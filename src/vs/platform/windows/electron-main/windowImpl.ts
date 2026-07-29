@@ -1424,7 +1424,7 @@ export class CodeWindow extends BaseWindow implements ICodeWindow {
 				bounds = this._win.getNormalBounds(); // make sure to persist the normal bounds when maximized to be able to restore them
 			}
 
-			if (bounds.width === 600 && (bounds.height === 160 || bounds.height === 200)) {
+			if (bounds.width < 800 || bounds.height < 500) {
 				state.x = this.windowState.x;
 				state.y = this.windowState.y;
 				state.width = this.windowState.width || 1024;
@@ -1448,7 +1448,7 @@ export class CodeWindow extends BaseWindow implements ICodeWindow {
 
 		let hasMultipleDisplays = false;
 		if (state) {
-			if (state.width === 600 && (state.height === 160 || state.height === 200)) {
+			if ((state.width && state.width < 800) || (state.height && state.height < 500)) {
 				state = defaultWindowState();
 			}
 
