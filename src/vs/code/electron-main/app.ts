@@ -759,6 +759,19 @@ export class CodeApplication extends Disposable {
 		// Signal phase: ready - before opening first window
 		this.lifecycleMainService.phase = LifecycleMainPhase.Ready;
 
+		// Request microphone permissions on macOS so getUserMedia doesn't get blocked
+		if (isMacintosh) {
+			try {
+				systemPreferences.askForMediaAccess('microphone').then(access => {
+					this.logService.info(`[CodeApplication] macOS microphone access request status: ${access}`);
+				}).catch(err => {
+					this.logService.error('[CodeApplication] macOS microphone access request error:', err);
+				});
+			} catch (error) {
+				this.logService.error('[CodeApplication] Failed to check/request media access:', error);
+			}
+		}
+
 		// Open Windows
 		await appInstantiationService.invokeFunction(accessor => this.openFirstWindow(accessor, initialProtocolUrls));
 

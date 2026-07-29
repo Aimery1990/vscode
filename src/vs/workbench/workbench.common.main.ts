@@ -239,6 +239,11 @@ import './contrib/chat/browser/chatSessions/chatSessions.contribution.js';
 import './contrib/chat/browser/contextContrib/chatContext.contribution.js';
 import './contrib/imageCarousel/browser/imageCarousel.contribution.js';
 
+// Centered Chat Popup Widget
+import '../sessions/contrib/centeredChat/browser/centeredChat.contribution.js';
+import '../sessions/contrib/agentGroups/browser/agentGroups.contribution.js';
+
+
 // Interactive
 import './contrib/interactive/browser/interactive.contribution.js';
 

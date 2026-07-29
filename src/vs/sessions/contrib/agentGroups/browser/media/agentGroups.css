@@ -1,0 +1,44 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.agent-groups-viewpane {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	width: 100%;
+	justify-content: center;
+	align-items: center;
+	padding: 24px;
+	box-sizing: border-box;
+}
+
+.agent-groups-container {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	text-align: center;
+	max-width: 280px;
+	gap: 16px;
+}
+
+.agent-groups-placeholder-icon {
+	font-size: 40px !important;
+	width: 40px;
+	height: 40px;
+	color: var(--vscode-charts-blue, #007aff);
+	opacity: 0.85;
+}
+
+.agent-groups-placeholder-title {
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--vscode-foreground);
+}
+
+.agent-groups-placeholder-desc {
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--vscode-descriptionForeground, rgba(255, 255, 255, 0.6));
+}

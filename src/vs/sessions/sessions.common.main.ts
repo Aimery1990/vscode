@@ -495,6 +495,7 @@ import './contrib/automations/browser/automations.contribution.js';
 // the Agents window scenario data.
 import '../workbench/contrib/onboarding/browser/onboarding.contribution.js';
 import './contrib/onboardingTours/browser/onboardingTours.contribution.js';
+import './contrib/centeredChat/browser/centeredChat.contribution.js';
 
 import './services/sessions/browser/sessionsManagementService.js';
 //#endregion
