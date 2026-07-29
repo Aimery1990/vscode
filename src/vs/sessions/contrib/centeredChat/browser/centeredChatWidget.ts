@@ -232,7 +232,7 @@ export class CenteredChatWidget extends Disposable {
 		if (!this.messagesContainer) { return; }
 		const welcomeMsg = append(this.messagesContainer, $('.centered-chat-msg.centered-chat-msg-ai'));
 		const content = append(welcomeMsg, $('span'));
-		
+
 		// Build DOM nodes dynamically to fully comply with TrustedHTML policies
 		content.appendChild(document.createTextNode('Welcome to '));
 		const bold1 = append(content, $('b'));
@@ -240,7 +240,7 @@ export class CenteredChatWidget extends Disposable {
 		content.appendChild(document.createTextNode('! 👋'));
 		append(content, $('br'));
 		content.appendChild(document.createTextNode("I'm your workspace orchestrator. You can prompt me, select models, upload files/images, and direct code operations directly from here."));
-		
+
 		const time = append(welcomeMsg, $('.centered-chat-msg-time'));
 		time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 	}
@@ -280,7 +280,7 @@ export class CenteredChatWidget extends Disposable {
 						x: this.osWindowStartPos.x + deltaX,
 						y: this.osWindowStartPos.y + deltaY,
 						width: 600,
-						height: 200
+						height: 160
 					});
 				}
 				return;
@@ -509,7 +509,7 @@ export class CenteredChatWidget extends Disposable {
 		this.attachmentsContainer.style.display = 'flex';
 		this.activeAttachments.forEach((attach, index) => {
 			const tag = append(this.attachmentsContainer!, $('.centered-chat-attachment-tag'));
-			
+
 			if (attach.isAudio && attach.url) {
 				// Style as a custom inline player (following Antigravity design)
 				tag.classList.add('centered-chat-attachment-audio-tag');
@@ -521,7 +521,7 @@ export class CenteredChatWidget extends Disposable {
 				const progressBar = append(progressTrack, $('.audio-preview-progress-bar'));
 
 				const timeDisplay = append(tag, $('span.audio-preview-time'));
-				
+
 				const totalDuration = attach.duration || 0;
 				const audio = new Audio(attach.url);
 				let isPlaying = false;
@@ -712,21 +712,21 @@ export class CenteredChatWidget extends Disposable {
 			if (attachmentsToSend.length > 0) {
 				append(aiText, $('br'));
 				append(aiText, $('br'));
-				
+
 				const emoji = append(aiText, $('span'));
 				emoji.textContent = '📁 ';
 				const boldTitle = append(aiText, $('b'));
 				boldTitle.textContent = `Analyzed ${attachmentsToSend.length} file(s) successfully:`;
-				
+
 				attachmentsToSend.forEach(att => {
 					append(aiText, $('br'));
-					
+
 					const bullet = append(aiText, $('span'));
 					bullet.textContent = att.isAudio ? '• 🎙️ ' : '• 📄 ';
-					
+
 					const codeTag = append(aiText, $('code'));
 					codeTag.textContent = att.name;
-					
+
 					const sizeText = append(aiText, $('span'));
 					sizeText.textContent = ` (${Math.round(att.size / 1024)} KB)`;
 				});
@@ -742,7 +742,7 @@ export class CenteredChatWidget extends Disposable {
 	private restoreWindowFromZenOnHide(): void {
 		const mainContainer = this.layoutService.mainContainer;
 		mainContainer.classList.remove('centered-chat-zen-mode');
-		
+
 		if (this.originalFullScreen) {
 			this.nativeHostService.toggleFullScreen();
 		} else if (this.originalMaximized) {
@@ -750,7 +750,7 @@ export class CenteredChatWidget extends Disposable {
 		} else if (this.originalWindowPosition) {
 			this.nativeHostService.positionWindow(this.originalWindowPosition);
 		}
-		
+
 		this.isZenMode = false;
 	}
 
@@ -818,18 +818,18 @@ export class CenteredChatWidget extends Disposable {
 				await new Promise(resolve => setTimeout(resolve, 200));
 			}
 
-			// Center the collapsed window (600 width, 200 height) on the screen
+			// Center the collapsed window (600 width, 160 height) on the screen
 			const screenPos = this.originalWindowPosition || activePos;
 			if (screenPos) {
 				const centerX = screenPos.x + screenPos.width / 2;
 				const centerY = screenPos.y + screenPos.height / 2;
 				const newLeft = Math.round(centerX - 300);
-				const newTop = Math.round(centerY - 100);
+				const newTop = Math.round(centerY - 80);
 				await this.nativeHostService.positionWindow({
 					x: newLeft,
 					y: newTop,
 					width: 600,
-					height: 200
+					height: 160
 				});
 			}
 

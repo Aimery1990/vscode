@@ -18,7 +18,8 @@
 	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 	overflow: hidden;
 	user-select: none;
-	resize: both; /* Enable native resizability */
+	resize: both;
+	/* Enable native resizability */
 	min-width: 350px;
 	min-height: 250px;
 }
@@ -31,7 +32,8 @@
 	justify-content: space-between;
 	padding: 0 16px;
 	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-	cursor: move; /* Draggable handle indicator */
+	cursor: move;
+	/* Draggable handle indicator */
 	background: rgba(0, 0, 0, 0.1);
 }
 
@@ -277,13 +279,13 @@
 	background-color: var(--vscode-toolbar-hoverBackground);
 }
 
-.monaco-workbench .centered-chat-titlebar-widget > .centered-chat-titlebar-widget-icon {
+.monaco-workbench .centered-chat-titlebar-widget>.centered-chat-titlebar-widget-icon {
 	font-size: 16px;
 	color: #007aff;
 	flex: 0 0 auto;
 }
 
-.monaco-workbench .centered-chat-titlebar-widget > .centered-chat-titlebar-widget-label {
+.monaco-workbench .centered-chat-titlebar-widget>.centered-chat-titlebar-widget-label {
 	display: inline-block;
 	max-width: 0;
 	opacity: 0;
@@ -295,12 +297,12 @@
 	font-size: 11px;
 }
 
-.monaco-enable-motion .monaco-workbench .centered-chat-titlebar-widget > .centered-chat-titlebar-widget-label {
+.monaco-enable-motion .monaco-workbench .centered-chat-titlebar-widget>.centered-chat-titlebar-widget-label {
 	transition: max-width 160ms ease, opacity 160ms ease, margin-left 160ms ease;
 	transition-delay: 200ms;
 }
 
-.monaco-workbench .centered-chat-titlebar-widget:hover > .centered-chat-titlebar-widget-label {
+.monaco-workbench .centered-chat-titlebar-widget:hover>.centered-chat-titlebar-widget-label {
 	max-width: 200px;
 	opacity: 1;
 	margin-left: 6px;
@@ -337,10 +339,12 @@
 		box-shadow: 0 0 0 0 rgba(255, 59, 48, 0.4);
 		background: rgba(255, 59, 48, 0.1);
 	}
+
 	70% {
 		box-shadow: 0 0 0 6px rgba(255, 59, 48, 0);
 		background: rgba(255, 59, 48, 0.2);
 	}
+
 	100% {
 		box-shadow: 0 0 0 0 rgba(255, 59, 48, 0);
 		background: rgba(255, 59, 48, 0.1);
@@ -367,8 +371,13 @@
 }
 
 @keyframes fade-pulse {
-	0% { opacity: 0.3; }
-	100% { opacity: 1; }
+	0% {
+		opacity: 0.3;
+	}
+
+	100% {
+		opacity: 1;
+	}
 }
 
 /* Audio Player Container */
@@ -436,7 +445,7 @@
 }
 
 /* Zen Mode: Hide other workbench components */
-.monaco-workbench.centered-chat-zen-mode > .part:not(.centered-chat-popup-container) {
+.monaco-workbench.centered-chat-zen-mode>.part:not(.centered-chat-popup-container) {
 	opacity: 0 !important;
 	pointer-events: none !important;
 	transition: opacity 150ms ease;
@@ -461,9 +470,7 @@
 	min-width: 0 !important;
 	min-height: 0 !important;
 	resize: none !important;
-	background: rgba(30, 30, 40, 0.85) !important;
-	backdrop-filter: blur(20px) !important;
-	-webkit-backdrop-filter: blur(20px) !important;
+	background: #141416 !important;
 }
 
 /* Hide messages body in Zen Mode */
@@ -471,8 +478,10 @@
 	display: none !important;
 }
 
-/* Ensure the input area has margin-top: auto to push it to the bottom */
+/* Ensure the input area has margin-top: auto to push it to the bottom and correct dimensions for 160px height */
 .monaco-workbench.centered-chat-zen-mode .centered-chat-popup-input-area {
+	margin: 6px 12px !important;
+	min-height: 70px !important;
 	margin-top: auto !important;
 }
 
@@ -493,6 +502,3 @@
 	opacity: 1;
 	transform: scale(1.15);
 }
-
-
-

@@ -1424,10 +1424,18 @@ export class CodeWindow extends BaseWindow implements ICodeWindow {
 				bounds = this._win.getNormalBounds(); // make sure to persist the normal bounds when maximized to be able to restore them
 			}
 
-			state.x = bounds.x;
-			state.y = bounds.y;
-			state.width = bounds.width;
-			state.height = bounds.height;
+			if (bounds.width === 600 && (bounds.height === 160 || bounds.height === 200)) {
+				state.x = this.windowState.x;
+				state.y = this.windowState.y;
+				state.width = this.windowState.width || 1024;
+				state.height = this.windowState.height || 768;
+				state.mode = this.windowState.mode || WindowMode.Normal;
+			} else {
+				state.x = bounds.x;
+				state.y = bounds.y;
+				state.width = bounds.width;
+				state.height = bounds.height;
+			}
 		}
 
 		state.zoomLevel = this.customZoomLevel;
