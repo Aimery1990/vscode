@@ -1448,6 +1448,9 @@ export class CodeWindow extends BaseWindow implements ICodeWindow {
 
 		let hasMultipleDisplays = false;
 		if (state) {
+			if (state.width === 600 && (state.height === 160 || state.height === 200)) {
+				state = defaultWindowState();
+			}
 
 			// Window zoom
 			this.customZoomLevel = state.zoomLevel;
