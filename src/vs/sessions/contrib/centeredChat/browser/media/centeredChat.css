@@ -461,12 +461,19 @@
 	min-width: 0 !important;
 	min-height: 0 !important;
 	resize: none !important;
-	background: #141416 !important;
+	background: rgba(30, 30, 40, 0.85) !important;
+	backdrop-filter: blur(20px) !important;
+	-webkit-backdrop-filter: blur(20px) !important;
 }
 
 /* Hide messages body in Zen Mode */
 .monaco-workbench.centered-chat-zen-mode .centered-chat-popup-messages {
 	display: none !important;
+}
+
+/* Ensure the input area has margin-top: auto to push it to the bottom */
+.monaco-workbench.centered-chat-zen-mode .centered-chat-popup-input-area {
+	margin-top: auto !important;
 }
 
 /* Ensure the header bar remains clean in Zen Mode */

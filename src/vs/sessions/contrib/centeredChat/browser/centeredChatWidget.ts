@@ -52,6 +52,9 @@ export class CenteredChatWidget extends Disposable {
 	private originalWindowPosition: IRectangle | undefined = undefined;
 	private originalFullScreen = false;
 	private originalMaximized = false;
+	private osWindowStartPos: IRectangle | undefined = undefined;
+	private osDragStartX = 0;
+	private osDragStartY = 0;
 
 	constructor(
 		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
@@ -243,7 +246,7 @@ export class CenteredChatWidget extends Disposable {
 	}
 
 	private setupDragging(header: HTMLElement): void {
-		this._register(addDisposableListener(header, 'mousedown', (e: MouseEvent) => {
+		this._register(addDisposableListener(header, 'mousedown', async (e: MouseEvent) => {
 			if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLOptionElement) {
 				return; // Don't drag when selecting options
 			}
@@ -251,17 +254,37 @@ export class CenteredChatWidget extends Disposable {
 			this.dragStartX = e.clientX;
 			this.dragStartY = e.clientY;
 
-			const rect = this.element!.getBoundingClientRect();
-			const parentRect = this.layoutService.mainContainer.getBoundingClientRect();
-			this.elementStartX = rect.left - parentRect.left;
-			this.elementStartY = rect.top - parentRect.top;
+			if (this.isZenMode) {
+				this.osWindowStartPos = await this.nativeHostService.getActiveWindowPosition();
+				this.osDragStartX = e.screenX;
+				this.osDragStartY = e.screenY;
+			} else {
+				const rect = this.element!.getBoundingClientRect();
+				const parentRect = this.layoutService.mainContainer.getBoundingClientRect();
+				this.elementStartX = rect.left - parentRect.left;
+				this.elementStartY = rect.top - parentRect.top;
+			}
 
 			header.style.cursor = 'grabbing';
 			e.preventDefault();
 		}));
 
-		const onMouseMove = (e: MouseEvent) => {
+		const onMouseMove = async (e: MouseEvent) => {
 			if (!this.isDragging || !this.element) { return; }
+
+			if (this.isZenMode) {
+				if (this.osWindowStartPos) {
+					const deltaX = e.screenX - this.osDragStartX;
+					const deltaY = e.screenY - this.osDragStartY;
+					await this.nativeHostService.positionWindow({
+						x: this.osWindowStartPos.x + deltaX,
+						y: this.osWindowStartPos.y + deltaY,
+						width: 600,
+						height: 200
+					});
+				}
+				return;
+			}
 
 			const deltaX = e.clientX - this.dragStartX;
 			const deltaY = e.clientY - this.dragStartY;
@@ -795,18 +818,18 @@ export class CenteredChatWidget extends Disposable {
 				await new Promise(resolve => setTimeout(resolve, 200));
 			}
 
-			// Center the collapsed window (600 width, 160 height) on the screen
+			// Center the collapsed window (600 width, 200 height) on the screen
 			const screenPos = this.originalWindowPosition || activePos;
 			if (screenPos) {
 				const centerX = screenPos.x + screenPos.width / 2;
 				const centerY = screenPos.y + screenPos.height / 2;
 				const newLeft = Math.round(centerX - 300);
-				const newTop = Math.round(centerY - 80);
+				const newTop = Math.round(centerY - 100);
 				await this.nativeHostService.positionWindow({
 					x: newLeft,
 					y: newTop,
 					width: 600,
-					height: 160
+					height: 200
 				});
 			}
 
