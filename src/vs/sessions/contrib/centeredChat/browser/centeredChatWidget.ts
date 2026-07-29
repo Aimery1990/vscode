@@ -7,6 +7,8 @@ import './media/centeredChat.css';
 import { $, append, addDisposableListener } from '../../../../base/browser/dom.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { IWorkbenchLayoutService } from '../../../../workbench/services/layout/browser/layoutService.js';
+import { INativeHostService } from '../../../../platform/native/common/native.js';
+import { IRectangle } from '../../../../platform/window/common/window.js';
 
 interface IAttachment {
 	name: string;
@@ -46,8 +48,14 @@ export class CenteredChatWidget extends Disposable {
 	private static lastPosition: { top: number; left: number } | undefined = undefined;
 	private static lastSize: { width: number; height: number } | undefined = undefined;
 
+	private isZenMode = false;
+	private originalWindowPosition: IRectangle | undefined = undefined;
+	private originalFullScreen = false;
+	private originalMaximized = false;
+
 	constructor(
-		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService
+		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
+		@INativeHostService private readonly nativeHostService: INativeHostService
 	) {
 		super();
 	}
@@ -68,6 +76,19 @@ export class CenteredChatWidget extends Disposable {
 		titleIcon.style.color = '#007aff';
 
 		const controls = append(header, $('.centered-chat-popup-controls'));
+
+		// Zen Toggle (Collapse) Button
+		const toggleZenBtn = append(controls, $('.centered-chat-popup-zen-btn'));
+		toggleZenBtn.style.cursor = 'pointer';
+		toggleZenBtn.style.display = 'flex';
+		toggleZenBtn.style.alignItems = 'center';
+		toggleZenBtn.style.justifyContent = 'center';
+		const zenIcon = append(toggleZenBtn, $('span.codicon.codicon-chrome-minimize'));
+
+		this._register(addDisposableListener(toggleZenBtn, 'click', async (e) => {
+			e.stopPropagation();
+			await this.toggleZenMode(zenIcon);
+		}));
 
 		// Close Button
 		const closeBtn = append(controls, $('.centered-chat-popup-close-btn'));
@@ -167,6 +188,10 @@ export class CenteredChatWidget extends Disposable {
 		if (this.element) {
 			// Stop recording if active on hide
 			this.stopRecording();
+
+			if (this.isZenMode) {
+				this.restoreWindowFromZenOnHide();
+			}
 
 			// Save the final position and size before removing
 			const rect = this.element.getBoundingClientRect();
@@ -689,5 +714,103 @@ export class CenteredChatWidget extends Disposable {
 
 			this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
 		}, 1000);
+	}
+
+	private restoreWindowFromZenOnHide(): void {
+		const mainContainer = this.layoutService.mainContainer;
+		mainContainer.classList.remove('centered-chat-zen-mode');
+		
+		if (this.originalFullScreen) {
+			this.nativeHostService.toggleFullScreen();
+		} else if (this.originalMaximized) {
+			this.nativeHostService.maximizeWindow();
+		} else if (this.originalWindowPosition) {
+			this.nativeHostService.positionWindow(this.originalWindowPosition);
+		}
+		
+		this.isZenMode = false;
+	}
+
+	private async toggleZenMode(zenIcon: HTMLElement): Promise<void> {
+		const mainContainer = this.layoutService.mainContainer;
+		if (this.isZenMode) {
+			// Restore normal mode
+			mainContainer.classList.remove('centered-chat-zen-mode');
+			zenIcon.className = 'codicon codicon-chrome-minimize';
+
+			if (this.originalFullScreen) {
+				await this.nativeHostService.toggleFullScreen();
+			} else if (this.originalMaximized) {
+				await this.nativeHostService.maximizeWindow();
+			} else if (this.originalWindowPosition) {
+				await this.nativeHostService.positionWindow(this.originalWindowPosition);
+			}
+
+			// Restore draggable state and resizability
+			if (this.element) {
+				this.element.style.position = 'absolute';
+				const defaultWidth = CenteredChatWidget.lastSize?.width ?? 600;
+				const defaultHeight = CenteredChatWidget.lastSize?.height ?? 400;
+				this.element.style.width = `${defaultWidth}px`;
+				this.element.style.height = `${defaultHeight}px`;
+				if (CenteredChatWidget.lastPosition) {
+					this.element.style.left = `${CenteredChatWidget.lastPosition.left}px`;
+					this.element.style.top = `${CenteredChatWidget.lastPosition.top}px`;
+				} else {
+					this.element.style.left = '50%';
+					this.element.style.top = '50%';
+					this.element.style.transform = 'translate(-50%, -50%)';
+				}
+			}
+
+			this.isZenMode = false;
+		} else {
+			// Save current state
+			this.originalFullScreen = await this.nativeHostService.isFullScreen();
+			this.originalMaximized = await this.nativeHostService.isMaximized();
+			const activePos = await this.nativeHostService.getActiveWindowPosition();
+			if (activePos) {
+				this.originalWindowPosition = activePos;
+			}
+
+			// Switch to Zen Mode class on workbench
+			mainContainer.classList.add('centered-chat-zen-mode');
+			zenIcon.className = 'codicon codicon-chrome-restore';
+
+			// Remove custom positioning styles to let CSS take over (fixed width/height of 100%)
+			if (this.element) {
+				this.element.style.transform = 'none';
+				this.element.style.left = '0';
+				this.element.style.top = '0';
+				this.element.style.width = '100%';
+				this.element.style.height = '100%';
+			}
+
+			// Transition out of fullscreen/maximized first to allow sizing
+			if (this.originalFullScreen) {
+				await this.nativeHostService.toggleFullScreen();
+				await new Promise(resolve => setTimeout(resolve, 800)); // wait for space animation
+			} else if (this.originalMaximized) {
+				await this.nativeHostService.unmaximizeWindow();
+				await new Promise(resolve => setTimeout(resolve, 200));
+			}
+
+			// Center the collapsed window (600 width, 160 height) on the screen
+			const screenPos = this.originalWindowPosition || activePos;
+			if (screenPos) {
+				const centerX = screenPos.x + screenPos.width / 2;
+				const centerY = screenPos.y + screenPos.height / 2;
+				const newLeft = Math.round(centerX - 300);
+				const newTop = Math.round(centerY - 80);
+				await this.nativeHostService.positionWindow({
+					x: newLeft,
+					y: newTop,
+					width: 600,
+					height: 160
+				});
+			}
+
+			this.isZenMode = true;
+		}
 	}
 }

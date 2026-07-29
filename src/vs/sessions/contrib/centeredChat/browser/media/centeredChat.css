@@ -435,5 +435,57 @@
 	text-align: right;
 }
 
+/* Zen Mode: Hide other workbench components */
+.monaco-workbench.centered-chat-zen-mode > .part:not(.centered-chat-popup-container) {
+	opacity: 0 !important;
+	pointer-events: none !important;
+	transition: opacity 150ms ease;
+}
+
+/* Make workspace background fully transparent or solid clean dark */
+.monaco-workbench.centered-chat-zen-mode {
+	background: #101014 !important;
+}
+
+/* Zen Mode container override to occupy the entire collapsed window */
+.monaco-workbench.centered-chat-zen-mode .centered-chat-popup-container {
+	position: fixed !important;
+	top: 0 !important;
+	left: 0 !important;
+	width: 100% !important;
+	height: 100% !important;
+	margin: 0 !important;
+	border: none !important;
+	border-radius: 0 !important;
+	box-shadow: none !important;
+	min-width: 0 !important;
+	min-height: 0 !important;
+	resize: none !important;
+	background: #141416 !important;
+}
+
+/* Hide messages body in Zen Mode */
+.monaco-workbench.centered-chat-zen-mode .centered-chat-popup-messages {
+	display: none !important;
+}
+
+/* Ensure the header bar remains clean in Zen Mode */
+.monaco-workbench.centered-chat-zen-mode .centered-chat-popup-header {
+	border-bottom: none !important;
+	background: transparent !important;
+}
+
+/* Styling for toggle button */
+.centered-chat-popup-zen-btn {
+	opacity: 0.7;
+	transition: opacity 120ms ease, transform 120ms ease;
+	color: var(--vscode-foreground, #cccccc);
+}
+
+.centered-chat-popup-zen-btn:hover {
+	opacity: 1;
+	transform: scale(1.15);
+}
+
 
 
