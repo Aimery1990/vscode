@@ -453,26 +453,7 @@
 
 /* Make workspace background fully transparent or solid clean dark */
 .monaco-workbench.centered-chat-zen-mode {
-	background: #1e1e28 !important;
-}
-
-/* Zen Mode container override to occupy the entire collapsed window */
-.monaco-workbench.centered-chat-zen-mode .centered-chat-popup-container {
-	position: fixed !important;
-	top: 0 !important;
-	left: 0 !important;
-	width: 100% !important;
-	height: 100% !important;
-	margin: 0 !important;
-	border: 1px solid rgba(255, 255, 255, 0.15) !important;
-	border-radius: 12px !important;
-	box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6) !important;
-	min-width: 0 !important;
-	min-height: 0 !important;
-	resize: none !important;
-	background: rgba(30, 30, 40, 0.95) !important;
-	backdrop-filter: blur(20px) !important;
-	-webkit-backdrop-filter: blur(20px) !important;
+	background: #141416 !important;
 }
 
 /* Styling for toggle button */

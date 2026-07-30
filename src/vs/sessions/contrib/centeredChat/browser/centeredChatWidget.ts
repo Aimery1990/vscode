@@ -7,8 +7,6 @@ import './media/centeredChat.css';
 import { $, append, addDisposableListener } from '../../../../base/browser/dom.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { IWorkbenchLayoutService } from '../../../../workbench/services/layout/browser/layoutService.js';
-import { INativeHostService } from '../../../../platform/native/common/native.js';
-import { IRectangle } from '../../../../platform/window/common/window.js';
 
 interface IAttachment {
 	name: string;
@@ -49,18 +47,9 @@ export class CenteredChatWidget extends Disposable {
 	private static lastSize: { width: number; height: number } | undefined = undefined;
 
 	private isZenMode = false;
-	private originalWindowPosition: IRectangle | undefined = undefined;
-	private originalFullScreen = false;
-	private originalMaximized = false;
-	private osWindowStartPos: IRectangle | undefined = undefined;
-	private osDragStartX = 0;
-	private osDragStartY = 0;
-	private zenWidth = 600;
-	private zenHeight = 400;
 
 	constructor(
-		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
-		@INativeHostService private readonly nativeHostService: INativeHostService
+		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService
 	) {
 		super();
 	}
@@ -248,7 +237,7 @@ export class CenteredChatWidget extends Disposable {
 	}
 
 	private setupDragging(header: HTMLElement): void {
-		this._register(addDisposableListener(header, 'mousedown', async (e: MouseEvent) => {
+		this._register(addDisposableListener(header, 'mousedown', (e: MouseEvent) => {
 			if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLOptionElement) {
 				return; // Don't drag when selecting options
 			}
@@ -256,37 +245,17 @@ export class CenteredChatWidget extends Disposable {
 			this.dragStartX = e.clientX;
 			this.dragStartY = e.clientY;
 
-			if (this.isZenMode) {
-				this.osWindowStartPos = await this.nativeHostService.getActiveWindowPosition();
-				this.osDragStartX = e.screenX;
-				this.osDragStartY = e.screenY;
-			} else {
-				const rect = this.element!.getBoundingClientRect();
-				const parentRect = this.layoutService.mainContainer.getBoundingClientRect();
-				this.elementStartX = rect.left - parentRect.left;
-				this.elementStartY = rect.top - parentRect.top;
-			}
+			const rect = this.element!.getBoundingClientRect();
+			const parentRect = this.layoutService.mainContainer.getBoundingClientRect();
+			this.elementStartX = rect.left - parentRect.left;
+			this.elementStartY = rect.top - parentRect.top;
 
 			header.style.cursor = 'grabbing';
 			e.preventDefault();
 		}));
 
-		const onMouseMove = async (e: MouseEvent) => {
+		const onMouseMove = (e: MouseEvent) => {
 			if (!this.isDragging || !this.element) { return; }
-
-			if (this.isZenMode) {
-				if (this.osWindowStartPos) {
-					const deltaX = e.screenX - this.osDragStartX;
-					const deltaY = e.screenY - this.osDragStartY;
-					await this.nativeHostService.positionWindow({
-						x: this.osWindowStartPos.x + deltaX,
-						y: this.osWindowStartPos.y + deltaY,
-						width: this.zenWidth,
-						height: this.zenHeight
-					});
-				}
-				return;
-			}
 
 			const deltaX = e.clientX - this.dragStartX;
 			const deltaY = e.clientY - this.dragStartY;
@@ -744,17 +713,6 @@ export class CenteredChatWidget extends Disposable {
 	private restoreWindowFromZenOnHide(): void {
 		const mainContainer = this.layoutService.mainContainer;
 		mainContainer.classList.remove('centered-chat-zen-mode');
-
-		this.nativeHostService.setWindowButtonVisibility(true);
-
-		if (this.originalFullScreen) {
-			this.nativeHostService.toggleFullScreen();
-		} else if (this.originalMaximized) {
-			this.nativeHostService.maximizeWindow();
-		} else if (this.originalWindowPosition) {
-			this.nativeHostService.positionWindow(this.originalWindowPosition);
-		}
-
 		this.isZenMode = false;
 	}
 
@@ -764,85 +722,11 @@ export class CenteredChatWidget extends Disposable {
 			// Restore normal mode
 			mainContainer.classList.remove('centered-chat-zen-mode');
 			zenIcon.className = 'codicon codicon-chrome-minimize';
-			await this.nativeHostService.setWindowButtonVisibility(true);
-
-			if (this.originalFullScreen) {
-				await this.nativeHostService.toggleFullScreen();
-			} else if (this.originalMaximized) {
-				await this.nativeHostService.maximizeWindow();
-			} else if (this.originalWindowPosition) {
-				await this.nativeHostService.positionWindow(this.originalWindowPosition);
-			}
-
-			// Restore draggable state and resizability
-			if (this.element) {
-				this.element.style.position = 'absolute';
-				const defaultWidth = CenteredChatWidget.lastSize?.width ?? 600;
-				const defaultHeight = CenteredChatWidget.lastSize?.height ?? 400;
-				this.element.style.width = `${defaultWidth}px`;
-				this.element.style.height = `${defaultHeight}px`;
-				if (CenteredChatWidget.lastPosition) {
-					this.element.style.left = `${CenteredChatWidget.lastPosition.left}px`;
-					this.element.style.top = `${CenteredChatWidget.lastPosition.top}px`;
-				} else {
-					this.element.style.left = '50%';
-					this.element.style.top = '50%';
-					this.element.style.transform = 'translate(-50%, -50%)';
-				}
-			}
-
 			this.isZenMode = false;
 		} else {
-			// Save current state
-			this.originalFullScreen = await this.nativeHostService.isFullScreen();
-			this.originalMaximized = await this.nativeHostService.isMaximized();
-			const activePos = await this.nativeHostService.getActiveWindowPosition();
-			if (activePos) {
-				this.originalWindowPosition = activePos;
-			}
-
 			// Switch to Zen Mode class on workbench
 			mainContainer.classList.add('centered-chat-zen-mode');
 			zenIcon.className = 'codicon codicon-chrome-restore';
-			await this.nativeHostService.setWindowButtonVisibility(false);
-
-			// Measure current card dimensions before removing positioning styles
-			if (this.element) {
-				const rect = this.element.getBoundingClientRect();
-				this.zenWidth = Math.max(Math.round(rect.width), 350) || 600;
-				this.zenHeight = Math.max(Math.round(rect.height), 250) || 400;
-
-				this.element.style.transform = 'none';
-				this.element.style.left = '0';
-				this.element.style.top = '0';
-				this.element.style.width = '100%';
-				this.element.style.height = '100%';
-			}
-
-			// Transition out of fullscreen/maximized first to allow sizing
-			const isFullScreen = await this.nativeHostService.isFullScreen();
-			if (isFullScreen) {
-				await this.nativeHostService.toggleFullScreen();
-				await new Promise(resolve => setTimeout(resolve, 1000)); // wait for macOS transition space animation
-			}
-			await this.nativeHostService.unmaximizeWindow();
-			await new Promise(resolve => setTimeout(resolve, 1000)); // wait for unmaximize zoom transition to complete fully
-
-			// Center the collapsed window (zenWidth width, zenHeight height) on the screen
-			const screenPos = this.originalWindowPosition || activePos;
-			if (screenPos) {
-				const centerX = screenPos.x + screenPos.width / 2;
-				const centerY = screenPos.y + screenPos.height / 2;
-				const newLeft = Math.round(centerX - this.zenWidth / 2);
-				const newTop = Math.round(centerY - this.zenHeight / 2);
-				await this.nativeHostService.positionWindow({
-					x: newLeft,
-					y: newTop,
-					width: this.zenWidth,
-					height: this.zenHeight
-				});
-			}
-
 			this.isZenMode = true;
 		}
 	}
