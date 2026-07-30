@@ -743,6 +743,8 @@ export class CenteredChatWidget extends Disposable {
 		const mainContainer = this.layoutService.mainContainer;
 		mainContainer.classList.remove('centered-chat-zen-mode');
 
+		this.nativeHostService.setWindowButtonVisibility(true);
+
 		if (this.originalFullScreen) {
 			this.nativeHostService.toggleFullScreen();
 		} else if (this.originalMaximized) {
@@ -760,6 +762,7 @@ export class CenteredChatWidget extends Disposable {
 			// Restore normal mode
 			mainContainer.classList.remove('centered-chat-zen-mode');
 			zenIcon.className = 'codicon codicon-chrome-minimize';
+			await this.nativeHostService.setWindowButtonVisibility(true);
 
 			if (this.originalFullScreen) {
 				await this.nativeHostService.toggleFullScreen();
@@ -799,6 +802,7 @@ export class CenteredChatWidget extends Disposable {
 			// Switch to Zen Mode class on workbench
 			mainContainer.classList.add('centered-chat-zen-mode');
 			zenIcon.className = 'codicon codicon-chrome-restore';
+			await this.nativeHostService.setWindowButtonVisibility(false);
 
 			// Remove custom positioning styles to let CSS take over (fixed width/height of 100%)
 			if (this.element) {

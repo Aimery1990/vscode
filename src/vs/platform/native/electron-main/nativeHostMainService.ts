@@ -403,6 +403,13 @@ export class NativeHostMainService extends Disposable implements INativeHostMain
 		}
 	}
 
+	async setWindowButtonVisibility(windowId: number | undefined, visible: boolean, options?: INativeHostOptions): Promise<void> {
+		const window = this.windowById(options?.targetWindowId, windowId);
+		if (window?.win && isMacintosh) {
+			window.win.setWindowButtonVisibility(visible);
+		}
+	}
+
 	async updateWindowControls(windowId: number | undefined, options: INativeHostOptions & { height?: number; backgroundColor?: string; foregroundColor?: string; dimmed?: boolean }): Promise<void> {
 		const window = this.windowById(options?.targetWindowId, windowId);
 		window?.updateWindowControls(options);

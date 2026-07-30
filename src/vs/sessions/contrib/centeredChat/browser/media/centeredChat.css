@@ -453,7 +453,7 @@
 
 /* Make workspace background fully transparent or solid clean dark */
 .monaco-workbench.centered-chat-zen-mode {
-	background: #101014 !important;
+	background: #1e1e28 !important;
 }
 
 /* Zen Mode container override to occupy the entire collapsed window */
@@ -464,13 +464,15 @@
 	width: 100% !important;
 	height: 100% !important;
 	margin: 0 !important;
-	border: none !important;
-	border-radius: 0 !important;
-	box-shadow: none !important;
+	border: 1px solid rgba(255, 255, 255, 0.15) !important;
+	border-radius: 12px !important;
+	box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6) !important;
 	min-width: 0 !important;
 	min-height: 0 !important;
 	resize: none !important;
-	background: #141416 !important;
+	background: rgba(30, 30, 40, 0.95) !important;
+	backdrop-filter: blur(20px) !important;
+	-webkit-backdrop-filter: blur(20px) !important;
 }
 
 /* Hide messages body in Zen Mode */
@@ -483,12 +485,6 @@
 	margin: 6px 12px !important;
 	min-height: 70px !important;
 	margin-top: auto !important;
-}
-
-/* Ensure the header bar remains clean in Zen Mode */
-.monaco-workbench.centered-chat-zen-mode .centered-chat-popup-header {
-	border-bottom: none !important;
-	background: transparent !important;
 }
 
 /* Styling for toggle button */
