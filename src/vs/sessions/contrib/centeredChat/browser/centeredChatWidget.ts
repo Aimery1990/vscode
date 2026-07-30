@@ -826,7 +826,7 @@ export class CenteredChatWidget extends Disposable {
 				await new Promise(resolve => setTimeout(resolve, 1000)); // wait for macOS transition space animation
 			}
 			await this.nativeHostService.unmaximizeWindow();
-			await new Promise(resolve => setTimeout(resolve, 300)); // wait for unmaximize zoom transition
+			await new Promise(resolve => setTimeout(resolve, 1000)); // wait for unmaximize zoom transition to complete fully
 
 			// Center the collapsed window (zenWidth width, zenHeight height) on the screen
 			const screenPos = this.originalWindowPosition || activePos;
