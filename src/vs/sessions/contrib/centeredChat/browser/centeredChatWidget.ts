@@ -55,6 +55,8 @@ export class CenteredChatWidget extends Disposable {
 	private osWindowStartPos: IRectangle | undefined = undefined;
 	private osDragStartX = 0;
 	private osDragStartY = 0;
+	private zenWidth = 600;
+	private zenHeight = 400;
 
 	constructor(
 		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
@@ -279,8 +281,8 @@ export class CenteredChatWidget extends Disposable {
 					await this.nativeHostService.positionWindow({
 						x: this.osWindowStartPos.x + deltaX,
 						y: this.osWindowStartPos.y + deltaY,
-						width: 600,
-						height: 160
+						width: this.zenWidth,
+						height: this.zenHeight
 					});
 				}
 				return;
@@ -804,8 +806,12 @@ export class CenteredChatWidget extends Disposable {
 			zenIcon.className = 'codicon codicon-chrome-restore';
 			await this.nativeHostService.setWindowButtonVisibility(false);
 
-			// Remove custom positioning styles to let CSS take over (fixed width/height of 100%)
+			// Measure current card dimensions before removing positioning styles
 			if (this.element) {
+				const rect = this.element.getBoundingClientRect();
+				this.zenWidth = Math.max(Math.round(rect.width), 350) || 600;
+				this.zenHeight = Math.max(Math.round(rect.height), 250) || 400;
+
 				this.element.style.transform = 'none';
 				this.element.style.left = '0';
 				this.element.style.top = '0';
@@ -822,18 +828,18 @@ export class CenteredChatWidget extends Disposable {
 				await new Promise(resolve => setTimeout(resolve, 200));
 			}
 
-			// Center the collapsed window (600 width, 160 height) on the screen
+			// Center the collapsed window (zenWidth width, zenHeight height) on the screen
 			const screenPos = this.originalWindowPosition || activePos;
 			if (screenPos) {
 				const centerX = screenPos.x + screenPos.width / 2;
 				const centerY = screenPos.y + screenPos.height / 2;
-				const newLeft = Math.round(centerX - 300);
-				const newTop = Math.round(centerY - 80);
+				const newLeft = Math.round(centerX - this.zenWidth / 2);
+				const newTop = Math.round(centerY - this.zenHeight / 2);
 				await this.nativeHostService.positionWindow({
 					x: newLeft,
 					y: newTop,
-					width: 600,
-					height: 160
+					width: this.zenWidth,
+					height: this.zenHeight
 				});
 			}
 

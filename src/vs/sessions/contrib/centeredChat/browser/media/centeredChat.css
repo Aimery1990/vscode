@@ -475,18 +475,6 @@
 	-webkit-backdrop-filter: blur(20px) !important;
 }
 
-/* Hide messages body in Zen Mode */
-.monaco-workbench.centered-chat-zen-mode .centered-chat-popup-messages {
-	display: none !important;
-}
-
-/* Ensure the input area has margin-top: auto to push it to the bottom and correct dimensions for 160px height */
-.monaco-workbench.centered-chat-zen-mode .centered-chat-popup-input-area {
-	margin: 6px 12px !important;
-	min-height: 70px !important;
-	margin-top: auto !important;
-}
-
 /* Styling for toggle button */
 .centered-chat-popup-zen-btn {
 	opacity: 0.7;
