@@ -820,13 +820,13 @@ export class CenteredChatWidget extends Disposable {
 			}
 
 			// Transition out of fullscreen/maximized first to allow sizing
-			if (this.originalFullScreen) {
+			const isFullScreen = await this.nativeHostService.isFullScreen();
+			if (isFullScreen) {
 				await this.nativeHostService.toggleFullScreen();
-				await new Promise(resolve => setTimeout(resolve, 800)); // wait for space animation
-			} else if (this.originalMaximized) {
-				await this.nativeHostService.unmaximizeWindow();
-				await new Promise(resolve => setTimeout(resolve, 200));
+				await new Promise(resolve => setTimeout(resolve, 1000)); // wait for macOS transition space animation
 			}
+			await this.nativeHostService.unmaximizeWindow();
+			await new Promise(resolve => setTimeout(resolve, 300)); // wait for unmaximize zoom transition
 
 			// Center the collapsed window (zenWidth width, zenHeight height) on the screen
 			const screenPos = this.originalWindowPosition || activePos;
