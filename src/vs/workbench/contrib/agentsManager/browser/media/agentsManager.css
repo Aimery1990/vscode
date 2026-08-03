@@ -1,9 +1,9 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All implementation rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-.agent-groups-viewpane {
+.agents-manager-viewpane {
 	display: flex !important;
 	flex-direction: column !important;
 	height: 100% !important;
@@ -17,68 +17,25 @@
 	overflow: hidden !important;
 }
 
-.agent-groups-main-container {
+.agents-manager-main-container {
 	display: flex;
 	flex-direction: column;
 	height: 100%;
 	width: 100%;
 	box-sizing: border-box;
-	padding: 12px;
+	padding: 10px 12px 14px 12px;
 	gap: 10px;
 	overflow-y: auto;
 	background: var(--vscode-sideBar-background, #181818);
 }
 
-.agents-header-row {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 8px;
-	flex-shrink: 0;
-	width: 100%;
-	margin-bottom: 2px;
-}
-
-.agents-header-row .title-left {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	font-weight: 600;
-	font-size: 13px;
-	color: #38bdf8;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.agents-header-row .add-agent-btn {
-	display: flex;
-	align-items: center;
-	gap: 5px;
-	padding: 4px 10px;
-	border-radius: 6px;
-	background: rgba(56, 189, 248, 0.15);
-	border: 1px solid rgba(56, 189, 248, 0.35);
-	color: #38bdf8;
-	cursor: pointer;
-	font-size: 11px;
-	font-weight: 600;
-	flex-shrink: 0;
-	transition: all 0.2s ease;
-}
-
-.agents-header-row .add-agent-btn:hover {
-	background: rgba(56, 189, 248, 0.25);
-	border-color: #38bdf8;
-	box-shadow: 0 2px 8px rgba(56, 189, 248, 0.2);
-}
-
-.filter-row {
+.agents-filter-row {
 	width: 100%;
 	flex-shrink: 0;
+	margin-top: 4px;
 }
 
-.filter-row input.filter-input {
+.agents-filter-row input.filter-input {
 	width: 100%;
 	box-sizing: border-box;
 	padding: 6px 10px;
@@ -91,50 +48,13 @@
 	transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.filter-row input.filter-input:focus {
+.agents-filter-row input.filter-input:focus {
 	border-color: #38bdf8;
 	box-shadow: 0 0 6px rgba(56, 189, 248, 0.25);
 }
 
-.agent-groups-container {
-	display: flex;
-	flex-direction: column;
-	gap: 10px;
-	width: 100%;
-	flex: 1;
-	min-height: 0;
-	text-align: left;
-}
-
-.agent-group-section {
-	border-radius: 8px;
-	background: rgba(255, 255, 255, 0.025);
-	border: 1px solid rgba(255, 255, 255, 0.07);
-	overflow: hidden;
-	width: 100%;
-	box-sizing: border-box;
-	flex-shrink: 0;
-}
-
-.agent-group-section .group-header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	padding: 8px 12px;
-	background: rgba(255, 255, 255, 0.04);
-	cursor: pointer;
-	user-select: none;
-	width: 100%;
-	box-sizing: border-box;
-	transition: background 0.15s ease;
-}
-
-.agent-group-section .group-header:hover {
-	background: rgba(255, 255, 255, 0.07);
-}
-
-.agent-group-section .group-list-body {
-	padding: 8px;
+.agents-list-body {
+	padding: 2px 0;
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
@@ -142,7 +62,7 @@
 	box-sizing: border-box;
 }
 
-.agent-card {
+.agent-item-card {
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
@@ -156,14 +76,14 @@
 	position: relative;
 }
 
-.agent-card:hover {
+.agent-item-card:hover {
 	border-color: rgba(56, 189, 248, 0.4);
 	background: rgba(255, 255, 255, 0.035);
 	transform: translateY(-1px);
 	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
-.agent-card .card-header {
+.agent-item-card .card-header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
@@ -171,7 +91,7 @@
 	gap: 8px;
 }
 
-.agent-card .card-left {
+.agent-item-card .card-left {
 	display: flex;
 	align-items: center;
 	gap: 8px;
@@ -180,7 +100,7 @@
 	min-width: 0;
 }
 
-.agent-card .agent-name {
+.agent-item-card .agent-name {
 	font-weight: 600;
 	font-size: 12.5px;
 	color: var(--vscode-foreground, #ffffff);
@@ -189,30 +109,30 @@
 	text-overflow: ellipsis;
 }
 
-.agent-card .status-dot {
+.agent-item-card .status-dot {
 	width: 6px;
 	height: 6px;
 	border-radius: 50%;
 	flex-shrink: 0;
 }
 
-.agent-card .card-actions {
+.agent-item-card .card-actions {
 	display: flex;
 	align-items: center;
 	gap: 8px;
 	flex-shrink: 0;
 }
 
-.agent-card .card-actions span {
+.agent-item-card .card-actions span {
 	transition: opacity 0.15s ease, transform 0.15s ease;
 }
 
-.agent-card .card-actions span:hover {
+.agent-item-card .card-actions span:hover {
 	opacity: 1 !important;
 	transform: scale(1.15);
 }
 
-.agent-card .role-row {
+.agent-item-card .role-row {
 	font-size: 11px;
 	color: #94a3b8;
 	line-height: 1.4;
@@ -221,7 +141,7 @@
 	font-weight: 400;
 }
 
-.agent-card .meta-row {
+.agent-item-card .meta-row {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
@@ -230,7 +150,19 @@
 	width: 100%;
 }
 
-.agent-card .scope-badge {
+.agent-item-card .model-badge {
+	font-size: 9.5px;
+	font-weight: 600;
+	padding: 2px 6px;
+	border-radius: 4px;
+	background: rgba(167, 139, 250, 0.12);
+	border: 1px solid rgba(167, 139, 250, 0.3);
+	color: #a78bfa;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+.agent-item-card .scope-badge {
 	font-size: 9.5px;
 	font-weight: 600;
 	padding: 2px 7px;
@@ -242,7 +174,7 @@
 	flex-shrink: 0;
 }
 
-.agent-card .prompt-preview {
+.agent-item-card .prompt-preview {
 	font-size: 10.5px;
 	font-style: italic;
 	color: #64748b;

@@ -66,8 +66,7 @@ export class CenteredChatWidget extends Disposable {
 		const header = append(this.element, $('.centered-chat-popup-header'));
 
 		const title = append(header, $('.centered-chat-popup-title'));
-		const titleIcon = append(title, $('span.codicon.codicon-sparkle'));
-		titleIcon.style.color = '#007aff';
+		append(title, $('span.codicon.codicon-sparkle'));
 
 		const controls = append(header, $('.centered-chat-popup-controls'));
 

@@ -290,6 +290,8 @@ export class AgentSessionsWelcomePage extends EditorPane {
 			: { icon: Codicon.folderOpened, label: localize('openFolder', "Open Folder..."), command: 'workbench.action.files.openFolder' };
 		const entries = [
 			openEntry,
+			{ icon: Codicon.rootFolder, label: localize('openWorkspace', "Open Workspace..."), command: 'workbench.action.workspacesExplorer.openWorkspace' },
+			{ icon: Codicon.plus, label: localize('newWorkspace', "New Workspace..."), command: 'workbench.action.workspacesExplorer.newWorkspace' },
 			{ icon: Codicon.newFile, label: localize('newFile', "New file..."), command: 'welcome.showNewFileEntries' },
 			{ icon: Codicon.repoClone, label: localize('cloneRepo', "Clone Git Repository..."), command: 'git.clone' },
 		];

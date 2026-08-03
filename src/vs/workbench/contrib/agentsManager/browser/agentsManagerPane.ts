@@ -1,16 +1,16 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All implementation rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import './media/agentGroups.css';
+import './media/agentsManager.css';
 import { $, append, clearNode } from '../../../../base/browser/dom.js';
-import { ViewPane, IViewPaneOptions } from '../../../../workbench/browser/parts/views/viewPane.js';
+import { ViewPane, IViewPaneOptions } from '../../../browser/parts/views/viewPane.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
-import { IViewDescriptorService } from '../../../../workbench/common/views.js';
+import { IViewDescriptorService } from '../../../common/views.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
@@ -22,16 +22,13 @@ import { URI } from '../../../../base/common/uri.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 
-import { IAgentsManagerService, IAgentItem, AgentScopeType } from '../../../../workbench/contrib/agentsManager/common/agentsManager.js';
-import { createOrEditAgentDialog } from '../../../../workbench/contrib/agentsManager/browser/agentEditorDialog.js';
+import { IAgentsManagerService, IAgentItem, AgentScopeType } from '../common/agentsManager.js';
+import { createOrEditAgentDialog } from './agentEditorDialog.js';
 
-export const AgentGroupsViewId = 'agentic.workbench.view.agentGroups';
-
-export class AgentGroupsView extends ViewPane {
+export class AgentsManagerPane extends ViewPane {
 	private containerEl?: HTMLElement;
 	private renderVersion = 0;
 	private filterText = '';
-	private expandedGroups = new Set<AgentScopeType>(['workspace', 'project', 'job']);
 
 	constructor(
 		options: IViewPaneOptions,
@@ -52,14 +49,51 @@ export class AgentGroupsView extends ViewPane {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
 		this._register(this.agentsManagerService.onDidChangeAgents(() => this.renderContent()));
+
+		// Accordion Exclusive Single Expansion: Notify service when this pane is expanded
+		this._register(this.onDidChangeBodyVisibility(visible => {
+			if (visible) {
+				this.agentsManagerService.notifyPaneExpanded(this.id);
+			}
+		}));
+
+		// Handle target pane expansion or collapse
+		this._register(this.agentsManagerService.onDidExpandPane(expandedId => {
+			if (expandedId === this.id) {
+				if (!this.isExpanded()) {
+					this.setExpanded(true);
+				}
+			} else if (this.isExpanded()) {
+				this.setExpanded(false);
+			}
+		}));
 	}
 
-	protected override renderBody(parent: HTMLElement): void {
-		super.renderBody(parent);
-		parent.classList.add('agent-groups-viewpane');
+	protected override renderBody(container: HTMLElement): void {
+		super.renderBody(container);
+		container.classList.add('agents-manager-viewpane');
 
-		this.containerEl = append(parent, $('.agent-groups-main-container'));
+		this.containerEl = append(container, $('.agents-manager-main-container'));
 		this.renderContent();
+	}
+
+	private getTargetScope(): 'all' | AgentScopeType {
+		if (this.id.endsWith('.workspace')) {
+			return 'workspace';
+		}
+		if (this.id.endsWith('.project')) {
+			return 'project';
+		}
+		if (this.id.endsWith('.job')) {
+			return 'job';
+		}
+		if (this.id.endsWith('.workflow')) {
+			return 'workflow';
+		}
+		if (this.id.endsWith('.standalone')) {
+			return 'none';
+		}
+		return 'all';
 	}
 
 	private async renderContent(): Promise<void> {
@@ -70,36 +104,35 @@ export class AgentGroupsView extends ViewPane {
 		const currentVersion = ++this.renderVersion;
 		clearNode(this.containerEl);
 
-		const agents = await this.agentsManagerService.getAgents();
+		const allAgents = await this.agentsManagerService.getAgents();
 		if (this.renderVersion !== currentVersion || !this.containerEl) {
 			return;
 		}
 
-		// --- 1. Header Row ---
-		const headerRow = append(this.containerEl, $('.agents-header-row'));
+		const targetScope = this.getTargetScope();
 
-		const titleLeft = append(headerRow, $('.title-left'));
-		const iconEl = append(titleLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.organization)));
-		iconEl.style.fontSize = '15px';
+		// Filter by View Pane Scope
+		let scopedAgents = allAgents;
+		if (targetScope !== 'all') {
+			scopedAgents = allAgents.filter(a => a.scopeType === targetScope);
+		}
 
-		const titleText = append(titleLeft, $('span'));
-		titleText.textContent = 'Agent Groups Coordination';
+		// Filter by Search Text
+		const filteredAgents = scopedAgents.filter(a => {
+			if (!this.filterText) {
+				return true;
+			}
+			return a.name.toLowerCase().includes(this.filterText) ||
+				a.role.toLowerCase().includes(this.filterText) ||
+				(a.modelName && a.modelName.toLowerCase().includes(this.filterText)) ||
+				a.scopeName.toLowerCase().includes(this.filterText);
+		});
 
-		const addAgentBtn = append(headerRow, $('.add-agent-btn'));
-		const plusIcon = append(addAgentBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
-		plusIcon.style.fontSize = '12px';
-		const addBtnText = append(addAgentBtn, $('span'));
-		addBtnText.textContent = 'New Agent';
-
-		addAgentBtn.onclick = () => {
-			this.instantiationService.invokeFunction(accessor => createOrEditAgentDialog(accessor));
-		};
-
-		// --- 2. Filter Bar ---
-		const filterRow = append(this.containerEl, $('.filter-row'));
+		// --- 1. Filter Bar ---
+		const filterRow = append(this.containerEl, $('.agents-filter-row'));
 		const filterInput = append(filterRow, $('input.filter-input')) as HTMLInputElement;
 		filterInput.type = 'text';
-		filterInput.placeholder = 'Filter agent groups by name, role or scope...';
+		filterInput.placeholder = `Search ${targetScope === 'all' ? 'all' : targetScope} agents by title, role or model...`;
 		filterInput.value = this.filterText;
 
 		filterInput.oninput = () => {
@@ -107,119 +140,51 @@ export class AgentGroupsView extends ViewPane {
 			this.renderContent();
 		};
 
-		// --- 3. Filtered Agents ---
-		const filteredAgents = agents.filter(a => {
-			if (!this.filterText) {
-				return true;
-			}
-			return a.name.toLowerCase().includes(this.filterText) ||
-				a.role.toLowerCase().includes(this.filterText) ||
-				a.scopeName.toLowerCase().includes(this.filterText);
-		});
+		// --- 2. Agent Cards List Body ---
+		const listBody = append(this.containerEl, $('.agents-list-body'));
 
-		// --- 4. Render Group Sections ---
-		const groups: { type: AgentScopeType; title: string; icon: ThemeIcon; color: string }[] = [
-			{ type: 'workspace', title: 'Workspace Agent Groups', icon: Codicon.globe, color: '#38bdf8' },
-			{ type: 'project', title: 'Project Agent Groups', icon: Codicon.folder, color: '#a78bfa' },
-			{ type: 'job', title: 'Job Agent Groups', icon: Codicon.target, color: '#f43f5e' }
-		];
-
-		const groupContainer = append(this.containerEl, $('.agent-groups-container'));
-
-		for (const g of groups) {
-			const groupAgents = filteredAgents.filter(a => a.scopeType === g.type);
-			this.renderGroupSection(groupContainer, g, groupAgents);
-		}
-	}
-
-	private renderGroupSection(
-		parent: HTMLElement,
-		group: { type: AgentScopeType; title: string; icon: ThemeIcon; color: string },
-		agents: IAgentItem[]
-	): void {
-		const groupSection = append(parent, $('.agent-group-section'));
-
-		// Group Header
-		const groupHeader = append(groupSection, $('.group-header'));
-
-		const headerLeft = append(groupHeader, $('.header-left'));
-		headerLeft.style.display = 'flex';
-		headerLeft.style.alignItems = 'center';
-		headerLeft.style.gap = '6px';
-
-		const isExpanded = this.expandedGroups.has(group.type);
-		const chevronIcon = append(headerLeft, $('span' + ThemeIcon.asCSSSelector(isExpanded ? Codicon.chevronDown : Codicon.chevronRight)));
-		chevronIcon.style.fontSize = '12px';
-		chevronIcon.style.color = '#888888';
-
-		const gIcon = append(headerLeft, $('span' + ThemeIcon.asCSSSelector(group.icon)));
-		gIcon.style.fontSize = '13px';
-		gIcon.style.color = group.color;
-
-		const gTitle = append(headerLeft, $('span.group-title'));
-		gTitle.textContent = group.title;
-		gTitle.style.fontWeight = '600';
-		gTitle.style.fontSize = '11px';
-		gTitle.style.color = group.color;
-
-		const headerRight = append(groupHeader, $('.header-right'));
-		headerRight.style.display = 'flex';
-		headerRight.style.alignItems = 'center';
-		headerRight.style.gap = '6px';
-
-		const countBadge = append(headerRight, $('span.count-badge'));
-		countBadge.textContent = `${agents.length}`;
-		countBadge.style.fontSize = '10px';
-		countBadge.style.padding = '1px 6px';
-		countBadge.style.borderRadius = '10px';
-		countBadge.style.background = 'rgba(255, 255, 255, 0.1)';
-		countBadge.style.color = '#cccccc';
-
-		const addScopeBtn = append(headerRight, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
-		addScopeBtn.style.fontSize = '12px';
-		addScopeBtn.style.color = group.color;
-		addScopeBtn.style.cursor = 'pointer';
-		addScopeBtn.title = `Add ${group.title} Agent`;
-		addScopeBtn.onclick = (e) => {
-			e.stopPropagation();
-			this.instantiationService.invokeFunction(accessor =>
-				createOrEditAgentDialog(accessor, undefined, group.type, `${group.type.toUpperCase()} Scoped`)
-			);
-		};
-
-		groupHeader.onclick = () => {
-			if (this.expandedGroups.has(group.type)) {
-				this.expandedGroups.delete(group.type);
-			} else {
-				this.expandedGroups.add(group.type);
-			}
-			this.renderContent();
-		};
-
-		if (!isExpanded) {
-			return;
-		}
-
-		// Agent List Body
-		const listBody = append(groupSection, $('.group-list-body'));
-
-		if (agents.length === 0) {
+		if (filteredAgents.length === 0) {
 			const emptyItem = append(listBody, $('.empty-agent-item'));
-			emptyItem.textContent = `No ${group.type} agents created yet.`;
-			emptyItem.style.fontStyle = 'italic';
+			emptyItem.style.display = 'flex';
+			emptyItem.style.flexDirection = 'column';
+			emptyItem.style.alignItems = 'center';
+			emptyItem.style.justifyContent = 'center';
+			emptyItem.style.padding = '18px 10px';
 			emptyItem.style.color = '#777777';
-			emptyItem.style.fontSize = '11px';
-			emptyItem.style.padding = '4px 6px';
+			emptyItem.style.fontSize = '11.5px';
+			emptyItem.style.gap = '8px';
+
+			const emptyText = append(emptyItem, $('span'));
+			emptyText.textContent = targetScope === 'all' ? 'No AI Agents created yet.' : `No ${targetScope} agents registered yet.`;
+
+			const createBtn = append(emptyItem, $('button.monaco-button', {
+				style: 'padding: 4px 10px; font-size: 11px; border-radius: 4px; cursor: pointer; background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8; font-weight: 600;'
+			}));
+			createBtn.innerText = '+ Create Agent';
+			createBtn.onclick = () => {
+				const defaultScope: AgentScopeType = targetScope === 'all' ? 'workspace' : targetScope;
+				this.instantiationService.invokeFunction(accessor => createOrEditAgentDialog(accessor, undefined, defaultScope));
+			};
 			return;
 		}
 
-		for (const agent of agents) {
-			this.renderAgentCard(listBody, agent, group.color);
+		const scopeAccentColors: Record<string, string> = {
+			all: '#38bdf8',
+			workspace: '#38bdf8',
+			project: '#a78bfa',
+			job: '#f43f5e',
+			workflow: '#eab308',
+			none: '#94a3b8'
+		};
+
+		for (const agent of filteredAgents) {
+			const accentColor = scopeAccentColors[agent.scopeType] || '#38bdf8';
+			this.renderAgentCard(listBody, agent, accentColor);
 		}
 	}
 
 	private renderAgentCard(parent: HTMLElement, agent: IAgentItem, accentColor: string): void {
-		const card = append(parent, $('.agent-card'));
+		const card = append(parent, $('.agent-item-card'));
 
 		// Card Header: Icon + Name + Status + Actions
 		const cardHeader = append(card, $('.card-header'));
@@ -275,7 +240,7 @@ export class AgentGroupsView extends ViewPane {
 			}
 		};
 
-		// Open Folder Action (Markdown Preview Mode)
+		// Open Folder / Rendered Markdown Preview Action
 		if (agent.folderPath) {
 			const openFolderBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.folderOpened)));
 			openFolderBtn.style.fontSize = '12px';
@@ -320,14 +285,18 @@ export class AgentGroupsView extends ViewPane {
 		const roleRow = append(card, $('.role-row'));
 		roleRow.textContent = agent.role;
 
-		// Scope Tag & Prompt Preview
+		// Meta Row: Model Badge + Scope Badge
 		const metaRow = append(card, $('.meta-row'));
+
+		const modelBadge = append(metaRow, $('span.model-badge'));
+		modelBadge.textContent = agent.modelName || 'gemini-2.0-flash';
 
 		const scopeBadge = append(metaRow, $('span.scope-badge'));
 		scopeBadge.textContent = agent.scopeName;
 		scopeBadge.style.color = accentColor;
 		scopeBadge.style.borderColor = `${accentColor}44`;
 
+		// Prompt Preview
 		const promptPreview = append(card, $('.prompt-preview'));
 		promptPreview.textContent = `"${agent.systemPrompt}"`;
 		promptPreview.title = agent.systemPrompt;

@@ -10,10 +10,10 @@
 	flex-direction: column;
 	backdrop-filter: blur(20px);
 	-webkit-backdrop-filter: blur(20px);
-	background: rgba(30, 30, 40, 0.75);
-	border: 1px solid rgba(255, 255, 255, 0.15);
+	background: var(--vscode-editorWidget-background, rgba(26, 26, 30, 0.92));
+	border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.12));
 	border-radius: 12px;
-	box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 24px rgba(0, 122, 255, 0.15);
+	box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5), 0 0 1px rgba(255, 255, 255, 0.1);
 	color: var(--vscode-foreground, #cccccc);
 	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 	overflow: hidden;
@@ -31,10 +31,10 @@
 	align-items: center;
 	justify-content: space-between;
 	padding: 0 16px;
-	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+	border-bottom: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.08));
 	cursor: move;
 	/* Draggable handle indicator */
-	background: rgba(0, 0, 0, 0.1);
+	background: var(--vscode-titleBar-activeBackground, rgba(0, 0, 0, 0.15));
 }
 
 .centered-chat-popup-title {
@@ -99,16 +99,16 @@
 
 .centered-chat-msg-user {
 	align-self: flex-end;
-	background: rgba(0, 122, 255, 0.2);
-	border: 1px solid rgba(0, 122, 255, 0.45);
+	background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.1));
+	border: 1px solid var(--vscode-button-secondaryBorder, rgba(255, 255, 255, 0.15));
 	border-radius: 12px 12px 2px 12px;
-	box-shadow: 0 2px 8px rgba(0, 122, 255, 0.1);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .centered-chat-msg-ai {
 	align-self: flex-start;
-	background: rgba(255, 255, 255, 0.06);
-	border: 1px solid rgba(255, 255, 255, 0.12);
+	background: rgba(255, 255, 255, 0.05);
+	border: 1px solid rgba(255, 255, 255, 0.1);
 	border-radius: 12px 12px 12px 2px;
 	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
@@ -136,11 +136,11 @@
 	align-items: center;
 	gap: 6px;
 	padding: 2px 8px;
-	background: rgba(255, 255, 255, 0.1);
-	border: 1px solid rgba(255, 255, 255, 0.08);
+	background: rgba(255, 255, 255, 0.08);
+	border: 1px solid rgba(255, 255, 255, 0.12);
 	border-radius: 4px;
 	font-size: 10px;
-	color: #007aff;
+	color: var(--vscode-foreground, #cccccc);
 }
 
 .centered-chat-attachment-remove {
@@ -158,26 +158,35 @@
 .centered-chat-popup-input-area {
 	display: flex;
 	flex-direction: column;
-	background: rgba(30, 30, 45, 0.6);
-	border: 1px solid rgba(255, 255, 255, 0.08);
-	border-radius: 12px;
+	background: var(--vscode-input-background, rgba(255, 255, 255, 0.04));
+	border: 1px solid var(--vscode-input-border, rgba(255, 255, 255, 0.1));
+	border-radius: 10px;
 	padding: 8px 12px;
 	margin: 12px;
 	gap: 6px;
 	min-height: 80px;
+	transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.centered-chat-popup-input-area:focus-within {
+	border-color: var(--vscode-focusBorder, rgba(255, 255, 255, 0.25));
 }
 
 .centered-chat-popup-input-wrapper {
 	width: 100%;
 }
 
-.centered-chat-popup-input {
+.centered-chat-popup-input,
+.centered-chat-popup-input:focus,
+.centered-chat-popup-input:focus-visible,
+.centered-chat-popup-input:active {
 	width: 100%;
 	height: 48px;
 	background: transparent;
-	border: none;
+	border: none !important;
 	resize: none;
-	outline: none;
+	outline: none !important;
+	box-shadow: none !important;
 	color: var(--vscode-foreground, #cccccc);
 	font-size: 13px;
 	line-height: 1.5;
@@ -244,21 +253,23 @@
 	justify-content: center;
 	width: 28px;
 	height: 28px;
-	border-radius: 50%;
-	background: #007aff;
-	border: none;
-	color: #ffffff;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.08);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	color: var(--vscode-foreground, #ffffff);
 	cursor: pointer;
-	transition: background 120ms ease, transform 120ms ease;
+	transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
 }
 
 .centered-chat-popup-send-btn:hover {
-	background: #0062cc;
-	transform: scale(1.05);
+	background: rgba(255, 255, 255, 0.16);
+	border-color: rgba(255, 255, 255, 0.25);
+	transform: translateY(-1px);
 }
 
 .centered-chat-popup-send-btn:active {
-	transform: scale(0.95);
+	transform: translateY(0);
+	background: rgba(255, 255, 255, 0.1);
 }
 
 
@@ -281,7 +292,7 @@
 
 .monaco-workbench .centered-chat-titlebar-widget>.centered-chat-titlebar-widget-icon {
 	font-size: 16px;
-	color: #007aff;
+	color: var(--vscode-titleBar-activeForeground);
 	flex: 0 0 auto;
 }
 
@@ -395,10 +406,10 @@
 	align-items: center;
 	gap: 10px;
 	padding: 4px 10px;
-	background: rgba(20, 20, 30, 0.85);
-	border: 1px solid rgba(0, 122, 255, 0.25);
+	background: rgba(20, 20, 25, 0.85);
+	border: 1px solid rgba(255, 255, 255, 0.15);
 	border-radius: 8px;
-	color: #007aff;
+	color: var(--vscode-foreground, #cccccc);
 	font-size: 11px;
 	width: auto;
 	min-width: 220px;
@@ -409,7 +420,7 @@
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	color: #007aff;
+	color: var(--vscode-foreground, #cccccc);
 	opacity: 0.85;
 	transition: opacity 120ms ease, transform 120ms ease;
 }
@@ -431,7 +442,7 @@
 .audio-preview-progress-bar {
 	height: 100%;
 	width: 0%;
-	background: #007aff;
+	background: var(--vscode-progressBar-background, rgba(255, 255, 255, 0.6));
 	border-radius: 2px;
 	transition: width 100ms linear;
 }

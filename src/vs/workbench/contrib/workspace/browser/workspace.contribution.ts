@@ -306,6 +306,7 @@ export class WorkspaceTrustUXHandler extends Disposable implements IWorkbenchCon
 		@IRemoteAgentService private readonly remoteAgentService: IRemoteAgentService,
 		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService,
 		@IFileService private readonly fileService: IFileService,
+		@ICommandService private readonly commandService: ICommandService,
 	) {
 		super();
 
@@ -437,6 +438,7 @@ export class WorkspaceTrustUXHandler extends Disposable implements IWorkbenchCon
 		if (bannerItem) {
 			if (!trusted) {
 				this.bannerService.show(bannerItem);
+				this.commandService.executeCommand(MANAGE_TRUST_COMMAND_ID);
 			} else {
 				this.bannerService.hide(BANNER_RESTRICTED_MODE);
 			}
