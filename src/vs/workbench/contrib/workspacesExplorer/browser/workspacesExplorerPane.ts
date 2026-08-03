@@ -23,6 +23,7 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
+import { dirname } from '../../../../base/common/resources.js';
 import { isMacintosh } from '../../../../base/common/platform.js';
 import { Action } from '../../../../base/common/actions.js';
 import { IWorkspacesExplorerService, ResourceType, IWorkspaceItem } from '../common/workspacesExplorer.js';
@@ -404,13 +405,20 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 				append(headerLeft, $('span', { style: 'font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;' }, ws.name));
 
+				// Header Right Container (Badges + Actions)
+				const headerRight = append(cardHeader, $('.header-right'));
+				headerRight.style.display = 'flex';
+				headerRight.style.alignItems = 'center';
+				headerRight.style.gap = '6px';
+				headerRight.style.flexShrink = '0';
+
 				if (badgeText) {
-					const badge = append(headerLeft, $('span', { style: `font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${badgeBg}; color: ${badgeFg}; font-weight: 600; margin-left: 6px; flex-shrink: 0; text-transform: uppercase;` }, badgeText));
+					const badge = append(headerRight, $('span', { style: `font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${badgeBg}; color: ${badgeFg}; font-weight: 600; text-transform: uppercase;` }, badgeText));
 					badge.title = `Entity Type: ${badgeText}`;
 				}
 
 				// Header Actions
-				const headerActions = append(cardHeader, $('.header-actions'));
+				const headerActions = append(headerRight, $('.header-actions'));
 				headerActions.style.display = 'flex';
 				headerActions.style.alignItems = 'center';
 				headerActions.style.gap = '6px';
@@ -1113,12 +1121,20 @@ export class MainWorkspaceViewPane extends ViewPane {
 				overlay.remove();
 				this.notificationService.info(`Created ${selectedType} '${name}' standard files in ${targetName}`);
 
+				const canonicalParentId = this.getCanonicalId(targetUri);
+				const createdFolderUri = dirname(createdUri);
+				const canonicalCreatedId = this.getCanonicalId(createdFolderUri);
+
+				this.expandedWorkspaces.add(canonicalParentId);
+				this.expandedWorkspaces.add(canonicalCreatedId);
+				this.selectedItemId = canonicalCreatedId;
+
 				if (createdUri.path.toLowerCase().endsWith('.md')) {
 					await this.commandService.executeCommand('markdown.showPreview', createdUri);
 				} else {
 					await this.openerService.open(createdUri);
 				}
-				this.renderContent();
+				await this.renderContent();
 			} catch (err) {
 				this.notificationService.error(`Failed to create entity: ${err}`);
 			}

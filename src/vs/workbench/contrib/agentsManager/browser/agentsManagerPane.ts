@@ -117,6 +117,18 @@ export class AgentsManagerPane extends ViewPane {
 			scopedAgents = allAgents.filter(a => a.scopeType === targetScope);
 		}
 
+		// Update Native View Pane Header Title with Dynamic Item Count
+		const baseTitles: Record<string, string> = {
+			all: 'All Agents',
+			workspace: 'Workspace Agents',
+			project: 'Project Agents',
+			job: 'Job Agents',
+			workflow: 'Workflow Agents',
+			none: 'Standalone / Global Agents'
+		};
+		const baseName = baseTitles[targetScope] || 'Agents';
+		this.updateTitle(`${baseName} (${scopedAgents.length})`);
+
 		// Filter by Search Text
 		const filteredAgents = scopedAgents.filter(a => {
 			if (!this.filterText) {

@@ -423,6 +423,7 @@ import './contrib/languageStatus/browser/languageStatus.contribution.js';
 // Authentication
 import './contrib/authentication/browser/authentication.contribution.js';
 import './contrib/googleAuthentication/browser/googleAuthentication.contribution.js';
+import './contrib/accountManagement/browser/accountManagement.contribution.js';
 
 // User Data Sync
 import './contrib/userDataSync/browser/userDataSync.contribution.js';
