@@ -1,0 +1,45 @@
+{
+	"version": "1.0.0",
+	"activeProviders": ["google", "github", "microsoft"],
+	"providers": {
+		"google": {
+			"id": "google",
+			"name": "Google",
+			"enabled": true,
+			"icon": "google",
+			"clientId": "YOUR_GOOGLE_CLIENT_ID",
+			"clientSecret": "YOUR_GOOGLE_CLIENT_SECRET",
+			"authUri": "https://accounts.google.com/o/oauth2/auth",
+			"tokenUri": "https://oauth2.googleapis.com/token",
+			"userInfoUri": "https://www.googleapis.com/oauth2/v2/userinfo",
+			"redirectUri": "http://localhost:3000/auth/callback",
+			"scopes": ["openid", "profile", "email"]
+		},
+		"github": {
+			"id": "github",
+			"name": "GitHub",
+			"enabled": false,
+			"icon": "github",
+			"clientId": "YOUR_GITHUB_CLIENT_ID",
+			"clientSecret": "YOUR_GITHUB_CLIENT_SECRET",
+			"authUri": "https://github.com/login/oauth/authorize",
+			"tokenUri": "https://github.com/login/oauth/access_token",
+			"userInfoUri": "https://api.github.com/user",
+			"redirectUri": "http://localhost:3000/auth/callback",
+			"scopes": ["read:user", "user:email"]
+		},
+		"microsoft": {
+			"id": "microsoft",
+			"name": "Microsoft",
+			"enabled": false,
+			"icon": "microsoft",
+			"clientId": "YOUR_MICROSOFT_CLIENT_ID",
+			"clientSecret": "YOUR_MICROSOFT_CLIENT_SECRET",
+			"authUri": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+			"tokenUri": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+			"userInfoUri": "https://graph.microsoft.com/v1.0/me",
+			"redirectUri": "http://localhost:3000/auth/callback",
+			"scopes": ["openid", "profile", "email"]
+		}
+	}
+}

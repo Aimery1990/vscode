@@ -1,0 +1,54 @@
+{
+  "name": "google-authentication",
+  "displayName": "Google Authentication",
+  "description": "Google Authentication Provider for AnyAgent Desktop",
+  "publisher": "vscode",
+  "license": "MIT",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "api": "none",
+  "extensionKind": [
+    "ui",
+    "workspace"
+  ],
+  "contributes": {
+    "authentication": [
+      {
+        "label": "Google",
+        "id": "google"
+      }
+    ],
+    "commands": [
+      {
+        "command": "anyagent.google.login",
+        "title": "AnyAgent: Sign in with Google",
+        "category": "Authentication"
+      },
+      {
+        "command": "anyagent.google.logout",
+        "title": "AnyAgent: Sign out of Google",
+        "category": "Authentication"
+      },
+      {
+        "command": "anyagent.google.showProfile",
+        "title": "AnyAgent: View Google Profile",
+        "category": "Authentication"
+      }
+    ]
+  },
+  "main": "./out/extension.js",
+  "scripts": {
+    "compile": "tsc -b",
+    "watch": "tsc -b -w"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.2.2"
+  }
+}

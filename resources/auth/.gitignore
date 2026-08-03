@@ -1,0 +1,6 @@
+# Protect sensitive credentials
+google_client_secret.json
+auth_providers.json
+!.gitignore
+!README.md
+!auth_providers.template.json
