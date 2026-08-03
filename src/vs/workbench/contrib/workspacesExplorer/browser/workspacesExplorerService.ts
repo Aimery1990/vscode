@@ -191,13 +191,19 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 				if (!hasWorkspaceMd && !item.isCurrent) {
 					let detectedType: ResourceType | undefined;
-					if (await this.fileService.exists(URI.joinPath(targetBase, 'job.md'))) {
+					const hasJobMd = await this.fileService.exists(URI.joinPath(targetBase, 'job.md'));
+					const hasProjectMd = await this.fileService.exists(URI.joinPath(targetBase, 'project.md'));
+					const hasTaskMd = await this.fileService.exists(URI.joinPath(targetBase, 'task.md'));
+					const hasAgentMd = await this.fileService.exists(URI.joinPath(targetBase, 'agent.md'));
+					const hasInstructionMd = await this.fileService.exists(URI.joinPath(targetBase, 'instruction.md'));
+
+					if (hasJobMd || hasInstructionMd || item.name.toLowerCase().includes('job')) {
 						detectedType = 'job';
-					} else if (await this.fileService.exists(URI.joinPath(targetBase, 'project.md'))) {
+					} else if (hasProjectMd || item.name.toLowerCase().includes('project')) {
 						detectedType = 'project';
-					} else if (await this.fileService.exists(URI.joinPath(targetBase, 'task.md'))) {
+					} else if (hasTaskMd || item.name.toLowerCase().includes('task')) {
 						detectedType = 'task';
-					} else if (await this.fileService.exists(URI.joinPath(targetBase, 'agent.md'))) {
+					} else if (hasAgentMd || item.name.toLowerCase().includes('agent')) {
 						detectedType = 'agent';
 					}
 
@@ -401,8 +407,14 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		}
 
 		if (type === 'workspace') {
-			const res = await this.createWorkspaceWithNameAndPath(name, targetBaseUri, description);
-			return URI.joinPath(res.uri, 'workspace.md');
+			const cleanName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+			const targetFolderUri = URI.joinPath(targetBaseUri, cleanName);
+			if (!await this.fileService.exists(targetFolderUri)) {
+				await this.fileService.createFolder(targetFolderUri);
+			}
+			await this.reinitializeWorkspaceMd(targetFolderUri);
+			this._onDidChangeWorkspaces.fire();
+			return URI.joinPath(targetFolderUri, 'workspace.md');
 		}
 
 		// EVERY entity type (job, project, task, case, agent, issue, analysis, folder) is created as a DEDICATED FOLDER containing 4-MD files
