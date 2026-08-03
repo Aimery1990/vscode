@@ -433,26 +433,22 @@ export class MainWorkspaceViewPane extends ViewPane {
 				};
 
 				if (ws.isMissing) {
-					const isEntityFolder = ws.missingReason?.includes('Entity folder') || ws.missingReason?.includes('Job');
-
-					if (!isEntityFolder) {
-						// Re-initialize 4-MD button for workspace with missing workspace.md
-						const fixBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.tools)));
-						fixBtn.style.color = '#fbbf24';
-						fixBtn.style.fontSize = '12px';
-						fixBtn.style.opacity = '0.9';
-						fixBtn.title = 'Re-initialize workspace.md & standard files';
-						fixBtn.onclick = async (e) => {
-							e.stopPropagation();
-							try {
-								await this.workspacesExplorerService.reinitializeWorkspaceMd(ws.uri);
-								this.notificationService.info(`Re-initialized workspace.md for '${ws.name}'`);
-								this.renderContent();
-							} catch (err) {
-								this.notificationService.error(`Failed to re-initialize: ${err}`);
-							}
-						};
-					}
+					// Repair 4-MD button for workspace / entity folder with missing files
+					const fixBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.tools)));
+					fixBtn.style.color = '#fbbf24';
+					fixBtn.style.fontSize = '12px';
+					fixBtn.style.opacity = '0.9';
+					fixBtn.title = 'Repair entity standard files from snapshot';
+					fixBtn.onclick = async (e) => {
+						e.stopPropagation();
+						try {
+							await this.workspacesExplorerService.repairEntityFromSnapshot(ws.uri);
+							this.notificationService.info(`Repaired standard files for '${ws.name}'`);
+							this.renderContent();
+						} catch (err) {
+							this.notificationService.error(`Failed to repair: ${err}`);
+						}
+					};
 
 					const removeBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
 					removeBtn.style.opacity = '0.65';

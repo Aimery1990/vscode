@@ -157,6 +157,40 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 		}
 	}
 
+	async repairAgent(id: string): Promise<void> {
+		const agent = await this.getAgent(id);
+		if (!agent) {
+			return;
+		}
+
+		let folderUri: URI | undefined;
+		if (agent.folderPath) {
+			folderUri = URI.file(agent.folderPath);
+		} else {
+			const activeFolder = this.workspaceContextService.getWorkspace().folders[0];
+			if (activeFolder) {
+				const cleanName = agent.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+				folderUri = URI.joinPath(activeFolder.uri, `agent_${cleanName}`);
+			}
+		}
+
+		if (folderUri) {
+			try {
+				if (!await this.fileService.exists(folderUri)) {
+					await this.fileService.createFolder(folderUri);
+				}
+				await this._writeAgent4MDFiles(agent, folderUri, false);
+				agent.folderPath = folderUri.fsPath;
+				agent.status = 'idle';
+				await this.updateAgent(agent);
+			} catch (err) {
+				console.error('Failed to repair agent files', err);
+			}
+		}
+
+		this._onDidChangeAgents.fire();
+	}
+
 	async assignTaskToAgent(agentId: string, taskTitle: string, taskDescription = ''): Promise<void> {
 		const agent = await this.getAgent(agentId);
 		if (!agent) {
@@ -190,7 +224,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 		const cleanName = agent.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
 		const agentFolderUri = isNewFolder ? URI.joinPath(baseParentUri, `agent_${cleanName}`) : baseParentUri;
 
-		if (isNewFolder) {
+		if (isNewFolder && !await this.fileService.exists(agentFolderUri)) {
 			await this.fileService.createFolder(agentFolderUri);
 		}
 

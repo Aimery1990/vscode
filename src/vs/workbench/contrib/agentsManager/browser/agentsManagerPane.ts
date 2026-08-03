@@ -18,6 +18,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
@@ -44,11 +45,16 @@ export class AgentsManagerPane extends ViewPane {
 		@INotificationService private readonly notificationService: INotificationService,
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@ICommandService private readonly commandService: ICommandService,
+		@IFileService private readonly fileService: IFileService,
 		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
-		this._register(this.agentsManagerService.onDidChangeAgents(() => this.renderContent()));
+		// Proactively update title on agent change or load
+		this._register(this.agentsManagerService.onDidChangeAgents(() => {
+			this.updatePaneTitle();
+			this.renderContent();
+		}));
 
 		// Accordion Exclusive Single Expansion: Notify service when this pane is expanded
 		this._register(this.onDidChangeBodyVisibility(visible => {
@@ -67,6 +73,14 @@ export class AgentsManagerPane extends ViewPane {
 				this.setExpanded(false);
 			}
 		}));
+
+		// Trigger initial title count calculation
+		this.updatePaneTitle();
+	}
+
+	protected override renderHeaderTitle(container: HTMLElement, title: string): void {
+		super.renderHeaderTitle(container, title);
+		this.updatePaneTitle();
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -96,6 +110,25 @@ export class AgentsManagerPane extends ViewPane {
 		return 'all';
 	}
 
+	private async updatePaneTitle(): Promise<void> {
+		const allAgents = await this.agentsManagerService.getAgents();
+		const targetScope = this.getTargetScope();
+		let scopedAgents = allAgents;
+		if (targetScope !== 'all') {
+			scopedAgents = allAgents.filter(a => a.scopeType === targetScope);
+		}
+		const baseTitles: Record<string, string> = {
+			all: 'All Agents',
+			workspace: 'Workspace Agents',
+			project: 'Project Agents',
+			job: 'Job Agents',
+			workflow: 'Workflow Agents',
+			none: 'Standalone / Global Agents'
+		};
+		const baseName = baseTitles[targetScope] || 'Agents';
+		this.updateTitle(`${baseName} (${scopedAgents.length})`);
+	}
+
 	private async renderContent(): Promise<void> {
 		if (!this.containerEl) {
 			return;
@@ -118,16 +151,7 @@ export class AgentsManagerPane extends ViewPane {
 		}
 
 		// Update Native View Pane Header Title with Dynamic Item Count
-		const baseTitles: Record<string, string> = {
-			all: 'All Agents',
-			workspace: 'Workspace Agents',
-			project: 'Project Agents',
-			job: 'Job Agents',
-			workflow: 'Workflow Agents',
-			none: 'Standalone / Global Agents'
-		};
-		const baseName = baseTitles[targetScope] || 'Agents';
-		this.updateTitle(`${baseName} (${scopedAgents.length})`);
+		this.updatePaneTitle();
 
 		// Filter by Search Text
 		const filteredAgents = scopedAgents.filter(a => {
@@ -191,12 +215,35 @@ export class AgentsManagerPane extends ViewPane {
 
 		for (const agent of filteredAgents) {
 			const accentColor = scopeAccentColors[agent.scopeType] || '#38bdf8';
-			this.renderAgentCard(listBody, agent, accentColor);
+			await this.renderAgentCard(listBody, agent, accentColor);
 		}
 	}
 
-	private renderAgentCard(parent: HTMLElement, agent: IAgentItem, accentColor: string): void {
+	private async renderAgentCard(parent: HTMLElement, agent: IAgentItem, accentColor: string): Promise<void> {
 		const card = append(parent, $('.agent-item-card'));
+
+		// Disk Inspection for missing or damaged agent files
+		let isMissing = false;
+		if (agent.folderPath) {
+			try {
+				const folderUri = URI.file(agent.folderPath);
+				const instructionUri = URI.file(`${agent.folderPath}/instruction.md`);
+				const hasFolder = await this.fileService.exists(folderUri);
+				const hasInstruction = await this.fileService.exists(instructionUri);
+				if (!hasFolder || !hasInstruction) {
+					isMissing = true;
+				}
+			} catch {
+				isMissing = true;
+			}
+		} else {
+			isMissing = true;
+		}
+
+		if (isMissing) {
+			card.style.borderColor = 'rgba(244, 63, 94, 0.45)';
+			card.style.backgroundColor = 'rgba(244, 63, 94, 0.05)';
+		}
 
 		// Card Header: Icon + Name + Status + Actions
 		const cardHeader = append(card, $('.card-header'));
@@ -213,7 +260,7 @@ export class AgentsManagerPane extends ViewPane {
 
 		const aIcon = append(cardLeft, $('span' + ThemeIcon.asCSSSelector(iconMap[agent.avatarIcon] || Codicon.robot)));
 		aIcon.style.fontSize = '14px';
-		aIcon.style.color = accentColor;
+		aIcon.style.color = isMissing ? '#ef4444' : accentColor;
 		aIcon.style.flexShrink = '0';
 
 		const nameText = append(cardLeft, $('span.agent-name'));
@@ -221,53 +268,72 @@ export class AgentsManagerPane extends ViewPane {
 
 		// Status Badge
 		const statusDot = append(cardLeft, $('span.status-dot'));
-		statusDot.style.background = agent.status === 'busy' ? '#eab308' : agent.status === 'offline' ? '#6b7280' : '#22c55e';
-		statusDot.title = `Status: ${agent.status}`;
+		if (isMissing) {
+			statusDot.style.background = '#ef4444';
+			statusDot.title = 'Warning: Agent files missing or damaged on disk!';
+		} else {
+			statusDot.style.background = agent.status === 'busy' ? '#eab308' : agent.status === 'offline' ? '#6b7280' : '#22c55e';
+			statusDot.title = `Status: ${agent.status}`;
+		}
 
 		// Card Right Actions
 		const cardActions = append(cardHeader, $('.card-actions'));
 
-		// Assign Task Action
-		const runBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
-		runBtn.style.fontSize = '12px';
-		runBtn.style.color = '#22c55e';
-		runBtn.style.cursor = 'pointer';
-		runBtn.style.opacity = '0.85';
-		runBtn.title = 'Assign Task to Agent';
-		runBtn.onclick = async () => {
-			const taskTitle = await this.quickInputService.input({
-				prompt: `Assign New Task to AI Agent '${agent.name}'`,
-				placeHolder: 'e.g. Implement user authentication, Refactor API response handler',
-				validateInput: async (val) => val.trim() ? null : 'Task title cannot be empty'
-			});
-
-			if (taskTitle) {
-				const taskDescription = await this.quickInputService.input({
-					prompt: 'Enter Task Details & Requirements (Optional)',
-					placeHolder: 'e.g. Ensure unit tests pass and work_log is updated.'
+		if (isMissing) {
+			// Repair Action (Wrench 🛠️)
+			const repairBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.tools)));
+			repairBtn.style.fontSize = '13px';
+			repairBtn.style.color = '#eab308';
+			repairBtn.style.cursor = 'pointer';
+			repairBtn.style.opacity = '0.9';
+			repairBtn.title = 'Repair Agent (Re-create missing 4-MD files)';
+			repairBtn.onclick = async () => {
+				await this.agentsManagerService.repairAgent(agent.id);
+				this.notificationService.info(`Agent '${agent.name}' files repaired & restored successfully!`);
+			};
+		} else {
+			// Assign Task Action
+			const runBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
+			runBtn.style.fontSize = '12px';
+			runBtn.style.color = '#22c55e';
+			runBtn.style.cursor = 'pointer';
+			runBtn.style.opacity = '0.85';
+			runBtn.title = 'Assign Task to Agent';
+			runBtn.onclick = async () => {
+				const taskTitle = await this.quickInputService.input({
+					prompt: `Assign New Task to AI Agent '${agent.name}'`,
+					placeHolder: 'e.g. Implement user authentication, Refactor API response handler',
+					validateInput: async (val) => val.trim() ? null : 'Task title cannot be empty'
 				});
 
-				await this.agentsManagerService.assignTaskToAgent(agent.id, taskTitle, taskDescription || '');
-				this.notificationService.info(`Task '${taskTitle}' assigned to Agent '${agent.name}'! Logged in work_log.md.`);
-			}
-		};
+				if (taskTitle) {
+					const taskDescription = await this.quickInputService.input({
+						prompt: 'Enter Task Details & Requirements (Optional)',
+						placeHolder: 'e.g. Ensure unit tests pass and work_log is updated.'
+					});
 
-		// Open Folder / Rendered Markdown Preview Action
-		if (agent.folderPath) {
-			const openFolderBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.folderOpened)));
-			openFolderBtn.style.fontSize = '12px';
-			openFolderBtn.style.color = '#a78bfa';
-			openFolderBtn.style.cursor = 'pointer';
-			openFolderBtn.style.opacity = '0.85';
-			openFolderBtn.title = 'Open Agent Instruction Preview (markdown.showPreview)';
-			openFolderBtn.onclick = async () => {
-				const instructionUri = URI.file(`${agent.folderPath}/instruction.md`);
-				try {
-					await this.commandService.executeCommand('markdown.showPreview', instructionUri);
-				} catch {
-					await this.openerService.open(instructionUri);
+					await this.agentsManagerService.assignTaskToAgent(agent.id, taskTitle, taskDescription || '');
+					this.notificationService.info(`Task '${taskTitle}' assigned to Agent '${agent.name}'! Logged in work_log.md.`);
 				}
 			};
+
+			// Open Folder / Rendered Markdown Preview Action
+			if (agent.folderPath) {
+				const openFolderBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.folderOpened)));
+				openFolderBtn.style.fontSize = '12px';
+				openFolderBtn.style.color = '#a78bfa';
+				openFolderBtn.style.cursor = 'pointer';
+				openFolderBtn.style.opacity = '0.85';
+				openFolderBtn.title = 'Open Agent Instruction Preview (markdown.showPreview)';
+				openFolderBtn.onclick = async () => {
+					const instructionUri = URI.file(`${agent.folderPath}/instruction.md`);
+					try {
+						await this.commandService.executeCommand('markdown.showPreview', instructionUri);
+					} catch {
+						await this.openerService.open(instructionUri);
+					}
+				};
+			}
 		}
 
 		// Edit Action
@@ -295,7 +361,12 @@ export class AgentsManagerPane extends ViewPane {
 
 		// Role Subtitle
 		const roleRow = append(card, $('.role-row'));
-		roleRow.textContent = agent.role;
+		if (isMissing) {
+			roleRow.textContent = `⚠️ Files missing or damaged. Click Repair (🛠️) to restore.`;
+			roleRow.style.color = '#f43f5e';
+		} else {
+			roleRow.textContent = agent.role;
+		}
 
 		// Meta Row: Model Badge + Scope Badge
 		const metaRow = append(card, $('.meta-row'));
@@ -305,8 +376,8 @@ export class AgentsManagerPane extends ViewPane {
 
 		const scopeBadge = append(metaRow, $('span.scope-badge'));
 		scopeBadge.textContent = agent.scopeName;
-		scopeBadge.style.color = accentColor;
-		scopeBadge.style.borderColor = `${accentColor}44`;
+		scopeBadge.style.color = isMissing ? '#ef4444' : accentColor;
+		scopeBadge.style.borderColor = isMissing ? 'rgba(239, 68, 68, 0.4)' : `${accentColor}44`;
 
 		// Prompt Preview
 		const promptPreview = append(card, $('.prompt-preview'));

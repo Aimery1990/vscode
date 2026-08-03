@@ -44,6 +44,28 @@ export interface ICreateWorkspaceResult {
 	uri: URI;
 }
 
+export interface IEntityGitSnapshot {
+	remoteUrl?: string;
+	branch?: string;
+	lastCommitHash?: string;
+	lastCommitMsg?: string;
+	hasUncommittedChanges?: boolean;
+	stashCount?: number;
+}
+
+export interface IEntityMetadataSnapshot {
+	entityUri: string;
+	entityName: string;
+	entityType: ResourceType;
+	ownerAccount: string;
+	createdAt: string;
+	description?: string;
+	belongsToWorkspaceUri?: string;
+	primaryLanguage?: string;
+	lastKnownChildren?: string[];
+	git?: IEntityGitSnapshot;
+}
+
 export const IWorkspacesExplorerService = createDecorator<IWorkspacesExplorerService>('workspacesExplorerService');
 
 export interface IWorkspacesExplorerService {
@@ -58,4 +80,7 @@ export interface IWorkspacesExplorerService {
 	createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult>;
 	reinitializeWorkspaceMd(workspaceUri: URI): Promise<void>;
 	reorderWorkspaces(sourceId: string, targetId: string): Promise<void>;
+	getMetadataSnapshot(uri: URI | string): IEntityMetadataSnapshot | undefined;
+	saveMetadataSnapshot(snapshot: IEntityMetadataSnapshot): Promise<void>;
+	repairEntityFromSnapshot(uri: URI): Promise<void>;
 }

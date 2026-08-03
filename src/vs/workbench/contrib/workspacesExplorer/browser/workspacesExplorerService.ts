@@ -5,7 +5,7 @@
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, ICreateResourceOptions, ICreateWorkspaceResult, ResourceType } from '../common/workspacesExplorer.js';
+import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, ICreateResourceOptions, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot } from '../common/workspacesExplorer.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IWorkspacesService, isRecentFolder, isRecentWorkspace } from '../../../../platform/workspaces/common/workspaces.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -17,6 +17,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IAgentsManagerService } from '../../agentsManager/common/agentsManager.js';
 
 const SAVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.savedWorkspaces';
+const METADATA_SNAPSHOTS_STORAGE_KEY = 'workspacesExplorer.metadataSnapshots';
 
 export class WorkspacesExplorerService extends Disposable implements IWorkspacesExplorerService {
 	declare readonly _serviceBrand: undefined;
@@ -35,6 +36,66 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 		this._register(this.workspaceContextService.onDidChangeWorkspaceFolders(() => this._onDidChangeWorkspaces.fire()));
 		this._register(this.workspacesService.onDidChangeRecentlyOpened(() => this._onDidChangeWorkspaces.fire()));
+	}
+
+	private getAllMetadataSnapshotsMap(): Record<string, IEntityMetadataSnapshot> {
+		const raw = this.storageService.get(METADATA_SNAPSHOTS_STORAGE_KEY, StorageScope.PROFILE, '{}');
+		try {
+			return JSON.parse(raw) as Record<string, IEntityMetadataSnapshot>;
+		} catch {
+			return {};
+		}
+	}
+
+	getMetadataSnapshot(uri: URI | string): IEntityMetadataSnapshot | undefined {
+		const strUri = typeof uri === 'string' ? uri : uri.toString();
+		const map = this.getAllMetadataSnapshotsMap();
+		return map[strUri] || map[strUri.toLowerCase()];
+	}
+
+	async saveMetadataSnapshot(snapshot: IEntityMetadataSnapshot): Promise<void> {
+		const map = this.getAllMetadataSnapshotsMap();
+		map[snapshot.entityUri] = snapshot;
+		this.storageService.store(METADATA_SNAPSHOTS_STORAGE_KEY, JSON.stringify(map), StorageScope.PROFILE, StorageTarget.USER);
+	}
+
+	async repairEntityFromSnapshot(uri: URI): Promise<void> {
+		const snapshot = this.getMetadataSnapshot(uri);
+		const targetFolderUri = uri.path.endsWith('.code-workspace') ? dirname(uri) : uri;
+
+		if (!await this.fileService.exists(targetFolderUri)) {
+			await this.fileService.createFolder(targetFolderUri);
+		}
+
+		if (snapshot && snapshot.entityType !== 'workspace') {
+			const type = snapshot.entityType;
+			const name = snapshot.entityName;
+			const ownerAccount = snapshot.ownerAccount || 'aimery.wei@gmail.com';
+			const dateTimeFormatted = this.getFormattedDateTime();
+			const description = snapshot.description || `${type} description`;
+
+			const mainMdFileName = `${type}.md`;
+			const mainMdUri = URI.joinPath(targetFolderUri, mainMdFileName);
+			const instructionUri = URI.joinPath(targetFolderUri, 'instruction.md');
+			const readmeUri = URI.joinPath(targetFolderUri, 'README.md');
+			const workLogUri = URI.joinPath(targetFolderUri, 'work_log.md');
+
+			const mainMdContent = `# ${name} (${type.toUpperCase()})\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n- **Entity Type**: ${type}\n- **Restored From Snapshot**: true\n- **Status**: active\n\n## Description\n\n${description}\n`;
+			await this.fileService.writeFile(mainMdUri, VSBuffer.fromString(mainMdContent));
+
+			const instructionContent = `# Instruction - ${name}\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n\n## Guidelines & Rules\n\nDocument operational procedures and guidelines for this ${type}.\n`;
+			await this.fileService.writeFile(instructionUri, VSBuffer.fromString(instructionContent));
+
+			const readmeContent = `# ${name}\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n\n${description}\n\n## Document Navigation\n\n- [${mainMdFileName}](file://${mainMdUri.fsPath})\n- [instruction.md](file://${instructionUri.fsPath})\n- [work_log.md](file://${workLogUri.fsPath})\n`;
+			await this.fileService.writeFile(readmeUri, VSBuffer.fromString(readmeContent));
+
+			const workLogContent = `# Work Log - ${name}\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n\n## ${dateTimeFormatted.slice(0, 10)}\n\n### Restoration\n\n- Restored 4-MD standard files for ${type} '${name}' from metadata snapshot\n`;
+			await this.fileService.writeFile(workLogUri, VSBuffer.fromString(workLogContent));
+		} else {
+			await this.reinitializeWorkspaceMd(targetFolderUri);
+		}
+
+		this._onDidChangeWorkspaces.fire();
 	}
 
 	private getSavedWorkspaceUris(): string[] {
@@ -177,11 +238,15 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 			try {
 				const folderExists = await this.fileService.exists(targetBase);
+				const snapshot = this.getMetadataSnapshot(targetBase);
+
 				if (!folderExists) {
 					resultItems.push({
 						...item,
+						name: snapshot ? snapshot.entityName : item.name,
+						detectedType: snapshot?.entityType,
 						isMissing: true,
-						missingReason: 'Workspace folder path does not exist'
+						missingReason: snapshot ? `Physical directory deleted. Snapshot: ${snapshot.entityType.toUpperCase()} (${snapshot.createdAt})` : 'Workspace folder path does not exist'
 					});
 					continue;
 				}
@@ -190,7 +255,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				const hasWorkspaceMd = await this.fileService.exists(workspaceMdUri);
 
 				if (!hasWorkspaceMd && !item.isCurrent) {
-					let detectedType: ResourceType | undefined;
+					let detectedType: ResourceType | undefined = snapshot?.entityType;
 					const hasJobMd = await this.fileService.exists(URI.joinPath(targetBase, 'job.md'));
 					const hasProjectMd = await this.fileService.exists(URI.joinPath(targetBase, 'project.md'));
 					const hasTaskMd = await this.fileService.exists(URI.joinPath(targetBase, 'task.md'));
@@ -209,6 +274,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 					resultItems.push({
 						...item,
+						name: snapshot ? snapshot.entityName : item.name,
 						isMissing: true,
 						detectedType,
 						missingReason: detectedType ? `Entity folder (${detectedType}), not a Workspace` : 'workspace.md is missing'
@@ -217,8 +283,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					resultItems.push(item);
 				}
 			} catch {
+				const snapshot = this.getMetadataSnapshot(targetBase);
 				resultItems.push({
 					...item,
+					name: snapshot ? snapshot.entityName : item.name,
+					detectedType: snapshot?.entityType,
 					isMissing: true,
 					missingReason: 'Inaccessible workspace path'
 				});
@@ -384,6 +453,16 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			await this.fileService.writeFile(workLogUri, VSBuffer.fromString(workLogContent));
 		}
 
+		await this.saveMetadataSnapshot({
+			entityUri: targetBaseUri.toString(),
+			entityName: wsName,
+			entityType: 'workspace',
+			ownerAccount: ownerAccount,
+			createdAt: dateTimeFormatted,
+			description: `Workspace ${wsName}`,
+			git: { remoteUrl: '', branch: '', lastCommitHash: '', lastCommitMsg: '' }
+		});
+
 		this._onDidChangeWorkspaces.fire();
 	}
 
@@ -440,6 +519,17 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 		const workLogContent = `# Work Log - ${name}\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n\n## ${dateTimeFormatted.slice(0, 10)}\n\n### User Request\n\nInitialize ${type} '${name}'\n\n### AI Execution\n\n- Created ${type} folder: \`${cleanName}\`\n- Initialized 4-MD standard files: \`${mainMdFileName}\`, \`instruction.md\`, \`README.md\`, \`work_log.md\`\n`;
 		await this.fileService.writeFile(workLogUri, VSBuffer.fromString(workLogContent));
+
+		await this.saveMetadataSnapshot({
+			entityUri: entityFolderUri.toString(),
+			entityName: name,
+			entityType: type,
+			ownerAccount: ownerAccount,
+			createdAt: dateTimeFormatted,
+			description: description || `${type} description`,
+			belongsToWorkspaceUri: targetBaseUri.toString(),
+			git: { remoteUrl: '', branch: '', lastCommitHash: '', lastCommitMsg: '' }
+		});
 
 		if (type === 'agent' && this.agentsManagerService) {
 			const wsName = targetBaseUri.path.split('/').filter(Boolean).pop() || 'Workspace';
