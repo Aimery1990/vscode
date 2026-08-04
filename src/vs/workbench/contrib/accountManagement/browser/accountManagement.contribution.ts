@@ -27,7 +27,7 @@ export class OpenAccountPanelAction extends Action2 {
 	public override run(accessor: ServicesAccessor): void {
 		const instantiationService = accessor.get(IInstantiationService);
 		const dialog = instantiationService.createInstance(AccountManagementDialog);
-		dialog.show('auth');
+		dialog.show('Account');
 	}
 }
 

@@ -15,13 +15,14 @@ export interface IWorkspaceItem {
 	name: string;
 	uri: URI;
 	isCurrent?: boolean;
+	isSaved?: boolean;
 	jobCount?: number;
 	isMissing?: boolean;
 	missingReason?: string;
 	detectedType?: ResourceType;
 }
 
-export type ResourceType = 'workspace' | 'job' | 'project' | 'task' | 'case' | 'agent' | 'issue' | 'analysis' | 'folder' | 'file';
+export type ResourceType = 'workspace' | 'job' | 'project' | 'task' | 'workflow' | 'case' | 'agent' | 'issue' | 'analysis' | 'folder' | 'file';
 
 export interface IWorkspaceChildItem {
 	id: string;
@@ -32,15 +33,22 @@ export interface IWorkspaceChildItem {
 }
 
 export interface ICreateResourceOptions {
-	workspaceUri: URI;
+	workspaceUri?: URI;
+	targetParentUri?: URI;
 	type: ResourceType;
 	name: string;
 	description?: string;
 	parentEntityUri?: URI;
 }
 
+export interface ICreateResourceResult {
+	alreadyExists?: boolean;
+	uri: URI;
+}
+
 export interface ICreateWorkspaceResult {
-	alreadyExists: boolean;
+	alreadyExists?: boolean;
+	name?: string;
 	uri: URI;
 }
 
@@ -76,7 +84,7 @@ export interface IWorkspacesExplorerService {
 	addWorkspace(uri: URI, name?: string): Promise<void>;
 	removeWorkspace(uri: URI): Promise<void>;
 	scanWorkspaceChildren(workspaceUri: URI): Promise<IWorkspaceChildItem[]>;
-	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<URI>;
+	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult>;
 	createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult>;
 	reinitializeWorkspaceMd(workspaceUri: URI): Promise<void>;
 	reorderWorkspaces(sourceId: string, targetId: string): Promise<void>;

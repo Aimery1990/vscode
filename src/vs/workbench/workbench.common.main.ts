@@ -454,6 +454,9 @@ import './contrib/workspace/browser/workspace.contribution.js';
 import './contrib/workspaces/browser/workspaces.contribution.js';
 import './contrib/workspacesExplorer/browser/workspacesExplorer.contribution.js';
 
+// Entity Persistence & Recovery Engine
+import './contrib/entityPersistence/browser/entityPersistence.contribution.js';
+
 // Agents Manager
 import './contrib/agentsManager/browser/agentsManager.contribution.js';
 

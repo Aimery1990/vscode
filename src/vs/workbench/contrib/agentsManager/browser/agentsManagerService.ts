@@ -12,6 +12,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IAgentItem, IAgentsManagerService, AgentScopeType } from '../common/agentsManager.js';
+import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 
 const STORAGE_KEY = 'workbench.agentsManager.agents';
 
@@ -30,13 +31,18 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
 		@IFileService private readonly fileService: IFileService,
-		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService
+		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
+		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService
 	) {
 		super();
 		this._loadAgents();
 
 		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, STORAGE_KEY, this._store)(_e => {
 			this._loadAgents();
+			this._onDidChangeAgents.fire();
+		}));
+
+		this._register(this.entityPersistenceService.onDidChangeSnapshots(() => {
 			this._onDidChangeAgents.fire();
 		}));
 	}
@@ -61,7 +67,6 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 		}
 
 		if (!this._initialized) {
-			// No built-in virtual demo seed agents. Only user-created agents are stored.
 			this._agents = [];
 			this._saveAgents();
 			this._initialized = true;
@@ -107,13 +112,26 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 			}
 		}
 
-		// 2. Write physical 4-MD files if parentUri is available
+		// 2. Write physical 4-MD files using unified EntityPersistenceService
 		if (parentUri) {
 			try {
-				const folderUri = await this._writeAgent4MDFiles(newAgent, parentUri);
+				const folderUri = await this.entityPersistenceService.writeEntity4MDFiles({
+					entityUri: parentUri.toString(),
+					entityName: newAgent.name,
+					entityType: 'agent',
+					ownerAccount: 'aimery.wei@gmail.com',
+					description: newAgent.role,
+					systemPrompt: newAgent.systemPrompt,
+					role: newAgent.role,
+					modelName: newAgent.modelName,
+					avatarIcon: newAgent.avatarIcon,
+					scopeType: newAgent.scopeType,
+					scopeId: newAgent.scopeId,
+					scopeName: newAgent.scopeName
+				}, parentUri, true);
 				newAgent.folderPath = folderUri.fsPath;
 			} catch (err) {
-				console.error('Failed to create agent 4-MD folder', err);
+				console.error('Failed to create agent 4-MD folder via persistence engine', err);
 			}
 		}
 
@@ -135,11 +153,22 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 			if (updated.folderPath) {
 				try {
 					const folderUri = URI.file(updated.folderPath);
-					if (await this.fileService.exists(folderUri)) {
-						await this._writeAgent4MDFiles(updated, folderUri, false);
-					}
+					await this.entityPersistenceService.writeEntity4MDFiles({
+						entityUri: folderUri.toString(),
+						entityName: updated.name,
+						entityType: 'agent',
+						ownerAccount: 'aimery.wei@gmail.com',
+						description: updated.role,
+						systemPrompt: updated.systemPrompt,
+						role: updated.role,
+						modelName: updated.modelName,
+						avatarIcon: updated.avatarIcon,
+						scopeType: updated.scopeType,
+						scopeId: updated.scopeId,
+						scopeName: updated.scopeName
+					}, folderUri, false);
 				} catch (err) {
-					console.error('Failed to update agent 4-MD files', err);
+					console.error('Failed to update agent 4-MD files via persistence engine', err);
 				}
 			}
 
@@ -151,6 +180,10 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 	async removeAgent(id: string): Promise<void> {
 		const idx = this._agents.findIndex(a => a.id === id);
 		if (idx !== -1) {
+			const agent = this._agents[idx];
+			if (agent.folderPath) {
+				await this.entityPersistenceService.removeSnapshot(agent.folderPath);
+			}
 			this._agents.splice(idx, 1);
 			this._saveAgents();
 			this._onDidChangeAgents.fire();
@@ -176,15 +209,12 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 
 		if (folderUri) {
 			try {
-				if (!await this.fileService.exists(folderUri)) {
-					await this.fileService.createFolder(folderUri);
-				}
-				await this._writeAgent4MDFiles(agent, folderUri, false);
+				await this.entityPersistenceService.repairEntityFromSnapshot(folderUri);
 				agent.folderPath = folderUri.fsPath;
 				agent.status = 'idle';
 				await this.updateAgent(agent);
 			} catch (err) {
-				console.error('Failed to repair agent files', err);
+				console.error('Failed to repair agent files via persistence engine', err);
 			}
 		}
 
@@ -218,41 +248,5 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 		}
 
 		this._onDidChangeAgents.fire();
-	}
-
-	private async _writeAgent4MDFiles(agent: IAgentItem, baseParentUri: URI, isNewFolder = true): Promise<URI> {
-		const cleanName = agent.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
-		const agentFolderUri = isNewFolder ? URI.joinPath(baseParentUri, `agent_${cleanName}`) : baseParentUri;
-
-		if (isNewFolder && !await this.fileService.exists(agentFolderUri)) {
-			await this.fileService.createFolder(agentFolderUri);
-		}
-
-		const dateFormatted = new Date().toISOString().slice(0, 10);
-		const modelStr = agent.modelName || 'gemini-2.0-flash';
-
-		// 1. agent.md (Index & Metadata)
-		const agentMdUri = URI.joinPath(agentFolderUri, 'agent.md');
-		const agentMdContent = `# Agent Metadata: ${agent.name}\n\n## Metadata\n\n- **Entity Type**: agent\n- **Agent ID**: \`${agent.id}\`\n- **Title**: ${agent.name}\n- **Role**: ${agent.role}\n- **Model**: \`${modelStr}\`\n- **Scope Type**: ${agent.scopeType}\n- **Scope Name**: ${agent.scopeName}\n- **Scope ID**: \`${agent.scopeId}\`\n- **Avatar Icon**: ${agent.avatarIcon}\n- **Status**: ${agent.status}\n- **Created At**: ${dateFormatted}\n\n## Scope & Target Service\n\nThis agent is configured to serve **${agent.scopeName}** at the \`${agent.scopeType}\` level.\n\n## Linked System Files\n\n- [instruction.md](file://${URI.joinPath(agentFolderUri, 'instruction.md').fsPath})\n- [README.md](file://${URI.joinPath(agentFolderUri, 'README.md').fsPath})\n- [work_log.md](file://${URI.joinPath(agentFolderUri, 'work_log.md').fsPath})\n`;
-		await this.fileService.writeFile(agentMdUri, VSBuffer.fromString(agentMdContent));
-
-		// 2. instruction.md (System Prompt & Guidelines)
-		const instructionUri = URI.joinPath(agentFolderUri, 'instruction.md');
-		const instructionContent = `# Instruction - ${agent.name}\n\n## AI Model\n\n- **Configured Model**: \`${modelStr}\`\n\n## System Prompt\n\n\`\`\`\n${agent.systemPrompt}\n\`\`\`\n\n## Operational Role & Guidelines\n\n- **Role**: ${agent.role}\n- **Work Scope**: ${agent.scopeName} (${agent.scopeType})\n- **Core Instructions**: Follow clean code principles, modular domain architecture, and clear progress reporting.\n`;
-		await this.fileService.writeFile(instructionUri, VSBuffer.fromString(instructionContent));
-
-		// 3. README.md (Overview & Navigation)
-		const readmeUri = URI.joinPath(agentFolderUri, 'README.md');
-		const readmeContent = `# AI Agent: ${agent.name}\n\n${agent.description || agent.role}\n\n## Configuration\n\n- **Model**: \`${modelStr}\`\n- **Scope**: ${agent.scopeName}\n\n## Quick Navigation\n\n- [agent.md](file://${agentMdUri.fsPath})\n- [instruction.md](file://${instructionUri.fsPath})\n- [work_log.md](file://${URI.joinPath(agentFolderUri, 'work_log.md').fsPath})\n`;
-		await this.fileService.writeFile(readmeUri, VSBuffer.fromString(readmeContent));
-
-		// 4. work_log.md (Execution History)
-		const workLogUri = URI.joinPath(agentFolderUri, 'work_log.md');
-		if (!await this.fileService.exists(workLogUri)) {
-			const workLogContent = `# Work Log - ${agent.name}\n\n## ${dateFormatted}\n\n### Agent Creation\n\n- Initialized AI Agent '${agent.name}' with standard files\n- Assigned Model: \`${modelStr}\`\n- Assigned Scope: ${agent.scopeName} (${agent.scopeType})\n`;
-			await this.fileService.writeFile(workLogUri, VSBuffer.fromString(workLogContent));
-		}
-
-		return agentFolderUri;
 	}
 }

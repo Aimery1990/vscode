@@ -18,12 +18,12 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
-import { IFileService } from '../../../../platform/files/common/files.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 
 import { IAgentsManagerService, IAgentItem, AgentScopeType } from '../common/agentsManager.js';
+import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { createOrEditAgentDialog } from './agentEditorDialog.js';
 
 export class AgentsManagerPane extends ViewPane {
@@ -45,13 +45,18 @@ export class AgentsManagerPane extends ViewPane {
 		@INotificationService private readonly notificationService: INotificationService,
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@ICommandService private readonly commandService: ICommandService,
-		@IFileService private readonly fileService: IFileService,
+		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
 		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
 		// Proactively update title on agent change or load
 		this._register(this.agentsManagerService.onDidChangeAgents(() => {
+			this.updatePaneTitle();
+			this.renderContent();
+		}));
+
+		this._register(this.entityPersistenceService.onDidChangeSnapshots(() => {
 			this.updatePaneTitle();
 			this.renderContent();
 		}));
@@ -222,20 +227,11 @@ export class AgentsManagerPane extends ViewPane {
 	private async renderAgentCard(parent: HTMLElement, agent: IAgentItem, accentColor: string): Promise<void> {
 		const card = append(parent, $('.agent-item-card'));
 
-		// Disk Inspection for missing or damaged agent files
+		// Disk Inspection for missing or damaged agent files via unified EntityPersistenceService
 		let isMissing = false;
 		if (agent.folderPath) {
-			try {
-				const folderUri = URI.file(agent.folderPath);
-				const instructionUri = URI.file(`${agent.folderPath}/instruction.md`);
-				const hasFolder = await this.fileService.exists(folderUri);
-				const hasInstruction = await this.fileService.exists(instructionUri);
-				if (!hasFolder || !hasInstruction) {
-					isMissing = true;
-				}
-			} catch {
-				isMissing = true;
-			}
+			const health = await this.entityPersistenceService.inspectEntityHealth(agent.folderPath);
+			isMissing = health.isMissing;
 		} else {
 			isMissing = true;
 		}
@@ -286,10 +282,10 @@ export class AgentsManagerPane extends ViewPane {
 			repairBtn.style.color = '#eab308';
 			repairBtn.style.cursor = 'pointer';
 			repairBtn.style.opacity = '0.9';
-			repairBtn.title = 'Repair Agent (Re-create missing 4-MD files)';
+			repairBtn.title = 'Repair Agent (Re-create missing 4-MD files from persistence engine)';
 			repairBtn.onclick = async () => {
 				await this.agentsManagerService.repairAgent(agent.id);
-				this.notificationService.info(`Agent '${agent.name}' files repaired & restored successfully!`);
+				this.notificationService.info(`Agent '${agent.name}' files repaired & restored successfully via EntityPersistenceService!`);
 			};
 		} else {
 			// Assign Task Action

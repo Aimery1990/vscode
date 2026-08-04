@@ -423,15 +423,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 				headerActions.style.alignItems = 'center';
 				headerActions.style.gap = '6px';
 
-				const createBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
-				createBtn.style.opacity = '0.8';
-				createBtn.style.fontSize = '13px';
-				createBtn.title = `New Entity in '${ws.name}'...`;
-				createBtn.onclick = (e) => {
-					e.stopPropagation();
-					this.showCreateResourceModal(ws.uri, ws.name);
-				};
-
 				if (ws.isMissing) {
 					// Repair 4-MD button for workspace / entity folder with missing files
 					const fixBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.tools)));
@@ -461,6 +452,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 						this.renderContent();
 					};
 				} else {
+					const createBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
+					createBtn.style.opacity = '0.8';
+					createBtn.style.fontSize = '13px';
+					createBtn.title = `New Entity in '${ws.name}'...`;
+					createBtn.onclick = (e) => {
+						e.stopPropagation();
+						this.showCreateResourceModal(ws.uri, ws.name);
+					};
+
 					const openBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.goToFile)));
 					openBtn.style.opacity = '0.7';
 					openBtn.style.fontSize = '12px';
@@ -1107,15 +1107,21 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 
 			try {
-				const createdUri = await this.workspacesExplorerService.createResourceUnderWorkspace({
+				const createResult = await this.workspacesExplorerService.createResourceUnderWorkspace({
 					workspaceUri: targetUri,
 					type: selectedType,
 					name,
 					description: descInput.value.trim()
 				});
 
+				const createdUri = createResult.uri;
+
 				overlay.remove();
-				this.notificationService.info(`Created ${selectedType} '${name}' standard files in ${targetName}`);
+				if (createResult.alreadyExists) {
+					this.notificationService.info(`'${name}' already exists in ${targetName}. Opened existing ${selectedType} files.`);
+				} else {
+					this.notificationService.info(`Created ${selectedType} '${name}' standard files in ${targetName}`);
+				}
 
 				const canonicalParentId = this.getCanonicalId(targetUri);
 				const createdFolderUri = dirname(createdUri);
