@@ -196,13 +196,24 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			// ignore
 		}
 
-		for (const item of resultItems) {
+		// Filter out items that are sub-directories of another valid workspace in resultItems
+		const workspaceBases = resultItems
+			.filter(item => !item.isMissing)
+			.map(item => item.uri.path.endsWith('.code-workspace') ? dirname(item.uri).path : item.uri.path);
+
+		const finalItems = resultItems.filter(item => {
+			const itemBase = item.uri.path.endsWith('.code-workspace') ? dirname(item.uri).path : item.uri.path;
+			const isSubOfAnother = workspaceBases.some(parentBase => parentBase !== itemBase && itemBase.startsWith(parentBase + '/'));
+			return !isSubOfAnother;
+		});
+
+		for (const item of finalItems) {
 			if (!item.isMissing) {
 				item.hasDamagedDescendant = await this.checkHasDamagedDescendant(item.uri);
 			}
 		}
 
-		return resultItems;
+		return finalItems;
 	}
 
 	async addWorkspace(uri: URI, name?: string): Promise<void> {
@@ -216,10 +227,29 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	async saveWorkspace(uri: URI): Promise<void> {
 		const uris = this.getSavedWorkspaceUris();
 		const uriStr = uri.toString();
+
+		// Check if uri is a sub-directory of another saved workspace or current workspace folder
+		const targetPath = uri.path.endsWith('.code-workspace') ? dirname(uri).path : uri.path;
+		const currentWorkspace = this.workspaceContextService.getWorkspace();
+		const allRootPaths = [
+			...currentWorkspace.folders.map(f => f.uri.path),
+			...uris.map(u => {
+				const p = URI.parse(u);
+				return p.path.endsWith('.code-workspace') ? dirname(p).path : p.path;
+			})
+		];
+
+		const isSubFolder = allRootPaths.some(rootPath => rootPath !== targetPath && targetPath.startsWith(rootPath + '/'));
+		if (isSubFolder) {
+			// Sub-folders are managed inside parent workspace tree, never registered as top-level root cards!
+			return;
+		}
+
 		if (!uris.includes(uriStr)) {
 			uris.push(uriStr);
 			this.saveWorkspaceUris(uris);
 		}
+		this._onDidChangeWorkspaces.fire();
 	}
 
 	async removeSavedWorkspace(uri: URI): Promise<void> {
@@ -228,6 +258,12 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		const updated = uris.filter(u => u !== uriStr);
 		this.saveWorkspaceUris(updated);
 		await this.entityPersistenceService.removeSnapshot(uri);
+		try {
+			await this.workspacesService.removeRecentlyOpened([uri]);
+		} catch {
+			// ignore
+		}
+		this._onDidChangeWorkspaces.fire();
 	}
 
 	async createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult> {
@@ -405,8 +441,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		const name = options.name;
 		const description = options.description;
 
-		const cleanName = name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
-		const entityFolderUri = URI.joinPath(targetBaseUri, `${type}_${cleanName}`);
+		const cleanName = name.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+		const folderName = (cleanName.startsWith(`${type}_`) || cleanName.startsWith(`${type}-`)) ? cleanName : `${type}_${cleanName}`;
+		const entityFolderUri = URI.joinPath(targetBaseUri, folderName);
 		const mainMdFileName = `${type}.md`;
 		const mainMdUri = URI.joinPath(entityFolderUri, mainMdFileName);
 

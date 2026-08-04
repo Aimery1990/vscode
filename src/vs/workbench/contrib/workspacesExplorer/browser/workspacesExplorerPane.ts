@@ -979,9 +979,47 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 	}
 
-	/**
-	 * Renders a spacious Create Resource Modal Overlay under the target Workspace
-	 */
+	private async generateSequentialName(targetUri: URI, type: ResourceType): Promise<string> {
+		const prefixMap: Record<ResourceType, string> = {
+			job: 'JOB',
+			task: 'TASK',
+			project: 'PROJECT',
+			workflow: 'WORKFLOW',
+			case: 'CASE',
+			agent: 'AGENT',
+			issue: 'ISSUE',
+			analysis: 'ANALYSIS',
+			workspace: 'WORKSPACE',
+			folder: 'FOLDER',
+			file: 'FILE'
+		};
+
+		const prefix = prefixMap[type] || 'ENTITY';
+
+		try {
+			const stat = await this.fileService.resolve(targetUri);
+			if (!stat.children) return `${prefix}-001`;
+
+			let maxNum = 0;
+			const regex = new RegExp(`^${prefix}[-_]?(\\d+)$`, 'i');
+
+			for (const child of stat.children) {
+				const match = child.name.match(regex);
+				if (match) {
+					const num = parseInt(match[1], 10);
+					if (!isNaN(num) && num > maxNum) {
+						maxNum = num;
+					}
+				}
+			}
+
+			const nextNum = maxNum + 1;
+			return `${prefix}-${String(nextNum).padStart(3, '0')}`;
+		} catch {
+			return `${prefix}-001`;
+		}
+	}
+
 	/**
 	 * Renders a spacious Create Resource Modal Overlay under the target Workspace or Folder
 	 */
@@ -1088,14 +1126,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 			append(btn, $('span', {}, t.label));
 
-			btn.onclick = () => {
+			btn.onclick = async () => {
 				selectedType = t.type;
 				for (let i = 0; i < typeButtons.length; i++) {
 					const isSelected = types[i].type === selectedType;
 					typeButtons[i].style.border = isSelected ? '1px solid #38bdf8' : '1px solid rgba(255,255,255,0.08)';
 					typeButtons[i].style.backgroundColor = isSelected ? 'rgba(56, 189, 248, 0.15)' : 'rgba(255,255,255,0.03)';
 				}
-				nameInput.value = `${selectedType}_spec`;
+				nameInput.value = await this.generateSequentialName(targetUri, selectedType);
+				await updateValidation();
 			};
 
 			typeButtons.push(btn);
@@ -1107,7 +1146,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const nameInput = append(nameBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
-		nameInput.value = 'job_spec';
+
+		// Warning banner element for duplicate or invalid names
+		const warningBanner = append(nameBox, $('div', {
+			style: 'font-size: 10.5px; color: #ef4444; margin-top: 4px; display: none; line-height: 1.3;'
+		}));
 
 		// Description Input
 		const descBox = append(modal, $('.form-group'));
@@ -1132,8 +1175,45 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		const submitBtn = append(actionsRow, $('button.monaco-button', {
 			style: 'padding: 6px 14px; font-size: 11px; border-radius: 4px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; font-weight: 600;'
-		}));
+		})) as HTMLButtonElement;
 		submitBtn.innerText = 'Create Entity';
+
+		const updateValidation = async () => {
+			const inputName = nameInput.value.trim();
+			if (!inputName) {
+				warningBanner.innerText = '⚠️ Please enter a valid entity name.';
+				warningBanner.style.display = 'block';
+				submitBtn.disabled = true;
+				submitBtn.style.opacity = '0.5';
+				submitBtn.style.pointerEvents = 'none';
+				return;
+			}
+
+			const targetCheckUri = URI.joinPath(targetUri, inputName);
+			const exists = await this.fileService.exists(targetCheckUri);
+			if (exists) {
+				warningBanner.innerText = `⚠️ Entity name '${inputName}' is already occupied in '${targetName}'. Please enter a unique name.`;
+				warningBanner.style.display = 'block';
+				submitBtn.disabled = true;
+				submitBtn.style.opacity = '0.5';
+				submitBtn.style.pointerEvents = 'none';
+			} else {
+				warningBanner.style.display = 'none';
+				submitBtn.disabled = false;
+				submitBtn.style.opacity = '1.0';
+				submitBtn.style.pointerEvents = 'auto';
+			}
+		};
+
+		// Set initial sequential name and run validation
+		this.generateSequentialName(targetUri, selectedType).then(initialName => {
+			nameInput.value = initialName;
+			updateValidation();
+		});
+
+		nameInput.oninput = () => {
+			updateValidation();
+		};
 
 		submitBtn.onclick = async () => {
 			const name = nameInput.value.trim();

@@ -32,8 +32,10 @@ import { IKeybindingService } from '../../../platform/keybinding/common/keybindi
 import { ILogService } from '../../../platform/log/common/log.js';
 import { IProductService } from '../../../platform/product/common/productService.js';
 import { ISecretStorageService } from '../../../platform/secrets/common/secrets.js';
+import { INotificationService } from '../../../platform/notification/common/notification.js';
 import { AuthenticationSessionInfo, getCurrentAuthenticationSessionInfo } from '../../services/authentication/browser/authenticationService.js';
 import { AccountManagementDialog } from '../../contrib/accountManagement/browser/accountManagementDialog.js';
+
 
 import { AuthenticationSessionAccount, IAuthenticationService, INTERNAL_AUTH_PROVIDER_PREFIX } from '../../services/authentication/common/authentication.js';
 import { IWorkbenchEnvironmentService } from '../../services/environment/common/environmentService.js';
@@ -292,8 +294,10 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 		@ILogService private readonly logService: ILogService,
 		@IActivityService activityService: IActivityService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
-		@ICommandService private readonly commandService: ICommandService
+		@ICommandService private readonly commandService: ICommandService,
+		@INotificationService private readonly notificationService: INotificationService
 	) {
+
 
 		const action = instantiationService.createInstance(CompositeBarAction, {
 			id: ACCOUNTS_ACTIVITY_ID,
@@ -408,8 +412,13 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 				label: localize('signInOrLogIn', "Sign In / Log In..."),
 				enabled: true,
 				run: async () => {
-					const dialog = this.instantiationService.createInstance(AccountManagementDialog);
-					await dialog.show('Account');
+					this.notificationService.info("Opening Any Agent Sign In & Account Control Center...");
+					try {
+						await this.commandService.executeCommand('anyagent.signInOrLogIn');
+					} catch (e) {
+						const dialog = this.instantiationService.createInstance(AccountManagementDialog);
+						await dialog.show('Account');
+					}
 				}
 			}));
 		}
@@ -419,10 +428,16 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 			label: localize('accountPreferences', "Account & Security Preferences..."),
 			enabled: true,
 			run: async () => {
-				const dialog = this.instantiationService.createInstance(AccountManagementDialog);
-				await dialog.show('Account');
+				this.notificationService.info("Opening Any Agent Account & Security Preferences...");
+				try {
+					await this.commandService.executeCommand('anyagent.accountPreferences');
+				} catch (e) {
+					const dialog = this.instantiationService.createInstance(AccountManagementDialog);
+					await dialog.show('Account');
+				}
 			}
 		}));
+
 
 
 		if (isLoggedIn && menus.length > 0) {
@@ -615,7 +630,8 @@ export class SimpleAccountActivityActionViewItem extends AccountsActivityActionV
 		@ILogService logService: ILogService,
 		@IActivityService activityService: IActivityService,
 		@IInstantiationService instantiationService: IInstantiationService,
-		@ICommandService commandService: ICommandService
+		@ICommandService commandService: ICommandService,
+		@INotificationService notificationService: INotificationService
 	) {
 		super(() => simpleActivityContextMenuActions(storageService, true),
 			{
@@ -626,8 +642,10 @@ export class SimpleAccountActivityActionViewItem extends AccountsActivityActionV
 				}),
 				hoverOptions,
 				compact: true,
-			}, () => undefined, actions => actions, themeService, lifecycleService, hoverService, contextMenuService, menuService, contextKeyService, authenticationService, environmentService, productService, configurationService, keybindingService, secretStorageService, logService, activityService, instantiationService, commandService);
+			}, () => undefined, actions => actions, themeService, lifecycleService, hoverService, contextMenuService, menuService, contextKeyService, authenticationService, environmentService, productService, configurationService, keybindingService, secretStorageService, logService, activityService, instantiationService, commandService, notificationService);
 	}
+
+
 }
 
 export class SimpleGlobalActivityActionViewItem extends GlobalActivityActionViewItem {
