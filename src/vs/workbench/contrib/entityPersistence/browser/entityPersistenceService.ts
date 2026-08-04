@@ -84,6 +84,25 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		}
 	}
 
+	private async detectEntityType(targetUri: URI): Promise<EntityType> {
+		if (await this.fileService.exists(URI.joinPath(targetUri, 'job.md'))) return 'job';
+		if (await this.fileService.exists(URI.joinPath(targetUri, 'project.md'))) return 'project';
+		if (await this.fileService.exists(URI.joinPath(targetUri, 'task.md'))) return 'task';
+		if (await this.fileService.exists(URI.joinPath(targetUri, 'agent.md'))) return 'agent';
+		if (await this.fileService.exists(URI.joinPath(targetUri, 'workflow.md'))) return 'workflow';
+		if (await this.fileService.exists(URI.joinPath(targetUri, 'workspace.md'))) return 'workspace';
+
+		const folderName = targetUri.path.split('/').filter(Boolean).pop()?.toLowerCase() || '';
+		if (folderName.includes('job')) return 'job';
+		if (folderName.includes('project')) return 'project';
+		if (folderName.includes('task')) return 'task';
+		if (folderName.includes('agent')) return 'agent';
+		if (folderName.includes('workflow')) return 'workflow';
+		if (folderName.includes('workspace')) return 'workspace';
+
+		return 'workspace';
+	}
+
 	async inspectEntityHealth(uri: URI | string): Promise<{ isMissing: boolean; missingReason?: string; snapshot?: IBaseEntitySnapshot }> {
 		const key = this.normalizeUriString(uri);
 		const targetUri = URI.parse(key);
@@ -99,7 +118,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 				};
 			}
 
-			const type: EntityType = snapshot ? snapshot.entityType : 'workspace';
+			const type: EntityType = snapshot ? snapshot.entityType : await this.detectEntityType(targetUri);
 			const mainMdFileName = type === 'workspace' ? 'workspace.md' : `${type}.md`;
 			const mainMdUri = URI.joinPath(targetUri, mainMdFileName);
 			const instructionUri = URI.joinPath(targetUri, 'instruction.md');
@@ -138,13 +157,14 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			await this.writeEntity4MDFiles(snapshot, targetFolderUri, false);
 		} else {
 			const folderName = targetFolderUri.path.split('/').filter(Boolean).pop() || 'Entity';
+			const detectedType = await this.detectEntityType(targetFolderUri);
 			const defaultSnapshot: IBaseEntitySnapshot = {
 				entityUri: key,
 				entityName: folderName,
-				entityType: 'workspace',
+				entityType: detectedType,
 				ownerAccount: 'aimery.wei@gmail.com',
 				createdAt: this.getFormattedDateTime(),
-				description: `Workspace ${folderName}`
+				description: `${detectedType} ${folderName}`
 			};
 			await this.writeEntity4MDFiles(defaultSnapshot, targetFolderUri, false);
 			await this.saveSnapshot(defaultSnapshot);

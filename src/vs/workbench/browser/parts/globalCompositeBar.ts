@@ -33,6 +33,8 @@ import { ILogService } from '../../../platform/log/common/log.js';
 import { IProductService } from '../../../platform/product/common/productService.js';
 import { ISecretStorageService } from '../../../platform/secrets/common/secrets.js';
 import { AuthenticationSessionInfo, getCurrentAuthenticationSessionInfo } from '../../services/authentication/browser/authenticationService.js';
+import { AccountManagementDialog } from '../../contrib/accountManagement/browser/accountManagementDialog.js';
+
 import { AuthenticationSessionAccount, IAuthenticationService, INTERNAL_AUTH_PROVIDER_PREFIX } from '../../services/authentication/common/authentication.js';
 import { IWorkbenchEnvironmentService } from '../../services/environment/common/environmentService.js';
 import { IHoverService } from '../../../platform/hover/browser/hover.js';
@@ -289,9 +291,10 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 		@ISecretStorageService private readonly secretStorageService: ISecretStorageService,
 		@ILogService private readonly logService: ILogService,
 		@IActivityService activityService: IActivityService,
-		@IInstantiationService instantiationService: IInstantiationService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@ICommandService private readonly commandService: ICommandService
 	) {
+
 		const action = instantiationService.createInstance(CompositeBarAction, {
 			id: ACCOUNTS_ACTIVITY_ID,
 			name: localize('accounts', "Accounts"),
@@ -404,7 +407,10 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 				id: 'anyagent.signInOrLogIn',
 				label: localize('signInOrLogIn', "Sign In / Log In..."),
 				enabled: true,
-				run: () => this.commandService.executeCommand('workbench.action.anyagent.openAccountPanel')
+				run: async () => {
+					const dialog = this.instantiationService.createInstance(AccountManagementDialog);
+					await dialog.show('Account');
+				}
 			}));
 		}
 
@@ -412,8 +418,12 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 			id: 'anyagent.accountPreferences',
 			label: localize('accountPreferences', "Account & Security Preferences..."),
 			enabled: true,
-			run: () => this.commandService.executeCommand('workbench.action.anyagent.openAccountPanel')
+			run: async () => {
+				const dialog = this.instantiationService.createInstance(AccountManagementDialog);
+				await dialog.show('Account');
+			}
 		}));
+
 
 		if (isLoggedIn && menus.length > 0) {
 			menus.push(new Separator());

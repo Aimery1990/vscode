@@ -31,16 +31,14 @@ export class OpenAccountPanelAction extends Action2 {
 	}
 }
 
+// Register action globally at module load time
+registerAction2(OpenAccountPanelAction);
+
 export class AccountManagementContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.accountManagement';
 
 	constructor() {
 		super();
-		this._registerActions();
-	}
-
-	private _registerActions(): void {
-		this._register(registerAction2(OpenAccountPanelAction));
 	}
 }
 

@@ -31,7 +31,7 @@ export class AccountManagementDialog extends Disposable {
 
 	public async show(initialTab: AccountPanelTab = 'Account'): Promise<void> {
 		this.activeTab = initialTab;
-		this.createModal();
+		await this.createModal();
 	}
 
 	private async createModal(): Promise<void> {
@@ -126,7 +126,7 @@ export class AccountManagementDialog extends Disposable {
 		`;
 		closeBtn.onmouseenter = () => { closeBtn.style.color = '#ffffff'; closeBtn.style.background = '#2a2a2a'; };
 		closeBtn.onmouseleave = () => { closeBtn.style.color = '#888888'; closeBtn.style.background = 'transparent'; };
-		closeBtn.onclick = () => overlay.remove();
+		closeBtn.onclick = () => this.close();
 
 		header.appendChild(title);
 		header.appendChild(closeBtn);
@@ -224,11 +224,12 @@ export class AccountManagementDialog extends Disposable {
 		// Close on clicking outside modal
 		overlay.onclick = (e) => {
 			if (e.target === overlay) {
-				overlay.remove();
+				this.close();
 			}
 		};
 
 		targetDocument.body.appendChild(overlay);
+		this.container = overlay;
 	}
 
 	private async renderContent(container: HTMLElement, targetDocument: Document): Promise<void> {

@@ -734,7 +734,24 @@ export class MainWorkspaceViewPane extends ViewPane {
 				badge.title = `Entity Type: ${badgeText}`;
 			}
 
-			if (isDirectory) {
+			if (child.isMissing) {
+				const fixBtn = append(childRight, $('span' + ThemeIcon.asCSSSelector(Codicon.tools)));
+				fixBtn.style.color = '#fbbf24';
+				fixBtn.style.fontSize = '11px';
+				fixBtn.style.opacity = '0.9';
+				fixBtn.style.marginLeft = '4px';
+				fixBtn.title = 'Repair entity standard files from snapshot';
+				fixBtn.onclick = async (e) => {
+					e.stopPropagation();
+					try {
+						await this.workspacesExplorerService.repairEntityFromSnapshot(child.uri);
+						this.notificationService.info(`Repaired standard files for '${child.name}'`);
+						this.renderContent();
+					} catch (err) {
+						this.notificationService.error(`Failed to repair: ${err}`);
+					}
+				};
+			} else if (isDirectory) {
 				const createSubBtn = append(childRight, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
 				createSubBtn.style.opacity = '0.75';
 				createSubBtn.style.fontSize = '11.5px';

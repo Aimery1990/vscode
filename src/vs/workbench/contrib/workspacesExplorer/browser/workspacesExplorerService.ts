@@ -318,11 +318,21 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						childType = 'workspace';
 					}
 
+					let isMissing = false;
+					let missingReason: string | undefined;
+					if (childType !== 'folder') {
+						const health = await this.entityPersistenceService.inspectEntityHealth(childUri);
+						isMissing = health.isMissing;
+						missingReason = health.missingReason;
+					}
+
 					childrenItems.push({
 						id: childUri.toString(),
 						name: child.name,
 						type: childType,
-						uri: childUri
+						uri: childUri,
+						isMissing,
+						missingReason
 					});
 				} else {
 					if (child.name.endsWith('.md') || child.name.endsWith('.json') || child.name.endsWith('.sh') || child.name.endsWith('.py')) {

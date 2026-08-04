@@ -19,6 +19,7 @@ export interface IWorkspaceItem {
 	jobCount?: number;
 	isMissing?: boolean;
 	missingReason?: string;
+	hasDamagedDescendant?: boolean;
 	detectedType?: ResourceType;
 }
 
@@ -29,6 +30,9 @@ export interface IWorkspaceChildItem {
 	name: string;
 	uri: URI;
 	type: ResourceType;
+	isMissing?: boolean;
+	missingReason?: string;
+	hasDamagedDescendant?: boolean;
 	children?: IWorkspaceChildItem[];
 }
 

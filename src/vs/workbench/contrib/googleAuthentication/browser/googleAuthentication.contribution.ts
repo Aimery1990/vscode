@@ -62,17 +62,15 @@ export class GoogleSignOutAction extends Action2 {
 	}
 }
 
+// Register actions globally at module load time
+registerAction2(GoogleSignInAction);
+registerAction2(GoogleSignOutAction);
+
 export class GoogleAuthenticationContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.googleAuthentication';
 
 	constructor() {
 		super();
-		this._registerActions();
-	}
-
-	private _registerActions(): void {
-		this._register(registerAction2(GoogleSignInAction));
-		this._register(registerAction2(GoogleSignOutAction));
 	}
 }
 
