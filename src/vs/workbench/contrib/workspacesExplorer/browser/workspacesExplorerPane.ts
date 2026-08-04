@@ -729,7 +729,29 @@ export class MainWorkspaceViewPane extends ViewPane {
 				badge.title = `Entity Type: ${badgeText}`;
 			}
 
-			if (child.isMissing) {
+			// Status Ring (Health / Cascading Error Indicator)
+			if (isDirectory) {
+				const childStatusRing = append(childRight, $('.status-ring'));
+				const isChildCorrupted = child.isMissing || child.hasDamagedDescendant;
+				childStatusRing.style.display = 'inline-block';
+				childStatusRing.style.width = '6.5px';
+				childStatusRing.style.height = '6.5px';
+				childStatusRing.style.borderRadius = '50%';
+				childStatusRing.style.flexShrink = '0';
+				childStatusRing.style.marginLeft = '2px';
+
+				if (isChildCorrupted) {
+					childStatusRing.style.background = '#ef4444';
+					childStatusRing.style.boxShadow = '0 0 5px rgba(239, 68, 68, 0.7)';
+					childStatusRing.title = child.isMissing ? (child.missingReason || 'Missing/damaged entity files') : 'Warning: Inner sub-entities are damaged!';
+				} else {
+					childStatusRing.style.background = '#22c55e';
+					childStatusRing.style.opacity = '0.85';
+					childStatusRing.title = 'Status: Healthy';
+				}
+			}
+
+			if (child.isMissing || child.hasDamagedDescendant) {
 				const fixBtn = append(childRight, $('span' + ThemeIcon.asCSSSelector(Codicon.tools)));
 				fixBtn.style.color = '#fbbf24';
 				fixBtn.style.fontSize = '11px';
@@ -746,7 +768,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 						this.notificationService.error(`Failed to repair: ${err}`);
 					}
 				};
-			} else if (isDirectory) {
+			}
+
+			if (!child.isMissing && isDirectory) {
 				const createSubBtn = append(childRight, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
 				createSubBtn.style.opacity = '0.75';
 				createSubBtn.style.fontSize = '11.5px';

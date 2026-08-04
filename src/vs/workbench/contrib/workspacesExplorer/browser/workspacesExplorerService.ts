@@ -196,6 +196,12 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			// ignore
 		}
 
+		for (const item of resultItems) {
+			if (!item.isMissing) {
+				item.hasDamagedDescendant = await this.checkHasDamagedDescendant(item.uri);
+			}
+		}
+
 		return resultItems;
 	}
 
@@ -320,10 +326,15 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 					let isMissing = false;
 					let missingReason: string | undefined;
+					let hasDamagedDescendant = false;
 					if (childType !== 'folder') {
 						const health = await this.entityPersistenceService.inspectEntityHealth(childUri);
 						isMissing = health.isMissing;
 						missingReason = health.missingReason;
+					}
+
+					if (!isMissing) {
+						hasDamagedDescendant = await this.checkHasDamagedDescendant(childUri);
 					}
 
 					childrenItems.push({
@@ -332,7 +343,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						type: childType,
 						uri: childUri,
 						isMissing,
-						missingReason
+						missingReason,
+						hasDamagedDescendant
 					});
 				} else {
 					if (child.name.endsWith('.md') || child.name.endsWith('.json') || child.name.endsWith('.sh') || child.name.endsWith('.py')) {
@@ -350,6 +362,41 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		} catch {
 			return [];
 		}
+	}
+
+	private async checkHasDamagedDescendant(dirUri: URI): Promise<boolean> {
+		try {
+			const stat = await this.fileService.resolve(dirUri);
+			if (!stat.children) return false;
+			for (const child of stat.children) {
+				if (child.isDirectory && !child.name.startsWith('.')) {
+					const childUri = child.resource;
+					let childType: ResourceType = 'folder';
+					const hasJobMd = await this.fileService.exists(URI.joinPath(childUri, 'job.md'));
+					const hasProjectMd = await this.fileService.exists(URI.joinPath(childUri, 'project.md'));
+					const hasTaskMd = await this.fileService.exists(URI.joinPath(childUri, 'task.md'));
+					const hasAgentMd = await this.fileService.exists(URI.joinPath(childUri, 'agent.md'));
+					const hasWorkflowMd = await this.fileService.exists(URI.joinPath(childUri, 'workflow.md'));
+					const hasWorkspaceMd = await this.fileService.exists(URI.joinPath(childUri, 'workspace.md'));
+
+					if (hasJobMd || child.name.toLowerCase().includes('job')) childType = 'job';
+					else if (hasProjectMd) childType = 'project';
+					else if (hasTaskMd) childType = 'task';
+					else if (hasAgentMd) childType = 'agent';
+					else if (hasWorkflowMd) childType = 'workflow';
+					else if (hasWorkspaceMd) childType = 'workspace';
+
+					if (childType !== 'folder') {
+						const health = await this.entityPersistenceService.inspectEntityHealth(childUri);
+						if (health.isMissing) return true;
+					}
+					if (await this.checkHasDamagedDescendant(childUri)) return true;
+				}
+			}
+		} catch {
+			// ignore
+		}
+		return false;
 	}
 
 	async createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult> {

@@ -214,7 +214,6 @@ export class AccountManagementDialog extends Disposable {
 		};
 
 		renderNav();
-		await this.renderContent(contentArea, targetDocument);
 
 		body.appendChild(sidebar);
 		body.appendChild(contentArea);
@@ -228,8 +227,16 @@ export class AccountManagementDialog extends Disposable {
 			}
 		};
 
+		// Synchronously append overlay to main document DOM first!
 		targetDocument.body.appendChild(overlay);
 		this.container = overlay;
+
+		// Asynchronously populate content safely
+		try {
+			await this.renderContent(contentArea, targetDocument);
+		} catch (err) {
+			console.error('Failed to populate Account Panel content:', err);
+		}
 	}
 
 	private async renderContent(container: HTMLElement, targetDocument: Document): Promise<void> {
@@ -259,9 +266,14 @@ export class AccountManagementDialog extends Disposable {
 		container.appendChild(mainTitle);
 		container.appendChild(mainDesc);
 
-		// Check Active Sessions
-		const googleSessions = await this.authenticationService.getSessions('google');
-		const isGoogleConnected = googleSessions.length > 0;
+		// Check Active Sessions safely
+		let googleSessions: readonly any[] = [];
+		try {
+			googleSessions = await this.authenticationService.getSessions('google');
+		} catch (e) {
+			// ignore auth service initialization error
+		}
+		const isGoogleConnected = googleSessions && googleSessions.length > 0;
 		const googleAccount = isGoogleConnected ? googleSessions[0].account.label : undefined;
 
 		// Plan Card (Antigravity Style)
