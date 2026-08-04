@@ -417,13 +417,44 @@ export class MainWorkspaceViewPane extends ViewPane {
 					badge.title = `Entity Type: ${badgeText}`;
 				}
 
+				// Status Ring (Health / Cascading Error Indicator)
+				const statusRing = append(headerRight, $('.status-ring'));
+				const isCorrupted = ws.isMissing || ws.hasDamagedDescendant;
+				statusRing.style.display = 'inline-block';
+				statusRing.style.width = '7px';
+				statusRing.style.height = '7px';
+				statusRing.style.borderRadius = '50%';
+				statusRing.style.flexShrink = '0';
+				statusRing.style.marginLeft = '2px';
+
+				if (isCorrupted) {
+					statusRing.style.background = '#ef4444';
+					statusRing.style.boxShadow = '0 0 5px rgba(239, 68, 68, 0.7)';
+					statusRing.title = ws.isMissing ? (ws.missingReason || 'Missing/damaged entity files on disk') : 'Warning: Inner sub-entities or files are damaged!';
+				} else {
+					statusRing.style.background = '#22c55e';
+					statusRing.style.opacity = '0.85';
+					statusRing.title = 'Status: Healthy';
+				}
+
 				// Header Actions
 				const headerActions = append(headerRight, $('.header-actions'));
 				headerActions.style.display = 'flex';
 				headerActions.style.alignItems = 'center';
 				headerActions.style.gap = '6px';
 
-				if (ws.isMissing) {
+				if (!ws.isMissing) {
+					const createBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
+					createBtn.style.opacity = '0.8';
+					createBtn.style.fontSize = '13px';
+					createBtn.title = `New Entity in '${ws.name}'...`;
+					createBtn.onclick = (e) => {
+						e.stopPropagation();
+						this.showCreateResourceModal(ws.uri, ws.name);
+					};
+				}
+
+				if (isCorrupted) {
 					// Repair 4-MD button for workspace / entity folder with missing files
 					const fixBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.tools)));
 					fixBtn.style.color = '#fbbf24';
@@ -440,66 +471,30 @@ export class MainWorkspaceViewPane extends ViewPane {
 							this.notificationService.error(`Failed to repair: ${err}`);
 						}
 					};
-
-					const removeBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
-					removeBtn.style.opacity = '0.65';
-					removeBtn.style.fontSize = '12px';
-					removeBtn.title = 'Remove entry from explorer';
-					removeBtn.onclick = async (e) => {
-						e.stopPropagation();
-						await this.workspacesExplorerService.removeWorkspace(ws.uri);
-						this.notificationService.info(`Removed missing entry '${ws.name}'.`);
-						this.renderContent();
-					};
-				} else {
-					const createBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
-					createBtn.style.opacity = '0.8';
-					createBtn.style.fontSize = '13px';
-					createBtn.title = `New Entity in '${ws.name}'...`;
-					createBtn.onclick = (e) => {
-						e.stopPropagation();
-						this.showCreateResourceModal(ws.uri, ws.name);
-					};
-
-					const openBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.goToFile)));
-					openBtn.style.opacity = '0.7';
-					openBtn.style.fontSize = '12px';
-					openBtn.title = 'Open workspace in window';
-					openBtn.onclick = async (e) => {
-						e.stopPropagation();
-						await this.commandService.executeCommand('vscode.openFolder', ws.uri, { forceNewWindow: false });
-					};
-
-					const removeBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
-					removeBtn.style.opacity = '0.5';
-					removeBtn.style.fontSize = '12px';
-					removeBtn.title = 'Remove entry from explorer';
-					removeBtn.onclick = async (e) => {
-						e.stopPropagation();
-						await this.workspacesExplorerService.removeWorkspace(ws.uri);
-						this.notificationService.info(`Removed '${ws.name}' from explorer.`);
-						this.renderContent();
-					};
 				}
+
+				const removeBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+				removeBtn.style.opacity = ws.isMissing ? '0.65' : '0.5';
+				removeBtn.style.fontSize = '12px';
+				removeBtn.title = 'Remove entry from explorer';
+				removeBtn.onclick = async (e) => {
+					e.stopPropagation();
+					await this.workspacesExplorerService.removeWorkspace(ws.uri);
+					this.notificationService.info(`Removed '${ws.name}' from explorer.`);
+					this.renderContent();
+				};
 
 				// Single Click: Select workspace card and toggle expansion in-place
 				cardHeader.onclick = () => {
 					this.selectedWorkspaceId = canonicalWsId;
-					this.selectedItemId = undefined;
-					if (!this.expandedWorkspaces.has(canonicalWsId)) {
-						this.expandedWorkspaces.add(canonicalWsId);
-					} else {
+					this.selectedItemId = canonicalWsId;
+
+					if (this.expandedWorkspaces.has(canonicalWsId)) {
 						this.expandedWorkspaces.delete(canonicalWsId);
+					} else {
+						this.expandedWorkspaces.add(canonicalWsId);
 					}
 					this.renderContent();
-				};
-
-				// Open workspace in window on double click
-				cardHeader.ondblclick = async (e) => {
-					e.stopPropagation();
-					if (!ws.isMissing) {
-						await this.commandService.executeCommand('vscode.openFolder', ws.uri, { forceNewWindow: false });
-					}
 				};
 
 				// Expanded Body: Inner Scrollable Children Container
