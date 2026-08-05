@@ -22,6 +22,7 @@ export interface IBaseEntitySnapshot {
 	entityUri: string;
 	entityName: string;
 	entityType: EntityType;
+	entityCode?: string;
 	ownerAccount?: string;
 	createdAt?: string;
 	description?: string;

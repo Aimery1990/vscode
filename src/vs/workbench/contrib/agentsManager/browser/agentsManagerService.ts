@@ -231,10 +231,14 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 		agent.updatedAt = Date.now();
 		await this.updateAgent(agent);
 
-		// Append to work_log.md if folderPath exists
+		// Append to work_log.md inside .agents system metadata dir if folderPath exists
 		if (agent.folderPath) {
 			try {
-				const workLogUri = URI.file(`${agent.folderPath}/work_log.md`);
+				let workLogUri = URI.file(`${agent.folderPath}/.agents/work_log.md`);
+				if (!await this.fileService.exists(workLogUri)) {
+					workLogUri = URI.file(`${agent.folderPath}/work_log.md`);
+				}
+
 				if (await this.fileService.exists(workLogUri)) {
 					const dateFormatted = new Date().toISOString().slice(0, 19).replace('T', ' ');
 					const logEntry = `\n## ${dateFormatted} - Task Assigned\n\n### Task Title\n\n${taskTitle}\n\n### Task Details\n\n${taskDescription || 'No details provided'}\n\n### Status\n\nTask dispatched to Agent '${agent.name}'. Processing...\n`;

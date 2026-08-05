@@ -14,6 +14,7 @@ export interface IWorkspaceItem {
 	id: string;
 	name: string;
 	uri: URI;
+	code?: string;
 	isCurrent?: boolean;
 	isSaved?: boolean;
 	jobCount?: number;
@@ -30,6 +31,7 @@ export interface IWorkspaceChildItem {
 	name: string;
 	uri: URI;
 	type: ResourceType;
+	code?: string;
 	isMissing?: boolean;
 	missingReason?: string;
 	hasDamagedDescendant?: boolean;
@@ -42,6 +44,7 @@ export interface ICreateResourceOptions {
 	type: ResourceType;
 	name: string;
 	description?: string;
+	code?: string;
 	parentEntityUri?: URI;
 }
 

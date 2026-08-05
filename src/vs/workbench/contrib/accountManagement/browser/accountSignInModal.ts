@@ -5,8 +5,11 @@
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { getActiveDocument } from '../../../../base/browser/dom.js';
 import { mainWindow } from '../../../../base/browser/window.js';
+import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
+
+const ttPolicy = createTrustedTypesPolicy('accountSignInModal', { createHTML: value => value });
 
 export class AccountSignInModal extends Disposable {
 	private container: HTMLElement | undefined;
@@ -27,6 +30,14 @@ export class AccountSignInModal extends Disposable {
 
 	public async show(): Promise<void> {
 		this.createModal();
+	}
+
+	private setElementHTML(element: HTMLElement, html: string): void {
+		if (ttPolicy) {
+			element.innerHTML = ttPolicy.createHTML(html) as unknown as string;
+		} else {
+			element.innerHTML = html;
+		}
 	}
 
 	private createModal(): void {
@@ -77,7 +88,7 @@ export class AccountSignInModal extends Disposable {
 
 		// Close Button
 		const closeBtn = targetDocument.createElement('button');
-		closeBtn.innerHTML = '✕';
+		this.setElementHTML(closeBtn, '✕');
 		closeBtn.style.cssText = `
 			position: absolute;
 			top: 18px;
@@ -109,12 +120,12 @@ export class AccountSignInModal extends Disposable {
 			margin-bottom: 20px;
 			box-shadow: 0 8px 24px rgba(59, 130, 246, 0.3);
 		`;
-		iconContainer.innerHTML = `
+		this.setElementHTML(iconContainer, `
 			<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
 				<path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"/>
 				<circle cx="12" cy="12" r="3" fill="#ffffff"/>
 			</svg>
-		`;
+		`);
 		modal.appendChild(iconContainer);
 
 		// Title
@@ -184,7 +195,7 @@ export class AccountSignInModal extends Disposable {
 			`
 				<svg width="18" height="18" viewBox="0 0 23 23">
 					<path fill="#f35325" d="M1 1h10v10H1z"/>
-					<path fill="#81bc06" d="M12 1h10v10H1z"/>
+					<path fill="#81bc06" d="M12 1h10v10H12z"/>
 					<path fill="#05a6f0" d="M1 12h10v10H1z"/>
 					<path fill="#ffba08" d="M12 12h10v10H1z"/>
 				</svg>
@@ -223,9 +234,9 @@ export class AccountSignInModal extends Disposable {
 			line-height: 1.5;
 			padding: 0 10px;
 		`;
-		footer.innerHTML = `
+		this.setElementHTML(footer, `
 			By continuing, you agree to Any Agent's <span style="color:#a1a1aa;text-decoration:underline;cursor:pointer;">Terms</span> and <span style="color:#a1a1aa;text-decoration:underline;cursor:pointer;">Privacy Statement</span>. Any Agent may process data to improve services.
-		`;
+		`);
 		modal.appendChild(footer);
 
 		overlay.appendChild(modal);
@@ -239,9 +250,6 @@ export class AccountSignInModal extends Disposable {
 
 		// Synchronously append overlay to DOM
 		targetDocument.body.appendChild(overlay);
-		if (window.document && window.document.body && window.document !== targetDocument) {
-			window.document.body.appendChild(overlay.cloneNode(true));
-		}
 		this.container = overlay;
 	}
 
@@ -271,7 +279,7 @@ export class AccountSignInModal extends Disposable {
 			transition: all 0.15s ease;
 		`;
 
-		btn.innerHTML = `${iconSvgHtml} <span>${label}</span>`;
+		this.setElementHTML(btn, `${iconSvgHtml} <span>${label}</span>`);
 
 		btn.onmouseenter = () => {
 			btn.style.borderColor = '#52525b';

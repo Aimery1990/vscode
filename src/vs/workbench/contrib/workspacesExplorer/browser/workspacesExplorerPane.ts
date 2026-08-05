@@ -782,8 +782,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 					} else {
 						this.expandedWorkspaces.delete(canonicalChildId);
 					}
-					// Also check if directory contains a primary md file like instruction.md / job.md / workspace.md
-					const possibleMds = ['instruction.md', 'job.md', 'workspace.md', 'project.md', 'agent.md', 'README.md'];
+					// Also check if directory contains a primary md file like .agents/job.md / instruction.md / workspace.md
+					const possibleMds = [
+						'.agents/job.md', '.agents/task.md', '.agents/project.md', '.agents/agent.md', '.agents/workflow.md', '.agents/workspace.md', '.agents/instruction.md', '.agents/README.md',
+						'instruction.md', 'job.md', 'workspace.md', 'project.md', 'agent.md', 'README.md'
+					];
 					for (const mdName of possibleMds) {
 						const mdUri = URI.joinPath(child.uri, mdName);
 						if (await this.fileService.exists(mdUri)) {

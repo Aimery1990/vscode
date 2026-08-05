@@ -5,11 +5,14 @@
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { getActiveDocument } from '../../../../base/browser/dom.js';
 import { mainWindow } from '../../../../base/browser/window.js';
+import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 
 export type AccountPanelTab = 'Account' | 'General' | 'Permissions' | 'Appearance' | 'Models' | 'Customizations';
+
+const ttPolicy = createTrustedTypesPolicy('accountManagementDialog', { createHTML: value => value });
 
 export class AccountManagementDialog extends Disposable {
 	private container: HTMLElement | undefined;
@@ -33,6 +36,14 @@ export class AccountManagementDialog extends Disposable {
 	public async show(initialTab: AccountPanelTab = 'Account'): Promise<void> {
 		this.activeTab = initialTab;
 		await this.createModal();
+	}
+
+	private setElementHTML(element: HTMLElement, html: string): void {
+		if (ttPolicy) {
+			element.innerHTML = ttPolicy.createHTML(html) as unknown as string;
+		} else {
+			element.innerHTML = html;
+		}
 	}
 
 	private async createModal(): Promise<void> {
@@ -68,38 +79,44 @@ export class AccountManagementDialog extends Disposable {
 		if (!targetDocument.getElementById('anyagent-modal-styles')) {
 			const style = targetDocument.createElement('style');
 			style.id = 'anyagent-modal-styles';
-			style.textContent = `
+			this.setElementHTML(style, `
 				@keyframes anyagentFadeIn {
-					from { opacity: 0; transform: scale(0.98); }
-					to { opacity: 1; transform: scale(1); }
+					from { opacity: 0; }
+					to { opacity: 1; }
 				}
-			`;
+				@keyframes anyagentSlideUp {
+					from { transform: translateY(16px); opacity: 0; }
+					to { transform: translateY(0); opacity: 1; }
+				}
+			`);
 			targetDocument.head.appendChild(style);
 		}
 
-		// Main Panel Container (Antigravity IDE Layout)
-		const modal = targetDocument.createElement('div');
-		modal.className = 'anyagent-account-modal';
-		modal.style.cssText = `
-			width: 900px;
-			height: 620px;
-			background: #141414;
-			border: 1px solid #2d2d2d;
+		// Dialog Container (Settings Panel layout matching AnyAgent Theme)
+		const dialog = targetDocument.createElement('div');
+		dialog.className = 'anyagent-account-dialog';
+		dialog.style.cssText = `
+			width: 960px;
+			height: 640px;
+			background: #1e1e1e;
+			border: 1px solid #2a2a2a;
 			border-radius: 12px;
-			box-shadow: 0 24px 64px rgba(0, 0, 0, 0.7);
+			box-shadow: 0 20px 40px rgba(0, 0, 0, 0.6);
 			display: flex;
 			flex-direction: column;
 			overflow: hidden;
-			color: #e1e1e1;
+			color: #cccccc;
 			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+			animation: anyagentSlideUp 0.2s ease-out;
 		`;
 
 		// Header Bar
 		const header = targetDocument.createElement('div');
 		header.style.cssText = `
-			padding: 14px 24px;
-			background: #1a1a1a;
+			height: 52px;
+			background: #181818;
 			border-bottom: 1px solid #2a2a2a;
+			padding: 0 20px;
 			display: flex;
 			align-items: center;
 			justify-content: space-between;
@@ -112,10 +129,10 @@ export class AccountManagementDialog extends Disposable {
 			color: #888888;
 			letter-spacing: 0.3px;
 		`;
-		title.innerHTML = `Settings <span style="color:#555555;margin:0 6px;">—</span> <span style="color:#ffffff;" id="anyagent-panel-tab-title">${this.activeTab}</span>`;
+		this.setElementHTML(title, `Settings <span style="color:#555555;margin:0 6px;">—</span> <span style="color:#ffffff;" id="anyagent-panel-tab-title">${this.activeTab}</span>`);
 
 		const closeBtn = targetDocument.createElement('button');
-		closeBtn.innerHTML = '✕';
+		this.setElementHTML(closeBtn, '✕');
 		closeBtn.style.cssText = `
 			background: transparent;
 			border: none;
@@ -132,39 +149,44 @@ export class AccountManagementDialog extends Disposable {
 
 		header.appendChild(title);
 		header.appendChild(closeBtn);
-		modal.appendChild(header);
+		dialog.appendChild(header);
 
-		// Split Body Area
-		const body = targetDocument.createElement('div');
-		body.style.cssText = `
+		// Layout: Sidebar (Left) + Content (Right)
+		const mainBody = targetDocument.createElement('div');
+		mainBody.style.cssText = `
 			flex: 1;
 			display: flex;
 			overflow: hidden;
 		`;
 
-		// Left Navigation Sidebar (Antigravity Style)
 		const sidebar = targetDocument.createElement('div');
 		sidebar.style.cssText = `
-			width: 210px;
-			background: #111111;
-			border-right: 1px solid #262626;
-			padding: 16px 10px;
+			width: 240px;
+			background: #181818;
+			border-right: 1px solid #2a2a2a;
+			padding: 16px 12px;
+			overflow-y: auto;
 			display: flex;
 			flex-direction: column;
 			gap: 4px;
-			overflow-y: auto;
 		`;
 
-		const navGroups: { section: string; items: { id: AccountPanelTab; label: string }[] }[] = [
+		// Sidebar Navigation Configuration
+		const navGroups = [
 			{
-				section: 'Settings',
+				section: 'User & System',
 				items: [
+					{ id: 'Account', label: 'Account Profile' },
 					{ id: 'General', label: 'General' },
-					{ id: 'Account', label: 'Account' },
-					{ id: 'Permissions', label: 'Permissions' },
-					{ id: 'Appearance', label: 'Appearance' },
-					{ id: 'Models', label: 'Models' },
-					{ id: 'Customizations', label: 'Customizations' }
+					{ id: 'Permissions', label: 'Workspace Permissions' }
+				]
+			},
+			{
+				section: 'Environment',
+				items: [
+					{ id: 'Appearance', label: 'Appearance & Theme' },
+					{ id: 'Models', label: 'AI LLM Providers' },
+					{ id: 'Customizations', label: 'Agent Customizations' }
 				]
 			}
 		];
@@ -178,7 +200,7 @@ export class AccountManagementDialog extends Disposable {
 		`;
 
 		const renderNav = () => {
-			sidebar.innerHTML = '';
+			sidebar.textContent = '';
 			navGroups.forEach(group => {
 				const groupTitle = targetDocument.createElement('div');
 				groupTitle.style.cssText = `font-size: 11px; text-transform: uppercase; color: #555555; font-weight: 600; padding: 6px 12px; margin-top: 4px;`;
@@ -189,26 +211,39 @@ export class AccountManagementDialog extends Disposable {
 					const btn = targetDocument.createElement('button');
 					const isActive = this.activeTab === item.id;
 					btn.style.cssText = `
-						display: block;
 						width: 100%;
-						padding: 8px 12px;
+						text-align: left;
+						background: ${isActive ? '#2563eb' : 'transparent'};
+						color: ${isActive ? '#ffffff' : '#aaaaaa'};
 						border: none;
 						border-radius: 6px;
-						background: ${isActive ? '#242424' : 'transparent'};
-						color: ${isActive ? '#ffffff' : '#999999'};
-						font-weight: ${isActive ? '600' : '400'};
+						padding: 8px 12px;
 						font-size: 13px;
+						font-weight: ${isActive ? '600' : '500'};
 						cursor: pointer;
-						text-align: left;
 						transition: all 0.15s ease;
 					`;
 					btn.textContent = item.label;
-					btn.onclick = () => {
-						this.activeTab = item.id;
-						const tabTitleEl = targetDocument.getElementById('anyagent-panel-tab-title');
-						if (tabTitleEl) tabTitleEl.textContent = item.label;
+					btn.onmouseenter = () => {
+						if (!isActive) {
+							btn.style.background = '#222222';
+							btn.style.color = '#ffffff';
+						}
+					};
+					btn.onmouseleave = () => {
+						if (!isActive) {
+							btn.style.background = 'transparent';
+							btn.style.color = '#aaaaaa';
+						}
+					};
+					btn.onclick = async () => {
+						this.activeTab = item.id as AccountPanelTab;
+						const tabTitleSpan = targetDocument.getElementById('anyagent-panel-tab-title');
+						if (tabTitleSpan) {
+							tabTitleSpan.textContent = this.activeTab;
+						}
 						renderNav();
-						this.renderContent(contentArea, targetDocument);
+						await this.renderContent(contentArea, targetDocument);
 					};
 					sidebar.appendChild(btn);
 				});
@@ -216,20 +251,12 @@ export class AccountManagementDialog extends Disposable {
 		};
 
 		renderNav();
+		mainBody.appendChild(sidebar);
+		mainBody.appendChild(contentArea);
+		dialog.appendChild(mainBody);
+		overlay.appendChild(dialog);
 
-		body.appendChild(sidebar);
-		body.appendChild(contentArea);
-		modal.appendChild(body);
-		overlay.appendChild(modal);
-
-		// Close on clicking outside modal
-		overlay.onclick = (e) => {
-			if (e.target === overlay) {
-				this.close();
-			}
-		};
-
-		// Synchronously append overlay to main document DOM first!
+		// Synchronously append to target document body
 		targetDocument.body.appendChild(overlay);
 		this.container = overlay;
 
@@ -242,7 +269,7 @@ export class AccountManagementDialog extends Disposable {
 	}
 
 	private async renderContent(container: HTMLElement, targetDocument: Document): Promise<void> {
-		container.innerHTML = '';
+		container.textContent = '';
 
 		if (this.activeTab === 'Account') {
 			await this.renderAccountTab(container, targetDocument);
@@ -256,29 +283,16 @@ export class AccountManagementDialog extends Disposable {
 	}
 
 	private async renderAccountTab(container: HTMLElement, targetDocument: Document): Promise<void> {
-		// Section Title
-		const mainTitle = targetDocument.createElement('h2');
-		mainTitle.style.cssText = `margin: 0 0 6px 0; font-size: 20px; color: #ffffff; font-weight: 600;`;
-		mainTitle.textContent = 'Account & Authentication';
+		// Header Description
+		const header = targetDocument.createElement('div');
+		header.style.marginBottom = '24px';
+		this.setElementHTML(header, `
+			<h3 style="margin:0 0 8px 0;font-size:18px;font-weight:600;color:#ffffff;">Account Profile</h3>
+			<p style="margin:0;font-size:13px;color:#888888;line-height:1.5;">Manage your Any Agent brand accounts, single sign-on preferences, and subscription details.</p>
+		`);
+		container.appendChild(header);
 
-		const mainDesc = targetDocument.createElement('p');
-		mainDesc.style.cssText = `margin: 0 0 24px 0; font-size: 13px; color: #888888;`;
-		mainDesc.textContent = 'Manage identity providers, active sessions, and account credentials for Any Agent IDE.';
-
-		container.appendChild(mainTitle);
-		container.appendChild(mainDesc);
-
-		// Check Active Sessions safely
-		let googleSessions: readonly any[] = [];
-		try {
-			googleSessions = await this.authenticationService.getSessions('google');
-		} catch (e) {
-			// ignore auth service initialization error
-		}
-		const isGoogleConnected = googleSessions && googleSessions.length > 0;
-		const googleAccount = isGoogleConnected ? googleSessions[0].account.label : undefined;
-
-		// Plan Card (Antigravity Style)
+		// Active Plan (Antigravity Style)
 		const planCard = targetDocument.createElement('div');
 		planCard.style.cssText = `
 			background: #1c1c1c;
@@ -292,10 +306,10 @@ export class AccountManagementDialog extends Disposable {
 		`;
 
 		const planLeft = targetDocument.createElement('div');
-		planLeft.innerHTML = `
+		this.setElementHTML(planLeft, `
 			<div style="font-size:12px;color:#888888;margin-bottom:4px;">Active Plan</div>
 			<div style="font-size:15px;font-weight:600;color:#ffffff;">Any Agent AI Pro Plan</div>
-		`;
+		`);
 
 		const planBtn = targetDocument.createElement('button');
 		planBtn.style.cssText = `
@@ -318,13 +332,28 @@ export class AccountManagementDialog extends Disposable {
 		container.appendChild(planCard);
 
 		// Identity Providers Section
-		const providerTitle = targetDocument.createElement('div');
-		providerTitle.style.cssText = `font-size: 14px; font-weight: 600; color: #ffffff; margin-bottom: 12px;`;
-		providerTitle.textContent = 'Connected Identity Providers';
-		container.appendChild(providerTitle);
+		const sectionTitle = targetDocument.createElement('h4');
+		sectionTitle.style.cssText = `margin: 0 0 16px 0; font-size: 14px; font-weight: 600; color: #ffffff; border-bottom: 1px solid #2a2a2a; padding-bottom: 8px;`;
+		sectionTitle.textContent = 'Connected Identity Providers';
+		container.appendChild(sectionTitle);
 
 		const grid = targetDocument.createElement('div');
-		grid.style.cssText = `display: flex; flex-direction: column; gap: 12px;`;
+		grid.style.cssText = `display: grid; grid-template-columns: 1fr; gap: 16px; margin-bottom: 24px;`;
+		container.appendChild(grid);
+
+		// Check session states
+		let isGoogleConnected = false;
+		let googleAccount = '';
+
+		try {
+			const sessions = await this.authenticationService.getSessions('google');
+			if (sessions && sessions.length > 0) {
+				isGoogleConnected = true;
+				googleAccount = sessions[0].account.label;
+			}
+		} catch (e) {
+			// ignore
+		}
 
 		// Google Provider Card
 		grid.appendChild(this.createProviderCard(
@@ -361,7 +390,7 @@ export class AccountManagementDialog extends Disposable {
 		grid.appendChild(this.createProviderCard(
 			targetDocument,
 			'Microsoft',
-			'Microsoft Azure & Office 365 Enterprise Identity.',
+			'Microsoft Azure AD & Enterprise SSO login.',
 			false,
 			undefined,
 			'Connect Microsoft',
@@ -370,12 +399,23 @@ export class AccountManagementDialog extends Disposable {
 			}
 		));
 
-		container.appendChild(grid);
+		// Apple Provider Card
+		grid.appendChild(this.createProviderCard(
+			targetDocument,
+			'Apple',
+			'Apple Account SSO integration.',
+			false,
+			undefined,
+			'Connect Apple',
+			async () => {
+				this.notificationService.info('Apple Authentication configuration is ready in resources/auth.');
+			}
+		));
 	}
 
 	private createProviderCard(
 		targetDocument: Document,
-		name: string,
+		providerName: string,
 		desc: string,
 		isConnected: boolean,
 		accountLabel: string | undefined,
@@ -384,58 +424,62 @@ export class AccountManagementDialog extends Disposable {
 	): HTMLElement {
 		const card = targetDocument.createElement('div');
 		card.style.cssText = `
-			background: #1c1c1c;
+			background: #181818;
 			border: 1px solid #2a2a2a;
 			border-radius: 8px;
 			padding: 16px 20px;
 			display: flex;
 			align-items: center;
 			justify-content: space-between;
+			transition: all 0.15s ease;
 		`;
 
 		const left = targetDocument.createElement('div');
-		left.style.cssText = `display: flex; flex-direction: column; gap: 4px;`;
+		left.style.cssText = `display:flex; flex-direction:column; gap:4px;`;
 
-		const headerRow = targetDocument.createElement('div');
-		headerRow.style.cssText = `display: flex; align-items: center; gap: 10px;`;
+		const nameContainer = targetDocument.createElement('div');
+		nameContainer.style.cssText = `display:flex; align-items:center; gap:8px;`;
 
-		const nameEl = targetDocument.createElement('span');
-		nameEl.style.cssText = `font-size: 14px; font-weight: 600; color: #ffffff;`;
-		nameEl.textContent = name;
+		const name = targetDocument.createElement('span');
+		name.style.cssText = `font-size: 14px; font-weight: 600; color: #ffffff;`;
+		name.textContent = providerName;
 
 		const badge = targetDocument.createElement('span');
 		badge.style.cssText = `
-			font-size: 11px;
-			padding: 2px 8px;
-			border-radius: 12px;
-			background: ${isConnected ? 'rgba(34, 197, 94, 0.15)' : 'rgba(255, 255, 255, 0.06)'};
-			color: ${isConnected ? '#4ade80' : '#888888'};
-			border: 1px solid ${isConnected ? 'rgba(34, 197, 94, 0.3)' : 'rgba(255, 255, 255, 0.08)'};
+			font-size: 10px;
+			font-weight: 600;
+			padding: 2px 6px;
+			border-radius: 4px;
+			background: ${isConnected ? '#15803d' : '#3f3f46'};
+			color: #ffffff;
 		`;
-		badge.textContent = isConnected ? 'Connected' : 'Not Connected';
+		badge.textContent = isConnected ? 'CONNECTED' : 'NOT CONNECTED';
 
-		headerRow.appendChild(nameEl);
-		headerRow.appendChild(badge);
-		left.appendChild(headerRow);
+		nameContainer.appendChild(name);
+		nameContainer.appendChild(badge);
 
-		const descEl = targetDocument.createElement('span');
-		descEl.style.cssText = `font-size: 12px; color: #888888;`;
-		descEl.textContent = isConnected && accountLabel ? `Active Account: ${accountLabel}` : desc;
-		left.appendChild(descEl);
+		const accountInfo = targetDocument.createElement('div');
+		accountInfo.style.cssText = `font-size: 12px; color: ${isConnected ? '#4ade80' : '#888888'};`;
+		accountInfo.textContent = isConnected && accountLabel ? `Account: ${accountLabel}` : desc;
+
+		left.appendChild(nameContainer);
+		left.appendChild(accountInfo);
 
 		const actionBtn = targetDocument.createElement('button');
 		actionBtn.style.cssText = `
-			background: ${isConnected ? '#2a2a2a' : '#0284c7'};
+			background: ${isConnected ? '#b91c1c' : '#27272a'};
 			color: #ffffff;
-			border: none;
+			border: 1px solid #3f3f46;
 			border-radius: 6px;
-			padding: 8px 16px;
+			padding: 6px 14px;
 			font-size: 12px;
 			font-weight: 500;
 			cursor: pointer;
-			transition: opacity 0.15s ease;
+			transition: all 0.15s ease;
 		`;
 		actionBtn.textContent = actionText;
+		actionBtn.onmouseenter = () => { actionBtn.style.borderColor = '#52525b'; };
+		actionBtn.onmouseleave = () => { actionBtn.style.borderColor = '#3f3f46'; };
 		actionBtn.onclick = onAction;
 
 		card.appendChild(left);
@@ -445,80 +489,59 @@ export class AccountManagementDialog extends Disposable {
 	}
 
 	private async renderPermissionsTab(container: HTMLElement, targetDocument: Document): Promise<void> {
-		const mainTitle = targetDocument.createElement('h2');
-		mainTitle.style.cssText = `margin: 0 0 6px 0; font-size: 20px; color: #ffffff; font-weight: 600;`;
-		mainTitle.textContent = 'Extension Permissions & Security';
-
-		const mainDesc = targetDocument.createElement('p');
-		mainDesc.style.cssText = `margin: 0 0 24px 0; font-size: 13px; color: #888888;`;
-		mainDesc.textContent = 'Configure account access and security credentials for installed IDE extensions.';
-
-		container.appendChild(mainTitle);
-		container.appendChild(mainDesc);
-
-		const card = targetDocument.createElement('div');
-		card.style.cssText = `background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 8px; padding: 20px;`;
-
-		const btn = targetDocument.createElement('button');
-		btn.style.cssText = `background: #0284c7; color: #ffffff; border: none; border-radius: 6px; padding: 10px 18px; font-size: 13px; cursor: pointer;`;
-		btn.textContent = '⚙ Configure Extension Account Access...';
-		btn.onclick = async () => {
-			await this.commandService.executeCommand('workbench.action.manageAccountPreferencesForExtension');
-		};
-
-		card.appendChild(btn);
-		container.appendChild(card);
+		this.setElementHTML(container, `
+			<h3 style="margin:0 0 8px 0;font-size:18px;font-weight:600;color:#ffffff;">Workspace Permissions</h3>
+			<p style="margin:0 0 20px 0;font-size:13px;color:#888888;line-height:1.5;">Configure authorization scopes for local workspaces and directories.</p>
+			
+			<div style="background:#1c1c1c; border:1px solid #2a2a2a; border-radius:8px; padding:16px; margin-bottom:20px;">
+				<div style="font-size:14px; font-weight:600; color:#ffffff; margin-bottom:6px;">Allow Filesystem Access</div>
+				<div style="font-size:12px; color:#888888; line-height:1.4;">Allows Any Agent to read and write files under project folders for task execution.</div>
+				<div style="margin-top:12px; display:flex; gap:8px;">
+					<button style="background:#2563eb; color:#ffffff; border:none; padding:6px 12px; border-radius:4px; font-size:12px; cursor:pointer;">Granted</button>
+				</div>
+			</div>
+			
+			<div style="background:#1c1c1c; border:1px solid #2a2a2a; border-radius:8px; padding:16px;">
+				<div style="font-size:14px; font-weight:600; color:#ffffff; margin-bottom:6px;">Terminal Command Execution</div>
+				<div style="font-size:12px; color:#888888; line-height:1.4;">Allows agents to execute local commands and run server builders.</div>
+				<div style="margin-top:12px; display:flex; gap:8px;">
+					<button style="background:#2563eb; color:#ffffff; border:none; padding:6px 12px; border-radius:4px; font-size:12px; cursor:pointer;">Granted</button>
+				</div>
+			</div>
+		`);
 	}
 
 	private async renderModelsTab(container: HTMLElement, targetDocument: Document): Promise<void> {
-		const mainTitle = targetDocument.createElement('h2');
-		mainTitle.style.cssText = `margin: 0 0 6px 0; font-size: 20px; color: #ffffff; font-weight: 600;`;
-		mainTitle.textContent = 'Language Models & Quota Access';
-
-		const mainDesc = targetDocument.createElement('p');
-		mainDesc.style.cssText = `margin: 0 0 24px 0; font-size: 13px; color: #888888;`;
-		mainDesc.textContent = 'Control Language Model access tokens and rate limits across extensions.';
-
-		container.appendChild(mainTitle);
-		container.appendChild(mainDesc);
-
-		const card = targetDocument.createElement('div');
-		card.style.cssText = `background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 8px; padding: 20px;`;
-
-		const btn = targetDocument.createElement('button');
-		btn.style.cssText = `background: #0284c7; color: #ffffff; border: none; border-radius: 6px; padding: 10px 18px; font-size: 13px; cursor: pointer;`;
-		btn.textContent = '🛡 Manage Language Model Access Permissions...';
-		btn.onclick = async () => {
-			await this.commandService.executeCommand('workbench.action.manageTrustedExtensionsForAccount');
-		};
-
-		card.appendChild(btn);
-		container.appendChild(card);
+		this.setElementHTML(container, `
+			<h3 style="margin:0 0 8px 0;font-size:18px;font-weight:600;color:#ffffff;">AI LLM Providers</h3>
+			<p style="margin:0 0 20px 0;font-size:13px;color:#888888;line-height:1.5;">Choose the primary AI models and API credentials to power Any Agent.</p>
+			
+			<div style="display:grid; grid-template-columns:1fr; gap:16px;">
+				<div style="background:#1c1c1c; border:1px solid #2a2a2a; border-radius:8px; padding:16px; display:flex; justify-content:space-between; align-items:center;">
+					<div>
+						<div style="font-size:14px; font-weight:600; color:#ffffff; margin-bottom:4px;">Gemini 1.5 Flash (Default)</div>
+						<div style="font-size:12px; color:#888888;">Optimized speed and reasoning. Powered by Google Vertex AI.</div>
+					</div>
+					<span style="font-size:11px; font-weight:600; color:#22c55e; border:1px solid #22c55e; padding:3px 8px; border-radius:12px;">ACTIVE</span>
+				</div>
+				<div style="background:#1c1c1c; border:1px solid #2a2a2a; border-radius:8px; padding:16px; display:flex; justify-content:space-between; align-items:center;">
+					<div>
+						<div style="font-size:14px; font-weight:600; color:#ffffff; margin-bottom:4px;">Gemini 1.5 Pro</div>
+						<div style="font-size:12px; color:#888888;">High precision reasoning and deep code generation capability.</div>
+					</div>
+					<button style="background:#27272a; color:#ffffff; border:1px solid #3f3f46; padding:4px 10px; border-radius:6px; font-size:11px; cursor:pointer;">Select</button>
+				</div>
+			</div>
+		`);
 	}
 
-	private async renderGenericTab(container: HTMLElement, targetDocument: Document, tabName: string): Promise<void> {
-		const mainTitle = targetDocument.createElement('h2');
-		mainTitle.style.cssText = `margin: 0 0 6px 0; font-size: 20px; color: #ffffff; font-weight: 600;`;
-		mainTitle.textContent = tabName;
-
-		const mainDesc = targetDocument.createElement('p');
-		mainDesc.style.cssText = `margin: 0 0 24px 0; font-size: 13px; color: #888888;`;
-		mainDesc.textContent = `Configure ${tabName} preferences for Any Agent Desktop.`;
-
-		container.appendChild(mainTitle);
-		container.appendChild(mainDesc);
-
-		const card = targetDocument.createElement('div');
-		card.style.cssText = `background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 8px; padding: 20px;`;
-
-		const btn = targetDocument.createElement('button');
-		btn.style.cssText = `background: #2a2a2a; color: #ffffff; border: 1px solid #3c3c3c; border-radius: 6px; padding: 10px 18px; font-size: 13px; cursor: pointer;`;
-		btn.textContent = `Open Full ${tabName} Settings...`;
-		btn.onclick = async () => {
-			await this.commandService.executeCommand('workbench.action.openSettings');
-		};
-
-		card.appendChild(btn);
-		container.appendChild(card);
+	private async renderGenericTab(container: HTMLElement, targetDocument: Document, tabId: string): Promise<void> {
+		this.setElementHTML(container, `
+			<h3 style="margin:0 0 8px 0;font-size:18px;font-weight:600;color:#ffffff;">${tabId} Settings</h3>
+			<p style="margin:0 0 20px 0;font-size:13px;color:#888888;line-height:1.5;">Customize settings and configuration options for ${tabId}.</p>
+			<div style="background:#1c1c1c; border:1px solid #2a2a2a; border-radius:8px; padding:24px; text-align:center; color:#888888; font-size:13px;">
+				Any Agent ${tabId} settings framework is ready. Custom settings will be populated here.
+			</div>
+		`);
 	}
 }

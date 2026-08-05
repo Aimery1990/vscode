@@ -322,7 +322,7 @@ export class AgentsManagerPane extends ViewPane {
 				openFolderBtn.style.opacity = '0.85';
 				openFolderBtn.title = 'Open Agent Instruction Preview (markdown.showPreview)';
 				openFolderBtn.onclick = async () => {
-					const instructionUri = URI.file(`${agent.folderPath}/instruction.md`);
+					const instructionUri = URI.file(`${agent.folderPath}/.agents/instruction.md`);
 					try {
 						await this.commandService.executeCommand('markdown.showPreview', instructionUri);
 					} catch {

@@ -329,7 +329,7 @@ export async function createOrEditAgentDialog(
 		submitBtn.innerText = existingAgent ? 'Save Changes' : 'Create AI Agent';
 
 		const openInstructionPreview = async (folderPath: string) => {
-			const instructionUri = URI.file(`${folderPath}/instruction.md`);
+			const instructionUri = URI.file(`${folderPath}/.agents/instruction.md`);
 			try {
 				await commandService.executeCommand('markdown.showPreview', instructionUri);
 			} catch {
