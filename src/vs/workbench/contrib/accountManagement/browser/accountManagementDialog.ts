@@ -3,6 +3,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
+import { getActiveDocument } from '../../../../base/browser/dom.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
@@ -35,7 +36,7 @@ export class AccountManagementDialog extends Disposable {
 	}
 
 	private async createModal(): Promise<void> {
-		const targetDocument = mainWindow.document;
+		const targetDocument = getActiveDocument() || window.document || mainWindow.document;
 
 		// Remove any existing modal
 		const existing = targetDocument.querySelector('.anyagent-account-modal-overlay');
@@ -55,12 +56,13 @@ export class AccountManagementDialog extends Disposable {
 			background: rgba(0, 0, 0, 0.75);
 			backdrop-filter: blur(12px);
 			-webkit-backdrop-filter: blur(12px);
-			z-index: 999999;
+			z-index: 99999999;
 			display: flex;
 			align-items: center;
 			justify-content: center;
 			animation: anyagentFadeIn 0.15s ease-out;
 		`;
+
 
 		// Keyframe style if not injected
 		if (!targetDocument.getElementById('anyagent-modal-styles')) {

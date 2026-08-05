@@ -3,6 +3,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
+import { getActiveDocument } from '../../../../base/browser/dom.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
@@ -29,7 +30,7 @@ export class AccountSignInModal extends Disposable {
 	}
 
 	private createModal(): void {
-		const targetDocument = mainWindow.document;
+		const targetDocument = getActiveDocument() || window.document || mainWindow.document;
 
 		// Remove any existing modal
 		const existing = targetDocument.querySelector('.anyagent-signin-modal-overlay');
@@ -49,7 +50,7 @@ export class AccountSignInModal extends Disposable {
 			background: rgba(0, 0, 0, 0.75);
 			backdrop-filter: blur(12px);
 			-webkit-backdrop-filter: blur(12px);
-			z-index: 999999;
+			z-index: 99999999;
 			display: flex;
 			align-items: center;
 			justify-content: center;
@@ -236,8 +237,11 @@ export class AccountSignInModal extends Disposable {
 			}
 		};
 
-		// Synchronously append overlay to main document DOM
+		// Synchronously append overlay to DOM
 		targetDocument.body.appendChild(overlay);
+		if (window.document && window.document.body && window.document !== targetDocument) {
+			window.document.body.appendChild(overlay.cloneNode(true));
+		}
 		this.container = overlay;
 	}
 

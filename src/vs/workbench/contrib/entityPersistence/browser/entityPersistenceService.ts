@@ -11,7 +11,9 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot, EntityType } from '../common/entityPersistence.js';
 
+
 const SNAPSHOTS_STORAGE_KEY = 'anyagent.entityPersistence.snapshots';
+export const SYSTEM_CONFIG_DIR_NAME = '.agents';
 
 export class EntityPersistenceService extends Disposable implements IEntityPersistenceService {
 	declare readonly _serviceBrand: undefined;
@@ -84,13 +86,56 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		}
 	}
 
+	private async getSystemConfigDirUri(targetUri: URI): Promise<URI> {
+		const agentsUri = URI.joinPath(targetUri, SYSTEM_CONFIG_DIR_NAME);
+		const anyagentUri = URI.joinPath(targetUri, '.anyagent');
+		const dunderUri = URI.joinPath(targetUri, '__agent__');
+
+		if (await this.fileService.exists(anyagentUri)) return anyagentUri;
+		if (await this.fileService.exists(dunderUri)) return dunderUri;
+
+		return agentsUri;
+	}
+
+	private async migrateLegacyEntityFilesIfNeeded(targetUri: URI): Promise<URI> {
+		const configDir = await this.getSystemConfigDirUri(targetUri);
+		if (!await this.fileService.exists(configDir)) {
+			try {
+				await this.fileService.createFolder(configDir);
+			} catch {
+				// ignore
+			}
+		}
+
+		const legacyFiles = [
+			'workspace.md', 'job.md', 'project.md', 'task.md', 'agent.md', 'workflow.md',
+			'case.md', 'issue.md', 'analysis.md', 'instruction.md', 'README.md', 'work_log.md'
+		];
+
+		for (const fileName of legacyFiles) {
+			const oldUri = URI.joinPath(targetUri, fileName);
+			const newUri = URI.joinPath(configDir, fileName);
+			if (await this.fileService.exists(oldUri) && !await this.fileService.exists(newUri)) {
+				try {
+					await this.fileService.move(oldUri, newUri, true);
+				} catch {
+					// ignore
+				}
+			}
+		}
+
+		return configDir;
+	}
+
 	private async detectEntityType(targetUri: URI): Promise<EntityType> {
-		if (await this.fileService.exists(URI.joinPath(targetUri, 'job.md'))) return 'job';
-		if (await this.fileService.exists(URI.joinPath(targetUri, 'project.md'))) return 'project';
-		if (await this.fileService.exists(URI.joinPath(targetUri, 'task.md'))) return 'task';
-		if (await this.fileService.exists(URI.joinPath(targetUri, 'agent.md'))) return 'agent';
-		if (await this.fileService.exists(URI.joinPath(targetUri, 'workflow.md'))) return 'workflow';
-		if (await this.fileService.exists(URI.joinPath(targetUri, 'workspace.md'))) return 'workspace';
+		const configDir = await this.migrateLegacyEntityFilesIfNeeded(targetUri);
+
+		if (await this.fileService.exists(URI.joinPath(configDir, 'job.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'job.md'))) return 'job';
+		if (await this.fileService.exists(URI.joinPath(configDir, 'project.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'project.md'))) return 'project';
+		if (await this.fileService.exists(URI.joinPath(configDir, 'task.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'task.md'))) return 'task';
+		if (await this.fileService.exists(URI.joinPath(configDir, 'agent.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'agent.md'))) return 'agent';
+		if (await this.fileService.exists(URI.joinPath(configDir, 'workflow.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'workflow.md'))) return 'workflow';
+		if (await this.fileService.exists(URI.joinPath(configDir, 'workspace.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'workspace.md'))) return 'workspace';
 
 		const folderName = targetUri.path.split('/').filter(Boolean).pop()?.toLowerCase() || '';
 		if (folderName.includes('job')) return 'job';
@@ -118,10 +163,11 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 				};
 			}
 
+			const configDir = await this.migrateLegacyEntityFilesIfNeeded(targetUri);
 			const type: EntityType = snapshot ? snapshot.entityType : await this.detectEntityType(targetUri);
 			const mainMdFileName = type === 'workspace' ? 'workspace.md' : `${type}.md`;
-			const mainMdUri = URI.joinPath(targetUri, mainMdFileName);
-			const instructionUri = URI.joinPath(targetUri, 'instruction.md');
+			const mainMdUri = URI.joinPath(configDir, mainMdFileName);
+			const instructionUri = URI.joinPath(configDir, 'instruction.md');
 
 			const hasMainMd = await this.fileService.exists(mainMdUri);
 			const hasInstruction = await this.fileService.exists(instructionUri);
@@ -129,7 +175,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			if (!hasMainMd || !hasInstruction) {
 				return {
 					isMissing: true,
-					missingReason: `Standard 4-MD files missing or damaged (${mainMdFileName})`,
+					missingReason: `Standard 4-MD files missing or damaged inside ${SYSTEM_CONFIG_DIR_NAME} (${mainMdFileName})`,
 					snapshot
 				};
 			}
@@ -182,16 +228,18 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			await this.fileService.createFolder(entityFolderUri);
 		}
 
+		const configDir = await this.migrateLegacyEntityFilesIfNeeded(entityFolderUri);
+
 		const dateTimeFormatted = snapshot.createdAt || this.getFormattedDateTime();
 		const ownerAccount = snapshot.ownerAccount || 'aimery.wei@gmail.com';
 		const modelStr = snapshot.modelName || 'gemini-2.0-flash';
 		const description = snapshot.description || `${type} description`;
 
 		const mainMdFileName = type === 'workspace' ? 'workspace.md' : `${type}.md`;
-		const mainMdUri = URI.joinPath(entityFolderUri, mainMdFileName);
-		const instructionUri = URI.joinPath(entityFolderUri, 'instruction.md');
-		const readmeUri = URI.joinPath(entityFolderUri, 'README.md');
-		const workLogUri = URI.joinPath(entityFolderUri, 'work_log.md');
+		const mainMdUri = URI.joinPath(configDir, mainMdFileName);
+		const instructionUri = URI.joinPath(configDir, 'instruction.md');
+		const readmeUri = URI.joinPath(configDir, 'README.md');
+		const workLogUri = URI.joinPath(configDir, 'work_log.md');
 
 		// 1. Primary Entity MD
 		let mainMdContent = `# ${snapshot.entityName} (${type.toUpperCase()})\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n- **Entity Type**: ${type}\n- **Status**: active\n`;
@@ -219,7 +267,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 		// 4. work_log.md
 		if (!await this.fileService.exists(workLogUri)) {
-			const workLogContent = `# Work Log - ${snapshot.entityName}\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n\n## ${dateTimeFormatted.slice(0, 10)}\n\n### Initialization & Restoration\n\n- Initialized standard 4-MD files for ${type} '${snapshot.entityName}'\n`;
+			const workLogContent = `# Work Log - ${snapshot.entityName}\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n\n## ${dateTimeFormatted.slice(0, 10)}\n\n### Initialization & Restoration\n\n- Initialized standard 4-MD files in ${SYSTEM_CONFIG_DIR_NAME} for ${type} '${snapshot.entityName}'\n`;
 			await this.fileService.writeFile(workLogUri, VSBuffer.fromString(workLogContent));
 		}
 
@@ -229,7 +277,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			entityUri: entityFolderUri.toString()
 		});
 
-		return entityFolderUri;
+		return mainMdUri;
 	}
 
 	private getFormattedDateTime(): string {
@@ -239,7 +287,6 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		const day = String(now.getDate()).padStart(2, '0');
 		const hours = String(now.getHours()).padStart(2, '0');
 		const minutes = String(now.getMinutes()).padStart(2, '0');
-		const seconds = String(now.getSeconds()).padStart(2, '0');
-		return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+		return `${year}-${month}-${day} ${hours}:${minutes}`;
 	}
 }

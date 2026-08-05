@@ -154,16 +154,17 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					return;
 				}
 
-				const workspaceMdUri = URI.joinPath(targetBase, 'workspace.md');
-				const hasWorkspaceMd = await this.fileService.exists(workspaceMdUri);
+				const workspaceMdUri = URI.joinPath(targetBase, '.agents', 'workspace.md');
+				const hasWorkspaceMd = await this.fileService.exists(workspaceMdUri) || await this.fileService.exists(URI.joinPath(targetBase, 'workspace.md'));
 
 				if (!hasWorkspaceMd && !item.isCurrent) {
 					let detectedType: ResourceType | undefined = snapshot?.entityType;
-					const hasJobMd = await this.fileService.exists(URI.joinPath(targetBase, 'job.md'));
-					const hasProjectMd = await this.fileService.exists(URI.joinPath(targetBase, 'project.md'));
-					const hasTaskMd = await this.fileService.exists(URI.joinPath(targetBase, 'task.md'));
-					const hasAgentMd = await this.fileService.exists(URI.joinPath(targetBase, 'agent.md'));
-					const hasWorkflowMd = await this.fileService.exists(URI.joinPath(targetBase, 'workflow.md'));
+					const configDir = URI.joinPath(targetBase, '.agents');
+					const hasJobMd = await this.fileService.exists(URI.joinPath(configDir, 'job.md')) || await this.fileService.exists(URI.joinPath(targetBase, 'job.md'));
+					const hasProjectMd = await this.fileService.exists(URI.joinPath(configDir, 'project.md')) || await this.fileService.exists(URI.joinPath(targetBase, 'project.md'));
+					const hasTaskMd = await this.fileService.exists(URI.joinPath(configDir, 'task.md')) || await this.fileService.exists(URI.joinPath(targetBase, 'task.md'));
+					const hasAgentMd = await this.fileService.exists(URI.joinPath(configDir, 'agent.md')) || await this.fileService.exists(URI.joinPath(targetBase, 'agent.md'));
+					const hasWorkflowMd = await this.fileService.exists(URI.joinPath(configDir, 'workflow.md')) || await this.fileService.exists(URI.joinPath(targetBase, 'workflow.md'));
 
 					if (hasJobMd || targetBase.path.toLowerCase().includes('job')) {
 						detectedType = 'job';
@@ -381,12 +382,13 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					const childUri = child.resource;
 
 					let childType: ResourceType = 'folder';
-					const hasJobMd = await this.fileService.exists(URI.joinPath(childUri, 'job.md'));
-					const hasProjectMd = await this.fileService.exists(URI.joinPath(childUri, 'project.md'));
-					const hasTaskMd = await this.fileService.exists(URI.joinPath(childUri, 'task.md'));
-					const hasAgentMd = await this.fileService.exists(URI.joinPath(childUri, 'agent.md'));
-					const hasWorkflowMd = await this.fileService.exists(URI.joinPath(childUri, 'workflow.md'));
-					const hasWorkspaceMd = await this.fileService.exists(URI.joinPath(childUri, 'workspace.md'));
+					const configDir = URI.joinPath(childUri, '.agents');
+					const hasJobMd = await this.fileService.exists(URI.joinPath(configDir, 'job.md')) || await this.fileService.exists(URI.joinPath(childUri, 'job.md'));
+					const hasProjectMd = await this.fileService.exists(URI.joinPath(configDir, 'project.md')) || await this.fileService.exists(URI.joinPath(childUri, 'project.md'));
+					const hasTaskMd = await this.fileService.exists(URI.joinPath(configDir, 'task.md')) || await this.fileService.exists(URI.joinPath(childUri, 'task.md'));
+					const hasAgentMd = await this.fileService.exists(URI.joinPath(configDir, 'agent.md')) || await this.fileService.exists(URI.joinPath(childUri, 'agent.md'));
+					const hasWorkflowMd = await this.fileService.exists(URI.joinPath(configDir, 'workflow.md')) || await this.fileService.exists(URI.joinPath(childUri, 'workflow.md'));
+					const hasWorkspaceMd = await this.fileService.exists(URI.joinPath(configDir, 'workspace.md')) || await this.fileService.exists(URI.joinPath(childUri, 'workspace.md'));
 
 					if (hasJobMd || child.name.toLowerCase().includes('job')) {
 						childType = 'job';
@@ -450,12 +452,13 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				if (child.isDirectory && !child.name.startsWith('.')) {
 					const childUri = child.resource;
 					let childType: ResourceType = 'folder';
-					const hasJobMd = await this.fileService.exists(URI.joinPath(childUri, 'job.md'));
-					const hasProjectMd = await this.fileService.exists(URI.joinPath(childUri, 'project.md'));
-					const hasTaskMd = await this.fileService.exists(URI.joinPath(childUri, 'task.md'));
-					const hasAgentMd = await this.fileService.exists(URI.joinPath(childUri, 'agent.md'));
-					const hasWorkflowMd = await this.fileService.exists(URI.joinPath(childUri, 'workflow.md'));
-					const hasWorkspaceMd = await this.fileService.exists(URI.joinPath(childUri, 'workspace.md'));
+					const configDir = URI.joinPath(childUri, '.agents');
+					const hasJobMd = await this.fileService.exists(URI.joinPath(configDir, 'job.md')) || await this.fileService.exists(URI.joinPath(childUri, 'job.md'));
+					const hasProjectMd = await this.fileService.exists(URI.joinPath(configDir, 'project.md')) || await this.fileService.exists(URI.joinPath(childUri, 'project.md'));
+					const hasTaskMd = await this.fileService.exists(URI.joinPath(configDir, 'task.md')) || await this.fileService.exists(URI.joinPath(childUri, 'task.md'));
+					const hasAgentMd = await this.fileService.exists(URI.joinPath(configDir, 'agent.md')) || await this.fileService.exists(URI.joinPath(childUri, 'agent.md'));
+					const hasWorkflowMd = await this.fileService.exists(URI.joinPath(configDir, 'workflow.md')) || await this.fileService.exists(URI.joinPath(childUri, 'workflow.md'));
+					const hasWorkspaceMd = await this.fileService.exists(URI.joinPath(configDir, 'workspace.md')) || await this.fileService.exists(URI.joinPath(childUri, 'workspace.md'));
 
 					if (hasJobMd || child.name.toLowerCase().includes('job')) childType = 'job';
 					else if (hasProjectMd) childType = 'project';
