@@ -174,11 +174,11 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 	}
 
 	async writeEntity4MDFiles(snapshot: IBaseEntitySnapshot, targetFolderUri: URI, isNewFolder = false): Promise<URI> {
-		const cleanName = snapshot.entityName.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+		const folderName = snapshot.entityName.replace(/[^a-zA-Z0-9_-]/g, '-');
 		const type = snapshot.entityType;
-		const entityFolderUri = isNewFolder ? URI.joinPath(targetFolderUri, `${type}_${cleanName}`) : targetFolderUri;
+		const entityFolderUri = isNewFolder ? URI.joinPath(targetFolderUri, folderName) : targetFolderUri;
 
-		if (isNewFolder && !await this.fileService.exists(entityFolderUri)) {
+		if (!await this.fileService.exists(entityFolderUri)) {
 			await this.fileService.createFolder(entityFolderUri);
 		}
 

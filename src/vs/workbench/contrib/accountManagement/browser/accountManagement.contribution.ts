@@ -7,9 +7,10 @@ import { localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
-import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
+
 import { AccountManagementDialog } from './accountManagementDialog.js';
+import { AccountSignInModal } from './accountSignInModal.js';
 
 export class OpenAccountPanelAction extends Action2 {
 	constructor() {
@@ -28,9 +29,6 @@ export class OpenAccountPanelAction extends Action2 {
 
 	public override run(accessor: ServicesAccessor): void {
 		const instantiationService = accessor.get(IInstantiationService);
-		const notificationService = accessor.get(INotificationService);
-		notificationService.info("Opening Any Agent Account & Security Preferences...");
-
 		const dialog = instantiationService.createInstance(AccountManagementDialog);
 		dialog.show('Account');
 	}
@@ -48,11 +46,8 @@ export class SignInOrLogInAction extends Action2 {
 
 	public override run(accessor: ServicesAccessor): void {
 		const instantiationService = accessor.get(IInstantiationService);
-		const notificationService = accessor.get(INotificationService);
-		notificationService.info("Opening Any Agent Sign In & Account Control Center...");
-
-		const dialog = instantiationService.createInstance(AccountManagementDialog);
-		dialog.show('Account');
+		const modal = instantiationService.createInstance(AccountSignInModal);
+		modal.show();
 	}
 }
 
@@ -68,9 +63,6 @@ export class AccountPreferencesAction extends Action2 {
 
 	public override run(accessor: ServicesAccessor): void {
 		const instantiationService = accessor.get(IInstantiationService);
-		const notificationService = accessor.get(INotificationService);
-		notificationService.info("Opening Any Agent Account & Security Preferences...");
-
 		const dialog = instantiationService.createInstance(AccountManagementDialog);
 		dialog.show('Account');
 	}
@@ -84,16 +76,12 @@ registerAction2(AccountPreferencesAction);
 // Also register explicitly in CommandsRegistry
 CommandsRegistry.registerCommand('anyagent.signInOrLogIn', (accessor: ServicesAccessor) => {
 	const instantiationService = accessor.get(IInstantiationService);
-	const notificationService = accessor.get(INotificationService);
-	notificationService.info("Opening Any Agent Sign In & Account Control Center...");
-	const dialog = instantiationService.createInstance(AccountManagementDialog);
-	dialog.show('Account');
+	const modal = instantiationService.createInstance(AccountSignInModal);
+	modal.show();
 });
 
 CommandsRegistry.registerCommand('anyagent.accountPreferences', (accessor: ServicesAccessor) => {
 	const instantiationService = accessor.get(IInstantiationService);
-	const notificationService = accessor.get(INotificationService);
-	notificationService.info("Opening Any Agent Account & Security Preferences...");
 	const dialog = instantiationService.createInstance(AccountManagementDialog);
 	dialog.show('Account');
 });

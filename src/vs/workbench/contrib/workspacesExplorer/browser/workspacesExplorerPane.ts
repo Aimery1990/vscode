@@ -473,17 +473,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 					};
 				}
 
-				const removeBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
-				removeBtn.style.opacity = ws.isMissing ? '0.65' : '0.5';
-				removeBtn.style.fontSize = '12px';
-				removeBtn.title = 'Remove entry from explorer';
-				removeBtn.onclick = async (e) => {
-					e.stopPropagation();
-					await this.workspacesExplorerService.removeWorkspace(ws.uri);
-					this.notificationService.info(`Removed '${ws.name}' from explorer.`);
-					this.renderContent();
-				};
-
 				// Single Click: Select workspace card and toggle expansion in-place
 				cardHeader.onclick = () => {
 					this.selectedWorkspaceId = canonicalWsId;
@@ -1001,7 +990,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 			if (!stat.children) return `${prefix}-001`;
 
 			let maxNum = 0;
-			const regex = new RegExp(`^${prefix}[-_]?(\\d+)$`, 'i');
+			const regex = new RegExp(`^(?:${prefix}|${type})(?:[-_]?(?:${type}))?[-_]?(\\d+)$`, 'i');
 
 			for (const child of stat.children) {
 				const match = child.name.match(regex);
@@ -1189,10 +1178,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 				return;
 			}
 
-			const targetCheckUri = URI.joinPath(targetUri, inputName);
-			const exists = await this.fileService.exists(targetCheckUri);
+			const sanitizedName = inputName.replace(/[^a-zA-Z0-9_-]/g, '-');
+			const targetCheckUri1 = URI.joinPath(targetUri, inputName);
+			const targetCheckUri2 = URI.joinPath(targetUri, sanitizedName);
+			const exists = await this.fileService.exists(targetCheckUri1) || await this.fileService.exists(targetCheckUri2);
 			if (exists) {
-				warningBanner.innerText = `⚠️ Entity name '${inputName}' is already occupied in '${targetName}'. Please enter a unique name.`;
+				warningBanner.innerText = `⚠️ Entity folder '${inputName}' is already occupied in '${targetName}'. Please enter a unique name.`;
 				warningBanner.style.display = 'block';
 				submitBtn.disabled = true;
 				submitBtn.style.opacity = '0.5';

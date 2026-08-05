@@ -16,6 +16,7 @@ import { IAgentsManagerService } from '../../agentsManager/common/agentsManager.
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 
 const SAVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.savedWorkspaces';
+const REMOVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.removedWorkspaces';
 
 export class WorkspacesExplorerService extends Disposable implements IWorkspacesExplorerService {
 	declare readonly _serviceBrand: undefined;
@@ -33,6 +34,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	) {
 		super();
 		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, SAVED_WORKSPACES_STORAGE_KEY, this._store)(() => this._onDidChangeWorkspaces.fire()));
+		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, REMOVED_WORKSPACES_STORAGE_KEY, this._store)(() => this._onDidChangeWorkspaces.fire()));
 		this._register(this.workspacesService.onDidChangeRecentlyOpened(() => this._onDidChangeWorkspaces.fire()));
 		this._register(this.entityPersistenceService.onDidChangeSnapshots(() => this._onDidChangeWorkspaces.fire()));
 	}
@@ -86,15 +88,41 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		this._onDidChangeWorkspaces.fire();
 	}
 
+	private getRemovedWorkspaceUris(): string[] {
+		const raw = this.storageService.get(REMOVED_WORKSPACES_STORAGE_KEY, StorageScope.PROFILE, '[]');
+		try {
+			return JSON.parse(raw) as string[];
+		} catch {
+			return [];
+		}
+	}
+
+	private saveRemovedWorkspaceUris(uris: string[]): void {
+		const uniqueUris = Array.from(new Set(uris.map(u => URI.parse(u).toString())));
+		this.storageService.store(
+			REMOVED_WORKSPACES_STORAGE_KEY,
+			JSON.stringify(uniqueUris),
+			StorageScope.PROFILE,
+			StorageTarget.USER
+		);
+		this._onDidChangeWorkspaces.fire();
+	}
+
 	async getWorkspaces(): Promise<IWorkspaceItem[]> {
 		const currentWorkspace = this.workspaceContextService.getWorkspace();
 		const currentFolderUris = new Set(currentWorkspace.folders.map(f => f.uri.toString()));
 
 		const savedUris = this.getSavedWorkspaceUris();
+		const removedUris = this.getRemovedWorkspaceUris();
 		const resultItems: IWorkspaceItem[] = [];
 
 		const processUri = async (uri: URI, isFromRecents = false) => {
 			const uriStr = uri.toString();
+			if (removedUris.includes(uriStr) && !currentFolderUris.has(uriStr)) {
+				// User explicitly removed this entry from explorer, skip rendering!
+				return;
+			}
+
 			const isCurrent = currentFolderUris.has(uriStr);
 
 			let targetBase = uri;
@@ -228,6 +256,13 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		const uris = this.getSavedWorkspaceUris();
 		const uriStr = uri.toString();
 
+		// Remove from removed blacklist if re-added explicitly
+		const removed = this.getRemovedWorkspaceUris();
+		if (removed.includes(uriStr)) {
+			const updatedRemoved = removed.filter(u => u !== uriStr);
+			this.saveRemovedWorkspaceUris(updatedRemoved);
+		}
+
 		// Check if uri is a sub-directory of another saved workspace or current workspace folder
 		const targetPath = uri.path.endsWith('.code-workspace') ? dirname(uri).path : uri.path;
 		const currentWorkspace = this.workspaceContextService.getWorkspace();
@@ -253,10 +288,17 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	async removeSavedWorkspace(uri: URI): Promise<void> {
-		const uris = this.getSavedWorkspaceUris();
 		const uriStr = uri.toString();
+		const uris = this.getSavedWorkspaceUris();
 		const updated = uris.filter(u => u !== uriStr);
 		this.saveWorkspaceUris(updated);
+
+		const removed = this.getRemovedWorkspaceUris();
+		if (!removed.includes(uriStr)) {
+			removed.push(uriStr);
+			this.saveRemovedWorkspaceUris(removed);
+		}
+
 		await this.entityPersistenceService.removeSnapshot(uri);
 		try {
 			await this.workspacesService.removeRecentlyOpened([uri]);
@@ -270,7 +312,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		const rootPath = options.targetParentUri ? options.targetParentUri.fsPath : '/Users/aimery/repos/jobs';
 
 		const parentFolderUri = URI.file(rootPath);
-		const folderName = options.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+		const folderName = options.name.replace(/[^a-zA-Z0-9_-]/g, '-');
 		const targetBaseUri = URI.joinPath(parentFolderUri, folderName);
 
 		const alreadyExists = await this.fileService.exists(targetBaseUri);
@@ -438,11 +480,12 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	async createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult> {
 		const targetBaseUri = options.workspaceUri || options.targetParentUri || URI.file('/Users/aimery/repos/jobs');
 		const type = options.type;
-		const name = options.name;
+		const name = options.name.trim();
 		const description = options.description;
 
-		const cleanName = name.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
-		const folderName = (cleanName.startsWith(`${type}_`) || cleanName.startsWith(`${type}-`)) ? cleanName : `${type}_${cleanName}`;
+		// Preserve exact case and hyphens (-), avoiding extra lowercasing or type prefix prepending
+		const sanitizedName = name.replace(/[^a-zA-Z0-9_-]/g, '-');
+		const folderName = sanitizedName;
 		const entityFolderUri = URI.joinPath(targetBaseUri, folderName);
 		const mainMdFileName = `${type}.md`;
 		const mainMdUri = URI.joinPath(entityFolderUri, mainMdFileName);
