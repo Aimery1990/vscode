@@ -242,7 +242,18 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		const workLogUri = URI.joinPath(configDir, 'work_log.md');
 
 		// 1. Primary Entity MD
-		let mainMdContent = `# ${snapshot.entityName} (${type.toUpperCase()})\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n- **Entity Type**: ${type}\n- **Status**: active\n`;
+		let mainMdContent = `# ${snapshot.entityName} (${type.toUpperCase()})\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n- **Entity Type**: ${type}\n`;
+		if (snapshot.entityCode) {
+			mainMdContent += `- **Entity Code**: ${snapshot.entityCode}\n`;
+		}
+		mainMdContent += `- **Priority**: ${snapshot.priority || 'Medium'}\n`;
+		if (snapshot.assignedAgentName) {
+			mainMdContent += `- **Assigned Agent**: ${snapshot.assignedAgentName}\n`;
+		}
+		if (snapshot.agentRulePrompt) {
+			mainMdContent += `- **Agent Rule**: ${snapshot.agentRulePrompt}\n`;
+		}
+		mainMdContent += `- **Status**: active\n`;
 
 		if (type === 'agent') {
 			mainMdContent += `- **Role**: ${snapshot.role || 'AI Agent'}\n- **Model**: \`${modelStr}\`\n- **Scope Type**: ${snapshot.scopeType || 'workspace'}\n- **Scope Name**: ${snapshot.scopeName || 'Workspace'}\n`;

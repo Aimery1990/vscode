@@ -14,6 +14,9 @@ import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { IAgentsManagerService } from '../../agentsManager/common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
+import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { EditorsOrder } from '../../../common/editor.js';
 
 const SAVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.savedWorkspaces';
 const REMOVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.removedWorkspaces';
@@ -24,19 +27,67 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	private readonly _onDidChangeWorkspaces = this._register(new Emitter<void>());
 	readonly onDidChangeWorkspaces: Event<void> = this._onDidChangeWorkspaces.event;
 
+	private activeUserEmail: string = '';
+
 	constructor(
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@IWorkspacesService private readonly workspacesService: IWorkspacesService,
 		@IStorageService private readonly storageService: IStorageService,
 		@IFileService private readonly fileService: IFileService,
 		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
-		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService
+		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService,
+		@IAuthenticationService private readonly authenticationService: IAuthenticationService,
+		@IEditorService private readonly editorService: IEditorService
 	) {
 		super();
-		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, SAVED_WORKSPACES_STORAGE_KEY, this._store)(() => this._onDidChangeWorkspaces.fire()));
-		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, REMOVED_WORKSPACES_STORAGE_KEY, this._store)(() => this._onDidChangeWorkspaces.fire()));
+		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
+			if (e.key === this.savedWorkspacesKey || e.key === this.removedWorkspacesKey) {
+				this._onDidChangeWorkspaces.fire();
+			}
+		}));
 		this._register(this.workspacesService.onDidChangeRecentlyOpened(() => this._onDidChangeWorkspaces.fire()));
 		this._register(this.entityPersistenceService.onDidChangeSnapshots(() => this._onDidChangeWorkspaces.fire()));
+
+		this._register(this.authenticationService.onDidChangeSessions(async (e: any) => {
+			if (e.providerId === 'google') {
+				await this.updateActiveUser();
+			}
+		}));
+
+		this._register(this.authenticationService.onDidRegisterAuthenticationProvider(async (e: any) => {
+			if (e.id === 'google') {
+				await this.updateActiveUser();
+			}
+		}));
+
+		this.updateActiveUser();
+	}
+
+
+	private async updateActiveUser(): Promise<void> {
+		try {
+			const sessions = await this.authenticationService.getSessions('google');
+			const newEmail = (sessions && sessions.length > 0) ? sessions[0].account.label : '';
+			if (newEmail !== this.activeUserEmail) {
+				this.activeUserEmail = newEmail;
+				// Close all active editors on account switch/sandbox change to prevent data leaks
+				const openEditors = this.editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE);
+				if (openEditors.length > 0) {
+					await this.editorService.closeEditors(openEditors);
+				}
+				this._onDidChangeWorkspaces.fire();
+			}
+		} catch (err) {
+			console.error('Failed to update active user in WorkspacesExplorerService:', err);
+		}
+	}
+
+	private get savedWorkspacesKey(): string {
+		return `${SAVED_WORKSPACES_STORAGE_KEY}:${this.activeUserEmail || 'unauthenticated'}`;
+	}
+
+	private get removedWorkspacesKey(): string {
+		return `${REMOVED_WORKSPACES_STORAGE_KEY}:${this.activeUserEmail || 'unauthenticated'}`;
 	}
 
 	getMetadataSnapshot(uri: URI | string): IEntityMetadataSnapshot | undefined {
@@ -52,6 +103,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			createdAt: snapshot.createdAt || '',
 			description: snapshot.description,
 			belongsToWorkspaceUri: snapshot.belongsToWorkspaceUri,
+			entityCode: snapshot.entityCode,
+			priority: snapshot.priority,
+			assignedAgentId: snapshot.assignedAgentId,
+			assignedAgentName: snapshot.assignedAgentName,
+			agentRulePrompt: snapshot.agentRulePrompt,
 			git: snapshot.git
 		};
 	}
@@ -69,7 +125,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	private getSavedWorkspaceUris(): string[] {
-		const raw = this.storageService.get(SAVED_WORKSPACES_STORAGE_KEY, StorageScope.PROFILE, '[]');
+		const raw = this.storageService.get(this.savedWorkspacesKey, StorageScope.PROFILE, '[]');
 		try {
 			return JSON.parse(raw) as string[];
 		} catch {
@@ -80,7 +136,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	private saveWorkspaceUris(uris: string[]): void {
 		const uniqueUris = Array.from(new Set(uris.map(u => URI.parse(u).toString())));
 		this.storageService.store(
-			SAVED_WORKSPACES_STORAGE_KEY,
+			this.savedWorkspacesKey,
 			JSON.stringify(uniqueUris),
 			StorageScope.PROFILE,
 			StorageTarget.USER
@@ -89,7 +145,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	private getRemovedWorkspaceUris(): string[] {
-		const raw = this.storageService.get(REMOVED_WORKSPACES_STORAGE_KEY, StorageScope.PROFILE, '[]');
+		const raw = this.storageService.get(this.removedWorkspacesKey, StorageScope.PROFILE, '[]');
 		try {
 			return JSON.parse(raw) as string[];
 		} catch {
@@ -100,13 +156,14 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	private saveRemovedWorkspaceUris(uris: string[]): void {
 		const uniqueUris = Array.from(new Set(uris.map(u => URI.parse(u).toString())));
 		this.storageService.store(
-			REMOVED_WORKSPACES_STORAGE_KEY,
+			this.removedWorkspacesKey,
 			JSON.stringify(uniqueUris),
 			StorageScope.PROFILE,
 			StorageTarget.USER
 		);
 		this._onDidChangeWorkspaces.fire();
 	}
+
 
 	async getWorkspaces(): Promise<IWorkspaceItem[]> {
 		const currentWorkspace = this.workspaceContextService.getWorkspace();
@@ -309,25 +366,33 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		this._onDidChangeWorkspaces.fire();
 	}
 
-	async createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult> {
+	async createWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult> {
 		const rootPath = options.targetParentUri ? options.targetParentUri.fsPath : '/Users/aimery/repos/jobs';
 
 		const parentFolderUri = URI.file(rootPath);
-		const folderName = options.name.replace(/[^a-zA-Z0-9_-]/g, '-');
-		const targetBaseUri = URI.joinPath(parentFolderUri, folderName);
+		const sanitizedName = options.name.replace(/[^a-zA-Z0-9_-]/g, '-');
+		const targetBaseUri = URI.joinPath(parentFolderUri, sanitizedName);
+
+		const wsCode = options.code ? options.code.toUpperCase().replace(/[^A-Z0-9]/g, '') : this.generateWorkspaceCodeFromName(options.name);
 
 		const alreadyExists = await this.fileService.exists(targetBaseUri);
+
+		if (!alreadyExists) {
+			await this.fileService.createFolder(targetBaseUri);
+		}
 
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: targetBaseUri.toString(),
 			entityName: options.name,
 			entityType: 'workspace',
+			entityCode: wsCode,
 			ownerAccount: 'aimery.wei@gmail.com',
 			description: options.description || `Workspace ${options.name}`
 		}, targetBaseUri, false);
 
 		await this.saveWorkspace(targetBaseUri);
-		return { alreadyExists, uri: targetBaseUri, name: options.name };
+		await this.addWorkspace(targetBaseUri, options.name);
+		return { alreadyExists, uri: targetBaseUri };
 	}
 
 	async createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult> {
@@ -480,18 +545,146 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		return false;
 	}
 
+	private generateWorkspaceCodeFromName(name: string): string {
+		const clean = name.toUpperCase().replace(/[^A-Z0-9]/g, '');
+		if (clean.length >= 3) {
+			return clean.slice(0, 5);
+		}
+		return 'PRJ1';
+	}
+
+	async resolveEntityCode(targetParentUri: URI, customCode?: string): Promise<string> {
+		if (customCode && customCode.trim()) {
+			const sanitized = customCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+			if (sanitized) return sanitized;
+		}
+
+		// Look up snapshot hierarchy or .agents/*.md on disk
+		let curr: URI | undefined = targetParentUri;
+		while (curr) {
+			const snapshot = this.getMetadataSnapshot(curr);
+			if (snapshot && snapshot.entityCode) {
+				return snapshot.entityCode;
+			}
+
+			// Disk fallback: check .agents/workspace.md, job.md, etc.
+			const configDir = URI.joinPath(curr, '.agents');
+			const possibleMds = ['workspace.md', 'job.md', 'project.md', 'task.md', 'agent.md', 'workflow.md'];
+			for (const mdName of possibleMds) {
+				const mdUri = URI.joinPath(configDir, mdName);
+				if (await this.fileService.exists(mdUri)) {
+					try {
+						const content = (await this.fileService.readFile(mdUri)).value.toString();
+						const match = content.match(/-\s*\*\*Entity Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/);
+						if (match && match[1]) {
+							const code = match[1].trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+							if (code) return code;
+						}
+					} catch {}
+				}
+			}
+
+			const parentPath = dirname(curr);
+			if (!parentPath || parentPath.path === curr.path) break;
+			curr = parentPath;
+		}
+
+		// Fallback code derived from parent folder name
+		const folderName = targetParentUri.path.split('/').filter(Boolean).pop() || 'WS';
+		return this.generateWorkspaceCodeFromName(folderName);
+	}
+
+	async generateNextSequentialName(targetParentUri: URI, type: ResourceType, customCode?: string): Promise<{ name: string; code: string }> {
+		const activeCode = await this.resolveEntityCode(targetParentUri, customCode);
+		const prefixMap: Record<ResourceType, string> = {
+			job: 'JOB',
+			task: 'TASK',
+			project: 'PROJECT',
+			workflow: 'WORKFLOW',
+			case: 'CASE',
+			agent: 'AGENT',
+			issue: 'ISSUE',
+			analysis: 'ANALYSIS',
+			workspace: 'WORKSPACE',
+			folder: 'FOLDER',
+			file: 'FILE'
+		};
+		const fallbackPrefix = prefixMap[type] || 'ENTITY';
+
+		try {
+			const stat = await this.fileService.resolve(targetParentUri);
+			let maxNum = 0;
+			const regex = new RegExp(`^(?:${activeCode}|${fallbackPrefix}|${type})(?:[-_]?(?:${fallbackPrefix}|${type}))?[-_]?(\\d+)$`, 'i');
+
+			if (stat.children) {
+				for (const child of stat.children) {
+					const match = child.name.match(regex);
+					if (match) {
+						const num = parseInt(match[1], 10);
+						if (!isNaN(num) && num > maxNum) {
+							maxNum = num;
+						}
+					}
+				}
+			}
+
+			const nextNum = maxNum + 1;
+			const formattedNum = String(nextNum).padStart(4, '0');
+			return {
+				name: `${activeCode}-${formattedNum}`,
+				code: activeCode
+			};
+		} catch {
+			return {
+				name: `${activeCode}-0001`,
+				code: activeCode
+			};
+		}
+	}
+
 	async createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult> {
 		const targetBaseUri = options.workspaceUri || options.targetParentUri || URI.file('/Users/aimery/repos/jobs');
 		const type = options.type;
-		const name = options.name.trim();
 		const description = options.description;
+
+		let name = options.name ? options.name.trim() : '';
+
+		if (type === 'folder') {
+			const folderName = name || 'new_folder';
+			const folderUri = URI.joinPath(targetBaseUri, folderName);
+			const alreadyExists = await this.fileService.exists(folderUri);
+			if (!alreadyExists) {
+				await this.fileService.createFolder(folderUri);
+			}
+			this._onDidChangeWorkspaces.fire();
+			return { alreadyExists, uri: folderUri };
+		}
+
+		if (type === 'file') {
+			const fileName = name || 'new_file.md';
+			const fileUri = URI.joinPath(targetBaseUri, fileName);
+			const alreadyExists = await this.fileService.exists(fileUri);
+			if (!alreadyExists) {
+				const { VSBuffer } = await import('../../../../base/common/buffer.js');
+				await this.fileService.createFile(fileUri, VSBuffer.fromString(description || `# ${fileName}\n`));
+			}
+			this._onDidChangeWorkspaces.fire();
+			return { alreadyExists, uri: fileUri };
+		}
+
+		const activeCode = await this.resolveEntityCode(targetBaseUri, options.code);
+
+		if (!name || name === 'AUTO') {
+			const seq = await this.generateNextSequentialName(targetBaseUri, type, options.code);
+			name = seq.name;
+		}
 
 		// Preserve exact case and hyphens (-), avoiding extra lowercasing or type prefix prepending
 		const sanitizedName = name.replace(/[^a-zA-Z0-9_-]/g, '-');
 		const folderName = sanitizedName;
 		const entityFolderUri = URI.joinPath(targetBaseUri, folderName);
 		const mainMdFileName = `${type}.md`;
-		const mainMdUri = URI.joinPath(entityFolderUri, mainMdFileName);
+		const mainMdUri = URI.joinPath(entityFolderUri, '.agents', mainMdFileName);
 
 		const alreadyExists = await this.fileService.exists(mainMdUri) || await this.fileService.exists(entityFolderUri);
 
@@ -504,6 +697,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			entityUri: entityFolderUri.toString(),
 			entityName: name,
 			entityType: type as any,
+			entityCode: activeCode,
+			priority: options.priority || 'Medium',
+			assignedAgentId: options.assignedAgentId,
+			assignedAgentName: options.assignedAgentName,
+			agentRulePrompt: options.agentRulePrompt,
 			ownerAccount: 'aimery.wei@gmail.com',
 			description: description || `${type} description`,
 			belongsToWorkspaceUri: targetBaseUri.toString()

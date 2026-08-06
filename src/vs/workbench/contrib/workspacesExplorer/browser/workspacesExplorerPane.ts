@@ -27,6 +27,9 @@ import { dirname } from '../../../../base/common/resources.js';
 import { isMacintosh } from '../../../../base/common/platform.js';
 import { Action } from '../../../../base/common/actions.js';
 import { IWorkspacesExplorerService, ResourceType, IWorkspaceItem } from '../common/workspacesExplorer.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { IAgentsManagerService } from '../../agentsManager/common/agentsManager.js';
+import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
 
 export class MainWorkspaceViewPane extends ViewPane {
 	private containerEl?: HTMLElement;
@@ -68,7 +71,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 		@IWorkspacesService private readonly workspacesService: IWorkspacesService,
 		@INotificationService private readonly notificationService: INotificationService,
 		@IFileService private readonly fileService: IFileService,
-		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService
+		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService,
+		@IEditorService private readonly editorService: IEditorService,
+		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -473,8 +478,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 					};
 				}
 
-				// Single Click: Select workspace card and toggle expansion in-place
-				cardHeader.onclick = () => {
+				// Single Click: Select workspace card, open its Domain Form in main editor area, and toggle expansion in-place
+				cardHeader.onclick = async () => {
 					this.selectedWorkspaceId = canonicalWsId;
 					this.selectedItemId = canonicalWsId;
 
@@ -483,6 +488,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 					} else {
 						this.expandedWorkspaces.add(canonicalWsId);
 					}
+
+					try {
+						await this.editorService.openEditor(new EntityDetailEditorInput(ws.uri, ws.name), { pinned: true });
+					} catch (err) {
+						console.error('Failed to open Workspace domain editor', err);
+					}
+
 					this.renderContent();
 				};
 
@@ -790,12 +802,28 @@ export class MainWorkspaceViewPane extends ViewPane {
 					for (const mdName of possibleMds) {
 						const mdUri = URI.joinPath(child.uri, mdName);
 						if (await this.fileService.exists(mdUri)) {
-							await this.commandService.executeCommand('markdown.showPreview', mdUri);
+							await this.editorService.openEditor(new EntityDetailEditorInput(child.uri, child.name), { pinned: true });
 							break;
 						}
 					}
 				} else if (child.uri.path.toLowerCase().endsWith('.md')) {
-					await this.commandService.executeCommand('markdown.showPreview', child.uri);
+					const possibleMds = [
+						'.agents/job.md', '.agents/task.md', '.agents/project.md', '.agents/agent.md', '.agents/workflow.md', '.agents/workspace.md', '.agents/instruction.md', '.agents/README.md',
+						'instruction.md', 'job.md', 'workspace.md', 'project.md', 'agent.md', 'README.md'
+					];
+					const fileName = child.uri.path.split('/').pop() || '';
+					const parentUri = dirname(child.uri);
+					const isAgentMd = possibleMds.some(name => name.endsWith(fileName));
+					if (isAgentMd) {
+						let entityUri = parentUri;
+						if (parentUri.path.endsWith('.agents')) {
+							entityUri = dirname(parentUri);
+						}
+						const entityName = entityUri.path.split('/').filter(Boolean).pop() || 'Entity';
+						await this.editorService.openEditor(new EntityDetailEditorInput(entityUri, entityName), { pinned: true });
+					} else {
+						await this.commandService.executeCommand('markdown.showPreview', child.uri);
+					}
 				} else {
 					await this.openerService.open(child.uri);
 				}
@@ -875,7 +903,21 @@ export class MainWorkspaceViewPane extends ViewPane {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
 		nameInput.placeholder = 'e.g., my_workspace';
-		nameInput.value = 'my_workspace';
+
+		// Workspace Code Input Prefix
+		const codeBox = append(modal, $('.form-group'));
+		append(codeBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Code Prefix:'));
+		const codeInput = append(codeBox, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; text-transform: uppercase;'
+		})) as HTMLInputElement;
+		codeInput.placeholder = 'e.g., ABCD / FINO3';
+
+		nameInput.oninput = () => {
+			const cleanName = nameInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+			if (cleanName.length >= 3) {
+				codeInput.value = cleanName.slice(0, 5);
+			}
+		};
 
 		// Location Path Picker
 		const pathBox = append(modal, $('.form-group'));
@@ -901,11 +943,20 @@ export class MainWorkspaceViewPane extends ViewPane {
 				canSelectFolders: true,
 				canSelectFiles: false,
 				canSelectMany: false,
-				title: 'Select Workspace Location Path'
+				title: 'Select Location Path (Workspace folder will be created inside this path)'
 			});
 			if (res && res.length > 0) {
 				selectedPathUri = res[0];
 				pathInput.value = res[0].fsPath;
+
+				if (!nameInput.value.trim()) {
+					const defaultName = res[0].path.split('/').filter(Boolean).pop() || 'my_workspace';
+					nameInput.value = defaultName;
+					const cleanName = defaultName.toUpperCase().replace(/[^A-Z0-9]/g, '');
+					if (cleanName.length >= 3) {
+						codeInput.value = cleanName.slice(0, 5);
+					}
+				}
 			}
 		};
 
@@ -951,7 +1002,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 
 			try {
-				const res = await this.workspacesExplorerService.createWorkspaceWithNameAndPath(name, parentUri, descInput.value.trim());
+				const res = await this.workspacesExplorerService.createWorkspace({
+					name,
+					targetParentUri: parentUri,
+					description: descInput.value.trim(),
+					code: codeInput.value.trim(),
+					type: 'workspace'
+				});
 
 				overlay.remove();
 
@@ -969,47 +1026,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 				this.notificationService.error(`Failed to create workspace: ${err}`);
 			}
 		};
-	}
-
-	private async generateSequentialName(targetUri: URI, type: ResourceType): Promise<string> {
-		const prefixMap: Record<ResourceType, string> = {
-			job: 'JOB',
-			task: 'TASK',
-			project: 'PROJECT',
-			workflow: 'WORKFLOW',
-			case: 'CASE',
-			agent: 'AGENT',
-			issue: 'ISSUE',
-			analysis: 'ANALYSIS',
-			workspace: 'WORKSPACE',
-			folder: 'FOLDER',
-			file: 'FILE'
-		};
-
-		const prefix = prefixMap[type] || 'ENTITY';
-
-		try {
-			const stat = await this.fileService.resolve(targetUri);
-			if (!stat.children) return `${prefix}-001`;
-
-			let maxNum = 0;
-			const regex = new RegExp(`^(?:${prefix}|${type})(?:[-_]?(?:${type}))?[-_]?(\\d+)$`, 'i');
-
-			for (const child of stat.children) {
-				const match = child.name.match(regex);
-				if (match) {
-					const num = parseInt(match[1], 10);
-					if (!isNaN(num) && num > maxNum) {
-						maxNum = num;
-					}
-				}
-			}
-
-			const nextNum = maxNum + 1;
-			return `${prefix}-${String(nextNum).padStart(3, '0')}`;
-		} catch {
-			return `${prefix}-001`;
-		}
 	}
 
 	/**
@@ -1052,15 +1068,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		const modal = append(overlay, $('.create-resource-modal'));
 		modal.style.width = '100%';
-		modal.style.maxWidth = '480px';
+		modal.style.maxWidth = '640px';
 		modal.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
-		modal.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-		modal.style.borderRadius = '10px';
-		modal.style.padding = '20px';
-		modal.style.boxShadow = '0 12px 32px rgba(0,0,0,0.6)';
+		modal.style.border = '1px solid rgba(255, 255, 255, 0.18)';
+		modal.style.borderRadius = '12px';
+		modal.style.padding = '24px 28px';
+		modal.style.boxShadow = '0 16px 40px rgba(0,0,0,0.7)';
 		modal.style.display = 'flex';
 		modal.style.flexDirection = 'column';
-		modal.style.gap = '14px';
+		modal.style.gap = '16px';
 
 		// Modal Header
 		const modalHeader = append(modal, $('.modal-header'));
@@ -1068,53 +1084,59 @@ export class MainWorkspaceViewPane extends ViewPane {
 		modalHeader.style.alignItems = 'center';
 		modalHeader.style.justifyContent = 'space-between';
 
-		const modalTitle = append(modalHeader, $('div', { style: 'font-weight: 600; font-size: 13px; color: #38bdf8; display: flex; align-items: center; gap: 8px;' }));
-		append(modalTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
-		append(modalTitle, $('span', {}, `New Entity Folder in '${targetName}'`));
+		const modalTitle = append(modalHeader, $('div', { style: 'font-weight: 600; font-size: 14px; color: #38bdf8; display: flex; align-items: center; gap: 8px;' }));
+		append(modalTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.folderActive)));
+		append(modalTitle, $('span', {}, `Create Sub-Entity in ${targetName}`));
 
 		const closeIcon = append(modalHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
 		closeIcon.style.cursor = 'pointer';
+		closeIcon.style.fontSize = '14px';
 		closeIcon.style.opacity = '0.7';
 		closeIcon.onclick = () => overlay.remove();
 
-		// Category Radio Selection (Workspace as 1st Top Entity)
-		append(modal, $('label', { style: 'font-size: 11px; opacity: 0.85; font-weight: 500;' }, 'Select Entity Type:'));
-		const categoryGrid = append(modal, $('.category-grid'));
-		categoryGrid.style.display = 'grid';
-		categoryGrid.style.gridTemplateColumns = '1fr 1fr 1fr';
-		categoryGrid.style.gap = '6px';
+		// Category / Type Selection Row
+		const categoryBox = append(modal, $('.form-group'));
+		append(categoryBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 6px; font-weight: 500;' }, 'Select Sub-Entity Type:'));
 
 		let selectedType: ResourceType = 'job';
 
 		const types: { type: ResourceType; label: string; icon: ThemeIcon; color: string }[] = [
-			{ type: 'job', label: 'Job', icon: Codicon.rocket, color: '#fbbf24' },
-			{ type: 'task', label: 'Task', icon: Codicon.checklist, color: '#a78bfa' },
-			{ type: 'project', label: 'Project', icon: Codicon.project, color: '#60a5fa' },
-			{ type: 'case', label: 'Case', icon: Codicon.beaker, color: '#f472b6' },
-			{ type: 'agent', label: 'AI Agent', icon: Codicon.robot, color: '#38bdf8' },
+			{ type: 'job', label: 'Job', icon: Codicon.briefcase, color: '#eab308' },
+			{ type: 'task', label: 'Task', icon: Codicon.tasklist, color: '#3b82f6' },
+			{ type: 'project', label: 'Project', icon: Codicon.project, color: '#a855f7' },
+			{ type: 'workflow', label: 'Workflow', icon: Codicon.circuitBoard, color: '#10b981' },
+			{ type: 'case', label: 'Case', icon: Codicon.checklist, color: '#f97316' },
+			{ type: 'agent', label: 'AI Agent', icon: Codicon.robot, color: '#ec4899' },
 			{ type: 'issue', label: 'Issue', icon: Codicon.bug, color: '#ef4444' },
-			{ type: 'analysis', label: 'Analysis', icon: Codicon.graph, color: '#34d399' },
-			{ type: 'workspace', label: 'Workspace', icon: Codicon.rootFolder, color: '#38bdf8' },
+			{ type: 'analysis', label: 'Analysis', icon: Codicon.graph, color: '#06b6d4' },
 			{ type: 'folder', label: 'Folder', icon: Codicon.folder, color: '#94a3b8' },
-			{ type: 'file', label: 'File', icon: Codicon.file, color: '#94a3b8' }
+			{ type: 'file', label: 'File', icon: Codicon.file, color: '#64748b' }
 		];
+
+		const categoryGrid = append(categoryBox, $('.category-grid'));
+		categoryGrid.style.display = 'grid';
+		categoryGrid.style.gridTemplateColumns = 'repeat(5, 1fr)';
+		categoryGrid.style.gap = '8px';
 
 		const typeButtons: HTMLElement[] = [];
 
 		for (const t of types) {
 			const btn = append(categoryGrid, $('.type-option-btn'));
-			btn.style.padding = '6px 8px';
-			btn.style.borderRadius = '5px';
+			btn.style.padding = '8px 10px';
+			btn.style.borderRadius = '6px';
 			btn.style.cursor = 'pointer';
-			btn.style.fontSize = '10.5px';
+			btn.style.fontSize = '11.5px';
 			btn.style.display = 'flex';
 			btn.style.alignItems = 'center';
-			btn.style.gap = '5px';
+			btn.style.justifyContent = 'center';
+			btn.style.gap = '6px';
 			btn.style.border = t.type === selectedType ? '1px solid #38bdf8' : '1px solid rgba(255,255,255,0.08)';
-			btn.style.backgroundColor = t.type === selectedType ? 'rgba(56, 189, 248, 0.15)' : 'rgba(255,255,255,0.03)';
+			btn.style.backgroundColor = t.type === selectedType ? 'rgba(56, 189, 248, 0.18)' : 'rgba(255,255,255,0.03)';
+			btn.style.transition = 'all 0.15s ease';
 
 			const iconSpan = append(btn, $('span' + ThemeIcon.asCSSSelector(t.icon)));
 			iconSpan.style.color = t.color;
+			iconSpan.style.fontSize = '14px';
 
 			append(btn, $('span', {}, t.label));
 
@@ -1123,50 +1145,136 @@ export class MainWorkspaceViewPane extends ViewPane {
 				for (let i = 0; i < typeButtons.length; i++) {
 					const isSelected = types[i].type === selectedType;
 					typeButtons[i].style.border = isSelected ? '1px solid #38bdf8' : '1px solid rgba(255,255,255,0.08)';
-					typeButtons[i].style.backgroundColor = isSelected ? 'rgba(56, 189, 248, 0.15)' : 'rgba(255,255,255,0.03)';
+					typeButtons[i].style.backgroundColor = isSelected ? 'rgba(56, 189, 248, 0.18)' : 'rgba(255,255,255,0.03)';
 				}
-				nameInput.value = await this.generateSequentialName(targetUri, selectedType);
-				await updateValidation();
+				await refreshNameAndBadge();
 			};
 
 			typeButtons.push(btn);
 		}
 
+		// Entity Code Prefix Override Box
+		const codeBox = append(modal, $('.form-group'));
+		append(codeBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Entity Code Prefix (Optional Override):'));
+		const codeInput = append(codeBox, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; text-transform: uppercase;'
+		})) as HTMLInputElement;
+		codeInput.placeholder = 'Inherited from parent (leave blank to inherit)';
+
+		// Ticket ID Live Badge
+		const badgeBox = append(modal, $('.form-group'));
+		const previewBadge = append(badgeBox, $('div', {
+			style: 'font-size: 11.5px; font-weight: 600; color: #38bdf8; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 6px; padding: 8px 12px; text-align: center;'
+		}));
+		previewBadge.innerText = 'Generated Ticket ID: calculating...';
+
+		// Priority Selection Box (5 Levels)
+		const priorityBox = append(modal, $('.form-group'));
+		append(priorityBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 6px; font-weight: 500;' }, 'Priority Level (5 Levels):'));
+
+		let selectedPriority = 'Medium';
+		const priorities = [
+			{ level: 'Very High', label: '🔴 Very High', color: '#f43f5e' },
+			{ level: 'High', label: '🟠 High', color: '#fb923c' },
+			{ level: 'Medium', label: '🔵 Medium', color: '#38bdf8' },
+			{ level: 'Low', label: '🟢 Low', color: '#34d399' },
+			{ level: 'Very Low', label: '⚪ Very Low', color: '#94a3b8' }
+		];
+
+		const priorityGrid = append(priorityBox, $('.priority-grid'));
+		priorityGrid.style.display = 'grid';
+		priorityGrid.style.gridTemplateColumns = 'repeat(5, 1fr)';
+		priorityGrid.style.gap = '8px';
+
+		const priorityButtons: HTMLElement[] = [];
+		for (const p of priorities) {
+			const pBtn = append(priorityGrid, $('.priority-option-btn'));
+			pBtn.style.padding = '7px 8px';
+			pBtn.style.borderRadius = '6px';
+			pBtn.style.cursor = 'pointer';
+			pBtn.style.fontSize = '11px';
+			pBtn.style.fontWeight = '500';
+			pBtn.style.display = 'flex';
+			pBtn.style.alignItems = 'center';
+			pBtn.style.justifyContent = 'center';
+			pBtn.style.border = p.level === selectedPriority ? `1px solid ${p.color}` : '1px solid rgba(255,255,255,0.08)';
+			pBtn.style.backgroundColor = p.level === selectedPriority ? `${p.color}25` : 'rgba(255,255,255,0.03)';
+			pBtn.style.color = p.level === selectedPriority ? p.color : 'inherit';
+			pBtn.style.transition = 'all 0.15s ease';
+			pBtn.innerText = p.label;
+
+			pBtn.onclick = () => {
+				selectedPriority = p.level;
+				for (let i = 0; i < priorityButtons.length; i++) {
+					const isSel = priorities[i].level === selectedPriority;
+					priorityButtons[i].style.border = isSel ? `1px solid ${priorities[i].color}` : '1px solid rgba(255,255,255,0.08)';
+					priorityButtons[i].style.backgroundColor = isSel ? `${priorities[i].color}25` : 'rgba(255,255,255,0.03)';
+					priorityButtons[i].style.color = isSel ? priorities[i].color : 'inherit';
+				}
+			};
+			priorityButtons.push(pBtn);
+		}
+
+		// AI Agent Assignment Box
+		const agentBox = append(modal, $('.form-group'));
+		append(agentBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Assign AI Agent (Involved Agent):'));
+
+		const agentSelect = append(agentBox, $('select.monaco-select', {
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box;'
+		})) as HTMLSelectElement;
+
+		append(agentSelect, $('option', { value: '' }, '-- Unassigned (No Agent) --'));
+
+		this.agentsManagerService.getAgents().then(agents => {
+			for (const ag of agents) {
+				const opt = append(agentSelect, $('option', { value: ag.id }, `🤖 ${ag.name} (${ag.modelName || 'gemini-2.0-flash'})`));
+				opt.setAttribute('data-name', ag.name);
+			}
+		}).catch(() => {});
+
+		// Agent Rule / Prompt Input
+		const ruleBox = append(modal, $('.form-group'));
+		append(ruleBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Agent Rule / Specific Prompt for this Ticket:'));
+		const ruleInput = append(ruleBox, $('textarea.monaco-inputbox', {
+			style: 'width: 100%; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; min-height: 52px; font-family: inherit;'
+		})) as HTMLTextAreaElement;
+		ruleInput.placeholder = 'e.g. Follow strict code quality rules and execute unit tests for this ticket...';
+
 		// Resource Name Input
 		const nameBox = append(modal, $('.form-group'));
-		append(nameBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Entity Folder Name:'));
+		const nameLabel = append(nameBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Entity Folder Name / Ticket ID:'));
 		const nameInput = append(nameBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
 
 		// Warning banner element for duplicate or invalid names
 		const warningBanner = append(nameBox, $('div', {
-			style: 'font-size: 10.5px; color: #ef4444; margin-top: 4px; display: none; line-height: 1.3;'
+			style: 'font-size: 11px; color: #ef4444; margin-top: 4px; display: none; line-height: 1.3;'
 		}));
 
-		// Description Input
+		// Description Input (Multiline Textarea)
 		const descBox = append(modal, $('.form-group'));
-		append(descBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Description:'));
-		const descInput = append(descBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
-		})) as HTMLInputElement;
-		descInput.placeholder = 'Brief purpose of this entity';
+		append(descBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Description:'));
+		const descInput = append(descBox, $('textarea.monaco-inputbox', {
+			style: 'width: 100%; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; min-height: 64px; font-family: inherit;'
+		})) as HTMLTextAreaElement;
+		descInput.placeholder = 'Brief purpose of this entity...';
 
 		// Action Buttons Row
 		const actionsRow = append(modal, $('.modal-actions-row'));
 		actionsRow.style.display = 'flex';
 		actionsRow.style.justifyContent = 'flex-end';
-		actionsRow.style.gap = '8px';
-		actionsRow.style.marginTop = '6px';
+		actionsRow.style.gap = '10px';
+		actionsRow.style.marginTop = '8px';
 
 		const cancelBtn = append(actionsRow, $('button.monaco-button', {
-			style: 'padding: 5px 12px; font-size: 11px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit;'
+			style: 'padding: 7px 16px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit;'
 		}));
 		cancelBtn.innerText = 'Cancel';
 		cancelBtn.onclick = () => overlay.remove();
 
 		const submitBtn = append(actionsRow, $('button.monaco-button', {
-			style: 'padding: 6px 14px; font-size: 11px; border-radius: 4px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; font-weight: 600;'
+			style: 'padding: 7px 18px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; font-weight: 600;'
 		})) as HTMLButtonElement;
 		submitBtn.innerText = 'Create Entity';
 
@@ -1186,7 +1294,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 			const targetCheckUri2 = URI.joinPath(targetUri, sanitizedName);
 			const exists = await this.fileService.exists(targetCheckUri1) || await this.fileService.exists(targetCheckUri2);
 			if (exists) {
-				warningBanner.innerText = `⚠️ Entity folder '${inputName}' is already occupied in '${targetName}'. Please enter a unique name.`;
+				warningBanner.innerText = `⚠️ Item '${inputName}' already exists in '${targetName}'. Please enter a unique name.`;
 				warningBanner.style.display = 'block';
 				submitBtn.disabled = true;
 				submitBtn.style.opacity = '0.5';
@@ -1199,11 +1307,44 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 		};
 
-		// Set initial sequential name and run validation
-		this.generateSequentialName(targetUri, selectedType).then(initialName => {
-			nameInput.value = initialName;
-			updateValidation();
-		});
+		const refreshNameAndBadge = async () => {
+			if (selectedType === 'folder') {
+				codeBox.style.display = 'none';
+				badgeBox.style.display = 'none';
+				priorityBox.style.display = 'none';
+				agentBox.style.display = 'none';
+				ruleBox.style.display = 'none';
+				nameLabel.innerText = 'Folder Name:';
+				nameInput.value = 'new_folder';
+			} else if (selectedType === 'file') {
+				codeBox.style.display = 'none';
+				badgeBox.style.display = 'none';
+				priorityBox.style.display = 'none';
+				agentBox.style.display = 'none';
+				ruleBox.style.display = 'none';
+				nameLabel.innerText = 'File Name:';
+				nameInput.value = 'new_file.md';
+			} else {
+				codeBox.style.display = 'block';
+				badgeBox.style.display = 'block';
+				priorityBox.style.display = 'block';
+				agentBox.style.display = 'block';
+				ruleBox.style.display = 'block';
+				nameLabel.innerText = 'Entity Folder Name / Ticket ID:';
+				const customCode = codeInput.value.trim();
+				const seq = await this.workspacesExplorerService.generateNextSequentialName(targetUri, selectedType, customCode);
+				nameInput.value = seq.name;
+				previewBadge.innerText = `Generated Ticket ID: ${seq.name} (Prefix Code: ${seq.code})`;
+			}
+			await updateValidation();
+		};
+
+		// Initial refresh
+		refreshNameAndBadge();
+
+		codeInput.oninput = () => {
+			refreshNameAndBadge();
+		};
 
 		nameInput.oninput = () => {
 			updateValidation();
@@ -1217,10 +1358,19 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 
 			try {
+				const selectedOpt = agentSelect.options[agentSelect.selectedIndex];
+				const assignedAgentId = agentSelect.value || undefined;
+				const assignedAgentName = (assignedAgentId && selectedOpt) ? (selectedOpt.getAttribute('data-name') || selectedOpt.text.replace(/^🤖\s*/, '').replace(/\s*\(.*\)$/, '')) : undefined;
+
 				const createResult = await this.workspacesExplorerService.createResourceUnderWorkspace({
 					workspaceUri: targetUri,
 					type: selectedType,
 					name,
+					code: codeInput.value.trim(),
+					priority: selectedPriority,
+					assignedAgentId,
+					assignedAgentName,
+					agentRulePrompt: ruleInput.value.trim(),
 					description: descInput.value.trim()
 				});
 

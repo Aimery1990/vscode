@@ -45,6 +45,10 @@ export interface ICreateResourceOptions {
 	name: string;
 	description?: string;
 	code?: string;
+	priority?: string;
+	assignedAgentId?: string;
+	assignedAgentName?: string;
+	agentRulePrompt?: string;
 	parentEntityUri?: URI;
 }
 
@@ -76,6 +80,11 @@ export interface IEntityMetadataSnapshot {
 	createdAt: string;
 	description?: string;
 	belongsToWorkspaceUri?: string;
+	entityCode?: string;
+	priority?: string;
+	assignedAgentId?: string;
+	assignedAgentName?: string;
+	agentRulePrompt?: string;
 	primaryLanguage?: string;
 	lastKnownChildren?: string[];
 	git?: IEntityGitSnapshot;
@@ -92,7 +101,9 @@ export interface IWorkspacesExplorerService {
 	removeWorkspace(uri: URI): Promise<void>;
 	scanWorkspaceChildren(workspaceUri: URI): Promise<IWorkspaceChildItem[]>;
 	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult>;
+	createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult>;
 	createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult>;
+	generateNextSequentialName(targetParentUri: URI, type: ResourceType, customCode?: string): Promise<{ name: string; code: string }>;
 	reinitializeWorkspaceMd(workspaceUri: URI): Promise<void>;
 	reorderWorkspaces(sourceId: string, targetId: string): Promise<void>;
 	getMetadataSnapshot(uri: URI | string): IEntityMetadataSnapshot | undefined;

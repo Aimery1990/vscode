@@ -29,6 +29,10 @@ import {
 import { WorkspacesExplorerService } from './workspacesExplorerService.js';
 import { WorkspacesExplorerViewPaneContainer } from './workspacesExplorerViewlet.js';
 import { MainWorkspaceViewPane } from './workspacesExplorerPane.js';
+import { EntityDetailEditor } from './entityDetailEditor.js';
+import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
+import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
+import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../common/editor.js';
 
 // 1. Register Singleton Service
 registerSingleton(IWorkspacesExplorerService, WorkspacesExplorerService, InstantiationType.Delayed);
@@ -153,3 +157,33 @@ registerAction2(class NewWorkspaceAction extends Action2 {
 		}
 	}
 });
+
+// --- Register Entity Detail Editor ---
+Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+	EditorPaneDescriptor.create(
+		EntityDetailEditor,
+		EntityDetailEditor.ID,
+		localize('entityDetailEditor', "Entity Detail")
+	),
+	[
+		new SyncDescriptor(EntityDetailEditorInput)
+	]
+);
+
+class EntityDetailEditorInputSerializer implements IEditorSerializer {
+	canSerialize(): boolean {
+		return false;
+	}
+
+	serialize(): string | undefined {
+		return undefined;
+	}
+
+	deserialize(): EntityDetailEditorInput | undefined {
+		return undefined;
+	}
+}
+
+Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory)
+	.registerEditorSerializer(EntityDetailEditorInput.ID, EntityDetailEditorInputSerializer);
+
