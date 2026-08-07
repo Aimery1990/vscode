@@ -37,15 +37,11 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		}));
 
 		this._register(this.authenticationService.onDidChangeSessions(async (e: any) => {
-			if (e.providerId === 'google') {
-				await this.updateActiveUser();
-			}
+			await this.updateActiveUser();
 		}));
 
 		this._register(this.authenticationService.onDidRegisterAuthenticationProvider(async (e: any) => {
-			if (e.id === 'google') {
-				await this.updateActiveUser();
-			}
+			await this.updateActiveUser();
 		}));
 
 		this.updateActiveUser();
@@ -53,10 +49,24 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 	private async updateActiveUser(): Promise<void> {
 		try {
-			const sessions = await this.authenticationService.getSessions('google');
-			const newEmail = (sessions && sessions.length > 0) ? sessions[0].account.label : '';
-			if (newEmail !== this.activeUserEmail) {
-				this.activeUserEmail = newEmail;
+			const providers = ['google', 'github', 'microsoft', 'apple', ...this.authenticationService.declaredProviders.map(p => p.id)];
+			const uniqueProviders = Array.from(new Set(providers));
+			let newUserIdentifier = '';
+
+			for (const providerId of uniqueProviders) {
+				try {
+					const sessions = await this.authenticationService.getSessions(providerId);
+					if (sessions && sessions.length > 0) {
+						newUserIdentifier = `${providerId}:${sessions[0].account.label}`;
+						break;
+					}
+				} catch {
+					// Ignore failures for providers not yet initialized/supported
+				}
+			}
+
+			if (newUserIdentifier !== this.activeUserEmail) {
+				this.activeUserEmail = newUserIdentifier;
 				this._onDidChangeSnapshots.fire();
 			}
 		} catch (err) {
