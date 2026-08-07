@@ -28,8 +28,8 @@ export class AccountSignInModal extends Disposable {
 		}
 	}
 
-	public async show(): Promise<void> {
-		this.createModal();
+	public async show(isForce = false): Promise<void> {
+		this.createModal(isForce);
 	}
 
 	private setElementHTML(element: HTMLElement, html: string): void {
@@ -40,7 +40,7 @@ export class AccountSignInModal extends Disposable {
 		}
 	}
 
-	private createModal(): void {
+	private createModal(isForce = false): void {
 		const targetDocument = getActiveDocument() || window.document || mainWindow.document;
 
 		// Remove any existing modal
@@ -87,25 +87,27 @@ export class AccountSignInModal extends Disposable {
 		`;
 
 		// Close Button
-		const closeBtn = targetDocument.createElement('button');
-		this.setElementHTML(closeBtn, '✕');
-		closeBtn.style.cssText = `
-			position: absolute;
-			top: 18px;
-			right: 20px;
-			background: transparent;
-			border: none;
-			color: #71717a;
-			font-size: 18px;
-			cursor: pointer;
-			padding: 4px 8px;
-			border-radius: 6px;
-			transition: all 0.15s ease;
-		`;
-		closeBtn.onmouseenter = () => { closeBtn.style.color = '#ffffff'; closeBtn.style.background = '#27272a'; };
-		closeBtn.onmouseleave = () => { closeBtn.style.color = '#71717a'; closeBtn.style.background = 'transparent'; };
-		closeBtn.onclick = () => this.close();
-		modal.appendChild(closeBtn);
+		if (!isForce) {
+			const closeBtn = targetDocument.createElement('button');
+			this.setElementHTML(closeBtn, '✕');
+			closeBtn.style.cssText = `
+				position: absolute;
+				top: 18px;
+				right: 20px;
+				background: transparent;
+				border: none;
+				color: #71717a;
+				font-size: 18px;
+				cursor: pointer;
+				padding: 4px 8px;
+				border-radius: 6px;
+				transition: all 0.15s ease;
+			`;
+			closeBtn.onmouseenter = () => { closeBtn.style.color = '#ffffff'; closeBtn.style.background = '#27272a'; };
+			closeBtn.onmouseleave = () => { closeBtn.style.color = '#71717a'; closeBtn.style.background = 'transparent'; };
+			closeBtn.onclick = () => this.close();
+			modal.appendChild(closeBtn);
+		}
 
 		// Brand Icon Header (Any Agent / Google AI Icon)
 		const iconContainer = targetDocument.createElement('div');
@@ -242,11 +244,13 @@ export class AccountSignInModal extends Disposable {
 		overlay.appendChild(modal);
 
 		// Close on clicking outside modal
-		overlay.onclick = (e) => {
-			if (e.target === overlay) {
-				this.close();
-			}
-		};
+		if (!isForce) {
+			overlay.onclick = (e) => {
+				if (e.target === overlay) {
+					this.close();
+				}
+			};
+		}
 
 		// Synchronously append overlay to DOM
 		targetDocument.body.appendChild(overlay);

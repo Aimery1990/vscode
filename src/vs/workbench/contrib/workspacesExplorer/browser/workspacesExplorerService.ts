@@ -17,6 +17,8 @@ import { IEntityPersistenceService } from '../../entityPersistence/common/entity
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { EditorsOrder } from '../../../common/editor.js';
+import { ITerminalService } from '../../terminal/browser/terminal.js';
+import { IDebugService } from '../../debug/common/debug.js';
 
 const SAVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.savedWorkspaces';
 const REMOVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.removedWorkspaces';
@@ -37,7 +39,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
 		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService,
 		@IAuthenticationService private readonly authenticationService: IAuthenticationService,
-		@IEditorService private readonly editorService: IEditorService
+		@IEditorService private readonly editorService: IEditorService,
+		@ITerminalService private readonly terminalService: ITerminalService,
+		@IDebugService private readonly debugService: IDebugService
 	) {
 		super();
 		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
@@ -80,11 +84,37 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 			if (newUserIdentifier !== this.activeUserEmail) {
 				this.activeUserEmail = newUserIdentifier;
-				// Close all active editors on account switch/sandbox change to prevent data leaks
-				const openEditors = this.editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE);
-				if (openEditors.length > 0) {
-					await this.editorService.closeEditors(openEditors);
+
+				// 1. Close all active editors on account switch/sandbox change to prevent data leaks
+				try {
+					const openEditors = this.editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE);
+					if (openEditors.length > 0) {
+						await this.editorService.closeEditors(openEditors);
+					}
+				} catch (err) {
+					console.error('Failed to close active editors on user switch:', err);
 				}
+
+				// 2. Kill all active terminal instances
+				try {
+					const instances = this.terminalService.instances;
+					for (const inst of instances) {
+						inst.dispose();
+					}
+				} catch (err) {
+					console.error('Failed to dispose active terminals on user switch:', err);
+				}
+
+				// 3. Stop all active debug sessions
+				try {
+					const sessions = this.debugService.getModel().getSessions();
+					for (const s of sessions) {
+						this.debugService.stopSession(s).catch(() => {});
+					}
+				} catch (err) {
+					console.error('Failed to stop active debug sessions on user switch:', err);
+				}
+
 				this._onDidChangeWorkspaces.fire();
 			}
 		} catch (err) {
@@ -103,6 +133,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	getMetadataSnapshot(uri: URI | string): IEntityMetadataSnapshot | undefined {
 		const snapshot = this.entityPersistenceService.getSnapshot(uri);
 		if (!snapshot) {
+			return undefined;
+		}
+		if (snapshot.ownerAccount && this.activeUserEmail && snapshot.ownerAccount !== this.activeUserEmail) {
 			return undefined;
 		}
 		return {

@@ -13,6 +13,7 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IAgentItem, IAgentsManagerService, AgentScopeType } from '../common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
+import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 
 const STORAGE_KEY = 'workbench.agentsManager.agents';
 
@@ -28,23 +29,69 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 	private _agents: IAgentItem[] = [];
 	private _initialized = false;
 
+	private activeUserEmail: string = '';
+
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
 		@IFileService private readonly fileService: IFileService,
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
-		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService
+		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
+		@IAuthenticationService private readonly authenticationService: IAuthenticationService
 	) {
 		super();
-		this._loadAgents();
 
-		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, STORAGE_KEY, this._store)(_e => {
-			this._loadAgents();
-			this._onDidChangeAgents.fire();
+		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
+			if (e.key === this.agentsStorageKey) {
+				this._loadAgents();
+				this._onDidChangeAgents.fire();
+			}
 		}));
 
 		this._register(this.entityPersistenceService.onDidChangeSnapshots(() => {
 			this._onDidChangeAgents.fire();
 		}));
+
+		this._register(this.authenticationService.onDidChangeSessions(async () => {
+			await this.updateActiveUser();
+		}));
+
+		this._register(this.authenticationService.onDidRegisterAuthenticationProvider(async () => {
+			await this.updateActiveUser();
+		}));
+
+		this.updateActiveUser();
+	}
+
+	private async updateActiveUser(): Promise<void> {
+		try {
+			const providers = ['google', 'github', 'microsoft', 'apple', ...this.authenticationService.declaredProviders.map(p => p.id)];
+			const uniqueProviders = Array.from(new Set(providers));
+			let newUserIdentifier = '';
+
+			for (const providerId of uniqueProviders) {
+				try {
+					const sessions = await this.authenticationService.getSessions(providerId);
+					if (sessions && sessions.length > 0) {
+						newUserIdentifier = `${providerId}:${sessions[0].account.label}`;
+						break;
+					}
+				} catch {
+					// Ignore failures for providers not yet initialized
+				}
+			}
+
+			if (newUserIdentifier !== this.activeUserEmail) {
+				this.activeUserEmail = newUserIdentifier;
+				this._loadAgents();
+				this._onDidChangeAgents.fire();
+			}
+		} catch (err) {
+			console.error('Failed to update active user in AgentsManagerService:', err);
+		}
+	}
+
+	private get agentsStorageKey(): string {
+		return `${STORAGE_KEY}:${this.activeUserEmail || 'unauthenticated'}`;
 	}
 
 	notifyPaneExpanded(paneId: string): void {
@@ -52,7 +99,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 	}
 
 	private _loadAgents(): void {
-		const raw = this.storageService.get(STORAGE_KEY, StorageScope.PROFILE);
+		const raw = this.storageService.get(this.agentsStorageKey, StorageScope.PROFILE);
 		if (raw) {
 			try {
 				const parsed = JSON.parse(raw) as IAgentItem[];
@@ -75,7 +122,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 
 	private _saveAgents(): void {
 		this.storageService.store(
-			STORAGE_KEY,
+			this.agentsStorageKey,
 			JSON.stringify(this._agents),
 			StorageScope.PROFILE,
 			StorageTarget.USER
@@ -119,7 +166,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 					entityUri: parentUri.toString(),
 					entityName: newAgent.name,
 					entityType: 'agent',
-					ownerAccount: 'aimery.wei@gmail.com',
+					ownerAccount: this.activeUserEmail || 'unauthenticated',
 					description: newAgent.role,
 					systemPrompt: newAgent.systemPrompt,
 					role: newAgent.role,
@@ -157,7 +204,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 						entityUri: folderUri.toString(),
 						entityName: updated.name,
 						entityType: 'agent',
-						ownerAccount: 'aimery.wei@gmail.com',
+						ownerAccount: this.activeUserEmail || 'unauthenticated',
 						description: updated.role,
 						systemPrompt: updated.systemPrompt,
 						role: updated.role,

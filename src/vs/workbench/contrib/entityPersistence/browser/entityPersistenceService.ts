@@ -199,6 +199,14 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		const targetUri = URI.parse(key);
 		const snapshot = this.getSnapshot(key);
 
+		if (snapshot && snapshot.ownerAccount && this.activeUserEmail && snapshot.ownerAccount !== this.activeUserEmail) {
+			return {
+				isMissing: true,
+				missingReason: `Unauthorized Workspace: Belongs to ${snapshot.ownerAccount}`,
+				snapshot
+			};
+		}
+
 		try {
 			const folderExists = await this.fileService.exists(targetUri);
 			if (!folderExists) {
@@ -254,7 +262,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 				entityUri: key,
 				entityName: folderName,
 				entityType: detectedType,
-				ownerAccount: 'aimery.wei@gmail.com',
+				ownerAccount: this.activeUserEmail || 'unauthenticated',
 				createdAt: this.getFormattedDateTime(),
 				description: `${detectedType} ${folderName}`
 			};
@@ -277,7 +285,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		const configDir = await this.migrateLegacyEntityFilesIfNeeded(entityFolderUri);
 
 		const dateTimeFormatted = snapshot.createdAt || this.getFormattedDateTime();
-		const ownerAccount = snapshot.ownerAccount || 'aimery.wei@gmail.com';
+		const ownerAccount = snapshot.ownerAccount || this.activeUserEmail || 'unauthenticated';
 		const modelStr = snapshot.modelName || 'gemini-2.0-flash';
 		const description = snapshot.description || `${type} description`;
 
