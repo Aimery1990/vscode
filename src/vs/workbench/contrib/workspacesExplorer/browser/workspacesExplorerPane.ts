@@ -1174,11 +1174,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		let selectedPriority = 'Medium';
 		const priorities = [
-			{ level: 'Very High', label: '🔴 Very High', color: '#f43f5e' },
-			{ level: 'High', label: '🟠 High', color: '#fb923c' },
-			{ level: 'Medium', label: '🔵 Medium', color: '#38bdf8' },
-			{ level: 'Low', label: '🟢 Low', color: '#34d399' },
-			{ level: 'Very Low', label: '⚪ Very Low', color: '#94a3b8' }
+			{ level: 'Very High', label: 'Very High', color: '#f43f5e' },
+			{ level: 'High', label: 'High', color: '#fb923c' },
+			{ level: 'Medium', label: 'Medium', color: '#38bdf8' },
+			{ level: 'Low', label: 'Low', color: '#34d399' },
+			{ level: 'Very Low', label: 'Very Low', color: '#2dd4bf' }
 		];
 
 		const priorityGrid = append(priorityBox, $('.priority-grid'));
@@ -1192,24 +1192,41 @@ export class MainWorkspaceViewPane extends ViewPane {
 			pBtn.style.padding = '7px 8px';
 			pBtn.style.borderRadius = '6px';
 			pBtn.style.cursor = 'pointer';
-			pBtn.style.fontSize = '11px';
-			pBtn.style.fontWeight = '500';
+			pBtn.style.fontSize = '11.5px';
+			pBtn.style.fontWeight = '600';
 			pBtn.style.display = 'flex';
 			pBtn.style.alignItems = 'center';
 			pBtn.style.justifyContent = 'center';
+			pBtn.style.gap = '6px';
 			pBtn.style.border = p.level === selectedPriority ? `1px solid ${p.color}` : '1px solid rgba(255,255,255,0.08)';
 			pBtn.style.backgroundColor = p.level === selectedPriority ? `${p.color}25` : 'rgba(255,255,255,0.03)';
 			pBtn.style.color = p.level === selectedPriority ? p.color : 'inherit';
 			pBtn.style.transition = 'all 0.15s ease';
-			pBtn.innerText = p.label;
+
+			const dot = append(pBtn, $('span.priority-dot'));
+			dot.style.display = 'inline-block';
+			dot.style.width = '7px';
+			dot.style.height = '7px';
+			dot.style.borderRadius = '50%';
+			dot.style.backgroundColor = p.color;
+			dot.style.boxShadow = p.level === selectedPriority ? `0 0 6px ${p.color}` : 'none';
+			dot.style.flexShrink = '0';
+
+			const txt = append(pBtn, $('span'));
+			txt.innerText = p.label;
 
 			pBtn.onclick = () => {
 				selectedPriority = p.level;
 				for (let i = 0; i < priorityButtons.length; i++) {
 					const isSel = priorities[i].level === selectedPriority;
-					priorityButtons[i].style.border = isSel ? `1px solid ${priorities[i].color}` : '1px solid rgba(255,255,255,0.08)';
-					priorityButtons[i].style.backgroundColor = isSel ? `${priorities[i].color}25` : 'rgba(255,255,255,0.03)';
-					priorityButtons[i].style.color = isSel ? priorities[i].color : 'inherit';
+					const btnEl = priorityButtons[i];
+					const dotEl = btnEl.querySelector('.priority-dot') as HTMLElement;
+					btnEl.style.border = isSel ? `1px solid ${priorities[i].color}` : '1px solid rgba(255,255,255,0.08)';
+					btnEl.style.backgroundColor = isSel ? `${priorities[i].color}25` : 'rgba(255,255,255,0.03)';
+					btnEl.style.color = isSel ? priorities[i].color : 'inherit';
+					if (dotEl) {
+						dotEl.style.boxShadow = isSel ? `0 0 6px ${priorities[i].color}` : 'none';
+					}
 				}
 			};
 			priorityButtons.push(pBtn);

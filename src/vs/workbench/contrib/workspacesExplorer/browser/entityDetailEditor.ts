@@ -614,6 +614,26 @@ export class EntityDetailEditor extends EditorPane {
 			if (keyLower === 'entity type') {
 				continue; // Removed to avoid redundancy with the main badge
 			}
+			if (keyLower === 'priority') {
+				const pColors: { [key: string]: string } = {
+					'very high': '#f43f5e',
+					'high': '#fb923c',
+					'medium': '#38bdf8',
+					'low': '#34d399',
+					'very low': '#2dd4bf'
+				};
+				const pColor = pColors[value.toLowerCase()] || '#94a3b8';
+				metadataRows += `
+					<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
+						<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">PRIORITY</span>
+						<div style="display: flex; align-items: center; gap: 6px; padding: 4px 0;">
+							<span style="display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;"></span>
+							<span style="font-size: 0.9em; font-weight: 700; color: ${pColor};">${value}</span>
+						</div>
+					</div>
+				`;
+				continue;
+			}
 			const isReadOnly = ['created at', 'belongs to workspace uri', 'target project', 'git', 'entity code', 'owner account', 'created by'].includes(keyLower);
 			if (isReadOnly) {
 				metadataRows += `

@@ -10,7 +10,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot, EntityType } from '../common/entityPersistence.js';
-
+import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 
 const SNAPSHOTS_STORAGE_KEY = 'anyagent.entityPersistence.snapshots';
 export const SYSTEM_CONFIG_DIR_NAME = '.agents';
@@ -21,15 +21,51 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 	private readonly _onDidChangeSnapshots = this._register(new Emitter<void>());
 	readonly onDidChangeSnapshots: Event<void> = this._onDidChangeSnapshots.event;
 
+	private activeUserEmail: string = '';
+
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
-		@IFileService private readonly fileService: IFileService
+		@IFileService private readonly fileService: IFileService,
+		@IAuthenticationService private readonly authenticationService: IAuthenticationService
 	) {
 		super();
 
-		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, SNAPSHOTS_STORAGE_KEY, this._store)(() => {
-			this._onDidChangeSnapshots.fire();
+		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
+			if (e.key === this.snapshotsStorageKey) {
+				this._onDidChangeSnapshots.fire();
+			}
 		}));
+
+		this._register(this.authenticationService.onDidChangeSessions(async (e: any) => {
+			if (e.providerId === 'google') {
+				await this.updateActiveUser();
+			}
+		}));
+
+		this._register(this.authenticationService.onDidRegisterAuthenticationProvider(async (e: any) => {
+			if (e.id === 'google') {
+				await this.updateActiveUser();
+			}
+		}));
+
+		this.updateActiveUser();
+	}
+
+	private async updateActiveUser(): Promise<void> {
+		try {
+			const sessions = await this.authenticationService.getSessions('google');
+			const newEmail = (sessions && sessions.length > 0) ? sessions[0].account.label : '';
+			if (newEmail !== this.activeUserEmail) {
+				this.activeUserEmail = newEmail;
+				this._onDidChangeSnapshots.fire();
+			}
+		} catch (err) {
+			console.error('Failed to update active user in EntityPersistenceService:', err);
+		}
+	}
+
+	private get snapshotsStorageKey(): string {
+		return `${SNAPSHOTS_STORAGE_KEY}:${this.activeUserEmail || 'unauthenticated'}`;
 	}
 
 	private normalizeUriString(uri: URI | string): string {
@@ -38,7 +74,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 	}
 
 	private getSnapshotsMap(): Record<string, IBaseEntitySnapshot> {
-		const raw = this.storageService.get(SNAPSHOTS_STORAGE_KEY, StorageScope.PROFILE, '{}');
+		const raw = this.storageService.get(this.snapshotsStorageKey, StorageScope.PROFILE, '{}');
 		try {
 			return JSON.parse(raw) as Record<string, IBaseEntitySnapshot>;
 		} catch {
@@ -48,7 +84,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 	private saveSnapshotsMap(map: Record<string, IBaseEntitySnapshot>): void {
 		this.storageService.store(
-			SNAPSHOTS_STORAGE_KEY,
+			this.snapshotsStorageKey,
 			JSON.stringify(map),
 			StorageScope.PROFILE,
 			StorageTarget.USER
