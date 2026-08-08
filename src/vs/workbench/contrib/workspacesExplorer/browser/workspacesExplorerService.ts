@@ -154,7 +154,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			entityUri: snapshot.entityUri,
 			entityName: snapshot.entityName,
 			entityType: snapshot.entityType as ResourceType,
-			ownerAccount: snapshot.ownerAccount || 'aimery.wei@gmail.com',
+			ownerAccount: snapshot.ownerAccount || this.activeUserEmail || 'unauthenticated',
 			createdAt: snapshot.createdAt || '',
 			description: snapshot.description,
 			belongsToWorkspaceUri: snapshot.belongsToWorkspaceUri,
@@ -221,6 +221,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 
 	async getWorkspaces(): Promise<IWorkspaceItem[]> {
+		if (!this.activeUserEmail) {
+			return [];
+		}
+
 		const currentWorkspace = this.workspaceContextService.getWorkspace();
 		const currentFolderUris = new Set(currentWorkspace.folders.map(f => f.uri.toString()));
 
@@ -235,13 +239,27 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				return;
 			}
 
-			const isCurrent = currentFolderUris.has(uriStr);
-
 			let targetBase = uri;
 			if (uri.path.endsWith('.code-workspace')) {
 				targetBase = dirname(uri);
 			}
 
+			// Pre-check snapshot ownership to skip workspaces belonging to other accounts entirely
+			const snapshotCheck = this.entityPersistenceService.getSnapshot(targetBase);
+			if (snapshotCheck && snapshotCheck.ownerAccount && this.activeUserEmail) {
+				const extractEmail = (str: string): string => {
+					const clean = str.includes(':') ? str.split(':')[1] : str;
+					const match = clean.match(/\(([^)]+)\)/);
+					return (match ? match[1] : clean).trim().toLowerCase();
+				};
+				const cleanActiveUser = extractEmail(this.activeUserEmail);
+				const cleanOwner = extractEmail(snapshotCheck.ownerAccount);
+				if (cleanActiveUser !== cleanOwner && snapshotCheck.ownerAccount !== this.activeUserEmail) {
+					return;
+				}
+			}
+
+			const isCurrent = currentFolderUris.has(uriStr);
 			const name = targetBase.path.split('/').filter(Boolean).pop() || 'Untitled Workspace';
 			const item: IWorkspaceItem = {
 				id: uri.toString(),
@@ -441,7 +459,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			entityName: options.name,
 			entityType: 'workspace',
 			entityCode: wsCode,
-			ownerAccount: 'aimery.wei@gmail.com',
+			ownerAccount: this.activeUserEmail || 'unauthenticated',
 			description: options.description || `Workspace ${options.name}`
 		}, targetBaseUri, false);
 
@@ -460,7 +478,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			entityUri: targetBaseUri.toString(),
 			entityName: wsName,
 			entityType: 'workspace',
-			ownerAccount: 'aimery.wei@gmail.com',
+			ownerAccount: this.activeUserEmail || 'unauthenticated',
 			description: `Workspace ${wsName}`
 		}, targetBaseUri, false);
 
@@ -757,7 +775,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			assignedAgentId: options.assignedAgentId,
 			assignedAgentName: options.assignedAgentName,
 			agentRulePrompt: options.agentRulePrompt,
-			ownerAccount: 'aimery.wei@gmail.com',
+			ownerAccount: this.activeUserEmail || 'unauthenticated',
 			description: description || `${type} description`,
 			belongsToWorkspaceUri: targetBaseUri.toString()
 		}, targetBaseUri, true);

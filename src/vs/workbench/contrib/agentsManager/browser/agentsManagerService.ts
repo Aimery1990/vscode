@@ -130,10 +130,16 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 	}
 
 	async getAgents(): Promise<IAgentItem[]> {
+		if (!this.activeUserEmail) {
+			return [];
+		}
 		return [...this._agents];
 	}
 
 	async getAgentsByScope(scopeType: AgentScopeType, scopeId?: string): Promise<IAgentItem[]> {
+		if (!this.activeUserEmail) {
+			return [];
+		}
 		return this._agents.filter(a => a.scopeType === scopeType && (!scopeId || a.scopeId === scopeId));
 	}
 
