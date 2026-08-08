@@ -202,7 +202,8 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		if (snapshot && snapshot.ownerAccount && this.activeUserEmail) {
 			const cleanActiveUser = this.activeUserEmail.includes(':') ? this.activeUserEmail.split(':')[1] : this.activeUserEmail;
 			const cleanOwner = snapshot.ownerAccount.includes(':') ? snapshot.ownerAccount.split(':')[1] : snapshot.ownerAccount;
-			if (cleanActiveUser !== cleanOwner && snapshot.ownerAccount !== this.activeUserEmail) {
+			console.log(`[EntityHealthCheck] Compare cleanActiveUser: "${cleanActiveUser}" with cleanOwner: "${cleanOwner}". Full raw activeUser: "${this.activeUserEmail}", owner: "${snapshot.ownerAccount}"`);
+			if (cleanActiveUser.toLowerCase() !== cleanOwner.toLowerCase() && snapshot.ownerAccount !== this.activeUserEmail) {
 				return {
 					isMissing: true,
 					missingReason: `Unauthorized Workspace: Belongs to ${snapshot.ownerAccount}`,
