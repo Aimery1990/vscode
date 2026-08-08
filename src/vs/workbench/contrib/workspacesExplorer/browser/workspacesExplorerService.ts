@@ -135,8 +135,12 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		if (!snapshot) {
 			return undefined;
 		}
-		if (snapshot.ownerAccount && this.activeUserEmail && snapshot.ownerAccount !== this.activeUserEmail) {
-			return undefined;
+		if (snapshot.ownerAccount && this.activeUserEmail) {
+			const cleanActiveUser = this.activeUserEmail.includes(':') ? this.activeUserEmail.split(':')[1] : this.activeUserEmail;
+			const cleanOwner = snapshot.ownerAccount.includes(':') ? snapshot.ownerAccount.split(':')[1] : snapshot.ownerAccount;
+			if (cleanActiveUser !== cleanOwner && snapshot.ownerAccount !== this.activeUserEmail) {
+				return undefined;
+			}
 		}
 		return {
 			entityUri: snapshot.entityUri,

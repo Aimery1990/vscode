@@ -199,12 +199,16 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		const targetUri = URI.parse(key);
 		const snapshot = this.getSnapshot(key);
 
-		if (snapshot && snapshot.ownerAccount && this.activeUserEmail && snapshot.ownerAccount !== this.activeUserEmail) {
-			return {
-				isMissing: true,
-				missingReason: `Unauthorized Workspace: Belongs to ${snapshot.ownerAccount}`,
-				snapshot
-			};
+		if (snapshot && snapshot.ownerAccount && this.activeUserEmail) {
+			const cleanActiveUser = this.activeUserEmail.includes(':') ? this.activeUserEmail.split(':')[1] : this.activeUserEmail;
+			const cleanOwner = snapshot.ownerAccount.includes(':') ? snapshot.ownerAccount.split(':')[1] : snapshot.ownerAccount;
+			if (cleanActiveUser !== cleanOwner && snapshot.ownerAccount !== this.activeUserEmail) {
+				return {
+					isMissing: true,
+					missingReason: `Unauthorized Workspace: Belongs to ${snapshot.ownerAccount}`,
+					snapshot
+				};
+			}
 		}
 
 		try {
