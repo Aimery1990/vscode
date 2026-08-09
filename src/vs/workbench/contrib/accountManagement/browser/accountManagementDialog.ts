@@ -9,6 +9,8 @@ import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+import { AccountSignInModal } from './accountSignInModal.js';
 
 export type AccountPanelTab = 'Account' | 'General' | 'Permissions' | 'Appearance' | 'Models' | 'Customizations';
 
@@ -21,7 +23,8 @@ export class AccountManagementDialog extends Disposable {
 	constructor(
 		@IAuthenticationService private readonly authenticationService: IAuthenticationService,
 		@ICommandService private readonly commandService: ICommandService,
-		@INotificationService private readonly notificationService: INotificationService
+		@INotificationService private readonly notificationService: INotificationService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService
 	) {
 		super();
 	}
@@ -365,6 +368,9 @@ export class AccountManagementDialog extends Disposable {
 			isGoogleConnected ? 'Sign Out' : 'Sign in with Google',
 			async () => {
 				if (isGoogleConnected) {
+					this.close();
+					const signInModal = this.instantiationService.createInstance(AccountSignInModal);
+					signInModal.show(true);
 					await this.commandService.executeCommand('anyagent.google.logout');
 				} else {
 					await this.commandService.executeCommand('anyagent.google.login');

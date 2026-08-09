@@ -58,9 +58,7 @@ export class AccountSignInModal extends Disposable {
 			left: 0;
 			width: 100vw;
 			height: 100vh;
-			background: rgba(0, 0, 0, 0.75);
-			backdrop-filter: blur(12px);
-			-webkit-backdrop-filter: blur(12px);
+			background: #181818; /* VS Code 原生暗色，完全不透明以彻底物理遮蔽后面的编辑器，实现全屏刷新页面的视觉效果 */
 			z-index: 99999999;
 			display: flex;
 			align-items: center;
@@ -73,16 +71,16 @@ export class AccountSignInModal extends Disposable {
 		modal.className = 'anyagent-signin-modal';
 		modal.style.cssText = `
 			width: 460px;
-			background: #18181b;
-			border: 1px solid #27272a;
-			border-radius: 16px;
-			box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.75);
+			background: #1e1e1e; /* 与 VS Code 风格保持一致的底色 */
+			border: 1px solid #3c3c3c; /* 原生细边框 */
+			border-radius: 4px; /* 扁平直角设计 */
+			box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 			padding: 36px 32px;
 			display: flex;
 			flex-direction: column;
 			align-items: center;
 			position: relative;
-			color: #f4f4f5;
+			color: #cccccc;
 			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 		`;
 
@@ -165,7 +163,7 @@ export class AccountSignInModal extends Disposable {
 					<path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
 				</svg>
 			`,
-			'#27272a',
+			'#2563eb', /* Google 登录作为 Primary Blue，进入 createProviderButton 会转换为 VS Code 主色蓝 */
 			'#ffffff',
 			async () => {
 				this.close();
@@ -183,7 +181,7 @@ export class AccountSignInModal extends Disposable {
 					<path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.53 1.032 1.53 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z"/>
 				</svg>
 			`,
-			'#2563eb',
+			'#27272a',
 			'#ffffff',
 			() => {
 				this.notificationService.info('GitHub Authentication configuration is ready in resources/auth.');
@@ -266,32 +264,43 @@ export class AccountSignInModal extends Disposable {
 		onClick: () => void
 	): HTMLElement {
 		const btn = targetDocument.createElement('button');
+		const isPrimaryBlue = bgColor === '#2563eb' || bgColor === '#0e639c';
+		const borderStyle = isPrimaryBlue ? 'none' : '1px solid #3c3c3c';
+		
 		btn.style.cssText = `
 			width: 100%;
-			height: 44px;
-			background: ${bgColor};
+			height: 38px;
+			background: ${isPrimaryBlue ? '#0e639c' : bgColor}; /* VS Code 官方经典皇家蓝，其它为原生暗灰 */
 			color: ${textColor};
-			border: 1px solid #3f3f46;
-			border-radius: 8px;
+			border: ${borderStyle};
+			border-radius: 4px; /* 扁平圆角 */
 			display: flex;
 			align-items: center;
 			justify-content: center;
 			gap: 12px;
-			font-size: 14px;
-			font-weight: 500;
+			font-size: 13px;
+			font-weight: 400;
 			cursor: pointer;
-			transition: all 0.15s ease;
+			transition: all 0.1s ease;
 		`;
 
 		this.setElementHTML(btn, `${iconSvgHtml} <span>${label}</span>`);
 
 		btn.onmouseenter = () => {
-			btn.style.borderColor = '#52525b';
-			btn.style.filter = 'brightness(1.15)';
+			if (isPrimaryBlue) {
+				btn.style.background = '#1177bb'; // Hover blue
+			} else {
+				btn.style.background = '#2a2a2a'; // Hover dark
+				btn.style.borderColor = '#4a4a4a';
+			}
 		};
 		btn.onmouseleave = () => {
-			btn.style.borderColor = '#3f3f46';
-			btn.style.filter = 'brightness(1)';
+			if (isPrimaryBlue) {
+				btn.style.background = '#0e639c';
+			} else {
+				btn.style.background = bgColor;
+				btn.style.borderColor = '#3c3c3c';
+			}
 		};
 		btn.onclick = onClick;
 
