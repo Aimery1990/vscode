@@ -74,7 +74,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				try {
 					const sessions = await this.authenticationService.getSessions(providerId);
 					if (sessions && sessions.length > 0) {
-						newUserIdentifier = `${providerId}:${sessions[0].account.label}`;
+						const label = sessions[0].account.label;
+						const match = label.match(/\(([^)]+)\)/);
+						newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 						break;
 					}
 				} catch {
@@ -142,11 +144,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				return (match ? match[1] : clean).trim().toLowerCase();
 			};
 
-			const cleanActiveUser = extractEmail(this.activeUserEmail);
+			const cleanActiveUser = this.activeUserEmail;
 			const cleanOwner = extractEmail(snapshot.ownerAccount);
 
 			console.log(`[WorkspaceMetadataCheck] Compare cleanActiveUser: "${cleanActiveUser}" with cleanOwner: "${cleanOwner}". Full raw activeUser: "${this.activeUserEmail}", owner: "${snapshot.ownerAccount}"`);
-			if (cleanActiveUser !== cleanOwner && snapshot.ownerAccount !== this.activeUserEmail) {
+			if (cleanActiveUser !== cleanOwner) {
 				return undefined;
 			}
 		}
@@ -252,9 +254,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					const match = clean.match(/\(([^)]+)\)/);
 					return (match ? match[1] : clean).trim().toLowerCase();
 				};
-				const cleanActiveUser = extractEmail(this.activeUserEmail);
+				const cleanActiveUser = this.activeUserEmail;
 				const cleanOwner = extractEmail(snapshotCheck.ownerAccount);
-				if (cleanActiveUser !== cleanOwner && snapshotCheck.ownerAccount !== this.activeUserEmail) {
+				if (cleanActiveUser !== cleanOwner) {
 					return;
 				}
 			}

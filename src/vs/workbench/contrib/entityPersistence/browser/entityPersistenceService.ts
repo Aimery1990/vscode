@@ -57,7 +57,9 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 				try {
 					const sessions = await this.authenticationService.getSessions(providerId);
 					if (sessions && sessions.length > 0) {
-						newUserIdentifier = `${providerId}:${sessions[0].account.label}`;
+						const label = sessions[0].account.label;
+						const match = label.match(/\(([^)]+)\)/);
+						newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 						break;
 					}
 				} catch {
@@ -206,11 +208,11 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 				return (match ? match[1] : clean).trim().toLowerCase();
 			};
 
-			const cleanActiveUser = extractEmail(this.activeUserEmail);
+			const cleanActiveUser = this.activeUserEmail;
 			const cleanOwner = extractEmail(snapshot.ownerAccount);
 
 			console.log(`[EntityHealthCheck] Compare cleanActiveUser: "${cleanActiveUser}" with cleanOwner: "${cleanOwner}". Full raw activeUser: "${this.activeUserEmail}", owner: "${snapshot.ownerAccount}"`);
-			if (cleanActiveUser !== cleanOwner && snapshot.ownerAccount !== this.activeUserEmail) {
+			if (cleanActiveUser !== cleanOwner) {
 				return {
 					isMissing: true,
 					missingReason: `Unauthorized Workspace: Belongs to ${snapshot.ownerAccount}`,
