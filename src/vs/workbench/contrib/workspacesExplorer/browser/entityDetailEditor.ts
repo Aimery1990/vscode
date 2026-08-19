@@ -9,11 +9,12 @@ import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
+import { INativeEnvironmentService } from '../../../../platform/environment/common/environment.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
-import { IStorageService } from '../../../../platform/storage/common/storage.js';
+import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { IWebviewElement, IWebviewService } from '../../webview/browser/webview.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
@@ -22,6 +23,48 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { dirname } from '../../../../base/common/resources.js';
+
+function getColorForName(name: string | undefined): string {
+	if (!name) return '#38bdf8';
+	const MODERN_PALETTE = [
+		'#38bdf8', // Light Blue
+		'#a78bfa', // Purple/Violet
+		'#f472b6', // Pink
+		'#34d399', // Emerald/Green
+		'#fbbf24', // Amber/Yellow
+		'#fb923c', // Orange
+		'#2dd4bf', // Teal
+		'#f87171', // Red
+		'#818cf8', // Indigo
+		'#c084fc', // Fuchsia
+		'#22d3ee', // Cyan
+		'#eab308'  // Yellow-gold
+	];
+	let hash = 0;
+	const str = String(name).trim();
+	for (let i = 0; i < str.length; i++) {
+		hash = str.charCodeAt(i) + ((hash << 5) - hash);
+	}
+	const index = Math.abs(hash) % MODERN_PALETTE.length;
+	return MODERN_PALETTE[index];
+}
+
+function hexToRgba(hex: string | undefined, alpha: number): string {
+	if (!hex) {
+		return `rgba(56, 189, 248, ${alpha})`;
+	}
+	let r = 0, g = 0, b = 0;
+	if (hex.length === 4) {
+		r = parseInt(hex[1] + hex[1], 16);
+		g = parseInt(hex[2] + hex[2], 16);
+		b = parseInt(hex[3] + hex[3], 16);
+	} else if (hex.length === 7) {
+		r = parseInt(hex.substring(1, 3), 16);
+		g = parseInt(hex.substring(3, 5), 16);
+		b = parseInt(hex.substring(5, 7), 16);
+	}
+	return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 export class EntityDetailEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.entityDetail';
@@ -33,6 +76,7 @@ export class EntityDetailEditor extends EditorPane {
 	private _entityUri: URI | undefined;
 	private _entityName: string = '';
 	private _entityType: string = 'task';
+	private _startInEditMode: boolean = false;
 
 	private _entityFileUri: URI | undefined;
 	private _instructionUri: URI | undefined;
@@ -43,13 +87,14 @@ export class EntityDetailEditor extends EditorPane {
 		group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IThemeService themeService: IThemeService,
-		@IStorageService storageService: IStorageService,
+		@IStorageService private readonly _storageService: IStorageService,
 		@IFileService private readonly _fileService: IFileService,
 		@IWebviewService private readonly _webviewService: IWebviewService,
 		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
-		@INotificationService private readonly _notificationService: INotificationService
+		@INotificationService private readonly _notificationService: INotificationService,
+		@INativeEnvironmentService private readonly _environmentService: INativeEnvironmentService
 	) {
-		super(EntityDetailEditor.ID, group, telemetryService, themeService, storageService);
+		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
@@ -71,6 +116,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		this._entityUri = input.entityUri;
 		this._entityName = input.entityName;
+		this._startInEditMode = !!input.startInEditMode;
 
 		this._contentDisposables.clear();
 		if (this._container) {
@@ -90,6 +136,89 @@ export class EntityDetailEditor extends EditorPane {
 		super.clearInput();
 	}
 
+	private _parseYaml(yaml: string): any {
+		const lines = yaml.split(/\r?\n/);
+		const result: any = {};
+		let currentFieldList: any[] = [];
+		let currentField: any = null;
+
+		for (let line of lines) {
+			const trimmed = line.trim();
+			if (!trimmed || trimmed.startsWith('#')) continue;
+
+			const indent = line.length - line.trimStart().length;
+
+			if (trimmed.startsWith('-')) {
+				const content = trimmed.substring(1).trim();
+				if (content.includes(':')) {
+					const colonIndex = content.indexOf(':');
+					const key = content.substring(0, colonIndex).trim();
+					let val = content.substring(colonIndex + 1).trim();
+					if (val.startsWith('"') && val.endsWith('"')) {
+						try { val = JSON.parse(val); } catch {}
+					}
+					currentField = { [key]: val };
+					currentFieldList.push(currentField);
+				} else {
+					let val = content;
+					if (val.startsWith('"') && val.endsWith('"')) {
+						try { val = JSON.parse(val); } catch {}
+					}
+					if (currentField && Array.isArray(currentField.options)) {
+						currentField.options.push(val);
+					}
+				}
+			} else if (trimmed.includes(':')) {
+				const colonIndex = trimmed.indexOf(':');
+				const key = trimmed.substring(0, colonIndex).trim();
+				let val = trimmed.substring(colonIndex + 1).trim();
+				if (val.startsWith('"') && val.endsWith('"')) {
+					try { val = JSON.parse(val); } catch {}
+				}
+
+				if (indent === 0) {
+					if (key === 'fields') {
+						result.fields = [];
+						currentFieldList = result.fields;
+					} else {
+						result[key] = (val === 'true' ? true : val === 'false' ? false : val);
+					}
+				} else if (indent > 0 && currentField) {
+					if (key === 'options') {
+						currentField.options = [];
+					} else {
+						currentField[key] = (val === 'true' ? true : val === 'false' ? false : val);
+					}
+				}
+			}
+		}
+		return result;
+	}
+
+	private async _readCustomModule(workspaceUri: URI, typeId: string): Promise<any | null> {
+		const savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
+		const userHome = this._environmentService.userHome.fsPath;
+		const resolvedPath = savedPath.startsWith('~/') ? userHome + savedPath.substring(1) : savedPath === '~' ? userHome : savedPath;
+		const globalFile = URI.file(resolvedPath + `/${typeId}.yaml`);
+		const localFile = URI.joinPath(workspaceUri, '.agents', 'entity_type', `${typeId}.yaml`);
+
+		if (await this._fileService.exists(localFile)) {
+			try {
+				const content = await this._fileService.readFile(localFile);
+				return this._parseYaml(content.value.toString());
+			} catch {}
+		}
+
+		if (await this._fileService.exists(globalFile)) {
+			try {
+				const content = await this._fileService.readFile(globalFile);
+				return this._parseYaml(content.value.toString());
+			} catch {}
+		}
+
+		return null;
+	}
+
 	private async _resolvePathsAndLoadData(): Promise<void> {
 		if (!this._entityUri || !this._container) {
 			return;
@@ -105,24 +234,58 @@ export class EntityDetailEditor extends EditorPane {
 			{ name: 'job.md', type: 'job' },
 			{ name: 'task.md', type: 'task' },
 			{ name: 'agent.md', type: 'agent' },
-			{ name: 'workflow.md', type: 'workflow' }
+			{ name: 'workflow.md', type: 'workflow' },
+			{ name: 'note.md', type: 'note' }
 		];
 
-		this._entityType = 'task';
-		this._entityFileUri = URI.joinPath(agentsDir, 'task.md');
+		let detectedMainMdName: string | undefined;
+		let detectedType: string = 'task';
 
-		for (const item of possibleMds) {
-			const path1 = URI.joinPath(agentsDir, item.name);
-			if (await this._fileService.exists(path1)) {
-				this._entityType = item.type;
-				this._entityFileUri = path1;
-				break;
+		try {
+			if (await this._fileService.exists(agentsDir)) {
+				const stat = await this._fileService.resolve(agentsDir);
+				if (stat.children) {
+					for (const child of stat.children) {
+						if (!child.isDirectory && child.name.endsWith('.md')) {
+							const nameLower = child.name.toLowerCase();
+							if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md') {
+								detectedMainMdName = child.name;
+								detectedType = child.name.substring(0, child.name.length - 3);
+								break;
+							}
+						}
+					}
+				}
 			}
-			const path2 = URI.joinPath(rootDir, item.name);
-			if (await this._fileService.exists(path2)) {
-				this._entityType = item.type;
-				this._entityFileUri = path2;
-				break;
+		} catch {}
+
+		if (detectedMainMdName) {
+			this._entityType = detectedType;
+			this._entityFileUri = URI.joinPath(agentsDir, detectedMainMdName);
+		} else {
+			const nameLower = (this._entityName || '').toLowerCase();
+			const uriPathLower = this._entityUri.path.toLowerCase();
+			if (nameLower.startsWith('note') || uriPathLower.includes('/note-') || uriPathLower.includes('/notes/')) {
+				this._entityType = 'note';
+				this._entityFileUri = URI.joinPath(agentsDir, 'note.md');
+			} else {
+				this._entityType = 'task';
+				this._entityFileUri = URI.joinPath(agentsDir, 'task.md');
+			}
+
+			for (const item of possibleMds) {
+				const path1 = URI.joinPath(agentsDir, item.name);
+				if (await this._fileService.exists(path1)) {
+					this._entityType = item.type;
+					this._entityFileUri = path1;
+					break;
+				}
+				const path2 = URI.joinPath(rootDir, item.name);
+				if (await this._fileService.exists(path2)) {
+					this._entityType = item.type;
+					this._entityFileUri = path2;
+					break;
+				}
 			}
 		}
 
@@ -155,7 +318,9 @@ export class EntityDetailEditor extends EditorPane {
 			}));
 		}
 
-		const html = this._generateHtml(parsed.title || this._entityName, this._entityType, parsed.metadata, parsed.description, readmeContent, instructionContent, workLogContent, attachments);
+		const customModule = await this._readCustomModule(this._entityUri, this._entityType);
+
+		const html = this._generateHtml(parsed.title || this._entityName, this._entityType, parsed.metadata, parsed.description, readmeContent, instructionContent, workLogContent, attachments, customModule);
 		this._webview.setHtml(html);
 	}
 
@@ -172,7 +337,7 @@ export class EntityDetailEditor extends EditorPane {
 			try {
 				const content = await this._fileService.readFile(uri);
 				return content.value.toString();
-			} catch {}
+			} catch { }
 		}
 		return '';
 	}
@@ -182,7 +347,7 @@ export class EntityDetailEditor extends EditorPane {
 		let title = '';
 		const metadata: { [key: string]: string } = {};
 		let description = '';
-		
+
 		let inMetadata = false;
 		let inDescription = false;
 		let descLines: string[] = [];
@@ -235,7 +400,7 @@ export class EntityDetailEditor extends EditorPane {
 	private _updateEntityFileContent(content: string, newDesc: string | undefined, newMeta: { [key: string]: string } | undefined): string {
 		const lines = content.split(/\r?\n/);
 		const newLines: string[] = [];
-		
+
 		let inMetadata = false;
 		let inDescription = false;
 		let hasReplacedMeta = false;
@@ -243,7 +408,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
-			
+
 			if (line.startsWith('## Metadata') || line.startsWith('## 基本元数据')) {
 				newLines.push(line);
 				inMetadata = true;
@@ -261,7 +426,7 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				continue;
 			}
-			
+
 			if (line.startsWith('## Description') || line.startsWith('## Job 目标') || line.startsWith('## 目标')) {
 				newLines.push(line);
 				inMetadata = false;
@@ -277,12 +442,12 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				continue;
 			}
-			
+
 			if (line.startsWith('## ')) {
 				inMetadata = false;
 				inDescription = false;
 			}
-			
+
 			if (!inMetadata && !inDescription) {
 				newLines.push(line);
 			}
@@ -303,7 +468,7 @@ export class EntityDetailEditor extends EditorPane {
 			newLines.push('');
 			newLines.push(newDesc);
 		}
-		
+
 		return newLines.join('\n');
 	}
 
@@ -317,7 +482,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (stat.children) {
 				return stat.children.filter(child => !child.isDirectory).map(child => child.name);
 			}
-		} catch {}
+		} catch { }
 		return [];
 	}
 
@@ -326,7 +491,7 @@ export class EntityDetailEditor extends EditorPane {
 		const now = new Date();
 		const dateStr = now.toISOString().split('T')[0];
 		const timeStr = now.toTimeString().split(' ')[0].substring(0, 5);
-		
+
 		const logBlock = [
 			`## ${dateStr} ${timeStr}`,
 			'',
@@ -335,7 +500,7 @@ export class EntityDetailEditor extends EditorPane {
 			newLogText,
 			''
 		].join('\n');
-		
+
 		let insertIndex = 0;
 		for (let i = 0; i < lines.length; i++) {
 			if (lines[i].startsWith('# ')) {
@@ -343,7 +508,7 @@ export class EntityDetailEditor extends EditorPane {
 				break;
 			}
 		}
-		
+
 		lines.splice(insertIndex, 0, '', logBlock);
 		return lines.join('\n');
 	}
@@ -494,14 +659,23 @@ export class EntityDetailEditor extends EditorPane {
 		return lines.join('\n');
 	}
 
-	private _generateHtml(title: string, type: string, metadata: { [key: string]: string }, description: string, readme: string, instruction: string, workLog: string, attachments: string[]): string {
+	private _generateHtml(title: string, type: string, metadata: { [key: string]: string }, description: string, readme: string, instruction: string, workLog: string, attachments: string[], customModule?: any): string {
 		const typeUpper = type.toUpperCase();
-		
+
 		// 1. Clean Title (remove trailing parenthesis tags like (JOB), (TASK) etc.)
 		const cleanTitle = title.replace(/\s*\((job|task|project|workspace|agent|workflow|case|issue|analysis)\)/i, '');
 
 		// 2. Map Status type to badge styles
-		const status = metadata['Status'] || metadata['status'] || 'Todo';
+		let status = metadata['Status'] || metadata['status'] || 'Todo';
+		const validStatuses = ['todo', 'in progress', 'done', 'blocked'];
+		if (!validStatuses.includes(status.toLowerCase())) {
+			status = 'Todo';
+			metadata['Status'] = 'Todo';
+			if (metadata['status']) {
+				metadata['status'] = 'Todo';
+			}
+		}
+
 		let statusColor = '#818cf8';
 		let statusBg = 'rgba(129, 140, 248, 0.18)';
 		let statusBorder = 'rgba(129, 140, 248, 0.4)';
@@ -525,17 +699,22 @@ export class EntityDetailEditor extends EditorPane {
 
 		// 3. Map Badge color to matching color system
 		const typeColors: { [key: string]: { text: string, bg: string } } = {
-			'job': { text: '#eab308', bg: 'rgba(234, 179, 8, 0.15)' },
-			'task': { text: '#3b82f6', bg: 'rgba(59, 130, 246, 0.15)' },
-			'project': { text: '#a855f7', bg: 'rgba(168, 85, 247, 0.15)' },
-			'workflow': { text: '#10b981', bg: 'rgba(16, 185, 129, 0.15)' },
-			'case': { text: '#f97316', bg: 'rgba(249, 115, 22, 0.15)' },
-			'agent': { text: '#ec4899', bg: 'rgba(236, 72, 153, 0.15)' },
+			'job': { text: '#fbbf24', bg: 'rgba(251, 191, 36, 0.15)' },
+			'task': { text: '#a78bfa', bg: 'rgba(167, 139, 250, 0.15)' },
+			'project': { text: '#60a5fa', bg: 'rgba(96, 165, 250, 0.15)' },
+			'workflow': { text: '#0d9488', bg: 'rgba(13, 148, 136, 0.15)' },
+			'case': { text: '#f472b6', bg: 'rgba(244, 114, 182, 0.15)' },
+			'agent': { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.15)' },
 			'issue': { text: '#ef4444', bg: 'rgba(239, 68, 68, 0.15)' },
-			'analysis': { text: '#06b6d4', bg: 'rgba(6, 182, 212, 0.15)' },
+			'analysis': { text: '#34d399', bg: 'rgba(52, 211, 153, 0.15)' },
 			'workspace': { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.15)' }
 		};
-		const colorSetting = typeColors[type.toLowerCase()] || { text: '#808080', bg: 'rgba(128, 128, 128, 0.15)' };
+		const typeLower = type.toLowerCase();
+		let colorSetting = typeColors[typeLower];
+		if (!colorSetting) {
+			const color = getColorForName(typeLower);
+			colorSetting = { text: color, bg: hexToRgba(color, 0.15) };
+		}
 
 		// Attachment cards html list
 		let attachmentsHtml = '';
@@ -606,6 +785,86 @@ export class EntityDetailEditor extends EditorPane {
 
 		// Metadata sidebar list (Make entity type, created at, entity code, owner account, created by read-only)
 		let metadataRows = '';
+
+		const customFields = (customModule && customModule.fields) ? customModule.fields : [];
+		const customFieldLabels = new Set(customFields.map((f: any) => f.label.toLowerCase()));
+
+		if (customFields.length > 0) {
+			for (const field of customFields) {
+				const key = field.label;
+				let value = '';
+				for (const [k, v] of Object.entries(metadata)) {
+					if (k.toLowerCase() === key.toLowerCase()) {
+						value = v;
+						break;
+					}
+				}
+
+				if (field.type === 'switch') {
+					metadataRows += `
+						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
+							<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${field.label.toUpperCase()}</span>
+							<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${value === 'true' ? 'Yes' : 'No'}</span>
+							<div class="meta-edit-val" style="display: none; align-items: center; gap: 8px; padding: 4px 0;">
+								<input type="checkbox" class="meta-input" data-key="${field.label}" ${value === 'true' ? 'checked' : ''} value="${value === 'true' ? 'true' : 'false'}" onchange="this.value = this.checked ? 'true' : 'false'" style="cursor: pointer;" />
+								<span style="font-size: 0.9em; opacity: 0.85;">Enabled</span>
+							</div>
+						</div>
+					`;
+				} else if (field.type === 'select') {
+					const options = field.options || [];
+					metadataRows += `
+						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
+							<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${field.label.toUpperCase()}</span>
+							<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${value}</span>
+							<select class="meta-input meta-edit-val" data-key="${field.label}" style="display: none; background: rgba(255,255,255,0.02); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.06); padding: 5px 8px; border-radius: 4px; font-size: 0.9em; width: 100%; cursor: pointer;">
+								${options.map((opt: string) => `<option value="${opt}" ${opt === value ? 'selected' : ''}>${opt}</option>`).join('')}
+							</select>
+						</div>
+					`;
+				} else if (field.type === 'multiselect') {
+					const options = field.options || [];
+					metadataRows += `
+						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
+							<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${field.label.toUpperCase()}</span>
+							<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${value || 'None'}</span>
+							<div class="meta-edit-val" style="display: none; flex-direction: column; gap: 4px; padding: 4px 0;">
+								<input type="hidden" class="meta-input" data-key="${field.label}" id="multiselect-${field.id}" value="${value}" />
+								${options.map((opt: string) => {
+									const isChecked = value.split(',').map(s => s.trim()).includes(opt);
+									return `
+										<label style="display: flex; align-items: center; gap: 6px; font-size: 0.9em; cursor: pointer; margin-bottom: 2px;">
+											<input type="checkbox" class="multiselect-checkbox-${field.id}" value="${opt}" ${isChecked ? 'checked' : ''} onchange="
+												const checked = Array.from(document.querySelectorAll('.multiselect-checkbox-${field.id}:checked')).map(cb => cb.value);
+												document.getElementById('multiselect-${field.id}').value = checked.join(', ');
+											" />
+											<span>${opt}</span>
+										</label>
+									`;
+								}).join('')}
+							</div>
+						</div>
+					`;
+				} else if (field.type === 'textarea') {
+					metadataRows += `
+						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
+							<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${field.label.toUpperCase()}</span>
+							<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground); white-space: pre-wrap;">${value}</span>
+							<textarea class="meta-input meta-edit-val" data-key="${field.label}" style="display: none; background: rgba(255,255,255,0.02); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.06); padding: 5px 8px; border-radius: 4px; font-size: 0.9em; width: 100%; min-height: 50px; resize: vertical; font-family: inherit;">${value}</textarea>
+						</div>
+					`;
+				} else {
+					metadataRows += `
+						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
+							<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${field.label.toUpperCase()}</span>
+							<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${value}</span>
+							<input type="text" class="meta-input meta-edit-val" data-key="${field.label}" value="${value}" style="display: none; background: rgba(255,255,255,0.02); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.06); padding: 5px 8px; border-radius: 4px; font-size: 0.9em; width: 100%;" />
+						</div>
+					`;
+				}
+			}
+		}
+
 		for (const [key, value] of Object.entries(metadata)) {
 			const keyLower = key.toLowerCase();
 			if (keyLower === 'status') {
@@ -614,6 +873,10 @@ export class EntityDetailEditor extends EditorPane {
 			if (keyLower === 'entity type') {
 				continue; // Removed to avoid redundancy with the main badge
 			}
+			if (customFieldLabels.has(keyLower)) {
+				continue; // already rendered as custom field
+			}
+
 			if (keyLower === 'priority') {
 				const pColors: { [key: string]: string } = {
 					'very high': '#f43f5e',
@@ -634,19 +897,24 @@ export class EntityDetailEditor extends EditorPane {
 				`;
 				continue;
 			}
-			const isReadOnly = ['created at', 'belongs to workspace uri', 'target project', 'git', 'entity code', 'owner account', 'created by'].includes(keyLower);
+			const isReadOnly = ['created at', 'belongs to workspace uri', 'target project', 'git', 'entity code', 'owner account', 'created by', 'scope type', 'scope name', 'role', 'model'].includes(keyLower);
+			let displayValue = value;
+			if (keyLower === 'scope type' && displayValue) {
+				displayValue = displayValue.charAt(0).toUpperCase() + displayValue.slice(1);
+			}
 			if (isReadOnly) {
 				metadataRows += `
 					<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
 						<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${key.toUpperCase()}</span>
-						<span style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${value}</span>
+						<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${displayValue}</span>
 					</div>
 				`;
 			} else {
 				metadataRows += `
 					<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
 						<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${key.toUpperCase()}</span>
-						<input type="text" class="meta-input" data-key="${key}" value="${value}" style="background: rgba(255,255,255,0.02); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.06); padding: 5px 8px; border-radius: 4px; font-size: 0.9em; transition: border 0.2s;" />
+						<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${displayValue}</span>
+						<input type="text" class="meta-input meta-edit-val" data-key="${key}" value="${displayValue}" style="display: none; background: rgba(255,255,255,0.02); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.06); padding: 5px 8px; border-radius: 4px; font-size: 0.9em; width: 100%; transition: border 0.2s;" />
 					</div>
 				`;
 			}
@@ -836,7 +1104,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-card">
 							<div class="section-title">
 								<span>Description</span>
-								<button id="edit-desc-btn" onclick="startEditDesc()" class="btn-secondary" style="padding: 3px 8px; font-size: 0.8em;">Edit</button>
+								<button id="edit-desc-btn" onclick="startEditDesc()" class="btn-secondary" style="display: none; padding: 3px 8px; font-size: 0.8em;">Edit</button>
 							</div>
 							
 							<div id="desc-view-mode" style="white-space: pre-wrap; line-height: 1.6; opacity: 0.9;">
@@ -888,7 +1156,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-card">
 							<div class="section-title">
 								<span>Work Logs Timeline</span>
-								<button onclick="showAddLogModal()" class="btn-primary" style="padding: 3px 8px; font-size: 0.8em;">Add Log</button>
+								<button id="add-log-btn" onclick="showAddLogModal()" class="btn-primary" style="display: none; padding: 3px 8px; font-size: 0.8em;">Add Log</button>
 							</div>
 							
 							<!-- Add Log Box -->
@@ -909,14 +1177,20 @@ export class EntityDetailEditor extends EditorPane {
 					<!-- Metadata Sidebar -->
 					<div class="sidebar">
 						<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
-							<h3 style="margin: 0; font-size: 1.05em; font-weight: bold; color: var(--vscode-editor-foreground);">Details</h3>
+							<div style="display: flex; align-items: center; gap: 8px;">
+								<h3 style="margin: 0; font-size: 1.05em; font-weight: bold; color: var(--vscode-editor-foreground);">Details</h3>
+								<button id="toggle-edit-mode-btn" onclick="toggleEditMode()" class="btn-secondary" style="padding: 2px 6px; font-size: 0.8em;">Edit</button>
+							</div>
 							<span class="badge" style="background: ${colorSetting.bg}; color: ${colorSetting.text}; margin: 0; font-size: 0.7em; padding: 3px 8px; border-radius: 4px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;">${typeUpper}</span>
 						</div>
 						
 						<!-- Status selection -->
 						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px;">
 							<span style="font-size: 0.8em; opacity: 0.6; font-weight: 600; letter-spacing: 0.03em;">STATUS</span>
-							<select id="status-select" onchange="onStatusChange()" style="background: ${statusBg}; color: ${statusColor}; border: 1px solid ${statusBorder}; padding: 7px 12px; border-radius: 6px; font-weight: 700; font-size: 0.88em; width: 100%; cursor: pointer; transition: all 0.2s ease;">
+							<div style="padding: 4px 0;">
+								<span id="status-view-val" style="display: inline-block; font-size: 0.9em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 4px 10px; border-radius: 6px;">${status}</span>
+							</div>
+							<select id="status-select" onchange="onStatusChange()" style="display: none; background: ${statusBg}; color: ${statusColor}; border: 1px solid ${statusBorder}; padding: 7px 12px; border-radius: 6px; font-weight: 700; font-size: 0.88em; width: 100%; cursor: pointer; transition: all 0.2s ease;">
 								<option value="Todo" ${status.toLowerCase() === 'todo' ? 'selected' : ''} style="background: #1e1b4b; color: #818cf8; font-weight: 700; padding: 8px;">Todo</option>
 								<option value="In Progress" ${status.toLowerCase().includes('progress') ? 'selected' : ''} style="background: #0c4a6e; color: #38bdf8; font-weight: 700; padding: 8px;">In Progress</option>
 								<option value="Done" ${status.toLowerCase().includes('done') || status.toLowerCase().includes('complete') ? 'selected' : ''} style="background: #064e3b; color: #34d399; font-weight: 700; padding: 8px;">Done</option>
@@ -926,7 +1200,7 @@ export class EntityDetailEditor extends EditorPane {
 
 						${metadataRows}
 
-						<button onclick="saveAllMetadata()" class="btn-primary" style="width: 100%; margin-top: 15px; padding: 8px;">Save</button>
+						<button id="save-metadata-btn" onclick="saveAllMetadata()" class="btn-primary" style="display: none; width: 100%; margin-top: 15px; padding: 8px;">Save</button>
 					</div>
 				</div>
 
@@ -1100,6 +1374,86 @@ export class EntityDetailEditor extends EditorPane {
 								name: name
 							});
 						}
+					}
+
+					// 6. Edit Mode Toggle
+					let isEditMode = ${this._startInEditMode ? 'true' : 'false'};
+					function toggleEditMode() {
+						isEditMode = !isEditMode;
+						const btn = document.getElementById('toggle-edit-mode-btn');
+						if (isEditMode) {
+							btn.innerText = 'Cancel';
+							btn.classList.add('active');
+							const editDescBtn = document.getElementById('edit-desc-btn');
+							if (editDescBtn) editDescBtn.style.display = 'inline-block';
+							const addLogBtn = document.getElementById('add-log-btn');
+							if (addLogBtn) addLogBtn.style.display = 'inline-block';
+							
+							const statusView = document.getElementById('status-view-val');
+							if (statusView) statusView.style.display = 'none';
+							const statusSelect = document.getElementById('status-select');
+							if (statusSelect) statusSelect.style.display = 'block';
+
+							document.querySelectorAll('.meta-view-val').forEach(el => el.style.display = 'none');
+							document.querySelectorAll('.meta-edit-val').forEach(el => el.style.display = 'block');
+							document.getElementById('save-metadata-btn').style.display = 'block';
+						} else {
+							btn.innerText = 'Edit';
+							btn.classList.remove('active');
+							const editDescBtn = document.getElementById('edit-desc-btn');
+							if (editDescBtn) editDescBtn.style.display = 'none';
+							const addLogBtn = document.getElementById('add-log-btn');
+							if (addLogBtn) addLogBtn.style.display = 'none';
+							
+							const descView = document.getElementById('desc-view-mode');
+							if (descView) descView.style.display = 'block';
+							const descEdit = document.getElementById('desc-edit-mode');
+							if (descEdit) descEdit.style.display = 'none';
+							
+							hideAddLogModal();
+							
+							const statusView = document.getElementById('status-view-val');
+							if (statusView) statusView.style.display = 'inline-block';
+							const statusSelect = document.getElementById('status-select');
+							if (statusSelect) statusSelect.style.display = 'none';
+
+							document.querySelectorAll('.meta-view-val').forEach(el => el.style.display = 'block');
+							document.querySelectorAll('.meta-edit-val').forEach(el => el.style.display = 'none');
+							document.getElementById('save-metadata-btn').style.display = 'none';
+
+							// Reset inputs to original values
+							const inputs = document.querySelectorAll('.meta-input');
+							inputs.forEach(input => {
+								const key = input.getAttribute('data-key');
+								if (key) {
+									const val = currentMetadata[key] || '';
+									if (input.type === 'checkbox') {
+										input.checked = (val === 'true');
+										input.value = val;
+									} else {
+										input.value = val;
+									}
+								}
+							});
+
+							const multiselects = document.querySelectorAll('[id^="multiselect-"]');
+							multiselects.forEach(hiddenInput => {
+								const key = hiddenInput.getAttribute('data-key');
+								const val = currentMetadata[key] || '';
+								hiddenInput.value = val;
+								const fid = hiddenInput.id.replace('multiselect-', '');
+								const valList = val.split(',').map(s => s.trim());
+								document.querySelectorAll('.multiselect-checkbox-' + fid).forEach(cb => {
+									cb.checked = valList.includes(cb.value);
+								});
+							});
+						}
+					}
+
+					// Auto trigger edit mode on startup if requested
+					if (isEditMode) {
+						isEditMode = false; // reset so toggleEditMode sets it to true
+						toggleEditMode();
 					}
 				</script>
 			</body>

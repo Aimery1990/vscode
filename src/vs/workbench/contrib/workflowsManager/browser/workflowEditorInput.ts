@@ -8,13 +8,12 @@ import { EditorInputCapabilities, IUntypedEditorInput } from '../../../common/ed
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
-import { Schemas } from '../../../../base/common/network.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
 
-const entityDetailEditorIcon = registerIcon('entity-detail-editor-label-icon', Codicon.info, 'Icon of the entity detail editor label.');
+const workflowEditorIcon = registerIcon('workflow-editor-label-icon', Codicon.githubAction, 'Icon of the workflow editor label.');
 
-export class EntityDetailEditorInput extends EditorInput {
-	static readonly ID = 'workbench.input.entityDetail';
+export class WorkflowEditorInput extends EditorInput {
+	static readonly ID = 'workbench.input.workflowEditor';
 
 	private _resource: URI;
 	private _name: string;
@@ -24,20 +23,19 @@ export class EntityDetailEditorInput extends EditorInput {
 	}
 
 	constructor(
-		public readonly entityUri: URI,
-		public readonly entityName: string,
-		public readonly startInEditMode?: boolean
+		public readonly workflowUri: URI,
+		public readonly workflowName: string
 	) {
 		super();
 		this._resource = URI.from({
-			scheme: Schemas.vscodeEntityDetail,
-			path: `/${encodeURIComponent(entityUri.toString())}`,
+			scheme: 'vscode-workflow-editor',
+			path: `/${encodeURIComponent(workflowUri.toString())}`,
 		});
-		this._name = `${entityName} (Detail)`;
+		this._name = `${workflowName} (Workflow)`;
 	}
 
 	override get typeId(): string {
-		return EntityDetailEditorInput.ID;
+		return WorkflowEditorInput.ID;
 	}
 
 	override get resource(): URI {
@@ -49,12 +47,12 @@ export class EntityDetailEditorInput extends EditorInput {
 	}
 
 	override getIcon(): ThemeIcon {
-		return entityDetailEditorIcon;
+		return workflowEditorIcon;
 	}
 
 	override matches(other: EditorInput | IUntypedEditorInput): boolean {
-		if (other instanceof EntityDetailEditorInput) {
-			return other.entityUri.toString() === this.entityUri.toString();
+		if (other instanceof WorkflowEditorInput) {
+			return other.workflowUri.toString() === this.workflowUri.toString();
 		}
 		return false;
 	}

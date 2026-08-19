@@ -30,6 +30,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	readonly onDidChangeWorkspaces: Event<void> = this._onDidChangeWorkspaces.event;
 
 	private activeUserEmail: string = '';
+	private activeUserInitPromise: Promise<void>;
 
 	constructor(
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
@@ -60,7 +61,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			await this.updateActiveUser();
 		}));
 
-		this.updateActiveUser();
+		this.activeUserInitPromise = this.updateActiveUser();
+	}
+
+	getActiveUserEmail(): string {
+		return this.activeUserEmail;
 	}
 
 
@@ -68,20 +73,33 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		try {
 			const providers = ['google', 'github', 'microsoft', 'apple', ...this.authenticationService.declaredProviders.map(p => p.id)];
 			const uniqueProviders = Array.from(new Set(providers));
-			let newUserIdentifier = '';
 
-			for (const providerId of uniqueProviders) {
+			const sessionPromises = uniqueProviders.map(async providerId => {
+				let timeoutId: any;
 				try {
-					const sessions = await this.authenticationService.getSessions(providerId);
+					const sessionsPromise = this.authenticationService.getSessions(providerId);
+					const timeoutPromise = new Promise<readonly any[]>(resolve => {
+						timeoutId = setTimeout(() => resolve([]), 1000);
+					});
+					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
+					clearTimeout(timeoutId);
 					if (sessions && sessions.length > 0) {
-						const label = sessions[0].account.label;
-						const match = label.match(/\(([^)]+)\)/);
-						newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
-						break;
+						return { providerId, session: sessions[0] };
 					}
 				} catch {
-					// Ignore failures for providers not yet initialized/supported
+					clearTimeout(timeoutId);
 				}
+				return null;
+			});
+
+			const results = await Promise.all(sessionPromises);
+			const activeResult = results.find(r => r !== null && r !== undefined);
+			let newUserIdentifier = '';
+
+			if (activeResult) {
+				const label = activeResult.session.account.label;
+				const match = label.match(/\(([^)]+)\)/);
+				newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 			}
 
 			if (newUserIdentifier !== this.activeUserEmail) {
@@ -111,7 +129,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				try {
 					const sessions = this.debugService.getModel().getSessions();
 					for (const s of sessions) {
-						this.debugService.stopSession(s).catch(() => {});
+						this.debugService.stopSession(s).catch(() => { });
 					}
 				} catch (err) {
 					console.error('Failed to stop active debug sessions on user switch:', err);
@@ -130,6 +148,15 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 	private get removedWorkspacesKey(): string {
 		return `${REMOVED_WORKSPACES_STORAGE_KEY}:${this.activeUserEmail || 'unauthenticated'}`;
+	}
+
+	private normalizeUriString(uri: URI | string): string {
+		const str = typeof uri === 'string' ? uri : uri.toString();
+		try {
+			return decodeURIComponent(str).replace(/\/+$/, '');
+		} catch {
+			return str.replace(/\/+$/, '');
+		}
 	}
 
 	getMetadataSnapshot(uri: URI | string): IEntityMetadataSnapshot | undefined {
@@ -181,17 +208,22 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		this._onDidChangeWorkspaces.fire();
 	}
 
+	async removeSnapshot(uri: URI): Promise<void> {
+		await this.entityPersistenceService.removeSnapshot(uri);
+		this._onDidChangeWorkspaces.fire();
+	}
+
 	private getSavedWorkspaceUris(): string[] {
 		const raw = this.storageService.get(this.savedWorkspacesKey, StorageScope.PROFILE, '[]');
 		try {
-			return JSON.parse(raw) as string[];
+			return (JSON.parse(raw) as string[]).map(u => this.normalizeUriString(u));
 		} catch {
 			return [];
 		}
 	}
 
 	private saveWorkspaceUris(uris: string[]): void {
-		const uniqueUris = Array.from(new Set(uris.map(u => URI.parse(u).toString())));
+		const uniqueUris = Array.from(new Set(uris.map(u => this.normalizeUriString(u))));
 		this.storageService.store(
 			this.savedWorkspacesKey,
 			JSON.stringify(uniqueUris),
@@ -204,14 +236,14 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	private getRemovedWorkspaceUris(): string[] {
 		const raw = this.storageService.get(this.removedWorkspacesKey, StorageScope.PROFILE, '[]');
 		try {
-			return JSON.parse(raw) as string[];
+			return (JSON.parse(raw) as string[]).map(u => this.normalizeUriString(u));
 		} catch {
 			return [];
 		}
 	}
 
 	private saveRemovedWorkspaceUris(uris: string[]): void {
-		const uniqueUris = Array.from(new Set(uris.map(u => URI.parse(u).toString())));
+		const uniqueUris = Array.from(new Set(uris.map(u => this.normalizeUriString(u))));
 		this.storageService.store(
 			this.removedWorkspacesKey,
 			JSON.stringify(uniqueUris),
@@ -223,20 +255,21 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 
 	async getWorkspaces(): Promise<IWorkspaceItem[]> {
+		await this.activeUserInitPromise;
 		if (!this.activeUserEmail) {
 			return [];
 		}
 
 		const currentWorkspace = this.workspaceContextService.getWorkspace();
-		const currentFolderUris = new Set(currentWorkspace.folders.map(f => f.uri.toString()));
+		const currentFolderUris = new Set(currentWorkspace.folders.map(f => this.normalizeUriString(f.uri)));
 
 		const savedUris = this.getSavedWorkspaceUris();
 		const removedUris = this.getRemovedWorkspaceUris();
 		const resultItems: IWorkspaceItem[] = [];
 
 		const processUri = async (uri: URI, isFromRecents = false) => {
-			const uriStr = uri.toString();
-			if (removedUris.includes(uriStr) && !currentFolderUris.has(uriStr)) {
+			const normUriStr = this.normalizeUriString(uri);
+			if (removedUris.includes(normUriStr) && !currentFolderUris.has(normUriStr)) {
 				// User explicitly removed this entry from explorer, skip rendering!
 				return;
 			}
@@ -261,14 +294,14 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				}
 			}
 
-			const isCurrent = currentFolderUris.has(uriStr);
+			const isCurrent = currentFolderUris.has(normUriStr);
 			const name = targetBase.path.split('/').filter(Boolean).pop() || 'Untitled Workspace';
 			const item: IWorkspaceItem = {
 				id: uri.toString(),
 				name,
 				uri,
 				isCurrent,
-				isSaved: savedUris.includes(uriStr)
+				isSaved: savedUris.includes(normUriStr)
 			};
 
 			try {
@@ -349,8 +382,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			const recents = await this.workspacesService.getRecentlyOpened();
 			for (const r of recents.workspaces) {
 				const uri = isRecentFolder(r) ? r.folderUri : isRecentWorkspace(r) ? r.workspace.configPath : undefined;
-				if (uri && !currentFolderUris.has(uri.toString()) && !savedUris.includes(uri.toString())) {
-					await processUri(uri, true);
+				if (uri) {
+					const normUriStr = this.normalizeUriString(uri);
+					if (!currentFolderUris.has(normUriStr) && !savedUris.includes(normUriStr)) {
+						await processUri(uri, true);
+					}
 				}
 			}
 		} catch {
@@ -387,12 +423,12 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 	async saveWorkspace(uri: URI): Promise<void> {
 		const uris = this.getSavedWorkspaceUris();
-		const uriStr = uri.toString();
+		const normUriStr = this.normalizeUriString(uri);
 
 		// Remove from removed blacklist if re-added explicitly
 		const removed = this.getRemovedWorkspaceUris();
-		if (removed.includes(uriStr)) {
-			const updatedRemoved = removed.filter(u => u !== uriStr);
+		if (removed.includes(normUriStr)) {
+			const updatedRemoved = removed.filter(u => u !== normUriStr);
 			this.saveRemovedWorkspaceUris(updatedRemoved);
 		}
 
@@ -413,22 +449,22 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			return;
 		}
 
-		if (!uris.includes(uriStr)) {
-			uris.push(uriStr);
+		if (!uris.includes(normUriStr)) {
+			uris.push(normUriStr);
 			this.saveWorkspaceUris(uris);
 		}
 		this._onDidChangeWorkspaces.fire();
 	}
 
 	async removeSavedWorkspace(uri: URI): Promise<void> {
-		const uriStr = uri.toString();
+		const normUriStr = this.normalizeUriString(uri);
 		const uris = this.getSavedWorkspaceUris();
-		const updated = uris.filter(u => u !== uriStr);
+		const updated = uris.filter(u => u !== normUriStr);
 		this.saveWorkspaceUris(updated);
 
 		const removed = this.getRemovedWorkspaceUris();
-		if (!removed.includes(uriStr)) {
-			removed.push(uriStr);
+		if (!removed.includes(normUriStr)) {
+			removed.push(normUriStr);
 			this.saveRemovedWorkspaceUris(removed);
 		}
 
@@ -514,7 +550,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			const childrenItems: IWorkspaceChildItem[] = [];
 
 			for (const child of stat.children) {
-				if (child.name.startsWith('.')) {
+				if (child.name.startsWith('.') || child.name.startsWith('~')) {
 					continue;
 				}
 
@@ -522,26 +558,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					const childUri = child.resource;
 
 					let childType: ResourceType = 'folder';
-					const configDir = URI.joinPath(childUri, '.agents');
-					const hasJobMd = await this.fileService.exists(URI.joinPath(configDir, 'job.md')) || await this.fileService.exists(URI.joinPath(childUri, 'job.md'));
-					const hasProjectMd = await this.fileService.exists(URI.joinPath(configDir, 'project.md')) || await this.fileService.exists(URI.joinPath(childUri, 'project.md'));
-					const hasTaskMd = await this.fileService.exists(URI.joinPath(configDir, 'task.md')) || await this.fileService.exists(URI.joinPath(childUri, 'task.md'));
-					const hasAgentMd = await this.fileService.exists(URI.joinPath(configDir, 'agent.md')) || await this.fileService.exists(URI.joinPath(childUri, 'agent.md'));
-					const hasWorkflowMd = await this.fileService.exists(URI.joinPath(configDir, 'workflow.md')) || await this.fileService.exists(URI.joinPath(childUri, 'workflow.md'));
-					const hasWorkspaceMd = await this.fileService.exists(URI.joinPath(configDir, 'workspace.md')) || await this.fileService.exists(URI.joinPath(childUri, 'workspace.md'));
-
-					if (hasJobMd || child.name.toLowerCase().includes('job')) {
-						childType = 'job';
-					} else if (hasProjectMd) {
-						childType = 'project';
-					} else if (hasTaskMd) {
-						childType = 'task';
-					} else if (hasAgentMd) {
-						childType = 'agent';
-					} else if (hasWorkflowMd) {
-						childType = 'workflow';
-					} else if (hasWorkspaceMd) {
-						childType = 'workspace';
+					const snapshot = this.entityPersistenceService.getSnapshot(childUri);
+					if (snapshot) {
+						childType = snapshot.entityType;
+					} else {
+						childType = await this.detectCustomEntityTypeFromDisk(childUri);
 					}
 
 					let isMissing = false;
@@ -584,28 +605,52 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		}
 	}
 
+	private async detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType> {
+		const configDir = URI.joinPath(childUri, '.agents');
+		try {
+			if (await this.fileService.exists(configDir)) {
+				const stat = await this.fileService.resolve(configDir);
+				if (stat.children) {
+					for (const child of stat.children) {
+						if (!child.isDirectory && child.name.endsWith('.md')) {
+							const nameLower = child.name.toLowerCase();
+							if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md') {
+								return child.name.substring(0, child.name.length - 3) as ResourceType;
+							}
+						}
+					}
+				}
+			}
+		} catch {
+			// ignore
+		}
+
+		// Fallback checking folder names
+		const folderName = childUri.path.split('/').filter(Boolean).pop()?.toLowerCase() || '';
+		if (folderName.includes('job')) return 'job';
+		if (folderName.includes('project')) return 'project';
+		if (folderName.includes('task')) return 'task';
+		if (folderName.includes('agent')) return 'agent';
+		if (folderName.includes('workflow')) return 'workflow';
+		if (folderName.includes('workspace')) return 'workspace';
+
+		return 'folder';
+	}
+
 	private async checkHasDamagedDescendant(dirUri: URI): Promise<boolean> {
 		try {
 			const stat = await this.fileService.resolve(dirUri);
 			if (!stat.children) return false;
 			for (const child of stat.children) {
-				if (child.isDirectory && !child.name.startsWith('.')) {
+				if (child.isDirectory && !child.name.startsWith('.') && !child.name.startsWith('~')) {
 					const childUri = child.resource;
 					let childType: ResourceType = 'folder';
-					const configDir = URI.joinPath(childUri, '.agents');
-					const hasJobMd = await this.fileService.exists(URI.joinPath(configDir, 'job.md')) || await this.fileService.exists(URI.joinPath(childUri, 'job.md'));
-					const hasProjectMd = await this.fileService.exists(URI.joinPath(configDir, 'project.md')) || await this.fileService.exists(URI.joinPath(childUri, 'project.md'));
-					const hasTaskMd = await this.fileService.exists(URI.joinPath(configDir, 'task.md')) || await this.fileService.exists(URI.joinPath(childUri, 'task.md'));
-					const hasAgentMd = await this.fileService.exists(URI.joinPath(configDir, 'agent.md')) || await this.fileService.exists(URI.joinPath(childUri, 'agent.md'));
-					const hasWorkflowMd = await this.fileService.exists(URI.joinPath(configDir, 'workflow.md')) || await this.fileService.exists(URI.joinPath(childUri, 'workflow.md'));
-					const hasWorkspaceMd = await this.fileService.exists(URI.joinPath(configDir, 'workspace.md')) || await this.fileService.exists(URI.joinPath(childUri, 'workspace.md'));
-
-					if (hasJobMd || child.name.toLowerCase().includes('job')) childType = 'job';
-					else if (hasProjectMd) childType = 'project';
-					else if (hasTaskMd) childType = 'task';
-					else if (hasAgentMd) childType = 'agent';
-					else if (hasWorkflowMd) childType = 'workflow';
-					else if (hasWorkspaceMd) childType = 'workspace';
+					const snapshot = this.entityPersistenceService.getSnapshot(childUri);
+					if (snapshot) {
+						childType = snapshot.entityType;
+					} else {
+						childType = await this.detectCustomEntityTypeFromDisk(childUri);
+					}
 
 					if (childType !== 'folder') {
 						const health = await this.entityPersistenceService.inspectEntityHealth(childUri);
@@ -634,6 +679,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			if (sanitized) return sanitized;
 		}
 
+		const pathLower = targetParentUri.path.toLowerCase();
+		if (pathLower === '/users/aimery/repos/jobs' || pathLower.endsWith('/repos/jobs')) {
+			return 'GLOBAL';
+		}
+
 		// Look up snapshot hierarchy or .agents/*.md on disk
 		let curr: URI | undefined = targetParentUri;
 		while (curr) {
@@ -642,21 +692,35 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				return snapshot.entityCode;
 			}
 
-			// Disk fallback: check .agents/workspace.md, job.md, etc.
+			// Disk fallback: check .agents for main md file
 			const configDir = URI.joinPath(curr, '.agents');
-			const possibleMds = ['workspace.md', 'job.md', 'project.md', 'task.md', 'agent.md', 'workflow.md'];
-			for (const mdName of possibleMds) {
-				const mdUri = URI.joinPath(configDir, mdName);
-				if (await this.fileService.exists(mdUri)) {
-					try {
-						const content = (await this.fileService.readFile(mdUri)).value.toString();
-						const match = content.match(/-\s*\*\*Entity Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/);
-						if (match && match[1]) {
-							const code = match[1].trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-							if (code) return code;
+			let foundMdUri: URI | undefined;
+			try {
+				if (await this.fileService.exists(configDir)) {
+					const stat = await this.fileService.resolve(configDir);
+					if (stat.children) {
+						for (const child of stat.children) {
+							if (!child.isDirectory && child.name.endsWith('.md')) {
+								const nameLower = child.name.toLowerCase();
+								if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md') {
+									foundMdUri = child.resource;
+									break;
+								}
+							}
 						}
-					} catch {}
+					}
 				}
+			} catch {}
+
+			if (foundMdUri) {
+				try {
+					const content = (await this.fileService.readFile(foundMdUri)).value.toString();
+					const match = content.match(/-\s*\*\*Entity Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/);
+					if (match && match[1]) {
+						const code = match[1].trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+						if (code) return code;
+					}
+				} catch {}
 			}
 
 			const parentPath = dirname(curr);
@@ -671,7 +735,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 	async generateNextSequentialName(targetParentUri: URI, type: ResourceType, customCode?: string): Promise<{ name: string; code: string }> {
 		const activeCode = await this.resolveEntityCode(targetParentUri, customCode);
-		const prefixMap: Record<ResourceType, string> = {
+		const prefixMap: Record<string, string> = {
 			job: 'JOB',
 			task: 'TASK',
 			project: 'PROJECT',
@@ -684,13 +748,32 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			folder: 'FOLDER',
 			file: 'FILE'
 		};
-		const fallbackPrefix = prefixMap[type] || 'ENTITY';
+		const fallbackPrefix = prefixMap[type] || type.toUpperCase();
 
+		let maxNum = 0;
+		const regex = new RegExp(`^(?:${activeCode}|${fallbackPrefix}|${type})(?:[-_]?(?:${fallbackPrefix}|${type}))?[-_]?(\\d+)$`, 'i');
+
+		// 1. Check existing snapshots globally to avoid duplicate IDs/names
+		try {
+			const snapshots = this.entityPersistenceService.getAllSnapshots();
+			for (const snap of snapshots) {
+				if (snap.entityCode?.toLowerCase() === activeCode.toLowerCase() || snap.entityName.toLowerCase().startsWith(activeCode.toLowerCase() + '-')) {
+					const match = snap.entityName.match(regex);
+					if (match) {
+						const num = parseInt(match[1], 10);
+						if (!isNaN(num) && num > maxNum) {
+							maxNum = num;
+						}
+					}
+				}
+			}
+		} catch {
+			// ignore
+		}
+
+		// 2. Check filesystem children under the immediate parent folder
 		try {
 			const stat = await this.fileService.resolve(targetParentUri);
-			let maxNum = 0;
-			const regex = new RegExp(`^(?:${activeCode}|${fallbackPrefix}|${type})(?:[-_]?(?:${fallbackPrefix}|${type}))?[-_]?(\\d+)$`, 'i');
-
 			if (stat.children) {
 				for (const child of stat.children) {
 					const match = child.name.match(regex);
@@ -702,19 +785,16 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					}
 				}
 			}
-
-			const nextNum = maxNum + 1;
-			const formattedNum = String(nextNum).padStart(4, '0');
-			return {
-				name: `${activeCode}-${formattedNum}`,
-				code: activeCode
-			};
 		} catch {
-			return {
-				name: `${activeCode}-0001`,
-				code: activeCode
-			};
+			// ignore
 		}
+
+		const nextNum = maxNum + 1;
+		const formattedNum = String(nextNum).padStart(4, '0');
+		return {
+			name: `${activeCode}-${formattedNum}`,
+			code: activeCode
+		};
 	}
 
 	async createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult> {
@@ -768,6 +848,54 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			return { alreadyExists: true, uri: mainMdUri };
 		}
 
+		const parentSnapshot = this.entityPersistenceService.getSnapshot(targetBaseUri);
+		let parentType = parentSnapshot ? parentSnapshot.entityType : 'workspace';
+		if (!parentSnapshot) {
+			const detected = await this.detectCustomEntityTypeFromDisk(targetBaseUri);
+			if (detected && detected !== 'folder' && detected !== 'file') {
+				parentType = detected;
+			}
+		}
+		const parentName = parentSnapshot ? parentSnapshot.entityName : (targetBaseUri.path.split('/').filter(Boolean).pop() || 'Workspace');
+
+		let finalModel = { providerId: 'gemini', modelId: 'gemini-1.5-flash', credentialId: undefined as string | undefined };
+		let finalSystemPrompt = `# Agent: ${name}\n\nYou are a specialized AI Agent serving '${parentName}'.`;
+
+		if (type === 'agent') {
+			if (options.agentModel) {
+				finalModel = {
+					providerId: options.agentModel.providerId,
+					modelId: options.agentModel.modelId,
+					credentialId: options.agentModel.credentialId
+				};
+			}
+			if (options.agentSystemPrompt) {
+				finalSystemPrompt = options.agentSystemPrompt;
+			}
+		}
+
+		if (type === 'agent' && !options.agentModel && options.assignedAgentId && this.agentsManagerService) {
+			const baseAgent = await this.agentsManagerService.getAgent(options.assignedAgentId);
+			if (baseAgent) {
+				if (baseAgent.model) {
+					finalModel = {
+						providerId: baseAgent.model.providerId,
+						modelId: baseAgent.model.modelId,
+						credentialId: baseAgent.model.credentialId
+					};
+				}
+				const basePrompt = baseAgent.systemPrompt || '';
+				const specPrompt = options.agentRulePrompt || '';
+				if (basePrompt && specPrompt) {
+					finalSystemPrompt = `${basePrompt}\n\n## Custom Rules / Specific Prompt for this instance:\n${specPrompt}`;
+				} else if (basePrompt) {
+					finalSystemPrompt = basePrompt;
+				} else if (specPrompt) {
+					finalSystemPrompt = specPrompt;
+				}
+			}
+		}
+
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: entityFolderUri.toString(),
 			entityName: name,
@@ -778,25 +906,30 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			assignedAgentName: options.assignedAgentName,
 			agentRulePrompt: options.agentRulePrompt,
 			ownerAccount: this.activeUserEmail || 'unauthenticated',
-			description: description || `${type} description`,
-			belongsToWorkspaceUri: targetBaseUri.toString()
+			description: description || `${parentType} Agent`,
+			belongsToWorkspaceUri: targetBaseUri.toString(),
+			role: description || `${parentType} Agent`,
+			modelName: finalModel.modelId,
+			systemPrompt: finalSystemPrompt,
+			scopeType: parentType as any,
+			scopeId: targetBaseUri.toString(),
+			scopeName: parentName
 		}, targetBaseUri, true);
 
 		if (type === 'agent' && this.agentsManagerService) {
-			const wsName = targetBaseUri.path.split('/').filter(Boolean).pop() || 'Workspace';
 			await this.agentsManagerService.addAgent({
 				name,
-				role: description || 'Workspace Agent',
-				description: description || 'Workspace Agent',
-				systemPrompt: `# Agent: ${name}\n\nYou are a specialized AI Agent serving '${wsName}'.`,
-				modelName: 'gemini-2.0-flash',
+				role: description || `${parentType} Agent`,
+				description: description || `${parentType} Agent`,
+				systemPrompt: finalSystemPrompt,
+				model: finalModel,
 				avatarIcon: 'robot',
-				scopeType: 'workspace',
+				scopeType: parentType as any,
 				scopeId: targetBaseUri.toString(),
-				scopeName: wsName,
+				scopeName: parentName,
 				folderPath: entityFolderUri.fsPath,
 				status: 'idle'
-			});
+			}, targetBaseUri);
 		}
 
 		this._onDidChangeWorkspaces.fire();

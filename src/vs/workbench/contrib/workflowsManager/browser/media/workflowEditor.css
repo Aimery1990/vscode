@@ -1,0 +1,812 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.workflow-editor-container {
+	display: flex;
+	width: 100%;
+	height: 100%;
+	background: var(--vscode-editor-background, #1e1e1e);
+	overflow: hidden;
+	box-sizing: border-box;
+	user-select: none;
+}
+
+/* --- Left Toolbar --- */
+.workflow-editor-toolbar {
+	width: 220px;
+	height: 100%;
+	border-right: 1px solid var(--vscode-sideBar-border, rgba(255, 255, 255, 0.08));
+	background: var(--vscode-sideBar-background, #181818);
+	display: flex;
+	flex-direction: column;
+	padding: 16px 14px;
+	gap: 18px;
+	box-sizing: border-box;
+	flex-shrink: 0;
+	overflow-y: auto;
+}
+
+.workflow-toolbar-section {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.workflow-toolbar-title {
+	font-size: 11px;
+	font-weight: 600;
+	text-transform: uppercase;
+	color: var(--vscode-descriptionForeground, #888888);
+	letter-spacing: 0.5px;
+	padding-bottom: 4px;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.workflow-shape-grid {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: 8px;
+}
+
+.workflow-toolbar-item {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	padding: 12px 8px;
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	background: rgba(255, 255, 255, 0.02);
+	border-radius: 6px;
+	cursor: pointer;
+	transition: all 0.2s ease;
+	gap: 6px;
+	text-align: center;
+}
+
+.workflow-toolbar-item:hover {
+	border-color: rgba(13, 148, 136, 0.45);
+	background: rgba(13, 148, 136, 0.08);
+}
+
+.workflow-toolbar-item.active {
+	border-color: #0d9488;
+	background: rgba(13, 148, 136, 0.15);
+	box-shadow: 0 0 8px rgba(13, 148, 136, 0.25);
+}
+
+.workflow-toolbar-item .item-preview {
+	width: 24px;
+	height: 18px;
+	border: 1.5px solid var(--vscode-foreground, #cccccc);
+	box-sizing: border-box;
+	opacity: 0.75;
+}
+
+/* Previews inside toolbar */
+.workflow-toolbar-item .item-preview.rect {
+	border-radius: 1px;
+}
+
+.workflow-toolbar-item .item-preview.round-rect {
+	border-radius: 4px;
+}
+
+.workflow-toolbar-item .item-preview.circle {
+	width: 18px;
+	border-radius: 50%;
+}
+
+.workflow-toolbar-item .item-preview.diamond {
+	width: 16px;
+	height: 16px;
+	transform: rotate(45deg);
+}
+
+.workflow-toolbar-item .item-preview.line-preview {
+	border: none;
+	border-top: 2px solid var(--vscode-foreground, #cccccc);
+	height: 2px;
+	margin-top: 8px;
+	position: relative;
+}
+
+.workflow-toolbar-item .item-preview.orthogonal-preview {
+	border: none;
+	height: 18px;
+	width: 24px;
+	position: relative;
+}
+
+.workflow-toolbar-item .item-preview.orthogonal-preview::before {
+	content: '';
+	position: absolute;
+	top: 3px;
+	left: 2px;
+	width: 9px;
+	height: 6px;
+	border-left: 2px solid var(--vscode-foreground, #cccccc);
+	border-bottom: 2px solid var(--vscode-foreground, #cccccc);
+}
+
+.workflow-toolbar-item .item-preview.orthogonal-preview::after {
+	content: '';
+	position: absolute;
+	bottom: 3px;
+	right: 2px;
+	width: 9px;
+	height: 6px;
+	border-right: 2px solid var(--vscode-foreground, #cccccc);
+	border-top: 2px solid var(--vscode-foreground, #cccccc);
+}
+
+.workflow-toolbar-item .item-preview.curved-preview {
+	border: none;
+	height: 18px;
+	width: 24px;
+	position: relative;
+}
+
+.workflow-toolbar-item .item-preview.curved-preview::before {
+	content: '';
+	position: absolute;
+	top: 3px;
+	left: 3px;
+	right: 3px;
+	bottom: 3px;
+	border-top: 2px solid var(--vscode-foreground, #cccccc);
+	border-right: 2px solid var(--vscode-foreground, #cccccc);
+	border-top-right-radius: 12px;
+}
+
+.workflow-toolbar-item .item-label {
+	font-size: 10px;
+	font-weight: 500;
+	color: var(--vscode-foreground, #cccccc);
+}
+
+/* --- Right Canvas Area --- */
+.workflow-editor-canvas-wrapper {
+	flex: 1;
+	height: 100%;
+	position: relative;
+	overflow: auto;
+	background: var(--vscode-editor-background, #1e1e1e);
+}
+
+.workflow-editor-canvas {
+	position: relative;
+	width: 2400px;
+	height: 2000px;
+	background-color: var(--vscode-editor-background, #1e1e1e);
+	background-image: radial-gradient(rgba(13, 148, 136, 0.06) 1.5px, transparent 0);
+	background-size: 20px 20px;
+	transform-origin: top left;
+}
+
+/* SVG Overlay for Connection Lines */
+.workflow-svg-overlay {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+	z-index: 1;
+}
+
+/* Connection Lines path styling */
+.workflow-connection-line {
+	fill: none;
+	stroke: rgba(13, 148, 136, 0.55);
+	stroke-width: 2px;
+	transition: stroke 0.15s ease, stroke-width 0.15s ease;
+	pointer-events: visibleStroke;
+	cursor: pointer;
+}
+
+.workflow-connection-line:hover {
+	stroke: #22d3ee;
+	stroke-width: 3.5px;
+}
+
+/* --- Nodes --- */
+.workflow-node {
+	position: absolute;
+	box-sizing: border-box;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	padding: 4px 8px;
+	color: var(--vscode-editor-foreground, #ffffff);
+	font-weight: 500;
+	font-size: 11px;
+	text-align: center;
+	line-height: 1.35;
+	word-break: break-word;
+	cursor: move;
+	z-index: 2;
+	transition: box-shadow 0.2s ease, border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.workflow-node.rect {
+	border: 1.5px solid #0d9488;
+	background: rgba(13, 148, 136, 0.12);
+	border-radius: 4px;
+}
+
+.workflow-node.round-rect {
+	border: 1.5px solid #0d9488;
+	background: rgba(13, 148, 136, 0.12);
+	border-radius: 12px;
+}
+
+.workflow-node.circle {
+	border: 1.5px solid #0d9488;
+	background: rgba(13, 148, 136, 0.12);
+	border-radius: 50%;
+	aspect-ratio: 1;
+}
+
+.workflow-node.diamond {
+	border: 1.5px solid #0d9488;
+	background: rgba(13, 148, 136, 0.12);
+	transform: rotate(45deg);
+}
+
+/* Internal label wrapper to un-rotate diamond text */
+.workflow-node.diamond .node-label {
+	transform: rotate(-45deg);
+}
+
+.workflow-node:hover {
+	border-color: rgba(34, 211, 238, 0.7);
+	background: rgba(13, 148, 136, 0.22);
+	box-shadow: 0 4px 14px rgba(13, 148, 136, 0.25);
+	z-index: 101;
+}
+
+.workflow-node.selected {
+	border-color: #22d3ee;
+	box-shadow: 0 0 12px rgba(34, 211, 238, 0.45);
+	z-index: 101;
+}
+
+/* --- Node Resize Handle --- */
+.node-resize-handle {
+	position: absolute;
+	bottom: 0;
+	right: 0;
+	width: 10px;
+	height: 10px;
+	cursor: se-resize;
+	background: linear-gradient(135deg, transparent 45%, #0d9488 45%, #0d9488 55%, transparent 55%, transparent 75%, #0d9488 75%);
+	z-index: 100;
+	border-bottom-right-radius: 4px;
+}
+
+.workflow-node.diamond .node-resize-handle {
+	bottom: -4px;
+	right: -4px;
+	transform: rotate(-45deg);
+}
+
+/* --- Node Connection Ports --- */
+.node-port-handle {
+	position: absolute;
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: #ffffff;
+	border: 2px solid #0d9488;
+	z-index: 100;
+	cursor: crosshair;
+	opacity: 0;
+	transition: opacity 0.15s ease, transform 0.15s ease;
+	pointer-events: auto;
+	box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+
+/* Expanded invisible hit target for easier grabbing/connecting */
+.node-port-handle::before {
+	content: '';
+	position: absolute;
+	top: -6px;
+	left: -6px;
+	right: -6px;
+	bottom: -6px;
+	border-radius: 50%;
+}
+
+.node-port-handle:hover {
+	transform: scale(1.3);
+	background: #0d9488;
+	border-color: #ffffff;
+}
+
+.workflow-node:hover .node-port-handle,
+.workflow-node.selected .node-port-handle {
+	opacity: 1;
+}
+
+.node-port-handle.top {
+	top: -5px;
+	left: calc(50% - 5px);
+}
+
+.node-port-handle.bottom {
+	bottom: -5px;
+	left: calc(50% - 5px);
+}
+
+.node-port-handle.left {
+	left: -5px;
+	top: calc(50% - 5px);
+}
+
+.node-port-handle.right {
+	right: -5px;
+	top: calc(50% - 5px);
+}
+
+/* Diamond specific port positions aligning precisely with the 4 rotated tips/vertices */
+.workflow-node.diamond .node-port-handle.top {
+	top: -5px;
+	left: -5px;
+	right: auto;
+	bottom: auto;
+}
+
+.workflow-node.diamond .node-port-handle.right {
+	top: -5px;
+	right: -5px;
+	left: auto;
+	bottom: auto;
+}
+
+.workflow-node.diamond .node-port-handle.bottom {
+	bottom: -5px;
+	right: -5px;
+	left: auto;
+	top: auto;
+}
+
+.workflow-node.diamond .node-port-handle.left {
+	bottom: -5px;
+	left: -5px;
+	right: auto;
+	top: auto;
+}
+
+/* --- Connection Line Reconnection Endpoint Handles --- */
+.workflow-link-endpoint-handle {
+	position: absolute;
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	background: #ffffff;
+	border: 2.5px solid #22d3ee;
+	cursor: pointer;
+	z-index: 99;
+	transform: translate(-50%, -50%);
+	box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+	pointer-events: auto;
+	opacity: 0;
+	transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.workflow-link-endpoint-handle.selected,
+.workflow-link-endpoint-handle.hovered,
+.workflow-link-endpoint-handle:hover {
+	opacity: 1;
+	transform: translate(-50%, -50%) scale(1.25);
+}
+
+/* --- Context Menu Style --- */
+.workflow-context-menu {
+	background: var(--vscode-editorWidget-background, #252526);
+	border: 1px solid rgba(255, 255, 255, 0.15);
+	border-radius: 6px;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+	padding: 4px 0;
+	display: flex;
+	flex-direction: column;
+	min-width: 150px;
+	font-family: var(--vscode-font-family, sans-serif);
+	pointer-events: auto;
+}
+
+.context-menu-item {
+	padding: 6px 12px;
+	font-size: 11.5px;
+	color: var(--vscode-foreground, #cccccc);
+	cursor: pointer;
+	transition: background 0.15s ease;
+	text-align: left;
+}
+
+.context-menu-item:hover {
+	background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.08));
+	color: var(--vscode-foreground, #ffffff);
+}
+
+.context-menu-item.danger {
+	color: #f43f5e;
+}
+
+.context-menu-item.danger:hover {
+	background: #ef4444;
+	color: #ffffff;
+}
+
+/* --- Inline Node Text Editor Input --- */
+.node-inline-editor {
+	position: absolute;
+	box-sizing: border-box;
+	border: 1.5px solid #22d3ee;
+	background: var(--vscode-input-background, #222222);
+	color: var(--vscode-input-foreground, #ffffff);
+	outline: none;
+	font-size: 11px;
+	text-align: center;
+	padding: 4px;
+	border-radius: 4px;
+	box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+	z-index: 1000;
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+
+/* --- Drag Selection Box --- */
+.workflow-selection-box {
+	position: absolute;
+	border: 1px dashed #22d3ee;
+	background: rgba(34, 211, 238, 0.08);
+	pointer-events: none;
+	z-index: 10000;
+	display: none;
+	box-sizing: border-box;
+}
+
+/* --- Node Imports Badges --- */
+.node-imports-badges-container {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+	justify-content: center;
+	align-items: center;
+	margin-top: 4px;
+	max-width: 100%;
+	pointer-events: none;
+}
+
+.node-import-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	font-size: 8px;
+	font-weight: bold;
+	padding: 2px 5px;
+	border-radius: 3px;
+	white-space: nowrap;
+	pointer-events: none;
+}
+
+.node-import-badge.agent {
+	background: rgba(56, 189, 248, 0.15);
+	color: #38bdf8;
+}
+.node-import-badge.task {
+	background: rgba(167, 139, 250, 0.15);
+	color: #a78bfa;
+}
+.node-import-badge.job {
+	background: rgba(251, 191, 36, 0.15);
+	color: #fbbf24;
+}
+.node-import-badge.project {
+	background: rgba(96, 165, 250, 0.15);
+	color: #60a5fa;
+}
+
+.workflow-node.diamond .node-imports-badges-container {
+	transform: rotate(-45deg); /* un-rotate for diamond as well! */
+}
+
+/* --- Drag over visual feedback --- */
+.workflow-node.drag-hover {
+	border-color: #22d3ee !important;
+	box-shadow: 0 0 12px rgba(34, 211, 238, 0.6) !important;
+	background-color: rgba(34, 211, 238, 0.2) !important;
+}
+
+/* --- Un-rotate text input inside diamonds --- */
+.workflow-node.diamond .node-inline-editor {
+	transform: rotate(-45deg);
+}
+
+/* --- Submenu Style --- */
+.workflow-context-submenu {
+	background: var(--vscode-editorWidget-background, #252526);
+	border: 1px solid rgba(255, 255, 255, 0.15);
+	border-radius: 6px;
+	box-shadow: 0 6px 16px rgba(0, 0, 0, 0.6);
+	padding: 4px 0;
+	display: none;
+	flex-direction: column;
+	min-width: 160px;
+	max-height: 280px;
+	overflow-y: auto;
+	font-family: var(--vscode-font-family, sans-serif);
+	pointer-events: auto;
+	z-index: 20005;
+}
+
+.context-menu-separator {
+	height: 1px;
+	background: rgba(255, 255, 255, 0.1);
+	margin: 4px 0;
+}
+
+.context-menu-item.module-item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 12px;
+	font-size: 11.5px;
+	white-space: nowrap;
+}
+
+.context-menu-item.module-item .module-icon {
+	flex-shrink: 0;
+	font-size: 13px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.context-menu-item.module-item .module-type-tag {
+	font-size: 9.5px;
+	font-weight: 600;
+	text-transform: uppercase;
+	padding: 1px 4px;
+	border-radius: 3px;
+	background: rgba(255, 255, 255, 0.08);
+	letter-spacing: 0.3px;
+	flex-shrink: 0;
+}
+
+.context-menu-item.module-item .module-name {
+	font-weight: 500;
+	color: var(--vscode-foreground, #cccccc);
+	max-width: 220px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.context-menu-item.module-item:hover .module-name {
+	color: #ffffff;
+}
+
+.context-menu-item.disabled {
+	opacity: 0.5;
+	pointer-events: none;
+	font-style: italic;
+}
+
+/* --- Keep codicon colored matching text --- */
+.node-import-badge .codicon {
+	color: inherit !important;
+}
+
+/* --- Flowchart Connection Line Labels & Inline Editor --- */
+.workflow-link-label {
+	position: absolute;
+	transform: translate(-50%, -50%);
+	box-sizing: border-box;
+	padding: 3px 8px;
+	font-size: 11px;
+	font-weight: 500;
+	color: var(--vscode-editor-foreground, #cccccc);
+	background: var(--vscode-editor-background, #1e1e1e);
+	border: 1px solid rgba(255, 255, 255, 0.2);
+	border-radius: 4px;
+	cursor: grab;
+	z-index: 10;
+	max-width: 140px;
+	max-height: 48px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	word-break: break-word;
+	line-height: 1.35;
+	text-align: center;
+	white-space: pre-wrap;
+	pointer-events: auto;
+	user-select: none;
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+	transition: border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+}
+
+.workflow-link-label:hover {
+	border-color: #22d3ee;
+	color: #ffffff;
+	box-shadow: 0 2px 8px rgba(34, 211, 238, 0.35);
+}
+
+.workflow-link-label.selected {
+	border-color: #22d3ee;
+	color: #22d3ee;
+	background: var(--vscode-editor-background, #1e1e1e);
+	box-shadow: 0 0 8px rgba(34, 211, 238, 0.5);
+}
+
+.workflow-link-label:active,
+.workflow-link-label.dragging {
+	cursor: grabbing !important;
+	border-color: #38bdf8 !important;
+	color: #ffffff !important;
+	box-shadow: 0 4px 14px rgba(56, 189, 248, 0.6) !important;
+	z-index: 50 !important;
+}
+
+.workflow-link-label-editor {
+	position: absolute;
+	transform: translate(-50%, -50%);
+	z-index: 200;
+	min-width: 80px;
+	max-width: 220px;
+	min-height: 24px;
+	max-height: 90px;
+	padding: 3px 6px;
+	font-size: 11px;
+	font-weight: 500;
+	text-align: center;
+	color: var(--vscode-input-foreground, #ffffff);
+	background: var(--vscode-input-background, #252526);
+	border: 1.5px solid #22d3ee;
+	border-radius: 4px;
+	outline: none;
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.7), 0 0 8px rgba(34, 211, 238, 0.4);
+	pointer-events: auto;
+	font-family: var(--vscode-font-family, sans-serif);
+	resize: none;
+	line-height: 1.35;
+	box-sizing: border-box;
+	overflow-y: auto;
+}
+
+/* --- Left Toolbar Zoom Controls --- */
+.workflow-zoom-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 6px;
+	padding: 3px 6px;
+	box-sizing: border-box;
+}
+
+.workflow-zoom-btn {
+	width: 26px;
+	height: 24px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--vscode-foreground, #cccccc);
+	transition: all 0.15s ease;
+	user-select: none;
+}
+
+.workflow-zoom-btn:hover {
+	background: rgba(13, 148, 136, 0.2);
+	color: #22d3ee;
+}
+
+.workflow-zoom-badge {
+	flex: 1;
+	text-align: center;
+	font-size: 11px;
+	font-weight: 600;
+	color: #0d9488;
+	cursor: pointer;
+	user-select: none;
+	transition: color 0.15s ease;
+}
+
+.workflow-zoom-badge:hover {
+	color: #22d3ee;
+	text-decoration: underline;
+}
+
+.workflow-zoom-fit-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	padding: 6px 10px;
+	background: rgba(255, 255, 255, 0.03);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 6px;
+	cursor: pointer;
+	font-size: 11px;
+	font-weight: 500;
+	color: var(--vscode-foreground, #cccccc);
+	transition: all 0.15s ease;
+	user-select: none;
+}
+
+.workflow-zoom-fit-btn:hover {
+	background: rgba(13, 148, 136, 0.15);
+	border-color: rgba(13, 148, 136, 0.4);
+	color: #ffffff;
+}
+
+/* --- Floating Zoom Bar in Canvas Top-Center --- */
+.workflow-floating-zoom-control {
+	position: absolute;
+	top: 14px;
+	left: 50%;
+	transform: translateX(-50%);
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	background: rgba(24, 24, 24, 0.88);
+	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+	border-radius: 20px;
+	padding: 4px 10px;
+	z-index: 100;
+	user-select: none;
+}
+
+.floating-zoom-btn {
+	width: 24px;
+	height: 24px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 50%;
+	cursor: pointer;
+	font-size: 13px;
+	font-weight: 600;
+	color: var(--vscode-foreground, #cccccc);
+	transition: all 0.15s ease;
+}
+
+.floating-zoom-btn:hover {
+	background: rgba(13, 148, 136, 0.25);
+	color: #2dd4bf;
+}
+
+.floating-zoom-btn.fit-btn {
+	font-size: 12px;
+}
+
+.floating-zoom-badge {
+	font-size: 11px;
+	font-weight: 600;
+	min-width: 40px;
+	text-align: center;
+	color: #2dd4bf;
+	cursor: pointer;
+	transition: color 0.15s ease;
+}
+
+.floating-zoom-badge:hover {
+	color: #5eead4;
+	text-decoration: underline;
+}
+
+

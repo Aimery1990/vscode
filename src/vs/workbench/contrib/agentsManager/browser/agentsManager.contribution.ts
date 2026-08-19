@@ -16,8 +16,9 @@ import { ServicesAccessor } from '../../../../platform/instantiation/common/inst
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { KeyMod, KeyCode } from '../../../../base/common/keyCodes.js';
 
-import { IAgentsManagerService } from '../common/agentsManager.js';
+import { IAgentsManagerService, IAgentCredentialService } from '../common/agentsManager.js';
 import { AgentsManagerService } from './agentsManagerService.js';
+import { AgentCredentialService } from './agentCredentialService.js';
 import { AgentsManagerPane } from './agentsManagerPane.js';
 import { createOrEditAgentDialog } from './agentEditorDialog.js';
 
@@ -26,6 +27,7 @@ export const AGENTS_MANAGER_PANE_VIEW_ID = 'workbench.view.agentsManagerPane';
 
 // 1. Register Singleton Service
 registerSingleton(IAgentsManagerService, AgentsManagerService, InstantiationType.Delayed);
+registerSingleton(IAgentCredentialService, AgentCredentialService, InstantiationType.Delayed);
 
 // 2. Register Icon
 const agentsManagerIcon = registerIcon(
@@ -99,7 +101,7 @@ const viewDescriptors: IViewDescriptor[] = [
 		order: 5,
 		canToggleVisibility: true,
 		canMoveView: true,
-		containerIcon: Codicon.sync
+		containerIcon: Codicon.githubAction
 	},
 	{
 		id: 'workbench.view.agentsManager.standalone',

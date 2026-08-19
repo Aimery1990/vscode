@@ -1,0 +1,236 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+.workflows-manager-viewpane {
+	display: flex !important;
+	flex-direction: column !important;
+	height: 100% !important;
+	width: 100% !important;
+	justify-content: flex-start !important;
+	align-items: stretch !important;
+	text-align: left !important;
+	padding: 0 !important;
+	margin: 0 !important;
+	box-sizing: border-box !important;
+	overflow: hidden !important;
+}
+
+/* Ensure Workflows pane header action buttons are permanently visible */
+.monaco-pane-view .pane:has(.workflows-manager-viewpane) > .pane-header > .actions,
+.monaco-workbench .part.sidebar .pane:has(.workflows-manager-viewpane) .pane-header .actions,
+.viewlet[id*="workflowsManager"] .pane-header .actions {
+	display: flex !important;
+	opacity: 1 !important;
+	visibility: visible !important;
+}
+
+.monaco-pane-view .pane:has(.workflows-manager-viewpane) > .pane-header > .actions .action-item,
+.monaco-workbench .part.sidebar .pane:has(.workflows-manager-viewpane) .pane-header .actions .action-item {
+	opacity: 1 !important;
+	visibility: visible !important;
+}
+
+.workflows-manager-main-container {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	width: 100%;
+	box-sizing: border-box;
+	padding: 10px 12px 14px 12px;
+	gap: 10px;
+	overflow-y: auto;
+	background: var(--vscode-sideBar-background, #181818);
+}
+
+.workflows-filter-row {
+	width: 100%;
+	flex-shrink: 0;
+	margin-top: 4px;
+}
+
+.workflows-filter-row input.filter-input {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 6px 10px;
+	border-radius: 6px;
+	background: var(--vscode-input-background, #222222);
+	color: var(--vscode-input-foreground, #cccccc);
+	border: 1px solid var(--vscode-input-border, rgba(255, 255, 255, 0.12));
+	outline: none;
+	font-size: 11px;
+	transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.workflows-filter-row input.filter-input:focus {
+	border-color: #0d9488;
+	box-shadow: 0 0 6px rgba(13, 148, 136, 0.25);
+}
+
+.workflows-list-body {
+	padding: 2px 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.workflow-item-card {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 10px 12px;
+	border-radius: 6px;
+	background: var(--vscode-editor-background, #1e1e1e);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	width: 100%;
+	box-sizing: border-box;
+	transition: all 0.2s ease;
+	position: relative;
+}
+
+.workflow-item-card:hover {
+	border-color: rgba(13, 148, 136, 0.4);
+	background: rgba(255, 255, 255, 0.035);
+	transform: translateY(-1px);
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.workflow-item-card .card-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	width: 100%;
+	gap: 8px;
+}
+
+.workflow-item-card .card-left {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	overflow: hidden;
+	flex: 1;
+	min-width: 0;
+}
+
+.workflow-item-card .card-title {
+	font-weight: 600;
+	font-size: 11.5px;
+	color: var(--vscode-sideBarTitle-foreground, #ffffff);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	flex: 1;
+	min-width: 0;
+}
+
+.workflow-item-card .card-title.damaged {
+	text-decoration: line-through;
+	opacity: 0.65;
+}
+
+.workflow-item-card .card-right {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.workflow-item-card .card-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.workflow-item-card .card-actions span {
+	transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.workflow-item-card .card-actions span:hover {
+	opacity: 1 !important;
+	transform: scale(1.15);
+}
+
+.workflow-item-card .card-description {
+	font-size: 10.5px;
+	color: var(--vscode-descriptionForeground, #aaaaaa);
+	line-height: 1.4;
+	word-break: break-word;
+	opacity: 0.85;
+}
+
+.workflow-item-card .card-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-top: 4px;
+	padding-top: 5px;
+	border-top: 1px solid rgba(255, 255, 255, 0.04);
+	font-size: 9.5px;
+	color: var(--vscode-descriptionForeground, #999999);
+	opacity: 0.75;
+}
+
+.workflow-item-card .workspace-badge {
+	background: rgba(13, 148, 136, 0.12);
+	color: #2dd4bf;
+	padding: 2px 7px;
+	border-radius: 4px;
+	font-weight: 600;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 140px;
+	text-transform: uppercase;
+}
+
+.workflow-item-card .status-dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	flex-shrink: 0;
+}
+
+.workflow-item-card .action-btn {
+	cursor: pointer;
+	opacity: 0.6;
+	transition: opacity 0.15s ease, color 0.15s ease;
+	font-size: 11px;
+}
+
+.workflow-item-card .action-btn:hover {
+	opacity: 1.0;
+}
+
+.workflow-item-card .action-btn.delete:hover {
+	color: #ef4444;
+}
+
+.workflow-item-card .action-btn.repair:hover {
+	color: #fbbf24;
+}
+
+.workflows-empty-placeholder {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	padding: 40px 20px;
+	text-align: center;
+	color: var(--vscode-descriptionForeground, #888888);
+	gap: 12px;
+}
+
+.workflows-empty-placeholder .placeholder-icon {
+	font-size: 28px;
+	opacity: 0.35;
+	color: #0d9488;
+}
+
+.workflows-empty-placeholder .placeholder-text {
+	font-size: 11px;
+	line-height: 1.5;
+}

@@ -20,16 +20,170 @@ import { ICommandService } from '../../../../platform/commands/common/commands.j
 import { IWorkspacesService } from '../../../../platform/workspaces/common/workspaces.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
+import { INativeEnvironmentService } from '../../../../platform/environment/common/environment.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { isMacintosh } from '../../../../base/common/platform.js';
 import { Action } from '../../../../base/common/actions.js';
-import { IWorkspacesExplorerService, ResourceType, IWorkspaceItem } from '../common/workspacesExplorer.js';
+import { VSBuffer } from '../../../../base/common/buffer.js';
+import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
+import { IWorkspacesExplorerService, IWorkspaceItem } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { IAgentsManagerService } from '../../agentsManager/common/agentsManager.js';
+import { IAgentsManagerService, IAgentCredentialService, IAgentCredential } from '../../agentsManager/common/agentsManager.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
+import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
+import { AccountManagementDialog } from '../../accountManagement/browser/accountManagementDialog.js';
+
+interface ICustomField {
+	id: string;
+	label: string;
+	type: 'text' | 'textarea' | 'select' | 'multiselect' | 'switch';
+	options?: string[];
+}
+
+interface ICustomModule {
+	id: string;
+	name: string;
+	isDeprecated?: boolean;
+	color: string;
+	storageScope?: 'global' | 'workspace';
+	fields?: ICustomField[];
+}
+
+function stringifyYaml(obj: any, indent = 0): string {
+	const spacing = ' '.repeat(indent);
+	if (Array.isArray(obj)) {
+		if (obj.length === 0) return ' []';
+		let res = '';
+		for (const item of obj) {
+			if (typeof item === 'object' && item !== null) {
+				const itemYaml = stringifyYaml(item, indent + 2).trim();
+				res += `\n${spacing}- ${itemYaml}`;
+			} else {
+				res += `\n${spacing}- ${item}`;
+			}
+		}
+		return res;
+	} else if (typeof obj === 'object' && obj !== null) {
+		let res = '';
+		for (const [k, v] of Object.entries(obj)) {
+			if (v === undefined) continue;
+			if (typeof v === 'object' && v !== null) {
+				res += `${res ? '\n' : ''}${spacing}${k}:${stringifyYaml(v, indent + 2)}`;
+			} else {
+				const valStr = typeof v === 'string' && (v.includes('\n') || v.includes(':') || v.startsWith('#') || v.includes(',') || v.includes('[') || v.includes(']')) 
+					? JSON.stringify(v)
+					: v;
+				res += `${res ? '\n' : ''}${spacing}${k}: ${valStr}`;
+			}
+		}
+		return res;
+	}
+	return String(obj);
+}
+
+function parseYaml(yaml: string): any {
+	const lines = yaml.split(/\r?\n/);
+	const result: any = {};
+	let currentFieldList: any[] = [];
+	let currentField: any = null;
+
+	for (let line of lines) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith('#')) continue;
+
+		const indent = line.length - line.trimStart().length;
+
+		if (trimmed.startsWith('-')) {
+			const content = trimmed.substring(1).trim();
+			if (content.includes(':')) {
+				const colonIndex = content.indexOf(':');
+				const key = content.substring(0, colonIndex).trim();
+				let val = content.substring(colonIndex + 1).trim();
+				if (val.startsWith('"') && val.endsWith('"')) {
+					try { val = JSON.parse(val); } catch {}
+				}
+				currentField = { [key]: val };
+				currentFieldList.push(currentField);
+			} else {
+				let val = content;
+				if (val.startsWith('"') && val.endsWith('"')) {
+					try { val = JSON.parse(val); } catch {}
+				}
+				if (currentField && Array.isArray(currentField.options)) {
+					currentField.options.push(val);
+				}
+			}
+		} else if (trimmed.includes(':')) {
+			const colonIndex = trimmed.indexOf(':');
+			const key = trimmed.substring(0, colonIndex).trim();
+			let val = trimmed.substring(colonIndex + 1).trim();
+			if (val.startsWith('"') && val.endsWith('"')) {
+				try { val = JSON.parse(val); } catch {}
+			}
+
+			if (indent === 0) {
+				if (key === 'fields') {
+					result.fields = [];
+					currentFieldList = result.fields;
+				} else {
+					result[key] = (val === 'true' ? true : val === 'false' ? false : val);
+				}
+			} else if (indent > 0 && currentField) {
+				if (key === 'options') {
+					currentField.options = [];
+				} else {
+					currentField[key] = (val === 'true' ? true : val === 'false' ? false : val);
+				}
+			}
+		}
+	}
+	return result;
+}
+
+function getColorForName(name: string | undefined): string {
+	if (!name) return '#38bdf8';
+	const MODERN_PALETTE = [
+		'#38bdf8', // Light Blue
+		'#a78bfa', // Purple/Violet
+		'#f472b6', // Pink
+		'#34d399', // Emerald/Green
+		'#fbbf24', // Amber/Yellow
+		'#fb923c', // Orange
+		'#2dd4bf', // Teal
+		'#f87171', // Red
+		'#818cf8', // Indigo
+		'#c084fc', // Fuchsia
+		'#22d3ee', // Cyan
+		'#eab308'  // Yellow-gold
+	];
+	let hash = 0;
+	const str = String(name).trim();
+	for (let i = 0; i < str.length; i++) {
+		hash = str.charCodeAt(i) + ((hash << 5) - hash);
+	}
+	const index = Math.abs(hash) % MODERN_PALETTE.length;
+	return MODERN_PALETTE[index];
+}
+
+function hexToRgba(hex: string | undefined, alpha: number): string {
+	if (!hex) {
+		return `rgba(56, 189, 248, ${alpha})`;
+	}
+	let r = 0, g = 0, b = 0;
+	if (hex.length === 4) {
+		r = parseInt(hex[1] + hex[1], 16);
+		g = parseInt(hex[2] + hex[2], 16);
+		b = parseInt(hex[3] + hex[3], 16);
+	} else if (hex.length === 7) {
+		r = parseInt(hex.substring(1, 3), 16);
+		g = parseInt(hex.substring(3, 5), 16);
+		b = parseInt(hex.substring(5, 7), 16);
+	}
+	return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 export class MainWorkspaceViewPane extends ViewPane {
 	private containerEl?: HTMLElement;
@@ -53,6 +207,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 		}
 	}
 
+	private readonly _storageService: IStorageService;
+
 	constructor(
 		options: IViewPaneOptions,
 		@IKeybindingService keybindingService: IKeybindingService,
@@ -73,9 +229,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 		@IFileService private readonly fileService: IFileService,
 		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService,
 		@IEditorService private readonly editorService: IEditorService,
-		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService
+		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService,
+		@IStorageService storageService: IStorageService,
+		@INativeEnvironmentService private readonly environmentService: INativeEnvironmentService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
+		this._storageService = storageService;
 
 		this._register(this.workspacesExplorerService.onDidChangeWorkspaces(() => this.renderContent()));
 		this._register(this.workspaceContextService.onDidChangeWorkspaceFolders(() => this.renderContent()));
@@ -232,8 +391,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 				wsCard.ondragstart = (e) => {
 					e.stopPropagation();
 					if (e.dataTransfer) {
-						e.dataTransfer.setData('text/plain', ws.id);
-						e.dataTransfer.effectAllowed = 'move';
+						e.dataTransfer.setData('vscode-workspace-id', ws.id);
+						e.dataTransfer.setData('text/plain', `any-agent-import:project:${ws.name}`);
+						e.dataTransfer.effectAllowed = 'copyMove';
 					}
 					wsCard.style.opacity = '0.5';
 				};
@@ -272,8 +432,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 					wsCard.style.borderTop = '';
 					wsCard.style.borderBottom = '';
 
-					const sourceId = e.dataTransfer?.getData('text/plain');
-					if (sourceId && sourceId !== ws.id) {
+					const sourceId = e.dataTransfer?.getData('vscode-workspace-id') || e.dataTransfer?.getData('text/plain');
+					if (sourceId && sourceId !== ws.id && !sourceId.startsWith('any-agent-import:')) {
 						await this.workspacesExplorerService.reorderWorkspaces(sourceId, ws.id);
 						this.renderContent();
 					}
@@ -403,6 +563,18 @@ export class MainWorkspaceViewPane extends ViewPane {
 					badgeText = 'AGENT';
 					badgeBg = 'rgba(56, 189, 248, 0.2)';
 					badgeFg = '#38bdf8';
+				} else if (ws.detectedType === 'workflow') {
+					wsIcon = append(headerLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.githubAction)));
+					wsIcon.style.color = '#0d9488';
+					badgeText = 'WORKFLOW';
+					badgeBg = 'rgba(13, 148, 136, 0.2)';
+					badgeFg = '#0d9488';
+				} else if (ws.detectedType === 'analysis') {
+					wsIcon = append(headerLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.graph)));
+					wsIcon.style.color = '#34d399';
+					badgeText = 'ANALYSIS';
+					badgeBg = 'rgba(52, 211, 153, 0.2)';
+					badgeFg = '#34d399';
 				} else {
 					wsIcon = append(headerLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.rootFolder)));
 					wsIcon.style.color = ws.isMissing ? '#f87171' : 'inherit';
@@ -490,7 +662,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 
 					try {
-						await this.editorService.openEditor(new EntityDetailEditorInput(ws.uri, ws.name), { pinned: true });
+						if (ws.detectedType === 'workflow') {
+							await this.editorService.openEditor(new WorkflowEditorInput(ws.uri, ws.name), { pinned: true });
+						} else {
+							await this.editorService.openEditor(new EntityDetailEditorInput(ws.uri, ws.name), { pinned: true });
+						}
 					} catch (err) {
 						console.error('Failed to open Workspace domain editor', err);
 					}
@@ -541,7 +717,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		for (const child of children) {
 			const canonicalChildId = this.getCanonicalId(child.id);
-			const isDirectory = child.type === 'folder' || child.type === 'job' || child.type === 'project' || child.type === 'workspace' || child.type === 'agent' || child.type === 'task' || child.type === 'case' || child.type === 'issue' || child.type === 'analysis';
+			const isDirectory = child.type !== 'file';
 			const isExpanded = isDirectory && this.expandedWorkspaces.has(canonicalChildId);
 			const isChildSelected = this.selectedWorkspaceId === parentWsId && this.selectedItemId === canonicalChildId;
 
@@ -552,6 +728,33 @@ export class MainWorkspaceViewPane extends ViewPane {
 			childRow.style.padding = `4px 6px 4px ${depth * 12}px`;
 			childRow.style.borderRadius = '4px';
 			childRow.style.cursor = 'pointer';
+
+			let isDraggable = true;
+			if (child.type === 'file' || child.type === 'folder') {
+				isDraggable = false;
+			}
+			const activeInput = this.editorService.activeEditor;
+			if (activeInput instanceof WorkflowEditorInput) {
+				const activeWorkflowUriStr = activeInput.workflowUri.toString().toLowerCase();
+				if (child.uri.toString().toLowerCase() === activeWorkflowUriStr) {
+					isDraggable = false;
+				}
+			}
+
+			if (isDraggable) {
+				childRow.draggable = true;
+				childRow.ondragstart = (e) => {
+					e.stopPropagation();
+					if (e.dataTransfer) {
+						e.dataTransfer.setData('text/plain', `any-agent-import:${child.type}:${child.name}`);
+						e.dataTransfer.effectAllowed = 'copy';
+					}
+					childRow.style.opacity = '0.5';
+				};
+				childRow.ondragend = () => {
+					childRow.style.opacity = '1';
+				};
+			}
 
 			if (isChildSelected) {
 				childRow.style.backgroundColor = 'rgba(56, 189, 248, 0.25)';
@@ -576,13 +779,23 @@ export class MainWorkspaceViewPane extends ViewPane {
 			// Right click context menu
 			childRow.oncontextmenu = (e) => {
 				e.preventDefault();
-				e.stopPropagation();
+					e.stopPropagation();
 
 				const childActions: Action[] = [];
 
 				if (isDirectory) {
-					childActions.push(new Action('create_sub_entity', `Create Sub-Entity in '${child.name}'...`, ThemeIcon.asClassName(Codicon.add), true, () => {
+					childActions.push(new Action('create_sub_entity', `Create Sub-Entity...`, ThemeIcon.asClassName(Codicon.add), true, () => {
 						this.showCreateResourceModal(child.uri, child.name);
+					}));
+				}
+
+				if (child.type !== 'file' && child.type !== 'folder') {
+					childActions.push(new Action('edit_child', 'Edit...', ThemeIcon.asClassName(Codicon.edit), true, async () => {
+						if (child.type === 'workflow') {
+							await this.editorService.openEditor(new WorkflowEditorInput(child.uri, child.name), { pinned: true });
+						} else {
+							await this.editorService.openEditor(new EntityDetailEditorInput(child.uri, child.name, true), { pinned: true });
+						}
 					}));
 				}
 
@@ -593,16 +806,64 @@ export class MainWorkspaceViewPane extends ViewPane {
 						} catch {
 							this.notificationService.warn(`Path does not exist: ${child.uri.fsPath}`);
 						}
-					}),
-					new Action('open_child', child.type === 'file' ? 'Open File' : 'Open Workspace Folder', ThemeIcon.asClassName(Codicon.goToFile), true, async () => {
-						if (child.uri.path.toLowerCase().endsWith('.md')) {
-							await this.commandService.executeCommand('markdown.showPreview', child.uri);
-						} else if (isDirectory) {
-							await this.commandService.executeCommand('vscode.openFolder', child.uri, { forceNewWindow: false });
-						} else {
-							await this.openerService.open(child.uri);
-						}
-					}),
+					})
+				);
+
+				if (child.type === 'file') {
+					childActions.push(
+						new Action('open_child', 'Open File', ThemeIcon.asClassName(Codicon.goToFile), true, async () => {
+							if (child.uri.path.toLowerCase().endsWith('.md')) {
+								await this.commandService.executeCommand('markdown.showPreview', child.uri);
+							} else {
+								await this.openerService.open(child.uri);
+							}
+						})
+					);
+				}
+
+				if (child.type !== 'file' && child.type !== 'folder') {
+					childActions.push(
+						new Action('remove_child_from_ws', 'Remove from Workspace', ThemeIcon.asClassName(Codicon.close), true, async () => {
+							const confirm = await this.dialogService.confirm({
+								type: 'warning',
+								message: `Are you sure you want to remove '${child.name}' from the workspace?`,
+								detail: `This will keep the physical folder intact but rename it to '~${child.name}', making it ignored in the explorer.`,
+								primaryButton: 'Remove'
+							});
+							if (confirm.confirmed) {
+								try {
+									const parentDir = dirname(child.uri);
+									const newName = '~' + child.name;
+									const newUri = URI.joinPath(parentDir, newName);
+									
+									// 1. Rename folder on disk
+									if (await this.fileService.exists(child.uri)) {
+										await this.fileService.move(child.uri, newUri, true);
+									}
+									
+									// 2. Remove snapshot from global DB
+									await this.workspacesExplorerService.removeSnapshot(child.uri);
+									
+									// 3. If it is registered as an agent in agentsManagerService, remove it too
+									if (child.type === 'agent' && this.agentsManagerService) {
+										const agentsList = await this.agentsManagerService.getAgents();
+										const matchingAgent = agentsList.find(a => a.folderPath === child.uri.fsPath);
+										if (matchingAgent) {
+											await this.agentsManagerService.removeAgent(matchingAgent.id);
+										}
+									}
+									
+									this.notificationService.info(`Removed '${child.name}' from workspace.`);
+									this.renderContent();
+								} catch (err) {
+									this.notificationService.error(`Failed to remove from workspace: ${err}`);
+								}
+							}
+						})
+					);
+				}
+
+				childActions.push(
 					new Action('trash_child', 'Move to Trash...', ThemeIcon.asClassName(Codicon.trash), true, async () => {
 						const confirm = await this.dialogService.confirm({
 							type: 'warning',
@@ -615,6 +876,17 @@ export class MainWorkspaceViewPane extends ViewPane {
 								const exists = await this.fileService.exists(child.uri);
 								if (exists) {
 									await this.fileService.del(child.uri, { useTrash: true, recursive: true });
+								}
+								// Remove snapshot from global DB
+								await this.workspacesExplorerService.removeSnapshot(child.uri);
+
+								// If it is registered as an agent in agentsManagerService, remove it too
+								if (child.type === 'agent' && this.agentsManagerService) {
+									const agentsList = await this.agentsManagerService.getAgents();
+									const matchingAgent = agentsList.find(a => a.folderPath === child.uri.fsPath);
+									if (matchingAgent) {
+										await this.agentsManagerService.removeAgent(matchingAgent.id);
+									}
 								}
 								this.notificationService.info(`Removed '${child.name}'.`);
 								this.renderContent();
@@ -708,6 +980,20 @@ export class MainWorkspaceViewPane extends ViewPane {
 				badgeText = 'ANALYSIS';
 				badgeBg = 'rgba(52, 211, 153, 0.2)';
 				badgeFg = '#34d399';
+			} else if (child.type === 'workflow') {
+				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.githubAction)));
+				childIcon.style.color = '#0d9488';
+				badgeText = 'WORKFLOW';
+				badgeBg = 'rgba(13, 148, 136, 0.2)';
+				badgeFg = '#0d9488';
+			} else if (child.type !== 'folder' && child.type !== 'file') {
+				// Custom Module!
+				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.package)));
+				const color = getColorForName(child.type);
+				childIcon.style.color = color;
+				badgeText = child.type.toUpperCase();
+				badgeBg = hexToRgba(color, 0.2);
+				badgeFg = color;
 			} else if (child.type === 'folder') {
 				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.folder)));
 				childIcon.style.opacity = '0.8';
@@ -794,33 +1080,32 @@ export class MainWorkspaceViewPane extends ViewPane {
 					} else {
 						this.expandedWorkspaces.delete(canonicalChildId);
 					}
-					// Also check if directory contains a primary md file like .agents/job.md / instruction.md / workspace.md
-					const possibleMds = [
-						'.agents/job.md', '.agents/task.md', '.agents/project.md', '.agents/agent.md', '.agents/workflow.md', '.agents/workspace.md', '.agents/instruction.md', '.agents/README.md',
-						'instruction.md', 'job.md', 'workspace.md', 'project.md', 'agent.md', 'README.md'
-					];
-					for (const mdName of possibleMds) {
-						const mdUri = URI.joinPath(child.uri, mdName);
-						if (await this.fileService.exists(mdUri)) {
+					// Also check if directory contains a primary md file like .agents folder or legacy files
+					const configDir = URI.joinPath(child.uri, '.agents');
+					const legacyConfigExists = await this.fileService.exists(URI.joinPath(child.uri, 'instruction.md')) || await this.fileService.exists(URI.joinPath(child.uri, 'README.md'));
+					if (await this.fileService.exists(configDir) || legacyConfigExists) {
+						if (child.type === 'workflow') {
+							await this.editorService.openEditor(new WorkflowEditorInput(child.uri, child.name), { pinned: true });
+						} else {
 							await this.editorService.openEditor(new EntityDetailEditorInput(child.uri, child.name), { pinned: true });
-							break;
 						}
 					}
 				} else if (child.uri.path.toLowerCase().endsWith('.md')) {
-					const possibleMds = [
-						'.agents/job.md', '.agents/task.md', '.agents/project.md', '.agents/agent.md', '.agents/workflow.md', '.agents/workspace.md', '.agents/instruction.md', '.agents/README.md',
-						'instruction.md', 'job.md', 'workspace.md', 'project.md', 'agent.md', 'README.md'
-					];
 					const fileName = child.uri.path.split('/').pop() || '';
 					const parentUri = dirname(child.uri);
-					const isAgentMd = possibleMds.some(name => name.endsWith(fileName));
+					const isAgentMd = parentUri.path.endsWith('.agents') || ['instruction.md', 'readme.md', 'work_log.md', 'workspace.md'].includes(fileName.toLowerCase());
 					if (isAgentMd) {
 						let entityUri = parentUri;
 						if (parentUri.path.endsWith('.agents')) {
 							entityUri = dirname(parentUri);
 						}
 						const entityName = entityUri.path.split('/').filter(Boolean).pop() || 'Entity';
-						await this.editorService.openEditor(new EntityDetailEditorInput(entityUri, entityName), { pinned: true });
+						const isWorkflow = fileName.toLowerCase() === 'workflow.md' || entityUri.path.toLowerCase().includes('workflow');
+						if (isWorkflow) {
+							await this.editorService.openEditor(new WorkflowEditorInput(entityUri, entityName), { pinned: true });
+						} else {
+							await this.editorService.openEditor(new EntityDetailEditorInput(entityUri, entityName), { pinned: true });
+						}
 					} else {
 						await this.commandService.executeCommand('markdown.showPreview', child.uri);
 					}
@@ -922,7 +1207,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		// Location Path Picker
 		const pathBox = append(modal, $('.form-group'));
 		append(pathBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Target Location Path:'));
-		
+
 		const pathRow = append(pathBox, $('.path-input-row'));
 		pathRow.style.display = 'flex';
 		pathRow.style.gap = '6px';
@@ -1031,7 +1316,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 	/**
 	 * Renders a spacious Create Resource Modal Overlay under the target Workspace or Folder
 	 */
-	private showCreateResourceModal(target: IWorkspaceItem | URI, parentName?: string): void {
+	public showCreateResourceModal(target: IWorkspaceItem | URI, parentName?: string, onSuccess?: (type: string, name: string) => void): void {
 		if (!this.containerEl) {
 			return;
 		}
@@ -1066,9 +1351,18 @@ export class MainWorkspaceViewPane extends ViewPane {
 		overlay.style.zIndex = '10000';
 		overlay.style.padding = '20px';
 
+		let clickListener: ((e: MouseEvent) => void) | undefined;
+		const removeOverlay = () => {
+			if (clickListener) {
+				document.removeEventListener('click', clickListener);
+			}
+			overlay.remove();
+		};
+
 		const modal = append(overlay, $('.create-resource-modal'));
 		modal.style.width = '100%';
 		modal.style.maxWidth = '640px';
+		modal.style.maxHeight = '88vh';
 		modal.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
 		modal.style.border = '1px solid rgba(255, 255, 255, 0.18)';
 		modal.style.borderRadius = '12px';
@@ -1092,69 +1386,126 @@ export class MainWorkspaceViewPane extends ViewPane {
 		closeIcon.style.cursor = 'pointer';
 		closeIcon.style.fontSize = '14px';
 		closeIcon.style.opacity = '0.7';
-		closeIcon.onclick = () => overlay.remove();
+		closeIcon.onclick = () => removeOverlay();
+
+		// Scrollable Body Container
+		const modalBody = append(modal, $('.modal-body'));
+		modalBody.style.flex = '1';
+		modalBody.style.overflowY = 'auto';
+		modalBody.style.display = 'flex';
+		modalBody.style.flexDirection = 'column';
+		modalBody.style.gap = '16px';
+		modalBody.style.paddingRight = '6px';
 
 		// Category / Type Selection Row
-		const categoryBox = append(modal, $('.form-group'));
-		append(categoryBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 6px; font-weight: 500;' }, 'Select Sub-Entity Type:'));
+		const categoryBox = append(modalBody, $('.form-group'));
+		const labelRow = append(categoryBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;' }));
+		append(labelRow, $('label', { style: 'font-size: 11.5px; opacity: 0.85; font-weight: 500;' }, 'Select Sub-Entity Type:'));
 
-		let selectedType: ResourceType = 'job';
+		const manageBtn = append(labelRow, $('span', {
+			style: 'font-size: 11px; color: #38bdf8; cursor: pointer; display: flex; align-items: center; gap: 4px; opacity: 0.85; transition: opacity 0.15s ease;'
+		}));
+		manageBtn.textContent = '⚙️ Manage Custom Modules';
+		manageBtn.onmouseenter = () => manageBtn.style.opacity = '1.0';
+		manageBtn.onmouseleave = () => manageBtn.style.opacity = '0.85';
 
-		const types: { type: ResourceType; label: string; icon: ThemeIcon; color: string }[] = [
-			{ type: 'job', label: 'Job', icon: Codicon.briefcase, color: '#eab308' },
-			{ type: 'task', label: 'Task', icon: Codicon.tasklist, color: '#3b82f6' },
-			{ type: 'project', label: 'Project', icon: Codicon.project, color: '#a855f7' },
-			{ type: 'workflow', label: 'Workflow', icon: Codicon.circuitBoard, color: '#10b981' },
-			{ type: 'case', label: 'Case', icon: Codicon.checklist, color: '#f97316' },
-			{ type: 'agent', label: 'AI Agent', icon: Codicon.robot, color: '#ec4899' },
-			{ type: 'issue', label: 'Issue', icon: Codicon.bug, color: '#ef4444' },
-			{ type: 'analysis', label: 'Analysis', icon: Codicon.graph, color: '#06b6d4' },
-			{ type: 'folder', label: 'Folder', icon: Codicon.folder, color: '#94a3b8' },
-			{ type: 'file', label: 'File', icon: Codicon.file, color: '#64748b' }
-		];
-
+		let selectedType: string = 'job';
 		const categoryGrid = append(categoryBox, $('.category-grid'));
-		categoryGrid.style.display = 'grid';
-		categoryGrid.style.gridTemplateColumns = 'repeat(5, 1fr)';
-		categoryGrid.style.gap = '8px';
 
 		const typeButtons: HTMLElement[] = [];
+		let typesList: { type: string; label: string; icon: ThemeIcon; color: string; bg: string }[] = [];
 
-		for (const t of types) {
-			const btn = append(categoryGrid, $('.type-option-btn'));
-			btn.style.padding = '8px 10px';
-			btn.style.borderRadius = '6px';
-			btn.style.cursor = 'pointer';
-			btn.style.fontSize = '11.5px';
-			btn.style.display = 'flex';
-			btn.style.alignItems = 'center';
-			btn.style.justifyContent = 'center';
-			btn.style.gap = '6px';
-			btn.style.border = t.type === selectedType ? '1px solid #38bdf8' : '1px solid rgba(255,255,255,0.08)';
-			btn.style.backgroundColor = t.type === selectedType ? 'rgba(56, 189, 248, 0.18)' : 'rgba(255,255,255,0.03)';
-			btn.style.transition = 'all 0.15s ease';
 
-			const iconSpan = append(btn, $('span' + ThemeIcon.asCSSSelector(t.icon)));
-			iconSpan.style.color = t.color;
-			iconSpan.style.fontSize = '14px';
 
-			append(btn, $('span', {}, t.label));
+		const renderTypeGrid = async () => {
+			clearNode(categoryGrid);
+			categoryGrid.style.display = 'grid';
+			categoryGrid.style.gridTemplateColumns = 'repeat(5, 1fr)';
+			categoryGrid.style.gap = '8px';
+			typeButtons.length = 0;
 
-			btn.onclick = async () => {
-				selectedType = t.type;
-				for (let i = 0; i < typeButtons.length; i++) {
-					const isSelected = types[i].type === selectedType;
-					typeButtons[i].style.border = isSelected ? '1px solid #38bdf8' : '1px solid rgba(255,255,255,0.08)';
-					typeButtons[i].style.backgroundColor = isSelected ? 'rgba(56, 189, 248, 0.18)' : 'rgba(255,255,255,0.03)';
-				}
-				await refreshNameAndBadge();
-			};
+			const baseTypes = [
+				{ type: 'job', label: 'Job', icon: Codicon.briefcase, color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.18)' },
+				{ type: 'task', label: 'Task', icon: Codicon.tasklist, color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.18)' },
+				{ type: 'project', label: 'Project', icon: Codicon.project, color: '#60a5fa', bg: 'rgba(96, 165, 250, 0.18)' },
+				{ type: 'workflow', label: 'Workflow', icon: Codicon.githubAction, color: '#0d9488', bg: 'rgba(13, 148, 136, 0.18)' },
+				{ type: 'case', label: 'Case', icon: Codicon.checklist, color: '#f472b6', bg: 'rgba(244, 114, 182, 0.18)' },
+				{ type: 'agent', label: 'AI Agent', icon: Codicon.robot, color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.18)' },
+				{ type: 'issue', label: 'Issue', icon: Codicon.bug, color: '#ef4444', bg: 'rgba(239, 68, 68, 0.18)' },
+				{ type: 'analysis', label: 'Analysis', icon: Codicon.graph, color: '#34d399', bg: 'rgba(52, 211, 153, 0.18)' },
+				{ type: 'folder', label: 'Folder', icon: Codicon.folder, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.18)' },
+				{ type: 'file', label: 'File', icon: Codicon.file, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.18)' }
+			];
 
-			typeButtons.push(btn);
-		}
+			let customModules: ICustomModule[] = [];
+			try {
+				customModules = (await this._getCustomModules(targetUri)).filter(m => !m.isDeprecated);
+			} catch (err) {
+				console.error('Error fetching custom modules:', err);
+			}
+
+			const customTypes = customModules.map(m => ({
+				type: m.id,
+				label: m.name,
+				icon: Codicon.package,
+				color: m.color,
+				bg: hexToRgba(m.color, 0.18)
+			}));
+
+			typesList = [...baseTypes, ...customTypes];
+
+			if (!typesList.some(t => t.type === selectedType)) {
+				selectedType = 'job';
+			}
+
+			for (const t of typesList) {
+				const btn = append(categoryGrid, $('.type-option-btn'));
+				btn.style.padding = '8px 10px';
+				btn.style.borderRadius = '6px';
+				btn.style.cursor = 'pointer';
+				btn.style.fontSize = '11.5px';
+				btn.style.display = 'flex';
+				btn.style.alignItems = 'center';
+				btn.style.justifyContent = 'center';
+				btn.style.gap = '6px';
+				btn.style.border = t.type === selectedType ? `1px solid ${t.color}` : '1px solid rgba(255,255,255,0.08)';
+				btn.style.backgroundColor = t.type === selectedType ? t.bg : 'rgba(255,255,255,0.03)';
+				btn.style.transition = 'all 0.15s ease';
+
+				const iconSpan = append(btn, $('span' + ThemeIcon.asCSSSelector(t.icon)));
+				iconSpan.style.color = t.color;
+				iconSpan.style.fontSize = '14px';
+
+				append(btn, $('span', {}, t.label));
+
+				btn.onclick = async () => {
+					selectedType = t.type;
+					for (let i = 0; i < typeButtons.length; i++) {
+						const isSelected = typesList[i].type === selectedType;
+						typeButtons[i].style.border = isSelected ? `1px solid ${typesList[i].color}` : '1px solid rgba(255,255,255,0.08)';
+						typeButtons[i].style.backgroundColor = isSelected ? typesList[i].bg : 'rgba(255,255,255,0.03)';
+					}
+					await refreshNameAndBadge();
+				};
+
+				typeButtons.push(btn);
+			}
+		};
+
+		manageBtn.onclick = () => {
+			this._openCustomModulesManager(targetUri, () => {
+				renderTypeGrid().then(() => {
+					refreshNameAndBadge();
+				});
+			});
+		};
+
+		renderTypeGrid().then(() => {
+			refreshNameAndBadge();
+		});
 
 		// Entity Code Prefix Override Box
-		const codeBox = append(modal, $('.form-group'));
+		const codeBox = append(modalBody, $('.form-group'));
 		append(codeBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Entity Code Prefix (Optional Override):'));
 		const codeInput = append(codeBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; text-transform: uppercase;'
@@ -1162,14 +1513,249 @@ export class MainWorkspaceViewPane extends ViewPane {
 		codeInput.placeholder = 'Inherited from parent (leave blank to inherit)';
 
 		// Ticket ID Live Badge
-		const badgeBox = append(modal, $('.form-group'));
+		const badgeBox = append(modalBody, $('.form-group'));
 		const previewBadge = append(badgeBox, $('div', {
 			style: 'font-size: 11.5px; font-weight: 600; color: #38bdf8; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 6px; padding: 8px 12px; text-align: center;'
 		}));
 		previewBadge.innerText = 'Generated Ticket ID: calculating...';
 
+		// Resource Name Input
+		const nameBox = append(modalBody, $('.form-group'));
+		const nameLabel = append(nameBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Entity Folder Name / Ticket ID:'));
+		const nameInput = append(nameBox, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+
+		// Warning banner element for duplicate or invalid names
+		const warningBanner = append(nameBox, $('div', {
+			style: 'font-size: 11px; color: #ef4444; margin-top: 4px; display: none; line-height: 1.3;'
+		}));
+
+		// Description Input (Multiline Textarea)
+		const descBox = append(modalBody, $('.form-group'));
+		const descLabel = append(descBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Description:'));
+		const descInput = append(descBox, $('textarea.monaco-inputbox', {
+			style: 'width: 100%; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; min-height: 64px; font-family: inherit;'
+		})) as HTMLTextAreaElement;
+		descInput.placeholder = 'Brief purpose of this entity...';
+
+		// Custom Fields Box for Custom Modules
+		const customFieldsBox = append(modalBody, $('.custom-fields-box', { style: 'display: flex; flex-direction: column; gap: 10px; margin-top: 8px;' }));
+
+		// Base Agent to Inherit From (Optional)
+		const baseAgentBox = append(modalBody, $('.form-group'));
+		append(baseAgentBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Base Agent to Inherit From (Optional):'));
+		const baseAgentSelect = append(baseAgentBox, $('select.monaco-select', {
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box;'
+		})) as HTMLSelectElement;
+
+		append(baseAgentSelect, $('option', { value: '' }, '-- Create from Scratch (No Base Agent) --'));
+
+		this.agentsManagerService.getAgents().then(agents => {
+			for (const ag of agents) {
+				append(baseAgentSelect, $('option', { value: ag.id }, `🤖 ${ag.name} (${ag.model?.modelId || 'gemini-1.5-flash'})`));
+			}
+		}).catch(() => { });
+
+		// AI Agent Credential Box
+		const credBox = append(modalBody, $('.form-group'));
+		append(credBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'API Connection Credential:'));
+		const credSelect = append(credBox, $('select.monaco-select', {
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box; outline: none; cursor: pointer;'
+		})) as HTMLSelectElement;
+
+		const credHelp = append(credBox, $('div', {
+			style: 'font-size: 11px; color: var(--vscode-descriptionForeground, #888888); margin-top: 4px; line-height: 1.4;'
+		}));
+		credHelp.appendChild(document.createTextNode('To connect custom providers (Ollama, DeepSeek, OpenAI, Claude), configure keys in '));
+		const helpLink = append(credHelp, $('span', {
+			style: 'color:var(--vscode-textLink-foreground,#38bdf8);cursor:pointer;text-decoration:underline;'
+		}));
+		helpLink.textContent = 'Account & Security Preferences -> AI LLM Providers';
+		credHelp.appendChild(document.createTextNode('.'));
+
+		helpLink.onclick = () => {
+			removeOverlay();
+			const dialog = this.instantiationService.createInstance(AccountManagementDialog);
+			dialog.show('Models');
+		};
+
+		// AI Agent Model Box
+		const modelBox = append(modalBody, $('.form-group', { style: 'position: relative;' }));
+		append(modelBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'AI Model:'));
+		const modelInputContainer = append(modelBox, $('.model-input-container', {
+			style: 'position: relative; width: 100%;'
+		}));
+		const modelInput = append(modelInputContainer, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 7px 30px 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; outline: none;'
+		})) as HTMLInputElement;
+		modelInput.placeholder = 'Search model or type custom ID...';
+
+		const modelArrow = append(modelInputContainer, $('div', {
+			style: 'position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 8px; color: var(--vscode-descriptionForeground, #888888); cursor: pointer; pointer-events: none;'
+		}));
+		modelArrow.textContent = '▼';
+
+		const modelDropdown = append(modelBox, $('.model-search-dropdown', {
+			style: 'position: absolute; top: 100%; left: 0; width: 100%; max-height: 160px; overflow-y: auto; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15)); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); z-index: 100001; display: none; margin-top: 4px; box-sizing: border-box;'
+		}));
+
+		// AI Agent System Prompt Box
+		const promptBox = append(modalBody, $('.form-group'));
+		append(promptBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'System Prompt / Core Instructions:'));
+		const promptInput = append(promptBox, $('textarea.monaco-inputbox', {
+			style: 'width: 100%; min-height: 100px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; outline: none; resize: vertical; font-family: var(--vscode-editor-font-family, monospace);'
+		})) as HTMLTextAreaElement;
+		promptInput.placeholder = 'e.g. You are the Lead Architect. Maintain modular design, clear contracts, and update instruction.md files...';
+
+		let savedCredentials: IAgentCredential[] = [];
+		let availableModels: { id: string; label: string }[] = [];
+		let isFiltering = false;
+
+		const updateModelsList = () => {
+			const activeId = credSelect.value;
+			if (activeId === 'default' || activeId === 'none') {
+				availableModels = [
+					{ id: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
+					{ id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+					{ id: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash' },
+					{ id: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
+					{ id: 'gpt-4o', label: 'GPT-4o' },
+					{ id: 'gpt-4o-mini', label: 'GPT-4o Mini' },
+					{ id: 'claude-3-5-sonnet', label: 'Claude 3.5 Sonnet' }
+				];
+				return;
+			}
+			const cred = savedCredentials.find(c => c.id === activeId);
+			if (!cred) {
+				availableModels = [];
+				return;
+			}
+			const list = cred.cachedModels || [];
+			availableModels = list.map((m: string) => ({ id: m, label: m }));
+		};
+
+		const renderFilteredDropdown = () => {
+			clearNode(modelDropdown);
+			const query = isFiltering ? modelInput.value.toLowerCase().trim() : '';
+
+			const filtered = availableModels.filter(m => {
+				if (!query) return true;
+				const matchString = `${m.id} ${m.label}`.toLowerCase();
+				let queryIndex = 0;
+				for (let i = 0; i < matchString.length; i++) {
+					if (matchString[i] === query[queryIndex]) {
+						queryIndex++;
+						if (queryIndex === query.length) return true;
+					}
+				}
+				return false;
+			});
+
+			if (filtered.length === 0) {
+				const noMatch = append(modelDropdown, $('.model-dropdown-item', {
+					style: 'padding: 8px 12px; color: #888888; font-style: italic; font-size: 11px;'
+				}));
+				noMatch.textContent = 'No matching models. Type to use custom ID.';
+				return;
+			}
+
+			filtered.forEach(m => {
+				const item = append(modelDropdown, $('.model-dropdown-item', {
+					style: 'padding: 8px 12px; cursor: pointer; transition: background 80ms ease; font-size: 11.5px; border-bottom: 1px solid rgba(255,255,255,0.02); color: var(--vscode-editorWidget-foreground, inherit); line-height: 1.4;'
+				}));
+				item.textContent = m.label;
+				item.onmouseenter = () => { item.style.background = 'var(--vscode-list-hoverBackground, rgba(255,255,255,0.08))'; };
+				item.onmouseleave = () => { item.style.background = 'transparent'; };
+				item.onclick = (e) => {
+					e.stopPropagation();
+					modelInput.value = m.id;
+					modelDropdown.style.display = 'none';
+				};
+			});
+		};
+
+		this.instantiationService.invokeFunction(async (accessor) => {
+			const credentialService = accessor.get(IAgentCredentialService);
+			savedCredentials = await credentialService.getCredentials();
+
+			clearNode(credSelect);
+			if (savedCredentials.length === 0) {
+				const opt = append(credSelect, $('option', { value: 'none' }, 'No Credentials Configured (click link below to configure)')) as HTMLOptionElement;
+				opt.disabled = true;
+				opt.selected = true;
+			} else {
+				for (let i = 0; i < savedCredentials.length; i++) {
+					const cred = savedCredentials[i];
+					const displayName = cred.isEnabled !== false ? `${cred.name} (${cred.providerId})` : `${cred.name} (${cred.providerId}) [Disabled]`;
+					const opt = append(credSelect, $('option', { value: cred.id }, displayName)) as HTMLOptionElement;
+					if (cred.isEnabled === false) {
+						opt.disabled = true;
+					}
+					if (i === 0 && cred.isEnabled !== false) {
+						opt.selected = true;
+					}
+				}
+			}
+			updateModelsList();
+			if (availableModels.length > 0) {
+				modelInput.value = availableModels[0].id;
+			}
+		});
+
+		modelInput.onclick = (e) => {
+			e.stopPropagation();
+			isFiltering = false;
+			modelDropdown.style.display = 'block';
+			renderFilteredDropdown();
+		};
+
+		modelInput.oninput = () => {
+			isFiltering = true;
+			modelDropdown.style.display = 'block';
+			renderFilteredDropdown();
+		};
+
+		clickListener = (e: MouseEvent) => {
+			if (e.target !== modelInput && !modelDropdown.contains(e.target as Node)) {
+				modelDropdown.style.display = 'none';
+			}
+		};
+		document.addEventListener('click', clickListener);
+
+		credSelect.onchange = () => {
+			isFiltering = false;
+			updateModelsList();
+			if (availableModels.length > 0) {
+				modelInput.value = availableModels[0].id;
+			}
+			renderFilteredDropdown();
+		};
+
+		baseAgentSelect.onchange = async () => {
+			const baseAgentId = baseAgentSelect.value;
+			if (!baseAgentId) return;
+
+			try {
+				const baseAgent = await this.agentsManagerService.getAgent(baseAgentId);
+				if (baseAgent) {
+					if (baseAgent.model) {
+						if (baseAgent.model.credentialId) {
+							credSelect.value = baseAgent.model.credentialId;
+							updateModelsList();
+						} else {
+							credSelect.value = 'default';
+							updateModelsList();
+						}
+						modelInput.value = baseAgent.model.modelId;
+					}
+					promptInput.value = baseAgent.systemPrompt || '';
+				}
+			} catch {}
+		};
+
 		// Priority Selection Box (5 Levels)
-		const priorityBox = append(modal, $('.form-group'));
+		const priorityBox = append(modalBody, $('.form-group'));
 		append(priorityBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 6px; font-weight: 500;' }, 'Priority Level (5 Levels):'));
 
 		let selectedPriority = 'Medium';
@@ -1233,7 +1819,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		}
 
 		// AI Agent Assignment Box
-		const agentBox = append(modal, $('.form-group'));
+		const agentBox = append(modalBody, $('.form-group'));
 		append(agentBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Assign AI Agent (Involved Agent):'));
 
 		const agentSelect = append(agentBox, $('select.monaco-select', {
@@ -1244,38 +1830,18 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		this.agentsManagerService.getAgents().then(agents => {
 			for (const ag of agents) {
-				const opt = append(agentSelect, $('option', { value: ag.id }, `🤖 ${ag.name} (${ag.modelName || 'gemini-2.0-flash'})`));
+				const opt = append(agentSelect, $('option', { value: ag.id }, `🤖 ${ag.name} (${ag.model?.modelId || 'gemini-1.5-flash'})`));
 				opt.setAttribute('data-name', ag.name);
 			}
-		}).catch(() => {});
+		}).catch(() => { });
 
 		// Agent Rule / Prompt Input
-		const ruleBox = append(modal, $('.form-group'));
+		const ruleBox = append(modalBody, $('.form-group'));
 		append(ruleBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Agent Rule / Specific Prompt for this Ticket:'));
 		const ruleInput = append(ruleBox, $('textarea.monaco-inputbox', {
 			style: 'width: 100%; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; min-height: 52px; font-family: inherit;'
 		})) as HTMLTextAreaElement;
 		ruleInput.placeholder = 'e.g. Follow strict code quality rules and execute unit tests for this ticket...';
-
-		// Resource Name Input
-		const nameBox = append(modal, $('.form-group'));
-		const nameLabel = append(nameBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Entity Folder Name / Ticket ID:'));
-		const nameInput = append(nameBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
-		})) as HTMLInputElement;
-
-		// Warning banner element for duplicate or invalid names
-		const warningBanner = append(nameBox, $('div', {
-			style: 'font-size: 11px; color: #ef4444; margin-top: 4px; display: none; line-height: 1.3;'
-		}));
-
-		// Description Input (Multiline Textarea)
-		const descBox = append(modal, $('.form-group'));
-		append(descBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Description:'));
-		const descInput = append(descBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; min-height: 64px; font-family: inherit;'
-		})) as HTMLTextAreaElement;
-		descInput.placeholder = 'Brief purpose of this entity...';
 
 		// Action Buttons Row
 		const actionsRow = append(modal, $('.modal-actions-row'));
@@ -1325,34 +1891,141 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 
 		const refreshNameAndBadge = async () => {
+			const customModules = await this._getCustomModules(targetUri);
+			const matchingModule = customModules.find((m: ICustomModule) => m.id === selectedType);
+
 			if (selectedType === 'folder') {
 				codeBox.style.display = 'none';
 				badgeBox.style.display = 'none';
 				priorityBox.style.display = 'none';
 				agentBox.style.display = 'none';
 				ruleBox.style.display = 'none';
+				credBox.style.display = 'none';
+				modelBox.style.display = 'none';
+				promptBox.style.display = 'none';
+				baseAgentBox.style.display = 'none';
 				nameLabel.innerText = 'Folder Name:';
 				nameInput.value = 'new_folder';
+				descLabel.innerText = 'Description:';
+				descInput.placeholder = 'Brief purpose of this entity...';
 			} else if (selectedType === 'file') {
 				codeBox.style.display = 'none';
 				badgeBox.style.display = 'none';
 				priorityBox.style.display = 'none';
 				agentBox.style.display = 'none';
 				ruleBox.style.display = 'none';
+				credBox.style.display = 'none';
+				modelBox.style.display = 'none';
+				promptBox.style.display = 'none';
+				baseAgentBox.style.display = 'none';
 				nameLabel.innerText = 'File Name:';
 				nameInput.value = 'new_file.md';
+				descLabel.innerText = 'Description:';
+				descInput.placeholder = 'Brief purpose of this entity...';
+			} else if (selectedType === 'agent') {
+				codeBox.style.display = 'block';
+				badgeBox.style.display = 'block';
+				priorityBox.style.display = 'none';
+				agentBox.style.display = 'none';
+				ruleBox.style.display = 'none';
+				credBox.style.display = 'block';
+				modelBox.style.display = 'block';
+				promptBox.style.display = 'block';
+				baseAgentBox.style.display = 'block';
+				nameLabel.innerText = 'Agent Title:';
+				descLabel.innerText = 'Role & Description:';
+				descInput.placeholder = 'e.g. NestJS Backend Specialist, Monaco UI Refactoring Architect';
+
+				const customCode = codeInput.value.trim();
+				const seq = await this.workspacesExplorerService.generateNextSequentialName(targetUri, selectedType, customCode);
+				nameInput.value = seq.name;
+				previewBadge.innerText = `Generated Ticket ID: ${seq.name} (Prefix Code: ${seq.code})`;
+				const currentTypeObj = typesList.find(t => t.type === selectedType);
+				const badgeColor = currentTypeObj ? currentTypeObj.color : '#38bdf8';
+				previewBadge.style.color = badgeColor;
+				previewBadge.style.borderColor = `${badgeColor}58`;
+				previewBadge.style.backgroundColor = `${badgeColor}12`;
 			} else {
 				codeBox.style.display = 'block';
 				badgeBox.style.display = 'block';
 				priorityBox.style.display = 'block';
 				agentBox.style.display = 'block';
 				ruleBox.style.display = 'block';
+				credBox.style.display = 'none';
+				modelBox.style.display = 'none';
+				promptBox.style.display = 'none';
+				baseAgentBox.style.display = 'none';
 				nameLabel.innerText = 'Entity Folder Name / Ticket ID:';
+				descLabel.innerText = 'Description:';
+				descInput.placeholder = 'Brief purpose of this entity...';
+
 				const customCode = codeInput.value.trim();
 				const seq = await this.workspacesExplorerService.generateNextSequentialName(targetUri, selectedType, customCode);
 				nameInput.value = seq.name;
 				previewBadge.innerText = `Generated Ticket ID: ${seq.name} (Prefix Code: ${seq.code})`;
+				const currentTypeObj = typesList.find(t => t.type === selectedType);
+				const badgeColor = currentTypeObj ? currentTypeObj.color : '#38bdf8';
+				previewBadge.style.color = badgeColor;
+				previewBadge.style.borderColor = `${badgeColor}58`;
+				previewBadge.style.backgroundColor = `${badgeColor}12`;
 			}
+
+			if (matchingModule && matchingModule.fields && matchingModule.fields.length > 0) {
+				clearNode(customFieldsBox);
+				customFieldsBox.style.display = 'flex';
+				for (const field of matchingModule.fields) {
+					const fieldGroup = append(customFieldsBox, $('.form-group', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+					append(fieldGroup, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; font-weight: 500;' }, `${field.label}:`));
+					
+					if (field.type === 'textarea') {
+						append(fieldGroup, $('textarea.monaco-inputbox.custom-field-input', {
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							style: 'width: 100%; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; min-height: 52px; font-family: inherit;'
+						}));
+					} else if (field.type === 'select') {
+						const select = append(fieldGroup, $('select.monaco-select.custom-field-input', {
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;'
+						})) as HTMLSelectElement;
+						(field.options || []).forEach((opt: string) => {
+							append(select, $('option', { value: opt }, opt));
+						});
+					} else if (field.type === 'multiselect') {
+						const container = append(fieldGroup, $('.multiselect-container.custom-field-input', {
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							style: 'display: flex; flex-direction: column; gap: 4px; border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 8px; background: rgba(0,0,0,0.15);'
+						}));
+						(field.options || []).forEach((opt: string) => {
+							const row = append(container, $('label', { style: 'display: flex; align-items: center; gap: 6px; font-size: 11.5px; cursor: pointer;' }));
+							append(row, $('input', { type: 'checkbox', value: opt, style: 'cursor: pointer;' }));
+							append(row, $('span', {}, opt));
+						});
+					} else if (field.type === 'switch') {
+						const row = append(fieldGroup, $('label', { style: 'display: flex; align-items: center; gap: 8px; font-size: 11.5px; cursor: pointer; padding: 4px 0;' }));
+						append(row, $('input.custom-field-input', {
+							type: 'checkbox',
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							style: 'cursor: pointer;'
+						}));
+						append(row, $('span', {}, 'Enabled'));
+					} else {
+						append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
+							type: 'text',
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+						}));
+					}
+				}
+			} else {
+				clearNode(customFieldsBox);
+				customFieldsBox.style.display = 'none';
+			}
+
 			await updateValidation();
 		};
 
@@ -1374,10 +2047,83 @@ export class MainWorkspaceViewPane extends ViewPane {
 				return;
 			}
 
+			if (selectedType === 'agent') {
+				const roleVal = descInput.value.trim();
+				const promptVal = promptInput.value.trim();
+				if (!roleVal) {
+					this.notificationService.warn('Please enter a Role Description.');
+					descInput.focus();
+					return;
+				}
+				if (!promptVal) {
+					this.notificationService.warn('Please enter System Prompt instructions.');
+					promptInput.focus();
+					return;
+				}
+				if (credSelect.value === 'none') {
+					this.notificationService.warn('Please configure and select an API Connection Credential first.');
+					credSelect.focus();
+					return;
+				}
+			}
+
 			try {
 				const selectedOpt = agentSelect.options[agentSelect.selectedIndex];
 				const assignedAgentId = agentSelect.value || undefined;
 				const assignedAgentName = (assignedAgentId && selectedOpt) ? (selectedOpt.getAttribute('data-name') || selectedOpt.text.replace(/^🤖\s*/, '').replace(/\s*\(.*\)$/, '')) : undefined;
+
+				let agentModelOpt: any = undefined;
+				if (selectedType === 'agent') {
+					let selectedModel = modelInput.value.trim();
+					selectedModel = selectedModel.replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-');
+					if (!selectedModel) {
+						this.notificationService.warn('Please enter an AI Model ID.');
+						modelInput.focus();
+						return;
+					}
+
+					let providerIdVal = 'gemini';
+					let modelIdVal = selectedModel;
+					let credentialIdVal: string | undefined = undefined;
+
+					if (credSelect.value !== 'default' && credSelect.value !== 'none') {
+						credentialIdVal = credSelect.value;
+						const cred = savedCredentials.find(c => c.id === credentialIdVal);
+						if (cred) {
+							providerIdVal = cred.providerId;
+						}
+					}
+					if (selectedModel.includes('/')) {
+						const parts = selectedModel.split('/');
+						providerIdVal = parts[0];
+						modelIdVal = parts[1];
+					} else {
+						if (credSelect.value === 'default' || credSelect.value === 'none') {
+							providerIdVal = selectedModel.startsWith('gpt') ? 'openai' : selectedModel.startsWith('claude') ? 'anthropic' : 'gemini';
+						}
+					}
+					agentModelOpt = {
+						providerId: providerIdVal,
+						modelId: modelIdVal,
+						credentialId: credentialIdVal
+					};
+				}
+
+				const customMetadata: { [key: string]: string } = {};
+				const customInputs = modalBody.querySelectorAll('.custom-field-input');
+				customInputs.forEach(inputEl => {
+					const fieldLabel = inputEl.getAttribute('data-field-label');
+					if (fieldLabel) {
+						if (inputEl instanceof HTMLInputElement && inputEl.type === 'checkbox') {
+							customMetadata[fieldLabel] = inputEl.checked ? 'true' : 'false';
+						} else if (inputEl.classList.contains('multiselect-container')) {
+							const checked = Array.from(inputEl.querySelectorAll('input[type="checkbox"]:checked')).map((cb: any) => cb.value);
+							customMetadata[fieldLabel] = checked.join(', ');
+						} else {
+							customMetadata[fieldLabel] = (inputEl as any).value || '';
+						}
+					}
+				});
 
 				const createResult = await this.workspacesExplorerService.createResourceUnderWorkspace({
 					workspaceUri: targetUri,
@@ -1388,12 +2134,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 					assignedAgentId,
 					assignedAgentName,
 					agentRulePrompt: ruleInput.value.trim(),
-					description: descInput.value.trim()
+					description: descInput.value.trim(),
+					agentModel: agentModelOpt,
+					agentSystemPrompt: selectedType === 'agent' ? promptInput.value.trim() : undefined,
+					customMetadata
 				});
 
 				const createdUri = createResult.uri;
 
-				overlay.remove();
+				removeOverlay();
 				if (createResult.alreadyExists) {
 					this.notificationService.info(`'${name}' already exists in ${targetName}. Opened existing ${selectedType} files.`);
 				} else {
@@ -1408,15 +2157,672 @@ export class MainWorkspaceViewPane extends ViewPane {
 				this.expandedWorkspaces.add(canonicalCreatedId);
 				this.selectedItemId = canonicalCreatedId;
 
-				if (createdUri.path.toLowerCase().endsWith('.md')) {
+				const isCustomEntity = selectedType !== 'file' && selectedType !== 'folder';
+				if (isCustomEntity) {
+					if (selectedType === 'workflow') {
+						await this.editorService.openEditor(new WorkflowEditorInput(createdUri, name), { pinned: true });
+					} else {
+						await this.editorService.openEditor(new EntityDetailEditorInput(createdUri, name), { pinned: true });
+					}
+				} else if (createdUri.path.toLowerCase().endsWith('.md')) {
 					await this.commandService.executeCommand('markdown.showPreview', createdUri);
 				} else {
 					await this.openerService.open(createdUri);
 				}
 				await this.renderContent();
+
+				if (onSuccess) {
+					onSuccess(selectedType, name);
+				}
 			} catch (err) {
 				this.notificationService.error(`Failed to create entity: ${err}`);
 			}
 		};
 	}
+
+	private async _readYamlFile(uri: URI): Promise<any> {
+		try {
+			if (await this.fileService.exists(uri)) {
+				const content = await this.fileService.readFile(uri);
+				return parseYaml(content.value.toString());
+			}
+		} catch (e) {
+			console.error('Error reading YAML file:', e);
+		}
+		return null;
+	}
+
+	private async _ensureDirExists(dirUri: URI): Promise<void> {
+		const parts: URI[] = [];
+		let curr = dirUri;
+		while (curr.path !== '/' && curr.path !== '\\' && curr.path !== '.') {
+			parts.push(curr);
+			const parent = dirname(curr);
+			if (parent.path === curr.path) break;
+			curr = parent;
+		}
+		parts.reverse();
+		for (const p of parts) {
+			try {
+				if (!await this.fileService.exists(p)) {
+					await this.fileService.createFolder(p);
+				}
+			} catch (e) {
+				console.error(`Failed to create directory part: ${p.toString()}`, e);
+			}
+		}
+	}
+
+	private async _writeYamlFile(uri: URI, data: any): Promise<void> {
+		try {
+			const parentDir = dirname(uri);
+			await this._ensureDirExists(parentDir);
+			const yamlContent = stringifyYaml(data);
+			await this.fileService.writeFile(uri, VSBuffer.fromString(yamlContent));
+		} catch (e) {
+			console.error('Error writing YAML file:', e);
+			this.notificationService.error(`Failed to write custom module YAML file: ${e}`);
+		}
+	}
+
+	private _getGlobalEntityTypeDir(): URI {
+		let savedPath = '~/.anyagent/entity_type';
+		try {
+			if (this._storageService) {
+				savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
+			}
+		} catch (e) {
+			console.error('Failed to read globalEntityTypePath setting:', e);
+		}
+		const userHome = this.environmentService.userHome.fsPath;
+		const resolvedPath = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type');
+		return URI.file(resolvedPath);
+	}
+
+	private async _getCustomModules(workspaceUri: URI): Promise<ICustomModule[]> {
+		const modulesMap = new Map<string, ICustomModule>();
+		try {
+			const globalDir = this._getGlobalEntityTypeDir();
+			const localDir = URI.joinPath(workspaceUri, '.agents', 'entity_type');
+
+			try {
+				if (await this.fileService.exists(globalDir)) {
+					const stat = await this.fileService.resolve(globalDir);
+					if (stat.children) {
+						for (const child of stat.children) {
+							if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
+								const mod = await this._readYamlFile(child.resource);
+								if (mod && mod.id) {
+									mod.storageScope = 'global';
+									modulesMap.set(mod.id, mod);
+								}
+							}
+						}
+					}
+				}
+			} catch (e) {
+				console.error('Error listing global entity types:', e);
+			}
+
+			try {
+				if (await this.fileService.exists(localDir)) {
+					const stat = await this.fileService.resolve(localDir);
+					if (stat.children) {
+						for (const child of stat.children) {
+							if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
+								const mod = await this._readYamlFile(child.resource);
+								if (mod && mod.id) {
+									if (!mod.storageScope) {
+										mod.storageScope = 'workspace';
+									}
+									modulesMap.set(mod.id, mod);
+								}
+							}
+						}
+					}
+				}
+			} catch (e) {
+				console.error('Error listing local entity types:', e);
+			}
+		} catch (e) {
+			console.error('Error in _getCustomModules overall resolution:', e);
+		}
+
+		return Array.from(modulesMap.values());
+	}
+
+	private async _saveCustomModules(modules: ICustomModule[], workspaceUri: URI): Promise<void> {
+		try {
+			const globalDir = this._getGlobalEntityTypeDir();
+			const localDir = URI.joinPath(workspaceUri, '.agents', 'entity_type');
+
+			const activeIds = new Set(modules.map(m => m.id));
+
+			try {
+				if (await this.fileService.exists(globalDir)) {
+					const stat = await this.fileService.resolve(globalDir);
+					if (stat.children) {
+						for (const child of stat.children) {
+							const id = child.name.replace(/\.yaml$|\.yml$/i, '');
+							if (!activeIds.has(id)) {
+								await this.fileService.del(child.resource);
+							}
+						}
+					}
+				}
+			} catch {}
+
+			try {
+				if (await this.fileService.exists(localDir)) {
+					const stat = await this.fileService.resolve(localDir);
+					if (stat.children) {
+						for (const child of stat.children) {
+							const id = child.name.replace(/\.yaml$|\.yml$/i, '');
+							if (!activeIds.has(id)) {
+								await this.fileService.del(child.resource);
+							}
+						}
+					}
+				}
+			} catch {}
+
+			for (const m of modules) {
+				const fileData = { ...m };
+				delete fileData.storageScope;
+
+				const filename = `${m.id}.yaml`;
+
+				if (m.storageScope === 'global') {
+					const globalFile = URI.joinPath(globalDir, filename);
+					const localFile = URI.joinPath(localDir, filename);
+					await this._writeYamlFile(globalFile, { ...fileData, storageScope: 'global' });
+					await this._writeYamlFile(localFile, { ...fileData, storageScope: 'global' });
+				} else {
+					const localFile = URI.joinPath(localDir, filename);
+					await this._writeYamlFile(localFile, { ...fileData, storageScope: 'workspace' });
+				}
+			}
+		} catch (e) {
+			console.error('Error in _saveCustomModules:', e);
+			this.notificationService.error(`Failed to save custom modules: ${e}`);
+		}
+	}
+
+	private async _openCustomModulesManager(targetUri: URI, onUpdate: () => void): Promise<void> {
+		if (!this.containerEl) {
+			return;
+		}
+		const mgOverlay = append(this.containerEl, $('.manage-modules-overlay'));
+		mgOverlay.style.position = 'fixed';
+		mgOverlay.style.top = '0';
+		mgOverlay.style.left = '0';
+		mgOverlay.style.width = '100vw';
+		mgOverlay.style.height = '100vh';
+		mgOverlay.style.backgroundColor = 'rgba(0, 0, 0, 0.7)';
+		mgOverlay.style.backdropFilter = 'blur(6px)';
+		mgOverlay.style.display = 'flex';
+		mgOverlay.style.alignItems = 'center';
+		mgOverlay.style.justifyContent = 'center';
+		mgOverlay.style.zIndex = '11000';
+
+		const mgModal = append(mgOverlay, $('.manage-modules-modal'));
+		mgModal.style.width = '100%';
+		mgModal.style.maxWidth = '480px';
+		mgModal.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
+		mgModal.style.border = '1px solid rgba(255, 255, 255, 0.18)';
+		mgModal.style.borderRadius = '12px';
+		mgModal.style.padding = '20px 24px';
+		mgModal.style.boxShadow = '0 16px 40px rgba(0,0,0,0.8)';
+		mgModal.style.display = 'flex';
+		mgModal.style.flexDirection = 'column';
+		mgModal.style.gap = '14px';
+		mgModal.style.color = 'var(--vscode-editorWidget-foreground, #e0e0e0)';
+		mgModal.style.fontFamily = 'var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif)';
+		mgModal.style.transition = 'max-width 0.25s cubic-bezier(0.4, 0, 0.2, 1)';
+
+		let selectedModule: ICustomModule | null = null;
+
+		const renderManagerContent = async () => {
+			clearNode(mgModal);
+
+			if (!selectedModule) {
+				// --- STAGE 1: List View ---
+				mgModal.style.maxWidth = '480px';
+
+				const mgHeader = append(mgModal, $('.mg-header', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+				append(mgHeader, $('div', { style: 'font-weight: 600; font-size: 14px; color: #38bdf8;' }, 'Manage Custom Modules'));
+				const mgClose = append(mgHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.close), { style: 'cursor: pointer; font-size: 13px; opacity: 0.7;' }));
+				mgClose.onclick = () => {
+					mgOverlay.remove();
+					onUpdate();
+				};
+
+				const formGroup = append(mgModal, $('.form-group', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
+				append(formGroup, $('label', { style: 'font-size: 11px; opacity: 0.85; font-weight: 500;' }, 'Create New Module Name:'));
+				const inputRow = append(formGroup, $('div', { style: 'display: flex; gap: 8px;' }));
+				const nameInputEl = append(inputRow, $('input.monaco-inputbox', {
+					style: 'flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+				})) as HTMLInputElement;
+				nameInputEl.placeholder = 'e.g. Test, Release, Design...';
+
+				const addBtn = append(inputRow, $('button.monaco-button', {
+					style: 'padding: 6px 14px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; font-weight: 600;'
+				}));
+				addBtn.innerText = 'Add';
+
+				const errorText = append(formGroup, $('div', { style: 'font-size: 11px; color: #ef4444; display: none;' }));
+
+				const listContainer = append(mgModal, $('.modules-list-container', {
+					style: 'max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px; background: rgba(0,0,0,0.15);'
+				}));
+
+				const refreshList = async () => {
+					clearNode(listContainer);
+					const currentModules = await this._getCustomModules(targetUri);
+
+					if (currentModules.length === 0) {
+						append(listContainer, $('div', { style: 'font-size: 11px; opacity: 0.5; text-align: center; padding: 16px; color: #888888;' }, 'No custom modules created yet.'));
+						return;
+					}
+
+					for (const m of currentModules) {
+						const row = append(listContainer, $('.module-row', {
+							style: 'display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border-radius: 6px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04);'
+						}));
+
+						const left = append(row, $('.module-left', { style: 'display: flex; align-items: center; gap: 8px;' }));
+						const dot = append(left, $('span'));
+						dot.style.display = 'inline-block';
+						dot.style.width = '8px';
+						dot.style.height = '8px';
+						dot.style.borderRadius = '50%';
+						dot.style.backgroundColor = m.color;
+
+						const nameSpan = append(left, $('span', { style: 'font-size: 12px; font-weight: 500;' }, m.name));
+						if (m.isDeprecated) {
+							nameSpan.style.opacity = '0.5';
+							nameSpan.style.textDecoration = 'line-through';
+							const depLabel = append(left, $('span', { style: 'font-size: 10px; color: #fb923c; background: rgba(251,146,60,0.12); border: 1px solid rgba(251,146,60,0.3); border-radius: 3px; padding: 1px 4px;' }));
+							depLabel.innerText = 'Deprecated';
+						}
+
+						const right = append(row, $('.module-right', { style: 'display: flex; align-items: center; gap: 10px;' }));
+						
+						// Edit Button
+						if (!m.isDeprecated) {
+							const editIcon = append(right, $('span' + ThemeIcon.asCSSSelector(Codicon.edit), {
+								style: 'font-size: 12px; cursor: pointer; color: #38bdf8; opacity: 0.8;'
+							}));
+							editIcon.title = 'Edit Module Schema';
+							editIcon.onclick = () => {
+								selectedModule = JSON.parse(JSON.stringify(m)); // Deep copy to support cancel
+								renderManagerContent();
+							};
+						}
+
+						// Deactivate / Restore Button
+						const actBtn = append(right, $('span', {
+							style: 'font-size: 11px; cursor: pointer; text-decoration: underline;'
+						}));
+						if (m.isDeprecated) {
+							actBtn.innerText = 'Restore';
+							actBtn.style.color = '#34d399';
+							actBtn.onclick = async () => {
+								m.isDeprecated = false;
+								await this._saveCustomModules(currentModules, targetUri);
+								await refreshList();
+							};
+						} else {
+							actBtn.innerText = 'Deactivate';
+							actBtn.style.color = '#fb923c';
+							actBtn.onclick = async () => {
+								m.isDeprecated = true;
+								await this._saveCustomModules(currentModules, targetUri);
+								await refreshList();
+							};
+						}
+					}
+				};
+
+				addBtn.onclick = async () => {
+					const val = nameInputEl.value.trim();
+					if (!val) {
+						errorText.innerText = 'Please enter a valid module name.';
+						errorText.style.display = 'block';
+						return;
+					}
+
+					const id = val.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+					const currentModules = await this._getCustomModules(targetUri);
+
+					const isReserved = ['workspace', 'job', 'project', 'task', 'workflow', 'case', 'agent', 'issue', 'analysis', 'folder', 'file'].includes(id);
+					if (isReserved) {
+						errorText.innerText = `"${val}" is a reserved system module name.`;
+						errorText.style.display = 'block';
+						return;
+					}
+
+					if (currentModules.some((m: ICustomModule) => m.id === id)) {
+						errorText.innerText = `Module "${val}" already exists.`;
+						errorText.style.display = 'block';
+						return;
+					}
+
+					errorText.style.display = 'none';
+					const color = getColorForName(val);
+					const newModule: ICustomModule = {
+						id,
+						name: val,
+						color,
+						storageScope: 'global',
+						fields: []
+					};
+
+					// Automatically enter edit mode for the new module
+					selectedModule = newModule;
+					nameInputEl.value = '';
+					renderManagerContent();
+				};
+
+				nameInputEl.onkeydown = (e) => {
+					if (e.key === 'Enter') {
+						addBtn.click();
+					}
+				};
+
+				const mgFooter = append(mgModal, $('.mg-footer', { style: 'display: flex; justify-content: flex-end; margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 12px;' }));
+				const doneBtn = append(mgFooter, $('button.monaco-button', {
+					style: 'padding: 6px 16px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: rgba(255,255,255,0.1); color: #fff; border: 1px solid rgba(255,255,255,0.15); font-weight: 600;'
+				}));
+				doneBtn.innerText = 'Close';
+				doneBtn.onclick = async () => {
+					mgOverlay.remove();
+					onUpdate();
+				};
+
+				await refreshList();
+			} else {
+				// --- STAGE 2: Specialized Module Editor Canvas ---
+				mgModal.style.maxWidth = '900px';
+
+				const activeMod = selectedModule;
+
+				// Header
+				const mgHeader = append(mgModal, $('.mg-header', { style: 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;' }));
+				append(mgHeader, $('div', { style: 'font-weight: 600; font-size: 14px; color: #38bdf8;' }, `Edit Module Schema: ${activeMod.name}`));
+				const mgBack = append(mgHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.close), { style: 'cursor: pointer; font-size: 13px; opacity: 0.7;' }));
+				mgBack.onclick = () => {
+					selectedModule = null;
+					renderManagerContent();
+				};
+
+				// Metadata & Options configuration layout
+				const configMetaContainer = append(mgModal, $('.config-meta-container', { style: 'display: flex; gap: 20px; align-items: center; flex-wrap: wrap; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 12px 16px; border-radius: 8px;' }));
+
+				// Scope Selector
+				const scopeGroup = append(configMetaContainer, $('.form-group', { style: 'display: flex; align-items: center; gap: 8px;' }));
+				append(scopeGroup, $('label', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #888888;' }, 'Scope:'));
+				const scopeSelect = append(scopeGroup, $('select.monaco-select', {
+					style: 'padding: 4px 8px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: #1a1a1a; color: inherit; cursor: pointer;'
+				})) as HTMLSelectElement;
+				append(scopeSelect, $('option', { value: 'global' }, 'Global'));
+				append(scopeSelect, $('option', { value: 'workspace' }, 'Workspace'));
+				scopeSelect.value = activeMod.storageScope || 'global';
+				scopeSelect.onchange = () => {
+					activeMod.storageScope = scopeSelect.value as any;
+				};
+
+				// Color Picker container
+				const colorContainer = append(configMetaContainer, $('div', { style: 'display: flex; align-items: center; gap: 12px;' }));
+				const renderColorPicker = () => {
+					colorContainer.textContent = '';
+					append(colorContainer, $('span', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #888888;' }, 'Module Color:'));
+					const pickerRow = append(colorContainer, $('div', { style: 'display: flex; gap: 6px;' }));
+					const colors = ['#fbbf24', '#a78bfa', '#60a5fa', '#0d9488', '#f472b6', '#38bdf8', '#34d399', '#f87171'];
+					colors.forEach(c => {
+						const dot = append(pickerRow, $('span', {
+							style: `display: inline-block; width: 18px; height: 18px; border-radius: 50%; background-color: ${c}; cursor: pointer; border: 2px solid ${activeMod.color === c ? '#fff' : 'transparent'}; box-sizing: border-box; transition: transform 0.1s ease;`
+						}));
+						dot.onclick = () => {
+							activeMod.color = c;
+							renderColorPicker();
+						};
+					});
+				};
+				renderColorPicker();
+
+				// Main columns
+				const modalLayoutContainer = append(mgModal, $('.modal-layout-container', { style: 'display: flex; gap: 20px; width: 100%; height: 380px; overflow: hidden;' }));
+				
+				// Left Column: Palette library (30%)
+				const leftColumn = append(modalLayoutContainer, $('.left-col', { style: 'flex: 3; border-right: 1px solid rgba(255,255,255,0.08); padding-right: 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto;' }));
+
+				// Palette Title & Stacked buttons
+				append(leftColumn, $('div', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #888888;' }, 'Component Library'));
+				append(leftColumn, $('div', { style: 'font-size: 10px; opacity: 0.5; line-height: 1.4;' }, 'Click component buttons below to add new fields to the schema on the right.'));
+
+				const paletteContainer = append(leftColumn, $('.palette-container', { style: 'display: flex; flex-direction: column; gap: 8px;' }));
+				const fieldTypes = [
+					{ type: 'text', label: 'Single-line Input (Text)', icon: Codicon.symbolString },
+					{ type: 'textarea', label: 'Textarea (Multiline)', icon: Codicon.listFlat },
+					{ type: 'select', label: 'Dropdown (Select)', icon: Codicon.chevronDown },
+					{ type: 'multiselect', label: 'Checkboxes (Multiselect)', icon: Codicon.checklist },
+					{ type: 'switch', label: 'Switch (Toggle)', icon: Codicon.circleFilled }
+				];
+
+				// Right Column: Canvas list (70%)
+				const rightColumn = append(modalLayoutContainer, $('.right-col', { style: 'flex: 7; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; padding-left: 6px;' }));
+
+				// Right Column Canvas fields renderer
+				const fieldsListContainer = append(rightColumn, $('.fields-list-container', {
+					style: 'display: flex; flex-direction: column; gap: 10px; min-height: 100%;'
+				}));
+
+				const renderFieldList = () => {
+					clearNode(fieldsListContainer);
+					const fields = activeMod.fields || [];
+
+					if (fields.length === 0) {
+						const empty = append(fieldsListContainer, $('div', { style: 'display: flex; flex-direction: column; align-items: center; justify-content: center; height: 260px; border: 1.5px dashed rgba(255,255,255,0.08); border-radius: 8px; color: #888888; gap: 8px;' }));
+						append(empty, $('span' + ThemeIcon.asCSSSelector(Codicon.package), { style: 'font-size: 24px; opacity: 0.5;' }));
+						append(empty, $('div', { style: 'font-size: 12px;' }, 'Drag or click components on the left to start designing your schema.'));
+						return;
+					}
+
+					fields.forEach((field, fIdx) => {
+						const fieldCard = append(fieldsListContainer, $('.field-card', {
+							style: 'padding: 12px 14px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); display: flex; flex-direction: column; gap: 8px; cursor: grab; position: relative;'
+						}));
+						fieldCard.setAttribute('draggable', 'true');
+
+						fieldCard.onmousedown = (e) => {
+							const target = e.target as HTMLElement;
+							if (target.closest('input, textarea, button, select, span, label')) {
+								fieldCard.setAttribute('draggable', 'false');
+							} else {
+								fieldCard.setAttribute('draggable', 'true');
+							}
+						};
+
+						// Drag & Drop
+						fieldCard.ondragstart = (ev) => {
+							ev.dataTransfer?.setData('text/plain', String(fIdx));
+						};
+						fieldCard.ondragover = (ev) => ev.preventDefault();
+						fieldCard.ondrop = (ev) => {
+							ev.preventDefault();
+							const fromIdx = Number(ev.dataTransfer?.getData('text/plain'));
+							if (fromIdx !== fIdx && activeMod.fields) {
+								const [removed] = activeMod.fields.splice(fromIdx, 1);
+								activeMod.fields.splice(fIdx, 0, removed);
+								renderFieldList();
+							}
+						};
+
+						const topRow = append(fieldCard, $('.field-top-row', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+						const badge = append(topRow, $('span', {
+							style: 'font-size: 9px; padding: 2px 6px; border-radius: 4px; background: rgba(56,189,248,0.12); color: #38bdf8; text-transform: uppercase; font-weight: bold; letter-spacing: 0.05em;'
+						}));
+						badge.innerText = field.type;
+
+						const actions = append(topRow, $('.field-actions', { style: 'display: flex; gap: 8px;' }));
+						
+						const upBtn = append(actions, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp), { style: 'cursor: pointer; opacity: 0.7; font-size: 12px; padding: 2px;' }));
+						upBtn.onclick = (e) => {
+							e.stopPropagation();
+							if (fIdx > 0 && activeMod.fields) {
+								const temp = activeMod.fields[fIdx];
+								activeMod.fields[fIdx] = activeMod.fields[fIdx - 1];
+								activeMod.fields[fIdx - 1] = temp;
+								renderFieldList();
+							}
+						};
+
+						const downBtn = append(actions, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowDown), { style: 'cursor: pointer; opacity: 0.7; font-size: 12px; padding: 2px;' }));
+						downBtn.onclick = (e) => {
+							e.stopPropagation();
+							if (activeMod.fields && fIdx < activeMod.fields.length - 1) {
+								const temp = activeMod.fields[fIdx];
+								activeMod.fields[fIdx] = activeMod.fields[fIdx + 1];
+								activeMod.fields[fIdx + 1] = temp;
+								renderFieldList();
+							}
+						};
+
+						const delBtn = append(actions, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { style: 'cursor: pointer; opacity: 0.7; color: #ef4444; font-size: 12px; padding: 2px;' }));
+						delBtn.onclick = (e) => {
+							e.stopPropagation();
+							if (activeMod.fields) {
+								activeMod.fields.splice(fIdx, 1);
+								renderFieldList();
+							}
+						};
+
+						// Label Rename Box
+						const renameGroup = append(fieldCard, $('.rename-group', { style: 'display: flex; gap: 8px; align-items: center;' }));
+						append(renameGroup, $('label', { style: 'font-size: 11px; opacity: 0.7; width: 80px; min-width: 80px;' }, 'Field Name:'));
+						const labelInput = append(renameGroup, $('input.monaco-inputbox', {
+							style: 'flex: 1; padding: 5px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit;'
+						})) as HTMLInputElement;
+						labelInput.value = field.label;
+						labelInput.placeholder = 'e.g. Version, Priority Level';
+						labelInput.oninput = () => {
+							const val = labelInput.value.trim() || `Field_${fIdx + 1}`;
+							field.label = labelInput.value;
+							field.id = val.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+						};
+
+						// Options List Config for Dropdowns / Checkboxes
+						if (field.type === 'select' || field.type === 'multiselect') {
+							const optionsBox = append(fieldCard, $('.options-config-box', { style: 'margin-left: 88px; background: rgba(0,0,0,0.15); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);' }));
+							
+							const renderOptionsUI = () => {
+								optionsBox.textContent = '';
+								append(optionsBox, $('div', { style: 'font-size: 10px; color: #888888; margin-bottom: 6px; font-weight: 600; text-transform: uppercase;' }, 'Configure Options:'));
+								
+								if (!field.options) {
+									field.options = ['Option 1', 'Option 2'];
+								}
+
+								const optsList = append(optionsBox, $('div', { style: 'display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px;' }));
+								field.options.forEach((opt, oIdx) => {
+									const optRow = append(optsList, $('div', { style: 'display: flex; gap: 6px; align-items: center;' }));
+									const optInput = append(optRow, $('input.monaco-inputbox', {
+										value: opt,
+										style: 'flex: 1; padding: 3px 6px; font-size: 11px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; color: #fff;'
+									})) as HTMLInputElement;
+									optInput.oninput = () => {
+										field.options![oIdx] = optInput.value;
+									};
+
+									const optTrash = append(optRow, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
+										style: 'color: #ef4444; cursor: pointer; padding: 4px; font-size: 11px;'
+									}));
+									optTrash.onclick = () => {
+										field.options!.splice(oIdx, 1);
+										renderOptionsUI();
+									};
+								});
+
+								const addOptBtn = append(optionsBox, $('button.monaco-button', {
+									style: 'padding: 3px 8px; font-size: 10px; border-radius: 4px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); color: #fff; cursor: pointer; font-weight: 500;'
+								}));
+								addOptBtn.textContent = '+ Add Option';
+								addOptBtn.onclick = () => {
+									field.options!.push(`Option ${field.options!.length + 1}`);
+									renderOptionsUI();
+								};
+							};
+							renderOptionsUI();
+						}
+					});
+				};
+
+				fieldTypes.forEach(ft => {
+					const btn = append(paletteContainer, $('button.monaco-button', {
+						style: 'padding: 8px 12px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: inherit; display: flex; align-items: center; gap: 8px; text-align: left;'
+					}));
+					const btnIcon = append(btn, $('span' + ThemeIcon.asCSSSelector(ft.icon)));
+					btnIcon.style.opacity = '0.6';
+					append(btn, $('span', {}, ft.label));
+
+					btn.onclick = () => {
+						if (!activeMod.fields) activeMod.fields = [];
+						const fieldId = `field_${Date.now()}`;
+						activeMod.fields.push({
+							id: fieldId,
+							label: `New ${ft.type === 'text' ? 'Input Row' : ft.type === 'textarea' ? 'Input Box' : ft.type === 'select' ? 'Dropdown' : ft.type === 'multiselect' ? 'Checkboxes' : 'Switch'}`,
+							type: ft.type as any,
+							options: (ft.type === 'select' || ft.type === 'multiselect') ? ['Option 1', 'Option 2'] : undefined
+						});
+						renderFieldList();
+						rightColumn.scrollTop = rightColumn.scrollHeight;
+					};
+				});
+
+				renderFieldList();
+
+				// Footer Controls
+				const mgFooter = append(mgModal, $('.mg-footer', { style: 'display: flex; justify-content: flex-end; gap: 12px; margin-top: 10px; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 12px;' }));
+				
+				const cancelBtn = append(mgFooter, $('button.monaco-button', {
+					style: 'padding: 6px 16px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: rgba(255,255,255,0.05); color: #fff; border: 1px solid rgba(255,255,255,0.1); font-weight: 500;'
+				}));
+				cancelBtn.innerText = 'Cancel';
+				cancelBtn.onclick = () => {
+					selectedModule = null;
+					renderManagerContent();
+				};
+
+				const saveBtn = append(mgFooter, $('button.monaco-button', {
+					style: 'padding: 6px 16px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; font-weight: 600;'
+				}));
+				saveBtn.innerText = 'Save & Return';
+				saveBtn.onclick = async () => {
+					try {
+						const globalDir = this._getGlobalEntityTypeDir();
+						const localDir = URI.joinPath(targetUri, '.agents', 'entity_type');
+						this.notificationService.info(`Saving module. ID: ${activeMod.id}, Scope: ${activeMod.storageScope || 'global'}`);
+						this.notificationService.info(`Paths: Global -> ${globalDir.path}, Local -> ${localDir.path}`);
+
+						const currentModules = await this._getCustomModules(targetUri);
+						const index = currentModules.findIndex((m: ICustomModule) => m.id === activeMod.id);
+						if (index !== -1) {
+							currentModules[index] = activeMod;
+						} else {
+							currentModules.push(activeMod);
+						}
+						await this._saveCustomModules(currentModules, targetUri);
+						selectedModule = null;
+						await renderManagerContent();
+					} catch (e) {
+						this.notificationService.error(`Failed to save schema: ${e}`);
+					}
+				};
+			}
+		};
+
+		await renderManagerContent();
+	}
 }
+

@@ -66,18 +66,31 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 		try {
 			const providers = ['google', 'github', 'microsoft', 'apple', ...this.authenticationService.declaredProviders.map(p => p.id)];
 			const uniqueProviders = Array.from(new Set(providers));
-			let newUserIdentifier = '';
 
-			for (const providerId of uniqueProviders) {
+			const sessionPromises = uniqueProviders.map(async providerId => {
+				let timeoutId: any;
 				try {
-					const sessions = await this.authenticationService.getSessions(providerId);
+					const sessionsPromise = this.authenticationService.getSessions(providerId);
+					const timeoutPromise = new Promise<readonly any[]>(resolve => {
+						timeoutId = setTimeout(() => resolve([]), 1000);
+					});
+					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
+					clearTimeout(timeoutId);
 					if (sessions && sessions.length > 0) {
-						newUserIdentifier = `${providerId}:${sessions[0].account.label}`;
-						break;
+						return { providerId, session: sessions[0] };
 					}
 				} catch {
-					// Ignore failures for providers not yet initialized
+					clearTimeout(timeoutId);
 				}
+				return null;
+			});
+
+			const results = await Promise.all(sessionPromises);
+			const activeResult = results.find(r => r !== null && r !== undefined);
+			let newUserIdentifier = '';
+
+			if (activeResult) {
+				newUserIdentifier = `${activeResult.providerId}:${activeResult.session.account.label}`;
 			}
 
 			if (newUserIdentifier !== this.activeUserEmail) {
@@ -102,9 +115,19 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 		const raw = this.storageService.get(this.agentsStorageKey, StorageScope.PROFILE);
 		if (raw) {
 			try {
-				const parsed = JSON.parse(raw) as IAgentItem[];
+								const parsed = JSON.parse(raw) as any[];
 				// Keep only real agents created by user that have a physical folderPath on disk
-				this._agents = parsed.filter(a => !!a.folderPath);
+				this._agents = parsed.filter(a => !!a.folderPath).map(a => {
+					// Migration of legacy agent model representation
+					if (!a.model && a.modelName) {
+						a.model = {
+							providerId: a.modelName.includes('gpt') ? 'openai' : a.modelName.includes('claude') ? 'anthropic' : 'gemini',
+							modelId: a.modelName
+						};
+						delete a.modelName;
+					}
+					return a as IAgentItem;
+				});
 				this._saveAgents();
 				this._initialized = true;
 				return;
@@ -150,7 +173,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 	async addAgent(agentData: Omit<IAgentItem, 'id' | 'createdAt' | 'updatedAt'>, targetParentUri?: URI): Promise<IAgentItem> {
 		const newAgent: IAgentItem = {
 			...agentData,
-			modelName: agentData.modelName || 'gemini-2.0-flash',
+			model: agentData.model || { providerId: 'gemini', modelId: 'gemini-1.5-flash' },
 			id: generateUuid(),
 			createdAt: Date.now(),
 			updatedAt: Date.now()
@@ -176,7 +199,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 					description: newAgent.role,
 					systemPrompt: newAgent.systemPrompt,
 					role: newAgent.role,
-					modelName: newAgent.modelName,
+					modelName: newAgent.model?.modelId || 'gemini-1.5-flash',
 					avatarIcon: newAgent.avatarIcon,
 					scopeType: newAgent.scopeType,
 					scopeId: newAgent.scopeId,
@@ -214,7 +237,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 						description: updated.role,
 						systemPrompt: updated.systemPrompt,
 						role: updated.role,
-						modelName: updated.modelName,
+						modelName: updated.model?.modelId || 'gemini-1.5-flash',
 						avatarIcon: updated.avatarIcon,
 						scopeType: updated.scopeType,
 						scopeId: updated.scopeId,

@@ -460,6 +460,9 @@ import './contrib/entityPersistence/browser/entityPersistence.contribution.js';
 // Agents Manager
 import './contrib/agentsManager/browser/agentsManager.contribution.js';
 
+// Workflows Manager
+import './contrib/workflowsManager/browser/workflowsManager.contribution.js';
+
 // List
 import './contrib/list/browser/list.contribution.js';
 

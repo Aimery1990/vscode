@@ -156,7 +156,6 @@
 	padding: 2px 6px;
 	border-radius: 4px;
 	background: rgba(167, 139, 250, 0.12);
-	border: 1px solid rgba(167, 139, 250, 0.3);
 	color: #a78bfa;
 	white-space: nowrap;
 	flex-shrink: 0;
@@ -168,7 +167,6 @@
 	padding: 2px 7px;
 	border-radius: 4px;
 	background: rgba(56, 189, 248, 0.1);
-	border: 1px solid rgba(56, 189, 248, 0.25);
 	text-transform: uppercase;
 	white-space: nowrap;
 	flex-shrink: 0;
@@ -181,7 +179,9 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-	flex: 1;
-	min-width: 0;
 	opacity: 0.85;
+	margin-top: 4px;
+	padding-top: 4px;
+	border-top: 1px solid rgba(255, 255, 255, 0.04);
+	cursor: pointer;
 }

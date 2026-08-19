@@ -7,7 +7,7 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 
-export type EntityType = 'workspace' | 'job' | 'project' | 'task' | 'workflow' | 'case' | 'agent' | 'issue' | 'analysis' | 'folder' | 'file';
+export type EntityType = 'workspace' | 'job' | 'project' | 'task' | 'workflow' | 'case' | 'agent' | 'issue' | 'analysis' | 'folder' | 'file' | string;
 
 export interface IEntityGitSnapshot {
 	remoteUrl?: string;
@@ -16,6 +16,22 @@ export interface IEntityGitSnapshot {
 	lastCommitMsg?: string;
 	hasUncommittedChanges?: boolean;
 	stashCount?: number;
+}
+
+export interface ICustomField {
+	id: string;
+	label: string;
+	type: 'text' | 'textarea' | 'select' | 'multiselect' | 'switch';
+	options?: string[];
+}
+
+export interface ICustomModule {
+	id: string;
+	name: string;
+	isDeprecated?: boolean;
+	color: string;
+	storageScope?: 'global' | 'workspace';
+	fields?: ICustomField[];
 }
 
 export interface IBaseEntitySnapshot {
@@ -43,6 +59,7 @@ export interface IBaseEntitySnapshot {
 
 	// Git metadata snapshot
 	git?: IEntityGitSnapshot;
+	customMetadata?: { [key: string]: string };
 }
 
 export const IEntityPersistenceService = createDecorator<IEntityPersistenceService>('entityPersistenceService');

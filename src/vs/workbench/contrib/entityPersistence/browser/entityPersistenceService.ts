@@ -51,20 +51,33 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		try {
 			const providers = ['google', 'github', 'microsoft', 'apple', ...this.authenticationService.declaredProviders.map(p => p.id)];
 			const uniqueProviders = Array.from(new Set(providers));
-			let newUserIdentifier = '';
 
-			for (const providerId of uniqueProviders) {
+			const sessionPromises = uniqueProviders.map(async providerId => {
+				let timeoutId: any;
 				try {
-					const sessions = await this.authenticationService.getSessions(providerId);
+					const sessionsPromise = this.authenticationService.getSessions(providerId);
+					const timeoutPromise = new Promise<readonly any[]>(resolve => {
+						timeoutId = setTimeout(() => resolve([]), 1000);
+					});
+					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
+					clearTimeout(timeoutId);
 					if (sessions && sessions.length > 0) {
-						const label = sessions[0].account.label;
-						const match = label.match(/\(([^)]+)\)/);
-						newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
-						break;
+						return { providerId, session: sessions[0] };
 					}
 				} catch {
-					// Ignore failures for providers not yet initialized/supported
+					clearTimeout(timeoutId);
 				}
+				return null;
+			});
+
+			const results = await Promise.all(sessionPromises);
+			const activeResult = results.find(r => r !== null && r !== undefined);
+			let newUserIdentifier = '';
+
+			if (activeResult) {
+				const label = activeResult.session.account.label;
+				const match = label.match(/\(([^)]+)\)/);
+				newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 			}
 
 			if (newUserIdentifier !== this.activeUserEmail) {
@@ -85,8 +98,9 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		return str.replace(/\/+$/, '');
 	}
 
-	private getSnapshotsMap(): Record<string, IBaseEntitySnapshot> {
-		const raw = this.storageService.get(this.snapshotsStorageKey, StorageScope.PROFILE, '{}');
+	private getSnapshotsMap(emailKey?: string): Record<string, IBaseEntitySnapshot> {
+		const key = emailKey !== undefined ? `${SNAPSHOTS_STORAGE_KEY}:${emailKey || 'unauthenticated'}` : this.snapshotsStorageKey;
+		const raw = this.storageService.get(key, StorageScope.PROFILE, '{}');
 		try {
 			return JSON.parse(raw) as Record<string, IBaseEntitySnapshot>;
 		} catch {
@@ -117,11 +131,20 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 	getSnapshot(uri: URI | string): IBaseEntitySnapshot | undefined {
 		const key = this.normalizeUriString(uri);
 		const map = this.getSnapshotsMap();
-		return map[key] || map[key.toLowerCase()];
+		let found = map[key] || map[key.toLowerCase()];
+		if (!found && this.activeUserEmail) {
+			const unauthMap = this.getSnapshotsMap('unauthenticated');
+			found = unauthMap[key] || unauthMap[key.toLowerCase()];
+		}
+		return found;
 	}
 
 	getAllSnapshots(): IBaseEntitySnapshot[] {
 		const map = this.getSnapshotsMap();
+		if (this.activeUserEmail) {
+			const unauthMap = this.getSnapshotsMap('unauthenticated');
+			return Object.values({ ...unauthMap, ...map });
+		}
 		return Object.values(map);
 	}
 
@@ -131,6 +154,19 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		if (map[key]) {
 			delete map[key];
 			this.saveSnapshotsMap(map);
+		}
+		if (this.activeUserEmail) {
+			const unauthMap = this.getSnapshotsMap('unauthenticated');
+			if (unauthMap[key]) {
+				delete unauthMap[key];
+				this.storageService.store(
+					`${SNAPSHOTS_STORAGE_KEY}:unauthenticated`,
+					JSON.stringify(unauthMap),
+					StorageScope.PROFILE,
+					StorageTarget.USER
+				);
+				this._onDidChangeSnapshots.fire();
+			}
 		}
 	}
 
@@ -178,6 +214,22 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 	private async detectEntityType(targetUri: URI): Promise<EntityType> {
 		const configDir = await this.migrateLegacyEntityFilesIfNeeded(targetUri);
 
+		try {
+			if (await this.fileService.exists(configDir)) {
+				const stat = await this.fileService.resolve(configDir);
+				if (stat.children) {
+					for (const child of stat.children) {
+						if (!child.isDirectory && child.name.endsWith('.md')) {
+							const nameLower = child.name.toLowerCase();
+							if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md') {
+								return child.name.substring(0, child.name.length - 3) as EntityType;
+							}
+						}
+					}
+				}
+			}
+		} catch {}
+
 		if (await this.fileService.exists(URI.joinPath(configDir, 'job.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'job.md'))) return 'job';
 		if (await this.fileService.exists(URI.joinPath(configDir, 'project.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'project.md'))) return 'project';
 		if (await this.fileService.exists(URI.joinPath(configDir, 'task.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'task.md'))) return 'task';
@@ -208,16 +260,22 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 				return (match ? match[1] : clean).trim().toLowerCase();
 			};
 
-			const cleanActiveUser = this.activeUserEmail;
+			const cleanActiveUser = this.activeUserEmail.trim().toLowerCase();
 			const cleanOwner = extractEmail(snapshot.ownerAccount);
 
-			console.log(`[EntityHealthCheck] Compare cleanActiveUser: "${cleanActiveUser}" with cleanOwner: "${cleanOwner}". Full raw activeUser: "${this.activeUserEmail}", owner: "${snapshot.ownerAccount}"`);
-			if (cleanActiveUser !== cleanOwner) {
-				return {
-					isMissing: true,
-					missingReason: `Unauthorized Workspace: Belongs to ${snapshot.ownerAccount}`,
-					snapshot
-				};
+			// Only treat as unauthorized if owner is explicitly another real user email (not unauthenticated or local)
+			if (cleanOwner && cleanOwner !== 'unauthenticated' && cleanOwner !== 'local' && cleanActiveUser && cleanActiveUser !== 'unauthenticated') {
+				if (cleanActiveUser !== cleanOwner) {
+					return {
+						isMissing: true,
+						missingReason: `Unauthorized Workspace: Belongs to ${snapshot.ownerAccount}`,
+						snapshot
+					};
+				}
+			} else if ((cleanOwner === 'unauthenticated' || !cleanOwner) && cleanActiveUser) {
+				// Auto-claim local/unauthenticated entity to active user
+				snapshot.ownerAccount = this.activeUserEmail;
+				this.saveSnapshot(snapshot);
 			}
 		}
 
@@ -261,13 +319,16 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 	async repairEntityFromSnapshot(uri: URI | string): Promise<void> {
 		const key = this.normalizeUriString(uri);
 		const targetFolderUri = URI.parse(key);
-		const snapshot = this.getSnapshot(key);
+		let snapshot = this.getSnapshot(key);
 
 		if (!await this.fileService.exists(targetFolderUri)) {
 			await this.fileService.createFolder(targetFolderUri);
 		}
 
 		if (snapshot) {
+			if (this.activeUserEmail && (!snapshot.ownerAccount || snapshot.ownerAccount === 'unauthenticated')) {
+				snapshot.ownerAccount = this.activeUserEmail;
+			}
 			await this.writeEntity4MDFiles(snapshot, targetFolderUri, false);
 		} else {
 			const folderName = targetFolderUri.path.split('/').filter(Boolean).pop() || 'Entity';
@@ -297,9 +358,11 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		}
 
 		const configDir = await this.migrateLegacyEntityFilesIfNeeded(entityFolderUri);
-
 		const dateTimeFormatted = snapshot.createdAt || this.getFormattedDateTime();
-		const ownerAccount = snapshot.ownerAccount || this.activeUserEmail || 'unauthenticated';
+		const ownerAccount = (snapshot.ownerAccount && snapshot.ownerAccount !== 'unauthenticated')
+			? snapshot.ownerAccount
+			: (this.activeUserEmail || 'unauthenticated');
+		snapshot.ownerAccount = ownerAccount;
 		const modelStr = snapshot.modelName || 'gemini-2.0-flash';
 		const description = snapshot.description || `${type} description`;
 
@@ -321,10 +384,16 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		if (snapshot.agentRulePrompt) {
 			mainMdContent += `- **Agent Rule**: ${snapshot.agentRulePrompt}\n`;
 		}
-		mainMdContent += `- **Status**: active\n`;
+		mainMdContent += `- **Status**: Todo\n`;
 
 		if (type === 'agent') {
 			mainMdContent += `- **Role**: ${snapshot.role || 'AI Agent'}\n- **Model**: \`${modelStr}\`\n- **Scope Type**: ${snapshot.scopeType || 'workspace'}\n- **Scope Name**: ${snapshot.scopeName || 'Workspace'}\n`;
+		}
+
+		if (snapshot.customMetadata) {
+			for (const [k, v] of Object.entries(snapshot.customMetadata)) {
+				mainMdContent += `- **${k}**: ${v}\n`;
+			}
 		}
 
 		mainMdContent += `\n## Description\n\n${description}\n\n## Linked System Files\n\n- [instruction.md](file://${instructionUri.fsPath})\n- [README.md](file://${readmeUri.fsPath})\n- [work_log.md](file://${workLogUri.fsPath})\n`;
@@ -350,13 +419,59 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			await this.fileService.writeFile(workLogUri, VSBuffer.fromString(workLogContent));
 		}
 
+		// 5. If workflow, ensure workflow_flowchart.json exists and is intact
+		if (type === 'workflow') {
+			const flowchartUri = URI.joinPath(configDir, 'workflow_flowchart.json');
+			if (!await this.fileService.exists(flowchartUri)) {
+				let flowchartContent: string;
+				if (snapshot.customMetadata && snapshot.customMetadata['flowchartJson']) {
+					flowchartContent = snapshot.customMetadata['flowchartJson'];
+				} else {
+					const initialFlowchart = {
+						nodes: [
+							{
+								id: 'start',
+								type: 'circle',
+								x: 80,
+								y: 150,
+								width: 64,
+								height: 64,
+								label: 'Start'
+							},
+							{
+								id: 'step1',
+								type: 'round-rect',
+								x: 240,
+								y: 142,
+								width: 180,
+								height: 80,
+								label: '1. Process Pipeline'
+							}
+						],
+						links: [
+							{
+								id: 'link1',
+								from: 'start',
+								to: 'step1',
+								style: 'arrow-single',
+								label: 'Proceed'
+							}
+						],
+						routingMode: 'orthogonal'
+					};
+					flowchartContent = JSON.stringify(initialFlowchart, null, 2);
+				}
+				await this.fileService.writeFile(flowchartUri, VSBuffer.fromString(flowchartContent));
+			}
+		}
+
 		// Also persist snapshot into SQLite engine
 		await this.saveSnapshot({
 			...snapshot,
 			entityUri: entityFolderUri.toString()
 		});
 
-		return mainMdUri;
+		return entityFolderUri;
 	}
 
 	private getFormattedDateTime(): string {

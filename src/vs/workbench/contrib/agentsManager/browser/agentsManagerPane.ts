@@ -21,6 +21,9 @@ import { IQuickInputService } from '../../../../platform/quickinput/common/quick
 import { URI } from '../../../../base/common/uri.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
+import { Action } from '../../../../base/common/actions.js';
+import { MarkdownString } from '../../../../base/common/htmlContent.js';
+import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
 
 import { IAgentsManagerService, IAgentItem, AgentScopeType } from '../common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
@@ -165,7 +168,7 @@ export class AgentsManagerPane extends ViewPane {
 			}
 			return a.name.toLowerCase().includes(this.filterText) ||
 				a.role.toLowerCase().includes(this.filterText) ||
-				(a.modelName && a.modelName.toLowerCase().includes(this.filterText)) ||
+				(a.model && a.model.modelId.toLowerCase().includes(this.filterText)) ||
 				a.scopeName.toLowerCase().includes(this.filterText);
 		});
 
@@ -209,23 +212,35 @@ export class AgentsManagerPane extends ViewPane {
 			return;
 		}
 
-		const scopeAccentColors: Record<string, string> = {
+		const scopeBadgeColors: Record<string, string> = {
 			all: '#38bdf8',
 			workspace: '#38bdf8',
-			project: '#a78bfa',
-			job: '#f43f5e',
+			project: '#60a5fa',
+			job: '#fbbf24',
 			workflow: '#eab308',
 			none: '#94a3b8'
 		};
 
 		for (const agent of filteredAgents) {
-			const accentColor = scopeAccentColors[agent.scopeType] || '#38bdf8';
-			await this.renderAgentCard(listBody, agent, accentColor);
+			const scopeColor = scopeBadgeColors[agent.scopeType] || '#38bdf8';
+			await this.renderAgentCard(listBody, agent, scopeColor);
 		}
 	}
 
-	private async renderAgentCard(parent: HTMLElement, agent: IAgentItem, accentColor: string): Promise<void> {
+	private async renderAgentCard(parent: HTMLElement, agent: IAgentItem, scopeColor: string): Promise<void> {
 		const card = append(parent, $('.agent-item-card'));
+		card.draggable = true;
+		card.ondragstart = (e) => {
+			e.stopPropagation();
+			if (e.dataTransfer) {
+				e.dataTransfer.setData('text/plain', `any-agent-import:agent:${agent.name}`);
+				e.dataTransfer.effectAllowed = 'copy';
+			}
+			card.style.opacity = '0.5';
+		};
+		card.ondragend = () => {
+			card.style.opacity = '1';
+		};
 
 		// Disk Inspection for missing or damaged agent files via unified EntityPersistenceService
 		let isMissing = false;
@@ -256,21 +271,11 @@ export class AgentsManagerPane extends ViewPane {
 
 		const aIcon = append(cardLeft, $('span' + ThemeIcon.asCSSSelector(iconMap[agent.avatarIcon] || Codicon.robot)));
 		aIcon.style.fontSize = '14px';
-		aIcon.style.color = isMissing ? '#ef4444' : accentColor;
+		aIcon.style.color = isMissing ? '#ef4444' : '#38bdf8';
 		aIcon.style.flexShrink = '0';
 
 		const nameText = append(cardLeft, $('span.agent-name'));
 		nameText.textContent = agent.name;
-
-		// Status Badge
-		const statusDot = append(cardLeft, $('span.status-dot'));
-		if (isMissing) {
-			statusDot.style.background = '#ef4444';
-			statusDot.title = 'Warning: Agent files missing or damaged on disk!';
-		} else {
-			statusDot.style.background = agent.status === 'busy' ? '#eab308' : agent.status === 'offline' ? '#6b7280' : '#22c55e';
-			statusDot.title = `Status: ${agent.status}`;
-		}
 
 		// Card Right Actions
 		const cardActions = append(cardHeader, $('.card-actions'));
@@ -283,7 +288,8 @@ export class AgentsManagerPane extends ViewPane {
 			repairBtn.style.cursor = 'pointer';
 			repairBtn.style.opacity = '0.9';
 			repairBtn.title = 'Repair Agent (Re-create missing 4-MD files from persistence engine)';
-			repairBtn.onclick = async () => {
+			repairBtn.onclick = async (e) => {
+				e.stopPropagation();
 				await this.agentsManagerService.repairAgent(agent.id);
 				this.notificationService.info(`Agent '${agent.name}' files repaired & restored successfully via EntityPersistenceService!`);
 			};
@@ -295,7 +301,8 @@ export class AgentsManagerPane extends ViewPane {
 			runBtn.style.cursor = 'pointer';
 			runBtn.style.opacity = '0.85';
 			runBtn.title = 'Assign Task to Agent';
-			runBtn.onclick = async () => {
+			runBtn.onclick = async (e) => {
+				e.stopPropagation();
 				const taskTitle = await this.quickInputService.input({
 					prompt: `Assign New Task to AI Agent '${agent.name}'`,
 					placeHolder: 'e.g. Implement user authentication, Refactor API response handler',
@@ -312,47 +319,55 @@ export class AgentsManagerPane extends ViewPane {
 					this.notificationService.info(`Task '${taskTitle}' assigned to Agent '${agent.name}'! Logged in work_log.md.`);
 				}
 			};
-
-			// Open Folder / Rendered Markdown Preview Action
-			if (agent.folderPath) {
-				const openFolderBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.folderOpened)));
-				openFolderBtn.style.fontSize = '12px';
-				openFolderBtn.style.color = '#a78bfa';
-				openFolderBtn.style.cursor = 'pointer';
-				openFolderBtn.style.opacity = '0.85';
-				openFolderBtn.title = 'Open Agent Instruction Preview (markdown.showPreview)';
-				openFolderBtn.onclick = async () => {
-					const instructionUri = URI.file(`${agent.folderPath}/.agents/instruction.md`);
-					try {
-						await this.commandService.executeCommand('markdown.showPreview', instructionUri);
-					} catch {
-						await this.openerService.open(instructionUri);
-					}
-				};
-			}
 		}
 
-		// Edit Action
-		const editBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.edit)));
-		editBtn.style.fontSize = '12px';
-		editBtn.style.color = '#38bdf8';
-		editBtn.style.cursor = 'pointer';
-		editBtn.style.opacity = '0.85';
-		editBtn.title = 'Edit Agent Configuration';
-		editBtn.onclick = () => {
-			this.instantiationService.invokeFunction(accessor => createOrEditAgentDialog(accessor, agent));
-		};
+		// Status Badge (Appended to Card Actions at the far right)
+		const statusDot = append(cardActions, $('span.status-dot'));
+		if (isMissing) {
+			statusDot.style.background = '#ef4444';
+			statusDot.title = 'Warning: Agent files missing or damaged on disk!';
+		} else {
+			statusDot.style.background = agent.status === 'busy' ? '#eab308' : agent.status === 'offline' ? '#6b7280' : '#22c55e';
+			statusDot.title = `Status: ${agent.status}`;
+		}
 
-		// Delete Action
-		const deleteBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
-		deleteBtn.style.fontSize = '12px';
-		deleteBtn.style.color = '#ef4444';
-		deleteBtn.style.cursor = 'pointer';
-		deleteBtn.style.opacity = '0.7';
-		deleteBtn.title = 'Delete Agent';
-		deleteBtn.onclick = async () => {
-			await this.agentsManagerService.removeAgent(agent.id);
-			this.notificationService.info(`Agent '${agent.name}' removed.`);
+		// Right Click Context Menu for secondary actions
+		card.oncontextmenu = (e) => {
+			e.preventDefault();
+			e.stopPropagation();
+
+			const actions: Action[] = [];
+
+			if (isMissing) {
+				actions.push(new Action('repair_agent', 'Repair Agent (🛠️)', ThemeIcon.asClassName(Codicon.tools), true, async () => {
+					await this.agentsManagerService.repairAgent(agent.id);
+					this.notificationService.info(`Agent '${agent.name}' files repaired & restored successfully via EntityPersistenceService!`);
+				}));
+			} else {
+				if (agent.folderPath) {
+					actions.push(new Action('open_agent_folder', 'Open Instruction Preview (📁)', ThemeIcon.asClassName(Codicon.folderOpened), true, async () => {
+						const instructionUri = URI.file(`${agent.folderPath}/.agents/instruction.md`);
+						try {
+							await this.commandService.executeCommand('markdown.showPreview', instructionUri);
+						} catch {
+							await this.openerService.open(instructionUri);
+						}
+					}));
+				}
+				actions.push(new Action('edit_agent', 'Edit Configuration (✏️)', ThemeIcon.asClassName(Codicon.edit), true, async () => {
+					this.instantiationService.invokeFunction(accessor => createOrEditAgentDialog(accessor, agent));
+				}));
+			}
+
+			actions.push(new Action('delete_agent', 'Delete Agent (🗑️)', ThemeIcon.asClassName(Codicon.trash), true, async () => {
+				await this.agentsManagerService.removeAgent(agent.id);
+				this.notificationService.info(`Agent '${agent.name}' removed.`);
+			}));
+
+			this.contextMenuService.showContextMenu({
+				getAnchor: () => ({ x: e.clientX, y: e.clientY }),
+				getActions: () => actions
+			});
 		};
 
 		// Role Subtitle
@@ -360,24 +375,35 @@ export class AgentsManagerPane extends ViewPane {
 		if (isMissing) {
 			roleRow.textContent = `⚠️ Files missing or damaged. Click Repair (🛠️) to restore.`;
 			roleRow.style.color = '#f43f5e';
-		} else {
+		} else if (agent.role && !agent.role.endsWith('Agent')) {
 			roleRow.textContent = agent.role;
+		} else {
+			roleRow.style.display = 'none';
 		}
 
 		// Meta Row: Model Badge + Scope Badge
 		const metaRow = append(card, $('.meta-row'));
 
 		const modelBadge = append(metaRow, $('span.model-badge'));
-		modelBadge.textContent = agent.modelName || 'gemini-2.0-flash';
+		modelBadge.textContent = agent.model?.modelId || 'gemini-1.5-flash';
 
 		const scopeBadge = append(metaRow, $('span.scope-badge'));
-		scopeBadge.textContent = agent.scopeName;
-		scopeBadge.style.color = isMissing ? '#ef4444' : accentColor;
-		scopeBadge.style.borderColor = isMissing ? 'rgba(239, 68, 68, 0.4)' : `${accentColor}44`;
+		let scopeName = agent.scopeName;
+		if (agent.scopeType === 'workspace') {
+			scopeName = scopeName.replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-');
+		}
+		scopeBadge.textContent = scopeName;
+		scopeBadge.style.color = isMissing ? '#ef4444' : scopeColor;
 
 		// Prompt Preview
 		const promptPreview = append(card, $('.prompt-preview'));
 		promptPreview.textContent = `"${agent.systemPrompt}"`;
-		promptPreview.title = agent.systemPrompt;
+		
+		const hoverMarkdown = {
+			markdown: new MarkdownString(agent.systemPrompt),
+			markdownNotSupportedFallback: agent.systemPrompt
+		};
+		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('mouse'), promptPreview, hoverMarkdown));
 	}
 }
+

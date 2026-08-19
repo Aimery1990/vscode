@@ -147,6 +147,8 @@ import { NativeWebContentExtractorService } from '../../platform/webContentExtra
 import { AgentNetworkFilterService, IAgentNetworkFilterService } from '../../platform/networkFilter/common/networkFilterService.js';
 import { ITerminalSandboxService, NullTerminalSandboxService } from '../../platform/sandbox/common/terminalSandboxService.js';
 import ErrorTelemetry from '../../platform/telemetry/electron-main/errorTelemetry.js';
+import { IRequestService } from '../../platform/request/common/request.js';
+import { RequestChannel } from '../../platform/request/common/requestIpc.js';
 
 type OSProxyConfigEvent = {
 	readonly success: boolean;
@@ -1405,6 +1407,10 @@ export class CodeApplication extends Disposable {
 		// Web Content Extractor
 		const webContentExtractorChannel = ProxyChannel.fromService(accessor.get(IWebContentExtractorService), disposables);
 		mainProcessElectronServer.registerChannel('webContentExtractor', webContentExtractorChannel);
+
+		// Request Service (exposed to renderer to bypass CORS)
+		const requestServiceChannel = new RequestChannel(accessor.get(IRequestService));
+		mainProcessElectronServer.registerChannel('request', requestServiceChannel);
 
 		// Workspaces
 		const workspacesChannel = ProxyChannel.fromService(accessor.get(IWorkspacesService), disposables);

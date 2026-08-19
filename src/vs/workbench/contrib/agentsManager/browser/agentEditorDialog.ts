@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { ServicesAccessor, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
@@ -13,7 +13,9 @@ import { URI } from '../../../../base/common/uri.js';
 import { $, append, clearNode } from '../../../../base/browser/dom.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
-import { IAgentsManagerService, IAgentItem, AgentScopeType } from '../common/agentsManager.js';
+import { IAgentsManagerService, IAgentItem, AgentScopeType, IAgentCredentialService, IAgentModelReference, IAgentCredential } from '../common/agentsManager.js';
+import { AccountManagementDialog } from '../../accountManagement/browser/accountManagementDialog.js';
+import { ILanguageModelsService } from '../../chat/common/languageModels.js';
 
 export async function createOrEditAgentDialog(
 	accessor: ServicesAccessor,
@@ -23,13 +25,19 @@ export async function createOrEditAgentDialog(
 	targetFolderUri?: URI
 ): Promise<IAgentItem | undefined> {
 	const agentsService = accessor.get(IAgentsManagerService);
+	const credentialService = accessor.get(IAgentCredentialService);
+	const languageModelsService = accessor.get(ILanguageModelsService);
 	const notificationService = accessor.get(INotificationService);
 	const fileDialogService = accessor.get(IFileDialogService);
 	const openerService = accessor.get(IOpenerService);
 	const commandService = accessor.get(ICommandService);
 	const workspaceContextService = accessor.get(IWorkspaceContextService);
 
-	return new Promise<IAgentItem | undefined>((resolve) => {
+	const savedCredentials = await credentialService.getCredentials();
+
+
+
+	return new Promise<IAgentItem | undefined>(async (resolve) => {
 		// 1. Remove any existing modal
 		const existingModal = document.querySelector('.create-agent-modal-overlay');
 		if (existingModal) {
@@ -71,7 +79,15 @@ export async function createOrEditAgentDialog(
 		modal.style.overflowY = 'auto';
 
 		// Close handler
+		let docClickListener: (e: MouseEvent) => void;
+		let credsListener: { dispose(): void } | undefined = undefined;
 		const closeModal = (result?: IAgentItem) => {
+			if (credsListener) {
+				credsListener.dispose();
+			}
+			if (docClickListener) {
+				document.removeEventListener('click', docClickListener);
+			}
 			overlay.remove();
 			resolve(result);
 		};
@@ -120,60 +136,330 @@ export async function createOrEditAgentDialog(
 		})) as HTMLInputElement;
 		roleInput.placeholder = 'e.g. NestJS Backend Specialist, Monaco UI Refactoring Architect';
 		roleInput.value = existingAgent?.role || '';
+		// 7. API Credential / Connection Provider
+		const credGroup = append(modal, $('.form-group'));
+		append(credGroup, createFormLabel('API Connection Credential:'));
+		const credSelect = append(credGroup, $('select.monaco-select', {
+			style: 'width: 100%; padding: 8px 12px; font-size: 12px; font-family: inherit; border-radius: 6px; border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.15)); background: var(--vscode-input-background, #121212); color: inherit; box-sizing: border-box; outline: none; cursor: pointer;'
+		})) as HTMLSelectElement;
 
-		// 7. AI Model Platform Selection Dropdown
-		const modelGroup = append(modal, $('.form-group'));
+		const credHelp = append(credGroup, $('div', {
+			style: 'font-size: 11px; color: var(--vscode-descriptionForeground, #888888); margin-top: 4px; line-height: 1.4;'
+		}));
+		credHelp.appendChild(document.createTextNode('To connect custom providers (Ollama, DeepSeek, OpenAI, Claude), configure keys in '));
+		const helpLink = append(credHelp, $('span', {
+			style: 'color:var(--vscode-textLink-foreground,#38bdf8);cursor:pointer;text-decoration:underline;'
+		}));
+		helpLink.textContent = 'Account & Security Preferences -> AI LLM Providers';
+		credHelp.appendChild(document.createTextNode('.'));
+
+		helpLink.onclick = () => {
+			closeModal(undefined);
+			const instantiationService = accessor.get(IInstantiationService);
+			const dialog = instantiationService.createInstance(AccountManagementDialog);
+			dialog.show('Models');
+		};
+
+		// Populate credentials
+
+		if (savedCredentials.length === 0) {
+			const opt = append(credSelect, $('option', { value: 'none' }, 'No Credentials Configured (click link below to configure)')) as HTMLOptionElement;
+			opt.disabled = true;
+			opt.selected = true;
+		} else {
+			for (let i = 0; i < savedCredentials.length; i++) {
+				const cred = savedCredentials[i];
+				const displayName = cred.isEnabled !== false ? `${cred.name} (${cred.providerId})` : `${cred.name} (${cred.providerId}) [Disabled]`;
+				const opt = append(credSelect, $('option', { value: cred.id }, displayName)) as HTMLOptionElement;
+				if (cred.isEnabled === false) {
+					opt.disabled = true;
+				}
+				if (existingAgent?.model?.credentialId === cred.id) {
+					opt.selected = true;
+				} else if (!existingAgent && i === 0 && cred.isEnabled !== false) {
+					opt.selected = true;
+				}
+			}
+		}
+
+		credsListener = credentialService.onDidChangeCredentials(async () => {
+			const creds = await credentialService.getCredentials();
+			savedCredentials.length = 0;
+			savedCredentials.push(...creds);
+
+			const currentSelection = credSelect.value;
+			clearNode(credSelect);
+
+			if (savedCredentials.length === 0) {
+				const opt = append(credSelect, $('option', { value: 'none' }, 'No Credentials Configured (click link below to configure)')) as HTMLOptionElement;
+				opt.disabled = true;
+				opt.selected = true;
+			} else {
+				for (let i = 0; i < savedCredentials.length; i++) {
+					const cred = savedCredentials[i];
+					const displayName = cred.isEnabled !== false ? `${cred.name} (${cred.providerId})` : `${cred.name} (${cred.providerId}) [Disabled]`;
+					const opt = append(credSelect, $('option', { value: cred.id }, displayName)) as HTMLOptionElement;
+					if (cred.isEnabled === false) {
+						opt.disabled = true;
+					}
+					if (currentSelection === cred.id) {
+						opt.selected = true;
+					} else if (currentSelection === 'none' && i === 0 && cred.isEnabled !== false) {
+						opt.selected = true;
+					}
+				}
+			}
+			updateModelsList();
+			renderFilteredDropdown();
+		});
+
+		// 7.5 AI Model Selection Dropdown with Fuzzy Search & Free Typing
+		const modelGroup = append(modal, $('.form-group', { style: 'position: relative;' }));
 		append(modelGroup, createFormLabel('AI Model:'));
-		const modelSelect = append(modelGroup, $('select.monaco-select', {
-			style: 'width: 100%; padding: 8px 12px; font-size: 12px; font-family: inherit; border-radius: 6px; border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.15)); background: var(--vscode-input-background, #121212); color: inherit; box-sizing: border-box; outline: none; cursor: pointer;'
-		})) as HTMLSelectElement;
+		const modelInputContainer = append(modelGroup, $('.model-input-container', {
+			style: 'position: relative; width: 100%;'
+		}));
+		const modelInput = append(modelInputContainer, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 8px 30px 8px 12px; font-size: 12px; font-family: inherit; border-radius: 6px; border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.15)); background: var(--vscode-input-background, #121212); color: inherit; box-sizing: border-box; outline: none;'
+		})) as HTMLInputElement;
+		modelInput.placeholder = 'Search model or type custom ID...';
 
-		const models = [
-			{ id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash (Recommended)' },
-			{ id: 'gemini-2.0-pro-exp', label: 'Gemini 2.0 Pro Experimental' },
-			{ id: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
-			{ id: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash' },
-			{ id: 'claude-3-5-sonnet', label: 'Claude 3.5 Sonnet' },
-			{ id: 'gpt-4o', label: 'GPT-4o' }
-		];
+		const modelArrow = append(modelInputContainer, $('div', {
+			style: 'position: absolute; right: 10px; top: 50%; transform: translateY(-50%); font-size: 8px; color: var(--vscode-descriptionForeground, #888888); cursor: pointer; pointer-events: none;'
+		}));
+		modelArrow.textContent = '▼';
 
-		for (const m of models) {
-			const opt = append(modelSelect, $('option', { value: m.id }, m.label)) as HTMLOptionElement;
-			if ((existingAgent?.modelName || 'gemini-2.0-flash') === m.id) {
-				opt.selected = true;
-			}
+		const modelDropdown = append(modelGroup, $('.model-search-dropdown', {
+			style: 'position: absolute; top: 100%; left: 0; width: 100%; max-height: 200px; overflow-y: auto; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15)); border-radius: 6px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); z-index: 100001; display: none; margin-top: 4px; box-sizing: border-box;'
+		}));
+
+		interface ISearchableModel {
+			id: string;
+			label: string;
 		}
+		let availableModels: ISearchableModel[] = [];
+		let isFiltering = false;
 
-		// 8. Work For (Scope Selection)
-		const scopeGroup = append(modal, $('.form-group'));
-		append(scopeGroup, createFormLabel('Work For:'));
-		const scopeSelect = append(scopeGroup, $('select.monaco-select', {
-			style: 'width: 100%; padding: 8px 12px; font-size: 12px; font-family: inherit; border-radius: 6px; border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.15)); background: var(--vscode-input-background, #121212); color: inherit; box-sizing: border-box; outline: none; cursor: pointer;'
-		})) as HTMLSelectElement;
+		const renderFilteredDropdown = () => {
+			clearNode(modelDropdown);
+			const query = isFiltering ? modelInput.value.toLowerCase().trim() : '';
 
-		const scopes: { id: AgentScopeType; label: string }[] = [
-			{ id: 'workspace', label: 'Workspace' },
-			{ id: 'project', label: 'Project' },
-			{ id: 'job', label: 'Job' },
-			{ id: 'workflow', label: 'Workflow' },
-			{ id: 'none', label: 'Standalone' }
-		];
+			const filtered = availableModels.filter(m => {
+				if (!query) { return true; }
+				// Simple subsequence matching
+				const matchString = `${m.id} ${m.label}`.toLowerCase();
+				let queryIndex = 0;
+				for (let i = 0; i < matchString.length; i++) {
+					if (matchString[i] === query[queryIndex]) {
+						queryIndex++;
+						if (queryIndex === query.length) {
+							return true;
+						}
+					}
+				}
+				return false;
+			});
 
-		for (const s of scopes) {
-			const opt = append(scopeSelect, $('option', { value: s.id }, s.label)) as HTMLOptionElement;
-			if ((existingAgent?.scopeType || defaultScopeType) === s.id) {
-				opt.selected = true;
+			if (filtered.length === 0) {
+				const noMatch = append(modelDropdown, $('.model-dropdown-item', {
+					style: 'padding: 8px 12px; color: #888888; font-style: italic; font-size: 11px;'
+				}));
+				noMatch.textContent = 'No matching models. Type to use custom ID.';
+				return;
 			}
-		}
 
-		// 9. Secondary Entity Selector Dropdown (Dynamic for Workspace, Project, Job, Workflow)
-		const entityGroup = append(modal, $('.form-group'));
-		const entityLabel = append(entityGroup, createFormLabel('Target Item:'));
-		const entitySelect = append(entityGroup, $('select.monaco-select', {
-			style: 'width: 100%; padding: 8px 12px; font-size: 12px; font-family: inherit; border-radius: 6px; border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.15)); background: var(--vscode-input-background, #121212); color: inherit; box-sizing: border-box; outline: none; cursor: pointer;'
-		})) as HTMLSelectElement;
+			filtered.forEach(m => {
+				const item = append(modelDropdown, $('.model-dropdown-item', {
+					style: 'padding: 8px 12px; cursor: pointer; transition: background 80ms ease; font-size: 11.5px; border-bottom: 1px solid rgba(255,255,255,0.02); color: var(--vscode-editorWidget-foreground, inherit); line-height: 1.4;'
+				}));
+				item.textContent = m.label;
+				item.onmouseenter = () => { item.style.background = 'var(--vscode-list-hoverBackground, rgba(255,255,255,0.08))'; };
+				item.onmouseleave = () => { item.style.background = 'transparent'; };
+				item.onclick = (e) => {
+					e.stopPropagation();
+					modelInput.value = m.id;
+					modelDropdown.style.display = 'none';
+				};
+			});
+		};
 
-		// 10. Target Directory Location Row
+		const activeFetchIds = new Set<string>();
+
+		const triggerDynamicFetch = async (cred: IAgentCredential) => {
+			if (activeFetchIds.has(cred.id)) {
+				return;
+			}
+			activeFetchIds.add(cred.id);
+
+			try {
+				const apiKey = await credentialService.getApiKey(cred.id);
+				if (apiKey) {
+					const models = await credentialService.fetchModels(cred.providerId, apiKey, cred.customUrl);
+					if (models && models.length > 0) {
+						const updated = {
+							...cred,
+							cachedModels: models,
+							connectionStatus: 'connected' as const,
+							lastVerifiedAt: Date.now()
+						};
+						await credentialService.updateCredential(updated);
+
+						if (credSelect.value === cred.id) {
+							updateModelsList();
+							renderFilteredDropdown();
+						}
+					}
+				}
+			} catch (e) {
+				console.error('Failed to dynamically fetch models in dialog:', e);
+			} finally {
+				activeFetchIds.delete(cred.id);
+			}
+		};
+
+		const getSmartDefaultModel = (models: ISearchableModel[], providerId: string): string => {
+			if (models.length === 0) return '';
+
+			const candidates = models.filter(m => {
+				const idLower = m.id.toLowerCase();
+				if (idLower.includes('/')) {
+					const prefix = idLower.split('/')[0];
+					const cleanProv = providerId.toLowerCase();
+					return cleanProv.includes(prefix) || prefix.includes(cleanProv);
+				}
+				return true;
+			});
+
+			const activeList = candidates.length > 0 ? candidates : models;
+
+			const priorities = [
+				'gpt-4o-mini',
+				'gpt-4o',
+				'gpt-4-turbo',
+				'gpt-3.5-turbo',
+				'claude-3-5-sonnet',
+				'claude-3-5-haiku',
+				'gemini-2.0-flash',
+				'gemini-1.5-flash',
+				'gemini-1.5-pro'
+			];
+
+			for (const p of priorities) {
+				const found = activeList.find(m => m.id.toLowerCase().includes(p));
+				if (found) return found.id;
+			}
+
+			const chatKeywords = ['gpt', 'claude', 'gemini', 'chat', 'llama', 'mistral', 'deepseek', 'qwen', 'command-r'];
+			const nonChatKeywords = ['embedding', 'whisper', 'tts', 'moderation', 'edit'];
+
+			const chatModels = activeList.filter(m => {
+				const idLower = m.id.toLowerCase();
+				const isNonChat = nonChatKeywords.some(kw => idLower.includes(kw));
+				if (isNonChat) return false;
+				return chatKeywords.some(kw => idLower.includes(kw));
+			});
+
+			if (chatModels.length > 0) return chatModels[0].id;
+
+			const generalCandidates = activeList.filter(m => {
+				const idLower = m.id.toLowerCase();
+				return !nonChatKeywords.some(kw => idLower.includes(kw));
+			});
+
+			if (generalCandidates.length > 0) return generalCandidates[0].id;
+			return activeList[0].id;
+		};
+
+		const updateModelsList = () => {
+			availableModels = [];
+			const selectedCredId = credSelect.value;
+
+			if (selectedCredId === 'default' || selectedCredId === 'none') {
+				const modelIds = languageModelsService.getLanguageModelIds();
+				const selectableModels = new Map<string, string>();
+
+				selectableModels.set('gemini/gemini-2.0-flash', 'Gemini 2.0 Flash (Google)');
+				selectableModels.set('gemini/gemini-1.5-flash', 'Gemini 1.5 Flash (Google)');
+				selectableModels.set('openai/gpt-4o', 'GPT-4o (OpenAI)');
+				selectableModels.set('anthropic/claude-3-5-sonnet', 'Claude 3.5 Sonnet (Anthropic)');
+
+				for (const id of modelIds) {
+					const meta = languageModelsService.lookupLanguageModel(id);
+					if (meta) {
+						selectableModels.set(id, `${meta.name} (${meta.vendor})`);
+					} else {
+						selectableModels.set(id, id);
+					}
+				}
+
+				for (const [id, label] of selectableModels.entries()) {
+					availableModels.push({ id, label });
+				}
+			} else {
+				const cred = savedCredentials.find(c => c.id === selectedCredId);
+				if (cred) {
+					const cached = cred.cachedModels || [];
+					if (cached.length === 0) {
+						// Dynamically fetch and populate list in the background
+						triggerDynamicFetch(cred);
+					} else {
+						for (const m of cached) {
+							availableModels.push({ id: m, label: m });
+						}
+					}
+				}
+			}
+
+			if (existingAgent?.model && (existingAgent.model.credentialId === selectedCredId || (!existingAgent.model.credentialId && (selectedCredId === 'default' || selectedCredId === 'none')))) {
+				const targetModelVal = existingAgent.model.modelId;
+				const targetProviderVal = existingAgent.model.providerId;
+				const matched = availableModels.find(m => m.id === targetModelVal || m.id === `${targetProviderVal}/${targetModelVal}`);
+				if (matched) {
+					modelInput.value = matched.id;
+				} else {
+					modelInput.value = targetModelVal;
+				}
+			} else {
+				const activeProv = selectedCredId === 'default' || selectedCredId === 'none'
+					? 'gemini'
+					: (savedCredentials.find(c => c.id === selectedCredId)?.providerId || 'gemini');
+				modelInput.value = getSmartDefaultModel(availableModels, activeProv);
+			}
+		};
+
+		modelInput.onfocus = () => {
+			isFiltering = false;
+			modelDropdown.style.display = 'block';
+			renderFilteredDropdown();
+		};
+
+		modelInput.oninput = () => {
+			isFiltering = true;
+			modelDropdown.style.display = 'block';
+			renderFilteredDropdown();
+		};
+
+		modelInput.onclick = (e) => {
+			e.stopPropagation();
+			isFiltering = false;
+			modelDropdown.style.display = 'block';
+			renderFilteredDropdown();
+		};
+
+		docClickListener = (e: MouseEvent) => {
+			if (e.target !== modelInput && !modelDropdown.contains(e.target as Node)) {
+				modelDropdown.style.display = 'none';
+			}
+		};
+		document.addEventListener('click', docClickListener);
+
+		credSelect.onchange = () => {
+			isFiltering = false;
+			updateModelsList();
+			renderFilteredDropdown();
+		};
+		updateModelsList();
+		// 8. Agent Storage Location
 		let selectedParentUri = targetFolderUri;
 
 		// Default initial path
@@ -184,7 +470,7 @@ export async function createOrEditAgentDialog(
 		}
 
 		const locationGroup = append(modal, $('.form-group'));
-		append(locationGroup, createFormLabel('Target Directory:'));
+		append(locationGroup, createFormLabel('Agent Storage Location:'));
 
 		const locationRow = append(locationGroup, $('.location-row'));
 		locationRow.style.display = 'flex';
@@ -209,97 +495,13 @@ export async function createOrEditAgentDialog(
 				canSelectFolders: true,
 				canSelectFiles: false,
 				canSelectMany: false,
-				title: 'Select Target Directory for AI Agent'
+				title: 'Select Storage Location for AI Agent'
 			});
 			if (res && res.length > 0) {
 				selectedParentUri = res[0];
 				locationInput.value = res[0].fsPath;
 			}
 		};
-
-		// Function to update Secondary Entity Options and Auto-Update Location
-		const updateSecondarySelector = () => {
-			clearNode(entitySelect);
-			const selectedScope = scopeSelect.value as AgentScopeType;
-
-			if (selectedScope === 'none') {
-				entityGroup.style.display = 'none';
-				return;
-			}
-
-			entityGroup.style.display = 'block';
-
-			if (selectedScope === 'workspace') {
-				entityLabel.textContent = 'Target Workspace:';
-				const folders = workspaceContextService.getWorkspace().folders;
-				if (folders.length === 0) {
-					append(entitySelect, $('option', { value: 'Workspace Global' }, 'Workspace Global'));
-				} else {
-					for (const folder of folders) {
-						const opt = append(entitySelect, $('option', { value: folder.name, 'data-path': folder.uri.fsPath }, folder.name)) as HTMLOptionElement;
-						if (existingAgent?.scopeName === folder.name) {
-							opt.selected = true;
-						}
-					}
-				}
-			} else if (selectedScope === 'project') {
-				entityLabel.textContent = 'Target Project:';
-				const projects = [
-					{ name: 'Any-Agent Desktop', path: '/Users/aimery/repos/any_agent/desktop' },
-					{ name: 'Celpip Backend', path: '/Users/aimery/repos/celpip/backend' },
-					{ name: 'Fino3 Mobile', path: '/Users/aimery/repos/fino3/mobile' }
-				];
-				for (const p of projects) {
-					const opt = append(entitySelect, $('option', { value: p.name, 'data-path': p.path }, p.name)) as HTMLOptionElement;
-					if (existingAgent?.scopeName === p.name) {
-						opt.selected = true;
-					}
-				}
-			} else if (selectedScope === 'job') {
-				entityLabel.textContent = 'Target Job:';
-				const jobs = [
-					{ name: 'any_agent_202607 Job', path: '/Users/aimery/repos/jobs/any_agent_202607' },
-					{ name: 'celpip_study_202607 Job', path: '/Users/aimery/repos/jobs/celpip_english_learning' }
-				];
-				for (const j of jobs) {
-					const opt = append(entitySelect, $('option', { value: j.name, 'data-path': j.path }, j.name)) as HTMLOptionElement;
-					if (existingAgent?.scopeName === j.name) {
-						opt.selected = true;
-					}
-				}
-			} else if (selectedScope === 'workflow') {
-				entityLabel.textContent = 'Target Workflow:';
-				const workflows = ['CI/CD Build Pipeline', 'Post-Market Stock Sync', 'Daily Test Runner'];
-				for (const wf of workflows) {
-					const opt = append(entitySelect, $('option', { value: wf }, wf)) as HTMLOptionElement;
-					if (existingAgent?.scopeName === wf) {
-						opt.selected = true;
-					}
-				}
-			}
-		};
-
-		scopeSelect.onchange = () => {
-			updateSecondarySelector();
-			// Auto update directory path if matching option selected
-			const selectedOpt = entitySelect.options[entitySelect.selectedIndex];
-			const path = selectedOpt?.getAttribute('data-path');
-			if (path) {
-				selectedParentUri = URI.file(path);
-				locationInput.value = path;
-			}
-		};
-
-		entitySelect.onchange = () => {
-			const selectedOpt = entitySelect.options[entitySelect.selectedIndex];
-			const path = selectedOpt?.getAttribute('data-path');
-			if (path) {
-				selectedParentUri = URI.file(path);
-				locationInput.value = path;
-			}
-		};
-
-		updateSecondarySelector();
 
 		// 11. System Prompt Textarea (Large, Roomy Textarea)
 		const promptGroup = append(modal, $('.form-group'));
@@ -370,19 +572,58 @@ export async function createOrEditAgentDialog(
 				return;
 			}
 
-			const modelVal = modelSelect.value;
-			const scopeVal = scopeSelect.value as AgentScopeType;
-			let scopeNameVal = 'Standalone';
-			if (scopeVal !== 'none' && entitySelect.value) {
-				scopeNameVal = entitySelect.value;
+			// 1. Resolve Model Reference (providerId, modelId, credentialId)
+			let selectedModel = modelInput.value.trim();
+			// Normalize any Unicode non-standard dashes to standard ASCII hyphen
+			selectedModel = selectedModel.replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-');
+			if (!selectedModel) {
+				notificationService.warn('Please enter an AI Model ID.');
+				modelInput.focus();
+				return;
 			}
 
-			const scopeIdVal = `${scopeVal}-${scopeNameVal.toLowerCase().replace(/\s+/g, '-')}`;
+			let providerIdVal = 'gemini';
+			let modelIdVal = selectedModel;
+			let credentialIdVal: string | undefined = undefined;
+
+			if (credSelect.value === 'none') {
+				notificationService.warn('Please configure and select an API Connection Credential first.');
+				credSelect.focus();
+				return;
+			}
+
+			if (credSelect.value !== 'default' && credSelect.value !== 'none') {
+				credentialIdVal = credSelect.value;
+				const cred = savedCredentials.find(c => c.id === credentialIdVal);
+				if (cred) {
+					providerIdVal = cred.providerId;
+				}
+			}
+
+			if (selectedModel.includes('/')) {
+				const parts = selectedModel.split('/');
+				providerIdVal = parts[0];
+				modelIdVal = parts[1];
+			} else {
+				if (credSelect.value === 'default' || credSelect.value === 'none') {
+					providerIdVal = selectedModel.startsWith('gpt') ? 'openai' : selectedModel.startsWith('claude') ? 'anthropic' : 'gemini';
+				}
+			}
+
+			const scopeVal = existingAgent ? existingAgent.scopeType : 'none';
+			const scopeNameVal = existingAgent ? existingAgent.scopeName : 'Standalone';
+			const scopeIdVal = existingAgent ? existingAgent.scopeId : 'none';
 
 			// Sync locationInput value if custom
 			if (locationInput.value.trim()) {
 				selectedParentUri = URI.file(locationInput.value.trim());
 			}
+
+			const modelRef: IAgentModelReference = {
+				providerId: providerIdVal,
+				modelId: modelIdVal,
+				credentialId: credentialIdVal
+			};
 
 			if (existingAgent) {
 				const updatedAgent: IAgentItem = {
@@ -390,7 +631,7 @@ export async function createOrEditAgentDialog(
 					name: nameVal,
 					role: roleVal,
 					systemPrompt: promptVal,
-					modelName: modelVal,
+					model: modelRef,
 					scopeType: scopeVal,
 					scopeId: scopeIdVal,
 					scopeName: scopeNameVal,
@@ -413,13 +654,13 @@ export async function createOrEditAgentDialog(
 					name: nameVal,
 					role: roleVal,
 					systemPrompt: promptVal,
-					modelName: modelVal,
+					model: modelRef,
 					scopeType: scopeVal,
 					scopeId: scopeIdVal,
 					scopeName: scopeNameVal,
 					avatarIcon: 'robot',
 					status: 'idle',
-					description: `${roleVal} - Powered by ${modelVal} (${scopeNameVal})`
+					description: `${roleVal} - Powered by ${modelIdVal} (${scopeNameVal})`
 				}, selectedParentUri);
 
 				notificationService.info(`AI Agent '${nameVal}' created successfully!`);

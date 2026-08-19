@@ -24,7 +24,7 @@ export interface IWorkspaceItem {
 	detectedType?: ResourceType;
 }
 
-export type ResourceType = 'workspace' | 'job' | 'project' | 'task' | 'workflow' | 'case' | 'agent' | 'issue' | 'analysis' | 'folder' | 'file';
+export type ResourceType = 'workspace' | 'job' | 'project' | 'task' | 'workflow' | 'case' | 'agent' | 'issue' | 'analysis' | 'folder' | 'file' | string;
 
 export interface IWorkspaceChildItem {
 	id: string;
@@ -50,6 +50,13 @@ export interface ICreateResourceOptions {
 	assignedAgentName?: string;
 	agentRulePrompt?: string;
 	parentEntityUri?: URI;
+	agentModel?: {
+		providerId: string;
+		modelId: string;
+		credentialId?: string;
+	};
+	agentSystemPrompt?: string;
+	customMetadata?: { [key: string]: string };
 }
 
 export interface ICreateResourceResult {
@@ -96,6 +103,7 @@ export interface IWorkspacesExplorerService {
 	readonly _serviceBrand: undefined;
 	readonly onDidChangeWorkspaces: Event<void>;
 
+	getActiveUserEmail(): string;
 	getWorkspaces(): Promise<IWorkspaceItem[]>;
 	addWorkspace(uri: URI, name?: string): Promise<void>;
 	removeWorkspace(uri: URI): Promise<void>;
@@ -109,4 +117,5 @@ export interface IWorkspacesExplorerService {
 	getMetadataSnapshot(uri: URI | string): IEntityMetadataSnapshot | undefined;
 	saveMetadataSnapshot(snapshot: IEntityMetadataSnapshot): Promise<void>;
 	repairEntityFromSnapshot(uri: URI): Promise<void>;
+	removeSnapshot(uri: URI): Promise<void>;
 }
