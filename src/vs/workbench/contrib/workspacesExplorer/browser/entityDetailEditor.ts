@@ -769,7 +769,7 @@ export class EntityDetailEditor extends EditorPane {
 				const lines = entry.split('\n');
 				let header = lines[0].trim();
 				if (header.toLowerCase() === 'metadata' || header.toLowerCase() === '基本元数据') {
-					header = 'Creation Details (创建信息)';
+					header = 'Creation Details';
 				}
 				const body = lines.slice(1).join('\n').trim();
 				workLogHtml += `

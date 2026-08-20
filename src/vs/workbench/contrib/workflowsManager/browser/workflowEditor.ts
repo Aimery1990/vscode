@@ -30,6 +30,7 @@ import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entity
 
 interface IFlowchartNode {
 	id: string;
+	groupId?: string;
 	type: 'rect' | 'round-rect' | 'diamond' | 'circle';
 	x: number;
 	y: number;
@@ -37,6 +38,14 @@ interface IFlowchartNode {
 	height: number;
 	label: string;
 	imports?: { type: 'agent' | 'task' | 'job' | 'project' | 'case' | 'issue' | 'analysis' | 'workflow' | string; name: string; uri?: string }[];
+	color?: string;
+	textColor?: string;
+	textAlign?: 'left' | 'center' | 'right';
+	verticalAlign?: 'top' | 'center' | 'bottom';
+	isBold?: boolean;
+	isItalic?: boolean;
+	isUnderline?: boolean;
+	isStrikethrough?: boolean;
 }
 
 interface IFlowchartLink {
@@ -47,6 +56,7 @@ interface IFlowchartLink {
 	toPort?: 'top' | 'right' | 'bottom' | 'left';
 	style: 'arrow-single' | 'arrow-double' | 'arrow-none';
 	routing?: 'orthogonal' | 'curved';
+	color?: string;
 	label?: string;
 	labelPosition?: number;
 }
@@ -55,6 +65,24 @@ interface IFlowchartData {
 	nodes: IFlowchartNode[];
 	links: IFlowchartLink[];
 	routingMode?: 'orthogonal' | 'curved';
+}
+
+function hexToRgba(hex?: string, alpha = 0.12): string {
+	if (!hex || !hex.startsWith('#')) return `rgba(13, 148, 136, ${alpha})`;
+	const clean = hex.replace('#', '');
+	if (clean.length === 3) {
+		const r = parseInt(clean[0] + clean[0], 16);
+		const g = parseInt(clean[1] + clean[1], 16);
+		const b = parseInt(clean[2] + clean[2], 16);
+		return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+	}
+	if (clean.length >= 6) {
+		const r = parseInt(clean.slice(0, 2), 16);
+		const g = parseInt(clean.slice(2, 4), 16);
+		const b = parseInt(clean.slice(4, 6), 16);
+		return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+	}
+	return `rgba(13, 148, 136, ${alpha})`;
 }
 
 function getColorForName(name: string | undefined): string {
@@ -138,6 +166,13 @@ export class WorkflowEditor extends EditorPane {
 
 	private _draggedNodesStartPos: Map<string, { x: number; y: number }> = new Map();
 	private _copiedNodes: IFlowchartNode[] = [];
+	private _collapseSelectionTargetNodeId: string | null = null;
+
+	// Undo / Redo History Stack
+	private _undoStack: string[] = [];
+	private _redoStack: string[] = [];
+	private _isUndoingOrRedoing: boolean = false;
+	private _lastSavedStateJson: string = '';
 
 	// Elements References
 	private _canvas: HTMLElement | undefined;
@@ -147,8 +182,10 @@ export class WorkflowEditor extends EditorPane {
 	private _linkDeletesContainer: HTMLElement | undefined;
 	private _zoomLevel: number = 1.0;
 	private _zoomSizerEl?: HTMLElement;
-	private _zoomBadgeEl?: HTMLElement;
 	private _floatingZoomBadgeEl?: HTMLElement;
+	private _inspectorEl?: HTMLElement;
+	private _isInspectorCollapsed: boolean = false;
+	private _inspectorTogglePill?: HTMLElement;
 
 	constructor(
 		group: IEditorGroup,
@@ -198,13 +235,22 @@ export class WorkflowEditor extends EditorPane {
 				const rawNodes = Array.isArray(parsed?.nodes) ? parsed.nodes : [];
 				const nodes: IFlowchartNode[] = rawNodes.map((n: any, idx: number) => ({
 					id: String(n.id || `node-${idx}`),
+					groupId: n.groupId ? String(n.groupId) : undefined,
 					type: (n.type === 'start' || n.type === 'circle') ? 'circle' : (n.type === 'decision' || n.type === 'diamond') ? 'diamond' : (n.type === 'rect') ? 'rect' : 'round-rect',
 					x: typeof n.x === 'number' ? n.x : typeof n.position?.x === 'number' ? n.position.x : 80 + (idx * 150),
 					y: typeof n.y === 'number' ? n.y : typeof n.position?.y === 'number' ? n.position.y : 150,
 					width: typeof n.width === 'number' ? n.width : (n.type === 'circle' || n.type === 'start') ? 64 : (n.type === 'diamond' || n.type === 'decision') ? 120 : 180,
 					height: typeof n.height === 'number' ? n.height : (n.type === 'circle' || n.type === 'start') ? 64 : (n.type === 'diamond' || n.type === 'decision') ? 120 : 80,
 					label: String(n.label || n.name || n.id || 'Node'),
-					imports: Array.isArray(n.imports) ? n.imports : undefined
+					imports: Array.isArray(n.imports) ? n.imports : undefined,
+					color: n.color || undefined,
+					textColor: n.textColor || undefined,
+					textAlign: n.textAlign || undefined,
+					verticalAlign: n.verticalAlign || undefined,
+					isBold: !!n.isBold,
+					isItalic: !!n.isItalic,
+					isUnderline: !!n.isUnderline,
+					isStrikethrough: !!n.isStrikethrough
 				}));
 
 				// Normalize links / connections / edges
@@ -217,6 +263,7 @@ export class WorkflowEditor extends EditorPane {
 					toPort: l.toPort,
 					style: (l.style === 'arrow-double' || l.style === 'arrow-none') ? l.style : 'arrow-single',
 					routing: l.routing,
+					color: l.color,
 					label: l.label,
 					labelPosition: typeof l.labelPosition === 'number' ? l.labelPosition : undefined
 				}));
@@ -283,19 +330,37 @@ export class WorkflowEditor extends EditorPane {
 					};
 				}
 				this._activeRoutingMode = this._data.routingMode || 'orthogonal';
-				await this._saveFlowchartData();
+				await this._saveFlowchartData(true);
 			}
+
+			// Initialize history baseline
+			this._undoStack = [];
+			this._redoStack = [];
+			this._lastSavedStateJson = JSON.stringify(this._data);
 		} catch (err) {
 			this._notificationService.error(`Failed to load flowchart: ${err}`);
 			this._data = { nodes: [], links: [] };
 		}
 	}
 
-	private async _saveFlowchartData(): Promise<void> {
+	private async _saveFlowchartData(skipHistory: boolean = false): Promise<void> {
 		if (!this._flowchartJsonUri) return;
 
 		try {
 			const jsonStr = JSON.stringify(this._data, null, 2);
+			const compactStr = JSON.stringify(this._data);
+
+			if (!skipHistory && !this._isUndoingOrRedoing) {
+				if (this._lastSavedStateJson && this._lastSavedStateJson !== compactStr) {
+					this._undoStack.push(this._lastSavedStateJson);
+					if (this._undoStack.length > 60) {
+						this._undoStack.shift();
+					}
+					this._redoStack = [];
+				}
+				this._lastSavedStateJson = compactStr;
+			}
+
 			await this._fileService.writeFile(this._flowchartJsonUri, VSBuffer.fromString(jsonStr));
 
 			// Also persist into Entity Persistence Snapshot engine for disaster recovery!
@@ -336,8 +401,11 @@ export class WorkflowEditor extends EditorPane {
 		const toolbar = append(this._container, $('.workflow-editor-toolbar'));
 		this._renderToolbar(toolbar);
 
-		// 2. Canvas Wrapper
-		const canvasWrapper = append(this._container, $('.workflow-editor-canvas-wrapper'));
+		// 2. Center Drawing Viewport (Fixed container for floating controls)
+		const canvasViewport = append(this._container, $('.workflow-canvas-viewport'));
+
+		// Canvas Scroll Wrapper inside Viewport
+		const canvasWrapper = append(canvasViewport, $('.workflow-editor-canvas-wrapper'));
 
 		// Sizer container to enforce scroll boundaries when zoomed
 		this._zoomSizerEl = append(canvasWrapper, $('.workflow-canvas-sizer'));
@@ -354,21 +422,33 @@ export class WorkflowEditor extends EditorPane {
 		this._svgOverlay?.classList.add('workflow-svg-overlay');
 		this._canvas.appendChild(this._svgOverlay!);
 
-		// Define Arrow marker
+		// Define Arrow markers for all theme colors
 		const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-		const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
-		marker.setAttribute('id', 'arrow');
-		marker.setAttribute('viewBox', '0 0 10 10');
-		marker.setAttribute('refX', '8');
-		marker.setAttribute('refY', '5');
-		marker.setAttribute('markerWidth', '6');
-		marker.setAttribute('markerHeight', '6');
-		marker.setAttribute('orient', 'auto-start-reverse');
-		const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-		path.setAttribute('d', 'M 0 1 L 10 5 L 0 9 z');
-		path.setAttribute('fill', '#0d9488');
-		marker.appendChild(path);
-		defs.appendChild(marker);
+		const arrowColors = [
+			{ id: 'arrow', color: '#0d9488' },
+			{ id: 'arrow-ffffff', color: '#ffffff' },
+			{ id: 'arrow-0d9488', color: '#0d9488' },
+			{ id: 'arrow-38bdf8', color: '#38bdf8' },
+			{ id: 'arrow-7c3aed', color: '#7c3aed' },
+			{ id: 'arrow-facc15', color: '#facc15' },
+			{ id: 'arrow-f43f5e', color: '#f43f5e' },
+			{ id: 'arrow-selected', color: '#22d3ee' }
+		];
+		for (const ac of arrowColors) {
+			const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+			marker.setAttribute('id', ac.id);
+			marker.setAttribute('viewBox', '0 0 10 10');
+			marker.setAttribute('refX', '8');
+			marker.setAttribute('refY', '5');
+			marker.setAttribute('markerWidth', '6');
+			marker.setAttribute('markerHeight', '6');
+			marker.setAttribute('orient', 'auto-start-reverse');
+			const markerPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+			markerPath.setAttribute('d', 'M 0 1 L 10 5 L 0 9 z');
+			markerPath.setAttribute('fill', ac.color);
+			marker.appendChild(markerPath);
+			defs.appendChild(marker);
+		}
 		this._svgOverlay?.appendChild(defs);
 
 		// Connection line delete handles layer
@@ -380,8 +460,8 @@ export class WorkflowEditor extends EditorPane {
 		// Selection Box Overlay element
 		this._selectionBoxEl = append(this._canvas, $('.workflow-selection-box'));
 
-		// Floating Zoom Toolbar at bottom-right of viewport
-		const floatingZoom = append(canvasWrapper, $('.workflow-floating-zoom-control'));
+		// Permanent Floating Zoom Toolbar at top-center of drawing viewport (never scrolls away)
+		const floatingZoom = append(canvasViewport, $('.workflow-floating-zoom-control'));
 		const fZoomOut = append(floatingZoom, $('.floating-zoom-btn'));
 		fZoomOut.textContent = '−';
 		fZoomOut.title = 'Zoom Out (−10%)';
@@ -407,6 +487,30 @@ export class WorkflowEditor extends EditorPane {
 		append(fFitBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.screenFull)));
 		fFitBtn.title = 'Fit Content to Screen';
 		fFitBtn.onclick = (e) => { e.stopPropagation(); this._fitView(); };
+
+		// Permanent Floating Trigger Pill at top-right of drawing viewport when inspector is collapsed
+		this._inspectorTogglePill = append(canvasViewport, $('.workflow-inspector-toggle-pill'));
+		if (!this._isInspectorCollapsed) {
+			this._inspectorTogglePill.classList.add('hidden');
+		}
+		append(this._inspectorTogglePill, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolColor)));
+		append(this._inspectorTogglePill, $('span')).textContent = 'Properties & Styles';
+		this._inspectorTogglePill.title = 'Open Properties & Styling Panel';
+		this._inspectorTogglePill.onclick = (e) => {
+			e.stopPropagation();
+			this._isInspectorCollapsed = false;
+			this._inspectorEl?.classList.remove('collapsed');
+			this._inspectorTogglePill?.classList.add('hidden');
+			if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+		};
+
+		// 3. Right Property Inspector Panel
+		const inspector = append(this._container, $('.workflow-editor-inspector'));
+		if (this._isInspectorCollapsed) {
+			inspector.classList.add('collapsed');
+		}
+		this._inspectorEl = inspector;
+		this._renderInspector(inspector);
 
 		// Wheel zoom with Ctrl/Cmd key
 		this._contentDisposables.add(addDisposableListener(canvasWrapper, 'wheel', (e: WheelEvent) => {
@@ -434,12 +538,46 @@ export class WorkflowEditor extends EditorPane {
 					e.preventDefault();
 					this._deleteSelectedItems();
 				}
+			} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+				e.preventDefault();
+				e.stopPropagation();
+				if (e.shiftKey) {
+					this._redo();
+				} else {
+					this._undo();
+				}
+			} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+				e.preventDefault();
+				e.stopPropagation();
+				this._redo();
 			} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
 				e.preventDefault();
 				this._copySelectedNodes();
 			} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
 				e.preventDefault();
 				this._pasteNodes();
+			} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
+				e.preventDefault();
+				e.stopPropagation();
+				if (e.shiftKey) {
+					this._ungroupSelectedNodes();
+				} else {
+					this._groupSelectedNodes();
+				}
+			} else if (this._selectedNodeIds.size === 1) {
+				const selId = Array.from(this._selectedNodeIds)[0];
+				const selNode = this._data?.nodes?.find(n => n.id === selId);
+				if (selNode) {
+					if (e.key === 'Tab') {
+						e.preventDefault();
+						e.stopPropagation();
+						this._createChildNode(selNode);
+					} else if (e.key === 'Enter') {
+						e.preventDefault();
+						e.stopPropagation();
+						this._createSiblingNode(selNode);
+					}
+				}
 			}
 		}));
 
@@ -532,7 +670,7 @@ export class WorkflowEditor extends EditorPane {
 						const x = Math.round(rawX / grid) * grid;
 						const y = Math.round(rawY / grid) * grid;
 						this._addNewNodeAt(type, label, x, y);
-					} catch {}
+					} catch { }
 				}
 			};
 		}
@@ -627,31 +765,379 @@ export class WorkflowEditor extends EditorPane {
 				this._drawLinks();
 			};
 		}
+	}
 
-		// Section D: Zoom & Scaling
-		const zoomSec = append(parent, $('.workflow-toolbar-section'));
-		append(zoomSec, $('.workflow-toolbar-title')).textContent = localize('zoomAndScale', 'Zoom & View');
+	private _renderInspector(parent: HTMLElement): void {
+		clearNode(parent);
+		if (!this._data || !Array.isArray(this._data.nodes)) {
+			return;
+		}
 
-		const zoomRow = append(zoomSec, $('.workflow-zoom-row'));
-		const zoomOutBtn = append(zoomRow, $('.workflow-zoom-btn'));
-		zoomOutBtn.textContent = '−';
-		zoomOutBtn.title = localize('zoomOut', 'Zoom Out');
-		zoomOutBtn.onclick = () => this._setZoom(this._zoomLevel - 0.1);
+		// Header / Title
+		const headerSec = append(parent, $('.workflow-inspector-header'));
+		const headerTop = append(headerSec, $('.workflow-inspector-header-top'));
+		const title = append(headerTop, $('.workflow-inspector-title'));
+		title.textContent = 'PROPERTIES & STYLING';
 
-		this._zoomBadgeEl = append(zoomRow, $('.workflow-zoom-badge'));
-		this._zoomBadgeEl.textContent = `${Math.round(this._zoomLevel * 100)}%`;
-		this._zoomBadgeEl.title = localize('resetZoom', 'Click to reset to 100%');
-		this._zoomBadgeEl.onclick = () => this._setZoom(1.0);
+		const collapseBtn = append(headerTop, $('.workflow-inspector-collapse-btn'));
+		append(collapseBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronRight)));
+		collapseBtn.title = 'Collapse Panel';
+		collapseBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._isInspectorCollapsed = true;
+			this._inspectorEl?.classList.add('collapsed');
+			this._inspectorTogglePill?.classList.remove('hidden');
+		};
 
-		const zoomInBtn = append(zoomRow, $('.workflow-zoom-btn'));
-		zoomInBtn.textContent = '+';
-		zoomInBtn.title = localize('zoomIn', 'Zoom In');
-		zoomInBtn.onclick = () => this._setZoom(this._zoomLevel + 0.1);
+		const selNodeCount = this._selectedNodeIds.size;
+		const selLinkCount = this._selectedLinkIds.size;
+		const subtitle = append(headerSec, $('.workflow-inspector-subtitle'));
 
-		const fitBtn = append(zoomSec, $('.workflow-zoom-fit-btn'));
-		append(fitBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.screenFull)));
-		append(fitBtn, $('span')).textContent = localize('fitContent', 'Fit to Screen');
-		fitBtn.onclick = () => this._fitView();
+		const paletteColors = [
+			{ name: 'White', hex: '#ffffff' },
+			{ name: 'Teal (Default)', hex: '#0d9488' },
+			{ name: 'Sky Blue', hex: '#38bdf8' },
+			{ name: 'Violet Purple', hex: '#7c3aed' },
+			{ name: 'Amber Gold', hex: '#facc15' },
+			{ name: 'Rose Red', hex: '#f43f5e' }
+		];
+
+		// Case A: Connection Line(s) Selected
+		if (selLinkCount > 0 && selNodeCount === 0) {
+			if (selLinkCount === 1) {
+				const selLinkId = Array.from(this._selectedLinkIds)[0];
+				const link = this._data.links.find(l => l.id === selLinkId);
+				subtitle.textContent = `Selected: ${link?.label ? `Line "${link.label}"` : 'Connection Line'}`;
+			} else {
+				subtitle.textContent = `${selLinkCount} Lines Selected`;
+			}
+
+			// Section 1: Line Color
+			const colorSec = append(parent, $('.workflow-toolbar-section'));
+			append(colorSec, $('.workflow-toolbar-title')).textContent = 'Line Color';
+
+			const colorGrid = append(colorSec, $('.workflow-color-grid'));
+			let currentLineColor = '#0d9488';
+			if (selLinkCount === 1) {
+				const selLinkId = Array.from(this._selectedLinkIds)[0];
+				const link = this._data.links.find(l => l.id === selLinkId);
+				currentLineColor = link?.color || '#0d9488';
+			}
+
+			for (const c of paletteColors) {
+				const swatch = append(colorGrid, $('.workflow-color-swatch-btn'));
+				swatch.style.backgroundColor = c.hex;
+				swatch.title = c.name;
+				if (currentLineColor.toLowerCase() === c.hex.toLowerCase()) {
+					swatch.classList.add('active');
+				}
+				swatch.onclick = () => {
+					for (const id of this._selectedLinkIds) {
+						const link = this._data.links.find(l => l.id === id);
+						if (link) {
+							link.color = c.hex;
+						}
+					}
+					this._saveFlowchartData();
+					this._drawLinks();
+					this._renderInspector(parent);
+				};
+			}
+
+			// Section 2: Routing Mode
+			const routingSec = append(parent, $('.workflow-toolbar-section'));
+			append(routingSec, $('.workflow-toolbar-title')).textContent = 'Routing Mode';
+			const routingRow = append(routingSec, $('.workflow-format-row'));
+			const routingModes: { mode: 'orthogonal' | 'curved'; label: string }[] = [
+				{ mode: 'orthogonal', label: 'Orthogonal' },
+				{ mode: 'curved', label: 'Curved' }
+			];
+			let curRouting: 'orthogonal' | 'curved' = 'orthogonal';
+			if (selLinkCount === 1) {
+				const selLinkId = Array.from(this._selectedLinkIds)[0];
+				const link = this._data.links.find(l => l.id === selLinkId);
+				curRouting = link?.routing || this._activeRoutingMode || 'orthogonal';
+			}
+			for (const rm of routingModes) {
+				const btn = append(routingRow, $('.workflow-format-btn'));
+				btn.textContent = rm.label;
+				if (curRouting === rm.mode) {
+					btn.classList.add('active');
+				}
+				btn.onclick = () => {
+					for (const id of this._selectedLinkIds) {
+						const link = this._data.links.find(l => l.id === id);
+						if (link) link.routing = rm.mode;
+					}
+					this._saveFlowchartData();
+					this._drawLinks();
+					this._renderInspector(parent);
+				};
+			}
+
+			// Section 3: Arrow Style
+			const arrowSec = append(parent, $('.workflow-toolbar-section'));
+			append(arrowSec, $('.workflow-toolbar-title')).textContent = 'Arrow Style';
+			const arrowRow = append(arrowSec, $('.workflow-format-row'));
+			const arrowStyles: { style: IFlowchartLink['style']; label: string }[] = [
+				{ style: 'arrow-single', label: 'Single (→)' },
+				{ style: 'arrow-double', label: 'Double (↔)' },
+				{ style: 'arrow-none', label: 'None (—)' }
+			];
+			let curArrowStyle: IFlowchartLink['style'] = 'arrow-single';
+			if (selLinkCount === 1) {
+				const selLinkId = Array.from(this._selectedLinkIds)[0];
+				const link = this._data.links.find(l => l.id === selLinkId);
+				curArrowStyle = link?.style || 'arrow-single';
+			}
+			for (const as of arrowStyles) {
+				const btn = append(arrowRow, $('.workflow-format-btn'));
+				btn.textContent = as.label;
+				if (curArrowStyle === as.style) {
+					btn.classList.add('active');
+				}
+				btn.onclick = () => {
+					for (const id of this._selectedLinkIds) {
+						const link = this._data.links.find(l => l.id === id);
+						if (link) link.style = as.style;
+					}
+					this._saveFlowchartData();
+					this._drawLinks();
+					this._renderInspector(parent);
+				};
+			}
+
+			return;
+		}
+
+		// Case B: Node(s) Selected or Default
+		if (selNodeCount === 1) {
+			const selId = Array.from(this._selectedNodeIds)[0];
+			const node = this._data.nodes.find(n => n.id === selId);
+			subtitle.textContent = `Selected: ${node?.label ? (node.label.length > 18 ? node.label.substring(0, 15) + '...' : node.label) : 'Node'}`;
+		} else if (selNodeCount > 1) {
+			subtitle.textContent = `${selNodeCount} Nodes Selected`;
+		} else {
+			subtitle.textContent = 'Default / Global Styles';
+		}
+
+		// Section 1: Node Color & Theme
+		const colorSec = append(parent, $('.workflow-toolbar-section'));
+		append(colorSec, $('.workflow-toolbar-title')).textContent = 'Node Color';
+
+		const colorGrid = append(colorSec, $('.workflow-color-grid'));
+
+		let currentColor = '#0d9488';
+		if (selNodeCount === 1) {
+			const selId = Array.from(this._selectedNodeIds)[0];
+			const node = this._data.nodes.find(n => n.id === selId);
+			currentColor = node?.color || '#0d9488';
+		}
+
+		for (const c of paletteColors) {
+			const swatch = append(colorGrid, $('.workflow-color-swatch-btn'));
+			swatch.style.backgroundColor = c.hex;
+			swatch.title = c.name;
+			if (currentColor.toLowerCase() === c.hex.toLowerCase()) {
+				swatch.classList.add('active');
+			}
+
+			swatch.onclick = () => {
+				if (this._selectedNodeIds.size > 0) {
+					for (const id of this._selectedNodeIds) {
+						const node = this._data.nodes.find(n => n.id === id);
+						if (node) {
+							node.color = c.hex;
+						}
+					}
+				}
+				this._saveFlowchartData();
+				this._renderNodes();
+				this._drawLinks();
+				this._renderInspector(parent);
+			};
+		}
+
+		// Section 2: Text Formatting
+		const textSec = append(parent, $('.workflow-toolbar-section'));
+		append(textSec, $('.workflow-toolbar-title')).textContent = 'Text Formatting';
+
+		let isBold = false;
+		let isItalic = false;
+		let isUnderline = false;
+		let isStrikethrough = false;
+		let textAlign: 'left' | 'center' | 'right' = 'center';
+		let verticalAlign: 'top' | 'center' | 'bottom' = 'center';
+		let currentTextColor = '#ffffff';
+
+		if (selNodeCount === 1) {
+			const selId = Array.from(this._selectedNodeIds)[0];
+			const node = this._data.nodes.find(n => n.id === selId);
+			isBold = !!node?.isBold;
+			isItalic = !!node?.isItalic;
+			isUnderline = !!node?.isUnderline;
+			isStrikethrough = !!node?.isStrikethrough;
+			textAlign = node?.textAlign || 'center';
+			verticalAlign = node?.verticalAlign || 'center';
+			currentTextColor = node?.textColor || '#ffffff';
+		}
+
+		// Row 1: Font Styles (Bold, Italic, Underline, Strikethrough)
+		const styleRow = append(textSec, $('.workflow-format-row'));
+
+		// Bold
+		const boldBtn = append(styleRow, $(`.workflow-format-btn${isBold ? '.active' : ''}`));
+		boldBtn.textContent = 'B';
+		boldBtn.style.fontWeight = 'bold';
+		boldBtn.title = 'Bold';
+		boldBtn.onclick = () => {
+			if (this._selectedNodeIds.size > 0) {
+				const nextVal = !isBold;
+				for (const id of this._selectedNodeIds) {
+					const node = this._data.nodes.find(n => n.id === id);
+					if (node) node.isBold = nextVal;
+				}
+				this._saveFlowchartData();
+				this._renderNodes();
+				this._renderInspector(parent);
+			}
+		};
+
+		// Italic
+		const italicBtn = append(styleRow, $(`.workflow-format-btn${isItalic ? '.active' : ''}`));
+		italicBtn.textContent = 'I';
+		italicBtn.style.fontStyle = 'italic';
+		italicBtn.style.fontFamily = 'Georgia, serif, sans-serif';
+		italicBtn.title = 'Italic';
+		italicBtn.onclick = () => {
+			if (this._selectedNodeIds.size > 0) {
+				const nextVal = !isItalic;
+				for (const id of this._selectedNodeIds) {
+					const node = this._data.nodes.find(n => n.id === id);
+					if (node) node.isItalic = nextVal;
+				}
+				this._saveFlowchartData();
+				this._renderNodes();
+				this._renderInspector(parent);
+			}
+		};
+
+		// Underline
+		const underlineBtn = append(styleRow, $(`.workflow-format-btn${isUnderline ? '.active' : ''}`));
+		underlineBtn.textContent = 'U';
+		underlineBtn.style.textDecoration = 'underline';
+		underlineBtn.title = 'Underline';
+		underlineBtn.onclick = () => {
+			if (this._selectedNodeIds.size > 0) {
+				const nextVal = !isUnderline;
+				for (const id of this._selectedNodeIds) {
+					const node = this._data.nodes.find(n => n.id === id);
+					if (node) node.isUnderline = nextVal;
+				}
+				this._saveFlowchartData();
+				this._renderNodes();
+				this._renderInspector(parent);
+			}
+		};
+
+		// Strikethrough
+		const strikeBtn = append(styleRow, $(`.workflow-format-btn${isStrikethrough ? '.active' : ''}`));
+		strikeBtn.textContent = 'S';
+		strikeBtn.style.textDecoration = 'line-through';
+		strikeBtn.title = 'Strikethrough';
+		strikeBtn.onclick = () => {
+			if (this._selectedNodeIds.size > 0) {
+				const nextVal = !isStrikethrough;
+				for (const id of this._selectedNodeIds) {
+					const node = this._data.nodes.find(n => n.id === id);
+					if (node) node.isStrikethrough = nextVal;
+				}
+				this._saveFlowchartData();
+				this._renderNodes();
+				this._renderInspector(parent);
+			}
+		};
+
+		// Row 2: Horizontal Alignment (Left, Center, Right)
+		const alignRow = append(textSec, $('.workflow-format-row'));
+		const alignChoices: { align: 'left' | 'center' | 'right'; label: string; title: string }[] = [
+			{ align: 'left', label: 'Left', title: 'Align Left' },
+			{ align: 'center', label: 'Center', title: 'Align Center' },
+			{ align: 'right', label: 'Right', title: 'Align Right' }
+		];
+		for (const ac of alignChoices) {
+			const aBtn = append(alignRow, $(`.workflow-format-btn.text-btn${textAlign === ac.align ? '.active' : ''}`));
+			aBtn.textContent = ac.label;
+			aBtn.title = ac.title;
+			aBtn.onclick = () => {
+				if (this._selectedNodeIds.size > 0) {
+					for (const id of this._selectedNodeIds) {
+						const node = this._data.nodes.find(n => n.id === id);
+						if (node) node.textAlign = ac.align;
+					}
+					this._saveFlowchartData();
+					this._renderNodes();
+					this._renderInspector(parent);
+				}
+			};
+		}
+
+		// Row 3: Vertical Alignments (Top, Middle, Bottom)
+		const vAlignRow = append(textSec, $('.workflow-format-row'));
+		const vAlignChoices: { align: 'top' | 'center' | 'bottom'; label: string; title: string }[] = [
+			{ align: 'top', label: 'Top', title: 'Align Top' },
+			{ align: 'center', label: 'Middle', title: 'Align Middle' },
+			{ align: 'bottom', label: 'Bottom', title: 'Align Bottom' }
+		];
+		for (const va of vAlignChoices) {
+			const vaBtn = append(vAlignRow, $(`.workflow-format-btn${verticalAlign === va.align ? '.active' : ''}`));
+			vaBtn.textContent = va.label;
+			vaBtn.title = va.title;
+			vaBtn.onclick = () => {
+				if (this._selectedNodeIds.size > 0) {
+					for (const id of this._selectedNodeIds) {
+						const node = this._data.nodes.find(n => n.id === id);
+						if (node) node.verticalAlign = va.align;
+					}
+					this._saveFlowchartData();
+					this._renderNodes();
+					this._renderInspector(parent);
+				}
+			};
+		}
+
+		// Text Color Sub-section
+		const textColorTitle = append(textSec, $('.workflow-sub-title'));
+		textColorTitle.textContent = 'Text Color';
+
+		const textColorGrid = append(textSec, $('.workflow-color-grid.small'));
+		const textColors = [
+			{ name: 'White', hex: '#ffffff' },
+			{ name: 'Teal (Default)', hex: '#0d9488' },
+			{ name: 'Sky Blue', hex: '#38bdf8' },
+			{ name: 'Violet Purple', hex: '#7c3aed' },
+			{ name: 'Amber Gold', hex: '#facc15' },
+			{ name: 'Rose Red', hex: '#f43f5e' }
+		];
+		for (const tc of textColors) {
+			const tcBtn = append(textColorGrid, $('.workflow-color-swatch-btn.small'));
+			tcBtn.style.backgroundColor = tc.hex;
+			tcBtn.title = tc.name;
+			if (currentTextColor.toLowerCase() === tc.hex.toLowerCase()) {
+				tcBtn.classList.add('active');
+			}
+			tcBtn.onclick = () => {
+				if (this._selectedNodeIds.size > 0) {
+					for (const id of this._selectedNodeIds) {
+						const node = this._data.nodes.find(n => n.id === id);
+						if (node) node.textColor = tc.hex;
+					}
+					this._saveFlowchartData();
+					this._renderNodes();
+					this._renderInspector(parent);
+				}
+			};
+		}
 	}
 
 	private _setZoom(level: number): void {
@@ -665,9 +1151,6 @@ export class WorkflowEditor extends EditorPane {
 			this._zoomSizerEl.style.height = `${2000 * this._zoomLevel}px`;
 		}
 		const zoomText = `${Math.round(this._zoomLevel * 100)}%`;
-		if (this._zoomBadgeEl) {
-			this._zoomBadgeEl.textContent = zoomText;
-		}
 		if (this._floatingZoomBadgeEl) {
 			this._floatingZoomBadgeEl.textContent = zoomText;
 		}
@@ -718,11 +1201,21 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		for (const node of this._data.nodes) {
-			const nodeEl = append(this._nodesContainer, $(`.workflow-node.${node.type}`));
+			const nodeEl = append(this._nodesContainer, $(`.workflow-node.${node.type}${node.groupId ? '.grouped' : ''}`));
+			nodeEl.setAttribute('data-node-id', node.id);
+			if (node.groupId) {
+				nodeEl.setAttribute('data-group-id', node.groupId);
+			}
 			nodeEl.style.left = `${node.x}px`;
 			nodeEl.style.top = `${node.y}px`;
 			nodeEl.style.width = `${node.width}px`;
 			nodeEl.style.height = `${node.height}px`;
+
+			// Custom Node Theme Color
+			if (node.color) {
+				nodeEl.style.borderColor = node.color;
+				nodeEl.style.backgroundColor = hexToRgba(node.color, 0.12);
+			}
 
 			const isSelected = this._selectedNodeIds.has(node.id);
 			if (isSelected) {
@@ -750,6 +1243,9 @@ export class WorkflowEditor extends EditorPane {
 			for (const edge of edges) {
 				const port = append(nodeEl, $(`.node-port-handle.${edge}`));
 				port.title = `Drag to connect from ${edge} edge`;
+				if (node.color) {
+					port.style.borderColor = node.color;
+				}
 				port.onmousedown = (e) => {
 					e.stopPropagation();
 					e.preventDefault();
@@ -809,7 +1305,45 @@ export class WorkflowEditor extends EditorPane {
 			};
 
 			const labelWrapper = append(nodeEl, $('.node-label'));
-			labelWrapper.textContent = node.label;
+			labelWrapper.textContent = node.label || '';
+
+			// Multiline formatting & Alignment
+			const textAlign = node.textAlign || 'center';
+			labelWrapper.style.textAlign = textAlign;
+			if (textAlign === 'left') {
+				labelWrapper.style.alignItems = 'flex-start';
+			} else if (textAlign === 'right') {
+				labelWrapper.style.alignItems = 'flex-end';
+			} else {
+				labelWrapper.style.alignItems = 'center';
+			}
+
+			const verticalAlign = node.verticalAlign || 'center';
+			if (verticalAlign === 'top') {
+				labelWrapper.style.justifyContent = 'flex-start';
+				labelWrapper.style.paddingTop = '4px';
+			} else if (verticalAlign === 'bottom') {
+				labelWrapper.style.justifyContent = 'flex-end';
+				labelWrapper.style.paddingBottom = '4px';
+			} else {
+				labelWrapper.style.justifyContent = 'center';
+			}
+
+			if (node.isBold) {
+				labelWrapper.style.fontWeight = '700';
+			}
+			if (node.isItalic) {
+				labelWrapper.style.fontStyle = 'italic';
+			}
+			const textDecorations: string[] = [];
+			if (node.isUnderline) textDecorations.push('underline');
+			if (node.isStrikethrough) textDecorations.push('line-through');
+			if (textDecorations.length > 0) {
+				labelWrapper.style.textDecoration = textDecorations.join(' ');
+			}
+			if (node.textColor) {
+				labelWrapper.style.color = node.textColor;
+			}
 
 			nodeEl.ondblclick = (e) => {
 				e.stopPropagation();
@@ -826,12 +1360,12 @@ export class WorkflowEditor extends EditorPane {
 				const badgesContainer = append(nodeEl, $('.node-imports-badges-container'));
 				for (const [type, count] of typeCounts.entries()) {
 					const badge = append(badgesContainer, $(`.node-import-badge.${type}`));
-					
+
 					// Dynamic Icon & Color mapping to match workspacesExplorerPane.ts exactly
 					let codicon = Codicon.package; // default for custom types
 					let color = '';
 					const lower = type.toLowerCase();
-					
+
 					if (lower === 'agent') {
 						codicon = Codicon.robot;
 						color = '#38bdf8';
@@ -865,12 +1399,12 @@ export class WorkflowEditor extends EditorPane {
 					const r = parseInt(color.slice(1, 3), 16);
 					const g = parseInt(color.slice(3, 5), 16);
 					const b = parseInt(color.slice(5, 7), 16);
-					
+
 					badge.style.backgroundColor = `rgba(${r}, ${g}, ${b}, 0.15)`;
 					badge.style.color = color;
-					
+
 					append(badge, $('span' + ThemeIcon.asCSSSelector(codicon)));
-					
+
 					const displayType = type.charAt(0).toUpperCase() + type.slice(1);
 					append(badge, $('span.badge-text', {}, `${displayType} (${count})`));
 				}
@@ -894,19 +1428,65 @@ export class WorkflowEditor extends EditorPane {
 					return;
 				}
 
-				const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey;
-				if (!isMultiKey) {
+				// Right click (button === 2): keep existing selection if right clicked node is already selected
+				if (e.button === 2) {
 					if (!this._selectedNodeIds.has(node.id)) {
 						this._selectedNodeIds.clear();
 						this._selectedLinkIds.clear();
 						this._selectedNodeIds.add(node.id);
+						this._renderNodes();
+						this._drawLinks();
+					}
+					return;
+				}
+
+				const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey;
+				this._collapseSelectionTargetNodeId = null;
+
+				if (!isMultiKey) {
+					if (node.groupId) {
+						// Group Selection: select all nodes in this group
+						const groupMemberIds = this._data.nodes.filter(n => n.groupId === node.groupId).map(n => n.id);
+						this._selectedNodeIds.clear();
+						this._selectedLinkIds.clear();
+						for (const id of groupMemberIds) {
+							this._selectedNodeIds.add(id);
+						}
+					} else {
+						// If this node is ALREADY part of a multi-selection, preserve selection during potential drag; collapse on mouseup if no drag occurred
+						if (this._selectedNodeIds.size > 1 && this._selectedNodeIds.has(node.id)) {
+							this._collapseSelectionTargetNodeId = node.id;
+						} else if (!this._selectedNodeIds.has(node.id)) {
+							this._selectedNodeIds.clear();
+							this._selectedLinkIds.clear();
+							this._selectedNodeIds.add(node.id);
+						}
 					}
 				} else {
-					if (this._selectedNodeIds.has(node.id)) {
-						this._selectedNodeIds.delete(node.id);
+					if (node.groupId) {
+						const groupMemberIds = this._data.nodes.filter(n => n.groupId === node.groupId).map(n => n.id);
+						const allSelected = groupMemberIds.every(id => this._selectedNodeIds.has(id));
+						for (const id of groupMemberIds) {
+							if (allSelected) {
+								this._selectedNodeIds.delete(id);
+							} else {
+								this._selectedNodeIds.add(id);
+							}
+						}
 					} else {
-						this._selectedNodeIds.add(node.id);
+						if (this._selectedNodeIds.has(node.id)) {
+							this._selectedNodeIds.delete(node.id);
+						} else {
+							this._selectedNodeIds.add(node.id);
+						}
 					}
+				}
+
+				// Auto expand inspector panel if collapsed when user selects a node
+				if (this._isInspectorCollapsed) {
+					this._isInspectorCollapsed = false;
+					this._inspectorEl?.classList.remove('collapsed');
+					this._inspectorTogglePill?.classList.add('hidden');
 				}
 
 				this._renderNodes();
@@ -933,6 +1513,10 @@ export class WorkflowEditor extends EditorPane {
 				this._showInlineEditor(nodeEl, node);
 			};
 		}
+
+		if (this._inspectorEl) {
+			this._renderInspector(this._inspectorEl);
+		}
 	}
 
 	private _showInlineEditor(nodeEl: HTMLElement, node: IFlowchartNode): void {
@@ -945,40 +1529,50 @@ export class WorkflowEditor extends EditorPane {
 			labelEl.style.visibility = 'hidden';
 		}
 
-		const input = append(nodeEl, $('input.node-inline-editor')) as HTMLInputElement;
-		input.type = 'text';
-		input.value = node.label;
-		
-		input.style.position = 'absolute';
-		input.style.left = '4px';
-		input.style.top = '4px';
-		input.style.width = 'calc(100% - 8px)';
-		input.style.height = 'calc(100% - 8px)';
-		input.style.boxSizing = 'border-box';
-		input.style.fontSize = '12px';
-		input.style.fontFamily = 'inherit';
-		input.style.textAlign = 'center';
-		input.style.background = 'var(--vscode-input-background, #1e1e1e)';
-		input.style.color = 'var(--vscode-input-foreground, #ffffff)';
-		input.style.border = '1px solid var(--vscode-focusBorder, #007fd4)';
-		input.style.borderRadius = '4px';
-		input.style.outline = 'none';
-		input.style.zIndex = '1000';
+		const textarea = append(nodeEl, $('textarea.node-inline-editor')) as HTMLTextAreaElement;
+		textarea.value = node.label || '';
+
+		textarea.style.position = 'absolute';
+		textarea.style.left = '4px';
+		textarea.style.top = '4px';
+		textarea.style.width = 'calc(100% - 8px)';
+		textarea.style.height = 'calc(100% - 8px)';
+		textarea.style.boxSizing = 'border-box';
+		textarea.style.fontSize = '11.5px';
+		textarea.style.fontFamily = 'inherit';
+		textarea.style.lineHeight = '1.35';
+		textarea.style.textAlign = node.textAlign || 'center';
+		textarea.style.fontWeight = node.isBold ? '700' : '500';
+		textarea.style.fontStyle = node.isItalic ? 'italic' : 'normal';
+		const editDecorations: string[] = [];
+		if (node.isUnderline) editDecorations.push('underline');
+		if (node.isStrikethrough) editDecorations.push('line-through');
+		textarea.style.textDecoration = editDecorations.length > 0 ? editDecorations.join(' ') : 'none';
+		textarea.style.background = 'var(--vscode-input-background, #1e1e1e)';
+		textarea.style.color = node.textColor || 'var(--vscode-input-foreground, #ffffff)';
+		textarea.style.border = '1px solid var(--vscode-focusBorder, #007fd4)';
+		textarea.style.borderRadius = '4px';
+		textarea.style.outline = 'none';
+		textarea.style.zIndex = '1000';
+		textarea.style.padding = '4px 6px';
+		textarea.style.resize = 'none';
+		textarea.style.whiteSpace = 'pre-wrap';
+		textarea.style.wordBreak = 'break-word';
 
 		// Stop propagation of all mouse events to prevent canvas selection and dragging
-		input.onmousedown = (e) => e.stopPropagation();
-		input.onmouseup = (e) => e.stopPropagation();
-		input.onclick = (e) => e.stopPropagation();
-		input.ondblclick = (e) => e.stopPropagation();
+		textarea.onmousedown = (e) => e.stopPropagation();
+		textarea.onmouseup = (e) => e.stopPropagation();
+		textarea.onclick = (e) => e.stopPropagation();
+		textarea.ondblclick = (e) => e.stopPropagation();
 
 		setTimeout(() => {
-			input.focus();
-			input.select();
+			textarea.focus();
+			textarea.select();
 		}, 50);
 
 		const saveText = () => {
-			const newText = input.value.trim();
-			if (newText && newText !== node.label) {
+			const newText = textarea.value;
+			if (newText !== node.label) {
 				node.label = newText;
 				this._saveFlowchartData();
 			}
@@ -986,10 +1580,24 @@ export class WorkflowEditor extends EditorPane {
 			this._drawLinks();
 		};
 
-		input.onkeydown = (e) => {
+		textarea.onkeydown = (e) => {
 			if (e.key === 'Enter') {
+				if (e.shiftKey) {
+					// Shift+Enter creates a new line in textarea natively
+					e.stopPropagation();
+				} else {
+					// Plain Enter saves and closes, then creates a sibling node
+					e.preventDefault();
+					e.stopPropagation();
+					saveText();
+					this._createSiblingNode(node);
+				}
+			} else if (e.key === 'Tab') {
+				// Tab saves and creates a child node
 				e.preventDefault();
+				e.stopPropagation();
 				saveText();
+				this._createChildNode(node);
 			} else if (e.key === 'Escape') {
 				e.preventDefault();
 				this._renderNodes();
@@ -997,9 +1605,175 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		input.onblur = () => {
+		textarea.onblur = () => {
 			saveText();
 		};
+	}
+
+	private _createChildNode(parent: IFlowchartNode): void {
+		if (!this._data || !Array.isArray(this._data.nodes) || !Array.isArray(this._data.links)) {
+			return;
+		}
+
+		// Find existing direct child nodes
+		const childLinks = this._data.links.filter(l => l.from === parent.id);
+		const existingChildren = childLinks
+			.map(l => this._data.nodes.find(n => n.id === l.to))
+			.filter(Boolean) as IFlowchartNode[];
+
+		const horizontalGap = 80;
+		const verticalGap = 20;
+
+		const childX = parent.x + parent.width + horizontalGap;
+		let childY = parent.y;
+
+		if (existingChildren.length > 0) {
+			const maxBottom = Math.max(...existingChildren.map(c => c.y + c.height));
+			childY = maxBottom + verticalGap;
+		}
+
+		const newId = `node_${Date.now()}`;
+		const newChild: IFlowchartNode = {
+			id: newId,
+			type: parent.type || 'round-rect',
+			x: childX,
+			y: childY,
+			width: parent.width || 120,
+			height: parent.height || 50,
+			label: 'New Node',
+			color: parent.color || '#0d9488',
+			textColor: parent.textColor || '#ffffff',
+			textAlign: parent.textAlign || 'center',
+			verticalAlign: parent.verticalAlign || 'center',
+			isBold: parent.isBold,
+			isItalic: parent.isItalic,
+			isUnderline: parent.isUnderline,
+			isStrikethrough: parent.isStrikethrough
+		};
+
+		const newLink: IFlowchartLink = {
+			id: `link_${Date.now()}`,
+			from: parent.id,
+			fromPort: 'right',
+			to: newId,
+			toPort: 'left',
+			style: this._activeLinkStyle || 'arrow-single',
+			routing: 'orthogonal',
+			color: parent.color || '#0d9488'
+		};
+
+		this._data.nodes.push(newChild);
+		this._data.links.push(newLink);
+		this._saveFlowchartData();
+
+		this._selectedNodeIds.clear();
+		this._selectedLinkIds.clear();
+		this._selectedNodeIds.add(newId);
+
+		this._renderNodes();
+		this._drawLinks();
+
+		if (this._inspectorEl) {
+			this._renderInspector(this._inspectorEl);
+		}
+
+		setTimeout(() => {
+			if (this._nodesContainer) {
+				const newNodeEl = this._nodesContainer.querySelector(`.workflow-node[data-node-id="${newId}"]`) as HTMLElement;
+				if (newNodeEl) {
+					this._showInlineEditor(newNodeEl, newChild);
+				}
+			}
+		}, 60);
+	}
+
+	private _createSiblingNode(current: IFlowchartNode): void {
+		if (!this._data || !Array.isArray(this._data.nodes) || !Array.isArray(this._data.links)) {
+			return;
+		}
+
+		const verticalGap = 20;
+
+		// Find parent link if current has a parent
+		const parentLink = this._data.links.find(l => l.to === current.id);
+		const parentNode = parentLink ? this._data.nodes.find(n => n.id === parentLink.from) : undefined;
+
+		const siblingX = current.x;
+		let siblingY = current.y + current.height + verticalGap;
+
+		if (parentNode) {
+			const siblingLinks = this._data.links.filter(l => l.from === parentNode.id);
+			const allSiblings = siblingLinks
+				.map(l => this._data.nodes.find(n => n.id === l.to))
+				.filter(Boolean) as IFlowchartNode[];
+			if (allSiblings.length > 0) {
+				const maxBottom = Math.max(...allSiblings.map(s => s.y + s.height), current.y + current.height);
+				siblingY = maxBottom + verticalGap;
+			}
+		} else {
+			const roots = this._data.nodes.filter(n => !this._data.links.some(l => l.to === n.id));
+			if (roots.length > 0) {
+				const maxBottom = Math.max(...roots.map(r => r.y + r.height), current.y + current.height);
+				siblingY = maxBottom + verticalGap;
+			}
+		}
+
+		const newId = `node_${Date.now()}`;
+		const newSibling: IFlowchartNode = {
+			id: newId,
+			type: current.type || 'round-rect',
+			x: siblingX,
+			y: siblingY,
+			width: current.width || 120,
+			height: current.height || 50,
+			label: 'New Node',
+			color: current.color || '#0d9488',
+			textColor: current.textColor || '#ffffff',
+			textAlign: current.textAlign || 'center',
+			verticalAlign: current.verticalAlign || 'center',
+			isBold: current.isBold,
+			isItalic: current.isItalic,
+			isUnderline: current.isUnderline,
+			isStrikethrough: current.isStrikethrough
+		};
+
+		this._data.nodes.push(newSibling);
+
+		if (parentNode) {
+			const newLink: IFlowchartLink = {
+				id: `link_${Date.now()}`,
+				from: parentNode.id,
+				fromPort: 'right',
+				to: newId,
+				toPort: 'left',
+				style: parentLink?.style || this._activeLinkStyle || 'arrow-single',
+				routing: 'orthogonal',
+				color: parentNode.color || current.color || '#0d9488'
+			};
+			this._data.links.push(newLink);
+		}
+
+		this._saveFlowchartData();
+
+		this._selectedNodeIds.clear();
+		this._selectedLinkIds.clear();
+		this._selectedNodeIds.add(newId);
+
+		this._renderNodes();
+		this._drawLinks();
+
+		if (this._inspectorEl) {
+			this._renderInspector(this._inspectorEl);
+		}
+
+		setTimeout(() => {
+			if (this._nodesContainer) {
+				const newNodeEl = this._nodesContainer.querySelector(`.workflow-node[data-node-id="${newId}"]`) as HTMLElement;
+				if (newNodeEl) {
+					this._showInlineEditor(newNodeEl, newSibling);
+				}
+			}
+		}, 60);
 	}
 
 	private _addNewNode(type: IFlowchartNode['type'], label: string): void {
@@ -1091,7 +1865,9 @@ export class WorkflowEditor extends EditorPane {
 			tempLine = document.createElementNS('http://www.w3.org/2000/svg', 'path') as any;
 			tempLine.setAttribute('id', 'workflow-temp-line');
 			tempLine.classList.add('workflow-connection-line');
-			tempLine.style.strokeDasharray = '4 4';
+			tempLine.style.strokeDasharray = '5 4';
+			tempLine.style.stroke = '#22d3ee';
+			tempLine.style.strokeWidth = '2.5px';
 			if (this._activeLinkStyle === 'arrow-single' || this._activeLinkStyle === 'arrow-double') {
 				tempLine.setAttribute('marker-end', 'url(#arrow)');
 			}
@@ -1099,12 +1875,16 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		if (!toPort) {
-			const dx = x2 - x1;
-			const dy = y2 - y1;
-			if (Math.abs(dx) > Math.abs(dy)) {
-				toPort = dx > 0 ? 'left' : 'right';
+			if (fromPort === 'right') {
+				toPort = x2 >= x1 ? 'left' : 'right';
+			} else if (fromPort === 'left') {
+				toPort = x2 <= x1 ? 'right' : 'left';
+			} else if (fromPort === 'bottom') {
+				toPort = y2 >= y1 ? 'top' : 'bottom';
+			} else if (fromPort === 'top') {
+				toPort = y2 <= y1 ? 'bottom' : 'top';
 			} else {
-				toPort = dy > 0 ? 'top' : 'bottom';
+				toPort = 'left';
 			}
 		}
 
@@ -1159,11 +1939,54 @@ export class WorkflowEditor extends EditorPane {
 			const rect = this._canvas!.getBoundingClientRect();
 			const currentX = (e.clientX - rect.left) / this._zoomLevel;
 			const currentY = (e.clientY - rect.top) / this._zoomLevel;
-			this._drawTempLink(this._tempLinkStartX, this._tempLinkStartY, currentX, currentY, this._tempLinkFromPort || 'right');
+			const fromPort = this._tempLinkFromPort || 'right';
+
+			// Check for target node snapping
+			let snapNode: IFlowchartNode | undefined;
+			for (const node of this._data.nodes) {
+				if (node.id === this._tempLinkFromNodeId) continue;
+				// Detect if cursor is near or inside target node bounding box
+				if (currentX >= node.x - 24 && currentX <= node.x + node.width + 24 &&
+					currentY >= node.y - 24 && currentY <= node.y + node.height + 24) {
+					snapNode = node;
+					break;
+				}
+			}
+
+			if (snapNode) {
+				// Find which port on snapNode is CLOSEST to current mouse cursor (currentX, currentY)
+				const ports: ('top' | 'right' | 'bottom' | 'left')[] = ['left', 'right', 'top', 'bottom'];
+				let snapPort: 'top' | 'right' | 'bottom' | 'left' = 'left';
+				let minDistance = Infinity;
+
+				for (const p of ports) {
+					const coords = this._getPortCoords(snapNode, p);
+					const dist = Math.hypot(currentX - coords.x, currentY - coords.y);
+					if (dist < minDistance) {
+						minDistance = dist;
+						snapPort = p;
+					}
+				}
+
+				const endCoords = this._getPortCoords(snapNode, snapPort);
+				this._drawTempLink(this._tempLinkStartX, this._tempLinkStartY, endCoords.x, endCoords.y, fromPort, snapPort);
+			} else {
+				let naturalToPort: 'top' | 'right' | 'bottom' | 'left' = 'left';
+				if (fromPort === 'right') {
+					naturalToPort = currentX >= this._tempLinkStartX ? 'left' : 'right';
+				} else if (fromPort === 'left') {
+					naturalToPort = currentX <= this._tempLinkStartX ? 'right' : 'left';
+				} else if (fromPort === 'bottom') {
+					naturalToPort = currentY >= this._tempLinkStartY ? 'top' : 'bottom';
+				} else if (fromPort === 'top') {
+					naturalToPort = currentY <= this._tempLinkStartY ? 'bottom' : 'top';
+				}
+				this._drawTempLink(this._tempLinkStartX, this._tempLinkStartY, currentX, currentY, fromPort, naturalToPort);
+			}
 			return;
 		}
 
-		if (this._isReconnectingStart && this._tempLinkFixedX !== null) {
+		if (this._isReconnectingStart && this._tempLinkFixedX !== null && this._tempLinkFixedY !== null) {
 			const rect = this._canvas!.getBoundingClientRect();
 			const currentX = (e.clientX - rect.left) / this._zoomLevel;
 			const currentY = (e.clientY - rect.top) / this._zoomLevel;
@@ -1171,7 +1994,7 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
-		if (this._isReconnectingEnd && this._tempLinkFixedX !== null) {
+		if (this._isReconnectingEnd && this._tempLinkFixedX !== null && this._tempLinkFixedY !== null) {
 			const rect = this._canvas!.getBoundingClientRect();
 			const currentX = (e.clientX - rect.left) / this._zoomLevel;
 			const currentY = (e.clientY - rect.top) / this._zoomLevel;
@@ -1231,9 +2054,9 @@ export class WorkflowEditor extends EditorPane {
 			this._selectedNodeIds.clear();
 			for (const node of this._data.nodes) {
 				const overlap = !(node.x + node.width < x_start ||
-								  node.x > x_start + width ||
-								  node.y + node.height < y_start ||
-								  node.y > y_start + height);
+					node.x > x_start + width ||
+					node.y + node.height < y_start ||
+					node.y > y_start + height);
 				if (overlap) {
 					this._selectedNodeIds.add(node.id);
 				}
@@ -1317,32 +2140,66 @@ export class WorkflowEditor extends EditorPane {
 			if (e) {
 				const targetPortEl = (e.target as HTMLElement).closest('.node-port-handle');
 				const targetNodeEl = (e.target as HTMLElement).closest('.workflow-node');
+				let targetNode: IFlowchartNode | undefined;
+				let toPort: 'top' | 'right' | 'bottom' | 'left' | undefined;
+
 				if (targetNodeEl) {
 					const nodes = this._nodesContainer?.children;
 					if (nodes) {
 						const nodeIdx = Array.from(nodes).indexOf(targetNodeEl as any);
-						const targetNode = this._data.nodes[nodeIdx];
-						if (targetNode) {
-							let toPort: 'top' | 'right' | 'bottom' | 'left' | undefined;
-							if (targetPortEl) {
-								const classes = Array.from(targetPortEl.classList);
-								toPort = classes.find(c => ['top', 'right', 'bottom', 'left'].includes(c)) as any;
-							}
+						targetNode = this._data.nodes[nodeIdx];
+					}
+				}
 
-							// Create connection!
-							const linkId = `link_${Date.now()}`;
-							this._data.links.push({
-								id: linkId,
-								from: this._tempLinkFromNodeId!,
-								fromPort: this._tempLinkFromPort || undefined,
-								to: targetNode.id,
-								toPort: toPort || undefined,
-								style: this._activeLinkStyle
-							});
-							this._saveFlowchartData();
-							this._drawLinks();
+				// If not dropped directly on DOM node, check coordinate-based proximity snapping (within 24px)
+				if (!targetNode && this._canvas) {
+					const rect = this._canvas.getBoundingClientRect();
+					const upX = (e.clientX - rect.left) / this._zoomLevel;
+					const upY = (e.clientY - rect.top) / this._zoomLevel;
+					for (const n of this._data.nodes) {
+						if (n.id === this._tempLinkFromNodeId) continue;
+						if (upX >= n.x - 24 && upX <= n.x + n.width + 24 &&
+							upY >= n.y - 24 && upY <= n.y + n.height + 24) {
+							targetNode = n;
+							break;
 						}
 					}
+				}
+
+				if (targetNode && targetNode.id !== this._tempLinkFromNodeId) {
+					if (targetPortEl) {
+						const classes = Array.from(targetPortEl.classList);
+						toPort = classes.find(c => ['top', 'right', 'bottom', 'left'].includes(c)) as any;
+					}
+
+					if (!toPort) {
+						const rect = this._canvas!.getBoundingClientRect();
+						const upX = (e.clientX - rect.left) / this._zoomLevel;
+						const upY = (e.clientY - rect.top) / this._zoomLevel;
+						const ports: ('top' | 'right' | 'bottom' | 'left')[] = ['left', 'right', 'top', 'bottom'];
+						let minDistance = Infinity;
+						for (const p of ports) {
+							const coords = this._getPortCoords(targetNode, p);
+							const dist = Math.hypot(upX - coords.x, upY - coords.y);
+							if (dist < minDistance) {
+								minDistance = dist;
+								toPort = p;
+							}
+						}
+					}
+
+					// Create connection!
+					const linkId = `link_${Date.now()}`;
+					this._data.links.push({
+						id: linkId,
+						from: this._tempLinkFromNodeId!,
+						fromPort: this._tempLinkFromPort || undefined,
+						to: targetNode.id,
+						toPort: toPort || undefined,
+						style: this._activeLinkStyle
+					});
+					this._saveFlowchartData();
+					this._drawLinks();
 				}
 			}
 
@@ -1363,30 +2220,58 @@ export class WorkflowEditor extends EditorPane {
 			if (e) {
 				const targetPortEl = (e.target as HTMLElement).closest('.node-port-handle');
 				const targetNodeEl = (e.target as HTMLElement).closest('.workflow-node');
+				let targetNode: IFlowchartNode | undefined;
+				let port: 'top' | 'right' | 'bottom' | 'left' | undefined;
+
 				if (targetNodeEl) {
 					const nodes = this._nodesContainer?.children;
 					if (nodes) {
 						const nodeIdx = Array.from(nodes).indexOf(targetNodeEl as any);
-						const targetNode = this._data.nodes[nodeIdx];
-						if (targetNode) {
-							let port: 'top' | 'right' | 'bottom' | 'left' | undefined;
-							if (targetPortEl) {
-								const classes = Array.from(targetPortEl.classList);
-								port = classes.find(c => ['top', 'right', 'bottom', 'left'].includes(c)) as any;
-							}
+						targetNode = this._data.nodes[nodeIdx];
+					}
+				}
 
-							const link = this._data.links.find(l => l.id === linkId);
-							if (link) {
-								if (isStart) {
-									link.from = targetNode.id;
-									link.fromPort = port || undefined;
-								} else {
-									link.to = targetNode.id;
-									link.toPort = port || undefined;
-								}
-								this._saveFlowchartData();
-							}
+				if (!targetNode && this._canvas) {
+					const rect = this._canvas.getBoundingClientRect();
+					const upX = (e.clientX - rect.left) / this._zoomLevel;
+					const upY = (e.clientY - rect.top) / this._zoomLevel;
+					for (const n of this._data.nodes) {
+						if (upX >= n.x - 24 && upX <= n.x + n.width + 24 &&
+							upY >= n.y - 24 && upY <= n.y + n.height + 24) {
+							targetNode = n;
+							break;
 						}
+					}
+				}
+
+				if (targetNode) {
+					if (targetPortEl) {
+						const classes = Array.from(targetPortEl.classList);
+						port = classes.find(c => ['top', 'right', 'bottom', 'left'].includes(c)) as any;
+					}
+
+					const link = this._data.links.find(l => l.id === linkId);
+					if (link) {
+						if (isStart) {
+							if (!port) {
+								const toNode = this._data.nodes.find(n => n.id === link.to);
+								if (toNode) {
+									port = this._getClosestPorts(targetNode, toNode).fromPort;
+								}
+							}
+							link.from = targetNode.id;
+							link.fromPort = port || undefined;
+						} else {
+							if (!port) {
+								const fromNode = this._data.nodes.find(n => n.id === link.from);
+								if (fromNode) {
+									port = this._getClosestPorts(fromNode, targetNode).toPort;
+								}
+							}
+							link.to = targetNode.id;
+							link.toPort = port || undefined;
+						}
+						this._saveFlowchartData();
 					}
 				}
 			}
@@ -1418,6 +2303,15 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		if (this._isDragging) {
+			const hasMoved = this._dragStartX !== undefined && (Math.abs(e.clientX - this._dragStartX) > 3 || Math.abs(e.clientY - this._dragStartY) > 3);
+			if (!hasMoved && this._collapseSelectionTargetNodeId) {
+				this._selectedNodeIds.clear();
+				this._selectedLinkIds.clear();
+				this._selectedNodeIds.add(this._collapseSelectionTargetNodeId);
+				this._renderNodes();
+				this._drawLinks();
+			}
+			this._collapseSelectionTargetNodeId = null;
 			this._isDragging = false;
 			this._dragNodeId = null;
 			this._saveFlowchartData();
@@ -1501,9 +2395,13 @@ export class WorkflowEditor extends EditorPane {
 		toPort: 'top' | 'right' | 'bottom' | 'left'
 	): { x: number; y: number }[] {
 		const offset = 20;
+		const alignSnapTolerance = 12;
 
 		// 1. Right to Left
 		if (fromPort === 'right' && toPort === 'left') {
+			if (Math.abs(y1 - y2) <= alignSnapTolerance && x2 >= x1) {
+				return [{ x: x1, y: y1 }, { x: x2, y: y1 }];
+			}
 			if (x2 >= x1 + 2 * offset) {
 				const midX = (x1 + x2) / 2;
 				return [{ x: x1, y: y1 }, { x: midX, y: y1 }, { x: midX, y: y2 }, { x: x2, y: y2 }];
@@ -1515,6 +2413,9 @@ export class WorkflowEditor extends EditorPane {
 
 		// 2. Left to Right
 		if (fromPort === 'left' && toPort === 'right') {
+			if (Math.abs(y1 - y2) <= alignSnapTolerance && x2 <= x1) {
+				return [{ x: x1, y: y1 }, { x: x2, y: y1 }];
+			}
 			if (x2 <= x1 - 2 * offset) {
 				const midX = (x1 + x2) / 2;
 				return [{ x: x1, y: y1 }, { x: midX, y: y1 }, { x: midX, y: y2 }, { x: x2, y: y2 }];
@@ -1526,6 +2427,9 @@ export class WorkflowEditor extends EditorPane {
 
 		// 3. Bottom to Top
 		if (fromPort === 'bottom' && toPort === 'top') {
+			if (Math.abs(x1 - x2) <= alignSnapTolerance && y2 >= y1) {
+				return [{ x: x1, y: y1 }, { x: x1, y: y2 }];
+			}
 			if (y2 >= y1 + 2 * offset) {
 				const midY = (y1 + y2) / 2;
 				return [{ x: x1, y: y1 }, { x: x1, y: midY }, { x: x2, y: midY }, { x: x2, y: y2 }];
@@ -1537,6 +2441,9 @@ export class WorkflowEditor extends EditorPane {
 
 		// 4. Top to Bottom
 		if (fromPort === 'top' && toPort === 'bottom') {
+			if (Math.abs(x1 - x2) <= alignSnapTolerance && y2 <= y1) {
+				return [{ x: x1, y: y1 }, { x: x1, y: y2 }];
+			}
 			if (y2 <= y1 - 2 * offset) {
 				const midY = (y1 + y2) / 2;
 				return [{ x: x1, y: y1 }, { x: x1, y: midY }, { x: x2, y: midY }, { x: x2, y: y2 }];
@@ -1630,15 +2537,21 @@ export class WorkflowEditor extends EditorPane {
 	private _pointsToSvgPath(pts: { x: number; y: number }[], radius = 5): string {
 		const clean: { x: number; y: number }[] = [];
 		for (let i = 0; i < pts.length; i++) {
+			if (clean.length >= 1) {
+				const last = clean[clean.length - 1];
+				if (Math.hypot(pts[i].x - last.x, pts[i].y - last.y) < 0.5) {
+					continue;
+				}
+			}
 			if (clean.length >= 2) {
 				const pPrev = clean[clean.length - 2];
 				const pLast = clean[clean.length - 1];
 				const pCurr = pts[i];
-				if (Math.abs(pPrev.y - pLast.y) < 0.1 && Math.abs(pLast.y - pCurr.y) < 0.1) {
+				if (Math.abs(pPrev.y - pLast.y) < 0.5 && Math.abs(pLast.y - pCurr.y) < 0.5) {
 					clean[clean.length - 1] = pCurr;
 					continue;
 				}
-				if (Math.abs(pPrev.x - pLast.x) < 0.1 && Math.abs(pLast.x - pCurr.x) < 0.1) {
+				if (Math.abs(pPrev.x - pLast.x) < 0.5 && Math.abs(pLast.x - pCurr.x) < 0.5) {
 					clean[clean.length - 1] = pCurr;
 					continue;
 				}
@@ -1962,6 +2875,19 @@ export class WorkflowEditor extends EditorPane {
 			let x2 = endCoords.x;
 			let y2 = endCoords.y;
 
+			// Horizontal micro-alignment snap (prevents tiny 1-5px steps when nodes are roughly horizontally aligned)
+			if ((fromPort === 'right' && toPort === 'left') || (fromPort === 'left' && toPort === 'right')) {
+				if (Math.abs(y1 - y2) <= 12) {
+					y2 = y1;
+				}
+			}
+			// Vertical micro-alignment snap
+			if ((fromPort === 'top' && toPort === 'bottom') || (fromPort === 'bottom' && toPort === 'top')) {
+				if (Math.abs(x1 - x2) <= 12) {
+					x2 = x1;
+				}
+			}
+
 			// Apply arrow offsets so arrows don't pierce into nodes
 			const hasEndArrow = link.style === 'arrow-single' || link.style === 'arrow-double';
 			const hasStartArrow = link.style === 'arrow-double';
@@ -1983,6 +2909,10 @@ export class WorkflowEditor extends EditorPane {
 			const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
 			path.classList.add('workflow-connection-line');
 
+			// Custom Link Color or Default (match fromNode color / theme)
+			const linkHex = (link.color || '#0d9488').toLowerCase();
+			path.style.stroke = linkHex;
+
 			// Highlight line if selected
 			const isSelected = this._selectedLinkIds.has(link.id);
 			if (isSelected) {
@@ -1997,11 +2927,15 @@ export class WorkflowEditor extends EditorPane {
 			path.setAttribute('d', d);
 
 			// Link Styles markers (Arrow marker endpoint)
+			const validMarkerColors = new Set(['ffffff', '0d9488', '38bdf8', '7c3aed', 'facc15', 'f43f5e']);
+			const hexClean = linkHex.replace('#', '');
+			const markerColorId = isSelected ? 'arrow-selected' : (validMarkerColors.has(hexClean) ? `arrow-${hexClean}` : 'arrow');
+
 			if (link.style === 'arrow-single') {
-				path.setAttribute('marker-end', 'url(#arrow)');
+				path.setAttribute('marker-end', `url(#${markerColorId})`);
 			} else if (link.style === 'arrow-double') {
-				path.setAttribute('marker-start', 'url(#arrow)');
-				path.setAttribute('marker-end', 'url(#arrow)');
+				path.setAttribute('marker-start', `url(#${markerColorId})`);
+				path.setAttribute('marker-end', `url(#${markerColorId})`);
 			}
 
 			this._svgOverlay.appendChild(path);
@@ -2038,8 +2972,14 @@ export class WorkflowEditor extends EditorPane {
 						this._selectedLinkIds.add(link.id);
 					}
 				}
+				this._isInspectorCollapsed = false;
+				this._inspectorEl?.classList.remove('collapsed');
+				this._inspectorTogglePill?.classList.add('hidden');
 				this._renderNodes();
 				this._drawLinks();
+				if (this._inspectorEl) {
+					this._renderInspector(this._inspectorEl);
+				}
 			};
 
 			// Render text label badge if present
@@ -2178,6 +3118,24 @@ export class WorkflowEditor extends EditorPane {
 		const totalSelected = this._selectedNodeIds.size + this._selectedLinkIds.size;
 		const isMulti = totalSelected > 1;
 
+		if (this._undoStack.length > 0) {
+			const undoItem = append(menu, $('.context-menu-item'));
+			undoItem.textContent = 'Undo (Ctrl+Z)';
+			undoItem.onclick = () => {
+				this._closeContextMenu();
+				this._undo();
+			};
+		}
+
+		if (this._redoStack.length > 0) {
+			const redoItem = append(menu, $('.context-menu-item'));
+			redoItem.textContent = 'Redo (Ctrl+Y)';
+			redoItem.onclick = () => {
+				this._closeContextMenu();
+				this._redo();
+			};
+		}
+
 		if (this._copiedNodes.length > 0) {
 			const pasteItem = append(menu, $('.context-menu-item'));
 			pasteItem.textContent = `Paste Node(s) (${this._copiedNodes.length}) (Ctrl+V)`;
@@ -2235,6 +3193,250 @@ export class WorkflowEditor extends EditorPane {
 				this._closeContextMenu();
 				this._copySelectedNodes();
 			};
+
+			// Group & Ungroup Menu Items
+			if (this._selectedNodeIds.size >= 2) {
+				const groupItem = append(menu, $('.context-menu-item'));
+				groupItem.textContent = `Group (${this._selectedNodeIds.size}) (Ctrl+G)`;
+				groupItem.onclick = () => {
+					this._closeContextMenu();
+					this._groupSelectedNodes();
+				};
+			}
+
+			const anyGrouped = Array.from(this._selectedNodeIds).some(nid => {
+				const n = this._data.nodes.find(node => node.id === nid);
+				return !!n?.groupId;
+			});
+			if (anyGrouped) {
+				const ungroupItem = append(menu, $('.context-menu-item'));
+				ungroupItem.textContent = 'Ungroup (Shift+Ctrl+G)';
+				ungroupItem.onclick = () => {
+					this._closeContextMenu();
+					this._ungroupSelectedNodes();
+				};
+			}
+
+			const nodeObj = this._data.nodes.find(n => n.id === targetId);
+
+			// Node Color Submenu
+			const changeColorItem = append(menu, $('.context-menu-item.submenu-trigger'));
+			changeColorItem.textContent = 'Node Color ›';
+			changeColorItem.style.position = 'relative';
+
+			const colorSubmenu = append(changeColorItem, $('.workflow-context-submenu'));
+			colorSubmenu.style.position = 'absolute';
+			colorSubmenu.style.left = '100%';
+			colorSubmenu.style.top = '-4px';
+			colorSubmenu.style.display = 'none';
+
+			changeColorItem.onmouseenter = () => { colorSubmenu.style.display = 'flex'; };
+			changeColorItem.onmouseleave = () => { colorSubmenu.style.display = 'none'; };
+
+			const nodeColors = [
+				{ name: 'White', hex: '#ffffff' },
+				{ name: 'Teal (Default)', hex: '#0d9488' },
+				{ name: 'Sky Blue', hex: '#38bdf8' },
+				{ name: 'Violet Purple', hex: '#7c3aed' },
+				{ name: 'Amber Gold', hex: '#facc15' },
+				{ name: 'Rose Red', hex: '#f43f5e' }
+			];
+
+			const currentNodeColor = nodeObj?.color || '#0d9488';
+			for (const c of nodeColors) {
+				const cItem = append(colorSubmenu, $('.context-menu-item'));
+				cItem.style.display = 'flex';
+				cItem.style.alignItems = 'center';
+				cItem.style.gap = '8px';
+
+				const dot = append(cItem, $('span.color-dot'));
+				dot.style.width = '10px';
+				dot.style.height = '10px';
+				dot.style.borderRadius = '50%';
+				dot.style.backgroundColor = c.hex;
+				dot.style.border = '1px solid rgba(255,255,255,0.4)';
+
+				const labelSpan = append(cItem, $('span'));
+				labelSpan.textContent = c.name + (currentNodeColor.toLowerCase() === c.hex.toLowerCase() ? ' ✓' : '');
+
+				cItem.onclick = (e) => {
+					e.stopPropagation();
+					this._closeContextMenu();
+					if (nodeObj) {
+						nodeObj.color = c.hex;
+						this._saveFlowchartData();
+						this._renderNodes();
+						this._drawLinks();
+					}
+				};
+			}
+
+			// Text Formatting & Alignment Submenu
+			const textStyleItem = append(menu, $('.context-menu-item.submenu-trigger'));
+			textStyleItem.textContent = 'Text Formatting ›';
+			textStyleItem.style.position = 'relative';
+
+			const textSubmenu = append(textStyleItem, $('.workflow-context-submenu'));
+			textSubmenu.style.position = 'absolute';
+			textSubmenu.style.left = '100%';
+			textSubmenu.style.top = '-4px';
+			textSubmenu.style.display = 'none';
+
+			textStyleItem.onmouseenter = () => { textSubmenu.style.display = 'flex'; };
+			textStyleItem.onmouseleave = () => { textSubmenu.style.display = 'none'; };
+
+			// Style toggles
+			const boldItem = append(textSubmenu, $('.context-menu-item'));
+			boldItem.textContent = `Bold${nodeObj?.isBold ? ' ✓' : ''}`;
+			boldItem.onclick = (e) => {
+				e.stopPropagation();
+				this._closeContextMenu();
+				if (nodeObj) {
+					nodeObj.isBold = !nodeObj.isBold;
+					this._saveFlowchartData();
+					this._renderNodes();
+				}
+			};
+
+			const italicItem = append(textSubmenu, $('.context-menu-item'));
+			italicItem.textContent = `Italic${nodeObj?.isItalic ? ' ✓' : ''}`;
+			italicItem.onclick = (e) => {
+				e.stopPropagation();
+				this._closeContextMenu();
+				if (nodeObj) {
+					nodeObj.isItalic = !nodeObj.isItalic;
+					this._saveFlowchartData();
+					this._renderNodes();
+				}
+			};
+
+			const underlineItem = append(textSubmenu, $('.context-menu-item'));
+			underlineItem.textContent = `Underline${nodeObj?.isUnderline ? ' ✓' : ''}`;
+			underlineItem.onclick = (e) => {
+				e.stopPropagation();
+				this._closeContextMenu();
+				if (nodeObj) {
+					nodeObj.isUnderline = !nodeObj.isUnderline;
+					this._saveFlowchartData();
+					this._renderNodes();
+				}
+			};
+
+			const strikeItem = append(textSubmenu, $('.context-menu-item'));
+			strikeItem.textContent = `Strikethrough${nodeObj?.isStrikethrough ? ' ✓' : ''}`;
+			strikeItem.onclick = (e) => {
+				e.stopPropagation();
+				this._closeContextMenu();
+				if (nodeObj) {
+					nodeObj.isStrikethrough = !nodeObj.isStrikethrough;
+					this._saveFlowchartData();
+					this._renderNodes();
+				}
+			};
+
+			append(textSubmenu, $('.context-menu-separator'));
+
+			// Horizontal Alignments
+			const textAligns: { align: 'left' | 'center' | 'right'; label: string }[] = [
+				{ align: 'left', label: 'Align Left' },
+				{ align: 'center', label: 'Align Center' },
+				{ align: 'right', label: 'Align Right' }
+			];
+			const currentTextAlign = nodeObj?.textAlign || 'center';
+			for (const ta of textAligns) {
+				const taItem = append(textSubmenu, $('.context-menu-item'));
+				taItem.textContent = ta.label + (currentTextAlign === ta.align ? ' ✓' : '');
+				taItem.onclick = (e) => {
+					e.stopPropagation();
+					this._closeContextMenu();
+					if (nodeObj) {
+						nodeObj.textAlign = ta.align;
+						this._saveFlowchartData();
+						this._renderNodes();
+					}
+				};
+			}
+
+			append(textSubmenu, $('.context-menu-separator'));
+
+			// Vertical Alignments
+			const vAligns: { align: 'top' | 'center' | 'bottom'; label: string }[] = [
+				{ align: 'top', label: 'Align Top' },
+				{ align: 'center', label: 'Align Middle' },
+				{ align: 'bottom', label: 'Align Bottom' }
+			];
+			const currentVAlign = nodeObj?.verticalAlign || 'center';
+			for (const va of vAligns) {
+				const vaItem = append(textSubmenu, $('.context-menu-item'));
+				vaItem.textContent = va.label + (currentVAlign === va.align ? ' ✓' : '');
+				vaItem.onclick = (e) => {
+					e.stopPropagation();
+					this._closeContextMenu();
+					if (nodeObj) {
+						nodeObj.verticalAlign = va.align;
+						this._saveFlowchartData();
+						this._renderNodes();
+					}
+				};
+			}
+
+			append(textSubmenu, $('.context-menu-separator'));
+
+			// Text Colors
+			const textColorTrigger = append(textSubmenu, $('.context-menu-item.submenu-trigger'));
+			textColorTrigger.textContent = 'Text Color ›';
+			textColorTrigger.style.position = 'relative';
+
+			const textColorSubmenu = append(textColorTrigger, $('.workflow-context-submenu'));
+			textColorSubmenu.style.position = 'absolute';
+			textColorSubmenu.style.left = '100%';
+			textColorSubmenu.style.top = '-4px';
+			textColorSubmenu.style.display = 'none';
+
+			textColorTrigger.onmouseenter = () => { textColorSubmenu.style.display = 'flex'; };
+			textColorTrigger.onmouseleave = () => { textColorSubmenu.style.display = 'none'; };
+
+			const textColors = [
+				{ name: 'Pure White (Default)', hex: '#ffffff' },
+				{ name: 'Muted Slate', hex: '#94a3b8' },
+				{ name: 'Gold Yellow', hex: '#facc15' },
+				{ name: 'Sky Blue', hex: '#38bdf8' },
+				{ name: 'Rose Red', hex: '#f43f5e' },
+				{ name: 'Emerald Green', hex: '#4ade80' },
+				{ name: 'Match Border Color', hex: 'MATCH_BORDER' }
+			];
+			const currentTextColor = nodeObj?.textColor || '#ffffff';
+
+			for (const tc of textColors) {
+				const tcItem = append(textColorSubmenu, $('.context-menu-item'));
+				tcItem.style.display = 'flex';
+				tcItem.style.alignItems = 'center';
+				tcItem.style.gap = '8px';
+
+				const dot = append(tcItem, $('span.color-dot'));
+				dot.style.width = '10px';
+				dot.style.height = '10px';
+				dot.style.borderRadius = '50%';
+				dot.style.backgroundColor = tc.hex === 'MATCH_BORDER' ? (nodeObj?.color || '#0d9488') : tc.hex;
+				dot.style.border = '1px solid rgba(255,255,255,0.4)';
+
+				const labelSpan = append(tcItem, $('span'));
+				labelSpan.textContent = tc.name + (currentTextColor === tc.hex ? ' ✓' : '');
+
+				tcItem.onclick = (e) => {
+					e.stopPropagation();
+					this._closeContextMenu();
+					if (nodeObj) {
+						if (tc.hex === 'MATCH_BORDER') {
+							nodeObj.textColor = nodeObj.color || '#0d9488';
+						} else {
+							nodeObj.textColor = tc.hex;
+						}
+						this._saveFlowchartData();
+						this._renderNodes();
+					}
+				};
+			}
 
 			// Change Shape menu item with hover submenu
 			const changeShapeItem = append(menu, $('.context-menu-item.submenu-trigger'));
@@ -2452,6 +3654,92 @@ export class WorkflowEditor extends EditorPane {
 				};
 			}
 
+			// Line Color Submenu
+			const lineColorItem = append(menu, $('.context-menu-item.submenu-trigger'));
+			lineColorItem.textContent = 'Line Color ›';
+			lineColorItem.style.position = 'relative';
+
+			const lineColorSubmenu = append(lineColorItem, $('.workflow-context-submenu'));
+			lineColorSubmenu.style.position = 'absolute';
+			lineColorSubmenu.style.left = '100%';
+			lineColorSubmenu.style.top = '-4px';
+			lineColorSubmenu.style.display = 'none';
+
+			lineColorItem.onmouseenter = () => { lineColorSubmenu.style.display = 'flex'; };
+			lineColorItem.onmouseleave = () => { lineColorSubmenu.style.display = 'none'; };
+
+			const lineColors = [
+				{ name: 'White', hex: '#ffffff' },
+				{ name: 'Teal (Default)', hex: '#0d9488' },
+				{ name: 'Sky Blue', hex: '#38bdf8' },
+				{ name: 'Violet Purple', hex: '#7c3aed' },
+				{ name: 'Amber Gold', hex: '#facc15' },
+				{ name: 'Rose Red', hex: '#f43f5e' }
+			];
+			const currentLineColor = linkObj?.color || '#0d9488';
+
+			for (const lc of lineColors) {
+				const lcItem = append(lineColorSubmenu, $('.context-menu-item'));
+				lcItem.style.display = 'flex';
+				lcItem.style.alignItems = 'center';
+				lcItem.style.gap = '8px';
+
+				const dot = append(lcItem, $('span.color-dot'));
+				dot.style.width = '10px';
+				dot.style.height = '10px';
+				dot.style.borderRadius = '50%';
+				dot.style.backgroundColor = lc.hex;
+				dot.style.border = '1px solid rgba(255,255,255,0.4)';
+
+				const labelSpan = append(lcItem, $('span'));
+				labelSpan.textContent = lc.name + (currentLineColor.toLowerCase() === lc.hex.toLowerCase() ? ' ✓' : '');
+
+				lcItem.onclick = (e) => {
+					e.stopPropagation();
+					this._closeContextMenu();
+					if (linkObj) {
+						linkObj.color = lc.hex;
+						this._saveFlowchartData();
+						this._drawLinks();
+					}
+				};
+			}
+
+			// Arrow Style Submenu
+			const arrowStyleItem = append(menu, $('.context-menu-item.submenu-trigger'));
+			arrowStyleItem.textContent = 'Arrow Style ›';
+			arrowStyleItem.style.position = 'relative';
+
+			const arrowSubmenu = append(arrowStyleItem, $('.workflow-context-submenu'));
+			arrowSubmenu.style.position = 'absolute';
+			arrowSubmenu.style.left = '100%';
+			arrowSubmenu.style.top = '-4px';
+			arrowSubmenu.style.display = 'none';
+
+			arrowStyleItem.onmouseenter = () => { arrowSubmenu.style.display = 'flex'; };
+			arrowStyleItem.onmouseleave = () => { arrowSubmenu.style.display = 'none'; };
+
+			const arrowStyles: { style: IFlowchartLink['style']; label: string }[] = [
+				{ style: 'arrow-single', label: 'Single Arrow (→)' },
+				{ style: 'arrow-double', label: 'Double Arrow (↔)' },
+				{ style: 'arrow-none', label: 'No Arrow (—)' }
+			];
+			const currentArrowStyle = linkObj?.style || 'arrow-single';
+
+			for (const as of arrowStyles) {
+				const asItem = append(arrowSubmenu, $('.context-menu-item'));
+				asItem.textContent = as.label + (currentArrowStyle === as.style ? ' ✓' : '');
+				asItem.onclick = (e) => {
+					e.stopPropagation();
+					this._closeContextMenu();
+					if (linkObj) {
+						linkObj.style = as.style;
+						this._saveFlowchartData();
+						this._drawLinks();
+					}
+				};
+			}
+
 			// Submenu to choose routing mode for this link
 			const routingSubmenuTrigger = append(menu, $('.context-menu-item.submenu-trigger'));
 			routingSubmenuTrigger.textContent = 'Routing Mode ›';
@@ -2513,6 +3801,96 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
+	private async _undo(): Promise<void> {
+		if (this._undoStack.length === 0) {
+			this._notificationService.info('Nothing to undo');
+			return;
+		}
+
+		const prevStateJson = this._undoStack.pop()!;
+		const currentStateJson = JSON.stringify(this._data);
+		this._redoStack.push(currentStateJson);
+
+		this._isUndoingOrRedoing = true;
+		try {
+			this._data = JSON.parse(prevStateJson);
+			this._lastSavedStateJson = prevStateJson;
+
+			// Clear multi-selection to avoid retaining stale group multi-selection
+			if (this._selectedNodeIds.size > 1) {
+				this._selectedNodeIds.clear();
+			} else {
+				const validNodeIds = new Set(this._data.nodes.map(n => n.id));
+				for (const id of Array.from(this._selectedNodeIds)) {
+					if (!validNodeIds.has(id)) {
+						this._selectedNodeIds.delete(id);
+					}
+				}
+			}
+			const validLinkIds = new Set(this._data.links.map(l => l.id));
+			for (const id of Array.from(this._selectedLinkIds)) {
+				if (!validLinkIds.has(id)) {
+					this._selectedLinkIds.delete(id);
+				}
+			}
+
+			await this._saveFlowchartData(true);
+			this._renderNodes();
+			this._drawLinks();
+			if (this._inspectorEl) {
+				this._renderInspector(this._inspectorEl);
+			}
+			this._notificationService.info('Undo');
+		} finally {
+			this._isUndoingOrRedoing = false;
+		}
+	}
+
+	private async _redo(): Promise<void> {
+		if (this._redoStack.length === 0) {
+			this._notificationService.info('Nothing to redo');
+			return;
+		}
+
+		const nextStateJson = this._redoStack.pop()!;
+		const currentStateJson = JSON.stringify(this._data);
+		this._undoStack.push(currentStateJson);
+
+		this._isUndoingOrRedoing = true;
+		try {
+			this._data = JSON.parse(nextStateJson);
+			this._lastSavedStateJson = nextStateJson;
+
+			// Clear multi-selection to avoid retaining stale group multi-selection
+			if (this._selectedNodeIds.size > 1) {
+				this._selectedNodeIds.clear();
+			} else {
+				const validNodeIds = new Set(this._data.nodes.map(n => n.id));
+				for (const id of Array.from(this._selectedNodeIds)) {
+					if (!validNodeIds.has(id)) {
+						this._selectedNodeIds.delete(id);
+					}
+				}
+			}
+			const validLinkIds = new Set(this._data.links.map(l => l.id));
+			for (const id of Array.from(this._selectedLinkIds)) {
+				if (!validLinkIds.has(id)) {
+					this._selectedLinkIds.delete(id);
+				}
+			}
+
+			await this._saveFlowchartData(true);
+			this._renderNodes();
+			this._drawLinks();
+			if (this._inspectorEl) {
+				this._renderInspector(this._inspectorEl);
+			}
+			this._notificationService.info('Redo');
+		} finally {
+			this._isUndoingOrRedoing = false;
+		}
+	}
+
 	private _copySelectedNodes(): void {
 		if (this._selectedNodeIds.size === 0) return;
 		this._copiedNodes = [];
@@ -2525,8 +3903,81 @@ export class WorkflowEditor extends EditorPane {
 		this._notificationService.info(`Copied ${this._copiedNodes.length} node(s)`);
 	}
 
+	private _groupSelectedNodes(): void {
+		if (this._selectedNodeIds.size < 2) {
+			return;
+		}
+
+		// Explicitly record history snapshot before grouping
+		const beforeState = JSON.stringify(this._data);
+		this._undoStack.push(beforeState);
+		if (this._undoStack.length > 60) {
+			this._undoStack.shift();
+		}
+		this._redoStack = [];
+
+		const newGroupId = `group_${Date.now()}`;
+		for (const nid of this._selectedNodeIds) {
+			const node = this._data.nodes.find(n => n.id === nid);
+			if (node) {
+				node.groupId = newGroupId;
+			}
+		}
+
+		this._lastSavedStateJson = JSON.stringify(this._data);
+		this._saveFlowchartData(true);
+		this._renderNodes();
+		this._drawLinks();
+		this._notificationService.info(`Grouped ${this._selectedNodeIds.size} nodes`);
+	}
+
+	private _ungroupSelectedNodes(): void {
+		if (this._selectedNodeIds.size === 0) {
+			return;
+		}
+
+		const groupIdsToRemove = new Set<string>();
+		for (const nid of this._selectedNodeIds) {
+			const node = this._data.nodes.find(n => n.id === nid);
+			if (node?.groupId) {
+				groupIdsToRemove.add(node.groupId);
+			}
+		}
+
+		if (groupIdsToRemove.size === 0) {
+			return;
+		}
+
+		// Explicitly record history snapshot before ungrouping
+		const beforeState = JSON.stringify(this._data);
+		this._undoStack.push(beforeState);
+		if (this._undoStack.length > 60) {
+			this._undoStack.shift();
+		}
+		this._redoStack = [];
+
+		for (const node of this._data.nodes) {
+			if (node.groupId && groupIdsToRemove.has(node.groupId)) {
+				delete node.groupId;
+			}
+		}
+
+		this._lastSavedStateJson = JSON.stringify(this._data);
+		this._saveFlowchartData(true);
+		this._renderNodes();
+		this._drawLinks();
+		this._notificationService.info(`Ungrouped nodes`);
+	}
+
 	private _pasteNodes(): void {
 		if (this._copiedNodes.length === 0) return;
+
+		const oldToNewGroupMap = new Map<string, string>();
+		for (const copiedNode of this._copiedNodes) {
+			if (copiedNode.groupId && !oldToNewGroupMap.has(copiedNode.groupId)) {
+				oldToNewGroupMap.set(copiedNode.groupId, `group_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`);
+			}
+		}
 
 		const newPastedIds = new Set<string>();
 		for (const copiedNode of this._copiedNodes) {
@@ -2534,10 +3985,11 @@ export class WorkflowEditor extends EditorPane {
 			const pastedNode: IFlowchartNode = {
 				...copiedNode,
 				id: newId,
+				groupId: copiedNode.groupId ? oldToNewGroupMap.get(copiedNode.groupId) : undefined,
 				x: copiedNode.x + 35,
 				y: copiedNode.y + 35
 			};
-			
+
 			this._data.nodes.push(pastedNode);
 			newPastedIds.add(newId);
 		}
@@ -2740,3 +4192,4 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 }
+
