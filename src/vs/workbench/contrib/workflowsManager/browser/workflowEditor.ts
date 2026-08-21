@@ -13,6 +13,7 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
+import { EditorInput } from '../../../common/editor/editorInput.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
@@ -165,8 +166,15 @@ export class WorkflowEditor extends EditorPane {
 	private _resizeStartY = 0;
 
 	private _draggedNodesStartPos: Map<string, { x: number; y: number }> = new Map();
-	private _copiedNodes: IFlowchartNode[] = [];
+	private static _sharedCopiedNodes: IFlowchartNode[] = [];
+	private get _copiedNodes(): IFlowchartNode[] {
+		return WorkflowEditor._sharedCopiedNodes;
+	}
+	private set _copiedNodes(nodes: IFlowchartNode[]) {
+		WorkflowEditor._sharedCopiedNodes = nodes;
+	}
 	private _collapseSelectionTargetNodeId: string | null = null;
+	private _isPureDiagram: boolean = false;
 
 	// Undo / Redo History Stack
 	private _undoStack: string[] = [];
@@ -207,11 +215,17 @@ export class WorkflowEditor extends EditorPane {
 		parent.appendChild(this._container);
 	}
 
-	override async setInput(input: WorkflowEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+	override async setInput(input: EditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 		await super.setInput(input, options, context, token);
 
-		this._workflowUri = input.workflowUri;
-		this._flowchartJsonUri = URI.joinPath(this._workflowUri, '.agents', 'workflow_flowchart.json');
+		this._isPureDiagram = !!(input as any).isPureDiagram || !!(input as any).diagramUri;
+		if (this._isPureDiagram) {
+			this._workflowUri = (input as any).diagramUri || (input as any).resource || URI.file('');
+			this._flowchartJsonUri = this._workflowUri;
+		} else {
+			this._workflowUri = (input as WorkflowEditorInput).workflowUri;
+			this._flowchartJsonUri = URI.joinPath(this._workflowUri, '.agents', 'workflow_flowchart.json');
+		}
 
 		await this._loadFlowchartData();
 		this._renderEditor();
@@ -1265,44 +1279,46 @@ export class WorkflowEditor extends EditorPane {
 				this._showContextMenu(e.clientX, e.clientY, 'node', node.id);
 			};
 
-			// Drag over and Drop support on Node to import modules
-			nodeEl.ondragover = (e: DragEvent) => {
-				e.preventDefault();
-				e.stopPropagation();
-				if (e.dataTransfer) {
-					e.dataTransfer.dropEffect = 'copy';
-				}
-				nodeEl.classList.add('drag-hover');
-			};
-
-			nodeEl.ondragleave = () => {
-				nodeEl.classList.remove('drag-hover');
-			};
-
-			nodeEl.ondrop = (e: DragEvent) => {
-				e.preventDefault();
-				e.stopPropagation();
-				nodeEl.classList.remove('drag-hover');
-
-				const dataStr = e.dataTransfer?.getData('text/plain');
-				if (dataStr && dataStr.startsWith('any-agent-import:')) {
-					const parts = dataStr.split(':');
-					const type = parts[1]; // agent, task, job
-					const name = parts[2]; // resource name
-
-					if (!node.imports) {
-						node.imports = [];
+			if (!this._isPureDiagram) {
+				// Drag over and Drop support on Node to import modules
+				nodeEl.ondragover = (e: DragEvent) => {
+					e.preventDefault();
+					e.stopPropagation();
+					if (e.dataTransfer) {
+						e.dataTransfer.dropEffect = 'copy';
 					}
-					// Avoid duplicates
-					if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
-						node.imports.push({ type: type as any, name });
-						this._saveFlowchartData();
-						this._renderNodes();
-						this._drawLinks();
-						this._notificationService.info(`Successfully imported ${type} '${name}' into '${node.label}'`);
+					nodeEl.classList.add('drag-hover');
+				};
+
+				nodeEl.ondragleave = () => {
+					nodeEl.classList.remove('drag-hover');
+				};
+
+				nodeEl.ondrop = (e: DragEvent) => {
+					e.preventDefault();
+					e.stopPropagation();
+					nodeEl.classList.remove('drag-hover');
+
+					const dataStr = e.dataTransfer?.getData('text/plain');
+					if (dataStr && dataStr.startsWith('any-agent-import:')) {
+						const parts = dataStr.split(':');
+						const type = parts[1]; // agent, task, job
+						const name = parts[2]; // resource name
+
+						if (!node.imports) {
+							node.imports = [];
+						}
+						// Avoid duplicates
+						if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
+							node.imports.push({ type: type as any, name });
+							this._saveFlowchartData();
+							this._renderNodes();
+							this._drawLinks();
+							this._notificationService.info(`Successfully imported ${type} '${name}' into '${node.label}'`);
+						}
 					}
-				}
-			};
+				};
+			}
 
 			const labelWrapper = append(nodeEl, $('.node-label'));
 			labelWrapper.textContent = node.label || '';
@@ -1350,7 +1366,7 @@ export class WorkflowEditor extends EditorPane {
 				this._showInlineEditor(nodeEl, node);
 			};
 
-			if (node.imports && node.imports.length > 0) {
+			if (!this._isPureDiagram && node.imports && node.imports.length > 0) {
 				const typeCounts = new Map<string, number>();
 				for (const imp of node.imports) {
 					const count = typeCounts.get(imp.type) || 0;
@@ -3155,37 +3171,39 @@ export class WorkflowEditor extends EditorPane {
 				this._drawLinks();
 			}
 
-			const importItem = append(menu, $('.context-menu-item'));
-			importItem.textContent = 'Import';
-			importItem.onclick = () => {
-				this._closeContextMenu();
-				this._importIntoNode(targetId);
-			};
+			if (!this._isPureDiagram) {
+				const importItem = append(menu, $('.context-menu-item'));
+				importItem.textContent = 'Import';
+				importItem.onclick = () => {
+					this._closeContextMenu();
+					this._importIntoNode(targetId);
+				};
 
-			const addSubModuleItem = append(menu, $('.context-menu-item'));
-			addSubModuleItem.textContent = 'Create Sub-Module...';
-			addSubModuleItem.onclick = () => {
-				this._closeContextMenu();
-				this._viewsService.openView<any>('workbench.workspacesExplorer.mainPane', true).then(workspacesView => {
-					if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
-						workspacesView.showCreateResourceModal(this._workflowUri, (this.input as any)?.name || '', (type: string, name: string) => {
-							const node = this._data.nodes.find(n => n.id === targetId);
-							if (node) {
-								if (!node.imports) {
-									node.imports = [];
+				const addSubModuleItem = append(menu, $('.context-menu-item'));
+				addSubModuleItem.textContent = 'Create Sub-Module...';
+				addSubModuleItem.onclick = () => {
+					this._closeContextMenu();
+					this._viewsService.openView<any>('workbench.workspacesExplorer.mainPane', true).then(workspacesView => {
+						if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
+							workspacesView.showCreateResourceModal(this._workflowUri, (this.input as any)?.name || '', (type: string, name: string) => {
+								const node = this._data.nodes.find(n => n.id === targetId);
+								if (node) {
+									if (!node.imports) {
+										node.imports = [];
+									}
+									if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
+										node.imports.push({ type: type as any, name });
+										this._saveFlowchartData();
+										this._renderNodes();
+										this._drawLinks();
+										this._notificationService.info(`Successfully created and imported ${type} '${name}' into '${node.label}'`);
+									}
 								}
-								if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
-									node.imports.push({ type: type as any, name });
-									this._saveFlowchartData();
-									this._renderNodes();
-									this._drawLinks();
-									this._notificationService.info(`Successfully created and imported ${type} '${name}' into '${node.label}'`);
-								}
-							}
-						});
-					}
-				});
-			};
+							});
+						}
+					});
+				};
+			}
 
 			const copyItem = append(menu, $('.context-menu-item'));
 			copyItem.textContent = 'Copy Node (Ctrl+C)';

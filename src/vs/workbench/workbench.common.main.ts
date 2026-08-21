@@ -463,6 +463,9 @@ import './contrib/agentsManager/browser/agentsManager.contribution.js';
 // Workflows Manager
 import './contrib/workflowsManager/browser/workflowsManager.contribution.js';
 
+// Diagrams Manager
+import './contrib/diagramsManager/browser/diagramsManager.contribution.js';
+
 // List
 import './contrib/list/browser/list.contribution.js';
 
