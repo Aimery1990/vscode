@@ -322,7 +322,13 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				const workspaceMdUri = URI.joinPath(targetBase, '.agents', 'workspace.md');
 				const hasWorkspaceMd = await this.fileService.exists(workspaceMdUri) || await this.fileService.exists(URI.joinPath(targetBase, 'workspace.md'));
 
-				if (!hasWorkspaceMd && !item.isCurrent) {
+				if (!hasWorkspaceMd) {
+					// If this is not a genuine managed workspace (no workspace.md) and not explicitly saved as a workspace,
+					// skip it so arbitrary explorer browsing folders (e.g. Downloads, Desktop) do not pollute Managed Workspaces!
+					if (!item.isSaved && !snapshot) {
+						return;
+					}
+
 					let detectedType: ResourceType | undefined = snapshot?.entityType;
 					const configDir = URI.joinPath(targetBase, '.agents');
 					const hasJobMd = await this.fileService.exists(URI.joinPath(configDir, 'job.md')) || await this.fileService.exists(URI.joinPath(targetBase, 'job.md'));

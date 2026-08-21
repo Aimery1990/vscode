@@ -10,6 +10,8 @@ import { WorkbenchActionExecutedEvent, WorkbenchActionExecutedClassification } f
 import { memoize } from '../../../../../base/common/decorators.js';
 import { IFilesConfiguration, ExplorerFolderContext, FilesExplorerFocusedContext, ExplorerFocusedContext, ExplorerRootContext, ExplorerResourceReadonlyContext, ExplorerResourceCut, ExplorerResourceMoveableToTrash, ExplorerCompressedFocusContext, ExplorerCompressedFirstFocusContext, ExplorerCompressedLastFocusContext, ExplorerResourceAvailableEditorIdsContext, VIEW_ID, ExplorerResourceWritableContext, ViewHasSomeCollapsibleRootItemContext, FoldersViewVisibleContext, ExplorerResourceParentReadOnlyContext, ExplorerFindProviderActive } from '../../common/files.js';
 import { FileCopiedContext, NEW_FILE_COMMAND_ID, NEW_FOLDER_COMMAND_ID } from '../fileActions.js';
+import { ADD_ROOT_FOLDER_COMMAND_ID } from '../../../../browser/actions/workspaceCommands.js';
+import { VIEW_CONTAINER } from '../explorerViewlet.js';
 import * as DOM from '../../../../../base/browser/dom.js';
 import { IWorkbenchLayoutService } from '../../../../services/layout/browser/layoutService.js';
 import { ExplorerDecorationsProvider } from './explorerDecorationsProvider.js';
@@ -1084,6 +1086,39 @@ registerAction2(class extends Action2 {
 	run(accessor: ServicesAccessor): void {
 		const commandService = accessor.get(ICommandService);
 		commandService.executeCommand(NEW_FOLDER_COMMAND_ID);
+	}
+});
+
+registerAction2(class extends Action2 {
+	constructor() {
+		super({
+			id: 'workbench.files.action.addFolderToExplorer',
+			title: nls.localize2('addFolderToExplorer', "Add Folder to Explorer..."),
+			f1: true,
+			icon: Codicon.folderLibrary,
+			menu: [
+				{
+					id: MenuId.ViewTitle,
+					group: '1_open',
+					when: ContextKeyExpr.equals('view', VIEW_ID),
+					order: 10
+				},
+				{
+					id: MenuId.ViewContainerTitle,
+					group: '1_open',
+					when: ContextKeyExpr.equals('viewContainer', VIEW_CONTAINER.id),
+					order: 10
+				}
+			],
+			metadata: {
+				description: nls.localize2('addFolderToExplorerMetadata', "Adds an existing folder from your computer to the Explorer.")
+			}
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const commandService = accessor.get(ICommandService);
+		await commandService.executeCommand(ADD_ROOT_FOLDER_COMMAND_ID);
 	}
 });
 

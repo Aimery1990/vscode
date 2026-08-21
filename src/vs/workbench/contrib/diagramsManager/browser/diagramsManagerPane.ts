@@ -59,6 +59,10 @@ export class DiagramsManagerPane extends ViewPane {
 			this.renderContent();
 		}));
 
+		this._register(this.editorService.onDidActiveEditorChange(() => {
+			this.renderContent();
+		}));
+
 		this._register(this.onDidChangeBodyVisibility(visible => {
 			if (visible) {
 				this.diagramsManagerService.notifyPaneExpanded(this.id);
@@ -194,8 +198,15 @@ export class DiagramsManagerPane extends ViewPane {
 			return;
 		}
 
+		const activeEditor = this.editorService.activeEditor;
+		const activeUriStr = (activeEditor instanceof DiagramEditorInput) ? activeEditor.resource.toString() : undefined;
+
 		for (const diagram of filtered) {
 			const itemEl = append(container, $('.diagram-card-item'));
+			if (activeUriStr && diagram.uri.toString() === activeUriStr) {
+				itemEl.classList.add('active');
+			}
+
 			itemEl.onclick = async () => {
 				const editorInput = this.instantiationService.createInstance(DiagramEditorInput, diagram.uri, diagram.name);
 				await this.editorService.openEditor(editorInput);

@@ -79,17 +79,26 @@
 	display: flex;
 	align-items: center;
 	gap: 10px;
-	padding: 8px 10px;
-	border-radius: 6px;
+	padding: 6px 10px;
+	border-radius: 4px;
 	cursor: pointer;
 	user-select: none;
 	border: 1px solid transparent;
-	transition: all 0.15s ease;
+	box-sizing: border-box;
 }
 
 .diagram-card-item:hover {
 	background-color: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.06));
-	border-color: var(--vscode-list-focusOutline, rgba(255, 255, 255, 0.1));
+}
+
+.diagram-card-item.active {
+	background-color: var(--vscode-list-activeSelectionBackground, rgba(0, 122, 204, 0.25));
+	border-color: var(--vscode-list-focusOutline, #007acc);
+}
+
+.diagram-card-item.active .diagram-card-title {
+	color: var(--vscode-list-activeSelectionForeground, #ffffff);
+	font-weight: 600;
 }
 
 .diagram-card-icon {
@@ -98,6 +107,7 @@
 	display: flex;
 	align-items: center;
 	justify-content: center;
+	flex-shrink: 0;
 }
 
 .diagram-card-info {
@@ -141,13 +151,18 @@
 }
 
 .diagram-card-actions {
-	display: none;
+	display: flex;
 	align-items: center;
 	gap: 4px;
+	opacity: 0;
+	pointer-events: none;
+	flex-shrink: 0;
 }
 
-.diagram-card-item:hover .diagram-card-actions {
-	display: flex;
+.diagram-card-item:hover .diagram-card-actions,
+.diagram-card-item:focus-within .diagram-card-actions {
+	opacity: 1;
+	pointer-events: auto;
 }
 
 .action-btn {
@@ -156,7 +171,6 @@
 	cursor: pointer;
 	color: var(--vscode-foreground, #cccccc);
 	opacity: 0.7;
-	transition: opacity 0.1s ease, background-color 0.1s ease;
 }
 
 .action-btn:hover {
