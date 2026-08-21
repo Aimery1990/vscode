@@ -9,7 +9,7 @@ import { IInstantiationService } from '../../../../../platform/instantiation/com
 import { IThemeService } from '../../../../../platform/theme/common/themeService.js';
 import { IKeybindingService } from '../../../../../platform/keybinding/common/keybinding.js';
 import { IContextMenuService } from '../../../../../platform/contextview/browser/contextView.js';
-import { isTemporaryWorkspace, IWorkspaceContextService, WorkbenchState } from '../../../../../platform/workspace/common/workspace.js';
+import { isTemporaryWorkspace, IWorkspaceContextService } from '../../../../../platform/workspace/common/workspace.js';
 import { IConfigurationService } from '../../../../../platform/configuration/common/configuration.js';
 import { ViewPane } from '../../../../browser/parts/views/viewPane.js';
 import { ResourcesDropHandler } from '../../../../browser/dnd.js';
@@ -26,7 +26,7 @@ import { IHoverService } from '../../../../../platform/hover/browser/hover.js';
 export class EmptyView extends ViewPane {
 
 	static readonly ID: string = 'workbench.explorer.emptyView';
-	static readonly NAME: ILocalizedString = nls.localize2('noWorkspace', "No Folder Opened");
+	static readonly NAME: ILocalizedString = nls.localize2('allFolders', "All Folders");
 	private _disposed: boolean = false;
 
 	constructor(
@@ -87,11 +87,7 @@ export class EmptyView extends ViewPane {
 			return;
 		}
 
-		if (this.contextService.getWorkbenchState() === WorkbenchState.WORKSPACE) {
-			this.updateTitle(EmptyView.NAME.value);
-		} else {
-			this.updateTitle(this.title);
-		}
+		this.updateTitle(EmptyView.NAME.value);
 	}
 
 	override dispose(): void {

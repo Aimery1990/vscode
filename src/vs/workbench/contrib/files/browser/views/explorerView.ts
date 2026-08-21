@@ -189,7 +189,7 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 	private readonly delegate: IExplorerViewContainerDelegate | undefined;
 
 	override get singleViewPaneContainerTitle(): string {
-		return this.name;
+		return nls.localize('allFolders', "All Folders");
 	}
 
 	constructor(
@@ -250,7 +250,7 @@ export class ExplorerView extends ViewPane implements IExplorerView {
 	}
 
 	get name(): string {
-		return this.labelService.getWorkspaceLabel(this.contextService.getWorkspace());
+		return nls.localize('allFolders', "All Folders");
 	}
 
 	override get title(): string {
@@ -1097,12 +1097,6 @@ registerAction2(class extends Action2 {
 			f1: true,
 			icon: Codicon.folderLibrary,
 			menu: [
-				{
-					id: MenuId.ViewTitle,
-					group: '1_open',
-					when: ContextKeyExpr.equals('view', VIEW_ID),
-					order: 10
-				},
 				{
 					id: MenuId.ViewContainerTitle,
 					group: '1_open',
