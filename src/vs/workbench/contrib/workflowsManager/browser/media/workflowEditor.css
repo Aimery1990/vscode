@@ -1037,6 +1037,37 @@
 	border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+.workflow-format-row.grid-2x2 {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 6px;
+	background: transparent;
+	border: none;
+	padding: 0;
+}
+
+.workflow-format-row.grid-2x2 .workflow-format-btn {
+	height: 30px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 6px;
+	padding: 0 8px;
+	font-size: 11px;
+}
+
+.workflow-format-row.grid-2x2 .workflow-format-btn:hover {
+	background: rgba(255, 255, 255, 0.09);
+	border-color: rgba(255, 255, 255, 0.16);
+	color: #ffffff;
+}
+
+.workflow-format-row.grid-2x2 .workflow-format-btn.active {
+	background: rgba(13, 148, 136, 0.25);
+	border-color: #0d9488;
+	color: #22d3ee;
+	font-weight: 600;
+}
+
 .workflow-format-btn {
 	flex: 1;
 	height: 26px;

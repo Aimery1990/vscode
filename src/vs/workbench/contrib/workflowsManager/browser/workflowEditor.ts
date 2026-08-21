@@ -167,11 +167,18 @@ export class WorkflowEditor extends EditorPane {
 
 	private _draggedNodesStartPos: Map<string, { x: number; y: number }> = new Map();
 	private static _sharedCopiedNodes: IFlowchartNode[] = [];
+	private static _sharedCopiedLinks: IFlowchartLink[] = [];
 	private get _copiedNodes(): IFlowchartNode[] {
 		return WorkflowEditor._sharedCopiedNodes;
 	}
 	private set _copiedNodes(nodes: IFlowchartNode[]) {
 		WorkflowEditor._sharedCopiedNodes = nodes;
+	}
+	private get _copiedLinks(): IFlowchartLink[] {
+		return WorkflowEditor._sharedCopiedLinks;
+	}
+	private set _copiedLinks(links: IFlowchartLink[]) {
+		WorkflowEditor._sharedCopiedLinks = links;
 	}
 	private _collapseSelectionTargetNodeId: string | null = null;
 	private _isPureDiagram: boolean = false;
@@ -893,7 +900,7 @@ export class WorkflowEditor extends EditorPane {
 			// Section 3: Arrow Style
 			const arrowSec = append(parent, $('.workflow-toolbar-section'));
 			append(arrowSec, $('.workflow-toolbar-title')).textContent = 'Arrow Style';
-			const arrowRow = append(arrowSec, $('.workflow-format-row'));
+			const arrowRow = append(arrowSec, $('.workflow-format-row.grid-2x2'));
 			const arrowStyles: { style: IFlowchartLink['style']; label: string }[] = [
 				{ style: 'arrow-single', label: 'Single (→)' },
 				{ style: 'arrow-double', label: 'Double (↔)' },
@@ -3964,13 +3971,26 @@ export class WorkflowEditor extends EditorPane {
 	private _copySelectedNodes(): void {
 		if (this._selectedNodeIds.size === 0) return;
 		this._copiedNodes = [];
+		this._copiedLinks = [];
+
+		const selectedSet = new Set<string>();
 		for (const nid of this._selectedNodeIds) {
 			const node = this._data.nodes.find(n => n.id === nid);
 			if (node) {
+				selectedSet.add(node.id);
 				this._copiedNodes.push(JSON.parse(JSON.stringify(node)));
 			}
 		}
-		this._notificationService.info(`Copied ${this._copiedNodes.length} node(s)`);
+
+		// Also copy any connecting links whose 'from' and 'to' are both in the selected nodes set
+		for (const link of this._data.links) {
+			if (selectedSet.has(link.from) && selectedSet.has(link.to)) {
+				this._copiedLinks.push(JSON.parse(JSON.stringify(link)));
+			}
+		}
+
+		const linkMsg = this._copiedLinks.length > 0 ? ` and ${this._copiedLinks.length} connection(s)` : '';
+		this._notificationService.info(`Copied ${this._copiedNodes.length} node(s)${linkMsg}`);
 	}
 
 	private _groupSelectedNodes(): void {
@@ -4042,6 +4062,14 @@ export class WorkflowEditor extends EditorPane {
 	private _pasteNodes(): void {
 		if (this._copiedNodes.length === 0) return;
 
+		// Record undo snapshot before paste
+		const beforeState = JSON.stringify(this._data);
+		this._undoStack.push(beforeState);
+		if (this._undoStack.length > 60) {
+			this._undoStack.shift();
+		}
+		this._redoStack = [];
+
 		const oldToNewGroupMap = new Map<string, string>();
 		for (const copiedNode of this._copiedNodes) {
 			if (copiedNode.groupId && !oldToNewGroupMap.has(copiedNode.groupId)) {
@@ -4049,9 +4077,13 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
+		const oldToNewNodeIdMap = new Map<string, string>();
 		const newPastedIds = new Set<string>();
+
 		for (const copiedNode of this._copiedNodes) {
 			const newId = `node_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+			oldToNewNodeIdMap.set(copiedNode.id, newId);
+
 			const pastedNode: IFlowchartNode = {
 				...copiedNode,
 				id: newId,
@@ -4064,6 +4096,22 @@ export class WorkflowEditor extends EditorPane {
 			newPastedIds.add(newId);
 		}
 
+		// Recreate internal connecting links between pasted nodes
+		for (const copiedLink of this._copiedLinks) {
+			const newFrom = oldToNewNodeIdMap.get(copiedLink.from);
+			const newTo = oldToNewNodeIdMap.get(copiedLink.to);
+			if (newFrom && newTo) {
+				const newLinkId = `link_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
+				const pastedLink: IFlowchartLink = {
+					...copiedLink,
+					id: newLinkId,
+					from: newFrom,
+					to: newTo
+				};
+				this._data.links.push(pastedLink);
+			}
+		}
+
 		this._selectedNodeIds.clear();
 		this._selectedLinkIds.clear();
 		for (const nid of newPastedIds) {
@@ -4073,7 +4121,8 @@ export class WorkflowEditor extends EditorPane {
 		this._saveFlowchartData();
 		this._renderNodes();
 		this._drawLinks();
-		this._notificationService.info(`Pasted ${newPastedIds.size} node(s)`);
+		const linkMsg = this._copiedLinks.length > 0 ? ` and ${this._copiedLinks.length} connection(s)` : '';
+		this._notificationService.info(`Pasted ${newPastedIds.size} node(s)${linkMsg}`);
 	}
 
 	private async _importIntoNode(nodeId: string): Promise<void> {
