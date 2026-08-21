@@ -112,6 +112,14 @@
 	position: relative;
 }
 
+.workflow-toolbar-item .item-preview.dashed-preview {
+	border: none;
+	border-top: 2px dashed var(--vscode-foreground, #cccccc);
+	height: 2px;
+	margin-top: 8px;
+	position: relative;
+}
+
 .workflow-toolbar-item .item-preview.orthogonal-preview {
 	border: none;
 	height: 18px;

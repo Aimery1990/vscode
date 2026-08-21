@@ -175,11 +175,6 @@ export class DiagramsManagerPane extends ViewPane {
 			nameEl.textContent = diagram.name;
 			nameEl.title = diagram.name;
 
-			if (diagram.belongsToWorkspaceName) {
-				const badge = append(titleRow, $('.diagram-card-badge'));
-				badge.textContent = diagram.belongsToWorkspaceName;
-			}
-
 			if (diagram.description) {
 				const descEl = append(infoEl, $('.diagram-card-desc'));
 				descEl.textContent = diagram.description;

@@ -152,12 +152,12 @@ export class DiagramsManagerService extends Disposable implements IDiagramsManag
 			},
 			nodes: [
 				{
-					id: 'node_start',
-					type: 'start',
-					label: `${options.name.trim()} (Start)`,
+					id: 'node_1',
+					type: 'round-rect',
+					label: options.name.trim(),
 					x: 240,
 					y: 160,
-					width: 160,
+					width: 140,
 					height: 48
 				}
 			],

@@ -48,6 +48,7 @@ export function createDiagramDialog(
 	modal.style.display = 'flex';
 	modal.style.flexDirection = 'column';
 	modal.style.overflow = 'hidden';
+	modal.style.fontFamily = 'var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif)';
 	modal.style.animation = 'workflowModalFadeIn 0.15s ease-out';
 
 	// Header
@@ -57,6 +58,7 @@ export function createDiagramDialog(
 	header.style.display = 'flex';
 	header.style.alignItems = 'center';
 	header.style.justifyContent = 'space-between';
+	header.style.fontFamily = 'inherit';
 
 	const titleRow = append(header, $('.title-row'));
 	titleRow.style.display = 'flex';
@@ -72,6 +74,7 @@ export function createDiagramDialog(
 	titleText.style.fontWeight = '600';
 	titleText.style.fontSize = '14px';
 	titleText.style.color = 'var(--vscode-foreground, #fff)';
+	titleText.style.fontFamily = 'inherit';
 
 	const closeBtn = append(header, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
 	closeBtn.style.cursor = 'pointer';
@@ -104,6 +107,8 @@ export function createDiagramDialog(
 	nameInput.style.border = '1px solid var(--vscode-input-border, #3c3c3c)';
 	nameInput.style.backgroundColor = 'var(--vscode-input-background, #252526)';
 	nameInput.style.color = 'var(--vscode-input-foreground, #fff)';
+	nameInput.style.fontFamily = 'inherit';
+	nameInput.style.fontSize = '12px';
 	nameInput.style.outline = 'none';
 	nameInput.style.boxSizing = 'border-box';
 
@@ -126,6 +131,8 @@ export function createDiagramDialog(
 	descInput.style.border = '1px solid var(--vscode-input-border, #3c3c3c)';
 	descInput.style.backgroundColor = 'var(--vscode-input-background, #252526)';
 	descInput.style.color = 'var(--vscode-input-foreground, #fff)';
+	descInput.style.fontFamily = 'inherit';
+	descInput.style.fontSize = '12px';
 	descInput.style.outline = 'none';
 	descInput.style.resize = 'vertical';
 	descInput.style.boxSizing = 'border-box';
@@ -150,6 +157,8 @@ export function createDiagramDialog(
 		select.style.border = '1px solid var(--vscode-input-border, #3c3c3c)';
 		select.style.backgroundColor = 'var(--vscode-input-background, #252526)';
 		select.style.color = 'var(--vscode-input-foreground, #fff)';
+		select.style.fontFamily = 'inherit';
+		select.style.fontSize = '12px';
 		select.style.boxSizing = 'border-box';
 
 		for (const f of folders) {
@@ -177,6 +186,8 @@ export function createDiagramDialog(
 	cancelBtn.style.border = '1px solid var(--vscode-button-secondaryBorder, #444)';
 	cancelBtn.style.backgroundColor = 'var(--vscode-button-secondaryBackground, #3a3d41)';
 	cancelBtn.style.color = 'var(--vscode-button-secondaryForeground, #fff)';
+	cancelBtn.style.fontFamily = 'inherit';
+	cancelBtn.style.fontSize = '12px';
 	cancelBtn.style.cursor = 'pointer';
 	cancelBtn.onclick = () => overlay.remove();
 
@@ -187,6 +198,8 @@ export function createDiagramDialog(
 	createBtn.style.border = 'none';
 	createBtn.style.backgroundColor = 'var(--vscode-button-background, #007acc)';
 	createBtn.style.color = 'var(--vscode-button-foreground, #fff)';
+	createBtn.style.fontFamily = 'inherit';
+	createBtn.style.fontSize = '12px';
 	createBtn.style.fontWeight = '600';
 	createBtn.style.cursor = 'pointer';
 

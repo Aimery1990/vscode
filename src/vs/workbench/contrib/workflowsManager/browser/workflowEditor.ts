@@ -55,7 +55,7 @@ interface IFlowchartLink {
 	fromPort?: 'top' | 'right' | 'bottom' | 'left';
 	to: string;
 	toPort?: 'top' | 'right' | 'bottom' | 'left';
-	style: 'arrow-single' | 'arrow-double' | 'arrow-none';
+	style: 'arrow-single' | 'arrow-double' | 'arrow-none' | 'dashed';
 	routing?: 'orthogonal' | 'curved';
 	color?: string;
 	label?: string;
@@ -124,7 +124,7 @@ export class WorkflowEditor extends EditorPane {
 	// UI State
 	private readonly _selectedNodeIds: Set<string> = new Set();
 	private readonly _selectedLinkIds: Set<string> = new Set();
-	private _activeLinkStyle: 'arrow-single' | 'arrow-double' | 'arrow-none' = 'arrow-single';
+	private _activeLinkStyle: 'arrow-single' | 'arrow-double' | 'arrow-none' | 'dashed' = 'arrow-single';
 	private _activeRoutingMode: 'orthogonal' | 'curved' = 'orthogonal';
 
 	// Selection Box State
@@ -275,7 +275,7 @@ export class WorkflowEditor extends EditorPane {
 					fromPort: l.fromPort,
 					to: String(l.to || l.toNodeId || l.target || ''),
 					toPort: l.toPort,
-					style: (l.style === 'arrow-double' || l.style === 'arrow-none') ? l.style : 'arrow-single',
+					style: (l.style === 'arrow-double' || l.style === 'arrow-none' || l.style === 'dashed') ? l.style : 'arrow-single',
 					routing: l.routing,
 					color: l.color,
 					label: l.label,
@@ -730,16 +730,17 @@ export class WorkflowEditor extends EditorPane {
 		append(linkSec, $('.workflow-toolbar-title')).textContent = localize('linkStyle', 'Connection Styles');
 
 		const linksGrid = append(linkSec, $('.workflow-shape-grid'));
-		const linkStyles: { style: IFlowchartLink['style']; label: string }[] = [
-			{ style: 'arrow-single', label: 'Single Arrow' },
-			{ style: 'arrow-double', label: 'Double Arrow' },
-			{ style: 'arrow-none', label: 'No Arrow' }
+		const linkStyles: { style: IFlowchartLink['style']; label: string; previewClass: string }[] = [
+			{ style: 'arrow-single', label: 'Single Arrow', previewClass: 'line-preview' },
+			{ style: 'arrow-double', label: 'Double Arrow', previewClass: 'line-preview' },
+			{ style: 'arrow-none', label: 'No Arrow', previewClass: 'line-preview' },
+			{ style: 'dashed', label: 'Dashed Line', previewClass: 'dashed-preview' }
 		];
 
 		const linkItemBtns: HTMLElement[] = [];
 		for (const ls of linkStyles) {
 			const item = append(linksGrid, $(`.workflow-toolbar-item${ls.style === this._activeLinkStyle ? '.active' : ''}`));
-			const line = append(item, $('.item-preview.line-preview'));
+			const line = append(item, $(`.item-preview.${ls.previewClass}`));
 			if (ls.style === 'arrow-single' || ls.style === 'arrow-double') {
 				line.style.borderRight = '3px solid var(--vscode-foreground, #cccccc)'; // dummy preview representation
 			}
@@ -896,7 +897,8 @@ export class WorkflowEditor extends EditorPane {
 			const arrowStyles: { style: IFlowchartLink['style']; label: string }[] = [
 				{ style: 'arrow-single', label: 'Single (→)' },
 				{ style: 'arrow-double', label: 'Double (↔)' },
-				{ style: 'arrow-none', label: 'None (—)' }
+				{ style: 'arrow-none', label: 'None (—)' },
+				{ style: 'dashed', label: 'Dashed (╌)' }
 			];
 			let curArrowStyle: IFlowchartLink['style'] = 'arrow-single';
 			if (selLinkCount === 1) {
@@ -2947,7 +2949,10 @@ export class WorkflowEditor extends EditorPane {
 			const hexClean = linkHex.replace('#', '');
 			const markerColorId = isSelected ? 'arrow-selected' : (validMarkerColors.has(hexClean) ? `arrow-${hexClean}` : 'arrow');
 
-			if (link.style === 'arrow-single') {
+			if (link.style === 'dashed') {
+				path.style.strokeDasharray = '6, 4';
+				path.setAttribute('marker-end', `url(#${markerColorId})`);
+			} else if (link.style === 'arrow-single') {
 				path.setAttribute('marker-end', `url(#${markerColorId})`);
 			} else if (link.style === 'arrow-double') {
 				path.setAttribute('marker-start', `url(#${markerColorId})`);
@@ -3512,37 +3517,27 @@ export class WorkflowEditor extends EditorPane {
 			append(menu, $('.context-menu-separator'));
 
 			// View / Open Imported Modules Submenu (lists every imported module without deduplication/collapsing)
-			const targetNode = this._data.nodes.find(n => n.id === targetId);
-			const nodeImports = targetNode?.imports || [];
+			if (!this._isPureDiagram && nodeObj && nodeObj.imports && nodeObj.imports.length > 0) {
+				const openModulesItem = append(menu, $('.context-menu-item.submenu-trigger'));
+				openModulesItem.textContent = `Open Module (${nodeObj.imports.length}) ›`;
+				openModulesItem.style.position = 'relative';
 
-			const openModulesItem = append(menu, $('.context-menu-item.submenu-trigger'));
-			const countLabel = nodeImports.length > 0 ? ` (${nodeImports.length})` : '';
-			openModulesItem.textContent = `View / Open Modules${countLabel} ›`;
-			openModulesItem.style.position = 'relative';
+				const modulesSubmenu = append(openModulesItem, $('.workflow-context-submenu'));
+				modulesSubmenu.style.position = 'absolute';
+				modulesSubmenu.style.left = '100%';
+				modulesSubmenu.style.top = '-4px';
+				modulesSubmenu.style.display = 'none';
 
-			const modulesSubmenu = append(openModulesItem, $('.workflow-context-submenu'));
-			modulesSubmenu.style.position = 'absolute';
-			modulesSubmenu.style.left = '100%';
-			modulesSubmenu.style.top = '-4px';
-			modulesSubmenu.style.display = 'none';
-
-			// Prevent overflowing right viewport boundary
-			if (x + 360 > window.innerWidth) {
-				modulesSubmenu.style.left = 'auto';
-				modulesSubmenu.style.right = '100%';
-			}
-
-			if (nodeImports.length === 0) {
-				const emptyItem = append(modulesSubmenu, $('.context-menu-item.disabled'));
-				emptyItem.textContent = 'No imported modules';
-			} else {
-				for (const imp of nodeImports) {
+				for (const imp of nodeObj.imports) {
 					const item = append(modulesSubmenu, $('.context-menu-item.module-item'));
+					item.style.display = 'flex';
+					item.style.alignItems = 'center';
+					item.style.gap = '8px';
 
-					// Dynamic Icon & Color mapping
 					let codicon = Codicon.package;
-					let color = '#fbbf24';
+					let color = '';
 					const lower = (imp.type || '').toLowerCase();
+
 					if (lower === 'agent') {
 						codicon = Codicon.robot;
 						color = '#38bdf8';
@@ -3590,51 +3585,107 @@ export class WorkflowEditor extends EditorPane {
 						this._openModuleInEditor(imp);
 					};
 				}
+
+				openModulesItem.onmouseenter = () => {
+					modulesSubmenu.style.display = 'flex';
+				};
+				openModulesItem.onmouseleave = () => {
+					modulesSubmenu.style.display = 'none';
+				};
+			}
+		} else if (targetType === 'canvas') {
+			// Add Node submenu for quick creation
+			const addNodeItem = append(menu, $('.context-menu-item.submenu-trigger'));
+			addNodeItem.textContent = 'Add Node ›';
+			addNodeItem.style.position = 'relative';
+
+			const addNodeSubmenu = append(addNodeItem, $('.workflow-context-submenu'));
+			addNodeSubmenu.style.position = 'absolute';
+			addNodeSubmenu.style.left = '100%';
+			addNodeSubmenu.style.top = '-4px';
+			addNodeSubmenu.style.display = 'none';
+
+			addNodeItem.onmouseenter = () => { addNodeSubmenu.style.display = 'flex'; };
+			addNodeItem.onmouseleave = () => { addNodeSubmenu.style.display = 'none'; };
+
+			const nodeTypes: { type: IFlowchartNode['type']; label: string; w: number; h: number }[] = [
+				{ type: 'round-rect', label: 'Round Rect', w: 140, h: 48 },
+				{ type: 'rect', label: 'Rectangle', w: 140, h: 48 },
+				{ type: 'diamond', label: 'Decision (Diamond)', w: 100, h: 100 },
+				{ type: 'circle', label: 'Circle Node', w: 70, h: 70 }
+			];
+
+			for (const nt of nodeTypes) {
+				const ntItem = append(addNodeSubmenu, $('.context-menu-item'));
+				ntItem.textContent = nt.label;
+				ntItem.onclick = (e) => {
+					e.stopPropagation();
+					this._closeContextMenu();
+
+					const rect = this._canvas!.getBoundingClientRect();
+					const rawX = (x - rect.left) / this._zoomLevel;
+					const rawY = (y - rect.top) / this._zoomLevel;
+					const grid = 5;
+					const nodeX = Math.round(rawX / grid) * grid;
+					const nodeY = Math.round(rawY / grid) * grid;
+
+					const id = `node_${Date.now()}`;
+					const newNode: IFlowchartNode = {
+						id,
+						type: nt.type,
+						x: Math.max(10, nodeX - Math.floor(nt.w / 2)),
+						y: Math.max(10, nodeY - Math.floor(nt.h / 2)),
+						width: nt.w,
+						height: nt.h,
+						label: nt.label.split(' ')[0]
+					};
+					this._data.nodes.push(newNode);
+					this._selectedNodeIds.clear();
+					this._selectedNodeIds.add(id);
+					this._saveFlowchartData();
+					this._renderNodes();
+					this._drawLinks();
+				};
 			}
 
-			openModulesItem.onmouseenter = () => {
-				modulesSubmenu.style.display = 'flex';
-			};
-			openModulesItem.onmouseleave = () => {
-				modulesSubmenu.style.display = 'none';
-			};
-		} else if (targetType === 'canvas') {
-			const createModuleItem = append(menu, $('.context-menu-item'));
-			createModuleItem.textContent = 'Create New Module...';
-			createModuleItem.onclick = () => {
-				this._closeContextMenu();
-				this._viewsService.openView<any>('workbench.workspacesExplorer.mainPane', true).then(workspacesView => {
-					if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
-						workspacesView.showCreateResourceModal(this._workflowUri, (this.input as any)?.name || '', (type: string, name: string) => {
-							const rect = this._canvas!.getBoundingClientRect();
-							const rawX = (x - rect.left) / this._zoomLevel;
-							const rawY = (y - rect.top) / this._zoomLevel;
-							const grid = 5;
-							const nodeX = Math.round(rawX / grid) * grid;
-							const nodeY = Math.round(rawY / grid) * grid;
+			if (!this._isPureDiagram) {
+				const createModuleItem = append(menu, $('.context-menu-item'));
+				createModuleItem.textContent = 'Create New Module...';
+				createModuleItem.onclick = () => {
+					this._closeContextMenu();
+					this._viewsService.openView<any>('workbench.workspacesExplorer.mainPane', true).then(workspacesView => {
+						if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
+							workspacesView.showCreateResourceModal(this._workflowUri, (this.input as any)?.name || '', (type: string, name: string) => {
+								const rect = this._canvas!.getBoundingClientRect();
+								const rawX = (x - rect.left) / this._zoomLevel;
+								const rawY = (y - rect.top) / this._zoomLevel;
+								const grid = 5;
+								const nodeX = Math.round(rawX / grid) * grid;
+								const nodeY = Math.round(rawY / grid) * grid;
 
-							const id = `node_${Date.now()}`;
-							const newNode: IFlowchartNode = {
-								id,
-								type: 'round-rect',
-								x: Math.max(10, nodeX - 50),
-								y: Math.max(10, nodeY - 25),
-								width: 100,
-								height: 50,
-								label: name,
-								imports: [{ type: type as any, name }]
-							};
-							this._data.nodes.push(newNode);
-							this._selectedNodeIds.clear();
-							this._selectedNodeIds.add(id);
-							this._saveFlowchartData();
-							this._renderNodes();
-							this._drawLinks();
-							this._notificationService.info(`Created new node for ${type} '${name}'`);
-						});
-					}
-				});
-			};
+								const id = `node_${Date.now()}`;
+								const newNode: IFlowchartNode = {
+									id,
+									type: 'round-rect',
+									x: Math.max(10, nodeX - 50),
+									y: Math.max(10, nodeY - 25),
+									width: 100,
+									height: 50,
+									label: name,
+									imports: [{ type: type as any, name }]
+								};
+								this._data.nodes.push(newNode);
+								this._selectedNodeIds.clear();
+								this._selectedNodeIds.add(id);
+								this._saveFlowchartData();
+								this._renderNodes();
+								this._drawLinks();
+								this._notificationService.info(`Created new node for ${type} '${name}'`);
+							});
+						}
+					});
+				};
+			}
 		} else {
 			// Ensure targetLink is in the selection if we right click it
 			if (!this._selectedLinkIds.has(targetId)) {
@@ -3740,7 +3791,8 @@ export class WorkflowEditor extends EditorPane {
 			const arrowStyles: { style: IFlowchartLink['style']; label: string }[] = [
 				{ style: 'arrow-single', label: 'Single Arrow (→)' },
 				{ style: 'arrow-double', label: 'Double Arrow (↔)' },
-				{ style: 'arrow-none', label: 'No Arrow (—)' }
+				{ style: 'arrow-none', label: 'No Arrow (—)' },
+				{ style: 'dashed', label: 'Dashed Line (╌)' }
 			];
 			const currentArrowStyle = linkObj?.style || 'arrow-single';
 
