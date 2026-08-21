@@ -27,6 +27,7 @@ export interface ICreateDiagramOptions {
 	name: string;
 	description?: string;
 	targetWorkspaceUri?: URI;
+	targetFolderUri?: URI;
 }
 
 export interface IDiagramsManagerService {

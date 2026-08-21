@@ -65,10 +65,21 @@ export class ExplorerModel implements IDisposable {
 
 	/**
 	 * Returns a FileStat that matches the passed resource.
-	 * In case multiple FileStat are matching the resource (same folder opened multiple times) returns the FileStat that has the closest root.
+	 * In case multiple FileStat are matching the resource (same folder opened multiple times or overlapping roots) returns the FileStat that has the closest/most specific root.
 	 * Will return undefined in case the FileStat does not exist.
 	 */
 	findClosest(resource: URI): ExplorerItem | null {
+		const parentRoots = this.roots
+			.filter(r => this.uriIdentityService.extUri.isEqualOrParent(resource, r.resource))
+			.sort((a, b) => b.resource.path.length - a.resource.path.length);
+
+		if (parentRoots.length > 0) {
+			const found = parentRoots[0].find(resource);
+			if (found) {
+				return found;
+			}
+		}
+
 		const folder = this.contextService.getWorkspaceFolder(resource);
 		if (folder) {
 			const root = this.roots.find(r => this.uriIdentityService.extUri.isEqual(r.resource, folder.uri));

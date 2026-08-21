@@ -25,6 +25,8 @@ import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../
 import { createDiagramDialog } from './diagramEditorDialog.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
+import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { IPathService } from '../../../services/path/common/pathService.js';
 
 // 1. Register Service
 registerSingleton(IDiagramsManagerService, DiagramsManagerService, InstantiationType.Delayed);
@@ -88,18 +90,18 @@ registerAction2(class NewDiagramAction extends Action2 {
 
 	async run(accessor: ServicesAccessor): Promise<void> {
 		const workspaceContextService = accessor.get(IWorkspaceContextService);
+		const fileDialogService = accessor.get(IFileDialogService);
+		const pathService = accessor.get(IPathService);
 		const diagramsManagerService = accessor.get(IDiagramsManagerService);
 		const editorService = accessor.get(IEditorService);
 		const notificationService = accessor.get(INotificationService);
 
-		createDiagramDialog(workspaceContextService, async (result) => {
+		await createDiagramDialog(workspaceContextService, fileDialogService, pathService, async (result) => {
 			try {
 				const uri = await diagramsManagerService.createDiagram(result);
-				const editorInput = accessor.get(IWorkspaceContextService) ? new DiagramEditorInput(uri, result.name) : undefined;
-				if (editorInput) {
-					await editorService.openEditor(editorInput);
-					notificationService.info(`Created diagram '${result.name}'`);
-				}
+				const editorInput = new DiagramEditorInput(uri, result.name);
+				await editorService.openEditor(editorInput);
+				notificationService.info(`Created diagram '${result.name}'`);
 			} catch (err) {
 				notificationService.error(`Failed to create diagram: ${err}`);
 			}

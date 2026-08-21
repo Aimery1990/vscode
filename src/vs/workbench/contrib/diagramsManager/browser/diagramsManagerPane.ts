@@ -24,7 +24,8 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { IDiagramsManagerService, IDiagramItem } from '../common/diagramsManager.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
-import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { IPathService } from '../../../services/path/common/pathService.js';
 import { DiagramEditorInput } from './diagramEditorInput.js';
 import { createDiagramDialog } from './diagramEditorDialog.js';
 
@@ -48,7 +49,9 @@ export class DiagramsManagerPane extends ViewPane {
 		@IDiagramsManagerService private readonly diagramsManagerService: IDiagramsManagerService,
 		@IEditorService private readonly editorService: IEditorService,
 		@ICommandService private readonly commandService: ICommandService,
-		@IDialogService private readonly dialogService: IDialogService
+		@IDialogService private readonly dialogService: IDialogService,
+		@IFileDialogService private readonly fileDialogService: IFileDialogService,
+		@IPathService private readonly pathService: IPathService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -100,11 +103,17 @@ export class DiagramsManagerPane extends ViewPane {
 			this.renderList(listContainer, allDiagrams);
 		};
 
-		const newBtn = append(toolbar, $('button.diagrams-new-btn'));
+		const btnRow = append(toolbar, $('.diagrams-toolbar-buttons'));
+		btnRow.style.display = 'flex';
+		btnRow.style.gap = '6px';
+		btnRow.style.width = '100%';
+
+		const newBtn = append(btnRow, $('button.diagrams-new-btn'));
+		newBtn.style.flex = '1';
 		append(newBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
 		append(newBtn, $('span')).textContent = 'New Diagram';
 		newBtn.onclick = () => {
-			createDiagramDialog(this.workspaceContextService, async (result) => {
+			createDiagramDialog(this.workspaceContextService, this.fileDialogService, this.pathService, async (result) => {
 				try {
 					const uri = await this.diagramsManagerService.createDiagram(result);
 					const editorInput = this.instantiationService.createInstance(DiagramEditorInput, uri, result.name);
@@ -114,6 +123,32 @@ export class DiagramsManagerPane extends ViewPane {
 					this.notificationService.error(`Failed to create diagram: ${err}`);
 				}
 			});
+		};
+
+		const openFileBtn = append(btnRow, $('button.diagrams-new-btn.secondary'));
+		openFileBtn.title = 'Open Existing Diagram File (.diagram.json)';
+		openFileBtn.style.width = '34px';
+		openFileBtn.style.padding = '0';
+		openFileBtn.style.display = 'flex';
+		openFileBtn.style.alignItems = 'center';
+		openFileBtn.style.justifyContent = 'center';
+		openFileBtn.style.background = 'rgba(255, 255, 255, 0.06)';
+		openFileBtn.style.border = '1px solid rgba(255, 255, 255, 0.12)';
+		append(openFileBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.folderOpened)));
+		openFileBtn.onclick = async () => {
+			const res = await this.fileDialogService.showOpenDialog({
+				canSelectFiles: true,
+				canSelectFolders: false,
+				canSelectMany: false,
+				filters: [{ name: 'Diagrams', extensions: ['json'] }],
+				title: 'Open Diagram File'
+			});
+			if (res && res.length > 0) {
+				const fileUri = res[0];
+				const name = fileUri.path.split('/').filter(Boolean).pop()?.replace(/\.diagram\.json$/, '').replace(/\.flowchart\.json$/, '').replace(/\.json$/, '') || 'Diagram';
+				const editorInput = this.instantiationService.createInstance(DiagramEditorInput, fileUri, name);
+				await this.editorService.openEditor(editorInput);
+			}
 		};
 
 		// 2. Diagrams List Container
@@ -149,7 +184,7 @@ export class DiagramsManagerPane extends ViewPane {
 				createFirstBtn.style.marginTop = '12px';
 				createFirstBtn.textContent = 'Create First Diagram';
 				createFirstBtn.onclick = () => {
-					createDiagramDialog(this.workspaceContextService, async (result) => {
+					createDiagramDialog(this.workspaceContextService, this.fileDialogService, this.pathService, async (result) => {
 						const uri = await this.diagramsManagerService.createDiagram(result);
 						const editorInput = this.instantiationService.createInstance(DiagramEditorInput, uri, result.name);
 						await this.editorService.openEditor(editorInput);

@@ -43,6 +43,7 @@ import { getContextMenuActions, createActionViewItem } from '../../../../platfor
 import { IMenuService, MenuId, registerAction2, Action2, MenuRegistry } from '../../../../platform/actions/common/actions.js';
 import { ActionViewItem } from '../../../../base/browser/ui/actionbar/actionViewItems.js';
 import { isDark } from '../../../../platform/theme/common/theme.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
 import { API_OPEN_DIFF_EDITOR_COMMAND_ID, API_OPEN_EDITOR_COMMAND_ID } from '../../../browser/parts/editor/editorCommands.js';
@@ -277,6 +278,7 @@ export class TimelinePane extends ViewPane {
 		@ILabelService private readonly labelService: ILabelService,
 		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
 		@IExtensionService private readonly extensionService: IExtensionService,
+		@IWorkspaceContextService private readonly contextService: IWorkspaceContextService,
 	) {
 		super({ ...options, titleMenuId: MenuId.TimelineTitle }, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -377,7 +379,13 @@ export class TimelinePane extends ViewPane {
 			return;
 		}
 
-		const uri = EditorResourceAccessor.getOriginalUri(this.editorService.activeEditor, { supportSideBySide: SideBySideEditor.PRIMARY });
+		let uri = EditorResourceAccessor.getOriginalUri(this.editorService.activeEditor, { supportSideBySide: SideBySideEditor.PRIMARY });
+		if (!uri) {
+			const folders = this.contextService.getWorkspace().folders;
+			if (folders.length > 0) {
+				uri = folders[0].uri;
+			}
+		}
 
 		if ((this.uriIdentityService.extUri.isEqual(uri, this.uri) && uri !== undefined) ||
 			// Fallback to match on fsPath if we are dealing with files or git schemes

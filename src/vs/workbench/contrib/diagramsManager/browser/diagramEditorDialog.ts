@@ -5,7 +5,10 @@
 
 import { $, append } from '../../../../base/browser/dom.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { IPathService } from '../../../services/path/common/pathService.js';
 import { URI } from '../../../../base/common/uri.js';
+import { joinPath } from '../../../../base/common/resources.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 
@@ -13,12 +16,15 @@ export interface IDiagramDialogResult {
 	name: string;
 	description?: string;
 	targetWorkspaceUri?: URI;
+	targetFolderUri?: URI;
 }
 
-export function createDiagramDialog(
+export async function createDiagramDialog(
 	workspaceContextService: IWorkspaceContextService,
+	fileDialogService: IFileDialogService,
+	pathService: IPathService,
 	onConfirm: (result: IDiagramDialogResult) => void
-): void {
+): Promise<void> {
 	// Remove any existing dialog
 	const existing = document.getElementById('create-diagram-dialog-overlay');
 	if (existing) {
@@ -40,7 +46,7 @@ export function createDiagramDialog(
 	overlay.style.backdropFilter = 'blur(4px)';
 
 	const modal = append(overlay, $('.create-diagram-modal'));
-	modal.style.width = '460px';
+	modal.style.width = '480px';
 	modal.style.backgroundColor = 'var(--vscode-sideBar-background, #1e1e1e)';
 	modal.style.border = '1px solid var(--vscode-widget-border, #333)';
 	modal.style.borderRadius = '8px';
@@ -88,7 +94,106 @@ export function createDiagramDialog(
 	body.style.flexDirection = 'column';
 	body.style.gap = '14px';
 
-	// Name Input
+	// 1. Storage Location / Workspace Selection
+	const folders = workspaceContextService.getWorkspace().folders;
+	const userHome = await pathService.userHome();
+	const defaultGlobalDir = joinPath(userHome, 'diagrams').fsPath;
+
+	let initialFolder = defaultGlobalDir;
+	if (folders.length > 0) {
+		initialFolder = joinPath(folders[0].uri, 'diagrams').fsPath;
+	}
+
+	const locGroup = append(body, $('.form-group'));
+	const locLabel = append(locGroup, $('label'));
+	locLabel.textContent = 'Storage Folder / Location';
+	locLabel.style.fontSize = '12px';
+	locLabel.style.fontWeight = '500';
+	locLabel.style.color = 'var(--vscode-descriptionForeground, #999)';
+	locLabel.style.marginBottom = '6px';
+	locLabel.style.display = 'block';
+
+	// Quick Scope Select
+	const selectScope = append(locGroup, $('select.vscode-select')) as HTMLSelectElement;
+	selectScope.style.width = '100%';
+	selectScope.style.padding = '6px 10px';
+	selectScope.style.borderRadius = '4px';
+	selectScope.style.border = '1px solid var(--vscode-input-border, #3c3c3c)';
+	selectScope.style.backgroundColor = 'var(--vscode-input-background, #252526)';
+	selectScope.style.color = 'var(--vscode-input-foreground, #fff)';
+	selectScope.style.fontFamily = 'inherit';
+	selectScope.style.fontSize = '12px';
+	selectScope.style.marginBottom = '6px';
+	selectScope.style.boxSizing = 'border-box';
+
+	for (const f of folders) {
+		const opt = append(selectScope, $('option')) as HTMLOptionElement;
+		opt.value = joinPath(f.uri, 'diagrams').fsPath;
+		opt.textContent = `Workspace: ${f.name} (${f.uri.fsPath}/diagrams)`;
+	}
+
+	const customOpt = append(selectScope, $('option')) as HTMLOptionElement;
+	customOpt.value = 'custom';
+	customOpt.textContent = 'Custom Directory...';
+
+	// Location input row with Browse button
+	const locRow = append(locGroup, $('.location-input-row'));
+	locRow.style.display = 'flex';
+	locRow.style.gap = '8px';
+	locRow.style.alignItems = 'center';
+
+	const locInput = append(locRow, $('input.vscode-input')) as HTMLInputElement;
+	locInput.type = 'text';
+	locInput.value = initialFolder;
+	locInput.style.flex = '1';
+	locInput.style.padding = '8px 10px';
+	locInput.style.borderRadius = '4px';
+	locInput.style.border = '1px solid var(--vscode-input-border, #3c3c3c)';
+	locInput.style.backgroundColor = 'var(--vscode-input-background, #252526)';
+	locInput.style.color = 'var(--vscode-input-foreground, #fff)';
+	locInput.style.fontFamily = 'inherit';
+	locInput.style.fontSize = '12px';
+	locInput.style.outline = 'none';
+	locInput.style.boxSizing = 'border-box';
+
+	const browseBtn = append(locRow, $('button.vscode-button.secondary'));
+	browseBtn.textContent = 'Browse...';
+	browseBtn.style.padding = '7px 12px';
+	browseBtn.style.borderRadius = '4px';
+	browseBtn.style.border = '1px solid var(--vscode-button-secondaryBorder, #444)';
+	browseBtn.style.backgroundColor = 'var(--vscode-button-secondaryBackground, #3a3d41)';
+	browseBtn.style.color = 'var(--vscode-button-secondaryForeground, #fff)';
+	browseBtn.style.fontFamily = 'inherit';
+	browseBtn.style.fontSize = '12px';
+	browseBtn.style.cursor = 'pointer';
+	browseBtn.style.whiteSpace = 'nowrap';
+
+	selectScope.onchange = () => {
+		if (selectScope.value !== 'custom') {
+			locInput.value = selectScope.value;
+		}
+	};
+
+	browseBtn.onclick = async () => {
+		const res = await fileDialogService.showOpenDialog({
+			canSelectFolders: true,
+			canSelectFiles: false,
+			canSelectMany: false,
+			defaultUri: URI.file(locInput.value.trim() || initialFolder),
+			title: 'Select Folder for Diagram'
+		});
+		if (res && res.length > 0) {
+			locInput.value = res[0].fsPath;
+			const matched = Array.from(selectScope.options).some(opt => opt.value === res[0].fsPath);
+			if (matched) {
+				selectScope.value = res[0].fsPath;
+			} else {
+				selectScope.value = 'custom';
+			}
+		}
+	};
+
+	// 2. Diagram Name Input
 	const nameGroup = append(body, $('.form-group'));
 	const nameLabel = append(nameGroup, $('label'));
 	nameLabel.textContent = 'Diagram Name *';
@@ -112,7 +217,7 @@ export function createDiagramDialog(
 	nameInput.style.outline = 'none';
 	nameInput.style.boxSizing = 'border-box';
 
-	// Description Input
+	// 3. Description Input
 	const descGroup = append(body, $('.form-group'));
 	const descLabel = append(descGroup, $('label'));
 	descLabel.textContent = 'Description (Optional)';
@@ -136,40 +241,6 @@ export function createDiagramDialog(
 	descInput.style.outline = 'none';
 	descInput.style.resize = 'vertical';
 	descInput.style.boxSizing = 'border-box';
-
-	// Workspace selector if multiple
-	const folders = workspaceContextService.getWorkspace().folders;
-	let selectedWorkspaceUri = folders.length > 0 ? folders[0].uri : undefined;
-	if (folders.length > 1) {
-		const wsGroup = append(body, $('.form-group'));
-		const wsLabel = append(wsGroup, $('label'));
-		wsLabel.textContent = 'Save To Workspace';
-		wsLabel.style.fontSize = '12px';
-		wsLabel.style.fontWeight = '500';
-		wsLabel.style.color = 'var(--vscode-descriptionForeground, #999)';
-		wsLabel.style.marginBottom = '6px';
-		wsLabel.style.display = 'block';
-
-		const select = append(wsGroup, $('select.vscode-select')) as HTMLSelectElement;
-		select.style.width = '100%';
-		select.style.padding = '6px 10px';
-		select.style.borderRadius = '4px';
-		select.style.border = '1px solid var(--vscode-input-border, #3c3c3c)';
-		select.style.backgroundColor = 'var(--vscode-input-background, #252526)';
-		select.style.color = 'var(--vscode-input-foreground, #fff)';
-		select.style.fontFamily = 'inherit';
-		select.style.fontSize = '12px';
-		select.style.boxSizing = 'border-box';
-
-		for (const f of folders) {
-			const opt = append(select, $('option')) as HTMLOptionElement;
-			opt.value = f.uri.toString();
-			opt.textContent = f.name;
-		}
-		select.onchange = () => {
-			selectedWorkspaceUri = URI.parse(select.value);
-		};
-	}
 
 	// Footer
 	const footer = append(modal, $('.modal-footer'));
@@ -210,11 +281,18 @@ export function createDiagramDialog(
 			nameInput.style.borderColor = 'var(--vscode-inputValidation-errorBorder, #f43f5e)';
 			return;
 		}
+		const folderPath = locInput.value.trim();
+		if (!folderPath) {
+			locInput.focus();
+			locInput.style.borderColor = 'var(--vscode-inputValidation-errorBorder, #f43f5e)';
+			return;
+		}
+
 		overlay.remove();
 		onConfirm({
 			name,
 			description: descInput.value.trim() || undefined,
-			targetWorkspaceUri: selectedWorkspaceUri
+			targetFolderUri: URI.file(folderPath)
 		});
 	};
 

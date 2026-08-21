@@ -9,9 +9,12 @@ import { URI } from '../../../../base/common/uri.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IDiagramItem, IDiagramsManagerService, ICreateDiagramOptions } from '../common/diagramsManager.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { joinPath, dirname } from '../../../../base/common/resources.js';
+
+const STORAGE_CUSTOM_DIAGRAM_DIRS = 'anyagent.diagrams.customDirectories';
 
 export class DiagramsManagerService extends Disposable implements IDiagramsManagerService {
 	declare readonly _serviceBrand: undefined;
@@ -25,7 +28,8 @@ export class DiagramsManagerService extends Disposable implements IDiagramsManag
 	constructor(
 		@IFileService private readonly fileService: IFileService,
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
-		@IPathService private readonly pathService: IPathService
+		@IPathService private readonly pathService: IPathService,
+		@IStorageService private readonly storageService: IStorageService
 	) {
 		super();
 
@@ -47,25 +51,72 @@ export class DiagramsManagerService extends Disposable implements IDiagramsManag
 		return joinPath(userHome, '.anyagent', 'diagrams');
 	}
 
+	private getTrackedCustomDirs(): URI[] {
+		try {
+			const raw = this.storageService.get(STORAGE_CUSTOM_DIAGRAM_DIRS, StorageScope.APPLICATION, '[]');
+			const parsed = JSON.parse(raw);
+			if (Array.isArray(parsed)) {
+				return parsed.map((s: string) => URI.parse(s));
+			}
+		} catch { }
+		return [];
+	}
+
+	private saveTrackedCustomDir(dir: URI): void {
+		try {
+			const existing = this.getTrackedCustomDirs();
+			const dirStr = dir.toString();
+			if (!existing.some(d => d.toString() === dirStr)) {
+				existing.push(dir);
+				this.storageService.store(
+					STORAGE_CUSTOM_DIAGRAM_DIRS,
+					JSON.stringify(existing.map(d => d.toString())),
+					StorageScope.APPLICATION,
+					StorageTarget.USER
+				);
+			}
+		} catch { }
+	}
+
 	async getDiagrams(): Promise<IDiagramItem[]> {
 		const items: IDiagramItem[] = [];
+		const seenUris = new Set<string>();
+
+		const addItem = (item: IDiagramItem) => {
+			const key = item.uri.toString().toLowerCase();
+			if (!seenUris.has(key)) {
+				seenUris.add(key);
+				items.push(item);
+			}
+		};
+
 		const folders = this.workspaceContextService.getWorkspace().folders;
 
-		// 1. Scan workspace folders
+		// 1. Scan workspace folders (both visible diagrams/ and .anyagent/diagrams/ and root)
 		for (const folder of folders) {
-			const wsDiagramsDir = joinPath(folder.uri, '.anyagent', 'diagrams');
-			const wsItems = await this.scanDirectoryForDiagrams(wsDiagramsDir, folder.uri, folder.name);
-			items.push(...wsItems);
+			const visibleDir = joinPath(folder.uri, 'diagrams');
+			const visibleItems = await this.scanDirectoryForDiagrams(visibleDir, folder.uri, folder.name);
+			visibleItems.forEach(addItem);
+
+			const hiddenDir = joinPath(folder.uri, '.anyagent', 'diagrams');
+			const hiddenItems = await this.scanDirectoryForDiagrams(hiddenDir, folder.uri, folder.name);
+			hiddenItems.forEach(addItem);
+
+			const rootItems = await this.scanDirectoryForDiagrams(folder.uri, folder.uri, folder.name);
+			rootItems.forEach(addItem);
 		}
 
-		// 2. Scan global fallback folder
+		// 2. Scan custom user-selected directories
+		const customDirs = this.getTrackedCustomDirs();
+		for (const cDir of customDirs) {
+			const cItems = await this.scanDirectoryForDiagrams(cDir, undefined, 'Custom');
+			cItems.forEach(addItem);
+		}
+
+		// 3. Scan global fallback folder
 		const globalDir = await this.getGlobalDiagramsDir();
 		const globalItems = await this.scanDirectoryForDiagrams(globalDir, undefined, 'Global');
-		for (const gi of globalItems) {
-			if (!items.some(i => i.id === gi.id)) {
-				items.push(gi);
-			}
-		}
+		globalItems.forEach(addItem);
 
 		return items;
 	}
@@ -126,12 +177,15 @@ export class DiagramsManagerService extends Disposable implements IDiagramsManag
 
 	async createDiagram(options: ICreateDiagramOptions): Promise<URI> {
 		let targetDir: URI;
-		if (options.targetWorkspaceUri) {
-			targetDir = joinPath(options.targetWorkspaceUri, '.anyagent', 'diagrams');
+		if (options.targetFolderUri) {
+			targetDir = options.targetFolderUri;
+			this.saveTrackedCustomDir(targetDir);
+		} else if (options.targetWorkspaceUri) {
+			targetDir = joinPath(options.targetWorkspaceUri, 'diagrams');
 		} else {
 			const folders = this.workspaceContextService.getWorkspace().folders;
 			if (folders.length > 0) {
-				targetDir = joinPath(folders[0].uri, '.anyagent', 'diagrams');
+				targetDir = joinPath(folders[0].uri, 'diagrams');
 			} else {
 				targetDir = await this.getGlobalDiagramsDir();
 			}
@@ -178,23 +232,15 @@ export class DiagramsManagerService extends Disposable implements IDiagramsManag
 	}
 
 	async renameDiagram(uri: URI, newName: string): Promise<URI> {
-		const dir = dirname(uri);
+		const targetDir = dirname(uri);
 		const cleanName = newName.trim().replace(/[\\/:*?"<>|]/g, '_');
-		const targetUri = joinPath(dir, `${cleanName}.diagram.json`);
+		const targetUri = joinPath(targetDir, `${cleanName}.diagram.json`);
 
-		// update metadata if possible
-		try {
-			const contentBuffer = await this.fileService.readFile(uri);
-			const parsed = JSON.parse(contentBuffer.value.toString());
-			if (!parsed.metadata) parsed.metadata = {};
-			parsed.metadata.name = newName.trim();
-			const updated = VSBuffer.fromString(JSON.stringify(parsed, null, 2));
-			await this.fileService.writeFile(uri, updated);
-		} catch {
-			// ignore metadata update error
+		if (targetUri.toString() === uri.toString()) {
+			return uri;
 		}
 
-		await this.fileService.move(uri, targetUri, true);
+		await this.fileService.move(uri, targetUri);
 		this._onDidChangeDiagrams.fire();
 		return targetUri;
 	}
