@@ -15,7 +15,6 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 export interface IDiagramDialogResult {
 	name: string;
 	description?: string;
-	targetWorkspaceUri?: URI;
 	targetFolderUri?: URI;
 }
 
@@ -94,49 +93,47 @@ export async function createDiagramDialog(
 	body.style.flexDirection = 'column';
 	body.style.gap = '14px';
 
-	// 1. Storage Location / Workspace Selection
+	// 1. Diagram Name Input
+	const nameGroup = append(body, $('.form-group'));
+	const nameLabel = append(nameGroup, $('label'));
+	nameLabel.textContent = 'Diagram Name *';
+	nameLabel.style.fontSize = '12px';
+	nameLabel.style.fontWeight = '500';
+	nameLabel.style.color = 'var(--vscode-descriptionForeground, #999)';
+	nameLabel.style.marginBottom = '6px';
+	nameLabel.style.display = 'block';
+
+	const nameInput = append(nameGroup, $('input.vscode-input')) as HTMLInputElement;
+	nameInput.type = 'text';
+	nameInput.placeholder = 'e.g. System Architecture, Auth Flow, Order Pipeline';
+	nameInput.style.width = '100%';
+	nameInput.style.padding = '8px 10px';
+	nameInput.style.borderRadius = '4px';
+	nameInput.style.border = '1px solid var(--vscode-input-border, #3c3c3c)';
+	nameInput.style.backgroundColor = 'var(--vscode-input-background, #252526)';
+	nameInput.style.color = 'var(--vscode-input-foreground, #fff)';
+	nameInput.style.fontFamily = 'inherit';
+	nameInput.style.fontSize = '12px';
+	nameInput.style.outline = 'none';
+	nameInput.style.boxSizing = 'border-box';
+
+	// 2. Storage Directory (Clean Single Location Row)
 	const folders = workspaceContextService.getWorkspace().folders;
 	const userHome = await pathService.userHome();
-	const defaultGlobalDir = joinPath(userHome, 'diagrams').fsPath;
-
-	let initialFolder = defaultGlobalDir;
+	let initialFolder = joinPath(userHome, 'diagrams').fsPath;
 	if (folders.length > 0) {
-		initialFolder = joinPath(folders[0].uri, 'diagrams').fsPath;
+		initialFolder = folders[0].uri.fsPath;
 	}
 
 	const locGroup = append(body, $('.form-group'));
 	const locLabel = append(locGroup, $('label'));
-	locLabel.textContent = 'Storage Folder / Location';
+	locLabel.textContent = 'Save Directory';
 	locLabel.style.fontSize = '12px';
 	locLabel.style.fontWeight = '500';
 	locLabel.style.color = 'var(--vscode-descriptionForeground, #999)';
 	locLabel.style.marginBottom = '6px';
 	locLabel.style.display = 'block';
 
-	// Quick Scope Select
-	const selectScope = append(locGroup, $('select.vscode-select')) as HTMLSelectElement;
-	selectScope.style.width = '100%';
-	selectScope.style.padding = '6px 10px';
-	selectScope.style.borderRadius = '4px';
-	selectScope.style.border = '1px solid var(--vscode-input-border, #3c3c3c)';
-	selectScope.style.backgroundColor = 'var(--vscode-input-background, #252526)';
-	selectScope.style.color = 'var(--vscode-input-foreground, #fff)';
-	selectScope.style.fontFamily = 'inherit';
-	selectScope.style.fontSize = '12px';
-	selectScope.style.marginBottom = '6px';
-	selectScope.style.boxSizing = 'border-box';
-
-	for (const f of folders) {
-		const opt = append(selectScope, $('option')) as HTMLOptionElement;
-		opt.value = joinPath(f.uri, 'diagrams').fsPath;
-		opt.textContent = `Workspace: ${f.name} (${f.uri.fsPath}/diagrams)`;
-	}
-
-	const customOpt = append(selectScope, $('option')) as HTMLOptionElement;
-	customOpt.value = 'custom';
-	customOpt.textContent = 'Custom Directory...';
-
-	// Location input row with Browse button
 	const locRow = append(locGroup, $('.location-input-row'));
 	locRow.style.display = 'flex';
 	locRow.style.gap = '8px';
@@ -145,6 +142,7 @@ export async function createDiagramDialog(
 	const locInput = append(locRow, $('input.vscode-input')) as HTMLInputElement;
 	locInput.type = 'text';
 	locInput.value = initialFolder;
+	locInput.placeholder = 'Select any folder on your computer...';
 	locInput.style.flex = '1';
 	locInput.style.padding = '8px 10px';
 	locInput.style.borderRadius = '4px';
@@ -168,12 +166,6 @@ export async function createDiagramDialog(
 	browseBtn.style.cursor = 'pointer';
 	browseBtn.style.whiteSpace = 'nowrap';
 
-	selectScope.onchange = () => {
-		if (selectScope.value !== 'custom') {
-			locInput.value = selectScope.value;
-		}
-	};
-
 	browseBtn.onclick = async () => {
 		const res = await fileDialogService.showOpenDialog({
 			canSelectFolders: true,
@@ -184,38 +176,8 @@ export async function createDiagramDialog(
 		});
 		if (res && res.length > 0) {
 			locInput.value = res[0].fsPath;
-			const matched = Array.from(selectScope.options).some(opt => opt.value === res[0].fsPath);
-			if (matched) {
-				selectScope.value = res[0].fsPath;
-			} else {
-				selectScope.value = 'custom';
-			}
 		}
 	};
-
-	// 2. Diagram Name Input
-	const nameGroup = append(body, $('.form-group'));
-	const nameLabel = append(nameGroup, $('label'));
-	nameLabel.textContent = 'Diagram Name *';
-	nameLabel.style.fontSize = '12px';
-	nameLabel.style.fontWeight = '500';
-	nameLabel.style.color = 'var(--vscode-descriptionForeground, #999)';
-	nameLabel.style.marginBottom = '6px';
-	nameLabel.style.display = 'block';
-
-	const nameInput = append(nameGroup, $('input.vscode-input')) as HTMLInputElement;
-	nameInput.type = 'text';
-	nameInput.placeholder = 'e.g. System Architecture, Auth Flow, Order Pipeline';
-	nameInput.style.width = '100%';
-	nameInput.style.padding = '8px 10px';
-	nameInput.style.borderRadius = '4px';
-	nameInput.style.border = '1px solid var(--vscode-input-border, #3c3c3c)';
-	nameInput.style.backgroundColor = 'var(--vscode-input-background, #252526)';
-	nameInput.style.color = 'var(--vscode-input-foreground, #fff)';
-	nameInput.style.fontFamily = 'inherit';
-	nameInput.style.fontSize = '12px';
-	nameInput.style.outline = 'none';
-	nameInput.style.boxSizing = 'border-box';
 
 	// 3. Description Input
 	const descGroup = append(body, $('.form-group'));
