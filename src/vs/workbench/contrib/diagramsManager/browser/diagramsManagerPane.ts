@@ -27,7 +27,7 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
-import { DiagramEditorInput } from './diagramEditorInput.js';
+import { DiagramEditorInput, diagramEditorIcon } from './diagramEditorInput.js';
 import { createDiagramDialog } from './diagramEditorDialog.js';
 import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
@@ -210,7 +210,7 @@ export class DiagramsManagerPane extends ViewPane {
 
 		if (filtered.length === 0) {
 			const emptyEl = append(container, $('.diagrams-empty-state'));
-			const emptyIcon = append(emptyEl, $('span' + ThemeIcon.asCSSSelector(Codicon.typeHierarchy)));
+			const emptyIcon = append(emptyEl, $('span' + ThemeIcon.asCSSSelector(diagramEditorIcon)));
 			emptyIcon.style.fontSize = '32px';
 			emptyIcon.style.opacity = '0.4';
 			emptyIcon.style.marginBottom = '8px';
@@ -248,7 +248,7 @@ export class DiagramsManagerPane extends ViewPane {
 			};
 
 			const iconEl = append(itemEl, $('.diagram-card-icon'));
-			append(iconEl, $('span' + ThemeIcon.asCSSSelector(Codicon.typeHierarchy)));
+			append(iconEl, $('span' + ThemeIcon.asCSSSelector(diagramEditorIcon)));
 
 			const infoEl = append(itemEl, $('.diagram-card-info'));
 			const titleRow = append(infoEl, $('.diagram-card-title-row'));

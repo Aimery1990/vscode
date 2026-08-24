@@ -11,6 +11,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { joinPath } from '../../../../base/common/resources.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
+import { diagramEditorIcon } from './diagramEditorInput.js';
 
 export interface IDiagramDialogResult {
 	name: string;
@@ -70,7 +71,7 @@ export async function createDiagramDialog(
 	titleRow.style.alignItems = 'center';
 	titleRow.style.gap = '8px';
 
-	const iconSpan = append(titleRow, $('span' + ThemeIcon.asCSSSelector(Codicon.typeHierarchy)));
+	const iconSpan = append(titleRow, $('span' + ThemeIcon.asCSSSelector(diagramEditorIcon)));
 	iconSpan.style.color = 'var(--vscode-charts-purple, #a855f7)';
 	iconSpan.style.fontSize = '16px';
 
