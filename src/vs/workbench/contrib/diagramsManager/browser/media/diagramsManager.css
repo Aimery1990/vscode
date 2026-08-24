@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-/* Custom Vector Icon for Diagrams & Flowcharts (Matching Node + Smooth Branching Routing Motif) */
+/* Custom Vector Icon for Diagrams & Flowcharts (Clean 3 Rounded Nodes + Smooth Branching Connections) */
 .codicon-diagrams-manager-view-icon::before,
 .codicon-diagram-editor-label-icon::before {
 	content: '' !important;
@@ -12,8 +12,8 @@
 	height: 1em;
 	vertical-align: middle;
 	background-color: currentColor;
-	-webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Crect x='1' y='2.5' width='4.5' height='5.5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Crect x='10.5' y='2.5' width='4.5' height='5.5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Crect x='10.5' y='9.5' width='4.5' height='5.5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Cline x1='5.5' y1='5.25' x2='9.5' y2='5.25' stroke='black' stroke-width='1.2' stroke-linecap='round'/%3E%3Cpolygon points='8.5,3.75 10.5,5.25 8.5,6.75' fill='black'/%3E%3Cpath d='M 7.2 5.25 C 7.8 5.25 8.2 5.65 8.2 6.25 V 11.25 C 8.2 11.85 8.6 12.25 9.2 12.25 H 9.5' stroke='black' stroke-width='1.2' stroke-linecap='round' fill='none'/%3E%3Cpolygon points='8.5,10.75 10.5,12.25 8.5,13.75' fill='black'/%3E%3C/svg%3E") no-repeat center / contain;
-	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Crect x='1' y='2.5' width='4.5' height='5.5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Crect x='10.5' y='2.5' width='4.5' height='5.5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Crect x='10.5' y='9.5' width='4.5' height='5.5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Cline x1='5.5' y1='5.25' x2='9.5' y2='5.25' stroke='black' stroke-width='1.2' stroke-linecap='round'/%3E%3Cpolygon points='8.5,3.75 10.5,5.25 8.5,6.75' fill='black'/%3E%3Cpath d='M 7.2 5.25 C 7.8 5.25 8.2 5.65 8.2 6.25 V 11.25 C 8.2 11.85 8.6 12.25 9.2 12.25 H 9.5' stroke='black' stroke-width='1.2' stroke-linecap='round' fill='none'/%3E%3Cpolygon points='8.5,10.75 10.5,12.25 8.5,13.75' fill='black'/%3E%3C/svg%3E") no-repeat center / contain;
+	-webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Crect x='1.5' y='2.5' width='4.5' height='5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Crect x='10' y='2.5' width='4.5' height='5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Crect x='10' y='9.5' width='4.5' height='5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Cline x1='6' y1='5' x2='10' y2='5' stroke='black' stroke-width='1.3'/%3E%3Cpath d='M 7.5 5 C 8.3 5 8.75 5.4 8.75 6.2 V 10.8 C 8.75 11.6 9.2 12 10 12' stroke='black' stroke-width='1.3' stroke-linecap='round' fill='none'/%3E%3C/svg%3E") no-repeat center / contain;
+	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Crect x='1.5' y='2.5' width='4.5' height='5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Crect x='10' y='2.5' width='4.5' height='5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Crect x='10' y='9.5' width='4.5' height='5' rx='1.2' stroke='black' stroke-width='1.3'/%3E%3Cline x1='6' y1='5' x2='10' y2='5' stroke='black' stroke-width='1.3'/%3E%3Cpath d='M 7.5 5 C 8.3 5 8.75 5.4 8.75 6.2 V 10.8 C 8.75 11.6 9.2 12 10 12' stroke='black' stroke-width='1.3' stroke-linecap='round' fill='none'/%3E%3C/svg%3E") no-repeat center / contain;
 }
 
 .diagrams-manager-viewpane {

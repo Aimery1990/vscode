@@ -320,7 +320,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				}
 
 				const workspaceMdUri = URI.joinPath(targetBase, '.agents', 'workspace.md');
-				const hasWorkspaceMd = await this.fileService.exists(workspaceMdUri) || await this.fileService.exists(URI.joinPath(targetBase, 'workspace.md'));
+				const ticketMdUri = URI.joinPath(targetBase, '.agents', 'ticket.md');
+				const hasWorkspaceMd = await this.fileService.exists(ticketMdUri) ||
+					await this.fileService.exists(workspaceMdUri) ||
+					await this.fileService.exists(URI.joinPath(targetBase, 'ticket.md')) ||
+					await this.fileService.exists(URI.joinPath(targetBase, 'workspace.md'));
 
 				if (!hasWorkspaceMd) {
 					// If this is not a genuine managed workspace (no workspace.md) and not explicitly saved as a workspace,
