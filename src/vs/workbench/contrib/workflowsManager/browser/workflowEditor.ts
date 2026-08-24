@@ -4649,9 +4649,9 @@ export class WorkflowEditor extends EditorPane {
 			const strokeWidth = 2;
 
 			if (node.type === 'round-rect') {
-				body += `  <rect x="${node.x}" y="${node.y}" width="${node.width}" height="${node.height}" rx="8" ry="8" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
+				body += `  <rect x="${node.x}" y="${node.y}" width="${node.width}" height="${node.height}" rx="12" ry="12" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
 			} else if (node.type === 'rect') {
-				body += `  <rect x="${node.x}" y="${node.y}" width="${node.width}" height="${node.height}" rx="0" ry="0" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
+				body += `  <rect x="${node.x}" y="${node.y}" width="${node.width}" height="${node.height}" rx="4" ry="4" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
 			} else if (node.type === 'circle') {
 				const cx = node.x + node.width / 2;
 				const cy = node.y + node.height / 2;
@@ -4668,18 +4668,72 @@ export class WorkflowEditor extends EditorPane {
 			const isItalic = node.isItalic ? 'font-style="italic"' : '';
 			const textDec = (node.isUnderline && node.isStrikethrough) ? 'text-decoration="underline line-through"' : (node.isUnderline ? 'text-decoration="underline"' : (node.isStrikethrough ? 'text-decoration="line-through"' : ''));
 
-			const lines = (node.label || '').split('\n');
-			const lineHeight = 16;
+			const maxTextWidth = (node.type === 'diamond') ? Math.max(20, Math.floor(node.width * 0.65)) : Math.max(20, node.width - 16);
+			const lines = this._wrapText(node.label || '', maxTextWidth, 11);
+			const lineHeight = 15;
 			const totalTextHeight = lines.length * lineHeight;
-			const startY = node.y + (node.height - totalTextHeight) / 2 + 12;
 
+			let textAnchor = 'middle';
+			let textX = node.x + node.width / 2;
+			if (node.textAlign === 'left' && node.type !== 'diamond') {
+				textAnchor = 'start';
+				textX = node.x + 8;
+			} else if (node.textAlign === 'right' && node.type !== 'diamond') {
+				textAnchor = 'end';
+				textX = node.x + node.width - 8;
+			}
+
+			let startY = node.y + (node.height - totalTextHeight) / 2 + 11;
+			if (node.verticalAlign === 'top' && node.type !== 'diamond') {
+				startY = node.y + 13;
+			} else if (node.verticalAlign === 'bottom' && node.type !== 'diamond') {
+				startY = node.y + node.height - totalTextHeight + 11;
+			}
+
+			body += `  <text x="${textX}" y="${startY}" fill="${textColor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" ${isBold} ${isItalic} ${textDec} text-anchor="${textAnchor}">\n`;
 			for (let i = 0; i < lines.length; i++) {
 				const lineText = this._escapeXml(lines[i]);
-				body += `  <text x="${node.x + node.width / 2}" y="${startY + i * lineHeight}" fill="${textColor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" ${isBold} ${isItalic} ${textDec} text-anchor="middle" dominant-baseline="middle">${lineText}</text>\n`;
+				const dy = i === 0 ? 0 : lineHeight;
+				body += `    <tspan x="${textX}" dy="${dy}">${lineText}</tspan>\n`;
 			}
+			body += `  </text>\n`;
 		}
 
 		return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="${minX} ${minY} ${width} ${height}">\n${defs}${body}</svg>`;
+	}
+
+	private _wrapText(text: string, maxWidth: number, fontSize: number = 11): string[] {
+		const rawLines = (text || '').split('\n');
+		const result: string[] = [];
+		const avgCharWidth = fontSize * 0.56;
+		const maxChars = Math.max(1, Math.floor(maxWidth / avgCharWidth));
+
+		for (const raw of rawLines) {
+			if (!raw) {
+				result.push('');
+				continue;
+			}
+			if (raw.length <= maxChars) {
+				result.push(raw);
+				continue;
+			}
+			const words = raw.split(' ');
+			let cur = '';
+			for (const w of words) {
+				if (!cur) {
+					cur = w;
+				} else if ((cur + ' ' + w).length <= maxChars) {
+					cur += ' ' + w;
+				} else {
+					result.push(cur);
+					cur = w;
+				}
+			}
+			if (cur) {
+				result.push(cur);
+			}
+		}
+		return result.length > 0 ? result : [''];
 	}
 
 	private async _saveExportedFile(fileName: string, dataBuffer: Uint8Array | string, defaultExtension: string): Promise<void> {
