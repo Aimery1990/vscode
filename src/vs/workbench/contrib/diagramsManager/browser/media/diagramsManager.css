@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-/* Custom Vector Icon for Diagrams & Flowcharts (3 Horizontal Rounded Rects + Prominent Branching Lines) */
+/* Custom Vector Icon for Diagrams & Flowcharts (Pure Minimalist Smooth Branching Routing) */
 .codicon-diagrams-manager-view-icon::before,
 .codicon-diagram-editor-label-icon::before {
 	content: '' !important;
@@ -12,8 +12,8 @@
 	height: 1em;
 	vertical-align: middle;
 	background-color: currentColor;
-	-webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Crect x='1' y='3.5' width='4.8' height='2.8' rx='0.8' stroke='black' stroke-width='1.25'/%3E%3Crect x='10.2' y='3.5' width='4.8' height='2.8' rx='0.8' stroke='black' stroke-width='1.25'/%3E%3Crect x='10.2' y='9.7' width='4.8' height='2.8' rx='0.8' stroke='black' stroke-width='1.25'/%3E%3Cline x1='5.8' y1='4.9' x2='10.2' y2='4.9' stroke='black' stroke-width='1.35'/%3E%3Cpath d='M 7.8 4.9 C 8.6 4.9 9.0 5.3 9.0 6.1 V 9.9 C 9.0 10.7 9.4 11.1 10.2 11.1' stroke='black' stroke-width='1.35' stroke-linecap='round' fill='none'/%3E%3C/svg%3E") no-repeat center / contain;
-	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Crect x='1' y='3.5' width='4.8' height='2.8' rx='0.8' stroke='black' stroke-width='1.25'/%3E%3Crect x='10.2' y='3.5' width='4.8' height='2.8' rx='0.8' stroke='black' stroke-width='1.25'/%3E%3Crect x='10.2' y='9.7' width='4.8' height='2.8' rx='0.8' stroke='black' stroke-width='1.25'/%3E%3Cline x1='5.8' y1='4.9' x2='10.2' y2='4.9' stroke='black' stroke-width='1.35'/%3E%3Cpath d='M 7.8 4.9 C 8.6 4.9 9.0 5.3 9.0 6.1 V 9.9 C 9.0 10.7 9.4 11.1 10.2 11.1' stroke='black' stroke-width='1.35' stroke-linecap='round' fill='none'/%3E%3C/svg%3E") no-repeat center / contain;
+	-webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cline x1='2.5' y1='4.5' x2='13.5' y2='4.5' stroke='black' stroke-width='1.75' stroke-linecap='round'/%3E%3Cpath d='M 6.5 4.5 C 7.8 4.5 8.6 5.3 8.6 6.6 V 9.4 C 8.6 10.7 9.4 11.5 10.7 11.5 H 13.5' stroke='black' stroke-width='1.75' stroke-linecap='round' fill='none'/%3E%3C/svg%3E") no-repeat center / contain;
+	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cline x1='2.5' y1='4.5' x2='13.5' y2='4.5' stroke='black' stroke-width='1.75' stroke-linecap='round'/%3E%3Cpath d='M 6.5 4.5 C 7.8 4.5 8.6 5.3 8.6 6.6 V 9.4 C 8.6 10.7 9.4 11.5 10.7 11.5 H 13.5' stroke='black' stroke-width='1.75' stroke-linecap='round' fill='none'/%3E%3C/svg%3E") no-repeat center / contain;
 }
 
 .diagrams-manager-viewpane {
