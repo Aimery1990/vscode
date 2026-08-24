@@ -35,6 +35,10 @@ import { IAgentsManagerService, IAgentCredentialService, IAgentCredential } from
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { AccountManagementDialog } from '../../accountManagement/browser/accountManagementDialog.js';
+import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
+import { IViewsService } from '../../../services/views/common/viewsService.js';
+import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
+import { VIEW_ID } from '../../files/common/files.js';
 
 interface ICustomField {
 	id: string;
@@ -231,7 +235,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 		@IEditorService private readonly editorService: IEditorService,
 		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService,
 		@IStorageService storageService: IStorageService,
-		@INativeEnvironmentService private readonly environmentService: INativeEnvironmentService
+		@INativeEnvironmentService private readonly environmentService: INativeEnvironmentService,
+		@IWorkspaceEditingService private readonly workspaceEditingService: IWorkspaceEditingService,
+		@IViewsService private readonly viewsService: IViewsService,
+		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 		this._storageService = storageService;
@@ -239,6 +246,30 @@ export class MainWorkspaceViewPane extends ViewPane {
 		this._register(this.workspacesExplorerService.onDidChangeWorkspaces(() => this.renderContent()));
 		this._register(this.workspaceContextService.onDidChangeWorkspaceFolders(() => this.renderContent()));
 		this._register(this.workspacesService.onDidChangeRecentlyOpened(() => this.renderContent()));
+	}
+
+	async showInExplorer(resourceUri: URI): Promise<void> {
+		try {
+			const exists = await this.fileService.exists(resourceUri);
+			if (!exists) {
+				this.notificationService.warn(`Path does not exist: ${resourceUri.fsPath}`);
+				return;
+			}
+			const stat = await this.fileService.resolve(resourceUri);
+			const targetDir = stat.isDirectory ? resourceUri : dirname(resourceUri);
+
+			const currentFolders = this.workspaceContextService.getWorkspace().folders;
+			const isInside = currentFolders.some(f => this.uriIdentityService.extUri.isEqualOrParent(resourceUri, f.uri));
+
+			if (!isInside) {
+				await this.workspaceEditingService.addFolders([{ uri: targetDir }]);
+			}
+
+			await this.viewsService.openView(VIEW_ID, true);
+			await this.commandService.executeCommand('revealInExplorer', resourceUri);
+		} catch (err) {
+			this.notificationService.error(`Failed to show in explorer: ${err}`);
+		}
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -462,6 +493,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 					e.stopPropagation();
 
 					const actions = [
+						new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {
+							await this.showInExplorer(ws.uri);
+						}),
 						new Action('reveal_in_os', isMacintosh ? 'Reveal in Finder' : 'Reveal in Explorer', ThemeIcon.asClassName(Codicon.folder), true, async () => {
 							try {
 								await this.commandService.executeCommand('revealFileInOS', ws.uri);
@@ -800,6 +834,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 				}
 
 				childActions.push(
+					new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {
+						await this.showInExplorer(child.uri);
+					}),
 					new Action('reveal_child_in_os', isMacintosh ? 'Reveal in Finder' : 'Reveal in Explorer', ThemeIcon.asClassName(Codicon.folder), true, async () => {
 						try {
 							await this.commandService.executeCommand('revealFileInOS', child.uri);

@@ -1113,4 +1113,52 @@
 	letter-spacing: 0.5px;
 }
 
+/* --- Export Floating Dropdown Menu --- */
+.workflow-export-floating-menu {
+	background: var(--vscode-sideBar-background, #1e1e1e);
+	border: 1px solid var(--vscode-widget-border, #333333);
+	border-radius: 8px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+	padding: 6px;
+	min-width: 210px;
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	user-select: none;
+	font-family: var(--vscode-font-family, sans-serif);
+	animation: workflowModalFadeIn 0.12s ease-out;
+}
+
+.export-menu-header {
+	font-size: 10px;
+	font-weight: 700;
+	color: var(--vscode-descriptionForeground, #888888);
+	letter-spacing: 0.5px;
+	padding: 6px 8px 3px;
+}
+
+.export-menu-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 10px;
+	border-radius: 5px;
+	font-size: 12px;
+	color: var(--vscode-foreground, #cccccc);
+	cursor: pointer;
+	transition: background 0.12s ease, color 0.12s ease;
+}
+
+.export-menu-item:hover {
+	background: var(--vscode-list-hoverBackground, rgba(255, 255, 255, 0.08));
+	color: #ffffff;
+}
+
+.export-menu-divider {
+	height: 1px;
+	background: var(--vscode-panel-border, rgba(255, 255, 255, 0.08));
+	margin: 4px 0;
+}
+
+
 

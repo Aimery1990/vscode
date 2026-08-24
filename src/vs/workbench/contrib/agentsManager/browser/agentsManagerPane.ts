@@ -28,6 +28,13 @@ import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hover
 import { IAgentsManagerService, IAgentItem, AgentScopeType } from '../common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { createOrEditAgentDialog } from './agentEditorDialog.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
+import { IViewsService } from '../../../services/views/common/viewsService.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
+import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
+import { VIEW_ID } from '../../files/common/files.js';
+import { dirname } from '../../../../base/common/resources.js';
 
 export class AgentsManagerPane extends ViewPane {
 	private containerEl?: HTMLElement;
@@ -49,7 +56,12 @@ export class AgentsManagerPane extends ViewPane {
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@ICommandService private readonly commandService: ICommandService,
 		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
-		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService
+		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService,
+		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
+		@IWorkspaceEditingService private readonly workspaceEditingService: IWorkspaceEditingService,
+		@IViewsService private readonly viewsService: IViewsService,
+		@IFileService private readonly fileService: IFileService,
+		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -84,6 +96,30 @@ export class AgentsManagerPane extends ViewPane {
 
 		// Trigger initial title count calculation
 		this.updatePaneTitle();
+	}
+
+	private async showInExplorer(resourceUri: URI): Promise<void> {
+		try {
+			const exists = await this.fileService.exists(resourceUri);
+			if (!exists) {
+				this.notificationService.warn(`Path does not exist: ${resourceUri.fsPath}`);
+				return;
+			}
+			const stat = await this.fileService.resolve(resourceUri);
+			const targetDir = stat.isDirectory ? resourceUri : dirname(resourceUri);
+
+			const currentFolders = this.workspaceContextService.getWorkspace().folders;
+			const isInside = currentFolders.some(f => this.uriIdentityService.extUri.isEqualOrParent(resourceUri, f.uri));
+
+			if (!isInside) {
+				await this.workspaceEditingService.addFolders([{ uri: targetDir }]);
+			}
+
+			await this.viewsService.openView(VIEW_ID, true);
+			await this.commandService.executeCommand('revealInExplorer', resourceUri);
+		} catch (err) {
+			this.notificationService.error(`Failed to show in explorer: ${err}`);
+		}
 	}
 
 	protected override renderHeaderTitle(container: HTMLElement, title: string): void {
@@ -345,6 +381,10 @@ export class AgentsManagerPane extends ViewPane {
 				}));
 			} else {
 				if (agent.folderPath) {
+					const agentFolderUri = URI.file(agent.folderPath);
+					actions.push(new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {
+						await this.showInExplorer(agentFolderUri);
+					}));
 					actions.push(new Action('open_agent_folder', 'Open Instruction Preview (📁)', ThemeIcon.asClassName(Codicon.folderOpened), true, async () => {
 						const instructionUri = URI.file(`${agent.folderPath}/.agents/instruction.md`);
 						try {

@@ -33,6 +33,9 @@ import { isMacintosh } from '../../../../base/common/platform.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { WorkflowEditorInput } from './workflowEditorInput.js';
 import { createWorkflowDialog } from './workflowEditorDialog.js';
+import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
+import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
+import { VIEW_ID } from '../../files/common/files.js';
 
 export class WorkflowsManagerPane extends ViewPane {
 	private containerEl?: HTMLElement;
@@ -58,7 +61,9 @@ export class WorkflowsManagerPane extends ViewPane {
 		@IDialogService private readonly dialogService: IDialogService,
 		@IFileService private readonly fileService: IFileService,
 		@IViewsService private readonly viewsService: IViewsService,
-		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService
+		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
+		@IWorkspaceEditingService private readonly workspaceEditingService: IWorkspaceEditingService,
+		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -84,6 +89,30 @@ export class WorkflowsManagerPane extends ViewPane {
 		}));
 
 		this.updatePaneTitle();
+	}
+
+	private async showInExplorer(resourceUri: URI): Promise<void> {
+		try {
+			const exists = await this.fileService.exists(resourceUri);
+			if (!exists) {
+				this.notificationService.warn(`Path does not exist: ${resourceUri.fsPath}`);
+				return;
+			}
+			const stat = await this.fileService.resolve(resourceUri);
+			const targetDir = stat.isDirectory ? resourceUri : dirname(resourceUri);
+
+			const currentFolders = this.workspaceContextService.getWorkspace().folders;
+			const isInside = currentFolders.some(f => this.uriIdentityService.extUri.isEqualOrParent(resourceUri, f.uri));
+
+			if (!isInside) {
+				await this.workspaceEditingService.addFolders([{ uri: targetDir }]);
+			}
+
+			await this.viewsService.openView(VIEW_ID, true);
+			await this.commandService.executeCommand('revealInExplorer', resourceUri);
+		} catch (err) {
+			this.notificationService.error(`Failed to show in explorer: ${err}`);
+		}
 	}
 
 	protected override renderHeaderTitle(container: HTMLElement, title: string): void {
@@ -348,7 +377,10 @@ export class WorkflowsManagerPane extends ViewPane {
 				}));
 			}
 
-			// 3. Reveal in Finder / Reveal in Explorer
+			// 3. Show in Explorer & Reveal in OS
+			actionsList.push(new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {
+				await this.showInExplorer(folderUri);
+			}));
 			actionsList.push(new Action('reveal_in_os', isMacintosh ? 'Reveal in Finder' : 'Reveal in Explorer', ThemeIcon.asClassName(Codicon.folder), true, async () => {
 				try {
 					await this.commandService.executeCommand('revealFileInOS', folderUri);

@@ -27,6 +27,7 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
 
 interface IFlowchartNode {
@@ -212,7 +213,8 @@ export class WorkflowEditor extends EditorPane {
 		@IViewsService private readonly _viewsService: IViewsService,
 		@IEntityPersistenceService private readonly _entityPersistenceService: IEntityPersistenceService,
 		@IEditorService private readonly _editorService: IEditorService,
-		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService
+		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
+		@IFileDialogService private readonly _fileDialogService: IFileDialogService
 	) {
 		super(WorkflowEditor.ID, group, telemetryService, themeService, storageService);
 	}
@@ -508,6 +510,17 @@ export class WorkflowEditor extends EditorPane {
 		append(fFitBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.screenFull)));
 		fFitBtn.title = 'Fit Content to Screen';
 		fFitBtn.onclick = (e) => { e.stopPropagation(); this._fitView(); };
+
+		const fExportDivider = append(floatingZoom, $('.floating-zoom-divider'));
+		fExportDivider.style.width = '1px';
+		fExportDivider.style.height = '12px';
+		fExportDivider.style.background = 'rgba(255, 255, 255, 0.15)';
+		fExportDivider.style.margin = '0 2px';
+
+		const fExportBtn = append(floatingZoom, $('.floating-zoom-btn.export-btn'));
+		append(fExportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.desktopDownload)));
+		fExportBtn.title = 'Export / Download Flowchart (PNG, JPEG, SVG, PDF)';
+		fExportBtn.onclick = (e) => { e.stopPropagation(); this._showExportMenu(fExportBtn); };
 
 		// Permanent Floating Trigger Pill at top-right of drawing viewport when inspector is collapsed
 		this._inspectorTogglePill = append(canvasViewport, $('.workflow-inspector-toggle-pill'));
@@ -1159,6 +1172,29 @@ export class WorkflowEditor extends EditorPane {
 					this._renderNodes();
 					this._renderInspector(parent);
 				}
+			};
+		}
+
+		// Export & Download Section (Always available at the bottom of Inspector)
+		const exportSec = append(parent, $('.workflow-toolbar-section'));
+		const isSelection = this._selectedNodeIds.size > 0;
+		const exportTitle = isSelection ? `Export Selection (${this._selectedNodeIds.size})` : 'Export / Download';
+		append(exportSec, $('.workflow-toolbar-title')).textContent = exportTitle;
+
+		const exportGrid = append(exportSec, $('.workflow-format-row.grid-2x2'));
+		const exportOptions: { label: string; format: 'png' | 'jpeg' | 'svg' | 'pdf' }[] = [
+			{ label: 'PNG Image', format: 'png' },
+			{ label: 'JPEG Image', format: 'jpeg' },
+			{ label: 'SVG Vector', format: 'svg' },
+			{ label: 'PDF Doc', format: 'pdf' }
+		];
+
+		for (const opt of exportOptions) {
+			const btn = append(exportGrid, $('.workflow-format-btn'));
+			btn.textContent = opt.label;
+			btn.title = `Export as ${opt.format.toUpperCase()} (${isSelection ? 'Selected Nodes' : 'Full Canvas'})`;
+			btn.onclick = () => {
+				this._exportDiagram(opt.format, isSelection);
 			};
 		}
 	}
@@ -3520,6 +3556,37 @@ export class WorkflowEditor extends EditorPane {
 				}
 			};
 
+			// Export Selection Submenu
+			const exportSelItem = append(menu, $('.context-menu-item.submenu-trigger'));
+			exportSelItem.textContent = isMulti ? `Export Selected (${totalSelected}) ›` : 'Export Node Image ›';
+			exportSelItem.style.position = 'relative';
+
+			const exportSelSubmenu = append(exportSelItem, $('.workflow-context-submenu'));
+			exportSelSubmenu.style.position = 'absolute';
+			exportSelSubmenu.style.left = '100%';
+			exportSelSubmenu.style.top = '-4px';
+			exportSelSubmenu.style.display = 'none';
+
+			exportSelItem.onmouseenter = () => { exportSelSubmenu.style.display = 'flex'; };
+			exportSelItem.onmouseleave = () => { exportSelSubmenu.style.display = 'none'; };
+
+			const selFormats: { label: string; format: 'png' | 'jpeg' | 'svg' | 'pdf' }[] = [
+				{ label: 'Export as PNG (.png)', format: 'png' },
+				{ label: 'Export as JPEG (.jpg)', format: 'jpeg' },
+				{ label: 'Export as SVG (.svg)', format: 'svg' },
+				{ label: 'Export as PDF (.pdf)', format: 'pdf' }
+			];
+
+			for (const fmt of selFormats) {
+				const fItem = append(exportSelSubmenu, $('.context-menu-item'));
+				fItem.textContent = fmt.label;
+				fItem.onclick = (e) => {
+					e.stopPropagation();
+					this._closeContextMenu();
+					this._exportDiagram(fmt.format, true);
+				};
+			}
+
 			// Separator before module inspection submenu
 			append(menu, $('.context-menu-separator'));
 
@@ -3691,6 +3758,37 @@ export class WorkflowEditor extends EditorPane {
 							});
 						}
 					});
+				};
+			}
+
+			// Export Canvas Submenu
+			const exportCanvasItem = append(menu, $('.context-menu-item.submenu-trigger'));
+			exportCanvasItem.textContent = 'Export Canvas ›';
+			exportCanvasItem.style.position = 'relative';
+
+			const exportCanvasSubmenu = append(exportCanvasItem, $('.workflow-context-submenu'));
+			exportCanvasSubmenu.style.position = 'absolute';
+			exportCanvasSubmenu.style.left = '100%';
+			exportCanvasSubmenu.style.top = '-4px';
+			exportCanvasSubmenu.style.display = 'none';
+
+			exportCanvasItem.onmouseenter = () => { exportCanvasSubmenu.style.display = 'flex'; };
+			exportCanvasItem.onmouseleave = () => { exportCanvasSubmenu.style.display = 'none'; };
+
+			const canvasFormats: { label: string; format: 'png' | 'jpeg' | 'svg' | 'pdf' }[] = [
+				{ label: 'Export as PNG (.png)', format: 'png' },
+				{ label: 'Export as JPEG (.jpg)', format: 'jpeg' },
+				{ label: 'Export as SVG (.svg)', format: 'svg' },
+				{ label: 'Export as PDF (.pdf)', format: 'pdf' }
+			];
+
+			for (const fmt of canvasFormats) {
+				const fItem = append(exportCanvasSubmenu, $('.context-menu-item'));
+				fItem.textContent = fmt.label;
+				fItem.onclick = (e) => {
+					e.stopPropagation();
+					this._closeContextMenu();
+					this._exportDiagram(fmt.format, false);
 				};
 			}
 		} else {
@@ -4308,6 +4406,411 @@ export class WorkflowEditor extends EditorPane {
 			this._notificationService.info(`Opened ${imp.type} '${imp.name}' in editor.`);
 		} catch (err) {
 			this._notificationService.error(`Failed to open ${imp.type} '${imp.name}': ${err}`);
+		}
+	}
+
+	private _escapeXml(str: string): string {
+		return (str || '')
+			.replace(/&/g, '&amp;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;')
+			.replace(/"/g, '&quot;')
+			.replace(/'/g, '&apos;');
+	}
+
+	private _showExportMenu(anchorEl: HTMLElement): void {
+		const existing = document.querySelector('.workflow-export-floating-menu');
+		if (existing) {
+			existing.remove();
+			return;
+		}
+
+		const rect = anchorEl.getBoundingClientRect();
+		const menuEl = append(document.body, $('.workflow-export-floating-menu'));
+		menuEl.style.position = 'fixed';
+		menuEl.style.top = `${rect.bottom + 6}px`;
+		menuEl.style.left = `${Math.max(10, rect.left - 70)}px`;
+		menuEl.style.zIndex = '99999';
+
+		const isSel = this._selectedNodeIds.size > 0;
+		const selCount = this._selectedNodeIds.size;
+
+		// Section 1: Full Canvas
+		const header1 = append(menuEl, $('.export-menu-header'));
+		header1.textContent = 'EXPORT CANVAS';
+
+		const items: { label: string; icon: any; format: 'png' | 'jpeg' | 'svg' | 'pdf' }[] = [
+			{ label: 'PNG Image (.png)', icon: Codicon.fileMedia, format: 'png' },
+			{ label: 'JPEG Image (.jpg)', icon: Codicon.fileMedia, format: 'jpeg' },
+			{ label: 'SVG Vector (.svg)', icon: Codicon.fileCode, format: 'svg' },
+			{ label: 'PDF Document (.pdf)', icon: Codicon.filePdf, format: 'pdf' }
+		];
+
+		for (const it of items) {
+			const row = append(menuEl, $('.export-menu-item'));
+			append(row, $('span' + ThemeIcon.asCSSSelector(it.icon)));
+			append(row, $('span')).textContent = it.label;
+			row.onclick = (e) => {
+				e.stopPropagation();
+				menuEl.remove();
+				this._exportDiagram(it.format, false);
+			};
+		}
+
+		// Section 2: Selected Elements
+		if (isSel) {
+			append(menuEl, $('.export-menu-divider'));
+			const header2 = append(menuEl, $('.export-menu-header'));
+			header2.textContent = `EXPORT SELECTION (${selCount})`;
+
+			for (const it of items) {
+				const row = append(menuEl, $('.export-menu-item'));
+				append(row, $('span' + ThemeIcon.asCSSSelector(it.icon)));
+				append(row, $('span')).textContent = `Selected as ${it.format.toUpperCase()}`;
+				row.onclick = (e) => {
+					e.stopPropagation();
+					menuEl.remove();
+					this._exportDiagram(it.format, true);
+				};
+			}
+		}
+
+		const closeListener = (e: MouseEvent) => {
+			if (!menuEl.contains(e.target as Node)) {
+				menuEl.remove();
+				window.removeEventListener('click', closeListener);
+			}
+		};
+		setTimeout(() => window.addEventListener('click', closeListener), 10);
+	}
+
+	private _createPdfFromJpeg(jpegBytes: Uint8Array, imgWidth: number, imgHeight: number): Uint8Array {
+		const ptWidth = Math.round(imgWidth * 0.75 * 100) / 100;
+		const ptHeight = Math.round(imgHeight * 0.75 * 100) / 100;
+
+		const chunks: Uint8Array[] = [];
+		const offsets: number[] = [];
+		let byteLength = 0;
+
+		const encoder = new TextEncoder();
+		function addText(str: string) {
+			const arr = encoder.encode(str);
+			chunks.push(arr);
+			byteLength += arr.length;
+		}
+
+		function addBytes(arr: Uint8Array) {
+			chunks.push(arr);
+			byteLength += arr.length;
+		}
+
+		function markObject(objNum: number) {
+			offsets[objNum] = byteLength;
+			addText(`${objNum} 0 obj\n`);
+		}
+
+		addText('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
+
+		// 1 0 obj: Catalog
+		markObject(1);
+		addText('<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
+
+		// 2 0 obj: Pages
+		markObject(2);
+		addText('<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
+
+		// 3 0 obj: Page
+		markObject(3);
+		addText(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${ptWidth} ${ptHeight}] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>\nendobj\n`);
+
+		// 4 0 obj: Contents Stream
+		const contentStream = `q\n${ptWidth} 0 0 ${ptHeight} 0 0 cm\n/Im1 Do\nQ\n`;
+		markObject(4);
+		addText(`<< /Length ${contentStream.length} >>\nstream\n${contentStream}endstream\nendobj\n`);
+
+		// 5 0 obj: Image XObject
+		markObject(5);
+		addText(`<< /Type /XObject /Subtype /Image /Width ${imgWidth} /Height ${imgHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>\nstream\n`);
+		addBytes(jpegBytes);
+		addText('\nendstream\nendobj\n');
+
+		// xref table
+		const startXref = byteLength;
+		addText('xref\n0 6\n0000000000 65535 f \n');
+		for (let i = 1; i <= 5; i++) {
+			const offStr = String(offsets[i]).padStart(10, '0');
+			addText(`${offStr} 00000 n \n`);
+		}
+
+		// trailer
+		addText(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${startXref}\n%%EOF\n`);
+
+		const result = new Uint8Array(byteLength);
+		let cur = 0;
+		for (const chunk of chunks) {
+			result.set(chunk, cur);
+			cur += chunk.length;
+		}
+		return result;
+	}
+
+	private _generateSvgString(
+		nodesToExport: IFlowchartNode[],
+		linksToExport: IFlowchartLink[],
+		bounds: { minX: number; minY: number; width: number; height: number },
+		format: 'png' | 'jpeg' | 'svg' | 'pdf'
+	): string {
+		const { minX, minY, width, height } = bounds;
+
+		const usedColors = new Set<string>(['#0d9488', '#ffffff', '#38bdf8', '#7c3aed', '#facc15', '#f43f5e', '#a78bfa', '#fbbf24', '#f87171', '#34d399']);
+		linksToExport.forEach(l => { if (l.color) usedColors.add(l.color); });
+		nodesToExport.forEach(n => { if (n.color) usedColors.add(n.color); });
+
+		let defs = '<defs>\n';
+		usedColors.forEach(color => {
+			const clean = color.replace('#', '');
+			defs += `    <marker id="export-arrow-${clean}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 0 1 L 10 5 L 0 9 z" fill="${color}" />
+    </marker>
+    <marker id="export-arrow-start-${clean}" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M 10 1 L 0 5 L 10 9 z" fill="${color}" />
+    </marker>\n`;
+		});
+		defs += '</defs>\n';
+
+		const bgFill = (format === 'jpeg' || format === 'pdf') ? '#1e1e1e' : '#18181b';
+		let body = `  <rect x="${minX}" y="${minY}" width="${width}" height="${height}" fill="${bgFill}" rx="8"/>\n`;
+
+		// Links
+		for (const link of linksToExport) {
+			const fromNode = nodesToExport.find(n => n.id === link.from);
+			const toNode = nodesToExport.find(n => n.id === link.to);
+			if (!fromNode || !toNode) continue;
+
+			const closest = this._getClosestPorts(fromNode, toNode);
+			const fromPort = link.fromPort || closest.fromPort;
+			const toPort = link.toPort || closest.toPort;
+
+			const startCoords = this._getPortCoords(fromNode, fromPort);
+			const endCoords = this._getPortCoords(toNode, toPort);
+
+			let x1 = startCoords.x;
+			let y1 = startCoords.y;
+			let x2 = endCoords.x;
+			let y2 = endCoords.y;
+
+			if ((fromPort === 'right' && toPort === 'left') || (fromPort === 'left' && toPort === 'right')) {
+				if (Math.abs(y1 - y2) <= 12) y2 = y1;
+			}
+			if ((fromPort === 'top' && toPort === 'bottom') || (fromPort === 'bottom' && toPort === 'top')) {
+				if (Math.abs(x1 - x2) <= 12) x2 = x1;
+			}
+
+			const hasEndArrow = link.style === 'arrow-single' || link.style === 'arrow-double';
+			const hasStartArrow = link.style === 'arrow-double';
+
+			if (hasStartArrow) {
+				if (fromPort === 'right') x1 += 8;
+				else if (fromPort === 'left') x1 -= 8;
+				else if (fromPort === 'bottom') y1 += 8;
+				else if (fromPort === 'top') y1 -= 8;
+			}
+			if (hasEndArrow) {
+				if (toPort === 'left') x2 -= 8;
+				else if (toPort === 'right') x2 += 8;
+				else if (toPort === 'top') y2 -= 8;
+				else if (toPort === 'bottom') y2 -= 8;
+			}
+
+			const routingMode = link.routing || this._activeRoutingMode || 'orthogonal';
+			const d = this._getLinkPathData(x1, y1, fromPort, x2, y2, toPort, routingMode);
+
+			const linkColor = link.color || '#0d9488';
+			const cleanColor = linkColor.replace('#', '');
+			const dashAttr = link.style === 'dashed' ? 'stroke-dasharray="6,4"' : '';
+			const markerEnd = hasEndArrow ? `marker-end="url(#export-arrow-${cleanColor})"` : '';
+			const markerStart = hasStartArrow ? `marker-start="url(#export-arrow-start-${cleanColor})"` : '';
+
+			body += `  <path d="${d}" fill="none" stroke="${linkColor}" stroke-width="2" ${dashAttr} ${markerStart} ${markerEnd} />\n`;
+
+			if (link.label) {
+				const mid = this._getLinkMidpoint(link);
+				const escapedLabel = this._escapeXml(link.label);
+				const labelW = Math.max(40, link.label.length * 7 + 16);
+				body += `  <rect x="${mid.x - labelW / 2}" y="${mid.y - 11}" width="${labelW}" height="22" rx="4" fill="#1e1e1e" stroke="${linkColor}" stroke-width="1"/>\n`;
+				body += `  <text x="${mid.x}" y="${mid.y + 4}" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="500" text-anchor="middle">${escapedLabel}</text>\n`;
+			}
+		}
+
+		// Nodes
+		for (const node of nodesToExport) {
+			const nodeColor = node.color || '#0d9488';
+			const fillColor = hexToRgba(nodeColor, 0.18);
+			const strokeWidth = 2;
+
+			if (node.type === 'round-rect') {
+				body += `  <rect x="${node.x}" y="${node.y}" width="${node.width}" height="${node.height}" rx="8" ry="8" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
+			} else if (node.type === 'rect') {
+				body += `  <rect x="${node.x}" y="${node.y}" width="${node.width}" height="${node.height}" rx="0" ry="0" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
+			} else if (node.type === 'circle') {
+				const cx = node.x + node.width / 2;
+				const cy = node.y + node.height / 2;
+				body += `  <ellipse cx="${cx}" cy="${cy}" rx="${node.width / 2}" ry="${node.height / 2}" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
+			} else if (node.type === 'diamond') {
+				const cx = node.x + node.width / 2;
+				const cy = node.y + node.height / 2;
+				const pts = `${cx},${node.y} ${node.x + node.width},${cy} ${cx},${node.y + node.height} ${node.x},${cy}`;
+				body += `  <polygon points="${pts}" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
+			}
+
+			const textColor = node.textColor || '#ffffff';
+			const isBold = node.isBold ? 'font-weight="bold"' : 'font-weight="500"';
+			const isItalic = node.isItalic ? 'font-style="italic"' : '';
+			const textDec = (node.isUnderline && node.isStrikethrough) ? 'text-decoration="underline line-through"' : (node.isUnderline ? 'text-decoration="underline"' : (node.isStrikethrough ? 'text-decoration="line-through"' : ''));
+
+			const lines = (node.label || '').split('\n');
+			const lineHeight = 16;
+			const totalTextHeight = lines.length * lineHeight;
+			const startY = node.y + (node.height - totalTextHeight) / 2 + 12;
+
+			for (let i = 0; i < lines.length; i++) {
+				const lineText = this._escapeXml(lines[i]);
+				body += `  <text x="${node.x + node.width / 2}" y="${startY + i * lineHeight}" fill="${textColor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="12" ${isBold} ${isItalic} ${textDec} text-anchor="middle" dominant-baseline="middle">${lineText}</text>\n`;
+			}
+		}
+
+		return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="${minX} ${minY} ${width} ${height}">\n${defs}${body}</svg>`;
+	}
+
+	private async _saveExportedFile(fileName: string, dataBuffer: Uint8Array | string, defaultExtension: string): Promise<void> {
+		try {
+			const defaultUri = this._workflowUri ? URI.joinPath(URI.file(this._workflowUri.fsPath.replace(/\.[^/.]+$/, '')), '..', fileName) : undefined;
+			const targetUri = await this._fileDialogService.showSaveDialog({
+				defaultUri,
+				title: 'Export Diagram / Flowchart',
+				filters: [
+					{ name: defaultExtension.toUpperCase(), extensions: [defaultExtension] }
+				]
+			});
+
+			if (targetUri) {
+				const buffer = typeof dataBuffer === 'string' ? VSBuffer.fromString(dataBuffer) : VSBuffer.wrap(dataBuffer);
+				await this._fileService.writeFile(targetUri, buffer);
+				this._notificationService.info(`Successfully exported to '${targetUri.fsPath}'`);
+			}
+		} catch (err) {
+			// Fallback to direct download via browser anchor
+			try {
+				const mime = defaultExtension === 'svg' ? 'image/svg+xml;charset=utf-8' : (defaultExtension === 'pdf' ? 'application/pdf' : `image/${defaultExtension}`);
+				const blob = typeof dataBuffer === 'string' ? new Blob([dataBuffer], { type: mime }) : new Blob([dataBuffer as any], { type: mime });
+				const url = URL.createObjectURL(blob);
+				const a = document.createElement('a');
+				a.href = url;
+				a.download = fileName;
+				document.body.appendChild(a);
+				a.click();
+				document.body.removeChild(a);
+				URL.revokeObjectURL(url);
+				this._notificationService.info(`Exported diagram '${fileName}'`);
+			} catch (downloadErr) {
+				this._notificationService.error(`Failed to export diagram: ${err}`);
+			}
+		}
+	}
+
+	private async _exportDiagram(format: 'png' | 'jpeg' | 'svg' | 'pdf', selectionOnly: boolean = false): Promise<void> {
+		if (!this._data || !Array.isArray(this._data.nodes) || this._data.nodes.length === 0) {
+			this._notificationService.warn('Canvas is empty, nothing to export.');
+			return;
+		}
+
+		const nodesToExport = selectionOnly ? this._data.nodes.filter(n => this._selectedNodeIds.has(n.id)) : this._data.nodes;
+		if (nodesToExport.length === 0) {
+			this._notificationService.warn(selectionOnly ? 'No nodes selected to export.' : 'Canvas is empty.');
+			return;
+		}
+
+		const nodeIdsSet = new Set(nodesToExport.map(n => n.id));
+		const linksToExport = (this._data.links || []).filter(l => nodeIdsSet.has(l.from) && nodeIdsSet.has(l.to));
+
+		// Calculate bounding box
+		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+		for (const n of nodesToExport) {
+			minX = Math.min(minX, n.x);
+			minY = Math.min(minY, n.y);
+			maxX = Math.max(maxX, n.x + n.width);
+			maxY = Math.max(maxY, n.y + n.height);
+		}
+
+		const margin = 40;
+		minX = Math.floor(minX - margin);
+		minY = Math.floor(minY - margin);
+		maxX = Math.ceil(maxX + margin);
+		maxY = Math.ceil(maxY + margin);
+		const width = Math.max(120, maxX - minX);
+		const height = Math.max(80, maxY - minY);
+
+		const defaultName = (this.input as any)?.name || this._workflowUri?.path.split('/').filter(Boolean).pop()?.replace(/\.diagram\.json$/, '').replace(/\.flowchart\.json$/, '') || 'diagram';
+		const cleanBaseName = defaultName.replace(/[\\/:*?"<>|]/g, '_');
+		const suffix = selectionOnly ? '_selection' : '';
+		const fileName = `${cleanBaseName}${suffix}.${format === 'jpeg' ? 'jpg' : format}`;
+
+		const svgString = this._generateSvgString(nodesToExport, linksToExport, { minX, minY, width, height }, format);
+
+		if (format === 'svg') {
+			await this._saveExportedFile(fileName, svgString, 'svg');
+			return;
+		}
+
+		try {
+			// Rasterize SVG on Canvas
+			const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
+			const blobUrl = URL.createObjectURL(svgBlob);
+			const img = new Image();
+
+			await new Promise<void>((resolve, reject) => {
+				img.onload = () => resolve();
+				img.onerror = (e) => reject(new Error('Failed to load SVG for rasterization'));
+				img.src = blobUrl;
+			});
+
+			const scale = 2; // 2x Retina sharpness
+			const canvas = document.createElement('canvas');
+			canvas.width = width * scale;
+			canvas.height = height * scale;
+			const ctx = canvas.getContext('2d')!;
+			ctx.scale(scale, scale);
+
+			if (format === 'jpeg' || format === 'pdf') {
+				ctx.fillStyle = '#1e1e1e';
+				ctx.fillRect(0, 0, width, height);
+			}
+
+			ctx.drawImage(img, 0, 0, width, height);
+			URL.revokeObjectURL(blobUrl);
+
+			if (format === 'png') {
+				const dataUrl = canvas.toDataURL('image/png');
+				const raw = atob(dataUrl.replace(/^data:image\/png;base64,/, ''));
+				const bytes = new Uint8Array(raw.length);
+				for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+				await this._saveExportedFile(fileName, bytes, 'png');
+			} else if (format === 'jpeg') {
+				const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+				const raw = atob(dataUrl.replace(/^data:image\/jpeg;base64,/, ''));
+				const bytes = new Uint8Array(raw.length);
+				for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+				await this._saveExportedFile(fileName, bytes, 'jpg');
+			} else if (format === 'pdf') {
+				const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
+				const raw = atob(dataUrl.replace(/^data:image\/jpeg;base64,/, ''));
+				const jpegBytes = new Uint8Array(raw.length);
+				for (let i = 0; i < raw.length; i++) jpegBytes[i] = raw.charCodeAt(i);
+				const pdfBytes = this._createPdfFromJpeg(jpegBytes, canvas.width, canvas.height);
+				await this._saveExportedFile(fileName, pdfBytes, 'pdf');
+			}
+		} catch (err) {
+			this._notificationService.error(`Export failed: ${err}`);
 		}
 	}
 }

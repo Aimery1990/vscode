@@ -19,6 +19,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { URI } from '../../../../base/common/uri.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { IDiagramsManagerService, IDiagramItem } from '../common/diagramsManager.js';
@@ -28,6 +29,12 @@ import { IDialogService, IFileDialogService } from '../../../../platform/dialogs
 import { IPathService } from '../../../services/path/common/pathService.js';
 import { DiagramEditorInput } from './diagramEditorInput.js';
 import { createDiagramDialog } from './diagramEditorDialog.js';
+import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
+import { IViewsService } from '../../../services/views/common/viewsService.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
+import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
+import { VIEW_ID } from '../../files/common/files.js';
+import { dirname } from '../../../../base/common/resources.js';
 
 export class DiagramsManagerPane extends ViewPane {
 	private containerEl?: HTMLElement;
@@ -51,7 +58,11 @@ export class DiagramsManagerPane extends ViewPane {
 		@ICommandService private readonly commandService: ICommandService,
 		@IDialogService private readonly dialogService: IDialogService,
 		@IFileDialogService private readonly fileDialogService: IFileDialogService,
-		@IPathService private readonly pathService: IPathService
+		@IPathService private readonly pathService: IPathService,
+		@IWorkspaceEditingService private readonly workspaceEditingService: IWorkspaceEditingService,
+		@IViewsService private readonly viewsService: IViewsService,
+		@IFileService private readonly fileService: IFileService,
+		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -78,6 +89,30 @@ export class DiagramsManagerPane extends ViewPane {
 				this.setExpanded(false);
 			}
 		}));
+	}
+
+	private async showInExplorer(resourceUri: URI): Promise<void> {
+		try {
+			const exists = await this.fileService.exists(resourceUri);
+			if (!exists) {
+				this.notificationService.warn(`Path does not exist: ${resourceUri.fsPath}`);
+				return;
+			}
+			const stat = await this.fileService.resolve(resourceUri);
+			const targetDir = stat.isDirectory ? resourceUri : dirname(resourceUri);
+
+			const currentFolders = this.workspaceContextService.getWorkspace().folders;
+			const isInside = currentFolders.some(f => this.uriIdentityService.extUri.isEqualOrParent(resourceUri, f.uri));
+
+			if (!isInside) {
+				await this.workspaceEditingService.addFolders([{ uri: targetDir }]);
+			}
+
+			await this.viewsService.openView(VIEW_ID, true);
+			await this.commandService.executeCommand('revealInExplorer', resourceUri);
+		} catch (err) {
+			this.notificationService.error(`Failed to show in explorer: ${err}`);
+		}
 	}
 
 	protected override renderBody(container: HTMLElement): void {
@@ -266,14 +301,14 @@ export class DiagramsManagerPane extends ViewPane {
 							}
 						},
 						{
-							id: 'reveal',
-							label: 'Reveal in Explorer View',
+							id: 'show_in_explorer',
+							label: 'Show in Explorer',
 							tooltip: '',
 							class: undefined,
 							enabled: true,
 							checked: false,
 							run: async () => {
-								await this.commandService.executeCommand('revealInExplorer', diagram.uri);
+								await this.showInExplorer(diagram.uri);
 							}
 						},
 						{
