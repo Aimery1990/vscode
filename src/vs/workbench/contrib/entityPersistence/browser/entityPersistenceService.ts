@@ -456,14 +456,17 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		await this.fileService.writeFile(instructionUri, VSBuffer.fromString(instructionContent));
 
 		// 3. README.md
-		let readmeContent = `# ${snapshot.entityName}\n\n## Metadata\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
+		let readmeContent = `# ${snapshot.entityName}\n\n`;
+		readmeContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
+		readmeContent += `- **Ticket Type**: ${type}\n`;
+		readmeContent += `- **Title**: ${snapshot.entityName}\n`;
+		readmeContent += `- **Description**: ${description || 'None'}\n`;
 		readmeContent += `- **Parent Path**: ${parentRelPath}\n`;
 		readmeContent += `- **Ego MDs Paths**:\n`;
 		readmeContent += `  - [instruction.md](file://${instructionUri.fsPath})\n`;
 		readmeContent += `  - [README.md](file://${readmeUri.fsPath})\n`;
 		readmeContent += `  - [ticket.md](file://${mainMdUri.fsPath})\n`;
 		readmeContent += `  - [worklog.md](file://${workLogUri.fsPath})\n`;
-		readmeContent += `\n${description}\n\n## Document Navigation\n\n- [ticket.md](file://${mainMdUri.fsPath})\n- [instruction.md](file://${instructionUri.fsPath})\n- [worklog.md](file://${workLogUri.fsPath})\n`;
 		await this.fileService.writeFile(readmeUri, VSBuffer.fromString(readmeContent));
 
 		// 4. worklog.md
