@@ -50,6 +50,7 @@ interface ICustomField {
 interface ICustomModule {
 	id: string;
 	name: string;
+	description?: string;
 	isDeprecated?: boolean;
 	color: string;
 	storageScope?: 'global' | 'workspace';
@@ -2611,6 +2612,18 @@ export class MainWorkspaceViewPane extends ViewPane {
 				scopeSelect.value = activeMod.storageScope || 'global';
 				scopeSelect.onchange = () => {
 					activeMod.storageScope = scopeSelect.value as any;
+				};
+
+				// Type Definition (Description) Input
+				const defGroup = append(configMetaContainer, $('.form-group', { style: 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 260px;' }));
+				append(defGroup, $('label', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #888888; white-space: nowrap;' }, 'Type Definition:'));
+				const defInput = append(defGroup, $('input.monaco-inputbox', {
+					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: #1a1a1a; color: inherit; box-sizing: border-box;'
+				})) as HTMLInputElement;
+				defInput.placeholder = 'e.g. Explains purpose and workflow of this custom module...';
+				defInput.value = activeMod.description || '';
+				defInput.oninput = () => {
+					activeMod.description = defInput.value;
 				};
 
 				// Color Picker container

@@ -410,38 +410,66 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		const ticketRel = getRelativePath(mainMdUri, baseUri);
 		const worklogRel = getRelativePath(workLogUri, baseUri);
 
-		// 1. Primary Entity MD
-		let mainMdContent = `# ${snapshot.entityName}\n\n## Metadata\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
-		if (snapshot.entityCode) {
-			mainMdContent += `- **Ticket Code**: ${snapshot.entityCode}\n`;
-		}
-		mainMdContent += `- **Priority**: ${snapshot.priority || 'Medium'}\n`;
-		if (snapshot.assignedAgentName) {
-			mainMdContent += `- **Assigned Agent**: ${snapshot.assignedAgentName}\n`;
-		}
-		if (snapshot.agentRulePrompt) {
-			mainMdContent += `- **Agent Rule**: ${snapshot.agentRulePrompt}\n`;
-		}
-		mainMdContent += `- **Status**: Todo\n`;
+		const builtInTypeDefs: Record<string, string> = {
+			workspace: 'A Workspace is the top-level root environment and repository container.',
+			job: 'A Job is a high-level goal-oriented operational workflow or container.',
+			project: 'A Project represents a structured software project or sub-system.',
+			task: 'A Task represents a specific, actionable unit of engineering work.',
+			workflow: 'A Workflow coordinates automated execution nodes and AI pipelines.',
+			case: 'A Case encapsulates specific test scenarios, verification runs, or business cases.',
+			agent: 'An AI Agent represents an autonomous role-based assistant entity.',
+			issue: 'An Issue tracks defects, bugs, and incident remediation items.',
+			analysis: 'An Analysis stores diagnostic findings, telemetry, and architectural studies.',
+			note: 'A Note stores unstructured research, memos, and knowledge-base items.',
+			folder: 'A standard directory container for grouping items.',
+			file: 'A standalone document or data asset.'
+		};
+		const typeDefStr = (snapshot as any).typeDefinition || builtInTypeDefs[type.toLowerCase()] || `${type.toUpperCase()} module entity definition.`;
 
-		if (type === 'agent') {
-			mainMdContent += `- **Role**: ${snapshot.role || 'AI Agent'}\n- **Model**: \`${modelStr}\`\n- **Scope Type**: ${snapshot.scopeType || 'workspace'}\n- **Scope Name**: ${snapshot.scopeName || 'Workspace'}\n`;
-		}
+		// 1. Primary Entity MD (ticket.md)
+		let mainMdContent = `# ${snapshot.entityName}\n\n## Metadata\n\n`;
+		mainMdContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
+		mainMdContent += `- **Ticket Type**: ${type}\n`;
+		mainMdContent += `- **Type Definition**: ${typeDefStr}\n\n`;
 
-		if (snapshot.customMetadata) {
+		mainMdContent += `### Profile Data\n`;
+		mainMdContent += `- **Created By**: User\n`;
+		mainMdContent += `- **Owner Account**: ${ownerAccount}\n`;
+		mainMdContent += `- **Created At**: ${dateTimeFormatted}\n`;
+		mainMdContent += `- **Ticket Code**: ${snapshot.entityCode || 'None'}\n`;
+		mainMdContent += `- **Last Updated At**: ${dateTimeFormatted}\n`;
+		mainMdContent += `- **Last Updated By**: User\n\n`;
+
+		mainMdContent += `### Self Defined Data (If any)\n`;
+		const schemaRelPath = `.agents/entity_types/${type}.yaml`;
+		if (snapshot.customMetadata && Object.keys(snapshot.customMetadata).length > 0) {
+			mainMdContent += `- **Self Defined Data Structure**: ${schemaRelPath}\n`;
+			mainMdContent += `- **Self Defined Data Value**:\n`;
 			for (const [k, v] of Object.entries(snapshot.customMetadata)) {
-				mainMdContent += `- **${k}**: ${v}\n`;
+				mainMdContent += `  - **${k}**: ${v}\n`;
 			}
+		} else {
+			mainMdContent += `- **Self Defined Data Structure**: None\n`;
+			mainMdContent += `- **Self Defined Data Value**: None\n`;
 		}
+		mainMdContent += `\n`;
 
+		mainMdContent += `- **Current AI Agent**: ${snapshot.assignedAgentName || 'None'}\n`;
+		mainMdContent += `- **Status**: Todo\n`;
+		mainMdContent += `- **Priority**: ${snapshot.priority || 'Medium'}\n`;
 		mainMdContent += `- **Parent Path**: ${parentRelPath}\n`;
 		mainMdContent += `- **Ego MDs Paths**:\n`;
 		mainMdContent += `  - [instruction.md](${instructionRel})\n`;
 		mainMdContent += `  - [README.md](${readmeRel})\n`;
 		mainMdContent += `  - [ticket.md](${ticketRel})\n`;
-		mainMdContent += `  - [worklog.md](${worklogRel})\n`;
+		mainMdContent += `  - [worklog.md](${worklogRel})\n\n`;
 
-		mainMdContent += `\n## Description\n\n${description}\n\n## Linked System Files\n\n- [instruction.md](${instructionRel})\n- [README.md](${readmeRel})\n- [worklog.md](${worklogRel})\n`;
+		mainMdContent += `### Link\n`;
+		mainMdContent += `- **Link To**: None\n`;
+		mainMdContent += `- **Linked By**: None\n\n`;
+
+		mainMdContent += `### Attachments Links\n`;
+		mainMdContent += `- None\n`;
 		await this.fileService.writeFile(mainMdUri, VSBuffer.fromString(mainMdContent));
 
 		// 2. instruction.md
