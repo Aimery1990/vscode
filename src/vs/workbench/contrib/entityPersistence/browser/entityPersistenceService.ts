@@ -214,6 +214,20 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 	private async detectEntityType(targetUri: URI): Promise<EntityType> {
 		const configDir = await this.migrateLegacyEntityFilesIfNeeded(targetUri);
+		const ticketUri = URI.joinPath(configDir, 'ticket.md');
+
+		try {
+			if (await this.fileService.exists(ticketUri)) {
+				const content = await this.fileService.readFile(ticketUri);
+				const text = content.value.toString();
+				const typeMatch = text.match(/-\s+\*\*Ticket\s+Type\*\*:\s*([a-zA-Z0-9_-]+)/i) || text.match(/-\s+\*\*Entity\s+Type\*\*:\s*([a-zA-Z0-9_-]+)/i);
+				if (typeMatch && typeMatch[1]) {
+					return typeMatch[1].trim().toLowerCase() as EntityType;
+				}
+			}
+		} catch {
+			// ignore
+		}
 
 		try {
 			if (await this.fileService.exists(configDir)) {
@@ -222,7 +236,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 					for (const child of stat.children) {
 						if (!child.isDirectory && child.name.endsWith('.md')) {
 							const nameLower = child.name.toLowerCase();
-							if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md') {
+							if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md' && nameLower !== 'ticket.md') {
 								return child.name.substring(0, child.name.length - 3) as EntityType;
 							}
 						}
@@ -292,17 +306,20 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 			const configDir = await this.migrateLegacyEntityFilesIfNeeded(targetUri);
 			const type: EntityType = snapshot ? snapshot.entityType : await this.detectEntityType(targetUri);
-			const mainMdFileName = type === 'workspace' ? 'workspace.md' : `${type}.md`;
-			const mainMdUri = URI.joinPath(configDir, mainMdFileName);
+			const mainMdUri = URI.joinPath(configDir, 'ticket.md');
 			const instructionUri = URI.joinPath(configDir, 'instruction.md');
 
-			const hasMainMd = await this.fileService.exists(mainMdUri);
-			const hasInstruction = await this.fileService.exists(instructionUri);
+			const hasMainMd = await this.fileService.exists(mainMdUri) ||
+				await this.fileService.exists(URI.joinPath(configDir, `${type}.md`)) ||
+				await this.fileService.exists(URI.joinPath(configDir, 'workspace.md')) ||
+				await this.fileService.exists(URI.joinPath(targetUri, 'ticket.md')) ||
+				await this.fileService.exists(URI.joinPath(targetUri, `${type}.md`));
+			const hasInstruction = await this.fileService.exists(instructionUri) || await this.fileService.exists(URI.joinPath(targetUri, 'instruction.md'));
 
 			if (!hasMainMd || !hasInstruction) {
 				return {
 					isMissing: true,
-					missingReason: `Standard 4-MD files missing or damaged inside ${SYSTEM_CONFIG_DIR_NAME} (${mainMdFileName})`,
+					missingReason: `Standard 4-MD files missing or damaged inside ${SYSTEM_CONFIG_DIR_NAME} (ticket.md / instruction.md)`,
 					snapshot
 				};
 			}
