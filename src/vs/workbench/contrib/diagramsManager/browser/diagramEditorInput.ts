@@ -10,7 +10,7 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
 
-export const diagramEditorIcon = registerIcon('diagram-editor-label-icon', Codicon.graph, 'Icon of the diagram editor label.');
+export const diagramEditorIcon = registerIcon('diagram-editor-label-icon', Codicon.typeHierarchy, 'Icon of the diagram editor label.');
 
 export class DiagramEditorInput extends EditorInput {
 	static readonly ID = 'workbench.input.diagramEditor';

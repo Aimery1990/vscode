@@ -70,7 +70,7 @@ export async function createDiagramDialog(
 	titleRow.style.alignItems = 'center';
 	titleRow.style.gap = '8px';
 
-	const iconSpan = append(titleRow, $('span' + ThemeIcon.asCSSSelector(Codicon.graph)));
+	const iconSpan = append(titleRow, $('span' + ThemeIcon.asCSSSelector(Codicon.typeHierarchy)));
 	iconSpan.style.color = 'var(--vscode-charts-purple, #a855f7)';
 	iconSpan.style.fontSize = '16px';
 

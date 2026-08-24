@@ -241,23 +241,28 @@ export class EntityDetailEditor extends EditorPane {
 		let detectedMainMdName: string | undefined;
 		let detectedType: string = 'task';
 
-		try {
-			if (await this._fileService.exists(agentsDir)) {
-				const stat = await this._fileService.resolve(agentsDir);
-				if (stat.children) {
-					for (const child of stat.children) {
-						if (!child.isDirectory && child.name.endsWith('.md')) {
-							const nameLower = child.name.toLowerCase();
-							if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md') {
-								detectedMainMdName = child.name;
-								detectedType = child.name.substring(0, child.name.length - 3);
-								break;
+		const ticketPath = URI.joinPath(agentsDir, 'ticket.md');
+		if (await this._fileService.exists(ticketPath)) {
+			detectedMainMdName = 'ticket.md';
+		} else {
+			try {
+				if (await this._fileService.exists(agentsDir)) {
+					const stat = await this._fileService.resolve(agentsDir);
+					if (stat.children) {
+						for (const child of stat.children) {
+							if (!child.isDirectory && child.name.endsWith('.md')) {
+								const nameLower = child.name.toLowerCase();
+								if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md') {
+									detectedMainMdName = child.name;
+									detectedType = child.name.substring(0, child.name.length - 3);
+									break;
+								}
 							}
 						}
 					}
 				}
-			}
-		} catch {}
+			} catch {}
+		}
 
 		if (detectedMainMdName) {
 			this._entityType = detectedType;
@@ -291,11 +296,19 @@ export class EntityDetailEditor extends EditorPane {
 
 		this._instructionUri = await this._resolveFileUri(this._entityUri, 'instruction.md');
 		this._readmeUri = await this._resolveFileUri(this._entityUri, 'README.md');
-		this._workLogUri = await this._resolveFileUri(this._entityUri, 'work_log.md');
+		const worklogUriNew = URI.joinPath(agentsDir, 'worklog.md');
+		if (await this._fileService.exists(worklogUriNew)) {
+			this._workLogUri = worklogUriNew;
+		} else {
+			this._workLogUri = await this._resolveFileUri(this._entityUri, 'work_log.md');
+		}
 
 		// 2. Load contents
 		const entityContent = await this._safeReadFile(this._entityFileUri);
 		const parsed = this._parseEntityFile(entityContent);
+		if (this._entityFileUri.path.endsWith('ticket.md')) {
+			this._entityType = parsed.metadata['Ticket Type'] || parsed.metadata['Entity Type'] || 'task';
+		}
 
 		const instructionContent = await this._safeReadFile(this._instructionUri);
 		const readmeContent = await this._safeReadFile(this._readmeUri);

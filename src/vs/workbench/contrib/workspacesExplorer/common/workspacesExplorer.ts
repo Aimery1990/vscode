@@ -108,6 +108,7 @@ export interface IWorkspacesExplorerService {
 	addWorkspace(uri: URI, name?: string): Promise<void>;
 	removeWorkspace(uri: URI): Promise<void>;
 	scanWorkspaceChildren(workspaceUri: URI): Promise<IWorkspaceChildItem[]>;
+	detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType>;
 	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult>;
 	createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult>;
 	createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult>;

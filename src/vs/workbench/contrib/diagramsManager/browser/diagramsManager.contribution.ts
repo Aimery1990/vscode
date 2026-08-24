@@ -31,10 +31,10 @@ import { IPathService } from '../../../services/path/common/pathService.js';
 // 1. Register Service
 registerSingleton(IDiagramsManagerService, DiagramsManagerService, InstantiationType.Delayed);
 
-// 2. Register Icon (Codicon.graph as the standard Diagram/Flowchart icon)
+// 2. Register Icon (Codicon.typeHierarchy as the standard Diagram/Flowchart icon)
 export const diagramsManagerIcon = registerIcon(
 	'diagrams-manager-view-icon',
-	Codicon.graph,
+	Codicon.typeHierarchy,
 	localize('diagramsManagerIcon', 'View icon of the Diagrams Manager view.')
 );
 

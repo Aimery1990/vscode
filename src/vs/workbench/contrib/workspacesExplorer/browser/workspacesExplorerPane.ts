@@ -1130,14 +1130,18 @@ export class MainWorkspaceViewPane extends ViewPane {
 				} else if (child.uri.path.toLowerCase().endsWith('.md')) {
 					const fileName = child.uri.path.split('/').pop() || '';
 					const parentUri = dirname(child.uri);
-					const isAgentMd = parentUri.path.endsWith('.agents') || ['instruction.md', 'readme.md', 'work_log.md', 'workspace.md'].includes(fileName.toLowerCase());
+					const isAgentMd = parentUri.path.endsWith('.agents') || ['instruction.md', 'readme.md', 'work_log.md', 'worklog.md', 'ticket.md', 'workspace.md'].includes(fileName.toLowerCase());
 					if (isAgentMd) {
 						let entityUri = parentUri;
 						if (parentUri.path.endsWith('.agents')) {
 							entityUri = dirname(parentUri);
 						}
 						const entityName = entityUri.path.split('/').filter(Boolean).pop() || 'Entity';
-						const isWorkflow = fileName.toLowerCase() === 'workflow.md' || entityUri.path.toLowerCase().includes('workflow');
+						let isWorkflow = fileName.toLowerCase() === 'workflow.md' || entityUri.path.toLowerCase().includes('workflow');
+						if (fileName.toLowerCase() === 'ticket.md') {
+							const detectedType = await this.workspacesExplorerService.detectCustomEntityTypeFromDisk(entityUri);
+							isWorkflow = detectedType === 'workflow';
+						}
 						if (isWorkflow) {
 							await this.editorService.openEditor(new WorkflowEditorInput(entityUri, entityName), { pinned: true });
 						} else {

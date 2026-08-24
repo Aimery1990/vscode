@@ -330,23 +330,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					}
 
 					let detectedType: ResourceType | undefined = snapshot?.entityType;
-					const configDir = URI.joinPath(targetBase, '.agents');
-					const hasJobMd = await this.fileService.exists(URI.joinPath(configDir, 'job.md')) || await this.fileService.exists(URI.joinPath(targetBase, 'job.md'));
-					const hasProjectMd = await this.fileService.exists(URI.joinPath(configDir, 'project.md')) || await this.fileService.exists(URI.joinPath(targetBase, 'project.md'));
-					const hasTaskMd = await this.fileService.exists(URI.joinPath(configDir, 'task.md')) || await this.fileService.exists(URI.joinPath(targetBase, 'task.md'));
-					const hasAgentMd = await this.fileService.exists(URI.joinPath(configDir, 'agent.md')) || await this.fileService.exists(URI.joinPath(targetBase, 'agent.md'));
-					const hasWorkflowMd = await this.fileService.exists(URI.joinPath(configDir, 'workflow.md')) || await this.fileService.exists(URI.joinPath(targetBase, 'workflow.md'));
-
-					if (hasJobMd || targetBase.path.toLowerCase().includes('job')) {
-						detectedType = 'job';
-					} else if (hasProjectMd) {
-						detectedType = 'project';
-					} else if (hasTaskMd) {
-						detectedType = 'task';
-					} else if (hasAgentMd) {
-						detectedType = 'agent';
-					} else if (hasWorkflowMd) {
-						detectedType = 'workflow';
+					if (!detectedType) {
+						detectedType = await this.detectCustomEntityTypeFromDisk(targetBase);
 					}
 
 					resultItems.push({
@@ -611,8 +596,22 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		}
 	}
 
-	private async detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType> {
+	public async detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType> {
 		const configDir = URI.joinPath(childUri, '.agents');
+		const ticketUri = URI.joinPath(configDir, 'ticket.md');
+		try {
+			if (await this.fileService.exists(ticketUri)) {
+				const content = await this.fileService.readFile(ticketUri);
+				const text = content.value.toString();
+				const typeMatch = text.match(/-\s+\*\*Ticket\s+Type\*\*:\s*([a-zA-Z0-9_-]+)/i) || text.match(/-\s+\*\*Entity\s+Type\*\*:\s*([a-zA-Z0-9_-]+)/i);
+				if (typeMatch && typeMatch[1]) {
+					return typeMatch[1].trim().toLowerCase() as ResourceType;
+				}
+			}
+		} catch {
+			// ignore
+		}
+
 		try {
 			if (await this.fileService.exists(configDir)) {
 				const stat = await this.fileService.resolve(configDir);
@@ -620,7 +619,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					for (const child of stat.children) {
 						if (!child.isDirectory && child.name.endsWith('.md')) {
 							const nameLower = child.name.toLowerCase();
-							if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md') {
+							if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md' && nameLower !== 'ticket.md') {
 								return child.name.substring(0, child.name.length - 3) as ResourceType;
 							}
 						}
@@ -708,7 +707,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						for (const child of stat.children) {
 							if (!child.isDirectory && child.name.endsWith('.md')) {
 								const nameLower = child.name.toLowerCase();
-								if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md') {
+								if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md') {
 									foundMdUri = child.resource;
 									break;
 								}
@@ -721,7 +720,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			if (foundMdUri) {
 				try {
 					const content = (await this.fileService.readFile(foundMdUri)).value.toString();
-					const match = content.match(/-\s*\*\*Entity Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/);
+					const match = content.match(/-\s*\*\*Entity Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/) || content.match(/-\s*\*\*Ticket Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/);
 					if (match && match[1]) {
 						const code = match[1].trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 						if (code) return code;
@@ -844,7 +843,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		const sanitizedName = name.replace(/[^a-zA-Z0-9_-]/g, '-');
 		const folderName = sanitizedName;
 		const entityFolderUri = URI.joinPath(targetBaseUri, folderName);
-		const mainMdFileName = `${type}.md`;
+		const mainMdFileName = 'ticket.md';
 		const mainMdUri = URI.joinPath(entityFolderUri, '.agents', mainMdFileName);
 
 		const alreadyExists = await this.fileService.exists(mainMdUri) || await this.fileService.exists(entityFolderUri);
@@ -919,7 +918,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			systemPrompt: finalSystemPrompt,
 			scopeType: parentType as any,
 			scopeId: targetBaseUri.toString(),
-			scopeName: parentName
+			scopeName: parentName,
+			customMetadata: options.customMetadata
 		}, targetBaseUri, true);
 
 		if (type === 'agent' && this.agentsManagerService) {

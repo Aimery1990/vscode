@@ -210,7 +210,7 @@ export class DiagramsManagerPane extends ViewPane {
 
 		if (filtered.length === 0) {
 			const emptyEl = append(container, $('.diagrams-empty-state'));
-			const emptyIcon = append(emptyEl, $('span' + ThemeIcon.asCSSSelector(Codicon.graph)));
+			const emptyIcon = append(emptyEl, $('span' + ThemeIcon.asCSSSelector(Codicon.typeHierarchy)));
 			emptyIcon.style.fontSize = '32px';
 			emptyIcon.style.opacity = '0.4';
 			emptyIcon.style.marginBottom = '8px';
@@ -248,7 +248,7 @@ export class DiagramsManagerPane extends ViewPane {
 			};
 
 			const iconEl = append(itemEl, $('.diagram-card-icon'));
-			append(iconEl, $('span' + ThemeIcon.asCSSSelector(Codicon.graph)));
+			append(iconEl, $('span' + ThemeIcon.asCSSSelector(Codicon.typeHierarchy)));
 
 			const infoEl = append(itemEl, $('.diagram-card-info'));
 			const titleRow = append(infoEl, $('.diagram-card-title-row'));

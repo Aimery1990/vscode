@@ -11,6 +11,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot, EntityType } from '../common/entityPersistence.js';
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
+import { dirname } from '../../../../base/common/resources.js';
 
 const SNAPSHOTS_STORAGE_KEY = 'anyagent.entityPersistence.snapshots';
 export const SYSTEM_CONFIG_DIR_NAME = '.agents';
@@ -366,16 +367,31 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		const modelStr = snapshot.modelName || 'gemini-2.0-flash';
 		const description = snapshot.description || `${type} description`;
 
-		const mainMdFileName = type === 'workspace' ? 'workspace.md' : `${type}.md`;
+		const mainMdFileName = 'ticket.md';
 		const mainMdUri = URI.joinPath(configDir, mainMdFileName);
 		const instructionUri = URI.joinPath(configDir, 'instruction.md');
 		const readmeUri = URI.joinPath(configDir, 'README.md');
-		const workLogUri = URI.joinPath(configDir, 'work_log.md');
+		const workLogUri = URI.joinPath(configDir, 'worklog.md');
+
+		const getRelativePath = (uri: URI, baseUri: URI): string => {
+			const uriPath = uri.path;
+			const basePath = baseUri.path;
+			if (uriPath.startsWith(basePath)) {
+				let rel = uriPath.substring(basePath.length);
+				if (rel.startsWith('/')) rel = rel.substring(1);
+				return rel;
+			}
+			return uriPath;
+		};
+
+		const baseUri = URI.parse(snapshot.belongsToWorkspaceUri || targetFolderUri.toString());
+		const parentUri = isNewFolder ? targetFolderUri : dirname(entityFolderUri);
+		const parentRelPath = getRelativePath(parentUri, baseUri) || '.';
 
 		// 1. Primary Entity MD
-		let mainMdContent = `# ${snapshot.entityName} (${type.toUpperCase()})\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n- **Entity Type**: ${type}\n`;
+		let mainMdContent = `# ${snapshot.entityName}\n\n## Metadata\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
 		if (snapshot.entityCode) {
-			mainMdContent += `- **Entity Code**: ${snapshot.entityCode}\n`;
+			mainMdContent += `- **Ticket Code**: ${snapshot.entityCode}\n`;
 		}
 		mainMdContent += `- **Priority**: ${snapshot.priority || 'Medium'}\n`;
 		if (snapshot.assignedAgentName) {
@@ -396,11 +412,24 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			}
 		}
 
-		mainMdContent += `\n## Description\n\n${description}\n\n## Linked System Files\n\n- [instruction.md](file://${instructionUri.fsPath})\n- [README.md](file://${readmeUri.fsPath})\n- [work_log.md](file://${workLogUri.fsPath})\n`;
+		mainMdContent += `- **Parent Path**: ${parentRelPath}\n`;
+		mainMdContent += `- **Ego MDs Paths**:\n`;
+		mainMdContent += `  - [instruction.md](file://${instructionUri.fsPath})\n`;
+		mainMdContent += `  - [README.md](file://${readmeUri.fsPath})\n`;
+		mainMdContent += `  - [ticket.md](file://${mainMdUri.fsPath})\n`;
+		mainMdContent += `  - [worklog.md](file://${workLogUri.fsPath})\n`;
+
+		mainMdContent += `\n## Description\n\n${description}\n\n## Linked System Files\n\n- [instruction.md](file://${instructionUri.fsPath})\n- [README.md](file://${readmeUri.fsPath})\n- [worklog.md](file://${workLogUri.fsPath})\n`;
 		await this.fileService.writeFile(mainMdUri, VSBuffer.fromString(mainMdContent));
 
 		// 2. instruction.md
-		let instructionContent = `# Instruction - ${snapshot.entityName}\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n- **Entity Type**: ${type}\n`;
+		let instructionContent = `# Instruction - ${snapshot.entityName}\n\n## Metadata\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
+		instructionContent += `- **Parent Path**: ${parentRelPath}\n`;
+		instructionContent += `- **Ego MDs Paths**:\n`;
+		instructionContent += `  - [instruction.md](file://${instructionUri.fsPath})\n`;
+		instructionContent += `  - [README.md](file://${readmeUri.fsPath})\n`;
+		instructionContent += `  - [ticket.md](file://${mainMdUri.fsPath})\n`;
+		instructionContent += `  - [worklog.md](file://${workLogUri.fsPath})\n`;
 
 		if (type === 'agent') {
 			instructionContent += `- **AI Model**: \`${modelStr}\`\n\n## System Prompt\n\n\`\`\`\n${snapshot.systemPrompt || 'You are a specialized AI Agent.'}\n\`\`\`\n\n## Operational Role & Guidelines\n\n- **Role**: ${snapshot.role || 'AI Agent'}\n- **Work Scope**: ${snapshot.scopeName || 'Workspace'} (${snapshot.scopeType || 'workspace'})\n- **Core Instructions**: Follow clean code principles, modular domain architecture, and clear progress reporting.\n`;
@@ -410,12 +439,26 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		await this.fileService.writeFile(instructionUri, VSBuffer.fromString(instructionContent));
 
 		// 3. README.md
-		const readmeContent = `# ${snapshot.entityName}\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n\n${description}\n\n## Document Navigation\n\n- [${mainMdFileName}](file://${mainMdUri.fsPath})\n- [instruction.md](file://${instructionUri.fsPath})\n- [work_log.md](file://${workLogUri.fsPath})\n`;
+		let readmeContent = `# ${snapshot.entityName}\n\n## Metadata\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
+		readmeContent += `- **Parent Path**: ${parentRelPath}\n`;
+		readmeContent += `- **Ego MDs Paths**:\n`;
+		readmeContent += `  - [instruction.md](file://${instructionUri.fsPath})\n`;
+		readmeContent += `  - [README.md](file://${readmeUri.fsPath})\n`;
+		readmeContent += `  - [ticket.md](file://${mainMdUri.fsPath})\n`;
+		readmeContent += `  - [worklog.md](file://${workLogUri.fsPath})\n`;
+		readmeContent += `\n${description}\n\n## Document Navigation\n\n- [ticket.md](file://${mainMdUri.fsPath})\n- [instruction.md](file://${instructionUri.fsPath})\n- [worklog.md](file://${workLogUri.fsPath})\n`;
 		await this.fileService.writeFile(readmeUri, VSBuffer.fromString(readmeContent));
 
-		// 4. work_log.md
+		// 4. worklog.md
 		if (!await this.fileService.exists(workLogUri)) {
-			const workLogContent = `# Work Log - ${snapshot.entityName}\n\n## Metadata\n\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n\n## ${dateTimeFormatted.slice(0, 10)}\n\n### Initialization & Restoration\n\n- Initialized standard 4-MD files in ${SYSTEM_CONFIG_DIR_NAME} for ${type} '${snapshot.entityName}'\n`;
+			let workLogContent = `# Work Log - ${snapshot.entityName}\n\n## Metadata\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
+			workLogContent += `- **Parent Path**: ${parentRelPath}\n`;
+			workLogContent += `- **Ego MDs Paths**:\n`;
+			workLogContent += `  - [instruction.md](file://${instructionUri.fsPath})\n`;
+			workLogContent += `  - [README.md](file://${readmeUri.fsPath})\n`;
+			workLogContent += `  - [ticket.md](file://${mainMdUri.fsPath})\n`;
+			workLogContent += `  - [worklog.md](file://${workLogUri.fsPath})\n`;
+			workLogContent += `\n## ${dateTimeFormatted.slice(0, 10)}\n\n### Initialization & Restoration\n\n- Initialized standard 4-MD files in ${SYSTEM_CONFIG_DIR_NAME} for ${type} '${snapshot.entityName}'\n`;
 			await this.fileService.writeFile(workLogUri, VSBuffer.fromString(workLogContent));
 		}
 
