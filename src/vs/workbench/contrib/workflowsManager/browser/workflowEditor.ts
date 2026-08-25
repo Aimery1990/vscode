@@ -199,7 +199,6 @@ export class WorkflowEditor extends EditorPane {
 	private _zoomLevel: number = 1.0;
 	private _zoomSizerEl?: HTMLElement;
 	private _floatingZoomBadgeEl?: HTMLElement;
-	private _toolbarEl?: HTMLElement;
 	private _isToolbarCompact: boolean = false;
 	private _inspectorEl?: HTMLElement;
 	private _isInspectorCompact: boolean = false;
@@ -431,7 +430,6 @@ export class WorkflowEditor extends EditorPane {
 		if (this._isToolbarCompact) {
 			toolbar.classList.add('compact');
 		}
-		this._toolbarEl = toolbar;
 		this._renderToolbar(toolbar);
 
 		// 2. Center Drawing Viewport (Fixed container for floating controls)
