@@ -557,14 +557,37 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 		// 4. worklog.md
 		if (!await this.fileService.exists(workLogUri)) {
-			let workLogContent = `# Work Log - ${snapshot.entityName}\n\n## Overview\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
+			const fullLogDateTime = this.getFormattedDateTimeWithSecondsAndTz();
+			let workLogContent = `# Work Log - ${snapshot.entityName}\n\n## Overview\n\n`;
+			workLogContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
+			workLogContent += `- **Ticket Type**: ${type}\n`;
 			workLogContent += `- **Parent Path**: ${parentRelPath}\n`;
 			workLogContent += `- **Ego MDs Paths**:\n`;
 			workLogContent += `  - [instruction.md](${instructionRel})\n`;
 			workLogContent += `  - [README.md](${readmeRel})\n`;
 			workLogContent += `  - [ticket.md](${ticketRel})\n`;
-			workLogContent += `  - [worklog.md](${worklogRel})\n`;
-			workLogContent += `\n## ${dateTimeFormatted.slice(0, 10)}\n\n### Initialization & Restoration\n\n- Initialized standard 4-MD files in ${SYSTEM_CONFIG_DIR_NAME} for ${type} '${snapshot.entityName}'\n`;
+			workLogContent += `  - [worklog.md](${worklogRel})\n\n`;
+			workLogContent += `---\n\n`;
+			workLogContent += `## ${fullLogDateTime}\n\n`;
+			workLogContent += `- **Update Datetime**: ${fullLogDateTime}\n`;
+			workLogContent += `- **Update By**: User\n\n`;
+			workLogContent += `### User Request\n`;
+			workLogContent += `Initialize standard 4-MD files for ${type} '${snapshot.entityName}'.\n\n`;
+			workLogContent += `### Update Summary\n`;
+			workLogContent += `Created standard ticket configuration and documentation files in .agents directory.\n\n`;
+			workLogContent += `### Update Details\n`;
+			workLogContent += `- Initialized \`ticket.md\` with standard entity metadata.\n`;
+			workLogContent += `- Initialized \`instruction.md\` with execution prompts.\n`;
+			workLogContent += `- Initialized \`README.md\` with ticket overview.\n`;
+			workLogContent += `- Initialized \`worklog.md\` work log record.\n\n`;
+			workLogContent += `### Update Conclusion\n`;
+			workLogContent += `Standard 4-MD files initialized successfully.\n\n`;
+			workLogContent += `### Commit\n`;
+			workLogContent += `- **Repo**: None\n`;
+			workLogContent += `- **Branch**: None\n`;
+			workLogContent += `- **ID**: None\n`;
+			workLogContent += `- **comment**: None\n`;
+			workLogContent += `- **committed by**: None\n`;
 			await this.fileService.writeFile(workLogUri, VSBuffer.fromString(workLogContent));
 		}
 

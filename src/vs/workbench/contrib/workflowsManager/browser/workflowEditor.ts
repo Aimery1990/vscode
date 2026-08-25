@@ -1331,7 +1331,8 @@ export class WorkflowEditor extends EditorPane {
 			append(parent, $('.workflow-compact-divider'));
 		}
 
-		// Text Color Sub-section
+		// Section 3: Text Color
+		const textColorSec = append(parent, $('.workflow-toolbar-section'));
 		const textColors = [
 			{ name: 'White', hex: '#ffffff' },
 			{ name: 'Teal (Default)', hex: '#0d9488' },
@@ -1342,7 +1343,7 @@ export class WorkflowEditor extends EditorPane {
 		];
 
 		if (this._isInspectorCompact) {
-			const compactTextColBtn = append(textSec, $('.workflow-compact-color-btn'));
+			const compactTextColBtn = append(textColorSec, $('.workflow-compact-color-btn'));
 			compactTextColBtn.title = `Text Font Color (${currentTextColor}) - Click to pick`;
 			const dot = append(compactTextColBtn, $('.workflow-compact-color-dot'));
 			dot.style.backgroundColor = currentTextColor;
@@ -1362,10 +1363,10 @@ export class WorkflowEditor extends EditorPane {
 			};
 			append(parent, $('.workflow-compact-divider'));
 		} else {
-			const textColorTitle = append(textSec, $('.workflow-sub-title'));
+			const textColorTitle = append(textColorSec, $('.workflow-sub-title'));
 			textColorTitle.textContent = 'Text Color';
 
-			const textColorGrid = append(textSec, $('.workflow-color-grid.small'));
+			const textColorGrid = append(textColorSec, $('.workflow-color-grid.small'));
 			for (const tc of textColors) {
 				const tcBtn = append(textColorGrid, $('.workflow-color-swatch-btn.small'));
 				tcBtn.style.backgroundColor = tc.hex;
