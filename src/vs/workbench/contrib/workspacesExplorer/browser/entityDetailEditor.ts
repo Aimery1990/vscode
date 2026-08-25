@@ -647,27 +647,30 @@ export class EntityDetailEditor extends EditorPane {
 			.replace(/"/g, '&quot;')
 			.replace(/'/g, '&#039;');
 
+		// Process links [text](url)
+		html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color: #38bdf8; text-decoration: none;">$1</a>');
+
 		// Process headings
-		html = html.replace(/^### (.*$)/gim, '<h4 style="margin: 14px 0 6px 0; color: var(--vscode-editor-foreground); font-weight: 600;">$1</h4>');
-		html = html.replace(/^## (.*$)/gim, '<h3 style="margin: 20px 0 10px 0; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.08); color: var(--vscode-editor-foreground); font-weight: 600;">$1</h3>');
-		html = html.replace(/^# (.*$)/gim, '<h2 style="margin: 24px 0 12px 0; color: var(--vscode-editor-foreground); font-weight: bold;">$1</h2>');
+		html = html.replace(/^### (.*$)/gim, '<h4 style="margin: 12px 0 4px 0; color: #38bdf8; font-size: 0.95em; font-weight: 600;">$1</h4>');
+		html = html.replace(/^## (.*$)/gim, '<h3 style="margin: 16px 0 8px 0; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.08); color: var(--vscode-editor-foreground); font-size: 1.05em; font-weight: 600;">$1</h3>');
+		html = html.replace(/^# (.*$)/gim, '<h2 style="margin: 20px 0 10px 0; color: var(--vscode-editor-foreground); font-size: 1.15em; font-weight: bold;">$1</h2>');
 
 		// Process bold and code blocks
-		html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-		html = html.replace(/`([^`]+)`/g, '<code style="background: rgba(255,255,255,0.06); padding: 2px 5px; border-radius: 4px; font-family: monospace; font-size: 0.9em; border: 1px solid rgba(255,255,255,0.05);">$1</code>');
+		html = html.replace(/\*\*([^*]+)\*\*/g, '<strong style="color: var(--vscode-editor-foreground);">$1</strong>');
+		html = html.replace(/`([^`]+)`/g, '<code style="background: rgba(255,255,255,0.08); padding: 2px 5px; border-radius: 4px; font-family: monospace; font-size: 0.9em; border: 1px solid rgba(255,255,255,0.06);">$1</code>');
 
 		// Process lists
-		html = html.replace(/^\s*-\s+(.*$)/gim, '<li style="margin-left: 20px; margin-bottom: 6px; line-height: 1.5;">$1</li>');
-		html = html.replace(/^\s*\*\s+(.*$)/gim, '<li style="margin-left: 20px; margin-bottom: 6px; line-height: 1.5;">$1</li>');
+		html = html.replace(/^\s*-\s+(.*$)/gim, '<li style="margin-left: 18px; margin-bottom: 4px; line-height: 1.5;">$1</li>');
+		html = html.replace(/^\s*\*\s+(.*$)/gim, '<li style="margin-left: 18px; margin-bottom: 4px; line-height: 1.5;">$1</li>');
 
-		// Wrap lines in paragraphs if they are not headings, lists, or tables
+		// Wrap lines in paragraphs if they are not headings, lists, or hr
 		const lines = html.split('\n');
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i].trim();
 			if (line && !line.startsWith('<h') && !line.startsWith('<li') && !line.startsWith('<ul') && !line.startsWith('<ol') && !line.startsWith('<code') && !line.startsWith('---')) {
-				lines[i] = `<p style="margin: 8px 0; line-height: 1.6; opacity: 0.95;">${lines[i]}</p>`;
+				lines[i] = `<p style="margin: 4px 0; line-height: 1.5; opacity: 0.95;">${lines[i]}</p>`;
 			} else if (line === '---') {
-				lines[i] = '<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.08); margin: 20px 0;" />';
+				lines[i] = '<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.08); margin: 16px 0;" />';
 			}
 		}
 
@@ -682,15 +685,6 @@ export class EntityDetailEditor extends EditorPane {
 
 		// 2. Map Status type to badge styles
 		let status = metadata['Status'] || metadata['status'] || 'Todo';
-		const validStatuses = ['todo', 'in progress', 'done', 'blocked'];
-		if (!validStatuses.includes(status.toLowerCase())) {
-			status = 'Todo';
-			metadata['Status'] = 'Todo';
-			if (metadata['status']) {
-				metadata['status'] = 'Todo';
-			}
-		}
-
 		let statusColor = '#818cf8';
 		let statusBg = 'rgba(129, 140, 248, 0.18)';
 		let statusBorder = 'rgba(129, 140, 248, 0.4)';
@@ -698,32 +692,30 @@ export class EntityDetailEditor extends EditorPane {
 			statusColor = '#38bdf8';
 			statusBg = 'rgba(56, 189, 248, 0.18)';
 			statusBorder = 'rgba(56, 189, 248, 0.4)';
-		} else if (status.toLowerCase().includes('done') || status.toLowerCase().includes('complete') || status.toLowerCase().includes('approved')) {
+		} else if (status.toLowerCase().includes('done')) {
 			statusColor = '#34d399';
 			statusBg = 'rgba(52, 211, 153, 0.18)';
 			statusBorder = 'rgba(52, 211, 153, 0.4)';
-		} else if (status.toLowerCase().includes('block') || status.toLowerCase().includes('fail') || status.toLowerCase().includes('cancel')) {
-			statusColor = '#f43f5e';
-			statusBg = 'rgba(244, 63, 94, 0.18)';
-			statusBorder = 'rgba(244, 63, 94, 0.4)';
-		} else if (status.toLowerCase().includes('review') || status.toLowerCase().includes('test') || status.toLowerCase().includes('pending')) {
-			statusColor = '#fbbf24';
-			statusBg = 'rgba(251, 191, 36, 0.18)';
-			statusBorder = 'rgba(251, 191, 36, 0.4)';
+		} else if (status.toLowerCase().includes('block')) {
+			statusColor = '#f87171';
+			statusBg = 'rgba(248, 113, 113, 0.18)';
+			statusBorder = 'rgba(248, 113, 113, 0.4)';
 		}
 
-		// 3. Map Badge color to matching color system
-		const typeColors: { [key: string]: { text: string, bg: string } } = {
-			'job': { text: '#fbbf24', bg: 'rgba(251, 191, 36, 0.15)' },
-			'task': { text: '#a78bfa', bg: 'rgba(167, 139, 250, 0.15)' },
-			'project': { text: '#60a5fa', bg: 'rgba(96, 165, 250, 0.15)' },
-			'workflow': { text: '#0d9488', bg: 'rgba(13, 148, 136, 0.15)' },
-			'case': { text: '#f472b6', bg: 'rgba(244, 114, 182, 0.15)' },
-			'agent': { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.15)' },
-			'issue': { text: '#ef4444', bg: 'rgba(239, 68, 68, 0.15)' },
-			'analysis': { text: '#34d399', bg: 'rgba(52, 211, 153, 0.15)' },
-			'workspace': { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.15)' }
+		// 3. Custom colors for entity types
+		const typeColors: { [key: string]: { text: string; bg: string } } = {
+			workspace: { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.15)' },
+			job: { text: '#fbbf24', bg: 'rgba(251, 191, 36, 0.15)' },
+			task: { text: '#a78bfa', bg: 'rgba(167, 139, 250, 0.15)' },
+			project: { text: '#60a5fa', bg: 'rgba(96, 165, 250, 0.15)' },
+			workflow: { text: '#0d9488', bg: 'rgba(13, 148, 136, 0.15)' },
+			agent: { text: '#f472b6', bg: 'rgba(244, 114, 182, 0.15)' },
+			case: { text: '#a3e635', bg: 'rgba(163, 230, 53, 0.15)' },
+			issue: { text: '#f87171', bg: 'rgba(248, 113, 113, 0.15)' },
+			analysis: { text: '#34d399', bg: 'rgba(52, 211, 153, 0.15)' },
+			note: { text: '#cbd5e1', bg: 'rgba(203, 213, 225, 0.15)' }
 		};
+
 		const typeLower = type.toLowerCase();
 		let colorSetting = typeColors[typeLower];
 		if (!colorSetting) {
@@ -738,22 +730,17 @@ export class EntityDetailEditor extends EditorPane {
 		// Attachment cards html list
 		let attachmentsHtml = '';
 		if (attachments.length === 0) {
-			attachmentsHtml = '<p style="opacity: 0.5; font-style: italic; font-size: 0.9em; text-align: center; padding: 20px 0;">No attachments uploaded yet. Drag files here!</p>';
+			attachmentsHtml = '<p style="opacity: 0.5; font-style: italic; font-size: 0.9em; margin: 10px 0;">No attachments linked yet.</p>';
 		} else {
-			attachmentsHtml = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px; margin-top: 10px;">';
+			attachmentsHtml = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin-top: 10px;">';
 			for (const file of attachments) {
-				const isImage = /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(file);
-				const icon = isImage ? '📷' : '📄';
 				attachmentsHtml += `
-					<div class="attachment-card" style="background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 10px; display: flex; flex-direction: column; justify-content: space-between; min-height: 80px; transition: background 0.2s;">
-						<div style="display: flex; align-items: center; gap: 8px;">
-							<span style="font-size: 1.5em;">${icon}</span>
-							<span style="font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500;" title="${file}">${file}</span>
+					<div class="attachment-card" data-filename="${file}" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); padding: 8px 12px; border-radius: 6px; cursor: pointer; transition: background 0.15s ease;">
+						<div style="display: flex; align-items: center; gap: 8px; overflow: hidden;">
+							<span style="font-size: 1.1em; opacity: 0.8;">📄</span>
+							<span style="font-size: 0.85em; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${file}</span>
 						</div>
-						<div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 12px;">
-							<button onclick="downloadFile('${file}')" class="btn-secondary" style="font-size: 0.8em; padding: 3px 8px;">Download</button>
-							<button onclick="deleteFile('${file}')" class="btn-danger" style="font-size: 0.8em; padding: 3px 8px;">Delete</button>
-						</div>
+						<span class="delete-attachment" data-filename="${file}" style="opacity: 0.4; cursor: pointer; padding: 2px 4px;" title="Delete Attachment">✕</span>
 					</div>
 				`;
 			}
@@ -787,15 +774,16 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				const lines = entry.split('\n');
 				let header = lines[0].trim();
-				if (header.toLowerCase() === 'metadata' || header.toLowerCase() === '基本元数据') {
-					header = 'Creation Details';
+				if (header.toLowerCase() === 'overview' || header.toLowerCase() === 'metadata' || header.toLowerCase() === '基本元数据') {
+					continue;
 				}
 				const body = lines.slice(1).join('\n').trim();
+				const bodyHtml = this._markdownToHtml(body);
 				workLogHtml += `
 					<div class="timeline-item" style="position: relative;">
 						<div class="timeline-dot" style="position: absolute; left: -27px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-button-background); border: 2px solid var(--vscode-editor-background);"></div>
-						<div style="font-weight: 600; font-size: 0.9em; color: var(--vscode-editor-foreground); margin-bottom: 4px;">${header}</div>
-						<div style="font-size: 0.85em; opacity: 0.8; line-height: 1.5; white-space: pre-wrap;">${body}</div>
+						<div style="font-weight: 600; font-size: 0.95em; color: var(--vscode-editor-foreground); margin-bottom: 6px;">${header}</div>
+						<div class="timeline-body" style="font-size: 0.88em; opacity: 0.9; line-height: 1.5;">${bodyHtml}</div>
 					</div>
 				`;
 			}
