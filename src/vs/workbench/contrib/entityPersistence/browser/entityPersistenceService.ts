@@ -381,7 +381,6 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			? snapshot.ownerAccount
 			: (this.activeUserEmail || 'unauthenticated');
 		snapshot.ownerAccount = ownerAccount;
-		const modelStr = snapshot.modelName || 'gemini-2.0-flash';
 		const description = snapshot.description || `${type} description`;
 
 		const mainMdFileName = 'ticket.md';
@@ -491,20 +490,55 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		mainMdContent += `- None\n`;
 		await this.fileService.writeFile(mainMdUri, VSBuffer.fromString(mainMdContent));
 
+		let customPromptFromYaml: string | undefined;
+		try {
+			const yamlLocalUri = URI.joinPath(baseUri, '.agents', 'entity_type', `${type}.yaml`);
+			const yamlLocalUriPlural = URI.joinPath(baseUri, '.agents', 'entity_types', `${type}.yaml`);
+			if (await this.fileService.exists(yamlLocalUri)) {
+				const yamlContent = (await this.fileService.readFile(yamlLocalUri)).value.toString();
+				const promptMatch = yamlContent.match(/^prompt:\s*(.+)$/m);
+				if (promptMatch && promptMatch[1]) {
+					customPromptFromYaml = promptMatch[1].trim();
+				}
+			} else if (await this.fileService.exists(yamlLocalUriPlural)) {
+				const yamlContent = (await this.fileService.readFile(yamlLocalUriPlural)).value.toString();
+				const promptMatch = yamlContent.match(/^prompt:\s*(.+)$/m);
+				if (promptMatch && promptMatch[1]) {
+					customPromptFromYaml = promptMatch[1].trim();
+				}
+			}
+		} catch {}
+
+		const builtInTypePrompts: Record<string, string> = {
+			workspace: 'A workspace is the root environment container. Manage sub-entities, repository structure, and lifecycle.',
+			job: 'A job represents a high-level goal-oriented operational workflow. Break down tasks and record progress.',
+			project: 'A project coordinates architecture, modules, implementation code, and verification.',
+			task: 'A task is an actionable unit of engineering work. Implement changes cleanly and verify.',
+			workflow: 'A workflow executes automated nodes, transitions, and AI pipelines.',
+			agent: 'An AI agent operates autonomously following role constraints and tools.',
+			case: 'A case verifies business scenarios, validation runs, and test plans.',
+			issue: 'An issue tracks defects, root causes, and remediation actions.',
+			analysis: 'An analysis documents architectural telemetry, research, and diagnostic findings.',
+			note: 'A note captures memos, references, and knowledge-base items.',
+			folder: 'A standard directory container for grouping items.',
+			file: 'A standalone document or data asset.'
+		};
+
+		const typePromptStr = (snapshot as any).typePrompt || customPromptFromYaml || builtInTypePrompts[type.toLowerCase()] || `${type.toUpperCase()} module processing guidelines.`;
+		const ticketPromptStr = (snapshot as any).ticketPrompt || (snapshot as any).agentRulePrompt || 'None';
+
 		// 2. instruction.md
-		let instructionContent = `# Instruction - ${snapshot.entityName}\n\n## Overview\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
+		let instructionContent = `# Instruction - ${snapshot.entityName}\n\n## Overview\n\n`;
+		instructionContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
+		instructionContent += `- **Ticket Type**: ${type}\n`;
+		instructionContent += `- **Ticket Type Prompt**: ${typePromptStr}\n`;
+		instructionContent += `- **Ticket Prompt**: ${ticketPromptStr}\n`;
 		instructionContent += `- **Parent Path**: ${parentRelPath}\n`;
 		instructionContent += `- **Ego MDs Paths**:\n`;
 		instructionContent += `  - [instruction.md](${instructionRel})\n`;
 		instructionContent += `  - [README.md](${readmeRel})\n`;
 		instructionContent += `  - [ticket.md](${ticketRel})\n`;
 		instructionContent += `  - [worklog.md](${worklogRel})\n`;
-
-		if (type === 'agent') {
-			instructionContent += `- **AI Model**: \`${modelStr}\`\n\n## System Prompt\n\n\`\`\`\n${snapshot.systemPrompt || 'You are a specialized AI Agent.'}\n\`\`\`\n\n## Operational Role & Guidelines\n\n- **Role**: ${snapshot.role || 'AI Agent'}\n- **Work Scope**: ${snapshot.scopeName || 'Workspace'} (${snapshot.scopeType || 'workspace'})\n- **Core Instructions**: Follow clean code principles, modular domain architecture, and clear progress reporting.\n`;
-		} else {
-			instructionContent += `\n## Guidelines & Rules\n\nDocument operational procedures, guidelines, and execution rules for this ${type}.\n`;
-		}
 		await this.fileService.writeFile(instructionUri, VSBuffer.fromString(instructionContent));
 
 		// 3. README.md

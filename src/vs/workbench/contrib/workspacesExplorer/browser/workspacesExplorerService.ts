@@ -924,6 +924,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			scopeId: targetBaseUri.toString(),
 			scopeName: parentName,
 			typeDefinition: options.typeDefinition,
+			typePrompt: options.typePrompt,
+			ticketPrompt: options.ticketPrompt || options.agentRulePrompt,
 			customMetadata: options.customMetadata
 		}, targetBaseUri, true);
 

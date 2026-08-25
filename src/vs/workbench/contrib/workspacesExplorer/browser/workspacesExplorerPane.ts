@@ -51,6 +51,7 @@ interface ICustomModule {
 	id: string;
 	name: string;
 	description?: string;
+	prompt?: string;
 	isDeprecated?: boolean;
 	color: string;
 	storageScope?: 'global' | 'workspace';
@@ -2207,10 +2208,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 					assignedAgentId,
 					assignedAgentName,
 					agentRulePrompt: ruleInput.value.trim(),
+					ticketPrompt: ruleInput.value.trim(),
 					description: descInput.value.trim(),
 					agentModel: agentModelOpt,
 					agentSystemPrompt: selectedType === 'agent' ? promptInput.value.trim() : undefined,
 					typeDefinition: matchingModule?.description,
+					typePrompt: matchingModule?.prompt,
 					customMetadata
 				});
 
@@ -2652,15 +2655,27 @@ export class MainWorkspaceViewPane extends ViewPane {
 				};
 
 				// Type Definition (Description) Input
-				const defGroup = append(configMetaContainer, $('.form-group', { style: 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 260px;' }));
+				const defGroup = append(configMetaContainer, $('.form-group', { style: 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 220px;' }));
 				append(defGroup, $('label', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #888888; white-space: nowrap;' }, 'Type Definition:'));
 				const defInput = append(defGroup, $('input.monaco-inputbox', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: #1a1a1a; color: inherit; box-sizing: border-box;'
 				})) as HTMLInputElement;
-				defInput.placeholder = 'e.g. Explains purpose and workflow of this custom module...';
+				defInput.placeholder = 'e.g. Explains purpose of this module...';
 				defInput.value = activeMod.description || '';
 				defInput.oninput = () => {
 					activeMod.description = defInput.value;
+				};
+
+				// Type Prompt (Ticket Type Prompt) Input
+				const promptGroup = append(configMetaContainer, $('.form-group', { style: 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 220px;' }));
+				append(promptGroup, $('label', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #888888; white-space: nowrap;' }, 'Type Prompt:'));
+				const typePromptInput = append(promptGroup, $('input.monaco-inputbox', {
+					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: #1a1a1a; color: inherit; box-sizing: border-box;'
+				})) as HTMLInputElement;
+				typePromptInput.placeholder = 'e.g. Instructions for AI to process tickets of this type...';
+				typePromptInput.value = activeMod.prompt || '';
+				typePromptInput.oninput = () => {
+					activeMod.prompt = typePromptInput.value;
 				};
 
 				// Color Picker container

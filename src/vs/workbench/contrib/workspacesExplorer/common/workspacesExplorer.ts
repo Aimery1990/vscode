@@ -57,6 +57,8 @@ export interface ICreateResourceOptions {
 	};
 	agentSystemPrompt?: string;
 	typeDefinition?: string;
+	typePrompt?: string;
+	ticketPrompt?: string;
 	customMetadata?: { [key: string]: string };
 }
 
