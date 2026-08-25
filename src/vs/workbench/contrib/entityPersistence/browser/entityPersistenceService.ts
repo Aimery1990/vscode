@@ -655,4 +655,20 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		const minutes = String(now.getMinutes()).padStart(2, '0');
 		return `${year}-${month}-${day} ${hours}:${minutes}`;
 	}
+
+	private getFormattedDateTimeWithSecondsAndTz(): string {
+		const now = new Date();
+		const pad = (n: number) => String(n).padStart(2, '0');
+		const year = now.getFullYear();
+		const month = pad(now.getMonth() + 1);
+		const day = pad(now.getDate());
+		const hours = pad(now.getHours());
+		const minutes = pad(now.getMinutes());
+		const seconds = pad(now.getSeconds());
+		const tzOffset = -now.getTimezoneOffset();
+		const tzSign = tzOffset >= 0 ? '+' : '-';
+		const tzHours = pad(Math.floor(Math.abs(tzOffset) / 60));
+		const tzMins = pad(Math.abs(tzOffset) % 60);
+		return `${year}-${month}-${day} ${hours}:${minutes}:${seconds} ${tzSign}${tzHours}:${tzMins}`;
+	}
 }
