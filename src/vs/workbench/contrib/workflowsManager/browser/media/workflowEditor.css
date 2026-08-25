@@ -47,6 +47,20 @@
 	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.workflow-editor-toolbar.compact .workflow-toolbar-header {
+	justify-content: center !important;
+	border-bottom: none !important;
+	padding-bottom: 2px !important;
+}
+
+.workflow-compact-divider {
+	width: 28px;
+	height: 1px;
+	background: rgba(255, 255, 255, 0.08);
+	margin: 2px auto;
+	flex-shrink: 0;
+}
+
 .workflow-toolbar-main-title {
 	font-size: 11px;
 	font-weight: 700;
@@ -56,22 +70,23 @@
 }
 
 .workflow-toolbar-toggle-btn {
-	width: 22px;
-	height: 22px;
+	width: 28px;
+	height: 28px;
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	border-radius: 4px;
-	border: 1px solid transparent;
-	background: transparent;
+	border-radius: 6px;
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	background: rgba(255, 255, 255, 0.03);
 	color: var(--vscode-descriptionForeground, #888888);
 	cursor: pointer;
 	transition: all 0.15s ease;
 }
 
 .workflow-toolbar-toggle-btn:hover {
-	background: rgba(255, 255, 255, 0.1);
-	color: #ffffff;
+	background: rgba(13, 148, 136, 0.18);
+	border-color: #0d9488;
+	color: #22d3ee;
 }
 
 .workflow-toolbar-section {
@@ -1188,10 +1203,44 @@
 	align-items: center;
 }
 
+.workflow-editor-inspector.compact .workflow-inspector-header {
+	border-bottom: none !important;
+	padding-bottom: 2px !important;
+}
+
+.workflow-editor-inspector.compact .workflow-inspector-header-top {
+	justify-content: center !important;
+}
+
 .workflow-inspector-header-actions {
 	display: flex;
 	align-items: center;
 	gap: 4px;
+}
+
+.workflow-editor-inspector.compact .workflow-inspector-header-actions {
+	gap: 2px;
+	justify-content: center;
+}
+
+.workflow-inspector-collapse-btn {
+	width: 22px;
+	height: 22px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 4px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--vscode-descriptionForeground, #888888);
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+
+.workflow-inspector-collapse-btn:hover {
+	background: rgba(13, 148, 136, 0.18);
+	border-color: #0d9488;
+	color: #22d3ee;
 }
 
 .workflow-compact-color-btn {

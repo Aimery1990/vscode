@@ -28,6 +28,8 @@ export interface ICustomField {
 export interface ICustomModule {
 	id: string;
 	name: string;
+	description?: string;
+	prompt?: string;
 	isDeprecated?: boolean;
 	color: string;
 	storageScope?: 'global' | 'workspace';
@@ -47,6 +49,8 @@ export interface IBaseEntitySnapshot {
 	assignedAgentName?: string;
 	agentRulePrompt?: string;
 	typeDefinition?: string;
+	typePrompt?: string;
+	ticketPrompt?: string;
 	belongsToWorkspaceUri?: string;
 
 	// Specialized properties for AI Agent

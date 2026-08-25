@@ -730,9 +730,11 @@ export class WorkflowEditor extends EditorPane {
 
 		// Header with Title & Mode Toggle Button
 		const header = append(parent, $('.workflow-toolbar-header'));
-		const title = append(header, $('.workflow-toolbar-main-title'));
-		title.textContent = this._isToolbarCompact ? 'TOOL' : 'TOOLBOX';
-		title.title = 'Shapes & Drawing Toolbox';
+		if (!this._isToolbarCompact) {
+			const title = append(header, $('.workflow-toolbar-main-title'));
+			title.textContent = 'TOOLBOX';
+			title.title = 'Shapes & Drawing Toolbox';
+		}
 
 		const toggleBtn = append(header, $('.workflow-toolbar-toggle-btn'));
 		append(toggleBtn, $('span' + ThemeIcon.asCSSSelector(this._isToolbarCompact ? Codicon.chevronRight : Codicon.chevronLeft)));
@@ -751,10 +753,9 @@ export class WorkflowEditor extends EditorPane {
 
 		// Section A: Drag Shapes
 		const shapeSec = append(parent, $('.workflow-toolbar-section'));
-		const shapeTitle = append(shapeSec, $('.workflow-toolbar-title'));
-		shapeTitle.textContent = this._isToolbarCompact ? 'SHAPES' : localize('shapes', 'Drag / Click Shapes');
-		if (this._isToolbarCompact) {
-			shapeTitle.title = 'Drag or Click Shapes to add';
+		if (!this._isToolbarCompact) {
+			const shapeTitle = append(shapeSec, $('.workflow-toolbar-title'));
+			shapeTitle.textContent = localize('shapes', 'Drag / Click Shapes');
 		}
 
 		const shapesGrid = append(shapeSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
@@ -786,12 +787,16 @@ export class WorkflowEditor extends EditorPane {
 			};
 		}
 
+		// Divider for compact mode
+		if (this._isToolbarCompact) {
+			append(parent, $('.workflow-compact-divider'));
+		}
+
 		// Section B: Link Styling
 		const linkSec = append(parent, $('.workflow-toolbar-section'));
-		const linkTitle = append(linkSec, $('.workflow-toolbar-title'));
-		linkTitle.textContent = this._isToolbarCompact ? 'LINES' : localize('linkStyle', 'Connection Styles');
-		if (this._isToolbarCompact) {
-			linkTitle.title = 'Connection Line Styles';
+		if (!this._isToolbarCompact) {
+			const linkTitle = append(linkSec, $('.workflow-toolbar-title'));
+			linkTitle.textContent = localize('linkStyle', 'Connection Styles');
 		}
 
 		const linksGrid = append(linkSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
@@ -822,12 +827,16 @@ export class WorkflowEditor extends EditorPane {
 			};
 		}
 
+		// Divider for compact mode
+		if (this._isToolbarCompact) {
+			append(parent, $('.workflow-compact-divider'));
+		}
+
 		// Section C: Line Routing Mode (Orthogonal / Curved)
 		const routingSec = append(parent, $('.workflow-toolbar-section'));
-		const routingTitle = append(routingSec, $('.workflow-toolbar-title'));
-		routingTitle.textContent = this._isToolbarCompact ? 'ROUTING' : localize('routingMode', 'Routing Modes');
-		if (this._isToolbarCompact) {
-			routingTitle.title = 'Connector Routing Modes';
+		if (!this._isToolbarCompact) {
+			const routingTitle = append(routingSec, $('.workflow-toolbar-title'));
+			routingTitle.textContent = localize('routingMode', 'Routing Modes');
 		}
 
 		const routingGrid = append(routingSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
@@ -909,8 +918,10 @@ export class WorkflowEditor extends EditorPane {
 		// Header / Title
 		const headerSec = append(parent, $('.workflow-inspector-header'));
 		const headerTop = append(headerSec, $('.workflow-inspector-header-top'));
-		const title = append(headerTop, $('.workflow-inspector-title'));
-		title.textContent = this._isInspectorCompact ? 'PROPS' : 'PROPERTIES & STYLING';
+		if (!this._isInspectorCompact) {
+			const title = append(headerTop, $('.workflow-inspector-title'));
+			title.textContent = 'PROPERTIES & STYLING';
+		}
 
 		const headerActions = append(headerTop, $('.workflow-inspector-header-actions'));
 
@@ -985,8 +996,10 @@ export class WorkflowEditor extends EditorPane {
 
 			// Section 1: Line Color
 			const colorSec = append(parent, $('.workflow-toolbar-section'));
-			const colorTitle = append(colorSec, $('.workflow-toolbar-title'));
-			colorTitle.textContent = this._isInspectorCompact ? 'COLOR' : 'Line Color';
+			if (!this._isInspectorCompact) {
+				const colorTitle = append(colorSec, $('.workflow-toolbar-title'));
+				colorTitle.textContent = 'Line Color';
+			}
 
 			if (this._isInspectorCompact) {
 				const compactColorBtn = append(colorSec, $('.workflow-compact-color-btn'));
@@ -1005,6 +1018,7 @@ export class WorkflowEditor extends EditorPane {
 						this._renderInspector(parent);
 					});
 				};
+				append(parent, $('.workflow-compact-divider'));
 			} else {
 				const colorGrid = append(colorSec, $('.workflow-color-grid'));
 				for (const c of paletteColors) {
@@ -1028,8 +1042,10 @@ export class WorkflowEditor extends EditorPane {
 
 			// Section 2: Routing Mode
 			const routingSec = append(parent, $('.workflow-toolbar-section'));
-			const routingTitle = append(routingSec, $('.workflow-toolbar-title'));
-			routingTitle.textContent = this._isInspectorCompact ? 'ROUTE' : 'Routing Mode';
+			if (!this._isInspectorCompact) {
+				const routingTitle = append(routingSec, $('.workflow-toolbar-title'));
+				routingTitle.textContent = 'Routing Mode';
+			}
 
 			const routingRow = append(routingSec, $(`.workflow-format-row${this._isInspectorCompact ? '.compact-col' : ''}`));
 			const routingModes: { mode: 'orthogonal' | 'curved'; label: string; shortLabel: string }[] = [
@@ -1060,10 +1076,16 @@ export class WorkflowEditor extends EditorPane {
 				};
 			}
 
+			if (this._isInspectorCompact) {
+				append(parent, $('.workflow-compact-divider'));
+			}
+
 			// Section 3: Arrow Style
 			const arrowSec = append(parent, $('.workflow-toolbar-section'));
-			const arrowTitle = append(arrowSec, $('.workflow-toolbar-title'));
-			arrowTitle.textContent = this._isInspectorCompact ? 'ARROW' : 'Arrow Style';
+			if (!this._isInspectorCompact) {
+				const arrowTitle = append(arrowSec, $('.workflow-toolbar-title'));
+				arrowTitle.textContent = 'Arrow Style';
+			}
 
 			const arrowRow = append(arrowSec, $(`.workflow-format-row${this._isInspectorCompact ? '.compact-col' : '.grid-2x2'}`));
 			const arrowStyles: { style: IFlowchartLink['style']; label: string; shortLabel: string }[] = [
@@ -1124,8 +1146,10 @@ export class WorkflowEditor extends EditorPane {
 
 		// Section 1: Node Color
 		const colorSec = append(parent, $('.workflow-toolbar-section'));
-		const colorTitle = append(colorSec, $('.workflow-toolbar-title'));
-		colorTitle.textContent = this._isInspectorCompact ? 'NODE' : 'Node Color';
+		if (!this._isInspectorCompact) {
+			const colorTitle = append(colorSec, $('.workflow-toolbar-title'));
+			colorTitle.textContent = 'Node Color';
+		}
 
 		if (this._isInspectorCompact) {
 			const compactColorBtn = append(colorSec, $('.workflow-compact-color-btn'));
@@ -1147,6 +1171,7 @@ export class WorkflowEditor extends EditorPane {
 					this._renderInspector(parent);
 				});
 			};
+			append(parent, $('.workflow-compact-divider'));
 		} else {
 			const colorGrid = append(colorSec, $('.workflow-color-grid'));
 			for (const c of paletteColors) {
@@ -1173,8 +1198,10 @@ export class WorkflowEditor extends EditorPane {
 
 		// Section 2: Text Formatting
 		const textSec = append(parent, $('.workflow-toolbar-section'));
-		const textTitle = append(textSec, $('.workflow-toolbar-title'));
-		textTitle.textContent = this._isInspectorCompact ? 'TEXT' : 'Text Formatting';
+		if (!this._isInspectorCompact) {
+			const textTitle = append(textSec, $('.workflow-toolbar-title'));
+			textTitle.textContent = 'Text Formatting';
+		}
 
 		// Row 1: Font Styles (Bold, Italic, Underline, Strikethrough)
 		const styleRow = append(textSec, $(`.workflow-format-row${this._isInspectorCompact ? '.compact-2x2' : ''}`));
@@ -1300,6 +1327,10 @@ export class WorkflowEditor extends EditorPane {
 			};
 		}
 
+		if (this._isInspectorCompact) {
+			append(parent, $('.workflow-compact-divider'));
+		}
+
 		// Text Color Sub-section
 		const textColors = [
 			{ name: 'White', hex: '#ffffff' },
@@ -1329,6 +1360,7 @@ export class WorkflowEditor extends EditorPane {
 					this._renderInspector(parent);
 				});
 			};
+			append(parent, $('.workflow-compact-divider'));
 		} else {
 			const textColorTitle = append(textSec, $('.workflow-sub-title'));
 			textColorTitle.textContent = 'Text Color';
@@ -1358,8 +1390,10 @@ export class WorkflowEditor extends EditorPane {
 		// Export & Download Section (Always available at the bottom of Inspector)
 		const exportSec = append(parent, $('.workflow-toolbar-section'));
 		const isSelection = this._selectedNodeIds.size > 0;
-		const exportTitle = this._isInspectorCompact ? 'EXPORT' : (isSelection ? `Export Selection (${this._selectedNodeIds.size})` : 'Export / Download');
-		append(exportSec, $('.workflow-toolbar-title')).textContent = exportTitle;
+		if (!this._isInspectorCompact) {
+			const exportTitle = isSelection ? `Export Selection (${this._selectedNodeIds.size})` : 'Export / Download';
+			append(exportSec, $('.workflow-toolbar-title')).textContent = exportTitle;
+		}
 
 		if (this._isInspectorCompact) {
 			const compactExpBtn = append(exportSec, $('.workflow-compact-color-btn'));
