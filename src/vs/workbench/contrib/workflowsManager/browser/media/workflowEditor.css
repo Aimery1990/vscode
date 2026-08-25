@@ -1264,12 +1264,45 @@
 	transform: scale(1.05);
 }
 
+.workflow-compact-color-shape {
+	width: 20px;
+	height: 14px;
+	border-radius: 3px;
+	border: 1.5px solid rgba(255, 255, 255, 0.7);
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+	transition: transform 0.15s ease;
+}
+
 .workflow-compact-color-dot {
 	width: 18px;
 	height: 18px;
 	border-radius: 50%;
 	border: 1.5px solid rgba(255, 255, 255, 0.6);
 	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+.workflow-compact-text-color-icon {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 1px;
+}
+
+.workflow-compact-text-letter {
+	font-size: 14px;
+	font-weight: 800;
+	line-height: 1;
+	color: var(--vscode-foreground, #cccccc);
+	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+	letter-spacing: -0.5px;
+}
+
+.workflow-compact-text-underline {
+	width: 16px;
+	height: 3.5px;
+	border-radius: 2px;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
 
 .workflow-format-row.compact-col {

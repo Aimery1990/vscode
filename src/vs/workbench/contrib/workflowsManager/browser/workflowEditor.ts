@@ -1154,8 +1154,8 @@ export class WorkflowEditor extends EditorPane {
 		if (this._isInspectorCompact) {
 			const compactColorBtn = append(colorSec, $('.workflow-compact-color-btn'));
 			compactColorBtn.title = `Node Fill Color (${currentColor}) - Click to pick`;
-			const dot = append(compactColorBtn, $('.workflow-compact-color-dot'));
-			dot.style.backgroundColor = currentColor;
+			const shape = append(compactColorBtn, $('.workflow-compact-color-shape'));
+			shape.style.backgroundColor = currentColor;
 			compactColorBtn.onclick = (e) => {
 				e.stopPropagation();
 				this._showColorPickerFlyout(compactColorBtn, currentColor, paletteColors, (hex) => {
@@ -1345,8 +1345,11 @@ export class WorkflowEditor extends EditorPane {
 		if (this._isInspectorCompact) {
 			const compactTextColBtn = append(textColorSec, $('.workflow-compact-color-btn'));
 			compactTextColBtn.title = `Text Font Color (${currentTextColor}) - Click to pick`;
-			const dot = append(compactTextColBtn, $('.workflow-compact-color-dot'));
-			dot.style.backgroundColor = currentTextColor;
+			const textIconWrapper = append(compactTextColBtn, $('.workflow-compact-text-color-icon'));
+			const letterA = append(textIconWrapper, $('.workflow-compact-text-letter'));
+			letterA.textContent = 'A';
+			const underlineBar = append(textIconWrapper, $('.workflow-compact-text-underline'));
+			underlineBar.style.backgroundColor = currentTextColor;
 			compactTextColBtn.onclick = (e) => {
 				e.stopPropagation();
 				this._showColorPickerFlyout(compactTextColBtn, currentTextColor, textColors, (hex) => {
