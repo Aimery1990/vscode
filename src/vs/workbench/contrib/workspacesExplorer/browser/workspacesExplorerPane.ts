@@ -2167,6 +2167,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 				});
 
+				const customModules = await this._getCustomModules(targetUri);
+				const matchingModule = customModules.find((m: ICustomModule) => m.id === selectedType);
+
 				const createResult = await this.workspacesExplorerService.createResourceUnderWorkspace({
 					workspaceUri: targetUri,
 					type: selectedType,
@@ -2179,6 +2182,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					description: descInput.value.trim(),
 					agentModel: agentModelOpt,
 					agentSystemPrompt: selectedType === 'agent' ? promptInput.value.trim() : undefined,
+					typeDefinition: matchingModule?.description,
 					customMetadata
 				});
 

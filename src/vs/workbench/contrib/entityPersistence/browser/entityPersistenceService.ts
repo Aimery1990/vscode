@@ -424,7 +424,26 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			folder: 'A standard directory container for grouping items.',
 			file: 'A standalone document or data asset.'
 		};
-		const typeDefStr = (snapshot as any).typeDefinition || builtInTypeDefs[type.toLowerCase()] || `${type.toUpperCase()} module entity definition.`;
+		let customDefFromYaml: string | undefined;
+		try {
+			const yamlLocalUri = URI.joinPath(baseUri, '.agents', 'entity_type', `${type}.yaml`);
+			const yamlLocalUriPlural = URI.joinPath(baseUri, '.agents', 'entity_types', `${type}.yaml`);
+			if (await this.fileService.exists(yamlLocalUri)) {
+				const yamlContent = (await this.fileService.readFile(yamlLocalUri)).value.toString();
+				const descMatch = yamlContent.match(/^description:\s*(.+)$/m);
+				if (descMatch && descMatch[1]) {
+					customDefFromYaml = descMatch[1].trim();
+				}
+			} else if (await this.fileService.exists(yamlLocalUriPlural)) {
+				const yamlContent = (await this.fileService.readFile(yamlLocalUriPlural)).value.toString();
+				const descMatch = yamlContent.match(/^description:\s*(.+)$/m);
+				if (descMatch && descMatch[1]) {
+					customDefFromYaml = descMatch[1].trim();
+				}
+			}
+		} catch {}
+
+		const typeDefStr = (snapshot as any).typeDefinition || customDefFromYaml || builtInTypeDefs[type.toLowerCase()] || `${type.toUpperCase()} module entity definition.`;
 
 		// 1. Primary Entity MD (ticket.md)
 		let mainMdContent = `# ${snapshot.entityName}\n\n## Metadata\n\n`;
@@ -441,7 +460,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		mainMdContent += `- **Last Updated By**: User\n\n`;
 
 		mainMdContent += `### Self Defined Data (If any)\n`;
-		const schemaRelPath = `.agents/entity_types/${type}.yaml`;
+		const schemaRelPath = `.agents/entity_type/${type}.yaml`;
 		if (snapshot.customMetadata && Object.keys(snapshot.customMetadata).length > 0) {
 			mainMdContent += `- **Self Defined Data Structure**: ${schemaRelPath}\n`;
 			mainMdContent += `- **Self Defined Data Value**:\n`;

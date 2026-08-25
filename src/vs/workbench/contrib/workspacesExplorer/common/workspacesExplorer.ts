@@ -56,6 +56,7 @@ export interface ICreateResourceOptions {
 		credentialId?: string;
 	};
 	agentSystemPrompt?: string;
+	typeDefinition?: string;
 	customMetadata?: { [key: string]: string };
 }
 

@@ -923,6 +923,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			scopeType: parentType as any,
 			scopeId: targetBaseUri.toString(),
 			scopeName: parentName,
+			typeDefinition: options.typeDefinition,
 			customMetadata: options.customMetadata
 		}, targetBaseUri, true);
 
