@@ -127,6 +127,7 @@ export class WorkflowEditor extends EditorPane {
 	private readonly _selectedLinkIds: Set<string> = new Set();
 	private _activeLinkStyle: 'arrow-single' | 'arrow-double' | 'arrow-none' | 'dashed' = 'arrow-single';
 	private _activeRoutingMode: 'orthogonal' | 'curved' = 'orthogonal';
+	private _activeBranchDirection: 'right' | 'bottom' | 'left' | 'top' = 'right';
 
 	// Selection Box State
 	private _isSelectingBox = false;
@@ -222,6 +223,7 @@ export class WorkflowEditor extends EditorPane {
 		this._isToolbarCompact = this._storageService.getBoolean('workflowEditor.toolbarCompact', StorageScope.PROFILE, false);
 		this._isInspectorCompact = this._storageService.getBoolean('workflowEditor.inspectorCompact', StorageScope.PROFILE, false);
 		this._isInspectorCollapsed = this._storageService.getBoolean('workflowEditor.inspectorCollapsed', StorageScope.PROFILE, false);
+		this._activeBranchDirection = (this._storageService.get('workflowEditor.branchDirection', StorageScope.PROFILE, 'right') as any) || 'right';
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
@@ -863,6 +865,56 @@ export class WorkflowEditor extends EditorPane {
 				this._saveFlowchartData();
 				this._drawLinks();
 			};
+		}
+
+		// Divider for compact mode
+		if (this._isToolbarCompact) {
+			append(parent, $('.workflow-compact-divider'));
+		}
+
+		// Section D: Tab Extension / Branching Direction
+		const branchSec = append(parent, $('.workflow-toolbar-section'));
+		if (!this._isToolbarCompact) {
+			const branchTitle = append(branchSec, $('.workflow-toolbar-title'));
+			branchTitle.textContent = localize('branchDirection', 'Tab Branch Direction');
+		}
+
+		const directions: { dir: 'right' | 'bottom' | 'left' | 'top'; label: string; icon: any }[] = [
+			{ dir: 'right', label: 'Right (→)', icon: Codicon.arrowRight },
+			{ dir: 'bottom', label: 'Down (↓)', icon: Codicon.arrowDown },
+			{ dir: 'left', label: 'Left (←)', icon: Codicon.arrowLeft },
+			{ dir: 'top', label: 'Up (↑)', icon: Codicon.arrowUp }
+		];
+
+		const currentDirInfo = directions.find(d => d.dir === this._activeBranchDirection) || directions[0];
+
+		if (this._isToolbarCompact) {
+			// Single Cycle Button in Compact Mode
+			const cycleBtn = append(branchSec, $('.workflow-toolbar-item.compact-item.active'));
+			cycleBtn.title = `Tab Branch: ${currentDirInfo.label} (Click to cycle: Right → Down → Left → Up)`;
+			append(cycleBtn, $('span' + ThemeIcon.asCSSSelector(currentDirInfo.icon)));
+
+			cycleBtn.onclick = (e) => {
+				e.stopPropagation();
+				const curIdx = directions.findIndex(d => d.dir === this._activeBranchDirection);
+				const nextIdx = (curIdx + 1) % directions.length;
+				this._activeBranchDirection = directions[nextIdx].dir;
+				this._storageService.store('workflowEditor.branchDirection', this._activeBranchDirection, StorageScope.PROFILE, StorageTarget.USER);
+				this._renderToolbar(parent);
+			};
+		} else {
+			// In Expanded Mode: 4-way Direction Button Row
+			const branchRow = append(branchSec, $('.workflow-format-row'));
+			for (const d of directions) {
+				const btn = append(branchRow, $(`.workflow-format-btn${d.dir === this._activeBranchDirection ? '.active' : ''}`));
+				append(btn, $('span' + ThemeIcon.asCSSSelector(d.icon)));
+				btn.title = `Tab Branch: ${d.label}`;
+				btn.onclick = () => {
+					this._activeBranchDirection = d.dir;
+					this._storageService.store('workflowEditor.branchDirection', this._activeBranchDirection, StorageScope.PROFILE, StorageTarget.USER);
+					this._renderToolbar(parent);
+				};
+			}
 		}
 	}
 
@@ -1904,21 +1956,68 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
-		// Find existing direct child nodes
+		const dir = this._activeBranchDirection || 'right';
+
+		// Find existing direct child nodes connected from parent in this direction
 		const childLinks = this._data.links.filter(l => l.from === parent.id);
 		const existingChildren = childLinks
 			.map(l => this._data.nodes.find(n => n.id === l.to))
 			.filter(Boolean) as IFlowchartNode[];
 
 		const horizontalGap = 80;
-		const verticalGap = 20;
+		const verticalGap = 40;
+		const nodeW = parent.width || 120;
+		const nodeH = parent.height || 50;
 
-		const childX = parent.x + parent.width + horizontalGap;
+		let childX = parent.x;
 		let childY = parent.y;
+		let fromPort: 'right' | 'bottom' | 'left' | 'top' = 'right';
+		let toPort: 'right' | 'bottom' | 'left' | 'top' = 'left';
 
-		if (existingChildren.length > 0) {
-			const maxBottom = Math.max(...existingChildren.map(c => c.y + c.height));
-			childY = maxBottom + verticalGap;
+		if (dir === 'right') {
+			fromPort = 'right';
+			toPort = 'left';
+			childX = parent.x + nodeW + horizontalGap;
+			const rightChildren = existingChildren.filter(c => c.x > parent.x);
+			if (rightChildren.length > 0) {
+				const maxBottom = Math.max(...rightChildren.map(c => c.y + (c.height || 50)));
+				childY = maxBottom + 20;
+			} else {
+				childY = parent.y;
+			}
+		} else if (dir === 'bottom') {
+			fromPort = 'bottom';
+			toPort = 'top';
+			childY = parent.y + nodeH + verticalGap;
+			const bottomChildren = existingChildren.filter(c => c.y > parent.y);
+			if (bottomChildren.length > 0) {
+				const maxRight = Math.max(...bottomChildren.map(c => c.x + (c.width || 120)));
+				childX = maxRight + 20;
+			} else {
+				childX = parent.x;
+			}
+		} else if (dir === 'left') {
+			fromPort = 'left';
+			toPort = 'right';
+			childX = parent.x - nodeW - horizontalGap;
+			const leftChildren = existingChildren.filter(c => c.x < parent.x);
+			if (leftChildren.length > 0) {
+				const maxBottom = Math.max(...leftChildren.map(c => c.y + (c.height || 50)));
+				childY = maxBottom + 20;
+			} else {
+				childY = parent.y;
+			}
+		} else if (dir === 'top') {
+			fromPort = 'top';
+			toPort = 'bottom';
+			childY = parent.y - nodeH - verticalGap;
+			const topChildren = existingChildren.filter(c => c.y < parent.y);
+			if (topChildren.length > 0) {
+				const maxRight = Math.max(...topChildren.map(c => c.x + (c.width || 120)));
+				childX = maxRight + 20;
+			} else {
+				childX = parent.x;
+			}
 		}
 
 		const newId = `node_${Date.now()}`;
@@ -1927,8 +2026,8 @@ export class WorkflowEditor extends EditorPane {
 			type: parent.type || 'round-rect',
 			x: childX,
 			y: childY,
-			width: parent.width || 120,
-			height: parent.height || 50,
+			width: nodeW,
+			height: nodeH,
 			label: 'New Node',
 			color: parent.color || '#0d9488',
 			textColor: parent.textColor || '#ffffff',
@@ -1943,11 +2042,11 @@ export class WorkflowEditor extends EditorPane {
 		const newLink: IFlowchartLink = {
 			id: `link_${Date.now()}`,
 			from: parent.id,
-			fromPort: 'right',
+			fromPort: fromPort,
 			to: newId,
-			toPort: 'left',
+			toPort: toPort,
 			style: this._activeLinkStyle || 'arrow-single',
-			routing: 'orthogonal',
+			routing: this._activeRoutingMode || 'orthogonal',
 			color: parent.color || '#0d9488'
 		};
 
@@ -1981,29 +2080,44 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
+		const dir = this._activeBranchDirection || 'right';
 		const verticalGap = 20;
+		const horizontalGap = 20;
 
 		// Find parent link if current has a parent
 		const parentLink = this._data.links.find(l => l.to === current.id);
 		const parentNode = parentLink ? this._data.nodes.find(n => n.id === parentLink.from) : undefined;
 
-		const siblingX = current.x;
-		let siblingY = current.y + current.height + verticalGap;
+		let siblingX = current.x;
+		let siblingY = current.y;
 
-		if (parentNode) {
-			const siblingLinks = this._data.links.filter(l => l.from === parentNode.id);
-			const allSiblings = siblingLinks
-				.map(l => this._data.nodes.find(n => n.id === l.to))
-				.filter(Boolean) as IFlowchartNode[];
-			if (allSiblings.length > 0) {
-				const maxBottom = Math.max(...allSiblings.map(s => s.y + s.height), current.y + current.height);
-				siblingY = maxBottom + verticalGap;
+		if (dir === 'right' || dir === 'left') {
+			// Sibling stacks vertically
+			siblingX = current.x;
+			siblingY = current.y + (current.height || 50) + verticalGap;
+			if (parentNode) {
+				const siblingLinks = this._data.links.filter(l => l.from === parentNode.id);
+				const allSiblings = siblingLinks
+					.map(l => this._data.nodes.find(n => n.id === l.to))
+					.filter(Boolean) as IFlowchartNode[];
+				if (allSiblings.length > 0) {
+					const maxBottom = Math.max(...allSiblings.map(s => s.y + (s.height || 50)), current.y + (current.height || 50));
+					siblingY = maxBottom + verticalGap;
+				}
 			}
 		} else {
-			const roots = this._data.nodes.filter(n => !this._data.links.some(l => l.to === n.id));
-			if (roots.length > 0) {
-				const maxBottom = Math.max(...roots.map(r => r.y + r.height), current.y + current.height);
-				siblingY = maxBottom + verticalGap;
+			// For vertical branching (down/up), sibling stacks horizontally
+			siblingY = current.y;
+			siblingX = current.x + (current.width || 120) + horizontalGap;
+			if (parentNode) {
+				const siblingLinks = this._data.links.filter(l => l.from === parentNode.id);
+				const allSiblings = siblingLinks
+					.map(l => this._data.nodes.find(n => n.id === l.to))
+					.filter(Boolean) as IFlowchartNode[];
+				if (allSiblings.length > 0) {
+					const maxRight = Math.max(...allSiblings.map(s => s.x + (s.width || 120)), current.x + (current.width || 120));
+					siblingX = maxRight + horizontalGap;
+				}
 			}
 		}
 
@@ -2028,15 +2142,15 @@ export class WorkflowEditor extends EditorPane {
 
 		this._data.nodes.push(newSibling);
 
-		if (parentNode) {
+		if (parentNode && parentLink) {
 			const newLink: IFlowchartLink = {
 				id: `link_${Date.now()}`,
 				from: parentNode.id,
-				fromPort: 'right',
+				fromPort: parentLink.fromPort || (dir === 'bottom' ? 'bottom' : (dir === 'top' ? 'top' : (dir === 'left' ? 'left' : 'right'))),
 				to: newId,
-				toPort: 'left',
-				style: parentLink?.style || this._activeLinkStyle || 'arrow-single',
-				routing: 'orthogonal',
+				toPort: parentLink.toPort || (dir === 'bottom' ? 'top' : (dir === 'top' ? 'bottom' : (dir === 'left' ? 'right' : 'left'))),
+				style: parentLink.style || this._activeLinkStyle || 'arrow-single',
+				routing: parentLink.routing || this._activeRoutingMode || 'orthogonal',
 				color: parentNode.color || current.color || '#0d9488'
 			};
 			this._data.links.push(newLink);
