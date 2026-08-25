@@ -16,6 +16,7 @@
 /* --- Left Toolbar --- */
 .workflow-editor-toolbar {
 	width: 220px;
+	min-width: 220px;
 	height: 100%;
 	border-right: 1px solid var(--vscode-sideBar-border, rgba(255, 255, 255, 0.08));
 	background: var(--vscode-sideBar-background, #181818);
@@ -26,12 +27,58 @@
 	box-sizing: border-box;
 	flex-shrink: 0;
 	overflow-y: auto;
+	transition: width 0.22s cubic-bezier(0.16, 1, 0.3, 1), min-width 0.22s cubic-bezier(0.16, 1, 0.3, 1), padding 0.22s ease;
+}
+
+.workflow-editor-toolbar.compact {
+	width: 52px !important;
+	min-width: 52px !important;
+	padding: 12px 6px !important;
+	gap: 14px !important;
+	align-items: center;
+}
+
+.workflow-toolbar-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	width: 100%;
+	padding-bottom: 6px;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.workflow-toolbar-main-title {
+	font-size: 11px;
+	font-weight: 700;
+	color: #22d3ee;
+	letter-spacing: 0.6px;
+	text-transform: uppercase;
+}
+
+.workflow-toolbar-toggle-btn {
+	width: 22px;
+	height: 22px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 4px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: var(--vscode-descriptionForeground, #888888);
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+
+.workflow-toolbar-toggle-btn:hover {
+	background: rgba(255, 255, 255, 0.1);
+	color: #ffffff;
 }
 
 .workflow-toolbar-section {
 	display: flex;
 	flex-direction: column;
 	gap: 10px;
+	width: 100%;
 }
 
 .workflow-toolbar-title {
@@ -42,12 +89,31 @@
 	letter-spacing: 0.5px;
 	padding-bottom: 4px;
 	border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+	text-align: center;
 }
 
 .workflow-shape-grid {
 	display: grid;
 	grid-template-columns: repeat(2, 1fr);
 	gap: 8px;
+}
+
+.workflow-shape-grid.compact-1col {
+	display: flex !important;
+	flex-direction: column !important;
+	gap: 6px !important;
+	align-items: center !important;
+	width: 100% !important;
+}
+
+.workflow-toolbar-item.compact-item {
+	width: 36px !important;
+	height: 36px !important;
+	padding: 0 !important;
+	display: flex !important;
+	align-items: center !important;
+	justify-content: center !important;
+	gap: 0 !important;
 }
 
 .workflow-toolbar-item {
@@ -1111,6 +1177,108 @@
 	margin-top: 8px;
 	margin-bottom: 4px;
 	letter-spacing: 0.5px;
+}
+
+/* --- Compact Inspector & Flyout Popover Styling --- */
+.workflow-editor-inspector.compact {
+	width: 52px !important;
+	min-width: 52px !important;
+	padding: 12px 6px !important;
+	gap: 14px !important;
+	align-items: center;
+}
+
+.workflow-inspector-header-actions {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.workflow-compact-color-btn {
+	width: 36px;
+	height: 36px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 6px;
+	border: 1.5px solid rgba(255, 255, 255, 0.12);
+	background: rgba(255, 255, 255, 0.04);
+	cursor: pointer;
+	transition: all 0.15s ease;
+	margin: 0 auto;
+	box-sizing: border-box;
+}
+
+.workflow-compact-color-btn:hover {
+	border-color: #0d9488;
+	background: rgba(13, 148, 136, 0.15);
+	transform: scale(1.05);
+}
+
+.workflow-compact-color-dot {
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	border: 1.5px solid rgba(255, 255, 255, 0.6);
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+.workflow-format-row.compact-col {
+	display: flex !important;
+	flex-direction: column !important;
+	gap: 4px !important;
+	padding: 2px !important;
+	width: 100% !important;
+	box-sizing: border-box !important;
+}
+
+.workflow-format-row.compact-col .workflow-format-btn {
+	width: 100% !important;
+	height: 24px !important;
+	padding: 0 !important;
+	font-size: 10.5px !important;
+	min-width: unset !important;
+}
+
+.workflow-format-row.compact-2x2 {
+	display: grid !important;
+	grid-template-columns: 1fr 1fr !important;
+	gap: 3px !important;
+	padding: 2px !important;
+	width: 100% !important;
+	box-sizing: border-box !important;
+}
+
+.workflow-format-row.compact-2x2 .workflow-format-btn {
+	height: 22px !important;
+	padding: 0 !important;
+	font-size: 10px !important;
+	min-width: unset !important;
+}
+
+/* Floating Color Popover Menu */
+.workflow-color-flyout-popover {
+	position: fixed;
+	background: var(--vscode-editorWidget-background, #252526);
+	border: 1px solid rgba(255, 255, 255, 0.18);
+	border-radius: 8px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.65);
+	backdrop-filter: blur(12px);
+	-webkit-backdrop-filter: blur(12px);
+	padding: 8px;
+	z-index: 10000;
+	animation: flyoutFadeIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes flyoutFadeIn {
+	from {
+		opacity: 0;
+		transform: scale(0.92) translateX(6px);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1) translateX(0);
+	}
 }
 
 /* --- Export Floating Dropdown Menu --- */

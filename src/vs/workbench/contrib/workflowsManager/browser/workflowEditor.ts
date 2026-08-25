@@ -15,7 +15,7 @@ import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
-import { IStorageService } from '../../../../platform/storage/common/storage.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { WorkflowEditorInput } from './workflowEditorInput.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -199,7 +199,10 @@ export class WorkflowEditor extends EditorPane {
 	private _zoomLevel: number = 1.0;
 	private _zoomSizerEl?: HTMLElement;
 	private _floatingZoomBadgeEl?: HTMLElement;
+	private _toolbarEl?: HTMLElement;
+	private _isToolbarCompact: boolean = false;
 	private _inspectorEl?: HTMLElement;
+	private _isInspectorCompact: boolean = false;
 	private _isInspectorCollapsed: boolean = false;
 	private _inspectorTogglePill?: HTMLElement;
 
@@ -207,7 +210,7 @@ export class WorkflowEditor extends EditorPane {
 		group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
 		@IThemeService themeService: IThemeService,
-		@IStorageService storageService: IStorageService,
+		@IStorageService private readonly _storageService: IStorageService,
 		@IFileService private readonly _fileService: IFileService,
 		@INotificationService private readonly _notificationService: INotificationService,
 		@IViewsService private readonly _viewsService: IViewsService,
@@ -216,7 +219,10 @@ export class WorkflowEditor extends EditorPane {
 		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
 		@IFileDialogService private readonly _fileDialogService: IFileDialogService
 	) {
-		super(WorkflowEditor.ID, group, telemetryService, themeService, storageService);
+		super(WorkflowEditor.ID, group, telemetryService, themeService, _storageService);
+		this._isToolbarCompact = this._storageService.getBoolean('workflowEditor.toolbarCompact', StorageScope.PROFILE, false);
+		this._isInspectorCompact = this._storageService.getBoolean('workflowEditor.inspectorCompact', StorageScope.PROFILE, false);
+		this._isInspectorCollapsed = this._storageService.getBoolean('workflowEditor.inspectorCollapsed', StorageScope.PROFILE, false);
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
@@ -422,6 +428,10 @@ export class WorkflowEditor extends EditorPane {
 
 		// 1. Toolbar Panel
 		const toolbar = append(this._container, $('.workflow-editor-toolbar'));
+		if (this._isToolbarCompact) {
+			toolbar.classList.add('compact');
+		}
+		this._toolbarEl = toolbar;
 		this._renderToolbar(toolbar);
 
 		// 2. Center Drawing Viewport (Fixed container for floating controls)
@@ -542,6 +552,9 @@ export class WorkflowEditor extends EditorPane {
 		const inspector = append(this._container, $('.workflow-editor-inspector'));
 		if (this._isInspectorCollapsed) {
 			inspector.classList.add('collapsed');
+		}
+		if (this._isInspectorCompact) {
+			inspector.classList.add('compact');
 		}
 		this._inspectorEl = inspector;
 		this._renderInspector(inspector);
@@ -715,11 +728,38 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _renderToolbar(parent: HTMLElement): void {
+		clearNode(parent);
+
+		// Header with Title & Mode Toggle Button
+		const header = append(parent, $('.workflow-toolbar-header'));
+		const title = append(header, $('.workflow-toolbar-main-title'));
+		title.textContent = this._isToolbarCompact ? 'TOOL' : 'TOOLBOX';
+		title.title = 'Shapes & Drawing Toolbox';
+
+		const toggleBtn = append(header, $('.workflow-toolbar-toggle-btn'));
+		append(toggleBtn, $('span' + ThemeIcon.asCSSSelector(this._isToolbarCompact ? Codicon.chevronRight : Codicon.chevronLeft)));
+		toggleBtn.title = this._isToolbarCompact ? 'Expand Toolbox (Double Column)' : 'Compact Toolbox (Single Column)';
+		toggleBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._isToolbarCompact = !this._isToolbarCompact;
+			this._storageService.store('workflowEditor.toolbarCompact', this._isToolbarCompact, StorageScope.PROFILE, StorageTarget.USER);
+			if (this._isToolbarCompact) {
+				parent.classList.add('compact');
+			} else {
+				parent.classList.remove('compact');
+			}
+			this._renderToolbar(parent);
+		};
+
 		// Section A: Drag Shapes
 		const shapeSec = append(parent, $('.workflow-toolbar-section'));
-		append(shapeSec, $('.workflow-toolbar-title')).textContent = localize('shapes', 'Drag / Click Shapes');
+		const shapeTitle = append(shapeSec, $('.workflow-toolbar-title'));
+		shapeTitle.textContent = this._isToolbarCompact ? 'SHAPES' : localize('shapes', 'Drag / Click Shapes');
+		if (this._isToolbarCompact) {
+			shapeTitle.title = 'Drag or Click Shapes to add';
+		}
 
-		const shapesGrid = append(shapeSec, $('.workflow-shape-grid'));
+		const shapesGrid = append(shapeSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
 		const shapeTypes: { type: IFlowchartNode['type']; label: string; previewClass: string }[] = [
 			{ type: 'round-rect', label: 'Round Rect', previewClass: 'round-rect' },
 			{ type: 'rect', label: 'Rectangle', previewClass: 'rect' },
@@ -728,8 +768,9 @@ export class WorkflowEditor extends EditorPane {
 		];
 
 		for (const st of shapeTypes) {
-			const item = append(shapesGrid, $('.workflow-toolbar-item'));
+			const item = append(shapesGrid, $(`.workflow-toolbar-item${this._isToolbarCompact ? '.compact-item' : ''}`));
 			item.setAttribute('draggable', 'true');
+			item.title = `${st.label} (Drag or Click to add)`;
 			item.ondragstart = (e: DragEvent) => {
 				e.dataTransfer?.setData('text/plain', JSON.stringify({ type: st.type, label: st.label }));
 				if (e.dataTransfer) {
@@ -738,7 +779,9 @@ export class WorkflowEditor extends EditorPane {
 			};
 
 			append(item, $(`.item-preview.${st.previewClass}`));
-			append(item, $('.item-label')).textContent = st.label;
+			if (!this._isToolbarCompact) {
+				append(item, $('.item-label')).textContent = st.label;
+			}
 
 			item.onclick = () => {
 				this._addNewNode(st.type, st.label);
@@ -747,9 +790,13 @@ export class WorkflowEditor extends EditorPane {
 
 		// Section B: Link Styling
 		const linkSec = append(parent, $('.workflow-toolbar-section'));
-		append(linkSec, $('.workflow-toolbar-title')).textContent = localize('linkStyle', 'Connection Styles');
+		const linkTitle = append(linkSec, $('.workflow-toolbar-title'));
+		linkTitle.textContent = this._isToolbarCompact ? 'LINES' : localize('linkStyle', 'Connection Styles');
+		if (this._isToolbarCompact) {
+			linkTitle.title = 'Connection Line Styles';
+		}
 
-		const linksGrid = append(linkSec, $('.workflow-shape-grid'));
+		const linksGrid = append(linkSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
 		const linkStyles: { style: IFlowchartLink['style']; label: string; previewClass: string }[] = [
 			{ style: 'arrow-single', label: 'Single Arrow', previewClass: 'line-preview' },
 			{ style: 'arrow-double', label: 'Double Arrow', previewClass: 'line-preview' },
@@ -759,12 +806,15 @@ export class WorkflowEditor extends EditorPane {
 
 		const linkItemBtns: HTMLElement[] = [];
 		for (const ls of linkStyles) {
-			const item = append(linksGrid, $(`.workflow-toolbar-item${ls.style === this._activeLinkStyle ? '.active' : ''}`));
+			const item = append(linksGrid, $(`.workflow-toolbar-item${this._isToolbarCompact ? '.compact-item' : ''}${ls.style === this._activeLinkStyle ? '.active' : ''}`));
+			item.title = ls.label;
 			const line = append(item, $(`.item-preview.${ls.previewClass}`));
 			if (ls.style === 'arrow-single' || ls.style === 'arrow-double') {
-				line.style.borderRight = '3px solid var(--vscode-foreground, #cccccc)'; // dummy preview representation
+				line.style.borderRight = '3px solid var(--vscode-foreground, #cccccc)';
 			}
-			append(item, $('.item-label')).textContent = ls.label;
+			if (!this._isToolbarCompact) {
+				append(item, $('.item-label')).textContent = ls.label;
+			}
 
 			linkItemBtns.push(item);
 			item.onclick = () => {
@@ -776,9 +826,13 @@ export class WorkflowEditor extends EditorPane {
 
 		// Section C: Line Routing Mode (Orthogonal / Curved)
 		const routingSec = append(parent, $('.workflow-toolbar-section'));
-		append(routingSec, $('.workflow-toolbar-title')).textContent = localize('routingMode', 'Routing Modes');
+		const routingTitle = append(routingSec, $('.workflow-toolbar-title'));
+		routingTitle.textContent = this._isToolbarCompact ? 'ROUTING' : localize('routingMode', 'Routing Modes');
+		if (this._isToolbarCompact) {
+			routingTitle.title = 'Connector Routing Modes';
+		}
 
-		const routingGrid = append(routingSec, $('.workflow-shape-grid'));
+		const routingGrid = append(routingSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
 		const routingModes: { mode: 'orthogonal' | 'curved'; label: string; previewClass: string }[] = [
 			{ mode: 'orthogonal', label: localize('orthogonal', 'Orthogonal (Right-Angle)'), previewClass: 'orthogonal-preview' },
 			{ mode: 'curved', label: localize('curved', 'Curved (Smooth)'), previewClass: 'curved-preview' }
@@ -786,9 +840,12 @@ export class WorkflowEditor extends EditorPane {
 
 		const routingItemBtns: HTMLElement[] = [];
 		for (const rm of routingModes) {
-			const item = append(routingGrid, $(`.workflow-toolbar-item${rm.mode === this._activeRoutingMode ? '.active' : ''}`));
+			const item = append(routingGrid, $(`.workflow-toolbar-item${this._isToolbarCompact ? '.compact-item' : ''}${rm.mode === this._activeRoutingMode ? '.active' : ''}`));
+			item.title = rm.label;
 			append(item, $(`.item-preview.${rm.previewClass}`));
-			append(item, $('.item-label')).textContent = rm.label;
+			if (!this._isToolbarCompact) {
+				append(item, $('.item-label')).textContent = rm.label;
+			}
 
 			routingItemBtns.push(item);
 			item.onclick = () => {
@@ -802,6 +859,49 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
+	private _showColorPickerFlyout(anchorEl: HTMLElement, currentColor: string, colors: { name: string; hex: string }[], onSelect: (hex: string) => void): void {
+		const existing = document.querySelector('.workflow-color-flyout-popover');
+		if (existing) existing.remove();
+
+		const popover = document.createElement('div');
+		popover.className = 'workflow-color-flyout-popover';
+		const rect = anchorEl.getBoundingClientRect();
+		popover.style.position = 'fixed';
+		popover.style.right = `${window.innerWidth - rect.left + 8}px`;
+		popover.style.top = `${Math.max(10, Math.min(window.innerHeight - 150, rect.top - 20))}px`;
+		popover.style.zIndex = '10000';
+
+		const grid = append(popover, $('.workflow-color-grid'));
+		grid.style.display = 'grid';
+		grid.style.gridTemplateColumns = 'repeat(3, 24px)';
+		grid.style.gap = '6px';
+		grid.style.padding = '8px';
+
+		for (const c of colors) {
+			const swatch = append(grid, $('.workflow-color-swatch-btn'));
+			swatch.style.backgroundColor = c.hex;
+			swatch.title = c.name;
+			if (currentColor.toLowerCase() === c.hex.toLowerCase()) {
+				swatch.classList.add('active');
+			}
+			swatch.onclick = (e) => {
+				e.stopPropagation();
+				onSelect(c.hex);
+				popover.remove();
+			};
+		}
+
+		document.body.appendChild(popover);
+
+		const dismiss = (e: MouseEvent) => {
+			if (!popover.contains(e.target as Node) && e.target !== anchorEl) {
+				popover.remove();
+				window.removeEventListener('mousedown', dismiss, true);
+			}
+		};
+		setTimeout(() => window.addEventListener('mousedown', dismiss, true), 50);
+	}
+
 	private _renderInspector(parent: HTMLElement): void {
 		clearNode(parent);
 		if (!this._data || !Array.isArray(this._data.nodes)) {
@@ -812,21 +912,60 @@ export class WorkflowEditor extends EditorPane {
 		const headerSec = append(parent, $('.workflow-inspector-header'));
 		const headerTop = append(headerSec, $('.workflow-inspector-header-top'));
 		const title = append(headerTop, $('.workflow-inspector-title'));
-		title.textContent = 'PROPERTIES & STYLING';
+		title.textContent = this._isInspectorCompact ? 'PROPS' : 'PROPERTIES & STYLING';
 
-		const collapseBtn = append(headerTop, $('.workflow-inspector-collapse-btn'));
-		append(collapseBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronRight)));
-		collapseBtn.title = 'Collapse Panel';
+		const headerActions = append(headerTop, $('.workflow-inspector-header-actions'));
+
+		// Compact Toggle Button
+		const compactBtn = append(headerActions, $('.workflow-inspector-collapse-btn'));
+		append(compactBtn, $('span' + ThemeIcon.asCSSSelector(this._isInspectorCompact ? Codicon.chevronLeft : Codicon.chevronRight)));
+		compactBtn.title = this._isInspectorCompact ? 'Expand Panel (Full Width)' : 'Compact Panel (Single Column)';
+		compactBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._isInspectorCompact = !this._isInspectorCompact;
+			this._storageService.store('workflowEditor.inspectorCompact', this._isInspectorCompact, StorageScope.PROFILE, StorageTarget.USER);
+			if (this._isInspectorCompact) {
+				parent.classList.add('compact');
+			} else {
+				parent.classList.remove('compact');
+			}
+			this._renderInspector(parent);
+		};
+
+		// Close / Collapse Button
+		const collapseBtn = append(headerActions, $('.workflow-inspector-collapse-btn'));
+		append(collapseBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+		collapseBtn.title = 'Collapse / Hide Panel';
 		collapseBtn.onclick = (e) => {
 			e.stopPropagation();
 			this._isInspectorCollapsed = true;
+			this._storageService.store('workflowEditor.inspectorCollapsed', true, StorageScope.PROFILE, StorageTarget.USER);
 			this._inspectorEl?.classList.add('collapsed');
 			this._inspectorTogglePill?.classList.remove('hidden');
 		};
 
 		const selNodeCount = this._selectedNodeIds.size;
 		const selLinkCount = this._selectedLinkIds.size;
-		const subtitle = append(headerSec, $('.workflow-inspector-subtitle'));
+		if (!this._isInspectorCompact) {
+			const subtitle = append(headerSec, $('.workflow-inspector-subtitle'));
+			if (selLinkCount > 0 && selNodeCount === 0) {
+				if (selLinkCount === 1) {
+					const selLinkId = Array.from(this._selectedLinkIds)[0];
+					const link = this._data.links.find(l => l.id === selLinkId);
+					subtitle.textContent = `Selected: ${link?.label ? `Line "${link.label}"` : 'Connection Line'}`;
+				} else {
+					subtitle.textContent = `${selLinkCount} Lines Selected`;
+				}
+			} else if (selNodeCount === 1) {
+				const selId = Array.from(this._selectedNodeIds)[0];
+				const node = this._data.nodes.find(n => n.id === selId);
+				subtitle.textContent = `Selected: ${node?.label ? (node.label.length > 18 ? node.label.substring(0, 15) + '...' : node.label) : 'Node'}`;
+			} else if (selNodeCount > 1) {
+				subtitle.textContent = `${selNodeCount} Nodes Selected`;
+			} else {
+				subtitle.textContent = 'Default / Global Styles';
+			}
+		}
 
 		const paletteColors = [
 			{ name: 'White', hex: '#ffffff' },
@@ -839,19 +978,6 @@ export class WorkflowEditor extends EditorPane {
 
 		// Case A: Connection Line(s) Selected
 		if (selLinkCount > 0 && selNodeCount === 0) {
-			if (selLinkCount === 1) {
-				const selLinkId = Array.from(this._selectedLinkIds)[0];
-				const link = this._data.links.find(l => l.id === selLinkId);
-				subtitle.textContent = `Selected: ${link?.label ? `Line "${link.label}"` : 'Connection Line'}`;
-			} else {
-				subtitle.textContent = `${selLinkCount} Lines Selected`;
-			}
-
-			// Section 1: Line Color
-			const colorSec = append(parent, $('.workflow-toolbar-section'));
-			append(colorSec, $('.workflow-toolbar-title')).textContent = 'Line Color';
-
-			const colorGrid = append(colorSec, $('.workflow-color-grid'));
 			let currentLineColor = '#0d9488';
 			if (selLinkCount === 1) {
 				const selLinkId = Array.from(this._selectedLinkIds)[0];
@@ -859,33 +985,58 @@ export class WorkflowEditor extends EditorPane {
 				currentLineColor = link?.color || '#0d9488';
 			}
 
-			for (const c of paletteColors) {
-				const swatch = append(colorGrid, $('.workflow-color-swatch-btn'));
-				swatch.style.backgroundColor = c.hex;
-				swatch.title = c.name;
-				if (currentLineColor.toLowerCase() === c.hex.toLowerCase()) {
-					swatch.classList.add('active');
-				}
-				swatch.onclick = () => {
-					for (const id of this._selectedLinkIds) {
-						const link = this._data.links.find(l => l.id === id);
-						if (link) {
-							link.color = c.hex;
+			// Section 1: Line Color
+			const colorSec = append(parent, $('.workflow-toolbar-section'));
+			const colorTitle = append(colorSec, $('.workflow-toolbar-title'));
+			colorTitle.textContent = this._isInspectorCompact ? 'COLOR' : 'Line Color';
+
+			if (this._isInspectorCompact) {
+				const compactColorBtn = append(colorSec, $('.workflow-compact-color-btn'));
+				compactColorBtn.title = `Line Color (${currentLineColor}) - Click to pick`;
+				const dot = append(compactColorBtn, $('.workflow-compact-color-dot'));
+				dot.style.backgroundColor = currentLineColor;
+				compactColorBtn.onclick = (e) => {
+					e.stopPropagation();
+					this._showColorPickerFlyout(compactColorBtn, currentLineColor, paletteColors, (hex) => {
+						for (const id of this._selectedLinkIds) {
+							const link = this._data.links.find(l => l.id === id);
+							if (link) link.color = hex;
 						}
-					}
-					this._saveFlowchartData();
-					this._drawLinks();
-					this._renderInspector(parent);
+						this._saveFlowchartData();
+						this._drawLinks();
+						this._renderInspector(parent);
+					});
 				};
+			} else {
+				const colorGrid = append(colorSec, $('.workflow-color-grid'));
+				for (const c of paletteColors) {
+					const swatch = append(colorGrid, $('.workflow-color-swatch-btn'));
+					swatch.style.backgroundColor = c.hex;
+					swatch.title = c.name;
+					if (currentLineColor.toLowerCase() === c.hex.toLowerCase()) {
+						swatch.classList.add('active');
+					}
+					swatch.onclick = () => {
+						for (const id of this._selectedLinkIds) {
+							const link = this._data.links.find(l => l.id === id);
+							if (link) link.color = c.hex;
+						}
+						this._saveFlowchartData();
+						this._drawLinks();
+						this._renderInspector(parent);
+					};
+				}
 			}
 
 			// Section 2: Routing Mode
 			const routingSec = append(parent, $('.workflow-toolbar-section'));
-			append(routingSec, $('.workflow-toolbar-title')).textContent = 'Routing Mode';
-			const routingRow = append(routingSec, $('.workflow-format-row'));
-			const routingModes: { mode: 'orthogonal' | 'curved'; label: string }[] = [
-				{ mode: 'orthogonal', label: 'Orthogonal' },
-				{ mode: 'curved', label: 'Curved' }
+			const routingTitle = append(routingSec, $('.workflow-toolbar-title'));
+			routingTitle.textContent = this._isInspectorCompact ? 'ROUTE' : 'Routing Mode';
+
+			const routingRow = append(routingSec, $(`.workflow-format-row${this._isInspectorCompact ? '.compact-col' : ''}`));
+			const routingModes: { mode: 'orthogonal' | 'curved'; label: string; shortLabel: string }[] = [
+				{ mode: 'orthogonal', label: 'Orthogonal', shortLabel: 'Ortho' },
+				{ mode: 'curved', label: 'Curved', shortLabel: 'Curve' }
 			];
 			let curRouting: 'orthogonal' | 'curved' = 'orthogonal';
 			if (selLinkCount === 1) {
@@ -895,7 +1046,8 @@ export class WorkflowEditor extends EditorPane {
 			}
 			for (const rm of routingModes) {
 				const btn = append(routingRow, $('.workflow-format-btn'));
-				btn.textContent = rm.label;
+				btn.textContent = this._isInspectorCompact ? rm.shortLabel : rm.label;
+				btn.title = rm.label;
 				if (curRouting === rm.mode) {
 					btn.classList.add('active');
 				}
@@ -912,13 +1064,15 @@ export class WorkflowEditor extends EditorPane {
 
 			// Section 3: Arrow Style
 			const arrowSec = append(parent, $('.workflow-toolbar-section'));
-			append(arrowSec, $('.workflow-toolbar-title')).textContent = 'Arrow Style';
-			const arrowRow = append(arrowSec, $('.workflow-format-row.grid-2x2'));
-			const arrowStyles: { style: IFlowchartLink['style']; label: string }[] = [
-				{ style: 'arrow-single', label: 'Single (→)' },
-				{ style: 'arrow-double', label: 'Double (↔)' },
-				{ style: 'arrow-none', label: 'None (—)' },
-				{ style: 'dashed', label: 'Dashed (╌)' }
+			const arrowTitle = append(arrowSec, $('.workflow-toolbar-title'));
+			arrowTitle.textContent = this._isInspectorCompact ? 'ARROW' : 'Arrow Style';
+
+			const arrowRow = append(arrowSec, $(`.workflow-format-row${this._isInspectorCompact ? '.compact-col' : '.grid-2x2'}`));
+			const arrowStyles: { style: IFlowchartLink['style']; label: string; shortLabel: string }[] = [
+				{ style: 'arrow-single', label: 'Single (→)', shortLabel: '→' },
+				{ style: 'arrow-double', label: 'Double (↔)', shortLabel: '↔' },
+				{ style: 'arrow-none', label: 'None (—)', shortLabel: '—' },
+				{ style: 'dashed', label: 'Dashed (╌)', shortLabel: '╌' }
 			];
 			let curArrowStyle: IFlowchartLink['style'] = 'arrow-single';
 			if (selLinkCount === 1) {
@@ -928,7 +1082,8 @@ export class WorkflowEditor extends EditorPane {
 			}
 			for (const as of arrowStyles) {
 				const btn = append(arrowRow, $('.workflow-format-btn'));
-				btn.textContent = as.label;
+				btn.textContent = this._isInspectorCompact ? as.shortLabel : as.label;
+				btn.title = as.label;
 				if (curArrowStyle === as.style) {
 					btn.classList.add('active');
 				}
@@ -947,79 +1102,84 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Case B: Node(s) Selected or Default
-		if (selNodeCount === 1) {
-			const selId = Array.from(this._selectedNodeIds)[0];
-			const node = this._data.nodes.find(n => n.id === selId);
-			subtitle.textContent = `Selected: ${node?.label ? (node.label.length > 18 ? node.label.substring(0, 15) + '...' : node.label) : 'Node'}`;
-		} else if (selNodeCount > 1) {
-			subtitle.textContent = `${selNodeCount} Nodes Selected`;
-		} else {
-			subtitle.textContent = 'Default / Global Styles';
-		}
-
-		// Section 1: Node Color & Theme
-		const colorSec = append(parent, $('.workflow-toolbar-section'));
-		append(colorSec, $('.workflow-toolbar-title')).textContent = 'Node Color';
-
-		const colorGrid = append(colorSec, $('.workflow-color-grid'));
-
 		let currentColor = '#0d9488';
-		if (selNodeCount === 1) {
-			const selId = Array.from(this._selectedNodeIds)[0];
-			const node = this._data.nodes.find(n => n.id === selId);
-			currentColor = node?.color || '#0d9488';
-		}
-
-		for (const c of paletteColors) {
-			const swatch = append(colorGrid, $('.workflow-color-swatch-btn'));
-			swatch.style.backgroundColor = c.hex;
-			swatch.title = c.name;
-			if (currentColor.toLowerCase() === c.hex.toLowerCase()) {
-				swatch.classList.add('active');
-			}
-
-			swatch.onclick = () => {
-				if (this._selectedNodeIds.size > 0) {
-					for (const id of this._selectedNodeIds) {
-						const node = this._data.nodes.find(n => n.id === id);
-						if (node) {
-							node.color = c.hex;
-						}
-					}
-				}
-				this._saveFlowchartData();
-				this._renderNodes();
-				this._drawLinks();
-				this._renderInspector(parent);
-			};
-		}
-
-		// Section 2: Text Formatting
-		const textSec = append(parent, $('.workflow-toolbar-section'));
-		append(textSec, $('.workflow-toolbar-title')).textContent = 'Text Formatting';
-
+		let currentTextColor = '#ffffff';
 		let isBold = false;
 		let isItalic = false;
 		let isUnderline = false;
 		let isStrikethrough = false;
 		let textAlign: 'left' | 'center' | 'right' = 'center';
 		let verticalAlign: 'top' | 'center' | 'bottom' = 'center';
-		let currentTextColor = '#ffffff';
 
 		if (selNodeCount === 1) {
 			const selId = Array.from(this._selectedNodeIds)[0];
 			const node = this._data.nodes.find(n => n.id === selId);
+			currentColor = node?.color || '#0d9488';
+			currentTextColor = node?.textColor || '#ffffff';
 			isBold = !!node?.isBold;
 			isItalic = !!node?.isItalic;
 			isUnderline = !!node?.isUnderline;
 			isStrikethrough = !!node?.isStrikethrough;
 			textAlign = node?.textAlign || 'center';
 			verticalAlign = node?.verticalAlign || 'center';
-			currentTextColor = node?.textColor || '#ffffff';
 		}
 
+		// Section 1: Node Color
+		const colorSec = append(parent, $('.workflow-toolbar-section'));
+		const colorTitle = append(colorSec, $('.workflow-toolbar-title'));
+		colorTitle.textContent = this._isInspectorCompact ? 'NODE' : 'Node Color';
+
+		if (this._isInspectorCompact) {
+			const compactColorBtn = append(colorSec, $('.workflow-compact-color-btn'));
+			compactColorBtn.title = `Node Fill Color (${currentColor}) - Click to pick`;
+			const dot = append(compactColorBtn, $('.workflow-compact-color-dot'));
+			dot.style.backgroundColor = currentColor;
+			compactColorBtn.onclick = (e) => {
+				e.stopPropagation();
+				this._showColorPickerFlyout(compactColorBtn, currentColor, paletteColors, (hex) => {
+					if (this._selectedNodeIds.size > 0) {
+						for (const id of this._selectedNodeIds) {
+							const node = this._data.nodes.find(n => n.id === id);
+							if (node) node.color = hex;
+						}
+					}
+					this._saveFlowchartData();
+					this._renderNodes();
+					this._drawLinks();
+					this._renderInspector(parent);
+				});
+			};
+		} else {
+			const colorGrid = append(colorSec, $('.workflow-color-grid'));
+			for (const c of paletteColors) {
+				const swatch = append(colorGrid, $('.workflow-color-swatch-btn'));
+				swatch.style.backgroundColor = c.hex;
+				swatch.title = c.name;
+				if (currentColor.toLowerCase() === c.hex.toLowerCase()) {
+					swatch.classList.add('active');
+				}
+				swatch.onclick = () => {
+					if (this._selectedNodeIds.size > 0) {
+						for (const id of this._selectedNodeIds) {
+							const node = this._data.nodes.find(n => n.id === id);
+							if (node) node.color = c.hex;
+						}
+					}
+					this._saveFlowchartData();
+					this._renderNodes();
+					this._drawLinks();
+					this._renderInspector(parent);
+				};
+			}
+		}
+
+		// Section 2: Text Formatting
+		const textSec = append(parent, $('.workflow-toolbar-section'));
+		const textTitle = append(textSec, $('.workflow-toolbar-title'));
+		textTitle.textContent = this._isInspectorCompact ? 'TEXT' : 'Text Formatting';
+
 		// Row 1: Font Styles (Bold, Italic, Underline, Strikethrough)
-		const styleRow = append(textSec, $('.workflow-format-row'));
+		const styleRow = append(textSec, $(`.workflow-format-row${this._isInspectorCompact ? '.compact-2x2' : ''}`));
 
 		// Bold
 		const boldBtn = append(styleRow, $(`.workflow-format-btn${isBold ? '.active' : ''}`));
@@ -1095,15 +1255,15 @@ export class WorkflowEditor extends EditorPane {
 		};
 
 		// Row 2: Horizontal Alignment (Left, Center, Right)
-		const alignRow = append(textSec, $('.workflow-format-row'));
-		const alignChoices: { align: 'left' | 'center' | 'right'; label: string; title: string }[] = [
-			{ align: 'left', label: 'Left', title: 'Align Left' },
-			{ align: 'center', label: 'Center', title: 'Align Center' },
-			{ align: 'right', label: 'Right', title: 'Align Right' }
+		const alignRow = append(textSec, $(`.workflow-format-row${this._isInspectorCompact ? '.compact-col' : ''}`));
+		const alignChoices: { align: 'left' | 'center' | 'right'; label: string; shortLabel: string; title: string }[] = [
+			{ align: 'left', label: 'Left', shortLabel: 'L', title: 'Align Left' },
+			{ align: 'center', label: 'Center', shortLabel: 'C', title: 'Align Center' },
+			{ align: 'right', label: 'Right', shortLabel: 'R', title: 'Align Right' }
 		];
 		for (const ac of alignChoices) {
 			const aBtn = append(alignRow, $(`.workflow-format-btn.text-btn${textAlign === ac.align ? '.active' : ''}`));
-			aBtn.textContent = ac.label;
+			aBtn.textContent = this._isInspectorCompact ? ac.shortLabel : ac.label;
 			aBtn.title = ac.title;
 			aBtn.onclick = () => {
 				if (this._selectedNodeIds.size > 0) {
@@ -1119,15 +1279,15 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Row 3: Vertical Alignments (Top, Middle, Bottom)
-		const vAlignRow = append(textSec, $('.workflow-format-row'));
-		const vAlignChoices: { align: 'top' | 'center' | 'bottom'; label: string; title: string }[] = [
-			{ align: 'top', label: 'Top', title: 'Align Top' },
-			{ align: 'center', label: 'Middle', title: 'Align Middle' },
-			{ align: 'bottom', label: 'Bottom', title: 'Align Bottom' }
+		const vAlignRow = append(textSec, $(`.workflow-format-row${this._isInspectorCompact ? '.compact-col' : ''}`));
+		const vAlignChoices: { align: 'top' | 'center' | 'bottom'; label: string; shortLabel: string; title: string }[] = [
+			{ align: 'top', label: 'Top', shortLabel: 'T', title: 'Align Top' },
+			{ align: 'center', label: 'Middle', shortLabel: 'M', title: 'Align Middle' },
+			{ align: 'bottom', label: 'Bottom', shortLabel: 'B', title: 'Align Bottom' }
 		];
 		for (const va of vAlignChoices) {
 			const vaBtn = append(vAlignRow, $(`.workflow-format-btn${verticalAlign === va.align ? '.active' : ''}`));
-			vaBtn.textContent = va.label;
+			vaBtn.textContent = this._isInspectorCompact ? va.shortLabel : va.label;
 			vaBtn.title = va.title;
 			vaBtn.onclick = () => {
 				if (this._selectedNodeIds.size > 0) {
@@ -1143,10 +1303,6 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Text Color Sub-section
-		const textColorTitle = append(textSec, $('.workflow-sub-title'));
-		textColorTitle.textContent = 'Text Color';
-
-		const textColorGrid = append(textSec, $('.workflow-color-grid.small'));
 		const textColors = [
 			{ name: 'White', hex: '#ffffff' },
 			{ name: 'Teal (Default)', hex: '#0d9488' },
@@ -1155,47 +1311,83 @@ export class WorkflowEditor extends EditorPane {
 			{ name: 'Amber Gold', hex: '#facc15' },
 			{ name: 'Rose Red', hex: '#f43f5e' }
 		];
-		for (const tc of textColors) {
-			const tcBtn = append(textColorGrid, $('.workflow-color-swatch-btn.small'));
-			tcBtn.style.backgroundColor = tc.hex;
-			tcBtn.title = tc.name;
-			if (currentTextColor.toLowerCase() === tc.hex.toLowerCase()) {
-				tcBtn.classList.add('active');
-			}
-			tcBtn.onclick = () => {
-				if (this._selectedNodeIds.size > 0) {
-					for (const id of this._selectedNodeIds) {
-						const node = this._data.nodes.find(n => n.id === id);
-						if (node) node.textColor = tc.hex;
+
+		if (this._isInspectorCompact) {
+			const compactTextColBtn = append(textSec, $('.workflow-compact-color-btn'));
+			compactTextColBtn.title = `Text Font Color (${currentTextColor}) - Click to pick`;
+			const dot = append(compactTextColBtn, $('.workflow-compact-color-dot'));
+			dot.style.backgroundColor = currentTextColor;
+			compactTextColBtn.onclick = (e) => {
+				e.stopPropagation();
+				this._showColorPickerFlyout(compactTextColBtn, currentTextColor, textColors, (hex) => {
+					if (this._selectedNodeIds.size > 0) {
+						for (const id of this._selectedNodeIds) {
+							const node = this._data.nodes.find(n => n.id === id);
+							if (node) node.textColor = hex;
+						}
 					}
 					this._saveFlowchartData();
 					this._renderNodes();
 					this._renderInspector(parent);
-				}
+				});
 			};
+		} else {
+			const textColorTitle = append(textSec, $('.workflow-sub-title'));
+			textColorTitle.textContent = 'Text Color';
+
+			const textColorGrid = append(textSec, $('.workflow-color-grid.small'));
+			for (const tc of textColors) {
+				const tcBtn = append(textColorGrid, $('.workflow-color-swatch-btn.small'));
+				tcBtn.style.backgroundColor = tc.hex;
+				tcBtn.title = tc.name;
+				if (currentTextColor.toLowerCase() === tc.hex.toLowerCase()) {
+					tcBtn.classList.add('active');
+				}
+				tcBtn.onclick = () => {
+					if (this._selectedNodeIds.size > 0) {
+						for (const id of this._selectedNodeIds) {
+							const node = this._data.nodes.find(n => n.id === id);
+							if (node) node.textColor = tc.hex;
+						}
+						this._saveFlowchartData();
+						this._renderNodes();
+						this._renderInspector(parent);
+					}
+				};
+			}
 		}
 
 		// Export & Download Section (Always available at the bottom of Inspector)
 		const exportSec = append(parent, $('.workflow-toolbar-section'));
 		const isSelection = this._selectedNodeIds.size > 0;
-		const exportTitle = isSelection ? `Export Selection (${this._selectedNodeIds.size})` : 'Export / Download';
+		const exportTitle = this._isInspectorCompact ? 'EXPORT' : (isSelection ? `Export Selection (${this._selectedNodeIds.size})` : 'Export / Download');
 		append(exportSec, $('.workflow-toolbar-title')).textContent = exportTitle;
 
-		const exportGrid = append(exportSec, $('.workflow-format-row.grid-2x2'));
-		const exportOptions: { label: string; format: 'png' | 'jpeg' | 'svg' | 'pdf' }[] = [
-			{ label: 'PNG Image', format: 'png' },
-			{ label: 'JPEG Image', format: 'jpeg' },
-			{ label: 'SVG Vector', format: 'svg' },
-			{ label: 'PDF Doc', format: 'pdf' }
-		];
-
-		for (const opt of exportOptions) {
-			const btn = append(exportGrid, $('.workflow-format-btn'));
-			btn.textContent = opt.label;
-			btn.title = `Export as ${opt.format.toUpperCase()} (${isSelection ? 'Selected Nodes' : 'Full Canvas'})`;
-			btn.onclick = () => {
-				this._exportDiagram(opt.format, isSelection);
+		if (this._isInspectorCompact) {
+			const compactExpBtn = append(exportSec, $('.workflow-compact-color-btn'));
+			append(compactExpBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.desktopDownload)));
+			compactExpBtn.title = 'Export / Download Diagram';
+			compactExpBtn.onclick = (e) => {
+				e.stopPropagation();
+				this._showExportMenu(compactExpBtn);
 			};
+		} else {
+			const exportGrid = append(exportSec, $('.workflow-format-row.grid-2x2'));
+			const exportOptions: { label: string; format: 'png' | 'jpeg' | 'svg' | 'pdf' }[] = [
+				{ label: 'PNG Image', format: 'png' },
+				{ label: 'JPEG Image', format: 'jpeg' },
+				{ label: 'SVG Vector', format: 'svg' },
+				{ label: 'PDF Doc', format: 'pdf' }
+			];
+
+			for (const opt of exportOptions) {
+				const btn = append(exportGrid, $('.workflow-format-btn'));
+				btn.textContent = opt.label;
+				btn.title = `Export as ${opt.format.toUpperCase()} (${isSelection ? 'Selected Nodes' : 'Full Canvas'})`;
+				btn.onclick = () => {
+					this._exportDiagram(opt.format, isSelection);
+				};
+			}
 		}
 	}
 

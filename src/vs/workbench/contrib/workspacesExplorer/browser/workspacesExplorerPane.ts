@@ -569,6 +569,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 					this.renderContent();
 				};
 
+				const customModules = await this._getCustomModules(ws.uri);
+				const customModulesMap = new Map<string, string>();
+				for (const m of customModules) {
+					if (m.id && m.color) {
+						customModulesMap.set(m.id.toLowerCase(), m.color);
+						customModulesMap.set(m.name.toLowerCase(), m.color);
+					}
+				}
+
 				let wsIcon: HTMLElement;
 				let badgeText = '';
 				let badgeBg = '';
@@ -610,6 +619,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 					badgeText = 'ANALYSIS';
 					badgeBg = 'rgba(52, 211, 153, 0.2)';
 					badgeFg = '#34d399';
+				} else if (ws.detectedType && ws.detectedType !== 'workspace' && ws.detectedType !== 'folder') {
+					wsIcon = append(headerLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.package)));
+					const customColor = customModulesMap.get(ws.detectedType.toLowerCase()) || getColorForName(ws.detectedType);
+					wsIcon.style.color = customColor;
+					badgeText = ws.detectedType.toUpperCase();
+					badgeBg = hexToRgba(customColor, 0.2);
+					badgeFg = customColor;
 				} else {
 					wsIcon = append(headerLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.rootFolder)));
 					wsIcon.style.color = ws.isMissing ? '#f87171' : 'inherit';
@@ -720,7 +736,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					childrenContainer.style.maxHeight = 'calc(88vh - 100px)';
 					childrenContainer.style.overflowY = 'auto';
 
-					await this.renderChildrenTree(childrenContainer, ws.uri, canonicalWsId, 1, currentVersion);
+					await this.renderChildrenTree(childrenContainer, ws.uri, canonicalWsId, 1, currentVersion, customModulesMap);
 				}
 			}
 		}
@@ -738,8 +754,20 @@ export class MainWorkspaceViewPane extends ViewPane {
 		folderUri: URI,
 		parentWsId: string,
 		depth: number,
-		currentVersion: number
+		currentVersion: number,
+		customModulesMap?: Map<string, string>
 	): Promise<void> {
+		if (!customModulesMap) {
+			const mods = await this._getCustomModules(folderUri);
+			customModulesMap = new Map<string, string>();
+			for (const m of mods) {
+				if (m.id && m.color) {
+					customModulesMap.set(m.id.toLowerCase(), m.color);
+					customModulesMap.set(m.name.toLowerCase(), m.color);
+				}
+			}
+		}
+
 		const children = await this.workspacesExplorerService.scanWorkspaceChildren(folderUri);
 		if (this.renderVersion !== currentVersion || !this.containerEl) {
 			return;
@@ -1027,7 +1055,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 			} else if (child.type !== 'folder' && child.type !== 'file') {
 				// Custom Module!
 				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.package)));
-				const color = getColorForName(child.type);
+				const color = customModulesMap.get(child.type.toLowerCase()) || getColorForName(child.type);
 				childIcon.style.color = color;
 				badgeText = child.type.toUpperCase();
 				badgeBg = hexToRgba(color, 0.2);
@@ -1164,7 +1192,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				subContainer.style.display = 'flex';
 				subContainer.style.flexDirection = 'column';
 				subContainer.style.gap = '2px';
-				await this.renderChildrenTree(subContainer, child.uri, parentWsId, depth + 1, currentVersion);
+				await this.renderChildrenTree(subContainer, child.uri, parentWsId, depth + 1, currentVersion, customModulesMap);
 			}
 		}
 	}
@@ -2290,6 +2318,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 		try {
 			const globalDir = this._getGlobalEntityTypeDir();
 			const localDir = URI.joinPath(workspaceUri, '.agents', 'entity_type');
+			const localDirPlural = URI.joinPath(workspaceUri, '.agents', 'entity_types');
+			const parentLocalDir = URI.joinPath(dirname(workspaceUri), '.agents', 'entity_type');
 
 			try {
 				if (await this.fileService.exists(globalDir)) {
@@ -2300,7 +2330,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 								const mod = await this._readYamlFile(child.resource);
 								if (mod && mod.id) {
 									mod.storageScope = 'global';
-									modulesMap.set(mod.id, mod);
+									modulesMap.set(mod.id.toLowerCase(), mod);
 								}
 							}
 						}
@@ -2310,25 +2340,28 @@ export class MainWorkspaceViewPane extends ViewPane {
 				console.error('Error listing global entity types:', e);
 			}
 
-			try {
-				if (await this.fileService.exists(localDir)) {
-					const stat = await this.fileService.resolve(localDir);
-					if (stat.children) {
-						for (const child of stat.children) {
-							if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
-								const mod = await this._readYamlFile(child.resource);
-								if (mod && mod.id) {
-									if (!mod.storageScope) {
-										mod.storageScope = 'workspace';
+			const checkDirs = [localDir, localDirPlural, parentLocalDir];
+			for (const dir of checkDirs) {
+				try {
+					if (await this.fileService.exists(dir)) {
+						const stat = await this.fileService.resolve(dir);
+						if (stat.children) {
+							for (const child of stat.children) {
+								if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
+									const mod = await this._readYamlFile(child.resource);
+									if (mod && mod.id) {
+										if (!mod.storageScope) {
+											mod.storageScope = 'workspace';
+										}
+										modulesMap.set(mod.id.toLowerCase(), mod);
 									}
-									modulesMap.set(mod.id, mod);
 								}
 							}
 						}
 					}
+				} catch (e) {
+					console.error('Error listing local entity types:', e);
 				}
-			} catch (e) {
-				console.error('Error listing local entity types:', e);
 			}
 		} catch (e) {
 			console.error('Error in _getCustomModules overall resolution:', e);

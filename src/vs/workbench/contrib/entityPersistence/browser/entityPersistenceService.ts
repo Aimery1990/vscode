@@ -446,7 +446,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		const typeDefStr = (snapshot as any).typeDefinition || customDefFromYaml || builtInTypeDefs[type.toLowerCase()] || `${type.toUpperCase()} module entity definition.`;
 
 		// 1. Primary Entity MD (ticket.md)
-		let mainMdContent = `# ${snapshot.entityName}\n\n## Metadata\n\n`;
+		let mainMdContent = `# ${snapshot.entityName}\n\n## Overview\n\n`;
 		mainMdContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
 		mainMdContent += `- **Ticket Type**: ${type}\n`;
 		mainMdContent += `- **Type Definition**: ${typeDefStr}\n\n`;
@@ -492,7 +492,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		await this.fileService.writeFile(mainMdUri, VSBuffer.fromString(mainMdContent));
 
 		// 2. instruction.md
-		let instructionContent = `# Instruction - ${snapshot.entityName}\n\n## Metadata\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
+		let instructionContent = `# Instruction - ${snapshot.entityName}\n\n## Overview\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
 		instructionContent += `- **Parent Path**: ${parentRelPath}\n`;
 		instructionContent += `- **Ego MDs Paths**:\n`;
 		instructionContent += `  - [instruction.md](${instructionRel})\n`;
@@ -523,7 +523,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 		// 4. worklog.md
 		if (!await this.fileService.exists(workLogUri)) {
-			let workLogContent = `# Work Log - ${snapshot.entityName}\n\n## Metadata\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
+			let workLogContent = `# Work Log - ${snapshot.entityName}\n\n## Overview\n\n- **Ticket ID**: ${snapshot.entityName}\n- **Ticket Type**: ${type}\n- **Created By**: User\n- **Owner Account**: ${ownerAccount}\n- **Created At**: ${dateTimeFormatted}\n`;
 			workLogContent += `- **Parent Path**: ${parentRelPath}\n`;
 			workLogContent += `- **Ego MDs Paths**:\n`;
 			workLogContent += `  - [instruction.md](${instructionRel})\n`;

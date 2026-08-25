@@ -199,21 +199,23 @@ export class EntityDetailEditor extends EditorPane {
 		const savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
 		const userHome = this._environmentService.userHome.fsPath;
 		const resolvedPath = savedPath.startsWith('~/') ? userHome + savedPath.substring(1) : savedPath === '~' ? userHome : savedPath;
-		const globalFile = URI.file(resolvedPath + `/${typeId}.yaml`);
-		const localFile = URI.joinPath(workspaceUri, '.agents', 'entity_type', `${typeId}.yaml`);
+		
+		const possibleUris = [
+			URI.joinPath(workspaceUri, '.agents', 'entity_type', `${typeId}.yaml`),
+			URI.joinPath(workspaceUri, '.agents', 'entity_type', `${typeId.toLowerCase()}.yaml`),
+			URI.joinPath(dirname(workspaceUri), '.agents', 'entity_type', `${typeId}.yaml`),
+			URI.joinPath(dirname(workspaceUri), '.agents', 'entity_type', `${typeId.toLowerCase()}.yaml`),
+			URI.file(resolvedPath + `/${typeId}.yaml`),
+			URI.file(resolvedPath + `/${typeId.toLowerCase()}.yaml`),
+		];
 
-		if (await this._fileService.exists(localFile)) {
-			try {
-				const content = await this._fileService.readFile(localFile);
-				return this._parseYaml(content.value.toString());
-			} catch {}
-		}
-
-		if (await this._fileService.exists(globalFile)) {
-			try {
-				const content = await this._fileService.readFile(globalFile);
-				return this._parseYaml(content.value.toString());
-			} catch {}
+		for (const u of possibleUris) {
+			if (await this._fileService.exists(u)) {
+				try {
+					const content = await this._fileService.readFile(u);
+					return this._parseYaml(content.value.toString());
+				} catch {}
+			}
 		}
 
 		return null;
@@ -370,7 +372,7 @@ export class EntityDetailEditor extends EditorPane {
 				title = line.substring(2).trim();
 				continue;
 			}
-			if (line.startsWith('## Metadata') || line.startsWith('## 基本元数据')) {
+			if (line.startsWith('## Overview') || line.startsWith('## Metadata') || line.startsWith('## 基本元数据') || line.startsWith('## Details') || line.startsWith('## 概览')) {
 				inMetadata = true;
 				inDescription = false;
 				continue;
@@ -422,7 +424,7 @@ export class EntityDetailEditor extends EditorPane {
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
 
-			if (line.startsWith('## Metadata') || line.startsWith('## 基本元数据')) {
+			if (line.startsWith('## Overview') || line.startsWith('## Metadata') || line.startsWith('## 基本元数据') || line.startsWith('## Details') || line.startsWith('## 概览')) {
 				newLines.push(line);
 				inMetadata = true;
 				inDescription = false;
@@ -469,7 +471,7 @@ export class EntityDetailEditor extends EditorPane {
 		// Fallback if sections didn't exist
 		if (!hasReplacedMeta && newMeta) {
 			newLines.push('');
-			newLines.push('## Metadata');
+			newLines.push('## Overview');
 			newLines.push('');
 			for (const [k, v] of Object.entries(newMeta)) {
 				newLines.push(`- **${k}**: ${v}`);
@@ -725,8 +727,12 @@ export class EntityDetailEditor extends EditorPane {
 		const typeLower = type.toLowerCase();
 		let colorSetting = typeColors[typeLower];
 		if (!colorSetting) {
-			const color = getColorForName(typeLower);
-			colorSetting = { text: color, bg: hexToRgba(color, 0.15) };
+			if (customModule && customModule.color) {
+				colorSetting = { text: customModule.color, bg: hexToRgba(customModule.color, 0.15) };
+			} else {
+				const color = getColorForName(typeLower);
+				colorSetting = { text: color, bg: hexToRgba(color, 0.15) };
+			}
 		}
 
 		// Attachment cards html list
