@@ -47,9 +47,12 @@ export interface ICreateResourceOptions {
 	workspaceId?: string;
 	description?: string;
 	code?: string;
+	status?: string;
 	priority?: string;
 	assignedAgentId?: string;
 	assignedAgentName?: string;
+	linkTo?: string;
+	attachments?: URI[];
 	agentRulePrompt?: string;
 	parentEntityUri?: URI;
 	agentModel?: {

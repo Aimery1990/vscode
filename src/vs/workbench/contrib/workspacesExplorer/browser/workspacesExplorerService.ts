@@ -487,6 +487,25 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			await this.fileService.createFolder(targetBaseUri);
 		}
 
+		let attachmentNames: string[] | undefined;
+		if (options.attachments && options.attachments.length > 0) {
+			const attachmentsDir = URI.joinPath(targetBaseUri, 'attachments');
+			if (!await this.fileService.exists(attachmentsDir)) {
+				await this.fileService.createFolder(attachmentsDir);
+			}
+			attachmentNames = [];
+			for (const attUri of options.attachments) {
+				const fileName = attUri.path.split('/').filter(Boolean).pop() || 'attachment';
+				const destUri = URI.joinPath(attachmentsDir, fileName);
+				try {
+					await this.fileService.copy(attUri, destUri, true);
+					attachmentNames.push(fileName);
+				} catch (err) {
+					console.error('Failed to copy attachment:', err);
+				}
+			}
+		}
+
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: targetBaseUri.toString(),
 			entityName: options.name,
@@ -495,7 +514,15 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			entityType: 'workspace',
 			entityCode: wsCode,
 			ownerAccount: this.activeUserEmail || 'unauthenticated',
-			description: options.description || `Workspace ${options.name}`
+			description: options.description || `Workspace ${options.name}`,
+			status: options.status || 'Todo',
+			priority: options.priority || 'Medium',
+			assignedAgentId: options.assignedAgentId,
+			assignedAgentName: options.assignedAgentName,
+			linkTo: options.linkTo,
+			attachments: attachmentNames,
+			typePrompt: options.typePrompt,
+			ticketPrompt: options.ticketPrompt
 		}, targetBaseUri, false);
 
 		await this.saveWorkspace(targetBaseUri);

@@ -503,8 +503,12 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		}
 		mainMdContent += `\n`;
 
+		const statusStr = snapshot.status || 'Todo';
+		const linkToStr = snapshot.linkTo || 'None';
+		const linkedByStr = snapshot.linkedBy || 'None';
+
 		mainMdContent += `- **Current AI Agent**: ${snapshot.assignedAgentName || 'None'}\n`;
-		mainMdContent += `- **Status**: Todo\n`;
+		mainMdContent += `- **Status**: ${statusStr}\n`;
 		mainMdContent += `- **Priority**: ${snapshot.priority || 'Medium'}\n`;
 		mainMdContent += `- **Parent Path**: ${parentRelPath}\n`;
 		mainMdContent += `- **Ego MDs Paths**:\n`;
@@ -514,11 +518,18 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		mainMdContent += `  - [worklog.md](${worklogRel})\n\n`;
 
 		mainMdContent += `### Link\n`;
-		mainMdContent += `- **Link To**: None\n`;
-		mainMdContent += `- **Linked By**: None\n\n`;
+		mainMdContent += `- **Link To**: ${linkToStr}\n`;
+		mainMdContent += `- **Linked By**: ${linkedByStr}\n\n`;
 
 		mainMdContent += `### Attachments Links\n`;
-		mainMdContent += `- None\n`;
+		if (snapshot.attachments && snapshot.attachments.length > 0) {
+			for (const att of snapshot.attachments) {
+				const attName = att.split('/').filter(Boolean).pop() || att;
+				mainMdContent += `- [${attName}](attachments/${attName})\n`;
+			}
+		} else {
+			mainMdContent += `- None\n`;
+		}
 		await this.fileService.writeFile(mainMdUri, VSBuffer.fromString(mainMdContent));
 
 		let customPromptFromYaml: string | undefined;

@@ -46,6 +46,7 @@ export interface IBaseEntitySnapshot {
 	ownerAccount?: string;
 	createdAt?: string;
 	description?: string;
+	status?: string;
 	priority?: string;
 	assignedAgentId?: string;
 	assignedAgentName?: string;
@@ -53,6 +54,9 @@ export interface IBaseEntitySnapshot {
 	typeDefinition?: string;
 	typePrompt?: string;
 	ticketPrompt?: string;
+	linkTo?: string;
+	linkedBy?: string;
+	attachments?: string[];
 	belongsToWorkspaceUri?: string;
 
 	// Specialized properties for AI Agent

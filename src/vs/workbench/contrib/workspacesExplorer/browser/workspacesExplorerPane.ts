@@ -1252,8 +1252,17 @@ export class MainWorkspaceViewPane extends ViewPane {
 		closeIcon.style.opacity = '0.7';
 		closeIcon.onclick = () => overlay.remove();
 
+		// Scrollable Body Container
+		const modalBody = append(modal, $('.modal-body'));
+		modalBody.style.flex = '1';
+		modalBody.style.overflowY = 'auto';
+		modalBody.style.display = 'flex';
+		modalBody.style.flexDirection = 'column';
+		modalBody.style.gap = '14px';
+		modalBody.style.paddingRight = '6px';
+
 		// Workspace Name Input
-		const nameBox = append(modal, $('.form-group'));
+		const nameBox = append(modalBody, $('.form-group'));
 		append(nameBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Name:'));
 		const nameInput = append(nameBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
@@ -1261,7 +1270,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		nameInput.placeholder = 'e.g., my_workspace';
 
 		// Workspace Title Input
-		const titleBox = append(modal, $('.form-group'));
+		const titleBox = append(modalBody, $('.form-group'));
 		append(titleBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Title:'));
 		const titleInput = append(titleBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
@@ -1269,7 +1278,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		titleInput.placeholder = 'e.g., My AI Workspace';
 
 		// Workspace Code Input Prefix
-		const codeBox = append(modal, $('.form-group'));
+		const codeBox = append(modalBody, $('.form-group'));
 		append(codeBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Code Prefix:'));
 		const codeInput = append(codeBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; text-transform: uppercase;'
@@ -1277,7 +1286,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		codeInput.placeholder = 'e.g., ABCD / FINO3';
 
 		// Workspace ID Preview (Read-only)
-		const wsIdBox = append(modal, $('.form-group'));
+		const wsIdBox = append(modalBody, $('.form-group'));
 		append(wsIdBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace ID (Ancestor Origin):'));
 		const wsIdInput = append(wsIdBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); color: #38bdf8; box-sizing: border-box; font-family: monospace; font-weight: 600;'
@@ -1304,7 +1313,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 
 		// Location Path Picker
-		const pathBox = append(modal, $('.form-group'));
+		const pathBox = append(modalBody, $('.form-group'));
 		append(pathBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Target Location Path:'));
 
 		const pathRow = append(pathBox, $('.path-input-row'));
@@ -1346,12 +1355,136 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 
 		// Description Input
-		const descBox = append(modal, $('.form-group'));
+		const descBox = append(modalBody, $('.form-group'));
 		append(descBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Description (Optional):'));
 		const descInput = append(descBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
 		descInput.placeholder = 'Brief purpose of this workspace';
+
+		// Status & Priority 2-Column Row
+		const statusPriorityRow = append(modalBody, $('.form-row'));
+		statusPriorityRow.style.display = 'grid';
+		statusPriorityRow.style.gridTemplateColumns = '1fr 1fr';
+		statusPriorityRow.style.gap = '12px';
+
+		// Status Box (Read-only badge)
+		const statusCol = append(statusPriorityRow, $('.form-group'));
+		append(statusCol, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Initial Status:'));
+		const statusBadgeWrapper = append(statusCol, $('div', { style: 'padding: 6px 0;' }));
+		append(statusBadgeWrapper, $('span', {
+			style: 'display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(129, 140, 248, 0.18); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.4);'
+		}, 'Todo'));
+
+		// Priority Dropdown
+		const priorityCol = append(statusPriorityRow, $('.form-group'));
+		append(priorityCol, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Priority:'));
+		const prioritySelect = append(priorityCol, $('select.monaco-select-box', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; cursor: pointer;'
+		})) as HTMLSelectElement;
+		const priorities = [
+			{ label: 'Medium', val: 'Medium' },
+			{ label: 'High', val: 'High' },
+			{ label: 'Very High', val: 'Very High' },
+			{ label: 'Low', val: 'Low' },
+			{ label: 'Very Low', val: 'Very Low' }
+		];
+		for (const p of priorities) {
+			const opt = append(prioritySelect, $('option', { value: p.val }, p.label)) as HTMLOptionElement;
+			if (p.val === 'Medium') opt.selected = true;
+		}
+
+		// Current AI Agent Dropdown
+		const agentBox = append(modalBody, $('.form-group'));
+		append(agentBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Current AI Agent (Optional):'));
+		const agentSelect = append(agentBox, $('select.monaco-select-box', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; cursor: pointer;'
+		})) as HTMLSelectElement;
+		append(agentSelect, $('option', { value: '' }, 'None (Unassigned)'));
+
+		let availableAgents: any[] = [];
+		if (this.agentsManagerService) {
+			this.agentsManagerService.getAgents().then(agents => {
+				availableAgents = agents || [];
+				for (const ag of availableAgents) {
+					append(agentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.role || 'Agent'})`));
+				}
+			}).catch(() => {});
+		}
+
+		// Link To Input
+		const linkBox = append(modalBody, $('.form-group'));
+		append(linkBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Link To (Optional Ticket ID / Resource):'));
+		const linkInput = append(linkBox, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		linkInput.placeholder = 'e.g., None, PROJ-0001, or URL';
+
+		// Attachments Section
+		const attachBox = append(modalBody, $('.form-group'));
+		append(attachBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Attachments (Optional):'));
+		const attachRow = append(attachBox, $('div', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
+		const attachTagsContainer = append(attachRow, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 6px;' }));
+
+		const selectedAttachments: URI[] = [];
+		const renderAttachmentTags = () => {
+			clearNode(attachTagsContainer);
+			if (selectedAttachments.length === 0) {
+				append(attachTagsContainer, $('span', { style: 'font-size: 11px; opacity: 0.5; font-style: italic;' }, 'No attachments added.'));
+			} else {
+				for (let i = 0; i < selectedAttachments.length; i++) {
+					const attUri = selectedAttachments[i];
+					const fileName = attUri.path.split('/').filter(Boolean).pop() || 'file';
+					const tag = append(attachTagsContainer, $('div', {
+						style: 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); padding: 3px 8px; border-radius: 4px; font-size: 11px;'
+					}));
+					append(tag, $('span', {}, `📄 ${fileName}`));
+					const delBtn = append(tag, $('span', { style: 'cursor: pointer; opacity: 0.6; margin-left: 4px;' }, '✕'));
+					delBtn.onclick = () => {
+						selectedAttachments.splice(i, 1);
+						renderAttachmentTags();
+					};
+				}
+			}
+		};
+		renderAttachmentTags();
+
+		const addAttachBtn = append(attachRow, $('button.monaco-button', {
+			style: 'align-self: flex-start; padding: 4px 10px; font-size: 11px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit;'
+		}));
+		addAttachBtn.innerText = '+ Add Attachment File...';
+		addAttachBtn.onclick = async () => {
+			const res = await this.fileDialogService.showOpenDialog({
+				canSelectFolders: false,
+				canSelectFiles: true,
+				canSelectMany: true,
+				title: 'Select Attachment Files to link with this workspace'
+			});
+			if (res && res.length > 0) {
+				for (const u of res) {
+					if (!selectedAttachments.some(existing => existing.toString() === u.toString())) {
+						selectedAttachments.push(u);
+					}
+				}
+				renderAttachmentTags();
+			}
+		};
+
+		// Ticket Type Prompt (Pre-populated)
+		const typePromptBox = append(modalBody, $('.form-group'));
+		append(typePromptBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Ticket Type Prompt (Global Workspace Rules):'));
+		const typePromptInput = append(typePromptBox, $('textarea.monaco-inputbox', {
+			style: 'width: 100%; height: 52px; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;'
+		})) as HTMLTextAreaElement;
+		typePromptInput.value = 'A workspace is the root environment container. Manage sub-entities, repository structure, and lifecycle.';
+
+		// Ticket Prompt (Instance specific prompt)
+		const ticketPromptBox = append(modalBody, $('.form-group'));
+		append(ticketPromptBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Ticket Prompt (Specific Instruction / Rule):'));
+		const ticketPromptInput = append(ticketPromptBox, $('textarea.monaco-inputbox', {
+			style: 'width: 100%; height: 52px; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;'
+		})) as HTMLTextAreaElement;
+		ticketPromptInput.placeholder = 'Optional custom instruction or rules for this specific workspace...';
 
 		// Action Buttons Row
 		const actionsRow = append(modal, $('.modal-actions-row'));
@@ -1388,6 +1521,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 			try {
 				const wsCode = codeInput.value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+				const assignedAgentId = agentSelect.value || undefined;
+				const matchingAgent = availableAgents.find(a => a.id === assignedAgentId);
+
 				const res = await this.workspacesExplorerService.createWorkspace({
 					name,
 					title: titleInput.value.trim() || name,
@@ -1395,7 +1531,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 					targetParentUri: parentUri,
 					description: descInput.value.trim(),
 					code: wsCode,
-					type: 'workspace'
+					type: 'workspace',
+					status: 'Todo',
+					priority: prioritySelect.value || 'Medium',
+					assignedAgentId: assignedAgentId,
+					assignedAgentName: matchingAgent ? matchingAgent.name : undefined,
+					linkTo: linkInput.value.trim() || undefined,
+					attachments: selectedAttachments.length > 0 ? selectedAttachments : undefined,
+					typePrompt: typePromptInput.value.trim() || undefined,
+					ticketPrompt: ticketPromptInput.value.trim() || undefined
 				});
 
 				overlay.remove();
