@@ -975,13 +975,21 @@
 	transition: width 0.22s cubic-bezier(0.16, 1, 0.3, 1), min-width 0.22s cubic-bezier(0.16, 1, 0.3, 1), padding 0.22s ease, opacity 0.2s ease;
 }
 
-.workflow-editor-inspector.collapsed {
+.workflow-editor-inspector.collapsed,
+.workflow-editor-inspector.compact.collapsed,
+.workflow-editor-container .workflow-editor-inspector.collapsed {
+	display: none !important;
 	width: 0 !important;
 	min-width: 0 !important;
+	max-width: 0 !important;
 	padding: 0 !important;
+	margin: 0 !important;
+	border: none !important;
 	border-left: none !important;
 	opacity: 0 !important;
 	pointer-events: none !important;
+	visibility: hidden !important;
+	flex: 0 0 0 !important;
 }
 
 .workflow-inspector-header {

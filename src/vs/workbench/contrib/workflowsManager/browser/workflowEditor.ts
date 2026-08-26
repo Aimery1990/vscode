@@ -543,6 +543,7 @@ export class WorkflowEditor extends EditorPane {
 		this._inspectorTogglePill.onclick = (e) => {
 			e.stopPropagation();
 			this._isInspectorCollapsed = false;
+			this._storageService.store('workflowEditor.inspectorCollapsed', false, StorageScope.PROFILE, StorageTarget.USER);
 			this._inspectorEl?.classList.remove('collapsed');
 			this._inspectorTogglePill?.classList.add('hidden');
 			if (this._inspectorEl) this._renderInspector(this._inspectorEl);
