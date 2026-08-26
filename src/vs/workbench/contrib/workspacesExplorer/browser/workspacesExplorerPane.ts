@@ -1227,17 +1227,17 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		const modal = append(overlay, $('.create-resource-modal'));
 		modal.style.width = '100%';
-		modal.style.maxWidth = '580px';
-		modal.style.maxHeight = '82vh';
+		modal.style.maxWidth = '680px';
+		modal.style.maxHeight = '86vh';
 		modal.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
 		modal.style.border = '1px solid rgba(255, 255, 255, 0.18)';
 		modal.style.borderRadius = '12px';
-		modal.style.padding = '20px 24px';
-		modal.style.boxShadow = '0 16px 48px rgba(0,0,0,0.7)';
+		modal.style.padding = '24px 28px';
+		modal.style.boxShadow = '0 20px 50px rgba(0,0,0,0.75)';
 		modal.style.display = 'flex';
 		modal.style.flexDirection = 'column';
 		modal.style.overflow = 'hidden';
-		modal.style.gap = '12px';
+		modal.style.gap = '14px';
 
 		// Modal Header (Fixed at top)
 		const modalHeader = append(modal, $('.modal-header'));
@@ -1247,12 +1247,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 		modalHeader.style.flexShrink = '0';
 		modalHeader.style.paddingBottom = '4px';
 
-		const modalTitle = append(modalHeader, $('div', { style: 'font-weight: 600; font-size: 13.5px; color: #38bdf8; display: flex; align-items: center; gap: 8px;' }));
+		const modalTitle = append(modalHeader, $('div', { style: 'font-weight: 600; font-size: 14.5px; color: #38bdf8; display: flex; align-items: center; gap: 8px;' }));
 		append(modalTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.rootFolder)));
 		append(modalTitle, $('span', {}, 'Create New Workspace'));
 
 		const closeIcon = append(modalHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
 		closeIcon.style.cursor = 'pointer';
+		closeIcon.style.fontSize = '14px';
 		closeIcon.style.opacity = '0.7';
 		closeIcon.onclick = () => overlay.remove();
 
@@ -1263,26 +1264,26 @@ export class MainWorkspaceViewPane extends ViewPane {
 		modalBody.style.overflowY = 'auto';
 		modalBody.style.display = 'flex';
 		modalBody.style.flexDirection = 'column';
-		modalBody.style.gap = '12px';
-		modalBody.style.paddingRight = '6px';
+		modalBody.style.gap = '16px';
+		modalBody.style.paddingRight = '8px';
 
 		// Row 1: Workspace Name & Workspace Title (2 Columns)
 		const row1 = append(modalBody, $('.form-row'));
 		row1.style.display = 'grid';
 		row1.style.gridTemplateColumns = '1fr 1fr';
-		row1.style.gap = '12px';
+		row1.style.gap = '14px';
 
 		const nameBox = append(row1, $('.form-group'));
-		append(nameBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Name:'));
+		append(nameBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Workspace Name:'));
 		const nameInput = append(nameBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
 		nameInput.placeholder = 'e.g., my_workspace';
 
 		const titleBox = append(row1, $('.form-group'));
-		append(titleBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Title:'));
+		append(titleBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Workspace Title:'));
 		const titleInput = append(titleBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
 		titleInput.placeholder = 'e.g., My AI Workspace';
 
@@ -1290,19 +1291,19 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const row2 = append(modalBody, $('.form-row'));
 		row2.style.display = 'grid';
 		row2.style.gridTemplateColumns = '1fr 1fr';
-		row2.style.gap = '12px';
+		row2.style.gap = '14px';
 
 		const codeBox = append(row2, $('.form-group'));
-		append(codeBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Code Prefix:'));
+		append(codeBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Workspace Code Prefix:'));
 		const codeInput = append(codeBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; text-transform: uppercase;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; text-transform: uppercase;'
 		})) as HTMLInputElement;
 		codeInput.placeholder = 'e.g., ABCD / FINO3';
 
 		const wsIdBox = append(row2, $('.form-group'));
-		append(wsIdBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace ID (Ancestor Origin):'));
+		append(wsIdBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Workspace ID (Ancestor Origin):'));
 		const wsIdInput = append(wsIdBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); color: #38bdf8; box-sizing: border-box; font-family: monospace; font-weight: 600;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); color: #38bdf8; box-sizing: border-box; font-family: monospace; font-weight: 600;'
 		})) as HTMLInputElement;
 		wsIdInput.readOnly = true;
 		wsIdInput.placeholder = 'e.g., ABCD-0000';
@@ -1325,23 +1326,23 @@ export class MainWorkspaceViewPane extends ViewPane {
 			updateWsId();
 		};
 
-		// Location Path Picker
+		// Location Path Picker (Full width)
 		const pathBox = append(modalBody, $('.form-group'));
-		append(pathBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Target Location Path:'));
+		append(pathBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Target Location Path:'));
 
 		const pathRow = append(pathBox, $('.path-input-row'));
 		pathRow.style.display = 'flex';
-		pathRow.style.gap = '6px';
+		pathRow.style.gap = '8px';
 
 		let selectedPathUri: URI | undefined;
 
 		const pathInput = append(pathRow, $('input.monaco-inputbox', {
-			style: 'flex: 1; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+			style: 'flex: 1; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
 		pathInput.placeholder = 'Select or enter folder path...';
 
 		const browseBtn = append(pathRow, $('button.monaco-button', {
-			style: 'padding: 6px 10px; font-size: 11px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit; white-space: nowrap;'
+			style: 'padding: 7px 14px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit; white-space: nowrap;'
 		}));
 		browseBtn.innerText = 'Browse...';
 		browseBtn.onclick = async () => {
@@ -1367,78 +1368,117 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 		};
 
-		// Description Input
+		// Description Input (Full width)
 		const descBox = append(modalBody, $('.form-group'));
-		append(descBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Description (Optional):'));
+		append(descBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Description (Optional):'));
 		const descInput = append(descBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
 		descInput.placeholder = 'Brief purpose of this workspace';
 
-		// Status & Priority Row (2 Columns)
-		const statusPriorityRow = append(modalBody, $('.form-row'));
-		statusPriorityRow.style.display = 'grid';
-		statusPriorityRow.style.gridTemplateColumns = '1fr 1fr';
-		statusPriorityRow.style.gap = '12px';
-
-		const statusCol = append(statusPriorityRow, $('.form-group'));
-		append(statusCol, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Initial Status:'));
-		const statusBadgeWrapper = append(statusCol, $('div', { style: 'padding: 4px 0;' }));
+		// Initial Status (Clean row)
+		const statusBox = append(modalBody, $('.form-group'));
+		append(statusBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Initial Status:'));
+		const statusBadgeWrapper = append(statusBox, $('div', { style: 'padding: 2px 0;' }));
 		append(statusBadgeWrapper, $('span', {
 			style: 'display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(129, 140, 248, 0.18); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.4);'
 		}, 'Todo'));
 
-		const priorityCol = append(statusPriorityRow, $('.form-group'));
-		append(priorityCol, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Priority:'));
-		const prioritySelect = append(priorityCol, $('select.monaco-select-box', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; cursor: pointer;'
-		})) as HTMLSelectElement;
+		// Priority Selection Box (5 Levels Flat Grid with Color Dots)
+		const priorityBox = append(modalBody, $('.form-group'));
+		append(priorityBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 6px; font-weight: 500;' }, 'Priority Level (5 Levels):'));
+
+		let selectedPriority = 'Medium';
 		const priorities = [
-			{ label: 'Medium', val: 'Medium' },
-			{ label: 'High', val: 'High' },
-			{ label: 'Very High', val: 'Very High' },
-			{ label: 'Low', val: 'Low' },
-			{ label: 'Very Low', val: 'Very Low' }
+			{ level: 'Very High', label: 'Very High', color: '#f43f5e' },
+			{ level: 'High', label: 'High', color: '#fb923c' },
+			{ level: 'Medium', label: 'Medium', color: '#38bdf8' },
+			{ level: 'Low', label: 'Low', color: '#34d399' },
+			{ level: 'Very Low', label: 'Very Low', color: '#2dd4bf' }
 		];
+
+		const priorityGrid = append(priorityBox, $('.priority-grid'));
+		priorityGrid.style.display = 'grid';
+		priorityGrid.style.gridTemplateColumns = 'repeat(5, 1fr)';
+		priorityGrid.style.gap = '8px';
+
+		const priorityButtons: HTMLElement[] = [];
 		for (const p of priorities) {
-			const opt = append(prioritySelect, $('option', { value: p.val }, p.label)) as HTMLOptionElement;
-			if (p.val === 'Medium') opt.selected = true;
+			const pBtn = append(priorityGrid, $('.priority-option-btn'));
+			pBtn.style.padding = '7px 8px';
+			pBtn.style.borderRadius = '6px';
+			pBtn.style.cursor = 'pointer';
+			pBtn.style.fontSize = '11.5px';
+			pBtn.style.fontWeight = '600';
+			pBtn.style.display = 'flex';
+			pBtn.style.alignItems = 'center';
+			pBtn.style.justifyContent = 'center';
+			pBtn.style.gap = '6px';
+			pBtn.style.border = p.level === selectedPriority ? `1px solid ${p.color}` : '1px solid rgba(255,255,255,0.08)';
+			pBtn.style.backgroundColor = p.level === selectedPriority ? `${p.color}25` : 'rgba(255,255,255,0.03)';
+			pBtn.style.color = p.level === selectedPriority ? p.color : 'inherit';
+			pBtn.style.transition = 'all 0.15s ease';
+
+			const dot = append(pBtn, $('span.priority-dot'));
+			dot.style.display = 'inline-block';
+			dot.style.width = '7px';
+			dot.style.height = '7px';
+			dot.style.borderRadius = '50%';
+			dot.style.backgroundColor = p.color;
+			dot.style.boxShadow = p.level === selectedPriority ? `0 0 6px ${p.color}` : 'none';
+			dot.style.flexShrink = '0';
+
+			const txt = append(pBtn, $('span'));
+			txt.innerText = p.label;
+
+			pBtn.onclick = () => {
+				selectedPriority = p.level;
+				for (let i = 0; i < priorityButtons.length; i++) {
+					const isSel = priorities[i].level === selectedPriority;
+					const btnEl = priorityButtons[i];
+					const dotEl = btnEl.querySelector('.priority-dot') as HTMLElement;
+					btnEl.style.border = isSel ? `1px solid ${priorities[i].color}` : '1px solid rgba(255,255,255,0.08)';
+					btnEl.style.backgroundColor = isSel ? `${priorities[i].color}25` : 'rgba(255,255,255,0.03)';
+					btnEl.style.color = isSel ? priorities[i].color : 'inherit';
+					if (dotEl) {
+						dotEl.style.boxShadow = isSel ? `0 0 6px ${priorities[i].color}` : 'none';
+					}
+				}
+			};
+
+			priorityButtons.push(pBtn);
 		}
 
-		// Agent & Link To Row (2 Columns)
-		const agentLinkRow = append(modalBody, $('.form-row'));
-		agentLinkRow.style.display = 'grid';
-		agentLinkRow.style.gridTemplateColumns = '1fr 1fr';
-		agentLinkRow.style.gap = '12px';
-
-		const agentBox = append(agentLinkRow, $('.form-group'));
-		append(agentBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Current AI Agent (Optional):'));
+		// Current AI Agent Dropdown (Full width)
+		const agentBox = append(modalBody, $('.form-group'));
+		append(agentBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Current AI Agent (Optional):'));
 		const agentSelect = append(agentBox, $('select.monaco-select-box', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; cursor: pointer;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; cursor: pointer;'
 		})) as HTMLSelectElement;
-		append(agentSelect, $('option', { value: '' }, 'None (Unassigned)'));
+		append(agentSelect, $('option', { value: '' }, '🤖 None (Unassigned)'));
 
 		let availableAgents: any[] = [];
 		if (this.agentsManagerService) {
 			this.agentsManagerService.getAgents().then(agents => {
 				availableAgents = agents || [];
 				for (const ag of availableAgents) {
-					append(agentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.role || 'Agent'})`));
+					append(agentSelect, $('option', { value: ag.id }, `🤖 ${ag.name} (${ag.role || 'Agent'})`));
 				}
 			}).catch(() => {});
 		}
 
-		const linkBox = append(agentLinkRow, $('.form-group'));
-		append(linkBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Link To (Optional):'));
+		// Link To Input (Full width)
+		const linkBox = append(modalBody, $('.form-group'));
+		append(linkBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Link To (Optional Ticket ID / Resource):'));
 		const linkInput = append(linkBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
-		linkInput.placeholder = 'e.g., None, PROJ-0001';
+		linkInput.placeholder = 'e.g., None, PROJ-0001, or URL';
 
-		// Attachments Section
+		// Attachments Section (Full width)
 		const attachBox = append(modalBody, $('.form-group'));
-		append(attachBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Attachments (Optional):'));
-		const attachRow = append(attachBox, $('div', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
+		append(attachBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Attachments (Optional):'));
+		const attachRow = append(attachBox, $('div', { style: 'display: flex; flex-direction: column; gap: 8px;' }));
 		const attachTagsContainer = append(attachRow, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 6px;' }));
 
 		const selectedAttachments: URI[] = [];
@@ -1451,7 +1491,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					const attUri = selectedAttachments[i];
 					const fileName = attUri.path.split('/').filter(Boolean).pop() || 'file';
 					const tag = append(attachTagsContainer, $('div', {
-						style: 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); padding: 3px 8px; border-radius: 4px; font-size: 11px;'
+						style: 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); padding: 4px 10px; border-radius: 6px; font-size: 11.5px;'
 					}));
 					append(tag, $('span', {}, `📄 ${fileName}`));
 					const delBtn = append(tag, $('span', { style: 'cursor: pointer; opacity: 0.6; margin-left: 4px;' }, '✕'));
@@ -1465,7 +1505,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		renderAttachmentTags();
 
 		const addAttachBtn = append(attachRow, $('button.monaco-button', {
-			style: 'align-self: flex-start; padding: 4px 10px; font-size: 11px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit;'
+			style: 'align-self: flex-start; padding: 5px 12px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit;'
 		}));
 		addAttachBtn.innerText = '+ Add Attachment File...';
 		addAttachBtn.onclick = async () => {
@@ -1487,17 +1527,17 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		// Ticket Type Prompt (Pre-populated)
 		const typePromptBox = append(modalBody, $('.form-group'));
-		append(typePromptBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Ticket Type Prompt (Global Workspace Rules):'));
+		append(typePromptBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Ticket Type Prompt (Global Workspace Rules):'));
 		const typePromptInput = append(typePromptBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; height: 48px; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;'
+			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: var(--vscode-editor-font-family, monospace);'
 		})) as HTMLTextAreaElement;
 		typePromptInput.value = 'A workspace is the root environment container. Manage sub-entities, repository structure, and lifecycle.';
 
 		// Ticket Prompt (Instance specific prompt)
 		const ticketPromptBox = append(modalBody, $('.form-group'));
-		append(ticketPromptBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Ticket Prompt (Specific Instruction / Rule):'));
+		append(ticketPromptBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Ticket Prompt (Specific Instruction / Rule):'));
 		const ticketPromptInput = append(ticketPromptBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; height: 48px; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;'
+			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: var(--vscode-editor-font-family, monospace);'
 		})) as HTMLTextAreaElement;
 		ticketPromptInput.placeholder = 'Optional custom instruction or rules for this specific workspace...';
 
@@ -1506,19 +1546,19 @@ export class MainWorkspaceViewPane extends ViewPane {
 		actionsRow.style.display = 'flex';
 		actionsRow.style.justifyContent = 'flex-end';
 		actionsRow.style.alignItems = 'center';
-		actionsRow.style.gap = '8px';
-		actionsRow.style.paddingTop = '10px';
+		actionsRow.style.gap = '10px';
+		actionsRow.style.paddingTop = '12px';
 		actionsRow.style.borderTop = '1px solid rgba(255,255,255,0.08)';
 		actionsRow.style.flexShrink = '0';
 
 		const cancelBtn = append(actionsRow, $('button.monaco-button', {
-			style: 'padding: 5px 12px; font-size: 11px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit;'
+			style: 'padding: 6px 16px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit;'
 		}));
 		cancelBtn.innerText = 'Cancel';
 		cancelBtn.onclick = () => overlay.remove();
 
 		const submitBtn = append(actionsRow, $('button.monaco-button', {
-			style: 'padding: 6px 14px; font-size: 11px; border-radius: 4px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; font-weight: 600;'
+			style: 'padding: 7px 18px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; font-weight: 600;'
 		}));
 		submitBtn.innerText = 'Create Workspace';
 
@@ -1551,7 +1591,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					code: wsCode,
 					type: 'workspace',
 					status: 'Todo',
-					priority: prioritySelect.value || 'Medium',
+					priority: selectedPriority,
 					assignedAgentId: assignedAgentId,
 					assignedAgentName: matchingAgent ? matchingAgent.name : undefined,
 					linkTo: linkInput.value.trim() || undefined,
@@ -1571,7 +1611,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 				this.expandedWorkspaces.add(res.uri.toString());
 				const workspaceMdUri = URI.joinPath(res.uri, 'workspace.md');
 				await this.commandService.executeCommand('markdown.showPreview', workspaceMdUri);
-				await this.renderContent();
 			} catch (err) {
 				this.notificationService.error(`Failed to create workspace: ${err}`);
 			}
