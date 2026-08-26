@@ -43,6 +43,8 @@ export interface ICreateResourceOptions {
 	targetParentUri?: URI;
 	type: ResourceType;
 	name: string;
+	title?: string;
+	workspaceId?: string;
 	description?: string;
 	code?: string;
 	priority?: string;

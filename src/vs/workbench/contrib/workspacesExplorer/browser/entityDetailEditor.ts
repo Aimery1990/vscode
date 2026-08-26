@@ -904,7 +904,7 @@ export class EntityDetailEditor extends EditorPane {
 				`;
 				continue;
 			}
-			const isReadOnly = ['created at', 'belongs to workspace uri', 'target project', 'git', 'entity code', 'owner account', 'created by', 'scope type', 'scope name', 'role', 'model'].includes(keyLower);
+			const isReadOnly = ['workspace id', 'ticket id', 'ticket type', 'created at', 'belongs to workspace uri', 'target project', 'git', 'entity code', 'owner account', 'created by', 'scope type', 'scope name', 'role', 'model'].includes(keyLower);
 			let displayValue = value;
 			if (keyLower === 'scope type' && displayValue) {
 				displayValue = displayValue.charAt(0).toUpperCase() + displayValue.slice(1);

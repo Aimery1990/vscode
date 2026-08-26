@@ -444,8 +444,39 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 		const typeDefStr = (snapshot as any).typeDefinition || customDefFromYaml || builtInTypeDefs[type.toLowerCase()] || `${type.toUpperCase()} module entity definition.`;
 
+		let workspaceId = snapshot.workspaceId;
+		if (!workspaceId) {
+			if (type === 'workspace') {
+				const wsCode = snapshot.entityCode || (snapshot.entityName.length >= 3 ? snapshot.entityName.slice(0, 5).toUpperCase() : 'PRJ1');
+				workspaceId = `${wsCode}-0000`;
+			} else {
+				try {
+					const rootTicketUri = URI.joinPath(baseUri, '.agents', 'ticket.md');
+					if (await this.fileService.exists(rootTicketUri)) {
+						const rootContent = (await this.fileService.readFile(rootTicketUri)).value.toString();
+						const wsIdMatch = rootContent.match(/-\s+\*\*Workspace\s+ID\*\*:\s*([^\n\r]+)/i);
+						if (wsIdMatch && wsIdMatch[1] && wsIdMatch[1].trim() !== 'None') {
+							workspaceId = wsIdMatch[1].trim();
+						} else {
+							const ticketCodeMatch = rootContent.match(/-\s+\*\*Ticket\s+Code\*\*:\s*([^\n\r]+)/i);
+							if (ticketCodeMatch && ticketCodeMatch[1] && ticketCodeMatch[1].trim() !== 'None') {
+								workspaceId = `${ticketCodeMatch[1].trim()}-0000`;
+							}
+						}
+					}
+				} catch {}
+				if (!workspaceId && snapshot.entityCode) {
+					workspaceId = `${snapshot.entityCode}-0000`;
+				}
+				if (!workspaceId) {
+					workspaceId = 'None';
+				}
+			}
+		}
+
 		// 1. Primary Entity MD (ticket.md)
 		let mainMdContent = `# ${snapshot.entityName}\n\n## Overview\n\n`;
+		mainMdContent += `- **Workspace ID**: ${workspaceId}\n`;
 		mainMdContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
 		mainMdContent += `- **Ticket Type**: ${type}\n`;
 		mainMdContent += `- **Type Definition**: ${typeDefStr}\n\n`;
@@ -529,6 +560,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 		// 2. instruction.md
 		let instructionContent = `# Instruction - ${snapshot.entityName}\n\n## Overview\n\n`;
+		instructionContent += `- **Workspace ID**: ${workspaceId}\n`;
 		instructionContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
 		instructionContent += `- **Ticket Type**: ${type}\n`;
 		instructionContent += `- **Ticket Type Prompt**: ${typePromptStr}\n`;
@@ -543,9 +575,10 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 		// 3. README.md
 		let readmeContent = `# ${snapshot.entityName}\n\n`;
+		readmeContent += `- **Workspace ID**: ${workspaceId}\n`;
 		readmeContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
 		readmeContent += `- **Ticket Type**: ${type}\n`;
-		readmeContent += `- **Title**: ${snapshot.entityName}\n`;
+		readmeContent += `- **Title**: ${snapshot.title || snapshot.entityName}\n`;
 		readmeContent += `- **Description**: ${description || 'None'}\n`;
 		readmeContent += `- **Parent Path**: ${parentRelPath}\n`;
 		readmeContent += `- **Ego MDs Paths**:\n`;
@@ -559,6 +592,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		if (!await this.fileService.exists(workLogUri)) {
 			const fullLogDateTime = this.getFormattedDateTimeWithSecondsAndTz();
 			let workLogContent = `# Work Log - ${snapshot.entityName}\n\n## Overview\n\n`;
+			workLogContent += `- **Workspace ID**: ${workspaceId}\n`;
 			workLogContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
 			workLogContent += `- **Ticket Type**: ${type}\n`;
 			workLogContent += `- **Parent Path**: ${parentRelPath}\n`;

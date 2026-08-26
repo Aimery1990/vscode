@@ -1260,6 +1260,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 		})) as HTMLInputElement;
 		nameInput.placeholder = 'e.g., my_workspace';
 
+		// Workspace Title Input
+		const titleBox = append(modal, $('.form-group'));
+		append(titleBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Title:'));
+		const titleInput = append(titleBox, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		titleInput.placeholder = 'e.g., My AI Workspace';
+
 		// Workspace Code Input Prefix
 		const codeBox = append(modal, $('.form-group'));
 		append(codeBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Code Prefix:'));
@@ -1268,11 +1276,31 @@ export class MainWorkspaceViewPane extends ViewPane {
 		})) as HTMLInputElement;
 		codeInput.placeholder = 'e.g., ABCD / FINO3';
 
+		// Workspace ID Preview (Read-only)
+		const wsIdBox = append(modal, $('.form-group'));
+		append(wsIdBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace ID (Ancestor Origin):'));
+		const wsIdInput = append(wsIdBox, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); color: #38bdf8; box-sizing: border-box; font-family: monospace; font-weight: 600;'
+		})) as HTMLInputElement;
+		wsIdInput.readOnly = true;
+		wsIdInput.placeholder = 'e.g., ABCD-0000';
+
+		const updateWsId = () => {
+			const rawCode = codeInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+			wsIdInput.value = rawCode ? `${rawCode}-0000` : '';
+		};
+
 		nameInput.oninput = () => {
 			const cleanName = nameInput.value.toUpperCase().replace(/[^A-Z0-9]/g, '');
-			if (cleanName.length >= 3) {
+			if (cleanName.length >= 3 && !(codeInput as any).dataset.userEdited) {
 				codeInput.value = cleanName.slice(0, 5);
 			}
+			updateWsId();
+		};
+
+		codeInput.oninput = () => {
+			(codeInput as any).dataset.userEdited = 'true';
+			updateWsId();
 		};
 
 		// Location Path Picker
@@ -1309,9 +1337,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 					const defaultName = res[0].path.split('/').filter(Boolean).pop() || 'my_workspace';
 					nameInput.value = defaultName;
 					const cleanName = defaultName.toUpperCase().replace(/[^A-Z0-9]/g, '');
-					if (cleanName.length >= 3) {
+					if (cleanName.length >= 3 && !(codeInput as any).dataset.userEdited) {
 						codeInput.value = cleanName.slice(0, 5);
 					}
+					updateWsId();
 				}
 			}
 		};
@@ -1358,11 +1387,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 
 			try {
+				const wsCode = codeInput.value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 				const res = await this.workspacesExplorerService.createWorkspace({
 					name,
+					title: titleInput.value.trim() || name,
+					workspaceId: wsIdInput.value.trim() || (wsCode ? `${wsCode}-0000` : undefined),
 					targetParentUri: parentUri,
 					description: descInput.value.trim(),
-					code: codeInput.value.trim(),
+					code: wsCode,
 					type: 'workspace'
 				});
 

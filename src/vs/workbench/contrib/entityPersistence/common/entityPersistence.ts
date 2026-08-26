@@ -39,6 +39,8 @@ export interface ICustomModule {
 export interface IBaseEntitySnapshot {
 	entityUri: string;
 	entityName: string;
+	title?: string;
+	workspaceId?: string;
 	entityType: EntityType;
 	entityCode?: string;
 	ownerAccount?: string;

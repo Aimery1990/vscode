@@ -490,6 +490,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: targetBaseUri.toString(),
 			entityName: options.name,
+			title: options.title || options.name,
+			workspaceId: options.workspaceId || (wsCode ? `${wsCode}-0000` : undefined),
 			entityType: 'workspace',
 			entityCode: wsCode,
 			ownerAccount: this.activeUserEmail || 'unauthenticated',
