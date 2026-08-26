@@ -1227,23 +1227,27 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		const modal = append(overlay, $('.create-resource-modal'));
 		modal.style.width = '100%';
-		modal.style.maxWidth = '440px';
+		modal.style.maxWidth = '580px';
+		modal.style.maxHeight = '82vh';
 		modal.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
-		modal.style.border = '1px solid rgba(255, 255, 255, 0.15)';
-		modal.style.borderRadius = '10px';
-		modal.style.padding = '20px';
-		modal.style.boxShadow = '0 12px 32px rgba(0,0,0,0.6)';
+		modal.style.border = '1px solid rgba(255, 255, 255, 0.18)';
+		modal.style.borderRadius = '12px';
+		modal.style.padding = '20px 24px';
+		modal.style.boxShadow = '0 16px 48px rgba(0,0,0,0.7)';
 		modal.style.display = 'flex';
 		modal.style.flexDirection = 'column';
-		modal.style.gap = '14px';
+		modal.style.overflow = 'hidden';
+		modal.style.gap = '12px';
 
-		// Modal Header
+		// Modal Header (Fixed at top)
 		const modalHeader = append(modal, $('.modal-header'));
 		modalHeader.style.display = 'flex';
 		modalHeader.style.alignItems = 'center';
 		modalHeader.style.justifyContent = 'space-between';
+		modalHeader.style.flexShrink = '0';
+		modalHeader.style.paddingBottom = '4px';
 
-		const modalTitle = append(modalHeader, $('div', { style: 'font-weight: 600; font-size: 13px; color: #38bdf8; display: flex; align-items: center; gap: 8px;' }));
+		const modalTitle = append(modalHeader, $('div', { style: 'font-weight: 600; font-size: 13.5px; color: #38bdf8; display: flex; align-items: center; gap: 8px;' }));
 		append(modalTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.rootFolder)));
 		append(modalTitle, $('span', {}, 'Create New Workspace'));
 
@@ -1255,38 +1259,47 @@ export class MainWorkspaceViewPane extends ViewPane {
 		// Scrollable Body Container
 		const modalBody = append(modal, $('.modal-body'));
 		modalBody.style.flex = '1';
+		modalBody.style.minHeight = '0';
 		modalBody.style.overflowY = 'auto';
 		modalBody.style.display = 'flex';
 		modalBody.style.flexDirection = 'column';
-		modalBody.style.gap = '14px';
+		modalBody.style.gap = '12px';
 		modalBody.style.paddingRight = '6px';
 
-		// Workspace Name Input
-		const nameBox = append(modalBody, $('.form-group'));
+		// Row 1: Workspace Name & Workspace Title (2 Columns)
+		const row1 = append(modalBody, $('.form-row'));
+		row1.style.display = 'grid';
+		row1.style.gridTemplateColumns = '1fr 1fr';
+		row1.style.gap = '12px';
+
+		const nameBox = append(row1, $('.form-group'));
 		append(nameBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Name:'));
 		const nameInput = append(nameBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
 		nameInput.placeholder = 'e.g., my_workspace';
 
-		// Workspace Title Input
-		const titleBox = append(modalBody, $('.form-group'));
+		const titleBox = append(row1, $('.form-group'));
 		append(titleBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Title:'));
 		const titleInput = append(titleBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
 		titleInput.placeholder = 'e.g., My AI Workspace';
 
-		// Workspace Code Input Prefix
-		const codeBox = append(modalBody, $('.form-group'));
+		// Row 2: Code Prefix & Workspace ID Preview (2 Columns)
+		const row2 = append(modalBody, $('.form-row'));
+		row2.style.display = 'grid';
+		row2.style.gridTemplateColumns = '1fr 1fr';
+		row2.style.gap = '12px';
+
+		const codeBox = append(row2, $('.form-group'));
 		append(codeBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace Code Prefix:'));
 		const codeInput = append(codeBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; text-transform: uppercase;'
 		})) as HTMLInputElement;
 		codeInput.placeholder = 'e.g., ABCD / FINO3';
 
-		// Workspace ID Preview (Read-only)
-		const wsIdBox = append(modalBody, $('.form-group'));
+		const wsIdBox = append(row2, $('.form-group'));
 		append(wsIdBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Workspace ID (Ancestor Origin):'));
 		const wsIdInput = append(wsIdBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); color: #38bdf8; box-sizing: border-box; font-family: monospace; font-weight: 600;'
@@ -1362,21 +1375,19 @@ export class MainWorkspaceViewPane extends ViewPane {
 		})) as HTMLInputElement;
 		descInput.placeholder = 'Brief purpose of this workspace';
 
-		// Status & Priority 2-Column Row
+		// Status & Priority Row (2 Columns)
 		const statusPriorityRow = append(modalBody, $('.form-row'));
 		statusPriorityRow.style.display = 'grid';
 		statusPriorityRow.style.gridTemplateColumns = '1fr 1fr';
 		statusPriorityRow.style.gap = '12px';
 
-		// Status Box (Read-only badge)
 		const statusCol = append(statusPriorityRow, $('.form-group'));
 		append(statusCol, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Initial Status:'));
-		const statusBadgeWrapper = append(statusCol, $('div', { style: 'padding: 6px 0;' }));
+		const statusBadgeWrapper = append(statusCol, $('div', { style: 'padding: 4px 0;' }));
 		append(statusBadgeWrapper, $('span', {
-			style: 'display: inline-block; padding: 3px 10px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(129, 140, 248, 0.18); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.4);'
+			style: 'display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(129, 140, 248, 0.18); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.4);'
 		}, 'Todo'));
 
-		// Priority Dropdown
 		const priorityCol = append(statusPriorityRow, $('.form-group'));
 		append(priorityCol, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Priority:'));
 		const prioritySelect = append(priorityCol, $('select.monaco-select-box', {
@@ -1394,8 +1405,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 			if (p.val === 'Medium') opt.selected = true;
 		}
 
-		// Current AI Agent Dropdown
-		const agentBox = append(modalBody, $('.form-group'));
+		// Agent & Link To Row (2 Columns)
+		const agentLinkRow = append(modalBody, $('.form-row'));
+		agentLinkRow.style.display = 'grid';
+		agentLinkRow.style.gridTemplateColumns = '1fr 1fr';
+		agentLinkRow.style.gap = '12px';
+
+		const agentBox = append(agentLinkRow, $('.form-group'));
 		append(agentBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Current AI Agent (Optional):'));
 		const agentSelect = append(agentBox, $('select.monaco-select-box', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; cursor: pointer;'
@@ -1412,13 +1428,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}).catch(() => {});
 		}
 
-		// Link To Input
-		const linkBox = append(modalBody, $('.form-group'));
-		append(linkBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Link To (Optional Ticket ID / Resource):'));
+		const linkBox = append(agentLinkRow, $('.form-group'));
+		append(linkBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Link To (Optional):'));
 		const linkInput = append(linkBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
-		linkInput.placeholder = 'e.g., None, PROJ-0001, or URL';
+		linkInput.placeholder = 'e.g., None, PROJ-0001';
 
 		// Attachments Section
 		const attachBox = append(modalBody, $('.form-group'));
@@ -1474,7 +1489,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const typePromptBox = append(modalBody, $('.form-group'));
 		append(typePromptBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Ticket Type Prompt (Global Workspace Rules):'));
 		const typePromptInput = append(typePromptBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; height: 52px; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;'
+			style: 'width: 100%; height: 48px; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;'
 		})) as HTMLTextAreaElement;
 		typePromptInput.value = 'A workspace is the root environment container. Manage sub-entities, repository structure, and lifecycle.';
 
@@ -1482,16 +1497,19 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const ticketPromptBox = append(modalBody, $('.form-group'));
 		append(ticketPromptBox, $('label', { style: 'display: block; font-size: 11px; opacity: 0.85; margin-bottom: 4px;' }, 'Ticket Prompt (Specific Instruction / Rule):'));
 		const ticketPromptInput = append(ticketPromptBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; height: 52px; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;'
+			style: 'width: 100%; height: 48px; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;'
 		})) as HTMLTextAreaElement;
 		ticketPromptInput.placeholder = 'Optional custom instruction or rules for this specific workspace...';
 
-		// Action Buttons Row
+		// Action Buttons Row (Fixed footer pinned at bottom)
 		const actionsRow = append(modal, $('.modal-actions-row'));
 		actionsRow.style.display = 'flex';
 		actionsRow.style.justifyContent = 'flex-end';
+		actionsRow.style.alignItems = 'center';
 		actionsRow.style.gap = '8px';
-		actionsRow.style.marginTop = '6px';
+		actionsRow.style.paddingTop = '10px';
+		actionsRow.style.borderTop = '1px solid rgba(255,255,255,0.08)';
+		actionsRow.style.flexShrink = '0';
 
 		const cancelBtn = append(actionsRow, $('button.monaco-button', {
 			style: 'padding: 5px 12px; font-size: 11px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit;'
