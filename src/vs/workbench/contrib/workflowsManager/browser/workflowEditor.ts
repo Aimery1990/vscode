@@ -1951,6 +1951,59 @@ export class WorkflowEditor extends EditorPane {
 		};
 	}
 
+	private _findNonOverlappingPosition(
+		initialX: number,
+		initialY: number,
+		width: number,
+		height: number,
+		dir: 'right' | 'bottom' | 'left' | 'top',
+		excludeNodeId?: string
+	): { x: number; y: number } {
+		if (!this._data?.nodes || this._data.nodes.length === 0) {
+			return { x: initialX, y: initialY };
+		}
+
+		let curX = initialX;
+		let curY = initialY;
+		const margin = 20;
+		const maxIterations = 60; // Safeguard against infinite loops
+
+		const isColliding = (x: number, y: number, other: IFlowchartNode): boolean => {
+			if (other.id === excludeNodeId) {
+				return false;
+			}
+			const otherW = other.width || 120;
+			const otherH = other.height || 50;
+			return (
+				x < other.x + otherW + margin &&
+				x + width + margin > other.x &&
+				y < other.y + otherH + margin &&
+				y + height + margin > other.y
+			);
+		};
+
+		for (let i = 0; i < maxIterations; i++) {
+			const obstacle = this._data.nodes.find(n => isColliding(curX, curY, n));
+			if (!obstacle) {
+				break;
+			}
+
+			const obstacleW = obstacle.width || 120;
+			const obstacleH = obstacle.height || 50;
+
+			// Shift along orthogonal axis according to extension direction
+			if (dir === 'right' || dir === 'left') {
+				// Horizontal extension -> step down vertically
+				curY = obstacle.y + obstacleH + margin;
+			} else {
+				// Vertical extension -> step right horizontally
+				curX = obstacle.x + obstacleW + margin;
+			}
+		}
+
+		return { x: curX, y: curY };
+	}
+
 	private _createChildNode(parent: IFlowchartNode): void {
 		if (!this._data || !Array.isArray(this._data.nodes) || !Array.isArray(this._data.links)) {
 			return;
@@ -2019,6 +2072,11 @@ export class WorkflowEditor extends EditorPane {
 				childX = parent.x;
 			}
 		}
+
+		// Smart collision avoidance against all existing canvas nodes
+		const safePos = this._findNonOverlappingPosition(childX, childY, nodeW, nodeH, dir, parent.id);
+		childX = safePos.x;
+		childY = safePos.y;
 
 		const newId = `node_${Date.now()}`;
 		const newChild: IFlowchartNode = {
@@ -2120,6 +2178,11 @@ export class WorkflowEditor extends EditorPane {
 				}
 			}
 		}
+
+		// Smart collision avoidance against all existing canvas nodes
+		const safePos = this._findNonOverlappingPosition(siblingX, siblingY, current.width || 120, current.height || 50, dir, current.id);
+		siblingX = safePos.x;
+		siblingY = safePos.y;
 
 		const newId = `node_${Date.now()}`;
 		const newSibling: IFlowchartNode = {
