@@ -38,6 +38,8 @@ import { AccountManagementDialog } from '../../accountManagement/browser/account
 import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
+import { IRequestService, asJson } from '../../../../platform/request/common/request.js';
+import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { VIEW_ID } from '../../files/common/files.js';
 
 interface ICustomField {
@@ -1225,22 +1227,36 @@ export class MainWorkspaceViewPane extends ViewPane {
 		overlay.style.zIndex = '10000';
 		overlay.style.padding = '20px';
 
-		const modal = append(overlay, $('.create-resource-modal'));
-		modal.style.width = '100%';
-		modal.style.maxWidth = '680px';
-		modal.style.maxHeight = '86vh';
-		modal.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
-		modal.style.border = '1px solid rgba(255, 255, 255, 0.18)';
-		modal.style.borderRadius = '12px';
-		modal.style.padding = '24px 28px';
-		modal.style.boxShadow = '0 20px 50px rgba(0,0,0,0.75)';
-		modal.style.display = 'flex';
-		modal.style.flexDirection = 'column';
-		modal.style.overflow = 'hidden';
-		modal.style.gap = '14px';
+		const dialogWrapper = append(overlay, $('.create-workspace-dialog-wrapper'));
+		dialogWrapper.style.width = '100%';
+		dialogWrapper.style.maxWidth = '1040px';
+		dialogWrapper.style.height = '88vh';
+		dialogWrapper.style.maxHeight = '88vh';
+		dialogWrapper.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
+		dialogWrapper.style.border = '1px solid rgba(255, 255, 255, 0.18)';
+		dialogWrapper.style.borderRadius = '14px';
+		dialogWrapper.style.boxShadow = '0 24px 64px rgba(0,0,0,0.85)';
+		dialogWrapper.style.display = 'flex';
+		dialogWrapper.style.flexDirection = 'row';
+		dialogWrapper.style.alignItems = 'stretch';
+		dialogWrapper.style.overflow = 'hidden';
+		dialogWrapper.style.transition = 'max-width 0.25s ease';
 
-		// Modal Header (Fixed at top)
-		const modalHeader = append(modal, $('.modal-header'));
+		// ==========================================
+		// Left Panel: Form Modal
+		// ==========================================
+		const formPanel = append(dialogWrapper, $('.create-resource-modal'));
+		formPanel.style.flex = '1';
+		formPanel.style.minWidth = '540px';
+		formPanel.style.padding = '22px 26px';
+		formPanel.style.display = 'flex';
+		formPanel.style.flexDirection = 'column';
+		formPanel.style.overflow = 'hidden';
+		formPanel.style.gap = '12px';
+		formPanel.style.background = 'transparent';
+
+		// Form Header (Fixed at top)
+		const modalHeader = append(formPanel, $('.modal-header'));
 		modalHeader.style.display = 'flex';
 		modalHeader.style.alignItems = 'center';
 		modalHeader.style.justifyContent = 'space-between';
@@ -1251,21 +1267,41 @@ export class MainWorkspaceViewPane extends ViewPane {
 		append(modalTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.rootFolder)));
 		append(modalTitle, $('span', {}, 'Create New Workspace'));
 
-		const closeIcon = append(modalHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+		const headerActions = append(modalHeader, $('div', { style: 'display: flex; align-items: center; gap: 10px;' }));
+
+		// Sidecar Toggle Button in Header
+		const sidecarToggleBtn = append(headerActions, $('button.monaco-button', {
+			style: 'padding: 4px 10px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); transition: all 0.15s ease;'
+		}));
+		sidecarToggleBtn.innerHTML = '✨ Agent Assist';
+
+		const closeIcon = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
 		closeIcon.style.cursor = 'pointer';
 		closeIcon.style.fontSize = '14px';
 		closeIcon.style.opacity = '0.7';
 		closeIcon.onclick = () => overlay.remove();
 
 		// Scrollable Body Container
-		const modalBody = append(modal, $('.modal-body'));
+		const modalBody = append(formPanel, $('.modal-body'));
 		modalBody.style.flex = '1';
 		modalBody.style.minHeight = '0';
 		modalBody.style.overflowY = 'auto';
 		modalBody.style.display = 'flex';
 		modalBody.style.flexDirection = 'column';
-		modalBody.style.gap = '16px';
+		modalBody.style.gap = '14px';
 		modalBody.style.paddingRight = '8px';
+
+		// Helper to flash highlight on autofilled inputs
+		const highlightField = (el: HTMLElement) => {
+			const prevBorder = el.style.border;
+			const prevShadow = el.style.boxShadow;
+			el.style.border = '1px solid #38bdf8';
+			el.style.boxShadow = '0 0 10px rgba(56, 189, 248, 0.5)';
+			setTimeout(() => {
+				el.style.border = prevBorder;
+				el.style.boxShadow = prevShadow;
+			}, 2200);
+		};
 
 		// Row 1: Workspace Name & Workspace Title (2 Columns)
 		const row1 = append(modalBody, $('.form-row'));
@@ -1276,14 +1312,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const nameBox = append(row1, $('.form-group'));
 		append(nameBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Workspace Name:'));
 		const nameInput = append(nameBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; transition: all 0.2s ease;'
 		})) as HTMLInputElement;
 		nameInput.placeholder = 'e.g., my_workspace';
 
 		const titleBox = append(row1, $('.form-group'));
 		append(titleBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Workspace Title:'));
 		const titleInput = append(titleBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; transition: all 0.2s ease;'
 		})) as HTMLInputElement;
 		titleInput.placeholder = 'e.g., My AI Workspace';
 
@@ -1296,14 +1332,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const codeBox = append(row2, $('.form-group'));
 		append(codeBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Workspace Code Prefix:'));
 		const codeInput = append(codeBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; text-transform: uppercase;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; text-transform: uppercase; transition: all 0.2s ease;'
 		})) as HTMLInputElement;
 		codeInput.placeholder = 'e.g., ABCD / FINO3';
 
 		const wsIdBox = append(row2, $('.form-group'));
 		append(wsIdBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Workspace ID (Ancestor Origin):'));
 		const wsIdInput = append(wsIdBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); color: #38bdf8; box-sizing: border-box; font-family: monospace; font-weight: 600;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.1); background: rgba(255,255,255,0.03); color: #38bdf8; box-sizing: border-box; font-family: monospace; font-weight: 600; transition: all 0.2s ease;'
 		})) as HTMLInputElement;
 		wsIdInput.readOnly = true;
 		wsIdInput.placeholder = 'e.g., ABCD-0000';
@@ -1372,7 +1408,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const descBox = append(modalBody, $('.form-group'));
 		append(descBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Description (Optional):'));
 		const descInput = append(descBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; transition: all 0.2s ease;'
 		})) as HTMLInputElement;
 		descInput.placeholder = 'Brief purpose of this workspace';
 
@@ -1403,6 +1439,20 @@ export class MainWorkspaceViewPane extends ViewPane {
 		priorityGrid.style.gap = '8px';
 
 		const priorityButtons: HTMLElement[] = [];
+		const refreshPriorityButtons = () => {
+			for (let i = 0; i < priorityButtons.length; i++) {
+				const isSel = priorities[i].level === selectedPriority;
+				const btnEl = priorityButtons[i];
+				const dotEl = btnEl.querySelector('.priority-dot') as HTMLElement;
+				btnEl.style.border = isSel ? `1px solid ${priorities[i].color}` : '1px solid rgba(255,255,255,0.08)';
+				btnEl.style.backgroundColor = isSel ? `${priorities[i].color}25` : 'rgba(255,255,255,0.03)';
+				btnEl.style.color = isSel ? priorities[i].color : 'inherit';
+				if (dotEl) {
+					dotEl.style.boxShadow = isSel ? `0 0 6px ${priorities[i].color}` : 'none';
+				}
+			}
+		};
+
 		for (const p of priorities) {
 			const pBtn = append(priorityGrid, $('.priority-option-btn'));
 			pBtn.style.padding = '7px 8px';
@@ -1433,17 +1483,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 			pBtn.onclick = () => {
 				selectedPriority = p.level;
-				for (let i = 0; i < priorityButtons.length; i++) {
-					const isSel = priorities[i].level === selectedPriority;
-					const btnEl = priorityButtons[i];
-					const dotEl = btnEl.querySelector('.priority-dot') as HTMLElement;
-					btnEl.style.border = isSel ? `1px solid ${priorities[i].color}` : '1px solid rgba(255,255,255,0.08)';
-					btnEl.style.backgroundColor = isSel ? `${priorities[i].color}25` : 'rgba(255,255,255,0.03)';
-					btnEl.style.color = isSel ? priorities[i].color : 'inherit';
-					if (dotEl) {
-						dotEl.style.boxShadow = isSel ? `0 0 6px ${priorities[i].color}` : 'none';
-					}
-				}
+				refreshPriorityButtons();
 			};
 
 			priorityButtons.push(pBtn);
@@ -1529,7 +1569,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const typePromptBox = append(modalBody, $('.form-group'));
 		append(typePromptBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Ticket Type Prompt (Global Workspace Rules):'));
 		const typePromptInput = append(typePromptBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: var(--vscode-editor-font-family, monospace);'
+			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: var(--vscode-editor-font-family, monospace); transition: all 0.2s ease;'
 		})) as HTMLTextAreaElement;
 		typePromptInput.value = 'A workspace is the root environment container. Manage sub-entities, repository structure, and lifecycle.';
 
@@ -1537,12 +1577,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const ticketPromptBox = append(modalBody, $('.form-group'));
 		append(ticketPromptBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Ticket Prompt (Specific Instruction / Rule):'));
 		const ticketPromptInput = append(ticketPromptBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: var(--vscode-editor-font-family, monospace);'
+			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: var(--vscode-editor-font-family, monospace); transition: all 0.2s ease;'
 		})) as HTMLTextAreaElement;
 		ticketPromptInput.placeholder = 'Optional custom instruction or rules for this specific workspace...';
 
 		// Action Buttons Row (Fixed footer pinned at bottom)
-		const actionsRow = append(modal, $('.modal-actions-row'));
+		const actionsRow = append(formPanel, $('.modal-actions-row'));
 		actionsRow.style.display = 'flex';
 		actionsRow.style.justifyContent = 'flex-end';
 		actionsRow.style.alignItems = 'center';
@@ -1611,15 +1651,341 @@ export class MainWorkspaceViewPane extends ViewPane {
 				this.expandedWorkspaces.add(res.uri.toString());
 				const workspaceMdUri = URI.joinPath(res.uri, 'workspace.md');
 				await this.commandService.executeCommand('markdown.showPreview', workspaceMdUri);
+				await this.renderContent();
 			} catch (err) {
 				this.notificationService.error(`Failed to create workspace: ${err}`);
 			}
 		};
+
+		// ==========================================
+		// Right Panel: Agent Central Magnetic Sidecar
+		// ==========================================
+		const agentSidecar = append(dialogWrapper, $('.agent-central-sidecar'));
+		agentSidecar.style.width = '380px';
+		agentSidecar.style.flexShrink = '0';
+		agentSidecar.style.display = 'flex';
+		agentSidecar.style.flexDirection = 'column';
+		agentSidecar.style.backgroundColor = 'rgba(20, 20, 26, 0.98)';
+		agentSidecar.style.borderLeft = '1px solid rgba(255, 255, 255, 0.12)';
+		agentSidecar.style.overflow = 'hidden';
+
+		// Sidecar Header
+		const sidecarHeader = append(agentSidecar, $('.sidecar-header'));
+		sidecarHeader.style.padding = '14px 18px';
+		sidecarHeader.style.display = 'flex';
+		sidecarHeader.style.alignItems = 'center';
+		sidecarHeader.style.justifyContent = 'space-between';
+		sidecarHeader.style.borderBottom = '1px solid rgba(255, 255, 255, 0.08)';
+		sidecarHeader.style.backgroundColor = 'rgba(0, 0, 0, 0.2)';
+
+		const sidecarTitle = append(sidecarHeader, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+		append(sidecarTitle, $('span', { style: 'font-size: 15px;' }, '🤖'));
+		append(sidecarTitle, $('span', { style: 'font-weight: 600; font-size: 13px; color: #f8fafc;' }, 'Agent Central'));
+		const sidecarBadge = append(sidecarTitle, $('span', {
+			style: 'font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35);'
+		}, 'Claude 3.5'));
+
+		const collapseBtn = append(sidecarHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronRight)));
+		collapseBtn.style.cursor = 'pointer';
+		collapseBtn.style.opacity = '0.7';
+		collapseBtn.style.fontSize = '14px';
+		collapseBtn.title = 'Collapse Agent Sidecar';
+
+		let isSidecarOpen = true;
+		const toggleSidecar = () => {
+			isSidecarOpen = !isSidecarOpen;
+			if (isSidecarOpen) {
+				agentSidecar.style.display = 'flex';
+				dialogWrapper.style.maxWidth = '1040px';
+				sidecarToggleBtn.style.background = 'rgba(56, 189, 248, 0.16)';
+				sidecarToggleBtn.style.color = '#38bdf8';
+				sidecarToggleBtn.style.border = '1px solid rgba(56, 189, 248, 0.4)';
+			} else {
+				agentSidecar.style.display = 'none';
+				dialogWrapper.style.maxWidth = '680px';
+				sidecarToggleBtn.style.background = 'rgba(255,255,255,0.06)';
+				sidecarToggleBtn.style.color = 'inherit';
+				sidecarToggleBtn.style.border = '1px solid rgba(255,255,255,0.12)';
+			}
+		};
+		collapseBtn.onclick = () => toggleSidecar();
+		sidecarToggleBtn.onclick = () => toggleSidecar();
+
+		// Chat Feed Container
+		const chatFeed = append(agentSidecar, $('.sidecar-chat-feed'));
+		chatFeed.style.flex = '1';
+		chatFeed.style.minHeight = '0';
+		chatFeed.style.overflowY = 'auto';
+		chatFeed.style.padding = '16px';
+		chatFeed.style.display = 'flex';
+		chatFeed.style.flexDirection = 'column';
+		chatFeed.style.gap = '12px';
+
+		const appendAssistantMessage = (text: string) => {
+			const bubble = append(chatFeed, $('.chat-bubble.assistant'));
+			bubble.style.alignSelf = 'flex-start';
+			bubble.style.maxWidth = '92%';
+			bubble.style.padding = '10px 14px';
+			bubble.style.borderRadius = '10px 10px 10px 2px';
+			bubble.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
+			bubble.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+			bubble.style.fontSize = '11.5px';
+			bubble.style.lineHeight = '1.5';
+			bubble.style.color = '#e2e8f0';
+
+			// Simple formatting
+			bubble.innerHTML = text
+				.replace(/\*\*(.*?)\*\*/g, '<strong style="color: #38bdf8;">$1</strong>')
+				.replace(/`([^`]+)`/g, '<code style="background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px; font-family: monospace;">$1</code>')
+				.replace(/\n/g, '<br/>');
+
+			chatFeed.scrollTop = chatFeed.scrollHeight;
+			return bubble;
+		};
+
+		const appendUserMessage = (text: string) => {
+			const bubble = append(chatFeed, $('.chat-bubble.user'));
+			bubble.style.alignSelf = 'flex-end';
+			bubble.style.maxWidth = '88%';
+			bubble.style.padding = '9px 13px';
+			bubble.style.borderRadius = '10px 10px 2px 10px';
+			bubble.style.backgroundColor = 'rgba(56, 189, 248, 0.2)';
+			bubble.style.border = '1px solid rgba(56, 189, 248, 0.4)';
+			bubble.style.fontSize = '11.5px';
+			bubble.style.lineHeight = '1.5';
+			bubble.style.color = '#f0f9ff';
+			bubble.innerText = text;
+			chatFeed.scrollTop = chatFeed.scrollHeight;
+			return bubble;
+		};
+
+		// Initial Welcome message
+		appendAssistantMessage(`👋 **Hello! I'm your Agent Central Workspace Co-pilot.**\n\nDescribe what kind of workspace you'd like to create, and I will automatically configure and fill in all the workspace parameters for you!`);
+
+		// Quick Suggestion Chips
+		const chipsBox = append(chatFeed, $('.quick-chips-box'));
+		chipsBox.style.display = 'flex';
+		chipsBox.style.flexWrap = 'wrap';
+		chipsBox.style.gap = '6px';
+		chipsBox.style.marginTop = '4px';
+
+		const suggestions = [
+			{ label: '💳 Fintech Core API', prompt: 'Create a financial payment transaction workspace with High priority and strict auditing rules.' },
+			{ label: '🤖 AI Research Lab', prompt: 'Create an AI Agent experiment workspace with Very High priority for LLM testing.' },
+			{ label: '📱 Mobile App', prompt: 'Create a mobile application workspace with Medium priority.' },
+			{ label: '📈 Data Pipeline', prompt: 'Create a distributed ETL data pipeline workspace with High priority.' }
+		];
+
+		// Chat Input Area
+		const chatInputArea = append(agentSidecar, $('.sidecar-input-area'));
+		chatInputArea.style.padding = '12px 16px';
+		chatInputArea.style.borderTop = '1px solid rgba(255, 255, 255, 0.08)';
+		chatInputArea.style.backgroundColor = 'rgba(0, 0, 0, 0.25)';
+		chatInputArea.style.display = 'flex';
+		chatInputArea.style.flexDirection = 'column';
+		chatInputArea.style.gap = '8px';
+
+		const chatTextarea = append(chatInputArea, $('textarea.monaco-inputbox', {
+			style: 'width: 100%; height: 46px; padding: 8px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box; resize: none; font-family: inherit;'
+		})) as HTMLTextAreaElement;
+		chatTextarea.placeholder = 'Type workspace requirements... (Enter to send)';
+
+		const inputActionRow = append(chatInputArea, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+		const statusText = append(inputActionRow, $('span', { style: 'font-size: 10.5px; opacity: 0.6; font-style: italic;' }, 'Ready'));
+
+		const sendBtn = append(inputActionRow, $('button.monaco-button', {
+			style: 'padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 6px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; display: flex; align-items: center; gap: 4px;'
+		}));
+		sendBtn.innerText = 'Send ➤';
+
+		// Intelligent LLM / Natural Language Parser
+		const handleSendPrompt = async () => {
+			const prompt = chatTextarea.value.trim();
+			if (!prompt) return;
+
+			chatTextarea.value = '';
+			appendUserMessage(prompt);
+
+			statusText.innerText = 'Thinking...';
+			const thinkingBubble = appendAssistantMessage('🤖 *Agent is analyzing requirements and generating workspace parameters...*');
+
+			try {
+				let generatedJson: any = null;
+				let explanation = '';
+
+				await this.instantiationService.invokeFunction(async (accessor) => {
+					const credService = accessor.get(IAgentCredentialService);
+					const requestService = accessor.get(IRequestService);
+
+					const creds = await credService.getCredentials();
+					// Prioritize enabled Anthropic credential first
+					let targetCred = creds.find(c => c.isEnabled !== false && c.providerId === 'anthropic');
+					if (!targetCred) {
+						targetCred = creds.find(c => c.isEnabled !== false && c.providerId !== 'none');
+					}
+
+					if (targetCred) {
+						const apiKey = await credService.getApiKey(targetCred.id);
+						if (apiKey) {
+							sidecarBadge.innerText = targetCred.providerId === 'anthropic' ? 'Claude 3.5' : targetCred.providerId;
+							const cleanModel = targetCred.cachedModels?.[0] || (targetCred.providerId === 'anthropic' ? 'claude-3-5-sonnet-20241022' : 'gpt-4o-mini');
+
+							const systemPrompt = `You are the AnyAgent Intelligent Workspace Architect.\nAnalyze user intent and generate structured JSON for a new workspace. Return ONLY a JSON code block in \`\`\`json ... \`\`\` followed by a concise friendly explanation in Simplified Chinese.\nJSON format:\n{\n  "name": "concise_sanitized_name",\n  "title": "Readable Workspace Title",\n  "code": "3-5 UPPERCASE LETTERS",\n  "description": "Brief description",\n  "priority": "Very High" | "High" | "Medium" | "Low" | "Very Low",\n  "ticketPrompt": "Specific rules / instructions for this workspace"\n}`;
+
+							if (targetCred.providerId === 'anthropic') {
+								const response = await requestService.request({
+									type: 'POST',
+									url: 'https://api.anthropic.com/v1/messages',
+									headers: {
+										'Content-Type': 'application/json',
+										'x-api-key': apiKey,
+										'anthropic-version': '2023-06-01',
+										'anthropic-dangerous-direct-browser-access': 'true'
+									},
+									data: JSON.stringify({
+										model: cleanModel,
+										max_tokens: 800,
+										system: systemPrompt,
+										messages: [{ role: 'user', content: prompt }]
+									}),
+									timeout: 15000,
+									callSite: 'workspacesExplorer.aiAutofill'
+								}, CancellationToken.None);
+
+								if (response.res.statusCode === 200) {
+									const data = await asJson<any>(response);
+									const rawContent = data?.content?.[0]?.text || '';
+									const jsonMatch = rawContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+									if (jsonMatch && jsonMatch[1]) {
+										try {
+											generatedJson = JSON.parse(jsonMatch[1]);
+											explanation = rawContent.replace(/```(?:json)?\s*[\s\S]*?\s*```/, '').trim();
+										} catch {}
+									}
+								}
+							} else if (targetCred.providerId === 'openai' || targetCred.providerId.startsWith('custom-openai')) {
+								const baseEndpoint = targetCred.customUrl || 'https://api.openai.com/v1';
+								const cleanBase = baseEndpoint.replace(/\/chat\/completions\/?$/, '').replace(/\/$/, '');
+								const response = await requestService.request({
+									type: 'POST',
+									url: `${cleanBase}/chat/completions`,
+									headers: {
+										'Content-Type': 'application/json',
+										'Authorization': `Bearer ${apiKey}`
+									},
+									data: JSON.stringify({
+										model: cleanModel,
+										max_tokens: 800,
+										messages: [
+											{ role: 'system', content: systemPrompt },
+											{ role: 'user', content: prompt }
+										]
+									}),
+									timeout: 15000,
+									callSite: 'workspacesExplorer.aiAutofill'
+								}, CancellationToken.None);
+
+								if (response.res.statusCode === 200) {
+									const data = await asJson<any>(response);
+									const rawContent = data?.choices?.[0]?.message?.content || '';
+									const jsonMatch = rawContent.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+									if (jsonMatch && jsonMatch[1]) {
+										try {
+											generatedJson = JSON.parse(jsonMatch[1]);
+											explanation = rawContent.replace(/```(?:json)?\s*[\s\S]*?\s*```/, '').trim();
+										} catch {}
+									}
+								}
+							}
+						}
+					}
+				});
+
+				// Fallback heuristic parser if no LLM configured or offline
+				if (!generatedJson) {
+					const sanitized = prompt.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim().split(/\s+/).slice(0, 3).join('_') || 'custom_workspace';
+					const codeGen = sanitized.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5) || 'PROJ';
+					let prio = 'Medium';
+					if (/high|urgent|critical|风控|核心|高优先/i.test(prompt)) prio = 'High';
+					if (/very high|highest|紧急|最高/i.test(prompt)) prio = 'Very High';
+					if (/low|低/i.test(prompt)) prio = 'Low';
+
+					generatedJson = {
+						name: sanitized,
+						title: prompt.slice(0, 30),
+						code: codeGen,
+						description: `Workspace created for: ${prompt}`,
+						priority: prio,
+						ticketPrompt: `Rules: Follow best practices for ${prompt}.`
+					};
+					explanation = '已根据您的需求自动提取并填充了工作区字段。';
+				}
+
+				// Apply extracted parameters to form inputs with visual feedback
+				if (generatedJson.name) {
+					nameInput.value = generatedJson.name;
+					highlightField(nameInput);
+				}
+				if (generatedJson.title) {
+					titleInput.value = generatedJson.title;
+					highlightField(titleInput);
+				}
+				if (generatedJson.code) {
+					codeInput.value = generatedJson.code;
+					highlightField(codeInput);
+				}
+				if (generatedJson.description) {
+					descInput.value = generatedJson.description;
+					highlightField(descInput);
+				}
+				if (generatedJson.priority) {
+					selectedPriority = generatedJson.priority;
+					refreshPriorityButtons();
+					highlightField(priorityGrid);
+				}
+				if (generatedJson.ticketPrompt) {
+					ticketPromptInput.value = generatedJson.ticketPrompt;
+					highlightField(ticketPromptInput);
+				}
+
+				updateWsId();
+
+				// Update assistant response bubble
+				thinkingBubble.innerHTML = `✅ **已为您完成智能配置！**\n\n- **工作区名称**: \`${nameInput.value}\`\n- **标题**: **${titleInput.value}**\n- **Code 代号**: \`${codeInput.value}\`\n- **初始优先级**: **${selectedPriority}**\n\n${explanation ? explanation : '请在左侧检视或调整字段，确认无误后点击下方 **Create Workspace** 即可完成创建！'}`
+					.replace(/\*\*(.*?)\*\*/g, '<strong style="color: #38bdf8;">$1</strong>')
+					.replace(/`([^`]+)`/g, '<code style="background: rgba(0,0,0,0.3); padding: 1px 4px; border-radius: 3px; font-family: monospace;">$1</code>')
+					.replace(/\n/g, '<br/>');
+
+				statusText.innerText = 'Ready';
+			} catch (err) {
+				console.error('Agent Central autofill failed:', err);
+				thinkingBubble.innerText = `⚠️ Failed to parse with LLM: ${err}`;
+				statusText.innerText = 'Error';
+			}
+		};
+
+		for (const chip of suggestions) {
+			const chipBtn = append(chipsBox, $('span', {
+				style: 'padding: 4px 10px; font-size: 11px; border-radius: 12px; cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: #94a3b8; transition: all 0.15s ease;'
+			}));
+			chipBtn.innerText = chip.label;
+			chipBtn.onmouseenter = () => { chipBtn.style.backgroundColor = 'rgba(56, 189, 248, 0.15)'; chipBtn.style.color = '#38bdf8'; chipBtn.style.borderColor = 'rgba(56, 189, 248, 0.35)'; };
+			chipBtn.onmouseleave = () => { chipBtn.style.backgroundColor = 'rgba(255,255,255,0.06)'; chipBtn.style.color = '#94a3b8'; chipBtn.style.borderColor = 'rgba(255,255,255,0.12)'; };
+			chipBtn.onclick = () => {
+				chatTextarea.value = chip.prompt;
+				handleSendPrompt();
+			};
+		}
+
+		chatTextarea.onkeydown = (e) => {
+			if (e.key === 'Enter' && !e.shiftKey) {
+				e.preventDefault();
+				handleSendPrompt();
+			}
+		};
+		sendBtn.onclick = () => handleSendPrompt();
 	}
 
-	/**
-	 * Renders a spacious Create Resource Modal Overlay under the target Workspace or Folder
-	 */
 	public showCreateResourceModal(target: IWorkspaceItem | URI, parentName?: string, onSuccess?: (type: string, name: string) => void): void {
 		if (!this.containerEl) {
 			return;
