@@ -1874,13 +1874,37 @@ export class MainWorkspaceViewPane extends ViewPane {
 			style: 'font-size: 11px; color: #ef4444; margin-top: 4px; display: none; line-height: 1.3;'
 		}));
 
+		// Title Input (Optional)
+		const titleBox = append(modalBody, $('.form-group'));
+		const titleLabel = append(titleBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Title (Optional):'));
+		const titleInput = append(titleBox, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		titleInput.placeholder = 'e.g. Core Engine API, Fix Auth Bug, User Authentication';
+
 		// Description Input (Multiline Textarea)
 		const descBox = append(modalBody, $('.form-group'));
 		const descLabel = append(descBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Description:'));
 		const descInput = append(descBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; min-height: 64px; font-family: inherit;'
+			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: inherit;'
 		})) as HTMLTextAreaElement;
 		descInput.placeholder = 'Brief purpose of this entity...';
+
+		// Type Definition Input (Optional / Pre-populated)
+		const typeDefBox = append(modalBody, $('.form-group'));
+		append(typeDefBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Type Definition (Optional / Schema Path):'));
+		const typeDefInput = append(typeDefBox, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		typeDefInput.placeholder = '.agents/entity_type/job.yaml';
+
+		// Initial Status (Clean badge row)
+		const statusBox = append(modalBody, $('.form-group'));
+		append(statusBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Initial Status:'));
+		const statusBadgeWrapper = append(statusBox, $('div', { style: 'padding: 2px 0;' }));
+		append(statusBadgeWrapper, $('span', {
+			style: 'display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(129, 140, 248, 0.18); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.4);'
+		}, 'Todo'));
 
 		// Custom Fields Box for Custom Modules
 		const customFieldsBox = append(modalBody, $('.custom-fields-box', { style: 'display: flex; flex-direction: column; gap: 10px; margin-top: 8px;' }));
@@ -2178,11 +2202,99 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 		}).catch(() => { });
 
-		// Agent Rule / Prompt Input
+		// Link Section (Link To & Linked By)
+		const linkBox = append(modalBody, $('.form-group'));
+		append(linkBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Link (Optional):'));
+		const linkRow = append(linkBox, $('div', { style: 'display: grid; grid-template-columns: 1fr 1fr; gap: 8px;' }));
+		
+		const linkToInput = append(linkRow, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		linkToInput.placeholder = 'Link To (e.g. None, PROJ-0001, URL)';
+
+		const linkedByInput = append(linkRow, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		linkedByInput.placeholder = 'Linked By (e.g. None, TASK-0002)';
+
+		// Attachments Section (Optional)
+		const attachBox = append(modalBody, $('.form-group'));
+		append(attachBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Attachments (Optional):'));
+		const attachRow = append(attachBox, $('div', { style: 'display: flex; flex-direction: column; gap: 8px;' }));
+		const attachTagsContainer = append(attachRow, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 6px;' }));
+
+		const selectedAttachments: URI[] = [];
+		const renderAttachmentTags = () => {
+			clearNode(attachTagsContainer);
+			if (selectedAttachments.length === 0) {
+				append(attachTagsContainer, $('span', { style: 'font-size: 11px; opacity: 0.5; font-style: italic;' }, 'No attachments added.'));
+			} else {
+				for (let i = 0; i < selectedAttachments.length; i++) {
+					const attUri = selectedAttachments[i];
+					const fileName = attUri.path.split('/').filter(Boolean).pop() || 'file';
+					const tag = append(attachTagsContainer, $('div', {
+						style: 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); padding: 4px 10px; border-radius: 6px; font-size: 11.5px;'
+					}));
+					append(tag, $('span', {}, `📄 ${fileName}`));
+					const delBtn = append(tag, $('span', { style: 'cursor: pointer; opacity: 0.6; margin-left: 4px;' }, '✕'));
+					delBtn.onclick = () => {
+						selectedAttachments.splice(i, 1);
+						renderAttachmentTags();
+					};
+				}
+			}
+		};
+		renderAttachmentTags();
+
+		const addAttachBtn = append(attachRow, $('button.monaco-button', {
+			style: 'align-self: flex-start; padding: 5px 12px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit;'
+		}));
+		addAttachBtn.innerText = '+ Add Attachment File...';
+		addAttachBtn.onclick = async () => {
+			const res = await this.fileDialogService.showOpenDialog({
+				canSelectFolders: false,
+				canSelectFiles: true,
+				canSelectMany: true,
+				title: 'Select Attachment Files to link with this entity'
+			});
+			if (res && res.length > 0) {
+				for (const u of res) {
+					if (!selectedAttachments.some(existing => existing.toString() === u.toString())) {
+						selectedAttachments.push(u);
+					}
+				}
+				renderAttachmentTags();
+			}
+		};
+
+		const builtInTypePrompts: Record<string, string> = {
+			workspace: 'A workspace is the root environment container. Manage sub-entities, repository structure, and lifecycle.',
+			job: 'A job represents a high-level goal-oriented operational workflow. Break down tasks and record progress.',
+			project: 'A project coordinates architecture, modules, implementation code, and verification.',
+			task: 'A task is an actionable unit of engineering work. Implement changes cleanly and verify.',
+			workflow: 'A workflow executes automated nodes, transitions, and AI pipelines.',
+			agent: 'An AI agent operates autonomously following role constraints and tools.',
+			case: 'A case verifies business scenarios, validation runs, and test plans.',
+			issue: 'An issue tracks defects, root causes, and remediation actions.',
+			analysis: 'An analysis documents architectural telemetry, research, and diagnostic findings.',
+			note: 'A note captures memos, references, and knowledge-base items.',
+			folder: '',
+			file: ''
+		};
+
+		// Ticket Type Prompt Input
+		const typePromptBox = append(modalBody, $('.form-group'));
+		append(typePromptBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Ticket Type Prompt (Global Type Rules):'));
+		const typePromptInput = append(typePromptBox, $('textarea.monaco-inputbox', {
+			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: var(--vscode-editor-font-family, monospace);'
+		})) as HTMLTextAreaElement;
+		typePromptInput.placeholder = 'Global guidelines and prompt for this entity type...';
+
+		// Agent Rule / Ticket Prompt Input
 		const ruleBox = append(modalBody, $('.form-group'));
-		append(ruleBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Agent Rule / Specific Prompt for this Ticket:'));
+		append(ruleBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Ticket Prompt (Specific Instruction / Rule):'));
 		const ruleInput = append(ruleBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; min-height: 52px; font-family: inherit;'
+			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: inherit;'
 		})) as HTMLTextAreaElement;
 		ruleInput.placeholder = 'e.g. Follow strict code quality rules and execute unit tests for this ticket...';
 
@@ -2240,8 +2352,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 			if (selectedType === 'folder') {
 				codeBox.style.display = 'none';
 				badgeBox.style.display = 'none';
+				titleBox.style.display = 'none';
+				typeDefBox.style.display = 'none';
+				statusBox.style.display = 'none';
 				priorityBox.style.display = 'none';
 				agentBox.style.display = 'none';
+				linkBox.style.display = 'none';
+				attachBox.style.display = 'none';
+				typePromptBox.style.display = 'none';
 				ruleBox.style.display = 'none';
 				credBox.style.display = 'none';
 				modelBox.style.display = 'none';
@@ -2254,8 +2372,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 			} else if (selectedType === 'file') {
 				codeBox.style.display = 'none';
 				badgeBox.style.display = 'none';
+				titleBox.style.display = 'none';
+				typeDefBox.style.display = 'none';
+				statusBox.style.display = 'none';
 				priorityBox.style.display = 'none';
 				agentBox.style.display = 'none';
+				linkBox.style.display = 'none';
+				attachBox.style.display = 'none';
+				typePromptBox.style.display = 'none';
 				ruleBox.style.display = 'none';
 				credBox.style.display = 'none';
 				modelBox.style.display = 'none';
@@ -2268,14 +2392,21 @@ export class MainWorkspaceViewPane extends ViewPane {
 			} else if (selectedType === 'agent') {
 				codeBox.style.display = 'block';
 				badgeBox.style.display = 'block';
+				titleBox.style.display = 'block';
+				typeDefBox.style.display = 'block';
+				statusBox.style.display = 'block';
 				priorityBox.style.display = 'none';
 				agentBox.style.display = 'none';
+				linkBox.style.display = 'block';
+				attachBox.style.display = 'block';
+				typePromptBox.style.display = 'block';
 				ruleBox.style.display = 'none';
 				credBox.style.display = 'block';
 				modelBox.style.display = 'block';
 				promptBox.style.display = 'block';
 				baseAgentBox.style.display = 'block';
-				nameLabel.innerText = 'Agent Title:';
+				nameLabel.innerText = 'Agent Code / Ticket ID:';
+				titleLabel.innerText = 'Agent Title / Name:';
 				descLabel.innerText = 'Role & Description:';
 				descInput.placeholder = 'e.g. NestJS Backend Specialist, Monaco UI Refactoring Architect';
 
@@ -2288,17 +2419,26 @@ export class MainWorkspaceViewPane extends ViewPane {
 				previewBadge.style.color = badgeColor;
 				previewBadge.style.borderColor = `${badgeColor}58`;
 				previewBadge.style.backgroundColor = `${badgeColor}12`;
+				typeDefInput.value = matchingModule?.description || `.agents/entity_type/${selectedType}.yaml`;
+				typePromptInput.value = matchingModule?.prompt || builtInTypePrompts[selectedType] || '';
 			} else {
 				codeBox.style.display = 'block';
 				badgeBox.style.display = 'block';
+				titleBox.style.display = 'block';
+				typeDefBox.style.display = 'block';
+				statusBox.style.display = 'block';
 				priorityBox.style.display = 'block';
 				agentBox.style.display = 'block';
+				linkBox.style.display = 'block';
+				attachBox.style.display = 'block';
+				typePromptBox.style.display = 'block';
 				ruleBox.style.display = 'block';
 				credBox.style.display = 'none';
 				modelBox.style.display = 'none';
 				promptBox.style.display = 'none';
 				baseAgentBox.style.display = 'none';
 				nameLabel.innerText = 'Entity Folder Name / Ticket ID:';
+				titleLabel.innerText = 'Title (Optional):';
 				descLabel.innerText = 'Description:';
 				descInput.placeholder = 'Brief purpose of this entity...';
 
@@ -2311,6 +2451,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 				previewBadge.style.color = badgeColor;
 				previewBadge.style.borderColor = `${badgeColor}58`;
 				previewBadge.style.backgroundColor = `${badgeColor}12`;
+				typeDefInput.value = matchingModule?.description || `.agents/entity_type/${selectedType}.yaml`;
+				typePromptInput.value = matchingModule?.prompt || builtInTypePrompts[selectedType] || '';
 			}
 
 			if (matchingModule && matchingModule.fields && matchingModule.fields.length > 0) {
@@ -2468,24 +2610,26 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 				});
 
-				const customModules = await this._getCustomModules(targetUri);
-				const matchingModule = customModules.find((m: ICustomModule) => m.id === selectedType);
-
 				const createResult = await this.workspacesExplorerService.createResourceUnderWorkspace({
 					workspaceUri: targetUri,
 					type: selectedType,
 					name,
-					code: codeInput.value.trim(),
+					title: titleInput.value.trim() || undefined,
+					code: codeInput.value.trim() || undefined,
+					status: 'Todo',
 					priority: selectedPriority,
 					assignedAgentId,
 					assignedAgentName,
-					agentRulePrompt: ruleInput.value.trim(),
-					ticketPrompt: ruleInput.value.trim(),
-					description: descInput.value.trim(),
+					agentRulePrompt: ruleInput.value.trim() || undefined,
+					ticketPrompt: ruleInput.value.trim() || undefined,
+					description: descInput.value.trim() || undefined,
+					typeDefinition: typeDefInput.value.trim() || undefined,
+					typePrompt: typePromptInput.value.trim() || undefined,
+					linkTo: linkToInput.value.trim() || undefined,
+					linkedBy: linkedByInput.value.trim() || undefined,
+					attachments: selectedAttachments.length > 0 ? selectedAttachments : undefined,
 					agentModel: agentModelOpt,
 					agentSystemPrompt: selectedType === 'agent' ? promptInput.value.trim() : undefined,
-					typeDefinition: matchingModule?.description,
-					typePrompt: matchingModule?.prompt,
 					customMetadata
 				});
 

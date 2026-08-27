@@ -52,6 +52,7 @@ export interface ICreateResourceOptions {
 	assignedAgentId?: string;
 	assignedAgentName?: string;
 	linkTo?: string;
+	linkedBy?: string;
 	attachments?: URI[];
 	agentRulePrompt?: string;
 	parentEntityUri?: URI;

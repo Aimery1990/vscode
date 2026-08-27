@@ -956,14 +956,16 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: entityFolderUri.toString(),
 			entityName: name,
+			title: options.title || name,
 			entityType: type as any,
 			entityCode: activeCode,
+			status: options.status || 'Todo',
 			priority: options.priority || 'Medium',
 			assignedAgentId: options.assignedAgentId,
 			assignedAgentName: options.assignedAgentName,
 			agentRulePrompt: options.agentRulePrompt,
 			ownerAccount: this.activeUserEmail || 'unauthenticated',
-			description: description || `${parentType} Agent`,
+			description: description || (options.title ? options.title : `${parentType} ${type}`),
 			belongsToWorkspaceUri: targetBaseUri.toString(),
 			role: description || `${parentType} Agent`,
 			modelName: finalModel.modelId,
@@ -974,6 +976,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			typeDefinition: options.typeDefinition,
 			typePrompt: options.typePrompt,
 			ticketPrompt: options.ticketPrompt || options.agentRulePrompt,
+			linkTo: options.linkTo,
+			linkedBy: options.linkedBy,
 			attachments: attachmentNames,
 			customMetadata: options.customMetadata
 		}, targetBaseUri, true);
