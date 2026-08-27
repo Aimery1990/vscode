@@ -85,7 +85,5 @@ export interface IEntityPersistenceService {
 	getAllSnapshots(): IBaseEntitySnapshot[];
 	removeSnapshot(uri: URI | string): Promise<void>;
 
-	inspectEntityHealth(uri: URI | string): Promise<{ isMissing: boolean; missingReason?: string; snapshot?: IBaseEntitySnapshot }>;
-	repairEntityFromSnapshot(uri: URI | string): Promise<void>;
 	writeEntity4MDFiles(snapshot: IBaseEntitySnapshot, targetFolderUri: URI, isNewFolder?: boolean): Promise<URI>;
 }

@@ -278,11 +278,14 @@ export class AgentsManagerPane extends ViewPane {
 			card.style.opacity = '1';
 		};
 
-		// Disk Inspection for missing or damaged agent files via unified EntityPersistenceService
+		// Disk Inspection for missing agent folder
 		let isMissing = false;
 		if (agent.folderPath) {
-			const health = await this.entityPersistenceService.inspectEntityHealth(agent.folderPath);
-			isMissing = health.isMissing;
+			try {
+				isMissing = !await this.fileService.exists(URI.file(agent.folderPath));
+			} catch {
+				isMissing = true;
+			}
 		} else {
 			isMissing = true;
 		}

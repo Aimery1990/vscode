@@ -125,10 +125,8 @@ export interface IWorkspacesExplorerService {
 	createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult>;
 	createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult>;
 	generateNextSequentialName(targetParentUri: URI, type: ResourceType, customCode?: string): Promise<{ name: string; code: string }>;
-	reinitializeWorkspaceMd(workspaceUri: URI): Promise<void>;
 	reorderWorkspaces(sourceId: string, targetId: string): Promise<void>;
 	getMetadataSnapshot(uri: URI | string): IEntityMetadataSnapshot | undefined;
 	saveMetadataSnapshot(snapshot: IEntityMetadataSnapshot): Promise<void>;
-	repairEntityFromSnapshot(uri: URI): Promise<void>;
 	removeSnapshot(uri: URI): Promise<void>;
 }

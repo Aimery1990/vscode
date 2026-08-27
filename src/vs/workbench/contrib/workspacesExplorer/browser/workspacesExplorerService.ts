@@ -203,11 +203,6 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		});
 	}
 
-	async repairEntityFromSnapshot(uri: URI): Promise<void> {
-		await this.entityPersistenceService.repairEntityFromSnapshot(uri);
-		this._onDidChangeWorkspaces.fire();
-	}
-
 	async removeSnapshot(uri: URI): Promise<void> {
 		await this.entityPersistenceService.removeSnapshot(uri);
 		this._onDidChangeWorkspaces.fire();
@@ -263,9 +258,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		const currentWorkspace = this.workspaceContextService.getWorkspace();
 		const currentFolderUris = new Set(currentWorkspace.folders.map(f => this.normalizeUriString(f.uri)));
 
-		const savedUris = this.getSavedWorkspaceUris();
+		let savedUris = this.getSavedWorkspaceUris();
 		const removedUris = this.getRemovedWorkspaceUris();
 		const resultItems: IWorkspaceItem[] = [];
+		const invalidSavedUris: string[] = [];
 
 		const processUri = async (uri: URI, isFromRecents = false) => {
 			const normUriStr = this.normalizeUriString(uri);
@@ -277,21 +273,6 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			let targetBase = uri;
 			if (uri.path.endsWith('.code-workspace')) {
 				targetBase = dirname(uri);
-			}
-
-			// Pre-check snapshot ownership to skip workspaces belonging to other accounts entirely
-			const snapshotCheck = this.entityPersistenceService.getSnapshot(targetBase);
-			if (snapshotCheck && snapshotCheck.ownerAccount && this.activeUserEmail) {
-				const extractEmail = (str: string): string => {
-					const clean = str.includes(':') ? str.split(':')[1] : str;
-					const match = clean.match(/\(([^)]+)\)/);
-					return (match ? match[1] : clean).trim().toLowerCase();
-				};
-				const cleanActiveUser = this.activeUserEmail;
-				const cleanOwner = extractEmail(snapshotCheck.ownerAccount);
-				if (cleanActiveUser !== cleanOwner) {
-					return;
-				}
 			}
 
 			const isCurrent = currentFolderUris.has(normUriStr);
@@ -306,16 +287,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 			try {
 				const folderExists = await this.fileService.exists(targetBase);
-				const snapshot = this.getMetadataSnapshot(targetBase);
-
 				if (!folderExists) {
-					resultItems.push({
-						...item,
-						name: snapshot ? snapshot.entityName : item.name,
-						detectedType: snapshot?.entityType,
-						isMissing: true,
-						missingReason: snapshot ? `Physical directory deleted. Snapshot: ${snapshot.entityType.toUpperCase()} (${snapshot.createdAt})` : 'Workspace folder path does not exist'
-					});
+					// Physical directory deleted on disk, clean up from saved list and do not render ghost card
+					if (savedUris.includes(normUriStr)) {
+						invalidSavedUris.push(normUriStr);
+					}
 					return;
 				}
 
@@ -326,37 +302,13 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					await this.fileService.exists(URI.joinPath(targetBase, 'ticket.md')) ||
 					await this.fileService.exists(URI.joinPath(targetBase, 'workspace.md'));
 
-				if (!hasWorkspaceMd) {
-					// If this is not a genuine managed workspace (no workspace.md) and not explicitly saved as a workspace,
-					// skip it so arbitrary explorer browsing folders (e.g. Downloads, Desktop) do not pollute Managed Workspaces!
-					if (!item.isSaved && !snapshot) {
-						return;
-					}
-
-					let detectedType: ResourceType | undefined = snapshot?.entityType;
-					if (!detectedType) {
-						detectedType = await this.detectCustomEntityTypeFromDisk(targetBase);
-					}
-
-					resultItems.push({
-						...item,
-						name: snapshot ? snapshot.entityName : item.name,
-						isMissing: true,
-						detectedType,
-						missingReason: detectedType ? `Entity folder (${detectedType}), not a Workspace` : 'workspace.md is missing'
-					});
-				} else {
-					resultItems.push(item);
+				if (!hasWorkspaceMd && !item.isSaved && !isCurrent) {
+					return;
 				}
+
+				resultItems.push(item);
 			} catch {
-				const snapshot = this.getMetadataSnapshot(targetBase);
-				resultItems.push({
-					...item,
-					name: snapshot ? snapshot.entityName : item.name,
-					detectedType: snapshot?.entityType,
-					isMissing: true,
-					missingReason: 'Inaccessible workspace path'
-				});
+				// Inaccessible path, ignore
 			}
 		};
 
@@ -388,9 +340,14 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			// ignore
 		}
 
+		// Clean up non-existent saved URIs
+		if (invalidSavedUris.length > 0) {
+			savedUris = savedUris.filter(u => !invalidSavedUris.includes(u));
+			this.saveWorkspaceUris(savedUris);
+		}
+
 		// Filter out items that are sub-directories of another valid workspace in resultItems
 		const workspaceBases = resultItems
-			.filter(item => !item.isMissing)
 			.map(item => item.uri.path.endsWith('.code-workspace') ? dirname(item.uri).path : item.uri.path);
 
 		const finalItems = resultItems.filter(item => {
@@ -398,12 +355,6 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			const isSubOfAnother = workspaceBases.some(parentBase => parentBase !== itemBase && itemBase.startsWith(parentBase + '/'));
 			return !isSubOfAnother;
 		});
-
-		for (const item of finalItems) {
-			if (!item.isMissing) {
-				item.hasDamagedDescendant = await this.checkHasDamagedDescendant(item.uri);
-			}
-		}
 
 		return finalItems;
 	}
@@ -500,8 +451,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				try {
 					await this.fileService.copy(attUri, destUri, true);
 					attachmentNames.push(fileName);
-				} catch (err) {
-					console.error('Failed to copy attachment:', err);
+				} catch {
+					// ignore
 				}
 			}
 		}
@@ -510,42 +461,29 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			entityUri: targetBaseUri.toString(),
 			entityName: options.name,
 			title: options.title || options.name,
-			workspaceId: options.workspaceId || (wsCode ? `${wsCode}-0000` : undefined),
 			entityType: 'workspace',
 			entityCode: wsCode,
 			ownerAccount: this.activeUserEmail || 'unauthenticated',
-			description: options.description || `Workspace ${options.name}`,
-			status: options.status || 'Todo',
+			createdAt: '',
+			description: options.description || `Workspace for ${options.name}`,
+			status: options.status || 'open',
 			priority: options.priority || 'Medium',
 			assignedAgentId: options.assignedAgentId,
 			assignedAgentName: options.assignedAgentName,
-			linkTo: options.linkTo,
+			agentRulePrompt: options.agentRulePrompt,
 			attachments: attachmentNames,
-			typeDefinition: (options.typeDefinition && options.typeDefinition !== 'Built-in (System)' && options.typeDefinition !== 'None') ? options.typeDefinition : undefined,
+			typeDefinition: options.typeDefinition,
 			typePrompt: options.typePrompt,
-			ticketPrompt: options.ticketPrompt
+			ticketPrompt: options.ticketPrompt,
+			customMetadata: options.customMetadata
 		}, targetBaseUri, false);
 
-		await this.saveWorkspace(targetBaseUri);
 		await this.addWorkspace(targetBaseUri, options.name);
 		return { alreadyExists, uri: targetBaseUri };
 	}
 
 	async createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult> {
 		return this.createWorkspace({ name, targetParentUri: parentLocationUri, description, type: 'workspace' });
-	}
-
-	async reinitializeWorkspaceMd(targetBaseUri: URI): Promise<void> {
-		const wsName = targetBaseUri.path.split('/').filter(Boolean).pop() || 'Workspace';
-		await this.entityPersistenceService.writeEntity4MDFiles({
-			entityUri: targetBaseUri.toString(),
-			entityName: wsName,
-			entityType: 'workspace',
-			ownerAccount: this.activeUserEmail || 'unauthenticated',
-			description: `Workspace ${wsName}`
-		}, targetBaseUri, false);
-
-		this._onDidChangeWorkspaces.fire();
 	}
 
 	async reorderWorkspaces(sourceId: string, targetId: string): Promise<void> {
@@ -581,36 +519,13 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 				if (child.isDirectory) {
 					const childUri = child.resource;
-
-					let childType: ResourceType = 'folder';
-					const snapshot = this.entityPersistenceService.getSnapshot(childUri);
-					if (snapshot) {
-						childType = snapshot.entityType;
-					} else {
-						childType = await this.detectCustomEntityTypeFromDisk(childUri);
-					}
-
-					let isMissing = false;
-					let missingReason: string | undefined;
-					let hasDamagedDescendant = false;
-					if (childType !== 'folder') {
-						const health = await this.entityPersistenceService.inspectEntityHealth(childUri);
-						isMissing = health.isMissing;
-						missingReason = health.missingReason;
-					}
-
-					if (!isMissing) {
-						hasDamagedDescendant = await this.checkHasDamagedDescendant(childUri);
-					}
+					const childType = await this.detectCustomEntityTypeFromDisk(childUri);
 
 					childrenItems.push({
 						id: childUri.toString(),
 						name: child.name,
 						type: childType,
-						uri: childUri,
-						isMissing,
-						missingReason,
-						hasDamagedDescendant
+						uri: childUri
 					});
 				} else {
 					if (!child.name.startsWith('.') && !child.name.startsWith('~') && child.name !== 'desktop.ini' && child.name !== 'Thumbs.db') {
@@ -664,44 +579,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			// ignore
 		}
 
-		// Fallback checking folder names
-		const folderName = childUri.path.split('/').filter(Boolean).pop()?.toLowerCase() || '';
-		if (folderName.includes('job')) return 'job';
-		if (folderName.includes('project')) return 'project';
-		if (folderName.includes('task')) return 'task';
-		if (folderName.includes('agent')) return 'agent';
-		if (folderName.includes('workflow')) return 'workflow';
-		if (folderName.includes('workspace')) return 'workspace';
-
 		return 'folder';
-	}
-
-	private async checkHasDamagedDescendant(dirUri: URI): Promise<boolean> {
-		try {
-			const stat = await this.fileService.resolve(dirUri);
-			if (!stat.children) return false;
-			for (const child of stat.children) {
-				if (child.isDirectory && !child.name.startsWith('.') && !child.name.startsWith('~')) {
-					const childUri = child.resource;
-					let childType: ResourceType = 'folder';
-					const snapshot = this.entityPersistenceService.getSnapshot(childUri);
-					if (snapshot) {
-						childType = snapshot.entityType;
-					} else {
-						childType = await this.detectCustomEntityTypeFromDisk(childUri);
-					}
-
-					if (childType !== 'folder') {
-						const health = await this.entityPersistenceService.inspectEntityHealth(childUri);
-						if (health.isMissing) return true;
-					}
-					if (await this.checkHasDamagedDescendant(childUri)) return true;
-				}
-			}
-		} catch {
-			// ignore
-		}
-		return false;
 	}
 
 	private generateWorkspaceCodeFromName(name: string): string {

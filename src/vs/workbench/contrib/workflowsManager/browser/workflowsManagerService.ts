@@ -41,27 +41,27 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 	}
 
 	async getWorkflows(): Promise<IWorkflowItem[]> {
-		const snapshots = this.entityPersistenceService.getAllSnapshots();
-		const workflowSnapshots = snapshots.filter(s => s.entityType === 'workflow');
-
+		const workspaces = await this.workspacesExplorerService.getWorkspaces();
 		const workflows: IWorkflowItem[] = [];
-		for (const snapshot of workflowSnapshots) {
-			const folderUri = URI.parse(snapshot.entityUri);
 
-			// Inspect disk health
-			const health = await this.entityPersistenceService.inspectEntityHealth(folderUri);
-
-			workflows.push({
-				id: snapshot.entityUri,
-				name: snapshot.entityName,
-				description: snapshot.description,
-				createdAt: snapshot.createdAt || '',
-				ownerAccount: snapshot.ownerAccount,
-				belongsToWorkspaceUri: snapshot.belongsToWorkspaceUri,
-				belongsToWorkspaceName: (snapshot.belongsToWorkspaceUri ? decodeURIComponent(snapshot.belongsToWorkspaceUri.split('/').filter(Boolean).pop() || '') : '') || snapshot.scopeName || 'Workspace',
-				isMissing: health.isMissing,
-				missingReason: health.missingReason
-			});
+		for (const ws of workspaces) {
+			try {
+				const children = await this.workspacesExplorerService.scanWorkspaceChildren(ws.uri);
+				for (const child of children) {
+					if (child.type === 'workflow') {
+						workflows.push({
+							id: child.uri.toString(),
+							name: child.name,
+							createdAt: '',
+							belongsToWorkspaceUri: ws.uri.toString(),
+							belongsToWorkspaceName: ws.name,
+							isMissing: false
+						});
+					}
+				}
+			} catch {
+				// ignore
+			}
 		}
 		return workflows;
 	}
@@ -82,12 +82,6 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 		} catch {
 			// ignore cleanup error
 		}
-		this._onDidChangeWorkflows.fire();
-	}
-
-	async repairWorkflow(id: string): Promise<void> {
-		const uri = URI.parse(id);
-		await this.entityPersistenceService.repairEntityFromSnapshot(uri);
 		this._onDidChangeWorkflows.fire();
 	}
 }

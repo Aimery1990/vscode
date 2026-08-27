@@ -257,35 +257,10 @@ export class WorkflowsManagerPane extends ViewPane {
 		}
 
 		card.style.cursor = 'pointer';
-		if (!workflow.isMissing) {
-			card.onclick = async () => {
-				const folderUri = URI.parse(workflow.id);
-				await this.editorService.openEditor(new WorkflowEditorInput(folderUri, workflow.name), { pinned: true });
-			};
-		} else {
-			card.onclick = async () => {
-				const confirm = await this.dialogService.confirm({
-					type: 'warning',
-					message: `Workflow '${workflow.name}' files are missing or damaged.`,
-					detail: `Would you like to repair standard 4-MD & flowchart files for '${workflow.name}' from the entity persistence engine?`,
-					primaryButton: 'Repair Workflow'
-				});
-				if (confirm.confirmed) {
-					try {
-						await this.workflowsManagerService.repairWorkflow(workflow.id);
-						this.notificationService.info(`Workflow '${workflow.name}' standard files repaired & restored successfully!`);
-						await this.renderContent();
-					} catch (err) {
-						this.notificationService.error(`Failed to repair workflow: ${err}`);
-					}
-				}
-			};
-		}
-
-		if (workflow.isMissing) {
-			card.style.borderColor = 'rgba(244, 63, 94, 0.45)';
-			card.style.backgroundColor = 'rgba(244, 63, 94, 0.05)';
-		}
+		card.onclick = async () => {
+			const folderUri = URI.parse(workflow.id);
+			await this.editorService.openEditor(new WorkflowEditorInput(folderUri, workflow.name), { pinned: true });
+		};
 
 		// Header
 		const header = append(card, $('.card-header'));
@@ -293,61 +268,24 @@ export class WorkflowsManagerPane extends ViewPane {
 
 		const icon = append(left, $('span' + ThemeIcon.asCSSSelector(Codicon.githubAction)));
 		icon.style.fontSize = '13px';
-		icon.style.color = workflow.isMissing ? '#ef4444' : '#0d9488';
+		icon.style.color = '#0d9488';
 
-		const title = append(left, $(`.card-title${workflow.isMissing ? '.damaged' : ''}`));
+		const title = append(left, $('.card-title'));
 		title.textContent = workflow.name;
-		if (workflow.isMissing) {
-			title.title = workflow.missingReason || 'Missing or damaged workflow files on disk!';
-		}
 
-		// Header Actions (Play/Run or Repair button and Status Dot in top-right)
+		// Header Actions (Play/Run button)
 		const cardActions = append(header, $('.card-actions'));
 
-		if (workflow.isMissing) {
-			// Repair Action (Wrench 🛠️)
-			const repairBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.tools)));
-			repairBtn.style.fontSize = '13px';
-			repairBtn.style.color = '#eab308';
-			repairBtn.style.cursor = 'pointer';
-			repairBtn.style.opacity = '0.9';
-			repairBtn.title = 'Repair Workflow (Re-create missing 4-MD & flowchart files from persistence engine)';
-			repairBtn.onclick = async (e) => {
-				e.stopPropagation();
-				try {
-					await this.workflowsManagerService.repairWorkflow(workflow.id);
-					this.notificationService.info(`Workflow '${workflow.name}' standard files repaired & restored successfully via EntityPersistenceService!`);
-					await this.renderContent();
-				} catch (err) {
-					this.notificationService.error(`Failed to repair workflow: ${err}`);
-				}
-			};
-		} else {
-			const runBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
-			runBtn.style.fontSize = '12px';
-			runBtn.style.color = '#22c55e';
-			runBtn.style.cursor = 'pointer';
-			runBtn.style.opacity = '0.85';
-			runBtn.title = 'Run Workflow';
-			runBtn.onclick = (e) => {
-				e.stopPropagation();
-				this.notificationService.info(`Workflow '${workflow.name}' run started successfully!`);
-			};
-		}
-
-		// Status Dot (Top-Right next to action button)
-		const statusDot = append(cardActions, $('span.status-dot'));
-		statusDot.style.width = '6px';
-		statusDot.style.height = '6px';
-		statusDot.style.borderRadius = '50%';
-		statusDot.style.flexShrink = '0';
-		if (workflow.isMissing) {
-			statusDot.style.background = '#ef4444';
-			statusDot.title = 'Warning: Workflow files missing or damaged!';
-		} else {
-			statusDot.style.background = '#22c55e';
-			statusDot.title = 'Status: Healthy';
-		}
+		const runBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
+		runBtn.style.fontSize = '12px';
+		runBtn.style.color = '#22c55e';
+		runBtn.style.cursor = 'pointer';
+		runBtn.style.opacity = '0.85';
+		runBtn.title = 'Run Workflow';
+		runBtn.onclick = (e) => {
+			e.stopPropagation();
+			this.notificationService.info(`Workflow '${workflow.name}' run started successfully!`);
+		};
 
 		// Right Click Context Menu for secondary actions
 		card.oncontextmenu = (e) => {
@@ -357,25 +295,18 @@ export class WorkflowsManagerPane extends ViewPane {
 			const folderUri = URI.parse(workflow.id);
 			const actionsList: Action[] = [];
 
-			if (workflow.isMissing) {
-				actionsList.push(new Action('repair_workflow', 'Repair Workflow', ThemeIcon.asClassName(Codicon.tools), true, async () => {
-					await this.workflowsManagerService.repairWorkflow(workflow.id);
-					this.notificationService.info(`Workflow '${workflow.name}' standard files repaired successfully.`);
-				}));
-			} else {
-				// 1. Open Flowchart Editor
-				actionsList.push(new Action('open_workflow', 'Open Flowchart Editor', ThemeIcon.asClassName(Codicon.folderOpened), true, async () => {
-					await this.editorService.openEditor(new WorkflowEditorInput(folderUri, workflow.name), { pinned: true });
-				}));
+			// 1. Open Flowchart Editor
+			actionsList.push(new Action('open_workflow', 'Open Flowchart Editor', ThemeIcon.asClassName(Codicon.folderOpened), true, async () => {
+				await this.editorService.openEditor(new WorkflowEditorInput(folderUri, workflow.name), { pinned: true });
+			}));
 
-				// 2. Create Sub-Entity...
-				actionsList.push(new Action('create_sub_entity', 'Create Sub-Entity...', ThemeIcon.asClassName(Codicon.add), true, async () => {
-					const workspacesView = await this.viewsService.openView<any>('workbench.workspacesExplorer.mainPane', true);
-					if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
-						workspacesView.showCreateResourceModal(folderUri, workflow.name);
-					}
-				}));
-			}
+			// 2. Create Sub-Entity...
+			actionsList.push(new Action('create_sub_entity', 'Create Sub-Entity...', ThemeIcon.asClassName(Codicon.add), true, async () => {
+				const workspacesView = await this.viewsService.openView<any>('workbench.workspacesExplorer.mainPane', true);
+				if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
+					workspacesView.showCreateResourceModal(folderUri, workflow.name);
+				}
+			}));
 
 			// 3. Show in Explorer & Reveal in OS
 			actionsList.push(new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {

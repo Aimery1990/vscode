@@ -406,11 +406,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 				const isWorkspaceSelected = this.selectedWorkspaceId === canonicalWsId;
 
-				// Handle missing / corrupted workspace card styling (clean Red Border + subtle Red Tint)
-				if (ws.isMissing) {
-					wsCard.style.backgroundColor = isWorkspaceSelected ? 'rgba(239, 68, 68, 0.2)' : 'rgba(239, 68, 68, 0.08)';
-					wsCard.style.border = isWorkspaceSelected ? '1px solid rgba(239, 68, 68, 0.8)' : '1px solid rgba(239, 68, 68, 0.45)';
-				} else if (isWorkspaceSelected) {
+				if (isWorkspaceSelected) {
 					wsCard.style.backgroundColor = 'rgba(56, 189, 248, 0.12)';
 					wsCard.style.border = '1px solid #38bdf8';
 				} else {
@@ -481,7 +477,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				cardHeader.style.justifyContent = 'space-between';
 				cardHeader.style.padding = '6px 8px';
 				cardHeader.style.cursor = 'pointer';
-				cardHeader.title = ws.isMissing ? `Warning: ${ws.missingReason || 'workspace.md is missing'} (Right click for menu)` : `${ws.name} - ${ws.uri.fsPath} (Right click for menu, drag to reorder, double click to open in window)`;
+				cardHeader.title = `${ws.name} - ${ws.uri.fsPath} (Right click for menu, drag to reorder, double click to open in window)`;
 				cardHeader.onmouseenter = () => cardHeader.style.backgroundColor = 'rgba(255, 255, 255, 0.04)';
 				cardHeader.onmouseleave = () => cardHeader.style.backgroundColor = 'transparent';
 
@@ -515,11 +511,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 							} catch {
 								this.notificationService.warn(`Path does not exist: ${ws.uri.fsPath}`);
 							}
-						}),
-						new Action('reinitialize_ws', 'Re-initialize Workspace', ThemeIcon.asClassName(Codicon.tools), true, async () => {
-							await this.workspacesExplorerService.reinitializeWorkspaceMd(ws.uri);
-							this.notificationService.info(`Re-initialized workspace.md for '${ws.name}'`);
-							this.renderContent();
 						}),
 						new Action('create_entity', 'Create New Entity Folder...', ThemeIcon.asClassName(Codicon.add), true, () => {
 							this.showCreateResourceModal(ws);
@@ -640,7 +631,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					badgeFg = customColor;
 				} else {
 					wsIcon = append(headerLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.rootFolder)));
-					wsIcon.style.color = ws.isMissing ? '#f87171' : 'inherit';
+					wsIcon.style.color = 'inherit';
 				}
 
 				const wsSnapshot = this.workspacesExplorerService.getMetadataSnapshot(ws.uri);
@@ -676,61 +667,20 @@ export class MainWorkspaceViewPane extends ViewPane {
 					badge.title = `Entity Type: ${badgeText}`;
 				}
 
-				// Status Ring (Health / Cascading Error Indicator)
-				const statusRing = append(headerRight, $('.status-ring'));
-				const isCorrupted = ws.isMissing || ws.hasDamagedDescendant;
-				statusRing.style.display = 'inline-block';
-				statusRing.style.width = '7px';
-				statusRing.style.height = '7px';
-				statusRing.style.borderRadius = '50%';
-				statusRing.style.flexShrink = '0';
-				statusRing.style.marginLeft = '2px';
-
-				if (isCorrupted) {
-					statusRing.style.background = '#ef4444';
-					statusRing.style.boxShadow = '0 0 5px rgba(239, 68, 68, 0.7)';
-					statusRing.title = ws.isMissing ? (ws.missingReason || 'Missing/damaged entity files on disk') : 'Warning: Inner sub-entities or files are damaged!';
-				} else {
-					statusRing.style.background = '#22c55e';
-					statusRing.style.opacity = '0.85';
-					statusRing.title = 'Status: Healthy';
-				}
-
 				// Header Actions
 				const headerActions = append(headerRight, $('.header-actions'));
 				headerActions.style.display = 'flex';
 				headerActions.style.alignItems = 'center';
 				headerActions.style.gap = '6px';
 
-				if (!ws.isMissing) {
-					const createBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
-					createBtn.style.opacity = '0.8';
-					createBtn.style.fontSize = '13px';
-					createBtn.title = `New Entity in '${ws.name}'...`;
-					createBtn.onclick = (e) => {
-						e.stopPropagation();
-						this.showCreateResourceModal(ws.uri, ws.name);
-					};
-				}
-
-				if (isCorrupted) {
-					// Repair 4-MD button for workspace / entity folder with missing files
-					const fixBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.tools)));
-					fixBtn.style.color = '#fbbf24';
-					fixBtn.style.fontSize = '12px';
-					fixBtn.style.opacity = '0.9';
-					fixBtn.title = 'Repair entity standard files from snapshot';
-					fixBtn.onclick = async (e) => {
-						e.stopPropagation();
-						try {
-							await this.workspacesExplorerService.repairEntityFromSnapshot(ws.uri);
-							this.notificationService.info(`Repaired standard files for '${ws.name}'`);
-							this.renderContent();
-						} catch (err) {
-							this.notificationService.error(`Failed to repair: ${err}`);
-						}
-					};
-				}
+				const createBtn = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
+				createBtn.style.opacity = '0.8';
+				createBtn.style.fontSize = '13px';
+				createBtn.title = `New Entity in '${ws.name}'...`;
+				createBtn.onclick = (e) => {
+					e.stopPropagation();
+					this.showCreateResourceModal(ws.uri, ws.name);
+				};
 
 				// Single Click: Select workspace card, open its Domain Form in main editor area, and toggle expansion in-place
 				cardHeader.onclick = async () => {
@@ -1122,48 +1072,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				badge.title = `Entity Type: ${badgeText}`;
 			}
 
-			// Status Ring (Health / Cascading Error Indicator)
 			if (isDirectory) {
-				const childStatusRing = append(childRight, $('.status-ring'));
-				const isChildCorrupted = child.isMissing || child.hasDamagedDescendant;
-				childStatusRing.style.display = 'inline-block';
-				childStatusRing.style.width = '6.5px';
-				childStatusRing.style.height = '6.5px';
-				childStatusRing.style.borderRadius = '50%';
-				childStatusRing.style.flexShrink = '0';
-				childStatusRing.style.marginLeft = '2px';
-
-				if (isChildCorrupted) {
-					childStatusRing.style.background = '#ef4444';
-					childStatusRing.style.boxShadow = '0 0 5px rgba(239, 68, 68, 0.7)';
-					childStatusRing.title = child.isMissing ? (child.missingReason || 'Missing/damaged entity files') : 'Warning: Inner sub-entities are damaged!';
-				} else {
-					childStatusRing.style.background = '#22c55e';
-					childStatusRing.style.opacity = '0.85';
-					childStatusRing.title = 'Status: Healthy';
-				}
-			}
-
-			if (child.isMissing || child.hasDamagedDescendant) {
-				const fixBtn = append(childRight, $('span' + ThemeIcon.asCSSSelector(Codicon.tools)));
-				fixBtn.style.color = '#fbbf24';
-				fixBtn.style.fontSize = '11px';
-				fixBtn.style.opacity = '0.9';
-				fixBtn.style.marginLeft = '4px';
-				fixBtn.title = 'Repair entity standard files from snapshot';
-				fixBtn.onclick = async (e) => {
-					e.stopPropagation();
-					try {
-						await this.workspacesExplorerService.repairEntityFromSnapshot(child.uri);
-						this.notificationService.info(`Repaired standard files for '${child.name}'`);
-						this.renderContent();
-					} catch (err) {
-						this.notificationService.error(`Failed to repair: ${err}`);
-					}
-				};
-			}
-
-			if (!child.isMissing && isDirectory) {
 				const createSubBtn = append(childRight, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
 				createSubBtn.style.opacity = '0.75';
 				createSubBtn.style.fontSize = '11.5px';
@@ -2616,6 +2525,30 @@ export class MainWorkspaceViewPane extends ViewPane {
 						}
 					}
 				});
+
+				const customModules = await this._getCustomModules(targetUri);
+				const matchingModule = customModules.find((m: ICustomModule) => m.id === selectedType);
+
+				if (matchingModule) {
+					// 1. Resolve workspace root URI
+					let wsRootUri = targetUri;
+					while (wsRootUri.path !== '/' && wsRootUri.path !== '.') {
+						if (await this.fileService.exists(URI.joinPath(wsRootUri, '.agents')) ||
+							await this.fileService.exists(URI.joinPath(wsRootUri, 'workspace.md')) ||
+							await this.fileService.exists(URI.joinPath(wsRootUri, 'ticket.md'))) {
+							break;
+						}
+						const parent = dirname(wsRootUri);
+						if (parent.path === wsRootUri.path) break;
+						wsRootUri = parent;
+					}
+
+					// 2. Materialize YAML in workspace .agents/entity_type/<type>.yaml
+					const localYamlUri = URI.joinPath(wsRootUri, '.agents', 'entity_type', `${selectedType}.yaml`);
+					if (!await this.fileService.exists(localYamlUri)) {
+						await this._writeYamlFile(localYamlUri, { ...matchingModule, storageScope: 'workspace' });
+					}
+				}
 
 				const createResult = await this.workspacesExplorerService.createResourceUnderWorkspace({
 					workspaceUri: targetUri,

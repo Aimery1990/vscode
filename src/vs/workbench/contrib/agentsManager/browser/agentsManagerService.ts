@@ -285,12 +285,23 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 
 		if (folderUri) {
 			try {
-				await this.entityPersistenceService.repairEntityFromSnapshot(folderUri);
+				if (!await this.fileService.exists(folderUri)) {
+					await this.fileService.createFolder(folderUri);
+				}
+				await this.entityPersistenceService.writeEntity4MDFiles({
+					entityUri: folderUri.toString(),
+					entityName: agent.name,
+					entityType: 'agent',
+					ownerAccount: this.activeUserEmail || 'unauthenticated',
+					description: agent.description,
+					role: agent.role,
+					systemPrompt: agent.systemPrompt
+				}, folderUri, false);
 				agent.folderPath = folderUri.fsPath;
 				agent.status = 'idle';
 				await this.updateAgent(agent);
 			} catch (err) {
-				console.error('Failed to repair agent files via persistence engine', err);
+				console.error('Failed to repair agent files:', err);
 			}
 		}
 

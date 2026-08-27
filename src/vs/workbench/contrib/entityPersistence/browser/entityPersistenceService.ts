@@ -7,9 +7,10 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
-import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
-import { IEntityPersistenceService, IBaseEntitySnapshot, EntityType } from '../common/entityPersistence.js';
+import { INativeEnvironmentService } from '../../../../platform/environment/common/environment.js';
+import { IEntityPersistenceService, IBaseEntitySnapshot } from '../common/entityPersistence.js';
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { dirname } from '../../../../base/common/resources.js';
 
@@ -23,19 +24,23 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 	readonly onDidChangeSnapshots: Event<void> = this._onDidChangeSnapshots.event;
 
 	private activeUserEmail: string = '';
+	private readonly _memorySnapshots = new Map<string, IBaseEntitySnapshot>();
 
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
 		@IFileService private readonly fileService: IFileService,
-		@IAuthenticationService private readonly authenticationService: IAuthenticationService
+		@IAuthenticationService private readonly authenticationService: IAuthenticationService,
+		@INativeEnvironmentService private readonly environmentService: INativeEnvironmentService
 	) {
 		super();
 
-		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
-			if (e.key === this.snapshotsStorageKey) {
-				this._onDidChangeSnapshots.fire();
-			}
-		}));
+		// Clean up any legacy snapshot keys from storageService to ensure no phantom cache remains in SQLite
+		try {
+			this.storageService.remove(this.snapshotsStorageKey, StorageScope.PROFILE);
+			this.storageService.remove(`${SNAPSHOTS_STORAGE_KEY}:unauthenticated`, StorageScope.PROFILE);
+		} catch {
+			// ignore cleanup error
+		}
 
 		this._register(this.authenticationService.onDidChangeSessions(async (e: any) => {
 			await this.updateActiveUser();
@@ -99,76 +104,29 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		return str.replace(/\/+$/, '');
 	}
 
-	private getSnapshotsMap(emailKey?: string): Record<string, IBaseEntitySnapshot> {
-		const key = emailKey !== undefined ? `${SNAPSHOTS_STORAGE_KEY}:${emailKey || 'unauthenticated'}` : this.snapshotsStorageKey;
-		const raw = this.storageService.get(key, StorageScope.PROFILE, '{}');
-		try {
-			return JSON.parse(raw) as Record<string, IBaseEntitySnapshot>;
-		} catch {
-			return {};
-		}
-	}
-
-	private saveSnapshotsMap(map: Record<string, IBaseEntitySnapshot>): void {
-		this.storageService.store(
-			this.snapshotsStorageKey,
-			JSON.stringify(map),
-			StorageScope.PROFILE,
-			StorageTarget.USER
-		);
-		this._onDidChangeSnapshots.fire();
-	}
-
 	async saveSnapshot(snapshot: IBaseEntitySnapshot): Promise<void> {
-		const map = this.getSnapshotsMap();
 		const key = this.normalizeUriString(snapshot.entityUri);
-		map[key] = {
+		this._memorySnapshots.set(key, {
 			...snapshot,
 			entityUri: key
-		};
-		this.saveSnapshotsMap(map);
+		});
+		this._onDidChangeSnapshots.fire();
 	}
 
 	getSnapshot(uri: URI | string): IBaseEntitySnapshot | undefined {
 		const key = this.normalizeUriString(uri);
-		const map = this.getSnapshotsMap();
-		let found = map[key] || map[key.toLowerCase()];
-		if (!found && this.activeUserEmail) {
-			const unauthMap = this.getSnapshotsMap('unauthenticated');
-			found = unauthMap[key] || unauthMap[key.toLowerCase()];
-		}
-		return found;
+		return this._memorySnapshots.get(key) || this._memorySnapshots.get(key.toLowerCase());
 	}
 
 	getAllSnapshots(): IBaseEntitySnapshot[] {
-		const map = this.getSnapshotsMap();
-		if (this.activeUserEmail) {
-			const unauthMap = this.getSnapshotsMap('unauthenticated');
-			return Object.values({ ...unauthMap, ...map });
-		}
-		return Object.values(map);
+		return Array.from(this._memorySnapshots.values());
 	}
 
 	async removeSnapshot(uri: URI | string): Promise<void> {
 		const key = this.normalizeUriString(uri);
-		const map = this.getSnapshotsMap();
-		if (map[key]) {
-			delete map[key];
-			this.saveSnapshotsMap(map);
-		}
-		if (this.activeUserEmail) {
-			const unauthMap = this.getSnapshotsMap('unauthenticated');
-			if (unauthMap[key]) {
-				delete unauthMap[key];
-				this.storageService.store(
-					`${SNAPSHOTS_STORAGE_KEY}:unauthenticated`,
-					JSON.stringify(unauthMap),
-					StorageScope.PROFILE,
-					StorageTarget.USER
-				);
-				this._onDidChangeSnapshots.fire();
-			}
-		}
+		this._memorySnapshots.delete(key);
+		this._memorySnapshots.delete(key.toLowerCase());
+		this._onDidChangeSnapshots.fire();
 	}
 
 	private async getSystemConfigDirUri(targetUri: URI): Promise<URI> {
@@ -210,160 +168,6 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		}
 
 		return configDir;
-	}
-
-	private async detectEntityType(targetUri: URI): Promise<EntityType> {
-		const configDir = await this.migrateLegacyEntityFilesIfNeeded(targetUri);
-		const ticketUri = URI.joinPath(configDir, 'ticket.md');
-
-		try {
-			if (await this.fileService.exists(ticketUri)) {
-				const content = await this.fileService.readFile(ticketUri);
-				const text = content.value.toString();
-				const typeMatch = text.match(/-\s+\*\*Ticket\s+Type\*\*:\s*([a-zA-Z0-9_-]+)/i) || text.match(/-\s+\*\*Entity\s+Type\*\*:\s*([a-zA-Z0-9_-]+)/i);
-				if (typeMatch && typeMatch[1]) {
-					return typeMatch[1].trim().toLowerCase() as EntityType;
-				}
-			}
-		} catch {
-			// ignore
-		}
-
-		try {
-			if (await this.fileService.exists(configDir)) {
-				const stat = await this.fileService.resolve(configDir);
-				if (stat.children) {
-					for (const child of stat.children) {
-						if (!child.isDirectory && child.name.endsWith('.md')) {
-							const nameLower = child.name.toLowerCase();
-							if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md' && nameLower !== 'ticket.md') {
-								return child.name.substring(0, child.name.length - 3) as EntityType;
-							}
-						}
-					}
-				}
-			}
-		} catch {}
-
-		if (await this.fileService.exists(URI.joinPath(configDir, 'job.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'job.md'))) return 'job';
-		if (await this.fileService.exists(URI.joinPath(configDir, 'project.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'project.md'))) return 'project';
-		if (await this.fileService.exists(URI.joinPath(configDir, 'task.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'task.md'))) return 'task';
-		if (await this.fileService.exists(URI.joinPath(configDir, 'agent.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'agent.md'))) return 'agent';
-		if (await this.fileService.exists(URI.joinPath(configDir, 'workflow.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'workflow.md'))) return 'workflow';
-		if (await this.fileService.exists(URI.joinPath(configDir, 'workspace.md')) || await this.fileService.exists(URI.joinPath(targetUri, 'workspace.md'))) return 'workspace';
-
-		const folderName = targetUri.path.split('/').filter(Boolean).pop()?.toLowerCase() || '';
-		if (folderName.includes('job')) return 'job';
-		if (folderName.includes('project')) return 'project';
-		if (folderName.includes('task')) return 'task';
-		if (folderName.includes('agent')) return 'agent';
-		if (folderName.includes('workflow')) return 'workflow';
-		if (folderName.includes('workspace')) return 'workspace';
-
-		return 'workspace';
-	}
-
-	async inspectEntityHealth(uri: URI | string): Promise<{ isMissing: boolean; missingReason?: string; snapshot?: IBaseEntitySnapshot }> {
-		const key = this.normalizeUriString(uri);
-		const targetUri = URI.parse(key);
-		const snapshot = this.getSnapshot(key);
-
-		if (snapshot && snapshot.ownerAccount && this.activeUserEmail) {
-			const extractEmail = (str: string): string => {
-				const clean = str.includes(':') ? str.split(':')[1] : str;
-				const match = clean.match(/\(([^)]+)\)/);
-				return (match ? match[1] : clean).trim().toLowerCase();
-			};
-
-			const cleanActiveUser = this.activeUserEmail.trim().toLowerCase();
-			const cleanOwner = extractEmail(snapshot.ownerAccount);
-
-			// Only treat as unauthorized if owner is explicitly another real user email (not unauthenticated or local)
-			if (cleanOwner && cleanOwner !== 'unauthenticated' && cleanOwner !== 'local' && cleanActiveUser && cleanActiveUser !== 'unauthenticated') {
-				if (cleanActiveUser !== cleanOwner) {
-					return {
-						isMissing: true,
-						missingReason: `Unauthorized Workspace: Belongs to ${snapshot.ownerAccount}`,
-						snapshot
-					};
-				}
-			} else if ((cleanOwner === 'unauthenticated' || !cleanOwner) && cleanActiveUser) {
-				// Auto-claim local/unauthenticated entity to active user
-				snapshot.ownerAccount = this.activeUserEmail;
-				this.saveSnapshot(snapshot);
-			}
-		}
-
-		try {
-			const folderExists = await this.fileService.exists(targetUri);
-			if (!folderExists) {
-				return {
-					isMissing: true,
-					missingReason: snapshot ? `Physical directory deleted on disk. Snapshot: ${snapshot.entityType.toUpperCase()}` : 'Physical directory does not exist',
-					snapshot
-				};
-			}
-
-			const configDir = await this.migrateLegacyEntityFilesIfNeeded(targetUri);
-			const type: EntityType = snapshot ? snapshot.entityType : await this.detectEntityType(targetUri);
-			const mainMdUri = URI.joinPath(configDir, 'ticket.md');
-			const instructionUri = URI.joinPath(configDir, 'instruction.md');
-
-			const hasMainMd = await this.fileService.exists(mainMdUri) ||
-				await this.fileService.exists(URI.joinPath(configDir, `${type}.md`)) ||
-				await this.fileService.exists(URI.joinPath(configDir, 'workspace.md')) ||
-				await this.fileService.exists(URI.joinPath(targetUri, 'ticket.md')) ||
-				await this.fileService.exists(URI.joinPath(targetUri, `${type}.md`));
-			const hasInstruction = await this.fileService.exists(instructionUri) || await this.fileService.exists(URI.joinPath(targetUri, 'instruction.md'));
-
-			if (!hasMainMd || !hasInstruction) {
-				return {
-					isMissing: true,
-					missingReason: `Standard 4-MD files missing or damaged inside ${SYSTEM_CONFIG_DIR_NAME} (ticket.md / instruction.md)`,
-					snapshot
-				};
-			}
-
-			return { isMissing: false, snapshot };
-		} catch (err) {
-			return {
-				isMissing: true,
-				missingReason: `Inaccessible entity path: ${err}`,
-				snapshot
-			};
-		}
-	}
-
-	async repairEntityFromSnapshot(uri: URI | string): Promise<void> {
-		const key = this.normalizeUriString(uri);
-		const targetFolderUri = URI.parse(key);
-		let snapshot = this.getSnapshot(key);
-
-		if (!await this.fileService.exists(targetFolderUri)) {
-			await this.fileService.createFolder(targetFolderUri);
-		}
-
-		if (snapshot) {
-			if (this.activeUserEmail && (!snapshot.ownerAccount || snapshot.ownerAccount === 'unauthenticated')) {
-				snapshot.ownerAccount = this.activeUserEmail;
-			}
-			await this.writeEntity4MDFiles(snapshot, targetFolderUri, false);
-		} else {
-			const folderName = targetFolderUri.path.split('/').filter(Boolean).pop() || 'Entity';
-			const detectedType = await this.detectEntityType(targetFolderUri);
-			const defaultSnapshot: IBaseEntitySnapshot = {
-				entityUri: key,
-				entityName: folderName,
-				entityType: detectedType,
-				ownerAccount: this.activeUserEmail || 'unauthenticated',
-				createdAt: this.getFormattedDateTime(),
-				description: `${detectedType} ${folderName}`
-			};
-			await this.writeEntity4MDFiles(defaultSnapshot, targetFolderUri, false);
-			await this.saveSnapshot(defaultSnapshot);
-		}
-
-		this._onDidChangeSnapshots.fire();
 	}
 
 	async writeEntity4MDFiles(snapshot: IBaseEntitySnapshot, targetFolderUri: URI, isNewFolder = false): Promise<URI> {
@@ -423,6 +227,35 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			folder: 'A standard directory container for grouping items.',
 			file: 'A standalone document or data asset.'
 		};
+
+		// Auto-materialize custom module YAML into target workspace .agents/entity_type/ if it exists globally
+		if (snapshot.typeDefinition && snapshot.typeDefinition !== 'Built-in (System)' && snapshot.typeDefinition !== 'None') {
+			const directYamlUri = URI.joinPath(baseUri, snapshot.typeDefinition);
+			if (!await this.fileService.exists(directYamlUri)) {
+				try {
+					const filename = snapshot.typeDefinition.split('/').filter(Boolean).pop() || `${type}.yaml`;
+					let savedPath = '~/.anyagent/entity_type';
+					try {
+						if (this.storageService) {
+							savedPath = this.storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
+						}
+					} catch {}
+					const userHome = this.environmentService.userHome.fsPath;
+					const resolvedGlobalDir = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : (savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type'));
+					const globalYamlUri = URI.file(`${resolvedGlobalDir}/${filename}`);
+					if (await this.fileService.exists(globalYamlUri)) {
+						const parentDir = dirname(directYamlUri);
+						if (!await this.fileService.exists(parentDir)) {
+							await this.fileService.createFolder(parentDir);
+						}
+						await this.fileService.copy(globalYamlUri, directYamlUri, true);
+					}
+				} catch (err) {
+					console.error('Failed to materialize custom type YAML to workspace:', err);
+				}
+			}
+		}
+
 		let customDefFromYaml: string | undefined;
 		try {
 			const yamlLocalUri = URI.joinPath(baseUri, '.agents', 'entity_type', `${type}.yaml`);

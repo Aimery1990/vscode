@@ -30,5 +30,4 @@ export interface IWorkflowsManagerService {
 	getWorkflows(): Promise<IWorkflowItem[]>;
 	getWorkflowsByWorkspace(workspaceUri: URI): Promise<IWorkflowItem[]>;
 	deleteWorkflow(id: string): Promise<void>;
-	repairWorkflow(id: string): Promise<void>;
 }
