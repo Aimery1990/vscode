@@ -1368,13 +1368,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 		};
 
-		// Description Input (Full width)
+		// Description Input (Full width, multi-line textarea)
 		const descBox = append(modalBody, $('.form-group'));
 		append(descBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Description (Optional):'));
-		const descInput = append(descBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
-		})) as HTMLInputElement;
-		descInput.placeholder = 'Brief purpose of this workspace';
+		const descInput = append(descBox, $('textarea.monaco-inputbox', {
+			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: inherit;'
+		})) as HTMLTextAreaElement;
+		descInput.placeholder = 'Brief purpose or detailed description of this workspace...';
 
 		// Initial Status (Clean row)
 		const statusBox = append(modalBody, $('.form-group'));
