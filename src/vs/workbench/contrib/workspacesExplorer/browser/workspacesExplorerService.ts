@@ -612,7 +612,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						hasDamagedDescendant
 					});
 				} else {
-					if (child.name.endsWith('.md') || child.name.endsWith('.json') || child.name.endsWith('.sh') || child.name.endsWith('.py')) {
+					if (!child.name.startsWith('.') && !child.name.startsWith('~') && child.name !== 'desktop.ini' && child.name !== 'Thumbs.db') {
 						childrenItems.push({
 							id: child.resource.toString(),
 							name: child.name,
@@ -934,6 +934,25 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			}
 		}
 
+		let attachmentNames: string[] | undefined;
+		if (options.attachments && options.attachments.length > 0) {
+			const attachmentsDir = URI.joinPath(entityFolderUri, 'attachments');
+			if (!await this.fileService.exists(attachmentsDir)) {
+				await this.fileService.createFolder(attachmentsDir);
+			}
+			attachmentNames = [];
+			for (const attUri of options.attachments) {
+				const fileName = attUri.path.split('/').filter(Boolean).pop() || 'attachment';
+				const destUri = URI.joinPath(attachmentsDir, fileName);
+				try {
+					await this.fileService.copy(attUri, destUri, true);
+					attachmentNames.push(fileName);
+				} catch (err) {
+					console.error('Failed to copy attachment:', err);
+				}
+			}
+		}
+
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: entityFolderUri.toString(),
 			entityName: name,
@@ -955,6 +974,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			typeDefinition: options.typeDefinition,
 			typePrompt: options.typePrompt,
 			ticketPrompt: options.ticketPrompt || options.agentRulePrompt,
+			attachments: attachmentNames,
 			customMetadata: options.customMetadata
 		}, targetBaseUri, true);
 

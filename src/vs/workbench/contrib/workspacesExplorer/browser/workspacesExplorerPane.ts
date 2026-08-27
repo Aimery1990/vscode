@@ -495,6 +495,17 @@ export class MainWorkspaceViewPane extends ViewPane {
 					e.stopPropagation();
 
 					const actions = [
+						new Action('edit_workspace', 'Edit Workspace...', ThemeIcon.asClassName(Codicon.edit), true, async () => {
+							try {
+								if (ws.detectedType === 'workflow') {
+									await this.editorService.openEditor(new WorkflowEditorInput(ws.uri, ws.name), { pinned: true });
+								} else {
+									await this.editorService.openEditor(new EntityDetailEditorInput(ws.uri, ws.name, true), { pinned: true });
+								}
+							} catch (err) {
+								console.error('Failed to open Workspace editor:', err);
+							}
+						}),
 						new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {
 							await this.showInExplorer(ws.uri);
 						}),
