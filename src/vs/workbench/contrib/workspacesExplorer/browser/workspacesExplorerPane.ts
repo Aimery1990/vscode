@@ -633,9 +633,19 @@ export class MainWorkspaceViewPane extends ViewPane {
 				}
 
 				const wsSnapshot = this.workspacesExplorerService.getMetadataSnapshot(ws.uri);
-				const wsTicketId = wsSnapshot?.ticketId || (wsSnapshot?.entityCode ? `${wsSnapshot.entityCode}-0000` : '') || (ws.code ? `${ws.code}-0000` : '');
+				let wsPrefix = wsSnapshot?.entityCode || ws.code || '';
+				if (!wsPrefix && wsSnapshot?.ticketId && wsSnapshot.ticketId.includes('-')) {
+					wsPrefix = wsSnapshot.ticketId.split('-')[0];
+				}
+				if (!wsPrefix && wsSnapshot?.workspaceId && wsSnapshot.workspaceId.includes('-')) {
+					wsPrefix = wsSnapshot.workspaceId.split('-')[0];
+				}
+				if (wsPrefix) {
+					wsPrefix = wsPrefix.toUpperCase();
+				}
+
 				const wsTitle = wsSnapshot?.title || ws.name;
-				const wsDisplayText = (wsTicketId && wsTitle && wsTitle !== wsTicketId) ? `${wsTicketId} ${wsTitle}` : (wsTicketId || ws.name);
+				const wsDisplayText = (wsPrefix && wsTitle && wsTitle !== wsPrefix) ? `${wsPrefix} ${wsTitle}` : (wsPrefix || wsTitle || ws.name);
 
 				const wsTitleSpan = append(headerLeft, $('span', {
 					style: 'font-weight: 600; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;'
