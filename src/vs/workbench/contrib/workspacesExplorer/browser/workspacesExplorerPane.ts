@@ -1223,45 +1223,35 @@ export class MainWorkspaceViewPane extends ViewPane {
 		overlay.style.backgroundColor = 'rgba(0, 0, 0, 0.65)';
 		overlay.style.backdropFilter = 'blur(6px)';
 		overlay.style.display = 'flex';
+		overlay.style.flexDirection = 'row';
 		overlay.style.alignItems = 'center';
 		overlay.style.justifyContent = 'center';
+		overlay.style.gap = '14px';
 		overlay.style.zIndex = '10000';
 		overlay.style.padding = '20px';
 		overlay.style.boxSizing = 'border-box';
-
-		const dialogWrapper = append(overlay, $('.create-workspace-dialog-wrapper'));
-		dialogWrapper.style.width = '100%';
-		dialogWrapper.style.maxWidth = '1040px';
-		dialogWrapper.style.height = '88vh';
-		dialogWrapper.style.maxHeight = '88vh';
-		dialogWrapper.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
-		dialogWrapper.style.border = '1px solid rgba(255, 255, 255, 0.18)';
-		dialogWrapper.style.borderRadius = '14px';
-		dialogWrapper.style.boxShadow = '0 24px 64px rgba(0,0,0,0.85)';
-		dialogWrapper.style.display = 'flex';
-		dialogWrapper.style.flexDirection = 'row';
-		dialogWrapper.style.alignItems = 'stretch';
-		dialogWrapper.style.overflow = 'hidden';
-		dialogWrapper.style.boxSizing = 'border-box';
-		dialogWrapper.style.transition = 'max-width 0.25s ease';
+		overlay.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif';
 
 		// ==========================================
-		// Left Panel: Form Modal
+		// 1. Original Primary Form Modal (Restored 100%)
 		// ==========================================
-		const formPanel = append(dialogWrapper, $('.create-resource-modal'));
-		formPanel.style.flex = '1';
-		formPanel.style.minWidth = '0';
-		formPanel.style.height = '100%';
-		formPanel.style.padding = '22px 26px';
-		formPanel.style.display = 'flex';
-		formPanel.style.flexDirection = 'column';
-		formPanel.style.overflow = 'hidden';
-		formPanel.style.boxSizing = 'border-box';
-		formPanel.style.gap = '12px';
-		formPanel.style.background = 'transparent';
+		const modal = append(overlay, $('.create-resource-modal'));
+		modal.style.width = '100%';
+		modal.style.maxWidth = '640px';
+		modal.style.maxHeight = '86vh';
+		modal.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
+		modal.style.border = '1px solid rgba(255, 255, 255, 0.18)';
+		modal.style.borderRadius = '12px';
+		modal.style.padding = '24px 28px';
+		modal.style.boxShadow = '0 20px 50px rgba(0,0,0,0.75)';
+		modal.style.display = 'flex';
+		modal.style.flexDirection = 'column';
+		modal.style.overflow = 'hidden';
+		modal.style.gap = '14px';
+		modal.style.boxSizing = 'border-box';
 
-		// Form Header (Fixed at top)
-		const modalHeader = append(formPanel, $('.modal-header'));
+		// Modal Header (Fixed at top)
+		const modalHeader = append(modal, $('.modal-header'));
 		modalHeader.style.display = 'flex';
 		modalHeader.style.alignItems = 'center';
 		modalHeader.style.justifyContent = 'space-between';
@@ -1274,11 +1264,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		const headerActions = append(modalHeader, $('div', { style: 'display: flex; align-items: center; gap: 10px;' }));
 
-		// Sidecar Toggle Button in Header
+		// Sidecar Toggle Button in Modal Header
 		const sidecarToggleBtn = append(headerActions, $('button.monaco-button', {
 			style: 'padding: 4px 10px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); transition: all 0.15s ease;'
 		}));
-		sidecarToggleBtn.innerHTML = '✨ Agent Assist';
+		sidecarToggleBtn.innerText = '✨ Agent Central';
 
 		const closeIcon = append(headerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
 		closeIcon.style.cursor = 'pointer';
@@ -1287,14 +1277,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 		closeIcon.onclick = () => overlay.remove();
 
 		// Scrollable Body Container
-		const modalBody = append(formPanel, $('.modal-body'));
+		const modalBody = append(modal, $('.modal-body'));
 		modalBody.style.flex = '1';
 		modalBody.style.minHeight = '0';
 		modalBody.style.overflowY = 'auto';
 		modalBody.style.display = 'flex';
 		modalBody.style.flexDirection = 'column';
 		modalBody.style.gap = '14px';
-		modalBody.style.paddingRight = '8px';
+		modalBody.style.paddingRight = '6px';
+		modalBody.style.boxSizing = 'border-box';
 
 		// Helper to flash highlight on autofilled inputs
 		const highlightField = (el: HTMLElement) => {
@@ -1587,7 +1578,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		ticketPromptInput.placeholder = 'Optional custom instruction or rules for this specific workspace...';
 
 		// Action Buttons Row (Fixed footer pinned at bottom)
-		const actionsRow = append(formPanel, $('.modal-actions-row'));
+		const actionsRow = append(modal, $('.modal-actions-row'));
 		actionsRow.style.display = 'flex';
 		actionsRow.style.justifyContent = 'flex-end';
 		actionsRow.style.alignItems = 'center';
@@ -1663,16 +1654,21 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 
 		// ==========================================
-		// Right Panel: Agent Central Magnetic Sidecar
+		// 2. Magnetic Agent Central Companion Sidecar
 		// ==========================================
-		const agentSidecar = append(dialogWrapper, $('.agent-central-sidecar'));
-		agentSidecar.style.width = '380px';
+		const agentSidecar = append(overlay, $('.agent-central-sidecar'));
+		agentSidecar.style.width = '360px';
+		agentSidecar.style.maxHeight = '86vh';
+		agentSidecar.style.height = '86vh';
 		agentSidecar.style.flexShrink = '0';
 		agentSidecar.style.display = 'flex';
 		agentSidecar.style.flexDirection = 'column';
-		agentSidecar.style.backgroundColor = 'rgba(20, 20, 26, 0.98)';
-		agentSidecar.style.borderLeft = '1px solid rgba(255, 255, 255, 0.12)';
+		agentSidecar.style.backgroundColor = 'var(--vscode-editorWidget-background, #1a1a22)';
+		agentSidecar.style.border = '1px solid rgba(255, 255, 255, 0.16)';
+		agentSidecar.style.borderRadius = '12px';
+		agentSidecar.style.boxShadow = '0 20px 50px rgba(0,0,0,0.75)';
 		agentSidecar.style.overflow = 'hidden';
+		agentSidecar.style.boxSizing = 'border-box';
 
 		// Sidecar Header
 		const sidecarHeader = append(agentSidecar, $('.sidecar-header'));
@@ -1682,6 +1678,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		sidecarHeader.style.justifyContent = 'space-between';
 		sidecarHeader.style.borderBottom = '1px solid rgba(255, 255, 255, 0.08)';
 		sidecarHeader.style.backgroundColor = 'rgba(0, 0, 0, 0.2)';
+		sidecarHeader.style.flexShrink = '0';
 
 		const sidecarTitle = append(sidecarHeader, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
 		append(sidecarTitle, $('span', { style: 'font-size: 15px;' }, '🤖'));
@@ -1690,24 +1687,22 @@ export class MainWorkspaceViewPane extends ViewPane {
 			style: 'font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35);'
 		}, 'Claude 3.5'));
 
-		const collapseBtn = append(sidecarHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronRight)));
+		const collapseBtn = append(sidecarHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
 		collapseBtn.style.cursor = 'pointer';
 		collapseBtn.style.opacity = '0.7';
 		collapseBtn.style.fontSize = '14px';
-		collapseBtn.title = 'Collapse Agent Sidecar';
+		collapseBtn.title = 'Close Agent Sidecar';
 
 		let isSidecarOpen = true;
 		const toggleSidecar = () => {
 			isSidecarOpen = !isSidecarOpen;
 			if (isSidecarOpen) {
 				agentSidecar.style.display = 'flex';
-				dialogWrapper.style.maxWidth = '1040px';
 				sidecarToggleBtn.style.background = 'rgba(56, 189, 248, 0.16)';
 				sidecarToggleBtn.style.color = '#38bdf8';
 				sidecarToggleBtn.style.border = '1px solid rgba(56, 189, 248, 0.4)';
 			} else {
 				agentSidecar.style.display = 'none';
-				dialogWrapper.style.maxWidth = '680px';
 				sidecarToggleBtn.style.background = 'rgba(255,255,255,0.06)';
 				sidecarToggleBtn.style.color = 'inherit';
 				sidecarToggleBtn.style.border = '1px solid rgba(255,255,255,0.12)';
@@ -1729,7 +1724,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const appendAssistantMessage = (text: string) => {
 			const bubble = append(chatFeed, $('.chat-bubble.assistant'));
 			bubble.style.alignSelf = 'flex-start';
-			bubble.style.maxWidth = '92%';
+			bubble.style.maxWidth = '94%';
 			bubble.style.padding = '10px 14px';
 			bubble.style.borderRadius = '10px 10px 10px 2px';
 			bubble.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
@@ -1765,7 +1760,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 
 		// Initial Welcome message
-		appendAssistantMessage(`👋 **Hello! I'm your Agent Central Workspace Co-pilot.**\n\nDescribe what kind of workspace you'd like to create, and I will automatically configure and fill in all the workspace parameters for you!`);
+		appendAssistantMessage(`👋 **Hello! I'm your Agent Central Co-pilot.**\n\nDescribe what kind of workspace you want to build, and I will automatically analyze your requirements and pre-fill the form fields on the left!`);
 
 		// Quick Suggestion Chips
 		const chipsBox = append(chatFeed, $('.quick-chips-box'));
@@ -1789,11 +1784,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 		chatInputArea.style.display = 'flex';
 		chatInputArea.style.flexDirection = 'column';
 		chatInputArea.style.gap = '8px';
+		chatInputArea.style.flexShrink = '0';
 
 		const chatTextarea = append(chatInputArea, $('textarea.monaco-inputbox', {
 			style: 'width: 100%; height: 46px; padding: 8px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box; resize: none; font-family: inherit;'
 		})) as HTMLTextAreaElement;
-		chatTextarea.placeholder = 'Type workspace requirements... (Enter to send)';
+		chatTextarea.placeholder = 'Describe your workspace requirements... (Enter to send)';
 
 		const inputActionRow = append(chatInputArea, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
 		const statusText = append(inputActionRow, $('span', { style: 'font-size: 10.5px; opacity: 0.6; font-style: italic;' }, 'Ready'));
