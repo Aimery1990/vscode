@@ -1409,7 +1409,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		// Description Input (Full width, multi-line textarea)
 		const descBox = append(modalBody, $('.form-group'));
-		append(descBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Description (Optional):'));
+		append(descBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Description:'));
 		const descInput = append(descBox, $('textarea.monaco-inputbox', {
 			style: 'width: 100%; height: 56px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; font-family: inherit;'
 		})) as HTMLTextAreaElement;
@@ -1490,7 +1490,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		// Current AI Agent Dropdown (Full width)
 		const agentBox = append(modalBody, $('.form-group'));
-		append(agentBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Current AI Agent (Optional):'));
+		append(agentBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Current AI Agent:'));
 		const agentSelect = append(agentBox, $('select.monaco-select-box', {
 			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; cursor: pointer;'
 		})) as HTMLSelectElement;
@@ -1508,7 +1508,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		// Link To Input (Full width)
 		const linkBox = append(modalBody, $('.form-group'));
-		append(linkBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Link To (Optional Ticket ID / Resource):'));
+		append(linkBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Link To:'));
 		const linkInput = append(linkBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
@@ -1516,7 +1516,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		// Attachments Section (Full width)
 		const attachBox = append(modalBody, $('.form-group'));
-		append(attachBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Attachments (Optional):'));
+		append(attachBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Attachments:'));
 		const attachRow = append(attachBox, $('div', { style: 'display: flex; flex-direction: column; gap: 8px;' }));
 		const attachTagsContainer = append(attachRow, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 6px;' }));
 
@@ -1874,9 +1874,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 			style: 'font-size: 11px; color: #ef4444; margin-top: 4px; display: none; line-height: 1.3;'
 		}));
 
-		// Title Input (Required for non-folder/file)
+		// Title Input
 		const titleBox = append(modalBody, $('.form-group'));
-		const titleLabel = append(titleBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Title (Required):'));
+		const titleLabel = append(titleBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Title:'));
 		const titleInput = append(titleBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
@@ -1890,6 +1890,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 		})) as HTMLTextAreaElement;
 		descInput.placeholder = 'Brief purpose of this entity...';
 
+		// Type Definition Input
+		const typeDefBox = append(modalBody, $('.form-group'));
+		append(typeDefBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Type Definition:'));
+		const typeDefInput = append(typeDefBox, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		typeDefInput.placeholder = '.agents/entity_type/job.yaml';
+
 		// Status (Clean badge row)
 		const statusBox = append(modalBody, $('.form-group'));
 		append(statusBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Status:'));
@@ -1901,9 +1909,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 		// Custom Fields Box for Custom Modules
 		const customFieldsBox = append(modalBody, $('.custom-fields-box', { style: 'display: flex; flex-direction: column; gap: 10px; margin-top: 8px;' }));
 
-		// Base Agent to Inherit From (Optional)
+		// Base Agent to Inherit From
 		const baseAgentBox = append(modalBody, $('.form-group'));
-		append(baseAgentBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Base Agent to Inherit From (Optional):'));
+		append(baseAgentBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Base Agent to Inherit From:'));
 		const baseAgentSelect = append(baseAgentBox, $('select.monaco-select', {
 			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box;'
 		})) as HTMLSelectElement;
@@ -2194,17 +2202,17 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 		}).catch(() => { });
 
-		// Link To Input (Optional)
+		// Link To Input
 		const linkBox = append(modalBody, $('.form-group'));
-		append(linkBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Link To (Optional Ticket ID / Resource):'));
+		append(linkBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Link To:'));
 		const linkToInput = append(linkBox, $('input.monaco-inputbox', {
 			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 		})) as HTMLInputElement;
 		linkToInput.placeholder = 'e.g., None, PROJ-0001, or URL';
 
-		// Attachments Section (Optional)
+		// Attachments Section
 		const attachBox = append(modalBody, $('.form-group'));
-		append(attachBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Attachments (Optional):'));
+		append(attachBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Attachments:'));
 		const attachRow = append(attachBox, $('div', { style: 'display: flex; flex-direction: column; gap: 8px;' }));
 		const attachTagsContainer = append(attachRow, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 6px;' }));
 
@@ -2304,24 +2312,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const updateValidation = async () => {
 			const inputName = nameInput.value.trim();
 			if (!inputName) {
-				warningBanner.innerText = '⚠️ Please enter a valid entity name.';
-				warningBanner.style.display = 'block';
+				warningBanner.style.display = 'none';
 				submitBtn.disabled = true;
 				submitBtn.style.opacity = '0.5';
 				submitBtn.style.pointerEvents = 'none';
 				return;
-			}
-
-			if (selectedType !== 'folder' && selectedType !== 'file') {
-				const inputTitle = titleInput.value.trim();
-				if (!inputTitle) {
-					warningBanner.innerText = '⚠️ Please enter a Title for this entity.';
-					warningBanner.style.display = 'block';
-					submitBtn.disabled = true;
-					submitBtn.style.opacity = '0.5';
-					submitBtn.style.pointerEvents = 'none';
-					return;
-				}
 			}
 
 			const sanitizedName = inputName.replace(/[^a-zA-Z0-9_-]/g, '-');
@@ -2350,6 +2345,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				codeBox.style.display = 'none';
 				badgeBox.style.display = 'none';
 				titleBox.style.display = 'none';
+				typeDefBox.style.display = 'none';
 				statusBox.style.display = 'none';
 				priorityBox.style.display = 'none';
 				agentBox.style.display = 'none';
@@ -2369,6 +2365,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				codeBox.style.display = 'none';
 				badgeBox.style.display = 'none';
 				titleBox.style.display = 'none';
+				typeDefBox.style.display = 'none';
 				statusBox.style.display = 'none';
 				priorityBox.style.display = 'none';
 				agentBox.style.display = 'none';
@@ -2388,6 +2385,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				codeBox.style.display = 'block';
 				badgeBox.style.display = 'block';
 				titleBox.style.display = 'block';
+				typeDefBox.style.display = 'block';
 				statusBox.style.display = 'block';
 				priorityBox.style.display = 'none';
 				agentBox.style.display = 'none';
@@ -2413,11 +2411,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 				previewBadge.style.color = badgeColor;
 				previewBadge.style.borderColor = `${badgeColor}58`;
 				previewBadge.style.backgroundColor = `${badgeColor}12`;
+				typeDefInput.value = matchingModule?.description || `.agents/entity_type/${selectedType}.yaml`;
 				typePromptInput.value = matchingModule?.prompt || builtInTypePrompts[selectedType] || '';
 			} else {
 				codeBox.style.display = 'block';
 				badgeBox.style.display = 'block';
 				titleBox.style.display = 'block';
+				typeDefBox.style.display = 'block';
 				statusBox.style.display = 'block';
 				priorityBox.style.display = 'block';
 				agentBox.style.display = 'block';
@@ -2430,7 +2430,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				promptBox.style.display = 'none';
 				baseAgentBox.style.display = 'none';
 				nameLabel.innerText = 'Entity Folder Name / Ticket ID:';
-				titleLabel.innerText = 'Title (Required):';
+				titleLabel.innerText = 'Title:';
 				descLabel.innerText = 'Description:';
 				descInput.placeholder = 'Brief purpose of this entity...';
 
@@ -2443,6 +2443,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				previewBadge.style.color = badgeColor;
 				previewBadge.style.borderColor = `${badgeColor}58`;
 				previewBadge.style.backgroundColor = `${badgeColor}12`;
+				typeDefInput.value = matchingModule?.description || `.agents/entity_type/${selectedType}.yaml`;
 				typePromptInput.value = matchingModule?.prompt || builtInTypePrompts[selectedType] || '';
 			}
 
@@ -2614,9 +2615,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 				});
 
-				const customModules = await this._getCustomModules(targetUri);
-				const matchingModule = customModules.find((m: ICustomModule) => m.id === selectedType);
-
 				const createResult = await this.workspacesExplorerService.createResourceUnderWorkspace({
 					workspaceUri: targetUri,
 					type: selectedType,
@@ -2630,7 +2628,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					agentRulePrompt: ruleInput.value.trim() || undefined,
 					ticketPrompt: ruleInput.value.trim() || undefined,
 					description: descInput.value.trim() || undefined,
-					typeDefinition: matchingModule?.description || (['folder', 'file'].includes(selectedType) ? undefined : `.agents/entity_type/${selectedType}.yaml`),
+					typeDefinition: typeDefInput.value.trim() || undefined,
 					typePrompt: typePromptInput.value.trim() || undefined,
 					linkTo: linkToInput.value.trim() || undefined,
 					attachments: selectedAttachments.length > 0 ? selectedAttachments : undefined,
