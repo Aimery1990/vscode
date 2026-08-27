@@ -2411,7 +2411,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 				previewBadge.style.color = badgeColor;
 				previewBadge.style.borderColor = `${badgeColor}58`;
 				previewBadge.style.backgroundColor = `${badgeColor}12`;
-				typeDefInput.value = matchingModule?.description || `.agents/entity_type/${selectedType}.yaml`;
+				typeDefInput.value = matchingModule ? (matchingModule.description || `.agents/entity_type/${selectedType}.yaml`) : 'Built-in (System)';
+				typeDefInput.placeholder = matchingModule ? `.agents/entity_type/${selectedType}.yaml` : 'Built-in (System)';
 				typePromptInput.value = matchingModule?.prompt || builtInTypePrompts[selectedType] || '';
 			} else {
 				codeBox.style.display = 'block';
@@ -2443,7 +2444,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 				previewBadge.style.color = badgeColor;
 				previewBadge.style.borderColor = `${badgeColor}58`;
 				previewBadge.style.backgroundColor = `${badgeColor}12`;
-				typeDefInput.value = matchingModule?.description || `.agents/entity_type/${selectedType}.yaml`;
+				typeDefInput.value = matchingModule ? (matchingModule.description || `.agents/entity_type/${selectedType}.yaml`) : 'Built-in (System)';
+				typeDefInput.placeholder = matchingModule ? `.agents/entity_type/${selectedType}.yaml` : 'Built-in (System)';
 				typePromptInput.value = matchingModule?.prompt || builtInTypePrompts[selectedType] || '';
 			}
 
@@ -2628,7 +2630,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					agentRulePrompt: ruleInput.value.trim() || undefined,
 					ticketPrompt: ruleInput.value.trim() || undefined,
 					description: descInput.value.trim() || undefined,
-					typeDefinition: typeDefInput.value.trim() || undefined,
+					typeDefinition: (typeDefInput.value.trim() && typeDefInput.value.trim() !== 'Built-in (System)' && typeDefInput.value.trim() !== 'None') ? typeDefInput.value.trim() : undefined,
 					typePrompt: typePromptInput.value.trim() || undefined,
 					linkTo: linkToInput.value.trim() || undefined,
 					attachments: selectedAttachments.length > 0 ? selectedAttachments : undefined,

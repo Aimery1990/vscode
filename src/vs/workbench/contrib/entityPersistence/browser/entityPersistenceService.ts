@@ -498,8 +498,10 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		mainMdContent += `- **Last Updated By**: User\n\n`;
 
 		mainMdContent += `### Self Defined Data (If any)\n`;
-		const schemaRelPath = `.agents/entity_type/${type}.yaml`;
-		if (snapshot.customMetadata && Object.keys(snapshot.customMetadata).length > 0) {
+		const schemaRelPath = (snapshot.typeDefinition && snapshot.typeDefinition !== 'Built-in (System)' && snapshot.typeDefinition !== 'None')
+			? snapshot.typeDefinition
+			: ((snapshot.customMetadata && Object.keys(snapshot.customMetadata).length > 0) ? `.agents/entity_type/${type}.yaml` : 'None');
+		if (schemaRelPath !== 'None' && snapshot.customMetadata && Object.keys(snapshot.customMetadata).length > 0) {
 			mainMdContent += `- **Self Defined Data Structure**: ${schemaRelPath}\n`;
 			mainMdContent += `- **Self Defined Data Value**:\n`;
 			for (const [k, v] of Object.entries(snapshot.customMetadata)) {
@@ -542,19 +544,31 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 		let customPromptFromYaml: string | undefined;
 		try {
-			const yamlLocalUri = URI.joinPath(baseUri, '.agents', 'entity_type', `${type}.yaml`);
-			const yamlLocalUriPlural = URI.joinPath(baseUri, '.agents', 'entity_types', `${type}.yaml`);
-			if (await this.fileService.exists(yamlLocalUri)) {
-				const yamlContent = (await this.fileService.readFile(yamlLocalUri)).value.toString();
-				const promptMatch = yamlContent.match(/^prompt:\s*(.+)$/m);
-				if (promptMatch && promptMatch[1]) {
-					customPromptFromYaml = promptMatch[1].trim();
+			if (snapshot.typeDefinition && snapshot.typeDefinition !== 'Built-in (System)' && snapshot.typeDefinition !== 'None') {
+				const directYamlUri = URI.joinPath(baseUri, snapshot.typeDefinition);
+				if (await this.fileService.exists(directYamlUri)) {
+					const yamlContent = (await this.fileService.readFile(directYamlUri)).value.toString();
+					const promptMatch = yamlContent.match(/^prompt:\s*(.+)$/m);
+					if (promptMatch && promptMatch[1]) {
+						customPromptFromYaml = promptMatch[1].trim();
+					}
 				}
-			} else if (await this.fileService.exists(yamlLocalUriPlural)) {
-				const yamlContent = (await this.fileService.readFile(yamlLocalUriPlural)).value.toString();
-				const promptMatch = yamlContent.match(/^prompt:\s*(.+)$/m);
-				if (promptMatch && promptMatch[1]) {
-					customPromptFromYaml = promptMatch[1].trim();
+			}
+			if (!customPromptFromYaml) {
+				const yamlLocalUri = URI.joinPath(baseUri, '.agents', 'entity_type', `${type}.yaml`);
+				const yamlLocalUriPlural = URI.joinPath(baseUri, '.agents', 'entity_types', `${type}.yaml`);
+				if (await this.fileService.exists(yamlLocalUri)) {
+					const yamlContent = (await this.fileService.readFile(yamlLocalUri)).value.toString();
+					const promptMatch = yamlContent.match(/^prompt:\s*(.+)$/m);
+					if (promptMatch && promptMatch[1]) {
+						customPromptFromYaml = promptMatch[1].trim();
+					}
+				} else if (await this.fileService.exists(yamlLocalUriPlural)) {
+					const yamlContent = (await this.fileService.readFile(yamlLocalUriPlural)).value.toString();
+					const promptMatch = yamlContent.match(/^prompt:\s*(.+)$/m);
+					if (promptMatch && promptMatch[1]) {
+						customPromptFromYaml = promptMatch[1].trim();
+					}
 				}
 			}
 		} catch {}
