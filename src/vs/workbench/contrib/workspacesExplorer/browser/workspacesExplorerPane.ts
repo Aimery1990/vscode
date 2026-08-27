@@ -1208,12 +1208,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 			return;
 		}
 
-		const existingModal = this.containerEl.querySelector('.create-workspace-modal-overlay');
+		const targetDoc = this.containerEl.ownerDocument || document;
+		const existingModal = targetDoc.querySelector('.create-workspace-modal-overlay');
 		if (existingModal) {
 			existingModal.remove();
 		}
 
-		const overlay = append(this.containerEl, $('.create-workspace-modal-overlay'));
+		const overlay = append(targetDoc.body, $('.create-workspace-modal-overlay'));
 		overlay.style.position = 'fixed';
 		overlay.style.top = '0';
 		overlay.style.left = '0';
@@ -1226,6 +1227,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		overlay.style.justifyContent = 'center';
 		overlay.style.zIndex = '10000';
 		overlay.style.padding = '20px';
+		overlay.style.boxSizing = 'border-box';
 
 		const dialogWrapper = append(overlay, $('.create-workspace-dialog-wrapper'));
 		dialogWrapper.style.width = '100%';
@@ -1240,6 +1242,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		dialogWrapper.style.flexDirection = 'row';
 		dialogWrapper.style.alignItems = 'stretch';
 		dialogWrapper.style.overflow = 'hidden';
+		dialogWrapper.style.boxSizing = 'border-box';
 		dialogWrapper.style.transition = 'max-width 0.25s ease';
 
 		// ==========================================
@@ -1247,11 +1250,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 		// ==========================================
 		const formPanel = append(dialogWrapper, $('.create-resource-modal'));
 		formPanel.style.flex = '1';
-		formPanel.style.minWidth = '540px';
+		formPanel.style.minWidth = '0';
+		formPanel.style.height = '100%';
 		formPanel.style.padding = '22px 26px';
 		formPanel.style.display = 'flex';
 		formPanel.style.flexDirection = 'column';
 		formPanel.style.overflow = 'hidden';
+		formPanel.style.boxSizing = 'border-box';
 		formPanel.style.gap = '12px';
 		formPanel.style.background = 'transparent';
 
@@ -2002,12 +2007,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 			targetName = parentName || 'Folder';
 		}
 
-		const existingModal = this.containerEl.querySelector('.create-resource-modal-overlay');
+		const targetDoc = this.containerEl.ownerDocument || document;
+		const existingModal = targetDoc.querySelector('.create-resource-modal-overlay');
 		if (existingModal) {
 			existingModal.remove();
 		}
 
-		const overlay = append(this.containerEl, $('.create-resource-modal-overlay'));
+		const overlay = append(targetDoc.body, $('.create-resource-modal-overlay'));
 		overlay.style.position = 'fixed';
 		overlay.style.top = '0';
 		overlay.style.left = '0';
@@ -3033,7 +3039,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 		if (!this.containerEl) {
 			return;
 		}
-		const mgOverlay = append(this.containerEl, $('.manage-modules-overlay'));
+		const targetDoc = this.containerEl.ownerDocument || document;
+		const mgOverlay = append(targetDoc.body, $('.manage-modules-overlay'));
 		mgOverlay.style.position = 'fixed';
 		mgOverlay.style.top = '0';
 		mgOverlay.style.left = '0';
