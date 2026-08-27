@@ -521,6 +521,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			assignedAgentName: options.assignedAgentName,
 			linkTo: options.linkTo,
 			attachments: attachmentNames,
+			typeDefinition: options.typeDefinition || '.agents/entity_type/workspace.yaml',
 			typePrompt: options.typePrompt,
 			ticketPrompt: options.ticketPrompt
 		}, targetBaseUri, false);
@@ -973,7 +974,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			scopeType: parentType as any,
 			scopeId: targetBaseUri.toString(),
 			scopeName: parentName,
-			typeDefinition: options.typeDefinition,
+			typeDefinition: options.typeDefinition || (type !== 'folder' && type !== 'file' ? `.agents/entity_type/${type}.yaml` : undefined),
 			typePrompt: options.typePrompt,
 			ticketPrompt: options.ticketPrompt || options.agentRulePrompt,
 			linkTo: options.linkTo,
