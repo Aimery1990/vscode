@@ -40,6 +40,7 @@ export interface IBaseEntitySnapshot {
 	entityUri: string;
 	entityName: string;
 	title?: string;
+	ticketId?: string;
 	workspaceId?: string;
 	entityType: EntityType;
 	entityCode?: string;

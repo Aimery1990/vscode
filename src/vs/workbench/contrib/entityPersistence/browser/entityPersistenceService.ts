@@ -474,10 +474,18 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			}
 		}
 
+		// Determine canonical ticket ID (For workspace root, ticket ID matches workspace ID)
+		let ticketId = snapshot.entityName;
+		if (type === 'workspace') {
+			ticketId = (workspaceId && workspaceId !== 'None') ? workspaceId : snapshot.entityName;
+		} else if (snapshot.ticketId) {
+			ticketId = snapshot.ticketId;
+		}
+
 		// 1. Primary Entity MD (ticket.md)
 		let mainMdContent = `# ${snapshot.entityName}\n\n## Overview\n\n`;
 		mainMdContent += `- **Workspace ID**: ${workspaceId}\n`;
-		mainMdContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
+		mainMdContent += `- **Ticket ID**: ${ticketId}\n`;
 		mainMdContent += `- **Ticket Type**: ${type}\n`;
 		mainMdContent += `- **Type Definition**: ${typeDefStr}\n\n`;
 
@@ -572,7 +580,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		// 2. instruction.md
 		let instructionContent = `# Instruction - ${snapshot.entityName}\n\n## Overview\n\n`;
 		instructionContent += `- **Workspace ID**: ${workspaceId}\n`;
-		instructionContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
+		instructionContent += `- **Ticket ID**: ${ticketId}\n`;
 		instructionContent += `- **Ticket Type**: ${type}\n`;
 		instructionContent += `- **Ticket Type Prompt**: ${typePromptStr}\n`;
 		instructionContent += `- **Ticket Prompt**: ${ticketPromptStr}\n`;
@@ -587,7 +595,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		// 3. README.md
 		let readmeContent = `# ${snapshot.entityName}\n\n`;
 		readmeContent += `- **Workspace ID**: ${workspaceId}\n`;
-		readmeContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
+		readmeContent += `- **Ticket ID**: ${ticketId}\n`;
 		readmeContent += `- **Ticket Type**: ${type}\n`;
 		readmeContent += `- **Title**: ${snapshot.title || snapshot.entityName}\n`;
 		readmeContent += `- **Description**: ${description || 'None'}\n`;
@@ -604,7 +612,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			const fullLogDateTime = this.getFormattedDateTimeWithSecondsAndTz();
 			let workLogContent = `# Work Log - ${snapshot.entityName}\n\n## Overview\n\n`;
 			workLogContent += `- **Workspace ID**: ${workspaceId}\n`;
-			workLogContent += `- **Ticket ID**: ${snapshot.entityName}\n`;
+			workLogContent += `- **Ticket ID**: ${ticketId}\n`;
 			workLogContent += `- **Ticket Type**: ${type}\n`;
 			workLogContent += `- **Parent Path**: ${parentRelPath}\n`;
 			workLogContent += `- **Ego MDs Paths**:\n`;
@@ -685,6 +693,8 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		// Also persist snapshot into SQLite engine
 		await this.saveSnapshot({
 			...snapshot,
+			ticketId: ticketId,
+			workspaceId: workspaceId !== 'None' ? workspaceId : undefined,
 			entityUri: entityFolderUri.toString()
 		});
 

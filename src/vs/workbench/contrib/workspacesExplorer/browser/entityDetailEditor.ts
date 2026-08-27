@@ -909,6 +909,12 @@ export class EntityDetailEditor extends EditorPane {
 			if (keyLower === 'scope type' && displayValue) {
 				displayValue = displayValue.charAt(0).toUpperCase() + displayValue.slice(1);
 			}
+			if (keyLower === 'ticket id' && (type === 'workspace' || !displayValue.includes('-'))) {
+				const wsIdVal = metadata['Workspace ID'] || metadata['workspace id'];
+				if (wsIdVal && wsIdVal !== 'None' && type === 'workspace') {
+					displayValue = wsIdVal;
+				}
+			}
 			if (isReadOnly) {
 				metadataRows += `
 					<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">

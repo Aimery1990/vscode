@@ -93,6 +93,9 @@ export interface IEntityMetadataSnapshot {
 	entityType: ResourceType;
 	ownerAccount: string;
 	createdAt: string;
+	title?: string;
+	ticketId?: string;
+	workspaceId?: string;
 	description?: string;
 	belongsToWorkspaceUri?: string;
 	entityCode?: string;

@@ -632,7 +632,16 @@ export class MainWorkspaceViewPane extends ViewPane {
 					wsIcon.style.color = ws.isMissing ? '#f87171' : 'inherit';
 				}
 
-				append(headerLeft, $('span', { style: 'font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;' }, ws.name));
+				const wsSnapshot = this.workspacesExplorerService.getMetadataSnapshot(ws.uri);
+				const wsTicketId = wsSnapshot?.ticketId || (wsSnapshot?.entityCode ? `${wsSnapshot.entityCode}-0000` : '') || (ws.code ? `${ws.code}-0000` : '');
+				const wsTitle = wsSnapshot?.title || ws.name;
+				const wsDisplayText = (wsTicketId && wsTitle && wsTitle !== wsTicketId) ? `${wsTicketId} ${wsTitle}` : (wsTicketId || ws.name);
+
+				const wsTitleSpan = append(headerLeft, $('span', {
+					style: 'font-weight: 600; font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;'
+				}));
+				wsTitleSpan.innerText = wsDisplayText;
+				wsTitleSpan.title = `${wsDisplayText} (${ws.uri.fsPath})`;
 
 				// Header Right Container (Badges + Actions)
 				const headerRight = append(cardHeader, $('.header-right'));
@@ -1069,7 +1078,16 @@ export class MainWorkspaceViewPane extends ViewPane {
 				childIcon.style.opacity = '0.7';
 			}
 
-			append(childLeft, $('span', { style: 'font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;' }, child.name));
+			const childSnapshot = this.workspacesExplorerService.getMetadataSnapshot(child.uri);
+			const childTicketId = childSnapshot?.ticketId || child.name;
+			const childTitle = childSnapshot?.title || '';
+			const childDisplayText = (childTitle && childTitle !== childTicketId) ? `${childTicketId} ${childTitle}` : (childTicketId || child.name);
+
+			const childTitleSpan = append(childLeft, $('span', {
+				style: 'font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;'
+			}));
+			childTitleSpan.innerText = childDisplayText;
+			childTitleSpan.title = `${childDisplayText} (${child.uri.fsPath})`;
 
 			// Right-Aligned Badges & Actions Group
 			const childRight = append(childRow, $('.child-right'));
