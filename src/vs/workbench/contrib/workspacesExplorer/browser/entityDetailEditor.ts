@@ -1136,10 +1136,10 @@ export class EntityDetailEditor extends EditorPane {
 							</div>
 						</div>
 
-						<!-- 2. Instructions & Directives Card -->
+						<!-- 2. Instructions Card -->
 						<div class="section-card">
 							<div class="section-title">
-								<span>Instructions & Directives</span>
+								<span>Instructions</span>
 							</div>
 
 							<div style="display: flex; flex-direction: column; gap: 12px;">
@@ -1181,10 +1181,10 @@ export class EntityDetailEditor extends EditorPane {
 							</div>
 						</div>
 
-						<!-- 5. Activity & Work Logs Card -->
+						<!-- 5. Work Logs Card -->
 						<div class="section-card">
 							<div class="section-title">
-								<span>Work Logs & Activity</span>
+								<span>Work Logs</span>
 								<button id="add-log-btn" onclick="showAddLogModal()" class="btn-primary" style="font-size: 0.8em; padding: 4px 10px;">+ Add Log</button>
 							</div>
 							
