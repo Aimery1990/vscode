@@ -22,6 +22,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { dirname } from '../../../../base/common/resources.js';
+import { IAgentsManagerService, IAgentItem } from '../../agentsManager/common/agentsManager.js';
 
 function getColorForName(name: string | undefined): string {
 	if (!name) return '#38bdf8';
@@ -116,7 +117,8 @@ export class EntityDetailEditor extends EditorPane {
 		@IWebviewService private readonly _webviewService: IWebviewService,
 		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
 		@INotificationService private readonly _notificationService: INotificationService,
-		@INativeEnvironmentService private readonly _environmentService: INativeEnvironmentService
+		@INativeEnvironmentService private readonly _environmentService: INativeEnvironmentService,
+		@IAgentsManagerService private readonly _agentsManagerService: IAgentsManagerService
 	) {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
 	}
@@ -296,6 +298,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		const attachments = await this._getAttachments(this._entityUri);
 		const customModule = await this._readCustomModule(this._entityUri, this._entityType);
+		const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
 
 		// 3. Setup Webview cleanly without recreating or dropping listeners
 		if (!this._webview) {
@@ -312,7 +315,7 @@ export class EntityDetailEditor extends EditorPane {
 			}));
 		}
 
-		const html = this._generateHtml(parsed, workLogContent, attachments, customModule);
+		const html = this._generateHtml(parsed, workLogContent, attachments, customModule, agents);
 		this._webview.setHtml(html);
 	}
 
@@ -764,7 +767,8 @@ export class EntityDetailEditor extends EditorPane {
 		data: IParsedTicketData,
 		workLog: string,
 		attachments: string[],
-		customModule?: any
+		customModule?: any,
+		agents: IAgentItem[] = []
 	): string {
 		const typeUpper = data.ticketType.toUpperCase();
 
@@ -1247,7 +1251,14 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<span class="sidebar-label">CURRENT AI AGENT</span>
 							<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
-							<input type="text" class="meta-input meta-edit-val input-field" data-key="Current AI Agent" value="${data.assignedAgentName !== 'None' ? data.assignedAgentName : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" placeholder="e.g. Lead Architect" />
+							<select class="meta-input meta-edit-val" data-key="Current AI Agent" style="display: none; background: rgba(255,255,255,0.04); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.1); padding: 5px 8px; border-radius: 4px; font-size: 0.88em; width: 100%;">
+								<option value="None" ${(!data.assignedAgentName || data.assignedAgentName === 'None' || data.assignedAgentName === 'Unassigned') ? 'selected' : ''}>Unassigned</option>
+								${agents.map(a => {
+									const isSelected = (data.assignedAgentName === a.name || data.assignedAgentName === a.id);
+									return `<option value="${a.name}" ${isSelected ? 'selected' : ''}>${a.name}${a.role ? ` (${a.role})` : ''}</option>`;
+								}).join('')}
+								${(!agents.some(a => a.name === data.assignedAgentName || a.id === data.assignedAgentName) && data.assignedAgentName && data.assignedAgentName !== 'None' && data.assignedAgentName !== 'Unassigned') ? `<option value="${data.assignedAgentName}" selected>${data.assignedAgentName}</option>` : ''}
+							</select>
 						</div>
 
 						<!-- Type Definition -->
