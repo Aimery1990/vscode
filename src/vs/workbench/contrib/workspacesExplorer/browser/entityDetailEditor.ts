@@ -163,29 +163,60 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private async _readCustomModule(workspaceUri: URI, typeId: string): Promise<any | null> {
-		const savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
-		const userHome = this._environmentService.userHome.fsPath;
-		const resolvedPath = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type');
+		const targetId = (typeId || '').trim().toLowerCase();
+		if (!targetId) return null;
 
-		const globalUri = URI.file(`${resolvedPath}/${typeId}.yaml`);
-		const localUri = URI.joinPath(workspaceUri, '.agents', 'entity_type', `${typeId}.yaml`);
-		const localUriPlural = URI.joinPath(workspaceUri, '.agents', 'entity_types', `${typeId}.yaml`);
-
-		let targetUri: URI | undefined;
-		if (await this._fileService.exists(localUri)) {
-			targetUri = localUri;
-		} else if (await this._fileService.exists(localUriPlural)) {
-			targetUri = localUriPlural;
-		} else if (await this._fileService.exists(globalUri)) {
-			targetUri = globalUri;
+		const checkDirs: URI[] = [];
+		let curr = workspaceUri;
+		while (curr.path !== '/' && curr.path !== '\\' && curr.path !== '.') {
+			checkDirs.push(URI.joinPath(curr, '.agents', 'entity_type'));
+			checkDirs.push(URI.joinPath(curr, '.agents', 'entity_types'));
+			const parent = dirname(curr);
+			if (parent.path === curr.path) break;
+			curr = parent;
 		}
 
-		if (targetUri) {
+		// Global directory
+		const savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
+		const userHome = this._environmentService.userHome.fsPath;
+		const resolvedGlobal = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : (savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type'));
+		checkDirs.push(URI.file(resolvedGlobal));
+
+		for (const dir of checkDirs) {
 			try {
-				const content = await this._fileService.readFile(targetUri);
-				return this._parseSimpleYaml(content.value.toString());
+				if (await this._fileService.exists(dir)) {
+					// 1. Check direct file names
+					const directNames = [`${targetId}.yaml`, `${targetId}.yml`, `${typeId}.yaml`, `${typeId}.yml`];
+					for (const dName of directNames) {
+						const directUri = URI.joinPath(dir, dName);
+						if (await this._fileService.exists(directUri)) {
+							const content = await this._fileService.readFile(directUri);
+							const mod = this._parseSimpleYaml(content.value.toString());
+							if (mod) return mod;
+						}
+					}
+
+					// 2. Scan all files in directory
+					const stat = await this._fileService.resolve(dir);
+					if (stat.children) {
+						for (const child of stat.children) {
+							if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
+								const content = await this._fileService.readFile(child.resource);
+								const mod = this._parseSimpleYaml(content.value.toString());
+								if (mod && (
+									mod.id?.toLowerCase() === targetId ||
+									mod.name?.toLowerCase() === targetId ||
+									child.name.toLowerCase() === `${targetId}.yaml` ||
+									child.name.toLowerCase() === `${targetId}.yml`
+								)) {
+									return mod;
+								}
+							}
+						}
+					}
+				}
 			} catch (e) {
-				console.error('Failed to read custom module schema:', e);
+				console.error('Error searching custom module:', e);
 			}
 		}
 		return null;
@@ -479,19 +510,39 @@ export class EntityDetailEditor extends EditorPane {
 		return newLines.join('\n');
 	}
 
-	private _updateTicketMdContent(content: string, updates: { [key: string]: string }): string {
+	private _updateTicketMdContent(content: string, updates: { [key: string]: string }, customUpdates?: { [key: string]: string }): string {
 		const lines = content.split(/\r?\n/);
 		const newLines: string[] = [];
-		const updatedKeys = new Set<string>();
+		let inSelfDefined = false;
 
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
+			if (line.startsWith('### Self Defined Data')) {
+				inSelfDefined = true;
+				newLines.push(line);
+				continue;
+			}
+			if (inSelfDefined && (line.startsWith('### ') || (line.startsWith('## ') && !line.startsWith('## Overview')) || line.startsWith('- **Current AI Agent') || line.startsWith('- **Status'))) {
+				inSelfDefined = false;
+			}
+
+			if (inSelfDefined && customUpdates && line.startsWith('- **Self Defined Data Value**:')) {
+				newLines.push(line);
+				for (const [k, v] of Object.entries(customUpdates)) {
+					newLines.push(`  - **${k}**: ${v}`);
+				}
+				// Skip old custom fields
+				while (i + 1 < lines.length && (lines[i + 1].startsWith('  -') || (lines[i + 1].trim() === '' && i + 2 < lines.length && lines[i + 2].startsWith('  -')))) {
+					i++;
+				}
+				continue;
+			}
+
 			const match = line.match(/^\s*-\s*\*\*([^*]+)\*\*:\s*(.*)$/);
-			if (match) {
+			if (match && !inSelfDefined) {
 				const key = match[1].trim();
 				if (updates[key] !== undefined) {
 					newLines.push(`- **${key}**: ${updates[key]}`);
-					updatedKeys.add(key);
 					continue;
 				}
 			}
@@ -507,6 +558,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		switch (e.type) {
+			case 'saveAllData':
 			case 'saveTitleAndDescription':
 			case 'saveDescription': {
 				try {
@@ -520,10 +572,11 @@ export class EntityDetailEditor extends EditorPane {
 						const updates: { [key: string]: string } = {};
 						if (e.title) updates['Title'] = e.title;
 						if (e.description) updates['Description'] = e.description;
-						const updated = this._updateTicketMdContent(content, updates);
+						if (e.metadata) Object.assign(updates, e.metadata);
+						const updated = this._updateTicketMdContent(content, updates, e.customMetadata);
 						await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
 					}
-					this._notificationService.info(localize('descSaved', "Saved title and description successfully."));
+					this._notificationService.info(localize('descSaved', "Saved entity details successfully."));
 					await this._resolvePathsAndLoadData();
 				} catch (err) {
 					this._notificationService.error(localize('saveDescFailed', "Failed to save: {0}", String(err)));
@@ -534,7 +587,7 @@ export class EntityDetailEditor extends EditorPane {
 				try {
 					if (this._ticketFileUri) {
 						const content = await this._safeReadFile(this._ticketFileUri);
-						const updated = this._updateTicketMdContent(content, e.metadata);
+						const updated = this._updateTicketMdContent(content, e.metadata, e.customMetadata);
 						await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
 					}
 					if (e.metadata && (e.metadata['Title'] || e.metadata['Description']) && this._readmeUri) {
@@ -733,18 +786,18 @@ export class EntityDetailEditor extends EditorPane {
 			case: { text: '#a3e635', bg: 'rgba(163, 230, 53, 0.15)' },
 			issue: { text: '#f87171', bg: 'rgba(248, 113, 113, 0.15)' },
 			analysis: { text: '#34d399', bg: 'rgba(52, 211, 153, 0.15)' },
-			note: { text: '#cbd5e1', bg: 'rgba(203, 213, 225, 0.15)' }
+			note: { text: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.15)' }
 		};
 
 		const typeLower = data.ticketType.toLowerCase();
-		let colorSetting = typeColors[typeLower];
-		if (!colorSetting) {
-			if (customModule && customModule.color) {
-				colorSetting = { text: customModule.color, bg: hexToRgba(customModule.color, 0.15) };
-			} else {
-				const color = getColorForName(typeLower);
-				colorSetting = { text: color, bg: hexToRgba(color, 0.15) };
-			}
+		let colorSetting: { text: string; bg: string };
+		if (customModule && customModule.color) {
+			colorSetting = { text: customModule.color, bg: hexToRgba(customModule.color, 0.15) };
+		} else if (typeColors[typeLower]) {
+			colorSetting = typeColors[typeLower];
+		} else {
+			const color = getColorForName(typeLower);
+			colorSetting = { text: color, bg: hexToRgba(color, 0.15) };
 		}
 
 		// 3. Priority badge
@@ -767,8 +820,7 @@ export class EntityDetailEditor extends EditorPane {
 				attachmentsHtml += `
 					<div class="attachment-card" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); padding: 8px 12px; border-radius: 6px;">
 						<div onclick="downloadFile('${file}')" style="display: flex; align-items: center; gap: 8px; overflow: hidden; cursor: pointer; flex: 1;" title="Download attachment">
-							<span style="font-size: 1.1em; opacity: 0.85;">📄</span>
-							<span style="font-size: 0.85em; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${file}</span>
+							<span style="font-size: 0.88em; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${file}</span>
 						</div>
 						<span class="delete-attachment" onclick="deleteFile('${file}')" style="opacity: 0.4; cursor: pointer; padding: 2px 4px; font-size: 0.85em;" title="Delete Attachment">✕</span>
 					</div>
@@ -813,25 +865,30 @@ export class EntityDetailEditor extends EditorPane {
 			workLogHtml += '</div>';
 		}
 
-		// 6. Custom Fields Section (Self Defined Data)
-		let customFieldsSectionHtml = '';
+		// 6. Custom Fields Section
+		let customFieldsHtml = '';
 		const customFieldsEntries = Object.entries(data.customMetadata || {});
 		if (customFieldsEntries.length > 0) {
-			customFieldsSectionHtml = `
-				<div class="section-card">
-					<div class="section-title">
-						<span>🧩 Custom Properties (${typeUpper})</span>
+			for (const [k, v] of customFieldsEntries) {
+				const isMultiline = v.length > 80 || v.includes('\n') || ['experience', 'description', 'detail', 'content', 'notes', 'summary', 'project', 'background'].some(sub => k.toLowerCase().includes(sub));
+				customFieldsHtml += `
+					<div class="section-card custom-property-card">
+						<div class="section-title">
+							<span>${k}</span>
+						</div>
+						<div class="custom-field-view desc-content-box">
+							${v ? this._markdownToHtml(v) : '<span style="opacity: 0.45; font-style: italic;">No content provided.</span>'}
+						</div>
+						<div class="custom-field-edit" style="display: none;">
+							${isMultiline ? `
+								<textarea class="custom-meta-input input-field" data-custom-key="${k}" rows="5">${v}</textarea>
+							` : `
+								<input type="text" class="custom-meta-input input-field" data-custom-key="${k}" value="${v}" />
+							`}
+						</div>
 					</div>
-					<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 8px;">
-						${customFieldsEntries.map(([k, v]) => `
-							<div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); padding: 10px 14px; border-radius: 6px;">
-								<div style="font-size: 0.75em; opacity: 0.55; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;">${k}</div>
-								<div style="font-size: 0.92em; font-weight: 500; color: var(--vscode-editor-foreground);">${v || '<span style="opacity:0.4;">None</span>'}</div>
-							</div>
-						`).join('')}
-					</div>
-				</div>
-			`;
+				`;
+			}
 		}
 
 		// 7. Instructions Card Section
@@ -1039,7 +1096,7 @@ export class EntityDetailEditor extends EditorPane {
 						<!-- 1. Description Card -->
 						<div class="section-card">
 							<div class="section-title">
-								<span>📝 Description</span>
+								<span>Description</span>
 								<button id="edit-desc-btn" onclick="startEditDesc()" class="btn-secondary">Edit</button>
 							</div>
 							
@@ -1058,7 +1115,7 @@ export class EntityDetailEditor extends EditorPane {
 								</div>
 								<div style="display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end;">
 									<button onclick="cancelEditDesc()" class="btn-secondary">Cancel</button>
-									<button onclick="saveDesc()" class="btn-primary">Save Changes</button>
+									<button onclick="saveAllChanges()" class="btn-primary">Save Changes</button>
 								</div>
 							</div>
 						</div>
@@ -1066,7 +1123,7 @@ export class EntityDetailEditor extends EditorPane {
 						<!-- 2. Instructions & Directives Card -->
 						<div class="section-card">
 							<div class="section-title">
-								<span>⚙️ Instructions & Directives</span>
+								<span>Instructions & Directives</span>
 							</div>
 
 							<div style="display: flex; flex-direction: column; gap: 12px;">
@@ -1091,16 +1148,15 @@ export class EntityDetailEditor extends EditorPane {
 							</div>
 						</div>
 
-						<!-- 3. Custom Fields (Self Defined Data) -->
-						${customFieldsSectionHtml}
+						<!-- 3. Custom Properties -->
+						${customFieldsHtml}
 
 						<!-- 4. Attachments Card -->
 						<div class="section-card">
 							<div class="section-title">
-								<span>📎 Attachments (${attachments.length})</span>
+								<span>Attachments (${attachments.length})</span>
 							</div>
 							<div id="attachment-dropzone" class="dropzone" onclick="triggerBrowse()">
-								<span style="font-size: 1.5em; display: block; margin-bottom: 6px;">📥</span>
 								<span style="font-size: 0.88em; opacity: 0.7;">Drag and drop files here or click to browse</span>
 								<input type="file" id="file-input" style="display: none;" onchange="handleBrowseUpload(event)" />
 							</div>
@@ -1112,7 +1168,7 @@ export class EntityDetailEditor extends EditorPane {
 						<!-- 5. Activity & Work Logs Card -->
 						<div class="section-card">
 							<div class="section-title">
-								<span>⏱️ Work Logs & Activity</span>
+								<span>Work Logs & Activity</span>
 								<button id="add-log-btn" onclick="showAddLogModal()" class="btn-primary" style="font-size: 0.8em; padding: 4px 10px;">+ Add Log</button>
 							</div>
 							
@@ -1138,7 +1194,7 @@ export class EntityDetailEditor extends EditorPane {
 								<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
 								<button id="toggle-edit-mode-btn" onclick="toggleEditMode()" class="btn-secondary" style="padding: 2px 8px; font-size: 0.8em;">Edit</button>
 							</div>
-							<span class="badge" style="background: ${colorSetting.bg}; color: ${colorSetting.text}; margin: 0;">${typeUpper}</span>
+							<span class="badge" style="background: ${colorSetting.bg}; color: ${colorSetting.text}; border: 1px solid ${colorSetting.text}40;">${typeUpper}</span>
 						</div>
 						
 						<!-- Status -->
@@ -1174,7 +1230,7 @@ export class EntityDetailEditor extends EditorPane {
 						<!-- Assigned AI Agent -->
 						<div class="sidebar-row">
 							<span class="sidebar-label">ASSIGNED AGENT</span>
-							<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? '🤖 ' + data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
+							<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
 							<input type="text" class="meta-input meta-edit-val input-field" data-key="Current AI Agent" value="${data.assignedAgentName !== 'None' ? data.assignedAgentName : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" placeholder="e.g. Lead Architect" />
 						</div>
 
@@ -1234,7 +1290,7 @@ export class EntityDetailEditor extends EditorPane {
 							<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
 						</div>
 
-						<button id="save-metadata-btn" onclick="saveAllMetadata()" class="btn-primary" style="display: none; width: 100%; margin-top: 16px; padding: 8px;">Save Attributes</button>
+						<button id="save-metadata-btn" onclick="saveAllChanges()" class="btn-primary" style="display: none; width: 100%; margin-top: 16px; padding: 8px;">Save Attributes</button>
 					</div>
 				</div>
 
@@ -1242,6 +1298,7 @@ export class EntityDetailEditor extends EditorPane {
 					const vscode = acquireVsCodeApi();
 
 					let currentMetadata = ${JSON.stringify(data.metadata)};
+					let currentCustomMetadata = ${JSON.stringify(data.customMetadata)};
 
 					// 1. Description & Title Edit
 					function startEditDesc() {
@@ -1257,13 +1314,39 @@ export class EntityDetailEditor extends EditorPane {
 						document.getElementById('edit-desc-btn').style.display = 'inline-block';
 					}
 
-					function saveDesc() {
-						const newTitle = document.getElementById('title-input').value.trim();
-						const newDesc = document.getElementById('desc-textarea').value.trim();
+					function saveAllChanges() {
+						const titleEl = document.getElementById('title-input');
+						const descEl = document.getElementById('desc-textarea');
+						const newTitle = titleEl ? titleEl.value.trim() : undefined;
+						const newDesc = descEl ? descEl.value.trim() : undefined;
+
+						const statusSelect = document.getElementById('status-select');
+						if (statusSelect) {
+							currentMetadata['Status'] = statusSelect.value;
+						}
+						
+						const inputs = document.querySelectorAll('.meta-input');
+						inputs.forEach(input => {
+							const key = input.getAttribute('data-key');
+							if (key) {
+								currentMetadata[key] = input.value;
+							}
+						});
+
+						const customInputs = document.querySelectorAll('.custom-meta-input');
+						customInputs.forEach(input => {
+							const key = input.getAttribute('data-custom-key');
+							if (key) {
+								currentCustomMetadata[key] = input.value;
+							}
+						});
+
 						vscode.postMessage({
-							type: 'saveTitleAndDescription',
+							type: 'saveAllData',
 							title: newTitle,
-							description: newDesc
+							description: newDesc,
+							metadata: currentMetadata,
+							customMetadata: currentCustomMetadata
 						});
 					}
 
@@ -1288,23 +1371,6 @@ export class EntityDetailEditor extends EditorPane {
 							select.style.color = '#818cf8';
 							select.style.borderColor = 'rgba(129, 140, 248, 0.4)';
 						}
-					}
-
-					function saveAllMetadata() {
-						currentMetadata['Status'] = document.getElementById('status-select').value;
-						
-						const inputs = document.querySelectorAll('.meta-input');
-						inputs.forEach(input => {
-							const key = input.getAttribute('data-key');
-							if (key) {
-								currentMetadata[key] = input.value;
-							}
-						});
-
-						vscode.postMessage({
-							type: 'saveMetadata',
-							metadata: currentMetadata
-						});
 					}
 
 					// 3. Work Logs
@@ -1381,7 +1447,7 @@ export class EntityDetailEditor extends EditorPane {
 					}
 
 					function deleteFile(name) {
-						if (confirm("Delete attachment '" + name + "'?")) {
+						if (confirm("Are you sure you want to delete attachment '" + name + "'?")) {
 							vscode.postMessage({
 								type: 'deleteAttachment',
 								name: name
@@ -1403,6 +1469,8 @@ export class EntityDetailEditor extends EditorPane {
 
 							document.querySelectorAll('.meta-view-val').forEach(el => el.style.display = 'none');
 							document.querySelectorAll('.meta-edit-val').forEach(el => el.style.display = 'block');
+							document.querySelectorAll('.custom-field-view').forEach(el => el.style.display = 'none');
+							document.querySelectorAll('.custom-field-edit').forEach(el => el.style.display = 'block');
 							document.getElementById('save-metadata-btn').style.display = 'block';
 						} else {
 							btn.innerText = 'Edit';
@@ -1413,6 +1481,8 @@ export class EntityDetailEditor extends EditorPane {
 
 							document.querySelectorAll('.meta-view-val').forEach(el => el.style.display = 'block');
 							document.querySelectorAll('.meta-edit-val').forEach(el => el.style.display = 'none');
+							document.querySelectorAll('.custom-field-view').forEach(el => el.style.display = 'block');
+							document.querySelectorAll('.custom-field-edit').forEach(el => el.style.display = 'none');
 							document.getElementById('save-metadata-btn').style.display = 'none';
 						}
 					}
