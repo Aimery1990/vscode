@@ -66,6 +66,32 @@ function hexToRgba(hex: string | undefined, alpha: number): string {
 	return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+interface IParsedTicketData {
+	title: string;
+	description: string;
+	ticketType: string;
+	ticketId: string;
+	workspaceId: string;
+	ticketCode: string;
+	status: string;
+	priority: string;
+	assignedAgentName: string;
+	typeDefinition: string;
+	typePrompt: string;
+	ticketPrompt: string;
+	createdBy: string;
+	ownerAccount: string;
+	createdAt: string;
+	lastUpdatedAt: string;
+	lastUpdatedBy: string;
+	linkTo: string;
+	linkedBy: string;
+	customMetadata: { [key: string]: string };
+	metadata: { [key: string]: string };
+	readmeNotes: string;
+	instructionNotes: string;
+}
+
 export class EntityDetailEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.entityDetail';
 
@@ -78,7 +104,7 @@ export class EntityDetailEditor extends EditorPane {
 	private _entityType: string = 'task';
 	private _startInEditMode: boolean = false;
 
-	private _entityFileUri: URI | undefined;
+	private _ticketFileUri: URI | undefined;
 	private _instructionUri: URI | undefined;
 	private _readmeUri: URI | undefined;
 	private _workLogUri: URI | undefined;
@@ -136,13 +162,42 @@ export class EntityDetailEditor extends EditorPane {
 		super.clearInput();
 	}
 
-	private _parseYaml(yaml: string): any {
+	private async _readCustomModule(workspaceUri: URI, typeId: string): Promise<any | null> {
+		const savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
+		const userHome = this._environmentService.userHome.fsPath;
+		const resolvedPath = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type');
+
+		const globalUri = URI.file(`${resolvedPath}/${typeId}.yaml`);
+		const localUri = URI.joinPath(workspaceUri, '.agents', 'entity_type', `${typeId}.yaml`);
+		const localUriPlural = URI.joinPath(workspaceUri, '.agents', 'entity_types', `${typeId}.yaml`);
+
+		let targetUri: URI | undefined;
+		if (await this._fileService.exists(localUri)) {
+			targetUri = localUri;
+		} else if (await this._fileService.exists(localUriPlural)) {
+			targetUri = localUriPlural;
+		} else if (await this._fileService.exists(globalUri)) {
+			targetUri = globalUri;
+		}
+
+		if (targetUri) {
+			try {
+				const content = await this._fileService.readFile(targetUri);
+				return this._parseSimpleYaml(content.value.toString());
+			} catch (e) {
+				console.error('Failed to read custom module schema:', e);
+			}
+		}
+		return null;
+	}
+
+	private _parseSimpleYaml(yaml: string): any {
 		const lines = yaml.split(/\r?\n/);
 		const result: any = {};
 		let currentFieldList: any[] = [];
 		let currentField: any = null;
 
-		for (let line of lines) {
+		for (const line of lines) {
 			const trimmed = line.trim();
 			if (!trimmed || trimmed.startsWith('#')) continue;
 
@@ -195,109 +250,24 @@ export class EntityDetailEditor extends EditorPane {
 		return result;
 	}
 
-	private async _readCustomModule(workspaceUri: URI, typeId: string): Promise<any | null> {
-		const savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
-		const userHome = this._environmentService.userHome.fsPath;
-		const resolvedPath = savedPath.startsWith('~/') ? userHome + savedPath.substring(1) : savedPath === '~' ? userHome : savedPath;
-		
-		const possibleUris = [
-			URI.joinPath(workspaceUri, '.agents', 'entity_type', `${typeId}.yaml`),
-			URI.joinPath(workspaceUri, '.agents', 'entity_type', `${typeId.toLowerCase()}.yaml`),
-			URI.joinPath(dirname(workspaceUri), '.agents', 'entity_type', `${typeId}.yaml`),
-			URI.joinPath(dirname(workspaceUri), '.agents', 'entity_type', `${typeId.toLowerCase()}.yaml`),
-			URI.file(resolvedPath + `/${typeId}.yaml`),
-			URI.file(resolvedPath + `/${typeId.toLowerCase()}.yaml`),
-		];
-
-		for (const u of possibleUris) {
-			if (await this._fileService.exists(u)) {
-				try {
-					const content = await this._fileService.readFile(u);
-					return this._parseYaml(content.value.toString());
-				} catch {}
-			}
-		}
-
-		return null;
-	}
-
 	private async _resolvePathsAndLoadData(): Promise<void> {
 		if (!this._entityUri || !this._container) {
 			return;
 		}
 
-		// 1. Resolve paths
+		// 1. Resolve 4-MD file paths
 		const agentsDir = URI.joinPath(this._entityUri, '.agents');
-		const rootDir = this._entityUri;
-
-		const possibleMds = [
-			{ name: 'workspace.md', type: 'workspace' },
-			{ name: 'project.md', type: 'project' },
-			{ name: 'job.md', type: 'job' },
-			{ name: 'task.md', type: 'task' },
-			{ name: 'agent.md', type: 'agent' },
-			{ name: 'workflow.md', type: 'workflow' },
-			{ name: 'note.md', type: 'note' }
-		];
-
-		let detectedMainMdName: string | undefined;
-		let detectedType: string = 'task';
 
 		const ticketPath = URI.joinPath(agentsDir, 'ticket.md');
 		if (await this._fileService.exists(ticketPath)) {
-			detectedMainMdName = 'ticket.md';
+			this._ticketFileUri = ticketPath;
 		} else {
-			try {
-				if (await this._fileService.exists(agentsDir)) {
-					const stat = await this._fileService.resolve(agentsDir);
-					if (stat.children) {
-						for (const child of stat.children) {
-							if (!child.isDirectory && child.name.endsWith('.md')) {
-								const nameLower = child.name.toLowerCase();
-								if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md') {
-									detectedMainMdName = child.name;
-									detectedType = child.name.substring(0, child.name.length - 3);
-									break;
-								}
-							}
-						}
-					}
-				}
-			} catch {}
-		}
-
-		if (detectedMainMdName) {
-			this._entityType = detectedType;
-			this._entityFileUri = URI.joinPath(agentsDir, detectedMainMdName);
-		} else {
-			const nameLower = (this._entityName || '').toLowerCase();
-			const uriPathLower = this._entityUri.path.toLowerCase();
-			if (nameLower.startsWith('note') || uriPathLower.includes('/note-') || uriPathLower.includes('/notes/')) {
-				this._entityType = 'note';
-				this._entityFileUri = URI.joinPath(agentsDir, 'note.md');
-			} else {
-				this._entityType = 'task';
-				this._entityFileUri = URI.joinPath(agentsDir, 'task.md');
-			}
-
-			for (const item of possibleMds) {
-				const path1 = URI.joinPath(agentsDir, item.name);
-				if (await this._fileService.exists(path1)) {
-					this._entityType = item.type;
-					this._entityFileUri = path1;
-					break;
-				}
-				const path2 = URI.joinPath(rootDir, item.name);
-				if (await this._fileService.exists(path2)) {
-					this._entityType = item.type;
-					this._entityFileUri = path2;
-					break;
-				}
-			}
+			this._ticketFileUri = await this._resolveFileUri(this._entityUri, 'ticket.md');
 		}
 
 		this._instructionUri = await this._resolveFileUri(this._entityUri, 'instruction.md');
 		this._readmeUri = await this._resolveFileUri(this._entityUri, 'README.md');
+
 		const worklogUriNew = URI.joinPath(agentsDir, 'worklog.md');
 		if (await this._fileService.exists(worklogUriNew)) {
 			this._workLogUri = worklogUriNew;
@@ -305,18 +275,17 @@ export class EntityDetailEditor extends EditorPane {
 			this._workLogUri = await this._resolveFileUri(this._entityUri, 'work_log.md');
 		}
 
-		// 2. Load contents
-		const entityContent = await this._safeReadFile(this._entityFileUri);
-		const parsed = this._parseEntityFile(entityContent);
-		if (this._entityFileUri.path.endsWith('ticket.md')) {
-			this._entityType = parsed.metadata['Ticket Type'] || parsed.metadata['Entity Type'] || 'task';
-		}
-
-		const instructionContent = await this._safeReadFile(this._instructionUri);
+		// 2. Read contents from 4-MD files
+		const ticketContent = await this._safeReadFile(this._ticketFileUri);
 		const readmeContent = await this._safeReadFile(this._readmeUri);
+		const instructionContent = await this._safeReadFile(this._instructionUri);
 		const workLogContent = await this._safeReadFile(this._workLogUri);
 
+		const parsed = this._parseAllEntityData(ticketContent, readmeContent, instructionContent);
+		this._entityType = parsed.ticketType || 'task';
+
 		const attachments = await this._getAttachments(this._entityUri);
+		const customModule = await this._readCustomModule(this._entityUri, this._entityType);
 
 		// 3. Setup Webview
 		if (!this._webview) {
@@ -333,9 +302,7 @@ export class EntityDetailEditor extends EditorPane {
 			}));
 		}
 
-		const customModule = await this._readCustomModule(this._entityUri, this._entityType);
-
-		const html = this._generateHtml(parsed.title || this._entityName, this._entityType, parsed.metadata, parsed.description, readmeContent, instructionContent, workLogContent, attachments, customModule);
+		const html = this._generateHtml(parsed, workLogContent, attachments, customModule);
 		this._webview.setHtml(html);
 	}
 
@@ -347,8 +314,8 @@ export class EntityDetailEditor extends EditorPane {
 		return URI.joinPath(baseUri, name);
 	}
 
-	private async _safeReadFile(uri: URI): Promise<string> {
-		if (await this._fileService.exists(uri)) {
+	private async _safeReadFile(uri: URI | undefined): Promise<string> {
+		if (uri && await this._fileService.exists(uri)) {
 			try {
 				const content = await this._fileService.readFile(uri);
 				return content.value.toString();
@@ -357,175 +324,181 @@ export class EntityDetailEditor extends EditorPane {
 		return '';
 	}
 
-	private _parseEntityFile(content: string): { title: string, metadata: { [key: string]: string }, description: string } {
-		const lines = content.split(/\r?\n/);
-		let title = '';
+	private _parseAllEntityData(
+		ticketContent: string,
+		readmeContent: string,
+		instructionContent: string
+	): IParsedTicketData {
 		const metadata: { [key: string]: string } = {};
-		let description = '';
+		const customMetadata: { [key: string]: string } = {};
 
-		let inMetadata = false;
-		let inDescription = false;
-		let descLines: string[] = [];
-
-		for (const line of lines) {
-			if (line.startsWith('# ')) {
-				title = line.substring(2).trim();
+		// 1. Parse ticket.md
+		let inSelfDefined = false;
+		const ticketLines = ticketContent.split(/\r?\n/);
+		for (const line of ticketLines) {
+			if (line.startsWith('### Self Defined Data')) {
+				inSelfDefined = true;
 				continue;
 			}
-			if (line.startsWith('## Overview') || line.startsWith('## Metadata') || line.startsWith('## 基本元数据') || line.startsWith('## Details') || line.startsWith('## 概览')) {
-				inMetadata = true;
-				inDescription = false;
-				continue;
+			if (line.startsWith('### ') || (line.startsWith('## ') && !line.startsWith('## Overview'))) {
+				inSelfDefined = false;
 			}
-			if (line.startsWith('## Description') || line.startsWith('## Job 目标') || line.startsWith('## 目标')) {
-				inMetadata = false;
-				inDescription = true;
-				continue;
-			}
-			if (line.startsWith('## ')) {
-				inMetadata = false;
-				inDescription = false;
-				continue;
-			}
-
-			if (inMetadata) {
-				const match = line.match(/^\s*-\s*\*\*([^*]+)\*\*:\s*(.*)$/);
-				if (match) {
-					const key = match[1].trim();
-					const val = match[2].trim().replace(/^[`'"]+|[`'"]+$/g, '');
-					metadata[key] = val;
+			const match = line.match(/^\s*-\s*\*\*([^*]+)\*\*:\s*(.*)$/);
+			if (match) {
+				const key = match[1].trim();
+				const val = match[2].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				if (inSelfDefined && line.startsWith('  -')) {
+					customMetadata[key] = val;
 				} else {
-					// Fallback for simple list: - Key: Value
-					const simpleMatch = line.match(/^\s*-\s*([^:]+):\s*(.*)$/);
-					if (simpleMatch) {
-						const key = simpleMatch[1].trim();
-						const val = simpleMatch[2].trim().replace(/^[`'"]+|[`'"]+$/g, '');
-						metadata[key] = val;
-					}
+					metadata[key] = val;
 				}
-			} else if (inDescription) {
-				descLines.push(line);
 			}
 		}
 
-		description = descLines.join('\n').trim();
-		return { title, metadata, description };
+		// 2. Parse README.md
+		let readmeTitle = '';
+		let readmeDesc = '';
+		const readmeNotesLines: string[] = [];
+		let isPastReadmeMeta = false;
+		const readmeLines = readmeContent.split(/\r?\n/);
+		for (const line of readmeLines) {
+			const titleMatch = line.match(/^\s*-\s*\*\*Title\*\*:\s*(.*)$/i);
+			if (titleMatch) {
+				readmeTitle = titleMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				continue;
+			}
+			const descMatch = line.match(/^\s*-\s*\*\*Description\*\*:\s*(.*)$/i);
+			if (descMatch) {
+				readmeDesc = descMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				continue;
+			}
+			if (line.startsWith('---') || (line.startsWith('## ') && !line.startsWith('## Overview'))) {
+				isPastReadmeMeta = true;
+			}
+			if (isPastReadmeMeta) {
+				readmeNotesLines.push(line);
+			}
+		}
+
+		// 3. Parse instruction.md
+		let typePrompt = '';
+		let ticketPrompt = '';
+		const instNotesLines: string[] = [];
+		let isPastInstMeta = false;
+		const instLines = instructionContent.split(/\r?\n/);
+		for (const line of instLines) {
+			const tpMatch = line.match(/^\s*-\s*\*\*Ticket Type Prompt\*\*:\s*(.*)$/i);
+			if (tpMatch) {
+				typePrompt = tpMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				continue;
+			}
+			const tickpMatch = line.match(/^\s*-\s*\*\*Ticket Prompt\*\*:\s*(.*)$/i);
+			if (tickpMatch) {
+				ticketPrompt = tickpMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				continue;
+			}
+			if (line.startsWith('---') || (line.startsWith('## ') && !line.startsWith('## Overview'))) {
+				isPastInstMeta = true;
+			}
+			if (isPastInstMeta) {
+				instNotesLines.push(line);
+			}
+		}
+
+		const ticketId = metadata['Ticket ID'] || this._entityName || '';
+		const workspaceId = metadata['Workspace ID'] || '';
+		const ticketType = metadata['Ticket Type'] || this._entityType || 'job';
+		const title = readmeTitle || metadata['Title'] || this._entityName || ticketId;
+		const description = (readmeDesc && readmeDesc !== 'None') ? readmeDesc : (metadata['Description'] || '');
+
+		return {
+			title,
+			description,
+			ticketType,
+			ticketId,
+			workspaceId,
+			ticketCode: metadata['Ticket Code'] || '',
+			status: metadata['Status'] || 'Todo',
+			priority: metadata['Priority'] || 'Medium',
+			assignedAgentName: metadata['Current AI Agent'] || 'None',
+			typeDefinition: metadata['Type Definition'] || 'None',
+			typePrompt: typePrompt || 'None',
+			ticketPrompt: ticketPrompt || 'None',
+			createdBy: metadata['Created By'] || 'User',
+			ownerAccount: metadata['Owner Account'] || '',
+			createdAt: metadata['Created At'] || '',
+			lastUpdatedAt: metadata['Last Updated At'] || '',
+			lastUpdatedBy: metadata['Last Updated By'] || 'User',
+			linkTo: metadata['Link To'] || 'None',
+			linkedBy: metadata['Linked By'] || 'None',
+			customMetadata,
+			metadata,
+			readmeNotes: readmeNotesLines.join('\n').trim(),
+			instructionNotes: instNotesLines.join('\n').trim()
+		};
 	}
 
-	private _updateEntityFileContent(content: string, newDesc: string | undefined, newMeta: { [key: string]: string } | undefined): string {
+	private _updateReadmeContent(content: string, newTitle?: string, newDesc?: string): string {
 		const lines = content.split(/\r?\n/);
 		const newLines: string[] = [];
-
-		let inMetadata = false;
-		let inDescription = false;
-		let hasReplacedMeta = false;
-		let hasReplacedDesc = false;
+		let foundTitle = false;
+		let foundDesc = false;
 
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
-
-			if (line.startsWith('## Overview') || line.startsWith('## Metadata') || line.startsWith('## 基本元数据') || line.startsWith('## Details') || line.startsWith('## 概览')) {
-				newLines.push(line);
-				inMetadata = true;
-				inDescription = false;
-				if (newMeta) {
-					newLines.push('');
-					for (const [k, v] of Object.entries(newMeta)) {
-						newLines.push(`- **${k}**: ${v}`);
-					}
-					hasReplacedMeta = true;
-					// Skip old metadata lines
-					while (i + 1 < lines.length && !lines[i + 1].startsWith('## ')) {
-						i++;
-					}
+			if (line.match(/^\s*-\s*\*\*Title\*\*:/i)) {
+				if (newTitle !== undefined) {
+					newLines.push(`- **Title**: ${newTitle}`);
+					foundTitle = true;
+				} else {
+					newLines.push(line);
+					foundTitle = true;
 				}
 				continue;
 			}
-
-			if (line.startsWith('## Description') || line.startsWith('## Job 目标') || line.startsWith('## 目标')) {
-				newLines.push(line);
-				inMetadata = false;
-				inDescription = true;
+			if (line.match(/^\s*-\s*\*\*Description\*\*:/i)) {
 				if (newDesc !== undefined) {
-					newLines.push('');
-					newLines.push(newDesc);
-					hasReplacedDesc = true;
-					// Skip old description lines
-					while (i + 1 < lines.length && !lines[i + 1].startsWith('## ')) {
-						i++;
-					}
+					newLines.push(`- **Description**: ${newDesc}`);
+					foundDesc = true;
+				} else {
+					newLines.push(line);
+					foundDesc = true;
 				}
 				continue;
 			}
-
-			if (line.startsWith('## ')) {
-				inMetadata = false;
-				inDescription = false;
-			}
-
-			if (!inMetadata && !inDescription) {
-				newLines.push(line);
-			}
+			newLines.push(line);
 		}
 
-		// Fallback if sections didn't exist
-		if (!hasReplacedMeta && newMeta) {
-			newLines.push('');
-			newLines.push('## Overview');
-			newLines.push('');
-			for (const [k, v] of Object.entries(newMeta)) {
-				newLines.push(`- **${k}**: ${v}`);
-			}
+		if (!foundTitle && newTitle !== undefined) {
+			newLines.splice(1, 0, `- **Title**: ${newTitle}`);
 		}
-		if (!hasReplacedDesc && newDesc !== undefined) {
-			newLines.push('');
-			newLines.push('## Description');
-			newLines.push('');
-			newLines.push(newDesc);
+		if (!foundDesc && newDesc !== undefined) {
+			newLines.splice(2, 0, `- **Description**: ${newDesc}`);
 		}
 
 		return newLines.join('\n');
 	}
 
-	private async _getAttachments(entityUri: URI): Promise<string[]> {
-		const attachmentsDir = URI.joinPath(entityUri, 'attachments');
-		if (!(await this._fileService.exists(attachmentsDir))) {
-			return [];
-		}
-		try {
-			const stat = await this._fileService.resolve(attachmentsDir);
-			if (stat.children) {
-				return stat.children.filter(child => !child.isDirectory).map(child => child.name);
-			}
-		} catch { }
-		return [];
-	}
-
-	private _addLogToContent(content: string, newLogText: string): string {
+	private _updateTicketMdContent(content: string, updates: { [key: string]: string }): string {
 		const lines = content.split(/\r?\n/);
-		const now = new Date();
-		const dateStr = now.toISOString().split('T')[0];
-		const timeStr = now.toTimeString().split(' ')[0].substring(0, 5);
+		const newLines: string[] = [];
+		const updatedKeys = new Set<string>();
 
-		const logBlock = [
-			`## ${dateStr} ${timeStr}`,
-			'',
-			'### AI 执行记录',
-			'',
-			newLogText,
-			''
-		].join('\n');
-
-		let insertIndex = 0;
 		for (let i = 0; i < lines.length; i++) {
-			if (lines[i].startsWith('# ')) {
-				insertIndex = i + 1;
-				break;
+			const line = lines[i];
+			const match = line.match(/^\s*-\s*\*\*([^*]+)\*\*:\s*(.*)$/);
+			if (match) {
+				const key = match[1].trim();
+				if (updates[key] !== undefined) {
+					newLines.push(`- **${key}**: ${updates[key]}`);
+					updatedKeys.add(key);
+					continue;
+				}
 			}
+			newLines.push(line);
 		}
 
-		lines.splice(insertIndex, 0, '', logBlock);
-		return lines.join('\n');
+		return newLines.join('\n');
 	}
 
 	private async _handleMessage(e: any): Promise<void> {
@@ -534,38 +507,51 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		switch (e.type) {
+			case 'saveTitleAndDescription':
 			case 'saveDescription': {
 				try {
-					if (this._entityFileUri) {
-						const content = await this._safeReadFile(this._entityFileUri);
-						const updated = this._updateEntityFileContent(content, e.description, undefined);
-						await this._fileService.writeFile(this._entityFileUri, VSBuffer.fromString(updated));
-						this._notificationService.info(localize('descSaved', "Description saved successfully."));
-						await this._resolvePathsAndLoadData();
+					if (this._readmeUri) {
+						const content = await this._safeReadFile(this._readmeUri);
+						const updated = this._updateReadmeContent(content, e.title, e.description);
+						await this._fileService.writeFile(this._readmeUri, VSBuffer.fromString(updated));
 					}
+					if (this._ticketFileUri) {
+						const content = await this._safeReadFile(this._ticketFileUri);
+						const updates: { [key: string]: string } = {};
+						if (e.title) updates['Title'] = e.title;
+						if (e.description) updates['Description'] = e.description;
+						const updated = this._updateTicketMdContent(content, updates);
+						await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+					}
+					this._notificationService.info(localize('descSaved', "Saved title and description successfully."));
+					await this._resolvePathsAndLoadData();
 				} catch (err) {
-					this._notificationService.error(localize('saveDescFailed', "Failed to save description: {0}", String(err)));
+					this._notificationService.error(localize('saveDescFailed', "Failed to save: {0}", String(err)));
 				}
 				break;
 			}
 			case 'saveMetadata': {
 				try {
-					if (this._entityFileUri) {
-						const content = await this._safeReadFile(this._entityFileUri);
-						const updated = this._updateEntityFileContent(content, undefined, e.metadata);
-						await this._fileService.writeFile(this._entityFileUri, VSBuffer.fromString(updated));
-						this._notificationService.info(localize('metaSaved', "Metadata updated successfully."));
-						await this._resolvePathsAndLoadData();
+					if (this._ticketFileUri) {
+						const content = await this._safeReadFile(this._ticketFileUri);
+						const updated = this._updateTicketMdContent(content, e.metadata);
+						await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
 					}
+					if (e.metadata && (e.metadata['Title'] || e.metadata['Description']) && this._readmeUri) {
+						const content = await this._safeReadFile(this._readmeUri);
+						const updated = this._updateReadmeContent(content, e.metadata['Title'], e.metadata['Description']);
+						await this._fileService.writeFile(this._readmeUri, VSBuffer.fromString(updated));
+					}
+					this._notificationService.info(localize('metaSaved', "Attributes updated successfully."));
+					await this._resolvePathsAndLoadData();
 				} catch (err) {
-					this._notificationService.error(localize('saveMetaFailed', "Failed to save metadata: {0}", String(err)));
+					this._notificationService.error(localize('saveMetaFailed', "Failed to save attributes: {0}", String(err)));
 				}
 				break;
 			}
 			case 'addWorkLog': {
 				try {
 					if (this._workLogUri) {
-						// Auto create work_log.md and parent directory if missing
 						if (!(await this._fileService.exists(this._workLogUri))) {
 							const parentDir = dirname(this._workLogUri);
 							if (!(await this._fileService.exists(parentDir))) {
@@ -635,11 +621,51 @@ export class EntityDetailEditor extends EditorPane {
 		}
 	}
 
+	private _addLogToContent(content: string, newLogText: string): string {
+		const lines = content.split(/\r?\n/);
+		const now = new Date();
+		const dateStr = now.toISOString().split('T')[0];
+		const timeStr = now.toTimeString().split(' ')[0].substring(0, 5);
+
+		const logBlock = [
+			`## ${dateStr} ${timeStr}`,
+			'',
+			'### AI 执行记录',
+			'',
+			newLogText,
+			''
+		].join('\n');
+
+		let insertIndex = 0;
+		for (let i = 0; i < lines.length; i++) {
+			if (lines[i].startsWith('# ')) {
+				insertIndex = i + 1;
+				break;
+			}
+		}
+
+		lines.splice(insertIndex, 0, '', logBlock);
+		return lines.join('\n');
+	}
+
+	private async _getAttachments(entityUri: URI): Promise<string[]> {
+		const attachmentsDir = URI.joinPath(entityUri, 'attachments');
+		if (!(await this._fileService.exists(attachmentsDir))) {
+			return [];
+		}
+		try {
+			const stat = await this._fileService.resolve(attachmentsDir);
+			if (stat.children) {
+				return stat.children.filter(child => !child.isDirectory).map(child => child.name);
+			}
+		} catch { }
+		return [];
+	}
+
 	private _markdownToHtml(md: string): string {
 		if (!md) {
 			return '<p style="opacity: 0.5; font-style: italic;">No content available</p>';
 		}
-		// Basic sanitizer and markdown compiler for security and aesthetic rendering
 		let html = md
 			.replace(/&/g, '&amp;')
 			.replace(/</g, '&lt;')
@@ -647,23 +673,15 @@ export class EntityDetailEditor extends EditorPane {
 			.replace(/"/g, '&quot;')
 			.replace(/'/g, '&#039;');
 
-		// Process links [text](url)
 		html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color: #38bdf8; text-decoration: none;">$1</a>');
-
-		// Process headings
 		html = html.replace(/^### (.*$)/gim, '<h4 style="margin: 12px 0 4px 0; color: #38bdf8; font-size: 0.95em; font-weight: 600;">$1</h4>');
 		html = html.replace(/^## (.*$)/gim, '<h3 style="margin: 16px 0 8px 0; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.08); color: var(--vscode-editor-foreground); font-size: 1.05em; font-weight: 600;">$1</h3>');
 		html = html.replace(/^# (.*$)/gim, '<h2 style="margin: 20px 0 10px 0; color: var(--vscode-editor-foreground); font-size: 1.15em; font-weight: bold;">$1</h2>');
-
-		// Process bold and code blocks
 		html = html.replace(/\*\*([^*]+)\*\*/g, '<strong style="color: var(--vscode-editor-foreground);">$1</strong>');
 		html = html.replace(/`([^`]+)`/g, '<code style="background: rgba(255,255,255,0.08); padding: 2px 5px; border-radius: 4px; font-family: monospace; font-size: 0.9em; border: 1px solid rgba(255,255,255,0.06);">$1</code>');
-
-		// Process lists
 		html = html.replace(/^\s*-\s+(.*$)/gim, '<li style="margin-left: 18px; margin-bottom: 4px; line-height: 1.5;">$1</li>');
 		html = html.replace(/^\s*\*\s+(.*$)/gim, '<li style="margin-left: 18px; margin-bottom: 4px; line-height: 1.5;">$1</li>');
 
-		// Wrap lines in paragraphs if they are not headings, lists, or hr
 		const lines = html.split('\n');
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i].trim();
@@ -677,32 +695,34 @@ export class EntityDetailEditor extends EditorPane {
 		return lines.join('\n');
 	}
 
-	private _generateHtml(title: string, type: string, metadata: { [key: string]: string }, description: string, readme: string, instruction: string, workLog: string, attachments: string[], customModule?: any): string {
-		const typeUpper = type.toUpperCase();
+	private _generateHtml(
+		data: IParsedTicketData,
+		workLog: string,
+		attachments: string[],
+		customModule?: any
+	): string {
+		const typeUpper = data.ticketType.toUpperCase();
 
-		// 1. Clean Title (remove trailing parenthesis tags like (JOB), (TASK) etc.)
-		const cleanTitle = title.replace(/\s*\((job|task|project|workspace|agent|workflow|case|issue|analysis)\)/i, '');
-
-		// 2. Map Status type to badge styles
-		let status = metadata['Status'] || metadata['status'] || 'Todo';
+		// 1. Status Colors
+		let status = data.status || 'Todo';
 		let statusColor = '#818cf8';
-		let statusBg = 'rgba(129, 140, 248, 0.18)';
-		let statusBorder = 'rgba(129, 140, 248, 0.4)';
+		let statusBg = 'rgba(129, 140, 248, 0.16)';
+		let statusBorder = 'rgba(129, 140, 248, 0.35)';
 		if (status.toLowerCase().includes('progress')) {
 			statusColor = '#38bdf8';
-			statusBg = 'rgba(56, 189, 248, 0.18)';
-			statusBorder = 'rgba(56, 189, 248, 0.4)';
-		} else if (status.toLowerCase().includes('done')) {
+			statusBg = 'rgba(56, 189, 248, 0.16)';
+			statusBorder = 'rgba(56, 189, 248, 0.35)';
+		} else if (status.toLowerCase().includes('done') || status.toLowerCase().includes('complete')) {
 			statusColor = '#34d399';
-			statusBg = 'rgba(52, 211, 153, 0.18)';
-			statusBorder = 'rgba(52, 211, 153, 0.4)';
-		} else if (status.toLowerCase().includes('block')) {
+			statusBg = 'rgba(52, 211, 153, 0.16)';
+			statusBorder = 'rgba(52, 211, 153, 0.35)';
+		} else if (status.toLowerCase().includes('block') || status.toLowerCase().includes('fail')) {
 			statusColor = '#f87171';
-			statusBg = 'rgba(248, 113, 113, 0.18)';
-			statusBorder = 'rgba(248, 113, 113, 0.4)';
+			statusBg = 'rgba(248, 113, 113, 0.16)';
+			statusBorder = 'rgba(248, 113, 113, 0.35)';
 		}
 
-		// 3. Custom colors for entity types
+		// 2. Type Colors
 		const typeColors: { [key: string]: { text: string; bg: string } } = {
 			workspace: { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.15)' },
 			job: { text: '#fbbf24', bg: 'rgba(251, 191, 36, 0.15)' },
@@ -716,7 +736,7 @@ export class EntityDetailEditor extends EditorPane {
 			note: { text: '#cbd5e1', bg: 'rgba(203, 213, 225, 0.15)' }
 		};
 
-		const typeLower = type.toLowerCase();
+		const typeLower = data.ticketType.toLowerCase();
 		let colorSetting = typeColors[typeLower];
 		if (!colorSetting) {
 			if (customModule && customModule.color) {
@@ -727,43 +747,46 @@ export class EntityDetailEditor extends EditorPane {
 			}
 		}
 
-		// Attachment cards html list
+		// 3. Priority badge
+		const pColors: { [key: string]: string } = {
+			'very high': '#f43f5e',
+			'high': '#fb923c',
+			'medium': '#38bdf8',
+			'low': '#34d399',
+			'very low': '#2dd4bf'
+		};
+		const pColor = pColors[data.priority.toLowerCase()] || '#94a3b8';
+
+		// 4. Attachments HTML
 		let attachmentsHtml = '';
 		if (attachments.length === 0) {
-			attachmentsHtml = '<p style="opacity: 0.5; font-style: italic; font-size: 0.9em; margin: 10px 0;">No attachments linked yet.</p>';
+			attachmentsHtml = '<p style="opacity: 0.45; font-style: italic; font-size: 0.88em; margin: 8px 0;">No attachments linked yet.</p>';
 		} else {
-			attachmentsHtml = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin-top: 10px;">';
+			attachmentsHtml = '<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin-top: 10px;">';
 			for (const file of attachments) {
 				attachmentsHtml += `
-					<div class="attachment-card" data-filename="${file}" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); padding: 8px 12px; border-radius: 6px; cursor: pointer; transition: background 0.15s ease;">
-						<div style="display: flex; align-items: center; gap: 8px; overflow: hidden;">
-							<span style="font-size: 1.1em; opacity: 0.8;">📄</span>
+					<div class="attachment-card" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); padding: 8px 12px; border-radius: 6px;">
+						<div onclick="downloadFile('${file}')" style="display: flex; align-items: center; gap: 8px; overflow: hidden; cursor: pointer; flex: 1;" title="Download attachment">
+							<span style="font-size: 1.1em; opacity: 0.85;">📄</span>
 							<span style="font-size: 0.85em; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${file}</span>
 						</div>
-						<span class="delete-attachment" data-filename="${file}" style="opacity: 0.4; cursor: pointer; padding: 2px 4px;" title="Delete Attachment">✕</span>
+						<span class="delete-attachment" onclick="deleteFile('${file}')" style="opacity: 0.4; cursor: pointer; padding: 2px 4px; font-size: 0.85em;" title="Delete Attachment">✕</span>
 					</div>
 				`;
 			}
 			attachmentsHtml += '</div>';
 		}
 
-		// Accordions for README and Instruction
-		const readmeHtml = this._markdownToHtml(readme);
-		const instructionHtml = this._markdownToHtml(instruction);
-
-		// Render work logs timeline
+		// 5. Timeline HTML
 		let workLogHtml = '';
 		const logsList = workLog.split(/\r?\n##\s+/);
 		if (logsList.length <= 1 && !workLog.trim().startsWith('##')) {
-			workLogHtml = '<p style="opacity: 0.5; font-style: italic; font-size: 0.9em; margin: 10px 0;">No work logs available.</p>';
+			workLogHtml = '<p style="opacity: 0.45; font-style: italic; font-size: 0.88em; margin: 8px 0;">No work logs recorded yet.</p>';
 		} else {
 			workLogHtml = '<div class="timeline" style="border-left: 2px solid rgba(255,255,255,0.08); margin-left: 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 16px; margin-top: 15px;">';
 			for (let entry of logsList) {
 				entry = entry.trim();
-				if (!entry) {
-					continue;
-				}
-				// If first entry had heading '# Work Log', split it
+				if (!entry) continue;
 				if (entry.startsWith('#')) {
 					const subParts = entry.split(/\r?\n##\s+/);
 					if (subParts.length > 1) {
@@ -773,7 +796,7 @@ export class EntityDetailEditor extends EditorPane {
 					}
 				}
 				const lines = entry.split('\n');
-				let header = lines[0].trim();
+				const header = lines[0].trim();
 				if (header.toLowerCase() === 'overview' || header.toLowerCase() === 'metadata' || header.toLowerCase() === '基本元数据') {
 					continue;
 				}
@@ -782,156 +805,38 @@ export class EntityDetailEditor extends EditorPane {
 				workLogHtml += `
 					<div class="timeline-item" style="position: relative;">
 						<div class="timeline-dot" style="position: absolute; left: -27px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-button-background); border: 2px solid var(--vscode-editor-background);"></div>
-						<div style="font-weight: 600; font-size: 0.95em; color: var(--vscode-editor-foreground); margin-bottom: 6px;">${header}</div>
-						<div class="timeline-body" style="font-size: 0.88em; opacity: 0.9; line-height: 1.5;">${bodyHtml}</div>
+						<div style="font-weight: 600; font-size: 0.92em; color: var(--vscode-editor-foreground); margin-bottom: 4px;">${header}</div>
+						<div class="timeline-body" style="font-size: 0.88em; opacity: 0.88; line-height: 1.5;">${bodyHtml}</div>
 					</div>
 				`;
 			}
 			workLogHtml += '</div>';
 		}
 
-		// Metadata sidebar list (Make entity type, created at, entity code, owner account, created by read-only)
-		let metadataRows = '';
-
-		const customFields = (customModule && customModule.fields) ? customModule.fields : [];
-		const customFieldLabels = new Set(customFields.map((f: any) => f.label.toLowerCase()));
-
-		if (customFields.length > 0) {
-			for (const field of customFields) {
-				const key = field.label;
-				let value = '';
-				for (const [k, v] of Object.entries(metadata)) {
-					if (k.toLowerCase() === key.toLowerCase()) {
-						value = v;
-						break;
-					}
-				}
-
-				if (field.type === 'switch') {
-					metadataRows += `
-						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
-							<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${field.label.toUpperCase()}</span>
-							<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${value === 'true' ? 'Yes' : 'No'}</span>
-							<div class="meta-edit-val" style="display: none; align-items: center; gap: 8px; padding: 4px 0;">
-								<input type="checkbox" class="meta-input" data-key="${field.label}" ${value === 'true' ? 'checked' : ''} value="${value === 'true' ? 'true' : 'false'}" onchange="this.value = this.checked ? 'true' : 'false'" style="cursor: pointer;" />
-								<span style="font-size: 0.9em; opacity: 0.85;">Enabled</span>
+		// 6. Custom Fields Section (Self Defined Data)
+		let customFieldsSectionHtml = '';
+		const customFieldsEntries = Object.entries(data.customMetadata || {});
+		if (customFieldsEntries.length > 0) {
+			customFieldsSectionHtml = `
+				<div class="section-card">
+					<div class="section-title">
+						<span>🧩 Custom Properties (${typeUpper})</span>
+					</div>
+					<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 8px;">
+						${customFieldsEntries.map(([k, v]) => `
+							<div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); padding: 10px 14px; border-radius: 6px;">
+								<div style="font-size: 0.75em; opacity: 0.55; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;">${k}</div>
+								<div style="font-size: 0.92em; font-weight: 500; color: var(--vscode-editor-foreground);">${v || '<span style="opacity:0.4;">None</span>'}</div>
 							</div>
-						</div>
-					`;
-				} else if (field.type === 'select') {
-					const options = field.options || [];
-					metadataRows += `
-						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
-							<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${field.label.toUpperCase()}</span>
-							<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${value}</span>
-							<select class="meta-input meta-edit-val" data-key="${field.label}" style="display: none; background: rgba(255,255,255,0.02); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.06); padding: 5px 8px; border-radius: 4px; font-size: 0.9em; width: 100%; cursor: pointer;">
-								${options.map((opt: string) => `<option value="${opt}" ${opt === value ? 'selected' : ''}>${opt}</option>`).join('')}
-							</select>
-						</div>
-					`;
-				} else if (field.type === 'multiselect') {
-					const options = field.options || [];
-					metadataRows += `
-						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
-							<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${field.label.toUpperCase()}</span>
-							<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${value || 'None'}</span>
-							<div class="meta-edit-val" style="display: none; flex-direction: column; gap: 4px; padding: 4px 0;">
-								<input type="hidden" class="meta-input" data-key="${field.label}" id="multiselect-${field.id}" value="${value}" />
-								${options.map((opt: string) => {
-									const isChecked = value.split(',').map(s => s.trim()).includes(opt);
-									return `
-										<label style="display: flex; align-items: center; gap: 6px; font-size: 0.9em; cursor: pointer; margin-bottom: 2px;">
-											<input type="checkbox" class="multiselect-checkbox-${field.id}" value="${opt}" ${isChecked ? 'checked' : ''} onchange="
-												const checked = Array.from(document.querySelectorAll('.multiselect-checkbox-${field.id}:checked')).map(cb => cb.value);
-												document.getElementById('multiselect-${field.id}').value = checked.join(', ');
-											" />
-											<span>${opt}</span>
-										</label>
-									`;
-								}).join('')}
-							</div>
-						</div>
-					`;
-				} else if (field.type === 'textarea') {
-					metadataRows += `
-						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
-							<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${field.label.toUpperCase()}</span>
-							<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground); white-space: pre-wrap;">${value}</span>
-							<textarea class="meta-input meta-edit-val" data-key="${field.label}" style="display: none; background: rgba(255,255,255,0.02); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.06); padding: 5px 8px; border-radius: 4px; font-size: 0.9em; width: 100%; min-height: 50px; resize: vertical; font-family: inherit;">${value}</textarea>
-						</div>
-					`;
-				} else {
-					metadataRows += `
-						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
-							<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${field.label.toUpperCase()}</span>
-							<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${value}</span>
-							<input type="text" class="meta-input meta-edit-val" data-key="${field.label}" value="${value}" style="display: none; background: rgba(255,255,255,0.02); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.06); padding: 5px 8px; border-radius: 4px; font-size: 0.9em; width: 100%;" />
-						</div>
-					`;
-				}
-			}
+						`).join('')}
+					</div>
+				</div>
+			`;
 		}
 
-		for (const [key, value] of Object.entries(metadata)) {
-			const keyLower = key.toLowerCase();
-			if (keyLower === 'status') {
-				continue; // rendered separately at the top
-			}
-			if (keyLower === 'entity type') {
-				continue; // Removed to avoid redundancy with the main badge
-			}
-			if (customFieldLabels.has(keyLower)) {
-				continue; // already rendered as custom field
-			}
-
-			if (keyLower === 'priority') {
-				const pColors: { [key: string]: string } = {
-					'very high': '#f43f5e',
-					'high': '#fb923c',
-					'medium': '#38bdf8',
-					'low': '#34d399',
-					'very low': '#2dd4bf'
-				};
-				const pColor = pColors[value.toLowerCase()] || '#94a3b8';
-				metadataRows += `
-					<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
-						<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">PRIORITY</span>
-						<div style="display: flex; align-items: center; gap: 6px; padding: 4px 0;">
-							<span style="display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;"></span>
-							<span style="font-size: 0.9em; font-weight: 700; color: ${pColor};">${value}</span>
-						</div>
-					</div>
-				`;
-				continue;
-			}
-			const isReadOnly = ['workspace id', 'ticket id', 'ticket type', 'created at', 'belongs to workspace uri', 'target project', 'git', 'entity code', 'owner account', 'created by', 'scope type', 'scope name', 'role', 'model'].includes(keyLower);
-			let displayValue = value;
-			if (keyLower === 'scope type' && displayValue) {
-				displayValue = displayValue.charAt(0).toUpperCase() + displayValue.slice(1);
-			}
-			if (keyLower === 'ticket id' && (type === 'workspace' || !displayValue.includes('-'))) {
-				const wsIdVal = metadata['Workspace ID'] || metadata['workspace id'];
-				if (wsIdVal && wsIdVal !== 'None' && type === 'workspace') {
-					displayValue = wsIdVal;
-				}
-			}
-			if (isReadOnly) {
-				metadataRows += `
-					<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
-						<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${key.toUpperCase()}</span>
-						<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${displayValue}</span>
-					</div>
-				`;
-			} else {
-				metadataRows += `
-					<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.03); padding-bottom: 8px;">
-						<span style="font-size: 0.85em; opacity: 0.55; font-weight: 600; letter-spacing: 0.03em;">${key.toUpperCase()}</span>
-						<span class="meta-view-val" style="font-size: 0.9em; opacity: 0.95; padding: 4px 0; font-weight: 500; color: var(--vscode-editor-foreground);">${displayValue}</span>
-						<input type="text" class="meta-input meta-edit-val" data-key="${key}" value="${displayValue}" style="display: none; background: rgba(255,255,255,0.02); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.06); padding: 5px 8px; border-radius: 4px; font-size: 0.9em; width: 100%; transition: border 0.2s;" />
-					</div>
-				`;
-			}
-		}
+		// 7. Instructions Card Section
+		const ticketPromptDisplay = (data.ticketPrompt && data.ticketPrompt !== 'None') ? data.ticketPrompt : '';
+		const typePromptDisplay = (data.typePrompt && data.typePrompt !== 'None') ? data.typePrompt : '';
 
 		return `
 			<!DOCTYPE html>
@@ -947,7 +852,7 @@ export class EntityDetailEditor extends EditorPane {
 						color: var(--vscode-foreground);
 						background-color: var(--vscode-editor-background);
 						margin: 0;
-						padding: 24px;
+						padding: 24px 32px;
 						box-sizing: border-box;
 						overflow-y: auto;
 					}
@@ -955,45 +860,66 @@ export class EntityDetailEditor extends EditorPane {
 						box-sizing: border-box;
 					}
 					.layout-container {
-						display: flex;
-						gap: 30px;
-						max-width: 1200px;
+						display: grid;
+						grid-template-columns: minmax(0, 1fr) 320px;
+						gap: 32px;
+						max-width: 1360px;
 						margin: 0 auto;
 					}
 					.main-content {
-						flex: 1;
 						display: flex;
 						flex-direction: column;
-						gap: 24px;
+						gap: 20px;
 					}
 					.sidebar {
-						width: 300px;
-						flex-shrink: 0;
 						background: rgba(255,255,255,0.02);
-						border: 1px solid rgba(255,255,255,0.05);
-						border-radius: 8px;
+						border: 1px solid rgba(255,255,255,0.06);
+						border-radius: 10px;
 						padding: 20px;
 						height: fit-content;
 						position: sticky;
-						top: 0;
+						top: 24px;
 						backdrop-filter: blur(8px);
-						box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+						box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+					}
+					.header-breadcrumb {
+						display: flex;
+						align-items: center;
+						gap: 8px;
+						font-size: 0.85em;
+						opacity: 0.65;
+						margin-bottom: 6px;
+						font-weight: 500;
+					}
+					.header-title-row {
+						display: flex;
+						align-items: center;
+						justify-content: space-between;
+						gap: 16px;
+						margin-bottom: 8px;
+					}
+					.ticket-title {
+						margin: 0;
+						font-size: 1.65em;
+						font-weight: 700;
+						color: var(--vscode-editor-foreground, #fff);
+						line-height: 1.25;
 					}
 					.badge {
 						display: inline-block;
-						padding: 3px 8px;
+						padding: 4px 10px;
 						border-radius: 4px;
-						font-size: 0.75em;
+						font-size: 0.72em;
 						font-weight: 700;
 						letter-spacing: 0.05em;
-						margin-bottom: 8px;
+						text-transform: uppercase;
 					}
 					.btn-primary {
 						background: var(--vscode-button-background);
 						color: var(--vscode-button-foreground);
 						border: none;
 						padding: 6px 14px;
-						border-radius: 4px;
+						border-radius: 5px;
 						cursor: pointer;
 						font-weight: 600;
 						font-size: 0.85em;
@@ -1003,161 +929,179 @@ export class EntityDetailEditor extends EditorPane {
 						background: var(--vscode-button-hoverBackground);
 					}
 					.btn-secondary {
-						background: rgba(255,255,255,0.08);
+						background: rgba(255,255,255,0.06);
 						color: var(--vscode-foreground);
 						border: 1px solid rgba(255,255,255,0.1);
-						padding: 6px 14px;
-						border-radius: 4px;
+						padding: 5px 12px;
+						border-radius: 5px;
 						cursor: pointer;
 						font-weight: 500;
-						font-size: 0.85em;
+						font-size: 0.82em;
 						transition: background 0.2s;
 					}
 					.btn-secondary:hover {
-						background: rgba(255,255,255,0.15);
-					}
-					.btn-danger {
-						background: rgba(211,47,47,0.15);
-						color: #ff5252;
-						border: 1px solid rgba(211,47,47,0.25);
-						padding: 6px 14px;
-						border-radius: 4px;
-						cursor: pointer;
-						font-weight: 500;
-						font-size: 0.85em;
-						transition: background 0.2s;
-					}
-					.btn-danger:hover {
-						background: rgba(211,47,47,0.25);
+						background: rgba(255,255,255,0.12);
 					}
 					.input-field {
-						background: var(--vscode-input-background, #252526);
-						color: var(--vscode-input-foreground, #ccc);
-						border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.1));
-						padding: 8px 12px;
-						border-radius: 4px;
+						background: var(--vscode-input-background, #1e1e1e);
+						color: var(--vscode-input-foreground, #eee);
+						border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12));
+						padding: 10px 14px;
+						border-radius: 6px;
 						width: 100%;
-						font-family: var(--vscode-font-family);
+						font-family: inherit;
 						font-size: 0.95em;
-						line-height: 1.5;
+						line-height: 1.6;
 						resize: vertical;
 					}
 					.input-field:focus {
 						outline: 1px solid var(--vscode-focusBorder, #007acc);
 						border-color: var(--vscode-focusBorder, #007acc);
 					}
-					.meta-input:focus {
-						outline: 1px solid var(--vscode-focusBorder, #007acc);
-						border-color: var(--vscode-focusBorder, #007acc);
-					}
 					.section-card {
-						background: rgba(255,255,255,0.01);
-						border: 1px solid rgba(255,255,255,0.04);
+						background: rgba(255,255,255,0.015);
+						border: 1px solid rgba(255,255,255,0.05);
 						border-radius: 8px;
-						padding: 16px 20px;
+						padding: 18px 22px;
 					}
 					.section-title {
-						font-size: 1.1em;
+						font-size: 1.05em;
 						font-weight: 600;
-						margin: 0 0 12px 0;
+						margin: 0 0 14px 0;
 						color: var(--vscode-editor-foreground, #eee);
 						display: flex;
 						justify-content: space-between;
 						align-items: center;
 					}
-					.accordion-header {
-						background: rgba(255,255,255,0.02);
-						border: 1px solid rgba(255,255,255,0.05);
+					.desc-content-box {
+						padding: 14px 16px;
+						background: rgba(0,0,0,0.18);
 						border-radius: 6px;
-						padding: 12px 16px;
-						cursor: pointer;
-						font-weight: 600;
-						display: flex;
-						justify-content: space-between;
-						align-items: center;
-						margin-bottom: 6px;
-						transition: background 0.2s;
-					}
-					.accordion-header:hover {
-						background: rgba(255,255,255,0.05);
-					}
-					.accordion-content {
-						display: none;
-						padding: 12px 16px;
-						background: rgba(0,0,0,0.1);
-						border-radius: 0 0 6px 6px;
-						border: 1px solid rgba(255,255,255,0.03);
-						border-top: none;
-						margin-bottom: 12px;
+						border: 1px solid rgba(255,255,255,0.04);
+						font-size: 0.93em;
+						line-height: 1.65;
+						text-align: left;
 					}
 					.dropzone {
 						border: 2px dashed rgba(255,255,255,0.12);
 						border-radius: 6px;
-						padding: 24px;
+						padding: 20px;
 						text-align: center;
 						cursor: pointer;
 						transition: border 0.2s, background 0.2s;
 						background: rgba(255,255,255,0.005);
 					}
-					.dropzone.dragover {
-						border-color: var(--vscode-focusBorder);
-						background: rgba(0,122,204,0.05);
+					.dropzone:hover, .dropzone.dragover {
+						border-color: var(--vscode-focusBorder, #38bdf8);
+						background: rgba(56,189,248,0.04);
+					}
+					.sidebar-row {
+						display: flex;
+						flex-direction: column;
+						gap: 4px;
+						margin-bottom: 14px;
+						border-bottom: 1px solid rgba(255,255,255,0.04);
+						padding-bottom: 8px;
+					}
+					.sidebar-label {
+						font-size: 0.75em;
+						opacity: 0.55;
+						font-weight: 600;
+						letter-spacing: 0.05em;
+						text-transform: uppercase;
+					}
+					.sidebar-value {
+						font-size: 0.9em;
+						font-weight: 500;
+						color: var(--vscode-editor-foreground);
+						word-break: break-word;
 					}
 				</style>
 			</head>
 			<body>
-				<div class="layout-container">
-					<div class="main-content">
-						<!-- Title & Header -->
-						<div style="display: flex; align-items: center; gap: 10px; margin-bottom: 16px;">
-							<h1 style="margin: 0; font-size: 1.7em; font-weight: bold; color: var(--vscode-editor-foreground, #fff); line-height: 1.2;">${cleanTitle}</h1>
-						</div>
+				<!-- Top Header Area -->
+				<div style="max-width: 1360px; margin: 0 auto 20px auto;">
+					<div class="header-breadcrumb">
+						<span>${data.workspaceId || 'Workspace'}</span>
+						<span>/</span>
+						<span>${data.ticketId}</span>
+						<span class="badge" style="background: ${colorSetting.bg}; color: ${colorSetting.text}; border: 1px solid ${colorSetting.text}40;">${typeUpper}</span>
+					</div>
+					<div class="header-title-row">
+						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
+					</div>
+				</div>
 
-						<!-- Description Card -->
+				<!-- Main Layout Container -->
+				<div class="layout-container">
+					<!-- Left Column: Main Stream -->
+					<div class="main-content">
+						<!-- 1. Description Card -->
 						<div class="section-card">
 							<div class="section-title">
-								<span>Description</span>
-								<button id="edit-desc-btn" onclick="startEditDesc()" class="btn-secondary" style="display: none; padding: 3px 8px; font-size: 0.8em;">Edit</button>
+								<span>📝 Description</span>
+								<button id="edit-desc-btn" onclick="startEditDesc()" class="btn-secondary">Edit</button>
 							</div>
 							
-							<div id="desc-view-mode" style="white-space: pre-wrap; line-height: 1.6; opacity: 0.9;">
-								${description || '<span style="opacity: 0.5; font-style: italic;">No description provided. Click Edit to add one.</span>'}
+							<div id="desc-view-mode" class="desc-content-box">
+								${data.description ? this._markdownToHtml(data.description) : '<span style="opacity: 0.45; font-style: italic;">No description provided. Click Edit to add one.</span>'}
 							</div>
 							
 							<div id="desc-edit-mode" style="display: none;">
-								<textarea id="desc-textarea" class="input-field" rows="6">${description}</textarea>
-								<div style="display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end;">
+								<div style="margin-bottom: 8px;">
+									<label style="display: block; font-size: 0.8em; opacity: 0.6; margin-bottom: 4px; font-weight: 600;">TITLE</label>
+									<input type="text" id="title-input" class="input-field" value="${data.title}" />
+								</div>
+								<div>
+									<label style="display: block; font-size: 0.8em; opacity: 0.6; margin-bottom: 4px; font-weight: 600;">DESCRIPTION</label>
+									<textarea id="desc-textarea" class="input-field" rows="6">${data.description}</textarea>
+								</div>
+								<div style="display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end;">
 									<button onclick="cancelEditDesc()" class="btn-secondary">Cancel</button>
-									<button onclick="saveDesc()" class="btn-primary">Save</button>
+									<button onclick="saveDesc()" class="btn-primary">Save Changes</button>
 								</div>
 							</div>
 						</div>
 
-						<!-- Collapsible Documents (README / Instruction) (Moved up) -->
-						<div>
-							<div class="accordion-header" onclick="toggleAccordion('readme-acc')">
-								<span>Overview (README)</span>
-								<span id="readme-acc-icon">▶</span>
-							</div>
-							<div id="readme-acc" class="accordion-content">
-								${readmeHtml}
+						<!-- 2. Instructions & Directives Card -->
+						<div class="section-card">
+							<div class="section-title">
+								<span>⚙️ Instructions & Directives</span>
 							</div>
 
-							<div class="accordion-header" onclick="toggleAccordion('inst-acc')">
-								<span>Instructions & Run Commands</span>
-								<span id="inst-acc-icon">▶</span>
-							</div>
-							<div id="inst-acc" class="accordion-content">
-								${instructionHtml}
+							<div style="display: flex; flex-direction: column; gap: 12px;">
+								<!-- Ticket Specific Directives -->
+								<div style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
+									<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 4px;">Ticket Specific Prompt / Rules</div>
+									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${ticketPromptDisplay ? this._markdownToHtml(ticketPromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No specific ticket prompts configured.</span>'}</div>
+								</div>
+
+								<!-- Type Guidelines -->
+								<div style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
+									<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 4px;">${typeUpper} Definition & Role Guidelines</div>
+									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">Standard system processing guidelines apply.</span>'}</div>
+								</div>
+
+								${data.instructionNotes ? `
+									<div style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
+										<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 6px;">Operational Commands & Notes</div>
+										<div style="font-size: 0.9em; line-height: 1.5;">${this._markdownToHtml(data.instructionNotes)}</div>
+									</div>
+								` : ''}
 							</div>
 						</div>
 
-						<!-- Attachments Card -->
+						<!-- 3. Custom Fields (Self Defined Data) -->
+						${customFieldsSectionHtml}
+
+						<!-- 4. Attachments Card -->
 						<div class="section-card">
-							<div class="section-title">Attachments</div>
+							<div class="section-title">
+								<span>📎 Attachments (${attachments.length})</span>
+							</div>
 							<div id="attachment-dropzone" class="dropzone" onclick="triggerBrowse()">
 								<span style="font-size: 1.5em; display: block; margin-bottom: 6px;">📥</span>
-								<span style="font-size: 0.9em; opacity: 0.7;">Drag and drop files here or click to upload</span>
+								<span style="font-size: 0.88em; opacity: 0.7;">Drag and drop files here or click to browse</span>
 								<input type="file" id="file-input" style="display: none;" onchange="handleBrowseUpload(event)" />
 							</div>
 							<div id="attachments-container">
@@ -1165,19 +1109,19 @@ export class EntityDetailEditor extends EditorPane {
 							</div>
 						</div>
 
-						<!-- Work Logs Card (Moved to bottom) -->
+						<!-- 5. Activity & Work Logs Card -->
 						<div class="section-card">
 							<div class="section-title">
-								<span>Work Logs Timeline</span>
-								<button id="add-log-btn" onclick="showAddLogModal()" class="btn-primary" style="display: none; padding: 3px 8px; font-size: 0.8em;">Add Log</button>
+								<span>⏱️ Work Logs & Activity</span>
+								<button id="add-log-btn" onclick="showAddLogModal()" class="btn-primary" style="font-size: 0.8em; padding: 4px 10px;">+ Add Log</button>
 							</div>
 							
-							<!-- Add Log Box -->
-							<div id="add-log-box" style="display: none; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 15px;">
+							<!-- Add Log Form -->
+							<div id="add-log-box" style="display: none; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 15px;">
 								<textarea id="log-textarea" class="input-field" rows="3" placeholder="Enter work log description..."></textarea>
 								<div style="display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end;">
 									<button onclick="hideAddLogModal()" class="btn-secondary">Cancel</button>
-									<button onclick="submitLog()" class="btn-primary">Add Log</button>
+									<button onclick="submitLog()" class="btn-primary">Record Log</button>
 								</div>
 							</div>
 
@@ -1187,43 +1131,119 @@ export class EntityDetailEditor extends EditorPane {
 						</div>
 					</div>
 
-					<!-- Metadata Sidebar -->
+					<!-- Right Column: Sidebar (Attributes / Information) -->
 					<div class="sidebar">
 						<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
 							<div style="display: flex; align-items: center; gap: 8px;">
-								<h3 style="margin: 0; font-size: 1.05em; font-weight: bold; color: var(--vscode-editor-foreground);">Details</h3>
-								<button id="toggle-edit-mode-btn" onclick="toggleEditMode()" class="btn-secondary" style="padding: 2px 6px; font-size: 0.8em;">Edit</button>
+								<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
+								<button id="toggle-edit-mode-btn" onclick="toggleEditMode()" class="btn-secondary" style="padding: 2px 8px; font-size: 0.8em;">Edit</button>
 							</div>
-							<span class="badge" style="background: ${colorSetting.bg}; color: ${colorSetting.text}; margin: 0; font-size: 0.7em; padding: 3px 8px; border-radius: 4px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;">${typeUpper}</span>
+							<span class="badge" style="background: ${colorSetting.bg}; color: ${colorSetting.text}; margin: 0;">${typeUpper}</span>
 						</div>
 						
-						<!-- Status selection -->
-						<div class="meta-row" style="display: flex; flex-direction: column; gap: 4px; margin-bottom: 16px;">
-							<span style="font-size: 0.8em; opacity: 0.6; font-weight: 600; letter-spacing: 0.03em;">STATUS</span>
-							<div style="padding: 4px 0;">
-								<span id="status-view-val" style="display: inline-block; font-size: 0.9em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 4px 10px; border-radius: 6px;">${status}</span>
+						<!-- Status -->
+						<div class="sidebar-row">
+							<span class="sidebar-label">STATUS</span>
+							<div style="padding: 2px 0;">
+								<span id="status-view-val" style="display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px;">${status}</span>
 							</div>
-							<select id="status-select" onchange="onStatusChange()" style="display: none; background: ${statusBg}; color: ${statusColor}; border: 1px solid ${statusBorder}; padding: 7px 12px; border-radius: 6px; font-weight: 700; font-size: 0.88em; width: 100%; cursor: pointer; transition: all 0.2s ease;">
-								<option value="Todo" ${status.toLowerCase() === 'todo' ? 'selected' : ''} style="background: #1e1b4b; color: #818cf8; font-weight: 700; padding: 8px;">Todo</option>
-								<option value="In Progress" ${status.toLowerCase().includes('progress') ? 'selected' : ''} style="background: #0c4a6e; color: #38bdf8; font-weight: 700; padding: 8px;">In Progress</option>
-								<option value="Done" ${status.toLowerCase().includes('done') || status.toLowerCase().includes('complete') ? 'selected' : ''} style="background: #064e3b; color: #34d399; font-weight: 700; padding: 8px;">Done</option>
-								<option value="Blocked" ${status.toLowerCase().includes('block') ? 'selected' : ''} style="background: #4c0519; color: #f43f5e; font-weight: 700; padding: 8px;">Blocked</option>
+							<select id="status-select" onchange="onStatusChange()" style="display: none; background: ${statusBg}; color: ${statusColor}; border: 1px solid ${statusBorder}; padding: 6px 10px; border-radius: 5px; font-weight: 700; font-size: 0.88em; width: 100%; cursor: pointer;">
+								<option value="Todo" ${status.toLowerCase() === 'todo' ? 'selected' : ''}>Todo</option>
+								<option value="In Progress" ${status.toLowerCase().includes('progress') ? 'selected' : ''}>In Progress</option>
+								<option value="Done" ${status.toLowerCase().includes('done') || status.toLowerCase().includes('complete') ? 'selected' : ''}>Done</option>
+								<option value="Blocked" ${status.toLowerCase().includes('block') ? 'selected' : ''}>Blocked</option>
 							</select>
 						</div>
 
-						${metadataRows}
+						<!-- Priority -->
+						<div class="sidebar-row">
+							<span class="sidebar-label">PRIORITY</span>
+							<div style="display: flex; align-items: center; gap: 6px; padding: 2px 0;">
+								<span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;"></span>
+								<span class="meta-view-val" style="font-size: 0.9em; font-weight: 700; color: ${pColor};">${data.priority}</span>
+							</div>
+							<select class="meta-input meta-edit-val" data-key="Priority" style="display: none; background: rgba(255,255,255,0.04); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.1); padding: 5px 8px; border-radius: 4px; font-size: 0.88em; width: 100%;">
+								<option value="Very High" ${data.priority.toLowerCase() === 'very high' ? 'selected' : ''}>Very High</option>
+								<option value="High" ${data.priority.toLowerCase() === 'high' ? 'selected' : ''}>High</option>
+								<option value="Medium" ${data.priority.toLowerCase() === 'medium' ? 'selected' : ''}>Medium</option>
+								<option value="Low" ${data.priority.toLowerCase() === 'low' ? 'selected' : ''}>Low</option>
+								<option value="Very Low" ${data.priority.toLowerCase() === 'very low' ? 'selected' : ''}>Very Low</option>
+							</select>
+						</div>
 
-						<button id="save-metadata-btn" onclick="saveAllMetadata()" class="btn-primary" style="display: none; width: 100%; margin-top: 15px; padding: 8px;">Save</button>
+						<!-- Assigned AI Agent -->
+						<div class="sidebar-row">
+							<span class="sidebar-label">ASSIGNED AGENT</span>
+							<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? '🤖 ' + data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
+							<input type="text" class="meta-input meta-edit-val input-field" data-key="Current AI Agent" value="${data.assignedAgentName !== 'None' ? data.assignedAgentName : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" placeholder="e.g. Lead Architect" />
+						</div>
+
+						<!-- Type Definition -->
+						<div class="sidebar-row">
+							<span class="sidebar-label">TYPE DEFINITION</span>
+							<span class="sidebar-value" style="font-family: monospace; font-size: 0.85em; opacity: 0.9;">${data.typeDefinition}</span>
+						</div>
+
+						<!-- Workspace ID & Ticket ID -->
+						<div class="sidebar-row">
+							<span class="sidebar-label">WORKSPACE ID</span>
+							<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em;">${data.workspaceId || 'None'}</span>
+						</div>
+
+						<div class="sidebar-row">
+							<span class="sidebar-label">TICKET ID</span>
+							<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em; color: #38bdf8;">${data.ticketId}</span>
+						</div>
+
+						<div class="sidebar-row">
+							<span class="sidebar-label">TICKET CODE</span>
+							<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em;">${data.ticketCode || 'None'}</span>
+						</div>
+
+						<!-- Link To & Linked By -->
+						<div class="sidebar-row">
+							<span class="sidebar-label">LINK TO</span>
+							<span class="meta-view-val sidebar-value">${data.linkTo !== 'None' ? data.linkTo : '<span style="opacity:0.4;">None</span>'}</span>
+							<input type="text" class="meta-input meta-edit-val input-field" data-key="Link To" value="${data.linkTo !== 'None' ? data.linkTo : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" placeholder="e.g. FNDJ1-0001" />
+						</div>
+
+						<div class="sidebar-row">
+							<span class="sidebar-label">LINKED BY</span>
+							<span class="meta-view-val sidebar-value">${data.linkedBy !== 'None' ? data.linkedBy : '<span style="opacity:0.4;">None</span>'}</span>
+							<input type="text" class="meta-input meta-edit-val input-field" data-key="Linked By" value="${data.linkedBy !== 'None' ? data.linkedBy : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" />
+						</div>
+
+						<!-- Ownership & Dates -->
+						<div class="sidebar-row">
+							<span class="sidebar-label">CREATED BY</span>
+							<span class="sidebar-value">${data.createdBy}</span>
+						</div>
+
+						<div class="sidebar-row">
+							<span class="sidebar-label">OWNER ACCOUNT</span>
+							<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.ownerAccount || 'unauthenticated'}</span>
+						</div>
+
+						<div class="sidebar-row">
+							<span class="sidebar-label">CREATED AT</span>
+							<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.createdAt}</span>
+						</div>
+
+						<div class="sidebar-row" style="border-bottom: none; margin-bottom: 0;">
+							<span class="sidebar-label">LAST UPDATED AT</span>
+							<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
+						</div>
+
+						<button id="save-metadata-btn" onclick="saveAllMetadata()" class="btn-primary" style="display: none; width: 100%; margin-top: 16px; padding: 8px;">Save Attributes</button>
 					</div>
 				</div>
 
 				<script>
 					const vscode = acquireVsCodeApi();
 
-					// Cache full metadata dictionary to preserve read-only values on write
-					let currentMetadata = ${JSON.stringify(metadata)};
+					let currentMetadata = ${JSON.stringify(data.metadata)};
 
-					// 1. Description edit mode toggle
+					// 1. Description & Title Edit
 					function startEditDesc() {
 						document.getElementById('desc-view-mode').style.display = 'none';
 						document.getElementById('desc-edit-mode').style.display = 'block';
@@ -1234,18 +1254,20 @@ export class EntityDetailEditor extends EditorPane {
 					function cancelEditDesc() {
 						document.getElementById('desc-view-mode').style.display = 'block';
 						document.getElementById('desc-edit-mode').style.display = 'none';
-						document.getElementById('edit-desc-btn').style.display = 'block';
+						document.getElementById('edit-desc-btn').style.display = 'inline-block';
 					}
 
 					function saveDesc() {
-						const newDesc = document.getElementById('desc-textarea').value;
+						const newTitle = document.getElementById('title-input').value.trim();
+						const newDesc = document.getElementById('desc-textarea').value.trim();
 						vscode.postMessage({
-							type: 'saveDescription',
+							type: 'saveTitleAndDescription',
+							title: newTitle,
 							description: newDesc
 						});
 					}
 
-					// 2. Metadata Updates
+					// 2. Status & Metadata Changes
 					function onStatusChange() {
 						const select = document.getElementById('status-select');
 						const status = select.value.toLowerCase();
@@ -1253,26 +1275,18 @@ export class EntityDetailEditor extends EditorPane {
 							select.style.background = 'rgba(56, 189, 248, 0.18)';
 							select.style.color = '#38bdf8';
 							select.style.borderColor = 'rgba(56, 189, 248, 0.4)';
-						} else if (status.includes('done') || status.includes('complete') || status.includes('approved')) {
+						} else if (status.includes('done') || status.includes('complete')) {
 							select.style.background = 'rgba(52, 211, 153, 0.18)';
 							select.style.color = '#34d399';
 							select.style.borderColor = 'rgba(52, 211, 153, 0.4)';
-						} else if (status.includes('block') || status.includes('fail') || status.includes('cancel')) {
+						} else if (status.includes('block') || status.includes('fail')) {
 							select.style.background = 'rgba(244, 63, 94, 0.18)';
 							select.style.color = '#f43f5e';
 							select.style.borderColor = 'rgba(244, 63, 94, 0.4)';
-						} else if (status.includes('review') || status.includes('test') || status.includes('pending')) {
-							select.style.background = 'rgba(251, 191, 36, 0.18)';
-							select.style.color = '#fbbf24';
-							select.style.borderColor = 'rgba(251, 191, 36, 0.4)';
-						} else if (status.includes('todo') || status.includes('backlog')) {
+						} else {
 							select.style.background = 'rgba(129, 140, 248, 0.18)';
 							select.style.color = '#818cf8';
 							select.style.borderColor = 'rgba(129, 140, 248, 0.4)';
-						} else {
-							select.style.background = 'rgba(148, 163, 184, 0.18)';
-							select.style.color = '#94a3b8';
-							select.style.borderColor = 'rgba(148, 163, 184, 0.4)';
 						}
 					}
 
@@ -1282,7 +1296,9 @@ export class EntityDetailEditor extends EditorPane {
 						const inputs = document.querySelectorAll('.meta-input');
 						inputs.forEach(input => {
 							const key = input.getAttribute('data-key');
-							currentMetadata[key] = input.value;
+							if (key) {
+								currentMetadata[key] = input.value;
+							}
 						});
 
 						vscode.postMessage({
@@ -1313,22 +1329,8 @@ export class EntityDetailEditor extends EditorPane {
 						}
 					}
 
-					// 4. Accordions
-					function toggleAccordion(id) {
-						const element = document.getElementById(id);
-						const icon = document.getElementById(id + '-icon');
-						if (element.style.display === 'block') {
-							element.style.display = 'none';
-							icon.textContent = '▶';
-						} else {
-							element.style.display = 'block';
-							icon.textContent = '▼';
-						}
-					}
-
-					// 5. Attachments drag and drop & upload
+					// 4. Attachments
 					const dropzone = document.getElementById('attachment-dropzone');
-					
 					window.addEventListener('dragover', (e) => e.preventDefault());
 					window.addEventListener('drop', (e) => e.preventDefault());
 
@@ -1336,11 +1338,9 @@ export class EntityDetailEditor extends EditorPane {
 						e.preventDefault();
 						dropzone.classList.add('dragover');
 					});
-
 					dropzone.addEventListener('dragleave', () => {
 						dropzone.classList.remove('dragover');
 					});
-
 					dropzone.addEventListener('drop', (e) => {
 						e.preventDefault();
 						dropzone.classList.remove('dragover');
@@ -1381,7 +1381,7 @@ export class EntityDetailEditor extends EditorPane {
 					}
 
 					function deleteFile(name) {
-						if (confirm("Are you sure you want to delete attachment '" + name + "'?")) {
+						if (confirm("Delete attachment '" + name + "'?")) {
 							vscode.postMessage({
 								type: 'deleteAttachment',
 								name: name
@@ -1389,19 +1389,13 @@ export class EntityDetailEditor extends EditorPane {
 						}
 					}
 
-					// 6. Edit Mode Toggle
+					// 5. Edit Mode Toggle
 					let isEditMode = ${this._startInEditMode ? 'true' : 'false'};
 					function toggleEditMode() {
 						isEditMode = !isEditMode;
 						const btn = document.getElementById('toggle-edit-mode-btn');
 						if (isEditMode) {
 							btn.innerText = 'Cancel';
-							btn.classList.add('active');
-							const editDescBtn = document.getElementById('edit-desc-btn');
-							if (editDescBtn) editDescBtn.style.display = 'inline-block';
-							const addLogBtn = document.getElementById('add-log-btn');
-							if (addLogBtn) addLogBtn.style.display = 'inline-block';
-							
 							const statusView = document.getElementById('status-view-val');
 							if (statusView) statusView.style.display = 'none';
 							const statusSelect = document.getElementById('status-select');
@@ -1412,19 +1406,6 @@ export class EntityDetailEditor extends EditorPane {
 							document.getElementById('save-metadata-btn').style.display = 'block';
 						} else {
 							btn.innerText = 'Edit';
-							btn.classList.remove('active');
-							const editDescBtn = document.getElementById('edit-desc-btn');
-							if (editDescBtn) editDescBtn.style.display = 'none';
-							const addLogBtn = document.getElementById('add-log-btn');
-							if (addLogBtn) addLogBtn.style.display = 'none';
-							
-							const descView = document.getElementById('desc-view-mode');
-							if (descView) descView.style.display = 'block';
-							const descEdit = document.getElementById('desc-edit-mode');
-							if (descEdit) descEdit.style.display = 'none';
-							
-							hideAddLogModal();
-							
 							const statusView = document.getElementById('status-view-val');
 							if (statusView) statusView.style.display = 'inline-block';
 							const statusSelect = document.getElementById('status-select');
@@ -1433,39 +1414,11 @@ export class EntityDetailEditor extends EditorPane {
 							document.querySelectorAll('.meta-view-val').forEach(el => el.style.display = 'block');
 							document.querySelectorAll('.meta-edit-val').forEach(el => el.style.display = 'none');
 							document.getElementById('save-metadata-btn').style.display = 'none';
-
-							// Reset inputs to original values
-							const inputs = document.querySelectorAll('.meta-input');
-							inputs.forEach(input => {
-								const key = input.getAttribute('data-key');
-								if (key) {
-									const val = currentMetadata[key] || '';
-									if (input.type === 'checkbox') {
-										input.checked = (val === 'true');
-										input.value = val;
-									} else {
-										input.value = val;
-									}
-								}
-							});
-
-							const multiselects = document.querySelectorAll('[id^="multiselect-"]');
-							multiselects.forEach(hiddenInput => {
-								const key = hiddenInput.getAttribute('data-key');
-								const val = currentMetadata[key] || '';
-								hiddenInput.value = val;
-								const fid = hiddenInput.id.replace('multiselect-', '');
-								const valList = val.split(',').map(s => s.trim());
-								document.querySelectorAll('.multiselect-checkbox-' + fid).forEach(cb => {
-									cb.checked = valList.includes(cb.value);
-								});
-							});
 						}
 					}
 
-					// Auto trigger edit mode on startup if requested
 					if (isEditMode) {
-						isEditMode = false; // reset so toggleEditMode sets it to true
+						isEditMode = false;
 						toggleEditMode();
 					}
 				</script>
