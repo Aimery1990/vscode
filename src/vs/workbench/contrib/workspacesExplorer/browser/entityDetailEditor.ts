@@ -548,7 +548,8 @@ export class EntityDetailEditor extends EditorPane {
 		return newLines.join('\n');
 	}
 
-	private async _handleMessage(e: any): Promise<void> {
+	private async _handleMessage(eventData: any): Promise<void> {
+		const e = (eventData && eventData.message) ? eventData.message : eventData;
 		if (!e || !this._entityUri) {
 			return;
 		}
