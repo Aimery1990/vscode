@@ -286,25 +286,11 @@ export class EntityDetailEditor extends EditorPane {
 			return;
 		}
 
-		// 1. Resolve 4-MD file paths
-		const agentsDir = URI.joinPath(this._entityUri, '.agents');
-
-		const ticketPath = URI.joinPath(agentsDir, 'ticket.md');
-		if (await this._fileService.exists(ticketPath)) {
-			this._ticketFileUri = ticketPath;
-		} else {
-			this._ticketFileUri = await this._resolveFileUri(this._entityUri, 'ticket.md');
-		}
-
+		// 1. Resolve 4-MD file paths (robust checking of .agents and root)
+		this._ticketFileUri = await this._resolveFileUri(this._entityUri, 'ticket.md');
 		this._instructionUri = await this._resolveFileUri(this._entityUri, 'instruction.md');
 		this._readmeUri = await this._resolveFileUri(this._entityUri, 'README.md');
-
-		const worklogUriNew = URI.joinPath(agentsDir, 'worklog.md');
-		if (await this._fileService.exists(worklogUriNew)) {
-			this._workLogUri = worklogUriNew;
-		} else {
-			this._workLogUri = await this._resolveFileUri(this._entityUri, 'work_log.md');
-		}
+		this._workLogUri = await this._resolveWorkLogUri(this._entityUri);
 
 		// 2. Read contents from 4-MD files
 		const ticketContent = await this._safeReadFile(this._ticketFileUri);
@@ -338,11 +324,28 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private async _resolveFileUri(baseUri: URI, name: string): Promise<URI> {
-		const path1 = URI.joinPath(baseUri, '.agents', name);
-		if (await this._fileService.exists(path1)) {
-			return path1;
+		const agentsDir = URI.joinPath(baseUri, '.agents');
+		const pathInAgents = URI.joinPath(agentsDir, name);
+		if (await this._fileService.exists(pathInAgents)) {
+			return pathInAgents;
 		}
-		return URI.joinPath(baseUri, name);
+		const pathInRoot = URI.joinPath(baseUri, name);
+		if (await this._fileService.exists(pathInRoot)) {
+			return pathInRoot;
+		}
+		// Default to .agents/<name>
+		return pathInAgents;
+	}
+
+	private async _resolveWorkLogUri(baseUri: URI): Promise<URI> {
+		const names = ['worklog.md', 'work_log.md'];
+		for (const name of names) {
+			const p1 = URI.joinPath(baseUri, '.agents', name);
+			if (await this._fileService.exists(p1)) return p1;
+			const p2 = URI.joinPath(baseUri, name);
+			if (await this._fileService.exists(p2)) return p2;
+		}
+		return URI.joinPath(baseUri, '.agents', 'worklog.md');
 	}
 
 	private async _safeReadFile(uri: URI | undefined): Promise<string> {
@@ -563,11 +566,25 @@ export class EntityDetailEditor extends EditorPane {
 			case 'saveDescription': {
 				try {
 					if (this._readmeUri) {
+						if (!(await this._fileService.exists(this._readmeUri))) {
+							const parentDir = dirname(this._readmeUri);
+							if (!(await this._fileService.exists(parentDir))) {
+								await this._fileService.createFolder(parentDir);
+							}
+							await this._fileService.writeFile(this._readmeUri, VSBuffer.fromString('# ' + (e.title || this._entityName) + '\n'));
+						}
 						const content = await this._safeReadFile(this._readmeUri);
 						const updated = this._updateReadmeContent(content, e.title, e.description);
 						await this._fileService.writeFile(this._readmeUri, VSBuffer.fromString(updated));
 					}
 					if (this._ticketFileUri) {
+						if (!(await this._fileService.exists(this._ticketFileUri))) {
+							const parentDir = dirname(this._ticketFileUri);
+							if (!(await this._fileService.exists(parentDir))) {
+								await this._fileService.createFolder(parentDir);
+							}
+							await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString('# ' + (e.title || this._entityName) + '\n\n## Overview\n'));
+						}
 						const content = await this._safeReadFile(this._ticketFileUri);
 						const updates: { [key: string]: string } = {};
 						if (e.title) updates['Title'] = e.title;
@@ -579,6 +596,7 @@ export class EntityDetailEditor extends EditorPane {
 					this._notificationService.info(localize('descSaved', "Saved entity details successfully."));
 					await this._resolvePathsAndLoadData();
 				} catch (err) {
+					console.error('Failed to save entity details:', err);
 					this._notificationService.error(localize('saveDescFailed', "Failed to save: {0}", String(err)));
 				}
 				break;
@@ -985,6 +1003,10 @@ export class EntityDetailEditor extends EditorPane {
 					.btn-primary:hover {
 						background: var(--vscode-button-hoverBackground);
 					}
+					.btn-primary:disabled {
+						opacity: 0.6;
+						cursor: not-allowed;
+					}
 					.btn-secondary {
 						background: rgba(255,255,255,0.06);
 						color: var(--vscode-foreground);
@@ -1115,7 +1137,7 @@ export class EntityDetailEditor extends EditorPane {
 								</div>
 								<div style="display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end;">
 									<button onclick="cancelEditDesc()" class="btn-secondary">Cancel</button>
-									<button onclick="saveAllChanges()" class="btn-primary">Save Changes</button>
+									<button id="save-desc-btn" onclick="saveAllChanges('save-desc-btn')" class="btn-primary">Save Changes</button>
 								</div>
 							</div>
 						</div>
@@ -1290,7 +1312,7 @@ export class EntityDetailEditor extends EditorPane {
 							<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
 						</div>
 
-						<button id="save-metadata-btn" onclick="saveAllChanges()" class="btn-primary" style="display: none; width: 100%; margin-top: 16px; padding: 8px;">Save Attributes</button>
+						<button id="save-metadata-btn" onclick="saveAllChanges('save-metadata-btn')" class="btn-primary" style="display: none; width: 100%; margin-top: 16px; padding: 8px;">Save Attributes</button>
 					</div>
 				</div>
 
@@ -1305,7 +1327,8 @@ export class EntityDetailEditor extends EditorPane {
 						document.getElementById('desc-view-mode').style.display = 'none';
 						document.getElementById('desc-edit-mode').style.display = 'block';
 						document.getElementById('edit-desc-btn').style.display = 'none';
-						document.getElementById('desc-textarea').focus();
+						const textarea = document.getElementById('desc-textarea');
+						if (textarea) textarea.focus();
 					}
 
 					function cancelEditDesc() {
@@ -1314,7 +1337,13 @@ export class EntityDetailEditor extends EditorPane {
 						document.getElementById('edit-desc-btn').style.display = 'inline-block';
 					}
 
-					function saveAllChanges() {
+					function saveAllChanges(btnId) {
+						const btn = btnId ? document.getElementById(btnId) : null;
+						if (btn) {
+							btn.disabled = true;
+							btn.innerText = 'Saving...';
+						}
+
 						const titleEl = document.getElementById('title-input');
 						const descEl = document.getElementById('desc-textarea');
 						const newTitle = titleEl ? titleEl.value.trim() : undefined;
@@ -1349,6 +1378,14 @@ export class EntityDetailEditor extends EditorPane {
 							customMetadata: currentCustomMetadata
 						});
 					}
+
+					// Shortcut Cmd+S / Ctrl+S
+					window.addEventListener('keydown', (e) => {
+						if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+							e.preventDefault();
+							saveAllChanges('save-desc-btn');
+						}
+					});
 
 					// 2. Status & Metadata Changes
 					function onStatusChange() {
