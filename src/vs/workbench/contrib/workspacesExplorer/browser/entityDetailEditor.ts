@@ -3,9 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { clearNode, Dimension, h } from '../../../../base/browser/dom.js';
+import { Dimension, h } from '../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
-import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { localize } from '../../../../nls.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
@@ -97,7 +96,6 @@ export class EntityDetailEditor extends EditorPane {
 
 	private _container: HTMLElement | undefined;
 	private _webview: IWebviewElement | undefined;
-	private readonly _contentDisposables = this._register(new DisposableStore());
 
 	private _entityUri: URI | undefined;
 	private _entityName: string = '';
@@ -144,27 +142,22 @@ export class EntityDetailEditor extends EditorPane {
 		this._entityName = input.entityName;
 		this._startInEditMode = !!input.startInEditMode;
 
-		this._contentDisposables.clear();
-		if (this._container) {
-			clearNode(this._container);
-		}
-
 		await this._resolvePathsAndLoadData();
 	}
 
 	override clearInput(): void {
-		this._webview?.dispose();
-		this._webview = undefined;
-		this._contentDisposables.clear();
-		if (this._container) {
-			clearNode(this._container);
-		}
 		super.clearInput();
 	}
 
 	private async _readCustomModule(workspaceUri: URI, typeId: string): Promise<any | null> {
 		const targetId = (typeId || '').trim().toLowerCase();
 		if (!targetId) return null;
+
+		// Fast-bail for built-in system types to avoid redundant disk scans
+		const builtInTypes = new Set(['workspace', 'job', 'task', 'project', 'workflow', 'agent', 'case', 'issue', 'analysis']);
+		if (builtInTypes.has(targetId)) {
+			return null;
+		}
 
 		const checkDirs: URI[] = [];
 		let curr = workspaceUri;
@@ -304,9 +297,9 @@ export class EntityDetailEditor extends EditorPane {
 		const attachments = await this._getAttachments(this._entityUri);
 		const customModule = await this._readCustomModule(this._entityUri, this._entityType);
 
-		// 3. Setup Webview
+		// 3. Setup Webview cleanly without recreating or dropping listeners
 		if (!this._webview) {
-			this._webview = this._contentDisposables.add(this._webviewService.createWebviewElement({
+			this._webview = this._register(this._webviewService.createWebviewElement({
 				title: localize('entityDetail', "Entity Detail"),
 				options: {},
 				contentOptions: { allowScripts: true },
@@ -314,7 +307,7 @@ export class EntityDetailEditor extends EditorPane {
 			}));
 			this._webview.mountTo(this._container, this.window);
 
-			this._contentDisposables.add(this._webview.onMessage(async (e: any) => {
+			this._register(this._webview.onMessage(async (e: any) => {
 				await this._handleMessage(e);
 			}));
 		}
@@ -1342,6 +1335,12 @@ export class EntityDetailEditor extends EditorPane {
 						if (btn) {
 							btn.disabled = true;
 							btn.innerText = 'Saving...';
+							setTimeout(() => {
+								if (btn) {
+									btn.disabled = false;
+									btn.innerText = (btnId === 'save-metadata-btn') ? 'Save Attributes' : 'Save Changes';
+								}
+							}, 1500);
 						}
 
 						const titleEl = document.getElementById('title-input');
