@@ -1143,21 +1143,21 @@ export class EntityDetailEditor extends EditorPane {
 							</div>
 
 							<div style="display: flex; flex-direction: column; gap: 12px;">
-								<!-- Ticket Specific Directives -->
+								<!-- Ticket Prompt -->
 								<div style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
-									<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 4px;">Ticket Specific Prompt / Rules</div>
-									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${ticketPromptDisplay ? this._markdownToHtml(ticketPromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No specific ticket prompts configured.</span>'}</div>
+									<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 4px;">Ticket Prompt</div>
+									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${ticketPromptDisplay ? this._markdownToHtml(ticketPromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Prompt configured.</span>'}</div>
 								</div>
 
-								<!-- Type Guidelines -->
+								<!-- Ticket Type Prompt -->
 								<div style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
-									<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 4px;">${typeUpper} Definition & Role Guidelines</div>
-									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">Standard system processing guidelines apply.</span>'}</div>
+									<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 4px;">Ticket Type Prompt</div>
+									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Type Prompt configured.</span>'}</div>
 								</div>
 
 								${data.instructionNotes ? `
 									<div style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
-										<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 6px;">Operational Commands & Notes</div>
+										<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 6px;">Instruction Notes</div>
 										<div style="font-size: 0.9em; line-height: 1.5;">${this._markdownToHtml(data.instructionNotes)}</div>
 									</div>
 								` : ''}
@@ -1243,9 +1243,9 @@ export class EntityDetailEditor extends EditorPane {
 							</select>
 						</div>
 
-						<!-- Assigned AI Agent -->
+						<!-- Current AI Agent -->
 						<div class="sidebar-row">
-							<span class="sidebar-label">ASSIGNED AGENT</span>
+							<span class="sidebar-label">CURRENT AI AGENT</span>
 							<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
 							<input type="text" class="meta-input meta-edit-val input-field" data-key="Current AI Agent" value="${data.assignedAgentName !== 'None' ? data.assignedAgentName : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" placeholder="e.g. Lead Architect" />
 						</div>
