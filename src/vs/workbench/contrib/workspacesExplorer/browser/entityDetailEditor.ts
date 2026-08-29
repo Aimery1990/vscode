@@ -311,7 +311,7 @@ export class EntityDetailEditor extends EditorPane {
 		if (!this._webview) {
 			this._webview = this._register(this._webviewService.createWebviewElement({
 				title: localize('entityDetail', "Entity Detail"),
-				options: {},
+				options: { disableServiceWorker: true },
 				contentOptions: { allowScripts: true },
 				extension: undefined
 			}));
@@ -1375,6 +1375,9 @@ export class EntityDetailEditor extends EditorPane {
 						justify-content: center;
 						z-index: 2147483647 !important;
 					}
+					.ai-modal-overlay.visible {
+						display: flex !important;
+					}
 					.ai-modal-dialog {
 						background: #1e1e1e;
 						border: 1px solid rgba(56, 189, 248, 0.35);
@@ -1947,6 +1950,8 @@ export class EntityDetailEditor extends EditorPane {
 						try {
 							const modal = document.getElementById('ai-edit-modal');
 							if (modal) {
+								modal.classList.add('visible');
+								modal.style.display = 'flex';
 								modal.style.setProperty('display', 'flex', 'important');
 							}
 
@@ -1969,6 +1974,8 @@ export class EntityDetailEditor extends EditorPane {
 					function closeAiEditModal() {
 						const modal = document.getElementById('ai-edit-modal');
 						if (modal) {
+							modal.classList.remove('visible');
+							modal.style.display = 'none';
 							modal.style.setProperty('display', 'none', 'important');
 						}
 						hideFieldDropdown();
@@ -2325,11 +2332,14 @@ export class EntityDetailEditor extends EditorPane {
 						const instructions = instructionsEl ? instructionsEl.value.trim() : '';
 
 						if (!fieldPath) {
-							alert('Please select a target field.');
+							const statusMsg = document.getElementById('ai-status-msg');
+							if (statusMsg) statusMsg.innerText = 'Please select a target field.';
 							return;
 						}
 						if (!instructions) {
-							alert('Please enter your instructions for the AI.');
+							if (instructionsEl) instructionsEl.focus();
+							const statusMsg = document.getElementById('ai-status-msg');
+							if (statusMsg) statusMsg.innerText = 'Please enter your instructions for the AI.';
 							return;
 						}
 
