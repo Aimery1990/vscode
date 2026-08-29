@@ -1334,11 +1334,9 @@ export class EntityDetailEditor extends EditorPane {
 						left: 0 !important;
 						right: 0 !important;
 						bottom: 0 !important;
-						width: 100vw !important;
-						height: 100vh !important;
-						background: rgba(0, 0, 0, 0.75) !important;
-						backdrop-filter: blur(10px) !important;
-						-webkit-backdrop-filter: blur(10px) !important;
+						width: 100% !important;
+						height: 100% !important;
+						background: rgba(0, 0, 0, 0.85) !important;
 						display: none;
 						align-items: center;
 						justify-content: center;
