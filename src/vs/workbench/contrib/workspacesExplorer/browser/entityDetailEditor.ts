@@ -917,8 +917,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-title">
 							<span>${k}</span>
 							<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}" title="Edit ${k} with AI">
-								<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								<span>Edit with AI</span>
+								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							</button>
 						</div>
 						<div class="custom-field-view desc-content-box">
@@ -1126,14 +1125,12 @@ export class EntityDetailEditor extends EditorPane {
 					.ai-edit-btn {
 						display: inline-flex;
 						align-items: center;
-						gap: 6px;
+						justify-content: center;
 						background: rgba(56, 189, 248, 0.12);
 						color: #38bdf8;
 						border: 1px solid rgba(56, 189, 248, 0.35);
 						border-radius: 4px;
-						padding: 4px 10px;
-						font-size: 0.82em;
-						font-weight: 600;
+						padding: 4px 6px;
 						cursor: pointer;
 						transition: all 0.15s ease;
 						user-select: none;
@@ -1159,8 +1156,7 @@ export class EntityDetailEditor extends EditorPane {
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
 						<button type="button" class="ai-edit-btn" data-ai-field="/Title" title="Edit Title with AI">
-							<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-							<span>Edit with AI</span>
+							<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 						</button>
 					</div>
 				</div>
@@ -1173,32 +1169,13 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-card">
 							<div class="section-title">
 								<span>Description</span>
-								<div style="display: flex; gap: 8px; align-items: center;">
-									<button type="button" class="ai-edit-btn" data-ai-field="/Description" title="Edit Description with AI">
-										<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-										<span>Edit with AI</span>
-									</button>
-									<button id="edit-desc-btn" onclick="startEditDesc()" class="btn-secondary">Edit</button>
-								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Description" title="Edit Description with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
 							</div>
 							
 							<div id="desc-view-mode" class="desc-content-box">
-								${data.description ? this._markdownToHtml(data.description) : '<span style="opacity: 0.45; font-style: italic;">No description provided. Click Edit to add one.</span>'}
-							</div>
-							
-							<div id="desc-edit-mode" style="display: none;">
-								<div style="margin-bottom: 8px;">
-									<label style="display: block; font-size: 0.8em; opacity: 0.6; margin-bottom: 4px; font-weight: 600;">TITLE</label>
-									<input type="text" id="title-input" class="input-field" value="${data.title}" />
-								</div>
-								<div>
-									<label style="display: block; font-size: 0.8em; opacity: 0.6; margin-bottom: 4px; font-weight: 600;">DESCRIPTION</label>
-									<textarea id="desc-textarea" class="input-field" rows="6">${data.description}</textarea>
-								</div>
-								<div style="display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end;">
-									<button onclick="cancelEditDesc()" class="btn-secondary">Cancel</button>
-									<button id="save-desc-btn" onclick="saveAllChanges('save-desc-btn')" class="btn-primary">Save Changes</button>
-								</div>
+								${data.description ? this._markdownToHtml(data.description) : '<span style="opacity: 0.45; font-style: italic;">No description provided.</span>'}
 							</div>
 						</div>
 
@@ -1207,8 +1184,7 @@ export class EntityDetailEditor extends EditorPane {
 							<div class="section-title">
 								<span>Instructions</span>
 								<button type="button" class="ai-edit-btn" data-ai-field="/Instructions" title="Edit Instructions with AI">
-									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									<span>Edit with AI</span>
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
 
@@ -1219,7 +1195,6 @@ export class EntityDetailEditor extends EditorPane {
 										<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Prompt</div>
 										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Prompt" title="Edit Ticket Prompt with AI">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-											<span>Edit with AI</span>
 										</button>
 									</div>
 									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${ticketPromptDisplay ? this._markdownToHtml(ticketPromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Prompt configured.</span>'}</div>
@@ -1231,7 +1206,6 @@ export class EntityDetailEditor extends EditorPane {
 										<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Type Prompt</div>
 										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Type Prompt" title="Edit Ticket Type Prompt with AI">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-											<span>Edit with AI</span>
 										</button>
 									</div>
 									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Type Prompt configured.</span>'}</div>
@@ -1243,7 +1217,6 @@ export class EntityDetailEditor extends EditorPane {
 											<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
 											<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Instruction Notes" title="Edit Instruction Notes with AI">
 												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-												<span>Edit with AI</span>
 											</button>
 										</div>
 										<div style="font-size: 0.9em; line-height: 1.5;">${this._markdownToHtml(data.instructionNotes)}</div>
@@ -1297,56 +1270,48 @@ export class EntityDetailEditor extends EditorPane {
 							<div style="display: flex; align-items: center; gap: 8px;">
 								<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
 								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" title="Edit Attributes with AI">
-									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									<span>Edit with AI</span>
+									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
-								<button id="toggle-edit-mode-btn" onclick="toggleEditMode()" class="btn-secondary" style="padding: 2px 8px; font-size: 0.8em;">Edit</button>
 							</div>
 							<span class="badge" style="background: ${colorSetting.bg}; color: ${colorSetting.text}; border: 1px solid ${colorSetting.text}40;">${typeUpper}</span>
 						</div>
 						
 						<!-- Status -->
 						<div class="sidebar-row">
-							<span class="sidebar-label">STATUS</span>
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">STATUS</span>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" title="Edit Status with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
 							<div style="padding: 2px 0;">
 								<span id="status-view-val" style="display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px;">${status}</span>
 							</div>
-							<select id="status-select" onchange="onStatusChange()" style="display: none; background: ${statusBg}; color: ${statusColor}; border: 1px solid ${statusBorder}; padding: 6px 10px; border-radius: 5px; font-weight: 700; font-size: 0.88em; width: 100%; cursor: pointer;">
-								<option value="Todo" ${status.toLowerCase() === 'todo' ? 'selected' : ''}>Todo</option>
-								<option value="In Progress" ${status.toLowerCase().includes('progress') ? 'selected' : ''}>In Progress</option>
-								<option value="Done" ${status.toLowerCase().includes('done') || status.toLowerCase().includes('complete') ? 'selected' : ''}>Done</option>
-								<option value="Blocked" ${status.toLowerCase().includes('block') ? 'selected' : ''}>Blocked</option>
-							</select>
 						</div>
 
 						<!-- Priority -->
 						<div class="sidebar-row">
-							<span class="sidebar-label">PRIORITY</span>
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">PRIORITY</span>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Priority" title="Edit Priority with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
 							<div style="display: flex; align-items: center; gap: 6px; padding: 2px 0;">
 								<span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;"></span>
 								<span class="meta-view-val" style="font-size: 0.9em; font-weight: 700; color: ${pColor};">${data.priority}</span>
 							</div>
-							<select class="meta-input meta-edit-val" data-key="Priority" style="display: none; background: rgba(255,255,255,0.04); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.1); padding: 5px 8px; border-radius: 4px; font-size: 0.88em; width: 100%;">
-								<option value="Very High" ${data.priority.toLowerCase() === 'very high' ? 'selected' : ''}>Very High</option>
-								<option value="High" ${data.priority.toLowerCase() === 'high' ? 'selected' : ''}>High</option>
-								<option value="Medium" ${data.priority.toLowerCase() === 'medium' ? 'selected' : ''}>Medium</option>
-								<option value="Low" ${data.priority.toLowerCase() === 'low' ? 'selected' : ''}>Low</option>
-								<option value="Very Low" ${data.priority.toLowerCase() === 'very low' ? 'selected' : ''}>Very Low</option>
-							</select>
 						</div>
 
 						<!-- Current AI Agent -->
 						<div class="sidebar-row">
-							<span class="sidebar-label">CURRENT AI AGENT</span>
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">CURRENT AI AGENT</span>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Current AI Agent" title="Edit Current AI Agent with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
 							<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
-							<select class="meta-input meta-edit-val" data-key="Current AI Agent" style="display: none; background: rgba(255,255,255,0.04); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.1); padding: 5px 8px; border-radius: 4px; font-size: 0.88em; width: 100%;">
-								<option value="None" ${(!data.assignedAgentName || data.assignedAgentName === 'None' || data.assignedAgentName === 'Unassigned') ? 'selected' : ''}>Unassigned</option>
-								${agents.map(a => {
-			const isSelected = (data.assignedAgentName === a.name || data.assignedAgentName === a.id);
-			return `<option value="${a.name}" ${isSelected ? 'selected' : ''}>${a.name}${a.role ? ` (${a.role})` : ''}</option>`;
-		}).join('')}
-								${(!agents.some(a => a.name === data.assignedAgentName || a.id === data.assignedAgentName) && data.assignedAgentName && data.assignedAgentName !== 'None' && data.assignedAgentName !== 'Unassigned') ? `<option value="${data.assignedAgentName}" selected>${data.assignedAgentName}</option>` : ''}
-							</select>
 						</div>
 
 						<!-- Type Definition -->
@@ -1373,15 +1338,23 @@ export class EntityDetailEditor extends EditorPane {
 
 						<!-- Link To & Linked By -->
 						<div class="sidebar-row">
-							<span class="sidebar-label">LINK TO</span>
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">LINK TO</span>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Link To" title="Edit Link To with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
 							<span class="meta-view-val sidebar-value">${data.linkTo !== 'None' ? data.linkTo : '<span style="opacity:0.4;">None</span>'}</span>
-							<input type="text" class="meta-input meta-edit-val input-field" data-key="Link To" value="${data.linkTo !== 'None' ? data.linkTo : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" placeholder="e.g. FNDJ1-0001" />
 						</div>
 
 						<div class="sidebar-row">
-							<span class="sidebar-label">LINKED BY</span>
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">LINKED BY</span>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Linked By" title="Edit Linked By with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
 							<span class="meta-view-val sidebar-value">${data.linkedBy !== 'None' ? data.linkedBy : '<span style="opacity:0.4;">None</span>'}</span>
-							<input type="text" class="meta-input meta-edit-val input-field" data-key="Linked By" value="${data.linkedBy !== 'None' ? data.linkedBy : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" />
 						</div>
 
 						<!-- Ownership & Dates -->
@@ -1404,8 +1377,6 @@ export class EntityDetailEditor extends EditorPane {
 							<span class="sidebar-label">LAST UPDATED AT</span>
 							<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
 						</div>
-
-						<button id="save-metadata-btn" onclick="saveAllChanges('save-metadata-btn')" class="btn-primary" style="display: none; width: 100%; margin-top: 16px; padding: 8px;">Save Attributes</button>
 					</div>
 				</div>
 
