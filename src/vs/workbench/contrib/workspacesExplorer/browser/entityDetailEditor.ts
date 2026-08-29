@@ -730,6 +730,10 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				break;
 			}
+			case 'aiButtonClicked': {
+				this._notificationService.info(`[AnyAgent AI] Opening AI Editor for ${e.source || 'field'}...`);
+				break;
+			}
 			case 'applyAiEdit': {
 				try {
 					const field = (e.field || '').trim();
@@ -1332,9 +1336,10 @@ export class EntityDetailEditor extends EditorPane {
 					.section-card:hover .ai-edit-btn,
 					.prompt-box-hover:hover .ai-edit-btn,
 					.sidebar-header-row:hover .ai-edit-btn,
-					.sidebar-row:hover .ai-edit-btn {
-						opacity: 1;
-						pointer-events: auto;
+					.sidebar-row:hover .ai-edit-btn,
+					.custom-property-card:hover .ai-edit-btn {
+						opacity: 1 !important;
+						pointer-events: auto !important;
 					}
 					.ai-edit-btn:hover {
 						background: rgba(56, 189, 248, 0.25);
@@ -1972,6 +1977,9 @@ export class EntityDetailEditor extends EditorPane {
 
 					// 2. In-Place AI Editing Functions
 					function toggleInPlaceAi(id) {
+						if (vscode) {
+							vscode.postMessage({ type: 'aiButtonClicked', source: id });
+						}
 						var panel = document.getElementById(id + '-ai-panel');
 						if (!panel) {
 							openAiEditModal('/' + id);
@@ -2037,6 +2045,9 @@ export class EntityDetailEditor extends EditorPane {
 
 					// 3. Global AI Modal Core Functions
 					function openAiEditModal(preSelectedPath) {
+						if (vscode) {
+							vscode.postMessage({ type: 'aiButtonClicked', source: preSelectedPath });
+						}
 						try {
 							const modal = document.getElementById('ai-edit-modal');
 							if (modal) {
