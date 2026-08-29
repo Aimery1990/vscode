@@ -108,6 +108,7 @@ export class EntityDetailEditor extends EditorPane {
 	private _instructionUri: URI | undefined;
 	private _readmeUri: URI | undefined;
 	private _workLogUri: URI | undefined;
+	private _lastParsedData: IParsedTicketData | undefined;
 
 	constructor(
 		group: IEditorGroup,
@@ -303,6 +304,7 @@ export class EntityDetailEditor extends EditorPane {
 		const workLogContent = await this._safeReadFile(this._workLogUri);
 
 		const parsed = this._parseAllEntityData(ticketContent, readmeContent, instructionContent);
+		this._lastParsedData = parsed;
 		this._entityType = parsed.ticketType || 'task';
 
 		const attachments = await this._getAttachments(this._entityUri);
@@ -570,13 +572,27 @@ export class EntityDetailEditor extends EditorPane {
 			case 'openAgentCentral':
 			case 'aiButtonClicked': {
 				const field = e.field || e.source || '/Description';
-				const ticketId = this._entityName || '';
-				const prompt = `Please assist with editing the [${field}] of Ticket ${ticketId}: `;
+				const ticketId = this._lastParsedData?.ticketId || this._entityName || '';
+				const workspaceId = this._lastParsedData?.workspaceId || '';
+
+				const locators: string[] = [];
+				if (workspaceId) {
+					locators.push(`Workspace: ${workspaceId}`);
+				}
+				if (ticketId) {
+					locators.push(`Ticket: ${ticketId}`);
+				}
+				if (field) {
+					locators.push(`Target: ${field}`);
+				}
+
+				const prompt = locators.length > 0 ? `[${locators.join(' | ')}] ` : '';
 				try {
 					await this._commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
 						prompt: prompt,
-						field: field,
-						ticketId: ticketId
+						workspaceId: workspaceId,
+						ticketId: ticketId,
+						field: field
 					});
 				} catch (err) {
 					console.error('Failed to open Agent Central:', err);

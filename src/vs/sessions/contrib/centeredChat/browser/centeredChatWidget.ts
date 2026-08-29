@@ -112,8 +112,14 @@ export class CenteredChatWidget extends Disposable {
 		this.activeModelId = this.storageService.get(STORAGE_KEY_MODEL_ID, StorageScope.PROFILE, '');
 	}
 
-	public show(): void {
+	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; currentValue?: string }): void {
 		if (this.element) {
+			if (initialContext && initialContext.prompt && this.inputField) {
+				this.inputField.value = initialContext.prompt;
+				this.inputField.focus();
+				const len = this.inputField.value.length;
+				this.inputField.setSelectionRange(len, len);
+			}
 			return;
 		}
 
@@ -289,8 +295,15 @@ export class CenteredChatWidget extends Disposable {
 		// Load Credentials and populate Model Picker
 		this.loadCredentialsAndModels();
 
-		// Auto Focus on load
+		// Auto Focus on load and populate pre-filled context
+		if (initialContext && initialContext.prompt) {
+			this.inputField.value = initialContext.prompt;
+		}
 		this.inputField.focus();
+		if (this.inputField.value) {
+			const len = this.inputField.value.length;
+			this.inputField.setSelectionRange(len, len);
+		}
 	}
 
 	public hide(): void {
@@ -338,11 +351,18 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public toggle(): void {
+	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; currentValue?: string }): void {
 		if (this.element) {
-			this.hide();
+			if (initialContext && initialContext.prompt && this.inputField) {
+				this.inputField.value = initialContext.prompt;
+				this.inputField.focus();
+				const len = this.inputField.value.length;
+				this.inputField.setSelectionRange(len, len);
+			} else {
+				this.hide();
+			}
 		} else {
-			this.show();
+			this.show(initialContext);
 		}
 	}
 

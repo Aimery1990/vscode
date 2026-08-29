@@ -25,7 +25,7 @@ const chatIcon = registerIcon('centered-chat-icon', Codicon.sparkle, localize('c
 const TOGGLE_CENTERED_CHAT_COMMAND_ID = 'workbench.action.chat.toggleCenteredChatPopup';
 
 // Decoupled communication event for title bar click triggers
-const onToggleCenteredChat = new Emitter<void>();
+const onToggleCenteredChat = new Emitter<any>();
 
 class ToggleCenteredChatAction extends Action2 {
 	constructor() {
@@ -41,8 +41,8 @@ class ToggleCenteredChatAction extends Action2 {
 		});
 	}
 
-	run(accessor: ServicesAccessor): void {
-		onToggleCenteredChat.fire();
+	run(accessor: ServicesAccessor, ...args: any[]): void {
+		onToggleCenteredChat.fire(args[0]);
 	}
 }
 
@@ -92,8 +92,8 @@ export class CenteredChatContribution extends Disposable implements IWorkbenchCo
 		this.widget = this.instantiationService.createInstance(CenteredChatWidget);
 
 		// Subscribe to the menu click event triggers
-		this._register(onToggleCenteredChat.event(() => {
-			this.widget.toggle();
+		this._register(onToggleCenteredChat.event((context) => {
+			this.widget.toggle(context);
 		}));
 
 		// Register the view item mapping
