@@ -1062,34 +1062,13 @@ export class EntityDetailEditor extends EditorPane {
 					<div class="section-card custom-property-card">
 						<div class="section-title">
 							<span>${k}</span>
-							<button class="ai-edit-btn" onclick="toggleInPlaceAi('custom-${k}')" title="Edit ${k} with AI">
+							<button class="ai-edit-btn" onclick="openAiEditModal('/Custom/${k}')" title="Edit ${k} with AI">
 								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								<span>Edit with AI</span>
 							</button>
 						</div>
 						<div class="custom-field-view desc-content-box">
 							${v ? this._markdownToHtml(v) : '<span style="opacity: 0.45; font-style: italic;">No content provided.</span>'}
-						</div>
-						<div id="custom-${k}-ai-panel" class="in-place-ai-panel" style="display: none;">
-							<div class="in-place-ai-header">
-								<div style="display: flex; align-items: center; gap: 6px;">
-									<svg width="14" height="14" viewBox="0 0 16 16" fill="#38bdf8"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-									<span style="font-weight: 700; font-size: 0.88em; color: #38bdf8;">AI Edit — /Custom/${k}</span>
-								</div>
-								<button type="button" class="btn-secondary" onclick="toggleInPlaceAi('custom-${k}')" style="padding: 2px 6px; font-size: 0.75em;">✕</button>
-							</div>
-							<textarea id="custom-${k}-ai-input" class="input-field" rows="3" placeholder="Tell AI what to update in ${k}..."></textarea>
-							<div class="ai-suggestion-chips" style="margin-top: 6px;">
-								<span class="ai-chip" onclick="applyChip('custom-${k}-ai-input', 'Refine and polish grammar and clarity')">✨ Refine</span>
-								<span class="ai-chip" onclick="applyChip('custom-${k}-ai-input', 'Make more detailed with explicit requirements')">📝 Expand</span>
-								<span class="ai-chip" onclick="applyChip('custom-${k}-ai-input', 'Make concise and brief')">✂️ Concise</span>
-							</div>
-							<div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px;">
-								<button type="button" onclick="toggleInPlaceAi('custom-${k}')" class="btn-secondary">Cancel</button>
-								<button type="button" id="custom-${k}-ai-btn" onclick="submitInPlaceAi('/Custom/${k}', 'custom-${k}-ai-input', 'custom-${k}-ai-btn')" class="btn-primary" style="background: linear-gradient(135deg, #0284c7, #6366f1);">
-									<span>✨ Apply with AI</span>
-								</button>
-							</div>
 						</div>
 						<div class="custom-field-edit" style="display: none;">
 							${isMultiline ? `
@@ -1535,30 +1514,10 @@ export class EntityDetailEditor extends EditorPane {
 					</div>
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
-						<button type="button" class="ai-edit-btn" onclick="toggleInPlaceAi('title')" title="Edit Title with AI">
+						<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Title')" title="Edit Title with AI">
 							<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							<span>Edit with AI</span>
 						</button>
-					</div>
-					<div id="title-ai-panel" class="in-place-ai-panel" style="display: none; margin-top: 10px;">
-						<div class="in-place-ai-header">
-							<div style="display: flex; align-items: center; gap: 6px;">
-								<svg width="14" height="14" viewBox="0 0 16 16" fill="#38bdf8"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								<span style="font-weight: 700; font-size: 0.88em; color: #38bdf8;">AI Edit — /Title (README.md & ticket.md)</span>
-							</div>
-							<button type="button" class="btn-secondary" onclick="toggleInPlaceAi('title')" style="padding: 2px 6px; font-size: 0.75em;">✕</button>
-						</div>
-						<input type="text" id="title-ai-input" class="input-field" placeholder="Tell AI how to rewrite Title..." />
-						<div class="ai-suggestion-chips" style="margin-top: 6px;">
-							<span class="ai-chip" onclick="applyChip('title-ai-input', 'Refine and make concise')">✨ Concise</span>
-							<span class="ai-chip" onclick="applyChip('title-ai-input', 'Professional engineering tone')">💼 Professional</span>
-						</div>
-						<div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px;">
-							<button type="button" onclick="toggleInPlaceAi('title')" class="btn-secondary">Cancel</button>
-							<button type="button" id="title-ai-btn" onclick="submitInPlaceAi('/Title', 'title-ai-input', 'title-ai-btn')" class="btn-primary" style="background: linear-gradient(135deg, #0284c7, #6366f1);">
-								<span>✨ Apply with AI</span>
-							</button>
-						</div>
 					</div>
 				</div>
 
@@ -1571,7 +1530,7 @@ export class EntityDetailEditor extends EditorPane {
 							<div class="section-title">
 								<span>Description</span>
 								<div style="display: flex; gap: 8px; align-items: center;">
-									<button type="button" class="ai-edit-btn" onclick="toggleInPlaceAi('desc')" title="Edit Description with AI">
+									<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Description')" title="Edit Description with AI">
 										<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 										<span>Edit with AI</span>
 									</button>
@@ -1581,29 +1540,6 @@ export class EntityDetailEditor extends EditorPane {
 							
 							<div id="desc-view-mode" class="desc-content-box">
 								${data.description ? this._markdownToHtml(data.description) : '<span style="opacity: 0.45; font-style: italic;">No description provided. Click Edit to add one.</span>'}
-							</div>
-
-							<div id="desc-ai-panel" class="in-place-ai-panel" style="display: none;">
-								<div class="in-place-ai-header">
-									<div style="display: flex; align-items: center; gap: 6px;">
-										<svg width="14" height="14" viewBox="0 0 16 16" fill="#38bdf8"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-										<span style="font-weight: 700; font-size: 0.88em; color: #38bdf8;">AI Edit — /Description (README.md)</span>
-									</div>
-									<button type="button" class="btn-secondary" onclick="toggleInPlaceAi('desc')" style="padding: 2px 6px; font-size: 0.75em;">✕</button>
-								</div>
-								<textarea id="desc-ai-input" class="input-field" rows="3" placeholder="Tell AI what to update in Description... (e.g. 'Make it concise' or 'Add explicit requirements')"></textarea>
-								<div class="ai-suggestion-chips" style="margin-top: 6px;">
-									<span class="ai-chip" onclick="applyChip('desc-ai-input', 'Refine and polish grammar and clarity')">✨ Refine</span>
-									<span class="ai-chip" onclick="applyChip('desc-ai-input', 'Make more detailed with explicit requirements')">📝 Expand</span>
-									<span class="ai-chip" onclick="applyChip('desc-ai-input', 'Make concise and brief')">✂️ Concise</span>
-									<span class="ai-chip" onclick="applyChip('desc-ai-input', 'Align with 4-MD standards')">🎯 4-MD</span>
-								</div>
-								<div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px;">
-									<button type="button" onclick="toggleInPlaceAi('desc')" class="btn-secondary">Cancel</button>
-									<button type="button" id="desc-ai-btn" onclick="submitInPlaceAi('/Description', 'desc-ai-input', 'desc-ai-btn')" class="btn-primary" style="background: linear-gradient(135deg, #0284c7, #6366f1);">
-										<span>✨ Apply with AI</span>
-									</button>
-								</div>
 							</div>
 							
 							<div id="desc-edit-mode" style="display: none;">
@@ -1626,7 +1562,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-card">
 							<div class="section-title">
 								<span>Instructions</span>
-								<button type="button" class="ai-edit-btn" onclick="toggleInPlaceAi('ticket-prompt')" title="Edit Instructions with AI">
+								<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions')" title="Edit Instructions with AI">
 									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 									<span>Edit with AI</span>
 								</button>
@@ -1637,83 +1573,36 @@ export class EntityDetailEditor extends EditorPane {
 								<div class="prompt-box-hover" style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Prompt</div>
-										<button type="button" class="ai-edit-btn" onclick="toggleInPlaceAi('ticket-prompt')" title="Edit Ticket Prompt with AI">
+										<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Prompt')" title="Edit Ticket Prompt with AI">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											<span>Edit with AI</span>
 										</button>
 									</div>
 									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${ticketPromptDisplay ? this._markdownToHtml(ticketPromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Prompt configured.</span>'}</div>
-									<div id="ticket-prompt-ai-panel" class="in-place-ai-panel" style="display: none; margin-top: 10px;">
-										<div class="in-place-ai-header">
-											<span style="font-weight: 700; font-size: 0.85em; color: #38bdf8;">AI Edit — /Instructions/Ticket Prompt (instruction.md)</span>
-											<button type="button" class="btn-secondary" onclick="toggleInPlaceAi('ticket-prompt')" style="padding: 1px 5px; font-size: 0.7em;">✕</button>
-										</div>
-										<textarea id="ticket-prompt-ai-input" class="input-field" rows="3" placeholder="Tell AI how to adjust Ticket Prompt..."></textarea>
-										<div class="ai-suggestion-chips" style="margin-top: 6px;">
-											<span class="ai-chip" onclick="applyChip('ticket-prompt-ai-input', 'Add step-by-step reasoning instructions')">🧠 Reasoning</span>
-											<span class="ai-chip" onclick="applyChip('ticket-prompt-ai-input', 'Make prompt concise and strict')">⚡ Strict</span>
-										</div>
-										<div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px;">
-											<button type="button" onclick="toggleInPlaceAi('ticket-prompt')" class="btn-secondary">Cancel</button>
-											<button type="button" id="ticket-prompt-ai-btn" onclick="submitInPlaceAi('/Instructions/Ticket Prompt', 'ticket-prompt-ai-input', 'ticket-prompt-ai-btn')" class="btn-primary" style="background: linear-gradient(135deg, #0284c7, #6366f1);">
-												<span>✨ Apply with AI</span>
-											</button>
-										</div>
-									</div>
 								</div>
 
 								<!-- Ticket Type Prompt -->
 								<div class="prompt-box-hover" style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Type Prompt</div>
-										<button type="button" class="ai-edit-btn" onclick="toggleInPlaceAi('type-prompt')" title="Edit Ticket Type Prompt with AI">
+										<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Type Prompt')" title="Edit Ticket Type Prompt with AI">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											<span>Edit with AI</span>
 										</button>
 									</div>
 									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Type Prompt configured.</span>'}</div>
-									<div id="type-prompt-ai-panel" class="in-place-ai-panel" style="display: none; margin-top: 10px;">
-										<div class="in-place-ai-header">
-											<span style="font-weight: 700; font-size: 0.85em; color: #a78bfa;">AI Edit — /Instructions/Ticket Type Prompt (instruction.md)</span>
-											<button type="button" class="btn-secondary" onclick="toggleInPlaceAi('type-prompt')" style="padding: 1px 5px; font-size: 0.7em;">✕</button>
-										</div>
-										<textarea id="type-prompt-ai-input" class="input-field" rows="3" placeholder="Tell AI how to adjust Ticket Type Prompt..."></textarea>
-										<div class="ai-suggestion-chips" style="margin-top: 6px;">
-											<span class="ai-chip" onclick="applyChip('type-prompt-ai-input', 'Add domain-specific guidance')">🎯 Guidance</span>
-											<span class="ai-chip" onclick="applyChip('type-prompt-ai-input', 'Make prompt concise')">⚡ Concise</span>
-										</div>
-										<div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px;">
-											<button type="button" onclick="toggleInPlaceAi('type-prompt')" class="btn-secondary">Cancel</button>
-											<button type="button" id="type-prompt-ai-btn" onclick="submitInPlaceAi('/Instructions/Ticket Type Prompt', 'type-prompt-ai-input', 'type-prompt-ai-btn')" class="btn-primary" style="background: linear-gradient(135deg, #0284c7, #6366f1);">
-												<span>✨ Apply with AI</span>
-											</button>
-										</div>
-									</div>
 								</div>
 
 								${data.instructionNotes ? `
 									<div class="prompt-box-hover" style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
 										<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
 											<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
-											<button type="button" class="ai-edit-btn" onclick="toggleInPlaceAi('inst-notes')" title="Edit Instruction Notes with AI">
+											<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Instruction Notes')" title="Edit Instruction Notes with AI">
 												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 												<span>Edit with AI</span>
 											</button>
 										</div>
 										<div style="font-size: 0.9em; line-height: 1.5;">${this._markdownToHtml(data.instructionNotes)}</div>
-										<div id="inst-notes-ai-panel" class="in-place-ai-panel" style="display: none; margin-top: 10px;">
-											<div class="in-place-ai-header">
-												<span style="font-weight: 700; font-size: 0.85em; color: #38bdf8;">AI Edit — /Instructions/Instruction Notes (instruction.md)</span>
-												<button type="button" class="btn-secondary" onclick="toggleInPlaceAi('inst-notes')" style="padding: 1px 5px; font-size: 0.7em;">✕</button>
-											</div>
-											<textarea id="inst-notes-ai-input" class="input-field" rows="3" placeholder="Tell AI what notes to add..."></textarea>
-											<div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px;">
-												<button type="button" onclick="toggleInPlaceAi('inst-notes')" class="btn-secondary">Cancel</button>
-												<button type="button" id="inst-notes-ai-btn" onclick="submitInPlaceAi('/Instructions/Instruction Notes', 'inst-notes-ai-input', 'inst-notes-ai-btn')" class="btn-primary" style="background: linear-gradient(135deg, #0284c7, #6366f1);">
-													<span>✨ Apply with AI</span>
-												</button>
-											</div>
-										</div>
 									</div>
 								` : ''}
 							</div>
