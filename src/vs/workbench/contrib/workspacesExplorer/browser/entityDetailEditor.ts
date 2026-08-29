@@ -545,7 +545,51 @@ export class EntityDetailEditor extends EditorPane {
 					continue;
 				}
 			}
+		}
+
+		return newLines.join('\n');
+	}
+
+	private _updateInstructionMdContent(
+		content: string,
+		typePrompt?: string,
+		ticketPrompt?: string,
+		notes?: string
+	): string {
+		const lines = content.split(/\r?\n/);
+		const newLines: string[] = [];
+		let hasTypePrompt = false;
+		let hasTicketPrompt = false;
+
+		for (const line of lines) {
+			if (line.match(/^\s*-\s*\*\*Ticket Type Prompt\*\*:\s*/i)) {
+				hasTypePrompt = true;
+				if (typePrompt !== undefined) {
+					newLines.push(`- **Ticket Type Prompt**: ${typePrompt}`);
+					continue;
+				}
+			}
+			if (line.match(/^\s*-\s*\*\*Ticket Prompt\*\*:\s*/i)) {
+				hasTicketPrompt = true;
+				if (ticketPrompt !== undefined) {
+					newLines.push(`- **Ticket Prompt**: ${ticketPrompt}`);
+					continue;
+				}
+			}
 			newLines.push(line);
+		}
+
+		if (typePrompt !== undefined && !hasTypePrompt) {
+			const overviewIdx = newLines.findIndex(l => l.startsWith('## Overview'));
+			if (overviewIdx !== -1) {
+				newLines.splice(overviewIdx + 1, 0, `- **Ticket Type Prompt**: ${typePrompt}`);
+			}
+		}
+		if (ticketPrompt !== undefined && !hasTicketPrompt) {
+			const overviewIdx = newLines.findIndex(l => l.startsWith('## Overview'));
+			if (overviewIdx !== -1) {
+				newLines.splice(overviewIdx + 1, 0, `- **Ticket Prompt**: ${ticketPrompt}`);
+			}
 		}
 
 		return newLines.join('\n');
@@ -683,6 +727,122 @@ export class EntityDetailEditor extends EditorPane {
 					}
 				} catch (err) {
 					this._notificationService.error(localize('deleteFailed', "Failed to delete: {0}", String(err)));
+				}
+				break;
+			}
+			case 'applyAiEdit': {
+				try {
+					const field = (e.field || '').trim();
+					const instructions = (e.instructions || '').trim();
+					const newContent = (e.newContent !== undefined ? e.newContent : instructions);
+					let modifiedFile = '';
+
+					// 1. Check which file to update
+					const lowerField = field.toLowerCase().replace(/^[/. ]+/, '');
+					if (lowerField.startsWith('title')) {
+						modifiedFile = 'README.md & ticket.md';
+						if (this._readmeUri) {
+							const content = await this._safeReadFile(this._readmeUri);
+							const updated = this._updateReadmeContent(content, newContent, undefined);
+							await this._fileService.writeFile(this._readmeUri, VSBuffer.fromString(updated));
+						}
+						if (this._ticketFileUri) {
+							const content = await this._safeReadFile(this._ticketFileUri);
+							const updated = this._updateTicketMdContent(content, { 'Title': newContent });
+							await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+						}
+					} else if (lowerField.startsWith('description')) {
+						modifiedFile = 'README.md';
+						if (this._readmeUri) {
+							const content = await this._safeReadFile(this._readmeUri);
+							const updated = this._updateReadmeContent(content, undefined, newContent);
+							await this._fileService.writeFile(this._readmeUri, VSBuffer.fromString(updated));
+						}
+						if (this._ticketFileUri) {
+							const content = await this._safeReadFile(this._ticketFileUri);
+							const updated = this._updateTicketMdContent(content, { 'Description': newContent });
+							await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+						}
+					} else if (lowerField.includes('ticket prompt') || lowerField === 'ticket_prompt' || lowerField === 'ticketprompt') {
+						modifiedFile = 'instruction.md';
+						if (this._instructionUri) {
+							const content = await this._safeReadFile(this._instructionUri);
+							const updated = this._updateInstructionMdContent(content, undefined, newContent);
+							await this._fileService.writeFile(this._instructionUri, VSBuffer.fromString(updated));
+						}
+					} else if (lowerField.includes('ticket type prompt') || lowerField === 'ticket_type_prompt' || lowerField === 'typeprompt' || lowerField === 'type_prompt') {
+						modifiedFile = 'instruction.md';
+						if (this._instructionUri) {
+							const content = await this._safeReadFile(this._instructionUri);
+							const updated = this._updateInstructionMdContent(content, newContent, undefined);
+							await this._fileService.writeFile(this._instructionUri, VSBuffer.fromString(updated));
+						}
+					} else if (lowerField.startsWith('instruction')) {
+						modifiedFile = 'instruction.md';
+						if (this._instructionUri) {
+							const content = await this._safeReadFile(this._instructionUri);
+							const updated = this._updateInstructionMdContent(content, undefined, newContent);
+							await this._fileService.writeFile(this._instructionUri, VSBuffer.fromString(updated));
+						}
+					} else if (lowerField.startsWith('attribute') || lowerField.startsWith('status') || lowerField.startsWith('priority') || lowerField.startsWith('current ai agent') || lowerField.startsWith('link')) {
+						modifiedFile = 'ticket.md';
+						if (this._ticketFileUri) {
+							const content = await this._safeReadFile(this._ticketFileUri);
+							const attrName = field.split(/[/.]/).pop()?.trim() || 'Custom';
+							const updates: { [key: string]: string } = {};
+							updates[attrName] = newContent;
+							const updated = this._updateTicketMdContent(content, updates);
+							await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+						}
+					} else if (lowerField.startsWith('custom/')) {
+						modifiedFile = 'ticket.md';
+						if (this._ticketFileUri) {
+							const customKey = field.replace(/^[/.]?custom[/.]?/i, '').trim();
+							const content = await this._safeReadFile(this._ticketFileUri);
+							const customUpdates: { [key: string]: string } = {};
+							customUpdates[customKey] = newContent;
+							const updated = this._updateTicketMdContent(content, {}, customUpdates);
+							await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+						}
+					} else {
+						modifiedFile = 'README.md';
+						if (this._readmeUri) {
+							const content = await this._safeReadFile(this._readmeUri);
+							const updated = this._updateReadmeContent(content, undefined, newContent);
+							await this._fileService.writeFile(this._readmeUri, VSBuffer.fromString(updated));
+						}
+					}
+
+					// 2. Append standard Work Log entry
+					if (this._workLogUri) {
+						if (!(await this._fileService.exists(this._workLogUri))) {
+							const parentDir = dirname(this._workLogUri);
+							if (!(await this._fileService.exists(parentDir))) {
+								await this._fileService.createFolder(parentDir);
+							}
+							await this._fileService.writeFile(this._workLogUri, VSBuffer.fromString('# Work Log\n'));
+						}
+						const content = await this._safeReadFile(this._workLogUri);
+						const logText = [
+							'### 用户需求',
+							`通过 AI 修改字段: \`${field}\` -> ${instructions}`,
+							'',
+							'### AI 执行记录',
+							`已将 \`${field}\` 字段内容更新完毕，严格遵循 4-MD 规范标准。`,
+							'',
+							'### 修改文件',
+							`- ${modifiedFile}`,
+							'- worklog.md'
+						].join('\n');
+						const updatedLog = this._addLogToContent(content, logText);
+						await this._fileService.writeFile(this._workLogUri, VSBuffer.fromString(updatedLog));
+					}
+
+					this._notificationService.info(localize('aiEditSuccess', "AI updated '{0}' and recorded to worklog.md successfully.", field));
+					await this._resolvePathsAndLoadData();
+				} catch (err) {
+					console.error('Failed to apply AI edit:', err);
+					this._notificationService.error(localize('aiEditFailed', "Failed to apply AI edit: {0}", String(err)));
 				}
 				break;
 			}
@@ -1079,6 +1239,7 @@ export class EntityDetailEditor extends EditorPane {
 						margin-bottom: 14px;
 						border-bottom: 1px solid rgba(255,255,255,0.04);
 						padding-bottom: 8px;
+						position: relative;
 					}
 					.sidebar-label {
 						font-size: 0.75em;
@@ -1093,6 +1254,180 @@ export class EntityDetailEditor extends EditorPane {
 						color: var(--vscode-editor-foreground);
 						word-break: break-word;
 					}
+					.ai-edit-btn {
+						opacity: 0;
+						pointer-events: none;
+						display: inline-flex;
+						align-items: center;
+						gap: 4px;
+						background: rgba(56, 189, 248, 0.1);
+						color: #38bdf8;
+						border: 1px solid rgba(56, 189, 248, 0.28);
+						border-radius: 4px;
+						padding: 2px 7px;
+						font-size: 0.76em;
+						font-weight: 600;
+						cursor: pointer;
+						transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+						user-select: none;
+					}
+					.ai-edit-btn:hover {
+						background: rgba(56, 189, 248, 0.22);
+						border-color: #38bdf8;
+						box-shadow: 0 0 8px rgba(56, 189, 248, 0.25);
+						transform: translateY(-1px);
+					}
+					.header-title-row:hover .ai-edit-btn,
+					.section-card:hover .section-title .ai-edit-btn,
+					.prompt-box-hover:hover .ai-edit-btn,
+					.sidebar-header-row:hover .ai-edit-btn,
+					.sidebar-row:hover .ai-edit-btn {
+						opacity: 1;
+						pointer-events: auto;
+					}
+					.prompt-box-hover {
+						position: relative;
+						transition: border-color 0.2s;
+					}
+					.ai-modal-overlay {
+						position: fixed;
+						top: 0;
+						left: 0;
+						right: 0;
+						bottom: 0;
+						background: rgba(0, 0, 0, 0.68);
+						backdrop-filter: blur(6px);
+						display: flex;
+						align-items: center;
+						justify-content: center;
+						z-index: 99999;
+						animation: fadeIn 0.15s ease-out;
+					}
+					.ai-modal-dialog {
+						background: #1e1e1e;
+						border: 1px solid rgba(56, 189, 248, 0.3);
+						border-radius: 10px;
+						box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6), 0 0 24px rgba(56, 189, 248, 0.12);
+						width: 90%;
+						max-width: 740px;
+						padding: 22px 24px;
+						display: flex;
+						flex-direction: column;
+						gap: 16px;
+					}
+					.ai-modal-header {
+						display: flex;
+						align-items: center;
+						justify-content: space-between;
+						padding-bottom: 12px;
+						border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+					}
+					.ai-modal-close-btn {
+						background: transparent;
+						border: none;
+						color: rgba(255, 255, 255, 0.5);
+						font-size: 1.1em;
+						cursor: pointer;
+						padding: 4px 8px;
+						border-radius: 4px;
+					}
+					.ai-modal-close-btn:hover {
+						color: #fff;
+						background: rgba(255, 255, 255, 0.1);
+					}
+					.ai-autocomplete-menu {
+						position: absolute;
+						top: calc(100% + 4px);
+						left: 0;
+						right: 0;
+						max-height: 220px;
+						overflow-y: auto;
+						background: #252526;
+						border: 1px solid rgba(56, 189, 248, 0.35);
+						border-radius: 6px;
+						box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+						z-index: 100000;
+					}
+					.ai-autocomplete-item {
+						display: flex;
+						align-items: center;
+						justify-content: space-between;
+						padding: 8px 12px;
+						cursor: pointer;
+						font-size: 0.88em;
+						color: var(--vscode-foreground);
+						transition: background 0.15s;
+					}
+					.ai-autocomplete-item:hover, .ai-autocomplete-item.selected {
+						background: rgba(56, 189, 248, 0.18);
+						color: #38bdf8;
+					}
+					.ai-dual-pane {
+						display: grid;
+						grid-template-columns: 1fr 1fr;
+						gap: 16px;
+					}
+					.ai-pane-card {
+						display: flex;
+						flex-direction: column;
+						gap: 6px;
+					}
+					.ai-pane-title {
+						display: flex;
+						justify-content: space-between;
+						font-size: 0.75em;
+						font-weight: 700;
+						opacity: 0.6;
+						letter-spacing: 0.05em;
+						text-transform: uppercase;
+					}
+					.ai-value-preview-box {
+						height: 160px;
+						overflow-y: auto;
+						padding: 10px 12px;
+						background: rgba(0, 0, 0, 0.25);
+						border: 1px solid rgba(255, 255, 255, 0.08);
+						border-radius: 6px;
+						font-size: 0.88em;
+						line-height: 1.5;
+						white-space: pre-wrap;
+						word-break: break-word;
+					}
+					.ai-suggestion-chips {
+						display: flex;
+						flex-wrap: wrap;
+						gap: 6px;
+						margin-top: 8px;
+					}
+					.ai-chip {
+						display: inline-flex;
+						align-items: center;
+						padding: 3px 8px;
+						background: rgba(255, 255, 255, 0.04);
+						border: 1px solid rgba(255, 255, 255, 0.1);
+						border-radius: 12px;
+						font-size: 0.75em;
+						opacity: 0.85;
+						cursor: pointer;
+						transition: all 0.15s;
+					}
+					.ai-chip:hover {
+						background: rgba(56, 189, 248, 0.15);
+						border-color: #38bdf8;
+						color: #38bdf8;
+						opacity: 1;
+					}
+					.ai-modal-footer {
+						display: flex;
+						justify-content: space-between;
+						align-items: center;
+						padding-top: 12px;
+						border-top: 1px solid rgba(255, 255, 255, 0.08);
+					}
+					@keyframes fadeIn {
+						from { opacity: 0; }
+						to { opacity: 1; }
+					}
 				</style>
 			</head>
 			<body>
@@ -1106,6 +1441,10 @@ export class EntityDetailEditor extends EditorPane {
 					</div>
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
+						<button class="ai-edit-btn" onclick="openAiEditModal('/Title')" title="Edit Title with AI">
+							<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+							<span>Edit with AI</span>
+						</button>
 					</div>
 				</div>
 
@@ -1117,7 +1456,13 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-card">
 							<div class="section-title">
 								<span>Description</span>
-								<button id="edit-desc-btn" onclick="startEditDesc()" class="btn-secondary">Edit</button>
+								<div style="display: flex; gap: 8px; align-items: center;">
+									<button class="ai-edit-btn" onclick="openAiEditModal('/Description')" title="Edit Description with AI">
+										<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+										<span>Edit with AI</span>
+									</button>
+									<button id="edit-desc-btn" onclick="startEditDesc()" class="btn-secondary">Edit</button>
+								</div>
 							</div>
 							
 							<div id="desc-view-mode" class="desc-content-box">
@@ -1144,24 +1489,46 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-card">
 							<div class="section-title">
 								<span>Instructions</span>
+								<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions')" title="Edit Instructions with AI">
+									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+									<span>Edit with AI</span>
+								</button>
 							</div>
 
 							<div style="display: flex; flex-direction: column; gap: 12px;">
 								<!-- Ticket Prompt -->
-								<div style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
-									<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 4px;">Ticket Prompt</div>
+								<div class="prompt-box-hover" style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
+									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+										<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Prompt</div>
+										<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Prompt')" title="Edit Ticket Prompt with AI">
+											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+											<span>Edit with AI</span>
+										</button>
+									</div>
 									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${ticketPromptDisplay ? this._markdownToHtml(ticketPromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Prompt configured.</span>'}</div>
 								</div>
 
 								<!-- Ticket Type Prompt -->
-								<div style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
-									<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 4px;">Ticket Type Prompt</div>
+								<div class="prompt-box-hover" style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
+									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+										<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Type Prompt</div>
+										<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Type Prompt')" title="Edit Ticket Type Prompt with AI">
+											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+											<span>Edit with AI</span>
+										</button>
+									</div>
 									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Type Prompt configured.</span>'}</div>
 								</div>
 
 								${data.instructionNotes ? `
-									<div style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
-										<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase; margin-bottom: 6px;">Instruction Notes</div>
+									<div class="prompt-box-hover" style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
+										<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+											<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
+											<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Instruction Notes')" title="Edit Instruction Notes with AI">
+												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+												<span>Edit with AI</span>
+											</button>
+										</div>
 										<div style="font-size: 0.9em; line-height: 1.5;">${this._markdownToHtml(data.instructionNotes)}</div>
 									</div>
 								` : ''}
@@ -1209,9 +1576,13 @@ export class EntityDetailEditor extends EditorPane {
 
 					<!-- Right Column: Sidebar (Attributes / Information) -->
 					<div class="sidebar">
-						<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
+						<div class="sidebar-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
 							<div style="display: flex; align-items: center; gap: 8px;">
 								<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
+								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes')" title="Edit Attributes with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+									<span>AI</span>
+								</button>
 								<button id="toggle-edit-mode-btn" onclick="toggleEditMode()" class="btn-secondary" style="padding: 2px 8px; font-size: 0.8em;">Edit</button>
 							</div>
 							<span class="badge" style="background: ${colorSetting.bg}; color: ${colorSetting.text}; border: 1px solid ${colorSetting.text}40;">${typeUpper}</span>
@@ -1219,7 +1590,10 @@ export class EntityDetailEditor extends EditorPane {
 						
 						<!-- Status -->
 						<div class="sidebar-row">
-							<span class="sidebar-label">STATUS</span>
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">STATUS</span>
+								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes/Status')" title="Edit Status with AI">✨</button>
+							</div>
 							<div style="padding: 2px 0;">
 								<span id="status-view-val" style="display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px;">${status}</span>
 							</div>
@@ -1233,7 +1607,10 @@ export class EntityDetailEditor extends EditorPane {
 
 						<!-- Priority -->
 						<div class="sidebar-row">
-							<span class="sidebar-label">PRIORITY</span>
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">PRIORITY</span>
+								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes/Priority')" title="Edit Priority with AI">✨</button>
+							</div>
 							<div style="display: flex; align-items: center; gap: 6px; padding: 2px 0;">
 								<span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;"></span>
 								<span class="meta-view-val" style="font-size: 0.9em; font-weight: 700; color: ${pColor};">${data.priority}</span>
@@ -1249,7 +1626,10 @@ export class EntityDetailEditor extends EditorPane {
 
 						<!-- Current AI Agent -->
 						<div class="sidebar-row">
-							<span class="sidebar-label">CURRENT AI AGENT</span>
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">CURRENT AI AGENT</span>
+								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes/Current AI Agent')" title="Edit Agent with AI">✨</button>
+							</div>
 							<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
 							<select class="meta-input meta-edit-val" data-key="Current AI Agent" style="display: none; background: rgba(255,255,255,0.04); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.1); padding: 5px 8px; border-radius: 4px; font-size: 0.88em; width: 100%;">
 								<option value="None" ${(!data.assignedAgentName || data.assignedAgentName === 'None' || data.assignedAgentName === 'Unassigned') ? 'selected' : ''}>Unassigned</option>
@@ -1285,13 +1665,19 @@ export class EntityDetailEditor extends EditorPane {
 
 						<!-- Link To & Linked By -->
 						<div class="sidebar-row">
-							<span class="sidebar-label">LINK TO</span>
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">LINK TO</span>
+								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes/Link To')" title="Edit Link To with AI">✨</button>
+							</div>
 							<span class="meta-view-val sidebar-value">${data.linkTo !== 'None' ? data.linkTo : '<span style="opacity:0.4;">None</span>'}</span>
 							<input type="text" class="meta-input meta-edit-val input-field" data-key="Link To" value="${data.linkTo !== 'None' ? data.linkTo : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" placeholder="e.g. FNDJ1-0001" />
 						</div>
 
 						<div class="sidebar-row">
-							<span class="sidebar-label">LINKED BY</span>
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">LINKED BY</span>
+								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes/Linked By')" title="Edit Linked By with AI">✨</button>
+							</div>
 							<span class="meta-view-val sidebar-value">${data.linkedBy !== 'None' ? data.linkedBy : '<span style="opacity:0.4;">None</span>'}</span>
 							<input type="text" class="meta-input meta-edit-val input-field" data-key="Linked By" value="${data.linkedBy !== 'None' ? data.linkedBy : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" />
 						</div>
@@ -1318,6 +1704,77 @@ export class EntityDetailEditor extends EditorPane {
 						</div>
 
 						<button id="save-metadata-btn" onclick="saveAllChanges('save-metadata-btn')" class="btn-primary" style="display: none; width: 100%; margin-top: 16px; padding: 8px;">Save Attributes</button>
+					</div>
+				</div>
+
+				<!-- AI Edit Modal Backdrop -->
+				<div id="ai-edit-modal" class="ai-modal-overlay" style="display: none;" onclick="onAiModalBackdropClick(event)">
+					<div class="ai-modal-dialog" onclick="event.stopPropagation()">
+						<!-- Modal Header -->
+						<div class="ai-modal-header">
+							<div style="display: flex; align-items: center; gap: 8px;">
+								<span style="font-size: 1.1em;">✨</span>
+								<h2 style="margin: 0; font-size: 1.15em; font-weight: 700; color: #fff;">Edit with AI</h2>
+								<span class="badge" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3);">AI ASSISTANT</span>
+							</div>
+							<button class="ai-modal-close-btn" onclick="closeAiEditModal()" title="Close (Esc)">✕</button>
+						</div>
+
+						<!-- Field Selector Row (supports / and .) -->
+						<div style="position: relative;">
+							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+								<label style="font-size: 0.76em; font-weight: 700; opacity: 0.7; letter-spacing: 0.05em; text-transform: uppercase;">
+									Target Field <span style="font-weight: normal; opacity: 0.6;">(Type <code style="background: rgba(255,255,255,0.08); padding: 1px 4px; border-radius: 3px;">/</code> or <code style="background: rgba(255,255,255,0.08); padding: 1px 4px; border-radius: 3px;">.</code> to switch field)</span>
+								</label>
+								<span id="ai-field-schema-badge" style="font-size: 0.75em; opacity: 0.6; font-family: monospace; background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 4px;">README.md</span>
+							</div>
+							<div style="position: relative;">
+								<input type="text" id="ai-field-path-input" class="input-field" placeholder="Type / or . to select field..." oninput="handleFieldPathInput(event)" onkeydown="handleFieldPathKeydown(event)" onfocus="showFieldDropdown()" style="font-family: monospace; font-size: 0.92em; padding-left: 12px;" />
+								<!-- Dropdown Menu for / or . autocomplete -->
+								<div id="ai-field-dropdown" class="ai-autocomplete-menu" style="display: none;"></div>
+							</div>
+						</div>
+
+						<!-- Dual Pane: Current Value vs AI Instructions -->
+						<div class="ai-dual-pane">
+							<!-- Current Value Pane -->
+							<div class="ai-pane-card">
+								<div class="ai-pane-title">
+									<span>CURRENT VALUE</span>
+									<span id="ai-char-count" style="font-size: 0.78em; opacity: 0.5;">0 chars</span>
+								</div>
+								<div id="ai-current-value-preview" class="ai-value-preview-box">
+									<span style="opacity: 0.45; font-style: italic;">No field selected.</span>
+								</div>
+							</div>
+
+							<!-- User Prompt / Instructions Pane -->
+							<div class="ai-pane-card">
+								<div class="ai-pane-title">
+									<span>AI MODIFICATION INSTRUCTIONS</span>
+								</div>
+								<textarea id="ai-instructions-textarea" class="input-field" rows="6" placeholder="Describe what you want AI to change, improve, or write for this field...&#10;&#10;e.g. 'Make this description more concise' or 'Add acceptance criteria for OAuth login'"></textarea>
+								
+								<!-- Quick Suggestion Chips -->
+								<div class="ai-suggestion-chips">
+									<span class="ai-chip" onclick="applySuggestion('✨ Refine and polish grammar and clarity')">✨ Refine & Polish</span>
+									<span class="ai-chip" onclick="applySuggestion('📝 Make more detailed with explicit requirements')">📝 More Detailed</span>
+									<span class="ai-chip" onclick="applySuggestion('✂️ Make concise and brief')">✂️ Make Concise</span>
+									<span class="ai-chip" onclick="applySuggestion('🎯 Ensure strict alignment with 4-MD schema standards')">🎯 4-MD Standard</span>
+								</div>
+							</div>
+						</div>
+
+						<!-- Modal Footer -->
+						<div class="ai-modal-footer">
+							<div id="ai-status-msg" style="font-size: 0.85em; opacity: 0.7;"></div>
+							<div style="display: flex; gap: 10px;">
+								<button onclick="closeAiEditModal()" class="btn-secondary">Cancel</button>
+								<button id="ai-apply-btn" onclick="submitAiEdit()" class="btn-primary" style="background: linear-gradient(135deg, #0284c7, #6366f1); border: 1px solid rgba(255,255,255,0.15); display: flex; align-items: center; gap: 6px;">
+									<span>✨ Apply with AI</span>
+								</button>
+							</div>
+						</div>
 					</div>
 				</div>
 
@@ -1395,6 +1852,8 @@ export class EntityDetailEditor extends EditorPane {
 						if ((e.metaKey || e.ctrlKey) && e.key === 's') {
 							e.preventDefault();
 							saveAllChanges('save-desc-btn');
+						} else if (e.key === 'Escape') {
+							closeAiEditModal();
 						}
 					});
 
@@ -1538,6 +1997,202 @@ export class EntityDetailEditor extends EditorPane {
 					if (isEditMode) {
 						isEditMode = false;
 						toggleEditMode();
+					}
+
+					// 6. ✨ AI Edit & Slash/Dot Autocomplete Engine
+					const fieldDefinitionList = [
+						{ path: '/Title', file: 'README.md', value: ${JSON.stringify(data.title)} },
+						{ path: '/Description', file: 'README.md', value: ${JSON.stringify(data.description || '')} },
+						{ path: '/Instructions/Ticket Prompt', file: 'instruction.md', value: ${JSON.stringify(data.ticketPrompt || '')} },
+						{ path: '/Instructions/Ticket Type Prompt', file: 'instruction.md', value: ${JSON.stringify(data.typePrompt || '')} },
+						{ path: '/Instructions/Instruction Notes', file: 'instruction.md', value: ${JSON.stringify(data.instructionNotes || '')} },
+						{ path: '/Attributes/Status', file: 'ticket.md', value: ${JSON.stringify(data.status || 'Todo')} },
+						{ path: '/Attributes/Priority', file: 'ticket.md', value: ${JSON.stringify(data.priority || 'Medium')} },
+						{ path: '/Attributes/Current AI Agent', file: 'ticket.md', value: ${JSON.stringify(data.assignedAgentName || 'None')} },
+						{ path: '/Attributes/Type Definition', file: 'ticket.md', value: ${JSON.stringify(data.typeDefinition || '')} },
+						{ path: '/Attributes/Link To', file: 'ticket.md', value: ${JSON.stringify(data.linkTo || 'None')} },
+						{ path: '/Attributes/Linked By', file: 'ticket.md', value: ${JSON.stringify(data.linkedBy || 'None')} }
+					];
+
+					// Add custom fields
+					Object.entries(currentCustomMetadata || {}).forEach(([k, v]) => {
+						fieldDefinitionList.push({
+							path: '/Custom/' + k,
+							file: 'ticket.md',
+							value: String(v)
+						});
+					});
+
+					let selectedFieldIndex = 0;
+					let filteredFields = [...fieldDefinitionList];
+
+					function openAiEditModal(preSelectedPath) {
+						const modal = document.getElementById('ai-edit-modal');
+						modal.style.display = 'flex';
+
+						const pathInput = document.getElementById('ai-field-path-input');
+						const target = preSelectedPath || '/Description';
+						pathInput.value = target;
+						selectField(target);
+
+						const textarea = document.getElementById('ai-instructions-textarea');
+						textarea.value = '';
+						setTimeout(() => textarea.focus(), 50);
+					}
+
+					function closeAiEditModal() {
+						const modal = document.getElementById('ai-edit-modal');
+						if (modal) modal.style.display = 'none';
+						hideFieldDropdown();
+					}
+
+					function onAiModalBackdropClick(e) {
+						if (e.target.id === 'ai-edit-modal') {
+							closeAiEditModal();
+						}
+					}
+
+					function selectField(path) {
+						const cleanPath = path.trim();
+						const matched = fieldDefinitionList.find(f => 
+							f.path.toLowerCase() === cleanPath.toLowerCase() || 
+							f.path.toLowerCase().replace(/[/.]/g, '') === cleanPath.toLowerCase().replace(/[/.]/g, '')
+						) || { path: cleanPath, file: 'README.md', value: '' };
+
+						document.getElementById('ai-field-path-input').value = matched.path;
+						document.getElementById('ai-field-schema-badge').innerText = matched.file;
+
+						const previewBox = document.getElementById('ai-current-value-preview');
+						const charCount = document.getElementById('ai-char-count');
+						const val = matched.value || '';
+						previewBox.innerText = val ? val : '(Empty / None)';
+						charCount.innerText = val.length + ' chars';
+
+						hideFieldDropdown();
+					}
+
+					function showFieldDropdown() {
+						const query = document.getElementById('ai-field-path-input').value.trim();
+						renderFieldDropdown(query);
+					}
+
+					function hideFieldDropdown() {
+						const dropdown = document.getElementById('ai-field-dropdown');
+						if (dropdown) dropdown.style.display = 'none';
+					}
+
+					function handleFieldPathInput(e) {
+						const query = e.target.value;
+						renderFieldDropdown(query);
+					}
+
+					function renderFieldDropdown(query) {
+						const dropdown = document.getElementById('ai-field-dropdown');
+						const cleanQuery = query.toLowerCase().replace(/^[/. ]+/, '');
+
+						filteredFields = fieldDefinitionList.filter(f => {
+							if (!cleanQuery) return true;
+							const cleanPath = f.path.toLowerCase().replace(/^[/. ]+/, '');
+							return cleanPath.includes(cleanQuery);
+						});
+
+						if (filteredFields.length === 0) {
+							dropdown.style.display = 'none';
+							return;
+						}
+
+						selectedFieldIndex = 0;
+						dropdown.innerHTML = filteredFields.map((f, idx) => {
+							const selectedClass = (idx === 0 ? ' selected' : '');
+							const dotNotation = f.path.replace(/\//g, '.');
+							return '<div class="ai-autocomplete-item' + selectedClass + '" onclick="selectField(\'' + f.path + '\')">' +
+								'<div style="display: flex; align-items: center; gap: 8px;">' +
+									'<span style="color: #38bdf8; font-family: monospace; font-weight: 600;">' + f.path + '</span>' +
+									'<span style="opacity: 0.45; font-size: 0.85em;">(' + dotNotation + ')</span>' +
+								'</div>' +
+								'<span style="font-size: 0.78em; opacity: 0.55; font-family: monospace;">' + f.file + '</span>' +
+							'</div>';
+						}).join('');
+						dropdown.style.display = 'block';
+					}
+
+					function handleFieldPathKeydown(e) {
+						const dropdown = document.getElementById('ai-field-dropdown');
+						if (dropdown.style.display === 'block') {
+							const items = dropdown.querySelectorAll('.ai-autocomplete-item');
+							if (e.key === 'ArrowDown') {
+								e.preventDefault();
+								selectedFieldIndex = (selectedFieldIndex + 1) % items.length;
+								updateDropdownSelection(items);
+							} else if (e.key === 'ArrowUp') {
+								e.preventDefault();
+								selectedFieldIndex = (selectedFieldIndex - 1 + items.length) % items.length;
+								updateDropdownSelection(items);
+							} else if (e.key === 'Enter') {
+								e.preventDefault();
+								if (filteredFields[selectedFieldIndex]) {
+									selectField(filteredFields[selectedFieldIndex].path);
+									document.getElementById('ai-instructions-textarea').focus();
+								}
+							} else if (e.key === 'Escape') {
+								hideFieldDropdown();
+							}
+						}
+					}
+
+					function updateDropdownSelection(items) {
+						items.forEach((item, idx) => {
+							if (idx === selectedFieldIndex) {
+								item.classList.add('selected');
+								item.scrollIntoView({ block: 'nearest' });
+							} else {
+								item.classList.remove('selected');
+							}
+						});
+					}
+
+					function applySuggestion(text) {
+						const textarea = document.getElementById('ai-instructions-textarea');
+						if (textarea.value.trim()) {
+							textarea.value += ' ' + text;
+						} else {
+							textarea.value = text;
+						}
+						textarea.focus();
+					}
+
+					function submitAiEdit() {
+						const fieldPath = document.getElementById('ai-field-path-input').value.trim();
+						const instructions = document.getElementById('ai-instructions-textarea').value.trim();
+
+						if (!fieldPath) {
+							alert('Please select a target field.');
+							return;
+						}
+						if (!instructions) {
+							alert('Please enter your instructions for the AI.');
+							return;
+						}
+
+						const applyBtn = document.getElementById('ai-apply-btn');
+						applyBtn.disabled = true;
+						applyBtn.innerHTML = '<span>✨ Applying...</span>';
+
+						const currentMatched = fieldDefinitionList.find(f => f.path.toLowerCase() === fieldPath.toLowerCase());
+						const currentVal = currentMatched ? currentMatched.value : '';
+
+						vscode.postMessage({
+							type: 'applyAiEdit',
+							field: fieldPath,
+							instructions: instructions,
+							newContent: instructions // Or AI prompt instruction to replace/update
+						});
+
+						setTimeout(() => {
+							closeAiEditModal();
+							applyBtn.disabled = false;
+							applyBtn.innerHTML = '<span>✨ Apply with AI</span>';
+						}, 600);
 					}
 				</script>
 			</body>
