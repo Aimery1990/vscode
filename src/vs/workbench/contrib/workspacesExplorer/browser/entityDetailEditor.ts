@@ -1289,18 +1289,18 @@ export class EntityDetailEditor extends EditorPane {
 						word-break: break-word;
 					}
 					.ai-edit-btn {
-						opacity: 0;
-						pointer-events: none;
+						opacity: 0.9;
+						pointer-events: auto;
 						display: inline-flex;
 						align-items: center;
 						justify-content: center;
 						gap: 4px;
-						background: rgba(56, 189, 248, 0.08);
+						background: rgba(56, 189, 248, 0.12);
 						color: #38bdf8;
-						border: 1px solid rgba(56, 189, 248, 0.28);
+						border: 1px solid rgba(56, 189, 248, 0.35);
 						border-radius: 4px;
-						padding: 2px 7px;
-						font-size: 0.76em;
+						padding: 3px 8px;
+						font-size: 0.78em;
 						font-weight: 600;
 						cursor: pointer;
 						transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
@@ -1308,38 +1308,34 @@ export class EntityDetailEditor extends EditorPane {
 						line-height: 1;
 					}
 					.ai-edit-btn:hover {
-						background: rgba(56, 189, 248, 0.22);
+						opacity: 1;
+						background: rgba(56, 189, 248, 0.25);
 						border-color: #38bdf8;
-						box-shadow: 0 0 8px rgba(56, 189, 248, 0.3);
+						box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
 						transform: translateY(-1px);
 					}
 					.ai-icon-only-btn {
-						padding: 3px 6px;
-					}
-					.header-title-row:hover .ai-edit-btn,
-					.section-card:hover .section-title .ai-edit-btn,
-					.prompt-box-hover:hover .ai-edit-btn,
-					.sidebar-header-row:hover .ai-edit-btn,
-					.sidebar-row:hover .ai-edit-btn {
-						opacity: 1;
-						pointer-events: auto;
+						padding: 4px 8px;
 					}
 					.prompt-box-hover {
 						position: relative;
 						transition: border-color 0.2s;
 					}
 					.ai-modal-overlay {
-						position: fixed;
-						top: 0;
-						left: 0;
-						right: 0;
-						bottom: 0;
-						background: rgba(0, 0, 0, 0.72);
-						backdrop-filter: blur(8px);
-						display: none !important;
+						position: fixed !important;
+						top: 0 !important;
+						left: 0 !important;
+						right: 0 !important;
+						bottom: 0 !important;
+						width: 100vw !important;
+						height: 100vh !important;
+						background: rgba(0, 0, 0, 0.75) !important;
+						backdrop-filter: blur(10px) !important;
+						-webkit-backdrop-filter: blur(10px) !important;
+						display: none;
 						align-items: center;
 						justify-content: center;
-						z-index: 2147483647;
+						z-index: 2147483647 !important;
 					}
 					.ai-modal-overlay.active {
 						display: flex !important;
@@ -1845,6 +1841,7 @@ export class EntityDetailEditor extends EditorPane {
 						try {
 							const modal = document.getElementById('ai-edit-modal');
 							if (modal) {
+								modal.style.display = 'flex';
 								modal.classList.add('active');
 							}
 
@@ -1866,7 +1863,10 @@ export class EntityDetailEditor extends EditorPane {
 
 					function closeAiEditModal() {
 						const modal = document.getElementById('ai-edit-modal');
-						if (modal) modal.classList.remove('active');
+						if (modal) {
+							modal.style.display = 'none';
+							modal.classList.remove('active');
+						}
 						hideFieldDropdown();
 					}
 					window.closeAiEditModal = closeAiEditModal;
