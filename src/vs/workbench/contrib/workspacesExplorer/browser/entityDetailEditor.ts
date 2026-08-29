@@ -23,6 +23,7 @@ import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { IAgentsManagerService, IAgentItem } from '../../agentsManager/common/agentsManager.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
 
 function getColorForName(name: string | undefined): string {
 	if (!name) return '#38bdf8';
@@ -118,7 +119,8 @@ export class EntityDetailEditor extends EditorPane {
 		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
 		@INotificationService private readonly _notificationService: INotificationService,
 		@INativeEnvironmentService private readonly _environmentService: INativeEnvironmentService,
-		@IAgentsManagerService private readonly _agentsManagerService: IAgentsManagerService
+		@IAgentsManagerService private readonly _agentsManagerService: IAgentsManagerService,
+		@ICommandService private readonly _commandService: ICommandService
 	) {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
 	}
@@ -737,8 +739,20 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				break;
 			}
+			case 'openAgentCentral':
 			case 'aiButtonClicked': {
-				this._notificationService.info(`[AnyAgent AI] Opening AI Editor for ${e.source || 'field'}...`);
+				const field = e.field || e.source || '/Description';
+				const ticketId = this._entityName || '';
+				const prompt = `Please assist with editing the [${field}] of Ticket ${ticketId}: `;
+				try {
+					await this._commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
+						prompt: prompt,
+						field: field,
+						ticketId: ticketId
+					});
+				} catch (err) {
+					this._notificationService.error(`Failed to open Agent Central: ${String(err)}`);
+				}
 				break;
 			}
 			case 'applyAiEdit': {
@@ -1942,31 +1956,15 @@ export class EntityDetailEditor extends EditorPane {
 					}
 					window.submitInPlaceAi = submitInPlaceAi;
 
-					// 3. Global AI Modal Core Functions
+					// 3. Global AI Trigger Function -> Triggers Native Agent Central
 					function openAiEditModal(preSelectedPath) {
+						const target = (preSelectedPath || '/Description').trim();
 						if (vscode) {
-							vscode.postMessage({ type: 'aiButtonClicked', source: preSelectedPath });
-						}
-						try {
-							const modal = document.getElementById('ai-edit-modal');
-							if (modal) {
-								modal.classList.add('visible');
-								modal.style.display = 'flex';
-								modal.style.setProperty('display', 'flex', 'important');
-							}
-
-							const target = (preSelectedPath || '/Description').trim();
-							const pathInput = document.getElementById('ai-field-path-input');
-							if (pathInput) pathInput.value = target;
-							selectField(target);
-
-							const textarea = document.getElementById('ai-instructions-textarea');
-							if (textarea) {
-								textarea.value = '';
-								setTimeout(() => textarea.focus(), 60);
-							}
-						} catch (err) {
-							console.error('Error opening AI edit modal:', err);
+							vscode.postMessage({
+								type: 'openAgentCentral',
+								field: target,
+								source: target
+							});
 						}
 					}
 					window.openAiEditModal = openAiEditModal;
