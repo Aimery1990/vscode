@@ -39,24 +39,7 @@ import { IWorkspaceEditingService } from '../../../services/workspaces/common/wo
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { VIEW_ID } from '../../files/common/files.js';
-
-interface ICustomField {
-	id: string;
-	label: string;
-	type: 'text' | 'textarea' | 'select' | 'multiselect' | 'switch';
-	options?: string[];
-}
-
-interface ICustomModule {
-	id: string;
-	name: string;
-	description?: string;
-	prompt?: string;
-	isDeprecated?: boolean;
-	color: string;
-	storageScope?: 'global' | 'workspace';
-	fields?: ICustomField[];
-}
+import { ICustomField, ICustomModule, ICompositeComponent } from '../../entityPersistence/common/entityPersistence.js';
 
 function stringifyYaml(obj: any, indent = 0): string {
 	const spacing = ' '.repeat(indent);
@@ -65,8 +48,31 @@ function stringifyYaml(obj: any, indent = 0): string {
 		let res = '';
 		for (const item of obj) {
 			if (typeof item === 'object' && item !== null) {
-				const itemYaml = stringifyYaml(item, indent + 2).trim();
-				res += `\n${spacing}- ${itemYaml}`;
+				const entries = Object.entries(item).filter(([_, v]) => v !== undefined);
+				if (entries.length > 0) {
+					const [firstK, firstV] = entries[0];
+					let firstVStr = '';
+					if (typeof firstV === 'object' && firstV !== null) {
+						firstVStr = stringifyYaml(firstV, indent + 4);
+						res += `\n${spacing}- ${firstK}:${firstVStr}`;
+					} else {
+						const valFormatted = typeof firstV === 'string' && (firstV.includes('\n') || firstV.includes(':') || firstV.startsWith('#') || firstV.includes(',') || firstV.includes('[') || firstV.includes(']'))
+							? JSON.stringify(firstV)
+							: firstV;
+						res += `\n${spacing}- ${firstK}: ${valFormatted}`;
+					}
+					for (let j = 1; j < entries.length; j++) {
+						const [k, v] = entries[j];
+						if (typeof v === 'object' && v !== null) {
+							res += `\n${spacing}  ${k}:${stringifyYaml(v, indent + 4)}`;
+						} else {
+							const valFormatted = typeof v === 'string' && (v.includes('\n') || v.includes(':') || v.startsWith('#') || v.includes(',') || v.includes('[') || v.includes(']'))
+								? JSON.stringify(v)
+								: v;
+							res += `\n${spacing}  ${k}: ${valFormatted}`;
+						}
+					}
+				}
 			} else {
 				res += `\n${spacing}- ${item}`;
 			}
@@ -92,61 +98,125 @@ function stringifyYaml(obj: any, indent = 0): string {
 
 function parseYaml(yaml: string): any {
 	const lines = yaml.split(/\r?\n/);
-	const result: any = {};
-	let currentFieldList: any[] = [];
-	let currentField: any = null;
+	let i = 0;
 
-	for (let line of lines) {
-		const trimmed = line.trim();
-		if (!trimmed || trimmed.startsWith('#')) continue;
+	function parseBlock(currentIndent: number): any {
+		let isArray = false;
+		const arrayResult: any[] = [];
+		const objectResult: any = {};
 
-		const indent = line.length - line.trimStart().length;
+		while (i < lines.length) {
+			const line = lines[i];
+			const trimmed = line.trim();
+			if (!trimmed || trimmed.startsWith('#')) {
+				i++;
+				continue;
+			}
 
-		if (trimmed.startsWith('-')) {
-			const content = trimmed.substring(1).trim();
-			if (content.includes(':')) {
-				const colonIndex = content.indexOf(':');
-				const key = content.substring(0, colonIndex).trim();
-				let val = content.substring(colonIndex + 1).trim();
-				if (val.startsWith('"') && val.endsWith('"')) {
-					try { val = JSON.parse(val); } catch {}
+			const indent = line.length - line.trimStart().length;
+			if (indent < currentIndent) {
+				break;
+			}
+
+			if (trimmed.startsWith('-')) {
+				isArray = true;
+				const itemContent = trimmed.substring(1).trim();
+				i++;
+				if (!itemContent) {
+					const child = parseBlock(indent + 2);
+					arrayResult.push(child);
+				} else if (itemContent.includes(':')) {
+					const colonIdx = itemContent.indexOf(':');
+					const key = itemContent.substring(0, colonIdx).trim();
+					let valStr = itemContent.substring(colonIdx + 1).trim();
+					const obj: any = {};
+					if (valStr) {
+						if (valStr.startsWith('"') && valStr.endsWith('"')) {
+							try { valStr = JSON.parse(valStr); } catch {}
+						} else if (valStr === 'true') {
+							valStr = true as any;
+						} else if (valStr === 'false') {
+							valStr = false as any;
+						}
+						obj[key] = valStr;
+					} else {
+						obj[key] = parseBlock(indent + 2);
+					}
+
+					while (i < lines.length) {
+						const nextLine = lines[i];
+						const nextTrimmed = nextLine.trim();
+						if (!nextTrimmed || nextTrimmed.startsWith('#')) {
+							i++;
+							continue;
+						}
+						const nextIndent = nextLine.length - nextLine.trimStart().length;
+						if (nextIndent <= indent) {
+							break;
+						}
+						if (nextTrimmed.startsWith('-')) {
+							break;
+						}
+						const nextColonIdx = nextTrimmed.indexOf(':');
+						if (nextColonIdx !== -1) {
+							const nKey = nextTrimmed.substring(0, nextColonIdx).trim();
+							let nVal = nextTrimmed.substring(nextColonIdx + 1).trim();
+							i++;
+							if (nVal) {
+								if (nVal.startsWith('"') && nVal.endsWith('"')) {
+									try { nVal = JSON.parse(nVal); } catch {}
+								} else if (nVal === 'true') {
+									nVal = true as any;
+								} else if (nVal === 'false') {
+									nVal = false as any;
+								}
+								obj[nKey] = nVal;
+							} else {
+								obj[nKey] = parseBlock(nextIndent + 2);
+							}
+						} else {
+							i++;
+						}
+					}
+					arrayResult.push(obj);
+				} else {
+					let val: any = itemContent;
+					if (val.startsWith('"') && val.endsWith('"')) {
+						try { val = JSON.parse(val); } catch {}
+					} else if (val === 'true') {
+						val = true;
+					} else if (val === 'false') {
+						val = false;
+					}
+					arrayResult.push(val);
 				}
-				currentField = { [key]: val };
-				currentFieldList.push(currentField);
+			} else if (trimmed.includes(':')) {
+				const colonIdx = trimmed.indexOf(':');
+				const key = trimmed.substring(0, colonIdx).trim();
+				let valStr = trimmed.substring(colonIdx + 1).trim();
+				i++;
+				if (valStr) {
+					if (valStr.startsWith('"') && valStr.endsWith('"')) {
+						try { valStr = JSON.parse(valStr); } catch {}
+					} else if (valStr === 'true') {
+						valStr = true as any;
+					} else if (valStr === 'false') {
+						valStr = false as any;
+					}
+					objectResult[key] = valStr;
+				} else {
+					objectResult[key] = parseBlock(indent + 2);
+				}
 			} else {
-				let val = content;
-				if (val.startsWith('"') && val.endsWith('"')) {
-					try { val = JSON.parse(val); } catch {}
-				}
-				if (currentField && Array.isArray(currentField.options)) {
-					currentField.options.push(val);
-				}
-			}
-		} else if (trimmed.includes(':')) {
-			const colonIndex = trimmed.indexOf(':');
-			const key = trimmed.substring(0, colonIndex).trim();
-			let val = trimmed.substring(colonIndex + 1).trim();
-			if (val.startsWith('"') && val.endsWith('"')) {
-				try { val = JSON.parse(val); } catch {}
-			}
-
-			if (indent === 0) {
-				if (key === 'fields') {
-					result.fields = [];
-					currentFieldList = result.fields;
-				} else {
-					result[key] = (val === 'true' ? true : val === 'false' ? false : val);
-				}
-			} else if (indent > 0 && currentField) {
-				if (key === 'options') {
-					currentField.options = [];
-				} else {
-					currentField[key] = (val === 'true' ? true : val === 'false' ? false : val);
-				}
+				i++;
 			}
 		}
+
+		if (isArray) return arrayResult;
+		return objectResult;
 	}
-	return result;
+
+	return parseBlock(0) || {};
 }
 
 function getColorForName(name: string | undefined): string {
@@ -2362,19 +2432,21 @@ export class MainWorkspaceViewPane extends ViewPane {
 				clearNode(customFieldsBox);
 				customFieldsBox.style.display = 'flex';
 				for (const field of matchingModule.fields) {
-					const fieldGroup = append(customFieldsBox, $('.form-group', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
-					append(fieldGroup, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; font-weight: 500;' }, `${field.label}:`));
+					const fieldGroup = append(customFieldsBox, $('.form-group', { style: 'display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px;' }));
+					append(fieldGroup, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; font-weight: 600;' }, `${field.label}:`));
 					
 					if (field.type === 'textarea') {
 						append(fieldGroup, $('textarea.monaco-inputbox.custom-field-input', {
 							'data-field-id': field.id,
 							'data-field-label': field.label,
+							'data-field-type': field.type,
 							style: 'width: 100%; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; min-height: 52px; font-family: inherit;'
 						}));
 					} else if (field.type === 'select') {
 						const select = append(fieldGroup, $('select.monaco-select.custom-field-input', {
 							'data-field-id': field.id,
 							'data-field-label': field.label,
+							'data-field-type': field.type,
 							style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;'
 						})) as HTMLSelectElement;
 						(field.options || []).forEach((opt: string) => {
@@ -2384,6 +2456,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 						const container = append(fieldGroup, $('.multiselect-container.custom-field-input', {
 							'data-field-id': field.id,
 							'data-field-label': field.label,
+							'data-field-type': field.type,
 							style: 'display: flex; flex-direction: column; gap: 4px; border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 8px; background: rgba(0,0,0,0.15);'
 						}));
 						(field.options || []).forEach((opt: string) => {
@@ -2397,14 +2470,181 @@ export class MainWorkspaceViewPane extends ViewPane {
 							type: 'checkbox',
 							'data-field-id': field.id,
 							'data-field-label': field.label,
+							'data-field-type': field.type,
 							style: 'cursor: pointer;'
 						}));
 						append(row, $('span', {}, 'Enabled'));
+					} else if (field.type === 'date') {
+						append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
+							type: 'date',
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							'data-field-type': field.type,
+							style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+						}));
+					} else if (field.type === 'time') {
+						append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
+							type: 'time',
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							'data-field-type': field.type,
+							style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+						}));
+					} else if (field.type === 'datetime') {
+						append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
+							type: 'datetime-local',
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							'data-field-type': field.type,
+							style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+						}));
+					} else if (field.type === 'date_range' || field.type === 'time_range' || field.type === 'datetime_range') {
+						const rangeContainer = append(fieldGroup, $('.range-container.custom-field-input', {
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							'data-field-type': field.type,
+							style: 'display: flex; align-items: center; gap: 8px;'
+						}));
+						const inputType = field.type === 'date_range' ? 'date' : field.type === 'time_range' ? 'time' : 'datetime-local';
+						append(rangeContainer, $('input.monaco-inputbox.range-start', {
+							type: inputType,
+							placeholder: 'Start',
+							style: 'flex: 1; padding: 7px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit;'
+						}));
+						append(rangeContainer, $('span', { style: 'opacity: 0.6; font-size: 12px;' }, '➔'));
+						append(rangeContainer, $('input.monaco-inputbox.range-end', {
+							type: inputType,
+							placeholder: 'End',
+							style: 'flex: 1; padding: 7px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit;'
+						}));
+					} else if (field.type === 'dynamic_list') {
+						const listContainer = append(fieldGroup, $('.dynamic-list-container.custom-field-input', {
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							'data-field-type': field.type,
+							style: 'display: flex; flex-direction: column; gap: 10px; border: 1px solid rgba(56, 189, 248, 0.2); background: rgba(56, 189, 248, 0.03); border-radius: 8px; padding: 12px;'
+						}));
+
+						const itemsWrapper = append(listContainer, $('.dynamic-items-wrapper', { style: 'display: flex; flex-direction: column; gap: 10px;' }));
+
+						const renderItemCard = (itemData?: any) => {
+							const currentCount = itemsWrapper.querySelectorAll('.dynamic-item-card').length;
+							const idx = currentCount + 1;
+							const itemCard = append(itemsWrapper, $('.dynamic-item-card', {
+								style: 'background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;'
+							}));
+
+							const itemHeader = append(itemCard, $('.item-card-header', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+							const headerLeft = append(itemHeader, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex: 1;' }));
+							append(headerLeft, $('span', { style: 'font-size: 10px; font-weight: 700; background: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 2px 6px; border-radius: 4px;' }, `#${idx}`));
+							append(headerLeft, $('input.monaco-inputbox.item-title-input', {
+								placeholder: `Entry Title (e.g. Company, Project, Milestone)...`,
+								value: itemData?._title || '',
+								style: 'flex: 1; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.25); color: #fff;'
+							}));
+
+							const delItemBtn = append(itemHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
+								style: 'color: #ef4444; cursor: pointer; padding: 4px; font-size: 12px; opacity: 0.8;'
+							}));
+							delItemBtn.onclick = () => {
+								itemCard.remove();
+								// Re-index remaining
+								const remaining = itemsWrapper.querySelectorAll('.dynamic-item-card');
+								remaining.forEach((card, rIdx) => {
+									const badge = card.querySelector('span');
+									if (badge) badge.innerText = `#${rIdx + 1}`;
+								});
+							};
+
+							const subFieldsList = field.itemFields || [];
+							if (subFieldsList.length > 0) {
+								const subGrid = append(itemCard, $('.subfields-grid', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
+								for (const subF of subFieldsList) {
+									const subRow = append(subGrid, $('.subfield-row', { style: 'display: flex; flex-direction: column; gap: 3px;' }));
+									append(subRow, $('label', { style: 'font-size: 10.5px; opacity: 0.75; font-weight: 500;' }, `${subF.label}:`));
+									
+									if (subF.type === 'textarea') {
+										append(subRow, $('textarea.monaco-inputbox.sub-field-input', {
+											'data-subfield-id': subF.id,
+											'data-subfield-label': subF.label,
+											'data-subfield-type': subF.type,
+											rows: '3',
+											style: 'width: 100%; padding: 6px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff; resize: vertical;'
+										}));
+									} else if (subF.type === 'select') {
+										const sSelect = append(subRow, $('select.monaco-select.sub-field-input', {
+											'data-subfield-id': subF.id,
+											'data-subfield-label': subF.label,
+											'data-subfield-type': subF.type,
+											style: 'width: 100%; padding: 5px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.25); color: #fff;'
+										})) as HTMLSelectElement;
+										(subF.options || []).forEach(o => append(sSelect, $('option', { value: o }, o)));
+									} else if (subF.type === 'date_range' || subF.type === 'time_range' || subF.type === 'datetime_range') {
+										const rBox = append(subRow, $('.range-container.sub-field-input', {
+											'data-subfield-id': subF.id,
+											'data-subfield-label': subF.label,
+											'data-subfield-type': subF.type,
+											style: 'display: flex; align-items: center; gap: 6px;'
+										}));
+										const iType = subF.type === 'date_range' ? 'date' : subF.type === 'time_range' ? 'time' : 'datetime-local';
+										append(rBox, $('input.monaco-inputbox.range-start', {
+											type: iType,
+											style: 'flex: 1; padding: 4px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff;'
+										}));
+										append(rBox, $('span', { style: 'font-size: 11px; opacity: 0.6;' }, '➔'));
+										append(rBox, $('input.monaco-inputbox.range-end', {
+											type: iType,
+											style: 'flex: 1; padding: 4px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff;'
+										}));
+									} else if (subF.type === 'date' || subF.type === 'time' || subF.type === 'datetime') {
+										const iType = subF.type === 'date' ? 'date' : subF.type === 'time' ? 'time' : 'datetime-local';
+										append(subRow, $('input.monaco-inputbox.sub-field-input', {
+											type: iType,
+											'data-subfield-id': subF.id,
+											'data-subfield-label': subF.label,
+											'data-subfield-type': subF.type,
+											style: 'width: 100%; padding: 5px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff;'
+										}));
+									} else if (subF.type === 'switch') {
+										const sLabel = append(subRow, $('label', { style: 'display: flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer;' }));
+										append(sLabel, $('input.sub-field-input', {
+											type: 'checkbox',
+											'data-subfield-id': subF.id,
+											'data-subfield-label': subF.label,
+											'data-subfield-type': subF.type
+										}));
+										append(sLabel, $('span', {}, 'Enabled'));
+									} else {
+										append(subRow, $('input.monaco-inputbox.sub-field-input', {
+											type: 'text',
+											'data-subfield-id': subF.id,
+											'data-subfield-label': subF.label,
+											'data-subfield-type': subF.type,
+											placeholder: `Enter ${subF.label}...`,
+											style: 'width: 100%; padding: 5px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff;'
+										}));
+									}
+								}
+							}
+						};
+
+						// Render initial entry
+						renderItemCard();
+
+						const addEntryBtn = append(listContainer, $('button.monaco-button', {
+							style: 'padding: 5px 12px; font-size: 11px; border-radius: 5px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); cursor: pointer; align-self: flex-start; font-weight: 500;'
+						}));
+						addEntryBtn.innerText = `+ Add ${field.label} Entry`;
+						addEntryBtn.onclick = (e) => {
+							e.preventDefault();
+							renderItemCard();
+						};
 					} else {
 						append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
 							type: 'text',
 							'data-field-id': field.id,
 							'data-field-label': field.label,
+							'data-field-type': field.type,
 							style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 						}));
 					}
@@ -2520,6 +2760,37 @@ export class MainWorkspaceViewPane extends ViewPane {
 						} else if (inputEl.classList.contains('multiselect-container')) {
 							const checked = Array.from(inputEl.querySelectorAll('input[type="checkbox"]:checked')).map((cb: any) => cb.value);
 							customMetadata[fieldLabel] = checked.join(', ');
+						} else if (inputEl.classList.contains('range-container')) {
+							const startVal = (inputEl.querySelector('.range-start') as HTMLInputElement)?.value || '';
+							const endVal = (inputEl.querySelector('.range-end') as HTMLInputElement)?.value || '';
+							customMetadata[fieldLabel] = (startVal || endVal) ? `${startVal} ~ ${endVal}` : '';
+						} else if (inputEl.classList.contains('dynamic-list-container')) {
+							const itemCards = inputEl.querySelectorAll('.dynamic-item-card');
+							const items: any[] = [];
+							itemCards.forEach((cardEl, idx) => {
+								const itemObj: any = { _index: idx + 1 };
+								const titleInput = cardEl.querySelector('.item-title-input') as HTMLInputElement;
+								if (titleInput && titleInput.value.trim()) {
+									itemObj._title = titleInput.value.trim();
+								}
+								const subInputs = cardEl.querySelectorAll('.sub-field-input');
+								subInputs.forEach(subEl => {
+									const subLabel = subEl.getAttribute('data-subfield-label');
+									if (subLabel) {
+										if (subEl instanceof HTMLInputElement && subEl.type === 'checkbox') {
+											itemObj[subLabel] = subEl.checked ? 'true' : 'false';
+										} else if (subEl.classList.contains('range-container')) {
+											const startVal = (subEl.querySelector('.range-start') as HTMLInputElement)?.value || '';
+											const endVal = (subEl.querySelector('.range-end') as HTMLInputElement)?.value || '';
+											itemObj[subLabel] = (startVal || endVal) ? `${startVal} ~ ${endVal}` : '';
+										} else {
+											itemObj[subLabel] = (subEl as any).value || '';
+										}
+									}
+								});
+								items.push(itemObj);
+							});
+							customMetadata[fieldLabel] = JSON.stringify(items);
 						} else {
 							customMetadata[fieldLabel] = (inputEl as any).value || '';
 						}
@@ -2669,6 +2940,112 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const userHome = this.environmentService.userHome.fsPath;
 		const resolvedPath = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type');
 		return URI.file(resolvedPath);
+	}
+
+	private _getGlobalEntityComponentDir(): URI {
+		let savedPath = '~/.anyagent/entity_component';
+		try {
+			if (this._storageService) {
+				savedPath = this._storageService.get('anyagent.globalEntityComponentPath', StorageScope.PROFILE, '~/.anyagent/entity_component');
+			}
+		} catch (e) {
+			console.error('Failed to read globalEntityComponentPath setting:', e);
+		}
+		const userHome = this.environmentService.userHome.fsPath;
+		const resolvedPath = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_component');
+		return URI.file(resolvedPath);
+	}
+
+	private async _getCompositeComponents(workspaceUri: URI): Promise<ICompositeComponent[]> {
+		const componentsMap = new Map<string, ICompositeComponent>();
+		try {
+			const globalDir = this._getGlobalEntityComponentDir();
+			const localDir = URI.joinPath(workspaceUri, '.agents', 'entity_component');
+			const localDirPlural = URI.joinPath(workspaceUri, '.agents', 'entity_components');
+			const parentLocalDir = URI.joinPath(dirname(workspaceUri), '.agents', 'entity_component');
+
+			if (await this.fileService.exists(globalDir)) {
+				const stat = await this.fileService.resolve(globalDir);
+				if (stat.children) {
+					for (const child of stat.children) {
+						if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
+							const comp = await this._readYamlFile(child.resource);
+							if (comp && comp.id) {
+								comp.storageScope = 'global';
+								componentsMap.set(comp.id.toLowerCase(), comp);
+							}
+						}
+					}
+				}
+			}
+
+			const checkDirs = [localDir, localDirPlural, parentLocalDir];
+			for (const dir of checkDirs) {
+				try {
+					if (await this.fileService.exists(dir)) {
+						const stat = await this.fileService.resolve(dir);
+						if (stat.children) {
+							for (const child of stat.children) {
+								if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
+									const comp = await this._readYamlFile(child.resource);
+									if (comp && comp.id) {
+										if (!comp.storageScope) {
+											comp.storageScope = 'workspace';
+										}
+										componentsMap.set(comp.id.toLowerCase(), comp);
+									}
+								}
+							}
+						}
+					}
+				} catch {}
+			}
+		} catch (e) {
+			console.error('Error in _getCompositeComponents:', e);
+		}
+		return Array.from(componentsMap.values());
+	}
+
+	private async _saveCompositeComponent(comp: ICompositeComponent, workspaceUri: URI): Promise<void> {
+		try {
+			const globalDir = this._getGlobalEntityComponentDir();
+			const localDir = URI.joinPath(workspaceUri, '.agents', 'entity_component');
+			const filename = `${comp.id}.yaml`;
+			const fileData = { ...comp };
+			delete fileData.storageScope;
+
+			if (comp.storageScope === 'global') {
+				const globalFile = URI.joinPath(globalDir, filename);
+				const localFile = URI.joinPath(localDir, filename);
+				await this._writeYamlFile(globalFile, { ...fileData, storageScope: 'global' });
+				await this._writeYamlFile(localFile, { ...fileData, storageScope: 'global' });
+			} else {
+				const localFile = URI.joinPath(localDir, filename);
+				await this._writeYamlFile(localFile, { ...fileData, storageScope: 'workspace' });
+			}
+		} catch (e) {
+			console.error('Error in _saveCompositeComponent:', e);
+			this.notificationService.error(`Failed to save composite class asset: ${e}`);
+		}
+	}
+
+	private async _deleteCompositeComponent(comp: ICompositeComponent, workspaceUri: URI): Promise<void> {
+		try {
+			const globalDir = this._getGlobalEntityComponentDir();
+			const localDir = URI.joinPath(workspaceUri, '.agents', 'entity_component');
+			const filename = `${comp.id}.yaml`;
+
+			const globalFile = URI.joinPath(globalDir, filename);
+			if (await this.fileService.exists(globalFile)) {
+				await this.fileService.del(globalFile);
+			}
+			const localFile = URI.joinPath(localDir, filename);
+			if (await this.fileService.exists(localFile)) {
+				await this.fileService.del(localFile);
+			}
+		} catch (e) {
+			console.error('Error in _deleteCompositeComponent:', e);
+		}
 	}
 
 	private async _getCustomModules(workspaceUri: URI): Promise<ICustomModule[]> {
@@ -2980,7 +3357,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				await refreshList();
 			} else {
 				// --- STAGE 2: Specialized Module Editor Canvas ---
-				mgModal.style.maxWidth = '900px';
+				mgModal.style.maxWidth = '1020px';
 
 				const activeMod = selectedModule;
 
@@ -3053,31 +3430,131 @@ export class MainWorkspaceViewPane extends ViewPane {
 				renderColorPicker();
 
 				// Main columns
-				const modalLayoutContainer = append(mgModal, $('.modal-layout-container', { style: 'display: flex; gap: 20px; width: 100%; height: 380px; overflow: hidden;' }));
+				const modalLayoutContainer = append(mgModal, $('.modal-layout-container', { style: 'display: flex; gap: 20px; width: 100%; height: 480px; overflow: hidden;' }));
 				
-				// Left Column: Palette library (30%)
-				const leftColumn = append(modalLayoutContainer, $('.left-col', { style: 'flex: 3; border-right: 1px solid rgba(255,255,255,0.08); padding-right: 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto;' }));
+				// Left Column: Palette library (32%)
+				const leftColumn = append(modalLayoutContainer, $('.left-col', { style: 'flex: 32; border-right: 1px solid rgba(255,255,255,0.08); padding-right: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto;' }));
 
-				// Palette Title & Stacked buttons
-				append(leftColumn, $('div', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #888888;' }, 'Component Library'));
-				append(leftColumn, $('div', { style: 'font-size: 10px; opacity: 0.5; line-height: 1.4;' }, 'Click component buttons below to add new fields to the schema on the right.'));
+				// Right Column: Canvas list (68%)
+				const rightColumn = append(modalLayoutContainer, $('.right-col', { style: 'flex: 68; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; padding-left: 6px;' }));
 
-				const paletteContainer = append(leftColumn, $('.palette-container', { style: 'display: flex; flex-direction: column; gap: 8px;' }));
-				const fieldTypes = [
+				const fieldsListContainer = append(rightColumn, $('.fields-list-container', {
+					style: 'display: flex; flex-direction: column; gap: 10px; min-height: 100%;'
+				}));
+
+				const getBadgeStyle = (type: string) => {
+					const colorMap: { [key: string]: { bg: string; text: string } } = {
+						text: { bg: 'rgba(56,189,248,0.12)', text: '#38bdf8' },
+						textarea: { bg: 'rgba(129,140,248,0.12)', text: '#818cf8' },
+						select: { bg: 'rgba(167,139,250,0.12)', text: '#a78bfa' },
+						multiselect: { bg: 'rgba(192,132,252,0.12)', text: '#c084fc' },
+						switch: { bg: 'rgba(45,212,191,0.12)', text: '#2dd4bf' },
+						date: { bg: 'rgba(52,211,153,0.12)', text: '#34d399' },
+						time: { bg: 'rgba(251,191,36,0.12)', text: '#fbbf24' },
+						datetime: { bg: 'rgba(96,165,250,0.12)', text: '#60a5fa' },
+						date_range: { bg: 'rgba(16,185,129,0.12)', text: '#10b981' },
+						time_range: { bg: 'rgba(245,158,11,0.12)', text: '#f59e0b' },
+						datetime_range: { bg: 'rgba(236,72,153,0.12)', text: '#ec4899' },
+						dynamic_list: { bg: 'rgba(6,182,212,0.15)', text: '#06b6d4' }
+					};
+					const c = colorMap[type] || colorMap.text;
+					return `font-size: 9px; padding: 2px 6px; border-radius: 4px; background: ${c.bg}; color: ${c.text}; text-transform: uppercase; font-weight: bold; letter-spacing: 0.05em;`;
+				};
+
+				const primitiveTypes = [
 					{ type: 'text', label: 'Single-line Input (Text)', icon: Codicon.symbolString },
 					{ type: 'textarea', label: 'Textarea (Multiline)', icon: Codicon.listFlat },
 					{ type: 'select', label: 'Dropdown (Select)', icon: Codicon.chevronDown },
 					{ type: 'multiselect', label: 'Checkboxes (Multiselect)', icon: Codicon.checklist },
-					{ type: 'switch', label: 'Switch (Toggle)', icon: Codicon.circleFilled }
+					{ type: 'switch', label: 'Switch (Toggle)', icon: Codicon.circleFilled },
+					{ type: 'date', label: 'Single Date Picker', icon: Codicon.calendar },
+					{ type: 'time', label: 'Single Time Picker', icon: Codicon.watch },
+					{ type: 'datetime', label: 'Single DateTime Picker', icon: Codicon.history },
+					{ type: 'date_range', label: 'Date Range (Start ~ End)', icon: Codicon.calendar },
+					{ type: 'time_range', label: 'Time Range (Start ~ End)', icon: Codicon.watch },
+					{ type: 'datetime_range', label: 'DateTime Range (Start ~ End)', icon: Codicon.history },
+					{ type: 'dynamic_list', label: 'Dynamic Container (List)', icon: Codicon.layers }
 				];
 
-				// Right Column: Canvas list (70%)
-				const rightColumn = append(modalLayoutContainer, $('.right-col', { style: 'flex: 7; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; padding-left: 6px;' }));
+				const refreshLeftPalette = async () => {
+					clearNode(leftColumn);
+					
+					// Title
+					append(leftColumn, $('div', { style: 'font-size: 11px; opacity: 0.85; font-weight: 700; text-transform: uppercase; color: #888888;' }, 'Component Library'));
+					append(leftColumn, $('div', { style: 'font-size: 10px; opacity: 0.5; line-height: 1.4;' }, 'Click buttons to insert primitives or saved composite classes.'));
 
-				// Right Column Canvas fields renderer
-				const fieldsListContainer = append(rightColumn, $('.fields-list-container', {
-					style: 'display: flex; flex-direction: column; gap: 10px; min-height: 100%;'
-				}));
+					// Section 1: Primitives
+					const primSection = append(leftColumn, $('.prim-section', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
+					append(primSection, $('div', { style: 'font-size: 10px; font-weight: 600; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px;' }, 'Base Primitives'));
+
+					primitiveTypes.forEach(ft => {
+						const btn = append(primSection, $('button.monaco-button', {
+							style: 'padding: 6px 10px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: inherit; display: flex; align-items: center; gap: 8px; text-align: left;'
+						}));
+						const btnIcon = append(btn, $('span' + ThemeIcon.asCSSSelector(ft.icon)));
+						btnIcon.style.opacity = '0.7';
+						append(btn, $('span', {}, ft.label));
+
+						btn.onclick = () => {
+							if (!activeMod.fields) activeMod.fields = [];
+							const fieldId = `field_${Date.now()}`;
+							const newF: ICustomField = {
+								id: fieldId,
+								label: ft.type === 'dynamic_list' ? 'New Dynamic List' : `New ${ft.type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`,
+								type: ft.type as any,
+								options: (ft.type === 'select' || ft.type === 'multiselect') ? ['Option 1', 'Option 2'] : undefined,
+								itemFields: ft.type === 'dynamic_list' ? [
+									{ id: `sub_${Date.now()}_1`, label: 'Item Name', type: 'text' },
+									{ id: `sub_${Date.now()}_2`, label: 'Service Period', type: 'date_range' },
+									{ id: `sub_${Date.now()}_3`, label: 'Description', type: 'textarea' }
+								] : undefined
+							};
+							activeMod.fields.push(newF);
+							renderFieldList();
+							rightColumn.scrollTop = rightColumn.scrollHeight;
+						};
+					});
+
+					// Section 2: Saved Composite Classes
+					const compSection = append(leftColumn, $('.comp-section', { style: 'display: flex; flex-direction: column; gap: 6px; margin-top: 8px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px;' }));
+					append(compSection, $('div', { style: 'font-size: 10px; font-weight: 600; color: #06b6d4; text-transform: uppercase; letter-spacing: 0.05em;' }, 'My Composite Classes'));
+
+					const savedClasses = await this._getCompositeComponents(targetUri);
+					if (savedClasses.length === 0) {
+						append(compSection, $('div', { style: 'font-size: 10px; opacity: 0.45; font-style: italic; padding: 4px 0;' }, 'No saved classes yet. Design a Dynamic Container & click "Save as Class".'));
+					} else {
+						savedClasses.forEach(sc => {
+							const cRow = append(compSection, $('div', { style: 'display: flex; align-items: center; gap: 4px;' }));
+							const cBtn = append(cRow, $('button.monaco-button', {
+								style: 'flex: 1; padding: 6px 8px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(6,182,212,0.08); border: 1px solid rgba(6,182,212,0.25); color: #06b6d4; display: flex; align-items: center; gap: 6px; text-align: left;'
+							}));
+							append(cBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolClass)));
+							append(cBtn, $('span', { style: 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, sc.name));
+
+							cBtn.onclick = () => {
+								if (!activeMod.fields) activeMod.fields = [];
+								const fieldId = `field_${Date.now()}`;
+								activeMod.fields.push({
+									id: fieldId,
+									label: sc.name,
+									type: 'dynamic_list',
+									componentRef: sc.id,
+									itemFields: JSON.parse(JSON.stringify(sc.itemFields || []))
+								});
+								renderFieldList();
+								rightColumn.scrollTop = rightColumn.scrollHeight;
+							};
+
+							const trashBtn = append(cRow, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
+								style: 'color: #ef4444; opacity: 0.6; cursor: pointer; padding: 4px; font-size: 11px;'
+							}));
+							trashBtn.onclick = async () => {
+								await this._deleteCompositeComponent(sc, targetUri);
+								await refreshLeftPalette();
+							};
+						});
+					}
+				};
 
 				const renderFieldList = () => {
 					clearNode(fieldsListContainer);
@@ -3091,8 +3568,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 
 					fields.forEach((field, fIdx) => {
+						const isContainer = field.type === 'dynamic_list';
 						const fieldCard = append(fieldsListContainer, $('.field-card', {
-							style: 'padding: 12px 14px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); display: flex; flex-direction: column; gap: 8px; cursor: grab; position: relative;'
+							style: isContainer
+								? 'padding: 12px 14px; border-radius: 8px; background: rgba(6, 182, 212, 0.04); border: 1px solid rgba(6, 182, 212, 0.25); display: flex; flex-direction: column; gap: 10px; cursor: grab; position: relative;'
+								: 'padding: 12px 14px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); display: flex; flex-direction: column; gap: 8px; cursor: grab; position: relative;'
 						}));
 						fieldCard.setAttribute('draggable', 'true');
 
@@ -3121,13 +3601,33 @@ export class MainWorkspaceViewPane extends ViewPane {
 						};
 
 						const topRow = append(fieldCard, $('.field-top-row', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
-						const badge = append(topRow, $('span', {
-							style: 'font-size: 9px; padding: 2px 6px; border-radius: 4px; background: rgba(56,189,248,0.12); color: #38bdf8; text-transform: uppercase; font-weight: bold; letter-spacing: 0.05em;'
-						}));
-						badge.innerText = field.type;
+						const badge = append(topRow, $('span', { style: getBadgeStyle(field.type) }));
+						badge.innerText = field.type.replace(/_/g, ' ');
 
-						const actions = append(topRow, $('.field-actions', { style: 'display: flex; gap: 8px;' }));
+						const actions = append(topRow, $('.field-actions', { style: 'display: flex; align-items: center; gap: 8px;' }));
 						
+						if (isContainer) {
+							const saveClassBtn = append(actions, $('button.monaco-button', {
+								style: 'padding: 2px 8px; font-size: 10px; border-radius: 4px; background: rgba(6, 182, 212, 0.15); color: #06b6d4; border: 1px solid rgba(6, 182, 212, 0.35); cursor: pointer; display: flex; align-items: center; gap: 4px; font-weight: 600;'
+							}));
+							append(saveClassBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.bookmark)));
+							append(saveClassBtn, $('span', {}, 'Save as Class Asset'));
+							saveClassBtn.onclick = async (e) => {
+								e.stopPropagation();
+								const classId = field.label.toLowerCase().replace(/[^a-z0-9_-]/g, '_') || `class_${Date.now()}`;
+								const comp: ICompositeComponent = {
+									id: classId,
+									name: field.label,
+									description: `Reusable composite class for ${field.label}`,
+									itemFields: JSON.parse(JSON.stringify(field.itemFields || [])),
+									storageScope: activeMod.storageScope || 'global'
+								};
+								await this._saveCompositeComponent(comp, targetUri);
+								this.notificationService.info(`Saved composite class asset "${field.label}" to ${comp.storageScope} library.`);
+								await refreshLeftPalette();
+							};
+						}
+
 						const upBtn = append(actions, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp), { style: 'cursor: pointer; opacity: 0.7; font-size: 12px; padding: 2px;' }));
 						upBtn.onclick = (e) => {
 							e.stopPropagation();
@@ -3161,12 +3661,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 						// Label Rename Box
 						const renameGroup = append(fieldCard, $('.rename-group', { style: 'display: flex; gap: 8px; align-items: center;' }));
-						append(renameGroup, $('label', { style: 'font-size: 11px; opacity: 0.7; width: 80px; min-width: 80px;' }, 'Field Name:'));
+						append(renameGroup, $('label', { style: 'font-size: 11px; opacity: 0.7; width: 90px; min-width: 90px;' }, isContainer ? 'Container Name:' : 'Field Name:'));
 						const labelInput = append(renameGroup, $('input.monaco-inputbox', {
 							style: 'flex: 1; padding: 5px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit;'
 						})) as HTMLInputElement;
 						labelInput.value = field.label;
-						labelInput.placeholder = 'e.g. Version, Priority Level';
+						labelInput.placeholder = isContainer ? 'e.g. Work Experience, Project History' : 'e.g. Version, Priority Level';
 						labelInput.oninput = () => {
 							const val = labelInput.value.trim() || `Field_${fIdx + 1}`;
 							field.label = labelInput.value;
@@ -3175,7 +3675,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 						// Options List Config for Dropdowns / Checkboxes
 						if (field.type === 'select' || field.type === 'multiselect') {
-							const optionsBox = append(fieldCard, $('.options-config-box', { style: 'margin-left: 88px; background: rgba(0,0,0,0.15); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);' }));
+							const optionsBox = append(fieldCard, $('.options-config-box', { style: 'margin-left: 98px; background: rgba(0,0,0,0.15); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);' }));
 							
 							const renderOptionsUI = () => {
 								optionsBox.textContent = '';
@@ -3216,31 +3716,125 @@ export class MainWorkspaceViewPane extends ViewPane {
 							};
 							renderOptionsUI();
 						}
+
+						// Inner Sub-fields Canvas for Dynamic Container
+						if (isContainer) {
+							const subCanvas = append(fieldCard, $('.subfields-canvas', {
+								style: 'margin-left: 12px; border-left: 2px solid rgba(6, 182, 212, 0.35); padding-left: 14px; display: flex; flex-direction: column; gap: 8px; background: rgba(0,0,0,0.15); padding: 10px; border-radius: 6px;'
+							}));
+
+							const renderSubFieldsList = () => {
+								clearNode(subCanvas);
+								append(subCanvas, $('div', { style: 'font-size: 10px; font-weight: 700; text-transform: uppercase; color: #06b6d4; letter-spacing: 0.05em;' }, 'Composite Item Template (Sub-Fields):'));
+								
+								if (!field.itemFields) field.itemFields = [];
+								
+								field.itemFields.forEach((subF, sIdx) => {
+									const subCard = append(subCanvas, $('.subfield-card', {
+										style: 'padding: 8px 10px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 5px; display: flex; flex-direction: column; gap: 6px;'
+									}));
+
+									const subTop = append(subCard, $('.sub-top', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+									const subBadge = append(subTop, $('span', { style: getBadgeStyle(subF.type) }));
+									subBadge.innerText = subF.type.replace(/_/g, ' ');
+
+									const subActs = append(subTop, $('.sub-actions', { style: 'display: flex; gap: 6px;' }));
+									const sUp = append(subActs, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp), { style: 'cursor: pointer; opacity: 0.6; font-size: 11px;' }));
+									sUp.onclick = (e) => {
+										e.stopPropagation();
+										if (sIdx > 0 && field.itemFields) {
+											const temp = field.itemFields[sIdx];
+											field.itemFields[sIdx] = field.itemFields[sIdx - 1];
+											field.itemFields[sIdx - 1] = temp;
+											renderSubFieldsList();
+										}
+									};
+
+									const sDown = append(subActs, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowDown), { style: 'cursor: pointer; opacity: 0.6; font-size: 11px;' }));
+									sDown.onclick = (e) => {
+										e.stopPropagation();
+										if (field.itemFields && sIdx < field.itemFields.length - 1) {
+											const temp = field.itemFields[sIdx];
+											field.itemFields[sIdx] = field.itemFields[sIdx + 1];
+											field.itemFields[sIdx + 1] = temp;
+											renderSubFieldsList();
+										}
+									};
+
+									const sDel = append(subActs, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { style: 'color: #ef4444; cursor: pointer; opacity: 0.7; font-size: 11px;' }));
+									sDel.onclick = (e) => {
+										e.stopPropagation();
+										field.itemFields?.splice(sIdx, 1);
+										renderSubFieldsList();
+									};
+
+									const subNameRow = append(subCard, $('.sub-name-row', { style: 'display: flex; gap: 6px; align-items: center;' }));
+									append(subNameRow, $('label', { style: 'font-size: 10.5px; opacity: 0.7; width: 75px;' }, 'Sub-Field:'));
+									const sInput = append(subNameRow, $('input.monaco-inputbox', {
+										value: subF.label,
+										style: 'flex: 1; padding: 4px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.25); color: #fff;'
+									})) as HTMLInputElement;
+									sInput.oninput = () => {
+										subF.label = sInput.value;
+										subF.id = sInput.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_') || `sub_${sIdx + 1}`;
+									};
+
+									if (subF.type === 'select' || subF.type === 'multiselect') {
+										const sOptBox = append(subCard, $('.sub-opts', { style: 'margin-left: 81px; display: flex; flex-direction: column; gap: 4px;' }));
+										if (!subF.options) subF.options = ['Option 1', 'Option 2'];
+										subF.options.forEach((opt, oIdx) => {
+											const oRow = append(sOptBox, $('div', { style: 'display: flex; gap: 4px; align-items: center;' }));
+											const oInput = append(oRow, $('input.monaco-inputbox', {
+												value: opt,
+												style: 'flex: 1; padding: 2px 4px; font-size: 10px; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.1); border-radius: 3px; color: #fff;'
+											})) as HTMLInputElement;
+											oInput.oninput = () => { subF.options![oIdx] = oInput.value; };
+											const oDel = append(oRow, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { style: 'color: #ef4444; cursor: pointer; font-size: 10px;' }));
+											oDel.onclick = () => { subF.options!.splice(oIdx, 1); renderSubFieldsList(); };
+										});
+										const addSOpt = append(sOptBox, $('button.monaco-button', { style: 'align-self: flex-start; padding: 2px 6px; font-size: 9.5px;' }, '+ Add Option'));
+										addSOpt.onclick = () => { subF.options!.push(`Option ${subF.options!.length + 1}`); renderSubFieldsList(); };
+									}
+								});
+
+								// Add Sub-Field Button Group
+								const addSubBtnRow = append(subCanvas, $('.add-sub-btn-row', { style: 'display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px;' }));
+								const subTypesToAdd = [
+									{ type: 'text', label: '+ Text' },
+									{ type: 'textarea', label: '+ Textarea' },
+									{ type: 'select', label: '+ Dropdown' },
+									{ type: 'date', label: '+ Date' },
+									{ type: 'time', label: '+ Time' },
+									{ type: 'datetime', label: '+ DateTime' },
+									{ type: 'date_range', label: '+ Date Range' },
+									{ type: 'time_range', label: '+ Time Range' },
+									{ type: 'switch', label: '+ Switch' }
+								];
+								subTypesToAdd.forEach(st => {
+									const stBtn = append(addSubBtnRow, $('button.monaco-button', {
+										style: 'padding: 3px 8px; font-size: 10px; border-radius: 4px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: #fff; cursor: pointer;'
+									}));
+									stBtn.innerText = st.label;
+									stBtn.onclick = (e) => {
+										e.preventDefault();
+										if (!field.itemFields) field.itemFields = [];
+										field.itemFields.push({
+											id: `sub_${Date.now()}`,
+											label: `New ${st.type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`,
+											type: st.type as any,
+											options: st.type === 'select' ? ['Option 1', 'Option 2'] : undefined
+										});
+										renderSubFieldsList();
+									};
+								});
+							};
+
+							renderSubFieldsList();
+						}
 					});
 				};
 
-				fieldTypes.forEach(ft => {
-					const btn = append(paletteContainer, $('button.monaco-button', {
-						style: 'padding: 8px 12px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: inherit; display: flex; align-items: center; gap: 8px; text-align: left;'
-					}));
-					const btnIcon = append(btn, $('span' + ThemeIcon.asCSSSelector(ft.icon)));
-					btnIcon.style.opacity = '0.6';
-					append(btn, $('span', {}, ft.label));
-
-					btn.onclick = () => {
-						if (!activeMod.fields) activeMod.fields = [];
-						const fieldId = `field_${Date.now()}`;
-						activeMod.fields.push({
-							id: fieldId,
-							label: `New ${ft.type === 'text' ? 'Input Row' : ft.type === 'textarea' ? 'Input Box' : ft.type === 'select' ? 'Dropdown' : ft.type === 'multiselect' ? 'Checkboxes' : 'Switch'}`,
-							type: ft.type as any,
-							options: (ft.type === 'select' || ft.type === 'multiselect') ? ['Option 1', 'Option 2'] : undefined
-						});
-						renderFieldList();
-						rightColumn.scrollTop = rightColumn.scrollHeight;
-					};
-				});
-
+				await refreshLeftPalette();
 				renderFieldList();
 
 				// Footer Controls

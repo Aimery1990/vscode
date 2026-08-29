@@ -927,27 +927,133 @@ export class EntityDetailEditor extends EditorPane {
 		const customFieldsEntries = Object.entries(data.customMetadata || {});
 		if (customFieldsEntries.length > 0) {
 			for (const [k, v] of customFieldsEntries) {
-				const isMultiline = v.length > 80 || v.includes('\n') || ['experience', 'description', 'detail', 'content', 'notes', 'summary', 'project', 'background'].some(sub => k.toLowerCase().includes(sub));
-				customFieldsHtml += `
-					<div class="section-card custom-property-card">
-						<div class="section-title">
-							<span>${k}</span>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}" title="Edit ${k} with AI">
-								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-							</button>
+				let parsedArray: any[] | null = null;
+				if (typeof v === 'string' && v.trim().startsWith('[') && v.trim().endsWith(']')) {
+					try {
+						const parsed = JSON.parse(v.trim());
+						if (Array.isArray(parsed)) {
+							parsedArray = parsed;
+						}
+					} catch {}
+				}
+
+				if (parsedArray) {
+					// Dynamic List Container
+					let subCardsViewHtml = '';
+
+					if (parsedArray.length === 0) {
+						subCardsViewHtml = '<div style="opacity: 0.45; font-style: italic; padding: 6px 0;">No entries in this list.</div>';
+					} else {
+						parsedArray.forEach((item: any, idx: number) => {
+							const idxNum = item._index || (idx + 1);
+							const itemTitle = item._title || item.title || item.name || item.company || `Entry #${idxNum}`;
+							
+							let itemSubFieldsView = '';
+							const itemEntries = Object.entries(item).filter(([subK]) => subK !== '_index' && subK !== '_title');
+							
+							if (itemEntries.length === 0) {
+								itemSubFieldsView = '<div style="opacity: 0.5; font-size: 0.85em;">No sub-fields recorded.</div>';
+							} else {
+								for (const [subK, subValRaw] of itemEntries) {
+									const subVal = String(subValRaw || '');
+									const isDateOrRange = subVal.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(subVal);
+									const isLong = subVal.length > 80 || subVal.includes('\n');
+
+									itemSubFieldsView += `
+										<div class="dynamic-subfield-row" style="margin-bottom: 6px; display: flex; flex-direction: ${isLong ? 'column' : 'row'}; gap: ${isLong ? '4px' : '8px'}; align-items: ${isLong ? 'flex-start' : 'center'}; justify-content: space-between;">
+											<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+												<span style="font-size: 0.82em; font-weight: 600; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.04em;">${subK}:</span>
+												${isDateOrRange ? `
+													<span class="range-badge" style="font-size: 0.82em; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 4px;">
+														📅 ${subVal}
+													</span>
+												` : (!isLong ? `
+													<span style="font-size: 0.9em; font-weight: 500; color: var(--vscode-editor-foreground);">${subVal || '<span style="opacity:0.4; font-style:italic;">None</span>'}</span>
+												` : '')}
+											</div>
+											<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}/${idxNum}/${subK}" title="Edit ${subK} with AI" style="padding: 2px 5px; font-size: 0.75em; opacity: 0.7;">
+												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+											</button>
+										</div>
+										${isLong ? `
+											<div class="desc-content-box" style="margin-top: 2px; margin-bottom: 8px; font-size: 0.88em; padding: 8px 12px;">
+												${this._markdownToHtml(subVal)}
+											</div>
+										` : ''}
+									`;
+								}
+							}
+
+							subCardsViewHtml += `
+								<div class="dynamic-sub-card" style="background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px; margin-bottom: 10px;">
+									<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.05); padding-bottom: 8px; margin-bottom: 10px;">
+										<div style="display: flex; align-items: center; gap: 8px;">
+											<span style="font-size: 0.75em; font-weight: 700; background: rgba(56,189,248,0.18); color: #38bdf8; padding: 2px 7px; border-radius: 4px; letter-spacing: 0.05em;">#${idxNum}</span>
+											<span style="font-size: 0.95em; font-weight: 600; color: var(--vscode-editor-foreground);">${itemTitle}</span>
+										</div>
+										<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}/${idxNum}" title="Edit ${itemTitle} with AI">
+											<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+										</button>
+									</div>
+									<div class="subcard-body">
+										${itemSubFieldsView}
+									</div>
+								</div>
+							`;
+						});
+					}
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(6,182,212,0.15); color: #06b6d4; font-weight: 700; text-transform: uppercase;">Dynamic List</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view">
+								${subCardsViewHtml}
+							</div>
+							<div class="custom-field-edit" style="display: none;">
+								<div class="dynamic-list-editor" data-custom-key="${k}">
+									<textarea class="custom-meta-input input-field" data-custom-key="${k}" rows="8" style="font-family: monospace; font-size: 0.85em;">${v}</textarea>
+									<div style="font-size: 0.75em; opacity: 0.5; margin-top: 4px;">Edit structured JSON items array. Each item supports _index, _title, and custom sub-fields.</div>
+								</div>
+							</div>
 						</div>
-						<div class="custom-field-view desc-content-box">
-							${v ? this._markdownToHtml(v) : '<span style="opacity: 0.45; font-style: italic;">No content provided.</span>'}
+					`;
+				} else {
+					// Single Value Property
+					const isRange = typeof v === 'string' && (v.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(v));
+					const isMultiline = v.length > 80 || v.includes('\n') || ['experience', 'description', 'detail', 'content', 'notes', 'summary', 'project', 'background'].some(sub => k.toLowerCase().includes(sub));
+					customFieldsHtml += `
+						<div class="section-card custom-property-card">
+							<div class="section-title">
+								<span>${k}</span>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view desc-content-box">
+								${isRange ? `
+									<span class="range-badge" style="font-size: 0.9em; font-weight: 600; padding: 3px 10px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 6px;">
+										📅 ${v}
+									</span>
+								` : (v ? this._markdownToHtml(v) : '<span style="opacity: 0.45; font-style: italic;">No content provided.</span>')}
+							</div>
+							<div class="custom-field-edit" style="display: none;">
+								${isMultiline ? `
+									<textarea class="custom-meta-input input-field" data-custom-key="${k}" rows="5">${v}</textarea>
+								` : `
+									<input type="text" class="custom-meta-input input-field" data-custom-key="${k}" value="${v}" />
+								`}
+							</div>
 						</div>
-						<div class="custom-field-edit" style="display: none;">
-							${isMultiline ? `
-								<textarea class="custom-meta-input input-field" data-custom-key="${k}" rows="5">${v}</textarea>
-							` : `
-								<input type="text" class="custom-meta-input input-field" data-custom-key="${k}" value="${v}" />
-							`}
-						</div>
-					</div>
-				`;
+					`;
+				}
 			}
 		}
 

@@ -18,11 +18,35 @@ export interface IEntityGitSnapshot {
 	stashCount?: number;
 }
 
+export type CustomFieldType =
+	| 'text'
+	| 'textarea'
+	| 'select'
+	| 'multiselect'
+	| 'switch'
+	| 'date'
+	| 'time'
+	| 'datetime'
+	| 'date_range'
+	| 'time_range'
+	| 'datetime_range'
+	| 'dynamic_list';
+
 export interface ICustomField {
 	id: string;
 	label: string;
-	type: 'text' | 'textarea' | 'select' | 'multiselect' | 'switch';
+	type: CustomFieldType;
 	options?: string[];
+	itemFields?: ICustomField[];
+	componentRef?: string;
+}
+
+export interface ICompositeComponent {
+	id: string;
+	name: string;
+	description?: string;
+	itemFields: ICustomField[];
+	storageScope?: 'global' | 'workspace';
 }
 
 export interface ICustomModule {
