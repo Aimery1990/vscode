@@ -112,15 +112,8 @@ export class CenteredChatWidget extends Disposable {
 		this.activeModelId = this.storageService.get(STORAGE_KEY_MODEL_ID, StorageScope.PROFILE, '');
 	}
 
-	public show(initialContext?: { prompt?: string; field?: string; ticketId?: string; currentValue?: string }): void {
+	public show(): void {
 		if (this.element) {
-			this.element.style.display = 'flex';
-			if (initialContext && this.inputField) {
-				if (initialContext.prompt) {
-					this.inputField.value = initialContext.prompt;
-				}
-				setTimeout(() => this.inputField?.focus(), 50);
-			}
 			return;
 		}
 
@@ -296,12 +289,6 @@ export class CenteredChatWidget extends Disposable {
 		// Load Credentials and populate Model Picker
 		this.loadCredentialsAndModels();
 
-		if (initialContext && this.inputField) {
-			if (initialContext.prompt) {
-				this.inputField.value = initialContext.prompt;
-			}
-		}
-
 		// Auto Focus on load
 		this.inputField.focus();
 	}
@@ -351,15 +338,11 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public toggle(initialContext?: { prompt?: string; field?: string; ticketId?: string; currentValue?: string }): void {
+	public toggle(): void {
 		if (this.element) {
-			if (initialContext) {
-				this.show(initialContext);
-			} else {
-				this.hide();
-			}
+			this.hide();
 		} else {
-			this.show(initialContext);
+			this.show();
 		}
 	}
 
