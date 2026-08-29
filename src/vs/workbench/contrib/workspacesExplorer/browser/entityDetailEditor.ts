@@ -151,6 +151,13 @@ export class EntityDetailEditor extends EditorPane {
 		super.clearInput();
 	}
 
+	override setEditorVisible(visible: boolean): void {
+		super.setEditorVisible(visible);
+		if (visible && this._entityUri) {
+			this._resolvePathsAndLoadData();
+		}
+	}
+
 	private async _readCustomModule(workspaceUri: URI, typeId: string): Promise<any | null> {
 		const targetId = (typeId || '').trim().toLowerCase();
 		if (!targetId) return null;
