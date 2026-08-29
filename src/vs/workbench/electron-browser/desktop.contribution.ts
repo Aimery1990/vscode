@@ -166,7 +166,7 @@ import product from '../../platform/product/common/product.js';
 		'properties': {
 			'window.confirmSaveUntitledWorkspace': {
 				'type': 'boolean',
-				'default': true,
+				'default': false,
 				'description': localize('confirmSaveUntitledWorkspace', "Controls whether a confirmation dialog shows asking to save or discard an opened untitled workspace in the window when switching to another workspace. Disabling the confirmation dialog will always discard the untitled workspace."),
 			},
 			'window.openWithoutArgumentsInNewWindow': {
