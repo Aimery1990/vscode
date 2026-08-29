@@ -1134,6 +1134,7 @@ export class EntityDetailEditor extends EditorPane {
 			<html lang="en">
 			<head>
 				<meta charset="UTF-8">
+				<meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;">
 				<style>
 					:root {
 						--vscode-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -1531,7 +1532,7 @@ export class EntityDetailEditor extends EditorPane {
 					</div>
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
-						<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Title')" title="Edit Title with AI">
+						<button type="button" class="ai-edit-btn" data-ai-field="/Title" onclick="openAiEditModal('/Title')" title="Edit Title with AI">
 							<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							<span>Edit with AI</span>
 						</button>
@@ -1547,7 +1548,7 @@ export class EntityDetailEditor extends EditorPane {
 							<div class="section-title">
 								<span>Description</span>
 								<div style="display: flex; gap: 8px; align-items: center;">
-									<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Description')" title="Edit Description with AI">
+									<button type="button" class="ai-edit-btn" data-ai-field="/Description" onclick="openAiEditModal('/Description')" title="Edit Description with AI">
 										<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 										<span>Edit with AI</span>
 									</button>
@@ -1579,7 +1580,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-card">
 							<div class="section-title">
 								<span>Instructions</span>
-								<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions')" title="Edit Instructions with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Instructions" onclick="openAiEditModal('/Instructions')" title="Edit Instructions with AI">
 									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 									<span>Edit with AI</span>
 								</button>
@@ -1590,7 +1591,7 @@ export class EntityDetailEditor extends EditorPane {
 								<div class="prompt-box-hover" style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Prompt</div>
-										<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Prompt')" title="Edit Ticket Prompt with AI">
+										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Prompt" onclick="openAiEditModal('/Instructions/Ticket Prompt')" title="Edit Ticket Prompt with AI">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											<span>Edit with AI</span>
 										</button>
@@ -1602,7 +1603,7 @@ export class EntityDetailEditor extends EditorPane {
 								<div class="prompt-box-hover" style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Type Prompt</div>
-										<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Type Prompt')" title="Edit Ticket Type Prompt with AI">
+										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Type Prompt" onclick="openAiEditModal('/Instructions/Ticket Type Prompt')" title="Edit Ticket Type Prompt with AI">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											<span>Edit with AI</span>
 										</button>
@@ -1614,7 +1615,7 @@ export class EntityDetailEditor extends EditorPane {
 									<div class="prompt-box-hover" style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
 										<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
 											<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
-											<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Instruction Notes')" title="Edit Instruction Notes with AI">
+											<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Instruction Notes" onclick="openAiEditModal('/Instructions/Instruction Notes')" title="Edit Instruction Notes with AI">
 												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 												<span>Edit with AI</span>
 											</button>
@@ -1880,6 +1881,24 @@ export class EntityDetailEditor extends EditorPane {
 
 				<script>
 					const vscode = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : (window.vscode || null);
+
+					// Global Event Delegation: Intercept any click on .ai-edit-btn
+					document.addEventListener('click', function(e) {
+						var target = e.target;
+						var btn = (target && target.closest) ? target.closest('.ai-edit-btn') : null;
+						if (btn) {
+							e.preventDefault();
+							e.stopPropagation();
+							var field = btn.getAttribute('data-ai-field') || '/Description';
+							if (vscode) {
+								vscode.postMessage({
+									type: 'openAgentCentral',
+									field: field,
+									source: field
+								});
+							}
+						}
+					});
 
 					// 1. Data Definitions
 					const fieldDefinitionList = ${fieldDefinitionListJson};
