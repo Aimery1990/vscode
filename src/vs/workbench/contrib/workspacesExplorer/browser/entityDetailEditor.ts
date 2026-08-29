@@ -1267,13 +1267,10 @@ export class EntityDetailEditor extends EditorPane {
 					<!-- Right Column: Sidebar (Attributes / Information) -->
 					<div class="sidebar">
 						<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
-							<div style="display: flex; align-items: center; gap: 8px;">
-								<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" title="Edit Attributes with AI">
-									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<span class="badge" style="background: ${colorSetting.bg}; color: ${colorSetting.text}; border: 1px solid ${colorSetting.text}40;">${typeUpper}</span>
+							<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" title="Edit Attributes with AI">
+								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+							</button>
 						</div>
 						
 						<!-- Status -->
