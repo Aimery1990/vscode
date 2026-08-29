@@ -1483,7 +1483,7 @@ export class EntityDetailEditor extends EditorPane {
 					</div>
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
-						<button class="ai-edit-btn" onclick="openAiEditModal('/Title')" data-ai-field="/Title" title="Edit Title with AI">
+						<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Title'); event.stopPropagation();" data-ai-field="/Title" title="Edit Title with AI">
 							<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							<span>Edit with AI</span>
 						</button>
@@ -1499,7 +1499,7 @@ export class EntityDetailEditor extends EditorPane {
 							<div class="section-title">
 								<span>Description</span>
 								<div style="display: flex; gap: 8px; align-items: center;">
-									<button class="ai-edit-btn" onclick="openAiEditModal('/Description')" data-ai-field="/Description" title="Edit Description with AI">
+									<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Description'); event.stopPropagation();" data-ai-field="/Description" title="Edit Description with AI">
 										<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 										<span>Edit with AI</span>
 									</button>
@@ -1531,7 +1531,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-card">
 							<div class="section-title">
 								<span>Instructions</span>
-								<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions')" data-ai-field="/Instructions" title="Edit Instructions with AI">
+								<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions'); event.stopPropagation();" data-ai-field="/Instructions" title="Edit Instructions with AI">
 									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 									<span>Edit with AI</span>
 								</button>
@@ -1542,7 +1542,7 @@ export class EntityDetailEditor extends EditorPane {
 								<div class="prompt-box-hover" style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Prompt</div>
-										<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Prompt')" data-ai-field="/Instructions/Ticket Prompt" title="Edit Ticket Prompt with AI">
+										<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Prompt'); event.stopPropagation();" data-ai-field="/Instructions/Ticket Prompt" title="Edit Ticket Prompt with AI">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											<span>Edit with AI</span>
 										</button>
@@ -1554,7 +1554,7 @@ export class EntityDetailEditor extends EditorPane {
 								<div class="prompt-box-hover" style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Type Prompt</div>
-										<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Type Prompt')" data-ai-field="/Instructions/Ticket Type Prompt" title="Edit Ticket Type Prompt with AI">
+										<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Type Prompt'); event.stopPropagation();" data-ai-field="/Instructions/Ticket Type Prompt" title="Edit Ticket Type Prompt with AI">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											<span>Edit with AI</span>
 										</button>
@@ -1566,7 +1566,7 @@ export class EntityDetailEditor extends EditorPane {
 									<div class="prompt-box-hover" style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
 										<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
 											<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
-											<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Instruction Notes')" data-ai-field="/Instructions/Instruction Notes" title="Edit Instruction Notes with AI">
+											<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Instruction Notes'); event.stopPropagation();" data-ai-field="/Instructions/Instruction Notes" title="Edit Instruction Notes with AI">
 												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 												<span>Edit with AI</span>
 											</button>
@@ -1621,7 +1621,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-header-row" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
 							<div style="display: flex; align-items: center; gap: 8px;">
 								<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
-								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes')" data-ai-field="/Attributes" title="Edit Attributes with AI">
+								<button type="button" class="ai-edit-btn" onclick="openAiEditModal('/Attributes'); event.stopPropagation();" data-ai-field="/Attributes" title="Edit Attributes with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 									<span>Edit with AI</span>
 								</button>
@@ -1634,7 +1634,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">STATUS</span>
-								<button class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Status')" data-ai-field="/Attributes/Status" title="Edit Status with AI">
+								<button type="button" class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Status'); event.stopPropagation();" data-ai-field="/Attributes/Status" title="Edit Status with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1653,7 +1653,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">PRIORITY</span>
-								<button class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Priority')" data-ai-field="/Attributes/Priority" title="Edit Priority with AI">
+								<button type="button" class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Priority'); event.stopPropagation();" data-ai-field="/Attributes/Priority" title="Edit Priority with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1674,7 +1674,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">CURRENT AI AGENT</span>
-								<button class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Current AI Agent')" data-ai-field="/Attributes/Current AI Agent" title="Edit Agent with AI">
+								<button type="button" class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Current AI Agent'); event.stopPropagation();" data-ai-field="/Attributes/Current AI Agent" title="Edit Agent with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1715,7 +1715,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">LINK TO</span>
-								<button class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Link To')" data-ai-field="/Attributes/Link To" title="Edit Link To with AI">
+								<button type="button" class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Link To'); event.stopPropagation();" data-ai-field="/Attributes/Link To" title="Edit Link To with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1726,7 +1726,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">LINKED BY</span>
-								<button class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Linked By')" data-ai-field="/Attributes/Linked By" title="Edit Linked By with AI">
+								<button type="button" class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Linked By'); event.stopPropagation();" data-ai-field="/Attributes/Linked By" title="Edit Linked By with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1831,7 +1831,7 @@ export class EntityDetailEditor extends EditorPane {
 				</div>
 
 				<script>
-					const vscode = acquireVsCodeApi();
+					const vscode = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : (window.vscode || null);
 
 					// 1. Data Definitions
 					const fieldDefinitionList = ${fieldDefinitionListJson};
@@ -1846,7 +1846,6 @@ export class EntityDetailEditor extends EditorPane {
 							const modal = document.getElementById('ai-edit-modal');
 							if (modal) {
 								modal.style.setProperty('display', 'flex', 'important');
-								modal.classList.add('active');
 							}
 
 							const target = (preSelectedPath || '/Description').trim();
@@ -1869,7 +1868,6 @@ export class EntityDetailEditor extends EditorPane {
 						const modal = document.getElementById('ai-edit-modal');
 						if (modal) {
 							modal.style.setProperty('display', 'none', 'important');
-							modal.classList.remove('active');
 						}
 						hideFieldDropdown();
 					}
