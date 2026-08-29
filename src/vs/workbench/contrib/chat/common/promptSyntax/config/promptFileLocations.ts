@@ -94,12 +94,12 @@ export const GITHUB_CONFIG_FOLDER = '.github';
 /**
  * Default reusable prompt files source folder.
  */
-export const PROMPT_DEFAULT_SOURCE_FOLDER = '.github/prompts';
+export const PROMPT_DEFAULT_SOURCE_FOLDER = '.agents/prompts';
 
 /**
  * Default reusable instructions files source folder.
  */
-export const INSTRUCTIONS_DEFAULT_SOURCE_FOLDER = '.github/instructions';
+export const INSTRUCTIONS_DEFAULT_SOURCE_FOLDER = '.agents/rules';
 
 /**
  * Default modes source folder.
@@ -109,7 +109,7 @@ export const LEGACY_MODE_DEFAULT_SOURCE_FOLDER = '.github/chatmodes';
 /**
  * Agents folder.
  */
-export const AGENTS_SOURCE_FOLDER = '.github/agents';
+export const AGENTS_SOURCE_FOLDER = '.agents/agents';
 
 /**
  * Claude agents folder.
@@ -171,38 +171,31 @@ export interface IResolvedPromptSourceFolder {
  */
 export const DEFAULT_SKILL_SOURCE_FOLDERS: readonly IPromptSourceFolder[] = [
 	{ path: '.agents/skills', source: PromptFileSource.AgentsWorkspace, storage: PromptsStorage.local },
-	{ path: '.github/skills', source: PromptFileSource.GitHubWorkspace, storage: PromptsStorage.local },
-	{ path: '.claude/skills', source: PromptFileSource.ClaudeWorkspace, storage: PromptsStorage.local },
 	{ path: '~/.agents/skills', source: PromptFileSource.AgentsPersonal, storage: PromptsStorage.user },
-	{ path: '~/.copilot/skills', source: PromptFileSource.CopilotPersonal, storage: PromptsStorage.user },
-	{ path: '~/.claude/skills', source: PromptFileSource.ClaudePersonal, storage: PromptsStorage.user },
 ];
 
 /**
  * Default instructions source folders.
  */
 export const DEFAULT_INSTRUCTIONS_SOURCE_FOLDERS: readonly IPromptSourceFolder[] = [
-	{ path: INSTRUCTIONS_DEFAULT_SOURCE_FOLDER, source: PromptFileSource.GitHubWorkspace, storage: PromptsStorage.local },
-	{ path: CLAUDE_RULES_SOURCE_FOLDER, source: PromptFileSource.ClaudeWorkspace, storage: PromptsStorage.local },
-	{ path: '~/.copilot/instructions', source: PromptFileSource.CopilotPersonal, storage: PromptsStorage.user },
-	{ path: '~/' + CLAUDE_RULES_SOURCE_FOLDER, source: PromptFileSource.ClaudePersonal, storage: PromptsStorage.user },
+	{ path: INSTRUCTIONS_DEFAULT_SOURCE_FOLDER, source: PromptFileSource.AgentsWorkspace, storage: PromptsStorage.local },
+	{ path: '~/' + INSTRUCTIONS_DEFAULT_SOURCE_FOLDER, source: PromptFileSource.AgentsPersonal, storage: PromptsStorage.user },
 ];
 
 /**
  * Default prompt source folders.
  */
 export const DEFAULT_PROMPT_SOURCE_FOLDERS: readonly IPromptSourceFolder[] = [
-	{ path: PROMPT_DEFAULT_SOURCE_FOLDER, source: PromptFileSource.GitHubWorkspace, storage: PromptsStorage.local },
+	{ path: PROMPT_DEFAULT_SOURCE_FOLDER, source: PromptFileSource.AgentsWorkspace, storage: PromptsStorage.local },
+	{ path: '~/' + PROMPT_DEFAULT_SOURCE_FOLDER, source: PromptFileSource.AgentsPersonal, storage: PromptsStorage.user },
 ];
 
 /**
  * Default agent source folders.
  */
 export const DEFAULT_AGENT_SOURCE_FOLDERS: readonly IPromptSourceFolder[] = [
-	{ path: AGENTS_SOURCE_FOLDER, source: PromptFileSource.GitHubWorkspace, storage: PromptsStorage.local },
-	{ path: CLAUDE_AGENTS_SOURCE_FOLDER, source: PromptFileSource.ClaudeWorkspace, storage: PromptsStorage.local },
-	{ path: COPILOT_USER_AGENTS_SOURCE_FOLDER, source: PromptFileSource.CopilotPersonal, storage: PromptsStorage.user },
-	{ path: '~/' + CLAUDE_AGENTS_SOURCE_FOLDER, source: PromptFileSource.ClaudePersonal, storage: PromptsStorage.user },
+	{ path: AGENTS_SOURCE_FOLDER, source: PromptFileSource.AgentsWorkspace, storage: PromptsStorage.local },
+	{ path: '~/' + AGENTS_SOURCE_FOLDER, source: PromptFileSource.AgentsPersonal, storage: PromptsStorage.user },
 ];
 
 /**

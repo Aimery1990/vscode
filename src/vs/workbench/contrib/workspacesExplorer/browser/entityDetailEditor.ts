@@ -1200,6 +1200,7 @@ export class EntityDetailEditor extends EditorPane {
 						border: 1px solid rgba(255,255,255,0.05);
 						border-radius: 8px;
 						padding: 18px 22px;
+						position: relative;
 					}
 					.section-title {
 						font-size: 1.05em;
@@ -1259,8 +1260,9 @@ export class EntityDetailEditor extends EditorPane {
 						pointer-events: none;
 						display: inline-flex;
 						align-items: center;
+						justify-content: center;
 						gap: 4px;
-						background: rgba(56, 189, 248, 0.1);
+						background: rgba(56, 189, 248, 0.08);
 						color: #38bdf8;
 						border: 1px solid rgba(56, 189, 248, 0.28);
 						border-radius: 4px;
@@ -1270,12 +1272,16 @@ export class EntityDetailEditor extends EditorPane {
 						cursor: pointer;
 						transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
 						user-select: none;
+						line-height: 1;
 					}
 					.ai-edit-btn:hover {
 						background: rgba(56, 189, 248, 0.22);
 						border-color: #38bdf8;
-						box-shadow: 0 0 8px rgba(56, 189, 248, 0.25);
+						box-shadow: 0 0 8px rgba(56, 189, 248, 0.3);
 						transform: translateY(-1px);
+					}
+					.ai-icon-only-btn {
+						padding: 3px 6px;
 					}
 					.header-title-row:hover .ai-edit-btn,
 					.section-card:hover .section-title .ai-edit-btn,
@@ -1297,11 +1303,10 @@ export class EntityDetailEditor extends EditorPane {
 						bottom: 0;
 						background: rgba(0, 0, 0, 0.68);
 						backdrop-filter: blur(6px);
-						display: flex;
+						display: none;
 						align-items: center;
 						justify-content: center;
 						z-index: 99999;
-						animation: fadeIn 0.15s ease-out;
 					}
 					.ai-modal-dialog {
 						background: #1e1e1e;
@@ -1424,10 +1429,6 @@ export class EntityDetailEditor extends EditorPane {
 						padding-top: 12px;
 						border-top: 1px solid rgba(255, 255, 255, 0.08);
 					}
-					@keyframes fadeIn {
-						from { opacity: 0; }
-						to { opacity: 1; }
-					}
 				</style>
 			</head>
 			<body>
@@ -1442,7 +1443,7 @@ export class EntityDetailEditor extends EditorPane {
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
 						<button class="ai-edit-btn" onclick="openAiEditModal('/Title')" title="Edit Title with AI">
-							<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+							<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							<span>Edit with AI</span>
 						</button>
 					</div>
@@ -1458,7 +1459,7 @@ export class EntityDetailEditor extends EditorPane {
 								<span>Description</span>
 								<div style="display: flex; gap: 8px; align-items: center;">
 									<button class="ai-edit-btn" onclick="openAiEditModal('/Description')" title="Edit Description with AI">
-										<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+										<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 										<span>Edit with AI</span>
 									</button>
 									<button id="edit-desc-btn" onclick="startEditDesc()" class="btn-secondary">Edit</button>
@@ -1490,7 +1491,7 @@ export class EntityDetailEditor extends EditorPane {
 							<div class="section-title">
 								<span>Instructions</span>
 								<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions')" title="Edit Instructions with AI">
-									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 									<span>Edit with AI</span>
 								</button>
 							</div>
@@ -1501,7 +1502,7 @@ export class EntityDetailEditor extends EditorPane {
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Prompt</div>
 										<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Prompt')" title="Edit Ticket Prompt with AI">
-											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											<span>Edit with AI</span>
 										</button>
 									</div>
@@ -1513,7 +1514,7 @@ export class EntityDetailEditor extends EditorPane {
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Type Prompt</div>
 										<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Ticket Type Prompt')" title="Edit Ticket Type Prompt with AI">
-											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											<span>Edit with AI</span>
 										</button>
 									</div>
@@ -1525,7 +1526,7 @@ export class EntityDetailEditor extends EditorPane {
 										<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
 											<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
 											<button class="ai-edit-btn" onclick="openAiEditModal('/Instructions/Instruction Notes')" title="Edit Instruction Notes with AI">
-												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
+												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 												<span>Edit with AI</span>
 											</button>
 										</div>
@@ -1580,8 +1581,8 @@ export class EntityDetailEditor extends EditorPane {
 							<div style="display: flex; align-items: center; gap: 8px;">
 								<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
 								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes')" title="Edit Attributes with AI">
-									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 1l1.5 4.5L13.5 7l-4.5 1.5L7.5 13l-1.5-4.5L1.5 7l4.5-1.5L7.5 1z"/></svg>
-									<span>AI</span>
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									<span>Edit with AI</span>
 								</button>
 								<button id="toggle-edit-mode-btn" onclick="toggleEditMode()" class="btn-secondary" style="padding: 2px 8px; font-size: 0.8em;">Edit</button>
 							</div>
@@ -1592,7 +1593,9 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">STATUS</span>
-								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes/Status')" title="Edit Status with AI">✨</button>
+								<button class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Status')" title="Edit Status with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
 							</div>
 							<div style="padding: 2px 0;">
 								<span id="status-view-val" style="display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px;">${status}</span>
@@ -1609,7 +1612,9 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">PRIORITY</span>
-								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes/Priority')" title="Edit Priority with AI">✨</button>
+								<button class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Priority')" title="Edit Priority with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
 							</div>
 							<div style="display: flex; align-items: center; gap: 6px; padding: 2px 0;">
 								<span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;"></span>
@@ -1628,7 +1633,9 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">CURRENT AI AGENT</span>
-								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes/Current AI Agent')" title="Edit Agent with AI">✨</button>
+								<button class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Current AI Agent')" title="Edit Agent with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
 							</div>
 							<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
 							<select class="meta-input meta-edit-val" data-key="Current AI Agent" style="display: none; background: rgba(255,255,255,0.04); color: var(--vscode-foreground); border: 1px solid rgba(255,255,255,0.1); padding: 5px 8px; border-radius: 4px; font-size: 0.88em; width: 100%;">
@@ -1667,7 +1674,9 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">LINK TO</span>
-								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes/Link To')" title="Edit Link To with AI">✨</button>
+								<button class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Link To')" title="Edit Link To with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
 							</div>
 							<span class="meta-view-val sidebar-value">${data.linkTo !== 'None' ? data.linkTo : '<span style="opacity:0.4;">None</span>'}</span>
 							<input type="text" class="meta-input meta-edit-val input-field" data-key="Link To" value="${data.linkTo !== 'None' ? data.linkTo : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" placeholder="e.g. FNDJ1-0001" />
@@ -1676,7 +1685,9 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">LINKED BY</span>
-								<button class="ai-edit-btn" onclick="openAiEditModal('/Attributes/Linked By')" title="Edit Linked By with AI">✨</button>
+								<button class="ai-edit-btn ai-icon-only-btn" onclick="openAiEditModal('/Attributes/Linked By')" title="Edit Linked By with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
 							</div>
 							<span class="meta-view-val sidebar-value">${data.linkedBy !== 'None' ? data.linkedBy : '<span style="opacity:0.4;">None</span>'}</span>
 							<input type="text" class="meta-input meta-edit-val input-field" data-key="Linked By" value="${data.linkedBy !== 'None' ? data.linkedBy : ''}" style="display: none; padding: 4px 8px; font-size: 0.88em;" />
@@ -1708,12 +1719,12 @@ export class EntityDetailEditor extends EditorPane {
 				</div>
 
 				<!-- AI Edit Modal Backdrop -->
-				<div id="ai-edit-modal" class="ai-modal-overlay" style="display: none;" onclick="onAiModalBackdropClick(event)">
+				<div id="ai-edit-modal" class="ai-modal-overlay" onclick="onAiModalBackdropClick(event)">
 					<div class="ai-modal-dialog" onclick="event.stopPropagation()">
 						<!-- Modal Header -->
 						<div class="ai-modal-header">
 							<div style="display: flex; align-items: center; gap: 8px;">
-								<span style="font-size: 1.1em;">✨</span>
+								<svg width="15" height="15" viewBox="0 0 16 16" fill="#38bdf8"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								<h2 style="margin: 0; font-size: 1.15em; font-weight: 700; color: #fff;">Edit with AI</h2>
 								<span class="badge" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3);">AI ASSISTANT</span>
 							</div>
@@ -2026,53 +2037,63 @@ export class EntityDetailEditor extends EditorPane {
 					let selectedFieldIndex = 0;
 					let filteredFields = [...fieldDefinitionList];
 
-					function openAiEditModal(preSelectedPath) {
+					window.openAiEditModal = function(preSelectedPath) {
 						const modal = document.getElementById('ai-edit-modal');
-						modal.style.display = 'flex';
+						if (modal) {
+							modal.style.display = 'flex';
+						}
 
-						const pathInput = document.getElementById('ai-field-path-input');
 						const target = preSelectedPath || '/Description';
-						pathInput.value = target;
+						const pathInput = document.getElementById('ai-field-path-input');
+						if (pathInput) {
+							pathInput.value = target;
+						}
 						selectField(target);
 
 						const textarea = document.getElementById('ai-instructions-textarea');
-						textarea.value = '';
-						setTimeout(() => textarea.focus(), 50);
-					}
+						if (textarea) {
+							textarea.value = '';
+							setTimeout(() => textarea.focus(), 80);
+						}
+					};
 
-					function closeAiEditModal() {
+					window.closeAiEditModal = function() {
 						const modal = document.getElementById('ai-edit-modal');
 						if (modal) modal.style.display = 'none';
 						hideFieldDropdown();
-					}
+					};
 
-					function onAiModalBackdropClick(e) {
+					window.onAiModalBackdropClick = function(e) {
 						if (e.target.id === 'ai-edit-modal') {
 							closeAiEditModal();
 						}
-					}
+					};
 
 					function selectField(path) {
-						const cleanPath = path.trim();
+						const cleanPath = (path || '').trim();
 						const matched = fieldDefinitionList.find(f => 
 							f.path.toLowerCase() === cleanPath.toLowerCase() || 
 							f.path.toLowerCase().replace(/[/.]/g, '') === cleanPath.toLowerCase().replace(/[/.]/g, '')
 						) || { path: cleanPath, file: 'README.md', value: '' };
 
-						document.getElementById('ai-field-path-input').value = matched.path;
-						document.getElementById('ai-field-schema-badge').innerText = matched.file;
+						const pathInput = document.getElementById('ai-field-path-input');
+						if (pathInput) pathInput.value = matched.path;
+
+						const badge = document.getElementById('ai-field-schema-badge');
+						if (badge) badge.innerText = matched.file;
 
 						const previewBox = document.getElementById('ai-current-value-preview');
 						const charCount = document.getElementById('ai-char-count');
 						const val = matched.value || '';
-						previewBox.innerText = val ? val : '(Empty / None)';
-						charCount.innerText = val.length + ' chars';
+						if (previewBox) previewBox.innerText = val ? val : '(Empty / None)';
+						if (charCount) charCount.innerText = val.length + ' chars';
 
 						hideFieldDropdown();
 					}
 
 					function showFieldDropdown() {
-						const query = document.getElementById('ai-field-path-input').value.trim();
+						const pathInput = document.getElementById('ai-field-path-input');
+						const query = pathInput ? pathInput.value.trim() : '';
 						renderFieldDropdown(query);
 					}
 
@@ -2088,7 +2109,8 @@ export class EntityDetailEditor extends EditorPane {
 
 					function renderFieldDropdown(query) {
 						const dropdown = document.getElementById('ai-field-dropdown');
-						const cleanQuery = query.toLowerCase().replace(/^[/. ]+/, '');
+						if (!dropdown) return;
+						const cleanQuery = (query || '').toLowerCase().replace(/^[/. ]+/, '');
 
 						filteredFields = fieldDefinitionList.filter(f => {
 							if (!cleanQuery) return true;
@@ -2118,7 +2140,7 @@ export class EntityDetailEditor extends EditorPane {
 
 					function handleFieldPathKeydown(e) {
 						const dropdown = document.getElementById('ai-field-dropdown');
-						if (dropdown.style.display === 'block') {
+						if (dropdown && dropdown.style.display === 'block') {
 							const items = dropdown.querySelectorAll('.ai-autocomplete-item');
 							if (e.key === 'ArrowDown') {
 								e.preventDefault();
@@ -2132,7 +2154,8 @@ export class EntityDetailEditor extends EditorPane {
 								e.preventDefault();
 								if (filteredFields[selectedFieldIndex]) {
 									selectField(filteredFields[selectedFieldIndex].path);
-									document.getElementById('ai-instructions-textarea').focus();
+									const textarea = document.getElementById('ai-instructions-textarea');
+									if (textarea) textarea.focus();
 								}
 							} else if (e.key === 'Escape') {
 								hideFieldDropdown();
@@ -2151,19 +2174,23 @@ export class EntityDetailEditor extends EditorPane {
 						});
 					}
 
-					function applySuggestion(text) {
+					window.applySuggestion = function(text) {
 						const textarea = document.getElementById('ai-instructions-textarea');
-						if (textarea.value.trim()) {
-							textarea.value += ' ' + text;
-						} else {
-							textarea.value = text;
+						if (textarea) {
+							if (textarea.value.trim()) {
+								textarea.value += ' ' + text;
+							} else {
+								textarea.value = text;
+							}
+							textarea.focus();
 						}
-						textarea.focus();
-					}
+					};
 
-					function submitAiEdit() {
-						const fieldPath = document.getElementById('ai-field-path-input').value.trim();
-						const instructions = document.getElementById('ai-instructions-textarea').value.trim();
+					window.submitAiEdit = function() {
+						const fieldPathEl = document.getElementById('ai-field-path-input');
+						const instructionsEl = document.getElementById('ai-instructions-textarea');
+						const fieldPath = fieldPathEl ? fieldPathEl.value.trim() : '';
+						const instructions = instructionsEl ? instructionsEl.value.trim() : '';
 
 						if (!fieldPath) {
 							alert('Please select a target field.');
@@ -2175,25 +2202,26 @@ export class EntityDetailEditor extends EditorPane {
 						}
 
 						const applyBtn = document.getElementById('ai-apply-btn');
-						applyBtn.disabled = true;
-						applyBtn.innerHTML = '<span>✨ Applying...</span>';
-
-						const currentMatched = fieldDefinitionList.find(f => f.path.toLowerCase() === fieldPath.toLowerCase());
-						const currentVal = currentMatched ? currentMatched.value : '';
+						if (applyBtn) {
+							applyBtn.disabled = true;
+							applyBtn.innerHTML = '<span>✨ Applying...</span>';
+						}
 
 						vscode.postMessage({
 							type: 'applyAiEdit',
 							field: fieldPath,
 							instructions: instructions,
-							newContent: instructions // Or AI prompt instruction to replace/update
+							newContent: instructions
 						});
 
 						setTimeout(() => {
 							closeAiEditModal();
-							applyBtn.disabled = false;
-							applyBtn.innerHTML = '<span>✨ Apply with AI</span>';
+							if (applyBtn) {
+								applyBtn.disabled = false;
+								applyBtn.innerHTML = '<span>✨ Apply with AI</span>';
+							}
 						}, 600);
-					}
+					};
 				</script>
 			</body>
 			</html>
