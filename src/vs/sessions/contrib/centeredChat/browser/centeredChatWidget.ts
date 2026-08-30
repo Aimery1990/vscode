@@ -908,7 +908,7 @@ export class CenteredChatWidget extends Disposable {
 
 						if (matched?.type) {
 							append(pill, $('span', {
-								style: `font-size: 8.5px; font-weight: 700; padding: 0 3px; border-radius: 2px; background: rgba(0,0,0,0.25); text-transform: uppercase;`
+								style: `font-size: 8px; padding: 1px 4px; border-radius: 3px; background: ${colorInfo.bg}; color: ${colorInfo.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;`
 							}, matched.type));
 						} else {
 							append(pill, $('span.codicon.codicon-tag', { style: 'font-size: 10px;' }));
@@ -975,10 +975,10 @@ export class CenteredChatWidget extends Disposable {
 							style: `font-weight: 700; color: ${colorInfo.text}; font-family: monospace; font-size: 10.5px; background: ${colorInfo.bg}; border: 1px solid ${colorInfo.border}; padding: 1px 5px; border-radius: 3px; flex-shrink: 0;`
 						}, ticket.id));
 
-						// 2. Type Tag Badge
+						// 2. Type Tag Badge (Unified 100% with Left Sidebar Explorer!)
 						const typeLabel = (ticket.type || 'TASK').toUpperCase();
 						append(left, $('span', {
-							style: `font-size: 9px; font-weight: 700; color: ${colorInfo.text}; background: rgba(0,0,0,0.3); border: 1px solid ${colorInfo.border}; padding: 1px 4px; border-radius: 3px; letter-spacing: 0.3px; flex-shrink: 0;`
+							style: `font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorInfo.bg}; color: ${colorInfo.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; flex-shrink: 0; display: inline-block;`
 						}, typeLabel));
 
 						// 3. Text container for Title and Summary

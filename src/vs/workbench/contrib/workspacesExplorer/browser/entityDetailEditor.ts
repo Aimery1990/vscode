@@ -841,17 +841,17 @@ export class EntityDetailEditor extends EditorPane {
 	private _getTypeColorInfo(typeStr: string | undefined): { text: string; bg: string; border: string } {
 		const typeLower = (typeStr || 'task').toLowerCase().trim();
 		const typeColors: { [key: string]: { text: string; bg: string; border: string } } = {
-			workspace: { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.14)', border: 'rgba(56, 189, 248, 0.3)' },
-			job: { text: '#fbbf24', bg: 'rgba(251, 191, 36, 0.14)', border: 'rgba(251, 191, 36, 0.3)' },
-			task: { text: '#a78bfa', bg: 'rgba(167, 139, 250, 0.14)', border: 'rgba(167, 139, 250, 0.3)' },
-			project: { text: '#60a5fa', bg: 'rgba(96, 165, 250, 0.14)', border: 'rgba(96, 165, 250, 0.3)' },
-			workflow: { text: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.14)', border: 'rgba(45, 212, 191, 0.3)' },
-			agent: { text: '#f472b6', bg: 'rgba(244, 114, 182, 0.14)', border: 'rgba(244, 114, 182, 0.3)' },
-			case: { text: '#a3e635', bg: 'rgba(163, 230, 53, 0.14)', border: 'rgba(163, 230, 53, 0.3)' },
-			issue: { text: '#f87171', bg: 'rgba(248, 113, 113, 0.14)', border: 'rgba(248, 113, 113, 0.3)' },
-			analysis: { text: '#34d399', bg: 'rgba(52, 211, 153, 0.14)', border: 'rgba(52, 211, 153, 0.3)' },
-			note: { text: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.14)', border: 'rgba(45, 212, 191, 0.3)' },
-			resume: { text: '#34d399', bg: 'rgba(52, 211, 153, 0.14)', border: 'rgba(52, 211, 153, 0.3)' }
+			workspace: { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.2)', border: 'rgba(56, 189, 248, 0.35)' },
+			job: { text: '#fbbf24', bg: 'rgba(251, 191, 36, 0.2)', border: 'rgba(251, 191, 36, 0.35)' },
+			task: { text: '#a78bfa', bg: 'rgba(167, 139, 250, 0.2)', border: 'rgba(167, 139, 250, 0.35)' },
+			project: { text: '#60a5fa', bg: 'rgba(96, 165, 250, 0.2)', border: 'rgba(96, 165, 250, 0.35)' },
+			workflow: { text: '#0d9488', bg: 'rgba(13, 148, 136, 0.2)', border: 'rgba(13, 148, 136, 0.35)' },
+			agent: { text: '#f472b6', bg: 'rgba(244, 114, 182, 0.2)', border: 'rgba(244, 114, 182, 0.35)' },
+			case: { text: '#a3e635', bg: 'rgba(163, 230, 53, 0.2)', border: 'rgba(163, 230, 53, 0.35)' },
+			issue: { text: '#ef4444', bg: 'rgba(239, 68, 68, 0.2)', border: 'rgba(239, 68, 68, 0.35)' },
+			analysis: { text: '#34d399', bg: 'rgba(52, 211, 153, 0.2)', border: 'rgba(52, 211, 153, 0.35)' },
+			note: { text: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.2)', border: 'rgba(45, 212, 191, 0.35)' },
+			resume: { text: '#34d399', bg: 'rgba(52, 211, 153, 0.2)', border: 'rgba(52, 211, 153, 0.35)' }
 		};
 
 		if (typeColors[typeLower]) {
@@ -861,8 +861,8 @@ export class EntityDetailEditor extends EditorPane {
 		const baseColor = getColorForName(typeLower);
 		return {
 			text: baseColor,
-			bg: hexToRgba(baseColor, 0.14),
-			border: hexToRgba(baseColor, 0.3)
+			bg: hexToRgba(baseColor, 0.2),
+			border: hexToRgba(baseColor, 0.35)
 		};
 	}
 
@@ -878,11 +878,11 @@ export class EntityDetailEditor extends EditorPane {
 			const matched = allTickets.find(t => t.id === id || t.code === id);
 			const typeLower = (matched?.type || 'task').toLowerCase();
 			const colorInfo = this._getTypeColorInfo(typeLower);
-			const typeBadge = matched?.type ? `<span style="font-size: 8.5px; font-weight: 700; opacity: 0.85; padding: 0 3px; border-radius: 2px; background: rgba(0,0,0,0.25); text-transform: uppercase;">${this._escapeHtmlAttr(matched.type)}</span>` : '';
+			const typeBadge = matched?.type ? `<span style="font-size: 8px; padding: 1px 4px; border-radius: 3px; background: ${colorInfo.bg}; color: ${colorInfo.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;">${this._escapeHtmlAttr(matched.type)}</span>` : '';
 			const tooltip = matched ? `${matched.id} [${(matched.type || 'task').toUpperCase()}]: ${matched.title || ''}\n${matched.summary || ''}` : `Ticket ${id}`;
 
 			return `
-			<span class="ticket-link-chip" onclick="openTicket('${this._escapeHtmlAttr(id)}')" style="display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; font-family: monospace; padding: 2px 7px; border-radius: 3px; background: ${colorInfo.bg}; border: 1px solid ${colorInfo.border}; color: ${colorInfo.text}; cursor: pointer; transition: all 0.15s ease;" title="${this._escapeHtmlAttr(tooltip)}">
+			<span class="ticket-link-chip" onclick="openTicket('${this._escapeHtmlAttr(id)}')" style="display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 600; font-family: monospace; padding: 2px 7px; border-radius: 3px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: ${colorInfo.text}; cursor: pointer; transition: all 0.15s ease;" title="${this._escapeHtmlAttr(tooltip)}">
 				${typeBadge}
 				<span>${this._escapeHtmlAttr(id)}</span>
 			</span>
@@ -1367,28 +1367,11 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		// 2. Type Colors
-		const typeColors: { [key: string]: { text: string; bg: string } } = {
-			workspace: { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.15)' },
-			job: { text: '#fbbf24', bg: 'rgba(251, 191, 36, 0.15)' },
-			task: { text: '#a78bfa', bg: 'rgba(167, 139, 250, 0.15)' },
-			project: { text: '#60a5fa', bg: 'rgba(96, 165, 250, 0.15)' },
-			workflow: { text: '#0d9488', bg: 'rgba(13, 148, 136, 0.15)' },
-			agent: { text: '#f472b6', bg: 'rgba(244, 114, 182, 0.15)' },
-			case: { text: '#a3e635', bg: 'rgba(163, 230, 53, 0.15)' },
-			issue: { text: '#f87171', bg: 'rgba(248, 113, 113, 0.15)' },
-			analysis: { text: '#34d399', bg: 'rgba(52, 211, 153, 0.15)' },
-			note: { text: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.15)' }
-		};
-
-		const typeLower = data.ticketType.toLowerCase();
-		let colorSetting: { text: string; bg: string };
+		let colorSetting: { text: string; bg: string; border: string };
 		if (customModule && customModule.color) {
-			colorSetting = { text: customModule.color, bg: hexToRgba(customModule.color, 0.15) };
-		} else if (typeColors[typeLower]) {
-			colorSetting = typeColors[typeLower];
+			colorSetting = { text: customModule.color, bg: hexToRgba(customModule.color, 0.2), border: hexToRgba(customModule.color, 0.35) };
 		} else {
-			const color = getColorForName(typeLower);
-			colorSetting = { text: color, bg: hexToRgba(color, 0.15) };
+			colorSetting = this._getTypeColorInfo(data.ticketType);
 		}
 
 		// 3. Priority badge
@@ -1665,7 +1648,7 @@ export class EntityDetailEditor extends EditorPane {
 					}
 					.badge {
 						display: inline-block;
-						padding: 4px 10px;
+						padding: 2px 8px;
 						border-radius: 4px;
 						font-size: 0.72em;
 						font-weight: 700;
@@ -1822,7 +1805,7 @@ export class EntityDetailEditor extends EditorPane {
 						<span>${data.workspaceId || 'Workspace'}</span>
 						<span>/</span>
 						<span>${data.ticketId}</span>
-						<span class="badge" style="background: ${colorSetting.bg}; color: ${colorSetting.text}; border: 1px solid ${colorSetting.text}40;">${typeUpper}</span>
+						<span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-block;">${typeUpper}</span>
 					</div>
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
