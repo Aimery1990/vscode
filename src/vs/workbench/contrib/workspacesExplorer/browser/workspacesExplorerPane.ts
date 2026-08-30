@@ -3482,12 +3482,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 					{ type: 'dynamic_list', label: 'Dynamic Container (List)', icon: Codicon.layers }
 				];
 
+				let currentDraggingItem: { source: 'palette' | 'canvas' | 'subcanvas'; type?: string; label?: string; isClass?: boolean; classId?: string; itemFields?: any[]; canvasIndex?: number; subIndex?: number } | null = null;
+
 				const refreshLeftPalette = async () => {
 					clearNode(leftColumn);
 					
 					// Title
 					append(leftColumn, $('div', { style: 'font-size: 11px; opacity: 0.85; font-weight: 700; text-transform: uppercase; color: #888888;' }, 'Component Library'));
-					append(leftColumn, $('div', { style: 'font-size: 10px; opacity: 0.5; line-height: 1.4;' }, 'Click buttons to insert primitives or saved composite classes.'));
+					append(leftColumn, $('div', { style: 'font-size: 10px; opacity: 0.5; line-height: 1.4;' }, 'Drag & drop components to the canvas on the right, or drop directly into container drop zones.'));
 
 					// Section 1: Primitives
 					const primSection = append(leftColumn, $('.prim-section', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
@@ -3495,14 +3497,23 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 					primitiveTypes.forEach(ft => {
 						const btn = append(primSection, $('button.monaco-button', {
-							style: 'padding: 6px 10px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: inherit; display: flex; align-items: center; gap: 8px; text-align: left;'
+							style: 'padding: 6px 10px; font-size: 11px; border-radius: 5px; cursor: grab; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: inherit; display: flex; align-items: center; gap: 8px; text-align: left;'
 						}));
+						btn.setAttribute('draggable', 'true');
+						btn.ondragstart = (ev) => {
+							currentDraggingItem = { source: 'palette', type: ft.type, label: ft.label };
+							ev.dataTransfer?.setData('text/plain', ft.type);
+						};
+						btn.ondragend = () => {
+							currentDraggingItem = null;
+						};
+
 						const btnIcon = append(btn, $('span' + ThemeIcon.asCSSSelector(ft.icon)));
 						btnIcon.style.opacity = '0.7';
 						append(btn, $('span', {}, ft.label));
 
 						btn.onclick = () => {
-							if (!activeMod.fields) activeMod.fields = [];
+							if (!activeMod.fields) { activeMod.fields = []; }
 							const fieldId = `field_${Date.now()}`;
 							const newF: ICustomField = {
 								id: fieldId,
@@ -3532,13 +3543,22 @@ export class MainWorkspaceViewPane extends ViewPane {
 						savedClasses.forEach(sc => {
 							const cRow = append(compSection, $('div', { style: 'display: flex; align-items: center; gap: 4px;' }));
 							const cBtn = append(cRow, $('button.monaco-button', {
-								style: 'flex: 1; padding: 6px 8px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(6,182,212,0.08); border: 1px solid rgba(6,182,212,0.25); color: #06b6d4; display: flex; align-items: center; gap: 6px; text-align: left;'
+								style: 'flex: 1; padding: 6px 8px; font-size: 11px; border-radius: 5px; cursor: grab; background: rgba(6,182,212,0.08); border: 1px solid rgba(6,182,212,0.25); color: #06b6d4; display: flex; align-items: center; gap: 6px; text-align: left;'
 							}));
+							cBtn.setAttribute('draggable', 'true');
+							cBtn.ondragstart = (ev) => {
+								currentDraggingItem = { source: 'palette', type: 'dynamic_list', label: sc.name, isClass: true, classId: sc.id, itemFields: sc.itemFields };
+								ev.dataTransfer?.setData('text/plain', sc.id);
+							};
+							cBtn.ondragend = () => {
+								currentDraggingItem = null;
+							};
+
 							append(cBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolClass)));
 							append(cBtn, $('span', { style: 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, sc.name));
 
 							cBtn.onclick = () => {
-								if (!activeMod.fields) activeMod.fields = [];
+								if (!activeMod.fields) { activeMod.fields = []; }
 								const fieldId = `field_${Date.now()}`;
 								activeMod.fields.push({
 									id: fieldId,
@@ -3562,6 +3582,42 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 				};
 
+				// Drag & Drop onto canvas background (Drop at bottom)
+				fieldsListContainer.ondragover = (ev) => {
+					ev.preventDefault();
+				};
+				fieldsListContainer.ondrop = (ev) => {
+					ev.preventDefault();
+					if (currentDraggingItem && currentDraggingItem.source === 'palette') {
+						if (!activeMod.fields) { activeMod.fields = []; }
+						if (currentDraggingItem.isClass) {
+							activeMod.fields.push({
+								id: `field_${Date.now()}`,
+								label: currentDraggingItem.label || 'Composite Class',
+								type: 'dynamic_list',
+								componentRef: currentDraggingItem.classId,
+								itemFields: JSON.parse(JSON.stringify(currentDraggingItem.itemFields || []))
+							});
+						} else {
+							const pType = currentDraggingItem.type || 'text';
+							activeMod.fields.push({
+								id: `field_${Date.now()}`,
+								label: pType === 'dynamic_list' ? 'New Dynamic List' : `New ${pType.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`,
+								type: pType as any,
+								options: (pType === 'select' || pType === 'multiselect') ? ['Option 1', 'Option 2'] : undefined,
+								itemFields: pType === 'dynamic_list' ? [
+									{ id: `sub_${Date.now()}_1`, label: 'Item Name', type: 'text' },
+									{ id: `sub_${Date.now()}_2`, label: 'Service Period', type: 'date_range' },
+									{ id: `sub_${Date.now()}_3`, label: 'Description', type: 'textarea' }
+								] : undefined
+							});
+						}
+						currentDraggingItem = null;
+						renderFieldList();
+						rightColumn.scrollTop = rightColumn.scrollHeight;
+					}
+				};
+
 				const renderFieldList = () => {
 					clearNode(fieldsListContainer);
 					const fields = activeMod.fields || [];
@@ -3569,7 +3625,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					if (fields.length === 0) {
 						const empty = append(fieldsListContainer, $('div', { style: 'display: flex; flex-direction: column; align-items: center; justify-content: center; height: 260px; border: 1.5px dashed rgba(255,255,255,0.08); border-radius: 8px; color: #888888; gap: 8px;' }));
 						append(empty, $('span' + ThemeIcon.asCSSSelector(Codicon.package), { style: 'font-size: 24px; opacity: 0.5;' }));
-						append(empty, $('div', { style: 'font-size: 12px;' }, 'Drag or click components on the left to start designing your schema.'));
+						append(empty, $('div', { style: 'font-size: 12px;' }, 'Drag & drop components here to design your schema.'));
 						return;
 					}
 
@@ -3577,32 +3633,70 @@ export class MainWorkspaceViewPane extends ViewPane {
 						const isContainer = field.type === 'dynamic_list';
 						const fieldCard = append(fieldsListContainer, $('.field-card', {
 							style: isContainer
-								? 'padding: 12px 14px; border-radius: 8px; background: rgba(6, 182, 212, 0.04); border: 1px solid rgba(6, 182, 212, 0.25); display: flex; flex-direction: column; gap: 10px; cursor: grab; position: relative;'
-								: 'padding: 12px 14px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); display: flex; flex-direction: column; gap: 8px; cursor: grab; position: relative;'
+								? 'padding: 12px 14px; border-radius: 8px; background: rgba(6, 182, 212, 0.04); border: 1px solid rgba(6, 182, 212, 0.25); display: flex; flex-direction: column; gap: 10px; cursor: grab; position: relative; transition: border-color 0.15s ease;'
+								: 'padding: 12px 14px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.05); display: flex; flex-direction: column; gap: 8px; cursor: grab; position: relative; transition: border-color 0.15s ease;'
 						}));
 						fieldCard.setAttribute('draggable', 'true');
 
 						fieldCard.onmousedown = (e) => {
 							const target = e.target as HTMLElement;
-							if (target.closest('input, textarea, button, select, span, label')) {
+							if (target.closest('input, textarea, button, select, span, label, .subfields-canvas')) {
 								fieldCard.setAttribute('draggable', 'false');
 							} else {
 								fieldCard.setAttribute('draggable', 'true');
 							}
 						};
 
-						// Drag & Drop
+						// Drag & Drop handling for top-level insertion & reordering
 						fieldCard.ondragstart = (ev) => {
+							currentDraggingItem = { source: 'canvas', canvasIndex: fIdx };
 							ev.dataTransfer?.setData('text/plain', String(fIdx));
 						};
-						fieldCard.ondragover = (ev) => ev.preventDefault();
+						fieldCard.ondragover = (ev) => {
+							ev.preventDefault();
+							ev.stopPropagation();
+							fieldCard.style.borderColor = '#38bdf8';
+						};
+						fieldCard.ondragleave = () => {
+							fieldCard.style.borderColor = isContainer ? 'rgba(6, 182, 212, 0.25)' : 'rgba(255,255,255,0.05)';
+						};
 						fieldCard.ondrop = (ev) => {
 							ev.preventDefault();
-							const fromIdx = Number(ev.dataTransfer?.getData('text/plain'));
-							if (fromIdx !== fIdx && activeMod.fields) {
-								const [removed] = activeMod.fields.splice(fromIdx, 1);
-								activeMod.fields.splice(fIdx, 0, removed);
-								renderFieldList();
+							ev.stopPropagation();
+							fieldCard.style.borderColor = isContainer ? 'rgba(6, 182, 212, 0.25)' : 'rgba(255,255,255,0.05)';
+
+							if (currentDraggingItem) {
+								if (currentDraggingItem.source === 'palette') {
+									// Insert component from palette right at fIdx
+									const newField: ICustomField = currentDraggingItem.isClass ? {
+										id: `field_${Date.now()}`,
+										label: currentDraggingItem.label || 'Composite Class',
+										type: 'dynamic_list',
+										componentRef: currentDraggingItem.classId,
+										itemFields: JSON.parse(JSON.stringify(currentDraggingItem.itemFields || []))
+									} : {
+										id: `field_${Date.now()}`,
+										label: currentDraggingItem.type === 'dynamic_list' ? 'New Dynamic List' : `New ${currentDraggingItem.type!.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`,
+										type: currentDraggingItem.type as any,
+										options: (currentDraggingItem.type === 'select' || currentDraggingItem.type === 'multiselect') ? ['Option 1', 'Option 2'] : undefined,
+										itemFields: currentDraggingItem.type === 'dynamic_list' ? [
+											{ id: `sub_${Date.now()}_1`, label: 'Item Name', type: 'text' },
+											{ id: `sub_${Date.now()}_2`, label: 'Service Period', type: 'date_range' },
+											{ id: `sub_${Date.now()}_3`, label: 'Description', type: 'textarea' }
+										] : undefined
+									};
+									activeMod.fields?.splice(fIdx, 0, newField);
+									currentDraggingItem = null;
+									renderFieldList();
+								} else if (currentDraggingItem.source === 'canvas') {
+									const fromIdx = currentDraggingItem.canvasIndex;
+									if (fromIdx !== undefined && fromIdx !== fIdx && activeMod.fields) {
+										const [removed] = activeMod.fields.splice(fromIdx, 1);
+										activeMod.fields.splice(fIdx, 0, removed);
+										currentDraggingItem = null;
+										renderFieldList();
+									}
+								}
 							}
 						};
 
@@ -3726,14 +3820,47 @@ export class MainWorkspaceViewPane extends ViewPane {
 						// Inner Sub-fields Canvas for Dynamic Container
 						if (isContainer) {
 							const subCanvas = append(fieldCard, $('.subfields-canvas', {
-								style: 'margin-left: 12px; border-left: 2px solid rgba(6, 182, 212, 0.35); padding-left: 14px; display: flex; flex-direction: column; gap: 8px; background: rgba(0,0,0,0.15); padding: 10px; border-radius: 6px;'
+								style: 'margin-left: 12px; border-left: 2px solid rgba(6, 182, 212, 0.35); padding-left: 14px; display: flex; flex-direction: column; gap: 8px; background: rgba(0,0,0,0.15); padding: 10px; border-radius: 6px; transition: background 0.15s ease, border-color 0.15s ease;'
 							}));
+
+							// Drop Target on SubCanvas
+							subCanvas.ondragover = (ev) => {
+								ev.preventDefault();
+								ev.stopPropagation();
+								subCanvas.style.background = 'rgba(6, 182, 212, 0.12)';
+							};
+							subCanvas.ondragleave = () => {
+								subCanvas.style.background = 'rgba(0,0,0,0.15)';
+							};
+							subCanvas.ondrop = (ev) => {
+								ev.preventDefault();
+								ev.stopPropagation();
+								subCanvas.style.background = 'rgba(0,0,0,0.15)';
+
+								if (currentDraggingItem && currentDraggingItem.source === 'palette') {
+									if (!field.itemFields) { field.itemFields = []; }
+									if (currentDraggingItem.isClass && currentDraggingItem.itemFields) {
+										const newItems = JSON.parse(JSON.stringify(currentDraggingItem.itemFields));
+										field.itemFields.push(...newItems);
+									} else {
+										const pType = currentDraggingItem.type || 'text';
+										field.itemFields.push({
+											id: `sub_${Date.now()}_${field.itemFields.length + 1}`,
+											label: `New ${pType.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`,
+											type: pType as any,
+											options: (pType === 'select' || pType === 'multiselect') ? ['Option 1', 'Option 2'] : undefined
+										});
+									}
+									currentDraggingItem = null;
+									renderSubFieldsList();
+								}
+							};
 
 							const renderSubFieldsList = () => {
 								clearNode(subCanvas);
 								append(subCanvas, $('div', { style: 'font-size: 10px; font-weight: 700; text-transform: uppercase; color: #06b6d4; letter-spacing: 0.05em;' }, 'Composite Item Template (Sub-Fields):'));
 								
-								if (!field.itemFields) field.itemFields = [];
+								if (!field.itemFields) { field.itemFields = []; }
 								
 								field.itemFields.forEach((subF, sIdx) => {
 									const subCard = append(subCanvas, $('.subfield-card', {
@@ -3787,7 +3914,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 									if (subF.type === 'select' || subF.type === 'multiselect') {
 										const sOptBox = append(subCard, $('.sub-opts', { style: 'margin-left: 81px; display: flex; flex-direction: column; gap: 4px;' }));
-										if (!subF.options) subF.options = ['Option 1', 'Option 2'];
+										if (!subF.options) { subF.options = ['Option 1', 'Option 2']; }
 										subF.options.forEach((opt, oIdx) => {
 											const oRow = append(sOptBox, $('div', { style: 'display: flex; gap: 4px; align-items: center;' }));
 											const oInput = append(oRow, $('input.monaco-inputbox', {
@@ -3803,36 +3930,23 @@ export class MainWorkspaceViewPane extends ViewPane {
 									}
 								});
 
-								// Add Sub-Field Button Group
-								const addSubBtnRow = append(subCanvas, $('.add-sub-btn-row', { style: 'display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px;' }));
-								const subTypesToAdd = [
-									{ type: 'text', label: '+ Text' },
-									{ type: 'textarea', label: '+ Textarea' },
-									{ type: 'select', label: '+ Dropdown' },
-									{ type: 'date', label: '+ Date' },
-									{ type: 'time', label: '+ Time' },
-									{ type: 'datetime', label: '+ DateTime' },
-									{ type: 'date_range', label: '+ Date Range' },
-									{ type: 'time_range', label: '+ Time Range' },
-									{ type: 'switch', label: '+ Switch' }
-								];
-								subTypesToAdd.forEach(st => {
-									const stBtn = append(addSubBtnRow, $('button.monaco-button', {
-										style: 'padding: 3px 8px; font-size: 10px; border-radius: 4px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); color: #fff; cursor: pointer;'
-									}));
-									stBtn.innerText = st.label;
-									stBtn.onclick = (e) => {
-										e.preventDefault();
-										if (!field.itemFields) field.itemFields = [];
-										field.itemFields.push({
-											id: `sub_${Date.now()}`,
-											label: `New ${st.type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`,
-											type: st.type as any,
-											options: st.type === 'select' ? ['Option 1', 'Option 2'] : undefined
-										});
-										renderSubFieldsList();
-									};
-								});
+								// Clean, high-aesthetic Drop Zone in place of cramped buttons
+								const subDropZone = append(subCanvas, $('.sub-drop-zone', {
+									style: 'border: 1.5px dashed rgba(6, 182, 212, 0.35); border-radius: 6px; padding: 10px; text-align: center; color: #06b6d4; font-size: 10.5px; display: flex; align-items: center; justify-content: center; gap: 6px; background: rgba(6, 182, 212, 0.03); cursor: pointer; margin-top: 4px; transition: all 0.15s ease;'
+								}));
+								append(subDropZone, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
+								append(subDropZone, $('span', {}, 'Drag & Drop components here to add sub-fields (or click to add Text)'));
+
+								subDropZone.onclick = (e) => {
+									e.preventDefault();
+									if (!field.itemFields) { field.itemFields = []; }
+									field.itemFields.push({
+										id: `sub_${Date.now()}`,
+										label: `New Text`,
+										type: 'text'
+									});
+									renderSubFieldsList();
+								};
 							};
 
 							renderSubFieldsList();
