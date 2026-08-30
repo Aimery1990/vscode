@@ -847,26 +847,66 @@ export class CenteredChatWidget extends Disposable {
 				const allTickets: Array<{ id: string; code?: string; title?: string; summary?: string; type?: string; workspaceName?: string }> =
 					(locator.options && Array.isArray(locator.options)) ? locator.options : (activeNode && activeNode.options ? activeNode.options : []);
 
-				// 1. Pills container for currently selected tickets
-				const pillsContainer = append(linkContainer, $('.selected-tickets-pills'));
+				let isChecklistExpanded = true;
+
+				// 1. Top row with Pills Container + Toggle Expand/Collapse button
+				const pillsWrapper = append(linkContainer, $('div'));
+				pillsWrapper.style.display = 'flex';
+				pillsWrapper.style.alignItems = 'center';
+				pillsWrapper.style.justifyContent = 'space-between';
+				pillsWrapper.style.gap = '6px';
+				pillsWrapper.style.width = '100%';
+
+				const pillsContainer = append(pillsWrapper, $('.selected-tickets-pills'));
 				pillsContainer.style.display = 'flex';
 				pillsContainer.style.flexWrap = 'wrap';
 				pillsContainer.style.gap = '5px';
-				pillsContainer.style.minHeight = '24px';
+				pillsContainer.style.minHeight = '26px';
 				pillsContainer.style.padding = '4px 6px';
 				pillsContainer.style.background = 'rgba(255, 255, 255, 0.04)';
 				pillsContainer.style.border = '1px solid rgba(255, 255, 255, 0.1)';
 				pillsContainer.style.borderRadius = '4px';
+				pillsContainer.style.flex = '1';
+				pillsContainer.style.cursor = 'pointer';
+				pillsContainer.title = 'Click to toggle ticket picker checklist';
 
-				// 2. Search input
-				const searchInput = append(linkContainer, $('input.monaco-inputbox', {
+				const toggleBtn = append(pillsWrapper, $('button.btn-secondary', {
+					style: 'display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: 10.5px; border-radius: 4px; flex-shrink: 0; cursor: pointer; height: 28px;'
+				})) as HTMLButtonElement;
+
+				const updateToggleBtn = () => {
+					toggleBtn.textContent = '';
+					if (isChecklistExpanded) {
+						append(toggleBtn, $('span.codicon.codicon-chevron-up', { style: 'font-size: 10px;' }));
+						append(toggleBtn, $('span', {}, 'Done / Collapse'));
+						toggleBtn.style.color = '#38bdf8';
+						toggleBtn.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+						toggleBtn.style.background = 'rgba(56, 189, 248, 0.1)';
+					} else {
+						append(toggleBtn, $('span.codicon.codicon-chevron-down', { style: 'font-size: 10px;' }));
+						append(toggleBtn, $('span', {}, '+ Link More'));
+						toggleBtn.style.color = 'var(--vscode-foreground)';
+						toggleBtn.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+						toggleBtn.style.background = 'rgba(255, 255, 255, 0.05)';
+					}
+				};
+
+				// 2. Expandable Dropdown Area
+				const dropdownArea = append(linkContainer, $('.tickets-dropdown-area'));
+				dropdownArea.style.display = 'flex';
+				dropdownArea.style.flexDirection = 'column';
+				dropdownArea.style.gap = '6px';
+				dropdownArea.style.width = '100%';
+
+				// Search input
+				const searchInput = append(dropdownArea, $('input.monaco-inputbox', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; color: #fff; box-sizing: border-box;'
 				})) as HTMLInputElement;
 				searchInput.placeholder = 'Search tickets across workspaces to link...';
 
-				// 3. Scrollable Checklist
-				const checklistContainer = append(linkContainer, $('.tickets-checklist'));
-				checklistContainer.style.maxHeight = '140px';
+				// Scrollable Checklist
+				const checklistContainer = append(dropdownArea, $('.tickets-checklist'));
+				checklistContainer.style.maxHeight = '115px';
 				checklistContainer.style.overflowY = 'auto';
 				checklistContainer.style.display = 'flex';
 				checklistContainer.style.flexDirection = 'column';
@@ -876,8 +916,41 @@ export class CenteredChatWidget extends Disposable {
 				checklistContainer.style.borderRadius = '4px';
 				checklistContainer.style.padding = '4px';
 
+				// Bottom action bar in dropdown
+				const bottomBar = append(dropdownArea, $('div'));
+				bottomBar.style.display = 'flex';
+				bottomBar.style.alignItems = 'center';
+				bottomBar.style.justifyContent = 'space-between';
+				bottomBar.style.padding = '2px 2px 0 2px';
+
+				const countLabel = append(bottomBar, $('span', { style: 'font-size: 10px; opacity: 0.6;' }));
+				const doneBtn = append(bottomBar, $('button.btn-primary', {
+					style: 'padding: 3px 10px; font-size: 10.5px; border-radius: 3px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;'
+				}));
+				append(doneBtn, $('span.codicon.codicon-check', { style: 'font-size: 10px;' }));
+				append(doneBtn, $('span', {}, 'Done (Collapse)'));
+				doneBtn.onclick = () => {
+					isChecklistExpanded = false;
+					dropdownArea.style.display = 'none';
+					updateToggleBtn();
+					this.inputField?.focus();
+				};
+
+				const toggleChecklist = () => {
+					isChecklistExpanded = !isChecklistExpanded;
+					dropdownArea.style.display = isChecklistExpanded ? 'flex' : 'none';
+					updateToggleBtn();
+					if (isChecklistExpanded) {
+						searchInput.focus();
+					}
+				};
+
+				toggleBtn.onclick = () => toggleChecklist();
+				pillsContainer.onclick = () => toggleChecklist();
+
 				const updateState = () => {
 					locator.interactiveModifiedValue = selectedSet.size > 0 ? Array.from(selectedSet).join(', ') : 'None';
+					countLabel.textContent = `${selectedSet.size} ticket${selectedSet.size === 1 ? '' : 's'} linked`;
 					renderPills();
 					renderChecklist(searchInput.value);
 				};
@@ -1040,7 +1113,8 @@ export class CenteredChatWidget extends Disposable {
 					renderChecklist(searchInput.value);
 				};
 
-				renderPills();
+				updateToggleBtn();
+				updateState();
 				renderChecklist('');
 			} else if (fType === 'read_only') {
 				const roBox = append(editorBox, $('div', {

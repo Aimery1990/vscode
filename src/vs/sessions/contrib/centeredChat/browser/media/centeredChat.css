@@ -165,6 +165,7 @@
 	margin: 12px;
 	gap: 6px;
 	min-height: 80px;
+	flex-shrink: 0;
 	transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
