@@ -849,7 +849,7 @@ export class CenteredChatWidget extends Disposable {
 
 				let isChecklistExpanded = true;
 
-				// 1. Top row with Pills Container + Toggle Expand/Collapse button
+				// 1. Top row: Pills Container + Minimal Chevron Toggle Icon
 				const pillsWrapper = append(linkContainer, $('div'));
 				pillsWrapper.style.display = 'flex';
 				pillsWrapper.style.alignItems = 'center';
@@ -862,34 +862,37 @@ export class CenteredChatWidget extends Disposable {
 				pillsContainer.style.flexWrap = 'wrap';
 				pillsContainer.style.gap = '5px';
 				pillsContainer.style.minHeight = '26px';
-				pillsContainer.style.padding = '4px 6px';
+				pillsContainer.style.padding = '4px 8px';
 				pillsContainer.style.background = 'rgba(255, 255, 255, 0.04)';
-				pillsContainer.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+				pillsContainer.style.border = '1px solid rgba(255, 255, 255, 0.09)';
 				pillsContainer.style.borderRadius = '4px';
 				pillsContainer.style.flex = '1';
 				pillsContainer.style.cursor = 'pointer';
-				pillsContainer.title = 'Click to toggle ticket picker checklist';
+				pillsContainer.title = 'Click to toggle ticket picker';
 
-				const toggleBtn = append(pillsWrapper, $('button.btn-secondary', {
-					style: 'display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; font-size: 10.5px; border-radius: 4px; flex-shrink: 0; cursor: pointer; height: 28px;'
-				})) as HTMLButtonElement;
+				const chevronToggleBtn = append(pillsWrapper, $('div', {
+					style: 'display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 4px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); cursor: pointer; color: var(--vscode-foreground); opacity: 0.75; transition: all 0.15s ease;'
+				}));
+				const chevronIcon = append(chevronToggleBtn, $('span.codicon'));
 
 				const updateToggleBtn = () => {
-					toggleBtn.textContent = '';
 					if (isChecklistExpanded) {
-						append(toggleBtn, $('span.codicon.codicon-chevron-up', { style: 'font-size: 10px;' }));
-						append(toggleBtn, $('span', {}, 'Done / Collapse'));
-						toggleBtn.style.color = '#38bdf8';
-						toggleBtn.style.borderColor = 'rgba(56, 189, 248, 0.3)';
-						toggleBtn.style.background = 'rgba(56, 189, 248, 0.1)';
+						chevronIcon.className = 'codicon codicon-chevron-up';
+						chevronToggleBtn.title = 'Collapse ticket picker';
+						chevronToggleBtn.style.color = '#38bdf8';
+						chevronToggleBtn.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+						chevronToggleBtn.style.background = 'rgba(56, 189, 248, 0.1)';
 					} else {
-						append(toggleBtn, $('span.codicon.codicon-chevron-down', { style: 'font-size: 10px;' }));
-						append(toggleBtn, $('span', {}, '+ Link More'));
-						toggleBtn.style.color = 'var(--vscode-foreground)';
-						toggleBtn.style.borderColor = 'rgba(255, 255, 255, 0.15)';
-						toggleBtn.style.background = 'rgba(255, 255, 255, 0.05)';
+						chevronIcon.className = 'codicon codicon-chevron-down';
+						chevronToggleBtn.title = 'Expand ticket picker';
+						chevronToggleBtn.style.color = 'var(--vscode-foreground)';
+						chevronToggleBtn.style.borderColor = 'rgba(255, 255, 255, 0.08)';
+						chevronToggleBtn.style.background = 'rgba(255, 255, 255, 0.04)';
 					}
 				};
+
+				chevronToggleBtn.onmouseenter = () => chevronToggleBtn.style.opacity = '1';
+				chevronToggleBtn.onmouseleave = () => chevronToggleBtn.style.opacity = '0.75';
 
 				// 2. Expandable Dropdown Area
 				const dropdownArea = append(linkContainer, $('.tickets-dropdown-area'));
@@ -906,7 +909,7 @@ export class CenteredChatWidget extends Disposable {
 
 				// Scrollable Checklist
 				const checklistContainer = append(dropdownArea, $('.tickets-checklist'));
-				checklistContainer.style.maxHeight = '115px';
+				checklistContainer.style.maxHeight = '120px';
 				checklistContainer.style.overflowY = 'auto';
 				checklistContainer.style.display = 'flex';
 				checklistContainer.style.flexDirection = 'column';
@@ -916,24 +919,28 @@ export class CenteredChatWidget extends Disposable {
 				checklistContainer.style.borderRadius = '4px';
 				checklistContainer.style.padding = '4px';
 
-				// Bottom action bar in dropdown
-				const bottomBar = append(dropdownArea, $('div'));
-				bottomBar.style.display = 'flex';
-				bottomBar.style.alignItems = 'center';
-				bottomBar.style.justifyContent = 'space-between';
-				bottomBar.style.padding = '2px 2px 0 2px';
-
-				const countLabel = append(bottomBar, $('span', { style: 'font-size: 10px; opacity: 0.6;' }));
-				const doneBtn = append(bottomBar, $('button.btn-primary', {
-					style: 'padding: 3px 10px; font-size: 10.5px; border-radius: 3px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; cursor: pointer;'
+				// Bottom interactive collapse bar with centered chevron handle
+				const collapseHandleBar = append(dropdownArea, $('div.tickets-collapse-handle', {
+					style: 'display: flex; align-items: center; justify-content: space-between; padding: 4px 10px; border-radius: 4px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.06); cursor: pointer; user-select: none; transition: all 0.15s ease;'
 				}));
-				append(doneBtn, $('span.codicon.codicon-check', { style: 'font-size: 10px;' }));
-				append(doneBtn, $('span', {}, 'Done (Collapse)'));
-				doneBtn.onclick = () => {
-					isChecklistExpanded = false;
-					dropdownArea.style.display = 'none';
-					updateToggleBtn();
-					this.inputField?.focus();
+
+				const countLabel = append(collapseHandleBar, $('span', { style: 'font-size: 10.5px; opacity: 0.6; color: var(--vscode-descriptionForeground);' }));
+
+				const centerChevron = append(collapseHandleBar, $('div', {
+					style: 'display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; color: #38bdf8; font-weight: 500;'
+				}));
+				append(centerChevron, $('span.codicon.codicon-chevron-up', { style: 'font-size: 11px;' }));
+				append(centerChevron, $('span', {}, 'Collapse'));
+
+				append(collapseHandleBar, $('span', { style: 'font-size: 9.5px; opacity: 0.35; font-family: monospace;' }, 'Done'));
+
+				collapseHandleBar.onmouseenter = () => {
+					collapseHandleBar.style.background = 'rgba(56, 189, 248, 0.08)';
+					collapseHandleBar.style.borderColor = 'rgba(56, 189, 248, 0.25)';
+				};
+				collapseHandleBar.onmouseleave = () => {
+					collapseHandleBar.style.background = 'rgba(255, 255, 255, 0.03)';
+					collapseHandleBar.style.borderColor = 'rgba(255, 255, 255, 0.06)';
 				};
 
 				const toggleChecklist = () => {
@@ -942,11 +949,14 @@ export class CenteredChatWidget extends Disposable {
 					updateToggleBtn();
 					if (isChecklistExpanded) {
 						searchInput.focus();
+					} else {
+						this.inputField?.focus();
 					}
 				};
 
-				toggleBtn.onclick = () => toggleChecklist();
+				chevronToggleBtn.onclick = () => toggleChecklist();
 				pillsContainer.onclick = () => toggleChecklist();
+				collapseHandleBar.onclick = () => toggleChecklist();
 
 				const updateState = () => {
 					locator.interactiveModifiedValue = selectedSet.size > 0 ? Array.from(selectedSet).join(', ') : 'None';
@@ -1730,11 +1740,13 @@ export class CenteredChatWidget extends Disposable {
 		if (!this.element) { return; }
 
 		if (CenteredChatWidget.lastSize) {
-			this.element.style.width = `${CenteredChatWidget.lastSize.width}px`;
-			this.element.style.height = `${CenteredChatWidget.lastSize.height}px`;
+			const w = Math.max(CenteredChatWidget.lastSize.width, 680);
+			const h = Math.max(CenteredChatWidget.lastSize.height, 540);
+			this.element.style.width = `${w}px`;
+			this.element.style.height = `${h}px`;
 		} else {
-			this.element.style.width = '640px';
-			this.element.style.height = '480px';
+			this.element.style.width = '700px';
+			this.element.style.height = '580px';
 		}
 
 		if (CenteredChatWidget.lastPosition) {

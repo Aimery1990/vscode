@@ -20,8 +20,8 @@
 	user-select: none;
 	resize: both;
 	/* Enable native resizability */
-	min-width: 350px;
-	min-height: 250px;
+	min-width: 450px;
+	min-height: 400px;
 }
 
 .centered-chat-popup-header {
