@@ -567,6 +567,169 @@ export class EntityDetailEditor extends EditorPane {
 		return newLines.join('\n');
 	}
 
+	private _buildHierarchyTree(data: IParsedTicketData | undefined, agents: any[]): any[] {
+		if (!data) return [];
+		const rootNodes: any[] = [];
+
+		// 1. Title
+		rootNodes.push({
+			path: '/Title',
+			label: 'Title',
+			fieldType: 'text',
+			currentValue: data.title || ''
+		});
+
+		// 2. Description
+		rootNodes.push({
+			path: '/Description',
+			label: 'Description',
+			fieldType: 'textarea',
+			currentValue: data.description || ''
+		});
+
+		// 3. Instructions
+		const instructionChildren: any[] = [
+			{
+				path: '/Instructions/Ticket Prompt',
+				label: 'Ticket Prompt',
+				fieldType: 'textarea',
+				currentValue: data.ticketPrompt || ''
+			},
+			{
+				path: '/Instructions/Ticket Type Prompt',
+				label: 'Ticket Type Prompt',
+				fieldType: 'textarea',
+				currentValue: data.metadata?.['Ticket Type Prompt'] || ''
+			},
+			{
+				path: '/Instructions/Instruction Notes',
+				label: 'Instruction Notes',
+				fieldType: 'textarea',
+				currentValue: data.instructionNotes || ''
+			}
+		];
+		rootNodes.push({
+			path: '/Instructions',
+			label: 'Instructions',
+			fieldType: 'container',
+			children: instructionChildren
+		});
+
+		// 4. Attributes
+		const attrChildren: any[] = [
+			{
+				path: '/Attributes/Status',
+				label: 'Status',
+				fieldType: 'status',
+				currentValue: data.status || 'Todo',
+				options: ['Todo', 'In Progress', 'Done', 'Blocked']
+			},
+			{
+				path: '/Attributes/Priority',
+				label: 'Priority',
+				fieldType: 'priority',
+				currentValue: data.priority || 'Medium',
+				options: ['Low', 'Medium', 'High', 'Urgent']
+			},
+			{
+				path: '/Attributes/Current AI Agent',
+				label: 'Current AI Agent',
+				fieldType: 'agent',
+				currentValue: data.assignedAgentName || '',
+				options: agents.map(a => ({ id: a.id, name: a.name }))
+			},
+			{
+				path: '/Attributes/Link To',
+				label: 'Link To',
+				fieldType: 'text',
+				currentValue: data.linkTo && data.linkTo !== 'None' ? data.linkTo : ''
+			},
+			{
+				path: '/Attributes/Linked By',
+				label: 'Linked By',
+				fieldType: 'text',
+				currentValue: data.linkedBy && data.linkedBy !== 'None' ? data.linkedBy : ''
+			}
+		];
+		rootNodes.push({
+			path: '/Attributes',
+			label: 'Attributes',
+			fieldType: 'container',
+			children: attrChildren
+		});
+
+		// 5. Custom Metadata
+		if (data.customMetadata) {
+			const customChildren: any[] = [];
+			for (const [k, v] of Object.entries(data.customMetadata)) {
+				let parsedItems: any[] | null = null;
+				if (typeof v === 'string' && v.trim().startsWith('[')) {
+					try {
+						parsedItems = JSON.parse(v);
+					} catch { }
+				} else if (Array.isArray(v)) {
+					parsedItems = v;
+				}
+
+				if (parsedItems && Array.isArray(parsedItems)) {
+					const listItems: any[] = [];
+					parsedItems.forEach((item, idx) => {
+						const idxNum = item._index || (idx + 1);
+						const itemTitle = item._title || `${k} #${idxNum}`;
+						const itemFields: any[] = [];
+						for (const [subK, subValRaw] of Object.entries(item)) {
+							if (subK.startsWith('_')) continue;
+							const subVal = String(subValRaw || '');
+							const isDateOrRange = subVal.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(subVal) || subK.toLowerCase().includes('period') || subK.toLowerCase().includes('date');
+							const isLong = subVal.length > 80 || subVal.includes('\n');
+							itemFields.push({
+								path: `/Custom/${k}/${idxNum}/${subK}`,
+								label: subK,
+								fieldType: isDateOrRange ? 'date_range' : (isLong ? 'textarea' : 'text'),
+								currentValue: subVal
+							});
+						}
+						listItems.push({
+							path: `/Custom/${k}/${idxNum}`,
+							label: itemTitle,
+							fieldType: 'composite',
+							currentValue: itemTitle,
+							children: itemFields
+						});
+					});
+
+					customChildren.push({
+						path: `/Custom/${k}`,
+						label: k,
+						fieldType: 'dynamic_list',
+						children: listItems
+					});
+				} else {
+					const strVal = String(v || '');
+					const isRange = strVal.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(strVal);
+					const isMultiline = strVal.length > 80 || strVal.includes('\n');
+					customChildren.push({
+						path: `/Custom/${k}`,
+						label: k,
+						fieldType: isRange ? 'date_range' : (isMultiline ? 'textarea' : 'text'),
+						currentValue: strVal
+					});
+				}
+			}
+
+			if (customChildren.length > 0) {
+				rootNodes.push({
+					path: '/Custom',
+					label: 'Custom Properties',
+					fieldType: 'container',
+					children: customChildren
+				});
+			}
+		}
+
+		return rootNodes;
+	}
+
 	private async _handleMessage(eventData: any): Promise<void> {
 		const e = (eventData && eventData.message) ? eventData.message : eventData;
 		if (!e || !this._entityUri) {
@@ -592,6 +755,9 @@ export class EntityDetailEditor extends EditorPane {
 				}
 
 				const prompt = locators.length > 0 ? `[${locators.join(' | ')}] ` : '';
+				const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
+				const hierarchyTree = this._buildHierarchyTree(this._lastParsedData, agents);
+
 				try {
 					await this._commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
 						prompt: prompt,
@@ -601,7 +767,8 @@ export class EntityDetailEditor extends EditorPane {
 						label: e.label,
 						fieldType: e.fieldType,
 						currentValue: e.currentValue,
-						options: e.options
+						options: e.options,
+						hierarchyTree: hierarchyTree
 					});
 				} catch (err) {
 					console.error('Failed to open Agent Central:', err);

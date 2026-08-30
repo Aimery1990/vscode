@@ -42,6 +42,7 @@ export interface IContextLocator {
 	currentValue?: string;
 	options?: any[];
 	interactiveModifiedValue?: string;
+	hierarchyTree?: any[];
 }
 
 export class CenteredChatWidget extends Disposable {
@@ -128,6 +129,138 @@ export class CenteredChatWidget extends Disposable {
 		this.activeModelId = this.storageService.get(STORAGE_KEY_MODEL_ID, StorageScope.PROFILE, '');
 	}
 
+	private activeBreadcrumbDropdown: HTMLElement | undefined;
+
+	private _findNodeByPath(nodes: any[] | undefined, targetPath: string): any {
+		if (!nodes || !targetPath) return undefined;
+		for (const node of nodes) {
+			if (node.path === targetPath) {
+				return node;
+			}
+			if (node.children && node.children.length > 0) {
+				const found = this._findNodeByPath(node.children, targetPath);
+				if (found) return found;
+			}
+		}
+		return undefined;
+	}
+
+	private _getAncestors(nodes: any[] | undefined, targetPath: string, currentTrail: any[] = []): any[] | undefined {
+		if (!nodes || !targetPath) return undefined;
+		for (const node of nodes) {
+			const trail = [...currentTrail, node];
+			if (node.path === targetPath) {
+				return trail;
+			}
+			if (node.children && node.children.length > 0) {
+				const found = this._getAncestors(node.children, targetPath, trail);
+				if (found) return found;
+			}
+		}
+		return undefined;
+	}
+
+	public drillDownTo(targetPath: string): void {
+		if (!this.activeContextLocator) return;
+		const tree = this.activeContextLocator.hierarchyTree;
+		const node = this._findNodeByPath(tree, targetPath);
+		if (node) {
+			this.activeContextLocator.field = node.path;
+			this.activeContextLocator.label = node.label;
+			this.activeContextLocator.fieldType = node.fieldType;
+			this.activeContextLocator.currentValue = node.currentValue || '';
+			this.activeContextLocator.options = node.options;
+			this.activeContextLocator.interactiveModifiedValue = node.currentValue || '';
+		} else {
+			this.activeContextLocator.field = targetPath;
+		}
+		this.setContextLocator(this.activeContextLocator);
+	}
+
+	private toggleBreadcrumbDropdown(ancNode: any, anchorEl: HTMLElement): void {
+		if (this.activeBreadcrumbDropdown) {
+			this.activeBreadcrumbDropdown.remove();
+			this.activeBreadcrumbDropdown = undefined;
+			return;
+		}
+
+		if (!ancNode || !ancNode.children || ancNode.children.length === 0) return;
+
+		const menu = append(document.body, $('.context-breadcrumb-dropdown'));
+		menu.style.position = 'fixed';
+		menu.style.zIndex = '100002';
+		menu.style.background = '#1e1e1e';
+		menu.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+		menu.style.borderRadius = '5px';
+		menu.style.padding = '4px';
+		menu.style.minWidth = '170px';
+		menu.style.boxShadow = '0 6px 16px rgba(0,0,0,0.5)';
+		menu.style.display = 'flex';
+		menu.style.flexDirection = 'column';
+		menu.style.gap = '2px';
+
+		const rect = anchorEl.getBoundingClientRect();
+		menu.style.top = `${rect.bottom + 4}px`;
+		menu.style.left = `${rect.left}px`;
+
+		ancNode.children.forEach((child: any) => {
+			const item = append(menu, $('.dropdown-item'));
+			item.style.padding = '5px 8px';
+			item.style.borderRadius = '3px';
+			item.style.fontSize = '11px';
+			item.style.color = '#ccc';
+			item.style.cursor = 'pointer';
+			item.style.display = 'flex';
+			item.style.justifyContent = 'space-between';
+			item.style.alignItems = 'center';
+			item.style.gap = '8px';
+
+			const labelSpan = append(item, $('span'));
+			labelSpan.textContent = child.label;
+
+			if (child.currentValue) {
+				const valSpan = append(item, $('span'));
+				valSpan.style.fontSize = '9.5px';
+				valSpan.style.opacity = '0.6';
+				valSpan.style.maxWidth = '100px';
+				valSpan.style.overflow = 'hidden';
+				valSpan.style.textOverflow = 'ellipsis';
+				valSpan.style.whiteSpace = 'nowrap';
+				valSpan.textContent = child.currentValue;
+			} else if (child.children && child.children.length > 0) {
+				append(item, $('span.codicon.codicon-chevron-right', { style: 'font-size: 10px; opacity: 0.5;' }));
+			}
+
+			item.onmouseenter = () => {
+				item.style.background = 'rgba(255,255,255,0.08)';
+				item.style.color = '#fff';
+			};
+			item.onmouseleave = () => {
+				item.style.background = 'transparent';
+				item.style.color = '#ccc';
+			};
+
+			item.onclick = (e) => {
+				e.stopPropagation();
+				menu.remove();
+				this.activeBreadcrumbDropdown = undefined;
+				this.drillDownTo(child.path);
+			};
+		});
+
+		const closeListener = (e: MouseEvent) => {
+			if (!menu.contains(e.target as Node) && e.target !== anchorEl) {
+				menu.remove();
+				this.activeBreadcrumbDropdown = undefined;
+				document.removeEventListener('click', closeListener);
+			}
+		};
+		setTimeout(() => {
+			document.addEventListener('click', closeListener);
+		}, 10);
+		this.activeBreadcrumbDropdown = menu;
+	}
+
 	public setContextLocator(locator: IContextLocator | null): void {
 		this.activeContextLocator = locator;
 		if (!this.contextLocatorContainer) {
@@ -145,7 +278,7 @@ export class CenteredChatWidget extends Disposable {
 		this.contextLocatorContainer.style.gap = '6px';
 		this.contextLocatorContainer.textContent = '';
 
-		// 1. Breadcrumb Header Row
+		// 1. Breadcrumb Top Row
 		const topRow = append(this.contextLocatorContainer, $('.context-locator-top-row'));
 		topRow.style.display = 'flex';
 		topRow.style.alignItems = 'center';
@@ -192,7 +325,53 @@ export class CenteredChatWidget extends Disposable {
 			append(tChip, $('span', {}, locator.ticketId));
 		}
 
-		if (locator.field) {
+		// Resolve hierarchy ancestry
+		const hierarchyTree = locator.hierarchyTree;
+		const activeField = locator.field || '';
+		const ancestors = (hierarchyTree && activeField) ? (this._getAncestors(hierarchyTree, activeField) || []) : [];
+		const activeNode = (hierarchyTree && activeField) ? this._findNodeByPath(hierarchyTree, activeField) : undefined;
+
+		if (ancestors.length > 0) {
+			ancestors.forEach((ancNode, idx) => {
+				append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '›'));
+
+				const isLeaf = (idx === ancestors.length - 1);
+				const chip = append(chipsRow, $('.context-chip'));
+				chip.style.display = 'inline-flex';
+				chip.style.alignItems = 'center';
+				chip.style.gap = '4px';
+				chip.style.fontSize = '10.5px';
+				chip.style.fontWeight = isLeaf ? '700' : '500';
+				chip.style.padding = '2px 6px';
+				chip.style.borderRadius = '4px';
+				chip.style.background = isLeaf ? 'rgba(167,139,250,0.22)' : 'rgba(167,139,250,0.1)';
+				chip.style.color = isLeaf ? '#c4b5fd' : '#a78bfa';
+				chip.style.cursor = 'pointer';
+				chip.title = isLeaf ? `Current: ${ancNode.path}` : `Drill up to ${ancNode.label || ancNode.path}`;
+
+				if (idx === 0) {
+					append(chip, $('span.codicon.codicon-target', { style: 'font-size: 11px; opacity: 0.9;' }));
+				}
+
+				append(chip, $('span', {}, ancNode.label || ancNode.path));
+
+				if (!isLeaf) {
+					chip.onclick = () => this.drillDownTo(ancNode.path);
+				}
+
+				// If node has children, add a dropdown trigger
+				if (ancNode.children && ancNode.children.length > 0) {
+					const dropBtn = append(chip, $('span.codicon.codicon-chevron-down', {
+						style: 'font-size: 9px; opacity: 0.7; margin-left: 2px; cursor: pointer;'
+					}));
+					dropBtn.title = 'Drill down to sub-items';
+					dropBtn.onclick = (e) => {
+						e.stopPropagation();
+						this.toggleBreadcrumbDropdown(ancNode, chip);
+					};
+				}
+			});
+		} else if (locator.field) {
 			if (locator.ticketId || locator.workspaceId) {
 				append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '›'));
 			}
@@ -225,8 +404,93 @@ export class CenteredChatWidget extends Disposable {
 			this.setContextLocator(null);
 		};
 
-		// 2. Interactive Target Quick-Modifier Row (Vertical layout for maximum width & zero waste)
-		if (locator.field && locator.fieldType !== 'dynamic_list' && locator.fieldType !== 'composite' && locator.fieldType !== 'attributes') {
+		// 2. Interactive Area
+		if (activeNode && activeNode.children && activeNode.children.length > 0) {
+			// Container Exploration Mode (Parent Node selected)
+			const containerBox = append(this.contextLocatorContainer, $('.context-interactive-editor-box'));
+			containerBox.style.display = 'flex';
+			containerBox.style.flexDirection = 'column';
+			containerBox.style.gap = '6px';
+			containerBox.style.background = 'rgba(0, 0, 0, 0.28)';
+			containerBox.style.border = '1px solid rgba(255, 255, 255, 0.08)';
+			containerBox.style.borderRadius = '5px';
+			containerBox.style.padding = '7px 10px';
+			containerBox.style.boxSizing = 'border-box';
+			containerBox.style.width = '100%';
+
+			const headRow = append(containerBox, $('div'));
+			headRow.style.display = 'flex';
+			headRow.style.justifyContent = 'space-between';
+			headRow.style.alignItems = 'center';
+
+			const labelEl = append(headRow, $('label'));
+			labelEl.style.fontSize = '10px';
+			labelEl.style.opacity = '0.8';
+			labelEl.style.fontWeight = '700';
+			labelEl.style.textTransform = 'uppercase';
+			labelEl.style.letterSpacing = '0.04em';
+			labelEl.style.color = '#a78bfa';
+			labelEl.textContent = `EXPLORE ${activeNode.label || 'PROPERTIES'} (CLICK TO DRILL DOWN):`;
+
+			const grid = append(containerBox, $('div'));
+			grid.style.display = 'flex';
+			grid.style.flexWrap = 'wrap';
+			grid.style.gap = '6px';
+			grid.style.marginTop = '2px';
+
+			activeNode.children.forEach((child: any) => {
+				const card = append(grid, $('.sub-property-pill'));
+				card.style.display = 'inline-flex';
+				card.style.alignItems = 'center';
+				card.style.gap = '6px';
+				card.style.padding = '4px 8px';
+				card.style.borderRadius = '4px';
+				card.style.background = 'rgba(255, 255, 255, 0.05)';
+				card.style.border = '1px solid rgba(255, 255, 255, 0.09)';
+				card.style.cursor = 'pointer';
+				card.style.transition = 'all 0.15s ease';
+
+				const nameSpan = append(card, $('span'));
+				nameSpan.style.fontSize = '10.5px';
+				nameSpan.style.fontWeight = '600';
+				nameSpan.style.color = 'var(--vscode-editor-foreground)';
+				nameSpan.textContent = child.label;
+
+				if (child.currentValue) {
+					const valBadge = append(card, $('span'));
+					valBadge.style.fontSize = '9.5px';
+					valBadge.style.padding = '1px 5px';
+					valBadge.style.borderRadius = '3px';
+					valBadge.style.background = 'rgba(56, 189, 248, 0.12)';
+					valBadge.style.color = '#38bdf8';
+					valBadge.style.maxWidth = '120px';
+					valBadge.style.overflow = 'hidden';
+					valBadge.style.textOverflow = 'ellipsis';
+					valBadge.style.whiteSpace = 'nowrap';
+					valBadge.textContent = child.currentValue;
+				} else if (child.children && child.children.length > 0) {
+					const countBadge = append(card, $('span'));
+					countBadge.style.fontSize = '9.5px';
+					countBadge.style.opacity = '0.6';
+					countBadge.textContent = `${child.children.length} items ›`;
+				}
+
+				card.onmouseenter = () => {
+					card.style.background = 'rgba(167, 139, 250, 0.18)';
+					card.style.borderColor = 'rgba(167, 139, 250, 0.4)';
+				};
+				card.onmouseleave = () => {
+					card.style.background = 'rgba(255, 255, 255, 0.05)';
+					card.style.borderColor = 'rgba(255, 255, 255, 0.09)';
+				};
+
+				card.onclick = (e) => {
+					e.stopPropagation();
+					this.drillDownTo(child.path);
+				};
+			});
+		} else if (locator.field) {
+			// Leaf Field Editor Mode
 			const editorBox = append(this.contextLocatorContainer, $('.context-interactive-editor-box'));
 			editorBox.style.display = 'flex';
 			editorBox.style.flexDirection = 'column';
@@ -239,22 +503,42 @@ export class CenteredChatWidget extends Disposable {
 			editorBox.style.boxSizing = 'border-box';
 			editorBox.style.width = '100%';
 
-			const labelEl = append(editorBox, $('label'));
+			const headRow = append(editorBox, $('div'));
+			headRow.style.display = 'flex';
+			headRow.style.justifyContent = 'space-between';
+			headRow.style.alignItems = 'center';
+
+			const labelEl = append(headRow, $('label'));
 			labelEl.style.fontSize = '10.5px';
 			labelEl.style.opacity = '0.75';
 			labelEl.style.fontWeight = '600';
 			labelEl.style.textTransform = 'uppercase';
 			labelEl.style.letterSpacing = '0.03em';
 			labelEl.style.color = 'var(--vscode-editor-foreground)';
-			labelEl.textContent = `${locator.label || 'Target Value'}:`;
+			labelEl.textContent = `${locator.label || (activeNode ? activeNode.label : 'Target Value')}:`;
 
-			const currentVal = locator.currentValue || '';
+			if (ancestors.length > 1) {
+				const parentNode = ancestors[ancestors.length - 2];
+				const upLink = append(headRow, $('span'));
+				upLink.style.fontSize = '10px';
+				upLink.style.color = '#38bdf8';
+				upLink.style.cursor = 'pointer';
+				upLink.style.opacity = '0.85';
+				upLink.style.display = 'inline-flex';
+				upLink.style.alignItems = 'center';
+				upLink.style.gap = '3px';
+				append(upLink, $('span.codicon.codicon-arrow-left', { style: 'font-size: 10px;' }));
+				append(upLink, $('span', {}, `Back to ${parentNode.label}`));
+				upLink.onclick = () => this.drillDownTo(parentNode.path);
+			}
+
+			const currentVal = locator.currentValue || (activeNode ? activeNode.currentValue : '') || '';
 			locator.interactiveModifiedValue = currentVal;
 
-			const fType = locator.fieldType || (currentVal.includes('~') ? 'date_range' : (/^\d{4}-\d{2}-\d{2}/.test(currentVal) ? 'date' : 'text'));
+			const fType = locator.fieldType || (activeNode ? activeNode.fieldType : undefined) || (currentVal.includes('~') ? 'date_range' : (/^\d{4}-\d{2}-\d{2}/.test(currentVal) ? 'date' : 'text'));
 
 			if (fType === 'date_range') {
-				const [sDate, eDate] = currentVal.split('~').map(s => s.trim());
+				const [sDate, eDate] = currentVal.split('~').map((s: string) => s.trim());
 				const dateWrapper = append(editorBox, $('div'));
 				dateWrapper.style.display = 'flex';
 				dateWrapper.style.alignItems = 'center';
@@ -311,7 +595,7 @@ export class CenteredChatWidget extends Disposable {
 				dInput.style.boxSizing = 'border-box';
 				dInput.oninput = () => { locator.interactiveModifiedValue = dInput.value; };
 			} else if (fType === 'time_range') {
-				const [sTime, eTime] = currentVal.split('~').map(s => s.trim());
+				const [sTime, eTime] = currentVal.split('~').map((s: string) => s.trim());
 				const timeWrapper = append(editorBox, $('div'));
 				timeWrapper.style.display = 'flex';
 				timeWrapper.style.alignItems = 'center';
@@ -368,7 +652,7 @@ export class CenteredChatWidget extends Disposable {
 				tInput.style.boxSizing = 'border-box';
 				tInput.oninput = () => { locator.interactiveModifiedValue = tInput.value; };
 			} else if (fType === 'datetime_range') {
-				const [sDt, eDt] = currentVal.split('~').map(s => s.trim());
+				const [sDt, eDt] = currentVal.split('~').map((s: string) => s.trim());
 				const dtWrapper = append(editorBox, $('div'));
 				dtWrapper.style.display = 'flex';
 				dtWrapper.style.alignItems = 'center';
@@ -449,8 +733,9 @@ export class CenteredChatWidget extends Disposable {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
 				})) as HTMLSelectElement;
 				append(select, $('option', { value: '' }, 'None (Unassigned)'));
-				if (locator.options && Array.isArray(locator.options)) {
-					locator.options.forEach(ag => {
+				const optionsList = locator.options || (activeNode ? activeNode.options : []);
+				if (optionsList && Array.isArray(optionsList)) {
+					optionsList.forEach(ag => {
 						const opt = append(select, $('option', { value: ag.id || ag.name }, ag.name || ag.id)) as HTMLOptionElement;
 						if (ag.id === currentVal || ag.name === currentVal) opt.selected = true;
 					});
@@ -460,8 +745,9 @@ export class CenteredChatWidget extends Disposable {
 				const select = append(editorBox, $('select.monaco-select-box', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
 				})) as HTMLSelectElement;
-				if (locator.options && Array.isArray(locator.options)) {
-					locator.options.forEach(op => {
+				const optionsList = locator.options || (activeNode ? activeNode.options : []);
+				if (optionsList && Array.isArray(optionsList)) {
+					optionsList.forEach(op => {
 						const opt = append(select, $('option', { value: op }, op)) as HTMLOptionElement;
 						if (op === currentVal) opt.selected = true;
 					});
@@ -485,7 +771,7 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[] }): void {
+	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[] }): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
@@ -496,7 +782,8 @@ export class CenteredChatWidget extends Disposable {
 						label: initialContext.label,
 						fieldType: initialContext.fieldType,
 						currentValue: initialContext.currentValue,
-						options: initialContext.options
+						options: initialContext.options,
+						hierarchyTree: initialContext.hierarchyTree
 					});
 				}
 				if (initialContext.prompt && !initialContext.field && !initialContext.ticketId && this.inputField) {
@@ -701,7 +988,8 @@ export class CenteredChatWidget extends Disposable {
 					label: initialContext.label,
 					fieldType: initialContext.fieldType,
 					currentValue: initialContext.currentValue,
-					options: initialContext.options
+					options: initialContext.options,
+					hierarchyTree: initialContext.hierarchyTree
 				});
 			}
 			if (initialContext.prompt && !initialContext.field && !initialContext.ticketId && this.inputField) {
@@ -760,7 +1048,7 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[] }): void {
+	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[] }): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
@@ -771,7 +1059,8 @@ export class CenteredChatWidget extends Disposable {
 						label: initialContext.label,
 						fieldType: initialContext.fieldType,
 						currentValue: initialContext.currentValue,
-						options: initialContext.options
+						options: initialContext.options,
+						hierarchyTree: initialContext.hierarchyTree
 					});
 				}
 				if (initialContext.prompt && !initialContext.field && !initialContext.ticketId && this.inputField) {
