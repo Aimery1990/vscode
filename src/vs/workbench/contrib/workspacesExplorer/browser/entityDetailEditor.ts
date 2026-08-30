@@ -479,6 +479,11 @@ export class EntityDetailEditor extends EditorPane {
 		};
 	}
 
+	private _escapeHtmlAttr(str: string | undefined): string {
+		if (!str) return '';
+		return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	}
+
 	private _updateReadmeContent(content: string, newTitle?: string, newDesc?: string): string {
 		const lines = content.split(/\r?\n/);
 		const newLines: string[] = [];
@@ -592,7 +597,11 @@ export class EntityDetailEditor extends EditorPane {
 						prompt: prompt,
 						workspaceId: workspaceId,
 						ticketId: ticketId,
-						field: field
+						field: field,
+						label: e.label,
+						fieldType: e.fieldType,
+						currentValue: e.currentValue,
+						options: e.options
 					});
 				} catch (err) {
 					console.error('Failed to open Agent Central:', err);
@@ -971,7 +980,7 @@ export class EntityDetailEditor extends EditorPane {
 													<span style="font-size: 0.9em; font-weight: 500; color: var(--vscode-editor-foreground);">${subVal || '<span style="opacity:0.4; font-style:italic;">None</span>'}</span>
 												` : '')}
 											</div>
-											<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}/${idxNum}/${subK}" title="Edit ${subK} with AI" style="padding: 2px 5px; font-size: 0.75em;">
+											<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}/${idxNum}/${subK}" data-ai-field-type="${isDateOrRange ? 'date_range' : (isLong ? 'textarea' : 'text')}" data-ai-field-label="${subK}" data-ai-current-value="${this._escapeHtmlAttr(subVal)}" title="Edit ${subK} with AI" style="padding: 2px 5px; font-size: 0.75em;">
 												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											</button>
 										</div>
@@ -991,7 +1000,7 @@ export class EntityDetailEditor extends EditorPane {
 											<span style="font-size: 0.75em; font-weight: 700; background: rgba(56,189,248,0.18); color: #38bdf8; padding: 2px 7px; border-radius: 4px; letter-spacing: 0.05em;">#${idxNum}</span>
 											<span style="font-size: 0.95em; font-weight: 600; color: var(--vscode-editor-foreground);">${itemTitle}</span>
 										</div>
-										<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}/${idxNum}" title="Edit ${itemTitle} with AI">
+										<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}/${idxNum}" data-ai-field-type="composite" data-ai-field-label="${itemTitle}" data-ai-current-value="${this._escapeHtmlAttr(itemTitle)}" title="Edit ${itemTitle} with AI">
 											<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 										</button>
 									</div>
@@ -1010,7 +1019,7 @@ export class EntityDetailEditor extends EditorPane {
 									<span>${k}</span>
 									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(6,182,212,0.15); color: #06b6d4; font-weight: 700; text-transform: uppercase;">Dynamic List</span>
 								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}" title="Edit ${k} with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}" data-ai-field-type="dynamic_list" data-ai-field-label="${k}" title="Edit ${k} with AI">
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1033,7 +1042,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-card custom-property-card">
 							<div class="section-title">
 								<span>${k}</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}" title="Edit ${k} with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}" data-ai-field-type="${isRange ? 'date_range' : (isMultiline ? 'textarea' : 'text')}" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(v)}" title="Edit ${k} with AI">
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1292,7 +1301,7 @@ export class EntityDetailEditor extends EditorPane {
 					</div>
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
-						<button type="button" class="ai-edit-btn" data-ai-field="/Title" title="Edit Title with AI">
+						<button type="button" class="ai-edit-btn" data-ai-field="/Title" data-ai-field-type="text" data-ai-field-label="Title" data-ai-current-value="${this._escapeHtmlAttr(data.title)}" title="Edit Title with AI">
 							<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 						</button>
 					</div>
@@ -1306,7 +1315,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-card">
 							<div class="section-title">
 								<span>Description</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Description" title="Edit Description with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Description" data-ai-field-type="textarea" data-ai-field-label="Description" data-ai-current-value="${this._escapeHtmlAttr(data.description)}" title="Edit Description with AI">
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1320,7 +1329,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="section-card">
 							<div class="section-title">
 								<span>Instructions</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Instructions" title="Edit Instructions with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Instructions" data-ai-field-type="textarea" data-ai-field-label="Instructions" title="Edit Instructions with AI">
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1330,7 +1339,7 @@ export class EntityDetailEditor extends EditorPane {
 								<div class="instruction-item" style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Prompt</div>
-										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Prompt" title="Edit Ticket Prompt with AI">
+										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Prompt" data-ai-field-type="textarea" data-ai-field-label="Ticket Prompt" data-ai-current-value="${this._escapeHtmlAttr(data.ticketPrompt || '')}" title="Edit Ticket Prompt with AI">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 										</button>
 									</div>
@@ -1341,7 +1350,7 @@ export class EntityDetailEditor extends EditorPane {
 								<div class="instruction-item" style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Type Prompt</div>
-										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Type Prompt" title="Edit Ticket Type Prompt with AI">
+										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Type Prompt" data-ai-field-type="textarea" data-ai-field-label="Ticket Type Prompt" data-ai-current-value="${this._escapeHtmlAttr(typePromptDisplay || '')}" title="Edit Ticket Type Prompt with AI">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 										</button>
 									</div>
@@ -1352,7 +1361,7 @@ export class EntityDetailEditor extends EditorPane {
 									<div class="instruction-item" style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
 										<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
 											<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
-											<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Instruction Notes" title="Edit Instruction Notes with AI">
+											<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Instruction Notes" data-ai-field-type="textarea" data-ai-field-label="Instruction Notes" data-ai-current-value="${this._escapeHtmlAttr(data.instructionNotes || '')}" title="Edit Instruction Notes with AI">
 												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											</button>
 										</div>
@@ -1405,7 +1414,7 @@ export class EntityDetailEditor extends EditorPane {
 					<div class="sidebar">
 						<div class="sidebar-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
 							<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" title="Edit Attributes with AI">
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" data-ai-field-type="attributes" data-ai-field-label="Attributes" title="Edit Attributes with AI">
 								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							</button>
 						</div>
@@ -1414,7 +1423,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">STATUS</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" title="Edit Status with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" title="Edit Status with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1427,7 +1436,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">PRIORITY</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Priority" title="Edit Priority with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Priority" data-ai-field-type="priority" data-ai-field-label="Priority" data-ai-current-value="${this._escapeHtmlAttr(data.priority)}" title="Edit Priority with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1441,7 +1450,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">CURRENT AI AGENT</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Current AI Agent" title="Edit Current AI Agent with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Current AI Agent" data-ai-field-type="agent" data-ai-field-label="Current AI Agent" data-ai-current-value="${this._escapeHtmlAttr(data.assignedAgentName || '')}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(agents.map(a => ({ id: a.id, name: a.name }))))}" title="Edit Current AI Agent with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1474,7 +1483,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">LINK TO</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Link To" title="Edit Link To with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Link To" data-ai-field-type="text" data-ai-field-label="Link To" data-ai-current-value="${data.linkTo !== 'None' ? this._escapeHtmlAttr(data.linkTo) : ''}" title="Edit Link To with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1484,7 +1493,7 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">LINKED BY</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Linked By" title="Edit Linked By with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Linked By" data-ai-field-type="text" data-ai-field-label="Linked By" data-ai-current-value="${data.linkedBy !== 'None' ? this._escapeHtmlAttr(data.linkedBy) : ''}" title="Edit Linked By with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -1525,10 +1534,22 @@ export class EntityDetailEditor extends EditorPane {
 							e.preventDefault();
 							e.stopPropagation();
 							var field = btn.getAttribute('data-ai-field') || '/Description';
+							var fieldType = btn.getAttribute('data-ai-field-type') || 'text';
+							var label = btn.getAttribute('data-ai-field-label') || '';
+							var currentValue = btn.getAttribute('data-ai-current-value') || '';
+							var optionsRaw = btn.getAttribute('data-ai-options') || '';
+							var options = [];
+							if (optionsRaw) {
+								try { options = JSON.parse(optionsRaw); } catch(e) {}
+							}
 							if (vscode) {
 								vscode.postMessage({
 									type: 'openAgentCentral',
 									field: field,
+									fieldType: fieldType,
+									label: label,
+									currentValue: currentValue,
+									options: options,
 									source: field
 								});
 							}

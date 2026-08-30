@@ -33,6 +33,17 @@ interface IAttachment {
 const STORAGE_KEY_CREDENTIAL_ID = 'anyagent.centeredChat.activeCredentialId';
 const STORAGE_KEY_MODEL_ID = 'anyagent.centeredChat.activeModelId';
 
+export interface IContextLocator {
+	workspaceId?: string;
+	ticketId?: string;
+	field?: string;
+	label?: string;
+	fieldType?: string;
+	currentValue?: string;
+	options?: any[];
+	interactiveModifiedValue?: string;
+}
+
 export class CenteredChatWidget extends Disposable {
 
 	private element: HTMLElement | undefined;
@@ -57,6 +68,7 @@ export class CenteredChatWidget extends Disposable {
 	private modelDropdown: HTMLElement | undefined;
 	private modelSearchInput: HTMLInputElement | undefined;
 	private modelListContainer: HTMLElement | undefined;
+
 	private isModelDropdownOpen = false;
 
 	// Active selection state
@@ -64,8 +76,8 @@ export class CenteredChatWidget extends Disposable {
 	private activeCredentialId: string = '';
 	private activeModelId: string = '';
 
-	// Context Target Locator (Breadcrumb tag above chat input)
-	private activeContextLocator: { workspaceId?: string; ticketId?: string; field?: string } | null = null;
+	// Context Target Locator (Breadcrumb tag + Interactive Modifier above chat input)
+	private activeContextLocator: IContextLocator | null = null;
 	private contextLocatorContainer: HTMLElement | undefined;
 
 	// Active Streaming state
@@ -116,7 +128,7 @@ export class CenteredChatWidget extends Disposable {
 		this.activeModelId = this.storageService.get(STORAGE_KEY_MODEL_ID, StorageScope.PROFILE, '');
 	}
 
-	public setContextLocator(locator: { workspaceId?: string; ticketId?: string; field?: string } | null): void {
+	public setContextLocator(locator: IContextLocator | null): void {
 		this.activeContextLocator = locator;
 		if (!this.contextLocatorContainer) {
 			return;
@@ -129,12 +141,21 @@ export class CenteredChatWidget extends Disposable {
 		}
 
 		this.contextLocatorContainer.style.display = 'flex';
+		this.contextLocatorContainer.style.flexDirection = 'column';
+		this.contextLocatorContainer.style.gap = '6px';
 		this.contextLocatorContainer.textContent = '';
 
-		const chipsRow = append(this.contextLocatorContainer, $('.centered-chat-context-chips'));
+		// 1. Breadcrumb Header Row
+		const topRow = append(this.contextLocatorContainer, $('.context-locator-top-row'));
+		topRow.style.display = 'flex';
+		topRow.style.alignItems = 'center';
+		topRow.style.justifyContent = 'space-between';
+		topRow.style.width = '100%';
+
+		const chipsRow = append(topRow, $('.centered-chat-context-chips'));
 		chipsRow.style.display = 'flex';
 		chipsRow.style.alignItems = 'center';
-		chipsRow.style.gap = '6px';
+		chipsRow.style.gap = '5px';
 		chipsRow.style.flex = '1';
 		chipsRow.style.overflow = 'hidden';
 		chipsRow.style.flexWrap = 'wrap';
@@ -190,7 +211,7 @@ export class CenteredChatWidget extends Disposable {
 			append(fChip, $('span', {}, locator.field));
 		}
 
-		const closeBtn = append(this.contextLocatorContainer, $('.context-chip-close'));
+		const closeBtn = append(topRow, $('.context-chip-close'));
 		closeBtn.style.cursor = 'pointer';
 		closeBtn.style.opacity = '0.6';
 		closeBtn.style.padding = '2px 4px';
@@ -203,16 +224,252 @@ export class CenteredChatWidget extends Disposable {
 			e.stopPropagation();
 			this.setContextLocator(null);
 		};
+
+		// 2. Interactive Target Quick-Modifier Row
+		if (locator.field && locator.fieldType !== 'dynamic_list' && locator.fieldType !== 'composite' && locator.fieldType !== 'attributes') {
+			const editorBox = append(this.contextLocatorContainer, $('.context-interactive-editor-box'));
+			editorBox.style.display = 'flex';
+			editorBox.style.alignItems = 'center';
+			editorBox.style.gap = '8px';
+			editorBox.style.background = 'rgba(0, 0, 0, 0.28)';
+			editorBox.style.border = '1px solid rgba(255, 255, 255, 0.08)';
+			editorBox.style.borderRadius = '5px';
+			editorBox.style.padding = '5px 10px';
+			editorBox.style.boxSizing = 'border-box';
+			editorBox.style.width = '100%';
+
+			const labelEl = append(editorBox, $('label'));
+			labelEl.style.fontSize = '10.5px';
+			labelEl.style.opacity = '0.7';
+			labelEl.style.fontWeight = '600';
+			labelEl.style.whiteSpace = 'nowrap';
+			labelEl.textContent = `${locator.label || 'Target Value'}:`;
+
+			const currentVal = locator.currentValue || '';
+			locator.interactiveModifiedValue = currentVal;
+
+			const fType = locator.fieldType || (currentVal.includes('~') ? 'date_range' : (/^\d{4}-\d{2}-\d{2}/.test(currentVal) ? 'date' : 'text'));
+
+			if (fType === 'date_range') {
+				const [sDate, eDate] = currentVal.split('~').map(s => s.trim());
+				const dateWrapper = append(editorBox, $('div'));
+				dateWrapper.style.display = 'flex';
+				dateWrapper.style.alignItems = 'center';
+				dateWrapper.style.gap = '6px';
+				dateWrapper.style.flex = '1';
+
+				const sInput = append(dateWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
+				sInput.type = 'date';
+				sInput.value = sDate || '';
+				sInput.style.padding = '2px 6px';
+				sInput.style.fontSize = '11px';
+				sInput.style.background = 'rgba(255,255,255,0.06)';
+				sInput.style.border = '1px solid rgba(255,255,255,0.12)';
+				sInput.style.borderRadius = '3px';
+				sInput.style.color = '#fff';
+				sInput.style.colorScheme = 'dark';
+
+				append(dateWrapper, $('span', { style: 'font-size: 11px; opacity: 0.5;' }, '~'));
+
+				const eInput = append(dateWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
+				eInput.type = 'date';
+				eInput.value = eDate || '';
+				eInput.style.padding = '2px 6px';
+				eInput.style.fontSize = '11px';
+				eInput.style.background = 'rgba(255,255,255,0.06)';
+				eInput.style.border = '1px solid rgba(255,255,255,0.12)';
+				eInput.style.borderRadius = '3px';
+				eInput.style.color = '#fff';
+				eInput.style.colorScheme = 'dark';
+
+				const updateDateRange = () => {
+					locator.interactiveModifiedValue = `${sInput.value.trim()} ~ ${eInput.value.trim()}`.trim();
+				};
+				sInput.oninput = updateDateRange;
+				eInput.oninput = updateDateRange;
+			} else if (fType === 'date') {
+				const dInput = append(editorBox, $('input.monaco-inputbox')) as HTMLInputElement;
+				dInput.type = 'date';
+				dInput.value = currentVal;
+				dInput.style.padding = '2px 6px';
+				dInput.style.fontSize = '11px';
+				dInput.style.background = 'rgba(255,255,255,0.06)';
+				dInput.style.border = '1px solid rgba(255,255,255,0.12)';
+				dInput.style.borderRadius = '3px';
+				dInput.style.color = '#fff';
+				dInput.style.colorScheme = 'dark';
+				dInput.oninput = () => { locator.interactiveModifiedValue = dInput.value; };
+			} else if (fType === 'time_range') {
+				const [sTime, eTime] = currentVal.split('~').map(s => s.trim());
+				const timeWrapper = append(editorBox, $('div'));
+				timeWrapper.style.display = 'flex';
+				timeWrapper.style.alignItems = 'center';
+				timeWrapper.style.gap = '6px';
+				timeWrapper.style.flex = '1';
+
+				const sInput = append(timeWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
+				sInput.type = 'time';
+				sInput.value = sTime || '';
+				sInput.style.padding = '2px 6px';
+				sInput.style.fontSize = '11px';
+				sInput.style.background = 'rgba(255,255,255,0.06)';
+				sInput.style.border = '1px solid rgba(255,255,255,0.12)';
+				sInput.style.borderRadius = '3px';
+				sInput.style.color = '#fff';
+				sInput.style.colorScheme = 'dark';
+
+				append(timeWrapper, $('span', { style: 'font-size: 11px; opacity: 0.5;' }, '~'));
+
+				const eInput = append(timeWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
+				eInput.type = 'time';
+				eInput.value = eTime || '';
+				eInput.style.padding = '2px 6px';
+				eInput.style.fontSize = '11px';
+				eInput.style.background = 'rgba(255,255,255,0.06)';
+				eInput.style.border = '1px solid rgba(255,255,255,0.12)';
+				eInput.style.borderRadius = '3px';
+				eInput.style.color = '#fff';
+				eInput.style.colorScheme = 'dark';
+
+				const updateTimeRange = () => {
+					locator.interactiveModifiedValue = `${sInput.value.trim()} ~ ${eInput.value.trim()}`.trim();
+				};
+				sInput.oninput = updateTimeRange;
+				eInput.oninput = updateTimeRange;
+			} else if (fType === 'time') {
+				const tInput = append(editorBox, $('input.monaco-inputbox')) as HTMLInputElement;
+				tInput.type = 'time';
+				tInput.value = currentVal;
+				tInput.style.padding = '2px 6px';
+				tInput.style.fontSize = '11px';
+				tInput.style.background = 'rgba(255,255,255,0.06)';
+				tInput.style.border = '1px solid rgba(255,255,255,0.12)';
+				tInput.style.borderRadius = '3px';
+				tInput.style.color = '#fff';
+				tInput.style.colorScheme = 'dark';
+				tInput.oninput = () => { locator.interactiveModifiedValue = tInput.value; };
+			} else if (fType === 'datetime_range') {
+				const [sDt, eDt] = currentVal.split('~').map(s => s.trim());
+				const dtWrapper = append(editorBox, $('div'));
+				dtWrapper.style.display = 'flex';
+				dtWrapper.style.alignItems = 'center';
+				dtWrapper.style.gap = '6px';
+				dtWrapper.style.flex = '1';
+
+				const sInput = append(dtWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
+				sInput.type = 'datetime-local';
+				sInput.value = sDt || '';
+				sInput.style.padding = '2px 6px';
+				sInput.style.fontSize = '11px';
+				sInput.style.background = 'rgba(255,255,255,0.06)';
+				sInput.style.border = '1px solid rgba(255,255,255,0.12)';
+				sInput.style.borderRadius = '3px';
+				sInput.style.color = '#fff';
+				sInput.style.colorScheme = 'dark';
+
+				append(dtWrapper, $('span', { style: 'font-size: 11px; opacity: 0.5;' }, '~'));
+
+				const eInput = append(dtWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
+				eInput.type = 'datetime-local';
+				eInput.value = eDt || '';
+				eInput.style.padding = '2px 6px';
+				eInput.style.fontSize = '11px';
+				eInput.style.background = 'rgba(255,255,255,0.06)';
+				eInput.style.border = '1px solid rgba(255,255,255,0.12)';
+				eInput.style.borderRadius = '3px';
+				eInput.style.color = '#fff';
+				eInput.style.colorScheme = 'dark';
+
+				const updateDtRange = () => {
+					locator.interactiveModifiedValue = `${sInput.value.trim()} ~ ${eInput.value.trim()}`.trim();
+				};
+				sInput.oninput = updateDtRange;
+				eInput.oninput = updateDtRange;
+			} else if (fType === 'datetime') {
+				const dtInput = append(editorBox, $('input.monaco-inputbox')) as HTMLInputElement;
+				dtInput.type = 'datetime-local';
+				dtInput.value = currentVal;
+				dtInput.style.padding = '2px 6px';
+				dtInput.style.fontSize = '11px';
+				dtInput.style.background = 'rgba(255,255,255,0.06)';
+				dtInput.style.border = '1px solid rgba(255,255,255,0.12)';
+				dtInput.style.borderRadius = '3px';
+				dtInput.style.color = '#fff';
+				dtInput.style.colorScheme = 'dark';
+				dtInput.oninput = () => { locator.interactiveModifiedValue = dtInput.value; };
+			} else if (fType === 'status') {
+				const select = append(editorBox, $('select.monaco-select-box', {
+					style: 'flex: 1; padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer;'
+				})) as HTMLSelectElement;
+				const statuses = ['Todo', 'In Progress', 'Done', 'Blocked'];
+				statuses.forEach(st => {
+					const opt = append(select, $('option', { value: st }, st)) as HTMLOptionElement;
+					if (st.toLowerCase() === currentVal.toLowerCase()) opt.selected = true;
+				});
+				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
+			} else if (fType === 'priority') {
+				const select = append(editorBox, $('select.monaco-select-box', {
+					style: 'flex: 1; padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer;'
+				})) as HTMLSelectElement;
+				const priorities = ['Low', 'Medium', 'High', 'Urgent'];
+				priorities.forEach(pr => {
+					const opt = append(select, $('option', { value: pr }, pr)) as HTMLOptionElement;
+					if (pr.toLowerCase() === currentVal.toLowerCase()) opt.selected = true;
+				});
+				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
+			} else if (fType === 'agent') {
+				const select = append(editorBox, $('select.monaco-select-box', {
+					style: 'flex: 1; padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer;'
+				})) as HTMLSelectElement;
+				append(select, $('option', { value: '' }, 'None (Unassigned)'));
+				if (locator.options && Array.isArray(locator.options)) {
+					locator.options.forEach(ag => {
+						const opt = append(select, $('option', { value: ag.id || ag.name }, ag.name || ag.id)) as HTMLOptionElement;
+						if (ag.id === currentVal || ag.name === currentVal) opt.selected = true;
+					});
+				}
+				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
+			} else if (fType === 'select') {
+				const select = append(editorBox, $('select.monaco-select-box', {
+					style: 'flex: 1; padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer;'
+				})) as HTMLSelectElement;
+				if (locator.options && Array.isArray(locator.options)) {
+					locator.options.forEach(op => {
+						const opt = append(select, $('option', { value: op }, op)) as HTMLOptionElement;
+						if (op === currentVal) opt.selected = true;
+					});
+				}
+				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
+			} else if (fType === 'textarea') {
+				const ta = append(editorBox, $('textarea.monaco-inputbox', {
+					style: 'flex: 1; width: 100%; padding: 4px 6px; font-size: 11px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 3px; color: #fff; resize: vertical;'
+				})) as HTMLTextAreaElement;
+				ta.rows = 2;
+				ta.value = currentVal;
+				ta.oninput = () => { locator.interactiveModifiedValue = ta.value; };
+			} else {
+				const txt = append(editorBox, $('input.monaco-inputbox', {
+					style: 'flex: 1; padding: 3px 6px; font-size: 11px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 3px; color: #fff;'
+				})) as HTMLInputElement;
+				txt.type = 'text';
+				txt.value = currentVal;
+				txt.oninput = () => { locator.interactiveModifiedValue = txt.value; };
+			}
+		}
 	}
 
-	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; currentValue?: string }): void {
+	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[] }): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
 					this.setContextLocator({
 						workspaceId: initialContext.workspaceId,
 						ticketId: initialContext.ticketId,
-						field: initialContext.field
+						field: initialContext.field,
+						label: initialContext.label,
+						fieldType: initialContext.fieldType,
+						currentValue: initialContext.currentValue,
+						options: initialContext.options
 					});
 				}
 				if (initialContext.prompt && !initialContext.field && !initialContext.ticketId && this.inputField) {
@@ -413,7 +670,11 @@ export class CenteredChatWidget extends Disposable {
 				this.setContextLocator({
 					workspaceId: initialContext.workspaceId,
 					ticketId: initialContext.ticketId,
-					field: initialContext.field
+					field: initialContext.field,
+					label: initialContext.label,
+					fieldType: initialContext.fieldType,
+					currentValue: initialContext.currentValue,
+					options: initialContext.options
 				});
 			}
 			if (initialContext.prompt && !initialContext.field && !initialContext.ticketId && this.inputField) {
@@ -472,15 +733,28 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; currentValue?: string }): void {
+	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[] }): void {
 		if (this.element) {
-			if (initialContext && initialContext.prompt && this.inputField) {
-				this.inputField.value = initialContext.prompt;
-				this.inputField.focus();
+			if (initialContext) {
+				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
+					this.setContextLocator({
+						workspaceId: initialContext.workspaceId,
+						ticketId: initialContext.ticketId,
+						field: initialContext.field,
+						label: initialContext.label,
+						fieldType: initialContext.fieldType,
+						currentValue: initialContext.currentValue,
+						options: initialContext.options
+					});
+				}
+				if (initialContext.prompt && !initialContext.field && !initialContext.ticketId && this.inputField) {
+					this.inputField.value = initialContext.prompt;
+				}
+			}
+			this.inputField?.focus();
+			if (this.inputField?.value) {
 				const len = this.inputField.value.length;
 				this.inputField.setSelectionRange(len, len);
-			} else {
-				this.hide();
 			}
 		} else {
 			this.show(initialContext);
@@ -827,7 +1101,8 @@ export class CenteredChatWidget extends Disposable {
 		if (!this.inputField || !this.messagesContainer) { return; }
 
 		const text = this.inputField.value.trim();
-		if (!text && this.activeAttachments.length === 0) { return; }
+		const hasModifiedValue = !!(this.activeContextLocator && this.activeContextLocator.interactiveModifiedValue && this.activeContextLocator.interactiveModifiedValue !== this.activeContextLocator.currentValue);
+		if (!text && this.activeAttachments.length === 0 && !hasModifiedValue) { return; }
 
 		const cred = this.getActiveCredential();
 		if (!cred) {
@@ -853,8 +1128,15 @@ export class CenteredChatWidget extends Disposable {
 			if (loc.workspaceId) { locators.push(`Workspace: ${loc.workspaceId}`); }
 			if (loc.ticketId) { locators.push(`Ticket: ${loc.ticketId}`); }
 			if (loc.field) { locators.push(`Target: ${loc.field}`); }
+			if (loc.interactiveModifiedValue !== undefined && loc.interactiveModifiedValue !== '') {
+				if (loc.interactiveModifiedValue !== loc.currentValue) {
+					locators.push(`Proposed Value: ${loc.interactiveModifiedValue}`);
+				} else {
+					locators.push(`Current Value: ${loc.currentValue}`);
+				}
+			}
 			const prefix = `[${locators.join(' | ')}]\n`;
-			fullPrompt = `${prefix}${text}`;
+			fullPrompt = `${prefix}${text || 'Please update this field as specified.'}`;
 
 			// Render nice context tag pill above the user text in the bubble
 			const ctxTag = append(userMsg, $('.centered-chat-msg-context-tag'));
@@ -872,6 +1154,9 @@ export class CenteredChatWidget extends Disposable {
 			if (loc.workspaceId) { parts.push(loc.workspaceId); }
 			if (loc.ticketId) { parts.push(loc.ticketId); }
 			if (loc.field) { parts.push(loc.field); }
+			if (loc.interactiveModifiedValue && loc.interactiveModifiedValue !== loc.currentValue) {
+				parts.push(`-> ${loc.interactiveModifiedValue}`);
+			}
 			ctxTag.textContent = parts.join(' › ');
 
 			// Clear locator for subsequent messages
