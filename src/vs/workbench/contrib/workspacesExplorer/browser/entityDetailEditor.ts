@@ -965,7 +965,7 @@ export class EntityDetailEditor extends EditorPane {
 												<span style="font-size: 0.82em; font-weight: 600; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.04em;">${subK}:</span>
 												${isDateOrRange ? `
 													<span class="range-badge" style="font-size: 0.82em; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 4px;">
-														📅 ${subVal}
+														${subVal}
 													</span>
 												` : (!isLong ? `
 													<span style="font-size: 0.9em; font-weight: 500; color: var(--vscode-editor-foreground);">${subVal || '<span style="opacity:0.4; font-style:italic;">None</span>'}</span>
@@ -1040,7 +1040,7 @@ export class EntityDetailEditor extends EditorPane {
 							<div class="custom-field-view desc-content-box">
 								${isRange ? `
 									<span class="range-badge" style="font-size: 0.9em; font-weight: 600; padding: 3px 10px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 6px;">
-										📅 ${v}
+										${v}
 									</span>
 								` : (v ? this._markdownToHtml(v) : '<span style="opacity: 0.45; font-style: italic;">No content provided.</span>')}
 							</div>

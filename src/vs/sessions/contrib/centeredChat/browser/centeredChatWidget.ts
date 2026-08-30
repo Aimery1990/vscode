@@ -143,13 +143,14 @@ export class CenteredChatWidget extends Disposable {
 			const wsChip = append(chipsRow, $('.context-chip'));
 			wsChip.style.display = 'inline-flex';
 			wsChip.style.alignItems = 'center';
-			wsChip.style.gap = '4px';
+			wsChip.style.gap = '5px';
 			wsChip.style.fontSize = '10.5px';
 			wsChip.style.padding = '2px 6px';
 			wsChip.style.borderRadius = '4px';
 			wsChip.style.background = 'rgba(255,255,255,0.06)';
 			wsChip.style.color = '#ccc';
-			wsChip.textContent = `📁 ${locator.workspaceId}`;
+			append(wsChip, $('span.codicon.codicon-folder', { style: 'font-size: 11px; opacity: 0.8;' }));
+			append(wsChip, $('span', {}, locator.workspaceId));
 		}
 
 		if (locator.ticketId) {
@@ -159,14 +160,15 @@ export class CenteredChatWidget extends Disposable {
 			const tChip = append(chipsRow, $('.context-chip'));
 			tChip.style.display = 'inline-flex';
 			tChip.style.alignItems = 'center';
-			tChip.style.gap = '4px';
+			tChip.style.gap = '5px';
 			tChip.style.fontSize = '10.5px';
 			tChip.style.fontWeight = '600';
 			tChip.style.padding = '2px 6px';
 			tChip.style.borderRadius = '4px';
 			tChip.style.background = 'rgba(56,189,248,0.15)';
 			tChip.style.color = '#38bdf8';
-			tChip.textContent = `🎫 ${locator.ticketId}`;
+			append(tChip, $('span.codicon.codicon-tag', { style: 'font-size: 11px; opacity: 0.9;' }));
+			append(tChip, $('span', {}, locator.ticketId));
 		}
 
 		if (locator.field) {
@@ -176,7 +178,7 @@ export class CenteredChatWidget extends Disposable {
 			const fChip = append(chipsRow, $('.context-chip'));
 			fChip.style.display = 'inline-flex';
 			fChip.style.alignItems = 'center';
-			fChip.style.gap = '4px';
+			fChip.style.gap = '5px';
 			fChip.style.fontSize = '10.5px';
 			fChip.style.fontWeight = '600';
 			fChip.style.padding = '2px 6px';
@@ -184,7 +186,8 @@ export class CenteredChatWidget extends Disposable {
 			fChip.style.background = 'rgba(167,139,250,0.15)';
 			fChip.style.color = '#a78bfa';
 			fChip.style.fontFamily = 'monospace';
-			fChip.textContent = `🎯 ${locator.field}`;
+			append(fChip, $('span.codicon.codicon-target', { style: 'font-size: 11px; opacity: 0.9;' }));
+			append(fChip, $('span', {}, locator.field));
 		}
 
 		const closeBtn = append(this.contextLocatorContainer, $('.context-chip-close'));
@@ -512,7 +515,7 @@ export class CenteredChatWidget extends Disposable {
 			// Add Settings link option
 			const optConfig = document.createElement('option');
 			optConfig.value = '__configure__';
-			optConfig.textContent = '⚙️ Configure API Keys...';
+			optConfig.textContent = 'Configure API Keys...';
 			this.providerSelect.appendChild(optConfig);
 
 			// Match previously selected credential
@@ -701,7 +704,7 @@ export class CenteredChatWidget extends Disposable {
 		content.appendChild(document.createTextNode('Welcome to '));
 		const bold1 = append(content, $('b'));
 		bold1.textContent = 'Agent Central';
-		content.appendChild(document.createTextNode('! 👋'));
+		content.appendChild(document.createTextNode('!'));
 		append(content, $('br'));
 		content.appendChild(document.createTextNode("I'm your workspace AI assistant. Select any configured Provider and Model from the toolbar below to start real streaming chat and code operations."));
 
@@ -865,11 +868,11 @@ export class CenteredChatWidget extends Disposable {
 			ctxTag.style.padding = '2px 6px';
 			ctxTag.style.borderRadius = '4px';
 			
-			let ctxText = '';
-			if (loc.workspaceId) { ctxText += `📁 ${loc.workspaceId} `; }
-			if (loc.ticketId) { ctxText += `🎫 ${loc.ticketId} `; }
-			if (loc.field) { ctxText += `🎯 ${loc.field}`; }
-			ctxTag.textContent = ctxText.trim();
+			const parts: string[] = [];
+			if (loc.workspaceId) { parts.push(loc.workspaceId); }
+			if (loc.ticketId) { parts.push(loc.ticketId); }
+			if (loc.field) { parts.push(loc.field); }
+			ctxTag.textContent = parts.join(' › ');
 
 			// Clear locator for subsequent messages
 			this.setContextLocator(null);
@@ -918,7 +921,7 @@ export class CenteredChatWidget extends Disposable {
 
 		const aiHeader = append(aiMsg, $('.centered-chat-msg-ai-header'));
 		const modelBadge = append(aiHeader, $('.centered-chat-msg-model-badge'));
-		modelBadge.textContent = `🤖 ${this.activeModelId} (${cred.providerId.toUpperCase()})`;
+		modelBadge.textContent = `${this.activeModelId} (${cred.providerId.toUpperCase()})`;
 
 		const aiContent = append(aiMsg, $('.centered-chat-ai-markdown-content'));
 		const typingCursor = append(aiContent, $('span.centered-chat-typing-cursor'));
@@ -987,7 +990,7 @@ export class CenteredChatWidget extends Disposable {
 				fullResponseText += '\n\n*(Generation stopped by user)*';
 			} else {
 				console.error('Streaming request error:', err);
-				fullResponseText += `\n\n⚠️ **Error:** ${err.message || err}`;
+				fullResponseText += `\n\n**Error:** ${err.message || err}`;
 			}
 		} finally {
 			streamSessionDisposables.dispose();

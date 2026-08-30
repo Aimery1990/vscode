@@ -1473,14 +1473,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const agentSelect = append(agentBox, $('select.monaco-select-box', {
 			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; cursor: pointer;'
 		})) as HTMLSelectElement;
-		append(agentSelect, $('option', { value: '' }, '🤖 None (Unassigned)'));
+		append(agentSelect, $('option', { value: '' }, 'None (Unassigned)'));
 
 		let availableAgents: any[] = [];
 		if (this.agentsManagerService) {
 			this.agentsManagerService.getAgents().then(agents => {
 				availableAgents = agents || [];
 				for (const ag of availableAgents) {
-					append(agentSelect, $('option', { value: ag.id }, `🤖 ${ag.name} (${ag.role || 'Agent'})`));
+					append(agentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.role || 'Agent'})`));
 				}
 			}).catch(() => {});
 		}
@@ -1511,7 +1511,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					const tag = append(attachTagsContainer, $('div', {
 						style: 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); padding: 4px 10px; border-radius: 6px; font-size: 11.5px;'
 					}));
-					append(tag, $('span', {}, `📄 ${fileName}`));
+					append(tag, $('span', {}, fileName));
 					const delBtn = append(tag, $('span', { style: 'cursor: pointer; opacity: 0.6; margin-left: 4px;' }, '✕'));
 					delBtn.onclick = () => {
 						selectedAttachments.splice(i, 1);
@@ -1727,7 +1727,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const manageBtn = append(labelRow, $('span', {
 			style: 'font-size: 11px; color: #38bdf8; cursor: pointer; display: flex; align-items: center; gap: 4px; opacity: 0.85; transition: opacity 0.15s ease;'
 		}));
-		manageBtn.textContent = '⚙️ Manage Custom Modules';
+		manageBtn.textContent = 'Manage Custom Modules';
 		manageBtn.onmouseenter = () => manageBtn.style.opacity = '1.0';
 		manageBtn.onmouseleave = () => manageBtn.style.opacity = '0.85';
 
@@ -1899,7 +1899,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		this.agentsManagerService.getAgents().then(agents => {
 			for (const ag of agents) {
-				append(baseAgentSelect, $('option', { value: ag.id }, `🤖 ${ag.name} (${ag.model?.modelId || 'gemini-1.5-flash'})`));
+				append(baseAgentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.model?.modelId || 'gemini-1.5-flash'})`));
 			}
 		}).catch(() => { });
 
@@ -2176,7 +2176,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		this.agentsManagerService.getAgents().then(agents => {
 			for (const ag of agents) {
-				const opt = append(agentSelect, $('option', { value: ag.id }, `🤖 ${ag.name} (${ag.model?.modelId || 'gemini-1.5-flash'})`));
+				const opt = append(agentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.model?.modelId || 'gemini-1.5-flash'})`));
 				opt.setAttribute('data-name', ag.name);
 			}
 		}).catch(() => { });
@@ -2207,7 +2207,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					const tag = append(attachTagsContainer, $('div', {
 						style: 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); padding: 4px 10px; border-radius: 6px; font-size: 11.5px;'
 					}));
-					append(tag, $('span', {}, `📄 ${fileName}`));
+					append(tag, $('span', {}, fileName));
 					const delBtn = append(tag, $('span', { style: 'cursor: pointer; opacity: 0.6; margin-left: 4px;' }, '✕'));
 					delBtn.onclick = () => {
 						selectedAttachments.splice(i, 1);
@@ -2303,7 +2303,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 			const targetCheckUri2 = URI.joinPath(targetUri, sanitizedName);
 			const exists = await this.fileService.exists(targetCheckUri1) || await this.fileService.exists(targetCheckUri2);
 			if (exists) {
-				warningBanner.innerText = `⚠️ Item '${inputName}' already exists in '${targetName}'. Please enter a unique name.`;
+				warningBanner.innerText = `Item '${inputName}' already exists in '${targetName}'. Please enter a unique name.`;
 				warningBanner.style.display = 'block';
 				submitBtn.disabled = true;
 				submitBtn.style.opacity = '0.5';
