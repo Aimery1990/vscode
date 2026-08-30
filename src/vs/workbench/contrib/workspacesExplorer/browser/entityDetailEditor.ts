@@ -1254,23 +1254,21 @@ export class EntityDetailEditor extends EditorPane {
 						border-radius: 4px;
 						padding: 3px 5px;
 						cursor: pointer;
-						transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+						transition: opacity 0.3s ease 0.35s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 						user-select: none;
 						line-height: 1;
 						opacity: 0;
 						pointer-events: none;
 					}
+					/* Container-level hover reveals all editable sparkle buttons within */
 					.header-title-row:hover .ai-edit-btn,
-					.section-card:hover > .section-title .ai-edit-btn,
-					.section-title:hover .ai-edit-btn,
-					.dynamic-sub-card:hover > div .ai-edit-btn,
-					.dynamic-subfield-row:hover .ai-edit-btn,
-					.sidebar-header:hover .ai-edit-btn,
-					.sidebar-row:hover .ai-edit-btn,
-					.instruction-item:hover .ai-edit-btn,
-					.custom-property-card:hover > .section-title .ai-edit-btn {
+					.section-card:hover .ai-edit-btn,
+					.sidebar:hover .ai-edit-btn,
+					.dynamic-sub-card:hover .ai-edit-btn,
+					.custom-property-card:hover .ai-edit-btn {
 						opacity: 0.55;
 						pointer-events: auto;
+						transition: opacity 0.15s ease 0s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 					}
 					.ai-edit-btn:hover {
 						opacity: 1 !important;
@@ -1279,6 +1277,7 @@ export class EntityDetailEditor extends EditorPane {
 						border-color: rgba(255, 255, 255, 0.18) !important;
 						box-shadow: none !important;
 						transform: none !important;
+						transition: opacity 0.1s ease 0s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease !important;
 					}
 				</style>
 			</head>
