@@ -218,15 +218,25 @@ export class CenteredChatWidget extends Disposable {
 			const labelSpan = append(item, $('span'));
 			labelSpan.textContent = child.label;
 
-			if (child.currentValue) {
+			if (child.currentValue !== undefined && child.currentValue !== '') {
+				const valStr = String(child.currentValue).trim();
+				const isNoneOrUnassigned = valStr === 'None' || valStr === 'Unassigned' || valStr === 'none' || valStr === 'null' || valStr === 'undefined';
+
 				const valSpan = append(item, $('span'));
 				valSpan.style.fontSize = '9.5px';
-				valSpan.style.opacity = '0.6';
 				valSpan.style.maxWidth = '100px';
 				valSpan.style.overflow = 'hidden';
 				valSpan.style.textOverflow = 'ellipsis';
 				valSpan.style.whiteSpace = 'nowrap';
-				valSpan.textContent = child.currentValue;
+				valSpan.textContent = valStr;
+
+				if (isNoneOrUnassigned) {
+					valSpan.style.opacity = '0.35';
+					valSpan.style.fontStyle = 'italic';
+				} else {
+					valSpan.style.color = '#38bdf8';
+					valSpan.style.opacity = '0.9';
+				}
 			} else if (child.children && child.children.length > 0) {
 				append(item, $('span.codicon.codicon-chevron-right', { style: 'font-size: 10px; opacity: 0.5;' }));
 			}
@@ -456,18 +466,28 @@ export class CenteredChatWidget extends Disposable {
 				nameSpan.style.color = 'var(--vscode-editor-foreground)';
 				nameSpan.textContent = child.label;
 
-				if (child.currentValue) {
+				if (child.currentValue !== undefined && child.currentValue !== '') {
+					const valStr = String(child.currentValue).trim();
+					const isNoneOrUnassigned = valStr === 'None' || valStr === 'Unassigned' || valStr === 'none' || valStr === 'null' || valStr === 'undefined';
+
 					const valBadge = append(card, $('span'));
 					valBadge.style.fontSize = '9.5px';
 					valBadge.style.padding = '1px 5px';
 					valBadge.style.borderRadius = '3px';
-					valBadge.style.background = 'rgba(56, 189, 248, 0.12)';
-					valBadge.style.color = '#38bdf8';
 					valBadge.style.maxWidth = '120px';
 					valBadge.style.overflow = 'hidden';
 					valBadge.style.textOverflow = 'ellipsis';
 					valBadge.style.whiteSpace = 'nowrap';
-					valBadge.textContent = child.currentValue;
+					valBadge.textContent = valStr;
+
+					if (isNoneOrUnassigned) {
+						valBadge.style.background = 'rgba(255, 255, 255, 0.06)';
+						valBadge.style.color = 'rgba(255, 255, 255, 0.4)';
+						valBadge.style.fontStyle = 'italic';
+					} else {
+						valBadge.style.background = 'rgba(56, 189, 248, 0.12)';
+						valBadge.style.color = '#38bdf8';
+					}
 				} else if (child.children && child.children.length > 0) {
 					const countBadge = append(card, $('span'));
 					countBadge.style.fontSize = '9.5px';
@@ -533,12 +553,14 @@ export class CenteredChatWidget extends Disposable {
 			}
 
 			const currentVal = locator.currentValue || (activeNode ? activeNode.currentValue : '') || '';
-			locator.interactiveModifiedValue = currentVal;
+			const isNoneOrUnassigned = currentVal === 'None' || currentVal === 'Unassigned' || currentVal === 'null' || currentVal === 'undefined';
+			const editableValue = isNoneOrUnassigned ? '' : currentVal;
+			locator.interactiveModifiedValue = editableValue;
 
-			const fType = locator.fieldType || (activeNode ? activeNode.fieldType : undefined) || (currentVal.includes('~') ? 'date_range' : (/^\d{4}-\d{2}-\d{2}/.test(currentVal) ? 'date' : 'text'));
+			const fType = locator.fieldType || (activeNode ? activeNode.fieldType : undefined) || (editableValue.includes('~') ? 'date_range' : (/^\d{4}-\d{2}-\d{2}/.test(editableValue) ? 'date' : 'text'));
 
 			if (fType === 'date_range') {
-				const [sDate, eDate] = currentVal.split('~').map((s: string) => s.trim());
+				const [sDate, eDate] = editableValue.split('~').map((s: string) => s.trim());
 				const dateWrapper = append(editorBox, $('div'));
 				dateWrapper.style.display = 'flex';
 				dateWrapper.style.alignItems = 'center';
@@ -583,7 +605,7 @@ export class CenteredChatWidget extends Disposable {
 			} else if (fType === 'date') {
 				const dInput = append(editorBox, $('input.monaco-inputbox')) as HTMLInputElement;
 				dInput.type = 'date';
-				dInput.value = currentVal;
+				dInput.value = editableValue;
 				dInput.style.width = '100%';
 				dInput.style.padding = '4px 8px';
 				dInput.style.fontSize = '11.5px';
@@ -595,7 +617,7 @@ export class CenteredChatWidget extends Disposable {
 				dInput.style.boxSizing = 'border-box';
 				dInput.oninput = () => { locator.interactiveModifiedValue = dInput.value; };
 			} else if (fType === 'time_range') {
-				const [sTime, eTime] = currentVal.split('~').map((s: string) => s.trim());
+				const [sTime, eTime] = editableValue.split('~').map((s: string) => s.trim());
 				const timeWrapper = append(editorBox, $('div'));
 				timeWrapper.style.display = 'flex';
 				timeWrapper.style.alignItems = 'center';
@@ -640,7 +662,7 @@ export class CenteredChatWidget extends Disposable {
 			} else if (fType === 'time') {
 				const tInput = append(editorBox, $('input.monaco-inputbox')) as HTMLInputElement;
 				tInput.type = 'time';
-				tInput.value = currentVal;
+				tInput.value = editableValue;
 				tInput.style.width = '100%';
 				tInput.style.padding = '4px 8px';
 				tInput.style.fontSize = '11.5px';
@@ -652,7 +674,7 @@ export class CenteredChatWidget extends Disposable {
 				tInput.style.boxSizing = 'border-box';
 				tInput.oninput = () => { locator.interactiveModifiedValue = tInput.value; };
 			} else if (fType === 'datetime_range') {
-				const [sDt, eDt] = currentVal.split('~').map((s: string) => s.trim());
+				const [sDt, eDt] = editableValue.split('~').map((s: string) => s.trim());
 				const dtWrapper = append(editorBox, $('div'));
 				dtWrapper.style.display = 'flex';
 				dtWrapper.style.alignItems = 'center';
@@ -697,7 +719,7 @@ export class CenteredChatWidget extends Disposable {
 			} else if (fType === 'datetime') {
 				const dtInput = append(editorBox, $('input.monaco-inputbox')) as HTMLInputElement;
 				dtInput.type = 'datetime-local';
-				dtInput.value = currentVal;
+				dtInput.value = editableValue;
 				dtInput.style.width = '100%';
 				dtInput.style.padding = '4px 8px';
 				dtInput.style.fontSize = '11.5px';
@@ -737,7 +759,7 @@ export class CenteredChatWidget extends Disposable {
 				if (optionsList && Array.isArray(optionsList)) {
 					optionsList.forEach(ag => {
 						const opt = append(select, $('option', { value: ag.id || ag.name }, ag.name || ag.id)) as HTMLOptionElement;
-						if (ag.id === currentVal || ag.name === currentVal) opt.selected = true;
+						if (!isNoneOrUnassigned && (ag.id === currentVal || ag.name === currentVal)) opt.selected = true;
 					});
 				}
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
@@ -758,14 +780,16 @@ export class CenteredChatWidget extends Disposable {
 					style: 'width: 100%; min-height: 62px; max-height: 200px; padding: 6px 8px; font-size: 11.5px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; color: #fff; resize: vertical; box-sizing: border-box;'
 				})) as HTMLTextAreaElement;
 				ta.rows = 3;
-				ta.value = currentVal;
+				ta.value = editableValue;
+				ta.placeholder = isNoneOrUnassigned ? currentVal : '';
 				ta.oninput = () => { locator.interactiveModifiedValue = ta.value; };
 			} else {
 				const txt = append(editorBox, $('input.monaco-inputbox', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; color: #fff; box-sizing: border-box;'
 				})) as HTMLInputElement;
 				txt.type = 'text';
-				txt.value = currentVal;
+				txt.value = editableValue;
+				txt.placeholder = isNoneOrUnassigned ? currentVal : '';
 				txt.oninput = () => { locator.interactiveModifiedValue = txt.value; };
 			}
 		}

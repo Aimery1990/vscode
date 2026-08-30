@@ -616,6 +616,7 @@ export class EntityDetailEditor extends EditorPane {
 		});
 
 		// 4. Attributes
+		const isAgentAssigned = !!(data.assignedAgentName && data.assignedAgentName !== 'None' && data.assignedAgentName !== 'Unassigned');
 		const attrChildren: any[] = [
 			{
 				path: '/Attributes/Status',
@@ -635,20 +636,20 @@ export class EntityDetailEditor extends EditorPane {
 				path: '/Attributes/Current AI Agent',
 				label: 'Current AI Agent',
 				fieldType: 'agent',
-				currentValue: data.assignedAgentName || '',
+				currentValue: isAgentAssigned ? data.assignedAgentName : 'Unassigned',
 				options: agents.map(a => ({ id: a.id, name: a.name }))
 			},
 			{
 				path: '/Attributes/Link To',
 				label: 'Link To',
 				fieldType: 'text',
-				currentValue: data.linkTo && data.linkTo !== 'None' ? data.linkTo : ''
+				currentValue: data.linkTo && data.linkTo !== 'None' ? data.linkTo : 'None'
 			},
 			{
 				path: '/Attributes/Linked By',
 				label: 'Linked By',
 				fieldType: 'text',
-				currentValue: data.linkedBy && data.linkedBy !== 'None' ? data.linkedBy : ''
+				currentValue: data.linkedBy && data.linkedBy !== 'None' ? data.linkedBy : 'None'
 			}
 		];
 		rootNodes.push({
@@ -679,8 +680,10 @@ export class EntityDetailEditor extends EditorPane {
 						const itemFields: any[] = [];
 						for (const [subK, subValRaw] of Object.entries(item)) {
 							if (subK.startsWith('_')) continue;
-							const subVal = String(subValRaw || '');
-							const isDateOrRange = subVal.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(subVal) || subK.toLowerCase().includes('period') || subK.toLowerCase().includes('date');
+							const rawStr = subValRaw !== undefined && subValRaw !== null ? String(subValRaw).trim() : '';
+							const isSubEmpty = !rawStr || rawStr === 'None' || rawStr === 'null' || rawStr === 'undefined' || rawStr === 'N/A';
+							const subVal = isSubEmpty ? 'None' : rawStr;
+							const isDateOrRange = subVal !== 'None' && (subVal.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(subVal) || subK.toLowerCase().includes('period') || subK.toLowerCase().includes('date'));
 							const isLong = subVal.length > 80 || subVal.includes('\n');
 							itemFields.push({
 								path: `/Custom/${k}/${idxNum}/${subK}`,
@@ -705,8 +708,10 @@ export class EntityDetailEditor extends EditorPane {
 						children: listItems
 					});
 				} else {
-					const strVal = String(v || '');
-					const isRange = strVal.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(strVal);
+					const rawVal = v !== undefined && v !== null ? String(v).trim() : '';
+					const isValEmpty = !rawVal || rawVal === 'None' || rawVal === 'null' || rawVal === 'undefined' || rawVal === 'N/A';
+					const strVal = isValEmpty ? 'None' : rawVal;
+					const isRange = strVal !== 'None' && (strVal.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(strVal));
 					const isMultiline = strVal.length > 80 || strVal.includes('\n');
 					customChildren.push({
 						path: `/Custom/${k}`,
