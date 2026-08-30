@@ -2389,10 +2389,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const badgeColor = currentTypeObj ? currentTypeObj.color : '#38bdf8';
 				previewBadge.style.color = badgeColor;
 				previewBadge.style.borderColor = `${badgeColor}58`;
-				previewBadge.style.backgroundColor = `${badgeColor}12`;
-				typeDefInput.value = matchingModule ? (matchingModule.description || `.agents/entity_type/${selectedType}.yaml`) : 'Built-in (System)';
-				typeDefInput.placeholder = matchingModule ? `.agents/entity_type/${selectedType}.yaml` : 'Built-in (System)';
-				typePromptInput.value = matchingModule?.prompt || builtInTypePrompts[selectedType] || '';
+				typeDefInput.value = matchingModule ? (matchingModule.description || '') : 'Built-in (System)';
+				typeDefInput.placeholder = matchingModule ? (matchingModule.description || `.agents/entity_type/${selectedType}.yaml`) : 'Built-in (System)';
+				typePromptInput.value = matchingModule ? (matchingModule.prompt || '') : (builtInTypePrompts[selectedType] || '');
 			} else {
 				codeBox.style.display = 'block';
 				badgeBox.style.display = 'block';
@@ -2422,10 +2421,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const badgeColor = currentTypeObj ? currentTypeObj.color : '#38bdf8';
 				previewBadge.style.color = badgeColor;
 				previewBadge.style.borderColor = `${badgeColor}58`;
-				previewBadge.style.backgroundColor = `${badgeColor}12`;
-				typeDefInput.value = matchingModule ? (matchingModule.description || `.agents/entity_type/${selectedType}.yaml`) : 'Built-in (System)';
-				typeDefInput.placeholder = matchingModule ? `.agents/entity_type/${selectedType}.yaml` : 'Built-in (System)';
-				typePromptInput.value = matchingModule?.prompt || builtInTypePrompts[selectedType] || '';
+				typeDefInput.value = matchingModule ? (matchingModule.description || '') : 'Built-in (System)';
+				typeDefInput.placeholder = matchingModule ? (matchingModule.description || `.agents/entity_type/${selectedType}.yaml`) : 'Built-in (System)';
+				typePromptInput.value = matchingModule ? (matchingModule.prompt || '') : (builtInTypePrompts[selectedType] || '');
 			}
 
 			if (matchingModule && matchingModule.fields && matchingModule.fields.length > 0) {
@@ -3371,10 +3369,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 				};
 
 				// Metadata & Options configuration layout
-				const configMetaContainer = append(mgModal, $('.config-meta-container', { style: 'display: flex; gap: 20px; align-items: center; flex-wrap: wrap; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 12px 16px; border-radius: 8px;' }));
+				const configMetaContainer = append(mgModal, $('.config-meta-container', { style: 'display: flex; flex-direction: column; gap: 10px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); padding: 12px 16px; border-radius: 8px;' }));
+
+				const configTopRow = append(configMetaContainer, $('.config-top-row', { style: 'display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap;' }));
+
+				const topLeftGroup = append(configTopRow, $('.top-left-group', { style: 'display: flex; gap: 16px; align-items: center; flex: 1; min-width: 320px;' }));
 
 				// Scope Selector
-				const scopeGroup = append(configMetaContainer, $('.form-group', { style: 'display: flex; align-items: center; gap: 8px;' }));
+				const scopeGroup = append(topLeftGroup, $('.form-group', { style: 'display: flex; align-items: center; gap: 8px;' }));
 				append(scopeGroup, $('label', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #888888;' }, 'Scope:'));
 				const scopeSelect = append(scopeGroup, $('select.monaco-select', {
 					style: 'padding: 4px 8px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: #1a1a1a; color: inherit; cursor: pointer;'
@@ -3387,7 +3389,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				};
 
 				// Type Definition (Description) Input
-				const defGroup = append(configMetaContainer, $('.form-group', { style: 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 220px;' }));
+				const defGroup = append(topLeftGroup, $('.form-group', { style: 'display: flex; align-items: center; gap: 8px; flex: 1;' }));
 				append(defGroup, $('label', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #888888; white-space: nowrap;' }, 'Type Definition:'));
 				const defInput = append(defGroup, $('input.monaco-inputbox', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: #1a1a1a; color: inherit; box-sizing: border-box;'
@@ -3398,20 +3400,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 					activeMod.description = defInput.value;
 				};
 
-				// Type Prompt (Ticket Type Prompt) Input
-				const promptGroup = append(configMetaContainer, $('.form-group', { style: 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 220px;' }));
-				append(promptGroup, $('label', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #888888; white-space: nowrap;' }, 'Type Prompt:'));
-				const typePromptInput = append(promptGroup, $('input.monaco-inputbox', {
-					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: #1a1a1a; color: inherit; box-sizing: border-box;'
-				})) as HTMLInputElement;
-				typePromptInput.placeholder = 'e.g. Instructions for AI to process tickets of this type...';
-				typePromptInput.value = activeMod.prompt || '';
-				typePromptInput.oninput = () => {
-					activeMod.prompt = typePromptInput.value;
-				};
-
 				// Color Picker container
-				const colorContainer = append(configMetaContainer, $('div', { style: 'display: flex; align-items: center; gap: 12px;' }));
+				const colorContainer = append(configTopRow, $('div', { style: 'display: flex; align-items: center; gap: 12px;' }));
 				const renderColorPicker = () => {
 					colorContainer.textContent = '';
 					append(colorContainer, $('span', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #888888;' }, 'Module Color:'));
@@ -3428,6 +3418,22 @@ export class MainWorkspaceViewPane extends ViewPane {
 					});
 				};
 				renderColorPicker();
+
+				// Dedicated Multi-line Type Prompt Section
+				const promptGroup = append(configMetaContainer, $('.form-group.config-prompt-section', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+				const promptLabelRow = append(promptGroup, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+				append(promptLabelRow, $('label', { style: 'font-size: 11px; opacity: 0.85; font-weight: 600; text-transform: uppercase; color: #38bdf8;' }, 'Type Prompt (AI System Instructions for this Module):'));
+				append(promptLabelRow, $('span', { style: 'font-size: 10px; opacity: 0.5;' }, 'Multi-line AI instructions when tickets of this type are processed'));
+
+				const typePromptInput = append(promptGroup, $('textarea.monaco-inputbox', {
+					rows: '2',
+					style: 'width: 100%; min-height: 48px; padding: 6px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: #1a1a1a; color: inherit; box-sizing: border-box; resize: vertical; font-family: inherit; line-height: 1.4;'
+				})) as HTMLTextAreaElement;
+				typePromptInput.placeholder = 'e.g. Instructions for AI to process tickets of this type...';
+				typePromptInput.value = activeMod.prompt || '';
+				typePromptInput.oninput = () => {
+					activeMod.prompt = typePromptInput.value;
+				};
 
 				// Main columns
 				const modalLayoutContainer = append(mgModal, $('.modal-layout-container', { style: 'display: flex; gap: 20px; width: 100%; height: 480px; overflow: hidden;' }));

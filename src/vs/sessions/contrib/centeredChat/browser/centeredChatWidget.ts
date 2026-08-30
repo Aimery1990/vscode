@@ -64,6 +64,10 @@ export class CenteredChatWidget extends Disposable {
 	private activeCredentialId: string = '';
 	private activeModelId: string = '';
 
+	// Context Target Locator (Breadcrumb tag above chat input)
+	private activeContextLocator: { workspaceId?: string; ticketId?: string; field?: string } | null = null;
+	private contextLocatorContainer: HTMLElement | undefined;
+
 	// Active Streaming state
 	private isStreaming = false;
 	private activeCts: CancellationTokenSource | null = null;
@@ -112,14 +116,107 @@ export class CenteredChatWidget extends Disposable {
 		this.activeModelId = this.storageService.get(STORAGE_KEY_MODEL_ID, StorageScope.PROFILE, '');
 	}
 
+	public setContextLocator(locator: { workspaceId?: string; ticketId?: string; field?: string } | null): void {
+		this.activeContextLocator = locator;
+		if (!this.contextLocatorContainer) {
+			return;
+		}
+
+		if (!locator || (!locator.workspaceId && !locator.ticketId && !locator.field)) {
+			this.contextLocatorContainer.style.display = 'none';
+			this.contextLocatorContainer.textContent = '';
+			return;
+		}
+
+		this.contextLocatorContainer.style.display = 'flex';
+		this.contextLocatorContainer.textContent = '';
+
+		const chipsRow = append(this.contextLocatorContainer, $('.centered-chat-context-chips'));
+		chipsRow.style.display = 'flex';
+		chipsRow.style.alignItems = 'center';
+		chipsRow.style.gap = '6px';
+		chipsRow.style.flex = '1';
+		chipsRow.style.overflow = 'hidden';
+		chipsRow.style.flexWrap = 'wrap';
+
+		if (locator.workspaceId) {
+			const wsChip = append(chipsRow, $('.context-chip'));
+			wsChip.style.display = 'inline-flex';
+			wsChip.style.alignItems = 'center';
+			wsChip.style.gap = '4px';
+			wsChip.style.fontSize = '10.5px';
+			wsChip.style.padding = '2px 6px';
+			wsChip.style.borderRadius = '4px';
+			wsChip.style.background = 'rgba(255,255,255,0.06)';
+			wsChip.style.color = '#ccc';
+			wsChip.textContent = `📁 ${locator.workspaceId}`;
+		}
+
+		if (locator.ticketId) {
+			if (locator.workspaceId) {
+				append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '›'));
+			}
+			const tChip = append(chipsRow, $('.context-chip'));
+			tChip.style.display = 'inline-flex';
+			tChip.style.alignItems = 'center';
+			tChip.style.gap = '4px';
+			tChip.style.fontSize = '10.5px';
+			tChip.style.fontWeight = '600';
+			tChip.style.padding = '2px 6px';
+			tChip.style.borderRadius = '4px';
+			tChip.style.background = 'rgba(56,189,248,0.15)';
+			tChip.style.color = '#38bdf8';
+			tChip.textContent = `🎫 ${locator.ticketId}`;
+		}
+
+		if (locator.field) {
+			if (locator.ticketId || locator.workspaceId) {
+				append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '›'));
+			}
+			const fChip = append(chipsRow, $('.context-chip'));
+			fChip.style.display = 'inline-flex';
+			fChip.style.alignItems = 'center';
+			fChip.style.gap = '4px';
+			fChip.style.fontSize = '10.5px';
+			fChip.style.fontWeight = '600';
+			fChip.style.padding = '2px 6px';
+			fChip.style.borderRadius = '4px';
+			fChip.style.background = 'rgba(167,139,250,0.15)';
+			fChip.style.color = '#a78bfa';
+			fChip.style.fontFamily = 'monospace';
+			fChip.textContent = `🎯 ${locator.field}`;
+		}
+
+		const closeBtn = append(this.contextLocatorContainer, $('.context-chip-close'));
+		closeBtn.style.cursor = 'pointer';
+		closeBtn.style.opacity = '0.6';
+		closeBtn.style.padding = '2px 4px';
+		closeBtn.style.fontSize = '11px';
+		closeBtn.style.display = 'flex';
+		closeBtn.style.alignItems = 'center';
+		closeBtn.title = 'Remove target locator';
+		append(closeBtn, $('span.codicon.codicon-close'));
+		closeBtn.onclick = (e) => {
+			e.stopPropagation();
+			this.setContextLocator(null);
+		};
+	}
+
 	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; currentValue?: string }): void {
 		if (this.element) {
-			if (initialContext && initialContext.prompt && this.inputField) {
-				this.inputField.value = initialContext.prompt;
-				this.inputField.focus();
-				const len = this.inputField.value.length;
-				this.inputField.setSelectionRange(len, len);
+			if (initialContext) {
+				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
+					this.setContextLocator({
+						workspaceId: initialContext.workspaceId,
+						ticketId: initialContext.ticketId,
+						field: initialContext.field
+					});
+				}
+				if (initialContext.prompt && !initialContext.field && !initialContext.ticketId && this.inputField) {
+					this.inputField.value = initialContext.prompt;
+				}
 			}
+			this.inputField?.focus();
 			return;
 		}
 
@@ -183,6 +280,18 @@ export class CenteredChatWidget extends Disposable {
 		append(this.recordingIndicator, $('.centered-chat-popup-recording-dot'));
 		this.recordingTimeSpan = append(this.recordingIndicator, $('span'));
 		this.recordingTimeSpan.textContent = '0:00 / 2:00';
+
+		// Context Locator Tag Bar (Cursor-style breadcrumb above input)
+		this.contextLocatorContainer = append(inputArea, $('.centered-chat-context-locator-bar'));
+		this.contextLocatorContainer.style.display = 'none';
+		this.contextLocatorContainer.style.alignItems = 'center';
+		this.contextLocatorContainer.style.justifyContent = 'space-between';
+		this.contextLocatorContainer.style.gap = '8px';
+		this.contextLocatorContainer.style.background = 'rgba(56,189,248,0.06)';
+		this.contextLocatorContainer.style.border = '1px solid rgba(56,189,248,0.2)';
+		this.contextLocatorContainer.style.borderRadius = '6px';
+		this.contextLocatorContainer.style.padding = '4px 8px';
+		this.contextLocatorContainer.style.marginBottom = '6px';
 
 		// Input Text Area
 		const inputWrapper = append(inputArea, $('.centered-chat-popup-input-wrapper'));
@@ -296,8 +405,17 @@ export class CenteredChatWidget extends Disposable {
 		this.loadCredentialsAndModels();
 
 		// Auto Focus on load and populate pre-filled context
-		if (initialContext && initialContext.prompt) {
-			this.inputField.value = initialContext.prompt;
+		if (initialContext) {
+			if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
+				this.setContextLocator({
+					workspaceId: initialContext.workspaceId,
+					ticketId: initialContext.ticketId,
+					field: initialContext.field
+				});
+			}
+			if (initialContext.prompt && !initialContext.field && !initialContext.ticketId && this.inputField) {
+				this.inputField.value = initialContext.prompt;
+			}
 		}
 		this.inputField.focus();
 		if (this.inputField.value) {
@@ -725,6 +843,38 @@ export class CenteredChatWidget extends Disposable {
 		// 1. Render User Message
 		const userMsg = append(this.messagesContainer, $('.centered-chat-msg.centered-chat-msg-user'));
 
+		let fullPrompt = text;
+		if (this.activeContextLocator && (this.activeContextLocator.workspaceId || this.activeContextLocator.ticketId || this.activeContextLocator.field)) {
+			const loc = this.activeContextLocator;
+			const locators: string[] = [];
+			if (loc.workspaceId) { locators.push(`Workspace: ${loc.workspaceId}`); }
+			if (loc.ticketId) { locators.push(`Ticket: ${loc.ticketId}`); }
+			if (loc.field) { locators.push(`Target: ${loc.field}`); }
+			const prefix = `[${locators.join(' | ')}]\n`;
+			fullPrompt = `${prefix}${text}`;
+
+			// Render nice context tag pill above the user text in the bubble
+			const ctxTag = append(userMsg, $('.centered-chat-msg-context-tag'));
+			ctxTag.style.display = 'inline-flex';
+			ctxTag.style.alignItems = 'center';
+			ctxTag.style.gap = '6px';
+			ctxTag.style.fontSize = '9.5px';
+			ctxTag.style.opacity = '0.85';
+			ctxTag.style.marginBottom = '6px';
+			ctxTag.style.background = 'rgba(255,255,255,0.08)';
+			ctxTag.style.padding = '2px 6px';
+			ctxTag.style.borderRadius = '4px';
+			
+			let ctxText = '';
+			if (loc.workspaceId) { ctxText += `📁 ${loc.workspaceId} `; }
+			if (loc.ticketId) { ctxText += `🎫 ${loc.ticketId} `; }
+			if (loc.field) { ctxText += `🎯 ${loc.field}`; }
+			ctxTag.textContent = ctxText.trim();
+
+			// Clear locator for subsequent messages
+			this.setContextLocator(null);
+		}
+
 		if (this.activeAttachments.length > 0) {
 			this.activeAttachments.forEach(att => {
 				const attachmentLabel = append(userMsg, $('div'));
@@ -751,7 +901,7 @@ export class CenteredChatWidget extends Disposable {
 		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
 
 		// 2. Start Real Streaming Response
-		await this.startStreamingResponse(text, cred, apiKey);
+		await this.startStreamingResponse(fullPrompt, cred, apiKey);
 	}
 
 	private async startStreamingResponse(prompt: string, cred: IAgentCredential, apiKey: string): Promise<void> {
