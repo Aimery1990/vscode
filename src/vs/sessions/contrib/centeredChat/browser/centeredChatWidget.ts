@@ -225,24 +225,27 @@ export class CenteredChatWidget extends Disposable {
 			this.setContextLocator(null);
 		};
 
-		// 2. Interactive Target Quick-Modifier Row
+		// 2. Interactive Target Quick-Modifier Row (Vertical layout for maximum width & zero waste)
 		if (locator.field && locator.fieldType !== 'dynamic_list' && locator.fieldType !== 'composite' && locator.fieldType !== 'attributes') {
 			const editorBox = append(this.contextLocatorContainer, $('.context-interactive-editor-box'));
 			editorBox.style.display = 'flex';
-			editorBox.style.alignItems = 'center';
-			editorBox.style.gap = '8px';
+			editorBox.style.flexDirection = 'column';
+			editorBox.style.alignItems = 'stretch';
+			editorBox.style.gap = '6px';
 			editorBox.style.background = 'rgba(0, 0, 0, 0.28)';
 			editorBox.style.border = '1px solid rgba(255, 255, 255, 0.08)';
 			editorBox.style.borderRadius = '5px';
-			editorBox.style.padding = '5px 10px';
+			editorBox.style.padding = '7px 10px';
 			editorBox.style.boxSizing = 'border-box';
 			editorBox.style.width = '100%';
 
 			const labelEl = append(editorBox, $('label'));
 			labelEl.style.fontSize = '10.5px';
-			labelEl.style.opacity = '0.7';
+			labelEl.style.opacity = '0.75';
 			labelEl.style.fontWeight = '600';
-			labelEl.style.whiteSpace = 'nowrap';
+			labelEl.style.textTransform = 'uppercase';
+			labelEl.style.letterSpacing = '0.03em';
+			labelEl.style.color = 'var(--vscode-editor-foreground)';
 			labelEl.textContent = `${locator.label || 'Target Value'}:`;
 
 			const currentVal = locator.currentValue || '';
@@ -255,32 +258,38 @@ export class CenteredChatWidget extends Disposable {
 				const dateWrapper = append(editorBox, $('div'));
 				dateWrapper.style.display = 'flex';
 				dateWrapper.style.alignItems = 'center';
-				dateWrapper.style.gap = '6px';
-				dateWrapper.style.flex = '1';
+				dateWrapper.style.gap = '8px';
+				dateWrapper.style.width = '100%';
 
 				const sInput = append(dateWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
 				sInput.type = 'date';
 				sInput.value = sDate || '';
-				sInput.style.padding = '2px 6px';
-				sInput.style.fontSize = '11px';
+				sInput.style.flex = '1';
+				sInput.style.minWidth = '0';
+				sInput.style.padding = '4px 8px';
+				sInput.style.fontSize = '11.5px';
 				sInput.style.background = 'rgba(255,255,255,0.06)';
 				sInput.style.border = '1px solid rgba(255,255,255,0.12)';
-				sInput.style.borderRadius = '3px';
+				sInput.style.borderRadius = '4px';
 				sInput.style.color = '#fff';
 				sInput.style.colorScheme = 'dark';
+				sInput.style.boxSizing = 'border-box';
 
-				append(dateWrapper, $('span', { style: 'font-size: 11px; opacity: 0.5;' }, '~'));
+				append(dateWrapper, $('span', { style: 'font-size: 11.5px; opacity: 0.5; font-weight: 600;' }, '~'));
 
 				const eInput = append(dateWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
 				eInput.type = 'date';
 				eInput.value = eDate || '';
-				eInput.style.padding = '2px 6px';
-				eInput.style.fontSize = '11px';
+				eInput.style.flex = '1';
+				eInput.style.minWidth = '0';
+				eInput.style.padding = '4px 8px';
+				eInput.style.fontSize = '11.5px';
 				eInput.style.background = 'rgba(255,255,255,0.06)';
 				eInput.style.border = '1px solid rgba(255,255,255,0.12)';
-				eInput.style.borderRadius = '3px';
+				eInput.style.borderRadius = '4px';
 				eInput.style.color = '#fff';
 				eInput.style.colorScheme = 'dark';
+				eInput.style.boxSizing = 'border-box';
 
 				const updateDateRange = () => {
 					locator.interactiveModifiedValue = `${sInput.value.trim()} ~ ${eInput.value.trim()}`.trim();
@@ -291,45 +300,53 @@ export class CenteredChatWidget extends Disposable {
 				const dInput = append(editorBox, $('input.monaco-inputbox')) as HTMLInputElement;
 				dInput.type = 'date';
 				dInput.value = currentVal;
-				dInput.style.padding = '2px 6px';
-				dInput.style.fontSize = '11px';
+				dInput.style.width = '100%';
+				dInput.style.padding = '4px 8px';
+				dInput.style.fontSize = '11.5px';
 				dInput.style.background = 'rgba(255,255,255,0.06)';
 				dInput.style.border = '1px solid rgba(255,255,255,0.12)';
-				dInput.style.borderRadius = '3px';
+				dInput.style.borderRadius = '4px';
 				dInput.style.color = '#fff';
 				dInput.style.colorScheme = 'dark';
+				dInput.style.boxSizing = 'border-box';
 				dInput.oninput = () => { locator.interactiveModifiedValue = dInput.value; };
 			} else if (fType === 'time_range') {
 				const [sTime, eTime] = currentVal.split('~').map(s => s.trim());
 				const timeWrapper = append(editorBox, $('div'));
 				timeWrapper.style.display = 'flex';
 				timeWrapper.style.alignItems = 'center';
-				timeWrapper.style.gap = '6px';
-				timeWrapper.style.flex = '1';
+				timeWrapper.style.gap = '8px';
+				timeWrapper.style.width = '100%';
 
 				const sInput = append(timeWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
 				sInput.type = 'time';
 				sInput.value = sTime || '';
-				sInput.style.padding = '2px 6px';
-				sInput.style.fontSize = '11px';
+				sInput.style.flex = '1';
+				sInput.style.minWidth = '0';
+				sInput.style.padding = '4px 8px';
+				sInput.style.fontSize = '11.5px';
 				sInput.style.background = 'rgba(255,255,255,0.06)';
 				sInput.style.border = '1px solid rgba(255,255,255,0.12)';
-				sInput.style.borderRadius = '3px';
+				sInput.style.borderRadius = '4px';
 				sInput.style.color = '#fff';
 				sInput.style.colorScheme = 'dark';
+				sInput.style.boxSizing = 'border-box';
 
-				append(timeWrapper, $('span', { style: 'font-size: 11px; opacity: 0.5;' }, '~'));
+				append(timeWrapper, $('span', { style: 'font-size: 11.5px; opacity: 0.5; font-weight: 600;' }, '~'));
 
 				const eInput = append(timeWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
 				eInput.type = 'time';
 				eInput.value = eTime || '';
-				eInput.style.padding = '2px 6px';
-				eInput.style.fontSize = '11px';
+				eInput.style.flex = '1';
+				eInput.style.minWidth = '0';
+				eInput.style.padding = '4px 8px';
+				eInput.style.fontSize = '11.5px';
 				eInput.style.background = 'rgba(255,255,255,0.06)';
 				eInput.style.border = '1px solid rgba(255,255,255,0.12)';
-				eInput.style.borderRadius = '3px';
+				eInput.style.borderRadius = '4px';
 				eInput.style.color = '#fff';
 				eInput.style.colorScheme = 'dark';
+				eInput.style.boxSizing = 'border-box';
 
 				const updateTimeRange = () => {
 					locator.interactiveModifiedValue = `${sInput.value.trim()} ~ ${eInput.value.trim()}`.trim();
@@ -340,45 +357,53 @@ export class CenteredChatWidget extends Disposable {
 				const tInput = append(editorBox, $('input.monaco-inputbox')) as HTMLInputElement;
 				tInput.type = 'time';
 				tInput.value = currentVal;
-				tInput.style.padding = '2px 6px';
-				tInput.style.fontSize = '11px';
+				tInput.style.width = '100%';
+				tInput.style.padding = '4px 8px';
+				tInput.style.fontSize = '11.5px';
 				tInput.style.background = 'rgba(255,255,255,0.06)';
 				tInput.style.border = '1px solid rgba(255,255,255,0.12)';
-				tInput.style.borderRadius = '3px';
+				tInput.style.borderRadius = '4px';
 				tInput.style.color = '#fff';
 				tInput.style.colorScheme = 'dark';
+				tInput.style.boxSizing = 'border-box';
 				tInput.oninput = () => { locator.interactiveModifiedValue = tInput.value; };
 			} else if (fType === 'datetime_range') {
 				const [sDt, eDt] = currentVal.split('~').map(s => s.trim());
 				const dtWrapper = append(editorBox, $('div'));
 				dtWrapper.style.display = 'flex';
 				dtWrapper.style.alignItems = 'center';
-				dtWrapper.style.gap = '6px';
-				dtWrapper.style.flex = '1';
+				dtWrapper.style.gap = '8px';
+				dtWrapper.style.width = '100%';
 
 				const sInput = append(dtWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
 				sInput.type = 'datetime-local';
 				sInput.value = sDt || '';
-				sInput.style.padding = '2px 6px';
-				sInput.style.fontSize = '11px';
+				sInput.style.flex = '1';
+				sInput.style.minWidth = '0';
+				sInput.style.padding = '4px 8px';
+				sInput.style.fontSize = '11.5px';
 				sInput.style.background = 'rgba(255,255,255,0.06)';
 				sInput.style.border = '1px solid rgba(255,255,255,0.12)';
-				sInput.style.borderRadius = '3px';
+				sInput.style.borderRadius = '4px';
 				sInput.style.color = '#fff';
 				sInput.style.colorScheme = 'dark';
+				sInput.style.boxSizing = 'border-box';
 
-				append(dtWrapper, $('span', { style: 'font-size: 11px; opacity: 0.5;' }, '~'));
+				append(dtWrapper, $('span', { style: 'font-size: 11.5px; opacity: 0.5; font-weight: 600;' }, '~'));
 
 				const eInput = append(dtWrapper, $('input.monaco-inputbox')) as HTMLInputElement;
 				eInput.type = 'datetime-local';
 				eInput.value = eDt || '';
-				eInput.style.padding = '2px 6px';
-				eInput.style.fontSize = '11px';
+				eInput.style.flex = '1';
+				eInput.style.minWidth = '0';
+				eInput.style.padding = '4px 8px';
+				eInput.style.fontSize = '11.5px';
 				eInput.style.background = 'rgba(255,255,255,0.06)';
 				eInput.style.border = '1px solid rgba(255,255,255,0.12)';
-				eInput.style.borderRadius = '3px';
+				eInput.style.borderRadius = '4px';
 				eInput.style.color = '#fff';
 				eInput.style.colorScheme = 'dark';
+				eInput.style.boxSizing = 'border-box';
 
 				const updateDtRange = () => {
 					locator.interactiveModifiedValue = `${sInput.value.trim()} ~ ${eInput.value.trim()}`.trim();
@@ -389,17 +414,19 @@ export class CenteredChatWidget extends Disposable {
 				const dtInput = append(editorBox, $('input.monaco-inputbox')) as HTMLInputElement;
 				dtInput.type = 'datetime-local';
 				dtInput.value = currentVal;
-				dtInput.style.padding = '2px 6px';
-				dtInput.style.fontSize = '11px';
+				dtInput.style.width = '100%';
+				dtInput.style.padding = '4px 8px';
+				dtInput.style.fontSize = '11.5px';
 				dtInput.style.background = 'rgba(255,255,255,0.06)';
 				dtInput.style.border = '1px solid rgba(255,255,255,0.12)';
-				dtInput.style.borderRadius = '3px';
+				dtInput.style.borderRadius = '4px';
 				dtInput.style.color = '#fff';
 				dtInput.style.colorScheme = 'dark';
+				dtInput.style.boxSizing = 'border-box';
 				dtInput.oninput = () => { locator.interactiveModifiedValue = dtInput.value; };
 			} else if (fType === 'status') {
 				const select = append(editorBox, $('select.monaco-select-box', {
-					style: 'flex: 1; padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer;'
+					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
 				})) as HTMLSelectElement;
 				const statuses = ['Todo', 'In Progress', 'Done', 'Blocked'];
 				statuses.forEach(st => {
@@ -409,7 +436,7 @@ export class CenteredChatWidget extends Disposable {
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
 			} else if (fType === 'priority') {
 				const select = append(editorBox, $('select.monaco-select-box', {
-					style: 'flex: 1; padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer;'
+					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
 				})) as HTMLSelectElement;
 				const priorities = ['Low', 'Medium', 'High', 'Urgent'];
 				priorities.forEach(pr => {
@@ -419,7 +446,7 @@ export class CenteredChatWidget extends Disposable {
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
 			} else if (fType === 'agent') {
 				const select = append(editorBox, $('select.monaco-select-box', {
-					style: 'flex: 1; padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer;'
+					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
 				})) as HTMLSelectElement;
 				append(select, $('option', { value: '' }, 'None (Unassigned)'));
 				if (locator.options && Array.isArray(locator.options)) {
@@ -431,7 +458,7 @@ export class CenteredChatWidget extends Disposable {
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
 			} else if (fType === 'select') {
 				const select = append(editorBox, $('select.monaco-select-box', {
-					style: 'flex: 1; padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer;'
+					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
 				})) as HTMLSelectElement;
 				if (locator.options && Array.isArray(locator.options)) {
 					locator.options.forEach(op => {
@@ -442,14 +469,14 @@ export class CenteredChatWidget extends Disposable {
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
 			} else if (fType === 'textarea') {
 				const ta = append(editorBox, $('textarea.monaco-inputbox', {
-					style: 'flex: 1; width: 100%; padding: 4px 6px; font-size: 11px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 3px; color: #fff; resize: vertical;'
+					style: 'width: 100%; min-height: 62px; max-height: 200px; padding: 6px 8px; font-size: 11.5px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; color: #fff; resize: vertical; box-sizing: border-box;'
 				})) as HTMLTextAreaElement;
-				ta.rows = 2;
+				ta.rows = 3;
 				ta.value = currentVal;
 				ta.oninput = () => { locator.interactiveModifiedValue = ta.value; };
 			} else {
 				const txt = append(editorBox, $('input.monaco-inputbox', {
-					style: 'flex: 1; padding: 3px 6px; font-size: 11px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 3px; color: #fff;'
+					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; color: #fff; box-sizing: border-box;'
 				})) as HTMLInputElement;
 				txt.type = 'text';
 				txt.value = currentVal;
