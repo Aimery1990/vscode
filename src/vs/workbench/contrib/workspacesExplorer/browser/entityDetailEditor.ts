@@ -597,8 +597,9 @@ export class EntityDetailEditor extends EditorPane {
 		let summary = '';
 
 		// 1. Check title from metadata
-		if (meta['Title'] && meta['Title'] !== 'None' && meta['Title'] !== 'null' && meta['Title'] !== fallbackName) {
-			title = meta['Title'].trim();
+		const rawTitle = meta['Title']?.trim();
+		if (rawTitle && rawTitle !== 'None' && rawTitle !== 'null' && rawTitle !== fallbackName && rawTitle !== meta['Ticket ID']) {
+			title = rawTitle;
 		}
 
 		// 2. Check title from README.md
@@ -607,19 +608,21 @@ export class EntityDetailEditor extends EditorPane {
 			for (const line of lines) {
 				const titleMatch = line.match(/^\s*-\s*\*\*Title\*\*:\s*(.*)$/i);
 				if (titleMatch && titleMatch[1].trim() && titleMatch[1].trim() !== 'None') {
-					title = titleMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
-					break;
+					const t = titleMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+					if (t !== fallbackName && t !== meta['Ticket ID']) {
+						title = t;
+						break;
+					}
 				}
 				const h1Match = line.match(/^#\s+(.+)$/);
 				if (h1Match && h1Match[1].trim()) {
-					title = h1Match[1].trim();
-					break;
+					const t = h1Match[1].trim();
+					if (t !== fallbackName && t !== meta['Ticket ID']) {
+						title = t;
+						break;
+					}
 				}
 			}
-		}
-
-		if (!title) {
-			title = fallbackName.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 		}
 
 		// 3. Summary from Description
@@ -644,6 +647,16 @@ export class EntityDetailEditor extends EditorPane {
 						break;
 					}
 				}
+			}
+		}
+
+		// If title is missing or identical to fallbackName/Ticket ID, promote summary to title
+		if (!title || title === fallbackName || title === meta['Ticket ID']) {
+			if (summary) {
+				title = summary;
+				summary = '';
+			} else {
+				title = fallbackName.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
 			}
 		}
 

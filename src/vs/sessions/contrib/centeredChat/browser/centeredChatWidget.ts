@@ -837,8 +837,9 @@ export class CenteredChatWidget extends Disposable {
 
 						append(pill, $('span.codicon.codicon-tag', { style: 'font-size: 10px;' }));
 
-						const labelText = matched ? (matched.title && matched.title !== matched.id ? `${matched.id}: ${matched.title}` : matched.id) : tid;
-						append(pill, $('span', { style: 'max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, labelText));
+						const isTitleSameAsId = !matched || !matched.title || matched.title.toLowerCase() === matched.id.toLowerCase() || (matched.code && matched.title.toLowerCase() === matched.code.toLowerCase());
+						const displayLabel = matched ? (isTitleSameAsId ? (matched.summary ? `${matched.id}: ${matched.summary}` : matched.id) : `${matched.id}: ${matched.title}`) : tid;
+						append(pill, $('span', { style: 'max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, displayLabel));
 
 						const remBtn = append(pill, $('span', { style: 'cursor: pointer; opacity: 0.7; margin-left: 3px; font-weight: bold;' }, '×'));
 						remBtn.onmouseenter = () => remBtn.style.opacity = '1';
@@ -900,16 +901,21 @@ export class CenteredChatWidget extends Disposable {
 							style: 'display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; min-width: 0;'
 						}));
 
-						// Title
-						append(textWrapper, $('span', {
-							style: 'font-weight: 600; color: #ffffff; font-size: 11px; flex-shrink: 0;'
-						}, ticket.title || ticket.id));
+						// Determine primary and secondary text without any duplicate code
+						const isTitleSameAsId = !ticket.title || ticket.title.toLowerCase() === ticket.id.toLowerCase() || (ticket.code && ticket.title.toLowerCase() === ticket.code.toLowerCase());
+						const primaryText = isTitleSameAsId ? (ticket.summary || '') : ticket.title;
+						const secondaryText = (!isTitleSameAsId && ticket.summary && ticket.summary !== ticket.title) ? ticket.summary : '';
 
-						// Summary preview
-						if (ticket.summary && ticket.summary !== ticket.title) {
+						if (primaryText) {
+							append(textWrapper, $('span', {
+								style: 'font-weight: 600; color: #ffffff; font-size: 11px; flex-shrink: 0;'
+							}, primaryText));
+						}
+
+						if (secondaryText) {
 							append(textWrapper, $('span', {
 								style: 'font-size: 10.5px; opacity: 0.55; color: rgba(255,255,255,0.75); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
-							}, `— ${ticket.summary}`));
+							}, `— ${secondaryText}`));
 						}
 
 						// Right: Workspace tag
