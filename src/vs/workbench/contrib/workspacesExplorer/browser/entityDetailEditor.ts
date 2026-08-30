@@ -971,7 +971,7 @@ export class EntityDetailEditor extends EditorPane {
 													<span style="font-size: 0.9em; font-weight: 500; color: var(--vscode-editor-foreground);">${subVal || '<span style="opacity:0.4; font-style:italic;">None</span>'}</span>
 												` : '')}
 											</div>
-											<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}/${idxNum}/${subK}" title="Edit ${subK} with AI" style="padding: 2px 5px; font-size: 0.75em; opacity: 0.7;">
+											<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}/${idxNum}/${subK}" title="Edit ${subK} with AI" style="padding: 2px 5px; font-size: 0.75em;">
 												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											</button>
 										</div>
@@ -1248,21 +1248,37 @@ export class EntityDetailEditor extends EditorPane {
 						display: inline-flex;
 						align-items: center;
 						justify-content: center;
-						background: rgba(56, 189, 248, 0.12);
-						color: #38bdf8;
-						border: 1px solid rgba(56, 189, 248, 0.35);
+						background: transparent;
+						color: var(--vscode-icon-foreground, rgba(255, 255, 255, 0.45));
+						border: 1px solid transparent;
 						border-radius: 4px;
-						padding: 4px 6px;
+						padding: 3px 5px;
 						cursor: pointer;
-						transition: all 0.15s ease;
+						transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 						user-select: none;
 						line-height: 1;
+						opacity: 0;
+						pointer-events: none;
+					}
+					.header-title-row:hover .ai-edit-btn,
+					.section-card:hover > .section-title .ai-edit-btn,
+					.section-title:hover .ai-edit-btn,
+					.dynamic-sub-card:hover > div .ai-edit-btn,
+					.dynamic-subfield-row:hover .ai-edit-btn,
+					.sidebar-header:hover .ai-edit-btn,
+					.sidebar-row:hover .ai-edit-btn,
+					.instruction-item:hover .ai-edit-btn,
+					.custom-property-card:hover > .section-title .ai-edit-btn {
+						opacity: 0.55;
+						pointer-events: auto;
 					}
 					.ai-edit-btn:hover {
-						background: rgba(56, 189, 248, 0.25);
-						border-color: #38bdf8;
-						box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
-						transform: translateY(-1px);
+						opacity: 1 !important;
+						color: var(--vscode-editor-foreground, #ffffff) !important;
+						background: rgba(255, 255, 255, 0.08) !important;
+						border-color: rgba(255, 255, 255, 0.18) !important;
+						box-shadow: none !important;
+						transform: none !important;
 					}
 				</style>
 			</head>
@@ -1312,7 +1328,7 @@ export class EntityDetailEditor extends EditorPane {
 
 							<div style="display: flex; flex-direction: column; gap: 12px;">
 								<!-- Ticket Prompt -->
-								<div style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
+								<div class="instruction-item" style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Prompt</div>
 										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Prompt" title="Edit Ticket Prompt with AI">
@@ -1323,7 +1339,7 @@ export class EntityDetailEditor extends EditorPane {
 								</div>
 
 								<!-- Ticket Type Prompt -->
-								<div style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
+								<div class="instruction-item" style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 										<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Type Prompt</div>
 										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Type Prompt" title="Edit Ticket Type Prompt with AI">
@@ -1334,7 +1350,7 @@ export class EntityDetailEditor extends EditorPane {
 								</div>
 
 								${data.instructionNotes ? `
-									<div style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
+									<div class="instruction-item" style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
 										<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
 											<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
 											<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Instruction Notes" title="Edit Instruction Notes with AI">
@@ -1388,7 +1404,7 @@ export class EntityDetailEditor extends EditorPane {
 
 					<!-- Right Column: Sidebar (Attributes / Information) -->
 					<div class="sidebar">
-						<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
+						<div class="sidebar-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
 							<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
 							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" title="Edit Attributes with AI">
 								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
