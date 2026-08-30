@@ -3728,27 +3728,38 @@ export class MainWorkspaceViewPane extends ViewPane {
 							};
 						}
 
-						const upBtn = append(actions, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp), { style: 'cursor: pointer; opacity: 0.7; font-size: 12px; padding: 2px;' }));
-						upBtn.onclick = (e) => {
-							e.stopPropagation();
-							if (fIdx > 0 && activeMod.fields) {
-								const temp = activeMod.fields[fIdx];
-								activeMod.fields[fIdx] = activeMod.fields[fIdx - 1];
-								activeMod.fields[fIdx - 1] = temp;
-								renderFieldList();
-							}
-						};
+						const isTop = fIdx === 0;
+						const isBottom = fIdx === (activeMod.fields ? activeMod.fields.length - 1 : 0);
 
-						const downBtn = append(actions, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowDown), { style: 'cursor: pointer; opacity: 0.7; font-size: 12px; padding: 2px;' }));
-						downBtn.onclick = (e) => {
-							e.stopPropagation();
-							if (activeMod.fields && fIdx < activeMod.fields.length - 1) {
-								const temp = activeMod.fields[fIdx];
-								activeMod.fields[fIdx] = activeMod.fields[fIdx + 1];
-								activeMod.fields[fIdx + 1] = temp;
-								renderFieldList();
-							}
-						};
+						const upBtn = append(actions, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp), {
+							style: `cursor: ${isTop ? 'not-allowed' : 'pointer'}; opacity: ${isTop ? '0.2' : '0.75'}; font-size: 12px; padding: 2px;`
+						}));
+						if (!isTop) {
+							upBtn.onclick = (e) => {
+								e.stopPropagation();
+								if (fIdx > 0 && activeMod.fields) {
+									const temp = activeMod.fields[fIdx];
+									activeMod.fields[fIdx] = activeMod.fields[fIdx - 1];
+									activeMod.fields[fIdx - 1] = temp;
+									renderFieldList();
+								}
+							};
+						}
+
+						const downBtn = append(actions, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowDown), {
+							style: `cursor: ${isBottom ? 'not-allowed' : 'pointer'}; opacity: ${isBottom ? '0.2' : '0.75'}; font-size: 12px; padding: 2px;`
+						}));
+						if (!isBottom) {
+							downBtn.onclick = (e) => {
+								e.stopPropagation();
+								if (activeMod.fields && fIdx < activeMod.fields.length - 1) {
+									const temp = activeMod.fields[fIdx];
+									activeMod.fields[fIdx] = activeMod.fields[fIdx + 1];
+									activeMod.fields[fIdx + 1] = temp;
+									renderFieldList();
+								}
+							};
+						}
 
 						const delBtn = append(actions, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { style: 'cursor: pointer; opacity: 0.7; color: #ef4444; font-size: 12px; padding: 2px;' }));
 						delBtn.onclick = (e) => {
@@ -3768,9 +3779,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 						labelInput.value = field.label;
 						labelInput.placeholder = isContainer ? 'e.g. Work Experience, Project History' : 'e.g. Version, Priority Level';
 						labelInput.oninput = () => {
-							const val = labelInput.value.trim() || `Field_${fIdx + 1}`;
 							field.label = labelInput.value;
-							field.id = val.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+							field.id = labelInput.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_') || field.id;
 						};
 
 						// Options List Config for Dropdowns / Checkboxes
@@ -3863,38 +3873,108 @@ export class MainWorkspaceViewPane extends ViewPane {
 								if (!field.itemFields) { field.itemFields = []; }
 								
 								field.itemFields.forEach((subF, sIdx) => {
+									const subIsTop = sIdx === 0;
+									const subIsBottom = sIdx === (field.itemFields ? field.itemFields.length - 1 : 0);
+
 									const subCard = append(subCanvas, $('.subfield-card', {
-										style: 'padding: 8px 10px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 5px; display: flex; flex-direction: column; gap: 6px;'
+										style: 'padding: 8px 10px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 5px; display: flex; flex-direction: column; gap: 6px; cursor: grab; position: relative; transition: border-color 0.15s ease;'
 									}));
+									subCard.setAttribute('draggable', 'true');
+
+									subCard.onmousedown = (e) => {
+										const target = e.target as HTMLElement;
+										if (target.closest('input, textarea, button, select, span, label')) {
+											subCard.setAttribute('draggable', 'false');
+										} else {
+											subCard.setAttribute('draggable', 'true');
+										}
+									};
+
+									// SubCard Drag & Drop for reordering
+									subCard.ondragstart = (ev) => {
+										currentDraggingItem = { source: 'subcanvas', subIndex: sIdx };
+										ev.dataTransfer?.setData('text/plain', String(sIdx));
+										ev.stopPropagation();
+									};
+									subCard.ondragover = (ev) => {
+										ev.preventDefault();
+										ev.stopPropagation();
+										subCard.style.borderColor = '#06b6d4';
+									};
+									subCard.ondragleave = () => {
+										subCard.style.borderColor = 'rgba(255,255,255,0.06)';
+									};
+									subCard.ondrop = (ev) => {
+										ev.preventDefault();
+										ev.stopPropagation();
+										subCard.style.borderColor = 'rgba(255,255,255,0.06)';
+
+										if (currentDraggingItem) {
+											if (currentDraggingItem.source === 'subcanvas') {
+												const fromIdx = currentDraggingItem.subIndex;
+												if (fromIdx !== undefined && fromIdx !== sIdx && field.itemFields) {
+													const [removed] = field.itemFields.splice(fromIdx, 1);
+													field.itemFields.splice(sIdx, 0, removed);
+													currentDraggingItem = null;
+													renderSubFieldsList();
+												}
+											} else if (currentDraggingItem.source === 'palette') {
+												if (!field.itemFields) { field.itemFields = []; }
+												if (currentDraggingItem.isClass && currentDraggingItem.itemFields) {
+													const newItems = JSON.parse(JSON.stringify(currentDraggingItem.itemFields));
+													field.itemFields.splice(sIdx, 0, ...newItems);
+												} else {
+													const pType = currentDraggingItem.type || 'text';
+													field.itemFields.splice(sIdx, 0, {
+														id: `sub_${Date.now()}_${field.itemFields.length + 1}`,
+														label: `New ${pType.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`,
+														type: pType as any,
+														options: (pType === 'select' || pType === 'multiselect') ? ['Option 1', 'Option 2'] : undefined
+													});
+												}
+												currentDraggingItem = null;
+												renderSubFieldsList();
+											}
+										}
+									};
 
 									const subTop = append(subCard, $('.sub-top', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
 									const subBadge = append(subTop, $('span', { style: getBadgeStyle(subF.type) }));
 									subBadge.innerText = subF.type.replace(/_/g, ' ');
 
-									const subActs = append(subTop, $('.sub-actions', { style: 'display: flex; gap: 6px;' }));
-									const sUp = append(subActs, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp), { style: 'cursor: pointer; opacity: 0.6; font-size: 11px;' }));
-									sUp.onclick = (e) => {
-										e.stopPropagation();
-										if (sIdx > 0 && field.itemFields) {
-											const temp = field.itemFields[sIdx];
-											field.itemFields[sIdx] = field.itemFields[sIdx - 1];
-											field.itemFields[sIdx - 1] = temp;
-											renderSubFieldsList();
-										}
-									};
+									const subActs = append(subTop, $('.sub-actions', { style: 'display: flex; gap: 6px; align-items: center;' }));
+									
+									const sUp = append(subActs, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp), {
+										style: `cursor: ${subIsTop ? 'not-allowed' : 'pointer'}; opacity: ${subIsTop ? '0.2' : '0.75'}; font-size: 11px; padding: 2px;`
+									}));
+									if (!subIsTop) {
+										sUp.onclick = (e) => {
+											e.stopPropagation();
+											if (sIdx > 0 && field.itemFields) {
+												const temp = field.itemFields[sIdx];
+												field.itemFields[sIdx] = field.itemFields[sIdx - 1];
+												field.itemFields[sIdx - 1] = temp;
+												renderSubFieldsList();
+											}
+										};
+									}
 
-									const sDown = append(subActs, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowDown), { style: 'cursor: pointer; opacity: 0.6; font-size: 11px;' }));
-									sDown.onclick = (e) => {
-										e.stopPropagation();
-										if (field.itemFields && sIdx < field.itemFields.length - 1) {
-											const temp = field.itemFields[sIdx];
-											field.itemFields[sIdx] = field.itemFields[sIdx + 1];
-											field.itemFields[sIdx + 1] = temp;
-											renderSubFieldsList();
-										}
-									};
+									const sDown = append(subActs, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowDown), {
+										style: `cursor: ${subIsBottom ? 'not-allowed' : 'pointer'}; opacity: ${subIsBottom ? '0.2' : '0.75'}; font-size: 11px; padding: 2px;`
+									}));
+									if (!subIsBottom) {
+										sDown.onclick = (e) => {
+											e.stopPropagation();
+											if (field.itemFields && sIdx < field.itemFields.length - 1) {
+												const temp = field.itemFields[sIdx];
+												field.itemFields[sIdx] = field.itemFields[sIdx + 1];
+												field.itemFields[sIdx + 1] = temp;
+												renderSubFieldsList();
+											}
+										};
+									}
 
-									const sDel = append(subActs, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { style: 'color: #ef4444; cursor: pointer; opacity: 0.7; font-size: 11px;' }));
+									const sDel = append(subActs, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { style: 'color: #ef4444; cursor: pointer; opacity: 0.7; font-size: 11px; padding: 2px;' }));
 									sDel.onclick = (e) => {
 										e.stopPropagation();
 										field.itemFields?.splice(sIdx, 1);
@@ -3909,7 +3989,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 									})) as HTMLInputElement;
 									sInput.oninput = () => {
 										subF.label = sInput.value;
-										subF.id = sInput.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_') || `sub_${sIdx + 1}`;
+										subF.id = sInput.value.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_') || subF.id;
 									};
 
 									if (subF.type === 'select' || subF.type === 'multiselect') {
