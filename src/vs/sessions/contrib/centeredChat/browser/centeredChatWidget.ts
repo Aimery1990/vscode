@@ -763,6 +763,170 @@ export class CenteredChatWidget extends Disposable {
 					});
 				}
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
+			} else if (fType === 'link_to') {
+				const linkContainer = append(editorBox, $('.link-to-multi-select-container'));
+				linkContainer.style.display = 'flex';
+				linkContainer.style.flexDirection = 'column';
+				linkContainer.style.gap = '6px';
+				linkContainer.style.width = '100%';
+
+				// Parse current selected IDs
+				const rawVals = editableValue ? editableValue.split(/[,;\n]+/).map((s: string) => s.trim()).filter(Boolean) : [];
+				const selectedSet = new Set<string>(rawVals);
+
+				const allTickets: Array<{ id: string; code?: string; title?: string; type?: string; workspaceName?: string }> =
+					(locator.options && Array.isArray(locator.options)) ? locator.options : (activeNode && activeNode.options ? activeNode.options : []);
+
+				// 1. Pills container for currently selected tickets
+				const pillsContainer = append(linkContainer, $('.selected-tickets-pills'));
+				pillsContainer.style.display = 'flex';
+				pillsContainer.style.flexWrap = 'wrap';
+				pillsContainer.style.gap = '5px';
+				pillsContainer.style.minHeight = '24px';
+				pillsContainer.style.padding = '4px 6px';
+				pillsContainer.style.background = 'rgba(255, 255, 255, 0.04)';
+				pillsContainer.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+				pillsContainer.style.borderRadius = '4px';
+
+				// 2. Search input
+				const searchInput = append(linkContainer, $('input.monaco-inputbox', {
+					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; color: #fff; box-sizing: border-box;'
+				})) as HTMLInputElement;
+				searchInput.placeholder = 'Search tickets across workspaces to link...';
+
+				// 3. Scrollable Checklist
+				const checklistContainer = append(linkContainer, $('.tickets-checklist'));
+				checklistContainer.style.maxHeight = '140px';
+				checklistContainer.style.overflowY = 'auto';
+				checklistContainer.style.display = 'flex';
+				checklistContainer.style.flexDirection = 'column';
+				checklistContainer.style.gap = '2px';
+				checklistContainer.style.background = 'rgba(0, 0, 0, 0.2)';
+				checklistContainer.style.border = '1px solid rgba(255, 255, 255, 0.08)';
+				checklistContainer.style.borderRadius = '4px';
+				checklistContainer.style.padding = '4px';
+
+				const updateState = () => {
+					locator.interactiveModifiedValue = selectedSet.size > 0 ? Array.from(selectedSet).join(', ') : 'None';
+					renderPills();
+					renderChecklist(searchInput.value);
+				};
+
+				const renderPills = () => {
+					pillsContainer.textContent = '';
+					if (selectedSet.size === 0) {
+						append(pillsContainer, $('span', { style: 'font-size: 10.5px; opacity: 0.4; font-style: italic;' }, 'No tickets linked (None)'));
+						return;
+					}
+					selectedSet.forEach(tid => {
+						const matched = allTickets.find(t => t.id === tid || t.code === tid);
+						const pill = append(pillsContainer, $('.ticket-pill'));
+						pill.style.display = 'inline-flex';
+						pill.style.alignItems = 'center';
+						pill.style.gap = '5px';
+						pill.style.fontSize = '10px';
+						pill.style.fontWeight = '600';
+						pill.style.padding = '2px 6px';
+						pill.style.borderRadius = '3px';
+						pill.style.background = 'rgba(56, 189, 248, 0.18)';
+						pill.style.color = '#38bdf8';
+
+						append(pill, $('span.codicon.codicon-tag', { style: 'font-size: 9.5px;' }));
+						append(pill, $('span', {}, matched ? (matched.code || matched.id) : tid));
+
+						const remBtn = append(pill, $('span', { style: 'cursor: pointer; opacity: 0.7; margin-left: 2px; font-weight: bold;' }, '×'));
+						remBtn.onmouseenter = () => remBtn.style.opacity = '1';
+						remBtn.onmouseleave = () => remBtn.style.opacity = '0.7';
+						remBtn.onclick = (e) => {
+							e.stopPropagation();
+							selectedSet.delete(tid);
+							updateState();
+						};
+					});
+				};
+
+				const renderChecklist = (query: string) => {
+					checklistContainer.textContent = '';
+					const q = query.trim().toLowerCase();
+					const filtered = allTickets.filter(t => {
+						if (!q) return true;
+						return (t.id && t.id.toLowerCase().includes(q)) ||
+							(t.code && t.code.toLowerCase().includes(q)) ||
+							(t.title && t.title.toLowerCase().includes(q)) ||
+							(t.workspaceName && t.workspaceName.toLowerCase().includes(q));
+					});
+
+					if (filtered.length === 0) {
+						append(checklistContainer, $('div', { style: 'font-size: 10.5px; opacity: 0.5; padding: 6px; text-align: center;' }, 'No matching tickets found'));
+						return;
+					}
+
+					filtered.forEach(ticket => {
+						const isSelected = selectedSet.has(ticket.id) || (ticket.code ? selectedSet.has(ticket.code) : false);
+						const row = append(checklistContainer, $('.ticket-check-row'));
+						row.style.display = 'flex';
+						row.style.alignItems = 'center';
+						row.style.justifyContent = 'space-between';
+						row.style.padding = '4px 8px';
+						row.style.borderRadius = '3px';
+						row.style.fontSize = '11px';
+						row.style.cursor = 'pointer';
+						row.style.transition = 'background 0.1s ease';
+						row.style.background = isSelected ? 'rgba(56, 189, 248, 0.12)' : 'transparent';
+
+						const left = append(row, $('div', { style: 'display: flex; align-items: center; gap: 6px; overflow: hidden;' }));
+						const checkbox = append(left, $('input')) as HTMLInputElement;
+						checkbox.type = 'checkbox';
+						checkbox.checked = isSelected;
+						checkbox.style.cursor = 'pointer';
+
+						append(left, $('span', { style: 'font-weight: 600; color: #38bdf8; font-family: monospace; font-size: 10.5px;' }, ticket.code || ticket.id));
+						if (ticket.title) {
+							append(left, $('span', { style: 'opacity: 0.85; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, ticket.title));
+						}
+
+						const right = append(row, $('div', { style: 'display: flex; align-items: center; gap: 4px;' }));
+						if (ticket.workspaceName) {
+							append(right, $('span', { style: 'font-size: 9.5px; opacity: 0.45;' }, ticket.workspaceName));
+						}
+
+						row.onmouseenter = () => {
+							if (!isSelected) row.style.background = 'rgba(255, 255, 255, 0.05)';
+						};
+						row.onmouseleave = () => {
+							if (!isSelected) row.style.background = 'transparent';
+						};
+
+						const toggle = () => {
+							const key = ticket.id;
+							if (selectedSet.has(key)) {
+								selectedSet.delete(key);
+								if (ticket.code) selectedSet.delete(ticket.code);
+							} else {
+								selectedSet.add(key);
+							}
+							updateState();
+						};
+
+						checkbox.onchange = toggle;
+						row.onclick = (e) => {
+							if (e.target !== checkbox) toggle();
+						};
+					});
+				};
+
+				searchInput.oninput = () => {
+					renderChecklist(searchInput.value);
+				};
+
+				renderPills();
+				renderChecklist('');
+			} else if (fType === 'read_only') {
+				const roBox = append(editorBox, $('div', {
+					style: 'padding: 6px 10px; font-size: 11px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; color: rgba(255,255,255,0.8); display: flex; align-items: center; justify-content: space-between;'
+				}));
+				append(roBox, $('span', { style: 'font-family: monospace;' }, currentVal));
+				append(roBox, $('span', { style: 'font-size: 10px; opacity: 0.5; font-style: italic;' }, 'Read-only (Managed by linking tickets)'));
 			} else if (fType === 'select') {
 				const select = append(editorBox, $('select.monaco-select-box', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'

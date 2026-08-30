@@ -24,6 +24,9 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { dirname } from '../../../../base/common/resources.js';
 import { IAgentsManagerService, IAgentItem } from '../../agentsManager/common/agentsManager.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
+import { IWorkspacesExplorerService } from '../common/workspacesExplorer.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 
 function getColorForName(name: string | undefined): string {
 	if (!name) return '#38bdf8';
@@ -121,6 +124,9 @@ export class EntityDetailEditor extends EditorPane {
 		@INotificationService private readonly _notificationService: INotificationService,
 		@INativeEnvironmentService private readonly _environmentService: INativeEnvironmentService,
 		@IAgentsManagerService private readonly _agentsManagerService: IAgentsManagerService,
+		@IWorkspacesExplorerService private readonly _workspacesExplorerService: IWorkspacesExplorerService,
+		@IEditorService private readonly _editorService: IEditorService,
+		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 		@ICommandService private readonly _commandService: ICommandService
 	) {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
@@ -310,6 +316,7 @@ export class EntityDetailEditor extends EditorPane {
 		const attachments = await this._getAttachments(this._entityUri);
 		const customModule = await this._readCustomModule(this._entityUri, this._entityType);
 		const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
+		const allTickets = await this._loadAllAvailableTickets();
 
 		// 3. Setup Webview cleanly without recreating or dropping listeners
 		if (!this._webview) {
@@ -326,7 +333,7 @@ export class EntityDetailEditor extends EditorPane {
 			}));
 		}
 
-		const html = this._generateHtml(parsed, workLogContent, attachments, customModule, agents);
+		const html = this._generateHtml(parsed, workLogContent, attachments, customModule, agents, allTickets);
 		this._webview.setHtml(html);
 	}
 
@@ -363,6 +370,20 @@ export class EntityDetailEditor extends EditorPane {
 			} catch { }
 		}
 		return '';
+	}
+
+	private _parseMetadata(content: string): { [key: string]: string } {
+		const metadata: { [key: string]: string } = {};
+		const lines = (content || '').split(/\r?\n/);
+		for (const line of lines) {
+			const match = line.match(/^\s*-\s*\*\*([^*]+)\*\*:\s*(.*)$/);
+			if (match) {
+				const key = match[1].trim();
+				const val = match[2].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				metadata[key] = val;
+			}
+		}
+		return metadata;
 	}
 
 	private _parseAllEntityData(
@@ -567,7 +588,186 @@ export class EntityDetailEditor extends EditorPane {
 		return newLines.join('\n');
 	}
 
-	private _buildHierarchyTree(data: IParsedTicketData | undefined, agents: any[]): any[] {
+	private async _loadAllAvailableTickets(): Promise<Array<{ id: string; code: string; title: string; type: string; workspaceId: string; workspaceName: string; uri: string }>> {
+		if (!this._workspacesExplorerService) return [];
+		const result: Array<{ id: string; code: string; title: string; type: string; workspaceId: string; workspaceName: string; uri: string }> = [];
+		try {
+			const workspaces = await this._workspacesExplorerService.getWorkspaces();
+			const currentTicketId = this._lastParsedData?.ticketId || this._entityName || '';
+
+			for (const ws of workspaces) {
+				const wsTargetBase = ws.uri.path.endsWith('.code-workspace') ? dirname(ws.uri) : ws.uri;
+				const wsName = ws.name || wsTargetBase.path.split('/').filter(Boolean).pop() || 'Workspace';
+
+				// 1. Check workspace root ticket
+				const wsTicketUri = await this._resolveFileUri(wsTargetBase, 'ticket.md');
+				if (wsTicketUri && (await this._fileService.exists(wsTicketUri))) {
+					const content = await this._safeReadFile(wsTicketUri);
+					const meta = this._parseMetadata(content);
+					const tId = meta['Ticket ID'] || meta['Entity ID'] || ws.name;
+					const tCode = meta['Ticket Code'] || meta['Entity Code'] || meta['Code'] || tId;
+					const tTitle = meta['Title'] || ws.name;
+					const tType = meta['Ticket Type'] || meta['Entity Type'] || 'workspace';
+					if (tId && tId !== currentTicketId && !result.some(r => r.id === tId)) {
+						result.push({
+							id: tId,
+							code: tCode,
+							title: tTitle,
+							type: tType,
+							workspaceId: meta['Workspace ID'] || ws.name,
+							workspaceName: wsName,
+							uri: wsTargetBase.toString()
+						});
+					}
+				}
+
+				// 2. Scan children of workspace
+				const children = await this._workspacesExplorerService.scanWorkspaceChildren(ws.uri);
+				for (const child of children) {
+					if (child.type === 'file') continue;
+					const childTicketUri = await this._resolveFileUri(child.uri, 'ticket.md');
+					if (childTicketUri && (await this._fileService.exists(childTicketUri))) {
+						const content = await this._safeReadFile(childTicketUri);
+						const meta = this._parseMetadata(content);
+						const tId = meta['Ticket ID'] || meta['Entity ID'] || child.name;
+						const tCode = meta['Ticket Code'] || meta['Entity Code'] || meta['Code'] || tId;
+						const tTitle = meta['Title'] || child.name;
+						const tType = meta['Ticket Type'] || meta['Entity Type'] || child.type || 'task';
+						if (tId && tId !== currentTicketId && !result.some(r => r.id === tId)) {
+							result.push({
+								id: tId,
+								code: tCode,
+								title: tTitle,
+								type: tType,
+								workspaceId: meta['Workspace ID'] || ws.name,
+								workspaceName: wsName,
+								uri: child.uri.toString()
+							});
+						}
+					}
+				}
+			}
+		} catch (err) {
+			console.error('Failed to load available tickets:', err);
+		}
+		return result;
+	}
+
+	private async _findTicketUriById(targetId: string): Promise<URI | undefined> {
+		if (!this._workspacesExplorerService || !targetId) return undefined;
+		const query = targetId.trim();
+		try {
+			const workspaces = await this._workspacesExplorerService.getWorkspaces();
+			for (const ws of workspaces) {
+				const wsTargetBase = ws.uri.path.endsWith('.code-workspace') ? dirname(ws.uri) : ws.uri;
+				const wsTicketUri = await this._resolveFileUri(wsTargetBase, 'ticket.md');
+				if (wsTicketUri && (await this._fileService.exists(wsTicketUri))) {
+					const content = await this._safeReadFile(wsTicketUri);
+					const meta = this._parseMetadata(content);
+					const tId = meta['Ticket ID'] || meta['Entity ID'] || ws.name;
+					const tCode = meta['Ticket Code'] || meta['Entity Code'] || meta['Code'] || tId;
+					if (tId === query || tCode === query || ws.name === query) {
+						return wsTicketUri;
+					}
+				}
+
+				const children = await this._workspacesExplorerService.scanWorkspaceChildren(ws.uri);
+				for (const child of children) {
+					if (child.type === 'file') continue;
+					const childTicketUri = await this._resolveFileUri(child.uri, 'ticket.md');
+					if (childTicketUri && (await this._fileService.exists(childTicketUri))) {
+						const content = await this._safeReadFile(childTicketUri);
+						const meta = this._parseMetadata(content);
+						const tId = meta['Ticket ID'] || meta['Entity ID'] || child.name;
+						const tCode = meta['Ticket Code'] || meta['Entity Code'] || meta['Code'] || tId;
+						if (tId === query || tCode === query || child.name === query) {
+							return childTicketUri;
+						}
+					}
+				}
+			}
+		} catch (err) {
+			console.error(`Failed to find ticket URI for id ${targetId}:`, err);
+		}
+		return undefined;
+	}
+
+	private async _syncBidirectionalLinks(sourceTicketId: string, oldLinkToRaw: string, newLinkToRaw: string): Promise<void> {
+		if (!sourceTicketId) return;
+
+		const parseList = (raw: string | undefined): string[] => {
+			if (!raw) return [];
+			return raw.split(/[,;\n]+/)
+				.map(s => s.trim())
+				.filter(s => s && s !== 'None' && s !== 'null' && s !== 'undefined' && s !== 'Unassigned');
+		};
+
+		const oldList = parseList(oldLinkToRaw);
+		const newList = parseList(newLinkToRaw);
+
+		const added = newList.filter(id => !oldList.includes(id));
+		const removed = oldList.filter(id => !newList.includes(id));
+
+		if (added.length === 0 && removed.length === 0) {
+			return;
+		}
+
+		// 1. For each added target, add sourceTicketId to target's Linked By
+		for (const targetId of added) {
+			const targetUri = await this._findTicketUriById(targetId);
+			if (targetUri && (await this._fileService.exists(targetUri))) {
+				try {
+					const content = await this._safeReadFile(targetUri);
+					const meta = this._parseMetadata(content);
+					const existingLinkedBy = parseList(meta['Linked By']);
+					if (!existingLinkedBy.includes(sourceTicketId)) {
+						existingLinkedBy.push(sourceTicketId);
+						const updatedLinkedBy = existingLinkedBy.join(', ');
+						const newContent = this._updateTicketMdContent(content, { 'Linked By': updatedLinkedBy });
+						await this._fileService.writeFile(targetUri, VSBuffer.fromString(newContent));
+					}
+				} catch (err) {
+					console.error(`Failed to sync Linked By to target ${targetId}:`, err);
+				}
+			}
+		}
+
+		// 2. For each removed target, remove sourceTicketId from target's Linked By
+		for (const targetId of removed) {
+			const targetUri = await this._findTicketUriById(targetId);
+			if (targetUri && (await this._fileService.exists(targetUri))) {
+				try {
+					const content = await this._safeReadFile(targetUri);
+					const meta = this._parseMetadata(content);
+					const existingLinkedBy = parseList(meta['Linked By']);
+					const filtered = existingLinkedBy.filter(id => id !== sourceTicketId);
+					const updatedLinkedBy = filtered.length > 0 ? filtered.join(', ') : 'None';
+					const newContent = this._updateTicketMdContent(content, { 'Linked By': updatedLinkedBy });
+					await this._fileService.writeFile(targetUri, VSBuffer.fromString(newContent));
+				} catch (err) {
+					console.error(`Failed to remove Linked By from target ${targetId}:`, err);
+				}
+			}
+		}
+	}
+
+	private _renderTicketChipsHtml(raw: string | undefined): string {
+		if (!raw || raw === 'None' || raw === 'Unassigned') {
+			return '<span style="opacity:0.4; font-size: 0.88em;">None</span>';
+		}
+		const ids = raw.split(/[,;\n]+/).map(s => s.trim()).filter(s => s && s !== 'None' && s !== 'Unassigned');
+		if (ids.length === 0) {
+			return '<span style="opacity:0.4; font-size: 0.88em;">None</span>';
+		}
+		return ids.map(id => `
+			<span class="ticket-link-chip" onclick="openTicket('${this._escapeHtmlAttr(id)}')" style="display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; font-family: monospace; padding: 2px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; cursor: pointer; transition: background 0.15s ease;" title="Click to open ticket ${this._escapeHtmlAttr(id)}">
+				<svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor"><path d="M14.5 9L9.5 14L1.5 6V1.5H6L14.5 9ZM3.5 3.5C3.5 4.05 3.95 4.5 4.5 4.5C5.05 4.5 5.5 4.05 5.5 3.5C5.5 2.95 5.05 2.5 4.5 2.5C3.95 2.5 3.5 2.95 3.5 3.5Z"/></svg>
+				${this._escapeHtmlAttr(id)}
+			</span>
+		`).join('');
+	}
+
+	private _buildHierarchyTree(data: IParsedTicketData | undefined, agents: any[], allTickets: any[] = []): any[] {
 		if (!data) return [];
 		const rootNodes: any[] = [];
 
@@ -642,13 +842,14 @@ export class EntityDetailEditor extends EditorPane {
 			{
 				path: '/Attributes/Link To',
 				label: 'Link To',
-				fieldType: 'text',
-				currentValue: data.linkTo && data.linkTo !== 'None' ? data.linkTo : 'None'
+				fieldType: 'link_to',
+				currentValue: data.linkTo && data.linkTo !== 'None' ? data.linkTo : 'None',
+				options: allTickets
 			},
 			{
 				path: '/Attributes/Linked By',
 				label: 'Linked By',
-				fieldType: 'text',
+				fieldType: 'read_only',
 				currentValue: data.linkedBy && data.linkedBy !== 'None' ? data.linkedBy : 'None'
 			}
 		];
@@ -761,7 +962,8 @@ export class EntityDetailEditor extends EditorPane {
 
 				const prompt = locators.length > 0 ? `[${locators.join(' | ')}] ` : '';
 				const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
-				const hierarchyTree = this._buildHierarchyTree(this._lastParsedData, agents);
+				const allTickets = await this._loadAllAvailableTickets();
+				const hierarchyTree = this._buildHierarchyTree(this._lastParsedData, agents, allTickets);
 
 				try {
 					await this._commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
@@ -784,6 +986,12 @@ export class EntityDetailEditor extends EditorPane {
 			case 'saveTitleAndDescription':
 			case 'saveDescription': {
 				try {
+					if (e.metadata && e.metadata['Link To'] !== undefined) {
+						const oldLinkTo = this._lastParsedData?.linkTo || 'None';
+						const newLinkTo = e.metadata['Link To'];
+						const currentTicketId = this._lastParsedData?.ticketId || this._entityName || '';
+						await this._syncBidirectionalLinks(currentTicketId, oldLinkTo, newLinkTo);
+					}
 					if (this._readmeUri) {
 						if (!(await this._fileService.exists(this._readmeUri))) {
 							const parentDir = dirname(this._readmeUri);
@@ -822,6 +1030,12 @@ export class EntityDetailEditor extends EditorPane {
 			}
 			case 'saveMetadata': {
 				try {
+					if (e.metadata && e.metadata['Link To'] !== undefined) {
+						const oldLinkTo = this._lastParsedData?.linkTo || 'None';
+						const newLinkTo = e.metadata['Link To'];
+						const currentTicketId = this._lastParsedData?.ticketId || this._entityName || '';
+						await this._syncBidirectionalLinks(currentTicketId, oldLinkTo, newLinkTo);
+					}
 					if (this._ticketFileUri) {
 						const content = await this._safeReadFile(this._ticketFileUri);
 						const updated = this._updateTicketMdContent(content, e.metadata, e.customMetadata);
@@ -836,6 +1050,21 @@ export class EntityDetailEditor extends EditorPane {
 					await this._resolvePathsAndLoadData();
 				} catch (err) {
 					this._notificationService.error(localize('saveMetaFailed', "Failed to save attributes: {0}", String(err)));
+				}
+				break;
+			}
+			case 'openTicket': {
+				const targetId = e.ticketId;
+				if (targetId) {
+					const targetUri = await this._findTicketUriById(targetId);
+					if (targetUri) {
+						let entityDir = dirname(targetUri);
+						if (entityDir.path.endsWith('/.agents')) {
+							entityDir = dirname(entityDir);
+						}
+						const input = this._instantiationService.createInstance(EntityDetailEditorInput, entityDir, targetId);
+						await this._editorService.openEditor(input, { pinned: true });
+					}
 				}
 				break;
 			}
@@ -990,7 +1219,8 @@ export class EntityDetailEditor extends EditorPane {
 		workLog: string,
 		attachments: string[],
 		customModule?: any,
-		agents: IAgentItem[] = []
+		agents: IAgentItem[] = [],
+		allTickets: any[] = []
 	): string {
 		const typeUpper = data.ticketType.toUpperCase();
 
@@ -1655,21 +1885,22 @@ export class EntityDetailEditor extends EditorPane {
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">LINK TO</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Link To" data-ai-field-type="text" data-ai-field-label="Link To" data-ai-current-value="${data.linkTo !== 'None' ? this._escapeHtmlAttr(data.linkTo) : ''}" title="Edit Link To with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Link To" data-ai-field-type="link_to" data-ai-field-label="Link To" data-ai-current-value="${data.linkTo !== 'None' ? this._escapeHtmlAttr(data.linkTo) : ''}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(allTickets))}" title="Edit Link To with AI">
 									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
-							<span class="meta-view-val sidebar-value">${data.linkTo !== 'None' ? data.linkTo : '<span style="opacity:0.4;">None</span>'}</span>
+							<div class="sidebar-value" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+								${this._renderTicketChipsHtml(data.linkTo)}
+							</div>
 						</div>
 
 						<div class="sidebar-row">
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span class="sidebar-label">LINKED BY</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Linked By" data-ai-field-type="text" data-ai-field-label="Linked By" data-ai-current-value="${data.linkedBy !== 'None' ? this._escapeHtmlAttr(data.linkedBy) : ''}" title="Edit Linked By with AI">
-									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
 							</div>
-							<span class="meta-view-val sidebar-value">${data.linkedBy !== 'None' ? data.linkedBy : '<span style="opacity:0.4;">None</span>'}</span>
+							<div class="sidebar-value" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+								${this._renderTicketChipsHtml(data.linkedBy)}
+							</div>
 						</div>
 
 						<!-- Ownership & Dates -->
@@ -1903,6 +2134,15 @@ export class EntityDetailEditor extends EditorPane {
 							vscode.postMessage({
 								type: 'deleteAttachment',
 								name: name
+							});
+						}
+					}
+
+					function openTicket(ticketId) {
+						if (vscode && ticketId) {
+							vscode.postMessage({
+								type: 'openTicket',
+								ticketId: ticketId
 							});
 						}
 					}
