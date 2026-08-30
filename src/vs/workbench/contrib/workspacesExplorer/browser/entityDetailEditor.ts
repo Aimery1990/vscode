@@ -838,7 +838,35 @@ export class EntityDetailEditor extends EditorPane {
 		}
 	}
 
-	private _renderTicketChipsHtml(raw: string | undefined): string {
+	private _getTypeColorInfo(typeStr: string | undefined): { text: string; bg: string; border: string } {
+		const typeLower = (typeStr || 'task').toLowerCase().trim();
+		const typeColors: { [key: string]: { text: string; bg: string; border: string } } = {
+			workspace: { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.14)', border: 'rgba(56, 189, 248, 0.3)' },
+			job: { text: '#fbbf24', bg: 'rgba(251, 191, 36, 0.14)', border: 'rgba(251, 191, 36, 0.3)' },
+			task: { text: '#a78bfa', bg: 'rgba(167, 139, 250, 0.14)', border: 'rgba(167, 139, 250, 0.3)' },
+			project: { text: '#60a5fa', bg: 'rgba(96, 165, 250, 0.14)', border: 'rgba(96, 165, 250, 0.3)' },
+			workflow: { text: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.14)', border: 'rgba(45, 212, 191, 0.3)' },
+			agent: { text: '#f472b6', bg: 'rgba(244, 114, 182, 0.14)', border: 'rgba(244, 114, 182, 0.3)' },
+			case: { text: '#a3e635', bg: 'rgba(163, 230, 53, 0.14)', border: 'rgba(163, 230, 53, 0.3)' },
+			issue: { text: '#f87171', bg: 'rgba(248, 113, 113, 0.14)', border: 'rgba(248, 113, 113, 0.3)' },
+			analysis: { text: '#34d399', bg: 'rgba(52, 211, 153, 0.14)', border: 'rgba(52, 211, 153, 0.3)' },
+			note: { text: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.14)', border: 'rgba(45, 212, 191, 0.3)' },
+			resume: { text: '#34d399', bg: 'rgba(52, 211, 153, 0.14)', border: 'rgba(52, 211, 153, 0.3)' }
+		};
+
+		if (typeColors[typeLower]) {
+			return typeColors[typeLower];
+		}
+
+		const baseColor = getColorForName(typeLower);
+		return {
+			text: baseColor,
+			bg: hexToRgba(baseColor, 0.14),
+			border: hexToRgba(baseColor, 0.3)
+		};
+	}
+
+	private _renderTicketChipsHtml(raw: string | undefined, allTickets: any[] = []): string {
 		if (!raw || raw === 'None' || raw === 'Unassigned') {
 			return '<span style="opacity:0.4; font-size: 0.88em;">None</span>';
 		}
@@ -846,12 +874,20 @@ export class EntityDetailEditor extends EditorPane {
 		if (ids.length === 0) {
 			return '<span style="opacity:0.4; font-size: 0.88em;">None</span>';
 		}
-		return ids.map(id => `
-			<span class="ticket-link-chip" onclick="openTicket('${this._escapeHtmlAttr(id)}')" style="display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; font-family: monospace; padding: 2px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; cursor: pointer; transition: background 0.15s ease;" title="Click to open ticket ${this._escapeHtmlAttr(id)}">
-				<svg width="9" height="9" viewBox="0 0 16 16" fill="currentColor"><path d="M14.5 9L9.5 14L1.5 6V1.5H6L14.5 9ZM3.5 3.5C3.5 4.05 3.95 4.5 4.5 4.5C5.05 4.5 5.5 4.05 5.5 3.5C5.5 2.95 5.05 2.5 4.5 2.5C3.95 2.5 3.5 2.95 3.5 3.5Z"/></svg>
-				${this._escapeHtmlAttr(id)}
+		return ids.map(id => {
+			const matched = allTickets.find(t => t.id === id || t.code === id);
+			const typeLower = (matched?.type || 'task').toLowerCase();
+			const colorInfo = this._getTypeColorInfo(typeLower);
+			const typeBadge = matched?.type ? `<span style="font-size: 8.5px; font-weight: 700; opacity: 0.85; padding: 0 3px; border-radius: 2px; background: rgba(0,0,0,0.25); text-transform: uppercase;">${this._escapeHtmlAttr(matched.type)}</span>` : '';
+			const tooltip = matched ? `${matched.id} [${(matched.type || 'task').toUpperCase()}]: ${matched.title || ''}\n${matched.summary || ''}` : `Ticket ${id}`;
+
+			return `
+			<span class="ticket-link-chip" onclick="openTicket('${this._escapeHtmlAttr(id)}')" style="display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 600; font-family: monospace; padding: 2px 7px; border-radius: 3px; background: ${colorInfo.bg}; border: 1px solid ${colorInfo.border}; color: ${colorInfo.text}; cursor: pointer; transition: all 0.15s ease;" title="${this._escapeHtmlAttr(tooltip)}">
+				${typeBadge}
+				<span>${this._escapeHtmlAttr(id)}</span>
 			</span>
-		`).join('');
+		`;
+		}).join('');
 	}
 
 	private _buildHierarchyTree(data: IParsedTicketData | undefined, agents: any[], allTickets: any[] = []): any[] {
@@ -1977,7 +2013,7 @@ export class EntityDetailEditor extends EditorPane {
 								</button>
 							</div>
 							<div class="sidebar-value" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
-								${this._renderTicketChipsHtml(data.linkTo)}
+								${this._renderTicketChipsHtml(data.linkTo, allTickets)}
 							</div>
 						</div>
 
@@ -1986,7 +2022,7 @@ export class EntityDetailEditor extends EditorPane {
 								<span class="sidebar-label">LINKED BY</span>
 							</div>
 							<div class="sidebar-value" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
-								${this._renderTicketChipsHtml(data.linkedBy)}
+								${this._renderTicketChipsHtml(data.linkedBy, allTickets)}
 							</div>
 						</div>
 

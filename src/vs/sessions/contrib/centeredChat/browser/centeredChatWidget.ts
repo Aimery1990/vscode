@@ -30,6 +30,76 @@ interface IAttachment {
 	duration?: number;
 }
 
+function getColorForName(name: string | undefined): string {
+	if (!name) return '#38bdf8';
+	const MODERN_PALETTE = [
+		'#38bdf8', // Light Blue
+		'#a78bfa', // Purple/Violet
+		'#f472b6', // Pink
+		'#34d399', // Emerald/Green
+		'#fbbf24', // Amber/Yellow
+		'#fb923c', // Orange
+		'#2dd4bf', // Teal
+		'#f87171', // Red
+		'#818cf8', // Indigo
+		'#c084fc', // Fuchsia
+		'#22d3ee', // Cyan
+		'#eab308'  // Yellow-gold
+	];
+	let hash = 0;
+	const str = String(name).trim();
+	for (let i = 0; i < str.length; i++) {
+		hash = str.charCodeAt(i) + ((hash << 5) - hash);
+	}
+	const index = Math.abs(hash) % MODERN_PALETTE.length;
+	return MODERN_PALETTE[index];
+}
+
+function hexToRgba(hex: string | undefined, alpha: number): string {
+	if (!hex) {
+		return `rgba(56, 189, 248, ${alpha})`;
+	}
+	let r = 0, g = 0, b = 0;
+	if (hex.length === 4) {
+		r = parseInt(hex[1] + hex[1], 16);
+		g = parseInt(hex[2] + hex[2], 16);
+		b = parseInt(hex[3] + hex[3], 16);
+	} else if (hex.length === 7) {
+		r = parseInt(hex.substring(1, 3), 16);
+		g = parseInt(hex.substring(3, 5), 16);
+		b = parseInt(hex.substring(5, 7), 16);
+	}
+	return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function getTypeColorInfo(typeStr: string | undefined): { text: string; bg: string; border: string } {
+	const typeLower = (typeStr || 'task').toLowerCase().trim();
+	const typeColors: { [key: string]: { text: string; bg: string; border: string } } = {
+		workspace: { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.14)', border: 'rgba(56, 189, 248, 0.3)' },
+		job: { text: '#fbbf24', bg: 'rgba(251, 191, 36, 0.14)', border: 'rgba(251, 191, 36, 0.3)' },
+		task: { text: '#a78bfa', bg: 'rgba(167, 139, 250, 0.14)', border: 'rgba(167, 139, 250, 0.3)' },
+		project: { text: '#60a5fa', bg: 'rgba(96, 165, 250, 0.14)', border: 'rgba(96, 165, 250, 0.3)' },
+		workflow: { text: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.14)', border: 'rgba(45, 212, 191, 0.3)' },
+		agent: { text: '#f472b6', bg: 'rgba(244, 114, 182, 0.14)', border: 'rgba(244, 114, 182, 0.3)' },
+		case: { text: '#a3e635', bg: 'rgba(163, 230, 53, 0.14)', border: 'rgba(163, 230, 53, 0.3)' },
+		issue: { text: '#f87171', bg: 'rgba(248, 113, 113, 0.14)', border: 'rgba(248, 113, 113, 0.3)' },
+		analysis: { text: '#34d399', bg: 'rgba(52, 211, 153, 0.14)', border: 'rgba(52, 211, 153, 0.3)' },
+		note: { text: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.14)', border: 'rgba(45, 212, 191, 0.3)' },
+		resume: { text: '#34d399', bg: 'rgba(52, 211, 153, 0.14)', border: 'rgba(52, 211, 153, 0.3)' }
+	};
+
+	if (typeColors[typeLower]) {
+		return typeColors[typeLower];
+	}
+
+	const baseColor = getColorForName(typeLower);
+	return {
+		text: baseColor,
+		bg: hexToRgba(baseColor, 0.14),
+		border: hexToRgba(baseColor, 0.3)
+	};
+}
+
 const STORAGE_KEY_CREDENTIAL_ID = 'anyagent.centeredChat.activeCredentialId';
 const STORAGE_KEY_MODEL_ID = 'anyagent.centeredChat.activeModelId';
 
@@ -820,6 +890,7 @@ export class CenteredChatWidget extends Disposable {
 					}
 					selectedSet.forEach(tid => {
 						const matched = allTickets.find(t => t.id === tid || t.code === tid);
+						const colorInfo = getTypeColorInfo(matched?.type);
 						const pill = append(pillsContainer, $('.ticket-pill'));
 						pill.style.display = 'inline-flex';
 						pill.style.alignItems = 'center';
@@ -828,14 +899,20 @@ export class CenteredChatWidget extends Disposable {
 						pill.style.fontWeight = '600';
 						pill.style.padding = '2px 8px';
 						pill.style.borderRadius = '4px';
-						pill.style.background = 'rgba(56, 189, 248, 0.16)';
-						pill.style.border = '1px solid rgba(56, 189, 248, 0.3)';
-						pill.style.color = '#38bdf8';
+						pill.style.background = colorInfo.bg;
+						pill.style.border = `1px solid ${colorInfo.border}`;
+						pill.style.color = colorInfo.text;
 						if (matched) {
-							pill.title = `${matched.id}: ${matched.title || ''}\n${matched.summary || ''}\nWorkspace: ${matched.workspaceName || ''}`;
+							pill.title = `${matched.id} [${(matched.type || 'task').toUpperCase()}]: ${matched.title || ''}\n${matched.summary || ''}\nWorkspace: ${matched.workspaceName || ''}`;
 						}
 
-						append(pill, $('span.codicon.codicon-tag', { style: 'font-size: 10px;' }));
+						if (matched?.type) {
+							append(pill, $('span', {
+								style: `font-size: 8.5px; font-weight: 700; padding: 0 3px; border-radius: 2px; background: rgba(0,0,0,0.25); text-transform: uppercase;`
+							}, matched.type));
+						} else {
+							append(pill, $('span.codicon.codicon-tag', { style: 'font-size: 10px;' }));
+						}
 
 						const isTitleSameAsId = !matched || !matched.title || matched.title.toLowerCase() === matched.id.toLowerCase() || (matched.code && matched.title.toLowerCase() === matched.code.toLowerCase());
 						const displayLabel = matched ? (isTitleSameAsId ? (matched.summary ? `${matched.id}: ${matched.summary}` : matched.id) : `${matched.id}: ${matched.title}`) : tid;
@@ -860,6 +937,7 @@ export class CenteredChatWidget extends Disposable {
 						return (t.id && t.id.toLowerCase().includes(q)) ||
 							(t.code && t.code.toLowerCase().includes(q)) ||
 							(t.title && t.title.toLowerCase().includes(q)) ||
+							(t.type && t.type.toLowerCase().includes(q)) ||
 							(t.summary && t.summary.toLowerCase().includes(q)) ||
 							(t.workspaceName && t.workspaceName.toLowerCase().includes(q));
 					});
@@ -871,6 +949,7 @@ export class CenteredChatWidget extends Disposable {
 
 					filtered.forEach(ticket => {
 						const isSelected = selectedSet.has(ticket.id) || (ticket.code ? selectedSet.has(ticket.code) : false);
+						const colorInfo = getTypeColorInfo(ticket.type);
 						const row = append(checklistContainer, $('.ticket-check-row'));
 						row.style.display = 'flex';
 						row.style.alignItems = 'center';
@@ -880,23 +959,29 @@ export class CenteredChatWidget extends Disposable {
 						row.style.fontSize = '11px';
 						row.style.cursor = 'pointer';
 						row.style.transition = 'all 0.15s ease';
-						row.style.background = isSelected ? 'rgba(56, 189, 248, 0.14)' : 'transparent';
-						row.style.border = isSelected ? '1px solid rgba(56, 189, 248, 0.25)' : '1px solid transparent';
-						row.title = `${ticket.id}: ${ticket.title || ''}\n${ticket.summary ? `Summary: ${ticket.summary}\n` : ''}Workspace: ${ticket.workspaceName || ''}`;
+						row.style.background = isSelected ? colorInfo.bg : 'transparent';
+						row.style.border = isSelected ? `1px solid ${colorInfo.border}` : '1px solid transparent';
+						row.title = `${ticket.id} [${(ticket.type || 'task').toUpperCase()}]: ${ticket.title || ''}\n${ticket.summary ? `Summary: ${ticket.summary}\n` : ''}Workspace: ${ticket.workspaceName || ''}`;
 
-						const left = append(row, $('div', { style: 'display: flex; align-items: center; gap: 8px; overflow: hidden; flex: 1; min-width: 0;' }));
+						const left = append(row, $('div', { style: 'display: flex; align-items: center; gap: 7px; overflow: hidden; flex: 1; min-width: 0;' }));
 						const checkbox = append(left, $('input')) as HTMLInputElement;
 						checkbox.type = 'checkbox';
 						checkbox.checked = isSelected;
 						checkbox.style.cursor = 'pointer';
 						checkbox.style.flexShrink = '0';
 
-						// ID Badge
+						// 1. Ticket ID Badge with Type Color
 						append(left, $('span', {
-							style: 'font-weight: 700; color: #38bdf8; font-family: monospace; font-size: 10.5px; background: rgba(56, 189, 248, 0.12); padding: 1px 5px; border-radius: 3px; flex-shrink: 0;'
+							style: `font-weight: 700; color: ${colorInfo.text}; font-family: monospace; font-size: 10.5px; background: ${colorInfo.bg}; border: 1px solid ${colorInfo.border}; padding: 1px 5px; border-radius: 3px; flex-shrink: 0;`
 						}, ticket.id));
 
-						// Text container for Title and Summary
+						// 2. Type Tag Badge
+						const typeLabel = (ticket.type || 'TASK').toUpperCase();
+						append(left, $('span', {
+							style: `font-size: 9px; font-weight: 700; color: ${colorInfo.text}; background: rgba(0,0,0,0.3); border: 1px solid ${colorInfo.border}; padding: 1px 4px; border-radius: 3px; letter-spacing: 0.3px; flex-shrink: 0;`
+						}, typeLabel));
+
+						// 3. Text container for Title and Summary
 						const textWrapper = append(left, $('div', {
 							style: 'display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; min-width: 0;'
 						}));
