@@ -774,7 +774,7 @@ export class CenteredChatWidget extends Disposable {
 				const rawVals = editableValue ? editableValue.split(/[,;\n]+/).map((s: string) => s.trim()).filter(Boolean) : [];
 				const selectedSet = new Set<string>(rawVals);
 
-				const allTickets: Array<{ id: string; code?: string; title?: string; type?: string; workspaceName?: string }> =
+				const allTickets: Array<{ id: string; code?: string; title?: string; summary?: string; type?: string; workspaceName?: string }> =
 					(locator.options && Array.isArray(locator.options)) ? locator.options : (activeNode && activeNode.options ? activeNode.options : []);
 
 				// 1. Pills container for currently selected tickets
@@ -824,17 +824,23 @@ export class CenteredChatWidget extends Disposable {
 						pill.style.display = 'inline-flex';
 						pill.style.alignItems = 'center';
 						pill.style.gap = '5px';
-						pill.style.fontSize = '10px';
+						pill.style.fontSize = '10.5px';
 						pill.style.fontWeight = '600';
-						pill.style.padding = '2px 6px';
-						pill.style.borderRadius = '3px';
-						pill.style.background = 'rgba(56, 189, 248, 0.18)';
+						pill.style.padding = '2px 8px';
+						pill.style.borderRadius = '4px';
+						pill.style.background = 'rgba(56, 189, 248, 0.16)';
+						pill.style.border = '1px solid rgba(56, 189, 248, 0.3)';
 						pill.style.color = '#38bdf8';
+						if (matched) {
+							pill.title = `${matched.id}: ${matched.title || ''}\n${matched.summary || ''}\nWorkspace: ${matched.workspaceName || ''}`;
+						}
 
-						append(pill, $('span.codicon.codicon-tag', { style: 'font-size: 9.5px;' }));
-						append(pill, $('span', {}, matched ? (matched.code || matched.id) : tid));
+						append(pill, $('span.codicon.codicon-tag', { style: 'font-size: 10px;' }));
 
-						const remBtn = append(pill, $('span', { style: 'cursor: pointer; opacity: 0.7; margin-left: 2px; font-weight: bold;' }, '×'));
+						const labelText = matched ? (matched.title && matched.title !== matched.id ? `${matched.id}: ${matched.title}` : matched.id) : tid;
+						append(pill, $('span', { style: 'max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, labelText));
+
+						const remBtn = append(pill, $('span', { style: 'cursor: pointer; opacity: 0.7; margin-left: 3px; font-weight: bold;' }, '×'));
 						remBtn.onmouseenter = () => remBtn.style.opacity = '1';
 						remBtn.onmouseleave = () => remBtn.style.opacity = '0.7';
 						remBtn.onclick = (e) => {
@@ -853,11 +859,12 @@ export class CenteredChatWidget extends Disposable {
 						return (t.id && t.id.toLowerCase().includes(q)) ||
 							(t.code && t.code.toLowerCase().includes(q)) ||
 							(t.title && t.title.toLowerCase().includes(q)) ||
+							(t.summary && t.summary.toLowerCase().includes(q)) ||
 							(t.workspaceName && t.workspaceName.toLowerCase().includes(q));
 					});
 
 					if (filtered.length === 0) {
-						append(checklistContainer, $('div', { style: 'font-size: 10.5px; opacity: 0.5; padding: 6px; text-align: center;' }, 'No matching tickets found'));
+						append(checklistContainer, $('div', { style: 'font-size: 10.5px; opacity: 0.5; padding: 10px; text-align: center;' }, 'No matching tickets found'));
 						return;
 					}
 
@@ -867,27 +874,50 @@ export class CenteredChatWidget extends Disposable {
 						row.style.display = 'flex';
 						row.style.alignItems = 'center';
 						row.style.justifyContent = 'space-between';
-						row.style.padding = '4px 8px';
-						row.style.borderRadius = '3px';
+						row.style.padding = '5px 8px';
+						row.style.borderRadius = '4px';
 						row.style.fontSize = '11px';
 						row.style.cursor = 'pointer';
-						row.style.transition = 'background 0.1s ease';
-						row.style.background = isSelected ? 'rgba(56, 189, 248, 0.12)' : 'transparent';
+						row.style.transition = 'all 0.15s ease';
+						row.style.background = isSelected ? 'rgba(56, 189, 248, 0.14)' : 'transparent';
+						row.style.border = isSelected ? '1px solid rgba(56, 189, 248, 0.25)' : '1px solid transparent';
+						row.title = `${ticket.id}: ${ticket.title || ''}\n${ticket.summary ? `Summary: ${ticket.summary}\n` : ''}Workspace: ${ticket.workspaceName || ''}`;
 
-						const left = append(row, $('div', { style: 'display: flex; align-items: center; gap: 6px; overflow: hidden;' }));
+						const left = append(row, $('div', { style: 'display: flex; align-items: center; gap: 8px; overflow: hidden; flex: 1; min-width: 0;' }));
 						const checkbox = append(left, $('input')) as HTMLInputElement;
 						checkbox.type = 'checkbox';
 						checkbox.checked = isSelected;
 						checkbox.style.cursor = 'pointer';
+						checkbox.style.flexShrink = '0';
 
-						append(left, $('span', { style: 'font-weight: 600; color: #38bdf8; font-family: monospace; font-size: 10.5px;' }, ticket.code || ticket.id));
-						if (ticket.title) {
-							append(left, $('span', { style: 'opacity: 0.85; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, ticket.title));
+						// ID Badge
+						append(left, $('span', {
+							style: 'font-weight: 700; color: #38bdf8; font-family: monospace; font-size: 10.5px; background: rgba(56, 189, 248, 0.12); padding: 1px 5px; border-radius: 3px; flex-shrink: 0;'
+						}, ticket.id));
+
+						// Text container for Title and Summary
+						const textWrapper = append(left, $('div', {
+							style: 'display: flex; align-items: baseline; gap: 6px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; min-width: 0;'
+						}));
+
+						// Title
+						append(textWrapper, $('span', {
+							style: 'font-weight: 600; color: #ffffff; font-size: 11px; flex-shrink: 0;'
+						}, ticket.title || ticket.id));
+
+						// Summary preview
+						if (ticket.summary && ticket.summary !== ticket.title) {
+							append(textWrapper, $('span', {
+								style: 'font-size: 10.5px; opacity: 0.55; color: rgba(255,255,255,0.75); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
+							}, `— ${ticket.summary}`));
 						}
 
-						const right = append(row, $('div', { style: 'display: flex; align-items: center; gap: 4px;' }));
+						// Right: Workspace tag
+						const right = append(row, $('div', { style: 'display: flex; align-items: center; gap: 4px; margin-left: 8px; flex-shrink: 0;' }));
 						if (ticket.workspaceName) {
-							append(right, $('span', { style: 'font-size: 9.5px; opacity: 0.45;' }, ticket.workspaceName));
+							append(right, $('span', {
+								style: 'font-size: 9.5px; opacity: 0.45; font-family: monospace; padding: 1px 5px; border: 1px solid rgba(255,255,255,0.08); border-radius: 3px; background: rgba(255,255,255,0.02);'
+							}, ticket.workspaceName));
 						}
 
 						row.onmouseenter = () => {

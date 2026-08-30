@@ -588,9 +588,75 @@ export class EntityDetailEditor extends EditorPane {
 		return newLines.join('\n');
 	}
 
-	private async _loadAllAvailableTickets(): Promise<Array<{ id: string; code: string; title: string; type: string; workspaceId: string; workspaceName: string; uri: string }>> {
+	private _extractEntityTitleAndSummary(
+		meta: { [key: string]: string },
+		readmeContent: string,
+		fallbackName: string
+	): { title: string; summary: string } {
+		let title = '';
+		let summary = '';
+
+		// 1. Check title from metadata
+		if (meta['Title'] && meta['Title'] !== 'None' && meta['Title'] !== 'null' && meta['Title'] !== fallbackName) {
+			title = meta['Title'].trim();
+		}
+
+		// 2. Check title from README.md
+		if (!title && readmeContent) {
+			const lines = readmeContent.split(/\r?\n/);
+			for (const line of lines) {
+				const titleMatch = line.match(/^\s*-\s*\*\*Title\*\*:\s*(.*)$/i);
+				if (titleMatch && titleMatch[1].trim() && titleMatch[1].trim() !== 'None') {
+					title = titleMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+					break;
+				}
+				const h1Match = line.match(/^#\s+(.+)$/);
+				if (h1Match && h1Match[1].trim()) {
+					title = h1Match[1].trim();
+					break;
+				}
+			}
+		}
+
+		if (!title) {
+			title = fallbackName.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+		}
+
+		// 3. Summary from Description
+		if (meta['Description'] && meta['Description'] !== 'None' && meta['Description'] !== 'null') {
+			summary = meta['Description'].trim();
+		}
+
+		if (!summary && readmeContent) {
+			const lines = readmeContent.split(/\r?\n/);
+			for (const line of lines) {
+				const descMatch = line.match(/^\s*-\s*\*\*Description\*\*:\s*(.*)$/i);
+				if (descMatch && descMatch[1].trim() && descMatch[1].trim() !== 'None') {
+					summary = descMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+					break;
+				}
+			}
+			if (!summary) {
+				for (const line of lines) {
+					const trimmed = line.trim();
+					if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('-') && !trimmed.startsWith('*') && !trimmed.startsWith('`') && !trimmed.startsWith('---')) {
+						summary = trimmed;
+						break;
+					}
+				}
+			}
+		}
+
+		if (summary.length > 80) {
+			summary = summary.substring(0, 77) + '...';
+		}
+
+		return { title, summary };
+	}
+
+	private async _loadAllAvailableTickets(): Promise<Array<{ id: string; code: string; title: string; summary: string; type: string; workspaceId: string; workspaceName: string; uri: string }>> {
 		if (!this._workspacesExplorerService) return [];
-		const result: Array<{ id: string; code: string; title: string; type: string; workspaceId: string; workspaceName: string; uri: string }> = [];
+		const result: Array<{ id: string; code: string; title: string; summary: string; type: string; workspaceId: string; workspaceName: string; uri: string }> = [];
 		try {
 			const workspaces = await this._workspacesExplorerService.getWorkspaces();
 			const currentTicketId = this._lastParsedData?.ticketId || this._entityName || '';
@@ -601,18 +667,22 @@ export class EntityDetailEditor extends EditorPane {
 
 				// 1. Check workspace root ticket
 				const wsTicketUri = await this._resolveFileUri(wsTargetBase, 'ticket.md');
+				const wsReadmeUri = await this._resolveFileUri(wsTargetBase, 'README.md');
 				if (wsTicketUri && (await this._fileService.exists(wsTicketUri))) {
 					const content = await this._safeReadFile(wsTicketUri);
+					const readmeContent = await this._safeReadFile(wsReadmeUri);
 					const meta = this._parseMetadata(content);
 					const tId = meta['Ticket ID'] || meta['Entity ID'] || ws.name;
-					const tCode = meta['Ticket Code'] || meta['Entity Code'] || meta['Code'] || tId;
-					const tTitle = meta['Title'] || ws.name;
+					const rawCode = meta['Ticket Code'] || meta['Entity Code'] || meta['Code'];
+					const tCode = (rawCode && rawCode !== 'None') ? rawCode : tId;
+					const { title: tTitle, summary: tSummary } = this._extractEntityTitleAndSummary(meta, readmeContent, ws.name);
 					const tType = meta['Ticket Type'] || meta['Entity Type'] || 'workspace';
 					if (tId && tId !== currentTicketId && !result.some(r => r.id === tId)) {
 						result.push({
 							id: tId,
 							code: tCode,
 							title: tTitle,
+							summary: tSummary,
 							type: tType,
 							workspaceId: meta['Workspace ID'] || ws.name,
 							workspaceName: wsName,
@@ -626,18 +696,22 @@ export class EntityDetailEditor extends EditorPane {
 				for (const child of children) {
 					if (child.type === 'file') continue;
 					const childTicketUri = await this._resolveFileUri(child.uri, 'ticket.md');
+					const childReadmeUri = await this._resolveFileUri(child.uri, 'README.md');
 					if (childTicketUri && (await this._fileService.exists(childTicketUri))) {
 						const content = await this._safeReadFile(childTicketUri);
+						const readmeContent = await this._safeReadFile(childReadmeUri);
 						const meta = this._parseMetadata(content);
 						const tId = meta['Ticket ID'] || meta['Entity ID'] || child.name;
-						const tCode = meta['Ticket Code'] || meta['Entity Code'] || meta['Code'] || tId;
-						const tTitle = meta['Title'] || child.name;
+						const rawCode = meta['Ticket Code'] || meta['Entity Code'] || meta['Code'];
+						const tCode = (rawCode && rawCode !== 'None') ? rawCode : tId;
+						const { title: tTitle, summary: tSummary } = this._extractEntityTitleAndSummary(meta, readmeContent, child.name);
 						const tType = meta['Ticket Type'] || meta['Entity Type'] || child.type || 'task';
 						if (tId && tId !== currentTicketId && !result.some(r => r.id === tId)) {
 							result.push({
 								id: tId,
 								code: tCode,
 								title: tTitle,
+								summary: tSummary,
 								type: tType,
 								workspaceId: meta['Workspace ID'] || ws.name,
 								workspaceName: wsName,
