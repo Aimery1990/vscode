@@ -15,7 +15,6 @@ import { IEditorOpenContext } from '../../../common/editor.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import { IWebviewElement, IWebviewService } from '../../webview/browser/webview.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
 import { URI } from '../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
@@ -100,12 +99,10 @@ export class EntityDetailEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.entityDetail';
 
 	private _container: HTMLElement | undefined;
-	private _webview: IWebviewElement | undefined;
 
 	private _entityUri: URI | undefined;
 	private _entityName: string = '';
 	private _entityType: string = 'task';
-	private _startInEditMode: boolean = false;
 
 	private _ticketFileUri: URI | undefined;
 	private _instructionUri: URI | undefined;
@@ -119,7 +116,6 @@ export class EntityDetailEditor extends EditorPane {
 		@IThemeService themeService: IThemeService,
 		@IStorageService private readonly _storageService: IStorageService,
 		@IFileService private readonly _fileService: IFileService,
-		@IWebviewService private readonly _webviewService: IWebviewService,
 		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
 		@INotificationService private readonly _notificationService: INotificationService,
 		@INativeEnvironmentService private readonly _environmentService: INativeEnvironmentService,
@@ -138,12 +134,19 @@ export class EntityDetailEditor extends EditorPane {
 		this._container.style.height = '100%';
 		this._container.style.display = 'flex';
 		this._container.style.flexDirection = 'column';
-		this._container.style.overflow = 'hidden';
+		this._container.style.overflowY = 'auto';
+		this._container.style.overflowX = 'hidden';
+		this._container.style.background = 'var(--vscode-editor-background)';
+		this._container.style.color = 'var(--vscode-editor-foreground)';
+		this._container.style.boxSizing = 'border-box';
+		this._container.style.padding = '24px 32px';
 		parent.appendChild(this._container);
+
+		this._bindContainerEvents();
 	}
 
 	override layout(dimension: Dimension): void {
-		// No-op. Webview element handles size automatically.
+		// Native DOM in _container auto-sizes smoothly.
 	}
 
 	override async setInput(input: EntityDetailEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
@@ -151,13 +154,25 @@ export class EntityDetailEditor extends EditorPane {
 
 		this._entityUri = input.entityUri;
 		this._entityName = input.entityName;
-		this._startInEditMode = !!input.startInEditMode;
 
 		await this._resolvePathsAndLoadData();
 	}
 
 	override clearInput(): void {
+		if (this._container) {
+			this._container.innerHTML = '';
+		}
+		this._entityUri = undefined;
+		this._lastParsedData = undefined;
 		super.clearInput();
+	}
+
+	override dispose(): void {
+		if (this._container) {
+			this._container.innerHTML = '';
+			this._container = undefined;
+		}
+		super.dispose();
 	}
 
 	override setEditorVisible(visible: boolean): void {
@@ -319,26 +334,165 @@ export class EntityDetailEditor extends EditorPane {
 			const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
 			const allTickets = await this._loadAllAvailableTickets();
 
-			// 3. Setup Webview cleanly without recreating or dropping listeners
-			if (!this._webview) {
-				this._webview = this._register(this._webviewService.createWebviewElement({
-					title: localize('entityDetail', "Entity Detail"),
-					options: { disableServiceWorker: true },
-					contentOptions: { allowScripts: true },
-					extension: undefined
-				}));
-				this._webview.mountTo(this._container, this.window);
-
-				this._register(this._webview.onMessage(async (e: any) => {
-					await this._handleMessage(e);
-				}));
-			}
-
+			// 3. Render directly into this._container as native high-performance DOM
 			const html = this._generateHtml(parsed, workLogContent, attachments, customModule, agents, allTickets);
-			this._webview.setHtml(html);
+			this._container.innerHTML = html;
 		} catch (err) {
 			console.error('Failed to resolve and render entity detail:', err);
 		}
+	}
+
+	private _bindContainerEvents(): void {
+		if (!this._container) return;
+
+		this._container.addEventListener('click', async (e: MouseEvent) => {
+			const target = e.target as HTMLElement | null;
+			if (!target) return;
+
+			// 1. AI Sparkle button click
+			const aiBtn = target.closest('.ai-edit-btn') as HTMLElement | null;
+			if (aiBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const field = aiBtn.getAttribute('data-ai-field') || '/Description';
+				const fieldType = aiBtn.getAttribute('data-ai-field-type') || 'text';
+				const label = aiBtn.getAttribute('data-ai-field-label') || '';
+				const currentValue = aiBtn.getAttribute('data-ai-current-value') || '';
+				const optionsRaw = aiBtn.getAttribute('data-ai-options') || '';
+				let options: any[] = [];
+				if (optionsRaw) {
+					try { options = JSON.parse(optionsRaw); } catch { }
+				}
+				await this._handleMessage({
+					type: 'openAgentCentral',
+					field,
+					fieldType,
+					label,
+					currentValue,
+					options,
+					source: field
+				});
+				return;
+			}
+
+			// 2. Ticket Link Chip click
+			const ticketChip = target.closest('.ticket-link-chip') as HTMLElement | null;
+			if (ticketChip) {
+				const ticketId = ticketChip.getAttribute('data-ticket-id');
+				if (ticketId) {
+					e.preventDefault();
+					e.stopPropagation();
+					await this._handleMessage({ type: 'openTicket', ticketId });
+					return;
+				}
+			}
+
+			// 3. Add Work Log toggle button
+			if (target.id === 'add-log-btn' || target.closest('#add-log-btn')) {
+				const addLogBox = this._container?.querySelector('#add-log-box') as HTMLElement | null;
+				const textarea = this._container?.querySelector('#log-textarea') as HTMLTextAreaElement | null;
+				if (addLogBox) {
+					addLogBox.style.display = 'block';
+					textarea?.focus();
+				}
+				return;
+			}
+
+			// 4. Cancel Add Log
+			if (target.id === 'cancel-log-btn' || target.closest('#cancel-log-btn')) {
+				const addLogBox = this._container?.querySelector('#add-log-box') as HTMLElement | null;
+				const textarea = this._container?.querySelector('#log-textarea') as HTMLTextAreaElement | null;
+				if (addLogBox) {
+					addLogBox.style.display = 'none';
+					if (textarea) textarea.value = '';
+				}
+				return;
+			}
+
+			// 5. Submit Work Log
+			if (target.id === 'submit-log-btn' || target.closest('#submit-log-btn')) {
+				const textarea = this._container?.querySelector('#log-textarea') as HTMLTextAreaElement | null;
+				const val = textarea?.value?.trim();
+				if (val) {
+					await this._handleMessage({ type: 'addWorkLog', log: val });
+				}
+				return;
+			}
+
+			// 6. Delete attachment
+			const delAttachBtn = target.closest('.delete-attachment') as HTMLElement | null;
+			if (delAttachBtn) {
+				const fileName = delAttachBtn.getAttribute('data-file-name');
+				if (fileName) {
+					e.preventDefault();
+					e.stopPropagation();
+					if (confirm(`Are you sure you want to delete attachment '${fileName}'?`)) {
+						await this._handleMessage({ type: 'deleteAttachment', name: fileName });
+					}
+					return;
+				}
+			}
+
+			// 7. Download attachment
+			const downloadAttachCard = target.closest('.attachment-card-download') as HTMLElement | null;
+			if (downloadAttachCard) {
+				const fileName = downloadAttachCard.getAttribute('data-file-name');
+				if (fileName) {
+					e.preventDefault();
+					e.stopPropagation();
+					await this._handleMessage({ type: 'downloadAttachment', name: fileName });
+					return;
+				}
+			}
+
+			// 8. Trigger File Upload Dropzone
+			if (target.id === 'attachment-dropzone' || target.closest('#attachment-dropzone')) {
+				if (!target.classList.contains('delete-attachment') && !target.closest('.delete-attachment')) {
+					const fileInput = this._container?.querySelector('#file-input') as HTMLInputElement | null;
+					fileInput?.click();
+				}
+				return;
+			}
+		});
+
+		this._container.addEventListener('change', async (e: Event) => {
+			const target = e.target as HTMLInputElement | null;
+			if (target && target.id === 'file-input' && target.files && target.files.length > 0) {
+				const file = target.files[0];
+				const buffer = await file.arrayBuffer();
+				await this._handleMessage({
+					type: 'uploadAttachment',
+					name: file.name,
+					data: Array.from(new Uint8Array(buffer))
+				});
+			}
+		});
+
+		this._container.addEventListener('dragover', (e: DragEvent) => {
+			e.preventDefault();
+			const dropzone = this._container?.querySelector('#attachment-dropzone') as HTMLElement | null;
+			dropzone?.classList.add('dragover');
+		});
+
+		this._container.addEventListener('dragleave', (e: DragEvent) => {
+			const dropzone = this._container?.querySelector('#attachment-dropzone') as HTMLElement | null;
+			dropzone?.classList.remove('dragover');
+		});
+
+		this._container.addEventListener('drop', async (e: DragEvent) => {
+			e.preventDefault();
+			const dropzone = this._container?.querySelector('#attachment-dropzone') as HTMLElement | null;
+			dropzone?.classList.remove('dragover');
+			if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+				const file = e.dataTransfer.files[0];
+				const buffer = await file.arrayBuffer();
+				await this._handleMessage({
+					type: 'uploadAttachment',
+					name: file.name,
+					data: Array.from(new Uint8Array(buffer))
+				});
+			}
+		});
 	}
 
 	private async _resolveFileUri(baseUri: URI, name: string): Promise<URI> {
@@ -886,7 +1040,7 @@ export class EntityDetailEditor extends EditorPane {
 			const tooltip = matched ? `${matched.id} [${(matched.type || 'task').toUpperCase()}]: ${matched.title || ''}\n${matched.summary || ''}` : `Ticket ${id}`;
 
 			return `
-			<span class="ticket-link-chip" onclick="openTicket('${this._escapeHtmlAttr(id)}')" style="display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 600; font-family: monospace; padding: 2px 7px; border-radius: 3px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: ${colorInfo.text}; cursor: pointer; transition: all 0.15s ease;" title="${this._escapeHtmlAttr(tooltip)}">
+			<span class="ticket-link-chip" data-ticket-id="${this._escapeHtmlAttr(id)}" style="display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 600; font-family: monospace; padding: 2px 7px; border-radius: 3px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); color: ${colorInfo.text}; cursor: pointer; transition: all 0.15s ease;" title="${this._escapeHtmlAttr(tooltip)}">
 				${typeBadge}
 				<span>${this._escapeHtmlAttr(id)}</span>
 			</span>
@@ -1397,10 +1551,10 @@ export class EntityDetailEditor extends EditorPane {
 			for (const file of attachments) {
 				attachmentsHtml += `
 					<div class="attachment-card" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); padding: 8px 12px; border-radius: 6px;">
-						<div onclick="downloadFile('${file}')" style="display: flex; align-items: center; gap: 8px; overflow: hidden; cursor: pointer; flex: 1;" title="Download attachment">
-							<span style="font-size: 0.88em; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${file}</span>
+						<div class="attachment-card-download" data-file-name="${this._escapeHtmlAttr(file)}" style="display: flex; align-items: center; gap: 8px; overflow: hidden; cursor: pointer; flex: 1;" title="Download attachment">
+							<span style="font-size: 0.88em; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${this._escapeHtmlAttr(file)}</span>
 						</div>
-						<span class="delete-attachment" onclick="deleteFile('${file}')" style="opacity: 0.4; cursor: pointer; padding: 2px 4px; font-size: 0.85em;" title="Delete Attachment">✕</span>
+						<span class="delete-attachment" data-file-name="${this._escapeHtmlAttr(file)}" style="opacity: 0.4; cursor: pointer; padding: 2px 4px; font-size: 0.85em;" title="Delete Attachment">✕</span>
 					</div>
 				`;
 			}
@@ -1538,12 +1692,6 @@ export class EntityDetailEditor extends EditorPane {
 							<div class="custom-field-view">
 								${subCardsViewHtml}
 							</div>
-							<div class="custom-field-edit" style="display: none;">
-								<div class="dynamic-list-editor" data-custom-key="${k}">
-									<textarea class="custom-meta-input input-field" data-custom-key="${k}" rows="8" style="font-family: monospace; font-size: 0.85em;">${v}</textarea>
-									<div style="font-size: 0.75em; opacity: 0.5; margin-top: 4px;">Edit structured JSON items array. Each item supports _index, _title, and custom sub-fields.</div>
-								</div>
-							</div>
 						</div>
 					`;
 				} else {
@@ -1565,13 +1713,6 @@ export class EntityDetailEditor extends EditorPane {
 									</span>
 								` : (v ? this._markdownToHtml(v) : '<span style="opacity: 0.45; font-style: italic;">No content provided.</span>')}
 							</div>
-							<div class="custom-field-edit" style="display: none;">
-								${isMultiline ? `
-									<textarea class="custom-meta-input input-field" data-custom-key="${k}" rows="5">${v}</textarea>
-								` : `
-									<input type="text" class="custom-meta-input input-field" data-custom-key="${k}" value="${v}" />
-								`}
-							</div>
 						</div>
 					`;
 				}
@@ -1583,719 +1724,436 @@ export class EntityDetailEditor extends EditorPane {
 		const typePromptDisplay = (data.typePrompt && data.typePrompt !== 'None') ? data.typePrompt : '';
 
 		return `
-			<!DOCTYPE html>
-			<html lang="en">
-			<head>
-				<meta charset="UTF-8">
-				<meta http-equiv="Content-Security-Policy" content="default-src * 'unsafe-inline' 'unsafe-eval' data: blob:;">
-				<style>
-					:root {
-						--vscode-font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-					}
-					body {
-						font-family: var(--vscode-font-family);
-						color: var(--vscode-foreground);
-						background-color: var(--vscode-editor-background);
-						margin: 0;
-						padding: 24px 32px;
-						box-sizing: border-box;
-						overflow-y: auto;
-					}
-					* {
-						box-sizing: border-box;
-					}
-					.layout-container {
-						display: grid;
-						grid-template-columns: minmax(0, 1fr) 320px;
-						gap: 32px;
-						max-width: 1360px;
-						margin: 0 auto;
-					}
-					.main-content {
-						display: flex;
-						flex-direction: column;
-						gap: 20px;
-					}
-					.sidebar {
-						background: rgba(255,255,255,0.02);
-						border: 1px solid rgba(255,255,255,0.06);
-						border-radius: 10px;
-						padding: 20px;
-						height: fit-content;
-						position: sticky;
-						top: 24px;
-						backdrop-filter: blur(8px);
-						box-shadow: 0 4px 16px rgba(0,0,0,0.15);
-					}
-					.header-breadcrumb {
-						display: flex;
-						align-items: center;
-						gap: 8px;
-						font-size: 0.85em;
-						opacity: 0.65;
-						margin-bottom: 6px;
-						font-weight: 500;
-					}
-					.header-title-row {
-						display: flex;
-						align-items: center;
-						justify-content: space-between;
-						gap: 16px;
-						margin-bottom: 8px;
-					}
-					.ticket-title {
-						margin: 0;
-						font-size: 1.65em;
-						font-weight: 700;
-						color: var(--vscode-editor-foreground, #fff);
-						line-height: 1.25;
-					}
-					.badge {
-						display: inline-block;
-						padding: 2px 8px;
-						border-radius: 4px;
-						font-size: 0.72em;
-						font-weight: 700;
-						letter-spacing: 0.05em;
-						text-transform: uppercase;
-					}
-					.btn-primary {
-						background: var(--vscode-button-background);
-						color: var(--vscode-button-foreground);
-						border: none;
-						padding: 6px 14px;
-						border-radius: 5px;
-						cursor: pointer;
-						font-weight: 600;
-						font-size: 0.85em;
-						transition: background 0.2s;
-					}
-					.btn-primary:hover {
-						background: var(--vscode-button-hoverBackground);
-					}
-					.btn-primary:disabled {
-						opacity: 0.6;
-						cursor: not-allowed;
-					}
-					.btn-secondary {
-						background: rgba(255,255,255,0.06);
-						color: var(--vscode-foreground);
-						border: 1px solid rgba(255,255,255,0.1);
-						padding: 5px 12px;
-						border-radius: 5px;
-						cursor: pointer;
-						font-weight: 500;
-						font-size: 0.82em;
-						transition: background 0.2s;
-					}
-					.btn-secondary:hover {
-						background: rgba(255,255,255,0.12);
-					}
-					.input-field {
-						background: var(--vscode-input-background, #1e1e1e);
-						color: var(--vscode-input-foreground, #eee);
-						border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12));
-						padding: 10px 14px;
-						border-radius: 6px;
-						width: 100%;
-						font-family: inherit;
-						font-size: 0.95em;
-						line-height: 1.6;
-						resize: vertical;
-					}
-					.input-field:focus {
-						outline: 1px solid var(--vscode-focusBorder, #007acc);
-						border-color: var(--vscode-focusBorder, #007acc);
-					}
-					.section-card {
-						background: rgba(255,255,255,0.015);
-						border: 1px solid rgba(255,255,255,0.05);
-						border-radius: 8px;
-						padding: 18px 22px;
-					}
-					.section-title {
-						font-size: 1.05em;
-						font-weight: 600;
-						margin: 0 0 14px 0;
-						color: var(--vscode-editor-foreground, #eee);
-						display: flex;
-						justify-content: space-between;
-						align-items: center;
-					}
-					.desc-content-box {
-						padding: 14px 16px;
-						background: rgba(0,0,0,0.18);
-						border-radius: 6px;
-						border: 1px solid rgba(255,255,255,0.04);
-						font-size: 0.93em;
-						line-height: 1.65;
-						text-align: left;
-					}
-					.dropzone {
-						border: 2px dashed rgba(255,255,255,0.12);
-						border-radius: 6px;
-						padding: 20px;
-						text-align: center;
-						cursor: pointer;
-						transition: border 0.2s, background 0.2s;
-						background: rgba(255,255,255,0.005);
-					}
-					.dropzone:hover, .dropzone.dragover {
-						border-color: var(--vscode-focusBorder, #38bdf8);
-						background: rgba(56,189,248,0.04);
-					}
-					.sidebar-row {
-						display: flex;
-						flex-direction: column;
-						gap: 4px;
-						margin-bottom: 14px;
-						border-bottom: 1px solid rgba(255,255,255,0.04);
-						padding-bottom: 8px;
-					}
-					.sidebar-label {
-						font-size: 0.75em;
-						opacity: 0.55;
-						font-weight: 600;
-						letter-spacing: 0.05em;
-						text-transform: uppercase;
-					}
-					.sidebar-value {
-						font-size: 0.9em;
-						font-weight: 500;
-						color: var(--vscode-editor-foreground);
-						word-break: break-word;
-					}
-					.ai-edit-btn {
-						display: inline-flex;
-						align-items: center;
-						justify-content: center;
-						background: transparent;
-						color: var(--vscode-icon-foreground, rgba(255, 255, 255, 0.45));
-						border: 1px solid transparent;
-						border-radius: 4px;
-						padding: 3px 5px;
-						cursor: pointer;
-						transition: opacity 0.3s ease 0.35s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-						user-select: none;
-						line-height: 1;
-						opacity: 0;
-						pointer-events: none;
-					}
-					/* Container-level hover reveals all editable sparkle buttons within */
-					.header-title-row:hover .ai-edit-btn,
-					.section-card:hover .ai-edit-btn,
-					.sidebar:hover .ai-edit-btn,
-					.dynamic-sub-card:hover .ai-edit-btn,
-					.custom-property-card:hover .ai-edit-btn {
-						opacity: 0.55;
-						pointer-events: auto;
-						transition: opacity 0.15s ease 0s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-					}
-					.ai-edit-btn:hover {
-						opacity: 1 !important;
-						color: var(--vscode-editor-foreground, #ffffff) !important;
-						background: rgba(255, 255, 255, 0.08) !important;
-						border-color: rgba(255, 255, 255, 0.18) !important;
-						box-shadow: none !important;
-						transform: none !important;
-						transition: opacity 0.1s ease 0s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease !important;
-					}
-				</style>
-			</head>
-			<body>
-				<!-- Top Header Area -->
-				<div style="max-width: 1360px; margin: 0 auto 20px auto;">
-					<div class="header-breadcrumb">
-						<span>${data.workspaceId || 'Workspace'}</span>
-						<span>/</span>
-						<span>${data.ticketId}</span>
-						<span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-block;">${typeUpper}</span>
-					</div>
-					<div class="header-title-row">
-						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
-						<button type="button" class="ai-edit-btn" data-ai-field="/Title" data-ai-field-type="text" data-ai-field-label="Title" data-ai-current-value="${this._escapeHtmlAttr(data.title)}" title="Edit Title with AI">
-							<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-						</button>
-					</div>
+			<style>
+				.entity-detail-editor * {
+					box-sizing: border-box;
+				}
+				.entity-detail-editor .layout-container {
+					display: grid;
+					grid-template-columns: minmax(0, 1fr) 320px;
+					gap: 32px;
+					max-width: 1360px;
+					margin: 0 auto;
+				}
+				.entity-detail-editor .main-content {
+					display: flex;
+					flex-direction: column;
+					gap: 20px;
+				}
+				.entity-detail-editor .sidebar {
+					background: rgba(255,255,255,0.02);
+					border: 1px solid rgba(255,255,255,0.06);
+					border-radius: 10px;
+					padding: 20px;
+					height: fit-content;
+					position: sticky;
+					top: 0px;
+					backdrop-filter: blur(8px);
+					box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+				}
+				.entity-detail-editor .header-breadcrumb {
+					display: flex;
+					align-items: center;
+					gap: 8px;
+					font-size: 0.85em;
+					opacity: 0.65;
+					margin-bottom: 6px;
+					font-weight: 500;
+				}
+				.entity-detail-editor .header-title-row {
+					display: flex;
+					align-items: center;
+					justify-content: space-between;
+					gap: 16px;
+					margin-bottom: 8px;
+				}
+				.entity-detail-editor .ticket-title {
+					margin: 0;
+					font-size: 1.65em;
+					font-weight: 700;
+					color: var(--vscode-editor-foreground, #fff);
+					line-height: 1.25;
+				}
+				.entity-detail-editor .badge {
+					display: inline-block;
+					padding: 2px 8px;
+					border-radius: 4px;
+					font-size: 0.72em;
+					font-weight: 700;
+					letter-spacing: 0.05em;
+					text-transform: uppercase;
+				}
+				.entity-detail-editor .btn-primary {
+					background: var(--vscode-button-background);
+					color: var(--vscode-button-foreground);
+					border: none;
+					padding: 6px 14px;
+					border-radius: 5px;
+					cursor: pointer;
+					font-weight: 600;
+					font-size: 0.85em;
+					transition: background 0.2s;
+				}
+				.entity-detail-editor .btn-primary:hover {
+					background: var(--vscode-button-hoverBackground);
+				}
+				.entity-detail-editor .btn-secondary {
+					background: rgba(255,255,255,0.06);
+					color: var(--vscode-foreground);
+					border: 1px solid rgba(255,255,255,0.1);
+					padding: 5px 12px;
+					border-radius: 5px;
+					cursor: pointer;
+					font-weight: 500;
+					font-size: 0.82em;
+					transition: background 0.2s;
+				}
+				.entity-detail-editor .btn-secondary:hover {
+					background: rgba(255,255,255,0.12);
+				}
+				.entity-detail-editor .input-field {
+					background: var(--vscode-input-background, #1e1e1e);
+					color: var(--vscode-input-foreground, #eee);
+					border: 1px solid var(--vscode-input-border, rgba(255,255,255,0.12));
+					padding: 10px 14px;
+					border-radius: 6px;
+					width: 100%;
+					font-family: inherit;
+					font-size: 0.95em;
+					line-height: 1.6;
+					resize: vertical;
+				}
+				.entity-detail-editor .input-field:focus {
+					outline: 1px solid var(--vscode-focusBorder, #007acc);
+					border-color: var(--vscode-focusBorder, #007acc);
+				}
+				.entity-detail-editor .section-card {
+					background: rgba(255,255,255,0.015);
+					border: 1px solid rgba(255,255,255,0.05);
+					border-radius: 8px;
+					padding: 18px 22px;
+				}
+				.entity-detail-editor .section-title {
+					font-size: 1.05em;
+					font-weight: 600;
+					margin: 0 0 14px 0;
+					color: var(--vscode-editor-foreground, #eee);
+					display: flex;
+					justify-content: space-between;
+					align-items: center;
+				}
+				.entity-detail-editor .desc-content-box {
+					padding: 14px 16px;
+					background: rgba(0,0,0,0.18);
+					border-radius: 6px;
+					border: 1px solid rgba(255,255,255,0.04);
+					font-size: 0.93em;
+					line-height: 1.65;
+					text-align: left;
+				}
+				.entity-detail-editor .dropzone {
+					border: 2px dashed rgba(255,255,255,0.12);
+					border-radius: 6px;
+					padding: 20px;
+					text-align: center;
+					cursor: pointer;
+					transition: border 0.2s, background 0.2s;
+					background: rgba(255,255,255,0.005);
+				}
+				.entity-detail-editor .dropzone:hover, .entity-detail-editor .dropzone.dragover {
+					border-color: var(--vscode-focusBorder, #38bdf8);
+					background: rgba(56,189,248,0.04);
+				}
+				.entity-detail-editor .sidebar-row {
+					display: flex;
+					flex-direction: column;
+					gap: 4px;
+					margin-bottom: 14px;
+					border-bottom: 1px solid rgba(255,255,255,0.04);
+					padding-bottom: 8px;
+				}
+				.entity-detail-editor .sidebar-label {
+					font-size: 0.75em;
+					opacity: 0.55;
+					font-weight: 600;
+					letter-spacing: 0.05em;
+					text-transform: uppercase;
+				}
+				.entity-detail-editor .sidebar-value {
+					font-size: 0.9em;
+					font-weight: 500;
+					color: var(--vscode-editor-foreground);
+					word-break: break-word;
+				}
+				.entity-detail-editor .ai-edit-btn {
+					display: inline-flex;
+					align-items: center;
+					justify-content: center;
+					background: transparent;
+					color: var(--vscode-icon-foreground, rgba(255, 255, 255, 0.45));
+					border: 1px solid transparent;
+					border-radius: 4px;
+					padding: 3px 5px;
+					cursor: pointer;
+					transition: opacity 0.3s ease 0.35s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+					user-select: none;
+					line-height: 1;
+					opacity: 0;
+					pointer-events: none;
+				}
+				/* Container-level hover reveals all editable sparkle buttons within */
+				.entity-detail-editor .header-title-row:hover .ai-edit-btn,
+				.entity-detail-editor .section-card:hover .ai-edit-btn,
+				.entity-detail-editor .sidebar:hover .ai-edit-btn,
+				.entity-detail-editor .dynamic-sub-card:hover .ai-edit-btn,
+				.entity-detail-editor .custom-property-card:hover .ai-edit-btn {
+					opacity: 0.55;
+					pointer-events: auto;
+					transition: opacity 0.15s ease 0s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+				}
+				.entity-detail-editor .ai-edit-btn:hover {
+					opacity: 1 !important;
+					color: var(--vscode-editor-foreground, #ffffff) !important;
+					background: rgba(255, 255, 255, 0.08) !important;
+					border-color: rgba(255, 255, 255, 0.18) !important;
+					box-shadow: none !important;
+					transform: none !important;
+					transition: opacity 0.1s ease 0s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease !important;
+				}
+			</style>
+
+			<!-- Top Header Area -->
+			<div style="max-width: 1360px; margin: 0 auto 20px auto;">
+				<div class="header-breadcrumb">
+					<span>${data.workspaceId || 'Workspace'}</span>
+					<span>/</span>
+					<span>${data.ticketId}</span>
+					<span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-block;">${typeUpper}</span>
 				</div>
+				<div class="header-title-row">
+					<h1 class="ticket-title" id="title-heading">${data.title}</h1>
+					<button type="button" class="ai-edit-btn" data-ai-field="/Title" data-ai-field-type="text" data-ai-field-label="Title" data-ai-current-value="${this._escapeHtmlAttr(data.title)}" title="Edit Title with AI">
+						<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+					</button>
+				</div>
+			</div>
 
-				<!-- Main Layout Container -->
-				<div class="layout-container">
-					<!-- Left Column: Main Stream -->
-					<div class="main-content">
-						<!-- 1. Description Card -->
-						<div class="section-card">
-							<div class="section-title">
-								<span>Description</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Description" data-ai-field-type="textarea" data-ai-field-label="Description" data-ai-current-value="${this._escapeHtmlAttr(data.description)}" title="Edit Description with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							
-							<div id="desc-view-mode" class="desc-content-box">
-								${data.description ? this._markdownToHtml(data.description) : '<span style="opacity: 0.45; font-style: italic;">No description provided.</span>'}
-							</div>
-						</div>
-
-						<!-- 2. Instructions Card -->
-						<div class="section-card">
-							<div class="section-title">
-								<span>Instructions</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Instructions" data-ai-field-type="textarea" data-ai-field-label="Instructions" title="Edit Instructions with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-
-							<div style="display: flex; flex-direction: column; gap: 12px;">
-								<!-- Ticket Prompt -->
-								<div class="instruction-item" style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
-									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-										<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Prompt</div>
-										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Prompt" data-ai-field-type="textarea" data-ai-field-label="Ticket Prompt" data-ai-current-value="${this._escapeHtmlAttr(data.ticketPrompt || '')}" title="Edit Ticket Prompt with AI">
-											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-										</button>
-									</div>
-									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${ticketPromptDisplay ? this._markdownToHtml(ticketPromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Prompt configured.</span>'}</div>
-								</div>
-
-								<!-- Ticket Type Prompt -->
-								<div class="instruction-item" style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
-									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-										<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Type Prompt</div>
-										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Type Prompt" data-ai-field-type="textarea" data-ai-field-label="Ticket Type Prompt" data-ai-current-value="${this._escapeHtmlAttr(typePromptDisplay || '')}" title="Edit Ticket Type Prompt with AI">
-											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-										</button>
-									</div>
-									<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Type Prompt configured.</span>'}</div>
-								</div>
-
-								${data.instructionNotes ? `
-									<div class="instruction-item" style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
-										<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-											<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
-											<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Instruction Notes" data-ai-field-type="textarea" data-ai-field-label="Instruction Notes" data-ai-current-value="${this._escapeHtmlAttr(data.instructionNotes || '')}" title="Edit Instruction Notes with AI">
-												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-											</button>
-										</div>
-										<div style="font-size: 0.9em; line-height: 1.5;">${this._markdownToHtml(data.instructionNotes)}</div>
-									</div>
-								` : ''}
-							</div>
-						</div>
-
-						<!-- 3. Custom Properties -->
-						${customFieldsHtml}
-
-						<!-- 4. Attachments Card -->
-						<div class="section-card">
-							<div class="section-title">
-								<span>Attachments (${attachments.length})</span>
-							</div>
-							<div id="attachment-dropzone" class="dropzone" onclick="triggerBrowse()">
-								<span style="font-size: 0.88em; opacity: 0.7;">Drag and drop files here or click to browse</span>
-								<input type="file" id="file-input" style="display: none;" onchange="handleBrowseUpload(event)" />
-							</div>
-							<div id="attachments-container">
-								${attachmentsHtml}
-							</div>
-						</div>
-
-						<!-- 5. Work Logs Card -->
-						<div class="section-card">
-							<div class="section-title">
-								<span>Work Logs</span>
-								<button id="add-log-btn" onclick="showAddLogModal()" class="btn-primary" style="font-size: 0.8em; padding: 4px 10px;">+ Add Log</button>
-							</div>
-							
-							<!-- Add Log Form -->
-							<div id="add-log-box" style="display: none; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 15px;">
-								<textarea id="log-textarea" class="input-field" rows="3" placeholder="Enter work log description..."></textarea>
-								<div style="display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end;">
-									<button onclick="hideAddLogModal()" class="btn-secondary">Cancel</button>
-									<button onclick="submitLog()" class="btn-primary">Record Log</button>
-								</div>
-							</div>
-
-							<div id="work-logs-container">
-								${workLogHtml}
-							</div>
-						</div>
-					</div>
-
-					<!-- Right Column: Sidebar (Attributes / Information) -->
-					<div class="sidebar">
-						<div class="sidebar-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
-							<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" data-ai-field-type="attributes" data-ai-field-label="Attributes" title="Edit Attributes with AI">
+			<!-- Main Layout Container -->
+			<div class="layout-container">
+				<!-- Left Column: Main Stream -->
+				<div class="main-content">
+					<!-- 1. Description Card -->
+					<div class="section-card">
+						<div class="section-title">
+							<span>Description</span>
+							<button type="button" class="ai-edit-btn" data-ai-field="/Description" data-ai-field-type="textarea" data-ai-field-label="Description" data-ai-current-value="${this._escapeHtmlAttr(data.description)}" title="Edit Description with AI">
 								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							</button>
 						</div>
 						
-						<!-- Status -->
-						<div class="sidebar-row">
-							<div style="display: flex; justify-content: space-between; align-items: center;">
-								<span class="sidebar-label">STATUS</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" title="Edit Status with AI">
-									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
+						<div id="desc-view-mode" class="desc-content-box">
+							${data.description ? this._markdownToHtml(data.description) : '<span style="opacity: 0.45; font-style: italic;">No description provided.</span>'}
+						</div>
+					</div>
+
+					<!-- 2. Instructions Card -->
+					<div class="section-card">
+						<div class="section-title">
+							<span>Instructions</span>
+							<button type="button" class="ai-edit-btn" data-ai-field="/Instructions" data-ai-field-type="textarea" data-ai-field-label="Instructions" title="Edit Instructions with AI">
+								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+							</button>
+						</div>
+
+						<div style="display: flex; flex-direction: column; gap: 12px;">
+							<!-- Ticket Prompt -->
+							<div class="instruction-item" style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
+								<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+									<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Prompt</div>
+									<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Prompt" data-ai-field-type="textarea" data-ai-field-label="Ticket Prompt" data-ai-current-value="${this._escapeHtmlAttr(data.ticketPrompt || '')}" title="Edit Ticket Prompt with AI">
+										<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									</button>
+								</div>
+								<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${ticketPromptDisplay ? this._markdownToHtml(ticketPromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Prompt configured.</span>'}</div>
 							</div>
-							<div style="padding: 2px 0;">
-								<span id="status-view-val" style="display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px;">${status}</span>
+
+							<!-- Ticket Type Prompt -->
+							<div class="instruction-item" style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
+								<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+									<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Type Prompt</div>
+									<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Type Prompt" data-ai-field-type="textarea" data-ai-field-label="Ticket Type Prompt" data-ai-current-value="${this._escapeHtmlAttr(typePromptDisplay || '')}" title="Edit Ticket Type Prompt with AI">
+										<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									</button>
+								</div>
+								<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Type Prompt configured.</span>'}</div>
+							</div>
+
+							${data.instructionNotes ? `
+								<div class="instruction-item" style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
+									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+										<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
+										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Instruction Notes" data-ai-field-type="textarea" data-ai-field-label="Instruction Notes" data-ai-current-value="${this._escapeHtmlAttr(data.instructionNotes || '')}" title="Edit Instruction Notes with AI">
+											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+										</button>
+									</div>
+									<div style="font-size: 0.9em; line-height: 1.5;">${this._markdownToHtml(data.instructionNotes)}</div>
+								</div>
+							` : ''}
+						</div>
+					</div>
+
+					<!-- 3. Custom Properties -->
+					${customFieldsHtml}
+
+					<!-- 4. Attachments Card -->
+					<div class="section-card">
+						<div class="section-title">
+							<span>Attachments (${attachments.length})</span>
+						</div>
+						<div id="attachment-dropzone" class="dropzone">
+							<span style="font-size: 0.88em; opacity: 0.7;">Drag and drop files here or click to browse</span>
+							<input type="file" id="file-input" style="display: none;" />
+						</div>
+						<div id="attachments-container">
+							${attachmentsHtml}
+						</div>
+					</div>
+
+					<!-- 5. Work Logs Card -->
+					<div class="section-card">
+						<div class="section-title">
+							<span>Work Logs</span>
+							<button id="add-log-btn" class="btn-primary" style="font-size: 0.8em; padding: 4px 10px;">+ Add Log</button>
+						</div>
+						
+						<!-- Add Log Form -->
+						<div id="add-log-box" style="display: none; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 15px;">
+							<textarea id="log-textarea" class="input-field" rows="3" placeholder="Enter work log description..."></textarea>
+							<div style="display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end;">
+								<button id="cancel-log-btn" class="btn-secondary">Cancel</button>
+								<button id="submit-log-btn" class="btn-primary">Record Log</button>
 							</div>
 						</div>
 
-						<!-- Priority -->
-						<div class="sidebar-row">
-							<div style="display: flex; justify-content: space-between; align-items: center;">
-								<span class="sidebar-label">PRIORITY</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Priority" data-ai-field-type="priority" data-ai-field-label="Priority" data-ai-current-value="${this._escapeHtmlAttr(data.priority)}" title="Edit Priority with AI">
-									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div style="display: flex; align-items: center; gap: 6px; padding: 2px 0;">
-								<span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;"></span>
-								<span class="meta-view-val" style="font-size: 0.9em; font-weight: 700; color: ${pColor};">${data.priority}</span>
-							</div>
-						</div>
-
-						<!-- Current AI Agent -->
-						<div class="sidebar-row">
-							<div style="display: flex; justify-content: space-between; align-items: center;">
-								<span class="sidebar-label">CURRENT AI AGENT</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Current AI Agent" data-ai-field-type="agent" data-ai-field-label="Current AI Agent" data-ai-current-value="${this._escapeHtmlAttr(data.assignedAgentName || '')}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(agents.map(a => ({ id: a.id, name: a.name }))))}" title="Edit Current AI Agent with AI">
-									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
-						</div>
-
-						<!-- Type Definition -->
-						<div class="sidebar-row">
-							<span class="sidebar-label">TYPE DEFINITION</span>
-							<span class="sidebar-value" style="font-family: monospace; font-size: 0.85em; opacity: 0.9;">${data.typeDefinition}</span>
-						</div>
-
-						<!-- Workspace ID & Ticket ID -->
-						<div class="sidebar-row">
-							<span class="sidebar-label">WORKSPACE ID</span>
-							<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em;">${data.workspaceId || 'None'}</span>
-						</div>
-
-						<div class="sidebar-row">
-							<span class="sidebar-label">TICKET ID</span>
-							<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em; color: #38bdf8;">${data.ticketId}</span>
-						</div>
-
-						<div class="sidebar-row">
-							<span class="sidebar-label">TICKET CODE</span>
-							<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em;">${data.ticketCode || 'None'}</span>
-						</div>
-
-						<!-- Link To & Linked By -->
-						<div class="sidebar-row">
-							<div style="display: flex; justify-content: space-between; align-items: center;">
-								<span class="sidebar-label">LINK TO</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Link To" data-ai-field-type="link_to" data-ai-field-label="Link To" data-ai-current-value="${data.linkTo !== 'None' ? this._escapeHtmlAttr(data.linkTo) : ''}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(allTickets))}" title="Edit Link To with AI">
-									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
-							</div>
-							<div class="sidebar-value" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
-								${this._renderTicketChipsHtml(data.linkTo, allTickets)}
-							</div>
-						</div>
-
-						<div class="sidebar-row">
-							<div style="display: flex; justify-content: space-between; align-items: center;">
-								<span class="sidebar-label">LINKED BY</span>
-							</div>
-							<div class="sidebar-value" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
-								${this._renderTicketChipsHtml(data.linkedBy, allTickets)}
-							</div>
-						</div>
-
-						<!-- Ownership & Dates -->
-						<div class="sidebar-row">
-							<span class="sidebar-label">CREATED BY</span>
-							<span class="sidebar-value">${data.createdBy}</span>
-						</div>
-
-						<div class="sidebar-row">
-							<span class="sidebar-label">OWNER ACCOUNT</span>
-							<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.ownerAccount || 'unauthenticated'}</span>
-						</div>
-
-						<div class="sidebar-row">
-							<span class="sidebar-label">CREATED AT</span>
-							<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.createdAt}</span>
-						</div>
-
-						<div class="sidebar-row" style="border-bottom: none; margin-bottom: 0;">
-							<span class="sidebar-label">LAST UPDATED AT</span>
-							<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
+						<div id="work-logs-container">
+							${workLogHtml}
 						</div>
 					</div>
 				</div>
 
-				<script>
-					const vscode = (typeof acquireVsCodeApi === 'function') ? acquireVsCodeApi() : (window.vscode || null);
+				<!-- Right Column: Sidebar (Attributes / Information) -->
+				<div class="sidebar">
+					<div class="sidebar-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
+						<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
+						<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" data-ai-field-type="attributes" data-ai-field-label="Attributes" title="Edit Attributes with AI">
+							<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+						</button>
+					</div>
+					
+					<!-- Status -->
+					<div class="sidebar-row">
+						<div style="display: flex; justify-content: space-between; align-items: center;">
+							<span class="sidebar-label">STATUS</span>
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" title="Edit Status with AI">
+								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+							</button>
+						</div>
+						<div style="padding: 2px 0;">
+							<span id="status-view-val" style="display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px;">${status}</span>
+						</div>
+					</div>
 
-					// Global Click Delegation for Edit with AI buttons
-					document.addEventListener('click', function(e) {
-						var target = e.target;
-						var btn = (target && target.closest) ? target.closest('.ai-edit-btn') : null;
-						if (btn) {
-							e.preventDefault();
-							e.stopPropagation();
-							var field = btn.getAttribute('data-ai-field') || '/Description';
-							var fieldType = btn.getAttribute('data-ai-field-type') || 'text';
-							var label = btn.getAttribute('data-ai-field-label') || '';
-							var currentValue = btn.getAttribute('data-ai-current-value') || '';
-							var optionsRaw = btn.getAttribute('data-ai-options') || '';
-							var options = [];
-							if (optionsRaw) {
-								try { options = JSON.parse(optionsRaw); } catch(e) {}
-							}
-							if (vscode) {
-								vscode.postMessage({
-									type: 'openAgentCentral',
-									field: field,
-									fieldType: fieldType,
-									label: label,
-									currentValue: currentValue,
-									options: options,
-									source: field
-								});
-							}
-						}
-					});
+					<!-- Priority -->
+					<div class="sidebar-row">
+						<div style="display: flex; justify-content: space-between; align-items: center;">
+							<span class="sidebar-label">PRIORITY</span>
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Priority" data-ai-field-type="priority" data-ai-field-label="Priority" data-ai-current-value="${this._escapeHtmlAttr(data.priority)}" title="Edit Priority with AI">
+								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+							</button>
+						</div>
+						<div style="display: flex; align-items: center; gap: 6px; padding: 2px 0;">
+							<span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;"></span>
+							<span class="meta-view-val" style="font-size: 0.9em; font-weight: 700; color: ${pColor};">${data.priority}</span>
+						</div>
+					</div>
 
-					let currentMetadata = ${JSON.stringify(data.metadata)};
-					let currentCustomMetadata = ${JSON.stringify(data.customMetadata)};
+					<!-- Current AI Agent -->
+					<div class="sidebar-row">
+						<div style="display: flex; justify-content: space-between; align-items: center;">
+							<span class="sidebar-label">CURRENT AI AGENT</span>
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Current AI Agent" data-ai-field-type="agent" data-ai-field-label="Current AI Agent" data-ai-current-value="${this._escapeHtmlAttr(data.assignedAgentName || '')}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(agents.map(a => ({ id: a.id, name: a.name }))))}" title="Edit Current AI Agent with AI">
+								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+							</button>
+						</div>
+						<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
+					</div>
 
-					// 1. Description & Title Edit
-					function startEditDesc() {
-						document.getElementById('desc-view-mode').style.display = 'none';
-						document.getElementById('desc-edit-mode').style.display = 'block';
-						document.getElementById('edit-desc-btn').style.display = 'none';
-						const textarea = document.getElementById('desc-textarea');
-						if (textarea) textarea.focus();
-					}
+					<!-- Type Definition -->
+					<div class="sidebar-row">
+						<span class="sidebar-label">TYPE DEFINITION</span>
+						<span class="sidebar-value" style="font-family: monospace; font-size: 0.85em; opacity: 0.9;">${data.typeDefinition}</span>
+					</div>
 
-					function cancelEditDesc() {
-						document.getElementById('desc-view-mode').style.display = 'block';
-						document.getElementById('desc-edit-mode').style.display = 'none';
-						document.getElementById('edit-desc-btn').style.display = 'inline-block';
-					}
+					<!-- Workspace ID & Ticket ID -->
+					<div class="sidebar-row">
+						<span class="sidebar-label">WORKSPACE ID</span>
+						<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em;">${data.workspaceId || 'None'}</span>
+					</div>
 
-					function saveAllChanges(btnId) {
-						const btn = btnId ? document.getElementById(btnId) : null;
-						if (btn) {
-							btn.disabled = true;
-							btn.innerText = 'Saving...';
-							setTimeout(() => {
-								if (btn) {
-									btn.disabled = false;
-									btn.innerText = (btnId === 'save-metadata-btn') ? 'Save Attributes' : 'Save Changes';
-								}
-							}, 1500);
-						}
+					<div class="sidebar-row">
+						<span class="sidebar-label">TICKET ID</span>
+						<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em; color: #38bdf8;">${data.ticketId}</span>
+					</div>
 
-						const titleEl = document.getElementById('title-input');
-						const descEl = document.getElementById('desc-textarea');
-						const newTitle = titleEl ? titleEl.value.trim() : undefined;
-						const newDesc = descEl ? descEl.value.trim() : undefined;
+					<div class="sidebar-row">
+						<span class="sidebar-label">TICKET CODE</span>
+						<span class="sidebar-value" style="font-family: monospace; font-size: 0.88em;">${data.ticketCode || 'None'}</span>
+					</div>
 
-						const statusSelect = document.getElementById('status-select');
-						if (statusSelect) {
-							currentMetadata['Status'] = statusSelect.value;
-						}
-						
-						const inputs = document.querySelectorAll('.meta-input');
-						inputs.forEach(input => {
-							const key = input.getAttribute('data-key');
-							if (key) {
-								currentMetadata[key] = input.value;
-							}
-						});
+					<!-- Link To & Linked By -->
+					<div class="sidebar-row">
+						<div style="display: flex; justify-content: space-between; align-items: center;">
+							<span class="sidebar-label">LINK TO</span>
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Link To" data-ai-field-type="link_to" data-ai-field-label="Link To" data-ai-current-value="${data.linkTo !== 'None' ? this._escapeHtmlAttr(data.linkTo) : ''}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(allTickets))}" title="Edit Link To with AI">
+								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+							</button>
+						</div>
+						<div class="sidebar-value" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+							${this._renderTicketChipsHtml(data.linkTo, allTickets)}
+						</div>
+					</div>
 
-						const customInputs = document.querySelectorAll('.custom-meta-input');
-						customInputs.forEach(input => {
-							const key = input.getAttribute('data-custom-key');
-							if (key) {
-								currentCustomMetadata[key] = input.value;
-							}
-						});
+					<div class="sidebar-row">
+						<div style="display: flex; justify-content: space-between; align-items: center;">
+							<span class="sidebar-label">LINKED BY</span>
+						</div>
+						<div class="sidebar-value" style="display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;">
+							${this._renderTicketChipsHtml(data.linkedBy, allTickets)}
+						</div>
+					</div>
 
-						vscode.postMessage({
-							type: 'saveAllData',
-							title: newTitle,
-							description: newDesc,
-							metadata: currentMetadata,
-							customMetadata: currentCustomMetadata
-						});
-					}
+					<!-- Ownership & Dates -->
+					<div class="sidebar-row">
+						<span class="sidebar-label">CREATED BY</span>
+						<span class="sidebar-value">${data.createdBy}</span>
+					</div>
 
-					// Shortcut Cmd+S / Ctrl+S
-					window.addEventListener('keydown', (e) => {
-						if ((e.metaKey || e.ctrlKey) && e.key === 's') {
-							e.preventDefault();
-							saveAllChanges('save-desc-btn');
-						}
-					});
+					<div class="sidebar-row">
+						<span class="sidebar-label">OWNER ACCOUNT</span>
+						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.ownerAccount || 'unauthenticated'}</span>
+					</div>
 
-					// 2. Status & Metadata Changes
-					function onStatusChange() {
-						const select = document.getElementById('status-select');
-						const status = select.value.toLowerCase();
-						if (status.includes('progress')) {
-							select.style.background = 'rgba(56, 189, 248, 0.18)';
-							select.style.color = '#38bdf8';
-							select.style.borderColor = 'rgba(56, 189, 248, 0.4)';
-						} else if (status.includes('done') || status.includes('complete')) {
-							select.style.background = 'rgba(52, 211, 153, 0.18)';
-							select.style.color = '#34d399';
-							select.style.borderColor = 'rgba(52, 211, 153, 0.4)';
-						} else if (status.includes('block') || status.includes('fail')) {
-							select.style.background = 'rgba(244, 63, 94, 0.18)';
-							select.style.color = '#f43f5e';
-							select.style.borderColor = 'rgba(244, 63, 94, 0.4)';
-						} else {
-							select.style.background = 'rgba(129, 140, 248, 0.18)';
-							select.style.color = '#818cf8';
-							select.style.borderColor = 'rgba(129, 140, 248, 0.4)';
-						}
-					}
+					<div class="sidebar-row">
+						<span class="sidebar-label">CREATED AT</span>
+						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.createdAt}</span>
+					</div>
 
-					// 3. Work Logs
-					function showAddLogModal() {
-						document.getElementById('add-log-box').style.display = 'block';
-						document.getElementById('log-textarea').focus();
-					}
-
-					function hideAddLogModal() {
-						document.getElementById('add-log-box').style.display = 'none';
-						document.getElementById('log-textarea').value = '';
-					}
-
-					function submitLog() {
-						const val = document.getElementById('log-textarea').value;
-						if (val.trim()) {
-							vscode.postMessage({
-								type: 'addWorkLog',
-								log: val
-							});
-							hideAddLogModal();
-						}
-					}
-
-					// 4. Attachments
-					const dropzone = document.getElementById('attachment-dropzone');
-					window.addEventListener('dragover', (e) => e.preventDefault());
-					window.addEventListener('drop', (e) => e.preventDefault());
-
-					dropzone.addEventListener('dragover', (e) => {
-						e.preventDefault();
-						dropzone.classList.add('dragover');
-					});
-					dropzone.addEventListener('dragleave', () => {
-						dropzone.classList.remove('dragover');
-					});
-					dropzone.addEventListener('drop', (e) => {
-						e.preventDefault();
-						dropzone.classList.remove('dragover');
-						const files = e.dataTransfer.files;
-						if (files && files.length > 0) {
-							uploadFile(files[0]);
-						}
-					});
-
-					function triggerBrowse() {
-						document.getElementById('file-input').click();
-					}
-
-					function handleBrowseUpload(event) {
-						const files = event.target.files;
-						if (files && files.length > 0) {
-							uploadFile(files[0]);
-						}
-					}
-
-					function uploadFile(file) {
-						const reader = new FileReader();
-						reader.onload = function(e) {
-							vscode.postMessage({
-								type: 'uploadAttachment',
-								name: file.name,
-								data: Array.from(new Uint8Array(e.target.result))
-							});
-						};
-						reader.readAsArrayBuffer(file);
-					}
-
-					function downloadFile(name) {
-						vscode.postMessage({
-							type: 'downloadAttachment',
-							name: name
-						});
-					}
-
-					function deleteFile(name) {
-						if (confirm("Are you sure you want to delete attachment '" + name + "'?")) {
-							vscode.postMessage({
-								type: 'deleteAttachment',
-								name: name
-							});
-						}
-					}
-
-					function openTicket(ticketId) {
-						if (vscode && ticketId) {
-							vscode.postMessage({
-								type: 'openTicket',
-								ticketId: ticketId
-							});
-						}
-					}
-
-					// 5. Edit Mode Toggle
-					let isEditMode = ${this._startInEditMode ? 'true' : 'false'};
-					function toggleEditMode() {
-						isEditMode = !isEditMode;
-						const btn = document.getElementById('toggle-edit-mode-btn');
-						if (isEditMode) {
-							btn.innerText = 'Cancel';
-							const statusView = document.getElementById('status-view-val');
-							if (statusView) statusView.style.display = 'none';
-							const statusSelect = document.getElementById('status-select');
-							if (statusSelect) statusSelect.style.display = 'block';
-
-							document.querySelectorAll('.meta-view-val').forEach(el => el.style.display = 'none');
-							document.querySelectorAll('.meta-edit-val').forEach(el => el.style.display = 'block');
-							document.querySelectorAll('.custom-field-view').forEach(el => el.style.display = 'none');
-							document.querySelectorAll('.custom-field-edit').forEach(el => el.style.display = 'block');
-							document.getElementById('save-metadata-btn').style.display = 'block';
-						} else {
-							btn.innerText = 'Edit';
-							const statusView = document.getElementById('status-view-val');
-							if (statusView) statusView.style.display = 'inline-block';
-							const statusSelect = document.getElementById('status-select');
-							if (statusSelect) statusSelect.style.display = 'none';
-
-							document.querySelectorAll('.meta-view-val').forEach(el => el.style.display = 'block');
-							document.querySelectorAll('.meta-edit-val').forEach(el => el.style.display = 'none');
-							document.querySelectorAll('.custom-field-view').forEach(el => el.style.display = 'block');
-							document.querySelectorAll('.custom-field-edit').forEach(el => el.style.display = 'none');
-							document.getElementById('save-metadata-btn').style.display = 'none';
-						}
-					}
-
-					if (isEditMode) {
-						isEditMode = false;
-						toggleEditMode();
-					}
-				</script>
-			</body>
-			</html>
+					<div class="sidebar-row" style="border-bottom: none; margin-bottom: 0;">
+						<span class="sidebar-label">LAST UPDATED AT</span>
+						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
+					</div>
+				</div>
+			</div>
 		`;
 	}
 }
