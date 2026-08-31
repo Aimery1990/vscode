@@ -1463,15 +1463,49 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		// Ticket Statuses Lifecycle Matrix (5 Canonical Categories)
 		const statusCard = append(modalBody, $('.form-group', {
-			style: 'background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;'
+			style: 'background: rgba(255, 255, 255, 0.02); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px;'
 		}));
 
-		const statusHeader = append(statusCard, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
-		append(statusHeader, $('label', { style: 'font-size: 11.5px; font-weight: 600; color: #38bdf8;' }, 'Ticket Statuses Lifecycle (5 Canonical Categories):'));
-		append(statusHeader, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'All custom statuses map to 5 core categories'));
+		let isMatrixExpanded = false;
+
+		const statusHeader = append(statusCard, $('div', {
+			style: 'display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; padding: 2px 0;'
+		}));
+
+		const headerLeft = append(statusHeader, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
+		const chevronIcon = append(headerLeft, $('span', { style: 'font-size: 10px; opacity: 0.6; width: 10px;' }, '▸'));
+		append(headerLeft, $('label', { style: 'font-size: 11.5px; opacity: 0.85; font-weight: 500; cursor: pointer; color: inherit;' }, 'Ticket Statuses Lifecycle (5 Categories):'));
+		const summarySpan = append(headerLeft, $('span', { style: 'font-size: 10px; opacity: 0.45;' }, '(Todo, In Progress, Done, Blocked, Removed)'));
+
+		const toggleBtn = append(statusHeader, $('span', {
+			style: 'font-size: 10px; opacity: 0.65; background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.1); cursor: pointer;'
+		}, 'Customize'));
+
+		const statusBody = append(statusCard, $('div', {
+			style: 'display: none; flex-direction: column; gap: 8px; margin-top: 2px;'
+		}));
+
+		const toggleAccordion = () => {
+			isMatrixExpanded = !isMatrixExpanded;
+			if (isMatrixExpanded) {
+				statusBody.style.display = 'flex';
+				chevronIcon.innerText = '▾';
+				toggleBtn.innerText = 'Collapse';
+				toggleBtn.style.opacity = '0.9';
+			} else {
+				statusBody.style.display = 'none';
+				chevronIcon.innerText = '▸';
+				toggleBtn.innerText = 'Customize';
+				toggleBtn.style.opacity = '0.65';
+			}
+		};
+
+		statusHeader.onclick = () => {
+			toggleAccordion();
+		};
 
 		// Presets Row
-		const presetsRow = append(statusCard, $('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;' }));
+		const presetsRow = append(statusBody, $('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;' }));
 		append(presetsRow, $('span', { style: 'font-size: 10.5px; opacity: 0.75; font-weight: 500;' }, 'Preset:'));
 
 		type CategoryMap = { [cat in CanonicalStatusCategory]: string[] };
@@ -1518,7 +1552,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		const categoriesList: CanonicalStatusCategory[] = ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'];
 
-		const matrixContainer = append(statusCard, $('.category-matrix-container', {
+		const updateSummaryText = () => {
+			const allSt: string[] = [];
+			for (const cat of categoriesList) {
+				allSt.push(...currentCategoryMap[cat]);
+			}
+			summarySpan.innerText = `(${allSt.join(', ')})`;
+		};
+
+		const matrixContainer = append(statusBody, $('.category-matrix-container', {
 			style: 'display: flex; flex-direction: column; gap: 5px;'
 		}));
 
@@ -1527,10 +1569,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 			for (const cat of categoriesList) {
 				const color = categoryColors[cat];
 				const catRow = append(matrixContainer, $('.category-row', {
-					style: `background: rgba(0,0,0,0.18); border: 1px solid ${color.border}; border-radius: 5px; padding: 4px 8px; display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;`
+					style: `background: rgba(0,0,0,0.18); border: 1px solid ${color.border}; border-radius: 5px; padding: 4px 8px; display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 10px;`
 				}));
 
-				// Left group: Category badge + chips + inline add
+				// Left group: Category badge + chips
 				const leftGroup = append(catRow, $('div', {
 					style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0;'
 				}));
@@ -1555,14 +1597,17 @@ export class MainWorkspaceViewPane extends ViewPane {
 						removeChipBtn.onclick = () => {
 							currentCategoryMap[cat].splice(idx, 1);
 							renderMatrix();
+							updateSummaryText();
 						};
 					}
 				}
 
-				// Inline Add Status Input
-				const addForm = append(leftGroup, $('div', { style: 'display: inline-flex; align-items: center; gap: 3px;' }));
+				// Right aligned Inline Add Status Input Form
+				const addForm = append(catRow, $('div', {
+					style: 'display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; margin-left: auto;'
+				}));
 				const addInput = append(addForm, $('input.monaco-inputbox', {
-					placeholder: `+ Add ${cat}...`,
+					placeholder: `+ Add status...`,
 					style: 'padding: 1.5px 5px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit; width: 105px; height: 20px; box-sizing: border-box;'
 				})) as HTMLInputElement;
 
@@ -1571,6 +1616,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					if (val && !currentCategoryMap[cat].includes(val)) {
 						currentCategoryMap[cat].push(val);
 						renderMatrix();
+						updateSummaryText();
 					}
 				};
 
@@ -1589,11 +1635,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 					e.preventDefault();
 					doAdd();
 				};
-
-				// Right status count
-				append(catRow, $('span', {
-					style: 'font-size: 9.5px; opacity: 0.45; white-space: nowrap; flex-shrink: 0;'
-				}, `${currentCategoryMap[cat].length} status${currentCategoryMap[cat].length > 1 ? 'es' : ''}`));
 			}
 		};
 
@@ -1608,6 +1649,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				e.preventDefault();
 				currentCategoryMap = JSON.parse(JSON.stringify(pMap));
 				renderMatrix();
+				updateSummaryText();
 			};
 		}
 
