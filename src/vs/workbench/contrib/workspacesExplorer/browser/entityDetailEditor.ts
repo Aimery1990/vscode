@@ -24,7 +24,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { dirname } from '../../../../base/common/resources.js';
 import { IAgentsManagerService, IAgentItem } from '../../agentsManager/common/agentsManager.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
-import { IWorkspacesExplorerService } from '../common/workspacesExplorer.js';
+import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 
@@ -116,9 +116,26 @@ export class EntityDetailEditor extends EditorPane {
 	private _readmeUri: URI | undefined;
 	private _workLogUri: URI | undefined;
 	private _lastParsedData: IParsedTicketData | undefined;
-	private _workspaceStatuses: { statuses: string[]; removedStatus: string } = {
+	private _workspaceStatuses: IWorkspaceStatusesInfo = {
 		statuses: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'],
-		removedStatus: 'Removed'
+		mapping: {
+			'Todo': 'Todo',
+			'In Progress': 'In Progress',
+			'Done': 'Done',
+			'Blocked': 'Blocked',
+			'Removed': 'Removed'
+		},
+		removedStatus: 'Removed',
+		initialStatus: 'Todo',
+		getCategory: (st?: string) => {
+			if (!st) return 'Todo';
+			const lower = st.toLowerCase();
+			if (lower.includes('progress') || lower.includes('dev') || lower.includes('doing') || lower.includes('test') || lower.includes('review') || lower.includes('deploy')) return 'In Progress';
+			if (lower.includes('done') || lower.includes('finish') || lower.includes('complete') || lower.includes('release')) return 'Done';
+			if (lower.includes('block') || lower.includes('fail') || lower.includes('hold')) return 'Blocked';
+			if (lower.includes('remove') || lower.includes('cancel') || lower.includes('archive')) return 'Removed';
+			return 'Todo';
+		}
 	};
 
 	constructor(
@@ -1716,25 +1733,21 @@ export class EntityDetailEditor extends EditorPane {
 		let statusBg = 'rgba(129, 140, 248, 0.16)';
 		let statusBorder = 'rgba(129, 140, 248, 0.35)';
 
-		const isRemovedStatus = status.toLowerCase() === this._workspaceStatuses.removedStatus.toLowerCase() ||
-			status.toLowerCase().includes('remove') ||
-			status.toLowerCase().includes('cancel') ||
-			status.toLowerCase().includes('archive') ||
-			status.toLowerCase().includes('discard');
+		const statusCategory = this._workspaceStatuses.getCategory(status);
 
-		if (status.toLowerCase().includes('progress') || status.toLowerCase().includes('doing') || status.toLowerCase().includes('dev')) {
+		if (statusCategory === 'In Progress') {
 			statusColor = '#38bdf8';
 			statusBg = 'rgba(56, 189, 248, 0.16)';
 			statusBorder = 'rgba(56, 189, 248, 0.35)';
-		} else if (status.toLowerCase().includes('done') || status.toLowerCase().includes('complete') || status.toLowerCase().includes('finish') || status.toLowerCase().includes('release')) {
+		} else if (statusCategory === 'Done') {
 			statusColor = '#34d399';
 			statusBg = 'rgba(52, 211, 153, 0.16)';
 			statusBorder = 'rgba(52, 211, 153, 0.35)';
-		} else if (status.toLowerCase().includes('block') || status.toLowerCase().includes('fail') || status.toLowerCase().includes('issue') || status.toLowerCase().includes('reject')) {
+		} else if (statusCategory === 'Blocked') {
 			statusColor = '#f87171';
 			statusBg = 'rgba(248, 113, 113, 0.16)';
 			statusBorder = 'rgba(248, 113, 113, 0.35)';
-		} else if (isRemovedStatus) {
+		} else if (statusCategory === 'Removed') {
 			statusColor = '#94a3b8';
 			statusBg = 'rgba(148, 163, 184, 0.16)';
 			statusBorder = 'rgba(148, 163, 184, 0.35)';

@@ -29,7 +29,7 @@ import { isMacintosh } from '../../../../base/common/platform.js';
 import { Action } from '../../../../base/common/actions.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IWorkspacesExplorerService, IWorkspaceItem } from '../common/workspacesExplorer.js';
+import { IWorkspacesExplorerService, IWorkspaceItem, CanonicalStatusCategory } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IAgentsManagerService, IAgentCredentialService, IAgentCredential } from '../../agentsManager/common/agentsManager.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
@@ -1461,82 +1461,168 @@ export class MainWorkspaceViewPane extends ViewPane {
 		})) as HTMLTextAreaElement;
 		descInput.placeholder = 'Brief purpose or detailed description of this workspace...';
 
-		// Ticket Statuses Lifecycle (Workspace Scoped)
+		// Ticket Statuses Lifecycle Matrix (5 Canonical Categories)
 		const statusCard = append(modalBody, $('.form-group', {
-			style: 'background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;'
+			style: 'background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 12px;'
 		}));
 
 		const statusHeader = append(statusCard, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
-		append(statusHeader, $('label', { style: 'font-size: 12px; font-weight: 600; color: #38bdf8;' }, 'Ticket Statuses Lifecycle (Workspace Scoped):'));
-		append(statusHeader, $('span', { style: 'font-size: 10.5px; opacity: 0.6;' }, 'Applies to all sub-tickets'));
+		append(statusHeader, $('label', { style: 'font-size: 12px; font-weight: 600; color: #38bdf8;' }, 'Ticket Statuses Lifecycle (5 Canonical Categories):'));
+		append(statusHeader, $('span', { style: 'font-size: 10.5px; opacity: 0.6;' }, 'All custom statuses map to 5 core categories'));
 
 		// Presets Row
 		const presetsRow = append(statusCard, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
 		append(presetsRow, $('span', { style: 'font-size: 11px; opacity: 0.75; font-weight: 500;' }, 'Preset:'));
 
-		const statusPresets = [
-			{ name: 'Default', statuses: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'], removed: 'Removed' },
-			{ name: 'Agile / Scrum', statuses: ['Backlog', 'Ready', 'In Progress', 'In Review', 'Done', 'Canceled'], removed: 'Canceled' },
-			{ name: 'Kanban', statuses: ['To Do', 'Doing', 'Blocked', 'Done', 'Archived'], removed: 'Archived' }
-		];
+		type CategoryMap = { [cat in CanonicalStatusCategory]: string[] };
 
-		let currentCustomStatuses = ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'];
-		let currentRemovedStatus = 'Removed';
+		const defaultPresets: { [name: string]: CategoryMap } = {
+			'Default': {
+				'Todo': ['Todo'],
+				'In Progress': ['In Progress'],
+				'Done': ['Done'],
+				'Blocked': ['Blocked'],
+				'Removed': ['Removed']
+			},
+			'Agile / Scrum': {
+				'Todo': ['Backlog', 'Ready'],
+				'In Progress': ['Developing', 'Testing', 'Reviewing', 'Deploying'],
+				'Done': ['Done', 'Released'],
+				'Blocked': ['Blocked', 'On Hold'],
+				'Removed': ['Canceled']
+			},
+			'Kanban': {
+				'Todo': ['To Do'],
+				'In Progress': ['Doing'],
+				'Done': ['Done'],
+				'Blocked': ['Blocked'],
+				'Removed': ['Archived']
+			}
+		};
 
-		// Status Progression Input
-		const statusesInputRow = append(statusCard, $('.form-group'));
-		append(statusesInputRow, $('label', { style: 'display: block; font-size: 11px; opacity: 0.8; margin-bottom: 4px;' }, 'Status Progression (Comma-separated):'));
-		const statusesInput = append(statusesInputRow, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
-		})) as HTMLInputElement;
-		statusesInput.value = currentCustomStatuses.join(', ');
+		let currentCategoryMap: CategoryMap = {
+			'Todo': ['Todo'],
+			'In Progress': ['In Progress'],
+			'Done': ['Done'],
+			'Blocked': ['Blocked'],
+			'Removed': ['Removed']
+		};
 
-		// Designated Removed Status Dropdown
-		const removedStatusRow = append(statusCard, $('.form-group'));
-		append(removedStatusRow, $('label', { style: 'display: block; font-size: 11px; opacity: 0.8; margin-bottom: 4px;' }, 'Designated Removed / Termination Status:'));
-		const removedStatusSelect = append(removedStatusRow, $('select.monaco-select-box', {
-			style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; cursor: pointer;'
-		})) as HTMLSelectElement;
+		const categoryColors: { [cat in CanonicalStatusCategory]: { text: string; bg: string; border: string } } = {
+			'Todo': { text: '#818cf8', bg: 'rgba(129, 140, 248, 0.16)', border: 'rgba(129, 140, 248, 0.35)' },
+			'In Progress': { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.16)', border: 'rgba(56, 189, 248, 0.35)' },
+			'Done': { text: '#34d399', bg: 'rgba(52, 211, 153, 0.16)', border: 'rgba(52, 211, 153, 0.35)' },
+			'Blocked': { text: '#f87171', bg: 'rgba(248, 113, 113, 0.16)', border: 'rgba(248, 113, 113, 0.35)' },
+			'Removed': { text: '#94a3b8', bg: 'rgba(148, 163, 184, 0.16)', border: 'rgba(148, 163, 184, 0.35)' }
+		};
 
-		const updateRemovedOptions = () => {
-			const list = statusesInput.value.split(/[,，;\n]+/).map(s => s.trim()).filter(Boolean);
-			currentCustomStatuses = list.length > 0 ? list : ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'];
-			clearNode(removedStatusSelect);
-			for (const st of currentCustomStatuses) {
-				const opt = append(removedStatusSelect, $('option', { value: st }, st)) as HTMLOptionElement;
-				if (st.toLowerCase() === currentRemovedStatus.toLowerCase()) {
-					opt.selected = true;
+		const categoriesList: CanonicalStatusCategory[] = ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'];
+
+		const matrixContainer = append(statusCard, $('.category-matrix-container', {
+			style: 'display: flex; flex-direction: column; gap: 8px;'
+		}));
+
+		const renderMatrix = () => {
+			clearNode(matrixContainer);
+			for (const cat of categoriesList) {
+				const color = categoryColors[cat];
+				const catRow = append(matrixContainer, $('.category-row', {
+					style: `background: rgba(0,0,0,0.2); border: 1px solid ${color.border}; border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px;`
+				}));
+
+				const catHeader = append(catRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+				append(catHeader, $('span', {
+					style: `font-size: 10px; font-weight: 700; color: ${color.text}; background: ${color.bg}; border: 1px solid ${color.border}; padding: 2px 7px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px;`
+				}, cat));
+
+				append(catHeader, $('span', { style: 'font-size: 10px; opacity: 0.5;' }, `${currentCategoryMap[cat].length} status${currentCategoryMap[cat].length > 1 ? 'es' : ''}`));
+
+				// Chips container
+				const chipsRow = append(catRow, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 6px; align-items: center;' }));
+
+				for (let idx = 0; idx < currentCategoryMap[cat].length; idx++) {
+					const stName = currentCategoryMap[cat][idx];
+					const chip = append(chipsRow, $('.status-chip', {
+						style: `display: inline-flex; align-items: center; gap: 5px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); padding: 3px 8px; border-radius: 4px; font-size: 11px; color: ${color.text}; font-weight: 500;`
+					}));
+					append(chip, $('span', {}, stName));
+					if (currentCategoryMap[cat].length > 1 || cat !== 'Removed') {
+						const removeChipBtn = append(chip, $('span', {
+							style: 'cursor: pointer; opacity: 0.6; font-size: 10px; margin-left: 2px;',
+							title: 'Remove status'
+						}, '✕'));
+						removeChipBtn.onclick = () => {
+							currentCategoryMap[cat].splice(idx, 1);
+							renderMatrix();
+						};
+					}
 				}
+
+				// Inline Add Status Input
+				const addForm = append(chipsRow, $('div', { style: 'display: inline-flex; align-items: center; gap: 4px;' }));
+				const addInput = append(addForm, $('input.monaco-inputbox', {
+					placeholder: `+ Add ${cat} status...`,
+					style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.3); color: inherit; width: 130px;'
+				})) as HTMLInputElement;
+
+				const doAdd = () => {
+					const val = addInput.value.trim();
+					if (val && !currentCategoryMap[cat].includes(val)) {
+						currentCategoryMap[cat].push(val);
+						renderMatrix();
+					}
+				};
+
+				addInput.onkeydown = (e) => {
+					if (e.key === 'Enter') {
+						e.preventDefault();
+						doAdd();
+					}
+				};
+
+				const addBtn = append(addForm, $('button.monaco-button', {
+					style: 'padding: 2px 6px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit;'
+				}));
+				addBtn.innerText = 'Add';
+				addBtn.onclick = (e) => {
+					e.preventDefault();
+					doAdd();
+				};
 			}
-			if (!currentCustomStatuses.some(s => s.toLowerCase() === currentRemovedStatus.toLowerCase())) {
-				currentRemovedStatus = currentCustomStatuses.find(s => /remove|cancel|archive|discard|delete/i.test(s)) || currentCustomStatuses[currentCustomStatuses.length - 1];
-				removedStatusSelect.value = currentRemovedStatus;
-			}
 		};
 
-		updateRemovedOptions();
+		renderMatrix();
 
-		statusesInput.oninput = () => {
-			updateRemovedOptions();
-		};
-
-		removedStatusSelect.onchange = () => {
-			currentRemovedStatus = removedStatusSelect.value;
-		};
-
-		for (const pr of statusPresets) {
+		for (const [pName, pMap] of Object.entries(defaultPresets)) {
 			const prBtn = append(presetsRow, $('button.monaco-button', {
 				style: 'padding: 3px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: inherit;'
 			}));
-			prBtn.innerText = pr.name;
+			prBtn.innerText = pName;
 			prBtn.onclick = (e) => {
 				e.preventDefault();
-				currentCustomStatuses = [...pr.statuses];
-				currentRemovedStatus = pr.removed;
-				statusesInput.value = currentCustomStatuses.join(', ');
-				updateRemovedOptions();
+				currentCategoryMap = JSON.parse(JSON.stringify(pMap));
+				renderMatrix();
 			};
 		}
+
+		const getCustomStatusesConfig = () => {
+			const customStatuses: string[] = [];
+			const statusMapping: { [st: string]: CanonicalStatusCategory } = {};
+
+			for (const cat of categoriesList) {
+				for (const st of currentCategoryMap[cat]) {
+					if (!customStatuses.includes(st)) {
+						customStatuses.push(st);
+					}
+					statusMapping[st] = cat;
+				}
+			}
+
+			const initialStatus = currentCategoryMap['Todo'][0] || customStatuses[0] || 'Todo';
+			const removedStatus = currentCategoryMap['Removed'][0] || 'Removed';
+
+			return { customStatuses, statusMapping, initialStatus, removedStatus };
+		};
 
 		// Priority Selection Box (5 Levels Flat Grid with Color Dots)
 		const priorityBox = append(modalBody, $('.form-group'));
@@ -1908,6 +1994,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const assignedAgentId = agentSelect.value || undefined;
 				const matchingAgent = availableAgents.find(a => a.id === assignedAgentId);
 
+				const statusConfig = getCustomStatusesConfig();
+
 				const res = await this.workspacesExplorerService.createWorkspace({
 					name,
 					title: titleInput.value.trim() || name,
@@ -1916,9 +2004,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 					description: descInput.value.trim(),
 					code: wsCode,
 					type: 'workspace',
-					status: currentCustomStatuses[0] || 'Todo',
-					customStatuses: currentCustomStatuses,
-					removedStatus: currentRemovedStatus,
+					status: statusConfig.initialStatus,
+					customStatuses: statusConfig.customStatuses,
+					statusMapping: statusConfig.statusMapping,
+					removedStatus: statusConfig.removedStatus,
 					priority: selectedPriority,
 					assignedAgentId: assignedAgentId,
 					assignedAgentName: matchingAgent ? matchingAgent.name : undefined,

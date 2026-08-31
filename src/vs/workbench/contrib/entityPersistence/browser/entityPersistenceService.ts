@@ -327,10 +327,12 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		mainMdContent += `- **Owner Account**: ${ownerAccount}\n`;
 		mainMdContent += `- **Created At**: ${dateTimeFormatted}\n`;
 		mainMdContent += `- **Ticket Code**: ${snapshot.entityCode || 'None'}\n`;
-		if (type === 'workspace' || (snapshot.customMetadata && (snapshot.customMetadata['Ticket Statuses'] || snapshot.customMetadata['Removed Status']))) {
+		if (type === 'workspace' || (snapshot.customMetadata && (snapshot.customMetadata['Ticket Statuses'] || snapshot.customMetadata['Removed Status'] || snapshot.customMetadata['Status Mapping']))) {
 			const statusesVal = (snapshot.customMetadata && snapshot.customMetadata['Ticket Statuses']) || 'Todo, In Progress, Done, Blocked, Removed';
 			const removedVal = (snapshot.customMetadata && snapshot.customMetadata['Removed Status']) || 'Removed';
+			const mappingVal = (snapshot.customMetadata && snapshot.customMetadata['Status Mapping']) || '{"Todo":"Todo","In Progress":"In Progress","Done":"Done","Blocked":"Blocked","Removed":"Removed"}';
 			mainMdContent += `- **Ticket Statuses**: ${statusesVal}\n`;
+			mainMdContent += `- **Status Mapping**: ${mappingVal}\n`;
 			mainMdContent += `- **Removed Status**: ${removedVal}\n`;
 		}
 		mainMdContent += `- **Last Updated At**: ${dateTimeFormatted}\n`;

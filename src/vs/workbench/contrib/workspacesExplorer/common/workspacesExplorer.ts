@@ -71,7 +71,18 @@ export interface ICreateResourceOptions {
 	ticketPrompt?: string;
 	customMetadata?: { [key: string]: string };
 	customStatuses?: string[];
+	statusMapping?: { [statusName: string]: CanonicalStatusCategory };
 	removedStatus?: string;
+}
+
+export type CanonicalStatusCategory = 'Todo' | 'In Progress' | 'Done' | 'Blocked' | 'Removed';
+
+export interface IWorkspaceStatusesInfo {
+	statuses: string[];
+	mapping: { [statusName: string]: CanonicalStatusCategory };
+	removedStatus: string;
+	initialStatus: string;
+	getCategory(statusName?: string): CanonicalStatusCategory;
 }
 
 export interface ICreateResourceResult {
@@ -135,7 +146,7 @@ export interface IWorkspacesExplorerService {
 	detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType>;
 	detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined>;
 	setEntityStatus(entityUri: URI, status: string): Promise<void>;
-	getWorkspaceStatuses(targetUri: URI): Promise<{ statuses: string[]; removedStatus: string }>;
+	getWorkspaceStatuses(targetUri: URI): Promise<IWorkspaceStatusesInfo>;
 	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult>;
 	createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult>;
 	createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult>;

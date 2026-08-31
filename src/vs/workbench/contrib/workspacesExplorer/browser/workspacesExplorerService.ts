@@ -5,7 +5,7 @@
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot } from '../common/workspacesExplorer.js';
+import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot, CanonicalStatusCategory, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IWorkspacesService, isRecentFolder, isRecentWorkspace } from '../../../../platform/workspaces/common/workspaces.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -462,6 +462,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		if (options.customStatuses && options.customStatuses.length > 0) {
 			customMetadata['Ticket Statuses'] = options.customStatuses.join(', ');
 		}
+		if (options.statusMapping && Object.keys(options.statusMapping).length > 0) {
+			customMetadata['Status Mapping'] = JSON.stringify(options.statusMapping);
+		}
 		if (options.removedStatus) {
 			customMetadata['Removed Status'] = options.removedStatus;
 		}
@@ -533,6 +536,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					const childStatus = await this.detectCustomEntityStatusFromDisk(childUri);
 
 					const isRemoved = childStatus && (
+						wsStatuses.getCategory(childStatus) === 'Removed' ||
 						childStatus.toLowerCase() === wsStatuses.removedStatus.toLowerCase() ||
 						childStatus.toLowerCase() === 'removed' ||
 						childStatus.toLowerCase() === 'canceled' ||
@@ -569,10 +573,53 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		}
 	}
 
-	public async getWorkspaceStatuses(targetUri: URI): Promise<{ statuses: string[]; removedStatus: string }> {
-		const defaultResult = {
-			statuses: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'],
-			removedStatus: 'Removed'
+	public async getWorkspaceStatuses(targetUri: URI): Promise<IWorkspaceStatusesInfo> {
+		const inferCategory = (name: string): CanonicalStatusCategory => {
+			const lower = name.toLowerCase();
+			if (lower.includes('progress') || lower.includes('dev') || lower.includes('doing') || lower.includes('test') || lower.includes('review') || lower.includes('deploy') || lower.includes('working') || lower.includes('wip')) {
+				return 'In Progress';
+			}
+			if (lower.includes('done') || lower.includes('finish') || lower.includes('complete') || lower.includes('release') || lower.includes('close') || lower.includes('merged')) {
+				return 'Done';
+			}
+			if (lower.includes('block') || lower.includes('fail') || lower.includes('hold') || lower.includes('pause') || lower.includes('wait') || lower.includes('reject') || lower.includes('issue')) {
+				return 'Blocked';
+			}
+			if (lower.includes('remove') || lower.includes('cancel') || lower.includes('archive') || lower.includes('discard') || lower.includes('delete') || lower.includes('trash')) {
+				return 'Removed';
+			}
+			return 'Todo';
+		};
+
+		const buildInfo = (statuses: string[], mapping: { [key: string]: CanonicalStatusCategory }, removedStatus?: string): IWorkspaceStatusesInfo => {
+			const safeStatuses = statuses.length > 0 ? statuses : ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'];
+			const safeMapping: { [key: string]: CanonicalStatusCategory } = { ...mapping };
+			for (const st of safeStatuses) {
+				if (!safeMapping[st]) {
+					safeMapping[st] = inferCategory(st);
+				}
+			}
+
+			let rem = removedStatus;
+			if (!rem || !safeStatuses.some(s => s.toLowerCase() === rem!.toLowerCase())) {
+				rem = safeStatuses.find(s => safeMapping[s] === 'Removed') || safeStatuses.find(s => /remove|cancel|archive|discard/i.test(s)) || safeStatuses[safeStatuses.length - 1];
+			}
+
+			const initial = safeStatuses.find(s => safeMapping[s] === 'Todo') || safeStatuses[0] || 'Todo';
+
+			return {
+				statuses: safeStatuses,
+				mapping: safeMapping,
+				removedStatus: rem || 'Removed',
+				initialStatus: initial,
+				getCategory: (statusName?: string): CanonicalStatusCategory => {
+					if (!statusName) return 'Todo';
+					if (safeMapping[statusName]) return safeMapping[statusName];
+					const matchedKey = Object.keys(safeMapping).find(k => k.toLowerCase() === statusName.toLowerCase());
+					if (matchedKey) return safeMapping[matchedKey];
+					return inferCategory(statusName);
+				}
+			};
 		};
 
 		try {
@@ -589,16 +636,28 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					if (await this.fileService.exists(uri)) {
 						const content = (await this.fileService.readFile(uri)).value.toString();
 						const statusesMatch = content.match(/-\s+\*\*Ticket\s+Statuses\*\*:\s*([^\r\n]+)/i);
+						const mappingMatch = content.match(/-\s+\*\*Status\s+Mapping\*\*:\s*([^\r\n]+)/i);
 						const removedMatch = content.match(/-\s+\*\*Removed\s+Status\*\*:\s*([^\r\n]+)/i);
+
+						let parsedStatuses: string[] = [];
 						if (statusesMatch && statusesMatch[1]) {
-							const list = statusesMatch[1].split(/[,，;\n]+/).map(s => s.trim()).filter(Boolean);
-							if (list.length > 0) {
-								let rem = removedMatch && removedMatch[1] ? removedMatch[1].trim() : '';
-								if (!rem || !list.some(s => s.toLowerCase() === rem.toLowerCase())) {
-									rem = list.find(s => /remove|cancel|archive|discard|delete/i.test(s)) || list[list.length - 1];
-								}
-								return { statuses: list, removedStatus: rem };
+							parsedStatuses = statusesMatch[1].split(/[,，;\n]+/).map(s => s.trim()).filter(Boolean);
+						}
+
+						let parsedMapping: { [key: string]: CanonicalStatusCategory } = {};
+						if (mappingMatch && mappingMatch[1]) {
+							try {
+								parsedMapping = JSON.parse(mappingMatch[1].trim());
+							} catch {
+								// ignore json parse error
 							}
+						}
+
+						if (parsedStatuses.length > 0 || Object.keys(parsedMapping).length > 0) {
+							if (parsedStatuses.length === 0) {
+								parsedStatuses = Object.keys(parsedMapping);
+							}
+							return buildInfo(parsedStatuses, parsedMapping, removedMatch?.[1]?.trim());
 						}
 					}
 				}
@@ -607,7 +666,17 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			console.error('Failed to get workspace statuses:', err);
 		}
 
-		return defaultResult;
+		return buildInfo(
+			['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'],
+			{
+				'Todo': 'Todo',
+				'In Progress': 'In Progress',
+				'Done': 'Done',
+				'Blocked': 'Blocked',
+				'Removed': 'Removed'
+			},
+			'Removed'
+		);
 	}
 
 	public async detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined> {
