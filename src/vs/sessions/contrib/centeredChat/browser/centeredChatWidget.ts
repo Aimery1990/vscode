@@ -804,8 +804,12 @@ export class CenteredChatWidget extends Disposable {
 				const select = append(editorBox, $('select.monaco-select-box', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
 				})) as HTMLSelectElement;
-				const statuses = ['Todo', 'In Progress', 'Done', 'Blocked'];
-				statuses.forEach(st => {
+				const statuses = (locator.options && Array.isArray(locator.options) && locator.options.length > 0)
+					? locator.options
+					: ((activeNode && activeNode.options && activeNode.options.length > 0)
+						? activeNode.options
+						: ['Todo', 'In Progress', 'Done', 'Blocked']);
+				statuses.forEach((st: string) => {
 					const opt = append(select, $('option', { value: st }, st)) as HTMLOptionElement;
 					if (st.toLowerCase() === currentVal.toLowerCase()) opt.selected = true;
 				});
@@ -814,8 +818,12 @@ export class CenteredChatWidget extends Disposable {
 				const select = append(editorBox, $('select.monaco-select-box', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
 				})) as HTMLSelectElement;
-				const priorities = ['Low', 'Medium', 'High', 'Urgent'];
-				priorities.forEach(pr => {
+				const priorities = (locator.options && Array.isArray(locator.options) && locator.options.length > 0)
+					? locator.options
+					: ((activeNode && activeNode.options && activeNode.options.length > 0)
+						? activeNode.options
+						: ['Low', 'Medium', 'High', 'Urgent']);
+				priorities.forEach((pr: string) => {
 					const opt = append(select, $('option', { value: pr }, pr)) as HTMLOptionElement;
 					if (pr.toLowerCase() === currentVal.toLowerCase()) opt.selected = true;
 				});
