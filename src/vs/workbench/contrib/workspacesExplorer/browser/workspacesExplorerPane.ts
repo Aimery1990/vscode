@@ -1463,16 +1463,16 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		// Ticket Statuses Lifecycle Matrix (5 Canonical Categories)
 		const statusCard = append(modalBody, $('.form-group', {
-			style: 'background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 12px;'
+			style: 'background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;'
 		}));
 
 		const statusHeader = append(statusCard, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
-		append(statusHeader, $('label', { style: 'font-size: 12px; font-weight: 600; color: #38bdf8;' }, 'Ticket Statuses Lifecycle (5 Canonical Categories):'));
-		append(statusHeader, $('span', { style: 'font-size: 10.5px; opacity: 0.6;' }, 'All custom statuses map to 5 core categories'));
+		append(statusHeader, $('label', { style: 'font-size: 11.5px; font-weight: 600; color: #38bdf8;' }, 'Ticket Statuses Lifecycle (5 Canonical Categories):'));
+		append(statusHeader, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'All custom statuses map to 5 core categories'));
 
 		// Presets Row
-		const presetsRow = append(statusCard, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
-		append(presetsRow, $('span', { style: 'font-size: 11px; opacity: 0.75; font-weight: 500;' }, 'Preset:'));
+		const presetsRow = append(statusCard, $('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;' }));
+		append(presetsRow, $('span', { style: 'font-size: 10.5px; opacity: 0.75; font-weight: 500;' }, 'Preset:'));
 
 		type CategoryMap = { [cat in CanonicalStatusCategory]: string[] };
 
@@ -1509,17 +1509,17 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 
 		const categoryColors: { [cat in CanonicalStatusCategory]: { text: string; bg: string; border: string } } = {
-			'Todo': { text: '#818cf8', bg: 'rgba(129, 140, 248, 0.16)', border: 'rgba(129, 140, 248, 0.35)' },
-			'In Progress': { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.16)', border: 'rgba(56, 189, 248, 0.35)' },
-			'Done': { text: '#34d399', bg: 'rgba(52, 211, 153, 0.16)', border: 'rgba(52, 211, 153, 0.35)' },
-			'Blocked': { text: '#f87171', bg: 'rgba(248, 113, 113, 0.16)', border: 'rgba(248, 113, 113, 0.35)' },
-			'Removed': { text: '#94a3b8', bg: 'rgba(148, 163, 184, 0.16)', border: 'rgba(148, 163, 184, 0.35)' }
+			'Todo': { text: '#818cf8', bg: 'rgba(129, 140, 248, 0.16)', border: 'rgba(129, 140, 248, 0.3)' },
+			'In Progress': { text: '#38bdf8', bg: 'rgba(56, 189, 248, 0.16)', border: 'rgba(56, 189, 248, 0.3)' },
+			'Done': { text: '#34d399', bg: 'rgba(52, 211, 153, 0.16)', border: 'rgba(52, 211, 153, 0.3)' },
+			'Blocked': { text: '#f87171', bg: 'rgba(248, 113, 113, 0.16)', border: 'rgba(248, 113, 113, 0.3)' },
+			'Removed': { text: '#94a3b8', bg: 'rgba(148, 163, 184, 0.16)', border: 'rgba(148, 163, 184, 0.3)' }
 		};
 
 		const categoriesList: CanonicalStatusCategory[] = ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'];
 
 		const matrixContainer = append(statusCard, $('.category-matrix-container', {
-			style: 'display: flex; flex-direction: column; gap: 8px;'
+			style: 'display: flex; flex-direction: column; gap: 5px;'
 		}));
 
 		const renderMatrix = () => {
@@ -1527,28 +1527,29 @@ export class MainWorkspaceViewPane extends ViewPane {
 			for (const cat of categoriesList) {
 				const color = categoryColors[cat];
 				const catRow = append(matrixContainer, $('.category-row', {
-					style: `background: rgba(0,0,0,0.2); border: 1px solid ${color.border}; border-radius: 6px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px;`
+					style: `background: rgba(0,0,0,0.18); border: 1px solid ${color.border}; border-radius: 5px; padding: 4px 8px; display: flex; flex-direction: row; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;`
 				}));
 
-				const catHeader = append(catRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
-				append(catHeader, $('span', {
-					style: `font-size: 10px; font-weight: 700; color: ${color.text}; background: ${color.bg}; border: 1px solid ${color.border}; padding: 2px 7px; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.5px;`
+				// Left group: Category badge + chips + inline add
+				const leftGroup = append(catRow, $('div', {
+					style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: 1; min-width: 0;'
+				}));
+
+				// Category Badge
+				append(leftGroup, $('span', {
+					style: `font-size: 9px; font-weight: 700; color: ${color.text}; background: ${color.bg}; border: 1px solid ${color.border}; padding: 1.5px 6px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.4px; flex-shrink: 0; min-width: 72px; text-align: center;`
 				}, cat));
 
-				append(catHeader, $('span', { style: 'font-size: 10px; opacity: 0.5;' }, `${currentCategoryMap[cat].length} status${currentCategoryMap[cat].length > 1 ? 'es' : ''}`));
-
-				// Chips container
-				const chipsRow = append(catRow, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 6px; align-items: center;' }));
-
+				// Chips
 				for (let idx = 0; idx < currentCategoryMap[cat].length; idx++) {
 					const stName = currentCategoryMap[cat][idx];
-					const chip = append(chipsRow, $('.status-chip', {
-						style: `display: inline-flex; align-items: center; gap: 5px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); padding: 3px 8px; border-radius: 4px; font-size: 11px; color: ${color.text}; font-weight: 500;`
+					const chip = append(leftGroup, $('.status-chip', {
+						style: `display: inline-flex; align-items: center; gap: 4px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12); padding: 1.5px 6px; border-radius: 3px; font-size: 10px; color: ${color.text}; font-weight: 500;`
 					}));
 					append(chip, $('span', {}, stName));
 					if (currentCategoryMap[cat].length > 1 || cat !== 'Removed') {
 						const removeChipBtn = append(chip, $('span', {
-							style: 'cursor: pointer; opacity: 0.6; font-size: 10px; margin-left: 2px;',
+							style: 'cursor: pointer; opacity: 0.55; font-size: 9px; margin-left: 2px; line-height: 1;',
 							title: 'Remove status'
 						}, '✕'));
 						removeChipBtn.onclick = () => {
@@ -1559,10 +1560,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 				}
 
 				// Inline Add Status Input
-				const addForm = append(chipsRow, $('div', { style: 'display: inline-flex; align-items: center; gap: 4px;' }));
+				const addForm = append(leftGroup, $('div', { style: 'display: inline-flex; align-items: center; gap: 3px;' }));
 				const addInput = append(addForm, $('input.monaco-inputbox', {
-					placeholder: `+ Add ${cat} status...`,
-					style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.3); color: inherit; width: 130px;'
+					placeholder: `+ Add ${cat}...`,
+					style: 'padding: 1.5px 5px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit; width: 105px; height: 20px; box-sizing: border-box;'
 				})) as HTMLInputElement;
 
 				const doAdd = () => {
@@ -1581,13 +1582,18 @@ export class MainWorkspaceViewPane extends ViewPane {
 				};
 
 				const addBtn = append(addForm, $('button.monaco-button', {
-					style: 'padding: 2px 6px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit;'
+					style: 'padding: 1px 5px; font-size: 9.5px; border-radius: 3px; cursor: pointer; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15); color: inherit; height: 20px; line-height: 16px;'
 				}));
 				addBtn.innerText = 'Add';
 				addBtn.onclick = (e) => {
 					e.preventDefault();
 					doAdd();
 				};
+
+				// Right status count
+				append(catRow, $('span', {
+					style: 'font-size: 9.5px; opacity: 0.45; white-space: nowrap; flex-shrink: 0;'
+				}, `${currentCategoryMap[cat].length} status${currentCategoryMap[cat].length > 1 ? 'es' : ''}`));
 			}
 		};
 
@@ -1595,7 +1601,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		for (const [pName, pMap] of Object.entries(defaultPresets)) {
 			const prBtn = append(presetsRow, $('button.monaco-button', {
-				style: 'padding: 3px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: inherit;'
+				style: 'padding: 2px 7px; font-size: 10px; border-radius: 3px; cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: inherit;'
 			}));
 			prBtn.innerText = pName;
 			prBtn.onclick = (e) => {
