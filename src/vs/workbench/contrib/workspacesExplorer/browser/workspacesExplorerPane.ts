@@ -1473,7 +1473,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 		}));
 
 		const headerLeft = append(statusHeader, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
-		const chevronIcon = append(headerLeft, $('span', { style: 'font-size: 10px; opacity: 0.6; width: 10px;' }, '▸'));
 		append(headerLeft, $('label', { style: 'font-size: 11.5px; opacity: 0.85; font-weight: 500; cursor: pointer; color: inherit;' }, 'Ticket Statuses Lifecycle (5 Categories):'));
 		const summarySpan = append(headerLeft, $('span', { style: 'font-size: 10px; opacity: 0.45;' }, '(Todo, In Progress, Done, Blocked, Removed)'));
 
@@ -1489,12 +1488,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 			isMatrixExpanded = !isMatrixExpanded;
 			if (isMatrixExpanded) {
 				statusBody.style.display = 'flex';
-				chevronIcon.innerText = '▾';
 				toggleBtn.innerText = 'Collapse';
 				toggleBtn.style.opacity = '0.9';
 			} else {
 				statusBody.style.display = 'none';
-				chevronIcon.innerText = '▸';
 				toggleBtn.innerText = 'Customize';
 				toggleBtn.style.opacity = '0.65';
 			}
