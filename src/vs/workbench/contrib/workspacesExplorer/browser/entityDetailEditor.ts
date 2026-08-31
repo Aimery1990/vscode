@@ -297,44 +297,48 @@ export class EntityDetailEditor extends EditorPane {
 			return;
 		}
 
-		// 1. Resolve 4-MD file paths (robust checking of .agents and root)
-		this._ticketFileUri = await this._resolveFileUri(this._entityUri, 'ticket.md');
-		this._instructionUri = await this._resolveFileUri(this._entityUri, 'instruction.md');
-		this._readmeUri = await this._resolveFileUri(this._entityUri, 'README.md');
-		this._workLogUri = await this._resolveWorkLogUri(this._entityUri);
+		try {
+			// 1. Resolve 4-MD file paths (robust checking of .agents and root)
+			this._ticketFileUri = await this._resolveFileUri(this._entityUri, 'ticket.md');
+			this._instructionUri = await this._resolveFileUri(this._entityUri, 'instruction.md');
+			this._readmeUri = await this._resolveFileUri(this._entityUri, 'README.md');
+			this._workLogUri = await this._resolveWorkLogUri(this._entityUri);
 
-		// 2. Read contents from 4-MD files
-		const ticketContent = await this._safeReadFile(this._ticketFileUri);
-		const readmeContent = await this._safeReadFile(this._readmeUri);
-		const instructionContent = await this._safeReadFile(this._instructionUri);
-		const workLogContent = await this._safeReadFile(this._workLogUri);
+			// 2. Read contents from 4-MD files
+			const ticketContent = await this._safeReadFile(this._ticketFileUri);
+			const readmeContent = await this._safeReadFile(this._readmeUri);
+			const instructionContent = await this._safeReadFile(this._instructionUri);
+			const workLogContent = await this._safeReadFile(this._workLogUri);
 
-		const parsed = this._parseAllEntityData(ticketContent, readmeContent, instructionContent);
-		this._lastParsedData = parsed;
-		this._entityType = parsed.ticketType || 'task';
+			const parsed = this._parseAllEntityData(ticketContent, readmeContent, instructionContent);
+			this._lastParsedData = parsed;
+			this._entityType = parsed.ticketType || 'task';
 
-		const attachments = await this._getAttachments(this._entityUri);
-		const customModule = await this._readCustomModule(this._entityUri, this._entityType);
-		const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
-		const allTickets = await this._loadAllAvailableTickets();
+			const attachments = await this._getAttachments(this._entityUri);
+			const customModule = await this._readCustomModule(this._entityUri, this._entityType);
+			const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
+			const allTickets = await this._loadAllAvailableTickets();
 
-		// 3. Setup Webview cleanly without recreating or dropping listeners
-		if (!this._webview) {
-			this._webview = this._register(this._webviewService.createWebviewElement({
-				title: localize('entityDetail', "Entity Detail"),
-				options: { disableServiceWorker: true },
-				contentOptions: { allowScripts: true },
-				extension: undefined
-			}));
-			this._webview.mountTo(this._container, this.window);
+			// 3. Setup Webview cleanly without recreating or dropping listeners
+			if (!this._webview) {
+				this._webview = this._register(this._webviewService.createWebviewElement({
+					title: localize('entityDetail', "Entity Detail"),
+					options: { disableServiceWorker: true },
+					contentOptions: { allowScripts: true },
+					extension: undefined
+				}));
+				this._webview.mountTo(this._container, this.window);
 
-			this._register(this._webview.onMessage(async (e: any) => {
-				await this._handleMessage(e);
-			}));
+				this._register(this._webview.onMessage(async (e: any) => {
+					await this._handleMessage(e);
+				}));
+			}
+
+			const html = this._generateHtml(parsed, workLogContent, attachments, customModule, agents, allTickets);
+			this._webview.setHtml(html);
+		} catch (err) {
+			console.error('Failed to resolve and render entity detail:', err);
 		}
-
-		const html = this._generateHtml(parsed, workLogContent, attachments, customModule, agents, allTickets);
-		this._webview.setHtml(html);
 	}
 
 	private async _resolveFileUri(baseUri: URI, name: string): Promise<URI> {
@@ -1345,7 +1349,7 @@ export class EntityDetailEditor extends EditorPane {
 		agents: IAgentItem[] = [],
 		allTickets: any[] = []
 	): string {
-		const typeUpper = data.ticketType.toUpperCase();
+		const typeUpper = (data.ticketType || 'task').toUpperCase();
 
 		// 1. Status Colors
 		let status = data.status || 'Todo';
@@ -1371,7 +1375,7 @@ export class EntityDetailEditor extends EditorPane {
 		if (customModule && customModule.color) {
 			colorSetting = { text: customModule.color, bg: hexToRgba(customModule.color, 0.2), border: hexToRgba(customModule.color, 0.35) };
 		} else {
-			colorSetting = this._getTypeColorInfo(data.ticketType);
+			colorSetting = this._getTypeColorInfo(data.ticketType || 'task');
 		}
 
 		// 3. Priority badge
@@ -1382,7 +1386,7 @@ export class EntityDetailEditor extends EditorPane {
 			'low': '#34d399',
 			'very low': '#2dd4bf'
 		};
-		const pColor = pColors[data.priority.toLowerCase()] || '#94a3b8';
+		const pColor = pColors[(data.priority || 'medium').toLowerCase()] || '#94a3b8';
 
 		// 4. Attachments HTML
 		let attachmentsHtml = '';

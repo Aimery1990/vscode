@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { EditorInput } from '../../../common/editor/editorInput.js';
-import { EditorInputCapabilities, IUntypedEditorInput } from '../../../common/editor.js';
+import { IUntypedEditorInput } from '../../../common/editor.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -18,10 +18,6 @@ export class EntityDetailEditorInput extends EditorInput {
 
 	private _resource: URI;
 	private _name: string;
-
-	override get capabilities(): EditorInputCapabilities {
-		return super.capabilities | EditorInputCapabilities.Singleton;
-	}
 
 	constructor(
 		public readonly entityUri: URI,
