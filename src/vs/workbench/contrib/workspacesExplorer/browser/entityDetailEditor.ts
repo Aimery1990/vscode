@@ -28,7 +28,8 @@ import { IWorkspacesExplorerService } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 
-const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value });
+const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
+	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
 
 function getColorForName(name: string | undefined): string {
 	if (!name) return '#38bdf8';
