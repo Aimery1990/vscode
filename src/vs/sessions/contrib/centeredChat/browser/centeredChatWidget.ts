@@ -808,7 +808,7 @@ export class CenteredChatWidget extends Disposable {
 					? locator.options
 					: ((activeNode && activeNode.options && activeNode.options.length > 0)
 						? activeNode.options
-						: ['Todo', 'In Progress', 'Done', 'Blocked']);
+						: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed']);
 				statuses.forEach((st: string) => {
 					const opt = append(select, $('option', { value: st }, st)) as HTMLOptionElement;
 					if (st.toLowerCase() === currentVal.toLowerCase()) opt.selected = true;

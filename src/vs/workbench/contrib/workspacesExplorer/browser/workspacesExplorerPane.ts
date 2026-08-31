@@ -28,7 +28,7 @@ import { dirname } from '../../../../base/common/resources.js';
 import { isMacintosh } from '../../../../base/common/platform.js';
 import { Action } from '../../../../base/common/actions.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
-import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IWorkspacesExplorerService, IWorkspaceItem } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IAgentsManagerService, IAgentCredentialService, IAgentCredential } from '../../agentsManager/common/agentsManager.js';
@@ -301,6 +301,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 	}
 
 	private readonly _storageService: IStorageService;
+	private _showRemovedItems: boolean = false;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -331,6 +332,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 		this._storageService = storageService;
+		this._showRemovedItems = this._storageService.getBoolean('anyagent.workspacesExplorer.showRemovedItems', StorageScope.PROFILE, false);
 
 		this._register(this.workspacesExplorerService.onDidChangeWorkspaces(() => this.renderContent()));
 		this._register(this.workspaceContextService.onDidChangeWorkspaceFolders(() => this.renderContent()));
@@ -602,6 +604,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 						new Action('create_entity', 'Create New Entity Folder...', ThemeIcon.asClassName(Codicon.add), true, () => {
 							this.showCreateResourceModal(ws);
 						}),
+						new Action('toggle_removed_items', this._showRemovedItems ? 'Hide Removed Tickets' : 'Show Removed Tickets', ThemeIcon.asClassName(this._showRemovedItems ? Codicon.eyeClosed : Codicon.eye), true, async () => {
+							this._showRemovedItems = !this._showRemovedItems;
+							this._storageService.store('anyagent.workspacesExplorer.showRemovedItems', this._showRemovedItems, StorageScope.PROFILE, StorageTarget.USER);
+							this.renderContent();
+						}),
 						new Action('remove_entry', 'Remove Entry from Explorer', ThemeIcon.asClassName(Codicon.close), true, async () => {
 							await this.workspacesExplorerService.removeWorkspace(ws.uri);
 							this.notificationService.info(`Removed '${ws.name}' from explorer.`);
@@ -836,7 +843,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 		}
 
-		const children = await this.workspacesExplorerService.scanWorkspaceChildren(folderUri);
+		const children = await this.workspacesExplorerService.scanWorkspaceChildren(folderUri, this._showRemovedItems);
 		if (this.renderVersion !== currentVersion || !this.containerEl) {
 			return;
 		}
@@ -852,6 +859,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 			const isExpanded = isDirectory && this.expandedWorkspaces.has(canonicalChildId);
 			const isChildSelected = this.selectedWorkspaceId === parentWsId && this.selectedItemId === canonicalChildId;
 
+			const isRemoved = !!(child.status && (
+				child.status.toLowerCase() === 'removed' ||
+				child.status.toLowerCase() === 'canceled' ||
+				child.status.toLowerCase() === 'cancelled'
+			));
+
 			const childRow = append(parentContainer, $('.child-item-row'));
 			childRow.style.display = 'flex';
 			childRow.style.alignItems = 'center';
@@ -859,9 +872,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 			childRow.style.padding = `4px 6px 4px ${depth * 12}px`;
 			childRow.style.borderRadius = '4px';
 			childRow.style.cursor = 'pointer';
+			if (isRemoved) {
+				childRow.style.opacity = '0.55';
+			}
 
 			let isDraggable = true;
-			if (child.type === 'file' || child.type === 'folder') {
+			if (child.type === 'file' || child.type === 'folder' || isRemoved) {
 				isDraggable = false;
 			}
 			const activeInput = this.editorService.activeEditor;
@@ -910,31 +926,41 @@ export class MainWorkspaceViewPane extends ViewPane {
 			// Right click context menu
 			childRow.oncontextmenu = (e) => {
 				e.preventDefault();
-					e.stopPropagation();
+				e.stopPropagation();
 
 				const childActions: Action[] = [];
 
-				if (isDirectory) {
+				if (isDirectory && !isRemoved) {
 					childActions.push(new Action('create_sub_entity', `Create Sub-Entity...`, ThemeIcon.asClassName(Codicon.add), true, () => {
 						this.showCreateResourceModal(child.uri, child.name);
 					}));
 				}
 
 				if (child.type !== 'file' && child.type !== 'folder') {
-					childActions.push(new Action('edit_child', 'Edit...', ThemeIcon.asClassName(Codicon.edit), true, async () => {
-						if (child.type === 'workflow') {
-							await this.editorService.openEditor(new WorkflowEditorInput(child.uri, child.name), { pinned: true });
-						} else {
-							await this.editorService.openEditor(new EntityDetailEditorInput(child.uri, child.name, true), { pinned: true });
-						}
-					}));
+					const formattedType = child.type.charAt(0).toUpperCase() + child.type.slice(1);
+					childActions.push(
+						new Action('edit_entity', `Edit ${formattedType} Details...`, ThemeIcon.asClassName(Codicon.edit), true, async () => {
+							try {
+								if (child.type === 'workflow') {
+									await this.editorService.openEditor(new WorkflowEditorInput(child.uri, child.name), { pinned: true });
+								} else {
+									await this.editorService.openEditor(new EntityDetailEditorInput(child.uri, child.name, false), { pinned: true });
+								}
+							} catch (err) {
+								console.error('Failed to open Entity editor:', err);
+							}
+						})
+					);
 				}
 
 				childActions.push(
 					new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {
 						await this.showInExplorer(child.uri);
-					}),
-					new Action('reveal_child_in_os', isMacintosh ? 'Reveal in Finder' : 'Reveal in Explorer', ThemeIcon.asClassName(Codicon.folder), true, async () => {
+					})
+				);
+
+				childActions.push(
+					new Action('reveal_in_os', isMacintosh ? 'Reveal in Finder' : 'Reveal in Explorer', ThemeIcon.asClassName(Codicon.folder), true, async () => {
 						try {
 							await this.commandService.executeCommand('revealFileInOS', child.uri);
 						} catch {
@@ -955,39 +981,52 @@ export class MainWorkspaceViewPane extends ViewPane {
 					);
 				}
 
-				if (child.type !== 'file' && child.type !== 'folder') {
+				if (isRemoved) {
+					childActions.push(
+						new Action('restore_child_to_ws', 'Restore Ticket (Reactivate to Todo)', ThemeIcon.asClassName(Codicon.history), true, async () => {
+							try {
+								await this.workspacesExplorerService.setEntityStatus(child.uri, 'Todo');
+								if (child.type === 'agent' && this.agentsManagerService) {
+									const agentsList = await this.agentsManagerService.getAgents();
+									const matchingAgent = agentsList.find(a => a.folderPath === child.uri.fsPath);
+									if (matchingAgent) {
+										await this.agentsManagerService.updateAgent({ ...matchingAgent, status: 'idle' });
+									}
+								}
+								this.notificationService.info(`Restored '${child.name}' to active workspace.`);
+								this.renderContent();
+							} catch (err) {
+								this.notificationService.error(`Failed to restore '${child.name}': ${err}`);
+							}
+						})
+					);
+				} else if (child.type !== 'file' && child.type !== 'folder') {
 					childActions.push(
 						new Action('remove_child_from_ws', 'Remove from Workspace', ThemeIcon.asClassName(Codicon.close), true, async () => {
 							const confirm = await this.dialogService.confirm({
 								type: 'warning',
-								message: `Are you sure you want to remove '${child.name}' from the workspace?`,
-								detail: `This will keep the physical folder intact but rename it to '~${child.name}', making it ignored in the explorer.`,
+								message: `Are you sure you want to remove '${child.name}' from active workspace?`,
+								detail: `The physical folder will remain intact on disk, and its ticket status will be set to 'Removed'. You can restore it at any time.`,
 								primaryButton: 'Remove'
 							});
 							if (confirm.confirmed) {
 								try {
-									const parentDir = dirname(child.uri);
-									const newName = '~' + child.name;
-									const newUri = URI.joinPath(parentDir, newName);
-									
-									// 1. Rename folder on disk
-									if (await this.fileService.exists(child.uri)) {
-										await this.fileService.move(child.uri, newUri, true);
-									}
+									// 1. Update status to 'Removed' in ticket.md (No folder renaming!)
+									await this.workspacesExplorerService.setEntityStatus(child.uri, 'Removed');
 									
 									// 2. Remove snapshot from global DB
 									await this.workspacesExplorerService.removeSnapshot(child.uri);
 									
-									// 3. If it is registered as an agent in agentsManagerService, remove it too
+									// 3. If it is registered as an agent in agentsManagerService, update it to offline
 									if (child.type === 'agent' && this.agentsManagerService) {
 										const agentsList = await this.agentsManagerService.getAgents();
 										const matchingAgent = agentsList.find(a => a.folderPath === child.uri.fsPath);
 										if (matchingAgent) {
-											await this.agentsManagerService.removeAgent(matchingAgent.id);
+											await this.agentsManagerService.updateAgent({ ...matchingAgent, status: 'offline' });
 										}
 									}
 									
-									this.notificationService.info(`Removed '${child.name}' from workspace.`);
+									this.notificationService.info(`Removed '${child.name}' from active workspace.`);
 									this.renderContent();
 								} catch (err) {
 									this.notificationService.error(`Failed to remove from workspace: ${err}`);
@@ -1157,6 +1196,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 			if (badgeText) {
 				const badge = append(childRight, $('span', { style: `font-size: 8px; padding: 1px 5px; border-radius: 3px; background: ${badgeBg}; color: ${badgeFg}; font-weight: 600; text-transform: uppercase;` }, badgeText));
 				badge.title = `Entity Type: ${badgeText}`;
+			}
+
+			if (isRemoved) {
+				const removedBadge = append(childRight, $('span', {
+					style: 'font-size: 8px; padding: 1px 5px; border-radius: 3px; background: rgba(148, 163, 184, 0.16); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); font-weight: 600; text-transform: uppercase;'
+				}, 'REMOVED'));
+				removedBadge.title = 'Status: Removed';
 			}
 
 			if (isDirectory) {

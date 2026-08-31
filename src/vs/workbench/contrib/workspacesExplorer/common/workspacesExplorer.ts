@@ -32,6 +32,7 @@ export interface IWorkspaceChildItem {
 	uri: URI;
 	type: ResourceType;
 	code?: string;
+	status?: string;
 	isMissing?: boolean;
 	missingReason?: string;
 	hasDamagedDescendant?: boolean;
@@ -59,9 +60,12 @@ export interface ICreateResourceOptions {
 	agentModel?: {
 		providerId: string;
 		modelId: string;
+		modelName?: string;
 		credentialId?: string;
 	};
+	agentAvatarIcon?: string;
 	agentSystemPrompt?: string;
+	agentRole?: string;
 	typeDefinition?: string;
 	typePrompt?: string;
 	ticketPrompt?: string;
@@ -71,12 +75,18 @@ export interface ICreateResourceOptions {
 export interface ICreateResourceResult {
 	alreadyExists?: boolean;
 	uri: URI;
+	folderUri?: URI;
+	type?: ResourceType;
+	name?: string;
+	code?: string;
 }
 
 export interface ICreateWorkspaceResult {
 	alreadyExists?: boolean;
-	name?: string;
 	uri: URI;
+	folderUri?: URI;
+	name?: string;
+	code?: string;
 }
 
 export interface IEntityGitSnapshot {
@@ -119,8 +129,10 @@ export interface IWorkspacesExplorerService {
 	getWorkspaces(): Promise<IWorkspaceItem[]>;
 	addWorkspace(uri: URI, name?: string): Promise<void>;
 	removeWorkspace(uri: URI): Promise<void>;
-	scanWorkspaceChildren(workspaceUri: URI): Promise<IWorkspaceChildItem[]>;
+	scanWorkspaceChildren(workspaceUri: URI, includeRemoved?: boolean): Promise<IWorkspaceChildItem[]>;
 	detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType>;
+	detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined>;
+	setEntityStatus(entityUri: URI, status: string): Promise<void>;
 	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult>;
 	createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult>;
 	createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult>;

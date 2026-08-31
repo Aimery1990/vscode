@@ -1214,7 +1214,7 @@ export class EntityDetailEditor extends EditorPane {
 				label: 'Status',
 				fieldType: 'status',
 				currentValue: data.status || 'Todo',
-				options: isAgent ? ['idle', 'busy', 'offline', 'active'] : ['Todo', 'In Progress', 'Done', 'Blocked']
+				options: isAgent ? ['idle', 'busy', 'offline'] : ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed']
 			},
 			{
 				path: '/Attributes/Priority',
@@ -1717,6 +1717,10 @@ export class EntityDetailEditor extends EditorPane {
 			statusColor = '#f87171';
 			statusBg = 'rgba(248, 113, 113, 0.16)';
 			statusBorder = 'rgba(248, 113, 113, 0.35)';
+		} else if (status.toLowerCase().includes('remove') || status.toLowerCase().includes('cancel')) {
+			statusColor = '#94a3b8';
+			statusBg = 'rgba(148, 163, 184, 0.16)';
+			statusBorder = 'rgba(148, 163, 184, 0.35)';
 		}
 
 		// 2. Type Colors
@@ -2350,7 +2354,7 @@ export class EntityDetailEditor extends EditorPane {
 					<div class="sidebar-row">
 						<div style="display: flex; justify-content: space-between; align-items: center;">
 							<span class="sidebar-label">STATUS</span>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : ['Todo', 'In Progress', 'Done', 'Blocked']))}" title="Edit Status with AI">
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed']))}" title="Edit Status with AI">
 								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							</button>
 						</div>

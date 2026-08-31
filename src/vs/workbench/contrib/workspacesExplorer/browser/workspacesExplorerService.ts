@@ -10,6 +10,7 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { IWorkspacesService, isRecentFolder, isRecentWorkspace } from '../../../../platform/workspaces/common/workspaces.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
+import { VSBuffer } from '../../../../base/common/buffer.js';
 import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { IAgentsManagerService } from '../../agentsManager/common/agentsManager.js';
@@ -490,11 +491,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		// optional order persistence logic
 	}
 
-	async scanWorkspaceChildren(workspaceUri: URI): Promise<IWorkspaceChildItem[]> {
-		return this.getWorkspaceChildren(workspaceUri);
+	async scanWorkspaceChildren(workspaceUri: URI, includeRemoved: boolean = false): Promise<IWorkspaceChildItem[]> {
+		return this.getWorkspaceChildren(workspaceUri, includeRemoved);
 	}
 
-	async getWorkspaceChildren(workspaceUri: URI): Promise<IWorkspaceChildItem[]> {
+	async getWorkspaceChildren(workspaceUri: URI, includeRemoved: boolean = false): Promise<IWorkspaceChildItem[]> {
 		let targetBase = workspaceUri;
 		if (workspaceUri.path.endsWith('.code-workspace')) {
 			targetBase = dirname(workspaceUri);
@@ -520,11 +521,23 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				if (child.isDirectory) {
 					const childUri = child.resource;
 					const childType = await this.detectCustomEntityTypeFromDisk(childUri);
+					const childStatus = await this.detectCustomEntityStatusFromDisk(childUri);
+
+					const isRemoved = childStatus && (
+						childStatus.toLowerCase() === 'removed' ||
+						childStatus.toLowerCase() === 'canceled' ||
+						childStatus.toLowerCase() === 'cancelled'
+					);
+
+					if (isRemoved && !includeRemoved) {
+						continue;
+					}
 
 					childrenItems.push({
 						id: childUri.toString(),
 						name: child.name,
 						type: childType,
+						status: childStatus,
 						uri: childUri
 					});
 				} else {
@@ -543,6 +556,57 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		} catch {
 			return [];
 		}
+	}
+
+	public async detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined> {
+		const configDir = URI.joinPath(childUri, '.agents');
+		const ticketUri = URI.joinPath(configDir, 'ticket.md');
+		const rootTicketUri = URI.joinPath(childUri, 'ticket.md');
+		for (const uri of [ticketUri, rootTicketUri]) {
+			try {
+				if (await this.fileService.exists(uri)) {
+					const content = await this.fileService.readFile(uri);
+					const text = content.value.toString();
+					const statusMatch = text.match(/-\s+\*\*Status\*\*:\s*([^\r\n]+)/i);
+					if (statusMatch && statusMatch[1]) {
+						return statusMatch[1].trim();
+					}
+				}
+			} catch {
+				// ignore
+			}
+		}
+		return undefined;
+	}
+
+	public async setEntityStatus(entityUri: URI, newStatus: string): Promise<void> {
+		const configDir = URI.joinPath(entityUri, '.agents');
+		const ticketUri = URI.joinPath(configDir, 'ticket.md');
+		const rootTicketUri = URI.joinPath(entityUri, 'ticket.md');
+		let targetUri: URI | undefined;
+
+		if (await this.fileService.exists(ticketUri)) {
+			targetUri = ticketUri;
+		} else if (await this.fileService.exists(rootTicketUri)) {
+			targetUri = rootTicketUri;
+		}
+
+		if (targetUri) {
+			try {
+				const content = await this.fileService.readFile(targetUri);
+				const text = content.value.toString();
+				let updated = '';
+				if (/-\s+\*\*Status\*\*:/i.test(text)) {
+					updated = text.replace(/-\s+\*\*Status\*\*:\s*([^\r\n]*)/i, `- **Status**: ${newStatus}`);
+				} else {
+					updated = text + `\n- **Status**: ${newStatus}\n`;
+				}
+				await this.fileService.writeFile(targetUri, VSBuffer.fromString(updated));
+			} catch (err) {
+				console.error('Failed to update status in ticket.md:', err);
+			}
+		}
+		this._onDidChangeWorkspaces.fire();
 	}
 
 	public async detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType> {
