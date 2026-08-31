@@ -327,6 +327,12 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		mainMdContent += `- **Owner Account**: ${ownerAccount}\n`;
 		mainMdContent += `- **Created At**: ${dateTimeFormatted}\n`;
 		mainMdContent += `- **Ticket Code**: ${snapshot.entityCode || 'None'}\n`;
+		if (type === 'workspace' || (snapshot.customMetadata && (snapshot.customMetadata['Ticket Statuses'] || snapshot.customMetadata['Removed Status']))) {
+			const statusesVal = (snapshot.customMetadata && snapshot.customMetadata['Ticket Statuses']) || 'Todo, In Progress, Done, Blocked, Removed';
+			const removedVal = (snapshot.customMetadata && snapshot.customMetadata['Removed Status']) || 'Removed';
+			mainMdContent += `- **Ticket Statuses**: ${statusesVal}\n`;
+			mainMdContent += `- **Removed Status**: ${removedVal}\n`;
+		}
 		mainMdContent += `- **Last Updated At**: ${dateTimeFormatted}\n`;
 		mainMdContent += `- **Last Updated By**: User\n\n`;
 

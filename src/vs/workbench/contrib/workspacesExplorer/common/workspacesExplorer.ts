@@ -70,6 +70,8 @@ export interface ICreateResourceOptions {
 	typePrompt?: string;
 	ticketPrompt?: string;
 	customMetadata?: { [key: string]: string };
+	customStatuses?: string[];
+	removedStatus?: string;
 }
 
 export interface ICreateResourceResult {
@@ -133,6 +135,7 @@ export interface IWorkspacesExplorerService {
 	detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType>;
 	detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined>;
 	setEntityStatus(entityUri: URI, status: string): Promise<void>;
+	getWorkspaceStatuses(targetUri: URI): Promise<{ statuses: string[]; removedStatus: string }>;
 	createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult>;
 	createWorkspace(options: ICreateResourceOptions): Promise<ICreateWorkspaceResult>;
 	createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult>;

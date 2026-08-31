@@ -458,6 +458,14 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			}
 		}
 
+		const customMetadata = options.customMetadata || {};
+		if (options.customStatuses && options.customStatuses.length > 0) {
+			customMetadata['Ticket Statuses'] = options.customStatuses.join(', ');
+		}
+		if (options.removedStatus) {
+			customMetadata['Removed Status'] = options.removedStatus;
+		}
+
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: targetBaseUri.toString(),
 			entityName: options.name,
@@ -467,7 +475,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			ownerAccount: this.activeUserEmail || 'unauthenticated',
 			createdAt: '',
 			description: options.description || `Workspace for ${options.name}`,
-			status: options.status || 'open',
+			status: options.status || (options.customStatuses && options.customStatuses.length > 0 ? options.customStatuses[0] : 'open'),
 			priority: options.priority || 'Medium',
 			assignedAgentId: options.assignedAgentId,
 			assignedAgentName: options.assignedAgentName,
@@ -476,7 +484,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			typeDefinition: options.typeDefinition,
 			typePrompt: options.typePrompt,
 			ticketPrompt: options.ticketPrompt,
-			customMetadata: options.customMetadata
+			customMetadata
 		}, targetBaseUri, false);
 
 		await this.addWorkspace(targetBaseUri, options.name);
@@ -511,6 +519,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				return [];
 			}
 
+			const wsStatuses = await this.getWorkspaceStatuses(targetBase);
 			const childrenItems: IWorkspaceChildItem[] = [];
 
 			for (const child of stat.children) {
@@ -524,9 +533,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					const childStatus = await this.detectCustomEntityStatusFromDisk(childUri);
 
 					const isRemoved = childStatus && (
+						childStatus.toLowerCase() === wsStatuses.removedStatus.toLowerCase() ||
 						childStatus.toLowerCase() === 'removed' ||
 						childStatus.toLowerCase() === 'canceled' ||
-						childStatus.toLowerCase() === 'cancelled'
+						childStatus.toLowerCase() === 'cancelled' ||
+						childStatus.toLowerCase() === 'archived'
 					);
 
 					if (isRemoved && !includeRemoved) {
@@ -556,6 +567,47 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		} catch {
 			return [];
 		}
+	}
+
+	public async getWorkspaceStatuses(targetUri: URI): Promise<{ statuses: string[]; removedStatus: string }> {
+		const defaultResult = {
+			statuses: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'],
+			removedStatus: 'Removed'
+		};
+
+		try {
+			const workspaces = await this.getWorkspaces();
+			const targetPath = targetUri.path.toLowerCase();
+			const matchedWs = workspaces
+				.filter(ws => targetPath === ws.uri.path.toLowerCase() || targetPath.startsWith(ws.uri.path.toLowerCase() + '/'))
+				.sort((a, b) => b.uri.path.length - a.uri.path.length)[0];
+
+			if (matchedWs) {
+				const wsTicketUri = URI.joinPath(matchedWs.uri, '.agents', 'ticket.md');
+				const rootTicketUri = URI.joinPath(matchedWs.uri, 'ticket.md');
+				for (const uri of [wsTicketUri, rootTicketUri]) {
+					if (await this.fileService.exists(uri)) {
+						const content = (await this.fileService.readFile(uri)).value.toString();
+						const statusesMatch = content.match(/-\s+\*\*Ticket\s+Statuses\*\*:\s*([^\r\n]+)/i);
+						const removedMatch = content.match(/-\s+\*\*Removed\s+Status\*\*:\s*([^\r\n]+)/i);
+						if (statusesMatch && statusesMatch[1]) {
+							const list = statusesMatch[1].split(/[,，;\n]+/).map(s => s.trim()).filter(Boolean);
+							if (list.length > 0) {
+								let rem = removedMatch && removedMatch[1] ? removedMatch[1].trim() : '';
+								if (!rem || !list.some(s => s.toLowerCase() === rem.toLowerCase())) {
+									rem = list.find(s => /remove|cancel|archive|discard|delete/i.test(s)) || list[list.length - 1];
+								}
+								return { statuses: list, removedStatus: rem };
+							}
+						}
+					}
+				}
+			}
+		} catch (err) {
+			console.error('Failed to get workspace statuses:', err);
+		}
+
+		return defaultResult;
 	}
 
 	public async detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined> {

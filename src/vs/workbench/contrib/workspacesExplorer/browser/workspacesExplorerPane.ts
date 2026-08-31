@@ -983,9 +983,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 				if (isRemoved) {
 					childActions.push(
-						new Action('restore_child_to_ws', 'Restore Ticket (Reactivate to Todo)', ThemeIcon.asClassName(Codicon.history), true, async () => {
+						new Action('restore_child_to_ws', 'Restore Ticket (Reactivate to Active)', ThemeIcon.asClassName(Codicon.history), true, async () => {
 							try {
-								await this.workspacesExplorerService.setEntityStatus(child.uri, 'Todo');
+								const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(child.uri);
+								const initialStatus = wsStatuses.statuses[0] || 'Todo';
+								await this.workspacesExplorerService.setEntityStatus(child.uri, initialStatus);
 								if (child.type === 'agent' && this.agentsManagerService) {
 									const agentsList = await this.agentsManagerService.getAgents();
 									const matchingAgent = agentsList.find(a => a.folderPath === child.uri.fsPath);
@@ -993,7 +995,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 										await this.agentsManagerService.updateAgent({ ...matchingAgent, status: 'idle' });
 									}
 								}
-								this.notificationService.info(`Restored '${child.name}' to active workspace.`);
+								this.notificationService.info(`Restored '${child.name}' to active workspace (${initialStatus}).`);
 								this.renderContent();
 							} catch (err) {
 								this.notificationService.error(`Failed to restore '${child.name}': ${err}`);
@@ -1003,16 +1005,18 @@ export class MainWorkspaceViewPane extends ViewPane {
 				} else if (child.type !== 'file' && child.type !== 'folder') {
 					childActions.push(
 						new Action('remove_child_from_ws', 'Remove from Workspace', ThemeIcon.asClassName(Codicon.close), true, async () => {
+							const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(child.uri);
+							const removedStatusName = wsStatuses.removedStatus || 'Removed';
 							const confirm = await this.dialogService.confirm({
 								type: 'warning',
 								message: `Are you sure you want to remove '${child.name}' from active workspace?`,
-								detail: `The physical folder will remain intact on disk, and its ticket status will be set to 'Removed'. You can restore it at any time.`,
+								detail: `The physical folder will remain intact on disk, and its ticket status will be set to '${removedStatusName}'. You can restore it at any time.`,
 								primaryButton: 'Remove'
 							});
 							if (confirm.confirmed) {
 								try {
-									// 1. Update status to 'Removed' in ticket.md (No folder renaming!)
-									await this.workspacesExplorerService.setEntityStatus(child.uri, 'Removed');
+									// 1. Update status to removedStatus in ticket.md (No folder renaming!)
+									await this.workspacesExplorerService.setEntityStatus(child.uri, removedStatusName);
 									
 									// 2. Remove snapshot from global DB
 									await this.workspacesExplorerService.removeSnapshot(child.uri);
@@ -1457,13 +1461,82 @@ export class MainWorkspaceViewPane extends ViewPane {
 		})) as HTMLTextAreaElement;
 		descInput.placeholder = 'Brief purpose or detailed description of this workspace...';
 
-		// Status (Clean row)
-		const statusBox = append(modalBody, $('.form-group'));
-		append(statusBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Status:'));
-		const statusBadgeWrapper = append(statusBox, $('div', { style: 'padding: 2px 0;' }));
-		append(statusBadgeWrapper, $('span', {
-			style: 'display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(129, 140, 248, 0.18); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.4);'
-		}, 'Todo'));
+		// Ticket Statuses Lifecycle (Workspace Scoped)
+		const statusCard = append(modalBody, $('.form-group', {
+			style: 'background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;'
+		}));
+
+		const statusHeader = append(statusCard, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+		append(statusHeader, $('label', { style: 'font-size: 12px; font-weight: 600; color: #38bdf8;' }, 'Ticket Statuses Lifecycle (Workspace Scoped):'));
+		append(statusHeader, $('span', { style: 'font-size: 10.5px; opacity: 0.6;' }, 'Applies to all sub-tickets'));
+
+		// Presets Row
+		const presetsRow = append(statusCard, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
+		append(presetsRow, $('span', { style: 'font-size: 11px; opacity: 0.75; font-weight: 500;' }, 'Preset:'));
+
+		const statusPresets = [
+			{ name: 'Default', statuses: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'], removed: 'Removed' },
+			{ name: 'Agile / Scrum', statuses: ['Backlog', 'Ready', 'In Progress', 'In Review', 'Done', 'Canceled'], removed: 'Canceled' },
+			{ name: 'Kanban', statuses: ['To Do', 'Doing', 'Blocked', 'Done', 'Archived'], removed: 'Archived' }
+		];
+
+		let currentCustomStatuses = ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'];
+		let currentRemovedStatus = 'Removed';
+
+		// Status Progression Input
+		const statusesInputRow = append(statusCard, $('.form-group'));
+		append(statusesInputRow, $('label', { style: 'display: block; font-size: 11px; opacity: 0.8; margin-bottom: 4px;' }, 'Status Progression (Comma-separated):'));
+		const statusesInput = append(statusesInputRow, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		statusesInput.value = currentCustomStatuses.join(', ');
+
+		// Designated Removed Status Dropdown
+		const removedStatusRow = append(statusCard, $('.form-group'));
+		append(removedStatusRow, $('label', { style: 'display: block; font-size: 11px; opacity: 0.8; margin-bottom: 4px;' }, 'Designated Removed / Termination Status:'));
+		const removedStatusSelect = append(removedStatusRow, $('select.monaco-select-box', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; cursor: pointer;'
+		})) as HTMLSelectElement;
+
+		const updateRemovedOptions = () => {
+			const list = statusesInput.value.split(/[,，;\n]+/).map(s => s.trim()).filter(Boolean);
+			currentCustomStatuses = list.length > 0 ? list : ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'];
+			clearNode(removedStatusSelect);
+			for (const st of currentCustomStatuses) {
+				const opt = append(removedStatusSelect, $('option', { value: st }, st)) as HTMLOptionElement;
+				if (st.toLowerCase() === currentRemovedStatus.toLowerCase()) {
+					opt.selected = true;
+				}
+			}
+			if (!currentCustomStatuses.some(s => s.toLowerCase() === currentRemovedStatus.toLowerCase())) {
+				currentRemovedStatus = currentCustomStatuses.find(s => /remove|cancel|archive|discard|delete/i.test(s)) || currentCustomStatuses[currentCustomStatuses.length - 1];
+				removedStatusSelect.value = currentRemovedStatus;
+			}
+		};
+
+		updateRemovedOptions();
+
+		statusesInput.oninput = () => {
+			updateRemovedOptions();
+		};
+
+		removedStatusSelect.onchange = () => {
+			currentRemovedStatus = removedStatusSelect.value;
+		};
+
+		for (const pr of statusPresets) {
+			const prBtn = append(presetsRow, $('button.monaco-button', {
+				style: 'padding: 3px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); color: inherit;'
+			}));
+			prBtn.innerText = pr.name;
+			prBtn.onclick = (e) => {
+				e.preventDefault();
+				currentCustomStatuses = [...pr.statuses];
+				currentRemovedStatus = pr.removed;
+				statusesInput.value = currentCustomStatuses.join(', ');
+				updateRemovedOptions();
+			};
+		}
 
 		// Priority Selection Box (5 Levels Flat Grid with Color Dots)
 		const priorityBox = append(modalBody, $('.form-group'));
@@ -1843,7 +1916,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 					description: descInput.value.trim(),
 					code: wsCode,
 					type: 'workspace',
-					status: 'Todo',
+					status: currentCustomStatuses[0] || 'Todo',
+					customStatuses: currentCustomStatuses,
+					removedStatus: currentRemovedStatus,
 					priority: selectedPriority,
 					assignedAgentId: assignedAgentId,
 					assignedAgentName: matchingAgent ? matchingAgent.name : undefined,
@@ -3225,13 +3300,16 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 				}
 
+				const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(targetUri);
+				const initialStatus = (selectedType === 'agent') ? 'idle' : (wsStatuses.statuses[0] || 'Todo');
+
 				const createResult = await this.workspacesExplorerService.createResourceUnderWorkspace({
 					workspaceUri: targetUri,
 					type: selectedType,
 					name,
 					title: titleInput.value.trim() || undefined,
 					code: codeInput.value.trim() || undefined,
-					status: 'Todo',
+					status: initialStatus,
 					priority: selectedPriority,
 					assignedAgentId,
 					assignedAgentName,

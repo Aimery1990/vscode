@@ -116,6 +116,10 @@ export class EntityDetailEditor extends EditorPane {
 	private _readmeUri: URI | undefined;
 	private _workLogUri: URI | undefined;
 	private _lastParsedData: IParsedTicketData | undefined;
+	private _workspaceStatuses: { statuses: string[]; removedStatus: string } = {
+		statuses: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'],
+		removedStatus: 'Removed'
+	};
 
 	constructor(
 		group: IEditorGroup,
@@ -343,6 +347,12 @@ export class EntityDetailEditor extends EditorPane {
 			const parsed = this._parseAllEntityData(ticketContent, readmeContent, instructionContent);
 			this._lastParsedData = parsed;
 			this._entityType = parsed.ticketType || 'task';
+
+			if (this._entityUri && this._workspacesExplorerService) {
+				try {
+					this._workspaceStatuses = await this._workspacesExplorerService.getWorkspaceStatuses(this._entityUri);
+				} catch {}
+			}
 
 			const attachments = await this._getAttachments(this._entityUri);
 			const customModule = await this._readCustomModule(this._entityUri, this._entityType);
@@ -1213,8 +1223,8 @@ export class EntityDetailEditor extends EditorPane {
 				path: '/Attributes/Status',
 				label: 'Status',
 				fieldType: 'status',
-				currentValue: data.status || 'Todo',
-				options: isAgent ? ['idle', 'busy', 'offline'] : ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed']
+				currentValue: data.status || this._workspaceStatuses.statuses[0] || 'Todo',
+				options: isAgent ? ['idle', 'busy', 'offline'] : this._workspaceStatuses.statuses
 			},
 			{
 				path: '/Attributes/Priority',
@@ -1705,19 +1715,26 @@ export class EntityDetailEditor extends EditorPane {
 		let statusColor = '#818cf8';
 		let statusBg = 'rgba(129, 140, 248, 0.16)';
 		let statusBorder = 'rgba(129, 140, 248, 0.35)';
-		if (status.toLowerCase().includes('progress')) {
+
+		const isRemovedStatus = status.toLowerCase() === this._workspaceStatuses.removedStatus.toLowerCase() ||
+			status.toLowerCase().includes('remove') ||
+			status.toLowerCase().includes('cancel') ||
+			status.toLowerCase().includes('archive') ||
+			status.toLowerCase().includes('discard');
+
+		if (status.toLowerCase().includes('progress') || status.toLowerCase().includes('doing') || status.toLowerCase().includes('dev')) {
 			statusColor = '#38bdf8';
 			statusBg = 'rgba(56, 189, 248, 0.16)';
 			statusBorder = 'rgba(56, 189, 248, 0.35)';
-		} else if (status.toLowerCase().includes('done') || status.toLowerCase().includes('complete')) {
+		} else if (status.toLowerCase().includes('done') || status.toLowerCase().includes('complete') || status.toLowerCase().includes('finish') || status.toLowerCase().includes('release')) {
 			statusColor = '#34d399';
 			statusBg = 'rgba(52, 211, 153, 0.16)';
 			statusBorder = 'rgba(52, 211, 153, 0.35)';
-		} else if (status.toLowerCase().includes('block') || status.toLowerCase().includes('fail')) {
+		} else if (status.toLowerCase().includes('block') || status.toLowerCase().includes('fail') || status.toLowerCase().includes('issue') || status.toLowerCase().includes('reject')) {
 			statusColor = '#f87171';
 			statusBg = 'rgba(248, 113, 113, 0.16)';
 			statusBorder = 'rgba(248, 113, 113, 0.35)';
-		} else if (status.toLowerCase().includes('remove') || status.toLowerCase().includes('cancel')) {
+		} else if (isRemovedStatus) {
 			statusColor = '#94a3b8';
 			statusBg = 'rgba(148, 163, 184, 0.16)';
 			statusBorder = 'rgba(148, 163, 184, 0.35)';
@@ -2354,7 +2371,7 @@ export class EntityDetailEditor extends EditorPane {
 					<div class="sidebar-row">
 						<div style="display: flex; justify-content: space-between; align-items: center;">
 							<span class="sidebar-label">STATUS</span>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed']))}" title="Edit Status with AI">
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : this._workspaceStatuses.statuses))}" title="Edit Status with AI">
 								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							</button>
 						</div>
