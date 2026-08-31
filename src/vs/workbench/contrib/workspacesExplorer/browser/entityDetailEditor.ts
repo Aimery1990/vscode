@@ -136,8 +136,6 @@ export class EntityDetailEditor extends EditorPane {
 		this._container = h('div.entity-detail-editor').root;
 		this._container.style.width = '100%';
 		this._container.style.height = '100%';
-		this._container.style.display = 'flex';
-		this._container.style.flexDirection = 'column';
 		this._container.style.overflowY = 'auto';
 		this._container.style.overflowX = 'hidden';
 		this._container.style.background = 'var(--vscode-editor-background)';
@@ -1743,14 +1741,15 @@ export class EntityDetailEditor extends EditorPane {
 				.entity-detail-editor .layout-container {
 					display: grid;
 					grid-template-columns: minmax(0, 1fr) 320px;
-					gap: 32px;
-					max-width: 1360px;
-					margin: 0 auto;
+					gap: 28px;
+					width: 100%;
+					margin: 0;
 				}
 				.entity-detail-editor .main-content {
 					display: flex;
 					flex-direction: column;
 					gap: 20px;
+					min-width: 0;
 				}
 				.entity-detail-editor .sidebar {
 					background: rgba(255,255,255,0.02);
@@ -1766,18 +1765,21 @@ export class EntityDetailEditor extends EditorPane {
 				.entity-detail-editor .header-breadcrumb {
 					display: flex;
 					align-items: center;
+					justify-content: flex-start;
 					gap: 8px;
 					font-size: 0.85em;
 					opacity: 0.65;
 					margin-bottom: 6px;
 					font-weight: 500;
+					text-align: left;
 				}
 				.entity-detail-editor .header-title-row {
 					display: flex;
 					align-items: center;
-					justify-content: space-between;
-					gap: 16px;
+					justify-content: flex-start;
+					gap: 12px;
 					margin-bottom: 8px;
+					text-align: left;
 				}
 				.entity-detail-editor .ticket-title {
 					margin: 0;
@@ -1785,6 +1787,7 @@ export class EntityDetailEditor extends EditorPane {
 					font-weight: 700;
 					color: var(--vscode-editor-foreground, #fff);
 					line-height: 1.25;
+					text-align: left;
 				}
 				.entity-detail-editor .badge {
 					display: inline-block;
@@ -1935,7 +1938,7 @@ export class EntityDetailEditor extends EditorPane {
 			</style>
 
 			<!-- Top Header Area -->
-			<div style="max-width: 1360px; margin: 0 auto 20px auto;">
+			<div style="width: 100%; margin: 0 0 20px 0; text-align: left;">
 				<div class="header-breadcrumb">
 					<span>${data.workspaceId || 'Workspace'}</span>
 					<span>/</span>
