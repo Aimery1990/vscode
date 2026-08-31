@@ -36,6 +36,9 @@ import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uri
 import { VIEW_ID } from '../../files/common/files.js';
 import { dirname } from '../../../../base/common/resources.js';
 
+import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
+
 export class AgentsManagerPane extends ViewPane {
 	private containerEl?: HTMLElement;
 	private renderVersion = 0;
@@ -61,7 +64,8 @@ export class AgentsManagerPane extends ViewPane {
 		@IWorkspaceEditingService private readonly workspaceEditingService: IWorkspaceEditingService,
 		@IViewsService private readonly viewsService: IViewsService,
 		@IFileService private readonly fileService: IFileService,
-		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService
+		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
+		@IEditorService private readonly editorService: IEditorService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
@@ -266,6 +270,25 @@ export class AgentsManagerPane extends ViewPane {
 	private async renderAgentCard(parent: HTMLElement, agent: IAgentItem, scopeColor: string): Promise<void> {
 		const card = append(parent, $('.agent-item-card'));
 		card.draggable = true;
+		card.style.cursor = 'pointer';
+		card.onclick = async () => {
+			try {
+				let folderUri: URI | undefined;
+				if (agent.folderPath && (await this.fileService.exists(URI.file(agent.folderPath)))) {
+					folderUri = URI.file(agent.folderPath);
+				} else {
+					folderUri = await this.agentsManagerService.ensureAgentFolder(agent.id);
+				}
+
+				if (folderUri) {
+					await this.editorService.openEditor(new EntityDetailEditorInput(folderUri, agent.name), { pinned: true });
+				} else {
+					this.notificationService.warn(`Could not locate entity folder for Agent '${agent.name}'.`);
+				}
+			} catch (err) {
+				this.notificationService.error(`Failed to open agent details: ${err}`);
+			}
+		};
 		card.ondragstart = (e) => {
 			e.stopPropagation();
 			if (e.dataTransfer) {
@@ -383,6 +406,17 @@ export class AgentsManagerPane extends ViewPane {
 					this.notificationService.info(`Agent '${agent.name}' files repaired & restored successfully via EntityPersistenceService!`);
 				}));
 			} else {
+				actions.push(new Action('open_agent_details', 'Open Agent Details (🤖)', ThemeIcon.asClassName(Codicon.layoutSidebarRightOff), true, async () => {
+					try {
+						const folderUri = await this.agentsManagerService.ensureAgentFolder(agent.id);
+						if (folderUri) {
+							await this.editorService.openEditor(new EntityDetailEditorInput(folderUri, agent.name), { pinned: true });
+						}
+					} catch (err) {
+						this.notificationService.error(`Failed to open agent details: ${err}`);
+					}
+				}));
+
 				if (agent.folderPath) {
 					const agentFolderUri = URI.file(agent.folderPath);
 					actions.push(new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {

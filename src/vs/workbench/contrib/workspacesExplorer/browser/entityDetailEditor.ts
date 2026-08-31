@@ -28,6 +28,9 @@ import { IWorkspacesExplorerService } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 
+import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
+import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
+
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
 	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
 
@@ -127,7 +130,9 @@ export class EntityDetailEditor extends EditorPane {
 		@IWorkspacesExplorerService private readonly _workspacesExplorerService: IWorkspacesExplorerService,
 		@IEditorService private readonly _editorService: IEditorService,
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
-		@ICommandService private readonly _commandService: ICommandService
+		@ICommandService private readonly _commandService: ICommandService,
+		@IClipboardService private readonly _clipboardService: IClipboardService,
+		@IQuickInputService private readonly _quickInputService: IQuickInputService
 	) {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
 	}
@@ -463,6 +468,41 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				return;
 			}
+
+			// 9. Copy System Prompt
+			const copyPromptBtn = target.closest('#copy-system-prompt-btn') as HTMLElement | null;
+			if (copyPromptBtn) {
+				const promptText = copyPromptBtn.getAttribute('data-prompt') || '';
+				if (promptText) {
+					await this._clipboardService.writeText(promptText);
+					this._notificationService.info(localize('promptCopied', "System Prompt copied to clipboard!"));
+				}
+				return;
+			}
+
+			// 10. Assign Task to Agent
+			const assignTaskBtn = target.closest('#agent-assign-task-btn') as HTMLElement | null;
+			if (assignTaskBtn) {
+				const agentId = assignTaskBtn.getAttribute('data-agent-id');
+				const agentName = assignTaskBtn.getAttribute('data-agent-name') || this._lastParsedData?.title || 'AI Agent';
+				if (agentId && this._agentsManagerService) {
+					const taskTitle = await this._quickInputService.input({
+						prompt: `Assign New Task to AI Agent '${agentName}'`,
+						placeHolder: 'e.g. Implement user authentication, Refactor API response handler',
+						validateInput: async (val) => val.trim() ? null : 'Task title cannot be empty'
+					});
+					if (taskTitle) {
+						const taskDescription = await this._quickInputService.input({
+							prompt: 'Enter Task Details & Requirements (Optional)',
+							placeHolder: 'e.g. Ensure unit tests pass and work_log is updated.'
+						});
+						await this._agentsManagerService.assignTaskToAgent(agentId, taskTitle, taskDescription || '');
+						this._notificationService.info(`Task '${taskTitle}' assigned to Agent '${agentName}'! Logged in work_log.md.`);
+						await this._resolvePathsAndLoadData();
+					}
+				}
+				return;
+			}
 		});
 
 		this._container.addEventListener('change', async (e: Event) => {
@@ -751,6 +791,45 @@ export class EntityDetailEditor extends EditorPane {
 				}
 			}
 			newLines.push(line);
+		}
+
+		return newLines.join('\n');
+	}
+
+	private _updateInstructionContent(content: string, updates: { [key: string]: string }): string {
+		const lines = content.split(/\r?\n/);
+		const newLines: string[] = [];
+		let inMeta = true;
+
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i];
+			if (line.startsWith('---') || (line.startsWith('## ') && !line.startsWith('## Overview'))) {
+				inMeta = false;
+			}
+
+			if (inMeta) {
+				const tpMatch = line.match(/^\s*-\s*\*\*Ticket Prompt\*\*:\s*(.*)$/i);
+				if (tpMatch && updates['Ticket Prompt'] !== undefined) {
+					newLines.push(`- **Ticket Prompt**: ${updates['Ticket Prompt']}`);
+					continue;
+				}
+				const ttpMatch = line.match(/^\s*-\s*\*\*Ticket Type Prompt\*\*:\s*(.*)$/i);
+				if (ttpMatch && updates['Ticket Type Prompt'] !== undefined) {
+					newLines.push(`- **Ticket Type Prompt**: ${updates['Ticket Type Prompt']}`);
+					continue;
+				}
+			}
+			newLines.push(line);
+		}
+
+		if (updates['System Prompt'] !== undefined || updates['Instruction Notes'] !== undefined) {
+			const notes = updates['System Prompt'] !== undefined ? updates['System Prompt'] : updates['Instruction Notes'];
+			const sepIdx = newLines.findIndex(l => l.startsWith('---'));
+			if (sepIdx !== -1) {
+				newLines.splice(sepIdx + 1, newLines.length - (sepIdx + 1), '', notes);
+			} else {
+				newLines.push('', '---', '', notes);
+			}
 		}
 
 		return newLines.join('\n');
@@ -1079,16 +1158,37 @@ export class EntityDetailEditor extends EditorPane {
 		});
 
 		// 3. Instructions
-		const instructionChildren: any[] = [
+		const isAgent = (data.ticketType || '').toLowerCase() === 'agent';
+		const matchingAgent = agents.find(a =>
+			(this._entityUri && a.folderPath && (a.folderPath === this._entityUri.fsPath || a.folderPath.toLowerCase() === this._entityUri.fsPath.toLowerCase())) ||
+			(a.name.toLowerCase() === (data.title || '').toLowerCase()) ||
+			(a.name.toLowerCase() === (data.ticketId || '').toLowerCase()) ||
+			(a.name.toLowerCase() === this._entityName.toLowerCase())
+		);
+
+		const agentModel = matchingAgent?.model?.modelId || data.metadata['Model Name'] || data.metadata['AI Model'] || data.metadata['Model'] || 'gemini-1.5-flash';
+		const agentPrompt = matchingAgent?.systemPrompt || data.metadata['System Prompt'] || data.instructionNotes || data.ticketPrompt || '';
+		const agentRole = matchingAgent?.role || data.metadata['Role'] || data.description || 'AI Agent';
+
+		const instructionChildren: any[] = [];
+		if (isAgent) {
+			instructionChildren.push({
+				path: '/Instructions/System Prompt',
+				label: 'System Prompt / Persona',
+				fieldType: 'textarea',
+				currentValue: agentPrompt
+			});
+		}
+		instructionChildren.push(
 			{
 				path: '/Instructions/Ticket Prompt',
-				label: 'Ticket Prompt',
+				label: isAgent ? 'Instance Rules / Ticket Prompt' : 'Ticket Prompt',
 				fieldType: 'textarea',
 				currentValue: data.ticketPrompt || ''
 			},
 			{
 				path: '/Instructions/Ticket Type Prompt',
-				label: 'Ticket Type Prompt',
+				label: isAgent ? 'System Type Prompt' : 'Ticket Type Prompt',
 				fieldType: 'textarea',
 				currentValue: data.metadata?.['Ticket Type Prompt'] || ''
 			},
@@ -1098,10 +1198,10 @@ export class EntityDetailEditor extends EditorPane {
 				fieldType: 'textarea',
 				currentValue: data.instructionNotes || ''
 			}
-		];
+		);
 		rootNodes.push({
 			path: '/Instructions',
-			label: 'Instructions',
+			label: isAgent ? 'Prompts & Instructions' : 'Instructions',
 			fieldType: 'container',
 			children: instructionChildren
 		});
@@ -1114,7 +1214,7 @@ export class EntityDetailEditor extends EditorPane {
 				label: 'Status',
 				fieldType: 'status',
 				currentValue: data.status || 'Todo',
-				options: ['Todo', 'In Progress', 'Done', 'Blocked']
+				options: isAgent ? ['idle', 'busy', 'offline', 'active'] : ['Todo', 'In Progress', 'Done', 'Blocked']
 			},
 			{
 				path: '/Attributes/Priority',
@@ -1122,14 +1222,35 @@ export class EntityDetailEditor extends EditorPane {
 				fieldType: 'priority',
 				currentValue: data.priority || 'Medium',
 				options: ['Low', 'Medium', 'High', 'Urgent']
-			},
-			{
+			}
+		];
+
+		if (isAgent) {
+			attrChildren.push(
+				{
+					path: '/Attributes/AI Model',
+					label: 'AI Model',
+					fieldType: 'text',
+					currentValue: agentModel
+				},
+				{
+					path: '/Attributes/Agent Role',
+					label: 'Agent Role',
+					fieldType: 'text',
+					currentValue: agentRole
+				}
+			);
+		} else {
+			attrChildren.push({
 				path: '/Attributes/Current AI Agent',
 				label: 'Current AI Agent',
 				fieldType: 'agent',
 				currentValue: isAgentAssigned ? data.assignedAgentName : 'Unassigned',
 				options: agents.map(a => ({ id: a.id, name: a.name }))
-			},
+			});
+		}
+
+		attrChildren.push(
 			{
 				path: '/Attributes/Link To',
 				label: 'Link To',
@@ -1143,7 +1264,7 @@ export class EntityDetailEditor extends EditorPane {
 				fieldType: 'read_only',
 				currentValue: data.linkedBy && data.linkedBy !== 'None' ? data.linkedBy : 'None'
 			}
-		];
+		);
 		rootNodes.push({
 			path: '/Attributes',
 			label: 'Attributes',
@@ -1311,6 +1432,38 @@ export class EntityDetailEditor extends EditorPane {
 						const updated = this._updateTicketMdContent(content, updates, e.customMetadata);
 						await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
 					}
+					if (this._instructionUri && e.metadata && (e.metadata['Ticket Prompt'] !== undefined || e.metadata['Ticket Type Prompt'] !== undefined || e.metadata['System Prompt'] !== undefined || e.metadata['Instruction Notes'] !== undefined)) {
+						const instContent = await this._safeReadFile(this._instructionUri);
+						const updatedInst = this._updateInstructionContent(instContent, e.metadata);
+						await this._fileService.writeFile(this._instructionUri, VSBuffer.fromString(updatedInst));
+					}
+					if (this._entityType === 'agent' && this._agentsManagerService) {
+						const agents = await this._agentsManagerService.getAgents();
+						const matchingAgent = agents.find(a =>
+							(this._entityUri && a.folderPath && (a.folderPath === this._entityUri.fsPath || a.folderPath.toLowerCase() === this._entityUri.fsPath.toLowerCase())) ||
+							(a.name.toLowerCase() === (e.title || this._lastParsedData?.title || '').toLowerCase()) ||
+							(a.name.toLowerCase() === this._entityName.toLowerCase())
+						);
+						if (matchingAgent) {
+							const updatedAgent: IAgentItem = {
+								...matchingAgent,
+								name: e.title || e.metadata?.['Title'] || matchingAgent.name,
+								role: e.description || e.metadata?.['Description'] || e.metadata?.['Role'] || e.metadata?.['Agent Role'] || matchingAgent.role,
+								description: e.description || e.metadata?.['Description'] || matchingAgent.description,
+								systemPrompt: e.metadata?.['System Prompt'] || e.metadata?.['Instruction Notes'] || matchingAgent.systemPrompt,
+								status: (e.metadata?.['Status'] ? (e.metadata['Status'].toLowerCase() as any) : matchingAgent.status)
+							};
+							if (e.metadata?.['AI Model'] || e.metadata?.['Model'] || e.metadata?.['Model Name']) {
+								const mId = e.metadata['AI Model'] || e.metadata['Model'] || e.metadata['Model Name'];
+								updatedAgent.model = {
+									providerId: matchingAgent.model?.providerId || 'gemini',
+									modelId: mId,
+									credentialId: matchingAgent.model?.credentialId
+								};
+							}
+							await this._agentsManagerService.updateAgent(updatedAgent);
+						}
+					}
 					this._notificationService.info(localize('descSaved', "Saved entity details successfully."));
 					await this._resolvePathsAndLoadData();
 				} catch (err) {
@@ -1336,6 +1489,38 @@ export class EntityDetailEditor extends EditorPane {
 						const content = await this._safeReadFile(this._readmeUri);
 						const updated = this._updateReadmeContent(content, e.metadata['Title'], e.metadata['Description']);
 						await this._fileService.writeFile(this._readmeUri, VSBuffer.fromString(updated));
+					}
+					if (this._instructionUri && e.metadata && (e.metadata['Ticket Prompt'] !== undefined || e.metadata['Ticket Type Prompt'] !== undefined || e.metadata['System Prompt'] !== undefined || e.metadata['Instruction Notes'] !== undefined)) {
+						const instContent = await this._safeReadFile(this._instructionUri);
+						const updatedInst = this._updateInstructionContent(instContent, e.metadata);
+						await this._fileService.writeFile(this._instructionUri, VSBuffer.fromString(updatedInst));
+					}
+					if (this._entityType === 'agent' && this._agentsManagerService) {
+						const agents = await this._agentsManagerService.getAgents();
+						const matchingAgent = agents.find(a =>
+							(this._entityUri && a.folderPath && (a.folderPath === this._entityUri.fsPath || a.folderPath.toLowerCase() === this._entityUri.fsPath.toLowerCase())) ||
+							(a.name.toLowerCase() === (e.metadata?.['Title'] || this._lastParsedData?.title || '').toLowerCase()) ||
+							(a.name.toLowerCase() === this._entityName.toLowerCase())
+						);
+						if (matchingAgent) {
+							const updatedAgent: IAgentItem = {
+								...matchingAgent,
+								name: e.metadata?.['Title'] || matchingAgent.name,
+								role: e.metadata?.['Description'] || e.metadata?.['Role'] || e.metadata?.['Agent Role'] || matchingAgent.role,
+								description: e.metadata?.['Description'] || matchingAgent.description,
+								systemPrompt: e.metadata?.['System Prompt'] || e.metadata?.['Instruction Notes'] || matchingAgent.systemPrompt,
+								status: (e.metadata?.['Status'] ? (e.metadata['Status'].toLowerCase() as any) : matchingAgent.status)
+							};
+							if (e.metadata?.['AI Model'] || e.metadata?.['Model'] || e.metadata?.['Model Name']) {
+								const mId = e.metadata['AI Model'] || e.metadata['Model'] || e.metadata['Model Name'];
+								updatedAgent.model = {
+									providerId: matchingAgent.model?.providerId || 'gemini',
+									modelId: mId,
+									credentialId: matchingAgent.model?.credentialId
+								};
+							}
+							await this._agentsManagerService.updateAgent(updatedAgent);
+						}
 					}
 					this._notificationService.info(localize('metaSaved', "Attributes updated successfully."));
 					await this._resolvePathsAndLoadData();
@@ -1733,6 +1918,39 @@ export class EntityDetailEditor extends EditorPane {
 		const ticketPromptDisplay = (data.ticketPrompt && data.ticketPrompt !== 'None') ? data.ticketPrompt : '';
 		const typePromptDisplay = (data.typePrompt && data.typePrompt !== 'None') ? data.typePrompt : '';
 
+		const isAgent = (data.ticketType || '').toLowerCase() === 'agent';
+		const matchingAgent = agents.find(a =>
+			(this._entityUri && a.folderPath && (a.folderPath === this._entityUri.fsPath || a.folderPath.toLowerCase() === this._entityUri.fsPath.toLowerCase())) ||
+			(a.name.toLowerCase() === (data.title || '').toLowerCase()) ||
+			(a.name.toLowerCase() === (data.ticketId || '').toLowerCase()) ||
+			(a.name.toLowerCase() === this._entityName.toLowerCase())
+		);
+
+		const agentModel = matchingAgent?.model?.modelId || data.metadata['Model Name'] || data.metadata['AI Model'] || data.metadata['Model'] || 'gemini-1.5-flash';
+		const agentProvider = matchingAgent?.model?.providerId || data.metadata['AI Provider'] || data.metadata['Provider'] || (agentModel.startsWith('gpt') ? 'openai' : agentModel.startsWith('claude') ? 'anthropic' : agentModel.startsWith('deepseek') ? 'deepseek' : 'gemini');
+		const agentCredentialId = matchingAgent?.model?.credentialId || data.metadata['Credential ID'] || data.metadata['Credential'] || 'Default Provider Connection';
+		const agentRole = matchingAgent?.role || data.metadata['Role'] || data.description || `${data.workspaceId || 'Workspace'} Agent`;
+		const agentSystemPrompt = matchingAgent?.systemPrompt || data.metadata['System Prompt'] || data.instructionNotes || '';
+		const agentScopeName = matchingAgent?.scopeName || data.metadata['Scope Name'] || data.workspaceId || 'Workspace';
+		const agentStatus = matchingAgent?.status || (data.status === 'Todo' ? 'idle' : data.status.toLowerCase());
+
+		if (isAgent) {
+			status = agentStatus;
+			if (agentStatus === 'busy') {
+				statusColor = '#eab308';
+				statusBg = 'rgba(234, 179, 8, 0.16)';
+				statusBorder = 'rgba(234, 179, 8, 0.35)';
+			} else if (agentStatus === 'offline') {
+				statusColor = '#94a3b8';
+				statusBg = 'rgba(148, 163, 184, 0.16)';
+				statusBorder = 'rgba(148, 163, 184, 0.35)';
+			} else {
+				statusColor = '#22c55e';
+				statusBg = 'rgba(34, 197, 94, 0.16)';
+				statusBorder = 'rgba(34, 197, 94, 0.35)';
+			}
+		}
+
 		return `
 			<style>
 				.entity-detail-editor * {
@@ -1957,34 +2175,97 @@ export class EntityDetailEditor extends EditorPane {
 			<div class="layout-container">
 				<!-- Left Column: Main Stream -->
 				<div class="main-content">
-					<!-- 1. Description Card -->
+					<!-- 1. Description / Role Card -->
 					<div class="section-card">
 						<div class="section-title">
-							<span>Description</span>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Description" data-ai-field-type="textarea" data-ai-field-label="Description" data-ai-current-value="${this._escapeHtmlAttr(data.description)}" title="Edit Description with AI">
+							<div style="display: flex; align-items: center; gap: 8px;">
+								<span>${isAgent ? 'Role & Purpose' : 'Description'}</span>
+							</div>
+							<button type="button" class="ai-edit-btn" data-ai-field="/Description" data-ai-field-type="textarea" data-ai-field-label="${isAgent ? 'Role & Purpose' : 'Description'}" data-ai-current-value="${this._escapeHtmlAttr(data.description)}" title="Edit Description with AI">
 								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							</button>
 						</div>
 						
 						<div id="desc-view-mode" class="desc-content-box">
-							${data.description ? this._markdownToHtml(data.description) : '<span style="opacity: 0.45; font-style: italic;">No description provided.</span>'}
+							${data.description ? this._markdownToHtml(data.description) : `<span style="opacity: 0.45; font-style: italic;">No ${isAgent ? 'role description' : 'description'} provided.</span>`}
 						</div>
 					</div>
 
-					<!-- 2. Instructions Card -->
+					${isAgent ? `
+						<!-- AI Model & Execution Engine Card -->
+						<div class="section-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>AI Model & Execution Engine</span>
+								</div>
+								<div style="display: flex; align-items: center; gap: 8px;">
+									${matchingAgent ? `
+										<button type="button" id="agent-assign-task-btn" data-agent-id="${this._escapeHtmlAttr(matchingAgent.id)}" data-agent-name="${this._escapeHtmlAttr(matchingAgent.name)}" class="btn-primary" style="font-size: 0.8em; padding: 3px 10px;">+ Assign Task</button>
+									` : ''}
+									<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/AI Model" data-ai-field-type="text" data-ai-field-label="AI Model" data-ai-current-value="${this._escapeHtmlAttr(agentModel)}" title="Edit AI Model with AI">
+										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									</button>
+								</div>
+							</div>
+							<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;">
+								<div style="background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;">
+									<div style="font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Active Model</div>
+									<div style="display: flex; align-items: center; gap: 6px;">
+										<span style="display: inline-block; padding: 3px 8px; border-radius: 4px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; font-weight: 700; font-family: monospace; font-size: 0.9em; border: 1px solid rgba(56, 189, 248, 0.3);">${agentModel}</span>
+									</div>
+								</div>
+								<div style="background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;">
+									<div style="font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">AI Provider</div>
+									<div style="font-size: 0.9em; font-weight: 600; text-transform: uppercase; color: #a78bfa;">${agentProvider}</div>
+								</div>
+								<div style="background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;">
+									<div style="font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">API Connection</div>
+									<div style="font-size: 0.88em; opacity: 0.85; word-break: break-word;">${agentCredentialId}</div>
+								</div>
+								<div style="background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;">
+									<div style="font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">Bound Scope</div>
+									<div style="font-size: 0.88em; font-weight: 600; color: #34d399;">${agentScopeName}</div>
+								</div>
+							</div>
+						</div>
+					` : ''}
+
+					<!-- Instructions / System Prompt Card -->
 					<div class="section-card">
 						<div class="section-title">
-							<span>Instructions</span>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Instructions" data-ai-field-type="textarea" data-ai-field-label="Instructions" title="Edit Instructions with AI">
-								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-							</button>
+							<div style="display: flex; align-items: center; gap: 8px;">
+								<span>${isAgent ? 'System Prompt & Persona Instructions' : 'Instructions'}</span>
+							</div>
+							<div style="display: flex; align-items: center; gap: 8px;">
+								${isAgent && agentSystemPrompt ? `
+									<button type="button" id="copy-system-prompt-btn" class="btn-secondary" data-prompt="${this._escapeHtmlAttr(agentSystemPrompt)}" style="font-size: 0.78em; padding: 3px 8px; display: inline-flex; align-items: center; gap: 4px;" title="Copy System Prompt">
+										<span>Copy Prompt</span>
+									</button>
+								` : ''}
+								<button type="button" class="ai-edit-btn" data-ai-field="${isAgent ? '/Instructions/System Prompt' : '/Instructions'}" data-ai-field-type="textarea" data-ai-field-label="${isAgent ? 'System Prompt' : 'Instructions'}" data-ai-current-value="${this._escapeHtmlAttr(agentSystemPrompt || data.instructionNotes || '')}" title="Edit with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
 						</div>
 
 						<div style="display: flex; flex-direction: column; gap: 12px;">
+							${isAgent && agentSystemPrompt ? `
+								<!-- Core Persona / System Prompt Box -->
+								<div class="instruction-item" style="border-left: 3px solid #f472b6; background: rgba(244, 114, 182, 0.04); padding: 14px 18px; border-radius: 0 6px 6px 0; border: 1px solid rgba(244, 114, 182, 0.18); border-left-width: 3px;">
+									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+										<div style="font-size: 0.78em; font-weight: 700; color: #f472b6; letter-spacing: 0.04em; text-transform: uppercase;">Core System Prompt / Persona</div>
+										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/System Prompt" data-ai-field-type="textarea" data-ai-field-label="System Prompt" data-ai-current-value="${this._escapeHtmlAttr(agentSystemPrompt)}" title="Edit System Prompt with AI">
+											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+										</button>
+									</div>
+									<div style="font-size: 0.9em; opacity: 0.95; line-height: 1.6; font-family: var(--vscode-editor-font-family, monospace); white-space: pre-wrap; word-break: break-word;">${this._markdownToHtml(agentSystemPrompt)}</div>
+								</div>
+							` : ''}
+
 							<!-- Ticket Prompt -->
 							<div class="instruction-item" style="border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;">
 								<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-									<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Prompt</div>
+									<div style="font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">${isAgent ? 'Instance Rules / Ticket Prompt' : 'Ticket Prompt'}</div>
 									<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Prompt" data-ai-field-type="textarea" data-ai-field-label="Ticket Prompt" data-ai-current-value="${this._escapeHtmlAttr(data.ticketPrompt || '')}" title="Edit Ticket Prompt with AI">
 										<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 									</button>
@@ -1995,7 +2276,7 @@ export class EntityDetailEditor extends EditorPane {
 							<!-- Ticket Type Prompt -->
 							<div class="instruction-item" style="border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;">
 								<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-									<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">Ticket Type Prompt</div>
+									<div style="font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;">${isAgent ? 'System Type Prompt' : 'Ticket Type Prompt'}</div>
 									<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Ticket Type Prompt" data-ai-field-type="textarea" data-ai-field-label="Ticket Type Prompt" data-ai-current-value="${this._escapeHtmlAttr(typePromptDisplay || '')}" title="Edit Ticket Type Prompt with AI">
 										<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 									</button>
@@ -2003,7 +2284,7 @@ export class EntityDetailEditor extends EditorPane {
 								<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Type Prompt configured.</span>'}</div>
 							</div>
 
-							${data.instructionNotes ? `
+							${data.instructionNotes && (!isAgent || data.instructionNotes !== agentSystemPrompt) ? `
 								<div class="instruction-item" style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
 									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
 										<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
@@ -2017,10 +2298,10 @@ export class EntityDetailEditor extends EditorPane {
 						</div>
 					</div>
 
-					<!-- 3. Custom Properties -->
+					<!-- Custom Properties -->
 					${customFieldsHtml}
 
-					<!-- 4. Attachments Card -->
+					<!-- Attachments Card -->
 					<div class="section-card">
 						<div class="section-title">
 							<span>Attachments (${attachments.length})</span>
@@ -2034,10 +2315,10 @@ export class EntityDetailEditor extends EditorPane {
 						</div>
 					</div>
 
-					<!-- 5. Work Logs Card -->
+					<!-- Work Logs Card -->
 					<div class="section-card">
 						<div class="section-title">
-							<span>Work Logs</span>
+							<span>${isAgent ? 'Task History & Work Logs' : 'Work Logs'}</span>
 							<button id="add-log-btn" class="btn-primary" style="font-size: 0.8em; padding: 4px 10px;">+ Add Log</button>
 						</div>
 						
@@ -2059,7 +2340,7 @@ export class EntityDetailEditor extends EditorPane {
 				<!-- Right Column: Sidebar (Attributes / Information) -->
 				<div class="sidebar">
 					<div class="sidebar-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
-						<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">Attributes</h3>
+						<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">${isAgent ? 'Agent Attributes' : 'Attributes'}</h3>
 						<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" data-ai-field-type="attributes" data-ai-field-label="Attributes" title="Edit Attributes with AI">
 							<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 						</button>
@@ -2074,7 +2355,7 @@ export class EntityDetailEditor extends EditorPane {
 							</button>
 						</div>
 						<div style="padding: 2px 0;">
-							<span id="status-view-val" style="display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px;">${status}</span>
+							<span id="status-view-val" style="display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px; text-transform: uppercase;">${status}</span>
 						</div>
 					</div>
 
@@ -2092,16 +2373,52 @@ export class EntityDetailEditor extends EditorPane {
 						</div>
 					</div>
 
-					<!-- Current AI Agent -->
-					<div class="sidebar-row">
-						<div style="display: flex; justify-content: space-between; align-items: center;">
-							<span class="sidebar-label">CURRENT AI AGENT</span>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Current AI Agent" data-ai-field-type="agent" data-ai-field-label="Current AI Agent" data-ai-current-value="${this._escapeHtmlAttr(data.assignedAgentName || '')}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(agents.map(a => ({ id: a.id, name: a.name }))))}" title="Edit Current AI Agent with AI">
-								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-							</button>
+					${isAgent ? `
+						<!-- AI Model -->
+						<div class="sidebar-row">
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">AI MODEL</span>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/AI Model" data-ai-field-type="text" data-ai-field-label="AI Model" data-ai-current-value="${this._escapeHtmlAttr(agentModel)}" title="Edit AI Model with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<span class="sidebar-value" style="color: #38bdf8; font-weight: 700; font-family: monospace;">${agentModel}</span>
 						</div>
-						<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
-					</div>
+
+						<!-- Provider -->
+						<div class="sidebar-row">
+							<span class="sidebar-label">PROVIDER</span>
+							<span class="sidebar-value" style="text-transform: uppercase; font-size: 0.88em; color: #a78bfa; font-weight: 600;">${agentProvider}</span>
+						</div>
+
+						<!-- Agent Role -->
+						<div class="sidebar-row">
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">AGENT ROLE</span>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Agent Role" data-ai-field-type="text" data-ai-field-label="Agent Role" data-ai-current-value="${this._escapeHtmlAttr(agentRole)}" title="Edit Agent Role with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<span class="sidebar-value" style="font-size: 0.88em;">${agentRole}</span>
+						</div>
+
+						<!-- Scope -->
+						<div class="sidebar-row">
+							<span class="sidebar-label">BOUND SCOPE</span>
+							<span class="sidebar-value" style="font-size: 0.88em; color: #34d399; font-weight: 600;">${agentScopeName}</span>
+						</div>
+					` : `
+						<!-- Current AI Agent -->
+						<div class="sidebar-row">
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span class="sidebar-label">CURRENT AI AGENT</span>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Current AI Agent" data-ai-field-type="agent" data-ai-field-label="Current AI Agent" data-ai-current-value="${this._escapeHtmlAttr(data.assignedAgentName || '')}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(agents.map(a => ({ id: a.id, name: a.name }))))}" title="Edit Current AI Agent with AI">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<span class="meta-view-val sidebar-value">${data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : '<span style="opacity:0.4;">Unassigned</span>'}</span>
+						</div>
+					`}
 
 					<!-- Type Definition -->
 					<div class="sidebar-row">

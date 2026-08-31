@@ -77,5 +77,6 @@ export interface IAgentsManagerService {
 	updateAgent(agent: IAgentItem): Promise<void>;
 	removeAgent(id: string): Promise<void>;
 	repairAgent(id: string): Promise<void>;
+	ensureAgentFolder(id: string): Promise<URI | undefined>;
 	assignTaskToAgent(agentId: string, taskTitle: string, taskDescription?: string): Promise<void>;
 }

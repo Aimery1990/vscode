@@ -293,9 +293,14 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 					entityName: agent.name,
 					entityType: 'agent',
 					ownerAccount: this.activeUserEmail || 'unauthenticated',
-					description: agent.description,
+					description: agent.description || agent.role,
 					role: agent.role,
-					systemPrompt: agent.systemPrompt
+					modelName: agent.model?.modelId || 'gemini-1.5-flash',
+					systemPrompt: agent.systemPrompt,
+					avatarIcon: agent.avatarIcon || 'robot',
+					scopeType: agent.scopeType || 'workspace',
+					scopeId: agent.scopeId || '',
+					scopeName: agent.scopeName || 'Workspace'
 				}, folderUri, false);
 				agent.folderPath = folderUri.fsPath;
 				agent.status = 'idle';
@@ -306,6 +311,28 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 		}
 
 		this._onDidChangeAgents.fire();
+	}
+
+	async ensureAgentFolder(id: string): Promise<URI | undefined> {
+		const agent = await this.getAgent(id);
+		if (!agent) {
+			return undefined;
+		}
+		if (agent.folderPath) {
+			const uri = URI.file(agent.folderPath);
+			if (await this.fileService.exists(uri)) {
+				return uri;
+			}
+		}
+		await this.repairAgent(id);
+		const refreshed = await this.getAgent(id);
+		if (refreshed?.folderPath) {
+			const uri = URI.file(refreshed.folderPath);
+			if (await this.fileService.exists(uri)) {
+				return uri;
+			}
+		}
+		return undefined;
 	}
 
 	async assignTaskToAgent(agentId: string, taskTitle: string, taskDescription = ''): Promise<void> {
