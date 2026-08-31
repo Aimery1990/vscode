@@ -219,6 +219,23 @@ function parseYaml(yaml: string): any {
 	return parseBlock(0) || {};
 }
 
+function getTicketTypeBadge(type: string): { color: string; bg: string } {
+	const t = (type || 'task').toLowerCase();
+	switch (t) {
+		case 'job': return { color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.18)' };
+		case 'task': return { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.18)' };
+		case 'project': return { color: '#60a5fa', bg: 'rgba(96, 165, 250, 0.18)' };
+		case 'workflow': return { color: '#0d9488', bg: 'rgba(13, 148, 136, 0.18)' };
+		case 'agent': return { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.18)' };
+		case 'case': return { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.18)' };
+		case 'issue': return { color: '#ef4444', bg: 'rgba(239, 68, 68, 0.18)' };
+		case 'analysis': return { color: '#34d399', bg: 'rgba(52, 211, 153, 0.18)' };
+		case 'note': return { color: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.18)' };
+		case 'workspace': return { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.18)' };
+		default: return { color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.18)' };
+	}
+}
+
 function getColorForName(name: string | undefined): string {
 	if (!name) return '#38bdf8';
 	const MODERN_PALETTE = [
@@ -1485,13 +1502,185 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}).catch(() => {});
 		}
 
-		// Link To Input (Full width)
-		const linkBox = append(modalBody, $('.form-group'));
+		// Link To Multi-Select Section
+		const linkBox = append(modalBody, $('.form-group', { style: 'position: relative;' }));
 		append(linkBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Link To:'));
-		const linkInput = append(linkBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+
+		const selectedWsLinkTickets: string[] = [];
+		const wsLinkChipsContainer = append(linkBox, $('.link-chips-container', {
+			style: 'display: none; flex-wrap: wrap; gap: 6px; margin-bottom: 6px;'
+		}));
+
+		const wsLinkInputWrapper = append(linkBox, $('.link-input-wrapper', {
+			style: 'position: relative; display: flex; align-items: center;'
+		}));
+
+		const wsLinkSearchInput = append(wsLinkInputWrapper, $('input.monaco-inputbox', {
+			placeholder: 'Select or search tickets to link...',
+			style: 'width: 100%; padding: 7px 28px 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; outline: none; cursor: pointer;'
 		})) as HTMLInputElement;
-		linkInput.placeholder = 'e.g., None, PROJ-0001, or URL';
+
+		const wsLinkDropdownArrow = append(wsLinkInputWrapper, $('div', {
+			style: 'position: absolute; right: 10px; font-size: 9px; opacity: 0.6; pointer-events: none; user-select: none;'
+		}));
+		wsLinkDropdownArrow.textContent = '▼';
+
+		const wsLinkDropdownMenu = append(linkBox, $('.link-dropdown-menu', {
+			style: 'position: absolute; top: 100%; left: 0; right: 0; max-height: 200px; overflow-y: auto; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15)); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); z-index: 100005; display: none; margin-top: 4px; box-sizing: border-box; padding: 4px 0;'
+		}));
+
+		let wsAvailableTickets: Array<{ id: string; code: string; title: string; summary: string; type: string; workspaceId: string; workspaceName: string; uri: string }> = [];
+
+		const renderWsLinkChips = () => {
+			clearNode(wsLinkChipsContainer);
+			if (selectedWsLinkTickets.length === 0) {
+				wsLinkChipsContainer.style.display = 'none';
+				return;
+			}
+			wsLinkChipsContainer.style.display = 'flex';
+			for (let i = 0; i < selectedWsLinkTickets.length; i++) {
+				const ticketId = selectedWsLinkTickets[i];
+				const ticketObj = wsAvailableTickets.find(t => t.id === ticketId || t.code === ticketId);
+				const badgeInfo = getTicketTypeBadge(ticketObj?.type || 'task');
+				const chip = append(wsLinkChipsContainer, $('.link-chip', {
+					style: `display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); padding: 3px 8px; border-radius: 5px; font-size: 11px;`
+				}));
+
+				if (ticketObj) {
+					const typeBadge = append(chip, $('span', {
+						style: `font-size: 8.5px; font-weight: 700; color: ${badgeInfo.color}; background: ${badgeInfo.bg}; padding: 1px 4px; border-radius: 3px; text-transform: uppercase;`
+					}));
+					typeBadge.textContent = ticketObj.type;
+				}
+
+				const titleSpan = append(chip, $('span', { style: 'font-weight: 500;' }));
+				titleSpan.textContent = ticketObj ? `${ticketObj.id} (${ticketObj.title})` : ticketId;
+
+				const removeBtn = append(chip, $('span', {
+					style: 'cursor: pointer; opacity: 0.6; margin-left: 2px; font-size: 11px;'
+				}));
+				removeBtn.textContent = '✕';
+				removeBtn.onmouseenter = () => { removeBtn.style.opacity = '1.0'; };
+				removeBtn.onmouseleave = () => { removeBtn.style.opacity = '0.6'; };
+				removeBtn.onclick = (e) => {
+					e.stopPropagation();
+					selectedWsLinkTickets.splice(i, 1);
+					renderWsLinkChips();
+					renderWsLinkDropdown();
+				};
+			}
+		};
+
+		const renderWsLinkDropdown = () => {
+			clearNode(wsLinkDropdownMenu);
+			const query = wsLinkSearchInput.value.toLowerCase().trim();
+
+			const filtered = wsAvailableTickets.filter(t => {
+				if (!query) return true;
+				const haystack = `${t.id} ${t.code} ${t.title} ${t.summary} ${t.type} ${t.workspaceName}`.toLowerCase();
+				return haystack.includes(query);
+			});
+
+			if (filtered.length === 0) {
+				const emptyItem = append(wsLinkDropdownMenu, $('.dropdown-empty', {
+					style: 'padding: 10px 14px; font-size: 11.5px; opacity: 0.6; font-style: italic;'
+				}));
+				emptyItem.textContent = query ? `No tickets matching "${query}". Press Enter to link as custom ID.` : 'No available tickets found in workspace.';
+			} else {
+				filtered.forEach(ticket => {
+					const isChecked = selectedWsLinkTickets.includes(ticket.id) || selectedWsLinkTickets.includes(ticket.code);
+					const badgeInfo = getTicketTypeBadge(ticket.type);
+
+					const item = append(wsLinkDropdownMenu, $('.ticket-dropdown-item', {
+						style: `display: flex; align-items: center; justify-content: space-between; padding: 7px 12px; cursor: pointer; transition: background 0.1s ease; border-bottom: 1px solid rgba(255,255,255,0.03); background: ${isChecked ? 'rgba(56, 189, 248, 0.08)' : 'transparent'};`
+					}));
+
+					item.onmouseenter = () => {
+						item.style.background = isChecked ? 'rgba(56, 189, 248, 0.15)' : 'var(--vscode-list-hoverBackground, rgba(255,255,255,0.06))';
+					};
+					item.onmouseleave = () => {
+						item.style.background = isChecked ? 'rgba(56, 189, 248, 0.08)' : 'transparent';
+					};
+
+					const leftInfo = append(item, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;' }));
+
+					const checkbox = append(leftInfo, $('input', {
+						type: 'checkbox',
+						style: 'cursor: pointer; accent-color: #38bdf8;'
+					})) as HTMLInputElement;
+					checkbox.checked = isChecked;
+
+					const typeBadge = append(leftInfo, $('span', {
+						style: `font-size: 8.5px; font-weight: 700; color: ${badgeInfo.color}; background: ${badgeInfo.bg}; padding: 1px 5px; border-radius: 3px; text-transform: uppercase; flex-shrink: 0;`
+					}));
+					typeBadge.textContent = ticket.type;
+
+					const textCol = append(leftInfo, $('div', { style: 'display: flex; flex-direction: column; min-width: 0;' }));
+					const idTitleRow = append(textCol, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
+					append(idTitleRow, $('span', { style: 'font-weight: 600; font-size: 11.5px; color: #38bdf8;' }, ticket.id));
+					if (ticket.title) {
+						append(idTitleRow, $('span', { style: 'font-size: 11.5px; opacity: 0.9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;' }, ` - ${ticket.title}`));
+					}
+
+					append(item, $('span', {
+						style: 'font-size: 10px; opacity: 0.5; margin-left: 8px; flex-shrink: 0;'
+					}, ticket.workspaceName));
+
+					const toggleItem = (e: Event) => {
+						e.stopPropagation();
+						const idx = selectedWsLinkTickets.indexOf(ticket.id);
+						if (idx !== -1) {
+							selectedWsLinkTickets.splice(idx, 1);
+						} else {
+							selectedWsLinkTickets.push(ticket.id);
+						}
+						renderWsLinkChips();
+						renderWsLinkDropdown();
+					};
+
+					item.onclick = toggleItem;
+				});
+			}
+		};
+
+		this._loadAllAvailableTickets().then(tickets => {
+			wsAvailableTickets = tickets;
+			renderWsLinkChips();
+			renderWsLinkDropdown();
+		});
+
+		wsLinkSearchInput.onclick = (e) => {
+			e.stopPropagation();
+			wsLinkDropdownMenu.style.display = 'block';
+			renderWsLinkDropdown();
+		};
+
+		wsLinkSearchInput.oninput = () => {
+			wsLinkDropdownMenu.style.display = 'block';
+			renderWsLinkDropdown();
+		};
+
+		wsLinkSearchInput.onkeydown = (e: KeyboardEvent) => {
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				const val = wsLinkSearchInput.value.trim();
+				if (val && !selectedWsLinkTickets.includes(val)) {
+					selectedWsLinkTickets.push(val);
+					wsLinkSearchInput.value = '';
+					renderWsLinkChips();
+					renderWsLinkDropdown();
+				}
+			} else if (e.key === 'Escape') {
+				wsLinkDropdownMenu.style.display = 'none';
+			}
+		};
+
+		const wsLinkClickListener = (e: MouseEvent) => {
+			if (e.target !== wsLinkSearchInput && !wsLinkDropdownMenu.contains(e.target as Node)) {
+				wsLinkDropdownMenu.style.display = 'none';
+			}
+		};
+		document.addEventListener('click', wsLinkClickListener);
 
 		// Attachments Section (Full width)
 		const attachBox = append(modalBody, $('.form-group'));
@@ -1612,12 +1801,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 					priority: selectedPriority,
 					assignedAgentId: assignedAgentId,
 					assignedAgentName: matchingAgent ? matchingAgent.name : undefined,
-					linkTo: linkInput.value.trim() || undefined,
+					linkTo: selectedWsLinkTickets.length > 0 ? selectedWsLinkTickets.join(', ') : undefined,
 					attachments: selectedAttachments.length > 0 ? selectedAttachments : undefined,
 					typePrompt: typePromptInput.value.trim() || undefined,
 					ticketPrompt: ticketPromptInput.value.trim() || undefined
 				});
 
+				document.removeEventListener('click', wsLinkClickListener);
 				overlay.remove();
 
 				if (res.alreadyExists) {
@@ -2066,6 +2256,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 			if (e.target !== modelInput && !modelDropdown.contains(e.target as Node)) {
 				modelDropdown.style.display = 'none';
 			}
+			if (typeof linkSearchInput !== 'undefined' && typeof linkDropdownMenu !== 'undefined') {
+				if (e.target !== linkSearchInput && !linkDropdownMenu.contains(e.target as Node)) {
+					linkDropdownMenu.style.display = 'none';
+				}
+			}
 		};
 		document.addEventListener('click', clickListener);
 
@@ -2181,13 +2376,178 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 		}).catch(() => { });
 
-		// Link To Input
-		const linkBox = append(modalBody, $('.form-group'));
+		// Link To Multi-Select Section
+		const linkBox = append(modalBody, $('.form-group', { style: 'position: relative;' }));
 		append(linkBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Link To:'));
-		const linkToInput = append(linkBox, $('input.monaco-inputbox', {
-			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+
+		const selectedLinkTickets: string[] = [];
+		const linkChipsContainer = append(linkBox, $('.link-chips-container', {
+			style: 'display: none; flex-wrap: wrap; gap: 6px; margin-bottom: 6px;'
+		}));
+
+		const linkInputWrapper = append(linkBox, $('.link-input-wrapper', {
+			style: 'position: relative; display: flex; align-items: center;'
+		}));
+
+		const linkSearchInput = append(linkInputWrapper, $('input.monaco-inputbox', {
+			placeholder: 'Select or search tickets to link...',
+			style: 'width: 100%; padding: 7px 28px 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; outline: none; cursor: pointer;'
 		})) as HTMLInputElement;
-		linkToInput.placeholder = 'e.g., None, PROJ-0001, or URL';
+
+		const linkDropdownArrow = append(linkInputWrapper, $('div', {
+			style: 'position: absolute; right: 10px; font-size: 9px; opacity: 0.6; pointer-events: none; user-select: none;'
+		}));
+		linkDropdownArrow.textContent = '▼';
+
+		const linkDropdownMenu = append(linkBox, $('.link-dropdown-menu', {
+			style: 'position: absolute; top: 100%; left: 0; right: 0; max-height: 200px; overflow-y: auto; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15)); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.6); z-index: 100005; display: none; margin-top: 4px; box-sizing: border-box; padding: 4px 0;'
+		}));
+
+		let availableTickets: Array<{ id: string; code: string; title: string; summary: string; type: string; workspaceId: string; workspaceName: string; uri: string }> = [];
+
+		const renderLinkChips = () => {
+			clearNode(linkChipsContainer);
+			if (selectedLinkTickets.length === 0) {
+				linkChipsContainer.style.display = 'none';
+				return;
+			}
+			linkChipsContainer.style.display = 'flex';
+			for (let i = 0; i < selectedLinkTickets.length; i++) {
+				const ticketId = selectedLinkTickets[i];
+				const ticketObj = availableTickets.find(t => t.id === ticketId || t.code === ticketId);
+				const badgeInfo = getTicketTypeBadge(ticketObj?.type || 'task');
+				const chip = append(linkChipsContainer, $('.link-chip', {
+					style: `display: inline-flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); padding: 3px 8px; border-radius: 5px; font-size: 11px;`
+				}));
+
+				if (ticketObj) {
+					const typeBadge = append(chip, $('span', {
+						style: `font-size: 8.5px; font-weight: 700; color: ${badgeInfo.color}; background: ${badgeInfo.bg}; padding: 1px 4px; border-radius: 3px; text-transform: uppercase;`
+					}));
+					typeBadge.textContent = ticketObj.type;
+				}
+
+				const titleSpan = append(chip, $('span', { style: 'font-weight: 500;' }));
+				titleSpan.textContent = ticketObj ? `${ticketObj.id} (${ticketObj.title})` : ticketId;
+
+				const removeBtn = append(chip, $('span', {
+					style: 'cursor: pointer; opacity: 0.6; margin-left: 2px; font-size: 11px;'
+				}));
+				removeBtn.textContent = '✕';
+				removeBtn.onmouseenter = () => { removeBtn.style.opacity = '1.0'; };
+				removeBtn.onmouseleave = () => { removeBtn.style.opacity = '0.6'; };
+				removeBtn.onclick = (e) => {
+					e.stopPropagation();
+					selectedLinkTickets.splice(i, 1);
+					renderLinkChips();
+					renderLinkDropdown();
+				};
+			}
+		};
+
+		const renderLinkDropdown = () => {
+			clearNode(linkDropdownMenu);
+			const query = linkSearchInput.value.toLowerCase().trim();
+
+			const filtered = availableTickets.filter(t => {
+				if (!query) return true;
+				const haystack = `${t.id} ${t.code} ${t.title} ${t.summary} ${t.type} ${t.workspaceName}`.toLowerCase();
+				return haystack.includes(query);
+			});
+
+			if (filtered.length === 0) {
+				const emptyItem = append(linkDropdownMenu, $('.dropdown-empty', {
+					style: 'padding: 10px 14px; font-size: 11.5px; opacity: 0.6; font-style: italic;'
+				}));
+				emptyItem.textContent = query ? `No tickets matching "${query}". Press Enter to link as custom ID.` : 'No available tickets found in workspace.';
+			} else {
+				filtered.forEach(ticket => {
+					const isChecked = selectedLinkTickets.includes(ticket.id) || selectedLinkTickets.includes(ticket.code);
+					const badgeInfo = getTicketTypeBadge(ticket.type);
+
+					const item = append(linkDropdownMenu, $('.ticket-dropdown-item', {
+						style: `display: flex; align-items: center; justify-content: space-between; padding: 7px 12px; cursor: pointer; transition: background 0.1s ease; border-bottom: 1px solid rgba(255,255,255,0.03); background: ${isChecked ? 'rgba(56, 189, 248, 0.08)' : 'transparent'};`
+					}));
+
+					item.onmouseenter = () => {
+						item.style.background = isChecked ? 'rgba(56, 189, 248, 0.15)' : 'var(--vscode-list-hoverBackground, rgba(255,255,255,0.06))';
+					};
+					item.onmouseleave = () => {
+						item.style.background = isChecked ? 'rgba(56, 189, 248, 0.08)' : 'transparent';
+					};
+
+					const leftInfo = append(item, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;' }));
+
+					const checkbox = append(leftInfo, $('input', {
+						type: 'checkbox',
+						style: 'cursor: pointer; accent-color: #38bdf8;'
+					})) as HTMLInputElement;
+					checkbox.checked = isChecked;
+
+					const typeBadge = append(leftInfo, $('span', {
+						style: `font-size: 8.5px; font-weight: 700; color: ${badgeInfo.color}; background: ${badgeInfo.bg}; padding: 1px 5px; border-radius: 3px; text-transform: uppercase; flex-shrink: 0;`
+					}));
+					typeBadge.textContent = ticket.type;
+
+					const textCol = append(leftInfo, $('div', { style: 'display: flex; flex-direction: column; min-width: 0;' }));
+					const idTitleRow = append(textCol, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
+					append(idTitleRow, $('span', { style: 'font-weight: 600; font-size: 11.5px; color: #38bdf8;' }, ticket.id));
+					if (ticket.title) {
+						append(idTitleRow, $('span', { style: 'font-size: 11.5px; opacity: 0.9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;' }, ` - ${ticket.title}`));
+					}
+
+					append(item, $('span', {
+						style: 'font-size: 10px; opacity: 0.5; margin-left: 8px; flex-shrink: 0;'
+					}, ticket.workspaceName));
+
+					const toggleItem = (e: Event) => {
+						e.stopPropagation();
+						const idx = selectedLinkTickets.indexOf(ticket.id);
+						if (idx !== -1) {
+							selectedLinkTickets.splice(idx, 1);
+						} else {
+							selectedLinkTickets.push(ticket.id);
+						}
+						renderLinkChips();
+						renderLinkDropdown();
+					};
+
+					item.onclick = toggleItem;
+				});
+			}
+		};
+
+		this._loadAllAvailableTickets().then(tickets => {
+			availableTickets = tickets;
+			renderLinkChips();
+			renderLinkDropdown();
+		});
+
+		linkSearchInput.onclick = (e) => {
+			e.stopPropagation();
+			linkDropdownMenu.style.display = 'block';
+			renderLinkDropdown();
+		};
+
+		linkSearchInput.oninput = () => {
+			linkDropdownMenu.style.display = 'block';
+			renderLinkDropdown();
+		};
+
+		linkSearchInput.onkeydown = (e: KeyboardEvent) => {
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				const val = linkSearchInput.value.trim();
+				if (val && !selectedLinkTickets.includes(val)) {
+					selectedLinkTickets.push(val);
+					linkSearchInput.value = '';
+					renderLinkChips();
+					renderLinkDropdown();
+				}
+			} else if (e.key === 'Escape') {
+				linkDropdownMenu.style.display = 'none';
+			}
+		};
 
 		// Attachments Section
 		const attachBox = append(modalBody, $('.form-group'));
@@ -2834,7 +3194,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					description: descInput.value.trim() || undefined,
 					typeDefinition: (typeDefInput.value.trim() && typeDefInput.value.trim() !== 'Built-in (System)' && typeDefInput.value.trim() !== 'None') ? typeDefInput.value.trim() : undefined,
 					typePrompt: typePromptInput.value.trim() || undefined,
-					linkTo: linkToInput.value.trim() || undefined,
+					linkTo: selectedLinkTickets.length > 0 ? selectedLinkTickets.join(', ') : undefined,
 					attachments: selectedAttachments.length > 0 ? selectedAttachments : undefined,
 					agentModel: agentModelOpt,
 					agentSystemPrompt: selectedType === 'agent' ? promptInput.value.trim() : undefined,
@@ -4078,6 +4438,154 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 
 		await renderManagerContent();
+	}
+
+	private async _resolveFileUri(baseUri: URI, name: string): Promise<URI> {
+		const agentsDir = URI.joinPath(baseUri, '.agents');
+		const pathInAgents = URI.joinPath(agentsDir, name);
+		if (await this.fileService.exists(pathInAgents)) {
+			return pathInAgents;
+		}
+		const pathInRoot = URI.joinPath(baseUri, name);
+		if (await this.fileService.exists(pathInRoot)) {
+			return pathInRoot;
+		}
+		return pathInAgents;
+	}
+
+	private async _safeReadFile(uri: URI | undefined): Promise<string> {
+		if (uri && await this.fileService.exists(uri)) {
+			try {
+				const content = await this.fileService.readFile(uri);
+				return content.value.toString();
+			} catch { }
+		}
+		return '';
+	}
+
+	private _parseMetadata(content: string): { [key: string]: string } {
+		const metadata: { [key: string]: string } = {};
+		const lines = (content || '').split(/\r?\n/);
+		for (const line of lines) {
+			const match = line.match(/^\s*-\s*\*\*([^*]+)\*\*:\s*(.*)$/);
+			if (match) {
+				const key = match[1].trim();
+				const val = match[2].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				metadata[key] = val;
+			}
+		}
+		return metadata;
+	}
+
+	private _extractEntityTitleAndSummary(meta: { [key: string]: string }, readmeContent: string, fallbackName: string): { title: string; summary: string } {
+		let title = meta['Title'] || meta['Entity Name'] || '';
+		let summary = meta['Description'] || meta['Summary'] || '';
+
+		if (!summary && readmeContent) {
+			const lines = readmeContent.split(/\r?\n/);
+			for (const line of lines) {
+				const descMatch = line.match(/^\s*-\s*\*\*Description\*\*:\s*(.*)$/i);
+				if (descMatch && descMatch[1].trim() && descMatch[1].trim() !== 'None') {
+					summary = descMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+					break;
+				}
+			}
+			if (!summary) {
+				for (const line of lines) {
+					const trimmed = line.trim();
+					if (trimmed && !trimmed.startsWith('#') && !trimmed.startsWith('-') && !trimmed.startsWith('*') && !trimmed.startsWith('`') && !trimmed.startsWith('---')) {
+						summary = trimmed;
+						break;
+					}
+				}
+			}
+		}
+
+		if (!title || title === fallbackName || title === meta['Ticket ID']) {
+			if (summary) {
+				title = summary;
+				summary = '';
+			} else {
+				title = fallbackName.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+			}
+		}
+
+		if (summary.length > 80) {
+			summary = summary.substring(0, 77) + '...';
+		}
+
+		return { title, summary };
+	}
+
+	private async _loadAllAvailableTickets(): Promise<Array<{ id: string; code: string; title: string; summary: string; type: string; workspaceId: string; workspaceName: string; uri: string }>> {
+		const result: Array<{ id: string; code: string; title: string; summary: string; type: string; workspaceId: string; workspaceName: string; uri: string }> = [];
+		try {
+			const workspaces = await this.workspacesExplorerService.getWorkspaces();
+
+			for (const ws of workspaces) {
+				const wsTargetBase = ws.uri.path.endsWith('.code-workspace') ? dirname(ws.uri) : ws.uri;
+				const wsName = ws.name || wsTargetBase.path.split('/').filter(Boolean).pop() || 'Workspace';
+
+				// 1. Check workspace root ticket
+				const wsTicketUri = await this._resolveFileUri(wsTargetBase, 'ticket.md');
+				const wsReadmeUri = await this._resolveFileUri(wsTargetBase, 'README.md');
+				if (wsTicketUri && (await this.fileService.exists(wsTicketUri))) {
+					const content = await this._safeReadFile(wsTicketUri);
+					const readmeContent = await this._safeReadFile(wsReadmeUri);
+					const meta = this._parseMetadata(content);
+					const tId = meta['Ticket ID'] || meta['Entity ID'] || ws.name;
+					const rawCode = meta['Ticket Code'] || meta['Entity Code'] || meta['Code'];
+					const tCode = (rawCode && rawCode !== 'None') ? rawCode : tId;
+					const { title: tTitle, summary: tSummary } = this._extractEntityTitleAndSummary(meta, readmeContent, ws.name);
+					const tType = meta['Ticket Type'] || meta['Entity Type'] || 'workspace';
+					if (tId && !result.some(r => r.id === tId)) {
+						result.push({
+							id: tId,
+							code: tCode,
+							title: tTitle,
+							summary: tSummary,
+							type: tType,
+							workspaceId: meta['Workspace ID'] || ws.name,
+							workspaceName: wsName,
+							uri: wsTargetBase.toString()
+						});
+					}
+				}
+
+				// 2. Scan children of workspace
+				const children = await this.workspacesExplorerService.scanWorkspaceChildren(ws.uri);
+				for (const child of children) {
+					if (child.type === 'file') continue;
+					const childTicketUri = await this._resolveFileUri(child.uri, 'ticket.md');
+					const childReadmeUri = await this._resolveFileUri(child.uri, 'README.md');
+					if (childTicketUri && (await this.fileService.exists(childTicketUri))) {
+						const content = await this._safeReadFile(childTicketUri);
+						const readmeContent = await this._safeReadFile(childReadmeUri);
+						const meta = this._parseMetadata(content);
+						const tId = meta['Ticket ID'] || meta['Entity ID'] || child.name;
+						const rawCode = meta['Ticket Code'] || meta['Entity Code'] || meta['Code'];
+						const tCode = (rawCode && rawCode !== 'None') ? rawCode : tId;
+						const { title: tTitle, summary: tSummary } = this._extractEntityTitleAndSummary(meta, readmeContent, child.name);
+						const tType = meta['Ticket Type'] || meta['Entity Type'] || child.type || 'task';
+						if (tId && !result.some(r => r.id === tId)) {
+							result.push({
+								id: tId,
+								code: tCode,
+								title: tTitle,
+								summary: tSummary,
+								type: tType,
+								workspaceId: meta['Workspace ID'] || ws.name,
+								workspaceName: wsName,
+								uri: child.uri.toString()
+							});
+						}
+					}
+				}
+			}
+		} catch (err) {
+			console.error('Failed to load available tickets for linking:', err);
+		}
+		return result;
 	}
 }
 
