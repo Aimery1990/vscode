@@ -200,6 +200,10 @@ export class WorkflowEditor extends EditorPane {
 	private _zoomLevel: number = 1.0;
 	private _zoomSizerEl?: HTMLElement;
 	private _floatingZoomBadgeEl?: HTMLElement;
+	private static readonly DEFAULT_CANVAS_WIDTH = 8000;
+	private static readonly DEFAULT_CANVAS_HEIGHT = 6000;
+	private _currentCanvasWidth: number = WorkflowEditor.DEFAULT_CANVAS_WIDTH;
+	private _currentCanvasHeight: number = WorkflowEditor.DEFAULT_CANVAS_HEIGHT;
 	private _isToolbarCompact: boolean = false;
 	private _inspectorEl?: HTMLElement;
 	private _isInspectorCompact: boolean = false;
@@ -442,13 +446,13 @@ export class WorkflowEditor extends EditorPane {
 
 		// Sizer container to enforce scroll boundaries when zoomed
 		this._zoomSizerEl = append(canvasWrapper, $('.workflow-canvas-sizer'));
-		this._zoomSizerEl.style.width = `${2400 * this._zoomLevel}px`;
-		this._zoomSizerEl.style.height = `${2000 * this._zoomLevel}px`;
 		this._zoomSizerEl.style.position = 'relative';
 
 		this._canvas = append(this._zoomSizerEl, $('.workflow-editor-canvas'));
 		this._canvas.style.transform = `scale(${this._zoomLevel})`;
 		this._canvas.style.transformOrigin = '0 0';
+
+		this._updateCanvasDimensions();
 
 		// SVG Overlay
 		this._svgOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg') as any;
@@ -1480,6 +1484,41 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
+	private _updateCanvasDimensions(additionalX?: number, additionalY?: number): void {
+		let maxRight = WorkflowEditor.DEFAULT_CANVAS_WIDTH;
+		let maxBottom = WorkflowEditor.DEFAULT_CANVAS_HEIGHT;
+
+		if (this._data && Array.isArray(this._data.nodes)) {
+			for (const node of this._data.nodes) {
+				const right = (node.x || 0) + (node.width || 120) + 1200;
+				const bottom = (node.y || 0) + (node.height || 50) + 1000;
+				if (right > maxRight) maxRight = right;
+				if (bottom > maxBottom) maxBottom = bottom;
+			}
+		}
+
+		if (additionalX !== undefined) {
+			const candidateX = additionalX + 1200;
+			if (candidateX > maxRight) maxRight = candidateX;
+		}
+		if (additionalY !== undefined) {
+			const candidateY = additionalY + 1000;
+			if (candidateY > maxBottom) maxBottom = candidateY;
+		}
+
+		this._currentCanvasWidth = Math.ceil(maxRight);
+		this._currentCanvasHeight = Math.ceil(maxBottom);
+
+		if (this._canvas) {
+			this._canvas.style.width = `${this._currentCanvasWidth}px`;
+			this._canvas.style.height = `${this._currentCanvasHeight}px`;
+		}
+		if (this._zoomSizerEl) {
+			this._zoomSizerEl.style.width = `${this._currentCanvasWidth * this._zoomLevel}px`;
+			this._zoomSizerEl.style.height = `${this._currentCanvasHeight * this._zoomLevel}px`;
+		}
+	}
+
 	private _setZoom(level: number): void {
 		this._zoomLevel = Math.max(0.25, Math.min(2.0, Math.round(level * 100) / 100));
 		if (this._canvas) {
@@ -1487,8 +1526,8 @@ export class WorkflowEditor extends EditorPane {
 			this._canvas.style.transformOrigin = '0 0';
 		}
 		if (this._zoomSizerEl) {
-			this._zoomSizerEl.style.width = `${2400 * this._zoomLevel}px`;
-			this._zoomSizerEl.style.height = `${2000 * this._zoomLevel}px`;
+			this._zoomSizerEl.style.width = `${this._currentCanvasWidth * this._zoomLevel}px`;
+			this._zoomSizerEl.style.height = `${this._currentCanvasHeight * this._zoomLevel}px`;
 		}
 		const zoomText = `${Math.round(this._zoomLevel * 100)}%`;
 		if (this._floatingZoomBadgeEl) {
@@ -1533,6 +1572,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _renderNodes(): void {
+		this._updateCanvasDimensions();
 		if (!this._nodesContainer) return;
 		clearNode(this._nodesContainer);
 
@@ -2124,11 +2164,31 @@ export class WorkflowEditor extends EditorPane {
 			this._renderInspector(this._inspectorEl);
 		}
 
+		this._updateCanvasDimensions(childX + nodeW, childY + nodeH);
+
 		setTimeout(() => {
 			if (this._nodesContainer) {
 				const newNodeEl = this._nodesContainer.querySelector(`.workflow-node[data-node-id="${newId}"]`) as HTMLElement;
 				if (newNodeEl) {
 					this._showInlineEditor(newNodeEl, newChild);
+				}
+			}
+			const wrapper = this._canvas?.closest('.workflow-editor-canvas-wrapper') as HTMLElement;
+			if (wrapper) {
+				const nodeScreenLeft = childX * this._zoomLevel;
+				const nodeScreenTop = childY * this._zoomLevel;
+				const nodeScreenRight = (childX + nodeW) * this._zoomLevel;
+				const nodeScreenBottom = (childY + nodeH) * this._zoomLevel;
+
+				if (nodeScreenRight > wrapper.scrollLeft + wrapper.clientWidth - 40) {
+					wrapper.scrollTo({ left: nodeScreenRight - wrapper.clientWidth + 120, behavior: 'smooth' });
+				} else if (nodeScreenLeft < wrapper.scrollLeft + 40) {
+					wrapper.scrollTo({ left: Math.max(0, nodeScreenLeft - 100), behavior: 'smooth' });
+				}
+				if (nodeScreenBottom > wrapper.scrollTop + wrapper.clientHeight - 40) {
+					wrapper.scrollTo({ top: nodeScreenBottom - wrapper.clientHeight + 120, behavior: 'smooth' });
+				} else if (nodeScreenTop < wrapper.scrollTop + 40) {
+					wrapper.scrollTo({ top: Math.max(0, nodeScreenTop - 100), behavior: 'smooth' });
 				}
 			}
 		}, 60);
@@ -2233,11 +2293,31 @@ export class WorkflowEditor extends EditorPane {
 			this._renderInspector(this._inspectorEl);
 		}
 
+		this._updateCanvasDimensions(siblingX + (current.width || 120), siblingY + (current.height || 50));
+
 		setTimeout(() => {
 			if (this._nodesContainer) {
 				const newNodeEl = this._nodesContainer.querySelector(`.workflow-node[data-node-id="${newId}"]`) as HTMLElement;
 				if (newNodeEl) {
 					this._showInlineEditor(newNodeEl, newSibling);
+				}
+			}
+			const wrapper = this._canvas?.closest('.workflow-editor-canvas-wrapper') as HTMLElement;
+			if (wrapper) {
+				const nodeScreenLeft = siblingX * this._zoomLevel;
+				const nodeScreenTop = siblingY * this._zoomLevel;
+				const nodeScreenRight = (siblingX + (current.width || 120)) * this._zoomLevel;
+				const nodeScreenBottom = (siblingY + (current.height || 50)) * this._zoomLevel;
+
+				if (nodeScreenRight > wrapper.scrollLeft + wrapper.clientWidth - 40) {
+					wrapper.scrollTo({ left: nodeScreenRight - wrapper.clientWidth + 120, behavior: 'smooth' });
+				} else if (nodeScreenLeft < wrapper.scrollLeft + 40) {
+					wrapper.scrollTo({ left: Math.max(0, nodeScreenLeft - 100), behavior: 'smooth' });
+				}
+				if (nodeScreenBottom > wrapper.scrollTop + wrapper.clientHeight - 40) {
+					wrapper.scrollTo({ top: nodeScreenBottom - wrapper.clientHeight + 120, behavior: 'smooth' });
+				} else if (nodeScreenTop < wrapper.scrollTop + 40) {
+					wrapper.scrollTo({ top: Math.max(0, nodeScreenTop - 100), behavior: 'smooth' });
 				}
 			}
 		}, 60);
@@ -2556,12 +2636,27 @@ export class WorkflowEditor extends EditorPane {
 			const deltaX = Math.round(dx / grid) * grid;
 			const deltaY = Math.round(dy / grid) * grid;
 
+			let needExpand = false;
+			let maxNodeRight = 0;
+			let maxNodeBottom = 0;
+
 			// Update positions of all dragged nodes
 			for (const [nid, startPos] of this._draggedNodesStartPos) {
 				const node = this._data.nodes.find(item => item.id === nid);
 				if (node) {
 					node.x = Math.max(10, startPos.x + deltaX);
 					node.y = Math.max(10, startPos.y + deltaY);
+
+					const right = node.x + (node.width || 120);
+					const bottom = node.y + (node.height || 50);
+					if (right > this._currentCanvasWidth - 400) {
+						needExpand = true;
+						maxNodeRight = Math.max(maxNodeRight, right);
+					}
+					if (bottom > this._currentCanvasHeight - 400) {
+						needExpand = true;
+						maxNodeBottom = Math.max(maxNodeBottom, bottom);
+					}
 
 					// Dynamically update position in DOM
 					const nodes = this._nodesContainer?.children;
@@ -2574,6 +2669,10 @@ export class WorkflowEditor extends EditorPane {
 						}
 					}
 				}
+			}
+
+			if (needExpand) {
+				this._updateCanvasDimensions(maxNodeRight, maxNodeBottom);
 			}
 
 			this._drawLinks();
@@ -2771,6 +2870,9 @@ export class WorkflowEditor extends EditorPane {
 
 		if (this._isDragging) {
 			const hasMoved = this._dragStartX !== undefined && (Math.abs(e.clientX - this._dragStartX) > 3 || Math.abs(e.clientY - this._dragStartY) > 3);
+			if (hasMoved) {
+				this._updateCanvasDimensions();
+			}
 			if (!hasMoved && this._collapseSelectionTargetNodeId) {
 				this._selectedNodeIds.clear();
 				this._selectedLinkIds.clear();

@@ -274,8 +274,10 @@
 
 .workflow-editor-canvas {
 	position: relative;
-	width: 2400px;
-	height: 2000px;
+	width: 8000px;
+	height: 6000px;
+	min-width: 8000px;
+	min-height: 6000px;
 	background-color: var(--vscode-editor-background, #1e1e1e);
 	background-image: radial-gradient(rgba(13, 148, 136, 0.06) 1.5px, transparent 0);
 	background-size: 20px 20px;
