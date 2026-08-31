@@ -3,7 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { Dimension, h } from '../../../../base/browser/dom.js';
+import { clearNode, Dimension, h } from '../../../../base/browser/dom.js';
+import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { localize } from '../../../../nls.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
@@ -26,6 +27,8 @@ import { ICommandService } from '../../../../platform/commands/common/commands.j
 import { IWorkspacesExplorerService } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
+
+const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value });
 
 function getColorForName(name: string | undefined): string {
 	if (!name) return '#38bdf8';
@@ -160,7 +163,7 @@ export class EntityDetailEditor extends EditorPane {
 
 	override clearInput(): void {
 		if (this._container) {
-			this._container.innerHTML = '';
+			clearNode(this._container);
 		}
 		this._entityUri = undefined;
 		this._lastParsedData = undefined;
@@ -169,10 +172,18 @@ export class EntityDetailEditor extends EditorPane {
 
 	override dispose(): void {
 		if (this._container) {
-			this._container.innerHTML = '';
+			clearNode(this._container);
 			this._container = undefined;
 		}
 		super.dispose();
+	}
+
+	private _setElementHTML(element: HTMLElement, html: string): void {
+		if (ttPolicy) {
+			element.innerHTML = ttPolicy.createHTML(html) as unknown as string;
+		} else {
+			element.innerHTML = html;
+		}
 	}
 
 	override setEditorVisible(visible: boolean): void {
@@ -336,7 +347,7 @@ export class EntityDetailEditor extends EditorPane {
 
 			// 3. Render directly into this._container as native high-performance DOM
 			const html = this._generateHtml(parsed, workLogContent, attachments, customModule, agents, allTickets);
-			this._container.innerHTML = html;
+			this._setElementHTML(this._container, html);
 		} catch (err) {
 			console.error('Failed to resolve and render entity detail:', err);
 		}
