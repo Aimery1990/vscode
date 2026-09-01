@@ -816,6 +816,13 @@ export class CenteredChatWidget extends Disposable {
 					if (st.toLowerCase() === currentVal.toLowerCase()) opt.selected = true;
 				});
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
+				select.onkeydown = (e) => {
+					if (e.key === 'Enter') {
+						e.preventDefault();
+						locator.interactiveModifiedValue = select.value;
+						this.sendMessage();
+					}
+				};
 			} else if (fType === 'priority') {
 				const select = append(editorBox, $('select.monaco-select-box', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
@@ -824,12 +831,19 @@ export class CenteredChatWidget extends Disposable {
 					? locator.options
 					: ((activeNode && activeNode.options && activeNode.options.length > 0)
 						? activeNode.options
-						: ['Low', 'Medium', 'High', 'Urgent']);
+						: ['Very High', 'High', 'Medium', 'Low', 'Very Low']);
 				priorities.forEach((pr: string) => {
 					const opt = append(select, $('option', { value: pr }, pr)) as HTMLOptionElement;
 					if (pr.toLowerCase() === currentVal.toLowerCase()) opt.selected = true;
 				});
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
+				select.onkeydown = (e) => {
+					if (e.key === 'Enter') {
+						e.preventDefault();
+						locator.interactiveModifiedValue = select.value;
+						this.sendMessage();
+					}
+				};
 			} else if (fType === 'agent') {
 				const select = append(editorBox, $('select.monaco-select-box', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
@@ -843,6 +857,13 @@ export class CenteredChatWidget extends Disposable {
 					});
 				}
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
+				select.onkeydown = (e) => {
+					if (e.key === 'Enter') {
+						e.preventDefault();
+						locator.interactiveModifiedValue = select.value;
+						this.sendMessage();
+					}
+				};
 			} else if (fType === 'link_to') {
 				const linkContainer = append(editorBox, $('.link-to-multi-select-container'));
 				linkContainer.style.display = 'flex';
@@ -1850,7 +1871,12 @@ Always explain the result clearly to the user once tool execution completes.`;
 		if (this.isStreaming) { return; }
 
 		const text = this.inputField?.value.trim() || '';
-		if (!text && this.activeAttachments.length === 0) {
+		const hasModifiedLocator = !!(this.activeContextLocator && (
+			(this.activeContextLocator.interactiveModifiedValue !== undefined && this.activeContextLocator.interactiveModifiedValue !== '') ||
+			this.activeContextLocator.field ||
+			this.activeContextLocator.ticketId
+		));
+		if (!text && this.activeAttachments.length === 0 && !hasModifiedLocator) {
 			return;
 		}
 
@@ -1873,6 +1899,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 		const userMsg = append(this.messagesContainer, $('.centered-chat-msg.centered-chat-msg-user'));
 
 		let fullPrompt = text;
+		let displayText = text;
 		if (this.activeContextLocator && (this.activeContextLocator.workspaceId || this.activeContextLocator.ticketId || this.activeContextLocator.field)) {
 			const loc = this.activeContextLocator;
 			const locators: string[] = [];
@@ -1888,6 +1915,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 			}
 			const prefix = `[${locators.join(' | ')}]\n`;
 			fullPrompt = `${prefix}${text || 'Please update this field as specified.'}`;
+			displayText = text || (loc.field && loc.interactiveModifiedValue ? `Update ${loc.field} to ${loc.interactiveModifiedValue}` : (text || 'Update field as specified.'));
 
 			// Render nice context tag pill above the user text in the bubble
 			const ctxTag = append(userMsg, $('.centered-chat-msg-context-tag'));
@@ -1944,9 +1972,9 @@ Always explain the result clearly to the user once tool execution completes.`;
 			});
 		}
 
-		if (text) {
+		if (displayText) {
 			const promptContent = append(userMsg, $('span'));
-			promptContent.textContent = text;
+			promptContent.textContent = displayText;
 		}
 
 		// Collapsible Prompt Inspector (Click to expand Full System Prompt & Tools)

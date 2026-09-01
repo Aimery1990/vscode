@@ -1248,7 +1248,7 @@ export class EntityDetailEditor extends EditorPane {
 				label: 'Priority',
 				fieldType: 'priority',
 				currentValue: data.priority || 'Medium',
-				options: ['Low', 'Medium', 'High', 'Urgent']
+				options: ['Very High', 'High', 'Medium', 'Low', 'Very Low']
 			}
 		];
 
