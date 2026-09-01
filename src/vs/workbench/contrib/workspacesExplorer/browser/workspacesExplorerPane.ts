@@ -2928,7 +2928,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const submitBtn = append(actionsRow, $('button.monaco-button', {
 			style: 'padding: 7px 18px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 6px;'
 		})) as HTMLButtonElement;
-		submitBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg><span>Create Entity</span>`;
+		clearNode(submitBtn);
+		const sparkleSpan = append(submitBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.sparkle)));
+		sparkleSpan.style.marginRight = '6px';
+		sparkleSpan.style.fontSize = '12px';
+		append(submitBtn, $('span', {}, 'Create Entity'));
 
 		const updateValidation = async () => {
 			const inputName = nameInput.value.trim();
@@ -3031,8 +3035,20 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const badgeColor = currentTypeObj ? currentTypeObj.color : '#38bdf8';
 				previewBadge.style.color = badgeColor;
 				previewBadge.style.borderColor = `${badgeColor}58`;
-				typeDefInput.value = matchingModule ? (matchingModule.description || '') : 'Built-in (System)';
-				typeDefInput.placeholder = matchingModule ? (matchingModule.description || `.agents/entity_type/${selectedType}.yaml`) : 'Built-in (System)';
+				const isBuiltInAgent = !matchingModule;
+				if (isBuiltInAgent) {
+					typeDefInput.value = 'Built-in (System)';
+					typeDefInput.placeholder = 'Built-in (System)';
+					typeDefInput.readOnly = true;
+					typeDefInput.style.opacity = '0.65';
+					typeDefInput.style.cursor = 'not-allowed';
+				} else {
+					typeDefInput.value = (matchingModule as any).definitionFile || matchingModule.description || `.agents/entity_type/${selectedType}.yaml`;
+					typeDefInput.placeholder = `.agents/entity_type/${selectedType}.yaml`;
+					typeDefInput.readOnly = false;
+					typeDefInput.style.opacity = '1.0';
+					typeDefInput.style.cursor = 'text';
+				}
 				typePromptInput.value = matchingModule ? (matchingModule.prompt || '') : (builtInTypePrompts[selectedType] || '');
 			} else {
 				codeBox.style.display = 'block';
@@ -3063,8 +3079,21 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const badgeColor = currentTypeObj ? currentTypeObj.color : '#38bdf8';
 				previewBadge.style.color = badgeColor;
 				previewBadge.style.borderColor = `${badgeColor}58`;
-				typeDefInput.value = matchingModule ? (matchingModule.description || '') : 'Built-in (System)';
-				typeDefInput.placeholder = matchingModule ? (matchingModule.description || `.agents/entity_type/${selectedType}.yaml`) : 'Built-in (System)';
+
+				const isBuiltIn = !matchingModule;
+				if (isBuiltIn) {
+					typeDefInput.value = 'Built-in (System)';
+					typeDefInput.placeholder = 'Built-in (System)';
+					typeDefInput.readOnly = true;
+					typeDefInput.style.opacity = '0.65';
+					typeDefInput.style.cursor = 'not-allowed';
+				} else {
+					typeDefInput.value = (matchingModule as any).definitionFile || matchingModule.description || `.agents/entity_type/${selectedType}.yaml`;
+					typeDefInput.placeholder = `.agents/entity_type/${selectedType}.yaml`;
+					typeDefInput.readOnly = false;
+					typeDefInput.style.opacity = '1.0';
+					typeDefInput.style.cursor = 'text';
+				}
 				typePromptInput.value = matchingModule ? (matchingModule.prompt || '') : (builtInTypePrompts[selectedType] || '');
 			}
 
@@ -3297,8 +3326,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 			await updateValidation();
 		};
 
-		// Initial refresh
-		refreshNameAndBadge();
+		// Initial render and refresh
+		renderTypeGrid().then(() => {
+			refreshNameAndBadge();
+		});
 
 		codeInput.oninput = () => {
 			refreshNameAndBadge();
