@@ -2298,10 +2298,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 			});
 		};
 
-		renderTypeGrid().then(() => {
-			refreshNameAndBadge();
-		});
-
 		// Entity Code Prefix Override Box
 		const codeBox = append(modalBody, $('.form-group'));
 		append(codeBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Entity Code Prefix (Optional Override):'));
@@ -2365,7 +2361,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const customFieldsBox = append(modalBody, $('.custom-fields-box', { style: 'display: flex; flex-direction: column; gap: 10px; margin-top: 8px;' }));
 
 		// Base Agent to Inherit From
-		const baseAgentBox = append(modalBody, $('.form-group'));
+		const baseAgentBox = append(modalBody, $('.form-group', { style: 'display: none;' }));
 		append(baseAgentBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'Base Agent to Inherit From:'));
 		const baseAgentSelect = append(baseAgentBox, $('select.monaco-select', {
 			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box;'
@@ -2380,7 +2376,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		}).catch(() => { });
 
 		// AI Agent Credential Box
-		const credBox = append(modalBody, $('.form-group'));
+		const credBox = append(modalBody, $('.form-group', { style: 'display: none;' }));
 		append(credBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'API Connection Credential:'));
 		const credSelect = append(credBox, $('select.monaco-select', {
 			style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box; outline: none; cursor: pointer;'
@@ -2403,7 +2399,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 
 		// AI Agent Model Box
-		const modelBox = append(modalBody, $('.form-group', { style: 'position: relative;' }));
+		const modelBox = append(modalBody, $('.form-group', { style: 'position: relative; display: none;' }));
 		append(modelBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'AI Model:'));
 		const modelInputContainer = append(modelBox, $('.model-input-container', {
 			style: 'position: relative; width: 100%;'
@@ -2423,7 +2419,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		}));
 
 		// AI Agent System Prompt Box
-		const promptBox = append(modalBody, $('.form-group'));
+		const promptBox = append(modalBody, $('.form-group', { style: 'display: none;' }));
 		append(promptBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 4px; font-weight: 500;' }, 'System Prompt / Core Instructions:'));
 		const promptInput = append(promptBox, $('textarea.monaco-inputbox', {
 			style: 'width: 100%; min-height: 100px; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; outline: none; resize: vertical; font-family: var(--vscode-editor-font-family, monospace);'

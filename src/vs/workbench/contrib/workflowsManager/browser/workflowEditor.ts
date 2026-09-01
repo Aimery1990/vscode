@@ -1686,29 +1686,34 @@ export class WorkflowEditor extends EditorPane {
 				};
 			}
 
-			const labelWrapper = append(nodeEl, $('.node-label'));
+			const contentWrapper = append(nodeEl, $('.node-content-wrapper'));
+
+			const labelWrapper = append(contentWrapper, $('.node-label'));
 			labelWrapper.textContent = node.label || '';
 
 			// Multiline formatting & Alignment
 			const textAlign = node.textAlign || 'center';
 			labelWrapper.style.textAlign = textAlign;
 			if (textAlign === 'left') {
-				labelWrapper.style.alignItems = 'flex-start';
+				labelWrapper.style.textAlign = 'left';
+				contentWrapper.style.alignItems = 'flex-start';
 			} else if (textAlign === 'right') {
-				labelWrapper.style.alignItems = 'flex-end';
+				labelWrapper.style.textAlign = 'right';
+				contentWrapper.style.alignItems = 'flex-end';
 			} else {
-				labelWrapper.style.alignItems = 'center';
+				labelWrapper.style.textAlign = 'center';
+				contentWrapper.style.alignItems = 'center';
 			}
 
 			const verticalAlign = node.verticalAlign || 'center';
 			if (verticalAlign === 'top') {
-				labelWrapper.style.justifyContent = 'flex-start';
-				labelWrapper.style.paddingTop = '4px';
+				contentWrapper.style.justifyContent = 'flex-start';
+				contentWrapper.style.paddingTop = '6px';
 			} else if (verticalAlign === 'bottom') {
-				labelWrapper.style.justifyContent = 'flex-end';
-				labelWrapper.style.paddingBottom = '4px';
+				contentWrapper.style.justifyContent = 'flex-end';
+				contentWrapper.style.paddingBottom = '6px';
 			} else {
-				labelWrapper.style.justifyContent = 'center';
+				contentWrapper.style.justifyContent = 'center';
 			}
 
 			if (node.isBold) {
@@ -1733,7 +1738,7 @@ export class WorkflowEditor extends EditorPane {
 			};
 
 			if (!this._isPureDiagram && node.imports && node.imports.length > 0) {
-				const badgesContainer = append(nodeEl, $('.node-imports-badges-container'));
+				const badgesContainer = append(contentWrapper, $('.node-imports-badges-container'));
 				const totalImports = node.imports.length;
 				// Dynamic limit based on node width (at least 2, max 4 visible pills)
 				const maxVisible = Math.max(1, Math.min(4, Math.floor(((node.width || 120) - 16) / 55)));
@@ -1915,9 +1920,9 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
-		const labelEl = nodeEl.querySelector('.node-label') as HTMLElement;
-		if (labelEl) {
-			labelEl.style.visibility = 'hidden';
+		const contentWrapper = nodeEl.querySelector('.node-content-wrapper') as HTMLElement;
+		if (contentWrapper) {
+			contentWrapper.style.visibility = 'hidden';
 		}
 
 		const textarea = append(nodeEl, $('textarea.node-inline-editor')) as HTMLTextAreaElement;

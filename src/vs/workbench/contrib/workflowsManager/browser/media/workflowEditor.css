@@ -318,7 +318,7 @@
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	padding: 4px 8px;
+	padding: 4px;
 	color: var(--vscode-editor-foreground, #ffffff);
 	font-weight: 500;
 	font-size: 11px;
@@ -327,6 +327,7 @@
 	word-break: break-word;
 	cursor: move;
 	z-index: 2;
+	overflow: hidden;
 	transition: box-shadow 0.2s ease, border-color 0.2s ease, background-color 0.2s ease;
 }
 
@@ -359,24 +360,48 @@
 	transform: rotate(45deg);
 }
 
-/* Internal label wrapper to un-rotate diamond text */
-.workflow-node.diamond .node-label {
+/* Inner content wrapper holding label text and ticket badges together */
+.node-content-wrapper {
+	width: 100%;
+	height: 100%;
+	max-height: 100%;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	box-sizing: border-box;
+	padding: 4px 6px;
+	pointer-events: none;
+	overflow: hidden;
+}
+
+.workflow-node.circle .node-content-wrapper {
+	padding: 8px 12px;
+	max-width: 82%;
+	max-height: 82%;
+}
+
+.workflow-node.diamond .node-content-wrapper {
 	transform: rotate(-45deg);
+	padding: 6px 8px;
+	max-width: 72%;
+	max-height: 72%;
 }
 
 .workflow-node .node-label {
 	width: 100%;
-	height: 100%;
-	display: flex;
-	flex-direction: column;
+	max-width: 100%;
+	display: block;
 	box-sizing: border-box;
 	white-space: pre-wrap;
 	word-break: break-word;
 	overflow: hidden;
+	text-overflow: ellipsis;
 	pointer-events: none;
 	user-select: none;
 	line-height: 1.35;
-	padding: 4px 6px;
+	padding: 0 2px;
+	flex: 0 1 auto;
 }
 
 .workflow-node:hover {
@@ -679,10 +704,6 @@
 .node-import-badge.project {
 	background: rgba(96, 165, 250, 0.15);
 	color: #60a5fa;
-}
-
-.workflow-node.diamond .node-imports-badges-container {
-	transform: rotate(-45deg); /* un-rotate for diamond as well! */
 }
 
 /* --- Drag over visual feedback --- */
