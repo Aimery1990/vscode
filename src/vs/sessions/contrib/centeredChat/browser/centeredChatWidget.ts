@@ -20,6 +20,7 @@ import { RequestChannelClient } from '../../../../platform/request/common/reques
 import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { listenStream } from '../../../../base/common/stream.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
+import { ILanguageModelToolsService } from '../../../../workbench/contrib/chat/common/tools/languageModelToolsService.js';
 
 interface IAttachment {
 	name: string;
@@ -182,7 +183,8 @@ export class CenteredChatWidget extends Disposable {
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@INotificationService private readonly notificationService: INotificationService,
 		@IStorageService private readonly storageService: IStorageService,
-		@IMainProcessService private readonly mainProcessService: IMainProcessService
+		@IMainProcessService private readonly mainProcessService: IMainProcessService,
+		@ILanguageModelToolsService private readonly languageModelToolsService: ILanguageModelToolsService
 	) {
 		super();
 
@@ -2018,6 +2020,75 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
+	private getAnthropicTools(): any[] {
+		const toolIds = [
+			'anyagent_get_ticket_data',
+			'anyagent_create_ticket',
+			'anyagent_delete_ticket',
+			'anyagent_update_ticket',
+			'anyagent_manage_links'
+		];
+		const tools: any[] = [];
+		for (const id of toolIds) {
+			const tool = this.languageModelToolsService.getTool(id);
+			if (tool) {
+				tools.push({
+					name: tool.id,
+					description: tool.modelDescription || tool.userDescription || tool.displayName,
+					input_schema: tool.inputSchema || { type: 'object', properties: {} }
+				});
+			}
+		}
+		return tools;
+	}
+
+	private getOpenAITools(): any[] {
+		const toolIds = [
+			'anyagent_get_ticket_data',
+			'anyagent_create_ticket',
+			'anyagent_delete_ticket',
+			'anyagent_update_ticket',
+			'anyagent_manage_links'
+		];
+		const tools: any[] = [];
+		for (const id of toolIds) {
+			const tool = this.languageModelToolsService.getTool(id);
+			if (tool) {
+				tools.push({
+					type: 'function',
+					function: {
+						name: tool.id,
+						description: tool.modelDescription || tool.userDescription || tool.displayName,
+						parameters: tool.inputSchema || { type: 'object', properties: {} }
+					}
+				});
+			}
+		}
+		return tools;
+	}
+
+	private getGeminiTools(): any[] {
+		const toolIds = [
+			'anyagent_get_ticket_data',
+			'anyagent_create_ticket',
+			'anyagent_delete_ticket',
+			'anyagent_update_ticket',
+			'anyagent_manage_links'
+		];
+		const declarations: any[] = [];
+		for (const id of toolIds) {
+			const tool = this.languageModelToolsService.getTool(id);
+			if (tool) {
+				declarations.push({
+					name: tool.id,
+					description: tool.modelDescription || tool.userDescription || tool.displayName,
+					parameters: tool.inputSchema || { type: 'object', properties: {} }
+				});
+			}
+		}
+		return declarations.length > 0 ? [{ function_declarations: declarations }] : [];
+	}
+
 	private async executeLlmStreamRequest(options: {
 		providerId: string;
 		modelId: string;
@@ -2030,115 +2101,427 @@ export class CenteredChatWidget extends Disposable {
 		const { providerId, modelId, prompt, apiKey, customUrl, cancellationTokenSource, onToken } = options;
 		const sanitizedModel = modelId.replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
 
-		let url = '';
-		let headers: Record<string, string> = { 'Content-Type': 'application/json' };
-		let data = '';
+		const ANYAGENT_SYSTEM_PROMPT = `You are AnyAgent Workspace Central AI Assistant.
+You have direct access to tool capabilities that manage the AnyAgent Workspace & Ticketing System.
+When the user gives you a request or when structured context is provided (such as "[Workspace: ... | Ticket: ... | Target: ...]"), you MUST call the appropriate tool(s) to fulfill the operation.
 
-		if (providerId === 'gemini') {
-			const cleanModel = sanitizedModel || 'gemini-1.5-flash';
-			url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:streamGenerateContent?key=${apiKey}&alt=sse`;
-			data = JSON.stringify({
-				contents: [{
-					role: 'user',
-					parts: [{ text: prompt }]
-				}]
-			});
-		} else if (providerId === 'anthropic') {
+AVAILABLE ANYAGENT TOOLS:
+- anyagent_get_ticket_data: Query current ticket values, metadata, field types, and allowed workspace statuses.
+- anyagent_create_ticket: Create a new sub-entity (job, task, note, resume, workflow, custom types).
+- anyagent_delete_ticket: Mark a ticket and its sub-tickets as Removed and clean up references.
+- anyagent_update_ticket: Update standard attributes (/Title, /Status, /Description, /Custom/...), or custom card items.
+- anyagent_manage_links: Add, remove, or set bidirectional links between tickets (supports 1-to-N, N-to-1, N-to-M).
+
+WORKLOG INTEGRATION REQUIREMENT:
+Whenever performing any mutating tool call (create, update, delete, manage_links), you MUST provide a complete, well-formed 'worklog_record' object:
+{
+  "user_request": "<clear description of user request>",
+  "update_summary": "<concise summary of changes made>",
+  "update_details": ["<detailed bullet 1>", "<detailed bullet 2>"],
+  "update_conclusion": "<short final verdict e.g. Successfully updated link to FNDJ1-0004>"
+}
+
+When user input looks like:
+[Workspace: WSP | Ticket: TICKET_ID | Target: /Attributes/Link To | Proposed Value: TARGET_ID]
+or:
+TICKET_ID > /Attributes/Link To > -> TARGET_ID
+You must invoke 'anyagent_manage_links' with action 'add_links' (or 'set_links') from source_ticket_ids [TICKET_ID] to target_ticket_ids [TARGET_ID].
+
+Always explain the result clearly to the user once tool execution completes.`;
+
+		const maxTurns = 5;
+
+		if (providerId === 'anthropic') {
+			let messages: any[] = [{ role: 'user', content: prompt }];
+			const tools = this.getAnthropicTools();
 			const cleanModel = sanitizedModel || 'claude-3-5-sonnet-20241022';
-			url = 'https://api.anthropic.com/v1/messages';
-			headers = {
+			const url = 'https://api.anthropic.com/v1/messages';
+			const headers = {
 				'Content-Type': 'application/json',
 				'x-api-key': apiKey,
 				'anthropic-version': '2023-06-01'
 			};
-			data = JSON.stringify({
-				model: cleanModel,
-				max_tokens: 4096,
-				stream: true,
-				messages: [{ role: 'user', content: prompt }]
-			});
+
+			for (let turn = 0; turn < maxTurns; turn++) {
+				if (cancellationTokenSource.token.isCancellationRequested) break;
+
+				const data = JSON.stringify({
+					model: cleanModel,
+					max_tokens: 4096,
+					stream: true,
+					system: ANYAGENT_SYSTEM_PROMPT,
+					messages,
+					tools: tools.length > 0 ? tools : undefined
+				});
+
+				const pendingToolUses: { id: string; name: string; inputJson: string }[] = [];
+				let currentToolUse: { id: string; name: string; inputJson: string } | null = null;
+				let currentText = '';
+
+				const response = await this.requestService.request({
+					type: 'POST',
+					url,
+					headers,
+					data,
+					callSite: 'centeredChat.streamLlm'
+				}, cancellationTokenSource.token);
+
+				if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+					throw new Error(`HTTP ${response.res.statusCode} Error from ANTHROPIC API.`);
+				}
+
+				await new Promise<void>((resolve, reject) => {
+					const streamDisposables = new DisposableStore();
+					streamDisposables.add(cancellationTokenSource.token.onCancellationRequested(() => {
+						streamDisposables.dispose();
+						resolve();
+					}));
+
+					let buffer = '';
+					listenStream(response.stream, {
+						onData: (chunk: VSBuffer) => {
+							buffer += chunk.toString();
+							const lines = buffer.split('\n');
+							buffer = lines.pop() || '';
+
+							for (const line of lines) {
+								const trimmed = line.trim();
+								if (trimmed.startsWith('data: ')) {
+									const dataStr = trimmed.slice(6).trim();
+									if (dataStr === '[DONE]') continue;
+									try {
+										const json = JSON.parse(dataStr);
+										if (json.type === 'content_block_start') {
+											if (json.content_block?.type === 'tool_use') {
+												currentToolUse = {
+													id: json.content_block.id,
+													name: json.content_block.name,
+													inputJson: ''
+												};
+											}
+										} else if (json.type === 'content_block_delta') {
+											if (json.delta?.type === 'text_delta' && json.delta.text) {
+												currentText += json.delta.text;
+												onToken(json.delta.text);
+											} else if (json.delta?.type === 'input_json_delta' && json.delta.partial_json) {
+												if (currentToolUse) {
+													currentToolUse.inputJson += json.delta.partial_json;
+												}
+											}
+										} else if (json.type === 'content_block_stop') {
+											if (currentToolUse) {
+												pendingToolUses.push(currentToolUse);
+												currentToolUse = null;
+											}
+										}
+									} catch { }
+								}
+							}
+						},
+						onError: (err) => { streamDisposables.dispose(); reject(err); },
+						onEnd: () => { streamDisposables.dispose(); resolve(); }
+					}, cancellationTokenSource.token);
+				});
+
+				if (pendingToolUses.length === 0) {
+					break;
+				}
+
+				const assistantBlocks: any[] = [];
+				if (currentText) {
+					assistantBlocks.push({ type: 'text', text: currentText });
+				}
+				for (const tu of pendingToolUses) {
+					let parsedInput: any = {};
+					try { parsedInput = JSON.parse(tu.inputJson || '{}'); } catch { }
+					assistantBlocks.push({
+						type: 'tool_use',
+						id: tu.id,
+						name: tu.name,
+						input: parsedInput
+					});
+				}
+				messages.push({ role: 'assistant', content: assistantBlocks });
+
+				const toolResultBlocks: any[] = [];
+				for (const tu of pendingToolUses) {
+					let parsedInput: any = {};
+					try { parsedInput = JSON.parse(tu.inputJson || '{}'); } catch { }
+
+					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${tu.name}\`\n`);
+					let resultContent = '';
+					try {
+						const result = await this.languageModelToolsService.invokeTool(
+							{ callId: tu.id, toolId: tu.name, parameters: parsedInput, context: undefined },
+							async (t) => Math.ceil(t.length / 4),
+							cancellationTokenSource.token
+						);
+						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
+						resultContent = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
+						onToken(`> ✅ **Tool Completed Successfully**\n\n`);
+					} catch (err: any) {
+						resultContent = `Tool execution error: ${err.message || String(err)}`;
+						onToken(`> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
+					}
+
+					toolResultBlocks.push({
+						type: 'tool_result',
+						tool_use_id: tu.id,
+						content: resultContent
+					});
+				}
+				messages.push({ role: 'user', content: toolResultBlocks });
+			}
+		} else if (providerId === 'gemini') {
+			let contents: any[] = [{ role: 'user', parts: [{ text: prompt }] }];
+			const tools = this.getGeminiTools();
+			const cleanModel = sanitizedModel || 'gemini-1.5-flash';
+			const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:streamGenerateContent?key=${apiKey}&alt=sse`;
+			const headers = { 'Content-Type': 'application/json' };
+
+			for (let turn = 0; turn < maxTurns; turn++) {
+				if (cancellationTokenSource.token.isCancellationRequested) break;
+
+				const data = JSON.stringify({
+					contents,
+					system_instruction: { parts: [{ text: ANYAGENT_SYSTEM_PROMPT }] },
+					tools: tools.length > 0 ? tools : undefined
+				});
+
+				const functionCalls: { name: string; args: any }[] = [];
+				let currentText = '';
+
+				const response = await this.requestService.request({
+					type: 'POST',
+					url,
+					headers,
+					data,
+					callSite: 'centeredChat.streamLlm'
+				}, cancellationTokenSource.token);
+
+				if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+					throw new Error(`HTTP ${response.res.statusCode} Error from GEMINI API.`);
+				}
+
+				await new Promise<void>((resolve, reject) => {
+					const streamDisposables = new DisposableStore();
+					streamDisposables.add(cancellationTokenSource.token.onCancellationRequested(() => {
+						streamDisposables.dispose();
+						resolve();
+					}));
+
+					let buffer = '';
+					listenStream(response.stream, {
+						onData: (chunk: VSBuffer) => {
+							buffer += chunk.toString();
+							const lines = buffer.split('\n');
+							buffer = lines.pop() || '';
+
+							for (const line of lines) {
+								const trimmed = line.trim();
+								if (trimmed.startsWith('data: ')) {
+									const dataStr = trimmed.slice(6).trim();
+									if (dataStr === '[DONE]') continue;
+									try {
+										const json = JSON.parse(dataStr);
+										const candidate = json.candidates?.[0];
+										const parts = candidate?.content?.parts;
+										if (parts && Array.isArray(parts)) {
+											for (const p of parts) {
+												if (p.text) {
+													currentText += p.text;
+													onToken(p.text);
+												}
+												if (p.functionCall) {
+													functionCalls.push({
+														name: p.functionCall.name,
+														args: p.functionCall.args || {}
+													});
+												}
+											}
+										}
+									} catch { }
+								}
+							}
+						},
+						onError: (err) => { streamDisposables.dispose(); reject(err); },
+						onEnd: () => { streamDisposables.dispose(); resolve(); }
+					}, cancellationTokenSource.token);
+				});
+
+				if (functionCalls.length === 0) {
+					break;
+				}
+
+				contents.push({
+					role: 'model',
+					parts: [
+						...(currentText ? [{ text: currentText }] : []),
+						...functionCalls.map(fc => ({ functionCall: { name: fc.name, args: fc.args } }))
+					]
+				});
+
+				const responseParts: any[] = [];
+				for (const fc of functionCalls) {
+					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${fc.name}\`\n`);
+					let resultContent: any = {};
+					try {
+						const result = await this.languageModelToolsService.invokeTool(
+							{ callId: `gemini_${Date.now()}`, toolId: fc.name, parameters: fc.args, context: undefined },
+							async (t) => Math.ceil(t.length / 4),
+							cancellationTokenSource.token
+						);
+						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
+						const textVal = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
+						try { resultContent = JSON.parse(textVal); } catch { resultContent = { response: textVal }; }
+						onToken(`> ✅ **Tool Completed Successfully**\n\n`);
+					} catch (err: any) {
+						resultContent = { error: err.message || String(err) };
+						onToken(`> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
+					}
+
+					responseParts.push({
+						functionResponse: {
+							name: fc.name,
+							response: resultContent
+						}
+					});
+				}
+
+				contents.push({
+					role: 'user',
+					parts: responseParts
+				});
+			}
 		} else {
 			// OpenAI & Custom-OpenAI
+			let messages: any[] = [
+				{ role: 'system', content: ANYAGENT_SYSTEM_PROMPT },
+				{ role: 'user', content: prompt }
+			];
+			const tools = this.getOpenAITools();
 			const baseEndpoint = customUrl || 'https://api.openai.com/v1';
 			const cleanBase = baseEndpoint.replace(/\/chat\/completions\/?$/, '');
-			url = `${cleanBase}/chat/completions`;
-			headers = {
+			const url = `${cleanBase}/chat/completions`;
+			const headers = {
 				'Content-Type': 'application/json',
 				'Authorization': `Bearer ${apiKey}`
 			};
-			data = JSON.stringify({
-				model: sanitizedModel || 'gpt-4o',
-				stream: true,
-				messages: [{ role: 'user', content: prompt }]
-			});
-		}
 
-		const response = await this.requestService.request({
-			type: 'POST',
-			url,
-			headers,
-			data,
-			callSite: 'centeredChat.streamLlm'
-		}, cancellationTokenSource.token);
+			for (let turn = 0; turn < maxTurns; turn++) {
+				if (cancellationTokenSource.token.isCancellationRequested) break;
 
-		if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
-			throw new Error(`HTTP ${response.res.statusCode} Error from ${providerId.toUpperCase()} API.`);
-		}
+				const data = JSON.stringify({
+					model: sanitizedModel || 'gpt-4o',
+					stream: true,
+					messages,
+					tools: tools.length > 0 ? tools : undefined
+				});
 
-		await new Promise<void>((resolve, reject) => {
-			const streamDisposables = new DisposableStore();
-			streamDisposables.add(cancellationTokenSource.token.onCancellationRequested(() => {
-				streamDisposables.dispose();
-				resolve();
-			}));
+				const toolCallsMap = new Map<number, { id: string; name: string; arguments: string }>();
+				let currentText = '';
 
-			let buffer = '';
-			listenStream(response.stream, {
-				onData: (chunk: VSBuffer) => {
-					buffer += chunk.toString();
-					const lines = buffer.split('\n');
-					buffer = lines.pop() || '';
+				const response = await this.requestService.request({
+					type: 'POST',
+					url,
+					headers,
+					data,
+					callSite: 'centeredChat.streamLlm'
+				}, cancellationTokenSource.token);
 
-					for (const line of lines) {
-						const trimmed = line.trim();
-						if (trimmed.startsWith('data: ')) {
-							const dataStr = trimmed.slice(6).trim();
-							if (dataStr === '[DONE]') {
-								continue;
-							}
-							try {
-								const json = JSON.parse(dataStr);
-								if (providerId === 'anthropic') {
-									if (json.type === 'content_block_delta' && json.delta?.text) {
-										onToken(json.delta.text);
-									}
-								} else if (providerId === 'gemini') {
-									const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
-									if (text) {
-										onToken(text);
-									}
-								} else {
-									const delta = json.choices?.[0]?.delta?.content;
-									if (delta) {
-										onToken(delta);
-									}
-								}
-							} catch {
-								// ignore split json
-							}
-						}
-					}
-				},
-				onError: (err) => {
-					streamDisposables.dispose();
-					reject(err);
-				},
-				onEnd: () => {
-					streamDisposables.dispose();
-					resolve();
+				if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+					throw new Error(`HTTP ${response.res.statusCode} Error from OPENAI API.`);
 				}
-			}, cancellationTokenSource.token);
-		});
+
+				await new Promise<void>((resolve, reject) => {
+					const streamDisposables = new DisposableStore();
+					streamDisposables.add(cancellationTokenSource.token.onCancellationRequested(() => {
+						streamDisposables.dispose();
+						resolve();
+					}));
+
+					let buffer = '';
+					listenStream(response.stream, {
+						onData: (chunk: VSBuffer) => {
+							buffer += chunk.toString();
+							const lines = buffer.split('\n');
+							buffer = lines.pop() || '';
+
+							for (const line of lines) {
+								const trimmed = line.trim();
+								if (trimmed.startsWith('data: ')) {
+									const dataStr = trimmed.slice(6).trim();
+									if (dataStr === '[DONE]') continue;
+									try {
+										const json = JSON.parse(dataStr);
+										const delta = json.choices?.[0]?.delta;
+										if (delta?.content) {
+											currentText += delta.content;
+											onToken(delta.content);
+										}
+										if (delta?.tool_calls) {
+											for (const tc of delta.tool_calls) {
+												const idx = tc.index ?? 0;
+												const entry = toolCallsMap.get(idx) || { id: '', name: '', arguments: '' };
+												if (tc.id) entry.id = tc.id;
+												if (tc.function?.name) entry.name += tc.function.name;
+												if (tc.function?.arguments) entry.arguments += tc.function.arguments;
+												toolCallsMap.set(idx, entry);
+											}
+										}
+									} catch { }
+								}
+							}
+						},
+						onError: (err) => { streamDisposables.dispose(); reject(err); },
+						onEnd: () => { streamDisposables.dispose(); resolve(); }
+					}, cancellationTokenSource.token);
+				});
+
+				if (toolCallsMap.size === 0) {
+					break;
+				}
+
+				const toolCalls = Array.from(toolCallsMap.values()).map(tc => ({
+					id: tc.id || `call_${Date.now()}_${Math.random()}`,
+					type: 'function' as const,
+					function: { name: tc.name, arguments: tc.arguments }
+				}));
+
+				messages.push({
+					role: 'assistant',
+					content: currentText || null,
+					tool_calls: toolCalls
+				});
+
+				for (const tc of toolCalls) {
+					let parsedArgs: any = {};
+					try { parsedArgs = JSON.parse(tc.function.arguments || '{}'); } catch { }
+
+					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${tc.function.name}\`\n`);
+					let resultContent = '';
+					try {
+						const result = await this.languageModelToolsService.invokeTool(
+							{ callId: tc.id, toolId: tc.function.name, parameters: parsedArgs, context: undefined },
+							async (t) => Math.ceil(t.length / 4),
+							cancellationTokenSource.token
+						);
+						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
+						resultContent = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
+						onToken(`> ✅ **Tool Completed Successfully**\n\n`);
+					} catch (err: any) {
+						resultContent = `Tool execution error: ${err.message || String(err)}`;
+						onToken(`> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
+					}
+
+					messages.push({
+						role: 'tool',
+						tool_call_id: tc.id,
+						content: resultContent
+					});
+				}
+			}
+		}
 	}
 
 	private abortStreaming(): void {
