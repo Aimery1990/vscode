@@ -835,6 +835,44 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		return this.generateWorkspaceCodeFromName(folderName);
 	}
 
+	public async findWorkspaceRootUri(targetUri: URI): Promise<URI> {
+		const savedUris = this.getSavedWorkspaceUris();
+		const targetPath = targetUri.path;
+		// 1. Check if targetUri is inside any registered workspace URI
+		for (const wsUriStr of savedUris) {
+			const wsUri = URI.parse(wsUriStr);
+			if (targetPath === wsUri.path || targetPath.startsWith(wsUri.path + '/')) {
+				return wsUri;
+			}
+		}
+
+		// 2. Walk up targetUri to find .agents/workspace.md or top directory
+		let curr = targetUri;
+		let highestWorkspaceUri: URI = targetUri;
+		while (curr) {
+			const configDir = URI.joinPath(curr, '.agents');
+			const wsMd = URI.joinPath(configDir, 'workspace.md');
+			try {
+				if (await this.fileService.exists(wsMd)) {
+					return curr;
+				}
+			} catch {}
+
+			const ticketMd = URI.joinPath(configDir, 'ticket.md');
+			try {
+				if (await this.fileService.exists(ticketMd)) {
+					highestWorkspaceUri = curr;
+				}
+			} catch {}
+
+			const parent = dirname(curr);
+			if (!parent || parent.path === curr.path) break;
+			curr = parent;
+		}
+
+		return highestWorkspaceUri;
+	}
+
 	async generateNextSequentialName(targetParentUri: URI, type: ResourceType, customCode?: string): Promise<{ name: string; code: string }> {
 		const activeCode = await this.resolveEntityCode(targetParentUri, customCode);
 		const prefixMap: Record<string, string> = {
@@ -854,13 +892,14 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 		let maxNum = 0;
 		const regex = new RegExp(`^(?:${activeCode}|${fallbackPrefix}|${type})(?:[-_]?(?:${fallbackPrefix}|${type}))?[-_]?(\\d+)$`, 'i');
+		const codeRegex = new RegExp(`^${activeCode}-(\\d+)$`, 'i');
 
 		// 1. Check existing snapshots globally to avoid duplicate IDs/names
 		try {
 			const snapshots = this.entityPersistenceService.getAllSnapshots();
 			for (const snap of snapshots) {
 				if (snap.entityCode?.toLowerCase() === activeCode.toLowerCase() || snap.entityName.toLowerCase().startsWith(activeCode.toLowerCase() + '-')) {
-					const match = snap.entityName.match(regex);
+					const match = snap.entityName.match(codeRegex) || snap.entityName.match(regex);
 					if (match) {
 						const num = parseInt(match[1], 10);
 						if (!isNaN(num) && num > maxNum) {
@@ -873,12 +912,53 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			// ignore
 		}
 
-		// 2. Check filesystem children under the immediate parent folder
+		// 2. Recursively scan the entire workspace filesystem tree from root
+		try {
+			const rootWsUri = await this.findWorkspaceRootUri(targetParentUri);
+			const queue: URI[] = [rootWsUri];
+			const visited = new Set<string>();
+
+			while (queue.length > 0) {
+				const currentUri = queue.shift()!;
+				const uriKey = currentUri.toString();
+				if (visited.has(uriKey)) continue;
+				visited.add(uriKey);
+
+				try {
+					const stat = await this.fileService.resolve(currentUri);
+					if (stat.children) {
+						for (const child of stat.children) {
+							if (child.name.startsWith('.') || child.name.startsWith('~') || child.name === 'node_modules' || child.name === 'attachments') {
+								continue;
+							}
+
+							const match = child.name.match(codeRegex) || child.name.match(regex);
+							if (match) {
+								const num = parseInt(match[1], 10);
+								if (!isNaN(num) && num > maxNum) {
+									maxNum = num;
+								}
+							}
+
+							if (child.isDirectory) {
+								queue.push(child.resource);
+							}
+						}
+					}
+				} catch {
+					// ignore
+				}
+			}
+		} catch {
+			// ignore
+		}
+
+		// 3. Fallback: also check immediate parent folder in case targetParentUri wasn't under rootWsUri
 		try {
 			const stat = await this.fileService.resolve(targetParentUri);
 			if (stat.children) {
 				for (const child of stat.children) {
-					const match = child.name.match(regex);
+					const match = child.name.match(codeRegex) || child.name.match(regex);
 					if (match) {
 						const num = parseInt(match[1], 10);
 						if (!isNaN(num) && num > maxNum) {
@@ -900,7 +980,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	async createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult> {
-		const targetBaseUri = options.workspaceUri || options.targetParentUri || URI.file('/Users/aimery/repos/jobs');
+		const targetFolderUri = options.targetParentUri || options.workspaceUri || URI.file('/Users/aimery/repos/jobs');
+		const workspaceRootUri = options.workspaceUri || (options.targetParentUri ? await this.findWorkspaceRootUri(options.targetParentUri) : targetFolderUri);
 		const type = options.type;
 		const description = options.description;
 
@@ -908,7 +989,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 		if (type === 'folder') {
 			const folderName = name || 'new_folder';
-			const folderUri = URI.joinPath(targetBaseUri, folderName);
+			const folderUri = URI.joinPath(targetFolderUri, folderName);
 			const alreadyExists = await this.fileService.exists(folderUri);
 			if (!alreadyExists) {
 				await this.fileService.createFolder(folderUri);
@@ -919,7 +1000,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 		if (type === 'file') {
 			const fileName = name || 'new_file.md';
-			const fileUri = URI.joinPath(targetBaseUri, fileName);
+			const fileUri = URI.joinPath(targetFolderUri, fileName);
 			const alreadyExists = await this.fileService.exists(fileUri);
 			if (!alreadyExists) {
 				const { VSBuffer } = await import('../../../../base/common/buffer.js');
@@ -929,17 +1010,17 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			return { alreadyExists, uri: fileUri };
 		}
 
-		const activeCode = await this.resolveEntityCode(targetBaseUri, options.code);
+		const activeCode = await this.resolveEntityCode(targetFolderUri, options.code);
 
 		if (!name || name === 'AUTO') {
-			const seq = await this.generateNextSequentialName(targetBaseUri, type, options.code);
+			const seq = await this.generateNextSequentialName(targetFolderUri, type, options.code);
 			name = seq.name;
 		}
 
 		// Preserve exact case and hyphens (-), avoiding extra lowercasing or type prefix prepending
 		const sanitizedName = name.replace(/[^a-zA-Z0-9_-]/g, '-');
 		const folderName = sanitizedName;
-		const entityFolderUri = URI.joinPath(targetBaseUri, folderName);
+		const entityFolderUri = URI.joinPath(targetFolderUri, folderName);
 		const mainMdFileName = 'ticket.md';
 		const mainMdUri = URI.joinPath(entityFolderUri, '.agents', mainMdFileName);
 
@@ -950,15 +1031,15 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			return { alreadyExists: true, uri: mainMdUri };
 		}
 
-		const parentSnapshot = this.entityPersistenceService.getSnapshot(targetBaseUri);
+		const parentSnapshot = this.entityPersistenceService.getSnapshot(targetFolderUri);
 		let parentType = parentSnapshot ? parentSnapshot.entityType : 'workspace';
 		if (!parentSnapshot) {
-			const detected = await this.detectCustomEntityTypeFromDisk(targetBaseUri);
+			const detected = await this.detectCustomEntityTypeFromDisk(targetFolderUri);
 			if (detected && detected !== 'folder' && detected !== 'file') {
 				parentType = detected;
 			}
 		}
-		const parentName = parentSnapshot ? parentSnapshot.entityName : (targetBaseUri.path.split('/').filter(Boolean).pop() || 'Workspace');
+		const parentName = parentSnapshot ? parentSnapshot.entityName : (targetFolderUri.path.split('/').filter(Boolean).pop() || 'Workspace');
 
 		let finalModel = { providerId: 'gemini', modelId: 'gemini-1.5-flash', credentialId: undefined as string | undefined };
 		let finalSystemPrompt = `# Agent: ${name}\n\nYou are a specialized AI Agent serving '${parentName}'.`;
@@ -1030,12 +1111,12 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			agentRulePrompt: options.agentRulePrompt,
 			ownerAccount: this.activeUserEmail || 'unauthenticated',
 			description: description || (options.title ? options.title : `${parentType} ${type}`),
-			belongsToWorkspaceUri: targetBaseUri.toString(),
+			belongsToWorkspaceUri: workspaceRootUri.toString(),
 			role: description || `${parentType} Agent`,
 			modelName: finalModel.modelId,
 			systemPrompt: finalSystemPrompt,
 			scopeType: parentType as any,
-			scopeId: targetBaseUri.toString(),
+			scopeId: targetFolderUri.toString(),
 			scopeName: parentName,
 			typeDefinition: (options.typeDefinition && options.typeDefinition !== 'Built-in (System)' && options.typeDefinition !== 'None') ? options.typeDefinition : undefined,
 			typePrompt: options.typePrompt,
@@ -1044,7 +1125,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			linkedBy: options.linkedBy,
 			attachments: attachmentNames,
 			customMetadata: options.customMetadata
-		}, targetBaseUri, true);
+		}, targetFolderUri, true);
 
 		if (type === 'agent' && this.agentsManagerService) {
 			await this.agentsManagerService.addAgent({
@@ -1055,11 +1136,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				model: finalModel,
 				avatarIcon: 'robot',
 				scopeType: parentType as any,
-				scopeId: targetBaseUri.toString(),
+				scopeId: targetFolderUri.toString(),
 				scopeName: parentName,
 				folderPath: entityFolderUri.fsPath,
 				status: 'idle'
-			}, targetBaseUri);
+			}, targetFolderUri);
 		}
 
 		this._onDidChangeWorkspaces.fire();
