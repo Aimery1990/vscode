@@ -1733,20 +1733,22 @@ export class WorkflowEditor extends EditorPane {
 			};
 
 			if (!this._isPureDiagram && node.imports && node.imports.length > 0) {
-				const typeCounts = new Map<string, number>();
-				for (const imp of node.imports) {
-					const count = typeCounts.get(imp.type) || 0;
-					typeCounts.set(imp.type, count + 1);
-				}
-
 				const badgesContainer = append(nodeEl, $('.node-imports-badges-container'));
-				for (const [type, count] of typeCounts.entries()) {
-					const badge = append(badgesContainer, $(`.node-import-badge.${type}`));
+				const totalImports = node.imports.length;
+				// Dynamic limit based on node width (at least 2, max 4 visible pills)
+				const maxVisible = Math.max(1, Math.min(4, Math.floor(((node.width || 120) - 16) / 55)));
+				const visibleImports = node.imports.slice(0, maxVisible);
+				const overflowCount = totalImports - visibleImports.length;
+
+				for (const imp of visibleImports) {
+					const badge = append(badgesContainer, $(`.node-import-badge.${imp.type || 'custom'}`));
+					const typeLabel = imp.type ? (imp.type.charAt(0).toUpperCase() + imp.type.slice(1)) : 'Module';
+					badge.title = `${typeLabel}: ${imp.name}`;
 
 					// Dynamic Icon & Color mapping to match workspacesExplorerPane.ts exactly
-					let codicon = Codicon.package; // default for custom types
+					let codicon = Codicon.package;
 					let color = '';
-					const lower = type.toLowerCase();
+					const lower = (imp.type || '').toLowerCase();
 
 					if (lower === 'agent') {
 						codicon = Codicon.robot;
@@ -1773,22 +1775,29 @@ export class WorkflowEditor extends EditorPane {
 						codicon = Codicon.githubAction;
 						color = '#0d9488';
 					} else {
-						codicon = Codicon.package; // cube/package for all custom types
-						color = getColorForName(type);
+						codicon = Codicon.package;
+						color = getColorForName(imp.type || 'custom');
 					}
 
 					// Hex to RGBA background color
-					const r = parseInt(color.slice(1, 3), 16);
-					const g = parseInt(color.slice(3, 5), 16);
-					const b = parseInt(color.slice(5, 7), 16);
+					const r = parseInt(color.slice(1, 3), 16) || 13;
+					const g = parseInt(color.slice(3, 5), 16) || 148;
+					const b = parseInt(color.slice(5, 7), 16) || 136;
 
-					badge.style.backgroundColor = `rgba(${r}, ${g}, ${b}, 0.15)`;
+					badge.style.backgroundColor = `rgba(${r}, ${g}, ${b}, 0.16)`;
 					badge.style.color = color;
 
 					append(badge, $('span' + ThemeIcon.asCSSSelector(codicon)));
+					append(badge, $('span.badge-text', {}, imp.name));
+				}
 
-					const displayType = type.charAt(0).toUpperCase() + type.slice(1);
-					append(badge, $('span.badge-text', {}, `${displayType} (${count})`));
+				if (overflowCount > 0) {
+					const moreBadge = append(badgesContainer, $('.node-import-badge.more-badge'));
+					const remainingList = node.imports.slice(maxVisible).map(i => `• [${i.type || 'module'}] ${i.name}`).join('\n');
+					moreBadge.title = `More attached tickets/modules (+${overflowCount}):\n${remainingList}`;
+					moreBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.12)';
+					moreBadge.style.color = 'var(--vscode-descriptionForeground, #aaaaaa)';
+					append(moreBadge, $('span.badge-text', {}, `+${overflowCount}`));
 				}
 			}
 
