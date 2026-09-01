@@ -1004,7 +1004,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					);
 				} else if (child.type !== 'file' && child.type !== 'folder') {
 					childActions.push(
-						new Action('remove_child_from_ws', 'Remove from Workspace', ThemeIcon.asClassName(Codicon.close), true, async () => {
+						new Action('remove_child_from_ws', 'Remove from Workspace', ThemeIcon.asClassName(Codicon.sparkle), true, async () => {
 							const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(child.uri);
 							const removedStatusName = wsStatuses.removedStatus || 'Removed';
 							const confirm = await this.dialogService.confirm({
@@ -1029,6 +1029,37 @@ export class MainWorkspaceViewPane extends ViewPane {
 											await this.agentsManagerService.updateAgent({ ...matchingAgent, status: 'offline' });
 										}
 									}
+
+									// 4. Record worklog in worklog.md
+									try {
+										const worklogNames = ['worklog.md', 'work_log.md'];
+										let worklogTargetUri: URI | undefined;
+										for (const wn of worklogNames) {
+											const p1 = URI.joinPath(child.uri, '.agents', wn);
+											if (await this.fileService.exists(p1)) { worklogTargetUri = p1; break; }
+											const p2 = URI.joinPath(child.uri, wn);
+											if (await this.fileService.exists(p2)) { worklogTargetUri = p2; break; }
+										}
+										if (worklogTargetUri) {
+											const now = new Date();
+											const pad = (n: number) => n.toString().padStart(2, '0');
+											const tzOffset = -now.getTimezoneOffset();
+											const sign = tzOffset >= 0 ? '+' : '-';
+											const tzHours = pad(Math.floor(Math.abs(tzOffset) / 60));
+											const tzMinutes = pad(Math.abs(tzOffset) % 60);
+											const fullLogDateTime = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())} ${sign}${tzHours}:${tzMinutes}`;
+											let content = (await this.fileService.readFile(worklogTargetUri)).value.toString();
+											const entry = `\n---\n\n## ${fullLogDateTime}\n\n` +
+												`- **Update Datetime**: ${fullLogDateTime}\n` +
+												`- **Update By**: AI Agent\n\n` +
+												`### User Request\nRemove ticket '${child.name}' from active workspace.\n\n` +
+												`### Update Summary\nTicket marked as '${removedStatusName}' and removed from active workspace.\n\n` +
+												`### Update Details\n- Status updated to '${removedStatusName}' in ticket.md.\n- Filtered out from active workspace tree.\n\n` +
+												`### Update Conclusion\nTicket removed successfully.\n\n` +
+												`### Commit\n- **Repo**: None\n- **Branch**: None\n- **ID**: None\n- **comment**: None\n- **committed by**: None\n`;
+											await this.fileService.writeFile(worklogTargetUri, VSBuffer.fromString(content + entry));
+										}
+									} catch {}
 									
 									this.notificationService.info(`Removed '${child.name}' from active workspace.`);
 									this.renderContent();
@@ -2899,9 +2930,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 		cancelBtn.onclick = () => overlay.remove();
 
 		const submitBtn = append(actionsRow, $('button.monaco-button', {
-			style: 'padding: 7px 18px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; font-weight: 600;'
+			style: 'padding: 7px 18px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 6px;'
 		})) as HTMLButtonElement;
-		submitBtn.innerText = 'Create Entity';
+		submitBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg><span>Create Entity</span>`;
 
 		const updateValidation = async () => {
 			const inputName = nameInput.value.trim();

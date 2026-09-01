@@ -31,6 +31,7 @@ import { WorkspacesExplorerViewPaneContainer } from './workspacesExplorerViewlet
 import { MainWorkspaceViewPane } from './workspacesExplorerPane.js';
 import { EntityDetailEditor } from './entityDetailEditor.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
+import './tools/ticketTools.contribution.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../common/editor.js';
 
