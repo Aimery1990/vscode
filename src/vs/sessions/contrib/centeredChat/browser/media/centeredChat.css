@@ -113,6 +113,131 @@
 	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
+.centered-chat-msg-user-header,
+.centered-chat-msg-ai-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 6px;
+	gap: 8px;
+}
+
+.centered-chat-msg-user-header-left {
+	font-size: 10.5px;
+	font-weight: 600;
+	opacity: 0.7;
+	letter-spacing: 0.3px;
+}
+
+.centered-chat-bubble-copy-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	background: rgba(255, 255, 255, 0.08);
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	border-radius: 4px;
+	padding: 2px 6px;
+	font-size: 10px;
+	color: var(--vscode-foreground, #cccccc);
+	cursor: pointer;
+	opacity: 0.65;
+	transition: opacity 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.centered-chat-bubble-copy-btn:hover {
+	opacity: 1;
+	background: rgba(255, 255, 255, 0.16);
+	border-color: rgba(255, 255, 255, 0.28);
+	color: #ffffff;
+}
+
+.centered-chat-bubble-copy-btn .codicon {
+	font-size: 11px;
+}
+
+/* Prompt Inspector (Collapsible System Prompt & Context) */
+.centered-chat-prompt-inspector {
+	margin-top: 8px;
+	background: rgba(0, 0, 0, 0.3);
+	border: 1px dashed rgba(255, 255, 255, 0.18);
+	border-radius: 6px;
+	overflow: hidden;
+	transition: background 150ms ease;
+}
+
+.centered-chat-prompt-inspector[open] {
+	background: rgba(0, 0, 0, 0.5);
+	border-style: solid;
+	border-color: rgba(56, 189, 248, 0.35);
+}
+
+.centered-chat-prompt-summary {
+	padding: 5px 8px;
+	font-size: 10.5px;
+	font-weight: 500;
+	color: #38bdf8;
+	cursor: pointer;
+	user-select: none;
+	outline: none;
+	opacity: 0.85;
+	transition: opacity 120ms ease;
+}
+
+.centered-chat-prompt-summary:hover {
+	opacity: 1;
+}
+
+.centered-chat-prompt-body {
+	padding: 8px 10px;
+	border-top: 1px solid rgba(255, 255, 255, 0.08);
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.centered-chat-prompt-section-title {
+	font-size: 10px;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+	opacity: 0.75;
+	color: #94a3b8;
+}
+
+.centered-chat-prompt-pre {
+	margin: 0;
+	background: #0d1117;
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	border-radius: 4px;
+	padding: 6px 8px;
+	font-family: Menlo, Monaco, "Courier New", monospace;
+	font-size: 10.5px;
+	line-height: 1.4;
+	color: #e2e8f0;
+	max-height: 180px;
+	overflow-y: auto;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.centered-chat-copy-full-prompt-btn {
+	align-self: flex-start;
+	background: rgba(56, 189, 248, 0.12);
+	border: 1px solid rgba(56, 189, 248, 0.3);
+	border-radius: 4px;
+	padding: 4px 8px;
+	font-size: 10.5px;
+	color: #38bdf8;
+	cursor: pointer;
+	margin-top: 4px;
+	transition: background 120ms ease, border-color 120ms ease;
+}
+
+.centered-chat-copy-full-prompt-btn:hover {
+	background: rgba(56, 189, 248, 0.22);
+	border-color: rgba(56, 189, 248, 0.5);
+}
+
 .centered-chat-msg-time {
 	font-size: 9px;
 	opacity: 0.4;

@@ -1818,20 +1818,50 @@ export class CenteredChatWidget extends Disposable {
 		});
 	}
 
+	private static readonly ANYAGENT_SYSTEM_PROMPT = `You are AnyAgent Workspace Central AI Assistant.
+You have direct access to tool capabilities that manage the AnyAgent Workspace & Ticketing System.
+When the user gives you a request or when structured context is provided (such as "[Workspace: ... | Ticket: ... | Target: ...]"), you MUST call the appropriate tool(s) to fulfill the operation.
+
+AVAILABLE ANYAGENT TOOLS:
+- anyagent_get_ticket_data: Query current ticket values, metadata, field types, and allowed workspace statuses.
+- anyagent_create_ticket: Create a new sub-entity (job, task, note, resume, workflow, custom types).
+- anyagent_delete_ticket: Mark a ticket and its sub-tickets as Removed and clean up references.
+- anyagent_update_ticket: Update standard attributes (/Title, /Status, /Description, /Custom/...), or custom card items.
+- anyagent_manage_links: Add, remove, or set bidirectional links between tickets (supports 1-to-N, N-to-1, N-to-M).
+
+WORKLOG INTEGRATION REQUIREMENT:
+Whenever performing any mutating tool call (create, update, delete, manage_links), you MUST provide a complete, well-formed 'worklog_record' object:
+{
+  "user_request": "<clear description of user request>",
+  "update_summary": "<concise summary of changes made>",
+  "update_details": ["<detailed bullet 1>", "<detailed bullet 2>"],
+  "update_conclusion": "<short final verdict e.g. Successfully updated link to FNDJ1-0004>"
+}
+
+When user input looks like:
+[Workspace: WSP | Ticket: TICKET_ID | Target: /Attributes/Link To | Proposed Value: TARGET_ID]
+or:
+TICKET_ID > /Attributes/Link To > -> TARGET_ID
+You must invoke 'anyagent_manage_links' with action 'add_links' (or 'set_links') from source_ticket_ids [TICKET_ID] to target_ticket_ids [TARGET_ID].
+
+Always explain the result clearly to the user once tool execution completes.`;
+
 	private async sendMessage(): Promise<void> {
-		if (!this.inputField || !this.messagesContainer) { return; }
+		if (this.isStreaming) { return; }
 
-		const text = this.inputField.value.trim();
-		const hasModifiedValue = !!(this.activeContextLocator && this.activeContextLocator.interactiveModifiedValue && this.activeContextLocator.interactiveModifiedValue !== this.activeContextLocator.currentValue);
-		if (!text && this.activeAttachments.length === 0 && !hasModifiedValue) { return; }
-
-		const cred = this.getActiveCredential();
-		if (!cred) {
-			this.notificationService.warn('Please configure an API Key in Settings first.');
-			this.openAccountSettings('Models');
+		const text = this.inputField?.value.trim() || '';
+		if (!text && this.activeAttachments.length === 0) {
 			return;
 		}
 
+		if (!this.messagesContainer) { return; }
+
+		// Ensure we have a valid model/credential
+		const cred = await this.agentCredentialService.getCredential(this.activeCredentialId);
+		if (!cred) {
+			this.notificationService.warn('Please select a valid AI Provider & Model in Agent Central first.');
+			return;
+		}
 		const apiKey = await this.agentCredentialService.getApiKey(cred.id);
 		if (!apiKey) {
 			this.notificationService.warn(`No API Key found for ${cred.name}. Please configure it in Settings.`);
@@ -1884,6 +1914,25 @@ export class CenteredChatWidget extends Disposable {
 			this.setContextLocator(null);
 		}
 
+		// User Message Header with Actions (Copy & Prompt Inspector toggle)
+		const userHeader = append(userMsg, $('.centered-chat-msg-user-header'));
+		
+		const userHeaderLeft = append(userHeader, $('.centered-chat-msg-user-header-left'));
+		userHeaderLeft.textContent = 'You';
+
+		const userCopyBtn = append(userHeader, $('button.centered-chat-bubble-copy-btn'));
+		userCopyBtn.title = 'Copy user prompt';
+		append(userCopyBtn, $('span.codicon.codicon-copy'));
+		const userCopyLabel = append(userCopyBtn, $('span'));
+		userCopyLabel.textContent = 'Copy';
+		userCopyBtn.onclick = (e) => {
+			e.stopPropagation();
+			navigator.clipboard.writeText(fullPrompt).then(() => {
+				userCopyLabel.textContent = 'Copied!';
+				setTimeout(() => { userCopyLabel.textContent = 'Copy'; }, 2000);
+			});
+		};
+
 		if (this.activeAttachments.length > 0) {
 			this.activeAttachments.forEach(att => {
 				const attachmentLabel = append(userMsg, $('div'));
@@ -1900,14 +1949,49 @@ export class CenteredChatWidget extends Disposable {
 			promptContent.textContent = text;
 		}
 
+		// Collapsible Prompt Inspector (Click to expand Full System Prompt & Tools)
+		const promptInspector = append(userMsg, document.createElement('details'));
+		promptInspector.className = 'centered-chat-prompt-inspector';
+		
+		const summary = append(promptInspector, document.createElement('summary'));
+		summary.className = 'centered-chat-prompt-summary';
+		summary.textContent = '🔍 View Injected System Prompt & Tools (Full Trace)';
+
+		const promptBody = append(promptInspector, $('.centered-chat-prompt-body'));
+		
+		const promptSectionTitle = append(promptBody, $('.centered-chat-prompt-section-title'));
+		promptSectionTitle.textContent = 'System Prompt:';
+		const sysPromptPre = append(promptBody, $('pre.centered-chat-prompt-pre'));
+		sysPromptPre.textContent = CenteredChatWidget.ANYAGENT_SYSTEM_PROMPT;
+
+		const payloadTitle = append(promptBody, $('.centered-chat-prompt-section-title'));
+		payloadTitle.textContent = 'User Payload Sent to LLM:';
+		const payloadPre = append(promptBody, $('pre.centered-chat-prompt-pre'));
+		payloadPre.textContent = fullPrompt;
+
+		const copyFullPromptBtn = append(promptBody, $('button.centered-chat-copy-full-prompt-btn'));
+		copyFullPromptBtn.textContent = '📋 Copy Complete Prompt & System Context';
+		copyFullPromptBtn.onclick = (e) => {
+			e.stopPropagation();
+			const fullTraceText = `=== SYSTEM PROMPT ===\n${CenteredChatWidget.ANYAGENT_SYSTEM_PROMPT}\n\n=== USER PAYLOAD ===\n${fullPrompt}`;
+			navigator.clipboard.writeText(fullTraceText).then(() => {
+				copyFullPromptBtn.textContent = '✓ Copied Full Context!';
+				setTimeout(() => { copyFullPromptBtn.textContent = '📋 Copy Complete Prompt & System Context'; }, 2000);
+			});
+		};
+
 		const userTime = append(userMsg, $('.centered-chat-msg-time'));
 		userTime.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
 		// Clear inputs
-		this.inputField.value = '';
+		if (this.inputField) {
+			this.inputField.value = '';
+		}
 		this.activeAttachments = [];
 		this.renderAttachmentTags();
-		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+		if (this.messagesContainer) {
+			this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+		}
 
 		// 2. Start Real Streaming Response
 		await this.startStreamingResponse(fullPrompt, cred, apiKey);
@@ -1928,6 +2012,19 @@ export class CenteredChatWidget extends Disposable {
 		const aiHeader = append(aiMsg, $('.centered-chat-msg-ai-header'));
 		const modelBadge = append(aiHeader, $('.centered-chat-msg-model-badge'));
 		modelBadge.textContent = `${this.activeModelId} (${cred.providerId.toUpperCase()})`;
+
+		const aiCopyBtn = append(aiHeader, $('button.centered-chat-bubble-copy-btn'));
+		aiCopyBtn.title = 'Copy entire AI response';
+		append(aiCopyBtn, $('span.codicon.codicon-copy'));
+		const aiCopyLabel = append(aiCopyBtn, $('span'));
+		aiCopyLabel.textContent = 'Copy';
+		aiCopyBtn.onclick = (e) => {
+			e.stopPropagation();
+			navigator.clipboard.writeText(fullResponseText).then(() => {
+				aiCopyLabel.textContent = 'Copied!';
+				setTimeout(() => { aiCopyLabel.textContent = 'Copy'; }, 2000);
+			});
+		};
 
 		const aiContent = append(aiMsg, $('.centered-chat-ai-markdown-content'));
 		const typingCursor = append(aiContent, $('span.centered-chat-typing-cursor'));
@@ -2101,34 +2198,7 @@ export class CenteredChatWidget extends Disposable {
 		const { providerId, modelId, prompt, apiKey, customUrl, cancellationTokenSource, onToken } = options;
 		const sanitizedModel = modelId.replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
 
-		const ANYAGENT_SYSTEM_PROMPT = `You are AnyAgent Workspace Central AI Assistant.
-You have direct access to tool capabilities that manage the AnyAgent Workspace & Ticketing System.
-When the user gives you a request or when structured context is provided (such as "[Workspace: ... | Ticket: ... | Target: ...]"), you MUST call the appropriate tool(s) to fulfill the operation.
-
-AVAILABLE ANYAGENT TOOLS:
-- anyagent_get_ticket_data: Query current ticket values, metadata, field types, and allowed workspace statuses.
-- anyagent_create_ticket: Create a new sub-entity (job, task, note, resume, workflow, custom types).
-- anyagent_delete_ticket: Mark a ticket and its sub-tickets as Removed and clean up references.
-- anyagent_update_ticket: Update standard attributes (/Title, /Status, /Description, /Custom/...), or custom card items.
-- anyagent_manage_links: Add, remove, or set bidirectional links between tickets (supports 1-to-N, N-to-1, N-to-M).
-
-WORKLOG INTEGRATION REQUIREMENT:
-Whenever performing any mutating tool call (create, update, delete, manage_links), you MUST provide a complete, well-formed 'worklog_record' object:
-{
-  "user_request": "<clear description of user request>",
-  "update_summary": "<concise summary of changes made>",
-  "update_details": ["<detailed bullet 1>", "<detailed bullet 2>"],
-  "update_conclusion": "<short final verdict e.g. Successfully updated link to FNDJ1-0004>"
-}
-
-When user input looks like:
-[Workspace: WSP | Ticket: TICKET_ID | Target: /Attributes/Link To | Proposed Value: TARGET_ID]
-or:
-TICKET_ID > /Attributes/Link To > -> TARGET_ID
-You must invoke 'anyagent_manage_links' with action 'add_links' (or 'set_links') from source_ticket_ids [TICKET_ID] to target_ticket_ids [TARGET_ID].
-
-Always explain the result clearly to the user once tool execution completes.`;
-
+		const systemPrompt = CenteredChatWidget.ANYAGENT_SYSTEM_PROMPT;
 		const maxTurns = 5;
 
 		if (providerId === 'anthropic') {
@@ -2149,7 +2219,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 					model: cleanModel,
 					max_tokens: 4096,
 					stream: true,
-					system: ANYAGENT_SYSTEM_PROMPT,
+					system: systemPrompt,
 					messages,
 					tools: tools.length > 0 ? tools : undefined
 				});
@@ -2291,7 +2361,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 
 				const data = JSON.stringify({
 					contents,
-					system_instruction: { parts: [{ text: ANYAGENT_SYSTEM_PROMPT }] },
+					system_instruction: { parts: [{ text: systemPrompt }] },
 					tools: tools.length > 0 ? tools : undefined
 				});
 
@@ -2406,7 +2476,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 		} else {
 			// OpenAI & Custom-OpenAI
 			let messages: any[] = [
-				{ role: 'system', content: ANYAGENT_SYSTEM_PROMPT },
+				{ role: 'system', content: systemPrompt },
 				{ role: 'user', content: prompt }
 			];
 			const tools = this.getOpenAITools();
