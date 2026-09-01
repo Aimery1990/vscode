@@ -2248,7 +2248,8 @@ Always explain the result clearly to the user once tool execution completes.`;
 					let parsedInput: any = {};
 					try { parsedInput = JSON.parse(tu.inputJson || '{}'); } catch { }
 
-					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${tu.name}\`\n`);
+					const formattedArgs = JSON.stringify(parsedInput, null, 2);
+					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${tu.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
 					let resultContent = '';
 					try {
 						const result = await this.languageModelToolsService.invokeTool(
@@ -2258,10 +2259,16 @@ Always explain the result clearly to the user once tool execution completes.`;
 						);
 						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
 						resultContent = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
-						onToken(`> ✅ **Tool Completed Successfully**\n\n`);
+						
+						let prettyResult = resultContent;
+						try {
+							const parsed = JSON.parse(resultContent);
+							prettyResult = JSON.stringify(parsed, null, 2);
+						} catch { }
+						onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> ✅ **Tool Completed Successfully**\n\n`);
 					} catch (err: any) {
 						resultContent = `Tool execution error: ${err.message || String(err)}`;
-						onToken(`> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
+						onToken(`>\n> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
 					}
 
 					toolResultBlocks.push({
@@ -2363,7 +2370,8 @@ Always explain the result clearly to the user once tool execution completes.`;
 
 				const responseParts: any[] = [];
 				for (const fc of functionCalls) {
-					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${fc.name}\`\n`);
+					const formattedArgs = JSON.stringify(fc.args || {}, null, 2);
+					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${fc.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
 					let resultContent: any = {};
 					try {
 						const result = await this.languageModelToolsService.invokeTool(
@@ -2374,10 +2382,12 @@ Always explain the result clearly to the user once tool execution completes.`;
 						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
 						const textVal = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
 						try { resultContent = JSON.parse(textVal); } catch { resultContent = { response: textVal }; }
-						onToken(`> ✅ **Tool Completed Successfully**\n\n`);
+						
+						const prettyResult = JSON.stringify(resultContent, null, 2);
+						onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> ✅ **Tool Completed Successfully**\n\n`);
 					} catch (err: any) {
 						resultContent = { error: err.message || String(err) };
-						onToken(`> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
+						onToken(`>\n> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
 					}
 
 					responseParts.push({
@@ -2498,7 +2508,8 @@ Always explain the result clearly to the user once tool execution completes.`;
 					let parsedArgs: any = {};
 					try { parsedArgs = JSON.parse(tc.function.arguments || '{}'); } catch { }
 
-					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${tc.function.name}\`\n`);
+					const formattedArgs = JSON.stringify(parsedArgs, null, 2);
+					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${tc.function.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
 					let resultContent = '';
 					try {
 						const result = await this.languageModelToolsService.invokeTool(
@@ -2508,10 +2519,16 @@ Always explain the result clearly to the user once tool execution completes.`;
 						);
 						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
 						resultContent = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
-						onToken(`> ✅ **Tool Completed Successfully**\n\n`);
+						
+						let prettyResult = resultContent;
+						try {
+							const parsed = JSON.parse(resultContent);
+							prettyResult = JSON.stringify(parsed, null, 2);
+						} catch { }
+						onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> ✅ **Tool Completed Successfully**\n\n`);
 					} catch (err: any) {
 						resultContent = `Tool execution error: ${err.message || String(err)}`;
-						onToken(`> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
+						onToken(`>\n> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
 					}
 
 					messages.push({
