@@ -873,6 +873,51 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		return highestWorkspaceUri;
 	}
 
+	public async getWorkspaceSequences(workspaceRootUri: URI): Promise<Record<string, number>> {
+		try {
+			const seqFileUri = URI.joinPath(workspaceRootUri, '.agents', 'sequences.json');
+			if (await this.fileService.exists(seqFileUri)) {
+				const content = (await this.fileService.readFile(seqFileUri)).value.toString();
+				const parsed = JSON.parse(content);
+				if (parsed && typeof parsed === 'object') {
+					const result: Record<string, number> = {};
+					for (const [k, v] of Object.entries(parsed)) {
+						if (typeof v === 'number' && !isNaN(v)) {
+							result[k.toUpperCase()] = v;
+						}
+					}
+					return result;
+				}
+			}
+		} catch {
+			// ignore
+		}
+		return {};
+	}
+
+	public async updateWorkspaceSequence(workspaceRootUri: URI, code: string, usedNumber: number): Promise<void> {
+		if (!code || isNaN(usedNumber) || usedNumber <= 0) return;
+		try {
+			const configDir = URI.joinPath(workspaceRootUri, '.agents');
+			if (!await this.fileService.exists(configDir)) {
+				await this.fileService.createFolder(configDir);
+			}
+
+			const seqFileUri = URI.joinPath(configDir, 'sequences.json');
+			const sequences = await this.getWorkspaceSequences(workspaceRootUri);
+			const upperCode = code.toUpperCase();
+			const currentMax = sequences[upperCode] || 0;
+			if (usedNumber > currentMax) {
+				sequences[upperCode] = usedNumber;
+				const jsonStr = JSON.stringify(sequences, null, 2);
+				const { VSBuffer } = await import('../../../../base/common/buffer.js');
+				await this.fileService.writeFile(seqFileUri, VSBuffer.fromString(jsonStr));
+			}
+		} catch (err) {
+			console.error('Failed to update workspace sequences.json:', err);
+		}
+	}
+
 	async generateNextSequentialName(targetParentUri: URI, type: ResourceType, customCode?: string): Promise<{ name: string; code: string }> {
 		const activeCode = await this.resolveEntityCode(targetParentUri, customCode);
 		const prefixMap: Record<string, string> = {
@@ -890,11 +935,16 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		};
 		const fallbackPrefix = prefixMap[type] || type.toUpperCase();
 
-		let maxNum = 0;
+		const rootWsUri = await this.findWorkspaceRootUri(targetParentUri);
+
+		// 1. Read persistent monotonic counter from .agents/sequences.json (never rolls back on deletion)
+		const storedSequences = await this.getWorkspaceSequences(rootWsUri);
+		let maxNum = storedSequences[activeCode.toUpperCase()] || 0;
+
 		const regex = new RegExp(`^(?:${activeCode}|${fallbackPrefix}|${type})(?:[-_]?(?:${fallbackPrefix}|${type}))?[-_]?(\\d+)$`, 'i');
 		const codeRegex = new RegExp(`^${activeCode}-(\\d+)$`, 'i');
 
-		// 1. Check existing snapshots globally to avoid duplicate IDs/names
+		// 2. Check existing snapshots globally to avoid duplicate IDs/names
 		try {
 			const snapshots = this.entityPersistenceService.getAllSnapshots();
 			for (const snap of snapshots) {
@@ -912,9 +962,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			// ignore
 		}
 
-		// 2. Recursively scan the entire workspace filesystem tree from root
+		// 3. Recursively scan the entire workspace filesystem tree from root
 		try {
-			const rootWsUri = await this.findWorkspaceRootUri(targetParentUri);
 			const queue: URI[] = [rootWsUri];
 			const visited = new Set<string>();
 
@@ -953,7 +1002,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			// ignore
 		}
 
-		// 3. Fallback: also check immediate parent folder in case targetParentUri wasn't under rootWsUri
+		// 4. Fallback: also check immediate parent folder in case targetParentUri wasn't under rootWsUri
 		try {
 			const stat = await this.fileService.resolve(targetParentUri);
 			if (stat.children) {
@@ -1141,6 +1190,15 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				folderPath: entityFolderUri.fsPath,
 				status: 'idle'
 			}, targetFolderUri);
+		}
+
+		// Update persistent workspace sequence counter for activeCode (strictly monotonic)
+		const matchNum = sanitizedName.match(/[-_](\d+)$/);
+		if (matchNum) {
+			const usedNum = parseInt(matchNum[1], 10);
+			if (!isNaN(usedNum)) {
+				await this.updateWorkspaceSequence(workspaceRootUri, activeCode, usedNum);
+			}
 		}
 
 		this._onDidChangeWorkspaces.fire();
