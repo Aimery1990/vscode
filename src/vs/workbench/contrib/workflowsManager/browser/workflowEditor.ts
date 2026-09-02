@@ -128,6 +128,15 @@ export class WorkflowEditor extends EditorPane {
 	private _activeLinkStyle: 'arrow-single' | 'arrow-double' | 'arrow-none' | 'dashed' = 'arrow-single';
 	private _activeRoutingMode: 'orthogonal' | 'curved' = 'orthogonal';
 	private _activeBranchDirection: 'right' | 'bottom' | 'left' | 'top' = 'right';
+	private _activeNodeColor: string = '#0d9488';
+	private _activeLineColor: string = '#0d9488';
+	private _activeTextColor: string = '#ffffff';
+	private _activeTextAlign: 'left' | 'center' | 'right' = 'center';
+	private _activeVerticalAlign: 'top' | 'center' | 'bottom' = 'center';
+	private _activeIsBold: boolean = false;
+	private _activeIsItalic: boolean = false;
+	private _activeIsUnderline: boolean = false;
+	private _activeIsStrikethrough: boolean = false;
 
 	// Selection Box State
 	private _isSelectingBox = false;
@@ -227,7 +236,18 @@ export class WorkflowEditor extends EditorPane {
 		this._isToolbarCompact = this._storageService.getBoolean('workflowEditor.toolbarCompact', StorageScope.PROFILE, false);
 		this._isInspectorCompact = this._storageService.getBoolean('workflowEditor.inspectorCompact', StorageScope.PROFILE, false);
 		this._isInspectorCollapsed = this._storageService.getBoolean('workflowEditor.inspectorCollapsed', StorageScope.PROFILE, false);
+		this._activeLinkStyle = (this._storageService.get('workflowEditor.linkStyle', StorageScope.PROFILE, 'arrow-single') as any) || 'arrow-single';
+		this._activeRoutingMode = (this._storageService.get('workflowEditor.routingMode', StorageScope.PROFILE, 'orthogonal') as any) || 'orthogonal';
 		this._activeBranchDirection = (this._storageService.get('workflowEditor.branchDirection', StorageScope.PROFILE, 'right') as any) || 'right';
+		this._activeNodeColor = this._storageService.get('workflowEditor.nodeColor', StorageScope.PROFILE, '#0d9488');
+		this._activeLineColor = this._storageService.get('workflowEditor.lineColor', StorageScope.PROFILE, '#0d9488');
+		this._activeTextColor = this._storageService.get('workflowEditor.textColor', StorageScope.PROFILE, '#ffffff');
+		this._activeTextAlign = (this._storageService.get('workflowEditor.textAlign', StorageScope.PROFILE, 'center') as any) || 'center';
+		this._activeVerticalAlign = (this._storageService.get('workflowEditor.verticalAlign', StorageScope.PROFILE, 'center') as any) || 'center';
+		this._activeIsBold = this._storageService.getBoolean('workflowEditor.isBold', StorageScope.PROFILE, false);
+		this._activeIsItalic = this._storageService.getBoolean('workflowEditor.isItalic', StorageScope.PROFILE, false);
+		this._activeIsUnderline = this._storageService.getBoolean('workflowEditor.isUnderline', StorageScope.PROFILE, false);
+		this._activeIsStrikethrough = this._storageService.getBoolean('workflowEditor.isStrikethrough', StorageScope.PROFILE, false);
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
@@ -701,7 +721,15 @@ export class WorkflowEditor extends EditorPane {
 							width: 100,
 							height: 50,
 							label: name,
-							imports: [{ type: type as any, name }]
+							imports: [{ type: type as any, name }],
+							color: this._activeNodeColor,
+							textColor: this._activeTextColor,
+							textAlign: this._activeTextAlign,
+							verticalAlign: this._activeVerticalAlign,
+							isBold: this._activeIsBold,
+							isItalic: this._activeIsItalic,
+							isUnderline: this._activeIsUnderline,
+							isStrikethrough: this._activeIsStrikethrough
 						};
 						this._data.nodes.push(newNode);
 						this._selectedNodeIds.clear();
@@ -829,6 +857,7 @@ export class WorkflowEditor extends EditorPane {
 			linkItemBtns.push(item);
 			item.onclick = () => {
 				this._activeLinkStyle = ls.style;
+				this._storageService.store('workflowEditor.linkStyle', this._activeLinkStyle, StorageScope.PROFILE, StorageTarget.USER);
 				linkItemBtns.forEach(btn => btn.classList.remove('active'));
 				item.classList.add('active');
 			};
@@ -864,6 +893,7 @@ export class WorkflowEditor extends EditorPane {
 			routingItemBtns.push(item);
 			item.onclick = () => {
 				this._activeRoutingMode = rm.mode;
+				this._storageService.store('workflowEditor.routingMode', this._activeRoutingMode, StorageScope.PROFILE, StorageTarget.USER);
 				this._data.routingMode = rm.mode;
 				routingItemBtns.forEach(btn => btn.classList.remove('active'));
 				item.classList.add('active');
@@ -1044,11 +1074,11 @@ export class WorkflowEditor extends EditorPane {
 
 		// Case A: Connection Line(s) Selected
 		if (selLinkCount > 0 && selNodeCount === 0) {
-			let currentLineColor = '#0d9488';
+			let currentLineColor = this._activeLineColor || '#0d9488';
 			if (selLinkCount === 1) {
 				const selLinkId = Array.from(this._selectedLinkIds)[0];
 				const link = this._data.links.find(l => l.id === selLinkId);
-				currentLineColor = link?.color || '#0d9488';
+				currentLineColor = link?.color || this._activeLineColor || '#0d9488';
 			}
 
 			// Section 1: Line Color
@@ -1066,12 +1096,16 @@ export class WorkflowEditor extends EditorPane {
 				compactColorBtn.onclick = (e) => {
 					e.stopPropagation();
 					this._showColorPickerFlyout(compactColorBtn, currentLineColor, paletteColors, (hex) => {
-						for (const id of this._selectedLinkIds) {
-							const link = this._data.links.find(l => l.id === id);
-							if (link) link.color = hex;
+						this._activeLineColor = hex;
+						this._storageService.store('workflowEditor.lineColor', this._activeLineColor, StorageScope.PROFILE, StorageTarget.USER);
+						if (this._selectedLinkIds.size > 0) {
+							for (const id of this._selectedLinkIds) {
+								const link = this._data.links.find(l => l.id === id);
+								if (link) link.color = hex;
+							}
+							this._saveFlowchartData();
+							this._drawLinks();
 						}
-						this._saveFlowchartData();
-						this._drawLinks();
 						this._renderInspector(parent);
 					});
 				};
@@ -1086,12 +1120,16 @@ export class WorkflowEditor extends EditorPane {
 						swatch.classList.add('active');
 					}
 					swatch.onclick = () => {
-						for (const id of this._selectedLinkIds) {
-							const link = this._data.links.find(l => l.id === id);
-							if (link) link.color = c.hex;
+						this._activeLineColor = c.hex;
+						this._storageService.store('workflowEditor.lineColor', this._activeLineColor, StorageScope.PROFILE, StorageTarget.USER);
+						if (this._selectedLinkIds.size > 0) {
+							for (const id of this._selectedLinkIds) {
+								const link = this._data.links.find(l => l.id === id);
+								if (link) link.color = c.hex;
+							}
+							this._saveFlowchartData();
+							this._drawLinks();
 						}
-						this._saveFlowchartData();
-						this._drawLinks();
 						this._renderInspector(parent);
 					};
 				}
@@ -1109,7 +1147,7 @@ export class WorkflowEditor extends EditorPane {
 				{ mode: 'orthogonal', label: 'Orthogonal', shortLabel: 'Ortho' },
 				{ mode: 'curved', label: 'Curved', shortLabel: 'Curve' }
 			];
-			let curRouting: 'orthogonal' | 'curved' = 'orthogonal';
+			let curRouting: 'orthogonal' | 'curved' = this._activeRoutingMode || 'orthogonal';
 			if (selLinkCount === 1) {
 				const selLinkId = Array.from(this._selectedLinkIds)[0];
 				const link = this._data.links.find(l => l.id === selLinkId);
@@ -1123,12 +1161,17 @@ export class WorkflowEditor extends EditorPane {
 					btn.classList.add('active');
 				}
 				btn.onclick = () => {
-					for (const id of this._selectedLinkIds) {
-						const link = this._data.links.find(l => l.id === id);
-						if (link) link.routing = rm.mode;
+					this._activeRoutingMode = rm.mode;
+					this._storageService.store('workflowEditor.routingMode', this._activeRoutingMode, StorageScope.PROFILE, StorageTarget.USER);
+					this._data.routingMode = rm.mode;
+					if (this._selectedLinkIds.size > 0) {
+						for (const id of this._selectedLinkIds) {
+							const link = this._data.links.find(l => l.id === id);
+							if (link) link.routing = rm.mode;
+						}
+						this._saveFlowchartData();
+						this._drawLinks();
 					}
-					this._saveFlowchartData();
-					this._drawLinks();
 					this._renderInspector(parent);
 				};
 			}
@@ -1151,11 +1194,11 @@ export class WorkflowEditor extends EditorPane {
 				{ style: 'arrow-none', label: 'None (—)', shortLabel: '—' },
 				{ style: 'dashed', label: 'Dashed (╌)', shortLabel: '╌' }
 			];
-			let curArrowStyle: IFlowchartLink['style'] = 'arrow-single';
+			let curArrowStyle: IFlowchartLink['style'] = this._activeLinkStyle || 'arrow-single';
 			if (selLinkCount === 1) {
 				const selLinkId = Array.from(this._selectedLinkIds)[0];
 				const link = this._data.links.find(l => l.id === selLinkId);
-				curArrowStyle = link?.style || 'arrow-single';
+				curArrowStyle = link?.style || this._activeLinkStyle || 'arrow-single';
 			}
 			for (const as of arrowStyles) {
 				const btn = append(arrowRow, $('.workflow-format-btn'));
@@ -1165,12 +1208,16 @@ export class WorkflowEditor extends EditorPane {
 					btn.classList.add('active');
 				}
 				btn.onclick = () => {
-					for (const id of this._selectedLinkIds) {
-						const link = this._data.links.find(l => l.id === id);
-						if (link) link.style = as.style;
+					this._activeLinkStyle = as.style;
+					this._storageService.store('workflowEditor.linkStyle', this._activeLinkStyle, StorageScope.PROFILE, StorageTarget.USER);
+					if (this._selectedLinkIds.size > 0) {
+						for (const id of this._selectedLinkIds) {
+							const link = this._data.links.find(l => l.id === id);
+							if (link) link.style = as.style;
+						}
+						this._saveFlowchartData();
+						this._drawLinks();
 					}
-					this._saveFlowchartData();
-					this._drawLinks();
 					this._renderInspector(parent);
 				};
 			}
@@ -1179,26 +1226,28 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Case B: Node(s) Selected or Default
-		let currentColor = '#0d9488';
-		let currentTextColor = '#ffffff';
-		let isBold = false;
-		let isItalic = false;
-		let isUnderline = false;
-		let isStrikethrough = false;
-		let textAlign: 'left' | 'center' | 'right' = 'center';
-		let verticalAlign: 'top' | 'center' | 'bottom' = 'center';
+		let currentColor = this._activeNodeColor || '#0d9488';
+		let currentTextColor = this._activeTextColor || '#ffffff';
+		let isBold = this._activeIsBold;
+		let isItalic = this._activeIsItalic;
+		let isUnderline = this._activeIsUnderline;
+		let isStrikethrough = this._activeIsStrikethrough;
+		let textAlign: 'left' | 'center' | 'right' = this._activeTextAlign || 'center';
+		let verticalAlign: 'top' | 'center' | 'bottom' = this._activeVerticalAlign || 'center';
 
 		if (selNodeCount === 1) {
 			const selId = Array.from(this._selectedNodeIds)[0];
 			const node = this._data.nodes.find(n => n.id === selId);
-			currentColor = node?.color || '#0d9488';
-			currentTextColor = node?.textColor || '#ffffff';
-			isBold = !!node?.isBold;
-			isItalic = !!node?.isItalic;
-			isUnderline = !!node?.isUnderline;
-			isStrikethrough = !!node?.isStrikethrough;
-			textAlign = node?.textAlign || 'center';
-			verticalAlign = node?.verticalAlign || 'center';
+			if (node) {
+				currentColor = node.color || this._activeNodeColor;
+				currentTextColor = node.textColor || this._activeTextColor;
+				isBold = typeof node.isBold === 'boolean' ? node.isBold : this._activeIsBold;
+				isItalic = typeof node.isItalic === 'boolean' ? node.isItalic : this._activeIsItalic;
+				isUnderline = typeof node.isUnderline === 'boolean' ? node.isUnderline : this._activeIsUnderline;
+				isStrikethrough = typeof node.isStrikethrough === 'boolean' ? node.isStrikethrough : this._activeIsStrikethrough;
+				textAlign = node.textAlign || this._activeTextAlign;
+				verticalAlign = node.verticalAlign || this._activeVerticalAlign;
+			}
 		}
 
 		// Section 1: Node Color
@@ -1216,15 +1265,17 @@ export class WorkflowEditor extends EditorPane {
 			compactColorBtn.onclick = (e) => {
 				e.stopPropagation();
 				this._showColorPickerFlyout(compactColorBtn, currentColor, paletteColors, (hex) => {
+					this._activeNodeColor = hex;
+					this._storageService.store('workflowEditor.nodeColor', this._activeNodeColor, StorageScope.PROFILE, StorageTarget.USER);
 					if (this._selectedNodeIds.size > 0) {
 						for (const id of this._selectedNodeIds) {
 							const node = this._data.nodes.find(n => n.id === id);
 							if (node) node.color = hex;
 						}
+						this._saveFlowchartData();
+						this._renderNodes();
+						this._drawLinks();
 					}
-					this._saveFlowchartData();
-					this._renderNodes();
-					this._drawLinks();
 					this._renderInspector(parent);
 				});
 			};
@@ -1239,15 +1290,17 @@ export class WorkflowEditor extends EditorPane {
 					swatch.classList.add('active');
 				}
 				swatch.onclick = () => {
+					this._activeNodeColor = c.hex;
+					this._storageService.store('workflowEditor.nodeColor', this._activeNodeColor, StorageScope.PROFILE, StorageTarget.USER);
 					if (this._selectedNodeIds.size > 0) {
 						for (const id of this._selectedNodeIds) {
 							const node = this._data.nodes.find(n => n.id === id);
 							if (node) node.color = c.hex;
 						}
+						this._saveFlowchartData();
+						this._renderNodes();
+						this._drawLinks();
 					}
-					this._saveFlowchartData();
-					this._renderNodes();
-					this._drawLinks();
 					this._renderInspector(parent);
 				};
 			}
@@ -1269,16 +1322,18 @@ export class WorkflowEditor extends EditorPane {
 		boldBtn.style.fontWeight = 'bold';
 		boldBtn.title = 'Bold';
 		boldBtn.onclick = () => {
+			const nextVal = !isBold;
+			this._activeIsBold = nextVal;
+			this._storageService.store('workflowEditor.isBold', this._activeIsBold, StorageScope.PROFILE, StorageTarget.USER);
 			if (this._selectedNodeIds.size > 0) {
-				const nextVal = !isBold;
 				for (const id of this._selectedNodeIds) {
 					const node = this._data.nodes.find(n => n.id === id);
 					if (node) node.isBold = nextVal;
 				}
 				this._saveFlowchartData();
 				this._renderNodes();
-				this._renderInspector(parent);
 			}
+			this._renderInspector(parent);
 		};
 
 		// Italic
@@ -1288,16 +1343,18 @@ export class WorkflowEditor extends EditorPane {
 		italicBtn.style.fontFamily = 'Georgia, serif, sans-serif';
 		italicBtn.title = 'Italic';
 		italicBtn.onclick = () => {
+			const nextVal = !isItalic;
+			this._activeIsItalic = nextVal;
+			this._storageService.store('workflowEditor.isItalic', this._activeIsItalic, StorageScope.PROFILE, StorageTarget.USER);
 			if (this._selectedNodeIds.size > 0) {
-				const nextVal = !isItalic;
 				for (const id of this._selectedNodeIds) {
 					const node = this._data.nodes.find(n => n.id === id);
 					if (node) node.isItalic = nextVal;
 				}
 				this._saveFlowchartData();
 				this._renderNodes();
-				this._renderInspector(parent);
 			}
+			this._renderInspector(parent);
 		};
 
 		// Underline
@@ -1306,16 +1363,18 @@ export class WorkflowEditor extends EditorPane {
 		underlineBtn.style.textDecoration = 'underline';
 		underlineBtn.title = 'Underline';
 		underlineBtn.onclick = () => {
+			const nextVal = !isUnderline;
+			this._activeIsUnderline = nextVal;
+			this._storageService.store('workflowEditor.isUnderline', this._activeIsUnderline, StorageScope.PROFILE, StorageTarget.USER);
 			if (this._selectedNodeIds.size > 0) {
-				const nextVal = !isUnderline;
 				for (const id of this._selectedNodeIds) {
 					const node = this._data.nodes.find(n => n.id === id);
 					if (node) node.isUnderline = nextVal;
 				}
 				this._saveFlowchartData();
 				this._renderNodes();
-				this._renderInspector(parent);
 			}
+			this._renderInspector(parent);
 		};
 
 		// Strikethrough
@@ -1324,16 +1383,18 @@ export class WorkflowEditor extends EditorPane {
 		strikeBtn.style.textDecoration = 'line-through';
 		strikeBtn.title = 'Strikethrough';
 		strikeBtn.onclick = () => {
+			const nextVal = !isStrikethrough;
+			this._activeIsStrikethrough = nextVal;
+			this._storageService.store('workflowEditor.isStrikethrough', this._activeIsStrikethrough, StorageScope.PROFILE, StorageTarget.USER);
 			if (this._selectedNodeIds.size > 0) {
-				const nextVal = !isStrikethrough;
 				for (const id of this._selectedNodeIds) {
 					const node = this._data.nodes.find(n => n.id === id);
 					if (node) node.isStrikethrough = nextVal;
 				}
 				this._saveFlowchartData();
 				this._renderNodes();
-				this._renderInspector(parent);
 			}
+			this._renderInspector(parent);
 		};
 
 		// Row 2: Horizontal Alignment (Left, Center, Right)
@@ -1348,6 +1409,8 @@ export class WorkflowEditor extends EditorPane {
 			aBtn.textContent = this._isInspectorCompact ? ac.shortLabel : ac.label;
 			aBtn.title = ac.title;
 			aBtn.onclick = () => {
+				this._activeTextAlign = ac.align;
+				this._storageService.store('workflowEditor.textAlign', this._activeTextAlign, StorageScope.PROFILE, StorageTarget.USER);
 				if (this._selectedNodeIds.size > 0) {
 					for (const id of this._selectedNodeIds) {
 						const node = this._data.nodes.find(n => n.id === id);
@@ -1355,8 +1418,8 @@ export class WorkflowEditor extends EditorPane {
 					}
 					this._saveFlowchartData();
 					this._renderNodes();
-					this._renderInspector(parent);
 				}
+				this._renderInspector(parent);
 			};
 		}
 
@@ -1372,6 +1435,8 @@ export class WorkflowEditor extends EditorPane {
 			vaBtn.textContent = this._isInspectorCompact ? va.shortLabel : va.label;
 			vaBtn.title = va.title;
 			vaBtn.onclick = () => {
+				this._activeVerticalAlign = va.align;
+				this._storageService.store('workflowEditor.verticalAlign', this._activeVerticalAlign, StorageScope.PROFILE, StorageTarget.USER);
 				if (this._selectedNodeIds.size > 0) {
 					for (const id of this._selectedNodeIds) {
 						const node = this._data.nodes.find(n => n.id === id);
@@ -1379,8 +1444,8 @@ export class WorkflowEditor extends EditorPane {
 					}
 					this._saveFlowchartData();
 					this._renderNodes();
-					this._renderInspector(parent);
 				}
+				this._renderInspector(parent);
 			};
 		}
 
@@ -1410,14 +1475,16 @@ export class WorkflowEditor extends EditorPane {
 			compactTextColBtn.onclick = (e) => {
 				e.stopPropagation();
 				this._showColorPickerFlyout(compactTextColBtn, currentTextColor, textColors, (hex) => {
+					this._activeTextColor = hex;
+					this._storageService.store('workflowEditor.textColor', this._activeTextColor, StorageScope.PROFILE, StorageTarget.USER);
 					if (this._selectedNodeIds.size > 0) {
 						for (const id of this._selectedNodeIds) {
 							const node = this._data.nodes.find(n => n.id === id);
 							if (node) node.textColor = hex;
 						}
+						this._saveFlowchartData();
+						this._renderNodes();
 					}
-					this._saveFlowchartData();
-					this._renderNodes();
 					this._renderInspector(parent);
 				});
 			};
@@ -1435,6 +1502,8 @@ export class WorkflowEditor extends EditorPane {
 					tcBtn.classList.add('active');
 				}
 				tcBtn.onclick = () => {
+					this._activeTextColor = tc.hex;
+					this._storageService.store('workflowEditor.textColor', this._activeTextColor, StorageScope.PROFILE, StorageTarget.USER);
 					if (this._selectedNodeIds.size > 0) {
 						for (const id of this._selectedNodeIds) {
 							const node = this._data.nodes.find(n => n.id === id);
@@ -1442,8 +1511,8 @@ export class WorkflowEditor extends EditorPane {
 						}
 						this._saveFlowchartData();
 						this._renderNodes();
-						this._renderInspector(parent);
 					}
+					this._renderInspector(parent);
 				};
 			}
 		}
@@ -2142,14 +2211,14 @@ export class WorkflowEditor extends EditorPane {
 			width: nodeW,
 			height: nodeH,
 			label: 'New Node',
-			color: parent.color || '#0d9488',
-			textColor: parent.textColor || '#ffffff',
-			textAlign: parent.textAlign || 'center',
-			verticalAlign: parent.verticalAlign || 'center',
-			isBold: parent.isBold,
-			isItalic: parent.isItalic,
-			isUnderline: parent.isUnderline,
-			isStrikethrough: parent.isStrikethrough
+			color: parent.color || this._activeNodeColor,
+			textColor: parent.textColor || this._activeTextColor,
+			textAlign: parent.textAlign || this._activeTextAlign,
+			verticalAlign: parent.verticalAlign || this._activeVerticalAlign,
+			isBold: typeof parent.isBold === 'boolean' ? parent.isBold : this._activeIsBold,
+			isItalic: typeof parent.isItalic === 'boolean' ? parent.isItalic : this._activeIsItalic,
+			isUnderline: typeof parent.isUnderline === 'boolean' ? parent.isUnderline : this._activeIsUnderline,
+			isStrikethrough: typeof parent.isStrikethrough === 'boolean' ? parent.isStrikethrough : this._activeIsStrikethrough
 		};
 
 		const newLink: IFlowchartLink = {
@@ -2160,7 +2229,7 @@ export class WorkflowEditor extends EditorPane {
 			toPort: toPort,
 			style: this._activeLinkStyle || 'arrow-single',
 			routing: this._activeRoutingMode || 'orthogonal',
-			color: parent.color || '#0d9488'
+			color: parent.color || this._activeLineColor || '#0d9488'
 		};
 
 		this._data.nodes.push(newChild);
@@ -2268,14 +2337,14 @@ export class WorkflowEditor extends EditorPane {
 			width: current.width || 120,
 			height: current.height || 50,
 			label: 'New Node',
-			color: current.color || '#0d9488',
-			textColor: current.textColor || '#ffffff',
-			textAlign: current.textAlign || 'center',
-			verticalAlign: current.verticalAlign || 'center',
-			isBold: current.isBold,
-			isItalic: current.isItalic,
-			isUnderline: current.isUnderline,
-			isStrikethrough: current.isStrikethrough
+			color: current.color || this._activeNodeColor,
+			textColor: current.textColor || this._activeTextColor,
+			textAlign: current.textAlign || this._activeTextAlign,
+			verticalAlign: current.verticalAlign || this._activeVerticalAlign,
+			isBold: typeof current.isBold === 'boolean' ? current.isBold : this._activeIsBold,
+			isItalic: typeof current.isItalic === 'boolean' ? current.isItalic : this._activeIsItalic,
+			isUnderline: typeof current.isUnderline === 'boolean' ? current.isUnderline : this._activeIsUnderline,
+			isStrikethrough: typeof current.isStrikethrough === 'boolean' ? current.isStrikethrough : this._activeIsStrikethrough
 		};
 
 		this._data.nodes.push(newSibling);
@@ -2289,7 +2358,7 @@ export class WorkflowEditor extends EditorPane {
 				toPort: parentLink.toPort || (dir === 'bottom' ? 'top' : (dir === 'top' ? 'bottom' : (dir === 'left' ? 'right' : 'left'))),
 				style: parentLink.style || this._activeLinkStyle || 'arrow-single',
 				routing: parentLink.routing || this._activeRoutingMode || 'orthogonal',
-				color: parentNode.color || current.color || '#0d9488'
+				color: parentNode.color || current.color || this._activeLineColor || '#0d9488'
 			};
 			this._data.links.push(newLink);
 		}
@@ -2366,7 +2435,15 @@ export class WorkflowEditor extends EditorPane {
 			y,
 			width,
 			height,
-			label
+			label,
+			color: this._activeNodeColor,
+			textColor: this._activeTextColor,
+			textAlign: this._activeTextAlign,
+			verticalAlign: this._activeVerticalAlign,
+			isBold: this._activeIsBold,
+			isItalic: this._activeIsItalic,
+			isUnderline: this._activeIsUnderline,
+			isStrikethrough: this._activeIsStrikethrough
 		};
 
 		this._data.nodes.push(newNode);
@@ -2400,7 +2477,15 @@ export class WorkflowEditor extends EditorPane {
 			y: Math.max(10, adjustedY),
 			width,
 			height,
-			label
+			label,
+			color: this._activeNodeColor,
+			textColor: this._activeTextColor,
+			textAlign: this._activeTextAlign,
+			verticalAlign: this._activeVerticalAlign,
+			isBold: this._activeIsBold,
+			isItalic: this._activeIsItalic,
+			isUnderline: this._activeIsUnderline,
+			isStrikethrough: this._activeIsStrikethrough
 		};
 
 		this._data.nodes.push(newNode);
@@ -2776,7 +2861,9 @@ export class WorkflowEditor extends EditorPane {
 						fromPort: this._tempLinkFromPort || undefined,
 						to: targetNode.id,
 						toPort: toPort || undefined,
-						style: this._activeLinkStyle
+						style: this._activeLinkStyle || 'arrow-single',
+						routing: this._activeRoutingMode || 'orthogonal',
+						color: this._activeLineColor || '#0d9488'
 					});
 					this._saveFlowchartData();
 					this._drawLinks();
@@ -4233,7 +4320,15 @@ export class WorkflowEditor extends EditorPane {
 						y: Math.max(10, nodeY - Math.floor(nt.h / 2)),
 						width: nt.w,
 						height: nt.h,
-						label: nt.label.split(' ')[0]
+						label: nt.label.split(' ')[0],
+						color: this._activeNodeColor,
+						textColor: this._activeTextColor,
+						textAlign: this._activeTextAlign,
+						verticalAlign: this._activeVerticalAlign,
+						isBold: this._activeIsBold,
+						isItalic: this._activeIsItalic,
+						isUnderline: this._activeIsUnderline,
+						isStrikethrough: this._activeIsStrikethrough
 					};
 					this._data.nodes.push(newNode);
 					this._selectedNodeIds.clear();
@@ -4268,7 +4363,15 @@ export class WorkflowEditor extends EditorPane {
 									width: 100,
 									height: 50,
 									label: name,
-									imports: [{ type: type as any, name }]
+									imports: [{ type: type as any, name }],
+									color: this._activeNodeColor,
+									textColor: this._activeTextColor,
+									textAlign: this._activeTextAlign,
+									verticalAlign: this._activeVerticalAlign,
+									isBold: this._activeIsBold,
+									isItalic: this._activeIsItalic,
+									isUnderline: this._activeIsUnderline,
+									isStrikethrough: this._activeIsStrikethrough
 								};
 								this._data.nodes.push(newNode);
 								this._selectedNodeIds.clear();
