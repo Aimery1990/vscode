@@ -29,6 +29,7 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
+import { IWorkflowExecutionService } from '../common/workflowExecutionService.js';
 
 interface IFlowchartNode {
 	id: string;
@@ -218,6 +219,7 @@ export class WorkflowEditor extends EditorPane {
 	private _isInspectorCompact: boolean = false;
 	private _isInspectorCollapsed: boolean = false;
 	private _inspectorTogglePill?: HTMLElement;
+	private _toolbarEl?: HTMLElement;
 
 	constructor(
 		group: IEditorGroup,
@@ -230,7 +232,8 @@ export class WorkflowEditor extends EditorPane {
 		@IEntityPersistenceService private readonly _entityPersistenceService: IEntityPersistenceService,
 		@IEditorService private readonly _editorService: IEditorService,
 		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
-		@IFileDialogService private readonly _fileDialogService: IFileDialogService
+		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
+		@IWorkflowExecutionService private readonly _workflowExecutionService: IWorkflowExecutionService
 	) {
 		super(WorkflowEditor.ID, group, telemetryService, themeService, _storageService);
 		this._isToolbarCompact = this._storageService.getBoolean('workflowEditor.toolbarCompact', StorageScope.PROFILE, false);
@@ -469,10 +472,20 @@ export class WorkflowEditor extends EditorPane {
 
 		// 1. Toolbar Panel
 		const toolbar = append(this._container, $('.workflow-editor-toolbar'));
+		this._toolbarEl = toolbar;
 		if (this._isToolbarCompact) {
 			toolbar.classList.add('compact');
 		}
 		this._renderToolbar(toolbar);
+
+		this._contentDisposables.add(this._workflowExecutionService.onDidChangeRunState(run => {
+			if (this._workflowUri && (run.workflowUri === this._workflowUri.toString() || run.workflowName === (this.input as any)?.name)) {
+				this._renderNodes();
+				if (this._toolbarEl) {
+					this._renderToolbar(this._toolbarEl);
+				}
+			}
+		}));
 
 		// 2. Center Drawing Viewport (Fixed container for floating controls)
 		const canvasViewport = append(this._container, $('.workflow-canvas-viewport'));
@@ -804,6 +817,93 @@ export class WorkflowEditor extends EditorPane {
 			}
 			this._renderToolbar(parent);
 		};
+
+		// Section 0: Workflow Execution Controls
+		const execSec = append(parent, $('.workflow-toolbar-section.execution-section'));
+		if (!this._isToolbarCompact) {
+			const execTitle = append(execSec, $('.workflow-toolbar-title'));
+			execTitle.textContent = localize('execution', 'Workflow Execution');
+		}
+
+		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+		const isRunning = activeRun && (activeRun.status === 'running' || activeRun.status === 'waiting_human');
+
+		const execGrid = append(execSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
+
+		// 1. Run Button
+		const runBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+		runBtn.title = isRunning ? 'Workflow executing...' : 'Run Workflow';
+		append(runBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
+		if (!this._isToolbarCompact) {
+			append(runBtn, $('.item-label')).textContent = isRunning ? 'Running' : 'Run';
+		}
+		if (isRunning) {
+			runBtn.classList.add('active');
+		}
+		runBtn.onclick = async () => {
+			if (!this._workflowUri) return;
+			try {
+				await this._workflowExecutionService.executeWorkflow(this._workflowUri, { mode: 'standard' });
+				this._renderToolbar(parent);
+				this._renderNodes();
+			} catch (e: any) {
+				this._notificationService.error(e.message || String(e));
+			}
+		};
+
+		// 2. Step Button
+		const stepBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+		stepBtn.title = 'Step Next Node';
+		append(stepBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.debugStepOver)));
+		if (!this._isToolbarCompact) {
+			append(stepBtn, $('.item-label')).textContent = 'Step';
+		}
+		stepBtn.onclick = async () => {
+			if (!this._workflowUri) return;
+			try {
+				await this._workflowExecutionService.stepWorkflow(this._workflowUri);
+				this._renderToolbar(parent);
+				this._renderNodes();
+			} catch (e: any) {
+				this._notificationService.error(e.message || String(e));
+			}
+		};
+
+		// 3. Pause / Resume Button
+		if (isRunning) {
+			const pauseBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+			pauseBtn.title = activeRun.status === 'paused' ? 'Resume Workflow' : 'Pause Workflow';
+			append(pauseBtn, $('span' + ThemeIcon.asCSSSelector(activeRun.status === 'paused' ? Codicon.debugContinue : Codicon.debugPause)));
+			if (!this._isToolbarCompact) {
+				append(pauseBtn, $('.item-label')).textContent = activeRun.status === 'paused' ? 'Resume' : 'Pause';
+			}
+			pauseBtn.onclick = async () => {
+				if (activeRun.status === 'paused') {
+					await this._workflowExecutionService.resumeWorkflow(activeRun.runId);
+				} else {
+					await this._workflowExecutionService.pauseWorkflow(activeRun.runId);
+				}
+				this._renderToolbar(parent);
+				this._renderNodes();
+			};
+
+			// 4. Stop Button
+			const stopBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+			stopBtn.title = 'Stop Workflow';
+			append(stopBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.debugStop)));
+			if (!this._isToolbarCompact) {
+				append(stopBtn, $('.item-label')).textContent = 'Stop';
+			}
+			stopBtn.onclick = async () => {
+				await this._workflowExecutionService.stopWorkflow(activeRun.runId);
+				this._renderToolbar(parent);
+				this._renderNodes();
+			};
+		}
+
+		if (this._isToolbarCompact) {
+			append(parent, $('.workflow-compact-divider'));
+		}
 
 		// Section A: Drag Shapes
 		const shapeSec = append(parent, $('.workflow-toolbar-section'));
@@ -1707,6 +1807,31 @@ export class WorkflowEditor extends EditorPane {
 			if (node.color) {
 				nodeEl.style.borderColor = node.color;
 				nodeEl.style.backgroundColor = hexToRgba(node.color, 0.12);
+			}
+
+			// Execution Status Visual Highlighting & Human Interaction
+			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+			const nodeRunState = activeRun?.nodeStates[node.id];
+			if (nodeRunState) {
+				if (nodeRunState.status === 'running') {
+					nodeEl.classList.add('status-running');
+				} else if (nodeRunState.status === 'success') {
+					nodeEl.classList.add('status-success');
+				} else if (nodeRunState.status === 'failed') {
+					nodeEl.classList.add('status-failed');
+				} else if (nodeRunState.status === 'waiting_human') {
+					nodeEl.classList.add('status-waiting-human');
+
+					// Human Approval Interactive Card
+					const humanCard = append(nodeEl, $('.node-human-approval-card'));
+					humanCard.textContent = '⏸ Waiting Approval [Approve]';
+					humanCard.title = 'Click to approve and continue workflow execution';
+					humanCard.onmousedown = (e) => e.stopPropagation();
+					humanCard.onclick = (e) => {
+						e.stopPropagation();
+						this._workflowExecutionService.resumeWorkflow(activeRun!.runId, { approved: true, action: 'approved', timestamp: Date.now() });
+					};
+				}
 			}
 
 			const isSelected = this._selectedNodeIds.has(node.id);

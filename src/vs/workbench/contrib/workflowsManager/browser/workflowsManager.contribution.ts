@@ -21,17 +21,21 @@ import { URI } from '../../../../base/common/uri.js';
 
 import { IWorkflowsManagerService } from '../common/workflowsManager.js';
 import { WorkflowsManagerService } from './workflowsManagerService.js';
+import { IWorkflowExecutionService } from '../common/workflowExecutionService.js';
+import { WorkflowExecutionService } from './workflowExecutionService.js';
 import { WorkflowsManagerPane } from './workflowsManagerPane.js';
 import { WorkflowEditor } from './workflowEditor.js';
 import { WorkflowEditorInput } from './workflowEditorInput.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../common/editor.js';
 import { createWorkflowDialog } from './workflowEditorDialog.js';
+import './tools/workflowTools.contribution.js';
 
 export const WORKFLOWS_MANAGER_VIEWLET_ID = 'workbench.view.workflowsManager';
 
-// 1. Register Service
+// 1. Register Services
 registerSingleton(IWorkflowsManagerService, WorkflowsManagerService, InstantiationType.Delayed);
+registerSingleton(IWorkflowExecutionService, WorkflowExecutionService, InstantiationType.Delayed);
 
 // 2. Register Icon (GithubAction is the unified Workflow Icon)
 const workflowsManagerIcon = registerIcon(
