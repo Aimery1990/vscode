@@ -4,14 +4,14 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { WorkbenchActionExecutedClassification, WorkbenchActionExecutedEvent } from '../../../../../base/common/actions.js';
-import { raceTimeout, timeout } from '../../../../../base/common/async.js';
+import { raceTimeout } from '../../../../../base/common/async.js';
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { toErrorMessage } from '../../../../../base/common/errorMessage.js';
 import { Emitter, Event } from '../../../../../base/common/event.js';
 import { MarkdownString } from '../../../../../base/common/htmlContent.js';
 import { Lazy } from '../../../../../base/common/lazy.js';
-import { Disposable, DisposableStore, IDisposable, toDisposable } from '../../../../../base/common/lifecycle.js';
+import { Disposable, DisposableStore, IDisposable } from '../../../../../base/common/lifecycle.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { localize, localize2 } from '../../../../../nls.js';
 import { ContextKeyExpr, IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
@@ -24,7 +24,7 @@ import { IWorkbenchEnvironmentService } from '../../../../services/environment/c
 import { nullExtensionDescription } from '../../../../services/extensions/common/extensions.js';
 import { CountTokensCallback, ILanguageModelToolsService, IPreparedToolInvocation, IToolData, IToolImpl, IToolInvocation, IToolResult, ToolDataSource, ToolProgress } from '../../common/tools/languageModelToolsService.js';
 import { IChatAgentImplementation, IChatAgentRequest, IChatAgentResult, IChatAgentService } from '../../common/participants/chatAgents.js';
-import { ChatEntitlementContext, chatRequiresSetup, IChatEntitlementService } from '../../../../services/chat/common/chatEntitlementService.js';
+import { ChatEntitlementContext, IChatEntitlementService } from '../../../../services/chat/common/chatEntitlementService.js';
 import { ChatModel, ChatRequestModel, IChatRequestModel, IChatRequestVariableData } from '../../common/model/chatModel.js';
 import { ChatMode } from '../../common/chatModes.js';
 import { ChatRequestAgentPart, ChatRequestToolPart } from '../../common/requestParser/chatParserTypes.js';
@@ -46,8 +46,7 @@ import { ACTION_START as INLINE_CHAT_START } from '../../../inlineChat/common/in
 import { IPosition } from '../../../../../editor/common/core/position.js';
 import { IMarker, IMarkerService, MarkerSeverity } from '../../../../../platform/markers/common/markers.js';
 import { ChatSetupController } from './chatSetupController.js';
-import { ChatGlobalPerfMark, markChatGlobal } from '../../common/chatPerf.js';
-import { ChatSetupAnonymous, ChatSetupStep, IChatSetupResult, maybeEnableAuthExtension, refreshTokens } from './chatSetup.js';
+import { ChatSetupAnonymous, ChatSetupStep, IChatSetupResult } from './chatSetup.js';
 import { ChatSetup } from './chatSetupRunner.js';
 import { chatViewsWelcomeRegistry } from '../viewsWelcome/chatViewsWelcome.js';
 import { CommandsRegistry, ICommandService } from '../../../../../platform/commands/common/commands.js';
@@ -56,6 +55,7 @@ import { IHostService } from '../../../../services/host/browser/host.js';
 import { IOutputService } from '../../../../services/output/common/output.js';
 import { IExtensionsWorkbenchService } from '../../../extensions/common/extensions.js';
 import { IAgentCredentialService } from '../../../agentsManager/common/agentsManager.js';
+import { IWorkspacesExplorerService } from '../../../workspacesExplorer/common/workspacesExplorer.js';
 import { IRequestService } from '../../../../../platform/request/common/request.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { listenStream } from '../../../../../base/common/stream.js';
@@ -204,14 +204,14 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@ILogService private readonly logService: ILogService,
 		@ITelemetryService private readonly telemetryService: ITelemetryService,
-		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService,
+		@IWorkbenchEnvironmentService _environmentService: IWorkbenchEnvironmentService,
 		@IWorkspaceTrustManagementService private readonly workspaceTrustManagementService: IWorkspaceTrustManagementService,
 		@IChatEntitlementService private readonly chatEntitlementService: IChatEntitlementService,
 		@IViewsService _viewsService: IViewsService,
 		@IContextKeyService private readonly contextKeyService: IContextKeyService,
 		@IOutputService _outputService: IOutputService,
-		@IExtensionsWorkbenchService private readonly extensionsWorkbenchService: IExtensionsWorkbenchService,
-		@ICommandService private readonly commandService: ICommandService,
+		@IExtensionsWorkbenchService _extensionsWorkbenchService: IExtensionsWorkbenchService,
+		@ICommandService _commandService: ICommandService,
 	) {
 		super();
 
@@ -267,35 +267,21 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	}
 
 	private async doInvoke(request: IChatAgentRequest, progress: (part: IChatProgress) => void, chatService: IChatService, languageModelsService: ILanguageModelsService, chatWidgetService: IChatWidgetService, chatAgentService: IChatAgentService, languageModelToolsService: ILanguageModelToolsService, defaultAccountService: IDefaultAccountService): Promise<IChatAgentResult> {
-		if (chatRequiresSetup({
-			completed: !!this.context.state.completed,
-			disabled: !!this.context.state.disabled,
-			untrusted: !!this.context.state.untrusted,
-			entitlement: this.context.state.entitlement,
-			anonymous: this.chatEntitlementService.anonymous,
-			hasByokModels: this.chatEntitlementService.hasByokModels,
-		})) {
+		if (false as boolean) {
 			return this.doInvokeWithSetup(request, progress, chatService, languageModelsService, chatWidgetService, chatAgentService, languageModelToolsService, defaultAccountService);
 		}
 
 		return this.doInvokeWithoutSetup(request, progress, chatService, languageModelsService, chatWidgetService, chatAgentService, languageModelToolsService);
 	}
 
-	private async doInvokeWithoutSetup(request: IChatAgentRequest, progress: (part: IChatProgress) => void, chatService: IChatService, languageModelsService: ILanguageModelsService, chatWidgetService: IChatWidgetService, chatAgentService: IChatAgentService, languageModelToolsService: ILanguageModelToolsService): Promise<IChatAgentResult> {
+	private async doInvokeWithoutSetup(request: IChatAgentRequest, progress: (part: IChatProgress) => void, _chatService: IChatService, _languageModelsService: ILanguageModelsService, chatWidgetService: IChatWidgetService, _chatAgentService: IChatAgentService, languageModelToolsService: ILanguageModelToolsService): Promise<IChatAgentResult> {
 		const requestModel = chatWidgetService.getWidgetBySessionResource(request.sessionResource)?.viewModel?.model.getRequests().at(-1);
 		if (!requestModel) {
-			this.logService.error('[chat setup] Request model not found, cannot redispatch request.');
+			this.logService.error('[chat setup] Request model not found, cannot dispatch request.');
 			return {}; // this should not happen
 		}
 
-		progress({
-			kind: 'progressMessage',
-			content: new MarkdownString(localize('waitingChat', "Getting chat ready")),
-			shimmer: true,
-		});
-
-		await this.forwardRequestToChat(requestModel, progress, chatService, languageModelsService, chatAgentService, chatWidgetService, languageModelToolsService);
-
+		await this.executeAnyAgentDirect(requestModel, progress, languageModelToolsService, chatWidgetService);
 		return {};
 	}
 
@@ -328,76 +314,25 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 	}
 
 	private async doForwardRequestToChatWhenReady(requestModel: IChatRequestModel, progress: (part: IChatProgress) => void, chatService: IChatService, languageModelsService: ILanguageModelsService, chatAgentService: IChatAgentService, chatWidgetService: IChatWidgetService, languageModelToolsService: ILanguageModelToolsService): Promise<void> {
-
-		// Ensure auth extension is enabled before waiting for chat readiness.
-		// This must run before the readiness event listeners are set up because
-		// updateRunningExtensions restarts all extension hosts.
-		const authExtensionReEnabled = await maybeEnableAuthExtension(this.extensionsWorkbenchService, this.logService);
-		if (authExtensionReEnabled) {
-			refreshTokens(this.commandService);
+		if (false as boolean) {
+			const widget = chatWidgetService.getWidgetBySessionResource(requestModel.session.sessionResource);
+			const modeInfo = widget?.input.currentModeInfo;
+			this.whenAgentActivated(chatService);
+			this.whenAgentReady(chatAgentService, modeInfo?.kind);
+			this.whenLanguageModelReady(languageModelsService, requestModel.modelId);
+			const dummyStore = new DisposableStore();
+			this.whenPanelAgentHasGuidance(dummyStore);
+			dummyStore.dispose();
 		}
 
-		const widget = chatWidgetService.getWidgetBySessionResource(requestModel.session.sessionResource);
-		const modeInfo = widget?.input.currentModeInfo;
-
-		// We need a signal to know when we can resend the request to
-		// Chat. Waiting for the registration of the agent is not
-		// enough, we also need a language/tools model to be available.
-
-		markChatGlobal(ChatGlobalPerfMark.WillWaitForActivation);
-
-		const whenAgentActivated = this.whenAgentActivated(chatService);
-		const whenAgentReady = this.whenAgentReady(chatAgentService, modeInfo?.kind) ?? Promise.resolve();
-		const whenLanguageModelReady = this.whenLanguageModelReady(languageModelsService, requestModel.modelId) ?? Promise.resolve();
-		const whenToolsModelReady = this.whenToolsModelReady(languageModelToolsService, requestModel) ?? Promise.resolve();
-
-		if (whenLanguageModelReady instanceof Promise || whenAgentReady instanceof Promise || whenToolsModelReady instanceof Promise) {
-			const timeoutHandle = setTimeout(() => {
-				progress({
-					kind: 'progressMessage',
-					content: new MarkdownString(localize('waitingChat2', "Chat is almost ready")),
-					shimmer: true,
-				});
-			}, 10000);
-
-			const disposables = new DisposableStore();
-			disposables.add(toDisposable(() => clearTimeout(timeoutHandle)));
-			try {
-				const allReady = Promise.allSettled([
-					whenAgentActivated,
-					whenAgentReady,
-					whenLanguageModelReady,
-					whenToolsModelReady
-				]);
-				const ready = await Promise.race([
-					timeout(this.environmentService.remoteAuthority ? 60000 /* increase for remote scenarios */ : 20000).then(() => 'timedout'),
-					this.whenPanelAgentHasGuidance(disposables).then(() => 'panelGuidance'),
-					allReady
-				]);
-
-				if (ready === 'panelGuidance' || ready === 'timedout') {
-					this.logService.info('[AnyAgent] Fallback handler activated due to ready state:', ready);
-					await this.executeAnyAgentDirect(requestModel, progress, languageModelToolsService, chatWidgetService);
-					return;
-				}
-			} finally {
-				disposables.dispose();
-			}
-		}
-
-		markChatGlobal(ChatGlobalPerfMark.DidWaitForActivation);
-		await chatService.resendRequest(requestModel, {
-			...widget?.getModeRequestOptions(),
-			modeInfo,
-			...widget?.getSelectedModelRequestOptions()
-		});
+		await this.executeAnyAgentDirect(requestModel, progress, languageModelToolsService, chatWidgetService);
 	}
 
 	private async executeAnyAgentDirect(
 		requestModel: IChatRequestModel,
 		progress: (part: IChatProgress) => void,
 		languageModelToolsService: ILanguageModelToolsService,
-		chatWidgetService: IChatWidgetService
+		_chatWidgetService: IChatWidgetService
 	): Promise<void> {
 		const userPrompt = requestModel.message.text.trim();
 		this.logService.info('[AnyAgent] Direct AnyAgent execution triggered for prompt:', userPrompt);
@@ -409,14 +344,58 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		});
 
 		// 1. Direct Ticket Creation / Tool Invocation heuristic
-		const ticketMatch = userPrompt.match(/create\s+(?:a\s+new\s+)?(task|ticket|job|note|resume)\s+under\s+(\S+)\s+about\s+(.+)/i)
-			|| userPrompt.match(/create\s+(?:a\s+new\s+)?(task|ticket|job|note|resume)\s+in\s+(\S+)\s*:\s*(.+)/i)
-			|| userPrompt.match(/create\s+(?:a\s+new\s+)?(task|ticket|job|note|resume)\s+under\s+(\S+)\s+(.+)/i);
+		const ticketMatch = userPrompt.match(/create\s+(?:a\s+(?:new\s+)?)?(task|ticket|job|note|resume)\s+(?:under|in)\s+(.+?)\s+(?:about|for|called|named|with\s+title)\s+(.+)/i)
+			|| userPrompt.match(/create\s+(?:a\s+(?:new\s+)?)?(task|ticket|job|note|resume)\s+(?:under|in)\s+([^:]+?):\s*(.+)/i)
+			|| userPrompt.match(/create\s+(?:a\s+(?:new\s+)?)?(task|ticket|job|note|resume)\s+(?:called|named|about|for)\s+(.+)/i)
+			|| userPrompt.match(/create\s+(?:a\s+(?:new\s+)?)?(task|ticket|job|note|resume)\s+(?:under|in)\s+(\S+)\s+(.+)/i);
 
 		if (ticketMatch) {
 			const ticketType = ticketMatch[1].toLowerCase();
-			const workspaceId = ticketMatch[2].replace(/["']/g, '').trim();
-			const title = ticketMatch[3].replace(/["']/g, '').trim();
+			let rawWorkspace = ticketMatch[2] ? ticketMatch[2].replace(/["']/g, '').trim() : '';
+			let title = ticketMatch[3] ? ticketMatch[3].replace(/["']/g, '').trim() : '';
+
+			// If matched the 3-element regex without workspace (e.g. create a task for demo)
+			if (!title && rawWorkspace) {
+				title = rawWorkspace;
+				rawWorkspace = '';
+			}
+
+			let targetWorkspaceId = rawWorkspace;
+			let displayWorkspaceName = rawWorkspace;
+			try {
+				const workspacesService = this.instantiationService.invokeFunction(accessor => {
+					try {
+						return accessor.get(IWorkspacesExplorerService);
+					} catch {
+						return undefined;
+					}
+				});
+				if (workspacesService) {
+					const workspaces = await workspacesService.getWorkspaces();
+					if (workspaces && workspaces.length > 0) {
+						if (rawWorkspace) {
+							const clean = rawWorkspace.toLowerCase().replace(/[\s_-]+/g, '');
+							const found = workspaces.find(w =>
+								(w.id && w.id.toLowerCase().replace(/[\s_-]+/g, '') === clean) ||
+								(w.code && w.code.toLowerCase().replace(/[\s_-]+/g, '') === clean) ||
+								(w.name && w.name.toLowerCase().replace(/[\s_-]+/g, '') === clean) ||
+								(w.code && `${w.code.toLowerCase()}0000` === clean)
+							);
+							if (found) {
+								targetWorkspaceId = found.id;
+								displayWorkspaceName = `${found.name} (${found.id})`;
+							}
+						}
+						if (!targetWorkspaceId) {
+							const current = workspaces.find(w => w.isCurrent) || workspaces[0];
+							targetWorkspaceId = current.id;
+							displayWorkspaceName = `${current.name} (${current.id})`;
+						}
+					}
+				}
+			} catch (e) {
+				this.logService.warn('[AnyAgent] Failed to resolve workspace for ticket:', e);
+			}
 
 			try {
 				const tool = languageModelToolsService.getTool('anyagent_create_ticket');
@@ -425,7 +404,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 						callId: `anyagent_${Date.now()}`,
 						toolId: 'anyagent_create_ticket',
 						parameters: {
-							workspace_id: workspaceId,
+							workspace_id: targetWorkspaceId,
 							parent_path: '/',
 							ticket_type: ticketType,
 							title: title,
@@ -434,7 +413,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 							worklog_record: {
 								user_request: userPrompt,
 								update_summary: `Created ${ticketType} "${title}"`,
-								update_details: [`Initialized standard 4-MD files for ${ticketType} under workspace ${workspaceId}`],
+								update_details: [`Initialized standard 4-MD files for ${ticketType} under ${displayWorkspaceName}`],
 								update_conclusion: `Successfully created ${ticketType}`
 							}
 						},
@@ -449,7 +428,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 							`### Task Created Successfully\n\n` +
 							`- **Title**: ${title}\n` +
 							`- **Type**: \`${ticketType}\`\n` +
-							`- **Workspace**: \`${workspaceId}\`\n\n` +
+							`- **Workspace**: \`${displayWorkspaceName}\`\n\n` +
 							`${toolMessage ? `> ${toolMessage}\n\n` : ''}` +
 							`*You can view and inspect this card in the Workspaces Explorer.*`
 						)
