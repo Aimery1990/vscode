@@ -2662,19 +2662,12 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 	 */
 	private ensureNotificationWidget(): void {
 		if (!this._notificationWidget.value) {
-			// Fall back to `getCurrentSessionType()` so the session-type
-			// picker delegate is consulted before any real session exists
-			// (e.g. empty workspace + Copilot CLI [Agent Host] selected). Without
-			// this fallback, `_currentSessionType` stays undefined until
-			// the user creates a session and `sessionTypes`-gated
-			// notifications never render.
 			this._notificationWidget.value = this.instantiationService.createInstance(ChatInputNotificationWidget, {
 				modelTargetChatSessionType: this._notificationModelTargetChatSessionType,
 				sessionResource: this._currentSessionResourceObservable,
 				openModelPicker: () => this.openModelPicker(),
 				switchToModel: modelIdentifier => this.switchModelByIdentifier(modelIdentifier, /* storeSelection */ true, /* isUserAction */ true),
 			});
-			this.chatInputNotificationContainer.appendChild(this._notificationWidget.value.domNode);
 		}
 	}
 
@@ -2973,6 +2966,7 @@ export class ChatInputPart extends Disposable implements IHistoryNavigationWidge
 		this.chatToolConfirmationCarouselContainer = elements.chatToolConfirmationCarouselContainer;
 		dom.hide(this.chatToolConfirmationCarouselContainer);
 		this.chatInputNotificationContainer = elements.chatInputNotificationContainer;
+		this.chatInputNotificationContainer.style.display = 'none';
 		this.chatGoalBannerContainer = elements.chatGoalBannerContainer;
 		this.contextUsageWidgetContainer = elements.contextUsageWidgetContainer;
 		this.statusToolbarContainer = elements.statusToolbarContainer;
