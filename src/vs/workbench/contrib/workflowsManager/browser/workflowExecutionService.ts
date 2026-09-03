@@ -96,6 +96,41 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 	}
 
+	resetWorkflow(workflowUri: URI | string): void {
+		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+		const activeRunId = this._activeRunsByWorkflow.get(uriStr);
+		if (activeRunId) {
+			this._cancelledRuns.add(activeRunId);
+			const stepResolve = this._stepWaiters.get(activeRunId);
+			if (stepResolve) {
+				this._stepWaiters.delete(activeRunId);
+				stepResolve();
+			}
+			const humanResolve = this._humanWaiters.get(activeRunId);
+			if (humanResolve) {
+				this._humanWaiters.delete(activeRunId);
+				humanResolve(undefined);
+			}
+		}
+		this.clearRuns(uriStr);
+
+		const idleRun: IWorkflowExecutionRun = {
+			runId: '',
+			workflowUri: uriStr,
+			workflowName: this._resolveWorkflowName(uriStr),
+			status: 'idle',
+			mode: 'standard',
+			currentNodeId: undefined,
+			visitedNodeIds: [],
+			startedAt: 0,
+			updatedAt: Date.now(),
+			contextVariables: {},
+			nodeStates: {},
+			logs: []
+		};
+		this._notifyRunChanged(idleRun);
+	}
+
 	async executeWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions): Promise<IWorkflowExecutionRun> {
 		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
 		const existingRunId = this._activeRunsByWorkflow.get(uriStr);

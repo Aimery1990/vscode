@@ -904,6 +904,30 @@ export class WorkflowEditor extends EditorPane {
 		this._logCountBadgeEl.textContent = '0 events';
 
 		const right = append(header, $('.log-header-right'));
+		// Reset Execution Button
+		const resetBtn = append(right, $('.log-btn-icon'));
+		resetBtn.title = localize('resetExecution', 'Reset execution state to IDLE & clear highlights');
+		append(resetBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.debugRestart)));
+		resetBtn.onclick = () => {
+			if (!this._workflowUri) return;
+			this._workflowExecutionService.resetWorkflow(this._workflowUri);
+			if (this._toolbarEl) {
+				this._renderToolbar(this._toolbarEl);
+			}
+			this._renderNodes();
+			if (this._logStatusBadgeEl) {
+				this._logStatusBadgeEl.textContent = 'IDLE';
+				this._logStatusBadgeEl.className = 'log-status-badge status-idle';
+			}
+			if (this._logCountBadgeEl) {
+				this._logCountBadgeEl.textContent = '0 events';
+			}
+			if (this._logBodyEl) {
+				clearNode(this._logBodyEl);
+			}
+			this._notificationService.info(localize('workflowResetInfo', 'Workflow execution reset to IDLE.'));
+		};
+
 		// Clear Button
 		const clearBtn = append(right, $('.log-btn-icon'));
 		clearBtn.title = localize('clearLogs', 'Clear logs');
@@ -1057,6 +1081,31 @@ export class WorkflowEditor extends EditorPane {
 		}
 		logsBtn.onclick = () => {
 			this._toggleLogDrawer();
+		};
+
+		// 6. Reset Execution Button (复位)
+		const resetBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+		resetBtn.title = localize('resetWorkflowTitle', 'Reset Workflow Execution (Clear node highlights & status)');
+		append(resetBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.debugRestart)));
+		if (!this._isToolbarCompact) {
+			append(resetBtn, $('.item-label')).textContent = 'Reset';
+		}
+		resetBtn.onclick = () => {
+			if (!this._workflowUri) return;
+			this._workflowExecutionService.resetWorkflow(this._workflowUri);
+			this._renderToolbar(parent);
+			this._renderNodes();
+			if (this._logStatusBadgeEl) {
+				this._logStatusBadgeEl.textContent = 'IDLE';
+				this._logStatusBadgeEl.className = 'log-status-badge status-idle';
+			}
+			if (this._logCountBadgeEl) {
+				this._logCountBadgeEl.textContent = '0 events';
+			}
+			if (this._logBodyEl) {
+				clearNode(this._logBodyEl);
+			}
+			this._notificationService.info(localize('workflowResetInfo', 'Workflow execution reset to IDLE.'));
 		};
 
 		if (this._isToolbarCompact) {
