@@ -9,6 +9,7 @@ import { Disposable, DisposableStore, IDisposable } from '../../../../base/commo
 import { IWorkbenchLayoutService } from '../../../../workbench/services/layout/browser/layoutService.js';
 import { IAgentCredentialService, IAgentCredential } from '../../../../workbench/contrib/agentsManager/common/agentsManager.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
+import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { AccountManagementDialog } from '../../../../workbench/contrib/accountManagement/browser/accountManagementDialog.js';
@@ -213,7 +214,8 @@ export class CenteredChatWidget extends Disposable {
 		@INotificationService private readonly notificationService: INotificationService,
 		@IStorageService private readonly storageService: IStorageService,
 		@IMainProcessService private readonly mainProcessService: IMainProcessService,
-		@ILanguageModelToolsService private readonly languageModelToolsService: ILanguageModelToolsService
+		@ILanguageModelToolsService private readonly languageModelToolsService: ILanguageModelToolsService,
+		@IClipboardService private readonly clipboardService: IClipboardService
 	) {
 		super();
 
@@ -1831,25 +1833,31 @@ export class CenteredChatWidget extends Disposable {
 
 	private async copyToClipboard(text: string, labelSpan?: HTMLElement): Promise<void> {
 		try {
-			if (navigator.clipboard && navigator.clipboard.writeText) {
-				await navigator.clipboard.writeText(text);
-			} else {
-				const ta = document.createElement('textarea');
-				ta.value = text;
-				ta.style.position = 'fixed';
-				ta.style.opacity = '0';
-				document.body.appendChild(ta);
-				ta.select();
-				document.execCommand('copy');
-				ta.remove();
-			}
+			await this.clipboardService.writeText(text);
 			if (labelSpan) {
 				labelSpan.textContent = '✓ Copied!';
 				setTimeout(() => { labelSpan.textContent = 'Copy'; }, 2000);
 			}
 			this.notificationService.info('Copied to clipboard');
 		} catch (err) {
-			console.error('Failed to copy text:', err);
+			try {
+				const ta = document.createElement('textarea');
+				ta.value = text;
+				ta.style.position = 'fixed';
+				ta.style.opacity = '0';
+				document.body.appendChild(ta);
+				ta.focus();
+				ta.select();
+				document.execCommand('copy');
+				ta.remove();
+				if (labelSpan) {
+					labelSpan.textContent = '✓ Copied!';
+					setTimeout(() => { labelSpan.textContent = 'Copy'; }, 2000);
+				}
+				this.notificationService.info('Copied to clipboard');
+			} catch (fallbackErr) {
+				console.error('Failed to copy text:', fallbackErr);
+			}
 		}
 	}
 
