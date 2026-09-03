@@ -11,7 +11,6 @@ import { KeyCode, KeyMod } from '../../../../../base/common/keyCodes.js';
 import { DisposableStore, toDisposable } from '../../../../../base/common/lifecycle.js';
 import { Schemas } from '../../../../../base/common/network.js';
 import { autorun, observableValue } from '../../../../../base/common/observable.js';
-import { ThemeIcon } from '../../../../../base/common/themables.js';
 import { isObject } from '../../../../../base/common/types.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { ServicesAccessor } from '../../../../../editor/browser/editorExtensions.js';
@@ -22,10 +21,10 @@ import { AbstractGotoSymbolQuickAccessProvider, IGotoSymbolQuickPickItem } from 
 import { localize, localize2 } from '../../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../../platform/actions/common/actions.js';
 import { ICommandService } from '../../../../../platform/commands/common/commands.js';
-import { ContextKeyExpr, IContextKeyService } from '../../../../../platform/contextkey/common/contextkey.js';
+import { ContextKeyExpr } from '../../../../../platform/contextkey/common/contextkey.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
+import { IFileDialogService } from '../../../../../platform/dialogs/common/dialogs.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
-import { IKeybindingService } from '../../../../../platform/keybinding/common/keybinding.js';
 import { KeybindingWeight } from '../../../../../platform/keybinding/common/keybindingsRegistry.js';
 import { IListService } from '../../../../../platform/list/browser/listService.js';
 import { ILogService } from '../../../../../platform/log/common/log.js';
@@ -46,7 +45,7 @@ import { ChatContextKeys } from '../../common/actions/chatContextKeys.js';
 import { IChatRequestVariableEntry, OmittedState } from '../../common/attachments/chatVariableEntries.js';
 import { ChatAgentLocation, isSupportedChatFileScheme } from '../../common/constants.js';
 import { IChatWidget, IChatWidgetService, IQuickChatService } from '../chat.js';
-import { IChatContextPickerItem, IChatContextPickService, IChatContextValueItem, isChatContextPickerPickItem } from '../attachments/chatContextPickService.js';
+import { IChatContextPickerItem, IChatContextValueItem, isChatContextPickerPickItem } from '../attachments/chatContextPickService.js';
 import { IChatAttachmentResolveService } from '../attachments/chatAttachmentResolveService.js';
 import { isQuickChat } from '../widget/chatWidget.js';
 import { resizeImage } from '../chatImageUtils.js';
@@ -520,37 +519,34 @@ export class AttachContextAction extends Action2 {
 	}
 
 	override async run(accessor: ServicesAccessor, ...args: unknown[]): Promise<void> {
-
-		const instantiationService = accessor.get(IInstantiationService);
 		const widgetService = accessor.get(IChatWidgetService);
-		const contextKeyService = accessor.get(IContextKeyService);
-		const keybindingService = accessor.get(IKeybindingService);
-		const contextPickService = accessor.get(IChatContextPickService);
+		const fileDialogService = accessor.get(IFileDialogService);
 
-		const context = args[0] as { widget?: IChatWidget; placeholder?: string } | undefined;
+		const context = args[0] as { widget?: IChatWidget; placeholder?: string; usePicker?: boolean } | undefined;
 		const widget = context?.widget ?? widgetService.lastFocusedWidget;
 		if (!widget) {
 			return;
 		}
 
-		const quickPickItems: IContextPickItemItem[] = [];
-
-		for (const item of contextPickService.items) {
-
-			if (item.isEnabled && !await item.isEnabled(widget)) {
-				continue;
-			}
-
-			quickPickItems.push({
-				kind: 'contextPick',
-				item,
-				label: item.label,
-				iconClass: ThemeIcon.asClassName(item.icon),
-				keybinding: item.commandId ? keybindingService.lookupKeybinding(item.commandId, contextKeyService) : undefined,
-			});
+		if (context?.usePicker) {
+			const instantiationService = accessor.get(IInstantiationService);
+			instantiationService.invokeFunction(this._show.bind(this), widget, undefined, context?.placeholder);
+			return;
 		}
 
-		instantiationService.invokeFunction(this._show.bind(this), widget, quickPickItems, context?.placeholder);
+		const files = await fileDialogService.showOpenDialog({
+			canSelectFiles: true,
+			canSelectFolders: false,
+			canSelectMany: true,
+			openLabel: localize('chat.attachFiles', "Attach"),
+			title: localize('chat.attachFilesTitle', "Select Files or Images to Attach"),
+		});
+
+		if (files && files.length > 0) {
+			for (const file of files) {
+				await widget.attachmentModel.addFile(file);
+			}
+		}
 	}
 
 	private _show(accessor: ServicesAccessor, widget: IChatWidget, additionPicks: IContextPickItemItem[] | undefined, placeholder?: string) {

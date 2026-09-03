@@ -36,10 +36,8 @@ export class ByokUtilityModelNotificationContribution extends Disposable {
 		@ILogService private readonly _logService: ILogService,
 	) {
 		super();
-
-		if (vscode.workspace.isAgentSessionsWorkspace) {
-			return;
-		}
+		// In AnyAgent, BYOK notification is disabled to avoid intruding on user experience
+		return;
 
 		this._register(this._authService.onDidAuthenticationChange(() => this._update()));
 		this._register(vscode.lm.onDidChangeChatModels(() => this._update()));

@@ -33,9 +33,8 @@ import { IChatRequestToolEntry } from '../../common/attachments/chatVariableEntr
 import { ChatAgentLocation, ChatConfiguration, ChatModeKind } from '../../common/constants.js';
 import { ILanguageModelsService } from '../../common/languageModels.js';
 import { CHAT_OPEN_ACTION_ID, CHAT_SETUP_ACTION_ID } from '../actions/chatActions.js';
-import { ChatViewId, IChatWidgetService } from '../chat.js';
+import { IChatWidgetService } from '../chat.js';
 import { IViewsService } from '../../../../services/views/common/viewsService.js';
-import { ChatViewPane } from '../widgetHosts/viewPane/chatViewPane.js';
 import { ILanguageFeaturesService } from '../../../../../editor/common/services/languageFeatures.js';
 import { CodeAction, CodeActionList, Command, NewSymbolName, NewSymbolNameTriggerKind } from '../../../../../editor/common/languages.js';
 import { ITextModel } from '../../../../../editor/common/model.js';
@@ -56,6 +55,10 @@ import { IDefaultAccountService } from '../../../../../platform/defaultAccount/c
 import { IHostService } from '../../../../services/host/browser/host.js';
 import { IOutputService } from '../../../../services/output/common/output.js';
 import { IExtensionsWorkbenchService } from '../../../extensions/common/extensions.js';
+import { IAgentCredentialService } from '../../../agentsManager/common/agentsManager.js';
+import { IRequestService } from '../../../../../platform/request/common/request.js';
+import { VSBuffer } from '../../../../../base/common/buffer.js';
+import { listenStream } from '../../../../../base/common/stream.js';
 
 const defaultChat = {
 	extensionId: product.defaultChatAgent?.extensionId ?? '',
@@ -69,6 +72,14 @@ const ToolsAgentContextKey = ContextKeyExpr.and(
 	ContextKeyExpr.equals(`config.${ChatConfiguration.AgentEnabled}`, true),
 	ContextKeyExpr.not(`previewFeaturesDisabled`) // Set by extension
 );
+
+interface IFallbackCredential {
+	id: string;
+	isEnabled?: boolean;
+	providerId?: string;
+	cachedModels?: string[];
+	customUrl?: string;
+}
 
 export class SetupAgent extends Disposable implements IChatAgentImplementation {
 
@@ -107,7 +118,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 					break;
 			}
 
-			return SetupAgent.doRegisterAgent(instantiationService, chatAgentService, id, `${defaultChat.provider.default.name} Copilot` /* Do NOT change, this hides the username altogether in Chat */, true, description, location, mode, context, controller);
+			return SetupAgent.doRegisterAgent(instantiationService, chatAgentService, id, 'Any Agent', true, description, location, mode, context, controller);
 		});
 	}
 
@@ -175,7 +186,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		return { agent, disposable: disposables };
 	}
 
-	private static readonly SETUP_NEEDED_MESSAGE = new MarkdownString(localize('settingUpCopilotNeeded', "You need to set up GitHub Copilot and be signed in to use Chat."));
+	private static readonly SETUP_NEEDED_MESSAGE = new MarkdownString(localize('settingUpCopilotNeeded', "You need to be signed in to use Any Agent."));
 	private static readonly TRUST_NEEDED_MESSAGE = new MarkdownString(localize('trustNeeded', "You need to trust this workspace to use Chat."));
 
 	private static readonly CHAT_RETRY_COMMAND_ID = 'workbench.action.chat.retrySetup';
@@ -196,9 +207,9 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		@IWorkbenchEnvironmentService private readonly environmentService: IWorkbenchEnvironmentService,
 		@IWorkspaceTrustManagementService private readonly workspaceTrustManagementService: IWorkspaceTrustManagementService,
 		@IChatEntitlementService private readonly chatEntitlementService: IChatEntitlementService,
-		@IViewsService private readonly viewsService: IViewsService,
+		@IViewsService _viewsService: IViewsService,
 		@IContextKeyService private readonly contextKeyService: IContextKeyService,
-		@IOutputService private readonly outputService: IOutputService,
+		@IOutputService _outputService: IOutputService,
 		@IExtensionsWorkbenchService private readonly extensionsWorkbenchService: IExtensionsWorkbenchService,
 		@ICommandService private readonly commandService: ICommandService,
 	) {
@@ -333,26 +344,12 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		// Chat. Waiting for the registration of the agent is not
 		// enough, we also need a language/tools model to be available.
 
-		let agentActivated = false;
-		let agentReady = false;
-		let languageModelReady = false;
-		let toolsModelReady = false;
-
 		markChatGlobal(ChatGlobalPerfMark.WillWaitForActivation);
 
-		const whenAgentActivated = this.whenAgentActivated(chatService).then(() => agentActivated = true);
-		const whenAgentReady = this.whenAgentReady(chatAgentService, modeInfo?.kind)?.then(() => agentReady = true);
-		if (!whenAgentReady) {
-			agentReady = true;
-		}
-		const whenLanguageModelReady = this.whenLanguageModelReady(languageModelsService, requestModel.modelId)?.then(() => languageModelReady = true);
-		if (!whenLanguageModelReady) {
-			languageModelReady = true;
-		}
-		const whenToolsModelReady = this.whenToolsModelReady(languageModelToolsService, requestModel)?.then(() => toolsModelReady = true);
-		if (!whenToolsModelReady) {
-			toolsModelReady = true;
-		}
+		const whenAgentActivated = this.whenAgentActivated(chatService);
+		const whenAgentReady = this.whenAgentReady(chatAgentService, modeInfo?.kind) ?? Promise.resolve();
+		const whenLanguageModelReady = this.whenLanguageModelReady(languageModelsService, requestModel.modelId) ?? Promise.resolve();
+		const whenToolsModelReady = this.whenToolsModelReady(languageModelToolsService, requestModel) ?? Promise.resolve();
 
 		if (whenLanguageModelReady instanceof Promise || whenAgentReady instanceof Promise || whenToolsModelReady instanceof Promise) {
 			const timeoutHandle = setTimeout(() => {
@@ -378,152 +375,10 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 					allReady
 				]);
 
-				if (ready === 'panelGuidance') {
-					const warningMessage = localize('chatTookLongWarningExtension', "Please try again.");
-
-					progress({
-						kind: 'markdownContent',
-						content: new MarkdownString(warningMessage)
-					});
-
-					// This means Chat is unhealthy and we cannot retry the
-					// request. Signal this to the outside via an event.
-					this._onUnresolvableError.fire();
+				if (ready === 'panelGuidance' || ready === 'timedout') {
+					this.logService.info('[AnyAgent] Fallback handler activated due to ready state:', ready);
+					await this.executeAnyAgentDirect(requestModel, progress, languageModelToolsService, chatWidgetService);
 					return;
-				}
-
-				if (ready === 'timedout') {
-					let warningMessage: string;
-					if (this.chatEntitlementService.anonymous) {
-						warningMessage = localize('chatTookLongWarningAnonymous', "Chat took too long to get ready. Please ensure that the extension `{0}` is installed and enabled. Click restart to try again if this issue persists.", defaultChat.chatExtensionId);
-					} else {
-						warningMessage = localize('chatTookLongWarning', "Chat took too long to get ready. Please ensure you are signed in to {0} and that the extension `{1}` is installed and enabled. Click restart to try again if this issue persists.", defaultChat.provider.default.name, defaultChat.chatExtensionId);
-					}
-
-					const diagnosticInfo = this.computeDiagnosticInfo(agentActivated, agentReady, languageModelReady, toolsModelReady, requestModel, languageModelsService, chatAgentService, modeInfo);
-
-					this.logService.warn(`[chat setup] ${warningMessage}`, diagnosticInfo);
-
-					type ChatSetupTimeoutClassification = {
-						owner: 'chrmarti';
-						comment: 'Provides insight into chat setup timeouts.';
-						agentActivated: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the agent was activated.' };
-						agentReady: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the agent was ready.' };
-						agentHasDefault: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether a default agent exists for the location and mode.' };
-						agentDefaultIsCore: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the default agent is a core agent.' };
-						agentHasContributedDefault: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether a contributed default agent exists for the location.' };
-						agentContributedDefaultIsCore: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the contributed default agent is a core agent.' };
-						agentActivatedCount: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; isMeasurement: true; comment: 'Number of activated agents at timeout.' };
-						agentLocation: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'The chat agent location.' };
-						agentModeKind: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'The chat mode kind.' };
-						languageModelReady: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the language model was ready.' };
-						languageModelCount: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; isMeasurement: true; comment: 'Number of registered language models at timeout.' };
-						languageModelDefaultCount: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; isMeasurement: true; comment: 'Number of language models with isDefaultForLocation[Chat] set.' };
-						languageModelHasRequestedModel: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether a specific model ID was requested.' };
-						toolsModelReady: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the tools model was ready.' };
-						isRemote: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether this is a remote scenario.' };
-						isAnonymous: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether anonymous access is enabled.' };
-						matchingWelcomeViewWhen: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'The when clause of the matching extension welcome view, if any.' };
-					};
-					type ChatSetupTimeoutEvent = {
-						agentActivated: boolean;
-						agentReady: boolean;
-						agentHasDefault: boolean;
-						agentDefaultIsCore: boolean;
-						agentHasContributedDefault: boolean;
-						agentContributedDefaultIsCore: boolean;
-						agentActivatedCount: number;
-						agentLocation: string;
-						agentModeKind: string;
-						languageModelReady: boolean;
-						languageModelCount: number;
-						languageModelDefaultCount: number;
-						languageModelHasRequestedModel: boolean;
-						toolsModelReady: boolean;
-						isRemote: boolean;
-						isAnonymous: boolean;
-						matchingWelcomeViewWhen: string;
-					};
-
-					this.telemetryService.publicLog2<ChatSetupTimeoutEvent, ChatSetupTimeoutClassification>('chatSetup.timeout', diagnosticInfo);
-
-					progress({
-						kind: 'warning',
-						content: new MarkdownString(warningMessage)
-					});
-
-					if (defaultChat.outputChannelId && this.outputService.getChannelDescriptor(defaultChat.outputChannelId)) {
-						progress({
-							kind: 'command',
-							command: {
-								id: SetupAgent.CHAT_SHOW_OUTPUT_COMMAND_ID,
-								title: localize('showCopilotChatDetails', "Show Details")
-							}
-						});
-					} else {
-						this.logService.warn(defaultChat.outputChannelId
-							? `[chat setup] No output channel found for id '${defaultChat.outputChannelId}' to show details about chat setup timeout. Please ensure the ${defaultChat.chatExtensionId} extension is activated.`
-							: '[chat setup] No output channel provided via product.json to show details about chat setup timeout.');
-						progress({
-							kind: 'command',
-							command: {
-								id: SetupAgent.CHAT_RETRY_COMMAND_ID,
-								title: localize('retryChat', "Restart"),
-								arguments: [requestModel.session.sessionResource]
-							}
-						});
-					}
-
-					// Wait for all readiness signals and log/send
-					// telemetry about recovery after the timeout.
-					await allReady;
-
-					const recoveryDiagnosticInfo = this.computeDiagnosticInfo(agentActivated, agentReady, languageModelReady, toolsModelReady, requestModel, languageModelsService, chatAgentService, modeInfo);
-
-					this.logService.info('[chat setup] Chat setup timeout recovered', recoveryDiagnosticInfo);
-
-					type ChatSetupTimeoutRecoveryClassification = {
-						owner: 'chrmarti';
-						comment: 'Provides insight into chat setup timeout recovery.';
-						agentActivated: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the agent was activated.' };
-						agentReady: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the agent was ready.' };
-						agentHasDefault: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether a default agent exists for the location and mode.' };
-						agentDefaultIsCore: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the default agent is a core agent.' };
-						agentHasContributedDefault: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether a contributed default agent exists for the location.' };
-						agentContributedDefaultIsCore: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the contributed default agent is a core agent.' };
-						agentActivatedCount: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; isMeasurement: true; comment: 'Number of activated agents at recovery time.' };
-						agentLocation: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'The chat agent location.' };
-						agentModeKind: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'The chat mode kind.' };
-						languageModelReady: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the language model was ready.' };
-						languageModelCount: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; isMeasurement: true; comment: 'Number of registered language models at recovery time.' };
-						languageModelDefaultCount: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; isMeasurement: true; comment: 'Number of language models with isDefaultForLocation[Chat] set at recovery time.' };
-						languageModelHasRequestedModel: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether a specific model ID was requested.' };
-						toolsModelReady: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether the tools model was ready.' };
-						isRemote: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether this is a remote scenario.' };
-						isAnonymous: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'Whether anonymous access is enabled.' };
-						matchingWelcomeViewWhen: { classification: 'SystemMetaData'; purpose: 'FeatureInsight'; comment: 'The when clause of the matching extension welcome view, if any.' };
-					};
-					type ChatSetupTimeoutRecoveryEvent = {
-						agentActivated: boolean;
-						agentReady: boolean;
-						agentHasDefault: boolean;
-						agentDefaultIsCore: boolean;
-						agentHasContributedDefault: boolean;
-						agentContributedDefaultIsCore: boolean;
-						agentActivatedCount: number;
-						agentLocation: string;
-						agentModeKind: string;
-						languageModelReady: boolean;
-						languageModelCount: number;
-						languageModelDefaultCount: number;
-						languageModelHasRequestedModel: boolean;
-						toolsModelReady: boolean;
-						isRemote: boolean;
-						isAnonymous: boolean;
-						matchingWelcomeViewWhen: string;
-					};
-
-					this.telemetryService.publicLog2<ChatSetupTimeoutRecoveryEvent, ChatSetupTimeoutRecoveryClassification>('chatSetup.timeoutRecovery', recoveryDiagnosticInfo);
 				}
 			} finally {
 				disposables.dispose();
@@ -536,6 +391,224 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			modeInfo,
 			...widget?.getSelectedModelRequestOptions()
 		});
+	}
+
+	private async executeAnyAgentDirect(
+		requestModel: IChatRequestModel,
+		progress: (part: IChatProgress) => void,
+		languageModelToolsService: ILanguageModelToolsService,
+		chatWidgetService: IChatWidgetService
+	): Promise<void> {
+		const userPrompt = requestModel.message.text.trim();
+		this.logService.info('[AnyAgent] Direct AnyAgent execution triggered for prompt:', userPrompt);
+
+		progress({
+			kind: 'progressMessage',
+			content: new MarkdownString(localize('anyagentProcessing', "Any Agent is processing...")),
+			shimmer: true,
+		});
+
+		// 1. Direct Ticket Creation / Tool Invocation heuristic
+		const ticketMatch = userPrompt.match(/create\s+(?:a\s+new\s+)?(task|ticket|job|note|resume)\s+under\s+(\S+)\s+about\s+(.+)/i)
+			|| userPrompt.match(/create\s+(?:a\s+new\s+)?(task|ticket|job|note|resume)\s+in\s+(\S+)\s*:\s*(.+)/i)
+			|| userPrompt.match(/create\s+(?:a\s+new\s+)?(task|ticket|job|note|resume)\s+under\s+(\S+)\s+(.+)/i);
+
+		if (ticketMatch) {
+			const ticketType = ticketMatch[1].toLowerCase();
+			const workspaceId = ticketMatch[2].replace(/["']/g, '').trim();
+			const title = ticketMatch[3].replace(/["']/g, '').trim();
+
+			try {
+				const tool = languageModelToolsService.getTool('anyagent_create_ticket');
+				if (tool) {
+					const invocation: IToolInvocation = {
+						callId: `anyagent_${Date.now()}`,
+						toolId: 'anyagent_create_ticket',
+						parameters: {
+							workspace_id: workspaceId,
+							parent_path: '/',
+							ticket_type: ticketType,
+							title: title,
+							description: `Created via Any Agent Chat: ${title}`,
+							priority: 'Medium',
+							worklog_record: {
+								user_request: userPrompt,
+								update_summary: `Created ${ticketType} "${title}"`,
+								update_details: [`Initialized standard 4-MD files for ${ticketType} under workspace ${workspaceId}`],
+								update_conclusion: `Successfully created ${ticketType}`
+							}
+						},
+						context: undefined
+					};
+					const result = await languageModelToolsService.invokeTool(invocation, async () => 1, CancellationToken.None);
+					const toolMessage = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
+
+					progress({
+						kind: 'markdownContent',
+						content: new MarkdownString(
+							`### Task Created Successfully\n\n` +
+							`- **Title**: ${title}\n` +
+							`- **Type**: \`${ticketType}\`\n` +
+							`- **Workspace**: \`${workspaceId}\`\n\n` +
+							`${toolMessage ? `> ${toolMessage}\n\n` : ''}` +
+							`*You can view and inspect this card in the Workspaces Explorer.*`
+						)
+					});
+					return;
+				}
+			} catch (err: unknown) {
+				this.logService.error('[AnyAgent] Direct ticket creation error:', err);
+			}
+		}
+
+		// 2. Try streaming LLM if credentials exist
+		try {
+			const credentialService = this.instantiationService.invokeFunction(accessor => {
+				try {
+					return accessor.get(IAgentCredentialService);
+				} catch {
+					return undefined;
+				}
+			});
+
+			if (credentialService) {
+				const creds = await credentialService.getCredentials();
+				const activeCred = creds.find(c => c.isEnabled) || creds[0];
+				if (activeCred) {
+					const apiKey = await credentialService.getApiKey(activeCred.id);
+					if (apiKey || activeCred.providerId === 'ollama' || activeCred.providerId === 'custom') {
+						const requestService = this.instantiationService.invokeFunction(accessor => accessor.get(IRequestService));
+						await this.streamLlmDirect(activeCred as IFallbackCredential, apiKey || '', userPrompt, progress, languageModelToolsService, requestService);
+						return;
+					}
+				}
+			}
+		} catch (llmErr) {
+			this.logService.warn('[AnyAgent] LLM direct execution failed:', llmErr);
+		}
+
+		// 3. Fallback greeting & instruction
+		progress({
+			kind: 'markdownContent',
+			content: new MarkdownString(
+				`### Hello from **Any Agent**\n\n` +
+				`I received your instruction:\n> \`${userPrompt}\`\n\n` +
+				`To enable AI-powered chat and automated task execution:\n` +
+				`1. Click the **Agent Central** icon in the top title bar or open **Settings**\n` +
+				`2. Configure your **Google Gemini**, **Claude**, or **OpenAI** API key\n\n` +
+				`*You can also directly execute ticket commands, e.g.:*\n` +
+				`\`create a new task under <WORKSPACE_ID> about <Title>\``
+			)
+		});
+	}
+
+	private async streamLlmDirect(
+		cred: IFallbackCredential,
+		apiKey: string,
+		prompt: string,
+		progress: (part: IChatProgress) => void,
+		languageModelToolsService: ILanguageModelToolsService,
+		requestService: IRequestService
+	): Promise<void> {
+		const cleanModel = cred.cachedModels?.[0] || (cred.providerId === 'gemini' ? 'gemini-1.5-flash' : cred.providerId === 'openai' ? 'gpt-4o' : 'claude-3-5-sonnet-20241022');
+		if (cred.providerId === 'gemini') {
+			const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:streamGenerateContent?key=${apiKey}&alt=sse`;
+			const response = await requestService.request({
+				type: 'POST',
+				url,
+				headers: { 'Content-Type': 'application/json' },
+				data: JSON.stringify({
+					contents: [{ role: 'user', parts: [{ text: prompt }] }],
+					system_instruction: { parts: [{ text: localize('anyagent.systemPrompt', "You are Any Agent Workspace AI assistant. Help users manage projects, code, and tickets concisely.") }] }
+				}),
+				callSite: 'anyagent.directChat'
+			}, CancellationToken.None);
+
+			if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+				throw new Error(`HTTP ${response.res.statusCode} Error from Gemini API`);
+			}
+
+			let buffer = '';
+			await new Promise<void>((resolve, reject) => {
+				listenStream(response.stream, {
+					onData: (chunk: VSBuffer) => {
+						buffer += chunk.toString();
+						const lines = buffer.split('\n');
+						buffer = lines.pop() || '';
+						for (const line of lines) {
+							const trimmed = line.trim();
+							if (trimmed.startsWith('data: ')) {
+								const dataStr = trimmed.slice(6).trim();
+								if (dataStr === '[DONE]') {
+									continue;
+								}
+								try {
+									const json = JSON.parse(dataStr);
+									const text = json.candidates?.[0]?.content?.parts?.[0]?.text;
+									if (text) {
+										progress({ kind: 'markdownContent', content: new MarkdownString(text) });
+									}
+								} catch { }
+							}
+						}
+					},
+					onError: reject,
+					onEnd: resolve
+				});
+			});
+		} else if (cred.providerId === 'openai') {
+			const url = (cred.customUrl || 'https://api.openai.com/v1') + '/chat/completions';
+			const response = await requestService.request({
+				type: 'POST',
+				url,
+				headers: {
+					'Content-Type': 'application/json',
+					'Authorization': `Bearer ${apiKey}`
+				},
+				data: JSON.stringify({
+					model: cleanModel,
+					stream: true,
+					messages: [
+						{ role: 'system', content: localize('anyagent.systemPrompt', "You are Any Agent Workspace AI assistant. Help users manage projects, code, and tickets concisely.") },
+						{ role: 'user', content: prompt }
+					]
+				}),
+				callSite: 'anyagent.directChat'
+			}, CancellationToken.None);
+
+			if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+				throw new Error(`HTTP ${response.res.statusCode} Error from OpenAI API`);
+			}
+
+			let buffer = '';
+			await new Promise<void>((resolve, reject) => {
+				listenStream(response.stream, {
+					onData: (chunk: VSBuffer) => {
+						buffer += chunk.toString();
+						const lines = buffer.split('\n');
+						buffer = lines.pop() || '';
+						for (const line of lines) {
+							const trimmed = line.trim();
+							if (trimmed.startsWith('data: ')) {
+								const dataStr = trimmed.slice(6).trim();
+								if (dataStr === '[DONE]') {
+									continue;
+								}
+								try {
+									const json = JSON.parse(dataStr);
+									const delta = json.choices?.[0]?.delta?.content;
+									if (delta) {
+										progress({ kind: 'markdownContent', content: new MarkdownString(delta) });
+									}
+								} catch { }
+							}
+						}
+					},
+					onError: reject,
+					onEnd: resolve
+				});
+			});
+		}
 	}
 
 	private async whenPanelAgentHasGuidance(disposables: DisposableStore): Promise<void> {
@@ -640,41 +713,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 		}
 	}
 
-	private computeDiagnosticInfo(agentActivated: boolean, agentReady: boolean, languageModelReady: boolean, toolsModelReady: boolean, requestModel: IChatRequestModel, languageModelsService: ILanguageModelsService, chatAgentService: IChatAgentService, modeInfo: { kind?: ChatModeKind } | undefined) {
-		const languageModelIds = languageModelsService.getLanguageModelIds();
-		let languageModelDefaultCount = 0;
-		for (const id of languageModelIds) {
-			const model = languageModelsService.lookupLanguageModel(id);
-			if (model?.isDefaultForLocation[ChatAgentLocation.Chat]) {
-				languageModelDefaultCount++;
-			}
-		}
 
-		const defaultAgent = chatAgentService.getDefaultAgent(this.location, modeInfo?.kind);
-		const contributedDefaultAgent = chatAgentService.getContributedDefaultAgent(this.location);
-		const chatViewPane = this.viewsService.getActiveViewWithId(ChatViewId) as ChatViewPane | undefined;
-		const matchingWelcomeView = chatViewPane?.getMatchingWelcomeView();
-
-		return {
-			agentActivated,
-			agentReady,
-			agentHasDefault: !!defaultAgent,
-			agentDefaultIsCore: defaultAgent?.isCore ?? false,
-			agentHasContributedDefault: !!contributedDefaultAgent,
-			agentContributedDefaultIsCore: contributedDefaultAgent?.isCore ?? false,
-			agentActivatedCount: chatAgentService.getActivatedAgents().length,
-			agentLocation: this.location,
-			agentModeKind: modeInfo?.kind ?? '',
-			languageModelReady,
-			languageModelCount: languageModelIds.length,
-			languageModelDefaultCount,
-			languageModelHasRequestedModel: !!requestModel.modelId,
-			toolsModelReady,
-			isRemote: !!this.environmentService.remoteAuthority,
-			isAnonymous: this.chatEntitlementService.anonymous,
-			matchingWelcomeViewWhen: matchingWelcomeView?.when.serialize() ?? (chatViewPane ? 'noWelcomeView' : 'noChatViewPane'),
-		};
-	}
 
 	private async doInvokeWithSetup(request: IChatAgentRequest, progress: (part: IChatProgress) => void, chatService: IChatService, languageModelsService: ILanguageModelsService, chatWidgetService: IChatWidgetService, chatAgentService: IChatAgentService, languageModelToolsService: ILanguageModelToolsService, defaultAccountService: IDefaultAccountService): Promise<IChatAgentResult> {
 		this.telemetryService.publicLog2<WorkbenchActionExecutedEvent, WorkbenchActionExecutedClassification>('workbenchActionExecuted', { id: CHAT_SETUP_ACTION_ID, from: 'chat' });
