@@ -83,6 +83,7 @@ export interface IWorkflowExecutionRun {
 export interface IWorkflowEngineOptions {
 	mode?: 'standard' | 'daemon' | 'step';
 	initialInputs?: Record<string, any>;
+	initialData?: any;
 	entryNodeId?: string;
 	daemonIntervalMs?: number;
 	maxSteps?: number;

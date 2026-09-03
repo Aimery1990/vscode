@@ -7,6 +7,7 @@ import { Emitter, Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { IWorkflowExecutionService } from '../common/workflowExecutionService.js';
 import {
@@ -60,6 +61,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	constructor(
 		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
+		@IFileService private readonly fileService: IFileService,
 		@ILogService private readonly logService: ILogService,
 		@INotificationService private readonly notificationService: INotificationService
 	) { }
@@ -105,7 +107,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 		}
 
-		const flowchartData = this._loadFlowchartData(uriStr);
+		const flowchartData = await this._loadFlowchartData(uriStr, options);
 		if (!flowchartData || !flowchartData.nodes || flowchartData.nodes.length === 0) {
 			throw new Error(`Cannot execute workflow: No flowchart nodes found for ${uriStr}`);
 		}
@@ -160,12 +162,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		return run;
 	}
 
-	async stepWorkflow(workflowUri: URI | string, runId?: string): Promise<IWorkflowExecutionRun> {
+	async stepWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions, runId?: string): Promise<IWorkflowExecutionRun> {
 		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
 		let targetRun = runId ? this._runs.get(runId) : this.getActiveRun(uriStr);
 
 		if (!targetRun || targetRun.status === 'completed' || targetRun.status === 'failed' || targetRun.status === 'stopped') {
-			targetRun = await this.executeWorkflow(uriStr, { mode: 'step' });
+			targetRun = await this.executeWorkflow(uriStr, { ...options, mode: 'step' });
 			return targetRun;
 		}
 
@@ -524,20 +526,51 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	}
 
 	private _isEndNode(node: IFlowchartNode): boolean {
-		const label = node.label.toLowerCase();
-		return (node.type === 'circle' && (label === 'end' || label === 'stop' || label === '结束')) ||
-			label === 'end' || label === 'stop' || label === 'finish' || label === '结束';
+		const label = (node.label || '').trim().toLowerCase();
+		return (node.type === 'circle' && (label === 'end' || label === 'stop' || label === 'exit' || label === 'finish' || label === '结束' || label === '退出')) ||
+			label === 'end' || label === 'stop' || label === 'finish' || label === 'exit' || label === 'quit' || label === '结束' || label === '退出';
 	}
 
-	private _loadFlowchartData(uriStr: string): IFlowchartData | undefined {
+	private async _loadFlowchartData(uriStr: string, options?: IWorkflowEngineOptions): Promise<IFlowchartData | undefined> {
+		// 1. Direct in-memory data passed from options (e.g. from active editor canvas)
+		if (options?.initialData && Array.isArray(options.initialData.nodes) && options.initialData.nodes.length > 0) {
+			return options.initialData;
+		}
+
+		// 2. Load from Entity Persistence Snapshot
 		const snapshot = this.entityPersistenceService.getSnapshot(uriStr);
 		if (snapshot?.customMetadata?.['flowchartJson']) {
 			try {
-				return JSON.parse(snapshot.customMetadata['flowchartJson']);
+				const parsed = JSON.parse(snapshot.customMetadata['flowchartJson']);
+				if (Array.isArray(parsed.nodes)) return parsed;
 			} catch (e) {
-				this.logService.error('[WorkflowExecution] Failed to parse flowchartJson:', e);
+				this.logService.error('[WorkflowExecution] Failed to parse flowchartJson from snapshot:', e);
 			}
 		}
+
+		// 3. Load from File System (for .diagram.json, .workflow, or any file:// URI)
+		try {
+			const uri = URI.parse(uriStr);
+			if (await this.fileService.exists(uri)) {
+				const fileContent = await this.fileService.readFile(uri);
+				const parsed = JSON.parse(fileContent.value.toString());
+				if (Array.isArray(parsed.nodes)) {
+					return {
+						nodes: parsed.nodes,
+						links: Array.isArray(parsed.links) ? parsed.links : Array.isArray(parsed.connections) ? parsed.connections : Array.isArray(parsed.edges) ? parsed.edges : []
+					};
+				}
+				if (parsed?.customMetadata?.['flowchartJson']) {
+					return JSON.parse(parsed.customMetadata['flowchartJson']);
+				}
+				if (parsed?.flowchartJson) {
+					return typeof parsed.flowchartJson === 'string' ? JSON.parse(parsed.flowchartJson) : parsed.flowchartJson;
+				}
+			}
+		} catch (e) {
+			this.logService.error('[WorkflowExecution] Failed to load flowchart from file:', e);
+		}
+
 		return undefined;
 	}
 
@@ -549,7 +582,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		try {
 			const uri = URI.parse(uriStr);
 			const base = uri.path.split('/').filter(Boolean).pop() || 'Workflow';
-			return base.replace(/\.workflow$/, '');
+			return decodeURIComponent(base.replace(/\.diagram\.json$/, '').replace(/\.flowchart\.json$/, '').replace(/\.workflow$/, '').replace(/\.json$/, ''));
 		} catch {
 			return 'Workflow';
 		}

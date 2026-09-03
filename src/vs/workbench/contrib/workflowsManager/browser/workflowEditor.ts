@@ -30,6 +30,7 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
 import { IWorkflowExecutionService } from '../common/workflowExecutionService.js';
+import { IWorkflowExecutionRun, IWorkflowLogEntry } from '../common/workflowExecutionModel.js';
 
 interface IFlowchartNode {
 	id: string;
@@ -220,6 +221,12 @@ export class WorkflowEditor extends EditorPane {
 	private _isInspectorCollapsed: boolean = false;
 	private _inspectorTogglePill?: HTMLElement;
 	private _toolbarEl?: HTMLElement;
+	private _isLogDrawerOpen: boolean = false;
+	private _logDrawerEl?: HTMLElement;
+	private _logBodyEl?: HTMLElement;
+	private _logCountBadgeEl?: HTMLElement;
+	private _logStatusBadgeEl?: HTMLElement;
+	private _autoScrollLogs: boolean = true;
 
 	constructor(
 		group: IEditorGroup,
@@ -484,6 +491,16 @@ export class WorkflowEditor extends EditorPane {
 				if (this._toolbarEl) {
 					this._renderToolbar(this._toolbarEl);
 				}
+				if (this._isLogDrawerOpen) {
+					this._refreshLogs(run);
+				}
+			}
+		}));
+
+		this._contentDisposables.add(this._workflowExecutionService.onDidEmitLog(({ runId, log }) => {
+			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+			if (activeRun && activeRun.runId === runId && this._isLogDrawerOpen) {
+				this._appendLogEntry(log, true);
 			}
 		}));
 
@@ -601,6 +618,9 @@ export class WorkflowEditor extends EditorPane {
 			this._inspectorTogglePill?.classList.add('hidden');
 			if (this._inspectorEl) this._renderInspector(this._inspectorEl);
 		};
+
+		// Floating Bottom Execution Log Drawer inside drawing viewport
+		this._renderLogDrawer(canvasViewport);
 
 		// 3. Right Property Inspector Panel
 		const inspector = append(this._container, $('.workflow-editor-inspector'));
@@ -792,6 +812,123 @@ export class WorkflowEditor extends EditorPane {
 		this._drawLinks();
 	}
 
+	private _toggleLogDrawer(): void {
+		if (this._isLogDrawerOpen) {
+			this._closeLogDrawer();
+		} else {
+			this._openLogDrawer();
+		}
+	}
+
+	private _openLogDrawer(): void {
+		this._isLogDrawerOpen = true;
+		if (this._logDrawerEl) {
+			this._logDrawerEl.style.display = 'flex';
+			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+			if (activeRun) {
+				this._refreshLogs(activeRun);
+			}
+		}
+		if (this._toolbarEl) {
+			this._renderToolbar(this._toolbarEl);
+		}
+	}
+
+	private _closeLogDrawer(): void {
+		this._isLogDrawerOpen = false;
+		if (this._logDrawerEl) {
+			this._logDrawerEl.style.display = 'none';
+		}
+		if (this._toolbarEl) {
+			this._renderToolbar(this._toolbarEl);
+		}
+	}
+
+	private _refreshLogs(run: IWorkflowExecutionRun): void {
+		if (this._logStatusBadgeEl) {
+			this._logStatusBadgeEl.textContent = run.status.toUpperCase();
+			this._logStatusBadgeEl.className = `log-status-badge status-${run.status}`;
+		}
+		if (this._logCountBadgeEl) {
+			this._logCountBadgeEl.textContent = `${run.logs.length} events`;
+		}
+		if (!this._logBodyEl) return;
+		clearNode(this._logBodyEl);
+		for (const log of run.logs) {
+			this._appendLogEntry(log, false);
+		}
+		if (this._autoScrollLogs) {
+			this._logBodyEl.scrollTop = this._logBodyEl.scrollHeight;
+		}
+	}
+
+	private _appendLogEntry(log: IWorkflowLogEntry, shouldScroll = true): void {
+		if (!this._logBodyEl) return;
+		const line = append(this._logBodyEl, $(`.workflow-log-line.level-${log.level}`));
+		const timeStr = new Date(log.timestamp).toLocaleTimeString();
+		append(line, $('.log-time')).textContent = `[${timeStr}]`;
+		const levelBadge = append(line, $(`.log-badge.badge-${log.level}`));
+		levelBadge.textContent = log.level.toUpperCase();
+		if (log.nodeId) {
+			const node = this._data?.nodes.find(n => n.id === log.nodeId);
+			const nodeBadge = append(line, $('.log-node'));
+			nodeBadge.textContent = `[${node?.label || log.nodeId}]`;
+		}
+		append(line, $('.log-msg')).textContent = log.message;
+
+		if (this._logCountBadgeEl) {
+			const count = this._logBodyEl.children.length;
+			this._logCountBadgeEl.textContent = `${count} events`;
+		}
+
+		if (shouldScroll && this._autoScrollLogs) {
+			this._logBodyEl.scrollTop = this._logBodyEl.scrollHeight;
+		}
+	}
+
+	private _renderLogDrawer(parent: HTMLElement): void {
+		const drawer = append(parent, $('.workflow-log-drawer'));
+		this._logDrawerEl = drawer;
+		if (!this._isLogDrawerOpen) {
+			drawer.style.display = 'none';
+		}
+
+		// Header
+		const header = append(drawer, $('.workflow-log-header'));
+		const left = append(header, $('.log-header-left'));
+		append(left, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
+		append(left, $('.log-header-title')).textContent = localize('logConsole', 'Execution Console');
+		this._logStatusBadgeEl = append(left, $('.log-status-badge.status-idle'));
+		this._logStatusBadgeEl.textContent = 'IDLE';
+		this._logCountBadgeEl = append(left, $('.log-count-badge'));
+		this._logCountBadgeEl.textContent = '0 events';
+
+		const right = append(header, $('.log-header-right'));
+		// Clear Button
+		const clearBtn = append(right, $('.log-btn-icon'));
+		clearBtn.title = localize('clearLogs', 'Clear logs');
+		append(clearBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.clearAll)));
+		clearBtn.onclick = () => {
+			if (this._logBodyEl) {
+				clearNode(this._logBodyEl);
+			}
+			if (this._logCountBadgeEl) {
+				this._logCountBadgeEl.textContent = '0 events';
+			}
+		};
+
+		// Close Button
+		const closeBtn = append(right, $('.log-btn-icon'));
+		closeBtn.title = localize('closeConsole', 'Close console');
+		append(closeBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+		closeBtn.onclick = () => {
+			this._closeLogDrawer();
+		};
+
+		// Body
+		this._logBodyEl = append(drawer, $('.workflow-log-body'));
+	}
+
 	private _renderToolbar(parent: HTMLElement): void {
 		clearNode(parent);
 
@@ -843,7 +980,11 @@ export class WorkflowEditor extends EditorPane {
 		runBtn.onclick = async () => {
 			if (!this._workflowUri) return;
 			try {
-				await this._workflowExecutionService.executeWorkflow(this._workflowUri, { mode: 'standard' });
+				this._openLogDrawer();
+				await this._workflowExecutionService.executeWorkflow(this._workflowUri, {
+					mode: 'standard',
+					initialData: this._data
+				});
 				this._renderToolbar(parent);
 				this._renderNodes();
 			} catch (e: any) {
@@ -861,7 +1002,10 @@ export class WorkflowEditor extends EditorPane {
 		stepBtn.onclick = async () => {
 			if (!this._workflowUri) return;
 			try {
-				await this._workflowExecutionService.stepWorkflow(this._workflowUri);
+				this._openLogDrawer();
+				await this._workflowExecutionService.stepWorkflow(this._workflowUri, {
+					initialData: this._data
+				});
 				this._renderToolbar(parent);
 				this._renderNodes();
 			} catch (e: any) {
@@ -900,6 +1044,20 @@ export class WorkflowEditor extends EditorPane {
 				this._renderNodes();
 			};
 		}
+
+		// 5. Logs Console Toggle Button
+		const logsBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+		logsBtn.title = 'Workflow Execution Logs Console';
+		append(logsBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
+		if (!this._isToolbarCompact) {
+			append(logsBtn, $('.item-label')).textContent = 'Logs';
+		}
+		if (this._isLogDrawerOpen) {
+			logsBtn.classList.add('active');
+		}
+		logsBtn.onclick = () => {
+			this._toggleLogDrawer();
+		};
 
 		if (this._isToolbarCompact) {
 			append(parent, $('.workflow-compact-divider'));

@@ -17,7 +17,7 @@ export interface IWorkflowExecutionService {
 	readonly onDidEmitLog: Event<{ runId: string; log: IWorkflowLogEntry }>;
 
 	executeWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions): Promise<IWorkflowExecutionRun>;
-	stepWorkflow(workflowUri: URI | string, runId?: string): Promise<IWorkflowExecutionRun>;
+	stepWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions, runId?: string): Promise<IWorkflowExecutionRun>;
 	pauseWorkflow(runId: string): Promise<void>;
 	resumeWorkflow(runId: string, userInput?: any): Promise<void>;
 	stopWorkflow(runId: string): Promise<void>;
