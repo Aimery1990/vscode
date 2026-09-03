@@ -201,6 +201,18 @@ export async function resolveTokenForResource(
 			return bestToken;
 		}
 	}
+
+	// Fallback to active Google authentication session if available
+	try {
+		const googleSessions = await authenticationService.getSessions('google', undefined, undefined, true);
+		if (googleSessions.length > 0 && googleSessions[0].accessToken) {
+			logService.trace(`${logPrefix} Fallback to active Google session token for resource: ${resourceServer.toString()}`);
+			return googleSessions[0].accessToken;
+		}
+	} catch (e) {
+		logService.trace(`${logPrefix} Google session lookup failed: ${e}`);
+	}
+
 	return undefined;
 }
 
@@ -318,33 +330,27 @@ export async function resolveAuthenticationInteractively(
 			return true;
 		}
 
-		const setupResult = await commandService.executeCommand<IChatSetupResult>(CHAT_SETUP_ACTION_ID, undefined, {
-			forceSignInDialog: true,
-			additionalScopes: scopes,
-			dialogTitle: localize('agentHost.signInDialogTitle', "Sign in to use GitHub Copilot"),
-			disableChatViewReveal: true,
-			returnResult: true,
-		});
-		if (setupResult?.success === undefined) {
-			return false;
+		// Prompt Google OAuth login if no active session
+		try {
+			await commandService.executeCommand('anyagent.google.login');
+			token = await resolveTokenForResource(
+				resourceUri,
+				resource.authorization_servers ?? [],
+				scopes,
+				authenticationService,
+				logService,
+				options.logPrefix,
+			);
+			if (token) {
+				await forwardAuthenticationToken(options, resource.resource, scopes, token);
+				logService.info(`${options.logPrefix} Interactive authentication succeeded via Google session for ${resource.resource}`);
+				return true;
+			}
+		} catch (err) {
+			logService.warn(`${options.logPrefix} Google sign-in prompt skipped or failed: ${err}`);
 		}
-		if (!setupResult.success) {
-			throw setupResult.error ?? new Error(localize('agentHost.signInFailed', "Failed to sign in to use GitHub Copilot."));
-		}
-		token = await resolveTokenForResource(
-			resourceUri,
-			resource.authorization_servers ?? [],
-			scopes,
-			authenticationService,
-			logService,
-			options.logPrefix,
-		);
-		if (!token) {
-			return false;
-		}
-		await forwardAuthenticationToken(options, resource.resource, scopes, token);
-		logService.info(`${options.logPrefix} Interactive authentication succeeded for ${resource.resource}`);
-		return true;
+
+		return false;
 	}
 
 	return false;

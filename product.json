@@ -102,8 +102,8 @@
 		"signUpUrl": "https://aka.ms/github-sign-up",
 		"provider": {
 			"default": {
-				"id": "github",
-				"name": "GitHub"
+				"id": "google",
+				"name": "Google"
 			},
 			"enterprise": {
 				"id": "github-enterprise",
@@ -118,14 +118,13 @@
 				"name": "Apple"
 			}
 		},
-		"providerExtensionId": "vscode.github-authentication",
+		"providerExtensionId": "vscode.google-authentication",
 		"providerUriSetting": "github-enterprise.uri",
 		"providerScopes": [
 			[
-				"read:user",
-				"user:email",
-				"repo",
-				"workflow"
+				"openid",
+				"profile",
+				"email"
 			],
 			[
 				"user:email"

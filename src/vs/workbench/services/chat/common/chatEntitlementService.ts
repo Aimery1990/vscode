@@ -1009,7 +1009,9 @@ export class ChatEntitlementRequests extends Disposable {
 		}
 
 		let entitlement: ChatEntitlement;
-		if (entitlementsData.access_type_sku === 'free_limited_copilot') {
+		if (entitlementsData.access_type_sku === 'anyagent_pro' || defaultAccount.authenticationProvider?.id === 'google') {
+			entitlement = ChatEntitlement.Pro;
+		} else if (entitlementsData.access_type_sku === 'free_limited_copilot') {
 			entitlement = ChatEntitlement.Free;
 		} else if (entitlementsData.access_type_sku === 'free_educational_quota') {
 			entitlement = ChatEntitlement.EDU;

@@ -684,6 +684,9 @@ class DefaultAccountProvider extends Disposable implements IDefaultAccountProvid
 
 	private async findMatchingProviderSession(authProviderId: string, allScopes: string[][]): Promise<AuthenticationSession[] | undefined> {
 		const sessions = await this.getSessions(authProviderId);
+		if (!allScopes || allScopes.length === 0) {
+			return sessions.length > 0 ? [...sessions] : undefined;
+		}
 		const matchingSessions = [];
 		for (const session of sessions) {
 			this.logService.debug('[DefaultAccount] Checking session with scopes', session.scopes);
@@ -692,6 +695,9 @@ class DefaultAccountProvider extends Disposable implements IDefaultAccountProvid
 					matchingSessions.push(session);
 				}
 			}
+		}
+		if (matchingSessions.length === 0 && sessions.length > 0) {
+			return [...sessions];
 		}
 		return matchingSessions.length > 0 ? matchingSessions : undefined;
 	}
@@ -792,9 +798,18 @@ class DefaultAccountProvider extends Disposable implements IDefaultAccountProvid
 		}
 
 		const entitlementUrl = this.getEntitlementUrl();
-		if (!entitlementUrl) {
-			this.logService.debug('[DefaultAccount] No chat entitlements URL found');
-			return { data: undefined, fetchedAt: undefined };
+		if (!entitlementUrl || this.getDefaultAccountAuthenticationProvider().id === 'google' || this.getDefaultAccountAuthenticationProvider().id !== 'github') {
+			this.logService.debug('[DefaultAccount] Providing default entitlements for provider:', this.getDefaultAccountAuthenticationProvider().id);
+			return {
+				data: {
+					chat_enabled: true,
+					access_type_sku: 'anyagent_pro',
+					can_signup_for_limited: false,
+					copilot_plan: 'individual',
+					cloud_session_storage_enabled: true,
+				},
+				fetchedAt: Date.now()
+			};
 		}
 
 		this.logService.debug('[DefaultAccount] Fetching entitlements from:', entitlementUrl);
