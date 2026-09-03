@@ -332,6 +332,22 @@ export class WorkflowEditor extends EditorPane {
 					this._activeRoutingMode = this._data.routingMode;
 				}
 
+				// Initialize active styles from the most recently styled node in the loaded diagram if any
+				for (let i = nodes.length - 1; i >= 0; i--) {
+					const lastNode = nodes[i];
+					if (lastNode.color || lastNode.textColor) {
+						if (lastNode.color) this._activeNodeColor = lastNode.color;
+						if (lastNode.textColor) this._activeTextColor = lastNode.textColor;
+						if (lastNode.textAlign) this._activeTextAlign = lastNode.textAlign;
+						if (lastNode.verticalAlign) this._activeVerticalAlign = lastNode.verticalAlign;
+						if (typeof lastNode.isBold === 'boolean') this._activeIsBold = lastNode.isBold;
+						if (typeof lastNode.isItalic === 'boolean') this._activeIsItalic = lastNode.isItalic;
+						if (typeof lastNode.isUnderline === 'boolean') this._activeIsUnderline = lastNode.isUnderline;
+						if (typeof lastNode.isStrikethrough === 'boolean') this._activeIsStrikethrough = lastNode.isStrikethrough;
+						break;
+					}
+				}
+
 				// Sync back to snapshot if missing in snapshot
 				if (this._workflowUri) {
 					const snapshot = this._entityPersistenceService.getSnapshot(this._workflowUri);
@@ -673,6 +689,9 @@ export class WorkflowEditor extends EditorPane {
 						this._selectedLinkIds.clear();
 						this._renderNodes();
 						this._drawLinks();
+						if (this._inspectorEl) {
+							this._renderInspector(this._inspectorEl);
+						}
 					}
 
 					this._isSelectingBox = true;
@@ -1226,6 +1245,45 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Case B: Node(s) Selected or Default
+		if (selNodeCount === 1) {
+			const selId = Array.from(this._selectedNodeIds)[0];
+			const node = this._data.nodes.find(n => n.id === selId);
+			if (node) {
+				if (node.color) {
+					this._activeNodeColor = node.color;
+					this._storageService.store('workflowEditor.nodeColor', this._activeNodeColor, StorageScope.PROFILE, StorageTarget.USER);
+				}
+				if (node.textColor) {
+					this._activeTextColor = node.textColor;
+					this._storageService.store('workflowEditor.textColor', this._activeTextColor, StorageScope.PROFILE, StorageTarget.USER);
+				}
+				if (node.textAlign) {
+					this._activeTextAlign = node.textAlign;
+					this._storageService.store('workflowEditor.textAlign', this._activeTextAlign, StorageScope.PROFILE, StorageTarget.USER);
+				}
+				if (node.verticalAlign) {
+					this._activeVerticalAlign = node.verticalAlign;
+					this._storageService.store('workflowEditor.verticalAlign', this._activeVerticalAlign, StorageScope.PROFILE, StorageTarget.USER);
+				}
+				if (typeof node.isBold === 'boolean') {
+					this._activeIsBold = node.isBold;
+					this._storageService.store('workflowEditor.isBold', this._activeIsBold, StorageScope.PROFILE, StorageTarget.USER);
+				}
+				if (typeof node.isItalic === 'boolean') {
+					this._activeIsItalic = node.isItalic;
+					this._storageService.store('workflowEditor.isItalic', this._activeIsItalic, StorageScope.PROFILE, StorageTarget.USER);
+				}
+				if (typeof node.isUnderline === 'boolean') {
+					this._activeIsUnderline = node.isUnderline;
+					this._storageService.store('workflowEditor.isUnderline', this._activeIsUnderline, StorageScope.PROFILE, StorageTarget.USER);
+				}
+				if (typeof node.isStrikethrough === 'boolean') {
+					this._activeIsStrikethrough = node.isStrikethrough;
+					this._storageService.store('workflowEditor.isStrikethrough', this._activeIsStrikethrough, StorageScope.PROFILE, StorageTarget.USER);
+				}
+			}
+		}
+
 		let currentColor = this._activeNodeColor || '#0d9488';
 		let currentTextColor = this._activeTextColor || '#ffffff';
 		let isBold = this._activeIsBold;
@@ -1234,21 +1292,6 @@ export class WorkflowEditor extends EditorPane {
 		let isStrikethrough = this._activeIsStrikethrough;
 		let textAlign: 'left' | 'center' | 'right' = this._activeTextAlign || 'center';
 		let verticalAlign: 'top' | 'center' | 'bottom' = this._activeVerticalAlign || 'center';
-
-		if (selNodeCount === 1) {
-			const selId = Array.from(this._selectedNodeIds)[0];
-			const node = this._data.nodes.find(n => n.id === selId);
-			if (node) {
-				currentColor = node.color || this._activeNodeColor;
-				currentTextColor = node.textColor || this._activeTextColor;
-				isBold = typeof node.isBold === 'boolean' ? node.isBold : this._activeIsBold;
-				isItalic = typeof node.isItalic === 'boolean' ? node.isItalic : this._activeIsItalic;
-				isUnderline = typeof node.isUnderline === 'boolean' ? node.isUnderline : this._activeIsUnderline;
-				isStrikethrough = typeof node.isStrikethrough === 'boolean' ? node.isStrikethrough : this._activeIsStrikethrough;
-				textAlign = node.textAlign || this._activeTextAlign;
-				verticalAlign = node.verticalAlign || this._activeVerticalAlign;
-			}
-		}
 
 		// Section 1: Node Color
 		const colorSec = append(parent, $('.workflow-toolbar-section'));
@@ -2958,6 +3001,9 @@ export class WorkflowEditor extends EditorPane {
 			}
 			this._renderNodes();
 			this._drawLinks();
+			if (this._inspectorEl) {
+				this._renderInspector(this._inspectorEl);
+			}
 			return;
 		}
 
@@ -2980,6 +3026,9 @@ export class WorkflowEditor extends EditorPane {
 				this._selectedNodeIds.add(this._collapseSelectionTargetNodeId);
 				this._renderNodes();
 				this._drawLinks();
+				if (this._inspectorEl) {
+					this._renderInspector(this._inspectorEl);
+				}
 			}
 			this._collapseSelectionTargetNodeId = null;
 			this._isDragging = false;
