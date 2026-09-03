@@ -96,6 +96,9 @@ interface IParsedTicketData {
 	lastUpdatedBy: string;
 	linkTo: string;
 	linkedBy: string;
+	gitRemoteUrl?: string;
+	gitBranch?: string;
+	localPath?: string;
 	customMetadata: { [key: string]: string };
 	metadata: { [key: string]: string };
 	readmeNotes: string;
@@ -156,6 +159,18 @@ export class EntityDetailEditor extends EditorPane {
 		@IQuickInputService private readonly _quickInputService: IQuickInputService
 	) {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
+
+		// Auto-reload data when underlying files are modified on disk (by AI or other tools)
+		this._register(this._fileService.onDidFilesChange(e => {
+			if (!this._entityUri || !this.isVisible()) return;
+			if (e.affects(this._entityUri)) {
+				this._resolvePathsAndLoadData();
+			}
+		}));
+	}
+
+	public async refresh(): Promise<void> {
+		await this._resolvePathsAndLoadData();
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
@@ -349,8 +364,8 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		try {
-			// 1. Resolve 4-MD file paths (robust checking of .agents and root)
-			this._ticketFileUri = await this._resolveFileUri(this._entityUri, 'ticket.md');
+			// 1. Resolve 4-MD file paths (robust checking of workspace.md/ticket.md, .agents and root)
+			this._ticketFileUri = await this._resolveMainEntityFileUri(this._entityUri);
 			this._instructionUri = await this._resolveFileUri(this._entityUri, 'instruction.md');
 			this._readmeUri = await this._resolveFileUri(this._entityUri, 'README.md');
 			this._workLogUri = await this._resolveWorkLogUri(this._entityUri);
@@ -362,6 +377,69 @@ export class EntityDetailEditor extends EditorPane {
 			const workLogContent = await this._safeReadFile(this._workLogUri);
 
 			const parsed = this._parseAllEntityData(ticketContent, readmeContent, instructionContent);
+
+			// Fallback: discover local .git if remoteUrl or branch not recorded in metadata
+			let gitRemoteUrl = parsed.gitRemoteUrl || '';
+			let gitBranch = parsed.gitBranch || '';
+
+			if ((!gitRemoteUrl || !gitBranch) && this._entityUri) {
+				let curr: URI | undefined = this._entityUri;
+				let foundGitUri: URI | undefined = undefined;
+				while (curr && curr.path !== '/' && curr.path !== '\\' && curr.path !== '.') {
+					const checkGit = URI.joinPath(curr, '.git');
+					if (await this._fileService.exists(checkGit)) {
+						foundGitUri = checkGit;
+						break;
+					}
+					const parent = dirname(curr);
+					if (parent.path === curr.path) break;
+					curr = parent;
+				}
+
+				if (foundGitUri) {
+					if (!gitBranch) {
+						try {
+							const headUri = URI.joinPath(foundGitUri, 'HEAD');
+							if (await this._fileService.exists(headUri)) {
+								const headContent = (await this._fileService.readFile(headUri)).value.toString().trim();
+								if (headContent.startsWith('ref: refs/heads/')) {
+									gitBranch = headContent.replace('ref: refs/heads/', '').trim();
+								}
+							}
+						} catch {}
+					}
+					if (!gitRemoteUrl) {
+						try {
+							const configUri = URI.joinPath(foundGitUri, 'config');
+							if (await this._fileService.exists(configUri)) {
+								const configContent = (await this._fileService.readFile(configUri)).value.toString();
+								const match = configContent.match(/url\s*=\s*(.+)/);
+								if (match && match[1]) {
+									gitRemoteUrl = match[1].trim();
+								}
+							}
+						} catch {}
+					}
+				}
+			}
+			if (!gitRemoteUrl && (parsed.localPath || parsed.metadata['Local Path'] || parsed.metadata['Target Project'])) {
+				try {
+					const lp = parsed.localPath || parsed.metadata['Local Path'] || parsed.metadata['Target Project'];
+					const localPathUri = URI.file(lp);
+					const configUri = URI.joinPath(localPathUri, '.git', 'config');
+					if (await this._fileService.exists(configUri)) {
+						const configContent = (await this._fileService.readFile(configUri)).value.toString();
+						const match = configContent.match(/url\s*=\s*(.+)/);
+						if (match && match[1]) {
+							gitRemoteUrl = match[1].trim();
+						}
+					}
+				} catch {}
+			}
+
+			parsed.gitRemoteUrl = gitRemoteUrl;
+			parsed.gitBranch = gitBranch;
+
 			this._lastParsedData = parsed;
 			this._entityType = parsed.ticketType || 'task';
 
@@ -379,6 +457,26 @@ export class EntityDetailEditor extends EditorPane {
 			// 3. Render directly into this._container as native high-performance DOM
 			const html = this._generateHtml(parsed, workLogContent, attachments, customModule, agents, allTickets);
 			this._setElementHTML(this._container, html);
+
+			// 4. Attach direct click handlers for key interactive elements
+			const directInfoBtn = this._container.querySelector('#status-lifecycle-info-btn') as HTMLElement | null;
+			const popoverEl = this._container.querySelector('#status-lifecycle-popover') as HTMLElement | null;
+			const closePopoverBtn = this._container.querySelector('#close-status-lifecycle-popover-btn') as HTMLElement | null;
+			if (directInfoBtn && popoverEl) {
+				directInfoBtn.onclick = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					const isHidden = popoverEl.style.display === 'none' || !popoverEl.style.display;
+					popoverEl.style.display = isHidden ? 'flex' : 'none';
+				};
+			}
+			if (closePopoverBtn && popoverEl) {
+				closePopoverBtn.onclick = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					popoverEl.style.display = 'none';
+				};
+			}
 		} catch (err) {
 			console.error('Failed to resolve and render entity detail:', err);
 		}
@@ -390,6 +488,63 @@ export class EntityDetailEditor extends EditorPane {
 		this._container.addEventListener('click', async (e: MouseEvent) => {
 			const target = e.target as HTMLElement | null;
 			if (!target) return;
+
+			// 0. Manual Refresh Button click
+			if (target.id === 'entity-detail-refresh-btn' || target.closest('#entity-detail-refresh-btn')) {
+				e.preventDefault();
+				e.stopPropagation();
+				await this._resolvePathsAndLoadData();
+				this._notificationService.info(`Refreshed ticket data for '${this._entityName || 'ticket'}'.`);
+				return;
+			}
+
+			// 0.1 Status Lifecycle Mapping Info button click
+			const infoBtn = (target.id === 'status-lifecycle-info-btn' || target.classList.contains('status-lifecycle-info-btn')) ? target : target.closest('#status-lifecycle-info-btn, .status-lifecycle-info-btn');
+			if (infoBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const popoverEl = this._container?.querySelector('#status-lifecycle-popover') as HTMLElement | null;
+				if (popoverEl) {
+					const isHidden = popoverEl.style.display === 'none' || !popoverEl.style.display;
+					popoverEl.style.display = isHidden ? 'flex' : 'none';
+				}
+				return;
+			}
+
+			// 0.11 Close popover button click
+			if (target.id === 'close-status-lifecycle-popover-btn' || target.closest('#close-status-lifecycle-popover-btn')) {
+				e.preventDefault();
+				e.stopPropagation();
+				const popoverEl = this._container?.querySelector('#status-lifecycle-popover') as HTMLElement | null;
+				if (popoverEl) {
+					popoverEl.style.display = 'none';
+				}
+				return;
+			}
+
+			// Close popover if clicking outside
+			const popoverEl = this._container?.querySelector('#status-lifecycle-popover') as HTMLElement | null;
+			if (popoverEl && popoverEl.style.display === 'flex') {
+				if (!target.closest('#status-lifecycle-popover') && !target.closest('#status-lifecycle-info-btn')) {
+					popoverEl.style.display = 'none';
+				}
+			}
+
+			// 0.2 Copy Git URL button click
+			const copyGitBtn = target.closest('.copy-git-url-btn') as HTMLElement | null;
+			if (copyGitBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const gitUrl = copyGitBtn.getAttribute('data-git-url');
+				if (gitUrl) {
+					this._clipboardService.writeText(gitUrl);
+					const span = copyGitBtn.querySelector('span');
+					if (span) span.textContent = 'Copied!';
+					setTimeout(() => { if (span) span.textContent = 'Copy'; }, 1500);
+					this._notificationService.info('Copied Git repository URL to clipboard.');
+				}
+				return;
+			}
 
 			// 1. AI Sparkle button click
 			const aiBtn = target.closest('.ai-edit-btn') as HTMLElement | null;
@@ -572,6 +727,18 @@ export class EntityDetailEditor extends EditorPane {
 		});
 	}
 
+
+	private async _resolveMainEntityFileUri(baseUri: URI): Promise<URI> {
+		const candidates = ['workspace.md', 'job.md', 'project.md', 'task.md', 'ticket.md', 'agent.md', 'workflow.md', 'case.md', 'issue.md', 'analysis.md'];
+		for (const name of candidates) {
+			const p1 = URI.joinPath(baseUri, '.agents', name);
+			if (await this._fileService.exists(p1)) return p1;
+			const p2 = URI.joinPath(baseUri, name);
+			if (await this._fileService.exists(p2)) return p2;
+		}
+		return URI.joinPath(baseUri, '.agents', 'ticket.md');
+	}
+
 	private async _resolveFileUri(baseUri: URI, name: string): Promise<URI> {
 		const agentsDir = URI.joinPath(baseUri, '.agents');
 		const pathInAgents = URI.joinPath(agentsDir, name);
@@ -680,6 +847,9 @@ export class EntityDetailEditor extends EditorPane {
 		// 3. Parse instruction.md
 		let typePrompt = '';
 		let ticketPrompt = '';
+		let instGitRemote = '';
+		let instGitBranch = '';
+		let instLocalPath = '';
 		const instNotesLines: string[] = [];
 		let isPastInstMeta = false;
 		const instLines = instructionContent.split(/\r?\n/);
@@ -692,6 +862,21 @@ export class EntityDetailEditor extends EditorPane {
 			const tickpMatch = line.match(/^\s*-\s*\*\*Ticket Prompt\*\*:\s*(.*)$/i);
 			if (tickpMatch) {
 				ticketPrompt = tickpMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				continue;
+			}
+			const gitRepoMatch = line.match(/^\s*-\s*(?:\*\*)?(?:Git\s+Repository(?:\s+URL)?|Git\s+Remote\s+URL|Git\s+Repo)(?:\*\*)?\s*[:：]\s*(.*)$/i);
+			if (gitRepoMatch) {
+				instGitRemote = gitRepoMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				continue;
+			}
+			const gitBranchMatch = line.match(/^\s*-\s*(?:\*\*)?(?:Git\s+Branch)(?:\*\*)?\s*[:：]\s*(.*)$/i);
+			if (gitBranchMatch) {
+				instGitBranch = gitBranchMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				continue;
+			}
+			const localPathMatch = line.match(/^\s*-\s*(?:\*\*)?(?:Local\s+Path|Target\s+Project(?:\s+Path)?)(?:\*\*)?\s*[:：]\s*(.*)$/i);
+			if (localPathMatch) {
+				instLocalPath = localPathMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
 				continue;
 			}
 			if (line.startsWith('---') || (line.startsWith('## ') && !line.startsWith('## Overview'))) {
@@ -707,6 +892,23 @@ export class EntityDetailEditor extends EditorPane {
 		const ticketType = metadata['Ticket Type'] || this._entityType || 'job';
 		const title = readmeTitle || metadata['Title'] || this._entityName || ticketId;
 		const description = (readmeDesc && readmeDesc !== 'None') ? readmeDesc : (metadata['Description'] || '');
+
+		const resolvedGitRemote = metadata['Git Remote URL'] ||
+			metadata['Git Repository'] ||
+			metadata['Git Repository URL'] ||
+			metadata['Git Repo'] ||
+			customMetadata['Git Remote URL'] ||
+			customMetadata['Git Repository'] ||
+			instGitRemote ||
+			'';
+		const resolvedGitBranch = metadata['Git Branch'] ||
+			customMetadata['Git Branch'] ||
+			instGitBranch ||
+			'';
+		const resolvedLocalPath = metadata['Local Path'] ||
+			customMetadata['Local Path'] ||
+			instLocalPath ||
+			'';
 
 		return {
 			title,
@@ -728,6 +930,9 @@ export class EntityDetailEditor extends EditorPane {
 			lastUpdatedBy: metadata['Last Updated By'] || 'User',
 			linkTo: metadata['Link To'] || 'None',
 			linkedBy: metadata['Linked By'] || 'None',
+			gitRemoteUrl: resolvedGitRemote,
+			gitBranch: resolvedGitBranch,
+			localPath: resolvedLocalPath,
 			customMetadata,
 			metadata,
 			readmeNotes: readmeNotesLines.join('\n').trim(),
@@ -1302,7 +1507,11 @@ export class EntityDetailEditor extends EditorPane {
 		// 5. Custom Metadata
 		if (data.customMetadata) {
 			const customChildren: any[] = [];
+			const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Git Remote URL', 'Git Branch'];
 			for (const [k, v] of Object.entries(data.customMetadata)) {
+				if (internalLifecycleKeys.includes(k)) {
+					continue;
+				}
 				let parsedItems: any[] | null = null;
 				if (typeof v === 'string' && v.trim().startsWith('[')) {
 					try {
@@ -1828,7 +2037,8 @@ export class EntityDetailEditor extends EditorPane {
 
 		// 6. Custom Fields Section
 		let customFieldsHtml = '';
-		const customFieldsEntries = Object.entries(data.customMetadata || {});
+		const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Git Remote URL', 'Git Branch'];
+		const customFieldsEntries = Object.entries(data.customMetadata || {}).filter(([k]) => !internalLifecycleKeys.includes(k));
 		if (customFieldsEntries.length > 0) {
 			for (const [k, v] of customFieldsEntries) {
 				let parsedArray: any[] | null = null;
@@ -2190,17 +2400,25 @@ export class EntityDetailEditor extends EditorPane {
 			</style>
 
 			<!-- Top Header Area -->
-			<div style="width: 100%; margin: 0 0 20px 0; text-align: left;">
-				<div class="header-breadcrumb">
-					<span>${data.workspaceId || 'Workspace'}</span>
-					<span>/</span>
-					<span>${data.ticketId}</span>
-					<span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-block;">${typeUpper}</span>
+			<div style="width: 100%; margin: 0 0 20px 0; text-align: left; display: flex; justify-content: space-between; align-items: flex-start;">
+				<div style="flex: 1; min-width: 0;">
+					<div class="header-breadcrumb">
+						<span>${data.workspaceId || 'Workspace'}</span>
+						<span>/</span>
+						<span>${data.ticketId}</span>
+						<span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-block;">${typeUpper}</span>
+					</div>
+					<div class="header-title-row">
+						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
+						<button type="button" class="ai-edit-btn" data-ai-field="/Title" data-ai-field-type="text" data-ai-field-label="Title" data-ai-current-value="${this._escapeHtmlAttr(data.title)}" title="Edit Title with AI">
+							<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+						</button>
+					</div>
 				</div>
-				<div class="header-title-row">
-					<h1 class="ticket-title" id="title-heading">${data.title}</h1>
-					<button type="button" class="ai-edit-btn" data-ai-field="/Title" data-ai-field-type="text" data-ai-field-label="Title" data-ai-current-value="${this._escapeHtmlAttr(data.title)}" title="Edit Title with AI">
-						<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+				<div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+					<button type="button" id="entity-detail-refresh-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer;" title="Refresh Ticket (Reload latest data from disk)">
+						<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="display:inline-block;"><path d="M13.65 2.35A7.958 7.958 0 0 0 8 0a8 8 0 1 0 8 8h-2a6 6 0 1 1-1.76-4.24l-2.24 2.24H16V0l-2.35 2.35z"/></svg>
+						<span>Refresh</span>
 					</button>
 				</div>
 			</div>
@@ -2381,15 +2599,142 @@ export class EntityDetailEditor extends EditorPane {
 					</div>
 					
 					<!-- Status -->
-					<div class="sidebar-row">
+					<div class="sidebar-row" style="position: relative;">
 						<div style="display: flex; justify-content: space-between; align-items: center;">
-							<span class="sidebar-label">STATUS</span>
+							<div style="display: flex; align-items: center; gap: 6px;">
+								<span class="sidebar-label">STATUS</span>
+								<button type="button" id="status-lifecycle-info-btn" class="status-lifecycle-info-btn" title="View Workspace Status Lifecycle & Mapping" style="background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.15); cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 50%; padding: 0; transition: all 0.15s ease;" onmouseenter="this.style.color='var(--vscode-foreground)'; this.style.borderColor='rgba(56, 189, 248, 0.6)'; this.style.background='rgba(56, 189, 248, 0.1)';" onmouseleave="this.style.color='var(--vscode-descriptionForeground)'; this.style.borderColor='rgba(255, 255, 255, 0.15)'; this.style.background='rgba(255, 255, 255, 0.06)';">
+									<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="pointer-events: none; display: block;">
+										<circle cx="8" cy="8" r="6.75"></circle>
+										<line x1="8" y1="7.2" x2="8" y2="11.5"></line>
+										<circle cx="8" cy="4.75" r="0.75" fill="currentColor" stroke="none"></circle>
+									</svg>
+								</button>
+							</div>
 							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : this._workspaceStatuses.statuses))}" title="Edit Status with AI">
 								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							</button>
 						</div>
 						<div style="padding: 2px 0;">
 							<span id="status-view-val" style="display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px; text-transform: uppercase;">${status}</span>
+						</div>
+
+						<!-- Status Lifecycle & Mapping Popover (浮窗) -->
+						<div id="status-lifecycle-popover" class="status-lifecycle-popover" style="display: none; position: absolute; top: calc(100% + 6px); right: 0; width: 330px; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.06); z-index: 1000; padding: 14px; box-sizing: border-box; flex-direction: column; gap: 10px;">
+							<!-- Header -->
+							<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px;">
+								<div style="display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--vscode-editor-foreground);">
+									<span style="color: #38bdf8; display: inline-flex; align-items: center;">
+										<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+											<circle cx="8" cy="8" r="6.75"></circle>
+											<line x1="8" y1="7.2" x2="8" y2="11.5"></line>
+											<circle cx="8" cy="4.75" r="0.75" fill="currentColor" stroke="none"></circle>
+										</svg>
+									</span>
+									<span>Status Lifecycle & Mapping</span>
+								</div>
+								<button type="button" id="close-status-lifecycle-popover-btn" style="background: transparent; border: none; cursor: pointer; color: var(--vscode-descriptionForeground); font-size: 14px; padding: 0 4px; border-radius: 4px; line-height: 1;" title="Close">✕</button>
+							</div>
+
+							<!-- Current Status Indicator -->
+							<div style="font-size: 11px; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.03); padding: 5px 8px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06);">
+								<span style="opacity: 0.7;">Current Status:</span>
+								<span style="font-weight: 700; color: ${statusColor}; text-transform: uppercase;">${status}</span>
+							</div>
+
+							<!-- 5 Categories -->
+							<div style="display: flex; flex-direction: column; gap: 6px;">
+								${(() => {
+									let mappingObj: { [key: string]: string } = {};
+									let hasCustomMapping = false;
+									if (this._workspaceStatuses?.mapping && Object.keys(this._workspaceStatuses.mapping).length > 0) {
+										mappingObj = { ...this._workspaceStatuses.mapping };
+										hasCustomMapping = true;
+									} else if (data.customMetadata?.['Status Mapping']) {
+										try {
+											mappingObj = JSON.parse(data.customMetadata['Status Mapping']);
+											hasCustomMapping = true;
+										} catch {}
+									}
+									if (Object.keys(mappingObj).length === 0) {
+										mappingObj = {
+											'Todo': 'Todo',
+											'In Progress': 'In Progress',
+											'Done': 'Done',
+											'Blocked': 'Blocked',
+											'Removed': 'Removed'
+										};
+										hasCustomMapping = false;
+									}
+
+									const categoriesDef = [
+										{ id: 'Todo', label: 'Todo', color: '#818cf8', bg: 'rgba(129, 140, 248, 0.15)', desc: 'Initial backlog / pending' },
+										{ id: 'In Progress', label: 'In Progress', color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.15)', desc: 'Active development' },
+										{ id: 'Done', label: 'Done', color: '#34d399', bg: 'rgba(52, 211, 153, 0.15)', desc: 'Completed & delivered' },
+										{ id: 'Blocked', label: 'Blocked', color: '#f43f5e', bg: 'rgba(244, 63, 94, 0.15)', desc: 'Waiting / on hold' },
+										{ id: 'Removed', label: 'Removed', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.15)', desc: 'Archived / purged' }
+									];
+
+									const categoryGroupMap: { [cat: string]: string[] } = {
+										'Todo': [],
+										'In Progress': [],
+										'Done': [],
+										'Blocked': [],
+										'Removed': []
+									};
+									for (const [st, cat] of Object.entries(mappingObj)) {
+										if (categoryGroupMap[cat]) {
+											if (!categoryGroupMap[cat].includes(st)) {
+												categoryGroupMap[cat].push(st);
+											}
+										} else {
+											categoryGroupMap['Todo'].push(st);
+										}
+									}
+
+									let htmlRows = '';
+									for (const cat of categoriesDef) {
+										const mappedList = categoryGroupMap[cat.id] || [];
+										let chipsHtml = '';
+										if (mappedList.length === 0) {
+											chipsHtml = `<span style="font-size: 10.5px; opacity: 0.45; font-style: italic;">None mapped</span>`;
+										} else {
+											for (const st of mappedList) {
+												const isCur = st.toLowerCase() === (status || '').toLowerCase();
+												chipsHtml += `
+													<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: ${isCur ? '700' : '500'}; background: ${isCur ? `${cat.color}25` : 'rgba(255,255,255,0.04)'}; color: ${isCur ? cat.color : 'inherit'}; border: ${isCur ? `1px solid ${cat.color}80` : '1px solid rgba(255,255,255,0.1)'};">
+														${this._escapeHtmlAttr(st)}
+														${isCur ? `<span style="font-size: 8.5px; background: ${cat.color}; color: #000; padding: 0 3px; border-radius: 2px; font-weight: 800;">CURRENT</span>` : ''}
+													</span>
+												`;
+											}
+										}
+
+										htmlRows += `
+											<div style="display: flex; gap: 8px; align-items: flex-start; padding: 5px 8px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px;">
+												<div style="width: 80px; flex-shrink: 0;">
+													<span style="display: inline-block; font-size: 10.5px; font-weight: 700; color: ${cat.color}; background: ${cat.bg}; border: 1px solid ${cat.color}40; padding: 1px 6px; border-radius: 3px;">${cat.label}</span>
+												</div>
+												<div style="flex: 1; display: flex; flex-wrap: wrap; gap: 4px; align-items: center;">
+													${chipsHtml}
+												</div>
+											</div>
+										`;
+									}
+
+									let noticeHtml = hasCustomMapping ? `
+										<div style="font-size: 10.5px; color: #34d399; background: rgba(52, 211, 153, 0.08); border: 1px solid rgba(52, 211, 153, 0.2); padding: 5px 8px; border-radius: 5px; line-height: 1.3;">
+											✓ Configured with workspace custom status mapping (${Object.keys(mappingObj).length} entries).
+										</div>
+									` : `
+										<div style="font-size: 10.5px; color: var(--vscode-descriptionForeground); background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); padding: 5px 8px; border-radius: 5px; line-height: 1.3;">
+											ℹ️ No custom mapping configured (using default 1:1 lifecycle mapping for standard stages).
+										</div>
+									`;
+
+									return htmlRows + noticeHtml;
+								})()}
+							</div>
 						</div>
 					</div>
 
@@ -2514,10 +2859,43 @@ export class EntityDetailEditor extends EditorPane {
 						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.createdAt}</span>
 					</div>
 
-					<div class="sidebar-row" style="border-bottom: none; margin-bottom: 0;">
+					<div class="sidebar-row" style="${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace') ? '' : 'border-bottom: none; margin-bottom: 0;'}">
 						<span class="sidebar-label">LAST UPDATED AT</span>
 						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
 					</div>
+
+					<!-- Git Configuration (Repository & Branch) -->
+					${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace') ? `
+						<div class="sidebar-row" style="margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);">
+							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+								<span class="sidebar-label" style="display: flex; align-items: center; gap: 5px;">
+									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color: #38bdf8;"><path fill-rule="evenodd" clip-rule="evenodd" d="M4.72 3.22a.75.75 0 0 1 1.06 1.06L2.06 8l3.72 3.72a.75.75 0 1 1-1.06 1.06L.47 8.53a.75.75 0 0 1 0-1.06l4.25-4.25zm6.56 0a.75.75 0 0 0-1.06 1.06L13.94 8l-3.72 3.72a.75.75 0 1 0 1.06 1.06l4.25-4.25a.75.75 0 0 0 0-1.06l-4.25-4.25z"/></svg>
+									GIT REPOSITORY
+								</span>
+								${data.gitRemoteUrl ? `
+									<button type="button" class="copy-git-url-btn" data-git-url="${this._escapeHtmlAttr(data.gitRemoteUrl)}" title="Copy Git URL to clipboard" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; font-size: 10.5px; transition: all 0.15s ease;" onmouseenter="this.style.color='var(--vscode-foreground)'" onmouseleave="this.style.color='var(--vscode-descriptionForeground)'">
+										<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path fill-rule="evenodd" clip-rule="evenodd" d="M4 4h5v2H4V4zm0 3h5v1H4V7zm0 2h3v1H4V9zm7.5-6H11V2H4v1H2.5A1.5 1.5 0 0 0 1 4.5v9A1.5 1.5 0 0 0 2.5 15h9a1.5 1.5 0 0 0 1.5-1.5V11h1a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1h-2.5zM12 4.5V10h-1V4.5a.5.5 0 0 1 .5-.5h.5zm-9.5 0a.5.5 0 0 1 .5-.5H10a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5H2.5a.5.5 0 0 1-.5-.5v-9zm12-.5h-.5v6h.5V4z"/></svg>
+										<span>Copy</span>
+									</button>
+								` : ''}
+							</div>
+							<div class="git-url-box" title="${this._escapeHtmlAttr(data.gitRemoteUrl || 'Inherited')}" style="background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); border-radius: 5px; padding: 5px 8px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-editor-foreground); display: flex; align-items: center; overflow: hidden;">
+								<span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;">${data.gitRemoteUrl || '<span style="opacity:0.4; font-style:italic;">None</span>'}</span>
+							</div>
+						</div>
+
+						<div class="sidebar-row" style="border-bottom: none; margin-bottom: 0;">
+							<span class="sidebar-label" style="display: flex; align-items: center; gap: 5px;">
+								<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color: #a78bfa;"><path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 2a2.25 2.25 0 1 0-1.77 3.635A4.75 4.75 0 0 0 5.5 10.158V6.635a2.25 2.25 0 1 0-1.5 0v5.73a2.25 2.25 0 1 0 1.5 0V11.5a3.25 3.25 0 0 1 3.25-3.25h1.23a2.25 2.25 0 1 0 1.77-6.25zM4.75 3.5a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5zm0 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm7-10a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5zm0 6a.75.75 0 1 1 0 1.5.75.75 0 0 1 0-1.5z"/></svg>
+								GIT BRANCH
+							</span>
+							<div style="display: flex; align-items: center; gap: 6px; padding: 2px 0;">
+								<span style="display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; font-family: monospace; background: rgba(167, 139, 250, 0.15); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.35); padding: 2px 8px; border-radius: 4px;">
+									${data.gitBranch || 'main'}
+								</span>
+							</div>
+						</div>
+					` : ''}
 				</div>
 			</div>
 		`;

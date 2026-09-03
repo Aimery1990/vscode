@@ -20,6 +20,7 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { EditorsOrder } from '../../../common/editor.js';
 import { ITerminalService } from '../../terminal/browser/terminal.js';
 import { IDebugService } from '../../debug/common/debug.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
 
 const SAVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.savedWorkspaces';
 const REMOVED_WORKSPACES_STORAGE_KEY = 'workspacesExplorer.removedWorkspaces';
@@ -43,7 +44,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		@IAuthenticationService private readonly authenticationService: IAuthenticationService,
 		@IEditorService private readonly editorService: IEditorService,
 		@ITerminalService private readonly terminalService: ITerminalService,
-		@IDebugService private readonly debugService: IDebugService
+		@IDebugService private readonly debugService: IDebugService,
+		@ICommandService private readonly commandService: ICommandService
 	) {
 		super();
 		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
@@ -175,7 +177,6 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			const cleanActiveUser = this.activeUserEmail;
 			const cleanOwner = extractEmail(snapshot.ownerAccount);
 
-			console.log(`[WorkspaceMetadataCheck] Compare cleanActiveUser: "${cleanActiveUser}" with cleanOwner: "${cleanOwner}". Full raw activeUser: "${this.activeUserEmail}", owner: "${snapshot.ownerAccount}"`);
 			if (cleanActiveUser !== cleanOwner) {
 				return undefined;
 			}
@@ -435,8 +436,13 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 		const alreadyExists = await this.fileService.exists(targetBaseUri);
 
-		if (!alreadyExists) {
-			await this.fileService.createFolder(targetBaseUri);
+		// If git repository is specified, ensure Git is cloned / initialized and ready BEFORE creating files
+		if (options.gitRepoUrl) {
+			await this.ensureGitRepositoryReady(targetBaseUri, options.gitRepoUrl, options.gitBranch);
+		} else {
+			if (!alreadyExists) {
+				await this.fileService.createFolder(targetBaseUri);
+			}
 		}
 
 		let attachmentNames: string[] | undefined;
@@ -487,6 +493,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			typeDefinition: options.typeDefinition,
 			typePrompt: options.typePrompt,
 			ticketPrompt: options.ticketPrompt,
+			git: (options.gitRepoUrl || options.gitBranch) ? { remoteUrl: options.gitRepoUrl, branch: options.gitBranch } : undefined,
 			customMetadata
 		}, targetBaseUri, false);
 
@@ -496,6 +503,140 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 	async createWorkspaceWithNameAndPath(name: string, parentLocationUri: URI, description?: string): Promise<ICreateWorkspaceResult> {
 		return this.createWorkspace({ name, targetParentUri: parentLocationUri, description, type: 'workspace' });
+	}
+
+	private async ensureGitRepositoryReady(targetFolderUri: URI, gitRepoUrl: string, gitBranch?: string): Promise<void> {
+		const targetPath = targetFolderUri.fsPath;
+		const dotGitUri = URI.joinPath(targetFolderUri, '.git');
+
+		// 1. If .git already exists in target folder, ensure remote & branch are aligned
+		if (await this.fileService.exists(dotGitUri)) {
+			await this._configureExistingGitRepo(dotGitUri, gitRepoUrl, gitBranch);
+			try {
+				await this.commandService.executeCommand('git.openRepository', targetPath);
+			} catch {}
+			return;
+		}
+
+		// 2. Check if target folder exists
+		const folderExists = await this.fileService.exists(targetFolderUri);
+		if (folderExists) {
+			const stat = await this.fileService.resolve(targetFolderUri);
+			const children = (stat.children || []).filter(c => c.name !== '.DS_Store');
+			if (children.length > 0) {
+				// Non-empty folder without git: initialize git directly in this folder
+				await this._initGitInExistingFolder(targetFolderUri, gitRepoUrl, gitBranch);
+				try {
+					await this.commandService.executeCommand('git.openRepository', targetPath);
+				} catch {}
+				return;
+			} else {
+				// Empty folder: remove it so git clone can create it cleanly without collision
+				try {
+					await this.fileService.del(targetFolderUri, { recursive: true });
+				} catch {}
+			}
+		}
+
+		// 3. Ensure parent folder exists before clone
+		const parentUri = dirname(targetFolderUri);
+		if (!await this.fileService.exists(parentUri)) {
+			await this.fileService.createFolder(parentUri);
+		}
+
+		// 4. Execute clone via VS Code's git extension command
+		let cloneError: any = null;
+		try {
+			await this.commandService.executeCommand('_git.cloneRepository', gitRepoUrl, targetPath);
+		} catch (err) {
+			cloneError = err;
+		}
+
+		// 5. Verify whether .git exists
+		const gitCreated = await this.fileService.exists(dotGitUri);
+		if (!gitCreated) {
+			// If clone command was unavailable or failed, attempt direct repo init fallback
+			try {
+				await this._initGitInExistingFolder(targetFolderUri, gitRepoUrl, gitBranch);
+			} catch (fallbackErr: any) {
+				const errMsg = cloneError ? (cloneError.message || cloneError) : (fallbackErr.message || fallbackErr);
+				throw new Error(`Git clone failed for '${gitRepoUrl}': ${errMsg}`);
+			}
+		} else {
+			if (gitBranch) {
+				await this._ensureGitBranch(dotGitUri, gitBranch);
+			}
+		}
+
+		// 6. Tell VS Code Git extension to immediately open and manage this repository
+		try {
+			await this.commandService.executeCommand('git.openRepository', targetPath);
+		} catch {}
+	}
+
+	private async _initGitInExistingFolder(folderUri: URI, gitRepoUrl: string, gitBranch?: string): Promise<void> {
+		if (!await this.fileService.exists(folderUri)) {
+			await this.fileService.createFolder(folderUri);
+		}
+		const dotGitUri = URI.joinPath(folderUri, '.git');
+		if (!await this.fileService.exists(dotGitUri)) {
+			await this.fileService.createFolder(dotGitUri);
+		}
+		const objectsUri = URI.joinPath(dotGitUri, 'objects');
+		if (!await this.fileService.exists(objectsUri)) {
+			await this.fileService.createFolder(objectsUri);
+		}
+		const refsHeadsUri = URI.joinPath(dotGitUri, 'refs', 'heads');
+		if (!await this.fileService.exists(refsHeadsUri)) {
+			await this.fileService.createFolder(refsHeadsUri);
+		}
+		const refsTagsUri = URI.joinPath(dotGitUri, 'refs', 'tags');
+		if (!await this.fileService.exists(refsTagsUri)) {
+			await this.fileService.createFolder(refsTagsUri);
+		}
+
+		const branch = gitBranch || 'main';
+		const headUri = URI.joinPath(dotGitUri, 'HEAD');
+		await this.fileService.writeFile(headUri, VSBuffer.fromString(`ref: refs/heads/${branch}\n`));
+
+		const configUri = URI.joinPath(dotGitUri, 'config');
+		const configStr = `[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n\tignorecase = true\n\tprecomposeunicode = true\n[remote "origin"]\n\turl = ${gitRepoUrl}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[branch "${branch}"]\n\tremote = origin\n\tmerge = refs/heads/${branch}\n`;
+		await this.fileService.writeFile(configUri, VSBuffer.fromString(configStr));
+
+		const descUri = URI.joinPath(dotGitUri, 'description');
+		await this.fileService.writeFile(descUri, VSBuffer.fromString('Unnamed repository\n'));
+	}
+
+	private async _configureExistingGitRepo(dotGitUri: URI, gitRepoUrl: string, gitBranch?: string): Promise<void> {
+		try {
+			const configUri = URI.joinPath(dotGitUri, 'config');
+			if (await this.fileService.exists(configUri)) {
+				let content = (await this.fileService.readFile(configUri)).value.toString();
+				if (!content.includes('[remote "origin"]')) {
+					content += `\n[remote "origin"]\n\turl = ${gitRepoUrl}\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n`;
+					await this.fileService.writeFile(configUri, VSBuffer.fromString(content));
+				}
+			}
+			if (gitBranch) {
+				await this._ensureGitBranch(dotGitUri, gitBranch);
+			}
+		} catch (err) {
+			console.warn('Failed to configure existing git repo:', err);
+		}
+	}
+
+	private async _ensureGitBranch(dotGitUri: URI, gitBranch: string): Promise<void> {
+		try {
+			const headUri = URI.joinPath(dotGitUri, 'HEAD');
+			if (await this.fileService.exists(headUri)) {
+				const currentHead = (await this.fileService.readFile(headUri)).value.toString().trim();
+				if (currentHead.startsWith('ref: refs/heads/') && currentHead !== `ref: refs/heads/${gitBranch}`) {
+					await this.fileService.writeFile(headUri, VSBuffer.fromString(`ref: refs/heads/${gitBranch}\n`));
+				}
+			}
+		} catch (err) {
+			console.warn('Failed to ensure git branch:', err);
+		}
 	}
 
 	async reorderWorkspaces(sourceId: string, targetId: string): Promise<void> {
@@ -1147,6 +1288,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			}
 		}
 
+		// If git repository is specified, ensure Git is cloned / initialized and ready BEFORE creating files
+		if (options.gitRepoUrl) {
+			await this.ensureGitRepositoryReady(entityFolderUri, options.gitRepoUrl, options.gitBranch);
+		}
+
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: entityFolderUri.toString(),
 			entityName: name,
@@ -1173,6 +1319,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			linkTo: options.linkTo,
 			linkedBy: options.linkedBy,
 			attachments: attachmentNames,
+			git: (options.gitRepoUrl || options.gitBranch) ? { remoteUrl: options.gitRepoUrl, branch: options.gitBranch } : undefined,
 			customMetadata: options.customMetadata
 		}, targetFolderUri, true);
 

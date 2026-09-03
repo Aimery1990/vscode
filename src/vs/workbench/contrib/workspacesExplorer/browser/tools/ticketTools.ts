@@ -51,7 +51,7 @@ export class GetTicketDataTool implements IToolImpl {
 			toolReferenceName: 'getTicketData',
 			displayName: localize('ticket.tool.get.displayName', "Get Ticket Data"),
 			userDescription: localize('ticket.tool.get.userDescription', "Get ticket field values and schema metadata"),
-			modelDescription: 'Retrieve actual values, field types, and allowed scopes of a ticket. If field_path is omitted, returns the entire ticket values alongside its complete YAML type schema definition and workspace status mapping.',
+			modelDescription: 'Retrieve actual values, field types, allowed scopes, and dynamically discovered direct children sub-tickets of a ticket. If field_path is omitted, returns the entire ticket values alongside its children list, complete YAML type schema definition, and workspace status mapping.',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.search,
@@ -64,7 +64,11 @@ export class GetTicketDataTool implements IToolImpl {
 					},
 					ticket_id: {
 						type: 'string',
-						description: "The target ticket ID (e.g. 'FNDJ1-0001', or root 'FNDJ1-0000')."
+						description: "The target ticket ID (e.g. 'FNDJ1-0001'), relative path (e.g. '/FNDJ1-0006/FNDJ1-0001'), or root 'FNDJ1-0000'."
+					},
+					parent_path: {
+						type: 'string',
+						description: "Optional parent path (e.g. '/FNDJ1-0006' or '/') to explicitly disambiguate sub-tickets with identical or relative IDs."
 					},
 					field_path: {
 						type: 'string',
@@ -86,11 +90,11 @@ export class GetTicketDataTool implements IToolImpl {
 
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
 		try {
-			const { workspace_id, ticket_id, field_path } = invocation.parameters;
+			const { workspace_id, ticket_id, field_path, parent_path } = invocation.parameters;
 			if (!workspace_id || !ticket_id) {
 				return toolError("'workspace_id' and 'ticket_id' are required.");
 			}
-			const data = await this.ticketEngine.getTicketData(workspace_id, ticket_id, field_path);
+			const data = await this.ticketEngine.getTicketData(workspace_id, ticket_id, field_path, parent_path);
 			return toolResult(data, `Retrieved data for ticket ${ticket_id}`);
 		} catch (err: any) {
 			return toolError(err.message || String(err));
@@ -245,7 +249,11 @@ export class DeleteTicketTool implements IToolImpl {
 					},
 					ticket_id: {
 						type: 'string',
-						description: "The target ticket ID to remove (e.g. 'FNDJ1-0004')."
+						description: "The target ticket ID to remove (e.g. 'FNDJ1-0004'), or relative path (e.g. '/FNDJ1-0006/FNDJ1-0001')."
+					},
+					parent_path: {
+						type: 'string',
+						description: "Optional parent path (e.g. '/FNDJ1-0006' or '/') to explicitly disambiguate sub-tickets with identical or relative IDs."
 					},
 					worklog_record: {
 						type: 'object',
@@ -321,7 +329,11 @@ export class UpdateTicketTool implements IToolImpl {
 					},
 					ticket_id: {
 						type: 'string',
-						description: "The target ticket ID to update (e.g. 'FNDJ1-0001')."
+						description: "The target ticket ID to update (e.g. 'FNDJ1-0001'), or relative path (e.g. '/FNDJ1-0006/FNDJ1-0001')."
+					},
+					parent_path: {
+						type: 'string',
+						description: "Optional parent path (e.g. '/FNDJ1-0006' or '/') to explicitly disambiguate sub-tickets with identical or relative IDs."
 					},
 					updates: {
 						type: 'object',

@@ -21,6 +21,8 @@ import { CancellationTokenSource } from '../../../../base/common/cancellation.js
 import { listenStream } from '../../../../base/common/stream.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { ILanguageModelToolsService } from '../../../../workbench/contrib/chat/common/tools/languageModelToolsService.js';
+import { Codicon } from '../../../../base/common/codicons.js';
+import { ThemeIcon } from '../../../../base/common/themables.js';
 
 interface IAttachment {
 	name: string;
@@ -103,6 +105,26 @@ function getTypeColorInfo(typeStr: string | undefined): { text: string; bg: stri
 
 const STORAGE_KEY_CREDENTIAL_ID = 'anyagent.centeredChat.activeCredentialId';
 const STORAGE_KEY_MODEL_ID = 'anyagent.centeredChat.activeModelId';
+const STORAGE_KEY_SESSIONS = 'anyagent.centeredChat.sessions.v1';
+const STORAGE_KEY_ACTIVE_SESSION = 'anyagent.centeredChat.activeSessionId.v1';
+
+export interface IChatMessageRecord {
+	role: 'user' | 'assistant';
+	content: string;
+	timestamp: string;
+	modelBadge?: string;
+	locatorTag?: string;
+}
+
+export interface IChatSessionRecord {
+	id: string;
+	title: string;
+	createdAt: number;
+	updatedAt: number;
+	workspaceId?: string;
+	ticketId?: string;
+	messages: IChatMessageRecord[];
+}
 
 export interface IContextLocator {
 	workspaceId?: string;
@@ -127,11 +149,18 @@ export class CenteredChatWidget extends Disposable {
 	private recordingTimeSpan: HTMLElement | undefined;
 	private sendBtn: HTMLButtonElement | undefined;
 
+	// Session Management
+	private sessions: IChatSessionRecord[] = [];
+	private currentSessionId: string = '';
+	private historyDropdown: HTMLElement | undefined;
+	private isHistoryOpen = false;
+
 	// Scoped Disposables to prevent any memory leaks
 	private readonly viewDisposables = this._register(new DisposableStore());
 	private readonly modelListDisposables = this._register(new DisposableStore());
 	private readonly attachmentDisposables = this._register(new DisposableStore());
 	private readonly messageDisposables = this._register(new DisposableStore());
+	private readonly historyDisposables = this._register(new DisposableStore());
 
 	// Provider & Searchable Model Picker UI elements
 	private providerSelect: HTMLSelectElement | undefined;
@@ -251,7 +280,9 @@ export class CenteredChatWidget extends Disposable {
 
 	private toggleBreadcrumbDropdown(ancNode: any, anchorEl: HTMLElement): void {
 		if (this.activeBreadcrumbDropdown) {
-			this.activeBreadcrumbDropdown.remove();
+			try {
+				this.activeBreadcrumbDropdown.remove();
+			} catch {}
 			this.activeBreadcrumbDropdown = undefined;
 			return;
 		}
@@ -324,7 +355,9 @@ export class CenteredChatWidget extends Disposable {
 
 			item.onclick = (e) => {
 				e.stopPropagation();
-				menu.remove();
+				try {
+					menu.remove();
+				} catch {}
 				this.activeBreadcrumbDropdown = undefined;
 				this.drillDownTo(child.path);
 			};
@@ -332,7 +365,9 @@ export class CenteredChatWidget extends Disposable {
 
 		const closeListener = (e: MouseEvent) => {
 			if (!menu.contains(e.target as Node) && e.target !== anchorEl) {
-				menu.remove();
+				try {
+					menu.remove();
+				} catch {}
 				this.activeBreadcrumbDropdown = undefined;
 				document.removeEventListener('click', closeListener);
 			}
@@ -581,7 +616,7 @@ export class CenteredChatWidget extends Disposable {
 					this.drillDownTo(child.path);
 				};
 			});
-		} else if (locator.field) {
+		} else if (locator.field && !locator.field.startsWith('/Create')) {
 			// Leaf Field Editor Mode
 			const editorBox = append(this.contextLocatorContainer, $('.context-interactive-editor-box'));
 			editorBox.style.display = 'flex';
@@ -1195,7 +1230,7 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[] }): void {
+	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number } }): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
@@ -1210,11 +1245,18 @@ export class CenteredChatWidget extends Disposable {
 						hierarchyTree: initialContext.hierarchyTree
 					});
 				}
-				if (initialContext.prompt && !initialContext.field && !initialContext.ticketId && this.inputField) {
+				if (initialContext.prompt && (!initialContext.field || initialContext.field.startsWith('/Create')) && this.inputField) {
 					this.inputField.value = initialContext.prompt;
+				}
+				if (initialContext.companionMode || initialContext.companionPosition) {
+					this.restorePosition(initialContext.companionMode, initialContext.companionPosition);
 				}
 			}
 			this.inputField?.focus();
+			if (this.inputField?.value) {
+				const len = this.inputField.value.length;
+				this.inputField.setSelectionRange(len, len);
+			}
 			return;
 		}
 
@@ -1228,11 +1270,34 @@ export class CenteredChatWidget extends Disposable {
 		const header = append(this.element, $('.centered-chat-popup-header'));
 
 		const title = append(header, $('.centered-chat-popup-title'));
-		append(title, $('span.codicon.codicon-sparkle'));
+		append(title, $('span.codicon.codicon-sparkle-filled'));
 		const titleText = append(title, $('span'));
 		titleText.textContent = 'Agent Central';
 
 		const controls = append(header, $('.centered-chat-popup-controls'));
+		controls.style.display = 'flex';
+		controls.style.alignItems = 'center';
+		controls.style.gap = '6px';
+
+		// New Chat Button
+		const newChatBtn = append(controls, $('button.centered-chat-header-btn'));
+		append(newChatBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
+		append(newChatBtn, $('span', {}, 'New Chat'));
+		newChatBtn.title = 'Start a fresh conversation';
+		this.viewDisposables.add(addDisposableListener(newChatBtn, 'click', (e) => {
+			e.stopPropagation();
+			this.startNewSession();
+		}));
+
+		// History Button
+		const historyBtn = append(controls, $('button.centered-chat-header-btn'));
+		append(historyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.history)));
+		append(historyBtn, $('span', {}, 'History'));
+		historyBtn.title = 'View and switch conversation history';
+		this.viewDisposables.add(addDisposableListener(historyBtn, 'click', (e) => {
+			e.stopPropagation();
+			this.toggleHistoryDropdown();
+		}));
 
 		// Zen Toggle (Collapse) Button
 		const toggleZenBtn = append(controls, $('.centered-chat-popup-zen-btn'));
@@ -1252,11 +1317,23 @@ export class CenteredChatWidget extends Disposable {
 		append(closeBtn, $('span.codicon.codicon-close'));
 		this.viewDisposables.add(addDisposableListener(closeBtn, 'click', () => this.hide()));
 
+		// Floating History Dropdown Container
+		this.historyDropdown = append(this.element, $('.centered-chat-history-dropdown'));
+		this.historyDropdown.style.display = 'none';
+
+		// Close History Dropdown on click outside
+		this.viewDisposables.add(addDisposableListener(this.element, 'click', (e) => {
+			if (this.isHistoryOpen && !historyBtn.contains(e.target as Node) && !this.historyDropdown?.contains(e.target as Node)) {
+				this.closeHistoryDropdown();
+			}
+		}));
+
 		// Messages Body
 		this.messagesContainer = append(this.element, $('.centered-chat-popup-messages'));
 
-		// Add welcome message
-		this.addWelcomeMessage();
+		// Load active conversation session or add welcome
+		const activeSession = this.getOrCreateCurrentSession(initialContext);
+		this.renderSessionMessages(activeSession);
 
 		// Attachments Area (hidden by default)
 		this.attachmentsContainer = append(this.element, $('.centered-chat-popup-attachments'));
@@ -1397,7 +1474,7 @@ export class CenteredChatWidget extends Disposable {
 		this.setupDragging(header);
 
 		// Position restores
-		this.restorePosition();
+		this.restorePosition(initialContext?.companionMode, initialContext?.companionPosition);
 
 		// Load Credentials and populate Model Picker
 		this.loadCredentialsAndModels();
@@ -1416,7 +1493,7 @@ export class CenteredChatWidget extends Disposable {
 					hierarchyTree: initialContext.hierarchyTree
 				});
 			}
-			if (initialContext.prompt && !initialContext.field && !initialContext.ticketId && this.inputField) {
+			if (initialContext.prompt && (!initialContext.field || initialContext.field.startsWith('/Create')) && this.inputField) {
 				this.inputField.value = initialContext.prompt;
 			}
 		}
@@ -1431,6 +1508,7 @@ export class CenteredChatWidget extends Disposable {
 		if (this.element) {
 			this.stopRecording();
 			this.closeModelDropdown();
+			this.closeHistoryDropdown();
 
 			if (this.isZenMode) {
 				this.restoreWindowFromZenOnHide();
@@ -1453,10 +1531,12 @@ export class CenteredChatWidget extends Disposable {
 			this.modelListDisposables.clear();
 			this.attachmentDisposables.clear();
 			this.messageDisposables.clear();
+			this.historyDisposables.clear();
 
 			this.element.remove();
 			this.element = undefined;
 			this.messagesContainer = undefined;
+			this.historyDropdown = undefined;
 			this.inputField = undefined;
 			this.attachmentsContainer = undefined;
 			this.providerSelect = undefined;
@@ -1472,7 +1552,7 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[] }): void {
+	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number } }): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
@@ -1487,9 +1567,15 @@ export class CenteredChatWidget extends Disposable {
 						hierarchyTree: initialContext.hierarchyTree
 					});
 				}
-				if (initialContext.prompt && !initialContext.field && !initialContext.ticketId && this.inputField) {
+				if (initialContext.prompt && (!initialContext.field || initialContext.field.startsWith('/Create')) && this.inputField) {
 					this.inputField.value = initialContext.prompt;
 				}
+				if (initialContext.companionMode || initialContext.companionPosition) {
+					this.restorePosition(initialContext.companionMode, initialContext.companionPosition);
+				}
+			} else {
+				this.hide();
+				return;
 			}
 			this.inputField?.focus();
 			if (this.inputField?.value) {
@@ -1498,6 +1584,324 @@ export class CenteredChatWidget extends Disposable {
 			}
 		} else {
 			this.show(initialContext);
+		}
+	}
+
+	private loadSessions(): IChatSessionRecord[] {
+		try {
+			const raw = this.storageService.get(STORAGE_KEY_SESSIONS, StorageScope.PROFILE, '[]');
+			return JSON.parse(raw);
+		} catch {
+			return [];
+		}
+	}
+
+	private saveSessions(sessions: IChatSessionRecord[]): void {
+		try {
+			this.storageService.store(STORAGE_KEY_SESSIONS, JSON.stringify(sessions), StorageScope.PROFILE, StorageTarget.USER);
+		} catch (err) {
+			console.error('Failed to save chat sessions:', err);
+		}
+	}
+
+	private getOrCreateCurrentSession(initialContext?: { workspaceId?: string; ticketId?: string }): IChatSessionRecord {
+		this.sessions = this.loadSessions();
+		const savedActiveId = this.storageService.get(STORAGE_KEY_ACTIVE_SESSION, StorageScope.PROFILE, '');
+		let session = this.sessions.find(s => s.id === savedActiveId);
+
+		if (!session) {
+			session = {
+				id: `session_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+				title: initialContext?.ticketId ? `Chat on ${initialContext.ticketId}` : (initialContext?.workspaceId ? `Chat in ${initialContext.workspaceId}` : 'New Conversation'),
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+				workspaceId: initialContext?.workspaceId,
+				ticketId: initialContext?.ticketId,
+				messages: []
+			};
+			this.sessions.unshift(session);
+			this.saveSessions(this.sessions);
+		}
+		this.currentSessionId = session.id;
+		this.storageService.store(STORAGE_KEY_ACTIVE_SESSION, session.id, StorageScope.PROFILE, StorageTarget.USER);
+		return session;
+	}
+
+	private appendMessageToCurrentSession(msg: IChatMessageRecord): void {
+		const session = this.sessions.find(s => s.id === this.currentSessionId);
+		if (session) {
+			session.messages.push(msg);
+			session.updatedAt = Date.now();
+			if (session.messages.length === 1 && msg.role === 'user') {
+				const cleanTitle = msg.content.replace(/^\[.*?\]\s*/g, '').trim().substring(0, 32);
+				if (cleanTitle) {
+					session.title = cleanTitle;
+				}
+			}
+			this.saveSessions(this.sessions);
+		}
+	}
+
+	private renderSessionMessages(session: IChatSessionRecord): void {
+		if (!this.messagesContainer) { return; }
+		this.messageDisposables.clear();
+		this.messagesContainer.textContent = '';
+
+		if (session.messages.length === 0) {
+			this.addWelcomeMessage();
+			return;
+		}
+
+		for (const msg of session.messages) {
+			if (msg.role === 'user') {
+				const userMsg = append(this.messagesContainer, $('.centered-chat-msg.centered-chat-msg-user'));
+				if (msg.locatorTag) {
+					const locBar = append(userMsg, $('.centered-chat-context-locator-tag-bubble'));
+					locBar.textContent = msg.locatorTag;
+				}
+				const contentSpan = append(userMsg, $('span'));
+				contentSpan.textContent = msg.content;
+
+				const userFooter = append(userMsg, $('.centered-chat-msg-footer'));
+				userFooter.style.display = 'flex';
+				userFooter.style.alignItems = 'center';
+				userFooter.style.justifyContent = 'space-between';
+				userFooter.style.marginTop = '6px';
+				userFooter.style.gap = '8px';
+
+				const timeSpan = append(userFooter, $('.centered-chat-msg-time'));
+				timeSpan.textContent = msg.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+				const copyBtn = append(userFooter, $('button.centered-chat-bubble-copy-btn'));
+				copyBtn.title = 'Copy user prompt';
+				append(copyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+				const copyLabel = append(copyBtn, $('span'));
+				copyLabel.textContent = 'Copy';
+				copyBtn.onclick = (e) => {
+					e.stopPropagation();
+					this.copyToClipboard(msg.content, copyLabel);
+				};
+			} else {
+				const aiMsg = append(this.messagesContainer, $('.centered-chat-msg.centered-chat-msg-ai'));
+				if (msg.modelBadge) {
+					const aiHeader = append(aiMsg, $('.centered-chat-msg-ai-header'));
+					const modelBadge = append(aiHeader, $('.centered-chat-msg-model-badge'));
+					modelBadge.textContent = msg.modelBadge;
+				}
+				const aiContent = append(aiMsg, $('.centered-chat-ai-markdown-content'));
+				const mdString = new MarkdownString(msg.content || '...');
+				mdString.isTrusted = true;
+				const rendered = renderMarkdown(mdString, { fillInIncompleteTokens: true });
+				this.messageDisposables.add(rendered);
+				aiContent.appendChild(rendered.element);
+				this.injectCopyButtons(aiContent);
+
+				const aiFooter = append(aiMsg, $('.centered-chat-msg-footer'));
+				aiFooter.style.display = 'flex';
+				aiFooter.style.alignItems = 'center';
+				aiFooter.style.justifyContent = 'space-between';
+				aiFooter.style.marginTop = '8px';
+				aiFooter.style.gap = '8px';
+
+				const timeSpan = append(aiFooter, $('.centered-chat-msg-time'));
+				timeSpan.textContent = msg.timestamp || new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+				const copyBtn = append(aiFooter, $('button.centered-chat-bubble-copy-btn'));
+				copyBtn.title = 'Copy AI response';
+				append(copyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+				const copyLabel = append(copyBtn, $('span'));
+				copyLabel.textContent = 'Copy';
+				copyBtn.onclick = (e) => {
+					e.stopPropagation();
+					this.copyToClipboard(msg.content, copyLabel);
+				};
+			}
+		}
+
+		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+	}
+
+	private startNewSession(): void {
+		const newSession: IChatSessionRecord = {
+			id: `session_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+			title: 'New Conversation',
+			createdAt: Date.now(),
+			updatedAt: Date.now(),
+			messages: []
+		};
+		this.sessions.unshift(newSession);
+		this.currentSessionId = newSession.id;
+		this.saveSessions(this.sessions);
+		this.storageService.store(STORAGE_KEY_ACTIVE_SESSION, newSession.id, StorageScope.PROFILE, StorageTarget.USER);
+		this.closeHistoryDropdown();
+		this.renderSessionMessages(newSession);
+		this.notificationService.info('Started a new conversation');
+	}
+
+	private switchSession(sessionId: string): void {
+		const session = this.sessions.find(s => s.id === sessionId);
+		if (session) {
+			this.currentSessionId = session.id;
+			this.storageService.store(STORAGE_KEY_ACTIVE_SESSION, session.id, StorageScope.PROFILE, StorageTarget.USER);
+			this.closeHistoryDropdown();
+			this.renderSessionMessages(session);
+		}
+	}
+
+	private deleteSession(sessionId: string): void {
+		this.sessions = this.sessions.filter(s => s.id !== sessionId);
+		this.saveSessions(this.sessions);
+		if (this.currentSessionId === sessionId) {
+			if (this.sessions.length > 0) {
+				this.switchSession(this.sessions[0].id);
+			} else {
+				this.startNewSession();
+			}
+		} else {
+			this.renderHistoryList();
+		}
+	}
+
+	private toggleHistoryDropdown(): void {
+		if (!this.historyDropdown) { return; }
+		this.isHistoryOpen = !this.isHistoryOpen;
+		this.historyDropdown.style.display = this.isHistoryOpen ? 'flex' : 'none';
+		if (this.isHistoryOpen) {
+			this.renderHistoryList();
+		}
+	}
+
+	private closeHistoryDropdown(): void {
+		if (this.historyDropdown) {
+			this.isHistoryOpen = false;
+			this.historyDropdown.style.display = 'none';
+		}
+	}
+
+	private renderHistoryList(): void {
+		if (!this.historyDropdown) { return; }
+		this.historyDisposables.clear();
+		this.historyDropdown.textContent = '';
+
+		const header = append(this.historyDropdown, $('.centered-chat-history-header'));
+		const title = append(header, $('span'));
+		title.textContent = `Chat History (${this.sessions.length})`;
+
+		const clearBtn = append(header, $('button.centered-chat-header-btn'));
+		clearBtn.textContent = '+ New Chat';
+		clearBtn.onclick = (e) => {
+			e.stopPropagation();
+			this.startNewSession();
+		};
+
+		const list = append(this.historyDropdown, $('.centered-chat-history-list'));
+		if (this.sessions.length === 0) {
+			const empty = append(list, $('div', { style: 'padding: 16px; text-align: center; font-size: 11px; opacity: 0.5;' }));
+			empty.textContent = 'No past conversations';
+			return;
+		}
+
+		for (const session of this.sessions) {
+			const item = append(list, $('.centered-chat-history-item'));
+			if (session.id === this.currentSessionId) {
+				item.classList.add('active');
+			}
+
+			const info = append(item, $('.centered-chat-history-item-info'));
+			const titleSpan = append(info, $('.centered-chat-history-item-title'));
+			titleSpan.textContent = session.title || 'Untitled Chat';
+
+			const meta = append(info, $('.centered-chat-history-item-meta'));
+			const dateStr = new Date(session.updatedAt).toLocaleDateString([], { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+			meta.textContent = `${dateStr} · ${session.messages.length} msgs`;
+
+			const delBtn = append(item, $('.centered-chat-history-item-delete'));
+			append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+			delBtn.title = 'Delete conversation';
+			delBtn.onclick = (e) => {
+				e.stopPropagation();
+				this.deleteSession(session.id);
+			};
+
+			item.onclick = () => {
+				this.switchSession(session.id);
+			};
+		}
+	}
+
+	private async copyToClipboard(text: string, labelSpan?: HTMLElement): Promise<void> {
+		try {
+			if (navigator.clipboard && navigator.clipboard.writeText) {
+				await navigator.clipboard.writeText(text);
+			} else {
+				const ta = document.createElement('textarea');
+				ta.value = text;
+				ta.style.position = 'fixed';
+				ta.style.opacity = '0';
+				document.body.appendChild(ta);
+				ta.select();
+				document.execCommand('copy');
+				ta.remove();
+			}
+			if (labelSpan) {
+				labelSpan.textContent = '✓ Copied!';
+				setTimeout(() => { labelSpan.textContent = 'Copy'; }, 2000);
+			}
+			this.notificationService.info('Copied to clipboard');
+		} catch (err) {
+			console.error('Failed to copy text:', err);
+		}
+	}
+
+	private restorePosition(companionMode?: boolean, companionPosition?: { left: number; top?: string; width: number; height: number }): void {
+		if (!this.element) { return; }
+
+		if (companionPosition) {
+			this.element.style.width = `${companionPosition.width}px`;
+			this.element.style.height = `${companionPosition.height}px`;
+			this.element.style.top = companionPosition.top || '50%';
+			this.element.style.left = `${companionPosition.left}px`;
+			this.element.style.transform = companionPosition.top && companionPosition.top !== '50%' ? 'none' : 'translateY(-50%)';
+			return;
+		}
+
+		if (companionMode) {
+			const vw = window.innerWidth;
+			const vh = window.innerHeight;
+			const gap = 12;
+			const maxPairWidth = Math.min(1340, vw - 32);
+			const leftW = Math.floor((maxPairWidth - gap) * 0.52);
+			const rightW = Math.floor((maxPairWidth - gap) * 0.48);
+			const startX = Math.max(12, Math.floor((vw - (leftW + gap + rightW)) / 2));
+			const targetH = Math.min(800, Math.floor(vh * 0.88));
+			const topY = Math.floor((vh - targetH) / 2);
+
+			this.element.style.width = `${rightW}px`;
+			this.element.style.height = `${targetH}px`;
+			this.element.style.top = `${topY}px`;
+			this.element.style.left = `${startX + leftW + gap}px`;
+			this.element.style.transform = 'none';
+			return;
+		}
+
+		if (CenteredChatWidget.lastSize) {
+			const w = Math.max(CenteredChatWidget.lastSize.width, 680);
+			const h = Math.max(CenteredChatWidget.lastSize.height, 540);
+			this.element.style.width = `${w}px`;
+			this.element.style.height = `${h}px`;
+		} else {
+			this.element.style.width = '700px';
+			this.element.style.height = '580px';
+		}
+
+		if (CenteredChatWidget.lastPosition) {
+			this.element.style.top = `${CenteredChatWidget.lastPosition.top}px`;
+			this.element.style.left = `${CenteredChatWidget.lastPosition.left}px`;
+			this.element.style.transform = 'none';
+		} else {
+			this.element.style.top = '50%';
+			this.element.style.left = '50%';
+			this.element.style.transform = 'translate(-50%, -50%)';
 		}
 	}
 
@@ -1767,30 +2171,6 @@ export class CenteredChatWidget extends Disposable {
 		}));
 	}
 
-	private restorePosition(): void {
-		if (!this.element) { return; }
-
-		if (CenteredChatWidget.lastSize) {
-			const w = Math.max(CenteredChatWidget.lastSize.width, 680);
-			const h = Math.max(CenteredChatWidget.lastSize.height, 540);
-			this.element.style.width = `${w}px`;
-			this.element.style.height = `${h}px`;
-		} else {
-			this.element.style.width = '700px';
-			this.element.style.height = '580px';
-		}
-
-		if (CenteredChatWidget.lastPosition) {
-			this.element.style.top = `${CenteredChatWidget.lastPosition.top}px`;
-			this.element.style.left = `${CenteredChatWidget.lastPosition.left}px`;
-			this.element.style.transform = 'none';
-		} else {
-			this.element.style.top = '50%';
-			this.element.style.left = '50%';
-			this.element.style.transform = 'translate(-50%, -50%)';
-		}
-	}
-
 	private handleFileSelection(e: Event): void {
 		const target = e.target as HTMLInputElement;
 		if (!target.files || target.files.length === 0) { return; }
@@ -1844,7 +2224,7 @@ You have direct access to tool capabilities that manage the AnyAgent Workspace &
 When the user gives you a request or when structured context is provided (such as "[Workspace: ... | Ticket: ... | Target: ...]"), you MUST call the appropriate tool(s) to fulfill the operation.
 
 AVAILABLE ANYAGENT TOOLS:
-- anyagent_get_ticket_data: Query current ticket values, metadata, field types, and allowed workspace statuses.
+- anyagent_get_ticket_data: Query current ticket values, metadata, field types, allowed workspace statuses, and dynamic list of direct children sub-tickets under it.
 - anyagent_create_ticket: Create a new sub-entity (job, task, note, resume, workflow, custom types).
 - anyagent_delete_ticket: Mark a ticket and its sub-tickets as Removed and clean up references.
 - anyagent_update_ticket: Update standard attributes (/Title, /Status, /Description, /Custom/...), or custom card items.
@@ -1858,6 +2238,12 @@ Whenever performing any mutating tool call (create, update, delete, manage_links
   "update_details": ["<detailed bullet 1>", "<detailed bullet 2>"],
   "update_conclusion": "<short final verdict e.g. Successfully updated link to FNDJ1-0004>"
 }
+
+SUB-TICKET PATH DISAMBIGUATION:
+When operating on a sub-ticket (e.g. deleting or updating a child returned in a parent's 'children' list), you MUST pass either:
+- The sub-ticket's full path as 'ticket_id' (e.g. ticket_id: "/FNDJ1-0006/FNDJ1-0001"), or
+- The 'parent_path' parameter (e.g. parent_path: "/FNDJ1-0006", ticket_id: "FNDJ1-0001").
+This guarantees that you operate on the intended child ticket without accidentally targeting top-level tickets.
 
 When user input looks like:
 [Workspace: WSP | Ticket: TICKET_ID | Target: /Attributes/Link To | Proposed Value: TARGET_ID]
@@ -1888,18 +2274,22 @@ Always explain the result clearly to the user once tool execution completes.`;
 			this.notificationService.warn('Please select a valid AI Provider & Model in Agent Central first.');
 			return;
 		}
+
 		const apiKey = await this.agentCredentialService.getApiKey(cred.id);
-		if (!apiKey) {
-			this.notificationService.warn(`No API Key found for ${cred.name}. Please configure it in Settings.`);
-			this.openAccountSettings('Models');
+		if (!apiKey && cred.providerId !== 'ollama' && cred.providerId !== 'custom') {
+			this.notificationService.error(`No API Key configured for ${cred.providerId}. Please open Settings (⚙️) to set API key.`);
 			return;
 		}
 
-		// 1. Render User Message
+		// 1. Render User Message Bubble
 		const userMsg = append(this.messagesContainer, $('.centered-chat-msg.centered-chat-msg-user'));
+		const userHeader = append(userMsg, $('.centered-chat-msg-user-header'));
+		const userBadge = append(userHeader, $('.centered-chat-msg-user-badge'));
+		userBadge.textContent = 'You';
 
 		let fullPrompt = text;
 		let displayText = text;
+		let locatorSummary = '';
 		if (this.activeContextLocator && (this.activeContextLocator.workspaceId || this.activeContextLocator.ticketId || this.activeContextLocator.field)) {
 			const loc = this.activeContextLocator;
 			const locators: string[] = [];
@@ -1936,30 +2326,12 @@ Always explain the result clearly to the user once tool execution completes.`;
 			if (loc.interactiveModifiedValue && loc.interactiveModifiedValue !== loc.currentValue) {
 				parts.push(`-> ${loc.interactiveModifiedValue}`);
 			}
-			ctxTag.textContent = parts.join(' › ');
+			locatorSummary = parts.join(' › ');
+			ctxTag.textContent = locatorSummary;
 
 			// Clear locator for subsequent messages
 			this.setContextLocator(null);
 		}
-
-		// User Message Header with Actions (Copy & Prompt Inspector toggle)
-		const userHeader = append(userMsg, $('.centered-chat-msg-user-header'));
-		
-		const userHeaderLeft = append(userHeader, $('.centered-chat-msg-user-header-left'));
-		userHeaderLeft.textContent = 'You';
-
-		const userCopyBtn = append(userHeader, $('button.centered-chat-bubble-copy-btn'));
-		userCopyBtn.title = 'Copy user prompt';
-		append(userCopyBtn, $('span.codicon.codicon-copy'));
-		const userCopyLabel = append(userCopyBtn, $('span'));
-		userCopyLabel.textContent = 'Copy';
-		userCopyBtn.onclick = (e) => {
-			e.stopPropagation();
-			navigator.clipboard.writeText(fullPrompt).then(() => {
-				userCopyLabel.textContent = 'Copied!';
-				setTimeout(() => { userCopyLabel.textContent = 'Copy'; }, 2000);
-			});
-		};
 
 		if (this.activeAttachments.length > 0) {
 			this.activeAttachments.forEach(att => {
@@ -2002,14 +2374,38 @@ Always explain the result clearly to the user once tool execution completes.`;
 		copyFullPromptBtn.onclick = (e) => {
 			e.stopPropagation();
 			const fullTraceText = `=== SYSTEM PROMPT ===\n${CenteredChatWidget.ANYAGENT_SYSTEM_PROMPT}\n\n=== USER PAYLOAD ===\n${fullPrompt}`;
-			navigator.clipboard.writeText(fullTraceText).then(() => {
-				copyFullPromptBtn.textContent = '✓ Copied Full Context!';
-				setTimeout(() => { copyFullPromptBtn.textContent = '📋 Copy Complete Prompt & System Context'; }, 2000);
-			});
+			this.copyToClipboard(fullTraceText);
 		};
 
-		const userTime = append(userMsg, $('.centered-chat-msg-time'));
-		userTime.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+		// User Message Footer with Time and Bottom Copy Button
+		const userFooter = append(userMsg, $('.centered-chat-msg-footer'));
+		userFooter.style.display = 'flex';
+		userFooter.style.alignItems = 'center';
+		userFooter.style.justifyContent = 'space-between';
+		userFooter.style.marginTop = '6px';
+		userFooter.style.gap = '8px';
+
+		const userTime = append(userFooter, $('.centered-chat-msg-time'));
+		const userTimeFormatted = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+		userTime.textContent = userTimeFormatted;
+
+		const userCopyBtn = append(userFooter, $('button.centered-chat-bubble-copy-btn'));
+		userCopyBtn.title = 'Copy user prompt';
+		append(userCopyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+		const userCopyLabel = append(userCopyBtn, $('span'));
+		userCopyLabel.textContent = 'Copy';
+		userCopyBtn.onclick = (e) => {
+			e.stopPropagation();
+			this.copyToClipboard(fullPrompt, userCopyLabel);
+		};
+
+		// Append user message to active session
+		this.appendMessageToCurrentSession({
+			role: 'user',
+			content: fullPrompt,
+			timestamp: userTimeFormatted,
+			locatorTag: locatorSummary || undefined
+		});
 
 		// Clear inputs
 		if (this.inputField) {
@@ -2025,7 +2421,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 		await this.startStreamingResponse(fullPrompt, cred, apiKey);
 	}
 
-	private async startStreamingResponse(prompt: string, cred: IAgentCredential, apiKey: string): Promise<void> {
+	private async startStreamingResponse(prompt: string, cred: IAgentCredential, apiKey: string | undefined): Promise<void> {
 		if (!this.messagesContainer) { return; }
 
 		this.isStreaming = true;
@@ -2041,19 +2437,6 @@ Always explain the result clearly to the user once tool execution completes.`;
 		const modelBadge = append(aiHeader, $('.centered-chat-msg-model-badge'));
 		modelBadge.textContent = `${this.activeModelId} (${cred.providerId.toUpperCase()})`;
 
-		const aiCopyBtn = append(aiHeader, $('button.centered-chat-bubble-copy-btn'));
-		aiCopyBtn.title = 'Copy entire AI response';
-		append(aiCopyBtn, $('span.codicon.codicon-copy'));
-		const aiCopyLabel = append(aiCopyBtn, $('span'));
-		aiCopyLabel.textContent = 'Copy';
-		aiCopyBtn.onclick = (e) => {
-			e.stopPropagation();
-			navigator.clipboard.writeText(fullResponseText).then(() => {
-				aiCopyLabel.textContent = 'Copied!';
-				setTimeout(() => { aiCopyLabel.textContent = 'Copy'; }, 2000);
-			});
-		};
-
 		const aiContent = append(aiMsg, $('.centered-chat-ai-markdown-content'));
 		const typingCursor = append(aiContent, $('span.centered-chat-typing-cursor'));
 		typingCursor.textContent = '▊';
@@ -2065,8 +2448,8 @@ Always explain the result clearly to the user once tool execution completes.`;
 
 		const scrollHandler = () => {
 			if (!this.messagesContainer) { return; }
-			const atBottom = this.messagesContainer.scrollHeight - this.messagesContainer.scrollTop - this.messagesContainer.clientHeight < 40;
-			isUserScrolledUp = !atBottom;
+			const isAtBottom = this.messagesContainer.scrollHeight - this.messagesContainer.scrollTop - this.messagesContainer.clientHeight < 30;
+			isUserScrolledUp = !isAtBottom;
 		};
 		streamSessionDisposables.add(addDisposableListener(this.messagesContainer, 'scroll', scrollHandler));
 
@@ -2111,7 +2494,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 				providerId: cred.providerId,
 				modelId: this.activeModelId,
 				prompt,
-				apiKey,
+				apiKey: apiKey || '',
 				customUrl: cred.customUrl,
 				cancellationTokenSource: this.activeCts,
 				onToken
@@ -2124,6 +2507,14 @@ Always explain the result clearly to the user once tool execution completes.`;
 				fullResponseText += `\n\n**Error:** ${err.message || err}`;
 			}
 		} finally {
+			if (animationFrameId) {
+				cancelAnimationFrame(animationFrameId);
+				animationFrameId = null;
+			}
+			if (streamRenderDisposable) {
+				(streamRenderDisposable as any).dispose();
+				streamRenderDisposable = null;
+			}
 			streamSessionDisposables.dispose();
 			this.isStreaming = false;
 			this.activeCts.dispose();
@@ -2132,11 +2523,40 @@ Always explain the result clearly to the user once tool execution completes.`;
 
 			// Final flush and register in message store
 			flushRender(true);
-			typingCursor.remove();
+			try {
+				typingCursor.remove();
+			} catch {}
 			this.injectCopyButtons(aiContent);
 
-			const aiTime = append(aiMsg, $('.centered-chat-msg-time'));
-			aiTime.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+			// AI Message Footer with Time and Bottom Copy Button
+			const aiFooter = append(aiMsg, $('.centered-chat-msg-footer'));
+			aiFooter.style.display = 'flex';
+			aiFooter.style.alignItems = 'center';
+			aiFooter.style.justifyContent = 'space-between';
+			aiFooter.style.marginTop = '8px';
+			aiFooter.style.gap = '8px';
+
+			const aiTime = append(aiFooter, $('.centered-chat-msg-time'));
+			const aiTimeFormatted = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+			aiTime.textContent = aiTimeFormatted;
+
+			const aiCopyBtn = append(aiFooter, $('button.centered-chat-bubble-copy-btn'));
+			aiCopyBtn.title = 'Copy entire AI response';
+			append(aiCopyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+			const aiCopyLabel = append(aiCopyBtn, $('span'));
+			aiCopyLabel.textContent = 'Copy';
+			aiCopyBtn.onclick = (e) => {
+				e.stopPropagation();
+				this.copyToClipboard(fullResponseText, aiCopyLabel);
+			};
+
+			// Append AI message to active session
+			this.appendMessageToCurrentSession({
+				role: 'assistant',
+				content: fullResponseText,
+				timestamp: aiTimeFormatted,
+				modelBadge: `${this.activeModelId} (${cred.providerId.toUpperCase()})`
+			});
 
 			if (this.messagesContainer) {
 				this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;

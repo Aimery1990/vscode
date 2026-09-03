@@ -444,6 +444,7 @@ class BaseMenuActionViewItem extends BaseActionViewItem {
 	protected item: HTMLElement | undefined;
 
 	private runOnceToEnableMouseUp: RunOnceScheduler;
+	private iconSpan: HTMLElement | undefined;
 	private label: HTMLElement | undefined;
 	private check: HTMLElement | undefined;
 	private mnemonic: string | undefined;
@@ -545,6 +546,12 @@ class BaseMenuActionViewItem extends BaseActionViewItem {
 		this.check = append(this.item, $('span.menu-item-check' + ThemeIcon.asCSSSelector(Codicon.menuSelection)));
 		this.check.setAttribute('role', 'none');
 
+		if (this.action.class) {
+			this.iconSpan = append(this.item, $('span.menu-item-icon'));
+			this.iconSpan.className = 'menu-item-icon ' + this.action.class;
+			this.iconSpan.setAttribute('role', 'none');
+		}
+
 		this.label = append(this.item, $('span.action-label'));
 
 		if (this.options.label && this.options.keybinding) {
@@ -639,6 +646,9 @@ class BaseMenuActionViewItem extends BaseActionViewItem {
 	}
 
 	protected override updateClass(): void {
+		if (this.iconSpan) {
+			this.iconSpan.className = 'menu-item-icon ' + (this.action.class || '');
+		}
 		if (this.cssClass && this.item) {
 			this.item.classList.remove(...this.cssClass.split(' '));
 		}
@@ -1015,6 +1025,18 @@ export function formatRule(c: ThemeIcon) {
 	return `.codicon-${c.id}:before { content: '\\${fontCharacter.toString(16)}'; }`;
 }
 
+export function getAllCodiconRules(): string {
+	const chars = getCodiconFontCharacters();
+	const rules: string[] = [];
+	for (const id in chars) {
+		const code = chars[id];
+		if (code !== undefined) {
+			rules.push(`.codicon-${id}:before { content: '\\${code.toString(16)}'; }`);
+		}
+	}
+	return rules.join('\n');
+}
+
 export function getMenuWidgetCSS(style: IMenuStyles, isForShadowDom: boolean): string {
 	const borderColor = style.borderColor ?? 'var(--vscode-menu-border)';
 	const menuShadow = `var(--vscode-shadow-lg${style.shadowColor ? `, 0 0 12px ${style.shadowColor}` : ''})`;
@@ -1026,8 +1048,17 @@ export function getMenuWidgetCSS(style: IMenuStyles, isForShadowDom: boolean): s
 	min-width: 160px;
 }
 
-${formatRule(Codicon.menuSelection)}
-${formatRule(Codicon.menuSubmenu)}
+${getAllCodiconRules()}
+
+.monaco-menu .monaco-action-bar.vertical .menu-item-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 13px;
+	margin-left: 6px;
+	margin-right: -4px;
+	opacity: 0.9;
+}
 
 .monaco-menu .monaco-action-bar {
 	text-align: right;

@@ -372,6 +372,12 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		mainMdContent += `- **Link To**: ${linkToStr}\n`;
 		mainMdContent += `- **Linked By**: ${linkedByStr}\n\n`;
 
+		if (snapshot.git && (snapshot.git.remoteUrl || snapshot.git.branch)) {
+			mainMdContent += `### Git Configuration\n`;
+			mainMdContent += `- **Git Remote URL**: ${snapshot.git.remoteUrl || 'Inherited'}\n`;
+			mainMdContent += `- **Git Branch**: ${snapshot.git.branch || 'main'}\n\n`;
+		}
+
 		mainMdContent += `### Attachments Links\n`;
 		if (snapshot.attachments && snapshot.attachments.length > 0) {
 			for (const att of snapshot.attachments) {
@@ -440,6 +446,10 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		instructionContent += `- **Ticket Type Prompt**: ${typePromptStr}\n`;
 		instructionContent += `- **Ticket Prompt**: ${ticketPromptStr}\n`;
 		instructionContent += `- **Parent Path**: ${parentRelPath}\n`;
+		if (snapshot.git && (snapshot.git.remoteUrl || snapshot.git.branch)) {
+			instructionContent += `- **Git Remote URL**: ${snapshot.git.remoteUrl || 'Inherited'}\n`;
+			instructionContent += `- **Git Branch**: ${snapshot.git.branch || 'main'}\n`;
+		}
 		instructionContent += `- **Ego MDs Paths**:\n`;
 		instructionContent += `  - [instruction.md](${instructionRel})\n`;
 		instructionContent += `  - [README.md](${readmeRel})\n`;

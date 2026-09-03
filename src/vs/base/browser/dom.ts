@@ -216,8 +216,24 @@ export function hasAppFocus(): boolean {
 //#endregion
 
 export function clearNode(node: HTMLElement): void {
+	if (node.replaceChildren) {
+		try {
+			node.replaceChildren();
+			return;
+		} catch {
+			// Fallback if replaceChildren throws or is unavailable
+		}
+	}
 	while (node.firstChild) {
-		node.firstChild.remove();
+		try {
+			node.firstChild.remove();
+		} catch {
+			try {
+				node.removeChild(node.firstChild);
+			} catch {
+				break;
+			}
+		}
 	}
 }
 

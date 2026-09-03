@@ -73,6 +73,8 @@ export interface ICreateResourceOptions {
 	customStatuses?: string[];
 	statusMapping?: { [statusName: string]: CanonicalStatusCategory };
 	removedStatus?: string;
+	gitRepoUrl?: string;
+	gitBranch?: string;
 }
 
 export type CanonicalStatusCategory = 'Todo' | 'In Progress' | 'Done' | 'Blocked' | 'Removed';

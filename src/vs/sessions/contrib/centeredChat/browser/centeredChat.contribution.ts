@@ -21,7 +21,7 @@ import { $, append } from '../../../../base/browser/dom.js';
 import { IActionViewItemService } from '../../../../platform/actions/browser/actionViewItemService.js';
 import { Emitter } from '../../../../base/common/event.js';
 
-const chatIcon = registerIcon('centered-chat-icon', Codicon.sparkle, localize('chatIcon', 'Icon for centered AI chat central.'));
+const chatIcon = registerIcon('centered-chat-icon', Codicon.sparkleFilled, localize('chatIcon', 'Icon for centered AI chat central.'));
 const TOGGLE_CENTERED_CHAT_COMMAND_ID = 'workbench.action.chat.toggleCenteredChatPopup';
 
 // Decoupled communication event for title bar click triggers
@@ -70,7 +70,7 @@ class CenteredChatTitleBarWidget extends BaseActionViewItem {
 		container.setAttribute('aria-label', hoverText);
 		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('element'), container, hoverText));
 
-		const icon = append(container, $('span.centered-chat-titlebar-widget-icon.codicon.codicon-sparkle'));
+		const icon = append(container, $('span.centered-chat-titlebar-widget-icon.codicon.codicon-sparkle-filled'));
 		icon.setAttribute('aria-hidden', 'true');
 
 		const labelEl = append(container, $('span.centered-chat-titlebar-widget-label'));

@@ -42,12 +42,14 @@ export interface ICreateTicketToolOptions {
 export interface IDeleteTicketToolOptions {
 	workspace_id: string;
 	ticket_id: string;
+	parent_path?: string;
 	worklog_record: IWorklogRecord;
 }
 
 export interface IUpdateTicketToolOptions {
 	workspace_id: string;
 	ticket_id: string;
+	parent_path?: string;
 	updates: Record<string, any>;
 	worklog_record: IWorklogRecord;
 }
@@ -103,30 +105,103 @@ export class TicketDataEngine {
 	}
 
 	/**
-	 * Find ticket folder by ticket_id under workspace
+	 * Find ticket folder by ticket_id or path under workspace
 	 */
-	public async resolveTicketPaths(workspaceUri: URI, ticketId: string): Promise<ITicketResolvedPaths | undefined> {
-		// 1. Check if target is workspace root itself
+	public async resolveTicketPaths(workspaceUri: URI, ticketIdOrPath: string, parentPath?: string): Promise<ITicketResolvedPaths | undefined> {
+		if (!ticketIdOrPath) {
+			return undefined;
+		}
+
+		// 1. If explicit parent_path is provided, resolve directly under that parent
+		if (parentPath && parentPath !== '/' && parentPath !== 'root') {
+			const parentRel = parentPath.startsWith('/') ? parentPath.slice(1) : parentPath;
+			const cleanTicketId = ticketIdOrPath.startsWith('/') ? ticketIdOrPath.slice(1) : ticketIdOrPath;
+			const targetUnderParentUri = URI.joinPath(workspaceUri, parentRel, cleanTicketId);
+			if (await this.fileService.exists(targetUnderParentUri)) {
+				const paths = await this._checkFolderForTicketPaths(targetUnderParentUri);
+				if (paths) return paths;
+			}
+		}
+
+		// 2. If ticketIdOrPath contains slashes (e.g. '/FNDJ1-0006/FNDJ1-0001' or 'FNDJ1-0006/FNDJ1-0001')
+		if (ticketIdOrPath.includes('/')) {
+			const cleanPath = ticketIdOrPath.startsWith('/') ? ticketIdOrPath.slice(1) : ticketIdOrPath;
+			const directPathUri = URI.joinPath(workspaceUri, cleanPath);
+			if (await this.fileService.exists(directPathUri)) {
+				const paths = await this._checkFolderForTicketPaths(directPathUri);
+				if (paths) return paths;
+			}
+		}
+
+		// 3. Check if target is workspace root itself
 		const wsTicketPaths = await this._checkFolderForTicketPaths(workspaceUri);
-		if (wsTicketPaths && (wsTicketPaths.ticketId === ticketId || ticketId === 'root' || ticketId === '/' || wsTicketPaths.workspaceId === ticketId)) {
+		if (wsTicketPaths && (wsTicketPaths.ticketId === ticketIdOrPath || ticketIdOrPath === 'root' || ticketIdOrPath === '/' || wsTicketPaths.workspaceId === ticketIdOrPath)) {
 			return wsTicketPaths;
 		}
 
-		// 2. Scan children recursively
-		const children = await this.workspacesExplorerService.scanWorkspaceChildren(workspaceUri, true);
-		const found = this._findChildRecursively(children, ticketId);
-		if (found) {
-			const paths = await this._checkFolderForTicketPaths(found.uri);
-			if (paths) return paths;
+		// 4. If parent_path is explicitly '/' or root, check direct folder at workspace root
+		if (parentPath === '/' || parentPath === 'root') {
+			const directUri = URI.joinPath(workspaceUri, ticketIdOrPath);
+			if (await this.fileService.exists(directUri)) {
+				const paths = await this._checkFolderForTicketPaths(directUri);
+				if (paths) return paths;
+			}
 		}
 
-		// 3. Fallback direct folder check
-		const directUri = URI.joinPath(workspaceUri, ticketId);
+		// 5. Direct folder check at root
+		const directUri = URI.joinPath(workspaceUri, ticketIdOrPath);
 		if (await this.fileService.exists(directUri)) {
 			const paths = await this._checkFolderForTicketPaths(directUri);
 			if (paths) return paths;
 		}
 
+		// 6. Recursive deep search across nested folders
+		const deepUri = await this._findTicketFolderDeep(workspaceUri, ticketIdOrPath);
+		if (deepUri) {
+			const paths = await this._checkFolderForTicketPaths(deepUri);
+			if (paths) return paths;
+		}
+
+		// 7. Fallback to explorer children scan
+		const children = await this.workspacesExplorerService.scanWorkspaceChildren(workspaceUri, true);
+		const found = this._findChildRecursively(children, ticketIdOrPath);
+		if (found) {
+			const paths = await this._checkFolderForTicketPaths(found.uri);
+			if (paths) return paths;
+		}
+
+		return undefined;
+	}
+
+	private async _findTicketFolderDeep(baseUri: URI, ticketId: string, currentDepth: number = 0, maxDepth: number = 6): Promise<URI | undefined> {
+		if (currentDepth >= maxDepth) return undefined;
+		try {
+			const stat = await this.fileService.resolve(baseUri);
+			if (!stat.children) return undefined;
+
+			// Check direct subdirectories at this level first
+			for (const child of stat.children) {
+				if (!child.isDirectory || child.name.startsWith('.') || child.name.startsWith('~') || child.name === 'node_modules') {
+					continue;
+				}
+				if (child.name === ticketId) {
+					return child.resource;
+				}
+				const paths = await this._checkFolderForTicketPaths(child.resource);
+				if (paths && paths.ticketId === ticketId) {
+					return child.resource;
+				}
+			}
+
+			// Then recursively check deeper
+			for (const child of stat.children) {
+				if (!child.isDirectory || child.name.startsWith('.') || child.name.startsWith('~') || child.name === 'node_modules') {
+					continue;
+				}
+				const found = await this._findTicketFolderDeep(child.resource, ticketId, currentDepth + 1, maxDepth);
+				if (found) return found;
+			}
+		} catch {}
 		return undefined;
 	}
 
@@ -141,6 +216,71 @@ export class TicketDataEngine {
 			}
 		}
 		return undefined;
+	}
+
+	private async _discoverChildren(folderUri: URI, workspaceUri: URI): Promise<Array<{
+		ticket_id: string;
+		title: string;
+		ticket_type: string;
+		status: string;
+		priority: string;
+		created_at?: string;
+		parent_path: string;
+		relative_path: string;
+		full_path: string;
+	}>> {
+		const results: Array<{
+			ticket_id: string;
+			title: string;
+			ticket_type: string;
+			status: string;
+			priority: string;
+			created_at?: string;
+			parent_path: string;
+			relative_path: string;
+			full_path: string;
+		}> = [];
+
+		try {
+			const stat = await this.fileService.resolve(folderUri);
+			if (!stat.children) return results;
+
+			const wsFsPath = workspaceUri.fsPath;
+			const folderFsPath = folderUri.fsPath;
+			const parentRelPath = folderFsPath.startsWith(wsFsPath)
+				? folderFsPath.slice(wsFsPath.length).replace(/^[/\\]+/, '')
+				: '';
+			const parentPathStr = parentRelPath ? `/${parentRelPath}` : '/';
+
+			for (const child of stat.children) {
+				if (!child.isDirectory || child.name.startsWith('.') || child.name.startsWith('~') || child.name === 'node_modules') {
+					continue;
+				}
+				const childPaths = await this._checkFolderForTicketPaths(child.resource);
+				if (childPaths) {
+					const childTicketContent = await this._safeRead(childPaths.ticketMdUri);
+					const childReadmeContent = await this._safeRead(childPaths.readmeMdUri);
+					const childParsedTicket = this._parseTicketMd(childTicketContent);
+					const childParsedReadme = this._parseReadmeMd(childReadmeContent);
+
+					const fullPath = parentRelPath ? `/${parentRelPath}/${child.name}` : `/${child.name}`;
+
+					results.push({
+						ticket_id: childPaths.ticketId,
+						title: childParsedReadme.title || childPaths.ticketId,
+						ticket_type: childPaths.ticketType,
+						status: childParsedTicket.status || 'Todo',
+						priority: childParsedTicket.priority || 'Medium',
+						created_at: childParsedTicket.profileData?.['Created At'] || '',
+						parent_path: parentPathStr,
+						relative_path: child.name,
+						full_path: fullPath
+					});
+				}
+			}
+		} catch {}
+
+		return results;
 	}
 
 	private async _checkFolderForTicketPaths(folderUri: URI): Promise<ITicketResolvedPaths | undefined> {
@@ -189,11 +329,11 @@ export class TicketDataEngine {
 	/**
 	 * 1. anyagent_get_ticket_data
 	 */
-	public async getTicketData(workspaceId: string, ticketId: string, fieldPath?: string): Promise<any> {
+	public async getTicketData(workspaceId: string, ticketId: string, fieldPath?: string, parentPath?: string): Promise<any> {
 		const wsUri = await this.findWorkspaceUri(workspaceId);
 		if (!wsUri) throw new Error(`Workspace '${workspaceId}' not found.`);
 
-		const paths = await this.resolveTicketPaths(wsUri, ticketId);
+		const paths = await this.resolveTicketPaths(wsUri, ticketId, parentPath);
 		if (!paths) throw new Error(`Ticket '${ticketId}' not found in workspace '${workspaceId}'.`);
 
 		// Read files
@@ -203,6 +343,9 @@ export class TicketDataEngine {
 
 		// Get workspace statuses & mapping
 		const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(paths.folderUri);
+
+		// Dynamically discover children under this ticket's directory (no static file modification)
+		const discoveredChildren = await this._discoverChildren(paths.folderUri, wsUri);
 
 		// Parse metadata
 		const parsedTicket = this._parseTicketMd(ticketContent);
@@ -229,6 +372,7 @@ export class TicketDataEngine {
 			priority: parsedTicket.priority || 'Medium',
 			current_ai_agent: parsedTicket.currentAiAgent || 'None',
 			parent_path: parsedTicket.parentPath || '/',
+			children: discoveredChildren,
 			profile_data: parsedTicket.profileData,
 			self_defined_data: parsedTicket.selfDefinedData,
 			links: {
@@ -267,8 +411,13 @@ export class TicketDataEngine {
 		// 1. Determine parent folder URI
 		let parentFolderUri = wsUri;
 		if (options.parent_path && options.parent_path !== '/' && options.parent_path !== 'root') {
-			const rel = options.parent_path.startsWith('/') ? options.parent_path.slice(1) : options.parent_path;
-			parentFolderUri = URI.joinPath(wsUri, rel);
+			const resolvedParent = await this.resolveTicketPaths(wsUri, options.parent_path);
+			if (resolvedParent) {
+				parentFolderUri = resolvedParent.folderUri;
+			} else {
+				const rel = options.parent_path.startsWith('/') ? options.parent_path.slice(1) : options.parent_path;
+				parentFolderUri = URI.joinPath(wsUri, rel);
+			}
 		}
 
 		// 2. Generate sequential name & code
@@ -325,7 +474,7 @@ export class TicketDataEngine {
 		const wsUri = await this.findWorkspaceUri(options.workspace_id);
 		if (!wsUri) throw new Error(`Workspace '${options.workspace_id}' not found.`);
 
-		const paths = await this.resolveTicketPaths(wsUri, options.ticket_id);
+		const paths = await this.resolveTicketPaths(wsUri, options.ticket_id, options.parent_path);
 		if (!paths) throw new Error(`Ticket '${options.ticket_id}' not found.`);
 
 		const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(paths.folderUri);
@@ -341,7 +490,7 @@ export class TicketDataEngine {
 		await this._cascadeMarkRemoved(children, removedStatusName, cascadedIds);
 
 		// 3. Clean up bidirectional links in external tickets
-		const ticketData = await this.getTicketData(options.workspace_id, options.ticket_id);
+		const ticketData = await this.getTicketData(options.workspace_id, options.ticket_id, undefined, options.parent_path);
 		const linkToList = this._splitList(ticketData.links?.link_to);
 		const linkedByList = this._splitList(ticketData.links?.linked_by);
 
@@ -377,7 +526,7 @@ export class TicketDataEngine {
 				try {
 					await this.workspacesExplorerService.setEntityStatus(child.uri, removedStatus);
 					await this.workspacesExplorerService.removeSnapshot(child.uri);
-					collectedIds.push(child.name || child.id);
+					if (child.name) collectedIds.push(child.name);
 				} catch {}
 			}
 			if (child.children && child.children.length > 0) {
@@ -393,7 +542,7 @@ export class TicketDataEngine {
 		const wsUri = await this.findWorkspaceUri(options.workspace_id);
 		if (!wsUri) throw new Error(`Workspace '${options.workspace_id}' not found.`);
 
-		const paths = await this.resolveTicketPaths(wsUri, options.ticket_id);
+		const paths = await this.resolveTicketPaths(wsUri, options.ticket_id, options.parent_path);
 		if (!paths) throw new Error(`Ticket '${options.ticket_id}' not found.`);
 
 		let ticketContent = (await this.fileService.readFile(paths.ticketMdUri)).value.toString();

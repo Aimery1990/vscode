@@ -39,6 +39,7 @@ import { IWorkspaceEditingService } from '../../../services/workspaces/common/wo
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { VIEW_ID } from '../../files/common/files.js';
+import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { ICustomField, ICustomModule, ICompositeComponent } from '../../entityPersistence/common/entityPersistence.js';
 
 function stringifyYaml(obj: any, indent = 0): string {
@@ -316,7 +317,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		@IHoverService hoverService: IHoverService,
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@IFileDialogService private readonly fileDialogService: IFileDialogService,
-		@IDialogService private readonly dialogService: IDialogService,
+		@IDialogService _dialogService: IDialogService,
 		@ICommandService private readonly commandService: ICommandService,
 		@IWorkspacesService private readonly workspacesService: IWorkspacesService,
 		@INotificationService private readonly notificationService: INotificationService,
@@ -328,7 +329,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 		@INativeEnvironmentService private readonly environmentService: INativeEnvironmentService,
 		@IWorkspaceEditingService private readonly workspaceEditingService: IWorkspaceEditingService,
 		@IViewsService private readonly viewsService: IViewsService,
-		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService
+		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
+		@IClipboardService private readonly clipboardService: IClipboardService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 		this._storageService = storageService;
@@ -580,16 +582,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 					e.stopPropagation();
 
 					const actions = [
-						new Action('edit_workspace', 'Edit Workspace...', ThemeIcon.asClassName(Codicon.edit), true, async () => {
-							try {
-								if (ws.detectedType === 'workflow') {
-									await this.editorService.openEditor(new WorkflowEditorInput(ws.uri, ws.name), { pinned: true });
-								} else {
-									await this.editorService.openEditor(new EntityDetailEditorInput(ws.uri, ws.name, true), { pinned: true });
-								}
-							} catch (err) {
-								console.error('Failed to open Workspace editor:', err);
+						new Action('refresh_workspace', 'Refresh', ThemeIcon.asClassName(Codicon.refresh), true, async () => {
+							this.renderContent();
+							const activeEditor = this.editorService.activeEditorPane;
+							if (activeEditor && typeof (activeEditor as any).refresh === 'function') {
+								await (activeEditor as any).refresh();
 							}
+							this.notificationService.info(`Refreshed workspace '${ws.name}'.`);
 						}),
 						new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {
 							await this.showInExplorer(ws.uri);
@@ -601,7 +600,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 								this.notificationService.warn(`Path does not exist: ${ws.uri.fsPath}`);
 							}
 						}),
-						new Action('create_entity', 'Create New Entity Folder...', ThemeIcon.asClassName(Codicon.add), true, () => {
+						new Action('create_entity', 'Create Entity...', ThemeIcon.asClassName(Codicon.sparkleFilled), true, () => {
 							this.showCreateResourceModal(ws);
 						}),
 						new Action('toggle_removed_items', this._showRemovedItems ? 'Hide Removed Tickets' : 'Show Removed Tickets', ThemeIcon.asClassName(this._showRemovedItems ? Codicon.eyeClosed : Codicon.eye), true, async () => {
@@ -609,34 +608,21 @@ export class MainWorkspaceViewPane extends ViewPane {
 							this._storageService.store('anyagent.workspacesExplorer.showRemovedItems', this._showRemovedItems, StorageScope.PROFILE, StorageTarget.USER);
 							this.renderContent();
 						}),
-						new Action('remove_entry', 'Remove Entry from Explorer', ThemeIcon.asClassName(Codicon.close), true, async () => {
-							await this.workspacesExplorerService.removeWorkspace(ws.uri);
-							this.notificationService.info(`Removed '${ws.name}' from explorer.`);
-							this.renderContent();
-						}),
-						new Action('move_to_trash', 'Move to Trash...', ThemeIcon.asClassName(Codicon.trash), true, async () => {
-							const confirm = await this.dialogService.confirm({
-								type: 'warning',
-								message: `Are you sure you want to move '${ws.name}' to trash?`,
-								detail: `This will move '${ws.uri.fsPath}' to OS Trash if it exists on disk.`,
-								primaryButton: 'Move to Trash'
+						new Action('remove_entry', 'Remove Entry from Explorer', ThemeIcon.asClassName(Codicon.sparkleFilled), true, async () => {
+							this.commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
+								workspaceId: ws.name,
+								field: '/RemoveWorkspace',
+								label: `Remove '${ws.name}' from Explorer`,
+								prompt: `[Workspace: "${ws.name}" | Action: "Remove Workspace Entry from Explorer" | Path: "${ws.uri.fsPath}"]\nPlease remove this workspace entry from the explorer.`
 							});
-							if (confirm.confirmed) {
-								try {
-									const exists = await this.fileService.exists(ws.uri);
-									if (exists) {
-										await this.fileService.del(ws.uri, { useTrash: true, recursive: true });
-									}
-									await this.workspacesExplorerService.removeWorkspace(ws.uri);
-									this.notificationService.info(`Removed '${ws.name}' workspace entry.`);
-									this.renderContent();
-								} catch (err) {
-									// File non-existent or inaccessible, still remove entry cleanly!
-									await this.workspacesExplorerService.removeWorkspace(ws.uri);
-									this.notificationService.info(`Removed missing workspace entry '${ws.name}'.`);
-									this.renderContent();
-								}
-							}
+						}),
+						new Action('move_to_trash', 'Move to Trash...', ThemeIcon.asClassName(Codicon.sparkleFilled), true, async () => {
+							this.commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
+								workspaceId: ws.name,
+								field: '/TrashWorkspace',
+								label: `Move '${ws.name}' to Trash`,
+								prompt: `[Workspace: "${ws.name}" | Action: "Move Workspace to OS Trash" | Path: "${ws.uri.fsPath}"]\nPlease move this workspace directory to OS Trash and clean up its references.`
+							});
 						})
 					];
 
@@ -928,10 +914,19 @@ export class MainWorkspaceViewPane extends ViewPane {
 				e.preventDefault();
 				e.stopPropagation();
 
-				const childActions: Action[] = [];
+				const childActions: Action[] = [
+					new Action('refresh_child', 'Refresh', ThemeIcon.asClassName(Codicon.refresh), true, async () => {
+						this.renderContent();
+						const activeEditor = this.editorService.activeEditorPane;
+						if (activeEditor && typeof (activeEditor as any).refresh === 'function') {
+							await (activeEditor as any).refresh();
+						}
+						this.notificationService.info(`Refreshed '${child.name}'.`);
+					})
+				];
 
 				if (isDirectory && !isRemoved) {
-					childActions.push(new Action('create_sub_entity', `Create Sub-Entity...`, ThemeIcon.asClassName(Codicon.add), true, () => {
+					childActions.push(new Action('create_sub_entity', `Create Sub-Entity...`, ThemeIcon.asClassName(Codicon.sparkleFilled), true, () => {
 						this.showCreateResourceModal(child.uri, child.name);
 					}));
 				}
@@ -939,7 +934,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				if (child.type !== 'file' && child.type !== 'folder') {
 					const formattedType = child.type.charAt(0).toUpperCase() + child.type.slice(1);
 					childActions.push(
-						new Action('edit_entity', `Edit ${formattedType} Details...`, ThemeIcon.asClassName(Codicon.edit), true, async () => {
+						new Action('edit_entity', `Edit ${formattedType} Details...`, ThemeIcon.asClassName(Codicon.sparkleFilled), true, async () => {
 							try {
 								if (child.type === 'workflow') {
 									await this.editorService.openEditor(new WorkflowEditorInput(child.uri, child.name), { pinned: true });
@@ -1004,104 +999,27 @@ export class MainWorkspaceViewPane extends ViewPane {
 					);
 				} else if (child.type !== 'file' && child.type !== 'folder') {
 					childActions.push(
-						new Action('remove_child_from_ws', 'Remove from Workspace', ThemeIcon.asClassName(Codicon.sparkle), true, async () => {
-							const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(child.uri);
-							const removedStatusName = wsStatuses.removedStatus || 'Removed';
-							const confirm = await this.dialogService.confirm({
-								type: 'warning',
-								message: `Are you sure you want to remove '${child.name}' from active workspace?`,
-								detail: `The physical folder will remain intact on disk, and its ticket status will be set to '${removedStatusName}'. You can restore it at any time.`,
-								primaryButton: 'Remove'
+						new Action('remove_child_from_ws', 'Remove from Workspace', ThemeIcon.asClassName(Codicon.sparkleFilled), true, async () => {
+							this.commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
+								workspaceId: parentWsId,
+								ticketId: child.name,
+								field: '/Status',
+								label: `Remove '${child.name}' from Workspace`,
+								prompt: `[Workspace: "${parentWsId}" | Ticket: "${child.name}" | Target: "/Status" | Action: "Remove Ticket from Active Workspace" | Path: "${child.uri.fsPath}"]\nPlease mark this ticket as Removed and clean up its references.`
 							});
-							if (confirm.confirmed) {
-								try {
-									// 1. Update status to removedStatus in ticket.md (No folder renaming!)
-									await this.workspacesExplorerService.setEntityStatus(child.uri, removedStatusName);
-									
-									// 2. Remove snapshot from global DB
-									await this.workspacesExplorerService.removeSnapshot(child.uri);
-									
-									// 3. If it is registered as an agent in agentsManagerService, update it to offline
-									if (child.type === 'agent' && this.agentsManagerService) {
-										const agentsList = await this.agentsManagerService.getAgents();
-										const matchingAgent = agentsList.find(a => a.folderPath === child.uri.fsPath);
-										if (matchingAgent) {
-											await this.agentsManagerService.updateAgent({ ...matchingAgent, status: 'offline' });
-										}
-									}
-
-									// 4. Record worklog in worklog.md
-									try {
-										const worklogNames = ['worklog.md', 'work_log.md'];
-										let worklogTargetUri: URI | undefined;
-										for (const wn of worklogNames) {
-											const p1 = URI.joinPath(child.uri, '.agents', wn);
-											if (await this.fileService.exists(p1)) { worklogTargetUri = p1; break; }
-											const p2 = URI.joinPath(child.uri, wn);
-											if (await this.fileService.exists(p2)) { worklogTargetUri = p2; break; }
-										}
-										if (worklogTargetUri) {
-											const now = new Date();
-											const pad = (n: number) => n.toString().padStart(2, '0');
-											const tzOffset = -now.getTimezoneOffset();
-											const sign = tzOffset >= 0 ? '+' : '-';
-											const tzHours = pad(Math.floor(Math.abs(tzOffset) / 60));
-											const tzMinutes = pad(Math.abs(tzOffset) % 60);
-											const fullLogDateTime = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())} ${sign}${tzHours}:${tzMinutes}`;
-											let content = (await this.fileService.readFile(worklogTargetUri)).value.toString();
-											const entry = `\n---\n\n## ${fullLogDateTime}\n\n` +
-												`- **Update Datetime**: ${fullLogDateTime}\n` +
-												`- **Update By**: AI Agent\n\n` +
-												`### User Request\nRemove ticket '${child.name}' from active workspace.\n\n` +
-												`### Update Summary\nTicket marked as '${removedStatusName}' and removed from active workspace.\n\n` +
-												`### Update Details\n- Status updated to '${removedStatusName}' in ticket.md.\n- Filtered out from active workspace tree.\n\n` +
-												`### Update Conclusion\nTicket removed successfully.\n\n` +
-												`### Commit\n- **Repo**: None\n- **Branch**: None\n- **ID**: None\n- **comment**: None\n- **committed by**: None\n`;
-											await this.fileService.writeFile(worklogTargetUri, VSBuffer.fromString(content + entry));
-										}
-									} catch {}
-									
-									this.notificationService.info(`Removed '${child.name}' from active workspace.`);
-									this.renderContent();
-								} catch (err) {
-									this.notificationService.error(`Failed to remove from workspace: ${err}`);
-								}
-							}
 						})
 					);
 				}
 
 				childActions.push(
-					new Action('trash_child', 'Move to Trash...', ThemeIcon.asClassName(Codicon.trash), true, async () => {
-						const confirm = await this.dialogService.confirm({
-							type: 'warning',
-							message: `Are you sure you want to move '${child.name}' to trash?`,
-							detail: `This will move '${child.uri.fsPath}' to OS Trash if it exists.`,
-							primaryButton: 'Move to Trash'
+					new Action('trash_child', 'Move to Trash...', ThemeIcon.asClassName(Codicon.sparkleFilled), true, async () => {
+						this.commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
+							workspaceId: parentWsId,
+							ticketId: child.name,
+							field: '/TrashTicket',
+							label: `Move '${child.name}' to OS Trash`,
+							prompt: `[Workspace: "${parentWsId}" | Ticket: "${child.name}" | Action: "Move Ticket to OS Trash" | Path: "${child.uri.fsPath}"]\nPlease move this ticket directory to OS Trash and clean up all its links and references.`
 						});
-						if (confirm.confirmed) {
-							try {
-								const exists = await this.fileService.exists(child.uri);
-								if (exists) {
-									await this.fileService.del(child.uri, { useTrash: true, recursive: true });
-								}
-								// Remove snapshot from global DB
-								await this.workspacesExplorerService.removeSnapshot(child.uri);
-
-								// If it is registered as an agent in agentsManagerService, remove it too
-								if (child.type === 'agent' && this.agentsManagerService) {
-									const agentsList = await this.agentsManagerService.getAgents();
-									const matchingAgent = agentsList.find(a => a.folderPath === child.uri.fsPath);
-									if (matchingAgent) {
-										await this.agentsManagerService.removeAgent(matchingAgent.id);
-									}
-								}
-								this.notificationService.info(`Removed '${child.name}'.`);
-								this.renderContent();
-							} catch (err) {
-								this.notificationService.error(`Failed to move to trash: ${err}`);
-							}
-						}
 					})
 				);
 
@@ -2013,6 +1931,175 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 		};
 
+		// Git Configuration Section (Collapsible, Default Collapsed)
+		const gitBox = append(modalBody, $('.form-group', { style: 'background: rgba(0,0,0,0.18); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px;' }));
+
+		const gitHeaderRow = append(gitBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none;' }));
+		const gitTitle = append(gitHeaderRow, $('div', { style: 'font-size: 11.5px; opacity: 0.9; font-weight: 600; display: flex; align-items: center; gap: 6px;' }));
+		const gitChevron = append(gitTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronRight)));
+		gitChevron.style.fontSize = '12px';
+		gitChevron.style.transition = 'transform 0.15s ease';
+		append(gitTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.sourceControl)));
+		append(gitTitle, $('span', {}, 'Git Repository & Branch Binding (Optional)'));
+
+		const gitToggleHint = append(gitHeaderRow, $('span', { style: 'font-size: 10.5px; opacity: 0.6; color: #38bdf8;' }, 'Configure Git...'));
+
+		const gitContent = append(gitBox, $('div', { style: 'display: none; flex-direction: column; gap: 10px; margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px;' }));
+
+		let isGitExpanded = false;
+		gitHeaderRow.onclick = () => {
+			isGitExpanded = !isGitExpanded;
+			gitContent.style.display = isGitExpanded ? 'flex' : 'none';
+			gitChevron.className = ThemeIcon.asClassName(isGitExpanded ? Codicon.chevronDown : Codicon.chevronRight);
+			gitToggleHint.textContent = isGitExpanded ? 'Collapse' : 'Configure Git...';
+		};
+
+		// Git Remote URL Input
+		const gitRemoteRow = append(gitContent, $('div'));
+		append(gitRemoteRow, $('label', { style: 'display: block; font-size: 10.5px; opacity: 0.7; margin-bottom: 3px;' }, 'Git Remote URL (e.g. GitHub / GitLab repository URL):'));
+		const gitRemoteInput = append(gitRemoteRow, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		gitRemoteInput.placeholder = 'e.g. git@github.com:org/repo.git or https://github.com/org/repo.git';
+
+		// Target Branch Input
+		const gitBranchRow = append(gitContent, $('div'));
+		append(gitBranchRow, $('label', { style: 'display: block; font-size: 10.5px; opacity: 0.7; margin-bottom: 3px;' }, 'Target Branch:'));
+		const gitBranchInput = append(gitBranchRow, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		gitBranchInput.placeholder = 'e.g. main, master, feature/workspace-setup (leave blank for default)';
+
+		// Test & Diagnostic Row
+		const gitActionRow = append(gitContent, $('div', { style: 'display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 2px;' }));
+		const testGitBtn = append(gitActionRow, $('button', {
+			style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.15) !important; color: #38bdf8 !important; border: 1px solid rgba(56, 189, 248, 0.35) !important; outline: none; transition: all 0.15s ease;'
+		})) as HTMLButtonElement;
+		testGitBtn.onmouseenter = () => { testGitBtn.style.background = 'rgba(56, 189, 248, 0.25) !important'; };
+		testGitBtn.onmouseleave = () => { testGitBtn.style.background = 'rgba(56, 189, 248, 0.15) !important'; };
+		append(testGitBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.plug)));
+		append(testGitBtn, $('span', {}, 'Test & Verify Git'));
+
+		const gitStatusBadge = append(gitActionRow, $('div', {
+			style: 'font-size: 11px; padding: 4px 8px; border-radius: 4px; display: none; align-items: center; gap: 6px; flex: 1; word-break: break-word;'
+		}));
+
+		const copyDiagnosticBtn = append(gitActionRow, $('button.btn-secondary', {
+			style: 'display: none; align-items: center; gap: 4px; padding: 3px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15);'
+		}));
+		append(copyDiagnosticBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+		append(copyDiagnosticBtn, $('span', {}, 'Copy Diagnostics'));
+
+		let lastGitDiagnosticText = '';
+
+		testGitBtn.onclick = async () => {
+			testGitBtn.disabled = true;
+			testGitBtn.style.opacity = '0.6';
+			gitStatusBadge.style.display = 'flex';
+			gitStatusBadge.style.backgroundColor = 'rgba(56, 189, 248, 0.12)';
+			gitStatusBadge.style.color = '#38bdf8';
+			gitStatusBadge.style.border = '1px solid rgba(56, 189, 248, 0.3)';
+			gitStatusBadge.textContent = 'Verifying Git repository & branch...';
+			copyDiagnosticBtn.style.display = 'none';
+
+			try {
+				const remoteUrl = gitRemoteInput.value.trim();
+				const targetBranch = gitBranchInput.value.trim();
+
+				let curr = selectedPathUri || (pathInput.value.trim() ? URI.file(pathInput.value.trim()) : undefined);
+				let foundGitUri: URI | undefined = undefined;
+				if (curr) {
+					while (curr.path !== '/' && curr.path !== '\\' && curr.path !== '.') {
+						const checkGit = URI.joinPath(curr, '.git');
+						if (await this.fileService.exists(checkGit)) {
+							foundGitUri = checkGit;
+							break;
+						}
+						const parent = dirname(curr);
+						if (parent.path === curr.path) break;
+						curr = parent;
+					}
+				}
+
+				let branchName = 'main';
+				let hasLocalGit = !!foundGitUri;
+				let gitConfigRemote = '';
+
+				if (foundGitUri) {
+					try {
+						const headUri = URI.joinPath(foundGitUri, 'HEAD');
+						if (await this.fileService.exists(headUri)) {
+							const headContent = (await this.fileService.readFile(headUri)).value.toString().trim();
+							if (headContent.startsWith('ref: refs/heads/')) {
+								branchName = headContent.replace('ref: refs/heads/', '').trim();
+							}
+						}
+					} catch {}
+
+					try {
+						const configUri = URI.joinPath(foundGitUri, 'config');
+						if (await this.fileService.exists(configUri)) {
+							const configContent = (await this.fileService.readFile(configUri)).value.toString();
+							const match = configContent.match(/url\s*=\s*(.+)/);
+							if (match && match[1]) {
+								gitConfigRemote = match[1].trim();
+							}
+						}
+					} catch {}
+				}
+
+				const desiredBranch = targetBranch || branchName;
+				const isBranchAligned = !targetBranch || targetBranch === branchName;
+
+				if (hasLocalGit) {
+					if (isBranchAligned) {
+						gitStatusBadge.style.backgroundColor = 'rgba(52, 211, 153, 0.15)';
+						gitStatusBadge.style.color = '#34d399';
+						gitStatusBadge.style.border = '1px solid rgba(52, 211, 153, 0.35)';
+						gitStatusBadge.textContent = `✔️ Connected: Local Git valid (Active Branch: '${branchName}'${gitConfigRemote ? ` | Remote: ${gitConfigRemote}` : ''})`;
+						lastGitDiagnosticText = `Git Verification Success:\n- Path: ${curr?.fsPath || 'Local'}\n- Active Branch: ${branchName}\n- Remote URL: ${remoteUrl || gitConfigRemote || 'None'}\n- Status: OK / Aligned`;
+					} else {
+						gitStatusBadge.style.backgroundColor = 'rgba(251, 146, 60, 0.15)';
+						gitStatusBadge.style.color = '#fb923c';
+						gitStatusBadge.style.border = '1px solid rgba(251, 146, 60, 0.35)';
+						gitStatusBadge.textContent = `⚠️ Warning: Local branch is '${branchName}', but target is '${targetBranch}'.`;
+						lastGitDiagnosticText = `Git Branch Alert:\n- Local Active Branch: ${branchName}\n- Desired Target Branch: ${targetBranch}\n- Status: Target branch differs from current active branch.`;
+						copyDiagnosticBtn.style.display = 'inline-flex';
+					}
+				} else if (remoteUrl) {
+					gitStatusBadge.style.backgroundColor = 'rgba(56, 189, 248, 0.15)';
+					gitStatusBadge.style.color = '#38bdf8';
+					gitStatusBadge.style.border = '1px solid rgba(56, 189, 248, 0.35)';
+					gitStatusBadge.textContent = `✔️ Remote Git URL specified: ${remoteUrl} (Target Branch: '${desiredBranch}')`;
+					lastGitDiagnosticText = `Remote Git Configured:\n- Remote URL: ${remoteUrl}\n- Target Branch: ${desiredBranch}\n- Status: Ready to track/clone`;
+				} else {
+					gitStatusBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
+					gitStatusBadge.style.color = 'var(--vscode-foreground)';
+					gitStatusBadge.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+					gitStatusBadge.textContent = `ℹ️ No local .git repository found at target path. Workspace will be initialized as standard directory.`;
+					lastGitDiagnosticText = `No Git Repository:\n- Path: ${curr?.fsPath || 'Not selected'}\n- Note: Leave blank if Git tracking is not required for this workspace.`;
+					copyDiagnosticBtn.style.display = 'inline-flex';
+				}
+			} catch (err: any) {
+				gitStatusBadge.style.backgroundColor = 'rgba(248, 113, 113, 0.15)';
+				gitStatusBadge.style.color = '#f87171';
+				gitStatusBadge.style.border = '1px solid rgba(248, 113, 113, 0.35)';
+				gitStatusBadge.textContent = `❌ Git Check Error: ${err?.message || err}`;
+				lastGitDiagnosticText = `Git Check Error:\n- Error Details: ${err?.stack || err?.message || err}`;
+				copyDiagnosticBtn.style.display = 'inline-flex';
+			} finally {
+				testGitBtn.disabled = false;
+				testGitBtn.style.opacity = '1';
+			}
+		};
+
+		copyDiagnosticBtn.onclick = () => {
+			if (lastGitDiagnosticText) {
+				this.clipboardService.writeText(lastGitDiagnosticText);
+				this.notificationService.info('Copied Git diagnostic information to clipboard.');
+			}
+		};
+
 		// Ticket Type Prompt (Pre-populated)
 		const typePromptBox = append(modalBody, $('.form-group'));
 		append(typePromptBox, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; margin-bottom: 5px; font-weight: 500;' }, 'Ticket Type Prompt (Global Workspace Rules):'));
@@ -2065,6 +2152,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 				return;
 			}
 
+			const gitRepoUrl = gitRemoteInput.value.trim();
+			const originalBtnHtml = submitBtn.innerHTML;
+			const btn = submitBtn as HTMLButtonElement;
+			if (gitRepoUrl) {
+				btn.disabled = true;
+				btn.style.opacity = '0.7';
+				btn.textContent = 'Cloning Git Repository & Initializing...';
+			}
+
 			try {
 				const wsCode = codeInput.value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 				const assignedAgentId = agentSelect.value || undefined;
@@ -2090,7 +2186,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 					linkTo: selectedWsLinkTickets.length > 0 ? selectedWsLinkTickets.join(', ') : undefined,
 					attachments: selectedAttachments.length > 0 ? selectedAttachments : undefined,
 					typePrompt: typePromptInput.value.trim() || undefined,
-					ticketPrompt: ticketPromptInput.value.trim() || undefined
+					ticketPrompt: ticketPromptInput.value.trim() || undefined,
+					gitRepoUrl: gitRepoUrl || undefined,
+					gitBranch: gitBranchInput.value.trim() || undefined
 				});
 
 				document.removeEventListener('click', wsLinkClickListener);
@@ -2105,8 +2203,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 				this.expandedWorkspaces.add(res.uri.toString());
 				const workspaceMdUri = URI.joinPath(res.uri, 'workspace.md');
 				await this.commandService.executeCommand('markdown.showPreview', workspaceMdUri);
-			} catch (err) {
-				this.notificationService.error(`Failed to create workspace: ${err}`);
+			} catch (err: any) {
+				btn.disabled = false;
+				btn.style.opacity = '1';
+				btn.innerHTML = originalBtnHtml;
+				this.notificationService.error(`Failed to create workspace: ${err?.message || err}`);
 			}
 		};
 	}
@@ -2158,8 +2259,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 
 		const modal = append(overlay, $('.create-resource-modal'));
-		modal.style.width = '100%';
-		modal.style.maxWidth = '640px';
+		modal.style.width = '640px';
+		modal.style.maxWidth = '92vw';
 		modal.style.maxHeight = '88vh';
 		modal.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
 		modal.style.border = '1px solid rgba(255, 255, 255, 0.18)';
@@ -2169,6 +2270,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 		modal.style.display = 'flex';
 		modal.style.flexDirection = 'column';
 		modal.style.gap = '16px';
+		modal.style.boxSizing = 'border-box';
+		modal.style.transition = 'all 0.25s cubic-bezier(0.16, 1, 0.3, 1)';
+
+		const isRootWorkspace = (target && typeof target === 'object' && 'uri' in target && 'name' in target) || !parentName;
+		const modalHeadingText = isRootWorkspace ? `Create Entity in ${targetName}` : `Create Sub-Entity in ${targetName}`;
 
 		// Modal Header
 		const modalHeader = append(modal, $('.modal-header'));
@@ -2178,9 +2284,84 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		const modalTitle = append(modalHeader, $('div', { style: 'font-weight: 600; font-size: 14px; color: #38bdf8; display: flex; align-items: center; gap: 8px;' }));
 		append(modalTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.folderActive)));
-		append(modalTitle, $('span', {}, `Create Sub-Entity in ${targetName}`));
+		append(modalTitle, $('span', {}, modalHeadingText));
 
-		const closeIcon = append(modalHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+		const headerRight = append(modalHeader, $('div', { style: 'display: flex; align-items: center; gap: 12px;' }));
+
+		const computeDualPaneLayout = () => {
+			const vw = window.innerWidth;
+			const vh = window.innerHeight;
+			const gap = 12;
+			const maxPairWidth = Math.min(1340, vw - 32);
+			const leftW = Math.floor((maxPairWidth - gap) * 0.52);
+			const rightW = Math.floor((maxPairWidth - gap) * 0.48);
+			const startX = Math.max(12, Math.floor((vw - (leftW + gap + rightW)) / 2));
+			const targetH = Math.min(800, Math.floor(vh * 0.88));
+			const topY = Math.floor((vh - targetH) / 2);
+
+			return {
+				left: { x: startX, y: topY, w: leftW, h: targetH },
+				right: { x: startX + leftW + gap, y: topY, w: rightW, h: targetH }
+			};
+		};
+
+		let isCompanionActive = false;
+		const aiCompanionBtn = append(headerRight, $('button.btn-secondary', {
+			style: 'display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); transition: all 0.2s ease;'
+		}));
+		append(aiCompanionBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.sparkleFilled)));
+		append(aiCompanionBtn, $('span', {}, 'AI Co-Pilot'));
+		aiCompanionBtn.title = 'Open Agent Central side-by-side to assist in entity planning';
+		aiCompanionBtn.onclick = () => {
+			isCompanionActive = !isCompanionActive;
+			if (isCompanionActive) {
+				const layout = computeDualPaneLayout();
+
+				overlay.style.alignItems = 'flex-start';
+				overlay.style.justifyContent = 'flex-start';
+				modal.style.position = 'fixed';
+				modal.style.left = `${layout.left.x}px`;
+				modal.style.top = `${layout.left.y}px`;
+				modal.style.width = `${layout.left.w}px`;
+				modal.style.height = `${layout.left.h}px`;
+				modal.style.maxHeight = `${layout.left.h}px`;
+				modal.style.transform = 'none';
+
+				aiCompanionBtn.style.background = 'rgba(56, 189, 248, 0.25)';
+				aiCompanionBtn.style.borderColor = 'rgba(56, 189, 248, 0.6)';
+
+				this.commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
+					workspaceId: targetName,
+					field: '/Create',
+					label: `Create in ${targetName}`,
+					companionMode: true,
+					companionPosition: {
+						left: layout.right.x,
+						top: `${layout.right.y}px`,
+						width: layout.right.w,
+						height: layout.right.h
+					},
+					prompt: `Help me plan and create a new entity under '${targetName}'. I want to `
+				});
+			} else {
+				overlay.style.alignItems = 'center';
+				overlay.style.justifyContent = 'center';
+				modal.style.position = 'relative';
+				modal.style.left = '';
+				modal.style.top = '';
+				modal.style.width = '640px';
+				modal.style.height = '';
+				modal.style.maxHeight = '88vh';
+				modal.style.transform = 'none';
+
+				aiCompanionBtn.style.background = 'rgba(56, 189, 248, 0.12)';
+				aiCompanionBtn.style.borderColor = 'rgba(56, 189, 248, 0.35)';
+
+				this.commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup');
+			}
+		};
+
+		const closeIcon = append(headerRight, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
 		closeIcon.style.cursor = 'pointer';
 		closeIcon.style.fontSize = '14px';
 		closeIcon.style.opacity = '0.7';
@@ -2213,13 +2394,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 		const typeButtons: HTMLElement[] = [];
 		let typesList: { type: string; label: string; icon: ThemeIcon; color: string; bg: string }[] = [];
 
-
-
 		const renderTypeGrid = async () => {
 			clearNode(categoryGrid);
 			categoryGrid.style.display = 'grid';
-			categoryGrid.style.gridTemplateColumns = 'repeat(5, 1fr)';
+			categoryGrid.style.gridTemplateColumns = 'repeat(5, minmax(0, 1fr))';
 			categoryGrid.style.gap = '8px';
+			categoryGrid.style.width = '100%';
+			categoryGrid.style.boxSizing = 'border-box';
 			typeButtons.length = 0;
 
 			const baseTypes = [
@@ -2258,23 +2439,31 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 			for (const t of typesList) {
 				const btn = append(categoryGrid, $('.type-option-btn'));
-				btn.style.padding = '8px 10px';
+				btn.style.padding = '8px 4px';
 				btn.style.borderRadius = '6px';
 				btn.style.cursor = 'pointer';
-				btn.style.fontSize = '11.5px';
+				btn.style.fontSize = '11px';
 				btn.style.display = 'flex';
 				btn.style.alignItems = 'center';
 				btn.style.justifyContent = 'center';
-				btn.style.gap = '6px';
+				btn.style.gap = '5px';
 				btn.style.border = t.type === selectedType ? `1px solid ${t.color}` : '1px solid rgba(255,255,255,0.08)';
 				btn.style.backgroundColor = t.type === selectedType ? t.bg : 'rgba(255,255,255,0.03)';
 				btn.style.transition = 'all 0.15s ease';
+				btn.style.boxSizing = 'border-box';
+				btn.style.width = '100%';
+				btn.style.minWidth = '0';
+				btn.style.minHeight = '34px';
+				btn.title = t.label;
 
 				const iconSpan = append(btn, $('span' + ThemeIcon.asCSSSelector(t.icon)));
 				iconSpan.style.color = t.color;
-				iconSpan.style.fontSize = '14px';
+				iconSpan.style.fontSize = '13px';
+				iconSpan.style.flexShrink = '0';
 
-				append(btn, $('span', {}, t.label));
+				append(btn, $('span', {
+					style: 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px;'
+				}, t.label));
 
 				btn.onclick = async () => {
 					selectedType = t.type;
@@ -2356,6 +2545,173 @@ export class MainWorkspaceViewPane extends ViewPane {
 		append(statusBadgeWrapper, $('span', {
 			style: 'display: inline-block; padding: 4px 12px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(129, 140, 248, 0.18); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.4);'
 		}, 'Todo'));
+
+		// Git Configuration Section (Collapsible, Default Collapsed)
+		const gitBox = append(modalBody, $('.form-group', { style: 'background: rgba(0,0,0,0.18); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px 14px; display: flex; flex-direction: column; gap: 8px;' }));
+
+		const gitHeaderRow = append(gitBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none;' }));
+		const gitTitle = append(gitHeaderRow, $('div', { style: 'font-size: 11.5px; opacity: 0.9; font-weight: 600; display: flex; align-items: center; gap: 6px;' }));
+		const gitChevron = append(gitTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronRight)));
+		gitChevron.style.fontSize = '12px';
+		gitChevron.style.transition = 'transform 0.15s ease';
+		append(gitTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.sourceControl)));
+		append(gitTitle, $('span', {}, 'Git Repository & Branch Binding (Optional)'));
+
+		const gitToggleHint = append(gitHeaderRow, $('span', { style: 'font-size: 10.5px; opacity: 0.6; color: #38bdf8;' }, 'Configure Git...'));
+
+		const gitContent = append(gitBox, $('div', { style: 'display: none; flex-direction: column; gap: 10px; margin-top: 4px; border-top: 1px solid rgba(255,255,255,0.06); padding-top: 10px;' }));
+
+		let isGitExpanded = false;
+		gitHeaderRow.onclick = () => {
+			isGitExpanded = !isGitExpanded;
+			gitContent.style.display = isGitExpanded ? 'flex' : 'none';
+			gitChevron.className = ThemeIcon.asClassName(isGitExpanded ? Codicon.chevronDown : Codicon.chevronRight);
+			gitToggleHint.textContent = isGitExpanded ? 'Collapse' : 'Configure Git...';
+		};
+
+		// Git Remote URL Input
+		const gitRemoteRow = append(gitContent, $('div'));
+		append(gitRemoteRow, $('label', { style: 'display: block; font-size: 10.5px; opacity: 0.7; margin-bottom: 3px;' }, 'Git Remote URL (Leave blank to inherit parent repository):'));
+		const gitRemoteInput = append(gitRemoteRow, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		gitRemoteInput.placeholder = 'e.g. git@github.com:org/repo.git or https://github.com/org/repo.git';
+
+		// Target Branch Input
+		const gitBranchRow = append(gitContent, $('div'));
+		append(gitBranchRow, $('label', { style: 'display: block; font-size: 10.5px; opacity: 0.7; margin-bottom: 3px;' }, 'Target Branch:'));
+		const gitBranchInput = append(gitBranchRow, $('input.monaco-inputbox', {
+			style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
+		})) as HTMLInputElement;
+		gitBranchInput.placeholder = 'e.g. main, master, feature/user-auth (leave blank for default)';
+
+		// Test & Diagnostic Row
+		const gitActionRow = append(gitContent, $('div', { style: 'display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 2px;' }));
+		const testGitBtn = append(gitActionRow, $('button', {
+			style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.15) !important; color: #38bdf8 !important; border: 1px solid rgba(56, 189, 248, 0.35) !important; outline: none; transition: all 0.15s ease;'
+		})) as HTMLButtonElement;
+		testGitBtn.onmouseenter = () => { testGitBtn.style.background = 'rgba(56, 189, 248, 0.25) !important'; };
+		testGitBtn.onmouseleave = () => { testGitBtn.style.background = 'rgba(56, 189, 248, 0.15) !important'; };
+		append(testGitBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.plug)));
+		append(testGitBtn, $('span', {}, 'Test & Verify Git'));
+
+		const gitStatusBadge = append(gitActionRow, $('div', {
+			style: 'font-size: 11px; padding: 4px 8px; border-radius: 4px; display: none; align-items: center; gap: 6px; flex: 1; word-break: break-word;'
+		}));
+
+		const copyDiagnosticBtn = append(gitActionRow, $('button.btn-secondary', {
+			style: 'display: none; align-items: center; gap: 4px; padding: 3px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15);'
+		}));
+		append(copyDiagnosticBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+		append(copyDiagnosticBtn, $('span', {}, 'Copy Diagnostics'));
+
+		let lastGitDiagnosticText = '';
+
+		testGitBtn.onclick = async () => {
+			testGitBtn.disabled = true;
+			testGitBtn.style.opacity = '0.6';
+			gitStatusBadge.style.display = 'flex';
+			gitStatusBadge.style.backgroundColor = 'rgba(56, 189, 248, 0.12)';
+			gitStatusBadge.style.color = '#38bdf8';
+			gitStatusBadge.style.border = '1px solid rgba(56, 189, 248, 0.3)';
+			gitStatusBadge.textContent = 'Verifying Git repository & branch...';
+			copyDiagnosticBtn.style.display = 'none';
+
+			try {
+				const remoteUrl = gitRemoteInput.value.trim();
+				const targetBranch = gitBranchInput.value.trim();
+
+				let curr = targetUri;
+				let foundGitUri: URI | undefined = undefined;
+				while (curr.path !== '/' && curr.path !== '\\' && curr.path !== '.') {
+					const checkGit = URI.joinPath(curr, '.git');
+					if (await this.fileService.exists(checkGit)) {
+						foundGitUri = checkGit;
+						break;
+					}
+					const parent = dirname(curr);
+					if (parent.path === curr.path) break;
+					curr = parent;
+				}
+
+				let branchName = 'main';
+				let hasLocalGit = !!foundGitUri;
+				let gitConfigRemote = '';
+
+				if (foundGitUri) {
+					try {
+						const headUri = URI.joinPath(foundGitUri, 'HEAD');
+						if (await this.fileService.exists(headUri)) {
+							const headContent = (await this.fileService.readFile(headUri)).value.toString().trim();
+							if (headContent.startsWith('ref: refs/heads/')) {
+								branchName = headContent.replace('ref: refs/heads/', '').trim();
+							}
+						}
+					} catch {}
+
+					try {
+						const configUri = URI.joinPath(foundGitUri, 'config');
+						if (await this.fileService.exists(configUri)) {
+							const configContent = (await this.fileService.readFile(configUri)).value.toString();
+							const match = configContent.match(/url\s*=\s*(.+)/);
+							if (match && match[1]) {
+								gitConfigRemote = match[1].trim();
+							}
+						}
+					} catch {}
+				}
+
+				const desiredBranch = targetBranch || branchName;
+				const isBranchAligned = !targetBranch || targetBranch === branchName;
+
+				if (hasLocalGit) {
+					if (isBranchAligned) {
+						gitStatusBadge.style.backgroundColor = 'rgba(52, 211, 153, 0.15)';
+						gitStatusBadge.style.color = '#34d399';
+						gitStatusBadge.style.border = '1px solid rgba(52, 211, 153, 0.35)';
+						gitStatusBadge.textContent = `✔️ Connected: Local Git valid (Active Branch: '${branchName}'${gitConfigRemote ? ` | Remote: ${gitConfigRemote}` : ''})`;
+						lastGitDiagnosticText = `Git Verification Success:\n- Path: ${targetUri.fsPath}\n- Active Branch: ${branchName}\n- Remote URL: ${remoteUrl || gitConfigRemote || 'None'}\n- Status: OK / Aligned`;
+					} else {
+						gitStatusBadge.style.backgroundColor = 'rgba(251, 146, 60, 0.15)';
+						gitStatusBadge.style.color = '#fb923c';
+						gitStatusBadge.style.border = '1px solid rgba(251, 146, 60, 0.35)';
+						gitStatusBadge.textContent = `⚠️ Warning: Local branch is '${branchName}', but target is '${targetBranch}'.`;
+						lastGitDiagnosticText = `Git Branch Alert:\n- Local Active Branch: ${branchName}\n- Desired Target Branch: ${targetBranch}\n- Status: Target branch differs from current active branch.`;
+						copyDiagnosticBtn.style.display = 'inline-flex';
+					}
+				} else if (remoteUrl) {
+					gitStatusBadge.style.backgroundColor = 'rgba(56, 189, 248, 0.15)';
+					gitStatusBadge.style.color = '#38bdf8';
+					gitStatusBadge.style.border = '1px solid rgba(56, 189, 248, 0.35)';
+					gitStatusBadge.textContent = `✔️ Remote Git URL specified: ${remoteUrl} (Target Branch: '${desiredBranch}')`;
+					lastGitDiagnosticText = `Remote Git Configured:\n- Remote URL: ${remoteUrl}\n- Target Branch: ${desiredBranch}\n- Status: Ready to track/clone`;
+				} else {
+					gitStatusBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.05)';
+					gitStatusBadge.style.color = 'var(--vscode-foreground)';
+					gitStatusBadge.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+					gitStatusBadge.textContent = `ℹ️ No local .git repository found at this path. Entity will be created as standard workspace ticket folder.`;
+					lastGitDiagnosticText = `No Git Repository:\n- Path: ${targetUri.fsPath}\n- Note: Leave blank if Git tracking is not required for this folder.`;
+					copyDiagnosticBtn.style.display = 'inline-flex';
+				}
+			} catch (err: any) {
+				gitStatusBadge.style.backgroundColor = 'rgba(248, 113, 113, 0.15)';
+				gitStatusBadge.style.color = '#f87171';
+				gitStatusBadge.style.border = '1px solid rgba(248, 113, 113, 0.35)';
+				gitStatusBadge.textContent = `❌ Git Check Error: ${err?.message || err}`;
+				lastGitDiagnosticText = `Git Check Error:\n- Error Details: ${err?.stack || err?.message || err}`;
+				copyDiagnosticBtn.style.display = 'inline-flex';
+			} finally {
+				testGitBtn.disabled = false;
+				testGitBtn.style.opacity = '1';
+			}
+		};
+
+		copyDiagnosticBtn.onclick = () => {
+			if (lastGitDiagnosticText) {
+				this.clipboardService.writeText(lastGitDiagnosticText);
+				this.notificationService.info('Copied Git diagnostic information to clipboard.');
+			}
+		};
 
 		// Custom Fields Box for Custom Modules
 		const customFieldsBox = append(modalBody, $('.custom-fields-box', { style: 'display: flex; flex-direction: column; gap: 10px; margin-top: 8px;' }));
@@ -2929,10 +3285,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 			style: 'padding: 7px 18px; font-size: 11.5px; border-radius: 6px; cursor: pointer; background: var(--vscode-button-background, #007acc); color: var(--vscode-button-foreground, #ffffff); border: none; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; gap: 6px;'
 		})) as HTMLButtonElement;
 		clearNode(submitBtn);
-		const sparkleSpan = append(submitBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.sparkle)));
-		sparkleSpan.style.marginRight = '6px';
+		const sparkleSpan = append(submitBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.sparkleFilled)));
 		sparkleSpan.style.fontSize = '12px';
-		append(submitBtn, $('span', {}, 'Create Entity'));
+		append(submitBtn, $('span', {}, 'Create'));
 
 		const updateValidation = async () => {
 			const inputName = nameInput.value.trim();
@@ -3379,6 +3734,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 				}
 			}
 
+			const gitRepoUrl = gitRemoteInput.value.trim();
+			const originalBtnHtml = submitBtn.innerHTML;
+			const btn = submitBtn as HTMLButtonElement;
+			if (gitRepoUrl) {
+				btn.disabled = true;
+				btn.style.opacity = '0.7';
+				btn.textContent = 'Cloning Git Repository & Initializing...';
+			}
+
 			try {
 				const selectedOpt = agentSelect.options[agentSelect.selectedIndex];
 				const assignedAgentId = agentSelect.value || undefined;
@@ -3496,64 +3860,69 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const initialStatus = (selectedType === 'agent') ? 'idle' : (wsStatuses.statuses[0] || 'Todo');
 
 				const createResult = await this.workspacesExplorerService.createResourceUnderWorkspace({
-					workspaceUri: targetUri,
-					type: selectedType,
-					name,
-					title: titleInput.value.trim() || undefined,
-					code: codeInput.value.trim() || undefined,
-					status: initialStatus,
-					priority: selectedPriority,
-					assignedAgentId,
-					assignedAgentName,
-					agentRulePrompt: ruleInput.value.trim() || undefined,
-					ticketPrompt: ruleInput.value.trim() || undefined,
-					description: descInput.value.trim() || undefined,
-					typeDefinition: (typeDefInput.value.trim() && typeDefInput.value.trim() !== 'Built-in (System)' && typeDefInput.value.trim() !== 'None') ? typeDefInput.value.trim() : undefined,
-					typePrompt: typePromptInput.value.trim() || undefined,
-					linkTo: selectedLinkTickets.length > 0 ? selectedLinkTickets.join(', ') : undefined,
-					attachments: selectedAttachments.length > 0 ? selectedAttachments : undefined,
-					agentModel: agentModelOpt,
-					agentSystemPrompt: selectedType === 'agent' ? promptInput.value.trim() : undefined,
-					customMetadata
-				});
+						workspaceUri: targetUri,
+						type: selectedType,
+						name,
+						title: titleInput.value.trim() || undefined,
+						code: codeInput.value.trim() || undefined,
+						status: initialStatus,
+						priority: selectedPriority,
+						assignedAgentId,
+						assignedAgentName,
+						agentRulePrompt: ruleInput.value.trim() || undefined,
+						ticketPrompt: ruleInput.value.trim() || undefined,
+						description: descInput.value.trim() || undefined,
+						typeDefinition: (typeDefInput.value.trim() && typeDefInput.value.trim() !== 'Built-in (System)' && typeDefInput.value.trim() !== 'None') ? typeDefInput.value.trim() : undefined,
+						typePrompt: typePromptInput.value.trim() || undefined,
+						linkTo: selectedLinkTickets.length > 0 ? selectedLinkTickets.join(', ') : undefined,
+						attachments: selectedAttachments.length > 0 ? selectedAttachments : undefined,
+						agentModel: agentModelOpt,
+						agentSystemPrompt: selectedType === 'agent' ? promptInput.value.trim() : undefined,
+						gitRepoUrl: gitRepoUrl || undefined,
+						gitBranch: gitBranchInput.value.trim() || undefined,
+						customMetadata
+					});
 
-				const createdUri = createResult.uri;
+					const createdUri = createResult.uri;
 
-				removeOverlay();
-				if (createResult.alreadyExists) {
-					this.notificationService.info(`'${name}' already exists in ${targetName}. Opened existing ${selectedType} files.`);
-				} else {
-					this.notificationService.info(`Created ${selectedType} '${name}' standard files in ${targetName}`);
-				}
-
-				const canonicalParentId = this.getCanonicalId(targetUri);
-				const createdFolderUri = dirname(createdUri);
-				const canonicalCreatedId = this.getCanonicalId(createdFolderUri);
-
-				this.expandedWorkspaces.add(canonicalParentId);
-				this.expandedWorkspaces.add(canonicalCreatedId);
-				this.selectedItemId = canonicalCreatedId;
-
-				const isCustomEntity = selectedType !== 'file' && selectedType !== 'folder';
-				if (isCustomEntity) {
-					if (selectedType === 'workflow') {
-						await this.editorService.openEditor(new WorkflowEditorInput(createdUri, name), { pinned: true });
+					removeOverlay();
+					if (createResult.alreadyExists) {
+						this.notificationService.info(`'${name}' already exists in ${targetName}. Opened existing ${selectedType} files.`);
 					} else {
-						await this.editorService.openEditor(new EntityDetailEditorInput(createdUri, name), { pinned: true });
+						this.notificationService.info(`Created ${selectedType} '${name}' standard files in ${targetName}`);
 					}
-				} else if (createdUri.path.toLowerCase().endsWith('.md')) {
-					await this.commandService.executeCommand('markdown.showPreview', createdUri);
-				} else {
-					await this.openerService.open(createdUri);
-				}
-				await this.renderContent();
 
-				if (onSuccess) {
-					onSuccess(selectedType, name);
+					const canonicalParentId = this.getCanonicalId(targetUri);
+					const createdFolderUri = dirname(createdUri);
+					const canonicalCreatedId = this.getCanonicalId(createdFolderUri);
+
+					this.expandedWorkspaces.add(canonicalParentId);
+					this.expandedWorkspaces.add(canonicalCreatedId);
+					this.selectedItemId = canonicalCreatedId;
+
+					const isCustomEntity = selectedType !== 'file' && selectedType !== 'folder';
+					if (isCustomEntity) {
+						if (selectedType === 'workflow') {
+							await this.editorService.openEditor(new WorkflowEditorInput(createdUri, name), { pinned: true });
+						} else {
+							await this.editorService.openEditor(new EntityDetailEditorInput(createdUri, name), { pinned: true });
+						}
+					} else if (createdUri.path.toLowerCase().endsWith('.md')) {
+						await this.commandService.executeCommand('markdown.showPreview', createdUri);
+					} else {
+						await this.openerService.open(createdUri);
+					}
+					await this.renderContent();
+
+					if (onSuccess) {
+						onSuccess(selectedType, name);
+					}
+				} catch (err: any) {
+					btn.disabled = false;
+					btn.style.opacity = '1';
+					btn.innerHTML = originalBtnHtml;
+					this.notificationService.error(`Failed to create entity: ${err?.message || err}`);
 				}
-			} catch (err) {
-				this.notificationService.error(`Failed to create entity: ${err}`);
-			}
 		};
 	}
 
