@@ -807,6 +807,9 @@ class DefaultAccountProvider extends Disposable implements IDefaultAccountProvid
 					can_signup_for_limited: false,
 					copilot_plan: 'individual',
 					cloud_session_storage_enabled: true,
+					assigned_date: '2026-01-01T00:00:00.000Z',
+					organization_login_list: [],
+					analytics_tracking_id: 'anyagent',
 				},
 				fetchedAt: Date.now()
 			};
