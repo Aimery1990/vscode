@@ -320,6 +320,7 @@ export class SetupAgent extends Disposable implements IChatAgentImplementation {
 			this.whenAgentActivated(chatService);
 			this.whenAgentReady(chatAgentService, modeInfo?.kind);
 			this.whenLanguageModelReady(languageModelsService, requestModel.modelId);
+			this.whenToolsModelReady(languageModelToolsService, requestModel);
 			const dummyStore = new DisposableStore();
 			this.whenPanelAgentHasGuidance(dummyStore);
 			dummyStore.dispose();
