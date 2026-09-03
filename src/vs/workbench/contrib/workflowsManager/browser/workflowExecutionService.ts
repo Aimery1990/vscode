@@ -292,15 +292,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 		do {
 			// Find Start/Entry node
-			let currentNode = this._findEntryNode(data, options?.entryNodeId);
-			if (!currentNode) {
+			const entryNode = this._findEntryNode(data, options?.entryNodeId);
+			if (!entryNode) {
 				throw new Error('No valid start node found in workflow.');
 			}
 
 			let stepCount = 0;
 			const maxSteps = options?.maxSteps || 500;
+			let activeNodeIds: string[] = [entryNode.id];
 
-			while (currentNode && !this._cancelledRuns.has(run.runId)) {
+			while (activeNodeIds.length > 0 && !this._cancelledRuns.has(run.runId)) {
 				stepCount++;
 				if (stepCount > maxSteps) {
 					throw new Error(`Maximum step limit (${maxSteps}) reached. Possible infinite loop detected.`);
@@ -317,51 +318,79 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					break;
 				}
 
-				run.currentNodeId = currentNode.id;
-				if (!run.visitedNodeIds.includes(currentNode.id)) {
-					run.visitedNodeIds.push(currentNode.id);
-				}
+				// Resolve current active nodes
+				const currentNodes = activeNodeIds
+					.map(id => data.nodes.find(n => n.id === id))
+					.filter((n): n is IFlowchartNode => !!n);
 
-				const nodeState = run.nodeStates[currentNode.id] || {
-					nodeId: currentNode.id,
-					nodeLabel: currentNode.label,
-					nodeType: currentNode.type,
-					status: 'pending',
-					executedTickets: []
-				};
-				nodeState.status = 'running';
-				nodeState.startedAt = Date.now();
-				this._notifyRunChanged(run);
-
-				this._emitLog(run, 'info', `Executing node: '${currentNode.label}' (${currentNode.type})`, { nodeId: currentNode.id });
-
-				// Execute node logic (Agent / Tickets / Decision / Human / Sub-workflow)
-				try {
-					await this._executeNode(run, currentNode, nodeState);
-					nodeState.status = 'success';
-					nodeState.completedAt = Date.now();
-					nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
-					this._emitLog(run, 'info', `Completed node: '${currentNode.label}' in ${nodeState.durationMs}ms`, { nodeId: currentNode.id });
-				} catch (err: any) {
-					nodeState.status = 'failed';
-					nodeState.error = err.message || String(err);
-					nodeState.completedAt = Date.now();
-					nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
-					this._emitLog(run, 'error', `Node '${currentNode.label}' failed: ${nodeState.error}`, { nodeId: currentNode.id });
-					throw err;
-				} finally {
-					this._notifyRunChanged(run);
-				}
-
-				// Check if end node
-				const isEndNode = this._isEndNode(currentNode);
-				if (isEndNode) {
-					this._emitLog(run, 'info', `Reached end node: '${currentNode.label}'. Execution branch completed.`);
+				if (currentNodes.length === 0) {
 					break;
 				}
 
-				// Step mode pause
-				if (run.mode === 'step') {
+				// Mark visited and update node states to running
+				run.currentNodeId = currentNodes[0].id;
+				for (const node of currentNodes) {
+					if (!run.visitedNodeIds.includes(node.id)) {
+						run.visitedNodeIds.push(node.id);
+					}
+					const nodeState = run.nodeStates[node.id] || {
+						nodeId: node.id,
+						nodeLabel: node.label,
+						nodeType: node.type,
+						status: 'pending',
+						executedTickets: []
+					};
+					nodeState.status = 'running';
+					nodeState.startedAt = Date.now();
+					run.nodeStates[node.id] = nodeState;
+				}
+				this._notifyRunChanged(run);
+
+				// Execute all active nodes in parallel
+				const nextNodesNested = await Promise.all(
+					currentNodes.map(async (node) => {
+						const nodeState = run.nodeStates[node.id];
+						this._emitLog(run, 'info', `Executing node: '${node.label}' (${node.type})`, { nodeId: node.id });
+						try {
+							await this._executeNode(run, node, nodeState);
+							nodeState.status = 'success';
+							nodeState.completedAt = Date.now();
+							nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
+							this._emitLog(run, 'info', `Completed node: '${node.label}' in ${nodeState.durationMs}ms`, { nodeId: node.id });
+						} catch (err: any) {
+							nodeState.status = 'failed';
+							nodeState.error = err.message || String(err);
+							nodeState.completedAt = Date.now();
+							nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
+							this._emitLog(run, 'error', `Node '${node.label}' failed: ${nodeState.error}`, { nodeId: node.id });
+							throw err;
+						} finally {
+							this._notifyRunChanged(run);
+						}
+
+						// Check if end node
+						if (this._isEndNode(node)) {
+							this._emitLog(run, 'info', `Reached end node: '${node.label}'. Execution branch completed.`);
+							return [];
+						}
+
+						// Resolve next nodes from this node
+						return await this._resolveNextNodes(run, node, data);
+					})
+				);
+
+				// Flatten and deduplicate next active nodes
+				const nextActiveIds: string[] = [];
+				for (const list of nextNodesNested) {
+					for (const nextNode of list) {
+						if (!nextActiveIds.includes(nextNode.id)) {
+							nextActiveIds.push(nextNode.id);
+						}
+					}
+				}
+
+				// Step mode pause before moving to the next round of active nodes
+				if (run.mode === 'step' && nextActiveIds.length > 0) {
 					run.status = 'paused';
 					this._notifyRunChanged(run);
 					await new Promise<void>(resolve => {
@@ -373,13 +402,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					break;
 				}
 
-				// Find next node via outgoing links
-				const nextNode = await this._resolveNextNode(run, currentNode, data);
-				if (!nextNode) {
-					this._emitLog(run, 'info', `No further outgoing connections from '${currentNode.label}'. Finished graph path.`);
-					break;
-				}
-				currentNode = nextNode;
+				activeNodeIds = nextActiveIds;
 			}
 
 			if (isDaemonLoop && !this._cancelledRuns.has(run.runId)) {
@@ -496,48 +519,75 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		state.output = { result: `Node '${node.label}' successfully executed` };
 	}
 
-	private async _resolveNextNode(
+	private async _resolveNextNodes(
 		run: IWorkflowExecutionRun,
 		currentNode: IFlowchartNode,
 		data: IFlowchartData
-	): Promise<IFlowchartNode | undefined> {
+	): Promise<IFlowchartNode[]> {
 		const outgoingLinks = data.links.filter(l => l.from === currentNode.id);
 		if (outgoingLinks.length === 0) {
-			return undefined;
+			return [];
 		}
 
 		if (outgoingLinks.length === 1) {
 			const targetId = outgoingLinks[0].to;
-			return data.nodes.find(n => n.id === targetId);
+			const target = data.nodes.find(n => n.id === targetId);
+			return target ? [target] : [];
 		}
 
-		// Decision Branching (Diamond or multiple branches)
-		if (currentNode.type === 'diamond' || outgoingLinks.length > 1) {
-			this._emitLog(run, 'info', `Evaluating ${outgoingLinks.length} decision branch(es) from '${currentNode.label}'`);
+		// Multiple outgoing branches from currentNode
+		this._emitLog(run, 'info', `Evaluating ${outgoingLinks.length} outgoing branch(es) from '${currentNode.label}'`);
 
-			// Evaluate links in order
+		// Check if any link has explicit condition labels or expressions
+		const conditionalLinks = outgoingLinks.filter(l => (l.label || '').trim().length > 0);
+
+		if (conditionalLinks.length > 0) {
+			const matchedNodes: IFlowchartNode[] = [];
 			for (const link of outgoingLinks) {
 				const label = (link.label || '').trim().toLowerCase();
 				if (!label) continue;
 
-				// 1. Simple expression matching
 				if (label === 'yes' || label === 'true' || label === 'success' || label === 'pass' || label === '通过' || label === '是') {
 					const target = data.nodes.find(n => n.id === link.to);
 					if (target) {
 						this._emitLog(run, 'info', `Branch matched: '${link.label}' -> navigating to '${target.label}'`);
-						return target;
+						matchedNodes.push(target);
+					}
+				} else if (label === 'no' || label === 'false' || label === 'fail' || label === 'reject' || label === '拒绝' || label === '否') {
+					const state = run.nodeStates[currentNode.id];
+					if (state && (state.status === 'failed' || state.output?.approved === false || state.output?.action === 'rejected')) {
+						const target = data.nodes.find(n => n.id === link.to);
+						if (target) {
+							this._emitLog(run, 'info', `Negative branch matched: '${link.label}' -> navigating to '${target.label}'`);
+							matchedNodes.push(target);
+						}
 					}
 				}
 			}
 
-			// Fallback to first available target branch
-			const defaultLink = outgoingLinks[0];
-			const fallbackTarget = data.nodes.find(n => n.id === defaultLink.to);
-			this._emitLog(run, 'info', `Default branch taken: -> navigating to '${fallbackTarget?.label || defaultLink.to}'`);
-			return fallbackTarget;
+			if (matchedNodes.length > 0) {
+				return matchedNodes;
+			}
+
+			// If no conditional link matched, check if there is an unlabelled / default fallback link
+			const unlabelled = outgoingLinks.filter(l => !(l.label || '').trim());
+			if (unlabelled.length > 0) {
+				const fallbackNodes = unlabelled
+					.map(l => data.nodes.find(n => n.id === l.to))
+					.filter((n): n is IFlowchartNode => !!n);
+				this._emitLog(run, 'info', `Fallback branch(es) taken -> navigating to ${fallbackNodes.map(n => `'${n.label}'`).join(', ')}`);
+				return fallbackNodes;
+			}
 		}
 
-		return undefined;
+		// Parallel Fork (Unconditional / Fan-Out):
+		// All outgoing branches are taken concurrently!
+		const targetNodes = outgoingLinks
+			.map(l => data.nodes.find(n => n.id === l.to))
+			.filter((n): n is IFlowchartNode => !!n);
+
+		this._emitLog(run, 'info', `Parallel fork: simultaneously executing ${targetNodes.length} branches -> [${targetNodes.map(n => `'${n.label}'`).join(', ')}]`);
+		return targetNodes;
 	}
 
 	private _findEntryNode(data: IFlowchartData, entryNodeId?: string): IFlowchartNode | undefined {
