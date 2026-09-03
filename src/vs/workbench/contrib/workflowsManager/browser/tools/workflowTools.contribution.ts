@@ -3,10 +3,10 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { Disposable } from '../../../../../../base/common/lifecycle.js';
-import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../../../common/contributions.js';
-import { ILanguageModelToolsService } from '../../../../chat/common/tools/languageModelToolsService.js';
-import { IWorkflowExecutionService } from '../../../common/workflowExecutionService.js';
+import { Disposable } from '../../../../../base/common/lifecycle.js';
+import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../../common/contributions.js';
+import { ILanguageModelToolsService } from '../../../chat/common/tools/languageModelToolsService.js';
+import { IWorkflowExecutionService } from '../../common/workflowExecutionService.js';
 import { ExecuteWorkflowTool, GetWorkflowStateTool, ResumeWorkflowStepTool, StopWorkflowTool } from './workflowTools.js';
 
 export class WorkflowToolsContribution extends Disposable implements IWorkbenchContribution {

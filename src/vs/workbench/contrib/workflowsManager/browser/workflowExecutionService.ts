@@ -13,8 +13,7 @@ import {
 	IWorkflowEngineOptions,
 	IWorkflowExecutionRun,
 	IWorkflowLogEntry,
-	IWorkflowNodeExecutionState,
-	WorkflowNodeStatus
+	IWorkflowNodeExecutionState
 } from '../common/workflowExecutionModel.js';
 
 interface IFlowchartNode {
@@ -544,8 +543,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	private _resolveWorkflowName(uriStr: string): string {
 		const snapshot = this.entityPersistenceService.getSnapshot(uriStr);
-		if (snapshot?.name) {
-			return snapshot.name;
+		if (snapshot?.entityName || snapshot?.title) {
+			return snapshot.entityName || snapshot.title || 'Workflow';
 		}
 		try {
 			const uri = URI.parse(uriStr);
