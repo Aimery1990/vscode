@@ -350,13 +350,51 @@
 	border: 1.5px solid #0d9488;
 	background: rgba(13, 148, 136, 0.12);
 	border-radius: 50%;
-	aspect-ratio: 1;
 }
 
 .workflow-node.diamond {
-	border: 1.5px solid #0d9488;
-	background: rgba(13, 148, 136, 0.12);
-	transform: rotate(45deg);
+	border: none !important;
+	background: transparent !important;
+	box-shadow: none !important;
+}
+
+.diamond-svg-bg {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+	z-index: 0;
+	overflow: visible;
+}
+
+.diamond-svg-polygon {
+	transition: fill 0.15s ease, stroke 0.15s ease, filter 0.15s ease;
+}
+
+.workflow-node.diamond.selected .diamond-svg-polygon {
+	stroke: #38bdf8 !important;
+	stroke-width: 2.5px !important;
+	filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.6));
+}
+
+.workflow-node.diamond.status-running .diamond-svg-polygon {
+	stroke: #38bdf8 !important;
+	stroke-width: 2.5px !important;
+	filter: drop-shadow(0 0 10px rgba(56, 189, 248, 0.8));
+}
+
+.workflow-node.diamond.status-success .diamond-svg-polygon {
+	stroke: #22c55e !important;
+	stroke-width: 2.5px !important;
+	filter: drop-shadow(0 0 10px rgba(34, 197, 94, 0.8));
+}
+
+.workflow-node.diamond.status-failed .diamond-svg-polygon {
+	stroke: #ef4444 !important;
+	stroke-width: 2.5px !important;
+	filter: drop-shadow(0 0 10px rgba(239, 68, 68, 0.8));
 }
 
 /* Inner content wrapper holding label text and ticket badges together */
@@ -380,10 +418,10 @@
 }
 
 .workflow-node.diamond .node-content-wrapper {
-	transform: rotate(-45deg);
-	padding: 4px 6px;
+	padding: 4px 10px;
 	max-width: 80%;
 	max-height: 80%;
+	z-index: 1;
 }
 
 .workflow-node .node-label {
@@ -495,12 +533,6 @@
 	border-bottom-right-radius: 4px;
 }
 
-.workflow-node.diamond .node-resize-handle {
-	bottom: -4px;
-	right: -4px;
-	transform: rotate(-45deg);
-}
-
 /* --- Node Connection Ports --- */
 .node-port-handle {
 	position: absolute;
@@ -557,35 +589,6 @@
 .node-port-handle.right {
 	right: -5px;
 	top: calc(50% - 5px);
-}
-
-/* Diamond specific port positions aligning precisely with the 4 rotated tips/vertices */
-.workflow-node.diamond .node-port-handle.top {
-	top: -5px;
-	left: -5px;
-	right: auto;
-	bottom: auto;
-}
-
-.workflow-node.diamond .node-port-handle.right {
-	top: -5px;
-	right: -5px;
-	left: auto;
-	bottom: auto;
-}
-
-.workflow-node.diamond .node-port-handle.bottom {
-	bottom: -5px;
-	right: -5px;
-	left: auto;
-	top: auto;
-}
-
-.workflow-node.diamond .node-port-handle.left {
-	bottom: -5px;
-	left: -5px;
-	right: auto;
-	top: auto;
 }
 
 /* --- Connection Line Reconnection Endpoint Handles --- */
@@ -778,10 +781,7 @@
 	background-color: rgba(34, 211, 238, 0.2) !important;
 }
 
-/* --- Un-rotate text input inside diamonds --- */
-.workflow-node.diamond .node-inline-editor {
-	transform: rotate(-45deg);
-}
+
 
 /* --- Submenu Style --- */
 .workflow-context-submenu {
@@ -1729,12 +1729,20 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-	transition: background 0.15s ease, border-color 0.15s ease;
+	pointer-events: auto !important;
+	cursor: pointer;
+	z-index: 10;
+	transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
 }
 
 .node-variable-pill:hover {
-	background: rgba(56, 189, 248, 0.25);
-	border-color: rgba(56, 189, 248, 0.6);
+	background: rgba(56, 189, 248, 0.3);
+	border-color: #38bdf8;
+	transform: translateY(-1px);
+}
+
+.node-variable-pill * {
+	pointer-events: auto !important;
 }
 
 .var-pill-text {
@@ -1747,15 +1755,229 @@
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 12px;
-	height: 12px;
+	width: 14px;
+	height: 14px;
 	border-radius: 50%;
 	cursor: pointer;
 	color: #94a3b8;
-	font-size: 9px;
+	font-size: 10px;
+	pointer-events: auto !important;
+	z-index: 20;
+	transition: background 0.15s ease, color 0.15s ease;
 }
 
 .var-pill-remove:hover {
+	color: #ef4444;
+	background: rgba(239, 68, 68, 0.25);
+}
+
+/* --- Inline Variable Edit Popover --- */
+.workflow-variable-popover {
+	position: fixed;
+	z-index: 9999;
+	background: #1e293b;
+	border: 1px solid #334155;
+	border-radius: 8px;
+	box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
+	padding: 12px;
+	width: 250px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.workflow-variable-popover-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.workflow-variable-popover-header .popover-title-wrapper {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 12px;
+	font-weight: 600;
+	color: #38bdf8;
+}
+
+.workflow-variable-popover-close {
+	cursor: pointer;
+	color: #94a3b8;
+	font-size: 12px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	border-radius: 3px;
+}
+
+.workflow-variable-popover-close:hover {
+	color: #f1f5f9;
+	background: rgba(255, 255, 255, 0.1);
+}
+
+.workflow-var-popover-actions {
+	display: flex;
+	gap: 6px;
+	margin-top: 4px;
+}
+
+/* --- Drawer Tabs & Variables Table Styles --- */
+.drawer-tabs {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.drawer-tab {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 8px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-size: 11px;
+	font-weight: 600;
+	color: #94a3b8;
+	transition: background 0.15s ease, color 0.15s ease;
+	user-select: none;
+}
+
+.drawer-tab.active {
+	color: #38bdf8;
+	background: rgba(56, 189, 248, 0.15);
+}
+
+.drawer-tab:hover:not(.active) {
+	color: #e2e8f0;
+	background: rgba(255, 255, 255, 0.06);
+}
+
+.drawer-tab-badge {
+	font-size: 10px;
+	padding: 0 5px;
+	border-radius: 10px;
+	background: rgba(255, 255, 255, 0.08);
+	color: #cbd5e1;
+}
+
+.drawer-tab.active .drawer-tab-badge {
+	background: rgba(56, 189, 248, 0.25);
+	color: #38bdf8;
+}
+
+.workflow-vars-body {
+	flex: 1;
+	overflow-y: auto;
+	padding: 10px 14px;
+	background: #090d16;
+}
+
+.workflow-vars-empty {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	height: 100px;
+	color: #64748b;
+	font-size: 12px;
+	text-align: center;
+}
+
+.workflow-vars-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 12px;
+	color: #cbd5e1;
+}
+
+.workflow-vars-table th {
+	text-align: left;
+	padding: 6px 10px;
+	font-size: 11px;
+	font-weight: 600;
+	color: #64748b;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+
+.workflow-vars-table td {
+	padding: 8px 10px;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+	vertical-align: middle;
+}
+
+.workflow-vars-table tr:hover td {
+	background: rgba(255, 255, 255, 0.02);
+}
+
+.vars-table-input {
+	height: 24px;
+	background: rgba(0, 0, 0, 0.3);
+	border: 1px solid rgba(255, 255, 255, 0.15);
+	border-radius: 4px;
+	padding: 0 6px;
+	color: #f1f5f9;
+	font-size: 11px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	outline: none;
+	width: 100%;
+	max-width: 140px;
+}
+
+.vars-table-input:focus {
+	border-color: #38bdf8;
+}
+
+.vars-table-node-link {
+	color: #2dd4bf;
+	cursor: pointer;
+	font-weight: 500;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+.vars-table-node-link:hover {
+	color: #5eead4;
+}
+
+.vars-table-val-badge {
+	display: inline-block;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	font-size: 11px;
+	padding: 1px 6px;
+	border-radius: 4px;
+	background: rgba(56, 189, 248, 0.15);
+	color: #38bdf8;
+}
+
+.vars-table-val-badge.not-run {
+	background: rgba(255, 255, 255, 0.06);
+	color: #64748b;
+}
+
+.vars-table-action-btn {
+	cursor: pointer;
+	color: #94a3b8;
+	font-size: 12px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	border-radius: 4px;
+	transition: background 0.15s ease, color 0.15s ease;
+}
+
+.vars-table-action-btn:hover {
 	color: #ef4444;
 	background: rgba(239, 68, 68, 0.2);
 }
