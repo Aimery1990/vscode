@@ -27,6 +27,7 @@ interface IFlowchartNode {
 	height: number;
 	label: string;
 	imports?: { type: string; name: string; uri?: string }[];
+	outputVariable?: { name: string; initialValue: string; currentValue?: any };
 }
 
 interface IFlowchartLink {
@@ -165,7 +166,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			logs: []
 		};
 
-		// Initialize all node states to pending
+		// Initialize all node states to pending and register output variables
 		for (const node of flowchartData.nodes) {
 			run.nodeStates[node.id] = {
 				nodeId: node.id,
@@ -174,6 +175,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				status: 'pending',
 				executedTickets: []
 			};
+			if (node.outputVariable && node.outputVariable.name) {
+				const initVal = this._resolveValue(node.outputVariable.initialValue || 'None', {});
+				run.contextVariables[node.outputVariable.name] = initVal;
+				node.outputVariable.currentValue = initVal;
+			}
 		}
 
 		this._runs.set(runId, run);
@@ -357,6 +363,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							nodeState.completedAt = Date.now();
 							nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
 							this._emitLog(run, 'info', `Completed node: '${node.label}' in ${nodeState.durationMs}ms`, { nodeId: node.id });
+
+							// Assign to bound context variable if present
+							if (node.outputVariable && node.outputVariable.name) {
+								const assignedVal = nodeState.output?.value ?? nodeState.output?.result ?? this._resolveValue(node.outputVariable.initialValue || 'None', run.contextVariables);
+								run.contextVariables[node.outputVariable.name] = assignedVal;
+								node.outputVariable.currentValue = assignedVal;
+								this._emitLog(run, 'info', `Variable '${node.outputVariable.name}' assigned: ${typeof assignedVal === 'object' ? JSON.stringify(assignedVal) : assignedVal}`, { nodeId: node.id });
+							}
 						} catch (err: any) {
 							nodeState.status = 'failed';
 							nodeState.error = err.message || String(err);
@@ -544,24 +558,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		if (conditionalLinks.length > 0) {
 			const matchedNodes: IFlowchartNode[] = [];
 			for (const link of outgoingLinks) {
-				const label = (link.label || '').trim().toLowerCase();
-				if (!label) continue;
+				const rawLabel = (link.label || '').trim();
+				if (!rawLabel) continue;
 
-				if (label === 'yes' || label === 'true' || label === 'success' || label === 'pass' || label === '通过' || label === '是') {
+				const condResult = this._evaluateCondition(rawLabel, run.contextVariables, run.nodeStates[currentNode.id]);
+				if (condResult === true) {
 					const target = data.nodes.find(n => n.id === link.to);
 					if (target) {
-						this._emitLog(run, 'info', `Branch matched: '${link.label}' -> navigating to '${target.label}'`);
+						this._emitLog(run, 'info', `Condition MATCHED: '${link.label}' -> navigating to '${target.label}'`);
 						matchedNodes.push(target);
 					}
-				} else if (label === 'no' || label === 'false' || label === 'fail' || label === 'reject' || label === '拒绝' || label === '否') {
-					const state = run.nodeStates[currentNode.id];
-					if (state && (state.status === 'failed' || state.output?.approved === false || state.output?.action === 'rejected')) {
-						const target = data.nodes.find(n => n.id === link.to);
-						if (target) {
-							this._emitLog(run, 'info', `Negative branch matched: '${link.label}' -> navigating to '${target.label}'`);
-							matchedNodes.push(target);
-						}
-					}
+				} else if (condResult === false) {
+					this._emitLog(run, 'info', `Condition REJECTED: '${link.label}'`);
 				}
 			}
 
@@ -588,6 +596,119 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 		this._emitLog(run, 'info', `Parallel fork: simultaneously executing ${targetNodes.length} branches -> [${targetNodes.map(n => `'${n.label}'`).join(', ')}]`);
 		return targetNodes;
+	}
+
+	private _evaluateCondition(
+		expr: string,
+		context: Record<string, any>,
+		nodeState?: IWorkflowNodeExecutionState
+	): boolean | null {
+		const raw = expr.trim();
+		if (!raw) return null;
+
+		// 1. Check standard boolean and status keywords
+		const lower = raw.toLowerCase();
+		if (lower === 'true' || lower === 'yes' || lower === 'success' || lower === 'pass' || lower === '通过' || lower === '是') {
+			return true;
+		}
+		if (lower === 'false' || lower === 'no' || lower === 'fail' || lower === 'reject' || lower === '拒绝' || lower === '否') {
+			if (nodeState && (nodeState.status === 'failed' || nodeState.output?.approved === false || nodeState.output?.action === 'rejected')) {
+				return true;
+			}
+			return false;
+		}
+
+		// 2. Python comparison operators (in order of length/precedence)
+		const opTokens = ['is not', '!=', '==', '<=', '>=', 'is', '<', '>'];
+		let matchedOp: string | undefined;
+		let opIndex = -1;
+
+		for (const op of opTokens) {
+			if (op === 'is not' || op === 'is') {
+				const regex = new RegExp(`\\b${op.replace(' ', '\\s+')}\\b`, 'i');
+				const match = regex.exec(raw);
+				if (match) {
+					matchedOp = op;
+					opIndex = match.index;
+					break;
+				}
+			} else {
+				const idx = raw.indexOf(op);
+				if (idx !== -1) {
+					matchedOp = op;
+					opIndex = idx;
+					break;
+				}
+			}
+		}
+
+		if (!matchedOp || opIndex === -1) {
+			// Single variable or truthiness check
+			const val = this._resolveValue(raw, context);
+			if (val !== undefined && val !== null) {
+				return Boolean(val);
+			}
+			return null;
+		}
+
+		const leftStr = raw.substring(0, opIndex).trim();
+		const rightStr = raw.substring(opIndex + matchedOp.length).trim();
+
+		const left = this._resolveValue(leftStr, context);
+		const right = this._resolveValue(rightStr, context);
+
+		const opLower = matchedOp.toLowerCase();
+		switch (opLower) {
+			case '==':
+			case 'is':
+				return left == right;
+			case '!=':
+			case 'is not':
+				return left != right;
+			case '<':
+				return Number(left) < Number(right);
+			case '>':
+				return Number(left) > Number(right);
+			case '<=':
+				return Number(left) <= Number(right);
+			case '>=':
+				return Number(left) >= Number(right);
+			default:
+				return null;
+		}
+	}
+
+	private _resolveValue(token: string, context: Record<string, any>): any {
+		const trimmed = token.trim();
+		if (!trimmed) return undefined;
+
+		// Python literals
+		if (trimmed === 'None' || trimmed === 'null') return null;
+		if (trimmed === 'True' || trimmed === 'true') return true;
+		if (trimmed === 'False' || trimmed === 'false') return false;
+
+		// Numeric literal
+		if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+			return Number(trimmed);
+		}
+
+		// Quoted string literal ('text' or "text")
+		if ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"'))) {
+			return trimmed.substring(1, trimmed.length - 1);
+		}
+
+		// Lookup in context
+		if (context && Object.prototype.hasOwnProperty.call(context, trimmed)) {
+			return context[trimmed];
+		}
+
+		// Support template syntax {{var}}
+		const tmpl = trimmed.match(/^\{\{\s*([a-zA-Z0-9_]+)\s*\}\}$/);
+		if (tmpl && context && Object.prototype.hasOwnProperty.call(context, tmpl[1])) {
+			return context[tmpl[1]];
+		}
+
+		return trimmed;
 	}
 
 	private _findEntryNode(data: IFlowchartData, entryNodeId?: string): IFlowchartNode | undefined {
