@@ -28,6 +28,7 @@ interface IFlowchartNode {
 	label: string;
 	imports?: { type: string; name: string; uri?: string }[];
 	outputVariable?: { name: string; initialValue: string; currentValue?: any };
+	outputVariables?: { name: string; initialValue: string; currentValue?: any }[];
 }
 
 interface IFlowchartLink {
@@ -176,10 +177,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				status: 'pending',
 				executedTickets: []
 			};
-			if (node.outputVariable && node.outputVariable.name) {
-				const initVal = this._resolveValue(node.outputVariable.initialValue || 'None', {});
-				run.contextVariables[node.outputVariable.name] = initVal;
-				node.outputVariable.currentValue = initVal;
+			const nodeVars = this._getNodeVars(node);
+			for (const v of nodeVars) {
+				if (v.name) {
+					const initVal = this._resolveValue(v.initialValue || 'None', {});
+					run.contextVariables[v.name] = initVal;
+					v.currentValue = initVal;
+				}
 			}
 		}
 
@@ -365,16 +369,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
 							this._emitLog(run, 'info', `Completed node: '${node.label}' in ${nodeState.durationMs}ms`, { nodeId: node.id });
 
-							// Assign to bound context variable if present
-							if (node.outputVariable && node.outputVariable.name) {
-								let assignedVal = nodeState.output?.value !== undefined ? nodeState.output.value : (nodeState.output?.returnValue !== undefined ? nodeState.output.returnValue : undefined);
-								if (assignedVal === undefined) {
-									// Maintain or resolve initial value
-									assignedVal = this._resolveValue(node.outputVariable.initialValue || 'None', run.contextVariables);
+							// Assign to bound context variables if present
+							const nodeVars = this._getNodeVars(node);
+							for (const v of nodeVars) {
+								if (v.name) {
+									let assignedVal = nodeState.output?.[v.name] ?? (nodeVars.length === 1 ? (nodeState.output?.value ?? nodeState.output?.returnValue) : undefined);
+									if (assignedVal === undefined) {
+										assignedVal = this._resolveValue(v.initialValue || 'None', run.contextVariables);
+									}
+									run.contextVariables[v.name] = assignedVal;
+									v.currentValue = assignedVal;
+									this._emitLog(run, 'info', `Variable '${v.name}' value is: ${typeof assignedVal === 'object' ? JSON.stringify(assignedVal) : assignedVal}`, { nodeId: node.id });
 								}
-								run.contextVariables[node.outputVariable.name] = assignedVal;
-								node.outputVariable.currentValue = assignedVal;
-								this._emitLog(run, 'info', `Variable '${node.outputVariable.name}' value is: ${typeof assignedVal === 'object' ? JSON.stringify(assignedVal) : assignedVal}`, { nodeId: node.id });
 							}
 						} catch (err: any) {
 							nodeState.status = 'failed';
@@ -690,6 +696,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			default:
 				return null;
 		}
+	}
+
+	private _getNodeVars(node: IFlowchartNode): { name: string; initialValue: string; currentValue?: any }[] {
+		if (Array.isArray(node.outputVariables) && node.outputVariables.length > 0) {
+			return node.outputVariables;
+		}
+		if (node.outputVariable && node.outputVariable.name) {
+			return [node.outputVariable];
+		}
+		return [];
 	}
 
 	private _resolveValue(token: string, context: Record<string, any>): any {
