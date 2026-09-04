@@ -396,7 +396,37 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 											expr = expr.substring(1).trim();
 										}
 
-										if (expr === 'ticket.output' || expr === 'ticket' || expr === '@ticket') {
+										// Check if expr references a ticket or unpack index: e.g. "@my_ticket", "@my_ticket[0]", "ticket.output[1]"
+										const ticketMatch = expr.match(/^@?([a-zA-Z0-9_]+)(\[(\d+)\])?$/);
+										const cleanTarget = ticketMatch ? ticketMatch[1] : '';
+										const unpackIdx = ticketMatch && ticketMatch[3] !== undefined ? parseInt(ticketMatch[3], 10) : undefined;
+
+										const matchedTicket = nodeState.executedTickets?.find(t =>
+											t.ticketName === cleanTarget ||
+											t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_') === cleanTarget ||
+											t.ticketId === cleanTarget
+										) || (cleanTarget === 'ticket' ? nodeState.executedTickets?.[nodeState.executedTickets.length - 1] : undefined);
+
+										if (matchedTicket) {
+											let outVal = matchedTicket.output;
+											if (typeof outVal === 'string' && (outVal.startsWith('[') || outVal.startsWith('{'))) {
+												try { outVal = JSON.parse(outVal); } catch { }
+											}
+											if (unpackIdx !== undefined) {
+												if (Array.isArray(outVal)) {
+													assignedVal = outVal[unpackIdx];
+												} else if (typeof outVal === 'object' && outVal !== null) {
+													assignedVal = Object.values(outVal)[unpackIdx];
+												} else if (typeof outVal === 'string' && outVal.includes(',')) {
+													const parts = outVal.split(',').map(s => s.trim());
+													assignedVal = parts[unpackIdx];
+												} else {
+													assignedVal = outVal;
+												}
+											} else {
+												assignedVal = outVal;
+											}
+										} else if (expr === 'ticket.output' || expr === 'ticket' || expr === '@ticket') {
 											const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
 											assignedVal = lastTicket?.output ?? nodeState.output?.result ?? nodeState.output?.output ?? 'success';
 										} else if (expr === 'ticket.status' || expr === '@ticket.status') {

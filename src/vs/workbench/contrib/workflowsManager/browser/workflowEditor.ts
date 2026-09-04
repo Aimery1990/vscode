@@ -815,9 +815,8 @@ export class WorkflowEditor extends EditorPane {
 						const x = Math.round(rawX / grid) * grid;
 						const y = Math.round(rawY / grid) * grid;
 
-						if (parsed && parsed.kind === 'variable') {
+						if (parsed && (parsed.kind === 'variable' || parsed.kind === 'variable_widget')) {
 							const id = `node_${Date.now()}`;
-							const varName = this._generateNextVarName();
 							const newNode: IFlowchartNode = {
 								id,
 								type: 'round-rect',
@@ -826,8 +825,7 @@ export class WorkflowEditor extends EditorPane {
 								width: 100,
 								height: 50,
 								label: 'State',
-								outputVariables: [{ name: varName, initialValue: 'None' }],
-								outputVariable: { name: varName, initialValue: 'None' },
+								outputVariables: [],
 								color: this._activeNodeColor,
 								textColor: this._activeTextColor,
 								textAlign: this._activeTextAlign,
@@ -845,7 +843,9 @@ export class WorkflowEditor extends EditorPane {
 							this._drawLinks();
 							if (this._inspectorEl) this._renderInspector(this._inspectorEl);
 							this._refreshVariablesDrawer(id);
-							this._notificationService.info(`Created new node with variable '${varName}'`);
+							setTimeout(() => {
+								this._openNodeVariableInlineEditor(newNode);
+							}, 40);
 							return;
 						}
 
@@ -1571,7 +1571,7 @@ export class WorkflowEditor extends EditorPane {
 		varItem.setAttribute('draggable', 'true');
 		varItem.title = localize('dragVariableTitle', 'Context Variable (Drag into any node to bind output)');
 		varItem.ondragstart = (e: DragEvent) => {
-			e.dataTransfer?.setData('text/plain', JSON.stringify({ kind: 'variable', name: this._generateNextVarName(), initialValue: 'None' }));
+			e.dataTransfer?.setData('text/plain', JSON.stringify({ kind: 'variable_widget' }));
 			if (e.dataTransfer) {
 				e.dataTransfer.effectAllowed = 'copy';
 			}
@@ -1587,10 +1587,10 @@ export class WorkflowEditor extends EditorPane {
 				const selectedId = Array.from(this._selectedNodeIds)[0];
 				const targetNode = this._data.nodes.find(n => n.id === selectedId);
 				if (targetNode) {
-					this._bindVariableToNode(targetNode);
+					this._openNodeVariableInlineEditor(targetNode);
 				}
 			} else {
-				this._notificationService.info(localize('dragVariableHint', 'Drag this variable onto any node, or select a node and click here to bind.'));
+				this._notificationService.info(localize('dragVariableHint', 'Drag Variable onto any node to define, update, or capture ticket results.'));
 			}
 		};
 
@@ -2763,8 +2763,8 @@ export class WorkflowEditor extends EditorPane {
 				// 1. Context Variable dropped onto node
 				try {
 					const parsed = JSON.parse(dataStr);
-					if (parsed && parsed.kind === 'variable') {
-						this._bindVariableToNode(node, parsed.name, parsed.initialValue);
+					if (parsed && (parsed.kind === 'variable' || parsed.kind === 'variable_widget')) {
+						this._openNodeVariableInlineEditor(node);
 						return;
 					}
 				} catch { }
@@ -2827,7 +2827,7 @@ export class WorkflowEditor extends EditorPane {
 					varPill.ondblclick = (e) => {
 						e.stopPropagation();
 						e.preventDefault();
-						this._showVariablePillInlineEditor(node, v, varPill);
+						this._openNodeVariableInlineEditor(node, v);
 					};
 
 					const vBadge = append(varPill, $('.var-tag-icon'));
@@ -2841,13 +2841,18 @@ export class WorkflowEditor extends EditorPane {
 						} else if (expr.startsWith(`${v.name}=`)) {
 							expr = expr.substring(`${v.name}=`.length).trim();
 						}
-						if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
+						const unpackMatch = expr.match(/^@?([a-zA-Z0-9_]+)\[(\d+)\]$/);
+						if (unpackMatch) {
+							pillText = `${v.name} ← @${unpackMatch[1]}[${unpackMatch[2]}]`;
+						} else if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
 							pillText = `${v.name} += 1`;
 						} else if (expr === '- 1' || expr === '--' || expr === '-= 1' || expr === '-=1') {
 							pillText = `${v.name} -= 1`;
 						} else if (expr.startsWith('+=') || expr.startsWith('-=') || expr.startsWith('*=') || expr.startsWith('/=')) {
 							pillText = `${v.name} ${expr}`;
-						} else if (expr === 'ticket.output' || expr === 'ticket' || expr === '@ticket') {
+						} else if (expr.startsWith('@')) {
+							pillText = `${v.name} = ${expr}`;
+						} else if (expr === 'ticket.output' || expr === 'ticket') {
 							pillText = `${v.name} ← Ticket`;
 						} else if (expr === 'ticket.status') {
 							pillText = `${v.name} ← Status`;
@@ -3188,74 +3193,344 @@ export class WorkflowEditor extends EditorPane {
 		};
 	}
 
-	private _showVariablePillInlineEditor(node: IFlowchartNode, v: INodeVariable, pillEl: HTMLElement): void {
-		const textSpan = pillEl.querySelector('.var-pill-text') as HTMLElement;
-		if (!textSpan) return;
+	private _activeVariableDraftInputEl: HTMLElement | null = null;
 
-		const currentExpr = v.expression || v.initialValue || '';
-		const input = document.createElement('input');
+	private _openNodeVariableInlineEditor(node: IFlowchartNode, targetVar?: INodeVariable): void {
+		if (this._activeVariableDraftInputEl) {
+			this._activeVariableDraftInputEl.remove();
+			this._activeVariableDraftInputEl = null;
+		}
+
+		if (!this._canvas) return;
+		const nodeEl = this._canvas.querySelector(`.flowchart-node[data-node-id="${node.id}"]`) as HTMLElement;
+		if (!nodeEl) return;
+
+		let varsContainer = nodeEl.querySelector('.node-variables-container') as HTMLElement;
+		if (!varsContainer) {
+			const contentWrapper = nodeEl.querySelector('.node-content-wrapper') as HTMLElement || nodeEl;
+			varsContainer = append(contentWrapper, $('.node-variables-container'));
+			varsContainer.style.display = 'flex';
+			varsContainer.style.flexWrap = 'wrap';
+			varsContainer.style.gap = '4px';
+			varsContainer.style.marginTop = '4px';
+			varsContainer.style.justifyContent = 'center';
+		}
+
+		let targetPillEl: HTMLElement | null = null;
+		if (targetVar) {
+			const allPills = varsContainer.querySelectorAll('.node-variable-pill');
+			allPills.forEach((p) => {
+				const text = p.querySelector('.var-pill-text')?.textContent || '';
+				if (text.startsWith(targetVar.name)) {
+					targetPillEl = p as HTMLElement;
+					targetPillEl.style.display = 'none';
+				}
+			});
+		}
+
+		const draftWrapper = document.createElement('div');
+		draftWrapper.className = 'node-variable-draft-wrapper';
+		this._activeVariableDraftInputEl = draftWrapper;
+
+		const vBadge = append(draftWrapper, $('.var-tag-icon'));
+		vBadge.textContent = '[V]';
+
+		const input = append(draftWrapper, $('input.node-variable-draft-input')) as HTMLInputElement;
 		input.type = 'text';
-		input.className = 'var-pill-inline-input';
-		input.value = currentExpr;
-		input.placeholder = 'e.g. += 1, = ticket.output, 0';
-		input.style.width = `${Math.max(60, textSpan.offsetWidth + 24)}px`;
-		input.style.height = '18px';
-		input.style.fontSize = '10px';
-		input.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
-		input.style.background = 'rgba(0, 0, 0, 0.85)';
-		input.style.color = '#38bdf8';
-		input.style.border = '1px solid #38bdf8';
-		input.style.borderRadius = '3px';
-		input.style.padding = '0 4px';
-		input.style.outline = 'none';
-		input.style.zIndex = '100';
+		input.placeholder = 'e.g. monitor = 0, @monitor++, res = @ticket';
+
+		if (targetVar) {
+			if (targetVar.expression) {
+				const expr = targetVar.expression.trim();
+				input.value = expr.startsWith(targetVar.name) ? expr : `${targetVar.name} ${expr.startsWith('=') || expr.startsWith('+') || expr.startsWith('-') ? expr : `= ${expr}`}`;
+			} else {
+				input.value = `${targetVar.name} = ${targetVar.initialValue || 'None'}`;
+			}
+		}
+
+		const collectSuggestions = () => {
+			const suggestions: { name: string; type: 'var' | 'ticket' | 'subwf'; detail: string }[] = [];
+			const seen = new Set<string>();
+
+			for (const n of this._data?.nodes || []) {
+				for (const v of this._getNodeVariables(n)) {
+					if (!seen.has(v.name)) {
+						seen.add(v.name);
+						suggestions.push({
+							name: v.name,
+							type: 'var',
+							detail: `Variable (init: ${v.initialValue || 'None'}) [${n.label}]`
+						});
+					}
+				}
+			}
+
+			for (const imp of node.imports || []) {
+				const ticketName = imp.name.replace(/[^a-zA-Z0-9_]/g, '_');
+				if (!seen.has(ticketName)) {
+					seen.add(ticketName);
+					suggestions.push({
+						name: ticketName,
+						type: imp.type === 'workflow' ? 'subwf' : 'ticket',
+						detail: `${imp.type}: ${imp.name}`
+					});
+				}
+			}
+
+			for (const other of this._data?.nodes || []) {
+				if (other.id === node.id) continue;
+				for (const imp of other.imports || []) {
+					const ticketName = imp.name.replace(/[^a-zA-Z0-9_]/g, '_');
+					if (!seen.has(ticketName)) {
+						seen.add(ticketName);
+						suggestions.push({
+							name: ticketName,
+							type: imp.type === 'workflow' ? 'subwf' : 'ticket',
+							detail: `${imp.type}: ${imp.name} [${other.label}]`
+						});
+					}
+				}
+			}
+
+			return suggestions;
+		};
+
+		let popover: HTMLElement | null = null;
+		let activeAcIdx = 0;
+		let currentMatches: { name: string; type: 'var' | 'ticket' | 'subwf'; detail: string }[] = [];
+
+		const closePopover = () => {
+			if (popover) {
+				popover.remove();
+				popover = null;
+			}
+		};
+
+		const insertAcItem = (name: string) => {
+			const selStart = input.selectionStart || 0;
+			const val = input.value;
+			const textBefore = val.slice(0, selStart);
+			const textAfter = val.slice(selStart);
+			const atIdx = textBefore.lastIndexOf('@');
+			if (atIdx !== -1) {
+				input.value = textBefore.slice(0, atIdx) + `@${name}` + (textAfter.startsWith(' ') ? textAfter : ` ${textAfter}`);
+				const newCursor = atIdx + name.length + 2;
+				input.selectionStart = input.selectionEnd = newCursor;
+			} else {
+				input.value = val + `@${name} `;
+			}
+			closePopover();
+			input.focus();
+		};
+
+		const updateAc = () => {
+			const selStart = input.selectionStart || 0;
+			const textBefore = input.value.slice(0, selStart);
+			const match = textBefore.match(/@([a-zA-Z0-9_]*)$/);
+			if (!match) {
+				closePopover();
+				return;
+			}
+
+			const query = match[1].toLowerCase();
+			const all = collectSuggestions();
+			currentMatches = all.filter(item => item.name.toLowerCase().includes(query));
+			if (currentMatches.length === 0) {
+				closePopover();
+				return;
+			}
+
+			if (!popover) {
+				popover = append(draftWrapper, $('.node-variable-ac-popover'));
+			}
+			clearNode(popover);
+			activeAcIdx = Math.max(0, Math.min(activeAcIdx, currentMatches.length - 1));
+
+			currentMatches.forEach((item, idx) => {
+				const row = append(popover!, $(`.node-variable-ac-item${idx === activeAcIdx ? '.active' : ''}`));
+				const badge = append(row, $(`.node-variable-ac-badge.${item.type}`));
+				badge.textContent = item.type === 'var' ? 'VAR' : (item.type === 'subwf' ? 'SUBWF' : 'TICKET');
+				const nameEl = append(row, $('.node-variable-ac-name'));
+				nameEl.textContent = `@${item.name}`;
+				const detailEl = append(row, $('.node-variable-ac-detail'));
+				detailEl.textContent = item.detail;
+
+				row.onmousedown = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+				};
+				row.onclick = (e) => {
+					e.stopPropagation();
+					insertAcItem(item.name);
+				};
+			});
+		};
+
+		input.oninput = () => {
+			updateAc();
+		};
 
 		let committed = false;
 		const commit = () => {
 			if (committed) return;
 			committed = true;
-			const val = input.value.trim();
-			if (val) {
-				if (/^(\+\=|\-\=|\*\=|\/\=|\+|\-|\=)/.test(val) || val.includes('ticket') || val.includes('@') || val.includes('+') || val.includes('-')) {
-					v.expression = val;
-				} else {
-					const otherNodesWithVar = (this._data?.nodes || []).filter(n => n.id !== node.id && this._getNodeVariables(n).some(ov => ov.name === v.name));
-					if (otherNodesWithVar.length > 0) {
-						v.expression = val;
-					} else {
-						v.initialValue = val;
-					}
-				}
-				this._saveFlowchartData();
-				this._renderNodes();
-				this._drawLinks();
-				if (this._inspectorEl) this._renderInspector(this._inspectorEl);
-				this._refreshVariablesDrawer();
+			closePopover();
+			const text = input.value.trim();
+			if (text) {
+				this._parseAndApplyVariableExpression(node, text, targetVar);
 			} else {
-				this._renderNodes();
+				if (targetPillEl) targetPillEl.style.display = '';
+				draftWrapper.remove();
+				this._activeVariableDraftInputEl = null;
 			}
 		};
 
 		input.onkeydown = (e) => {
 			e.stopPropagation();
+			if (popover && currentMatches.length > 0) {
+				if (e.key === 'ArrowDown') {
+					e.preventDefault();
+					activeAcIdx = (activeAcIdx + 1) % currentMatches.length;
+					updateAc();
+					return;
+				} else if (e.key === 'ArrowUp') {
+					e.preventDefault();
+					activeAcIdx = (activeAcIdx - 1 + currentMatches.length) % currentMatches.length;
+					updateAc();
+					return;
+				} else if (e.key === 'Enter' || e.key === 'Tab') {
+					e.preventDefault();
+					insertAcItem(currentMatches[activeAcIdx].name);
+					return;
+				} else if (e.key === 'Escape') {
+					e.preventDefault();
+					closePopover();
+					return;
+				}
+			}
+
 			if (e.key === 'Enter') {
 				e.preventDefault();
 				commit();
 			} else if (e.key === 'Escape') {
 				e.preventDefault();
 				committed = true;
-				this._renderNodes();
+				closePopover();
+				if (targetPillEl) targetPillEl.style.display = '';
+				draftWrapper.remove();
+				this._activeVariableDraftInputEl = null;
 			}
 		};
 
 		input.onblur = () => {
-			commit();
+			setTimeout(() => {
+				commit();
+			}, 180);
 		};
 
-		textSpan.style.display = 'none';
-		pillEl.insertBefore(input, textSpan);
+		varsContainer.appendChild(draftWrapper);
 		input.focus();
-		input.select();
+		if (targetVar) {
+			input.select();
+		}
+	}
+
+	private _parseAndApplyVariableExpression(node: IFlowchartNode, rawText: string, targetVar?: INodeVariable): void {
+		const trimmed = rawText.trim();
+		if (!trimmed) return;
+
+		const vars = this._getNodeVariables(node);
+
+		// Case A: Multiple return / Tuple unpacking: "var1, var2 = @script" or "a, b = expr"
+		const unpackMatch = trimmed.match(/^([a-zA-Z0-9_,\s@]+)\s*=\s*(.+)$/);
+		if (unpackMatch && unpackMatch[1].includes(',')) {
+			const leftNames = unpackMatch[1].split(',').map(s => s.trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_]/g, '_')).filter(Boolean);
+			const rightExpr = unpackMatch[2].trim();
+
+			if (targetVar) {
+				const idx = vars.findIndex(v => v.name === targetVar.name);
+				if (idx !== -1) vars.splice(idx, 1);
+			}
+
+			for (let i = 0; i < leftNames.length; i++) {
+				const name = leftNames[i];
+				const expr = `${rightExpr}[${i}]`;
+				const existing = vars.find(v => v.name === name);
+				if (existing) {
+					existing.expression = expr;
+				} else {
+					vars.push({
+						name,
+						initialValue: 'None',
+						expression: expr
+					});
+				}
+			}
+		} else {
+			// Case B & C: Single mutation or assignment
+			let varName = '';
+			let expression: string | undefined = undefined;
+			let initialValue: string = 'None';
+
+			const incMatch = trimmed.match(/^@?([a-zA-Z0-9_]+)\s*(\+\+|--)$/);
+			const opMatch = trimmed.match(/^@?([a-zA-Z0-9_]+)\s*(\+=|-=|\*=|\/=|%=)\s*(.+)$/);
+			const assignMatch = trimmed.match(/^@?([a-zA-Z0-9_]+)\s*=\s*(.+)$/);
+
+			if (incMatch) {
+				varName = incMatch[1];
+				expression = incMatch[2] === '++' ? '+= 1' : '-= 1';
+			} else if (opMatch) {
+				varName = opMatch[1];
+				expression = `${opMatch[2]} ${opMatch[3].trim()}`;
+			} else if (assignMatch) {
+				varName = assignMatch[1];
+				const rhs = assignMatch[2].trim();
+				if (rhs.startsWith('@') || rhs.startsWith('ticket') || rhs.includes('+') || rhs.includes('-') || rhs.includes('*') || rhs.includes('/')) {
+					expression = rhs;
+					initialValue = 'None';
+				} else {
+					const otherNodesWithVar = (this._data?.nodes || []).filter(n => n.id !== node.id && this._getNodeVariables(n).some(ov => ov.name === varName));
+					if (otherNodesWithVar.length > 0) {
+						expression = rhs;
+					} else {
+						initialValue = rhs;
+						expression = undefined;
+					}
+				}
+			} else if (/^(\+\+|--|\+=|-=|\*=|\/=|%=)/.test(trimmed)) {
+				varName = targetVar ? targetVar.name : (vars[0]?.name || this._generateNextVarName());
+				expression = trimmed.startsWith('++') ? '+= 1' : (trimmed.startsWith('--') ? '-= 1' : trimmed);
+			} else {
+				varName = trimmed.replace(/^@/, '').replace(/[^a-zA-Z0-9_]/g, '_') || this._generateNextVarName();
+				initialValue = 'None';
+			}
+
+			if (targetVar && targetVar.name !== varName) {
+				this._renameVariableGlobally(targetVar.name, varName);
+				targetVar.name = varName;
+				if (expression !== undefined) targetVar.expression = expression;
+				if (initialValue !== 'None') targetVar.initialValue = initialValue;
+			} else {
+				const existing = vars.find(v => v.name === varName);
+				if (existing) {
+					if (expression !== undefined) existing.expression = expression;
+					if (initialValue !== 'None') existing.initialValue = initialValue;
+				} else {
+					vars.push({
+						name: varName,
+						initialValue,
+						expression
+					});
+				}
+			}
+		}
+
+		node.outputVariable = vars[0];
+		this._saveFlowchartData();
+		this._renderNodes();
+		this._drawLinks();
+		if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+		this._refreshVariablesDrawer();
 	}
 
 	private _findNonOverlappingPosition(
