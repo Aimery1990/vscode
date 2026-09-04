@@ -1707,9 +1707,64 @@
 }
 
 /* --- Context Variable Badge & Inspector Styles --- */
-.variable-toolbar-item span {
-	font-size: 16px;
+.var-icon-badge {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	font-weight: 700;
+	font-size: 11px;
+	line-height: 1;
 	color: #38bdf8;
+	letter-spacing: -0.5px;
+	user-select: none;
+}
+
+.variable-toolbar-item .var-icon-badge {
+	font-size: 13px;
+	font-weight: 800;
+	color: #38bdf8;
+}
+
+.var-card-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: 6px;
+}
+
+.top-right-delete-btn {
+	cursor: pointer;
+	color: #94a3b8;
+	padding: 3px 5px;
+	border-radius: 4px;
+	transition: background 0.15s ease, color 0.15s ease;
+}
+
+.top-right-delete-btn:hover {
+	color: #ef4444;
+	background: rgba(239, 68, 68, 0.2);
+}
+
+.vars-table-ref-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 2px 7px;
+	border-radius: 4px;
+	background: rgba(147, 51, 234, 0.15);
+	border: 1px solid rgba(147, 51, 234, 0.35);
+	color: #c084fc;
+	font-size: 11px;
+	font-weight: 600;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	cursor: pointer;
+	transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.vars-table-ref-badge:hover {
+	background: rgba(147, 51, 234, 0.3);
+	border-color: #c084fc;
+	color: #e9d5ff;
 }
 
 .node-variable-pill {

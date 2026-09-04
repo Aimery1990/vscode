@@ -807,14 +807,49 @@ export class WorkflowEditor extends EditorPane {
 					}
 
 					try {
-						const { type, label } = JSON.parse(dataStr);
+						const parsed = JSON.parse(dataStr);
 						const rect = this._canvas!.getBoundingClientRect();
 						const rawX = (e.clientX - rect.left) / this._zoomLevel;
 						const rawY = (e.clientY - rect.top) / this._zoomLevel;
 						const grid = 5;
 						const x = Math.round(rawX / grid) * grid;
 						const y = Math.round(rawY / grid) * grid;
-						this._addNewNodeAt(type, label, x, y);
+
+						if (parsed && parsed.kind === 'variable') {
+							const id = `node_${Date.now()}`;
+							const varName = this._generateNextVarName();
+							const newNode: IFlowchartNode = {
+								id,
+								type: 'round-rect',
+								x: Math.max(10, x - 50),
+								y: Math.max(10, y - 25),
+								width: 100,
+								height: 50,
+								label: 'State',
+								outputVariables: [{ name: varName, initialValue: 'None' }],
+								outputVariable: { name: varName, initialValue: 'None' },
+								color: this._activeNodeColor,
+								textColor: this._activeTextColor,
+								textAlign: this._activeTextAlign,
+								verticalAlign: this._activeVerticalAlign,
+								isBold: this._activeIsBold,
+								isItalic: this._activeIsItalic,
+								isUnderline: this._activeIsUnderline,
+								isStrikethrough: this._activeIsStrikethrough
+							};
+							this._data.nodes.push(newNode);
+							this._selectedNodeIds.clear();
+							this._selectedNodeIds.add(id);
+							this._saveFlowchartData();
+							this._renderNodes();
+							this._drawLinks();
+							if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+							this._refreshVariablesDrawer(id);
+							this._notificationService.info(`Created new node with variable '${varName}'`);
+							return;
+						}
+
+						this._addNewNodeAt(parsed.type, parsed.label, x, y);
 					} catch { }
 				}
 			};
@@ -964,9 +999,12 @@ export class WorkflowEditor extends EditorPane {
 
 		if (allVars.length === 0) {
 			const empty = append(this._varsBodyEl, $('.workflow-vars-empty'));
-			append(empty, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+			const emptyIcon = append(empty, $('.var-icon-badge'));
+			emptyIcon.textContent = '[V]';
+			emptyIcon.style.fontSize = '24px';
+			emptyIcon.style.padding = '4px 8px';
 			append(empty, $('div')).textContent = localize('noVarsMsg', 'No context variables defined in this workflow.');
-			append(empty, $('div')).textContent = localize('noVarsSubMsg', 'Drag the Variable card from the toolbox onto any node, or select a node and click "Bind Output Variable".');
+			append(empty, $('div')).textContent = localize('noVarsSubMsg', 'Drag the Variable card from the toolbox onto any node or canvas space.');
 			return;
 		}
 
@@ -975,7 +1013,10 @@ export class WorkflowEditor extends EditorPane {
 		const headerRow = append(thead, $('tr'));
 		append(headerRow, $('th')).textContent = 'Variable Name';
 		append(headerRow, $('th')).textContent = 'Bound Node';
-		append(headerRow, $('th')).textContent = 'Initial Value (Python)';
+		const initTh = append(headerRow, $('th'));
+		initTh.textContent = 'Initial Value (Python)';
+		initTh.style.width = '140px';
+		append(headerRow, $('th')).textContent = 'References';
 		append(headerRow, $('th')).textContent = 'Runtime Value';
 		append(headerRow, $('th')).textContent = 'Action';
 
@@ -1015,12 +1056,16 @@ export class WorkflowEditor extends EditorPane {
 				this._refreshVariablesDrawer(item.node.id);
 			};
 
-			// 3. Initial Value (Python literal)
+			// 3. Initial Value (Python literal, compact)
 			const initTd = append(row, $('td'));
+			initTd.style.width = '140px';
+			initTd.style.maxWidth = '140px';
 			const initInput = append(initTd, $('input.vars-table-input')) as HTMLInputElement;
+			initInput.style.width = '120px';
+			initInput.style.maxWidth = '120px';
 			initInput.type = 'text';
 			initInput.value = item.variable.initialValue || 'None';
-			initInput.placeholder = "None, True, False, 0, 'admin'";
+			initInput.placeholder = "None, True, 0";
 			initInput.onchange = () => {
 				item.variable.initialValue = initInput.value.trim() || 'None';
 				this._saveFlowchartData();
@@ -1029,13 +1074,60 @@ export class WorkflowEditor extends EditorPane {
 				if (this._inspectorEl) this._renderInspector(this._inspectorEl);
 			};
 
-			// 4. Runtime Value
+			// 4. References Column (Writes and Reads tracing)
+			const varName = item.variable.name;
+			const regexAt = new RegExp(`@${varName}\\b`);
+			const regexWord = new RegExp(`\\b${varName}\\b`);
+
+			const writeNodes: string[] = [];
+			for (const n of this._data?.nodes || []) {
+				if (this._getNodeVariables(n).some(v => v.name === varName)) {
+					writeNodes.push(n.label || n.id);
+				}
+			}
+
+			const readLinks: { from: string; to: string; expr: string }[] = [];
+			for (const l of this._data?.links || []) {
+				const text = `${l.label || ''} ${l.condition || ''}`;
+				if (regexAt.test(text) || regexWord.test(text)) {
+					const fromNode = this._data?.nodes.find(n => n.id === l.from);
+					const toNode = this._data?.nodes.find(n => n.id === l.to);
+					readLinks.push({
+						from: fromNode?.label || l.from,
+						to: toNode?.label || l.to,
+						expr: l.label || l.condition || ''
+					});
+				}
+			}
+
+			const refTd = append(row, $('td'));
+			const refBadge = append(refTd, $('.vars-table-ref-badge'));
+			const totalRefs = writeNodes.length + readLinks.length;
+			refBadge.textContent = `${totalRefs} ref${totalRefs === 1 ? '' : 's'}`;
+
+			const refTooltip = [
+				`Defined (Written) in: ${writeNodes.join(', ')}`,
+				readLinks.length > 0
+					? `Referenced (Read) in: ${readLinks.map(rl => `${rl.from} → ${rl.to} [${rl.expr}]`).join('; ')}`
+					: 'No connection conditions referencing this variable yet'
+			].join('\n');
+			refBadge.title = refTooltip;
+			refBadge.onclick = () => {
+				this._selectedNodeIds.clear();
+				this._selectedNodeIds.add(item.node.id);
+				this._renderNodes();
+				if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+				this._centerOnNode(item.node);
+				this._notificationService.info(`Variable '${varName}': ${writeNodes.length} write(s), ${readLinks.length} read(s).`);
+			};
+
+			// 5. Runtime Value
 			const valTd = append(row, $('td'));
 			const runtimeVal = activeRun?.contextVariables ? activeRun.contextVariables[item.variable.name] : undefined;
 			const valBadge = append(valTd, $(`.vars-table-val-badge${runtimeVal === undefined ? '.not-run' : ''}`));
 			valBadge.textContent = runtimeVal !== undefined ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : '(not evaluated)';
 
-			// 5. Action (Unbind / Delete)
+			// 6. Action (Unbind / Delete)
 			const actionTd = append(row, $('td'));
 			const unbindBtn = append(actionTd, $('.vars-table-action-btn'));
 			unbindBtn.title = `Unbind variable '${item.variable.name}' from '${item.node.label}'`;
@@ -1176,7 +1268,8 @@ export class WorkflowEditor extends EditorPane {
 		this._logCountBadgeEl.textContent = '0 events';
 
 		const varsTab = append(tabs, $(`.drawer-tab${this._activeDrawerTab === 'vars' ? '.active' : ''}`));
-		append(varsTab, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+		const vTabBadge = append(varsTab, $('.var-icon-badge'));
+		vTabBadge.textContent = '[V]';
 		append(varsTab, $('span')).textContent = localize('contextVarsTitle', 'Context Variables');
 		this._varsCountBadgeEl = append(varsTab, $('.drawer-tab-badge'));
 		const varCount = (this._data?.nodes || []).reduce((acc, n) => acc + this._getNodeVariables(n).length, 0);
@@ -1462,7 +1555,8 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		append(varItem, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+		const vBoxBadge = append(varItem, $('.var-icon-badge'));
+		vBoxBadge.textContent = '[V]';
 		if (!this._isToolbarCompact) {
 			append(varItem, $('.item-label')).textContent = localize('varLabel', 'Variable');
 		}
@@ -2213,7 +2307,8 @@ export class WorkflowEditor extends EditorPane {
 					if (nodeVars.length === 0) {
 						const compactAddBtn = append(varSec, $('.workflow-compact-color-btn'));
 						compactAddBtn.title = localize('bindVarTitle', 'Bind Context Variable to Node');
-						append(compactAddBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+						const vTag = append(compactAddBtn, $('.var-icon-badge'));
+						vTag.textContent = '[V]';
 						compactAddBtn.onclick = (e) => {
 							e.stopPropagation();
 							this._bindVariableToNode(selectedNode);
@@ -2221,7 +2316,8 @@ export class WorkflowEditor extends EditorPane {
 					} else {
 						const compactVarBtn = append(varSec, $('.workflow-compact-color-btn.active'));
 						compactVarBtn.title = `Variables: ${nodeVars.map(v => v.name).join(', ')} (Click to manage in Variables Table)`;
-						append(compactVarBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+						const vTag = append(compactVarBtn, $('.var-icon-badge'));
+						vTag.textContent = '[V]';
 						compactVarBtn.onclick = (e) => {
 							e.stopPropagation();
 							this._openDrawerTab('vars', selectedNode.id);
@@ -2231,7 +2327,8 @@ export class WorkflowEditor extends EditorPane {
 				} else {
 					if (nodeVars.length === 0) {
 						const addVarBtn = append(varSec, $('.workflow-format-btn.full-width'));
-						append(addVarBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+						const vTag = append(addVarBtn, $('.var-icon-badge'));
+						vTag.textContent = '[V]';
 						append(addVarBtn, $('span')).textContent = localize('addVar', ' Bind Output Variable');
 						addVarBtn.title = localize('addVarTitle', 'Bind an output variable to this node for data flow and branching');
 						addVarBtn.onclick = () => {
@@ -2243,23 +2340,43 @@ export class WorkflowEditor extends EditorPane {
 						for (let i = 0; i < nodeVars.length; i++) {
 							const v = nodeVars[i];
 							const varCard = append(varForm, $('.workflow-var-card'));
-							varCard.style.padding = '8px';
+							varCard.style.padding = '8px 10px';
 							varCard.style.marginBottom = '8px';
 							varCard.style.borderRadius = '4px';
 							varCard.style.border = '1px solid var(--vscode-widget-border, rgba(255,255,255,0.12))';
 							varCard.style.background = 'var(--vscode-editor-background, rgba(0,0,0,0.2))';
 
-							// Variable Name Row with Delete Icon Button
+							// Card Top Header: [V] badge on left, Trash Button on top-right!
+							const cardHeader = append(varCard, $('.var-card-header'));
+							const headerTitle = append(cardHeader, $('.var-card-title'));
+							headerTitle.style.display = 'flex';
+							headerTitle.style.alignItems = 'center';
+							headerTitle.style.gap = '6px';
+							const vBadge = append(headerTitle, $('.var-icon-badge'));
+							vBadge.textContent = '[V]';
+							const labelText = append(headerTitle, $('span'));
+							labelText.textContent = `Variable ${nodeVars.length > 1 ? `#${i + 1}` : ''}`;
+							labelText.style.fontSize = '11px';
+							labelText.style.fontWeight = '600';
+							labelText.style.color = 'var(--vscode-foreground, #cccccc)';
+
+							const unbindBtn = append(cardHeader, $('.top-right-delete-btn'));
+							unbindBtn.title = localize('unbindVar', 'Delete variable from node');
+							append(unbindBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+							unbindBtn.onclick = () => {
+								this._unbindVariableFromNode(selectedNode, v.name);
+							};
+
+							// Variable Name Row
 							const nameRow = append(varCard, $('.workflow-var-row'));
 							const nameLabel = append(nameRow, $('.workflow-var-label'));
 							nameLabel.textContent = localize('varName', 'Name:');
-
-							const nameInputWrapper = append(nameRow, $('.workflow-var-input-wrapper'));
-							const nameInput = append(nameInputWrapper, $('input.workflow-var-input')) as HTMLInputElement;
-							nameInput.style.flex = '1';
+							const nameInput = append(nameRow, $('input.workflow-var-input')) as HTMLInputElement;
+							nameInput.style.width = '100%';
+							nameInput.style.boxSizing = 'border-box';
 							nameInput.type = 'text';
 							nameInput.value = v.name;
-							nameInput.placeholder = 'e.g. status, count, role';
+							nameInput.placeholder = 'e.g. status, count, monitor1';
 							nameInput.onchange = () => {
 								const oldName = v.name;
 								const cleaned = nameInput.value.trim().replace(/[^a-zA-Z0-9_]/g, '_') || `var_${i + 1}`;
@@ -2267,19 +2384,14 @@ export class WorkflowEditor extends EditorPane {
 								this._renameVariableGlobally(oldName, cleaned);
 							};
 
-							const unbindBtn = append(nameInputWrapper, $('.workflow-var-unbind-btn.inline-delete-btn'));
-							unbindBtn.title = localize('unbindVar', 'Remove Variable from node');
-							append(unbindBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
-							unbindBtn.onclick = () => {
-								this._unbindVariableFromNode(selectedNode, v.name);
-							};
-
 							// Initial Value (Python Literal) Row
 							const initRow = append(varCard, $('.workflow-var-row'));
-							initRow.style.marginTop = '4px';
+							initRow.style.marginTop = '6px';
 							const initLabel = append(initRow, $('.workflow-var-label'));
 							initLabel.textContent = localize('varInit', 'Initial Value (Python):');
 							const initInput = append(initRow, $('input.workflow-var-input')) as HTMLInputElement;
+							initInput.style.width = '100%';
+							initInput.style.boxSizing = 'border-box';
 							initInput.type = 'text';
 							initInput.value = v.initialValue || 'None';
 							initInput.placeholder = "None, True, False, 0, 'admin'";
@@ -2297,75 +2409,11 @@ export class WorkflowEditor extends EditorPane {
 								this._drawLinks();
 								this._refreshVariablesDrawer();
 							};
-
-							// Update / Assignment Expression Row
-							const exprRow = append(varCard, $('.workflow-var-row'));
-							exprRow.style.marginTop = '4px';
-							const exprLabel = append(exprRow, $('.workflow-var-label'));
-							exprLabel.textContent = localize('varExpr', 'Update / Assignment:');
-							const exprInput = append(exprRow, $('input.workflow-var-input')) as HTMLInputElement;
-							exprInput.type = 'text';
-							exprInput.value = v.expression || '';
-							exprInput.placeholder = "e.g. + 1, ticket.output, 'SUCCESS'";
-
-							const saveExpr = (val: string) => {
-								const cleanVal = val.trim();
-								v.expression = cleanVal || undefined;
-								if (selectedNode.outputVariables) {
-									const found = selectedNode.outputVariables.find(x => x.name === v.name);
-									if (found) found.expression = v.expression;
-								}
-								if (selectedNode.outputVariable && selectedNode.outputVariable.name === v.name) {
-									selectedNode.outputVariable.expression = v.expression;
-								}
-								this._saveFlowchartData();
-								this._renderNodes();
-								this._drawLinks();
-								this._refreshVariablesDrawer();
-							};
-
-							exprInput.onchange = () => {
-								saveExpr(exprInput.value);
-							};
-
-							// Quick Preset Chips for Mutation & Ticket Output
-							const presetRow = append(varCard, $('.var-preset-row'));
-							const addPreset = (label: string, exprVal: string, tooltip: string) => {
-								const chip = append(presetRow, $('.var-preset-chip'));
-								chip.textContent = label;
-								chip.title = tooltip;
-								if (v.expression === exprVal || (!v.expression && !exprVal)) {
-									chip.classList.add('active');
-								}
-								chip.onclick = (e) => {
-									e.stopPropagation();
-									exprInput.value = exprVal;
-									saveExpr(exprVal);
-									if (this._inspectorEl) this._renderInspector(this._inspectorEl);
-								};
-							};
-
-							addPreset('+1 自增', '+ 1', '自增 1 (count += 1)');
-							addPreset('-1 自减', '- 1', '自减 1 (count -= 1)');
-							addPreset('🎯 接收 Ticket', 'ticket.output', '当前节点执行 Ticket/Task 的返回值赋给该变量');
-							addPreset("'SUCCESS'", "'SUCCESS'", "直接设为 'SUCCESS'");
-							addPreset('初值模式', '', '清除表达式，重置为初值');
 						}
 
-						// Actions: Add Another Variable & Open in Variables Drawer
+						// Actions: Only Keep 'Manage in Variables Table'
 						const actRow = append(varForm, $('.workflow-var-actions-row'));
-						actRow.style.display = 'flex';
-						actRow.style.flexDirection = 'column';
-						actRow.style.gap = '6px';
-						actRow.style.marginTop = '4px';
-
-						const addAnotherBtn = append(actRow, $('.workflow-format-btn.full-width'));
-						append(addAnotherBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
-						append(addAnotherBtn, $('span')).textContent = localize('addAnotherVar', ' Add Variable to Node');
-						addAnotherBtn.title = localize('addAnotherVarTitle', 'Add another output variable to this node');
-						addAnotherBtn.onclick = () => {
-							this._bindVariableToNode(selectedNode);
-						};
+						actRow.style.marginTop = '6px';
 
 						const viewTableBtn = append(actRow, $('.workflow-format-btn.full-width'));
 						append(viewTableBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.listUnordered)));
@@ -2706,24 +2754,15 @@ export class WorkflowEditor extends EditorPane {
 					const vBadge = append(varPill, $('.var-tag-icon'));
 					vBadge.textContent = '[V]';
 
-					let pillText = '';
-					if (v.expression) {
-						const expr = v.expression.trim();
-						if (expr === '+ 1' || expr === '++' || expr === '+= 1') {
+					let pillText = `${v.name} = ${displayVal}`;
+					if (v.expression && v.expression !== 'ticket.output' && v.expression !== 'ticket.status') {
+						if (v.expression === '+ 1' || v.expression === '++' || v.expression === '+= 1') {
 							pillText = `${v.name} += 1`;
-						} else if (expr === '- 1' || expr === '--' || expr === '-= 1') {
+						} else if (v.expression === '- 1' || v.expression === '--' || v.expression === '-= 1') {
 							pillText = `${v.name} -= 1`;
-						} else if (expr === 'ticket.output') {
-							pillText = `${v.name} ← Ticket`;
-						} else if (expr === 'ticket.status') {
-							pillText = `${v.name} ← Status`;
-						} else if (expr.startsWith('+') || expr.startsWith('-')) {
-							pillText = `${v.name} ${expr}`;
 						} else {
-							pillText = `${v.name} = ${expr}`;
+							pillText = `${v.name} = ${v.expression}`;
 						}
-					} else {
-						pillText = `${v.name}=${displayVal}`;
 					}
 					append(varPill, $('.var-pill-text')).textContent = pillText;
 
@@ -4495,6 +4534,16 @@ export class WorkflowEditor extends EditorPane {
 					nodeLabel: n.label
 				});
 			}
+			for (const imp of n.imports || []) {
+				const ticketVar = imp.name.replace(/[^a-zA-Z0-9_]/g, '_');
+				if (!availableVars.some(av => av.name === ticketVar)) {
+					availableVars.push({
+						name: ticketVar,
+						initialValue: `${imp.type}`,
+						nodeLabel: n.label
+					});
+				}
+			}
 		}
 
 		const closeAc = () => {
@@ -4636,6 +4685,9 @@ export class WorkflowEditor extends EditorPane {
 		for (const n of this._data?.nodes || []) {
 			for (const v of this._getNodeVariables(n)) {
 				knownVars.add(v.name);
+			}
+			for (const imp of n.imports || []) {
+				knownVars.add(imp.name.replace(/[^a-zA-Z0-9_]/g, '_'));
 			}
 		}
 
