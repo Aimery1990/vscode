@@ -320,6 +320,10 @@ export class WorkflowEditor extends EditorPane {
 					height: typeof n.height === 'number' ? n.height : (n.type === 'circle' || n.type === 'start') ? 64 : (n.type === 'diamond' || n.type === 'decision') ? 120 : 80,
 					label: String(n.label || n.name || n.id || 'Node'),
 					imports: Array.isArray(n.imports) ? n.imports : undefined,
+					outputVariable: n.outputVariable ? { ...n.outputVariable } : undefined,
+					outputVariables: Array.isArray(n.outputVariables)
+						? n.outputVariables.map((ov: any) => ({ ...ov }))
+						: (n.outputVariable ? [{ ...n.outputVariable }] : undefined),
 					color: n.color || undefined,
 					textColor: n.textColor || undefined,
 					textAlign: n.textAlign || undefined,
@@ -900,13 +904,28 @@ export class WorkflowEditor extends EditorPane {
 			tabs[1].classList.toggle('active', tab === 'vars');
 		}
 
+		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+
 		if (this._logBodyEl) {
 			this._logBodyEl.style.display = tab === 'logs' ? 'block' : 'none';
+			if (tab === 'logs' && activeRun) {
+				this._refreshLogs(activeRun);
+			}
 		}
 		if (this._varsBodyEl) {
 			this._varsBodyEl.style.display = tab === 'vars' ? 'block' : 'none';
 			if (tab === 'vars') {
 				this._refreshVariablesDrawer(targetNodeId);
+			}
+		}
+
+		if (activeRun) {
+			if (this._logStatusBadgeEl) {
+				this._logStatusBadgeEl.textContent = activeRun.status.toUpperCase();
+				this._logStatusBadgeEl.className = `log-status-badge status-${activeRun.status}`;
+			}
+			if (this._logCountBadgeEl) {
+				this._logCountBadgeEl.textContent = `${activeRun.logs?.length || 0} events`;
 			}
 		}
 
