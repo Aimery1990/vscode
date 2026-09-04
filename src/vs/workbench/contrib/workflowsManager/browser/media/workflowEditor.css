@@ -2215,18 +2215,25 @@
 	border-color: rgba(239, 68, 68, 0.5);
 }
 
-/* Inline Variable Draft Box on Node */
+.workflow-node.editing-variable {
+	z-index: 10000 !important;
+}
+
+.workflow-node.editing-variable .node-content-wrapper {
+	overflow: visible !important;
+}
+
 .node-variable-draft-wrapper {
 	position: relative;
 	display: inline-flex;
 	align-items: center;
 	gap: 4px;
 	padding: 2px 6px;
-	background: rgba(15, 23, 42, 0.95);
+	background: rgba(15, 23, 42, 0.98);
 	border: 1.5px solid #38bdf8;
 	border-radius: 4px;
-	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5), 0 0 8px rgba(56, 189, 248, 0.3);
-	z-index: 1000;
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.7), 0 0 10px rgba(56, 189, 248, 0.4);
+	z-index: 10001;
 	margin-top: 4px;
 	animation: varDraftPop 0.15s ease-out;
 }
@@ -2258,18 +2265,19 @@
 	position: absolute;
 	top: calc(100% + 4px);
 	left: 0;
-	min-width: 200px;
-	max-width: 320px;
-	max-height: 180px;
+	min-width: 220px;
+	max-width: 380px;
+	max-height: 220px;
 	overflow-y: auto;
 	background: #0f172a;
-	border: 1px solid rgba(56, 189, 248, 0.4);
+	border: 1.5px solid rgba(56, 189, 248, 0.6);
 	border-radius: 6px;
-	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
-	z-index: 2000;
+	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.85), 0 0 16px rgba(56, 189, 248, 0.3);
+	z-index: 20000 !important;
 	display: flex;
 	flex-direction: column;
 	padding: 4px;
+	pointer-events: auto;
 }
 
 .node-variable-ac-item {

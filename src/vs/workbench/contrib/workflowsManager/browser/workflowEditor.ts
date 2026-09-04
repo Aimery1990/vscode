@@ -3248,6 +3248,7 @@ export class WorkflowEditor extends EditorPane {
 			console.warn('[WorkflowEditor] Node element not found for id:', node.id);
 			return;
 		}
+		nodeEl.classList.add('editing-variable');
 
 		let varsContainer = nodeEl.querySelector('.node-variables-container') as HTMLElement;
 		if (!varsContainer) {
@@ -3299,6 +3300,7 @@ export class WorkflowEditor extends EditorPane {
 		};
 		cancelBtn.onclick = (e) => {
 			e.stopPropagation();
+			nodeEl.classList.remove('editing-variable');
 			if (popover) {
 				popover.remove();
 				popover = null;
@@ -3396,7 +3398,7 @@ export class WorkflowEditor extends EditorPane {
 		const updateAc = () => {
 			const selStart = input.selectionStart || 0;
 			const textBefore = input.value.slice(0, selStart);
-			const match = textBefore.match(/@([a-zA-Z0-9_]*)$/);
+			const match = textBefore.match(/@([a-zA-Z0-9_\u4e00-\u9fa5]*)$/);
 			if (!match) {
 				closePopover();
 				return;
@@ -3412,6 +3414,14 @@ export class WorkflowEditor extends EditorPane {
 
 			if (!popover) {
 				popover = append(draftWrapper, $('.node-variable-ac-popover'));
+			}
+			const wrapperRect = draftWrapper.getBoundingClientRect();
+			if (window.innerHeight - wrapperRect.bottom < 220 && wrapperRect.top > 220) {
+				popover.style.top = 'auto';
+				popover.style.bottom = 'calc(100% + 4px)';
+			} else {
+				popover.style.top = 'calc(100% + 4px)';
+				popover.style.bottom = 'auto';
 			}
 			clearNode(popover);
 			activeAcIdx = Math.max(0, Math.min(activeAcIdx, currentMatches.length - 1));
@@ -3444,6 +3454,7 @@ export class WorkflowEditor extends EditorPane {
 		const commit = () => {
 			if (committed) return;
 			committed = true;
+			nodeEl.classList.remove('editing-variable');
 			closePopover();
 			const text = input.value.trim();
 			if (text) {
@@ -3485,6 +3496,7 @@ export class WorkflowEditor extends EditorPane {
 			} else if (e.key === 'Escape') {
 				e.preventDefault();
 				committed = true;
+				nodeEl.classList.remove('editing-variable');
 				closePopover();
 				if (targetPillEl) targetPillEl.style.display = '';
 				draftWrapper.remove();
@@ -3520,9 +3532,9 @@ export class WorkflowEditor extends EditorPane {
 		const vars = this._getNodeVariables(node);
 
 		// Case A: Multiple return / Tuple unpacking: "var1, var2 = @script" or "a, b = expr"
-		const unpackMatch = trimmed.match(/^([a-zA-Z0-9_,\s@]+)\s*=\s*(.+)$/);
+		const unpackMatch = trimmed.match(/^([a-zA-Z0-9_,\s@\u4e00-\u9fa5]+)\s*=\s*(.+)$/);
 		if (unpackMatch && unpackMatch[1].includes(',')) {
-			const leftNames = unpackMatch[1].split(',').map(s => s.trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_]/g, '_')).filter(Boolean);
+			const leftNames = unpackMatch[1].split(',').map(s => s.trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_')).filter(Boolean);
 			const rightExpr = unpackMatch[2].trim();
 
 			if (targetVar) {
@@ -3545,9 +3557,9 @@ export class WorkflowEditor extends EditorPane {
 			let expression: string | undefined = undefined;
 			let initialValue: string = 'None';
 
-			const incMatch = trimmed.match(/^@?([a-zA-Z0-9_]+)\s*(\+\+|--)$/);
-			const opMatch = trimmed.match(/^@?([a-zA-Z0-9_]+)\s*(\+=|-=|\*=|\/=|%=)\s*(.+)$/);
-			const assignMatch = trimmed.match(/^@?([a-zA-Z0-9_]+)\s*=\s*(.+)$/);
+			const incMatch = trimmed.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*(\+\+|--)$/);
+			const opMatch = trimmed.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*(\+=|-=|\*=|\/=|%=)\s*(.+)$/);
+			const assignMatch = trimmed.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*(.+)$/);
 
 			if (incMatch) {
 				varName = incMatch[1];
@@ -3558,7 +3570,7 @@ export class WorkflowEditor extends EditorPane {
 			} else if (assignMatch) {
 				varName = assignMatch[1];
 				const rhs = assignMatch[2].trim();
-				const cleanRhs = rhs.replace(/@([a-zA-Z0-9_]+)/g, '$1');
+				const cleanRhs = rhs.replace(/@([a-zA-Z0-9_\u4e00-\u9fa5]+)/g, '$1');
 
 				const allKnownVars = new Set<string>();
 				for (const n of this._data?.nodes || []) {
@@ -3592,7 +3604,7 @@ export class WorkflowEditor extends EditorPane {
 				varName = targetVar ? targetVar.name : (vars[vars.length - 1]?.name || this._generateNextVarName());
 				expression = trimmed.startsWith('++') ? '+= 1' : (trimmed.startsWith('--') ? '-= 1' : trimmed);
 			} else {
-				varName = trimmed.replace(/^@/, '').replace(/[^a-zA-Z0-9_]/g, '_') || this._generateNextVarName();
+				varName = trimmed.replace(/^@/, '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_') || this._generateNextVarName();
 				initialValue = 'None';
 			}
 
