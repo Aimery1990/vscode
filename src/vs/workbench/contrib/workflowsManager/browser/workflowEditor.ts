@@ -2354,7 +2354,7 @@ export class WorkflowEditor extends EditorPane {
 						append(addVarBtn, $('span')).textContent = localize('addVar', ' Bind Output Variable');
 						addVarBtn.title = localize('addVarTitle', 'Bind an output variable to this node for data flow and branching');
 						addVarBtn.onclick = () => {
-							this._bindVariableToNode(selectedNode);
+							this._openNodeVariableInlineEditor(selectedNode);
 						};
 					} else {
 						const varForm = append(varSec, $('.workflow-var-form'));
@@ -2485,9 +2485,17 @@ export class WorkflowEditor extends EditorPane {
 							}
 						}
 
-						// Actions: Only Keep 'Manage in Variables Table'
+						// Actions: Add Variable to Node & Manage in Table
 						const actRow = append(varForm, $('.workflow-var-actions-row'));
 						actRow.style.marginTop = '6px';
+
+						const addAnotherVarBtn = append(actRow, $('.workflow-format-btn.full-width'));
+						addAnotherVarBtn.style.marginBottom = '6px';
+						append(addAnotherVarBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
+						append(addAnotherVarBtn, $('span')).textContent = localize('addAnotherVar', ' Add Variable to Node');
+						addAnotherVarBtn.onclick = () => {
+							this._openNodeVariableInlineEditor(selectedNode);
+						};
 
 						const viewTableBtn = append(actRow, $('.workflow-format-btn.full-width'));
 						append(viewTableBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.listUnordered)));
@@ -2764,7 +2772,13 @@ export class WorkflowEditor extends EditorPane {
 				try {
 					const parsed = JSON.parse(dataStr);
 					if (parsed && (parsed.kind === 'variable' || parsed.kind === 'variable_widget')) {
-						this._openNodeVariableInlineEditor(node);
+						this._selectedNodeIds.clear();
+						this._selectedNodeIds.add(node.id);
+						this._renderNodes();
+						if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+						setTimeout(() => {
+							this._openNodeVariableInlineEditor(node);
+						}, 50);
 						return;
 					}
 				} catch { }
@@ -3201,9 +3215,11 @@ export class WorkflowEditor extends EditorPane {
 			this._activeVariableDraftInputEl = null;
 		}
 
-		if (!this._canvas) return;
-		const nodeEl = this._canvas.querySelector(`.flowchart-node[data-node-id="${node.id}"]`) as HTMLElement;
-		if (!nodeEl) return;
+		const nodeEl = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${node.id}"]`) as HTMLElement;
+		if (!nodeEl) {
+			console.warn('[WorkflowEditor] Node element not found for id:', node.id);
+			return;
+		}
 
 		let varsContainer = nodeEl.querySelector('.node-variables-container') as HTMLElement;
 		if (!varsContainer) {
@@ -3238,6 +3254,28 @@ export class WorkflowEditor extends EditorPane {
 		const input = append(draftWrapper, $('input.node-variable-draft-input')) as HTMLInputElement;
 		input.type = 'text';
 		input.placeholder = 'e.g. monitor = 0, @monitor++, res = @ticket';
+
+		const cancelBtn = append(draftWrapper, $('.var-draft-cancel-btn'));
+		cancelBtn.title = 'Cancel (Esc)';
+		cancelBtn.textContent = '✕';
+		cancelBtn.style.cursor = 'pointer';
+		cancelBtn.style.padding = '0 3px';
+		cancelBtn.style.color = '#94a3b8';
+		cancelBtn.style.fontSize = '10px';
+		cancelBtn.onmousedown = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+		};
+		cancelBtn.onclick = (e) => {
+			e.stopPropagation();
+			if (popover) {
+				popover.remove();
+				popover = null;
+			}
+			if (targetPillEl) targetPillEl.style.display = '';
+			draftWrapper.remove();
+			this._activeVariableDraftInputEl = null;
+		};
 
 		if (targetVar) {
 			if (targetVar.expression) {
@@ -3424,8 +3462,12 @@ export class WorkflowEditor extends EditorPane {
 
 		input.onblur = () => {
 			setTimeout(() => {
-				commit();
-			}, 180);
+				if (popover && popover.matches(':hover')) return;
+				const text = input.value.trim();
+				if (text) {
+					commit();
+				}
+			}, 250);
 		};
 
 		varsContainer.appendChild(draftWrapper);
