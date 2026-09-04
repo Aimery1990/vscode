@@ -65,8 +65,8 @@ class PythonExpressionEvaluator {
 		if (s.startsWith('=')) {
 			s = s.substring(1).trim();
 		}
-		// Strip @ before variable names: e.g. "@monitor1" -> "monitor1"
-		s = s.replace(/@([a-zA-Z0-9_]+)/g, '$1');
+		// Strip @ before variable names / tickets: e.g. "@monitor1" -> "monitor1", "@FNDJ1-0008" -> "FNDJ1-0008"
+		s = s.replace(/@([a-zA-Z0-9_\-]+)/g, '$1');
 
 		while (i < s.length) {
 			const ch = s[i];
@@ -98,6 +98,15 @@ class PythonExpressionEvaluator {
 			if (['==', '!=', '<=', '>=', '//', '**'].includes(two)) {
 				tokens.push(two);
 				i += 2;
+				continue;
+			}
+
+			// Atomic ticket identifier: e.g. FNDJ1-0008, TASK-123 (alphanumeric with hyphen)
+			// Checked BEFORE single '-' operator so hyphen is not treated as minus!
+			const ticketMatch = s.slice(i).match(/^[a-zA-Z0-9_]+-[a-zA-Z0-9_\-]+/);
+			if (ticketMatch) {
+				tokens.push(ticketMatch[0]);
+				i += ticketMatch[0].length;
 				continue;
 			}
 
@@ -344,10 +353,18 @@ class PythonExpressionEvaluator {
 			return token.substring(1, token.length - 1);
 		}
 
-		// Identifier lookup in context
-		if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(token)) {
+		// Identifier lookup in context (including ticket identifiers like FNDJ1-0008)
+		if (/^[a-zA-Z0-9_]+(-[a-zA-Z0-9_]+)*$/.test(token) && !/^\d+$/.test(token)) {
 			if (this.context && Object.prototype.hasOwnProperty.call(this.context, token)) {
 				return this.context[token];
+			}
+			const normalizedToken = token.replace(/[^a-zA-Z0-9_]/g, '_');
+			if (this.context && Object.prototype.hasOwnProperty.call(this.context, normalizedToken)) {
+				return this.context[normalizedToken];
+			}
+			// If it has a hyphen, it's a ticket or slug entity; return the entity string instead of throwing NameError
+			if (token.includes('-')) {
+				return token;
 			}
 			throw new Error(`NameError: name '${token}' is not defined in workflow context`);
 		}
@@ -705,15 +722,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 											expr = expr.substring(1).trim();
 										}
 
-										// Check if expr references a ticket or unpack index: e.g. "@my_ticket", "@my_ticket[0]", "ticket.output[1]"
-										const ticketMatch = expr.match(/^@?([a-zA-Z0-9_]+)(\[(\d+)\])?$/);
+										// Check if expr references a ticket or unpack index: e.g. "@my_ticket", "@my_ticket[0]", "ticket.output[1]", "FNDJ1-0008"
+										const ticketMatch = expr.match(/^@?([a-zA-Z0-9_\-]+)(\[(\d+)\])?$/);
 										const cleanTarget = ticketMatch ? ticketMatch[1] : '';
 										const unpackIdx = ticketMatch && ticketMatch[3] !== undefined ? parseInt(ticketMatch[3], 10) : undefined;
 
 										const matchedTicket = nodeState.executedTickets?.find(t =>
 											t.ticketName === cleanTarget ||
 											t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_') === cleanTarget ||
-											t.ticketId === cleanTarget
+											t.ticketName.toLowerCase() === cleanTarget.toLowerCase() ||
+											t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() === cleanTarget.toLowerCase() ||
+											t.ticketId === cleanTarget ||
+											t.ticketId.toLowerCase() === cleanTarget.toLowerCase()
 										) || (cleanTarget === 'ticket' ? nodeState.executedTickets?.[nodeState.executedTickets.length - 1] : undefined);
 
 										if (matchedTicket) {
@@ -771,8 +791,19 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 											}
 										}
 									} else if (nodeState.executedTickets && nodeState.executedTickets.length > 0) {
-										const lastTicket = nodeState.executedTickets[nodeState.executedTickets.length - 1];
-										assignedVal = lastTicket?.output ?? 'success';
+										const initClean = (v.initialValue || '').trim().replace(/^@/, '').replace(/^=\s*/, '');
+										const matchedByInit = nodeState.executedTickets.find(t =>
+											t.ticketName === initClean ||
+											t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_') === initClean ||
+											t.ticketName.toLowerCase() === initClean.toLowerCase() ||
+											t.ticketId === initClean
+										);
+										if (matchedByInit) {
+											assignedVal = matchedByInit.output;
+										} else {
+											const lastTicket = nodeState.executedTickets[nodeState.executedTickets.length - 1];
+											assignedVal = lastTicket?.output ?? 'success';
+										}
 									} else {
 										assignedVal = nodeState.output?.[v.name] ?? (nodeVars.length === 1 ? (nodeState.output?.value ?? nodeState.output?.returnValue) : undefined);
 										if (assignedVal === undefined) {
@@ -916,14 +947,17 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return;
 		}
 
-		// 4. Imported Tickets Sequential Execution
+		// 4. Imported Tickets Execution (Variable-driven pipeline & natural ordering)
 		const ticketImports = node.imports?.filter(i =>
 			['task', 'job', 'project', 'case', 'issue'].includes(i.type.toLowerCase())
 		) || [];
 
 		if (ticketImports.length > 0) {
-			this._emitLog(run, 'info', `Node '${node.label}' contains ${ticketImports.length} imported ticket(s). Executing sequentially...`);
-			for (const item of ticketImports) {
+			this._emitLog(run, 'info', `Node '${node.label}' contains ${ticketImports.length} imported ticket(s). Processing execution pipeline...`);
+
+			const executedTicketNames = new Set<string>();
+
+			const runTicket = async (item: { type: string; name: string; uri?: string }) => {
 				const ticketStart = Date.now();
 				this._emitLog(run, 'info', `Running Ticket: [${item.type}] '${item.name}'`);
 
@@ -939,9 +973,58 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					durationMs: Date.now() - ticketStart
 				};
 				state.executedTickets.push(ticketRecord);
+				run.contextVariables[ticketRecord.ticketName] = ticketRecord.output;
+				run.contextVariables[ticketRecord.ticketName.replace(/[^a-zA-Z0-9_]/g, '_')] = ticketRecord.output;
+				if (ticketRecord.ticketId) {
+					run.contextVariables[ticketRecord.ticketId] = ticketRecord.output;
+				}
 				this._emitLog(run, 'info', `Ticket '${item.name}' completed in ${ticketRecord.durationMs}ms`);
 				this._notifyRunChanged(run);
+				return ticketRecord;
+			};
+
+			// Helper to find imported ticket matching a variable reference
+			const findMatchingImport = (ref?: string) => {
+				if (!ref) return undefined;
+				let clean = ref.trim().replace(/^@/, '');
+				if (clean.startsWith('=')) clean = clean.substring(1).trim();
+				const eqIdx = clean.indexOf('=');
+				if (eqIdx !== -1) clean = clean.substring(eqIdx + 1).trim();
+				clean = clean.replace(/^@/, '').trim();
+				const m = clean.match(/^([a-zA-Z0-9_\-]+)(\[(\d+)\])?$/);
+				const target = m ? m[1] : clean;
+
+				if (target === 'ticket' || target === 'ticket.output') {
+					return ticketImports[0];
+				}
+
+				return ticketImports.find(imp =>
+					imp.name === target ||
+					imp.name.replace(/[^a-zA-Z0-9_]/g, '_') === target ||
+					imp.name.toLowerCase() === target.toLowerCase() ||
+					(imp.uri && imp.uri === target)
+				);
+			};
+
+			const nodeVars = this._getNodeVars(node);
+
+			// First: Run tickets in the exact order requested by node's bound variables!
+			for (const v of nodeVars) {
+				const targetImport = findMatchingImport(v.expression) || findMatchingImport(v.initialValue);
+				if (targetImport && !executedTicketNames.has(targetImport.name)) {
+					executedTicketNames.add(targetImport.name);
+					await runTicket(targetImport);
+				}
 			}
+
+			// Second: Run any remaining imported tickets that were not bound to variables
+			for (const item of ticketImports) {
+				if (!executedTicketNames.has(item.name)) {
+					executedTicketNames.add(item.name);
+					await runTicket(item);
+				}
+			}
+
 			state.output = { executedCount: ticketImports.length, tickets: state.executedTickets };
 			return;
 		}
