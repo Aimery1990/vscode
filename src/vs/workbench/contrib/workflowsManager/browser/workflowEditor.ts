@@ -2565,18 +2565,15 @@ export class WorkflowEditor extends EditorPane {
 		// Row 3: Vertical Alignments (Top, Middle, Bottom)
 		const vAlignRow = append(textSec, $(`.workflow-format-row${this._isInspectorCompact ? '.compact-col' : ''}`));
 		const vAlignChoices: { align: 'top' | 'center' | 'bottom'; label: string; shortLabel: string; title: string }[] = [
-			{ align: 'top', label: 'Top', shortLabel: 'T', title: 'Align Top (Click: content only; Double-click: all including title)' },
-			{ align: 'center', label: 'Middle', shortLabel: 'M', title: 'Align Middle (Click: content only; Double-click: all including title)' },
-			{ align: 'bottom', label: 'Bottom', shortLabel: 'B', title: 'Align Bottom (Click: content only; Double-click: all including title)' }
+			{ align: 'top', label: 'Top', shortLabel: 'T', title: 'Align Top' },
+			{ align: 'center', label: 'Middle', shortLabel: 'M', title: 'Align Middle' },
+			{ align: 'bottom', label: 'Bottom', shortLabel: 'B', title: 'Align Bottom' }
 		];
 		for (const va of vAlignChoices) {
 			const vaBtn = append(vAlignRow, $(`.workflow-format-btn${verticalAlign === va.align ? '.active' : ''}`));
 			vaBtn.textContent = this._isInspectorCompact ? va.shortLabel : va.label;
 			vaBtn.title = va.title;
-
-			let vClickTimer: any = null;
-
-			const applyVAlign = (includeTitle: boolean) => {
+			vaBtn.onclick = () => {
 				this._activeVerticalAlign = va.align;
 				this._storageService.store('workflowEditor.verticalAlign', this._activeVerticalAlign, StorageScope.PROFILE, StorageTarget.USER);
 				if (this._selectedNodeIds.size > 0) {
@@ -2584,42 +2581,12 @@ export class WorkflowEditor extends EditorPane {
 						const node = this._data.nodes.find(n => n.id === id);
 						if (node) {
 							node.verticalAlign = va.align;
-							if (includeTitle) {
-								node.titleVerticalAlign = va.align;
-							}
 						}
 					}
 					this._saveFlowchartData();
 					this._renderNodes();
 				}
 				this._renderInspector(parent);
-				if (includeTitle) {
-					this._notificationService.info(`Aligned all elements (including node title) vertically to ${va.label}.`);
-				}
-			};
-
-			vaBtn.onclick = (e) => {
-				e.stopPropagation();
-				if (vClickTimer) {
-					clearTimeout(vClickTimer);
-					vClickTimer = null;
-					applyVAlign(true);
-				} else {
-					vClickTimer = setTimeout(() => {
-						vClickTimer = null;
-						applyVAlign(false);
-					}, 220);
-				}
-			};
-
-			vaBtn.ondblclick = (e) => {
-				e.stopPropagation();
-				e.preventDefault();
-				if (vClickTimer) {
-					clearTimeout(vClickTimer);
-					vClickTimer = null;
-				}
-				applyVAlign(true);
 			};
 		}
 
@@ -3427,19 +3394,18 @@ export class WorkflowEditor extends EditorPane {
 			contentWrapper.style.alignItems = 'stretch';
 
 			const verticalAlign = node.verticalAlign || 'center';
-			const titleVAlign = node.titleVerticalAlign || 'top';
-			if (titleVAlign === 'center' && verticalAlign === 'center') {
-				contentWrapper.style.justifyContent = 'center';
-				contentWrapper.style.paddingTop = '0px';
-				contentWrapper.style.paddingBottom = '0px';
-			} else if (titleVAlign === 'bottom' && verticalAlign === 'bottom') {
-				contentWrapper.style.justifyContent = 'flex-end';
-				contentWrapper.style.paddingTop = '0px';
-				contentWrapper.style.paddingBottom = '6px';
-			} else {
+			if (verticalAlign === 'top') {
 				contentWrapper.style.justifyContent = 'flex-start';
 				contentWrapper.style.paddingTop = '6px';
 				contentWrapper.style.paddingBottom = '6px';
+			} else if (verticalAlign === 'bottom') {
+				contentWrapper.style.justifyContent = 'flex-end';
+				contentWrapper.style.paddingTop = '6px';
+				contentWrapper.style.paddingBottom = '6px';
+			} else {
+				contentWrapper.style.justifyContent = 'center';
+				contentWrapper.style.paddingTop = '0px';
+				contentWrapper.style.paddingBottom = '0px';
 			}
 
 			if (node.isBold) {
