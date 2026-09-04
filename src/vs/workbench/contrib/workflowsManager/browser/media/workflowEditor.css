@@ -2313,9 +2313,10 @@
 	position: absolute;
 	top: calc(100% + 4px);
 	left: 0;
-	min-width: 220px;
-	max-width: 380px;
-	max-height: 220px;
+	min-width: 300px;
+	max-width: 520px;
+	width: max-content;
+	max-height: 240px;
 	overflow-y: auto;
 	background: #0f172a;
 	border: 1.5px solid rgba(56, 189, 248, 0.6);
@@ -2326,18 +2327,22 @@
 	flex-direction: column;
 	padding: 4px;
 	pointer-events: auto;
+	box-sizing: border-box;
 }
 
 .node-variable-ac-item {
 	display: flex;
 	align-items: center;
-	gap: 6px;
+	gap: 8px;
 	padding: 5px 8px;
 	border-radius: 4px;
 	font-size: 11px;
 	cursor: pointer;
 	color: #e2e8f0;
+	white-space: nowrap;
 	transition: background 0.12s ease;
+	box-sizing: border-box;
+	width: 100%;
 }
 
 .node-variable-ac-item:hover,
@@ -2349,9 +2354,10 @@
 .node-variable-ac-badge {
 	font-size: 9px;
 	font-weight: 700;
-	padding: 1px 4px;
+	padding: 1px 5px;
 	border-radius: 3px;
 	text-transform: uppercase;
+	flex-shrink: 0;
 }
 
 .node-variable-ac-badge.var {
@@ -2359,25 +2365,42 @@
 	color: #38bdf8;
 }
 
+.node-variable-ac-badge.task,
 .node-variable-ac-badge.ticket {
+	background: rgba(168, 85, 247, 0.25);
+	color: #c084fc;
+}
+
+.node-variable-ac-badge.job {
 	background: rgba(245, 158, 11, 0.25);
 	color: #f59e0b;
 }
 
-.node-variable-ac-badge.subwf {
-	background: rgba(168, 85, 247, 0.25);
-	color: #c084fc;
+.node-variable-ac-badge.agent {
+	background: rgba(56, 189, 248, 0.25);
+	color: #38bdf8;
+}
+
+.node-variable-ac-badge.subwf,
+.node-variable-ac-badge.workflow {
+	background: rgba(13, 148, 136, 0.25);
+	color: #14b8a6;
 }
 
 .node-variable-ac-name {
 	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 	font-weight: 600;
-	flex: 1;
+	white-space: nowrap;
+	flex-shrink: 0;
 }
 
 .node-variable-ac-detail {
 	font-size: 10px;
 	color: #64748b;
+	white-space: nowrap;
+	margin-left: auto;
+	padding-left: 12px;
+	flex-shrink: 0;
 }
 
 /* --- Context Variables Find & Replace Bar --- */

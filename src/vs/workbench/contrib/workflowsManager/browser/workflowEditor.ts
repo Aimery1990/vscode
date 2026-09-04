@@ -3145,7 +3145,82 @@ export class WorkflowEditor extends EditorPane {
 			const labelWrapper = append(contentWrapper, $('.node-label'));
 			labelWrapper.textContent = node.label || '';
 
-			// Render Output Context Variable Pills if bound
+			// Determine text alignment and matching flex justification
+			const textAlign = node.textAlign || 'center';
+			const justifyAlign = textAlign === 'left' ? 'flex-start' : (textAlign === 'right' ? 'flex-end' : 'center');
+
+			// 1. Attached Modules & Tickets (TOP OF NODE: executes first!)
+			if (!this._isPureDiagram && node.imports && node.imports.length > 0) {
+				const badgesContainer = append(contentWrapper, $('.node-imports-badges-container'));
+				badgesContainer.style.justifyContent = justifyAlign;
+				const totalImports = node.imports.length;
+				// Dynamic limit based on node width (at least 2, max 4 visible pills)
+				const maxVisible = Math.max(1, Math.min(4, Math.floor(((node.width || 120) - 16) / 55)));
+				const visibleImports = node.imports.slice(0, maxVisible);
+				const overflowCount = totalImports - visibleImports.length;
+
+				for (const imp of visibleImports) {
+					const badge = append(badgesContainer, $(`.node-import-badge.${imp.type || 'custom'}`));
+					const typeLabel = imp.type ? (imp.type.charAt(0).toUpperCase() + imp.type.slice(1)) : 'Module';
+					badge.title = `${typeLabel}: ${imp.name}`;
+
+					// Dynamic Icon & Color mapping to match workspacesExplorerPane.ts exactly
+					let codicon = Codicon.package;
+					let color = '';
+					const lower = (imp.type || '').toLowerCase();
+
+					if (lower === 'agent') {
+						codicon = Codicon.robot;
+						color = '#38bdf8';
+					} else if (lower === 'task') {
+						codicon = Codicon.checklist;
+						color = '#a78bfa';
+					} else if (lower === 'job') {
+						codicon = Codicon.rocket;
+						color = '#fbbf24';
+					} else if (lower === 'project') {
+						codicon = Codicon.project;
+						color = '#60a5fa';
+					} else if (lower === 'case') {
+						codicon = Codicon.beaker;
+						color = '#f472b6';
+					} else if (lower === 'issue') {
+						codicon = Codicon.bug;
+						color = '#ef4444';
+					} else if (lower === 'analysis') {
+						codicon = Codicon.graph;
+						color = '#34d399';
+					} else if (lower === 'workflow') {
+						codicon = Codicon.githubAction;
+						color = '#0d9488';
+					} else {
+						codicon = Codicon.package;
+						color = getColorForName(imp.type || 'custom');
+					}
+
+					// Hex to RGBA background color
+					const r = parseInt(color.slice(1, 3), 16) || 13;
+					const g = parseInt(color.slice(3, 5), 16) || 148;
+					const b = parseInt(color.slice(5, 7), 16) || 136;
+
+					badge.style.backgroundColor = `rgba(${r}, ${g}, ${b}, 0.16)`;
+					badge.style.color = color;
+
+					append(badge, $('span' + ThemeIcon.asCSSSelector(codicon)));
+					append(badge, $('span.badge-text', {}, imp.name));
+				}
+
+				if (overflowCount > 0) {
+					const moreBadge = append(badgesContainer, $('.node-import-badge.more-badge'));
+					const remainingList = node.imports.slice(maxVisible).map(i => `• [${i.type || 'module'}] ${i.name}`).join('\n');
+					moreBadge.title = `More attached tickets/modules (+${overflowCount}):\n${remainingList}`;
+					moreBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.12)';
+					moreBadge.style.color = 'var(--vscode-descriptionForeground, #aaaaaa)';
+					append(moreBadge, $('span.badge-text', {}, `+${overflowCount}`));
+				}
+			}
+
+			// 2. Output Context Variables (BOTTOM OF NODE: captures execution outputs!)
 			const nodeVars = this._getNodeVariables(node);
 			if (nodeVars.length > 0) {
 				const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
@@ -3154,7 +3229,7 @@ export class WorkflowEditor extends EditorPane {
 				varsContainer.style.flexWrap = 'wrap';
 				varsContainer.style.gap = '4px';
 				varsContainer.style.marginTop = '4px';
-				varsContainer.style.justifyContent = 'center';
+				varsContainer.style.justifyContent = justifyAlign;
 
 				for (const v of nodeVars) {
 					const runtimeVal = activeRun?.contextVariables ? activeRun.contextVariables[v.name] : undefined;
@@ -3271,7 +3346,6 @@ export class WorkflowEditor extends EditorPane {
 			}
 
 			// Multiline formatting & Alignment
-			const textAlign = node.textAlign || 'center';
 			labelWrapper.style.textAlign = textAlign;
 			if (textAlign === 'left') {
 				labelWrapper.style.textAlign = 'left';
@@ -3315,75 +3389,6 @@ export class WorkflowEditor extends EditorPane {
 				e.stopPropagation();
 				this._showInlineEditor(nodeEl, node);
 			};
-
-			if (!this._isPureDiagram && node.imports && node.imports.length > 0) {
-				const badgesContainer = append(contentWrapper, $('.node-imports-badges-container'));
-				const totalImports = node.imports.length;
-				// Dynamic limit based on node width (at least 2, max 4 visible pills)
-				const maxVisible = Math.max(1, Math.min(4, Math.floor(((node.width || 120) - 16) / 55)));
-				const visibleImports = node.imports.slice(0, maxVisible);
-				const overflowCount = totalImports - visibleImports.length;
-
-				for (const imp of visibleImports) {
-					const badge = append(badgesContainer, $(`.node-import-badge.${imp.type || 'custom'}`));
-					const typeLabel = imp.type ? (imp.type.charAt(0).toUpperCase() + imp.type.slice(1)) : 'Module';
-					badge.title = `${typeLabel}: ${imp.name}`;
-
-					// Dynamic Icon & Color mapping to match workspacesExplorerPane.ts exactly
-					let codicon = Codicon.package;
-					let color = '';
-					const lower = (imp.type || '').toLowerCase();
-
-					if (lower === 'agent') {
-						codicon = Codicon.robot;
-						color = '#38bdf8';
-					} else if (lower === 'task') {
-						codicon = Codicon.checklist;
-						color = '#a78bfa';
-					} else if (lower === 'job') {
-						codicon = Codicon.rocket;
-						color = '#fbbf24';
-					} else if (lower === 'project') {
-						codicon = Codicon.project;
-						color = '#60a5fa';
-					} else if (lower === 'case') {
-						codicon = Codicon.beaker;
-						color = '#f472b6';
-					} else if (lower === 'issue') {
-						codicon = Codicon.bug;
-						color = '#ef4444';
-					} else if (lower === 'analysis') {
-						codicon = Codicon.graph;
-						color = '#34d399';
-					} else if (lower === 'workflow') {
-						codicon = Codicon.githubAction;
-						color = '#0d9488';
-					} else {
-						codicon = Codicon.package;
-						color = getColorForName(imp.type || 'custom');
-					}
-
-					// Hex to RGBA background color
-					const r = parseInt(color.slice(1, 3), 16) || 13;
-					const g = parseInt(color.slice(3, 5), 16) || 148;
-					const b = parseInt(color.slice(5, 7), 16) || 136;
-
-					badge.style.backgroundColor = `rgba(${r}, ${g}, ${b}, 0.16)`;
-					badge.style.color = color;
-
-					append(badge, $('span' + ThemeIcon.asCSSSelector(codicon)));
-					append(badge, $('span.badge-text', {}, imp.name));
-				}
-
-				if (overflowCount > 0) {
-					const moreBadge = append(badgesContainer, $('.node-import-badge.more-badge'));
-					const remainingList = node.imports.slice(maxVisible).map(i => `• [${i.type || 'module'}] ${i.name}`).join('\n');
-					moreBadge.title = `More attached tickets/modules (+${overflowCount}):\n${remainingList}`;
-					moreBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.12)';
-					moreBadge.style.color = 'var(--vscode-descriptionForeground, #aaaaaa)';
-					append(moreBadge, $('span.badge-text', {}, `+${overflowCount}`));
-				}
-			}
 
 			// Handle dragging & double-click inline editing
 			nodeEl.onmousedown = (e) => {
@@ -3671,7 +3676,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		const collectSuggestions = () => {
-			const suggestions: { name: string; type: 'var' | 'ticket' | 'subwf'; detail: string }[] = [];
+			const suggestions: { name: string; type: string; badgeLabel: string; detail: string }[] = [];
 			const seen = new Set<string>();
 
 			for (const n of this._data?.nodes || []) {
@@ -3681,6 +3686,7 @@ export class WorkflowEditor extends EditorPane {
 						suggestions.push({
 							name: v.name,
 							type: 'var',
+							badgeLabel: 'VAR',
 							detail: `Variable (init: ${v.initialValue || 'None'}) [${n.label}]`
 						});
 					}
@@ -3691,10 +3697,13 @@ export class WorkflowEditor extends EditorPane {
 				const ticketName = imp.name.replace(/[^a-zA-Z0-9_]/g, '_');
 				if (!seen.has(ticketName)) {
 					seen.add(ticketName);
+					const rawType = (imp.type || 'task').toLowerCase();
+					const badgeLabel = rawType === 'task' ? 'TASK' : (rawType === 'job' ? 'JOB' : (rawType === 'workflow' ? 'SUBWF' : rawType.toUpperCase()));
 					suggestions.push({
 						name: ticketName,
-						type: imp.type === 'workflow' ? 'subwf' : 'ticket',
-						detail: `${imp.type}: ${imp.name}`
+						type: rawType,
+						badgeLabel,
+						detail: `${imp.type || 'task'}: ${imp.name}`
 					});
 				}
 			}
@@ -3705,10 +3714,13 @@ export class WorkflowEditor extends EditorPane {
 					const ticketName = imp.name.replace(/[^a-zA-Z0-9_]/g, '_');
 					if (!seen.has(ticketName)) {
 						seen.add(ticketName);
+						const rawType = (imp.type || 'task').toLowerCase();
+						const badgeLabel = rawType === 'task' ? 'TASK' : (rawType === 'job' ? 'JOB' : (rawType === 'workflow' ? 'SUBWF' : rawType.toUpperCase()));
 						suggestions.push({
 							name: ticketName,
-							type: imp.type === 'workflow' ? 'subwf' : 'ticket',
-							detail: `${imp.type}: ${imp.name} [${other.label}]`
+							type: rawType,
+							badgeLabel,
+							detail: `${imp.type || 'task'}: ${imp.name} [${other.label}]`
 						});
 					}
 				}
@@ -3719,7 +3731,7 @@ export class WorkflowEditor extends EditorPane {
 
 		let popover: HTMLElement | null = null;
 		let activeAcIdx = 0;
-		let currentMatches: { name: string; type: 'var' | 'ticket' | 'subwf'; detail: string }[] = [];
+		let currentMatches: { name: string; type: string; badgeLabel: string; detail: string }[] = [];
 
 		const closePopover = () => {
 			if (popover) {
@@ -3779,7 +3791,7 @@ export class WorkflowEditor extends EditorPane {
 			currentMatches.forEach((item, idx) => {
 				const row = append(popover!, $(`.node-variable-ac-item${idx === activeAcIdx ? '.active' : ''}`));
 				const badge = append(row, $(`.node-variable-ac-badge.${item.type}`));
-				badge.textContent = item.type === 'var' ? 'VAR' : (item.type === 'subwf' ? 'SUBWF' : 'TICKET');
+				badge.textContent = item.badgeLabel;
 				const nameEl = append(row, $('.node-variable-ac-name'));
 				nameEl.textContent = `@${item.name}`;
 				const detailEl = append(row, $('.node-variable-ac-detail'));
