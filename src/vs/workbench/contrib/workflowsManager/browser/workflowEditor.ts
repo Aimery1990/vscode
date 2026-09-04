@@ -1423,7 +1423,7 @@ export class WorkflowEditor extends EditorPane {
 		append(findGroup, $('span' + ThemeIcon.asCSSSelector(Codicon.search)));
 		const findInput = append(findGroup, $('input.vars-find-input')) as HTMLInputElement;
 		findInput.type = 'text';
-		findInput.placeholder = localize('findVarPlaceholder', 'Find variable name (查找变量名)...');
+		findInput.placeholder = localize('findVarPlaceholder', 'Find variable name...');
 		this._varsFindInputEl = findInput;
 		if (this._varsLastFindQuery) {
 			findInput.value = this._varsLastFindQuery;
@@ -1438,7 +1438,7 @@ export class WorkflowEditor extends EditorPane {
 		append(replaceGroup, $('span' + ThemeIcon.asCSSSelector(Codicon.replace)));
 		const replaceInput = append(replaceGroup, $('input.vars-replace-input')) as HTMLInputElement;
 		replaceInput.type = 'text';
-		replaceInput.placeholder = localize('replaceVarPlaceholder', 'Replace with (替换为)...');
+		replaceInput.placeholder = localize('replaceVarPlaceholder', 'Replace with...');
 		if (this._varsLastReplaceQuery) {
 			replaceInput.value = this._varsLastReplaceQuery;
 		}
@@ -1469,9 +1469,9 @@ export class WorkflowEditor extends EditorPane {
 			this._varsLastReplaceQuery = replaceInput.value.trim();
 		};
 
-		// Replace Next (一个个换) Button
+		// Replace Next Button
 		const replaceNextBtn = append(actions, $('button.vars-find-btn.btn-next'));
-		replaceNextBtn.textContent = localize('replaceNextBtn', 'Replace (换下一个)');
+		replaceNextBtn.textContent = localize('replaceNextBtn', 'Replace');
 		replaceNextBtn.title = 'Replace next occurrence of this variable (Enter)';
 		replaceNextBtn.onclick = () => {
 			const findName = findInput.value.trim();
@@ -1483,9 +1483,9 @@ export class WorkflowEditor extends EditorPane {
 			this._replaceNextVariableOccurrence(findName, replaceWith);
 		};
 
-		// Replace All (一口气全换) Button
+		// Replace All Button
 		const replaceAllBtn = append(actions, $('button.vars-find-btn.btn-all'));
-		replaceAllBtn.textContent = localize('replaceAllBtn', 'Replace All (全部替换)');
+		replaceAllBtn.textContent = localize('replaceAllBtn', 'Replace All');
 		replaceAllBtn.title = 'Replace all occurrences of this variable across nodes & links (Cmd/Ctrl+Enter)';
 		replaceAllBtn.onclick = () => {
 			const findName = findInput.value.trim();
@@ -1605,7 +1605,7 @@ export class WorkflowEditor extends EditorPane {
 		const right = append(header, $('.log-header-right'));
 		// Reset Execution Button
 		const resetBtn = append(right, $('.log-btn-icon'));
-		resetBtn.title = localize('resetExecutionTooltip', 'Reset Workflow State to IDLE & Clear Highlights (复位执行状态)');
+		resetBtn.title = localize('resetExecutionTooltip', 'Reset Workflow State to IDLE & Clear Highlights');
 		append(resetBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.debugRestart)));
 		resetBtn.onclick = () => {
 			if (!this._workflowUri) return;
@@ -1630,7 +1630,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// Clear Logs Button (only visible in Execution Logs tab)
 		const clearBtn = append(right, $('.log-btn-icon.log-clear-btn'));
-		clearBtn.title = localize('clearLogsTooltip', 'Clear Execution Logs (清空运行日志)');
+		clearBtn.title = localize('clearLogsTooltip', 'Clear Execution Logs');
 		append(clearBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.clearAll)));
 		clearBtn.onclick = () => {
 			if (this._logBodyEl) {
@@ -1643,7 +1643,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// Find & Replace Button (only visible in Context Variables tab)
 		const findReplaceBtn = append(right, $('.log-btn-icon.vars-find-replace-toggle-btn'));
-		findReplaceBtn.title = localize('findReplaceVarsTooltip', 'Find & Replace Variable Names (查找与替换变量名 Ctrl/Cmd+R)');
+		findReplaceBtn.title = localize('findReplaceVarsTooltip', 'Find & Replace Variable Names (Ctrl/Cmd+R)');
 		append(findReplaceBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.replace)));
 		findReplaceBtn.onclick = () => {
 			this._toggleVarsFindReplaceBar();
@@ -1651,7 +1651,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// Close Button
 		const closeBtn = append(right, $('.log-btn-icon'));
-		closeBtn.title = localize('closeDrawerTooltip', 'Close Bottom Panel (关闭底部面板)');
+		closeBtn.title = localize('closeDrawerTooltip', 'Close Bottom Panel');
 		append(closeBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
 		closeBtn.onclick = () => {
 			this._closeLogDrawer();
@@ -1784,7 +1784,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// 5. Execution Console & Variables Drawer Toggle Button
 		const logsBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
-		logsBtn.title = localize('logsConsoleTitle', 'Execution Console & Variables Drawer (运行控制台与上下文变量)');
+		logsBtn.title = localize('logsConsoleTitle', 'Execution Console & Variables Drawer');
 		append(logsBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
 		if (!this._isToolbarCompact) {
 			append(logsBtn, $('.item-label')).textContent = 'Logs';
@@ -2727,7 +2727,7 @@ export class WorkflowEditor extends EditorPane {
 								const exprRow = append(varCard, $('.workflow-var-row'));
 								exprRow.style.marginTop = '6px';
 								const exprLabel = append(exprRow, $('.workflow-var-label'));
-								exprLabel.textContent = localize('varOperation', 'Operation / Assignment (操作 / 赋值):');
+								exprLabel.textContent = localize('varOperation', 'Operation / Assignment:');
 								const exprInput = append(exprRow, $('input.workflow-var-input')) as HTMLInputElement;
 								exprInput.style.width = '100%';
 								exprInput.style.boxSizing = 'border-box';
@@ -2752,7 +2752,7 @@ export class WorkflowEditor extends EditorPane {
 								const initRow = append(varCard, $('.workflow-var-row'));
 								initRow.style.marginTop = '6px';
 								const initLabel = append(initRow, $('.workflow-var-label'));
-								initLabel.textContent = localize('varInit', 'Initial Value (Python 初值):');
+								initLabel.textContent = localize('varInit', 'Initial Value (Python):');
 								const initInput = append(initRow, $('input.workflow-var-input')) as HTMLInputElement;
 								initInput.style.width = '100%';
 								initInput.style.boxSizing = 'border-box';
@@ -2777,7 +2777,7 @@ export class WorkflowEditor extends EditorPane {
 								const exprRow = append(varCard, $('.workflow-var-row'));
 								exprRow.style.marginTop = '6px';
 								const exprLabel = append(exprRow, $('.workflow-var-label'));
-								exprLabel.textContent = localize('varExprOpt', 'Operation on this Node (本节点操作, 可选):');
+								exprLabel.textContent = localize('varExprOpt', 'Operation on this Node (Optional):');
 								const exprInput = append(exprRow, $('input.workflow-var-input')) as HTMLInputElement;
 								exprInput.style.width = '100%';
 								exprInput.style.boxSizing = 'border-box';
