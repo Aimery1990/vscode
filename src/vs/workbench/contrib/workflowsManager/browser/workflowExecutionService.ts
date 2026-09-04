@@ -47,6 +47,315 @@ interface IFlowchartData {
 	links: IFlowchartLink[];
 }
 
+class PythonExpressionEvaluator {
+	private pos = 0;
+	private tokens: string[] = [];
+	private context: Record<string, any>;
+
+	constructor(expr: string, context: Record<string, any>) {
+		this.context = context || {};
+		this.tokens = this.tokenize(expr);
+		this.pos = 0;
+	}
+
+	private tokenize(expr: string): string[] {
+		const tokens: string[] = [];
+		let i = 0;
+		let s = expr.trim();
+		if (s.startsWith('=')) {
+			s = s.substring(1).trim();
+		}
+		// Strip @ before variable names: e.g. "@monitor1" -> "monitor1"
+		s = s.replace(/@([a-zA-Z0-9_]+)/g, '$1');
+
+		while (i < s.length) {
+			const ch = s[i];
+			if (/\s/.test(ch)) {
+				i++;
+				continue;
+			}
+			// Quoted strings: '...' or "..."
+			if (ch === "'" || ch === '"') {
+				const quote = ch;
+				let str = '';
+				i++;
+				while (i < s.length && s[i] !== quote) {
+					if (s[i] === '\\' && i + 1 < s.length) {
+						i++;
+						str += s[i];
+					} else {
+						str += s[i];
+					}
+					i++;
+				}
+				if (i < s.length) i++; // consume closing quote
+				tokens.push(quote + str + quote);
+				continue;
+			}
+
+			// Two-char operators: ==, !=, <=, >=, //, **
+			const two = s.slice(i, i + 2);
+			if (['==', '!=', '<=', '>=', '//', '**'].includes(two)) {
+				tokens.push(two);
+				i += 2;
+				continue;
+			}
+
+			// Single-char operators and punctuation
+			if (['+', '-', '*', '/', '%', '(', ')', '<', '>'].includes(ch)) {
+				tokens.push(ch);
+				i++;
+				continue;
+			}
+
+			// Identifiers, numbers, or keywords
+			let word = '';
+			while (i < s.length && !/\s|[()+\-*/%<>=!,'"]/.test(s[i])) {
+				word += s[i];
+				i++;
+			}
+			if (word) {
+				tokens.push(word);
+			}
+		}
+		return tokens;
+	}
+
+	public evaluate(): any {
+		if (this.tokens.length === 0) return undefined;
+		const res = this.parseOr();
+		if (this.pos < this.tokens.length) {
+			throw new Error(`SyntaxError: invalid syntax near '${this.tokens[this.pos]}'`);
+		}
+		return res;
+	}
+
+	private peek(): string | undefined {
+		return this.tokens[this.pos];
+	}
+
+	private consume(expected?: string): string {
+		const token = this.tokens[this.pos];
+		if (expected && token !== expected) {
+			throw new Error(`SyntaxError: expected '${expected}', got '${token || 'EOF'}'`);
+		}
+		this.pos++;
+		return token;
+	}
+
+	// Level 1: or
+	private parseOr(): any {
+		let left = this.parseAnd();
+		while (this.peek() === 'or') {
+			this.consume('or');
+			const right = this.parseAnd();
+			left = Boolean(left) ? left : right;
+		}
+		return left;
+	}
+
+	// Level 2: and
+	private parseAnd(): any {
+		let left = this.parseNot();
+		while (this.peek() === 'and') {
+			this.consume('and');
+			const right = this.parseNot();
+			left = Boolean(left) ? right : left;
+		}
+		return left;
+	}
+
+	// Level 3: not
+	private parseNot(): any {
+		if (this.peek() === 'not') {
+			this.consume('not');
+			return !this.parseNot();
+		}
+		return this.parseComparison();
+	}
+
+	// Level 4: comparisons (==, !=, <, <=, >, >=, is, is not, in)
+	private parseComparison(): any {
+		let left = this.parseAddSub();
+
+		const op = this.peek();
+		if (op === '==' || op === '!=' || op === '<' || op === '<=' || op === '>' || op === '>=') {
+			this.consume();
+			const right = this.parseAddSub();
+			if (op === '==') return left === right;
+			if (op === '!=') return left !== right;
+			if (op === '<') return left < right;
+			if (op === '<=') return left <= right;
+			if (op === '>') return left > right;
+			if (op === '>=') return left >= right;
+		} else if (op === 'is') {
+			this.consume('is');
+			if (this.peek() === 'not') {
+				this.consume('not');
+				const right = this.parseAddSub();
+				return left !== right;
+			} else {
+				const right = this.parseAddSub();
+				return left === right;
+			}
+		} else if (op === 'in') {
+			this.consume('in');
+			const right = this.parseAddSub();
+			if (typeof right === 'string' || Array.isArray(right)) {
+				return right.includes(left);
+			}
+			if (right && typeof right === 'object') {
+				return left in right;
+			}
+			return false;
+		}
+
+		return left;
+	}
+
+	// Level 5: +, -
+	private parseAddSub(): any {
+		let left = this.parseMulDiv();
+		while (this.peek() === '+' || this.peek() === '-') {
+			const op = this.consume();
+			const right = this.parseMulDiv();
+
+			if (op === '+') {
+				if (typeof left === 'number' && typeof right === 'number') {
+					left = left + right;
+				} else if (typeof left === 'string' && typeof right === 'string') {
+					left = left + right;
+				} else if (typeof left === 'string' || typeof right === 'string') {
+					throw new Error(`TypeError: can only concatenate str (not "${typeof left === 'string' ? typeof right : typeof left}") to str`);
+				} else {
+					left = (left as any) + (right as any);
+				}
+			} else if (op === '-') {
+				if (typeof left === 'number' && typeof right === 'number') {
+					left = left - right;
+				} else {
+					throw new Error(`TypeError: unsupported operand type(s) for -: '${typeof left}' and '${typeof right}'`);
+				}
+			}
+		}
+		return left;
+	}
+
+	// Level 6: *, /, //, %
+	private parseMulDiv(): any {
+		let left = this.parsePower();
+		while (this.peek() === '*' || this.peek() === '/' || this.peek() === '//' || this.peek() === '%') {
+			const op = this.consume();
+			const right = this.parsePower();
+
+			if (op === '*') {
+				if (typeof left === 'number' && typeof right === 'number') {
+					left = left * right;
+				} else if (typeof left === 'string' && typeof right === 'number') {
+					left = left.repeat(Math.max(0, Math.floor(right)));
+				} else if (typeof left === 'number' && typeof right === 'string') {
+					left = right.repeat(Math.max(0, Math.floor(left)));
+				} else {
+					throw new Error(`TypeError: unsupported operand type(s) for *: '${typeof left}' and '${typeof right}'`);
+				}
+			} else if (op === '/') {
+				if (typeof left === 'number' && typeof right === 'number') {
+					if (right === 0) throw new Error('ZeroDivisionError: division by zero');
+					left = left / right;
+				} else {
+					throw new Error(`TypeError: unsupported operand type(s) for /: '${typeof left}' and '${typeof right}'`);
+				}
+			} else if (op === '//') {
+				if (typeof left === 'number' && typeof right === 'number') {
+					if (right === 0) throw new Error('ZeroDivisionError: integer division by zero');
+					left = Math.floor(left / right);
+				} else {
+					throw new Error(`TypeError: unsupported operand type(s) for //: '${typeof left}' and '${typeof right}'`);
+				}
+			} else if (op === '%') {
+				if (typeof left === 'number' && typeof right === 'number') {
+					if (right === 0) throw new Error('ZeroDivisionError: integer modulo by zero');
+					left = left % right;
+				} else {
+					throw new Error(`TypeError: unsupported operand type(s) for %: '${typeof left}' and '${typeof right}'`);
+				}
+			}
+		}
+		return left;
+	}
+
+	// Level 7: **
+	private parsePower(): any {
+		let left = this.parseUnary();
+		if (this.peek() === '**') {
+			this.consume('**');
+			const right = this.parsePower(); // right-associative in Python!
+			if (typeof left === 'number' && typeof right === 'number') {
+				return Math.pow(left, right);
+			}
+			throw new Error(`TypeError: unsupported operand type(s) for **: '${typeof left}' and '${typeof right}'`);
+		}
+		return left;
+	}
+
+	// Level 8: Unary +, -
+	private parseUnary(): any {
+		if (this.peek() === '+') {
+			this.consume('+');
+			const val = this.parseUnary();
+			return +val;
+		}
+		if (this.peek() === '-') {
+			this.consume('-');
+			const val = this.parseUnary();
+			return -val;
+		}
+		return this.parsePrimary();
+	}
+
+	// Level 9: Primary (literal, variable lookup, parentheses)
+	private parsePrimary(): any {
+		const token = this.peek();
+		if (!token) {
+			throw new Error('SyntaxError: unexpected end of expression');
+		}
+
+		if (token === '(') {
+			this.consume('(');
+			const val = this.parseOr();
+			this.consume(')');
+			return val;
+		}
+
+		this.consume();
+
+		// Python literals
+		if (token === 'None' || token === 'null') return null;
+		if (token === 'True' || token === 'true') return true;
+		if (token === 'False' || token === 'false') return false;
+
+		// Number literal
+		if (/^-?\d+(\.\d+)?$/.test(token)) {
+			return Number(token);
+		}
+
+		// Quoted string literal
+		if ((token.startsWith("'") && token.endsWith("'")) || (token.startsWith('"') && token.endsWith('"'))) {
+			return token.substring(1, token.length - 1);
+		}
+
+		// Identifier lookup in context
+		if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(token)) {
+			if (this.context && Object.prototype.hasOwnProperty.call(this.context, token)) {
+				return this.context[token];
+			}
+			throw new Error(`NameError: name '${token}' is not defined in workflow context`);
+		}
+
+		return token;
+	}
+}
+
 export class WorkflowExecutionService implements IWorkflowExecutionService {
 	readonly _serviceBrand: undefined;
 
@@ -728,71 +1037,32 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return false;
 		}
 
-		// 2. Python comparison operators (in order of length/precedence)
-		const opTokens = ['is not', '!=', '==', '<=', '>=', 'is', '<', '>'];
-		let matchedOp: string | undefined;
-		let opIndex = -1;
-
-		for (const op of opTokens) {
-			if (op === 'is not' || op === 'is') {
-				const regex = new RegExp(`\\b${op.replace(' ', '\\s+')}\\b`, 'i');
-				const match = regex.exec(raw);
-				if (match) {
-					matchedOp = op;
-					opIndex = match.index;
-					break;
-				}
-			} else {
-				const idx = raw.indexOf(op);
-				if (idx !== -1) {
-					matchedOp = op;
-					opIndex = idx;
-					break;
-				}
+		// 2. Evaluate using pure Python expression evaluator (no eval / new Function)
+		try {
+			const evaluator = new PythonExpressionEvaluator(raw, context);
+			const res = evaluator.evaluate();
+			if (typeof res === 'boolean') {
+				return res;
 			}
-		}
-
-		if (!matchedOp || opIndex === -1) {
-			// Single variable or truthiness check
-			const val = this._resolveValue(raw, context);
-			if (val !== undefined && val !== null) {
-				return Boolean(val);
+			if (res !== undefined && res !== null) {
+				return Boolean(res);
 			}
-			return null;
-		}
+		} catch { }
 
-		const leftStr = raw.substring(0, opIndex).trim();
-		const rightStr = raw.substring(opIndex + matchedOp.length).trim();
+		return null;
+	}
 
-		const left = this._resolveValue(leftStr, context);
-		const right = this._resolveValue(rightStr, context);
+	private _evaluateExpressionOrLiteral(expr: string, context: Record<string, any>): any {
+		const evaluator = new PythonExpressionEvaluator(expr, context);
+		return evaluator.evaluate();
+	}
 
-		// If user explicitly referenced @variable that does not exist, reject condition
-		if (leftStr.startsWith('@') && left === undefined) {
-			return false;
-		}
-		if (rightStr.startsWith('@') && right === undefined) {
-			return false;
-		}
-
-		const opLower = matchedOp.toLowerCase();
-		switch (opLower) {
-			case '==':
-			case 'is':
-				return left == right;
-			case '!=':
-			case 'is not':
-				return left != right;
-			case '<':
-				return Number(left) < Number(right);
-			case '>':
-				return Number(left) > Number(right);
-			case '<=':
-				return Number(left) <= Number(right);
-			case '>=':
-				return Number(left) >= Number(right);
-			default:
-				return null;
+	private _resolveValue(token: string, context: Record<string, any>): any {
+		try {
+			const evaluator = new PythonExpressionEvaluator(token, context);
+			return evaluator.evaluate();
+		} catch {
+			return undefined;
 		}
 	}
 
@@ -804,153 +1074,6 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return [node.outputVariable];
 		}
 		return [];
-	}
-
-	private _evaluateExpressionOrLiteral(expr: string, context: Record<string, any>): any {
-		let trimmed = expr.trim();
-		// Strip @ before variable names: e.g. "@monitor1" -> "monitor1"
-		trimmed = trimmed.replace(/@([a-zA-Z0-9_]+)/g, '$1');
-
-		// 1. Check for single literal tokens first
-		if (trimmed === 'None' || trimmed === 'null') return null;
-		if (trimmed === 'True' || trimmed === 'true') return true;
-		if (trimmed === 'False' || trimmed === 'false') return false;
-		if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-		if ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"'))) {
-			return trimmed.substring(1, trimmed.length - 1);
-		}
-
-		// 2. Python NameError check: all variable identifiers outside quotes must exist in context
-		const codeWithoutStrings = trimmed.replace(/'[^']*'/g, ' ').replace(/"[^"]*"/g, ' ');
-		const pythonKeywords = new Set(['True', 'true', 'False', 'false', 'None', 'null', 'and', 'or', 'not', 'is', 'in']);
-		const identifiers = codeWithoutStrings.match(/\b[a-zA-Z_][a-zA-Z0-9_]*\b/g) || [];
-
-		for (const id of identifiers) {
-			if (!pythonKeywords.has(id)) {
-				if (!context || !Object.prototype.hasOwnProperty.call(context, id)) {
-					throw new Error(`NameError: name '${id}' is not defined in workflow context`);
-				}
-			}
-		}
-
-		// 3. Safe evaluation with Python strict types check
-		try {
-			if (!/[;{}[\]]/.test(trimmed) && /^[a-zA-Z0-9_+\-*/%().\s'"]+$/.test(trimmed)) {
-				const safeExpr = trimmed.replace(/\b([a-zA-Z_][a-zA-Z0-9_]*)\b/g, (match) => {
-					if (match === 'True' || match === 'true') return 'true';
-					if (match === 'False' || match === 'false') return 'false';
-					if (match === 'None' || match === 'null') return 'null';
-					if (context && Object.prototype.hasOwnProperty.call(context, match)) {
-						return `__ctx.${match}`;
-					}
-					return match;
-				});
-
-				const fn = new Function('__ctx', `return (${safeExpr});`);
-				const res = fn(context || {});
-
-				// Strict Python TypeError check: prohibit implicit string + number concatenation
-				if (typeof res === 'string' && trimmed.includes('+')) {
-					let hasNumberOperand = false;
-					let hasStringOperand = false;
-					for (const id of identifiers) {
-						if (context && typeof context[id] === 'number') hasNumberOperand = true;
-						if (context && typeof context[id] === 'string') hasStringOperand = true;
-					}
-					if (hasNumberOperand && hasStringOperand) {
-						throw new Error(`TypeError: can only concatenate str (not "int") to str`);
-					}
-				}
-
-				if (res !== undefined && !Number.isNaN(res)) {
-					return res;
-				}
-			}
-		} catch (e: any) {
-			throw e;
-		}
-
-		// 4. Binary arithmetic fallback strictly adhering to Python types
-		const binMatch = trimmed.match(/^([a-zA-Z0-9_]+)\s*([+\-*/])\s*(.+)$/);
-		if (binMatch) {
-			const leftVal = this._resolveValue(binMatch[1], context);
-			const op = binMatch[2];
-			const rightVal = this._resolveValue(binMatch[3], context);
-
-			if (leftVal === undefined) {
-				throw new Error(`NameError: name '${binMatch[1]}' is not defined in workflow context`);
-			}
-			if (rightVal === undefined) {
-				throw new Error(`NameError: name '${binMatch[3]}' is not defined in workflow context`);
-			}
-
-			if (typeof leftVal === 'number' && typeof rightVal === 'number') {
-				if (op === '+') return leftVal + rightVal;
-				if (op === '-') return leftVal - rightVal;
-				if (op === '*') return leftVal * rightVal;
-				if (op === '/' && rightVal !== 0) return leftVal / rightVal;
-			}
-			if (typeof leftVal === 'string' && typeof rightVal === 'string') {
-				if (op === '+') return leftVal + rightVal;
-			}
-			if (typeof leftVal === 'string' && typeof rightVal === 'number') {
-				if (op === '*') return leftVal.repeat(Math.max(0, Math.floor(rightVal)));
-				throw new Error(`TypeError: can only concatenate str (not "int") to str`);
-			}
-			if (typeof leftVal === 'number' && typeof rightVal === 'string') {
-				if (op === '*') return rightVal.repeat(Math.max(0, Math.floor(leftVal)));
-				throw new Error(`TypeError: unsupported operand type(s) for ${op}: 'int' and 'str'`);
-			}
-		}
-
-		return this._resolveValue(trimmed, context);
-	}
-
-	private _resolveValue(token: string, context: Record<string, any>): any {
-		const trimmed = token.trim();
-		if (!trimmed) return undefined;
-
-		// Python literals
-		if (trimmed === 'None' || trimmed === 'null') return null;
-		if (trimmed === 'True' || trimmed === 'true') return true;
-		if (trimmed === 'False' || trimmed === 'false') return false;
-
-		// Numeric literal
-		if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
-			return Number(trimmed);
-		}
-
-		// Quoted string literal ('text' or "text")
-		if ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"'))) {
-			return trimmed.substring(1, trimmed.length - 1);
-		}
-
-		// Support formal variable reference syntax @var_name
-		if (trimmed.startsWith('@')) {
-			const varName = trimmed.substring(1).trim();
-			if (context && Object.prototype.hasOwnProperty.call(context, varName)) {
-				return context[varName];
-			}
-			return undefined;
-		}
-
-		// Lookup in context
-		if (context && Object.prototype.hasOwnProperty.call(context, trimmed)) {
-			return context[trimmed];
-		}
-
-		// Support template syntax {{var}}
-		const tmpl = trimmed.match(/^\{\{\s*([a-zA-Z0-9_]+)\s*\}\}$/);
-		if (tmpl && context && Object.prototype.hasOwnProperty.call(context, tmpl[1])) {
-			return context[tmpl[1]];
-		}
-
-		// If it's a valid identifier that wasn't found in context, it's UNDEFINED (Python NameError), NOT a string literal!
-		if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(trimmed)) {
-			return undefined;
-		}
-
-		return trimmed;
 	}
 
 	private _findEntryNode(data: IFlowchartData, entryNodeId?: string): IFlowchartNode | undefined {
