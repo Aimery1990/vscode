@@ -366,10 +366,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 							// Assign to bound context variable if present
 							if (node.outputVariable && node.outputVariable.name) {
-								const assignedVal = nodeState.output?.value ?? nodeState.output?.result ?? this._resolveValue(node.outputVariable.initialValue || 'None', run.contextVariables);
+								let assignedVal = nodeState.output?.value !== undefined ? nodeState.output.value : (nodeState.output?.returnValue !== undefined ? nodeState.output.returnValue : undefined);
+								if (assignedVal === undefined) {
+									// Maintain or resolve initial value
+									assignedVal = this._resolveValue(node.outputVariable.initialValue || 'None', run.contextVariables);
+								}
 								run.contextVariables[node.outputVariable.name] = assignedVal;
 								node.outputVariable.currentValue = assignedVal;
-								this._emitLog(run, 'info', `Variable '${node.outputVariable.name}' assigned: ${typeof assignedVal === 'object' ? JSON.stringify(assignedVal) : assignedVal}`, { nodeId: node.id });
+								this._emitLog(run, 'info', `Variable '${node.outputVariable.name}' value is: ${typeof assignedVal === 'object' ? JSON.stringify(assignedVal) : assignedVal}`, { nodeId: node.id });
 							}
 						} catch (err: any) {
 							nodeState.status = 'failed';
@@ -528,9 +532,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return;
 		}
 
-		// 5. General Agent Node Execution
+		// 5. General Diagram Node Execution
 		await new Promise(r => setTimeout(r, 500));
-		state.output = { result: `Node '${node.label}' successfully executed` };
+		state.output = { message: `Node '${node.label}' successfully executed` };
 	}
 
 	private async _resolveNextNodes(
@@ -543,19 +547,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return [];
 		}
 
-		if (outgoingLinks.length === 1) {
-			const targetId = outgoingLinks[0].to;
-			const target = data.nodes.find(n => n.id === targetId);
-			return target ? [target] : [];
-		}
-
-		// Multiple outgoing branches from currentNode
-		this._emitLog(run, 'info', `Evaluating ${outgoingLinks.length} outgoing branch(es) from '${currentNode.label}'`);
-
-		// Check if any link has explicit condition labels or expressions
+		// Check if any outgoing link has explicit condition labels or expressions
 		const conditionalLinks = outgoingLinks.filter(l => (l.label || '').trim().length > 0);
 
 		if (conditionalLinks.length > 0) {
+			this._emitLog(run, 'info', `Evaluating condition(s) on ${outgoingLinks.length} outgoing branch(es) from '${currentNode.label}'`);
 			const matchedNodes: IFlowchartNode[] = [];
 			for (const link of outgoingLinks) {
 				const rawLabel = (link.label || '').trim();
@@ -569,7 +565,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						matchedNodes.push(target);
 					}
 				} else if (condResult === false) {
-					this._emitLog(run, 'info', `Condition REJECTED: '${link.label}'`);
+					this._emitLog(run, 'info', `Condition REJECTED: '${link.label}' (context: ${JSON.stringify(run.contextVariables)})`);
 				}
 			}
 
@@ -586,6 +582,15 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				this._emitLog(run, 'info', `Fallback branch(es) taken -> navigating to ${fallbackNodes.map(n => `'${n.label}'`).join(', ')}`);
 				return fallbackNodes;
 			}
+
+			this._emitLog(run, 'warn', `No outgoing branch condition was satisfied from '${currentNode.label}'. Execution stopped.`);
+			return [];
+		}
+
+		if (outgoingLinks.length === 1) {
+			const targetId = outgoingLinks[0].to;
+			const target = data.nodes.find(n => n.id === targetId);
+			return target ? [target] : [];
 		}
 
 		// Parallel Fork (Unconditional / Fan-Out):

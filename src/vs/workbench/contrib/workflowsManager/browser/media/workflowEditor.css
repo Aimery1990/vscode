@@ -1771,60 +1771,6 @@
 	background: rgba(239, 68, 68, 0.25);
 }
 
-/* --- Inline Variable Edit Popover --- */
-.workflow-variable-popover {
-	position: fixed;
-	z-index: 9999;
-	background: #1e293b;
-	border: 1px solid #334155;
-	border-radius: 8px;
-	box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.5);
-	padding: 12px;
-	width: 250px;
-	display: flex;
-	flex-direction: column;
-	gap: 10px;
-	font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-.workflow-variable-popover-header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-}
-
-.workflow-variable-popover-header .popover-title-wrapper {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	font-size: 12px;
-	font-weight: 600;
-	color: #38bdf8;
-}
-
-.workflow-variable-popover-close {
-	cursor: pointer;
-	color: #94a3b8;
-	font-size: 12px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	width: 18px;
-	height: 18px;
-	border-radius: 3px;
-}
-
-.workflow-variable-popover-close:hover {
-	color: #f1f5f9;
-	background: rgba(255, 255, 255, 0.1);
-}
-
-.workflow-var-popover-actions {
-	display: flex;
-	gap: 6px;
-	margin-top: 4px;
-}
-
 /* --- Drawer Tabs & Variables Table Styles --- */
 .drawer-tabs {
 	display: flex;
@@ -1914,6 +1860,11 @@
 
 .workflow-vars-table tr:hover td {
 	background: rgba(255, 255, 255, 0.02);
+}
+
+.workflow-vars-table tr.highlighted-var-row td {
+	background: rgba(56, 189, 248, 0.15) !important;
+	border-bottom-color: rgba(56, 189, 248, 0.35) !important;
 }
 
 .vars-table-input {
