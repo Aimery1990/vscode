@@ -55,6 +55,8 @@ interface IFlowchartNode {
 	textColor?: string;
 	textAlign?: 'left' | 'center' | 'right';
 	verticalAlign?: 'top' | 'center' | 'bottom';
+	titleTextAlign?: 'left' | 'center' | 'right';
+	titleVerticalAlign?: 'top' | 'center' | 'bottom';
 	isBold?: boolean;
 	isItalic?: boolean;
 	isUnderline?: boolean;
@@ -2502,52 +2504,122 @@ export class WorkflowEditor extends EditorPane {
 		// Row 2: Horizontal Alignment (Left, Center, Right)
 		const alignRow = append(textSec, $(`.workflow-format-row${this._isInspectorCompact ? '.compact-col' : ''}`));
 		const alignChoices: { align: 'left' | 'center' | 'right'; label: string; shortLabel: string; title: string }[] = [
-			{ align: 'left', label: 'Left', shortLabel: 'L', title: 'Align Left' },
-			{ align: 'center', label: 'Center', shortLabel: 'C', title: 'Align Center' },
-			{ align: 'right', label: 'Right', shortLabel: 'R', title: 'Align Right' }
+			{ align: 'left', label: 'Left', shortLabel: 'L', title: 'Align Left (Click: content only; Double-click: all including title)' },
+			{ align: 'center', label: 'Center', shortLabel: 'C', title: 'Align Center (Click: content only; Double-click: all including title)' },
+			{ align: 'right', label: 'Right', shortLabel: 'R', title: 'Align Right (Click: content only; Double-click: all including title)' }
 		];
 		for (const ac of alignChoices) {
 			const aBtn = append(alignRow, $(`.workflow-format-btn.text-btn${textAlign === ac.align ? '.active' : ''}`));
 			aBtn.textContent = this._isInspectorCompact ? ac.shortLabel : ac.label;
 			aBtn.title = ac.title;
-			aBtn.onclick = () => {
+
+			let clickTimer: any = null;
+
+			const applyAlign = (includeTitle: boolean) => {
 				this._activeTextAlign = ac.align;
 				this._storageService.store('workflowEditor.textAlign', this._activeTextAlign, StorageScope.PROFILE, StorageTarget.USER);
 				if (this._selectedNodeIds.size > 0) {
 					for (const id of this._selectedNodeIds) {
 						const node = this._data.nodes.find(n => n.id === id);
-						if (node) node.textAlign = ac.align;
+						if (node) {
+							node.textAlign = ac.align;
+							if (includeTitle) {
+								node.titleTextAlign = ac.align;
+							}
+						}
 					}
 					this._saveFlowchartData();
 					this._renderNodes();
 				}
 				this._renderInspector(parent);
+				if (includeTitle) {
+					this._notificationService.info(`Aligned all elements (including node title) to ${ac.label}.`);
+				}
+			};
+
+			aBtn.onclick = (e) => {
+				e.stopPropagation();
+				if (clickTimer) {
+					clearTimeout(clickTimer);
+					clickTimer = null;
+					applyAlign(true);
+				} else {
+					clickTimer = setTimeout(() => {
+						clickTimer = null;
+						applyAlign(false);
+					}, 220);
+				}
+			};
+
+			aBtn.ondblclick = (e) => {
+				e.stopPropagation();
+				e.preventDefault();
+				if (clickTimer) {
+					clearTimeout(clickTimer);
+					clickTimer = null;
+				}
+				applyAlign(true);
 			};
 		}
 
 		// Row 3: Vertical Alignments (Top, Middle, Bottom)
 		const vAlignRow = append(textSec, $(`.workflow-format-row${this._isInspectorCompact ? '.compact-col' : ''}`));
 		const vAlignChoices: { align: 'top' | 'center' | 'bottom'; label: string; shortLabel: string; title: string }[] = [
-			{ align: 'top', label: 'Top', shortLabel: 'T', title: 'Align Top' },
-			{ align: 'center', label: 'Middle', shortLabel: 'M', title: 'Align Middle' },
-			{ align: 'bottom', label: 'Bottom', shortLabel: 'B', title: 'Align Bottom' }
+			{ align: 'top', label: 'Top', shortLabel: 'T', title: 'Align Top (Click: content only; Double-click: all including title)' },
+			{ align: 'center', label: 'Middle', shortLabel: 'M', title: 'Align Middle (Click: content only; Double-click: all including title)' },
+			{ align: 'bottom', label: 'Bottom', shortLabel: 'B', title: 'Align Bottom (Click: content only; Double-click: all including title)' }
 		];
 		for (const va of vAlignChoices) {
 			const vaBtn = append(vAlignRow, $(`.workflow-format-btn${verticalAlign === va.align ? '.active' : ''}`));
 			vaBtn.textContent = this._isInspectorCompact ? va.shortLabel : va.label;
 			vaBtn.title = va.title;
-			vaBtn.onclick = () => {
+
+			let vClickTimer: any = null;
+
+			const applyVAlign = (includeTitle: boolean) => {
 				this._activeVerticalAlign = va.align;
 				this._storageService.store('workflowEditor.verticalAlign', this._activeVerticalAlign, StorageScope.PROFILE, StorageTarget.USER);
 				if (this._selectedNodeIds.size > 0) {
 					for (const id of this._selectedNodeIds) {
 						const node = this._data.nodes.find(n => n.id === id);
-						if (node) node.verticalAlign = va.align;
+						if (node) {
+							node.verticalAlign = va.align;
+							if (includeTitle) {
+								node.titleVerticalAlign = va.align;
+							}
+						}
 					}
 					this._saveFlowchartData();
 					this._renderNodes();
 				}
 				this._renderInspector(parent);
+				if (includeTitle) {
+					this._notificationService.info(`Aligned all elements (including node title) vertically to ${va.label}.`);
+				}
+			};
+
+			vaBtn.onclick = (e) => {
+				e.stopPropagation();
+				if (vClickTimer) {
+					clearTimeout(vClickTimer);
+					vClickTimer = null;
+					applyVAlign(true);
+				} else {
+					vClickTimer = setTimeout(() => {
+						vClickTimer = null;
+						applyVAlign(false);
+					}, 220);
+				}
+			};
+
+			vaBtn.ondblclick = (e) => {
+				e.stopPropagation();
+				e.preventDefault();
+				if (vClickTimer) {
+					clearTimeout(vClickTimer);
+					vClickTimer = null;
+				}
+				applyVAlign(true);
 			};
 		}
 
@@ -3346,27 +3418,28 @@ export class WorkflowEditor extends EditorPane {
 			}
 
 			// Multiline formatting & Alignment
-			labelWrapper.style.textAlign = textAlign;
-			if (textAlign === 'left') {
-				labelWrapper.style.textAlign = 'left';
-				contentWrapper.style.alignItems = 'flex-start';
-			} else if (textAlign === 'right') {
-				labelWrapper.style.textAlign = 'right';
-				contentWrapper.style.alignItems = 'flex-end';
-			} else {
-				labelWrapper.style.textAlign = 'center';
-				contentWrapper.style.alignItems = 'center';
-			}
+			// Node title defaults to center-top; follows titleTextAlign if explicitly set
+			const titleAlign = node.titleTextAlign || 'center';
+			labelWrapper.style.textAlign = titleAlign;
+			labelWrapper.style.width = '100%';
+			labelWrapper.style.display = 'block';
+
+			contentWrapper.style.alignItems = 'stretch';
 
 			const verticalAlign = node.verticalAlign || 'center';
-			if (verticalAlign === 'top') {
-				contentWrapper.style.justifyContent = 'flex-start';
-				contentWrapper.style.paddingTop = '6px';
-			} else if (verticalAlign === 'bottom') {
+			const titleVAlign = node.titleVerticalAlign || 'top';
+			if (titleVAlign === 'center' && verticalAlign === 'center') {
+				contentWrapper.style.justifyContent = 'center';
+				contentWrapper.style.paddingTop = '0px';
+				contentWrapper.style.paddingBottom = '0px';
+			} else if (titleVAlign === 'bottom' && verticalAlign === 'bottom') {
 				contentWrapper.style.justifyContent = 'flex-end';
+				contentWrapper.style.paddingTop = '0px';
 				contentWrapper.style.paddingBottom = '6px';
 			} else {
-				contentWrapper.style.justifyContent = 'center';
+				contentWrapper.style.justifyContent = 'flex-start';
+				contentWrapper.style.paddingTop = '6px';
+				contentWrapper.style.paddingBottom = '6px';
 			}
 
 			if (node.isBold) {
