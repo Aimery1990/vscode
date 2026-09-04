@@ -802,9 +802,32 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	}
 
 	private _evaluateExpressionOrLiteral(expr: string, context: Record<string, any>): any {
-		const trimmed = expr.trim();
-		// Basic binary arithmetic: var + number, var - number, var * number
-		const binMatch = trimmed.match(/^(@?[a-zA-Z0-9_]+)\s*([+\-*/])\s*(.+)$/);
+		let trimmed = expr.trim();
+		// Strip @ before variable names: e.g. "@monitor1" -> "monitor1"
+		trimmed = trimmed.replace(/@([a-zA-Z0-9_]+)/g, '$1');
+
+		// 1. Try safe evaluation against context variables
+		try {
+			if (!/[;{}[\]]/.test(trimmed) && /^[a-zA-Z0-9_+\-*/%().\s'"]+$/.test(trimmed)) {
+				const safeExpr = trimmed.replace(/\b([a-zA-Z_][a-zA-Z0-9_]*)\b/g, (match) => {
+					if (match === 'True' || match === 'true') return 'true';
+					if (match === 'False' || match === 'false') return 'false';
+					if (match === 'None' || match === 'null') return 'null';
+					if (context && Object.prototype.hasOwnProperty.call(context, match)) {
+						return `__ctx.${match}`;
+					}
+					return match;
+				});
+				const fn = new Function('__ctx', `return (${safeExpr});`);
+				const res = fn(context || {});
+				if (res !== undefined && !Number.isNaN(res)) {
+					return res;
+				}
+			}
+		} catch { }
+
+		// 2. Fallback to basic binary arithmetic
+		const binMatch = trimmed.match(/^([a-zA-Z0-9_]+)\s*([+\-*/])\s*(.+)$/);
 		if (binMatch) {
 			const leftVal = this._resolveValue(binMatch[1], context);
 			const op = binMatch[2];

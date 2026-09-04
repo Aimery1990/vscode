@@ -2838,18 +2838,19 @@ export class WorkflowEditor extends EditorPane {
 					};
 					varPill.onclick = (e) => {
 						e.stopPropagation();
-						this._selectedNodeIds.clear();
-						this._selectedNodeIds.add(node.id);
-						this._renderNodes();
-						if (this._inspectorEl) {
-							this._renderInspector(this._inspectorEl);
+						if (!this._selectedNodeIds.has(node.id)) {
+							this._selectedNodeIds.clear();
+							this._selectedNodeIds.add(node.id);
+							this._renderNodes();
+							if (this._inspectorEl) {
+								this._renderInspector(this._inspectorEl);
+							}
 						}
-						this._openDrawerTab('vars', node.id);
 					};
 					varPill.ondblclick = (e) => {
 						e.stopPropagation();
 						e.preventDefault();
-						this._openNodeVariableInlineEditor(node, v);
+						this._openNodeVariableInlineEditor(node, v, varPill);
 					};
 
 					const vBadge = append(varPill, $('.var-tag-icon'));
@@ -2863,25 +2864,25 @@ export class WorkflowEditor extends EditorPane {
 						} else if (expr.startsWith(`${v.name}=`)) {
 							expr = expr.substring(`${v.name}=`.length).trim();
 						}
-						const unpackMatch = expr.match(/^@?([a-zA-Z0-9_]+)\[(\d+)\]$/);
+						// Strip unnecessary @ prefix for clean human readability: e.g. "@monitor1" -> "monitor1"
+						const cleanExpr = expr.replace(/@([a-zA-Z0-9_]+)/g, '$1');
+						const unpackMatch = cleanExpr.match(/^([a-zA-Z0-9_]+)\[(\d+)\]$/);
 						if (unpackMatch) {
-							pillText = `${v.name} ← @${unpackMatch[1]}[${unpackMatch[2]}]`;
-						} else if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
+							pillText = `${v.name} ← ${unpackMatch[1]}[${unpackMatch[2]}]`;
+						} else if (cleanExpr === '+ 1' || cleanExpr === '++' || cleanExpr === '+= 1' || cleanExpr === '+=1') {
 							pillText = `${v.name} += 1`;
-						} else if (expr === '- 1' || expr === '--' || expr === '-= 1' || expr === '-=1') {
+						} else if (cleanExpr === '- 1' || cleanExpr === '--' || cleanExpr === '-= 1' || cleanExpr === '-=1') {
 							pillText = `${v.name} -= 1`;
-						} else if (expr.startsWith('+=') || expr.startsWith('-=') || expr.startsWith('*=') || expr.startsWith('/=')) {
-							pillText = `${v.name} ${expr}`;
-						} else if (expr.startsWith('@')) {
-							pillText = `${v.name} = ${expr}`;
-						} else if (expr === 'ticket.output' || expr === 'ticket') {
+						} else if (cleanExpr.startsWith('+=') || cleanExpr.startsWith('-=') || cleanExpr.startsWith('*=') || cleanExpr.startsWith('/=')) {
+							pillText = `${v.name} ${cleanExpr}`;
+						} else if (cleanExpr === 'ticket.output' || cleanExpr === 'ticket') {
 							pillText = `${v.name} ← Ticket`;
-						} else if (expr === 'ticket.status') {
+						} else if (cleanExpr === 'ticket.status') {
 							pillText = `${v.name} ← Status`;
-						} else if (expr.startsWith('=')) {
-							pillText = `${v.name} = ${expr.substring(1).trim()}`;
+						} else if (cleanExpr.startsWith('=')) {
+							pillText = `${v.name} = ${cleanExpr.substring(1).trim()}`;
 						} else {
-							pillText = `${v.name} = ${expr}`;
+							pillText = `${v.name} = ${cleanExpr}`;
 						}
 					}
 					append(varPill, $('.var-pill-text')).textContent = pillText;
@@ -3217,7 +3218,7 @@ export class WorkflowEditor extends EditorPane {
 
 	private _activeVariableDraftInputEl: HTMLElement | null = null;
 
-	private _openNodeVariableInlineEditor(node: IFlowchartNode, targetVar?: INodeVariable): void {
+	private _openNodeVariableInlineEditor(node: IFlowchartNode, targetVar?: INodeVariable, targetPillElement?: HTMLElement): void {
 		if (this._activeVariableDraftInputEl) {
 			this._activeVariableDraftInputEl.remove();
 			this._activeVariableDraftInputEl = null;
@@ -3240,16 +3241,19 @@ export class WorkflowEditor extends EditorPane {
 			varsContainer.style.justifyContent = 'center';
 		}
 
-		let targetPillEl: HTMLElement | null = null;
-		if (targetVar) {
+		let targetPillEl: HTMLElement | null = targetPillElement || null;
+		if (targetVar && !targetPillEl) {
 			const allPills = varsContainer.querySelectorAll('.node-variable-pill');
-			allPills.forEach((p) => {
+			for (const p of Array.from(allPills)) {
 				const text = p.querySelector('.var-pill-text')?.textContent || '';
-				if (text.startsWith(targetVar.name)) {
+				if (text.startsWith(`${targetVar.name} `) || text === targetVar.name || text.startsWith(`${targetVar.name}=`)) {
 					targetPillEl = p as HTMLElement;
-					targetPillEl.style.display = 'none';
+					break;
 				}
-			});
+			}
+		}
+		if (targetPillEl) {
+			targetPillEl.style.display = 'none';
 		}
 
 		const draftWrapper = document.createElement('div');
@@ -3288,7 +3292,8 @@ export class WorkflowEditor extends EditorPane {
 		if (targetVar) {
 			if (targetVar.expression) {
 				const expr = targetVar.expression.trim();
-				input.value = expr.startsWith(targetVar.name) ? expr : `${targetVar.name} ${expr.startsWith('=') || expr.startsWith('+') || expr.startsWith('-') ? expr : `= ${expr}`}`;
+				const cleanExpr = expr.replace(/@([a-zA-Z0-9_]+)/g, '$1');
+				input.value = cleanExpr.startsWith(targetVar.name) ? cleanExpr : `${targetVar.name} ${cleanExpr.startsWith('=') || cleanExpr.startsWith('+') || cleanExpr.startsWith('-') ? cleanExpr : `= ${cleanExpr}`}`;
 			} else {
 				input.value = `${targetVar.name} = ${targetVar.initialValue || 'None'}`;
 			}
@@ -3359,11 +3364,11 @@ export class WorkflowEditor extends EditorPane {
 			const textAfter = val.slice(selStart);
 			const atIdx = textBefore.lastIndexOf('@');
 			if (atIdx !== -1) {
-				input.value = textBefore.slice(0, atIdx) + `@${name}` + (textAfter.startsWith(' ') ? textAfter : ` ${textAfter}`);
-				const newCursor = atIdx + name.length + 2;
+				input.value = textBefore.slice(0, atIdx) + `${name}` + (textAfter.startsWith(' ') ? textAfter : ` ${textAfter}`);
+				const newCursor = atIdx + name.length + (textAfter.startsWith(' ') ? 0 : 1);
 				input.selectionStart = input.selectionEnd = newCursor;
 			} else {
-				input.value = val + `@${name} `;
+				input.value = val + `${name} `;
 			}
 			closePopover();
 			input.focus();
@@ -3468,14 +3473,18 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
+		let canBlurCommit = false;
+		setTimeout(() => { canBlurCommit = true; }, 400);
+
 		input.onblur = () => {
+			if (!canBlurCommit) return;
 			setTimeout(() => {
 				if (popover && popover.matches(':hover')) return;
 				const text = input.value.trim();
 				if (text) {
 					commit();
 				}
-			}, 250);
+			}, 300);
 		};
 
 		varsContainer.appendChild(draftWrapper);
@@ -3530,15 +3539,33 @@ export class WorkflowEditor extends EditorPane {
 			} else if (assignMatch) {
 				varName = assignMatch[1];
 				const rhs = assignMatch[2].trim();
-				if (rhs.startsWith('@') || rhs.startsWith('ticket') || rhs.includes('+') || rhs.includes('-') || rhs.includes('*') || rhs.includes('/')) {
-					expression = rhs;
+				const cleanRhs = rhs.replace(/@([a-zA-Z0-9_]+)/g, '$1');
+
+				const allKnownVars = new Set<string>();
+				for (const n of this._data?.nodes || []) {
+					for (const kv of this._getNodeVariables(n)) {
+						allKnownVars.add(kv.name);
+					}
+				}
+				for (const kv of vars) {
+					allKnownVars.add(kv.name);
+				}
+
+				const isExpression = rhs.startsWith('@') ||
+					rhs.startsWith('ticket') ||
+					rhs.includes('+') || rhs.includes('-') || rhs.includes('*') || rhs.includes('/') || rhs.includes('%') ||
+					allKnownVars.has(cleanRhs) ||
+					Array.from(allKnownVars).some(v => cleanRhs.includes(v));
+
+				if (isExpression) {
+					expression = cleanRhs;
 					initialValue = 'None';
 				} else {
 					const otherNodesWithVar = (this._data?.nodes || []).filter(n => n.id !== node.id && this._getNodeVariables(n).some(ov => ov.name === varName));
 					if (otherNodesWithVar.length > 0) {
-						expression = rhs;
+						expression = cleanRhs;
 					} else {
-						initialValue = rhs;
+						initialValue = cleanRhs;
 						expression = undefined;
 					}
 				}

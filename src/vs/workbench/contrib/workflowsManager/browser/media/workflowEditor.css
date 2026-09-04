@@ -2243,9 +2243,10 @@
 	color: #f8fafc;
 	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 	font-size: 11px;
-	min-width: 140px;
-	max-width: 260px;
-	padding: 0 2px;
+	min-width: 200px;
+	max-width: 460px;
+	width: auto;
+	padding: 0 4px;
 }
 
 .node-variable-draft-input::placeholder {
