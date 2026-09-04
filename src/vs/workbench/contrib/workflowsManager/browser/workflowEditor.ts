@@ -2721,6 +2721,34 @@ export class WorkflowEditor extends EditorPane {
 								this._renderNodes();
 								this._refreshVariablesDrawer();
 							};
+							const findInspectorTicket = (rawRef?: string) => {
+								if (!rawRef) return undefined;
+								const clean = rawRef.trim().replace(/^@/, '').replace(/^=\s*/, '');
+								if (clean === 'ticket' || clean === 'ticket.output') return selectedNode.imports?.[0];
+								return (selectedNode.imports || []).find(imp =>
+									imp.name === clean ||
+									imp.name.replace(/[^a-zA-Z0-9_]/g, '_') === clean ||
+									imp.name.toLowerCase() === clean.toLowerCase() ||
+									imp.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() === clean.toLowerCase()
+								);
+							};
+
+							const boundTicket = findInspectorTicket(v.expression) || findInspectorTicket(v.initialValue);
+							if (boundTicket) {
+								const ticketBanner = append(varCard, $('.workflow-var-ticket-banner'));
+								ticketBanner.style.display = 'flex';
+								ticketBanner.style.alignItems = 'center';
+								ticketBanner.style.gap = '5px';
+								ticketBanner.style.marginTop = '6px';
+								ticketBanner.style.padding = '3px 6px';
+								ticketBanner.style.borderRadius = '4px';
+								ticketBanner.style.background = 'rgba(168, 85, 247, 0.15)';
+								ticketBanner.style.border = '1px solid rgba(168, 85, 247, 0.4)';
+								ticketBanner.style.fontSize = '11px';
+								ticketBanner.style.color = '#c084fc';
+								append(ticketBanner, $('span' + ThemeIcon.asCSSSelector(Codicon.checklist)));
+								append(ticketBanner, $('span', {}, `Captures Ticket Output: ${boundTicket.name}`));
+							}
 
 							if (isUpdatingExisting) {
 								// This node is modifying an existing variable from an upstream node!
@@ -3157,36 +3185,76 @@ export class WorkflowEditor extends EditorPane {
 					const vBadge = append(varPill, $('.var-tag-icon'));
 					vBadge.textContent = '[V]';
 
-					let pillText = `${v.name} = ${displayVal}`;
-					if (v.expression) {
-						let expr = v.expression.trim();
-						if (expr.startsWith(`${v.name} =`)) {
-							expr = expr.substring(`${v.name} =`.length).trim();
-						} else if (expr.startsWith(`${v.name}=`)) {
-							expr = expr.substring(`${v.name}=`.length).trim();
+					// Check if this variable is bound to a ticket (e.g. FNDJ1-0008, ticket.output, etc.)
+					const findReferencedTicket = (rawRef?: string) => {
+						if (!rawRef) return undefined;
+						const clean = rawRef.trim().replace(/^@/, '').replace(/^=\s*/, '');
+						if (clean === 'ticket' || clean === 'ticket.output') {
+							return node.imports?.[0];
 						}
-						// Strip unnecessary @ prefix for clean human readability: e.g. "@monitor1" -> "monitor1"
-						const cleanExpr = expr.replace(/@([a-zA-Z0-9_]+)/g, '$1');
-						const unpackMatch = cleanExpr.match(/^([a-zA-Z0-9_]+)\[(\d+)\]$/);
-						if (unpackMatch) {
-							pillText = `${v.name} ← ${unpackMatch[1]}[${unpackMatch[2]}]`;
-						} else if (cleanExpr === '+ 1' || cleanExpr === '++' || cleanExpr === '+= 1' || cleanExpr === '+=1') {
-							pillText = `${v.name} += 1`;
-						} else if (cleanExpr === '- 1' || cleanExpr === '--' || cleanExpr === '-= 1' || cleanExpr === '-=1') {
-							pillText = `${v.name} -= 1`;
-						} else if (cleanExpr.startsWith('+=') || cleanExpr.startsWith('-=') || cleanExpr.startsWith('*=') || cleanExpr.startsWith('/=')) {
-							pillText = `${v.name} ${cleanExpr}`;
-						} else if (cleanExpr === 'ticket.output' || cleanExpr === 'ticket') {
-							pillText = `${v.name} ← Ticket`;
-						} else if (cleanExpr === 'ticket.status') {
-							pillText = `${v.name} ← Status`;
-						} else if (cleanExpr.startsWith('=')) {
-							pillText = `${v.name} = ${cleanExpr.substring(1).trim()}`;
-						} else {
-							pillText = `${v.name} = ${cleanExpr}`;
+						const m = clean.match(/^([a-zA-Z0-9_\-]+)(\[(\d+)\])?$/);
+						const target = m ? m[1] : clean;
+						return (node.imports || []).find(imp =>
+							imp.name === target ||
+							imp.name.replace(/[^a-zA-Z0-9_]/g, '_') === target ||
+							imp.name.toLowerCase() === target.toLowerCase() ||
+							imp.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() === target.toLowerCase()
+						) || (this._data?.nodes || []).flatMap(n => n.imports || []).find(imp =>
+							imp.name === target ||
+							imp.name.replace(/[^a-zA-Z0-9_]/g, '_') === target
+						);
+					};
+
+					const boundTicket = findReferencedTicket(v.expression) || findReferencedTicket(v.initialValue);
+					const pillContent = append(varPill, $('.var-pill-text'));
+
+					if (boundTicket) {
+						varPill.classList.add('has-ticket-ref');
+						const namePart = append(pillContent, $('span'));
+						namePart.textContent = `${v.name} ←`;
+
+						const chip = append(pillContent, $('.var-pill-ticket-chip'));
+						chip.title = `Bound to Ticket output: ${boundTicket.name}`;
+						append(chip, $('span' + ThemeIcon.asCSSSelector(Codicon.checklist)));
+						append(chip, $('span', {}, boundTicket.name));
+
+						if (runtimeVal !== undefined && runtimeVal !== null && runtimeVal !== 'None') {
+							const valPart = append(pillContent, $('.var-pill-runtime-val'));
+							valPart.textContent = `(${typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)})`;
+							valPart.title = `Runtime Output: ${String(runtimeVal)}`;
 						}
+					} else {
+						let pillText = `${v.name} = ${displayVal}`;
+						if (v.expression) {
+							let expr = v.expression.trim();
+							if (expr.startsWith(`${v.name} =`)) {
+								expr = expr.substring(`${v.name} =`.length).trim();
+							} else if (expr.startsWith(`${v.name}=`)) {
+								expr = expr.substring(`${v.name}=`.length).trim();
+							}
+							// Strip unnecessary @ prefix for clean human readability: e.g. "@monitor1" -> "monitor1"
+							const cleanExpr = expr.replace(/@([a-zA-Z0-9_]+)/g, '$1');
+							const unpackMatch = cleanExpr.match(/^([a-zA-Z0-9_]+)\[(\d+)\]$/);
+							if (unpackMatch) {
+								pillText = `${v.name} ← ${unpackMatch[1]}[${unpackMatch[2]}]`;
+							} else if (cleanExpr === '+ 1' || cleanExpr === '++' || cleanExpr === '+= 1' || cleanExpr === '+=1') {
+								pillText = `${v.name} += 1`;
+							} else if (cleanExpr === '- 1' || cleanExpr === '--' || cleanExpr === '-= 1' || cleanExpr === '-=1') {
+								pillText = `${v.name} -= 1`;
+							} else if (cleanExpr.startsWith('+=') || cleanExpr.startsWith('-=') || cleanExpr.startsWith('*=') || cleanExpr.startsWith('/=')) {
+								pillText = `${v.name} ${cleanExpr}`;
+							} else if (cleanExpr === 'ticket.output' || cleanExpr === 'ticket') {
+								pillText = `${v.name} ← Ticket`;
+							} else if (cleanExpr === 'ticket.status') {
+								pillText = `${v.name} ← Status`;
+							} else if (cleanExpr.startsWith('=')) {
+								pillText = `${v.name} = ${cleanExpr.substring(1).trim()}`;
+							} else {
+								pillText = `${v.name} = ${cleanExpr}`;
+							}
+						}
+						pillContent.textContent = pillText;
 					}
-					append(varPill, $('.var-pill-text')).textContent = pillText;
 
 					const removeVarBtn = append(varPill, $('.var-pill-remove'));
 					removeVarBtn.title = 'Remove variable';
@@ -3854,6 +3922,19 @@ export class WorkflowEditor extends EditorPane {
 				const rhs = assignMatch[2].trim();
 				const cleanRhs = rhs.replace(/@([a-zA-Z0-9_\u4e00-\u9fa5]+)/g, '$1');
 
+				// Check if rhs matches an imported ticket on this node or workflow
+				const matchingTicket = (node.imports || []).find(imp =>
+					imp.name === rhs ||
+					imp.name === cleanRhs ||
+					imp.name.replace(/[^a-zA-Z0-9_]/g, '_') === cleanRhs ||
+					imp.name.toLowerCase() === cleanRhs.toLowerCase() ||
+					imp.name.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() === cleanRhs.toLowerCase()
+				) || (this._data?.nodes || []).flatMap(n => n.imports || []).find(imp =>
+					imp.name === rhs ||
+					imp.name === cleanRhs ||
+					imp.name.replace(/[^a-zA-Z0-9_]/g, '_') === cleanRhs
+				);
+
 				const allKnownVars = new Set<string>();
 				for (const n of this._data?.nodes || []) {
 					for (const kv of this._getNodeVariables(n)) {
@@ -3864,13 +3945,17 @@ export class WorkflowEditor extends EditorPane {
 					allKnownVars.add(kv.name);
 				}
 
-				const isExpression = rhs.startsWith('@') ||
+				const isExpression = !!matchingTicket ||
+					rhs.startsWith('@') ||
 					rhs.startsWith('ticket') ||
 					rhs.includes('+') || rhs.includes('-') || rhs.includes('*') || rhs.includes('/') || rhs.includes('%') ||
 					allKnownVars.has(cleanRhs) ||
 					Array.from(allKnownVars).some(v => cleanRhs.includes(v));
 
-				if (isExpression) {
+				if (matchingTicket) {
+					expression = matchingTicket.name;
+					initialValue = 'None';
+				} else if (isExpression) {
 					expression = cleanRhs;
 					initialValue = 'None';
 				} else {
@@ -3893,7 +3978,7 @@ export class WorkflowEditor extends EditorPane {
 			if (targetVar) {
 				targetVar.name = varName;
 				targetVar.expression = expression;
-				if (initialValue !== 'None') targetVar.initialValue = initialValue;
+				targetVar.initialValue = initialValue;
 			} else {
 				// Dragged or added a new variable box into the node:
 				// ALWAYS ADD A NEW BOX! DO NOT OVERWRITE AN EXISTING BOX ON THE SAME NODE!
@@ -3902,6 +3987,12 @@ export class WorkflowEditor extends EditorPane {
 					initialValue: initialValue || 'None',
 					expression
 				});
+			}
+
+			// Clear any stale runtime value from previous executions so the new definition displays cleanly
+			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+			if (activeRun?.contextVariables) {
+				delete activeRun.contextVariables[varName];
 			}
 		}
 
