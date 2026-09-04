@@ -963,9 +963,17 @@ export class WorkflowEditor extends EditorPane {
 		return node.outputVariables;
 	}
 
-	private _unbindVariableFromNode(node: IFlowchartNode, varName: string): void {
+	private _unbindVariableFromNode(node: IFlowchartNode, targetVar: string | INodeVariable): void {
 		const vars = this._getNodeVariables(node);
-		const idx = vars.findIndex(v => v.name === varName);
+		let idx = -1;
+		if (typeof targetVar === 'string') {
+			idx = vars.findIndex(v => v.name === targetVar);
+		} else {
+			idx = vars.indexOf(targetVar);
+			if (idx === -1) {
+				idx = vars.findIndex(v => v.name === targetVar.name);
+			}
+		}
 		if (idx !== -1) {
 			vars.splice(idx, 1);
 		}
@@ -2392,7 +2400,7 @@ export class WorkflowEditor extends EditorPane {
 							unbindBtn.title = localize('unbindVar', 'Delete variable from node');
 							append(unbindBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
 							unbindBtn.onclick = () => {
-								this._unbindVariableFromNode(selectedNode, v.name);
+								this._unbindVariableFromNode(selectedNode, v);
 							};
 
 							// Variable Name Row (with datalist for known variables!)
@@ -2887,7 +2895,7 @@ export class WorkflowEditor extends EditorPane {
 					removeVarBtn.onclick = (e) => {
 						e.stopPropagation();
 						e.preventDefault();
-						this._unbindVariableFromNode(node, v.name);
+						this._unbindVariableFromNode(node, v);
 					};
 				}
 			}
@@ -3490,23 +3498,18 @@ export class WorkflowEditor extends EditorPane {
 			const rightExpr = unpackMatch[2].trim();
 
 			if (targetVar) {
-				const idx = vars.findIndex(v => v.name === targetVar.name);
+				const idx = vars.indexOf(targetVar);
 				if (idx !== -1) vars.splice(idx, 1);
 			}
 
 			for (let i = 0; i < leftNames.length; i++) {
 				const name = leftNames[i];
 				const expr = `${rightExpr}[${i}]`;
-				const existing = vars.find(v => v.name === name);
-				if (existing) {
-					existing.expression = expr;
-				} else {
-					vars.push({
-						name,
-						initialValue: 'None',
-						expression: expr
-					});
-				}
+				vars.push({
+					name,
+					initialValue: 'None',
+					expression: expr
+				});
 			}
 		} else {
 			// Case B & C: Single mutation or assignment
@@ -3540,30 +3543,28 @@ export class WorkflowEditor extends EditorPane {
 					}
 				}
 			} else if (/^(\+\+|--|\+=|-=|\*=|\/=|%=)/.test(trimmed)) {
-				varName = targetVar ? targetVar.name : (vars[0]?.name || this._generateNextVarName());
+				varName = targetVar ? targetVar.name : (vars[vars.length - 1]?.name || this._generateNextVarName());
 				expression = trimmed.startsWith('++') ? '+= 1' : (trimmed.startsWith('--') ? '-= 1' : trimmed);
 			} else {
 				varName = trimmed.replace(/^@/, '').replace(/[^a-zA-Z0-9_]/g, '_') || this._generateNextVarName();
 				initialValue = 'None';
 			}
 
-			if (targetVar && targetVar.name !== varName) {
-				this._renameVariableGlobally(targetVar.name, varName);
-				targetVar.name = varName;
-				if (expression !== undefined) targetVar.expression = expression;
+			if (targetVar) {
+				if (targetVar.name !== varName) {
+					this._renameVariableGlobally(targetVar.name, varName);
+					targetVar.name = varName;
+				}
+				targetVar.expression = expression;
 				if (initialValue !== 'None') targetVar.initialValue = initialValue;
 			} else {
-				const existing = vars.find(v => v.name === varName);
-				if (existing) {
-					if (expression !== undefined) existing.expression = expression;
-					if (initialValue !== 'None') existing.initialValue = initialValue;
-				} else {
-					vars.push({
-						name: varName,
-						initialValue,
-						expression
-					});
-				}
+				// Dragged or added a new variable box into the node:
+				// ALWAYS ADD A NEW BOX! DO NOT OVERWRITE AN EXISTING BOX ON THE SAME NODE!
+				vars.push({
+					name: varName,
+					initialValue: initialValue || 'None',
+					expression
+				});
 			}
 		}
 
