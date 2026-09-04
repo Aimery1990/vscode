@@ -454,7 +454,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
 											assignedVal = base * mult;
 										} else {
-											assignedVal = this._evaluateExpressionOrLiteral(expr, run.contextVariables);
+											try {
+												assignedVal = this._evaluateExpressionOrLiteral(expr, run.contextVariables);
+											} catch (evalErr: any) {
+												this._emitLog(run, 'error', `[Expression Error] '${v.name}' in '${node.label}': ${evalErr.message}`, { nodeId: node.id });
+												throw evalErr;
+											}
 										}
 									} else if (nodeState.executedTickets && nodeState.executedTickets.length > 0) {
 										const lastTicket = nodeState.executedTickets[nodeState.executedTickets.length - 1];
@@ -806,7 +811,29 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		// Strip @ before variable names: e.g. "@monitor1" -> "monitor1"
 		trimmed = trimmed.replace(/@([a-zA-Z0-9_]+)/g, '$1');
 
-		// 1. Try safe evaluation against context variables
+		// 1. Check for single literal tokens first
+		if (trimmed === 'None' || trimmed === 'null') return null;
+		if (trimmed === 'True' || trimmed === 'true') return true;
+		if (trimmed === 'False' || trimmed === 'false') return false;
+		if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
+		if ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"'))) {
+			return trimmed.substring(1, trimmed.length - 1);
+		}
+
+		// 2. Python NameError check: all variable identifiers outside quotes must exist in context
+		const codeWithoutStrings = trimmed.replace(/'[^']*'/g, ' ').replace(/"[^"]*"/g, ' ');
+		const pythonKeywords = new Set(['True', 'true', 'False', 'false', 'None', 'null', 'and', 'or', 'not', 'is', 'in']);
+		const identifiers = codeWithoutStrings.match(/\b[a-zA-Z_][a-zA-Z0-9_]*\b/g) || [];
+
+		for (const id of identifiers) {
+			if (!pythonKeywords.has(id)) {
+				if (!context || !Object.prototype.hasOwnProperty.call(context, id)) {
+					throw new Error(`NameError: name '${id}' is not defined in workflow context`);
+				}
+			}
+		}
+
+		// 3. Safe evaluation with Python strict types check
 		try {
 			if (!/[;{}[\]]/.test(trimmed) && /^[a-zA-Z0-9_+\-*/%().\s'"]+$/.test(trimmed)) {
 				const safeExpr = trimmed.replace(/\b([a-zA-Z_][a-zA-Z0-9_]*)\b/g, (match) => {
@@ -818,30 +845,64 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 					return match;
 				});
+
 				const fn = new Function('__ctx', `return (${safeExpr});`);
 				const res = fn(context || {});
+
+				// Strict Python TypeError check: prohibit implicit string + number concatenation
+				if (typeof res === 'string' && trimmed.includes('+')) {
+					let hasNumberOperand = false;
+					let hasStringOperand = false;
+					for (const id of identifiers) {
+						if (context && typeof context[id] === 'number') hasNumberOperand = true;
+						if (context && typeof context[id] === 'string') hasStringOperand = true;
+					}
+					if (hasNumberOperand && hasStringOperand) {
+						throw new Error(`TypeError: can only concatenate str (not "int") to str`);
+					}
+				}
+
 				if (res !== undefined && !Number.isNaN(res)) {
 					return res;
 				}
 			}
-		} catch { }
+		} catch (e: any) {
+			throw e;
+		}
 
-		// 2. Fallback to basic binary arithmetic
+		// 4. Binary arithmetic fallback strictly adhering to Python types
 		const binMatch = trimmed.match(/^([a-zA-Z0-9_]+)\s*([+\-*/])\s*(.+)$/);
 		if (binMatch) {
 			const leftVal = this._resolveValue(binMatch[1], context);
 			const op = binMatch[2];
 			const rightVal = this._resolveValue(binMatch[3], context);
-			if (typeof leftVal === 'number' && typeof rightVal === 'number') {
-				if (op === '+') { return leftVal + rightVal; }
-				if (op === '-') { return leftVal - rightVal; }
-				if (op === '*') { return leftVal * rightVal; }
-				if (op === '/' && rightVal !== 0) { return leftVal / rightVal; }
+
+			if (leftVal === undefined) {
+				throw new Error(`NameError: name '${binMatch[1]}' is not defined in workflow context`);
 			}
-			if (op === '+' && (typeof leftVal === 'string' || typeof rightVal === 'string')) {
-				return String(leftVal ?? '') + String(rightVal ?? '');
+			if (rightVal === undefined) {
+				throw new Error(`NameError: name '${binMatch[3]}' is not defined in workflow context`);
+			}
+
+			if (typeof leftVal === 'number' && typeof rightVal === 'number') {
+				if (op === '+') return leftVal + rightVal;
+				if (op === '-') return leftVal - rightVal;
+				if (op === '*') return leftVal * rightVal;
+				if (op === '/' && rightVal !== 0) return leftVal / rightVal;
+			}
+			if (typeof leftVal === 'string' && typeof rightVal === 'string') {
+				if (op === '+') return leftVal + rightVal;
+			}
+			if (typeof leftVal === 'string' && typeof rightVal === 'number') {
+				if (op === '*') return leftVal.repeat(Math.max(0, Math.floor(rightVal)));
+				throw new Error(`TypeError: can only concatenate str (not "int") to str`);
+			}
+			if (typeof leftVal === 'number' && typeof rightVal === 'string') {
+				if (op === '*') return rightVal.repeat(Math.max(0, Math.floor(leftVal)));
+				throw new Error(`TypeError: unsupported operand type(s) for ${op}: 'int' and 'str'`);
 			}
 		}
+
 		return this._resolveValue(trimmed, context);
 	}
 
@@ -882,6 +943,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const tmpl = trimmed.match(/^\{\{\s*([a-zA-Z0-9_]+)\s*\}\}$/);
 		if (tmpl && context && Object.prototype.hasOwnProperty.call(context, tmpl[1])) {
 			return context[tmpl[1]];
+		}
+
+		// If it's a valid identifier that wasn't found in context, it's UNDEFINED (Python NameError), NOT a string literal!
+		if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(trimmed)) {
+			return undefined;
 		}
 
 		return trimmed;
