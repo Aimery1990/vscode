@@ -69,6 +69,7 @@ interface IFlowchartLink {
 	routing?: 'orthogonal' | 'curved';
 	color?: string;
 	label?: string;
+	condition?: string;
 	labelPosition?: number;
 }
 
@@ -953,19 +954,17 @@ export class WorkflowEditor extends EditorPane {
 			nameInput.value = node.outputVariable!.name;
 			nameInput.placeholder = 'e.g. status, count';
 			nameInput.onchange = () => {
-				const cleaned = nameInput.value.trim().replace(/[^a-zA-Z0-9_]/g, '_');
-				node.outputVariable!.name = cleaned || 'var_1';
-				nameInput.value = node.outputVariable!.name;
-				this._saveFlowchartData();
-				this._renderNodes();
-				if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+				const oldName = node.outputVariable!.name;
+				const cleaned = nameInput.value.trim().replace(/[^a-zA-Z0-9_]/g, '_') || 'var_1';
+				nameInput.value = cleaned;
+				this._renameVariableGlobally(oldName, cleaned);
 			};
 
 			// 2. Bound Node
 			const nodeTd = append(row, $('td'));
 			const nodeLink = append(nodeTd, $('.vars-table-node-link'));
-			append(nodeLink, $('span' + ThemeIcon.asCSSSelector(Codicon.circleFilled)));
-			append(nodeLink, $('span')).textContent = node.label || node.id;
+			append(nodeLink, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolEvent)));
+			append(nodeLink, $('span.node-link-text')).textContent = node.label || node.id;
 			nodeLink.title = `Click to locate & select node '${node.label}' on canvas`;
 			nodeLink.onclick = () => {
 				this._selectedNodeIds.clear();
@@ -1014,6 +1013,66 @@ export class WorkflowEditor extends EditorPane {
 					nameInput.focus();
 				}, 60);
 			}
+		}
+	}
+
+	private _renameVariableGlobally(oldName: string, newName: string): void {
+		if (!oldName || !newName || oldName === newName || !this._data) return;
+
+		// 1. Update bound nodes
+		for (const node of this._data.nodes) {
+			if (node.outputVariable && node.outputVariable.name === oldName) {
+				node.outputVariable.name = newName;
+			}
+		}
+
+		// 2. Cascade rename into link conditions and labels
+		let cascadeCount = 0;
+		const regexAt = new RegExp(`@${oldName}\\b`, 'g');
+		const regexWord = new RegExp(`\\b${oldName}\\b`, 'g');
+
+		for (const link of this._data.links) {
+			let modified = false;
+			if (link.label) {
+				if (regexAt.test(link.label)) {
+					link.label = link.label.replace(regexAt, `@${newName}`);
+					modified = true;
+				} else if (regexWord.test(link.label)) {
+					link.label = link.label.replace(regexWord, `@${newName}`);
+					modified = true;
+				}
+			}
+			if (link.condition) {
+				if (regexAt.test(link.condition)) {
+					link.condition = link.condition.replace(regexAt, `@${newName}`);
+					modified = true;
+				} else if (regexWord.test(link.condition)) {
+					link.condition = link.condition.replace(regexWord, `@${newName}`);
+					modified = true;
+				}
+			}
+			if (modified) {
+				cascadeCount++;
+			}
+		}
+
+		// 3. Update runtime context variables if workflow is active
+		if (this._workflowUri) {
+			const activeRun = this._workflowExecutionService.getActiveRun(this._workflowUri);
+			if (activeRun?.contextVariables && Object.prototype.hasOwnProperty.call(activeRun.contextVariables, oldName)) {
+				activeRun.contextVariables[newName] = activeRun.contextVariables[oldName];
+				delete activeRun.contextVariables[oldName];
+			}
+		}
+
+		this._saveFlowchartData();
+		this._renderNodes();
+		this._drawLinks();
+		if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+		this._refreshVariablesDrawer();
+
+		if (cascadeCount > 0) {
+			this._notificationService.info(localize('varCascadedMsg', "Renamed variable '{0}' to '{1}' across {2} connection(s).", oldName, newName, cascadeCount));
 		}
 	}
 
@@ -2139,19 +2198,32 @@ export class WorkflowEditor extends EditorPane {
 						const varForm = append(varSec, $('.workflow-var-form'));
 
 						// Variable Name Row
+						// Variable Name Row with Delete Icon Button
 						const nameRow = append(varForm, $('.workflow-var-row'));
 						const nameLabel = append(nameRow, $('.workflow-var-label'));
 						nameLabel.textContent = localize('varName', 'Name:');
-						const nameInput = append(nameRow, $('input.workflow-var-input')) as HTMLInputElement;
+						
+						const nameInputWrapper = append(nameRow, $('.workflow-var-input-wrapper'));
+						const nameInput = append(nameInputWrapper, $('input.workflow-var-input')) as HTMLInputElement;
+						nameInput.style.flex = '1';
 						nameInput.type = 'text';
 						nameInput.value = selectedNode.outputVariable.name;
 						nameInput.placeholder = 'e.g. status, count, role';
 						nameInput.onchange = () => {
-							const cleaned = nameInput.value.trim().replace(/[^a-zA-Z0-9_]/g, '_');
-							selectedNode.outputVariable!.name = cleaned || 'var_1';
-							nameInput.value = selectedNode.outputVariable!.name;
+							const oldName = selectedNode.outputVariable!.name;
+							const cleaned = nameInput.value.trim().replace(/[^a-zA-Z0-9_]/g, '_') || 'var_1';
+							nameInput.value = cleaned;
+							this._renameVariableGlobally(oldName, cleaned);
+						};
+
+						const unbindBtn = append(nameInputWrapper, $('.workflow-var-unbind-btn.inline-delete-btn'));
+						unbindBtn.title = localize('unbindVar', 'Remove Variable from node');
+						append(unbindBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+						unbindBtn.onclick = () => {
+							delete selectedNode.outputVariable;
 							this._saveFlowchartData();
 							this._renderNodes();
+							this._renderInspector(parent);
 							this._refreshVariablesDrawer();
 						};
 
@@ -2170,30 +2242,16 @@ export class WorkflowEditor extends EditorPane {
 							this._refreshVariablesDrawer();
 						};
 
-						// Actions Row: Open in Variables Drawer & Unbind
+						// Actions Row: Open in Variables Drawer (Full width, clean left align)
 						const actRow = append(varForm, $('.workflow-var-actions-row'));
-						actRow.style.display = 'flex';
-						actRow.style.gap = '6px';
 						actRow.style.marginTop = '4px';
 
-						const viewTableBtn = append(actRow, $('.workflow-format-btn'));
-						viewTableBtn.style.flex = '1';
+						const viewTableBtn = append(actRow, $('.workflow-format-btn.full-width'));
 						append(viewTableBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.listUnordered)));
-						append(viewTableBtn, $('span')).textContent = localize('manageInTable', ' Manage in Table');
+						append(viewTableBtn, $('span')).textContent = localize('manageInTable', ' Manage in Variables Table');
 						viewTableBtn.title = localize('viewInTableTitle', 'Open and edit in bottom Context Variables table');
 						viewTableBtn.onclick = () => {
 							this._openDrawerTab('vars', selectedNode.id);
-						};
-
-						const unbindBtn = append(actRow, $('.workflow-var-unbind-btn'));
-						unbindBtn.title = localize('unbindVar', 'Remove Variable from node');
-						append(unbindBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
-						unbindBtn.onclick = () => {
-							delete selectedNode.outputVariable;
-							this._saveFlowchartData();
-							this._renderNodes();
-							this._renderInspector(parent);
-							this._refreshVariablesDrawer();
 						};
 					}
 				}
@@ -4244,51 +4302,154 @@ export class WorkflowEditor extends EditorPane {
 	private _showLinkInlineEditor(link: IFlowchartLink, x: number, y: number): void {
 		if (!this._linkDeletesContainer) return;
 		// Remove any existing editor
-		const existing = this._linkDeletesContainer.querySelector('.workflow-link-label-editor');
+		const existing = this._linkDeletesContainer.querySelector('.workflow-link-label-editor-wrapper, .workflow-link-label-editor');
 		if (existing) existing.remove();
 
-		const textarea = append(this._linkDeletesContainer, $('textarea.workflow-link-label-editor')) as HTMLTextAreaElement;
+		const wrapper = append(this._linkDeletesContainer, $('.workflow-link-label-editor-wrapper'));
+		wrapper.style.position = 'absolute';
+		wrapper.style.left = `${x}px`;
+		wrapper.style.top = `${y}px`;
+		wrapper.style.zIndex = '10000';
+
+		const textarea = append(wrapper, $('textarea.workflow-link-label-editor')) as HTMLTextAreaElement;
 		textarea.value = link.label || '';
-		textarea.placeholder = 'Label... (Shift+Enter for newline)';
-		textarea.style.left = `${x}px`;
-		textarea.style.top = `${y}px`;
+		textarea.placeholder = 'Condition, e.g. @monitor != None';
 
 		const adjustHeight = () => {
 			textarea.style.height = 'auto';
 			textarea.style.height = `${Math.min(90, Math.max(24, textarea.scrollHeight + 2))}px`;
 		};
-		textarea.oninput = adjustHeight;
 
 		let committed = false;
+		let acMenu: HTMLElement | null = null;
+		let activeAcIndex = 0;
+		let currentMatches: { name: string; initialValue: string; nodeLabel?: string }[] = [];
+
+		const availableVars = (this._data?.nodes || [])
+			.filter(n => n.outputVariable?.name)
+			.map(n => ({
+				name: n.outputVariable!.name,
+				initialValue: n.outputVariable!.initialValue || 'None',
+				nodeLabel: n.label
+			}));
+
+		const closeAc = () => {
+			if (acMenu) {
+				acMenu.remove();
+				acMenu = null;
+			}
+		};
+
+		const insertVar = (varName: string) => {
+			const selStart = textarea.selectionStart;
+			const textBefore = textarea.value.slice(0, selStart);
+			const textAfter = textarea.value.slice(selStart);
+			const atIdx = textBefore.lastIndexOf('@');
+			if (atIdx !== -1) {
+				textarea.value = textBefore.slice(0, atIdx) + `@${varName} ` + textAfter;
+				textarea.selectionStart = textarea.selectionEnd = atIdx + varName.length + 2;
+			}
+			closeAc();
+			adjustHeight();
+			textarea.focus();
+		};
+
+		const updateAc = () => {
+			const selStart = textarea.selectionStart;
+			const textBefore = textarea.value.slice(0, selStart);
+			const match = textBefore.match(/@([a-zA-Z0-9_]*)$/);
+			if (!match) {
+				closeAc();
+				return;
+			}
+
+			const query = match[1].toLowerCase();
+			currentMatches = availableVars.filter(v => v.name.toLowerCase().includes(query));
+			if (currentMatches.length === 0) {
+				closeAc();
+				return;
+			}
+
+			if (!acMenu) {
+				acMenu = append(wrapper, $('.workflow-link-ac-menu'));
+			}
+			clearNode(acMenu);
+			activeAcIndex = Math.min(activeAcIndex, currentMatches.length - 1);
+
+			currentMatches.forEach((v, idx) => {
+				const item = append(acMenu!, $(`.workflow-link-ac-item${idx === activeAcIndex ? '.active' : ''}`));
+				append(item, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+				const nameSpan = append(item, $('.ac-var-name'));
+				nameSpan.textContent = `@${v.name}`;
+				const descSpan = append(item, $('.ac-var-desc'));
+				descSpan.textContent = `(=${v.initialValue}) ${v.nodeLabel ? `[${v.nodeLabel}]` : ''}`;
+				item.onmousedown = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					insertVar(v.name);
+				};
+			});
+		};
+
+		textarea.oninput = () => {
+			adjustHeight();
+			updateAc();
+		};
+
 		const commit = () => {
 			if (committed) return;
 			committed = true;
+			closeAc();
 			const val = textarea.value.trim();
 			if (val) {
 				link.label = val;
 			} else {
 				delete link.label;
 			}
-			textarea.remove();
+			wrapper.remove();
 			this._saveFlowchartData();
 			this._drawLinks();
 		};
 
 		textarea.onkeydown = (e) => {
 			e.stopPropagation();
+			if (acMenu && currentMatches.length > 0) {
+				if (e.key === 'ArrowDown') {
+					e.preventDefault();
+					activeAcIndex = (activeAcIndex + 1) % currentMatches.length;
+					updateAc();
+					return;
+				} else if (e.key === 'ArrowUp') {
+					e.preventDefault();
+					activeAcIndex = (activeAcIndex - 1 + currentMatches.length) % currentMatches.length;
+					updateAc();
+					return;
+				} else if (e.key === 'Enter' || e.key === 'Tab') {
+					e.preventDefault();
+					insertVar(currentMatches[activeAcIndex].name);
+					return;
+				} else if (e.key === 'Escape') {
+					e.preventDefault();
+					closeAc();
+					return;
+				}
+			}
+
 			if (e.key === 'Enter' && !e.shiftKey) {
 				e.preventDefault();
 				commit();
 			} else if (e.key === 'Escape') {
 				e.preventDefault();
 				committed = true;
-				textarea.remove();
+				wrapper.remove();
 				this._drawLinks();
 			}
 		};
 
 		textarea.onblur = () => {
-			commit();
+			setTimeout(() => {
+				commit();
+			}, 180);
 		};
 
 		textarea.onmousedown = (e) => e.stopPropagation();
@@ -4300,6 +4461,44 @@ export class WorkflowEditor extends EditorPane {
 			textarea.focus();
 			textarea.select();
 		}, 20);
+	}
+
+	private _renderLinkLabelContent(parent: HTMLElement, rawLabel: string): void {
+		clearNode(parent);
+		if (!rawLabel) return;
+
+		const knownVars = new Set<string>(
+			(this._data?.nodes || [])
+				.filter(n => n.outputVariable?.name)
+				.map(n => n.outputVariable!.name)
+		);
+
+		const tokens = rawLabel.split(/(\s+|==|!=|<=|>=|<|>)/);
+		for (const tok of tokens) {
+			if (!tok) continue;
+			let varName: string | null = null;
+			let hasAt = false;
+			if (tok.startsWith('@')) {
+				varName = tok.slice(1);
+				hasAt = true;
+			} else if (knownVars.has(tok)) {
+				varName = tok;
+			}
+
+			if (varName && (hasAt || knownVars.has(varName))) {
+				const chip = append(parent, $('.link-var-chip'));
+				append(chip, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+				append(chip, $('.link-var-chip-name')).textContent = varName;
+				if (!knownVars.has(varName)) {
+					chip.classList.add('undefined-var');
+					chip.title = localize('undefinedVarWarning', 'Variable @{0} is not defined in workflow!', varName);
+				} else {
+					chip.title = localize('definedVarTitle', 'Context Variable: {0}', varName);
+				}
+			} else {
+				parent.appendChild(document.createTextNode(tok));
+			}
+		}
 	}
 
 	private _drawLinks(): void {
@@ -4455,12 +4654,12 @@ export class WorkflowEditor extends EditorPane {
 				const maxLabelWidth = Math.max(90, Math.min(160, Math.round(linkDist * 0.65)));
 
 				const labelEl = append(this._linkDeletesContainer, $('.workflow-link-label'));
-				labelEl.textContent = link.label;
+				this._renderLinkLabelContent(labelEl, link.label);
 				labelEl.setAttribute('data-link-id', link.id);
 				labelEl.style.left = `${labelPt.x}px`;
 				labelEl.style.top = `${labelPt.y}px`;
 				labelEl.style.maxWidth = `${maxLabelWidth}px`;
-				labelEl.title = `${link.label}\n\n• Drag along line to reposition\n• Double-click to edit (Shift+Enter for newline)`;
+				labelEl.title = `${link.label}\n\n• Drag along line to reposition\n• Double-click to edit (Type @ to autocomplete variables)`;
 				if (isSelected) {
 					labelEl.classList.add('selected');
 				}

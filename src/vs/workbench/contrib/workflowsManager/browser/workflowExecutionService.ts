@@ -35,6 +35,7 @@ interface IFlowchartLink {
 	from: string;
 	to: string;
 	label?: string;
+	condition?: string;
 	style?: string;
 	routing?: string;
 	color?: string;
@@ -662,6 +663,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const left = this._resolveValue(leftStr, context);
 		const right = this._resolveValue(rightStr, context);
 
+		// If user explicitly referenced @variable that does not exist, reject condition
+		if (leftStr.startsWith('@') && left === undefined) {
+			return false;
+		}
+		if (rightStr.startsWith('@') && right === undefined) {
+			return false;
+		}
+
 		const opLower = matchedOp.toLowerCase();
 		switch (opLower) {
 			case '==':
@@ -700,6 +709,15 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		// Quoted string literal ('text' or "text")
 		if ((trimmed.startsWith("'") && trimmed.endsWith("'")) || (trimmed.startsWith('"') && trimmed.endsWith('"'))) {
 			return trimmed.substring(1, trimmed.length - 1);
+		}
+
+		// Support formal variable reference syntax @var_name
+		if (trimmed.startsWith('@')) {
+			const varName = trimmed.substring(1).trim();
+			if (context && Object.prototype.hasOwnProperty.call(context, varName)) {
+				return context[varName];
+			}
+			return undefined;
 		}
 
 		// Lookup in context
