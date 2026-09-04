@@ -35,6 +35,7 @@ import { IWorkflowExecutionRun, IWorkflowLogEntry } from '../common/workflowExec
 export interface INodeVariable {
 	name: string;
 	initialValue: string; // e.g. "None", "True", "False", "0", "'admin'"
+	expression?: string;  // e.g. "+ 1", "ticket.output", "monitor + 5", "'SUCCESS'"
 	currentValue?: any;
 }
 
@@ -941,6 +942,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 		this._saveFlowchartData();
 		this._renderNodes();
+		this._drawLinks();
 		if (this._inspectorEl) this._renderInspector(this._inspectorEl);
 		this._refreshVariablesDrawer();
 	}
@@ -1023,6 +1025,7 @@ export class WorkflowEditor extends EditorPane {
 				item.variable.initialValue = initInput.value.trim() || 'None';
 				this._saveFlowchartData();
 				this._renderNodes();
+				this._drawLinks();
 				if (this._inspectorEl) this._renderInspector(this._inspectorEl);
 			};
 
@@ -2291,8 +2294,62 @@ export class WorkflowEditor extends EditorPane {
 								}
 								this._saveFlowchartData();
 								this._renderNodes();
+								this._drawLinks();
 								this._refreshVariablesDrawer();
 							};
+
+							// Update / Assignment Expression Row
+							const exprRow = append(varCard, $('.workflow-var-row'));
+							exprRow.style.marginTop = '4px';
+							const exprLabel = append(exprRow, $('.workflow-var-label'));
+							exprLabel.textContent = localize('varExpr', 'Update / Assignment:');
+							const exprInput = append(exprRow, $('input.workflow-var-input')) as HTMLInputElement;
+							exprInput.type = 'text';
+							exprInput.value = v.expression || '';
+							exprInput.placeholder = "e.g. + 1, ticket.output, 'SUCCESS'";
+
+							const saveExpr = (val: string) => {
+								const cleanVal = val.trim();
+								v.expression = cleanVal || undefined;
+								if (selectedNode.outputVariables) {
+									const found = selectedNode.outputVariables.find(x => x.name === v.name);
+									if (found) found.expression = v.expression;
+								}
+								if (selectedNode.outputVariable && selectedNode.outputVariable.name === v.name) {
+									selectedNode.outputVariable.expression = v.expression;
+								}
+								this._saveFlowchartData();
+								this._renderNodes();
+								this._drawLinks();
+								this._refreshVariablesDrawer();
+							};
+
+							exprInput.onchange = () => {
+								saveExpr(exprInput.value);
+							};
+
+							// Quick Preset Chips for Mutation & Ticket Output
+							const presetRow = append(varCard, $('.var-preset-row'));
+							const addPreset = (label: string, exprVal: string, tooltip: string) => {
+								const chip = append(presetRow, $('.var-preset-chip'));
+								chip.textContent = label;
+								chip.title = tooltip;
+								if (v.expression === exprVal || (!v.expression && !exprVal)) {
+									chip.classList.add('active');
+								}
+								chip.onclick = (e) => {
+									e.stopPropagation();
+									exprInput.value = exprVal;
+									saveExpr(exprVal);
+									if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+								};
+							};
+
+							addPreset('+1 自增', '+ 1', '自增 1 (count += 1)');
+							addPreset('-1 自减', '- 1', '自减 1 (count -= 1)');
+							addPreset('🎯 接收 Ticket', 'ticket.output', '当前节点执行 Ticket/Task 的返回值赋给该变量');
+							addPreset("'SUCCESS'", "'SUCCESS'", "直接设为 'SUCCESS'");
+							addPreset('初值模式', '', '清除表达式，重置为初值');
 						}
 
 						// Actions: Add Another Variable & Open in Variables Drawer
@@ -2646,8 +2703,29 @@ export class WorkflowEditor extends EditorPane {
 						this._openDrawerTab('vars', node.id);
 					};
 
-					append(varPill, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
-					append(varPill, $('.var-pill-text')).textContent = `${v.name}=${displayVal}`;
+					const vBadge = append(varPill, $('.var-tag-icon'));
+					vBadge.textContent = '[V]';
+
+					let pillText = '';
+					if (v.expression) {
+						const expr = v.expression.trim();
+						if (expr === '+ 1' || expr === '++' || expr === '+= 1') {
+							pillText = `${v.name} += 1`;
+						} else if (expr === '- 1' || expr === '--' || expr === '-= 1') {
+							pillText = `${v.name} -= 1`;
+						} else if (expr === 'ticket.output') {
+							pillText = `${v.name} ← Ticket`;
+						} else if (expr === 'ticket.status') {
+							pillText = `${v.name} ← Status`;
+						} else if (expr.startsWith('+') || expr.startsWith('-')) {
+							pillText = `${v.name} ${expr}`;
+						} else {
+							pillText = `${v.name} = ${expr}`;
+						}
+					} else {
+						pillText = `${v.name}=${displayVal}`;
+					}
+					append(varPill, $('.var-pill-text')).textContent = pillText;
 
 					const removeVarBtn = append(varPill, $('.var-pill-remove'));
 					removeVarBtn.title = 'Remove variable';
@@ -3430,6 +3508,7 @@ export class WorkflowEditor extends EditorPane {
 		targetNode.outputVariable = vars[0];
 		this._saveFlowchartData();
 		this._renderNodes();
+		this._drawLinks();
 		if (this._inspectorEl) {
 			this._renderInspector(this._inspectorEl);
 		}
@@ -4463,7 +4542,8 @@ export class WorkflowEditor extends EditorPane {
 
 			currentMatches.forEach((v, idx) => {
 				const item = append(acMenu!, $(`.workflow-link-ac-item${idx === activeAcIndex ? '.active' : ''}`));
-				append(item, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+				const vTag = append(item, $('.var-tag-icon'));
+				vTag.textContent = '[V]';
 				const nameSpan = append(item, $('.ac-var-name'));
 				nameSpan.textContent = `@${v.name}`;
 				const descSpan = append(item, $('.ac-var-desc'));
@@ -4573,7 +4653,8 @@ export class WorkflowEditor extends EditorPane {
 
 			if (varName && (hasAt || knownVars.has(varName))) {
 				const chip = append(parent, $('.link-var-chip'));
-				append(chip, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+				const vBadge = append(chip, $('.var-tag-icon'));
+				vBadge.textContent = '[V]';
 				append(chip, $('.link-var-chip-name')).textContent = varName;
 				if (!knownVars.has(varName)) {
 					chip.classList.add('undefined-var');

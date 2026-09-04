@@ -27,8 +27,8 @@ interface IFlowchartNode {
 	height: number;
 	label: string;
 	imports?: { type: string; name: string; uri?: string }[];
-	outputVariable?: { name: string; initialValue: string; currentValue?: any };
-	outputVariables?: { name: string; initialValue: string; currentValue?: any }[];
+	outputVariable?: { name: string; initialValue?: string; expression?: string; currentValue?: any };
+	outputVariables?: { name: string; initialValue?: string; expression?: string; currentValue?: any }[];
 }
 
 interface IFlowchartLink {
@@ -373,13 +373,54 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							const nodeVars = this._getNodeVars(node);
 							for (const v of nodeVars) {
 								if (v.name) {
-									let assignedVal = nodeState.output?.[v.name] ?? (nodeVars.length === 1 ? (nodeState.output?.value ?? nodeState.output?.returnValue) : undefined);
-									if (assignedVal === undefined) {
-										assignedVal = this._resolveValue(v.initialValue || 'None', run.contextVariables);
+									let assignedVal: any;
+									const oldVal = run.contextVariables[v.name];
+
+									if (v.expression) {
+										const expr = v.expression.trim();
+										if (expr === 'ticket.output' || expr === 'ticket') {
+											const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
+											assignedVal = lastTicket?.output ?? nodeState.output?.result ?? nodeState.output?.output ?? 'success';
+										} else if (expr === 'ticket.status') {
+											const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
+											assignedVal = lastTicket?.status ?? nodeState.status ?? 'success';
+										} else if (expr === 'ticket.id' || expr === 'ticket.name') {
+											const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
+											assignedVal = lastTicket ? (expr === 'ticket.id' ? lastTicket.ticketId : lastTicket.ticketName) : '';
+										} else if (expr === '+ 1' || expr === '++' || expr === '+= 1') {
+											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+											assignedVal = base + 1;
+										} else if (expr === '- 1' || expr === '--' || expr === '-= 1') {
+											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+											assignedVal = base - 1;
+										} else if (/^\+\s*(\d+(\.\d+)?)$/.test(expr)) {
+											const delta = Number(expr.replace('+', '').trim());
+											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+											assignedVal = base + delta;
+										} else if (/^-\s*(\d+(\.\d+)?)$/.test(expr)) {
+											const delta = Number(expr.replace('-', '').trim());
+											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+											assignedVal = base - delta;
+										} else {
+											assignedVal = this._evaluateExpressionOrLiteral(expr, run.contextVariables);
+										}
+									} else if (nodeState.executedTickets && nodeState.executedTickets.length > 0) {
+										const lastTicket = nodeState.executedTickets[nodeState.executedTickets.length - 1];
+										assignedVal = lastTicket?.output ?? 'success';
+									} else {
+										assignedVal = nodeState.output?.[v.name] ?? (nodeVars.length === 1 ? (nodeState.output?.value ?? nodeState.output?.returnValue) : undefined);
+										if (assignedVal === undefined) {
+											if (oldVal !== undefined) {
+												assignedVal = oldVal;
+											} else {
+												assignedVal = this._resolveValue(v.initialValue || 'None', run.contextVariables);
+											}
+										}
 									}
+
 									run.contextVariables[v.name] = assignedVal;
 									v.currentValue = assignedVal;
-									this._emitLog(run, 'info', `Variable '${v.name}' value is: ${typeof assignedVal === 'object' ? JSON.stringify(assignedVal) : assignedVal}`, { nodeId: node.id });
+									this._emitLog(run, 'info', `[Variable Updated] '${v.name}' = ${typeof assignedVal === 'object' ? JSON.stringify(assignedVal) : assignedVal}${v.expression ? ` (${v.expression})` : ''}`, { nodeId: node.id });
 								}
 							}
 						} catch (err: any) {
@@ -698,7 +739,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 	}
 
-	private _getNodeVars(node: IFlowchartNode): { name: string; initialValue: string; currentValue?: any }[] {
+	private _getNodeVars(node: IFlowchartNode): { name: string; initialValue?: string; expression?: string; currentValue?: any }[] {
 		if (Array.isArray(node.outputVariables) && node.outputVariables.length > 0) {
 			return node.outputVariables;
 		}
@@ -706,6 +747,27 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return [node.outputVariable];
 		}
 		return [];
+	}
+
+	private _evaluateExpressionOrLiteral(expr: string, context: Record<string, any>): any {
+		const trimmed = expr.trim();
+		// Basic binary arithmetic: var + number, var - number, var * number
+		const binMatch = trimmed.match(/^(@?[a-zA-Z0-9_]+)\s*([+\-*/])\s*(.+)$/);
+		if (binMatch) {
+			const leftVal = this._resolveValue(binMatch[1], context);
+			const op = binMatch[2];
+			const rightVal = this._resolveValue(binMatch[3], context);
+			if (typeof leftVal === 'number' && typeof rightVal === 'number') {
+				if (op === '+') { return leftVal + rightVal; }
+				if (op === '-') { return leftVal - rightVal; }
+				if (op === '*') { return leftVal * rightVal; }
+				if (op === '/' && rightVal !== 0) { return leftVal / rightVal; }
+			}
+			if (op === '+' && (typeof leftVal === 'string' || typeof rightVal === 'string')) {
+				return String(leftVal ?? '') + String(rightVal ?? '');
+			}
+		}
+		return this._resolveValue(trimmed, context);
 	}
 
 	private _resolveValue(token: string, context: Record<string, any>): any {
