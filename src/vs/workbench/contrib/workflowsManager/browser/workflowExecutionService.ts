@@ -377,30 +377,52 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 									const oldVal = run.contextVariables[v.name];
 
 									if (v.expression) {
-										const expr = v.expression.trim();
-										if (expr === 'ticket.output' || expr === 'ticket') {
+										let expr = v.expression.trim();
+										// Strip self-assignment prefix if present (e.g. "monitor = monitor + 1" or "monitor += 1")
+										if (expr.startsWith(`${v.name} =`)) {
+											expr = expr.substring(`${v.name} =`.length).trim();
+										} else if (expr.startsWith(`${v.name}=`)) {
+											expr = expr.substring(`${v.name}=`.length).trim();
+										} else if (expr.startsWith(`${v.name} +=`)) {
+											expr = `+=${expr.substring(`${v.name} +=`.length).trim()}`;
+										} else if (expr.startsWith(`${v.name}+=`)) {
+											expr = `+=${expr.substring(`${v.name}+=`.length).trim()}`;
+										} else if (expr.startsWith(`${v.name} -=`)) {
+											expr = `-=${expr.substring(`${v.name} -=`.length).trim()}`;
+										} else if (expr.startsWith(`${v.name}-=`)) {
+											expr = `-=${expr.substring(`${v.name}-=`.length).trim()}`;
+										}
+										if (expr.startsWith('=')) {
+											expr = expr.substring(1).trim();
+										}
+
+										if (expr === 'ticket.output' || expr === 'ticket' || expr === '@ticket') {
 											const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
 											assignedVal = lastTicket?.output ?? nodeState.output?.result ?? nodeState.output?.output ?? 'success';
-										} else if (expr === 'ticket.status') {
+										} else if (expr === 'ticket.status' || expr === '@ticket.status') {
 											const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
 											assignedVal = lastTicket?.status ?? nodeState.status ?? 'success';
 										} else if (expr === 'ticket.id' || expr === 'ticket.name') {
 											const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
 											assignedVal = lastTicket ? (expr === 'ticket.id' ? lastTicket.ticketId : lastTicket.ticketName) : '';
-										} else if (expr === '+ 1' || expr === '++' || expr === '+= 1') {
+										} else if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
 											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
 											assignedVal = base + 1;
-										} else if (expr === '- 1' || expr === '--' || expr === '-= 1') {
+										} else if (expr === '- 1' || expr === '--' || expr === '-= 1' || expr === '-=1') {
 											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
 											assignedVal = base - 1;
-										} else if (/^\+\s*(\d+(\.\d+)?)$/.test(expr)) {
-											const delta = Number(expr.replace('+', '').trim());
+										} else if (/^(\+\=|\+)\s*(\d+(\.\d+)?)$/.test(expr)) {
+											const delta = Number(expr.replace(/^(\+\=|\+)/, '').trim());
 											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
 											assignedVal = base + delta;
-										} else if (/^-\s*(\d+(\.\d+)?)$/.test(expr)) {
-											const delta = Number(expr.replace('-', '').trim());
+										} else if (/^(-\=|-)\s*(\d+(\.\d+)?)$/.test(expr)) {
+											const delta = Number(expr.replace(/^(-\=|-)/, '').trim());
 											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
 											assignedVal = base - delta;
+										} else if (/^\*\=\s*(\d+(\.\d+)?)$/.test(expr)) {
+											const mult = Number(expr.replace(/^\*\=/, '').trim());
+											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+											assignedVal = base * mult;
 										} else {
 											assignedVal = this._evaluateExpressionOrLiteral(expr, run.contextVariables);
 										}

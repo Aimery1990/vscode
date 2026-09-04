@@ -982,6 +982,28 @@ export class WorkflowEditor extends EditorPane {
 		this._refreshVariablesDrawer();
 	}
 
+	private _updateExistingVarsDatalist(): void {
+		let dl = document.getElementById('workflow-existing-vars-list') as HTMLDataListElement;
+		if (!dl) {
+			dl = document.createElement('datalist');
+			dl.id = 'workflow-existing-vars-list';
+			document.body.appendChild(dl);
+		}
+		clearNode(dl);
+		const seen = new Set<string>();
+		for (const n of this._data?.nodes || []) {
+			for (const v of this._getNodeVariables(n)) {
+				if (!seen.has(v.name)) {
+					seen.add(v.name);
+					const opt = document.createElement('option');
+					opt.value = v.name;
+					opt.textContent = `(=${v.initialValue || 'None'}) [${n.label}]`;
+					dl.appendChild(opt);
+				}
+			}
+		}
+	}
+
 	private _refreshVariablesDrawer(targetNodeId?: string): void {
 		const allVars: { node: IFlowchartNode; variable: INodeVariable }[] = [];
 		for (const node of this._data?.nodes || []) {
@@ -2337,6 +2359,8 @@ export class WorkflowEditor extends EditorPane {
 					} else {
 						const varForm = append(varSec, $('.workflow-var-form'));
 
+						this._updateExistingVarsDatalist();
+
 						for (let i = 0; i < nodeVars.length; i++) {
 							const v = nodeVars[i];
 							const varCard = append(varForm, $('.workflow-var-card'));
@@ -2345,6 +2369,10 @@ export class WorkflowEditor extends EditorPane {
 							varCard.style.borderRadius = '4px';
 							varCard.style.border = '1px solid var(--vscode-widget-border, rgba(255,255,255,0.12))';
 							varCard.style.background = 'var(--vscode-editor-background, rgba(0,0,0,0.2))';
+
+							// Check if this variable was already defined in an earlier/other node
+							const otherNodesWithVar = (this._data?.nodes || []).filter(n => n.id !== selectedNode.id && this._getNodeVariables(n).some(ov => ov.name === v.name));
+							const isUpdatingExisting = otherNodesWithVar.length > 0;
 
 							// Card Top Header: [V] badge on left, Trash Button on top-right!
 							const cardHeader = append(varCard, $('.var-card-header'));
@@ -2355,10 +2383,10 @@ export class WorkflowEditor extends EditorPane {
 							const vBadge = append(headerTitle, $('.var-icon-badge'));
 							vBadge.textContent = '[V]';
 							const labelText = append(headerTitle, $('span'));
-							labelText.textContent = `Variable ${nodeVars.length > 1 ? `#${i + 1}` : ''}`;
+							labelText.textContent = isUpdatingExisting ? `Update @${v.name}` : `Variable ${nodeVars.length > 1 ? `#${i + 1}` : ''}`;
 							labelText.style.fontSize = '11px';
 							labelText.style.fontWeight = '600';
-							labelText.style.color = 'var(--vscode-foreground, #cccccc)';
+							labelText.style.color = isUpdatingExisting ? '#38bdf8' : 'var(--vscode-foreground, #cccccc)';
 
 							const unbindBtn = append(cardHeader, $('.top-right-delete-btn'));
 							unbindBtn.title = localize('unbindVar', 'Delete variable from node');
@@ -2367,7 +2395,7 @@ export class WorkflowEditor extends EditorPane {
 								this._unbindVariableFromNode(selectedNode, v.name);
 							};
 
-							// Variable Name Row
+							// Variable Name Row (with datalist for known variables!)
 							const nameRow = append(varCard, $('.workflow-var-row'));
 							const nameLabel = append(nameRow, $('.workflow-var-label'));
 							nameLabel.textContent = localize('varName', 'Name:');
@@ -2376,39 +2404,85 @@ export class WorkflowEditor extends EditorPane {
 							nameInput.style.boxSizing = 'border-box';
 							nameInput.type = 'text';
 							nameInput.value = v.name;
+							nameInput.setAttribute('list', 'workflow-existing-vars-list');
 							nameInput.placeholder = 'e.g. status, count, monitor1';
 							nameInput.onchange = () => {
 								const oldName = v.name;
-								const cleaned = nameInput.value.trim().replace(/[^a-zA-Z0-9_]/g, '_') || `var_${i + 1}`;
+								const cleaned = nameInput.value.trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_]/g, '_') || `var_${i + 1}`;
 								nameInput.value = cleaned;
 								this._renameVariableGlobally(oldName, cleaned);
 							};
 
-							// Initial Value (Python Literal) Row
-							const initRow = append(varCard, $('.workflow-var-row'));
-							initRow.style.marginTop = '6px';
-							const initLabel = append(initRow, $('.workflow-var-label'));
-							initLabel.textContent = localize('varInit', 'Initial Value (Python):');
-							const initInput = append(initRow, $('input.workflow-var-input')) as HTMLInputElement;
-							initInput.style.width = '100%';
-							initInput.style.boxSizing = 'border-box';
-							initInput.type = 'text';
-							initInput.value = v.initialValue || 'None';
-							initInput.placeholder = "None, True, False, 0, 'admin'";
-							initInput.onchange = () => {
-								v.initialValue = initInput.value.trim() || 'None';
-								if (selectedNode.outputVariables) {
-									const found = selectedNode.outputVariables.find(x => x.name === v.name);
-									if (found) found.initialValue = v.initialValue;
-								}
-								if (selectedNode.outputVariable && selectedNode.outputVariable.name === v.name) {
-									selectedNode.outputVariable.initialValue = v.initialValue;
-								}
-								this._saveFlowchartData();
-								this._renderNodes();
-								this._drawLinks();
-								this._refreshVariablesDrawer();
-							};
+							if (isUpdatingExisting) {
+								// This node is modifying an existing variable from an upstream node!
+								const exprRow = append(varCard, $('.workflow-var-row'));
+								exprRow.style.marginTop = '6px';
+								const exprLabel = append(exprRow, $('.workflow-var-label'));
+								exprLabel.textContent = localize('varOperation', 'Operation / Assignment (操作 / 赋值):');
+								const exprInput = append(exprRow, $('input.workflow-var-input')) as HTMLInputElement;
+								exprInput.style.width = '100%';
+								exprInput.style.boxSizing = 'border-box';
+								exprInput.type = 'text';
+								exprInput.value = v.expression || '';
+								exprInput.placeholder = "e.g. += 1, -= 1, = ticket.output, = 'DONE'";
+								exprInput.onchange = () => {
+									v.expression = exprInput.value.trim() || undefined;
+									this._saveFlowchartData();
+									this._renderNodes();
+									this._drawLinks();
+									this._refreshVariablesDrawer();
+								};
+
+								const noteRow = append(varCard, $('.workflow-var-note'));
+								noteRow.style.fontSize = '10px';
+								noteRow.style.color = '#94a3b8';
+								noteRow.style.marginTop = '4px';
+								noteRow.textContent = `Initial value defined in '${otherNodesWithVar[0].label}': ${otherNodesWithVar[0].outputVariables?.find(x => x.name === v.name)?.initialValue || 'None'}`;
+							} else {
+								// First definition node: Initial Value + optional operation
+								const initRow = append(varCard, $('.workflow-var-row'));
+								initRow.style.marginTop = '6px';
+								const initLabel = append(initRow, $('.workflow-var-label'));
+								initLabel.textContent = localize('varInit', 'Initial Value (Python 初值):');
+								const initInput = append(initRow, $('input.workflow-var-input')) as HTMLInputElement;
+								initInput.style.width = '100%';
+								initInput.style.boxSizing = 'border-box';
+								initInput.type = 'text';
+								initInput.value = v.initialValue || 'None';
+								initInput.placeholder = "0, None, True, 'admin'";
+								initInput.onchange = () => {
+									v.initialValue = initInput.value.trim() || 'None';
+									if (selectedNode.outputVariables) {
+										const found = selectedNode.outputVariables.find(x => x.name === v.name);
+										if (found) found.initialValue = v.initialValue;
+									}
+									if (selectedNode.outputVariable && selectedNode.outputVariable.name === v.name) {
+										selectedNode.outputVariable.initialValue = v.initialValue;
+									}
+									this._saveFlowchartData();
+									this._renderNodes();
+									this._drawLinks();
+									this._refreshVariablesDrawer();
+								};
+
+								const exprRow = append(varCard, $('.workflow-var-row'));
+								exprRow.style.marginTop = '6px';
+								const exprLabel = append(exprRow, $('.workflow-var-label'));
+								exprLabel.textContent = localize('varExprOpt', 'Operation on this Node (本节点操作, 可选):');
+								const exprInput = append(exprRow, $('input.workflow-var-input')) as HTMLInputElement;
+								exprInput.style.width = '100%';
+								exprInput.style.boxSizing = 'border-box';
+								exprInput.type = 'text';
+								exprInput.value = v.expression || '';
+								exprInput.placeholder = "e.g. += 1, = ticket.output (optional)";
+								exprInput.onchange = () => {
+									v.expression = exprInput.value.trim() || undefined;
+									this._saveFlowchartData();
+									this._renderNodes();
+									this._drawLinks();
+									this._refreshVariablesDrawer();
+								};
+							}
 						}
 
 						// Actions: Only Keep 'Manage in Variables Table'
@@ -2736,7 +2810,7 @@ export class WorkflowEditor extends EditorPane {
 					const displayVal = runtimeVal !== undefined ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : (v.initialValue || 'None');
 
 					const varPill = append(varsContainer, $('.node-variable-pill'));
-					varPill.title = `Context Variable: ${v.name} = ${displayVal} (Click to manage in Variables Table)`;
+					varPill.title = `Context Variable: ${v.name} = ${displayVal} (Double-click to inline edit expression, click to select)`;
 					varPill.onmousedown = (e) => {
 						e.stopPropagation();
 					};
@@ -2750,18 +2824,37 @@ export class WorkflowEditor extends EditorPane {
 						}
 						this._openDrawerTab('vars', node.id);
 					};
+					varPill.ondblclick = (e) => {
+						e.stopPropagation();
+						e.preventDefault();
+						this._showVariablePillInlineEditor(node, v, varPill);
+					};
 
 					const vBadge = append(varPill, $('.var-tag-icon'));
 					vBadge.textContent = '[V]';
 
 					let pillText = `${v.name} = ${displayVal}`;
-					if (v.expression && v.expression !== 'ticket.output' && v.expression !== 'ticket.status') {
-						if (v.expression === '+ 1' || v.expression === '++' || v.expression === '+= 1') {
+					if (v.expression) {
+						let expr = v.expression.trim();
+						if (expr.startsWith(`${v.name} =`)) {
+							expr = expr.substring(`${v.name} =`.length).trim();
+						} else if (expr.startsWith(`${v.name}=`)) {
+							expr = expr.substring(`${v.name}=`.length).trim();
+						}
+						if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
 							pillText = `${v.name} += 1`;
-						} else if (v.expression === '- 1' || v.expression === '--' || v.expression === '-= 1') {
+						} else if (expr === '- 1' || expr === '--' || expr === '-= 1' || expr === '-=1') {
 							pillText = `${v.name} -= 1`;
+						} else if (expr.startsWith('+=') || expr.startsWith('-=') || expr.startsWith('*=') || expr.startsWith('/=')) {
+							pillText = `${v.name} ${expr}`;
+						} else if (expr === 'ticket.output' || expr === 'ticket' || expr === '@ticket') {
+							pillText = `${v.name} ← Ticket`;
+						} else if (expr === 'ticket.status') {
+							pillText = `${v.name} ← Status`;
+						} else if (expr.startsWith('=')) {
+							pillText = `${v.name} = ${expr.substring(1).trim()}`;
 						} else {
-							pillText = `${v.name} = ${v.expression}`;
+							pillText = `${v.name} = ${expr}`;
 						}
 					}
 					append(varPill, $('.var-pill-text')).textContent = pillText;
@@ -3093,6 +3186,76 @@ export class WorkflowEditor extends EditorPane {
 		textarea.onblur = () => {
 			saveText();
 		};
+	}
+
+	private _showVariablePillInlineEditor(node: IFlowchartNode, v: INodeVariable, pillEl: HTMLElement): void {
+		const textSpan = pillEl.querySelector('.var-pill-text') as HTMLElement;
+		if (!textSpan) return;
+
+		const currentExpr = v.expression || v.initialValue || '';
+		const input = document.createElement('input');
+		input.type = 'text';
+		input.className = 'var-pill-inline-input';
+		input.value = currentExpr;
+		input.placeholder = 'e.g. += 1, = ticket.output, 0';
+		input.style.width = `${Math.max(60, textSpan.offsetWidth + 24)}px`;
+		input.style.height = '18px';
+		input.style.fontSize = '10px';
+		input.style.fontFamily = 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+		input.style.background = 'rgba(0, 0, 0, 0.85)';
+		input.style.color = '#38bdf8';
+		input.style.border = '1px solid #38bdf8';
+		input.style.borderRadius = '3px';
+		input.style.padding = '0 4px';
+		input.style.outline = 'none';
+		input.style.zIndex = '100';
+
+		let committed = false;
+		const commit = () => {
+			if (committed) return;
+			committed = true;
+			const val = input.value.trim();
+			if (val) {
+				if (/^(\+\=|\-\=|\*\=|\/\=|\+|\-|\=)/.test(val) || val.includes('ticket') || val.includes('@') || val.includes('+') || val.includes('-')) {
+					v.expression = val;
+				} else {
+					const otherNodesWithVar = (this._data?.nodes || []).filter(n => n.id !== node.id && this._getNodeVariables(n).some(ov => ov.name === v.name));
+					if (otherNodesWithVar.length > 0) {
+						v.expression = val;
+					} else {
+						v.initialValue = val;
+					}
+				}
+				this._saveFlowchartData();
+				this._renderNodes();
+				this._drawLinks();
+				if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+				this._refreshVariablesDrawer();
+			} else {
+				this._renderNodes();
+			}
+		};
+
+		input.onkeydown = (e) => {
+			e.stopPropagation();
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				commit();
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				committed = true;
+				this._renderNodes();
+			}
+		};
+
+		input.onblur = () => {
+			commit();
+		};
+
+		textSpan.style.display = 'none';
+		pillEl.insertBefore(input, textSpan);
+		input.focus();
+		input.select();
 	}
 
 	private _findNonOverlappingPosition(
