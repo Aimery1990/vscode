@@ -240,6 +240,11 @@ export class WorkflowEditor extends EditorPane {
 	private _logCountBadgeEl?: HTMLElement;
 	private _logStatusBadgeEl?: HTMLElement;
 	private _autoScrollLogs: boolean = true;
+	private _isVarsFindReplaceOpen: boolean = false;
+	private _varsLastFindQuery: string = '';
+	private _varsLastReplaceQuery: string = '';
+	private _varsFindInputEl?: HTMLInputElement;
+	private _varsFindCurrentIndex: number = 0;
 
 	constructor(
 		group: IEditorGroup,
@@ -702,6 +707,10 @@ export class WorkflowEditor extends EditorPane {
 				} else {
 					this._groupSelectedNodes();
 				}
+			} else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'f' || e.key.toLowerCase() === 'r')) {
+				e.preventDefault();
+				e.stopPropagation();
+				this._openVarsFindReplaceBar();
 			} else if (this._selectedNodeIds.size === 1) {
 				const selId = Array.from(this._selectedNodeIds)[0];
 				const selNode = this._data?.nodes?.find(n => n.id === selId);
@@ -935,6 +944,12 @@ export class WorkflowEditor extends EditorPane {
 			clearBtn.style.display = tab === 'logs' ? 'inline-flex' : 'none';
 		}
 
+		// Only show Find & Replace toggle button on Context Variables tab
+		const findReplaceToggleBtn = this._logDrawerEl.querySelector('.vars-find-replace-toggle-btn') as HTMLElement | null;
+		if (findReplaceToggleBtn) {
+			findReplaceToggleBtn.style.display = tab === 'vars' ? 'inline-flex' : 'none';
+		}
+
 		if (this._toolbarEl) {
 			this._renderToolbar(this._toolbarEl);
 		}
@@ -1046,6 +1061,10 @@ export class WorkflowEditor extends EditorPane {
 		if (!this._varsBodyEl) return;
 		clearNode(this._varsBodyEl);
 
+		if (this._isVarsFindReplaceOpen) {
+			this._renderVarsFindReplaceBar(this._varsBodyEl);
+		}
+
 		if (allVars.length === 0) {
 			const empty = append(this._varsBodyEl, $('.workflow-vars-empty'));
 			const emptyIcon = append(empty, $('.var-icon-badge'));
@@ -1084,10 +1103,13 @@ export class WorkflowEditor extends EditorPane {
 			nameInput.value = item.variable.name;
 			nameInput.placeholder = 'e.g. status, count';
 			nameInput.onchange = () => {
-				const oldName = item.variable.name;
-				const cleaned = nameInput.value.trim().replace(/[^a-zA-Z0-9_]/g, '_') || 'var_1';
+				const cleaned = nameInput.value.trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_') || 'var_1';
 				nameInput.value = cleaned;
-				this._renameVariableGlobally(oldName, cleaned);
+				item.variable.name = cleaned;
+				item.node.outputVariable = this._getNodeVariables(item.node)[0];
+				this._saveFlowchartData();
+				this._renderNodes();
+				this._refreshVariablesDrawer();
 			};
 
 			// 2. Bound Node
@@ -1194,57 +1216,167 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
-	private _renameVariableGlobally(oldName: string, newName: string): void {
-		if (!oldName || !newName || oldName === newName || !this._data) return;
+	private _collectVariableOccurrences(findName: string): {
+		type: 'node-var-def' | 'node-var-expr' | 'link-condition' | 'link-label';
+		node?: IFlowchartNode;
+		varIndex?: number;
+		link?: IFlowchartLink;
+		targetVar?: INodeVariable;
+		description: string;
+	}[] {
+		const results: {
+			type: 'node-var-def' | 'node-var-expr' | 'link-condition' | 'link-label';
+			node?: IFlowchartNode;
+			varIndex?: number;
+			link?: IFlowchartLink;
+			targetVar?: INodeVariable;
+			description: string;
+		}[] = [];
 
-		// 1. Update bound nodes
+		if (!this._data || !findName.trim()) return results;
+
+		const query = findName.trim();
+		const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		const wordReg = new RegExp(`(?<=^|[^a-zA-Z0-9_\\u4e00-\\u9fa5])@?${escaped}(?=[^a-zA-Z0-9_\\u4e00-\\u9fa5]|$)`, 'g');
+
+		// 1. Scan nodes
 		for (const node of this._data.nodes) {
-			for (const v of this._getNodeVariables(node)) {
-				if (v.name === oldName) {
-					v.name = newName;
+			const vars = this._getNodeVariables(node);
+			for (let i = 0; i < vars.length; i++) {
+				const v = vars[i];
+				if (v.name === query) {
+					results.push({
+						type: 'node-var-def',
+						node,
+						varIndex: i,
+						targetVar: v,
+						description: localize('occNodeDef', "Node '{0}' definition: '{1}'", node.label, v.name)
+					});
 				}
-			}
-			if (node.outputVariable && node.outputVariable.name === oldName) {
-				node.outputVariable.name = newName;
+				if (v.expression) {
+					wordReg.lastIndex = 0;
+					if (wordReg.test(v.expression)) {
+						results.push({
+							type: 'node-var-expr',
+							node,
+							varIndex: i,
+							targetVar: v,
+							description: localize('occNodeExpr', "Node '{0}' expression: '{1}'", node.label, v.expression)
+						});
+					}
+				}
 			}
 		}
 
-		// 2. Cascade rename into link conditions and labels
-		let cascadeCount = 0;
-		const regexAt = new RegExp(`@${oldName}\\b`, 'g');
-		const regexWord = new RegExp(`\\b${oldName}\\b`, 'g');
-
+		// 2. Scan links
 		for (const link of this._data.links) {
-			let modified = false;
-			if (link.label) {
-				if (regexAt.test(link.label)) {
-					link.label = link.label.replace(regexAt, `@${newName}`);
-					modified = true;
-				} else if (regexWord.test(link.label)) {
-					link.label = link.label.replace(regexWord, `@${newName}`);
-					modified = true;
-				}
-			}
 			if (link.condition) {
-				if (regexAt.test(link.condition)) {
-					link.condition = link.condition.replace(regexAt, `@${newName}`);
-					modified = true;
-				} else if (regexWord.test(link.condition)) {
-					link.condition = link.condition.replace(regexWord, `@${newName}`);
-					modified = true;
+				wordReg.lastIndex = 0;
+				if (wordReg.test(link.condition)) {
+					results.push({
+						type: 'link-condition',
+						link,
+						description: localize('occLinkCond', "Link condition: '{0}'", link.condition)
+					});
 				}
 			}
-			if (modified) {
-				cascadeCount++;
+			if (link.label) {
+				wordReg.lastIndex = 0;
+				if (wordReg.test(link.label)) {
+					results.push({
+						type: 'link-label',
+						link,
+						description: localize('occLinkLabel', "Link label: '{0}'", link.label)
+					});
+				}
 			}
 		}
 
-		// 3. Update runtime context variables if workflow is active
+		return results;
+	}
+
+	private _replaceNextVariableOccurrence(findName: string, replaceWith: string): void {
+		const occs = this._collectVariableOccurrences(findName);
+		if (occs.length === 0) {
+			this._notificationService.info(localize('noMatchesFound', "No occurrences of variable '{0}' found.", findName));
+			return;
+		}
+
+		if (this._varsFindCurrentIndex >= occs.length) {
+			this._varsFindCurrentIndex = 0;
+		}
+
+		const occ = occs[this._varsFindCurrentIndex];
+		const escaped = findName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		const wordReg = new RegExp(`(?<=^|[^a-zA-Z0-9_\\u4e00-\\u9fa5])@?${escaped}(?=[^a-zA-Z0-9_\\u4e00-\\u9fa5]|$)`, 'g');
+
+		if (occ.type === 'node-var-def' && occ.targetVar) {
+			occ.targetVar.name = replaceWith;
+			if (occ.node) {
+				occ.node.outputVariable = this._getNodeVariables(occ.node)[0];
+			}
+		} else if (occ.type === 'node-var-expr' && occ.targetVar?.expression) {
+			occ.targetVar.expression = occ.targetVar.expression.replace(wordReg, replaceWith);
+		} else if (occ.type === 'link-condition' && occ.link?.condition) {
+			occ.link.condition = occ.link.condition.replace(wordReg, replaceWith);
+		} else if (occ.type === 'link-label' && occ.link?.label) {
+			occ.link.label = occ.link.label.replace(wordReg, `@${replaceWith}`);
+		}
+
+		if (occ.node) {
+			this._selectedNodeIds.clear();
+			this._selectedNodeIds.add(occ.node.id);
+			this._centerOnNode(occ.node);
+		} else if (occ.link) {
+			this._selectedLinkIds.clear();
+			this._selectedLinkIds.add(occ.link.id);
+		}
+
+		this._saveFlowchartData();
+		this._renderNodes();
+		this._drawLinks();
+		if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+		this._refreshVariablesDrawer();
+
+		const remaining = this._collectVariableOccurrences(findName).length;
+		this._notificationService.info(localize('replacedNextInfo', "Replaced occurrence in {0}. ({1} remaining)", occ.description, remaining));
+	}
+
+	private _replaceAllVariableOccurrences(findName: string, replaceWith: string): void {
+		const occs = this._collectVariableOccurrences(findName);
+		if (occs.length === 0) {
+			this._notificationService.info(localize('noMatchesFound', "No occurrences of variable '{0}' found.", findName));
+			return;
+		}
+
+		const escaped = findName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		const wordReg = new RegExp(`(?<=^|[^a-zA-Z0-9_\\u4e00-\\u9fa5])@?${escaped}(?=[^a-zA-Z0-9_\\u4e00-\\u9fa5]|$)`, 'g');
+
+		let count = 0;
+		for (const occ of occs) {
+			if (occ.type === 'node-var-def' && occ.targetVar) {
+				occ.targetVar.name = replaceWith;
+				if (occ.node) {
+					occ.node.outputVariable = this._getNodeVariables(occ.node)[0];
+				}
+				count++;
+			} else if (occ.type === 'node-var-expr' && occ.targetVar?.expression) {
+				occ.targetVar.expression = occ.targetVar.expression.replace(wordReg, replaceWith);
+				count++;
+			} else if (occ.type === 'link-condition' && occ.link?.condition) {
+				occ.link.condition = occ.link.condition.replace(wordReg, replaceWith);
+				count++;
+			} else if (occ.type === 'link-label' && occ.link?.label) {
+				occ.link.label = occ.link.label.replace(wordReg, `@${replaceWith}`);
+				count++;
+			}
+		}
+
 		if (this._workflowUri) {
 			const activeRun = this._workflowExecutionService.getActiveRun(this._workflowUri);
-			if (activeRun?.contextVariables && Object.prototype.hasOwnProperty.call(activeRun.contextVariables, oldName)) {
-				activeRun.contextVariables[newName] = activeRun.contextVariables[oldName];
-				delete activeRun.contextVariables[oldName];
+			if (activeRun?.contextVariables && Object.prototype.hasOwnProperty.call(activeRun.contextVariables, findName.trim())) {
+				activeRun.contextVariables[replaceWith] = activeRun.contextVariables[findName.trim()];
+				delete activeRun.contextVariables[findName.trim()];
 			}
 		}
 
@@ -1254,9 +1386,148 @@ export class WorkflowEditor extends EditorPane {
 		if (this._inspectorEl) this._renderInspector(this._inspectorEl);
 		this._refreshVariablesDrawer();
 
-		if (cascadeCount > 0) {
-			this._notificationService.info(localize('varCascadedMsg', "Renamed variable '{0}' to '{1}' across {2} connection(s).", oldName, newName, cascadeCount));
+		this._notificationService.info(localize('replacedAllInfo', "Replaced all {0} occurrences of variable '{1}' with '{2}'.", count, findName, replaceWith));
+	}
+
+	private _openVarsFindReplaceBar(initialFindQuery?: string): void {
+		this._isVarsFindReplaceOpen = true;
+		if (initialFindQuery) {
+			this._varsLastFindQuery = initialFindQuery;
 		}
+		this._openDrawerTab('vars');
+		setTimeout(() => {
+			if (this._varsFindInputEl) {
+				this._varsFindInputEl.focus();
+				this._varsFindInputEl.select();
+			}
+		}, 50);
+	}
+
+	private _closeVarsFindReplaceBar(): void {
+		this._isVarsFindReplaceOpen = false;
+		this._refreshVariablesDrawer();
+	}
+
+	private _toggleVarsFindReplaceBar(): void {
+		if (this._isVarsFindReplaceOpen) {
+			this._closeVarsFindReplaceBar();
+		} else {
+			this._openVarsFindReplaceBar();
+		}
+	}
+
+	private _renderVarsFindReplaceBar(container: HTMLElement): void {
+		const bar = append(container, $('.vars-find-replace-bar'));
+
+		const findGroup = append(bar, $('.vars-find-input-group'));
+		append(findGroup, $('span' + ThemeIcon.asCSSSelector(Codicon.search)));
+		const findInput = append(findGroup, $('input.vars-find-input')) as HTMLInputElement;
+		findInput.type = 'text';
+		findInput.placeholder = localize('findVarPlaceholder', 'Find variable name (查找变量名)...');
+		this._varsFindInputEl = findInput;
+		if (this._varsLastFindQuery) {
+			findInput.value = this._varsLastFindQuery;
+		}
+
+		const arrowIcon = append(bar, $('.vars-replace-arrow'));
+		arrowIcon.textContent = '➔';
+		arrowIcon.style.color = '#38bdf8';
+		arrowIcon.style.fontSize = '12px';
+
+		const replaceGroup = append(bar, $('.vars-replace-input-group'));
+		append(replaceGroup, $('span' + ThemeIcon.asCSSSelector(Codicon.replace)));
+		const replaceInput = append(replaceGroup, $('input.vars-replace-input')) as HTMLInputElement;
+		replaceInput.type = 'text';
+		replaceInput.placeholder = localize('replaceVarPlaceholder', 'Replace with (替换为)...');
+		if (this._varsLastReplaceQuery) {
+			replaceInput.value = this._varsLastReplaceQuery;
+		}
+
+		const actions = append(bar, $('.vars-find-actions'));
+		const matchesBadge = append(actions, $('.vars-matches-badge'));
+
+		const updateMatchesCount = () => {
+			const query = findInput.value.trim();
+			this._varsLastFindQuery = query;
+			if (!query) {
+				matchesBadge.textContent = '0 matches';
+				return [];
+			}
+			const occs = this._collectVariableOccurrences(query);
+			matchesBadge.textContent = `${occs.length} ${occs.length === 1 ? 'match' : 'matches'}`;
+			return occs;
+		};
+
+		updateMatchesCount();
+
+		findInput.oninput = () => {
+			this._varsFindCurrentIndex = 0;
+			updateMatchesCount();
+		};
+
+		replaceInput.oninput = () => {
+			this._varsLastReplaceQuery = replaceInput.value.trim();
+		};
+
+		// Replace Next (一个个换) Button
+		const replaceNextBtn = append(actions, $('button.vars-find-btn.btn-next'));
+		replaceNextBtn.textContent = localize('replaceNextBtn', 'Replace (换下一个)');
+		replaceNextBtn.title = 'Replace next occurrence of this variable (Enter)';
+		replaceNextBtn.onclick = () => {
+			const findName = findInput.value.trim();
+			const replaceWith = replaceInput.value.trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
+			if (!findName || !replaceWith) {
+				this._notificationService.warn(localize('findReplaceMissing', 'Please provide both find and replace variable names.'));
+				return;
+			}
+			this._replaceNextVariableOccurrence(findName, replaceWith);
+		};
+
+		// Replace All (一口气全换) Button
+		const replaceAllBtn = append(actions, $('button.vars-find-btn.btn-all'));
+		replaceAllBtn.textContent = localize('replaceAllBtn', 'Replace All (全部替换)');
+		replaceAllBtn.title = 'Replace all occurrences of this variable across nodes & links (Cmd/Ctrl+Enter)';
+		replaceAllBtn.onclick = () => {
+			const findName = findInput.value.trim();
+			const replaceWith = replaceInput.value.trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_');
+			if (!findName || !replaceWith) {
+				this._notificationService.warn(localize('findReplaceMissing', 'Please provide both find and replace variable names.'));
+				return;
+			}
+			this._replaceAllVariableOccurrences(findName, replaceWith);
+		};
+
+		// Close Button
+		const closeBtn = append(actions, $('button.vars-find-close-btn'));
+		closeBtn.textContent = '✕';
+		closeBtn.title = 'Close Find & Replace (Esc)';
+		closeBtn.onclick = () => {
+			this._closeVarsFindReplaceBar();
+		};
+
+		findInput.onkeydown = (e) => {
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				replaceInput.focus();
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				this._closeVarsFindReplaceBar();
+			}
+		};
+
+		replaceInput.onkeydown = (e) => {
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				if (e.altKey || e.metaKey || e.ctrlKey) {
+					replaceAllBtn.click();
+				} else {
+					replaceNextBtn.click();
+				}
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				this._closeVarsFindReplaceBar();
+			}
+		};
 	}
 
 	private _centerOnNode(node: IFlowchartNode): void {
@@ -1368,6 +1639,14 @@ export class WorkflowEditor extends EditorPane {
 			if (this._logCountBadgeEl) {
 				this._logCountBadgeEl.textContent = '0 events';
 			}
+		};
+
+		// Find & Replace Button (only visible in Context Variables tab)
+		const findReplaceBtn = append(right, $('.log-btn-icon.vars-find-replace-toggle-btn'));
+		findReplaceBtn.title = localize('findReplaceVarsTooltip', 'Find & Replace Variable Names (查找与替换变量名 Ctrl/Cmd+R)');
+		append(findReplaceBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.replace)));
+		findReplaceBtn.onclick = () => {
+			this._toggleVarsFindReplaceBar();
 		};
 
 		// Close Button
@@ -2434,10 +2713,13 @@ export class WorkflowEditor extends EditorPane {
 							nameInput.setAttribute('list', 'workflow-existing-vars-list');
 							nameInput.placeholder = 'e.g. status, count, monitor1';
 							nameInput.onchange = () => {
-								const oldName = v.name;
-								const cleaned = nameInput.value.trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_]/g, '_') || `var_${i + 1}`;
+								const cleaned = nameInput.value.trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_') || `var_${i + 1}`;
 								nameInput.value = cleaned;
-								this._renameVariableGlobally(oldName, cleaned);
+								v.name = cleaned;
+								selectedNode.outputVariable = nodeVars[0];
+								this._saveFlowchartData();
+								this._renderNodes();
+								this._refreshVariablesDrawer();
 							};
 
 							if (isUpdatingExisting) {
@@ -3609,10 +3891,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 
 			if (targetVar) {
-				if (targetVar.name !== varName) {
-					this._renameVariableGlobally(targetVar.name, varName);
-					targetVar.name = varName;
-				}
+				targetVar.name = varName;
 				targetVar.expression = expression;
 				if (initialValue !== 'None') targetVar.initialValue = initialValue;
 			} else {
