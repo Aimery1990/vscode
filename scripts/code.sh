@@ -19,9 +19,32 @@ function code() {
 	if [[ "$OSTYPE" == "darwin"* ]]; then
 		NAME=`node -p "require('./product.json').nameLong"`
 		EXE_NAME=`node -p "require('./product.json').nameShort"`
-		CODE="./.build/electron/$NAME.app/Contents/MacOS/$EXE_NAME"
-		if [ ! -f "$CODE" ] && [ -f "./.build/electron/Code - OSS.app/Contents/MacOS/Code - OSS" ]; then
-			CODE="./.build/electron/Code - OSS.app/Contents/MacOS/Code - OSS"
+		APP_DIR="./.build/electron/$NAME.app"
+		CODE="$APP_DIR/Contents/MacOS/$EXE_NAME"
+
+		# Ensure custom branded app bundle and helpers exist
+		if [ ! -f "$CODE" ] && [ -d "./.build/electron/Code - OSS.app" ]; then
+			cp -a "./.build/electron/Code - OSS.app" "$APP_DIR"
+			if [ -f "$APP_DIR/Contents/MacOS/Code - OSS" ]; then
+				mv "$APP_DIR/Contents/MacOS/Code - OSS" "$CODE"
+			fi
+			plutil -replace CFBundleName -string "$NAME" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
+			plutil -replace CFBundleDisplayName -string "$NAME" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
+			plutil -replace CFBundleExecutable -string "$EXE_NAME" "$APP_DIR/Contents/Info.plist" 2>/dev/null || true
+			for type in "" " (GPU)" " (Plugin)" " (Renderer)"; do
+				src="$APP_DIR/Contents/Frameworks/Code - OSS Helper${type}.app"
+				dst="$APP_DIR/Contents/Frameworks/${EXE_NAME} Helper${type}.app"
+				exe_src="Code - OSS Helper${type}"
+				exe_dst="${EXE_NAME} Helper${type}"
+				if [ -d "$src" ] && [ ! -d "$dst" ]; then
+					cp -a "$src" "$dst"
+					if [ -f "$dst/Contents/MacOS/$exe_src" ]; then
+						mv "$dst/Contents/MacOS/$exe_src" "$dst/Contents/MacOS/$exe_dst"
+					fi
+					plutil -replace CFBundleName -string "$exe_dst" "$dst/Contents/Info.plist" 2>/dev/null || true
+					plutil -replace CFBundleExecutable -string "$exe_dst" "$dst/Contents/Info.plist" 2>/dev/null || true
+				fi
+			done
 		fi
 	else
 		NAME=`node -p "require('./product.json').applicationName"`
