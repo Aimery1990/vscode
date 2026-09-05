@@ -17,6 +17,7 @@ import { ICommandService } from '../../../../platform/commands/common/commands.j
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
+import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
@@ -56,6 +57,7 @@ export class AgentsManagerPane extends ViewPane {
 		@IThemeService themeService: IThemeService,
 		@IHoverService hoverService: IHoverService,
 		@INotificationService private readonly notificationService: INotificationService,
+		@IDialogService private readonly dialogService: IDialogService,
 		@IQuickInputService private readonly quickInputService: IQuickInputService,
 		@ICommandService private readonly commandService: ICommandService,
 		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
@@ -343,17 +345,25 @@ export class AgentsManagerPane extends ViewPane {
 		const cardActions = append(cardHeader, $('.card-actions'));
 
 		if (isMissing) {
-			// Repair Action (Wrench 🛠️)
-			const repairBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.tools)));
-			repairBtn.style.fontSize = '13px';
-			repairBtn.style.color = '#eab308';
-			repairBtn.style.cursor = 'pointer';
-			repairBtn.style.opacity = '0.9';
-			repairBtn.title = 'Repair Agent (Re-create missing 4-MD files from persistence engine)';
-			repairBtn.onclick = async (e) => {
+			// Remove Action (Trash 🗑️)
+			const removeBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+			removeBtn.style.fontSize = '12px';
+			removeBtn.style.color = '#f43f5e';
+			removeBtn.style.cursor = 'pointer';
+			removeBtn.style.opacity = '0.9';
+			removeBtn.title = 'Remove Missing Agent Record from List';
+			removeBtn.onclick = async (e) => {
 				e.stopPropagation();
-				await this.agentsManagerService.repairAgent(agent.id);
-				this.notificationService.info(`Agent '${agent.name}' files repaired & restored successfully via EntityPersistenceService!`);
+				const confirm = await this.dialogService.confirm({
+					type: 'warning',
+					message: `Remove missing agent '${agent.name}'?`,
+					detail: `The physical folder for this agent no longer exists on disk. This action will remove its record from your agent list.`,
+					primaryButton: 'Remove'
+				});
+				if (confirm.confirmed) {
+					await this.agentsManagerService.removeAgent(agent.id);
+					this.notificationService.info(`Agent '${agent.name}' removed from list.`);
+				}
 			};
 		} else {
 			// Assign Task Action
@@ -387,7 +397,7 @@ export class AgentsManagerPane extends ViewPane {
 		const statusDot = append(cardActions, $('span.status-dot'));
 		if (isMissing) {
 			statusDot.style.background = '#ef4444';
-			statusDot.title = 'Warning: Agent files missing or damaged on disk!';
+			statusDot.title = 'Warning: Agent folder not found on disk';
 		} else {
 			statusDot.style.background = agent.status === 'busy' ? '#eab308' : agent.status === 'offline' ? '#6b7280' : '#22c55e';
 			statusDot.title = `Status: ${agent.status}`;
@@ -401,9 +411,17 @@ export class AgentsManagerPane extends ViewPane {
 			const actions: Action[] = [];
 
 			if (isMissing) {
-				actions.push(new Action('repair_agent', 'Repair Agent (🛠️)', ThemeIcon.asClassName(Codicon.tools), true, async () => {
-					await this.agentsManagerService.repairAgent(agent.id);
-					this.notificationService.info(`Agent '${agent.name}' files repaired & restored successfully via EntityPersistenceService!`);
+				actions.push(new Action('delete_missing_agent', 'Remove Missing Agent Record (🗑️)', ThemeIcon.asClassName(Codicon.trash), true, async () => {
+					const confirm = await this.dialogService.confirm({
+						type: 'warning',
+						message: `Remove missing agent '${agent.name}'?`,
+						detail: `The physical folder for this agent no longer exists on disk. This action will remove its record from your agent list.`,
+						primaryButton: 'Remove'
+					});
+					if (confirm.confirmed) {
+						await this.agentsManagerService.removeAgent(agent.id);
+						this.notificationService.info(`Agent '${agent.name}' removed from list.`);
+					}
 				}));
 			} else {
 				actions.push(new Action('open_agent_details', 'Open Agent Details (🤖)', ThemeIcon.asClassName(Codicon.layoutSidebarRightOff), true, async () => {
@@ -411,6 +429,8 @@ export class AgentsManagerPane extends ViewPane {
 						const folderUri = await this.agentsManagerService.ensureAgentFolder(agent.id);
 						if (folderUri) {
 							await this.editorService.openEditor(new EntityDetailEditorInput(folderUri, agent.name), { pinned: true });
+						} else {
+							this.notificationService.warn(`Cannot open agent details: folder not found on disk.`);
 						}
 					} catch (err) {
 						this.notificationService.error(`Failed to open agent details: ${err}`);
@@ -434,12 +454,12 @@ export class AgentsManagerPane extends ViewPane {
 				actions.push(new Action('edit_agent', 'Edit Configuration (✏️)', ThemeIcon.asClassName(Codicon.edit), true, async () => {
 					this.instantiationService.invokeFunction(accessor => createOrEditAgentDialog(accessor, agent));
 				}));
-			}
 
-			actions.push(new Action('delete_agent', 'Delete Agent (🗑️)', ThemeIcon.asClassName(Codicon.trash), true, async () => {
-				await this.agentsManagerService.removeAgent(agent.id);
-				this.notificationService.info(`Agent '${agent.name}' removed.`);
-			}));
+				actions.push(new Action('delete_agent', 'Delete Agent (🗑️)', ThemeIcon.asClassName(Codicon.trash), true, async () => {
+					await this.agentsManagerService.removeAgent(agent.id);
+					this.notificationService.info(`Agent '${agent.name}' removed.`);
+				}));
+			}
 
 			this.contextMenuService.showContextMenu({
 				getAnchor: () => ({ x: e.clientX, y: e.clientY }),
@@ -450,7 +470,7 @@ export class AgentsManagerPane extends ViewPane {
 		// Role Subtitle
 		const roleRow = append(card, $('.role-row'));
 		if (isMissing) {
-			roleRow.textContent = `⚠️ Files missing or damaged. Click Repair (🛠️) to restore.`;
+			roleRow.textContent = `⚠️ Files missing on disk. Click 🗑️ to remove record.`;
 			roleRow.style.color = '#f43f5e';
 		} else if (agent.role && !agent.role.endsWith('Agent')) {
 			roleRow.textContent = agent.role;

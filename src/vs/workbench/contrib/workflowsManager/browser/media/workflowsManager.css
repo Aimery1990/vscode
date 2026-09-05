@@ -209,10 +209,6 @@
 	color: #ef4444;
 }
 
-.workflow-item-card .action-btn.repair:hover {
-	color: #fbbf24;
-}
-
 .workflows-empty-placeholder {
 	display: flex;
 	flex-direction: column;

@@ -275,53 +275,6 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 		}
 	}
 
-	async repairAgent(id: string): Promise<void> {
-		const agent = await this.getAgent(id);
-		if (!agent) {
-			return;
-		}
-
-		let folderUri: URI | undefined;
-		if (agent.folderPath) {
-			folderUri = URI.file(agent.folderPath);
-		} else {
-			const activeFolder = this.workspaceContextService.getWorkspace().folders[0];
-			if (activeFolder) {
-				const cleanName = agent.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
-				folderUri = URI.joinPath(activeFolder.uri, `agent_${cleanName}`);
-			}
-		}
-
-		if (folderUri) {
-			try {
-				if (!await this.fileService.exists(folderUri)) {
-					await this.fileService.createFolder(folderUri);
-				}
-				await this.entityPersistenceService.writeEntity4MDFiles({
-					entityUri: folderUri.toString(),
-					entityName: agent.name,
-					entityType: 'agent',
-					ownerAccount: this.activeUserEmail || 'unauthenticated',
-					description: agent.description || agent.role,
-					role: agent.role,
-					modelName: agent.model?.modelId || 'gemini-1.5-flash',
-					systemPrompt: agent.systemPrompt,
-					avatarIcon: agent.avatarIcon || 'robot',
-					scopeType: agent.scopeType || 'workspace',
-					scopeId: agent.scopeId || '',
-					scopeName: agent.scopeName || 'Workspace'
-				}, folderUri, false);
-				agent.folderPath = folderUri.fsPath;
-				agent.status = 'idle';
-				await this.updateAgent(agent);
-			} catch (err) {
-				console.error('Failed to repair agent files:', err);
-			}
-		}
-
-		this._onDidChangeAgents.fire();
-	}
-
 	async ensureAgentFolder(id: string): Promise<URI | undefined> {
 		const agent = await this.getAgent(id);
 		if (!agent) {
@@ -329,14 +282,6 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 		}
 		if (agent.folderPath) {
 			const uri = URI.file(agent.folderPath);
-			if (await this.fileService.exists(uri)) {
-				return uri;
-			}
-		}
-		await this.repairAgent(id);
-		const refreshed = await this.getAgent(id);
-		if (refreshed?.folderPath) {
-			const uri = URI.file(refreshed.folderPath);
 			if (await this.fileService.exists(uri)) {
 				return uri;
 			}

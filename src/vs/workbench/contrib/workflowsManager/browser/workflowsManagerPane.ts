@@ -263,6 +263,10 @@ export class WorkflowsManagerPane extends ViewPane {
 
 		card.style.cursor = 'pointer';
 		card.onclick = async () => {
+			if (workflow.isMissing) {
+				this.notificationService.warn(`Workflow '${workflow.name}' cannot be opened: folder not found on disk.`);
+				return;
+			}
 			const folderUri = URI.parse(workflow.id);
 			await this.editorService.openEditor(new WorkflowEditorInput(folderUri, workflow.name), { pinned: true });
 		};
@@ -273,24 +277,48 @@ export class WorkflowsManagerPane extends ViewPane {
 
 		const icon = append(left, $('span' + ThemeIcon.asCSSSelector(Codicon.githubAction)));
 		icon.style.fontSize = '13px';
-		icon.style.color = '#0d9488';
+		icon.style.color = workflow.isMissing ? '#ef4444' : '#0d9488';
 
 		const title = append(left, $('.card-title'));
 		title.textContent = workflow.name;
 
-		// Header Actions (Play/Run button)
+		// Header Actions
 		const cardActions = append(header, $('.card-actions'));
 
-		const runBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
-		runBtn.style.fontSize = '12px';
-		runBtn.style.color = '#22c55e';
-		runBtn.style.cursor = 'pointer';
-		runBtn.style.opacity = '0.85';
-		runBtn.title = 'Run Workflow';
-		runBtn.onclick = (e) => {
-			e.stopPropagation();
-			this.notificationService.info(`Workflow '${workflow.name}' run started successfully!`);
-		};
+		if (workflow.isMissing) {
+			const removeBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+			removeBtn.style.fontSize = '12px';
+			removeBtn.style.color = '#f43f5e';
+			removeBtn.style.cursor = 'pointer';
+			removeBtn.style.opacity = '0.9';
+			removeBtn.title = 'Remove Missing Workflow from List';
+			removeBtn.onclick = async (e) => {
+				e.stopPropagation();
+				const confirm = await this.dialogService.confirm({
+					type: 'warning',
+					message: `Remove missing workflow '${workflow.name}'?`,
+					detail: `The physical folder for this workflow no longer exists on disk. This action will remove its record from your workflows list.`,
+					primaryButton: 'Remove'
+				});
+				if (confirm.confirmed) {
+					const folderUri = URI.parse(workflow.id);
+					await this.workflowsManagerService.removeSavedWorkflow(folderUri);
+					await this.entityPersistenceService.removeSnapshot(folderUri);
+					this.notificationService.info(`Workflow '${workflow.name}' removed from list.`);
+				}
+			};
+		} else {
+			const runBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
+			runBtn.style.fontSize = '12px';
+			runBtn.style.color = '#22c55e';
+			runBtn.style.cursor = 'pointer';
+			runBtn.style.opacity = '0.85';
+			runBtn.title = 'Run Workflow';
+			runBtn.onclick = (e) => {
+				e.stopPropagation();
+				this.notificationService.info(`Workflow '${workflow.name}' run started successfully!`);
+			};
+		}
 
 		// Right Click Context Menu for secondary actions
 		card.oncontextmenu = (e) => {
@@ -300,77 +328,93 @@ export class WorkflowsManagerPane extends ViewPane {
 			const folderUri = URI.parse(workflow.id);
 			const actionsList: Action[] = [];
 
-			// 1. Open Flowchart Editor
-			actionsList.push(new Action('open_workflow', 'Open Flowchart Editor', ThemeIcon.asClassName(Codicon.folderOpened), true, async () => {
-				await this.editorService.openEditor(new WorkflowEditorInput(folderUri, workflow.name), { pinned: true });
-			}));
-
-			// 2. Create Sub-Entity...
-			actionsList.push(new Action('create_sub_entity', 'Create Sub-Entity...', ThemeIcon.asClassName(Codicon.add), true, async () => {
-				interface IWorkspacesExplorerView extends IView {
-					showCreateResourceModal?(target: URI, name: string): void;
-				}
-				const workspacesView = await this.viewsService.openView<IWorkspacesExplorerView>('workbench.workspacesExplorer.mainPane', true);
-				if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
-					workspacesView.showCreateResourceModal(folderUri, workflow.name);
-				}
-			}));
-
-			// 3. Show in Explorer & Reveal in OS
-			actionsList.push(new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {
-				await this.showInExplorer(folderUri);
-			}));
-			actionsList.push(new Action('reveal_in_os', isMacintosh ? 'Reveal in Finder' : 'Reveal in Explorer', ThemeIcon.asClassName(Codicon.folder), true, async () => {
-				try {
-					await this.commandService.executeCommand('revealFileInOS', folderUri);
-				} catch {
-					this.notificationService.warn(`Path does not exist: ${folderUri.fsPath}`);
-				}
-			}));
-
-			// 4. Remove from Workflows
-			actionsList.push(new Action('remove_from_workflows', 'Remove from Workflows', ThemeIcon.asClassName(Codicon.close), true, async () => {
-				const confirm = await this.dialogService.confirm({
-					type: 'warning',
-					message: `Are you sure you want to remove '${workflow.name}' from workflows?`,
-					detail: `This will keep the physical folder intact but rename it to '~${workflow.name}', making it ignored in the explorer and workflows list.`,
-					primaryButton: 'Remove from Workflows'
-				});
-				if (confirm.confirmed) {
-					try {
-						const parentDir = dirname(folderUri);
-						const newName = '~' + workflow.name;
-						const newUri = URI.joinPath(parentDir, newName);
-
-						if (await this.fileService.exists(folderUri)) {
-							await this.fileService.move(folderUri, newUri, true);
-						}
+			if (workflow.isMissing) {
+				actionsList.push(new Action('remove_missing_workflow', 'Remove Missing Workflow from List (🗑️)', ThemeIcon.asClassName(Codicon.trash), true, async () => {
+					const confirm = await this.dialogService.confirm({
+						type: 'warning',
+						message: `Remove missing workflow '${workflow.name}'?`,
+						detail: `The physical folder for this workflow no longer exists on disk. This action will remove its record from your workflows list.`,
+						primaryButton: 'Remove'
+					});
+					if (confirm.confirmed) {
 						await this.workflowsManagerService.removeSavedWorkflow(folderUri);
 						await this.entityPersistenceService.removeSnapshot(folderUri);
-						this.notificationService.info(`Removed '${workflow.name}' from workflows.`);
-					} catch (err) {
-						this.notificationService.error(`Failed to remove from workflows: ${err}`);
+						this.notificationService.info(`Workflow '${workflow.name}' removed from list.`);
 					}
-				}
-			}));
+				}));
+			} else {
+				// 1. Open Flowchart Editor
+				actionsList.push(new Action('open_workflow', 'Open Flowchart Editor', ThemeIcon.asClassName(Codicon.folderOpened), true, async () => {
+					await this.editorService.openEditor(new WorkflowEditorInput(folderUri, workflow.name), { pinned: true });
+				}));
 
-			// 5. Move to Trash...
-			actionsList.push(new Action('move_to_trash', 'Move to Trash...', ThemeIcon.asClassName(Codicon.trash), true, async () => {
-				const confirm = await this.dialogService.confirm({
-					type: 'warning',
-					message: `Are you sure you want to move '${workflow.name}' to trash?`,
-					detail: `This will move '${folderUri.fsPath}' to OS Trash if it exists on disk.`,
-					primaryButton: 'Move to Trash'
-				});
-				if (confirm.confirmed) {
-					try {
-						await this.workflowsManagerService.deleteWorkflow(workflow.id);
-						this.notificationService.info(`Moved '${workflow.name}' to trash.`);
-					} catch (err) {
-						this.notificationService.error(`Failed to delete workflow: ${err}`);
+				// 2. Create Sub-Entity...
+				actionsList.push(new Action('create_sub_entity', 'Create Sub-Entity...', ThemeIcon.asClassName(Codicon.add), true, async () => {
+					interface IWorkspacesExplorerView extends IView {
+						showCreateResourceModal?(target: URI, name: string): void;
 					}
-				}
-			}));
+					const workspacesView = await this.viewsService.openView<IWorkspacesExplorerView>('workbench.workspacesExplorer.mainPane', true);
+					if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
+						workspacesView.showCreateResourceModal(folderUri, workflow.name);
+					}
+				}));
+
+				// 3. Show in Explorer & Reveal in OS
+				actionsList.push(new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {
+					await this.showInExplorer(folderUri);
+				}));
+				actionsList.push(new Action('reveal_in_os', isMacintosh ? 'Reveal in Finder' : 'Reveal in Explorer', ThemeIcon.asClassName(Codicon.folder), true, async () => {
+					try {
+						await this.commandService.executeCommand('revealFileInOS', folderUri);
+					} catch {
+						this.notificationService.warn(`Path does not exist: ${folderUri.fsPath}`);
+					}
+				}));
+
+				// 4. Remove from Workflows
+				actionsList.push(new Action('remove_from_workflows', 'Remove from Workflows', ThemeIcon.asClassName(Codicon.close), true, async () => {
+					const confirm = await this.dialogService.confirm({
+						type: 'warning',
+						message: `Are you sure you want to remove '${workflow.name}' from workflows?`,
+						detail: `This will keep the physical folder intact but rename it to '~${workflow.name}', making it ignored in the explorer and workflows list.`,
+						primaryButton: 'Remove from Workflows'
+					});
+					if (confirm.confirmed) {
+						try {
+							const parentDir = dirname(folderUri);
+							const newName = '~' + workflow.name;
+							const newUri = URI.joinPath(parentDir, newName);
+
+							if (await this.fileService.exists(folderUri)) {
+								await this.fileService.move(folderUri, newUri, true);
+							}
+							await this.workflowsManagerService.removeSavedWorkflow(folderUri);
+							await this.entityPersistenceService.removeSnapshot(folderUri);
+							this.notificationService.info(`Removed '${workflow.name}' from workflows.`);
+						} catch (err) {
+							this.notificationService.error(`Failed to remove from workflows: ${err}`);
+						}
+					}
+				}));
+
+				// 5. Move to Trash...
+				actionsList.push(new Action('move_to_trash', 'Move to Trash...', ThemeIcon.asClassName(Codicon.trash), true, async () => {
+					const confirm = await this.dialogService.confirm({
+						type: 'warning',
+						message: `Are you sure you want to move '${workflow.name}' to trash?`,
+						detail: `This will move '${folderUri.fsPath}' to OS Trash if it exists on disk.`,
+						primaryButton: 'Move to Trash'
+					});
+					if (confirm.confirmed) {
+						try {
+							await this.workflowsManagerService.deleteWorkflow(workflow.id);
+							this.notificationService.info(`Moved '${workflow.name}' to trash.`);
+						} catch (err) {
+							this.notificationService.error(`Failed to delete workflow: ${err}`);
+						}
+					}
+				}));
+			}
 
 			this.contextMenuService.showContextMenu({
 				getAnchor: () => ({ x: e.clientX, y: e.clientY }),
@@ -384,8 +428,7 @@ export class WorkflowsManagerPane extends ViewPane {
 			desc.textContent = workflow.description;
 		} else if (workflow.isMissing) {
 			const desc = append(card, $('.card-description', { style: 'color: #f43f5e; font-weight: 500;' }));
-			// allow-any-unicode-next-line
-			desc.textContent = `⚠️ Files missing or damaged. Click Repair (🛠️) to restore.`;
+			desc.textContent = `⚠️ Files missing on disk. Click 🗑️ to remove record.`;
 		}
 
 		// Footer Row
