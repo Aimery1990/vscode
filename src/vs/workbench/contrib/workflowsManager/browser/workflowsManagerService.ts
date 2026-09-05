@@ -54,10 +54,14 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 		this._register(this.editorService.onDidActiveEditorChange(() => {
 			const active = this.editorService.activeEditor;
 			if (active instanceof WorkflowEditorInput) {
-				this.saveWorkflow({
-					uri: active.workflowUri.toString(),
-					name: active.workflowName
-				});
+				const norm = this.normalizeUriString(active.workflowUri);
+				const saved = this.getSavedWorkflows();
+				if (!saved.some(w => this.normalizeUriString(w.uri) === norm)) {
+					this.saveWorkflow({
+						uri: active.workflowUri.toString(),
+						name: active.workflowName
+					});
+				}
 			}
 		}));
 	}
@@ -76,7 +80,15 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 	}
 
 	private getSavedWorkflows(): ISavedWorkflowRecord[] {
-		const raw = this.storageService.get(SAVED_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE, '[]');
+		const raw = this.storageService.get(SAVED_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE, '');
+		if (!raw) {
+			return [{
+				uri: URI.file('/Users/aimery/Documents/Find_Jobs_WSP/Find-Jobs/Find-Remote-Jobs-WFL').toString(),
+				name: 'Find-Remote-Jobs-WFL',
+				description: 'Workflow coordinates automated execution nodes and AI pipelines.',
+				belongsToWorkspaceName: 'Find_Jobs_WSP'
+			}];
+		}
 		try {
 			return JSON.parse(raw) as ISavedWorkflowRecord[];
 		} catch {
@@ -98,8 +110,14 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 		const saved = this.getSavedWorkflows();
 		const existingIdx = saved.findIndex(w => this.normalizeUriString(w.uri) === normUriStr);
 		if (existingIdx >= 0) {
+			const existing = saved[existingIdx];
+			if (existing.name === record.name &&
+				existing.belongsToWorkspaceUri === record.belongsToWorkspaceUri &&
+				existing.belongsToWorkspaceName === record.belongsToWorkspaceName) {
+				return;
+			}
 			saved[existingIdx] = {
-				...saved[existingIdx],
+				...existing,
 				...record,
 				uri: record.uri
 			};
@@ -153,16 +171,11 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 			}
 		};
 
-		// 1. Check currently active/open editors (actively viewed workflows)
+		// 1. Check currently active/open editors (actively viewed workflows) - READ ONLY, NO STATE MUTATION
 		const openEditors = this.editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE);
 		for (const editor of openEditors) {
 			if (editor instanceof WorkflowEditorInput) {
 				addWorkflow(editor.workflowUri, editor.workflowName);
-				// Automatically persist it to saved list
-				this.saveWorkflow({
-					uri: editor.workflowUri.toString(),
-					name: editor.workflowName
-				});
 			}
 		}
 
@@ -181,24 +194,8 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 			}
 		}
 
-		// 3. Check user saved/opened workflows from StorageService
+		// 3. Check user saved/opened workflows from StorageService - READ ONLY, NO STATE MUTATION
 		const savedList = this.getSavedWorkflows();
-
-		// Seed initial workflow if not present (Find-Remote-Jobs-WFL that user previously worked on)
-		if (savedList.length === 0 || !savedList.some(w => this.normalizeUriString(w.uri).includes('find-remote-jobs-wfl'))) {
-			const defaultUserWorkflowUri = URI.file('/Users/aimery/Documents/Find_Jobs_WSP/Find-Jobs/Find-Remote-Jobs-WFL');
-			if (await this.fileService.exists(defaultUserWorkflowUri)) {
-				const seedRecord: ISavedWorkflowRecord = {
-					uri: defaultUserWorkflowUri.toString(),
-					name: 'Find-Remote-Jobs-WFL',
-					description: 'Workflow coordinates automated execution nodes and AI pipelines.',
-					belongsToWorkspaceName: 'Find_Jobs_WSP'
-				};
-				savedList.push(seedRecord);
-				this.storageService.store(SAVED_WORKFLOWS_STORAGE_KEY, JSON.stringify(savedList), StorageScope.PROFILE, StorageTarget.USER);
-			}
-		}
-
 		for (const item of savedList) {
 			try {
 				const uri = URI.parse(item.uri);

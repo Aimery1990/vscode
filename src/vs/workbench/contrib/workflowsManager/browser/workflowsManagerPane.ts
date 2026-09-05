@@ -93,10 +93,6 @@ export class WorkflowsManagerPane extends ViewPane {
 		}));
 
 		this.updatePaneTitle();
-		setTimeout(() => {
-			this.updatePaneTitle();
-			this.renderContent();
-		}, 300);
 	}
 
 	private async showInExplorer(resourceUri: URI): Promise<void> {
@@ -167,12 +163,12 @@ export class WorkflowsManagerPane extends ViewPane {
 		}
 
 		const currentVersion = ++this.renderVersion;
-		clearNode(this.containerEl);
-
 		const all = await this.workflowsManagerService.getWorkflows();
 		if (this.renderVersion !== currentVersion || !this.containerEl) {
 			return;
 		}
+
+		clearNode(this.containerEl);
 
 		const targetScope = this.getTargetScope();
 		let scoped = all;
