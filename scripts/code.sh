@@ -20,9 +20,15 @@ function code() {
 		NAME=`node -p "require('./product.json').nameLong"`
 		EXE_NAME=`node -p "require('./product.json').nameShort"`
 		CODE="./.build/electron/$NAME.app/Contents/MacOS/$EXE_NAME"
+		if [ ! -f "$CODE" ] && [ -f "./.build/electron/Code - OSS.app/Contents/MacOS/Code - OSS" ]; then
+			CODE="./.build/electron/Code - OSS.app/Contents/MacOS/Code - OSS"
+		fi
 	else
 		NAME=`node -p "require('./product.json').applicationName"`
 		CODE=".build/electron/$NAME"
+		if [ ! -f "$CODE" ] && [ -f ".build/electron/code-oss" ]; then
+			CODE=".build/electron/code-oss"
+		fi
 	fi
 
 	# Get electron, compile, built-in extensions
