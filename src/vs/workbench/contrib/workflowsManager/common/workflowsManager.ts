@@ -7,8 +7,17 @@ import { createDecorator } from '../../../../platform/instantiation/common/insta
 import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 
+export interface ISavedWorkflowRecord {
+	uri: string; // Workflow directory URI string
+	name: string;
+	description?: string;
+	belongsToWorkspaceUri?: string;
+	belongsToWorkspaceName?: string;
+	createdAt?: string;
+}
+
 export interface IWorkflowItem {
-	id: string; // 工作流实体目录的 URI 字符串
+	id: string; // Workflow directory URI string
 	name: string;
 	description?: string;
 	createdAt: string;
@@ -29,5 +38,7 @@ export interface IWorkflowsManagerService {
 	notifyPaneExpanded(paneId: string): void;
 	getWorkflows(): Promise<IWorkflowItem[]>;
 	getWorkflowsByWorkspace(workspaceUri: URI): Promise<IWorkflowItem[]>;
+	saveWorkflow(record: ISavedWorkflowRecord): Promise<void>;
+	removeSavedWorkflow(uri: URI | string): Promise<void>;
 	deleteWorkflow(id: string): Promise<void>;
 }

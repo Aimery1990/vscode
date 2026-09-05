@@ -10,7 +10,7 @@ import { IKeybindingService } from '../../../../platform/keybinding/common/keybi
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
-import { IViewDescriptorService } from '../../../common/views.js';
+import { IViewDescriptorService, IView } from '../../../common/views.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
@@ -311,7 +311,10 @@ export class WorkflowsManagerPane extends ViewPane {
 
 			// 2. Create Sub-Entity...
 			actionsList.push(new Action('create_sub_entity', 'Create Sub-Entity...', ThemeIcon.asClassName(Codicon.add), true, async () => {
-				const workspacesView = await this.viewsService.openView<{ showCreateResourceModal?: (u: URI, n: string) => void }>('workbench.workspacesExplorer.mainPane', true);
+				interface IWorkspacesExplorerView extends IView {
+					showCreateResourceModal?(target: URI, name: string): void;
+				}
+				const workspacesView = await this.viewsService.openView<IWorkspacesExplorerView>('workbench.workspacesExplorer.mainPane', true);
 				if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
 					workspacesView.showCreateResourceModal(folderUri, workflow.name);
 				}
@@ -346,6 +349,7 @@ export class WorkflowsManagerPane extends ViewPane {
 						if (await this.fileService.exists(folderUri)) {
 							await this.fileService.move(folderUri, newUri, true);
 						}
+						await this.workflowsManagerService.removeSavedWorkflow(folderUri);
 						await this.entityPersistenceService.removeSnapshot(folderUri);
 						this.notificationService.info(`Removed '${workflow.name}' from workflows.`);
 					} catch (err) {

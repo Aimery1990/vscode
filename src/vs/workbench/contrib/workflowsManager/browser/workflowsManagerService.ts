@@ -7,9 +7,16 @@ import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
-import { IWorkflowItem, IWorkflowsManagerService } from '../common/workflowsManager.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { EditorsOrder } from '../../../common/editor.js';
+import { IWorkflowItem, ISavedWorkflowRecord, IWorkflowsManagerService } from '../common/workflowsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
+import { WorkflowEditorInput } from './workflowEditorInput.js';
+
+const SAVED_WORKFLOWS_STORAGE_KEY = 'workflowsManager.savedWorkflows';
+const REMOVED_WORKFLOWS_STORAGE_KEY = 'workflowsManager.removedWorkflows';
 
 export class WorkflowsManagerService extends Disposable implements IWorkflowsManagerService {
 	declare readonly _serviceBrand: undefined;
@@ -22,10 +29,18 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 
 	constructor(
 		@IFileService private readonly fileService: IFileService,
+		@IStorageService private readonly storageService: IStorageService,
+		@IEditorService private readonly editorService: IEditorService,
 		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
 		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService
 	) {
 		super();
+
+		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
+			if (e.key === SAVED_WORKFLOWS_STORAGE_KEY || e.key === REMOVED_WORKFLOWS_STORAGE_KEY) {
+				this._onDidChangeWorkflows.fire();
+			}
+		}));
 
 		this._register(this.entityPersistenceService.onDidChangeSnapshots(() => {
 			this._onDidChangeWorkflows.fire();
@@ -34,25 +49,103 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 		this._register(this.workspacesExplorerService.onDidChangeWorkspaces(() => {
 			this._onDidChangeWorkflows.fire();
 		}));
+
+		// Auto-track workflows when opened in editor (active / viewed workflows)
+		this._register(this.editorService.onDidActiveEditorChange(() => {
+			const active = this.editorService.activeEditor;
+			if (active instanceof WorkflowEditorInput) {
+				this.saveWorkflow({
+					uri: active.workflowUri.toString(),
+					name: active.workflowName
+				});
+			}
+		}));
 	}
 
 	notifyPaneExpanded(paneId: string): void {
 		this._onDidExpandPane.fire(paneId);
 	}
 
+	private normalizeUriString(uri: URI | string): string {
+		const str = typeof uri === 'string' ? uri : uri.toString();
+		try {
+			return decodeURIComponent(str).replace(/\/+$/, '');
+		} catch {
+			return str.replace(/\/+$/, '');
+		}
+	}
+
+	private getSavedWorkflows(): ISavedWorkflowRecord[] {
+		const raw = this.storageService.get(SAVED_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE, '[]');
+		try {
+			return JSON.parse(raw) as ISavedWorkflowRecord[];
+		} catch {
+			return [];
+		}
+	}
+
+	private getRemovedWorkflowUris(): string[] {
+		const raw = this.storageService.get(REMOVED_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE, '[]');
+		try {
+			return (JSON.parse(raw) as string[]).map(u => this.normalizeUriString(u));
+		} catch {
+			return [];
+		}
+	}
+
+	async saveWorkflow(record: ISavedWorkflowRecord): Promise<void> {
+		const normUriStr = this.normalizeUriString(record.uri);
+		const saved = this.getSavedWorkflows();
+		const existingIdx = saved.findIndex(w => this.normalizeUriString(w.uri) === normUriStr);
+		if (existingIdx >= 0) {
+			saved[existingIdx] = {
+				...saved[existingIdx],
+				...record,
+				uri: record.uri
+			};
+		} else {
+			saved.push(record);
+		}
+
+		// Also remove from removed list if user reopened it
+		const removed = this.getRemovedWorkflowUris().filter(u => u !== normUriStr);
+		this.storageService.store(REMOVED_WORKFLOWS_STORAGE_KEY, JSON.stringify(removed), StorageScope.PROFILE, StorageTarget.USER);
+
+		this.storageService.store(SAVED_WORKFLOWS_STORAGE_KEY, JSON.stringify(saved), StorageScope.PROFILE, StorageTarget.USER);
+		this._onDidChangeWorkflows.fire();
+	}
+
+	async removeSavedWorkflow(uri: URI | string): Promise<void> {
+		const normUriStr = this.normalizeUriString(uri);
+		const saved = this.getSavedWorkflows().filter(w => this.normalizeUriString(w.uri) !== normUriStr);
+		this.storageService.store(SAVED_WORKFLOWS_STORAGE_KEY, JSON.stringify(saved), StorageScope.PROFILE, StorageTarget.USER);
+
+		const removed = this.getRemovedWorkflowUris();
+		if (!removed.includes(normUriStr)) {
+			removed.push(normUriStr);
+			this.storageService.store(REMOVED_WORKFLOWS_STORAGE_KEY, JSON.stringify(removed), StorageScope.PROFILE, StorageTarget.USER);
+		}
+
+		this._onDidChangeWorkflows.fire();
+	}
+
 	async getWorkflows(): Promise<IWorkflowItem[]> {
-		const workspaces = await this.workspacesExplorerService.getWorkspaces();
 		const workflows: IWorkflowItem[] = [];
 		const seenUris = new Set<string>();
+		const removedUris = new Set(this.getRemovedWorkflowUris());
 
-		const addWorkflow = (uri: URI, name: string, wsUri?: string, wsName?: string) => {
-			const norm = uri.toString().toLowerCase();
+		const addWorkflow = (uri: URI, name: string, description?: string, createdAt?: string, wsUri?: string, wsName?: string) => {
+			const norm = this.normalizeUriString(uri).toLowerCase();
+			if (removedUris.has(norm)) {
+				return;
+			}
 			if (!seenUris.has(norm)) {
 				seenUris.add(norm);
 				workflows.push({
 					id: uri.toString(),
 					name,
-					createdAt: '',
+					description,
+					createdAt: createdAt || '',
 					belongsToWorkspaceUri: wsUri || '',
 					belongsToWorkspaceName: wsName || '',
 					isMissing: false
@@ -60,52 +153,58 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 			}
 		};
 
-		// 1. Recursive scan across all workspaces to discover nested workflows
-		const scanRecursively = async (folderUri: URI, wsUri: URI, wsName: string, depth = 0) => {
-			if (depth > 4) {
-				return;
+		// 1. Check currently active/open editors (actively viewed workflows)
+		const openEditors = this.editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE);
+		for (const editor of openEditors) {
+			if (editor instanceof WorkflowEditorInput) {
+				addWorkflow(editor.workflowUri, editor.workflowName);
+				// Automatically persist it to saved list
+				this.saveWorkflow({
+					uri: editor.workflowUri.toString(),
+					name: editor.workflowName
+				});
 			}
+		}
+
+		// 2. Check direct workflows in currently open workspaces (direct children only)
+		const workspaces = await this.workspacesExplorerService.getWorkspaces();
+		for (const ws of workspaces) {
 			try {
-				const children = await this.workspacesExplorerService.scanWorkspaceChildren(folderUri);
+				const children = await this.workspacesExplorerService.scanWorkspaceChildren(ws.uri);
 				for (const child of children) {
 					if (child.type === 'workflow') {
-						addWorkflow(child.uri, child.name, wsUri.toString(), wsName);
-					} else if (child.type === 'folder' || child.type === 'job' || child.type === 'project' || child.type === 'task') {
-						await scanRecursively(child.uri, wsUri, wsName, depth + 1);
+						addWorkflow(child.uri, child.name, undefined, undefined, ws.uri.toString(), ws.name);
 					}
 				}
 			} catch {
 				// ignore
 			}
-		};
-
-		for (const ws of workspaces) {
-			await scanRecursively(ws.uri, ws.uri, ws.name, 0);
 		}
 
-		// 2. Discover workflows in entityPersistenceService snapshots
-		const snapshots = this.entityPersistenceService.getAllSnapshots();
-		for (const snap of snapshots) {
-			if (snap.entityType === 'workflow') {
-				try {
-					const uri = URI.parse(snap.entityUri);
-					addWorkflow(uri, snap.entityName);
-				} catch {
-					// ignore
-				}
+		// 3. Check user saved/opened workflows from StorageService
+		const savedList = this.getSavedWorkflows();
+
+		// Seed initial workflow if not present (Find-Remote-Jobs-WFL that user previously worked on)
+		if (savedList.length === 0 || !savedList.some(w => this.normalizeUriString(w.uri).includes('find-remote-jobs-wfl'))) {
+			const defaultUserWorkflowUri = URI.file('/Users/aimery/Documents/Find_Jobs_WSP/Find-Jobs/Find-Remote-Jobs-WFL');
+			if (await this.fileService.exists(defaultUserWorkflowUri)) {
+				const seedRecord: ISavedWorkflowRecord = {
+					uri: defaultUserWorkflowUri.toString(),
+					name: 'Find-Remote-Jobs-WFL',
+					description: 'Workflow coordinates automated execution nodes and AI pipelines.',
+					belongsToWorkspaceName: 'Find_Jobs_WSP'
+				};
+				savedList.push(seedRecord);
+				this.storageService.store(SAVED_WORKFLOWS_STORAGE_KEY, JSON.stringify(savedList), StorageScope.PROFILE, StorageTarget.USER);
 			}
 		}
 
-		// 3. Discover workflows in ~/Documents/workflows and ~/Documents/Find_Jobs_WSP if present
-		const extraPaths = [
-			'/Users/aimery/Documents/workflows',
-			'/Users/aimery/Documents/Find_Jobs_WSP'
-		];
-		for (const p of extraPaths) {
+		for (const item of savedList) {
 			try {
-				const dirUri = URI.file(p);
-				if (await this.fileService.exists(dirUri)) {
-					await scanRecursively(dirUri, dirUri, p.split('/').pop() || 'Workflows', 0);
+				const uri = URI.parse(item.uri);
+				const exists = await this.fileService.exists(uri);
+				if (exists) {
+					addWorkflow(uri, item.name, item.description, item.createdAt, item.belongsToWorkspaceUri, item.belongsToWorkspaceName);
 				}
 			} catch {
 				// ignore
@@ -123,14 +222,8 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 
 	async deleteWorkflow(id: string): Promise<void> {
 		const uri = URI.parse(id);
+		await this.removeSavedWorkflow(uri);
 		await this.entityPersistenceService.removeSnapshot(uri);
-		try {
-			if (await this.fileService.exists(uri)) {
-				await this.fileService.del(uri, { recursive: true, useTrash: true });
-			}
-		} catch {
-			// ignore cleanup error
-		}
 		this._onDidChangeWorkflows.fire();
 	}
 }

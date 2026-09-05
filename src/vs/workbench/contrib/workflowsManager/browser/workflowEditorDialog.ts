@@ -9,9 +9,10 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
+import { IWorkflowsManagerService } from '../common/workflowsManager.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { URI } from '../../../../base/common/uri.js';
-import { $, append } from '../../../../base/browser/dom.js';
+import { $, append, mainWindow } from '../../../../base/browser/dom.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
@@ -73,6 +74,8 @@ async function probeWorkflowDirectory(fileService: IFileService, dirUri: URI): P
 	return { isExisting: false };
 }
 
+let activeWorkflowModalOverlay: HTMLElement | undefined = undefined;
+
 export async function createWorkflowDialog(
 	accessor: ServicesAccessor,
 	defaultTargetFolderUri?: URI
@@ -83,18 +86,20 @@ export async function createWorkflowDialog(
 	const fileDialogService = accessor.get(IFileDialogService);
 	const fileService = accessor.get(IFileService);
 	const entityPersistenceService = accessor.get(IEntityPersistenceService);
+	const workflowsManagerService = accessor.get(IWorkflowsManagerService);
 
 	const folders = workspaceContextService.getWorkspace().folders;
 
 	return new Promise<void>((resolve) => {
 		// 1. Remove any existing modal
-		const existingModal = document.querySelector('.create-workflow-modal-overlay');
-		if (existingModal) {
-			existingModal.remove();
+		if (activeWorkflowModalOverlay) {
+			activeWorkflowModalOverlay.remove();
+			activeWorkflowModalOverlay = undefined;
 		}
 
 		// 2. Create Modal Overlay (Blur backdrop)
-		const overlay = append(document.body, $('.create-workflow-modal-overlay'));
+		const overlay = append(mainWindow.document.body, $('.create-workflow-modal-overlay'));
+		activeWorkflowModalOverlay = overlay;
 		overlay.style.position = 'fixed';
 		overlay.style.top = '0';
 		overlay.style.left = '0';
@@ -111,20 +116,18 @@ export async function createWorkflowDialog(
 
 		// 3. Modal Main Dialog Box
 		const modal = append(overlay, $('.create-workflow-modal-box'));
-		modal.style.width = '100%';
-		modal.style.maxWidth = '540px';
-		modal.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
-		modal.style.border = '1px solid var(--vscode-widget-border, rgba(255, 255, 255, 0.15))';
-		modal.style.borderRadius = '10px';
-		modal.style.padding = '24px 28px';
-		modal.style.boxShadow = '0 20px 48px rgba(0, 0, 0, 0.65)';
+		modal.style.width = '520px';
+		modal.style.maxWidth = '92vw';
+		modal.style.maxHeight = '90vh';
+		modal.style.backgroundColor = 'var(--vscode-editor-background, #1e1e1e)';
+		modal.style.color = 'var(--vscode-editor-foreground, #cccccc)';
+		modal.style.border = '1px solid rgba(255, 255, 255, 0.15)';
+		modal.style.borderRadius = '12px';
+		modal.style.boxShadow = '0 20px 50px rgba(0, 0, 0, 0.6)';
 		modal.style.display = 'flex';
 		modal.style.flexDirection = 'column';
-		modal.style.gap = '16px';
-		modal.style.color = 'var(--vscode-foreground, #cccccc)';
-		modal.style.fontFamily = 'var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif)';
-		modal.style.fontSize = '12px';
-		modal.style.maxHeight = '90vh';
+		modal.style.overflow = 'hidden';
+		modal.style.position = 'relative';
 		modal.style.overflowY = 'auto';
 
 		const closeModal = () => {
@@ -338,6 +341,15 @@ export async function createWorkflowDialog(
 						scopeName: scopeName
 					});
 
+					await workflowsManagerService.saveWorkflow({
+						uri: locationUri.toString(),
+						name: workflowName,
+						description: workflowDesc,
+						belongsToWorkspaceUri: belongsToWsUri,
+						belongsToWorkspaceName: scopeName,
+						createdAt: new Date().toISOString()
+					});
+
 					notificationService.info(`Workflow '${workflowName}' opened and registered successfully!`);
 					closeModal();
 					await editorService.openEditor(new WorkflowEditorInput(locationUri, workflowName), { pinned: true });
@@ -416,6 +428,15 @@ export async function createWorkflowDialog(
 					createdAt: new Date().toISOString(),
 					belongsToWorkspaceUri: belongsToWsUri,
 					scopeName: scopeName
+				});
+
+				await workflowsManagerService.saveWorkflow({
+					uri: targetFolderUri.toString(),
+					name: name,
+					description: description || `Workflow: ${name}`,
+					belongsToWorkspaceUri: belongsToWsUri,
+					belongsToWorkspaceName: scopeName,
+					createdAt: new Date().toISOString()
 				});
 
 				notificationService.info(`Workflow '${name}' created successfully!`);
