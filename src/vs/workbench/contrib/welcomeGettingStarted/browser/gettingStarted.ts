@@ -538,7 +538,7 @@ export class GettingStartedPage extends EditorPane {
 
 	private async openWalkthroughSelector() {
 		const selection = await this.quickInputService.pick(this.gettingStartedCategories
-			.filter(c => this.contextService.contextMatchesRules(c.when))
+			.filter(c => !c.id.toLowerCase().includes('copilot') && this.contextService.contextMatchesRules(c.when))
 			.map(x => ({
 				id: x.id,
 				label: x.title,
@@ -1232,7 +1232,7 @@ export class GettingStartedPage extends EditorPane {
 			if (e.newItems) { rank += 2; }
 			if (e.recencyBonus) { rank += 4 * e.recencyBonus; }
 
-			if (this.getHiddenCategories().has(e.id)) { rank = null; }
+			if (this.getHiddenCategories().has(e.id) || e.id.toLowerCase().includes('copilot')) { rank = null; }
 			return rank;
 		};
 

@@ -500,6 +500,7 @@ export class WalkthroughsService extends Disposable implements IWalkthroughsServ
 			})
 			.filter(category => category.content.type !== 'steps' || category.content.steps.length)
 			.filter(category => category.id !== 'NewWelcomeExperience')
+			.filter(category => !category.id.toLowerCase().includes('copilot'))
 			.map(category => this.resolveWalkthrough(category));
 
 		return categoriesWithCompletion;

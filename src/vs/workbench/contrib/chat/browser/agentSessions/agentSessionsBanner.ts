@@ -6,7 +6,7 @@
 import { $, addDisposableListener } from '../../../../../base/browser/dom.js';
 import { DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { localize } from '../../../../../nls.js';
-import { ICommandService, CommandsRegistry } from '../../../../../platform/commands/common/commands.js';
+import { ICommandService } from '../../../../../platform/commands/common/commands.js';
 import { ITelemetryService } from '../../../../../platform/telemetry/common/telemetry.js';
 import { IChatEntitlementService } from '../../../../services/chat/common/chatEntitlementService.js';
 
