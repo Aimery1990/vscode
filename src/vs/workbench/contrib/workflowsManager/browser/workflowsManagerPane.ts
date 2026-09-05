@@ -75,6 +75,8 @@ export class WorkflowsManagerPane extends ViewPane {
 		this._register(this.onDidChangeBodyVisibility(visible => {
 			if (visible) {
 				this.workflowsManagerService.notifyPaneExpanded(this.id);
+				this.updatePaneTitle();
+				this.renderContent();
 			}
 		}));
 
@@ -83,12 +85,18 @@ export class WorkflowsManagerPane extends ViewPane {
 				if (!this.isExpanded()) {
 					this.setExpanded(true);
 				}
+				this.updatePaneTitle();
+				this.renderContent();
 			} else if (this.isExpanded()) {
 				this.setExpanded(false);
 			}
 		}));
 
 		this.updatePaneTitle();
+		setTimeout(() => {
+			this.updatePaneTitle();
+			this.renderContent();
+		}, 300);
 	}
 
 	private async showInExplorer(resourceUri: URI): Promise<void> {
@@ -179,8 +187,9 @@ export class WorkflowsManagerPane extends ViewPane {
 			}
 		}
 
-		// Update Title
-		this.updatePaneTitle();
+		// Update Title synchronously with scoped items
+		const baseName = targetScope === 'workspace' ? 'Workspace Workflows' : 'All Workflows';
+		this.updateTitle(`${baseName} (${scoped.length})`);
 
 		// Search Filter
 		const filtered = scoped.filter(w => {
@@ -209,10 +218,10 @@ export class WorkflowsManagerPane extends ViewPane {
 
 		if (filtered.length === 0) {
 			const placeholder = append(listBody, $('.workflows-empty-placeholder'));
-			
+
 			const icon = append(placeholder, $('.placeholder-icon' + ThemeIcon.asCSSSelector(Codicon.githubAction)));
 			icon.style.color = '#0d9488';
-			
+
 			const text = append(placeholder, $('.placeholder-text'));
 			text.textContent = this.filterText ? 'No matching workflows found.' : 'No workflows configured yet.';
 
@@ -302,7 +311,7 @@ export class WorkflowsManagerPane extends ViewPane {
 
 			// 2. Create Sub-Entity...
 			actionsList.push(new Action('create_sub_entity', 'Create Sub-Entity...', ThemeIcon.asClassName(Codicon.add), true, async () => {
-				const workspacesView = await this.viewsService.openView<any>('workbench.workspacesExplorer.mainPane', true);
+				const workspacesView = await this.viewsService.openView<{ showCreateResourceModal?: (u: URI, n: string) => void }>('workbench.workspacesExplorer.mainPane', true);
 				if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
 					workspacesView.showCreateResourceModal(folderUri, workflow.name);
 				}
@@ -375,6 +384,7 @@ export class WorkflowsManagerPane extends ViewPane {
 			desc.textContent = workflow.description;
 		} else if (workflow.isMissing) {
 			const desc = append(card, $('.card-description', { style: 'color: #f43f5e; font-weight: 500;' }));
+			// allow-any-unicode-next-line
 			desc.textContent = `⚠️ Files missing or damaged. Click Repair (🛠️) to restore.`;
 		}
 
