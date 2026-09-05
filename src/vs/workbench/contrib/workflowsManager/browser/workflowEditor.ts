@@ -247,6 +247,10 @@ export class WorkflowEditor extends EditorPane {
 	private _varsLastReplaceQuery: string = '';
 	private _varsFindInputEl?: HTMLInputElement;
 	private _varsFindCurrentIndex: number = 0;
+	private _drawerHeight: number = 280;
+	private _isDrawerResizing: boolean = false;
+	private _drawerResizeStartY: number = 0;
+	private _drawerResizeStartHeight: number = 280;
 
 	constructor(
 		group: IEditorGroup,
@@ -278,6 +282,7 @@ export class WorkflowEditor extends EditorPane {
 		this._activeIsItalic = this._storageService.getBoolean('workflowEditor.isItalic', StorageScope.PROFILE, false);
 		this._activeIsUnderline = this._storageService.getBoolean('workflowEditor.isUnderline', StorageScope.PROFILE, false);
 		this._activeIsStrikethrough = this._storageService.getBoolean('workflowEditor.isStrikethrough', StorageScope.PROFILE, false);
+		this._drawerHeight = this._storageService.getNumber('workflowEditor.drawerHeight', StorageScope.PROFILE, 280);
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
@@ -879,6 +884,7 @@ export class WorkflowEditor extends EditorPane {
 		this._isLogDrawerOpen = true;
 		if (this._logDrawerEl) {
 			this._logDrawerEl.style.display = 'flex';
+			this._logDrawerEl.style.height = `${this._drawerHeight}px`;
 			if (this._activeDrawerTab === 'logs') {
 				const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
 				if (activeRun) {
@@ -898,6 +904,7 @@ export class WorkflowEditor extends EditorPane {
 		this._isLogDrawerOpen = true;
 		if (this._logDrawerEl) {
 			this._logDrawerEl.style.display = 'flex';
+			this._logDrawerEl.style.height = `${this._drawerHeight}px`;
 			this._switchDrawerTab(tab, targetNodeId);
 		}
 		if (this._toolbarEl) {
@@ -1081,14 +1088,29 @@ export class WorkflowEditor extends EditorPane {
 		const table = append(this._varsBodyEl, $('table.workflow-vars-table'));
 		const thead = append(table, $('thead'));
 		const headerRow = append(thead, $('tr'));
-		append(headerRow, $('th')).textContent = 'Variable Name';
-		append(headerRow, $('th')).textContent = 'Bound Node';
+		const nameTh = append(headerRow, $('th'));
+		nameTh.textContent = 'Variable Name';
+		nameTh.style.width = '150px';
+
+		const nodeTh = append(headerRow, $('th'));
+		nodeTh.textContent = 'Bound Node';
+		nodeTh.style.width = '130px';
+
 		const initTh = append(headerRow, $('th'));
-		initTh.textContent = 'Initial Value (Python)';
-		initTh.style.width = '140px';
-		append(headerRow, $('th')).textContent = 'References';
-		append(headerRow, $('th')).textContent = 'Runtime Value';
-		append(headerRow, $('th')).textContent = 'Action';
+		initTh.textContent = 'Initial Value';
+		initTh.style.width = '130px';
+
+		const refTh = append(headerRow, $('th'));
+		refTh.textContent = 'References';
+		refTh.style.width = '90px';
+
+		const valTh = append(headerRow, $('th'));
+		valTh.textContent = 'Runtime Value';
+
+		const actTh = append(headerRow, $('th'));
+		actTh.textContent = 'Action';
+		actTh.style.width = '50px';
+		actTh.style.textAlign = 'center';
 
 		const tbody = append(table, $('tbody'));
 		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
@@ -1198,10 +1220,13 @@ export class WorkflowEditor extends EditorPane {
 			const valTd = append(row, $('td'));
 			const runtimeVal = activeRun?.contextVariables ? activeRun.contextVariables[item.variable.name] : undefined;
 			const valBadge = append(valTd, $(`.vars-table-val-badge${runtimeVal === undefined ? '.not-run' : ''}`));
-			valBadge.textContent = runtimeVal !== undefined ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : '(not evaluated)';
+			const valStr = runtimeVal !== undefined ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : '(not evaluated)';
+			valBadge.textContent = valStr;
+			valBadge.title = valStr;
 
 			// 6. Action (Unbind / Delete)
 			const actionTd = append(row, $('td'));
+			actionTd.style.textAlign = 'center';
 			const unbindBtn = append(actionTd, $('.vars-table-action-btn'));
 			unbindBtn.title = `Unbind variable '${item.variable.name}' from '${item.node.label}'`;
 			append(unbindBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
@@ -1571,9 +1596,22 @@ export class WorkflowEditor extends EditorPane {
 	private _renderLogDrawer(parent: HTMLElement): void {
 		const drawer = append(parent, $('.workflow-log-drawer'));
 		this._logDrawerEl = drawer;
+		drawer.style.height = `${this._drawerHeight}px`;
 		if (!this._isLogDrawerOpen) {
 			drawer.style.display = 'none';
 		}
+
+		// Top Resizer Bar (allows dragging up/down to resize bottom panel)
+		const resizer = append(drawer, $('.workflow-log-resizer'));
+		resizer.title = localize('resizeDrawerTooltip', 'Drag up or down to resize bottom panel');
+		resizer.onmousedown = (e: MouseEvent) => {
+			e.preventDefault();
+			e.stopPropagation();
+			this._isDrawerResizing = true;
+			this._drawerResizeStartY = e.clientY;
+			this._drawerResizeStartHeight = drawer.offsetHeight || this._drawerHeight;
+			drawer.classList.add('resizing');
+		};
 
 		// Header Tabs (Logs vs Variables)
 		const header = append(drawer, $('.workflow-log-header'));
@@ -2819,7 +2857,7 @@ export class WorkflowEditor extends EditorPane {
 								const initRow = append(varCard, $('.workflow-var-row'));
 								initRow.style.marginTop = '6px';
 								const initLabel = append(initRow, $('.workflow-var-label'));
-								initLabel.textContent = localize('varInit', 'Initial Value (Python):');
+								initLabel.textContent = localize('varInit', 'Initial Value:');
 								const initInput = append(initRow, $('input.workflow-var-input')) as HTMLInputElement;
 								initInput.style.width = '100%';
 								initInput.style.boxSizing = 'border-box';
@@ -4565,6 +4603,16 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _onMouseMove(e: MouseEvent): void {
+		if (this._isDrawerResizing && this._logDrawerEl) {
+			const dy = this._drawerResizeStartY - e.clientY;
+			const parentHeight = this._logDrawerEl.parentElement?.clientHeight || window.innerHeight;
+			const maxHeight = Math.max(200, parentHeight - 60);
+			const newHeight = Math.min(maxHeight, Math.max(100, this._drawerResizeStartHeight + dy));
+			this._drawerHeight = newHeight;
+			this._logDrawerEl.style.height = `${newHeight}px`;
+			return;
+		}
+
 		if (this._isDraggingLinkLabel) {
 			if (!this._dragLabelHasMoved && Math.hypot(e.clientX - this._dragLabelStartX, e.clientY - this._dragLabelStartY) > 3) {
 				this._dragLabelHasMoved = true;
@@ -4885,6 +4933,15 @@ export class WorkflowEditor extends EditorPane {
 			this._tempLinkStartY = null;
 			this._tempLinkFromNodeId = null;
 			this._tempLinkFromPort = null;
+			return;
+		}
+
+		if (this._isDrawerResizing) {
+			this._isDrawerResizing = false;
+			if (this._logDrawerEl) {
+				this._logDrawerEl.classList.remove('resizing');
+			}
+			this._storageService.store('workflowEditor.drawerHeight', this._drawerHeight, StorageScope.PROFILE, StorageTarget.USER);
 			return;
 		}
 
