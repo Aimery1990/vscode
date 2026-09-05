@@ -12,7 +12,8 @@ import { IEntityPersistenceService } from '../../entityPersistence/common/entity
 import { IWorkflowsManagerService } from '../common/workflowsManager.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { URI } from '../../../../base/common/uri.js';
-import { $, append, mainWindow } from '../../../../base/browser/dom.js';
+import { $, append } from '../../../../base/browser/dom.js';
+import { mainWindow } from '../../../../base/browser/window.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
