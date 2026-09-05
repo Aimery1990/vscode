@@ -61,9 +61,9 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			const sessionPromises = uniqueProviders.map(async providerId => {
 				let timeoutId: any;
 				try {
-					const sessionsPromise = this.authenticationService.getSessions(providerId);
+					const sessionsPromise = this.authenticationService.getSessions(providerId, undefined, undefined, true);
 					const timeoutPromise = new Promise<readonly any[]>(resolve => {
-						timeoutId = setTimeout(() => resolve([]), 1000);
+						timeoutId = setTimeout(() => resolve([]), 5000);
 					});
 					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
 					clearTimeout(timeoutId);
@@ -81,7 +81,9 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			let newUserIdentifier = '';
 
 			if (activeResult) {
-				newUserIdentifier = `${activeResult.providerId}:${activeResult.session.account.label}`;
+				const label = activeResult.session.account.label || activeResult.session.account.email || '';
+				const match = label.match(/\(([^)]+)\)/);
+				newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 			}
 
 			if (newUserIdentifier !== this.activeUserEmail) {
@@ -99,7 +101,22 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 	}
 
 	private _loadCredentials(): void {
-		const raw = this.storageService.get(this.credentialsStorageKey, StorageScope.PROFILE);
+		let raw = this.storageService.get(this.credentialsStorageKey, StorageScope.PROFILE);
+		if (!raw && this.activeUserEmail) {
+			const legacyKey = `workbench.agentsManager.credentials:google:Aimery Wei (${this.activeUserEmail})`;
+			let legacyRaw = this.storageService.get(legacyKey, StorageScope.PROFILE);
+			if (!legacyRaw) {
+				const allKeys = this.storageService.keys(StorageScope.PROFILE, StorageTarget.USER);
+				const matchedKey = allKeys.find(k => k.startsWith('workbench.agentsManager.credentials:') && k.includes(this.activeUserEmail));
+				if (matchedKey) {
+					legacyRaw = this.storageService.get(matchedKey, StorageScope.PROFILE);
+				}
+			}
+			if (legacyRaw) {
+				raw = legacyRaw;
+				this.storageService.store(this.credentialsStorageKey, raw, StorageScope.PROFILE, StorageTarget.USER);
+			}
+		}
 		if (raw) {
 			try {
 				this._credentials = JSON.parse(raw) as IAgentCredential[];
@@ -187,7 +204,15 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 	async getApiKey(id: string): Promise<string | undefined> {
 		await this.initializationPromise;
 		const secretKey = `credential:${this.activeUserEmail || 'unauthenticated'}:${id}`;
-		return await this.secretStorageService.get(secretKey);
+		let key = await this.secretStorageService.get(secretKey);
+		if (!key && this.activeUserEmail) {
+			const legacySecretKey = `credential:google:Aimery Wei (${this.activeUserEmail}):${id}`;
+			key = await this.secretStorageService.get(legacySecretKey);
+			if (key) {
+				await this.secretStorageService.set(secretKey, key);
+			}
+		}
+		return key;
 	}
 
 	async fetchModels(providerId: string, apiKey: string, customUrl?: string): Promise<string[]> {

@@ -80,9 +80,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			const sessionPromises = uniqueProviders.map(async providerId => {
 				let timeoutId: any;
 				try {
-					const sessionsPromise = this.authenticationService.getSessions(providerId);
+					const sessionsPromise = this.authenticationService.getSessions(providerId, undefined, undefined, true);
 					const timeoutPromise = new Promise<readonly any[]>(resolve => {
-						timeoutId = setTimeout(() => resolve([]), 1000);
+						timeoutId = setTimeout(() => resolve([]), 5000);
 					});
 					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
 					clearTimeout(timeoutId);
@@ -100,42 +100,46 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			let newUserIdentifier = '';
 
 			if (activeResult) {
-				const label = activeResult.session.account.label;
+				const label = activeResult.session.account.label || activeResult.session.account.email || '';
 				const match = label.match(/\(([^)]+)\)/);
 				newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 			}
 
 			if (newUserIdentifier !== this.activeUserEmail) {
+				const oldUser = this.activeUserEmail;
 				this.activeUserEmail = newUserIdentifier;
 
-				// 1. Close all active editors on account switch/sandbox change to prevent data leaks
-				try {
-					const openEditors = this.editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE);
-					if (openEditors.length > 0) {
-						await this.editorService.closeEditors(openEditors);
+				// 1. Only close active editors on TRUE account switch (User A -> User B) to prevent data leaks.
+				// Cold startup resolution (when oldUser was empty) MUST NEVER close user tabs!
+				if (oldUser && newUserIdentifier && oldUser !== newUserIdentifier) {
+					try {
+						const openEditors = this.editorService.getEditors(EditorsOrder.MOST_RECENTLY_ACTIVE);
+						if (openEditors.length > 0) {
+							await this.editorService.closeEditors(openEditors);
+						}
+					} catch (err) {
+						console.error('Failed to close active editors on user switch:', err);
 					}
-				} catch (err) {
-					console.error('Failed to close active editors on user switch:', err);
-				}
 
-				// 2. Kill all active terminal instances
-				try {
-					const instances = this.terminalService.instances;
-					for (const inst of instances) {
-						inst.dispose();
+					// 2. Kill all active terminal instances
+					try {
+						const instances = this.terminalService.instances;
+						for (const inst of instances) {
+							inst.dispose();
+						}
+					} catch (err) {
+						console.error('Failed to dispose active terminals on user switch:', err);
 					}
-				} catch (err) {
-					console.error('Failed to dispose active terminals on user switch:', err);
-				}
 
-				// 3. Stop all active debug sessions
-				try {
-					const sessions = this.debugService.getModel().getSessions();
-					for (const s of sessions) {
-						this.debugService.stopSession(s).catch(() => { });
+					// 3. Stop all active debug sessions
+					try {
+						const sessions = this.debugService.getModel().getSessions();
+						for (const s of sessions) {
+							this.debugService.stopSession(s).catch(() => { });
+						}
+					} catch (err) {
+						console.error('Failed to stop active debug sessions on user switch:', err);
 					}
-				} catch (err) {
-					console.error('Failed to stop active debug sessions on user switch:', err);
 				}
 
 				this._onDidChangeWorkspaces.fire();
@@ -211,9 +215,18 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	private getSavedWorkspaceUris(): string[] {
-		const raw = this.storageService.get(this.savedWorkspacesKey, StorageScope.PROFILE, '[]');
+		let raw = this.storageService.get(this.savedWorkspacesKey, StorageScope.PROFILE, '');
+		if (!raw && this.activeUserEmail) {
+			// Check legacy account key format
+			const legacyKey = `${SAVED_WORKSPACES_STORAGE_KEY}:google:Aimery Wei (${this.activeUserEmail})`;
+			const legacyRaw = this.storageService.get(legacyKey, StorageScope.PROFILE, '');
+			if (legacyRaw) {
+				raw = legacyRaw;
+				this.storageService.store(this.savedWorkspacesKey, raw, StorageScope.PROFILE, StorageTarget.USER);
+			}
+		}
 		try {
-			return (JSON.parse(raw) as string[]).map(u => this.normalizeUriString(u));
+			return (JSON.parse(raw || '[]') as string[]).map(u => this.normalizeUriString(u));
 		} catch {
 			return [];
 		}
@@ -253,9 +266,6 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 	async getWorkspaces(): Promise<IWorkspaceItem[]> {
 		await this.activeUserInitPromise;
-		if (!this.activeUserEmail) {
-			return [];
-		}
 
 		const currentWorkspace = this.workspaceContextService.getWorkspace();
 		const currentFolderUris = new Set(currentWorkspace.folders.map(f => this.normalizeUriString(f.uri)));

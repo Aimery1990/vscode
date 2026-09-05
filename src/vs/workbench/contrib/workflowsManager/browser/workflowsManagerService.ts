@@ -37,7 +37,7 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 		super();
 
 		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
-			if (e.key === SAVED_WORKFLOWS_STORAGE_KEY || e.key === REMOVED_WORKFLOWS_STORAGE_KEY) {
+			if (e.key === this.savedWorkflowsKey || e.key === this.removedWorkflowsKey || e.key === SAVED_WORKFLOWS_STORAGE_KEY || e.key === REMOVED_WORKFLOWS_STORAGE_KEY) {
 				this._onDidChangeWorkflows.fire();
 			}
 		}));
@@ -70,6 +70,16 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 		this._onDidExpandPane.fire(paneId);
 	}
 
+	private get savedWorkflowsKey(): string {
+		const email = this.workspacesExplorerService.getActiveUserEmail();
+		return `${SAVED_WORKFLOWS_STORAGE_KEY}:${email || 'unauthenticated'}`;
+	}
+
+	private get removedWorkflowsKey(): string {
+		const email = this.workspacesExplorerService.getActiveUserEmail();
+		return `${REMOVED_WORKFLOWS_STORAGE_KEY}:${email || 'unauthenticated'}`;
+	}
+
 	private normalizeUriString(uri: URI | string): string {
 		const str = typeof uri === 'string' ? uri : uri.toString();
 		try {
@@ -80,14 +90,20 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 	}
 
 	private getSavedWorkflows(): ISavedWorkflowRecord[] {
-		const raw = this.storageService.get(SAVED_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE, '');
+		let raw = this.storageService.get(this.savedWorkflowsKey, StorageScope.PROFILE, '');
 		if (!raw) {
-			return [{
-				uri: URI.file('/Users/aimery/Documents/Find_Jobs_WSP/Find-Jobs/Find-Remote-Jobs-WFL').toString(),
-				name: 'Find-Remote-Jobs-WFL',
-				description: 'Workflow coordinates automated execution nodes and AI pipelines.',
-				belongsToWorkspaceName: 'Find_Jobs_WSP'
-			}];
+			const legacyRaw = this.storageService.get(SAVED_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE, '');
+			if (legacyRaw) {
+				try {
+					raw = legacyRaw;
+					this.storageService.store(this.savedWorkflowsKey, raw, StorageScope.PROFILE, StorageTarget.USER);
+				} catch {
+					// ignore
+				}
+			}
+		}
+		if (!raw) {
+			return [];
 		}
 		try {
 			return JSON.parse(raw) as ISavedWorkflowRecord[];
@@ -97,7 +113,10 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 	}
 
 	private getRemovedWorkflowUris(): string[] {
-		const raw = this.storageService.get(REMOVED_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE, '[]');
+		let raw = this.storageService.get(this.removedWorkflowsKey, StorageScope.PROFILE, '');
+		if (!raw) {
+			raw = this.storageService.get(REMOVED_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE, '[]');
+		}
 		try {
 			return (JSON.parse(raw) as string[]).map(u => this.normalizeUriString(u));
 		} catch {
@@ -127,21 +146,21 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 
 		// Also remove from removed list if user reopened it
 		const removed = this.getRemovedWorkflowUris().filter(u => u !== normUriStr);
-		this.storageService.store(REMOVED_WORKFLOWS_STORAGE_KEY, JSON.stringify(removed), StorageScope.PROFILE, StorageTarget.USER);
+		this.storageService.store(this.removedWorkflowsKey, JSON.stringify(removed), StorageScope.PROFILE, StorageTarget.USER);
 
-		this.storageService.store(SAVED_WORKFLOWS_STORAGE_KEY, JSON.stringify(saved), StorageScope.PROFILE, StorageTarget.USER);
+		this.storageService.store(this.savedWorkflowsKey, JSON.stringify(saved), StorageScope.PROFILE, StorageTarget.USER);
 		this._onDidChangeWorkflows.fire();
 	}
 
 	async removeSavedWorkflow(uri: URI | string): Promise<void> {
 		const normUriStr = this.normalizeUriString(uri);
 		const saved = this.getSavedWorkflows().filter(w => this.normalizeUriString(w.uri) !== normUriStr);
-		this.storageService.store(SAVED_WORKFLOWS_STORAGE_KEY, JSON.stringify(saved), StorageScope.PROFILE, StorageTarget.USER);
+		this.storageService.store(this.savedWorkflowsKey, JSON.stringify(saved), StorageScope.PROFILE, StorageTarget.USER);
 
 		const removed = this.getRemovedWorkflowUris();
 		if (!removed.includes(normUriStr)) {
 			removed.push(normUriStr);
-			this.storageService.store(REMOVED_WORKFLOWS_STORAGE_KEY, JSON.stringify(removed), StorageScope.PROFILE, StorageTarget.USER);
+			this.storageService.store(this.removedWorkflowsKey, JSON.stringify(removed), StorageScope.PROFILE, StorageTarget.USER);
 		}
 
 		this._onDidChangeWorkflows.fire();

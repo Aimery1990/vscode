@@ -27,9 +27,9 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 	readonly onDidExpandPane: Event<string> = this._onDidExpandPane.event;
 
 	private _agents: IAgentItem[] = [];
-	private _initialized = false;
 
 	private activeUserEmail: string = '';
+	private readonly activeUserInitPromise: Promise<void>;
 
 	constructor(
 		@IStorageService private readonly storageService: IStorageService,
@@ -59,7 +59,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 			await this.updateActiveUser();
 		}));
 
-		this.updateActiveUser();
+		this.activeUserInitPromise = this.updateActiveUser();
 	}
 
 	private async updateActiveUser(): Promise<void> {
@@ -70,9 +70,9 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 			const sessionPromises = uniqueProviders.map(async providerId => {
 				let timeoutId: any;
 				try {
-					const sessionsPromise = this.authenticationService.getSessions(providerId);
+					const sessionsPromise = this.authenticationService.getSessions(providerId, undefined, undefined, true);
 					const timeoutPromise = new Promise<readonly any[]>(resolve => {
-						timeoutId = setTimeout(() => resolve([]), 1000);
+						timeoutId = setTimeout(() => resolve([]), 5000);
 					});
 					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
 					clearTimeout(timeoutId);
@@ -90,7 +90,9 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 			let newUserIdentifier = '';
 
 			if (activeResult) {
-				newUserIdentifier = `${activeResult.providerId}:${activeResult.session.account.label}`;
+				const label = activeResult.session.account.label || activeResult.session.account.email || '';
+				const match = label.match(/\(([^)]+)\)/);
+				newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 			}
 
 			if (newUserIdentifier !== this.activeUserEmail) {
@@ -112,10 +114,26 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 	}
 
 	private _loadAgents(): void {
-		const raw = this.storageService.get(this.agentsStorageKey, StorageScope.PROFILE);
+		let raw = this.storageService.get(this.agentsStorageKey, StorageScope.PROFILE);
+		if (!raw && this.activeUserEmail) {
+			const legacyKey = `${STORAGE_KEY}:google:Aimery Wei (${this.activeUserEmail})`;
+			let legacyRaw = this.storageService.get(legacyKey, StorageScope.PROFILE);
+			if (!legacyRaw) {
+				const allKeys = this.storageService.keys(StorageScope.PROFILE, StorageTarget.USER);
+				const matchedKey = allKeys.find(k => k.startsWith(`${STORAGE_KEY}:`) && k.includes(this.activeUserEmail));
+				if (matchedKey) {
+					legacyRaw = this.storageService.get(matchedKey, StorageScope.PROFILE);
+				}
+			}
+			if (legacyRaw) {
+				raw = legacyRaw;
+				this.storageService.store(this.agentsStorageKey, raw, StorageScope.PROFILE, StorageTarget.USER);
+			}
+		}
+
 		if (raw) {
 			try {
-								const parsed = JSON.parse(raw) as any[];
+				const parsed = JSON.parse(raw) as any[];
 				// Keep only real agents created by user that have a physical folderPath on disk
 				this._agents = parsed.filter(a => !!a.folderPath).map(a => {
 					// Migration of legacy agent model representation
@@ -129,18 +147,13 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 					return a as IAgentItem;
 				});
 				this._saveAgents();
-				this._initialized = true;
 				return;
 			} catch (e) {
 				console.error('Failed to parse stored agents', e);
 			}
 		}
 
-		if (!this._initialized) {
-			this._agents = [];
-			this._saveAgents();
-			this._initialized = true;
-		}
+		this._agents = [];
 	}
 
 	private _saveAgents(): void {
@@ -153,16 +166,12 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 	}
 
 	async getAgents(): Promise<IAgentItem[]> {
-		if (!this.activeUserEmail) {
-			return [];
-		}
+		await this.activeUserInitPromise;
 		return [...this._agents];
 	}
 
 	async getAgentsByScope(scopeType: AgentScopeType, scopeId?: string): Promise<IAgentItem[]> {
-		if (!this.activeUserEmail) {
-			return [];
-		}
+		await this.activeUserInitPromise;
 		return this._agents.filter(a => a.scopeType === scopeType && (!scopeId || a.scopeId === scopeId));
 	}
 

@@ -61,9 +61,9 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			const sessionPromises = uniqueProviders.map(async providerId => {
 				let timeoutId: any;
 				try {
-					const sessionsPromise = this.authenticationService.getSessions(providerId);
+					const sessionsPromise = this.authenticationService.getSessions(providerId, undefined, undefined, true);
 					const timeoutPromise = new Promise<readonly any[]>(resolve => {
-						timeoutId = setTimeout(() => resolve([]), 1000);
+						timeoutId = setTimeout(() => resolve([]), 5000);
 					});
 					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
 					clearTimeout(timeoutId);
@@ -81,7 +81,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			let newUserIdentifier = '';
 
 			if (activeResult) {
-				const label = activeResult.session.account.label;
+				const label = activeResult.session.account.label || activeResult.session.account.email || '';
 				const match = label.match(/\(([^)]+)\)/);
 				newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 			}
