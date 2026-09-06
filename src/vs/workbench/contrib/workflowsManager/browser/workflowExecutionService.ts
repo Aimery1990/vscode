@@ -17,6 +17,17 @@ import {
 	IWorkflowNodeExecutionState
 } from '../common/workflowExecutionModel.js';
 
+interface INodePipelineStep {
+	id: string;
+	type: 'run_ticket' | 'set_variable' | 'custom_code';
+	ticketName?: string;
+	ticketType?: string;
+	ticketUri?: string;
+	targetVariable?: string;
+	expression?: string;
+	label?: string;
+}
+
 interface IFlowchartNode {
 	id: string;
 	groupId?: string;
@@ -29,6 +40,7 @@ interface IFlowchartNode {
 	imports?: { type: string; name: string; uri?: string }[];
 	outputVariable?: { name: string; initialValue?: string; expression?: string; currentValue?: any };
 	outputVariables?: { name: string; initialValue?: string; expression?: string; currentValue?: any }[];
+	pipeline?: INodePipelineStep[];
 }
 
 interface IFlowchartLink {
@@ -947,7 +959,68 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return;
 		}
 
-		// 4. Imported Tickets Execution (Variable-driven pipeline & natural ordering)
+		// 4. Custom Execution Pipeline (Explicit user-ordered steps)
+		if (node.pipeline && node.pipeline.length > 0) {
+			this._emitLog(run, 'info', `[Pipeline] Node '${node.label}' executing explicit pipeline (${node.pipeline.length} step(s))...`);
+
+			const runTicket = async (ticketName: string, ticketType?: string, ticketUri?: string) => {
+				const ticketStart = Date.now();
+				this._emitLog(run, 'info', `Running Ticket: [${ticketType || 'task'}] '${ticketName}'`);
+
+				// Simulated async ticket execution with snapshot integration
+				await new Promise(r => setTimeout(r, 600));
+
+				const ticketRecord = {
+					ticketId: ticketUri || ticketName,
+					ticketName: ticketName,
+					ticketType: ticketType || 'task',
+					status: 'success' as const,
+					output: `Ticket '${ticketName}' processed successfully.`,
+					durationMs: Date.now() - ticketStart
+				};
+				state.executedTickets.push(ticketRecord);
+				run.contextVariables[ticketRecord.ticketName] = ticketRecord.output;
+				run.contextVariables[ticketRecord.ticketName.replace(/[^a-zA-Z0-9_]/g, '_')] = ticketRecord.output;
+				if (ticketRecord.ticketId) {
+					run.contextVariables[ticketRecord.ticketId] = ticketRecord.output;
+				}
+				this._emitLog(run, 'info', `Ticket '${ticketName}' completed in ${ticketRecord.durationMs}ms`);
+				this._notifyRunChanged(run);
+				return ticketRecord;
+			};
+
+			for (let i = 0; i < node.pipeline.length; i++) {
+				const step: INodePipelineStep = node.pipeline[i];
+				if (step.type === 'run_ticket' && step.ticketName) {
+					this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'`);
+					const ticketRecord = await runTicket(step.ticketName, step.ticketType, step.ticketUri);
+					if (step.targetVariable) {
+						const varKey = step.targetVariable.trim().replace(/^@/, '');
+						run.contextVariables[varKey] = ticketRecord.output;
+						this._emitLog(run, 'info', `[Step #${i + 1}] Output stored in variable: @${varKey}`);
+					}
+				} else if (step.type === 'set_variable' && step.targetVariable) {
+					const varKey = step.targetVariable.trim().replace(/^@/, '');
+					let val: any = undefined;
+					const expr = (step.expression || '').trim();
+					if (expr) {
+						try {
+							const evaluator = new PythonExpressionEvaluator(expr, run.contextVariables);
+							val = evaluator.evaluate();
+						} catch {
+							val = expr.replace(/^=\s*/, '');
+						}
+					}
+					run.contextVariables[varKey] = val;
+					this._emitLog(run, 'info', `[Step #${i + 1}] Variable assigned: @${varKey} = ${JSON.stringify(val)}`);
+				}
+			}
+
+			state.output = { executedSteps: node.pipeline.length, tickets: state.executedTickets };
+			return;
+		}
+
+		// 5. Fallback: Imported Tickets Execution (Variable-driven pipeline & natural ordering)
 		const ticketImports = node.imports?.filter(i =>
 			['task', 'job', 'project', 'case', 'issue'].includes(i.type.toLowerCase())
 		) || [];

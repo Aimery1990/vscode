@@ -2569,3 +2569,511 @@
 	color: #f87171;
 }
 
+/* ==========================================================================
+   Node Execution Pipeline & Sequence Inspector Panel
+   ========================================================================== */
+
+.workflow-pipeline-panel {
+	position: absolute;
+	top: 14px;
+	bottom: 36px;
+	width: 380px;
+	z-index: 120;
+	background: rgba(13, 17, 26, 0.95);
+	backdrop-filter: blur(14px);
+	-webkit-backdrop-filter: blur(14px);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	border-radius: 8px;
+	box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.05);
+	display: flex;
+	flex-direction: column;
+	overflow: hidden;
+	user-select: none;
+	animation: pipelineSlideIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes pipelineSlideIn {
+	from {
+		opacity: 0;
+		transform: scale(0.97) translateY(8px);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1) translateY(0);
+	}
+}
+
+.workflow-pipeline-panel.dock-left {
+	left: 16px;
+	right: auto;
+}
+
+.workflow-pipeline-panel.dock-right {
+	right: 16px;
+	left: auto;
+}
+
+/* Panel Header */
+.pipeline-panel-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 10px 14px;
+	background: rgba(255, 255, 255, 0.03);
+	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+	flex-shrink: 0;
+}
+
+.pipeline-panel-title-group {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	overflow: hidden;
+}
+
+.pipeline-panel-title-icon {
+	color: #38bdf8;
+	font-size: 14px;
+	flex-shrink: 0;
+}
+
+.pipeline-panel-title {
+	font-size: 11px;
+	font-weight: 700;
+	color: #38bdf8;
+	letter-spacing: 0.6px;
+	text-transform: uppercase;
+	white-space: nowrap;
+}
+
+.pipeline-node-tag {
+	font-size: 10px;
+	padding: 2px 7px;
+	border-radius: 4px;
+	background: rgba(56, 189, 248, 0.15);
+	color: #7dd3fc;
+	border: 1px solid rgba(56, 189, 248, 0.35);
+	font-weight: 600;
+	max-width: 140px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.pipeline-panel-actions {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.pipeline-action-btn {
+	width: 26px;
+	height: 26px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 4px;
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	background: rgba(255, 255, 255, 0.02);
+	color: #94a3b8;
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+
+.pipeline-action-btn:hover {
+	background: rgba(255, 255, 255, 0.1);
+	border-color: rgba(255, 255, 255, 0.25);
+	color: #ffffff;
+}
+
+.pipeline-action-btn.close-btn:hover {
+	background: rgba(239, 68, 68, 0.2);
+	border-color: rgba(239, 68, 68, 0.4);
+	color: #f87171;
+}
+
+/* Panel Body */
+.pipeline-panel-body {
+	flex: 1;
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	padding: 12px;
+	gap: 14px;
+}
+
+.pipeline-section {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	background: rgba(255, 255, 255, 0.02);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	border-radius: 6px;
+	padding: 10px;
+}
+
+.pipeline-section-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+}
+
+.pipeline-section-title {
+	font-size: 10px;
+	font-weight: 700;
+	color: #e2e8f0;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+
+.pipeline-section-desc {
+	font-size: 10px;
+	color: #94a3b8;
+	line-height: 1.4;
+	margin-top: -2px;
+}
+
+/* Upper Section: Imports */
+.pipeline-imports-list {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	max-height: 170px;
+	overflow-y: auto;
+}
+
+.pipeline-import-card {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 6px 10px;
+	background: rgba(0, 0, 0, 0.28);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 4px;
+	transition: all 0.15s ease;
+}
+
+.pipeline-import-card:hover {
+	border-color: rgba(56, 189, 248, 0.35);
+	background: rgba(0, 0, 0, 0.38);
+}
+
+.pipeline-import-info {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	overflow: hidden;
+	flex: 1;
+}
+
+.pipeline-import-badge {
+	font-size: 9px;
+	font-weight: 600;
+	padding: 1px 5px;
+	border-radius: 3px;
+	text-transform: uppercase;
+	letter-spacing: 0.4px;
+	flex-shrink: 0;
+}
+
+.pipeline-import-name {
+	font-size: 11px;
+	font-weight: 500;
+	color: #f1f5f9;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.pipeline-import-actions {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	flex-shrink: 0;
+}
+
+.pipeline-import-add-btn {
+	padding: 3px 8px;
+	font-size: 10px;
+	font-weight: 600;
+	border-radius: 3px;
+	background: rgba(168, 85, 247, 0.18);
+	border: 1px solid rgba(168, 85, 247, 0.4);
+	color: #c084fc;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	transition: all 0.12s ease;
+}
+
+.pipeline-import-add-btn:hover {
+	background: rgba(168, 85, 247, 0.35);
+	border-color: #c084fc;
+	color: #ffffff;
+}
+
+.pipeline-icon-btn {
+	width: 22px;
+	height: 22px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: 3px;
+	background: transparent;
+	border: none;
+	color: #94a3b8;
+	cursor: pointer;
+	transition: all 0.12s ease;
+}
+
+.pipeline-icon-btn:hover {
+	background: rgba(239, 68, 68, 0.18);
+	color: #f87171;
+}
+
+.pipeline-drop-zone {
+	border: 1px dashed rgba(56, 189, 248, 0.35);
+	border-radius: 5px;
+	padding: 10px;
+	text-align: center;
+	color: #64748b;
+	font-size: 11px;
+	background: rgba(56, 189, 248, 0.02);
+	transition: all 0.15s ease;
+	cursor: default;
+}
+
+.pipeline-drop-zone.drag-over {
+	background: rgba(56, 189, 248, 0.12);
+	border-color: #38bdf8;
+	color: #38bdf8;
+	border-style: solid;
+}
+
+/* Lower Section: Execution Pipeline Steps */
+.pipeline-steps-list {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.pipeline-step-card {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	padding: 8px 10px;
+	background: rgba(0, 0, 0, 0.35);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	border-radius: 6px;
+	transition: all 0.15s ease;
+	position: relative;
+}
+
+.pipeline-step-card:hover {
+	border-color: rgba(255, 255, 255, 0.18);
+}
+
+.pipeline-step-card.is-dragging {
+	opacity: 0.35;
+	border-color: #38bdf8;
+	background: rgba(56, 189, 248, 0.08);
+}
+
+.pipeline-step-card.drag-over-above {
+	border-top: 2px solid #38bdf8;
+}
+
+.pipeline-step-card.drag-over-below {
+	border-bottom: 2px solid #38bdf8;
+}
+
+.pipeline-drag-handle {
+	cursor: grab;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 18px;
+	height: 18px;
+	color: #64748b;
+	margin-top: 2px;
+	flex-shrink: 0;
+	transition: color 0.12s ease;
+}
+
+.pipeline-drag-handle:hover {
+	color: #38bdf8;
+}
+
+.pipeline-drag-handle:active {
+	cursor: grabbing;
+}
+
+.pipeline-step-number {
+	font-size: 10px;
+	font-weight: 700;
+	color: #94a3b8;
+	background: rgba(255, 255, 255, 0.06);
+	padding: 1px 5px;
+	border-radius: 3px;
+	flex-shrink: 0;
+	margin-top: 2px;
+}
+
+.pipeline-step-content {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	overflow: hidden;
+}
+
+.pipeline-step-top-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	overflow: hidden;
+}
+
+.pipeline-step-badge-run {
+	background: rgba(168, 85, 247, 0.2);
+	border: 1px solid rgba(168, 85, 247, 0.4);
+	color: #c084fc;
+	font-size: 9px;
+	font-weight: 700;
+	padding: 1px 5px;
+	border-radius: 3px;
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	flex-shrink: 0;
+}
+
+.pipeline-step-badge-var {
+	background: rgba(13, 148, 136, 0.2);
+	border: 1px solid rgba(13, 148, 136, 0.4);
+	color: #2dd4bf;
+	font-size: 9px;
+	font-weight: 700;
+	padding: 1px 5px;
+	border-radius: 3px;
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	flex-shrink: 0;
+}
+
+.pipeline-step-title {
+	font-size: 11px;
+	font-weight: 600;
+	color: #f1f5f9;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.pipeline-step-config-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 10px;
+	color: #94a3b8;
+	margin-top: 2px;
+}
+
+.pipeline-step-input {
+	background: rgba(0, 0, 0, 0.4);
+	border: 1px solid rgba(255, 255, 255, 0.12);
+	border-radius: 3px;
+	padding: 2px 6px;
+	color: #e2e8f0;
+	font-size: 10px;
+	outline: none;
+	transition: border-color 0.12s ease;
+}
+
+.pipeline-step-input:focus {
+	border-color: #38bdf8;
+}
+
+.pipeline-step-actions {
+	display: flex;
+	align-items: center;
+	gap: 2px;
+	flex-shrink: 0;
+	margin-top: 2px;
+}
+
+/* Toolbar Buttons in Pipeline */
+.pipeline-toolbar-btns {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 6px;
+}
+
+.pipeline-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	padding: 4px 10px;
+	border-radius: 4px;
+	font-size: 11px;
+	font-weight: 600;
+	cursor: pointer;
+	border: 1px solid transparent;
+	transition: all 0.12s ease;
+	user-select: none;
+}
+
+.pipeline-btn-primary {
+	background: rgba(168, 85, 247, 0.18);
+	border-color: rgba(168, 85, 247, 0.45);
+	color: #c084fc;
+}
+
+.pipeline-btn-primary:hover {
+	background: rgba(168, 85, 247, 0.35);
+	border-color: #c084fc;
+	color: #ffffff;
+}
+
+.pipeline-btn-secondary {
+	background: rgba(13, 148, 136, 0.18);
+	border-color: rgba(13, 148, 136, 0.45);
+	color: #2dd4bf;
+}
+
+.pipeline-btn-secondary:hover {
+	background: rgba(13, 148, 136, 0.35);
+	border-color: #2dd4bf;
+	color: #ffffff;
+}
+
+.pipeline-btn-outline {
+	background: rgba(255, 255, 255, 0.04);
+	border-color: rgba(255, 255, 255, 0.12);
+	color: #cbd5e1;
+}
+
+.pipeline-btn-outline:hover {
+	background: rgba(255, 255, 255, 0.08);
+	border-color: rgba(255, 255, 255, 0.25);
+	color: #ffffff;
+}
+
+.pipeline-empty-state {
+	padding: 14px;
+	text-align: center;
+	border: 1px dashed rgba(255, 255, 255, 0.1);
+	border-radius: 6px;
+	color: #64748b;
+	font-size: 11px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 6px;
+}
+
+

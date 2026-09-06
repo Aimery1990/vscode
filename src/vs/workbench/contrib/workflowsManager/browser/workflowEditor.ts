@@ -39,6 +39,17 @@ export interface INodeVariable {
 	currentValue?: any;
 }
 
+export interface INodePipelineStep {
+	id: string;
+	type: 'run_ticket' | 'set_variable' | 'custom_code';
+	ticketName?: string;
+	ticketType?: string;
+	ticketUri?: string;
+	targetVariable?: string; // e.g. "task" or "monitor"
+	expression?: string;     // e.g. "= ticket.output" or "= @task"
+	label?: string;          // Human-readable title
+}
+
 interface IFlowchartNode {
 	id: string;
 	groupId?: string;
@@ -51,6 +62,7 @@ interface IFlowchartNode {
 	imports?: { type: 'agent' | 'task' | 'job' | 'project' | 'case' | 'issue' | 'analysis' | 'workflow' | string; name: string; uri?: string }[];
 	outputVariable?: INodeVariable;
 	outputVariables?: INodeVariable[];
+	pipeline?: INodePipelineStep[];
 	color?: string;
 	textColor?: string;
 	textAlign?: 'left' | 'center' | 'right';
@@ -251,6 +263,10 @@ export class WorkflowEditor extends EditorPane {
 	private _isDrawerResizing: boolean = false;
 	private _drawerResizeStartY: number = 0;
 	private _drawerResizeStartHeight: number = 280;
+	private _canvasViewport?: HTMLElement;
+	private _pipelinePanelEl?: HTMLElement;
+	private _activePipelineNodeId?: string;
+	private _pipelineDockSide: 'left' | 'right' = 'right';
 
 	constructor(
 		group: IEditorGroup,
@@ -283,6 +299,7 @@ export class WorkflowEditor extends EditorPane {
 		this._activeIsUnderline = this._storageService.getBoolean('workflowEditor.isUnderline', StorageScope.PROFILE, false);
 		this._activeIsStrikethrough = this._storageService.getBoolean('workflowEditor.isStrikethrough', StorageScope.PROFILE, false);
 		this._drawerHeight = this._storageService.getNumber('workflowEditor.drawerHeight', StorageScope.PROFILE, 280);
+		this._pipelineDockSide = (this._storageService.get('workflowEditor.pipelineDockSide', StorageScope.PROFILE, 'right') as any) || 'right';
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
@@ -535,6 +552,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// 2. Center Drawing Viewport (Fixed container for floating controls)
 		const canvasViewport = append(this._container, $('.workflow-canvas-viewport'));
+		this._canvasViewport = canvasViewport;
 
 		// Canvas Scroll Wrapper inside Viewport
 		const canvasWrapper = append(canvasViewport, $('.workflow-editor-canvas-wrapper'));
@@ -2114,6 +2132,547 @@ export class WorkflowEditor extends EditorPane {
 		setTimeout(() => window.addEventListener('mousedown', dismiss, true), 50);
 	}
 
+	private _openNodePipelinePanel(nodeId: string): void {
+		if (this._activePipelineNodeId === nodeId && this._pipelinePanelEl) {
+			return;
+		}
+		const node = this._data.nodes.find(n => n.id === nodeId);
+		if (!node) return;
+
+		this._activePipelineNodeId = nodeId;
+
+		// Select the node so user sees visual focus
+		this._selectedNodeIds.clear();
+		this._selectedLinkIds.clear();
+		this._selectedNodeIds.add(nodeId);
+		this._renderNodes();
+		this._drawLinks();
+		if (this._inspectorEl) {
+			this._renderInspector(this._inspectorEl);
+		}
+
+		if (!this._canvasViewport) return;
+
+		if (!this._pipelinePanelEl) {
+			this._pipelinePanelEl = append(this._canvasViewport, $('.workflow-pipeline-panel'));
+		}
+		this._pipelinePanelEl.className = `workflow-pipeline-panel dock-${this._pipelineDockSide}`;
+		this._renderPipelinePanel(this._pipelinePanelEl, node);
+	}
+
+	private _closeNodePipelinePanel(): void {
+		if (this._pipelinePanelEl) {
+			this._pipelinePanelEl.remove();
+			this._pipelinePanelEl = undefined;
+		}
+		this._activePipelineNodeId = undefined;
+	}
+
+	private _autoGenerateNodePipeline(node: IFlowchartNode): void {
+		node.pipeline = [];
+		const ticketImports = (node.imports || []).filter(i =>
+			['task', 'job', 'project', 'case', 'issue', 'workflow', 'agent'].includes((i.type || '').toLowerCase())
+		);
+		const nodeVars = this._getNodeVariables(node);
+		const scheduledTickets = new Set<string>();
+
+		// Helper to find matching import for a variable
+		const findMatch = (raw?: string) => {
+			if (!raw) return undefined;
+			let clean = raw.trim().replace(/^@/, '');
+			if (clean.startsWith('=')) clean = clean.substring(1).trim();
+			const eqIdx = clean.indexOf('=');
+			if (eqIdx !== -1) clean = clean.substring(eqIdx + 1).trim();
+			clean = clean.replace(/^@/, '').trim();
+			if (clean === 'ticket' || clean === 'ticket.output') return ticketImports[0];
+			return ticketImports.find(imp =>
+				imp.name === clean ||
+				imp.name.replace(/[^a-zA-Z0-9_]/g, '_') === clean ||
+				imp.name.toLowerCase() === clean.toLowerCase()
+			);
+		};
+
+		// 1. Map variables bound to tickets into run_ticket steps
+		for (const v of nodeVars) {
+			const targetImp = findMatch(v.expression) || findMatch(v.initialValue);
+			if (targetImp && !scheduledTickets.has(targetImp.name)) {
+				scheduledTickets.add(targetImp.name);
+				node.pipeline.push({
+					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+					type: 'run_ticket',
+					ticketName: targetImp.name,
+					ticketType: targetImp.type,
+					ticketUri: targetImp.uri,
+					targetVariable: v.name
+				});
+			} else {
+				// Variable assignment or computation step
+				node.pipeline.push({
+					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+					type: 'set_variable',
+					targetVariable: v.name,
+					expression: v.expression || v.initialValue || 'None'
+				});
+			}
+		}
+
+		// 2. Add any remaining imported tickets not yet in pipeline
+		for (const imp of ticketImports) {
+			if (!scheduledTickets.has(imp.name)) {
+				scheduledTickets.add(imp.name);
+				node.pipeline.push({
+					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+					type: 'run_ticket',
+					ticketName: imp.name,
+					ticketType: imp.type,
+					ticketUri: imp.uri
+				});
+			}
+		}
+
+		this._saveFlowchartData();
+		this._renderNodes();
+		if (this._pipelinePanelEl) {
+			this._renderPipelinePanel(this._pipelinePanelEl, node);
+		}
+		this._notificationService.info(`Auto-generated ${node.pipeline.length} execution step(s) for '${node.label}'.`);
+	}
+
+	private _renderPipelinePanel(panel: HTMLElement, node: IFlowchartNode): void {
+		clearNode(panel);
+
+		// Header
+		const header = append(panel, $('.pipeline-panel-header'));
+		const titleGroup = append(header, $('.pipeline-panel-title-group'));
+		append(titleGroup, $('span' + ThemeIcon.asCSSSelector(Codicon.listOrdered) + '.pipeline-panel-title-icon'));
+		append(titleGroup, $('span.pipeline-panel-title', {}, 'Node Pipeline'));
+
+		const nodeTag = append(titleGroup, $('span.pipeline-node-tag'));
+		nodeTag.textContent = node.label || 'Node';
+		nodeTag.title = `Node: ${node.label || 'Node'}`;
+
+		const actions = append(header, $('.pipeline-panel-actions'));
+
+		// Dock Side Toggle Button
+		const dockBtn = append(actions, $('.pipeline-action-btn'));
+		const isLeft = this._pipelineDockSide === 'left';
+		append(dockBtn, $('span' + ThemeIcon.asCSSSelector(isLeft ? Codicon.layoutSidebarRight : Codicon.layoutSidebarLeft)));
+		dockBtn.title = isLeft ? 'Dock to Right' : 'Dock to Left (Next to Toolbox)';
+		dockBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._pipelineDockSide = isLeft ? 'right' : 'left';
+			this._storageService.store('workflowEditor.pipelineDockSide', this._pipelineDockSide, StorageScope.PROFILE, StorageTarget.USER);
+			panel.className = `workflow-pipeline-panel dock-${this._pipelineDockSide}`;
+			this._renderPipelinePanel(panel, node);
+		};
+
+		// Close Button
+		const closeBtn = append(actions, $('.pipeline-action-btn.close-btn'));
+		append(closeBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+		closeBtn.title = 'Close Pipeline Panel';
+		closeBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._closeNodePipelinePanel();
+		};
+
+		// Panel Body
+		const body = append(panel, $('.pipeline-panel-body'));
+
+		// --- UPPER SECTION: 1. Imported Resources & Tickets ---
+		const importsSec = append(body, $('.pipeline-section'));
+		const importsHeader = append(importsSec, $('.pipeline-section-header'));
+		const importCount = node.imports?.length || 0;
+		append(importsHeader, $('span.pipeline-section-title', {}, `1. Imported Resources (${importCount})`));
+
+		const importMoreBtn = append(importsHeader, $('.pipeline-btn.pipeline-btn-outline'));
+		importMoreBtn.style.padding = '2px 6px';
+		importMoreBtn.style.fontSize = '10px';
+		append(importMoreBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
+		append(importMoreBtn, $('span', {}, 'Import...'));
+		importMoreBtn.title = 'Import another ticket or module into this node';
+		importMoreBtn.onclick = () => {
+			this._importIntoNode(node.id);
+		};
+
+		append(importsSec, $('span.pipeline-section-desc', {}, 'Tickets & modules associated with this node. Click "+ Add Step" to schedule execution below.'));
+
+		// Drop zone & imports list
+		const importsList = append(importsSec, $('.pipeline-imports-list'));
+
+		const renderImportCards = () => {
+			clearNode(importsList);
+			if (!node.imports || node.imports.length === 0) {
+				const emptyDrop = append(importsList, $('.pipeline-drop-zone'));
+				emptyDrop.textContent = 'Drag & drop tickets here from explorer or canvas to import';
+			} else {
+				for (const imp of node.imports) {
+					const card = append(importsList, $('.pipeline-import-card'));
+					const info = append(card, $('.pipeline-import-info'));
+
+					// Type Badge Color & Icon
+					let badgeColor = '#38bdf8';
+					let typeIcon = Codicon.checklist;
+					const lowerType = (imp.type || '').toLowerCase();
+					if (lowerType === 'task') { badgeColor = '#a78bfa'; typeIcon = Codicon.checklist; }
+					else if (lowerType === 'job') { badgeColor = '#fbbf24'; typeIcon = Codicon.rocket; }
+					else if (lowerType === 'agent') { badgeColor = '#38bdf8'; typeIcon = Codicon.robot; }
+					else if (lowerType === 'project') { badgeColor = '#60a5fa'; typeIcon = Codicon.project; }
+					else if (lowerType === 'case') { badgeColor = '#f472b6'; typeIcon = Codicon.beaker; }
+					else if (lowerType === 'issue') { badgeColor = '#ef4444'; typeIcon = Codicon.bug; }
+					else if (lowerType === 'workflow') { badgeColor = '#0d9488'; typeIcon = Codicon.githubAction; }
+
+					const badge = append(info, $('.pipeline-import-badge'));
+					badge.style.background = `${badgeColor}22`;
+					badge.style.color = badgeColor;
+					badge.style.border = `1px solid ${badgeColor}55`;
+					append(badge, $('span' + ThemeIcon.asCSSSelector(typeIcon)));
+					append(badge, $('span', {}, ` ${imp.type ? imp.type.toUpperCase() : 'TICKET'}`));
+
+					const nameSpan = append(info, $('span.pipeline-import-name', {}, imp.name));
+					nameSpan.title = `${imp.type || 'ticket'}: ${imp.name}`;
+
+					const actionsEl = append(card, $('.pipeline-import-actions'));
+
+					// "+ Add Step" button
+					const addStepBtn = append(actionsEl, $('.pipeline-import-add-btn'));
+					append(addStepBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
+					append(addStepBtn, $('span', {}, 'Add Step'));
+					addStepBtn.title = `Add '${imp.name}' execution step to pipeline below`;
+					addStepBtn.onclick = (e) => {
+						e.stopPropagation();
+						if (!node.pipeline) node.pipeline = [];
+						node.pipeline.push({
+							id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+							type: 'run_ticket',
+							ticketName: imp.name,
+							ticketType: imp.type,
+							ticketUri: imp.uri
+						});
+						this._saveFlowchartData();
+						this._renderPipelinePanel(panel, node);
+					};
+
+					// Un-import button
+					const unimportBtn = append(actionsEl, $('.pipeline-icon-btn'));
+					append(unimportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+					unimportBtn.title = `Remove '${imp.name}' from imported resources`;
+					unimportBtn.onclick = (e) => {
+						e.stopPropagation();
+						node.imports = (node.imports || []).filter(i => !(i.type === imp.type && i.name === imp.name));
+						this._saveFlowchartData();
+						this._renderNodes();
+						this._renderPipelinePanel(panel, node);
+					};
+				}
+			}
+		};
+		renderImportCards();
+
+		// Handle drag & drop tickets directly onto imports section
+		importsSec.ondragover = (e: DragEvent) => {
+			e.preventDefault();
+			importsSec.classList.add('drag-over');
+		};
+		importsSec.ondragleave = () => {
+			importsSec.classList.remove('drag-over');
+		};
+		importsSec.ondrop = (e: DragEvent) => {
+			e.preventDefault();
+			e.stopPropagation();
+			importsSec.classList.remove('drag-over');
+			const dataStr = e.dataTransfer?.getData('text/plain');
+			if (!dataStr || !dataStr.startsWith('any-agent-import:')) return;
+
+			const parts = dataStr.split(':');
+			const type = parts[1];
+			const name = parts[2];
+
+			if (!node.imports) node.imports = [];
+			if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
+				node.imports.push({ type: type as any, name });
+				// Also auto-append step to pipeline
+				if (!node.pipeline) node.pipeline = [];
+				node.pipeline.push({
+					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+					type: 'run_ticket',
+					ticketName: name,
+					ticketType: type
+				});
+				this._saveFlowchartData();
+				this._renderNodes();
+				this._renderPipelinePanel(panel, node);
+				this._notificationService.info(`Imported ${type} '${name}' and added execution step.`);
+			}
+		};
+
+		// --- LOWER SECTION: 2. Execution Sequence Pipeline ---
+		const pipelineSec = append(body, $('.pipeline-section'));
+		const pipelineHeader = append(pipelineSec, $('.pipeline-section-header'));
+		const stepCount = node.pipeline?.length || 0;
+		append(pipelineHeader, $('span.pipeline-section-title', {}, `2. Execution Sequence (${stepCount} Steps)`));
+
+		const autoGenHeaderBtn = append(pipelineHeader, $('.pipeline-btn.pipeline-btn-outline'));
+		autoGenHeaderBtn.style.padding = '2px 6px';
+		autoGenHeaderBtn.style.fontSize = '10px';
+		append(autoGenHeaderBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.zap)));
+		append(autoGenHeaderBtn, $('span', {}, 'Auto-Sync'));
+		autoGenHeaderBtn.title = 'Auto-generate execution pipeline based on imported tickets and bound variables';
+		autoGenHeaderBtn.onclick = () => {
+			this._autoGenerateNodePipeline(node);
+		};
+
+		append(pipelineSec, $('span.pipeline-section-desc', {}, 'Runs strictly from top to bottom. Drag ≡ or use ▲/▼ to reorder steps.'));
+
+		const stepsList = append(pipelineSec, $('.pipeline-steps-list'));
+
+		if (!node.pipeline || node.pipeline.length === 0) {
+			const emptyState = append(stepsList, $('.pipeline-empty-state'));
+			append(emptyState, $('span' + ThemeIcon.asCSSSelector(Codicon.info)));
+			append(emptyState, $('span', {}, 'No execution steps configured yet.'));
+			const emptyActions = append(emptyState, $('.pipeline-toolbar-btns'));
+			emptyActions.style.justifyContent = 'center';
+
+			const autoBtn = append(emptyActions, $('.pipeline-btn.pipeline-btn-primary'));
+			append(autoBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.zap)));
+			append(autoBtn, $('span', {}, 'Auto-Generate Pipeline'));
+			autoBtn.onclick = () => {
+				this._autoGenerateNodePipeline(node);
+			};
+
+			if (node.imports && node.imports.length > 0) {
+				const addFirstTicketBtn = append(emptyActions, $('.pipeline-btn.pipeline-btn-secondary'));
+				append(addFirstTicketBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
+				append(addFirstTicketBtn, $('span', {}, `Run '${node.imports[0].name}'`));
+				addFirstTicketBtn.onclick = () => {
+					if (!node.pipeline) node.pipeline = [];
+					node.pipeline.push({
+						id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+						type: 'run_ticket',
+						ticketName: node.imports![0].name,
+						ticketType: node.imports![0].type,
+						ticketUri: node.imports![0].uri
+					});
+					this._saveFlowchartData();
+					this._renderPipelinePanel(panel, node);
+				};
+			}
+		} else {
+			for (let i = 0; i < node.pipeline.length; i++) {
+				const step = node.pipeline[i];
+				const stepCard = append(stepsList, $('.pipeline-step-card'));
+				stepCard.draggable = true;
+				stepCard.dataset.stepIndex = String(i);
+
+				// HTML5 Drag & Drop Reordering Handlers
+				stepCard.ondragstart = (e: DragEvent) => {
+					e.dataTransfer?.setData('text/pipeline-step-idx', String(i));
+					stepCard.classList.add('is-dragging');
+				};
+
+				stepCard.ondragover = (e: DragEvent) => {
+					e.preventDefault();
+					const rect = stepCard.getBoundingClientRect();
+					const isAbove = e.clientY < (rect.top + rect.height / 2);
+					stepCard.classList.toggle('drag-over-above', isAbove);
+					stepCard.classList.toggle('drag-over-below', !isAbove);
+				};
+
+				stepCard.ondragleave = () => {
+					stepCard.classList.remove('drag-over-above', 'drag-over-below');
+				};
+
+				stepCard.ondrop = (e: DragEvent) => {
+					e.preventDefault();
+					e.stopPropagation();
+					stepCard.classList.remove('drag-over-above', 'drag-over-below');
+					const rawFrom = e.dataTransfer?.getData('text/pipeline-step-idx');
+					if (rawFrom !== undefined && rawFrom !== '') {
+						const fromIdx = parseInt(rawFrom, 10);
+						if (!isNaN(fromIdx) && fromIdx !== i && node.pipeline) {
+							const [moved] = node.pipeline.splice(fromIdx, 1);
+							node.pipeline.splice(i, 0, moved);
+							this._saveFlowchartData();
+							this._renderPipelinePanel(panel, node);
+						}
+					}
+				};
+
+				stepCard.ondragend = () => {
+					stepCard.classList.remove('is-dragging', 'drag-over-above', 'drag-over-below');
+				};
+
+				// Left: Drag Handle ≡
+				const dragHandle = append(stepCard, $('.pipeline-drag-handle'));
+				append(dragHandle, $('span' + ThemeIcon.asCSSSelector(Codicon.gripper)));
+				dragHandle.title = 'Drag ≡ to reorder step';
+
+				// Step Number Badge: #1, #2...
+				const stepNum = append(stepCard, $('.pipeline-step-number'));
+				stepNum.textContent = `#${i + 1}`;
+
+				// Center: Step Content
+				const content = append(stepCard, $('.pipeline-step-content'));
+				const topRow = append(content, $('.pipeline-step-top-row'));
+
+				if (step.type === 'run_ticket') {
+					const badge = append(topRow, $('.pipeline-step-badge-run'));
+					append(badge, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
+					append(badge, $('span', {}, 'RUN'));
+
+					const title = append(topRow, $('.pipeline-step-title'));
+					title.textContent = `Ticket: ${step.ticketName || 'Unnamed'}`;
+					title.title = `Runs Ticket '${step.ticketName}'`;
+
+					// Variable mapping row: ➔ Output to: @[variable]
+					const cfgRow = append(content, $('.pipeline-step-config-row'));
+					append(cfgRow, $('span', {}, '➔ Output to: @'));
+					const varInput = append(cfgRow, $('input.pipeline-step-input')) as HTMLInputElement;
+					varInput.type = 'text';
+					varInput.style.flex = '1';
+					varInput.value = step.targetVariable || '';
+					varInput.placeholder = 'e.g. task, monitor (optional)';
+					varInput.title = 'Store Ticket output into this Context Variable';
+					varInput.onchange = () => {
+						step.targetVariable = varInput.value.trim().replace(/^@/, '') || undefined;
+						this._saveFlowchartData();
+					};
+				} else if (step.type === 'set_variable') {
+					const badge = append(topRow, $('.pipeline-step-badge-var'));
+					append(badge, $('span' + ThemeIcon.asCSSSelector(Codicon.variable)));
+					append(badge, $('span', {}, 'VAR'));
+
+					const title = append(topRow, $('.pipeline-step-title'));
+					title.textContent = `Assign Variable: @${step.targetVariable || 'var'}`;
+
+					// Assignment row: @[var] = [expression]
+					const cfgRow = append(content, $('.pipeline-step-config-row'));
+					append(cfgRow, $('span', {}, '@'));
+					const varNameInput = append(cfgRow, $('input.pipeline-step-input')) as HTMLInputElement;
+					varNameInput.type = 'text';
+					varNameInput.style.width = '75px';
+					varNameInput.value = step.targetVariable || 'var';
+					varNameInput.placeholder = 'monitor';
+					varNameInput.onchange = () => {
+						step.targetVariable = varNameInput.value.trim().replace(/^@/, '') || 'var';
+						this._saveFlowchartData();
+						this._renderPipelinePanel(panel, node);
+					};
+
+					append(cfgRow, $('span', {}, ' = '));
+					const exprInput = append(cfgRow, $('input.pipeline-step-input')) as HTMLInputElement;
+					exprInput.type = 'text';
+					exprInput.style.flex = '1';
+					exprInput.value = step.expression || '';
+					exprInput.placeholder = 'e.g. @task, 0, None';
+					exprInput.title = 'Value or Python expression';
+					exprInput.onchange = () => {
+						step.expression = exprInput.value.trim() || undefined;
+						this._saveFlowchartData();
+					};
+				}
+
+				// Right: Actions (▲, ▼, 🗑️)
+				const stepActions = append(stepCard, $('.pipeline-step-actions'));
+
+				// Move Up Button
+				if (i > 0) {
+					const upBtn = append(stepActions, $('.pipeline-icon-btn'));
+					append(upBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronUp)));
+					upBtn.title = 'Move step up';
+					upBtn.onclick = (e) => {
+						e.stopPropagation();
+						if (node.pipeline) {
+							const temp = node.pipeline[i];
+							node.pipeline[i] = node.pipeline[i - 1];
+							node.pipeline[i - 1] = temp;
+							this._saveFlowchartData();
+							this._renderPipelinePanel(panel, node);
+						}
+					};
+				}
+
+				// Move Down Button
+				if (i < node.pipeline.length - 1) {
+					const downBtn = append(stepActions, $('.pipeline-icon-btn'));
+					append(downBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
+					downBtn.title = 'Move step down';
+					downBtn.onclick = (e) => {
+						e.stopPropagation();
+						if (node.pipeline) {
+							const temp = node.pipeline[i];
+							node.pipeline[i] = node.pipeline[i + 1];
+							node.pipeline[i + 1] = temp;
+							this._saveFlowchartData();
+							this._renderPipelinePanel(panel, node);
+						}
+					};
+				}
+
+				// Delete Step Button
+				const delBtn = append(stepActions, $('.pipeline-icon-btn'));
+				append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+				delBtn.title = 'Delete this execution step';
+				delBtn.onclick = (e) => {
+					e.stopPropagation();
+					if (node.pipeline) {
+						node.pipeline.splice(i, 1);
+						this._saveFlowchartData();
+						this._renderPipelinePanel(panel, node);
+					}
+				};
+			}
+		}
+
+		// Toolbar: Add Steps
+		const toolbarRow = append(pipelineSec, $('.pipeline-toolbar-btns'));
+
+		// + Run Ticket Step
+		const addRunBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-primary'));
+		append(addRunBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
+		append(addRunBtn, $('span', {}, '+ Run Ticket'));
+		addRunBtn.title = 'Add ticket execution step';
+		addRunBtn.onclick = (e) => {
+			e.stopPropagation();
+			const imports = node.imports || [];
+			if (imports.length === 0) {
+				this._importIntoNode(node.id);
+				return;
+			}
+			// Pick first or show submenu
+			if (!node.pipeline) node.pipeline = [];
+			const imp = imports[0];
+			node.pipeline.push({
+				id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+				type: 'run_ticket',
+				ticketName: imp.name,
+				ticketType: imp.type,
+				ticketUri: imp.uri
+			});
+			this._saveFlowchartData();
+			this._renderPipelinePanel(panel, node);
+		};
+
+		// + Assign Variable Step
+		const addVarBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-secondary'));
+		append(addVarBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.variable)));
+		append(addVarBtn, $('span', {}, '+ Set Variable'));
+		addVarBtn.title = 'Add variable assignment step (e.g. @monitor = @task)';
+		addVarBtn.onclick = (e) => {
+			e.stopPropagation();
+			if (!node.pipeline) node.pipeline = [];
+			const knownVars = this._getNodeVariables(node);
+			const defaultVarName = knownVars.length > 0 ? `${knownVars[0].name}_copy` : `var_${node.pipeline.length + 1}`;
+			node.pipeline.push({
+				id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+				type: 'set_variable',
+				targetVariable: defaultVarName,
+				expression: knownVars.length > 0 ? `@${knownVars[0].name}` : '0'
+			});
+			this._saveFlowchartData();
+			this._renderPipelinePanel(panel, node);
+		};
+	}
+
 	private _renderInspector(parent: HTMLElement): void {
 		clearNode(parent);
 		if (!this._data || !Array.isArray(this._data.nodes)) {
@@ -2739,6 +3298,18 @@ export class WorkflowEditor extends EditorPane {
 						addVarBtn.onclick = () => {
 							this._openNodeVariableInlineEditor(selectedNode);
 						};
+
+						const openPipelineBtn = append(varSec, $('.workflow-format-btn.full-width'));
+						openPipelineBtn.style.marginTop = '6px';
+						openPipelineBtn.style.background = 'rgba(56, 189, 248, 0.15)';
+						openPipelineBtn.style.borderColor = 'rgba(56, 189, 248, 0.4)';
+						openPipelineBtn.style.color = '#38bdf8';
+						append(openPipelineBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.listOrdered)));
+						append(openPipelineBtn, $('span', {}, localize('openPipelineBtn', ' Execution Pipeline (编排顺序)')));
+						openPipelineBtn.title = localize('openPipelineTitle', 'Configure step-by-step execution order and variable mapping for this node');
+						openPipelineBtn.onclick = () => {
+							this._openNodePipelinePanel(selectedNode.id);
+						};
 					} else {
 						const varForm = append(varSec, $('.workflow-var-form'));
 
@@ -2917,6 +3488,18 @@ export class WorkflowEditor extends EditorPane {
 						viewTableBtn.title = localize('viewInTableTitle', 'Open and edit in bottom Context Variables table');
 						viewTableBtn.onclick = () => {
 							this._openDrawerTab('vars', selectedNode.id);
+						};
+
+						const openPipelineBtn = append(actRow, $('.workflow-format-btn.full-width'));
+						openPipelineBtn.style.marginTop = '6px';
+						openPipelineBtn.style.background = 'rgba(56, 189, 248, 0.15)';
+						openPipelineBtn.style.borderColor = 'rgba(56, 189, 248, 0.4)';
+						openPipelineBtn.style.color = '#38bdf8';
+						append(openPipelineBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.listOrdered)));
+						append(openPipelineBtn, $('span', {}, localize('openPipelineBtn', ' Execution Pipeline (编排顺序)')));
+						openPipelineBtn.title = localize('openPipelineTitle', 'Configure step-by-step execution order and variable mapping for this node');
+						openPipelineBtn.onclick = () => {
+							this._openNodePipelinePanel(selectedNode.id);
 						};
 					}
 				}
@@ -3226,74 +3809,93 @@ export class WorkflowEditor extends EditorPane {
 			const textAlign = node.textAlign || 'center';
 			const justifyAlign = textAlign === 'left' ? 'flex-start' : (textAlign === 'right' ? 'flex-end' : 'center');
 
-			// 1. Attached Modules & Tickets (TOP OF NODE: executes first!)
-			if (!this._isPureDiagram && node.imports && node.imports.length > 0) {
+			// 1. Attached Modules & Tickets & Pipeline (TOP OF NODE: executes first!)
+			if (!this._isPureDiagram && ((node.imports && node.imports.length > 0) || (node.pipeline && node.pipeline.length > 0))) {
 				const badgesContainer = append(contentWrapper, $('.node-imports-badges-container'));
 				badgesContainer.style.justifyContent = justifyAlign;
-				const totalImports = node.imports.length;
-				// Dynamic limit based on node width (at least 2, max 4 visible pills)
-				const maxVisible = Math.max(1, Math.min(4, Math.floor(((node.width || 120) - 16) / 55)));
-				const visibleImports = node.imports.slice(0, maxVisible);
-				const overflowCount = totalImports - visibleImports.length;
+				badgesContainer.style.cursor = 'pointer';
+				badgesContainer.title = 'Click to open Execution Pipeline (编排运行顺序)';
+				badgesContainer.onclick = (e) => {
+					e.stopPropagation();
+					this._openNodePipelinePanel(node.id);
+				};
 
-				for (const imp of visibleImports) {
-					const badge = append(badgesContainer, $(`.node-import-badge.${imp.type || 'custom'}`));
-					const typeLabel = imp.type ? (imp.type.charAt(0).toUpperCase() + imp.type.slice(1)) : 'Module';
-					badge.title = `${typeLabel}: ${imp.name}`;
-
-					// Dynamic Icon & Color mapping to match workspacesExplorerPane.ts exactly
-					let codicon = Codicon.package;
-					let color = '';
-					const lower = (imp.type || '').toLowerCase();
-
-					if (lower === 'agent') {
-						codicon = Codicon.robot;
-						color = '#38bdf8';
-					} else if (lower === 'task') {
-						codicon = Codicon.checklist;
-						color = '#a78bfa';
-					} else if (lower === 'job') {
-						codicon = Codicon.rocket;
-						color = '#fbbf24';
-					} else if (lower === 'project') {
-						codicon = Codicon.project;
-						color = '#60a5fa';
-					} else if (lower === 'case') {
-						codicon = Codicon.beaker;
-						color = '#f472b6';
-					} else if (lower === 'issue') {
-						codicon = Codicon.bug;
-						color = '#ef4444';
-					} else if (lower === 'analysis') {
-						codicon = Codicon.graph;
-						color = '#34d399';
-					} else if (lower === 'workflow') {
-						codicon = Codicon.githubAction;
-						color = '#0d9488';
-					} else {
-						codicon = Codicon.package;
-						color = getColorForName(imp.type || 'custom');
-					}
-
-					// Hex to RGBA background color
-					const r = parseInt(color.slice(1, 3), 16) || 13;
-					const g = parseInt(color.slice(3, 5), 16) || 148;
-					const b = parseInt(color.slice(5, 7), 16) || 136;
-
-					badge.style.backgroundColor = `rgba(${r}, ${g}, ${b}, 0.16)`;
-					badge.style.color = color;
-
-					append(badge, $('span' + ThemeIcon.asCSSSelector(codicon)));
-					append(badge, $('span.badge-text', {}, imp.name));
+				if (node.pipeline && node.pipeline.length > 0) {
+					const pipeBadge = append(badgesContainer, $('.node-import-badge'));
+					pipeBadge.style.background = 'rgba(56, 189, 248, 0.18)';
+					pipeBadge.style.color = '#38bdf8';
+					pipeBadge.style.border = '1px solid rgba(56, 189, 248, 0.45)';
+					pipeBadge.title = `Execution Pipeline: ${node.pipeline.length} step(s) configured (Click to edit)`;
+					append(pipeBadge, $('span' + ThemeIcon.asCSSSelector(Codicon.listOrdered)));
+					append(pipeBadge, $('span.badge-text', {}, `${node.pipeline.length} steps`));
 				}
 
-				if (overflowCount > 0) {
-					const moreBadge = append(badgesContainer, $('.node-import-badge.more-badge'));
-					const remainingList = node.imports.slice(maxVisible).map(i => `• [${i.type || 'module'}] ${i.name}`).join('\n');
-					moreBadge.title = `More attached tickets/modules (+${overflowCount}):\n${remainingList}`;
-					moreBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.12)';
-					moreBadge.style.color = 'var(--vscode-descriptionForeground, #aaaaaa)';
-					append(moreBadge, $('span.badge-text', {}, `+${overflowCount}`));
+				const totalImports = node.imports?.length || 0;
+				if (totalImports > 0) {
+					// Dynamic limit based on node width (at least 1, max 3 visible pills when pipeline present)
+					const maxVisible = Math.max(1, Math.min(3, Math.floor(((node.width || 120) - 20) / 60)));
+					const visibleImports = (node.imports || []).slice(0, maxVisible);
+					const overflowCount = totalImports - visibleImports.length;
+
+					for (const imp of visibleImports) {
+						const badge = append(badgesContainer, $(`.node-import-badge.${imp.type || 'custom'}`));
+						const typeLabel = imp.type ? (imp.type.charAt(0).toUpperCase() + imp.type.slice(1)) : 'Module';
+						badge.title = `${typeLabel}: ${imp.name}`;
+
+						// Dynamic Icon & Color mapping to match workspacesExplorerPane.ts exactly
+						let codicon = Codicon.package;
+						let color = '';
+						const lower = (imp.type || '').toLowerCase();
+
+						if (lower === 'agent') {
+							codicon = Codicon.robot;
+							color = '#38bdf8';
+						} else if (lower === 'task') {
+							codicon = Codicon.checklist;
+							color = '#a78bfa';
+						} else if (lower === 'job') {
+							codicon = Codicon.rocket;
+							color = '#fbbf24';
+						} else if (lower === 'project') {
+							codicon = Codicon.project;
+							color = '#60a5fa';
+						} else if (lower === 'case') {
+							codicon = Codicon.beaker;
+							color = '#f472b6';
+						} else if (lower === 'issue') {
+							codicon = Codicon.bug;
+							color = '#ef4444';
+						} else if (lower === 'analysis') {
+							codicon = Codicon.graph;
+							color = '#34d399';
+						} else if (lower === 'workflow') {
+							codicon = Codicon.githubAction;
+							color = '#0d9488';
+						} else {
+							codicon = Codicon.package;
+							color = getColorForName(imp.type || 'custom');
+						}
+
+						// Hex to RGBA background color
+						const r = parseInt(color.slice(1, 3), 16) || 13;
+						const g = parseInt(color.slice(3, 5), 16) || 148;
+						const b = parseInt(color.slice(5, 7), 16) || 136;
+
+						badge.style.backgroundColor = `rgba(${r}, ${g}, ${b}, 0.16)`;
+						badge.style.color = color;
+
+						append(badge, $('span' + ThemeIcon.asCSSSelector(codicon)));
+						append(badge, $('span.badge-text', {}, imp.name));
+					}
+
+					if (overflowCount > 0) {
+						const moreBadge = append(badgesContainer, $('.node-import-badge.more-badge'));
+						const remainingList = node.imports!.slice(maxVisible).map(i => `• [${i.type || 'module'}] ${i.name}`).join('\n');
+						moreBadge.title = `More attached tickets/modules (+${overflowCount}):\n${remainingList}`;
+						moreBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.12)';
+						moreBadge.style.color = 'var(--vscode-descriptionForeground, #aaaaaa)';
+						append(moreBadge, $('span.badge-text', {}, `+${overflowCount}`));
+					}
 				}
 			}
 
@@ -6082,6 +6684,13 @@ export class WorkflowEditor extends EditorPane {
 							});
 						}
 					});
+				};
+
+				const pipelineItem = append(menu, $('.context-menu-item'));
+				pipelineItem.textContent = 'Execution Pipeline (≡) ...';
+				pipelineItem.onclick = () => {
+					this._closeContextMenu();
+					this._openNodePipelinePanel(targetId);
 				};
 			}
 
