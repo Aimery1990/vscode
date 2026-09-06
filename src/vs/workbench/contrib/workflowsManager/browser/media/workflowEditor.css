@@ -2578,7 +2578,7 @@
 	top: 14px;
 	bottom: 36px;
 	width: 380px;
-	z-index: 120;
+	z-index: 500;
 	background: rgba(13, 17, 26, 0.95);
 	backdrop-filter: blur(14px);
 	-webkit-backdrop-filter: blur(14px);
@@ -2762,9 +2762,37 @@
 .pipeline-import-info {
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	gap: 6px;
 	overflow: hidden;
 	flex: 1;
+	min-width: 0;
+}
+
+.pipeline-import-type-icon {
+	font-size: 13px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+.pipeline-import-name {
+	font-size: 11px;
+	font-weight: 600;
+	color: #f1f5f9;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.pipeline-type-badge {
+	font-size: 8px;
+	font-weight: 600;
+	padding: 1px 5px;
+	border-radius: 3px;
+	text-transform: uppercase;
+	letter-spacing: 0.3px;
+	flex-shrink: 0;
 }
 
 .pipeline-import-badge {
@@ -2776,13 +2804,6 @@
 	letter-spacing: 0.4px;
 	flex-shrink: 0;
 }
-
-.pipeline-import-name {
-	font-size: 11px;
-	font-weight: 500;
-	color: #f1f5f9;
-	overflow: hidden;
-	text-overflow: ellipsis;
 	white-space: nowrap;
 }
 
@@ -2951,16 +2972,16 @@
 }
 
 .pipeline-step-badge-var {
-	background: rgba(13, 148, 136, 0.2);
-	border: 1px solid rgba(13, 148, 136, 0.4);
-	color: #2dd4bf;
+	background: rgba(56, 189, 248, 0.18);
+	border: 1px solid rgba(56, 189, 248, 0.4);
+	color: #38bdf8;
 	font-size: 9px;
 	font-weight: 700;
 	padding: 1px 5px;
 	border-radius: 3px;
 	display: inline-flex;
 	align-items: center;
-	gap: 3px;
+	gap: 4px;
 	flex-shrink: 0;
 }
 

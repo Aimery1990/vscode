@@ -138,6 +138,36 @@ function getColorForName(name: string | undefined): string {
 	return MODERN_PALETTE[index];
 }
 
+function getEntityBadgeStyle(type?: string): { color: string; bg: string; icon: ThemeIcon } {
+	const t = (type || 'task').toLowerCase();
+	switch (t) {
+		case 'job':
+			return { color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.18)', icon: Codicon.rocket };
+		case 'task':
+			return { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.18)', icon: Codicon.checklist };
+		case 'project':
+			return { color: '#60a5fa', bg: 'rgba(96, 165, 250, 0.18)', icon: Codicon.project };
+		case 'workflow':
+			return { color: '#0d9488', bg: 'rgba(13, 148, 136, 0.18)', icon: Codicon.githubAction };
+		case 'agent':
+			return { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.18)', icon: Codicon.robot };
+		case 'case':
+			return { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.18)', icon: Codicon.beaker };
+		case 'issue':
+			return { color: '#ef4444', bg: 'rgba(239, 68, 68, 0.18)', icon: Codicon.bug };
+		case 'analysis':
+			return { color: '#34d399', bg: 'rgba(52, 211, 153, 0.18)', icon: Codicon.graph };
+		case 'note':
+			return { color: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.18)', icon: Codicon.package };
+		case 'workspace':
+			return { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.18)', icon: Codicon.rootFolder };
+		default: {
+			const c = getColorForName(type || 'custom');
+			return { color: c, bg: hexToRgba(c, 0.18), icon: Codicon.package };
+		}
+	}
+}
+
 export class WorkflowEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.workflowEditor';
 
@@ -353,6 +383,9 @@ export class WorkflowEditor extends EditorPane {
 					outputVariables: Array.isArray(n.outputVariables)
 						? n.outputVariables.map((ov: any) => ({ ...ov }))
 						: (n.outputVariable ? [{ ...n.outputVariable }] : undefined),
+					pipeline: Array.isArray(n.pipeline)
+						? n.pipeline.map((p: any) => ({ ...p }))
+						: undefined,
 					color: n.color || undefined,
 					textColor: n.textColor || undefined,
 					textAlign: n.textAlign || undefined,
@@ -519,6 +552,11 @@ export class WorkflowEditor extends EditorPane {
 
 	private _renderEditor(): void {
 		if (!this._container) return;
+
+		if (this._pipelinePanelEl) {
+			this._pipelinePanelEl.remove();
+			this._pipelinePanelEl = undefined;
+		}
 
 		this._contentDisposables.clear();
 		clearNode(this._container);
@@ -2133,11 +2171,14 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _openNodePipelinePanel(nodeId: string): void {
-		if (this._activePipelineNodeId === nodeId && this._pipelinePanelEl) {
+		if (this._activePipelineNodeId === nodeId && this._pipelinePanelEl && this._canvasViewport?.contains(this._pipelinePanelEl)) {
 			return;
 		}
 		const node = this._data.nodes.find(n => n.id === nodeId);
-		if (!node) return;
+		if (!node) {
+			this._notificationService.warn(`Node '${nodeId}' not found.`);
+			return;
+		}
 
 		this._activePipelineNodeId = nodeId;
 
@@ -2153,9 +2194,15 @@ export class WorkflowEditor extends EditorPane {
 
 		if (!this._canvasViewport) return;
 
+		// Ensure panel element is cleanly attached to current canvas viewport
+		if (this._pipelinePanelEl && !this._canvasViewport.contains(this._pipelinePanelEl)) {
+			this._pipelinePanelEl.remove();
+			this._pipelinePanelEl = undefined;
+		}
 		if (!this._pipelinePanelEl) {
 			this._pipelinePanelEl = append(this._canvasViewport, $('.workflow-pipeline-panel'));
 		}
+		this._pipelinePanelEl.style.display = 'flex';
 		this._pipelinePanelEl.className = `workflow-pipeline-panel dock-${this._pipelineDockSide}`;
 		this._renderPipelinePanel(this._pipelinePanelEl, node);
 	}
@@ -2309,27 +2356,21 @@ export class WorkflowEditor extends EditorPane {
 					const card = append(importsList, $('.pipeline-import-card'));
 					const info = append(card, $('.pipeline-import-info'));
 
-					// Type Badge Color & Icon
-					let badgeColor = '#38bdf8';
-					let typeIcon = Codicon.checklist;
-					const lowerType = (imp.type || '').toLowerCase();
-					if (lowerType === 'task') { badgeColor = '#a78bfa'; typeIcon = Codicon.checklist; }
-					else if (lowerType === 'job') { badgeColor = '#fbbf24'; typeIcon = Codicon.rocket; }
-					else if (lowerType === 'agent') { badgeColor = '#38bdf8'; typeIcon = Codicon.robot; }
-					else if (lowerType === 'project') { badgeColor = '#60a5fa'; typeIcon = Codicon.project; }
-					else if (lowerType === 'case') { badgeColor = '#f472b6'; typeIcon = Codicon.beaker; }
-					else if (lowerType === 'issue') { badgeColor = '#ef4444'; typeIcon = Codicon.bug; }
-					else if (lowerType === 'workflow') { badgeColor = '#0d9488'; typeIcon = Codicon.githubAction; }
+					const style = getEntityBadgeStyle(imp.type);
 
-					const badge = append(info, $('.pipeline-import-badge'));
-					badge.style.background = `${badgeColor}22`;
-					badge.style.color = badgeColor;
-					badge.style.border = `1px solid ${badgeColor}55`;
-					append(badge, $('span' + ThemeIcon.asCSSSelector(typeIcon)));
-					append(badge, $('span', {}, ` ${imp.type ? imp.type.toUpperCase() : 'TICKET'}`));
+					// 1. Icon on the left (colored with system type color, aligned)
+					const iconSpan = append(info, $('span.pipeline-import-type-icon' + ThemeIcon.asCSSSelector(style.icon)));
+					iconSpan.style.color = style.color;
 
+					// 2. Ticket ID / Name
 					const nameSpan = append(info, $('span.pipeline-import-name', {}, imp.name));
 					nameSpan.title = `${imp.type || 'ticket'}: ${imp.name}`;
+
+					// 3. Type Badge pill following the name (matching system tree badge)
+					const typeBadge = append(info, $('span.pipeline-type-badge', {}, (imp.type || 'ticket').toUpperCase()));
+					typeBadge.style.background = style.bg;
+					typeBadge.style.color = style.color;
+					typeBadge.title = `Entity Type: ${(imp.type || 'ticket').toUpperCase()}`;
 
 					const actionsEl = append(card, $('.pipeline-import-actions'));
 
@@ -2538,7 +2579,10 @@ export class WorkflowEditor extends EditorPane {
 					};
 				} else if (step.type === 'set_variable') {
 					const badge = append(topRow, $('.pipeline-step-badge-var'));
-					append(badge, $('span' + ThemeIcon.asCSSSelector(Codicon.variable)));
+					const vTag = append(badge, $('span.var-icon-badge'));
+					vTag.textContent = '[V]';
+					vTag.style.color = '#38bdf8';
+					vTag.style.marginRight = '2px';
 					append(badge, $('span', {}, 'VAR'));
 
 					const title = append(topRow, $('.pipeline-step-title'));
@@ -2654,8 +2698,11 @@ export class WorkflowEditor extends EditorPane {
 
 		// + Assign Variable Step
 		const addVarBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-secondary'));
-		append(addVarBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.variable)));
-		append(addVarBtn, $('span', {}, '+ Set Variable'));
+		const vBtnTag = append(addVarBtn, $('span.var-icon-badge'));
+		vBtnTag.textContent = '[V]';
+		vBtnTag.style.color = '#38bdf8';
+		vBtnTag.style.marginRight = '4px';
+		append(addVarBtn, $('span', {}, 'Set Variable'));
 		addVarBtn.title = 'Add variable assignment step (e.g. @monitor = @task)';
 		addVarBtn.onclick = (e) => {
 			e.stopPropagation();
@@ -3842,49 +3889,13 @@ export class WorkflowEditor extends EditorPane {
 						const typeLabel = imp.type ? (imp.type.charAt(0).toUpperCase() + imp.type.slice(1)) : 'Module';
 						badge.title = `${typeLabel}: ${imp.name}`;
 
-						// Dynamic Icon & Color mapping to match workspacesExplorerPane.ts exactly
-						let codicon = Codicon.package;
-						let color = '';
-						const lower = (imp.type || '').toLowerCase();
+						const style = getEntityBadgeStyle(imp.type);
 
-						if (lower === 'agent') {
-							codicon = Codicon.robot;
-							color = '#38bdf8';
-						} else if (lower === 'task') {
-							codicon = Codicon.checklist;
-							color = '#a78bfa';
-						} else if (lower === 'job') {
-							codicon = Codicon.rocket;
-							color = '#fbbf24';
-						} else if (lower === 'project') {
-							codicon = Codicon.project;
-							color = '#60a5fa';
-						} else if (lower === 'case') {
-							codicon = Codicon.beaker;
-							color = '#f472b6';
-						} else if (lower === 'issue') {
-							codicon = Codicon.bug;
-							color = '#ef4444';
-						} else if (lower === 'analysis') {
-							codicon = Codicon.graph;
-							color = '#34d399';
-						} else if (lower === 'workflow') {
-							codicon = Codicon.githubAction;
-							color = '#0d9488';
-						} else {
-							codicon = Codicon.package;
-							color = getColorForName(imp.type || 'custom');
-						}
+						badge.style.backgroundColor = style.bg;
+						badge.style.color = style.color;
+						badge.style.border = `1px solid ${style.color}44`;
 
-						// Hex to RGBA background color
-						const r = parseInt(color.slice(1, 3), 16) || 13;
-						const g = parseInt(color.slice(3, 5), 16) || 148;
-						const b = parseInt(color.slice(5, 7), 16) || 136;
-
-						badge.style.backgroundColor = `rgba(${r}, ${g}, ${b}, 0.16)`;
-						badge.style.color = color;
-
-						append(badge, $('span' + ThemeIcon.asCSSSelector(codicon)));
+						append(badge, $('span' + ThemeIcon.asCSSSelector(style.icon)));
 						append(badge, $('span.badge-text', {}, imp.name));
 					}
 
