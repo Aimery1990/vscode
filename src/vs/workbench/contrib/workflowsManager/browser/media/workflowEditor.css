@@ -2989,37 +2989,48 @@
 	color: #4ade80;
 	font-size: 9px;
 	font-weight: 700;
-	padding: 1px 5px;
+	padding: 0 5px;
 	border-radius: 3px;
 	display: inline-flex;
 	align-items: center;
 	gap: 3px;
 	flex-shrink: 0;
-	line-height: 1.2;
+	height: 16px;
+	box-sizing: border-box;
+	line-height: 1;
 }
 
 .pipeline-step-badge-run span.codicon {
-	font-size: 6.5px !important;
+	font-size: 8px !important;
 	line-height: 1;
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	color: #4ade80;
-	transform: scale(0.85);
 }
 
 .pipeline-step-badge-var {
-	background: rgba(56, 189, 248, 0.18);
-	border: 1px solid rgba(56, 189, 248, 0.4);
+	background: rgba(56, 189, 248, 0.14);
+	border: 1px solid rgba(56, 189, 248, 0.35);
 	color: #38bdf8;
 	font-size: 9px;
 	font-weight: 700;
-	padding: 1px 5px;
+	padding: 0 5px;
 	border-radius: 3px;
 	display: inline-flex;
 	align-items: center;
-	gap: 4px;
+	gap: 3px;
 	flex-shrink: 0;
+	height: 16px;
+	box-sizing: border-box;
+	line-height: 1;
+}
+
+.pipeline-step-badge-var .var-icon-badge {
+	font-size: 8.5px;
+	line-height: 1;
+	letter-spacing: -0.3px;
+	color: #38bdf8;
 }
 
 .pipeline-step-title {
@@ -3087,41 +3098,46 @@
 	line-height: 1.3;
 }
 
-/* Green Add Runner Button */
+/* Standard Button: Add Runner (Neutral background, green icon) */
 .pipeline-btn-run {
-	background: rgba(34, 197, 94, 0.12);
-	border-color: rgba(34, 197, 94, 0.35);
-	color: #4ade80;
+	background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.08));
+	border: 1px solid var(--vscode-button-secondaryBorder, rgba(255, 255, 255, 0.14));
+	color: var(--vscode-button-secondaryForeground, #e2e8f0);
 }
 
 .pipeline-btn-run span.codicon {
-	font-size: 7.5px;
+	font-size: 8px;
 	color: #4ade80;
+	margin-right: 1px;
 }
 
 .pipeline-btn-run:hover {
-	background: rgba(34, 197, 94, 0.22);
-	border-color: #4ade80;
+	background: var(--vscode-button-secondaryHoverBackground, rgba(255, 255, 255, 0.16));
+	border-color: rgba(255, 255, 255, 0.28);
 	color: #ffffff;
 }
 
-/* Primary Button fallback (green) */
+.pipeline-btn-run:hover span.codicon {
+	color: #86efac;
+}
+
+/* Primary Button fallback (neutral) */
 .pipeline-btn-primary {
-	background: rgba(34, 197, 94, 0.12);
-	border-color: rgba(34, 197, 94, 0.35);
-	color: #4ade80;
+	background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.08));
+	border: 1px solid var(--vscode-button-secondaryBorder, rgba(255, 255, 255, 0.14));
+	color: var(--vscode-button-secondaryForeground, #e2e8f0);
 }
 
 .pipeline-btn-primary:hover {
-	background: rgba(34, 197, 94, 0.22);
-	border-color: #4ade80;
+	background: var(--vscode-button-secondaryHoverBackground, rgba(255, 255, 255, 0.16));
+	border-color: rgba(255, 255, 255, 0.28);
 	color: #ffffff;
 }
 
-/* Standard Secondary Button */
+/* Standard Secondary Button: Add Variable */
 .pipeline-btn-secondary {
 	background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.08));
-	border-color: var(--vscode-button-secondaryBorder, rgba(255, 255, 255, 0.14));
+	border: 1px solid var(--vscode-button-secondaryBorder, rgba(255, 255, 255, 0.14));
 	color: var(--vscode-button-secondaryForeground, #e2e8f0);
 }
 
