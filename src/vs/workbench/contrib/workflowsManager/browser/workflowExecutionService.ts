@@ -964,19 +964,24 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		if (node.pipeline && node.pipeline.length > 0) {
 			this._emitLog(run, 'info', `[Pipeline] Node '${node.label}' executing explicit pipeline (${node.pipeline.length} step(s))...`);
 
-			const runTicket = async (ticketName: string, ticketType?: string, ticketUri?: string) => {
+			const runTicket = async (ticketName: string, ticketType?: string, ticketUri?: string, parameters?: string) => {
 				const ticketStart = Date.now();
-				this._emitLog(run, 'info', `Running Ticket: [${ticketType || 'task'}] '${ticketName}'`);
+				this._emitLog(run, 'info', `Running Ticket: [${ticketType || 'task'}] '${ticketName}'${parameters ? ` (parameters: ${parameters})` : ''}`);
 
 				// Simulated async ticket execution with snapshot integration
 				await new Promise(r => setTimeout(r, 600));
+
+				const paramStr = parameters?.trim();
+				const outputText = paramStr
+					? `Ticket '${ticketName}' executed with (${paramStr}).`
+					: `Ticket '${ticketName}' processed successfully.`;
 
 				const ticketRecord = {
 					ticketId: ticketUri || ticketName,
 					ticketName: ticketName,
 					ticketType: ticketType || 'task',
 					status: 'success' as const,
-					output: `Ticket '${ticketName}' processed successfully.`,
+					output: outputText,
 					durationMs: Date.now() - ticketStart
 				};
 				state.executedTickets.push(ticketRecord);
@@ -994,7 +999,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const step: INodePipelineStep = node.pipeline[i];
 				if (step.type === 'run_ticket' && step.ticketName) {
 					this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'${step.parameters ? ` (params: ${step.parameters})` : ''}`);
-					const ticketRecord = await runTicket(step.ticketName, step.ticketType, step.ticketUri);
+					const ticketRecord = await runTicket(step.ticketName, step.ticketType, step.ticketUri, step.parameters);
 					if (step.targetVariable) {
 						const varKey = step.targetVariable.trim().replace(/^@/, '');
 						run.contextVariables[varKey] = ticketRecord.output;

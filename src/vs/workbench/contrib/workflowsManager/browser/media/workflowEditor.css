@@ -1852,7 +1852,7 @@
 	display: inline-flex;
 	align-items: center;
 	gap: 4px;
-	margin-top: 4px;
+	margin-top: 0;
 	padding: 1px 6px;
 	background: rgba(56, 189, 248, 0.15);
 	border: 1px solid rgba(56, 189, 248, 0.4);
@@ -3118,13 +3118,13 @@
 
 .pipeline-ticket-input {
 	flex: 1;
-	min-width: 90px;
+	min-width: 100px;
 }
 
 .pipeline-param-input {
-	width: 110px;
-	font-size: 9.5px;
-	opacity: 0.9;
+	flex: 1;
+	min-width: 100px;
+	font-size: 10px;
 }
 
 .pipeline-var-name-input {
