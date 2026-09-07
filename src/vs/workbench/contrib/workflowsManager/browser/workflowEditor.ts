@@ -4433,7 +4433,7 @@ export class WorkflowEditor extends EditorPane {
 		varPill.ondblclick = (e) => {
 			e.stopPropagation();
 			e.preventDefault();
-			this._openNodeVariableInlineEditor(node, v, varPill);
+			this._openNodeVariableInlineEditor(node, v, varPill, pipelineStep);
 		};
 
 		const vBadge = append(varPill, $('.var-tag-icon'));
@@ -5155,7 +5155,12 @@ export class WorkflowEditor extends EditorPane {
 
 	private _activeVariableDraftInputEl: HTMLElement | null = null;
 
-	private _openNodeVariableInlineEditor(node: IFlowchartNode, targetVar?: INodeVariable, targetPillElement?: HTMLElement): void {
+	private _openNodeVariableInlineEditor(
+		node: IFlowchartNode,
+		targetVar?: INodeVariable,
+		targetPillElement?: HTMLElement,
+		pipelineStep?: INodePipelineStep
+	): void {
 		if (this._activeVariableDraftInputEl) {
 			this._activeVariableDraftInputEl.remove();
 			this._activeVariableDraftInputEl = null;
@@ -5231,8 +5236,20 @@ export class WorkflowEditor extends EditorPane {
 		if (targetVar) {
 			if (targetVar.expression) {
 				const expr = targetVar.expression.trim();
-				const cleanExpr = expr.replace(/@([a-zA-Z0-9_]+)/g, '$1');
-				input.value = cleanExpr.startsWith(targetVar.name) ? cleanExpr : `${targetVar.name} ${cleanExpr.startsWith('=') || cleanExpr.startsWith('+') || cleanExpr.startsWith('-') ? cleanExpr : `= ${cleanExpr}`}`;
+				const cleanExpr = expr.replace(/@([a-zA-Z0-9_\u4e00-\u9fa5]+)/g, '$1');
+				// Check if cleanExpr already explicitly starts with the variable name and an assignment or mutation operator
+				// e.g. "monitor = ...", "monitor += ...", "monitor++"
+				const escapedName = targetVar.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+				const varPrefixRegex = new RegExp(`^${escapedName}\\s*(=|\\+=|-=|\\*=|/=|%=|\\+\\+|--)`);
+				if (varPrefixRegex.test(cleanExpr)) {
+					input.value = cleanExpr;
+				} else if (/^(\+=|-=|\*=|\/=|%=|\+\+|--)/.test(cleanExpr)) {
+					input.value = `${targetVar.name} ${cleanExpr}`;
+				} else if (cleanExpr.startsWith('=')) {
+					input.value = `${targetVar.name} ${cleanExpr}`;
+				} else {
+					input.value = `${targetVar.name} = ${cleanExpr}`;
+				}
 			} else {
 				input.value = `${targetVar.name} = ${targetVar.initialValue || 'None'}`;
 			}
@@ -5383,7 +5400,7 @@ export class WorkflowEditor extends EditorPane {
 			closePopover();
 			const text = input.value.trim();
 			if (text) {
-				this._parseAndApplyVariableExpression(node, text, targetVar);
+				this._parseAndApplyVariableExpression(node, text, targetVar, pipelineStep);
 			} else {
 				if (targetPillEl) targetPillEl.style.display = '';
 				draftWrapper.remove();
@@ -5450,7 +5467,12 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
-	private _parseAndApplyVariableExpression(node: IFlowchartNode, rawText: string, targetVar?: INodeVariable): void {
+	private _parseAndApplyVariableExpression(
+		node: IFlowchartNode,
+		rawText: string,
+		targetVar?: INodeVariable,
+		pipelineStep?: INodePipelineStep
+	): void {
 		const trimmed = rawText.trim();
 		if (!trimmed) return;
 
@@ -5482,6 +5504,16 @@ export class WorkflowEditor extends EditorPane {
 			let expression: string | undefined = undefined;
 			let initialValue: string = 'None';
 
+			const allKnownVars = new Set<string>();
+			for (const n of this._data?.nodes || []) {
+				for (const kv of this._getNodeVariables(n)) {
+					allKnownVars.add(kv.name);
+				}
+			}
+			for (const kv of vars) {
+				allKnownVars.add(kv.name);
+			}
+
 			const incMatch = trimmed.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*(\+\+|--)$/);
 			const opMatch = trimmed.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*(\+=|-=|\*=|\/=|%=)\s*(.+)$/);
 			const assignMatch = trimmed.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*(.+)$/);
@@ -5510,16 +5542,6 @@ export class WorkflowEditor extends EditorPane {
 					imp.name.replace(/[^a-zA-Z0-9_]/g, '_') === cleanRhs
 				);
 
-				const allKnownVars = new Set<string>();
-				for (const n of this._data?.nodes || []) {
-					for (const kv of this._getNodeVariables(n)) {
-						allKnownVars.add(kv.name);
-					}
-				}
-				for (const kv of vars) {
-					allKnownVars.add(kv.name);
-				}
-
 				const isExpression = !!matchingTicket ||
 					rhs.startsWith('@') ||
 					rhs.startsWith('ticket') ||
@@ -5546,8 +5568,31 @@ export class WorkflowEditor extends EditorPane {
 				varName = targetVar ? targetVar.name : (vars[vars.length - 1]?.name || this._generateNextVarName());
 				expression = trimmed.startsWith('++') ? '+= 1' : (trimmed.startsWith('--') ? '-= 1' : trimmed);
 			} else {
-				varName = trimmed.replace(/^@/, '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_') || this._generateNextVarName();
-				initialValue = 'None';
+				if (targetVar) {
+					// User was editing an existing variable targetVar!
+					const cleanRhs = trimmed.replace(/@([a-zA-Z0-9_\u4e00-\u9fa5]+)/g, '$1');
+					// Check if user is purely renaming the variable (valid identifier without spaces or math operators)
+					const isPureIdentifier = /^[a-zA-Z_][a-zA-Z0-9_\u4e00-\u9fa5]*$/.test(trimmed);
+					if (isPureIdentifier && !allKnownVars.has(trimmed) && trimmed !== 'ticket' && trimmed !== 'None') {
+						varName = trimmed;
+						expression = targetVar.expression;
+						initialValue = targetVar.initialValue || 'None';
+					} else {
+						// User provided a RHS value/expression for targetVar (e.g. "monitor1 + monitor2", "100", "@ticket")
+						varName = targetVar.name;
+						if (trimmed.includes('+') || trimmed.includes('-') || trimmed.includes('*') || trimmed.includes('/') || trimmed.includes('%') ||
+							trimmed.startsWith('@') || trimmed.startsWith('ticket') || allKnownVars.has(cleanRhs) || cleanRhs === 'None') {
+							expression = cleanRhs;
+							initialValue = 'None';
+						} else {
+							initialValue = cleanRhs;
+							expression = undefined;
+						}
+					}
+				} else {
+					varName = trimmed.replace(/^@/, '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_') || this._generateNextVarName();
+					initialValue = 'None';
+				}
 			}
 
 			if (targetVar) {
@@ -5556,11 +5601,23 @@ export class WorkflowEditor extends EditorPane {
 				targetVar.expression = expression;
 				targetVar.initialValue = initialValue;
 
-				if (node.pipeline) {
+				if (pipelineStep) {
+					pipelineStep.targetVariable = varName;
+					pipelineStep.expression = expression || initialValue;
+				} else if (node.pipeline) {
 					const step = node.pipeline.find(s => s.type === 'set_variable' && s.targetVariable?.replace(/^@/, '') === oldName);
 					if (step) {
 						step.targetVariable = varName;
 						step.expression = expression || initialValue;
+					}
+				}
+
+				if (Array.isArray(node.outputVariables)) {
+					const outVar = node.outputVariables.find(v => v.name.replace(/^@/, '') === oldName);
+					if (outVar) {
+						outVar.name = varName;
+						outVar.expression = expression;
+						outVar.initialValue = initialValue;
 					}
 				}
 			} else {
