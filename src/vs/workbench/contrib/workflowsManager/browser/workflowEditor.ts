@@ -158,7 +158,7 @@ function getEntityBadgeStyle(type?: string): { color: string; bg: string; icon: 
 		case 'analysis':
 			return { color: '#34d399', bg: 'rgba(52, 211, 153, 0.18)', icon: Codicon.graph };
 		case 'note':
-			return { color: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.18)', icon: Codicon.package };
+			return { color: '#00b4d8', bg: 'rgba(0, 180, 216, 0.18)', icon: Codicon.package };
 		case 'workspace':
 			return { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.18)', icon: Codicon.rootFolder };
 		default: {

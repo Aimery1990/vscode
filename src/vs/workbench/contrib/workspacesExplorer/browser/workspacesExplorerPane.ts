@@ -231,7 +231,7 @@ function getTicketTypeBadge(type: string): { color: string; bg: string } {
 		case 'case': return { color: '#f472b6', bg: 'rgba(244, 114, 182, 0.18)' };
 		case 'issue': return { color: '#ef4444', bg: 'rgba(239, 68, 68, 0.18)' };
 		case 'analysis': return { color: '#34d399', bg: 'rgba(52, 211, 153, 0.18)' };
-		case 'note': return { color: '#2dd4bf', bg: 'rgba(45, 212, 191, 0.18)' };
+		case 'note': return { color: '#00b4d8', bg: 'rgba(0, 180, 216, 0.18)' };
 		case 'workspace': return { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.18)' };
 		default: return { color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.18)' };
 	}
