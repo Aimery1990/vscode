@@ -2637,9 +2637,6 @@ export class WorkflowEditor extends EditorPane {
 
 		this._saveFlowchartData();
 		this._renderNodes();
-		if (this._pipelinePanelEl) {
-			this._renderPipelinePanel(this._pipelinePanelEl, node);
-		}
 		if (!silent) {
 			this._notificationService.info(`Synced to node '${node.label}': ${updatedTickets} ticket(s) and ${updatedVars} variable(s) updated.`);
 		}
@@ -2940,6 +2937,8 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _renderPipelinePanel(panel: HTMLElement, node: IFlowchartNode): void {
+		const existingBody = panel.querySelector('.pipeline-panel-body') as HTMLElement;
+		const previousScrollTop = existingBody ? existingBody.scrollTop : 0;
 		clearNode(panel);
 
 		// Header
@@ -3333,6 +3332,11 @@ export class WorkflowEditor extends EditorPane {
 					varNameInput.placeholder = 'Variable name (e.g. current_user)';
 					varNameInput.title = 'Define or assign Variable name';
 					varNameInput.oninput = () => {
+						step.targetVariable = varNameInput.value.trim().replace(/^@/, '') || undefined;
+						this._syncToNode(node, true);
+						this._saveFlowchartData();
+					};
+					varNameInput.onchange = () => {
 						step.targetVariable = varNameInput.value.trim().replace(/^@/, '') || 'var';
 						this._syncToNode(node, true);
 						this._saveFlowchartData();
@@ -3360,6 +3364,11 @@ export class WorkflowEditor extends EditorPane {
 						'variable'
 					);
 
+					valInput.oninput = () => {
+						step.expression = valInput.value.trim() || undefined;
+						this._syncToNode(node, true);
+						this._saveFlowchartData();
+					};
 					valInput.onchange = () => {
 						step.expression = valInput.value.trim() || undefined;
 						this._syncToNode(node, true);
@@ -3459,6 +3468,12 @@ export class WorkflowEditor extends EditorPane {
 			e.stopPropagation();
 			this._syncToNode(node, false);
 		};
+
+		if (previousScrollTop > 0) {
+			setTimeout(() => {
+				body.scrollTop = previousScrollTop;
+			}, 0);
+		}
 	}
 
 	private _renderInspector(parent: HTMLElement): void {
