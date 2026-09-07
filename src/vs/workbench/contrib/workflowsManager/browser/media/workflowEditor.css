@@ -2979,8 +2979,7 @@
 	display: flex;
 	align-items: center;
 	gap: 5px;
-	height: 18px;
-	overflow: hidden;
+	min-height: 20px;
 }
 
 .pipeline-step-badge-run {
@@ -3053,19 +3052,58 @@
 	margin-top: 2px;
 }
 
+.pipeline-cfg-label {
+	font-size: 10px;
+	color: #94a3b8;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
 .pipeline-step-input {
-	background: rgba(0, 0, 0, 0.4);
+	background: rgba(0, 0, 0, 0.45);
 	border: 1px solid rgba(255, 255, 255, 0.12);
 	border-radius: 3px;
 	padding: 2px 6px;
 	color: #e2e8f0;
 	font-size: 10px;
 	outline: none;
+	height: 20px;
+	box-sizing: border-box;
 	transition: border-color 0.12s ease;
+}
+
+.pipeline-step-input::placeholder {
+	color: rgba(255, 255, 255, 0.35);
+	font-style: italic;
 }
 
 .pipeline-step-input:focus {
 	border-color: #38bdf8;
+	background: rgba(0, 0, 0, 0.6);
+}
+
+.pipeline-ticket-input {
+	flex: 1;
+	min-width: 90px;
+}
+
+.pipeline-param-input {
+	width: 110px;
+	font-size: 9.5px;
+	opacity: 0.9;
+}
+
+.pipeline-var-name-input {
+	flex: 1;
+	min-width: 110px;
+}
+
+.pipeline-output-input {
+	flex: 1;
+}
+
+.pipeline-var-val-input {
+	flex: 1;
 }
 
 .pipeline-step-actions {
@@ -3171,5 +3209,73 @@
 	align-items: center;
 	gap: 6px;
 }
+
+/* Pipeline Autocomplete Dropdown */
+.pipeline-autocomplete-dropdown {
+	position: fixed;
+	z-index: 10000;
+	background: #181825;
+	border: 1px solid rgba(255, 255, 255, 0.16);
+	border-radius: 5px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.65);
+	max-height: 220px;
+	overflow-y: auto;
+	padding: 4px 0;
+	backdrop-filter: blur(10px);
+	font-family: inherit;
+}
+
+.pipeline-autocomplete-item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 8px;
+	font-size: 11px;
+	color: #cbd5e1;
+	cursor: pointer;
+	user-select: none;
+	transition: background 0.1s ease, color 0.1s ease;
+}
+
+.pipeline-autocomplete-item:hover,
+.pipeline-autocomplete-item.selected {
+	background: rgba(56, 189, 248, 0.18);
+	color: #ffffff;
+}
+
+.pipeline-autocomplete-item .item-icon {
+	font-size: 11px;
+	color: #38bdf8;
+	flex-shrink: 0;
+	display: flex;
+	align-items: center;
+}
+
+.pipeline-autocomplete-item .item-label {
+	font-weight: 500;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 1;
+}
+
+.pipeline-autocomplete-item .item-detail {
+	font-size: 9px;
+	opacity: 0.65;
+	text-transform: uppercase;
+	padding: 1px 5px;
+	border-radius: 2px;
+	background: rgba(255, 255, 255, 0.08);
+	flex-shrink: 0;
+}
+
+.pipeline-autocomplete-empty {
+	padding: 8px 12px;
+	font-size: 10.5px;
+	color: #64748b;
+	font-style: italic;
+	text-align: center;
+}
+
 
 

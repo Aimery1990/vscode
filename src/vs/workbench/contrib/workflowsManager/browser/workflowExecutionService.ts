@@ -26,6 +26,7 @@ interface INodePipelineStep {
 	targetVariable?: string;
 	expression?: string;
 	label?: string;
+	parameters?: string;
 }
 
 interface IFlowchartNode {
@@ -992,7 +993,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			for (let i = 0; i < node.pipeline.length; i++) {
 				const step: INodePipelineStep = node.pipeline[i];
 				if (step.type === 'run_ticket' && step.ticketName) {
-					this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'`);
+					this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'${step.parameters ? ` (params: ${step.parameters})` : ''}`);
 					const ticketRecord = await runTicket(step.ticketName, step.ticketType, step.ticketUri);
 					if (step.targetVariable) {
 						const varKey = step.targetVariable.trim().replace(/^@/, '');

@@ -48,6 +48,7 @@ export interface INodePipelineStep {
 	targetVariable?: string; // e.g. "task" or "monitor"
 	expression?: string;     // e.g. "= ticket.output" or "= @task"
 	label?: string;          // Human-readable title
+	parameters?: string;     // Runtime parameters (e.g. "--fast", "param1")
 }
 
 interface IFlowchartNode {
@@ -59,7 +60,7 @@ interface IFlowchartNode {
 	width: number;
 	height: number;
 	label: string;
-	imports?: { type: 'agent' | 'task' | 'job' | 'project' | 'case' | 'issue' | 'analysis' | 'workflow' | string; name: string; uri?: string }[];
+	imports?: { type: 'agent' | 'task' | 'job' | 'project' | 'case' | 'issue' | 'analysis' | 'workflow' | string; name: string; uri?: string; parameters?: string }[];
 	outputVariable?: INodeVariable;
 	outputVariables?: INodeVariable[];
 	pipeline?: INodePipelineStep[];
@@ -297,6 +298,7 @@ export class WorkflowEditor extends EditorPane {
 	private _pipelinePanelEl?: HTMLElement;
 	private _activePipelineNodeId?: string;
 	private _pipelineDockSide: 'left' | 'right' = 'right';
+	private _activePipelineDropdown: HTMLElement | null = null;
 
 	constructor(
 		group: IEditorGroup,
@@ -1049,17 +1051,38 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _getNodeVariables(node: IFlowchartNode): INodeVariable[] {
+		const result: INodeVariable[] = [];
+		const seen = new Set<string>();
+
 		if (Array.isArray(node.outputVariables) && node.outputVariables.length > 0) {
-			return node.outputVariables;
+			for (const v of node.outputVariables) {
+				if (v.name && !seen.has(v.name)) {
+					seen.add(v.name);
+					result.push(v);
+				}
+			}
+		} else if (node.outputVariable && node.outputVariable.name) {
+			seen.add(node.outputVariable.name);
+			result.push(node.outputVariable);
 		}
-		if (node.outputVariable && node.outputVariable.name) {
-			node.outputVariables = [node.outputVariable];
-			return node.outputVariables;
+
+		if (node.pipeline) {
+			for (const step of node.pipeline) {
+				if (step.type === 'set_variable' && step.targetVariable && !seen.has(step.targetVariable)) {
+					seen.add(step.targetVariable);
+					result.push({
+						name: step.targetVariable,
+						initialValue: step.expression || 'None',
+						expression: step.expression
+					});
+				}
+			}
 		}
+
 		if (!node.outputVariables) {
-			node.outputVariables = [];
+			node.outputVariables = [...result];
 		}
-		return node.outputVariables;
+		return result;
 	}
 
 	private _unbindVariableFromNode(node: IFlowchartNode, targetVar: string | INodeVariable): void {
@@ -2208,6 +2231,10 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _closeNodePipelinePanel(): void {
+		if (this._activePipelineDropdown) {
+			this._activePipelineDropdown.remove();
+			this._activePipelineDropdown = null;
+		}
 		if (this._pipelinePanelEl) {
 			this._pipelinePanelEl.remove();
 			this._pipelinePanelEl = undefined;
@@ -2215,65 +2242,94 @@ export class WorkflowEditor extends EditorPane {
 		this._activePipelineNodeId = undefined;
 	}
 
-	private _autoGenerateNodePipeline(node: IFlowchartNode): void {
-		node.pipeline = [];
+	private _syncFromNode(node: IFlowchartNode): void {
+		if (!node.pipeline) node.pipeline = [];
+
+		let addedSteps = 0;
+		// 1. Sync tickets from node.imports
 		const ticketImports = (node.imports || []).filter(i =>
-			['task', 'job', 'project', 'case', 'issue', 'workflow', 'agent'].includes((i.type || '').toLowerCase())
+			['task', 'job', 'project', 'case', 'issue', 'workflow', 'agent', 'ticket'].includes((i.type || '').toLowerCase()) || Boolean(i.name)
 		);
-		const nodeVars = this._getNodeVariables(node);
-		const scheduledTickets = new Set<string>();
 
-		// Helper to find matching import for a variable
-		const findMatch = (raw?: string) => {
-			if (!raw) return undefined;
-			let clean = raw.trim().replace(/^@/, '');
-			if (clean.startsWith('=')) clean = clean.substring(1).trim();
-			const eqIdx = clean.indexOf('=');
-			if (eqIdx !== -1) clean = clean.substring(eqIdx + 1).trim();
-			clean = clean.replace(/^@/, '').trim();
-			if (clean === 'ticket' || clean === 'ticket.output') return ticketImports[0];
-			return ticketImports.find(imp =>
-				imp.name === clean ||
-				imp.name.replace(/[^a-zA-Z0-9_]/g, '_') === clean ||
-				imp.name.toLowerCase() === clean.toLowerCase()
-			);
-		};
-
-		// 1. Map variables bound to tickets into run_ticket steps
-		for (const v of nodeVars) {
-			const targetImp = findMatch(v.expression) || findMatch(v.initialValue);
-			if (targetImp && !scheduledTickets.has(targetImp.name)) {
-				scheduledTickets.add(targetImp.name);
+		for (const imp of ticketImports) {
+			const exists = node.pipeline.some(s => s.type === 'run_ticket' && s.ticketName === imp.name);
+			if (!exists) {
 				node.pipeline.push({
 					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 					type: 'run_ticket',
-					ticketName: targetImp.name,
-					ticketType: targetImp.type,
-					ticketUri: targetImp.uri,
-					targetVariable: v.name
+					ticketName: imp.name,
+					ticketType: imp.type,
+					ticketUri: imp.uri,
+					parameters: (imp as any).parameters
 				});
-			} else {
-				// Variable assignment or computation step
+				addedSteps++;
+			}
+		}
+
+		// 2. Sync variables from node.outputVariables
+		const nodeVars = this._getNodeVariables(node);
+		for (const v of nodeVars) {
+			const exists = node.pipeline.some(s => s.type === 'set_variable' && s.targetVariable === v.name);
+			if (!exists) {
 				node.pipeline.push({
 					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 					type: 'set_variable',
 					targetVariable: v.name,
 					expression: v.expression || v.initialValue || 'None'
 				});
+				addedSteps++;
 			}
 		}
 
-		// 2. Add any remaining imported tickets not yet in pipeline
-		for (const imp of ticketImports) {
-			if (!scheduledTickets.has(imp.name)) {
-				scheduledTickets.add(imp.name);
-				node.pipeline.push({
-					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-					type: 'run_ticket',
-					ticketName: imp.name,
-					ticketType: imp.type,
-					ticketUri: imp.uri
-				});
+		this._saveFlowchartData();
+		if (this._pipelinePanelEl) {
+			this._renderPipelinePanel(this._pipelinePanelEl, node);
+		}
+		this._notificationService.info(`Synced from node '${node.label}': ${addedSteps} new step(s) imported (${node.pipeline.length} total).`);
+	}
+
+	private _syncToNode(node: IFlowchartNode): void {
+		if (!node.pipeline || node.pipeline.length === 0) {
+			this._notificationService.warn(`No execution steps in pipeline to sync to node '${node.label}'.`);
+			return;
+		}
+
+		if (!node.imports) node.imports = [];
+
+		let updatedTickets = 0;
+		let updatedVars = 0;
+
+		// 1. Sync run_ticket steps into node.imports
+		for (const step of node.pipeline) {
+			if (step.type === 'run_ticket' && step.ticketName) {
+				const existingImp = node.imports.find(imp => imp.name === step.ticketName);
+				if (existingImp) {
+					existingImp.parameters = step.parameters;
+					existingImp.type = (step.ticketType || existingImp.type || 'ticket') as any;
+					if (step.ticketUri) existingImp.uri = step.ticketUri;
+				} else {
+					node.imports.push({
+						type: (step.ticketType || 'ticket') as any,
+						name: step.ticketName,
+						uri: step.ticketUri,
+						parameters: step.parameters
+					} as any);
+				}
+				updatedTickets++;
+			} else if (step.type === 'set_variable' && step.targetVariable) {
+				// 2. Sync set_variable into node.outputVariables
+				if (!node.outputVariables) node.outputVariables = [];
+				const existingVar = node.outputVariables.find(v => v.name === step.targetVariable);
+				if (existingVar) {
+					existingVar.expression = step.expression;
+				} else {
+					node.outputVariables.push({
+						name: step.targetVariable,
+						initialValue: step.expression || 'None',
+						expression: step.expression
+					});
+				}
+				updatedVars++;
 			}
 		}
 
@@ -2282,7 +2338,282 @@ export class WorkflowEditor extends EditorPane {
 		if (this._pipelinePanelEl) {
 			this._renderPipelinePanel(this._pipelinePanelEl, node);
 		}
-		this._notificationService.info(`Auto-generated ${node.pipeline.length} execution step(s) for '${node.label}'.`);
+		this._notificationService.info(`Synced to node '${node.label}': ${updatedTickets} ticket(s) and ${updatedVars} variable(s) updated.`);
+	}
+
+	private _getAvailableTickets(currentNode?: IFlowchartNode): { label: string; detail: string; icon: ThemeIcon; insertText: string; raw: { type: string; name: string; uri?: string } }[] {
+		const result: { label: string; detail: string; icon: ThemeIcon; insertText: string; raw: { type: string; name: string; uri?: string } }[] = [];
+		const seen = new Set<string>();
+
+		// 1. Current node imports
+		if (currentNode?.imports) {
+			for (const imp of currentNode.imports) {
+				if (imp.name && !seen.has(imp.name)) {
+					seen.add(imp.name);
+					const style = getEntityBadgeStyle(imp.type);
+					result.push({
+						label: imp.name,
+						detail: (imp.type || 'ticket').toUpperCase(),
+						icon: style.icon,
+						insertText: imp.name,
+						raw: { type: imp.type || 'ticket', name: imp.name, uri: imp.uri }
+					});
+				}
+			}
+		}
+
+		// 2. Other nodes in this workflow
+		if (this._data?.nodes) {
+			for (const n of this._data.nodes) {
+				if (n.imports) {
+					for (const imp of n.imports) {
+						if (imp.name && !seen.has(imp.name)) {
+							seen.add(imp.name);
+							const style = getEntityBadgeStyle(imp.type);
+							result.push({
+								label: imp.name,
+								detail: (imp.type || 'ticket').toUpperCase(),
+								icon: style.icon,
+								insertText: imp.name,
+								raw: { type: imp.type || 'ticket', name: imp.name, uri: imp.uri }
+							});
+						}
+					}
+				}
+			}
+		}
+
+		// 3. Registered entity snapshots
+		try {
+			const snapshots = this._entityPersistenceService.getAllSnapshots();
+			for (const s of snapshots) {
+				if (s.entityName && !seen.has(s.entityName)) {
+					seen.add(s.entityName);
+					const style = getEntityBadgeStyle(s.entityType);
+					result.push({
+						label: s.entityName,
+						detail: (s.entityType || 'entity').toUpperCase(),
+						icon: style.icon,
+						insertText: s.entityName,
+						raw: { type: s.entityType || 'ticket', name: s.entityName, uri: s.entityUri }
+					});
+				}
+			}
+		} catch { }
+
+		return result;
+	}
+
+	private _getAvailableVariables(currentNode?: IFlowchartNode): { label: string; detail: string; icon: ThemeIcon; insertText: string }[] {
+		const result: { label: string; detail: string; icon: ThemeIcon; insertText: string }[] = [];
+		const seen = new Set<string>();
+
+		// 1. Current node variables
+		if (currentNode) {
+			const nVars = this._getNodeVariables(currentNode);
+			for (const v of nVars) {
+				if (v.name && !seen.has(v.name)) {
+					seen.add(v.name);
+					result.push({
+						label: `@${v.name}`,
+						detail: 'VARIABLE',
+						icon: Codicon.symbolVariable,
+						insertText: `@${v.name}`
+					});
+				}
+			}
+			if (currentNode.pipeline) {
+				for (const s of currentNode.pipeline) {
+					if (s.targetVariable && !seen.has(s.targetVariable)) {
+						seen.add(s.targetVariable);
+						result.push({
+							label: `@${s.targetVariable}`,
+							detail: 'OUTPUT VAR',
+							icon: Codicon.symbolVariable,
+							insertText: `@${s.targetVariable}`
+						});
+					}
+				}
+			}
+		}
+
+		// 2. All nodes in workflow
+		if (this._data?.nodes) {
+			for (const n of this._data.nodes) {
+				const nVars = this._getNodeVariables(n);
+				for (const v of nVars) {
+					if (v.name && !seen.has(v.name)) {
+						seen.add(v.name);
+						result.push({
+							label: `@${v.name}`,
+							detail: 'VARIABLE',
+							icon: Codicon.symbolVariable,
+							insertText: `@${v.name}`
+						});
+					}
+				}
+				if (n.pipeline) {
+					for (const s of n.pipeline) {
+						if (s.targetVariable && !seen.has(s.targetVariable)) {
+							seen.add(s.targetVariable);
+							result.push({
+								label: `@${s.targetVariable}`,
+								detail: 'OUTPUT VAR',
+								icon: Codicon.symbolVariable,
+								insertText: `@${s.targetVariable}`
+							});
+						}
+					}
+				}
+			}
+		}
+
+		// 3. Ticket outputs
+		const tickets = this._getAvailableTickets(currentNode);
+		for (const t of tickets) {
+			const ticketOut = `@${t.label}.output`;
+			if (!seen.has(ticketOut)) {
+				seen.add(ticketOut);
+				result.push({
+					label: ticketOut,
+					detail: 'TICKET OUT',
+					icon: Codicon.output,
+					insertText: ticketOut
+				});
+			}
+		}
+
+		return result;
+	}
+
+	private _attachAutocomplete(
+		input: HTMLInputElement,
+		getItems: () => { label: string; detail?: string; icon?: ThemeIcon; insertText: string; raw?: any }[],
+		onSelect: (insertText: string, rawItem?: any) => void,
+		mode: 'ticket' | 'variable' | 'any' = 'any'
+	): void {
+		let dropdownEl: HTMLElement | null = null;
+		let selectedIndex = 0;
+		let filteredItems: { label: string; detail?: string; icon?: ThemeIcon; insertText: string; raw?: any }[] = [];
+
+		const closeDropdown = () => {
+			if (dropdownEl && dropdownEl.parentNode) {
+				dropdownEl.remove();
+			}
+			if (this._activePipelineDropdown === dropdownEl) {
+				this._activePipelineDropdown = null;
+			}
+			dropdownEl = null;
+		};
+
+		const renderDropdown = () => {
+			const allItems = getItems();
+			const val = input.value;
+			let query = val.trim();
+			if (query.startsWith('@')) {
+				query = query.substring(1).trim();
+			}
+			const lowerQuery = query.toLowerCase();
+
+			filteredItems = allItems.filter(item => {
+				if (!lowerQuery) return true;
+				return item.label.toLowerCase().includes(lowerQuery) ||
+					(item.detail && item.detail.toLowerCase().includes(lowerQuery));
+			});
+
+			if (!dropdownEl) {
+				if (this._activePipelineDropdown) {
+					this._activePipelineDropdown.remove();
+					this._activePipelineDropdown = null;
+				}
+				dropdownEl = document.createElement('div');
+				dropdownEl.className = 'pipeline-autocomplete-dropdown';
+				document.body.appendChild(dropdownEl);
+				this._activePipelineDropdown = dropdownEl;
+			}
+
+			const rect = input.getBoundingClientRect();
+			dropdownEl.style.left = `${Math.max(10, rect.left)}px`;
+			dropdownEl.style.top = `${rect.bottom + 4}px`;
+			dropdownEl.style.minWidth = `${Math.max(rect.width, 220)}px`;
+
+			clearNode(dropdownEl);
+
+			if (filteredItems.length === 0) {
+				const empty = append(dropdownEl, $('.pipeline-autocomplete-empty'));
+				empty.textContent = query ? 'No matches found' : 'No available items';
+				return;
+			}
+
+			if (selectedIndex >= filteredItems.length) {
+				selectedIndex = 0;
+			}
+
+			for (let idx = 0; idx < filteredItems.length; idx++) {
+				const item = filteredItems[idx];
+				const itemEl = append(dropdownEl, $('.pipeline-autocomplete-item'));
+				if (idx === selectedIndex) {
+					itemEl.classList.add('selected');
+				}
+
+				if (item.icon) {
+					append(itemEl, $('span.item-icon' + ThemeIcon.asCSSSelector(item.icon)));
+				}
+				append(itemEl, $('span.item-label', {}, item.label));
+				if (item.detail) {
+					append(itemEl, $('span.item-detail', {}, item.detail));
+				}
+
+				itemEl.onmousedown = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					onSelect(item.insertText, item);
+					closeDropdown();
+				};
+			}
+		};
+
+		input.addEventListener('focus', () => {
+			selectedIndex = 0;
+			renderDropdown();
+		});
+
+		input.addEventListener('input', () => {
+			selectedIndex = 0;
+			renderDropdown();
+		});
+
+		input.addEventListener('keydown', (e: KeyboardEvent) => {
+			if (!dropdownEl) return;
+			if (e.key === 'ArrowDown') {
+				e.preventDefault();
+				if (filteredItems.length > 0) {
+					selectedIndex = (selectedIndex + 1) % filteredItems.length;
+					renderDropdown();
+				}
+			} else if (e.key === 'ArrowUp') {
+				e.preventDefault();
+				if (filteredItems.length > 0) {
+					selectedIndex = (selectedIndex - 1 + filteredItems.length) % filteredItems.length;
+					renderDropdown();
+				}
+			} else if (e.key === 'Enter') {
+				if (filteredItems.length > 0 && selectedIndex >= 0 && selectedIndex < filteredItems.length) {
+					e.preventDefault();
+					e.stopPropagation();
+					onSelect(filteredItems[selectedIndex].insertText, filteredItems[selectedIndex]);
+					closeDropdown();
+				}
+			} else if (e.key === 'Escape') {
+				closeDropdown();
+			}
+		});
+
+		input.addEventListener('blur', () => {
+			setTimeout(() => {
+				closeDropdown();
+			}, 200);
+		});
 	}
 
 	private _renderPipelinePanel(panel: HTMLElement, node: IFlowchartNode): void {
@@ -2482,14 +2813,14 @@ export class WorkflowEditor extends EditorPane {
 		const stepCount = node.pipeline?.length || 0;
 		append(pipelineHeader, $('span.pipeline-section-title', {}, `2. EXECUTION SEQUENCE (${stepCount} STEPS)`));
 
-		const autoGenHeaderBtn = append(pipelineHeader, $('.pipeline-btn.pipeline-btn-outline'));
-		autoGenHeaderBtn.style.padding = '2px 6px';
-		autoGenHeaderBtn.style.fontSize = '10px';
-		append(autoGenHeaderBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.zap)));
-		append(autoGenHeaderBtn, $('span', {}, 'Auto-Sync'));
-		autoGenHeaderBtn.title = 'Auto-generate execution pipeline based on imported tickets and bound variables';
-		autoGenHeaderBtn.onclick = () => {
-			this._autoGenerateNodePipeline(node);
+		const syncFromHeaderBtn = append(pipelineHeader, $('.pipeline-btn.pipeline-btn-outline'));
+		syncFromHeaderBtn.style.padding = '2px 8px';
+		syncFromHeaderBtn.style.fontSize = '10px';
+		append(syncFromHeaderBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowDown)));
+		append(syncFromHeaderBtn, $('span', {}, 'Sync From Node'));
+		syncFromHeaderBtn.title = 'Sync imported tickets and variables from canvas node into execution sequence';
+		syncFromHeaderBtn.onclick = () => {
+			this._syncFromNode(node);
 		};
 
 		const stepsList = append(pipelineSec, $('.pipeline-steps-list'));
@@ -2501,36 +2832,39 @@ export class WorkflowEditor extends EditorPane {
 			const emptyActions = append(emptyState, $('.pipeline-toolbar-btns'));
 			emptyActions.style.justifyContent = 'center';
 
-			const autoBtn = append(emptyActions, $('.pipeline-btn.pipeline-btn-primary'));
-			append(autoBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.zap)));
-			append(autoBtn, $('span', {}, 'Auto-Generate Pipeline'));
-			autoBtn.onclick = () => {
-				this._autoGenerateNodePipeline(node);
+			const syncFromEmptyBtn = append(emptyActions, $('.pipeline-btn.pipeline-btn-secondary'));
+			append(syncFromEmptyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowDown)));
+			append(syncFromEmptyBtn, $('span', {}, 'Sync From Node'));
+			syncFromEmptyBtn.onclick = () => {
+				this._syncFromNode(node);
 			};
 
-			if (node.imports && node.imports.length > 0) {
-				const addFirstTicketBtn = append(emptyActions, $('.pipeline-btn.pipeline-btn-secondary'));
-				append(addFirstTicketBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
-				append(addFirstTicketBtn, $('span', {}, `Run '${node.imports[0].name}'`));
-				addFirstTicketBtn.onclick = () => {
-					if (!node.pipeline) node.pipeline = [];
-					node.pipeline.push({
-						id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-						type: 'run_ticket',
-						ticketName: node.imports![0].name,
-						ticketType: node.imports![0].type,
-						ticketUri: node.imports![0].uri
-					});
-					this._saveFlowchartData();
-					this._renderPipelinePanel(panel, node);
-				};
-			}
+			const addRunEmptyBtn = append(emptyActions, $('.pipeline-btn.pipeline-btn-run'));
+			append(addRunEmptyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
+			append(addRunEmptyBtn, $('span', {}, 'Add Runner'));
+			addRunEmptyBtn.onclick = () => {
+				if (!node.pipeline) node.pipeline = [];
+				const newStepId = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+				node.pipeline.push({
+					id: newStepId,
+					type: 'run_ticket',
+					ticketName: '',
+					parameters: ''
+				});
+				this._saveFlowchartData();
+				this._renderPipelinePanel(panel, node);
+				setTimeout(() => {
+					const input = panel.querySelector(`[data-step-id="${newStepId}"] input.pipeline-ticket-input`) as HTMLInputElement;
+					if (input) input.focus();
+				}, 50);
+			};
 		} else {
 			for (let i = 0; i < node.pipeline.length; i++) {
 				const step = node.pipeline[i];
 				const stepCard = append(stepsList, $('.pipeline-step-card'));
 				stepCard.draggable = true;
 				stepCard.dataset.stepIndex = String(i);
+				stepCard.dataset.stepId = step.id;
 
 				// HTML5 Drag & Drop Reordering Handlers
 				stepCard.ondragstart = (e: DragEvent) => {
@@ -2584,28 +2918,77 @@ export class WorkflowEditor extends EditorPane {
 				const topRow = append(content, $('.pipeline-step-top-row'));
 
 				if (step.type === 'run_ticket') {
+					// 1. Badge: [▶ RUN]
 					const badge = append(topRow, $('.pipeline-step-badge-run'));
 					append(badge, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
 					append(badge, $('span', {}, 'RUN'));
 
-					const title = append(topRow, $('.pipeline-step-title'));
-					title.textContent = `Ticket: ${step.ticketName || 'Unnamed'}`;
-					title.title = `Runs Ticket '${step.ticketName}'`;
+					// 2. Ticket selection input with autocomplete
+					const ticketInput = append(topRow, $('input.pipeline-step-input.pipeline-ticket-input')) as HTMLInputElement;
+					ticketInput.type = 'text';
+					ticketInput.value = step.ticketName || '';
+					ticketInput.placeholder = '@ Select or type ticket...';
+					ticketInput.title = 'Ticket to execute (type @ or text to search)';
 
-					// Variable mapping row: ➔ Output to: @[variable]
+					this._attachAutocomplete(
+						ticketInput,
+						() => this._getAvailableTickets(node),
+						(selectedText, rawItem) => {
+							ticketInput.value = selectedText;
+							step.ticketName = selectedText;
+							if (rawItem?.raw?.type) step.ticketType = rawItem.raw.type;
+							if (rawItem?.raw?.uri) step.ticketUri = rawItem.raw.uri;
+							this._saveFlowchartData();
+							this._renderNodes();
+						},
+						'ticket'
+					);
+
+					ticketInput.onchange = () => {
+						const cleanVal = ticketInput.value.trim().replace(/^@/, '');
+						step.ticketName = cleanVal;
+						this._saveFlowchartData();
+						this._renderNodes();
+					};
+
+					// 3. Parameters input (e.g. parameters)
+					const paramInput = append(topRow, $('input.pipeline-step-input.pipeline-param-input')) as HTMLInputElement;
+					paramInput.type = 'text';
+					paramInput.value = step.parameters || '';
+					paramInput.placeholder = 'parameters (e.g. --fast)';
+					paramInput.title = 'Runtime parameter(s) for this ticket';
+					paramInput.oninput = () => {
+						step.parameters = paramInput.value.trim() || undefined;
+						this._saveFlowchartData();
+						this._renderNodes();
+					};
+
+					// Line 2: Output destination row: Output to: [input]
 					const cfgRow = append(content, $('.pipeline-step-config-row'));
-					append(cfgRow, $('span', {}, '➔ Output to: @'));
-					const varInput = append(cfgRow, $('input.pipeline-step-input')) as HTMLInputElement;
+					append(cfgRow, $('span.pipeline-cfg-label', {}, 'Output to:'));
+					const varInput = append(cfgRow, $('input.pipeline-step-input.pipeline-output-input')) as HTMLInputElement;
 					varInput.type = 'text';
-					varInput.style.flex = '1';
-					varInput.value = step.targetVariable || '';
-					varInput.placeholder = 'e.g. task, monitor (optional)';
-					varInput.title = 'Store Ticket output into this Context Variable';
+					varInput.value = step.targetVariable ? `@${step.targetVariable}` : '';
+					varInput.placeholder = 'e.g. @task_result, @monitor (optional)';
+					varInput.title = 'Store Ticket output into this Context Variable (type @ to autocomplete)';
+
+					this._attachAutocomplete(
+						varInput,
+						() => this._getAvailableVariables(node),
+						(selectedText) => {
+							varInput.value = selectedText;
+							step.targetVariable = selectedText.replace(/^@/, '').trim() || undefined;
+							this._saveFlowchartData();
+						},
+						'variable'
+					);
+
 					varInput.onchange = () => {
 						step.targetVariable = varInput.value.trim().replace(/^@/, '') || undefined;
 						this._saveFlowchartData();
 					};
 				} else if (step.type === 'set_variable') {
+					// 1. Badge: [V] VAR
 					const badge = append(topRow, $('.pipeline-step-badge-var'));
 					const vTag = append(badge, $('span.var-icon-badge'));
 					vTag.textContent = '[V]';
@@ -2613,32 +2996,39 @@ export class WorkflowEditor extends EditorPane {
 					vTag.style.marginRight = '2px';
 					append(badge, $('span', {}, 'VAR'));
 
-					const title = append(topRow, $('.pipeline-step-title'));
-					title.textContent = `Assign: @${step.targetVariable || 'var'}`;
-
-					// Assignment row: @[var] = [expression]
-					const cfgRow = append(content, $('.pipeline-step-config-row'));
-					append(cfgRow, $('span', {}, '@'));
-					const varNameInput = append(cfgRow, $('input.pipeline-step-input')) as HTMLInputElement;
+					// 2. Variable name input
+					const varNameInput = append(topRow, $('input.pipeline-step-input.pipeline-var-name-input')) as HTMLInputElement;
 					varNameInput.type = 'text';
-					varNameInput.style.width = '75px';
-					varNameInput.value = step.targetVariable || 'var';
-					varNameInput.placeholder = 'monitor';
-					varNameInput.onchange = () => {
+					varNameInput.value = step.targetVariable || '';
+					varNameInput.placeholder = 'Variable name (e.g. current_user)';
+					varNameInput.title = 'Define or assign Variable name';
+					varNameInput.oninput = () => {
 						step.targetVariable = varNameInput.value.trim().replace(/^@/, '') || 'var';
 						this._saveFlowchartData();
-						this._renderPipelinePanel(panel, node);
 					};
 
-					append(cfgRow, $('span', {}, ' = '));
-					const exprInput = append(cfgRow, $('input.pipeline-step-input')) as HTMLInputElement;
-					exprInput.type = 'text';
-					exprInput.style.flex = '1';
-					exprInput.value = step.expression || '';
-					exprInput.placeholder = 'e.g. @task, 0, None';
-					exprInput.title = 'Value or Python expression';
-					exprInput.onchange = () => {
-						step.expression = exprInput.value.trim() || undefined;
+					// Line 2: Value row: Value = [input]
+					const cfgRow = append(content, $('.pipeline-step-config-row'));
+					append(cfgRow, $('span.pipeline-cfg-label', {}, 'Value ='));
+					const valInput = append(cfgRow, $('input.pipeline-step-input.pipeline-var-val-input')) as HTMLInputElement;
+					valInput.type = 'text';
+					valInput.value = step.expression || '';
+					valInput.placeholder = "e.g. 'initial_val', @ticket_out, or 0";
+					valInput.title = 'Initial value or expression (type @ to autocomplete)';
+
+					this._attachAutocomplete(
+						valInput,
+						() => this._getAvailableVariables(node),
+						(selectedText) => {
+							valInput.value = selectedText;
+							step.expression = selectedText;
+							this._saveFlowchartData();
+						},
+						'variable'
+					);
+
+					valInput.onchange = () => {
+						step.expression = valInput.value.trim() || undefined;
 						this._saveFlowchartData();
 					};
 				}
@@ -2661,56 +3051,66 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		// Toolbar: Add Steps
+		// Toolbar: Add Steps & Sync
 		const toolbarRow = append(pipelineSec, $('.pipeline-toolbar-btns'));
 
-		// Add Runner Button
+		// 1. Add Runner Button
 		const addRunBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-run'));
 		append(addRunBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
 		append(addRunBtn, $('span', {}, 'Add Runner'));
-		addRunBtn.title = 'Add ticket execution step';
+		addRunBtn.title = 'Add ticket execution step to pipeline';
 		addRunBtn.onclick = (e) => {
 			e.stopPropagation();
-			const imports = node.imports || [];
-			if (imports.length === 0) {
-				this._importIntoNode(node.id);
-				return;
-			}
-			// Pick first or show submenu
 			if (!node.pipeline) node.pipeline = [];
-			const imp = imports[0];
+			const newStepId = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 			node.pipeline.push({
-				id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+				id: newStepId,
 				type: 'run_ticket',
-				ticketName: imp.name,
-				ticketType: imp.type,
-				ticketUri: imp.uri
+				ticketName: '',
+				parameters: ''
 			});
 			this._saveFlowchartData();
 			this._renderPipelinePanel(panel, node);
+			setTimeout(() => {
+				const input = panel.querySelector(`[data-step-id="${newStepId}"] input.pipeline-ticket-input`) as HTMLInputElement;
+				if (input) input.focus();
+			}, 50);
 		};
 
-		// Add Variable Step
+		// 2. Add Variable Step
 		const addVarBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-secondary'));
 		const vBtnTag = append(addVarBtn, $('span.var-icon-badge'));
 		vBtnTag.textContent = '[V]';
 		vBtnTag.style.color = '#38bdf8';
 		vBtnTag.style.marginRight = '4px';
 		append(addVarBtn, $('span', {}, 'Add Variable'));
-		addVarBtn.title = 'Add variable assignment step (e.g. @monitor = @task)';
+		addVarBtn.title = 'Add variable definition step';
 		addVarBtn.onclick = (e) => {
 			e.stopPropagation();
 			if (!node.pipeline) node.pipeline = [];
-			const knownVars = this._getNodeVariables(node);
-			const defaultVarName = knownVars.length > 0 ? `${knownVars[0].name}_copy` : `var_${node.pipeline.length + 1}`;
+			const newStepId = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 			node.pipeline.push({
-				id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+				id: newStepId,
 				type: 'set_variable',
-				targetVariable: defaultVarName,
-				expression: knownVars.length > 0 ? `@${knownVars[0].name}` : '0'
+				targetVariable: '',
+				expression: ''
 			});
 			this._saveFlowchartData();
 			this._renderPipelinePanel(panel, node);
+			setTimeout(() => {
+				const input = panel.querySelector(`[data-step-id="${newStepId}"] input.pipeline-var-name-input`) as HTMLInputElement;
+				if (input) input.focus();
+			}, 50);
+		};
+
+		// 3. Sync To Node Button
+		const syncToBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-secondary'));
+		append(syncToBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp)));
+		append(syncToBtn, $('span', {}, 'Sync To Node'));
+		syncToBtn.title = 'Sync execution sequence steps and parameters back to canvas node';
+		syncToBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._syncToNode(node);
 		};
 	}
 
@@ -3871,31 +4271,65 @@ export class WorkflowEditor extends EditorPane {
 					append(pipeBadge, $('span.badge-text', {}, `${node.pipeline.length} steps`));
 				}
 
-				const totalImports = node.imports?.length || 0;
-				if (totalImports > 0) {
+				// Aggregate tickets from node.imports and pipeline steps for full two-way display
+				const allTicketMap = new Map<string, { type: string; name: string; uri?: string; parameters?: string }>();
+				for (const imp of (node.imports || [])) {
+					if (imp.name) {
+						allTicketMap.set(imp.name, { ...imp });
+					}
+				}
+				if (node.pipeline) {
+					for (const s of node.pipeline) {
+						if (s.type === 'run_ticket' && s.ticketName) {
+							const existing = allTicketMap.get(s.ticketName);
+							if (existing) {
+								if (s.parameters) existing.parameters = s.parameters;
+							} else {
+								allTicketMap.set(s.ticketName, {
+									type: s.ticketType || 'ticket',
+									name: s.ticketName,
+									uri: s.ticketUri,
+									parameters: s.parameters
+								});
+							}
+						}
+					}
+				}
+
+				const effectiveTickets = Array.from(allTicketMap.values());
+				const totalTickets = effectiveTickets.length;
+				if (totalTickets > 0) {
 					// Dynamic limit based on node width (at least 1, max 3 visible pills when pipeline present)
 					const maxVisible = Math.max(1, Math.min(3, Math.floor(((node.width || 120) - 20) / 60)));
-					const visibleImports = (node.imports || []).slice(0, maxVisible);
-					const overflowCount = totalImports - visibleImports.length;
+					const visibleTickets = effectiveTickets.slice(0, maxVisible);
+					const overflowCount = totalTickets - visibleTickets.length;
 
-					for (const imp of visibleImports) {
-						const badge = append(badgesContainer, $(`.node-import-badge.${imp.type || 'custom'}`));
-						const typeLabel = imp.type ? (imp.type.charAt(0).toUpperCase() + imp.type.slice(1)) : 'Module';
-						badge.title = `${typeLabel}: ${imp.name}`;
+					for (const t of visibleTickets) {
+						const badge = append(badgesContainer, $(`.node-import-badge.${t.type || 'custom'}`));
+						const typeLabel = t.type ? (t.type.charAt(0).toUpperCase() + t.type.slice(1)) : 'Module';
 
-						const style = getEntityBadgeStyle(imp.type);
+						const style = getEntityBadgeStyle(t.type);
 
 						badge.style.backgroundColor = style.bg;
 						badge.style.color = style.color;
 						badge.style.border = `1px solid ${style.color}44`;
 
 						append(badge, $('span' + ThemeIcon.asCSSSelector(style.icon)));
-						append(badge, $('span.badge-text', {}, imp.name));
+
+						// Display parameters in parentheses inside the ticket pill if present
+						const paramText = t.parameters?.trim();
+						const labelText = paramText ? `${t.name} (${paramText})` : t.name;
+
+						badge.title = paramText ? `${typeLabel}: ${t.name}\nParameters: ${paramText}` : `${typeLabel}: ${t.name}`;
+						append(badge, $('span.badge-text', {}, labelText));
 					}
 
 					if (overflowCount > 0) {
 						const moreBadge = append(badgesContainer, $('.node-import-badge.more-badge'));
-						const remainingList = node.imports!.slice(maxVisible).map(i => `• [${i.type || 'module'}] ${i.name}`).join('\n');
+						const remainingList = effectiveTickets.slice(maxVisible).map(i => {
+							const p = i.parameters?.trim();
+							return `• [${i.type || 'module'}] ${i.name}${p ? ` (${p})` : ''}`;
+						}).join('\n');
 						moreBadge.title = `More attached tickets/modules (+${overflowCount}):\n${remainingList}`;
 						moreBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.12)';
 						moreBadge.style.color = 'var(--vscode-descriptionForeground, #aaaaaa)';
