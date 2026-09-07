@@ -2892,8 +2892,8 @@
 
 .pipeline-step-card {
 	display: flex;
-	align-items: flex-start;
-	gap: 6px;
+	align-items: stretch;
+	gap: 7px;
 	padding: 5px 8px;
 	background: rgba(0, 0, 0, 0.35);
 	border: 1px solid rgba(255, 255, 255, 0.08);
@@ -2925,23 +2925,25 @@
 	flex-direction: column;
 	align-items: center;
 	justify-content: space-between;
-	gap: 3px;
 	flex-shrink: 0;
-	width: 20px;
-	padding-top: 1px;
+	width: 22px;
+	align-self: stretch;
+	padding: 0;
 }
 
 .pipeline-step-number {
-	font-size: 8.5px;
+	font-size: 11px;
 	font-weight: 700;
 	color: #94a3b8;
-	background: rgba(255, 255, 255, 0.06);
-	padding: 1px 2px;
-	border-radius: 3px;
-	line-height: 1.1;
+	height: 18px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	line-height: 1;
 	text-align: center;
 	width: 100%;
 	box-sizing: border-box;
+	user-select: none;
 }
 
 .pipeline-drag-handle {
@@ -2949,12 +2951,12 @@
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	width: 16px;
-	height: 16px;
+	width: 18px;
+	height: 22px;
 	color: #64748b;
 	flex-shrink: 0;
 	transition: color 0.12s ease;
-	font-size: 11px;
+	font-size: 12px;
 }
 
 .pipeline-drag-handle:hover {
@@ -2977,26 +2979,33 @@
 	display: flex;
 	align-items: center;
 	gap: 5px;
+	height: 18px;
 	overflow: hidden;
 }
 
 .pipeline-step-badge-run {
-	background: rgba(34, 197, 94, 0.14);
-	border: 1px solid rgba(34, 197, 94, 0.35);
+	background: rgba(34, 197, 94, 0.12);
+	border: 1px solid rgba(34, 197, 94, 0.32);
 	color: #4ade80;
-	font-size: 8.5px;
+	font-size: 9px;
 	font-weight: 700;
 	padding: 1px 5px;
 	border-radius: 3px;
 	display: inline-flex;
 	align-items: center;
-	gap: 2.5px;
+	gap: 3px;
 	flex-shrink: 0;
+	line-height: 1.2;
 }
 
 .pipeline-step-badge-run span.codicon {
-	font-size: 8px;
+	font-size: 6.5px !important;
+	line-height: 1;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
 	color: #4ade80;
+	transform: scale(0.85);
 }
 
 .pipeline-step-badge-var {
@@ -3020,6 +3029,8 @@
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+	flex: 1;
+	line-height: 18px;
 }
 
 .pipeline-step-config-row {
@@ -3049,9 +3060,8 @@
 .pipeline-step-actions {
 	display: flex;
 	align-items: center;
-	gap: 2px;
+	height: 18px;
 	flex-shrink: 0;
-	margin-top: 2px;
 }
 
 /* Toolbar Buttons in Pipeline */
@@ -3069,34 +3079,55 @@
 	padding: 4px 10px;
 	border-radius: 4px;
 	font-size: 11px;
-	font-weight: 600;
+	font-weight: 500;
 	cursor: pointer;
 	border: 1px solid transparent;
 	transition: all 0.12s ease;
 	user-select: none;
+	line-height: 1.3;
 }
 
-.pipeline-btn-primary {
-	background: rgba(168, 85, 247, 0.18);
-	border-color: rgba(168, 85, 247, 0.45);
-	color: #c084fc;
+/* Green Add Runner Button */
+.pipeline-btn-run {
+	background: rgba(34, 197, 94, 0.12);
+	border-color: rgba(34, 197, 94, 0.35);
+	color: #4ade80;
 }
 
-.pipeline-btn-primary:hover {
-	background: rgba(168, 85, 247, 0.35);
-	border-color: #c084fc;
+.pipeline-btn-run span.codicon {
+	font-size: 7.5px;
+	color: #4ade80;
+}
+
+.pipeline-btn-run:hover {
+	background: rgba(34, 197, 94, 0.22);
+	border-color: #4ade80;
 	color: #ffffff;
 }
 
+/* Primary Button fallback (green) */
+.pipeline-btn-primary {
+	background: rgba(34, 197, 94, 0.12);
+	border-color: rgba(34, 197, 94, 0.35);
+	color: #4ade80;
+}
+
+.pipeline-btn-primary:hover {
+	background: rgba(34, 197, 94, 0.22);
+	border-color: #4ade80;
+	color: #ffffff;
+}
+
+/* Standard Secondary Button */
 .pipeline-btn-secondary {
-	background: rgba(13, 148, 136, 0.18);
-	border-color: rgba(13, 148, 136, 0.45);
-	color: #2dd4bf;
+	background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.08));
+	border-color: var(--vscode-button-secondaryBorder, rgba(255, 255, 255, 0.14));
+	color: var(--vscode-button-secondaryForeground, #e2e8f0);
 }
 
 .pipeline-btn-secondary:hover {
-	background: rgba(13, 148, 136, 0.35);
-	border-color: #2dd4bf;
+	background: var(--vscode-button-secondaryHoverBackground, rgba(255, 255, 255, 0.16));
+	border-color: rgba(255, 255, 255, 0.28);
 	color: #ffffff;
 }
 

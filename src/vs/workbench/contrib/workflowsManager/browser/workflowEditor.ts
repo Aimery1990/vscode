@@ -2664,10 +2664,10 @@ export class WorkflowEditor extends EditorPane {
 		// Toolbar: Add Steps
 		const toolbarRow = append(pipelineSec, $('.pipeline-toolbar-btns'));
 
-		// + Run Ticket Step
-		const addRunBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-primary'));
+		// Add Runner Button
+		const addRunBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-run'));
 		append(addRunBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
-		append(addRunBtn, $('span', {}, '+ Run Ticket'));
+		append(addRunBtn, $('span', {}, 'Add Runner'));
 		addRunBtn.title = 'Add ticket execution step';
 		addRunBtn.onclick = (e) => {
 			e.stopPropagation();
@@ -2690,13 +2690,13 @@ export class WorkflowEditor extends EditorPane {
 			this._renderPipelinePanel(panel, node);
 		};
 
-		// + Assign Variable Step
+		// Add Variable Step
 		const addVarBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-secondary'));
 		const vBtnTag = append(addVarBtn, $('span.var-icon-badge'));
 		vBtnTag.textContent = '[V]';
 		vBtnTag.style.color = '#38bdf8';
 		vBtnTag.style.marginRight = '4px';
-		append(addVarBtn, $('span', {}, 'Set Variable'));
+		append(addVarBtn, $('span', {}, 'Add Variable'));
 		addVarBtn.title = 'Add variable assignment step (e.g. @monitor = @task)';
 		addVarBtn.onclick = (e) => {
 			e.stopPropagation();
