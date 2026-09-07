@@ -4774,9 +4774,13 @@ export class WorkflowEditor extends EditorPane {
 				badgesContainer.style.boxSizing = 'border-box';
 				badgesContainer.style.padding = '0 8px';
 				badgesContainer.style.cursor = 'pointer';
-				badgesContainer.title = 'Click to open Execution Pipeline (编排运行顺序)';
+				badgesContainer.title = 'Click to open Pipeline';
+				badgesContainer.onmousedown = (e) => {
+					e.stopPropagation();
+				};
 				badgesContainer.onclick = (e) => {
 					e.stopPropagation();
+					this._hideTicketPopover();
 					this._openNodePipelinePanel(node.id);
 				};
 
@@ -4786,9 +4790,18 @@ export class WorkflowEditor extends EditorPane {
 					pipeBadge.style.background = 'rgba(56, 189, 248, 0.18)';
 					pipeBadge.style.color = '#38bdf8';
 					pipeBadge.style.border = '1px solid rgba(56, 189, 248, 0.45)';
-					pipeBadge.title = `Execution Pipeline: ${node.pipeline!.length} step(s) configured (Click to edit)`;
+					pipeBadge.style.cursor = 'pointer';
+					pipeBadge.title = `Pipeline: ${node.pipeline!.length} step(s) configured (Click to open Pipeline)`;
 					append(pipeBadge, $('span' + ThemeIcon.asCSSSelector(Codicon.threeBars)));
 					append(pipeBadge, $('span.badge-text', {}, `${node.pipeline!.length} steps`));
+					pipeBadge.onmousedown = (e) => {
+						e.stopPropagation();
+					};
+					pipeBadge.onclick = (e) => {
+						e.stopPropagation();
+						this._hideTicketPopover();
+						this._openNodePipelinePanel(node.id);
+					};
 
 					for (let i = 0; i < node.pipeline!.length; i++) {
 						const step = node.pipeline![i];
@@ -7570,6 +7583,27 @@ export class WorkflowEditor extends EditorPane {
 		const totalSelected = this._selectedNodeIds.size + this._selectedLinkIds.size;
 		const isMulti = totalSelected > 1;
 
+		if (targetType === 'node') {
+			// Ensure targetNode is in the selection if we right click it
+			if (!this._selectedNodeIds.has(targetId)) {
+				this._selectedNodeIds.clear();
+				this._selectedLinkIds.clear();
+				this._selectedNodeIds.add(targetId);
+				this._renderNodes();
+				this._drawLinks();
+			}
+
+			// Pipeline... is the most frequently used node action - placed as the very first menu item
+			if (!this._isPureDiagram) {
+				const pipelineItem = append(menu, $('.context-menu-item'));
+				pipelineItem.textContent = 'Pipeline...';
+				pipelineItem.onclick = () => {
+					this._closeContextMenu();
+					this._openNodePipelinePanel(targetId);
+				};
+			}
+		}
+
 		if (this._undoStack.length > 0) {
 			const undoItem = append(menu, $('.context-menu-item'));
 			undoItem.textContent = 'Undo (Ctrl+Z)';
@@ -7598,15 +7632,6 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		if (targetType === 'node') {
-			// Ensure targetNode is in the selection if we right click it
-			if (!this._selectedNodeIds.has(targetId)) {
-				this._selectedNodeIds.clear();
-				this._selectedLinkIds.clear();
-				this._selectedNodeIds.add(targetId);
-				this._renderNodes();
-				this._drawLinks();
-			}
-
 			if (!this._isPureDiagram) {
 				const importItem = append(menu, $('.context-menu-item'));
 				importItem.textContent = 'Import';
@@ -7654,13 +7679,6 @@ export class WorkflowEditor extends EditorPane {
 							});
 						}
 					});
-				};
-
-				const pipelineItem = append(menu, $('.context-menu-item'));
-				pipelineItem.textContent = 'Execution Pipeline (≡) ...';
-				pipelineItem.onclick = () => {
-					this._closeContextMenu();
-					this._openNodePipelinePanel(targetId);
 				};
 			}
 
