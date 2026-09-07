@@ -2325,23 +2325,11 @@ export class WorkflowEditor extends EditorPane {
 		// Panel Body
 		const body = append(panel, $('.pipeline-panel-body'));
 
-		// --- UPPER SECTION: 1. Imported Resources & Tickets ---
+		// --- UPPER SECTION: 1. Imports ---
 		const importsSec = append(body, $('.pipeline-section'));
 		const importsHeader = append(importsSec, $('.pipeline-section-header'));
 		const importCount = node.imports?.length || 0;
-		append(importsHeader, $('span.pipeline-section-title', {}, `1. Imported Resources (${importCount})`));
-
-		const importMoreBtn = append(importsHeader, $('.pipeline-btn.pipeline-btn-outline'));
-		importMoreBtn.style.padding = '2px 6px';
-		importMoreBtn.style.fontSize = '10px';
-		append(importMoreBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
-		append(importMoreBtn, $('span', {}, 'Import...'));
-		importMoreBtn.title = 'Import another ticket or module into this node';
-		importMoreBtn.onclick = () => {
-			this._importIntoNode(node.id);
-		};
-
-		append(importsSec, $('span.pipeline-section-desc', {}, 'Tickets & modules associated with this node. Click "+ Add Step" to schedule execution below.'));
+		append(importsHeader, $('span.pipeline-section-title', {}, `1. IMPORTS (${importCount})`));
 
 		// Drop zone & imports list
 		const importsList = append(importsSec, $('.pipeline-imports-list'));
@@ -2352,10 +2340,53 @@ export class WorkflowEditor extends EditorPane {
 				const emptyDrop = append(importsList, $('.pipeline-drop-zone'));
 				emptyDrop.textContent = 'Drag & drop tickets here from explorer or canvas to import';
 			} else {
-				for (const imp of node.imports) {
+				for (let impIdx = 0; impIdx < node.imports.length; impIdx++) {
+					const imp = node.imports[impIdx];
 					const card = append(importsList, $('.pipeline-import-card'));
-					const info = append(card, $('.pipeline-import-info'));
+					card.draggable = true;
+					card.dataset.importIndex = String(impIdx);
 
+					// HTML5 Drag & Drop reordering for imported tickets
+					card.ondragstart = (e: DragEvent) => {
+						e.dataTransfer?.setData('text/pipeline-import-idx', String(impIdx));
+						card.classList.add('is-dragging');
+					};
+					card.ondragover = (e: DragEvent) => {
+						e.preventDefault();
+						const rect = card.getBoundingClientRect();
+						const isAbove = e.clientY < (rect.top + rect.height / 2);
+						card.classList.toggle('drag-over-above', isAbove);
+						card.classList.toggle('drag-over-below', !isAbove);
+					};
+					card.ondragleave = () => {
+						card.classList.remove('drag-over-above', 'drag-over-below');
+					};
+					card.ondrop = (e: DragEvent) => {
+						e.preventDefault();
+						e.stopPropagation();
+						card.classList.remove('drag-over-above', 'drag-over-below');
+						const rawFrom = e.dataTransfer?.getData('text/pipeline-import-idx');
+						if (rawFrom !== undefined && rawFrom !== '') {
+							const fromIdx = parseInt(rawFrom, 10);
+							if (!isNaN(fromIdx) && fromIdx !== impIdx && node.imports) {
+								const [moved] = node.imports.splice(fromIdx, 1);
+								node.imports.splice(impIdx, 0, moved);
+								this._saveFlowchartData();
+								this._renderNodes();
+								this._renderPipelinePanel(panel, node);
+							}
+						}
+					};
+					card.ondragend = () => {
+						card.classList.remove('is-dragging', 'drag-over-above', 'drag-over-below');
+					};
+
+					// Left: Drag handle ≡
+					const dragHandle = append(card, $('.pipeline-drag-handle'));
+					append(dragHandle, $('span' + ThemeIcon.asCSSSelector(Codicon.gripper)));
+					dragHandle.title = 'Drag ≡ to reorder import';
+
+					const info = append(card, $('.pipeline-import-info'));
 					const style = getEntityBadgeStyle(imp.type);
 
 					// 1. Icon on the left (colored with system type color, aligned)
@@ -2374,9 +2405,8 @@ export class WorkflowEditor extends EditorPane {
 
 					const actionsEl = append(card, $('.pipeline-import-actions'));
 
-					// "+ Add Step" button
+					// "Add Step" button (standard button, no plus sign)
 					const addStepBtn = append(actionsEl, $('.pipeline-import-add-btn'));
-					append(addStepBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
 					append(addStepBtn, $('span', {}, 'Add Step'));
 					addStepBtn.title = `Add '${imp.name}' execution step to pipeline below`;
 					addStepBtn.onclick = (e) => {
@@ -2393,10 +2423,10 @@ export class WorkflowEditor extends EditorPane {
 						this._renderPipelinePanel(panel, node);
 					};
 
-					// Un-import button
+					// Un-import button (trash can)
 					const unimportBtn = append(actionsEl, $('.pipeline-icon-btn'));
 					append(unimportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
-					unimportBtn.title = `Remove '${imp.name}' from imported resources`;
+					unimportBtn.title = `Remove '${imp.name}' from imports`;
 					unimportBtn.onclick = (e) => {
 						e.stopPropagation();
 						node.imports = (node.imports || []).filter(i => !(i.type === imp.type && i.name === imp.name));
@@ -2450,7 +2480,7 @@ export class WorkflowEditor extends EditorPane {
 		const pipelineSec = append(body, $('.pipeline-section'));
 		const pipelineHeader = append(pipelineSec, $('.pipeline-section-header'));
 		const stepCount = node.pipeline?.length || 0;
-		append(pipelineHeader, $('span.pipeline-section-title', {}, `2. Execution Sequence (${stepCount} Steps)`));
+		append(pipelineHeader, $('span.pipeline-section-title', {}, `2. EXECUTION SEQUENCE (${stepCount} STEPS)`));
 
 		const autoGenHeaderBtn = append(pipelineHeader, $('.pipeline-btn.pipeline-btn-outline'));
 		autoGenHeaderBtn.style.padding = '2px 6px';
@@ -2461,8 +2491,6 @@ export class WorkflowEditor extends EditorPane {
 		autoGenHeaderBtn.onclick = () => {
 			this._autoGenerateNodePipeline(node);
 		};
-
-		append(pipelineSec, $('span.pipeline-section-desc', {}, 'Runs strictly from top to bottom. Drag ≡ or use ▲/▼ to reorder steps.'));
 
 		const stepsList = append(pipelineSec, $('.pipeline-steps-list'));
 
@@ -2542,14 +2570,14 @@ export class WorkflowEditor extends EditorPane {
 					stepCard.classList.remove('is-dragging', 'drag-over-above', 'drag-over-below');
 				};
 
-				// Left: Drag Handle ≡
-				const dragHandle = append(stepCard, $('.pipeline-drag-handle'));
+				// Left Column: #1 (top) and Drag Handle ::: (bottom)
+				const leftCol = append(stepCard, $('.pipeline-step-left-col'));
+				const stepNum = append(leftCol, $('.pipeline-step-number'));
+				stepNum.textContent = `#${i + 1}`;
+
+				const dragHandle = append(leftCol, $('.pipeline-drag-handle'));
 				append(dragHandle, $('span' + ThemeIcon.asCSSSelector(Codicon.gripper)));
 				dragHandle.title = 'Drag ≡ to reorder step';
-
-				// Step Number Badge: #1, #2...
-				const stepNum = append(stepCard, $('.pipeline-step-number'));
-				stepNum.textContent = `#${i + 1}`;
 
 				// Center: Step Content
 				const content = append(stepCard, $('.pipeline-step-content'));
@@ -2586,7 +2614,7 @@ export class WorkflowEditor extends EditorPane {
 					append(badge, $('span', {}, 'VAR'));
 
 					const title = append(topRow, $('.pipeline-step-title'));
-					title.textContent = `Assign Variable: @${step.targetVariable || 'var'}`;
+					title.textContent = `Assign: @${step.targetVariable || 'var'}`;
 
 					// Assignment row: @[var] = [expression]
 					const cfgRow = append(content, $('.pipeline-step-config-row'));
@@ -2615,42 +2643,8 @@ export class WorkflowEditor extends EditorPane {
 					};
 				}
 
-				// Right: Actions (▲, ▼, 🗑️)
+				// Right: Actions (Delete only)
 				const stepActions = append(stepCard, $('.pipeline-step-actions'));
-
-				// Move Up Button
-				if (i > 0) {
-					const upBtn = append(stepActions, $('.pipeline-icon-btn'));
-					append(upBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronUp)));
-					upBtn.title = 'Move step up';
-					upBtn.onclick = (e) => {
-						e.stopPropagation();
-						if (node.pipeline) {
-							const temp = node.pipeline[i];
-							node.pipeline[i] = node.pipeline[i - 1];
-							node.pipeline[i - 1] = temp;
-							this._saveFlowchartData();
-							this._renderPipelinePanel(panel, node);
-						}
-					};
-				}
-
-				// Move Down Button
-				if (i < node.pipeline.length - 1) {
-					const downBtn = append(stepActions, $('.pipeline-icon-btn'));
-					append(downBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
-					downBtn.title = 'Move step down';
-					downBtn.onclick = (e) => {
-						e.stopPropagation();
-						if (node.pipeline) {
-							const temp = node.pipeline[i];
-							node.pipeline[i] = node.pipeline[i + 1];
-							node.pipeline[i + 1] = temp;
-							this._saveFlowchartData();
-							this._renderPipelinePanel(panel, node);
-						}
-					};
-				}
 
 				// Delete Step Button
 				const delBtn = append(stepActions, $('.pipeline-icon-btn'));

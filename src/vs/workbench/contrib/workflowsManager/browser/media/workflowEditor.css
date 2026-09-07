@@ -2819,28 +2819,24 @@
 }
 
 .pipeline-import-add-btn {
-	padding: 2px 6px;
-	font-size: 10.5px;
+	padding: 2px 7px;
+	font-size: 10px;
 	font-weight: 500;
 	border-radius: 3px;
-	background: rgba(168, 85, 247, 0.18);
-	border: 1px solid rgba(168, 85, 247, 0.4);
-	color: #c084fc;
+	background: var(--vscode-button-secondaryBackground, rgba(255, 255, 255, 0.08));
+	border: 1px solid var(--vscode-button-secondaryBorder, rgba(255, 255, 255, 0.14));
+	color: var(--vscode-button-secondaryForeground, #e2e8f0);
 	cursor: pointer;
 	display: inline-flex;
 	align-items: center;
-	gap: 3px;
+	justify-content: center;
 	transition: all 0.12s ease;
-	line-height: 1.2;
-}
-
-.pipeline-import-add-btn span.codicon {
-	font-size: 9.5px;
+	line-height: 1.3;
 }
 
 .pipeline-import-add-btn:hover {
-	background: rgba(168, 85, 247, 0.35);
-	border-color: #c084fc;
+	background: var(--vscode-button-secondaryHoverBackground, rgba(255, 255, 255, 0.16));
+	border-color: rgba(255, 255, 255, 0.28);
 	color: #ffffff;
 }
 
@@ -2924,6 +2920,30 @@
 	border-bottom: 2px solid #38bdf8;
 }
 
+.pipeline-step-left-col {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: space-between;
+	gap: 3px;
+	flex-shrink: 0;
+	width: 20px;
+	padding-top: 1px;
+}
+
+.pipeline-step-number {
+	font-size: 8.5px;
+	font-weight: 700;
+	color: #94a3b8;
+	background: rgba(255, 255, 255, 0.06);
+	padding: 1px 2px;
+	border-radius: 3px;
+	line-height: 1.1;
+	text-align: center;
+	width: 100%;
+	box-sizing: border-box;
+}
+
 .pipeline-drag-handle {
 	cursor: grab;
 	display: flex;
@@ -2932,7 +2952,6 @@
 	width: 16px;
 	height: 16px;
 	color: #64748b;
-	margin-top: 2px;
 	flex-shrink: 0;
 	transition: color 0.12s ease;
 	font-size: 11px;
@@ -2944,17 +2963,6 @@
 
 .pipeline-drag-handle:active {
 	cursor: grabbing;
-}
-
-.pipeline-step-number {
-	font-size: 9.5px;
-	font-weight: 700;
-	color: #94a3b8;
-	background: rgba(255, 255, 255, 0.06);
-	padding: 1px 4px;
-	border-radius: 3px;
-	flex-shrink: 0;
-	margin-top: 2px;
 }
 
 .pipeline-step-content {
@@ -2973,12 +2981,12 @@
 }
 
 .pipeline-step-badge-run {
-	background: rgba(168, 85, 247, 0.2);
-	border: 1px solid rgba(168, 85, 247, 0.4);
-	color: #c084fc;
+	background: rgba(34, 197, 94, 0.14);
+	border: 1px solid rgba(34, 197, 94, 0.35);
+	color: #4ade80;
 	font-size: 8.5px;
 	font-weight: 700;
-	padding: 1px 4px;
+	padding: 1px 5px;
 	border-radius: 3px;
 	display: inline-flex;
 	align-items: center;
@@ -2987,7 +2995,8 @@
 }
 
 .pipeline-step-badge-run span.codicon {
-	font-size: 7.5px;
+	font-size: 8px;
+	color: #4ade80;
 }
 
 .pipeline-step-badge-var {
