@@ -4439,6 +4439,8 @@ export class WorkflowEditor extends EditorPane {
 
 		const vBadge = append(varPill, $('.var-tag-icon'));
 		vBadge.textContent = '[V]';
+		vBadge.style.whiteSpace = 'nowrap';
+		vBadge.style.flexShrink = '0';
 
 		// Check if this variable is bound to a ticket
 		const findReferencedTicket = (rawRef?: string) => {
@@ -5213,6 +5215,8 @@ export class WorkflowEditor extends EditorPane {
 
 		const vBadge = append(draftWrapper, $('.var-tag-icon'));
 		vBadge.textContent = '[V]';
+		vBadge.style.whiteSpace = 'nowrap';
+		vBadge.style.flexShrink = '0';
 
 		const input = append(draftWrapper, $('input.node-variable-draft-input')) as HTMLInputElement;
 		input.type = 'text';
