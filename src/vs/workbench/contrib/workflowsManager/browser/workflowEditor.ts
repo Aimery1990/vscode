@@ -4413,7 +4413,8 @@ export class WorkflowEditor extends EditorPane {
 	): HTMLElement {
 		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
 		const runtimeVal = activeRun?.contextVariables ? activeRun.contextVariables[v.name] : undefined;
-		const displayVal = runtimeVal !== undefined ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : (v.initialValue || 'None');
+		const displayVal = v.initialValue || 'None';
+		const runtimeTooltip = runtimeVal !== undefined && runtimeVal !== null ? `\n(Latest Runtime Value: ${typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)})` : '';
 
 		const varPill = append(container, $('.node-variable-pill'));
 		varPill.onmousedown = (e) => {
@@ -4507,15 +4508,9 @@ export class WorkflowEditor extends EditorPane {
 			append(chip, $('span' + ThemeIcon.asCSSSelector(Codicon.checklist)));
 			append(chip, $('span', {}, boundTicket.name));
 
-			if (runtimeVal !== undefined && runtimeVal !== null && runtimeVal !== 'None') {
-				const valPart = append(pillContent, $('.var-pill-runtime-val'));
-				valPart.textContent = `(${typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)})`;
-				valPart.title = `Runtime Output: ${String(runtimeVal)}`;
-			}
-
 			varPill.title = stepIndex
-				? `[Step #${stepIndex} VAR] ${v.name} ← Output of ${boundTicket.name}${fromStepText}\n(Double-click to inline edit, click to edit in Pipeline)`
-				: `Context Variable: ${v.name} ← ${boundTicket.name}\n(Double-click to inline edit, click to select)`;
+				? `[Step #${stepIndex} VAR] ${v.name} ← Output of ${boundTicket.name}${fromStepText}${runtimeTooltip}\n(Double-click to inline edit, click to edit in Pipeline)`
+				: `Context Variable: ${v.name} ← ${boundTicket.name}${runtimeTooltip}\n(Double-click to inline edit, click to select)`;
 		} else {
 			let pillText = `${v.name} = ${displayVal}`;
 			if (v.expression) {
@@ -4547,8 +4542,8 @@ export class WorkflowEditor extends EditorPane {
 			}
 			pillContent.textContent = pillText;
 			varPill.title = stepIndex
-				? `[Step #${stepIndex} VAR] ${v.name} = ${displayVal}\n(Double-click to inline edit, click to edit in Pipeline)`
-				: `Context Variable: ${v.name} = ${displayVal}\n(Double-click to inline edit, click to select)`;
+				? `[Step #${stepIndex} VAR] ${v.name} = ${displayVal}${runtimeTooltip}\n(Double-click to inline edit, click to edit in Pipeline)`
+				: `Context Variable: ${v.name} = ${displayVal}${runtimeTooltip}\n(Double-click to inline edit, click to select)`;
 		}
 
 		const removeVarBtn = append(varPill, $('.var-pill-remove'));
