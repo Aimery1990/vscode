@@ -299,6 +299,8 @@ export class WorkflowEditor extends EditorPane {
 	private _activePipelineNodeId?: string;
 	private _pipelineDockSide: 'left' | 'right' = 'right';
 	private _activePipelineDropdown: HTMLElement | null = null;
+	private _ticketHoverPopoverEl: HTMLElement | null = null;
+	private _ticketHoverTimeout: any = null;
 
 	constructor(
 		group: IEditorGroup,
@@ -2193,10 +2195,20 @@ export class WorkflowEditor extends EditorPane {
 		setTimeout(() => window.addEventListener('mousedown', dismiss, true), 50);
 	}
 
-	private _openNodePipelinePanel(nodeId: string): void {
+	private _openNodePipelinePanel(nodeId: string, highlightTicketName?: string): void {
 		if (this._activePipelineNodeId === nodeId && this._pipelinePanelEl && this._canvasViewport?.contains(this._pipelinePanelEl)) {
+			if (highlightTicketName) {
+				const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(highlightTicketName) : highlightTicketName;
+				const targetCard = this._pipelinePanelEl.querySelector(`[data-ticket-name="${escaped}"]`) as HTMLElement;
+				if (targetCard) {
+					targetCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+					targetCard.classList.add('highlight-pulse');
+					setTimeout(() => targetCard.classList.remove('highlight-pulse'), 1600);
+				}
+			}
 			return;
 		}
+
 		const node = this._data.nodes.find(n => n.id === nodeId);
 		if (!node) {
 			this._notificationService.warn(`Node '${nodeId}' not found.`);
@@ -2228,9 +2240,23 @@ export class WorkflowEditor extends EditorPane {
 		this._pipelinePanelEl.style.display = 'flex';
 		this._pipelinePanelEl.className = `workflow-pipeline-panel dock-${this._pipelineDockSide}`;
 		this._renderPipelinePanel(this._pipelinePanelEl, node);
+
+		if (highlightTicketName) {
+			setTimeout(() => {
+				if (!this._pipelinePanelEl) return;
+				const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(highlightTicketName) : highlightTicketName;
+				const targetCard = this._pipelinePanelEl.querySelector(`[data-ticket-name="${escaped}"]`) as HTMLElement;
+				if (targetCard) {
+					targetCard.scrollIntoView({ behavior: 'smooth', block: 'center' });
+					targetCard.classList.add('highlight-pulse');
+					setTimeout(() => targetCard.classList.remove('highlight-pulse'), 1600);
+				}
+			}, 80);
+		}
 	}
 
 	private _closeNodePipelinePanel(): void {
+		this._hideTicketPopover();
 		if (this._activePipelineDropdown) {
 			this._activePipelineDropdown.remove();
 			this._activePipelineDropdown = null;
@@ -2240,6 +2266,117 @@ export class WorkflowEditor extends EditorPane {
 			this._pipelinePanelEl = undefined;
 		}
 		this._activePipelineNodeId = undefined;
+	}
+
+	private _showTicketPopover(
+		targetEl: HTMLElement,
+		ticket: { type: string; name: string; uri?: string; parameters?: string },
+		node: IFlowchartNode
+	): void {
+		if (this._ticketHoverTimeout) {
+			clearTimeout(this._ticketHoverTimeout);
+			this._ticketHoverTimeout = null;
+		}
+
+		if (!this._ticketHoverPopoverEl) {
+			this._ticketHoverPopoverEl = document.createElement('div');
+			this._ticketHoverPopoverEl.className = 'workflow-ticket-popover';
+			document.body.appendChild(this._ticketHoverPopoverEl);
+
+			this._ticketHoverPopoverEl.addEventListener('mouseenter', () => {
+				if (this._ticketHoverTimeout) {
+					clearTimeout(this._ticketHoverTimeout);
+					this._ticketHoverTimeout = null;
+				}
+			});
+			this._ticketHoverPopoverEl.addEventListener('mouseleave', () => {
+				this._hideTicketPopover();
+			});
+		}
+
+		const popover = this._ticketHoverPopoverEl;
+		clearNode(popover);
+
+		const matchingStep = node.pipeline?.find(s => s.type === 'run_ticket' && s.ticketName === ticket.name);
+		const stepIndex = matchingStep && node.pipeline ? (node.pipeline.indexOf(matchingStep) + 1) : undefined;
+		const style = getEntityBadgeStyle(ticket.type);
+
+		// 1. Header row
+		const header = append(popover, $('.ticket-popover-header'));
+		const badge = append(header, $('.ticket-popover-badge'));
+		badge.style.backgroundColor = style.bg;
+		badge.style.color = style.color;
+		badge.style.border = `1px solid ${style.color}44`;
+		append(badge, $('span' + ThemeIcon.asCSSSelector(style.icon)));
+		append(badge, $('span', {}, (ticket.type || 'ticket').toUpperCase()));
+
+		append(header, $('span.ticket-popover-name', {}, ticket.name));
+
+		if (stepIndex !== undefined) {
+			append(header, $('span.ticket-popover-seq', {}, `#${stepIndex} in Pipeline`));
+		}
+
+		// 2. Parameters row
+		const effectiveParams = matchingStep?.parameters || ticket.parameters;
+		const paramRow = append(popover, $('.ticket-popover-row'));
+		append(paramRow, $('span.ticket-popover-label', {}, 'Parameters:'));
+		const paramVal = append(paramRow, $('span.ticket-popover-param'));
+		if (effectiveParams && effectiveParams.trim()) {
+			paramVal.textContent = effectiveParams.trim();
+			paramVal.classList.add('has-value');
+		} else {
+			paramVal.textContent = '(none)';
+			paramVal.classList.add('is-empty');
+		}
+
+		// 3. Output destination row
+		if (matchingStep?.targetVariable) {
+			const outRow = append(popover, $('.ticket-popover-row'));
+			append(outRow, $('span.ticket-popover-label', {}, 'Output to:'));
+			append(outRow, $('span.ticket-popover-out', {}, `@${matchingStep.targetVariable}`));
+		}
+
+		// 4. Footer hint
+		const footer = append(popover, $('.ticket-popover-footer'));
+		append(footer, $('span' + ThemeIcon.asCSSSelector(Codicon.edit)));
+		append(footer, $('span', {}, 'Click badge to configure in Execution Pipeline'));
+
+		popover.onclick = (e) => {
+			e.stopPropagation();
+			this._hideTicketPopover();
+			this._openNodePipelinePanel(node.id, ticket.name);
+		};
+
+		// Position popover relative to targetEl
+		const rect = targetEl.getBoundingClientRect();
+		popover.style.display = 'flex';
+		const popRect = popover.getBoundingClientRect();
+
+		// Position above if space available, else below
+		let top = rect.top - popRect.height - 8;
+		if (top < 10) {
+			top = rect.bottom + 8;
+		}
+		let left = rect.left + (rect.width / 2) - (popRect.width / 2);
+		if (left < 10) left = 10;
+		if (left + popRect.width > window.innerWidth - 10) {
+			left = window.innerWidth - popRect.width - 10;
+		}
+
+		popover.style.top = `${top}px`;
+		popover.style.left = `${left}px`;
+	}
+
+	private _hideTicketPopover(): void {
+		if (this._ticketHoverTimeout) {
+			clearTimeout(this._ticketHoverTimeout);
+		}
+		this._ticketHoverTimeout = setTimeout(() => {
+			if (this._ticketHoverPopoverEl) {
+				this._ticketHoverPopoverEl.remove();
+				this._ticketHoverPopoverEl = null;
+			}
+		}, 120);
 	}
 
 	private _syncFromNode(node: IFlowchartNode): void {
@@ -2865,6 +3002,9 @@ export class WorkflowEditor extends EditorPane {
 				stepCard.draggable = true;
 				stepCard.dataset.stepIndex = String(i);
 				stepCard.dataset.stepId = step.id;
+				if (step.type === 'run_ticket' && step.ticketName) {
+					stepCard.dataset.ticketName = step.ticketName;
+				}
 
 				// HTML5 Drag & Drop Reordering Handlers
 				stepCard.ondragstart = (e: DragEvent) => {
@@ -4299,8 +4439,16 @@ export class WorkflowEditor extends EditorPane {
 				const effectiveTickets = Array.from(allTicketMap.values());
 				const totalTickets = effectiveTickets.length;
 				if (totalTickets > 0) {
-					// Dynamic limit based on node width (at least 1, max 3 visible pills when pipeline present)
-					const maxVisible = Math.max(1, Math.min(3, Math.floor(((node.width || 120) - 20) / 60)));
+					// Dynamic limit based on node width (allow badges to fill horizontal space, never hardcode cap at 3)
+					const nodeWidth = node.width || 120;
+					const reservedWidth = (node.pipeline && node.pipeline.length > 0) ? 75 : 0;
+					const availableWidth = Math.max(60, nodeWidth - 30 - reservedWidth);
+					const avgBadgeWidth = 95;
+					let maxVisible = Math.min(totalTickets, Math.max(1, Math.floor(availableWidth / avgBadgeWidth)));
+					// If only 1 extra ticket remains, fit it in rather than showing "+1"
+					if (totalTickets - maxVisible === 1 && availableWidth >= (totalTickets * 75)) {
+						maxVisible = totalTickets;
+					}
 					const visibleTickets = effectiveTickets.slice(0, maxVisible);
 					const overflowCount = totalTickets - visibleTickets.length;
 
@@ -4316,12 +4464,29 @@ export class WorkflowEditor extends EditorPane {
 
 						append(badge, $('span' + ThemeIcon.asCSSSelector(style.icon)));
 
+						const badgeText = append(badge, $('span.badge-text'));
+						append(badgeText, $('span.badge-name-text', {}, t.name));
+
 						// Display parameters in parentheses inside the ticket pill if present
 						const paramText = t.parameters?.trim();
-						const labelText = paramText ? `${t.name} (${paramText})` : t.name;
+						if (paramText) {
+							append(badgeText, $('span.badge-param-text', {}, `(${paramText})`));
+						}
 
-						badge.title = paramText ? `${typeLabel}: ${t.name}\nParameters: ${paramText}` : `${typeLabel}: ${t.name}`;
-						append(badge, $('span.badge-text', {}, labelText));
+						badge.title = paramText ? `${typeLabel}: ${t.name}\nParameters: ${paramText}\n(Click to edit in Pipeline)` : `${typeLabel}: ${t.name}\n(Click to edit in Pipeline)`;
+
+						// Interactive hover popover & click to navigate to pipeline step
+						badge.onmouseenter = () => {
+							this._showTicketPopover(badge, t, node);
+						};
+						badge.onmouseleave = () => {
+							this._hideTicketPopover();
+						};
+						badge.onclick = (e) => {
+							e.stopPropagation();
+							this._hideTicketPopover();
+							this._openNodePipelinePanel(node.id, t.name);
+						};
 					}
 
 					if (overflowCount > 0) {
@@ -4330,10 +4495,14 @@ export class WorkflowEditor extends EditorPane {
 							const p = i.parameters?.trim();
 							return `• [${i.type || 'module'}] ${i.name}${p ? ` (${p})` : ''}`;
 						}).join('\n');
-						moreBadge.title = `More attached tickets/modules (+${overflowCount}):\n${remainingList}`;
+						moreBadge.title = `More attached tickets/modules (+${overflowCount}):\n${remainingList}\n(Click to view all in Pipeline)`;
 						moreBadge.style.backgroundColor = 'rgba(255, 255, 255, 0.12)';
 						moreBadge.style.color = 'var(--vscode-descriptionForeground, #aaaaaa)';
 						append(moreBadge, $('span.badge-text', {}, `+${overflowCount}`));
+						moreBadge.onclick = (e) => {
+							e.stopPropagation();
+							this._openNodePipelinePanel(node.id);
+						};
 					}
 				}
 			}
