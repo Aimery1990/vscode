@@ -1056,28 +1056,38 @@ export class WorkflowEditor extends EditorPane {
 		const result: INodeVariable[] = [];
 		const seen = new Set<string>();
 
+		// 1. If pipeline exists, variables defined/set in pipeline take precedence in execution order!
+		if (node.pipeline && node.pipeline.length > 0) {
+			for (const step of node.pipeline) {
+				if (step.type === 'set_variable' && step.targetVariable) {
+					const cleanName = step.targetVariable.replace(/^@/, '');
+					if (!seen.has(cleanName)) {
+						seen.add(cleanName);
+						const existingVar = (node.outputVariables || []).find(v => v.name.replace(/^@/, '') === cleanName);
+						result.push({
+							name: cleanName,
+							initialValue: step.expression || existingVar?.initialValue || 'None',
+							expression: step.expression || existingVar?.expression
+						});
+					}
+				}
+			}
+		}
+
+		// 2. Any additional outputVariables not in pipeline
 		if (Array.isArray(node.outputVariables) && node.outputVariables.length > 0) {
 			for (const v of node.outputVariables) {
-				if (v.name && !seen.has(v.name)) {
-					seen.add(v.name);
+				const cleanName = v.name.replace(/^@/, '');
+				if (!seen.has(cleanName)) {
+					seen.add(cleanName);
 					result.push(v);
 				}
 			}
 		} else if (node.outputVariable && node.outputVariable.name) {
-			seen.add(node.outputVariable.name);
-			result.push(node.outputVariable);
-		}
-
-		if (node.pipeline) {
-			for (const step of node.pipeline) {
-				if (step.type === 'set_variable' && step.targetVariable && !seen.has(step.targetVariable)) {
-					seen.add(step.targetVariable);
-					result.push({
-						name: step.targetVariable,
-						initialValue: step.expression || 'None',
-						expression: step.expression
-					});
-				}
+			const cleanName = node.outputVariable.name.replace(/^@/, '');
+			if (!seen.has(cleanName)) {
+				seen.add(cleanName);
+				result.push(node.outputVariable);
 			}
 		}
 
@@ -2221,6 +2231,12 @@ export class WorkflowEditor extends EditorPane {
 		this._selectedNodeIds.clear();
 		this._selectedLinkIds.clear();
 		this._selectedNodeIds.add(nodeId);
+
+		// Auto-align pipeline from node if empty or disordered (runners first, variables at end)
+		if (this._pipelineNeedsAlignment(node)) {
+			this._syncFromNode(node, true);
+		}
+
 		this._renderNodes();
 		this._drawLinks();
 		if (this._inspectorEl) {
@@ -2386,7 +2402,55 @@ export class WorkflowEditor extends EditorPane {
 		}, 120);
 	}
 
-	private _syncFromNode(node: IFlowchartNode): void {
+	private _pipelineNeedsAlignment(node: IFlowchartNode): boolean {
+		if (!node.pipeline || node.pipeline.length === 0) {
+			const hasImports = Array.isArray(node.imports) && node.imports.length > 0;
+			const hasVars = (Array.isArray(node.outputVariables) && node.outputVariables.length > 0) || Boolean(node.outputVariable?.name);
+			return hasImports || hasVars;
+		}
+
+		// Check 1: Duplicate ticket names in run_ticket steps
+		const seenRunners = new Set<string>();
+		for (const s of node.pipeline) {
+			if (s.type === 'run_ticket' && s.ticketName) {
+				if (seenRunners.has(s.ticketName)) return true;
+				seenRunners.add(s.ticketName);
+			}
+		}
+
+		// Check 2: Variable step placed before any runner step
+		let seenVar = false;
+		for (const s of node.pipeline) {
+			if (s.type === 'set_variable') {
+				seenVar = true;
+			} else if (s.type === 'run_ticket' && seenVar) {
+				return true;
+			}
+		}
+
+		// Check 3: Tickets present in node.imports but completely absent from pipeline
+		const ticketImports = (node.imports || []).filter(i =>
+			['task', 'job', 'project', 'case', 'issue', 'workflow', 'agent', 'ticket'].includes((i.type || '').toLowerCase()) || Boolean(i.name)
+		);
+		for (const imp of ticketImports) {
+			if (imp.name && !seenRunners.has(imp.name)) {
+				return true;
+			}
+		}
+
+		// Check 4: Variables present in node.outputVariables but completely absent from pipeline
+		const pipelineVars = new Set(node.pipeline.filter(s => s.type === 'set_variable').map(s => s.targetVariable?.replace(/^@/, '')).filter(Boolean));
+		const nodeVars = (node.outputVariables || []).map(v => v.name.replace(/^@/, '')).filter(Boolean);
+		for (const vName of nodeVars) {
+			if (!pipelineVars.has(vName)) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private _syncFromNode(node: IFlowchartNode, silent: boolean = false): void {
 		if (!node.pipeline) node.pipeline = [];
 
 		const ticketImports = (node.imports || []).filter(i =>
@@ -2420,6 +2484,7 @@ export class WorkflowEditor extends EditorPane {
 		// 1. All Runner tickets in node.imports order first
 		const usedRunTickets = new Set<string>();
 		for (const imp of ticketImports) {
+			if (usedRunTickets.has(imp.name)) continue;
 			usedRunTickets.add(imp.name);
 			const existing = existingRunMap.get(imp.name);
 			if (existing) {
@@ -2442,9 +2507,10 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		// Keep any extra run_ticket steps that were manually configured in pipeline
+		// Keep any extra run_ticket steps that were manually configured in pipeline (deduped)
 		for (const [tName, step] of existingRunMap) {
 			if (!usedRunTickets.has(tName)) {
+				usedRunTickets.add(tName);
 				newPipeline.push(step);
 			}
 		}
@@ -2458,6 +2524,7 @@ export class WorkflowEditor extends EditorPane {
 		const usedVars = new Set<string>();
 		for (const v of nodeVars) {
 			const cleanName = v.name.replace(/^@/, '');
+			if (usedVars.has(cleanName)) continue;
 			usedVars.add(cleanName);
 			const existing = existingVarMap.get(cleanName);
 			if (existing) {
@@ -2473,9 +2540,10 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		// Keep any extra set_variable steps
+		// Keep any extra set_variable steps (deduped)
 		for (const [vName, step] of existingVarMap) {
 			if (!usedVars.has(vName)) {
+				usedVars.add(vName);
 				newPipeline.push(step);
 			}
 		}
@@ -2487,12 +2555,16 @@ export class WorkflowEditor extends EditorPane {
 		if (this._pipelinePanelEl) {
 			this._renderPipelinePanel(this._pipelinePanelEl, node);
 		}
-		this._notificationService.info(`Synced from node '${node.label}': ${node.pipeline.length} step(s) aligned in sequence (Runners first, Variables at end).`);
+		if (!silent) {
+			this._notificationService.info(`Synced from node '${node.label}': ${node.pipeline.length} step(s) aligned in sequence (Runners first, Variables at end).`);
+		}
 	}
 
-	private _syncToNode(node: IFlowchartNode): void {
+	private _syncToNode(node: IFlowchartNode, silent: boolean = false): void {
 		if (!node.pipeline || node.pipeline.length === 0) {
-			this._notificationService.warn(`No execution steps in pipeline to sync to node '${node.label}'.`);
+			if (!silent) {
+				this._notificationService.warn(`No execution steps in pipeline to sync to node '${node.label}'.`);
+			}
 			return;
 		}
 
@@ -2507,22 +2579,26 @@ export class WorkflowEditor extends EditorPane {
 		for (const step of node.pipeline) {
 			if (step.type === 'run_ticket' && step.ticketName) {
 				const existingImp = node.imports.find(imp => imp.name === step.ticketName);
-				newImports.push({
-					type: (step.ticketType || existingImp?.type || 'ticket') as any,
-					name: step.ticketName,
-					uri: step.ticketUri || existingImp?.uri,
-					parameters: step.parameters
-				} as any);
-				updatedTickets++;
+				if (!newImports.some(i => i.name === step.ticketName)) {
+					newImports.push({
+						type: (step.ticketType || existingImp?.type || 'ticket') as any,
+						name: step.ticketName,
+						uri: step.ticketUri || existingImp?.uri,
+						parameters: step.parameters
+					} as any);
+					updatedTickets++;
+				}
 			} else if (step.type === 'set_variable' && step.targetVariable) {
 				const cleanVar = step.targetVariable.replace(/^@/, '');
-				const existingVar = (node.outputVariables || []).find(v => v.name.replace(/^@/, '') === cleanVar);
-				newVars.push({
-					name: cleanVar,
-					initialValue: step.expression || existingVar?.initialValue || 'None',
-					expression: step.expression
-				});
-				updatedVars++;
+				if (!newVars.some(v => v.name === cleanVar)) {
+					const existingVar = (node.outputVariables || []).find(v => v.name.replace(/^@/, '') === cleanVar);
+					newVars.push({
+						name: cleanVar,
+						initialValue: step.expression || existingVar?.initialValue || 'None',
+						expression: step.expression
+					});
+					updatedVars++;
+				}
 			}
 		}
 
@@ -2543,7 +2619,9 @@ export class WorkflowEditor extends EditorPane {
 		if (this._pipelinePanelEl) {
 			this._renderPipelinePanel(this._pipelinePanelEl, node);
 		}
-		this._notificationService.info(`Synced to node '${node.label}': ${updatedTickets} ticket(s) and ${updatedVars} variable(s) updated.`);
+		if (!silent) {
+			this._notificationService.info(`Synced to node '${node.label}': ${updatedTickets} ticket(s) and ${updatedVars} variable(s) updated.`);
+		}
 	}
 
 
@@ -3121,6 +3199,7 @@ export class WorkflowEditor extends EditorPane {
 						if (!isNaN(fromIdx) && fromIdx !== i && node.pipeline) {
 							const [moved] = node.pipeline.splice(fromIdx, 1);
 							node.pipeline.splice(i, 0, moved);
+							this._syncToNode(node, true);
 							this._saveFlowchartData();
 							this._renderPipelinePanel(panel, node);
 						}
@@ -3165,8 +3244,8 @@ export class WorkflowEditor extends EditorPane {
 							step.ticketName = selectedText;
 							if (rawItem?.raw?.type) step.ticketType = rawItem.raw.type;
 							if (rawItem?.raw?.uri) step.ticketUri = rawItem.raw.uri;
+							this._syncToNode(node, true);
 							this._saveFlowchartData();
-							this._renderNodes();
 						},
 						'ticket'
 					);
@@ -3174,8 +3253,8 @@ export class WorkflowEditor extends EditorPane {
 					ticketInput.onchange = () => {
 						const cleanVal = ticketInput.value.trim().replace(/^@/, '');
 						step.ticketName = cleanVal;
+						this._syncToNode(node, true);
 						this._saveFlowchartData();
-						this._renderNodes();
 					};
 
 					// 3. Parameters input (e.g. parameters)
@@ -3186,8 +3265,8 @@ export class WorkflowEditor extends EditorPane {
 					paramInput.title = 'Runtime parameter(s) for this ticket';
 					paramInput.oninput = () => {
 						step.parameters = paramInput.value.trim() || undefined;
+						this._syncToNode(node, true);
 						this._saveFlowchartData();
-						this._renderNodes();
 					};
 
 					// Line 2: Output destination row: Output to: [input]
@@ -3206,16 +3285,16 @@ export class WorkflowEditor extends EditorPane {
 							const cleanVar = selectedText.replace(/^@/, '').trim();
 							varInput.value = cleanVar;
 							step.targetVariable = cleanVar || undefined;
+							this._syncToNode(node, true);
 							this._saveFlowchartData();
-							this._renderNodes();
 						},
 						'variable'
 					);
 
 					varInput.onchange = () => {
 						step.targetVariable = varInput.value.trim().replace(/^@/, '') || undefined;
+						this._syncToNode(node, true);
 						this._saveFlowchartData();
-						this._renderNodes();
 					};
 				} else if (step.type === 'set_variable') {
 					// 1. Badge: [V] VAR
@@ -3234,8 +3313,8 @@ export class WorkflowEditor extends EditorPane {
 					varNameInput.title = 'Define or assign Variable name';
 					varNameInput.oninput = () => {
 						step.targetVariable = varNameInput.value.trim().replace(/^@/, '') || 'var';
+						this._syncToNode(node, true);
 						this._saveFlowchartData();
-						this._renderNodes();
 					};
 
 					// Line 2: Value row: Value = [input]
@@ -3254,6 +3333,7 @@ export class WorkflowEditor extends EditorPane {
 						(selectedText) => {
 							valInput.value = selectedText;
 							step.expression = selectedText;
+							this._syncToNode(node, true);
 							this._saveFlowchartData();
 						},
 						'variable'
@@ -3261,6 +3341,7 @@ export class WorkflowEditor extends EditorPane {
 
 					valInput.onchange = () => {
 						step.expression = valInput.value.trim() || undefined;
+						this._syncToNode(node, true);
 						this._saveFlowchartData();
 					};
 				}
@@ -3276,6 +3357,7 @@ export class WorkflowEditor extends EditorPane {
 					e.stopPropagation();
 					if (node.pipeline) {
 						node.pipeline.splice(i, 1);
+						this._syncToNode(node, true);
 						this._saveFlowchartData();
 						this._renderPipelinePanel(panel, node);
 					}
@@ -3283,7 +3365,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		// Toolbar: Add Steps & Sync
+		// Toolbar: Add Steps
 		const toolbarRow = append(pipelineSec, $('.pipeline-toolbar-btns'));
 
 		// 1. Add Runner Button
@@ -3295,12 +3377,19 @@ export class WorkflowEditor extends EditorPane {
 			e.stopPropagation();
 			if (!node.pipeline) node.pipeline = [];
 			const newStepId = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-			node.pipeline.push({
+			const newStep: INodePipelineStep = {
 				id: newStepId,
 				type: 'run_ticket',
 				ticketName: '',
 				parameters: ''
-			});
+			};
+			const varIdx = node.pipeline.findIndex(s => s.type === 'set_variable');
+			if (varIdx !== -1) {
+				node.pipeline.splice(varIdx, 0, newStep);
+			} else {
+				node.pipeline.push(newStep);
+			}
+			this._syncToNode(node, true);
 			this._saveFlowchartData();
 			this._renderPipelinePanel(panel, node);
 			setTimeout(() => {
@@ -3327,6 +3416,7 @@ export class WorkflowEditor extends EditorPane {
 				targetVariable: '',
 				expression: ''
 			});
+			this._syncToNode(node, true);
 			this._saveFlowchartData();
 			this._renderPipelinePanel(panel, node);
 			setTimeout(() => {
@@ -3335,14 +3425,18 @@ export class WorkflowEditor extends EditorPane {
 			}, 50);
 		};
 
-		// 3. Sync To Node Button
-		const syncToBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-secondary'));
+		// Divider line separating Add buttons from Sync To Node button
+		append(pipelineSec, $('.pipeline-toolbar-divider'));
+
+		// Toolbar Row 2: Sync To Node on the right
+		const syncRow = append(pipelineSec, $('.pipeline-toolbar-sync-row'));
+		const syncToBtn = append(syncRow, $('.pipeline-btn.pipeline-sync-to-btn'));
 		append(syncToBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp)));
 		append(syncToBtn, $('span', {}, 'Sync To Node'));
-		syncToBtn.title = 'Sync execution sequence steps and parameters back to canvas node';
+		syncToBtn.title = 'Sync execution sequence steps, runner order, and parameters to canvas node';
 		syncToBtn.onclick = (e) => {
 			e.stopPropagation();
-			this._syncToNode(node);
+			this._syncToNode(node, false);
 		};
 	}
 
@@ -4465,9 +4559,25 @@ export class WorkflowEditor extends EditorPane {
 					// Avoid duplicates
 					if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
 						node.imports.push({ type: type as any, name });
+						if (!node.pipeline) node.pipeline = [];
+						const varIdx = node.pipeline.findIndex(s => s.type === 'set_variable');
+						const newStep: INodePipelineStep = {
+							id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+							type: 'run_ticket',
+							ticketName: name,
+							ticketType: type
+						};
+						if (varIdx !== -1) {
+							node.pipeline.splice(varIdx, 0, newStep);
+						} else {
+							node.pipeline.push(newStep);
+						}
 						this._saveFlowchartData();
 						this._renderNodes();
 						this._drawLinks();
+						if (this._pipelinePanelEl && this._activePipelineNodeId === node.id) {
+							this._renderPipelinePanel(this._pipelinePanelEl, node);
+						}
 						this._notificationService.info(`Successfully imported ${type} '${name}' into '${node.label}'`);
 					}
 				}
@@ -7403,9 +7513,25 @@ export class WorkflowEditor extends EditorPane {
 									}
 									if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
 										node.imports.push({ type: type as any, name });
+										if (!node.pipeline) node.pipeline = [];
+										const varIdx = node.pipeline.findIndex(s => s.type === 'set_variable');
+										const newStep: INodePipelineStep = {
+											id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+											type: 'run_ticket',
+											ticketName: name,
+											ticketType: type
+										};
+										if (varIdx !== -1) {
+											node.pipeline.splice(varIdx, 0, newStep);
+										} else {
+											node.pipeline.push(newStep);
+										}
 										this._saveFlowchartData();
 										this._renderNodes();
 										this._drawLinks();
+										if (this._pipelinePanelEl && this._activePipelineNodeId === node.id) {
+											this._renderPipelinePanel(this._pipelinePanelEl, node);
+										}
 										this._notificationService.info(`Successfully created and imported ${type} '${name}' into '${node.label}'`);
 									}
 								}

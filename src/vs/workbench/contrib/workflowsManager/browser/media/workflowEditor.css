@@ -3231,6 +3231,36 @@
 	color: #ffffff;
 }
 
+.pipeline-toolbar-divider {
+	height: 1px;
+	background-color: var(--vscode-widget-border, rgba(255, 255, 255, 0.1));
+	margin: 12px 0 10px 0;
+	width: 100%;
+}
+
+.pipeline-toolbar-sync-row {
+	display: flex;
+	justify-content: flex-end;
+	width: 100%;
+	box-sizing: border-box;
+}
+
+.pipeline-sync-to-btn {
+	padding: 4px 12px;
+	font-size: 11px;
+	font-weight: 500;
+	gap: 6px;
+	background: rgba(255, 255, 255, 0.05);
+	border: 1px solid rgba(255, 255, 255, 0.15);
+	color: var(--vscode-button-secondaryForeground, #e2e8f0);
+}
+
+.pipeline-sync-to-btn:hover {
+	background: rgba(255, 255, 255, 0.12);
+	border-color: rgba(255, 255, 255, 0.3);
+	color: #ffffff;
+}
+
 .pipeline-empty-state {
 	padding: 14px;
 	text-align: center;
