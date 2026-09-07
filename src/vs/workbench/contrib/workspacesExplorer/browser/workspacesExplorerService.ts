@@ -244,9 +244,17 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	private getRemovedWorkspaceUris(): string[] {
-		const raw = this.storageService.get(this.removedWorkspacesKey, StorageScope.PROFILE, '[]');
+		let raw = this.storageService.get(this.removedWorkspacesKey, StorageScope.PROFILE, '');
+		if (!raw && this.activeUserEmail) {
+			const legacyKey = `${REMOVED_WORKSPACES_STORAGE_KEY}:google:Aimery Wei (${this.activeUserEmail})`;
+			const legacyRaw = this.storageService.get(legacyKey, StorageScope.PROFILE, '');
+			if (legacyRaw) {
+				raw = legacyRaw;
+				this.storageService.store(this.removedWorkspacesKey, raw, StorageScope.PROFILE, StorageTarget.USER);
+			}
+		}
 		try {
-			return (JSON.parse(raw) as string[]).map(u => this.normalizeUriString(u));
+			return (JSON.parse(raw || '[]') as string[]).map(u => this.normalizeUriString(u));
 		} catch {
 			return [];
 		}
@@ -792,7 +800,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 						let parsedStatuses: string[] = [];
 						if (statusesMatch && statusesMatch[1]) {
-							parsedStatuses = statusesMatch[1].split(/[,，;\n]+/).map(s => s.trim()).filter(Boolean);
+							parsedStatuses = statusesMatch[1].split(/[,;\n\uFF0C]+/).map(s => s.trim()).filter(Boolean);
 						}
 
 						let parsedMapping: { [key: string]: CanonicalStatusCategory } = {};
