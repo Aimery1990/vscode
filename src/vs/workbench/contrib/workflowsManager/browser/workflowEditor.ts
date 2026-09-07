@@ -2354,7 +2354,7 @@ export class WorkflowEditor extends EditorPane {
 		// 2. Parameters row
 		const effectiveParams = matchingStep?.parameters || ticket.parameters;
 		const paramRow = append(popover, $('.ticket-popover-row'));
-		append(paramRow, $('span.ticket-popover-label', {}, 'Parameters:'));
+		append(paramRow, $('span.ticket-popover-label', {}, 'PARAM:'));
 		const paramVal = append(paramRow, $('span.ticket-popover-param'));
 		if (effectiveParams && effectiveParams.trim()) {
 			paramVal.textContent = effectiveParams.trim();
@@ -3270,14 +3270,14 @@ export class WorkflowEditor extends EditorPane {
 					// Clean up legacy targetVariable on run_ticket
 					delete step.targetVariable;
 
-					// Line 2: Parameters row: parameters: [input] (Moved from topRow to replace Output to)
+					// Line 2: Parameters row: PARAM: [input] (Moved from topRow to replace Output to)
 					const cfgRow = append(content, $('.pipeline-step-config-row'));
-					append(cfgRow, $('span.pipeline-cfg-label', {}, 'parameters:'));
+					append(cfgRow, $('span.pipeline-cfg-label', {}, 'PARAM:'));
 					const paramInput = append(cfgRow, $('input.pipeline-step-input.pipeline-param-input')) as HTMLInputElement;
 					paramInput.type = 'text';
 					paramInput.value = step.parameters || '';
-					paramInput.placeholder = 'parameters (e.g. 1,2,3,4,5 or --fast)';
-					paramInput.title = 'Runtime parameter(s) for this ticket';
+					paramInput.placeholder = 'PARAM (e.g. 1,2,3,4,5 or --fast)';
+					paramInput.title = 'Runtime PARAM for this ticket';
 					paramInput.oninput = () => {
 						step.parameters = paramInput.value.trim() || undefined;
 						this._syncToNode(node, true);
@@ -4818,7 +4818,7 @@ export class WorkflowEditor extends EditorPane {
 								append(badgeText, $('span.badge-param-text', {}, `(${paramText})`));
 							}
 
-							badge.title = `[Step #${stepNumber} RUN] ${typeLabel}: ${step.ticketName}${paramText ? `\nParameters: ${paramText}` : ''}\n(Click to edit in Pipeline)`;
+							badge.title = `[Step #${stepNumber} RUN] ${typeLabel}: ${step.ticketName}${paramText ? `\nPARAM: ${paramText}` : ''}\n(Click to edit in Pipeline)`;
 
 							badge.onmouseenter = () => {
 								this._showTicketPopover(badge, { name: step.ticketName || '', type: step.ticketType || 'ticket', uri: step.ticketUri, parameters: step.parameters }, node, stepNumber);
@@ -4871,7 +4871,7 @@ export class WorkflowEditor extends EditorPane {
 							append(badgeText, $('span.badge-param-text', {}, `(${paramText})`));
 						}
 
-						badge.title = paramText ? `${typeLabel}: ${t.name}\nParameters: ${paramText}` : `${typeLabel}: ${t.name}`;
+						badge.title = paramText ? `${typeLabel}: ${t.name}\nPARAM: ${paramText}` : `${typeLabel}: ${t.name}`;
 
 						badge.onmouseenter = () => {
 							this._showTicketPopover(badge, t, node);

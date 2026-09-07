@@ -966,7 +966,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 			const runTicket = async (ticketName: string, ticketType?: string, ticketUri?: string, parameters?: string) => {
 				const ticketStart = Date.now();
-				this._emitLog(run, 'info', `Running Ticket: [${ticketType || 'task'}] '${ticketName}'${parameters ? ` (parameters: ${parameters})` : ''}`);
+				this._emitLog(run, 'info', `Running Ticket: [${ticketType || 'task'}] '${ticketName}'${parameters ? ` (PARAM: ${parameters})` : ''}`);
 
 				// Simulated async ticket execution with snapshot integration
 				await new Promise(r => setTimeout(r, 600));
@@ -998,7 +998,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			for (let i = 0; i < node.pipeline.length; i++) {
 				const step: INodePipelineStep = node.pipeline[i];
 				if (step.type === 'run_ticket' && step.ticketName) {
-					this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'${step.parameters ? ` (params: ${step.parameters})` : ''}`);
+					this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'${step.parameters ? ` (PARAM: ${step.parameters})` : ''}`);
 					const ticketRecord = await runTicket(step.ticketName, step.ticketType, step.ticketUri, step.parameters);
 					if (step.targetVariable) {
 						const varKey = step.targetVariable.trim().replace(/^@/, '');
