@@ -120,16 +120,21 @@ export abstract class BreadcrumbsPicker<TInput, TElement> {
 		this._domNode.focus();
 		try {
 			await this._setInput(input);
-			this._layout();
 		} catch (err) {
 			onUnexpectedError(err);
 		}
+		this._layout();
 	}
 
 	protected _layout(): void {
 
 		const headerHeight = 2 * this._layoutInfo.arrowSize;
-		const treeHeight = Math.min(this._layoutInfo.maxHeight - headerHeight, this._tree.contentHeight);
+		const treeChildren = this._tree.getNode().children;
+		const hasChildren = treeChildren && treeChildren.length > 0;
+		const minEmptyHeight = 36;
+		const treeHeight = hasChildren
+			? Math.max(minEmptyHeight, Math.min(this._layoutInfo.maxHeight - headerHeight, this._tree.contentHeight || minEmptyHeight))
+			: minEmptyHeight;
 		const totalHeight = treeHeight + headerHeight;
 
 		this._domNode.style.height = `${totalHeight}px`;
@@ -139,7 +144,27 @@ export abstract class BreadcrumbsPicker<TInput, TElement> {
 		this._arrow.style.marginLeft = `${this._layoutInfo.arrowOffset}px`;
 		this._treeContainer.style.height = `${treeHeight}px`;
 		this._treeContainer.style.width = `${this._layoutInfo.width}px`;
-		this._tree.layout(treeHeight, this._layoutInfo.width);
+
+		if (!hasChildren) {
+			let emptyMsg = this._treeContainer.querySelector('.breadcrumbs-picker-empty-message') as HTMLElement | null;
+			if (!emptyMsg) {
+				emptyMsg = document.createElement('div');
+				emptyMsg.className = 'breadcrumbs-picker-empty-message';
+				emptyMsg.textContent = localize('breadcrumbs.noElements', "No items or access restricted");
+				emptyMsg.style.padding = '8px 12px';
+				emptyMsg.style.color = 'var(--vscode-descriptionForeground)';
+				emptyMsg.style.fontSize = '12px';
+				emptyMsg.style.fontStyle = 'italic';
+				emptyMsg.style.textAlign = 'center';
+				this._treeContainer.appendChild(emptyMsg);
+			}
+		} else {
+			const emptyMsg = this._treeContainer.querySelector('.breadcrumbs-picker-empty-message');
+			if (emptyMsg) {
+				emptyMsg.remove();
+			}
+			this._tree.layout(treeHeight, this._layoutInfo.width);
+		}
 	}
 
 	restoreViewState(): void { }
@@ -402,14 +427,29 @@ export class BreadcrumbsFilePicker extends BreadcrumbsPicker<IWorkspace | URI, I
 		}
 
 		const tree = this._tree as WorkbenchAsyncDataTree<IWorkspace | URI, IWorkspaceFolder | IFileStat, FuzzyScore>;
-		await tree.setInput(input);
+		let targetInput = input;
+		try {
+			await tree.setInput(targetInput);
+		} catch {
+			// If parent folder cannot be listed (e.g. macOS TCC / OneDrive cloud permissions EPERM),
+			// and this is a folder, fall back to listing the selected folder itself!
+			if (kind === FileKind.FOLDER) {
+				targetInput = uri;
+				try {
+					await tree.setInput(targetInput);
+				} catch {
+					// Inaccessible folder
+				}
+			}
+		}
+
 		let focusElement: IWorkspaceFolder | IFileStat | undefined;
-		for (const { element } of tree.getNode().children) {
-			if (isWorkspaceFolder(element) && isEqual(element.uri, uri)) {
-				focusElement = element;
+		for (const { element: childElement } of tree.getNode().children) {
+			if (isWorkspaceFolder(childElement) && isEqual(childElement.uri, uri)) {
+				focusElement = childElement;
 				break;
-			} else if (isEqual((element as IFileStat).resource, uri)) {
-				focusElement = element as IFileStat;
+			} else if (isEqual((childElement as IFileStat).resource, uri)) {
+				focusElement = childElement as IFileStat;
 				break;
 			}
 		}

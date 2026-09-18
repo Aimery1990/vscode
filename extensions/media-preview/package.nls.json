@@ -4,11 +4,14 @@
 	"customEditor.audioPreview.displayName": "Audio Preview",
 	"customEditor.imagePreview.displayName": "Image Preview",
 	"customEditor.videoPreview.displayName": "Video Preview",
+	"customEditor.pdfPreview.displayName": "PDF Preview",
 	"videoPreviewerAutoPlay": "Start playing videos on mute automatically.",
 	"videoPreviewerLoop": "Loop videos over again automatically.",
 	"command.zoomIn": "Zoom in",
 	"command.zoomOut": "Zoom out",
 	"command.copyImage": "Copy",
 	"command.reopenAsPreview": "Reopen as image preview",
-	"command.reopenAsText": "Reopen as source text"
+	"command.reopenAsText": "Reopen as source text",
+	"command.pdf.reopenAsPreview": "Reopen as PDF Preview",
+	"command.pdf.reopenAsText": "Reopen as Text"
 }

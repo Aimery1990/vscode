@@ -298,16 +298,13 @@ export class LifecycleMainService extends Disposable implements ILifecycleMainSe
 		electron.app.addListener('before-quit', beforeQuitListener);
 
 		// window-all-closed: an event that only fires when the last window
-		// was closed. We override this event to be in charge if app.quit()
-		// should be called or not.
+		// was closed. For AnyAgent, we automatically quit the app and reclaim
+		// all resources when the last window is closed on all platforms (including macOS).
 		const windowAllClosedListener = () => {
 			this.trace('Lifecycle#app.on(window-all-closed)');
 
-			// Windows/Linux: we quit when all windows have closed
-			// Mac: we only quit when quit was requested
-			if (this._quitRequested || !isMacintosh) {
-				electron.app.quit();
-			}
+			// When all windows have closed, quit the application across all platforms
+			electron.app.quit();
 		};
 		electron.app.addListener('window-all-closed', windowAllClosedListener);
 
@@ -466,10 +463,8 @@ export class LifecycleMainService extends Disposable implements ILifecycleMainSe
 			// clear window listeners
 			windowListeners.dispose();
 
-			// if there are no more code windows opened, fire the onWillShutdown event, unless
-			// we are on macOS where it is perfectly fine to close the last window and
-			// the application continues running (unless quit was actually requested)
-			if (this.windowCounter === 0 && (!isMacintosh || this._quitRequested)) {
+			// if there are no more code windows opened, fire the onWillShutdown event to reclaim all resources
+			if (this.windowCounter === 0) {
 				this.fireOnWillShutdown(ShutdownReason.QUIT);
 			}
 		}));

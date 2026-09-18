@@ -3523,6 +3523,19 @@
 	100% { box-shadow: none; }
 }
 
+/* Create / Open Workflow Dialog Modal */
+.create-workflow-modal-overlay {
+	font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif);
+}
 
+.create-workflow-modal-box {
+	font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif);
+}
 
-
+.create-workflow-modal-box input,
+.create-workflow-modal-box select,
+.create-workflow-modal-box button,
+.create-workflow-modal-box textarea,
+.create-workflow-modal-box label {
+	font-family: inherit;
+}

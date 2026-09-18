@@ -73,6 +73,16 @@
             "filenamePattern": "*.{mp4,webm}"
           }
         ]
+      },
+      {
+        "viewType": "vscode.pdfPreview",
+        "displayName": "%customEditor.pdfPreview.displayName%",
+        "priority": "builtin",
+        "selector": [
+          {
+            "filenamePattern": "*.pdf"
+          }
+        ]
       }
     ],
     "commands": [
@@ -102,6 +112,18 @@
         "title": "%command.reopenAsText%",
         "category": "Image Preview",
         "icon": "$(go-to-file)"
+      },
+      {
+        "command": "pdfPreview.reopenAsPreview",
+        "title": "%command.pdf.reopenAsPreview%",
+        "category": "PDF Preview",
+        "icon": "$(preview)"
+      },
+      {
+        "command": "pdfPreview.reopenAsText",
+        "title": "%command.pdf.reopenAsText%",
+        "category": "PDF Preview",
+        "icon": "$(go-to-file)"
       }
     ],
     "menus": {
@@ -129,6 +151,16 @@
           "command": "imagePreview.reopenAsText",
           "when": "activeCustomEditorId == 'imagePreview.previewEditor' && resourceExtname == '.svg'",
           "group": "navigation"
+        },
+        {
+          "command": "pdfPreview.reopenAsPreview",
+          "when": "activeEditor == workbench.editors.files.textFileEditor && resourceExtname == '.pdf'",
+          "group": "navigation"
+        },
+        {
+          "command": "pdfPreview.reopenAsText",
+          "when": "activeCustomEditorId == 'vscode.pdfPreview'",
+          "group": "navigation"
         }
       ],
       "webview/context": [
@@ -146,6 +178,16 @@
         {
           "command": "imagePreview.reopenAsText",
           "when": "activeCustomEditorId == 'imagePreview.previewEditor' && resourceExtname == '.svg'",
+          "group": "navigation"
+        },
+        {
+          "command": "pdfPreview.reopenAsPreview",
+          "when": "editorFocus && resourceExtname == '.pdf' && activeEditor == workbench.editors.files.textFileEditor",
+          "group": "navigation"
+        },
+        {
+          "command": "pdfPreview.reopenAsText",
+          "when": "activeCustomEditorId == 'vscode.pdfPreview'",
           "group": "navigation"
         }
       ]
