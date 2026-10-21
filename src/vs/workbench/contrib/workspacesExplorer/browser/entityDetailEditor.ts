@@ -30,7 +30,7 @@ import { IInstantiationService } from '../../../../platform/instantiation/common
 
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { parseYaml } from '../../customModules/browser/customModulesService.js';
-import { IActionButton, ICredentialPair } from '../../entityPersistence/common/entityPersistence.js';
+import { IActionButton, ICredentialPair, IParameterDefinition } from '../../entityPersistence/common/entityPersistence.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
@@ -524,6 +524,19 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// 0.125 Parameter Copy Tag click
+			const copyParamTag = target.closest('.ticket-param-copy-tag') as HTMLElement | null;
+			if (copyParamTag) {
+				e.preventDefault();
+				e.stopPropagation();
+				const token = copyParamTag.getAttribute('data-token') || '';
+				if (token) {
+					await this._clipboardService.writeText(token);
+					this._notificationService.info(`Copied '${token}' to clipboard.`);
+				}
+				return;
+			}
+
 			// 0.13 Browser Copy Content button click
 			const copyContentBtn = target.closest('.browser-copy-content-btn') as HTMLElement | null;
 			if (copyContentBtn) {
@@ -600,6 +613,7 @@ export class EntityDetailEditor extends EditorPane {
 				if (!/^https?:\/\//i.test(url)) {
 					url = 'https://' + url;
 				}
+				url = this._interpolateParameters(url);
 				try {
 					const uri = URI.parse(url);
 					await this._commandService.executeCommand('simpleBrowser.api.open', uri, {
@@ -785,9 +799,21 @@ export class EntityDetailEditor extends EditorPane {
 		});
 
 		this._container.addEventListener('change', async (e: Event) => {
-			const target = e.target as HTMLInputElement | null;
-			if (target && target.id === 'file-input' && target.files && target.files.length > 0) {
-				const file = target.files[0];
+			const target = e.target as HTMLElement | null;
+			const paramInput = target?.closest('.ticket-parameter-input') as HTMLInputElement | HTMLSelectElement | null;
+			if (paramInput) {
+				const fieldKey = paramInput.getAttribute('data-field-key') || '';
+				const paramName = paramInput.getAttribute('data-param-name') || '';
+				const newValue = paramInput.value;
+				if (fieldKey && paramName) {
+					await this._saveTicketParameterValue(fieldKey, paramName, newValue);
+				}
+				return;
+			}
+
+			const fileInput = target as HTMLInputElement | null;
+			if (fileInput && fileInput.id === 'file-input' && fileInput.files && fileInput.files.length > 0) {
+				const file = fileInput.files[0];
 				const buffer = await file.arrayBuffer();
 				await this._handleMessage({
 					type: 'uploadAttachment',
@@ -796,6 +822,19 @@ export class EntityDetailEditor extends EditorPane {
 				});
 			}
 		});
+
+		this._container.addEventListener('blur', async (e: FocusEvent) => {
+			const target = e.target as HTMLElement | null;
+			const paramInput = target?.closest('.ticket-parameter-input') as HTMLInputElement | null;
+			if (paramInput && paramInput.tagName === 'INPUT') {
+				const fieldKey = paramInput.getAttribute('data-field-key') || '';
+				const paramName = paramInput.getAttribute('data-param-name') || '';
+				const newValue = paramInput.value;
+				if (fieldKey && paramName) {
+					await this._saveTicketParameterValue(fieldKey, paramName, newValue);
+				}
+			}
+		}, true);
 
 		this._container.addEventListener('dragover', (e: DragEvent) => {
 			e.preventDefault();
@@ -2283,19 +2322,21 @@ export class EntityDetailEditor extends EditorPane {
 			if (urlInput) urlInput.value = url;
 		}
 
+		const finalUrl = this._interpolateParameters(url);
+
 		const statusEl = card.querySelector('.browser-fetch-status') as HTMLElement | null;
 		const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
 
 		if (openTab) {
 			try {
-				const uri = URI.parse(url);
+				const uri = URI.parse(finalUrl);
 				await this._commandService.executeCommand('simpleBrowser.api.open', uri, {
 					viewColumn: -2, // ViewColumn.Beside
 					preserveFocus: false
 				});
 			} catch (e) {
 				try {
-					await this._commandService.executeCommand('simpleBrowser.show', url);
+					await this._commandService.executeCommand('simpleBrowser.show', finalUrl);
 				} catch (err) {
 					console.error('Failed to open simpleBrowser:', err);
 				}
@@ -2329,7 +2370,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		try {
-			const result = await this._fetchUrlContent(url, creds);
+			const result = await this._fetchUrlContent(finalUrl, creds);
 			if (result.isAuthRequired) {
 				throw new Error(result.rawError || 'Authentication Required');
 			}
@@ -2436,6 +2477,85 @@ ${rawErr}
 			metadata: {},
 			customMetadata: updatedCustom
 		});
+	}
+
+	private async _saveTicketParameterValue(fieldKey: string, paramName: string, newValue: string): Promise<void> {
+		const rawVal = this._lastParsedData?.customMetadata?.[fieldKey];
+		let paramValues: { [name: string]: string } = {};
+		if (rawVal) {
+			try {
+				const parsed = JSON.parse(rawVal);
+				if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+					paramValues = parsed;
+				}
+			} catch {}
+		}
+		paramValues[paramName] = newValue;
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: JSON.stringify(paramValues)
+		};
+		await this._handleMessage({
+			type: 'saveMetadata',
+			metadata: {},
+			customMetadata: updatedCustom
+		});
+	}
+
+	private _interpolateParameters(text: string): string {
+		if (!text) return text;
+
+		const paramMap = new Map<string, string>();
+
+		// 1. Schema default parameters
+		if (this._lastCustomModule?.fields) {
+			for (const f of this._lastCustomModule.fields) {
+				if (f.type === 'parameters' && f.parameters) {
+					for (const p of f.parameters) {
+						if (p.name) {
+							paramMap.set(p.name, p.defaultValue || '');
+						}
+					}
+				}
+			}
+		}
+
+		// 2. Saved customMetadata parameter values
+		if (this._lastParsedData?.customMetadata) {
+			for (const [, v] of Object.entries(this._lastParsedData.customMetadata)) {
+				if (typeof v === 'string') {
+					try {
+						const parsed = JSON.parse(v);
+						if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+							for (const [pName, pVal] of Object.entries(parsed)) {
+								paramMap.set(pName, String(pVal ?? ''));
+							}
+						}
+					} catch {}
+				}
+			}
+		}
+
+		// 3. Live DOM inputs if currently typed
+		if (this._container) {
+			const inputs = this._container.querySelectorAll('.ticket-parameter-input') as NodeListOf<HTMLInputElement | HTMLSelectElement>;
+			inputs.forEach(input => {
+				const pName = input.getAttribute('data-param-name');
+				if (pName) {
+					paramMap.set(pName, input.value);
+				}
+			});
+		}
+
+		// Interpolate {{param}} and {param}
+		let result = text;
+		for (const [pName, pVal] of paramMap.entries()) {
+			if (!pName) continue;
+			const reDouble = new RegExp(`\\{\\{\\s*${pName}\\s*\\}\\}`, 'g');
+			const reSingle = new RegExp(`\\{\\s*${pName}\\s*\\}`, 'g');
+			result = result.replace(reDouble, pVal).replace(reSingle, pVal);
+		}
+		return result;
 	}
 
 	private async _getAttachments(entityUri: URI): Promise<string[]> {
@@ -2627,6 +2747,7 @@ ${rawErr}
 			credentials?: ICredentialPair[];
 			gitRemoteUrl?: string;
 			gitBranch?: string;
+			parameters?: IParameterDefinition[];
 		}
 
 		const fieldsToRender: IRenderField[] = [];
@@ -2668,7 +2789,8 @@ ${rawErr}
 					defaultUrl: (f as any).defaultUrl,
 					credentials: (f as any).credentials,
 					gitRemoteUrl: (f as any).gitRemoteUrl,
-					gitBranch: (f as any).gitBranch
+					gitBranch: (f as any).gitBranch,
+					parameters: (f as any).parameters
 				});
 			}
 
@@ -3126,6 +3248,85 @@ ${rawErr}
 				} else if (fType === 'git') {
 					// Git primitive is integrated into the dedicated sidebar Git repository binding
 					continue;
+				} else if (fType === 'parameters') {
+					// Input Parameters Primitive
+					const paramDefs: IParameterDefinition[] = fieldItem.parameters || [];
+					let paramValues: { [name: string]: string } = {};
+					if (v) {
+						if (typeof v === 'string') {
+							try {
+								paramValues = JSON.parse(v);
+								if (typeof paramValues !== 'object' || paramValues === null || Array.isArray(paramValues)) {
+									paramValues = {};
+								}
+							} catch {
+								paramValues = {};
+							}
+						} else if (typeof v === 'object' && v !== null && !Array.isArray(v)) {
+							paramValues = v as { [name: string]: string };
+						}
+					}
+
+					const rowsHtml = paramDefs.map(param => {
+						const currentVal = paramValues[param.name] !== undefined ? paramValues[param.name] : (param.defaultValue || '');
+						const hasOptions = Array.isArray(param.options) && param.options.length > 0;
+						const copyToken = `{{${param.name}}}`;
+
+						let controlHtml = '';
+						if (hasOptions) {
+							const optionsHtml = param.options!.map(opt => {
+								const selected = String(opt) === String(currentVal) ? 'selected' : '';
+								return `<option value="${this._escapeHtmlAttr(opt)}" ${selected}>${this._escapeHtml(opt)}</option>`;
+							}).join('');
+							controlHtml = `
+								<select class="ticket-parameter-input monaco-select-box" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-param-name="${this._escapeHtmlAttr(param.name)}" style="flex: 1; min-width: 140px; padding: 5px 8px; font-size: 12px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit;">
+									${optionsHtml}
+								</select>
+							`;
+						} else {
+							controlHtml = `
+								<input type="text" class="ticket-parameter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-param-name="${this._escapeHtmlAttr(param.name)}" value="${this._escapeHtmlAttr(currentVal)}" placeholder="${this._escapeHtmlAttr(param.defaultValue || '')}" style="flex: 1; min-width: 140px; padding: 5px 10px; font-size: 12px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit; font-family: var(--vscode-editor-font-family, monospace);" />
+							`;
+						}
+
+						return `
+							<div class="ticket-parameter-row" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-radius: 6px; background: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.06);">
+								<div style="display: flex; flex-direction: column; gap: 2px; min-width: 130px;">
+									<div style="display: flex; align-items: center; gap: 6px;">
+										<span style="font-size: 12px; font-weight: 600;">${this._escapeHtml(param.label || param.name)}</span>
+										<button type="button" class="ticket-param-copy-tag" data-token="${this._escapeHtmlAttr(copyToken)}" title="Click to copy '${copyToken}'" style="border: 1px solid rgba(168, 85, 247, 0.35); background: rgba(168, 85, 247, 0.12); color: #c084fc; font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px; font-weight: 700; border-radius: 4px; padding: 1px 6px; cursor: pointer; transition: all 0.15s ease;">
+											${this._escapeHtml(copyToken)}
+										</button>
+									</div>
+									${param.description ? `<span style="font-size: 10px; opacity: 0.55;">${this._escapeHtml(param.description)}</span>` : ''}
+								</div>
+								<div style="display: flex; align-items: center; gap: 8px; flex: 1; max-width: 380px;">
+									${controlHtml}
+								</div>
+							</div>
+						`;
+					}).join('');
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card ticket-parameters-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(168, 85, 247, 0.18); color: #c084fc; font-weight: 700; text-transform: uppercase;">Parameters</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); color: #a1a1aa; font-weight: 600;">${paramDefs.length} Vars</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="parameters" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(typeof v === 'string' ? v : JSON.stringify(paramValues))}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div style="font-size: 11px; opacity: 0.65; margin-bottom: 8px;">
+								Runtime parameters can be referenced across URLs, prompts, and actions using <code>{{variable_name}}</code>.
+							</div>
+							<div class="parameters-rows-container" style="display: flex; flex-direction: column; gap: 6px;">
+								${rowsHtml || '<span style="opacity: 0.4; font-style: italic;">No parameters defined in schema.</span>'}
+							</div>
+						</div>
+					`;
 				} else if (fType === 'browser') {
 					let browserUrl = fieldItem.defaultUrl || '';
 					let browserCreds: ICredentialPair[] = fieldItem.credentials || [];

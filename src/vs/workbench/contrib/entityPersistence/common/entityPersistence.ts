@@ -36,7 +36,8 @@ export type CustomFieldType =
 	| 'button_group'
 	| 'button'
 	| 'browser'
-	| 'git';
+	| 'git'
+	| 'parameters';
 
 export interface IActionButton {
 	id: string;
@@ -49,6 +50,15 @@ export interface ICredentialPair {
 	id: string;
 	key: string;
 	value: string;
+}
+
+export interface IParameterDefinition {
+	id: string;
+	name: string;
+	label?: string;
+	defaultValue?: string;
+	options?: string[];
+	description?: string;
 }
 
 export interface ICustomField {
@@ -70,6 +80,7 @@ export interface ICustomField {
 	credentials?: ICredentialPair[];
 	gitRemoteUrl?: string;
 	gitBranch?: string;
+	parameters?: IParameterDefinition[];
 }
 
 export interface ICompositeComponent {

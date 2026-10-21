@@ -445,6 +445,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				icon: Codicon.sourceControl,
 				type: 'git',
 				defaultName: 'Git Repository'
+			},
+			{
+				label: 'Input Parameters (Runtime Variables)',
+				icon: Codicon.symbolVariable,
+				type: 'parameters',
+				defaultName: 'Parameters'
 			}
 		];
 
@@ -498,6 +504,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			if (bc.type === 'git') {
 				newField.gitRemoteUrl = '';
 				newField.gitBranch = 'main';
+			}
+			if (bc.type === 'parameters') {
+				newField.parameters = [
+					{ id: `param_${Date.now()}_1`, name: 'start', label: 'Start Offset', defaultValue: '0', description: 'Zero-based pagination start index' }
+				];
 			}
 			if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= fields.length) {
 				const safeInsertIndex = Math.max(2, insertIndex);
@@ -788,10 +799,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				// Badge
 				const isBrowser = field.type === 'browser';
 				const isGit = field.type === 'git';
-				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : field.type.toUpperCase()))));
-				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : 'rgba(99, 102, 241, 0.18)'))));
-				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : '#818cf8'))));
-				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : 'rgba(99, 102, 241, 0.35)'))));
+				const isParameters = field.type === 'parameters';
+				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isParameters ? 'INPUT PARAMETERS' : field.type.toUpperCase())))));
+				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : 'rgba(99, 102, 241, 0.18)')))));
+				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isParameters ? '#c084fc' : '#818cf8')))));
+				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : 'rgba(99, 102, 241, 0.35)')))));
 
 				append(headerLeft, $('span.type-badge', {
 					style: `font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; letter-spacing: 0.04em;`
@@ -1550,7 +1562,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					};
 
 					const executeFetch = async (openTab: boolean) => {
-						await this._executeBrowserFetch(urlInput, statusBadge, contentDisplay, field, openTab);
+						await this._executeBrowserFetch(urlInput, statusBadge, contentDisplay, field, openTab, fields);
 					};
 
 					silentBtn.onclick = () => executeFetch(false);
@@ -1596,6 +1608,133 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					branchInput.value = field.gitBranch || '';
 					branchInput.oninput = () => {
 						field.gitBranch = branchInput.value.trim();
+					};
+				}
+
+				// Parameters Primitive Configuration Box
+				if (field.type === 'parameters') {
+					if (!field.parameters) {
+						field.parameters = [];
+					}
+					const paramSchemaBox = append(fieldCard, $('.parameters-schema-config', {
+						style: 'display: flex; flex-direction: column; gap: 12px; background: rgba(0, 0, 0, 0.2); padding: 12px 14px; border-radius: 6px; border: 1px solid rgba(168, 85, 247, 0.25);'
+					}));
+
+					const paramNotice = append(paramSchemaBox, $('div', { style: 'font-size: 11px; opacity: 0.85; line-height: 1.4; color: #c084fc; display: flex; align-items: center; gap: 6px;' }));
+					append(paramNotice, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+					append(paramNotice, $('span', {}, 'Define runtime input parameters for tickets. Reference these parameters in URLs and prompts using {{param_name}}.'));
+
+					// Parameters List Container
+					const paramListContainer = append(paramSchemaBox, $('.params-list', { style: 'display: flex; flex-direction: column; gap: 8px;' }));
+
+					const renderParamList = () => {
+						clearNode(paramListContainer);
+
+						if (!field.parameters || field.parameters.length === 0) {
+							append(paramListContainer, $('div', {
+								style: 'font-size: 11px; font-style: italic; opacity: 0.5; padding: 6px 0;'
+							}, 'No parameters defined yet. Click "+ Add Parameter" below.'));
+							return;
+						}
+
+						field.parameters.forEach((param, pIdx) => {
+							const row = append(paramListContainer, $('.param-row-card', {
+								style: 'display: flex; flex-direction: column; gap: 6px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 8px 10px;'
+							}));
+
+							// Top line: Name, copy tag, and delete
+							const topLine = append(row, $('.param-row-top', { style: 'display: flex; align-items: center; gap: 8px;' }));
+
+							const nameInput = append(topLine, $('input.monaco-inputbox', {
+								placeholder: 'Variable Name (e.g. start, env)',
+								style: 'flex: 1; padding: 5px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+							})) as HTMLInputElement;
+							nameInput.value = param.name || '';
+
+							const copyTag = append(topLine, $('span.param-copy-tag', {
+								title: 'Click to copy reference token',
+								style: 'font-size: 10px; font-family: var(--vscode-editor-font-family, monospace); font-weight: 700; color: #c084fc; background: rgba(168, 85, 247, 0.15); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 4px; padding: 3px 7px; cursor: pointer; user-select: none; white-space: nowrap;'
+							}, `{{${param.name || 'param'}}}`));
+							copyTag.onclick = () => {
+								const token = `{{${param.name || 'param'}}}`;
+								this._clipboardService.writeText(token);
+								this.notificationService.info(`Copied '${token}' to clipboard.`);
+							};
+
+							nameInput.oninput = () => {
+								param.name = nameInput.value.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+								nameInput.value = param.name;
+								copyTag.textContent = `{{${param.name || 'param'}}}`;
+							};
+
+							const delBtn = append(topLine, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
+								title: 'Delete Parameter',
+								style: 'cursor: pointer; opacity: 0.6; font-size: 12px; padding: 4px;'
+							}));
+							delBtn.onmouseenter = () => delBtn.style.opacity = '1';
+							delBtn.onmouseleave = () => delBtn.style.opacity = '0.6';
+							delBtn.onclick = () => {
+								field.parameters!.splice(pIdx, 1);
+								renderParamList();
+							};
+
+							// Bottom line: Label, Default Value, Choices, and Description
+							const bottomGrid = append(row, $('.param-row-grid', {
+								style: 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;'
+							}));
+
+							// Label
+							const labelCol = append(bottomGrid, $('div', { style: 'display: flex; flex-direction: column; gap: 3px;' }));
+							append(labelCol, $('label', { style: 'font-size: 10px; opacity: 0.7;' }, 'Display Label:'));
+							const labelInput = append(labelCol, $('input.monaco-inputbox', {
+								placeholder: 'e.g. Start Offset',
+								style: 'width: 100%; padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit; box-sizing: border-box;'
+							})) as HTMLInputElement;
+							labelInput.value = param.label || '';
+							labelInput.oninput = () => { param.label = labelInput.value.trim(); };
+
+							// Default Value
+							const defCol = append(bottomGrid, $('div', { style: 'display: flex; flex-direction: column; gap: 3px;' }));
+							append(defCol, $('label', { style: 'font-size: 10px; opacity: 0.7;' }, 'Default Value:'));
+							const defInput = append(defCol, $('input.monaco-inputbox', {
+								placeholder: 'e.g. 0',
+								style: 'width: 100%; padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit; box-sizing: border-box;'
+							})) as HTMLInputElement;
+							defInput.value = param.defaultValue || '';
+							defInput.oninput = () => { param.defaultValue = defInput.value; };
+
+							// Choices / Options
+							const optsCol = append(bottomGrid, $('div', { style: 'display: flex; flex-direction: column; gap: 3px;' }));
+							append(optsCol, $('label', { style: 'font-size: 10px; opacity: 0.7;' }, 'Choices (comma-separated):'));
+							const optsInput = append(optsCol, $('input.monaco-inputbox', {
+								placeholder: 'e.g. testing, dev, prod',
+								style: 'width: 100%; padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit; box-sizing: border-box;'
+							})) as HTMLInputElement;
+							optsInput.value = (param.options || []).join(', ');
+							optsInput.oninput = () => {
+								const val = optsInput.value.trim();
+								param.options = val ? val.split(',').map(s => s.trim()).filter(Boolean) : undefined;
+							};
+						});
+					};
+
+					renderParamList();
+
+					// Add Parameter Button
+					const addParamBtn = append(paramSchemaBox, $('button', {
+						style: 'align-self: flex-start; display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.35); cursor: pointer; transition: all 0.15s ease;'
+					}));
+					append(addParamBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.plus)));
+					append(addParamBtn, $('span', {}, 'Add Parameter'));
+					addParamBtn.onclick = () => {
+						const count = (field.parameters?.length || 0) + 1;
+						field.parameters!.push({
+							id: `param_${Date.now()}_${count}`,
+							name: `param_${count}`,
+							label: `Parameter ${count}`,
+							defaultValue: ''
+						});
+						renderParamList();
 					};
 				}
 			});
@@ -2212,7 +2351,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		statusEl: HTMLElement,
 		contentEl: HTMLElement,
 		field: ICustomField,
-		openTab: boolean
+		openTab: boolean,
+		allFields?: ICustomField[]
 	): Promise<void> {
 		let url = urlInput.value.trim();
 		if (!url) {
@@ -2227,17 +2367,33 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			field.defaultUrl = url;
 		}
 
+		let finalUrl = url;
+		if (allFields) {
+			for (const f of allFields) {
+				if (f.type === 'parameters' && f.parameters) {
+					for (const p of f.parameters) {
+						if (p.name) {
+							const val = p.defaultValue ?? '';
+							const reDouble = new RegExp(`\\{\\{\\s*${p.name}\\s*\\}\\}`, 'g');
+							const reSingle = new RegExp(`\\{\\s*${p.name}\\s*\\}`, 'g');
+							finalUrl = finalUrl.replace(reDouble, val).replace(reSingle, val);
+						}
+					}
+				}
+			}
+		}
+
 		if (openTab) {
 			this._syncDraft();
 			try {
-				const uri = URI.parse(url);
+				const uri = URI.parse(finalUrl);
 				await this._commandService.executeCommand('simpleBrowser.api.open', uri, {
 					viewColumn: -2, // ViewColumn.Beside (split editor beside)
 					preserveFocus: false
 				});
 			} catch (e) {
 				try {
-					await this._commandService.executeCommand('simpleBrowser.show', url);
+					await this._commandService.executeCommand('simpleBrowser.show', finalUrl);
 				} catch (err) {
 					console.error('Failed to open simpleBrowser:', err);
 				}
@@ -2248,7 +2404,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		statusEl.style.color = '#38bdf8';
 
 		try {
-			const result = await this._fetchUrlContent(url, field.credentials);
+			const result = await this._fetchUrlContent(finalUrl, field.credentials);
 			if (result.isAuthRequired) {
 				throw new Error(result.rawError || 'Authentication Required');
 			}

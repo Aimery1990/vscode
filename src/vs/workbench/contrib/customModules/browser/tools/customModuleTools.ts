@@ -56,7 +56,8 @@ const VALID_FIELD_TYPES: Set<CustomFieldType> = new Set([
 	'button_group',
 	'button',
 	'browser',
-	'git'
+	'git',
+	'parameters'
 ]);
 
 const BASE_PRIMITIVES_CATALOG = [
@@ -227,6 +228,22 @@ const BASE_PRIMITIVES_CATALOG = [
 			type: 'git',
 			gitRemoteUrl: 'git@github.com:org/repo.git',
 			gitBranch: 'main'
+		}
+	},
+	{
+		type: 'parameters',
+		label: 'Input Parameters (Runtime Variables)',
+		description: 'Runtime input parameters and variables for tickets with optional choices. Interpolated via {{param_name}} in URLs and prompts.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'runtime_params',
+			label: 'Input Parameters',
+			type: 'parameters',
+			parameters: [
+				{ id: 'param_1', name: 'start', label: 'Start Offset', defaultValue: '0' },
+				{ id: 'param_2', name: 'env', label: 'Environment', defaultValue: 'testing', options: ['testing', 'developing', 'production'] }
+			]
 		}
 	}
 ];
