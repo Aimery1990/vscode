@@ -260,7 +260,9 @@ function processNode(uri: URI, node: AXNodeTree, buffer: string[], depth: number
 					url = `${uri.scheme || 'https'}://${uri.authority}${url}`;
 				}
 				if (!isSameUriIgnoringQueryAndFragment(uri, node.node)) {
-					const jobIdMatch = url ? (url.match(/currentJobId=(\d+)/) || url.match(/\/jobs\/view\/(\d+)/)) : null;
+					const isTrueJobView = url && (url.includes('/jobs/view/') || (url.includes('currentJobId=') && !uri.query.includes(url.split('currentJobId=')[1]?.split('&')[0] || '')));
+					const isNonJobText = /feedback|premium|share|verified|cad\/yr|hybrid|full-time|more|apply|helpful|notification|network|messaging/i.test(linkText);
+					const jobIdMatch = (isTrueJobView && !isNonJobText) ? (url.match(/\/jobs\/view\/([0-9]+)/) || url.match(/currentJobId=([0-9]+)/)) : null;
 					const jobSuffix = (jobIdMatch && !linkText.includes(jobIdMatch[1])) ? ` (Job ID: ${jobIdMatch[1]})` : '';
 					buffer.push(`[${(linkText || 'Link') + jobSuffix}](${url})`);
 				} else {
@@ -385,8 +387,8 @@ function isSameUriIgnoringQueryAndFragment(uri: URI, node: AXNode): boolean {
 	if (!link || link === '#' || link.startsWith('#')) {
 		return true;
 	}
-	// Never suppress links pointing to job postings or containing job IDs
-	if (/currentJobId=\d+|\/jobs\/view\/\d+/i.test(link)) {
+	// Never suppress links pointing to a specific job detail page (/jobs/view/...)
+	if (/\/jobs\/view\/[0-9]+/i.test(link)) {
 		return false;
 	}
 	try {
