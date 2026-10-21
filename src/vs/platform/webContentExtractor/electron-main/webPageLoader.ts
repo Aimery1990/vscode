@@ -39,7 +39,7 @@ export class WebPageLoader extends Disposable {
 	private static readonly TIMEOUT = 30000; // 30 seconds
 	private static readonly POST_LOAD_TIMEOUT = 5000; // 5 seconds - increased for dynamic content
 	private static readonly FRAME_TIMEOUT = 500; // 0.5 seconds
-	private static readonly EXTRACT_CONTENT_TIMEOUT = 2000; // 2 seconds
+	private static readonly EXTRACT_CONTENT_TIMEOUT = 8000; // 8 seconds
 	private static readonly IDLE_DEBOUNCE_TIME = 500; // 0.5 seconds - wait after last network request
 	private static readonly MIN_CONTENT_LENGTH = 100; // Minimum content length to consider extraction successful
 
@@ -575,9 +575,9 @@ export class WebPageLoader extends Disposable {
 			const script = `
 				(() => {
 					try {
-						// 1. Trigger auto-scroll on job list containers to un-occlude virtual cards
+						// 1. Scroll potential job list containers to trigger virtual list rendering
 						const scrollables = document.querySelectorAll(
-							'.jobs-search-results-list, .scaffold-layout__list, [data-view-name*="job"], ul.jobs-search__results-list, main'
+							'.jobs-search-results-list, .scaffold-layout__list, .scaffold-layout__list-container, [data-view-name*="job"], ul.jobs-search__results-list, main'
 						);
 						scrollables.forEach(s => {
 							try { s.scrollTop = s.scrollHeight; } catch {}
@@ -585,139 +585,198 @@ export class WebPageLoader extends Disposable {
 
 						const jobs = [];
 						const seenIds = new Set();
+						const seenTitles = new Set();
 
-						// 2. Query all job card elements
-						const cards = document.querySelectorAll(
-							'li[data-occludable-job-id], [data-job-id], .job-card-container, .jobs-search-results__list-item'
-						);
+						function addJob(job) {
+							if (!job) return;
+							const id = (job.jobId || '').trim();
+							const title = (job.title || '').replace(/[ \\t\\r\\n]+/g, ' ').replace(/\\(Verified job\\)/gi, '').trim();
+							if (!title && !id) return;
+							if (id && seenIds.has(id)) return;
+							if (id) seenIds.add(id);
 
-						cards.forEach(card => {
-							const directId = card.getAttribute('data-job-id') || card.getAttribute('data-occludable-job-id');
-							const linkEl = card.querySelector(
-								'a.job-card-list__title--link, a.job-card-container__link, a[href*="/jobs/view/"], a[href*="currentJobId="]'
-							);
-							const href = linkEl ? (linkEl.getAttribute('href') || '') : '';
-							const hrefMatch = href.match(/currentJobId=(\\d+)/) || href.match(/\\/jobs\\/view\\/(\\d+)/);
-							const jobId = directId || (hrefMatch ? hrefMatch[1] : '');
+							const key = title.toLowerCase() + '|' + (job.company || '').toLowerCase();
+							if (!id && seenTitles.has(key)) return;
+							if (key) seenTitles.add(key);
 
-							if (jobId && seenIds.has(jobId)) {
-								return;
-							}
-							if (jobId) {
-								seenIds.add(jobId);
-							}
+							const directLink = id
+								? ('https://www.linkedin.com/jobs/view/' + id + '/')
+								: (job.link && job.link.startsWith('http') ? job.link : (job.link ? ('https://www.linkedin.com' + job.link) : ''));
 
-							// Title
-							let title = linkEl ? (linkEl.innerText || linkEl.getAttribute('aria-label') || '').trim() : '';
-							if (!title) {
-								const strong = card.querySelector('strong');
-								if (strong) title = (strong.innerText || strong.getAttribute('title') || '').trim();
-							}
-							if (!title) {
-								const anyTitle = card.querySelector('[class*="title"], [class*="job-name"]');
-								if (anyTitle) title = anyTitle.innerText.trim();
-							}
-							title = title.replace(/\\s+/g, ' ').replace(/\\(Verified job\\)/gi, '').trim();
+							jobs.push({
+								jobId: id || 'N/A',
+								title: title || 'Job Posting',
+								company: (job.company || '').replace(/[ \\t\\r\\n]+/g, ' ').trim() || 'Unknown Company',
+								location: (job.location || '').replace(/[ \\t\\r\\n]+/g, ' ').trim(),
+								salary: (job.salary || '').replace(/[ \\t\\r\\n]+/g, ' ').trim(),
+								link: directLink
+							});
+						}
 
-							// Company
-							const compEl = card.querySelector(
-								'.job-card-container__company-name, .job-card-container__primary-description, [class*="company-name"], [class*="primary-description"]'
-							);
-							const company = compEl ? compEl.innerText.replace(/\\s+/g, ' ').trim() : '';
+						// 2. Scan all card elements
+						const cardSelectors = [
+							'li[data-occludable-job-id]',
+							'[data-job-id]',
+							'li[data-occludable-entity-urn*="jobPosting"]',
+							'[data-entity-urn*="jobPosting"]',
+							'.job-card-container',
+							'.jobs-search-results__list-item',
+							'.scaffold-layout__list-item',
+							'[data-view-name*="job-card"]'
+						];
+						const cardElements = document.querySelectorAll(cardSelectors.join(', '));
 
-							// Location
-							const locEl = card.querySelector(
-								'.job-card-container__metadata-item, [class*="metadata-item"], [class*="location"]'
-							);
-							const location = locEl ? locEl.innerText.replace(/\\s+/g, ' ').trim() : '';
+						cardElements.forEach(card => {
+							try {
+								let jobId = card.getAttribute('data-job-id') || card.getAttribute('data-occludable-job-id') || '';
+								if (!jobId) {
+									const urn = card.getAttribute('data-entity-urn') || card.getAttribute('data-occludable-entity-urn') || '';
+									const m = urn.match(/jobPosting:([0-9]+)/);
+									if (m) jobId = m[1];
+								}
 
-							// Salary
-							const salaryEl = card.querySelector(
-								'[class*="salary"], [class*="compensation"]'
-							);
-							const salary = salaryEl ? salaryEl.innerText.replace(/\\s+/g, ' ').trim() : '';
+								// Find link
+								const linkEl = card.querySelector('a[href*="currentJobId="], a[href*="/jobs/view/"], a.job-card-list__title--link, a.job-card-container__link, a');
+								const href = linkEl ? (linkEl.getAttribute('href') || '') : '';
+								if (!jobId && href) {
+									const m = href.match(/currentJobId=([0-9]+)/) || href.match(/\\/jobs\\/view\\/([0-9]+)/);
+									if (m) jobId = m[1];
+								}
 
-							const directLink = jobId
-								? ('https://www.linkedin.com/jobs/view/' + jobId + '/')
-								: (href.startsWith('http') ? href : ('https://www.linkedin.com' + href));
+								// Find Title
+								let title = '';
+								const titleEl = card.querySelector('.job-card-list__title, .job-card-list__title--link, .job-card-container__link, strong, h3, a[class*="title"]');
+								if (titleEl) {
+									title = (titleEl.innerText || titleEl.getAttribute('aria-label') || titleEl.getAttribute('title') || '').trim();
+								}
+								if (!title && linkEl) {
+									title = (linkEl.innerText || linkEl.getAttribute('aria-label') || '').trim();
+								}
 
-							if (jobId || title || company) {
-								jobs.push({
-									jobId: jobId || 'N/A',
-									title: title || 'Job Posting',
-									company: company || 'Unknown Company',
-									location: location || '',
-									salary: salary || '',
-									link: directLink
-								});
-							}
+								// Find Company
+								let company = '';
+								const compEl = card.querySelector('.job-card-container__company-name, .job-card-container__primary-description, [class*="company-name"], [class*="primary-description"]');
+								if (compEl) {
+									company = compEl.innerText.trim();
+								}
+
+								// Find Location
+								let location = '';
+								const locEl = card.querySelector('.job-card-container__metadata-item, [class*="metadata-item"], [class*="location"]');
+								if (locEl) {
+									location = locEl.innerText.trim();
+								}
+
+								// Find Salary
+								let salary = '';
+								const salEl = card.querySelector('[class*="salary"], [class*="compensation"]');
+								if (salEl) {
+									salary = salEl.innerText.trim();
+								}
+
+								if (jobId || title) {
+									addJob({ jobId, title, company, location, salary, link: href });
+								}
+							} catch {}
 						});
 
-						// 3. Fallback to BigPipe code blocks if titles are missing
-						const codeTags = document.querySelectorAll('code[id^="bpr-guid-"]');
+						// 3. Scan all anchor tags matching job search or job view URLs
+						const allJobAnchors = document.querySelectorAll('a[href*="currentJobId="], a[href*="/jobs/view/"]');
+						allJobAnchors.forEach(a => {
+							try {
+								const href = a.getAttribute('href') || '';
+								const m = href.match(/currentJobId=([0-9]+)/) || href.match(/\\/jobs\\/view\\/([0-9]+)/);
+								const jobId = m ? m[1] : '';
+								if (!jobId || seenIds.has(jobId)) return;
+
+								const container = a.closest('li, [class*="card"], [class*="item"], div') || a;
+								let title = (a.innerText || a.getAttribute('aria-label') || '').trim();
+								if (!title) {
+									const titleEl = container.querySelector('strong, h3, [class*="title"]');
+									if (titleEl) title = (titleEl.innerText || '').trim();
+								}
+
+								let company = '';
+								const compEl = container.querySelector('[class*="company"], [class*="primary-description"]');
+								if (compEl) company = compEl.innerText.trim();
+
+								let location = '';
+								const locEl = container.querySelector('[class*="location"], [class*="metadata"]');
+								if (locEl) location = locEl.innerText.trim();
+
+								let salary = '';
+								const salEl = container.querySelector('[class*="salary"], [class*="compensation"]');
+								if (salEl) salary = salEl.innerText.trim();
+
+								addJob({ jobId, title, company, location, salary, link: href });
+							} catch {}
+						});
+
+						// 4. Scan JSON-LD and BigPipe code/script blocks
+						const codeTags = document.querySelectorAll('code[id^="bpr-guid-"], script[type="application/json"], script[type="application/ld+json"]');
 						codeTags.forEach(code => {
 							try {
 								let text = code.textContent || '';
 								if (text.startsWith('<!--')) text = text.slice(4);
 								if (text.endsWith('-->')) text = text.slice(0, -3);
 								text = text.trim();
-								if (!text.startsWith('{')) return;
+								if (!text.startsWith('{') && !text.startsWith('[')) return;
 								const parsed = JSON.parse(text);
 								const included = parsed.included || (Array.isArray(parsed.data) ? parsed.data : (parsed.data ? [parsed.data] : []));
 								if (!Array.isArray(included)) return;
 
 								included.forEach(item => {
-									if (item && item.entityUrn && item.entityUrn.includes('jobPosting') && item.title) {
-										const idMatch = item.entityUrn.match(/(\\d+)/);
-										const jobId = idMatch ? idMatch[1] : '';
-										if (jobId) {
-											const existing = jobs.find(j => j.jobId === jobId);
-											if (existing) {
-												if (!existing.title || existing.title === 'Job Posting') {
-													existing.title = item.title;
-												}
-												if (!existing.company || existing.company === 'Unknown Company') {
-													existing.company = item.primaryDescription?.text || item.companyDetails?.companyName || '';
-												}
-												if (!existing.location) {
-													existing.location = item.secondaryDescription?.text || item.formattedLocation || '';
-												}
-											} else if (!seenIds.has(jobId)) {
-												seenIds.add(jobId);
-												jobs.push({
-													jobId,
-													title: item.title,
-													company: item.primaryDescription?.text || item.companyDetails?.companyName || 'Unknown Company',
-													location: item.secondaryDescription?.text || item.formattedLocation || '',
-													salary: '',
-													link: 'https://www.linkedin.com/jobs/view/' + jobId + '/'
-												});
-											}
-										}
+									if (!item || !item.entityUrn || !item.entityUrn.includes('jobPosting')) return;
+									const idMatch = item.entityUrn.match(/([0-9]+)/);
+									const jobId = idMatch ? idMatch[1] : '';
+									if (!jobId) return;
+
+									const rawTitle = typeof item.title === 'string' ? item.title : (item.title?.text || '');
+									const rawComp = item.primaryDescription?.text || item.companyDetails?.companyName || '';
+									const rawLoc = item.secondaryDescription?.text || item.formattedLocation || '';
+
+									const existing = jobs.find(j => j.jobId === jobId);
+									if (existing) {
+										if ((!existing.title || existing.title === 'Job Posting') && rawTitle) existing.title = rawTitle;
+										if ((!existing.company || existing.company === 'Unknown Company') && rawComp) existing.company = rawComp;
+										if (!existing.location && rawLoc) existing.location = rawLoc;
+									} else {
+										addJob({ jobId, title: rawTitle, company: rawComp, location: rawLoc, salary: '', link: '' });
 									}
 								});
 							} catch {}
 						});
 
-						if (jobs.length === 0) {
-							return '';
-						}
-
-						let md = '## Extracted Job Listings (' + jobs.length + ' Jobs Found)\\n\\n';
-						md += '| # | Job ID | Job Title | Company | Location | Compensation | Direct Link |\\n';
-						md += '|---|---|---|---|---|---|---|\\n';
-						jobs.forEach((j, i) => {
-							md += '| ' + (i + 1) + ' | ' + j.jobId + ' | ' + j.title + ' | ' + j.company + ' | ' + j.location + ' | ' + (j.salary || '-') + ' | [' + (j.title || 'View Job') + '](' + j.link + ') |\\n';
-						});
-						md += '\\n---\\n\\n';
-						return md;
+						return jobs;
 					} catch {
-						return '';
+						return [];
 					}
 				})()
 			`;
-			return (await this._window.webContents.executeJavaScript(script)) ?? '';
-		} catch {
+
+			const jobs = await this._window.webContents.executeJavaScript(script);
+			if (!Array.isArray(jobs) || jobs.length === 0) {
+				this.trace('Structured job listing extraction found 0 jobs');
+				return '';
+			}
+
+			this.trace(`Structured job listing extraction found ${jobs.length} jobs`);
+			let md = `## Extracted Job Listings (${jobs.length} Jobs Found)\n\n`;
+			md += `| # | Job ID | Job Title | Company | Location | Compensation | Direct Link |\n`;
+			md += `|---|---|---|---|---|---|---|\n`;
+			for (let i = 0; i < jobs.length; i++) {
+				const j = jobs[i];
+				const title = j.title || 'Job Posting';
+				const company = j.company || 'Unknown Company';
+				const loc = j.location || '-';
+				const sal = j.salary || '-';
+				const link = j.link || `https://www.linkedin.com/jobs/view/${j.jobId}/`;
+				md += `| ${i + 1} | ${j.jobId} | ${title} | ${company} | ${loc} | ${sal} | [${title}](${link}) |\n`;
+			}
+			md += `\n---\n\n`;
+			return md;
+		} catch (error) {
+			this.trace(`Structured job listing extraction failed: ${error instanceof Error ? error.message : String(error)}`);
 			return '';
 		}
 	}

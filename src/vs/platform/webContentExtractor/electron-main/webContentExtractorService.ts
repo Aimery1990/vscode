@@ -40,10 +40,12 @@ export class NativeWebContentExtractorService extends Disposable implements IWeb
 	}
 
 	async doExtract(uri: URI, options: IWebContentExtractorOptions | undefined): Promise<WebContentExtractResult> {
-		const cached = this._webContentsCache.tryGet(uri, options);
-		if (cached !== undefined) {
-			this._logger.info(`Found cached content for ${uri.toString()}`);
-			return cached;
+		if (!options?.bypassCache) {
+			const cached = this._webContentsCache.tryGet(uri, options);
+			if (cached !== undefined) {
+				this._logger.info(`Found cached content for ${uri.toString()}`);
+				return cached;
+			}
 		}
 
 		const loader = new WebPageLoader(

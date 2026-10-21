@@ -27,6 +27,11 @@ export interface IWebContentExtractorOptions {
 	 * Session partition to use. Defaults to 'persist:vscode-browser' to share browser login cookies.
 	 */
 	partition?: string;
+
+	/**
+	 * Whether to bypass in-memory extraction cache and force a fresh extraction.
+	 */
+	bypassCache?: boolean;
 }
 
 export type WebContentExtractResult =

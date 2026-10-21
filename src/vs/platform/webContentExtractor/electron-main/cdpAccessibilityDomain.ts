@@ -255,9 +255,14 @@ function processNode(uri: URI, node: AXNodeTree, buffer: string[], depth: number
 					}
 					linkText = childBuf.join(' ').replace(/\s+/g, ' ').trim();
 				}
-				const url = getLinkUrl(node.node);
+				let url = getLinkUrl(node.node);
+				if (url && url.startsWith('/') && uri.authority) {
+					url = `${uri.scheme || 'https'}://${uri.authority}${url}`;
+				}
 				if (!isSameUriIgnoringQueryAndFragment(uri, node.node)) {
-					buffer.push(`[${linkText || 'Link'}](${url})`);
+					const jobIdMatch = url ? (url.match(/currentJobId=(\d+)/) || url.match(/\/jobs\/view\/(\d+)/)) : null;
+					const jobSuffix = (jobIdMatch && !linkText.includes(jobIdMatch[1])) ? ` (Job ID: ${jobIdMatch[1]})` : '';
+					buffer.push(`[${(linkText || 'Link') + jobSuffix}](${url})`);
 				} else {
 					buffer.push(linkText);
 				}
@@ -379,6 +384,10 @@ function isSameUriIgnoringQueryAndFragment(uri: URI, node: AXNode): boolean {
 	const link = getLinkUrl(node);
 	if (!link || link === '#' || link.startsWith('#')) {
 		return true;
+	}
+	// Never suppress links pointing to job postings or containing job IDs
+	if (/currentJobId=\d+|\/jobs\/view\/\d+/i.test(link)) {
+		return false;
 	}
 	try {
 		const parsed = URI.parse(link);

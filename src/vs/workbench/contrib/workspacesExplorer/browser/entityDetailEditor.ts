@@ -2157,8 +2157,8 @@ export class EntityDetailEditor extends EditorPane {
 			if (extractorService) {
 				const uri = URI.parse(targetUrl);
 				const extractResults = await Promise.race([
-					extractorService.extract([uri], { followRedirects: true }),
-					new Promise<WebContentExtractResult[]>((_, reject) => setTimeout(() => reject(new Error('Extraction timed out')), 12000))
+					extractorService.extract([uri], { followRedirects: true, bypassCache: true }),
+					new Promise<WebContentExtractResult[]>((_, reject) => setTimeout(() => reject(new Error('Extraction timed out')), 25000))
 				]);
 				if (extractResults && extractResults.length > 0) {
 					const first = extractResults[0];
@@ -2280,8 +2280,87 @@ export class EntityDetailEditor extends EditorPane {
 		}
 	}
 
+	private _extractJobsFromHtml(html: string): string {
+		try {
+			const seenIds = new Set<string>();
+			const jobs: Array<{ jobId: string; title: string; company: string; location: string; link: string }> = [];
+
+			// 1. Regex search for Voyager JobPosting entities in embedded JSON
+			const entityRegex = /"entityUrn":"urn:li:(?:fsd_)?jobPosting:([0-9]+)"/g;
+			let match: RegExpExecArray | null;
+			while ((match = entityRegex.exec(html)) !== null) {
+				const jobId = match[1];
+				if (seenIds.has(jobId)) { continue; }
+				seenIds.add(jobId);
+
+				const contextStart = Math.max(0, match.index - 500);
+				const contextEnd = Math.min(html.length, match.index + 1500);
+				const snippet = html.slice(contextStart, contextEnd);
+
+				let title = '';
+				const titleMatch = snippet.match(/"title":\{"text":"([^"]+)"\}|"title":"([^"]+)"/);
+				if (titleMatch) {
+					title = titleMatch[1] || titleMatch[2] || '';
+				}
+
+				let company = '';
+				const compMatch = snippet.match(/"companyName":"([^"]+)"|"primaryDescription":\{"text":"([^"]+)"\}/);
+				if (compMatch) {
+					company = compMatch[1] || compMatch[2] || '';
+				}
+
+				let location = '';
+				const locMatch = snippet.match(/"formattedLocation":"([^"]+)"|"secondaryDescription":\{"text":"([^"]+)"\}/);
+				if (locMatch) {
+					location = locMatch[1] || locMatch[2] || '';
+				}
+
+				jobs.push({
+					jobId,
+					title: title || 'Job Posting',
+					company: company || 'Unknown Company',
+					location: location || '',
+					link: `https://www.linkedin.com/jobs/view/${jobId}/`
+				});
+			}
+
+			// 2. Regex search for currentJobId or /jobs/view/ in HTML attributes
+			const hrefRegex = /(?:currentJobId=|\/jobs\/view\/)([0-9]+)/g;
+			while ((match = hrefRegex.exec(html)) !== null) {
+				const jobId = match[1];
+				if (seenIds.has(jobId)) { continue; }
+				seenIds.add(jobId);
+				jobs.push({
+					jobId,
+					title: 'Job Posting',
+					company: 'Unknown Company',
+					location: '',
+					link: `https://www.linkedin.com/jobs/view/${jobId}/`
+				});
+			}
+
+			if (jobs.length === 0) {
+				return '';
+			}
+
+			let md = `## Extracted Job Listings (${jobs.length} Jobs Found)\n\n`;
+			md += `| # | Job ID | Job Title | Company | Location | Direct Link |\n`;
+			md += `|---|---|---|---|---|---|\n`;
+			for (let i = 0; i < jobs.length; i++) {
+				const j = jobs[i];
+				md += `| ${i + 1} | ${j.jobId} | ${j.title} | ${j.company} | ${j.location || '-'} | [${j.title}](${j.link}) |\n`;
+			}
+			md += `\n---\n\n`;
+			return md;
+		} catch {
+			return '';
+		}
+	}
+
 	private _cleanHtmlToText(html: string): string {
 		try {
+			const jobTable = this._extractJobsFromHtml(html);
+
 			// 1. Remove non-content tags including script, style, svg, iframe, noscript, etc.
 			let clean = html.replace(/<(script|style|svg|noscript|iframe|canvas|video|audio|nav|footer)[^>]*>[\s\S]*?<\/\1>/gi, ' ');
 			// 2. Convert block-level tags and line-breaks to newlines
@@ -2302,7 +2381,8 @@ export class EntityDetailEditor extends EditorPane {
 				.map(l => l.replace(/[ \t]+/g, ' ').trim())
 				.filter(l => l.length > 0);
 
-			return lines.join('\n');
+			const mainText = lines.join('\n');
+			return jobTable ? (jobTable + mainText) : mainText;
 		} catch {
 			return html.replace(/<[^>]+>/g, ' ').slice(0, 10000);
 		}
