@@ -57,7 +57,8 @@ const VALID_FIELD_TYPES: Set<CustomFieldType> = new Set([
 	'button',
 	'browser',
 	'git',
-	'parameters'
+	'parameters',
+	'prompt'
 ]);
 
 const BASE_PRIMITIVES_CATALOG = [
@@ -244,6 +245,22 @@ const BASE_PRIMITIVES_CATALOG = [
 				{ id: 'param_1', name: 'start', label: 'Start Offset', defaultValue: '0' },
 				{ id: 'param_2', name: 'env', label: 'Environment', defaultValue: 'testing', options: ['testing', 'developing', 'production'] }
 			]
+		}
+	},
+	{
+		type: 'prompt',
+		label: 'Prompt (AI Instruction & Execution)',
+		description: 'Instruction prompt input box primitive. Dispatches instructions and inputs to either a selected Large Language Model or an autonomous AI Agent to process information.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'analysis_prompt',
+			label: 'AI Analysis Prompt',
+			type: 'prompt',
+			defaultContent: 'Please summarize the following ticket requirements and identify key risks.',
+			targetMode: 'model',
+			targetModel: 'gemini-1.5-flash',
+			targetAgentId: ''
 		}
 	}
 ];
@@ -461,7 +478,11 @@ export class GenerateCustomModuleTool implements IToolImpl {
 										'dynamic_list',
 										'attachment',
 										'button_group',
-										'button'
+										'button',
+										'browser',
+										'git',
+										'parameters',
+										'prompt'
 									],
 									description: "Component type from Base Primitives catalog."
 								},

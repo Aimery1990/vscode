@@ -37,7 +37,8 @@ export type CustomFieldType =
 	| 'button'
 	| 'browser'
 	| 'git'
-	| 'parameters';
+	| 'parameters'
+	| 'prompt';
 
 export interface IActionButton {
 	id: string;
@@ -81,6 +82,10 @@ export interface ICustomField {
 	gitRemoteUrl?: string;
 	gitBranch?: string;
 	parameters?: IParameterDefinition[];
+	targetMode?: 'model' | 'agent';
+	targetModel?: string;
+	targetAgentId?: string;
+	targetAgentName?: string;
 }
 
 export interface ICompositeComponent {

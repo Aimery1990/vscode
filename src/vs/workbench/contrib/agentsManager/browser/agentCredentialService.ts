@@ -591,4 +591,91 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			};
 		}
 	}
+
+	async executePrompt(modelId: string, prompt: string, systemPrompt?: string): Promise<{ success: boolean; text?: string; error?: string }> {
+		await this.initializationPromise;
+		const sanitizedModel = (modelId || 'gemini-1.5-flash').replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
+
+		let providerId = 'gemini';
+		if (sanitizedModel.startsWith('gpt') || sanitizedModel.startsWith('o1') || sanitizedModel.startsWith('o3') || sanitizedModel.startsWith('text-embedding')) {
+			providerId = 'openai';
+		} else if (sanitizedModel.startsWith('claude')) {
+			providerId = 'anthropic';
+		} else if (sanitizedModel.startsWith('deepseek') || sanitizedModel.startsWith('qwen') || sanitizedModel.startsWith('llama')) {
+			providerId = 'custom-openai';
+		}
+
+		let cred = this._credentials.find(c => c.providerId === providerId && c.isEnabled !== false);
+		if (!cred) {
+			cred = this._credentials.find(c => c.isEnabled !== false);
+		}
+
+		if (!cred) {
+			return {
+				success: false,
+				error: `No configured AI credential found for provider '${providerId}'. Please add an API Key in AI Agent Settings / Credentials.`
+			};
+		}
+
+		const apiKey = await this.getApiKey(cred.id);
+		if (!apiKey) {
+			return {
+				success: false,
+				error: `API key not found for credential '${cred.name}'. Please re-enter the API key in Settings.`
+			};
+		}
+
+		try {
+			if (cred.providerId === 'gemini') {
+				const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${sanitizedModel}:generateContent?key=${apiKey}`;
+				const contents: any[] = [{ parts: [{ text: prompt }] }];
+				const payload: any = { contents };
+				if (systemPrompt) {
+					payload.system_instruction = { parts: [{ text: systemPrompt }] };
+				}
+				const headers = { 'Content-Type': 'application/json' };
+				const res = await this._executeRequest(endpoint, headers, JSON.stringify(payload));
+				return res.success ? { success: true, text: res.message } : { success: false, error: res.message };
+			} else if (cred.providerId === 'anthropic') {
+				const endpoint = 'https://api.anthropic.com/v1/messages';
+				const payload: any = {
+					model: sanitizedModel,
+					max_tokens: 4096,
+					messages: [{ role: 'user', content: prompt }]
+				};
+				if (systemPrompt) {
+					payload.system = systemPrompt;
+				}
+				const headers = {
+					'Content-Type': 'application/json',
+					'x-api-key': apiKey,
+					'anthropic-version': '2023-06-01',
+					'dangerously-allow-html-and-other-things': 'true'
+				};
+				const res = await this._executeRequest(endpoint, headers, JSON.stringify(payload));
+				return res.success ? { success: true, text: res.message } : { success: false, error: res.message };
+			} else {
+				const baseEndpoint = cred.providerId === 'openai' ? 'https://api.openai.com/v1' : (cred.customUrl || 'http://localhost:11434/v1');
+				const cleanBase = baseEndpoint.replace(/\/chat\/completions\/?$/, '').replace(/\/completions\/?$/, '').replace(/\/responses\/?$/, '').replace(/\/$/, '');
+				const messages: any[] = [];
+				if (systemPrompt) {
+					messages.push({ role: 'system', content: systemPrompt });
+				}
+				messages.push({ role: 'user', content: prompt });
+				const payload: any = {
+					model: sanitizedModel,
+					messages,
+					max_tokens: 4096
+				};
+				const headers = {
+					'Content-Type': 'application/json',
+					'Authorization': `Bearer ${apiKey}`
+				};
+				const res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
+				return res.success ? { success: true, text: res.message } : { success: false, error: res.message };
+			}
+		} catch (err: any) {
+			return { success: false, error: `Prompt execution failed: ${err.message || String(err)}` };
+		}
+	}
 }

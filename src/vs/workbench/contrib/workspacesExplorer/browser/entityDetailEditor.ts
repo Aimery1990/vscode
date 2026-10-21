@@ -22,7 +22,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { dirname, basename } from '../../../../base/common/resources.js';
-import { IAgentsManagerService, IAgentItem } from '../../agentsManager/common/agentsManager.js';
+import { IAgentsManagerService, IAgentItem, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -654,6 +654,112 @@ export class EntityDetailEditor extends EditorPane {
 				const btnLabel = actionTransitionBtn.getAttribute('data-action-label') || 'Action';
 				const targetStatus = actionTransitionBtn.getAttribute('data-target-status') || '';
 				await this._executeActionTransition(targetStatus, btnLabel);
+				return;
+			}
+
+			// 0.4 Prompt Primitive: Toggle Target Mode (Model vs Agent)
+			const promptModeBtn = target.closest('.prompt-mode-btn') as HTMLElement | null;
+			if (promptModeBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = promptModeBtn.getAttribute('data-field-key') || '';
+				const mode = promptModeBtn.getAttribute('data-mode') as 'model' | 'agent';
+				const card = promptModeBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card) {
+					this._togglePromptMode(card, fieldKey, mode);
+				}
+				return;
+			}
+
+			// 0.41 Prompt Primitive: Run Prompt with Model
+			const runPromptBtn = target.closest('.prompt-run-model-btn') as HTMLElement | null;
+			if (runPromptBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = runPromptBtn.getAttribute('data-field-key') || '';
+				const card = runPromptBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._executePromptWithModel(card, fieldKey);
+				}
+				return;
+			}
+
+			// 0.42 Prompt Primitive: Dispatch Task to AI Agent
+			const dispatchAgentBtn = target.closest('.prompt-dispatch-agent-btn') as HTMLElement | null;
+			if (dispatchAgentBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = dispatchAgentBtn.getAttribute('data-field-key') || '';
+				const card = dispatchAgentBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._dispatchPromptToAgent(card, fieldKey);
+				}
+				return;
+			}
+
+			// 0.43 Prompt Primitive: Open in Agent Central
+			const openCentralBtn = target.closest('.prompt-open-agent-central-btn') as HTMLElement | null;
+			if (openCentralBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = openCentralBtn.getAttribute('data-field-key') || '';
+				const card = openCentralBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				const textarea = card?.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+				const promptVal = textarea?.value.trim() || '';
+				await this._handleMessage({
+					type: 'openAgentCentral',
+					field: `/Custom/${fieldKey}`,
+					fieldType: 'prompt',
+					label: fieldKey,
+					currentValue: promptVal,
+					options: [],
+					source: `/Custom/${fieldKey}`
+				});
+				return;
+			}
+
+			// 0.44 Prompt Primitive: Save Prompt Instruction & Settings
+			const savePromptBtn = target.closest('.prompt-save-btn') as HTMLElement | null;
+			if (savePromptBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = savePromptBtn.getAttribute('data-field-key') || '';
+				const card = savePromptBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._savePromptDataFromCard(card, fieldKey);
+					this._notificationService.info(`Prompt settings for '${fieldKey}' saved.`);
+				}
+				return;
+			}
+
+			// 0.45 Prompt Primitive: Copy Output
+			const copyPromptOutBtn = target.closest('.prompt-copy-output-btn') as HTMLElement | null;
+			if (copyPromptOutBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = copyPromptOutBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				const display = card?.querySelector('.prompt-output-display') as HTMLElement | null;
+				if (display && display.textContent) {
+					this._clipboardService.writeText(display.textContent);
+					this._notificationService.info('Copied AI execution output to clipboard.');
+				}
+				return;
+			}
+
+			// 0.46 Prompt Primitive: Clear Output
+			const clearPromptOutBtn = target.closest('.prompt-clear-output-btn') as HTMLElement | null;
+			if (clearPromptOutBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = clearPromptOutBtn.getAttribute('data-field-key') || '';
+				const card = clearPromptOutBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card) {
+					const display = card.querySelector('.prompt-output-display') as HTMLElement | null;
+					if (display) display.innerHTML = '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.</span>';
+					const statusText = card.querySelector('.prompt-status-text') as HTMLElement | null;
+					if (statusText) statusText.textContent = 'Ready';
+					await this._savePromptDataFromCard(card, fieldKey, '');
+				}
 				return;
 			}
 
@@ -2587,6 +2693,13 @@ ${rawErr}
 
 		const paramMap = new Map<string, string>();
 
+		// 0. Base Ticket Attributes
+		if (this._lastParsedData) {
+			if (this._lastParsedData.title) paramMap.set('title', this._lastParsedData.title);
+			if (this._lastParsedData.description) paramMap.set('description', this._lastParsedData.description);
+			if (this._lastParsedData.ticketId) paramMap.set('ticketId', this._lastParsedData.ticketId);
+		}
+
 		// 1. Schema default parameters
 		if (this._lastCustomModule?.fields) {
 			for (const f of this._lastCustomModule.fields) {
@@ -2636,6 +2749,227 @@ ${rawErr}
 			result = result.replace(reDouble, pVal).replace(reSingle, pVal);
 		}
 		return result;
+	}
+
+	private async _savePromptPrimitiveData(fieldKey: string, promptData: any): Promise<void> {
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: JSON.stringify(promptData)
+		};
+		await this._handleMessage({
+			type: 'saveMetadata',
+			metadata: {},
+			customMetadata: updatedCustom
+		});
+	}
+
+	private async _savePromptDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string): Promise<any> {
+		const textarea = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+		const modelSelect = card.querySelector('.prompt-model-select') as HTMLSelectElement | null;
+		const agentSelect = card.querySelector('.prompt-agent-select') as HTMLSelectElement | null;
+		const modelBtn = card.querySelector('.prompt-mode-model-btn') as HTMLElement | null;
+		const isModel = modelBtn?.style.background.includes('rgba(236') || false;
+		const outputDisplay = card.querySelector('.prompt-output-display') as HTMLElement | null;
+
+		const targetMode = isModel ? 'model' : 'agent';
+		const targetModel = modelSelect?.value.trim() || 'gemini-1.5-flash';
+		const targetAgentId = agentSelect?.value.trim() || '';
+		const targetAgentName = agentSelect?.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || '';
+		const prompt = textarea?.value || '';
+		const output = outputOverride !== undefined ? outputOverride : (outputDisplay?.textContent || '');
+		const lastExecuted = outputOverride !== undefined && outputOverride === '' ? '' : `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
+
+		const promptData = {
+			prompt,
+			targetMode,
+			targetModel,
+			targetAgentId,
+			targetAgentName,
+			output,
+			lastExecuted
+		};
+
+		await this._savePromptPrimitiveData(fieldKey, promptData);
+		return promptData;
+	}
+
+	private _togglePromptMode(card: HTMLElement, fieldKey: string, mode: 'model' | 'agent'): void {
+		const isAgent = mode === 'agent';
+		const modelBtn = card.querySelector('.prompt-mode-model-btn') as HTMLElement | null;
+		const agentBtn = card.querySelector('.prompt-mode-agent-btn') as HTMLElement | null;
+		const modelSelect = card.querySelector('.prompt-model-select') as HTMLElement | null;
+		const agentSelect = card.querySelector('.prompt-agent-select') as HTMLElement | null;
+		const runModelBtn = card.querySelector('.prompt-run-model-btn') as HTMLElement | null;
+		const dispatchAgentBtn = card.querySelector('.prompt-dispatch-agent-btn') as HTMLElement | null;
+		const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
+
+		if (modelBtn && agentBtn) {
+			if (isAgent) {
+				agentBtn.style.border = '1px solid rgba(56,189,248,0.5)';
+				agentBtn.style.background = 'rgba(56,189,248,0.2)';
+				agentBtn.style.color = '#38bdf8';
+				modelBtn.style.border = '1px solid rgba(255,255,255,0.1)';
+				modelBtn.style.background = 'transparent';
+				modelBtn.style.color = 'inherit';
+			} else {
+				modelBtn.style.border = '1px solid rgba(236,72,153,0.5)';
+				modelBtn.style.background = 'rgba(236,72,153,0.2)';
+				modelBtn.style.color = '#f472b6';
+				agentBtn.style.border = '1px solid rgba(255,255,255,0.1)';
+				agentBtn.style.background = 'transparent';
+				agentBtn.style.color = 'inherit';
+			}
+		}
+
+		if (modelSelect && agentSelect) {
+			modelSelect.style.display = isAgent ? 'none' : 'block';
+			agentSelect.style.display = isAgent ? 'block' : 'none';
+		}
+
+		if (runModelBtn && dispatchAgentBtn) {
+			runModelBtn.style.display = isAgent ? 'none' : 'inline-flex';
+			dispatchAgentBtn.style.display = isAgent ? 'inline-flex' : 'none';
+		}
+
+		if (targetBadge) {
+			if (isAgent) {
+				const agName = (agentSelect as HTMLSelectElement)?.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || 'Agent';
+				targetBadge.textContent = `🤖 Agent: ${agName}`;
+				targetBadge.style.background = 'rgba(56, 189, 248, 0.15)';
+				targetBadge.style.color = '#38bdf8';
+			} else {
+				const mName = (modelSelect as HTMLSelectElement)?.value || 'gemini-1.5-flash';
+				targetBadge.textContent = `⚡ Model: ${mName}`;
+				targetBadge.style.background = 'rgba(236, 72, 153, 0.15)';
+				targetBadge.style.color = '#f472b6';
+			}
+		}
+
+		this._savePromptDataFromCard(card, fieldKey).catch(() => {});
+	}
+
+	private async _executePromptWithModel(card: HTMLElement, fieldKey: string): Promise<void> {
+		const textarea = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+		const rawPrompt = textarea?.value.trim() || '';
+		if (!rawPrompt) {
+			this._notificationService.warn('Please enter a prompt instruction before running.');
+			textarea?.focus();
+			return;
+		}
+
+		const modelSelect = card.querySelector('.prompt-model-select') as HTMLSelectElement | null;
+		const modelId = modelSelect?.value.trim() || 'gemini-1.5-flash';
+
+		const interpolatedPrompt = this._interpolateParameters(rawPrompt);
+
+		const statusText = card.querySelector('.prompt-status-text') as HTMLElement | null;
+		const outputDisplay = card.querySelector('.prompt-output-display') as HTMLElement | null;
+
+		if (statusText) {
+			statusText.textContent = `Running with ${modelId}... ⏳`;
+			statusText.style.color = '#f472b6';
+		}
+		if (outputDisplay) {
+			outputDisplay.textContent = `Processing prompt with ${modelId}...`;
+		}
+
+		try {
+			const credService = this._instantiationService.invokeFunction(accessor => {
+				try { return accessor.get(IAgentCredentialService); } catch { return undefined; }
+			});
+
+			if (!credService || !credService.executePrompt) {
+				throw new Error('AI Credential service not available.');
+			}
+
+			const res = await credService.executePrompt(modelId, interpolatedPrompt);
+
+			if (res.success && res.text) {
+				if (outputDisplay) {
+					outputDisplay.textContent = res.text;
+				}
+				if (statusText) {
+					statusText.textContent = `Completed at ${new Date().toLocaleTimeString()} (${res.text.length} chars)`;
+					statusText.style.color = '#34d399';
+				}
+				await this._savePromptDataFromCard(card, fieldKey, res.text);
+			} else {
+				throw new Error(res.error || 'Execution failed');
+			}
+		} catch (err: any) {
+			const errMsg = err?.message || String(err);
+			if (outputDisplay) {
+				outputDisplay.textContent = `[Execution Error]\n${errMsg}`;
+			}
+			if (statusText) {
+				statusText.textContent = `Failed: ${errMsg.slice(0, 30)}`;
+				statusText.style.color = '#ef4444';
+			}
+			await this._savePromptDataFromCard(card, fieldKey, `[Error: ${errMsg}]`);
+		}
+	}
+
+	private async _dispatchPromptToAgent(card: HTMLElement, fieldKey: string): Promise<void> {
+		const textarea = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+		const rawPrompt = textarea?.value.trim() || '';
+		if (!rawPrompt) {
+			this._notificationService.warn('Please enter a prompt instruction before dispatching.');
+			textarea?.focus();
+			return;
+		}
+
+		const agentSelect = card.querySelector('.prompt-agent-select') as HTMLSelectElement | null;
+		const agentId = agentSelect?.value.trim();
+		if (!agentId) {
+			this._notificationService.warn('Please select a target AI Agent.');
+			agentSelect?.focus();
+			return;
+		}
+
+		const agentName = agentSelect.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || 'AI Agent';
+		const interpolatedPrompt = this._interpolateParameters(rawPrompt);
+		const taskTitle = `Task (${fieldKey}): ${this._lastParsedData?.title || 'Ticket Task'}`;
+
+		const statusText = card.querySelector('.prompt-status-text') as HTMLElement | null;
+		const outputDisplay = card.querySelector('.prompt-output-display') as HTMLElement | null;
+
+		if (statusText) {
+			statusText.textContent = `Dispatching to ${agentName}... ⏳`;
+			statusText.style.color = '#38bdf8';
+		}
+
+		try {
+			await this._agentsManagerService.assignTaskToAgent(agentId, taskTitle, interpolatedPrompt);
+			const timeStr = new Date().toLocaleTimeString();
+			const dispatchOutput = `[Task Dispatched to AI Agent]
+Agent Name: ${agentName}
+Agent ID: ${agentId}
+Dispatched At: ${timeStr}
+Status: Agent set to 'busy'. Task appended to agent work_log.md.
+
+--- [INSTRUCTION PAYLOAD] ---
+${interpolatedPrompt}`;
+
+			if (outputDisplay) {
+				outputDisplay.textContent = dispatchOutput;
+			}
+			if (statusText) {
+				statusText.textContent = `Dispatched to ${agentName} at ${timeStr}`;
+				statusText.style.color = '#38bdf8';
+			}
+
+			await this._savePromptDataFromCard(card, fieldKey, dispatchOutput);
+			this._notificationService.info(`Task successfully assigned to Agent '${agentName}'.`);
+		} catch (err: any) {
+			const errMsg = err?.message || String(err);
+			if (outputDisplay) {
+				outputDisplay.textContent = `[Dispatch Error]\n${errMsg}`;
+			}
+			if (statusText) {
+				statusText.textContent = `Failed: ${errMsg.slice(0, 30)}`;
+				statusText.style.color = '#ef4444';
+			}
+		}
 	}
 
 	private async _getAttachments(entityUri: URI): Promise<string[]> {
@@ -3505,6 +3839,149 @@ ${rawErr}
 									</div>
 								</div>
 								<div class="browser-content-display desc-content-box" style="max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${browserContent ? this._escapeHtml(browserContent) : '<span style="opacity: 0.4; font-style: italic;">No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to extract page contents.</span>'}</div>
+							</div>
+						</div>
+					`;
+				} else if (fType === 'prompt') {
+					let promptText = fieldItem.defaultContent || '';
+					let promptMode: 'model' | 'agent' = fieldItem.targetMode || 'model';
+					let promptModel = fieldItem.targetModel || 'gemini-1.5-flash';
+					let promptAgentId = fieldItem.targetAgentId || '';
+					let promptAgentName = fieldItem.targetAgentName || '';
+					let promptOutput = '';
+					let lastExecutedText = '';
+
+					if (v) {
+						if (typeof v === 'string') {
+							const trimmed = v.trim();
+							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+								try {
+									const pObj = JSON.parse(trimmed);
+									if (pObj.prompt !== undefined) promptText = pObj.prompt;
+									if (pObj.targetMode) promptMode = pObj.targetMode;
+									if (pObj.targetModel) promptModel = pObj.targetModel;
+									if (pObj.targetAgentId) promptAgentId = pObj.targetAgentId;
+									if (pObj.targetAgentName) promptAgentName = pObj.targetAgentName;
+									if (pObj.output) promptOutput = pObj.output;
+									if (pObj.lastExecuted) lastExecutedText = pObj.lastExecuted;
+								} catch {
+									promptText = trimmed;
+								}
+							} else {
+								promptText = trimmed;
+							}
+						} else if (typeof v === 'object' && v !== null) {
+							if ((v as any).prompt !== undefined) promptText = (v as any).prompt;
+							if ((v as any).targetMode) promptMode = (v as any).targetMode;
+							if ((v as any).targetModel) promptModel = (v as any).targetModel;
+							if ((v as any).targetAgentId) promptAgentId = (v as any).targetAgentId;
+							if ((v as any).targetAgentName) promptAgentName = (v as any).targetAgentName;
+							if ((v as any).output) promptOutput = (v as any).output;
+							if ((v as any).lastExecuted) lastExecutedText = (v as any).lastExecuted;
+						}
+					}
+
+					if (promptAgentId && !promptAgentName) {
+						const matchingAg = agents.find(a => a.id === promptAgentId);
+						if (matchingAg) promptAgentName = matchingAg.name;
+					}
+
+					const isAgentMode = promptMode === 'agent';
+					const targetBadgeText = isAgentMode
+						? `🤖 Agent: ${promptAgentName || promptAgentId || 'Unassigned'}`
+						: `⚡ Model: ${promptModel || 'gemini-1.5-flash'}`;
+					const targetBadgeBg = isAgentMode ? 'rgba(56, 189, 248, 0.15)' : 'rgba(236, 72, 153, 0.15)';
+					const targetBadgeColor = isAgentMode ? '#38bdf8' : '#f472b6';
+
+					const agentOptionsHtml = agents.length > 0
+						? agents.map(ag => `<option value="${this._escapeHtmlAttr(ag.id)}" ${ag.id === promptAgentId ? 'selected' : ''}>${this._escapeHtml(ag.name)} (${this._escapeHtml(ag.role || 'Agent')})</option>`).join('')
+						: '<option value="">-- No AI Agents configured --</option>';
+
+					const presetModels = [
+						{ id: 'gemini-1.5-flash', label: 'Google Gemini 1.5 Flash' },
+						{ id: 'gemini-1.5-pro', label: 'Google Gemini 1.5 Pro' },
+						{ id: 'gpt-4o', label: 'OpenAI GPT-4o' },
+						{ id: 'gpt-4o-mini', label: 'OpenAI GPT-4o-mini' },
+						{ id: 'claude-3-5-sonnet-20241022', label: 'Anthropic Claude 3.5 Sonnet' },
+						{ id: 'claude-3-5-haiku-20241022', label: 'Anthropic Claude 3.5 Haiku' },
+						{ id: 'deepseek-chat', label: 'DeepSeek Chat' }
+					];
+					let modelOptionsHtml = presetModels.map(pm => `<option value="${this._escapeHtmlAttr(pm.id)}" ${pm.id === promptModel ? 'selected' : ''}>${this._escapeHtml(pm.label)}</option>`).join('');
+					if (!presetModels.some(pm => pm.id === promptModel) && promptModel) {
+						modelOptionsHtml += `<option value="${this._escapeHtmlAttr(promptModel)}" selected>Custom: ${this._escapeHtml(promptModel)}</option>`;
+					}
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card prompt-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(236,72,153,0.18); color: #ec4899; font-weight: 700; text-transform: uppercase;">Prompt</span>
+									<span class="prompt-target-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: ${targetBadgeBg}; color: ${targetBadgeColor}; font-weight: 600;">${this._escapeHtml(targetBadgeText)}</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="prompt" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(promptText)}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
+								<!-- Mode Switcher & Target Row -->
+								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.06);">
+									<div style="display: flex; align-items: center; gap: 6px;">
+										<span style="font-size: 11px; font-weight: 600; opacity: 0.75;">Target:</span>
+										<button type="button" class="prompt-mode-btn prompt-mode-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-mode="model" style="padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; border: 1px solid ${!isAgentMode ? 'rgba(236,72,153,0.5)' : 'rgba(255,255,255,0.1)'}; background: ${!isAgentMode ? 'rgba(236,72,153,0.2)' : 'transparent'}; color: ${!isAgentMode ? '#f472b6' : 'inherit'};">⚡ Model</button>
+										<button type="button" class="prompt-mode-btn prompt-mode-agent-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-mode="agent" style="padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; border: 1px solid ${isAgentMode ? 'rgba(56,189,248,0.5)' : 'rgba(255,255,255,0.1)'}; background: ${isAgentMode ? 'rgba(56,189,248,0.2)' : 'transparent'}; color: ${isAgentMode ? '#38bdf8' : 'inherit'};">🤖 AI Agent</button>
+									</div>
+									<div class="prompt-target-selector-box" style="flex: 1; max-width: 320px; min-width: 200px;">
+										<select class="prompt-model-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(236,72,153,0.3); background: #1a1a1a; color: inherit; ${isAgentMode ? 'display: none;' : ''}">
+											${modelOptionsHtml}
+										</select>
+										<select class="prompt-agent-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(56,189,248,0.3); background: #1a1a1a; color: inherit; ${!isAgentMode ? 'display: none;' : ''}">
+											${agentOptionsHtml}
+										</select>
+									</div>
+								</div>
+
+								<!-- Prompt Instruction Input -->
+								<div style="display: flex; flex-direction: column; gap: 4px;">
+									<div style="display: flex; justify-content: space-between; align-items: center;">
+										<label style="font-size: 11px; font-weight: 600; opacity: 0.85;">Instruction Prompt:</label>
+										<span style="font-size: 10px; opacity: 0.55;">Use {{param_name}} to reference variables</span>
+									</div>
+									<textarea class="prompt-instruction-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="3" placeholder="Enter prompt instruction for model or AI agent..." style="width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical;">${this._escapeHtml(promptText)}</textarea>
+								</div>
+
+								<!-- Action Buttons Row -->
+								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+									<div style="display: flex; gap: 8px; align-items: center;">
+										<button type="button" class="prompt-run-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(236,72,153,0.18); color: #f472b6; border: 1px solid rgba(236,72,153,0.4); ${isAgentMode ? 'display: none;' : ''}" title="Execute prompt with selected model">
+											<span>▶ Run with Model</span>
+										</button>
+										<button type="button" class="prompt-dispatch-agent-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.18); color: #38bdf8; border: 1px solid rgba(56,189,248,0.4); ${!isAgentMode ? 'display: none;' : ''}" title="Dispatch task to selected AI Agent">
+											<span>🚀 Dispatch to Agent</span>
+										</button>
+										<button type="button" class="prompt-open-agent-central-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(168,85,247,0.15); color: #c084fc; border: 1px solid rgba(168,85,247,0.35);" title="Open Agent Central Chat with this prompt">
+											<span>💬 Agent Central</span>
+										</button>
+									</div>
+									<button type="button" class="prompt-save-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15);" title="Save prompt instruction & settings">
+										<span>💾 Save Prompt</span>
+									</button>
+								</div>
+
+								<!-- Output Area -->
+								<div class="prompt-output-section" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">
+									<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px;">
+										<div style="display: flex; align-items: center; gap: 8px;">
+											<span style="font-size: 11px; font-weight: 600; opacity: 0.85;">AI Execution Output:</span>
+											<span class="prompt-status-text" style="font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;">${lastExecutedText ? `Executed: ${this._escapeHtmlAttr(lastExecutedText)}` : 'Ready'}</span>
+										</div>
+										<div style="display: gap: 6px;">
+											<button type="button" class="prompt-copy-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Copy</button>
+											<button type="button" class="prompt-clear-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Clear</button>
+										</div>
+									</div>
+									<div class="prompt-output-display desc-content-box" style="max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${promptOutput ? this._escapeHtml(promptOutput) : '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.</span>'}</div>
+								</div>
 							</div>
 						</div>
 					`;

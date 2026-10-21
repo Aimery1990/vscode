@@ -3915,6 +3915,37 @@ export class MainWorkspaceViewPane extends ViewPane {
 							content: field.defaultContent || '',
 							lastFetched: field.defaultContent ? 'Initialized from Schema' : ''
 						});
+					} else if (field.type === 'prompt') {
+						const promptBox = append(fieldGroup, $('.prompt-field-container.custom-field-input', {
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							'data-field-type': field.type,
+							style: 'display: flex; flex-direction: column; gap: 8px; border: 1px solid rgba(236, 72, 153, 0.25); background: rgba(236, 72, 153, 0.03); border-radius: 8px; padding: 10px 12px;'
+						}));
+
+						const targetDesc = field.targetMode === 'agent'
+							? `Agent: ${field.targetAgentName || field.targetAgentId || 'Default'}`
+							: `Model: ${field.targetModel || 'gemini-1.5-flash'}`;
+
+						const topRow = append(promptBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px;' }));
+						append(topRow, $('span', { style: 'font-size: 10.5px; opacity: 0.8; font-weight: 600; color: #f472b6;' }, `AI Instruction (${targetDesc})`));
+
+						const promptTextarea = append(promptBox, $('textarea.monaco-inputbox.prompt-text-input', {
+							placeholder: 'AI Prompt Instruction...',
+							rows: 3,
+							style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; line-height: 1.4;'
+						})) as HTMLTextAreaElement;
+						promptTextarea.value = field.defaultContent || '';
+
+						(promptBox as any).__getPromptData = () => ({
+							prompt: promptTextarea.value.trim(),
+							targetMode: field.targetMode || 'model',
+							targetModel: field.targetModel || 'gemini-1.5-flash',
+							targetAgentId: field.targetAgentId || '',
+							targetAgentName: field.targetAgentName || '',
+							output: '',
+							lastExecuted: ''
+						});
 					} else if (field.type === 'git') {
 						// Git primitive is managed via gitBox above, remove duplicate generic input
 						fieldGroup.remove();
@@ -4103,6 +4134,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 							const getBData = (inputEl as any).__getBrowserData;
 							const bData = getBData ? getBData() : { url: '', credentials: [] };
 							customMetadata[fieldLabel] = JSON.stringify(bData);
+						} else if (inputEl.classList.contains('prompt-field-container')) {
+							const getPData = (inputEl as any).__getPromptData;
+							const pData = getPData ? getPData() : { prompt: '', targetMode: 'model' };
+							customMetadata[fieldLabel] = JSON.stringify(pData);
 						} else {
 							customMetadata[fieldLabel] = (inputEl as any).value || '';
 						}

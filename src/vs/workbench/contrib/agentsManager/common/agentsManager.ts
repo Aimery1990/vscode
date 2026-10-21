@@ -60,6 +60,7 @@ export interface IAgentCredentialService {
 	testConnection(providerId: string, apiKey: string, modelId: string, customUrl?: string): Promise<{ success: boolean; message: string }>;
 	fetchModels(providerId: string, apiKey: string, customUrl?: string): Promise<string[]>;
 	refreshCredential(id: string): Promise<void>;
+	executePrompt(modelId: string, prompt: string, systemPrompt?: string): Promise<{ success: boolean; text?: string; error?: string }>;
 }
 
 export const IAgentsManagerService = createDecorator<IAgentsManagerService>('agentsManagerService');

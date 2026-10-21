@@ -28,6 +28,7 @@ import { RequestChannelClient } from '../../../../platform/request/common/reques
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { URI } from '../../../../base/common/uri.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
+import { IAgentsManagerService } from '../../agentsManager/common/agentsManager.js';
 
 export class CustomModuleSchemaEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.customModuleSchema';
@@ -451,6 +452,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				icon: Codicon.symbolVariable,
 				type: 'parameters',
 				defaultName: 'Parameters'
+			},
+			{
+				label: 'AI Prompt (Model / Agent)',
+				icon: Codicon.sparkle,
+				type: 'prompt',
+				defaultName: 'AI Prompt'
 			}
 		];
 
@@ -509,6 +516,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				newField.parameters = [
 					{ id: `param_${Date.now()}_1`, name: 'start', label: 'Start Offset', defaultValue: '0', description: 'Zero-based pagination start index' }
 				];
+			}
+			if (bc.type === 'prompt') {
+				newField.defaultContent = 'Please analyze the ticket details and execute instructions:';
+				newField.targetMode = 'model';
+				newField.targetModel = 'gemini-1.5-flash';
+				newField.targetAgentId = '';
 			}
 			if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= fields.length) {
 				const safeInsertIndex = Math.max(2, insertIndex);
@@ -800,10 +813,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				const isBrowser = field.type === 'browser';
 				const isGit = field.type === 'git';
 				const isParameters = field.type === 'parameters';
-				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isParameters ? 'INPUT PARAMETERS' : field.type.toUpperCase())))));
-				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : 'rgba(99, 102, 241, 0.18)')))));
-				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isParameters ? '#c084fc' : '#818cf8')))));
-				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : 'rgba(99, 102, 241, 0.35)')))));
+				const isPrompt = field.type === 'prompt';
+				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isParameters ? 'INPUT PARAMETERS' : (isPrompt ? 'AI PROMPT' : field.type.toUpperCase()))))));
+				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(236, 72, 153, 0.18)' : 'rgba(99, 102, 241, 0.18)'))))));
+				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isParameters ? '#c084fc' : (isPrompt ? '#f472b6' : '#818cf8'))))));
+				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(236, 72, 153, 0.35)' : 'rgba(99, 102, 241, 0.35)'))))));
 
 				append(headerLeft, $('span.type-badge', {
 					style: `font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; letter-spacing: 0.04em;`
@@ -1118,7 +1132,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								{ type: 'date_range', label: 'Date Range' },
 								{ type: 'time_range', label: 'Time Range' },
 								{ type: 'datetime_range', label: 'DateTime Range' },
-								{ type: 'attachment', label: 'Attachment' }
+								{ type: 'attachment', label: 'Attachment' },
+								{ type: 'prompt', label: 'AI Prompt' }
 							];
 							availableSubTypes.forEach(st => {
 								append(subTypeSelect, $('option', { value: st.type }, st.label));
@@ -1735,6 +1750,177 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							defaultValue: ''
 						});
 						renderParamList();
+					};
+				}
+
+				// Prompt Primitive Configuration Box
+				if (field.type === 'prompt') {
+					if (!field.targetMode) {
+						field.targetMode = 'model';
+					}
+					if (!field.targetModel) {
+						field.targetModel = 'gemini-1.5-flash';
+					}
+					const promptSchemaBox = append(fieldCard, $('.prompt-schema-config', {
+						style: 'display: flex; flex-direction: column; gap: 12px; background: rgba(0, 0, 0, 0.2); padding: 12px 14px; border-radius: 6px; border: 1px solid rgba(236, 72, 153, 0.25);'
+					}));
+
+					// Top Description
+					const promptNotice = append(promptSchemaBox, $('div', { style: 'font-size: 11px; opacity: 0.85; line-height: 1.4; color: #f472b6; display: flex; align-items: center; gap: 6px;' }));
+					append(promptNotice, $('span' + ThemeIcon.asCSSSelector(Codicon.sparkle)));
+					append(promptNotice, $('span', {}, 'AI Prompt Primitive: configure instruction prompt and choose whether it is processed by an AI Model or an autonomous AI Agent.'));
+
+					// Target Mode Switcher (Model vs Agent)
+					const modeRow = append(promptSchemaBox, $('div', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
+					append(modeRow, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Processing Target Mode:'));
+					const modeButtons = append(modeRow, $('div', { style: 'display: flex; gap: 8px;' }));
+
+					const modelModeBtn = append(modeButtons, $('button.monaco-button', {
+						type: 'button',
+						style: `padding: 6px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; ${field.targetMode !== 'agent' ? 'background: rgba(236, 72, 153, 0.2); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.5);' : 'background: rgba(255, 255, 255, 0.05); color: #ccc; border: 1px solid rgba(255, 255, 255, 0.15);'}`
+					})) as HTMLButtonElement;
+					append(modelModeBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.zap)));
+					append(modelModeBtn, $('span', {}, 'Large Language Model (Direct)'));
+
+					const agentModeBtn = append(modeButtons, $('button.monaco-button', {
+						type: 'button',
+						style: `padding: 6px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; ${field.targetMode === 'agent' ? 'background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.5);' : 'background: rgba(255, 255, 255, 0.05); color: #ccc; border: 1px solid rgba(255, 255, 255, 0.15);'}`
+					})) as HTMLButtonElement;
+					append(agentModeBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.robot)));
+					append(agentModeBtn, $('span', {}, 'AI Agent (Role-based Autonomous)'));
+
+					// Target Selector Container
+					const targetSelectContainer = append(promptSchemaBox, $('div', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
+
+					const renderTargetSelector = async () => {
+						clearNode(targetSelectContainer);
+						if (field.targetMode === 'agent') {
+							append(targetSelectContainer, $('label', { style: 'font-size: 11px; font-weight: 600; color: #38bdf8;' }, 'Target AI Agent:'));
+							const agentSelect = append(targetSelectContainer, $('select.monaco-select-box', {
+								style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(0, 0, 0, 0.25); color: inherit;'
+							})) as HTMLSelectElement;
+
+							let agentsList: any[] = [];
+							try {
+								const agentsMgr = this._instantiationService.invokeFunction(accessor => {
+									try { return accessor.get(IAgentsManagerService); } catch { return undefined; }
+								});
+								if (agentsMgr) {
+									agentsList = await agentsMgr.getAgents();
+								}
+							} catch { }
+
+							if (agentsList.length === 0) {
+								const opt = append(agentSelect, $('option', { value: '' }, '-- No AI Agents configured yet --')) as HTMLOptionElement;
+								opt.selected = true;
+							} else {
+								const defaultOpt = append(agentSelect, $('option', { value: '' }, '-- Select AI Agent --')) as HTMLOptionElement;
+								if (!field.targetAgentId) defaultOpt.selected = true;
+
+								agentsList.forEach(ag => {
+									const opt = append(agentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.role || 'Agent'})`)) as HTMLOptionElement;
+									if (field.targetAgentId === ag.id) {
+										opt.selected = true;
+									}
+								});
+							}
+
+							agentSelect.onchange = () => {
+								field.targetAgentId = agentSelect.value;
+								const selAgent = agentsList.find(a => a.id === agentSelect.value);
+								field.targetAgentName = selAgent?.name || '';
+							};
+						} else {
+							append(targetSelectContainer, $('label', { style: 'font-size: 11px; font-weight: 600; color: #f472b6;' }, 'Target AI Model:'));
+							const modelRow = append(targetSelectContainer, $('div', { style: 'display: flex; gap: 8px; align-items: center;' }));
+							const modelSelect = append(modelRow, $('select.monaco-select-box', {
+								style: 'flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(236, 72, 153, 0.35); background: rgba(0, 0, 0, 0.25); color: inherit;'
+							})) as HTMLSelectElement;
+
+							const presetModels = [
+								{ id: 'gemini-1.5-flash', label: 'Google Gemini 1.5 Flash (Fast & Capable)' },
+								{ id: 'gemini-1.5-pro', label: 'Google Gemini 1.5 Pro (Deep Reasoning)' },
+								{ id: 'gpt-4o', label: 'OpenAI GPT-4o (Omni Flagship)' },
+								{ id: 'gpt-4o-mini', label: 'OpenAI GPT-4o-mini (Lightweight)' },
+								{ id: 'claude-3-5-sonnet-20241022', label: 'Anthropic Claude 3.5 Sonnet' },
+								{ id: 'claude-3-5-haiku-20241022', label: 'Anthropic Claude 3.5 Haiku' },
+								{ id: 'custom', label: 'Custom Model Name...' }
+							];
+
+							let matched = false;
+							presetModels.forEach(pm => {
+								const opt = append(modelSelect, $('option', { value: pm.id }, pm.label)) as HTMLOptionElement;
+								if (pm.id === field.targetModel) {
+									opt.selected = true;
+									matched = true;
+								}
+							});
+							if (!matched && field.targetModel) {
+								const customOpt = append(modelSelect, $('option', { value: field.targetModel }, `Custom: ${field.targetModel}`)) as HTMLOptionElement;
+								customOpt.selected = true;
+							}
+
+							const customInput = append(modelRow, $('input.monaco-inputbox', {
+								placeholder: 'Custom model ID (e.g. deepseek-chat)',
+								style: `flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; ${modelSelect.value === 'custom' || (!matched && field.targetModel) ? '' : 'display: none;'}`
+							})) as HTMLInputElement;
+							customInput.value = field.targetModel || '';
+
+							modelSelect.onchange = () => {
+								if (modelSelect.value === 'custom') {
+									customInput.style.display = 'block';
+									customInput.focus();
+									field.targetModel = customInput.value.trim() || 'gemini-1.5-flash';
+								} else {
+									customInput.style.display = 'none';
+									field.targetModel = modelSelect.value;
+								}
+							};
+
+							customInput.oninput = () => {
+								field.targetModel = customInput.value.trim();
+							};
+						}
+					};
+
+					modelModeBtn.onclick = () => {
+						field.targetMode = 'model';
+						modelModeBtn.style.background = 'rgba(236, 72, 153, 0.2)';
+						modelModeBtn.style.color = '#f472b6';
+						modelModeBtn.style.borderColor = 'rgba(236, 72, 153, 0.5)';
+						agentModeBtn.style.background = 'rgba(255, 255, 255, 0.05)';
+						agentModeBtn.style.color = '#ccc';
+						agentModeBtn.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+						renderTargetSelector();
+					};
+
+					agentModeBtn.onclick = () => {
+						field.targetMode = 'agent';
+						agentModeBtn.style.background = 'rgba(56, 189, 248, 0.2)';
+						agentModeBtn.style.color = '#38bdf8';
+						agentModeBtn.style.borderColor = 'rgba(56, 189, 248, 0.5)';
+						modelModeBtn.style.background = 'rgba(255, 255, 255, 0.05)';
+						modelModeBtn.style.color = '#ccc';
+						modelModeBtn.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+						renderTargetSelector();
+					};
+
+					renderTargetSelector();
+
+					// Default Instruction / Prompt Template Textarea
+					const promptTextRow = append(promptSchemaBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+					const promptTop = append(promptTextRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+					append(promptTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Default Instruction / Prompt Template:'));
+					append(promptTop, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'Supports {{param_name}} interpolation'));
+
+					const promptTextarea = append(promptTextRow, $('textarea.monaco-inputbox', {
+						rows: 4,
+						placeholder: 'e.g. Please analyze the ticket details and draft a summary:\n{{description}}',
+						style: 'width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.4;'
+					})) as HTMLTextAreaElement;
+					promptTextarea.value = field.defaultContent || '';
+					promptTextarea.oninput = () => {
+						field.defaultContent = promptTextarea.value;
 					};
 				}
 			});
