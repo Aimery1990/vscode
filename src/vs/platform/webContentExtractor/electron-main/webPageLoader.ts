@@ -64,8 +64,8 @@ export class WebPageLoader extends Disposable {
 		super();
 
 		this._window = browserWindowFactory({
-			width: 800,
-			height: 600,
+			width: 1440,
+			height: 2560,
 			show: false,
 			webPreferences: {
 				partition: this._options?.partition || 'persist:vscode-browser',
@@ -451,6 +451,11 @@ export class WebPageLoader extends Disposable {
 						return;
 					}
 
+					let jobListSummary = '';
+					try {
+						jobListSummary = await this.extractJobListContent();
+					} catch {}
+
 					if (!cts.token.isCancellationRequested) {
 						result = await this.extractAccessibilityTreeContent(cts.token) ?? '';
 					}
@@ -459,6 +464,10 @@ export class WebPageLoader extends Disposable {
 						this.trace(`Accessibility tree extraction yielded insufficient content, trying main DOM element extraction`);
 						const domContent = await this.extractMainDomElementContent() ?? '';
 						result = domContent.length > result.length ? domContent : result;
+					}
+
+					if (jobListSummary) {
+						result = jobListSummary + result;
 					}
 				})(), WebPageLoader.EXTRACT_CONTENT_TIMEOUT);
 			} finally {
@@ -554,6 +563,162 @@ export class WebPageLoader extends Disposable {
 		} catch (error) {
 			this.trace(`DOM extraction failed: ${error instanceof Error ? error.message : String(error)}`);
 			return undefined;
+		}
+	}
+
+	/**
+	 * Automatically extracts structured job search results (including Job ID, Title, Company, Location, Compensation, and Direct Links)
+	 * from job portals such as LinkedIn and Indeed, ensuring full coverage without virtual occlusion.
+	 */
+	private async extractJobListContent(): Promise<string> {
+		try {
+			const script = `
+				(() => {
+					try {
+						// 1. Trigger auto-scroll on job list containers to un-occlude virtual cards
+						const scrollables = document.querySelectorAll(
+							'.jobs-search-results-list, .scaffold-layout__list, [data-view-name*="job"], ul.jobs-search__results-list, main'
+						);
+						scrollables.forEach(s => {
+							try { s.scrollTop = s.scrollHeight; } catch {}
+						});
+
+						const jobs = [];
+						const seenIds = new Set();
+
+						// 2. Query all job card elements
+						const cards = document.querySelectorAll(
+							'li[data-occludable-job-id], [data-job-id], .job-card-container, .jobs-search-results__list-item'
+						);
+
+						cards.forEach(card => {
+							const directId = card.getAttribute('data-job-id') || card.getAttribute('data-occludable-job-id');
+							const linkEl = card.querySelector(
+								'a.job-card-list__title--link, a.job-card-container__link, a[href*="/jobs/view/"], a[href*="currentJobId="]'
+							);
+							const href = linkEl ? (linkEl.getAttribute('href') || '') : '';
+							const hrefMatch = href.match(/currentJobId=(\\d+)/) || href.match(/\\/jobs\\/view\\/(\\d+)/);
+							const jobId = directId || (hrefMatch ? hrefMatch[1] : '');
+
+							if (jobId && seenIds.has(jobId)) {
+								return;
+							}
+							if (jobId) {
+								seenIds.add(jobId);
+							}
+
+							// Title
+							let title = linkEl ? (linkEl.innerText || linkEl.getAttribute('aria-label') || '').trim() : '';
+							if (!title) {
+								const strong = card.querySelector('strong');
+								if (strong) title = (strong.innerText || strong.getAttribute('title') || '').trim();
+							}
+							if (!title) {
+								const anyTitle = card.querySelector('[class*="title"], [class*="job-name"]');
+								if (anyTitle) title = anyTitle.innerText.trim();
+							}
+							title = title.replace(/\\s+/g, ' ').replace(/\\(Verified job\\)/gi, '').trim();
+
+							// Company
+							const compEl = card.querySelector(
+								'.job-card-container__company-name, .job-card-container__primary-description, [class*="company-name"], [class*="primary-description"]'
+							);
+							const company = compEl ? compEl.innerText.replace(/\\s+/g, ' ').trim() : '';
+
+							// Location
+							const locEl = card.querySelector(
+								'.job-card-container__metadata-item, [class*="metadata-item"], [class*="location"]'
+							);
+							const location = locEl ? locEl.innerText.replace(/\\s+/g, ' ').trim() : '';
+
+							// Salary
+							const salaryEl = card.querySelector(
+								'[class*="salary"], [class*="compensation"]'
+							);
+							const salary = salaryEl ? salaryEl.innerText.replace(/\\s+/g, ' ').trim() : '';
+
+							const directLink = jobId
+								? ('https://www.linkedin.com/jobs/view/' + jobId + '/')
+								: (href.startsWith('http') ? href : ('https://www.linkedin.com' + href));
+
+							if (jobId || title || company) {
+								jobs.push({
+									jobId: jobId || 'N/A',
+									title: title || 'Job Posting',
+									company: company || 'Unknown Company',
+									location: location || '',
+									salary: salary || '',
+									link: directLink
+								});
+							}
+						});
+
+						// 3. Fallback to BigPipe code blocks if titles are missing
+						const codeTags = document.querySelectorAll('code[id^="bpr-guid-"]');
+						codeTags.forEach(code => {
+							try {
+								let text = code.textContent || '';
+								if (text.startsWith('<!--')) text = text.slice(4);
+								if (text.endsWith('-->')) text = text.slice(0, -3);
+								text = text.trim();
+								if (!text.startsWith('{')) return;
+								const parsed = JSON.parse(text);
+								const included = parsed.included || (Array.isArray(parsed.data) ? parsed.data : (parsed.data ? [parsed.data] : []));
+								if (!Array.isArray(included)) return;
+
+								included.forEach(item => {
+									if (item && item.entityUrn && item.entityUrn.includes('jobPosting') && item.title) {
+										const idMatch = item.entityUrn.match(/(\\d+)/);
+										const jobId = idMatch ? idMatch[1] : '';
+										if (jobId) {
+											const existing = jobs.find(j => j.jobId === jobId);
+											if (existing) {
+												if (!existing.title || existing.title === 'Job Posting') {
+													existing.title = item.title;
+												}
+												if (!existing.company || existing.company === 'Unknown Company') {
+													existing.company = item.primaryDescription?.text || item.companyDetails?.companyName || '';
+												}
+												if (!existing.location) {
+													existing.location = item.secondaryDescription?.text || item.formattedLocation || '';
+												}
+											} else if (!seenIds.has(jobId)) {
+												seenIds.add(jobId);
+												jobs.push({
+													jobId,
+													title: item.title,
+													company: item.primaryDescription?.text || item.companyDetails?.companyName || 'Unknown Company',
+													location: item.secondaryDescription?.text || item.formattedLocation || '',
+													salary: '',
+													link: 'https://www.linkedin.com/jobs/view/' + jobId + '/'
+												});
+											}
+										}
+									}
+								});
+							} catch {}
+						});
+
+						if (jobs.length === 0) {
+							return '';
+						}
+
+						let md = '## Extracted Job Listings (' + jobs.length + ' Jobs Found)\\n\\n';
+						md += '| # | Job ID | Job Title | Company | Location | Compensation | Direct Link |\\n';
+						md += '|---|---|---|---|---|---|---|\\n';
+						jobs.forEach((j, i) => {
+							md += '| ' + (i + 1) + ' | ' + j.jobId + ' | ' + j.title + ' | ' + j.company + ' | ' + j.location + ' | ' + (j.salary || '-') + ' | [' + (j.title || 'View Job') + '](' + j.link + ') |\\n';
+						});
+						md += '\\n---\\n\\n';
+						return md;
+					} catch {
+						return '';
+					}
+				})()
+			`;
+			return (await this._window.webContents.executeJavaScript(script)) ?? '';
+		} catch {
+			return '';
 		}
 	}
 }

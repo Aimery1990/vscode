@@ -247,10 +247,17 @@ function processNode(uri: URI, node: AXNodeTree, buffer: string[], depth: number
 
 		case 'link':
 			if (!isNavigationLink(node)) {
-				const linkText = getNodeText(node.node, allowWrap);
+				let linkText = getNodeText(node.node, allowWrap).trim();
+				if (!linkText && node.children.length > 0) {
+					const childBuf: string[] = [];
+					for (const child of node.children) {
+						processNode(uri, child, childBuf, depth + 1, allowWrap);
+					}
+					linkText = childBuf.join(' ').replace(/\s+/g, ' ').trim();
+				}
 				const url = getLinkUrl(node.node);
 				if (!isSameUriIgnoringQueryAndFragment(uri, node.node)) {
-					buffer.push(`[${linkText}](${url})`);
+					buffer.push(`[${linkText || 'Link'}](${url})`);
 				} else {
 					buffer.push(linkText);
 				}
@@ -369,10 +376,16 @@ function isNavigationLink(node: AXNodeTree): boolean {
 }
 
 function isSameUriIgnoringQueryAndFragment(uri: URI, node: AXNode): boolean {
-	// Check if this link is an anchor link
 	const link = getLinkUrl(node);
+	if (!link || link === '#' || link.startsWith('#')) {
+		return true;
+	}
 	try {
 		const parsed = URI.parse(link);
+		// If query parameters differ, this is a distinct item (e.g. currentJobId, page, offset)
+		if (parsed.query !== uri.query) {
+			return false;
+		}
 		return parsed.scheme === uri.scheme && parsed.authority === uri.authority && parsed.path === uri.path;
 	} catch (e) {
 		return false;
