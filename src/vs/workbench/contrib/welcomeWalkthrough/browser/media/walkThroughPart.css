@@ -114,6 +114,9 @@
 .file-icons-enabled .show-file-icons .vs_code_editor_walkthrough\.md-name-file-icon.md-ext-file-icon.ext-file-icon.markdown-lang-file-icon.file-icon::before {
 	content: ' ';
 	background-image: url('../../../../browser/media/code-icon.svg');
+	background-size: 13px auto;
+	background-position: center;
+	background-repeat: no-repeat;
 }
 
 .monaco-workbench .part.editor > .content .walkThroughContent .mac-only,

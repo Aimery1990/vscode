@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { app, BrowserWindow, desktopCapturer, Details, globalShortcut, GPUFeatureStatus, powerMonitor, protocol, screen as electronScreen, session, Session, systemPreferences, WebFrameMain } from 'electron';
+import { existsSync } from 'fs';
 import { addUNCHostToAllowlist, disableUNCAccessRestrictions } from '../../base/node/unc.js';
 import { validatedIpcMain } from '../../base/parts/ipc/electron-main/ipcMain.js';
 import { hostname, release } from 'os';
@@ -148,7 +149,7 @@ import { AgentNetworkFilterService, IAgentNetworkFilterService } from '../../pla
 import { ITerminalSandboxService, NullTerminalSandboxService } from '../../platform/sandbox/common/terminalSandboxService.js';
 import ErrorTelemetry from '../../platform/telemetry/electron-main/errorTelemetry.js';
 import { IRequestService } from '../../platform/request/common/request.js';
-import { RequestChannel } from '../../platform/request/common/requestIpc.js';
+import { ElectronRequestChannel } from '../../platform/request/electron-main/requestChannel.js';
 
 type OSProxyConfigEvent = {
 	readonly success: boolean;
@@ -682,6 +683,18 @@ export class CodeApplication extends Disposable {
 		const win32AppUserModelId = this.productService.win32AppUserModelId;
 		if (isWindows && win32AppUserModelId) {
 			app.setAppUserModelId(win32AppUserModelId);
+		}
+
+		// Explicitly set macOS Dock icon to ensure AnyAgent logo is displayed immediately
+		if (isMacintosh && app.dock) {
+			try {
+				const iconPng = join(this.environmentMainService.appRoot, 'resources/darwin/code.png');
+				if (existsSync(iconPng)) {
+					app.dock.setIcon(iconPng);
+				}
+			} catch (error) {
+				this.logService.error('Failed to set dock icon:', error);
+			}
 		}
 
 		// Fix native tabs on macOS 10.13
@@ -1408,8 +1421,8 @@ export class CodeApplication extends Disposable {
 		const webContentExtractorChannel = ProxyChannel.fromService(accessor.get(IWebContentExtractorService), disposables);
 		mainProcessElectronServer.registerChannel('webContentExtractor', webContentExtractorChannel);
 
-		// Request Service (exposed to renderer to bypass CORS)
-		const requestServiceChannel = new RequestChannel(accessor.get(IRequestService));
+		// Request Service (exposed to renderer to bypass CORS, with integrated browser cookie sharing)
+		const requestServiceChannel = new ElectronRequestChannel(accessor.get(IRequestService));
 		mainProcessElectronServer.registerChannel('request', requestServiceChannel);
 
 		// Workspaces

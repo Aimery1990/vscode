@@ -573,11 +573,18 @@ export class WorkflowEditor extends EditorPane {
 		}
 		this._renderToolbar(toolbar);
 
+		let renderPending = false;
 		this._contentDisposables.add(this._workflowExecutionService.onDidChangeRunState(run => {
 			if (this._workflowUri && (run.workflowUri === this._workflowUri.toString() || run.workflowName === (this.input as any)?.name)) {
-				this._renderNodes();
-				if (this._toolbarEl) {
-					this._renderToolbar(this._toolbarEl);
+				if (!renderPending) {
+					renderPending = true;
+					requestAnimationFrame(() => {
+						renderPending = false;
+						this._renderNodes();
+						if (this._toolbarEl) {
+							this._renderToolbar(this._toolbarEl);
+						}
+					});
 				}
 				if (this._isLogDrawerOpen) {
 					this._refreshLogs(run);
@@ -1007,10 +1014,14 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		// Only show clear log button on Execution Logs tab
+		// Only show clear log and copy logs buttons on Execution Logs tab
 		const clearBtn = this._logDrawerEl.querySelector('.log-clear-btn') as HTMLElement | null;
 		if (clearBtn) {
 			clearBtn.style.display = tab === 'logs' ? 'inline-flex' : 'none';
+		}
+		const copyLogsBtn = this._logDrawerEl.querySelector('.log-copy-btn') as HTMLElement | null;
+		if (copyLogsBtn) {
+			copyLogsBtn.style.display = tab === 'logs' ? 'inline-flex' : 'none';
 		}
 
 		// Only show Find & Replace toggle button on Context Variables tab
@@ -1056,18 +1067,35 @@ export class WorkflowEditor extends EditorPane {
 		const result: INodeVariable[] = [];
 		const seen = new Set<string>();
 
+		const sanitizeInitVal = (val?: string): string | undefined => {
+			if (!val) return undefined;
+			const trimmed = val.trim();
+			if (/^(\+\=|\-\=|\*\=|\/\=|\+\+|\-\-)/.test(trimmed)) {
+				return undefined;
+			}
+			return trimmed;
+		};
+
 		// 1. If pipeline exists, variables defined/set in pipeline take precedence in execution order!
 		if (node.pipeline && node.pipeline.length > 0) {
 			for (const step of node.pipeline) {
 				if (step.type === 'set_variable' && step.targetVariable) {
-					const cleanName = step.targetVariable.replace(/^@/, '');
+					const cleanName = step.targetVariable.replace(/^@/, '').trim();
 					if (!seen.has(cleanName)) {
 						seen.add(cleanName);
-						const existingVar = (node.outputVariables || []).find(v => v.name.replace(/^@/, '') === cleanName);
+						const existingVar = (node.outputVariables || []).find(v => v.name.replace(/^@/, '').trim() === cleanName);
+						const expr = step.expression || existingVar?.expression || '';
+						const isMutation = expr && /^(\+\=|\-\=|\*\=|\/\=|\+\+|\-\-|\+\s*\d+|\-\s*\d+)/.test(expr.trim());
+
+						let initVal = sanitizeInitVal(existingVar?.initialValue);
+						if (!initVal) {
+							initVal = isMutation ? '0' : (sanitizeInitVal(step.expression) || 'None');
+						}
+
 						result.push({
 							name: cleanName,
-							initialValue: step.expression || existingVar?.initialValue || 'None',
-							expression: step.expression || existingVar?.expression
+							initialValue: initVal,
+							expression: expr
 						});
 					}
 				}
@@ -1077,17 +1105,27 @@ export class WorkflowEditor extends EditorPane {
 		// 2. Any additional outputVariables not in pipeline
 		if (Array.isArray(node.outputVariables) && node.outputVariables.length > 0) {
 			for (const v of node.outputVariables) {
-				const cleanName = v.name.replace(/^@/, '');
+				const cleanName = v.name.replace(/^@/, '').trim();
 				if (!seen.has(cleanName)) {
 					seen.add(cleanName);
-					result.push(v);
+					const initVal = sanitizeInitVal(v.initialValue) || 'None';
+					result.push({
+						...v,
+						name: cleanName,
+						initialValue: initVal
+					});
 				}
 			}
 		} else if (node.outputVariable && node.outputVariable.name) {
-			const cleanName = node.outputVariable.name.replace(/^@/, '');
+			const cleanName = node.outputVariable.name.replace(/^@/, '').trim();
 			if (!seen.has(cleanName)) {
 				seen.add(cleanName);
-				result.push(node.outputVariable);
+				const initVal = sanitizeInitVal(node.outputVariable.initialValue) || 'None';
+				result.push({
+					...node.outputVariable,
+					name: cleanName,
+					initialValue: initVal
+				});
 			}
 		}
 
@@ -1158,9 +1196,14 @@ export class WorkflowEditor extends EditorPane {
 
 	private _refreshVariablesDrawer(targetNodeId?: string): void {
 		const allVars: { node: IFlowchartNode; variable: INodeVariable }[] = [];
+		const seenNodeVar = new Set<string>();
 		for (const node of this._data?.nodes || []) {
 			for (const v of this._getNodeVariables(node)) {
-				allVars.push({ node, variable: v });
+				const key = `${node.id}::${v.name}`;
+				if (!seenNodeVar.has(key)) {
+					seenNodeVar.add(key);
+					allVars.push({ node, variable: v });
+				}
 			}
 		}
 
@@ -1782,6 +1825,26 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
+		// Copy All Logs Button (only visible in Execution Logs tab)
+		const copyLogsBtn = append(right, $('.log-btn-icon.log-copy-btn'));
+		copyLogsBtn.title = localize('copyLogsTooltip', 'Copy All Execution Logs (Clipboard)');
+		append(copyLogsBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+		copyLogsBtn.onclick = async () => {
+			if (!this._logBodyEl) return;
+			const lines = Array.from(this._logBodyEl.querySelectorAll('.workflow-log-line'));
+			if (lines.length === 0) {
+				this._notificationService.info(localize('noLogsToCopy', 'No execution logs to copy.'));
+				return;
+			}
+			const text = lines.map(line => (line as HTMLElement).innerText || line.textContent || '').join('\n');
+			try {
+				await navigator.clipboard.writeText(text);
+				this._notificationService.info(localize('logsCopied', 'All execution logs copied to clipboard.'));
+			} catch {
+				this._notificationService.error(localize('copyFailed', 'Failed to copy logs to clipboard.'));
+			}
+		};
+
 		// Find & Replace Button (only visible in Context Variables tab)
 		const findReplaceBtn = append(right, $('.log-btn-icon.vars-find-replace-toggle-btn'));
 		findReplaceBtn.title = localize('findReplaceVarsTooltip', 'Find & Replace Variable Names (Ctrl/Cmd+R)');
@@ -1941,7 +2004,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		// 6. Reset Execution Button (复位)
+		// 6. Reset Execution Button
 		const resetBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
 		resetBtn.title = localize('resetWorkflowTitle', 'Reset Workflow Execution (Clear node highlights & status)');
 		append(resetBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.debugRestart)));
@@ -4080,7 +4143,7 @@ export class WorkflowEditor extends EditorPane {
 						openPipelineBtn.style.borderColor = 'rgba(56, 189, 248, 0.4)';
 						openPipelineBtn.style.color = '#38bdf8';
 						append(openPipelineBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.listOrdered)));
-						append(openPipelineBtn, $('span', {}, localize('openPipelineBtn', ' Execution Pipeline (编排顺序)')));
+						append(openPipelineBtn, $('span', {}, localize('openPipelineBtn', ' Execution Pipeline')));
 						openPipelineBtn.title = localize('openPipelineTitle', 'Configure step-by-step execution order and variable mapping for this node');
 						openPipelineBtn.onclick = () => {
 							this._openNodePipelinePanel(selectedNode.id);
@@ -4271,7 +4334,7 @@ export class WorkflowEditor extends EditorPane {
 						openPipelineBtn.style.borderColor = 'rgba(56, 189, 248, 0.4)';
 						openPipelineBtn.style.color = '#38bdf8';
 						append(openPipelineBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.listOrdered)));
-						append(openPipelineBtn, $('span', {}, localize('openPipelineBtn', ' Execution Pipeline (编排顺序)')));
+						append(openPipelineBtn, $('span', {}, localize('openPipelineBtn', ' Execution Pipeline')));
 						openPipelineBtn.title = localize('openPipelineTitle', 'Configure step-by-step execution order and variable mapping for this node');
 						openPipelineBtn.onclick = () => {
 							this._openNodePipelinePanel(selectedNode.id);

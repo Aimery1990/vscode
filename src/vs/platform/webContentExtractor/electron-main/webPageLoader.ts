@@ -9,7 +9,6 @@ import { CancellationToken, CancellationTokenSource } from '../../../base/common
 import { createSingleCallFunction } from '../../../base/common/functional.js';
 import { Disposable, toDisposable } from '../../../base/common/lifecycle.js';
 import { URI } from '../../../base/common/uri.js';
-import { generateUuid } from '../../../base/common/uuid.js';
 import { ILogService } from '../../log/common/log.js';
 import { IAgentNetworkFilterService } from '../../networkFilter/common/networkFilterService.js';
 import { IWebContentExtractorOptions, WebContentExtractResult } from '../common/webContentExtractor.js';
@@ -69,7 +68,7 @@ export class WebPageLoader extends Disposable {
 			height: 600,
 			show: false,
 			webPreferences: {
-				partition: generateUuid(), // do not share any state with the default renderer session
+				partition: this._options?.partition || 'persist:vscode-browser',
 				javascript: true,
 				offscreen: true,
 				sandbox: true,
@@ -162,10 +161,9 @@ export class WebPageLoader extends Disposable {
 		headers['DNT'] = '1';
 		headers['Sec-GPC'] = '1';
 
-		// For the main document request, prefer markdown responses from sites that
-		// support agent-friendly content negotiation (e.g. Microsoft Learn, Cloudflare docs).
+		// For the main document request, use standard modern browser Accept header
 		if (details.resourceType === 'mainFrame') {
-			headers['Accept'] = 'text/markdown, text/html;q=0.9, application/xhtml+xml;q=0.9, application/xml;q=0.8, */*;q=0.7';
+			headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8';
 		}
 
 		callback({ requestHeaders: headers });

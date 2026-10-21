@@ -64,8 +64,10 @@ class PythonExpressionEvaluator {
 	private pos = 0;
 	private tokens: string[] = [];
 	private context: Record<string, any>;
+	private rawExpr: string;
 
 	constructor(expr: string, context: Record<string, any>) {
+		this.rawExpr = expr || '';
 		this.context = context || {};
 		this.tokens = this.tokenize(expr);
 		this.pos = 0;
@@ -106,9 +108,9 @@ class PythonExpressionEvaluator {
 				continue;
 			}
 
-			// Two-char operators: ==, !=, <=, >=, //, **
+			// Multi-char operators: ==, !=, <=, >=, //, **, +=, -=, *=, /=
 			const two = s.slice(i, i + 2);
-			if (['==', '!=', '<=', '>=', '//', '**'].includes(two)) {
+			if (['==', '!=', '<=', '>=', '//', '**', '+=', '-=', '*=', '/='].includes(two)) {
 				tokens.push(two);
 				i += 2;
 				continue;
@@ -124,7 +126,7 @@ class PythonExpressionEvaluator {
 			}
 
 			// Single-char operators and punctuation
-			if (['+', '-', '*', '/', '%', '(', ')', '<', '>'].includes(ch)) {
+			if (['+', '-', '*', '/', '%', '(', ')', '<', '>', '=', '!', ',', ':', '[', ']'].includes(ch)) {
 				tokens.push(ch);
 				i++;
 				continue;
@@ -132,12 +134,16 @@ class PythonExpressionEvaluator {
 
 			// Identifiers, numbers, or keywords
 			let word = '';
-			while (i < s.length && !/\s|[()+\-*/%<>=!,'"]/.test(s[i])) {
+			while (i < s.length && !/\s|[()+\-*/%<>=!,'":\[\]]/.test(s[i])) {
 				word += s[i];
 				i++;
 			}
 			if (word) {
 				tokens.push(word);
+			} else {
+				// Guaranteed safety fallback: consume single character so i ALWAYS advances
+				tokens.push(s[i]);
+				i++;
 			}
 		}
 		return tokens;
@@ -351,6 +357,12 @@ class PythonExpressionEvaluator {
 
 		this.consume();
 
+		// Assignment / mutation prefix fallback (e.g. "+= 1")
+		if (token === '+=' || token === '-=') {
+			const val = this.parseUnary();
+			return token === '+=' ? +val : -val;
+		}
+
 		// Python literals
 		if (token === 'None' || token === 'null') return null;
 		if (token === 'True' || token === 'true') return true;
@@ -382,7 +394,8 @@ class PythonExpressionEvaluator {
 			throw new Error(`NameError: name '${token}' is not defined in workflow context`);
 		}
 
-		return token;
+		// If token is an unrecognized symbol or punctuation: fail fast with SyntaxError
+		throw new Error(`SyntaxError: invalid or unrecognized syntax '${token}' in expression '${this.rawExpr}'`);
 	}
 }
 
@@ -519,9 +532,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			const nodeVars = this._getNodeVars(node);
 			for (const v of nodeVars) {
 				if (v.name) {
-					const initVal = this._resolveValue(v.initialValue || 'None', {});
-					run.contextVariables[v.name] = initVal;
-					v.currentValue = initVal;
+					const cleanName = v.name.replace(/^@/, '').trim();
+					if (run.contextVariables[cleanName] === undefined) {
+						let initStr = (v.initialValue || '').trim();
+						if (/^(\+\=|\-\=|\*\=|\/\=|\+\+|\-\-)/.test(initStr)) {
+							initStr = '0';
+						}
+						const initVal = this._resolveValue(initStr || 'None', {});
+						run.contextVariables[cleanName] = initVal;
+						v.currentValue = initVal;
+					}
 				}
 			}
 		}
@@ -657,6 +677,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					throw new Error(`Maximum step limit (${maxSteps}) reached. Possible infinite loop detected.`);
 				}
 
+				// Always yield to the UI event loop so the renderer thread never freezes
+				await new Promise(resolve => setTimeout(resolve, 80));
+
 				// Check paused state
 				if (run.status === 'paused') {
 					await new Promise<void>(resolve => {
@@ -709,27 +732,43 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							this._emitLog(run, 'info', `Completed node: '${node.label}' in ${nodeState.durationMs}ms`, { nodeId: node.id });
 
 							// Assign to bound context variables if present
+							const pipelineAssignedVars = new Set<string>();
+							if (node.pipeline && Array.isArray(node.pipeline)) {
+								for (const step of node.pipeline) {
+									if (step.type === 'set_variable' && step.targetVariable) {
+										pipelineAssignedVars.add(step.targetVariable.replace(/^@/, '').trim());
+									}
+								}
+							}
+
 							const nodeVars = this._getNodeVars(node);
 							for (const v of nodeVars) {
 								if (v.name) {
+									const cleanVarName = v.name.replace(/^@/, '').trim();
+									// If this variable was already assigned by pipeline steps in this node, do not re-evaluate to avoid double mutation!
+									if (pipelineAssignedVars.has(cleanVarName)) {
+										v.currentValue = run.contextVariables[cleanVarName];
+										continue;
+									}
+
 									let assignedVal: any;
-									const oldVal = run.contextVariables[v.name];
+									const oldVal = run.contextVariables[cleanVarName];
 
 									if (v.expression) {
 										let expr = v.expression.trim();
 										// Strip self-assignment prefix if present (e.g. "monitor = monitor + 1" or "monitor += 1")
-										if (expr.startsWith(`${v.name} =`)) {
-											expr = expr.substring(`${v.name} =`.length).trim();
-										} else if (expr.startsWith(`${v.name}=`)) {
-											expr = expr.substring(`${v.name}=`.length).trim();
-										} else if (expr.startsWith(`${v.name} +=`)) {
-											expr = `+=${expr.substring(`${v.name} +=`.length).trim()}`;
-										} else if (expr.startsWith(`${v.name}+=`)) {
-											expr = `+=${expr.substring(`${v.name}+=`.length).trim()}`;
-										} else if (expr.startsWith(`${v.name} -=`)) {
-											expr = `-=${expr.substring(`${v.name} -=`.length).trim()}`;
-										} else if (expr.startsWith(`${v.name}-=`)) {
-											expr = `-=${expr.substring(`${v.name}-=`.length).trim()}`;
+										if (expr.startsWith(`${cleanVarName} =`)) {
+											expr = expr.substring(`${cleanVarName} =`.length).trim();
+										} else if (expr.startsWith(`${cleanVarName}=`)) {
+											expr = expr.substring(`${cleanVarName}=`.length).trim();
+										} else if (expr.startsWith(`${cleanVarName} +=`)) {
+											expr = `+=${expr.substring(`${cleanVarName} +=`.length).trim()}`;
+										} else if (expr.startsWith(`${cleanVarName}+=`)) {
+											expr = `+=${expr.substring(`${cleanVarName}+=`.length).trim()}`;
+										} else if (expr.startsWith(`${cleanVarName} -=`)) {
+											expr = `-=${expr.substring(`${cleanVarName} -=`.length).trim()}`;
+										} else if (expr.startsWith(`${cleanVarName}-=`)) {
+											expr = `-=${expr.substring(`${cleanVarName}-=`.length).trim()}`;
 										}
 										if (expr.startsWith('=')) {
 											expr = expr.substring(1).trim();
@@ -828,9 +867,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 										}
 									}
 
-									run.contextVariables[v.name] = assignedVal;
+									run.contextVariables[cleanVarName] = assignedVal;
 									v.currentValue = assignedVal;
-									this._emitLog(run, 'info', `[Variable Updated] '${v.name}' = ${typeof assignedVal === 'object' ? JSON.stringify(assignedVal) : assignedVal}${v.expression ? ` (${v.expression})` : ''}`, { nodeId: node.id });
+									this._emitLog(run, 'info', `[Variable Updated] '${cleanVarName}' = ${typeof assignedVal === 'object' ? JSON.stringify(assignedVal) : assignedVal}${v.expression ? ` (${v.expression})` : ''}`, { nodeId: node.id });
 								}
 							}
 						} catch (err: any) {
@@ -915,9 +954,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		// 2. Human-in-the-Loop Node check
 		const isHuman = node.label.toLowerCase().includes('human') ||
 			node.label.toLowerCase().includes('approval') ||
-			node.label.includes('人工') ||
-			node.label.includes('审批') ||
-			node.label.includes('审核');
+			node.label.toLowerCase().includes('review') ||
+			node.label.toLowerCase().includes('manual');
 
 		if (isHuman) {
 			run.status = 'waiting_human';
@@ -1008,13 +1046,48 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				} else if (step.type === 'set_variable' && step.targetVariable) {
 					const varKey = step.targetVariable.trim().replace(/^@/, '');
 					let val: any = undefined;
-					const expr = (step.expression || '').trim();
-					if (expr) {
+					let expr = (step.expression || '').trim();
+
+					// Strip self-assignment prefix if present (e.g. "monitor = monitor + 1" or "monitor += 1")
+					if (expr.startsWith(`${varKey} =`)) {
+						expr = expr.substring(`${varKey} =`.length).trim();
+					} else if (expr.startsWith(`${varKey}=`)) {
+						expr = expr.substring(`${varKey}=`.length).trim();
+					} else if (expr.startsWith(`${varKey} +=`)) {
+						expr = `+=${expr.substring(`${varKey} +=`.length).trim()}`;
+					} else if (expr.startsWith(`${varKey}+=`)) {
+						expr = `+=${expr.substring(`${varKey}+=`.length).trim()}`;
+					} else if (expr.startsWith(`${varKey} -=`)) {
+						expr = `-=${expr.substring(`${varKey} -=`.length).trim()}`;
+					} else if (expr.startsWith(`${varKey}-=`)) {
+						expr = `-=${expr.substring(`${varKey}-=`.length).trim()}`;
+					}
+					if (expr.startsWith('=')) {
+						expr = expr.substring(1).trim();
+					}
+
+					const oldVal = run.contextVariables[varKey];
+					if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
+						const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+						val = base + 1;
+					} else if (expr === '- 1' || expr === '--' || expr === '-= 1' || expr === '-=1') {
+						const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+						val = base - 1;
+					} else if (/^(\+\=|\+)\s*(\d+(\.\d+)?)$/.test(expr)) {
+						const delta = Number(expr.replace(/^(\+\=|\+)/, '').trim());
+						const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+						val = base + delta;
+					} else if (/^(-\=|-)\s*(\d+(\.\d+)?)$/.test(expr)) {
+						const delta = Number(expr.replace(/^(-\=|-)/, '').trim());
+						const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+						val = base - delta;
+					} else if (expr) {
 						try {
 							const evaluator = new PythonExpressionEvaluator(expr, run.contextVariables);
 							val = evaluator.evaluate();
-						} catch {
-							val = expr.replace(/^=\s*/, '');
+						} catch (evalErr: any) {
+							this._emitLog(run, 'error', `[Syntax Error] Step #${i + 1} variable '${varKey}' failed to evaluate '${expr}': ${evalErr.message}`, { nodeId: node.id });
+							throw new Error(`[Syntax Error] Step #${i + 1} ('${expr}'): ${evalErr.message}`);
 						}
 					}
 					run.contextVariables[varKey] = val;
@@ -1133,7 +1206,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const rawLabel = (link.label || '').trim();
 				if (!rawLabel) continue;
 
-				const condResult = this._evaluateCondition(rawLabel, run.contextVariables, run.nodeStates[currentNode.id]);
+				const condResult = this._evaluateCondition(rawLabel, run.contextVariables, run.nodeStates[currentNode.id], run);
 				if (condResult === true) {
 					const target = data.nodes.find(n => n.id === link.to);
 					if (target) {
@@ -1182,17 +1255,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	private _evaluateCondition(
 		expr: string,
 		context: Record<string, any>,
-		nodeState?: IWorkflowNodeExecutionState
+		nodeState?: IWorkflowNodeExecutionState,
+		run?: IWorkflowExecutionRun
 	): boolean | null {
 		const raw = expr.trim();
 		if (!raw) return null;
 
 		// 1. Check standard boolean and status keywords
 		const lower = raw.toLowerCase();
-		if (lower === 'true' || lower === 'yes' || lower === 'success' || lower === 'pass' || lower === '通过' || lower === '是') {
+		if (lower === 'true' || lower === 'yes' || lower === 'success' || lower === 'pass') {
 			return true;
 		}
-		if (lower === 'false' || lower === 'no' || lower === 'fail' || lower === 'reject' || lower === '拒绝' || lower === '否') {
+		if (lower === 'false' || lower === 'no' || lower === 'fail' || lower === 'reject') {
 			if (nodeState && (nodeState.status === 'failed' || nodeState.output?.approved === false || nodeState.output?.action === 'rejected')) {
 				return true;
 			}
@@ -1209,7 +1283,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			if (res !== undefined && res !== null) {
 				return Boolean(res);
 			}
-		} catch { }
+		} catch (err: any) {
+			if (run) {
+				this._emitLog(run, 'error', `[Condition Syntax Error] Failed to evaluate condition '${raw}': ${err.message}`);
+			}
+			return false;
+		}
 
 		return null;
 	}
@@ -1221,7 +1300,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	private _resolveValue(token: string, context: Record<string, any>): any {
 		try {
-			const evaluator = new PythonExpressionEvaluator(token, context);
+			const trimmed = (token || '').trim();
+			if (!trimmed || trimmed === 'None' || trimmed === 'null') return undefined;
+			if (trimmed.startsWith('+=') || trimmed.startsWith('-=')) {
+				const num = Number(trimmed.substring(2).trim());
+				return isNaN(num) ? 0 : num;
+			}
+			const evaluator = new PythonExpressionEvaluator(trimmed, context);
 			return evaluator.evaluate();
 		} catch {
 			return undefined;
@@ -1229,13 +1314,33 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	}
 
 	private _getNodeVars(node: IFlowchartNode): { name: string; initialValue?: string; expression?: string; currentValue?: any }[] {
+		const rawVars: { name: string; initialValue?: string; expression?: string; currentValue?: any }[] = [];
 		if (Array.isArray(node.outputVariables) && node.outputVariables.length > 0) {
-			return node.outputVariables;
+			rawVars.push(...node.outputVariables);
+		} else if (node.outputVariable && node.outputVariable.name) {
+			rawVars.push(node.outputVariable);
 		}
-		if (node.outputVariable && node.outputVariable.name) {
-			return [node.outputVariable];
+
+		// Deduplicate by name, preserving valid initialValue and expression
+		const map = new Map<string, { name: string; initialValue?: string; expression?: string; currentValue?: any }>();
+		for (const v of rawVars) {
+			if (v && v.name) {
+				const clean = v.name.replace(/^@/, '').trim();
+				const existing = map.get(clean);
+				if (!existing) {
+					map.set(clean, { ...v, name: clean });
+				} else {
+					map.set(clean, {
+						...existing,
+						...v,
+						name: clean,
+						initialValue: (v.initialValue && v.initialValue !== 'None' && !/^(\+\=|\-\=|\*\=|\/\=)/.test(v.initialValue)) ? v.initialValue : existing.initialValue,
+						expression: v.expression || existing.expression
+					});
+				}
+			}
 		}
-		return [];
+		return Array.from(map.values());
 	}
 
 	private _findEntryNode(data: IFlowchartData, entryNodeId?: string): IFlowchartNode | undefined {
@@ -1246,7 +1351,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 		// 1. Look for circle Start node
 		const startCircle = data.nodes.find(n =>
-			n.type === 'circle' && (n.label.toLowerCase() === 'start' || n.label === '开始')
+			n.type === 'circle' && n.label.toLowerCase() === 'start'
 		);
 		if (startCircle) return startCircle;
 
@@ -1260,8 +1365,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	private _isEndNode(node: IFlowchartNode): boolean {
 		const label = (node.label || '').trim().toLowerCase();
-		return (node.type === 'circle' && (label === 'end' || label === 'stop' || label === 'exit' || label === 'finish' || label === '结束' || label === '退出')) ||
-			label === 'end' || label === 'stop' || label === 'finish' || label === 'exit' || label === 'quit' || label === '结束' || label === '退出';
+		return (node.type === 'circle' && (label === 'end' || label === 'stop' || label === 'exit' || label === 'finish')) ||
+			label === 'end' || label === 'stop' || label === 'finish' || label === 'exit' || label === 'quit';
 	}
 
 	private async _loadFlowchartData(uriStr: string, options?: IWorkflowEngineOptions): Promise<IFlowchartData | undefined> {

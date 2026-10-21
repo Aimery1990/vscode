@@ -120,11 +120,11 @@ export const VIEW_CONTAINER = Registry.as<IViewContainersRegistry>(ViewContainer
 			id: VIEWLET_ID,
 			mnemonicTitle: localize({ key: 'miViewExtensions', comment: ['&& denotes a mnemonic'] }, "E&&xtensions"),
 			keybindings: { primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyX },
-			order: 4,
+			order: 9,
 		},
 		ctorDescriptor: new SyncDescriptor(ExtensionsViewPaneContainer),
 		icon: extensionsViewIcon,
-		order: 4,
+		order: 9,
 		rejectAddedViews: true,
 		alwaysUseContainerInfo: true,
 	}, ViewContainerLocation.Sidebar);

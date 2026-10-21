@@ -24,6 +24,12 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { ILanguageModelToolsService } from '../../../../workbench/contrib/chat/common/tools/languageModelToolsService.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
+import { IVoiceModelService } from '../../../../workbench/contrib/voiceModels/common/voiceModel.js';
+import { IWorkspacesExplorerService } from '../../../../workbench/contrib/workspacesExplorer/common/workspacesExplorer.js';
+import { TicketDataEngine } from '../../../../workbench/contrib/workspacesExplorer/browser/tools/ticketDataEngine.js';
+import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
+import { URI } from '../../../../base/common/uri.js';
 
 interface IAttachment {
 	name: string;
@@ -137,6 +143,7 @@ export interface IContextLocator {
 	options?: any[];
 	interactiveModifiedValue?: string;
 	hierarchyTree?: any[];
+	entityUri?: string;
 }
 
 export class CenteredChatWidget extends Disposable {
@@ -149,6 +156,17 @@ export class CenteredChatWidget extends Disposable {
 	private recordingIndicator: HTMLElement | undefined;
 	private recordingTimeSpan: HTMLElement | undefined;
 	private sendBtn: HTMLButtonElement | undefined;
+
+	// Track last active editable input element and cursor position for STT dictation
+	private lastActiveEditableElement: HTMLInputElement | HTMLTextAreaElement | null = null;
+	private lastSelectionStart: number = 0;
+	private lastSelectionEnd: number = 0;
+
+	private recordLastActiveEditable(el: HTMLInputElement | HTMLTextAreaElement): void {
+		this.lastActiveEditableElement = el;
+		this.lastSelectionStart = typeof el.selectionStart === 'number' ? el.selectionStart : el.value.length;
+		this.lastSelectionEnd = typeof el.selectionEnd === 'number' ? el.selectionEnd : el.value.length;
+	}
 
 	// Session Management
 	private sessions: IChatSessionRecord[] = [];
@@ -200,12 +218,14 @@ export class CenteredChatWidget extends Disposable {
 	private recordingTimer: any = undefined;
 	private recordingSeconds = 0;
 	private isRecording = false;
+	private isTranscribing = false;
 
 	// Keep track of the last position and size in memory so it doesn't reset on toggle
 	private static lastPosition: { top: number; left: number } | undefined = undefined;
 	private static lastSize: { width: number; height: number } | undefined = undefined;
 
 	private isZenMode = false;
+	private readonly ticketDataEngine: TicketDataEngine;
 
 	constructor(
 		@IWorkbenchLayoutService private readonly layoutService: IWorkbenchLayoutService,
@@ -215,9 +235,14 @@ export class CenteredChatWidget extends Disposable {
 		@IStorageService private readonly storageService: IStorageService,
 		@IMainProcessService private readonly mainProcessService: IMainProcessService,
 		@ILanguageModelToolsService private readonly languageModelToolsService: ILanguageModelToolsService,
-		@IClipboardService private readonly clipboardService: IClipboardService
+		@IClipboardService private readonly clipboardService: IClipboardService,
+		@IVoiceModelService private readonly voiceModelService: IVoiceModelService,
+		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService,
+		@IFileDialogService private readonly fileDialogService: IFileDialogService,
+		@IFileService private readonly fileService: IFileService
 	) {
 		super();
+		this.ticketDataEngine = this.instantiationService.createInstance(TicketDataEngine);
 
 		// Use RequestChannelClient to route all network requests via Electron main process (bypasses browser CORS completely!)
 		this.requestService = new RequestChannelClient(this.mainProcessService.getChannel('request'));
@@ -284,7 +309,7 @@ export class CenteredChatWidget extends Disposable {
 		if (this.activeBreadcrumbDropdown) {
 			try {
 				this.activeBreadcrumbDropdown.remove();
-			} catch {}
+			} catch { }
 			this.activeBreadcrumbDropdown = undefined;
 			return;
 		}
@@ -359,7 +384,7 @@ export class CenteredChatWidget extends Disposable {
 				e.stopPropagation();
 				try {
 					menu.remove();
-				} catch {}
+				} catch { }
 				this.activeBreadcrumbDropdown = undefined;
 				this.drillDownTo(child.path);
 			};
@@ -369,7 +394,7 @@ export class CenteredChatWidget extends Disposable {
 			if (!menu.contains(e.target as Node) && e.target !== anchorEl) {
 				try {
 					menu.remove();
-				} catch {}
+				} catch { }
 				this.activeBreadcrumbDropdown = undefined;
 				document.removeEventListener('click', closeListener);
 			}
@@ -551,6 +576,27 @@ export class CenteredChatWidget extends Disposable {
 			labelEl.style.color = '#a78bfa';
 			labelEl.textContent = `EXPLORE ${activeNode.label || 'PROPERTIES'} (CLICK TO DRILL DOWN):`;
 
+			const firstChildWithChildren = activeNode.children.find((c: any) => c.children && c.children.length > 0);
+			if (firstChildWithChildren && firstChildWithChildren.children) {
+				const schemaBar = append(containerBox, $('div'));
+				schemaBar.style.display = 'flex';
+				schemaBar.style.alignItems = 'center';
+				schemaBar.style.gap = '5px';
+				schemaBar.style.flexWrap = 'wrap';
+				schemaBar.style.padding = '3px 8px';
+				schemaBar.style.borderRadius = '4px';
+				schemaBar.style.background = 'rgba(167, 139, 250, 0.08)';
+				schemaBar.style.border = '1px solid rgba(167, 139, 250, 0.18)';
+				schemaBar.style.marginTop = '2px';
+
+				append(schemaBar, $('span', { style: 'font-size: 9px; font-weight: 700; color: #a78bfa; text-transform: uppercase;' }, 'UNDERLYING SCHEMA:'));
+				firstChildWithChildren.children.forEach((sf: any) => {
+					append(schemaBar, $('span', {
+						style: 'font-size: 9.5px; padding: 1px 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.06); color: #e2e8f0; font-family: monospace;'
+					}, `${sf.label}${sf.fieldType ? ` (${sf.fieldType})` : ''}`));
+				});
+			}
+
 			const grid = append(containerBox, $('div'));
 			grid.style.display = 'flex';
 			grid.style.flexWrap = 'wrap';
@@ -618,6 +664,12 @@ export class CenteredChatWidget extends Disposable {
 					this.drillDownTo(child.path);
 				};
 			});
+
+			const hintEl = append(containerBox, $('div'));
+			hintEl.style.fontSize = '9.5px';
+			hintEl.style.opacity = '0.55';
+			hintEl.style.marginTop = '4px';
+			hintEl.textContent = '✦ Click an item above to drill down into specific fields, or type/speak below to instruct the AI agent to modify or add items.';
 		} else if (locator.field && !locator.field.startsWith('/Create')) {
 			// Leaf Field Editor Mode
 			const editorBox = append(this.contextLocatorContainer, $('.context-interactive-editor-box'));
@@ -666,7 +718,7 @@ export class CenteredChatWidget extends Disposable {
 			const editableValue = isNoneOrUnassigned ? '' : currentVal;
 			locator.interactiveModifiedValue = editableValue;
 
-			const fType = locator.fieldType || (activeNode ? activeNode.fieldType : undefined) || (editableValue.includes('~') ? 'date_range' : (/^\d{4}-\d{2}-\d{2}/.test(editableValue) ? 'date' : 'text'));
+			const fType = locator.fieldType || (activeNode ? activeNode.fieldType : undefined) || (editableValue.includes('~') ? 'date_range' : (/^\d{4}-\d{2}-\d{2}/.test(editableValue) ? 'date' : (editableValue.toLowerCase() === 'true' || editableValue.toLowerCase() === 'false' ? 'switch' : 'text')));
 
 			if (fType === 'date_range') {
 				const [sDate, eDate] = editableValue.split('~').map((s: string) => s.trim());
@@ -1200,18 +1252,660 @@ export class CenteredChatWidget extends Disposable {
 				}));
 				append(roBox, $('span', { style: 'font-family: monospace;' }, currentVal));
 				append(roBox, $('span', { style: 'font-size: 10px; opacity: 0.5; font-style: italic;' }, 'Read-only (Managed by linking tickets)'));
-			} else if (fType === 'select') {
+			} else if (fType === 'switch' || fType === 'boolean') {
+				let isChecked = String(currentVal).toLowerCase() === 'true' || currentVal === true || String(currentVal).toLowerCase() === 'yes' || String(currentVal).toLowerCase() === '1';
+				locator.interactiveModifiedValue = isChecked ? 'true' : 'false';
+
+				const switchWrapper = append(editorBox, $('div.switch-interactive-control', {
+					style: 'display: flex; align-items: center; justify-content: space-between; padding: 7px 12px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 6px; cursor: pointer; user-select: none; transition: all 0.15s ease;'
+				}));
+				switchWrapper.onmouseenter = () => { switchWrapper.style.background = 'rgba(255, 255, 255, 0.07)'; };
+				switchWrapper.onmouseleave = () => { switchWrapper.style.background = 'rgba(255, 255, 255, 0.04)'; };
+
+				const stateInfo = append(switchWrapper, $('div', {
+					style: 'display: flex; align-items: center; gap: 8px;'
+				}));
+				const stateIndicator = append(stateInfo, $('span', {
+					style: 'font-size: 12px; font-weight: 600; letter-spacing: 0.2px;'
+				}));
+
+				const switchTrack = append(switchWrapper, $('div', {
+					style: 'position: relative; width: 42px; height: 22px; border-radius: 11px; transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1); flex-shrink: 0;'
+				}));
+				const switchThumb = append(switchTrack, $('div', {
+					style: 'position: absolute; top: 2px; width: 18px; height: 18px; border-radius: 50%; background: #ffffff; box-shadow: 0 1px 4px rgba(0,0,0,0.4); transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);'
+				}));
+
+				const updateSwitchVisual = () => {
+					if (isChecked) {
+						switchTrack.style.background = '#10b981';
+						switchTrack.style.boxShadow = '0 0 10px rgba(16, 185, 129, 0.45)';
+						switchThumb.style.left = '22px';
+						stateIndicator.textContent = 'ON (true)';
+						stateIndicator.style.color = '#34d399';
+					} else {
+						switchTrack.style.background = 'rgba(255, 255, 255, 0.18)';
+						switchTrack.style.boxShadow = 'none';
+						switchThumb.style.left = '2px';
+						stateIndicator.textContent = 'OFF (false)';
+						stateIndicator.style.color = 'rgba(255, 255, 255, 0.45)';
+					}
+					locator.interactiveModifiedValue = isChecked ? 'true' : 'false';
+				};
+
+				updateSwitchVisual();
+
+				switchWrapper.onclick = (e) => {
+					e.preventDefault();
+					isChecked = !isChecked;
+					updateSwitchVisual();
+				};
+			} else if (fType === 'select' || fType === 'single_select') {
 				const select = append(editorBox, $('select.monaco-select-box', {
-					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
+					style: 'width: 100%; padding: 6px 10px; font-size: 12px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.45); color: #fff; cursor: pointer; box-sizing: border-box; outline: none;'
 				})) as HTMLSelectElement;
-				const optionsList = locator.options || (activeNode ? activeNode.options : []);
-				if (optionsList && Array.isArray(optionsList)) {
-					optionsList.forEach(op => {
-						const opt = append(select, $('option', { value: op }, op)) as HTMLOptionElement;
-						if (op === currentVal) opt.selected = true;
-					});
+
+				const optionsList = (locator.options && Array.isArray(locator.options) && locator.options.length > 0)
+					? locator.options
+					: ((activeNode && activeNode.options && activeNode.options.length > 0)
+						? activeNode.options
+						: []);
+
+				if (!currentVal || currentVal === 'None' || currentVal === 'Unassigned') {
+					const defOpt = append(select, $('option', { value: '' }, '-- Select an option --')) as HTMLOptionElement;
+					defOpt.selected = true;
 				}
+
+				if (optionsList && Array.isArray(optionsList) && optionsList.length > 0) {
+					let matched = false;
+					optionsList.forEach(op => {
+						const valStr = typeof op === 'object' && op ? (op.value || op.id || op.name || JSON.stringify(op)) : String(op);
+						const labelStr = typeof op === 'object' && op ? (op.label || op.name || op.title || valStr) : String(op);
+						const opt = append(select, $('option', { value: valStr }, labelStr)) as HTMLOptionElement;
+						if (currentVal && (valStr.toLowerCase() === currentVal.toLowerCase() || labelStr.toLowerCase() === currentVal.toLowerCase())) {
+							opt.selected = true;
+							matched = true;
+						}
+					});
+					if (!matched && currentVal && currentVal !== 'None' && currentVal !== 'Unassigned') {
+						const customOpt = append(select, $('option', { value: currentVal }, currentVal)) as HTMLOptionElement;
+						customOpt.selected = true;
+					}
+				} else if (currentVal && currentVal !== 'None') {
+					const currentOpt = append(select, $('option', { value: currentVal }, currentVal)) as HTMLOptionElement;
+					currentOpt.selected = true;
+				}
+
+				locator.interactiveModifiedValue = select.value;
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
+				select.onkeydown = (e) => {
+					if (e.key === 'Enter') {
+						e.preventDefault();
+						locator.interactiveModifiedValue = select.value;
+						this.sendMessage();
+					}
+				};
+			} else if (fType === 'multiselect' || fType === 'tags') {
+				let initialArr: string[] = [];
+				if (Array.isArray(currentVal)) {
+					initialArr = currentVal.map(s => String(s).trim());
+				} else if (typeof currentVal === 'string') {
+					const tr = currentVal.trim();
+					if (tr.startsWith('[')) {
+						try {
+							const parsed = JSON.parse(tr);
+							if (Array.isArray(parsed)) initialArr = parsed.map((s: any) => String(s).trim());
+						} catch { }
+					} else if (tr && tr !== 'None' && tr !== 'null' && tr !== 'undefined') {
+						initialArr = tr.split(/[,;\n]+/).map(s => s.trim()).filter(Boolean);
+					}
+				}
+				const selectedSet = new Set<string>(initialArr);
+
+				const rawOptions = (locator.options && Array.isArray(locator.options) && locator.options.length > 0)
+					? locator.options
+					: ((activeNode && activeNode.options && activeNode.options.length > 0)
+						? activeNode.options
+						: []);
+
+				const optionStrings: string[] = rawOptions.map((o: any) => typeof o === 'object' && o ? (o.value || o.name || o.label || String(o)) : String(o));
+				selectedSet.forEach(item => {
+					if (!optionStrings.includes(item)) {
+						optionStrings.push(item);
+					}
+				});
+
+				const multiWrapper = append(editorBox, $('div.multiselect-interactive-container', {
+					style: 'display: flex; flex-direction: column; gap: 8px; width: 100%;'
+				}));
+
+				const chipsArea = append(multiWrapper, $('div', {
+					style: 'display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0;'
+				}));
+
+				const countRow = append(multiWrapper, $('div', {
+					style: 'display: flex; align-items: center; justify-content: space-between; font-size: 10.5px; opacity: 0.65; padding: 0 2px;'
+				}));
+				const countLabel = append(countRow, $('span'));
+
+				const updateMultiState = () => {
+					locator.interactiveModifiedValue = JSON.stringify(Array.from(selectedSet));
+					countLabel.textContent = `${selectedSet.size} option${selectedSet.size === 1 ? '' : 's'} selected`;
+					renderChips();
+				};
+
+				const renderChips = () => {
+					chipsArea.textContent = '';
+					if (optionStrings.length === 0) {
+						append(chipsArea, $('span', { style: 'font-size: 11px; opacity: 0.45; font-style: italic;' }, 'No options defined'));
+						return;
+					}
+					optionStrings.forEach(opt => {
+						const isSelected = selectedSet.has(opt);
+						const chip = append(chipsArea, $('div.interactive-tag-chip', {
+							style: `display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 12px; font-size: 11px; cursor: pointer; user-select: none; transition: all 0.15s ease; ${isSelected
+								? 'background: rgba(99, 102, 241, 0.22); border: 1px solid rgba(99, 102, 241, 0.55); color: #a5b4fc; font-weight: 600;'
+								: 'background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.12); color: rgba(255, 255, 255, 0.65); font-weight: 400;'
+								}`
+						}));
+						append(chip, $('span', {
+							style: `font-size: 11px; font-weight: bold; ${isSelected ? 'color: #818cf8;' : 'opacity: 0.4;'}`
+						}, isSelected ? '✓' : '+'));
+						append(chip, $('span', {}, opt));
+
+						chip.onmouseenter = () => {
+							chip.style.opacity = '1';
+							if (!isSelected) chip.style.background = 'rgba(255, 255, 255, 0.09)';
+						};
+						chip.onmouseleave = () => {
+							if (!isSelected) chip.style.background = 'rgba(255, 255, 255, 0.05)';
+						};
+						chip.onclick = (e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							if (selectedSet.has(opt)) {
+								selectedSet.delete(opt);
+							} else {
+								selectedSet.add(opt);
+							}
+							updateMultiState();
+						};
+					});
+				};
+
+				updateMultiState();
+			} else if (fType === 'attachment') {
+				interface IAttachmentItem {
+					name: string;
+					size?: number;
+				}
+				let existingFiles: IAttachmentItem[] = [];
+				if (currentVal && currentVal !== 'None' && currentVal !== 'null' && currentVal !== 'undefined') {
+					if (typeof currentVal === 'string' && currentVal.trim().startsWith('[')) {
+						try {
+							const parsed = JSON.parse(currentVal);
+							if (Array.isArray(parsed)) {
+								existingFiles = parsed.map((item: any) => ({
+									name: item.name || String(item),
+									size: typeof item.size === 'number' ? item.size : undefined
+								}));
+							}
+						} catch { }
+					} else {
+						existingFiles = [{ name: String(currentVal).trim() }];
+					}
+				}
+
+				const markedForDeletion = new Set<string>();
+				const stagedNewFiles: Array<{ name: string; size?: number; sourceUri?: URI }> = [];
+
+				const formatSize = (size?: number): string => {
+					if (!size || size <= 0) return '';
+					if (size < 1024) return `${size} B`;
+					if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+					return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+				};
+
+				const appendFileIcon = (container: HTMLElement, fileName: string) => {
+					const isImg = /\.(png|jpe?g|gif|webp|svg)$/i.test(fileName);
+					const isPdf = /\.pdf$/i.test(fileName);
+					if (isImg) {
+						append(container, $('span.codicon.codicon-file-media', { style: 'font-size: 13px; color: #10b981; flex-shrink: 0;' }));
+					} else if (isPdf) {
+						append(container, $('span.codicon.codicon-file-pdf', { style: 'font-size: 13px; color: #ef4444; flex-shrink: 0;' }));
+					} else {
+						append(container, $('span.codicon.codicon-file', { style: 'font-size: 13px; color: #38bdf8; flex-shrink: 0;' }));
+					}
+				};
+
+				const attachWrapper = append(editorBox, $('.centered-chat-attachment-editor'));
+				attachWrapper.style.display = 'flex';
+				attachWrapper.style.flexDirection = 'column';
+				attachWrapper.style.gap = '8px';
+				attachWrapper.style.width = '100%';
+
+				// 1. Existing Attachments List
+				const existingSection = append(attachWrapper, $('div'));
+				existingSection.style.display = 'flex';
+				existingSection.style.flexDirection = 'column';
+				existingSection.style.gap = '4px';
+
+				const existingHeader = append(existingSection, $('div'));
+				existingHeader.style.display = 'flex';
+				existingHeader.style.justifyContent = 'space-between';
+				existingHeader.style.alignItems = 'center';
+
+				const existingTitle = append(existingHeader, $('span'));
+				existingTitle.style.fontSize = '10px';
+				existingTitle.style.fontWeight = '700';
+				existingTitle.style.opacity = '0.7';
+				existingTitle.style.textTransform = 'uppercase';
+				existingTitle.style.letterSpacing = '0.03em';
+				existingTitle.textContent = `Existing Attachments (${existingFiles.length}):`;
+
+				const existingListEl = append(existingSection, $('div'));
+				existingListEl.style.display = 'flex';
+				existingListEl.style.flexWrap = 'wrap';
+				existingListEl.style.gap = '6px';
+
+				// 2. Staged New Attachments List
+				const stagedSection = append(attachWrapper, $('div'));
+				stagedSection.style.display = 'flex';
+				stagedSection.style.flexDirection = 'column';
+				stagedSection.style.gap = '4px';
+
+				const stagedHeader = append(stagedSection, $('div'));
+				stagedHeader.style.display = 'flex';
+				stagedHeader.style.justifyContent = 'space-between';
+				stagedHeader.style.alignItems = 'center';
+
+				const stagedTitle = append(stagedHeader, $('span'));
+				stagedTitle.style.fontSize = '10px';
+				stagedTitle.style.fontWeight = '700';
+				stagedTitle.style.color = '#10b981';
+				stagedTitle.style.textTransform = 'uppercase';
+				stagedTitle.style.letterSpacing = '0.03em';
+				stagedTitle.textContent = 'Staged to Add (0):';
+
+				const stagedListEl = append(stagedSection, $('div'));
+				stagedListEl.style.display = 'flex';
+				stagedListEl.style.flexWrap = 'wrap';
+				stagedListEl.style.gap = '6px';
+
+				// 3. Dropzone & Browse Box
+				const dropzone = append(attachWrapper, $('.attachment-dropzone-box'));
+				dropzone.style.display = 'flex';
+				dropzone.style.flexDirection = 'column';
+				dropzone.style.alignItems = 'center';
+				dropzone.style.justifyContent = 'center';
+				dropzone.style.gap = '4px';
+				dropzone.style.padding = '10px 14px';
+				dropzone.style.borderRadius = '5px';
+				dropzone.style.border = '1px dashed rgba(255, 255, 255, 0.2)';
+				dropzone.style.background = 'rgba(255, 255, 255, 0.02)';
+				dropzone.style.cursor = 'pointer';
+				dropzone.style.transition = 'all 0.15s ease';
+
+				const dzTopRow = append(dropzone, $('div'));
+				dzTopRow.style.display = 'flex';
+				dzTopRow.style.alignItems = 'center';
+				dzTopRow.style.gap = '6px';
+
+				const cloudIcon = append(dzTopRow, $('span.codicon.codicon-cloud-upload'));
+				cloudIcon.style.fontSize = '16px';
+				cloudIcon.style.color = '#38bdf8';
+
+				const dzPrompt = append(dzTopRow, $('span', { style: 'font-size: 11px; font-weight: 500;' }));
+				append(dzPrompt, $('span', {}, 'Drag & drop files here, or '));
+				append(dzPrompt, $('span', { style: 'color: #38bdf8; text-decoration: underline;' }, 'browse files...'));
+
+				const dzHint = append(dropzone, $('div'));
+				dzHint.style.fontSize = '9.5px';
+				dzHint.style.opacity = '0.5';
+				dzHint.textContent = 'Files will be copied to ticket attachments and submitted to AI';
+
+				// 4. Diff & Action Summary Banner
+				const diffBanner = append(attachWrapper, $('div'));
+				diffBanner.style.display = 'flex';
+				diffBanner.style.flexDirection = 'column';
+				diffBanner.style.gap = '3px';
+				diffBanner.style.padding = '5px 8px';
+				diffBanner.style.borderRadius = '4px';
+				diffBanner.style.background = 'rgba(0, 0, 0, 0.2)';
+				diffBanner.style.border = '1px solid rgba(255, 255, 255, 0.06)';
+
+				const syncInteractiveValue = () => {
+					const surviving = existingFiles.filter(f => !markedForDeletion.has(f.name));
+					const finalAll = [...surviving, ...stagedNewFiles.map(f => ({ name: f.name, size: f.size }))];
+					if (markedForDeletion.size === 0 && stagedNewFiles.length === 0) {
+						locator.interactiveModifiedValue = currentVal;
+					} else {
+						locator.interactiveModifiedValue = JSON.stringify(finalAll);
+					}
+					renderDiffBanner();
+				};
+
+				const renderExistingList = () => {
+					existingListEl.textContent = '';
+					existingTitle.textContent = `Existing Attachments (${existingFiles.length}):`;
+					if (existingFiles.length === 0) {
+						const empty = append(existingListEl, $('div'));
+						empty.style.fontSize = '10.5px';
+						empty.style.opacity = '0.45';
+						empty.style.fontStyle = 'italic';
+						empty.textContent = 'No existing attachments.';
+						return;
+					}
+
+					existingFiles.forEach(f => {
+						const isMarked = markedForDeletion.has(f.name);
+						const card = append(existingListEl, $('.attachment-file-chip'));
+						card.style.display = 'inline-flex';
+						card.style.alignItems = 'center';
+						card.style.gap = '6px';
+						card.style.padding = '3px 8px';
+						card.style.borderRadius = '4px';
+						card.style.transition = 'all 0.15s ease';
+
+						if (isMarked) {
+							card.style.background = 'rgba(239, 68, 68, 0.14)';
+							card.style.border = '1px dashed rgba(239, 68, 68, 0.45)';
+
+							const delBadge = append(card, $('span'));
+							delBadge.style.fontSize = '8.5px';
+							delBadge.style.fontWeight = '700';
+							delBadge.style.color = '#ef4444';
+							delBadge.style.background = 'rgba(239, 68, 68, 0.2)';
+							delBadge.style.padding = '1px 4px';
+							delBadge.style.borderRadius = '2px';
+							delBadge.textContent = 'TO DELETE';
+
+							const nameSpan = append(card, $('span'));
+							nameSpan.style.fontSize = '11px';
+							nameSpan.style.textDecoration = 'line-through';
+							nameSpan.style.color = '#fca5a5';
+							nameSpan.style.opacity = '0.7';
+							nameSpan.style.maxWidth = '150px';
+							nameSpan.style.overflow = 'hidden';
+							nameSpan.style.textOverflow = 'ellipsis';
+							nameSpan.style.whiteSpace = 'nowrap';
+							nameSpan.textContent = f.name;
+
+							const undoBtn = append(card, $('span'));
+							undoBtn.style.fontSize = '10px';
+							undoBtn.style.color = '#38bdf8';
+							undoBtn.style.cursor = 'pointer';
+							undoBtn.style.padding = '1px 4px';
+							undoBtn.style.borderRadius = '2px';
+							undoBtn.style.background = 'rgba(56, 189, 248, 0.1)';
+							undoBtn.style.marginLeft = '2px';
+							undoBtn.textContent = '↺ Undo';
+							undoBtn.title = 'Restore attachment';
+							undoBtn.onclick = (e) => {
+								e.stopPropagation();
+								markedForDeletion.delete(f.name);
+								renderExistingList();
+								syncInteractiveValue();
+							};
+						} else {
+							card.style.background = 'rgba(255, 255, 255, 0.05)';
+							card.style.border = '1px solid rgba(255, 255, 255, 0.1)';
+
+							appendFileIcon(card, f.name);
+
+							const nameSpan = append(card, $('span'));
+							nameSpan.style.fontSize = '11px';
+							nameSpan.style.fontWeight = '500';
+							nameSpan.style.color = 'var(--vscode-editor-foreground)';
+							nameSpan.style.maxWidth = '160px';
+							nameSpan.style.overflow = 'hidden';
+							nameSpan.style.textOverflow = 'ellipsis';
+							nameSpan.style.whiteSpace = 'nowrap';
+							nameSpan.textContent = f.name;
+
+							if (f.size) {
+								const sizeSpan = append(card, $('span'));
+								sizeSpan.style.fontSize = '9px';
+								sizeSpan.style.opacity = '0.5';
+								sizeSpan.textContent = `(${formatSize(f.size)})`;
+							}
+
+							const removeBtn = append(card, $('span'));
+							removeBtn.style.fontSize = '9.5px';
+							removeBtn.style.color = '#f87171';
+							removeBtn.style.cursor = 'pointer';
+							removeBtn.style.padding = '1px 5px';
+							removeBtn.style.borderRadius = '3px';
+							removeBtn.style.background = 'rgba(239, 68, 68, 0.1)';
+							removeBtn.style.border = '1px solid rgba(239, 68, 68, 0.25)';
+							removeBtn.style.marginLeft = '4px';
+							removeBtn.textContent = '✕ Remove';
+							removeBtn.title = 'Mark for deletion with AI';
+							removeBtn.onclick = (e) => {
+								e.stopPropagation();
+								markedForDeletion.add(f.name);
+								renderExistingList();
+								syncInteractiveValue();
+							};
+						}
+					});
+				};
+
+				const renderStagedList = () => {
+					stagedListEl.textContent = '';
+					stagedTitle.textContent = `Staged to Add (${stagedNewFiles.length}):`;
+					if (stagedNewFiles.length === 0) {
+						stagedSection.style.display = 'none';
+						return;
+					}
+					stagedSection.style.display = 'flex';
+
+					stagedNewFiles.forEach((f, idx) => {
+						const card = append(stagedListEl, $('.attachment-file-chip'));
+						card.style.display = 'inline-flex';
+						card.style.alignItems = 'center';
+						card.style.gap = '6px';
+						card.style.padding = '3px 8px';
+						card.style.borderRadius = '4px';
+						card.style.background = 'rgba(16, 185, 129, 0.12)';
+						card.style.border = '1px solid rgba(16, 185, 129, 0.3)';
+
+						const addBadge = append(card, $('span'));
+						addBadge.style.fontSize = '8.5px';
+						addBadge.style.fontWeight = '700';
+						addBadge.style.color = '#10b981';
+						addBadge.style.background = 'rgba(16, 185, 129, 0.2)';
+						addBadge.style.padding = '1px 4px';
+						addBadge.style.borderRadius = '2px';
+						addBadge.textContent = '+ ADD';
+
+						appendFileIcon(card, f.name);
+
+						const nameSpan = append(card, $('span'));
+						nameSpan.style.fontSize = '11px';
+						nameSpan.style.fontWeight = '500';
+						nameSpan.style.color = '#6ee7b7';
+						nameSpan.style.maxWidth = '160px';
+						nameSpan.style.overflow = 'hidden';
+						nameSpan.style.textOverflow = 'ellipsis';
+						nameSpan.style.whiteSpace = 'nowrap';
+						nameSpan.textContent = f.name;
+
+						if (f.size) {
+							const sizeSpan = append(card, $('span'));
+							sizeSpan.style.fontSize = '9px';
+							sizeSpan.style.opacity = '0.6';
+							sizeSpan.textContent = `(${formatSize(f.size)})`;
+						}
+
+						const cancelBtn = append(card, $('span'));
+						cancelBtn.style.fontSize = '11px';
+						cancelBtn.style.cursor = 'pointer';
+						cancelBtn.style.opacity = '0.7';
+						cancelBtn.style.marginLeft = '3px';
+						cancelBtn.textContent = '✕';
+						cancelBtn.title = 'Cancel staged addition';
+						cancelBtn.onclick = (e) => {
+							e.stopPropagation();
+							stagedNewFiles.splice(idx, 1);
+							renderStagedList();
+							syncInteractiveValue();
+						};
+					});
+				};
+
+				const renderDiffBanner = () => {
+					diffBanner.textContent = '';
+					const hasChanges = markedForDeletion.size > 0 || stagedNewFiles.length > 0;
+					if (!hasChanges) {
+						const emptyHint = append(diffBanner, $('div'));
+						emptyHint.style.fontSize = '9.5px';
+						emptyHint.style.opacity = '0.45';
+						emptyHint.style.fontStyle = 'italic';
+						emptyHint.textContent = 'No pending attachment changes. Use Remove or Browse/Drop to modify.';
+						return;
+					}
+
+					const changesRow = append(diffBanner, $('div'));
+					changesRow.style.display = 'flex';
+					changesRow.style.alignItems = 'center';
+					changesRow.style.gap = '8px';
+					changesRow.style.flexWrap = 'wrap';
+
+					if (stagedNewFiles.length > 0) {
+						const addTag = append(changesRow, $('span'));
+						addTag.style.fontSize = '10px';
+						addTag.style.fontWeight = '600';
+						addTag.style.color = '#10b981';
+						addTag.textContent = `+ Added: [${stagedNewFiles.map(f => f.name).join(', ')}]`;
+					}
+
+					if (markedForDeletion.size > 0) {
+						const delTag = append(changesRow, $('span'));
+						delTag.style.fontSize = '10px';
+						delTag.style.fontWeight = '600';
+						delTag.style.color = '#ef4444';
+						delTag.textContent = `- Removed: [${Array.from(markedForDeletion).join(', ')}]`;
+					}
+
+					const hint = append(diffBanner, $('div'));
+					hint.style.fontSize = '9px';
+					hint.style.opacity = '0.6';
+					hint.textContent = '✦ Press Enter or Send below to instruct the AI agent to apply these changes.';
+				};
+
+				const processIncomingFiles = async (items: Array<{ uri: URI; name: string }>) => {
+					if (!items || items.length === 0) return;
+					try {
+						let targetAttachmentsDir: URI | undefined = undefined;
+						if (!locator.entityUri && (locator.workspaceId || locator.ticketId)) {
+							try {
+								const wsUri = await this.ticketDataEngine.findWorkspaceUri(locator.workspaceId, locator.ticketId);
+								if (wsUri && locator.ticketId) {
+									const paths = await this.ticketDataEngine.resolveTicketPaths(wsUri, locator.ticketId);
+									if (paths) {
+										locator.entityUri = paths.folderUri.toString();
+									}
+								}
+							} catch { }
+						}
+						if (locator.entityUri) {
+							const baseUri = locator.entityUri.includes('://') ? URI.parse(locator.entityUri) : URI.file(locator.entityUri);
+							targetAttachmentsDir = URI.joinPath(baseUri, 'attachments');
+							if (!(await this.fileService.exists(targetAttachmentsDir))) {
+								await this.fileService.createFolder(targetAttachmentsDir);
+							}
+						}
+
+						for (const item of items) {
+							let fileSize = 0;
+							if (targetAttachmentsDir) {
+								const targetFileUri = URI.joinPath(targetAttachmentsDir, item.name);
+								await this.fileService.copy(item.uri, targetFileUri, true);
+								const stat = await this.fileService.stat(targetFileUri);
+								fileSize = stat.size;
+							} else {
+								try {
+									const stat = await this.fileService.stat(item.uri);
+									fileSize = stat.size;
+								} catch { }
+							}
+							if (markedForDeletion.has(item.name)) {
+								markedForDeletion.delete(item.name);
+							}
+							if (!stagedNewFiles.some(f => f.name === item.name)) {
+								stagedNewFiles.push({ name: item.name, size: fileSize, sourceUri: item.uri });
+							}
+						}
+						renderExistingList();
+						renderStagedList();
+						syncInteractiveValue();
+					} catch (err) {
+						this.notificationService.error(`Failed to stage attachment: ${String(err)}`);
+					}
+				};
+
+				dropzone.onclick = async (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					try {
+						const picked = await this.fileDialogService.showOpenDialog({
+							canSelectFiles: true,
+							canSelectFolders: false,
+							canSelectMany: true,
+							title: 'Select Attachments to Add'
+						});
+						if (picked && picked.length > 0) {
+							const items = picked.map(p => ({
+								uri: p,
+								name: p.path.split('/').filter(Boolean).pop() || 'file'
+							}));
+							await processIncomingFiles(items);
+						}
+					} catch (err) {
+						console.error('Failed to open file dialog:', err);
+						this.notificationService.error(`Failed to select files: ${String(err)}`);
+					}
+				};
+
+				dropzone.ondragover = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					dropzone.style.borderColor = '#38bdf8';
+					dropzone.style.background = 'rgba(56, 189, 248, 0.08)';
+				};
+				dropzone.ondragleave = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					dropzone.style.borderColor = 'rgba(255, 255, 255, 0.2)';
+					dropzone.style.background = 'rgba(255, 255, 255, 0.02)';
+				};
+				dropzone.ondrop = async (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					dropzone.style.borderColor = 'rgba(255, 255, 255, 0.2)';
+					dropzone.style.background = 'rgba(255, 255, 255, 0.02)';
+					if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+						const items: Array<{ uri: URI; name: string }> = [];
+						for (let i = 0; i < e.dataTransfer.files.length; i++) {
+							const f = e.dataTransfer.files[i];
+							const filePath = (f as any).path;
+							if (filePath) {
+								items.push({
+									uri: URI.file(filePath),
+									name: f.name
+								});
+							}
+						}
+						if (items.length > 0) {
+							await processIncomingFiles(items);
+						}
+					}
+				};
+
+				renderExistingList();
+				renderStagedList();
+				renderDiffBanner();
 			} else if (fType === 'textarea') {
 				const ta = append(editorBox, $('textarea.monaco-inputbox', {
 					style: 'width: 100%; min-height: 62px; max-height: 200px; padding: 6px 8px; font-size: 11.5px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; color: #fff; resize: vertical; box-sizing: border-box;'
@@ -1219,7 +1913,15 @@ export class CenteredChatWidget extends Disposable {
 				ta.rows = 3;
 				ta.value = editableValue;
 				ta.placeholder = isNoneOrUnassigned ? currentVal : '';
-				ta.oninput = () => { locator.interactiveModifiedValue = ta.value; };
+				ta.onfocus = () => this.recordLastActiveEditable(ta);
+				ta.onkeyup = () => this.recordLastActiveEditable(ta);
+				ta.onmouseup = () => this.recordLastActiveEditable(ta);
+				ta.onselect = () => this.recordLastActiveEditable(ta);
+				ta.oninput = () => {
+					locator.interactiveModifiedValue = ta.value;
+					this.recordLastActiveEditable(ta);
+				};
+				this.recordLastActiveEditable(ta);
 			} else {
 				const txt = append(editorBox, $('input.monaco-inputbox', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; color: #fff; box-sizing: border-box;'
@@ -1227,12 +1929,20 @@ export class CenteredChatWidget extends Disposable {
 				txt.type = 'text';
 				txt.value = editableValue;
 				txt.placeholder = isNoneOrUnassigned ? currentVal : '';
-				txt.oninput = () => { locator.interactiveModifiedValue = txt.value; };
+				txt.onfocus = () => this.recordLastActiveEditable(txt);
+				txt.onkeyup = () => this.recordLastActiveEditable(txt);
+				txt.onmouseup = () => this.recordLastActiveEditable(txt);
+				txt.onselect = () => this.recordLastActiveEditable(txt);
+				txt.oninput = () => {
+					locator.interactiveModifiedValue = txt.value;
+					this.recordLastActiveEditable(txt);
+				};
+				this.recordLastActiveEditable(txt);
 			}
 		}
 	}
 
-	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number } }): void {
+	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string }): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
@@ -1244,7 +1954,8 @@ export class CenteredChatWidget extends Disposable {
 						fieldType: initialContext.fieldType,
 						currentValue: initialContext.currentValue,
 						options: initialContext.options,
-						hierarchyTree: initialContext.hierarchyTree
+						hierarchyTree: initialContext.hierarchyTree,
+						entityUri: initialContext.entityUri
 					});
 				}
 				if (initialContext.prompt && (!initialContext.field || initialContext.field.startsWith('/Create')) && this.inputField) {
@@ -1259,6 +1970,7 @@ export class CenteredChatWidget extends Disposable {
 				const len = this.inputField.value.length;
 				this.inputField.setSelectionRange(len, len);
 			}
+			this.scrollToBottom();
 			return;
 		}
 
@@ -1268,11 +1980,11 @@ export class CenteredChatWidget extends Disposable {
 		const parent = this.layoutService.mainContainer;
 		this.element = append(parent, $('.centered-chat-popup-container'));
 
-		// Titlebar / Header - ONLY keep the sparkle icon
+		// Titlebar / Header - AnyAgent Logo
 		const header = append(this.element, $('.centered-chat-popup-header'));
 
 		const title = append(header, $('.centered-chat-popup-title'));
-		append(title, $('span.codicon.codicon-sparkle-filled'));
+		append(title, $('span.centered-chat-popup-title-icon'));
 		const titleText = append(title, $('span'));
 		titleText.textContent = 'Agent Central';
 
@@ -1344,6 +2056,19 @@ export class CenteredChatWidget extends Disposable {
 		// Input Section - Rounded bubble following Antigravity layout
 		const inputArea = append(this.element, $('.centered-chat-popup-input-area'));
 
+		// Track active editable element & caret position for speech-to-text dictation
+		const updateActiveEditable = (e: Event) => {
+			const target = e.target;
+			if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+				this.recordLastActiveEditable(target);
+			}
+		};
+		this.viewDisposables.add(addDisposableListener(this.element, 'focusin', updateActiveEditable));
+		this.viewDisposables.add(addDisposableListener(this.element, 'keyup', updateActiveEditable));
+		this.viewDisposables.add(addDisposableListener(this.element, 'mouseup', updateActiveEditable));
+		this.viewDisposables.add(addDisposableListener(this.element, 'input', updateActiveEditable));
+		this.viewDisposables.add(addDisposableListener(this.element, 'select', updateActiveEditable));
+
 		// Hidden File Input
 		const fileInput = document.createElement('input');
 		fileInput.type = 'file';
@@ -1374,6 +2099,7 @@ export class CenteredChatWidget extends Disposable {
 		const inputWrapper = append(inputArea, $('.centered-chat-popup-input-wrapper'));
 		this.inputField = append(inputWrapper, $('textarea.centered-chat-popup-input')) as HTMLTextAreaElement;
 		this.inputField.placeholder = 'Ask anything, @ to mention, / for actions... (Enter to send)';
+		this.recordLastActiveEditable(this.inputField);
 
 		// Toolbar below textarea
 		const toolbar = append(inputArea, $('.centered-chat-popup-toolbar'));
@@ -1440,6 +2166,9 @@ export class CenteredChatWidget extends Disposable {
 		this.micBtn = append(toolbarRight, $('.centered-chat-popup-mic-btn'));
 		append(this.micBtn, $('span.codicon.codicon-mic'));
 		this.micBtn.title = 'Record voice message';
+		this.viewDisposables.add(addDisposableListener(this.micBtn, 'mousedown', (e: MouseEvent) => {
+			e.preventDefault();
+		}));
 		this.viewDisposables.add(addDisposableListener(this.micBtn, 'click', () => this.toggleRecording()));
 
 		// Send / Stop button
@@ -1452,9 +2181,12 @@ export class CenteredChatWidget extends Disposable {
 		this.viewDisposables.add(addDisposableListener(this.sendBtn, 'click', () => {
 			if (this.isStreaming) {
 				this.abortStreaming();
-			} else {
-				this.sendMessage();
+				return;
 			}
+			if (this.isTranscribing || this.isRecording) {
+				return;
+			}
+			this.sendMessage();
 		}));
 
 		// Prevent VS Code keybinding intercepting when typing
@@ -1463,7 +2195,7 @@ export class CenteredChatWidget extends Disposable {
 			e.stopPropagation();
 			if (e.key === 'Enter' && !e.shiftKey) {
 				e.preventDefault();
-				if (this.isStreaming) {
+				if (this.isStreaming || this.isTranscribing || this.isRecording) {
 					return;
 				}
 				this.sendMessage();
@@ -1492,7 +2224,8 @@ export class CenteredChatWidget extends Disposable {
 					fieldType: initialContext.fieldType,
 					currentValue: initialContext.currentValue,
 					options: initialContext.options,
-					hierarchyTree: initialContext.hierarchyTree
+					hierarchyTree: initialContext.hierarchyTree,
+					entityUri: initialContext.entityUri
 				});
 			}
 			if (initialContext.prompt && (!initialContext.field || initialContext.field.startsWith('/Create')) && this.inputField) {
@@ -1504,6 +2237,7 @@ export class CenteredChatWidget extends Disposable {
 			const len = this.inputField.value.length;
 			this.inputField.setSelectionRange(len, len);
 		}
+		this.scrollToBottom();
 	}
 
 	public hide(): void {
@@ -1554,7 +2288,7 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number } }): void {
+	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string }): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
@@ -1566,7 +2300,8 @@ export class CenteredChatWidget extends Disposable {
 						fieldType: initialContext.fieldType,
 						currentValue: initialContext.currentValue,
 						options: initialContext.options,
-						hierarchyTree: initialContext.hierarchyTree
+						hierarchyTree: initialContext.hierarchyTree,
+						entityUri: initialContext.entityUri
 					});
 				}
 				if (initialContext.prompt && (!initialContext.field || initialContext.field.startsWith('/Create')) && this.inputField) {
@@ -1584,6 +2319,7 @@ export class CenteredChatWidget extends Disposable {
 				const len = this.inputField.value.length;
 				this.inputField.setSelectionRange(len, len);
 			}
+			this.scrollToBottom();
 		} else {
 			this.show(initialContext);
 		}
@@ -1720,7 +2456,22 @@ export class CenteredChatWidget extends Disposable {
 			}
 		}
 
-		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+		this.scrollToBottom();
+	}
+
+	private scrollToBottom(): void {
+		if (!this.messagesContainer) { return; }
+		const doScroll = () => {
+			if (this.messagesContainer) {
+				this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+			}
+		};
+		doScroll();
+		requestAnimationFrame(() => {
+			doScroll();
+			setTimeout(doScroll, 50);
+			setTimeout(doScroll, 150);
+		});
 	}
 
 	private startNewSession(): void {
@@ -2233,10 +2984,21 @@ When the user gives you a request or when structured context is provided (such a
 
 AVAILABLE ANYAGENT TOOLS:
 - anyagent_get_ticket_data: Query current ticket values, metadata, field types, allowed workspace statuses, and dynamic list of direct children sub-tickets under it.
+- anyagent_query_workspace_tree: Explore and search the hierarchical ticket/job tree of a workspace on-demand with optional parent ticket filter and keyword query.
 - anyagent_create_ticket: Create a new sub-entity (job, task, note, resume, workflow, custom types).
 - anyagent_delete_ticket: Mark a ticket and its sub-tickets as Removed and clean up references.
 - anyagent_update_ticket: Update standard attributes (/Title, /Status, /Description, /Custom/...), or custom card items.
 - anyagent_manage_links: Add, remove, or set bidirectional links between tickets (supports 1-to-N, N-to-1, N-to-M).
+- anyagent_list_custom_modules: List existing custom modules, Base Primitives catalog, and reusable classes.
+- anyagent_generate_custom_module: Synthesize and register a new Custom Module (entity type schema) or update an existing module with Type Definition, Type Prompt, and fields composed from Base Primitives and Reusable Classes.
+- anyagent_toggle_custom_module_status: Disable (deactivate) or re-enable an existing custom module so it hides or shows in ticket type options.
+- anyagent_delete_custom_module: Permanently delete an existing custom module's YAML schema file.
+
+CRITICAL PARAMETER DISCIPLINE:
+When the user context contains a structured tag like [Workspace: <WSP> | Ticket: <TICKET_ID> | Target: <FIELD>] or [Ticket: <TICKET_ID> | Target: <FIELD>]:
+- You MUST pass '<TICKET_ID>' verbatim as 'ticket_id' in your tool calls (e.g. if Ticket is 'Init-SW-Developer', pass 'Init-SW-Developer').
+- You MUST pass '<WSP>' verbatim as 'workspace_id' if present in the tag. If 'Workspace:' is not present or empty, DO NOT invent a workspace name from the ticket ID! Pass '' or omit workspace_id.
+- NEVER split words, alter hyphens, strip prefixes, or invent workspace names from ticket IDs (e.g. NEVER convert 'Init-SW-Developer' into workspace_id='Init' and ticket_id='SW Developer').
 
 WORKLOG INTEGRATION REQUIREMENT:
 Whenever performing any mutating tool call (create, update, delete, manage_links), you MUST provide a complete, well-formed 'worklog_record' object:
@@ -2259,14 +3021,94 @@ or:
 TICKET_ID > /Attributes/Link To > -> TARGET_ID
 You must invoke 'anyagent_manage_links' with action 'add_links' (or 'set_links') from source_ticket_ids [TICKET_ID] to target_ticket_ids [TARGET_ID].
 
+TEXT & TEXTAREA CLEAR / DELETE CONVENTIONS:
+When the user targets a text or textarea field (such as /Description, /Custom/Description 1, /Custom/Text Field 1) and:
+- 'Proposed Value' is "" (empty string) or (empty), OR
+- 'Action' includes 'Clear' or 'Delete' or 'Keep empty', OR
+- The user requests to clear, remove, or empty the field content, OR
+- The user targets a text/textarea field without providing new content:
+1. If the field currently has content, you MUST invoke 'anyagent_update_ticket' with updates: { "<Target>": "" } (an empty string).
+2. If the field is already empty, confirm to the user that the field is already empty and no update is needed (or invoke 'anyagent_update_ticket' with updates: { "<Target>": "" }).
+3. In ALL these cases, DO NOT ask the user to provide a proposed new value! An empty proposed value IS the desired target state.
+
+CUSTOM MODULES & DATA TYPE SYNTHESIS RULES:
+When the user asks you to create, synthesize, design, or generate a new entity type, approval flow form, custom module, or template (e.g. expense reimbursement, contract review, leave request, purchase order, equipment inspection):
+1. COMPONENT LIBRARY (BASE PRIMITIVES & REUSABLE CLASSES):
+   You have access to the following Base Primitives:
+   - 'text': Single-line Input for short strings, titles, codes, monetary sums formatted as string, names.
+   - 'textarea': Multiline text for justifications, descriptions, remarks, breakdown notes.
+   - 'select': Dropdown menu for single selection. Requires 'options' array of string choices (e.g. ['Travel & Lodging', 'Meals & Entertainment', 'Office Supplies', 'Other']).
+   - 'multiselect': Checkboxes for multi-selection. Requires 'options' array of strings.
+   - 'switch': Toggle switch for boolean flags (e.g. is_billable, urgent_flag, cfo_review_required).
+   - 'date': Single date picker (YYYY-MM-DD).
+   - 'time': Single time picker (HH:MM).
+   - 'datetime': Single datetime picker.
+   - 'date_range': Date range with start and end dates (e.g. travel period, event dates).
+   - 'time_range': Time range with start and end times.
+   - 'datetime_range': DateTime range.
+   - 'dynamic_list': Container (Nested Subfields / Repeatable table). Contains 'itemFields' (array of sub-fields) or 'componentRef' (referencing reusable composite class). Use this whenever repeating items (such as expense line items, invoice lines, task milestones) are needed.
+   - 'attachment': File upload for receipts, proof documents, PDF files, and image attachments.
+2. SYNTHESIS & EXTRACTION PROCESS:
+   From the user's verbal or written description, you MUST extract and construct:
+   - 'module_id': Unique kebab-case or snake-case identifier (e.g. 'expense_reimbursement', 'basic_approval_flow').
+   - 'module_name': Clear human-readable title (e.g. 'Expense Reimbursement Flow', 'Contract Review Process').
+   - 'color': Appropriate hex color code (e.g. '#10b981' for finance/reimbursement, '#3b82f6' for generic approval/process, '#8b5cf6' for workflows, '#f59e0b' for urgent).
+   - 'type_definition': Rich explanation of the entity's purpose, business context, lifecycle, and scope based on user instructions.
+   - 'type_prompt': Specific AI guidelines & instructions telling subsequent AI agents how to process, validate, calculate, check compliance, and route tickets of this module type.
+   - 'fields': Thoughtfully mapped array of fields choosing the best primitives. For approval workflows, always include relevant fields such as approval subject/title, category dropdown, amount/cost, date/period, itemized sub-table ('dynamic_list'), justification ('textarea'), approval flags ('switch'), and attachments for proof documents ('attachment').
+   - 'auto_open': Set to true (default) so the Schema Designer immediately opens for the user.
+
 Always explain the result clearly to the user once tool execution completes.`;
 
+	private async getDynamicSystemPrompt(): Promise<string> {
+		let prompt = CenteredChatWidget.ANYAGENT_SYSTEM_PROMPT;
+		try {
+			const workspaces = await this.workspacesExplorerService.getWorkspaces();
+			if (workspaces && workspaces.length > 0) {
+				const activeTicketId = this.activeContextLocator?.ticketId;
+				const wsBlocks: string[] = [];
+
+				for (const w of workspaces) {
+					const codeStr = w.code ? ` (Code: ${w.code})` : '';
+					const activeStr = w.isCurrent ? ' [CURRENT ACTIVE WORKSPACE]' : '';
+					let block = `📁 Workspace "${w.name}"${codeStr}${activeStr}`;
+
+					try {
+						// Render ultra-compact ASCII skeleton tree
+						const treeView = await this.ticketDataEngine.buildCompactWorkspaceTree(w.uri, activeTicketId, 2);
+						block += `\n${treeView}`;
+					} catch (treeErr) {
+						block += `\n  (Could not read workspace tree: ${treeErr})`;
+					}
+
+					wsBlocks.push(block);
+				}
+
+				prompt += `\n\n=== ACCESSIBLE WORKSPACES & COMPACT HIERARCHICAL TREES ===
+${wsBlocks.join('\n\n')}
+
+CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
+1. Workspace Resolution: When calling tools such as 'anyagent_create_ticket', you MUST specify a valid 'workspace_id' matching one of the accessible workspaces above (use exact Name or Code). Resolve acoustic STT variants (e.g. "new workspace" -> "neoWorkspace").
+2. Parent Ticket Resolution: When a user asks to perform CRUD (create, update, delete, view, link) under or on an existing entity:
+   - Match against the hierarchical tree above! For example, "job 0001", "job 1", or "0001" corresponds to the job ticket whose ID ends with "-0001" (e.g. "NEOWO-0001").
+   - Set 'parent_path' to the exact Ticket ID (e.g. "NEOWO-0001" or "/NEOWO-0001").
+   - NEVER pass an arbitrary folder string like "/job 0001"!
+   - If creating at the workspace root, pass "/".
+3. On-Demand Tree Exploration: If a branch is deep or collapsed, or if you need to find a ticket by keyword/content, invoke 'anyagent_query_workspace_tree' to search and retrieve the updated sub-tree before acting.
+4. Non-existent Entities: If the user refers to a workspace or parent ticket that genuinely does not exist in the list above, STOP and ask the user to clarify, rather than inventing fake folders or creating in the wrong place.`;
+			}
+		} catch (err) {
+			console.warn('Failed to retrieve dynamic workspaces for system prompt:', err);
+		}
+		return prompt;
+	}
+
 	private async sendMessage(): Promise<void> {
-		if (this.isStreaming) { return; }
+		if (this.isStreaming || this.isTranscribing || this.isRecording) { return; }
 
 		const text = this.inputField?.value.trim() || '';
 		const hasModifiedLocator = !!(this.activeContextLocator && (
-			(this.activeContextLocator.interactiveModifiedValue !== undefined && this.activeContextLocator.interactiveModifiedValue !== '') ||
+			(this.activeContextLocator.interactiveModifiedValue !== undefined) ||
 			this.activeContextLocator.field ||
 			this.activeContextLocator.ticketId
 		));
@@ -2304,41 +3146,169 @@ Always explain the result clearly to the user once tool execution completes.`;
 			if (loc.workspaceId) { locators.push(`Workspace: ${loc.workspaceId}`); }
 			if (loc.ticketId) { locators.push(`Ticket: ${loc.ticketId}`); }
 			if (loc.field) { locators.push(`Target: ${loc.field}`); }
-			if (loc.interactiveModifiedValue !== undefined && loc.interactiveModifiedValue !== '') {
-				if (loc.interactiveModifiedValue !== loc.currentValue) {
+
+			if (loc.fieldType === 'attachment') {
+				let origNames: string[] = [];
+				if (loc.currentValue && loc.currentValue !== 'None' && loc.currentValue !== 'null' && loc.currentValue !== 'undefined') {
+					if (typeof loc.currentValue === 'string' && loc.currentValue.trim().startsWith('[')) {
+						try {
+							const parsed = JSON.parse(loc.currentValue);
+							if (Array.isArray(parsed)) origNames = parsed.map((p: any) => p.name || String(p));
+						} catch { }
+					} else {
+						origNames = [String(loc.currentValue).trim()];
+					}
+				}
+				let propNames: string[] = [];
+				if (loc.interactiveModifiedValue) {
+					try {
+						const parsed = JSON.parse(loc.interactiveModifiedValue);
+						if (Array.isArray(parsed)) propNames = parsed.map((p: any) => p.name || String(p));
+					} catch { }
+				}
+				const added = propNames.filter(n => !origNames.includes(n));
+				const removed = origNames.filter(n => !propNames.includes(n));
+				const diffParts: string[] = [];
+				if (added.length > 0) diffParts.push(`+Added: [${added.join(', ')}]`);
+				if (removed.length > 0) diffParts.push(`-Removed: [${removed.join(', ')}]`);
+				const diffActionStr = diffParts.join(', ');
+
+				if (diffActionStr) {
+					locators.push(`Attachment Action: ${diffActionStr}`);
 					locators.push(`Proposed Value: ${loc.interactiveModifiedValue}`);
-				} else {
+				} else if (loc.interactiveModifiedValue !== undefined && loc.interactiveModifiedValue !== '') {
 					locators.push(`Current Value: ${loc.currentValue}`);
 				}
-			}
-			const prefix = `[${locators.join(' | ')}]\n`;
-			fullPrompt = `${prefix}${text || 'Please update this field as specified.'}`;
-			displayText = text || (loc.field && loc.interactiveModifiedValue ? `Update ${loc.field} to ${loc.interactiveModifiedValue}` : (text || 'Update field as specified.'));
 
-			// Render nice context tag pill above the user text in the bubble
-			const ctxTag = append(userMsg, $('.centered-chat-msg-context-tag'));
-			ctxTag.style.display = 'inline-flex';
-			ctxTag.style.alignItems = 'center';
-			ctxTag.style.gap = '6px';
-			ctxTag.style.fontSize = '9.5px';
-			ctxTag.style.opacity = '0.85';
-			ctxTag.style.marginBottom = '6px';
-			ctxTag.style.background = 'rgba(255,255,255,0.08)';
-			ctxTag.style.padding = '2px 6px';
-			ctxTag.style.borderRadius = '4px';
-			
-			const parts: string[] = [];
-			if (loc.workspaceId) { parts.push(loc.workspaceId); }
-			if (loc.ticketId) { parts.push(loc.ticketId); }
-			if (loc.field) { parts.push(loc.field); }
-			if (loc.interactiveModifiedValue && loc.interactiveModifiedValue !== loc.currentValue) {
-				parts.push(`-> ${loc.interactiveModifiedValue}`);
-			}
-			locatorSummary = parts.join(' › ');
-			ctxTag.textContent = locatorSummary;
+				const fieldLabel = loc.label || loc.field || 'Attachment';
+				const prefix = `[${locators.join(' | ')}]\n`;
+				fullPrompt = `${prefix}${text || (diffActionStr ? `Please update attachment field '${fieldLabel}': ${diffActionStr}. Update the ticket accordingly and record the change in work_log.md.` : 'Please update this attachment field.')}`;
+				displayText = text || (diffActionStr ? `Update ${fieldLabel}: ${diffActionStr}` : `Update ${fieldLabel}`);
 
-			// Clear locator for subsequent messages
-			this.setContextLocator(null);
+				const ctxTag = append(userMsg, $('.centered-chat-msg-context-tag'));
+				ctxTag.style.display = 'inline-flex';
+				ctxTag.style.alignItems = 'center';
+				ctxTag.style.gap = '6px';
+				ctxTag.style.fontSize = '9.5px';
+				ctxTag.style.opacity = '0.85';
+				ctxTag.style.marginBottom = '6px';
+				ctxTag.style.background = 'rgba(255,255,255,0.08)';
+				ctxTag.style.padding = '2px 6px';
+				ctxTag.style.borderRadius = '4px';
+
+				const parts: string[] = [];
+				if (loc.workspaceId) { parts.push(loc.workspaceId); }
+				if (loc.ticketId) { parts.push(loc.ticketId); }
+				if (loc.field) { parts.push(loc.field); }
+				if (diffActionStr) {
+					parts.push(diffActionStr);
+				}
+				locatorSummary = parts.join(' › ');
+				ctxTag.textContent = locatorSummary;
+
+				this.setContextLocator(null);
+			} else {
+				const targetNode = this._findNodeByPath(loc.hierarchyTree, loc.field || '');
+				if (targetNode && targetNode.children && targetNode.children.length > 0) {
+					const firstWithSub = targetNode.children.find((c: any) => c.children && c.children.length > 0);
+					if (firstWithSub && firstWithSub.children) {
+						const subFieldSpecs = firstWithSub.children.map((f: any) => `${f.label} (${f.fieldType || 'text'})`);
+						locators.push(`Schema: [${subFieldSpecs.join(', ')}]`);
+					} else if (targetNode.fieldType === 'composite') {
+						const subFieldSpecs = targetNode.children.map((f: any) => `${f.label} (${f.fieldType || 'text'})`);
+						locators.push(`Item Fields: [${subFieldSpecs.join(', ')}]`);
+					}
+				}
+
+				const hasOrigContent = !!(loc.currentValue && loc.currentValue.trim() !== '' && loc.currentValue !== 'None' && loc.currentValue !== 'null' && loc.currentValue !== 'undefined');
+				const isTextType = loc.fieldType === 'text' || loc.fieldType === 'textarea' || (!loc.fieldType && (loc.field?.includes('Description') || loc.field?.includes('Text') || loc.field?.includes('Title') || loc.field?.includes('Notes')));
+				const isExplicitClear = isTextType && (loc.interactiveModifiedValue !== undefined) && (loc.interactiveModifiedValue.trim() === '') && hasOrigContent;
+				const isAlreadyEmpty = isTextType && (loc.interactiveModifiedValue !== undefined) && (loc.interactiveModifiedValue.trim() === '') && !hasOrigContent;
+
+				if (isExplicitClear) {
+					if (hasOrigContent) {
+						locators.push(`Current Value: ${loc.currentValue}`);
+					}
+					locators.push(`Proposed Value: ""`);
+					locators.push(`Action: Clear / Delete field content (set to empty)`);
+				} else if (isAlreadyEmpty) {
+					locators.push(`Current Value: "" (empty)`);
+					locators.push(`Proposed Value: ""`);
+					locators.push(`Action: Keep empty / Confirm already empty`);
+				} else if (loc.interactiveModifiedValue !== undefined && loc.interactiveModifiedValue.trim() !== '') {
+					if (hasOrigContent && loc.interactiveModifiedValue !== loc.currentValue) {
+						locators.push(`Current Value: ${loc.currentValue}`);
+					}
+					if (loc.interactiveModifiedValue !== loc.currentValue) {
+						locators.push(`Proposed Value: ${loc.interactiveModifiedValue}`);
+					} else {
+						locators.push(`Current Value: ${loc.currentValue}`);
+					}
+				} else if (hasOrigContent) {
+					locators.push(`Current Value: ${loc.currentValue}`);
+				}
+
+				const fieldLabel = loc.label || loc.field || 'field';
+				const prefix = `[${locators.join(' | ')}]\n`;
+
+				let formattedDisplayVal = loc.interactiveModifiedValue || '';
+				if (formattedDisplayVal.startsWith('[') && formattedDisplayVal.endsWith(']')) {
+					try {
+						const parsed = JSON.parse(formattedDisplayVal);
+						if (Array.isArray(parsed)) formattedDisplayVal = parsed.join(', ');
+					} catch { }
+				}
+
+				if (isExplicitClear) {
+					fullPrompt = `${prefix}${text || `Please clear the content of '${fieldLabel}', setting it to empty as specified.`}`;
+					displayText = text || `Clear ${fieldLabel} (set to empty)`;
+				} else if (isAlreadyEmpty) {
+					fullPrompt = `${prefix}${text || `The field '${fieldLabel}' is already empty and the proposed value is empty. If no other instruction is provided, please confirm it remains empty without asking for a new value.`}`;
+					displayText = text || `Confirm ${fieldLabel} is empty`;
+				} else if (loc.interactiveModifiedValue !== undefined && loc.interactiveModifiedValue.trim() !== '' && loc.interactiveModifiedValue !== loc.currentValue) {
+					fullPrompt = `${prefix}${text || `Please update '${fieldLabel}' to the proposed value.`}`;
+					displayText = text || (text ? text : `Update ${fieldLabel} to "${formattedDisplayVal.length > 40 ? formattedDisplayVal.substring(0, 40) + '...' : formattedDisplayVal}"`);
+				} else {
+					fullPrompt = `${prefix}${text || 'Please update this field as specified.'}`;
+					displayText = text || (loc.field && loc.interactiveModifiedValue ? `Update ${loc.field} to ${formattedDisplayVal}` : (text || 'Update field as specified.'));
+				}
+
+				// Render nice context tag pill above the user text in the bubble
+				const ctxTag = append(userMsg, $('.centered-chat-msg-context-tag'));
+				ctxTag.style.display = 'inline-flex';
+				ctxTag.style.alignItems = 'center';
+				ctxTag.style.gap = '6px';
+				ctxTag.style.fontSize = '9.5px';
+				ctxTag.style.opacity = '0.85';
+				ctxTag.style.marginBottom = '6px';
+				ctxTag.style.background = 'rgba(255,255,255,0.08)';
+				ctxTag.style.padding = '2px 6px';
+				ctxTag.style.borderRadius = '4px';
+
+				const parts: string[] = [];
+				if (loc.workspaceId) { parts.push(loc.workspaceId); }
+				if (loc.ticketId) { parts.push(loc.ticketId); }
+				if (loc.field) { parts.push(loc.field); }
+				if (isExplicitClear) {
+					parts.push(`-> (cleared)`);
+				} else if (isAlreadyEmpty) {
+					parts.push(`-> (empty)`);
+				} else if (loc.interactiveModifiedValue && loc.interactiveModifiedValue !== loc.currentValue) {
+					let tagVal = loc.interactiveModifiedValue;
+					if (tagVal.startsWith('[') && tagVal.endsWith(']')) {
+						try {
+							const parsed = JSON.parse(tagVal);
+							if (Array.isArray(parsed)) tagVal = parsed.join(', ');
+						} catch { }
+					}
+					parts.push(`-> ${tagVal}`);
+				}
+				locatorSummary = parts.join(' › ');
+				ctxTag.textContent = locatorSummary;
+
+				// Clear locator for subsequent messages
+				this.setContextLocator(null);
+			}
 		}
 
 		if (this.activeAttachments.length > 0) {
@@ -2360,17 +3330,18 @@ Always explain the result clearly to the user once tool execution completes.`;
 		// Collapsible Prompt Inspector (Click to expand Full System Prompt & Tools)
 		const promptInspector = append(userMsg, document.createElement('details'));
 		promptInspector.className = 'centered-chat-prompt-inspector';
-		
+
 		const summary = append(promptInspector, document.createElement('summary'));
 		summary.className = 'centered-chat-prompt-summary';
 		summary.textContent = '🔍 View Injected System Prompt & Tools (Full Trace)';
 
 		const promptBody = append(promptInspector, $('.centered-chat-prompt-body'));
-		
+
+		const dynamicSystemPrompt = await this.getDynamicSystemPrompt();
 		const promptSectionTitle = append(promptBody, $('.centered-chat-prompt-section-title'));
 		promptSectionTitle.textContent = 'System Prompt:';
 		const sysPromptPre = append(promptBody, $('pre.centered-chat-prompt-pre'));
-		sysPromptPre.textContent = CenteredChatWidget.ANYAGENT_SYSTEM_PROMPT;
+		sysPromptPre.textContent = dynamicSystemPrompt;
 
 		const payloadTitle = append(promptBody, $('.centered-chat-prompt-section-title'));
 		payloadTitle.textContent = 'User Payload Sent to LLM:';
@@ -2381,7 +3352,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 		copyFullPromptBtn.textContent = '📋 Copy Complete Prompt & System Context';
 		copyFullPromptBtn.onclick = (e) => {
 			e.stopPropagation();
-			const fullTraceText = `=== SYSTEM PROMPT ===\n${CenteredChatWidget.ANYAGENT_SYSTEM_PROMPT}\n\n=== USER PAYLOAD ===\n${fullPrompt}`;
+			const fullTraceText = `=== SYSTEM PROMPT ===\n${dynamicSystemPrompt}\n\n=== USER PAYLOAD ===\n${fullPrompt}`;
 			this.copyToClipboard(fullTraceText);
 		};
 
@@ -2533,7 +3504,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 			flushRender(true);
 			try {
 				typingCursor.remove();
-			} catch {}
+			} catch { }
 			this.injectCopyButtons(aiContent);
 
 			// AI Message Footer with Time and Bottom Copy Button
@@ -2576,10 +3547,15 @@ Always explain the result clearly to the user once tool execution completes.`;
 	private getAnthropicTools(): any[] {
 		const toolIds = [
 			'anyagent_get_ticket_data',
+			'anyagent_query_workspace_tree',
 			'anyagent_create_ticket',
 			'anyagent_delete_ticket',
 			'anyagent_update_ticket',
-			'anyagent_manage_links'
+			'anyagent_manage_links',
+			'anyagent_list_custom_modules',
+			'anyagent_generate_custom_module',
+			'anyagent_toggle_custom_module_status',
+			'anyagent_delete_custom_module'
 		];
 		const tools: any[] = [];
 		for (const id of toolIds) {
@@ -2598,10 +3574,15 @@ Always explain the result clearly to the user once tool execution completes.`;
 	private getOpenAITools(): any[] {
 		const toolIds = [
 			'anyagent_get_ticket_data',
+			'anyagent_query_workspace_tree',
 			'anyagent_create_ticket',
 			'anyagent_delete_ticket',
 			'anyagent_update_ticket',
-			'anyagent_manage_links'
+			'anyagent_manage_links',
+			'anyagent_list_custom_modules',
+			'anyagent_generate_custom_module',
+			'anyagent_toggle_custom_module_status',
+			'anyagent_delete_custom_module'
 		];
 		const tools: any[] = [];
 		for (const id of toolIds) {
@@ -2623,10 +3604,15 @@ Always explain the result clearly to the user once tool execution completes.`;
 	private getGeminiTools(): any[] {
 		const toolIds = [
 			'anyagent_get_ticket_data',
+			'anyagent_query_workspace_tree',
 			'anyagent_create_ticket',
 			'anyagent_delete_ticket',
 			'anyagent_update_ticket',
-			'anyagent_manage_links'
+			'anyagent_manage_links',
+			'anyagent_list_custom_modules',
+			'anyagent_generate_custom_module',
+			'anyagent_toggle_custom_module_status',
+			'anyagent_delete_custom_module'
 		];
 		const declarations: any[] = [];
 		for (const id of toolIds) {
@@ -2642,6 +3628,39 @@ Always explain the result clearly to the user once tool execution completes.`;
 		return declarations.length > 0 ? [{ function_declarations: declarations }] : [];
 	}
 
+	private async extractResponseErrorMessage(response: any, providerName: string): Promise<string> {
+		let rawBody = '';
+		try {
+			await new Promise<void>((resolve) => {
+				listenStream(response.stream, {
+					onData: (chunk: VSBuffer) => { rawBody += chunk.toString(); },
+					onError: () => resolve(),
+					onEnd: () => resolve()
+				});
+			});
+		} catch { }
+
+		let detailed = '';
+		if (rawBody) {
+			try {
+				const json = JSON.parse(rawBody);
+				if (json.error?.message) {
+					detailed = json.error.message;
+				} else if (typeof json.error === 'string') {
+					detailed = json.error;
+				} else if (json.message) {
+					detailed = json.message;
+				}
+			} catch {
+				detailed = rawBody.slice(0, 300);
+			}
+		}
+
+		return detailed
+			? `HTTP ${response.res.statusCode} Error from ${providerName}: ${detailed}`
+			: `HTTP ${response.res.statusCode} Error from ${providerName}.`;
+	}
+
 	private async executeLlmStreamRequest(options: {
 		providerId: string;
 		modelId: string;
@@ -2654,7 +3673,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 		const { providerId, modelId, prompt, apiKey, customUrl, cancellationTokenSource, onToken } = options;
 		const sanitizedModel = modelId.replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
 
-		const systemPrompt = CenteredChatWidget.ANYAGENT_SYSTEM_PROMPT;
+		const systemPrompt = await this.getDynamicSystemPrompt();
 		const maxTurns = 5;
 
 		if (providerId === 'anthropic') {
@@ -2693,7 +3712,8 @@ Always explain the result clearly to the user once tool execution completes.`;
 				}, cancellationTokenSource.token);
 
 				if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
-					throw new Error(`HTTP ${response.res.statusCode} Error from ANTHROPIC API.`);
+					const errMsg = await this.extractResponseErrorMessage(response, 'ANTHROPIC API');
+					throw new Error(errMsg);
 				}
 
 				await new Promise<void>((resolve, reject) => {
@@ -2785,7 +3805,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 						);
 						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
 						resultContent = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
-						
+
 						let prettyResult = resultContent;
 						try {
 							const parsed = JSON.parse(resultContent);
@@ -2833,7 +3853,8 @@ Always explain the result clearly to the user once tool execution completes.`;
 				}, cancellationTokenSource.token);
 
 				if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
-					throw new Error(`HTTP ${response.res.statusCode} Error from GEMINI API.`);
+					const errMsg = await this.extractResponseErrorMessage(response, 'GEMINI API');
+					throw new Error(errMsg);
 				}
 
 				await new Promise<void>((resolve, reject) => {
@@ -2908,7 +3929,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
 						const textVal = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
 						try { resultContent = JSON.parse(textVal); } catch { resultContent = { response: textVal }; }
-						
+
 						const prettyResult = JSON.stringify(resultContent, null, 2);
 						onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> ✅ **Tool Completed Successfully**\n\n`);
 					} catch (err: any) {
@@ -2966,7 +3987,8 @@ Always explain the result clearly to the user once tool execution completes.`;
 				}, cancellationTokenSource.token);
 
 				if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
-					throw new Error(`HTTP ${response.res.statusCode} Error from OPENAI API.`);
+					const errMsg = await this.extractResponseErrorMessage(response, 'OPENAI API');
+					throw new Error(errMsg);
 				}
 
 				await new Promise<void>((resolve, reject) => {
@@ -3019,14 +4041,14 @@ Always explain the result clearly to the user once tool execution completes.`;
 				}
 
 				const toolCalls = Array.from(toolCallsMap.values()).map(tc => ({
-					id: tc.id || `call_${Date.now()}_${Math.random()}`,
+					id: tc.id || `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
 					type: 'function' as const,
 					function: { name: tc.name, arguments: tc.arguments }
 				}));
 
 				messages.push({
 					role: 'assistant',
-					content: currentText || null,
+					content: currentText || '',
 					tool_calls: toolCalls
 				});
 
@@ -3045,7 +4067,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 						);
 						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
 						resultContent = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
-						
+
 						let prettyResult = resultContent;
 						try {
 							const parsed = JSON.parse(resultContent);
@@ -3073,18 +4095,38 @@ Always explain the result clearly to the user once tool execution completes.`;
 		}
 	}
 
-	private setStreamingButtonState(isStreaming: boolean): void {
+	private updateSendButtonState(): void {
 		if (!this.sendBtn) { return; }
 		this.sendBtn.textContent = '';
-		if (isStreaming) {
+		if (this.isStreaming) {
+			this.sendBtn.disabled = false;
+			this.sendBtn.classList.remove('disabled', 'is-transcribing');
 			this.sendBtn.classList.add('is-streaming');
 			this.sendBtn.title = 'Stop Generating (Click to Abort)';
 			append(this.sendBtn, $('span.codicon.codicon-primitive-square'));
-		} else {
+		} else if (this.isTranscribing) {
+			this.sendBtn.disabled = true;
 			this.sendBtn.classList.remove('is-streaming');
+			this.sendBtn.classList.add('disabled', 'is-transcribing');
+			this.sendBtn.title = 'Transcribing voice input... Please wait';
+			append(this.sendBtn, $('span.codicon.codicon-loading.codicon-modifier-spin'));
+		} else if (this.isRecording) {
+			this.sendBtn.disabled = true;
+			this.sendBtn.classList.remove('is-streaming', 'is-transcribing');
+			this.sendBtn.classList.add('disabled');
+			this.sendBtn.title = 'Recording voice... Finish recording first';
+			append(this.sendBtn, $('span.codicon.codicon-arrow-right'));
+		} else {
+			this.sendBtn.disabled = false;
+			this.sendBtn.classList.remove('is-streaming', 'disabled', 'is-transcribing');
 			this.sendBtn.title = 'Send Prompt (Enter)';
 			append(this.sendBtn, $('span.codicon.codicon-arrow-right'));
 		}
+	}
+
+	private setStreamingButtonState(isStreaming: boolean): void {
+		this.isStreaming = isStreaming;
+		this.updateSendButtonState();
 	}
 
 	private injectCopyButtons(container: HTMLElement): void {
@@ -3114,11 +4156,20 @@ Always explain the result clearly to the user once tool execution completes.`;
 		if (this.isRecording) {
 			this.stopRecording();
 		} else {
+			const activeEl = document.activeElement;
+			if (activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement) {
+				this.recordLastActiveEditable(activeEl);
+			}
 			this.startRecording();
 		}
 	}
 
 	private async startRecording(): Promise<void> {
+		const activeEl = document.activeElement;
+		if (activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement) {
+			this.recordLastActiveEditable(activeEl);
+		}
+
 		try {
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 			this.audioChunks = [];
@@ -3130,31 +4181,114 @@ Always explain the result clearly to the user once tool execution completes.`;
 				}
 			};
 
-			this.mediaRecorder.onstop = () => {
+			this.mediaRecorder.onstop = async () => {
+				this.isTranscribing = true;
+				this.updateSendButtonState();
+
 				const audioBlob = new Blob(this.audioChunks, { type: 'audio/webm' });
 				const audioUrl = URL.createObjectURL(audioBlob);
 				const duration = this.recordingSeconds;
 
-				const recordingName = `Voice Note ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.webm`;
-				this.activeAttachments.push({
-					name: recordingName,
-					content: '',
-					size: audioBlob.size,
-					url: audioUrl,
-					isAudio: true,
-					duration: duration
-				});
-				this.renderAttachmentTags();
+				// Determine target input element: last active focused input (e.g. locator textarea/input) or main chat inputField
+				let targetEl: HTMLInputElement | HTMLTextAreaElement | undefined = undefined;
+				if (this.lastActiveEditableElement && document.body.contains(this.lastActiveEditableElement)) {
+					targetEl = this.lastActiveEditableElement;
+				} else if (this.inputField && document.body.contains(this.inputField)) {
+					targetEl = this.inputField;
+				}
+
+				// Only add Voice Note attachment to the main chat if dictating into the main inputField
+				if (!targetEl || targetEl === this.inputField) {
+					const recordingName = `Voice Note ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}.webm`;
+					this.activeAttachments.push({
+						name: recordingName,
+						content: '',
+						size: audioBlob.size,
+						url: audioUrl,
+						isAudio: true,
+						duration: duration
+					});
+					this.renderAttachmentTags();
+				}
 
 				stream.getTracks().forEach(track => track.stop());
+
+				// Speech-to-Text transcription with active Voice Model
+				if (this.recordingIndicator && this.recordingTimeSpan) {
+					this.recordingIndicator.style.display = 'flex';
+					this.recordingTimeSpan.textContent = 'Transcribing voice...';
+				}
+
+				try {
+					const result = await this.voiceModelService.transcribeAudio(audioBlob);
+					if (result.text && result.text.trim()) {
+						const transcribed = result.text.trim();
+
+						if (targetEl) {
+							const existing = targetEl.value || '';
+							let start = (targetEl === this.lastActiveEditableElement && typeof this.lastSelectionStart === 'number')
+								? this.lastSelectionStart
+								: (targetEl.selectionStart ?? existing.length);
+							let end = (targetEl === this.lastActiveEditableElement && typeof this.lastSelectionEnd === 'number')
+								? this.lastSelectionEnd
+								: (targetEl.selectionEnd ?? existing.length);
+
+							if (start < 0 || start > existing.length) { start = existing.length; }
+							if (end < 0 || end > existing.length) { end = existing.length; }
+							if (start > end) { const tmp = start; start = end; end = tmp; }
+
+							// Smart whitespace handling around insertion point
+							const beforeText = existing.substring(0, start);
+							const afterText = existing.substring(end);
+							let insertText = transcribed;
+							if (start > 0 && !/\s$/.test(beforeText) && !/^\s/.test(insertText)) {
+								insertText = ' ' + insertText;
+							}
+							if (end < existing.length && !/^\s/.test(afterText) && !/\s$/.test(insertText)) {
+								insertText = insertText + ' ';
+							}
+
+							targetEl.value = beforeText + insertText + afterText;
+							const newCursorPos = start + insertText.length;
+							targetEl.selectionStart = newCursorPos;
+							targetEl.selectionEnd = newCursorPos;
+							targetEl.focus();
+
+							targetEl.dispatchEvent(new Event('input', { bubbles: true }));
+							targetEl.dispatchEvent(new Event('change', { bubbles: true }));
+
+							// If editing inside context locator, keep locator.interactiveModifiedValue in sync
+							if (targetEl !== this.inputField && this.activeContextLocator) {
+								this.activeContextLocator.interactiveModifiedValue = targetEl.value;
+							}
+
+							this.recordLastActiveEditable(targetEl);
+						}
+					} else if (result.error) {
+						this.notificationService.warn(`Voice Transcription: ${result.error}`);
+					}
+				} catch (err: any) {
+					console.error('Failed to transcribe voice input:', err);
+					this.notificationService.error(`Voice transcription error: ${err.message || err}`);
+				} finally {
+					this.isTranscribing = false;
+					this.updateSendButtonState();
+					if (this.recordingIndicator) {
+						this.recordingIndicator.style.display = 'none';
+					}
+				}
 			};
 
 			this.mediaRecorder.start();
 			this.isRecording = true;
+			this.updateSendButtonState();
 			this.recordingSeconds = 0;
 
 			if (this.recordingIndicator) {
 				this.recordingIndicator.style.display = 'flex';
+			}
+			if (this.recordingTimeSpan) {
+				this.recordingTimeSpan.textContent = '0:00 / 5:00';
 			}
 			if (this.micBtn) {
 				this.micBtn.classList.add('recording');
@@ -3165,9 +4299,9 @@ Always explain the result clearly to the user once tool execution completes.`;
 				if (this.recordingTimeSpan) {
 					const mins = Math.floor(this.recordingSeconds / 60);
 					const secs = this.recordingSeconds % 60;
-					this.recordingTimeSpan.textContent = `${mins}:${secs < 10 ? '0' : ''}${secs} / 2:00`;
+					this.recordingTimeSpan.textContent = `${mins}:${secs < 10 ? '0' : ''}${secs} / 5:00`;
 				}
-				if (this.recordingSeconds >= 120) {
+				if (this.recordingSeconds >= 300) {
 					this.stopRecording();
 				}
 			}, 1000);
@@ -3186,11 +4320,15 @@ Always explain the result clearly to the user once tool execution completes.`;
 		if (this.mediaRecorder && this.isRecording) {
 			this.mediaRecorder.stop();
 			this.isRecording = false;
+			this.updateSendButtonState();
+		} else {
+			this.isRecording = false;
+			this.updateSendButtonState();
+			if (this.recordingIndicator) {
+				this.recordingIndicator.style.display = 'none';
+			}
 		}
 
-		if (this.recordingIndicator) {
-			this.recordingIndicator.style.display = 'none';
-		}
 		if (this.micBtn) {
 			this.micBtn.classList.remove('recording');
 		}

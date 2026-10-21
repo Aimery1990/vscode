@@ -3,17 +3,9 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-/* "Open in Agents" titlebar widget — icon-only at rest, expands on hover/focus. */
+/* "Open in Agents" titlebar widget — hidden in AnyAgent */
 .monaco-workbench .open-in-agents-titlebar-widget {
-	display: inline-flex;
-	align-items: center;
-	height: 22px;
-	padding: 0 4px;
-	border-radius: 5px;
-	cursor: pointer;
-	color: var(--vscode-titleBar-activeForeground);
-	-webkit-app-region: no-drag;
-	white-space: nowrap;
+	display: none !important;
 }
 
 .monaco-workbench .open-in-agents-titlebar-widget > .open-in-agents-titlebar-widget-icon {

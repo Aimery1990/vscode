@@ -275,7 +275,9 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			}
 		} catch {}
 
-		const typeDefStr = (snapshot as any).typeDefinition || customDefFromYaml || builtInTypeDefs[type.toLowerCase()] || `${type.toUpperCase()} module entity definition.`;
+		const typeDefRaw = (snapshot as any).typeDefinition;
+		const validTypeDef = (typeof typeDefRaw === 'string' && typeDefRaw.trim() && typeDefRaw !== '[object Object]') ? typeDefRaw.trim() : undefined;
+		const typeDefStr = validTypeDef || customDefFromYaml || builtInTypeDefs[type.toLowerCase()] || `${type.toUpperCase()} module entity definition.`;
 
 		let workspaceId = snapshot.workspaceId;
 		if (!workspaceId) {
@@ -339,8 +341,8 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		mainMdContent += `- **Last Updated By**: User\n\n`;
 
 		mainMdContent += `### Self Defined Data (If any)\n`;
-		const schemaRelPath = (snapshot.typeDefinition && snapshot.typeDefinition !== 'Built-in (System)' && snapshot.typeDefinition !== 'None')
-			? snapshot.typeDefinition
+		const schemaRelPath = (validTypeDef && validTypeDef !== 'Built-in (System)' && validTypeDef !== 'None')
+			? validTypeDef
 			: ((snapshot.customMetadata && Object.keys(snapshot.customMetadata).length > 0) ? `.agents/entity_type/${type}.yaml` : 'None');
 		if (schemaRelPath !== 'None' && snapshot.customMetadata && Object.keys(snapshot.customMetadata).length > 0) {
 			mainMdContent += `- **Self Defined Data Structure**: ${schemaRelPath}\n`;
@@ -378,14 +380,13 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			mainMdContent += `- **Git Branch**: ${snapshot.git.branch || 'main'}\n\n`;
 		}
 
-		mainMdContent += `### Attachments Links\n`;
 		if (snapshot.attachments && snapshot.attachments.length > 0) {
+			mainMdContent += `### Attachments Links\n`;
 			for (const att of snapshot.attachments) {
 				const attName = att.split('/').filter(Boolean).pop() || att;
 				mainMdContent += `- [${attName}](attachments/${attName})\n`;
 			}
-		} else {
-			mainMdContent += `- None\n`;
+			mainMdContent += '\n';
 		}
 		await this.fileService.writeFile(mainMdUri, VSBuffer.fromString(mainMdContent));
 
@@ -435,8 +436,11 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			file: 'A standalone document or data asset.'
 		};
 
-		const typePromptStr = (snapshot as any).typePrompt || customPromptFromYaml || builtInTypePrompts[type.toLowerCase()] || `${type.toUpperCase()} module processing guidelines.`;
-		const ticketPromptStr = (snapshot as any).ticketPrompt || (snapshot as any).agentRulePrompt || 'None';
+		const typePromptRaw = (snapshot as any).typePrompt;
+		const validSnapshotPrompt = (typeof typePromptRaw === 'string' && typePromptRaw.trim() && typePromptRaw !== '[object Object]') ? typePromptRaw.trim() : undefined;
+		const typePromptStr = validSnapshotPrompt || customPromptFromYaml || builtInTypePrompts[type.toLowerCase()] || `${type.toUpperCase()} module processing guidelines.`;
+		const ticketPromptRaw = (snapshot as any).ticketPrompt || (snapshot as any).agentRulePrompt;
+		const ticketPromptStr = (typeof ticketPromptRaw === 'string' && ticketPromptRaw.trim() && ticketPromptRaw !== '[object Object]') ? ticketPromptRaw.trim() : 'None';
 
 		// 2. instruction.md
 		let instructionContent = `# Instruction - ${snapshot.entityName}\n\n## Overview\n\n`;

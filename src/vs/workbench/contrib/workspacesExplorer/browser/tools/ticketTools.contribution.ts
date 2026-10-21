@@ -8,7 +8,7 @@ import { IInstantiationService } from '../../../../../platform/instantiation/com
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../../common/contributions.js';
 import { ILanguageModelToolsService } from '../../../chat/common/tools/languageModelToolsService.js';
 import { TicketDataEngine } from './ticketDataEngine.js';
-import { CreateTicketTool, DeleteTicketTool, GetTicketDataTool, ManageLinksTool, UpdateTicketTool } from './ticketTools.js';
+import { CreateTicketTool, DeleteTicketTool, GetTicketDataTool, ManageLinksTool, QueryWorkspaceTreeTool, UpdateTicketTool } from './ticketTools.js';
 
 export class TicketToolsContribution extends Disposable implements IWorkbenchContribution {
 
@@ -27,12 +27,14 @@ export class TicketToolsContribution extends Disposable implements IWorkbenchCon
 		const deleteTool = new DeleteTicketTool(engine);
 		const updateTool = new UpdateTicketTool(engine);
 		const linkTool = new ManageLinksTool(engine);
+		const queryTreeTool = new QueryWorkspaceTreeTool(engine);
 
 		this._register(toolsService.registerTool(getTool.getToolData(), getTool));
 		this._register(toolsService.registerTool(createTool.getToolData(), createTool));
 		this._register(toolsService.registerTool(deleteTool.getToolData(), deleteTool));
 		this._register(toolsService.registerTool(updateTool.getToolData(), updateTool));
 		this._register(toolsService.registerTool(linkTool.getToolData(), linkTool));
+		this._register(toolsService.registerTool(queryTreeTool.getToolData(), queryTreeTool));
 	}
 }
 

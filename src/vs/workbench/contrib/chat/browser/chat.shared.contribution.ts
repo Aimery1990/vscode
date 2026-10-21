@@ -2057,7 +2057,7 @@ configurationRegistry.registerConfiguration({
 		[ChatConfiguration.TitleBarOpenInAgentsWindowEnabled]: {
 			type: 'boolean',
 			description: nls.localize('chat.titleBar.openInAgentsWindow.enabled', "Controls whether the Open in Agents Window button is shown in the title bar."),
-			default: true,
+			default: false,
 		},
 		'chat.approvedAccountOrganizations': {
 			type: 'array',

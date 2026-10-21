@@ -418,7 +418,7 @@ export class WebviewElement extends Disposable implements IWebviewElement, Webvi
 		const element = document.createElement('iframe');
 		element.name = this.id;
 		element.className = `webview ${options.customClasses || ''}`;
-		element.sandbox.add('allow-scripts', 'allow-same-origin', 'allow-forms', 'allow-pointer-lock', 'allow-downloads');
+		element.sandbox.add('allow-scripts', 'allow-same-origin', 'allow-forms', 'allow-pointer-lock', 'allow-downloads', 'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-modals', 'allow-storage-access-by-user-activation');
 
 		const allowRules = ['cross-origin-isolated', 'autoplay', 'local-network-access'];
 		if (!isFirefox) {

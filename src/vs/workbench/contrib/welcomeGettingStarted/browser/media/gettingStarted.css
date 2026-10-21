@@ -6,6 +6,9 @@
 .file-icons-enabled .show-file-icons .vscode_getting_started_page-name-file-icon.file-icon::before {
 	content: ' ';
 	background-image: url('../../../../browser/media/code-icon.svg');
+	background-size: 13px auto;
+	background-position: center;
+	background-repeat: no-repeat;
 }
 
 .monaco-workbench .part.editor > .content .gettingStartedContainer {

@@ -1712,6 +1712,8 @@
 	font-size: 11px;
 	line-height: 1.6;
 	background: #090d16;
+	user-select: text !important;
+	-webkit-user-select: text !important;
 }
 
 .workflow-log-line {
@@ -1720,6 +1722,8 @@
 	gap: 8px;
 	padding: 2px 0;
 	border-radius: 3px;
+	user-select: text !important;
+	-webkit-user-select: text !important;
 }
 
 .workflow-log-line:hover {
@@ -1729,6 +1733,8 @@
 .log-time {
 	color: #64748b;
 	flex-shrink: 0;
+	user-select: text !important;
+	-webkit-user-select: text !important;
 }
 
 .log-badge {
@@ -1737,6 +1743,7 @@
 	padding: 1px 5px;
 	border-radius: 3px;
 	flex-shrink: 0;
+	user-select: none;
 }
 
 .log-badge.badge-info {
@@ -1758,12 +1765,17 @@
 	color: #2dd4bf;
 	font-weight: 600;
 	flex-shrink: 0;
+	user-select: text !important;
+	-webkit-user-select: text !important;
 }
 
 .log-msg {
 	color: #cbd5e1;
 	word-break: break-word;
 	flex: 1;
+	user-select: text !important;
+	-webkit-user-select: text !important;
+	cursor: text;
 }
 
 .workflow-log-line.level-error .log-msg {

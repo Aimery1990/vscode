@@ -14,6 +14,7 @@ export const CreateTicketToolId = 'anyagent_create_ticket';
 export const DeleteTicketToolId = 'anyagent_delete_ticket';
 export const UpdateTicketToolId = 'anyagent_update_ticket';
 export const ManageLinksToolId = 'anyagent_manage_links';
+export const QueryWorkspaceTreeToolId = 'anyagent_query_workspace_tree';
 
 function toolResult(data: any, message?: string): IToolResult {
 	return {
@@ -466,6 +467,68 @@ export class ManageLinksTool implements IToolImpl {
 		try {
 			const res = await this.ticketEngine.manageLinks(invocation.parameters as any);
 			return toolResult(res, `Bi-directional links updated: action '${res.action}' synchronized across ${res.synchronized_tickets_count} ticket(s).`);
+		} catch (err: any) {
+			return toolError(err.message || String(err));
+		}
+	}
+}
+
+// -------------------------------------------------------------
+// 6. anyagent_query_workspace_tree
+// -------------------------------------------------------------
+export class QueryWorkspaceTreeTool implements IToolImpl {
+
+	constructor(
+		private readonly ticketEngine: TicketDataEngine
+	) { }
+
+	getToolData(): IToolData {
+		return {
+			id: QueryWorkspaceTreeToolId,
+			toolReferenceName: 'queryWorkspaceTree',
+			displayName: localize('ticket.tool.tree.displayName', "Query Workspace Tree"),
+			userDescription: localize('ticket.tool.tree.userDescription', "Explore and search hierarchical tickets and jobs under a workspace"),
+			modelDescription: "Explore and search the hierarchical ticket/job tree under a workspace. Use this tool when you need to inspect deep sub-tickets, find a ticket by keyword/type, or get an updated tree representation under a specific job or workspace.",
+			source: ToolDataSource.Internal,
+			canBeReferencedInPrompt: true,
+			icon: Codicon.listTree,
+			inputSchema: {
+				type: 'object',
+				properties: {
+					workspace_id: {
+						type: 'string',
+						description: "The target workspace ID or name (e.g. 'neoWorkspace', 'NEOWO')."
+					},
+					parent_ticket_id: {
+						type: 'string',
+						description: "Optional parent ticket ID (e.g. 'NEOWO-0001') to inspect a specific sub-tree, or '/' for workspace root."
+					},
+					query: {
+						type: 'string',
+						description: "Optional keyword to search across ticket IDs, titles, or types (e.g. 'demo', 'job', '0001')."
+					},
+					max_depth: {
+						type: 'number',
+						description: "Maximum depth to inspect (default: 3)."
+					}
+				},
+				required: ['workspace_id']
+			}
+		};
+	}
+
+	async prepareToolInvocation(context: IToolInvocationPreparationContext, _token: CancellationToken): Promise<IPreparedToolInvocation> {
+		const wsId = context.parameters?.workspace_id || '';
+		return {
+			invocationMessage: localize('ticket.tool.tree.invoking', "Querying workspace tree for {0}...", wsId),
+			pastTenseMessage: localize('ticket.tool.tree.done', "Queried workspace tree for {0}", wsId)
+		};
+	}
+
+	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
+		try {
+			const res = await this.ticketEngine.queryWorkspaceTree(invocation.parameters as any);
+			return toolResult(res, `Workspace tree retrieved for ${invocation.parameters?.workspace_id}`);
 		} catch (err: any) {
 			return toolError(err.message || String(err));
 		}

@@ -22,6 +22,11 @@ export interface IWebContentExtractorOptions {
 	 * List of trusted domain patterns for redirect validation.
 	 */
 	trustedDomains?: string[];
+
+	/**
+	 * Session partition to use. Defaults to 'persist:vscode-browser' to share browser login cookies.
+	 */
+	partition?: string;
 }
 
 export type WebContentExtractResult =

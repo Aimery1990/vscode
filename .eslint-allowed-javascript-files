@@ -158,3 +158,6 @@ test/unit/electron/renderer.js
 test/unit/fullJsonStreamReporter.js
 test/unit/node/index.js
 test/unit/reporter.js
+extensions/media-preview/media/pdf.min.js
+extensions/media-preview/media/pdf.worker.min.js
+extensions/media-preview/media/pdfPreview.js

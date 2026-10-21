@@ -70,7 +70,7 @@ class CenteredChatTitleBarWidget extends BaseActionViewItem {
 		container.setAttribute('aria-label', hoverText);
 		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('element'), container, hoverText));
 
-		const icon = append(container, $('span.centered-chat-titlebar-widget-icon.codicon.codicon-sparkle-filled'));
+		const icon = append(container, $('span.centered-chat-titlebar-widget-icon'));
 		icon.setAttribute('aria-hidden', 'true');
 
 		const labelEl = append(container, $('span.centered-chat-titlebar-widget-label'));

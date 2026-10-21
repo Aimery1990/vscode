@@ -21,7 +21,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
-import { dirname } from '../../../../base/common/resources.js';
+import { dirname, basename } from '../../../../base/common/resources.js';
 import { IAgentsManagerService, IAgentItem } from '../../agentsManager/common/agentsManager.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
@@ -29,7 +29,13 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
+import { parseYaml } from '../../customModules/browser/customModulesService.js';
+import { IActionButton, ICredentialPair } from '../../entityPersistence/common/entityPersistence.js';
+import { IRequestService, asText } from '../../../../platform/request/common/request.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
+import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
+import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
+import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
 	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
@@ -119,6 +125,7 @@ export class EntityDetailEditor extends EditorPane {
 	private _readmeUri: URI | undefined;
 	private _workLogUri: URI | undefined;
 	private _lastParsedData: IParsedTicketData | undefined;
+	private _lastCustomModule: any | undefined;
 	private _workspaceStatuses: IWorkspaceStatusesInfo = {
 		statuses: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'],
 		mapping: {
@@ -156,7 +163,8 @@ export class EntityDetailEditor extends EditorPane {
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 		@ICommandService private readonly _commandService: ICommandService,
 		@IClipboardService private readonly _clipboardService: IClipboardService,
-		@IQuickInputService private readonly _quickInputService: IQuickInputService
+		@IQuickInputService private readonly _quickInputService: IQuickInputService,
+		@IRequestService private readonly _requestService: IRequestService
 	) {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
 
@@ -207,6 +215,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		this._entityUri = undefined;
 		this._lastParsedData = undefined;
+		this._lastCustomModule = undefined;
 		super.clearInput();
 	}
 
@@ -300,62 +309,7 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private _parseSimpleYaml(yaml: string): any {
-		const lines = yaml.split(/\r?\n/);
-		const result: any = {};
-		let currentFieldList: any[] = [];
-		let currentField: any = null;
-
-		for (const line of lines) {
-			const trimmed = line.trim();
-			if (!trimmed || trimmed.startsWith('#')) continue;
-
-			const indent = line.length - line.trimStart().length;
-
-			if (trimmed.startsWith('-')) {
-				const content = trimmed.substring(1).trim();
-				if (content.includes(':')) {
-					const colonIndex = content.indexOf(':');
-					const key = content.substring(0, colonIndex).trim();
-					let val = content.substring(colonIndex + 1).trim();
-					if (val.startsWith('"') && val.endsWith('"')) {
-						try { val = JSON.parse(val); } catch { }
-					}
-					currentField = { [key]: val };
-					currentFieldList.push(currentField);
-				} else {
-					let val = content;
-					if (val.startsWith('"') && val.endsWith('"')) {
-						try { val = JSON.parse(val); } catch { }
-					}
-					if (currentField && Array.isArray(currentField.options)) {
-						currentField.options.push(val);
-					}
-				}
-			} else if (trimmed.includes(':')) {
-				const colonIndex = trimmed.indexOf(':');
-				const key = trimmed.substring(0, colonIndex).trim();
-				let val = trimmed.substring(colonIndex + 1).trim();
-				if (val.startsWith('"') && val.endsWith('"')) {
-					try { val = JSON.parse(val); } catch { }
-				}
-
-				if (indent === 0) {
-					if (key === 'fields') {
-						result.fields = [];
-						currentFieldList = result.fields;
-					} else {
-						result[key] = (val === 'true' ? true : val === 'false' ? false : val);
-					}
-				} else if (indent > 0 && currentField) {
-					if (key === 'options') {
-						currentField.options = [];
-					} else {
-						currentField[key] = (val === 'true' ? true : val === 'false' ? false : val);
-					}
-				}
-			}
-		}
-		return result;
+		return parseYaml(yaml);
 	}
 
 	private async _resolvePathsAndLoadData(): Promise<void> {
@@ -451,6 +405,28 @@ export class EntityDetailEditor extends EditorPane {
 
 			const attachments = await this._getAttachments(this._entityUri);
 			const customModule = await this._readCustomModule(this._entityUri, this._entityType);
+			this._lastCustomModule = customModule;
+
+			// If customModule exists, prune empty deleted fields from customMetadata so stale schemas do not linger
+			if (customModule && Array.isArray(customModule.fields) && parsed.customMetadata) {
+				const validKeys = new Set<string>();
+				for (const f of customModule.fields) {
+					if (f.label) validKeys.add(f.label.toLowerCase());
+					if (f.id) validKeys.add(f.id.toLowerCase());
+				}
+				const internalLifecycleKeys = ['ticket statuses', 'status mapping', 'removed status', 'git remote url', 'git branch'];
+				for (const k of Object.keys(parsed.customMetadata)) {
+					if (internalLifecycleKeys.includes(k.toLowerCase())) continue;
+					if (!validKeys.has(k.toLowerCase())) {
+						const val = parsed.customMetadata[k];
+						const isEmpty = val === undefined || val === null || String(val).trim() === '' || String(val).trim() === '[]' || String(val).trim() === '{}';
+						if (isEmpty) {
+							delete parsed.customMetadata[k];
+						}
+					}
+				}
+			}
+
 			const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
 			const allTickets = await this._loadAllAvailableTickets();
 
@@ -530,6 +506,116 @@ export class EntityDetailEditor extends EditorPane {
 				}
 			}
 
+			// 0.12 Credential Eye Toggle click
+			const credEyeBtn = target.closest('.cred-toggle-eye') as HTMLElement | null;
+			if (credEyeBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const item = credEyeBtn.closest('.browser-cred-item');
+				const textSpan = item?.querySelector('.cred-secret-text') as HTMLElement | null;
+				if (textSpan) {
+					const realVal = textSpan.getAttribute('data-real') || '';
+					if (textSpan.textContent === '••••••••') {
+						textSpan.textContent = realVal;
+					} else {
+						textSpan.textContent = '••••••••';
+					}
+				}
+				return;
+			}
+
+			// 0.13 Browser Copy Content button click
+			const copyContentBtn = target.closest('.browser-copy-content-btn') as HTMLElement | null;
+			if (copyContentBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = copyContentBtn.closest('.browser-primitive-card');
+				const contentEl = card?.querySelector('.browser-content-display');
+				const text = contentEl?.textContent || '';
+				if (text && !text.includes('No webpage content extracted yet.')) {
+					await this._clipboardService.writeText(text);
+					this._notificationService.info('Webpage content copied to clipboard.');
+				}
+				return;
+			}
+
+			// 0.14 Browser Clear Content button click
+			const clearContentBtn = target.closest('.browser-clear-content-btn') as HTMLElement | null;
+			if (clearContentBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = clearContentBtn.getAttribute('data-field-key') || '';
+				const card = clearContentBtn.closest('.browser-primitive-card') as HTMLElement | null;
+				if (card) {
+					const contentEl = card.querySelector('.browser-content-display');
+					if (contentEl) {
+						contentEl.innerHTML = '<span style="opacity: 0.4; font-style: italic;">No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to extract page contents.</span>';
+					}
+					const statusEl = card.querySelector('.browser-fetch-status') as HTMLElement | null;
+					if (statusEl) {
+						statusEl.textContent = 'Cleared';
+						statusEl.style.color = '';
+					}
+					const urlInput = card.querySelector('.browser-url-input') as HTMLInputElement | null;
+					const currentUrl = urlInput?.value.trim() || '';
+					await this._saveBrowserPrimitiveData(fieldKey, currentUrl, '', '');
+				}
+				return;
+			}
+
+			// 0.15 Browser Silent Fetch Button click
+			const silentFetchBtn = target.closest('.browser-silent-fetch-btn') as HTMLElement | null;
+			if (silentFetchBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = silentFetchBtn.getAttribute('data-field-key') || '';
+				const card = silentFetchBtn.closest('.browser-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._executeBrowserFetch(card, fieldKey, false);
+				}
+				return;
+			}
+
+			// 0.16 Browser Open in Tab Button click
+			const openTabBtn = target.closest('.browser-open-tab-btn') as HTMLElement | null;
+			if (openTabBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = openTabBtn.getAttribute('data-field-key') || '';
+				const card = openTabBtn.closest('.browser-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._executeBrowserFetch(card, fieldKey, true);
+				}
+				return;
+			}
+
+			// 0.165 Browser New Tab Button (+) click
+			const newTabBtn = target.closest('.browser-new-tab-btn') as HTMLElement | null;
+			if (newTabBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = newTabBtn.closest('.browser-primitive-card') as HTMLElement | null;
+				const urlInput = card?.querySelector('.browser-url-input') as HTMLInputElement | null;
+				let url = urlInput?.value.trim() || 'https://www.google.com';
+				if (!/^https?:\/\//i.test(url)) {
+					url = 'https://' + url;
+				}
+				try {
+					const uri = URI.parse(url);
+					await this._commandService.executeCommand('simpleBrowser.api.open', uri, {
+						viewColumn: -2, // ViewColumn.Beside
+						preserveFocus: false
+					});
+				} catch (e) {
+					try {
+						await this._commandService.executeCommand('simpleBrowser.show', url);
+					} catch (err) {
+						console.error('Failed to open simpleBrowser:', err);
+					}
+				}
+				return;
+			}
+
 			// 0.2 Copy Git URL button click
 			const copyGitBtn = target.closest('.copy-git-url-btn') as HTMLElement | null;
 			if (copyGitBtn) {
@@ -543,6 +629,17 @@ export class EntityDetailEditor extends EditorPane {
 					setTimeout(() => { if (span) span.textContent = 'Copy'; }, 1500);
 					this._notificationService.info('Copied Git repository URL to clipboard.');
 				}
+				return;
+			}
+
+			// 0.3 Ticket Action Transition Button click
+			const actionTransitionBtn = target.closest('.ticket-action-transition-btn') as HTMLElement | null;
+			if (actionTransitionBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const btnLabel = actionTransitionBtn.getAttribute('data-action-label') || 'Action';
+				const targetStatus = actionTransitionBtn.getAttribute('data-target-status') || '';
+				await this._executeActionTransition(targetStatus, btnLabel);
 				return;
 			}
 
@@ -642,7 +739,7 @@ export class EntityDetailEditor extends EditorPane {
 				}
 			}
 
-			// 8. Trigger File Upload Dropzone
+			// 8. Trigger File Upload Dropzone (if present)
 			if (target.id === 'attachment-dropzone' || target.closest('#attachment-dropzone')) {
 				if (!target.classList.contains('delete-attachment') && !target.closest('.delete-attachment')) {
 					const fileInput = this._container?.querySelector('#file-input') as HTMLInputElement | null;
@@ -671,7 +768,7 @@ export class EntityDetailEditor extends EditorPane {
 					const taskTitle = await this._quickInputService.input({
 						prompt: `Assign New Task to AI Agent '${agentName}'`,
 						placeHolder: 'e.g. Implement user authentication, Refactor API response handler',
-						validateInput: async (val) => val.trim() ? null : 'Task title cannot be empty'
+						validateInput: async (val: string) => val.trim() ? null : 'Task title cannot be empty'
 					});
 					if (taskTitle) {
 						const taskDescription = await this._quickInputService.input({
@@ -723,6 +820,22 @@ export class EntityDetailEditor extends EditorPane {
 					name: file.name,
 					data: Array.from(new Uint8Array(buffer))
 				});
+			}
+		});
+
+		this._container.addEventListener('keydown', async (e: KeyboardEvent) => {
+			if (e.key === 'Enter') {
+				const urlInput = (e.target as HTMLElement)?.closest('.browser-url-input') as HTMLInputElement | null;
+				if (urlInput) {
+					e.preventDefault();
+					e.stopPropagation();
+					const card = urlInput.closest('.browser-primitive-card') as HTMLElement | null;
+					const fetchBtn = card?.querySelector('.browser-silent-fetch-btn') as HTMLElement | null;
+					const fieldKey = fetchBtn?.getAttribute('data-field-key') || '';
+					if (card && fieldKey) {
+						await this._executeBrowserFetch(card, fieldKey, false);
+					}
+				}
 			}
 		});
 	}
@@ -822,10 +935,22 @@ export class EntityDetailEditor extends EditorPane {
 		// 2. Parse README.md
 		let readmeTitle = '';
 		let readmeDesc = '';
+		let readmeWorkspaceId = '';
+		let readmeTicketId = '';
 		const readmeNotesLines: string[] = [];
 		let isPastReadmeMeta = false;
 		const readmeLines = readmeContent.split(/\r?\n/);
 		for (const line of readmeLines) {
+			const wsMatch = line.match(/^\s*-\s*\*\*Workspace ID\*\*:\s*(.*)$/i);
+			if (wsMatch) {
+				readmeWorkspaceId = wsMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				continue;
+			}
+			const tidMatch = line.match(/^\s*-\s*\*\*Ticket ID\*\*:\s*(.*)$/i);
+			if (tidMatch) {
+				readmeTicketId = tidMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				continue;
+			}
 			const titleMatch = line.match(/^\s*-\s*\*\*Title\*\*:\s*(.*)$/i);
 			if (titleMatch) {
 				readmeTitle = titleMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
@@ -847,6 +972,8 @@ export class EntityDetailEditor extends EditorPane {
 		// 3. Parse instruction.md
 		let typePrompt = '';
 		let ticketPrompt = '';
+		let instWorkspaceId = '';
+		let instTicketId = '';
 		let instGitRemote = '';
 		let instGitBranch = '';
 		let instLocalPath = '';
@@ -854,6 +981,16 @@ export class EntityDetailEditor extends EditorPane {
 		let isPastInstMeta = false;
 		const instLines = instructionContent.split(/\r?\n/);
 		for (const line of instLines) {
+			const wsMatch = line.match(/^\s*-\s*\*\*Workspace ID\*\*:\s*(.*)$/i);
+			if (wsMatch) {
+				instWorkspaceId = wsMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				continue;
+			}
+			const tidMatch = line.match(/^\s*-\s*\*\*Ticket ID\*\*:\s*(.*)$/i);
+			if (tidMatch) {
+				instTicketId = tidMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+				continue;
+			}
 			const tpMatch = line.match(/^\s*-\s*\*\*Ticket Type Prompt\*\*:\s*(.*)$/i);
 			if (tpMatch) {
 				typePrompt = tpMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
@@ -887,11 +1024,12 @@ export class EntityDetailEditor extends EditorPane {
 			}
 		}
 
-		const ticketId = metadata['Ticket ID'] || this._entityName || '';
-		const workspaceId = metadata['Workspace ID'] || '';
+		const rawFolderId = this._entityUri ? basename(this._entityUri) : '';
+		const ticketId = metadata['Ticket ID'] || instTicketId || readmeTicketId || (rawFolderId && !rawFolderId.includes(' ') ? rawFolderId : '') || this._entityName || '';
+		const workspaceId = metadata['Workspace ID'] || instWorkspaceId || readmeWorkspaceId || '';
 		const ticketType = metadata['Ticket Type'] || this._entityType || 'job';
-		const title = readmeTitle || metadata['Title'] || this._entityName || ticketId;
-		const description = (readmeDesc && readmeDesc !== 'None') ? readmeDesc : (metadata['Description'] || '');
+		const title = readmeTitle || metadata['Title'] || customMetadata['Title'] || customMetadata['title'] || this._entityName || ticketId;
+		const description = (readmeDesc && readmeDesc !== 'None') ? readmeDesc : (metadata['Description'] || customMetadata['Description'] || customMetadata['description'] || '');
 
 		const resolvedGitRemote = metadata['Git Remote URL'] ||
 			metadata['Git Repository'] ||
@@ -943,6 +1081,10 @@ export class EntityDetailEditor extends EditorPane {
 	private _escapeHtmlAttr(str: string | undefined): string {
 		if (!str) return '';
 		return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	}
+
+	private _escapeHtml(str: string | undefined): string {
+		return this._escapeHtmlAttr(str);
 	}
 
 	private _updateReadmeContent(content: string, newTitle?: string, newDesc?: string): string {
@@ -1369,8 +1511,9 @@ export class EntityDetailEditor extends EditorPane {
 		}).join('');
 	}
 
-	private _buildHierarchyTree(data: IParsedTicketData | undefined, agents: any[], allTickets: any[] = []): any[] {
+	private _buildHierarchyTree(data: IParsedTicketData | undefined, agents: any[], allTickets: any[] = [], customModule?: any): any[] {
 		if (!data) return [];
+		if (!customModule) customModule = this._lastCustomModule;
 		const rootNodes: any[] = [];
 
 		// 1. Title
@@ -1423,12 +1566,6 @@ export class EntityDetailEditor extends EditorPane {
 				label: isAgent ? 'System Type Prompt' : 'Ticket Type Prompt',
 				fieldType: 'textarea',
 				currentValue: data.metadata?.['Ticket Type Prompt'] || ''
-			},
-			{
-				path: '/Instructions/Instruction Notes',
-				label: 'Instruction Notes',
-				fieldType: 'textarea',
-				currentValue: data.instructionNotes || ''
 			}
 		);
 		rootNodes.push({
@@ -1507,21 +1644,55 @@ export class EntityDetailEditor extends EditorPane {
 		// 5. Custom Metadata
 		if (data.customMetadata) {
 			const customChildren: any[] = [];
-			const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Git Remote URL', 'Git Branch'];
+			const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Git Remote URL', 'Git Branch', 'Title', 'title', 'Description', 'description'];
 			for (const [k, v] of Object.entries(data.customMetadata)) {
 				if (internalLifecycleKeys.includes(k)) {
 					continue;
 				}
-				let parsedItems: any[] | null = null;
-				if (typeof v === 'string' && v.trim().startsWith('[')) {
-					try {
-						parsedItems = JSON.parse(v);
-					} catch { }
-				} else if (Array.isArray(v)) {
-					parsedItems = v;
+
+				const modField = customModule?.fields && Array.isArray(customModule.fields)
+					? customModule.fields.find((f: any) =>
+						(f.label && f.label.toLowerCase() === k.toLowerCase()) ||
+						(f.id && f.id.toLowerCase() === k.toLowerCase()) ||
+						(f.id && f.id.toLowerCase().replace(/_/g, ' ') === k.toLowerCase()) ||
+						(f.label && f.label.toLowerCase().replace(/_/g, ' ') === k.toLowerCase().replace(/_/g, ' '))
+					)
+					: undefined;
+
+				const isAttachment = (modField && modField.type === 'attachment') ||
+					k.toLowerCase().includes('attachment') ||
+					(typeof v === 'string' && (v.trim().startsWith('[{"name":') || v.trim().startsWith('{"name":'))) ||
+					(Array.isArray(v) && v.length > 0 && typeof v[0] === 'object' && v[0] && 'name' in v[0]) ||
+					(v && typeof v === 'object' && 'name' in v);
+
+				if (isAttachment) {
+					const rawVal = v !== undefined && v !== null ? String(v).trim() : '';
+					const isValEmpty = !rawVal || rawVal === 'None' || rawVal === 'null' || rawVal === 'undefined' || rawVal === 'N/A';
+					const strVal = isValEmpty ? 'None' : (typeof v === 'string' ? v : JSON.stringify(v));
+					customChildren.push({
+						path: `/Custom/${k}`,
+						label: k,
+						fieldType: 'attachment',
+						currentValue: strVal,
+						options: []
+					});
+					continue;
 				}
 
-				if (parsedItems && Array.isArray(parsedItems)) {
+				const isDeclaredNonList = modField && modField.type && modField.type !== 'dynamic_list' && modField.type !== 'container';
+
+				let parsedItems: any[] | null = null;
+				if (!isDeclaredNonList) {
+					if (typeof v === 'string' && v.trim().startsWith('[')) {
+						try {
+							parsedItems = JSON.parse(v);
+						} catch { }
+					} else if (Array.isArray(v)) {
+						parsedItems = v;
+					}
+				}
+
+				if (parsedItems && Array.isArray(parsedItems) && !isDeclaredNonList) {
 					const listItems: any[] = [];
 					parsedItems.forEach((item, idx) => {
 						const idxNum = item._index || (idx + 1);
@@ -1545,7 +1716,7 @@ export class EntityDetailEditor extends EditorPane {
 							path: `/Custom/${k}/${idxNum}`,
 							label: itemTitle,
 							fieldType: 'composite',
-							currentValue: itemTitle,
+							currentValue: JSON.stringify(item),
 							children: itemFields
 						});
 					});
@@ -1554,6 +1725,7 @@ export class EntityDetailEditor extends EditorPane {
 						path: `/Custom/${k}`,
 						label: k,
 						fieldType: 'dynamic_list',
+						currentValue: typeof v === 'string' ? v : JSON.stringify(v),
 						children: listItems
 					});
 				} else {
@@ -1562,11 +1734,24 @@ export class EntityDetailEditor extends EditorPane {
 					const strVal = isValEmpty ? 'None' : rawVal;
 					const isRange = strVal !== 'None' && (strVal.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(strVal));
 					const isMultiline = strVal.length > 80 || strVal.includes('\n');
+
+					let resolvedType = modField?.type;
+					if (!resolvedType) {
+						if (isAttachment) resolvedType = 'attachment';
+						else if (isRange) resolvedType = 'date_range';
+						else if (strVal.toLowerCase() === 'true' || strVal.toLowerCase() === 'false') resolvedType = 'switch';
+						else if (isMultiline) resolvedType = 'textarea';
+						else resolvedType = 'text';
+					}
+
 					customChildren.push({
 						path: `/Custom/${k}`,
 						label: k,
-						fieldType: isRange ? 'date_range' : (isMultiline ? 'textarea' : 'text'),
-						currentValue: strVal
+						fieldType: resolvedType,
+						currentValue: strVal,
+						options: modField?.options || modField?.choices || [],
+						unit: modField?.unit,
+						precision: modField?.precision
 					});
 				}
 			}
@@ -1593,9 +1778,10 @@ export class EntityDetailEditor extends EditorPane {
 		switch (e.type) {
 			case 'openAgentCentral':
 			case 'aiButtonClicked': {
-				const field = e.field || e.source || '/Description';
-				const ticketId = this._lastParsedData?.ticketId || this._entityName || '';
+				const rawFolderId = this._entityUri ? basename(this._entityUri) : '';
+				const ticketId = this._lastParsedData?.ticketId || (rawFolderId && !rawFolderId.includes(' ') ? rawFolderId : '') || this._entityName || '';
 				const workspaceId = this._lastParsedData?.workspaceId || '';
+				const field = (e as any).field || '';
 
 				const locators: string[] = [];
 				if (workspaceId) {
@@ -1611,7 +1797,7 @@ export class EntityDetailEditor extends EditorPane {
 				const prompt = locators.length > 0 ? `[${locators.join(' | ')}] ` : '';
 				const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
 				const allTickets = await this._loadAllAvailableTickets();
-				const hierarchyTree = this._buildHierarchyTree(this._lastParsedData, agents, allTickets);
+				const hierarchyTree = this._buildHierarchyTree(this._lastParsedData, agents, allTickets, this._lastCustomModule);
 
 				try {
 					await this._commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
@@ -1623,7 +1809,8 @@ export class EntityDetailEditor extends EditorPane {
 						fieldType: e.fieldType,
 						currentValue: e.currentValue,
 						options: e.options,
-						hierarchyTree: hierarchyTree
+						hierarchyTree: hierarchyTree,
+						entityUri: this._entityUri?.toString()
 					});
 				} catch (err) {
 					console.error('Failed to open Agent Central:', err);
@@ -1861,7 +2048,7 @@ export class EntityDetailEditor extends EditorPane {
 		const logBlock = [
 			`## ${dateStr} ${timeStr}`,
 			'',
-			'### AI 执行记录',
+			'### AI Execution Log',
 			'',
 			newLogText,
 			''
@@ -1877,6 +2064,378 @@ export class EntityDetailEditor extends EditorPane {
 
 		lines.splice(insertIndex, 0, '', logBlock);
 		return lines.join('\n');
+	}
+
+	private async _executeActionTransition(targetStatus: string, actionLabel: string): Promise<void> {
+		const currentStatus = this._lastParsedData?.status || 'Todo';
+		if (!targetStatus || targetStatus.trim() === '') {
+			this._notificationService.info(`Action '${actionLabel}' triggered.`);
+			if (this._workLogUri) {
+				const logEntry = `- **Action**: Clicked '${actionLabel}'\n- **Status Transition**: None configured. Current status remains **${currentStatus}**.`;
+				await this._handleMessage({ type: 'addWorkLog', log: logEntry });
+			}
+			return;
+		}
+
+		if (currentStatus.trim().toLowerCase() === targetStatus.trim().toLowerCase()) {
+			this._notificationService.info(`Ticket '${this._entityName || 'ticket'}' is already in '${targetStatus}' status.`);
+			return;
+		}
+
+		try {
+			await this._handleMessage({
+				type: 'saveMetadata',
+				metadata: { 'Status': targetStatus },
+				customMetadata: {}
+			});
+
+			if (this._workLogUri) {
+				const logEntry = `- **Action Triggered**: '${actionLabel}'\n- **Status Transition**: Changed status from **${currentStatus}** to **${targetStatus}**.`;
+				await this._handleMessage({ type: 'addWorkLog', log: logEntry });
+			}
+
+			this._notificationService.info(`Ticket status updated to '${targetStatus}' via '${actionLabel}'.`);
+		} catch (err) {
+			console.error('Failed to execute action transition:', err);
+			this._notificationService.error(`Failed to transition status: ${String(err)}`);
+		}
+	}
+
+	private async _fetchUrlContent(
+		rawUrl: string,
+		credentials?: Array<{ key: string; value: string }>
+	): Promise<{ title: string; content: string; isAuthRequired?: boolean; rawError?: string }> {
+		let targetUrl = rawUrl.trim();
+		if (!/^https?:\/\//i.test(targetUrl)) {
+			targetUrl = 'https://' + targetUrl;
+		}
+
+		// 1. Try headless extraction via IWebContentExtractorService first
+		// This uses the integrated browser's session partition ('persist:vscode-browser'),
+		// so logged-in cookies and JavaScript dynamic single-page applications (SPA) are executed seamlessly!
+		try {
+			const extractorService = this._instantiationService.invokeFunction(accessor => accessor.get(IWebContentExtractorService));
+			if (extractorService) {
+				const uri = URI.parse(targetUrl);
+				const extractResults = await Promise.race([
+					extractorService.extract([uri], { followRedirects: true }),
+					new Promise<WebContentExtractResult[]>((_, reject) => setTimeout(() => reject(new Error('Extraction timed out')), 12000))
+				]);
+				if (extractResults && extractResults.length > 0) {
+					const first = extractResults[0];
+					if (first.status === 'ok' && first.result && first.result.length > 30) {
+						const title = first.title || targetUrl;
+						const formatted = `# ${title}\nURL: ${targetUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${first.result}`;
+						return { title, content: formatted };
+					} else if (first.status === 'error' && /auth|401|403|login|session|verification/i.test(first.error)) {
+						return {
+							title: targetUrl,
+							content: first.result || first.error,
+							isAuthRequired: true,
+							rawError: first.error
+						};
+					}
+				}
+			}
+		} catch {
+			// Fallback to HTTP request
+		}
+
+		// 2. Fallback to direct HTTP request with bridged browser cookies & user credentials
+		let html = '';
+		let statusCode = 200;
+		try {
+			let reqService: IRequestService = this._requestService;
+			try {
+				const mainProcessService = this._instantiationService.invokeFunction(accessor => accessor.get(IMainProcessService));
+				if (mainProcessService) {
+					reqService = new RequestChannelClient(mainProcessService.getChannel('request'));
+				}
+			} catch {
+				// Fallback to renderer requestService
+			}
+
+			const extraHeaders: Record<string, string> = {};
+			if (credentials && Array.isArray(credentials)) {
+				for (const c of credentials) {
+					if (!c.key || !c.value) { continue; }
+					const lowerKey = c.key.toLowerCase().trim();
+					if (lowerKey === 'cookie') {
+						extraHeaders['Cookie'] = c.value;
+					} else if (lowerKey === 'li_at') {
+						extraHeaders['Cookie'] = (extraHeaders['Cookie'] ? extraHeaders['Cookie'] + '; ' : '') + `li_at=${c.value}`;
+					} else if (lowerKey === 'token' || lowerKey === 'bearer') {
+						extraHeaders['Authorization'] = `Bearer ${c.value}`;
+					} else if (lowerKey === 'authorization') {
+						extraHeaders['Authorization'] = c.value;
+					} else {
+						extraHeaders[c.key.trim()] = c.value;
+					}
+				}
+			}
+
+			const requestOptions = {
+				type: 'GET',
+				url: targetUrl,
+				headers: {
+					'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+					'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+					'Accept-Language': 'en-US,en;q=0.9',
+					'Sec-Fetch-Dest': 'document',
+					'Sec-Fetch-Mode': 'navigate',
+					'Sec-Fetch-Site': 'none',
+					...extraHeaders
+				},
+				timeout: 20000,
+				callSite: 'browserPrimitive'
+			};
+			const context = await reqService.request(requestOptions, CancellationToken.None);
+			statusCode = context.res.statusCode || 200;
+			const text = await asText(context);
+			html = text || '';
+		} catch (err: any) {
+			const rawErr = err?.message || String(err);
+			return {
+				title: targetUrl,
+				content: `Failed to fetch URL (${targetUrl}): ${rawErr}`,
+				rawError: rawErr
+			};
+		}
+
+		if (!html) {
+			return { title: targetUrl, content: `Empty response received from ${targetUrl}`, rawError: 'Empty response body' };
+		}
+
+		// Detect true authentication walls (redirects to login, 401, 403, or authwall pages)
+		const isAuthPage = statusCode === 401 || statusCode === 403 ||
+			(html.includes('/uas/login') && !targetUrl.includes('/login') && !targetUrl.includes('/signup')) ||
+			(html.includes('authwall') && !targetUrl.includes('authwall'));
+
+		if (isAuthPage) {
+			return {
+				title: targetUrl,
+				content: html,
+				isAuthRequired: true,
+				rawError: `HTTP ${statusCode}: Authentication or Session Verification Required`
+			};
+		}
+
+		try {
+			let title = targetUrl;
+			const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/i);
+			if (titleMatch && titleMatch[1]) {
+				title = titleMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+			}
+
+			const cleanedText = this._cleanHtmlToText(html);
+			const maxChars = 25000;
+			const displayContent = cleanedText.length > maxChars
+				? cleanedText.slice(0, maxChars) + '\n\n... [Content truncated for display and AI context]'
+				: cleanedText;
+
+			const formatted = `# ${title}\nURL: ${targetUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${displayContent}`;
+			return { title, content: formatted };
+		} catch (parseErr: any) {
+			const cleaned = this._cleanHtmlToText(html);
+			return { title: targetUrl, content: cleaned };
+		}
+	}
+
+	private _cleanHtmlToText(html: string): string {
+		try {
+			// 1. Remove non-content tags including script, style, svg, iframe, noscript, etc.
+			let clean = html.replace(/<(script|style|svg|noscript|iframe|canvas|video|audio|nav|footer)[^>]*>[\s\S]*?<\/\1>/gi, ' ');
+			// 2. Convert block-level tags and line-breaks to newlines
+			clean = clean.replace(/<\/?(p|div|li|h[1-6]|tr|article|section|header|footer|br|blockquote|table|ol|ul)[^>]*>/gi, '\n');
+			// 3. Strip all remaining HTML tags
+			clean = clean.replace(/<[^>]+>/g, ' ');
+			// 4. Decode common HTML entities
+			clean = clean
+				.replace(/&nbsp;/gi, ' ')
+				.replace(/&amp;/gi, '&')
+				.replace(/&lt;/gi, '<')
+				.replace(/&gt;/gi, '>')
+				.replace(/&quot;/gi, '"')
+				.replace(/&#39;/gi, "'")
+				.replace(/&middot;/gi, '·');
+			// 5. Clean up multiple spaces and empty lines
+			const lines = clean.split('\n')
+				.map(l => l.replace(/[ \t]+/g, ' ').trim())
+				.filter(l => l.length > 0);
+
+			return lines.join('\n');
+		} catch {
+			return html.replace(/<[^>]+>/g, ' ').slice(0, 10000);
+		}
+	}
+
+	private async _executeBrowserFetch(card: HTMLElement, fieldKey: string, openTab: boolean): Promise<void> {
+		const urlInput = card.querySelector('.browser-url-input') as HTMLInputElement | null;
+		let url = urlInput?.value.trim() || '';
+		if (!url) {
+			this._notificationService.warn('Please enter a target URL before fetching.');
+			urlInput?.focus();
+			return;
+		}
+
+		if (!/^https?:\/\//i.test(url)) {
+			url = 'https://' + url;
+			if (urlInput) urlInput.value = url;
+		}
+
+		const statusEl = card.querySelector('.browser-fetch-status') as HTMLElement | null;
+		const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
+
+		if (openTab) {
+			try {
+				const uri = URI.parse(url);
+				await this._commandService.executeCommand('simpleBrowser.api.open', uri, {
+					viewColumn: -2, // ViewColumn.Beside
+					preserveFocus: false
+				});
+			} catch (e) {
+				try {
+					await this._commandService.executeCommand('simpleBrowser.show', url);
+				} catch (err) {
+					console.error('Failed to open simpleBrowser:', err);
+				}
+			}
+		}
+
+		if (statusEl) {
+			statusEl.textContent = 'Fetching webpage content...';
+			statusEl.style.color = '#38bdf8';
+		}
+
+		let creds: Array<{ key: string; value: string }> | undefined;
+		const rawVal = this._lastParsedData ? ((this._lastParsedData as any)[fieldKey] || (this._lastParsedData as any).data?.[fieldKey]) : undefined;
+		if (rawVal) {
+			if (typeof rawVal === 'object' && Array.isArray(rawVal.credentials)) {
+				creds = rawVal.credentials;
+			} else if (typeof rawVal === 'string') {
+				try {
+					const parsed = JSON.parse(rawVal);
+					if (Array.isArray(parsed.credentials)) {
+						creds = parsed.credentials;
+					}
+				} catch {}
+			}
+		}
+		if (!creds && this._lastCustomModule?.fields) {
+			const matchingF = this._lastCustomModule.fields.find((f: any) => f.label?.toLowerCase() === fieldKey.toLowerCase() || f.id?.toLowerCase() === fieldKey.toLowerCase() || f.key?.toLowerCase() === fieldKey.toLowerCase());
+			if (matchingF?.credentials) {
+				creds = matchingF.credentials;
+			}
+		}
+
+		try {
+			const result = await this._fetchUrlContent(url, creds);
+			if (result.isAuthRequired) {
+				throw new Error(result.rawError || 'Authentication Required');
+			}
+			if (result.content.startsWith('Failed to fetch URL')) {
+				throw new Error(result.rawError || result.content);
+			}
+			if (contentEl) {
+				contentEl.textContent = result.content;
+			}
+			const charCount = result.content.length;
+			const timestamp = new Date().toLocaleTimeString();
+			if (statusEl) {
+				statusEl.textContent = `Fetched at ${timestamp} (${charCount} chars)`;
+				statusEl.style.color = '#34d399';
+			}
+			await this._saveBrowserPrimitiveData(fieldKey, url, result.content, `${new Date().toLocaleDateString()} ${timestamp}`);
+			// Suppress notificationService.info toast to prevent webview "Paused due to Notification" overlay
+		} catch (err: any) {
+			const rawErr = err?.message || String(err);
+			const isAuthOrCors = /auth|401|403|login|session|verification/i.test(rawErr);
+			const timestamp = new Date().toLocaleString();
+			if (isAuthOrCors) {
+				if (statusEl) {
+					statusEl.textContent = 'Auth Required / Protected Page (Raw Error Logged)';
+					statusEl.style.color = '#fbbf24';
+				}
+				const formattedNotice = `[AUTH REQUIRED / PROTECTED PAGE]
+Target URL: ${url}
+Timestamp: ${timestamp}
+Status: Authentication Required / Access Restricted
+
+--- [RAW SERVER & NETWORK RESPONSE] ---
+${rawErr}
+
+--- [AUTOMATION & TROUBLESHOOTING GUIDANCE] ---
+1. Why this happened:
+   The destination endpoint (${url}) requires an active authenticated session or blocks unauthenticated automated background crawlers (CORS / Anti-Scraping / 307 Redirect to Login).
+
+2. Interactive Login:
+   Click the "Open in Tab" or "+ New Tab" button directly above this card to open a browser tab beside and log in.
+
+3. Automated AI Agent usage:
+   In the "Credentials / Authentication" section above, configure your login credentials (username/email & password or session token). AI agents will use these credentials when automating tasks on this ticket.`;
+
+				if (contentEl) {
+					contentEl.textContent = formattedNotice;
+				}
+				await this._saveBrowserPrimitiveData(fieldKey, url, formattedNotice, `${new Date().toLocaleDateString()} ${timestamp}`);
+				// Avoid notificationService.warn toast to prevent webview "Paused due to Notification" overlay
+			} else {
+				if (statusEl) {
+					statusEl.textContent = `Fetch failed: ${rawErr.slice(0, 30)}`;
+					statusEl.style.color = '#ef4444';
+				}
+				const formattedErr = `[HTTP / NETWORK FETCH ERROR]
+Target URL: ${url}
+Timestamp: ${timestamp}
+
+--- [RAW SERVER & NETWORK ERROR] ---
+${rawErr}
+
+--- [TROUBLESHOOTING GUIDANCE] ---
+1. Verify that the URL is correct, online, and publicly reachable.
+2. If the site blocks cross-origin requests, click "Open in Tab" or "+ New Tab" to inspect or view the site directly.`;
+
+				if (contentEl) {
+					contentEl.textContent = formattedErr;
+				}
+				await this._saveBrowserPrimitiveData(fieldKey, url, formattedErr, `${new Date().toLocaleDateString()} ${timestamp}`);
+				// Avoid notificationService.error toast to prevent webview "Paused due to Notification" overlay
+			}
+		}
+	}
+
+	private async _saveBrowserPrimitiveData(fieldKey: string, url: string, content: string, lastFetched: string): Promise<void> {
+		const rawVal = this._lastParsedData?.customMetadata?.[fieldKey];
+		let creds: any[] = [];
+		if (rawVal) {
+			try {
+				const parsed = JSON.parse(rawVal);
+				if (Array.isArray(parsed.credentials)) {
+					creds = parsed.credentials;
+				}
+			} catch {}
+		}
+		if (creds.length === 0 && this._lastCustomModule?.fields) {
+			const matchingF = this._lastCustomModule.fields.find((f: any) => f.label?.toLowerCase() === fieldKey.toLowerCase() || f.id?.toLowerCase() === fieldKey.toLowerCase());
+			if (matchingF?.credentials) {
+				creds = matchingF.credentials;
+			}
+		}
+		const bData = {
+			url,
+			credentials: creds,
+			content,
+			lastFetched
+		};
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: JSON.stringify(bData)
+		};
+		await this._handleMessage({
+			type: 'saveMetadata',
+			metadata: {},
+			customMetadata: updatedCustom
+		});
 	}
 
 	private async _getAttachments(entityUri: URI): Promise<string[]> {
@@ -1962,6 +2521,18 @@ export class EntityDetailEditor extends EditorPane {
 			statusBorder = 'rgba(148, 163, 184, 0.35)';
 		}
 
+		if (customModule && Array.isArray(customModule.statuses)) {
+			const customDef = customModule.statuses.find((s: any) =>
+				(s.label && s.label.toLowerCase() === status.toLowerCase()) ||
+				(s.id && s.id.toLowerCase() === status.toLowerCase())
+			);
+			if (customDef && customDef.color) {
+				statusColor = customDef.color;
+				statusBg = hexToRgba(customDef.color, 0.16);
+				statusBorder = hexToRgba(customDef.color, 0.35);
+			}
+		}
+
 		// 2. Type Colors
 		let colorSetting: { text: string; bg: string; border: string };
 		if (customModule && customModule.color) {
@@ -2019,7 +2590,7 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				const lines = entry.split('\n');
 				const header = lines[0].trim();
-				if (header.toLowerCase() === 'overview' || header.toLowerCase() === 'metadata' || header.toLowerCase() === '基本元数据') {
+				if (header.toLowerCase() === 'overview' || header.toLowerCase() === 'metadata') {
 					continue;
 				}
 				const body = lines.slice(1).join('\n').trim();
@@ -2037,25 +2608,202 @@ export class EntityDetailEditor extends EditorPane {
 
 		// 6. Custom Fields Section
 		let customFieldsHtml = '';
-		const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Git Remote URL', 'Git Branch'];
-		const customFieldsEntries = Object.entries(data.customMetadata || {}).filter(([k]) => !internalLifecycleKeys.includes(k));
-		if (customFieldsEntries.length > 0) {
-			for (const [k, v] of customFieldsEntries) {
-				let parsedArray: any[] | null = null;
-				if (typeof v === 'string' && v.trim().startsWith('[') && v.trim().endsWith(']')) {
-					try {
-						const parsed = JSON.parse(v.trim());
-						if (Array.isArray(parsed)) {
-							parsedArray = parsed;
-						}
-					} catch {}
-				}
+		const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Git Remote URL', 'Git Branch', 'Title', 'title', 'Description', 'description'];
+		const rawCustomMap = new Map<string, any>(Object.entries(data.customMetadata || {}));
+		for (const k of internalLifecycleKeys) {
+			rawCustomMap.delete(k);
+		}
 
-				if (parsedArray) {
+		interface IRenderField {
+			key: string;
+			label: string;
+			type: string;
+			val: any;
+			options?: any[];
+			buttons?: IActionButton[];
+			unit?: string;
+			precision?: number;
+			defaultUrl?: string;
+			credentials?: ICredentialPair[];
+			gitRemoteUrl?: string;
+			gitBranch?: string;
+		}
+
+		const fieldsToRender: IRenderField[] = [];
+		const handledKeys = new Set<string>();
+
+		if (customModule && Array.isArray(customModule.fields)) {
+			// 1. Follow canonical order defined in the module schema
+			for (const f of customModule.fields) {
+				const fLabel = f.label || f.id;
+				const fKey = f.id || f.label;
+				// Skip mandatory root fields (Title and Description) as they are already rendered in ticket header and main description card
+				if (fKey.toLowerCase() === 'title' || fLabel.toLowerCase() === 'title' || fKey.toLowerCase() === 'description' || fLabel.toLowerCase() === 'description') {
+					continue;
+				}
+				let matchedKey = '';
+				let val: any = '';
+				for (const [k, v] of rawCustomMap.entries()) {
+					if (k.toLowerCase() === fLabel.toLowerCase() ||
+						k.toLowerCase() === fKey.toLowerCase() ||
+						k.toLowerCase() === fKey.toLowerCase().replace(/_/g, ' ') ||
+						k.toLowerCase().replace(/_/g, ' ') === fLabel.toLowerCase().replace(/_/g, ' ')) {
+						matchedKey = k;
+						val = v;
+						break;
+					}
+				}
+				if (matchedKey) {
+					handledKeys.add(matchedKey);
+				}
+				fieldsToRender.push({
+					key: matchedKey || fLabel,
+					label: fLabel,
+					type: f.type || 'text',
+					val: val,
+					options: f.options || f.choices || [],
+					buttons: (f as any).buttons || [],
+					unit: f.unit,
+					precision: f.precision !== undefined ? f.precision : 2,
+					defaultUrl: (f as any).defaultUrl,
+					credentials: (f as any).credentials,
+					gitRemoteUrl: (f as any).gitRemoteUrl,
+					gitBranch: (f as any).gitBranch
+				});
+			}
+
+			// 2. Extra keys in ticket.md not in customModule.fields
+			// If value is non-empty, preserve it so historical user data is never lost.
+			for (const [k, v] of rawCustomMap.entries()) {
+				if (!handledKeys.has(k)) {
+					if (k.toLowerCase() === 'title' || k.toLowerCase() === 'description') {
+						continue;
+					}
+					const isNonEmpty = v !== undefined && v !== null && String(v).trim() !== '' && String(v).trim() !== '[]' && String(v).trim() !== '{}';
+					if (isNonEmpty) {
+						const isAtt = k.toLowerCase().includes('attachment') || (typeof v === 'string' && (v.trim().startsWith('[{"name":') || v.trim().startsWith('{"name":')));
+						fieldsToRender.push({
+							key: k,
+							label: k,
+							type: isAtt ? 'attachment' : ((typeof v === 'string' && v.trim().startsWith('[') && v.trim().endsWith(']')) ? 'dynamic_list' : 'text'),
+							val: v,
+							options: []
+						});
+					}
+				}
+			}
+		} else {
+			for (const [k, v] of rawCustomMap.entries()) {
+				if (k.toLowerCase() === 'title' || k.toLowerCase() === 'description') {
+					continue;
+				}
+				const isAtt = k.toLowerCase().includes('attachment') || (typeof v === 'string' && (v.trim().startsWith('[{"name":') || v.trim().startsWith('{"name":')));
+				fieldsToRender.push({
+					key: k,
+					label: k,
+					type: isAtt ? 'attachment' : ((typeof v === 'string' && v.trim().startsWith('[') && v.trim().endsWith(']')) ? 'dynamic_list' : 'text'),
+					val: v,
+					options: []
+				});
+			}
+		}
+
+		if (fieldsToRender.length > 0) {
+			for (const fieldItem of fieldsToRender) {
+				const k = fieldItem.label;
+				const rawKey = fieldItem.key;
+				const v = fieldItem.val;
+				const fType = fieldItem.type;
+
+				// 1:1 DEDICATED ATTACHMENT COMPONENT - ATOMIC, NEVER TREATED AS DYNAMIC LIST OR CONTAINER
+				const isAttachmentField = fType === 'attachment' ||
+					(customModule?.fields && Array.isArray(customModule.fields) && customModule.fields.some((f: any) => (f.label?.toLowerCase() === k.toLowerCase() || f.id?.toLowerCase() === k.toLowerCase()) && f.type === 'attachment')) ||
+					k.toLowerCase().includes('attachment') ||
+					(typeof v === 'string' && (v.trim().startsWith('[{"name":') || v.trim().startsWith('{"name":')));
+
+				if (isAttachmentField) {
+					let parsedAttachmentList: Array<{ name: string; size?: number }> | null = null;
+					if (typeof v === 'string') {
+						const trimmed = v.trim();
+						if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+							try {
+								const parsedJson = JSON.parse(trimmed);
+								if (Array.isArray(parsedJson)) {
+									parsedAttachmentList = parsedJson;
+								} else if (parsedJson && typeof parsedJson === 'object' && parsedJson.name) {
+									parsedAttachmentList = [parsedJson];
+								}
+							} catch { }
+						}
+					} else if (Array.isArray(v)) {
+						parsedAttachmentList = v;
+					} else if (v && typeof v === 'object' && (v as any).name) {
+						parsedAttachmentList = [v as any];
+					}
+
+					let fileItemsHtml = '';
+					const filesToRender: Array<{ name: string; size?: number }> = parsedAttachmentList || (v && String(v).trim() !== '' && String(v).trim() !== 'None' ? [{ name: String(v) }] : []);
+					if (filesToRender.length === 0) {
+						fileItemsHtml = '<div style="opacity: 0.5; font-style: italic; font-size: 0.88em; padding: 6px 0;">No attachments linked to this field yet.</div>';
+					} else {
+						fileItemsHtml = '<div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px;">';
+						for (const f of filesToRender) {
+							const isImg = /\.(png|jpe?g|gif|webp|svg)$/i.test(f.name);
+							const isPdf = /\.pdf$/i.test(f.name);
+							const iconSvg = isImg
+								? '<svg width="13" height="13" viewBox="0 0 16 16" fill="#10b981"><path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h11A1.5 1.5 0 0 1 15 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 13.5v-11zM2.5 2a.5.5 0 0 0-.5.5v8.793l3.146-3.147a.5.5 0 0 1 .708 0L8 10.293l3.646-3.647a.5.5 0 0 1 .708 0L14 8.293V2.5a.5.5 0 0 0-.5-.5h-11zm11.5 7.707-2.146-2.147-3.646 3.647a.5.5 0 0 1-.708 0L5.354 9.06 2 12.414V13.5a.5.5 0 0 0 .5.5h11a.5.5 0 0 0 .5-.5v-3.793z"/></svg>'
+								: (isPdf
+									? '<svg width="13" height="13" viewBox="0 0 16 16" fill="#ef4444"><path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/></svg>'
+									: '<svg width="13" height="13" viewBox="0 0 16 16" fill="#10b981"><path d="M14 4.5V14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2h5.5L14 4.5zm-3 0A1.5 1.5 0 0 1 9.5 3V1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V4.5h-2z"/></svg>');
+
+							fileItemsHtml += `
+								<div class="attachment-card-download" data-file-name="${this._escapeHtmlAttr(f.name)}" style="display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1); padding: 6px 12px; border-radius: 6px; cursor: pointer; transition: all 0.15s ease;" title="Download attachment">
+									${iconSvg}
+									<span style="font-size: 0.9em; font-weight: 500; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${this._escapeHtmlAttr(f.name)}</span>
+									${f.size ? `<span style="font-size: 0.75em; opacity: 0.5;">(${(f.size / 1024).toFixed(0)} KB)</span>` : ''}
+								</div>
+							`;
+						}
+						fileItemsHtml += '</div>';
+					}
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; font-weight: 700; text-transform: uppercase;">Attachment</span>
+								</div>
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="attachment" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(parsedAttachmentList ? JSON.stringify(parsedAttachmentList) : String(v || ''))}" title="Edit ${k} with AI">
+										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									</button>
+								</div>
+							</div>
+							<div class="custom-field-view">
+								${fileItemsHtml}
+							</div>
+						</div>
+					`;
+				} else if (fType === 'dynamic_list' || (typeof v === 'string' && v.trim().startsWith('[') && v.trim().endsWith(']'))) {
+					let parsedArray: any[] | null = null;
+					if (typeof v === 'string' && v.trim().startsWith('[')) {
+						try {
+							const parsed = JSON.parse(v.trim());
+							if (Array.isArray(parsed)) {
+								parsedArray = parsed;
+							}
+						} catch {}
+					} else if (Array.isArray(v)) {
+						parsedArray = v;
+					} else {
+						parsedArray = [];
+					}
+
 					// Dynamic List Container
 					let subCardsViewHtml = '';
 
-					if (parsedArray.length === 0) {
+					if (!parsedArray || parsedArray.length === 0) {
 						subCardsViewHtml = '<div style="opacity: 0.45; font-style: italic; padding: 6px 0;">No entries in this list.</div>';
 					} else {
 						parsedArray.forEach((item: any, idx: number) => {
@@ -2085,7 +2833,7 @@ export class EntityDetailEditor extends EditorPane {
 													<span style="font-size: 0.9em; font-weight: 500; color: var(--vscode-editor-foreground);">${subVal || '<span style="opacity:0.4; font-style:italic;">None</span>'}</span>
 												` : '')}
 											</div>
-											<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}/${idxNum}/${subK}" data-ai-field-type="${isDateOrRange ? 'date_range' : (isLong ? 'textarea' : 'text')}" data-ai-field-label="${subK}" data-ai-current-value="${this._escapeHtmlAttr(subVal)}" title="Edit ${subK} with AI" style="padding: 2px 5px; font-size: 0.75em;">
+											<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}/${idxNum}/${subK}" data-ai-field-type="${isDateOrRange ? 'date_range' : (isLong ? 'textarea' : 'text')}" data-ai-field-label="${subK}" data-ai-current-value="${this._escapeHtmlAttr(subVal)}" title="Edit ${subK} with AI" style="padding: 2px 5px; font-size: 0.75em;">
 												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											</button>
 										</div>
@@ -2105,7 +2853,7 @@ export class EntityDetailEditor extends EditorPane {
 											<span style="font-size: 0.75em; font-weight: 700; background: rgba(56,189,248,0.18); color: #38bdf8; padding: 2px 7px; border-radius: 4px; letter-spacing: 0.05em;">#${idxNum}</span>
 											<span style="font-size: 0.95em; font-weight: 600; color: var(--vscode-editor-foreground);">${itemTitle}</span>
 										</div>
-										<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}/${idxNum}" data-ai-field-type="composite" data-ai-field-label="${itemTitle}" data-ai-current-value="${this._escapeHtmlAttr(itemTitle)}" title="Edit ${itemTitle} with AI">
+										<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}/${idxNum}" data-ai-field-type="composite" data-ai-field-label="${itemTitle}" data-ai-current-value="${this._escapeHtmlAttr(itemTitle)}" title="Edit ${itemTitle} with AI">
 											<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 										</button>
 									</div>
@@ -2124,7 +2872,7 @@ export class EntityDetailEditor extends EditorPane {
 									<span>${k}</span>
 									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(6,182,212,0.15); color: #06b6d4; font-weight: 700; text-transform: uppercase;">Dynamic List</span>
 								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}" data-ai-field-type="dynamic_list" data-ai-field-label="${k}" title="Edit ${k} with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="dynamic_list" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(typeof v === 'string' ? v : JSON.stringify(v))}" title="Edit ${k} with AI">
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -2133,24 +2881,368 @@ export class EntityDetailEditor extends EditorPane {
 							</div>
 						</div>
 					`;
-				} else {
-					// Single Value Property
-					const isRange = typeof v === 'string' && (v.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(v));
-					const isMultiline = v.length > 80 || v.includes('\n') || ['experience', 'description', 'detail', 'content', 'notes', 'summary', 'project', 'background'].some(sub => k.toLowerCase().includes(sub));
+				} else if (fType === 'switch' || fType === 'boolean' || k.toLowerCase().includes('flag')) {
+					const isChecked = String(v).trim().toLowerCase() === 'true';
 					customFieldsHtml += `
 						<div class="section-card custom-property-card">
 							<div class="section-title">
-								<span>${k}</span>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${k}" data-ai-field-type="${isRange ? 'date_range' : (isMultiline ? 'textarea' : 'text')}" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(v)}" title="Edit ${k} with AI">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: ${isChecked ? 'rgba(16,185,129,0.15)' : 'rgba(148,163,184,0.15)'}; color: ${isChecked ? '#10b981' : '#94a3b8'}; font-weight: 700; text-transform: uppercase;">Switch</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="switch" data-ai-field-label="${k}" data-ai-current-value="${isChecked ? 'true' : 'false'}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view" style="display: flex; align-items: center; gap: 10px; padding: 6px 0;">
+								<div style="width: 36px; height: 20px; border-radius: 10px; background: ${isChecked ? '#10b981' : 'rgba(255,255,255,0.14)'}; position: relative; border: 1px solid ${isChecked ? '#059669' : 'rgba(255,255,255,0.2)'};">
+									<div style="width: 14px; height: 14px; border-radius: 50%; background: #fff; position: absolute; top: 2px; left: ${isChecked ? '18px' : '2px'}; box-shadow: 0 1px 3px rgba(0,0,0,0.4);"></div>
+								</div>
+								<span style="font-size: 0.9em; font-weight: 600; color: ${isChecked ? '#10b981' : '#94a3b8'};">
+									${isChecked ? 'ON (true)' : 'OFF (false)'}
+								</span>
+							</div>
+						</div>
+					`;
+				} else if (fType === 'select' || fType === 'single_select') {
+					customFieldsHtml += `
+						<div class="section-card custom-property-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;">Select</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="select" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(fieldItem.options || []))}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view" style="padding: 4px 0;">
+								${v ? `
+									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #93c5fd; border: 1px solid rgba(59,130,246,0.25); font-size: 0.9em; font-weight: 500;">
+										<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M3 9.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg>
+										${v}
+									</span>
+								` : '<span style="opacity: 0.45; font-style: italic;">No option selected.</span>'}
+							</div>
+						</div>
+					`;
+				} else if (fType === 'multiselect' || fType === 'tags') {
+					let selectedArr: string[] = [];
+					if (Array.isArray(v)) {
+						selectedArr = v;
+					} else if (typeof v === 'string') {
+						const tr = v.trim();
+						if (tr.startsWith('[')) {
+							try { selectedArr = JSON.parse(tr); } catch {}
+						} else if (tr && tr !== 'None' && tr !== 'null' && tr !== 'undefined') {
+							selectedArr = tr.split(',').map(s => s.trim()).filter(Boolean);
+						}
+					}
+					customFieldsHtml += `
+						<div class="section-card custom-property-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(99,102,241,0.15); color: #818cf8; font-weight: 700; text-transform: uppercase;">Multiselect</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="multiselect" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(fieldItem.options || []))}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view" style="display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0;">
+								${selectedArr.length > 0 ? selectedArr.map(item => `
+									<span style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 12px; background: rgba(99,102,241,0.15); color: #818cf8; border: 1px solid rgba(99,102,241,0.3); font-size: 0.85em; font-weight: 500;">
+										🏷️ ${this._escapeHtmlAttr(String(item))}
+									</span>
+								`).join('') : '<span style="opacity: 0.45; font-style: italic;">No options selected.</span>'}
+							</div>
+						</div>
+					`;
+				} else if (fType === 'date') {
+					customFieldsHtml += `
+						<div class="section-card custom-property-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;">Date</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="date" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view" style="padding: 4px 0;">
+								${v ? `
+									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #60a5fa; border: 1px solid rgba(59,130,246,0.25); font-size: 0.9em; font-weight: 500;">
+										📅 ${v}
+									</span>
+								` : '<span style="opacity: 0.45; font-style: italic;">No date set.</span>'}
+							</div>
+						</div>
+					`;
+				} else if (fType === 'time') {
+					customFieldsHtml += `
+						<div class="section-card custom-property-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(234,179,8,0.15); color: #facc15; font-weight: 700; text-transform: uppercase;">Time</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="time" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view" style="padding: 4px 0;">
+								${v ? `
+									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(234,179,8,0.12); color: #facc15; border: 1px solid rgba(234,179,8,0.25); font-size: 0.9em; font-weight: 500;">
+										🕒 ${v}
+									</span>
+								` : '<span style="opacity: 0.45; font-style: italic;">No time set.</span>'}
+							</div>
+						</div>
+					`;
+				} else if (fType === 'datetime') {
+					customFieldsHtml += `
+						<div class="section-card custom-property-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(168,85,247,0.15); color: #c084fc; font-weight: 700; text-transform: uppercase;">DateTime</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="datetime" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view" style="padding: 4px 0;">
+								${v ? `
+									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(168,85,247,0.12); color: #c084fc; border: 1px solid rgba(168,85,247,0.25); font-size: 0.9em; font-weight: 500;">
+										📅 🕒 ${v}
+									</span>
+								` : '<span style="opacity: 0.45; font-style: italic;">No datetime set.</span>'}
+							</div>
+						</div>
+					`;
+				} else if (fType === 'date_range' || fType === 'time_range' || fType === 'datetime_range' || (typeof v === 'string' && (v.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(v)))) {
+					const rangeType = fType || 'date_range';
+					customFieldsHtml += `
+						<div class="section-card custom-property-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; font-weight: 700; text-transform: uppercase;">Range</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="${rangeType}" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view" style="padding: 4px 0;">
+								${v ? `
+									<span class="range-badge" style="font-size: 0.9em; font-weight: 600; padding: 3px 10px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 6px;">
+										${v}
+									</span>
+								` : '<span style="opacity: 0.45; font-style: italic;">No range set.</span>'}
+							</div>
+						</div>
+					`;
+				} else if (fType === 'button_group' || fType === 'button') {
+					const buttonsList: IActionButton[] = (fieldItem.buttons && fieldItem.buttons.length > 0)
+						? fieldItem.buttons
+						: [
+							{ id: 'btn_1', label: 'Approve', color: '#10b981', targetStatus: 'Done' },
+							{ id: 'btn_2', label: 'Reject', color: '#ef4444', targetStatus: 'Blocked' }
+						];
+
+					const buttonsHtml = buttonsList.map(btn => {
+						const btnColor = btn.color || '#3b82f6';
+						const targetStatus = btn.targetStatus || '';
+						return `
+							<button type="button" class="ticket-action-transition-btn"
+								data-action-id="${this._escapeHtmlAttr(btn.id)}"
+								data-action-label="${this._escapeHtmlAttr(btn.label)}"
+								data-target-status="${this._escapeHtmlAttr(targetStatus)}"
+								data-field-key="${this._escapeHtmlAttr(rawKey)}"
+								style="--btn-accent-color: ${btnColor};"
+								title="${targetStatus ? `Trigger '${btn.label}' and transition to '${targetStatus}'` : `Trigger '${btn.label}'`}">
+								<span class="action-btn-text">${this._escapeHtmlAttr(btn.label)}</span>
+							</button>
+						`;
+					}).join('');
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card action-button-group-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;">Actions</span>
+								</div>
+							</div>
+							<div class="custom-field-view" style="padding: 6px 0;">
+								<div class="action-buttons-group-row">
+									${buttonsHtml}
+								</div>
+							</div>
+						</div>
+					`;
+				} else if (fType === 'number') {
+					let formattedVal = '';
+					const numVal = (v !== undefined && v !== null && String(v).trim() !== '') ? Number(v) : NaN;
+					const prec = fieldItem.precision !== undefined ? fieldItem.precision : 2;
+					if (!isNaN(numVal)) {
+						const formattedNum = numVal.toLocaleString('en-US', {
+							minimumFractionDigits: prec,
+							maximumFractionDigits: prec
+						});
+						const unit = (fieldItem.unit || '').trim();
+						if (unit) {
+							if (/^[$€¥£₹₽₿]/.test(unit)) {
+								formattedVal = `${unit}${formattedNum}`;
+							} else {
+								formattedVal = `${formattedNum} ${unit}`;
+							}
+						} else {
+							formattedVal = formattedNum;
+						}
+					}
+					customFieldsHtml += `
+						<div class="section-card custom-property-card number-field-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(234, 179, 8, 0.18); color: #facc15; font-weight: 700; text-transform: uppercase;">Number</span>
+									${fieldItem.unit ? `<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(255, 255, 255, 0.08); color: #94a3b8; font-weight: 600;">${this._escapeHtmlAttr(fieldItem.unit)}</span>` : ''}
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="number" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v ?? ''))}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view" style="padding: 4px 0;">
+								${formattedVal ? `
+									<div style="display: inline-flex; align-items: baseline; gap: 6px; background: rgba(234, 179, 8, 0.08); border: 1px solid rgba(234, 179, 8, 0.25); border-radius: 6px; padding: 6px 14px;">
+										<span style="font-size: 1.25em; font-weight: 700; color: #facc15; font-variant-numeric: tabular-nums;">${formattedVal}</span>
+									</div>
+								` : '<span style="opacity: 0.45; font-style: italic;">No number set.</span>'}
+							</div>
+						</div>
+					`;
+				} else if (fType === 'git') {
+					// Git primitive is integrated into the dedicated sidebar Git repository binding
+					continue;
+				} else if (fType === 'browser') {
+					let browserUrl = fieldItem.defaultUrl || '';
+					let browserCreds: ICredentialPair[] = fieldItem.credentials || [];
+					let browserContent = '';
+					let lastFetchedText = '';
+
+					if (v) {
+						if (typeof v === 'string') {
+							const trimmed = v.trim();
+							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+								try {
+									const parsedObj = JSON.parse(trimmed);
+									if (parsedObj.url !== undefined) browserUrl = parsedObj.url;
+									if (Array.isArray(parsedObj.credentials) && parsedObj.credentials.length > 0) browserCreds = parsedObj.credentials;
+									if (parsedObj.content) browserContent = parsedObj.content;
+									if (parsedObj.lastFetched) lastFetchedText = parsedObj.lastFetched;
+								} catch {
+									browserUrl = trimmed;
+								}
+							} else {
+								browserUrl = trimmed;
+							}
+						} else if (typeof v === 'object' && v !== null) {
+							if ((v as any).url) browserUrl = (v as any).url;
+							if (Array.isArray((v as any).credentials)) browserCreds = (v as any).credentials;
+							if ((v as any).content) browserContent = (v as any).content;
+							if ((v as any).lastFetched) lastFetchedText = (v as any).lastFetched;
+						}
+					}
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card browser-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.18); color: #38bdf8; font-weight: 700; text-transform: uppercase;">Browser</span>
+									${browserCreds.length > 0 ? `<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(167,139,250,0.15); color: #c084fc; font-weight: 600;">🔑 ${browserCreds.length} Credentials</span>` : ''}
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="browser" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(browserUrl)}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+
+							<!-- Navigation Bar -->
+							<div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
+								<div style="position: relative; flex: 1; display: flex; align-items: center;">
+									<span style="position: absolute; left: 10px; opacity: 0.5; font-size: 13px; pointer-events: none;">🌐</span>
+									<input type="text" class="browser-url-input" value="${this._escapeHtmlAttr(browserUrl)}" placeholder="https://example.com..." style="width: 100%; padding: 7px 10px 7px 32px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
+								</div>
+								<!-- Silent Fetch Button -->
+								<button type="button" class="browser-silent-fetch-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Fetch webpage in background and extract text/HTML for AI" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); transition: all 0.15s ease;">
+									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12l-4-4h2.5V3h3v5H12l-4 4zm-7 2h14v1.5H1V14z"/></svg>
+									<span>Fetch (Silent)</span>
+								</button>
+								<!-- Open in Tab Button -->
+								<button type="button" class="browser-open-tab-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Open webpage in a new VS Code browser tab" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(167, 139, 250, 0.15); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.35); transition: all 0.15s ease;">
+									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 2.5A1.5 1.5 0 0 1 3 1h10a1.5 1.5 0 0 1 1.5 1.5v11a1.5 1.5 0 0 1-1.5 1.5H3a1.5 1.5 0 0 1-1.5-1.5v-11zM3 2a.5.5 0 0 0-.5.5V4h11V2.5a.5.5 0 0 0-.5-.5H3zm11 3H2v8.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5V5z"/></svg>
+									<span>Open in Tab</span>
+								</button>
+								<!-- New Tab Button (+) -->
+								<button type="button" class="browser-new-tab-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Open a new independent browser tab beside (e.g. for login, cookies, or manual navigation)" style="display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(52, 211, 153, 0.15); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.35); transition: all 0.15s ease;">
+									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2a.75.75 0 0 1 .75.75v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5A.75.75 0 0 1 8 2z"/></svg>
+									<span>+ New Tab</span>
+								</button>
+							</div>
+
+							<!-- Credentials Drawer -->
+							${browserCreds.length > 0 ? `
+								<div style="background: rgba(0,0,0,0.18); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 6px;">
+									<div style="font-size: 10.5px; font-weight: 700; color: #a78bfa; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px;">
+										<span>🔑 Credentials / Authentication</span>
+										<span style="font-size: 9.5px; opacity: 0.5; font-weight: normal; text-transform: none;">(Available for AI automated navigation)</span>
+									</div>
+									<div style="display: flex; flex-wrap: wrap; gap: 8px;">
+										${browserCreds.map(c => `
+											<div class="browser-cred-item" style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; padding: 3px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 6px;">
+												<span style="opacity: 0.7; font-weight: 600;">${this._escapeHtmlAttr(c.key)}:</span>
+												<span class="cred-secret-text" data-real="${this._escapeHtmlAttr(c.value)}" style="font-family: monospace;">••••••••</span>
+												<span class="cred-toggle-eye" style="cursor: pointer; opacity: 0.6; font-size: 11px;" title="Click to show/hide">👁️</span>
+											</div>
+										`).join('')}
+									</div>
+								</div>
+							` : ''}
+
+							<!-- Web Content Display Area -->
+							<div class="browser-content-container" style="display: flex; flex-direction: column; gap: 6px;">
+								<div style="display: flex; justify-content: space-between; align-items: center;">
+									<div style="display: flex; align-items: center; gap: 8px;">
+										<span style="font-size: 11px; font-weight: 600; opacity: 0.75; text-transform: uppercase;">Extracted Web Content (AI-Ready):</span>
+										<span class="browser-fetch-status" style="font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;">${lastFetchedText ? `Last fetched: ${this._escapeHtmlAttr(lastFetchedText)}` : 'Not fetched yet'}</span>
+									</div>
+									<div style="display: flex; gap: 6px;">
+										<button type="button" class="browser-copy-content-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Copy Text</button>
+										<button type="button" class="browser-clear-content-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Clear</button>
+									</div>
+								</div>
+								<div class="browser-content-display desc-content-box" style="max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${browserContent ? this._escapeHtml(browserContent) : '<span style="opacity: 0.4; font-style: italic;">No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to extract page contents.</span>'}</div>
+							</div>
+						</div>
+					`;
+				} else {
+					// Textarea or Single-line Text
+					const isMultiline = fType === 'textarea' || (typeof v === 'string' && (v.length > 80 || v.includes('\n') || ['experience', 'description', 'detail', 'content', 'notes', 'summary', 'project', 'background'].some(sub => k.toLowerCase().includes(sub))));
+					customFieldsHtml += `
+						<div class="section-card custom-property-card">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									${isMultiline ? '<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.08); color: #ccc; font-weight: 700; text-transform: uppercase;">Textarea</span>' : ''}
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="${isMultiline ? 'textarea' : 'text'}" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
 							<div class="custom-field-view desc-content-box">
-								${isRange ? `
-									<span class="range-badge" style="font-size: 0.9em; font-weight: 600; padding: 3px 10px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 6px;">
-										${v}
-									</span>
-								` : (v ? this._markdownToHtml(v) : '<span style="opacity: 0.45; font-style: italic;">No content provided.</span>')}
+								${v ? this._markdownToHtml(String(v)) : '<span style="opacity: 0.45; font-style: italic;">No content provided.</span>'}
 							</div>
 						</div>
 					`;
@@ -2494,7 +3586,7 @@ export class EntityDetailEditor extends EditorPane {
 										<span>Copy Prompt</span>
 									</button>
 								` : ''}
-								<button type="button" class="ai-edit-btn" data-ai-field="${isAgent ? '/Instructions/System Prompt' : '/Instructions'}" data-ai-field-type="textarea" data-ai-field-label="${isAgent ? 'System Prompt' : 'Instructions'}" data-ai-current-value="${this._escapeHtmlAttr(agentSystemPrompt || data.instructionNotes || '')}" title="Edit with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="${isAgent ? '/Instructions/System Prompt' : '/Instructions'}" data-ai-field-type="${isAgent ? 'textarea' : 'container'}" data-ai-field-label="${isAgent ? 'System Prompt' : 'Instructions'}" data-ai-current-value="${this._escapeHtmlAttr(agentSystemPrompt || data.ticketPrompt || '')}" title="Edit with AI">
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
@@ -2535,37 +3627,11 @@ export class EntityDetailEditor extends EditorPane {
 								</div>
 								<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Type Prompt configured.</span>'}</div>
 							</div>
-
-							${data.instructionNotes && (!isAgent || data.instructionNotes !== agentSystemPrompt) ? `
-								<div class="instruction-item" style="padding: 12px 16px; background: rgba(0,0,0,0.15); border-radius: 6px; border: 1px solid rgba(255,255,255,0.04);">
-									<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-										<div style="font-size: 0.78em; font-weight: 700; opacity: 0.6; letter-spacing: 0.04em; text-transform: uppercase;">Instruction Notes</div>
-										<button type="button" class="ai-edit-btn" data-ai-field="/Instructions/Instruction Notes" data-ai-field-type="textarea" data-ai-field-label="Instruction Notes" data-ai-current-value="${this._escapeHtmlAttr(data.instructionNotes || '')}" title="Edit Instruction Notes with AI">
-											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-										</button>
-									</div>
-									<div style="font-size: 0.9em; line-height: 1.5;">${this._markdownToHtml(data.instructionNotes)}</div>
-								</div>
-							` : ''}
 						</div>
 					</div>
 
 					<!-- Custom Properties -->
 					${customFieldsHtml}
-
-					<!-- Attachments Card -->
-					<div class="section-card">
-						<div class="section-title">
-							<span>Attachments (${attachments.length})</span>
-						</div>
-						<div id="attachment-dropzone" class="dropzone">
-							<span style="font-size: 0.88em; opacity: 0.7;">Drag and drop files here or click to browse</span>
-							<input type="file" id="file-input" style="display: none;" />
-						</div>
-						<div id="attachments-container">
-							${attachmentsHtml}
-						</div>
-					</div>
 
 					<!-- Work Logs Card -->
 					<div class="section-card">
@@ -2611,7 +3677,7 @@ export class EntityDetailEditor extends EditorPane {
 									</svg>
 								</button>
 							</div>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : this._workspaceStatuses.statuses))}" title="Edit Status with AI">
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map((s: any) => s.label || s.id) : this._workspaceStatuses.statuses)))}" title="Edit Status with AI">
 								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							</button>
 						</div>
@@ -2619,7 +3685,7 @@ export class EntityDetailEditor extends EditorPane {
 							<span id="status-view-val" style="display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px; text-transform: uppercase;">${status}</span>
 						</div>
 
-						<!-- Status Lifecycle & Mapping Popover (浮窗) -->
+						<!-- Status Lifecycle & Mapping Popover -->
 						<div id="status-lifecycle-popover" class="status-lifecycle-popover" style="display: none; position: absolute; top: calc(100% + 6px); right: 0; width: 330px; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.06); z-index: 1000; padding: 14px; box-sizing: border-box; flex-direction: column; gap: 10px;">
 							<!-- Header -->
 							<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px;">
@@ -2647,7 +3713,13 @@ export class EntityDetailEditor extends EditorPane {
 								${(() => {
 									let mappingObj: { [key: string]: string } = {};
 									let hasCustomMapping = false;
-									if (this._workspaceStatuses?.mapping && Object.keys(this._workspaceStatuses.mapping).length > 0) {
+									if (customModule?.statuses && Array.isArray(customModule.statuses) && customModule.statuses.length > 0) {
+										for (const stDef of customModule.statuses) {
+											const stName = stDef.label || stDef.id;
+											mappingObj[stName] = stDef.category || 'Todo';
+										}
+										hasCustomMapping = true;
+									} else if (this._workspaceStatuses?.mapping && Object.keys(this._workspaceStatuses.mapping).length > 0) {
 										mappingObj = { ...this._workspaceStatuses.mapping };
 										hasCustomMapping = true;
 									} else if (data.customMetadata?.['Status Mapping']) {
@@ -2859,13 +3931,13 @@ export class EntityDetailEditor extends EditorPane {
 						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.createdAt}</span>
 					</div>
 
-					<div class="sidebar-row" style="${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace') ? '' : 'border-bottom: none; margin-bottom: 0;'}">
+					<div class="sidebar-row" style="${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some((f: any) => f.type === 'git'))) ? '' : 'border-bottom: none; margin-bottom: 0;'}">
 						<span class="sidebar-label">LAST UPDATED AT</span>
 						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
 					</div>
 
 					<!-- Git Configuration (Repository & Branch) -->
-					${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace') ? `
+					${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some((f: any) => f.type === 'git'))) ? `
 						<div class="sidebar-row" style="margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);">
 							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 								<span class="sidebar-label" style="display: flex; align-items: center; gap: 5px;">

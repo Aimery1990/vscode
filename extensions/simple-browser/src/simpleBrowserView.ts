@@ -166,7 +166,7 @@ export class SimpleBrowserView extends Disposable {
 				</header>
 				<div class="content">
 					<div class="iframe-focused-alert">${vscode.l10n.t("Focus Lock")}</div>
-					<iframe sandbox="allow-scripts allow-forms allow-same-origin allow-downloads"></iframe>
+					<iframe sandbox="allow-scripts allow-forms allow-same-origin allow-downloads allow-popups allow-popups-to-escape-sandbox allow-modals allow-storage-access-by-user-activation"></iframe>
 				</div>
 
 				<script src="${mainJs}" nonce="${nonce}"></script>

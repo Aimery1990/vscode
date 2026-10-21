@@ -1025,6 +1025,10 @@
 				if (options.allowScripts) {
 					sandboxRules.add('allow-scripts');
 					sandboxRules.add('allow-downloads');
+					sandboxRules.add('allow-popups');
+					sandboxRules.add('allow-popups-to-escape-sandbox');
+					sandboxRules.add('allow-modals');
+					sandboxRules.add('allow-storage-access-by-user-activation');
 				}
 				if (options.allowForms) {
 					sandboxRules.add('allow-forms');

@@ -42,7 +42,17 @@
 	font-size: 13px;
 	display: flex;
 	align-items: center;
-	gap: 6px;
+	gap: 8px;
+}
+
+.centered-chat-popup-title>.centered-chat-popup-title-icon {
+	width: 18px;
+	height: 10.5px;
+	flex: 0 0 auto;
+	background-image: url('./AnyAgent-logo.svg');
+	background-repeat: no-repeat;
+	background-position: center center;
+	background-size: contain;
 }
 
 .centered-chat-popup-controls {
@@ -398,6 +408,22 @@
 	background: rgba(255, 255, 255, 0.1);
 }
 
+.centered-chat-popup-send-btn:disabled,
+.centered-chat-popup-send-btn.disabled {
+	opacity: 0.35 !important;
+	cursor: not-allowed !important;
+	pointer-events: none !important;
+	background: rgba(255, 255, 255, 0.04) !important;
+	border-color: rgba(255, 255, 255, 0.08) !important;
+	transform: none !important;
+}
+
+.centered-chat-popup-send-btn.is-transcribing {
+	opacity: 0.75 !important;
+	color: var(--vscode-focusBorder, #007fd4) !important;
+	cursor: wait !important;
+}
+
 
 /* Titlebar Widget styles for Option A */
 .monaco-workbench .centered-chat-titlebar-widget {
@@ -417,9 +443,25 @@
 }
 
 .monaco-workbench .centered-chat-titlebar-widget>.centered-chat-titlebar-widget-icon {
-	font-size: 16px;
-	color: var(--vscode-titleBar-activeForeground);
+	width: 16px;
+	height: 10px;
 	flex: 0 0 auto;
+	background-image: url('./AnyAgent-logo.svg');
+	background-repeat: no-repeat;
+	background-position: center center;
+	background-size: contain;
+}
+
+.monaco-workbench .codicon-centered-chat-icon:before {
+	content: '';
+	display: inline-block;
+	width: 15px;
+	height: 9px;
+	vertical-align: middle;
+	background-image: url('./AnyAgent-logo.svg');
+	background-repeat: no-repeat;
+	background-position: center center;
+	background-size: contain;
 }
 
 .monaco-workbench .centered-chat-titlebar-widget>.centered-chat-titlebar-widget-label {
@@ -687,6 +729,7 @@
 		opacity: 0;
 		transform: translateY(6px);
 	}
+
 	to {
 		opacity: 1;
 		transform: translateY(0);
@@ -702,7 +745,7 @@
 	background: rgba(0, 0, 0, 0.2);
 }
 
-.centered-chat-model-search-wrapper > .codicon-search {
+.centered-chat-model-search-wrapper>.codicon-search {
 	font-size: 13px;
 	opacity: 0.6;
 }
@@ -804,9 +847,12 @@
 }
 
 @keyframes pulseStop {
-	0%, 100% {
+
+	0%,
+	100% {
 		box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.4);
 	}
+
 	50% {
 		box-shadow: 0 0 0 6px rgba(220, 38, 38, 0);
 	}
@@ -886,8 +932,15 @@
 }
 
 @keyframes blinkCursor {
-	0%, 100% { opacity: 1; }
-	50% { opacity: 0; }
+
+	0%,
+	100% {
+		opacity: 1;
+	}
+
+	50% {
+		opacity: 0;
+	}
 }
 
 .centered-chat-copy-code-btn {

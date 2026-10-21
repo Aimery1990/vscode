@@ -20,6 +20,7 @@ export interface IEntityGitSnapshot {
 
 export type CustomFieldType =
 	| 'text'
+	| 'number'
 	| 'textarea'
 	| 'select'
 	| 'multiselect'
@@ -30,7 +31,25 @@ export type CustomFieldType =
 	| 'date_range'
 	| 'time_range'
 	| 'datetime_range'
-	| 'dynamic_list';
+	| 'dynamic_list'
+	| 'attachment'
+	| 'button_group'
+	| 'button'
+	| 'browser'
+	| 'git';
+
+export interface IActionButton {
+	id: string;
+	label: string;
+	color?: string;
+	targetStatus?: string;
+}
+
+export interface ICredentialPair {
+	id: string;
+	key: string;
+	value: string;
+}
 
 export interface ICustomField {
 	id: string;
@@ -39,6 +58,18 @@ export interface ICustomField {
 	options?: string[];
 	itemFields?: ICustomField[];
 	componentRef?: string;
+	buttons?: IActionButton[];
+	unit?: string;
+	precision?: number;
+	min?: number;
+	max?: number;
+	step?: number;
+	required?: boolean;
+	defaultUrl?: string;
+	defaultContent?: string;
+	credentials?: ICredentialPair[];
+	gitRemoteUrl?: string;
+	gitBranch?: string;
 }
 
 export interface ICompositeComponent {
@@ -49,6 +80,22 @@ export interface ICompositeComponent {
 	storageScope?: 'global' | 'workspace';
 }
 
+export interface IStatusDefinition {
+	id: string;
+	label: string;
+	color: string;
+	category: 'Todo' | 'In Progress' | 'Done' | 'Blocked' | 'Removed';
+	description?: string;
+}
+
+export const DEFAULT_STATUS_DEFINITIONS: IStatusDefinition[] = [
+	{ id: 'todo', label: 'Todo', color: '#818cf8', category: 'Todo', description: 'Initial backlog / pending' },
+	{ id: 'in_progress', label: 'In Progress', color: '#fbbf24', category: 'In Progress', description: 'Active development' },
+	{ id: 'done', label: 'Done', color: '#34d399', category: 'Done', description: 'Completed & delivered' },
+	{ id: 'blocked', label: 'Blocked', color: '#f43f5e', category: 'Blocked', description: 'Waiting / on hold' },
+	{ id: 'removed', label: 'Removed', color: '#94a3b8', category: 'Removed', description: 'Archived / purged' }
+];
+
 export interface ICustomModule {
 	id: string;
 	name: string;
@@ -58,6 +105,7 @@ export interface ICustomModule {
 	color: string;
 	storageScope?: 'global' | 'workspace';
 	fields?: ICustomField[];
+	statuses?: IStatusDefinition[];
 }
 
 export interface IBaseEntitySnapshot {

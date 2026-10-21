@@ -243,6 +243,9 @@ import './contrib/imageCarousel/browser/imageCarousel.contribution.js';
 import '../sessions/contrib/centeredChat/browser/centeredChat.contribution.js';
 import '../sessions/contrib/agentGroups/browser/agentGroups.contribution.js';
 
+// Custom Modules & Data Types
+import './contrib/customModules/browser/customModules.contribution.js';
+
 
 // Interactive
 import './contrib/interactive/browser/interactive.contribution.js';
@@ -459,6 +462,9 @@ import './contrib/entityPersistence/browser/entityPersistence.contribution.js';
 
 // Agents Manager
 import './contrib/agentsManager/browser/agentsManager.contribution.js';
+
+// Voice & Audio Models Service
+import './contrib/voiceModels/browser/voiceModels.contribution.js';
 
 // Workflows Manager
 import './contrib/workflowsManager/browser/workflowsManager.contribution.js';

@@ -326,6 +326,12 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					return;
 				}
 
+				try {
+					item.code = await this.resolveEntityCode(targetBase);
+				} catch {
+					// Inaccessible or unresolvable code
+				}
+
 				resultItems.push(item);
 			} catch {
 				// Inaccessible path, ignore
@@ -976,9 +982,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			if (foundMdUri) {
 				try {
 					const content = (await this.fileService.readFile(foundMdUri)).value.toString();
-					const match = content.match(/-\s*\*\*Entity Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/) || content.match(/-\s*\*\*Ticket Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/);
+					const match = content.match(/-\s*\*\*(?:Entity|Ticket) Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/) ||
+						content.match(/-\s*\*\*Workspace ID\*\*:\s*`?([A-Za-z0-9_-]+)`?/);
 					if (match && match[1]) {
-						const code = match[1].trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+						const code = match[1].replace(/-0000$/i, '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
 						if (code) return code;
 					}
 				} catch {}
@@ -1189,7 +1196,16 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 	async createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult> {
 		const targetFolderUri = options.targetParentUri || options.workspaceUri || URI.file('/Users/aimery/repos/jobs');
-		const workspaceRootUri = options.workspaceUri || (options.targetParentUri ? await this.findWorkspaceRootUri(options.targetParentUri) : targetFolderUri);
+		let workspaceRootUri: URI;
+		if (options.workspaceUri && !options.targetParentUri) {
+			workspaceRootUri = await this.findWorkspaceRootUri(options.workspaceUri);
+		} else if (options.workspaceUri) {
+			workspaceRootUri = options.workspaceUri;
+		} else if (options.targetParentUri) {
+			workspaceRootUri = await this.findWorkspaceRootUri(options.targetParentUri);
+		} else {
+			workspaceRootUri = targetFolderUri;
+		}
 		const type = options.type;
 		const description = options.description;
 

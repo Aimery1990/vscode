@@ -14,14 +14,16 @@ import { AccountSignInModal } from './accountSignInModal.js';
 import { IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
+import { IVoiceModel, IVoiceModelService, VoiceModelProvider } from '../../voiceModels/common/voiceModel.js';
 
-export type AccountPanelTab = 'Account' | 'General' | 'Permissions' | 'Appearance' | 'Models' | 'Customizations';
+export type AccountPanelTab = 'Account' | 'General' | 'Permissions' | 'Appearance' | 'Models' | 'VoiceModels' | 'Customizations';
 
 const ttPolicy = createTrustedTypesPolicy('accountManagementDialog', { createHTML: value => value });
 
 export class AccountManagementDialog extends Disposable {
 	private container: HTMLElement | undefined;
 	private activeTab: AccountPanelTab = 'Account';
+	private renderNavFn?: () => void;
 
 	constructor(
 		@IAuthenticationService private readonly authenticationService: IAuthenticationService,
@@ -30,7 +32,8 @@ export class AccountManagementDialog extends Disposable {
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@IAgentCredentialService private readonly agentCredentialService: IAgentCredentialService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
-		@IStorageService private readonly _storageService: IStorageService
+		@IStorageService private readonly _storageService: IStorageService,
+		@IVoiceModelService private readonly voiceModelService: IVoiceModelService
 	) {
 		super();
 	}
@@ -40,6 +43,7 @@ export class AccountManagementDialog extends Disposable {
 			this.container.remove();
 			this.container = undefined;
 		}
+		this.renderNavFn = undefined;
 	}
 
 	public async show(initialTab: AccountPanelTab = 'Account'): Promise<void> {
@@ -195,6 +199,7 @@ export class AccountManagementDialog extends Disposable {
 				items: [
 					{ id: 'Appearance', label: 'Appearance & Theme' },
 					{ id: 'Models', label: 'AI LLM Providers' },
+					{ id: 'VoiceModels', label: 'Voice & Audio Models' },
 					{ id: 'Customizations', label: 'Agent Customizations' }
 				]
 			}
@@ -259,6 +264,7 @@ export class AccountManagementDialog extends Disposable {
 			});
 		};
 
+		this.renderNavFn = renderNav;
 		renderNav();
 		mainBody.appendChild(sidebar);
 		mainBody.appendChild(contentArea);
@@ -286,6 +292,8 @@ export class AccountManagementDialog extends Disposable {
 			await this.renderPermissionsTab(container, targetDocument);
 		} else if (this.activeTab === 'Models') {
 			await this.renderModelsTab(container, targetDocument);
+		} else if (this.activeTab === 'VoiceModels') {
+			await this.renderVoiceModelsTab(container, targetDocument);
 		} else if (this.activeTab === 'Customizations') {
 			await this.renderCustomizationsTab(container, targetDocument);
 		} else {
@@ -527,12 +535,60 @@ export class AccountManagementDialog extends Disposable {
 
 	private async renderModelsTab(container: HTMLElement, targetDocument: Document): Promise<void> {
 		const header = targetDocument.createElement('div');
-		header.style.marginBottom = '24px';
+		header.style.marginBottom = '20px';
 		this.setElementHTML(header, `
 			<h3 style="margin:0 0 8px 0;font-size:18px;font-weight:600;color:#ffffff;">AI LLM Providers & Credentials</h3>
 			<p style="margin:0;font-size:13px;color:#888888;line-height:1.5;">Configure and manage your API keys, custom endpoints, and secure credentials for Any Agent models.</p>
 		`);
 		container.appendChild(header);
+
+		// Voice & Audio Speech-to-Text Quick Navigation Banner
+		const voiceBanner = targetDocument.createElement('div');
+		voiceBanner.style.cssText = `
+			background: linear-gradient(90deg, rgba(37, 99, 235, 0.12) 0%, rgba(16, 185, 129, 0.08) 100%);
+			border: 1px solid rgba(37, 99, 235, 0.3);
+			border-radius: 8px;
+			padding: 12px 16px;
+			margin-bottom: 24px;
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 16px;
+		`;
+		this.setElementHTML(voiceBanner, `
+			<div style="display:flex;align-items:center;gap:12px;">
+				<span style="font-size:20px;">🎙️</span>
+				<div>
+					<div style="font-size:13px;font-weight:600;color:#ffffff;margin-bottom:2px;">Voice & Audio Speech-to-Text Models</div>
+					<div style="font-size:11.5px;color:#aaaaaa;">Looking to configure speech recognition models for Agent Central voice input? Manage audio transcription here.</div>
+				</div>
+			</div>
+		`);
+		const voiceBtn = targetDocument.createElement('button');
+		voiceBtn.style.cssText = `
+			background: #2563eb;
+			color: #ffffff;
+			border: none;
+			border-radius: 6px;
+			padding: 6px 14px;
+			font-size: 11.5px;
+			font-weight: 600;
+			cursor: pointer;
+			white-space: nowrap;
+			transition: all 0.15s ease;
+		`;
+		voiceBtn.textContent = 'Voice Models ›';
+		voiceBtn.onclick = async () => {
+			this.activeTab = 'VoiceModels';
+			const tabTitleSpan = targetDocument.getElementById('anyagent-panel-tab-title');
+			if (tabTitleSpan) {
+				tabTitleSpan.textContent = this.activeTab;
+			}
+			this.renderNavFn?.();
+			await this.renderContent(container, targetDocument);
+		};
+		voiceBanner.appendChild(voiceBtn);
+		container.appendChild(voiceBanner);
 
 		// Section 1: Active System Providers
 		const sysTitle = targetDocument.createElement('h4');
@@ -1281,6 +1337,739 @@ export class AccountManagementDialog extends Disposable {
 			await this.renderContent(container, targetDocument);
 		};
 		btnRow.appendChild(saveBtn);
+	}
+
+	private async renderVoiceModelsTab(container: HTMLElement, targetDocument: Document): Promise<void> {
+		const header = targetDocument.createElement('div');
+		header.style.marginBottom = '24px';
+		this.setElementHTML(header, `
+			<h3 style="margin:0 0 8px 0;font-size:18px;font-weight:600;color:#ffffff;display:flex;align-items:center;gap:8px;">
+				<span>🎙️</span> Voice & Audio Input Models
+			</h3>
+			<p style="margin:0;font-size:13px;color:#888888;line-height:1.5;">Configure Speech-to-Text (STT) models for Agent Central voice input. Spoken audio is recorded and transcribed into prompt text using your active default model.</p>
+		`);
+		container.appendChild(header);
+
+		const activeModel = await this.voiceModelService.getActiveVoiceModel();
+		const allModels = await this.voiceModelService.getVoiceModels();
+		const credentials = await this.agentCredentialService.getCredentials();
+
+		// Section 1: Active Default STT Model Card
+		const activeSecTitle = targetDocument.createElement('h4');
+		activeSecTitle.style.cssText = `margin: 0 0 14px 0; font-size: 13.5px; font-weight: 600; color: #ffffff; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px;`;
+		activeSecTitle.textContent = 'Active Default Model (Used by Agent Central)';
+		container.appendChild(activeSecTitle);
+
+		const activeCard = targetDocument.createElement('div');
+		activeCard.style.cssText = `
+			background: linear-gradient(135deg, rgba(37, 99, 235, 0.08) 0%, rgba(16, 185, 129, 0.05) 100%);
+			border: 1px solid #2563eb;
+			border-radius: 8px;
+			padding: 16px 20px;
+			margin-bottom: 28px;
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			gap: 16px;
+		`;
+		container.appendChild(activeCard);
+
+		const activeLeft = targetDocument.createElement('div');
+		activeLeft.style.cssText = `display: flex; flex-direction: column; gap: 4px;`;
+		const activeNameRow = targetDocument.createElement('div');
+		activeNameRow.style.cssText = `display: flex; align-items: center; gap: 10px;`;
+		
+		const activeNameSpan = targetDocument.createElement('span');
+		activeNameSpan.style.cssText = `font-size: 14.5px; font-weight: 600; color: #ffffff;`;
+		activeNameSpan.textContent = activeModel ? activeModel.name : 'None Selected';
+		activeNameRow.appendChild(activeNameSpan);
+
+		const activeBadge = targetDocument.createElement('span');
+		activeBadge.style.cssText = `font-size: 10.5px; font-weight: 600; color: #22c55e; border: 1px solid #22c55e; background: rgba(34, 197, 94, 0.1); padding: 2px 8px; border-radius: 12px;`;
+		activeBadge.textContent = 'ACTIVE IN AGENT CENTRAL';
+		activeNameRow.appendChild(activeBadge);
+
+		activeLeft.appendChild(activeNameRow);
+
+		const activeDescSpan = targetDocument.createElement('span');
+		activeDescSpan.style.cssText = `font-size: 12px; color: #999999;`;
+		if (activeModel) {
+			const provUpper = activeModel.provider === 'gemini' ? 'Google Gemini' : (activeModel.provider === 'openai' ? 'OpenAI Whisper' : 'Custom Endpoint');
+			activeDescSpan.textContent = `Provider: ${provUpper} | Model ID: ${activeModel.modelId} | ${activeModel.connectionMessage || 'Ready for speech transcription'}`;
+		} else {
+			activeDescSpan.textContent = 'No voice model selected. Please choose or add a model below.';
+		}
+		activeLeft.appendChild(activeDescSpan);
+		activeCard.appendChild(activeLeft);
+
+		if (activeModel) {
+			const activeTestBtn = targetDocument.createElement('button');
+			activeTestBtn.style.cssText = `
+				background: #2563eb;
+				color: #ffffff;
+				border: none;
+				border-radius: 6px;
+				padding: 7px 14px;
+				font-size: 11.5px;
+				font-weight: 600;
+				cursor: pointer;
+				white-space: nowrap;
+				transition: all 0.15s ease;
+			`;
+			activeTestBtn.textContent = 'Test Active Model';
+			activeTestBtn.onclick = async () => {
+				activeTestBtn.disabled = true;
+				activeTestBtn.textContent = 'Testing...';
+				const res = await this.voiceModelService.testVoiceModel(activeModel);
+				activeTestBtn.disabled = false;
+				activeTestBtn.textContent = 'Test Active Model';
+				if (res.success) {
+					this.notificationService.info(`[Voice Model Test] ${res.message}`);
+				} else {
+					this.notificationService.error(`[Voice Model Test] ${res.message}`);
+				}
+				await this.renderContent(container, targetDocument);
+			};
+			activeCard.appendChild(activeTestBtn);
+		}
+
+		// Section 2: Configured Voice Models
+		const listHeaderRow = targetDocument.createElement('div');
+		listHeaderRow.style.cssText = `display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px;`;
+		
+		const listTitle = targetDocument.createElement('h4');
+		listTitle.style.cssText = `margin: 0; font-size: 13.5px; font-weight: 600; color: #ffffff;`;
+		listTitle.textContent = 'Available Voice & Audio Models';
+		listHeaderRow.appendChild(listTitle);
+
+		const addModelToggleBtn = targetDocument.createElement('button');
+		addModelToggleBtn.style.cssText = `
+			background: #2563eb;
+			color: #ffffff;
+			border: none;
+			border-radius: 6px;
+			padding: 5px 12px;
+			font-size: 11.5px;
+			font-weight: 600;
+			cursor: pointer;
+			display: flex;
+			align-items: center;
+			gap: 4px;
+		`;
+		addModelToggleBtn.textContent = '+ Add Voice Model';
+		listHeaderRow.appendChild(addModelToggleBtn);
+		container.appendChild(listHeaderRow);
+
+		// Models List Container
+		const modelsListContainer = targetDocument.createElement('div');
+		modelsListContainer.style.cssText = `display: flex; flex-direction: column; gap: 12px; margin-bottom: 28px;`;
+		container.appendChild(modelsListContainer);
+
+		for (const model of allModels) {
+			const isCurrentActive = activeModel?.id === model.id;
+			const card = targetDocument.createElement('div');
+			card.style.cssText = `
+				background: #181818;
+				border: 1px solid ${isCurrentActive ? '#2563eb' : '#2a2a2a'};
+				border-radius: 8px;
+				padding: 14px 16px;
+				display: flex;
+				align-items: center;
+				justify-content: space-between;
+				gap: 12px;
+			`;
+
+			const infoCol = targetDocument.createElement('div');
+			infoCol.style.cssText = `display: flex; flex-direction: column; gap: 4px;`;
+
+			const titleRow = targetDocument.createElement('div');
+			titleRow.style.cssText = `display: flex; align-items: center; gap: 8px;`;
+
+			const modelName = targetDocument.createElement('span');
+			modelName.style.cssText = `font-size: 13.5px; font-weight: 600; color: #ffffff;`;
+			modelName.textContent = model.name;
+			titleRow.appendChild(modelName);
+
+			// Provider Badge
+			const provBadge = targetDocument.createElement('span');
+			provBadge.style.cssText = `
+				font-size: 10px;
+				font-weight: 600;
+				padding: 1px 6px;
+				border-radius: 4px;
+				background: ${model.provider === 'gemini' ? 'rgba(59, 130, 246, 0.15)' : (model.provider === 'openai' ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)')};
+				color: ${model.provider === 'gemini' ? '#60a5fa' : (model.provider === 'openai' ? '#34d399' : '#fbbf24')};
+				border: 1px solid ${model.provider === 'gemini' ? 'rgba(59, 130, 246, 0.3)' : (model.provider === 'openai' ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)')};
+			`;
+			provBadge.textContent = model.provider.toUpperCase();
+			titleRow.appendChild(provBadge);
+
+			if (model.isBuiltIn) {
+				const builtInBadge = targetDocument.createElement('span');
+				builtInBadge.style.cssText = `font-size: 10px; color: #888888; background: #222222; padding: 1px 5px; border-radius: 4px;`;
+				builtInBadge.textContent = 'Built-in';
+				titleRow.appendChild(builtInBadge);
+			}
+
+			if (isCurrentActive) {
+				const activeFlag = targetDocument.createElement('span');
+				activeFlag.style.cssText = `font-size: 10px; font-weight: 600; color: #22c55e; border: 1px solid #22c55e; padding: 1px 6px; border-radius: 10px;`;
+				activeFlag.textContent = 'DEFAULT';
+				titleRow.appendChild(activeFlag);
+			}
+
+			infoCol.appendChild(titleRow);
+
+			const metaRow = targetDocument.createElement('div');
+			metaRow.style.cssText = `font-size: 11.5px; color: #777777; display: flex; align-items: center; gap: 12px;`;
+			
+			const modelIdSpan = targetDocument.createElement('span');
+			modelIdSpan.textContent = `Model ID: ${model.modelId}`;
+			metaRow.appendChild(modelIdSpan);
+
+			let keyLabelText = 'Key: Auto-detect from AI LLM Providers';
+			let keyLabelColor = '#777777';
+
+			if (model.credentialId) {
+				const matched = credentials.find(c => c.id === model.credentialId);
+				keyLabelText = `Key: Linked to ${matched ? matched.name : 'Credential'}`;
+				keyLabelColor = '#94a3b8';
+			} else if (model.apiKey) {
+				keyLabelText = 'Key: Dedicated Key Configured';
+				keyLabelColor = '#4ade80';
+			} else {
+				const hasMatching = credentials.some(c => 
+					(c.providerId === model.provider || (model.provider === 'gemini' && c.providerId === 'google')) && c.isEnabled !== false
+				);
+				if (hasMatching) {
+					keyLabelText = 'Key: Auto-detect (Found in AI LLM Providers)';
+					keyLabelColor = '#94a3b8';
+				} else {
+					keyLabelText = 'Key: Not Configured (Click Configure)';
+					keyLabelColor = '#fbbf24';
+				}
+			}
+
+			const keySpan = targetDocument.createElement('span');
+			keySpan.style.color = keyLabelColor;
+			keySpan.textContent = keyLabelText;
+			metaRow.appendChild(keySpan);
+
+			if (model.connectionStatus === 'connected') {
+				const statusSpan = targetDocument.createElement('span');
+				statusSpan.style.color = '#22c55e';
+				statusSpan.textContent = '✓ Verified';
+				metaRow.appendChild(statusSpan);
+			} else if (model.connectionStatus === 'error') {
+				const statusSpan = targetDocument.createElement('span');
+				statusSpan.style.color = '#f43f5e';
+				statusSpan.style.cursor = 'pointer';
+				const isNoKey = model.connectionMessage?.includes('No API key') || model.connectionMessage?.includes('No API Key');
+				statusSpan.textContent = isNoKey ? '✗ No API Key (Click to Add)' : '✗ Connection Error';
+				statusSpan.title = model.connectionMessage || 'Connection error. Click Configure to enter or update API key.';
+				statusSpan.onclick = () => openEditModal(model);
+				metaRow.appendChild(statusSpan);
+			}
+
+			infoCol.appendChild(metaRow);
+			card.appendChild(infoCol);
+
+			// Action Buttons
+			const actionsRow = targetDocument.createElement('div');
+			actionsRow.style.cssText = `display: flex; align-items: center; gap: 8px;`;
+
+			if (!isCurrentActive) {
+				const setDefaultBtn = targetDocument.createElement('button');
+				setDefaultBtn.style.cssText = `
+					background: #222222;
+					color: #ffffff;
+					border: 1px solid #333333;
+					border-radius: 5px;
+					padding: 5px 10px;
+					font-size: 11px;
+					font-weight: 500;
+					cursor: pointer;
+					transition: all 0.1s ease;
+				`;
+				setDefaultBtn.textContent = 'Set as Default';
+				setDefaultBtn.onclick = async () => {
+					await this.voiceModelService.setActiveVoiceModel(model.id);
+					this.notificationService.info(`Default voice model set to: ${model.name}`);
+					await this.renderContent(container, targetDocument);
+				};
+				actionsRow.appendChild(setDefaultBtn);
+			}
+
+			// Configure Button (available on ALL models, built-in or custom)
+			const configBtn = targetDocument.createElement('button');
+			configBtn.style.cssText = `
+				background: #222222;
+				color: #cccccc;
+				border: 1px solid #333333;
+				border-radius: 5px;
+				padding: 5px 10px;
+				font-size: 11px;
+				font-weight: 500;
+				cursor: pointer;
+				transition: all 0.1s ease;
+			`;
+			configBtn.textContent = 'Configure';
+			configBtn.onclick = () => {
+				openEditModal(model);
+			};
+			actionsRow.appendChild(configBtn);
+
+			const testBtn = targetDocument.createElement('button');
+			testBtn.style.cssText = `
+				background: rgba(37, 99, 235, 0.1);
+				color: #60a5fa;
+				border: 1px solid rgba(37, 99, 235, 0.25);
+				border-radius: 5px;
+				padding: 5px 10px;
+				font-size: 11px;
+				font-weight: 500;
+				cursor: pointer;
+				transition: all 0.1s ease;
+			`;
+			testBtn.textContent = 'Test';
+			testBtn.onclick = async () => {
+				testBtn.disabled = true;
+				testBtn.textContent = 'Testing...';
+				const res = await this.voiceModelService.testVoiceModel(model);
+				testBtn.disabled = false;
+				testBtn.textContent = 'Test';
+				if (res.success) {
+					this.notificationService.info(`[${model.name}] ${res.message}`);
+				} else {
+					this.notificationService.error(`[${model.name}] ${res.message}`);
+				}
+				await this.renderContent(container, targetDocument);
+			};
+			actionsRow.appendChild(testBtn);
+
+			if (!model.isBuiltIn) {
+				const delBtn = targetDocument.createElement('button');
+				delBtn.style.cssText = `
+					background: rgba(244, 63, 94, 0.1);
+					color: #f43f5e;
+					border: 1px solid rgba(244, 63, 94, 0.25);
+					border-radius: 5px;
+					padding: 5px 10px;
+					font-size: 11px;
+					font-weight: 500;
+					cursor: pointer;
+				`;
+				delBtn.textContent = 'Delete';
+				delBtn.onclick = async () => {
+					await this.voiceModelService.removeVoiceModel(model.id);
+					this.notificationService.info(`Removed voice model '${model.name}'.`);
+					await this.renderContent(container, targetDocument);
+				};
+				actionsRow.appendChild(delBtn);
+			}
+
+			card.appendChild(actionsRow);
+			modelsListContainer.appendChild(card);
+		}
+
+		// Edit Voice Model Modal Helper
+		const openEditModal = (model: IVoiceModel) => {
+			const editOverlay = targetDocument.createElement('div');
+			editOverlay.style.cssText = `
+				position: fixed;
+				inset: 0;
+				background: rgba(0, 0, 0, 0.75);
+				backdrop-filter: blur(4px);
+				z-index: 999999;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+			`;
+
+			const modalBox = targetDocument.createElement('div');
+			modalBox.style.cssText = `
+				width: 520px;
+				background: #1c1c1c;
+				border: 1px solid #333333;
+				border-radius: 10px;
+				padding: 24px;
+				display: flex;
+				flex-direction: column;
+				gap: 16px;
+				box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6);
+			`;
+			editOverlay.appendChild(modalBox);
+
+			const modalHeader = targetDocument.createElement('div');
+			modalHeader.style.cssText = `display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #2a2a2a; padding-bottom: 12px;`;
+			modalHeader.innerHTML = `
+				<div>
+					<h3 style="margin:0; font-size:16px; font-weight:600; color:#ffffff;">Configure Voice Model</h3>
+					<div style="font-size:12px; color:#888888; margin-top:2px;">${model.name}</div>
+				</div>
+			`;
+			const closeBtn = targetDocument.createElement('button');
+			closeBtn.style.cssText = `background:none; border:none; color:#888888; font-size:18px; cursor:pointer;`;
+			closeBtn.textContent = '✕';
+			closeBtn.onclick = () => editOverlay.remove();
+			modalHeader.appendChild(closeBtn);
+			modalBox.appendChild(modalHeader);
+
+			// Field: Display Name
+			const nameGrp = targetDocument.createElement('div');
+			nameGrp.innerHTML = `<label style="display:block; font-size:11px; font-weight:600; text-transform:uppercase; margin-bottom:6px; color:#888888;">Display Name:</label>`;
+			const nameInp = targetDocument.createElement('input');
+			nameInp.style.cssText = `width:100%; padding:8px 12px; font-size:12px; background:#121212; border:1px solid #2a2a2a; border-radius:6px; color:#ffffff; outline:none; box-sizing:border-box;`;
+			nameInp.value = model.name;
+			nameGrp.appendChild(nameInp);
+			modalBox.appendChild(nameGrp);
+
+			// Field: Model ID
+			const modelIdGrp = targetDocument.createElement('div');
+			modelIdGrp.innerHTML = `<label style="display:block; font-size:11px; font-weight:600; text-transform:uppercase; margin-bottom:6px; color:#888888;">Model Identifier:</label>`;
+			const modelIdInp = targetDocument.createElement('input');
+			modelIdInp.style.cssText = `width:100%; padding:8px 12px; font-size:12px; background:#121212; border:1px solid #2a2a2a; border-radius:6px; color:#ffffff; outline:none; box-sizing:border-box;`;
+			modelIdInp.value = model.modelId;
+			modelIdGrp.appendChild(modelIdInp);
+			modalBox.appendChild(modelIdGrp);
+
+			// Field: API Key Source
+			const keyGrp = targetDocument.createElement('div');
+			keyGrp.innerHTML = `<label style="display:block; font-size:11px; font-weight:600; text-transform:uppercase; margin-bottom:6px; color:#888888;">API Key Source:</label>`;
+			const keySrcSelect = targetDocument.createElement('select');
+			keySrcSelect.style.cssText = `width:100%; padding:8px 12px; font-size:12px; background:#121212; border:1px solid #2a2a2a; border-radius:6px; color:#ffffff; outline:none; box-sizing:border-box; margin-bottom:8px;`;
+
+			let editKeyOpts = `<option value="auto">Auto-detect from configured AI LLM Providers</option>`;
+			credentials.forEach(c => {
+				const isSel = model.credentialId === c.id;
+				editKeyOpts += `<option value="cred:${c.id}" ${isSel ? 'selected' : ''}>Link to Credential: ${c.name} (${c.providerId})</option>`;
+			});
+			const isCustomKey = !!model.apiKey;
+			editKeyOpts += `<option value="custom" ${isCustomKey ? 'selected' : ''}>Enter Dedicated API Key for Voice...</option>`;
+			keySrcSelect.innerHTML = editKeyOpts;
+			keyGrp.appendChild(keySrcSelect);
+
+			const dedicatedKeyInp = targetDocument.createElement('input');
+			dedicatedKeyInp.type = 'password';
+			dedicatedKeyInp.style.cssText = `width:100%; padding:8px 12px; font-size:12px; background:#121212; border:1px solid #2a2a2a; border-radius:6px; color:#ffffff; outline:none; box-sizing:border-box; display:${isCustomKey ? 'block' : 'none'};`;
+			dedicatedKeyInp.placeholder = model.provider === 'gemini' ? 'Paste Google Gemini API Key (AIzaSy...)' : 'Paste API Key';
+			dedicatedKeyInp.value = model.apiKey || '';
+			keyGrp.appendChild(dedicatedKeyInp);
+
+			keySrcSelect.onchange = () => {
+				dedicatedKeyInp.style.display = keySrcSelect.value === 'custom' ? 'block' : 'none';
+			};
+			modalBox.appendChild(keyGrp);
+
+			// Custom Endpoint (if provider === 'custom' or whisper)
+			const endpGrp = targetDocument.createElement('div');
+			endpGrp.style.display = model.provider === 'custom' ? 'block' : 'none';
+			endpGrp.innerHTML = `<label style="display:block; font-size:11px; font-weight:600; text-transform:uppercase; margin-bottom:6px; color:#888888;">Custom Endpoint URL:</label>`;
+			const endpInp = targetDocument.createElement('input');
+			endpInp.style.cssText = `width:100%; padding:8px 12px; font-size:12px; background:#121212; border:1px solid #2a2a2a; border-radius:6px; color:#ffffff; outline:none; box-sizing:border-box;`;
+			endpInp.placeholder = 'e.g. http://localhost:8000/v1/audio/transcriptions';
+			endpInp.value = model.customUrl || '';
+			endpGrp.appendChild(endpInp);
+			modalBox.appendChild(endpGrp);
+
+			// Inline Test Result Container
+			const modalTestResult = targetDocument.createElement('div');
+			modalTestResult.style.cssText = `display:none; padding:8px 12px; font-size:11.5px; border-radius:6px;`;
+			modalBox.appendChild(modalTestResult);
+
+			// Button Row
+			const modalBtnRow = targetDocument.createElement('div');
+			modalBtnRow.style.cssText = `display:flex; justify-content:space-between; align-items:center; margin-top:8px;`;
+
+			const modalTestBtn = targetDocument.createElement('button');
+			modalTestBtn.style.cssText = `background:rgba(37,99,235,0.1); color:#60a5fa; border:1px solid rgba(37,99,235,0.3); border-radius:6px; padding:7px 14px; font-size:11.5px; font-weight:600; cursor:pointer;`;
+			modalTestBtn.textContent = 'Test Connection';
+			modalTestBtn.onclick = async () => {
+				modalTestBtn.disabled = true;
+				modalTestBtn.textContent = 'Testing...';
+				modalTestResult.style.display = 'none';
+
+				let tempKey = model.apiKey;
+				let tempCredId = model.credentialId;
+				if (keySrcSelect.value === 'custom') {
+					tempKey = dedicatedKeyInp.value.trim();
+					tempCredId = undefined;
+				} else if (keySrcSelect.value.startsWith('cred:')) {
+					tempCredId = keySrcSelect.value.substring(5);
+					tempKey = undefined;
+				} else {
+					tempKey = undefined;
+					tempCredId = undefined;
+				}
+
+				const testCandidate: IVoiceModel = {
+					...model,
+					name: nameInp.value.trim() || model.name,
+					modelId: modelIdInp.value.trim() || model.modelId,
+					apiKey: tempKey,
+					credentialId: tempCredId,
+					customUrl: endpInp.value.trim() || undefined
+				};
+
+				const res = await this.voiceModelService.testVoiceModel(testCandidate);
+				modalTestBtn.disabled = false;
+				modalTestBtn.textContent = 'Test Connection';
+
+				modalTestResult.style.display = 'block';
+				if (res.success) {
+					modalTestResult.style.background = 'rgba(34, 197, 94, 0.1)';
+					modalTestResult.style.border = '1px solid rgba(34, 197, 94, 0.3)';
+					modalTestResult.style.color = '#4ade80';
+					modalTestResult.textContent = `✓ ${res.message}`;
+				} else {
+					modalTestResult.style.background = 'rgba(244, 63, 94, 0.1)';
+					modalTestResult.style.border = '1px solid rgba(244, 63, 94, 0.3)';
+					modalTestResult.style.color = '#f43f5e';
+					modalTestResult.textContent = `✗ ${res.message}`;
+				}
+			};
+			modalBtnRow.appendChild(modalTestBtn);
+
+			const rightBtns = targetDocument.createElement('div');
+			rightBtns.style.cssText = `display:flex; gap:10px;`;
+
+			const cancelBtn = targetDocument.createElement('button');
+			cancelBtn.style.cssText = `background:#222222; color:#cccccc; border:1px solid #333333; border-radius:6px; padding:7px 14px; font-size:12px; cursor:pointer;`;
+			cancelBtn.textContent = 'Cancel';
+			cancelBtn.onclick = () => editOverlay.remove();
+			rightBtns.appendChild(cancelBtn);
+
+			const saveEditBtn = targetDocument.createElement('button');
+			saveEditBtn.style.cssText = `background:#2563eb; color:#ffffff; border:none; border-radius:6px; padding:7px 18px; font-size:12px; font-weight:600; cursor:pointer;`;
+			saveEditBtn.textContent = 'Save Changes';
+			saveEditBtn.onclick = async () => {
+				let finalKey = model.apiKey;
+				let finalCredId = model.credentialId;
+				if (keySrcSelect.value === 'custom') {
+					finalKey = dedicatedKeyInp.value.trim() || undefined;
+					finalCredId = undefined;
+				} else if (keySrcSelect.value.startsWith('cred:')) {
+					finalCredId = keySrcSelect.value.substring(5);
+					finalKey = undefined;
+				} else {
+					finalKey = undefined;
+					finalCredId = undefined;
+				}
+
+				const updated: IVoiceModel = {
+					...model,
+					name: nameInp.value.trim() || model.name,
+					modelId: modelIdInp.value.trim() || model.modelId,
+					apiKey: finalKey,
+					credentialId: finalCredId,
+					customUrl: endpInp.value.trim() || undefined
+				};
+
+				await this.voiceModelService.updateVoiceModel(updated);
+				this.notificationService.info(`Voice model '${updated.name}' updated successfully!`);
+				editOverlay.remove();
+				await this.renderContent(container, targetDocument);
+			};
+			rightBtns.appendChild(saveEditBtn);
+			modalBtnRow.appendChild(rightBtns);
+			modalBox.appendChild(modalBtnRow);
+
+			targetDocument.body.appendChild(editOverlay);
+		};
+
+		// Section 3: Add / Register Voice Model Form (collapsible)
+		const addFormCard = targetDocument.createElement('div');
+		addFormCard.style.cssText = `
+			background: #1c1c1c;
+			border: 1px solid #2a2a2a;
+			border-radius: 8px;
+			padding: 20px;
+			display: none;
+			flex-direction: column;
+			gap: 16px;
+			margin-bottom: 24px;
+		`;
+		container.appendChild(addFormCard);
+
+		addModelToggleBtn.onclick = () => {
+			const isVisible = addFormCard.style.display === 'flex';
+			addFormCard.style.display = isVisible ? 'none' : 'flex';
+			addModelToggleBtn.textContent = isVisible ? '+ Add Voice Model' : '✕ Cancel';
+		};
+
+		const formTitle = targetDocument.createElement('h4');
+		formTitle.style.cssText = `margin: 0; font-size: 14px; font-weight: 600; color: #ffffff;`;
+		formTitle.textContent = 'Register New Speech-to-Text Model';
+		addFormCard.appendChild(formTitle);
+
+		// Name Group
+		const nameGroup = targetDocument.createElement('div');
+		const nameLabel = targetDocument.createElement('label');
+		nameLabel.style.cssText = `display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; color: #888888;`;
+		nameLabel.textContent = 'Model Display Name:';
+		const nameInput = targetDocument.createElement('input');
+		nameInput.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box;`;
+		nameInput.placeholder = 'e.g. Gemini 2.0 Flash Audio or Custom Whisper';
+		nameGroup.appendChild(nameLabel);
+		nameGroup.appendChild(nameInput);
+		addFormCard.appendChild(nameGroup);
+
+		// Provider & Model ID Row
+		const row2 = targetDocument.createElement('div');
+		row2.style.cssText = `display: flex; gap: 16px;`;
+
+		const provGroup = targetDocument.createElement('div');
+		provGroup.style.cssText = `flex: 1;`;
+		const provLabel = targetDocument.createElement('label');
+		provLabel.style.cssText = `display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; color: #888888;`;
+		provLabel.textContent = 'Provider:';
+		const provSelect = targetDocument.createElement('select');
+		provSelect.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box;`;
+		provSelect.innerHTML = `
+			<option value="gemini">Google Gemini (Native Multimodal Audio)</option>
+			<option value="openai">OpenAI Whisper</option>
+			<option value="custom">Custom STT Endpoint (Local / Whisper.cpp)</option>
+		`;
+		provGroup.appendChild(provLabel);
+		provGroup.appendChild(provSelect);
+		row2.appendChild(provGroup);
+
+		const modelIdGroup = targetDocument.createElement('div');
+		modelIdGroup.style.cssText = `flex: 1;`;
+		const modelIdLabel = targetDocument.createElement('label');
+		modelIdLabel.style.cssText = `display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; color: #888888;`;
+		modelIdLabel.textContent = 'Model Identifier:';
+		const modelIdInput = targetDocument.createElement('input');
+		modelIdInput.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box;`;
+		modelIdInput.value = 'gemini-1.5-flash';
+		modelIdGroup.appendChild(modelIdLabel);
+		modelIdGroup.appendChild(modelIdInput);
+		row2.appendChild(modelIdGroup);
+		addFormCard.appendChild(row2);
+
+		provSelect.onchange = () => {
+			if (provSelect.value === 'gemini') {
+				modelIdInput.value = 'gemini-1.5-flash';
+				endpointGroup.style.display = 'none';
+			} else if (provSelect.value === 'openai') {
+				modelIdInput.value = 'whisper-1';
+				endpointGroup.style.display = 'none';
+			} else {
+				modelIdInput.value = 'whisper-1';
+				endpointGroup.style.display = 'block';
+			}
+		};
+
+		// Endpoint Group (for custom STT)
+		const endpointGroup = targetDocument.createElement('div');
+		endpointGroup.style.cssText = `display: none;`;
+		const endpointLabel = targetDocument.createElement('label');
+		endpointLabel.style.cssText = `display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; color: #888888;`;
+		endpointLabel.textContent = 'Custom Endpoint URL:';
+		const endpointInput = targetDocument.createElement('input');
+		endpointInput.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box;`;
+		endpointInput.placeholder = 'e.g. http://localhost:8000/v1/audio/transcriptions';
+		endpointGroup.appendChild(endpointLabel);
+		endpointGroup.appendChild(endpointInput);
+		addFormCard.appendChild(endpointGroup);
+
+		// Key Selection Group
+		const keyGroup = targetDocument.createElement('div');
+		const keyLabel = targetDocument.createElement('label');
+		keyLabel.style.cssText = `display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; color: #888888;`;
+		keyLabel.textContent = 'API Key Source:';
+		const keySourceSelect = targetDocument.createElement('select');
+		keySourceSelect.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box; margin-bottom: 8px;`;
+		
+		let keyOptions = `<option value="auto">Auto-detect from configured AI LLM Providers</option>`;
+		credentials.forEach(c => {
+			keyOptions += `<option value="cred:${c.id}">Link to Credential: ${c.name} (${c.providerId})</option>`;
+		});
+		keyOptions += `<option value="custom">Enter Dedicated API Key for Voice...</option>`;
+		keySourceSelect.innerHTML = keyOptions;
+		keyGroup.appendChild(keyLabel);
+		keyGroup.appendChild(keySourceSelect);
+
+		const customKeyInput = targetDocument.createElement('input');
+		customKeyInput.type = 'password';
+		customKeyInput.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box; display: none;`;
+		customKeyInput.placeholder = 'Paste secret API Key (stored locally)';
+		keyGroup.appendChild(customKeyInput);
+
+		keySourceSelect.onchange = () => {
+			customKeyInput.style.display = keySourceSelect.value === 'custom' ? 'block' : 'none';
+		};
+		addFormCard.appendChild(keyGroup);
+
+		// Set as default checkbox
+		const checkRow = targetDocument.createElement('div');
+		checkRow.style.cssText = `display: flex; align-items: center; gap: 8px; margin-top: 4px;`;
+		const defaultCheckbox = targetDocument.createElement('input');
+		defaultCheckbox.type = 'checkbox';
+		defaultCheckbox.id = 'set-default-voice-model-check';
+		defaultCheckbox.checked = true;
+		const checkLabel = targetDocument.createElement('label');
+		checkLabel.htmlFor = 'set-default-voice-model-check';
+		checkLabel.style.cssText = `font-size: 12px; color: #cccccc; cursor: pointer;`;
+		checkLabel.textContent = 'Set as Active Default voice model for Agent Central';
+		checkRow.appendChild(defaultCheckbox);
+		checkRow.appendChild(checkLabel);
+		addFormCard.appendChild(checkRow);
+
+		// Form Action Buttons
+		const formBtnRow = targetDocument.createElement('div');
+		formBtnRow.style.cssText = `display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px;`;
+
+		const saveModelBtn = targetDocument.createElement('button');
+		saveModelBtn.style.cssText = `
+			background: #2563eb;
+			color: #ffffff;
+			border: none;
+			border-radius: 6px;
+			padding: 7px 18px;
+			font-size: 12px;
+			font-weight: 600;
+			cursor: pointer;
+		`;
+		saveModelBtn.textContent = 'Save Voice Model';
+		saveModelBtn.onclick = async () => {
+			const name = nameInput.value.trim() || `${provSelect.value} Voice Model`;
+			const provider = provSelect.value as VoiceModelProvider;
+			const modelId = modelIdInput.value.trim() || (provider === 'gemini' ? 'gemini-1.5-flash' : 'whisper-1');
+			const isDefault = defaultCheckbox.checked;
+
+			let credentialId: string | undefined = undefined;
+			let apiKey: string | undefined = undefined;
+
+			if (keySourceSelect.value.startsWith('cred:')) {
+				credentialId = keySourceSelect.value.substring(5);
+			} else if (keySourceSelect.value === 'custom') {
+				apiKey = customKeyInput.value.trim();
+				if (!apiKey) {
+					this.notificationService.warn('Please enter an API Key or select an existing credential.');
+					customKeyInput.focus();
+					return;
+				}
+			}
+
+			const customUrl = provider === 'custom' ? endpointInput.value.trim() : undefined;
+
+			await this.voiceModelService.addVoiceModel({
+				name,
+				provider,
+				modelId,
+				apiKey,
+				credentialId,
+				customUrl,
+				isDefault
+			});
+
+			this.notificationService.info(`Voice model "${name}" registered successfully!`);
+			await this.renderContent(container, targetDocument);
+		};
+
+		formBtnRow.appendChild(saveModelBtn);
+		addFormCard.appendChild(formBtnRow);
 	}
 
 	private async renderCustomizationsTab(container: HTMLElement, targetDocument: Document): Promise<void> {

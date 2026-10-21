@@ -58,7 +58,7 @@ export class AccountSignInModal extends Disposable {
 			left: 0;
 			width: 100vw;
 			height: 100vh;
-			background: #181818; /* VS Code 原生暗色，完全不透明以彻底物理遮蔽后面的编辑器，实现全屏刷新页面的视觉效果 */
+			background: #181818; /* Native dark background to fully cover underlying editor */
 			z-index: 99999999;
 			display: flex;
 			align-items: center;
@@ -71,9 +71,9 @@ export class AccountSignInModal extends Disposable {
 		modal.className = 'anyagent-signin-modal';
 		modal.style.cssText = `
 			width: 460px;
-			background: #1e1e1e; /* 与 VS Code 风格保持一致的底色 */
-			border: 1px solid #3c3c3c; /* 原生细边框 */
-			border-radius: 4px; /* 扁平直角设计 */
+			background: #1e1e1e; /* Consistent with VS Code dark surface */
+			border: 1px solid #3c3c3c; /* Native border */
+			border-radius: 4px; /* Flat modern design */
 			box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
 			padding: 36px 32px;
 			display: flex;
@@ -163,7 +163,7 @@ export class AccountSignInModal extends Disposable {
 					<path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
 				</svg>
 			`,
-			'#2563eb', /* Google 登录作为 Primary Blue，进入 createProviderButton 会转换为 VS Code 主色蓝 */
+			'#2563eb', /* Google sign-in primary blue */
 			'#ffffff',
 			async () => {
 				this.close();
@@ -270,10 +270,10 @@ export class AccountSignInModal extends Disposable {
 		btn.style.cssText = `
 			width: 100%;
 			height: 38px;
-			background: ${isPrimaryBlue ? '#0e639c' : bgColor}; /* VS Code 官方经典皇家蓝，其它为原生暗灰 */
+			background: ${isPrimaryBlue ? '#0e639c' : bgColor}; /* VS Code classic royal blue or dark grey */
 			color: ${textColor};
 			border: ${borderStyle};
-			border-radius: 4px; /* 扁平圆角 */
+			border-radius: 4px;
 			display: flex;
 			align-items: center;
 			justify-content: center;

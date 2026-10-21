@@ -7,6 +7,7 @@ import { URI } from '../../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IWorkspacesExplorerService } from '../../common/workspacesExplorer.js';
+import { IAgentsManagerService } from '../../../agentsManager/common/agentsManager.js';
 import { parse as parseYaml } from '../../../../../base/common/yaml.js';
 
 export interface IWorklogRecord {
@@ -77,31 +78,173 @@ export class TicketDataEngine {
 
 	constructor(
 		@IFileService private readonly fileService: IFileService,
-		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService
+		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService,
+		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService
 	) { }
 
 	/**
-	 * Find the workspace root URI from workspace_id or active workspaces
+	 * Find the workspace root URI from workspace_id or active workspaces with smart matching
 	 */
-	public async findWorkspaceUri(workspaceId: string): Promise<URI | undefined> {
+	public async findWorkspaceUri(workspaceId?: string, ticketId?: string): Promise<URI | undefined> {
 		const workspaces = await this.workspacesExplorerService.getWorkspaces();
 		if (!workspaces || workspaces.length === 0) return undefined;
 
-		const target = workspaces.find(w => {
-			const wCode = w.code || '';
-			const wId = w.id || '';
-			const wName = w.name || '';
-			return wCode === workspaceId ||
-				wId === workspaceId ||
-				wName === workspaceId ||
-				`${wCode}-0000` === workspaceId;
+		// 0. Ensure workspaces have their code populated if missing
+		for (const w of workspaces) {
+			if (!w.code) {
+				try {
+					w.code = await this.workspacesExplorerService.resolveEntityCode(w.uri);
+				} catch { }
+			}
+		}
+
+		const trimmedId = (workspaceId || '').trim();
+
+		// 1. If workspaceId is empty, default, or active-keyword, resolve to ticketId prefix or active/current workspace
+		if (!trimmedId || trimmedId === 'current' || trimmedId === 'active' || trimmedId === 'default' || trimmedId === '/' || trimmedId === '.') {
+			if (ticketId) {
+				const ticketPrefixMatch = ticketId.trim().match(/^([A-Za-z0-9_-]+?)-\d+/);
+				if (ticketPrefixMatch) {
+					const prefix = ticketPrefixMatch[1].toLowerCase();
+					const matchByPrefix = workspaces.find(w => (w.code || '').toLowerCase() === prefix);
+					if (matchByPrefix) return matchByPrefix.uri;
+				}
+			}
+			const current = workspaces.find(w => w.isCurrent) || workspaces[0];
+			return current?.uri;
+		}
+
+		const lowerId = trimmedId.toLowerCase();
+		const normId = lowerId.replace(/[\s_\-]+/g, '');
+		const cleanCodeFromWsId = lowerId.replace(/-0000$/i, '').replace(/[\s_\-]+/g, '');
+
+		// 2. Exact match (case-insensitive)
+		let target = workspaces.find(w => {
+			const wCode = (w.code || '').toLowerCase();
+			const wId = (w.id || '').toLowerCase();
+			const wName = (w.name || '').toLowerCase();
+			return wCode === lowerId ||
+				wId === lowerId ||
+				wName === lowerId ||
+				`${wCode}-0000` === lowerId ||
+				wCode === cleanCodeFromWsId ||
+				w.uri.fsPath.toLowerCase() === lowerId;
 		});
 
 		if (target) return target.uri;
 
-		// Fallback to active workspace if workspaceId is default/current
-		const current = workspaces.find(w => w.isCurrent) || workspaces[0];
-		return current?.uri;
+		// 3. Normalized match (ignoring whitespace, underscores, hyphens)
+		target = workspaces.find(w => {
+			const normCode = (w.code || '').toLowerCase().replace(/[\s_\-]+/g, '');
+			const normName = (w.name || '').toLowerCase().replace(/[\s_\-]+/g, '');
+			const normIdStr = (w.id || '').toLowerCase().replace(/[\s_\-]+/g, '');
+			return normCode === normId ||
+				normName === normId ||
+				normIdStr === normId ||
+				`${normCode}0000` === normId ||
+				normCode === cleanCodeFromWsId;
+		});
+
+		if (target) return target.uri;
+
+		// 4. Substring / Prefix match
+		target = workspaces.find(w => {
+			const normCode = (w.code || '').toLowerCase().replace(/[\s_\-]+/g, '');
+			const normName = (w.name || '').toLowerCase().replace(/[\s_\-]+/g, '');
+			return (normId.length >= 3 && normName.includes(normId)) ||
+				(normName.length >= 3 && normId.includes(normName)) ||
+				(normCode.length >= 2 && normId.startsWith(normCode)) ||
+				(normCode.length >= 2 && cleanCodeFromWsId.startsWith(normCode));
+		});
+
+		if (target) return target.uri;
+
+		// 5. If ticketId is provided, try matching by ticket prefix (e.g. NEOWO-0006 -> NEOWO)
+		if (ticketId) {
+			const ticketPrefixMatch = ticketId.trim().match(/^([A-Za-z0-9_-]+?)-\d+/);
+			if (ticketPrefixMatch) {
+				const prefix = ticketPrefixMatch[1].toLowerCase().replace(/[\s_\-]+/g, '');
+				target = workspaces.find(w => {
+					const c = (w.code || '').toLowerCase().replace(/[\s_\-]+/g, '');
+					const n = (w.name || '').toLowerCase().replace(/[\s_\-]+/g, '');
+					return c === prefix || n.startsWith(prefix) || (prefix.length >= 3 && n.startsWith(prefix.slice(0, 3))) || (n.length >= 3 && prefix.startsWith(n.slice(0, 3)));
+				});
+				if (target) return target.uri;
+			}
+		}
+
+		if (cleanCodeFromWsId && cleanCodeFromWsId.length >= 3) {
+			target = workspaces.find(w => {
+				const n = (w.name || '').toLowerCase().replace(/[\s_\-]+/g, '');
+				return n.startsWith(cleanCodeFromWsId) || (cleanCodeFromWsId.length >= 3 && n.startsWith(cleanCodeFromWsId.slice(0, 3))) || (n.length >= 3 && cleanCodeFromWsId.startsWith(n.slice(0, 3)));
+			});
+			if (target) return target.uri;
+		}
+
+		// 5. STT Acoustic / Phonetic matching (handles speech-to-text confusions like "new" <-> "neo")
+		const phoneticVariants = [
+			normId.replace(/^new/, 'neo'),
+			normId.replace(/newworkspace$/, 'neoworkspace'),
+			normId.replace(/new/, 'neo')
+		];
+
+		for (const variant of phoneticVariants) {
+			target = workspaces.find(w => {
+				const normName = (w.name || '').toLowerCase().replace(/[\s_\-]+/g, '');
+				const normCode = (w.code || '').toLowerCase().replace(/[\s_\-]+/g, '');
+				return normName === variant || normCode === variant;
+			});
+			if (target) return target.uri;
+		}
+
+		// 6. Fuzzy Levenshtein Distance match (for acoustic / typo tolerance)
+		const levenshtein = (a: string, b: string): number => {
+			const matrix: number[][] = [];
+			for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+			for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+			for (let i = 1; i <= b.length; i++) {
+				for (let j = 1; j <= a.length; j++) {
+					if (b.charAt(i - 1) === a.charAt(j - 1)) {
+						matrix[i][j] = matrix[i - 1][j - 1];
+					} else {
+						matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j] + 1);
+					}
+				}
+			}
+			return matrix[b.length][a.length];
+		};
+
+		let bestMatch: typeof workspaces[0] | undefined = undefined;
+		let minDistance = 999;
+		for (const w of workspaces) {
+			const normName = (w.name || '').toLowerCase().replace(/[\s_\-]+/g, '');
+			const dist = levenshtein(normId, normName);
+			if (dist <= 2 && dist < minDistance && normName.length >= 3) {
+				minDistance = dist;
+				bestMatch = w;
+			}
+		}
+
+		if (bestMatch && minDistance <= 2) {
+			return bestMatch.uri;
+		}
+
+		// 6.5 If ticketId is provided, scan all workspaces to see which one physically contains this ticket
+		if (ticketId) {
+			for (const w of workspaces) {
+				try {
+					const found = await this.resolveTicketPaths(w.uri, ticketId);
+					if (found) {
+						return w.uri;
+					}
+				} catch { }
+			}
+		}
+
+		// 7. SAFETY: DO NOT silently fall back to workspaces[0]!
+		// Throw an informative error listing all available workspaces so AI and user know exactly what exists
+		const availableList = workspaces.map(w => `"${w.name}" (Code: ${w.code || 'N/A'})${w.isCurrent ? ' [Active]' : ''}`).join(', ');
+		throw new Error(`Workspace '${workspaceId}' was not found. Currently available workspaces in AnyAgent are: [${availableList}]. Please specify one of these valid workspace names, or ask the user to clarify if unsure.`);
 	}
 
 	/**
@@ -169,6 +312,152 @@ export class TicketDataEngine {
 			const paths = await this._checkFolderForTicketPaths(found.uri);
 			if (paths) return paths;
 		}
+
+		// 8. Direct agents manager check if target matches a registered agent
+		if (this.agentsManagerService) {
+			try {
+				const agents = await this.agentsManagerService.getAgents();
+				const matchedAgent = agents.find(a => {
+					const fName = a.folderPath ? a.folderPath.split(/[/\\]/).filter(Boolean).pop() : '';
+					return (fName && fName === ticketIdOrPath) ||
+						(a.id && a.id === ticketIdOrPath) ||
+						(a.name && (a.name === ticketIdOrPath || a.name.toLowerCase() === ticketIdOrPath.toLowerCase()));
+				});
+				if (matchedAgent && matchedAgent.folderPath) {
+					const agentFolderUri = URI.file(matchedAgent.folderPath);
+					const paths = await this._checkFolderForTicketPaths(agentFolderUri);
+					if (paths) return paths;
+				}
+			} catch {}
+		}
+
+		// 9. Intelligent Sequence / Type / Fuzzy matching (e.g. "job 0001", "job 1", "0001", "job-0001", "#1", title match)
+		const fuzzyMatched = await this._resolveTicketFuzzyOrSequence(workspaceUri, ticketIdOrPath);
+		if (fuzzyMatched) {
+			return fuzzyMatched;
+		}
+
+		return undefined;
+	}
+
+	private async _collectAllWorkspaceTickets(workspaceUri: URI): Promise<Array<{
+		paths: ITicketResolvedPaths;
+		ticketId: string;
+		ticketType: string;
+		title: string;
+		seqNumber?: number;
+		code?: string;
+	}>> {
+		const results: Array<{
+			paths: ITicketResolvedPaths;
+			ticketId: string;
+			ticketType: string;
+			title: string;
+			seqNumber?: number;
+			code?: string;
+		}> = [];
+		const visitedFolders = new Set<string>();
+
+		const scanDir = async (dirUri: URI, depth: number) => {
+			if (depth > 6) return;
+			const fsPath = dirUri.fsPath;
+			if (visitedFolders.has(fsPath)) return;
+			visitedFolders.add(fsPath);
+
+			try {
+				const stat = await this.fileService.resolve(dirUri);
+				if (!stat.children) return;
+
+				for (const child of stat.children) {
+					if (!child.isDirectory || child.name.startsWith('.') || child.name.startsWith('~') || child.name === 'node_modules') {
+						continue;
+					}
+					const paths = await this._checkFolderForTicketPaths(child.resource);
+					if (paths) {
+						let title = child.name;
+						try {
+							const readme = await this._safeRead(paths.readmeMdUri);
+							const parsed = this._parseReadmeMd(readme);
+							if (parsed.title) title = parsed.title;
+						} catch {}
+
+						let seqNumber: number | undefined;
+						let code: string | undefined;
+						const match = paths.ticketId.match(/^([A-Za-z0-9]+)[_\-]0*(\d+)$/);
+						if (match) {
+							code = match[1];
+							seqNumber = parseInt(match[2], 10);
+						}
+
+						results.push({
+							paths,
+							ticketId: paths.ticketId,
+							ticketType: paths.ticketType || '',
+							title,
+							seqNumber,
+							code
+						});
+					}
+					await scanDir(child.resource, depth + 1);
+				}
+			} catch {}
+		};
+
+		await scanDir(workspaceUri, 0);
+		return results;
+	}
+
+	private async _resolveTicketFuzzyOrSequence(workspaceUri: URI, ticketIdOrPath: string): Promise<ITicketResolvedPaths | undefined> {
+		const cleanInput = ticketIdOrPath.trim().replace(/^[/\\]+/, '');
+		if (!cleanInput) return undefined;
+
+		const allTickets = await this._collectAllWorkspaceTickets(workspaceUri);
+		if (allTickets.length === 0) return undefined;
+
+		const normInput = cleanInput.toLowerCase().replace(/[\s_\-]+/g, '');
+
+		// Case 1: Type + Sequence Number (e.g. "job 0001", "job-0001", "job 1", "task 0002", "job0001")
+		const typeSeqMatch = cleanInput.match(/^(job|task|note|workflow|project|case|agent|issue|analysis)[\s_\-]*0*(\d+)$/i);
+		if (typeSeqMatch) {
+			const targetType = typeSeqMatch[1].toLowerCase();
+			const targetSeq = parseInt(typeSeqMatch[2], 10);
+			const matched = allTickets.find(t =>
+				t.ticketType.toLowerCase() === targetType && t.seqNumber === targetSeq
+			);
+			if (matched) return matched.paths;
+
+			// Fallback: If type doesn't strictly match but seqNumber matches and there's only one
+			const seqMatches = allTickets.filter(t => t.seqNumber === targetSeq);
+			if (seqMatches.length === 1) return seqMatches[0].paths;
+		}
+
+		// Case 2: Pure sequence number (e.g. "0001", "1", "-0001", "#1")
+		const pureSeqMatch = cleanInput.match(/^#?[_\-]?0*(\d+)$/);
+		if (pureSeqMatch) {
+			const targetSeq = parseInt(pureSeqMatch[1], 10);
+			const seqMatches = allTickets.filter(t => t.seqNumber === targetSeq);
+			if (seqMatches.length === 1) return seqMatches[0].paths;
+			if (seqMatches.length > 1) {
+				// Prefer top-level or job type
+				const jobMatch = seqMatches.find(t => t.ticketType.toLowerCase() === 'job');
+				if (jobMatch) return jobMatch.paths;
+				return seqMatches[0].paths;
+			}
+		}
+
+		// Case 3: Normalized ticket ID (e.g. "neowo0001", "neowo-1")
+		const idMatch = allTickets.find(t => {
+			const normTid = t.ticketId.toLowerCase().replace(/[\s_\-]+/g, '');
+			return normTid === normInput;
+		});
+		if (idMatch) return idMatch.paths;
+
+		// Case 4: Title match (exact or substring)
+		const titleMatch = allTickets.find(t =>
+			t.title.toLowerCase() === cleanInput.toLowerCase() ||
+			(cleanInput.length >= 4 && t.title.toLowerCase().includes(cleanInput.toLowerCase()))
+		);
+		if (titleMatch) return titleMatch.paths;
 
 		return undefined;
 	}
@@ -285,12 +574,27 @@ export class TicketDataEngine {
 
 	private async _checkFolderForTicketPaths(folderUri: URI): Promise<ITicketResolvedPaths | undefined> {
 		const agentsDir = URI.joinPath(folderUri, '.agents');
-		let ticketMdUri = URI.joinPath(agentsDir, 'ticket.md');
-		if (!await this.fileService.exists(ticketMdUri)) {
-			ticketMdUri = URI.joinPath(folderUri, 'ticket.md');
-			if (!await this.fileService.exists(ticketMdUri)) {
-				return undefined;
+		const altCandidates = ['ticket.md', 'agent.md', 'job.md', 'task.md', 'note.md', 'workspace.md'];
+		let ticketMdUri: URI | undefined;
+
+		for (const alt of altCandidates) {
+			const inAgents = URI.joinPath(agentsDir, alt);
+			if (await this.fileService.exists(inAgents)) {
+				ticketMdUri = inAgents;
+				break;
 			}
+		}
+		if (!ticketMdUri) {
+			for (const alt of altCandidates) {
+				const inRoot = URI.joinPath(folderUri, alt);
+				if (await this.fileService.exists(inRoot)) {
+					ticketMdUri = inRoot;
+					break;
+				}
+			}
+		}
+		if (!ticketMdUri) {
+			return undefined;
 		}
 
 		const isAgents = ticketMdUri.path.includes('/.agents/');
@@ -308,9 +612,16 @@ export class TicketDataEngine {
 
 		// Parse overview to get ticket ID and workspace ID
 		const content = (await this.fileService.readFile(ticketMdUri)).value.toString();
-		const wsMatch = content.match(/^-\s*\*\*Workspace ID\*\*:\s*(.+)$/m);
-		const idMatch = content.match(/^-\s*\*\*Ticket ID\*\*:\s*(.+)$/m);
-		const typeMatch = content.match(/^-\s*\*\*Ticket Type\*\*:\s*(.+)$/m);
+		let wsMatch = content.match(/^-\s*\*\*Workspace ID\*\*:\s*(.+)$/m);
+		let idMatch = content.match(/^-\s*\*\*Ticket ID\*\*:\s*(.+)$/m);
+		let typeMatch = content.match(/^-\s*\*\*(?:Ticket Type|Entity Type)\*\*:\s*(.+)$/m);
+
+		// Fallback to instruction.md or README.md if not in ticket.md
+		if ((!wsMatch || !idMatch) && await this.fileService.exists(instructionMdUri)) {
+			const instContent = (await this.fileService.readFile(instructionMdUri)).value.toString();
+			if (!wsMatch) wsMatch = instContent.match(/^-\s*\*\*Workspace ID\*\*:\s*(.+)$/m);
+			if (!idMatch) idMatch = instContent.match(/^-\s*\*\*Ticket ID\*\*:\s*(.+)$/m);
+		}
 
 		const folderName = folderUri.path.split('/').filter(Boolean).pop() || '';
 
@@ -327,10 +638,145 @@ export class TicketDataEngine {
 	}
 
 	/**
+	 * Builds an ultra-compact, token-dense ASCII skeleton tree of the workspace tickets.
+	 * Compresses hierarchical information by 95% compared to raw JSON.
+	 */
+	public async buildCompactWorkspaceTree(workspaceUri: URI, activeTicketId?: string, maxDepth: number = 2): Promise<string> {
+		const typeEmoji = (type: string): string => {
+			const t = (type || '').toLowerCase();
+			if (t === 'job') return '🚀';
+			if (t === 'task') return '📋';
+			if (t === 'workflow') return '⚡';
+			if (t === 'case') return '📦';
+			if (t === 'note') return '📝';
+			if (t === 'agent') return '🤖';
+			if (t === 'issue') return '🐞';
+			if (t === 'analysis') return '📊';
+			return '📄';
+		};
+
+		const getDirectSubTickets = async (folderUri: URI): Promise<Array<{ paths: ITicketResolvedPaths; title: string; status: string }>> => {
+			const items: Array<{ paths: ITicketResolvedPaths; title: string; status: string }> = [];
+			try {
+				const stat = await this.fileService.resolve(folderUri);
+				if (!stat.children) return items;
+				for (const child of stat.children) {
+					if (!child.isDirectory || child.name.startsWith('.') || child.name.startsWith('~') || child.name === 'node_modules') {
+						continue;
+					}
+					const paths = await this._checkFolderForTicketPaths(child.resource);
+					if (paths) {
+						let title = child.name;
+						let status = 'Todo';
+						try {
+							const readme = await this._safeRead(paths.readmeMdUri);
+							const parsedR = this._parseReadmeMd(readme);
+							if (parsedR.title) title = parsedR.title;
+						} catch {}
+						try {
+							const ticket = await this._safeRead(paths.ticketMdUri);
+							const parsedT = this._parseTicketMd(ticket);
+							if (parsedT.status) status = parsedT.status;
+						} catch {}
+
+						items.push({ paths, title, status });
+					}
+				}
+			} catch {}
+			return items;
+		};
+
+		const renderBranch = async (dirUri: URI, prefix: string, depth: number): Promise<string[]> => {
+			const lines: string[] = [];
+			const subTickets = await getDirectSubTickets(dirUri);
+			if (subTickets.length === 0) return lines;
+
+			for (let i = 0; i < subTickets.length; i++) {
+				const item = subTickets[i];
+				const isLast = (i === subTickets.length - 1);
+				const pointer = isLast ? '└── ' : '├── ';
+				const nextPrefix = prefix + (isLast ? '    ' : '│   ');
+
+				const emoji = typeEmoji(item.paths.ticketType);
+				const isFocus = !!(activeTicketId && (item.paths.ticketId === activeTicketId || item.paths.ticketId.toLowerCase() === activeTicketId.toLowerCase()));
+				const focusBadge = isFocus ? ' [CURRENT FOCUS]' : '';
+
+				const grandChildren = await getDirectSubTickets(item.paths.folderUri);
+				const shouldExpand = (depth < maxDepth) || isFocus || (grandChildren.length <= 5 && depth <= maxDepth + 1);
+
+				if (grandChildren.length > 0 && !shouldExpand) {
+					lines.push(`${prefix}${pointer}${emoji} ${item.paths.ticketId} [${item.paths.ticketType}] ${item.title} (Status: ${item.status}, ${grandChildren.length} sub-items)${focusBadge}`);
+				} else {
+					lines.push(`${prefix}${pointer}${emoji} ${item.paths.ticketId} [${item.paths.ticketType}] ${item.title} (Status: ${item.status})${focusBadge}`);
+					if (grandChildren.length > 0) {
+						const childLines = await renderBranch(item.paths.folderUri, nextPrefix, depth + 1);
+						lines.push(...childLines);
+					}
+				}
+			}
+			return lines;
+		};
+
+		const treeLines = await renderBranch(workspaceUri, '  ', 1);
+		if (treeLines.length === 0) {
+			return '  (Empty workspace - no tickets created yet)';
+		}
+		return treeLines.join('\n');
+	}
+
+	/**
+	 * Query workspace tree on-demand
+	 */
+	public async queryWorkspaceTree(options: { workspace_id: string; parent_ticket_id?: string; query?: string; max_depth?: number }): Promise<any> {
+		const wsUri = await this.findWorkspaceUri(options.workspace_id, options.parent_ticket_id);
+		if (!wsUri) throw new Error(`Workspace '${options.workspace_id}' not found.`);
+
+		let baseUri = wsUri;
+		let targetParentId = options.parent_ticket_id;
+		if (targetParentId && targetParentId !== '/' && targetParentId !== 'root' && targetParentId !== '.') {
+			const resolved = await this.resolveTicketPaths(wsUri, targetParentId);
+			if (resolved) {
+				baseUri = resolved.folderUri;
+			} else {
+				throw new Error(`Parent ticket '${targetParentId}' not found in workspace '${options.workspace_id}'.`);
+			}
+		}
+
+		const maxDepth = options.max_depth || 3;
+		const query = (options.query || '').trim().toLowerCase();
+
+		const allTickets = await this._collectAllWorkspaceTickets(baseUri);
+		let matches = allTickets;
+		if (query) {
+			matches = allTickets.filter(t =>
+				t.ticketId.toLowerCase().includes(query) ||
+				t.ticketType.toLowerCase().includes(query) ||
+				t.title.toLowerCase().includes(query) ||
+				(t.seqNumber !== undefined && String(t.seqNumber) === query)
+			);
+		}
+
+		const treeView = await this.buildCompactWorkspaceTree(baseUri, undefined, maxDepth);
+
+		return {
+			workspace_id: options.workspace_id,
+			base_ticket_or_folder: targetParentId || '/',
+			total_matching: matches.length,
+			matching_tickets: matches.slice(0, 30).map(t => ({
+				ticket_id: t.ticketId,
+				ticket_type: t.ticketType,
+				title: t.title,
+				folder_path: t.paths.folderUri.fsPath
+			})),
+			tree_view: treeView
+		};
+	}
+
+	/**
 	 * 1. anyagent_get_ticket_data
 	 */
 	public async getTicketData(workspaceId: string, ticketId: string, fieldPath?: string, parentPath?: string): Promise<any> {
-		const wsUri = await this.findWorkspaceUri(workspaceId);
+		const wsUri = await this.findWorkspaceUri(workspaceId, ticketId);
 		if (!wsUri) throw new Error(`Workspace '${workspaceId}' not found.`);
 
 		const paths = await this.resolveTicketPaths(wsUri, ticketId, parentPath);
@@ -410,13 +856,15 @@ export class TicketDataEngine {
 
 		// 1. Determine parent folder URI
 		let parentFolderUri = wsUri;
-		if (options.parent_path && options.parent_path !== '/' && options.parent_path !== 'root') {
+		if (options.parent_path && options.parent_path !== '/' && options.parent_path !== 'root' && options.parent_path !== '.') {
 			const resolvedParent = await this.resolveTicketPaths(wsUri, options.parent_path);
 			if (resolvedParent) {
 				parentFolderUri = resolvedParent.folderUri;
 			} else {
-				const rel = options.parent_path.startsWith('/') ? options.parent_path.slice(1) : options.parent_path;
-				parentFolderUri = URI.joinPath(wsUri, rel);
+				// SAFETY: DO NOT create an arbitrary folder on disk!
+				const allTickets = await this._collectAllWorkspaceTickets(wsUri);
+				const ticketSummary = allTickets.map(t => `${t.ticketId} (Type: ${t.ticketType}, Title: "${t.title}")`).join(', ');
+				throw new Error(`Parent ticket '${options.parent_path}' was not found in workspace '${options.workspace_id}'. Existing tickets in this workspace are: [${ticketSummary || 'none'}]. Please specify an existing ticket ID (such as 'NEOWO-0001') or '/' for workspace root.`);
 			}
 		}
 
@@ -471,7 +919,7 @@ export class TicketDataEngine {
 	 * 3. anyagent_delete_ticket
 	 */
 	public async deleteTicket(options: IDeleteTicketToolOptions): Promise<any> {
-		const wsUri = await this.findWorkspaceUri(options.workspace_id);
+		const wsUri = await this.findWorkspaceUri(options.workspace_id, options.ticket_id);
 		if (!wsUri) throw new Error(`Workspace '${options.workspace_id}' not found.`);
 
 		const paths = await this.resolveTicketPaths(wsUri, options.ticket_id, options.parent_path);
@@ -539,11 +987,28 @@ export class TicketDataEngine {
 	 * 4. anyagent_update_ticket
 	 */
 	public async updateTicket(options: IUpdateTicketToolOptions): Promise<any> {
-		const wsUri = await this.findWorkspaceUri(options.workspace_id);
-		if (!wsUri) throw new Error(`Workspace '${options.workspace_id}' not found.`);
+		const wsUri = await this.findWorkspaceUri(options.workspace_id, options.ticket_id);
+		let paths = wsUri ? await this.resolveTicketPaths(wsUri, options.ticket_id, options.parent_path) : undefined;
 
-		const paths = await this.resolveTicketPaths(wsUri, options.ticket_id, options.parent_path);
-		if (!paths) throw new Error(`Ticket '${options.ticket_id}' not found.`);
+		if (!paths && this.agentsManagerService) {
+			try {
+				const agents = await this.agentsManagerService.getAgents();
+				const matchedAgent = agents.find(a => {
+					const fName = a.folderPath ? a.folderPath.split(/[/\\]/).filter(Boolean).pop() : '';
+					return (fName && fName === options.ticket_id) ||
+						(a.id && a.id === options.ticket_id) ||
+						(a.name && (a.name === options.ticket_id || a.name.toLowerCase() === options.ticket_id.toLowerCase()));
+				});
+				if (matchedAgent && matchedAgent.folderPath) {
+					paths = await this._checkFolderForTicketPaths(URI.file(matchedAgent.folderPath));
+				}
+			} catch {}
+		}
+
+		if (!paths) {
+			if (!wsUri) throw new Error(`Workspace '${options.workspace_id}' not found.`);
+			throw new Error(`Ticket '${options.ticket_id}' not found.`);
+		}
 
 		let ticketContent = (await this.fileService.readFile(paths.ticketMdUri)).value.toString();
 		let readmeContent = await this._safeRead(paths.readmeMdUri);
@@ -602,11 +1067,79 @@ export class TicketDataEngine {
 				instructionContent = instructionContent.replace(/^-\s*\*\*Ticket Type Prompt\*\*:\s*.*$/m, `- **Ticket Type Prompt**: ${pVal}`);
 				instructionModified = true;
 			}
+			else if (path === '/Instructions/Instruction Notes' || path === '/Instruction Notes' || path === '/Instructions') {
+				const notes = String(rawVal ?? '');
+				const lines = instructionContent.split(/\r?\n/);
+				const sepIdx = lines.findIndex(l => l.startsWith('---'));
+				if (sepIdx !== -1) {
+					lines.splice(sepIdx + 1, lines.length - (sepIdx + 1), '', notes);
+				} else {
+					lines.push('', '---', '', notes);
+				}
+				instructionContent = lines.join('\n');
+				instructionModified = true;
+			}
 			// 7. Dynamic Custom Cards & Attributes (/Custom/...)
 			else if (path.startsWith('/Custom/') || path.startsWith('Custom/')) {
 				const cleanPath = path.replace(/^\/?Custom\//, '');
 				ticketContent = this._applyCustomUpdate(ticketContent, cleanPath, rawVal);
 				ticketModified = true;
+			}
+		}
+
+		// 8. Auto-sync physical attachment files if any attachment fields or file objects were updated
+		const filesToSync: string[] = [];
+		for (const [k, v] of Object.entries(options.updates)) {
+			if (k.toLowerCase().includes('attachment') || Array.isArray(v) || (typeof v === 'object' && v && ('name' in v))) {
+				const items = Array.isArray(v) ? v : [v];
+				for (const item of items) {
+					if (item && typeof item === 'object' && item.name && typeof item.name === 'string') {
+						filesToSync.push(item.name);
+					} else if (typeof item === 'string' && /\.[a-zA-Z0-9]{2,5}$/.test(item)) {
+						filesToSync.push(item);
+					}
+				}
+			}
+		}
+
+		if (filesToSync.length > 0) {
+			const attachmentsDir = URI.joinPath(paths.folderUri, 'attachments');
+			if (!(await this.fileService.exists(attachmentsDir))) {
+				await this.fileService.createFolder(attachmentsDir);
+			}
+			for (const fileName of filesToSync) {
+				const destUri = URI.joinPath(attachmentsDir, fileName);
+				if (!(await this.fileService.exists(destUri))) {
+					const userHome = '/Users/aimery';
+					const candidates = [
+						URI.file(`${userHome}/Desktop/${fileName}`),
+						URI.file(`${userHome}/Downloads/${fileName}`),
+						URI.file(`${userHome}/Documents/${fileName}`)
+					];
+					for (const cand of candidates) {
+						if (await this.fileService.exists(cand)) {
+							try {
+								await this.fileService.copy(cand, destUri, true);
+								break;
+							} catch { }
+						}
+					}
+				}
+
+				// Also ensure ### Attachments Links in ticket.md reflects this file
+				const fileLinkPattern = new RegExp(`\\[${fileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]`, 'i');
+				if (!fileLinkPattern.test(ticketContent)) {
+					const encodedName = encodeURIComponent(fileName);
+					const linkLine = `- [${fileName}](attachments/${encodedName})`;
+					if (/^### Attachments Links\n-\s*None/m.test(ticketContent)) {
+						ticketContent = ticketContent.replace(/^### Attachments Links\n-\s*None/m, `### Attachments Links\n${linkLine}`);
+					} else if (/^### Attachments Links/m.test(ticketContent)) {
+						ticketContent = ticketContent.replace(/(^### Attachments Links\n)/m, `$1${linkLine}\n`);
+					} else {
+						ticketContent += `\n### Attachments Links\n${linkLine}\n`;
+					}
+					ticketModified = true;
+				}
 			}
 		}
 
@@ -854,9 +1387,52 @@ export class TicketDataEngine {
 		const parts = path.split('/').filter(Boolean);
 		if (parts.length === 0) return content;
 
-		// 1. /Custom/<key>/add -> Add dynamic card
-		if (parts.length === 2 && parts[1] === 'add' && val && typeof val === 'object') {
+		// 1. /Custom/<key>/add -> Add items to list or dynamic card
+		if (parts.length === 2 && parts[1] === 'add' && val !== undefined && val !== null) {
 			const listKey = parts[0];
+			const propRegex = new RegExp(`^(\\s*-\\s*\\*\\*${listKey}\\*\\*:)(.*)$`, 'm');
+			const propMatch = content.match(propRegex);
+
+			// Check if listKey is stored as a JSON array / flat line
+			const isArrayOrAttachment = Array.isArray(val) || (typeof val === 'object' && ('name' in val || 'file' in val || 'uri' in val)) || (propMatch && propMatch[2].trim().startsWith('['));
+
+			if (isArrayOrAttachment) {
+				let existingArr: any[] = [];
+				if (propMatch && propMatch[2].trim().startsWith('[')) {
+					try { existingArr = JSON.parse(propMatch[2].trim()); } catch { }
+					if (!Array.isArray(existingArr)) existingArr = [];
+				} else if (propMatch && propMatch[2].trim()) {
+					existingArr = [{ name: propMatch[2].trim() }];
+				}
+
+				const itemsToAdd = Array.isArray(val) ? val : [val];
+				for (const item of itemsToAdd) {
+					const itemName = typeof item === 'object' && item ? (item.name || item.key || item.title || JSON.stringify(item)) : String(item);
+					const exists = existingArr.some(e => {
+						const eName = typeof e === 'object' && e ? (e.name || e.key || e.title || JSON.stringify(e)) : String(e);
+						return eName === itemName;
+					});
+					if (!exists) {
+						existingArr.push(item);
+					}
+				}
+
+				const updatedJson = JSON.stringify(existingArr);
+				if (propMatch) {
+					content = content.replace(propRegex, `  - **${listKey}**: ${updatedJson}`);
+				} else {
+					if (/^-\s*\*\*Self Defined Data Value\*\*:/m.test(content)) {
+						content = content.replace(/(^-\s*\*\*Self Defined Data Value\**:)/m, `$1\n  - **${listKey}**: ${updatedJson}`);
+					} else if (/### Self Defined Data Value/m.test(content)) {
+						content = content.replace(/(### Self Defined Data Value:?\n)/m, `$1  - **${listKey}**: ${updatedJson}\n`);
+					} else {
+						content += `\n  - **${listKey}**: ${updatedJson}\n`;
+					}
+				}
+				return content;
+			}
+
+			// Otherwise, handle as markdown sub-card block
 			const cardKey = val.key || val.name || val.title || `Item ${Date.now()}`;
 			let newCardBlock = `  - **${cardKey}**:\n`;
 			for (const [subK, subV] of Object.entries(val)) {
@@ -865,17 +1441,41 @@ export class TicketDataEngine {
 			}
 
 			// Find listKey in Self Defined Data Value
-			const listRegex = new RegExp(`(  - \\*\\*${listKey}\\*\\*:\\n)([\\s\\S]*?)(?=(\\n  - \\*\\*|\\n\\n|\\n###|$))`);
+			const listRegex = new RegExp(`(  - \\*\\*${listKey}\\*\\*:\\n?)([\\s\\S]*?)(?=(\\n  - \\*\\*|\\n\\n|\\n###|$))`);
 			if (listRegex.test(content)) {
 				content = content.replace(listRegex, `$1$2${newCardBlock}`);
 			} else {
-				// Insert new listKey
-				content = content.replace(/(### Self Defined Data Value:\n)/, `$1  - **${listKey}**:\n${newCardBlock}`);
+				if (/^-\s*\*\*Self Defined Data Value\*\*:/m.test(content)) {
+					content = content.replace(/(^-\s*\*\*Self Defined Data Value\**:)/m, `$1\n  - **${listKey}**: ${newCardBlock}`);
+				} else if (/### Self Defined Data Value/m.test(content)) {
+					content = content.replace(/(### Self Defined Data Value:?\n)/m, `$1  - **${listKey}**: ${newCardBlock}`);
+				}
 			}
 			return content;
 		}
 
-		// 2. /Custom/<key>/<cardKey>/<attr> -> Update specific attribute of card
+		// 2. /Custom/<key>/remove or /delete
+		if (parts.length === 2 && (parts[1] === 'remove' || parts[1] === 'delete')) {
+			const listKey = parts[0];
+			const propRegex = new RegExp(`^(\\s*-\\s*\\*\\*${listKey}\\*\\*:)(.*)$`, 'm');
+			const propMatch = content.match(propRegex);
+			if (propMatch && propMatch[2].trim().startsWith('[')) {
+				try {
+					let arr = JSON.parse(propMatch[2].trim());
+					if (Array.isArray(arr)) {
+						const targetName = typeof val === 'object' && val ? (val.name || val.key || val.title) : String(val);
+						arr = arr.filter(item => {
+							const itemName = typeof item === 'object' && item ? (item.name || item.key || item.title) : String(item);
+							return itemName !== targetName;
+						});
+						content = content.replace(propRegex, `  - **${listKey}**: ${JSON.stringify(arr)}`);
+					}
+				} catch { }
+			}
+			return content;
+		}
+
+		// 3. /Custom/<key>/<cardKey>/<attr> -> Update specific attribute of card
 		if (parts.length === 3) {
 			const [, cardKey, attr] = parts;
 			const attrRegex = new RegExp(`(  - \\*\\*${cardKey}\\*\\*:[\\s\\S]*?    - \\*\\*${attr}\\*\\*:).*$`, 'm');
@@ -885,7 +1485,7 @@ export class TicketDataEngine {
 			return content;
 		}
 
-		// 3. /Custom/<key>/<cardKey>: null -> Delete card
+		// 4. /Custom/<key>/<cardKey>: null -> Delete card
 		if (parts.length === 2 && (val === null || val === undefined)) {
 			const [, cardKey] = parts;
 			const cardRegex = new RegExp(`\\n?    - \\*\\*${cardKey}\\*\\*:[\\s\\S]*?(?=(\\n    - \\*\\*|\\n  - \\*\\*|\\n###|$))`, 'g');
@@ -893,16 +1493,23 @@ export class TicketDataEngine {
 			return content;
 		}
 
-		// 4. /Custom/<key>: val -> Flat custom property
+		// 5. /Custom/<key>: val -> Flat custom property or full array update
 		if (parts.length === 1) {
 			const key = parts[0];
-			const propRegex = new RegExp(`^  - \\*\\*${key}\\*\\*:.*$`, 'm');
+			const propRegex = new RegExp(`^\\s*-\\s*\\*\\*${key}\\*\\*:.*$`, 'm');
+			const valStr = (typeof val === 'object' && val !== null) ? JSON.stringify(val) : String(val ?? '');
 			if (val === null || val === undefined) {
 				content = content.replace(propRegex, '');
 			} else if (propRegex.test(content)) {
-				content = content.replace(propRegex, `  - **${key}**: ${val}`);
+				content = content.replace(propRegex, `  - **${key}**: ${valStr}`);
 			} else {
-				content = content.replace(/(### Self Defined Data Value:\n)/, `$1  - **${key}**: ${val}\n`);
+				if (/^-\s*\*\*Self Defined Data Value\*\*:/m.test(content)) {
+					content = content.replace(/(^-\s*\*\*Self Defined Data Value\**:)/m, `$1\n  - **${key}**: ${valStr}`);
+				} else if (/### Self Defined Data Value/m.test(content)) {
+					content = content.replace(/(### Self Defined Data Value:?\n)/m, `$1  - **${key}**: ${valStr}\n`);
+				} else {
+					content += `\n  - **${key}**: ${valStr}\n`;
+				}
 			}
 			return content;
 		}
@@ -911,12 +1518,40 @@ export class TicketDataEngine {
 	}
 
 	private _extractFieldByPath(data: any, path: string): any {
-		const clean = path.startsWith('/') ? path.slice(1) : path;
-		const parts = clean.split('/');
+		let clean = path.startsWith('/') ? path.slice(1) : path;
 		let curr = data;
+
+		if (clean.startsWith('Custom/')) {
+			clean = clean.slice('Custom/'.length);
+			if (curr && curr.self_defined_data !== undefined) {
+				curr = curr.self_defined_data;
+			}
+		} else if (clean.startsWith('Attributes/')) {
+			clean = clean.slice('Attributes/'.length);
+		} else if (clean.startsWith('Profile/')) {
+			clean = clean.slice('Profile/'.length);
+			if (curr && curr.profile_data !== undefined) {
+				curr = curr.profile_data;
+			}
+		} else if (clean.startsWith('Instructions/')) {
+			clean = clean.slice('Instructions/'.length);
+			if (curr && curr.prompts !== undefined) {
+				curr = curr.prompts;
+			}
+		}
+
+		if (!clean) return curr;
+
+		const parts = clean.split('/');
 		for (const p of parts) {
 			if (curr === undefined || curr === null) return undefined;
-			if (curr[p] !== undefined) {
+			if (typeof curr === 'string' && (curr.trim().startsWith('[') || curr.trim().startsWith('{'))) {
+				try { curr = JSON.parse(curr); } catch { }
+			}
+			if (Array.isArray(curr) && /^\d+$/.test(p)) {
+				const idx = parseInt(p, 10);
+				curr = curr.find(item => item && (item._index === idx || item.id === p)) || curr[idx - 1] || curr[idx];
+			} else if (curr[p] !== undefined) {
 				curr = curr[p];
 			} else if (curr.self_defined_data && curr.self_defined_data[p] !== undefined) {
 				curr = curr.self_defined_data[p];
