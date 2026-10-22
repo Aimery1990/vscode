@@ -39,7 +39,8 @@ export type CustomFieldType =
 	| 'git'
 	| 'parameters'
 	| 'prompt'
-	| 'result';
+	| 'result'
+	| 'output';
 
 export interface IActionButton {
 	id: string;
@@ -61,6 +62,13 @@ export interface IParameterDefinition {
 	defaultValue?: string;
 	options?: string[];
 	description?: string;
+}
+
+export interface IOutputSpec {
+	fieldKey: string;
+	label: string;
+	enabled: boolean;
+	defaultFormat?: string;
 }
 
 export interface ICustomField {
@@ -88,6 +96,7 @@ export interface ICustomField {
 	targetAgentId?: string;
 	targetAgentName?: string;
 	defaultFormat?: string;
+	outputSpecs?: IOutputSpec[];
 }
 
 export interface ICompositeComponent {

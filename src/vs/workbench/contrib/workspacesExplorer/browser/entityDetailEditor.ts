@@ -763,6 +763,73 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// Output Item: Copy
+			const copyOutputItemBtn = target.closest('.output-item-copy-btn') as HTMLElement | null;
+			if (copyOutputItemBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const specKey = copyOutputItemBtn.getAttribute('data-spec-key') || '';
+				const card = copyOutputItemBtn.closest('.output-primitive-card, .result-primitive-card') as HTMLElement | null;
+				const item = card?.querySelector(`.output-spec-item[data-spec-key="${specKey}"]`);
+				const rawTa = item?.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+				const text = rawTa?.value || '';
+				if (text) {
+					await this._clipboardService.writeText(text);
+					this._notificationService.info(`Output '${specKey}' copied to clipboard.`);
+				} else {
+					this._notificationService.warn('No content to copy.');
+				}
+				return;
+			}
+
+			// Output Item: Export CSV
+			const exportOutputItemCsvBtn = target.closest('.output-item-export-csv-btn') as HTMLElement | null;
+			if (exportOutputItemCsvBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const specKey = exportOutputItemCsvBtn.getAttribute('data-spec-key') || '';
+				const card = exportOutputItemCsvBtn.closest('.output-primitive-card, .result-primitive-card') as HTMLElement | null;
+				const item = card?.querySelector(`.output-spec-item[data-spec-key="${specKey}"]`);
+				const rawTa = item?.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+				const text = rawTa?.value || '';
+				this._exportResultToCsv(text, specKey);
+				return;
+			}
+
+			// Output: Sync All Outputs
+			const syncOutputsBtn = target.closest('.output-sync-all-btn') as HTMLElement | null;
+			if (syncOutputsBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = syncOutputsBtn.closest('.output-primitive-card, .result-primitive-card') as HTMLElement | null;
+				if (card) {
+					const fieldKey = syncOutputsBtn.getAttribute('data-field-key') || '';
+					await this._syncAllOutputItems(card, fieldKey);
+				}
+				return;
+			}
+
+			// Output: Copy All Data as JSON
+			const copyAllOutputBtn = target.closest('.output-copy-all-btn') as HTMLElement | null;
+			if (copyAllOutputBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = copyAllOutputBtn.closest('.output-primitive-card, .result-primitive-card') as HTMLElement | null;
+				if (card) {
+					const allOutputs: Record<string, string> = {};
+					const items = card.querySelectorAll('.output-spec-item');
+					items.forEach(it => {
+						const sKey = it.getAttribute('data-spec-key') || '';
+						const ta = it.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+						if (sKey) { allOutputs[sKey] = ta?.value || ''; }
+					});
+					const jsonStr = JSON.stringify(allOutputs, null, 2);
+					await this._clipboardService.writeText(jsonStr);
+					this._notificationService.info('All output items copied as JSON.');
+				}
+				return;
+			}
+
 			// 0.47 Result Primitive: Copy Result Content
 			const copyResultBtn = target.closest('.result-copy-btn') as HTMLElement | null;
 			if (copyResultBtn) {
@@ -968,10 +1035,21 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			const outputItemSelector = target?.closest('.output-item-format-selector') as HTMLSelectElement | null;
+			if (outputItemSelector) {
+				const fieldKey = outputItemSelector.getAttribute('data-field-key') || '';
+				const specKey = outputItemSelector.getAttribute('data-spec-key') || '';
+				const card = outputItemSelector.closest('.output-primitive-card, .result-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._updateOutputItemFormat(card, fieldKey, specKey, outputItemSelector.value);
+				}
+				return;
+			}
+
 			const formatSelector = target?.closest('.result-format-selector') as HTMLSelectElement | null;
 			if (formatSelector) {
 				const fieldKey = formatSelector.getAttribute('data-field-key') || '';
-				const card = formatSelector.closest('.result-primitive-card') as HTMLElement | null;
+				const card = formatSelector.closest('.result-primitive-card, .output-primitive-card') as HTMLElement | null;
 				if (card) {
 					await this._updateResultCardFormat(card, fieldKey, formatSelector.value);
 				}
@@ -2876,18 +2954,37 @@ ${rawErr}
 					subProps['prompt'] = prompt;
 					subProps['output'] = output;
 					primitiveVal = output || prompt;
-				} else if (f.type === 'result') {
+				} else if (f.type === 'output' || f.type === 'result') {
 					let resText = '';
 					if (this._container) {
 						const card = this._container.querySelector(`.custom-primitive-card[data-field-key="${fKey}"]`) ||
 									this._container.querySelector(`.custom-primitive-card[data-field-id="${f.id}"]`);
 						if (card) {
 							const contentEl = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
-							if (contentEl) resText = contentEl.value || '';
+							if (contentEl) { resText = contentEl.value || ''; }
+							const specItems = card.querySelectorAll('.output-spec-item');
+							specItems.forEach(it => {
+								const sKey = it.getAttribute('data-spec-key') || '';
+								const ta = it.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+								if (sKey && ta?.value) {
+									subProps[sKey] = ta.value;
+								}
+							});
 						}
 					}
 					if (!resText && savedObj) {
-						resText = typeof savedObj === 'object' ? (savedObj.result || savedObj.output || '') : String(savedObj);
+						if (typeof savedObj === 'object' && savedObj !== null) {
+							resText = savedObj.result || savedObj.output || JSON.stringify(savedObj, null, 2);
+							for (const [sK, sV] of Object.entries(savedObj)) {
+								if (typeof sV === 'object' && sV !== null && (sV as Record<string, unknown>).text !== undefined) {
+									subProps[sK] = String((sV as Record<string, unknown>).text);
+								} else if (typeof sV === 'string') {
+									subProps[sK] = sV;
+								}
+							}
+						} else {
+							resText = String(savedObj);
+						}
 					}
 					primitiveVal = resText;
 					subProps['result'] = resText;
@@ -2910,17 +3007,34 @@ ${rawErr}
 					}
 				}
 
+				const currentTicketId = this._lastParsedData?.ticketId || '';
 				if (label) {
 					paramMap.set(label, primitiveVal);
 					for (const [subKey, subVal] of Object.entries(subProps)) {
 						paramMap.set(`${label}.${subKey}`, subVal);
 					}
+					if (currentTicketId) {
+						paramMap.set(`${currentTicketId}.${label}`, primitiveVal);
+						for (const [subKey, subVal] of Object.entries(subProps)) {
+							paramMap.set(`${currentTicketId}.${label}.${subKey}`, subVal);
+						}
+					}
+					paramMap.set(`output.${label}`, primitiveVal);
+					paramMap.set(`result.${label}`, primitiveVal);
 				}
 				if (id && id !== label) {
 					paramMap.set(id, primitiveVal);
 					for (const [subKey, subVal] of Object.entries(subProps)) {
 						paramMap.set(`${id}.${subKey}`, subVal);
 					}
+					if (currentTicketId) {
+						paramMap.set(`${currentTicketId}.${id}`, primitiveVal);
+						for (const [subKey, subVal] of Object.entries(subProps)) {
+							paramMap.set(`${currentTicketId}.${id}.${subKey}`, subVal);
+						}
+					}
+					paramMap.set(`output.${id}`, primitiveVal);
+					paramMap.set(`result.${id}`, primitiveVal);
 				}
 			}
 		}
@@ -2929,7 +3043,7 @@ ${rawErr}
 		const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 		let result = text;
 		for (const [pName, pVal] of paramMap.entries()) {
-			if (!pName) continue;
+			if (!pName) { continue; }
 			const escapedName = escapeRegExp(pName);
 			const reDouble = new RegExp(`\\{\\{\\s*${escapedName}\\s*\\}\\}`, 'gi');
 			const reSingle = new RegExp(`\\{\\s*${escapedName}\\s*\\}`, 'gi');
@@ -3080,7 +3194,7 @@ ${rawErr}
 					statusText.style.color = '#34d399';
 				}
 				await this._savePromptDataFromCard(card, fieldKey, res.text);
-				await this._autoUpdateResultPrimitives(res.text);
+				await this._autoUpdateOutputPrimitives(res.text, fieldKey);
 			} else {
 				throw new Error(res.error || 'Execution failed');
 			}
@@ -3097,15 +3211,246 @@ ${rawErr}
 		}
 	}
 
-	private async _autoUpdateResultPrimitives(output: string): Promise<void> {
-		if (!this._container) return;
-		const resultCards = this._container.querySelectorAll('.result-primitive-card') as NodeListOf<HTMLElement>;
-		if (resultCards.length === 0) return;
+	private async _autoUpdateOutputPrimitives(output: string, sourceFieldKey?: string): Promise<void> {
+		if (!this._container) { return; }
+		const outputCards = this._container.querySelectorAll('.output-primitive-card, .result-primitive-card') as NodeListOf<HTMLElement>;
+		if (outputCards.length === 0) { return; }
 
-		for (const card of Array.from(resultCards)) {
+		for (const card of Array.from(outputCards)) {
 			const fieldKey = card.getAttribute('data-field-key') || '';
-			await this._setResultCardContent(card, fieldKey, output);
+			const subItems = card.querySelectorAll('.output-spec-item') as NodeListOf<HTMLElement>;
+			if (subItems.length > 0) {
+				let targetItem: HTMLElement | null = null;
+				if (sourceFieldKey) {
+					for (const item of Array.from(subItems)) {
+						const specKey = item.getAttribute('data-spec-key') || '';
+						if (specKey.toLowerCase() === sourceFieldKey.toLowerCase()) {
+							targetItem = item;
+							break;
+						}
+					}
+				}
+				if (!targetItem) {
+					targetItem = subItems[0];
+				}
+				if (targetItem) {
+					const specKey = targetItem.getAttribute('data-spec-key') || '';
+					await this._setOutputItemContent(card, fieldKey, specKey, output);
+				}
+			} else {
+				await this._setResultCardContent(card, fieldKey, output);
+			}
 		}
+	}
+
+	private async _autoUpdateResultPrimitives(output: string): Promise<void> {
+		await this._autoUpdateOutputPrimitives(output);
+	}
+
+	private async _setOutputItemContent(card: HTMLElement, fieldKey: string, specKey: string, content: string): Promise<void> {
+		const itemContainer = card.querySelector(`.output-spec-item[data-spec-key="${specKey}"]`) as HTMLElement | null;
+		if (!itemContainer) { return; }
+
+		const rawTa = itemContainer.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+		if (rawTa) { rawTa.value = content; }
+
+		const formatSelector = itemContainer.querySelector('.output-item-format-selector') as HTMLSelectElement | null;
+		const format = formatSelector?.value || 'table';
+
+		const viewport = itemContainer.querySelector('.output-item-viewport') as HTMLElement | null;
+		if (viewport) {
+			if (format === 'table') {
+				viewport.innerHTML = this._renderResultTableHtml(content);
+			} else if (format === 'markdown') {
+				viewport.innerHTML = this._markdownToHtml(content);
+			} else if (format === 'json') {
+				viewport.innerHTML = this._renderResultJsonHtml(content);
+			} else {
+				viewport.innerHTML = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(content)}</pre>`;
+			}
+		}
+
+		let currentData: Record<string, unknown> = {};
+		const rawVal = this._lastParsedData?.customMetadata?.[fieldKey];
+		if (typeof rawVal === 'string') {
+			try { currentData = JSON.parse(rawVal); } catch {}
+		} else if (typeof rawVal === 'object' && rawVal !== null) {
+			currentData = rawVal as Record<string, unknown>;
+		}
+
+		const existingItem = (currentData[specKey] && typeof currentData[specKey] === 'object')
+			? (currentData[specKey] as Record<string, unknown>)
+			: {};
+
+		currentData[specKey] = {
+			...existingItem,
+			text: content,
+			format,
+			lastUpdated: new Date().toLocaleTimeString()
+		};
+
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: JSON.stringify(currentData)
+		};
+		await this._handleMessage({
+			type: 'saveMetadata',
+			metadata: {},
+			customMetadata: updatedCustom
+		});
+	}
+
+	private async _updateOutputItemFormat(card: HTMLElement, fieldKey: string, specKey: string, format: string): Promise<void> {
+		const itemContainer = card.querySelector(`.output-spec-item[data-spec-key="${specKey}"]`) as HTMLElement | null;
+		if (!itemContainer) { return; }
+
+		const rawTa = itemContainer.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+		const text = rawTa?.value || '';
+
+		const viewport = itemContainer.querySelector('.output-item-viewport') as HTMLElement | null;
+		if (viewport) {
+			if (format === 'table') {
+				viewport.innerHTML = this._renderResultTableHtml(text);
+			} else if (format === 'markdown') {
+				viewport.innerHTML = this._markdownToHtml(text);
+			} else if (format === 'json') {
+				viewport.innerHTML = this._renderResultJsonHtml(text);
+			} else {
+				viewport.innerHTML = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(text)}</pre>`;
+			}
+		}
+
+		let currentData: Record<string, unknown> = {};
+		const rawVal = this._lastParsedData?.customMetadata?.[fieldKey];
+		if (typeof rawVal === 'string') {
+			try { currentData = JSON.parse(rawVal); } catch {}
+		} else if (typeof rawVal === 'object' && rawVal !== null) {
+			currentData = rawVal as Record<string, unknown>;
+		}
+
+		const existingItem = (currentData[specKey] && typeof currentData[specKey] === 'object')
+			? (currentData[specKey] as Record<string, unknown>)
+			: {};
+
+		currentData[specKey] = {
+			...existingItem,
+			text,
+			format,
+			lastUpdated: new Date().toLocaleTimeString()
+		};
+
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: JSON.stringify(currentData)
+		};
+		await this._handleMessage({
+			type: 'saveMetadata',
+			metadata: {},
+			customMetadata: updatedCustom
+		});
+	}
+
+	private async _syncAllOutputItems(card: HTMLElement, fieldKey: string): Promise<void> {
+		const items = card.querySelectorAll('.output-spec-item') as NodeListOf<HTMLElement>;
+		if (items.length === 0) {
+			const promptCard = this._container?.querySelector('.prompt-primitive-card');
+			const promptOut = promptCard?.querySelector('.prompt-output-display');
+			const text = promptOut?.textContent || '';
+			if (text && !text.includes('No execution output yet.')) {
+				await this._setResultCardContent(card, fieldKey, text);
+				this._notificationService.info(`Output synced from AI Prompt into '${fieldKey}'.`);
+			} else {
+				this._notificationService.warn('No AI Prompt output available to sync.');
+			}
+			return;
+		}
+
+		let currentData: Record<string, unknown> = {};
+		const rawVal = this._lastParsedData?.customMetadata?.[fieldKey];
+		if (typeof rawVal === 'string') {
+			try { currentData = JSON.parse(rawVal); } catch {}
+		} else if (typeof rawVal === 'object' && rawVal !== null) {
+			currentData = rawVal as Record<string, unknown>;
+		}
+
+		for (const item of Array.from(items)) {
+			const specKey = item.getAttribute('data-spec-key') || '';
+			if (!specKey) { continue; }
+
+			let resolvedText = '';
+
+			if (this._container) {
+				const matchedCard = this._container.querySelector(`.custom-primitive-card[data-field-key="${specKey}"]`);
+				if (matchedCard) {
+					const browserContent = matchedCard.querySelector('.browser-content-display') as HTMLElement | null;
+					const promptContent = matchedCard.querySelector('.prompt-output-display') as HTMLElement | null;
+					if (browserContent && !browserContent.textContent?.startsWith('No webpage content')) {
+						resolvedText = browserContent.textContent || '';
+					} else if (promptContent && !promptContent.textContent?.includes('No execution output yet.')) {
+						resolvedText = promptContent.textContent || '';
+					}
+				}
+			}
+
+			if (!resolvedText && this._lastParsedData?.customMetadata) {
+				const mVal = this._lastParsedData.customMetadata[specKey];
+				if (typeof mVal === 'string') {
+					try {
+						const parsed = JSON.parse(mVal);
+						if (typeof parsed === 'object' && parsed !== null) {
+							const pRec = parsed as Record<string, unknown>;
+							resolvedText = String(pRec.output ?? pRec.content ?? pRec.result ?? mVal);
+						} else {
+							resolvedText = mVal;
+						}
+					} catch {
+						resolvedText = mVal;
+					}
+				} else if (typeof mVal === 'object' && mVal !== null) {
+					const mRec = mVal as Record<string, unknown>;
+					resolvedText = String(mRec.output ?? mRec.content ?? mRec.result ?? JSON.stringify(mVal, null, 2));
+				}
+			}
+
+			if (resolvedText) {
+				const rawTa = item.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+				if (rawTa) { rawTa.value = resolvedText; }
+
+				const formatSelector = item.querySelector('.output-item-format-selector') as HTMLSelectElement | null;
+				const format = formatSelector?.value || 'table';
+
+				const viewport = item.querySelector('.output-item-viewport') as HTMLElement | null;
+				if (viewport) {
+					if (format === 'table') {
+						viewport.innerHTML = this._renderResultTableHtml(resolvedText);
+					} else if (format === 'markdown') {
+						viewport.innerHTML = this._markdownToHtml(resolvedText);
+					} else if (format === 'json') {
+						viewport.innerHTML = this._renderResultJsonHtml(resolvedText);
+					} else {
+						viewport.innerHTML = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(resolvedText)}</pre>`;
+					}
+				}
+
+				currentData[specKey] = {
+					text: resolvedText,
+					format,
+					lastUpdated: new Date().toLocaleTimeString()
+				};
+			}
+		}
+
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: JSON.stringify(currentData)
+		};
+		await this._handleMessage({
+			type: 'saveMetadata',
+			metadata: {},
+			customMetadata: updatedCustom
+		});
+
+		this._notificationService.info(`Output items synchronized from live primitives.`);
 	}
 
 	private async _setResultCardContent(card: HTMLElement, fieldKey: string, output: string): Promise<void> {
@@ -4458,17 +4803,20 @@ ${interpolatedPrompt}`;
 								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
 									<div style="display: flex; gap: 8px; align-items: center;">
 										<button type="button" class="prompt-run-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59,130,246,0.18); color: #60a5fa; border: 1px solid rgba(59,130,246,0.4); ${isAgentMode ? 'display: none;' : ''}" title="Execute prompt with selected model">
-											<span>▶ Run with Model</span>
+											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5l9 5.5-9 5.5v-11z"/></svg>
+											<span>Run with Model</span>
 										</button>
 										<button type="button" class="prompt-dispatch-agent-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.18); color: #38bdf8; border: 1px solid rgba(56,189,248,0.4); ${!isAgentMode ? 'display: none;' : ''}" title="Dispatch task to selected AI Agent">
-											<span>🚀 Dispatch to Agent</span>
+											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1L2 5v6l6 4 6-4V5L8 1z"/></svg>
+											<span>Dispatch to Agent</span>
 										</button>
 										<button type="button" class="prompt-open-agent-central-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(168,85,247,0.15); color: #c084fc; border: 1px solid rgba(168,85,247,0.35);" title="Open Agent Central Chat with this prompt">
-											<span>💬 Agent Central</span>
+											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M14 1H2a1 1 0 00-1 1v9a1 1 0 001 1h3v3l3.5-3H14a1 1 0 001-1V2a1 1 0 00-1-1z"/></svg>
+											<span>Agent Central</span>
 										</button>
 									</div>
 									<button type="button" class="prompt-save-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15);" title="Save prompt instruction & settings">
-										<span>💾 Save Prompt</span>
+										<span>Save Prompt</span>
 									</button>
 								</div>
 
@@ -4489,9 +4837,11 @@ ${interpolatedPrompt}`;
 							</div>
 						</div>
 					`;
-				} else if (fType === 'result') {
-					let resultText = fieldItem.defaultContent || '';
-					let resultFormat = fieldItem.defaultFormat || 'table';
+				} else if (fType === 'output' || fType === 'result') {
+					const enabledSpecs = (fieldItem.outputSpecs || []).filter(s => s.enabled);
+					let savedMap: Record<string, any> = {};
+					let singleResultText = fieldItem.defaultContent || '';
+					let singleResultFormat = fieldItem.defaultFormat || 'table';
 					let lastUpdatedText = '';
 
 					if (v) {
@@ -4500,82 +4850,157 @@ ${interpolatedPrompt}`;
 							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 								try {
 									const parsed = JSON.parse(trimmed);
-									if (parsed.result !== undefined || parsed.output !== undefined) {
-										resultText = parsed.result ?? parsed.output ?? '';
-										if (parsed.format) { resultFormat = parsed.format; }
-										if (parsed.lastUpdated) { lastUpdatedText = parsed.lastUpdated; }
-									} else {
-										resultText = v;
+									if (typeof parsed === 'object' && parsed !== null) {
+										if (parsed.result !== undefined || parsed.output !== undefined) {
+											singleResultText = parsed.result ?? parsed.output ?? '';
+											if (parsed.format) { singleResultFormat = parsed.format; }
+											if (parsed.lastUpdated) { lastUpdatedText = parsed.lastUpdated; }
+										}
+										savedMap = parsed;
 									}
 								} catch {
-									resultText = v;
+									singleResultText = v;
 								}
 							} else {
-								resultText = v;
+								singleResultText = v;
 							}
 						} else if (typeof v === 'object' && v !== null) {
 							const rObj = v as Record<string, unknown>;
-							resultText = String(rObj.result ?? rObj.output ?? JSON.stringify(v, null, 2));
-							if (rObj.format) { resultFormat = String(rObj.format); }
-							if (rObj.lastUpdated) { lastUpdatedText = String(rObj.lastUpdated); }
+							if (rObj.result !== undefined || rObj.output !== undefined) {
+								singleResultText = String(rObj.result ?? rObj.output ?? '');
+								if (rObj.format) { singleResultFormat = String(rObj.format); }
+								if (rObj.lastUpdated) { lastUpdatedText = String(rObj.lastUpdated); }
+							}
+							savedMap = v as Record<string, any>;
 						}
 					}
 
-					let initialViewportHtml = '';
-					if (resultFormat === 'table') {
-						initialViewportHtml = this._renderResultTableHtml(resultText);
-					} else if (resultFormat === 'markdown') {
-						initialViewportHtml = resultText ? this._markdownToHtml(resultText) : '<span style="opacity: 0.4; font-style: italic;">No markdown content to display.</span>';
-					} else if (resultFormat === 'json') {
-						initialViewportHtml = this._renderResultJsonHtml(resultText);
+					let itemsHtml = '';
+
+					if (enabledSpecs.length > 0) {
+						for (const spec of enabledSpecs) {
+							let itemText = '';
+							let itemFormat = spec.defaultFormat || 'table';
+							const specData = savedMap[spec.fieldKey] || savedMap[spec.label];
+
+							if (specData) {
+								if (typeof specData === 'object' && specData !== null) {
+									itemText = specData.text ?? specData.content ?? specData.result ?? specData.output ?? JSON.stringify(specData, null, 2);
+									if (specData.format) { itemFormat = specData.format; }
+								} else {
+									itemText = String(specData);
+								}
+							} else {
+								const primRaw = this._lastParsedData?.customMetadata?.[spec.fieldKey] ?? this._lastParsedData?.customMetadata?.[spec.label];
+								if (primRaw) {
+									if (typeof primRaw === 'string') {
+										try {
+											const pObj = JSON.parse(primRaw);
+											if (typeof pObj === 'object' && pObj !== null) {
+												itemText = pObj.output ?? pObj.content ?? pObj.result ?? primRaw;
+											} else {
+												itemText = primRaw;
+											}
+										} catch {
+											itemText = primRaw;
+										}
+									} else if (typeof primRaw === 'object' && primRaw !== null) {
+										const pRec = primRaw as Record<string, unknown>;
+										itemText = String(pRec.output ?? pRec.content ?? pRec.result ?? JSON.stringify(primRaw, null, 2));
+									}
+								}
+							}
+
+							let itemViewportHtml = '';
+							if (itemFormat === 'table') {
+								itemViewportHtml = this._renderResultTableHtml(itemText);
+							} else if (itemFormat === 'markdown') {
+								itemViewportHtml = itemText ? this._markdownToHtml(itemText) : '<span style="opacity: 0.4; font-style: italic;">No markdown content to display.</span>';
+							} else if (itemFormat === 'json') {
+								itemViewportHtml = this._renderResultJsonHtml(itemText);
+							} else {
+								itemViewportHtml = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${itemText ? this._escapeHtml(itemText) : '<span style="opacity: 0.4; font-style: italic;">No text content.</span>'}</pre>`;
+							}
+
+							itemsHtml += `
+								<div class="output-spec-item" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">
+									<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
+										<div style="display: flex; align-items: center; gap: 6px;">
+											<span style="font-weight: 600; font-size: 12px; color: #a5b4fc;">${this._escapeHtml(spec.label)}</span>
+										</div>
+										<div style="display: flex; align-items: center; gap: 6px;">
+											<span style="font-size: 10.5px; opacity: 0.65;">Format:</span>
+											<select class="output-item-format-selector" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;">
+												<option value="table" ${itemFormat === 'table' ? 'selected' : ''}>Table</option>
+												<option value="markdown" ${itemFormat === 'markdown' ? 'selected' : ''}>Markdown</option>
+												<option value="json" ${itemFormat === 'json' ? 'selected' : ''}>JSON</option>
+												<option value="text" ${itemFormat === 'text' ? 'selected' : ''}>Text</option>
+											</select>
+											<button type="button" class="output-item-copy-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" title="Copy output content" style="background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;">Copy</button>
+											<button type="button" class="output-item-export-csv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" title="Export as CSV" style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Export CSV</button>
+										</div>
+									</div>
+									<textarea class="output-item-raw-content" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="display: none;">${this._escapeHtml(itemText)}</textarea>
+									<div class="output-item-viewport desc-content-box" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="min-height: 60px; max-height: 380px; overflow-y: auto; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 4px; padding: 8px 10px; line-height: 1.5; font-size: 11.5px;">
+										${itemViewportHtml}
+									</div>
+								</div>
+							`;
+						}
 					} else {
-						initialViewportHtml = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${resultText ? this._escapeHtml(resultText) : '<span style="opacity: 0.4; font-style: italic;">No text content.</span>'}</pre>`;
+						let initialViewportHtml = '';
+						if (singleResultFormat === 'table') {
+							initialViewportHtml = this._renderResultTableHtml(singleResultText);
+						} else if (singleResultFormat === 'markdown') {
+							initialViewportHtml = singleResultText ? this._markdownToHtml(singleResultText) : '<span style="opacity: 0.4; font-style: italic;">No markdown content to display.</span>';
+						} else if (singleResultFormat === 'json') {
+							initialViewportHtml = this._renderResultJsonHtml(singleResultText);
+						} else {
+							initialViewportHtml = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${singleResultText ? this._escapeHtml(singleResultText) : '<span style="opacity: 0.4; font-style: italic;">No text content.</span>'}</pre>`;
+						}
+
+						itemsHtml = `
+							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+								<div style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
+									<span style="opacity: 0.65; font-weight: 500;">Format:</span>
+									<select class="result-format-selector" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;">
+										<option value="table" ${singleResultFormat === 'table' ? 'selected' : ''}>Table</option>
+										<option value="markdown" ${singleResultFormat === 'markdown' ? 'selected' : ''}>Markdown</option>
+										<option value="json" ${singleResultFormat === 'json' ? 'selected' : ''}>JSON</option>
+										<option value="text" ${singleResultFormat === 'text' ? 'selected' : ''}>Text</option>
+									</select>
+								</div>
+								<div style="display: flex; align-items: center; gap: 6px;">
+									<button type="button" class="result-copy-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy Result Text to Clipboard" style="background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;">Copy</button>
+									<button type="button" class="result-export-csv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Export Result Data as CSV" style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Export CSV</button>
+									<button type="button" class="result-sync-prompt-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Sync latest output from AI Prompt" style="background: rgba(129, 140, 248, 0.12); border: 1px solid rgba(129, 140, 248, 0.3); color: #818cf8; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Sync</button>
+								</div>
+							</div>
+							<textarea class="result-raw-content" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: none;">${this._escapeHtml(singleResultText)}</textarea>
+							<div class="result-viewport-container desc-content-box" style="min-height: 80px; max-height: 480px; overflow-y: auto; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px; line-height: 1.5; font-size: 11.5px;">
+								${initialViewportHtml}
+							</div>
+						`;
 					}
 
 					customFieldsHtml += `
-						<div class="section-card custom-property-card result-primitive-card custom-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-type="result" style="border-left: 3px solid #818cf8; background: rgba(129, 140, 248, 0.03);">
+						<div class="section-card custom-property-card output-primitive-card result-primitive-card custom-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-type="output" style="border-left: 3px solid #818cf8; background: rgba(129, 140, 248, 0.03);">
 							<!-- Card Header -->
 							<div class="section-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<svg width="14" height="14" viewBox="0 0 16 16" fill="#818cf8"><path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h11A1.5 1.5 0 0 1 15 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 13.5v-11zM2.5 2a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5h11a.5.5 0 0 0 .5-.5v-11a.5.5 0 0 0-.5-.5h-11zm2 3h7v1h-7V5zm0 3h7v1h-7V8zm0 3h4v1h-4v-1z"/></svg>
 									<span style="font-weight: 600;">${this._escapeHtml(k)}</span>
-									<span style="font-size: 9.5px; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; background: rgba(129, 140, 248, 0.18); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.35); letter-spacing: 0.04em;">RETURN / RESULT / OUTPUT</span>
+									<span style="font-size: 9.5px; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; background: rgba(129, 140, 248, 0.18); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.35); letter-spacing: 0.04em;">OUTPUT</span>
 								</div>
-
-								<!-- Format Selector & Action Controls -->
-								<div style="display: flex; align-items: center; gap: 8px;">
-									<div style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
-										<span style="opacity: 0.65; font-weight: 500;">Format:</span>
-										<select class="result-format-selector" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;">
-											<option value="table" ${resultFormat === 'table' ? 'selected' : ''}>📊 Table</option>
-											<option value="markdown" ${resultFormat === 'markdown' ? 'selected' : ''}>📝 Markdown</option>
-											<option value="json" ${resultFormat === 'json' ? 'selected' : ''}>{} JSON</option>
-											<option value="text" ${resultFormat === 'text' ? 'selected' : ''}>📄 Text</option>
-										</select>
-									</div>
-									<button type="button" class="result-copy-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy Result Text to Clipboard" style="background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit; display: inline-flex; align-items: center; gap: 4px;">
-										<span>📋 Copy</span>
-									</button>
-									<button type="button" class="result-export-csv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Export Result Data as CSV" style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
-										<span>💾 Export CSV</span>
-									</button>
-									<button type="button" class="result-sync-prompt-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Sync latest output from AI Prompt" style="background: rgba(129, 140, 248, 0.12); border: 1px solid rgba(129, 140, 248, 0.3); color: #818cf8; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
-										<span>🔄 Sync</span>
-									</button>
+								<div style="display: flex; align-items: center; gap: 6px;">
+									<button type="button" class="output-sync-all-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Sync outputs from ticket primitives" style="background: rgba(129, 140, 248, 0.12); border: 1px solid rgba(129, 140, 248, 0.3); color: #818cf8; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Sync Outputs</button>
+									<button type="button" class="output-copy-all-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy all output data as JSON" style="background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;">Copy All</button>
 								</div>
 							</div>
 
-							<!-- Hidden Raw Content Holder -->
-							<textarea class="result-raw-content" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: none;">${this._escapeHtml(resultText)}</textarea>
-
-							<!-- Status Header -->
-							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 10.5px;">
-								<span class="result-status-text" style="padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.05); opacity: 0.7;">${lastUpdatedText ? `Last updated: ${this._escapeHtmlAttr(lastUpdatedText)}` : 'Ready'}</span>
-							</div>
-
-							<!-- Interactive Result Viewport -->
-							<div class="result-viewport-container desc-content-box" style="min-height: 80px; max-height: 480px; overflow-y: auto; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px; line-height: 1.5; font-size: 11.5px;">
-								${initialViewportHtml}
+							<!-- Body Items Container -->
+							<div class="output-items-container" style="display: flex; flex-direction: column; gap: 10px;">
+								${itemsHtml}
 							</div>
 						</div>
 					`;

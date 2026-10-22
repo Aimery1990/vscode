@@ -16,7 +16,7 @@ import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
-import { ICustomModule, ICustomField, CustomFieldType, ICompositeComponent, IStatusDefinition, IActionButton, DEFAULT_STATUS_DEFINITIONS } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomModule, ICustomField, CustomFieldType, ICompositeComponent, IStatusDefinition, IActionButton, DEFAULT_STATUS_DEFINITIONS, IOutputSpec } from '../../entityPersistence/common/entityPersistence.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { ICustomModulesService } from '../common/customModules.js';
 import { CustomModuleSchemaEditorInput } from './customModuleSchemaEditorInput.js';
@@ -448,10 +448,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				defaultName: 'Git Repository'
 			},
 			{
-				label: 'Return / Result / Output',
+				label: 'Output',
 				icon: Codicon.output,
-				type: 'result',
-				defaultName: 'Pipeline Result'
+				type: 'output',
+				defaultName: 'Output'
 			},
 			{ label: 'Single-line Input (Text)', icon: Codicon.symbolString, type: 'text', defaultName: 'Text Field' },
 			{ label: 'Textarea (Multiline)', icon: Codicon.listFlat, type: 'textarea', defaultName: 'Description' },
@@ -857,11 +857,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				const isGit = field.type === 'git';
 				const isParameters = field.type === 'parameters';
 				const isPrompt = field.type === 'prompt';
-				const isResult = field.type === 'result';
-				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isParameters ? 'INPUT PARAMETERS' : (isPrompt ? 'AI PROMPT' : (isResult ? 'RETURN / RESULT / OUTPUT' : field.type.toUpperCase())))))));
-				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isResult ? 'rgba(129, 140, 248, 0.18)' : 'rgba(99, 102, 241, 0.18)')))))));
-				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isResult ? '#818cf8' : '#818cf8')))))));
-				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isResult ? 'rgba(129, 140, 248, 0.35)' : 'rgba(99, 102, 241, 0.35)')))))));
+				const isOutput = field.type === 'output' || field.type === 'result';
+				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isParameters ? 'INPUT PARAMETERS' : (isPrompt ? 'AI PROMPT' : (isOutput ? 'OUTPUT' : field.type.toUpperCase())))))));
+				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : 'rgba(99, 102, 241, 0.18)')))))));
+				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isOutput ? '#818cf8' : '#818cf8')))))));
+				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : 'rgba(99, 102, 241, 0.35)')))))));
 
 				append(headerLeft, $('span.type-badge', {
 					style: `font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; letter-spacing: 0.04em;`
@@ -1968,35 +1968,113 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					};
 				}
 
-				if (field.type === 'result') {
-					const resultBox = append(cardBody, $('.primitive-config-box', {
-						style: 'margin-top: 10px; padding: 10px 12px; background: rgba(129, 140, 248, 0.05); border: 1px solid rgba(129, 140, 248, 0.2); border-radius: 6px; display: flex; flex-direction: column; gap: 8px;'
+				if (field.type === 'output' || field.type === 'result') {
+					if (!field.outputSpecs) {
+						field.outputSpecs = [];
+					}
+
+					const outputBox = append(cardBody, $('.primitive-config-box', {
+						style: 'margin-top: 10px; padding: 12px 14px; background: rgba(129, 140, 248, 0.05); border: 1px solid rgba(129, 140, 248, 0.2); border-radius: 6px; display: flex; flex-direction: column; gap: 10px;'
 					}));
-					append(resultBox, $('div', { style: 'font-size: 11px; font-weight: 600; color: #818cf8; display: flex; align-items: center; gap: 6px;' },
-						$('span' + ThemeIcon.asCSSSelector(Codicon.output)),
-						$('span', {}, 'Result Display & Visualization Settings')
+
+					const headerRow = append(outputBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+					const titleEl = append(headerRow, $('div', { style: 'font-size: 11.5px; font-weight: 600; color: #818cf8; display: flex; align-items: center; gap: 6px;' }));
+					append(titleEl, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
+					append(titleEl, $('span', {}, 'Output Manifest & Export Selection'));
+
+					const syncBtn = append(headerRow, $('button.sync-primitives-btn', {
+						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; background: rgba(129, 140, 248, 0.15); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.35); cursor: pointer; transition: all 0.15s ease;'
+					}));
+					append(syncBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.refresh)));
+					append(syncBtn, $('span', {}, 'Sync Primitives'));
+
+					append(outputBox, $('div', { style: 'font-size: 11px; color: rgba(255, 255, 255, 0.65); line-height: 1.4;' },
+						'Select which primitives to expose as outputs for inspection, downstream workflows, or other tickets.'
 					));
-					append(resultBox, $('div', { style: 'font-size: 11px; color: rgba(255, 255, 255, 0.6); line-height: 1.4;' },
-						'Renders execution results, outputs, and return values. Provides 4 visualization formats: Table, Markdown, JSON, and Text with CSV export and clipboard copying.'
-					));
-					const formatRow = append(resultBox, $('.format-row', { style: 'display: flex; align-items: center; gap: 8px; margin-top: 2px;' }));
-					append(formatRow, $('span', { style: 'font-size: 11px; font-weight: 500; opacity: 0.8;' }, 'Default View:'));
-					const formatSelect = append(formatRow, $('select', {
-						style: 'padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit;'
-					})) as HTMLSelectElement;
-					[
-						{ value: 'table', label: '📊 Table (Interactive grid)' },
-						{ value: 'markdown', label: '📝 Markdown (Rich formatted)' },
-						{ value: 'json', label: '{} JSON (Formatted tree)' },
-						{ value: 'text', label: '📄 Text (Raw output)' },
-					].forEach(opt => {
-						const option = append(formatSelect, $('option', { value: opt.value }, opt.label)) as HTMLOptionElement;
-						if ((field.defaultFormat || 'table') === opt.value) {
-							option.selected = true;
+
+					const specsContainer = append(outputBox, $('.output-specs-container', {
+						style: 'display: flex; flex-direction: column; gap: 8px;'
+					}));
+
+					const syncSpecsWithCanvas = () => {
+						const currentCanvasFields = fields.filter(f => f.id !== field.id && f.type !== 'output' && f.type !== 'result');
+						const existingMap = new Map((field.outputSpecs || []).map(s => [s.fieldKey, s]));
+						const updated: IOutputSpec[] = [];
+
+						for (const f of currentCanvasFields) {
+							const fKey = f.label || f.id;
+							const existing = existingMap.get(fKey) || existingMap.get(f.id);
+							if (existing) {
+								updated.push({
+									fieldKey: fKey,
+									label: f.label || f.id,
+									enabled: existing.enabled,
+									defaultFormat: existing.defaultFormat || 'table'
+								});
+							} else {
+								updated.push({
+									fieldKey: fKey,
+									label: f.label || f.id,
+									enabled: true,
+									defaultFormat: 'table'
+								});
+							}
 						}
-					});
-					formatSelect.onchange = () => {
-						field.defaultFormat = formatSelect.value;
+						field.outputSpecs = updated;
+					};
+
+					const renderSpecsList = () => {
+						specsContainer.innerHTML = '';
+						if (!field.outputSpecs || field.outputSpecs.length === 0) {
+							append(specsContainer, $('div', {
+								style: 'padding: 10px; font-size: 11px; font-style: italic; color: rgba(255, 255, 255, 0.45); text-align: center; border: 1px dashed rgba(255, 255, 255, 0.1); border-radius: 4px;'
+							}, 'No other primitives detected in this schema. Drag primitives into canvas and click "Sync Primitives" above.'));
+							return;
+						}
+
+						field.outputSpecs.forEach(spec => {
+							const row = append(specsContainer, $('.output-spec-row', {
+								style: 'display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; background: rgba(0, 0, 0, 0.25); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 5px; gap: 10px;'
+							}));
+
+							const leftPart = append(row, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+							const checkbox = append(leftPart, $('input', { type: 'checkbox', style: 'cursor: pointer;' })) as HTMLInputElement;
+							checkbox.checked = spec.enabled;
+							checkbox.onchange = () => {
+								spec.enabled = checkbox.checked;
+							};
+
+							append(leftPart, $('span', { style: 'font-size: 11.5px; font-weight: 500;' }, spec.label));
+
+							const rightPart = append(row, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
+							append(rightPart, $('span', { style: 'font-size: 10.5px; opacity: 0.6;' }, 'Default View:'));
+							const formatSelect = append(rightPart, $('select', {
+								style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit;'
+							})) as HTMLSelectElement;
+
+							[
+								{ value: 'table', label: 'Table' },
+								{ value: 'markdown', label: 'Markdown' },
+								{ value: 'json', label: 'JSON' },
+								{ value: 'text', label: 'Text' }
+							].forEach(opt => {
+								const optEl = append(formatSelect, $('option', { value: opt.value }, opt.label)) as HTMLOptionElement;
+								if ((spec.defaultFormat || 'table') === opt.value) {
+									optEl.selected = true;
+								}
+							});
+							formatSelect.onchange = () => {
+								spec.defaultFormat = formatSelect.value;
+							};
+						});
+					};
+
+					syncSpecsWithCanvas();
+					renderSpecsList();
+
+					syncBtn.onclick = () => {
+						syncSpecsWithCanvas();
+						renderSpecsList();
 					};
 				}
 			});

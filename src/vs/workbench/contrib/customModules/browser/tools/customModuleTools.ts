@@ -59,7 +59,8 @@ const VALID_FIELD_TYPES: Set<CustomFieldType> = new Set([
 	'git',
 	'parameters',
 	'prompt',
-	'result'
+	'result',
+	'output'
 ]);
 
 const BASE_PRIMITIVES_CATALOG = [
@@ -127,16 +128,17 @@ const BASE_PRIMITIVES_CATALOG = [
 		}
 	},
 	{
-		type: 'result',
-		label: 'Return / Result / Output',
-		description: 'Captures, formats, and visualizes ticket pipeline execution results (Table, Markdown, JSON, Text) for inspection or inter-ticket reference.',
+		type: 'output',
+		label: 'Output',
+		description: 'Aggregates, formats, and exports ticket pipeline outputs (Table, Markdown, JSON, Text) for inspection or inter-ticket reference.',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: {
-			id: 'pipeline_result',
-			label: 'Pipeline Result',
-			type: 'result',
-			defaultContent: ''
+			id: 'pipeline_output',
+			label: 'Output',
+			type: 'output',
+			defaultContent: '',
+			outputSpecs: []
 		}
 	},
 	{
