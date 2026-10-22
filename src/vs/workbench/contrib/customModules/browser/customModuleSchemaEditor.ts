@@ -35,6 +35,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 	private _container?: HTMLElement;
 	private _activeModule?: ICustomModule;
+	private _isToolboxCompact: boolean = false;
 
 	constructor(
 		group: IEditorGroup,
@@ -61,9 +62,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		this._container.style.background = 'var(--vscode-editor-background, #181818)';
 		this._container.style.color = 'var(--vscode-editor-foreground, #e0e0e0)';
 		this._container.style.fontFamily = 'var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif)';
-		this._container.style.padding = '16px 24px';
+		this._container.style.padding = '0';
 		this._container.style.display = 'flex';
-		this._container.style.flexDirection = 'column';
+		this._container.style.flexDirection = 'row';
 	}
 
 	override layout(dimension: Dimension): void {
@@ -169,8 +170,18 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 		const compositeClasses = await this.customModulesService.getCompositeComponents(input.workspaceUri);
 
-		const wrapper = append(this._container, $('.schema-editor-wrapper', {
-			style: 'max-width: 1280px; width: 100%; height: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; min-height: 0; box-sizing: border-box; overflow: hidden;'
+		// 1. Left Dedicated Toolbox Sidebar (Full-height, pinned, independent scroll, like Workflow Toolbox)
+		const leftLibrary = append(this._container, $('.schema-editor-toolbox', {
+			style: `width: ${this._isToolboxCompact ? '56px' : '260px'}; min-width: ${this._isToolboxCompact ? '56px' : '260px'}; height: 100%; border-right: 1px solid var(--vscode-sideBar-border, rgba(255, 255, 255, 0.08)); background: var(--vscode-sideBar-background, #181818); display: flex; flex-direction: column; padding: ${this._isToolboxCompact ? '12px 6px' : '16px 14px'}; gap: 14px; box-sizing: border-box; flex-shrink: 0; overflow-y: auto; overflow-x: hidden; transition: width 0.2s cubic-bezier(0.16, 1, 0.3, 1), min-width 0.2s cubic-bezier(0.16, 1, 0.3, 1);`
+		}));
+
+		// 2. Right Main Scrollable Viewport (Contains Header, Config Card, Canvas & Footer. Scrolls smoothly as a unified document!)
+		const mainViewport = append(this._container, $('.schema-editor-main-viewport', {
+			style: 'flex: 1; height: 100%; min-width: 0; overflow-y: auto; overflow-x: hidden; padding: 24px 36px; box-sizing: border-box;'
+		}));
+
+		const wrapper = append(mainViewport, $('.schema-editor-wrapper', {
+			style: 'max-width: 1080px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 18px;'
 		}));
 
 		activeMod.isDeprecated = !!activeMod.isDeprecated;
@@ -380,22 +391,36 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			activeMod.prompt = promptInput.value;
 		};
 
-		// Main 2-column Designer Layout (Independent scrollable columns)
-		const designerLayout = append(wrapper, $('.designer-layout', {
-			style: 'display: flex; gap: 18px; align-items: stretch; flex: 1; min-height: 0; overflow: hidden;'
+		// Configure Left Toolbox (Full-height Sidebar)
+		const toolboxHeader = append(leftLibrary, $('.workflow-toolbar-header', {
+			style: 'display: flex; align-items: center; justify-content: space-between; width: 100%; padding-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.08);'
 		}));
-
-		// Left Column: Component Library (Scrolls independently)
-		const leftLibrary = append(designerLayout, $('.component-library', {
-			style: 'width: 260px; flex-shrink: 0; height: 100%; max-height: 100%; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; overflow-x: hidden; box-sizing: border-box;'
+		if (!this._isToolboxCompact) {
+			const tbTitle = append(toolboxHeader, $('div', {
+				style: 'font-size: 11px; font-weight: 700; color: #38bdf8; letter-spacing: 0.6px; text-transform: uppercase;'
+			}, 'TOOLBOX'));
+			tbTitle.title = 'Primitives & Components Toolbox';
+		}
+		const toggleBtn = append(toolboxHeader, $('button.monaco-button.workflow-toolbar-toggle-btn', {
+			type: 'button',
+			title: this._isToolboxCompact ? 'Expand Toolbox' : 'Collapse Toolbox',
+			style: 'width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08); background: rgba(255, 255, 255, 0.03); color: #888888; cursor: pointer; padding: 0;'
 		}));
+		append(toggleBtn, $('span' + ThemeIcon.asCSSSelector(this._isToolboxCompact ? Codicon.chevronRight : Codicon.chevronLeft)));
+		toggleBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._isToolboxCompact = !this._isToolboxCompact;
+			this._loadAndRender(input);
+		};
 
-		append(leftLibrary, $('div', { style: 'font-size: 11.5px; font-weight: 700; text-transform: uppercase; color: #888888; letter-spacing: 0.05em;' }, 'Component Library'));
-		append(leftLibrary, $('div', { style: 'font-size: 10.5px; opacity: 0.65; line-height: 1.4;' }, 'Drag & drop components anywhere to canvas on the right, or click to append.'));
+		if (!this._isToolboxCompact) {
+			append(leftLibrary, $('div', { style: 'font-size: 10.5px; opacity: 0.65; line-height: 1.4;' }, 'Drag & drop components anywhere to canvas on the right, or click to append.'));
+			append(leftLibrary, $('div', { style: 'font-size: 10.5px; font-weight: 700; text-transform: uppercase; color: #38bdf8; margin-top: 4px;' }, 'Base Primitives'));
+		}
 
-		append(leftLibrary, $('div', { style: 'font-size: 10.5px; font-weight: 700; text-transform: uppercase; color: #38bdf8; margin-top: 4px;' }, 'Base Primitives'));
-
-		const primitivesList = append(leftLibrary, $('.primitives-list', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
+		const primitivesList = append(leftLibrary, $('.primitives-list', {
+			style: `display: flex; flex-direction: column; gap: 6px; ${this._isToolboxCompact ? 'align-items: center;' : ''}`
+		}));
 
 		const baseComponents: Array<{ label: string; icon: ThemeIcon; type: CustomFieldType; defaultName: string; defaultChoices?: string[]; itemFields?: ICustomField[]; buttons?: IActionButton[] }> = [
 			{
@@ -462,9 +487,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			}
 		];
 
-		// Right Column: Canvas (Scrolls independently)
-		const rightCanvas = append(designerLayout, $('.designer-canvas', {
-			style: 'flex: 1; min-width: 0; height: 100%; max-height: 100%; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; overflow-x: hidden; padding-right: 6px; box-sizing: border-box; transition: all 0.2s ease;'
+		// Right Main Area: Canvas appended inside scrollable wrapper
+		const rightCanvas = append(wrapper, $('.designer-canvas', {
+			style: 'display: flex; flex-direction: column; gap: 14px; min-height: 400px; transition: all 0.2s ease;'
 		}));
 
 		let currentDraggingItem: {
@@ -534,7 +559,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			renderCanvas();
 			if (insertIndex === undefined) {
 				setTimeout(() => {
-					rightCanvas.scrollTop = rightCanvas.scrollHeight;
+					mainViewport.scrollTop = mainViewport.scrollHeight;
 				}, 40);
 			}
 		};
@@ -567,7 +592,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			renderCanvas();
 			if (insertIndex === undefined) {
 				setTimeout(() => {
-					rightCanvas.scrollTop = rightCanvas.scrollHeight;
+					mainViewport.scrollTop = mainViewport.scrollHeight;
 				}, 40);
 			}
 		};
@@ -1970,7 +1995,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		// Populate Base Components in Library
 		baseComponents.forEach(bc => {
 			const item = append(primitivesList, $('.primitive-item', {
-				style: 'padding: 7px 10px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); cursor: grab; display: flex; align-items: center; gap: 8px; transition: all 0.15s ease;'
+				title: `${bc.label} (Drag or Click to Add)`,
+				style: this._isToolboxCompact
+					? 'width: 38px; height: 38px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); cursor: grab; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease;'
+					: 'padding: 7px 10px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); cursor: grab; display: flex; align-items: center; gap: 8px; transition: all 0.15s ease;'
 			}));
 			item.setAttribute('draggable', 'true');
 			item.ondragstart = (e) => {
@@ -1992,8 +2020,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				item.style.borderColor = 'rgba(255, 255, 255, 0.08)';
 			};
 
-			append(item, $('span' + ThemeIcon.asCSSSelector(bc.icon), { style: 'font-size: 13px; opacity: 0.75; min-width: 16px; text-align: center;' }));
-			append(item, $('span', { style: 'font-size: 11.5px;' }, bc.label));
+			append(item, $('span' + ThemeIcon.asCSSSelector(bc.icon), { style: 'font-size: 14px; opacity: 0.85; min-width: 16px; text-align: center;' }));
+			if (!this._isToolboxCompact) {
+				append(item, $('span', { style: 'font-size: 11.5px;' }, bc.label));
+			}
 
 			item.onclick = () => {
 				addFieldFromDef(bc);
@@ -2002,21 +2032,30 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 		// Reusable Classes in Library
 		const reusableSection = append(leftLibrary, $('.reusable-classes-section', {
-			style: 'display: flex; flex-direction: column; gap: 6px; margin-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.08); padding-top: 10px;'
+			style: `display: flex; flex-direction: column; gap: 6px; margin-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.08); padding-top: 10px; ${this._isToolboxCompact ? 'align-items: center;' : ''}`
 		}));
-		append(reusableSection, $('div', {
-			style: 'font-size: 10.5px; font-weight: 700; text-transform: uppercase; color: #06b6d4;'
-		}, `Reusable Classes (${compositeClasses.length})`));
+		if (!this._isToolboxCompact) {
+			append(reusableSection, $('div', {
+				style: 'font-size: 10.5px; font-weight: 700; text-transform: uppercase; color: #06b6d4;'
+			}, `Reusable Classes (${compositeClasses.length})`));
+		}
 
 		if (compositeClasses.length === 0) {
-			append(reusableSection, $('div', {
-				style: 'font-size: 10.5px; opacity: 0.45; font-style: italic; padding: 4px 0;'
-			}, 'No classes saved yet. Add a Container to canvas and click "Save as Class Asset".'));
+			if (!this._isToolboxCompact) {
+				append(reusableSection, $('div', {
+					style: 'font-size: 10.5px; opacity: 0.45; font-style: italic; padding: 4px 0;'
+				}, 'No classes saved yet. Add a Container to canvas and click "Save as Class Asset".'));
+			}
 		} else {
-			const compList = append(reusableSection, $('.composite-classes-list', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
+			const compList = append(reusableSection, $('.composite-classes-list', {
+				style: `display: flex; flex-direction: column; gap: 6px; ${this._isToolboxCompact ? 'align-items: center;' : ''}`
+			}));
 			compositeClasses.forEach(cc => {
 				const ccItem = append(compList, $('.primitive-item', {
-					style: 'padding: 7px 10px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); cursor: grab; display: flex; align-items: center; gap: 8px; transition: all 0.15s ease;'
+					title: `Class: ${cc.name} (Drag or Click to Add)`,
+					style: this._isToolboxCompact
+						? 'width: 38px; height: 38px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); cursor: grab; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease;'
+						: 'padding: 7px 10px; border-radius: 6px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); cursor: grab; display: flex; align-items: center; gap: 8px; transition: all 0.15s ease;'
 				}));
 				ccItem.setAttribute('draggable', 'true');
 				ccItem.ondragstart = (e) => {
@@ -2039,8 +2078,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					ccItem.style.borderColor = 'rgba(255, 255, 255, 0.08)';
 				};
 
-				append(ccItem, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolClass), { style: 'color: #06b6d4; font-size: 12px; min-width: 16px; text-align: center;' }));
-				append(ccItem, $('span', { style: 'font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, cc.name));
+				append(ccItem, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolClass), { style: 'color: #06b6d4; font-size: 13px; min-width: 16px; text-align: center;' }));
+				if (!this._isToolboxCompact) {
+					append(ccItem, $('span', { style: 'font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, cc.name));
+				}
 
 				ccItem.onclick = () => {
 					addCompositeClass(cc);
