@@ -63,6 +63,69 @@ const VALID_FIELD_TYPES: Set<CustomFieldType> = new Set([
 
 const BASE_PRIMITIVES_CATALOG = [
 	{
+		type: 'parameters',
+		label: 'Input Parameters (Runtime Variables)',
+		description: 'Runtime input parameters and variables for tickets with optional choices. Interpolated via {{param_name}} in URLs and prompts.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'runtime_params',
+			label: 'Input Parameters',
+			type: 'parameters',
+			parameters: [
+				{ id: 'param_1', name: 'start', label: 'Start Offset', defaultValue: '0' },
+				{ id: 'param_2', name: 'env', label: 'Environment', defaultValue: 'testing', options: ['testing', 'developing', 'production'] }
+			]
+		}
+	},
+	{
+		type: 'prompt',
+		label: 'AI Prompt (Model / Agent)',
+		description: 'Instruction prompt input box primitive. Dispatches instructions and inputs to either a selected Large Language Model or an autonomous AI Agent to process information.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'analysis_prompt',
+			label: 'AI Analysis Prompt',
+			type: 'prompt',
+			defaultContent: 'Please summarize the following ticket requirements and identify key risks.',
+			targetMode: 'model',
+			targetModel: 'gemini-1.5-flash',
+			targetAgentId: ''
+		}
+	},
+	{
+		type: 'browser',
+		label: 'Browser (Web Navigation & Data Extraction)',
+		description: 'Embedded web browser primitive for navigating URLs, extracting web content/HTML for AI consumption, and managing credentials.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'web_browser',
+			label: 'Browser',
+			type: 'browser',
+			defaultUrl: 'https://example.com',
+			credentials: [
+				{ id: 'cred_1', key: 'username', value: 'admin' },
+				{ id: 'cred_2', key: 'password', value: 'secret' }
+			]
+		}
+	},
+	{
+		type: 'git',
+		label: 'Git Repository & Branch Binding',
+		description: 'Git source control integration module for binding a repository URL, branch, and status verification.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'git_binding',
+			label: 'Git Repository',
+			type: 'git',
+			gitRemoteUrl: 'git@github.com:org/repo.git',
+			gitBranch: 'main'
+		}
+	},
+	{
 		type: 'text',
 		label: 'Single-line Input (Text)',
 		description: 'Short strings, titles, codes, currency amounts as string, invoice numbers, person names.',
@@ -198,69 +261,6 @@ const BASE_PRIMITIVES_CATALOG = [
 				{ id: 'btn_approve', label: 'Approve', color: '#10b981', targetStatus: 'Done' },
 				{ id: 'btn_reject', label: 'Reject', color: '#ef4444', targetStatus: 'Blocked' }
 			]
-		}
-	},
-	{
-		type: 'browser',
-		label: 'Browser (Web Navigation & Data Extraction)',
-		description: 'Embedded web browser primitive for navigating URLs, extracting web content/HTML for AI consumption, and managing credentials.',
-		requiresOptions: false,
-		supportsItemFields: false,
-		example: {
-			id: 'web_browser',
-			label: 'Browser',
-			type: 'browser',
-			defaultUrl: 'https://example.com',
-			credentials: [
-				{ id: 'cred_1', key: 'username', value: 'admin' },
-				{ id: 'cred_2', key: 'password', value: 'secret' }
-			]
-		}
-	},
-	{
-		type: 'git',
-		label: 'Git Repository & Branch Binding',
-		description: 'Git source control integration module for binding a repository URL, branch, and status verification.',
-		requiresOptions: false,
-		supportsItemFields: false,
-		example: {
-			id: 'git_binding',
-			label: 'Git Repository',
-			type: 'git',
-			gitRemoteUrl: 'git@github.com:org/repo.git',
-			gitBranch: 'main'
-		}
-	},
-	{
-		type: 'parameters',
-		label: 'Input Parameters (Runtime Variables)',
-		description: 'Runtime input parameters and variables for tickets with optional choices. Interpolated via {{param_name}} in URLs and prompts.',
-		requiresOptions: false,
-		supportsItemFields: false,
-		example: {
-			id: 'runtime_params',
-			label: 'Input Parameters',
-			type: 'parameters',
-			parameters: [
-				{ id: 'param_1', name: 'start', label: 'Start Offset', defaultValue: '0' },
-				{ id: 'param_2', name: 'env', label: 'Environment', defaultValue: 'testing', options: ['testing', 'developing', 'production'] }
-			]
-		}
-	},
-	{
-		type: 'prompt',
-		label: 'Prompt (AI Instruction & Execution)',
-		description: 'Instruction prompt input box primitive. Dispatches instructions and inputs to either a selected Large Language Model or an autonomous AI Agent to process information.',
-		requiresOptions: false,
-		supportsItemFields: false,
-		example: {
-			id: 'analysis_prompt',
-			label: 'AI Analysis Prompt',
-			type: 'prompt',
-			defaultContent: 'Please summarize the following ticket requirements and identify key risks.',
-			targetMode: 'model',
-			targetModel: 'gemini-1.5-flash',
-			targetAgentId: ''
 		}
 	}
 ];

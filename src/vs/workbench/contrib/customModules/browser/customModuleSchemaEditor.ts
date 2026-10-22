@@ -56,13 +56,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		this._container = append(parent, $('.custom-module-schema-editor'));
 		this._container.style.width = '100%';
 		this._container.style.height = '100%';
-		this._container.style.overflowY = 'auto';
-		this._container.style.overflowX = 'hidden';
+		this._container.style.overflow = 'hidden';
 		this._container.style.boxSizing = 'border-box';
 		this._container.style.background = 'var(--vscode-editor-background, #181818)';
 		this._container.style.color = 'var(--vscode-editor-foreground, #e0e0e0)';
 		this._container.style.fontFamily = 'var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif)';
-		this._container.style.padding = '24px 32px';
+		this._container.style.padding = '16px 24px';
+		this._container.style.display = 'flex';
+		this._container.style.flexDirection = 'column';
 	}
 
 	override layout(dimension: Dimension): void {
@@ -169,14 +170,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		const compositeClasses = await this.customModulesService.getCompositeComponents(input.workspaceUri);
 
 		const wrapper = append(this._container, $('.schema-editor-wrapper', {
-			style: 'max-width: 1180px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px;'
+			style: 'max-width: 1280px; width: 100%; height: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; min-height: 0; box-sizing: border-box; overflow: hidden;'
 		}));
 
 		activeMod.isDeprecated = !!activeMod.isDeprecated;
 
 		// Header Bar
 		const header = append(wrapper, $('.schema-editor-header', {
-			style: 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 255, 255, 0.08); padding-bottom: 12px;'
+			style: 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255, 255, 255, 0.08); padding-bottom: 8px; flex-shrink: 0;'
 		}));
 		const titleEl = append(header, $('h2', {
 			style: 'margin: 0; font-size: 18px; font-weight: 600; color: #38bdf8; display: flex; align-items: center; gap: 10px;'
@@ -205,7 +206,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 		// Top Configuration Card (Scope, Type Definition, Color, Status)
 		const configCard = append(wrapper, $('.config-meta-container', {
-			style: 'display: flex; flex-direction: column; gap: 12px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); padding: 14px 18px; border-radius: 8px;'
+			style: 'display: flex; flex-direction: column; gap: 8px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); padding: 10px 14px; border-radius: 8px; flex-shrink: 0;'
 		}));
 
 		// Status Row in Configuration Card
@@ -371,7 +372,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		append(promptHeader, $('span', { style: 'font-size: 10.5px; opacity: 0.6;' }, 'Multi-line AI instructions when tickets of this type are processed'));
 
 		const promptInput = append(promptBox, $('textarea.monaco-inputbox', {
-			style: 'width: 100%; height: 72px; padding: 8px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: #141414; color: inherit; box-sizing: border-box; resize: vertical; line-height: 1.4;'
+			style: 'width: 100%; height: 50px; padding: 6px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: #141414; color: inherit; box-sizing: border-box; resize: vertical; line-height: 1.4;'
 		})) as HTMLTextAreaElement;
 		promptInput.placeholder = 'Provide specific guidelines for AI agents handling this module entity...';
 		promptInput.value = activeMod.prompt || '';
@@ -379,14 +380,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			activeMod.prompt = promptInput.value;
 		};
 
-		// Main 2-column Designer Layout
+		// Main 2-column Designer Layout (Independent scrollable columns)
 		const designerLayout = append(wrapper, $('.designer-layout', {
-			style: 'display: flex; gap: 20px; align-items: stretch; min-height: 620px;'
+			style: 'display: flex; gap: 18px; align-items: stretch; flex: 1; min-height: 0; overflow: hidden;'
 		}));
 
-		// Left Column: Component Library
+		// Left Column: Component Library (Scrolls independently)
 		const leftLibrary = append(designerLayout, $('.component-library', {
-			style: 'width: 250px; flex-shrink: 0; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 14px; display: flex; flex-direction: column; gap: 12px; height: fit-content;'
+			style: 'width: 260px; flex-shrink: 0; height: 100%; max-height: 100%; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; overflow-x: hidden; box-sizing: border-box;'
 		}));
 
 		append(leftLibrary, $('div', { style: 'font-size: 11.5px; font-weight: 700; text-transform: uppercase; color: #888888; letter-spacing: 0.05em;' }, 'Component Library'));
@@ -397,9 +398,33 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		const primitivesList = append(leftLibrary, $('.primitives-list', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
 
 		const baseComponents: Array<{ label: string; icon: ThemeIcon; type: CustomFieldType; defaultName: string; defaultChoices?: string[]; itemFields?: ICustomField[]; buttons?: IActionButton[] }> = [
+			{
+				label: 'Input Parameters (Runtime Variables)',
+				icon: Codicon.symbolVariable,
+				type: 'parameters',
+				defaultName: 'Parameters'
+			},
+			{
+				label: 'AI Prompt (Model / Agent)',
+				icon: Codicon.sparkle,
+				type: 'prompt',
+				defaultName: 'AI Prompt'
+			},
+			{
+				label: 'Browser (Web Navigation & Data)',
+				icon: Codicon.globe,
+				type: 'browser',
+				defaultName: 'Browser'
+			},
+			{
+				label: 'Git Repository & Branch Binding',
+				icon: Codicon.sourceControl,
+				type: 'git',
+				defaultName: 'Git Repository'
+			},
 			{ label: 'Single-line Input (Text)', icon: Codicon.symbolString, type: 'text', defaultName: 'Text Field' },
-			{ label: 'Number Input (Numeric)', icon: Codicon.symbolNumber, type: 'number', defaultName: 'Amount' },
 			{ label: 'Textarea (Multiline)', icon: Codicon.listFlat, type: 'textarea', defaultName: 'Description' },
+			{ label: 'Number Input (Numeric)', icon: Codicon.symbolNumber, type: 'number', defaultName: 'Amount' },
 			{ label: 'Dropdown (Select)', icon: Codicon.chevronDown, type: 'select', defaultName: 'Select Option', defaultChoices: ['Option 1', 'Option 2', 'Option 3'] },
 			{ label: 'Checkboxes (Multiselect)', icon: Codicon.checklist, type: 'multiselect', defaultName: 'Tags', defaultChoices: ['Tag A', 'Tag B', 'Tag C'] },
 			{ label: 'Switch (Toggle)', icon: Codicon.circleFilled, type: 'switch', defaultName: 'Enabled Flag' },
@@ -434,35 +459,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					{ id: `btn_${Date.now()}_1`, label: 'Approve', color: '#22c55e', targetStatus: 'Done' },
 					{ id: `btn_${Date.now()}_2`, label: 'Reject', color: '#ef4444', targetStatus: 'Blocked' }
 				]
-			},
-			{
-				label: 'Browser (Web Navigation & Data)',
-				icon: Codicon.globe,
-				type: 'browser',
-				defaultName: 'Browser'
-			},
-			{
-				label: 'Git Repository & Branch Binding',
-				icon: Codicon.sourceControl,
-				type: 'git',
-				defaultName: 'Git Repository'
-			},
-			{
-				label: 'Input Parameters (Runtime Variables)',
-				icon: Codicon.symbolVariable,
-				type: 'parameters',
-				defaultName: 'Parameters'
-			},
-			{
-				label: 'AI Prompt (Model / Agent)',
-				icon: Codicon.sparkle,
-				type: 'prompt',
-				defaultName: 'AI Prompt'
 			}
 		];
 
+		// Right Column: Canvas (Scrolls independently)
 		const rightCanvas = append(designerLayout, $('.designer-canvas', {
-			style: 'flex: 1; min-width: 0; min-height: 580px; display: flex; flex-direction: column; gap: 12px; transition: all 0.2s ease;'
+			style: 'flex: 1; min-width: 0; height: 100%; max-height: 100%; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; overflow-x: hidden; padding-right: 6px; box-sizing: border-box; transition: all 0.2s ease;'
 		}));
 
 		let currentDraggingItem: {
@@ -530,6 +532,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				fields.push(newField);
 			}
 			renderCanvas();
+			if (insertIndex === undefined) {
+				setTimeout(() => {
+					rightCanvas.scrollTop = rightCanvas.scrollHeight;
+				}, 40);
+			}
 		};
 
 		const addCompositeClass = (cc: ICompositeComponent, insertIndex?: number) => {
@@ -558,6 +565,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				fields.push(newField);
 			}
 			renderCanvas();
+			if (insertIndex === undefined) {
+				setTimeout(() => {
+					rightCanvas.scrollTop = rightCanvas.scrollHeight;
+				}, 40);
+			}
 		};
 
 		const handleItemDrop = (targetIndex?: number, position: 'before' | 'after' = 'before', e?: DragEvent) => {
