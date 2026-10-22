@@ -247,13 +247,17 @@ export class BrowserEditorInput extends EditorInput {
 
 	override getTitle(verbosity = Verbosity.MEDIUM): string {
 		const hasTitle = this._model ? !!this._model.title : !!this._initialData.title;
-		const description = this.getDescription(verbosity);
-		const title = hasTitle ? `${this.title} (${description})` : description;
+		const fullDesc = this.url && this.getURLTitles.get(this.url)[verbosity];
+		const title = hasTitle ? (fullDesc ? `${this.title} (${fullDesc})` : this.title!) : fullDesc;
 		return title || BrowserEditorInput.DEFAULT_LABEL;
 	}
 
 	override getDescription(verbosity = Verbosity.MEDIUM): string | undefined {
-		return this.url && this.getURLTitles.get(this.url)[verbosity];
+		if (!this.url) {
+			return undefined;
+		}
+		const desc = this.getURLTitles.get(this.url)[verbosity];
+		return desc ? truncate(desc, MAX_TITLE_LENGTH) : undefined;
 	}
 
 	private readonly getURLTitles = new LRUCachedFunction((url: string) => {

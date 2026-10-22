@@ -4,6 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Codicon } from '../../../../base/common/codicons.js';
+import { ThemeIcon } from '../../../../base/common/themables.js';
+import { URI } from '../../../../base/common/uri.js';
+import { KeyMod, KeyCode } from '../../../../base/common/keyCodes.js';
+import { KeybindingWeight } from '../../../../platform/keybinding/common/keybindingsRegistry.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
@@ -23,6 +28,7 @@ import { Emitter } from '../../../../base/common/event.js';
 
 const chatIcon = registerIcon('centered-chat-icon', Codicon.sparkleFilled, localize('chatIcon', 'Icon for centered AI chat central.'));
 const TOGGLE_CENTERED_CHAT_COMMAND_ID = 'workbench.action.chat.toggleCenteredChatPopup';
+const OPEN_DEFAULT_BROWSER_TAB_COMMAND_ID = 'workbench.action.browser.openDefaultTab';
 
 // Decoupled communication event for title bar click triggers
 const onToggleCenteredChat = new Emitter<any>();
@@ -46,8 +52,42 @@ class ToggleCenteredChatAction extends Action2 {
 	}
 }
 
+class OpenDefaultBrowserTabAction extends Action2 {
+	constructor() {
+		super({
+			id: OPEN_DEFAULT_BROWSER_TAB_COMMAND_ID,
+			title: localize2('openDefaultBrowserTabBtn', "New Tab"),
+			icon: Codicon.globe,
+			f1: true,
+			keybinding: {
+				primary: KeyMod.CtrlCmd | KeyMod.Alt | KeyCode.KeyB,
+				weight: KeybindingWeight.WorkbenchContrib
+			},
+			menu: {
+				id: MenuId.TitleBarAdjacentCenter,
+				order: -1000 // Right next to Agent Central (-1001)
+			}
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const commandService = accessor.get(ICommandService);
+		const defaultUrl = 'https://www.google.com';
+		try {
+			await commandService.executeCommand('workbench.action.browser.open', defaultUrl);
+		} catch {
+			try {
+				await commandService.executeCommand('simpleBrowser.api.open', URI.parse(defaultUrl));
+			} catch {
+				await commandService.executeCommand('simpleBrowser.show', defaultUrl);
+			}
+		}
+	}
+}
+
 // Register action statically at module load time
 registerAction2(ToggleCenteredChatAction);
+registerAction2(OpenDefaultBrowserTabAction);
 
 class CenteredChatTitleBarWidget extends BaseActionViewItem {
 	constructor(
@@ -78,6 +118,34 @@ class CenteredChatTitleBarWidget extends BaseActionViewItem {
 	}
 }
 
+class NewBrowserTabTitleBarWidget extends BaseActionViewItem {
+	constructor(
+		action: IAction,
+		options: IBaseActionViewItemOptions | undefined,
+		@IHoverService private readonly hoverService: IHoverService,
+		@IKeybindingService private readonly keybindingService: IKeybindingService,
+	) {
+		super(undefined, action, options);
+	}
+
+	override render(container: HTMLElement): void {
+		super.render(container);
+
+		container.classList.add('new-browser-tab-titlebar-widget');
+		container.setAttribute('role', 'button');
+
+		const hoverText = this.keybindingService.appendKeybinding(localize('newBrowserTabHover', "New Browser Tab (Google)"), OPEN_DEFAULT_BROWSER_TAB_COMMAND_ID);
+		container.setAttribute('aria-label', hoverText);
+		this._register(this.hoverService.setupManagedHover(getDefaultHoverDelegate('element'), container, hoverText));
+
+		const icon = append(container, $('span.new-browser-tab-titlebar-widget-icon' + ThemeIcon.asCSSSelector(Codicon.globe)));
+		icon.setAttribute('aria-hidden', 'true');
+
+		const labelEl = append(container, $('span.new-browser-tab-titlebar-widget-label'));
+		labelEl.textContent = 'New Tab';
+	}
+}
+
 export class CenteredChatContribution extends Disposable implements IWorkbenchContribution {
 
 	static readonly ID = 'workbench.contrib.centeredChat';
@@ -99,6 +167,11 @@ export class CenteredChatContribution extends Disposable implements IWorkbenchCo
 		// Register the view item mapping
 		this._register(actionViewItemService.register(MenuId.TitleBarAdjacentCenter, TOGGLE_CENTERED_CHAT_COMMAND_ID, (action, options) => {
 			return this.instantiationService.createInstance(CenteredChatTitleBarWidget, action, options);
+		}, undefined));
+
+		// Register Browser New Tab view item mapping
+		this._register(actionViewItemService.register(MenuId.TitleBarAdjacentCenter, OPEN_DEFAULT_BROWSER_TAB_COMMAND_ID, (action, options) => {
+			return this.instantiationService.createInstance(NewBrowserTabTitleBarWidget, action, options);
 		}, undefined));
 	}
 

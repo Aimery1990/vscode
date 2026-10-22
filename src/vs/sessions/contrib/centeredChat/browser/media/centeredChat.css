@@ -487,6 +487,55 @@
 	margin-left: 6px;
 }
 
+/* New Browser Tab Titlebar Widget */
+.monaco-workbench .new-browser-tab-titlebar-widget {
+	display: inline-flex;
+	align-items: center;
+	height: 22px;
+	padding: 0 6px;
+	border-radius: 5px;
+	cursor: pointer;
+	color: var(--vscode-titleBar-activeForeground);
+	-webkit-app-region: no-drag;
+	white-space: nowrap;
+	margin-left: 2px;
+}
+
+.monaco-workbench .new-browser-tab-titlebar-widget:hover {
+	background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+.monaco-workbench .new-browser-tab-titlebar-widget > .new-browser-tab-titlebar-widget-icon {
+	font-size: 13.5px;
+	color: #34d399; /* Emerald green matching the New Tab theme */
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.monaco-workbench .new-browser-tab-titlebar-widget > .new-browser-tab-titlebar-widget-label {
+	display: inline-block;
+	max-width: 0;
+	opacity: 0;
+	margin-left: 0;
+	color: var(--vscode-foreground);
+	font: inherit;
+	overflow: hidden;
+	white-space: nowrap;
+	font-size: 11px;
+}
+
+.monaco-enable-motion .monaco-workbench .new-browser-tab-titlebar-widget > .new-browser-tab-titlebar-widget-label {
+	transition: max-width 160ms ease, opacity 160ms ease, margin-left 160ms ease;
+	transition-delay: 200ms;
+}
+
+.monaco-workbench .new-browser-tab-titlebar-widget:hover > .new-browser-tab-titlebar-widget-label {
+	max-width: 100px;
+	opacity: 1;
+	margin-left: 5px;
+}
+
 /* Mic Button & Recording Indicator styles */
 .monaco-workbench .centered-chat-popup-mic-btn {
 	display: flex;

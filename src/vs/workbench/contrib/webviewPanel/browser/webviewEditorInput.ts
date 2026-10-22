@@ -14,6 +14,7 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorInputCapabilities, GroupIdentifier, IUntypedEditorInput, Verbosity } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IOverlayWebview } from '../../webview/browser/webview.js';
+import { truncate } from '../../../../base/common/strings.js';
 
 export interface WebviewInputInitInfo {
 	readonly viewType: string;
@@ -88,7 +89,7 @@ export class WebviewInput extends EditorInput {
 	}
 
 	public override getName(): string {
-		return this._webviewTitle;
+		return truncate(this._webviewTitle, 40);
 	}
 
 	public override getTitle(_verbosity?: Verbosity): string {
