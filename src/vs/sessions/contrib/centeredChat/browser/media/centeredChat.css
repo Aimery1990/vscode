@@ -507,10 +507,16 @@
 
 .monaco-workbench .new-browser-tab-titlebar-widget > .new-browser-tab-titlebar-widget-icon {
 	font-size: 13.5px;
-	color: #34d399; /* Emerald green matching the New Tab theme */
+	color: var(--vscode-titleBar-activeForeground);
+	opacity: 0.82;
 	display: flex;
 	align-items: center;
 	justify-content: center;
+	transition: opacity 160ms ease;
+}
+
+.monaco-workbench .new-browser-tab-titlebar-widget:hover > .new-browser-tab-titlebar-widget-icon {
+	opacity: 1;
 }
 
 .monaco-workbench .new-browser-tab-titlebar-widget > .new-browser-tab-titlebar-widget-label {
