@@ -815,9 +815,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				const isParameters = field.type === 'parameters';
 				const isPrompt = field.type === 'prompt';
 				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isParameters ? 'INPUT PARAMETERS' : (isPrompt ? 'AI PROMPT' : field.type.toUpperCase()))))));
-				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(236, 72, 153, 0.18)' : 'rgba(99, 102, 241, 0.18)'))))));
-				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isParameters ? '#c084fc' : (isPrompt ? '#f472b6' : '#818cf8'))))));
-				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(236, 72, 153, 0.35)' : 'rgba(99, 102, 241, 0.35)'))))));
+				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : 'rgba(99, 102, 241, 0.18)'))))));
+				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : '#818cf8'))))));
+				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : 'rgba(99, 102, 241, 0.35)'))))));
 
 				append(headerLeft, $('span.type-badge', {
 					style: `font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; letter-spacing: 0.04em;`
@@ -1762,11 +1762,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						field.targetModel = 'gemini-1.5-flash';
 					}
 					const promptSchemaBox = append(fieldCard, $('.prompt-schema-config', {
-						style: 'display: flex; flex-direction: column; gap: 12px; background: rgba(0, 0, 0, 0.2); padding: 12px 14px; border-radius: 6px; border: 1px solid rgba(236, 72, 153, 0.25);'
+						style: 'display: flex; flex-direction: column; gap: 12px; background: rgba(0, 0, 0, 0.2); padding: 12px 14px; border-radius: 6px; border: 1px solid rgba(59, 130, 246, 0.25);'
 					}));
 
 					// Top Description
-					const promptNotice = append(promptSchemaBox, $('div', { style: 'font-size: 11px; opacity: 0.85; line-height: 1.4; color: #f472b6; display: flex; align-items: center; gap: 6px;' }));
+					const promptNotice = append(promptSchemaBox, $('div', { style: 'font-size: 11px; opacity: 0.85; line-height: 1.4; color: #60a5fa; display: flex; align-items: center; gap: 6px;' }));
 					append(promptNotice, $('span' + ThemeIcon.asCSSSelector(Codicon.sparkle)));
 					append(promptNotice, $('span', {}, 'AI Prompt Primitive: configure instruction prompt and choose whether it is processed by an AI Model or an autonomous AI Agent.'));
 
@@ -1777,7 +1777,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					const modelModeBtn = append(modeButtons, $('button.monaco-button', {
 						type: 'button',
-						style: `padding: 6px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; ${field.targetMode !== 'agent' ? 'background: rgba(236, 72, 153, 0.2); color: #f472b6; border: 1px solid rgba(236, 72, 153, 0.5);' : 'background: rgba(255, 255, 255, 0.05); color: #ccc; border: 1px solid rgba(255, 255, 255, 0.15);'}`
+						style: `padding: 6px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; ${field.targetMode !== 'agent' ? 'background: rgba(59, 130, 246, 0.18); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.5);' : 'background: rgba(255, 255, 255, 0.05); color: #ccc; border: 1px solid rgba(255, 255, 255, 0.15);'}`
 					})) as HTMLButtonElement;
 					append(modelModeBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.zap)));
 					append(modelModeBtn, $('span', {}, 'Large Language Model (Direct)'));
@@ -1831,10 +1831,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								field.targetAgentName = selAgent?.name || '';
 							};
 						} else {
-							append(targetSelectContainer, $('label', { style: 'font-size: 11px; font-weight: 600; color: #f472b6;' }, 'Target AI Model:'));
+							append(targetSelectContainer, $('label', { style: 'font-size: 11px; font-weight: 600; color: #60a5fa;' }, 'Target AI Model:'));
 							const modelRow = append(targetSelectContainer, $('div', { style: 'display: flex; gap: 8px; align-items: center;' }));
 							const modelSelect = append(modelRow, $('select.monaco-select-box', {
-								style: 'flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(236, 72, 153, 0.35); background: rgba(0, 0, 0, 0.25); color: inherit;'
+								style: 'flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(59, 130, 246, 0.35); background: rgba(0, 0, 0, 0.25); color: inherit;'
 							})) as HTMLSelectElement;
 
 							const presetModels = [
@@ -1885,9 +1885,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					modelModeBtn.onclick = () => {
 						field.targetMode = 'model';
-						modelModeBtn.style.background = 'rgba(236, 72, 153, 0.2)';
-						modelModeBtn.style.color = '#f472b6';
-						modelModeBtn.style.borderColor = 'rgba(236, 72, 153, 0.5)';
+						modelModeBtn.style.background = 'rgba(59, 130, 246, 0.18)';
+						modelModeBtn.style.color = '#60a5fa';
+						modelModeBtn.style.borderColor = 'rgba(59, 130, 246, 0.5)';
 						agentModeBtn.style.background = 'rgba(255, 255, 255, 0.05)';
 						agentModeBtn.style.color = '#ccc';
 						agentModeBtn.style.borderColor = 'rgba(255, 255, 255, 0.15)';

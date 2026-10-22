@@ -3920,7 +3920,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 							'data-field-id': field.id,
 							'data-field-label': field.label,
 							'data-field-type': field.type,
-							style: 'display: flex; flex-direction: column; gap: 8px; border: 1px solid rgba(236, 72, 153, 0.25); background: rgba(236, 72, 153, 0.03); border-radius: 8px; padding: 10px 12px;'
+							style: 'display: flex; flex-direction: column; gap: 8px; border: 1px solid rgba(59, 130, 246, 0.25); background: rgba(59, 130, 246, 0.04); border-radius: 8px; padding: 10px 12px;'
 						}));
 
 						const targetDesc = field.targetMode === 'agent'
@@ -3928,7 +3928,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 							: `Model: ${field.targetModel || 'gemini-1.5-flash'}`;
 
 						const topRow = append(promptBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px;' }));
-						append(topRow, $('span', { style: 'font-size: 10.5px; opacity: 0.8; font-weight: 600; color: #f472b6;' }, `AI Instruction (${targetDesc})`));
+						append(topRow, $('span', { style: 'font-size: 10.5px; opacity: 0.8; font-weight: 600; color: #60a5fa;' }, `AI Instruction (${targetDesc})`));
 
 						const promptTextarea = append(promptBox, $('textarea.monaco-inputbox.prompt-text-input', {
 							placeholder: 'AI Prompt Instruction...',

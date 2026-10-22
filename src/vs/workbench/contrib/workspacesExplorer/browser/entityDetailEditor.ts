@@ -2812,9 +2812,9 @@ ${rawErr}
 				modelBtn.style.background = 'transparent';
 				modelBtn.style.color = 'inherit';
 			} else {
-				modelBtn.style.border = '1px solid rgba(236,72,153,0.5)';
-				modelBtn.style.background = 'rgba(236,72,153,0.2)';
-				modelBtn.style.color = '#f472b6';
+				modelBtn.style.border = '1px solid rgba(59,130,246,0.5)';
+				modelBtn.style.background = 'rgba(59,130,246,0.18)';
+				modelBtn.style.color = '#60a5fa';
 				agentBtn.style.border = '1px solid rgba(255,255,255,0.1)';
 				agentBtn.style.background = 'transparent';
 				agentBtn.style.color = 'inherit';
@@ -2840,8 +2840,8 @@ ${rawErr}
 			} else {
 				const mName = (modelSelect as HTMLSelectElement)?.value || 'gemini-1.5-flash';
 				targetBadge.textContent = `⚡ Model: ${mName}`;
-				targetBadge.style.background = 'rgba(236, 72, 153, 0.15)';
-				targetBadge.style.color = '#f472b6';
+				targetBadge.style.background = 'rgba(59, 130, 246, 0.15)';
+				targetBadge.style.color = '#60a5fa';
 			}
 		}
 
@@ -3890,8 +3890,8 @@ ${interpolatedPrompt}`;
 					const targetBadgeText = isAgentMode
 						? `🤖 Agent: ${promptAgentName || promptAgentId || 'Unassigned'}`
 						: `⚡ Model: ${promptModel || 'gemini-1.5-flash'}`;
-					const targetBadgeBg = isAgentMode ? 'rgba(56, 189, 248, 0.15)' : 'rgba(236, 72, 153, 0.15)';
-					const targetBadgeColor = isAgentMode ? '#38bdf8' : '#f472b6';
+					const targetBadgeBg = isAgentMode ? 'rgba(56, 189, 248, 0.15)' : 'rgba(59, 130, 246, 0.15)';
+					const targetBadgeColor = isAgentMode ? '#38bdf8' : '#60a5fa';
 
 					const agentOptionsHtml = agents.length > 0
 						? agents.map(ag => `<option value="${this._escapeHtmlAttr(ag.id)}" ${ag.id === promptAgentId ? 'selected' : ''}>${this._escapeHtml(ag.name)} (${this._escapeHtml(ag.role || 'Agent')})</option>`).join('')
@@ -3916,7 +3916,7 @@ ${interpolatedPrompt}`;
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(236,72,153,0.18); color: #ec4899; font-weight: 700; text-transform: uppercase;">Prompt</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(59,130,246,0.18); color: #60a5fa; font-weight: 700; text-transform: uppercase;">Prompt</span>
 									<span class="prompt-target-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: ${targetBadgeBg}; color: ${targetBadgeColor}; font-weight: 600;">${this._escapeHtml(targetBadgeText)}</span>
 								</div>
 								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="prompt" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(promptText)}" title="Edit ${k} with AI">
@@ -3928,11 +3928,11 @@ ${interpolatedPrompt}`;
 								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.06);">
 									<div style="display: flex; align-items: center; gap: 6px;">
 										<span style="font-size: 11px; font-weight: 600; opacity: 0.75;">Target:</span>
-										<button type="button" class="prompt-mode-btn prompt-mode-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-mode="model" style="padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; border: 1px solid ${!isAgentMode ? 'rgba(236,72,153,0.5)' : 'rgba(255,255,255,0.1)'}; background: ${!isAgentMode ? 'rgba(236,72,153,0.2)' : 'transparent'}; color: ${!isAgentMode ? '#f472b6' : 'inherit'};">⚡ Model</button>
+										<button type="button" class="prompt-mode-btn prompt-mode-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-mode="model" style="padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; border: 1px solid ${!isAgentMode ? 'rgba(59,130,246,0.5)' : 'rgba(255,255,255,0.1)'}; background: ${!isAgentMode ? 'rgba(59,130,246,0.18)' : 'transparent'}; color: ${!isAgentMode ? '#60a5fa' : 'inherit'};">⚡ Model</button>
 										<button type="button" class="prompt-mode-btn prompt-mode-agent-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-mode="agent" style="padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; border: 1px solid ${isAgentMode ? 'rgba(56,189,248,0.5)' : 'rgba(255,255,255,0.1)'}; background: ${isAgentMode ? 'rgba(56,189,248,0.2)' : 'transparent'}; color: ${isAgentMode ? '#38bdf8' : 'inherit'};">🤖 AI Agent</button>
 									</div>
 									<div class="prompt-target-selector-box" style="flex: 1; max-width: 320px; min-width: 200px;">
-										<select class="prompt-model-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(236,72,153,0.3); background: #1a1a1a; color: inherit; ${isAgentMode ? 'display: none;' : ''}">
+										<select class="prompt-model-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; ${isAgentMode ? 'display: none;' : ''}">
 											${modelOptionsHtml}
 										</select>
 										<select class="prompt-agent-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(56,189,248,0.3); background: #1a1a1a; color: inherit; ${!isAgentMode ? 'display: none;' : ''}">
@@ -3953,7 +3953,7 @@ ${interpolatedPrompt}`;
 								<!-- Action Buttons Row -->
 								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
 									<div style="display: flex; gap: 8px; align-items: center;">
-										<button type="button" class="prompt-run-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(236,72,153,0.18); color: #f472b6; border: 1px solid rgba(236,72,153,0.4); ${isAgentMode ? 'display: none;' : ''}" title="Execute prompt with selected model">
+										<button type="button" class="prompt-run-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59,130,246,0.18); color: #60a5fa; border: 1px solid rgba(59,130,246,0.4); ${isAgentMode ? 'display: none;' : ''}" title="Execute prompt with selected model">
 											<span>▶ Run with Model</span>
 										</button>
 										<button type="button" class="prompt-dispatch-agent-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.18); color: #38bdf8; border: 1px solid rgba(56,189,248,0.4); ${!isAgentMode ? 'display: none;' : ''}" title="Dispatch task to selected AI Agent">
