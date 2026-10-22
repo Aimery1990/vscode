@@ -763,6 +763,57 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// 0.47 Result Primitive: Copy Result Content
+			const copyResultBtn = target.closest('.result-copy-btn') as HTMLElement | null;
+			if (copyResultBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = copyResultBtn.closest('.result-primitive-card') as HTMLElement | null;
+				const rawTa = card?.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
+				const text = rawTa?.value || '';
+				if (text) {
+					await this._clipboardService.writeText(text);
+					this._notificationService.info('Result content copied to clipboard.');
+				} else {
+					this._notificationService.warn('No content to copy.');
+				}
+				return;
+			}
+
+			// 0.48 Result Primitive: Export CSV
+			const exportCsvBtn = target.closest('.result-export-csv-btn') as HTMLElement | null;
+			if (exportCsvBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = exportCsvBtn.getAttribute('data-field-key') || '';
+				const card = exportCsvBtn.closest('.result-primitive-card') as HTMLElement | null;
+				const rawTa = card?.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
+				const text = rawTa?.value || '';
+				this._exportResultToCsv(text, fieldKey);
+				return;
+			}
+
+			// 0.49 Result Primitive: Sync from AI Prompt
+			const syncPromptBtn = target.closest('.result-sync-prompt-btn') as HTMLElement | null;
+			if (syncPromptBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = syncPromptBtn.closest('.result-primitive-card') as HTMLElement | null;
+				if (card) {
+					const fieldKey = syncPromptBtn.getAttribute('data-field-key') || '';
+					const promptCard = this._container?.querySelector('.prompt-primitive-card');
+					const promptOutputEl = promptCard?.querySelector('.prompt-output-display');
+					const text = promptOutputEl?.textContent || '';
+					if (!text || text.includes('No execution output yet.')) {
+						this._notificationService.warn('No AI Prompt output available to sync. Run an AI Prompt first.');
+						return;
+					}
+					await this._setResultCardContent(card, fieldKey, text);
+					this._notificationService.info(`Synced output from AI Prompt into '${fieldKey}'.`);
+				}
+				return;
+			}
+
 			// 1. AI Sparkle button click
 			const aiBtn = target.closest('.ai-edit-btn') as HTMLElement | null;
 			if (aiBtn) {
@@ -913,6 +964,16 @@ export class EntityDetailEditor extends EditorPane {
 				const newValue = paramInput.value;
 				if (fieldKey && paramName) {
 					await this._saveTicketParameterValue(fieldKey, paramName, newValue);
+				}
+				return;
+			}
+
+			const formatSelector = target?.closest('.result-format-selector') as HTMLSelectElement | null;
+			if (formatSelector) {
+				const fieldKey = formatSelector.getAttribute('data-field-key') || '';
+				const card = formatSelector.closest('.result-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._updateResultCardFormat(card, fieldKey, formatSelector.value);
 				}
 				return;
 			}
@@ -2740,12 +2801,138 @@ ${rawErr}
 			});
 		}
 
+		// 4. Resolve primitives by Field Label & Field ID
+		if (this._lastCustomModule?.fields) {
+			for (const f of this._lastCustomModule.fields) {
+				const label = f.label || f.id;
+				const id = f.id;
+				const fKey = f.label || f.id;
+
+				let primitiveVal = '';
+				const subProps: Record<string, string> = {};
+
+				// Look up saved metadata
+				const rawSaved = this._lastParsedData?.customMetadata?.[fKey] ?? this._lastParsedData?.customMetadata?.[f.id];
+				let savedObj: any = null;
+				if (typeof rawSaved === 'string') {
+					try { savedObj = JSON.parse(rawSaved); } catch { savedObj = rawSaved; }
+				} else if (rawSaved) {
+					savedObj = rawSaved;
+				}
+
+				if (f.type === 'browser') {
+					let url = '';
+					let content = '';
+					if (this._container) {
+						const card = this._container.querySelector(`.custom-primitive-card[data-field-key="${fKey}"]`) ||
+									this._container.querySelector(`.custom-primitive-card[data-field-id="${f.id}"]`);
+						if (card) {
+							const urlInput = card.querySelector('.browser-url-input') as HTMLInputElement | null;
+							const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
+							if (urlInput) url = urlInput.value.trim();
+							if (contentEl) content = contentEl.textContent || '';
+						}
+					}
+					if (!url && savedObj && typeof savedObj === 'object') {
+						url = savedObj.url || '';
+					}
+					if (!content && savedObj && typeof savedObj === 'object') {
+						content = savedObj.content || '';
+					}
+					if (!url) url = f.defaultUrl || '';
+
+					if (content.includes('No webpage content extracted yet.')) {
+						content = '';
+					}
+
+					subProps['url'] = url;
+					subProps['content'] = content;
+					primitiveVal = `--- [Primitive: ${label} (Browser)] ---\nTarget URL: ${url}\nExtracted Web Content:\n${content}\n--- [End of ${label}] ---`;
+				} else if (f.type === 'prompt') {
+					let prompt = '';
+					let output = '';
+					if (this._container) {
+						const card = this._container.querySelector(`.custom-primitive-card[data-field-key="${fKey}"]`) ||
+									this._container.querySelector(`.custom-primitive-card[data-field-id="${f.id}"]`);
+						if (card) {
+							const ta = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+							const out = card.querySelector('.prompt-output-display') as HTMLElement | null;
+							if (ta) prompt = ta.value;
+							if (out) output = out.textContent || '';
+						}
+					}
+					if (!prompt && savedObj && typeof savedObj === 'object') {
+						prompt = savedObj.prompt || '';
+					}
+					if (!output && savedObj && typeof savedObj === 'object') {
+						output = savedObj.output || '';
+					}
+					if (!prompt) prompt = f.defaultContent || '';
+
+					if (output.includes('No execution output yet.')) {
+						output = '';
+					}
+
+					subProps['prompt'] = prompt;
+					subProps['output'] = output;
+					primitiveVal = output || prompt;
+				} else if (f.type === 'result') {
+					let resText = '';
+					if (this._container) {
+						const card = this._container.querySelector(`.custom-primitive-card[data-field-key="${fKey}"]`) ||
+									this._container.querySelector(`.custom-primitive-card[data-field-id="${f.id}"]`);
+						if (card) {
+							const contentEl = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
+							if (contentEl) resText = contentEl.value || '';
+						}
+					}
+					if (!resText && savedObj) {
+						resText = typeof savedObj === 'object' ? (savedObj.result || savedObj.output || '') : String(savedObj);
+					}
+					primitiveVal = resText;
+					subProps['result'] = resText;
+					subProps['output'] = resText;
+				} else if (f.type === 'parameters') {
+					const lines: string[] = [];
+					if (f.parameters) {
+						for (const p of f.parameters) {
+							const val = paramMap.get(p.name) || p.defaultValue || '';
+							lines.push(`${p.name}: ${val}`);
+							subProps[p.name] = val;
+						}
+					}
+					primitiveVal = lines.join('\n');
+				} else {
+					if (savedObj) {
+						primitiveVal = typeof savedObj === 'object' ? JSON.stringify(savedObj, null, 2) : String(savedObj);
+					} else {
+						primitiveVal = f.defaultContent || '';
+					}
+				}
+
+				if (label) {
+					paramMap.set(label, primitiveVal);
+					for (const [subKey, subVal] of Object.entries(subProps)) {
+						paramMap.set(`${label}.${subKey}`, subVal);
+					}
+				}
+				if (id && id !== label) {
+					paramMap.set(id, primitiveVal);
+					for (const [subKey, subVal] of Object.entries(subProps)) {
+						paramMap.set(`${id}.${subKey}`, subVal);
+					}
+				}
+			}
+		}
+
 		// Interpolate {{param}} and {param}
+		const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 		let result = text;
 		for (const [pName, pVal] of paramMap.entries()) {
 			if (!pName) continue;
-			const reDouble = new RegExp(`\\{\\{\\s*${pName}\\s*\\}\\}`, 'g');
-			const reSingle = new RegExp(`\\{\\s*${pName}\\s*\\}`, 'g');
+			const escapedName = escapeRegExp(pName);
+			const reDouble = new RegExp(`\\{\\{\\s*${escapedName}\\s*\\}\\}`, 'gi');
+			const reSingle = new RegExp(`\\{\\s*${escapedName}\\s*\\}`, 'gi');
 			result = result.replace(reDouble, pVal).replace(reSingle, pVal);
 		}
 		return result;
@@ -2893,6 +3080,7 @@ ${rawErr}
 					statusText.style.color = '#34d399';
 				}
 				await this._savePromptDataFromCard(card, fieldKey, res.text);
+				await this._autoUpdateResultPrimitives(res.text);
 			} else {
 				throw new Error(res.error || 'Execution failed');
 			}
@@ -2907,6 +3095,321 @@ ${rawErr}
 			}
 			await this._savePromptDataFromCard(card, fieldKey, `[Error: ${errMsg}]`);
 		}
+	}
+
+	private async _autoUpdateResultPrimitives(output: string): Promise<void> {
+		if (!this._container) return;
+		const resultCards = this._container.querySelectorAll('.result-primitive-card') as NodeListOf<HTMLElement>;
+		if (resultCards.length === 0) return;
+
+		for (const card of Array.from(resultCards)) {
+			const fieldKey = card.getAttribute('data-field-key') || '';
+			await this._setResultCardContent(card, fieldKey, output);
+		}
+	}
+
+	private async _setResultCardContent(card: HTMLElement, fieldKey: string, output: string): Promise<void> {
+		const formatSelector = card.querySelector('.result-format-selector') as HTMLSelectElement | null;
+		const format = formatSelector?.value || 'table';
+		const rawTa = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
+		if (rawTa) rawTa.value = output;
+
+		const viewport = card.querySelector('.result-viewport-container') as HTMLElement | null;
+		if (viewport) {
+			if (format === 'table') {
+				viewport.innerHTML = this._renderResultTableHtml(output);
+			} else if (format === 'markdown') {
+				viewport.innerHTML = this._markdownToHtml(output);
+			} else if (format === 'json') {
+				viewport.innerHTML = this._renderResultJsonHtml(output);
+			} else {
+				viewport.innerHTML = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(output)}</pre>`;
+			}
+		}
+
+		const statusEl = card.querySelector('.result-status-text') as HTMLElement | null;
+		const timeStr = `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
+		if (statusEl) {
+			statusEl.textContent = `Updated: ${new Date().toLocaleTimeString()} (${output.length} chars)`;
+			statusEl.style.color = '#34d399';
+		}
+
+		const resultData = {
+			result: output,
+			format,
+			lastUpdated: timeStr
+		};
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: JSON.stringify(resultData)
+		};
+		await this._handleMessage({
+			type: 'saveMetadata',
+			metadata: {},
+			customMetadata: updatedCustom
+		});
+	}
+
+	private async _updateResultCardFormat(card: HTMLElement, fieldKey: string, format: string): Promise<void> {
+		const rawTa = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
+		const text = rawTa?.value || '';
+
+		const viewport = card.querySelector('.result-viewport-container') as HTMLElement | null;
+		if (viewport) {
+			if (format === 'table') {
+				viewport.innerHTML = this._renderResultTableHtml(text);
+			} else if (format === 'markdown') {
+				viewport.innerHTML = this._markdownToHtml(text);
+			} else if (format === 'json') {
+				viewport.innerHTML = this._renderResultJsonHtml(text);
+			} else {
+				viewport.innerHTML = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(text)}</pre>`;
+			}
+		}
+
+		const statusEl = card.querySelector('.result-status-text') as HTMLElement | null;
+		const rawStatus = statusEl?.textContent || '';
+		const resultData = {
+			result: text,
+			format,
+			lastUpdated: rawStatus.includes(':') ? rawStatus.replace(/^(?:Updated|Auto-synced):\s*/, '') : ''
+		};
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: JSON.stringify(resultData)
+		};
+		await this._handleMessage({
+			type: 'saveMetadata',
+			metadata: {},
+			customMetadata: updatedCustom
+		});
+	}
+
+	private _renderResultTableHtml(text: string): string {
+		if (!text || !text.trim()) {
+			return '<span style="opacity: 0.4; font-style: italic;">No result content to display in table.</span>';
+		}
+
+		const trimmed = text.trim();
+
+		// 1. Try parsing JSON array of objects
+		let jsonObj: any = null;
+		if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+			try {
+				jsonObj = JSON.parse(trimmed);
+			} catch {
+				const jsonMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+				if (jsonMatch) {
+					try { jsonObj = JSON.parse(jsonMatch[1]); } catch {}
+				}
+			}
+		}
+
+		if (jsonObj) {
+			const rows = Array.isArray(jsonObj) ? jsonObj : (Array.isArray(jsonObj.data) ? jsonObj.data : (Array.isArray(jsonObj.items) ? jsonObj.items : (Array.isArray(jsonObj.results) ? jsonObj.results : null)));
+			if (rows && rows.length > 0 && typeof rows[0] === 'object' && rows[0] !== null) {
+				const headers = Array.from(new Set(rows.flatMap(r => typeof r === 'object' && r !== null ? Object.keys(r) : [])));
+				let tableHtml = '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
+				tableHtml += '<table class="result-data-table" style="width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;">';
+				tableHtml += '<thead><tr style="background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15); position: sticky; top: 0; z-index: 1;">';
+				for (const h of headers) {
+					tableHtml += `<th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc; text-transform: capitalize; white-space: nowrap;">${this._escapeHtml(h)}</th>`;
+				}
+				tableHtml += '</tr></thead><tbody>';
+				rows.forEach((r, idx) => {
+					const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.12)';
+					tableHtml += `<tr style="background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05); transition: background 0.15s ease;">`;
+					for (const h of headers) {
+						const cellVal = r[h] !== undefined && r[h] !== null ? (typeof r[h] === 'object' ? JSON.stringify(r[h]) : String(r[h])) : '';
+						const isLink = /^https?:\/\//i.test(cellVal.trim());
+						const displayVal = isLink
+							? `<a href="${this._escapeHtmlAttr(cellVal.trim())}" target="_blank" style="color: #38bdf8; text-decoration: underline;">${this._escapeHtml(cellVal.trim())}</a>`
+							: this._escapeHtml(cellVal);
+						tableHtml += `<td style="padding: 7px 12px; vertical-align: top; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: normal; line-height: 1.4;">${displayVal}</td>`;
+					}
+					tableHtml += '</tr>';
+				});
+				tableHtml += '</tbody></table></div>';
+				return tableHtml;
+			}
+		}
+
+		// 2. Try parsing Markdown table
+		const lines = trimmed.split('\n');
+		const tableLines = lines.filter(l => l.trim().startsWith('|') && l.trim().endsWith('|'));
+		if (tableLines.length >= 2) {
+			const headerLine = tableLines[0];
+			let dataLines = tableLines.slice(1);
+			if (dataLines.length > 0 && /^\s*\|(?:\s*[-:]+[-| :]*)\|?\s*$/.test(dataLines[0])) {
+				dataLines = dataLines.slice(1);
+			}
+
+			const splitCells = (line: string) => {
+				const trimmedL = line.trim();
+				const inner = trimmedL.startsWith('|') && trimmedL.endsWith('|') ? trimmedL.slice(1, -1) : trimmedL;
+				return inner.split('|').map(c => c.trim());
+			};
+
+			const headers = splitCells(headerLine);
+			let tableHtml = '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
+			tableHtml += '<table class="result-data-table" style="width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;">';
+			tableHtml += '<thead><tr style="background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15); position: sticky; top: 0; z-index: 1;">';
+			for (const h of headers) {
+				tableHtml += `<th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc; white-space: nowrap;">${this._escapeHtml(h)}</th>`;
+			}
+			tableHtml += '</tr></thead><tbody>';
+			dataLines.forEach((line, idx) => {
+				const cells = splitCells(line);
+				const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.12)';
+				tableHtml += `<tr style="background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05);">`;
+				for (let cIdx = 0; cIdx < headers.length; cIdx++) {
+					const cellVal = cells[cIdx] || '';
+					const isLink = /^https?:\/\//i.test(cellVal.trim());
+					const displayVal = isLink
+						? `<a href="${this._escapeHtmlAttr(cellVal.trim())}" target="_blank" style="color: #38bdf8; text-decoration: underline;">${this._escapeHtml(cellVal.trim())}</a>`
+						: this._escapeHtml(cellVal);
+					tableHtml += `<td style="padding: 7px 12px; vertical-align: top; line-height: 1.4;">${displayVal}</td>`;
+				}
+				tableHtml += '</tr>';
+			});
+			tableHtml += '</tbody></table></div>';
+			return tableHtml;
+		}
+
+		// 3. Fallback: Key-Value pairs check
+		const kvPairs: Array<{ key: string; val: string }> = [];
+		for (const line of lines) {
+			const m = line.match(/^([^:\n]{1,40}):\s*(.+)$/);
+			if (m) {
+				kvPairs.push({ key: m[1].trim(), val: m[2].trim() });
+			}
+		}
+		if (kvPairs.length >= 2) {
+			let tableHtml = '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
+			tableHtml += '<table class="result-data-table" style="width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;">';
+			tableHtml += '<thead><tr style="background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15);"><th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc; width: 30%;">Property</th><th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc;">Value</th></tr></thead><tbody>';
+			kvPairs.forEach((kv, idx) => {
+				const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.12)';
+				tableHtml += `<tr style="background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05);"><td style="padding: 7px 12px; font-weight: 500; opacity: 0.85;">${this._escapeHtml(kv.key)}</td><td style="padding: 7px 12px;">${this._escapeHtml(kv.val)}</td></tr>`;
+			});
+			tableHtml += '</tbody></table></div>';
+			return tableHtml;
+		}
+
+		// 4. Default fallback: Render as pre-formatted text with suggestion note
+		return `
+			<div style="margin-bottom: 8px; font-size: 10.5px; color: #fbbf24; opacity: 0.85;">ℹ Output is plain text or unstructured. Switch to Markdown or Text view for optimal layout:</div>
+			<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 5px;">${this._escapeHtml(trimmed)}</pre>
+		`;
+	}
+
+	private _renderResultJsonHtml(text: string): string {
+		if (!text || !text.trim()) {
+			return '<span style="opacity: 0.4; font-style: italic;">No JSON content to display.</span>';
+		}
+		const trimmed = text.trim();
+		let parsed: any = null;
+		try {
+			parsed = JSON.parse(trimmed);
+		} catch {
+			const m = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+			if (m) {
+				try { parsed = JSON.parse(m[1]); } catch {}
+			}
+		}
+
+		if (parsed !== null) {
+			const formatted = JSON.stringify(parsed, null, 2);
+			return `<pre style="font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);">${this._escapeHtml(formatted)}</pre>`;
+		}
+
+		return `
+			<div style="margin-bottom: 8px; font-size: 10.5px; color: #fbbf24; opacity: 0.85;">⚠ Content is not strictly valid JSON. Displaying raw format:</div>
+			<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; background: rgba(0,0,0,0.25); padding: 10px; border-radius: 6px; margin: 0;">${this._escapeHtml(trimmed)}</pre>
+		`;
+	}
+
+	private _exportResultToCsv(rawText: string, fieldKey: string): void {
+		if (!rawText || !rawText.trim()) {
+			this._notificationService.warn('No result data available to export.');
+			return;
+		}
+
+		let csv = '';
+		const trimmed = rawText.trim();
+
+		// Check JSON
+		let jsonObj: any = null;
+		if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+			try {
+				jsonObj = JSON.parse(trimmed);
+			} catch {
+				const m = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+				if (m) {
+					try { jsonObj = JSON.parse(m[1]); } catch {}
+				}
+			}
+		}
+
+		if (jsonObj) {
+			const rows = Array.isArray(jsonObj) ? jsonObj : (Array.isArray(jsonObj.data) ? jsonObj.data : (Array.isArray(jsonObj.items) ? jsonObj.items : (Array.isArray(jsonObj.results) ? jsonObj.results : null)));
+			if (rows && rows.length > 0 && typeof rows[0] === 'object' && rows[0] !== null) {
+				const headers = Array.from(new Set(rows.flatMap(r => typeof r === 'object' && r !== null ? Object.keys(r) : [])));
+				const escapeCsv = (val: any) => {
+					const str = val !== undefined && val !== null ? String(val) : '';
+					if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+						return `"${str.replace(/"/g, '""')}"`;
+					}
+					return str;
+				};
+				csv += headers.map(escapeCsv).join(',') + '\n';
+				rows.forEach(r => {
+					csv += headers.map(h => escapeCsv(r[h])).join(',') + '\n';
+				});
+			}
+		}
+
+		if (!csv) {
+			// Check Markdown table
+			const lines = trimmed.split('\n');
+			const tableLines = lines.filter(l => l.trim().startsWith('|') && l.trim().endsWith('|'));
+			if (tableLines.length >= 2) {
+				const splitCells = (line: string) => {
+					const trimmedL = line.trim();
+					const inner = trimmedL.startsWith('|') && trimmedL.endsWith('|') ? trimmedL.slice(1, -1) : trimmedL;
+					return inner.split('|').map(c => c.trim());
+				};
+				const escapeCsv = (val: string) => {
+					if (val.includes(',') || val.includes('"') || val.includes('\n')) {
+						return `"${val.replace(/"/g, '""')}"`;
+					}
+					return val;
+				};
+				const headerCells = splitCells(tableLines[0]);
+				csv += headerCells.map(escapeCsv).join(',') + '\n';
+				let dataLines = tableLines.slice(1);
+				if (dataLines.length > 0 && /^\s*\|(?:\s*[-:]+[-| :]*)\|?\s*$/.test(dataLines[0])) {
+					dataLines = dataLines.slice(1);
+				}
+				dataLines.forEach(l => {
+					const cells = splitCells(l);
+					csv += cells.map(escapeCsv).join(',') + '\n';
+				});
+			}
+		}
+
+		if (!csv) {
+			csv = `Content\n"${trimmed.replace(/"/g, '""')}"`;
+		}
+
+		const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = `result_${fieldKey.replace(/\s+/g, '_')}_${Date.now()}.csv`;
+		a.click();
+		URL.revokeObjectURL(url);
+		this._notificationService.info(`CSV exported for '${fieldKey}'.`);
 	}
 
 	private async _dispatchPromptToAgent(card: HTMLElement, fieldKey: string): Promise<void> {
@@ -3871,19 +4374,20 @@ ${interpolatedPrompt}`;
 								promptText = trimmed;
 							}
 						} else if (typeof v === 'object' && v !== null) {
-							if ((v as any).prompt !== undefined) promptText = (v as any).prompt;
-							if ((v as any).targetMode) promptMode = (v as any).targetMode;
-							if ((v as any).targetModel) promptModel = (v as any).targetModel;
-							if ((v as any).targetAgentId) promptAgentId = (v as any).targetAgentId;
-							if ((v as any).targetAgentName) promptAgentName = (v as any).targetAgentName;
-							if ((v as any).output) promptOutput = (v as any).output;
-							if ((v as any).lastExecuted) lastExecutedText = (v as any).lastExecuted;
+							const obj = v as Record<string, unknown>;
+							if (obj.prompt !== undefined) { promptText = String(obj.prompt); }
+							if (obj.targetMode) { promptMode = obj.targetMode as 'model' | 'agent'; }
+							if (obj.targetModel) { promptModel = String(obj.targetModel); }
+							if (obj.targetAgentId) { promptAgentId = String(obj.targetAgentId); }
+							if (obj.targetAgentName) { promptAgentName = String(obj.targetAgentName); }
+							if (obj.output) { promptOutput = String(obj.output); }
+							if (obj.lastExecuted) { lastExecutedText = String(obj.lastExecuted); }
 						}
 					}
 
 					if (promptAgentId && !promptAgentName) {
 						const matchingAg = agents.find(a => a.id === promptAgentId);
-						if (matchingAg) promptAgentName = matchingAg.name;
+						if (matchingAg) { promptAgentName = matchingAg.name; }
 					}
 
 					const isAgentMode = promptMode === 'agent';
@@ -3982,6 +4486,96 @@ ${interpolatedPrompt}`;
 									</div>
 									<div class="prompt-output-display desc-content-box" style="max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${promptOutput ? this._escapeHtml(promptOutput) : '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.</span>'}</div>
 								</div>
+							</div>
+						</div>
+					`;
+				} else if (fType === 'result') {
+					let resultText = fieldItem.defaultContent || '';
+					let resultFormat = fieldItem.defaultFormat || 'table';
+					let lastUpdatedText = '';
+
+					if (v) {
+						if (typeof v === 'string') {
+							const trimmed = v.trim();
+							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+								try {
+									const parsed = JSON.parse(trimmed);
+									if (parsed.result !== undefined || parsed.output !== undefined) {
+										resultText = parsed.result ?? parsed.output ?? '';
+										if (parsed.format) { resultFormat = parsed.format; }
+										if (parsed.lastUpdated) { lastUpdatedText = parsed.lastUpdated; }
+									} else {
+										resultText = v;
+									}
+								} catch {
+									resultText = v;
+								}
+							} else {
+								resultText = v;
+							}
+						} else if (typeof v === 'object' && v !== null) {
+							const rObj = v as Record<string, unknown>;
+							resultText = String(rObj.result ?? rObj.output ?? JSON.stringify(v, null, 2));
+							if (rObj.format) { resultFormat = String(rObj.format); }
+							if (rObj.lastUpdated) { lastUpdatedText = String(rObj.lastUpdated); }
+						}
+					}
+
+					let initialViewportHtml = '';
+					if (resultFormat === 'table') {
+						initialViewportHtml = this._renderResultTableHtml(resultText);
+					} else if (resultFormat === 'markdown') {
+						initialViewportHtml = resultText ? this._markdownToHtml(resultText) : '<span style="opacity: 0.4; font-style: italic;">No markdown content to display.</span>';
+					} else if (resultFormat === 'json') {
+						initialViewportHtml = this._renderResultJsonHtml(resultText);
+					} else {
+						initialViewportHtml = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${resultText ? this._escapeHtml(resultText) : '<span style="opacity: 0.4; font-style: italic;">No text content.</span>'}</pre>`;
+					}
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card result-primitive-card custom-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-type="result" style="border-left: 3px solid #818cf8; background: rgba(129, 140, 248, 0.03);">
+							<!-- Card Header -->
+							<div class="section-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<svg width="14" height="14" viewBox="0 0 16 16" fill="#818cf8"><path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h11A1.5 1.5 0 0 1 15 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 13.5v-11zM2.5 2a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5h11a.5.5 0 0 0 .5-.5v-11a.5.5 0 0 0-.5-.5h-11zm2 3h7v1h-7V5zm0 3h7v1h-7V8zm0 3h4v1h-4v-1z"/></svg>
+									<span style="font-weight: 600;">${this._escapeHtml(k)}</span>
+									<span style="font-size: 9.5px; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; background: rgba(129, 140, 248, 0.18); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.35); letter-spacing: 0.04em;">RETURN / RESULT / OUTPUT</span>
+								</div>
+
+								<!-- Format Selector & Action Controls -->
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<div style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
+										<span style="opacity: 0.65; font-weight: 500;">Format:</span>
+										<select class="result-format-selector" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;">
+											<option value="table" ${resultFormat === 'table' ? 'selected' : ''}>📊 Table</option>
+											<option value="markdown" ${resultFormat === 'markdown' ? 'selected' : ''}>📝 Markdown</option>
+											<option value="json" ${resultFormat === 'json' ? 'selected' : ''}>{} JSON</option>
+											<option value="text" ${resultFormat === 'text' ? 'selected' : ''}>📄 Text</option>
+										</select>
+									</div>
+									<button type="button" class="result-copy-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy Result Text to Clipboard" style="background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit; display: inline-flex; align-items: center; gap: 4px;">
+										<span>📋 Copy</span>
+									</button>
+									<button type="button" class="result-export-csv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Export Result Data as CSV" style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
+										<span>💾 Export CSV</span>
+									</button>
+									<button type="button" class="result-sync-prompt-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Sync latest output from AI Prompt" style="background: rgba(129, 140, 248, 0.12); border: 1px solid rgba(129, 140, 248, 0.3); color: #818cf8; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;">
+										<span>🔄 Sync</span>
+									</button>
+								</div>
+							</div>
+
+							<!-- Hidden Raw Content Holder -->
+							<textarea class="result-raw-content" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: none;">${this._escapeHtml(resultText)}</textarea>
+
+							<!-- Status Header -->
+							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 10.5px;">
+								<span class="result-status-text" style="padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.05); opacity: 0.7;">${lastUpdatedText ? `Last updated: ${this._escapeHtmlAttr(lastUpdatedText)}` : 'Ready'}</span>
+							</div>
+
+							<!-- Interactive Result Viewport -->
+							<div class="result-viewport-container desc-content-box" style="min-height: 80px; max-height: 480px; overflow-y: auto; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px; line-height: 1.5; font-size: 11.5px;">
+								${initialViewportHtml}
 							</div>
 						</div>
 					`;
@@ -4435,7 +5029,7 @@ ${interpolatedPrompt}`;
 									</svg>
 								</button>
 							</div>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map((s: any) => s.label || s.id) : this._workspaceStatuses.statuses)))}" title="Edit Status with AI">
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map(s => s.label || s.id) : this._workspaceStatuses.statuses)))}" title="Edit Status with AI">
 								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							</button>
 						</div>
@@ -4552,7 +5146,7 @@ ${interpolatedPrompt}`;
 										`;
 									}
 
-									let noticeHtml = hasCustomMapping ? `
+									const noticeHtml = hasCustomMapping ? `
 										<div style="font-size: 10.5px; color: #34d399; background: rgba(52, 211, 153, 0.08); border: 1px solid rgba(52, 211, 153, 0.2); padding: 5px 8px; border-radius: 5px; line-height: 1.3;">
 											✓ Configured with workspace custom status mapping (${Object.keys(mappingObj).length} entries).
 										</div>
@@ -4689,13 +5283,13 @@ ${interpolatedPrompt}`;
 						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.createdAt}</span>
 					</div>
 
-					<div class="sidebar-row" style="${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some((f: any) => f.type === 'git'))) ? '' : 'border-bottom: none; margin-bottom: 0;'}">
+					<div class="sidebar-row" style="${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some(f => f.type === 'git'))) ? '' : 'border-bottom: none; margin-bottom: 0;'}">
 						<span class="sidebar-label">LAST UPDATED AT</span>
 						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
 					</div>
 
 					<!-- Git Configuration (Repository & Branch) -->
-					${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some((f: any) => f.type === 'git'))) ? `
+					${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some(f => f.type === 'git'))) ? `
 						<div class="sidebar-row" style="margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);">
 							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 								<span class="sidebar-label" style="display: flex; align-items: center; gap: 5px;">

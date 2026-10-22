@@ -38,7 +38,8 @@ export type CustomFieldType =
 	| 'browser'
 	| 'git'
 	| 'parameters'
-	| 'prompt';
+	| 'prompt'
+	| 'result';
 
 export interface IActionButton {
 	id: string;
@@ -86,6 +87,7 @@ export interface ICustomField {
 	targetModel?: string;
 	targetAgentId?: string;
 	targetAgentName?: string;
+	defaultFormat?: string;
 }
 
 export interface ICompositeComponent {

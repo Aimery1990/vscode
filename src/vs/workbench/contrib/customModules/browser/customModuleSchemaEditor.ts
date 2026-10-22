@@ -447,6 +447,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				type: 'git',
 				defaultName: 'Git Repository'
 			},
+			{
+				label: 'Return / Result / Output',
+				icon: Codicon.output,
+				type: 'result',
+				defaultName: 'Pipeline Result'
+			},
 			{ label: 'Single-line Input (Text)', icon: Codicon.symbolString, type: 'text', defaultName: 'Text Field' },
 			{ label: 'Textarea (Multiline)', icon: Codicon.listFlat, type: 'textarea', defaultName: 'Description' },
 			{ label: 'Number Input (Numeric)', icon: Codicon.symbolNumber, type: 'number', defaultName: 'Amount' },
@@ -851,10 +857,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				const isGit = field.type === 'git';
 				const isParameters = field.type === 'parameters';
 				const isPrompt = field.type === 'prompt';
-				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isParameters ? 'INPUT PARAMETERS' : (isPrompt ? 'AI PROMPT' : field.type.toUpperCase()))))));
-				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : 'rgba(99, 102, 241, 0.18)'))))));
-				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : '#818cf8'))))));
-				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : 'rgba(99, 102, 241, 0.35)'))))));
+				const isResult = field.type === 'result';
+				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isParameters ? 'INPUT PARAMETERS' : (isPrompt ? 'AI PROMPT' : (isResult ? 'RETURN / RESULT / OUTPUT' : field.type.toUpperCase())))))));
+				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isResult ? 'rgba(129, 140, 248, 0.18)' : 'rgba(99, 102, 241, 0.18)')))))));
+				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isResult ? '#818cf8' : '#818cf8')))))));
+				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isResult ? 'rgba(129, 140, 248, 0.35)' : 'rgba(99, 102, 241, 0.35)')))))));
 
 				append(headerLeft, $('span.type-badge', {
 					style: `font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; letter-spacing: 0.04em;`
@@ -1958,6 +1965,38 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					promptTextarea.value = field.defaultContent || '';
 					promptTextarea.oninput = () => {
 						field.defaultContent = promptTextarea.value;
+					};
+				}
+
+				if (field.type === 'result') {
+					const resultBox = append(cardBody, $('.primitive-config-box', {
+						style: 'margin-top: 10px; padding: 10px 12px; background: rgba(129, 140, 248, 0.05); border: 1px solid rgba(129, 140, 248, 0.2); border-radius: 6px; display: flex; flex-direction: column; gap: 8px;'
+					}));
+					append(resultBox, $('div', { style: 'font-size: 11px; font-weight: 600; color: #818cf8; display: flex; align-items: center; gap: 6px;' },
+						$('span' + ThemeIcon.asCSSSelector(Codicon.output)),
+						$('span', {}, 'Result Display & Visualization Settings')
+					));
+					append(resultBox, $('div', { style: 'font-size: 11px; color: rgba(255, 255, 255, 0.6); line-height: 1.4;' },
+						'Renders execution results, outputs, and return values. Provides 4 visualization formats: Table, Markdown, JSON, and Text with CSV export and clipboard copying.'
+					));
+					const formatRow = append(resultBox, $('.format-row', { style: 'display: flex; align-items: center; gap: 8px; margin-top: 2px;' }));
+					append(formatRow, $('span', { style: 'font-size: 11px; font-weight: 500; opacity: 0.8;' }, 'Default View:'));
+					const formatSelect = append(formatRow, $('select', {
+						style: 'padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit;'
+					})) as HTMLSelectElement;
+					[
+						{ value: 'table', label: '📊 Table (Interactive grid)' },
+						{ value: 'markdown', label: '📝 Markdown (Rich formatted)' },
+						{ value: 'json', label: '{} JSON (Formatted tree)' },
+						{ value: 'text', label: '📄 Text (Raw output)' },
+					].forEach(opt => {
+						const option = append(formatSelect, $('option', { value: opt.value }, opt.label)) as HTMLOptionElement;
+						if ((field.defaultFormat || 'table') === opt.value) {
+							option.selected = true;
+						}
+					});
+					formatSelect.onchange = () => {
+						field.defaultFormat = formatSelect.value;
 					};
 				}
 			});
