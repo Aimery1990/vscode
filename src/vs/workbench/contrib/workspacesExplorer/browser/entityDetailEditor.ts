@@ -4673,12 +4673,13 @@ ${interpolatedPrompt}`;
 								</button>
 							</div>
 
-							<!-- Navigation Bar -->
-							<div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px;">
-								<div style="position: relative; flex: 1; display: flex; align-items: center;">
-									<span style="position: absolute; left: 10px; opacity: 0.5; font-size: 13px; pointer-events: none;">🌐</span>
-									<input type="text" class="browser-url-input" value="${this._escapeHtmlAttr(browserUrl)}" placeholder="https://example.com..." style="width: 100%; padding: 7px 10px 7px 32px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
-								</div>
+							<!-- URL Input Bar (Full Width) -->
+							<div style="width: 100%; margin-bottom: 8px;">
+								<input type="text" class="browser-url-input" value="${this._escapeHtmlAttr(browserUrl)}" placeholder="https://example.com..." style="width: 100%; padding: 7px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
+							</div>
+
+							<!-- Action Buttons Row (Below URL) -->
+							<div style="display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;">
 								<!-- Silent Fetch Button -->
 								<button type="button" class="browser-silent-fetch-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Fetch webpage in background and extract text/HTML for AI" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); transition: all 0.15s ease;">
 									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 12l-4-4h2.5V3h3v5H12l-4 4zm-7 2h14v1.5H1V14z"/></svg>
@@ -4689,10 +4690,10 @@ ${interpolatedPrompt}`;
 									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 2.5A1.5 1.5 0 0 1 3 1h10a1.5 1.5 0 0 1 1.5 1.5v11a1.5 1.5 0 0 1-1.5 1.5H3a1.5 1.5 0 0 1-1.5-1.5v-11zM3 2a.5.5 0 0 0-.5.5V4h11V2.5a.5.5 0 0 0-.5-.5H3zm11 3H2v8.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5V5z"/></svg>
 									<span>Open in Tab</span>
 								</button>
-								<!-- New Tab Button (+) -->
+								<!-- New Tab Button -->
 								<button type="button" class="browser-new-tab-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Open a new independent browser tab beside (e.g. for login, cookies, or manual navigation)" style="display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(52, 211, 153, 0.15); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.35); transition: all 0.15s ease;">
 									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2a.75.75 0 0 1 .75.75v4.5h4.5a.75.75 0 0 1 0 1.5h-4.5v4.5a.75.75 0 0 1-1.5 0v-4.5h-4.5a.75.75 0 0 1 0-1.5h4.5v-4.5A.75.75 0 0 1 8 2z"/></svg>
-									<span>+ New Tab</span>
+									<span>New Tab</span>
 								</button>
 							</div>
 
@@ -4961,13 +4962,12 @@ ${interpolatedPrompt}`;
 							} else if (itemFormat === 'markdown') {
 								itemViewportHtml = itemText ? this._markdownToHtml(itemText) : '<span style="opacity: 0.4; font-style: italic;">No markdown content to display.</span>';
 							} else if (itemFormat === 'json') {
-								itemViewportHtml = this._renderResultJsonHtml(itemText);
 							} else {
 								itemViewportHtml = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${itemText ? this._escapeHtml(itemText) : '<span style="opacity: 0.4; font-style: italic;">No text content.</span>'}</pre>`;
 							}
 
 							itemsHtml += `
-								<div class="output-spec-item" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="background: rgba(0, 0, 0, 0.2); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">
+								<div class="output-spec-item" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="display: flex; flex-direction: column; gap: 6px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
 										<div style="display: flex; align-items: center; gap: 6px;">
 											<span style="font-weight: 600; font-size: 12px; color: #a5b4fc;">${this._escapeHtml(spec.label)}</span>
@@ -4975,17 +4975,16 @@ ${interpolatedPrompt}`;
 										<div style="display: flex; align-items: center; gap: 6px;">
 											<span style="font-size: 10.5px; opacity: 0.65;">Format:</span>
 											<select class="output-item-format-selector" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;">
-												<option value="table" ${itemFormat === 'table' ? 'selected' : ''}>Table</option>
-												<option value="markdown" ${itemFormat === 'markdown' ? 'selected' : ''}>Markdown</option>
-												<option value="json" ${itemFormat === 'json' ? 'selected' : ''}>JSON</option>
 												<option value="text" ${itemFormat === 'text' ? 'selected' : ''}>Text</option>
+												<option value="markdown" ${itemFormat === 'markdown' ? 'selected' : ''}>Markdown</option>
+												<option value="table" ${itemFormat === 'table' ? 'selected' : ''}>Table</option>
+												<option value="json" ${itemFormat === 'json' ? 'selected' : ''}>JSON</option>
 											</select>
 											<button type="button" class="output-item-copy-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" title="Copy output content" style="background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;">Copy</button>
-											<button type="button" class="output-item-export-csv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" title="Export as CSV" style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Export CSV</button>
 										</div>
 									</div>
 									<textarea class="output-item-raw-content" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="display: none;">${this._escapeHtml(itemText)}</textarea>
-									<div class="output-item-viewport desc-content-box" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="min-height: 60px; max-height: 380px; overflow-y: auto; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 4px; padding: 8px 10px; line-height: 1.5; font-size: 11.5px;">
+									<div class="output-item-viewport desc-content-box" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">
 										${itemViewportHtml}
 									</div>
 								</div>
@@ -5008,33 +5007,31 @@ ${interpolatedPrompt}`;
 								<div style="display: flex; align-items: center; gap: 4px; font-size: 11px;">
 									<span style="opacity: 0.65; font-weight: 500;">Format:</span>
 									<select class="result-format-selector" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;">
-										<option value="table" ${singleResultFormat === 'table' ? 'selected' : ''}>Table</option>
-										<option value="markdown" ${singleResultFormat === 'markdown' ? 'selected' : ''}>Markdown</option>
-										<option value="json" ${singleResultFormat === 'json' ? 'selected' : ''}>JSON</option>
 										<option value="text" ${singleResultFormat === 'text' ? 'selected' : ''}>Text</option>
+										<option value="markdown" ${singleResultFormat === 'markdown' ? 'selected' : ''}>Markdown</option>
+										<option value="table" ${singleResultFormat === 'table' ? 'selected' : ''}>Table</option>
+										<option value="json" ${singleResultFormat === 'json' ? 'selected' : ''}>JSON</option>
 									</select>
 								</div>
 								<div style="display: flex; align-items: center; gap: 6px;">
 									<button type="button" class="result-copy-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy Result Text to Clipboard" style="background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;">Copy</button>
-									<button type="button" class="result-export-csv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Export Result Data as CSV" style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3); color: #34d399; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Export CSV</button>
 									<button type="button" class="result-sync-prompt-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Sync latest output from AI Prompt" style="background: rgba(129, 140, 248, 0.12); border: 1px solid rgba(129, 140, 248, 0.3); color: #818cf8; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Sync</button>
 								</div>
 							</div>
 							<textarea class="result-raw-content" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: none;">${this._escapeHtml(singleResultText)}</textarea>
-							<div class="result-viewport-container desc-content-box" style="min-height: 80px; max-height: 480px; overflow-y: auto; background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px; line-height: 1.5; font-size: 11.5px;">
+							<div class="result-viewport-container desc-content-box" style="max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">
 								${initialViewportHtml}
 							</div>
 						`;
 					}
 
 					customFieldsHtml += `
-						<div class="section-card custom-property-card output-primitive-card result-primitive-card custom-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-type="output" style="border-left: 3px solid #818cf8; background: rgba(129, 140, 248, 0.03);">
+						<div class="section-card custom-property-card output-primitive-card result-primitive-card custom-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-type="output">
 							<!-- Card Header -->
-							<div class="section-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 8px;">
+							<div class="section-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
 								<div style="display: flex; align-items: center; gap: 8px;">
-									<svg width="14" height="14" viewBox="0 0 16 16" fill="#818cf8"><path d="M1 2.5A1.5 1.5 0 0 1 2.5 1h11A1.5 1.5 0 0 1 15 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 13.5v-11zM2.5 2a.5.5 0 0 0-.5.5v11a.5.5 0 0 0 .5.5h11a.5.5 0 0 0 .5-.5v-11a.5.5 0 0 0-.5-.5h-11zm2 3h7v1h-7V5zm0 3h7v1h-7V8zm0 3h4v1h-4v-1z"/></svg>
-									<span style="font-weight: 600;">${this._escapeHtml(k)}</span>
-									<span style="font-size: 9.5px; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; background: rgba(129, 140, 248, 0.18); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.35); letter-spacing: 0.04em;">OUTPUT</span>
+									<span>${this._escapeHtml(k)}</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(129, 140, 248, 0.18); color: #818cf8; font-weight: 700; text-transform: uppercase;">OUTPUT</span>
 								</div>
 								<div style="display: flex; align-items: center; gap: 6px;">
 									<button type="button" class="output-sync-all-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Sync outputs from ticket primitives" style="background: rgba(129, 140, 248, 0.12); border: 1px solid rgba(129, 140, 248, 0.3); color: #818cf8; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Sync Outputs</button>
@@ -5043,7 +5040,7 @@ ${interpolatedPrompt}`;
 							</div>
 
 							<!-- Body Items Container -->
-							<div class="output-items-container" style="display: flex; flex-direction: column; gap: 10px;">
+							<div class="output-items-container" style="display: flex; flex-direction: column; gap: 12px;">
 								${itemsHtml}
 							</div>
 						</div>
