@@ -8,11 +8,17 @@ import { Codicon } from '../../../../../base/common/codicons.js';
 import { localize } from '../../../../../nls.js';
 import { CountTokensCallback, IPreparedToolInvocation, IToolData, IToolImpl, IToolInvocation, IToolInvocationPreparationContext, IToolResult, ToolDataSource, ToolProgress } from '../../../chat/common/tools/languageModelToolsService.js';
 import { IWorkflowExecutionService } from '../../common/workflowExecutionService.js';
+import { ITicketWorkflowRuntimeService } from '../ticketWorkflowRuntime.js';
 
 export const ExecuteWorkflowToolId = 'anyagent_execute_workflow';
 export const GetWorkflowStateToolId = 'anyagent_get_workflow_state';
 export const ResumeWorkflowStepToolId = 'anyagent_resume_workflow_step';
 export const StopWorkflowToolId = 'anyagent_stop_workflow';
+
+export const CreateTicketToolId = 'anyagent_create_ticket';
+export const GetTicketToolId = 'anyagent_get_ticket';
+export const RunTicketToolId = 'anyagent_run_ticket';
+export const GetPrimitivesCatalogToolId = 'anyagent_get_primitives_catalog';
 
 function toolResult(data: any, message?: string): IToolResult {
 	return {
@@ -288,3 +294,268 @@ export class StopWorkflowTool implements IToolImpl {
 		}
 	}
 }
+
+// -------------------------------------------------------------
+// 5. anyagent_create_ticket
+// -------------------------------------------------------------
+export class CreateTicketTool implements IToolImpl {
+	constructor(
+		private readonly ticketRuntimeService: ITicketWorkflowRuntimeService
+	) { }
+
+	getToolData(): IToolData {
+		return {
+			id: CreateTicketToolId,
+			toolReferenceName: 'createTicket',
+			displayName: localize('workflow.tool.createTicket.displayName', "Create Ticket"),
+			userDescription: localize('workflow.tool.createTicket.userDescription', "Create a new ticket from a schema template in the workspace"),
+			modelDescription: 'Create a new ticket entity in the workspace based on a schema (custom module or built-in type). Initializes fields, parameters, and 4 markdown files (instruction.md, README.md, work_log.md, metadata.json).',
+			source: ToolDataSource.Internal,
+			canBeReferencedInPrompt: true,
+			icon: Codicon.add,
+			inputSchema: {
+				type: 'object',
+				properties: {
+					workspace_uri: {
+						type: 'string',
+						description: "The root workspace URI or folder path where tickets are managed."
+					},
+					target_path: {
+						type: 'string',
+						description: "Optional relative subfolder path within the workspace (e.g. 'jobs', 'jobs/fino3', 'tasks')."
+					},
+					ticket_type: {
+						type: 'string',
+						description: "The schema type ID or name (e.g. 'task', 'job', 'analysis', or custom module ID)."
+					},
+					title: {
+						type: 'string',
+						description: "The title of the ticket."
+					},
+					description: {
+						type: 'string',
+						description: "Optional description or summary of the ticket."
+					},
+					parameters: {
+						type: 'object',
+						description: "Optional dictionary of initial parameter and variable values."
+					},
+					field_values: {
+						type: 'object',
+						description: "Optional initial values for specific schema fields."
+					}
+				},
+				required: ['workspace_uri', 'ticket_type', 'title']
+			}
+		};
+	}
+
+	async prepareToolInvocation(context: IToolInvocationPreparationContext, _token: CancellationToken): Promise<IPreparedToolInvocation> {
+		const title = context.parameters?.title || 'New Ticket';
+		return {
+			invocationMessage: localize('workflow.tool.createTicket.invoking', "Creating ticket '{0}'...", title),
+			pastTenseMessage: localize('workflow.tool.createTicket.done', "Created ticket '{0}'", title)
+		};
+	}
+
+	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
+		try {
+			const { workspace_uri, target_path, ticket_type, title, description, parameters, field_values } = invocation.parameters;
+			if (!workspace_uri || !ticket_type || !title) {
+				return toolError("'workspace_uri', 'ticket_type', and 'title' are required.");
+			}
+			const res = await this.ticketRuntimeService.createTicket({
+				workspaceUri: workspace_uri,
+				targetPath: target_path,
+				ticketType: ticket_type,
+				title: title,
+				description: description,
+				parameters: parameters,
+				fieldValues: field_values
+			});
+			if (!res.success) {
+				return toolError(res.error || 'Failed to create ticket.');
+			}
+			return toolResult(res, `Successfully created ticket '${res.ticketId}' (${res.ticketName}) at ${res.targetFolder}`);
+		} catch (err: any) {
+			return toolError(err.message || String(err));
+		}
+	}
+}
+
+// -------------------------------------------------------------
+// 6. anyagent_get_ticket
+// -------------------------------------------------------------
+export class GetTicketTool implements IToolImpl {
+	constructor(
+		private readonly ticketRuntimeService: ITicketWorkflowRuntimeService
+	) { }
+
+	getToolData(): IToolData {
+		return {
+			id: GetTicketToolId,
+			toolReferenceName: 'getTicket',
+			displayName: localize('workflow.tool.getTicket.displayName', "Get Ticket"),
+			userDescription: localize('workflow.tool.getTicket.userDescription', "Retrieve ticket details, fields, custom metadata, and output"),
+			modelDescription: 'Query and fetch ticket details including current field values, customMetadata, execution outputs, and schema configuration by ticketId, name, or path.',
+			source: ToolDataSource.Internal,
+			canBeReferencedInPrompt: true,
+			icon: Codicon.info,
+			inputSchema: {
+				type: 'object',
+				properties: {
+					workspace_uri: {
+						type: 'string',
+						description: "The root workspace URI or path."
+					},
+					ticket_id_or_path: {
+						type: 'string',
+						description: "Ticket identifier, ticket code, folder name, or relative path."
+					}
+				},
+				required: ['workspace_uri', 'ticket_id_or_path']
+			}
+		};
+	}
+
+	async prepareToolInvocation(context: IToolInvocationPreparationContext, _token: CancellationToken): Promise<IPreparedToolInvocation> {
+		const tid = context.parameters?.ticket_id_or_path || '';
+		return {
+			invocationMessage: localize('workflow.tool.getTicket.invoking', "Fetching ticket '{0}'...", tid),
+			pastTenseMessage: localize('workflow.tool.getTicket.done', "Fetched ticket '{0}'", tid)
+		};
+	}
+
+	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
+		try {
+			const { workspace_uri, ticket_id_or_path } = invocation.parameters;
+			if (!workspace_uri || !ticket_id_or_path) {
+				return toolError("'workspace_uri' and 'ticket_id_or_path' are required.");
+			}
+			const res = await this.ticketRuntimeService.getTicket(workspace_uri, ticket_id_or_path);
+			if (!res.success) {
+				return toolError(res.error || `Ticket '${ticket_id_or_path}' not found.`);
+			}
+			return toolResult(res, `Retrieved ticket '${res.ticketId}' (Type: ${res.ticketType}, Status: ${res.status})`);
+		} catch (err: any) {
+			return toolError(err.message || String(err));
+		}
+	}
+}
+
+// -------------------------------------------------------------
+// 7. anyagent_run_ticket
+// -------------------------------------------------------------
+export class RunTicketTool implements IToolImpl {
+	constructor(
+		private readonly ticketRuntimeService: ITicketWorkflowRuntimeService
+	) { }
+
+	getToolData(): IToolData {
+		return {
+			id: RunTicketToolId,
+			toolReferenceName: 'runTicket',
+			displayName: localize('workflow.tool.runTicket.displayName', "Run Ticket Pipeline"),
+			userDescription: localize('workflow.tool.runTicket.userDescription', "Sequentially execute all primitives on a ticket schema from top to bottom"),
+			modelDescription: 'Execute a ticket as an autonomous runtime unit. Evaluates parameters, performs browser navigations/extractions, triggers AI prompts, aggregates outputs, and persists state.',
+			source: ToolDataSource.Internal,
+			canBeReferencedInPrompt: true,
+			icon: Codicon.playCircle,
+			inputSchema: {
+				type: 'object',
+				properties: {
+					workspace_uri: {
+						type: 'string',
+						description: "The root workspace URI or path."
+					},
+					ticket_id_or_path: {
+						type: 'string',
+						description: "Ticket identifier, code, folder name, or relative path."
+					},
+					input_params: {
+						type: 'object',
+						description: "Optional runtime parameter overrides or context variables passed from workflow."
+					}
+				},
+				required: ['workspace_uri', 'ticket_id_or_path']
+			}
+		};
+	}
+
+	async prepareToolInvocation(context: IToolInvocationPreparationContext, _token: CancellationToken): Promise<IPreparedToolInvocation> {
+		const tid = context.parameters?.ticket_id_or_path || '';
+		return {
+			invocationMessage: localize('workflow.tool.runTicket.invoking', "Running ticket '{0}' pipeline...", tid),
+			pastTenseMessage: localize('workflow.tool.runTicket.done', "Finished running ticket '{0}'", tid)
+		};
+	}
+
+	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
+		try {
+			const { workspace_uri, ticket_id_or_path, input_params } = invocation.parameters;
+			if (!workspace_uri || !ticket_id_or_path) {
+				return toolError("'workspace_uri' and 'ticket_id_or_path' are required.");
+			}
+			const res = await this.ticketRuntimeService.runTicket({
+				workspaceUri: workspace_uri,
+				ticketIdOrPath: ticket_id_or_path,
+				inputParams: input_params
+			});
+			if (!res.success) {
+				return toolError(res.error || `Execution of ticket '${ticket_id_or_path}' failed.`);
+			}
+			return toolResult(res, `Ticket '${res.ticketId}' executed successfully in ${res.durationMs}ms`);
+		} catch (err: any) {
+			return toolError(err.message || String(err));
+		}
+	}
+}
+
+// -------------------------------------------------------------
+// 8. anyagent_get_primitives_catalog
+// -------------------------------------------------------------
+export class GetPrimitivesCatalogTool implements IToolImpl {
+	constructor(
+		private readonly ticketRuntimeService: ITicketWorkflowRuntimeService
+	) { }
+
+	getToolData(): IToolData {
+		return {
+			id: GetPrimitivesCatalogToolId,
+			toolReferenceName: 'getPrimitivesCatalog',
+			displayName: localize('workflow.tool.catalog.displayName', "Get Primitives Catalog"),
+			userDescription: localize('workflow.tool.catalog.userDescription', "Get all Base Primitives and Reusable Classes with their runtime execution specifications"),
+			modelDescription: 'Retrieve the latest catalog of all 18 Base Primitives and Reusable Classes, including their data categories, supported inputs, outputs, and execution behaviors.',
+			source: ToolDataSource.Internal,
+			canBeReferencedInPrompt: true,
+			icon: Codicon.library,
+			inputSchema: {
+				type: 'object',
+				properties: {
+					workspace_uri: {
+						type: 'string',
+						description: "Optional workspace URI to include workspace-specific Reusable Classes."
+					}
+				}
+			}
+		};
+	}
+
+	async prepareToolInvocation(_context: IToolInvocationPreparationContext, _token: CancellationToken): Promise<IPreparedToolInvocation> {
+		return {
+			invocationMessage: localize('workflow.tool.catalog.invoking', "Retrieving primitives catalog..."),
+			pastTenseMessage: localize('workflow.tool.catalog.done', "Retrieved primitives catalog")
+		};
+	}
+
+	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
+		try {
+			const { workspace_uri } = invocation.parameters;
+			const catalog = await this.ticketRuntimeService.getPrimitivesCatalog(workspace_uri);
+			return toolResult({ total: catalog.length, primitives: catalog }, `Retrieved catalog with ${catalog.length} primitives and classes.`);
+		} catch (err: any) {
+			return toolError(err.message || String(err));
+		}
+	}
+}
+

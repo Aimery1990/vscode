@@ -10,6 +10,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { IWorkflowExecutionService } from '../common/workflowExecutionService.js';
+import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import {
 	IWorkflowEngineOptions,
 	IWorkflowExecutionRun,
@@ -418,7 +419,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
 		@IFileService private readonly fileService: IFileService,
 		@ILogService private readonly logService: ILogService,
-		@INotificationService private readonly notificationService: INotificationService
+		@INotificationService private readonly notificationService: INotificationService,
+		@ITicketWorkflowRuntimeService private readonly ticketRuntimeService: ITicketWorkflowRuntimeService
 	) { }
 
 	getActiveRun(workflowUri: URI | string): IWorkflowExecutionRun | undefined {
@@ -1006,29 +1008,71 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const ticketStart = Date.now();
 				this._emitLog(run, 'info', `Running Ticket: [${ticketType || 'task'}] '${ticketName}'${parameters ? ` (PARAM: ${parameters})` : ''}`);
 
-				// Simulated async ticket execution with snapshot integration
-				await new Promise(r => setTimeout(r, 600));
+				// Parse parameters string if provided (e.g. key1=val1, key2=val2 or JSON or variable references)
+				const inputParams: Record<string, any> = {};
+				if (parameters) {
+					const trimmed = parameters.trim();
+					if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+						try {
+							Object.assign(inputParams, JSON.parse(trimmed));
+						} catch {
+							// fallback
+						}
+					} else {
+						const parts = trimmed.split(',');
+						for (const p of parts) {
+							const eqIdx = p.indexOf('=');
+							if (eqIdx !== -1) {
+								const k = p.substring(0, eqIdx).trim();
+								const v = p.substring(eqIdx + 1).trim();
+								inputParams[k] = v;
+							}
+						}
+					}
+				}
 
-				const paramStr = parameters?.trim();
-				const outputText = paramStr
-					? `Ticket '${ticketName}' executed with (${paramStr}).`
-					: `Ticket '${ticketName}' processed successfully.`;
+				// Resolve target workspace URI
+				const wsUri = URI.parse(run.workflowUri);
+
+				// Real runtime execution through ticketRuntimeService
+				const execResult = await this.ticketRuntimeService.runTicket({
+					workspaceUri: wsUri,
+					ticketIdOrPath: ticketUri || ticketName,
+					inputParams: { ...run.contextVariables, ...inputParams }
+				});
 
 				const ticketRecord = {
-					ticketId: ticketUri || ticketName,
-					ticketName: ticketName,
-					ticketType: ticketType || 'task',
-					status: 'success' as const,
-					output: outputText,
+					ticketId: execResult.ticketId || ticketUri || ticketName,
+					ticketName: execResult.ticketName || ticketName,
+					ticketType: execResult.ticketType || ticketType || 'task',
+					status: (execResult.success ? 'success' : 'failed') as 'success' | 'failed',
+					output: execResult.output,
 					durationMs: Date.now() - ticketStart
 				};
 				state.executedTickets.push(ticketRecord);
+
+				// Register primary outputs into contextVariables
 				run.contextVariables[ticketRecord.ticketName] = ticketRecord.output;
 				run.contextVariables[ticketRecord.ticketName.replace(/[^a-zA-Z0-9_]/g, '_')] = ticketRecord.output;
 				if (ticketRecord.ticketId) {
 					run.contextVariables[ticketRecord.ticketId] = ticketRecord.output;
 				}
-				this._emitLog(run, 'info', `Ticket '${ticketName}' completed in ${ticketRecord.durationMs}ms`);
+
+				// Merge granular field outputs from ticket execution into workflow context
+				if (execResult.contextVariables) {
+					for (const [k, v] of Object.entries(execResult.contextVariables)) {
+						run.contextVariables[`${ticketRecord.ticketName}.${k}`] = v;
+						if (ticketRecord.ticketId) {
+							run.contextVariables[`${ticketRecord.ticketId}.${k}`] = v;
+						}
+					}
+				}
+
+				for (const stepRes of execResult.stepResults) {
+					this._emitLog(run, stepRes.status === 'success' ? 'info' : 'warn', `  - [${stepRes.fieldType.toUpperCase()}] ${stepRes.fieldLabel}: ${stepRes.status} (${stepRes.durationMs}ms)`);
+				}
+
+				this._emitLog(run, execResult.success ? 'info' : 'error', `Ticket '${ticketName}' finished with status: ${execResult.status} in ${ticketRecord.durationMs}ms`);
 				this._notifyRunChanged(run);
 				return ticketRecord;
 			};
