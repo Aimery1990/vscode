@@ -1973,7 +1973,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						field.outputSpecs = [];
 					}
 
-					const outputBox = append(cardBody, $('.primitive-config-box', {
+					const outputBox = append(fieldCard, $('.primitive-config-box', {
 						style: 'margin-top: 10px; padding: 12px 14px; background: rgba(129, 140, 248, 0.05); border: 1px solid rgba(129, 140, 248, 0.2); border-radius: 6px; display: flex; flex-direction: column; gap: 10px;'
 					}));
 
