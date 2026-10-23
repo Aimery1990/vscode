@@ -945,12 +945,17 @@ export class WorkflowEditor extends EditorPane {
 								width: 120,
 								height: 50,
 								label: 'Call Function',
-								outputVariables: [],
+								outputVariables: [{
+									name: 'res',
+									initialValue: 'None',
+									expression: '@res = RUN_TICKETS(ticket_name="", params={})'
+								}],
 								pipeline: [{
 									id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 									type: 'call_function',
+									targetVariable: 'res',
 									functionName: 'RUN_TICKETS',
-									expression: 'RUN_TICKETS("")'
+									expression: '@res = RUN_TICKETS(ticket_name="", params={})'
 								}],
 								color: this._activeNodeColor,
 								textColor: this._activeTextColor,
@@ -3523,9 +3528,9 @@ export class WorkflowEditor extends EditorPane {
 							commitFn();
 						};
 					};
-					addPipelineChip('RUN_TICKETS', '@res = RUN_TICKETS("ticket_name", {})');
-					addPipelineChip('CREATE_TICKETS', '@new_ticket = CREATE_TICKETS("task", "Title", {})');
-					addPipelineChip('GET_TICKETS', '@ticket = GET_TICKETS("ticket_name")');
+					addPipelineChip('RUN_TICKETS', '@res = RUN_TICKETS(ticket_name="", params={})');
+					addPipelineChip('CREATE_TICKETS', '@new_ticket = CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})');
+					addPipelineChip('GET_TICKETS', '@ticket_data = GET_TICKETS(ticket_name="")');
 					addPipelineChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
 				}
 
@@ -5256,8 +5261,15 @@ export class WorkflowEditor extends EditorPane {
 
 			// Handle dragging & double-click inline editing
 			nodeEl.onmousedown = (e) => {
-				// Don't drag if clicking port or resize handle
-				if ((e.target as HTMLElement).closest('.node-port-handle') || (e.target as HTMLElement).closest('.node-resize-handle')) {
+				// Don't drag if clicking port, resize handle, or editing inputs
+				if (
+					(e.target as HTMLElement).closest('.node-port-handle') ||
+					(e.target as HTMLElement).closest('.node-resize-handle') ||
+					(e.target as HTMLElement).closest('.node-function-draft-wrapper') ||
+					(e.target as HTMLElement).closest('.node-variable-draft-wrapper') ||
+					(e.target as HTMLElement).closest('.node-inline-editor') ||
+					(e.target as HTMLElement).closest('.node-variable-ac-popover')
+				) {
 					return;
 				}
 				e.stopPropagation();
@@ -5802,28 +5814,98 @@ export class WorkflowEditor extends EditorPane {
 			targetPillElement.style.display = 'none';
 		}
 
+		// Initial variable and expression values
+		let initialReturnVar = 'res';
+		let initialExpr = 'RUN_TICKETS(ticket_name="", params={})';
+
+		if (existingStep) {
+			if (existingStep.targetVariable) {
+				initialReturnVar = existingStep.targetVariable.replace(/^@/, '');
+			}
+			if (existingStep.expression) {
+				const expr = existingStep.expression.trim();
+				const m = expr.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*([\s\S]*)$/);
+				if (m) {
+					initialReturnVar = m[1];
+					initialExpr = m[2].trim();
+				} else {
+					initialExpr = expr;
+				}
+			} else if (existingStep.functionName) {
+				if (existingStep.functionName === 'CREATE_TICKETS') {
+					initialExpr = 'CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})';
+					if (!existingStep.targetVariable) initialReturnVar = 'new_ticket';
+				} else if (existingStep.functionName === 'GET_TICKETS') {
+					initialExpr = 'GET_TICKETS(ticket_name="")';
+					if (!existingStep.targetVariable) initialReturnVar = 'ticket_data';
+				} else if (existingStep.functionName === 'GET_PRIMITIVES_CATALOG') {
+					initialExpr = 'GET_PRIMITIVES_CATALOG()';
+					if (!existingStep.targetVariable) initialReturnVar = 'catalog';
+				} else {
+					initialExpr = `${existingStep.functionName}(ticket_name="", params={})`;
+				}
+			}
+		}
+
 		const draftWrapper = document.createElement('div');
 		draftWrapper.className = 'node-function-draft-wrapper';
 		this._activeFunctionDraftInputEl = draftWrapper;
 
+		// Stop mouse events from reaching canvas or node to prevent dragging/re-rendering
+		draftWrapper.onmousedown = (e) => e.stopPropagation();
+		draftWrapper.onmouseup = (e) => e.stopPropagation();
+		draftWrapper.onclick = (e) => e.stopPropagation();
+		draftWrapper.ondblclick = (e) => e.stopPropagation();
+
 		const inputRow = append(draftWrapper, $('.node-function-draft-input-row'));
+		inputRow.onmousedown = (e) => e.stopPropagation();
 
 		const fnBadge = append(inputRow, $('.fn-tag-icon'));
 		fnBadge.textContent = '[fx]';
 		fnBadge.style.whiteSpace = 'nowrap';
 		fnBadge.style.flexShrink = '0';
 
+		// Step 1: Return Variable input (@ [ res ] =)
+		const returnVarWrapper = append(inputRow, $('.node-function-return-var-wrapper'));
+		returnVarWrapper.title = 'Specify context variable to capture function return value';
+		const atSign = append(returnVarWrapper, $('.return-var-prefix'));
+		atSign.textContent = '@';
+
+		const returnVarInput = append(returnVarWrapper, $('input.node-function-return-var-input')) as HTMLInputElement;
+		returnVarInput.type = 'text';
+		returnVarInput.value = initialReturnVar;
+		returnVarInput.placeholder = 'res';
+		returnVarInput.title = 'Target context variable to store return value (leave blank for no return variable)';
+		returnVarInput.onmousedown = (e) => e.stopPropagation();
+		returnVarInput.onclick = (e) => e.stopPropagation();
+
+		const adjustReturnVarWidth = () => {
+			const len = Math.max(3, returnVarInput.value.length);
+			returnVarInput.style.width = `${len * 7 + 8}px`;
+		};
+		adjustReturnVarWidth();
+		returnVarInput.oninput = () => adjustReturnVarWidth();
+
+		const eqSign = append(returnVarWrapper, $('.return-var-equal'));
+		eqSign.textContent = '=';
+
+		// Step 2 & 3: Function call expression input
 		const input = append(inputRow, $('input.node-function-draft-input')) as HTMLInputElement;
 		input.type = 'text';
-		input.placeholder = 'e.g. @news = RUN_TICKETS("jobs/news_digest", { target_keyword: "AI" })';
+		input.value = initialExpr;
+		input.placeholder = 'RUN_TICKETS(ticket_name="", params={})';
+		input.title = 'Function Call with explicit keyword parameters';
+		input.onmousedown = (e) => e.stopPropagation();
+		input.onclick = (e) => e.stopPropagation();
 
 		const cancelBtn = append(inputRow, $('.var-draft-cancel-btn'));
 		cancelBtn.title = 'Cancel (Esc)';
 		cancelBtn.textContent = '✕';
 		cancelBtn.style.cursor = 'pointer';
-		cancelBtn.style.padding = '0 3px';
-		cancelBtn.style.color = '#94a3b8';
-		cancelBtn.style.fontSize = '10px';
+		cancelBtn.onmousedown = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+		};
 
 		const cleanup = () => {
 			nodeEl.classList.remove('editing-function');
@@ -5841,12 +5923,22 @@ export class WorkflowEditor extends EditorPane {
 			cleanup();
 		};
 
-		// Helper Chips Row for fast templates
+		// Helper Chips Row for explicit keyword templates
 		const chipsRow = append(draftWrapper, $('.node-function-templates-row'));
+		chipsRow.onmousedown = (e) => e.stopPropagation();
 
-		const applyTemplate = (tpl: string) => {
+		const chipsLabel = append(chipsRow, $('.node-function-templates-label'));
+		chipsLabel.textContent = 'Templates:';
+
+		const applyTemplate = (defaultVar: string, tpl: string) => {
+			const curVar = returnVarInput.value.trim();
+			if (!curVar || curVar === 'res' || curVar === 'new_ticket' || curVar === 'ticket_data' || curVar === 'catalog') {
+				returnVarInput.value = defaultVar;
+				adjustReturnVarWidth();
+			}
 			input.value = tpl;
 			input.focus();
+			// Place cursor inside the first ""
 			const quoteIdx = tpl.indexOf('""');
 			if (quoteIdx !== -1) {
 				input.selectionStart = input.selectionEnd = quoteIdx + 1;
@@ -5855,55 +5947,47 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		const addChip = (name: string, template: string) => {
+		const addChip = (name: string, defaultVar: string, template: string) => {
 			const chip = append(chipsRow, $('.node-function-template-chip'));
 			chip.textContent = name;
-			chip.title = `Click to insert ${name} template`;
+			chip.title = `Click to insert ${name} explicit template`;
 			chip.onmousedown = (e) => {
 				e.stopPropagation();
 				e.preventDefault();
 			};
 			chip.onclick = (e) => {
 				e.stopPropagation();
-				applyTemplate(template);
+				applyTemplate(defaultVar, template);
 			};
 		};
 
-		addChip('RUN_TICKETS', '@res = RUN_TICKETS("ticket_name", {})');
-		addChip('CREATE_TICKETS', '@new_ticket = CREATE_TICKETS("task", "Title", {})');
-		addChip('GET_TICKETS', '@ticket = GET_TICKETS("ticket_name")');
-		addChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
+		addChip('RUN_TICKETS', 'res', 'RUN_TICKETS(ticket_name="", params={})');
+		addChip('CREATE_TICKETS', 'new_ticket', 'CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})');
+		addChip('GET_TICKETS', 'ticket_data', 'GET_TICKETS(ticket_name="")');
+		addChip('GET_PRIMITIVES_CATALOG', 'catalog', 'GET_PRIMITIVES_CATALOG()');
 
-		if (existingStep) {
-			const cleanVar = existingStep.targetVariable?.replace(/^@/, '');
-			if (existingStep.expression) {
-				input.value = existingStep.expression;
-			} else if (cleanVar && existingStep.functionName) {
-				input.value = `@${cleanVar} = ${existingStep.functionName}()`;
-			} else if (existingStep.functionName) {
-				input.value = `${existingStep.functionName}()`;
-			}
-		} else {
-			input.value = '@res = RUN_TICKETS("", {})';
-		}
+		// Parameter hint row
+		const hintRow = append(draftWrapper, $('.node-function-hint-row'));
+		hintRow.textContent = 'Explicit params: specify keyword args. Leave target_folder="" for current workflow folder.';
 
 		// Autocomplete suggestions
 		const collectSuggestions = () => {
-			const suggestions: { name: string; type: string; badgeLabel: string; detail: string }[] = [];
+			const suggestions: { name: string; type: string; badgeLabel: string; detail: string; snippet?: string }[] = [];
 			const seen = new Set<string>();
 
 			const fns = [
-				{ name: 'RUN_TICKETS', detail: 'RUN_TICKETS(ticketIdOrPath, inputParams)' },
-				{ name: 'CREATE_TICKETS', detail: 'CREATE_TICKETS(ticketType, title, parameters)' },
-				{ name: 'GET_TICKETS', detail: 'GET_TICKETS(ticketIdOrPath)' },
-				{ name: 'GET_PRIMITIVES_CATALOG', detail: 'GET_PRIMITIVES_CATALOG()' }
+				{ name: 'RUN_TICKETS', detail: 'RUN_TICKETS(ticket_name="", params={})', snippet: 'RUN_TICKETS(ticket_name="", params={})' },
+				{ name: 'CREATE_TICKETS', detail: 'CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})', snippet: 'CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})' },
+				{ name: 'GET_TICKETS', detail: 'GET_TICKETS(ticket_name="")', snippet: 'GET_TICKETS(ticket_name="")' },
+				{ name: 'GET_PRIMITIVES_CATALOG', detail: 'GET_PRIMITIVES_CATALOG()', snippet: 'GET_PRIMITIVES_CATALOG()' }
 			];
 			for (const f of fns) {
 				suggestions.push({
 					name: f.name,
 					type: 'func',
 					badgeLabel: 'FX',
-					detail: f.detail
+					detail: f.detail,
+					snippet: f.snippet
 				});
 			}
 
@@ -5938,7 +6022,7 @@ export class WorkflowEditor extends EditorPane {
 
 		let popover: HTMLElement | null = null;
 		let activeAcIdx = 0;
-		let currentMatches: { name: string; type: string; badgeLabel: string; detail: string }[] = [];
+		let currentMatches: { name: string; type: string; badgeLabel: string; detail: string; snippet?: string }[] = [];
 
 		const closePopover = () => {
 			if (popover) {
@@ -5947,24 +6031,24 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		const insertAcItem = (item: { name: string; type: string }) => {
-			const selStart = input.selectionStart || 0;
-			const val = input.value;
-			const textBefore = val.slice(0, selStart);
-			const textAfter = val.slice(selStart);
-			const atIdx = textBefore.lastIndexOf('@');
-
+		const insertAcItem = (item: { name: string; type: string; snippet?: string }) => {
 			if (item.type === 'func') {
-				if (atIdx !== -1) {
-					input.value = textBefore.slice(0, atIdx) + `${item.name}("${textAfter}`;
-				} else {
-					input.value = textBefore + `${item.name}("${textAfter}`;
+				input.value = item.snippet || `${item.name}()`;
+				const quoteIdx = input.value.indexOf('""');
+				if (quoteIdx !== -1) {
+					input.selectionStart = input.selectionEnd = quoteIdx + 1;
 				}
 			} else {
+				const selStart = input.selectionStart || 0;
+				const val = input.value;
+				const textBefore = val.slice(0, selStart);
+				const textAfter = val.slice(selStart);
+				const atIdx = textBefore.lastIndexOf('@');
+
 				if (atIdx !== -1) {
-					input.value = textBefore.slice(0, atIdx) + `${item.name}` + (textAfter.startsWith(' ') ? textAfter : ` ${textAfter}`);
+					input.value = textBefore.slice(0, atIdx) + `@${item.name}` + (textAfter.startsWith(' ') ? textAfter : ` ${textAfter}`);
 				} else {
-					input.value = val + `${item.name} `;
+					input.value = val + `@${item.name} `;
 				}
 			}
 			closePopover();
@@ -5990,6 +6074,10 @@ export class WorkflowEditor extends EditorPane {
 
 			if (!popover) {
 				popover = append(draftWrapper, $('.node-variable-ac-popover'));
+				popover.onmousedown = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+				};
 			}
 			popover.innerHTML = '';
 			currentMatches.slice(0, 8).forEach((item, idx) => {
@@ -6013,26 +6101,36 @@ export class WorkflowEditor extends EditorPane {
 		const commit = () => {
 			if (committed) return;
 			committed = true;
-			const rawVal = input.value.trim();
-			if (!rawVal) {
+
+			const returnVar = returnVarInput.value.trim().replace(/^@/, '');
+			let fnExpr = input.value.trim();
+			if (!fnExpr) {
 				cleanup();
 				return;
 			}
 
-			let targetVar: string | undefined = undefined;
-			let fnName: string = 'RUN_TICKETS';
+			// If user accidentally typed "@foo = fn()" in the function input, normalize it
+			const prefixMatch = fnExpr.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*([\s\S]*)$/);
+			let effectiveVar = returnVar;
+			if (prefixMatch) {
+				effectiveVar = prefixMatch[1];
+				fnExpr = prefixMatch[2].trim();
+			}
 
-			const m = rawVal.match(/^(?:@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*)?([a-zA-Z0-9_]+)\s*(?:\(([\s\S]*)\))?$/);
-			if (m) {
-				if (m[1]) targetVar = m[1].replace(/^@/, '');
-				if (m[2]) fnName = m[2];
+			const fullExpr = effectiveVar ? `@${effectiveVar} = ${fnExpr}` : fnExpr;
+			const targetVar = effectiveVar || undefined;
+
+			let fnName = 'RUN_TICKETS';
+			const m = fnExpr.match(/^([a-zA-Z0-9_]+)\s*(?:\(([\s\S]*)\))?$/);
+			if (m && m[1]) {
+				fnName = m[1];
 			}
 
 			if (!node.pipeline) node.pipeline = [];
 
 			if (existingStep) {
 				existingStep.type = 'call_function';
-				existingStep.expression = rawVal;
+				existingStep.expression = fullExpr;
 				existingStep.targetVariable = targetVar;
 				existingStep.functionName = fnName;
 			} else {
@@ -6041,7 +6139,7 @@ export class WorkflowEditor extends EditorPane {
 					type: 'call_function',
 					targetVariable: targetVar,
 					functionName: fnName,
-					expression: rawVal
+					expression: fullExpr
 				};
 				node.pipeline.push(newStep);
 			}
@@ -6051,12 +6149,12 @@ export class WorkflowEditor extends EditorPane {
 				if (!node.outputVariables) node.outputVariables = [];
 				const existingVar = node.outputVariables.find(v => v.name === targetVar);
 				if (existingVar) {
-					existingVar.expression = rawVal;
+					existingVar.expression = fullExpr;
 				} else {
 					node.outputVariables.push({
 						name: targetVar,
 						initialValue: 'None',
-						expression: rawVal
+						expression: fullExpr
 					});
 				}
 			}
@@ -6072,10 +6170,17 @@ export class WorkflowEditor extends EditorPane {
 		};
 
 		input.oninput = () => {
+			// Auto extract if user typed "@var = " inside function input
+			const prefixMatch = input.value.match(/^@([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*([\s\S]*)$/);
+			if (prefixMatch) {
+				returnVarInput.value = prefixMatch[1];
+				adjustReturnVarWidth();
+				input.value = prefixMatch[2];
+			}
 			updateAc();
 		};
 
-		input.onkeydown = (e) => {
+		const handleKeyDown = (e: KeyboardEvent) => {
 			e.stopPropagation();
 			if (popover && currentMatches.length > 0) {
 				if (e.key === 'ArrowDown') {
@@ -6108,12 +6213,18 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
+		input.onkeydown = handleKeyDown;
+		returnVarInput.onkeydown = handleKeyDown;
+
 		let canBlurCommit = false;
 		setTimeout(() => { canBlurCommit = true; }, 400);
 
-		input.onblur = () => {
+		const handleBlur = () => {
 			if (!canBlurCommit) return;
 			setTimeout(() => {
+				const active = document.activeElement;
+				if (active === returnVarInput || active === input) return;
+				if (draftWrapper.contains(active)) return;
 				if (popover && popover.matches(':hover')) return;
 				const text = input.value.trim();
 				if (text) {
@@ -6124,9 +6235,17 @@ export class WorkflowEditor extends EditorPane {
 			}, 300);
 		};
 
+		input.onblur = handleBlur;
+		returnVarInput.onblur = handleBlur;
+
 		varsContainer.appendChild(draftWrapper);
 		input.focus();
-		input.select();
+		const quoteIdx = input.value.indexOf('""');
+		if (quoteIdx !== -1) {
+			input.selectionStart = input.selectionEnd = quoteIdx + 1;
+		} else {
+			input.select();
+		}
 	}
 
 	private _parseAndApplyVariableExpression(

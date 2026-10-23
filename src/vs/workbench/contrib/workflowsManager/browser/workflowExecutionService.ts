@@ -1269,7 +1269,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 
 		const upperFn = (fnName || '').toUpperCase();
-		const parsedArgs = this._parseFunctionArgs(rawArgsStr, run.contextVariables);
+		const { args, kwargs } = this._parseFunctionArgs(rawArgsStr, run.contextVariables);
+
+		// Resolve workflow directory from workflowUri (if file URI, take parent folder)
+		const rawWsUri = URI.parse(run.workflowUri);
+		const workflowDir = rawWsUri.path.endsWith('.workflow.json') || rawWsUri.path.endsWith('.json')
+			? URI.joinPath(rawWsUri, '..')
+			: rawWsUri;
 
 		let result: any = undefined;
 		const startMs = Date.now();
@@ -1279,16 +1285,25 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				let ticketIdOrPath = '';
 				let inputParams: Record<string, any> = {};
 
-				if (parsedArgs.length > 0 && typeof parsedArgs[0] === 'object' && parsedArgs[0] !== null && !Array.isArray(parsedArgs[0])) {
-					ticketIdOrPath = parsedArgs[0].ticketIdOrPath || parsedArgs[0].ticketName || parsedArgs[0].id || '';
-					inputParams = parsedArgs[0].inputParams || parsedArgs[0].parameters || parsedArgs[0];
+				if (args.length > 0 && typeof args[0] === 'object' && args[0] !== null && !Array.isArray(args[0])) {
+					ticketIdOrPath = args[0].ticketIdOrPath || args[0].ticketName || args[0].ticket_name || args[0].id || '';
+					inputParams = args[0].inputParams || args[0].parameters || args[0].params || args[0];
 				} else {
-					ticketIdOrPath = String(parsedArgs[0] || '').trim();
-					inputParams = (parsedArgs[1] && typeof parsedArgs[1] === 'object') ? parsedArgs[1] : {};
+					ticketIdOrPath = String(kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.ticket ?? args[0] ?? '').trim();
+					const explicitParams = kwargs.params ?? kwargs.input_params ?? kwargs.parameters ?? kwargs.inputParams ?? (typeof args[1] === 'object' ? args[1] : {});
+					inputParams = typeof explicitParams === 'object' && explicitParams !== null ? { ...explicitParams } : {};
+				}
+
+				// Merge any loose keyword arguments directly into inputParams (e.g. RUN_TICKETS("jobs/calc", start=0))
+				const reservedKeys = new Set(['ticket_name', 'ticket_id', 'ticketIdOrPath', 'ticket', 'params', 'input_params', 'parameters', 'inputParams']);
+				for (const [k, v] of Object.entries(kwargs)) {
+					if (!reservedKeys.has(k) && inputParams[k] === undefined) {
+						inputParams[k] = v;
+					}
 				}
 
 				const execRes = await this.ticketRuntimeService.RUN_TICKETS({
-					workspaceUri: wsUri,
+					workspaceUri: workflowDir,
 					ticketIdOrPath,
 					inputParams: { ...run.contextVariables, ...inputParams }
 				});
@@ -1309,25 +1324,39 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 			} else if (upperFn === 'CREATE_TICKETS' || upperFn === 'CREATETICKETS' || upperFn === 'CREATETICKET') {
 				let opts: any = {};
-				if (parsedArgs.length === 1 && typeof parsedArgs[0] === 'object' && parsedArgs[0] !== null) {
-					opts = { ...parsedArgs[0] };
+				if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null) {
+					opts = { ...args[0] };
 				} else {
-					opts.ticketType = String(parsedArgs[0] || 'task');
-					opts.title = String(parsedArgs[1] || 'New Ticket');
-					if (parsedArgs[2] && typeof parsedArgs[2] === 'object') {
-						opts.parameters = parsedArgs[2];
-						opts.fieldValues = parsedArgs[2];
+					opts.ticketType = String(kwargs.ticket_type ?? kwargs.type ?? args[0] ?? 'task');
+					opts.title = String(kwargs.title ?? args[1] ?? 'New Ticket');
+
+					const targetFolder = kwargs.target_folder ?? kwargs.target_path ?? kwargs.folder ?? kwargs.path ?? (typeof args[2] === 'string' ? args[2] : undefined);
+					if (targetFolder && String(targetFolder).trim()) {
+						opts.targetPath = String(targetFolder).trim();
 					}
+
+					const rawParams = kwargs.parameters ?? kwargs.params ?? kwargs.fieldValues ?? (typeof args[2] === 'object' ? args[2] : (typeof args[3] === 'object' ? args[3] : {}));
+					const initialFields = typeof rawParams === 'object' && rawParams !== null ? { ...rawParams } : {};
+
+					// Merge any loose keyword arguments directly into initialFields (e.g. CREATE_TICKETS("xxx", start=0))
+					const reservedCreateKeys = new Set(['ticket_type', 'type', 'title', 'target_folder', 'target_path', 'folder', 'path', 'parameters', 'params', 'fieldValues']);
+					for (const [k, v] of Object.entries(kwargs)) {
+						if (!reservedCreateKeys.has(k) && initialFields[k] === undefined) {
+							initialFields[k] = v;
+						}
+					}
+					opts.parameters = initialFields;
+					opts.fieldValues = initialFields;
 				}
-				opts.workspaceUri = wsUri;
+				opts.workspaceUri = workflowDir;
 				const createRes = await this.ticketRuntimeService.CREATE_TICKETS(opts);
 				result = createRes;
 			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS' || upperFn === 'GETTICKET') {
-				const ticketIdOrPath = String(parsedArgs[0] || '').trim();
-				const getRes = await this.ticketRuntimeService.GET_TICKETS(wsUri, ticketIdOrPath);
+				const ticketIdOrPath = String(kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.ticket ?? args[0] ?? '').trim();
+				const getRes = await this.ticketRuntimeService.GET_TICKETS(workflowDir, ticketIdOrPath);
 				result = getRes.output !== undefined ? getRes.output : getRes;
 			} else if (upperFn === 'GET_PRIMITIVES_CATALOG' || upperFn === 'GETPRIMITIVESCATALOG') {
-				const catalog = await this.ticketRuntimeService.GET_PRIMITIVES_CATALOG(wsUri);
+				const catalog = await this.ticketRuntimeService.GET_PRIMITIVES_CATALOG(workflowDir);
 				result = catalog;
 			} else {
 				// Fallback evaluation for general expressions
@@ -1352,9 +1381,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 	}
 
-	private _parseFunctionArgs(argsStr: string, context: Record<string, any>): any[] {
+	private _parseFunctionArgs(argsStr: string, context: Record<string, any>): { args: any[]; kwargs: Record<string, any> } {
 		const trimmed = argsStr.trim();
-		if (!trimmed) return [];
+		if (!trimmed) return { args: [], kwargs: {} };
 
 		const rawParts: string[] = [];
 		let current = '';
@@ -1404,7 +1433,23 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			rawParts.push(current.trim());
 		}
 
-		return rawParts.map(part => this._evaluateArgument(part, context));
+		const args: any[] = [];
+		const kwargs: Record<string, any> = {};
+
+		for (const part of rawParts) {
+			const s = part.trim();
+			// Match keyword arg: key = value (not ==, !=, <=, >=)
+			const kwMatch = s.match(/^([a-zA-Z0-9_]+)\s*=(?!=)\s*([\s\S]*)$/);
+			if (kwMatch && !s.startsWith('==') && !s.startsWith('!=') && !s.startsWith('<=') && !s.startsWith('>=')) {
+				const k = kwMatch[1];
+				const v = this._evaluateArgument(kwMatch[2], context);
+				kwargs[k] = v;
+			} else {
+				args.push(this._evaluateArgument(s, context));
+			}
+		}
+
+		return { args, kwargs };
 	}
 
 	private _evaluateArgument(arg: string, context: Record<string, any>): any {
