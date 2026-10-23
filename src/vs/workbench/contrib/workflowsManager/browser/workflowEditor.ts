@@ -5826,45 +5826,35 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Calculate current workflow relative folder path
-		let defaultPath = 'workflows';
+		let defaultPath = '.';
 		if (this._workflowUri) {
 			const wsFolder = this._workspaceContextService.getWorkspaceFolder(this._workflowUri);
 			if (wsFolder) {
 				const wfDir = URI.joinPath(this._workflowUri, '..');
 				const rel = wfDir.path.substring(wsFolder.uri.path.length).replace(/^\/+|\/+$/g, '');
-				defaultPath = rel || '';
+				defaultPath = rel || '.';
 			}
 		}
 
-		// Initial variable and expression values
-		let initialReturnVar = 'res';
-		let initialExpr = 'RUN_TICKETS(ticket_name="", params={})';
+		// Initial expression value (including @return_var = ...)
+		let initialExpr = '@res = RUN_TICKETS(ticket_name="", params={})';
 
 		if (existingStep) {
-			if (existingStep.targetVariable) {
-				initialReturnVar = existingStep.targetVariable.replace(/^@/, '');
-			}
 			if (existingStep.expression) {
-				const expr = existingStep.expression.trim();
-				const m = expr.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*([\s\S]*)$/);
-				if (m) {
-					initialReturnVar = m[1];
-					initialExpr = m[2].trim();
-				} else {
-					initialExpr = expr;
+				initialExpr = existingStep.expression.trim();
+				if (!initialExpr.startsWith('@') && existingStep.targetVariable) {
+					initialExpr = `@${existingStep.targetVariable.replace(/^@/, '')} = ${initialExpr}`;
 				}
 			} else if (existingStep.functionName) {
+				const retVar = existingStep.targetVariable ? `@${existingStep.targetVariable.replace(/^@/, '')} = ` : '';
 				if (existingStep.functionName === 'CREATE_TICKETS') {
-					initialExpr = `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`;
-					if (!existingStep.targetVariable) initialReturnVar = 'new_ticket';
+					initialExpr = `${retVar || '@new_ticket = '}CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`;
 				} else if (existingStep.functionName === 'GET_TICKETS') {
-					initialExpr = 'GET_TICKETS(ticket_name="")';
-					if (!existingStep.targetVariable) initialReturnVar = 'ticket_data';
+					initialExpr = `${retVar || '@ticket_data = '}GET_TICKETS(ticket_name="")`;
 				} else if (existingStep.functionName === 'GET_PRIMITIVES_CATALOG') {
-					initialExpr = 'GET_PRIMITIVES_CATALOG()';
-					if (!existingStep.targetVariable) initialReturnVar = 'catalog';
+					initialExpr = `${retVar || '@catalog = '}GET_PRIMITIVES_CATALOG()`;
 				} else {
-					initialExpr = `${existingStep.functionName}(ticket_name="", params={})`;
+					initialExpr = `${retVar || '@res = '}${existingStep.functionName}(ticket_name="", params={})`;
 				}
 			}
 		}
@@ -5879,7 +5869,7 @@ export class WorkflowEditor extends EditorPane {
 		draftWrapper.onclick = (e) => e.stopPropagation();
 		draftWrapper.ondblclick = (e) => e.stopPropagation();
 
-		// Row 1: Header + Return Variable + Cancel
+		// Row 1: Header + Close Button
 		const headerRow = append(draftWrapper, $('.node-function-header-row'));
 		headerRow.onmousedown = (e) => e.stopPropagation();
 
@@ -5887,19 +5877,7 @@ export class WorkflowEditor extends EditorPane {
 		const fnTag = append(titleDiv, $('.fn-tag-icon'));
 		fnTag.textContent = '[fx]';
 		const titleText = append(titleDiv, $('.node-function-title-text'));
-		titleText.textContent = 'Function Call';
-
-		const returnVarWrapper = append(headerRow, $('.node-function-return-var-wrapper'));
-		returnVarWrapper.title = 'Assign return value to context variable';
-		append(returnVarWrapper, $('.return-var-label', {}, 'Return:'));
-		append(returnVarWrapper, $('.return-var-prefix', {}, '@'));
-
-		const returnVarInput = append(returnVarWrapper, $('input.node-function-return-var-input')) as HTMLInputElement;
-		returnVarInput.type = 'text';
-		returnVarInput.value = initialReturnVar;
-		returnVarInput.placeholder = 'res';
-		returnVarInput.onmousedown = (e) => e.stopPropagation();
-		returnVarInput.onclick = (e) => e.stopPropagation();
+		titleText.textContent = 'Function Call Editor';
 
 		const cancelBtn = append(headerRow, $('.var-draft-cancel-btn'));
 		cancelBtn.title = 'Cancel (Esc)';
@@ -5931,11 +5909,7 @@ export class WorkflowEditor extends EditorPane {
 		chipsRow.onmousedown = (e) => e.stopPropagation();
 		append(chipsRow, $('.node-function-templates-label', {}, 'Templates:'));
 
-		const applyTemplate = (defaultVar: string, tpl: string) => {
-			const curVar = returnVarInput.value.trim();
-			if (!curVar || curVar === 'res' || curVar === 'new_ticket' || curVar === 'ticket_data' || curVar === 'catalog') {
-				returnVarInput.value = defaultVar;
-			}
+		const applyTemplate = (tpl: string) => {
 			codeArea.value = tpl;
 			codeArea.focus();
 			const quoteIdx = tpl.indexOf('""');
@@ -5947,7 +5921,7 @@ export class WorkflowEditor extends EditorPane {
 			updateFieldChips();
 		};
 
-		const addChip = (name: string, defaultVar: string, template: string) => {
+		const addChip = (name: string, template: string) => {
 			const chip = append(chipsRow, $('.node-function-template-chip'));
 			chip.textContent = name;
 			chip.title = `Click to load ${name} template`;
@@ -5957,16 +5931,16 @@ export class WorkflowEditor extends EditorPane {
 			};
 			chip.onclick = (e) => {
 				e.stopPropagation();
-				applyTemplate(defaultVar, template);
+				applyTemplate(template);
 			};
 		};
 
-		addChip('RUN_TICKETS', 'res', 'RUN_TICKETS(ticket_name="", params={})');
-		addChip('CREATE_TICKETS', 'new_ticket', `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`);
-		addChip('GET_TICKETS', 'ticket_data', 'GET_TICKETS(ticket_name="")');
-		addChip('GET_PRIMITIVES_CATALOG', 'catalog', 'GET_PRIMITIVES_CATALOG()');
+		addChip('RUN_TICKETS', '@res = RUN_TICKETS(ticket_name="", params={})');
+		addChip('CREATE_TICKETS', `@new_ticket = CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`);
+		addChip('GET_TICKETS', '@ticket_data = GET_TICKETS(ticket_name="")');
+		addChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
 
-		// Row 3: Multiline Code Area
+		// Row 3: Multiline Code Area (unified return variable + function call)
 		const codeRow = append(draftWrapper, $('.node-function-code-row'));
 		codeRow.onmousedown = (e) => e.stopPropagation();
 
@@ -5974,7 +5948,7 @@ export class WorkflowEditor extends EditorPane {
 		codeArea.rows = 3;
 		codeArea.spellcheck = false;
 		codeArea.value = initialExpr;
-		codeArea.placeholder = 'RUN_TICKETS(ticket_name="", params={})';
+		codeArea.placeholder = '@res = RUN_TICKETS(ticket_name="", params={})';
 		codeArea.onmousedown = (e) => e.stopPropagation();
 		codeArea.onclick = (e) => e.stopPropagation();
 
@@ -6191,39 +6165,30 @@ export class WorkflowEditor extends EditorPane {
 			if (committed) return;
 			committed = true;
 
-			const returnVar = returnVarInput.value.trim().replace(/^@/, '');
-			let fnExpr = codeArea.value.trim();
-			if (!fnExpr) {
+			let rawExpr = codeArea.value.trim();
+			if (!rawExpr) {
 				cleanup();
 				return;
 			}
 
 			// Clean multiple lines into single line expression for pipeline step
-			const normalizedExpr = fnExpr.replace(/\r?\n\s*/g, ' ').trim();
+			const normalizedExpr = rawExpr.replace(/\r?\n\s*/g, ' ').trim();
 
-			// If user typed "@foo = fn()" in codeArea, normalize it
-			const prefixMatch = normalizedExpr.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*([\s\S]*)$/);
-			let effectiveVar = returnVar;
-			let effectiveFnExpr = normalizedExpr;
-			if (prefixMatch) {
-				effectiveVar = prefixMatch[1];
-				effectiveFnExpr = prefixMatch[2].trim();
-			}
-
-			const fullExpr = effectiveVar ? `@${effectiveVar} = ${effectiveFnExpr}` : effectiveFnExpr;
-			const targetVar = effectiveVar || undefined;
-
+			// Parse: e.g. "@new_ticket = CREATE_TICKETS(...)" or "CREATE_TICKETS(...)"
+			let targetVar: string | undefined = undefined;
 			let fnName = 'RUN_TICKETS';
-			const m = effectiveFnExpr.match(/^([a-zA-Z0-9_]+)\s*(?:\(([\s\S]*)\))?$/);
-			if (m && m[1]) {
-				fnName = m[1];
+
+			const m = normalizedExpr.match(/^(?:@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*)?([a-zA-Z0-9_]+)\s*(?:\(([\s\S]*)\))?$/);
+			if (m) {
+				if (m[1]) targetVar = m[1].replace(/^@/, '');
+				if (m[2]) fnName = m[2];
 			}
 
 			if (!node.pipeline) node.pipeline = [];
 
 			if (existingStep) {
 				existingStep.type = 'call_function';
-				existingStep.expression = fullExpr;
+				existingStep.expression = normalizedExpr;
 				existingStep.targetVariable = targetVar;
 				existingStep.functionName = fnName;
 			} else {
@@ -6232,22 +6197,22 @@ export class WorkflowEditor extends EditorPane {
 					type: 'call_function',
 					targetVariable: targetVar,
 					functionName: fnName,
-					expression: fullExpr
+					expression: normalizedExpr
 				};
 				node.pipeline.push(newStep);
 			}
 
-			// Sync output variables
+			// Sync output variables (DO NOT overwrite with unparseable expression that breaks python evaluation)
 			if (targetVar) {
 				if (!node.outputVariables) node.outputVariables = [];
 				const existingVar = node.outputVariables.find(v => v.name === targetVar);
 				if (existingVar) {
-					existingVar.expression = fullExpr;
+					existingVar.expression = normalizedExpr;
 				} else {
 					node.outputVariables.push({
 						name: targetVar,
 						initialValue: 'None',
-						expression: fullExpr
+						expression: normalizedExpr
 					});
 				}
 			}
@@ -6263,11 +6228,6 @@ export class WorkflowEditor extends EditorPane {
 		};
 
 		codeArea.oninput = () => {
-			const prefixMatch = codeArea.value.match(/^@([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*([\s\S]*)$/);
-			if (prefixMatch) {
-				returnVarInput.value = prefixMatch[1];
-				codeArea.value = prefixMatch[2];
-			}
 			updateAc();
 			updateFieldChips();
 		};
@@ -6306,7 +6266,6 @@ export class WorkflowEditor extends EditorPane {
 		};
 
 		codeArea.onkeydown = handleKeyDown;
-		returnVarInput.onkeydown = handleKeyDown;
 
 		nodeEl.appendChild(draftWrapper);
 		codeArea.focus();

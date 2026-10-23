@@ -3666,17 +3666,19 @@
 
 .node-function-draft-wrapper {
 	position: absolute;
-	top: calc(100% + 8px);
+	top: 50%;
 	left: 50%;
-	transform: translateX(-50%);
-	width: 490px;
-	max-width: 90vw;
-	background: #0b1120 !important;
+	transform: translate(-50%, -50%);
+	width: 510px;
+	max-width: 95vw;
+	background: rgba(11, 17, 32, 0.94) !important;
+	backdrop-filter: blur(16px);
+	-webkit-backdrop-filter: blur(16px);
 	border: 1.5px solid #c084fc;
 	border-radius: 8px;
-	box-shadow: 0 16px 40px rgba(0, 0, 0, 0.95), 0 0 24px rgba(192, 132, 252, 0.4);
-	z-index: 10005;
-	padding: 10px 14px;
+	box-shadow: 0 20px 50px rgba(0, 0, 0, 0.95), 0 0 30px rgba(192, 132, 252, 0.4);
+	z-index: 10010;
+	padding: 12px 14px;
 	box-sizing: border-box;
 	display: flex;
 	flex-direction: column;

@@ -759,90 +759,103 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 									if (v.expression) {
 										let expr = v.expression.trim();
-										// Strip self-assignment prefix if present (e.g. "monitor = monitor + 1" or "monitor += 1")
-										if (expr.startsWith(`${cleanVarName} =`)) {
-											expr = expr.substring(`${cleanVarName} =`.length).trim();
-										} else if (expr.startsWith(`${cleanVarName}=`)) {
-											expr = expr.substring(`${cleanVarName}=`.length).trim();
-										} else if (expr.startsWith(`${cleanVarName} +=`)) {
-											expr = `+=${expr.substring(`${cleanVarName} +=`.length).trim()}`;
-										} else if (expr.startsWith(`${cleanVarName}+=`)) {
-											expr = `+=${expr.substring(`${cleanVarName}+=`.length).trim()}`;
-										} else if (expr.startsWith(`${cleanVarName} -=`)) {
-											expr = `-=${expr.substring(`${cleanVarName} -=`.length).trim()}`;
-										} else if (expr.startsWith(`${cleanVarName}-=`)) {
-											expr = `-=${expr.substring(`${cleanVarName}-=`.length).trim()}`;
-										}
-										if (expr.startsWith('=')) {
-											expr = expr.substring(1).trim();
-										}
 
-										// Check if expr references a ticket or unpack index: e.g. "@my_ticket", "@my_ticket[0]", "ticket.output[1]", "FNDJ1-0008"
-										const ticketMatch = expr.match(/^@?([a-zA-Z0-9_\-]+)(\[(\d+)\])?$/);
-										const cleanTarget = ticketMatch ? ticketMatch[1] : '';
-										const unpackIdx = ticketMatch && ticketMatch[3] !== undefined ? parseInt(ticketMatch[3], 10) : undefined;
+										// Check if this variable was already assigned and populated by a pipeline step (e.g. call_function),
+										// or if the expression represents a function call / assignment (e.g. @var = fn(...) or fn(...))
+										const isFunctionCall = this._isFunctionCallExpression(expr) ||
+											this._isFunctionCallExpression(v.name) ||
+											(node.pipeline && node.pipeline.some(p => p.type === 'call_function' && (p.targetVariable?.replace(/^@/, '') === cleanVarName || (p.expression && p.expression.includes(cleanVarName)))));
 
-										const matchedTicket = nodeState.executedTickets?.find(t =>
-											t.ticketName === cleanTarget ||
-											t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_') === cleanTarget ||
-											t.ticketName.toLowerCase() === cleanTarget.toLowerCase() ||
-											t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() === cleanTarget.toLowerCase() ||
-											t.ticketId === cleanTarget ||
-											t.ticketId.toLowerCase() === cleanTarget.toLowerCase()
-										) || (cleanTarget === 'ticket' ? nodeState.executedTickets?.[nodeState.executedTickets.length - 1] : undefined);
-
-										if (matchedTicket) {
-											let outVal = matchedTicket.output;
-											if (typeof outVal === 'string' && (outVal.startsWith('[') || outVal.startsWith('{'))) {
-												try { outVal = JSON.parse(outVal); } catch { }
+										if (isFunctionCall && run.contextVariables[cleanVarName] !== undefined) {
+											assignedVal = run.contextVariables[cleanVarName];
+										} else {
+											// Strip self-assignment prefix if present (e.g. "@monitor = ...", "monitor = monitor + 1" or "monitor += 1")
+											const assignMatch = expr.match(/^@?[a-zA-Z0-9_\u4e00-\u9fa5]+\s*=\s*([\s\S]*)$/);
+											if (assignMatch) {
+												expr = assignMatch[1].trim();
 											}
-											if (unpackIdx !== undefined) {
-												if (Array.isArray(outVal)) {
-													assignedVal = outVal[unpackIdx];
-												} else if (typeof outVal === 'object' && outVal !== null) {
-													assignedVal = Object.values(outVal)[unpackIdx];
-												} else if (typeof outVal === 'string' && outVal.includes(',')) {
-													const parts = outVal.split(',').map(s => s.trim());
-													assignedVal = parts[unpackIdx];
+											if (expr.startsWith(`${cleanVarName} +=`)) {
+												expr = `+=${expr.substring(`${cleanVarName} +=`.length).trim()}`;
+											} else if (expr.startsWith(`${cleanVarName}+=`)) {
+												expr = `+=${expr.substring(`${cleanVarName}+=`.length).trim()}`;
+											} else if (expr.startsWith(`${cleanVarName} -=`)) {
+												expr = `-=${expr.substring(`${cleanVarName} -=`.length).trim()}`;
+											} else if (expr.startsWith(`${cleanVarName}-=`)) {
+												expr = `-=${expr.substring(`${cleanVarName}-=`.length).trim()}`;
+											}
+											if (expr.startsWith('=')) {
+												expr = expr.substring(1).trim();
+											}
+
+											// Check if expr references a ticket or unpack index: e.g. "@my_ticket", "@my_ticket[0]", "ticket.output[1]", "FNDJ1-0008"
+											const ticketMatch = expr.match(/^@?([a-zA-Z0-9_\-]+)(\[(\d+)\])?$/);
+											const cleanTarget = ticketMatch ? ticketMatch[1] : '';
+											const unpackIdx = ticketMatch && ticketMatch[3] !== undefined ? parseInt(ticketMatch[3], 10) : undefined;
+
+											const matchedTicket = nodeState.executedTickets?.find(t =>
+												t.ticketName === cleanTarget ||
+												t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_') === cleanTarget ||
+												t.ticketName.toLowerCase() === cleanTarget.toLowerCase() ||
+												t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() === cleanTarget.toLowerCase() ||
+												t.ticketId === cleanTarget ||
+												t.ticketId.toLowerCase() === cleanTarget.toLowerCase()
+											) || (cleanTarget === 'ticket' ? nodeState.executedTickets?.[nodeState.executedTickets.length - 1] : undefined);
+
+											if (matchedTicket) {
+												let outVal = matchedTicket.output;
+												if (typeof outVal === 'string' && (outVal.startsWith('[') || outVal.startsWith('{'))) {
+													try { outVal = JSON.parse(outVal); } catch { }
+												}
+												if (unpackIdx !== undefined) {
+													if (Array.isArray(outVal)) {
+														assignedVal = outVal[unpackIdx];
+													} else if (typeof outVal === 'object' && outVal !== null) {
+														assignedVal = Object.values(outVal)[unpackIdx];
+													} else if (typeof outVal === 'string' && outVal.includes(',')) {
+														const parts = outVal.split(',').map(s => s.trim());
+														assignedVal = parts[unpackIdx];
+													} else {
+														assignedVal = outVal;
+													}
 												} else {
 													assignedVal = outVal;
 												}
+											} else if (expr === 'ticket.output' || expr === 'ticket' || expr === '@ticket') {
+												const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
+												assignedVal = lastTicket?.output ?? nodeState.output?.result ?? nodeState.output?.output ?? 'success';
+											} else if (expr === 'ticket.status' || expr === '@ticket.status') {
+												const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
+												assignedVal = lastTicket?.status ?? nodeState.status ?? 'success';
+											} else if (expr === 'ticket.id' || expr === 'ticket.name') {
+												const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
+												assignedVal = lastTicket ? (expr === 'ticket.id' ? lastTicket.ticketId : lastTicket.ticketName) : '';
+											} else if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
+												const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+												assignedVal = base + 1;
+											} else if (expr === '- 1' || expr === '--' || expr === '-= 1' || expr === '-=1') {
+												const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+												assignedVal = base - 1;
+											} else if (/^(\+\=|\+)\s*(\d+(\.\d+)?)$/.test(expr)) {
+												const delta = Number(expr.replace(/^(\+\=|\+)/, '').trim());
+												const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+												assignedVal = base + delta;
+											} else if (/^(-\=|-)\s*(\d+(\.\d+)?)$/.test(expr)) {
+												const delta = Number(expr.replace(/^(-\=|-)/, '').trim());
+												const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+												assignedVal = base - delta;
+											} else if (/^\*\=\s*(\d+(\.\d+)?)$/.test(expr)) {
+												const mult = Number(expr.replace(/^\*\=/, '').trim());
+												const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+												assignedVal = base * mult;
+											} else if (isFunctionCall && run.contextVariables[cleanVarName] !== undefined) {
+												assignedVal = run.contextVariables[cleanVarName];
 											} else {
-												assignedVal = outVal;
-											}
-										} else if (expr === 'ticket.output' || expr === 'ticket' || expr === '@ticket') {
-											const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
-											assignedVal = lastTicket?.output ?? nodeState.output?.result ?? nodeState.output?.output ?? 'success';
-										} else if (expr === 'ticket.status' || expr === '@ticket.status') {
-											const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
-											assignedVal = lastTicket?.status ?? nodeState.status ?? 'success';
-										} else if (expr === 'ticket.id' || expr === 'ticket.name') {
-											const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
-											assignedVal = lastTicket ? (expr === 'ticket.id' ? lastTicket.ticketId : lastTicket.ticketName) : '';
-										} else if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
-											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-											assignedVal = base + 1;
-										} else if (expr === '- 1' || expr === '--' || expr === '-= 1' || expr === '-=1') {
-											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-											assignedVal = base - 1;
-										} else if (/^(\+\=|\+)\s*(\d+(\.\d+)?)$/.test(expr)) {
-											const delta = Number(expr.replace(/^(\+\=|\+)/, '').trim());
-											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-											assignedVal = base + delta;
-										} else if (/^(-\=|-)\s*(\d+(\.\d+)?)$/.test(expr)) {
-											const delta = Number(expr.replace(/^(-\=|-)/, '').trim());
-											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-											assignedVal = base - delta;
-										} else if (/^\*\=\s*(\d+(\.\d+)?)$/.test(expr)) {
-											const mult = Number(expr.replace(/^\*\=/, '').trim());
-											const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-											assignedVal = base * mult;
-										} else {
-											try {
-												assignedVal = this._evaluateExpressionOrLiteral(expr, run.contextVariables);
-											} catch (evalErr: any) {
-												this._emitLog(run, 'error', `[Expression Error] '${v.name}' in '${node.label}': ${evalErr.message}`, { nodeId: node.id });
-												throw evalErr;
+												try {
+													assignedVal = this._evaluateExpressionOrLiteral(expr, run.contextVariables);
+												} catch (evalErr: any) {
+													this._emitLog(run, 'error', `[Expression Error] '${v.name}' in '${node.label}': ${evalErr.message}`, { nodeId: node.id });
+													throw evalErr;
+												}
 											}
 										}
 									} else if (nodeState.executedTickets && nodeState.executedTickets.length > 0) {
