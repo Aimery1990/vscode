@@ -5256,6 +5256,17 @@ export class WorkflowEditor extends EditorPane {
 
 			nodeEl.ondblclick = (e) => {
 				e.stopPropagation();
+				if (
+					(e.target as HTMLElement).closest('.node-variables-container') ||
+					(e.target as HTMLElement).closest('.node-function-pill') ||
+					(e.target as HTMLElement).closest('.node-variable-pill') ||
+					(e.target as HTMLElement).closest('.node-function-draft-wrapper') ||
+					(e.target as HTMLElement).closest('.node-variable-draft-wrapper') ||
+					nodeEl.classList.contains('editing-function') ||
+					nodeEl.classList.contains('editing-variable')
+				) {
+					return;
+				}
 				this._showInlineEditor(nodeEl, node);
 			};
 
@@ -5279,6 +5290,17 @@ export class WorkflowEditor extends EditorPane {
 				const lastClickTime = (node as any)._lastClickTime || 0;
 				(node as any)._lastClickTime = now;
 				if (now - lastClickTime < 300) {
+					if (
+						(e.target as HTMLElement).closest('.node-variables-container') ||
+						(e.target as HTMLElement).closest('.node-function-pill') ||
+						(e.target as HTMLElement).closest('.node-variable-pill') ||
+						(e.target as HTMLElement).closest('.node-function-draft-wrapper') ||
+						(e.target as HTMLElement).closest('.node-variable-draft-wrapper') ||
+						nodeEl.classList.contains('editing-function') ||
+						nodeEl.classList.contains('editing-variable')
+					) {
+						return;
+					}
 					e.preventDefault();
 					this._showInlineEditor(nodeEl, node);
 					return;
@@ -5799,19 +5821,19 @@ export class WorkflowEditor extends EditorPane {
 		}
 		nodeEl.classList.add('editing-function');
 
-		let varsContainer = nodeEl.querySelector('.node-variables-container') as HTMLElement;
-		if (!varsContainer) {
-			const contentWrapper = nodeEl.querySelector('.node-content-wrapper') as HTMLElement || nodeEl;
-			varsContainer = append(contentWrapper, $('.node-variables-container'));
-			varsContainer.style.display = 'flex';
-			varsContainer.style.flexWrap = 'wrap';
-			varsContainer.style.gap = '4px';
-			varsContainer.style.marginTop = '4px';
-			varsContainer.style.justifyContent = 'center';
-		}
-
 		if (targetPillElement) {
 			targetPillElement.style.display = 'none';
+		}
+
+		// Calculate current workflow relative folder path
+		let defaultPath = 'workflows';
+		if (this._workflowUri) {
+			const wsFolder = this._workspaceContextService.getWorkspaceFolder(this._workflowUri);
+			if (wsFolder) {
+				const wfDir = URI.joinPath(this._workflowUri, '..');
+				const rel = wfDir.path.substring(wsFolder.uri.path.length).replace(/^\/+|\/+$/g, '');
+				defaultPath = rel || '';
+			}
 		}
 
 		// Initial variable and expression values
@@ -5833,7 +5855,7 @@ export class WorkflowEditor extends EditorPane {
 				}
 			} else if (existingStep.functionName) {
 				if (existingStep.functionName === 'CREATE_TICKETS') {
-					initialExpr = 'CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})';
+					initialExpr = `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`;
 					if (!existingStep.targetVariable) initialReturnVar = 'new_ticket';
 				} else if (existingStep.functionName === 'GET_TICKETS') {
 					initialExpr = 'GET_TICKETS(ticket_name="")';
@@ -5857,48 +5879,29 @@ export class WorkflowEditor extends EditorPane {
 		draftWrapper.onclick = (e) => e.stopPropagation();
 		draftWrapper.ondblclick = (e) => e.stopPropagation();
 
-		const inputRow = append(draftWrapper, $('.node-function-draft-input-row'));
-		inputRow.onmousedown = (e) => e.stopPropagation();
+		// Row 1: Header + Return Variable + Cancel
+		const headerRow = append(draftWrapper, $('.node-function-header-row'));
+		headerRow.onmousedown = (e) => e.stopPropagation();
 
-		const fnBadge = append(inputRow, $('.fn-tag-icon'));
-		fnBadge.textContent = '[fx]';
-		fnBadge.style.whiteSpace = 'nowrap';
-		fnBadge.style.flexShrink = '0';
+		const titleDiv = append(headerRow, $('.node-function-header-title'));
+		const fnTag = append(titleDiv, $('.fn-tag-icon'));
+		fnTag.textContent = '[fx]';
+		const titleText = append(titleDiv, $('.node-function-title-text'));
+		titleText.textContent = 'Function Call';
 
-		// Step 1: Return Variable input (@ [ res ] =)
-		const returnVarWrapper = append(inputRow, $('.node-function-return-var-wrapper'));
-		returnVarWrapper.title = 'Specify context variable to capture function return value';
-		const atSign = append(returnVarWrapper, $('.return-var-prefix'));
-		atSign.textContent = '@';
+		const returnVarWrapper = append(headerRow, $('.node-function-return-var-wrapper'));
+		returnVarWrapper.title = 'Assign return value to context variable';
+		append(returnVarWrapper, $('.return-var-label', {}, 'Return:'));
+		append(returnVarWrapper, $('.return-var-prefix', {}, '@'));
 
 		const returnVarInput = append(returnVarWrapper, $('input.node-function-return-var-input')) as HTMLInputElement;
 		returnVarInput.type = 'text';
 		returnVarInput.value = initialReturnVar;
 		returnVarInput.placeholder = 'res';
-		returnVarInput.title = 'Target context variable to store return value (leave blank for no return variable)';
 		returnVarInput.onmousedown = (e) => e.stopPropagation();
 		returnVarInput.onclick = (e) => e.stopPropagation();
 
-		const adjustReturnVarWidth = () => {
-			const len = Math.max(3, returnVarInput.value.length);
-			returnVarInput.style.width = `${len * 7 + 8}px`;
-		};
-		adjustReturnVarWidth();
-		returnVarInput.oninput = () => adjustReturnVarWidth();
-
-		const eqSign = append(returnVarWrapper, $('.return-var-equal'));
-		eqSign.textContent = '=';
-
-		// Step 2 & 3: Function call expression input
-		const input = append(inputRow, $('input.node-function-draft-input')) as HTMLInputElement;
-		input.type = 'text';
-		input.value = initialExpr;
-		input.placeholder = 'RUN_TICKETS(ticket_name="", params={})';
-		input.title = 'Function Call with explicit keyword parameters';
-		input.onmousedown = (e) => e.stopPropagation();
-		input.onclick = (e) => e.stopPropagation();
-
-		const cancelBtn = append(inputRow, $('.var-draft-cancel-btn'));
+		const cancelBtn = append(headerRow, $('.var-draft-cancel-btn'));
 		cancelBtn.title = 'Cancel (Esc)';
 		cancelBtn.textContent = '✕';
 		cancelBtn.style.cursor = 'pointer';
@@ -5923,34 +5926,31 @@ export class WorkflowEditor extends EditorPane {
 			cleanup();
 		};
 
-		// Helper Chips Row for explicit keyword templates
+		// Row 2: Template Chips
 		const chipsRow = append(draftWrapper, $('.node-function-templates-row'));
 		chipsRow.onmousedown = (e) => e.stopPropagation();
-
-		const chipsLabel = append(chipsRow, $('.node-function-templates-label'));
-		chipsLabel.textContent = 'Templates:';
+		append(chipsRow, $('.node-function-templates-label', {}, 'Templates:'));
 
 		const applyTemplate = (defaultVar: string, tpl: string) => {
 			const curVar = returnVarInput.value.trim();
 			if (!curVar || curVar === 'res' || curVar === 'new_ticket' || curVar === 'ticket_data' || curVar === 'catalog') {
 				returnVarInput.value = defaultVar;
-				adjustReturnVarWidth();
 			}
-			input.value = tpl;
-			input.focus();
-			// Place cursor inside the first ""
+			codeArea.value = tpl;
+			codeArea.focus();
 			const quoteIdx = tpl.indexOf('""');
 			if (quoteIdx !== -1) {
-				input.selectionStart = input.selectionEnd = quoteIdx + 1;
+				codeArea.selectionStart = codeArea.selectionEnd = quoteIdx + 1;
 			} else {
-				input.selectionStart = input.selectionEnd = tpl.length;
+				codeArea.selectionStart = codeArea.selectionEnd = tpl.length;
 			}
+			updateFieldChips();
 		};
 
 		const addChip = (name: string, defaultVar: string, template: string) => {
 			const chip = append(chipsRow, $('.node-function-template-chip'));
 			chip.textContent = name;
-			chip.title = `Click to insert ${name} explicit template`;
+			chip.title = `Click to load ${name} template`;
 			chip.onmousedown = (e) => {
 				e.stopPropagation();
 				e.preventDefault();
@@ -5962,13 +5962,101 @@ export class WorkflowEditor extends EditorPane {
 		};
 
 		addChip('RUN_TICKETS', 'res', 'RUN_TICKETS(ticket_name="", params={})');
-		addChip('CREATE_TICKETS', 'new_ticket', 'CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})');
+		addChip('CREATE_TICKETS', 'new_ticket', `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`);
 		addChip('GET_TICKETS', 'ticket_data', 'GET_TICKETS(ticket_name="")');
 		addChip('GET_PRIMITIVES_CATALOG', 'catalog', 'GET_PRIMITIVES_CATALOG()');
 
-		// Parameter hint row
-		const hintRow = append(draftWrapper, $('.node-function-hint-row'));
-		hintRow.textContent = 'Explicit params: specify keyword args. Leave target_folder="" for current workflow folder.';
+		// Row 3: Multiline Code Area
+		const codeRow = append(draftWrapper, $('.node-function-code-row'));
+		codeRow.onmousedown = (e) => e.stopPropagation();
+
+		const codeArea = append(codeRow, $('textarea.node-function-code-area')) as HTMLTextAreaElement;
+		codeArea.rows = 3;
+		codeArea.spellcheck = false;
+		codeArea.value = initialExpr;
+		codeArea.placeholder = 'RUN_TICKETS(ticket_name="", params={})';
+		codeArea.onmousedown = (e) => e.stopPropagation();
+		codeArea.onclick = (e) => e.stopPropagation();
+
+		// Row 4: Schema Fields Quick Add
+		const fieldsRow = append(draftWrapper, $('.node-function-fields-row'));
+		fieldsRow.onmousedown = (e) => e.stopPropagation();
+		append(fieldsRow, $('.node-function-fields-label', {}, 'Quick Add:'));
+
+		const updateFieldChips = () => {
+			const val = codeArea.value;
+			const typeMatch = val.match(/ticket_type\s*=\s*["']([^"']+)["']/i);
+			const curType = typeMatch ? typeMatch[1] : 'Task';
+
+			fieldsRow.querySelectorAll('.node-function-field-chip').forEach(el => el.remove());
+
+			const fieldsToAdd: { label: string; snippet: string }[] = [];
+			if (/CREATE_TICKETS/i.test(val)) {
+				if (!/title\s*=/i.test(val)) fieldsToAdd.push({ label: 'title', snippet: ', title=""' });
+				if (!/path\s*=/i.test(val)) fieldsToAdd.push({ label: 'path', snippet: `, path="${defaultPath}"` });
+
+				const snapshots = this._entityPersistenceService.getAllSnapshots();
+				const sample = snapshots.find(s => s.entityType?.toLowerCase() === curType.toLowerCase());
+				if (sample?.customMetadata) {
+					for (const [k, v] of Object.entries(sample.customMetadata)) {
+						if (k !== 'flowchartJson' && k !== 'title' && k !== 'path' && !new RegExp(`${k}\\s*=`, 'i').test(val)) {
+							const snipVal = typeof v === 'number' ? `, ${k}=${v}` : `, ${k}="${v}"`;
+							fieldsToAdd.push({ label: k, snippet: snipVal });
+						}
+					}
+				}
+				if (curType.toLowerCase() === 'xxx' && !/start\s*=/i.test(val)) {
+					fieldsToAdd.push({ label: 'start', snippet: ', start=0' });
+				}
+				if (curType.toLowerCase() === 'task') {
+					if (!/priority\s*=/i.test(val)) fieldsToAdd.push({ label: 'priority', snippet: ', priority="normal"' });
+					if (!/status\s*=/i.test(val)) fieldsToAdd.push({ label: 'status', snippet: ', status="todo"' });
+				}
+			} else if (/RUN_TICKETS/i.test(val)) {
+				if (!/start\s*=/i.test(val)) fieldsToAdd.push({ label: 'start', snippet: ', start=0' });
+				if (!/count\s*=/i.test(val)) fieldsToAdd.push({ label: 'count', snippet: ', count=10' });
+			}
+
+			for (const f of fieldsToAdd.slice(0, 6)) {
+				const chip = append(fieldsRow, $('.node-function-field-chip'));
+				chip.textContent = `+ ${f.label}`;
+				chip.title = `Insert ${f.label} keyword parameter`;
+				chip.onmousedown = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+				};
+				chip.onclick = (e) => {
+					e.stopPropagation();
+					const lastParen = codeArea.value.lastIndexOf(')');
+					if (lastParen !== -1) {
+						codeArea.value = codeArea.value.substring(0, lastParen).trimEnd() + f.snippet + codeArea.value.substring(lastParen);
+					} else {
+						codeArea.value += f.snippet;
+					}
+					codeArea.focus();
+					updateFieldChips();
+				};
+			}
+		};
+		updateFieldChips();
+
+		// Row 5: Action buttons
+		const footerRow = append(draftWrapper, $('.node-function-footer-row'));
+		footerRow.onmousedown = (e) => e.stopPropagation();
+		append(footerRow, $('.node-function-footer-hint', {}, 'Ctrl+Enter to save, Esc to cancel'));
+
+		const actionsDiv = append(footerRow, $('.node-function-footer-actions'));
+		const btnCancel = append(actionsDiv, $('button.node-function-btn.node-function-btn-cancel', {}, 'Cancel'));
+		btnCancel.onclick = (e) => {
+			e.stopPropagation();
+			cleanup();
+		};
+
+		const btnSave = append(actionsDiv, $('button.node-function-btn.node-function-btn-save', {}, 'Save Step'));
+		btnSave.onclick = (e) => {
+			e.stopPropagation();
+			commit();
+		};
 
 		// Autocomplete suggestions
 		const collectSuggestions = () => {
@@ -5977,7 +6065,7 @@ export class WorkflowEditor extends EditorPane {
 
 			const fns = [
 				{ name: 'RUN_TICKETS', detail: 'RUN_TICKETS(ticket_name="", params={})', snippet: 'RUN_TICKETS(ticket_name="", params={})' },
-				{ name: 'CREATE_TICKETS', detail: 'CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})', snippet: 'CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})' },
+				{ name: 'CREATE_TICKETS', detail: `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`, snippet: `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")` },
 				{ name: 'GET_TICKETS', detail: 'GET_TICKETS(ticket_name="")', snippet: 'GET_TICKETS(ticket_name="")' },
 				{ name: 'GET_PRIMITIVES_CATALOG', detail: 'GET_PRIMITIVES_CATALOG()', snippet: 'GET_PRIMITIVES_CATALOG()' }
 			];
@@ -6033,31 +6121,32 @@ export class WorkflowEditor extends EditorPane {
 
 		const insertAcItem = (item: { name: string; type: string; snippet?: string }) => {
 			if (item.type === 'func') {
-				input.value = item.snippet || `${item.name}()`;
-				const quoteIdx = input.value.indexOf('""');
+				codeArea.value = item.snippet || `${item.name}()`;
+				const quoteIdx = codeArea.value.indexOf('""');
 				if (quoteIdx !== -1) {
-					input.selectionStart = input.selectionEnd = quoteIdx + 1;
+					codeArea.selectionStart = codeArea.selectionEnd = quoteIdx + 1;
 				}
 			} else {
-				const selStart = input.selectionStart || 0;
-				const val = input.value;
+				const selStart = codeArea.selectionStart || 0;
+				const val = codeArea.value;
 				const textBefore = val.slice(0, selStart);
 				const textAfter = val.slice(selStart);
 				const atIdx = textBefore.lastIndexOf('@');
 
 				if (atIdx !== -1) {
-					input.value = textBefore.slice(0, atIdx) + `@${item.name}` + (textAfter.startsWith(' ') ? textAfter : ` ${textAfter}`);
+					codeArea.value = textBefore.slice(0, atIdx) + `@${item.name}` + (textAfter.startsWith(' ') ? textAfter : ` ${textAfter}`);
 				} else {
-					input.value = val + `@${item.name} `;
+					codeArea.value = val + `@${item.name} `;
 				}
 			}
 			closePopover();
-			input.focus();
+			codeArea.focus();
+			updateFieldChips();
 		};
 
 		const updateAc = () => {
-			const selStart = input.selectionStart || 0;
-			const textBefore = input.value.slice(0, selStart);
+			const selStart = codeArea.selectionStart || 0;
+			const textBefore = codeArea.value.slice(0, selStart);
 			const match = textBefore.match(/@?([a-zA-Z0-9_\u4e00-\u9fa5]*)$/);
 			if (!match || !match[1]) {
 				closePopover();
@@ -6103,25 +6192,29 @@ export class WorkflowEditor extends EditorPane {
 			committed = true;
 
 			const returnVar = returnVarInput.value.trim().replace(/^@/, '');
-			let fnExpr = input.value.trim();
+			let fnExpr = codeArea.value.trim();
 			if (!fnExpr) {
 				cleanup();
 				return;
 			}
 
-			// If user accidentally typed "@foo = fn()" in the function input, normalize it
-			const prefixMatch = fnExpr.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*([\s\S]*)$/);
+			// Clean multiple lines into single line expression for pipeline step
+			const normalizedExpr = fnExpr.replace(/\r?\n\s*/g, ' ').trim();
+
+			// If user typed "@foo = fn()" in codeArea, normalize it
+			const prefixMatch = normalizedExpr.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*([\s\S]*)$/);
 			let effectiveVar = returnVar;
+			let effectiveFnExpr = normalizedExpr;
 			if (prefixMatch) {
 				effectiveVar = prefixMatch[1];
-				fnExpr = prefixMatch[2].trim();
+				effectiveFnExpr = prefixMatch[2].trim();
 			}
 
-			const fullExpr = effectiveVar ? `@${effectiveVar} = ${fnExpr}` : fnExpr;
+			const fullExpr = effectiveVar ? `@${effectiveVar} = ${effectiveFnExpr}` : effectiveFnExpr;
 			const targetVar = effectiveVar || undefined;
 
 			let fnName = 'RUN_TICKETS';
-			const m = fnExpr.match(/^([a-zA-Z0-9_]+)\s*(?:\(([\s\S]*)\))?$/);
+			const m = effectiveFnExpr.match(/^([a-zA-Z0-9_]+)\s*(?:\(([\s\S]*)\))?$/);
 			if (m && m[1]) {
 				fnName = m[1];
 			}
@@ -6169,15 +6262,14 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		input.oninput = () => {
-			// Auto extract if user typed "@var = " inside function input
-			const prefixMatch = input.value.match(/^@([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*([\s\S]*)$/);
+		codeArea.oninput = () => {
+			const prefixMatch = codeArea.value.match(/^@([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*([\s\S]*)$/);
 			if (prefixMatch) {
 				returnVarInput.value = prefixMatch[1];
-				adjustReturnVarWidth();
-				input.value = prefixMatch[2];
+				codeArea.value = prefixMatch[2];
 			}
 			updateAc();
+			updateFieldChips();
 		};
 
 		const handleKeyDown = (e: KeyboardEvent) => {
@@ -6204,7 +6296,7 @@ export class WorkflowEditor extends EditorPane {
 				}
 			}
 
-			if (e.key === 'Enter') {
+			if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || !e.shiftKey)) {
 				e.preventDefault();
 				commit();
 			} else if (e.key === 'Escape') {
@@ -6213,38 +6305,16 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		input.onkeydown = handleKeyDown;
+		codeArea.onkeydown = handleKeyDown;
 		returnVarInput.onkeydown = handleKeyDown;
 
-		let canBlurCommit = false;
-		setTimeout(() => { canBlurCommit = true; }, 400);
-
-		const handleBlur = () => {
-			if (!canBlurCommit) return;
-			setTimeout(() => {
-				const active = document.activeElement;
-				if (active === returnVarInput || active === input) return;
-				if (draftWrapper.contains(active)) return;
-				if (popover && popover.matches(':hover')) return;
-				const text = input.value.trim();
-				if (text) {
-					commit();
-				} else {
-					cleanup();
-				}
-			}, 300);
-		};
-
-		input.onblur = handleBlur;
-		returnVarInput.onblur = handleBlur;
-
-		varsContainer.appendChild(draftWrapper);
-		input.focus();
-		const quoteIdx = input.value.indexOf('""');
+		nodeEl.appendChild(draftWrapper);
+		codeArea.focus();
+		const quoteIdx = codeArea.value.indexOf('""');
 		if (quoteIdx !== -1) {
-			input.selectionStart = input.selectionEnd = quoteIdx + 1;
+			codeArea.selectionStart = codeArea.selectionEnd = quoteIdx + 1;
 		} else {
-			input.select();
+			codeArea.select();
 		}
 	}
 
