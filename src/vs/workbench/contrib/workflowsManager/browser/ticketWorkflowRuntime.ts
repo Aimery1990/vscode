@@ -163,14 +163,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				for (const f of matchedModule.fields) {
 					const fKey = f.label || f.id;
 					if (f.type === 'parameters' && f.parameters) {
+						const paramObj: Record<string, any> = {};
 						for (const p of f.parameters) {
 							const pKey = p.name || p.id;
-							const pVal = initialFields[pKey] !== undefined ? initialFields[pKey] : (p.defaultValue || '');
-							customMetadata[pKey] = String(pVal);
-							if (p.label) {
-								customMetadata[p.label] = String(pVal);
-							}
+							const pVal = initialFields[pKey] !== undefined ? initialFields[pKey] : (p.label && initialFields[p.label] !== undefined ? initialFields[p.label] : (p.defaultValue !== undefined ? p.defaultValue : ''));
+							paramObj[pKey] = pVal;
 						}
+						customMetadata[fKey] = JSON.stringify(paramObj);
 					} else if (f.type === 'browser') {
 						const urlVal = initialFields[fKey] || f.defaultUrl || '';
 						customMetadata[fKey] = String(urlVal);
@@ -185,9 +184,22 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				}
 			}
 
-			// Apply any additional passed-in custom fields
+			// Apply any additional passed-in custom fields (exclude parameter names that belong to parameters primitives)
+			const knownParamNames = new Set<string>();
+			if (matchedModule?.fields) {
+				for (const f of matchedModule.fields) {
+					if (f.type === 'parameters' && Array.isArray(f.parameters)) {
+						for (const p of f.parameters) {
+							if (p.name) knownParamNames.add(p.name);
+							if (p.id) knownParamNames.add(p.id);
+							if (p.label) knownParamNames.add(p.label);
+						}
+					}
+				}
+			}
+
 			for (const [k, v] of Object.entries(initialFields)) {
-				if (customMetadata[k] === undefined) {
+				if (customMetadata[k] === undefined && !knownParamNames.has(k)) {
 					customMetadata[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
 				}
 			}

@@ -4010,6 +4010,9 @@ ${interpolatedPrompt}`;
 			gitRemoteUrl?: string;
 			gitBranch?: string;
 			parameters?: IParameterDefinition[];
+			outputSpecs?: IOutputSpec[];
+			defaultFormat?: string;
+			defaultContent?: string;
 		}
 
 		const fieldsToRender: IRenderField[] = [];
@@ -4024,6 +4027,16 @@ ${interpolatedPrompt}`;
 				if (fKey.toLowerCase() === 'title' || fLabel.toLowerCase() === 'title' || fKey.toLowerCase() === 'description' || fLabel.toLowerCase() === 'description') {
 					continue;
 				}
+
+				// If this field is a parameters primitive, mark all its child param names/labels as handled so they are not rendered as orphan cards
+				if (f.type === 'parameters' && Array.isArray(f.parameters)) {
+					for (const p of f.parameters) {
+						if (p.name) handledKeys.add(p.name);
+						if (p.id) handledKeys.add(p.id);
+						if (p.label) handledKeys.add(p.label);
+					}
+				}
+
 				let matchedKey = '';
 				let val: any = '';
 				for (const [k, v] of rawCustomMap.entries()) {
@@ -4039,6 +4052,31 @@ ${interpolatedPrompt}`;
 				if (matchedKey) {
 					handledKeys.add(matchedKey);
 				}
+
+				// If f is parameters, construct/hydrate paramObj from rawCustomMap if individual parameters were stored
+				if (f.type === 'parameters' && Array.isArray(f.parameters)) {
+					let paramObj: Record<string, any> = {};
+					if (val) {
+						if (typeof val === 'string') {
+							try { paramObj = JSON.parse(val); } catch { }
+						} else if (typeof val === 'object' && val !== null) {
+							paramObj = { ...val };
+						}
+					}
+					for (const p of f.parameters) {
+						const pKey = p.name || p.id;
+						if (paramObj[pKey] === undefined) {
+							const found = rawCustomMap.get(pKey) ?? (p.label ? rawCustomMap.get(p.label) : undefined);
+							if (found !== undefined) {
+								paramObj[pKey] = found;
+							} else if (p.defaultValue !== undefined) {
+								paramObj[pKey] = p.defaultValue;
+							}
+						}
+					}
+					val = JSON.stringify(paramObj);
+				}
+
 				fieldsToRender.push({
 					key: matchedKey || fLabel,
 					label: fLabel,
@@ -4052,7 +4090,10 @@ ${interpolatedPrompt}`;
 					credentials: (f as any).credentials,
 					gitRemoteUrl: (f as any).gitRemoteUrl,
 					gitBranch: (f as any).gitBranch,
-					parameters: (f as any).parameters
+					parameters: (f as any).parameters,
+					outputSpecs: (f as any).outputSpecs,
+					defaultFormat: (f as any).defaultFormat,
+					defaultContent: (f as any).defaultContent
 				});
 			}
 
@@ -4841,7 +4882,7 @@ ${interpolatedPrompt}`;
 					const enabledSpecs = (fieldItem.outputSpecs || []).filter(s => s.enabled);
 					let savedMap: Record<string, unknown> = {};
 					let singleResultText = fieldItem.defaultContent || '';
-					let singleResultFormat = fieldItem.defaultFormat || 'table';
+					let singleResultFormat = fieldItem.defaultFormat || 'text';
 					let lastUpdatedText = '';
 
 					if (v) {
@@ -4881,7 +4922,7 @@ ${interpolatedPrompt}`;
 					if (enabledSpecs.length > 0) {
 						for (const spec of enabledSpecs) {
 							let itemText = '';
-							let itemFormat = spec.defaultFormat || 'table';
+							let itemFormat = spec.defaultFormat || 'text';
 							const specData = savedMap[spec.fieldKey] || savedMap[spec.label];
 
 							if (specData) {
