@@ -149,6 +149,23 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const parentFolderUri = targetSubPath ? URI.joinPath(wsUri, targetSubPath) : wsUri;
 			const ticketFolderUri = URI.joinPath(parentFolderUri, safeFolderName);
 
+			// Collision check: verify if the target ticket folder already exists
+			const folderExists = await this.fileService.exists(ticketFolderUri);
+			if (folderExists) {
+				const errMsg = `Ticket '${safeFolderName}' already exists at path '${parentFolderUri.fsPath}'. Cannot create duplicate ticket with the same name. Please specify a different title or target path.`;
+				this.logService.warn(`[TicketWorkflowRuntime] ${errMsg}`);
+				return {
+					success: false,
+					ticketId: '',
+					ticketName: safeFolderName,
+					ticketType: ticketType,
+					entityUri: ticketFolderUri.toString(),
+					targetFolder: ticketFolderUri.fsPath,
+					fields: {},
+					error: errMsg
+				};
+			}
+
 			// 3. Generate sequential ticket ID
 			const existingSnapshots = this.entityPersistenceService.getAllSnapshots();
 			const count = existingSnapshots.filter(s => s.entityType === ticketType).length + 1;

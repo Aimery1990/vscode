@@ -5966,30 +5966,53 @@ export class WorkflowEditor extends EditorPane {
 
 			const fieldsToAdd: { label: string; snippet: string }[] = [];
 			if (/CREATE_TICKETS/i.test(val)) {
-				if (!/title\s*=/i.test(val)) fieldsToAdd.push({ label: 'title', snippet: ', title=""' });
-				if (!/path\s*=/i.test(val)) fieldsToAdd.push({ label: 'path', snippet: `, path="${defaultPath}"` });
+				if (!/\btitle\s*=/i.test(val)) fieldsToAdd.push({ label: 'title', snippet: ', title=""' });
+				if (!/\bpath\s*=/i.test(val)) fieldsToAdd.push({ label: 'path', snippet: `, path="${defaultPath}"` });
 
 				const snapshots = this._entityPersistenceService.getAllSnapshots();
 				const sample = snapshots.find(s => s.entityType?.toLowerCase() === curType.toLowerCase());
 				if (sample?.customMetadata) {
 					for (const [k, v] of Object.entries(sample.customMetadata)) {
-						if (k !== 'flowchartJson' && k !== 'title' && k !== 'path' && !new RegExp(`${k}\\s*=`, 'i').test(val)) {
+						if (k === 'flowchartJson' || k === 'title' || k === 'path') continue;
+
+						// If value is a parameters primitive (JSON object e.g. Parameters 1: {"start": 0}), extract child variables!
+						if (typeof v === 'string' && v.trim().startsWith('{') && v.trim().endsWith('}')) {
+							try {
+								const parsed = JSON.parse(v.trim());
+								if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+									for (const [pName, pVal] of Object.entries(parsed)) {
+										if (!new RegExp(`\\b${pName}\\s*=`, 'i').test(val)) {
+											const snipVal = typeof pVal === 'number' ? `, ${pName}=${pVal}` : `, ${pName}="${pVal}"`;
+											fieldsToAdd.push({ label: pName, snippet: snipVal });
+										}
+									}
+									continue;
+								}
+							} catch { }
+						}
+
+						// Only add small scalar parameters, skip complex primitives (Browser URLs, Prompts, Outputs)
+						const isPrimitiveContent = typeof v === 'string' && (v.length > 40 || v.startsWith('http') || v.includes('\n') || v.includes('{'));
+						if (!isPrimitiveContent && !/output|result|summary|attachment|prompt|browser|parameter/i.test(k) && !new RegExp(`\\b${k}\\s*=`, 'i').test(val)) {
 							const snipVal = typeof v === 'number' ? `, ${k}=${v}` : `, ${k}="${v}"`;
 							fieldsToAdd.push({ label: k, snippet: snipVal });
 						}
 					}
 				}
-				if (curType.toLowerCase() === 'xxx' && !/start\s*=/i.test(val)) {
+				if (curType.toLowerCase() === 'xxx' && !/\bstart\s*=/i.test(val)) {
 					fieldsToAdd.push({ label: 'start', snippet: ', start=0' });
 				}
 				if (curType.toLowerCase() === 'task') {
-					if (!/priority\s*=/i.test(val)) fieldsToAdd.push({ label: 'priority', snippet: ', priority="normal"' });
-					if (!/status\s*=/i.test(val)) fieldsToAdd.push({ label: 'status', snippet: ', status="todo"' });
+					if (!/\bpriority\s*=/i.test(val)) fieldsToAdd.push({ label: 'priority', snippet: ', priority="normal"' });
+					if (!/\bstatus\s*=/i.test(val)) fieldsToAdd.push({ label: 'status', snippet: ', status="todo"' });
 				}
 			} else if (/RUN_TICKETS/i.test(val)) {
-				if (!/start\s*=/i.test(val)) fieldsToAdd.push({ label: 'start', snippet: ', start=0' });
-				if (!/count\s*=/i.test(val)) fieldsToAdd.push({ label: 'count', snippet: ', count=10' });
+				if (!/\bticket_name\s*=/i.test(val) && !/\bticket_id\s*=/i.test(val)) fieldsToAdd.push({ label: 'ticket_name', snippet: ', ticket_name=""' });
+				if (!/\bparams\s*=/i.test(val) && !/\bstart\s*=/i.test(val)) fieldsToAdd.push({ label: 'start', snippet: ', start=0' });
 			}
+
+			// Show or hide Quick Add row depending on whether there are fields to add
+			fieldsRow.style.display = fieldsToAdd.length > 0 ? 'flex' : 'none';
 
 			for (const f of fieldsToAdd.slice(0, 6)) {
 				const chip = append(fieldsRow, $('.node-function-field-chip'));

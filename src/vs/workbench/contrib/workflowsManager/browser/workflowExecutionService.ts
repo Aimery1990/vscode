@@ -1363,6 +1363,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 				opts.workspaceUri = workflowDir;
 				const createRes = await this.ticketRuntimeService.CREATE_TICKETS(opts);
+				if (!createRes.success) {
+					throw new Error(createRes.error || `Failed to create ticket '${opts.title}'`);
+				}
 				result = createRes;
 			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS' || upperFn === 'GETTICKET') {
 				const ticketIdOrPath = String(kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.ticket ?? args[0] ?? '').trim();
