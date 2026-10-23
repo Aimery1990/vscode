@@ -41,12 +41,13 @@ export interface INodeVariable {
 
 export interface INodePipelineStep {
 	id: string;
-	type: 'run_ticket' | 'set_variable' | 'custom_code';
+	type: 'run_ticket' | 'set_variable' | 'custom_code' | 'call_function';
 	ticketName?: string;
 	ticketType?: string;
 	ticketUri?: string;
-	targetVariable?: string; // e.g. "task" or "monitor"
-	expression?: string;     // e.g. "= ticket.output" or "= @task"
+	targetVariable?: string; // e.g. "task" or "monitor" or "news"
+	expression?: string;     // e.g. "= ticket.output" or "@news = RUN_TICKETS(...)"
+	functionName?: string;   // e.g. "RUN_TICKETS", "CREATE_TICKETS"
 	label?: string;          // Human-readable title
 	parameters?: string;     // Runtime parameters (e.g. "--fast", "param1")
 }
@@ -932,6 +933,43 @@ export class WorkflowEditor extends EditorPane {
 							this._refreshVariablesDrawer(id);
 							setTimeout(() => {
 								this._openNodeVariableInlineEditor(newNode);
+							}, 40);
+							return;
+						} else if (parsed && (parsed.kind === 'function' || parsed.kind === 'function_widget')) {
+							const id = `node_${Date.now()}`;
+							const newNode: IFlowchartNode = {
+								id,
+								type: 'round-rect',
+								x: Math.max(10, x - 60),
+								y: Math.max(10, y - 25),
+								width: 120,
+								height: 50,
+								label: 'Call Function',
+								outputVariables: [],
+								pipeline: [{
+									id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+									type: 'call_function',
+									functionName: 'RUN_TICKETS',
+									expression: 'RUN_TICKETS("")'
+								}],
+								color: this._activeNodeColor,
+								textColor: this._activeTextColor,
+								textAlign: this._activeTextAlign,
+								verticalAlign: this._activeVerticalAlign,
+								isBold: this._activeIsBold,
+								isItalic: this._activeIsItalic,
+								isUnderline: this._activeIsUnderline,
+								isStrikethrough: this._activeIsStrikethrough
+							};
+							this._data.nodes.push(newNode);
+							this._selectedNodeIds.clear();
+							this._selectedNodeIds.add(id);
+							this._saveFlowchartData();
+							this._renderNodes();
+							this._drawLinks();
+							if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+							setTimeout(() => {
+								this._openNodeFunctionInlineEditor(newNode);
 							}, 40);
 							return;
 						}
@@ -2069,11 +2107,11 @@ export class WorkflowEditor extends EditorPane {
 			};
 		}
 
-		// Section: Context Variables
+		// Section: Context Variables & Functions
 		const varSec = append(parent, $('.workflow-toolbar-section.variables-section'));
 		if (!this._isToolbarCompact) {
 			const varTitle = append(varSec, $('.workflow-toolbar-title'));
-			varTitle.textContent = localize('contextVariables', 'Context Variables');
+			varTitle.textContent = localize('contextVariablesAndFunctions', 'Context Variables & Functions');
 		}
 
 		const varGrid = append(varSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
@@ -2101,6 +2139,34 @@ export class WorkflowEditor extends EditorPane {
 				}
 			} else {
 				this._notificationService.info(localize('dragVariableHint', 'Drag Variable onto any node to define, update, or capture ticket results.'));
+			}
+		};
+
+		// Function Component [fx]
+		const fnItem = append(varGrid, $(`.workflow-toolbar-item.function-toolbar-item${this._isToolbarCompact ? '.compact-item' : ''}`));
+		fnItem.setAttribute('draggable', 'true');
+		fnItem.title = localize('dragFunctionTitle', 'Function Call (Drag into any node or canvas to call RUN_TICKETS, CREATE_TICKETS, etc.)');
+		fnItem.ondragstart = (e: DragEvent) => {
+			e.dataTransfer?.setData('text/plain', JSON.stringify({ kind: 'function_widget' }));
+			if (e.dataTransfer) {
+				e.dataTransfer.effectAllowed = 'copy';
+			}
+		};
+
+		const fnBoxBadge = append(fnItem, $('.fn-icon-badge'));
+		fnBoxBadge.textContent = '[fx]';
+		if (!this._isToolbarCompact) {
+			append(fnItem, $('.item-label')).textContent = localize('fnLabel', 'Function');
+		}
+		fnItem.onclick = () => {
+			if (this._selectedNodeIds.size === 1) {
+				const selectedId = Array.from(this._selectedNodeIds)[0];
+				const targetNode = this._data.nodes.find(n => n.id === selectedId);
+				if (targetNode) {
+					this._openNodeFunctionInlineEditor(targetNode);
+				}
+			} else {
+				this._notificationService.info(localize('dragFunctionHint', 'Drag Function [fx] onto any node or canvas to call RUN_TICKETS, CREATE_TICKETS, etc.'));
 			}
 		};
 
@@ -2651,7 +2717,7 @@ export class WorkflowEditor extends EditorPane {
 					} as any);
 					updatedTickets++;
 				}
-			} else if (step.type === 'set_variable' && step.targetVariable) {
+			} else if ((step.type === 'set_variable' || step.type === 'call_function') && step.targetVariable) {
 				const cleanVar = step.targetVariable.replace(/^@/, '');
 				if (!newVars.some(v => v.name === cleanVar)) {
 					const existingVar = (node.outputVariables || []).find(v => v.name.replace(/^@/, '') === cleanVar);
@@ -3409,6 +3475,58 @@ export class WorkflowEditor extends EditorPane {
 						this._syncToNode(node, true);
 						this._saveFlowchartData();
 					};
+				} else if (step.type === 'call_function') {
+					// 1. Badge: [fx] FUNC
+					const badge = append(topRow, $('.pipeline-step-badge-fn'));
+					const fnTag = append(badge, $('span.fn-icon-badge'));
+					fnTag.textContent = '[fx]';
+					fnTag.style.color = '#c084fc';
+					fnTag.style.marginRight = '2px';
+					append(badge, $('span', {}, 'FUNC'));
+
+					// 2. Function expression input
+					const fnInput = append(topRow, $('input.pipeline-step-input.pipeline-fn-input')) as HTMLInputElement;
+					fnInput.type = 'text';
+					const cleanVar = step.targetVariable?.replace(/^@/, '');
+					fnInput.value = step.expression || (cleanVar ? `@${cleanVar} = ${step.functionName || 'RUN_TICKETS'}()` : (step.functionName ? `${step.functionName}()` : 'RUN_TICKETS()'));
+					fnInput.placeholder = '@res = RUN_TICKETS("jobs/calc", {})';
+					fnInput.title = 'Function Call Expression (e.g. @news = RUN_TICKETS("jobs/news_digest", { target_keyword: "AI" }))';
+
+					const commitFn = () => {
+						const val = fnInput.value.trim();
+						step.expression = val || undefined;
+						const m = val.match(/^(?:@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*)?([a-zA-Z0-9_]+)\s*(?:\(([\s\S]*)\))?$/);
+						if (m) {
+							if (m[1]) step.targetVariable = m[1].replace(/^@/, '');
+							if (m[2]) step.functionName = m[2];
+						}
+						this._syncToNode(node, true);
+						this._saveFlowchartData();
+					};
+
+					fnInput.oninput = commitFn;
+					fnInput.onchange = commitFn;
+
+					// Quick helper chips row
+					const cfgRow = append(content, $('.pipeline-step-config-row'));
+					cfgRow.style.display = 'flex';
+					cfgRow.style.gap = '4px';
+					cfgRow.style.alignItems = 'center';
+					cfgRow.style.flexWrap = 'wrap';
+
+					const addPipelineChip = (label: string, snippet: string) => {
+						const chip = append(cfgRow, $('.node-function-template-chip'));
+						chip.textContent = label;
+						chip.onclick = (e) => {
+							e.stopPropagation();
+							fnInput.value = snippet;
+							commitFn();
+						};
+					};
+					addPipelineChip('RUN_TICKETS', '@res = RUN_TICKETS("ticket_name", {})');
+					addPipelineChip('CREATE_TICKETS', '@new_ticket = CREATE_TICKETS("task", "Title", {})');
+					addPipelineChip('GET_TICKETS', '@ticket = GET_TICKETS("ticket_name")');
+					addPipelineChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
 				}
 
 				// Right: Actions (Delete only)
@@ -3486,6 +3604,33 @@ export class WorkflowEditor extends EditorPane {
 			this._renderPipelinePanel(panel, node);
 			setTimeout(() => {
 				const input = panel.querySelector(`[data-step-id="${newStepId}"] input.pipeline-var-name-input`) as HTMLInputElement;
+				if (input) input.focus();
+			}, 50);
+		};
+
+		// 3. Add Function Step
+		const addFnBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-secondary'));
+		const fnBtnTag = append(addFnBtn, $('span.fn-icon-badge'));
+		fnBtnTag.textContent = '[fx]';
+		fnBtnTag.style.color = '#c084fc';
+		fnBtnTag.style.marginRight = '4px';
+		append(addFnBtn, $('span', {}, 'Add Function'));
+		addFnBtn.title = 'Add function / ticket primitive call step';
+		addFnBtn.onclick = (e) => {
+			e.stopPropagation();
+			if (!node.pipeline) node.pipeline = [];
+			const newStepId = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+			node.pipeline.push({
+				id: newStepId,
+				type: 'call_function',
+				functionName: 'RUN_TICKETS',
+				expression: 'RUN_TICKETS("")'
+			});
+			this._syncToNode(node, true);
+			this._saveFlowchartData();
+			this._renderPipelinePanel(panel, node);
+			setTimeout(() => {
+				const input = panel.querySelector(`[data-step-id="${newStepId}"] input.pipeline-fn-input`) as HTMLInputElement;
 				if (input) input.focus();
 			}, 50);
 		};
@@ -4632,6 +4777,78 @@ export class WorkflowEditor extends EditorPane {
 		return varPill;
 	}
 
+	private _isFunctionCallExpression(expr?: string): boolean {
+		if (!expr) return false;
+		const trimmed = expr.trim();
+		return /^(?:@?[a-zA-Z0-9_\u4e00-\u9fa5]+\s*=\s*)?[a-zA-Z0-9_]+\s*\(.*?\)$/s.test(trimmed);
+	}
+
+	private _renderFunctionPill(
+		container: HTMLElement,
+		node: IFlowchartNode,
+		step: INodePipelineStep,
+		stepIndex?: number
+	): HTMLElement {
+		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+		const cleanVar = step.targetVariable?.replace(/^@/, '');
+		const runtimeVal = (activeRun?.contextVariables && cleanVar) ? activeRun.contextVariables[cleanVar] : undefined;
+		const runtimeTooltip = runtimeVal !== undefined && runtimeVal !== null ? `\n(Runtime Output: ${typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)})` : '';
+
+		const fnPill = append(container, $('.node-function-pill'));
+		fnPill.onmousedown = (e) => {
+			e.stopPropagation();
+		};
+		fnPill.onclick = (e) => {
+			e.stopPropagation();
+			if (!this._selectedNodeIds.has(node.id)) {
+				this._selectedNodeIds.clear();
+				this._selectedNodeIds.add(node.id);
+				this._renderNodes();
+				if (this._inspectorEl) {
+					this._renderInspector(this._inspectorEl);
+				}
+			}
+		};
+		fnPill.ondblclick = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+			this._openNodeFunctionInlineEditor(node, step, fnPill);
+		};
+
+		const fnBadge = append(fnPill, $('.fn-tag-icon'));
+		fnBadge.textContent = '[fx]';
+		fnBadge.style.whiteSpace = 'nowrap';
+		fnBadge.style.flexShrink = '0';
+
+		const pillContent = append(fnPill, $('.fn-pill-text'));
+		const displayExpr = step.expression || (cleanVar ? `@${cleanVar} = ${step.functionName || 'RUN_TICKETS'}()` : (step.functionName ? `${step.functionName}()` : 'RUN_TICKETS()'));
+		pillContent.textContent = displayExpr;
+
+		fnPill.title = `[Step #${stepIndex !== undefined ? stepIndex : ''} FUNC] ${displayExpr}${runtimeTooltip}\n(Double-click to inline edit function, click to select)`;
+
+		const removeFnBtn = append(fnPill, $('.var-pill-remove'));
+		removeFnBtn.title = 'Remove function step';
+		append(removeFnBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+		removeFnBtn.onmousedown = (e) => {
+			e.stopPropagation();
+		};
+		removeFnBtn.onclick = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+			if (node.pipeline) {
+				const idx = node.pipeline.indexOf(step);
+				if (idx !== -1) {
+					node.pipeline.splice(idx, 1);
+					this._syncToNode(node, true);
+					this._saveFlowchartData();
+					this._renderNodes();
+				}
+			}
+		};
+
+		return fnPill;
+	}
+
 	private _renderNodes(): void {
 		this._updateCanvasDimensions();
 		if (!this._nodesContainer) return;
@@ -4780,6 +4997,15 @@ export class WorkflowEditor extends EditorPane {
 							this._openNodeVariableInlineEditor(node);
 						}, 50);
 						return;
+					} else if (parsed && (parsed.kind === 'function' || parsed.kind === 'function_widget')) {
+						this._selectedNodeIds.clear();
+						this._selectedNodeIds.add(node.id);
+						this._renderNodes();
+						if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+						setTimeout(() => {
+							this._openNodeFunctionInlineEditor(node);
+						}, 50);
+						return;
 					}
 				} catch { }
 
@@ -4904,6 +5130,8 @@ export class WorkflowEditor extends EditorPane {
 								this._hideTicketPopover();
 								this._openNodePipelinePanel(node.id, step.ticketName);
 							};
+						} else if (step.type === 'call_function' || (step.expression && this._isFunctionCallExpression(step.expression))) {
+							this._renderFunctionPill(badgesContainer, node, step, stepNumber);
 						} else if (step.type === 'set_variable' && step.targetVariable) {
 							const cleanName = step.targetVariable.replace(/^@/, '');
 							const vObj: INodeVariable = {
@@ -4916,7 +5144,7 @@ export class WorkflowEditor extends EditorPane {
 					}
 
 					// Also render any outputVariables that are not yet in pipeline
-					const pipelineVarNames = new Set(node.pipeline!.filter(s => s.type === 'set_variable').map(s => s.targetVariable?.replace(/^@/, '')).filter(Boolean));
+					const pipelineVarNames = new Set(node.pipeline!.filter(s => s.type === 'set_variable' || s.type === 'call_function').map(s => s.targetVariable?.replace(/^@/, '')).filter(Boolean));
 					const extraVars = this._getNodeVariables(node).filter(v => !pipelineVarNames.has(v.name.replace(/^@/, '')));
 					for (const extraV of extraVars) {
 						this._renderVariablePill(badgesContainer, node, extraV);
@@ -5227,6 +5455,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _activeVariableDraftInputEl: HTMLElement | null = null;
+	private _activeFunctionDraftInputEl: HTMLElement | null = null;
 
 	private _openNodeVariableInlineEditor(
 		node: IFlowchartNode,
@@ -5540,6 +5769,364 @@ export class WorkflowEditor extends EditorPane {
 		if (targetVar) {
 			input.select();
 		}
+	}
+
+	private _openNodeFunctionInlineEditor(
+		node: IFlowchartNode,
+		existingStep?: INodePipelineStep,
+		targetPillElement?: HTMLElement
+	): void {
+		if (this._activeFunctionDraftInputEl) {
+			this._activeFunctionDraftInputEl.remove();
+			this._activeFunctionDraftInputEl = null;
+		}
+
+		const nodeEl = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${node.id}"]`) as HTMLElement;
+		if (!nodeEl) {
+			return;
+		}
+		nodeEl.classList.add('editing-function');
+
+		let varsContainer = nodeEl.querySelector('.node-variables-container') as HTMLElement;
+		if (!varsContainer) {
+			const contentWrapper = nodeEl.querySelector('.node-content-wrapper') as HTMLElement || nodeEl;
+			varsContainer = append(contentWrapper, $('.node-variables-container'));
+			varsContainer.style.display = 'flex';
+			varsContainer.style.flexWrap = 'wrap';
+			varsContainer.style.gap = '4px';
+			varsContainer.style.marginTop = '4px';
+			varsContainer.style.justifyContent = 'center';
+		}
+
+		if (targetPillElement) {
+			targetPillElement.style.display = 'none';
+		}
+
+		const draftWrapper = document.createElement('div');
+		draftWrapper.className = 'node-function-draft-wrapper';
+		this._activeFunctionDraftInputEl = draftWrapper;
+
+		const inputRow = append(draftWrapper, $('.node-function-draft-input-row'));
+
+		const fnBadge = append(inputRow, $('.fn-tag-icon'));
+		fnBadge.textContent = '[fx]';
+		fnBadge.style.whiteSpace = 'nowrap';
+		fnBadge.style.flexShrink = '0';
+
+		const input = append(inputRow, $('input.node-function-draft-input')) as HTMLInputElement;
+		input.type = 'text';
+		input.placeholder = 'e.g. @news = RUN_TICKETS("jobs/news_digest", { target_keyword: "AI" })';
+
+		const cancelBtn = append(inputRow, $('.var-draft-cancel-btn'));
+		cancelBtn.title = 'Cancel (Esc)';
+		cancelBtn.textContent = '✕';
+		cancelBtn.style.cursor = 'pointer';
+		cancelBtn.style.padding = '0 3px';
+		cancelBtn.style.color = '#94a3b8';
+		cancelBtn.style.fontSize = '10px';
+
+		const cleanup = () => {
+			nodeEl.classList.remove('editing-function');
+			if (popover) {
+				popover.remove();
+				popover = null;
+			}
+			if (targetPillElement) targetPillElement.style.display = '';
+			draftWrapper.remove();
+			this._activeFunctionDraftInputEl = null;
+		};
+
+		cancelBtn.onclick = (e) => {
+			e.stopPropagation();
+			cleanup();
+		};
+
+		// Helper Chips Row for fast templates
+		const chipsRow = append(draftWrapper, $('.node-function-templates-row'));
+
+		const applyTemplate = (tpl: string) => {
+			input.value = tpl;
+			input.focus();
+			const quoteIdx = tpl.indexOf('""');
+			if (quoteIdx !== -1) {
+				input.selectionStart = input.selectionEnd = quoteIdx + 1;
+			} else {
+				input.selectionStart = input.selectionEnd = tpl.length;
+			}
+		};
+
+		const addChip = (name: string, template: string) => {
+			const chip = append(chipsRow, $('.node-function-template-chip'));
+			chip.textContent = name;
+			chip.title = `Click to insert ${name} template`;
+			chip.onmousedown = (e) => {
+				e.stopPropagation();
+				e.preventDefault();
+			};
+			chip.onclick = (e) => {
+				e.stopPropagation();
+				applyTemplate(template);
+			};
+		};
+
+		addChip('RUN_TICKETS', '@res = RUN_TICKETS("ticket_name", {})');
+		addChip('CREATE_TICKETS', '@new_ticket = CREATE_TICKETS("task", "Title", {})');
+		addChip('GET_TICKETS', '@ticket = GET_TICKETS("ticket_name")');
+		addChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
+
+		if (existingStep) {
+			const cleanVar = existingStep.targetVariable?.replace(/^@/, '');
+			if (existingStep.expression) {
+				input.value = existingStep.expression;
+			} else if (cleanVar && existingStep.functionName) {
+				input.value = `@${cleanVar} = ${existingStep.functionName}()`;
+			} else if (existingStep.functionName) {
+				input.value = `${existingStep.functionName}()`;
+			}
+		} else {
+			input.value = '@res = RUN_TICKETS("", {})';
+		}
+
+		// Autocomplete suggestions
+		const collectSuggestions = () => {
+			const suggestions: { name: string; type: string; badgeLabel: string; detail: string }[] = [];
+			const seen = new Set<string>();
+
+			const fns = [
+				{ name: 'RUN_TICKETS', detail: 'RUN_TICKETS(ticketIdOrPath, inputParams)' },
+				{ name: 'CREATE_TICKETS', detail: 'CREATE_TICKETS(ticketType, title, parameters)' },
+				{ name: 'GET_TICKETS', detail: 'GET_TICKETS(ticketIdOrPath)' },
+				{ name: 'GET_PRIMITIVES_CATALOG', detail: 'GET_PRIMITIVES_CATALOG()' }
+			];
+			for (const f of fns) {
+				suggestions.push({
+					name: f.name,
+					type: 'func',
+					badgeLabel: 'FX',
+					detail: f.detail
+				});
+			}
+
+			for (const n of this._data?.nodes || []) {
+				for (const v of this._getNodeVariables(n)) {
+					if (!seen.has(v.name)) {
+						seen.add(v.name);
+						suggestions.push({
+							name: v.name,
+							type: 'var',
+							badgeLabel: 'VAR',
+							detail: `Variable [${n.label}]`
+						});
+					}
+				}
+				for (const imp of n.imports || []) {
+					const tName = imp.name.replace(/[^a-zA-Z0-9_]/g, '_');
+					if (!seen.has(tName)) {
+						seen.add(tName);
+						suggestions.push({
+							name: tName,
+							type: imp.type || 'ticket',
+							badgeLabel: (imp.type || 'ticket').toUpperCase(),
+							detail: `${imp.type || 'ticket'}: ${imp.name}`
+						});
+					}
+				}
+			}
+
+			return suggestions;
+		};
+
+		let popover: HTMLElement | null = null;
+		let activeAcIdx = 0;
+		let currentMatches: { name: string; type: string; badgeLabel: string; detail: string }[] = [];
+
+		const closePopover = () => {
+			if (popover) {
+				popover.remove();
+				popover = null;
+			}
+		};
+
+		const insertAcItem = (item: { name: string; type: string }) => {
+			const selStart = input.selectionStart || 0;
+			const val = input.value;
+			const textBefore = val.slice(0, selStart);
+			const textAfter = val.slice(selStart);
+			const atIdx = textBefore.lastIndexOf('@');
+
+			if (item.type === 'func') {
+				if (atIdx !== -1) {
+					input.value = textBefore.slice(0, atIdx) + `${item.name}("${textAfter}`;
+				} else {
+					input.value = textBefore + `${item.name}("${textAfter}`;
+				}
+			} else {
+				if (atIdx !== -1) {
+					input.value = textBefore.slice(0, atIdx) + `${item.name}` + (textAfter.startsWith(' ') ? textAfter : ` ${textAfter}`);
+				} else {
+					input.value = val + `${item.name} `;
+				}
+			}
+			closePopover();
+			input.focus();
+		};
+
+		const updateAc = () => {
+			const selStart = input.selectionStart || 0;
+			const textBefore = input.value.slice(0, selStart);
+			const match = textBefore.match(/@?([a-zA-Z0-9_\u4e00-\u9fa5]*)$/);
+			if (!match || !match[1]) {
+				closePopover();
+				return;
+			}
+
+			const query = match[1].toLowerCase();
+			const all = collectSuggestions();
+			currentMatches = all.filter(item => item.name.toLowerCase().includes(query));
+			if (currentMatches.length === 0) {
+				closePopover();
+				return;
+			}
+
+			if (!popover) {
+				popover = append(draftWrapper, $('.node-variable-ac-popover'));
+			}
+			popover.innerHTML = '';
+			currentMatches.slice(0, 8).forEach((item, idx) => {
+				const row = append(popover!, $('.node-variable-ac-item'));
+				if (idx === activeAcIdx) row.classList.add('selected');
+				const badge = append(row, $('.ac-item-badge'));
+				badge.textContent = item.badgeLabel;
+				const nameEl = append(row, $('.ac-item-name'));
+				nameEl.textContent = item.name;
+				const detailEl = append(row, $('.ac-item-detail'));
+				detailEl.textContent = item.detail;
+				row.onmousedown = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+					insertAcItem(item);
+				};
+			});
+		};
+
+		let committed = false;
+		const commit = () => {
+			if (committed) return;
+			committed = true;
+			const rawVal = input.value.trim();
+			if (!rawVal) {
+				cleanup();
+				return;
+			}
+
+			let targetVar: string | undefined = undefined;
+			let fnName: string = 'RUN_TICKETS';
+
+			const m = rawVal.match(/^(?:@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*)?([a-zA-Z0-9_]+)\s*(?:\(([\s\S]*)\))?$/);
+			if (m) {
+				if (m[1]) targetVar = m[1].replace(/^@/, '');
+				if (m[2]) fnName = m[2];
+			}
+
+			if (!node.pipeline) node.pipeline = [];
+
+			if (existingStep) {
+				existingStep.type = 'call_function';
+				existingStep.expression = rawVal;
+				existingStep.targetVariable = targetVar;
+				existingStep.functionName = fnName;
+			} else {
+				const newStep: INodePipelineStep = {
+					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+					type: 'call_function',
+					targetVariable: targetVar,
+					functionName: fnName,
+					expression: rawVal
+				};
+				node.pipeline.push(newStep);
+			}
+
+			// Sync output variables
+			if (targetVar) {
+				if (!node.outputVariables) node.outputVariables = [];
+				const existingVar = node.outputVariables.find(v => v.name === targetVar);
+				if (existingVar) {
+					existingVar.expression = rawVal;
+				} else {
+					node.outputVariables.push({
+						name: targetVar,
+						initialValue: 'None',
+						expression: rawVal
+					});
+				}
+			}
+
+			this._syncToNode(node, true);
+			this._saveFlowchartData();
+			cleanup();
+			this._renderNodes();
+			this._drawLinks();
+			if (this._pipelinePanelEl && this._activePipelineNodeId === node.id) {
+				this._renderPipelinePanel(this._pipelinePanelEl, node);
+			}
+		};
+
+		input.oninput = () => {
+			updateAc();
+		};
+
+		input.onkeydown = (e) => {
+			e.stopPropagation();
+			if (popover && currentMatches.length > 0) {
+				if (e.key === 'ArrowDown') {
+					e.preventDefault();
+					activeAcIdx = (activeAcIdx + 1) % currentMatches.length;
+					updateAc();
+					return;
+				} else if (e.key === 'ArrowUp') {
+					e.preventDefault();
+					activeAcIdx = (activeAcIdx - 1 + currentMatches.length) % currentMatches.length;
+					updateAc();
+					return;
+				} else if (e.key === 'Enter' || e.key === 'Tab') {
+					e.preventDefault();
+					insertAcItem(currentMatches[activeAcIdx]);
+					return;
+				} else if (e.key === 'Escape') {
+					e.preventDefault();
+					closePopover();
+					return;
+				}
+			}
+
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				commit();
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				cleanup();
+			}
+		};
+
+		let canBlurCommit = false;
+		setTimeout(() => { canBlurCommit = true; }, 400);
+
+		input.onblur = () => {
+			if (!canBlurCommit) return;
+			setTimeout(() => {
+				if (popover && popover.matches(':hover')) return;
+				const text = input.value.trim();
+				if (text) {
+					commit();
+				} else {
+					cleanup();
+				}
+			}, 300);
+		};
+
+		varsContainer.appendChild(draftWrapper);
+		input.focus();
+		input.select();
 	}
 
 	private _parseAndApplyVariableExpression(
@@ -7667,6 +8254,26 @@ export class WorkflowEditor extends EditorPane {
 				pipelineItem.onclick = () => {
 					this._closeContextMenu();
 					this._openNodePipelinePanel(targetId);
+				};
+
+				const fnItem = append(menu, $('.context-menu-item'));
+				fnItem.textContent = 'Call Function [fx]...';
+				fnItem.onclick = () => {
+					this._closeContextMenu();
+					const targetNode = this._data.nodes.find(n => n.id === targetId);
+					if (targetNode) {
+						this._openNodeFunctionInlineEditor(targetNode);
+					}
+				};
+
+				const varItem = append(menu, $('.context-menu-item'));
+				varItem.textContent = 'Context Variable [V]...';
+				varItem.onclick = () => {
+					this._closeContextMenu();
+					const targetNode = this._data.nodes.find(n => n.id === targetId);
+					if (targetNode) {
+						this._openNodeVariableInlineEditor(targetNode);
+					}
 				};
 			}
 		}

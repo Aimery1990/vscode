@@ -3551,3 +3551,173 @@
 .create-workflow-modal-box label {
 	font-family: inherit;
 }
+
+/* --- Context Function Badge & Pill Styles --- */
+.fn-icon-badge {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	font-weight: 700;
+	font-size: 11px;
+	line-height: 1;
+	color: #c084fc;
+	letter-spacing: -0.5px;
+	user-select: none;
+}
+
+.function-toolbar-item .fn-icon-badge {
+	font-size: 13px;
+	font-weight: 800;
+	color: #c084fc;
+}
+
+.pipeline-step-badge-fn {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	padding: 1px 6px;
+	background: rgba(192, 132, 252, 0.15);
+	border: 1px solid rgba(192, 132, 252, 0.4);
+	border-radius: 4px;
+	font-size: 10px;
+	font-weight: 700;
+	color: #c084fc;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.pipeline-step-badge-fn .fn-icon-badge {
+	font-size: 10.5px;
+	color: #c084fc;
+}
+
+.node-function-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	margin-top: 0;
+	padding: 1px 6px;
+	background: rgba(192, 132, 252, 0.15);
+	border: 1px solid rgba(192, 132, 252, 0.4);
+	border-radius: 4px;
+	font-size: 10px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	color: #c084fc;
+	user-select: none;
+	max-width: calc(100% - 4px);
+	box-sizing: border-box;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	pointer-events: auto !important;
+	cursor: pointer;
+	z-index: 10;
+	transition: background 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
+}
+
+.node-function-pill:hover {
+	background: rgba(192, 132, 252, 0.35);
+	border-color: #c084fc;
+	transform: translateY(-1px);
+	z-index: 50;
+	max-width: max-content;
+}
+
+.node-function-pill * {
+	pointer-events: auto !important;
+}
+
+.fn-tag-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 9.5px;
+	font-weight: 700;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	line-height: 1;
+	color: #c084fc;
+	opacity: 0.95;
+	letter-spacing: -0.5px;
+	padding: 0 1px;
+	white-space: nowrap !important;
+	flex-shrink: 0 !important;
+}
+
+.fn-pill-text {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	display: inline-flex;
+	align-items: center;
+	color: #e9d5ff;
+}
+
+.node-function-draft-wrapper {
+	position: relative;
+	display: inline-flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 4px 6px;
+	background: rgba(15, 23, 42, 0.98);
+	border: 1.5px solid #c084fc;
+	border-radius: 5px;
+	box-shadow: 0 4px 18px rgba(0, 0, 0, 0.75), 0 0 12px rgba(192, 132, 252, 0.4);
+	z-index: 10001;
+	margin-top: 4px;
+	animation: varDraftPop 0.15s ease-out;
+	box-sizing: border-box;
+	max-width: 100%;
+}
+
+.node-function-draft-input-row {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	width: 100%;
+}
+
+.node-function-draft-input {
+	border: none;
+	outline: none;
+	background: transparent;
+	color: #f8fafc;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	font-size: 11px;
+	min-width: 180px;
+	flex: 1 1 auto;
+	max-width: 520px;
+	padding: 0 4px;
+}
+
+.node-function-draft-input::placeholder {
+	color: rgba(192, 132, 252, 0.55);
+	font-style: italic;
+}
+
+.node-function-templates-row {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	flex-wrap: wrap;
+	padding-top: 2px;
+	border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.node-function-template-chip {
+	font-size: 9px;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	padding: 1px 5px;
+	background: rgba(192, 132, 252, 0.12);
+	border: 1px solid rgba(192, 132, 252, 0.3);
+	border-radius: 3px;
+	color: #d8b4fe;
+	cursor: pointer;
+	user-select: none;
+	transition: all 0.15s ease;
+}
+
+.node-function-template-chip:hover {
+	background: rgba(192, 132, 252, 0.28);
+	border-color: #c084fc;
+	color: #ffffff;
+}

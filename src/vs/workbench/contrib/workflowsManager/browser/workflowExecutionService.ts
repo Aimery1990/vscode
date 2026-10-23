@@ -20,12 +20,13 @@ import {
 
 interface INodePipelineStep {
 	id: string;
-	type: 'run_ticket' | 'set_variable' | 'custom_code';
+	type: 'run_ticket' | 'set_variable' | 'custom_code' | 'call_function';
 	ticketName?: string;
 	ticketType?: string;
 	ticketUri?: string;
 	targetVariable?: string;
 	expression?: string;
+	functionName?: string;
 	label?: string;
 	parameters?: string;
 }
@@ -1078,8 +1079,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			};
 
 			for (let i = 0; i < node.pipeline.length; i++) {
+				const step = node.pipeline[i];
 				const isRunTicketStep = step.type === 'run_ticket' || step.type === 'run_tickets' || step.type === 'RUN_TICKETS' || step.type === 'runTickets';
-				if (isRunTicketStep && step.ticketName) {
+				const isCallFnStep = step.type === 'call_function' || (step.expression && this._isFunctionCallExpression(step.expression));
+
+				if (isCallFnStep) {
+					await this._executeFunctionStep(run, node, step, i, state);
+				} else if (isRunTicketStep && step.ticketName) {
 					this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'${step.parameters ? ` (PARAM: ${step.parameters})` : ''}`);
 					const ticketRecord = await runTicket(step.ticketName, step.ticketType, step.ticketUri, step.parameters);
 					if (step.targetVariable) {
@@ -1228,6 +1234,225 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		// 5. General Diagram Node Execution
 		await new Promise(r => setTimeout(r, 500));
 		state.output = { message: `Node '${node.label}' successfully executed` };
+	}
+
+	private _isFunctionCallExpression(expr?: string): boolean {
+		if (!expr) return false;
+		const trimmed = expr.trim();
+		return /^(?:@?[a-zA-Z0-9_\u4e00-\u9fa5]+\s*=\s*)?[a-zA-Z0-9_]+\s*\(.*?\)$/s.test(trimmed);
+	}
+
+	private async _executeFunctionStep(
+		run: IWorkflowExecutionRun,
+		node: IFlowchartNode,
+		step: INodePipelineStep,
+		stepIndex: number,
+		state: IWorkflowNodeExecutionState
+	): Promise<void> {
+		const rawExpr = (step.expression || '').trim();
+		const wsUri = URI.parse(run.workflowUri);
+
+		this._emitLog(run, 'info', `[Step #${stepIndex + 1} FX] Invoking function call: ${rawExpr || step.functionName || 'unknown'}`, { nodeId: node.id });
+
+		// Parse expression: e.g. "@news = RUN_TICKETS('jobs/news_digest', { 'target_keyword': 'AI' })"
+		const match = rawExpr.match(/^(?:@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*)?([a-zA-Z0-9_]+)\s*\(([\s\S]*)\)$/);
+		let targetVar = step.targetVariable?.replace(/^@/, '');
+		let fnName = step.functionName || '';
+		let rawArgsStr = '';
+
+		if (match) {
+			if (match[1]) targetVar = match[1].replace(/^@/, '');
+			fnName = match[2];
+			rawArgsStr = match[3] || '';
+		} else if (!fnName && rawExpr) {
+			fnName = rawExpr;
+		}
+
+		const upperFn = (fnName || '').toUpperCase();
+		const parsedArgs = this._parseFunctionArgs(rawArgsStr, run.contextVariables);
+
+		let result: any = undefined;
+		const startMs = Date.now();
+
+		try {
+			if (upperFn === 'RUN_TICKETS' || upperFn === 'RUNTICKETS' || upperFn === 'RUNTICKET') {
+				let ticketIdOrPath = '';
+				let inputParams: Record<string, any> = {};
+
+				if (parsedArgs.length > 0 && typeof parsedArgs[0] === 'object' && parsedArgs[0] !== null && !Array.isArray(parsedArgs[0])) {
+					ticketIdOrPath = parsedArgs[0].ticketIdOrPath || parsedArgs[0].ticketName || parsedArgs[0].id || '';
+					inputParams = parsedArgs[0].inputParams || parsedArgs[0].parameters || parsedArgs[0];
+				} else {
+					ticketIdOrPath = String(parsedArgs[0] || '').trim();
+					inputParams = (parsedArgs[1] && typeof parsedArgs[1] === 'object') ? parsedArgs[1] : {};
+				}
+
+				const execRes = await this.ticketRuntimeService.RUN_TICKETS({
+					workspaceUri: wsUri,
+					ticketIdOrPath,
+					inputParams: { ...run.contextVariables, ...inputParams }
+				});
+
+				result = execRes.output !== undefined ? execRes.output : execRes;
+				const ticketRecord = {
+					ticketId: execRes.ticketId || ticketIdOrPath,
+					ticketName: execRes.ticketName || ticketIdOrPath,
+					ticketType: execRes.ticketType || 'task',
+					status: (execRes.success ? 'success' : 'failed') as 'success' | 'failed',
+					output: execRes.output,
+					durationMs: Date.now() - startMs
+				};
+				state.executedTickets.push(ticketRecord);
+
+				if (ticketRecord.ticketName) {
+					run.contextVariables[ticketRecord.ticketName] = execRes.output;
+				}
+			} else if (upperFn === 'CREATE_TICKETS' || upperFn === 'CREATETICKETS' || upperFn === 'CREATETICKET') {
+				let opts: any = {};
+				if (parsedArgs.length === 1 && typeof parsedArgs[0] === 'object' && parsedArgs[0] !== null) {
+					opts = { ...parsedArgs[0] };
+				} else {
+					opts.ticketType = String(parsedArgs[0] || 'task');
+					opts.title = String(parsedArgs[1] || 'New Ticket');
+					if (parsedArgs[2] && typeof parsedArgs[2] === 'object') {
+						opts.parameters = parsedArgs[2];
+						opts.fieldValues = parsedArgs[2];
+					}
+				}
+				opts.workspaceUri = wsUri;
+				const createRes = await this.ticketRuntimeService.CREATE_TICKETS(opts);
+				result = createRes;
+			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS' || upperFn === 'GETTICKET') {
+				const ticketIdOrPath = String(parsedArgs[0] || '').trim();
+				const getRes = await this.ticketRuntimeService.GET_TICKETS(wsUri, ticketIdOrPath);
+				result = getRes.output !== undefined ? getRes.output : getRes;
+			} else if (upperFn === 'GET_PRIMITIVES_CATALOG' || upperFn === 'GETPRIMITIVESCATALOG') {
+				const catalog = await this.ticketRuntimeService.GET_PRIMITIVES_CATALOG(wsUri);
+				result = catalog;
+			} else {
+				// Fallback evaluation for general expressions
+				try {
+					const evaluator = new PythonExpressionEvaluator(rawExpr, run.contextVariables);
+					result = evaluator.evaluate();
+				} catch (err: any) {
+					throw new Error(`Unsupported function '${fnName}': ${err.message}`);
+				}
+			}
+
+			if (targetVar) {
+				run.contextVariables[targetVar] = result;
+				const preview = typeof result === 'object' ? JSON.stringify(result) : String(result);
+				this._emitLog(run, 'info', `[Step #${stepIndex + 1} FX] Output stored in @${targetVar}: ${preview.substring(0, 150)}`, { nodeId: node.id });
+			} else {
+				this._emitLog(run, 'info', `[Step #${stepIndex + 1} FX] Execution completed successfully in ${Date.now() - startMs}ms`, { nodeId: node.id });
+			}
+		} catch (err: any) {
+			this._emitLog(run, 'error', `[Step #${stepIndex + 1} FX Error] Function call '${fnName}' failed: ${err.message}`, { nodeId: node.id });
+			throw err;
+		}
+	}
+
+	private _parseFunctionArgs(argsStr: string, context: Record<string, any>): any[] {
+		const trimmed = argsStr.trim();
+		if (!trimmed) return [];
+
+		const rawParts: string[] = [];
+		let current = '';
+		let inQuote: string | null = null;
+		let depthParen = 0;
+		let depthBrace = 0;
+		let depthBracket = 0;
+
+		for (let i = 0; i < trimmed.length; i++) {
+			const ch = trimmed[i];
+			if (inQuote) {
+				current += ch;
+				if (ch === inQuote && trimmed[i - 1] !== '\\') {
+					inQuote = null;
+				}
+			} else {
+				if (ch === '"' || ch === "'") {
+					inQuote = ch;
+					current += ch;
+				} else if (ch === '(') {
+					depthParen++;
+					current += ch;
+				} else if (ch === ')') {
+					depthParen--;
+					current += ch;
+				} else if (ch === '{') {
+					depthBrace++;
+					current += ch;
+				} else if (ch === '}') {
+					depthBrace--;
+					current += ch;
+				} else if (ch === '[') {
+					depthBracket++;
+					current += ch;
+				} else if (ch === ']') {
+					depthBracket--;
+					current += ch;
+				} else if (ch === ',' && depthParen === 0 && depthBrace === 0 && depthBracket === 0) {
+					rawParts.push(current.trim());
+					current = '';
+				} else {
+					current += ch;
+				}
+			}
+		}
+		if (current.trim().length > 0) {
+			rawParts.push(current.trim());
+		}
+
+		return rawParts.map(part => this._evaluateArgument(part, context));
+	}
+
+	private _evaluateArgument(arg: string, context: Record<string, any>): any {
+		const s = arg.trim();
+		if (!s) return undefined;
+
+		// String literals
+		if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+			return s.slice(1, -1);
+		}
+		// Numbers
+		if (/^-?\d+(?:\.\d+)?$/.test(s)) {
+			return Number(s);
+		}
+		// Booleans & Null
+		if (s === 'true') return true;
+		if (s === 'false') return false;
+		if (s === 'null' || s === 'None') return null;
+
+		// Direct variable reference
+		if (s.startsWith('@')) {
+			const varName = s.substring(1).trim();
+			return context[varName] !== undefined ? context[varName] : undefined;
+		}
+		if (context[s] !== undefined) {
+			return context[s];
+		}
+
+		// JSON Object / Array literal
+		if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
+			try {
+				const replaced = s.replace(/@([a-zA-Z0-9_\u4e00-\u9fa5]+)/g, (_, name) => {
+					const val = context[name];
+					return val !== undefined ? JSON.stringify(val) : 'null';
+				});
+				const fixedJson = replaced.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
+				return JSON.parse(fixedJson);
+			} catch {
+				// Fallback to python evaluator
+			}
+		}
+
+		try {
+			const evalr = new PythonExpressionEvaluator(s, context);
+			return evalr.evaluate();
+		} catch {
+			return s;
+		}
 	}
 
 	private async _resolveNextNodes(
