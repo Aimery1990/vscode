@@ -4839,7 +4839,7 @@ ${interpolatedPrompt}`;
 					`;
 				} else if (fType === 'output' || fType === 'result') {
 					const enabledSpecs = (fieldItem.outputSpecs || []).filter(s => s.enabled);
-					let savedMap: Record<string, any> = {};
+					let savedMap: Record<string, unknown> = {};
 					let singleResultText = fieldItem.defaultContent || '';
 					let singleResultFormat = fieldItem.defaultFormat || 'table';
 					let lastUpdatedText = '';
@@ -4851,12 +4851,13 @@ ${interpolatedPrompt}`;
 								try {
 									const parsed = JSON.parse(trimmed);
 									if (typeof parsed === 'object' && parsed !== null) {
-										if (parsed.result !== undefined || parsed.output !== undefined) {
-											singleResultText = parsed.result ?? parsed.output ?? '';
-											if (parsed.format) { singleResultFormat = parsed.format; }
-											if (parsed.lastUpdated) { lastUpdatedText = parsed.lastUpdated; }
+										const pRec = parsed as Record<string, unknown>;
+										if (pRec.result !== undefined || pRec.output !== undefined) {
+											singleResultText = String(pRec.result ?? pRec.output ?? '');
+											if (pRec.format) { singleResultFormat = String(pRec.format); }
+											if (pRec.lastUpdated) { lastUpdatedText = String(pRec.lastUpdated); }
 										}
-										savedMap = parsed;
+										savedMap = pRec;
 									}
 								} catch {
 									singleResultText = v;
@@ -4871,7 +4872,7 @@ ${interpolatedPrompt}`;
 								if (rObj.format) { singleResultFormat = String(rObj.format); }
 								if (rObj.lastUpdated) { lastUpdatedText = String(rObj.lastUpdated); }
 							}
-							savedMap = v as Record<string, any>;
+							savedMap = rObj;
 						}
 					}
 
@@ -4885,8 +4886,9 @@ ${interpolatedPrompt}`;
 
 							if (specData) {
 								if (typeof specData === 'object' && specData !== null) {
-									itemText = specData.text ?? specData.content ?? specData.result ?? specData.output ?? JSON.stringify(specData, null, 2);
-									if (specData.format) { itemFormat = specData.format; }
+									const sRec = specData as Record<string, unknown>;
+									itemText = String(sRec.text ?? sRec.content ?? sRec.result ?? sRec.output ?? JSON.stringify(specData, null, 2));
+									if (sRec.format) { itemFormat = String(sRec.format); }
 								} else {
 									itemText = String(specData);
 								}
@@ -4897,7 +4899,8 @@ ${interpolatedPrompt}`;
 										try {
 											const pObj = JSON.parse(primRaw);
 											if (typeof pObj === 'object' && pObj !== null) {
-												itemText = pObj.output ?? pObj.content ?? pObj.result ?? primRaw;
+												const pRec = pObj as Record<string, unknown>;
+												itemText = String(pRec.output ?? pRec.content ?? pRec.result ?? primRaw);
 											} else {
 												itemText = primRaw;
 											}

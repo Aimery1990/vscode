@@ -556,6 +556,23 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				newField.targetModel = 'gemini-1.5-flash';
 				newField.targetAgentId = '';
 			}
+			if (bc.type === 'output') {
+				const candidatePrimitives = fields.filter(f =>
+					f &&
+					f.type !== 'output' &&
+					f.type !== 'result' &&
+					f.id !== 'title' &&
+					f.id !== 'description' &&
+					f.label?.toLowerCase() !== 'title' &&
+					f.label?.toLowerCase() !== 'description'
+				);
+				newField.outputSpecs = candidatePrimitives.map(cp => ({
+					fieldKey: cp.label || cp.id,
+					label: cp.label || cp.id,
+					enabled: true,
+					defaultFormat: 'table'
+				}));
+			}
 			if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= fields.length) {
 				const safeInsertIndex = Math.max(2, insertIndex);
 				fields.splice(safeInsertIndex, 0, newField);
@@ -1969,7 +1986,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				}
 
 				if (field.type === 'output' || field.type === 'result') {
-					if (!field.outputSpecs) {
+					if (!Array.isArray(field.outputSpecs)) {
 						field.outputSpecs = [];
 					}
 
@@ -1983,7 +2000,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					append(titleEl, $('span', {}, 'Output Manifest & Export Selection'));
 
 					const syncBtn = append(headerRow, $('button.sync-primitives-btn', {
-						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; background: rgba(129, 140, 248, 0.15); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.35); cursor: pointer; transition: all 0.15s ease;'
+						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(129, 140, 248, 0.15); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.35); cursor: pointer; transition: all 0.15s ease;'
 					}));
 					append(syncBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.refresh)));
 					append(syncBtn, $('span', {}, 'Sync Primitives'));
@@ -1997,84 +2014,136 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}));
 
 					const syncSpecsWithCanvas = () => {
-						const currentCanvasFields = fields.filter(f => f.id !== field.id && f.type !== 'output' && f.type !== 'result');
-						const existingMap = new Map((field.outputSpecs || []).map(s => [s.fieldKey, s]));
-						const updated: IOutputSpec[] = [];
+						try {
+							const allFields = (this._activeModule?.fields && this._activeModule.fields.length > 0) ? this._activeModule.fields : fields;
+							const currentCanvasFields = allFields.filter(f =>
+								f &&
+								f.id !== field.id &&
+								f.type !== 'output' &&
+								f.type !== 'result' &&
+								f.id !== 'title' &&
+								f.id !== 'description' &&
+								f.label?.toLowerCase() !== 'title' &&
+								f.label?.toLowerCase() !== 'description'
+							);
 
-						for (const f of currentCanvasFields) {
-							const fKey = f.label || f.id;
-							const existing = existingMap.get(fKey) || existingMap.get(f.id);
-							if (existing) {
-								updated.push({
-									fieldKey: fKey,
-									label: f.label || f.id,
-									enabled: existing.enabled,
-									defaultFormat: existing.defaultFormat || 'table'
-								});
-							} else {
-								updated.push({
-									fieldKey: fKey,
-									label: f.label || f.id,
-									enabled: true,
-									defaultFormat: 'table'
-								});
+							if (!Array.isArray(field.outputSpecs)) {
+								field.outputSpecs = [];
 							}
+
+							const existingMap = new Map<string, IOutputSpec>();
+							for (const s of field.outputSpecs) {
+								if (s && typeof s === 'object') {
+									if (s.fieldKey) { existingMap.set(s.fieldKey, s); }
+									if (s.label) { existingMap.set(s.label, s); }
+								}
+							}
+
+							const updated: IOutputSpec[] = [];
+							for (const f of currentCanvasFields) {
+								const fKey = f.label || f.id || 'Primitive';
+								const existing = existingMap.get(fKey) || (f.id ? existingMap.get(f.id) : undefined);
+								if (existing) {
+									updated.push({
+										fieldKey: fKey,
+										label: f.label || f.id || fKey,
+										enabled: existing.enabled ?? true,
+										defaultFormat: existing.defaultFormat || 'table'
+									});
+								} else {
+									updated.push({
+										fieldKey: fKey,
+										label: f.label || f.id || fKey,
+										enabled: true,
+										defaultFormat: 'table'
+									});
+								}
+							}
+							field.outputSpecs = updated;
+						} catch (err) {
+							console.error('[OutputPrimitive] syncSpecsWithCanvas error:', err);
+							this.notificationService.error(`Sync error: ${err}`);
 						}
-						field.outputSpecs = updated;
 					};
 
 					const renderSpecsList = () => {
-						specsContainer.innerHTML = '';
-						if (!field.outputSpecs || field.outputSpecs.length === 0) {
-							append(specsContainer, $('div', {
-								style: 'padding: 10px; font-size: 11px; font-style: italic; color: rgba(255, 255, 255, 0.45); text-align: center; border: 1px dashed rgba(255, 255, 255, 0.1); border-radius: 4px;'
-							}, 'No other primitives detected in this schema. Drag primitives into canvas and click "Sync Primitives" above.'));
-							return;
-						}
+						try {
+							clearNode(specsContainer);
+							if (!Array.isArray(field.outputSpecs) || field.outputSpecs.length === 0) {
+								append(specsContainer, $('div', {
+									style: 'padding: 10px 14px; font-size: 11px; font-style: italic; color: rgba(255, 255, 255, 0.45); text-align: center; border: 1px dashed rgba(255, 255, 255, 0.15); border-radius: 4px; background: rgba(0, 0, 0, 0.15);'
+								}, 'No candidate primitives found in canvas. Add Browser, AI Prompt, or other primitives, then click "Sync Primitives" above.'));
+								return;
+							}
 
-						field.outputSpecs.forEach(spec => {
-							const row = append(specsContainer, $('.output-spec-row', {
-								style: 'display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; background: rgba(0, 0, 0, 0.25); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 5px; gap: 10px;'
-							}));
-
-							const leftPart = append(row, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
-							const checkbox = append(leftPart, $('input', { type: 'checkbox', style: 'cursor: pointer;' })) as HTMLInputElement;
-							checkbox.checked = spec.enabled;
-							checkbox.onchange = () => {
-								spec.enabled = checkbox.checked;
-							};
-
-							append(leftPart, $('span', { style: 'font-size: 11.5px; font-weight: 500;' }, spec.label));
-
-							const rightPart = append(row, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
-							append(rightPart, $('span', { style: 'font-size: 10.5px; opacity: 0.6;' }, 'Default View:'));
-							const formatSelect = append(rightPart, $('select', {
-								style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit;'
-							})) as HTMLSelectElement;
-
-							[
-								{ value: 'table', label: 'Table' },
-								{ value: 'markdown', label: 'Markdown' },
-								{ value: 'json', label: 'JSON' },
-								{ value: 'text', label: 'Text' }
-							].forEach(opt => {
-								const optEl = append(formatSelect, $('option', { value: opt.value }, opt.label)) as HTMLOptionElement;
-								if ((spec.defaultFormat || 'table') === opt.value) {
-									optEl.selected = true;
+							field.outputSpecs.forEach((spec, specIdx) => {
+								if (!spec) {
+									return;
 								}
+								const row = append(specsContainer, $('.output-spec-row', {
+									style: 'display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; background: rgba(0, 0, 0, 0.25); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 5px; gap: 10px;'
+								}));
+
+								const leftPart = append(row, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+								const checkbox = append(leftPart, $('input', {
+									type: 'checkbox',
+									style: 'cursor: pointer; width: 14px; height: 14px;'
+								})) as HTMLInputElement;
+								checkbox.checked = spec.enabled ?? true;
+								checkbox.onchange = () => {
+									spec.enabled = checkbox.checked;
+									this._syncDraft();
+								};
+
+								append(leftPart, $('span', {
+									style: 'font-size: 11.5px; font-weight: 500; color: #f1f5f9;'
+								}, spec.label || spec.fieldKey || `Output ${specIdx + 1}`));
+
+								const rightPart = append(row, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
+								append(rightPart, $('span', { style: 'font-size: 10.5px; opacity: 0.6;' }, 'Default View:'));
+								const formatSelect = append(rightPart, $('select', {
+									style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit;'
+								})) as HTMLSelectElement;
+
+								const formatOptions = [
+									{ value: 'table', label: 'Table' },
+									{ value: 'markdown', label: 'Markdown' },
+									{ value: 'json', label: 'JSON' },
+									{ value: 'text', label: 'Text' }
+								];
+
+								formatOptions.forEach(opt => {
+									const optEl = document.createElement('option');
+									optEl.value = opt.value;
+									optEl.textContent = opt.label;
+									if ((spec.defaultFormat || 'table') === opt.value) {
+										optEl.selected = true;
+									}
+									formatSelect.appendChild(optEl);
+								});
+
+								formatSelect.onchange = () => {
+									spec.defaultFormat = formatSelect.value;
+									this._syncDraft();
+								};
 							});
-							formatSelect.onchange = () => {
-								spec.defaultFormat = formatSelect.value;
-							};
-						});
+						} catch (err) {
+							console.error('[OutputPrimitive] renderSpecsList error:', err);
+							this.notificationService.error(`Render error: ${err}`);
+						}
 					};
 
 					syncSpecsWithCanvas();
 					renderSpecsList();
 
-					syncBtn.onclick = () => {
+					syncBtn.onclick = (e) => {
+						e.preventDefault();
+						e.stopPropagation();
 						syncSpecsWithCanvas();
 						renderSpecsList();
+						this._syncDraft();
+						const count = field.outputSpecs?.length || 0;
+						this.notificationService.info(`Synced ${count} primitive(s) into Output Manifest.`);
 					};
 				}
 			});
