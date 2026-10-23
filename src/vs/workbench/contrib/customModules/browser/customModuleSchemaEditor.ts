@@ -29,6 +29,8 @@ import { IInstantiationService } from '../../../../platform/instantiation/common
 import { URI } from '../../../../base/common/uri.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { IAgentsManagerService } from '../../agentsManager/common/agentsManager.js';
+import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
+
 
 export class CustomModuleSchemaEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.customModuleSchema';
@@ -889,6 +891,29 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'font-size: 9.5px; font-weight: 600; padding: 2px 7px; border-radius: 4px; background: rgba(6, 182, 212, 0.12); color: #22d3ee; border: 1px solid rgba(6, 182, 212, 0.25);'
 					}, `CLASS: ${field.label}`));
 				}
+
+				// Info button (circle with 'i') opening primitive usage guide & RUN_TICKETS execution behavior
+				const infoCircleBtn = append(headerLeft, $('span.primitive-info-circle-btn', {
+					style: 'display: inline-flex; align-items: center; justify-content: center; width: 19px; height: 19px; border-radius: 50%; border: 1px solid rgba(56, 189, 248, 0.45); color: #38bdf8; background: rgba(56, 189, 248, 0.08); font-size: 11px; cursor: pointer; transition: all 0.15s ease; user-select: none; margin-left: 2px;',
+					title: `View ${field.label || field.type} usage guide & RUN_TICKETS execution behavior`
+				}));
+				append(infoCircleBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.info)));
+				infoCircleBtn.onmouseenter = () => {
+					infoCircleBtn.style.background = 'rgba(56, 189, 248, 0.22)';
+					infoCircleBtn.style.borderColor = '#38bdf8';
+					infoCircleBtn.style.transform = 'scale(1.12)';
+				};
+				infoCircleBtn.onmouseleave = () => {
+					infoCircleBtn.style.background = 'rgba(56, 189, 248, 0.08)';
+					infoCircleBtn.style.borderColor = 'rgba(56, 189, 248, 0.45)';
+					infoCircleBtn.style.transform = 'scale(1)';
+				};
+				infoCircleBtn.onclick = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+					showPrimitiveHelpModal(this._container!, field.type, field.label || field.id, field.componentRef);
+				};
+
 
 				const headerRight = append(cardHeader, $('.header-right', {
 					style: 'display: flex; align-items: center; gap: 8px;'
@@ -2208,7 +2233,25 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 			append(item, $('span' + ThemeIcon.asCSSSelector(bc.icon), { style: 'font-size: 14px; opacity: 0.85; min-width: 16px; text-align: center;' }));
 			if (!this._isToolboxCompact) {
-				append(item, $('span', { style: 'font-size: 11.5px;' }, bc.label));
+				append(item, $('span', { style: 'font-size: 11.5px; flex: 1;' }, bc.label));
+				const toolboxInfoBtn = append(item, $('span.toolbox-item-info-btn', {
+					style: 'display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; color: rgba(56, 189, 248, 0.7); font-size: 11px; cursor: pointer; transition: all 0.15s ease;',
+					title: `View ${bc.label} documentation & RUN_TICKETS guide`
+				}));
+				append(toolboxInfoBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.info)));
+				toolboxInfoBtn.onmouseenter = () => {
+					toolboxInfoBtn.style.color = '#38bdf8';
+					toolboxInfoBtn.style.background = 'rgba(56, 189, 248, 0.18)';
+				};
+				toolboxInfoBtn.onmouseleave = () => {
+					toolboxInfoBtn.style.color = 'rgba(56, 189, 248, 0.7)';
+					toolboxInfoBtn.style.background = 'transparent';
+				};
+				toolboxInfoBtn.onclick = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+					showPrimitiveHelpModal(this._container!, bc.type, bc.label);
+				};
 			}
 
 			item.onclick = () => {
@@ -2266,7 +2309,25 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 				append(ccItem, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolClass), { style: 'color: #06b6d4; font-size: 13px; min-width: 16px; text-align: center;' }));
 				if (!this._isToolboxCompact) {
-					append(ccItem, $('span', { style: 'font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, cc.name));
+					append(ccItem, $('span', { style: 'font-size: 11.5px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, cc.name));
+					const ccInfoBtn = append(ccItem, $('span.toolbox-item-info-btn', {
+						style: 'display: inline-flex; align-items: center; justify-content: center; width: 16px; height: 16px; border-radius: 50%; color: rgba(6, 182, 212, 0.7); font-size: 11px; cursor: pointer; transition: all 0.15s ease;',
+						title: `View Class ${cc.name} documentation & RUN_TICKETS guide`
+					}));
+					append(ccInfoBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.info)));
+					ccInfoBtn.onmouseenter = () => {
+						ccInfoBtn.style.color = '#06b6d4';
+						ccInfoBtn.style.background = 'rgba(6, 182, 212, 0.18)';
+					};
+					ccInfoBtn.onmouseleave = () => {
+						ccInfoBtn.style.color = 'rgba(6, 182, 212, 0.7)';
+						ccInfoBtn.style.background = 'transparent';
+					};
+					ccInfoBtn.onclick = (e) => {
+						e.stopPropagation();
+						e.preventDefault();
+						showPrimitiveHelpModal(this._container!, 'reusable_class', cc.name, cc.id);
+					};
 				}
 
 				ccItem.onclick = () => {

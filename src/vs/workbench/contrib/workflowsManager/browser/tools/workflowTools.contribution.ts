@@ -16,7 +16,11 @@ import {
 	CreateTicketTool,
 	GetTicketTool,
 	RunTicketTool,
-	GetPrimitivesCatalogTool
+	GetPrimitivesCatalogTool,
+	LegacyCreateTicketToolId,
+	LegacyGetTicketToolId,
+	LegacyRunTicketToolId,
+	LegacyGetPrimitivesCatalogToolId
 } from './workflowTools.js';
 
 export class WorkflowToolsContribution extends Disposable implements IWorkbenchContribution {
@@ -45,12 +49,20 @@ export class WorkflowToolsContribution extends Disposable implements IWorkbenchC
 		this._register(toolsService.registerTool(resumeTool.getToolData(), resumeTool));
 		this._register(toolsService.registerTool(stopTool.getToolData(), stopTool));
 
+		// Primary UPPERCASE tools
 		this._register(toolsService.registerTool(createTicketTool.getToolData(), createTicketTool));
 		this._register(toolsService.registerTool(getTicketTool.getToolData(), getTicketTool));
 		this._register(toolsService.registerTool(runTicketTool.getToolData(), runTicketTool));
 		this._register(toolsService.registerTool(getCatalogTool.getToolData(), getCatalogTool));
+
+		// Legacy & lowercase aliases
+		this._register(toolsService.registerTool({ ...createTicketTool.getToolData(), id: LegacyCreateTicketToolId, toolReferenceName: 'createTickets' }, createTicketTool));
+		this._register(toolsService.registerTool({ ...getTicketTool.getToolData(), id: LegacyGetTicketToolId, toolReferenceName: 'getTickets' }, getTicketTool));
+		this._register(toolsService.registerTool({ ...runTicketTool.getToolData(), id: LegacyRunTicketToolId, toolReferenceName: 'runTickets' }, runTicketTool));
+		this._register(toolsService.registerTool({ ...getCatalogTool.getToolData(), id: LegacyGetPrimitivesCatalogToolId, toolReferenceName: 'getPrimitivesCatalog' }, getCatalogTool));
 	}
 }
+
 
 registerWorkbenchContribution2(WorkflowToolsContribution.ID, WorkflowToolsContribution, WorkbenchPhase.Eventually);
 

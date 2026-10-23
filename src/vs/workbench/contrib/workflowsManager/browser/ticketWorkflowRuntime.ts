@@ -98,11 +98,22 @@ export interface IPrimitiveCatalogItem {
 export interface ITicketWorkflowRuntimeService {
 	readonly _serviceBrand: undefined;
 
+	createTickets(options: ITicketCreateOptions): Promise<ITicketCreateResult>;
 	createTicket(options: ITicketCreateOptions): Promise<ITicketCreateResult>;
+	CREATE_TICKETS(options: ITicketCreateOptions): Promise<ITicketCreateResult>;
+
+	getTickets(workspaceUri: string | URI, ticketIdOrPath: string): Promise<ITicketGetResult>;
 	getTicket(workspaceUri: string | URI, ticketIdOrPath: string): Promise<ITicketGetResult>;
+	GET_TICKETS(workspaceUri: string | URI, ticketIdOrPath: string): Promise<ITicketGetResult>;
+
+	runTickets(options: ITicketRunOptions): Promise<ITicketRunResult>;
 	runTicket(options: ITicketRunOptions): Promise<ITicketRunResult>;
+	RUN_TICKETS(options: ITicketRunOptions): Promise<ITicketRunResult>;
+
 	getPrimitivesCatalog(workspaceUri?: string | URI): Promise<IPrimitiveCatalogItem[]>;
+	GET_PRIMITIVES_CATALOG(workspaceUri?: string | URI): Promise<IPrimitiveCatalogItem[]>;
 }
+
 
 export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 	declare readonly _serviceBrand: undefined;
@@ -748,9 +759,38 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return baseCatalog;
 	}
 
+	async createTickets(options: ITicketCreateOptions): Promise<ITicketCreateResult> {
+		return this.createTicket(options);
+	}
+
+	async CREATE_TICKETS(options: ITicketCreateOptions): Promise<ITicketCreateResult> {
+		return this.createTicket(options);
+	}
+
+	async getTickets(workspaceUri: string | URI, ticketIdOrPath: string): Promise<ITicketGetResult> {
+		return this.getTicket(workspaceUri, ticketIdOrPath);
+	}
+
+	async GET_TICKETS(workspaceUri: string | URI, ticketIdOrPath: string): Promise<ITicketGetResult> {
+		return this.getTicket(workspaceUri, ticketIdOrPath);
+	}
+
+	async runTickets(options: ITicketRunOptions): Promise<ITicketRunResult> {
+		return this.runTicket(options);
+	}
+
+	async RUN_TICKETS(options: ITicketRunOptions): Promise<ITicketRunResult> {
+		return this.runTicket(options);
+	}
+
+	async GET_PRIMITIVES_CATALOG(workspaceUri?: string | URI): Promise<IPrimitiveCatalogItem[]> {
+		return this.getPrimitivesCatalog(workspaceUri);
+	}
+
 	// -------------------------------------------------------------
 	// Private Helper Functions
 	// -------------------------------------------------------------
+
 
 	private _toUri(u: string | URI): URI {
 		if (typeof u === 'string') {

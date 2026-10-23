@@ -1078,8 +1078,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			};
 
 			for (let i = 0; i < node.pipeline.length; i++) {
-				const step: INodePipelineStep = node.pipeline[i];
-				if (step.type === 'run_ticket' && step.ticketName) {
+				const isRunTicketStep = step.type === 'run_ticket' || step.type === 'run_tickets' || step.type === 'RUN_TICKETS' || step.type === 'runTickets';
+				if (isRunTicketStep && step.ticketName) {
 					this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'${step.parameters ? ` (PARAM: ${step.parameters})` : ''}`);
 					const ticketRecord = await runTicket(step.ticketName, step.ticketType, step.ticketUri, step.parameters);
 					if (step.targetVariable) {

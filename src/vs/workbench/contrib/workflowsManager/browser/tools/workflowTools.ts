@@ -15,10 +15,20 @@ export const GetWorkflowStateToolId = 'anyagent_get_workflow_state';
 export const ResumeWorkflowStepToolId = 'anyagent_resume_workflow_step';
 export const StopWorkflowToolId = 'anyagent_stop_workflow';
 
-export const CreateTicketToolId = 'anyagent_create_ticket';
-export const GetTicketToolId = 'anyagent_get_ticket';
-export const RunTicketToolId = 'anyagent_run_ticket';
-export const GetPrimitivesCatalogToolId = 'anyagent_get_primitives_catalog';
+export const CreateTicketsToolId = 'CREATE_TICKETS';
+export const GetTicketsToolId = 'GET_TICKETS';
+export const RunTicketsToolId = 'RUN_TICKETS';
+export const GetPrimitivesCatalogToolId = 'GET_PRIMITIVES_CATALOG';
+
+// Backwards-compatible aliases
+export const CreateTicketToolId = CreateTicketsToolId;
+export const GetTicketToolId = GetTicketsToolId;
+export const RunTicketToolId = RunTicketsToolId;
+export const LegacyCreateTicketToolId = 'anyagent_create_ticket';
+export const LegacyGetTicketToolId = 'anyagent_get_ticket';
+export const LegacyRunTicketToolId = 'anyagent_run_ticket';
+export const LegacyGetPrimitivesCatalogToolId = 'anyagent_get_primitives_catalog';
+
 
 function toolResult(data: any, message?: string): IToolResult {
 	return {
@@ -305,9 +315,9 @@ export class CreateTicketTool implements IToolImpl {
 
 	getToolData(): IToolData {
 		return {
-			id: CreateTicketToolId,
-			toolReferenceName: 'createTicket',
-			displayName: localize('workflow.tool.createTicket.displayName', "Create Ticket"),
+			id: CreateTicketsToolId,
+			toolReferenceName: 'CREATE_TICKETS',
+			displayName: localize('workflow.tool.createTickets.displayName', "CREATE_TICKETS"),
 			userDescription: localize('workflow.tool.createTicket.userDescription', "Create a new ticket from a schema template in the workspace"),
 			modelDescription: 'Create a new ticket entity in the workspace based on a schema (custom module or built-in type). Initializes fields, parameters, and 4 markdown files (instruction.md, README.md, work_log.md, metadata.json).',
 			source: ToolDataSource.Internal,
@@ -393,9 +403,9 @@ export class GetTicketTool implements IToolImpl {
 
 	getToolData(): IToolData {
 		return {
-			id: GetTicketToolId,
-			toolReferenceName: 'getTicket',
-			displayName: localize('workflow.tool.getTicket.displayName', "Get Ticket"),
+			id: GetTicketsToolId,
+			toolReferenceName: 'GET_TICKETS',
+			displayName: localize('workflow.tool.getTickets.displayName', "GET_TICKETS"),
 			userDescription: localize('workflow.tool.getTicket.userDescription', "Retrieve ticket details, fields, custom metadata, and output"),
 			modelDescription: 'Query and fetch ticket details including current field values, customMetadata, execution outputs, and schema configuration by ticketId, name, or path.',
 			source: ToolDataSource.Internal,
@@ -444,7 +454,7 @@ export class GetTicketTool implements IToolImpl {
 }
 
 // -------------------------------------------------------------
-// 7. anyagent_run_ticket
+// 7. RUN_TICKETS
 // -------------------------------------------------------------
 export class RunTicketTool implements IToolImpl {
 	constructor(
@@ -453,9 +463,9 @@ export class RunTicketTool implements IToolImpl {
 
 	getToolData(): IToolData {
 		return {
-			id: RunTicketToolId,
-			toolReferenceName: 'runTicket',
-			displayName: localize('workflow.tool.runTicket.displayName', "Run Ticket Pipeline"),
+			id: RunTicketsToolId,
+			toolReferenceName: 'RUN_TICKETS',
+			displayName: localize('workflow.tool.runTickets.displayName', "RUN_TICKETS"),
 			userDescription: localize('workflow.tool.runTicket.userDescription', "Sequentially execute all primitives on a ticket schema from top to bottom"),
 			modelDescription: 'Execute a ticket as an autonomous runtime unit. Evaluates parameters, performs browser navigations/extractions, triggers AI prompts, aggregates outputs, and persists state.',
 			source: ToolDataSource.Internal,
@@ -512,7 +522,7 @@ export class RunTicketTool implements IToolImpl {
 }
 
 // -------------------------------------------------------------
-// 8. anyagent_get_primitives_catalog
+// 8. GET_PRIMITIVES_CATALOG
 // -------------------------------------------------------------
 export class GetPrimitivesCatalogTool implements IToolImpl {
 	constructor(
@@ -522,8 +532,8 @@ export class GetPrimitivesCatalogTool implements IToolImpl {
 	getToolData(): IToolData {
 		return {
 			id: GetPrimitivesCatalogToolId,
-			toolReferenceName: 'getPrimitivesCatalog',
-			displayName: localize('workflow.tool.catalog.displayName', "Get Primitives Catalog"),
+			toolReferenceName: 'GET_PRIMITIVES_CATALOG',
+			displayName: localize('workflow.tool.catalog.displayName', "GET_PRIMITIVES_CATALOG"),
 			userDescription: localize('workflow.tool.catalog.userDescription', "Get all Base Primitives and Reusable Classes with their runtime execution specifications"),
 			modelDescription: 'Retrieve the latest catalog of all 18 Base Primitives and Reusable Classes, including their data categories, supported inputs, outputs, and execution behaviors.',
 			source: ToolDataSource.Internal,
