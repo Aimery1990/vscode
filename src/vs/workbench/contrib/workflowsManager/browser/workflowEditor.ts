@@ -544,8 +544,11 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	override clearInput(): void {
-		this._clearDisplayInspectorCards();
-		this._activeDisplayRunId = null;
+		if (this._displayInspectorContainer) {
+			this._displayInspectorContainer.remove();
+			this._displayInspectorContainer = null;
+			this._displayInspectorCardsContainer = null;
+		}
 		this._contentDisposables.clear();
 		if (this._container) {
 			clearNode(this._container);
@@ -613,6 +616,9 @@ export class WorkflowEditor extends EditorPane {
 		// 2. Center Drawing Viewport (Fixed container for floating controls)
 		const canvasViewport = append(this._container, $('.workflow-canvas-viewport'));
 		this._canvasViewport = canvasViewport;
+
+		// Restore Live Display inspector if cards exist
+		this._restoreDisplayInspectorCards();
 
 		// Canvas Scroll Wrapper inside Viewport
 		const canvasWrapper = append(canvasViewport, $('.workflow-editor-canvas-wrapper'));
@@ -10313,6 +10319,9 @@ export class WorkflowEditor extends EditorPane {
 
 	private _clearDisplayInspectorCards(): void {
 		this._displayInspectorCards = [];
+		if (this._workflowUri) {
+			this._workflowExecutionService.clearDisplayCards(this._workflowUri);
+		}
 		if (this._displayInspectorCardsContainer) {
 			clearNode(this._displayInspectorCardsContainer);
 		}
@@ -10320,6 +10329,80 @@ export class WorkflowEditor extends EditorPane {
 			this._displayInspectorContainer.remove();
 			this._displayInspectorContainer = null;
 			this._displayInspectorCardsContainer = null;
+		}
+	}
+
+	private _ensureDisplayInspectorPanel(): HTMLElement | null {
+		if (!this._canvasViewport) return null;
+
+		if (this._displayInspectorContainer && this._displayInspectorContainer.isConnected) {
+			const titleText = this._displayInspectorContainer.querySelector('.inspector-title-text');
+			if (titleText) {
+				titleText.textContent = `Live Display (${this._displayInspectorCards.length})`;
+			}
+			return this._displayInspectorContainer;
+		}
+
+		const panel = document.createElement('div');
+		panel.className = 'workflow-display-inspector-panel';
+		if (this._isDisplayInspectorMinimized) {
+			panel.classList.add('minimized');
+		}
+		this._displayInspectorContainer = panel;
+
+		// Header
+		const header = append(panel, $('.workflow-display-inspector-header'));
+		const titleBox = append(header, $('.workflow-display-inspector-title'));
+		const iconBadge = append(titleBox, $('span.workflow-display-header-badge'));
+		iconBadge.textContent = 'OUTPUT';
+		const titleText = append(titleBox, $('span.inspector-title-text'));
+		titleText.textContent = `Live Display (${this._displayInspectorCards.length})`;
+
+		const actionsBox = append(header, $('.workflow-display-inspector-actions'));
+
+		// 1. Clear button
+		const clearBtn = append(actionsBox, $('button.workflow-display-btn-action.workflow-display-btn-clear'));
+		clearBtn.textContent = 'Clear';
+		clearBtn.title = 'Clear all display cards';
+		clearBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._clearDisplayInspectorCards();
+		};
+
+		// 2. Minimize / Expand button (outermost on the right)
+		const minBtn = append(actionsBox, $('button.workflow-display-btn-action.workflow-display-btn-toggle'));
+		minBtn.textContent = this._isDisplayInspectorMinimized ? '+' : '–';
+		minBtn.title = this._isDisplayInspectorMinimized ? 'Expand Inspector' : 'Minimize Inspector';
+		minBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._isDisplayInspectorMinimized = !this._isDisplayInspectorMinimized;
+			panel.classList.toggle('minimized', this._isDisplayInspectorMinimized);
+			minBtn.textContent = this._isDisplayInspectorMinimized ? '+' : '–';
+			minBtn.title = this._isDisplayInspectorMinimized ? 'Expand Inspector' : 'Minimize Inspector';
+		};
+
+		// Cards Container
+		this._displayInspectorCardsContainer = append(panel, $('.workflow-display-cards-container'));
+		this._canvasViewport.appendChild(panel);
+		return panel;
+	}
+
+	private _restoreDisplayInspectorCards(): void {
+		if (!this._canvasViewport || !this._workflowUri) return;
+		const cards = this._workflowExecutionService.getDisplayCards(this._workflowUri);
+		if (cards && cards.length > 0) {
+			this._displayInspectorCards = [...cards];
+		}
+
+		if (this._displayInspectorCards.length === 0) return;
+
+		this._ensureDisplayInspectorPanel();
+		if (!this._displayInspectorCardsContainer) return;
+		clearNode(this._displayInspectorCardsContainer);
+
+		for (const card of this._displayInspectorCards) {
+			const cardEl = this._renderDisplayInspectorCardElement(card);
+			this._displayInspectorCardsContainer.appendChild(cardEl);
 		}
 	}
 
@@ -10334,65 +10417,28 @@ export class WorkflowEditor extends EditorPane {
 			this._activeDisplayRunId = card.runId;
 		}
 
-		this._displayInspectorCards.unshift(card);
+		if (!this._displayInspectorCards.some(c => c.id === card.id)) {
+			this._displayInspectorCards.unshift(card);
+		}
 
-		if (!this._displayInspectorContainer || !this._displayInspectorContainer.isConnected) {
-			const panel = document.createElement('div');
-			panel.className = 'workflow-display-inspector-panel';
-			this._displayInspectorContainer = panel;
-
-			// Header
-			const header = append(panel, $('.workflow-display-inspector-header'));
-			const titleBox = append(header, $('.workflow-display-inspector-title'));
-			const iconBadge = append(titleBox, $('span.workflow-display-header-badge'));
-			iconBadge.textContent = 'OUTPUT';
-			const titleText = append(titleBox, $('span.inspector-title-text'));
-			titleText.textContent = `Live Display (${this._displayInspectorCards.length})`;
-
-			const actionsBox = append(header, $('.workflow-display-inspector-actions'));
-
-			// 1. Clear button
-			const clearBtn = append(actionsBox, $('button.workflow-display-btn-action.workflow-display-btn-clear'));
-			clearBtn.textContent = 'Clear';
-			clearBtn.title = 'Clear all display cards';
-			clearBtn.onclick = (e) => {
-				e.stopPropagation();
-				this._clearDisplayInspectorCards();
-			};
-
-			// 2. Minimize / Expand button (outermost on the right)
-			const minBtn = append(actionsBox, $('button.workflow-display-btn-action.workflow-display-btn-toggle'));
-			minBtn.textContent = this._isDisplayInspectorMinimized ? '+' : '–';
-			minBtn.title = this._isDisplayInspectorMinimized ? 'Expand Inspector' : 'Minimize Inspector';
-			minBtn.onclick = (e) => {
-				e.stopPropagation();
-				this._isDisplayInspectorMinimized = !this._isDisplayInspectorMinimized;
-				panel.classList.toggle('minimized', this._isDisplayInspectorMinimized);
-				minBtn.textContent = this._isDisplayInspectorMinimized ? '+' : '–';
-				minBtn.title = this._isDisplayInspectorMinimized ? 'Expand Inspector' : 'Minimize Inspector';
-			};
-
-			// Cards Container
-			this._displayInspectorCardsContainer = append(panel, $('.workflow-display-cards-container'));
-			this._canvasViewport.appendChild(panel);
-		} else {
-			const titleText = this._displayInspectorContainer.querySelector('.inspector-title-text');
-			if (titleText) {
-				titleText.textContent = `Live Display (${this._displayInspectorCards.length})`;
-			}
-			if (this._isDisplayInspectorMinimized) {
-				this._isDisplayInspectorMinimized = false;
-				this._displayInspectorContainer.classList.remove('minimized');
-				const minBtn = this._displayInspectorContainer.querySelector('.workflow-display-btn-toggle') as HTMLElement | null;
-				if (minBtn) {
-					minBtn.textContent = '–';
-					minBtn.title = 'Minimize Inspector';
-				}
+		this._ensureDisplayInspectorPanel();
+		if (this._isDisplayInspectorMinimized) {
+			this._isDisplayInspectorMinimized = false;
+			this._displayInspectorContainer?.classList.remove('minimized');
+			const minBtn = this._displayInspectorContainer?.querySelector('.workflow-display-btn-toggle') as HTMLElement | null;
+			if (minBtn) {
+				minBtn.textContent = '–';
+				minBtn.title = 'Minimize Inspector';
 			}
 		}
 
 		if (!this._displayInspectorCardsContainer) return;
 
+		const cardEl = this._renderDisplayInspectorCardElement(card);
+		this._displayInspectorCardsContainer.prepend(cardEl);
+	}
+
+	private _renderDisplayInspectorCardElement(card: IWorkflowDisplayCard): HTMLElement {
 		// Create Card element
 		const cardEl = document.createElement('div');
 		cardEl.className = 'workflow-display-card';
@@ -10455,6 +10501,9 @@ export class WorkflowEditor extends EditorPane {
 			e.stopPropagation();
 			cardEl.remove();
 			this._displayInspectorCards = this._displayInspectorCards.filter(c => c.id !== card.id);
+			if (this._workflowUri) {
+				this._workflowExecutionService.removeDisplayCard(this._workflowUri, card.id);
+			}
 			if (this._displayInspectorContainer) {
 				const titleText = this._displayInspectorContainer.querySelector('.inspector-title-text');
 				if (titleText) {
@@ -10668,8 +10717,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 		footerEl.textContent = `Type: ${typeDesc}`;
 
-		// Prepend to show latest at top
-		this._displayInspectorCardsContainer.prepend(cardEl);
+		return cardEl;
 	}
 }
 

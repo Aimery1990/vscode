@@ -63,4 +63,8 @@ export interface IWorkflowExecutionService {
 	getRunsForWorkflow(workflowUri: URI | string): IWorkflowExecutionRun[];
 	clearRuns(workflowUri?: URI | string): void;
 	resetWorkflow(workflowUri: URI | string): void;
+
+	getDisplayCards(workflowUri: URI | string): IWorkflowDisplayCard[];
+	clearDisplayCards(workflowUri: URI | string): void;
+	removeDisplayCard(workflowUri: URI | string, cardId: string): void;
 }

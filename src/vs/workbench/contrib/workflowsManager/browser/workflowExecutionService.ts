@@ -434,6 +434,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		@ITicketWorkflowRuntimeService private readonly ticketRuntimeService: ITicketWorkflowRuntimeService
 	) { }
 
+	private readonly _displayCardsByWorkflow = new Map<string, IWorkflowDisplayCard[]>();
+
 	getActiveRun(workflowUri: URI | string): IWorkflowExecutionRun | undefined {
 		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
 		const runId = this._activeRunsByWorkflow.get(uriStr);
@@ -447,6 +449,29 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	getRunsForWorkflow(workflowUri: URI | string): IWorkflowExecutionRun[] {
 		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
 		return Array.from(this._runs.values()).filter(r => r.workflowUri === uriStr);
+	}
+
+	getDisplayCards(workflowUri: URI | string): IWorkflowDisplayCard[] {
+		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+		return this._displayCardsByWorkflow.get(uriStr) || [];
+	}
+
+	clearDisplayCards(workflowUri: URI | string): void {
+		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+		this._displayCardsByWorkflow.delete(uriStr);
+	}
+
+	removeDisplayCard(workflowUri: URI | string, cardId: string): void {
+		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+		const list = this._displayCardsByWorkflow.get(uriStr);
+		if (list) {
+			const filtered = list.filter(c => c.id !== cardId);
+			if (filtered.length === 0) {
+				this._displayCardsByWorkflow.delete(uriStr);
+			} else {
+				this._displayCardsByWorkflow.set(uriStr, filtered);
+			}
+		}
 	}
 
 	clearRuns(workflowUri?: URI | string): void {
@@ -481,6 +506,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 		}
 		this.clearRuns(uriStr);
+		this.clearDisplayCards(uriStr);
 
 		const idleRun: IWorkflowExecutionRun = {
 			runId: '',
@@ -509,6 +535,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				return existing;
 			}
 		}
+
+		// Clear previous execution cards when starting a fresh full workflow run
+		this.clearDisplayCards(uriStr);
 
 		const flowchartData = await this._loadFlowchartData(uriStr, options);
 		if (!flowchartData || !flowchartData.nodes || flowchartData.nodes.length === 0) {
@@ -1435,7 +1464,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 				this._emitLog(run, 'info', `[DISPLAY] [${node.title || node.id}]\n${formattedText}`, { nodeId: node.id });
 
-				this._onDidDisplayVariable.fire({
+				const displayCard: IWorkflowDisplayCard = {
 					id: `display_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 					runId: run.runId,
 					nodeId: node.id,
@@ -1449,7 +1478,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketType,
 					outputItems,
 					ticketHandle
-				});
+				};
+
+				let cardList = this._displayCardsByWorkflow.get(run.workflowUri);
+				if (!cardList) {
+					cardList = [];
+					this._displayCardsByWorkflow.set(run.workflowUri, cardList);
+				}
+				cardList.unshift(displayCard);
+
+				this._onDidDisplayVariable.fire(displayCard);
 			} else {
 				// Fallback evaluation for general expressions
 				try {
