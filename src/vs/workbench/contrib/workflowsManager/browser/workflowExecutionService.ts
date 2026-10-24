@@ -9,7 +9,7 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
-import { IWorkflowExecutionService, IWorkflowDisplayCard } from '../common/workflowExecutionService.js';
+import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutputItem } from '../common/workflowExecutionService.js';
 import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import {
 	IWorkflowEngineOptions,
@@ -1398,7 +1398,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 				result = displayVal;
 
-				const { formattedText, summaryType, cleanValue } = this._formatDisplayOutput(displayVal);
+				const { formattedText, summaryType, cleanValue, ticketTitle, ticketId, ticketType, outputItems } = this._formatDisplayOutput(displayVal);
 
 				this._emitLog(run, 'info', `[DISPLAY] [${node.title || node.id}]\n${formattedText}`, { nodeId: node.id });
 
@@ -1409,7 +1409,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					expression: rawExpr || `DISPLAY(${rawArgsStr})`,
 					value: cleanValue,
 					formattedText,
-					timestamp: new Date().toLocaleTimeString()
+					timestamp: new Date().toLocaleTimeString(),
+					ticketTitle,
+					ticketId,
+					ticketType,
+					outputItems
 				});
 			} else {
 				// Fallback evaluation for general expressions
@@ -1573,7 +1577,15 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 	}
 
-	private _formatDisplayOutput(displayVal: any): { formattedText: string; summaryType: string; cleanValue: any } {
+	private _formatDisplayOutput(displayVal: any): {
+		formattedText: string;
+		summaryType: string;
+		cleanValue: any;
+		ticketTitle?: string;
+		ticketId?: string;
+		ticketType?: string;
+		outputItems?: IWorkflowDisplayOutputItem[];
+	} {
 		if (displayVal === undefined) {
 			return { formattedText: 'undefined', summaryType: 'undefined', cleanValue: undefined };
 		}
@@ -1658,10 +1670,30 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				});
 			}
 
+			// Build structured output items for accordion rendering
+			const outputItems: IWorkflowDisplayOutputItem[] = [];
+			for (const [key, val] of Object.entries(extractedOutputs)) {
+				const isObj = typeof val === 'object' && val !== null;
+				const strVal = isObj ? JSON.stringify(val, null, 2) : String(val).trim();
+				const isPending = !strVal || strVal.includes('Pending AI Execution');
+				const fmt = isObj ? 'json' : (strVal.startsWith('#') || strVal.includes('•') ? 'text' : 'text');
+
+				outputItems.push({
+					label: key,
+					format: fmt,
+					content: strVal,
+					status: isPending ? 'pending' : (strVal.length > 0 ? 'ready' : 'empty')
+				});
+			}
+
 			return {
 				formattedText: lines.join('\n'),
 				summaryType: `Ticket Outputs (${outputEntries.length} items)`,
-				cleanValue: extractedOutputs
+				cleanValue: extractedOutputs,
+				ticketTitle: ticketName || 'Ticket',
+				ticketId: ticketId,
+				ticketType: ticketType,
+				outputItems: outputItems
 			};
 		}
 

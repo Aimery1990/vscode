@@ -10,6 +10,13 @@ import { IWorkflowEngineOptions, IWorkflowExecutionRun, IWorkflowLogEntry } from
 
 export const IWorkflowExecutionService = createDecorator<IWorkflowExecutionService>('workflowExecutionService');
 
+export interface IWorkflowDisplayOutputItem {
+	label: string;
+	format?: string;
+	content: string;
+	status?: 'ready' | 'pending' | 'empty';
+}
+
 export interface IWorkflowDisplayCard {
 	id: string;
 	nodeId: string;
@@ -18,6 +25,10 @@ export interface IWorkflowDisplayCard {
 	value: any;
 	formattedText: string;
 	timestamp: string;
+	ticketTitle?: string;
+	ticketId?: string;
+	ticketType?: string;
+	outputItems?: IWorkflowDisplayOutputItem[];
 }
 
 export interface IWorkflowExecutionService {

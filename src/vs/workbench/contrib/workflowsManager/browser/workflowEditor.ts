@@ -10227,23 +10227,18 @@ export class WorkflowEditor extends EditorPane {
 		const timeEl = append(metaBox, $('.workflow-display-card-time'));
 		timeEl.textContent = card.timestamp;
 
-		const cardActions = append(cardHeader, $('.workflow-display-card-actions'));
-		const copyBtn = append(cardActions, $('button.workflow-display-btn-action'));
-		copyBtn.textContent = 'Copy';
-		copyBtn.title = 'Copy value';
-		copyBtn.onclick = async (e) => {
-			e.stopPropagation();
+		const copyText = async (text: string): Promise<boolean> => {
 			let ok = false;
 			try {
 				if (navigator?.clipboard?.writeText) {
-					await navigator.clipboard.writeText(card.formattedText);
+					await navigator.clipboard.writeText(text);
 					ok = true;
 				}
 			} catch {}
 			if (!ok) {
 				try {
 					const ta = document.createElement('textarea');
-					ta.value = card.formattedText;
+					ta.value = text;
 					ta.style.position = 'fixed';
 					ta.style.left = '-9999px';
 					ta.style.top = '-9999px';
@@ -10256,10 +10251,20 @@ export class WorkflowEditor extends EditorPane {
 			}
 			if (!ok) {
 				try {
-					await this._clipboardService.writeText(card.formattedText);
+					await this._clipboardService.writeText(text);
 					ok = true;
 				} catch {}
 			}
+			return ok;
+		};
+
+		const cardActions = append(cardHeader, $('.workflow-display-card-actions'));
+		const copyBtn = append(cardActions, $('button.workflow-display-btn-action'));
+		copyBtn.textContent = 'Copy';
+		copyBtn.title = 'Copy entire card value';
+		copyBtn.onclick = async (e) => {
+			e.stopPropagation();
+			const ok = await copyText(card.formattedText);
 			copyBtn.textContent = ok ? 'Copied!' : 'Failed';
 			setTimeout(() => { if (copyBtn.isConnected) copyBtn.textContent = 'Copy'; }, 1500);
 		};
@@ -10288,9 +10293,104 @@ export class WorkflowEditor extends EditorPane {
 		const exprEl = append(cardEl, $('.workflow-display-card-expr'));
 		exprEl.textContent = card.expression;
 
-		// Card Body
-		const bodyEl = append(cardEl, $('.workflow-display-card-body'));
-		bodyEl.textContent = card.formattedText;
+		// Card Body / Outputs Sections
+		if (card.outputItems && card.outputItems.length > 0) {
+			// Ticket Meta Banner if available
+			if (card.ticketTitle || card.ticketId) {
+				const bannerEl = append(cardEl, $('.workflow-display-ticket-banner'));
+				const bannerTitle = append(bannerEl, $('span.workflow-display-ticket-title'));
+				bannerTitle.textContent = `${card.ticketTitle || 'Ticket'}${card.ticketId ? ` (${card.ticketId})` : ''}`;
+				if (card.ticketType) {
+					const bannerType = append(bannerEl, $('span.workflow-display-ticket-type'));
+					bannerType.textContent = card.ticketType;
+				}
+			}
+
+			// Sections Toolbar (Expand All / Collapse All)
+			const sectionsToolbar = append(cardEl, $('.workflow-display-sections-toolbar'));
+			const countLabel = append(sectionsToolbar, $('span.workflow-display-sections-count'));
+			countLabel.textContent = `Outputs (${card.outputItems.length})`;
+
+			const toggleAllBtn = append(sectionsToolbar, $('button.workflow-display-btn-toggle-all'));
+			toggleAllBtn.textContent = 'Collapse All';
+
+			const sectionsContainer = append(cardEl, $('.workflow-display-sections-container'));
+			const sectionToggles: ((open: boolean) => void)[] = [];
+			let areAllExpanded = true;
+
+			card.outputItems.forEach((item, idx) => {
+				const sectionEl = append(sectionsContainer, $('.workflow-output-section-strip'));
+
+				// Strip Header
+				const stripHeader = append(sectionEl, $('.workflow-output-section-header'));
+				stripHeader.title = 'Click to expand / collapse';
+
+				const leftGroup = append(stripHeader, $('.workflow-output-section-left'));
+				const chevron = append(leftGroup, $('span.workflow-output-chevron'));
+				chevron.textContent = '▼';
+
+				const indexBadge = append(leftGroup, $('span.workflow-output-index-badge'));
+				indexBadge.textContent = `#${idx + 1}`;
+
+				const titleSpan = append(leftGroup, $('span.workflow-output-title'));
+				titleSpan.textContent = item.label;
+
+				if (item.format) {
+					const formatBadge = append(leftGroup, $('span.workflow-output-format-badge'));
+					formatBadge.textContent = item.format.toUpperCase();
+				}
+
+				if (item.status) {
+					const statusBadge = append(leftGroup, $(`span.workflow-output-status-badge.${item.status}`));
+					statusBadge.textContent = item.status === 'ready' ? 'Ready' : (item.status === 'pending' ? 'Pending' : 'Empty');
+				}
+
+				// Right Action: Item Copy
+				const rightGroup = append(stripHeader, $('.workflow-output-section-right'));
+				const itemCopyBtn = append(rightGroup, $('button.workflow-display-btn-action.output-item-copy'));
+				itemCopyBtn.textContent = 'Copy';
+				itemCopyBtn.title = 'Copy this output content';
+				itemCopyBtn.onclick = async (e) => {
+					e.stopPropagation();
+					const ok = await copyText(item.content);
+					itemCopyBtn.textContent = ok ? 'Copied!' : 'Failed';
+					setTimeout(() => { if (itemCopyBtn.isConnected) itemCopyBtn.textContent = 'Copy'; }, 1500);
+				};
+
+				// Strip Content Body
+				const stripBody = append(sectionEl, $('.workflow-output-section-body'));
+				const preContent = append(stripBody, $('pre.workflow-output-pre'));
+				preContent.textContent = item.content;
+
+				// Expand first item by default, collapse others if many
+				let isExpanded = idx === 0 || card.outputItems!.length <= 2;
+				const setExpanded = (expanded: boolean) => {
+					isExpanded = expanded;
+					sectionEl.classList.toggle('expanded', isExpanded);
+					chevron.textContent = isExpanded ? '▼' : '▶';
+					stripBody.style.display = isExpanded ? 'block' : 'none';
+				};
+				setExpanded(isExpanded);
+
+				stripHeader.onclick = (e) => {
+					e.stopPropagation();
+					setExpanded(!isExpanded);
+				};
+
+				sectionToggles.push((open: boolean) => setExpanded(open));
+			});
+
+			toggleAllBtn.onclick = (e) => {
+				e.stopPropagation();
+				areAllExpanded = !areAllExpanded;
+				sectionToggles.forEach(t => t(areAllExpanded));
+				toggleAllBtn.textContent = areAllExpanded ? 'Collapse All' : 'Expand All';
+			};
+		} else {
+			// Card Body Fallback
+			const bodyEl = append(cardEl, $('.workflow-display-card-body'));
+			bodyEl.textContent = card.formattedText;
+		}
 
 		// Card Footer
 		const footerEl = append(cardEl, $('.workflow-display-card-footer'));
