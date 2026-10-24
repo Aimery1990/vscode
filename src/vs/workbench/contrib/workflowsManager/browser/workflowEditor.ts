@@ -5875,7 +5875,7 @@ export class WorkflowEditor extends EditorPane {
 		addChip('CREATE_TICKETS', `@new_ticket = CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`);
 		addChip('GET_TICKETS', '@ticket_data = GET_TICKETS(ticket_name="")');
 		addChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
-		addChip('DISPLAY', 'DISPLAY(@new_ticket)');
+		addChip('DISPLAY', 'DISPLAY(new_ticket)');
 
 		// Row 3: Multiline Code Area (unified return variable + function call)
 		const codeRow = append(draftWrapper, $('.node-function-code-row'));
@@ -5885,7 +5885,7 @@ export class WorkflowEditor extends EditorPane {
 		codeArea.rows = 3;
 		codeArea.spellcheck = false;
 		codeArea.value = initialExpr;
-		codeArea.placeholder = '@res = RUN_TICKETS(ticket_name="", params={})';
+		codeArea.placeholder = 'res = RUN_TICKETS(ticket_name="", params={})';
 		codeArea.onmousedown = (e) => e.stopPropagation();
 		codeArea.onclick = (e) => e.stopPropagation();
 

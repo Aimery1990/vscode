@@ -385,9 +385,16 @@ class PythonExpressionEvaluator {
 			if (this.context && Object.prototype.hasOwnProperty.call(this.context, token)) {
 				return this.context[token];
 			}
+			const withAt = `@${token}`;
+			if (this.context && Object.prototype.hasOwnProperty.call(this.context, withAt)) {
+				return this.context[withAt];
+			}
 			const normalizedToken = token.replace(/[^a-zA-Z0-9_]/g, '_');
 			if (this.context && Object.prototype.hasOwnProperty.call(this.context, normalizedToken)) {
 				return this.context[normalizedToken];
+			}
+			if (this.context && Object.prototype.hasOwnProperty.call(this.context, `@${normalizedToken}`)) {
+				return this.context[`@${normalizedToken}`];
 			}
 			// If it has a hyphen, it's a ticket or slug entity; return the entity string instead of throwing NameError
 			if (token.includes('-')) {
@@ -1157,6 +1164,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						}
 					}
 					run.contextVariables[varKey] = val;
+					run.contextVariables[`@${varKey}`] = val;
 					this._emitLog(run, 'info', `[Step #${i + 1}] Variable assigned: @${varKey} = ${JSON.stringify(val)}`);
 				}
 			}
@@ -1415,6 +1423,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 			if (targetVar) {
 				run.contextVariables[targetVar] = result;
+				run.contextVariables[`@${targetVar}`] = result;
 				const preview = typeof result === 'object' ? JSON.stringify(result) : String(result);
 				this._emitLog(run, 'info', `[Step #${stepIndex + 1} FX] Output stored in @${targetVar}: ${preview.substring(0, 150)}`, { nodeId: node.id });
 			} else {
@@ -1514,10 +1523,29 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		if (s === 'false') return false;
 		if (s === 'null' || s === 'None') return null;
 
-		// Direct variable reference
-		if (s.startsWith('@')) {
-			const varName = s.substring(1).trim();
-			return context[varName] !== undefined ? context[varName] : undefined;
+		// Direct variable reference (with or without @) or property path
+		const cleanRef = s.startsWith('@') ? s.substring(1).trim() : s;
+
+		// Check property path (e.g. new_ticket.outputs, @new_ticket.fields)
+		if (cleanRef.includes('.')) {
+			const parts = cleanRef.split('.');
+			const rootVar = parts[0];
+			let val = context[rootVar] !== undefined ? context[rootVar] : context[`@${rootVar}`];
+			if (val !== undefined) {
+				for (let i = 1; i < parts.length; i++) {
+					if (val === undefined || val === null) break;
+					val = val[parts[i]];
+				}
+				if (val !== undefined) return val;
+			}
+		}
+
+		// Direct variable lookup in context (with or without @)
+		if (context[cleanRef] !== undefined) {
+			return context[cleanRef];
+		}
+		if (context[`@${cleanRef}`] !== undefined) {
+			return context[`@${cleanRef}`];
 		}
 		if (context[s] !== undefined) {
 			return context[s];
@@ -1526,9 +1554,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		// JSON Object / Array literal
 		if ((s.startsWith('{') && s.endsWith('}')) || (s.startsWith('[') && s.endsWith(']'))) {
 			try {
-				const replaced = s.replace(/@([a-zA-Z0-9_\u4e00-\u9fa5]+)/g, (_, name) => {
-					const val = context[name];
-					return val !== undefined ? JSON.stringify(val) : 'null';
+				const replaced = s.replace(/@?([a-zA-Z0-9_\u4e00-\u9fa5]+)/g, (fullMatch, name) => {
+					const val = context[name] !== undefined ? context[name] : context[`@${name}`];
+					return val !== undefined ? JSON.stringify(val) : fullMatch;
 				});
 				const fixedJson = replaced.replace(/([{,]\s*)([a-zA-Z0-9_]+)\s*:/g, '$1"$2":');
 				return JSON.parse(fixedJson);
