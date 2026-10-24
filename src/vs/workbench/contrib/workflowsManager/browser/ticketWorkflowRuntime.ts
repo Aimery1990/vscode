@@ -189,10 +189,23 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						customMetadata[fKey] = JSON.stringify(paramObj);
 					} else if (f.type === 'browser') {
 						const urlVal = initialFields[fKey] || f.defaultUrl || '';
-						customMetadata[fKey] = String(urlVal);
+						const contentVal = (initialFields[fKey] && typeof initialFields[fKey] === 'object' && initialFields[fKey].content) || f.defaultContent || '';
+						customMetadata[fKey] = JSON.stringify({
+							url: String(urlVal),
+							content: String(contentVal),
+							credentials: f.credentials || [],
+							lastFetched: contentVal ? new Date().toISOString() : ''
+						});
 					} else if (f.type === 'prompt') {
-						const promptVal = initialFields[fKey] || f.defaultContent || '';
-						customMetadata[fKey] = String(promptVal);
+						const promptVal = (typeof initialFields[fKey] === 'string' ? initialFields[fKey] : '') || f.defaultContent || '';
+						customMetadata[fKey] = JSON.stringify({
+							prompt: String(promptVal),
+							targetMode: f.targetMode || 'model',
+							targetModel: f.targetModel || 'gpt-4o',
+							targetAgentId: f.targetAgentId || '',
+							targetAgentName: f.targetAgentName || '',
+							output: ''
+						});
 					} else if (initialFields[fKey] !== undefined) {
 						customMetadata[fKey] = typeof initialFields[fKey] === 'object' ? JSON.stringify(initialFields[fKey]) : String(initialFields[fKey]);
 					} else if (initialFields[f.id] !== undefined) {

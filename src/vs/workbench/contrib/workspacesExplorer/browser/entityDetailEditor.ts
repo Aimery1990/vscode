@@ -253,6 +253,14 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		const checkDirs: URI[] = [];
+
+		// 1. Global directory has priority for custom modules defined/updated in the Schema Designer
+		const savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
+		const userHome = this._environmentService.userHome.fsPath;
+		const resolvedGlobal = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : (savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type'));
+		checkDirs.push(URI.file(resolvedGlobal));
+
+		// 2. Local workspace directory hierarchy
 		let curr = workspaceUri;
 		while (curr.path !== '/' && curr.path !== '\\' && curr.path !== '.') {
 			checkDirs.push(URI.joinPath(curr, '.agents', 'entity_type'));
@@ -261,12 +269,6 @@ export class EntityDetailEditor extends EditorPane {
 			if (parent.path === curr.path) break;
 			curr = parent;
 		}
-
-		// Global directory
-		const savedPath = this._storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
-		const userHome = this._environmentService.userHome.fsPath;
-		const resolvedGlobal = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : (savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type'));
-		checkDirs.push(URI.file(resolvedGlobal));
 
 		for (const dir of checkDirs) {
 			try {
@@ -1195,14 +1197,17 @@ export class EntityDetailEditor extends EditorPane {
 
 		// 1. Parse ticket.md
 		let inSelfDefined = false;
+		let currentCustomKey: string | null = null;
 		const ticketLines = ticketContent.split(/\r?\n/);
 		for (const line of ticketLines) {
 			if (line.startsWith('### Self Defined Data')) {
 				inSelfDefined = true;
+				currentCustomKey = null;
 				continue;
 			}
 			if (line.startsWith('### ') || (line.startsWith('## ') && !line.startsWith('## Overview'))) {
 				inSelfDefined = false;
+				currentCustomKey = null;
 			}
 			const match = line.match(/^\s*-\s*\*\*([^*]+)\*\*:\s*(.*)$/);
 			if (match) {
@@ -1210,9 +1215,13 @@ export class EntityDetailEditor extends EditorPane {
 				const val = match[2].trim().replace(/^[`'"]+|[`'"]+$/g, '');
 				if (inSelfDefined && line.startsWith('  -')) {
 					customMetadata[key] = val;
+					currentCustomKey = key;
 				} else {
 					metadata[key] = val;
+					currentCustomKey = null;
 				}
+			} else if (inSelfDefined && currentCustomKey && !line.startsWith('#') && !line.startsWith('---') && !line.match(/^\s*-\s*\*\*/)) {
+				customMetadata[currentCustomKey] = (customMetadata[currentCustomKey] || '') + '\n' + line;
 			}
 		}
 
@@ -3380,7 +3389,7 @@ ${rawErr}
 			let resolvedText = '';
 
 			if (this._container) {
-				const matchedCard = this._container.querySelector(`.custom-primitive-card[data-field-key="${specKey}"]`);
+				const matchedCard = this._container.querySelector(`.section-card[data-field-key="${specKey}"], [data-field-key="${specKey}"]`);
 				if (matchedCard) {
 					const browserContent = matchedCard.querySelector('.browser-content-display') as HTMLElement | null;
 					const promptContent = matchedCard.querySelector('.prompt-output-display') as HTMLElement | null;
@@ -3394,21 +3403,44 @@ ${rawErr}
 
 			if (!resolvedText && this._lastParsedData?.customMetadata) {
 				const mVal = this._lastParsedData.customMetadata[specKey];
+				const matchingField = this._lastCustomModule?.fields?.find((f: any) =>
+					(f.label && f.label.toLowerCase() === specKey.toLowerCase()) ||
+					(f.id && f.id.toLowerCase() === specKey.toLowerCase())
+				);
+				const isBrowserField = matchingField?.type === 'browser' || specKey.toLowerCase().includes('browser');
+				const isPromptField = matchingField?.type === 'prompt' || specKey.toLowerCase().includes('prompt');
+
 				if (typeof mVal === 'string') {
 					try {
 						const parsed = JSON.parse(mVal);
 						if (typeof parsed === 'object' && parsed !== null) {
 							const pRec = parsed as Record<string, unknown>;
-							resolvedText = String(pRec.output ?? pRec.content ?? pRec.result ?? mVal);
-						} else {
-							resolvedText = mVal;
+							if (isBrowserField) {
+								resolvedText = String(pRec.content ?? matchingField?.defaultContent ?? '');
+							} else if (isPromptField) {
+								resolvedText = String(pRec.output ?? '');
+							} else {
+								resolvedText = String(pRec.output ?? pRec.content ?? pRec.result ?? '');
+							}
+						} else if (isBrowserField) {
+							resolvedText = matchingField?.defaultContent || '';
+						} else if (isPromptField) {
+							resolvedText = '';
 						}
 					} catch {
-						resolvedText = mVal;
+						if (isBrowserField) {
+							resolvedText = matchingField?.defaultContent || '';
+						}
 					}
 				} else if (typeof mVal === 'object' && mVal !== null) {
 					const mRec = mVal as Record<string, unknown>;
-					resolvedText = String(mRec.output ?? mRec.content ?? mRec.result ?? JSON.stringify(mVal, null, 2));
+					if (isBrowserField) {
+						resolvedText = String(mRec.content ?? matchingField?.defaultContent ?? '');
+					} else if (isPromptField) {
+						resolvedText = String(mRec.output ?? '');
+					} else {
+						resolvedText = String(mRec.output ?? mRec.content ?? mRec.result ?? '');
+					}
 				}
 			}
 
@@ -4926,10 +4958,26 @@ ${interpolatedPrompt}`;
 							let itemFormat = spec.defaultFormat || 'text';
 							const specData = savedMap[spec.fieldKey] || savedMap[spec.label];
 
+							// Find matching schema field to determine its primitive type
+							const matchingField = customModule?.fields?.find((f: any) =>
+								(f.label && f.label.toLowerCase() === spec.fieldKey.toLowerCase()) ||
+								(f.id && f.id.toLowerCase() === spec.fieldKey.toLowerCase()) ||
+								(f.label && f.label.toLowerCase() === spec.label.toLowerCase()) ||
+								(f.id && f.id.toLowerCase() === spec.label.toLowerCase())
+							);
+							const isBrowserField = matchingField?.type === 'browser' || spec.fieldKey.toLowerCase().includes('browser') || spec.label.toLowerCase().includes('browser');
+							const isPromptField = matchingField?.type === 'prompt' || spec.fieldKey.toLowerCase().includes('prompt') || spec.label.toLowerCase().includes('summary') || spec.label.toLowerCase().includes('instruction');
+
 							if (specData) {
 								if (typeof specData === 'object' && specData !== null) {
 									const sRec = specData as Record<string, unknown>;
-									itemText = String(sRec.text ?? sRec.content ?? sRec.result ?? sRec.output ?? JSON.stringify(specData, null, 2));
+									if (isBrowserField) {
+										itemText = String(sRec.content ?? sRec.text ?? '');
+									} else if (isPromptField) {
+										itemText = String(sRec.output ?? sRec.result ?? '');
+									} else {
+										itemText = String(sRec.text ?? sRec.content ?? sRec.result ?? sRec.output ?? JSON.stringify(specData, null, 2));
+									}
 									if (sRec.format) { itemFormat = String(sRec.format); }
 								} else {
 									itemText = String(specData);
@@ -4942,28 +4990,60 @@ ${interpolatedPrompt}`;
 											const pObj = JSON.parse(primRaw);
 											if (typeof pObj === 'object' && pObj !== null) {
 												const pRec = pObj as Record<string, unknown>;
-												itemText = String(pRec.output ?? pRec.content ?? pRec.result ?? primRaw);
+												if (isBrowserField) {
+													itemText = String(pRec.content ?? matchingField?.defaultContent ?? '');
+												} else if (isPromptField) {
+													itemText = String(pRec.output ?? '');
+												} else {
+													itemText = String(pRec.output ?? pRec.content ?? pRec.result ?? '');
+												}
+											} else if (isBrowserField) {
+												itemText = matchingField?.defaultContent || '';
+											} else if (isPromptField) {
+												itemText = '';
 											} else {
 												itemText = primRaw;
 											}
 										} catch {
-											itemText = primRaw;
+											if (isBrowserField) {
+												itemText = matchingField?.defaultContent || '';
+											} else if (isPromptField) {
+												itemText = '';
+											} else {
+												itemText = primRaw;
+											}
 										}
 									} else if (typeof primRaw === 'object' && primRaw !== null) {
 										const pRec = primRaw as Record<string, unknown>;
-										itemText = String(pRec.output ?? pRec.content ?? pRec.result ?? JSON.stringify(primRaw, null, 2));
+										if (isBrowserField) {
+											itemText = String(pRec.content ?? matchingField?.defaultContent ?? '');
+										} else if (isPromptField) {
+											itemText = String(pRec.output ?? '');
+										} else {
+											itemText = String(pRec.output ?? pRec.content ?? pRec.result ?? '');
+										}
 									}
+								} else if (isBrowserField && matchingField?.defaultContent) {
+									itemText = matchingField.defaultContent;
 								}
 							}
 
 							let itemViewportHtml = '';
-							if (itemFormat === 'table') {
+							if (!itemText) {
+								const notReadyHint = isBrowserField
+									? 'Web content not fetched yet. Click "Fetch (Silent)" in the Browser card above to extract content.'
+									: (isPromptField
+										? 'No AI output generated yet. Run Model or Agent in the Prompt card above or run workflow.'
+										: 'No output data recorded yet.');
+								itemViewportHtml = `<div style="opacity: 0.45; font-style: italic; font-size: 11px; padding: 4px 0;">${notReadyHint}</div>`;
+							} else if (itemFormat === 'table') {
 								itemViewportHtml = this._renderResultTableHtml(itemText);
 							} else if (itemFormat === 'markdown') {
-								itemViewportHtml = itemText ? this._markdownToHtml(itemText) : '<span style="opacity: 0.4; font-style: italic;">No markdown content to display.</span>';
+								itemViewportHtml = this._markdownToHtml(itemText);
 							} else if (itemFormat === 'json') {
+								itemViewportHtml = this._renderResultJsonHtml(itemText);
 							} else {
-								itemViewportHtml = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${itemText ? this._escapeHtml(itemText) : '<span style="opacity: 0.4; font-style: italic;">No text content.</span>'}</pre>`;
+								itemViewportHtml = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(itemText)}</pre>`;
 							}
 
 							itemsHtml += `
