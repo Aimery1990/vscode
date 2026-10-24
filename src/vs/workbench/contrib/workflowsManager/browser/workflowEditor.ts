@@ -544,6 +544,8 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	override clearInput(): void {
+		this._clearDisplayInspectorCards();
+		this._activeDisplayRunId = null;
 		this._contentDisposables.clear();
 		if (this._container) {
 			clearNode(this._container);
@@ -577,6 +579,10 @@ export class WorkflowEditor extends EditorPane {
 		let renderPending = false;
 		this._contentDisposables.add(this._workflowExecutionService.onDidChangeRunState(run => {
 			if (this._workflowUri && (run.workflowUri === this._workflowUri.toString() || run.workflowName === (this.input as any)?.name)) {
+				if (run.status === 'running' && this._activeDisplayRunId !== run.runId) {
+					this._activeDisplayRunId = run.runId;
+					this._clearDisplayInspectorCards();
+				}
 				if (!renderPending) {
 					renderPending = true;
 					requestAnimationFrame(() => {
@@ -1969,6 +1975,7 @@ export class WorkflowEditor extends EditorPane {
 			if (!this._workflowUri) return;
 			try {
 				this._openLogDrawer();
+				this._clearDisplayInspectorCards();
 				await this._workflowExecutionService.executeWorkflow(this._workflowUri, {
 					mode: 'standard',
 					initialData: this._data
@@ -1991,6 +1998,10 @@ export class WorkflowEditor extends EditorPane {
 			if (!this._workflowUri) return;
 			try {
 				this._openLogDrawer();
+				const activeRun = this._workflowExecutionService.getActiveRun(this._workflowUri);
+				if (!activeRun || activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'stopped') {
+					this._clearDisplayInspectorCards();
+				}
 				await this._workflowExecutionService.stepWorkflow(this._workflowUri, {
 					initialData: this._data
 				});
@@ -10298,9 +10309,30 @@ export class WorkflowEditor extends EditorPane {
 	private _displayInspectorCardsContainer: HTMLElement | null = null;
 	private _displayInspectorCards: IWorkflowDisplayCard[] = [];
 	private _isDisplayInspectorMinimized = false;
+	private _activeDisplayRunId: string | null = null;
+
+	private _clearDisplayInspectorCards(): void {
+		this._displayInspectorCards = [];
+		if (this._displayInspectorCardsContainer) {
+			clearNode(this._displayInspectorCardsContainer);
+		}
+		if (this._displayInspectorContainer) {
+			this._displayInspectorContainer.remove();
+			this._displayInspectorContainer = null;
+			this._displayInspectorCardsContainer = null;
+		}
+	}
 
 	private _addDisplayInspectorCard(card: IWorkflowDisplayCard): void {
 		if (!this._canvasViewport) return;
+
+		// Automatically clear cards from previous workflow execution runs when a new run begins
+		if (card.runId && this._activeDisplayRunId && card.runId !== this._activeDisplayRunId) {
+			this._activeDisplayRunId = card.runId;
+			this._clearDisplayInspectorCards();
+		} else if (card.runId && !this._activeDisplayRunId) {
+			this._activeDisplayRunId = card.runId;
+		}
 
 		this._displayInspectorCards.unshift(card);
 
@@ -10335,13 +10367,7 @@ export class WorkflowEditor extends EditorPane {
 			clearBtn.title = 'Clear all display cards';
 			clearBtn.onclick = (e) => {
 				e.stopPropagation();
-				this._displayInspectorCards = [];
-				if (this._displayInspectorCardsContainer) {
-					clearNode(this._displayInspectorCardsContainer);
-				}
-				panel.remove();
-				this._displayInspectorContainer = null;
-				this._displayInspectorCardsContainer = null;
+				this._clearDisplayInspectorCards();
 			};
 
 			// Cards Container

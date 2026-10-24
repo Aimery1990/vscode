@@ -19,6 +19,7 @@ export interface IWorkflowDisplayOutputItem {
 
 export interface IWorkflowDisplayCard {
 	id: string;
+	runId?: string;
 	nodeId: string;
 	nodeTitle: string;
 	expression: string;

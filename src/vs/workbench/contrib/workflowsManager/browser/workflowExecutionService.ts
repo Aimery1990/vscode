@@ -1427,6 +1427,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 				this._onDidDisplayVariable.fire({
 					id: `display_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+					runId: run.runId,
 					nodeId: node.id,
 					nodeTitle: node.title || node.id,
 					expression: rawExpr || `DISPLAY(${rawArgsStr})`,
