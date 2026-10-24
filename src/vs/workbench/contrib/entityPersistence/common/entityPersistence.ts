@@ -97,6 +97,7 @@ export interface ICustomField {
 	targetAgentName?: string;
 	defaultFormat?: string;
 	outputSpecs?: IOutputSpec[];
+	debugPromptOutput?: string;
 }
 
 export interface ICompositeComponent {

@@ -1611,12 +1611,16 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'display: flex; align-items: center; gap: 8px;'
 					}));
 					append(contentHeaderLeft, $('span', {
-						style: 'font-size: 11px; font-weight: 600; opacity: 0.85; text-transform: uppercase; color: #94a3b8;'
-					}, 'Extracted Web Content (AI-Ready Preview):'));
+						style: 'font-size: 11px; font-weight: 600; opacity: 0.9; text-transform: uppercase; color: #94a3b8;'
+					}, 'Debug: Extracted Web Content (Test Preview):'));
+
+					append(contentHeaderLeft, $('span.browser-debug-badge', {
+						style: 'font-size: 9.5px; padding: 2px 6px; border-radius: 3px; background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); font-weight: 600;'
+					}, 'Template Debug Only'));
 
 					const statusBadge = append(contentHeaderLeft, $('span.browser-fetch-status', {
 						style: 'font-size: 10px; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); opacity: 0.75;'
-					}, field.defaultContent ? 'Preloaded default content' : 'Not tested yet'));
+					}, field.defaultContent ? 'Preloaded test content' : 'Not tested yet'));
 
 					const contentHeaderRight = append(contentHeader, $('div', {
 						style: 'display: flex; gap: 6px;'
@@ -1638,7 +1642,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					const resetPlaceholder = () => {
 						clearNode(contentDisplay);
-						append(contentDisplay, $('span', { style: 'opacity: 0.4; font-style: italic;' }, 'No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to test webpage extraction.'));
+						append(contentDisplay, $('span', { style: 'opacity: 0.4; font-style: italic;' }, 'No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to test webpage extraction during template design. (This is debug preview only, not saved to ticket instances)'));
 					};
 
 					if (field.defaultContent) {
@@ -2240,6 +2244,94 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					};
 
 					updateReferencePreview();
+
+					// Debug: AI Prompt Test Execution Area (Template Preview)
+					const promptDebugArea = append(promptSchemaBox, $('.prompt-debug-container', {
+						style: 'display: flex; flex-direction: column; gap: 8px; margin-top: 6px; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.08);'
+					}));
+
+					const debugHeader = append(promptDebugArea, $('div', {
+						style: 'display: flex; justify-content: space-between; align-items: center;'
+					}));
+
+					const debugHeaderLeft = append(debugHeader, $('div', {
+						style: 'display: flex; align-items: center; gap: 8px;'
+					}));
+
+					append(debugHeaderLeft, $('span', {
+						style: 'font-size: 11px; font-weight: 600; opacity: 0.9; text-transform: uppercase; color: #60a5fa;'
+					}, 'Debug: AI Execution Output (Test Preview):'));
+
+					append(debugHeaderLeft, $('span.prompt-debug-badge', {
+						style: 'font-size: 9.5px; padding: 2px 6px; border-radius: 3px; background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); font-weight: 600;'
+					}, 'Template Debug Only'));
+
+					const promptStatusBadge = append(debugHeaderLeft, $('span.prompt-test-status', {
+						style: 'font-size: 10px; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); opacity: 0.75;'
+					}, field.debugPromptOutput ? 'Cached test output' : 'Not tested yet'));
+
+					const debugHeaderRight = append(debugHeader, $('div', {
+						style: 'display: flex; gap: 6px; align-items: center;'
+					}));
+
+					// Test Prompt Button
+					const testPromptBtn = append(debugHeaderRight, $('button.monaco-button', {
+						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(59, 130, 246, 0.22); border: 1px solid rgba(59, 130, 246, 0.5); color: #60a5fa; transition: all 0.15s ease;'
+					})) as HTMLButtonElement;
+					append(testPromptBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
+					append(testPromptBtn, $('span', {}, 'Test Prompt (Run AI)'));
+
+					const copyPromptOutBtn = append(debugHeaderRight, $('button.monaco-button', {
+						style: 'background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; opacity: 0.8; cursor: pointer; color: inherit;'
+					}));
+					copyPromptOutBtn.innerText = 'Copy Output';
+
+					const clearPromptOutBtn = append(debugHeaderRight, $('button.monaco-button', {
+						style: 'background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; opacity: 0.8; cursor: pointer; color: inherit;'
+					}));
+					clearPromptOutBtn.innerText = 'Clear';
+
+					const promptOutputDisplay = append(promptDebugArea, $('.prompt-output-display', {
+						style: 'min-height: 110px; max-height: 260px; overflow-y: auto; padding: 10px 12px; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; color: #e2e8f0;'
+					}));
+
+					const resetPromptOutputPlaceholder = () => {
+						clearNode(promptOutputDisplay);
+						append(promptOutputDisplay, $('span', { style: 'opacity: 0.4; font-style: italic;' }, 'No test response yet. Click "Test Prompt (Run AI)" to test your instruction with the configured AI model/agent during template design. (This is debug preview only, not saved to ticket instances)'));
+					};
+
+					if (field.debugPromptOutput) {
+						promptOutputDisplay.textContent = field.debugPromptOutput;
+					} else {
+						resetPromptOutputPlaceholder();
+					}
+
+					copyPromptOutBtn.onclick = () => {
+						const text = promptOutputDisplay.textContent || '';
+						if (text && !text.startsWith('No test response')) {
+							this._clipboardService.writeText(text);
+							this.notificationService.info('Prompt output copied to clipboard.');
+						}
+					};
+
+					clearPromptOutBtn.onclick = () => {
+						resetPromptOutputPlaceholder();
+						promptStatusBadge.textContent = 'Cleared';
+						promptStatusBadge.style.color = '';
+						field.debugPromptOutput = '';
+						this._syncDraft();
+					};
+
+					testPromptBtn.onclick = async () => {
+						testPromptBtn.disabled = true;
+						testPromptBtn.style.opacity = '0.5';
+						try {
+							await this._executePromptTest(promptTextarea, promptStatusBadge, promptOutputDisplay, field, allSchemaFields);
+						} finally {
+							testPromptBtn.disabled = false;
+							testPromptBtn.style.opacity = '1';
+						}
+					};
 				}
 
 				if (field.type === 'output' || field.type === 'result') {
@@ -3263,6 +3355,109 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				field.defaultContent = formattedErr;
 				this._syncDraft();
 			}
+		}
+	}
+
+	private async _executePromptTest(
+		promptTextarea: HTMLTextAreaElement,
+		statusEl: HTMLElement,
+		outputEl: HTMLElement,
+		field: ICustomField,
+		allFields?: ICustomField[]
+	): Promise<void> {
+		const rawPrompt = promptTextarea.value.trim();
+		if (!rawPrompt) {
+			this.notificationService.warn('Please enter a prompt template before testing.');
+			promptTextarea.focus();
+			return;
+		}
+
+		// Interpolate referenced primitives ({Field Label} or @FieldLabel)
+		let interpolatedPrompt = rawPrompt;
+		if (allFields && allFields.length > 0) {
+			for (const f of allFields) {
+				if (!f || f.id === field.id) continue;
+				const fLabel = f.label || f.id;
+				let valToInsert = '';
+
+				if (f.type === 'browser') {
+					valToInsert = f.defaultContent || f.defaultUrl || '';
+				} else if (f.type === 'parameters' && f.parameters) {
+					const paramMap: Record<string, any> = {};
+					f.parameters.forEach(p => {
+						if (p.name) paramMap[p.name] = p.defaultValue ?? '';
+					});
+					valToInsert = JSON.stringify(paramMap);
+				} else if (f.type === 'prompt') {
+					valToInsert = f.debugPromptOutput || f.defaultContent || '';
+				} else if (f.type === 'git') {
+					valToInsert = f.gitRemoteUrl || '';
+				} else {
+					valToInsert = f.defaultContent || '';
+				}
+
+				if (valToInsert) {
+					const reBrace = new RegExp(`\\{\\s*${fLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\}`, 'gi');
+					const reAt = new RegExp(`@${fLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
+					interpolatedPrompt = interpolatedPrompt.replace(reBrace, valToInsert).replace(reAt, valToInsert);
+				}
+			}
+		}
+
+		statusEl.textContent = 'Executing AI prompt test...';
+		statusEl.style.color = '#38bdf8';
+		outputEl.textContent = 'Waiting for AI response...';
+
+		const startTime = Date.now();
+		try {
+			const credService = this._instantiationService.invokeFunction(accessor => {
+				try { return accessor.get(IAgentCredentialService); } catch { return undefined; }
+			});
+
+			if (!credService || !credService.executePrompt) {
+				throw new Error('AI Credential Service is not available');
+			}
+
+			let targetModel = field.targetModel || 'gemini-1.5-flash';
+			let systemPrompt: string | undefined = undefined;
+
+			if (field.targetMode === 'agent' && field.targetAgentId) {
+				try {
+					const agentsMgr = this._instantiationService.invokeFunction(accessor => {
+						try { return accessor.get(IAgentsManagerService); } catch { return undefined; }
+					});
+					if (agentsMgr) {
+						const ag = await agentsMgr.getAgent(field.targetAgentId);
+						if (ag) {
+							if (ag.modelName) targetModel = ag.modelName;
+							systemPrompt = ag.systemPrompt || (ag.role ? `You are a helpful ${ag.role}.` : undefined);
+						}
+					}
+				} catch { }
+			}
+
+			const res = await credService.executePrompt(targetModel, interpolatedPrompt, systemPrompt, field.targetProvider);
+			const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+
+			if (res.success && res.text) {
+				outputEl.textContent = res.text;
+				field.debugPromptOutput = res.text;
+				this._syncDraft();
+				const charCount = res.text.length;
+				statusEl.textContent = `Completed in ${elapsedSec}s (${charCount} chars)`;
+				statusEl.style.color = '#34d399';
+			} else {
+				const errMsg = res.error || 'Unknown AI response error';
+				outputEl.textContent = `[AI Execution Error]\n${errMsg}`;
+				statusEl.textContent = `Failed (${elapsedSec}s)`;
+				statusEl.style.color = '#f87171';
+			}
+		} catch (err: any) {
+			const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+			const errMsg = err?.message || String(err);
+			outputEl.textContent = `[Prompt Test Failed]\n${errMsg}`;
+			statusEl.textContent = `Error (${elapsedSec}s)`;
+			statusEl.style.color = '#f87171';
 		}
 	}
 }

@@ -6058,8 +6058,20 @@ export class WorkflowEditor extends EditorPane {
 							try {
 								const parsed = JSON.parse(v.trim());
 								if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+									// Strictly skip browser, git, prompt, output primitives and other non-parameter objects
+									if (parsed.url !== undefined || parsed.content !== undefined || parsed.credentials !== undefined ||
+										parsed.gitRemoteUrl !== undefined || parsed.gitBranch !== undefined ||
+										parsed.instruction !== undefined || parsed.prompt !== undefined ||
+										parsed.targetModel !== undefined || parsed.outputSpecs !== undefined) {
+										continue;
+									}
+
 									for (const [pName, pVal] of Object.entries(parsed)) {
-										if (!paramSpecs.some(p => p.name.toLowerCase() === pName.toLowerCase())) {
+										const lowerName = pName.toLowerCase();
+										if (lowerName === 'url' || lowerName === 'content' || lowerName === 'credentials') continue;
+										if (typeof pVal === 'string' && pVal.length > 80) continue;
+
+										if (!paramSpecs.some(p => p.name.toLowerCase() === lowerName)) {
 											paramSpecs.push({ name: pName, defaultValue: pVal !== undefined ? pVal : 0 });
 										}
 									}
@@ -6112,6 +6124,7 @@ export class WorkflowEditor extends EditorPane {
 				const formattedVal = typeof p.defaultValue === 'number' || typeof p.defaultValue === 'boolean'
 					? String(p.defaultValue)
 					: `"${p.defaultValue}"`;
+				const safeDisplayVal = formattedVal.length > 35 ? formattedVal.substring(0, 32) + '..."' : formattedVal;
 				const snippet = typeof p.defaultValue === 'number' || typeof p.defaultValue === 'boolean'
 					? `, ${p.name}=${p.defaultValue}`
 					: `, ${p.name}="${p.defaultValue}"`;
@@ -6119,13 +6132,13 @@ export class WorkflowEditor extends EditorPane {
 				const chip = append(fieldsRow, $('.node-function-field-chip'));
 				if (isIncluded) {
 					chip.classList.add('included');
-					chip.textContent = `\u2713 ${p.name} = ${formattedVal}`;
+					chip.textContent = `\u2713 ${p.name} = ${safeDisplayVal}`;
 					chip.title = `${p.name} is currently configured in expression`;
 				} else {
 					if (p.isStandard) {
 						chip.classList.add('standard');
 					}
-					chip.textContent = `+ ${p.name} = ${formattedVal}`;
+					chip.textContent = `+ ${p.name} = ${safeDisplayVal}`;
 					chip.title = `Click to insert ${p.name} = ${formattedVal}`;
 				}
 
