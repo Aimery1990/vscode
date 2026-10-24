@@ -1905,7 +1905,7 @@
 	border-color: #38bdf8;
 	transform: translateY(-1px);
 	z-index: 50;
-	max-width: max-content;
+	max-width: min(400px, 90vw);
 }
 
 .node-variable-pill * {
@@ -2368,6 +2368,8 @@
 	transform: translate(-50%, -50%);
 	width: 480px;
 	max-width: 95vw;
+	max-height: 80vh !important;
+	overflow: hidden !important;
 	background: rgba(11, 17, 32, 0.96) !important;
 	backdrop-filter: blur(16px);
 	-webkit-backdrop-filter: blur(16px);
@@ -3631,7 +3633,7 @@
 	border-color: #c084fc;
 	transform: translateY(-1px);
 	z-index: 50;
-	max-width: max-content;
+	max-width: min(400px, 90vw);
 }
 
 .node-function-pill * {
@@ -3682,6 +3684,8 @@
 	transform: translate(-50%, -50%);
 	width: 510px;
 	max-width: 95vw;
+	max-height: 80vh !important;
+	overflow: hidden !important;
 	background: rgba(11, 17, 32, 0.94) !important;
 	backdrop-filter: blur(16px);
 	-webkit-backdrop-filter: blur(16px);
@@ -3808,6 +3812,9 @@
 .node-function-code-area {
 	width: 100%;
 	min-height: 60px;
+	max-height: 180px !important;
+	overflow-y: auto !important;
+	word-break: break-all !important;
 	background: #030712 !important;
 	border: 1px solid rgba(192, 132, 252, 0.35);
 	border-radius: 6px;

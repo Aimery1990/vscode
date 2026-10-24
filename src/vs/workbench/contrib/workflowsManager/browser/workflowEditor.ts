@@ -2489,6 +2489,31 @@ export class WorkflowEditor extends EditorPane {
 			append(header, $('span.ticket-popover-seq', {}, `#${stepIndex} in Pipeline`));
 		}
 
+		const openTabBtn = append(header, $('.ticket-popover-open-tab-btn'));
+		openTabBtn.title = `Open ${ticket.name} in Editor Tab`;
+		openTabBtn.style.cursor = 'pointer';
+		openTabBtn.style.marginLeft = 'auto';
+		openTabBtn.style.padding = '1px 6px';
+		openTabBtn.style.fontSize = '10px';
+		openTabBtn.style.borderRadius = '3px';
+		openTabBtn.style.background = 'rgba(56, 189, 248, 0.18)';
+		openTabBtn.style.border = '1px solid rgba(56, 189, 248, 0.4)';
+		openTabBtn.style.color = '#38bdf8';
+		openTabBtn.style.display = 'inline-flex';
+		openTabBtn.style.alignItems = 'center';
+		openTabBtn.style.gap = '3px';
+		append(openTabBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.linkExternal)));
+		append(openTabBtn, $('span', {}, 'Open Tab'));
+		openTabBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._hideTicketPopover();
+			this._openModuleInEditor({
+				type: ticket.type || 'ticket',
+				name: ticket.name,
+				uri: ticket.uri
+			});
+		};
+
 		// 2. Parameters row
 		const effectiveParams = matchingStep?.parameters || ticket.parameters;
 		const paramRow = append(popover, $('.ticket-popover-row'));
@@ -2547,13 +2572,24 @@ export class WorkflowEditor extends EditorPane {
 
 		// 4. Footer hint
 		const footer = append(popover, $('.ticket-popover-footer'));
-		append(footer, $('span' + ThemeIcon.asCSSSelector(Codicon.edit)));
-		append(footer, $('span', {}, 'Click badge to configure in Execution Pipeline'));
+		append(footer, $('span' + ThemeIcon.asCSSSelector(Codicon.linkExternal)));
+		append(footer, $('span', {}, 'Double-click to open in Editor Tab (Click to configure in Pipeline)'));
 
 		popover.onclick = (e) => {
 			e.stopPropagation();
 			this._hideTicketPopover();
 			this._openNodePipelinePanel(node.id, ticket.name);
+		};
+
+		popover.ondblclick = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+			this._hideTicketPopover();
+			this._openModuleInEditor({
+				type: ticket.type || 'ticket',
+				name: ticket.name,
+				uri: ticket.uri
+			});
 		};
 
 		// Position popover relative to targetEl
@@ -4723,9 +4759,18 @@ export class WorkflowEditor extends EditorPane {
 
 			const chip = append(pillContent, $('.var-pill-ticket-chip'));
 			const fromStepText = boundTicket.stepNumber ? ` (from Step #${boundTicket.stepNumber})` : '';
-			chip.title = `Bound to Ticket output: ${boundTicket.name}${fromStepText}`;
+			chip.title = `Bound to Ticket output: ${boundTicket.name}${fromStepText}\n(Double-click to open Ticket in Editor Tab)`;
+			chip.style.cursor = 'pointer';
 			append(chip, $('span' + ThemeIcon.asCSSSelector(Codicon.checklist)));
 			append(chip, $('span', {}, boundTicket.name));
+			chip.ondblclick = (e) => {
+				e.stopPropagation();
+				e.preventDefault();
+				this._openModuleInEditor({
+					type: boundTicket.type || 'ticket',
+					name: boundTicket.name
+				});
+			};
 
 			varPill.title = stepIndex
 				? `[Step #${stepIndex} VAR] ${v.name} ← Output of ${boundTicket.name}${fromStepText}${runtimeTooltip}\n(Double-click to inline edit, click to edit in Pipeline)`
@@ -4758,6 +4803,9 @@ export class WorkflowEditor extends EditorPane {
 				} else {
 					pillText = `${v.name} = ${cleanExpr}`;
 				}
+			}
+			if (pillText.length > 55) {
+				pillText = pillText.substring(0, 52) + '...';
 			}
 			pillContent.textContent = pillText;
 			varPill.title = stepIndex
@@ -4830,7 +4878,10 @@ export class WorkflowEditor extends EditorPane {
 		fnBadge.style.flexShrink = '0';
 
 		const pillContent = append(fnPill, $('.fn-pill-text'));
-		const displayExpr = step.expression || (cleanVar ? `@${cleanVar} = ${step.functionName || 'RUN_TICKETS'}()` : (step.functionName ? `${step.functionName}()` : 'RUN_TICKETS()'));
+		let displayExpr = step.expression || (cleanVar ? `@${cleanVar} = ${step.functionName || 'RUN_TICKETS'}()` : (step.functionName ? `${step.functionName}()` : 'RUN_TICKETS()'));
+		if (displayExpr.length > 55) {
+			displayExpr = displayExpr.substring(0, 52) + '...';
+		}
 		pillContent.textContent = displayExpr;
 
 		fnPill.title = `[Step #${stepIndex !== undefined ? stepIndex : ''} FUNC] ${displayExpr}${runtimeTooltip}\n(Double-click to inline edit function, click to select)`;
@@ -5126,7 +5177,7 @@ export class WorkflowEditor extends EditorPane {
 								append(badgeText, $('span.badge-param-text', {}, `(${paramText})`));
 							}
 
-							badge.title = `[Step #${stepNumber} RUN] ${typeLabel}: ${step.ticketName}${paramText ? `\nPARAM: ${paramText}` : ''}\n(Click to edit in Pipeline)`;
+							badge.title = `[Step #${stepNumber} RUN] ${typeLabel}: ${step.ticketName}${paramText ? `\nPARAM: ${paramText}` : ''}\n(Double-click to open in Tab, click to edit in Pipeline)`;
 
 							badge.onmouseenter = () => {
 								this._showTicketPopover(badge, { name: step.ticketName || '', type: step.ticketType || 'ticket', uri: step.ticketUri, parameters: step.parameters }, node, stepNumber);
@@ -5138,6 +5189,16 @@ export class WorkflowEditor extends EditorPane {
 								e.stopPropagation();
 								this._hideTicketPopover();
 								this._openNodePipelinePanel(node.id, step.ticketName);
+							};
+							badge.ondblclick = (e) => {
+								e.stopPropagation();
+								e.preventDefault();
+								this._hideTicketPopover();
+								this._openModuleInEditor({
+									type: step.ticketType || 'ticket',
+									name: step.ticketName,
+									uri: step.ticketUri
+								});
 							};
 						} else if (step.type === 'call_function' || (step.expression && this._isFunctionCallExpression(step.expression))) {
 							this._renderFunctionPill(badgesContainer, node, step, stepNumber);
@@ -5181,7 +5242,7 @@ export class WorkflowEditor extends EditorPane {
 							append(badgeText, $('span.badge-param-text', {}, `(${paramText})`));
 						}
 
-						badge.title = paramText ? `${typeLabel}: ${t.name}\nPARAM: ${paramText}` : `${typeLabel}: ${t.name}`;
+						badge.title = paramText ? `${typeLabel}: ${t.name}\nPARAM: ${paramText}\n(Double-click to open in Tab, click to edit in Pipeline)` : `${typeLabel}: ${t.name}\n(Double-click to open in Tab, click to edit in Pipeline)`;
 
 						badge.onmouseenter = () => {
 							this._showTicketPopover(badge, t, node);
@@ -5193,6 +5254,16 @@ export class WorkflowEditor extends EditorPane {
 							e.stopPropagation();
 							this._hideTicketPopover();
 							this._openNodePipelinePanel(node.id, t.name);
+						};
+						badge.ondblclick = (e) => {
+							e.stopPropagation();
+							e.preventDefault();
+							this._hideTicketPopover();
+							this._openModuleInEditor({
+								type: t.type || 'ticket',
+								name: t.name,
+								uri: t.uri
+							});
 						};
 					}
 				}
@@ -5627,13 +5698,19 @@ export class WorkflowEditor extends EditorPane {
 		if (targetVar) {
 			if (targetVar.expression) {
 				const expr = targetVar.expression.trim();
-				if (expr.startsWith('@') || expr.includes('=')) {
+				if (expr.length > 250 || expr.includes('\n') || expr.startsWith('#') || expr.startsWith('+ content') || expr.includes('URL: https://')) {
+					initialVal = `@${targetVar.name} = None`;
+				} else if (expr.startsWith('@') || expr.includes('=')) {
 					initialVal = expr.startsWith('@') ? expr : `@${expr}`;
 				} else {
 					initialVal = `@${targetVar.name} = ${expr}`;
 				}
 			} else {
-				initialVal = `@${targetVar.name} = ${targetVar.initialValue || 'None'}`;
+				let initV = targetVar.initialValue || 'None';
+				if (initV.length > 250 || initV.includes('\n') || initV.startsWith('#') || initV.startsWith('+ content') || initV.includes('URL: https://')) {
+					initV = 'None';
+				}
+				initialVal = `@${targetVar.name} = ${initV}`;
 			}
 		}
 		codeArea.value = initialVal;
@@ -5751,6 +5828,16 @@ export class WorkflowEditor extends EditorPane {
 			this._activeFunctionDraftInputEl = null;
 		}
 
+		// 1. If existingStep is a ticket (type === 'run_ticket' or has ticketName), do NOT open inline function editor with ticket body; open it in a VS Code editor tab!
+		if (existingStep && (existingStep.type === 'run_ticket' || existingStep.ticketName)) {
+			const ticketType = existingStep.ticketType || 'ticket';
+			const ticketName = existingStep.ticketName || existingStep.stepName || '';
+			if (ticketName) {
+				this._openModuleInEditor({ type: ticketType, name: ticketName, uri: existingStep.ticketUri });
+				return;
+			}
+		}
+
 		const nodeEl = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${node.id}"]`) as HTMLElement;
 		if (!nodeEl) {
 			return;
@@ -5777,7 +5864,22 @@ export class WorkflowEditor extends EditorPane {
 
 		if (existingStep) {
 			if (existingStep.expression) {
-				initialExpr = existingStep.expression.trim();
+				let expr = existingStep.expression.trim();
+				// If expression was polluted by raw markdown/scraped content or excessive length, sanitize it back to clean function call!
+				if (expr.length > 250 || expr.includes('\n') || expr.startsWith('#') || expr.startsWith('+ content') || expr.includes('URL: https://')) {
+					const retVar = existingStep.targetVariable ? `@${existingStep.targetVariable.replace(/^@/, '')} = ` : '@res = ';
+					const fn = existingStep.functionName || 'CREATE_TICKETS';
+					if (fn === 'CREATE_TICKETS') {
+						expr = `${retVar}CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`;
+					} else if (fn === 'GET_TICKETS') {
+						expr = `${retVar}GET_TICKETS(ticket_name="")`;
+					} else if (fn === 'GET_PRIMITIVES_CATALOG') {
+						expr = `${retVar}GET_PRIMITIVES_CATALOG()`;
+					} else {
+						expr = `${retVar}RUN_TICKETS(ticket_name="", params={})`;
+					}
+				}
+				initialExpr = expr;
 				if (!initialExpr.startsWith('@') && existingStep.targetVariable) {
 					initialExpr = `@${existingStep.targetVariable.replace(/^@/, '')} = ${initialExpr}`;
 				}
@@ -5814,6 +5916,39 @@ export class WorkflowEditor extends EditorPane {
 		fnTag.textContent = '[fx]';
 		const titleText = append(titleDiv, $('.node-function-title-text'));
 		titleText.textContent = 'Function Call Editor';
+
+		// Optional: Open referenced ticket in Editor Tab button
+		const candidateTicket = (node.imports || [])[0] || (node.pipeline || []).find(s => s.type === 'run_ticket' && s.ticketName);
+		if (candidateTicket) {
+			const ticketName = 'ticketName' in candidateTicket ? candidateTicket.ticketName : candidateTicket.name;
+			const ticketType = 'ticketType' in candidateTicket ? candidateTicket.ticketType : candidateTicket.type;
+			if (ticketName) {
+				const openTabBtn = append(headerRow, $('.node-function-open-tab-btn'));
+				openTabBtn.title = `Open Ticket '${ticketName}' in Editor Tab`;
+				openTabBtn.style.cursor = 'pointer';
+				openTabBtn.style.marginLeft = 'auto';
+				openTabBtn.style.marginRight = '6px';
+				openTabBtn.style.padding = '1px 7px';
+				openTabBtn.style.fontSize = '10px';
+				openTabBtn.style.borderRadius = '3px';
+				openTabBtn.style.background = 'rgba(192, 132, 252, 0.15)';
+				openTabBtn.style.border = '1px solid rgba(192, 132, 252, 0.4)';
+				openTabBtn.style.color = '#d8b4fe';
+				openTabBtn.style.display = 'inline-flex';
+				openTabBtn.style.alignItems = 'center';
+				openTabBtn.style.gap = '3px';
+				append(openTabBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.linkExternal)));
+				append(openTabBtn, $('span', {}, 'Open in Tab'));
+				openTabBtn.onmousedown = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+				};
+				openTabBtn.onclick = (e) => {
+					e.stopPropagation();
+					this._openModuleInEditor({ type: ticketType || 'ticket', name: ticketName });
+				};
+			}
+		}
 
 		const cancelBtn = append(headerRow, $('.var-draft-cancel-btn'));
 		cancelBtn.title = 'Cancel (Esc)';
