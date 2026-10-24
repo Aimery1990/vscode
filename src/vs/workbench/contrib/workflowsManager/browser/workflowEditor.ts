@@ -10164,8 +10164,8 @@ export class WorkflowEditor extends EditorPane {
 			// Header
 			const header = append(panel, $('.workflow-display-inspector-header'));
 			const titleBox = append(header, $('.workflow-display-inspector-title'));
-			const eyeIcon = append(titleBox, $('span'));
-			eyeIcon.textContent = '\uD83D\uDC41';
+			const iconBadge = append(titleBox, $('span.workflow-display-header-badge'));
+			iconBadge.textContent = 'OUTPUT';
 			const titleText = append(titleBox, $('span.inspector-title-text'));
 			titleText.textContent = `Live Display (${this._displayInspectorCards.length})`;
 
@@ -10223,7 +10223,7 @@ export class WorkflowEditor extends EditorPane {
 		const cardHeader = append(cardEl, $('.workflow-display-card-header'));
 		const metaBox = append(cardHeader, $('.workflow-display-card-meta'));
 		const nodeBadge = append(metaBox, $('.workflow-display-card-node'));
-		nodeBadge.textContent = `\uD83D\uDCCC ${card.nodeTitle || 'Node'}`;
+		nodeBadge.textContent = card.nodeTitle || 'Node';
 		const timeEl = append(metaBox, $('.workflow-display-card-time'));
 		timeEl.textContent = card.timestamp;
 
@@ -10231,10 +10231,36 @@ export class WorkflowEditor extends EditorPane {
 		const copyBtn = append(cardActions, $('button.workflow-display-btn-action'));
 		copyBtn.textContent = 'Copy';
 		copyBtn.title = 'Copy value';
-		copyBtn.onclick = (e) => {
+		copyBtn.onclick = async (e) => {
 			e.stopPropagation();
-			this._clipboardService.writeText(card.formattedText);
-			copyBtn.textContent = 'Copied!';
+			let ok = false;
+			try {
+				if (navigator?.clipboard?.writeText) {
+					await navigator.clipboard.writeText(card.formattedText);
+					ok = true;
+				}
+			} catch {}
+			if (!ok) {
+				try {
+					const ta = document.createElement('textarea');
+					ta.value = card.formattedText;
+					ta.style.position = 'fixed';
+					ta.style.left = '-9999px';
+					ta.style.top = '-9999px';
+					document.body.appendChild(ta);
+					ta.focus();
+					ta.select();
+					ok = document.execCommand('copy');
+					ta.remove();
+				} catch {}
+			}
+			if (!ok) {
+				try {
+					await this._clipboardService.writeText(card.formattedText);
+					ok = true;
+				} catch {}
+			}
+			copyBtn.textContent = ok ? 'Copied!' : 'Failed';
 			setTimeout(() => { if (copyBtn.isConnected) copyBtn.textContent = 'Copy'; }, 1500);
 		};
 

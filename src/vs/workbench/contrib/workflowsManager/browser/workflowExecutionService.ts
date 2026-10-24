@@ -1389,18 +1389,17 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					displayVal = run.contextVariables;
 				}
 				result = displayVal;
-				const formattedText = typeof displayVal === 'object' && displayVal !== null
-					? JSON.stringify(displayVal, null, 2)
-					: String(displayVal);
 
-				this._emitLog(run, 'info', `[DISPLAY] [${node.title || node.id}] ${formattedText}`, { nodeId: node.id });
+				const { formattedText, summaryType, cleanValue } = this._formatDisplayOutput(displayVal);
+
+				this._emitLog(run, 'info', `[DISPLAY] [${node.title || node.id}]\n${formattedText}`, { nodeId: node.id });
 
 				this._onDidDisplayVariable.fire({
 					id: `display_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 					nodeId: node.id,
 					nodeTitle: node.title || node.id,
 					expression: rawExpr || `DISPLAY(${rawArgsStr})`,
-					value: displayVal,
+					value: cleanValue,
 					formattedText,
 					timestamp: new Date().toLocaleTimeString()
 				});
@@ -1544,6 +1543,141 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		} catch {
 			return s;
 		}
+	}
+
+	private _formatDisplayOutput(displayVal: any): { formattedText: string; summaryType: string; cleanValue: any } {
+		if (displayVal === undefined) {
+			return { formattedText: 'undefined', summaryType: 'undefined', cleanValue: undefined };
+		}
+		if (displayVal === null) {
+			return { formattedText: 'null', summaryType: 'null', cleanValue: null };
+		}
+
+		// Check if displayVal is a Ticket or contains Ticket Fields/Outputs
+		const isTicket = typeof displayVal === 'object' && !Array.isArray(displayVal) && (
+			displayVal.ticketId !== undefined ||
+			displayVal.ticketType !== undefined ||
+			displayVal.fields !== undefined ||
+			displayVal.outputs !== undefined ||
+			displayVal.customMetadata !== undefined
+		);
+
+		if (isTicket) {
+			const ticketId = displayVal.ticketId || '';
+			const ticketName = displayVal.ticketName || displayVal.title || '';
+			const ticketType = displayVal.ticketType || '';
+
+			let extractedOutputs: Record<string, any> = {};
+
+			// Case 1: ticket already has outputs
+			if (displayVal.outputs && typeof displayVal.outputs === 'object' && Object.keys(displayVal.outputs).length > 0) {
+				extractedOutputs = { ...displayVal.outputs };
+			} else {
+				// Case 2: extract outputs from fields / customMetadata
+				const fields = displayVal.fields || displayVal.customMetadata || {};
+
+				// Check if there is an explicit Output / output primitive
+				const outMeta = fields['Output'] || fields['output'] || fields['Result'] || fields['result'];
+				if (outMeta && typeof outMeta === 'string' && outMeta.trim().startsWith('{')) {
+					try {
+						const parsed = JSON.parse(outMeta);
+						if (Array.isArray(parsed.outputSpecs)) {
+							for (const spec of parsed.outputSpecs) {
+								if (spec.enabled !== false) {
+									const key = spec.label || spec.fieldKey;
+									const raw = fields[key] || fields[spec.fieldKey];
+									extractedOutputs[key] = this._extractPrimitiveCleanValue(raw, spec.defaultFormat);
+								}
+							}
+						}
+					} catch {}
+				}
+
+				// If no outputs found from Output primitive, infer from browser / prompt primitives
+				if (Object.keys(extractedOutputs).length === 0) {
+					for (const [k, v] of Object.entries(fields)) {
+						if (k.toLowerCase().startsWith('param') || k === 'parameters') continue;
+						const extracted = this._extractPrimitiveCleanValue(v);
+						if (extracted !== undefined) {
+							extractedOutputs[k] = extracted;
+						}
+					}
+				}
+			}
+
+			// Build human-friendly formatted text for display card
+			const outputEntries = Object.entries(extractedOutputs);
+			const lines: string[] = [];
+
+			lines.push(`======================================================================`);
+			lines.push(`Ticket Outputs: ${ticketName || 'Ticket'}${ticketId ? ` (${ticketId})` : ''}${ticketType ? ` [${ticketType}]` : ''}`);
+			lines.push(`======================================================================`);
+
+			if (outputEntries.length === 0) {
+				lines.push('');
+				lines.push(`(No primitive outputs enabled or generated for this ticket)`);
+			} else {
+				outputEntries.forEach(([key, val], idx) => {
+					lines.push('');
+					lines.push(`----------------------------------------------------------------------`);
+					lines.push(`[OUTPUT ${idx + 1}] ${key}`);
+					lines.push(`----------------------------------------------------------------------`);
+					if (typeof val === 'object' && val !== null) {
+						lines.push(JSON.stringify(val, null, 2));
+					} else {
+						lines.push(String(val).trim());
+					}
+				});
+			}
+
+			return {
+				formattedText: lines.join('\n'),
+				summaryType: `Ticket Outputs (${outputEntries.length} items)`,
+				cleanValue: extractedOutputs
+			};
+		}
+
+		if (typeof displayVal === 'string') {
+			return { formattedText: displayVal, summaryType: `string (${displayVal.length} chars)`, cleanValue: displayVal };
+		}
+		if (typeof displayVal === 'number' || typeof displayVal === 'boolean') {
+			return { formattedText: String(displayVal), summaryType: typeof displayVal, cleanValue: displayVal };
+		}
+
+		// General Array or Object
+		return {
+			formattedText: JSON.stringify(displayVal, null, 2),
+			summaryType: Array.isArray(displayVal) ? `array [${displayVal.length}]` : `object {${Object.keys(displayVal).length} keys}`,
+			cleanValue: displayVal
+		};
+	}
+
+	private _extractPrimitiveCleanValue(rawMeta: any, defaultFormat?: string): any {
+		if (rawMeta === undefined || rawMeta === null) return undefined;
+		if (typeof rawMeta === 'string') {
+			const trimmed = rawMeta.trim();
+			if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+				try {
+					const parsed = JSON.parse(trimmed);
+					// Browser primitive
+					if (parsed.content !== undefined) {
+						return parsed.content;
+					}
+					// Prompt primitive
+					if (parsed.prompt !== undefined || parsed.output !== undefined) {
+						return parsed.output && parsed.output.trim()
+							? parsed.output
+							: '(Pending AI Execution - Run ticket to generate output)';
+					}
+					// Output / Result primitive
+					if (parsed.result !== undefined) {
+						return parsed.result;
+					}
+					return parsed;
+				} catch {}
+			}
+		}
+		return rawMeta;
 	}
 
 	private async _resolveNextNodes(

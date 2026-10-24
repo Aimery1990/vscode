@@ -35,6 +35,7 @@ export interface ITicketCreateResult {
 	entityUri: string;
 	targetFolder: string;
 	fields: Record<string, any>;
+	outputs?: Record<string, any>;
 	error?: string;
 }
 
@@ -50,6 +51,7 @@ export interface ITicketGetResult {
 	priority: string;
 	customMetadata: Record<string, string>;
 	output?: any;
+	outputs?: Record<string, any>;
 	schema?: ICustomModule;
 	error?: string;
 }
@@ -255,6 +257,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			this.logService.info(`[TicketWorkflowRuntime] Created ticket '${ticketCode}' (${title}) at ${ticketFolderUri.fsPath}`);
 
+			const ticketOutputs = this._extractTicketOutputs(customMetadata, matchedModule);
+
 			return {
 				success: true,
 				ticketId: ticketCode,
@@ -262,7 +266,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				ticketType: ticketType,
 				entityUri: ticketFolderUri.toString(),
 				targetFolder: ticketFolderUri.fsPath,
-				fields: customMetadata
+				fields: customMetadata,
+				outputs: ticketOutputs
 			};
 		} catch (err: any) {
 			this.logService.error(`[TicketWorkflowRuntime] Failed to create ticket:`, err);
@@ -333,6 +338,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				schema = modules.find(m => m.id.toLowerCase() === ticketData.ticketType.toLowerCase());
 			}
 
+			const ticketOutputs = this._extractTicketOutputs(ticketData.customMetadata, schema);
+
 			return {
 				success: true,
 				ticketId: ticketData.ticketId,
@@ -345,6 +352,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				priority: ticketData.priority,
 				customMetadata: ticketData.customMetadata,
 				output: ticketData.customMetadata['Output'] || ticketData.customMetadata['output'] || ticketData.customMetadata['Result'] || ticketData.customMetadata['result'],
+				outputs: ticketOutputs,
 				schema: schema
 			};
 		} catch (err: any) {
@@ -974,6 +982,83 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			default:
 				return str;
 		}
+	}
+
+	private _extractTicketOutputs(metadata: Record<string, string>, schema?: ICustomModule): Record<string, any> {
+		const outputs: Record<string, any> = {};
+
+		// 1. Check if schema has an output / result primitive with outputSpecs
+		const outputField = schema?.fields?.find(f => f.type === 'output' || f.type === 'result');
+		if (outputField && Array.isArray(outputField.outputSpecs)) {
+			const enabledSpecs = outputField.outputSpecs.filter(s => s.enabled !== false);
+			for (const spec of enabledSpecs) {
+				const key = spec.label || spec.fieldKey;
+				const raw = metadata[key] || metadata[spec.fieldKey];
+				outputs[key] = this._extractPrimitiveCleanValue(raw, spec.defaultFormat);
+			}
+			if (Object.keys(outputs).length > 0) {
+				return outputs;
+			}
+		}
+
+		// 2. Check if metadata directly has an 'Output' or 'output' field with outputSpecs
+		const outMeta = metadata['Output'] || metadata['output'] || metadata['Result'] || metadata['result'];
+		if (outMeta && typeof outMeta === 'string' && outMeta.trim().startsWith('{')) {
+			try {
+				const parsed = JSON.parse(outMeta);
+				if (Array.isArray(parsed.outputSpecs)) {
+					for (const spec of parsed.outputSpecs) {
+						if (spec.enabled !== false) {
+							const key = spec.label || spec.fieldKey;
+							const raw = metadata[key] || metadata[spec.fieldKey];
+							outputs[key] = this._extractPrimitiveCleanValue(raw, spec.defaultFormat);
+						}
+					}
+					if (Object.keys(outputs).length > 0) {
+						return outputs;
+					}
+				}
+			} catch {}
+		}
+
+		// 3. Fallback: extract output from any browser, prompt, or output fields in metadata
+		for (const [k, v] of Object.entries(metadata)) {
+			if (k.toLowerCase().startsWith('param') || k === 'parameters') continue;
+			const extracted = this._extractPrimitiveCleanValue(v);
+			if (extracted !== undefined) {
+				outputs[k] = extracted;
+			}
+		}
+
+		return outputs;
+	}
+
+	private _extractPrimitiveCleanValue(rawMeta: any, defaultFormat?: string): any {
+		if (rawMeta === undefined || rawMeta === null) return undefined;
+		if (typeof rawMeta === 'string') {
+			const trimmed = rawMeta.trim();
+			if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+				try {
+					const parsed = JSON.parse(trimmed);
+					// Browser primitive
+					if (parsed.content !== undefined) {
+						return parsed.content;
+					}
+					// Prompt primitive
+					if (parsed.prompt !== undefined || parsed.output !== undefined) {
+						return parsed.output && parsed.output.trim()
+							? parsed.output
+							: '(Pending AI Execution - Run ticket to generate output)';
+					}
+					// Output / Result primitive
+					if (parsed.result !== undefined) {
+						return parsed.result;
+					}
+					return parsed;
+				} catch {}
+			}
+		}
+		return rawMeta;
 	}
 
 	private async _readTicketFiles(ticketUri: URI, snapshot?: IBaseEntitySnapshot): Promise<{
