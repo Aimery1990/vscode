@@ -1605,34 +1605,34 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}));
 
 					const contentHeader = append(contentArea, $('div', {
-						style: 'display: flex; justify-content: space-between; align-items: center;'
+						style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: nowrap;'
 					}));
 					const contentHeaderLeft = append(contentHeader, $('div', {
-						style: 'display: flex; align-items: center; gap: 8px;'
+						style: 'display: flex; align-items: center; gap: 6px; min-width: 0; flex-shrink: 1;'
 					}));
 					append(contentHeaderLeft, $('span', {
-						style: 'font-size: 11px; font-weight: 600; opacity: 0.9; text-transform: uppercase; color: #94a3b8;'
+						style: 'font-size: 11px; font-weight: 600; opacity: 0.9; text-transform: uppercase; color: #94a3b8; white-space: nowrap;'
 					}, 'Debug: Extracted Web Content (Test Preview):'));
 
 					append(contentHeaderLeft, $('span.browser-debug-badge', {
-						style: 'font-size: 9.5px; padding: 2px 6px; border-radius: 3px; background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); font-weight: 600;'
+						style: 'font-size: 9.5px; padding: 2px 6px; border-radius: 3px; background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); font-weight: 600; white-space: nowrap;'
 					}, 'Template Debug Only'));
 
 					const statusBadge = append(contentHeaderLeft, $('span.browser-fetch-status', {
-						style: 'font-size: 10px; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); opacity: 0.75;'
-					}, field.defaultContent ? 'Preloaded test content' : 'Not tested yet'));
+						style: 'font-size: 10px; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); opacity: 0.75; display: none; white-space: nowrap;'
+					}));
 
 					const contentHeaderRight = append(contentHeader, $('div', {
-						style: 'display: flex; gap: 6px;'
+						style: 'display: flex; gap: 5px; align-items: center; flex-shrink: 0;'
 					}));
 
 					const copyBtn = append(contentHeaderRight, $('button.monaco-button', {
-						style: 'background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; opacity: 0.8; cursor: pointer; color: inherit;'
+						style: 'background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; opacity: 0.8; cursor: pointer; color: inherit; white-space: nowrap;'
 					}));
-					copyBtn.innerText = 'Copy Text';
+					copyBtn.innerText = 'Copy';
 
 					const clearBtn = append(contentHeaderRight, $('button.monaco-button', {
-						style: 'background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; opacity: 0.8; cursor: pointer; color: inherit;'
+						style: 'background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; opacity: 0.8; cursor: pointer; color: inherit; white-space: nowrap;'
 					}));
 					clearBtn.innerText = 'Clear';
 
@@ -1661,8 +1661,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					clearBtn.onclick = () => {
 						resetPlaceholder();
-						statusBadge.textContent = 'Cleared';
-						statusBadge.style.color = '';
+						statusBadge.textContent = '';
+						statusBadge.style.display = 'none';
 						field.defaultContent = '';
 					};
 
@@ -2139,24 +2139,30 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const updateReferencePreview = () => {
 						clearNode(previewRow);
 						const val = promptTextarea.value;
-						const matches = new Set<string>();
-						// Match {Field Name}
-						const braceMatches = val.match(/\{([^{}]+)\}/g);
-						if (braceMatches) braceMatches.forEach(m => matches.add(m.slice(1, -1).trim()));
-						// Match @Field_Name or @Field
-						const atMatches = val.match(/@([a-zA-Z0-9_\u4e00-\u9fa5\s]+)/g);
-						if (atMatches) atMatches.forEach(m => matches.add(m.slice(1).trim()));
+						if (!val || referenceableFields.length === 0) return;
 
-						if (matches.size > 0) {
+						const matchedRefs: typeof referenceableFields = [];
+						for (const rf of referenceableFields) {
+							const rfLabel = rf.label || rf.id;
+							if (!rfLabel) continue;
+							const escapedLabel = rfLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+							const reBrace = new RegExp(`\\{\\s*${escapedLabel}\\s*\\}`, 'i');
+							const reAt = new RegExp(`@${escapedLabel}\\b`, 'i');
+							const escapedId = rf.id ? rf.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : null;
+							const reIdBrace = escapedId ? new RegExp(`\\{\\s*${escapedId}\\s*\\}`, 'i') : null;
+
+							if (reBrace.test(val) || reAt.test(val) || (reIdBrace && reIdBrace.test(val))) {
+								matchedRefs.push(rf);
+							}
+						}
+
+						if (matchedRefs.length > 0) {
 							append(previewRow, $('span', { style: 'color: #94a3b8; font-weight: 600;' }, 'Linked Outputs:'));
-							matches.forEach(m => {
-								const targetRef = referenceableFields.find(rf => (rf.label || rf.id).toLowerCase() === m.toLowerCase() || rf.id.toLowerCase() === m.toLowerCase());
+							matchedRefs.forEach(rf => {
 								const pill = append(previewRow, $('span.prompt-ref-pill', {
-									style: targetRef
-										? 'padding: 2px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600;'
-										: 'padding: 2px 6px; border-radius: 3px; background: rgba(148, 163, 184, 0.1); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.2);'
+									style: 'padding: 2px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600; display: inline-flex; align-items: center; gap: 4px;'
 								}));
-								pill.textContent = targetRef ? `🔗 ${targetRef.label || targetRef.id} [${targetRef.type.toUpperCase()}]` : `{${m}}`;
+								pill.textContent = `🔗 ${rf.label || rf.id} [${rf.type.toUpperCase()}]`;
 							});
 						}
 					};
@@ -2251,53 +2257,53 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}));
 
 					const debugHeader = append(promptDebugArea, $('div', {
-						style: 'display: flex; justify-content: space-between; align-items: center;'
+						style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: nowrap;'
 					}));
 
 					const debugHeaderLeft = append(debugHeader, $('div', {
-						style: 'display: flex; align-items: center; gap: 8px;'
+						style: 'display: flex; align-items: center; gap: 6px; min-width: 0; flex-shrink: 1;'
 					}));
 
 					append(debugHeaderLeft, $('span', {
-						style: 'font-size: 11px; font-weight: 600; opacity: 0.9; text-transform: uppercase; color: #60a5fa;'
+						style: 'font-size: 11px; font-weight: 600; opacity: 0.9; text-transform: uppercase; color: #94a3b8; white-space: nowrap;'
 					}, 'Debug: AI Execution Output (Test Preview):'));
 
 					append(debugHeaderLeft, $('span.prompt-debug-badge', {
-						style: 'font-size: 9.5px; padding: 2px 6px; border-radius: 3px; background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); font-weight: 600;'
+						style: 'font-size: 9.5px; padding: 2px 6px; border-radius: 3px; background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); font-weight: 600; white-space: nowrap;'
 					}, 'Template Debug Only'));
 
 					const promptStatusBadge = append(debugHeaderLeft, $('span.prompt-test-status', {
-						style: 'font-size: 10px; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); opacity: 0.75;'
-					}, field.debugPromptOutput ? 'Cached test output' : 'Not tested yet'));
+						style: 'font-size: 10px; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); opacity: 0.75; display: none; white-space: nowrap;'
+					}));
 
 					const debugHeaderRight = append(debugHeader, $('div', {
-						style: 'display: flex; gap: 6px; align-items: center;'
+						style: 'display: flex; gap: 5px; align-items: center; flex-shrink: 0;'
 					}));
 
 					// Test Prompt Button
 					const testPromptBtn = append(debugHeaderRight, $('button.monaco-button', {
-						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(59, 130, 246, 0.22); border: 1px solid rgba(59, 130, 246, 0.5); color: #60a5fa; transition: all 0.15s ease;'
+						style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(59, 130, 246, 0.22); border: 1px solid rgba(59, 130, 246, 0.5); color: #60a5fa; transition: all 0.15s ease; white-space: nowrap;'
 					})) as HTMLButtonElement;
 					append(testPromptBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
-					append(testPromptBtn, $('span', {}, 'Test Prompt (Run AI)'));
+					append(testPromptBtn, $('span', {}, 'Test'));
 
 					const copyPromptOutBtn = append(debugHeaderRight, $('button.monaco-button', {
-						style: 'background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; opacity: 0.8; cursor: pointer; color: inherit;'
+						style: 'background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; opacity: 0.8; cursor: pointer; color: inherit; white-space: nowrap;'
 					}));
-					copyPromptOutBtn.innerText = 'Copy Output';
+					copyPromptOutBtn.innerText = 'Copy';
 
 					const clearPromptOutBtn = append(debugHeaderRight, $('button.monaco-button', {
-						style: 'background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; opacity: 0.8; cursor: pointer; color: inherit;'
+						style: 'background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; opacity: 0.8; cursor: pointer; color: inherit; white-space: nowrap;'
 					}));
 					clearPromptOutBtn.innerText = 'Clear';
 
 					const promptOutputDisplay = append(promptDebugArea, $('.prompt-output-display', {
-						style: 'min-height: 110px; max-height: 260px; overflow-y: auto; padding: 10px 12px; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(59, 130, 246, 0.25); border-radius: 6px; color: #e2e8f0;'
+						style: 'min-height: 110px; max-height: 260px; overflow-y: auto; padding: 10px 12px; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; color: #e2e8f0;'
 					}));
 
 					const resetPromptOutputPlaceholder = () => {
 						clearNode(promptOutputDisplay);
-						append(promptOutputDisplay, $('span', { style: 'opacity: 0.4; font-style: italic;' }, 'No test response yet. Click "Test Prompt (Run AI)" to test your instruction with the configured AI model/agent during template design. (This is debug preview only, not saved to ticket instances)'));
+						append(promptOutputDisplay, $('span', { style: 'opacity: 0.4; font-style: italic;' }, 'No test response yet. Click "Test" to test your instruction with the configured AI model/agent during template design. (This is debug preview only, not saved to ticket instances)'));
 					};
 
 					if (field.debugPromptOutput) {
@@ -2316,8 +2322,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					clearPromptOutBtn.onclick = () => {
 						resetPromptOutputPlaceholder();
-						promptStatusBadge.textContent = 'Cleared';
-						promptStatusBadge.style.color = '';
+						promptStatusBadge.textContent = '';
+						promptStatusBadge.style.display = 'none';
 						field.debugPromptOutput = '';
 						this._syncDraft();
 					};
@@ -3290,7 +3296,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			}
 		}
 
-		statusEl.textContent = 'Fetching webpage content...';
+		statusEl.style.display = 'inline-block';
+		statusEl.textContent = 'Fetching...';
 		statusEl.style.color = '#38bdf8';
 
 		try {
@@ -3305,8 +3312,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			field.defaultContent = result.content;
 			this._syncDraft();
 			const charCount = result.content.length;
-			const timestamp = new Date().toLocaleTimeString();
-			statusEl.textContent = `Fetched at ${timestamp} (${charCount} chars)`;
+			statusEl.textContent = `Fetched (${charCount} chars)`;
 			statusEl.style.color = '#34d399';
 			// Suppress notificationService.info toast to prevent webview "Paused due to Notification" overlay
 		} catch (err: any) {
@@ -3404,7 +3410,8 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 			}
 		}
 
-		statusEl.textContent = 'Executing AI prompt test...';
+		statusEl.style.display = 'inline-block';
+		statusEl.textContent = 'Running...';
 		statusEl.style.color = '#38bdf8';
 		outputEl.textContent = 'Waiting for AI response...';
 
@@ -3443,8 +3450,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				outputEl.textContent = res.text;
 				field.debugPromptOutput = res.text;
 				this._syncDraft();
-				const charCount = res.text.length;
-				statusEl.textContent = `Completed in ${elapsedSec}s (${charCount} chars)`;
+				statusEl.textContent = `Done (${elapsedSec}s)`;
 				statusEl.style.color = '#34d399';
 			} else {
 				const errMsg = res.error || 'Unknown AI response error';
