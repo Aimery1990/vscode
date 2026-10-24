@@ -10351,23 +10351,25 @@ export class WorkflowEditor extends EditorPane {
 
 			const actionsBox = append(header, $('.workflow-display-inspector-actions'));
 
-			const minBtn = append(actionsBox, $('button.workflow-display-btn-action'));
-			minBtn.textContent = '–';
-			minBtn.title = 'Minimize Inspector';
+			// 1. Clear button
+			const clearBtn = append(actionsBox, $('button.workflow-display-btn-action.workflow-display-btn-clear'));
+			clearBtn.textContent = 'Clear';
+			clearBtn.title = 'Clear all display cards';
+			clearBtn.onclick = (e) => {
+				e.stopPropagation();
+				this._clearDisplayInspectorCards();
+			};
+
+			// 2. Minimize / Expand button (outermost on the right)
+			const minBtn = append(actionsBox, $('button.workflow-display-btn-action.workflow-display-btn-toggle'));
+			minBtn.textContent = this._isDisplayInspectorMinimized ? '+' : '–';
+			minBtn.title = this._isDisplayInspectorMinimized ? 'Expand Inspector' : 'Minimize Inspector';
 			minBtn.onclick = (e) => {
 				e.stopPropagation();
 				this._isDisplayInspectorMinimized = !this._isDisplayInspectorMinimized;
 				panel.classList.toggle('minimized', this._isDisplayInspectorMinimized);
 				minBtn.textContent = this._isDisplayInspectorMinimized ? '+' : '–';
 				minBtn.title = this._isDisplayInspectorMinimized ? 'Expand Inspector' : 'Minimize Inspector';
-			};
-
-			const clearBtn = append(actionsBox, $('button.workflow-display-btn-action'));
-			clearBtn.textContent = 'Clear All';
-			clearBtn.title = 'Clear all display cards';
-			clearBtn.onclick = (e) => {
-				e.stopPropagation();
-				this._clearDisplayInspectorCards();
 			};
 
 			// Cards Container
@@ -10381,8 +10383,11 @@ export class WorkflowEditor extends EditorPane {
 			if (this._isDisplayInspectorMinimized) {
 				this._isDisplayInspectorMinimized = false;
 				this._displayInspectorContainer.classList.remove('minimized');
-				const minBtn = this._displayInspectorContainer.querySelector('.workflow-display-btn-action') as HTMLElement | null;
-				if (minBtn) minBtn.textContent = '–';
+				const minBtn = this._displayInspectorContainer.querySelector('.workflow-display-btn-toggle') as HTMLElement | null;
+				if (minBtn) {
+					minBtn.textContent = '–';
+					minBtn.title = 'Minimize Inspector';
+				}
 			}
 		}
 
