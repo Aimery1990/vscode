@@ -11,6 +11,7 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot, ICustomField, ICustomModule, IOutputSpec } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
+import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
@@ -20,6 +21,8 @@ export interface ITicketCreateOptions {
 	targetPath?: string;
 	ticketType: string;
 	title: string;
+	folderName?: string;
+	name?: string;
 	description?: string;
 	status?: string;
 	priority?: string;
@@ -126,7 +129,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		@ICustomModulesService private readonly customModulesService: ICustomModulesService,
 		@IFileService private readonly fileService: IFileService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
-		@ILogService private readonly logService: ILogService
+		@ILogService private readonly logService: ILogService,
+		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService
 	) { }
 
 	/**
@@ -146,21 +150,29 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				m.name.toLowerCase() === ticketType.toLowerCase()
 			);
 
-			// 2. Prepare target folder path
+			// 2. Prepare target parent folder path & find root workspace URI
 			const targetSubPath = (options.targetPath || '').trim().replace(/^\/+|\/+$/g, '');
-			const safeFolderName = title.toLowerCase().replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '') || `ticket-${Date.now()}`;
 			const parentFolderUri = targetSubPath ? URI.joinPath(wsUri, targetSubPath) : wsUri;
-			const ticketFolderUri = URI.joinPath(parentFolderUri, safeFolderName);
+			const rootWsUri = await this.workspacesExplorerService.findWorkspaceRootUri(parentFolderUri);
+
+			// 3. Generate sequential ticket ID and code matching workspace convention (e.g. NEOWO-0011)
+			const { name: seqCode, code: activeCode } = await this.workspacesExplorerService.generateNextSequentialName(parentFolderUri, ticketType as any);
+			const ticketCode = seqCode; // e.g. "NEOWO-0011"
+			const ticketEntityCode = activeCode; // e.g. "NEOWO"
+
+			// Folder name: if user explicitly provided a folder name, use it; otherwise use the sequential ticket code (e.g. "NEOWO-0011")
+			const folderName = (options.folderName || options.name || ticketCode).replace(/[^a-zA-Z0-9_-]/g, '-');
+			const ticketFolderUri = URI.joinPath(parentFolderUri, folderName);
 
 			// Collision check: verify if the target ticket folder already exists
 			const folderExists = await this.fileService.exists(ticketFolderUri);
 			if (folderExists) {
-				const errMsg = `Ticket '${safeFolderName}' already exists at path '${parentFolderUri.fsPath}'. Cannot create duplicate ticket with the same name. Please specify a different title or target path.`;
+				const errMsg = `Ticket '${folderName}' already exists at path '${parentFolderUri.fsPath}'. Cannot create duplicate ticket with the same name. Please specify a different title or target path.`;
 				this.logService.warn(`[TicketWorkflowRuntime] ${errMsg}`);
 				return {
 					success: false,
 					ticketId: '',
-					ticketName: safeFolderName,
+					ticketName: folderName,
 					ticketType: ticketType,
 					entityUri: ticketFolderUri.toString(),
 					targetFolder: ticketFolderUri.fsPath,
@@ -169,11 +181,14 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				};
 			}
 
-			// 3. Generate sequential ticket ID
-			const existingSnapshots = this.entityPersistenceService.getAllSnapshots();
-			const count = existingSnapshots.filter(s => s.entityType === ticketType).length + 1;
-			const prefix = (matchedModule?.name || ticketType).substring(0, 4).toUpperCase();
-			const ticketCode = `${prefix}-${String(count).padStart(4, '0')}`;
+			// Update persistent monotonic sequence in .agents/sequences.json
+			const numMatch = ticketCode.match(/-(\d+)$/);
+			if (numMatch) {
+				const num = parseInt(numMatch[1], 10);
+				if (!isNaN(num)) {
+					await this.workspacesExplorerService.updateWorkspaceSequence(rootWsUri, activeCode, num);
+				}
+			}
 
 			// 4. Initialize field values and customMetadata
 			const customMetadata: Record<string, string> = {};
@@ -240,15 +255,15 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			// 5. Persist entity files via entityPersistenceService
 			const snapshot: IBaseEntitySnapshot = {
 				entityUri: ticketFolderUri.toString(),
-				entityName: safeFolderName,
+				entityName: folderName,
 				title: title,
 				ticketId: ticketCode,
-				entityCode: ticketCode,
+				entityCode: ticketEntityCode,
 				entityType: ticketType,
 				status: options.status || (matchedModule?.statuses?.[0]?.label) || 'Todo',
 				priority: options.priority || 'Medium',
 				description: options.description || `${matchedModule?.name || ticketType}: ${title}`,
-				belongsToWorkspaceUri: wsUri.toString(),
+				belongsToWorkspaceUri: rootWsUri.toString(),
 				typeDefinition: matchedModule ? `.agents/entity_type/${matchedModule.id}.yaml` : undefined,
 				typePrompt: matchedModule?.prompt,
 				customMetadata: customMetadata
@@ -270,7 +285,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					return {
 						success: true,
 						ticketId: ticketCode,
-						ticketName: safeFolderName,
+						ticketName: folderName,
 						ticketType: ticketType,
 						entityUri: ticketFolderUri.toString(),
 						targetFolder: ticketFolderUri.fsPath,
@@ -283,7 +298,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			return {
 				success: true,
 				ticketId: ticketCode,
-				ticketName: safeFolderName,
+				ticketName: folderName,
 				ticketType: ticketType,
 				entityUri: ticketFolderUri.toString(),
 				targetFolder: ticketFolderUri.fsPath,

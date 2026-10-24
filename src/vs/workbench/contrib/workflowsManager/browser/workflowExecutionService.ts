@@ -1359,11 +1359,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						opts.targetPath = String(targetFolder).trim();
 					}
 
+					const explicitFolderName = kwargs.folder_name ?? kwargs.folderName ?? kwargs.name;
+					if (explicitFolderName && String(explicitFolderName).trim()) {
+						opts.folderName = String(explicitFolderName).trim();
+					}
+
 					const rawParams = kwargs.parameters ?? kwargs.params ?? kwargs.fieldValues ?? (typeof args[2] === 'object' ? args[2] : (typeof args[3] === 'object' ? args[3] : {}));
 					const initialFields = typeof rawParams === 'object' && rawParams !== null ? { ...rawParams } : {};
 
 					// Merge any loose keyword arguments directly into initialFields (e.g. CREATE_TICKETS("xxx", start=0))
-					const reservedCreateKeys = new Set(['ticket_type', 'type', 'title', 'target_folder', 'target_path', 'folder', 'path', 'parameters', 'params', 'fieldValues']);
+					const reservedCreateKeys = new Set(['ticket_type', 'type', 'title', 'target_folder', 'target_path', 'folder', 'path', 'folder_name', 'folderName', 'name', 'parameters', 'params', 'fieldValues']);
 					for (const [k, v] of Object.entries(kwargs)) {
 						if (!reservedCreateKeys.has(k) && initialFields[k] === undefined) {
 							initialFields[k] = v;

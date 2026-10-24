@@ -17,6 +17,7 @@ import { ITelemetryService } from '../../../../platform/telemetry/common/telemet
 import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
+import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { URI } from '../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
@@ -109,6 +110,7 @@ interface IParsedTicketData {
 	metadata: { [key: string]: string };
 	readmeNotes: string;
 	instructionNotes: string;
+	breadcrumbSegments?: Array<{ label: string; uri?: string }>;
 }
 
 export class EntityDetailEditor extends EditorPane {
@@ -432,6 +434,33 @@ export class EntityDetailEditor extends EditorPane {
 			const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
 			const allTickets = await this._loadAllAvailableTickets();
 
+			// 2.5 Resolve hierarchical breadcrumb segments from root workspace down to current entity
+			const breadcrumbSegments: Array<{ label: string; uri?: string }> = [];
+			try {
+				const wsRootUri = this._entityUri ? await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri) : undefined;
+				const rootLabel = parsed.workspaceId || (wsRootUri ? basename(wsRootUri) : 'Workspace');
+				breadcrumbSegments.push({ label: rootLabel, uri: wsRootUri?.toString() });
+
+				if (wsRootUri && this._entityUri && this._entityUri.toString() !== wsRootUri.toString()) {
+					const rootPath = wsRootUri.path.replace(/\/+$/, '');
+					const entityPath = this._entityUri.path.replace(/\/+$/, '');
+					if (entityPath.startsWith(rootPath + '/')) {
+						const rel = entityPath.substring(rootPath.length + 1);
+						const parts = rel.split('/').filter(Boolean);
+						let curr = wsRootUri;
+						for (let i = 0; i < parts.length - 1; i++) {
+							const seg = parts[i];
+							curr = URI.joinPath(curr, seg);
+							const snap = this._workspacesExplorerService.getMetadataSnapshot(curr);
+							const segLabel = snap?.ticketId || snap?.entityName || seg;
+							breadcrumbSegments.push({ label: segLabel, uri: curr.toString() });
+						}
+					}
+				}
+				breadcrumbSegments.push({ label: parsed.ticketId || parsed.title || this._entityName });
+			} catch {}
+			parsed.breadcrumbSegments = breadcrumbSegments;
+
 			// 3. Render directly into this._container as native high-performance DOM
 			const html = this._generateHtml(parsed, workLogContent, attachments, customModule, agents, allTickets);
 			this._setElementHTML(this._container, html);
@@ -474,6 +503,25 @@ export class EntityDetailEditor extends EditorPane {
 				await this._resolvePathsAndLoadData();
 				this._notificationService.info(`Refreshed ticket data for '${this._entityName || 'ticket'}'.`);
 				return;
+			}
+
+			// 0.05 Breadcrumb item navigation click
+			const breadcrumbItem = target.closest('.breadcrumb-item') as HTMLElement | null;
+			if (breadcrumbItem && breadcrumbItem.getAttribute('data-uri')) {
+				const uriStr = breadcrumbItem.getAttribute('data-uri');
+				if (uriStr && uriStr !== this._entityUri?.toString()) {
+					e.preventDefault();
+					e.stopPropagation();
+					const targetUri = URI.parse(uriStr);
+					const label = breadcrumbItem.textContent?.trim() || 'Entity';
+					const isWorkflow = label.toLowerCase().includes('workflow') || (await this._fileService.exists(URI.joinPath(targetUri, '.agents', 'workflow_flowchart.json')));
+					if (isWorkflow) {
+						await this._editorService.openEditor(new WorkflowEditorInput(targetUri, label), { pinned: true });
+					} else {
+						await this._editorService.openEditor(new EntityDetailEditorInput(targetUri, label), { pinned: true });
+					}
+					return;
+				}
 			}
 
 			// 0.1 Status Lifecycle Mapping Info button click
@@ -5218,12 +5266,18 @@ ${interpolatedPrompt}`;
 					display: flex;
 					align-items: center;
 					justify-content: flex-start;
-					gap: 8px;
+					gap: 6px;
 					font-size: 0.85em;
-					opacity: 0.65;
+					opacity: 0.75;
 					margin-bottom: 6px;
 					font-weight: 500;
 					text-align: left;
+					flex-wrap: wrap;
+				}
+				.entity-detail-editor .header-breadcrumb .breadcrumb-item[data-uri]:hover {
+					opacity: 1;
+					color: #38bdf8;
+					text-decoration: underline;
 				}
 				.entity-detail-editor .header-title-row {
 					display: flex;
@@ -5393,10 +5447,14 @@ ${interpolatedPrompt}`;
 			<div style="width: 100%; margin: 0 0 20px 0; text-align: left; display: flex; justify-content: space-between; align-items: flex-start;">
 				<div style="flex: 1; min-width: 0;">
 					<div class="header-breadcrumb">
-						<span>${data.workspaceId || 'Workspace'}</span>
-						<span>/</span>
-						<span>${data.ticketId}</span>
-						<span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-block;">${typeUpper}</span>
+						${(data.breadcrumbSegments && data.breadcrumbSegments.length > 0)
+							? data.breadcrumbSegments.map((s, idx) => `
+								<span class="breadcrumb-item" data-uri="${this._escapeHtmlAttr(s.uri || '')}" style="${s.uri ? 'cursor: pointer;' : ''}" title="${s.uri ? 'Click to navigate to ' + this._escapeHtmlAttr(s.label) : ''}">${this._escapeHtml(s.label)}</span>
+								${idx < data.breadcrumbSegments!.length - 1 ? '<span class="breadcrumb-sep" style="opacity: 0.35; margin: 0 4px;">/</span>' : ''}
+							`).join('')
+							: `<span>${this._escapeHtml(data.workspaceId || 'Workspace')}</span><span class="breadcrumb-sep" style="opacity: 0.35; margin: 0 4px;">/</span><span>${this._escapeHtml(data.ticketId)}</span>`
+						}
+						<span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-block; margin-left: 6px;">${typeUpper}</span>
 					</div>
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
