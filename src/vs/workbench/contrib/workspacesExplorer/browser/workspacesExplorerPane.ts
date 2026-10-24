@@ -921,9 +921,28 @@ export class MainWorkspaceViewPane extends ViewPane {
 			};
 
 			// Right click context menu
-			childRow.oncontextmenu = (e) => {
+			childRow.oncontextmenu = async (e) => {
 				e.preventDefault();
 				e.stopPropagation();
+
+				const wsRootUri = await this.workspacesExplorerService.findWorkspaceRootUri(child.uri);
+				const allWorkspaces = await this.workspacesExplorerService.getWorkspaces();
+				const matchedWs = allWorkspaces.find(w => w.uri.toString() === wsRootUri.toString());
+				const actualWsName = matchedWs?.name || matchedWs?.code || 'neoWorkspace';
+
+				const rootPath = wsRootUri.path.replace(/\/+$/, '');
+				const childPath = child.uri.path.replace(/\/+$/, '');
+				let parentRelPath = '/';
+				if (childPath.startsWith(rootPath + '/')) {
+					const rel = childPath.substring(rootPath.length + 1);
+					const lastSlash = rel.lastIndexOf('/');
+					if (lastSlash > 0) {
+						parentRelPath = '/' + rel.substring(0, lastSlash);
+					}
+				}
+
+				const snapshot = this.workspacesExplorerService.getMetadataSnapshot(child.uri);
+				const realTicketId = snapshot?.ticketId || child.code || child.name;
 
 				const childActions: Action[] = [
 					new Action('refresh_child', 'Refresh', ThemeIcon.asClassName(Codicon.refresh), true, async () => {
@@ -1012,11 +1031,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 					childActions.push(
 						new Action('remove_child_from_ws', 'Remove from Workspace', ThemeIcon.asClassName(Codicon.sparkleFilled), true, async () => {
 							this.commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
-								workspaceId: parentWsId,
-								ticketId: child.name,
-								field: '/Status',
-								label: `Remove '${child.name}' from Workspace`,
-								prompt: `[Workspace: "${parentWsId}" | Ticket: "${child.name}" | Target: "/Status" | Action: "Remove Ticket from Active Workspace" | Path: "${child.uri.fsPath}"]\nPlease mark this ticket as Removed and clean up its references.`
+								workspaceId: actualWsName,
+								ticketId: realTicketId,
+								parentPath: parentRelPath,
+								entityUri: child.uri.toString(),
+								field: '/Action/RemoveFromWorkspace',
+								label: `Remove '${child.name}' (${realTicketId}) from Workspace`,
+								prompt: `[Workspace: ${actualWsName} | Ticket: ${realTicketId} | Parent Path: ${parentRelPath} | Action: "Remove Ticket from Active Workspace" | Folder: "${child.name}" | Path: "${child.uri.fsPath}"]\nPlease mark ticket '${realTicketId}' (folder '${child.name}') as Removed and clean up its references.`,
+								autoSend: true
 							});
 						})
 					);
@@ -1025,11 +1047,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 				childActions.push(
 					new Action('trash_child', 'Move to Trash...', ThemeIcon.asClassName(Codicon.sparkleFilled), true, async () => {
 						this.commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
-							workspaceId: parentWsId,
-							ticketId: child.name,
-							field: '/TrashTicket',
-							label: `Move '${child.name}' to OS Trash`,
-							prompt: `[Workspace: "${parentWsId}" | Ticket: "${child.name}" | Action: "Move Ticket to OS Trash" | Path: "${child.uri.fsPath}"]\nPlease move this ticket directory to OS Trash and clean up all its links and references.`
+							workspaceId: actualWsName,
+							ticketId: realTicketId,
+							parentPath: parentRelPath,
+							entityUri: child.uri.toString(),
+							field: '/Action/MoveToTrash',
+							label: `Move '${child.name}' (${realTicketId}) to OS Trash`,
+							prompt: `[Workspace: ${actualWsName} | Ticket: ${realTicketId} | Parent Path: ${parentRelPath} | Action: "Move Ticket to OS Trash" | Folder: "${child.name}" | Path: "${child.uri.fsPath}"]\nPlease move ticket '${realTicketId}' (folder '${child.name}') to OS Trash, remove it from workspace, and clean up all its links and references.`,
+							autoSend: true
 						});
 					})
 				);

@@ -237,7 +237,7 @@ export class DeleteTicketTool implements IToolImpl {
 			toolReferenceName: 'deleteTicket',
 			displayName: localize('ticket.tool.delete.displayName', "Delete Ticket"),
 			userDescription: localize('ticket.tool.delete.userDescription', "Remove ticket and cascade clean references"),
-			modelDescription: 'Remove a ticket from active workspace. Marks the ticket (and recursively all its child tickets) as the workspace status mapped to REMOVED, automatically cleans up bidirectional references in other tickets Link To/Linked By, and appends deletion logs to worklog.md.',
+			modelDescription: 'Remove a ticket from active workspace or move it to OS Trash. Marks the ticket (and recursively all its child tickets) as REMOVED, automatically cleans up bidirectional references in other tickets Link To/Linked By, appends deletion logs to worklog.md, and physically moves the folder to OS Trash if move_to_trash is true.',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.trash,
@@ -255,6 +255,10 @@ export class DeleteTicketTool implements IToolImpl {
 					parent_path: {
 						type: 'string',
 						description: "Optional parent path (e.g. '/FNDJ1-0006' or '/') to explicitly disambiguate sub-tickets with identical or relative IDs."
+					},
+					move_to_trash: {
+						type: 'boolean',
+						description: "Optional flag. When true, permanently moves the ticket directory to OS Trash (Recycle Bin) in addition to workspace reference cleanup. Defaults to false."
 					},
 					worklog_record: {
 						type: 'object',
@@ -295,7 +299,10 @@ export class DeleteTicketTool implements IToolImpl {
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
 		try {
 			const res = await this.ticketEngine.deleteTicket(invocation.parameters as any);
-			return toolResult(res, `Ticket '${res.removed_ticket_id}' marked as '${res.status_set_to}' and links cleaned up.`);
+			const msg = res.moved_to_os_trash
+				? `Ticket '${res.removed_ticket_id}' moved to OS Trash and references cleaned up.`
+				: `Ticket '${res.removed_ticket_id}' marked as '${res.status_set_to}' and links cleaned up.`;
+			return toolResult(res, msg);
 		} catch (err: any) {
 			return toolError(err.message || String(err));
 		}

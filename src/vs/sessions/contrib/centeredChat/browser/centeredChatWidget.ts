@@ -136,6 +136,7 @@ export interface IChatSessionRecord {
 export interface IContextLocator {
 	workspaceId?: string;
 	ticketId?: string;
+	parentPath?: string;
 	field?: string;
 	label?: string;
 	fieldType?: string;
@@ -469,6 +470,22 @@ export class CenteredChatWidget extends Disposable {
 			append(tChip, $('span', {}, locator.ticketId));
 		}
 
+		if (locator.field && (locator.field.startsWith('/Action') || locator.field.startsWith('/Trash') || locator.field.startsWith('/Remove'))) {
+			append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '›'));
+			const actChip = append(chipsRow, $('.context-chip'));
+			actChip.style.display = 'inline-flex';
+			actChip.style.alignItems = 'center';
+			actChip.style.gap = '5px';
+			actChip.style.fontSize = '10.5px';
+			actChip.style.fontWeight = '600';
+			actChip.style.padding = '2px 6px';
+			actChip.style.borderRadius = '4px';
+			actChip.style.background = 'rgba(239, 68, 68, 0.18)';
+			actChip.style.color = '#f87171';
+			append(actChip, $('span.codicon.codicon-trash', { style: 'font-size: 11px;' }));
+			append(actChip, $('span', {}, locator.label || 'Action'));
+		}
+
 		// Resolve hierarchy ancestry
 		const hierarchyTree = locator.hierarchyTree;
 		const activeField = locator.field || '';
@@ -670,7 +687,7 @@ export class CenteredChatWidget extends Disposable {
 			hintEl.style.opacity = '0.55';
 			hintEl.style.marginTop = '4px';
 			hintEl.textContent = '✦ Click an item above to drill down into specific fields, or type/speak below to instruct the AI agent to modify or add items.';
-		} else if (locator.field && !locator.field.startsWith('/Create')) {
+		} else if (locator.field && !locator.field.startsWith('/Create') && !locator.field.startsWith('/Action') && !locator.field.startsWith('/Trash') && !locator.field.startsWith('/Remove')) {
 			// Leaf Field Editor Mode
 			const editorBox = append(this.contextLocatorContainer, $('.context-interactive-editor-box'));
 			editorBox.style.display = 'flex';
@@ -1942,13 +1959,14 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string }): void {
+	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; parentPath?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string; autoSend?: boolean }): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
 					this.setContextLocator({
 						workspaceId: initialContext.workspaceId,
 						ticketId: initialContext.ticketId,
+						parentPath: initialContext.parentPath,
 						field: initialContext.field,
 						label: initialContext.label,
 						fieldType: initialContext.fieldType,
@@ -1958,11 +1976,16 @@ export class CenteredChatWidget extends Disposable {
 						entityUri: initialContext.entityUri
 					});
 				}
-				if (initialContext.prompt && (!initialContext.field || initialContext.field.startsWith('/Create')) && this.inputField) {
+				if (initialContext.prompt && this.inputField) {
 					this.inputField.value = initialContext.prompt;
 				}
 				if (initialContext.companionMode || initialContext.companionPosition) {
 					this.restorePosition(initialContext.companionMode, initialContext.companionPosition);
+				}
+				if (initialContext.autoSend) {
+					setTimeout(() => {
+						this.sendMessage();
+					}, 80);
 				}
 			}
 			this.inputField?.focus();
@@ -2219,6 +2242,7 @@ export class CenteredChatWidget extends Disposable {
 				this.setContextLocator({
 					workspaceId: initialContext.workspaceId,
 					ticketId: initialContext.ticketId,
+					parentPath: initialContext.parentPath,
 					field: initialContext.field,
 					label: initialContext.label,
 					fieldType: initialContext.fieldType,
@@ -2228,8 +2252,13 @@ export class CenteredChatWidget extends Disposable {
 					entityUri: initialContext.entityUri
 				});
 			}
-			if (initialContext.prompt && (!initialContext.field || initialContext.field.startsWith('/Create')) && this.inputField) {
+			if (initialContext.prompt && this.inputField) {
 				this.inputField.value = initialContext.prompt;
+			}
+			if (initialContext.autoSend) {
+				setTimeout(() => {
+					this.sendMessage();
+				}, 80);
 			}
 		}
 		this.inputField.focus();
@@ -2288,13 +2317,14 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string }): void {
+	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; parentPath?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string; autoSend?: boolean }): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
 					this.setContextLocator({
 						workspaceId: initialContext.workspaceId,
 						ticketId: initialContext.ticketId,
+						parentPath: initialContext.parentPath,
 						field: initialContext.field,
 						label: initialContext.label,
 						fieldType: initialContext.fieldType,
@@ -2304,11 +2334,16 @@ export class CenteredChatWidget extends Disposable {
 						entityUri: initialContext.entityUri
 					});
 				}
-				if (initialContext.prompt && (!initialContext.field || initialContext.field.startsWith('/Create')) && this.inputField) {
+				if (initialContext.prompt && this.inputField) {
 					this.inputField.value = initialContext.prompt;
 				}
 				if (initialContext.companionMode || initialContext.companionPosition) {
 					this.restorePosition(initialContext.companionMode, initialContext.companionPosition);
+				}
+				if (initialContext.autoSend) {
+					setTimeout(() => {
+						this.sendMessage();
+					}, 80);
 				}
 			} else {
 				this.hide();
@@ -3031,6 +3066,17 @@ When the user targets a text or textarea field (such as /Description, /Custom/De
 2. If the field is already empty, confirm to the user that the field is already empty and no update is needed (or invoke 'anyagent_update_ticket' with updates: { "<Target>": "" }).
 3. In ALL these cases, DO NOT ask the user to provide a proposed new value! An empty proposed value IS the desired target state.
 
+TICKET DELETION & MOVE TO OS TRASH CONVENTIONS:
+When the user request includes 'Action: "Move Ticket to OS Trash"' or 'Action: "Remove Ticket from Active Workspace"' or requests to move a ticket to trash or delete/remove a ticket:
+1. You MUST invoke 'anyagent_delete_ticket' IMMEDIATELY without asking the user for confirmation or clarification.
+2. In your call to 'anyagent_delete_ticket':
+   - 'workspace_id': Use the workspace name or code from the tag (e.g. 'neoWorkspace' or 'NEOWO').
+   - 'ticket_id': Use the ticket ID or folder name from the tag (e.g. 'NEOWO-0017' or 'x6').
+   - 'parent_path': If 'Parent Path:' is present in the tag, pass it verbatim (e.g. '/NEOWO-0004/NEOWO-0006/Demo-XXX') to disambiguate nested sub-tickets.
+   - 'move_to_trash': Set to true if Action is "Move Ticket to OS Trash" or user requested moving to trash.
+   - 'worklog_record': Provide a standard worklog record describing the deletion.
+3. Sub-tickets deep in the hierarchy may not be visible in collapsed top-level tree summaries. NEVER reject a valid delete/trash request claiming a ticket is missing without executing 'anyagent_delete_ticket' first!
+
 CUSTOM MODULES & DATA TYPE SYNTHESIS RULES:
 When the user asks you to create, synthesize, design, or generate a new entity type, approval flow form, custom module, or template (e.g. expense reimbursement, contract review, leave request, purchase order, equipment inspection):
 1. COMPONENT LIBRARY (BASE PRIMITIVES & REUSABLE CLASSES):
@@ -3140,7 +3186,30 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		let fullPrompt = text;
 		let displayText = text;
 		let locatorSummary = '';
-		if (this.activeContextLocator && (this.activeContextLocator.workspaceId || this.activeContextLocator.ticketId || this.activeContextLocator.field)) {
+		if (text.startsWith('[Workspace:') || text.startsWith('[Action:') || (this.activeContextLocator?.field && (this.activeContextLocator.field.startsWith('/Action') || this.activeContextLocator.field.startsWith('/Trash') || this.activeContextLocator.field.startsWith('/Remove')))) {
+			// Already a formatted command/action prompt from context menu or toolbar
+			fullPrompt = text;
+			displayText = this.activeContextLocator?.label || text;
+			if (this.activeContextLocator) {
+				const parts: string[] = [];
+				if (this.activeContextLocator.workspaceId) parts.push(this.activeContextLocator.workspaceId);
+				if (this.activeContextLocator.ticketId) parts.push(this.activeContextLocator.ticketId);
+				if (this.activeContextLocator.label) parts.push(this.activeContextLocator.label);
+				locatorSummary = parts.join(' › ');
+				const ctxTag = append(userMsg, $('.centered-chat-msg-context-tag'));
+				ctxTag.style.display = 'inline-flex';
+				ctxTag.style.alignItems = 'center';
+				ctxTag.style.gap = '6px';
+				ctxTag.style.fontSize = '9.5px';
+				ctxTag.style.opacity = '0.85';
+				ctxTag.style.marginBottom = '6px';
+				ctxTag.style.background = 'rgba(255,255,255,0.08)';
+				ctxTag.style.padding = '2px 6px';
+				ctxTag.style.borderRadius = '4px';
+				ctxTag.textContent = locatorSummary;
+				this.setContextLocator(null);
+			}
+		} else if (this.activeContextLocator && (this.activeContextLocator.workspaceId || this.activeContextLocator.ticketId || this.activeContextLocator.field)) {
 			const loc = this.activeContextLocator;
 			const locators: string[] = [];
 			if (loc.workspaceId) { locators.push(`Workspace: ${loc.workspaceId}`); }

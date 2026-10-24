@@ -44,6 +44,7 @@ export interface IDeleteTicketToolOptions {
 	workspace_id: string;
 	ticket_id: string;
 	parent_path?: string;
+	move_to_trash?: boolean;
 	worklog_record: IWorklogRecord;
 }
 
@@ -953,13 +954,28 @@ export class TicketDataEngine {
 
 		// 4. Append worklog to the removed ticket
 		if (options.worklog_record) {
-			await this.appendWorklog(paths.worklogMdUri, options.worklog_record);
+			try {
+				await this.appendWorklog(paths.worklogMdUri, options.worklog_record);
+			} catch {}
+		}
+
+		// 5. If move_to_trash requested, permanently move folder to OS Trash
+		let movedToOsTrash = false;
+		if (options.move_to_trash) {
+			try {
+				await this.fileService.del(paths.folderUri, { recursive: true, useTrash: true });
+				movedToOsTrash = true;
+				await this.workspacesExplorerService.removeSnapshot(paths.folderUri);
+			} catch (err) {
+				console.error('Failed to move ticket folder to OS trash:', err);
+			}
 		}
 
 		return {
 			success: true,
 			removed_ticket_id: options.ticket_id,
 			status_set_to: removedStatusName,
+			moved_to_os_trash: movedToOsTrash,
 			cascaded_child_tickets_removed: cascadedIds,
 			unlinked_references: {
 				targets_unlinked: linkToList,
