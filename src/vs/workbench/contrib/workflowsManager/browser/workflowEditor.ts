@@ -5952,23 +5952,29 @@ export class WorkflowEditor extends EditorPane {
 		codeArea.onmousedown = (e) => e.stopPropagation();
 		codeArea.onclick = (e) => e.stopPropagation();
 
-		// Row 4: Schema Fields Quick Add
+		// Row 4: Parameters Reference
 		const fieldsRow = append(draftWrapper, $('.node-function-fields-row'));
 		fieldsRow.onmousedown = (e) => e.stopPropagation();
-		append(fieldsRow, $('.node-function-fields-label', {}, 'Quick Add:'));
+		const fieldsLabel = append(fieldsRow, $('.node-function-fields-label', {}, 'Parameters:'));
 
 		const updateFieldChips = () => {
 			const val = codeArea.value;
 			const typeMatch = val.match(/ticket_type\s*=\s*["']([^"']+)["']/i);
 			const curType = typeMatch ? typeMatch[1] : 'Task';
 
-			fieldsRow.querySelectorAll('.node-function-field-chip').forEach(el => el.remove());
+			fieldsRow.querySelectorAll('.node-function-field-chip, .node-function-field-hint').forEach(el => el.remove());
 
-			const fieldsToAdd: { label: string; snippet: string }[] = [];
+			interface IParamSpec {
+				name: string;
+				defaultValue: any;
+				isStandard?: boolean;
+			}
+			const paramSpecs: IParamSpec[] = [];
+
 			if (/CREATE_TICKETS/i.test(val)) {
-				if (!/\btitle\s*=/i.test(val)) fieldsToAdd.push({ label: 'title', snippet: ', title=""' });
-				if (!/\bpath\s*=/i.test(val)) fieldsToAdd.push({ label: 'path', snippet: `, path="${defaultPath}"` });
+				fieldsLabel.textContent = `Parameters (${curType}):`;
 
+				// Discover parameters from snapshot customMetadata
 				const snapshots = this._entityPersistenceService.getAllSnapshots();
 				const sample = snapshots.find(s => s.entityType?.toLowerCase() === curType.toLowerCase());
 				if (sample?.customMetadata) {
@@ -5981,60 +5987,105 @@ export class WorkflowEditor extends EditorPane {
 								const parsed = JSON.parse(v.trim());
 								if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
 									for (const [pName, pVal] of Object.entries(parsed)) {
-										if (!new RegExp(`\\b${pName}\\s*=`, 'i').test(val)) {
-											const snipVal = typeof pVal === 'number' ? `, ${pName}=${pVal}` : `, ${pName}="${pVal}"`;
-											fieldsToAdd.push({ label: pName, snippet: snipVal });
+										if (!paramSpecs.some(p => p.name.toLowerCase() === pName.toLowerCase())) {
+											paramSpecs.push({ name: pName, defaultValue: pVal !== undefined ? pVal : 0 });
 										}
 									}
 									continue;
 								}
 							} catch { }
 						}
-
-						// Only add small scalar parameters, skip complex primitives (Browser URLs, Prompts, Outputs)
-						const isPrimitiveContent = typeof v === 'string' && (v.length > 40 || v.startsWith('http') || v.includes('\n') || v.includes('{'));
-						if (!isPrimitiveContent && !/output|result|summary|attachment|prompt|browser|parameter/i.test(k) && !new RegExp(`\\b${k}\\s*=`, 'i').test(val)) {
-							const snipVal = typeof v === 'number' ? `, ${k}=${v}` : `, ${k}="${v}"`;
-							fieldsToAdd.push({ label: k, snippet: snipVal });
-						}
 					}
 				}
-				if (curType.toLowerCase() === 'xxx' && !/\bstart\s*=/i.test(val)) {
-					fieldsToAdd.push({ label: 'start', snippet: ', start=0' });
+
+				// Built-in / known fallbacks
+				if (curType.toLowerCase() === 'xxx') {
+					if (!paramSpecs.some(p => p.name.toLowerCase() === 'start')) {
+						paramSpecs.push({ name: 'start', defaultValue: 0 });
+					}
+				} else if (curType.toLowerCase() === 'task') {
+					if (!paramSpecs.some(p => p.name.toLowerCase() === 'priority')) {
+						paramSpecs.push({ name: 'priority', defaultValue: 'normal' });
+					}
+					if (!paramSpecs.some(p => p.name.toLowerCase() === 'status')) {
+						paramSpecs.push({ name: 'status', defaultValue: 'todo' });
+					}
 				}
-				if (curType.toLowerCase() === 'task') {
-					if (!/\bpriority\s*=/i.test(val)) fieldsToAdd.push({ label: 'priority', snippet: ', priority="normal"' });
-					if (!/\bstatus\s*=/i.test(val)) fieldsToAdd.push({ label: 'status', snippet: ', status="todo"' });
-				}
+
+				// Standard options
+				paramSpecs.push({ name: 'title', defaultValue: '', isStandard: true });
+				paramSpecs.push({ name: 'path', defaultValue: defaultPath, isStandard: true });
 			} else if (/RUN_TICKETS/i.test(val)) {
-				if (!/\bticket_name\s*=/i.test(val) && !/\bticket_id\s*=/i.test(val)) fieldsToAdd.push({ label: 'ticket_name', snippet: ', ticket_name=""' });
-				if (!/\bparams\s*=/i.test(val) && !/\bstart\s*=/i.test(val)) fieldsToAdd.push({ label: 'start', snippet: ', start=0' });
+				fieldsLabel.textContent = 'Parameters (RUN_TICKETS):';
+				paramSpecs.push({ name: 'ticket_name', defaultValue: '' });
+				paramSpecs.push({ name: 'start', defaultValue: 0 });
+			} else if (/GET_TICKETS/i.test(val)) {
+				fieldsLabel.textContent = 'Parameters (GET_TICKETS):';
+				paramSpecs.push({ name: 'ticket_name', defaultValue: '' });
+			} else {
+				fieldsLabel.textContent = 'Parameters:';
 			}
 
-			// Show or hide Quick Add row depending on whether there are fields to add
-			fieldsRow.style.display = fieldsToAdd.length > 0 ? 'flex' : 'none';
+			if (paramSpecs.length === 0) {
+				const hint = append(fieldsRow, $('.node-function-field-hint'));
+				hint.textContent = 'None required';
+				hint.style.fontSize = '9.5px';
+				hint.style.opacity = '0.5';
+				hint.style.fontStyle = 'italic';
+				return;
+			}
 
-			for (const f of fieldsToAdd.slice(0, 6)) {
+			for (const p of paramSpecs) {
+				const isIncluded = new RegExp(`\\b${p.name}\\s*=`, 'i').test(val);
+				const formattedVal = typeof p.defaultValue === 'number' || typeof p.defaultValue === 'boolean'
+					? String(p.defaultValue)
+					: `"${p.defaultValue}"`;
+				const snippet = typeof p.defaultValue === 'number' || typeof p.defaultValue === 'boolean'
+					? `, ${p.name}=${p.defaultValue}`
+					: `, ${p.name}="${p.defaultValue}"`;
+
 				const chip = append(fieldsRow, $('.node-function-field-chip'));
-				chip.textContent = `+ ${f.label}`;
-				chip.title = `Insert ${f.label} keyword parameter`;
+				if (isIncluded) {
+					chip.classList.add('included');
+					chip.textContent = `\u2713 ${p.name} = ${formattedVal}`;
+					chip.title = `${p.name} is currently configured in expression`;
+				} else {
+					if (p.isStandard) {
+						chip.classList.add('standard');
+					}
+					chip.textContent = `+ ${p.name} = ${formattedVal}`;
+					chip.title = `Click to insert ${p.name} = ${formattedVal}`;
+				}
+
 				chip.onmousedown = (e) => {
 					e.stopPropagation();
 					e.preventDefault();
 				};
+
 				chip.onclick = (e) => {
 					e.stopPropagation();
-					const lastParen = codeArea.value.lastIndexOf(')');
-					if (lastParen !== -1) {
-						codeArea.value = codeArea.value.substring(0, lastParen).trimEnd() + f.snippet + codeArea.value.substring(lastParen);
+					if (isIncluded) {
+						// Focus and highlight parameter in text area
+						const matchIdx = codeArea.value.search(new RegExp(`\\b${p.name}\\s*=`, 'i'));
+						if (matchIdx !== -1) {
+							codeArea.focus();
+							codeArea.setSelectionRange(matchIdx, matchIdx + p.name.length);
+						}
 					} else {
-						codeArea.value += f.snippet;
+						// Append parameter to call expression
+						const lastParen = codeArea.value.lastIndexOf(')');
+						if (lastParen !== -1) {
+							codeArea.value = codeArea.value.substring(0, lastParen).trimEnd() + snippet + codeArea.value.substring(lastParen);
+						} else {
+							codeArea.value += snippet;
+						}
+						codeArea.focus();
+						updateFieldChips();
 					}
-					codeArea.focus();
-					updateFieldChips();
 				};
 			}
 		};
+		codeArea.oninput = () => updateFieldChips();
 		updateFieldChips();
 
 		// Row 5: Action buttons

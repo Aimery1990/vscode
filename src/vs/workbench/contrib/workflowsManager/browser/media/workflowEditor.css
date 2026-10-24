@@ -3852,6 +3852,24 @@
 	color: #ffffff;
 }
 
+.node-function-field-chip.included {
+	background: rgba(52, 211, 153, 0.12);
+	border-color: rgba(52, 211, 153, 0.4);
+	color: #6ee7b7;
+	opacity: 0.9;
+}
+
+.node-function-field-chip.included:hover {
+	background: rgba(52, 211, 153, 0.25);
+	border-color: #34d399;
+	color: #ffffff;
+}
+
+.node-function-field-chip.standard {
+	border-color: rgba(148, 163, 184, 0.3);
+	color: #94a3b8;
+}
+
 .node-function-footer-row {
 	display: flex;
 	align-items: center;
