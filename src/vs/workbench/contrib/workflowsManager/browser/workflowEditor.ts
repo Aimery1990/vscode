@@ -10477,7 +10477,7 @@ export class WorkflowEditor extends EditorPane {
 
 				if (item.status) {
 					const statusBadge = append(leftGroup, $(`span.workflow-output-status-badge.${item.status}`));
-					statusBadge.textContent = item.status === 'ready' ? 'Ready' : (item.status === 'pending' ? 'Pending' : 'Empty');
+					statusBadge.textContent = item.status === 'ready' ? 'Ready' : (item.status === 'pending' ? 'Pending' : (item.status === 'failed' ? 'Failed' : 'Empty'));
 				}
 
 				// Right Action: Item Copy

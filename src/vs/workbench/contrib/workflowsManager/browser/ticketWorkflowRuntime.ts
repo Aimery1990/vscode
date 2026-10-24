@@ -502,21 +502,74 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						}
 
 						case 'browser': {
-							// 2. Browser Primitive: interpolate URL template and fetch web content
-							const rawUrl = inputOverrides[fieldLabel] || customMetadata[fieldLabel] || field.defaultUrl || '';
-							const interpolatedUrl = this._interpolateVariables(rawUrl, contextVariables);
+							// 2. Browser Primitive: resolve URL template, existing content, credentials, and fetch
+							let targetUrl = '';
+							let existingContent = '';
+							let browserCreds = field.credentials;
+
+							if (inputOverrides[fieldLabel]) {
+								targetUrl = String(inputOverrides[fieldLabel]).trim();
+							} else if (customMetadata[fieldLabel]) {
+								const metaVal = customMetadata[fieldLabel];
+								if (typeof metaVal === 'string') {
+									const trimmed = metaVal.trim();
+									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+										try {
+											const parsed = JSON.parse(trimmed);
+											if (parsed.url) targetUrl = String(parsed.url).trim();
+											if (parsed.content) existingContent = String(parsed.content);
+											if (parsed.credentials && Array.isArray(parsed.credentials)) browserCreds = parsed.credentials;
+										} catch {
+											targetUrl = trimmed;
+										}
+									} else {
+										targetUrl = trimmed;
+									}
+								} else if (typeof metaVal === 'object' && metaVal !== null) {
+									if ((metaVal as any).url) targetUrl = String((metaVal as any).url).trim();
+									if ((metaVal as any).content) existingContent = String((metaVal as any).content);
+									if ((metaVal as any).credentials) browserCreds = (metaVal as any).credentials;
+								}
+							}
+
+							if (!targetUrl && field.defaultUrl) {
+								targetUrl = field.defaultUrl.trim();
+							}
+
+							const interpolatedUrl = this._interpolateVariables(targetUrl, contextVariables);
 
 							if (interpolatedUrl && /^https?:\/\//i.test(interpolatedUrl.trim())) {
 								this.logService.info(`[TicketWorkflowRuntime] Fetching web content from: ${interpolatedUrl}`);
-								const extracted = await this._extractWebContent(interpolatedUrl, field.credentials);
-								stepOutput = extracted.content;
-								customMetadata[fieldLabel] = extracted.content;
+								let extracted = await this._extractWebContent(interpolatedUrl, browserCreds);
+								if ((!extracted.content || extracted.content.startsWith('[Fetch Failed') || extracted.content.startsWith('HTTP Error')) && existingContent) {
+									this.logService.info(`[TicketWorkflowRuntime] Web fetch failed or rate-limited; using preloaded content (${existingContent.length} chars)`);
+									stepOutput = existingContent;
+								} else {
+									stepOutput = extracted.content || existingContent;
+								}
+
+								customMetadata[fieldLabel] = JSON.stringify({
+									url: interpolatedUrl,
+									content: stepOutput,
+									credentials: browserCreds || [],
+									lastFetched: new Date().toISOString()
+								});
 								customMetadata[`${fieldLabel}_url`] = interpolatedUrl;
-								contextVariables[fieldLabel] = extracted.content;
-								contextVariables[this._cleanKey(fieldLabel)] = extracted.content;
+								contextVariables[fieldLabel] = stepOutput;
+								contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 								contextVariables[`${this._cleanKey(fieldLabel)}_url`] = interpolatedUrl;
+							} else if (existingContent) {
+								stepOutput = existingContent;
+								customMetadata[fieldLabel] = JSON.stringify({
+									url: targetUrl || '',
+									content: stepOutput,
+									credentials: browserCreds || [],
+									lastFetched: new Date().toISOString()
+								});
+								contextVariables[fieldLabel] = stepOutput;
+								contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 							} else {
-								stepOutput = `[Browser: Skipped - Invalid or empty URL: '${rawUrl}']`;
+								stepOutput = `[Browser: Skipped - Invalid or empty URL: '${targetUrl}']`;
 								contextVariables[fieldLabel] = stepOutput;
 							}
 							break;
@@ -524,26 +577,62 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 						case 'prompt': {
 							// 3. AI Prompt Primitive: interpolate template with variables and call LLM
-							const rawPrompt = customMetadata[fieldLabel] || field.defaultContent || '';
+							let rawPrompt = '';
+							let promptModel = field.targetModel || 'gpt-4o';
+							let promptProvider = field.targetProvider;
+							let existingPromptOutput = '';
+
+							if (customMetadata[fieldLabel]) {
+								const metaVal = customMetadata[fieldLabel];
+								if (typeof metaVal === 'string') {
+									const trimmed = metaVal.trim();
+									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+										try {
+											const parsed = JSON.parse(trimmed);
+											if (parsed.prompt !== undefined) rawPrompt = String(parsed.prompt);
+											if (parsed.targetModel) promptModel = String(parsed.targetModel);
+											if (parsed.targetProvider) promptProvider = String(parsed.targetProvider);
+											if (parsed.output) existingPromptOutput = String(parsed.output);
+										} catch {
+											rawPrompt = trimmed;
+										}
+									} else {
+										rawPrompt = trimmed;
+									}
+								} else if (typeof metaVal === 'object' && metaVal !== null) {
+									if ((metaVal as any).prompt !== undefined) rawPrompt = String((metaVal as any).prompt);
+									if ((metaVal as any).targetModel) promptModel = String((metaVal as any).targetModel);
+									if ((metaVal as any).targetProvider) promptProvider = String((metaVal as any).targetProvider);
+									if ((metaVal as any).output) existingPromptOutput = String((metaVal as any).output);
+								}
+							}
+
+							if (!rawPrompt && field.defaultContent) {
+								rawPrompt = field.defaultContent;
+							}
+
 							const interpolatedPrompt = this._interpolateVariables(rawPrompt, contextVariables);
-							const modelId = field.targetModel || 'gpt-4o';
-							const providerId = field.targetProvider;
 
-							this.logService.info(`[TicketWorkflowRuntime] Executing AI Prompt with model '${modelId}' (provider: ${providerId || 'auto'})...`);
-							const aiResponse = await this._executePrompt(modelId, interpolatedPrompt, providerId);
+							this.logService.info(`[TicketWorkflowRuntime] Executing AI Prompt with model '${promptModel}' (provider: ${promptProvider || 'auto'})...`);
+							let aiResponse = '';
+							try {
+								aiResponse = await this._executePrompt(promptModel, interpolatedPrompt, promptProvider);
+							} catch (promptErr) {
+								this.logService.warn(`[TicketWorkflowRuntime] AI Prompt call failed, checking for existing output:`, promptErr);
+							}
 
-							stepOutput = aiResponse;
+							stepOutput = aiResponse || existingPromptOutput || 'No output generated from AI model';
 							customMetadata[fieldLabel] = JSON.stringify({
 								prompt: rawPrompt,
 								interpolatedPrompt: interpolatedPrompt,
 								targetMode: field.targetMode || 'model',
-								targetModel: modelId,
-								targetProvider: providerId,
-								output: aiResponse,
+								targetModel: promptModel,
+								targetProvider: promptProvider,
+								output: stepOutput,
 								executedAt: new Date().toISOString()
 							});
-							contextVariables[fieldLabel] = aiResponse;
-							contextVariables[this._cleanKey(fieldLabel)] = aiResponse;
+							contextVariables[fieldLabel] = stepOutput;
+							contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 							break;
 						}
 
@@ -557,7 +646,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							if (enabledSpecs.length > 0) {
 								for (const spec of enabledSpecs) {
 									const specKey = spec.label || spec.fieldKey;
-									const rawVal = contextVariables[specKey] ?? contextVariables[spec.fieldKey] ?? contextVariables[this._cleanKey(specKey)];
+									const rawVal = contextVariables[specKey] ?? contextVariables[spec.fieldKey] ?? contextVariables[this._cleanKey(specKey)] ?? customMetadata[specKey] ?? customMetadata[spec.fieldKey];
 									aggregatedMap[specKey] = this._formatOutputValue(rawVal, spec.defaultFormat || 'table');
 								}
 								stepOutput = aggregatedMap;
@@ -1061,16 +1150,36 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 	private _formatOutputValue(rawVal: any, format: string): any {
 		if (rawVal === undefined || rawVal === null) return '';
-		const str = typeof rawVal === 'string' ? rawVal : JSON.stringify(rawVal, null, 2);
-		switch (format) {
-			case 'json':
-				try { return JSON.parse(str); } catch { return { raw: str }; }
-			case 'markdown':
-			case 'table':
-			case 'text':
-			default:
-				return str;
+		if (typeof rawVal === 'object') return rawVal;
+
+		const str = String(rawVal).trim();
+		if (format === 'json' || format === 'table') {
+			try {
+				return JSON.parse(str);
+			} catch {
+				const match = str.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+				if (match && match[1]) {
+					try {
+						return JSON.parse(match[1].trim());
+					} catch {}
+				}
+				const firstBrace = str.indexOf('{');
+				const lastBrace = str.lastIndexOf('}');
+				if (firstBrace !== -1 && lastBrace > firstBrace) {
+					try {
+						return JSON.parse(str.substring(firstBrace, lastBrace + 1));
+					} catch {}
+				}
+				const firstBracket = str.indexOf('[');
+				const lastBracket = str.lastIndexOf(']');
+				if (firstBracket !== -1 && lastBracket > firstBracket) {
+					try {
+						return JSON.parse(str.substring(firstBracket, lastBracket + 1));
+					} catch {}
+				}
+			}
 		}
+		return str;
 	}
 
 	private _extractTicketOutputs(metadata: Record<string, string>, schema?: ICustomModule): Record<string, any> {

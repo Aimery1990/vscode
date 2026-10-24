@@ -4313,6 +4313,12 @@
 	border: 1px solid rgba(148, 163, 184, 0.25);
 }
 
+.workflow-output-status-badge.failed {
+	color: #f43f5e;
+	background: rgba(244, 63, 94, 0.12);
+	border: 1px solid rgba(244, 63, 94, 0.25);
+}
+
 .workflow-output-section-right {
 	display: flex;
 	align-items: center;

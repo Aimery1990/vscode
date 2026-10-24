@@ -1333,6 +1333,20 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				});
 
 				result = execRes.output !== undefined ? execRes.output : execRes;
+				if (result && typeof result === 'object' && !Array.isArray(result)) {
+					try {
+						Object.defineProperty(result, '__ticketMetadata', {
+							value: {
+								ticketId: execRes.ticketId || ticketIdOrPath,
+								ticketName: execRes.ticketName || ticketIdOrPath,
+								ticketType: execRes.ticketType || 'ticket'
+							},
+							enumerable: false,
+							configurable: true,
+							writable: true
+						});
+					} catch {}
+				}
 				const ticketRecord = {
 					ticketId: execRes.ticketId || ticketIdOrPath,
 					ticketName: execRes.ticketName || ticketIdOrPath,
@@ -1603,29 +1617,26 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 
 		// Check if displayVal is a Ticket or contains Ticket Fields/Outputs
-		const isTicket = typeof displayVal === 'object' && !Array.isArray(displayVal) && (
+		let ticketId = displayVal?.ticketId || displayVal?.__ticketMetadata?.ticketId || '';
+		let ticketName = displayVal?.ticketName || displayVal?.title || displayVal?.__ticketMetadata?.ticketName || '';
+		let ticketType = displayVal?.ticketType || displayVal?.__ticketMetadata?.ticketType || '';
+
+		let extractedOutputs: Record<string, any> = {};
+
+		const isExplicitTicket = typeof displayVal === 'object' && displayVal !== null && !Array.isArray(displayVal) && (
 			displayVal.ticketId !== undefined ||
 			displayVal.ticketType !== undefined ||
 			displayVal.fields !== undefined ||
 			displayVal.outputs !== undefined ||
-			displayVal.customMetadata !== undefined
+			displayVal.customMetadata !== undefined ||
+			displayVal.__ticketMetadata !== undefined
 		);
 
-		if (isTicket) {
-			const ticketId = displayVal.ticketId || '';
-			const ticketName = displayVal.ticketName || displayVal.title || '';
-			const ticketType = displayVal.ticketType || '';
-
-			let extractedOutputs: Record<string, any> = {};
-
-			// Case 1: ticket already has outputs
+		if (isExplicitTicket) {
 			if (displayVal.outputs && typeof displayVal.outputs === 'object' && Object.keys(displayVal.outputs).length > 0) {
 				extractedOutputs = { ...displayVal.outputs };
-			} else {
-				// Case 2: extract outputs from fields / customMetadata
+			} else if (displayVal.fields || displayVal.customMetadata) {
 				const fields = displayVal.fields || displayVal.customMetadata || {};
-
-				// Check if there is an explicit Output / output primitive
 				const outMeta = fields['Output'] || fields['output'] || fields['Result'] || fields['result'];
 				if (outMeta && typeof outMeta === 'string' && outMeta.trim().startsWith('{')) {
 					try {
@@ -1642,7 +1653,6 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					} catch {}
 				}
 
-				// If no outputs found from Output primitive, infer from browser / prompt primitives
 				if (Object.keys(extractedOutputs).length === 0) {
 					for (const [k, v] of Object.entries(fields)) {
 						if (k.toLowerCase().startsWith('param') || k === 'parameters') continue;
@@ -1653,55 +1663,105 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 				}
 			}
+		}
 
-			// Build human-friendly formatted text for display card
+		// Direct dictionary / map of outputs or array of outputs
+		if (Object.keys(extractedOutputs).length === 0 && typeof displayVal === 'object' && displayVal !== null) {
+			if (Array.isArray(displayVal)) {
+				if (displayVal.length > 0) {
+					displayVal.forEach((item, idx) => {
+						const label = (item && typeof item === 'object' && (item.label || item.title || item.name))
+							? String(item.label || item.title || item.name)
+							: `Output #${idx + 1}`;
+						extractedOutputs[label] = item;
+					});
+				}
+			} else {
+				for (const [k, v] of Object.entries(displayVal)) {
+					if (k.startsWith('__')) continue;
+					extractedOutputs[k] = v;
+				}
+			}
+		}
+
+		if (Object.keys(extractedOutputs).length > 0) {
 			const outputEntries = Object.entries(extractedOutputs);
 			const lines: string[] = [];
 
-			lines.push(`======================================================================`);
-			lines.push(`Ticket Outputs: ${ticketName || 'Ticket'}${ticketId ? ` (${ticketId})` : ''}${ticketType ? ` [${ticketType}]` : ''}`);
-			lines.push(`======================================================================`);
-
-			if (outputEntries.length === 0) {
-				lines.push('');
-				lines.push(`(No primitive outputs enabled or generated for this ticket)`);
-			} else {
-				outputEntries.forEach(([key, val], idx) => {
-					lines.push('');
-					lines.push(`----------------------------------------------------------------------`);
-					lines.push(`[OUTPUT ${idx + 1}] ${key}`);
-					lines.push(`----------------------------------------------------------------------`);
-					if (typeof val === 'object' && val !== null) {
-						lines.push(JSON.stringify(val, null, 2));
-					} else {
-						lines.push(String(val).trim());
-					}
-				});
+			if (ticketName || ticketId || ticketType) {
+				lines.push(`======================================================================`);
+				lines.push(`Ticket Outputs: ${ticketName || 'Ticket'}${ticketId ? ` (${ticketId})` : ''}${ticketType ? ` [${ticketType}]` : ''}`);
+				lines.push(`======================================================================`);
 			}
+
+			outputEntries.forEach(([key, val], idx) => {
+				lines.push('');
+				lines.push(`----------------------------------------------------------------------`);
+				lines.push(`[OUTPUT ${idx + 1}] ${key}`);
+				lines.push(`----------------------------------------------------------------------`);
+				if (typeof val === 'object' && val !== null) {
+					lines.push(JSON.stringify(val, null, 2));
+				} else {
+					lines.push(String(val).trim());
+				}
+			});
 
 			// Build structured output items for accordion rendering
 			const outputItems: IWorkflowDisplayOutputItem[] = [];
 			for (const [key, val] of Object.entries(extractedOutputs)) {
-				const isObj = typeof val === 'object' && val !== null;
-				const strVal = isObj ? JSON.stringify(val, null, 2) : String(val).trim();
+				let fmt = 'text';
+				let strVal = '';
+
+				if (typeof val === 'object' && val !== null) {
+					fmt = Array.isArray(val) ? 'json' : 'json';
+					strVal = JSON.stringify(val, null, 2);
+				} else if (typeof val === 'string') {
+					strVal = val.trim();
+					if ((strVal.startsWith('{') && strVal.endsWith('}')) || (strVal.startsWith('[') && strVal.endsWith(']'))) {
+						try {
+							const parsed = JSON.parse(strVal);
+							fmt = 'json';
+							strVal = JSON.stringify(parsed, null, 2);
+						} catch {
+							fmt = 'text';
+						}
+					} else {
+						const jsonBlock = strVal.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+						if (jsonBlock && jsonBlock[1]) {
+							try {
+								const parsed = JSON.parse(jsonBlock[1].trim());
+								fmt = 'json';
+								strVal = JSON.stringify(parsed, null, 2);
+							} catch {
+								fmt = 'markdown';
+							}
+						} else if (strVal.startsWith('#') || strVal.includes('•') || strVal.includes('http')) {
+							fmt = 'text';
+						}
+					}
+				} else {
+					strVal = String(val);
+					fmt = typeof val;
+				}
+
 				const isPending = !strVal || strVal.includes('Pending AI Execution');
-				const fmt = isObj ? 'json' : (strVal.startsWith('#') || strVal.includes('•') ? 'text' : 'text');
+				const isFailed = strVal.startsWith('[Browser: Skipped') || strVal.startsWith('[Fetch Failed') || strVal.startsWith('HTTP Error');
 
 				outputItems.push({
 					label: key,
 					format: fmt,
 					content: strVal,
-					status: isPending ? 'pending' : (strVal.length > 0 ? 'ready' : 'empty')
+					status: isPending ? 'pending' : (isFailed ? 'failed' : (strVal.length > 0 ? 'ready' : 'empty'))
 				});
 			}
 
 			return {
-				formattedText: lines.join('\n'),
-				summaryType: `Ticket Outputs (${outputEntries.length} items)`,
+				formattedText: lines.join('\n').trim(),
+				summaryType: `Outputs (${outputEntries.length} items)`,
 				cleanValue: extractedOutputs,
-				ticketTitle: ticketName || 'Ticket',
-				ticketId: ticketId,
-				ticketType: ticketType,
+				ticketTitle: ticketName || undefined,
+				ticketId: ticketId || undefined,
+				ticketType: ticketType || undefined,
 				outputItems: outputItems
 			};
 		}
