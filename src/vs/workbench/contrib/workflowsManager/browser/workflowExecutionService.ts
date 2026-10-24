@@ -9,7 +9,7 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
-import { IWorkflowExecutionService } from '../common/workflowExecutionService.js';
+import { IWorkflowExecutionService, IWorkflowDisplayCard } from '../common/workflowExecutionService.js';
 import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import {
 	IWorkflowEngineOptions,
@@ -415,6 +415,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	private readonly _onDidEmitLog = new Emitter<{ runId: string; log: IWorkflowLogEntry }>();
 	readonly onDidEmitLog: Event<{ runId: string; log: IWorkflowLogEntry }> = this._onDidEmitLog.event;
+
+	private readonly _onDidDisplayVariable = new Emitter<IWorkflowDisplayCard>();
+	readonly onDidDisplayVariable: Event<IWorkflowDisplayCard> = this._onDidDisplayVariable.event;
 
 	constructor(
 		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
@@ -1374,6 +1377,33 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			} else if (upperFn === 'GET_PRIMITIVES_CATALOG' || upperFn === 'GETPRIMITIVESCATALOG') {
 				const catalog = await this.ticketRuntimeService.GET_PRIMITIVES_CATALOG(workflowDir);
 				result = catalog;
+			} else if (upperFn === 'DISPLAY' || upperFn === 'PRINT') {
+				let displayVal: any;
+				if (args.length === 1) {
+					displayVal = args[0];
+				} else if (args.length > 1) {
+					displayVal = args;
+				} else if (Object.keys(kwargs).length > 0) {
+					displayVal = kwargs;
+				} else {
+					displayVal = run.contextVariables;
+				}
+				result = displayVal;
+				const formattedText = typeof displayVal === 'object' && displayVal !== null
+					? JSON.stringify(displayVal, null, 2)
+					: String(displayVal);
+
+				this._emitLog(run, 'info', `[DISPLAY] [${node.title || node.id}] ${formattedText}`, { nodeId: node.id });
+
+				this._onDidDisplayVariable.fire({
+					id: `display_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+					nodeId: node.id,
+					nodeTitle: node.title || node.id,
+					expression: rawExpr || `DISPLAY(${rawArgsStr})`,
+					value: displayVal,
+					formattedText,
+					timestamp: new Date().toLocaleTimeString()
+				});
 			} else {
 				// Fallback evaluation for general expressions
 				try {

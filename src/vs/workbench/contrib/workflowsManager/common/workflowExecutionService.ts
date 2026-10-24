@@ -10,11 +10,22 @@ import { IWorkflowEngineOptions, IWorkflowExecutionRun, IWorkflowLogEntry } from
 
 export const IWorkflowExecutionService = createDecorator<IWorkflowExecutionService>('workflowExecutionService');
 
+export interface IWorkflowDisplayCard {
+	id: string;
+	nodeId: string;
+	nodeTitle: string;
+	expression: string;
+	value: any;
+	formattedText: string;
+	timestamp: string;
+}
+
 export interface IWorkflowExecutionService {
 	readonly _serviceBrand: undefined;
 
 	readonly onDidChangeRunState: Event<IWorkflowExecutionRun>;
 	readonly onDidEmitLog: Event<{ runId: string; log: IWorkflowLogEntry }>;
+	readonly onDidDisplayVariable: Event<IWorkflowDisplayCard>;
 
 	executeWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions): Promise<IWorkflowExecutionRun>;
 	stepWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions, runId?: string): Promise<IWorkflowExecutionRun>;
