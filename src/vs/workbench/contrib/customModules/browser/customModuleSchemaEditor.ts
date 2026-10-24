@@ -28,7 +28,7 @@ import { RequestChannelClient } from '../../../../platform/request/common/reques
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { URI } from '../../../../base/common/uri.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
-import { IAgentsManagerService } from '../../agentsManager/common/agentsManager.js';
+import { IAgentsManagerService, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
 import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
 
 
@@ -1919,44 +1919,136 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						} else {
 							append(targetSelectContainer, $('label', { style: 'font-size: 11px; font-weight: 600; color: #60a5fa;' }, 'Target AI Model:'));
 							const modelRow = append(targetSelectContainer, $('div', { style: 'display: flex; gap: 8px; align-items: center;' }));
+
+							// Provider Selector (OpenAI, Gemini, Anthropic, Ollama, Custom, etc.)
+							const providerSelect = append(modelRow, $('select.monaco-select-box', {
+								style: 'width: 140px; padding: 6px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(59, 130, 246, 0.35); background: rgba(0, 0, 0, 0.25); color: inherit;'
+							})) as HTMLSelectElement;
+
+							// Model Selector
 							const modelSelect = append(modelRow, $('select.monaco-select-box', {
 								style: 'flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(59, 130, 246, 0.35); background: rgba(0, 0, 0, 0.25); color: inherit;'
 							})) as HTMLSelectElement;
 
-							const presetModels = [
-								{ id: 'gemini-1.5-flash', label: 'Google Gemini 1.5 Flash (Fast & Capable)' },
-								{ id: 'gemini-1.5-pro', label: 'Google Gemini 1.5 Pro (Deep Reasoning)' },
-								{ id: 'gpt-4o', label: 'OpenAI GPT-4o (Omni Flagship)' },
-								{ id: 'gpt-4o-mini', label: 'OpenAI GPT-4o-mini (Lightweight)' },
-								{ id: 'claude-3-5-sonnet-20241022', label: 'Anthropic Claude 3.5 Sonnet' },
-								{ id: 'claude-3-5-haiku-20241022', label: 'Anthropic Claude 3.5 Haiku' },
-								{ id: 'custom', label: 'Custom Model Name...' }
-							];
-
-							let matched = false;
-							presetModels.forEach(pm => {
-								const opt = append(modelSelect, $('option', { value: pm.id }, pm.label)) as HTMLOptionElement;
-								if (pm.id === field.targetModel) {
-									opt.selected = true;
-									matched = true;
-								}
-							});
-							if (!matched && field.targetModel) {
-								const customOpt = append(modelSelect, $('option', { value: field.targetModel }, `Custom: ${field.targetModel}`)) as HTMLOptionElement;
-								customOpt.selected = true;
-							}
-
 							const customInput = append(modelRow, $('input.monaco-inputbox', {
 								placeholder: 'Custom model ID (e.g. deepseek-chat)',
-								style: `flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; ${modelSelect.value === 'custom' || (!matched && field.targetModel) ? '' : 'display: none;'}`
+								style: 'flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; display: none;'
 							})) as HTMLInputElement;
-							customInput.value = field.targetModel || '';
+
+							const providerModelsMap: Record<string, { id: string; label: string }[]> = {
+								openai: [
+									{ id: 'gpt-4o', label: 'OpenAI GPT-4o (Omni Flagship)' },
+									{ id: 'gpt-4o-mini', label: 'OpenAI GPT-4o-mini (Lightweight)' },
+									{ id: 'o1-preview', label: 'OpenAI o1 (Advanced Reasoning)' },
+									{ id: 'o1-mini', label: 'OpenAI o1-mini (Fast Reasoning)' },
+									{ id: 'gpt-4-turbo', label: 'OpenAI GPT-4 Turbo' },
+									{ id: 'custom', label: 'Custom Model ID...' }
+								],
+								gemini: [
+									{ id: 'gemini-2.5-flash', label: 'Google Gemini 2.5 Flash' },
+									{ id: 'gemini-2.5-pro', label: 'Google Gemini 2.5 Pro' },
+									{ id: 'gemini-2.0-flash', label: 'Google Gemini 2.0 Flash' },
+									{ id: 'gemini-1.5-pro', label: 'Google Gemini 1.5 Pro' },
+									{ id: 'gemini-1.5-flash', label: 'Google Gemini 1.5 Flash' },
+									{ id: 'custom', label: 'Custom Model ID...' }
+								],
+								anthropic: [
+									{ id: 'claude-3-5-sonnet-20241022', label: 'Anthropic Claude 3.5 Sonnet' },
+									{ id: 'claude-3-5-haiku-20241022', label: 'Anthropic Claude 3.5 Haiku' },
+									{ id: 'claude-3-opus-20240229', label: 'Anthropic Claude 3 Opus' },
+									{ id: 'custom', label: 'Custom Model ID...' }
+								],
+								ollama: [
+									{ id: 'llama3.1', label: 'Ollama Llama 3.1' },
+									{ id: 'qwen2.5-coder', label: 'Ollama Qwen 2.5 Coder' },
+									{ id: 'mistral', label: 'Ollama Mistral' },
+									{ id: 'deepseek-r1', label: 'Ollama DeepSeek-R1' },
+									{ id: 'custom', label: 'Custom Model ID...' }
+								],
+								'custom-openai': [
+									{ id: 'custom', label: 'Custom Endpoint Model' }
+								]
+							};
+
+							const populateProviders = async () => {
+								clearNode(providerSelect);
+								let configuredCreds: any[] = [];
+								try {
+									const credService = this._instantiationService.invokeFunction(accessor => {
+										try { return accessor.get(IAgentCredentialService); } catch { return undefined; }
+									});
+									if (credService) {
+										configuredCreds = await credService.getCredentials();
+									}
+								} catch {}
+
+								const standardProviders = [
+									{ id: 'openai', label: 'OpenAI' },
+									{ id: 'gemini', label: 'Google Gemini' },
+									{ id: 'anthropic', label: 'Anthropic Claude' },
+									{ id: 'ollama', label: 'Ollama Local' },
+									{ id: 'custom-openai', label: 'Custom Endpoint' }
+								];
+
+								// Determine active provider
+								let activeProv = field.targetProvider || 'openai';
+								if (!field.targetProvider && field.targetModel) {
+									if (field.targetModel.startsWith('gemini')) activeProv = 'gemini';
+									else if (field.targetModel.startsWith('claude')) activeProv = 'anthropic';
+									else if (field.targetModel.startsWith('gpt') || field.targetModel.startsWith('o1')) activeProv = 'openai';
+								}
+
+								standardProviders.forEach(p => {
+									const opt = append(providerSelect, $('option', { value: p.id }, p.label)) as HTMLOptionElement;
+									if (p.id === activeProv) opt.selected = true;
+								});
+
+								field.targetProvider = providerSelect.value;
+								updateModelsForProvider(field.targetProvider);
+							};
+
+							const updateModelsForProvider = (providerId: string) => {
+								clearNode(modelSelect);
+								const list = providerModelsMap[providerId] || providerModelsMap['openai'];
+								let matched = false;
+								list.forEach(m => {
+									const opt = append(modelSelect, $('option', { value: m.id }, m.label)) as HTMLOptionElement;
+									if (m.id === field.targetModel) {
+										opt.selected = true;
+										matched = true;
+									}
+								});
+								if (!matched && field.targetModel && field.targetModel !== 'custom') {
+									const customOpt = append(modelSelect, $('option', { value: field.targetModel }, `Custom: ${field.targetModel}`)) as HTMLOptionElement;
+									customOpt.selected = true;
+									matched = true;
+								}
+								if (!matched && list.length > 0) {
+									field.targetModel = list[0].id;
+									(modelSelect.firstChild as HTMLOptionElement).selected = true;
+								}
+								if (modelSelect.value === 'custom') {
+									customInput.style.display = 'block';
+									customInput.value = field.targetModel === 'custom' ? '' : (field.targetModel || '');
+								} else {
+									customInput.style.display = 'none';
+								}
+							};
+
+							populateProviders();
+
+							providerSelect.onchange = () => {
+								field.targetProvider = providerSelect.value;
+								const defaultFirst = (providerModelsMap[field.targetProvider] || [])[0]?.id || 'gpt-4o';
+								field.targetModel = defaultFirst;
+								updateModelsForProvider(field.targetProvider);
+							};
 
 							modelSelect.onchange = () => {
 								if (modelSelect.value === 'custom') {
 									customInput.style.display = 'block';
 									customInput.focus();
-									field.targetModel = customInput.value.trim() || 'gemini-1.5-flash';
+									field.targetModel = customInput.value.trim() || 'gpt-4o';
 								} else {
 									customInput.style.display = 'none';
 									field.targetModel = modelSelect.value;
@@ -1993,21 +2085,161 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					renderTargetSelector();
 
+					// Collect available referenceable fields (primitives from the schema)
+					const allSchemaFields = (this._activeModule?.fields && this._activeModule.fields.length > 0) ? this._activeModule.fields : fields;
+					const referenceableFields = allSchemaFields.filter(f => f && f.id !== field.id && f.type !== 'output' && f.type !== 'result');
+
 					// Default Instruction / Prompt Template Textarea
-					const promptTextRow = append(promptSchemaBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+					const promptTextRow = append(promptSchemaBox, $('div', { style: 'display: flex; flex-direction: column; gap: 6px; position: relative;' }));
 					const promptTop = append(promptTextRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
 					append(promptTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Default Instruction / Prompt Template:'));
-					append(promptTop, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'Supports {{param_name}} interpolation'));
+					append(promptTop, $('span', { style: 'font-size: 10px; color: #38bdf8;' }, 'Supports {Field Label} or @Field references'));
+
+					// Quick Reference Insert Toolbar (Clickable Chips)
+					if (referenceableFields.length > 0) {
+						const chipBar = append(promptTextRow, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center; background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.15); border-radius: 4px; padding: 4px 8px;' }));
+						append(chipBar, $('span', { style: 'font-size: 10px; font-weight: 600; color: #94a3b8;' }, 'Insert Primitive:'));
+						referenceableFields.forEach(rf => {
+							const rfLabel = rf.label || rf.id;
+							const chip = append(chipBar, $('button.prompt-insert-chip', {
+								type: 'button',
+								style: 'padding: 2px 7px; font-size: 10px; font-weight: 600; border-radius: 3px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.28); cursor: pointer; transition: all 0.15s ease;'
+							}));
+							chip.textContent = `+ {${rfLabel}}`;
+							chip.title = `Click to insert reference to ${rfLabel} (${rf.type.toUpperCase()})`;
+							chip.onclick = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								insertTextAtCursor(`{${rfLabel}}`);
+							};
+						});
+					}
 
 					const promptTextarea = append(promptTextRow, $('textarea.monaco-inputbox', {
-						rows: 4,
-						placeholder: 'e.g. Please analyze the ticket details and draft a summary:\n{{description}}',
-						style: 'width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.4;'
+						rows: 5,
+						placeholder: 'e.g. Please analyze the ticket details:\nGet the result of {Linkedin Product Manager AI Software} above and extract each job as json...',
+						style: 'width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45;'
 					})) as HTMLTextAreaElement;
 					promptTextarea.value = field.defaultContent || '';
+
+					// Floating Autocomplete Menu for @ and {
+					const autocompleteMenu = append(promptTextRow, $('div.prompt-autocomplete-menu', {
+						style: 'display: none; position: absolute; z-index: 50; max-height: 160px; overflow-y: auto; background: #1e293b; border: 1px solid #38bdf8; border-radius: 5px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); width: 280px; padding: 4px;'
+					}));
+
+					// Live Referenced Primitives Preview Bar
+					const previewRow = append(promptTextRow, $('div.prompt-references-preview', {
+						style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center; min-height: 20px; font-size: 10px;'
+					}));
+
+					const updateReferencePreview = () => {
+						clearNode(previewRow);
+						const val = promptTextarea.value;
+						const matches = new Set<string>();
+						// Match {Field Name}
+						const braceMatches = val.match(/\{([^{}]+)\}/g);
+						if (braceMatches) braceMatches.forEach(m => matches.add(m.slice(1, -1).trim()));
+						// Match @Field_Name or @Field
+						const atMatches = val.match(/@([a-zA-Z0-9_\u4e00-\u9fa5\s]+)/g);
+						if (atMatches) atMatches.forEach(m => matches.add(m.slice(1).trim()));
+
+						if (matches.size > 0) {
+							append(previewRow, $('span', { style: 'color: #94a3b8; font-weight: 600;' }, 'Linked Outputs:'));
+							matches.forEach(m => {
+								const targetRef = referenceableFields.find(rf => (rf.label || rf.id).toLowerCase() === m.toLowerCase() || rf.id.toLowerCase() === m.toLowerCase());
+								const pill = append(previewRow, $('span.prompt-ref-pill', {
+									style: targetRef
+										? 'padding: 2px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600;'
+										: 'padding: 2px 6px; border-radius: 3px; background: rgba(148, 163, 184, 0.1); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.2);'
+								}));
+								pill.textContent = targetRef ? `🔗 ${targetRef.label || targetRef.id} [${targetRef.type.toUpperCase()}]` : `{${m}}`;
+							});
+						}
+					};
+
+					const insertTextAtCursor = (insertText: string) => {
+						const start = promptTextarea.selectionStart || 0;
+						const end = promptTextarea.selectionEnd || 0;
+						const current = promptTextarea.value;
+						promptTextarea.value = current.substring(0, start) + insertText + current.substring(end);
+						promptTextarea.selectionStart = promptTextarea.selectionEnd = start + insertText.length;
+						field.defaultContent = promptTextarea.value;
+						promptTextarea.focus();
+						updateReferencePreview();
+						autocompleteMenu.style.display = 'none';
+					};
+
+					const showAutocomplete = (prefix: string) => {
+						clearNode(autocompleteMenu);
+						const query = prefix.toLowerCase();
+						const filtered = referenceableFields.filter(rf =>
+							(rf.label || rf.id).toLowerCase().includes(query) ||
+							rf.type.toLowerCase().includes(query)
+						);
+						if (filtered.length === 0) {
+							autocompleteMenu.style.display = 'none';
+							return;
+						}
+						filtered.forEach(rf => {
+							const rfLabel = rf.label || rf.id;
+							const itemEl = append(autocompleteMenu, $('div.prompt-autocomplete-item', {
+								style: 'padding: 5px 8px; font-size: 11px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; border-radius: 3px; transition: background 0.1s ease;'
+							}));
+							itemEl.onmouseenter = () => itemEl.style.background = 'rgba(56, 189, 248, 0.2)';
+							itemEl.onmouseleave = () => itemEl.style.background = 'transparent';
+							append(itemEl, $('span', { style: 'font-weight: 600; color: #f1f5f9;' }, rfLabel));
+							append(itemEl, $('span', { style: 'font-size: 9px; color: #38bdf8; background: rgba(56,189,248,0.15); padding: 1px 4px; border-radius: 2px;' }, rf.type.toUpperCase()));
+
+							itemEl.onmousedown = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								const start = promptTextarea.selectionStart || 0;
+								const textBefore = promptTextarea.value.substring(0, start);
+								const lastTriggerIdx = Math.max(textBefore.lastIndexOf('@'), textBefore.lastIndexOf('{'));
+								if (lastTriggerIdx >= 0) {
+									promptTextarea.value = promptTextarea.value.substring(0, lastTriggerIdx) + `{${rfLabel}}` + promptTextarea.value.substring(start);
+									promptTextarea.selectionStart = promptTextarea.selectionEnd = lastTriggerIdx + rfLabel.length + 2;
+								} else {
+									insertTextAtCursor(`{${rfLabel}}`);
+								}
+								field.defaultContent = promptTextarea.value;
+								updateReferencePreview();
+								autocompleteMenu.style.display = 'none';
+							};
+						});
+
+						autocompleteMenu.style.display = 'block';
+						autocompleteMenu.style.bottom = '30px';
+						autocompleteMenu.style.left = '10px';
+					};
+
 					promptTextarea.oninput = () => {
 						field.defaultContent = promptTextarea.value;
+						updateReferencePreview();
+
+						const cursor = promptTextarea.selectionStart || 0;
+						const before = promptTextarea.value.substring(0, cursor);
+						const lastAt = before.lastIndexOf('@');
+						const lastBrace = before.lastIndexOf('{');
+						const triggerIdx = Math.max(lastAt, lastBrace);
+
+						if (triggerIdx >= 0 && triggerIdx >= cursor - 25) {
+							const query = before.substring(triggerIdx + 1);
+							if (!/[\s\n}]/.test(query)) {
+								showAutocomplete(query);
+								return;
+							}
+						}
+						autocompleteMenu.style.display = 'none';
 					};
+
+					promptTextarea.onkeydown = (e) => {
+						if (e.key === 'Escape') {
+							autocompleteMenu.style.display = 'none';
+						}
+					};
+
+					updateReferencePreview();
 				}
 
 				if (field.type === 'output' || field.type === 'result') {

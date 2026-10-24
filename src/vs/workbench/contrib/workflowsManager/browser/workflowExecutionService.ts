@@ -1371,6 +1371,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 					opts.parameters = initialFields;
 					opts.fieldValues = initialFields;
+					opts.autoRun = kwargs.auto_run === true || kwargs.autoRun === true || kwargs.run === true;
+				}
+				if (opts.auto_run !== undefined && opts.autoRun === undefined) {
+					opts.autoRun = opts.auto_run === true;
 				}
 				opts.workspaceUri = workflowDir;
 				const createRes = await this.ticketRuntimeService.CREATE_TICKETS(opts);

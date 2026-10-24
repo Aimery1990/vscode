@@ -507,8 +507,8 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				url,
 				headers,
 				data: body,
-				timeout: 12000,
-				callSite: 'agentCredentialService.testConnection'
+				timeout: 60000,
+				callSite: 'agentCredentialService.executePrompt'
 			}, CancellationToken.None);
 
 			if (response.res.statusCode !== 200) {
@@ -592,20 +592,25 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 		}
 	}
 
-	async executePrompt(modelId: string, prompt: string, systemPrompt?: string): Promise<{ success: boolean; text?: string; error?: string }> {
+	async executePrompt(modelId: string, prompt: string, systemPrompt?: string, targetProviderId?: string): Promise<{ success: boolean; text?: string; error?: string }> {
 		await this.initializationPromise;
 		const sanitizedModel = (modelId || 'gemini-1.5-flash').replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
 
-		let providerId = 'gemini';
-		if (sanitizedModel.startsWith('gpt') || sanitizedModel.startsWith('o1') || sanitizedModel.startsWith('o3') || sanitizedModel.startsWith('text-embedding')) {
-			providerId = 'openai';
-		} else if (sanitizedModel.startsWith('claude')) {
-			providerId = 'anthropic';
-		} else if (sanitizedModel.startsWith('deepseek') || sanitizedModel.startsWith('qwen') || sanitizedModel.startsWith('llama')) {
-			providerId = 'custom-openai';
+		let providerId = targetProviderId || 'gemini';
+		if (!targetProviderId) {
+			if (sanitizedModel.startsWith('gpt') || sanitizedModel.startsWith('o1') || sanitizedModel.startsWith('o3') || sanitizedModel.startsWith('text-embedding')) {
+				providerId = 'openai';
+			} else if (sanitizedModel.startsWith('claude')) {
+				providerId = 'anthropic';
+			} else if (sanitizedModel.startsWith('deepseek') || sanitizedModel.startsWith('qwen') || sanitizedModel.startsWith('llama')) {
+				providerId = 'custom-openai';
+			}
 		}
 
 		let cred = this._credentials.find(c => c.providerId === providerId && c.isEnabled !== false);
+		if (!cred && targetProviderId) {
+			cred = this._credentials.find(c => c.id === targetProviderId || c.name.toLowerCase() === targetProviderId.toLowerCase());
+		}
 		if (!cred) {
 			cred = this._credentials.find(c => c.isEnabled !== false);
 		}

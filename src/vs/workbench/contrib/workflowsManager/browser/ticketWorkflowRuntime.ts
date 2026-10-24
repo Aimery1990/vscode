@@ -25,6 +25,7 @@ export interface ITicketCreateOptions {
 	priority?: string;
 	parameters?: Record<string, any>;
 	fieldValues?: Record<string, any>;
+	autoRun?: boolean;
 }
 
 export interface ITicketCreateResult {
@@ -259,6 +260,26 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			const ticketOutputs = this._extractTicketOutputs(customMetadata, matchedModule);
 
+			if (options.autoRun) {
+				const runRes = await this.runTicket({
+					workspaceUri: options.workspaceUri,
+					ticketIdOrPath: ticketCode,
+					inputParams: options.parameters || options.fieldValues
+				});
+				if (runRes.success) {
+					return {
+						success: true,
+						ticketId: ticketCode,
+						ticketName: safeFolderName,
+						ticketType: ticketType,
+						entityUri: ticketFolderUri.toString(),
+						targetFolder: ticketFolderUri.fsPath,
+						fields: runRes.fields || customMetadata,
+						outputs: (runRes.output !== undefined && typeof runRes.output === 'object') ? runRes.output : ticketOutputs
+					};
+				}
+			}
+
 			return {
 				success: true,
 				ticketId: ticketCode,
@@ -401,10 +422,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			contextVariables['ticketName'] = ticketResult.ticketName;
 			contextVariables['status'] = ticketResult.status;
 
-			// Add customMetadata entries into context
+			// Add customMetadata entries into context (clean primitive contents so variables interpolate properly)
 			for (const [k, v] of Object.entries(customMetadata)) {
-				contextVariables[k] = v;
-				contextVariables[this._cleanKey(k)] = v;
+				const cleanVal = this._getCleanPrimitiveContent(v);
+				contextVariables[k] = cleanVal;
+				contextVariables[this._cleanKey(k)] = cleanVal;
 			}
 
 			// Add input overrides into context
@@ -489,13 +511,22 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							// 3. AI Prompt Primitive: interpolate template with variables and call LLM
 							const rawPrompt = customMetadata[fieldLabel] || field.defaultContent || '';
 							const interpolatedPrompt = this._interpolateVariables(rawPrompt, contextVariables);
-							const modelId = field.targetModel || 'gemini-1.5-flash';
+							const modelId = field.targetModel || 'gpt-4o';
+							const providerId = field.targetProvider;
 
-							this.logService.info(`[TicketWorkflowRuntime] Executing AI Prompt with model '${modelId}'...`);
-							const aiResponse = await this._executePrompt(modelId, interpolatedPrompt);
+							this.logService.info(`[TicketWorkflowRuntime] Executing AI Prompt with model '${modelId}' (provider: ${providerId || 'auto'})...`);
+							const aiResponse = await this._executePrompt(modelId, interpolatedPrompt, providerId);
 
 							stepOutput = aiResponse;
-							customMetadata[fieldLabel] = aiResponse;
+							customMetadata[fieldLabel] = JSON.stringify({
+								prompt: rawPrompt,
+								interpolatedPrompt: interpolatedPrompt,
+								targetMode: field.targetMode || 'model',
+								targetModel: modelId,
+								targetProvider: providerId,
+								output: aiResponse,
+								executedAt: new Date().toISOString()
+							});
 							contextVariables[fieldLabel] = aiResponse;
 							contextVariables[this._cleanKey(fieldLabel)] = aiResponse;
 							break;
@@ -853,19 +884,42 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return k.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
 	}
 
+	private _getCleanPrimitiveContent(rawVal: any): string {
+		if (rawVal === undefined || rawVal === null) return '';
+		if (typeof rawVal === 'string') {
+			const trimmed = rawVal.trim();
+			if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+				try {
+					const parsed = JSON.parse(trimmed);
+					if (parsed.content !== undefined) return String(parsed.content);
+					if (parsed.output !== undefined) return String(parsed.output);
+					if (parsed.result !== undefined) return String(parsed.result);
+				} catch {}
+			}
+			return rawVal;
+		}
+		if (typeof rawVal === 'object') {
+			if (rawVal.content !== undefined) return String(rawVal.content);
+			if (rawVal.output !== undefined) return String(rawVal.output);
+			if (rawVal.result !== undefined) return String(rawVal.result);
+			return JSON.stringify(rawVal, null, 2);
+		}
+		return String(rawVal);
+	}
+
 	private _interpolateVariables(text: string, context: Record<string, any>): string {
 		if (!text) return '';
-		// Supports both {{var}} and {var}, as well as dot-notation: {ticketId.Field Label}
-		return text.replace(/\{\{?([a-zA-Z0-9_.\-\s]+)\}?\}/g, (match, rawKey) => {
-			const trimmedKey = rawKey.trim();
+
+		const resolveVal = (key: string): string | undefined => {
+			const trimmedKey = key.trim();
 			// 1. Direct match
 			if (context[trimmedKey] !== undefined) {
-				return typeof context[trimmedKey] === 'object' ? JSON.stringify(context[trimmedKey]) : String(context[trimmedKey]);
+				return this._getCleanPrimitiveContent(context[trimmedKey]);
 			}
 			// 2. Cleaned key match
 			const clean = this._cleanKey(trimmedKey);
 			if (context[clean] !== undefined) {
-				return typeof context[clean] === 'object' ? JSON.stringify(context[clean]) : String(context[clean]);
+				return this._getCleanPrimitiveContent(context[clean]);
 			}
 			// 3. Dot-notation match (e.g. "output.Browser 1" or "FNDJ1-0008.AI Prompt 1")
 			if (trimmedKey.includes('.')) {
@@ -876,15 +930,34 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				if (rootObj && typeof rootObj === 'object') {
 					const subVal = rootObj[sub] ?? rootObj[this._cleanKey(sub)];
 					if (subVal !== undefined) {
-						return typeof subVal === 'object' ? JSON.stringify(subVal) : String(subVal);
+						return this._getCleanPrimitiveContent(subVal);
 					}
 				}
 				if (context[sub] !== undefined) {
-					return typeof context[sub] === 'object' ? JSON.stringify(context[sub]) : String(context[sub]);
+					return this._getCleanPrimitiveContent(context[sub]);
 				}
 			}
-			return match;
+			return undefined;
+		};
+
+		// 1. Replace {{...}}, {...}, @{...}
+		let result = text.replace(/@?\{\{?([^{}]+)\}?\}/g, (match, rawKey) => {
+			const resolved = resolveVal(rawKey);
+			return resolved !== undefined ? resolved : match;
 		});
+
+		// 2. Replace @Field_Name or @FieldName when matching existing context keys
+		for (const k of Object.keys(context)) {
+			if (!k || k.length < 2) continue;
+			const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+			const atPattern = new RegExp(`@${escaped}\\b`, 'g');
+			if (atPattern.test(result)) {
+				const cleanVal = this._getCleanPrimitiveContent(context[k]);
+				result = result.replace(atPattern, cleanVal);
+			}
+		}
+
+		return result;
 	}
 
 	private async _extractWebContent(targetUrl: string, credentials?: Array<{ key: string; value: string }>): Promise<{ title: string; content: string }> {
@@ -948,26 +1021,27 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		}
 	}
 
-	private async _executePrompt(modelId: string, promptText: string): Promise<string> {
+	private async _executePrompt(modelId: string, promptText: string, targetProviderId?: string): Promise<string> {
 		try {
 			const credService = this.instantiationService.invokeFunction(accessor => {
 				try { return accessor.get(IAgentCredentialService); } catch { return undefined; }
 			});
 
 			if (credService && credService.executePrompt) {
-				const res = await credService.executePrompt(modelId, promptText);
+				const res = await credService.executePrompt(modelId, promptText, undefined, targetProviderId);
 				if (res.success && res.text) {
 					return res.text;
 				} else if (res.error) {
 					this.logService.warn(`[TicketWorkflowRuntime] AI Prompt execution warning: ${res.error}`);
-					return `[AI Generation Notice: ${res.error}]`;
+					return `[AI Execution Error: ${res.error}]`;
 				}
 			}
 		} catch (e: any) {
 			this.logService.warn(`[TicketWorkflowRuntime] IAgentCredentialService error:`, e);
+			return `[AI Service Error: ${e.message || String(e)}]`;
 		}
 
-		return `[AI Response (${modelId}) for: ${promptText.substring(0, 80)}...]`;
+		return `[AI Execution Notice: Credential not configured for ${modelId}]`;
 	}
 
 	private _formatOutputValue(rawVal: any, format: string): any {
