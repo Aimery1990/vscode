@@ -4195,6 +4195,169 @@
 	text-transform: uppercase;
 }
 
+/* Ticket Handle Card in Live Display */
+.workflow-display-ticket-handle-card {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	width: 100%;
+}
+
+.workflow-display-ticket-banner-left {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	overflow: hidden;
+}
+
+.workflow-display-ticket-badge {
+	font-size: 8.5px;
+	font-weight: 800;
+	color: #38bdf8;
+	background: rgba(56, 189, 248, 0.15);
+	border: 1px solid rgba(56, 189, 248, 0.3);
+	padding: 1px 5px;
+	border-radius: 3px;
+	letter-spacing: 0.5px;
+}
+
+.workflow-display-ticket-banner-right {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.workflow-display-handle-status {
+	font-size: 9px;
+	font-weight: 700;
+	color: #10b981;
+	background: rgba(16, 185, 129, 0.12);
+	border: 1px solid rgba(16, 185, 129, 0.3);
+	padding: 1px 6px;
+	border-radius: 3px;
+	text-transform: capitalize;
+}
+
+.workflow-display-btn-open-tab {
+	background: rgba(14, 165, 233, 0.15);
+	border: 1px solid rgba(14, 165, 233, 0.35);
+	border-radius: 3px;
+	color: #38bdf8;
+	font-size: 9.5px;
+	font-weight: 600;
+	padding: 1.5px 6px;
+	cursor: pointer;
+	transition: all 0.15s ease;
+}
+
+.workflow-display-btn-open-tab:hover {
+	background: rgba(14, 165, 233, 0.3);
+	border-color: #38bdf8;
+	color: #ffffff;
+}
+
+.workflow-display-handle-meta-grid {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	padding: 6px 8px;
+	background: rgba(15, 23, 42, 0.5);
+	border: 1px solid rgba(148, 163, 184, 0.12);
+	border-radius: 4px;
+	font-size: 10.5px;
+}
+
+.workflow-display-handle-meta-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	overflow: hidden;
+}
+
+.handle-meta-label {
+	font-weight: 600;
+	color: #64748b;
+	width: 52px;
+	flex-shrink: 0;
+}
+
+.handle-meta-val {
+	color: #cbd5e1;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 10px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.handle-meta-val.folder-path {
+	color: #94a3b8;
+}
+
+.workflow-display-handle-params-box {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 6px 8px;
+	background: rgba(15, 23, 42, 0.4);
+	border: 1px solid rgba(148, 163, 184, 0.12);
+	border-radius: 4px;
+}
+
+.workflow-display-handle-params-header {
+	font-size: 9.5px;
+	font-weight: 700;
+	color: #94a3b8;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+
+.workflow-display-handle-params-list {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px;
+}
+
+.workflow-display-handle-param-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 3px;
+	padding: 2px 6px;
+	background: rgba(30, 41, 59, 0.7);
+	border: 1px solid rgba(148, 163, 184, 0.2);
+	border-radius: 3px;
+	font-size: 10px;
+	font-family: var(--vscode-editor-font-family, monospace);
+}
+
+.workflow-display-handle-param-chip .param-key {
+	color: #38bdf8;
+	font-weight: 600;
+}
+
+.workflow-display-handle-param-chip .param-sep {
+	color: #64748b;
+}
+
+.workflow-display-handle-param-chip .param-val {
+	color: #f1f5f9;
+	max-width: 200px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.workflow-display-handle-hint {
+	font-size: 9.5px;
+	color: #64748b;
+	padding: 3px 6px;
+	border-left: 2px solid rgba(56, 189, 248, 0.4);
+	background: rgba(56, 189, 248, 0.04);
+	border-radius: 0 3px 3px 0;
+	font-style: italic;
+}
+
 /* Sections Toolbar */
 .workflow-display-sections-toolbar {
 	display: flex;

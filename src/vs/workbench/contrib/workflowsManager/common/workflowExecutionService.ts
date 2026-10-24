@@ -17,6 +17,18 @@ export interface IWorkflowDisplayOutputItem {
 	status?: 'ready' | 'pending' | 'empty';
 }
 
+export interface ITicketHandleInfo {
+	ticketId: string;
+	ticketName: string;
+	ticketType: string;
+	title?: string;
+	status?: string;
+	createdAt?: string;
+	targetFolder?: string;
+	parameters?: Record<string, any>;
+	isCreated?: boolean;
+}
+
 export interface IWorkflowDisplayCard {
 	id: string;
 	runId?: string;
@@ -30,6 +42,7 @@ export interface IWorkflowDisplayCard {
 	ticketId?: string;
 	ticketType?: string;
 	outputItems?: IWorkflowDisplayOutputItem[];
+	ticketHandle?: ITicketHandleInfo;
 }
 
 export interface IWorkflowExecutionService {

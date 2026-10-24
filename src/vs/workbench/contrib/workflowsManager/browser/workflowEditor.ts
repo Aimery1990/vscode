@@ -10472,8 +10472,88 @@ export class WorkflowEditor extends EditorPane {
 		const exprEl = append(cardEl, $('.workflow-display-card-expr'));
 		exprEl.textContent = card.expression;
 
-		// Card Body / Outputs Sections
-		if (card.outputItems && card.outputItems.length > 0) {
+		// Card Body / Outputs Sections or Ticket Handle
+		if (card.ticketHandle) {
+			const th = card.ticketHandle;
+			const handleEl = append(cardEl, $('.workflow-display-ticket-handle-card'));
+
+			// Banner: Ticket Code & Type with Open in Tab button
+			const bannerEl = append(handleEl, $('.workflow-display-ticket-banner'));
+			bannerEl.title = 'Double-click to open in Editor Tab';
+			bannerEl.ondblclick = (e) => {
+				e.stopPropagation();
+				this._openModuleInEditor({ type: th.ticketType, name: th.ticketName || th.ticketId });
+			};
+
+			const leftGroup = append(bannerEl, $('.workflow-display-ticket-banner-left'));
+			const ticketBadge = append(leftGroup, $('span.workflow-display-ticket-badge'));
+			ticketBadge.textContent = 'TICKET';
+			const bannerTitle = append(leftGroup, $('span.workflow-display-ticket-title'));
+			bannerTitle.textContent = `${th.ticketId}${th.title && th.title !== th.ticketId ? ` (${th.title})` : ''}`;
+
+			const rightGroup = append(bannerEl, $('.workflow-display-ticket-banner-right'));
+			if (th.ticketType) {
+				const bannerType = append(rightGroup, $('span.workflow-display-ticket-type'));
+				bannerType.textContent = th.ticketType;
+			}
+			const statusChip = append(rightGroup, $('span.workflow-display-handle-status'));
+			statusChip.textContent = th.status || 'Todo';
+
+			// Open in Tab Button
+			const openTabBtn = append(rightGroup, $('button.workflow-display-btn-open-tab'));
+			openTabBtn.textContent = '↗ Tab';
+			openTabBtn.title = 'Open ticket in Editor Tab';
+			openTabBtn.onclick = (e) => {
+				e.stopPropagation();
+				this._openModuleInEditor({ type: th.ticketType, name: th.ticketName || th.ticketId });
+			};
+
+			// Metadata Grid
+			const metaGrid = append(handleEl, $('.workflow-display-handle-meta-grid'));
+
+			// Row 1: Created At
+			if (th.createdAt) {
+				const row = append(metaGrid, $('.workflow-display-handle-meta-row'));
+				const label = append(row, $('.handle-meta-label'));
+				label.textContent = 'Created:';
+				const val = append(row, $('.handle-meta-val'));
+				val.textContent = th.createdAt;
+			}
+
+			// Row 2: Target Path
+			if (th.targetFolder) {
+				const row = append(metaGrid, $('.workflow-display-handle-meta-row'));
+				const label = append(row, $('.handle-meta-label'));
+				label.textContent = 'Folder:';
+				const val = append(row, $('.handle-meta-val.folder-path'));
+				const displayFolder = th.targetFolder.length > 45 ? '...' + th.targetFolder.substring(th.targetFolder.length - 42) : th.targetFolder;
+				val.textContent = displayFolder;
+				val.title = th.targetFolder;
+			}
+
+			// Row 3: Parameters
+			if (th.parameters && Object.keys(th.parameters).length > 0) {
+				const paramsBox = append(handleEl, $('.workflow-display-handle-params-box'));
+				const paramsHeader = append(paramsBox, $('.workflow-display-handle-params-header'));
+				paramsHeader.textContent = `Parameters (${Object.keys(th.parameters).length})`;
+				const paramsList = append(paramsBox, $('.workflow-display-handle-params-list'));
+				for (const [pk, pv] of Object.entries(th.parameters)) {
+					const chip = append(paramsList, $('.workflow-display-handle-param-chip'));
+					const kSpan = append(chip, $('span.param-key'));
+					kSpan.textContent = pk;
+					const eqSpan = append(chip, $('span.param-sep'));
+					eqSpan.textContent = '=';
+					const vSpan = append(chip, $('span.param-val'));
+					const rawValStr = typeof pv === 'object' ? JSON.stringify(pv) : String(pv);
+					vSpan.textContent = rawValStr.length > 50 ? rawValStr.substring(0, 47) + '...' : rawValStr;
+					vSpan.title = rawValStr;
+				}
+			}
+
+			// Hint Bar: Ticket ready to run
+			const hintEl = append(handleEl, $('.workflow-display-handle-hint'));
+			hintEl.textContent = `Ticket ready. Use RUN_TICKETS(ticket_name="${th.ticketName || th.ticketId}") to execute.`;
+		} else if (card.outputItems && card.outputItems.length > 0) {
 			// Ticket Meta Banner if available
 			if (card.ticketTitle || card.ticketId) {
 				const bannerEl = append(cardEl, $('.workflow-display-ticket-banner'));

@@ -36,10 +36,15 @@ export interface ITicketCreateResult {
 	ticketId: string;
 	ticketName: string;
 	ticketType: string;
+	title?: string;
+	status?: string;
+	createdAt?: string;
 	entityUri: string;
 	targetFolder: string;
+	parameters?: Record<string, any>;
 	fields: Record<string, any>;
 	outputs?: Record<string, any>;
+	isHandle?: boolean;
 	error?: string;
 }
 
@@ -207,7 +212,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						customMetadata[fKey] = JSON.stringify(paramObj);
 					} else if (f.type === 'browser') {
 						const urlVal = initialFields[fKey] || f.defaultUrl || '';
-						const contentVal = (initialFields[fKey] && typeof initialFields[fKey] === 'object' && initialFields[fKey].content) || f.defaultContent || '';
+						const contentVal = (initialFields[fKey] && typeof initialFields[fKey] === 'object' && initialFields[fKey].content)
+							? initialFields[fKey].content
+							: (typeof initialFields[fKey] === 'string' && initialFields[fKey].trim() ? initialFields[fKey] : '');
 						customMetadata[fKey] = JSON.stringify({
 							url: String(urlVal),
 							content: String(contentVal),
@@ -273,7 +280,21 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			this.logService.info(`[TicketWorkflowRuntime] Created ticket '${ticketCode}' (${title}) at ${ticketFolderUri.fsPath}`);
 
-			const ticketOutputs = this._extractTicketOutputs(customMetadata, matchedModule);
+			const createdAt = new Date().toISOString();
+			const ticketResult: ITicketCreateResult = {
+				success: true,
+				ticketId: ticketCode,
+				ticketName: folderName,
+				ticketType: ticketType,
+				title: title,
+				status: snapshot.status || 'Todo',
+				createdAt: createdAt,
+				entityUri: ticketFolderUri.toString(),
+				targetFolder: ticketFolderUri.fsPath,
+				parameters: initialFields,
+				fields: customMetadata,
+				isHandle: true
+			};
 
 			if (options.autoRun) {
 				const runRes = await this.runTicket({
@@ -283,28 +304,15 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				});
 				if (runRes.success) {
 					return {
-						success: true,
-						ticketId: ticketCode,
-						ticketName: folderName,
-						ticketType: ticketType,
-						entityUri: ticketFolderUri.toString(),
-						targetFolder: ticketFolderUri.fsPath,
+						...ticketResult,
+						status: 'Success',
 						fields: runRes.fields || customMetadata,
-						outputs: (runRes.output !== undefined && typeof runRes.output === 'object') ? runRes.output : ticketOutputs
+						outputs: (runRes.output !== undefined && typeof runRes.output === 'object') ? runRes.output : this._extractTicketOutputs(runRes.fields || customMetadata, matchedModule)
 					};
 				}
 			}
 
-			return {
-				success: true,
-				ticketId: ticketCode,
-				ticketName: folderName,
-				ticketType: ticketType,
-				entityUri: ticketFolderUri.toString(),
-				targetFolder: ticketFolderUri.fsPath,
-				fields: customMetadata,
-				outputs: ticketOutputs
-			};
+			return ticketResult;
 		} catch (err: any) {
 			this.logService.error(`[TicketWorkflowRuntime] Failed to create ticket:`, err);
 			return {

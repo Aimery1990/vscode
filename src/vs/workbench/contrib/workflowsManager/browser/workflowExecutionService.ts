@@ -9,7 +9,7 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
-import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutputItem } from '../common/workflowExecutionService.js';
+import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutputItem, ITicketHandleInfo } from '../common/workflowExecutionService.js';
 import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import {
 	IWorkflowEngineOptions,
@@ -1310,12 +1310,22 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				let inputParams: Record<string, any> = {};
 
 				if (args.length > 0 && typeof args[0] === 'object' && args[0] !== null && !Array.isArray(args[0])) {
-					ticketIdOrPath = args[0].ticketIdOrPath || args[0].ticketName || args[0].ticket_name || args[0].id || '';
-					inputParams = args[0].inputParams || args[0].parameters || args[0].params || args[0];
+					ticketIdOrPath = args[0].ticketId || args[0].ticketName || args[0].ticketIdOrPath || args[0].ticket_name || args[0].id || '';
+					inputParams = args[0].parameters || args[0].inputParams || args[0].params || {};
 				} else {
-					ticketIdOrPath = String(kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.ticket ?? args[0] ?? '').trim();
+					const rawTicketArg = kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.ticket ?? args[0] ?? '';
+					if (typeof rawTicketArg === 'object' && rawTicketArg !== null) {
+						ticketIdOrPath = rawTicketArg.ticketId || rawTicketArg.ticketName || rawTicketArg.ticketIdOrPath || rawTicketArg.id || '';
+						if (rawTicketArg.parameters && typeof rawTicketArg.parameters === 'object') {
+							inputParams = { ...rawTicketArg.parameters };
+						}
+					} else {
+						ticketIdOrPath = String(rawTicketArg).trim();
+					}
 					const explicitParams = kwargs.params ?? kwargs.input_params ?? kwargs.parameters ?? kwargs.inputParams ?? (typeof args[1] === 'object' ? args[1] : {});
-					inputParams = typeof explicitParams === 'object' && explicitParams !== null ? { ...explicitParams } : {};
+					if (typeof explicitParams === 'object' && explicitParams !== null) {
+						inputParams = { ...inputParams, ...explicitParams };
+					}
 				}
 
 				// Merge any loose keyword arguments directly into inputParams (e.g. RUN_TICKETS("jobs/calc", start=0))
@@ -1421,7 +1431,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 				result = displayVal;
 
-				const { formattedText, summaryType, cleanValue, ticketTitle, ticketId, ticketType, outputItems } = this._formatDisplayOutput(displayVal);
+				const { formattedText, summaryType, cleanValue, ticketTitle, ticketId, ticketType, outputItems, ticketHandle } = this._formatDisplayOutput(displayVal);
 
 				this._emitLog(run, 'info', `[DISPLAY] [${node.title || node.id}]\n${formattedText}`, { nodeId: node.id });
 
@@ -1437,7 +1447,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketTitle,
 					ticketId,
 					ticketType,
-					outputItems
+					outputItems,
+					ticketHandle
 				});
 			} else {
 				// Fallback evaluation for general expressions
@@ -1609,6 +1620,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		ticketId?: string;
 		ticketType?: string;
 		outputItems?: IWorkflowDisplayOutputItem[];
+		ticketHandle?: ITicketHandleInfo;
 	} {
 		if (displayVal === undefined) {
 			return { formattedText: 'undefined', summaryType: 'undefined', cleanValue: undefined };
@@ -1617,7 +1629,58 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return { formattedText: 'null', summaryType: 'null', cleanValue: null };
 		}
 
-		// Check if displayVal is a Ticket or contains Ticket Fields/Outputs
+		// 1. Check if displayVal is a newly created Ticket Handle (descriptor)
+		const isTicketHandle = typeof displayVal === 'object' && displayVal !== null && !Array.isArray(displayVal) && (
+			displayVal.isHandle === true ||
+			(displayVal.ticketId && displayVal.ticketType && (!displayVal.outputs || Object.keys(displayVal.outputs).length === 0) && displayVal.output === undefined)
+		);
+
+		if (isTicketHandle) {
+			const ticketId = String(displayVal.ticketId || '');
+			const ticketName = String(displayVal.ticketName || ticketId);
+			const ticketType = String(displayVal.ticketType || 'ticket');
+			const title = String(displayVal.title || ticketName || ticketId);
+			const status = String(displayVal.status || 'Todo');
+			const createdAt = String(displayVal.createdAt || new Date().toLocaleString());
+			const targetFolder = String(displayVal.targetFolder || '');
+			const parameters = (displayVal.parameters && typeof displayVal.parameters === 'object') ? displayVal.parameters : {};
+
+			const ticketHandle: ITicketHandleInfo = {
+				ticketId,
+				ticketName,
+				ticketType,
+				title,
+				status,
+				createdAt,
+				targetFolder,
+				parameters,
+				isCreated: true
+			};
+
+			const lines: string[] = [
+				`[TICKET CREATED] ${ticketId} [${ticketType}]`,
+				`Title: ${title}`,
+				`Status: ${status}`,
+				`Created: ${createdAt}`
+			];
+			if (targetFolder) lines.push(`Path: ${targetFolder}`);
+			if (Object.keys(parameters).length > 0) {
+				lines.push(`Parameters: ${JSON.stringify(parameters, null, 2)}`);
+			}
+			lines.push(`(Ticket ready. Call RUN_TICKETS to execute.)`);
+
+			return {
+				formattedText: lines.join('\n'),
+				summaryType: `ticket_handle [${ticketType}]`,
+				cleanValue: displayVal,
+				ticketTitle: title,
+				ticketId,
+				ticketType,
+				ticketHandle
+			};
+		}
+
+		// 2. Check if displayVal is an executed Ticket or contains Ticket Fields/Outputs
 		let ticketId = displayVal?.ticketId || displayVal?.__ticketMetadata?.ticketId || '';
 		let ticketName = displayVal?.ticketName || displayVal?.title || displayVal?.__ticketMetadata?.ticketName || '';
 		let ticketType = displayVal?.ticketType || displayVal?.__ticketMetadata?.ticketType || '';
