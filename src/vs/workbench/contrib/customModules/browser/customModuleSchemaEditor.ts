@@ -2743,6 +2743,51 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						this._syncDraft();
 					};
 
+					// Context Variable Insert Bar under Source Code
+					const varBar = append(codeRow, $('div', {
+						style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 4px;'
+					}));
+					append(varBar, $('span', { style: 'font-size: 10.5px; opacity: 0.65;' }, 'Insert Context:'));
+
+					const insertTextAtCursor = (textToInsert: string, cursorOffsetFromEnd: number = 0) => {
+						const start = codeTextarea.selectionStart;
+						const end = codeTextarea.selectionEnd;
+						const before = codeTextarea.value.substring(0, start);
+						const after = codeTextarea.value.substring(end);
+						codeTextarea.value = before + textToInsert + after;
+						const newCursor = start + textToInsert.length + cursorOffsetFromEnd;
+						codeTextarea.selectionStart = codeTextarea.selectionEnd = newCursor;
+						codeTextarea.focus();
+						field.pythonCode = codeTextarea.value;
+						this._syncDraft();
+					};
+
+					// Base Chip: + TICKET_CONTEXT['']
+					const baseChip = append(varBar, $('button', {
+						style: 'padding: 2px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; font-family: var(--vscode-editor-font-family, monospace);',
+						title: 'Insert TICKET_CONTEXT[\'\'] into script'
+					}, "+ TICKET_CONTEXT['']"));
+					baseChip.onclick = (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						insertTextAtCursor("TICKET_CONTEXT['']", -2);
+					};
+
+					// Specific Field Chips from Schema
+					const otherFields = (fields || this._activeModule?.fields || []).filter(f => f && f.id !== field.id);
+					otherFields.forEach(of => {
+						const ofLabel = of.label || of.id;
+						const fieldChip = append(varBar, $('button', {
+							style: 'padding: 2px 7px; font-size: 10.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.05); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace);',
+							title: `Insert TICKET_CONTEXT['${ofLabel}']`
+						}, `+ TICKET_CONTEXT['${ofLabel}']`));
+						fieldChip.onclick = (e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							insertTextAtCursor(`TICKET_CONTEXT['${ofLabel}']`);
+						};
+					});
+
 					// DEBUG: Execution Output & Logs Preview Row
 					const previewRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
 					const previewHeader = append(previewRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
@@ -2797,7 +2842,36 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						previewBox.textContent = '[Executing script...] Running in background terminal...';
 						try {
 							const scriptCode = codeTextarea.value;
-							const res = await runtime.executePythonScript(wsUri, wsUri, interpInput.value.trim(), scriptCode, {});
+
+							// Gather full schema context from preceding and static fields
+							const schemaContext: Record<string, any> = {};
+							const allFieldsToGather = fields || this._activeModule?.fields || [];
+							for (const f of allFieldsToGather) {
+								if (!f || f.id === field.id) continue;
+								const fKey = f.label || f.id;
+								let val: any = '';
+								if (f.type === 'browser') {
+									val = f.defaultContent || f.defaultUrl || '';
+								} else if (f.type === 'parameters' && f.parameters) {
+									const pMap: Record<string, any> = {};
+									f.parameters.forEach(p => { if (p.name) pMap[p.name] = p.defaultValue ?? ''; });
+									val = pMap;
+								} else if (f.type === 'prompt') {
+									val = f.debugPromptOutput || f.defaultContent || '';
+								} else if (f.type === 'python') {
+									val = f.pythonOutput || f.pythonCode || '';
+								} else if (f.type === 'git') {
+									val = f.gitRemoteUrl || '';
+								} else {
+									val = f.defaultContent || f.defaultValue || '';
+								}
+								schemaContext[fKey] = val;
+							}
+							if (this._activeModule?.name) {
+								schemaContext['Title'] = this._activeModule.name;
+							}
+
+							const res = await runtime.executePythonScript(wsUri, wsUri, interpInput.value.trim(), scriptCode, schemaContext);
 							const durationStr = `${res.durationMs}ms`;
 							const exitCodeStr = `Exit code: ${res.exitCode}`;
 							const headerLine = `[Finished in ${durationStr} | ${exitCodeStr}]\n`;

@@ -880,6 +880,32 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// Python Primitive: Insert Context Chip click
+			const insertPyCtxChip = target.closest('.python-insert-ctx-chip') as HTMLElement | null;
+			if (insertPyCtxChip) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = insertPyCtxChip.closest('.python-primitive-card') as HTMLElement | null;
+				const textarea = card?.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+				const textToInsert = insertPyCtxChip.getAttribute('data-insert') || '';
+				const cursorOffset = parseInt(insertPyCtxChip.getAttribute('data-cursor-offset') || '0', 10);
+				if (textarea && textToInsert) {
+					const start = textarea.selectionStart;
+					const end = textarea.selectionEnd;
+					const before = textarea.value.substring(0, start);
+					const after = textarea.value.substring(end);
+					textarea.value = before + textToInsert + after;
+					const newCursor = start + textToInsert.length + cursorOffset;
+					textarea.selectionStart = textarea.selectionEnd = newCursor;
+					textarea.focus();
+					const fieldKey = insertPyCtxChip.getAttribute('data-field-key') || '';
+					if (fieldKey && card) {
+						await this._savePythonDataFromCard(card, fieldKey);
+					}
+				}
+				return;
+			}
+
 			// Python Primitive: Copy Output button click
 			const copyPyOutBtn = target.closest('.python-copy-output-btn') as HTMLElement | null;
 			if (copyPyOutBtn) {
@@ -3465,12 +3491,21 @@ ${rawErr}
 				throw new Error('No active ticket or workspace selected.');
 			}
 
+			const ticketContext: { [key: string]: any } = {
+				title: this._lastParsedData?.title || '',
+				description: this._lastParsedData?.description || '',
+				ticketId: this._lastParsedData?.ticketId || '',
+				status: this._lastParsedData?.status || '',
+				...((this._lastParsedData as any)?.data || {}),
+				...(this._lastParsedData?.customMetadata || {})
+			};
+
 			const res = await runtimeService.executePythonScript(
 				workspaceUri,
 				this._entityUri,
 				pythonPath,
 				interpolatedCode,
-				this._lastParsedData ? (this._lastParsedData as any).data : {}
+				ticketContext
 			);
 
 			if (outputDisplay) {
@@ -5138,12 +5173,19 @@ ${interpolatedPrompt}`;
 					}
 
 					if (!pythonCode) {
-						pythonCode = '# Write Python automation script\n# Context variables are available via ANY_AGENT_CONTEXT environment variable\nimport os, sys, json\n\nprint("Executing Python script...")\n';
+						pythonCode = '# Write Python automation script\n# Context variables are available via TICKET_CONTEXT dictionary (e.g. TICKET_CONTEXT[\'Field Name\'])\n# Or via ANY_AGENT_CONTEXT environment variable\nimport os, sys, json\n\nprint("Executing Python script...")\n';
 					}
 
 					const statusTag = lastExecutedText
 						? `Executed: ${lastExecutedText.substring(0, 16)} (${durationMs !== undefined ? `${durationMs}ms` : 'ok'})`
 						: 'Ready to execute';
+
+					const otherFields = (customModule?.fields || []).filter(f => f && f.id !== rawKey && (f.label || f.id) !== k);
+					const baseChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['']" data-cursor-offset="-2" style="padding: 2px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; font-family: var(--vscode-editor-font-family, monospace);" title="Insert TICKET_CONTEXT[''] into script">+ TICKET_CONTEXT['']</button>`;
+					const fieldChipsHtml = otherFields.map(of => {
+						const ofLabel = of.label || of.id;
+						return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.05); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace);" title="Insert TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']">+ TICKET_CONTEXT['${this._escapeHtml(ofLabel)}']</button>`;
+					}).join('');
 
 					customFieldsHtml += `
 						<div class="section-card custom-property-card python-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
@@ -5179,9 +5221,14 @@ ${interpolatedPrompt}`;
 								<div style="display: flex; flex-direction: column; gap: 4px;">
 									<div style="display: flex; justify-content: space-between; align-items: center;">
 										<label style="font-size: 11px; font-weight: 600; opacity: 0.85;">Source Code:</label>
-										<span style="font-size: 10px; opacity: 0.55;">Supports {{variables}} interpolation and ANY_AGENT_CONTEXT</span>
+										<span style="font-size: 10px; opacity: 0.55;">Supports TICKET_CONTEXT, {{variables}}, and ANY_AGENT_CONTEXT</span>
 									</div>
 									<textarea class="python-code-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="6" placeholder="Enter Python script to execute..." spellcheck="false" style="width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; tab-size: 4;">${this._escapeHtml(pythonCode)}</textarea>
+									<div class="python-ctx-chips-bar" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0;">
+										<span style="font-size: 10.5px; opacity: 0.65;">Insert Context:</span>
+										${baseChipHtml}
+										${fieldChipsHtml}
+									</div>
 								</div>
 
 								<!-- Action Buttons Row -->

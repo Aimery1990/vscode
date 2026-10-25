@@ -531,6 +531,25 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				? schema.fields
 				: this._synthesizeFieldsFromMetadata(customMetadata);
 
+			// Pre-populate context with static defaults and contents from all fields
+			for (const f of fieldsToRun) {
+				const fKey = f.label || f.id;
+				if (contextVariables[fKey] === undefined) {
+					let defaultVal: any = f.defaultContent ?? f.defaultValue ?? '';
+					if (f.type === 'parameters' && f.parameters) {
+						const pMap: Record<string, any> = {};
+						f.parameters.forEach(p => { if (p.name) pMap[p.name] = p.defaultValue ?? ''; });
+						defaultVal = pMap;
+					} else if (f.type === 'browser') {
+						defaultVal = f.defaultContent || f.defaultUrl || '';
+					}
+					if (defaultVal) {
+						contextVariables[fKey] = defaultVal;
+						contextVariables[this._cleanKey(fKey)] = defaultVal;
+					}
+				}
+			}
+
 			this.logService.info(`[TicketWorkflowRuntime] Running ticket '${ticketResult.ticketId}' with ${fieldsToRun.length} primitive(s)...`);
 
 			let finalOutput: any = undefined;
@@ -1603,13 +1622,49 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const scriptUri = URI.joinPath(agentsDirUri, `run_python_${timestamp}.py`);
 			const logUri = URI.joinPath(agentsDirUri, `run_python_${timestamp}.log`);
 
-			// 2. Prepare script with injected context variables
+			// 2. Prepare script with injected context variables and TICKET_CONTEXT dictionary
 			const ctxJson = JSON.stringify(contextVariables || {});
 			const header = `# -*- coding: utf-8 -*-
 import os, sys, json
+
 try:
-    _ctx_data = json.loads(${JSON.stringify(ctxJson)})
-    os.environ['ANY_AGENT_CONTEXT'] = json.dumps(_ctx_data)
+    _raw_context = json.loads(${JSON.stringify(ctxJson)})
+except Exception:
+    _raw_context = {}
+
+def _anyagent_smart_parse(v):
+    if isinstance(v, str):
+        s = v.strip()
+        if (s.startswith('{') and s.endswith('}')) or (s.startswith('[') and s.endswith(']')):
+            try:
+                return json.loads(s)
+            except Exception:
+                pass
+        if '\`\`\`json' in s:
+            try:
+                part = s.split('\`\`\`json', 1)[1].split('\`\`\`', 1)[0].strip()
+                return json.loads(part)
+            except Exception:
+                pass
+        elif '\`\`\`' in s:
+            try:
+                part = s.split('\`\`\`', 1)[1].split('\`\`\`', 1)[0].strip()
+                return json.loads(part)
+            except Exception:
+                pass
+        return v
+    elif isinstance(v, dict):
+        return {k: _anyagent_smart_parse(sub_v) for k, sub_v in v.items()}
+    elif isinstance(v, list):
+        return [_anyagent_smart_parse(sub_v) for sub_v in v]
+    return v
+
+TICKET_CONTEXT = {k: _anyagent_smart_parse(v) for k, v in _raw_context.items()}
+ticket_context = TICKET_CONTEXT
+context = TICKET_CONTEXT
+
+try:
+    os.environ['ANY_AGENT_CONTEXT'] = json.dumps(_raw_context)
 except Exception:
     pass
 

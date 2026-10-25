@@ -286,18 +286,20 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 			headline: 'How RUN_TICKETS Executes Python Primitive',
 			steps: [
 				{ step: '1. Interpreter Resolution', detail: 'Resolves specified Python binary or auto-detects active virtualenv (.venv/bin/python) / system python3.' },
-				{ step: '2. Variable Interpolation & Context Injection', detail: 'Interpolates {{variables}} and injects ticket runtime variables into ANY_AGENT_CONTEXT environment variable.' },
+				{ step: '2. Variable Interpolation & Context Injection', detail: 'Interpolates {{variables}} and automatically injects pre-parsed ticket variables into native TICKET_CONTEXT dictionary and ANY_AGENT_CONTEXT environment variable.' },
 				{ step: '3. Script Execution & Log Capture', detail: 'Runs script synchronously with timeout protection, capturing stdout, stderr, exit code, and runtime duration.' },
 				{ step: '4. Context Registration & Metadata Update', detail: 'Stores captured stdout into contextVariables and updates ticket customMetadata.' }
 			],
-			variableResolution: '{Field Label} or {Field Label_output}',
+			variableResolution: 'TICKET_CONTEXT[\'Field Label\'] or {Field Label}',
 			downstreamPassing: 'Captured output (stdout) can be passed directly to downstream AI Prompts, Browsers, or Output Manifests.'
 		},
 		syntaxExamples: [
-			'import os, json\ncontext = json.loads(os.environ.get("ANY_AGENT_CONTEXT", "{}"))\nprint(f"Processing ticket: {context.get(\'title\')}")',
-			'{Field Label}'
+			'# Directly access upstream data via TICKET_CONTEXT (auto-parsed from JSON / Markdown)\njob_data = TICKET_CONTEXT.get("Linkedin Job Info Summary", {})\nprint(f"Processing: {job_data}")',
+			'TICKET_CONTEXT[\'Field Label\']'
 		],
 		tips: [
+			'Use the "Insert Context" chips below the script box to insert TICKET_CONTEXT[\'...\'] for any field with one click.',
+			'Upstream outputs (like JSON or markdown code blocks from AI Prompts) are automatically parsed into Python dictionaries or lists inside TICKET_CONTEXT.',
 			'Use the "Create venv" button in the ticket view to instantly initialize a local virtual environment for package dependencies.',
 			'Any standard library or installed pip packages in your virtualenv are immediately available to your script.'
 		]
