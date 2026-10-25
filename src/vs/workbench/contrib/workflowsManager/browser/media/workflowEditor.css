@@ -1084,6 +1084,37 @@
 	font-size: 12px;
 }
 
+.floating-zoom-btn.live-display-btn {
+	width: auto;
+	min-width: 24px;
+	padding: 0 7px;
+	border-radius: 12px;
+	gap: 4px;
+	font-size: 11px;
+}
+
+.floating-zoom-btn.live-display-btn.has-cards {
+	color: #38bdf8;
+	background: rgba(56, 189, 248, 0.12);
+	border: 1px solid rgba(56, 189, 248, 0.25);
+}
+
+.floating-zoom-btn.live-display-btn.has-cards:hover {
+	background: rgba(56, 189, 248, 0.25);
+	color: #ffffff;
+}
+
+.floating-zoom-btn.live-display-btn.active {
+	background: rgba(56, 189, 248, 0.22);
+	border-color: rgba(56, 189, 248, 0.45);
+	color: #38bdf8;
+}
+
+.floating-zoom-btn.live-display-btn .floating-live-label {
+	font-size: 10.5px;
+	font-weight: 600;
+}
+
 .floating-zoom-badge {
 	font-size: 11px;
 	font-weight: 600;
@@ -3952,11 +3983,11 @@
 /* Live Variable Display Inspector Panel */
 .workflow-display-inspector-panel {
 	position: absolute;
-	top: 70px;
-	right: 20px;
+	top: 14px;
+	right: 16px;
 	width: 440px;
 	max-width: 92vw;
-	max-height: calc(100% - 90px);
+	max-height: calc(100% - 30px);
 	background: rgba(15, 23, 42, 0.94);
 	backdrop-filter: blur(16px);
 	-webkit-backdrop-filter: blur(16px);
@@ -3969,14 +4000,22 @@
 	overflow: hidden;
 	pointer-events: auto;
 	animation: slideInRight 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-	transition: all 0.2s ease;
+	transition: box-shadow 0.2s ease, border-color 0.2s ease;
+}
+
+.workflow-display-inspector-panel.is-dragging {
+	user-select: none;
+	box-shadow: 0 20px 48px rgba(0, 0, 0, 0.8), 0 0 30px rgba(56, 189, 248, 0.3);
+	border-color: rgba(56, 189, 248, 0.45);
 }
 
 .workflow-display-inspector-panel.minimized {
 	max-height: 38px;
 	width: auto;
-	min-width: 290px;
+	min-width: 250px;
 	max-width: 380px;
+	border-radius: 8px;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 
 .workflow-display-inspector-panel.minimized .workflow-display-cards-container {
@@ -3998,6 +4037,11 @@
 	user-select: none;
 	white-space: nowrap;
 	gap: 12px;
+	cursor: grab;
+}
+
+.workflow-display-inspector-header:active {
+	cursor: grabbing;
 }
 
 .workflow-display-inspector-title {
@@ -4082,9 +4126,8 @@
 }
 
 .workflow-display-card {
-	background: rgba(15, 23, 42, 0.88);
-	border: 1px solid rgba(56, 189, 248, 0.3);
-	border-left: 3.5px solid #38bdf8;
+	background: rgba(15, 23, 42, 0.92);
+	border: 1px solid rgba(148, 163, 184, 0.22);
 	border-radius: 6px;
 	padding: 8px 10px;
 	display: flex;
@@ -4114,12 +4157,28 @@
 }
 
 .workflow-display-card-node {
-	color: #c084fc;
+	display: inline-flex;
+	align-items: baseline;
+	gap: 3px;
+	max-width: 240px;
+	overflow: hidden;
+}
+
+.workflow-display-card-node .node-title-main {
+	color: #f1f5f9;
 	font-weight: 600;
+	font-size: 11px;
 	white-space: nowrap;
 	text-overflow: ellipsis;
 	overflow: hidden;
-	max-width: 140px;
+}
+
+.workflow-display-card-node .node-id-sub {
+	color: #64748b;
+	font-size: 9.5px;
+	font-weight: 400;
+	font-family: var(--vscode-editor-font-family, monospace);
+	white-space: nowrap;
 }
 
 .workflow-display-card-time {

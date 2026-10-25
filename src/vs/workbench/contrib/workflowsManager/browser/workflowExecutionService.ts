@@ -1357,18 +1357,26 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 				}
 
-				// Merge any loose keyword arguments directly into inputParams (e.g. RUN_TICKETS("jobs/calc", start=0))
+				// Merge any loose keyword arguments directly into inputParams (e.g. RUN_TICKETS("jobs/calc", start=@start))
+				// Keyword arguments explicitly passed to the function call ALWAYS take precedence!
 				const reservedKeys = new Set(['ticket_name', 'ticket_id', 'ticketIdOrPath', 'ticket', 'params', 'input_params', 'parameters', 'inputParams']);
 				for (const [k, v] of Object.entries(kwargs)) {
-					if (!reservedKeys.has(k) && inputParams[k] === undefined) {
+					if (!reservedKeys.has(k)) {
 						inputParams[k] = v;
 					}
 				}
 
+				const mergedInputs = { ...run.contextVariables, ...inputParams };
+				const paramKeys = Object.keys(inputParams);
+				const paramSummary = paramKeys.length > 0
+					? paramKeys.map(k => `${k}=${JSON.stringify(inputParams[k])}`).join(', ')
+					: 'none';
+				this._emitLog(run, 'info', `[RUN_TICKETS] Executing ticket '${ticketIdOrPath}' with ${paramKeys.length} parameter(s): ${paramSummary}`, { nodeId: node.id });
+
 				const execRes = await this.ticketRuntimeService.RUN_TICKETS({
 					workspaceUri: workflowDir,
 					ticketIdOrPath,
-					inputParams: { ...run.contextVariables, ...inputParams }
+					inputParams: mergedInputs
 				});
 
 				result = execRes.output !== undefined ? execRes.output : execRes;
@@ -1421,9 +1429,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					const initialFields = typeof rawParams === 'object' && rawParams !== null ? { ...rawParams } : {};
 
 					// Merge any loose keyword arguments directly into initialFields (e.g. CREATE_TICKETS("xxx", start=0))
-					const reservedCreateKeys = new Set(['ticket_type', 'type', 'title', 'target_folder', 'target_path', 'folder', 'path', 'folder_name', 'folderName', 'name', 'parameters', 'params', 'fieldValues']);
+					// Explicit keyword arguments take precedence over dictionary parameters
+					const reservedCreateKeys = new Set(['ticket_type', 'type', 'title', 'target_folder', 'target_path', 'folder', 'path', 'folder_name', 'folderName', 'name', 'parameters', 'params', 'fieldValues', 'auto_run', 'autoRun', 'run']);
 					for (const [k, v] of Object.entries(kwargs)) {
-						if (!reservedCreateKeys.has(k) && initialFields[k] === undefined) {
+						if (!reservedCreateKeys.has(k)) {
 							initialFields[k] = v;
 						}
 					}
@@ -1435,6 +1444,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					opts.autoRun = opts.auto_run === true;
 				}
 				opts.workspaceUri = workflowDir;
+
+				const createParamKeys = Object.keys(opts.parameters || {});
+				const createParamSummary = createParamKeys.length > 0
+					? createParamKeys.map(k => `${k}=${JSON.stringify(opts.parameters[k])}`).join(', ')
+					: 'none';
+				this._emitLog(run, 'info', `[CREATE_TICKETS] Creating ticket '${opts.title}' (type: ${opts.ticketType}) with ${createParamKeys.length} parameter(s): ${createParamSummary}`, { nodeId: node.id });
 				const createRes = await this.ticketRuntimeService.CREATE_TICKETS(opts);
 				if (!createRes.success) {
 					throw new Error(createRes.error || `Failed to create ticket '${opts.title}'`);
@@ -1462,13 +1477,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 				const { formattedText, summaryType, cleanValue, ticketTitle, ticketId, ticketType, outputItems, ticketHandle } = this._formatDisplayOutput(displayVal);
 
-				this._emitLog(run, 'info', `[DISPLAY] [${node.title || node.id}]\n${formattedText}`, { nodeId: node.id });
+				const nodeLabelName = (node.label && node.label.trim()) ? node.label.trim() : (node.id || 'Node');
+				this._emitLog(run, 'info', `[DISPLAY] [${nodeLabelName}]\n${formattedText}`, { nodeId: node.id });
 
 				const displayCard: IWorkflowDisplayCard = {
 					id: `display_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 					runId: run.runId,
 					nodeId: node.id,
-					nodeTitle: node.title || node.id,
+					nodeTitle: nodeLabelName,
 					expression: rawExpr || `DISPLAY(${rawArgsStr})`,
 					value: cleanValue,
 					formattedText,
