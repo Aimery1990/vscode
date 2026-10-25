@@ -104,6 +104,26 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		}
 	}
 
+	private async _persistCurrentModule(): Promise<void> {
+		if (!this._activeModule) {
+			return;
+		}
+		this._syncDraft();
+		const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
+		try {
+			const currentModules = await this.customModulesService.getCustomModules(wsUri);
+			const existingIndex = currentModules.findIndex(m => m.id.toLowerCase() === this._activeModule!.id.toLowerCase());
+			if (existingIndex !== -1) {
+				currentModules[existingIndex] = this._activeModule!;
+			} else {
+				currentModules.push(this._activeModule!);
+			}
+			await this.customModulesService.saveCustomModules(currentModules, wsUri);
+		} catch (e) {
+			console.warn('[CustomModuleSchemaEditor] Failed to auto-persist schema module:', e);
+		}
+	}
+
 	private async _loadAndRender(input: CustomModuleSchemaEditorInput): Promise<void> {
 		if (!this._container) {
 			return;
@@ -1676,11 +1696,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 					};
 
-					clearBtn.onclick = () => {
+					clearBtn.onclick = async () => {
 						resetPlaceholder();
 						statusBadge.textContent = '';
 						statusBadge.style.display = 'none';
 						field.defaultContent = '';
+						this._syncDraft();
+						await this._persistCurrentModule();
 					};
 
 					const executeFetch = async (openTab: boolean) => {
@@ -2325,6 +2347,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					if (field.debugPromptOutput) {
 						promptOutputDisplay.textContent = field.debugPromptOutput;
+						promptStatusBadge.textContent = 'Saved Preview';
+						promptStatusBadge.style.color = '#34d399';
+						promptStatusBadge.style.display = 'inline-block';
 					} else {
 						resetPromptOutputPlaceholder();
 					}
@@ -2337,12 +2362,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 					};
 
-					clearPromptOutBtn.onclick = () => {
+					clearPromptOutBtn.onclick = async () => {
 						resetPromptOutputPlaceholder();
 						promptStatusBadge.textContent = '';
 						promptStatusBadge.style.display = 'none';
 						field.debugPromptOutput = '';
 						this._syncDraft();
+						await this._persistCurrentModule();
 					};
 
 					testPromptBtn.onclick = async () => {
@@ -2923,6 +2949,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							previewBox.textContent = fullOutput;
 							field.pythonOutput = fullOutput;
 							this._syncDraft();
+							await this._persistCurrentModule();
 							if (res.success) {
 								this.notificationService.info(`Script executed successfully (${durationStr})`);
 							} else {
@@ -2950,12 +2977,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 					};
 
-					clearBtn.onclick = (e) => {
+					clearBtn.onclick = async (e) => {
 						e.preventDefault();
 						e.stopPropagation();
 						previewBox.textContent = '[Ready to execute] Output, stdout/stderr, and runtime duration will appear here when run.';
 						field.pythonOutput = '';
 						this._syncDraft();
+						await this._persistCurrentModule();
 					};
 				}
 			});
@@ -3768,6 +3796,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			contentEl.textContent = result.content;
 			field.defaultContent = result.content;
 			this._syncDraft();
+			await this._persistCurrentModule();
 			const charCount = result.content.length;
 			statusEl.textContent = `Fetched (${charCount} chars)`;
 			statusEl.style.color = '#34d399';
@@ -3911,6 +3940,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				this._syncDraft();
 				statusEl.textContent = `Done (${elapsedSec}s)`;
 				statusEl.style.color = '#34d399';
+				await this._persistCurrentModule();
 			} else {
 				const errMsg = res.error || 'Unknown AI response error';
 				outputEl.textContent = `[AI Execution Error]\n${errMsg}`;
