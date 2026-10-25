@@ -2763,8 +2763,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					};
 
 					// Base Chip: + TICKET_CONTEXT['']
+					const chipStyle = 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;';
+
 					const baseChip = append(varBar, $('button', {
-						style: 'padding: 2px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; font-family: var(--vscode-editor-font-family, monospace);',
+						style: chipStyle + ' font-weight: 600;',
 						title: 'Insert TICKET_CONTEXT[\'\'] into script'
 					}, "+ TICKET_CONTEXT['']"));
 					baseChip.onclick = (e) => {
@@ -2775,10 +2777,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					// Specific Field Chips from Schema
 					const otherFields = (fields || this._activeModule?.fields || []).filter(f => f && f.id !== field.id);
-					otherFields.forEach(of => {
+					const maxInitialVisible = 2;
+					const visibleFields = otherFields.slice(0, maxInitialVisible);
+					const hiddenFields = otherFields.slice(maxInitialVisible);
+
+					visibleFields.forEach(of => {
 						const ofLabel = of.label || of.id;
 						const fieldChip = append(varBar, $('button', {
-							style: 'padding: 2px 7px; font-size: 10.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.05); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace);',
+							style: chipStyle,
 							title: `Insert TICKET_CONTEXT['${ofLabel}']`
 						}, `+ TICKET_CONTEXT['${ofLabel}']`));
 						fieldChip.onclick = (e) => {
@@ -2787,6 +2793,44 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							insertTextAtCursor(`TICKET_CONTEXT['${ofLabel}']`);
 						};
 					});
+
+					if (hiddenFields.length > 0) {
+						const hiddenContainer = append(varBar, $('span', {
+							style: 'display: none;'
+						}));
+
+						hiddenFields.forEach(of => {
+							const ofLabel = of.label || of.id;
+							const fieldChip = append(hiddenContainer, $('button', {
+								style: chipStyle,
+								title: `Insert TICKET_CONTEXT['${ofLabel}']`
+							}, `+ TICKET_CONTEXT['${ofLabel}']`));
+							fieldChip.onclick = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								insertTextAtCursor(`TICKET_CONTEXT['${ofLabel}']`);
+							};
+						});
+
+						let isExpanded = false;
+						const moreBtn = append(varBar, $('button', {
+							style: 'padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;',
+							title: 'Toggle more context fields'
+						}, `+${hiddenFields.length} More...`));
+
+						moreBtn.onclick = (e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							isExpanded = !isExpanded;
+							if (isExpanded) {
+								hiddenContainer.style.display = 'contents';
+								moreBtn.textContent = 'Less';
+							} else {
+								hiddenContainer.style.display = 'none';
+								moreBtn.textContent = `+${hiddenFields.length} More...`;
+							}
+						};
+					}
 
 					// DEBUG: Execution Output & Logs Preview Row
 					const previewRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 6px;' }));

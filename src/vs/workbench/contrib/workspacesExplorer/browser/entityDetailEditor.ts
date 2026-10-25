@@ -906,6 +906,22 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// Python Primitive: Context chips More / Less toggle
+			const morePyCtxBtn = target.closest('.python-ctx-more-btn') as HTMLElement | null;
+			if (morePyCtxBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const bar = morePyCtxBtn.closest('.python-ctx-chips-bar') as HTMLElement | null;
+				const hiddenGroup = bar?.querySelector('.python-ctx-hidden-group') as HTMLElement | null;
+				if (hiddenGroup) {
+					const isHidden = hiddenGroup.style.display === 'none';
+					hiddenGroup.style.display = isHidden ? 'contents' : 'none';
+					const remainingCount = morePyCtxBtn.getAttribute('data-count') || '';
+					morePyCtxBtn.textContent = isHidden ? 'Less' : `+${remainingCount} More...`;
+				}
+				return;
+			}
+
 			// Python Primitive: Copy Output button click
 			const copyPyOutBtn = target.closest('.python-copy-output-btn') as HTMLElement | null;
 			if (copyPyOutBtn) {
@@ -5181,11 +5197,30 @@ ${interpolatedPrompt}`;
 						: 'Ready to execute';
 
 					const otherFields = (customModule?.fields || []).filter(f => f && f.id !== rawKey && (f.label || f.id) !== k);
-					const baseChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['']" data-cursor-offset="-2" style="padding: 2px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; font-family: var(--vscode-editor-font-family, monospace);" title="Insert TICKET_CONTEXT[''] into script">+ TICKET_CONTEXT['']</button>`;
-					const fieldChipsHtml = otherFields.map(of => {
+					const baseChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['']" data-cursor-offset="-2" style="padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert TICKET_CONTEXT[''] into script">+ TICKET_CONTEXT['']</button>`;
+
+					const maxInitialVisible = 2;
+					const visibleFields = otherFields.slice(0, maxInitialVisible);
+					const hiddenFields = otherFields.slice(maxInitialVisible);
+
+					const visibleChipsHtml = visibleFields.map(of => {
 						const ofLabel = of.label || of.id;
-						return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.05); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace);" title="Insert TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']">+ TICKET_CONTEXT['${this._escapeHtml(ofLabel)}']</button>`;
+						return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']">+ TICKET_CONTEXT['${this._escapeHtml(ofLabel)}']</button>`;
 					}).join('');
+
+					let hiddenChipsHtml = '';
+					let moreBtnHtml = '';
+					if (hiddenFields.length > 0) {
+						hiddenChipsHtml = `
+							<span class="python-ctx-hidden-group" style="display: none;">
+								${hiddenFields.map(of => {
+									const ofLabel = of.label || of.id;
+									return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']">+ TICKET_CONTEXT['${this._escapeHtml(ofLabel)}']</button>`;
+								}).join('')}
+							</span>
+						`;
+						moreBtnHtml = `<button type="button" class="python-ctx-more-btn" data-count="${hiddenFields.length}" style="padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;" title="Toggle more context fields">+${hiddenFields.length} More...</button>`;
+					}
 
 					customFieldsHtml += `
 						<div class="section-card custom-property-card python-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
@@ -5227,7 +5262,9 @@ ${interpolatedPrompt}`;
 									<div class="python-ctx-chips-bar" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0;">
 										<span style="font-size: 10.5px; opacity: 0.65;">Insert Context:</span>
 										${baseChipHtml}
-										${fieldChipsHtml}
+										${visibleChipsHtml}
+										${hiddenChipsHtml}
+										${moreBtnHtml}
 									</div>
 								</div>
 
