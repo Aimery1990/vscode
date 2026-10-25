@@ -3215,6 +3215,16 @@ export class WorkflowEditor extends EditorPane {
 						card.classList.remove('is-dragging', 'drag-over-above', 'drag-over-below');
 					};
 
+					card.ondblclick = (e) => {
+						const target = e.target as HTMLElement;
+						if (target.closest('.pipeline-import-add-btn') || target.closest('.pipeline-icon-btn') || target.closest('.pipeline-drag-handle')) {
+							return;
+						}
+						e.stopPropagation();
+						e.preventDefault();
+						this._openModuleInEditor(imp);
+					};
+
 					// Left: Drag handle ≡
 					const dragHandle = append(card, $('.pipeline-drag-handle'));
 					append(dragHandle, $('span' + ThemeIcon.asCSSSelector(Codicon.gripper)));
@@ -3229,7 +3239,7 @@ export class WorkflowEditor extends EditorPane {
 
 					// 2. Ticket ID / Name
 					const nameSpan = append(info, $('span.pipeline-import-name', {}, imp.name));
-					nameSpan.title = `${imp.type || 'ticket'}: ${imp.name}`;
+					nameSpan.title = `${imp.type || 'ticket'}: ${imp.name}\n(Double-click to open in Editor Tab)`;
 
 					// 3. Type Badge pill following the name (matching system tree badge)
 					const typeBadge = append(info, $('span.pipeline-type-badge', {}, (imp.type || 'ticket').toUpperCase()));
@@ -3238,6 +3248,15 @@ export class WorkflowEditor extends EditorPane {
 					typeBadge.title = `Entity Type: ${(imp.type || 'ticket').toUpperCase()}`;
 
 					const actionsEl = append(card, $('.pipeline-import-actions'));
+
+					// Open in Tab button
+					const openInTabBtn = append(actionsEl, $('.pipeline-icon-btn'));
+					append(openInTabBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.linkExternal)));
+					openInTabBtn.title = `Open '${imp.name}' in Editor Tab`;
+					openInTabBtn.onclick = (e) => {
+						e.stopPropagation();
+						this._openModuleInEditor(imp);
+					};
 
 					// "Add Step" button (standard button, no plus sign)
 					const addStepBtn = append(actionsEl, $('.pipeline-import-add-btn'));
@@ -3370,6 +3389,20 @@ export class WorkflowEditor extends EditorPane {
 				stepCard.dataset.stepId = step.id;
 				if (step.type === 'run_ticket' && step.ticketName) {
 					stepCard.dataset.ticketName = step.ticketName;
+					stepCard.title = `Step #${i + 1} (${step.ticketName})\nDouble-click to open Ticket in Editor Tab`;
+					stepCard.ondblclick = (e) => {
+						const target = e.target as HTMLElement;
+						if (target.tagName === 'INPUT' || target.closest('.pipeline-icon-btn') || target.closest('.pipeline-drag-handle')) {
+							return;
+						}
+						e.stopPropagation();
+						e.preventDefault();
+						this._openModuleInEditor({
+							type: step.ticketType || 'ticket',
+							name: step.ticketName,
+							uri: step.ticketUri
+						});
+					};
 				}
 
 				// HTML5 Drag & Drop Reordering Handlers
@@ -3591,8 +3624,22 @@ export class WorkflowEditor extends EditorPane {
 					addPipelineChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
 				}
 
-				// Right: Actions (Delete only)
+				// Right: Actions
 				const stepActions = append(stepCard, $('.pipeline-step-actions'));
+
+				if (step.type === 'run_ticket' && step.ticketName) {
+					const openTabBtn = append(stepActions, $('.pipeline-icon-btn'));
+					append(openTabBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.linkExternal)));
+					openTabBtn.title = `Open '${step.ticketName}' in Editor Tab`;
+					openTabBtn.onclick = (e) => {
+						e.stopPropagation();
+						this._openModuleInEditor({
+							type: step.ticketType || 'ticket',
+							name: step.ticketName,
+							uri: step.ticketUri
+						});
+					};
+				}
 
 				// Delete Step Button
 				const delBtn = append(stepActions, $('.pipeline-icon-btn'));
@@ -4779,7 +4826,11 @@ export class WorkflowEditor extends EditorPane {
 			chip.title = `Bound to Ticket output: ${boundTicket.name}${fromStepText}\n(Double-click to open Ticket in Editor Tab)`;
 			chip.style.cursor = 'pointer';
 			append(chip, $('span' + ThemeIcon.asCSSSelector(Codicon.checklist)));
-			append(chip, $('span', {}, boundTicket.name));
+			let ticketDisplayName = boundTicket.name;
+			if (ticketDisplayName.length > 35) {
+				ticketDisplayName = ticketDisplayName.substring(0, 32) + '...';
+			}
+			append(chip, $('span', {}, ticketDisplayName));
 			chip.ondblclick = (e) => {
 				e.stopPropagation();
 				e.preventDefault();
@@ -4896,6 +4947,9 @@ export class WorkflowEditor extends EditorPane {
 
 		const pillContent = append(fnPill, $('.fn-pill-text'));
 		let displayExpr = step.expression || (cleanVar ? `@${cleanVar} = ${step.functionName || 'RUN_TICKETS'}()` : (step.functionName ? `${step.functionName}()` : 'RUN_TICKETS()'));
+		if (displayExpr.length > 250 || displayExpr.includes('\n') || displayExpr.startsWith('#') || displayExpr.startsWith('+ content') || displayExpr.includes('URL: https://')) {
+			displayExpr = cleanVar ? `@${cleanVar} = ${step.functionName || 'RUN_TICKETS'}()` : (step.functionName ? `${step.functionName}()` : 'RUN_TICKETS()');
+		}
 		if (displayExpr.length > 55) {
 			displayExpr = displayExpr.substring(0, 52) + '...';
 		}
@@ -5125,7 +5179,11 @@ export class WorkflowEditor extends EditorPane {
 			const contentWrapper = append(nodeEl, $('.node-content-wrapper'));
 
 			const labelWrapper = append(contentWrapper, $('.node-label'));
-			labelWrapper.textContent = node.label || '';
+			let displayLabel = node.label || '';
+			if (displayLabel.length > 80 || displayLabel.startsWith('#') || displayLabel.startsWith('+ content') || displayLabel.includes('URL: https://')) {
+				displayLabel = displayLabel.substring(0, 77) + '...';
+			}
+			labelWrapper.textContent = displayLabel;
 
 			// Determine text alignment
 			const textAlign = node.textAlign || 'center';
@@ -5167,6 +5225,12 @@ export class WorkflowEditor extends EditorPane {
 					};
 					pipeBadge.onclick = (e) => {
 						e.stopPropagation();
+						this._hideTicketPopover();
+						this._openNodePipelinePanel(node.id);
+					};
+					pipeBadge.ondblclick = (e) => {
+						e.stopPropagation();
+						e.preventDefault();
 						this._hideTicketPopover();
 						this._openNodePipelinePanel(node.id);
 					};
@@ -5348,12 +5412,17 @@ export class WorkflowEditor extends EditorPane {
 
 			nodeEl.ondblclick = (e) => {
 				e.stopPropagation();
+				const target = e.target as HTMLElement;
 				if (
-					(e.target as HTMLElement).closest('.node-variables-container') ||
-					(e.target as HTMLElement).closest('.node-function-pill') ||
-					(e.target as HTMLElement).closest('.node-variable-pill') ||
-					(e.target as HTMLElement).closest('.node-function-draft-wrapper') ||
-					(e.target as HTMLElement).closest('.node-variable-draft-wrapper') ||
+					target.closest('.node-imports-badges-container') ||
+					target.closest('.node-import-badge') ||
+					target.closest('.node-variables-container') ||
+					target.closest('.node-function-pill') ||
+					target.closest('.node-variable-pill') ||
+					target.closest('.node-function-draft-wrapper') ||
+					target.closest('.node-variable-draft-wrapper') ||
+					target.closest('.node-port-handle') ||
+					target.closest('.node-resize-handle') ||
 					nodeEl.classList.contains('editing-function') ||
 					nodeEl.classList.contains('editing-variable')
 				) {
@@ -5382,12 +5451,17 @@ export class WorkflowEditor extends EditorPane {
 				const lastClickTime = (node as any)._lastClickTime || 0;
 				(node as any)._lastClickTime = now;
 				if (now - lastClickTime < 300) {
+					const target = e.target as HTMLElement;
 					if (
-						(e.target as HTMLElement).closest('.node-variables-container') ||
-						(e.target as HTMLElement).closest('.node-function-pill') ||
-						(e.target as HTMLElement).closest('.node-variable-pill') ||
-						(e.target as HTMLElement).closest('.node-function-draft-wrapper') ||
-						(e.target as HTMLElement).closest('.node-variable-draft-wrapper') ||
+						target.closest('.node-imports-badges-container') ||
+						target.closest('.node-import-badge') ||
+						target.closest('.node-variables-container') ||
+						target.closest('.node-function-pill') ||
+						target.closest('.node-variable-pill') ||
+						target.closest('.node-function-draft-wrapper') ||
+						target.closest('.node-variable-draft-wrapper') ||
+						target.closest('.node-port-handle') ||
+						target.closest('.node-resize-handle') ||
 						nodeEl.classList.contains('editing-function') ||
 						nodeEl.classList.contains('editing-variable')
 					) {
@@ -5476,12 +5550,6 @@ export class WorkflowEditor extends EditorPane {
 					}
 				}
 			};
-
-			// Handle double click inline editing
-			nodeEl.ondblclick = (e) => {
-				e.stopPropagation();
-				this._showInlineEditor(nodeEl, node);
-			};
 		}
 
 		if (this._inspectorEl) {
@@ -5494,13 +5562,18 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
+		let curLabel = node.label || '';
+		if (curLabel.length > 250 || curLabel.includes('\n') || curLabel.startsWith('#') || curLabel.startsWith('+ content') || curLabel.includes('URL: https://')) {
+			curLabel = curLabel.substring(0, 50).trim() || 'Step';
+		}
+
 		const contentWrapper = nodeEl.querySelector('.node-content-wrapper') as HTMLElement;
 		if (contentWrapper) {
 			contentWrapper.style.visibility = 'hidden';
 		}
 
 		const textarea = append(nodeEl, $('textarea.node-inline-editor')) as HTMLTextAreaElement;
-		textarea.value = node.label || '';
+		textarea.value = curLabel;
 
 		textarea.style.position = 'absolute';
 		textarea.style.left = '4px';

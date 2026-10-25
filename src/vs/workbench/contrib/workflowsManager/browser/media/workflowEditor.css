@@ -2369,7 +2369,8 @@
 	width: 480px;
 	max-width: 95vw;
 	max-height: 80vh !important;
-	overflow: hidden !important;
+	overflow-y: auto !important;
+	overflow-x: hidden !important;
 	background: rgba(11, 17, 32, 0.96) !important;
 	backdrop-filter: blur(16px);
 	-webkit-backdrop-filter: blur(16px);
@@ -3685,7 +3686,8 @@
 	width: 510px;
 	max-width: 95vw;
 	max-height: 80vh !important;
-	overflow: hidden !important;
+	overflow-y: auto !important;
+	overflow-x: hidden !important;
 	background: rgba(11, 17, 32, 0.94) !important;
 	backdrop-filter: blur(16px);
 	-webkit-backdrop-filter: blur(16px);
