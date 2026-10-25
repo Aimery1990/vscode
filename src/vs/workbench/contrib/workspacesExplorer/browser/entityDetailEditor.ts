@@ -37,6 +37,7 @@ import { IQuickInputService } from '../../../../platform/quickinput/common/quick
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
+import { ITicketWorkflowRuntimeService } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
 
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
 	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
@@ -813,6 +814,98 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// Python Primitive: Run Script button click
+			const runPyBtn = target.closest('.python-run-script-btn') as HTMLElement | null;
+			if (runPyBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = runPyBtn.getAttribute('data-field-key') || '';
+				const card = runPyBtn.closest('.python-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._executePythonScriptInEditor(card, fieldKey);
+				}
+				return;
+			}
+
+			// Python Primitive: Save Code button click
+			const savePyBtn = target.closest('.python-save-code-btn') as HTMLElement | null;
+			if (savePyBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = savePyBtn.getAttribute('data-field-key') || '';
+				const card = savePyBtn.closest('.python-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._savePythonDataFromCard(card, fieldKey);
+					this._notificationService.info('Saved Python automation script.');
+				}
+				return;
+			}
+
+			// Python Primitive: Test Interpreter button click
+			const testPyBtn = target.closest('.python-test-interpreter-btn') as HTMLElement | null;
+			if (testPyBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = testPyBtn.getAttribute('data-field-key') || '';
+				const card = testPyBtn.closest('.python-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._testPythonInterpreterInEditor(card, fieldKey);
+				}
+				return;
+			}
+
+			// Python Primitive: Create venv button click
+			const createVenvBtn = target.closest('.python-create-venv-btn') as HTMLElement | null;
+			if (createVenvBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = createVenvBtn.getAttribute('data-field-key') || '';
+				const card = createVenvBtn.closest('.python-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._createVenvInEditor(card, fieldKey);
+				}
+				return;
+			}
+
+			// Python Primitive: Copy Output button click
+			const copyPyOutBtn = target.closest('.python-copy-output-btn') as HTMLElement | null;
+			if (copyPyOutBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = copyPyOutBtn.closest('.python-primitive-card') as HTMLElement | null;
+				const outputDisplay = card?.querySelector('.python-output-display') as HTMLElement | null;
+				const text = outputDisplay?.textContent || '';
+				if (text && !text.startsWith('No execution output yet')) {
+					this._clipboardService.writeText(text);
+					copyPyOutBtn.textContent = 'Copied!';
+					setTimeout(() => { copyPyOutBtn.textContent = 'Copy'; }, 1500);
+					this._notificationService.info('Copied Python execution output to clipboard.');
+				}
+				return;
+			}
+
+			// Python Primitive: Clear Output button click
+			const clearPyOutBtn = target.closest('.python-clear-output-btn') as HTMLElement | null;
+			if (clearPyOutBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = clearPyOutBtn.getAttribute('data-field-key') || '';
+				const card = clearPyOutBtn.closest('.python-primitive-card') as HTMLElement | null;
+				if (card) {
+					const outputDisplay = card.querySelector('.python-output-display') as HTMLElement | null;
+					if (outputDisplay) {
+						outputDisplay.innerHTML = '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run Script" above to execute the automation code.</span>';
+					}
+					const statusText = card.querySelector('.python-status-text') as HTMLElement | null;
+					if (statusText) {
+						statusText.textContent = 'Output cleared';
+						statusText.style.color = 'inherit';
+					}
+					await this._savePythonDataFromCard(card, fieldKey, '');
+				}
+				return;
+			}
+
 			// Output Item: Copy
 			const copyOutputItemBtn = target.closest('.output-item-copy-btn') as HTMLElement | null;
 			if (copyOutputItemBtn) {
@@ -1158,6 +1251,18 @@ export class EntityDetailEditor extends EditorPane {
 		});
 
 		this._container.addEventListener('keydown', async (e: KeyboardEvent) => {
+			if (e.key === 'Tab') {
+				const pyTextarea = (e.target as HTMLElement)?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
+				if (pyTextarea) {
+					e.preventDefault();
+					e.stopPropagation();
+					const start = pyTextarea.selectionStart;
+					const end = pyTextarea.selectionEnd;
+					pyTextarea.value = pyTextarea.value.substring(0, start) + '    ' + pyTextarea.value.substring(end);
+					pyTextarea.selectionStart = pyTextarea.selectionEnd = start + 4;
+					return;
+				}
+			}
 			if (e.key === 'Enter') {
 				const urlInput = (e.target as HTMLElement)?.closest('.browser-url-input') as HTMLInputElement | null;
 				if (urlInput) {
@@ -3268,6 +3373,249 @@ ${rawErr}
 		}
 	}
 
+	private async _savePythonPrimitiveData(fieldKey: string, pythonData: any): Promise<void> {
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: typeof pythonData === 'string' ? pythonData : JSON.stringify(pythonData)
+		};
+		await this._handleMessage({
+			type: 'saveMetadata',
+			metadata: {},
+			customMetadata: updatedCustom
+		});
+	}
+
+	private async _savePythonDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string, exitCodeOverride?: number, durationMsOverride?: number): Promise<any> {
+		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
+		const codeTextarea = card.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+		const outputDisplay = card.querySelector('.python-output-display') as HTMLElement | null;
+
+		const pythonPath = interpInput?.value.trim() || '';
+		const code = codeTextarea?.value || '';
+		let output = outputOverride !== undefined ? outputOverride : (outputDisplay?.textContent || '');
+		if (output.startsWith('No execution output yet')) output = '';
+
+		const pythonData: any = {
+			pythonPath,
+			code,
+			output,
+			exitCode: exitCodeOverride,
+			durationMs: durationMsOverride,
+			lastExecuted: outputOverride !== undefined && outputOverride === '' ? '' : new Date().toISOString()
+		};
+
+		await this._savePythonPrimitiveData(fieldKey, pythonData);
+		return pythonData;
+	}
+
+	private async _executePythonScriptInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
+		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
+		const codeTextarea = card.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+		const statusText = card.querySelector('.python-status-text') as HTMLElement | null;
+		const outputDisplay = card.querySelector('.python-output-display') as HTMLElement | null;
+		const runBtn = card.querySelector('.python-run-script-btn') as HTMLElement | null;
+
+		const pythonPath = interpInput?.value.trim() || '';
+		const rawCode = codeTextarea?.value || '';
+
+		if (!rawCode.trim()) {
+			this._notificationService.warn('Please enter Python code before running.');
+			codeTextarea?.focus();
+			return;
+		}
+
+		if (runBtn) {
+			runBtn.setAttribute('disabled', 'true');
+			runBtn.style.opacity = '0.6';
+		}
+		if (statusText) {
+			statusText.textContent = 'Running script... ⏳';
+			statusText.style.color = '#facc15';
+		}
+		if (outputDisplay) {
+			outputDisplay.textContent = 'Executing Python automation script...\n';
+		}
+
+		const interpolatedCode = this._interpolateParameters(rawCode);
+
+		try {
+			const runtimeService = this._instantiationService.invokeFunction(accessor => {
+				try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+			});
+
+			if (!runtimeService) {
+				throw new Error('Ticket workflow runtime service not available.');
+			}
+
+			const workspaceUri = this._entityUri ? this._workspacesExplorerService.findRootWorkspace(this._entityUri) || this._entityUri : this._entityUri;
+			if (!workspaceUri || !this._entityUri) {
+				throw new Error('No active ticket or workspace selected.');
+			}
+
+			const res = await runtimeService.executePythonScript(
+				workspaceUri,
+				this._entityUri,
+				pythonPath,
+				interpolatedCode,
+				this._lastParsedData ? (this._lastParsedData as any).data : {}
+			);
+
+			if (outputDisplay) {
+				outputDisplay.textContent = res.output || (res.success ? '(Script completed with 0 exit code and no stdout output)' : `Error: ${res.error || 'Execution failed'}`);
+			}
+
+			if (statusText) {
+				statusText.textContent = res.success
+					? `Completed in ${res.durationMs}ms (exit 0)`
+					: `Failed with exit code ${res.exitCode} (${res.durationMs}ms)`;
+				statusText.style.color = res.success ? '#4ade80' : '#f87171';
+			}
+
+			// Update customMetadata
+			await this._savePythonDataFromCard(card, fieldKey, res.output, res.exitCode, res.durationMs);
+
+			// Also update interpreter input if auto-resolved
+			if (interpInput && !pythonPath && res.pythonPath) {
+				interpInput.value = res.pythonPath;
+			}
+		} catch (err: any) {
+			if (outputDisplay) {
+				outputDisplay.textContent = `Execution Error: ${err.message || String(err)}`;
+			}
+			if (statusText) {
+				statusText.textContent = 'Execution failed';
+				statusText.style.color = '#f87171';
+			}
+			this._notificationService.error(`Python execution error: ${err.message || String(err)}`);
+		} finally {
+			if (runBtn) {
+				runBtn.removeAttribute('disabled');
+				runBtn.style.opacity = '1';
+			}
+		}
+	}
+
+	private async _createVenvInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
+		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
+		const statusEl = card.querySelector('.python-test-status') as HTMLElement | null;
+		const createBtn = card.querySelector('.python-create-venv-btn') as HTMLElement | null;
+		const envBadge = card.querySelector('.python-env-badge') as HTMLElement | null;
+
+		const currentPath = interpInput?.value.trim() || '.venv';
+		const venvName = currentPath.endsWith('/bin/python') || currentPath.endsWith('\\Scripts\\python.exe')
+			? currentPath.replace(/\/bin\/python$/, '').replace(/\\Scripts\\python\.exe$/, '')
+			: (currentPath || '.venv');
+
+		if (createBtn) {
+			createBtn.setAttribute('disabled', 'true');
+			createBtn.textContent = 'Creating...';
+		}
+		if (statusEl) {
+			statusEl.textContent = `Creating virtualenv at '${venvName}'... ⏳`;
+			statusEl.style.color = '#facc15';
+		}
+
+		try {
+			const runtimeService = this._instantiationService.invokeFunction(accessor => {
+				try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+			});
+			if (!runtimeService) {
+				throw new Error('Ticket workflow runtime service not available.');
+			}
+			const workspaceUri = this._entityUri ? this._workspacesExplorerService.findRootWorkspace(this._entityUri) || this._entityUri : this._entityUri;
+			if (!workspaceUri) {
+				throw new Error('No workspace context.');
+			}
+
+			const res = await runtimeService.createVirtualEnv(workspaceUri, venvName);
+			if (res.success) {
+				if (interpInput) {
+					interpInput.value = res.pythonPath;
+				}
+				if (envBadge) {
+					envBadge.textContent = res.pythonPath;
+				}
+				if (statusEl) {
+					statusEl.textContent = `Venv created: ${res.pythonPath} ✓`;
+					statusEl.style.color = '#4ade80';
+				}
+				this._notificationService.info(`Virtual environment successfully created at ${res.pythonPath}`);
+				await this._savePythonDataFromCard(card, fieldKey);
+			} else {
+				if (statusEl) {
+					statusEl.textContent = `Venv creation failed ✗`;
+					statusEl.style.color = '#f87171';
+				}
+				this._notificationService.error(`Failed to create venv: ${res.error || res.output}`);
+			}
+		} catch (err: any) {
+			if (statusEl) {
+				statusEl.textContent = `Error: ${err.message}`;
+				statusEl.style.color = '#f87171';
+			}
+			this._notificationService.error(`Failed to create venv: ${err.message || String(err)}`);
+		} finally {
+			if (createBtn) {
+				createBtn.removeAttribute('disabled');
+				createBtn.textContent = 'Create venv';
+			}
+		}
+	}
+
+	private async _testPythonInterpreterInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
+		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
+		const statusEl = card.querySelector('.python-test-status') as HTMLElement | null;
+		const testBtn = card.querySelector('.python-test-interpreter-btn') as HTMLElement | null;
+		const pythonPath = interpInput?.value.trim() || '';
+
+		if (testBtn) {
+			testBtn.setAttribute('disabled', 'true');
+			testBtn.textContent = 'Testing...';
+		}
+		if (statusEl) {
+			statusEl.textContent = 'Testing interpreter... ⏳';
+			statusEl.style.color = '#facc15';
+		}
+
+		try {
+			const runtimeService = this._instantiationService.invokeFunction(accessor => {
+				try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+			});
+			if (!runtimeService) {
+				throw new Error('Ticket workflow runtime service not available.');
+			}
+			const workspaceUri = this._entityUri ? this._workspacesExplorerService.findRootWorkspace(this._entityUri) || this._entityUri : this._entityUri;
+			if (!workspaceUri) {
+				throw new Error('No workspace context.');
+			}
+
+			const res = await runtimeService.testPythonInterpreter(workspaceUri, pythonPath);
+			if (res.success) {
+				if (statusEl) {
+					statusEl.textContent = `${res.version} ✓`;
+					statusEl.style.color = '#4ade80';
+				}
+				this._notificationService.info(`Python interpreter verified: ${res.version}`);
+			} else {
+				if (statusEl) {
+					statusEl.textContent = 'Interpreter not found / failed ✗';
+					statusEl.style.color = '#f87171';
+				}
+				this._notificationService.warn(`Python interpreter test failed: ${res.error}`);
+			}
+		} catch (err: any) {
+			if (statusEl) {
+				statusEl.textContent = `Error: ${err.message}`;
+				statusEl.style.color = '#f87171';
+			}
+		} finally {
+			if (testBtn) {
+				testBtn.removeAttribute('disabled');
+				testBtn.textContent = 'Test';
+			}
+		}
+	}
+
 	private async _autoUpdateOutputPrimitives(output: string, sourceFieldKey?: string): Promise<void> {
 		if (!this._container) { return; }
 		const outputCards = this._container.querySelectorAll('.output-primitive-card, .result-primitive-card') as NodeListOf<HTMLElement>;
@@ -4707,6 +5055,122 @@ ${interpolatedPrompt}`;
 							</div>
 							<div class="parameters-rows-container" style="display: flex; flex-direction: column; gap: 6px;">
 								${rowsHtml || '<span style="opacity: 0.4; font-style: italic;">No parameters defined in schema.</span>'}
+							</div>
+						</div>
+					`;
+				} else if (fType === 'python') {
+					let pythonPath = fieldItem.pythonPath || '';
+					let pythonCode = fieldItem.pythonCode || '';
+					let pythonOutput = '';
+					let exitCode: number | undefined;
+					let durationMs: number | undefined;
+					let lastExecutedText = '';
+
+					if (v) {
+						if (typeof v === 'string') {
+							const trimmed = v.trim();
+							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+								try {
+									const pObj = JSON.parse(trimmed);
+									if (pObj.pythonPath !== undefined) pythonPath = pObj.pythonPath;
+									if (pObj.code !== undefined) pythonCode = pObj.code;
+									if (pObj.pythonCode !== undefined && !pythonCode) pythonCode = pObj.pythonCode;
+									if (pObj.output !== undefined) pythonOutput = pObj.output;
+									if (pObj.exitCode !== undefined) exitCode = pObj.exitCode;
+									if (pObj.durationMs !== undefined) durationMs = pObj.durationMs;
+									if (pObj.lastExecuted) lastExecutedText = pObj.lastExecuted;
+								} catch {
+									pythonCode = trimmed;
+								}
+							} else {
+								pythonCode = trimmed;
+							}
+						} else if (typeof v === 'object' && v !== null) {
+							const obj = v as Record<string, unknown>;
+							if (obj.pythonPath !== undefined) pythonPath = String(obj.pythonPath);
+							if (obj.code !== undefined) pythonCode = String(obj.code);
+							if (obj.pythonCode !== undefined && !pythonCode) pythonCode = String(obj.pythonCode);
+							if (obj.output !== undefined) pythonOutput = String(obj.output);
+							if (obj.exitCode !== undefined) exitCode = Number(obj.exitCode);
+							if (obj.durationMs !== undefined) durationMs = Number(obj.durationMs);
+							if (obj.lastExecuted) lastExecutedText = String(obj.lastExecuted);
+						}
+					}
+
+					if (!pythonCode) {
+						pythonCode = '# Write Python automation script\n# Context variables are available via ANY_AGENT_CONTEXT environment variable\nimport os, sys, json\n\nprint("Executing Python script...")\n';
+					}
+
+					const statusTag = lastExecutedText
+						? `Executed: ${lastExecutedText.substring(0, 16)} (${durationMs !== undefined ? `${durationMs}ms` : 'ok'})`
+						: 'Ready to execute';
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card python-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(234,179,8,0.18); color: #facc15; font-weight: 700; text-transform: uppercase;">Python</span>
+									<span class="python-env-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.7); font-family: monospace;">${this._escapeHtml(pythonPath || '.venv / python3')}</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="python" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(pythonCode)}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+
+							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
+								<!-- Virtual Environment & Interpreter Row -->
+								<div style="background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;">
+									<div style="display: flex; justify-content: space-between; align-items: center;">
+										<label style="font-size: 11px; font-weight: 600; color: #facc15; display: flex; align-items: center; gap: 6px;">
+											<span>Virtual Environment / Interpreter:</span>
+										</label>
+										<span class="python-test-status" style="font-size: 10px; opacity: 0.65;"></span>
+									</div>
+									<div style="display: flex; gap: 8px; align-items: center;">
+										<input type="text" class="python-interpreter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(pythonPath)}" placeholder="e.g. .venv/bin/python, /usr/bin/python3, or python3" style="flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
+										<button type="button" class="python-test-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Test Python binary and check version" style="padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); white-space: nowrap;">Test</button>
+										<button type="button" class="python-create-venv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Initialize a local virtual environment (.venv) via python3 -m venv" style="padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(234,179,8,0.15); color: #facc15; border: 1px solid rgba(234,179,8,0.35); white-space: nowrap;">Create venv</button>
+									</div>
+								</div>
+
+								<!-- Python Source Code Textarea -->
+								<div style="display: flex; flex-direction: column; gap: 4px;">
+									<div style="display: flex; justify-content: space-between; align-items: center;">
+										<label style="font-size: 11px; font-weight: 600; opacity: 0.85;">Python Automation Code:</label>
+										<span style="font-size: 10px; opacity: 0.55;">Supports {{variables}} interpolation and ANY_AGENT_CONTEXT</span>
+									</div>
+									<textarea class="python-code-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="6" placeholder="Enter Python script to execute..." spellcheck="false" style="width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; tab-size: 4;">${this._escapeHtml(pythonCode)}</textarea>
+								</div>
+
+								<!-- Action Buttons Row -->
+								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+									<div style="display: flex; gap: 8px; align-items: center;">
+										<button type="button" class="python-run-script-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 16px; font-size: 11.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(234,179,8,0.18); color: #facc15; border: 1px solid rgba(234,179,8,0.45); transition: all 0.15s ease;" title="Run Python script in virtualenv or interpreter">
+											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5l9 5.5-9 5.5v-11z"/></svg>
+											<span>Run Script</span>
+										</button>
+										<button type="button" class="python-save-code-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15);" title="Save code without running">
+											<span>Save Code</span>
+										</button>
+									</div>
+									<span class="python-status-text" style="font-size: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(255,255,255,0.06); opacity: 0.7;">${statusTag}</span>
+								</div>
+
+								<!-- Debug & Execution Output Box -->
+								<div class="python-output-section" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">
+									<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px;">
+										<div style="display: flex; align-items: center; gap: 8px;">
+											<span style="font-size: 11px; font-weight: 600; opacity: 0.85;">Execution Output & Logs:</span>
+											${exitCode !== undefined ? `<span style="font-size: 10px; padding: 1px 6px; border-radius: 3px; background: ${exitCode === 0 ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)'}; color: ${exitCode === 0 ? '#4ade80' : '#f87171'};">Exit code: ${exitCode}</span>` : ''}
+										</div>
+										<div style="display: flex; gap: 6px;">
+											<button type="button" class="python-copy-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Copy</button>
+											<button type="button" class="python-clear-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Clear</button>
+										</div>
+									</div>
+									<div class="python-output-display desc-content-box" style="max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${pythonOutput ? this._escapeHtml(pythonOutput) : '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run Script" above to execute the automation code.</span>'}</div>
+								</div>
 							</div>
 						</div>
 					`;

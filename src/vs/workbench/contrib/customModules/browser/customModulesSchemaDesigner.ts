@@ -348,7 +348,8 @@ export class CustomModulesSchemaDesignerDialog {
 						dynamic_list: { bg: 'rgba(6,182,212,0.15)', text: '#06b6d4' },
 						attachment: { bg: 'rgba(16,185,129,0.15)', text: '#10b981' },
 						browser: { bg: 'rgba(56,189,248,0.15)', text: '#38bdf8' },
-						git: { bg: 'rgba(249,115,22,0.15)', text: '#f97316' }
+						git: { bg: 'rgba(249,115,22,0.15)', text: '#f97316' },
+						python: { bg: 'rgba(234,179,8,0.15)', text: '#eab308' }
 					};
 					const c = colorMap[type] || colorMap.text;
 					return `font-size: 9px; padding: 2px 6px; border-radius: 4px; background: ${c.bg}; color: ${c.text}; text-transform: uppercase; font-weight: bold; letter-spacing: 0.05em;`;
@@ -369,7 +370,8 @@ export class CustomModulesSchemaDesignerDialog {
 					{ type: 'dynamic_list', label: 'Container (Nested Subfields)', icon: Codicon.layers },
 					{ type: 'attachment', label: 'Attachment (Files / Images / PDF)', icon: Codicon.files },
 					{ type: 'browser', label: 'Browser (Web Navigation)', icon: Codicon.globe },
-					{ type: 'git', label: 'Git Repository Binding', icon: Codicon.sourceControl }
+					{ type: 'git', label: 'Git Repository Binding', icon: Codicon.sourceControl },
+					{ type: 'python', label: 'Python (Code Automation)', icon: Codicon.code }
 				];
 
 				let currentDraggingItem: { source: 'palette' | 'canvas' | 'subcanvas'; type?: string; label?: string; isClass?: boolean; classId?: string; itemFields?: any[]; canvasIndex?: number; subIndex?: number } | null = null;

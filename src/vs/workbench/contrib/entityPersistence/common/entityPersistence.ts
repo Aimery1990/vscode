@@ -40,7 +40,8 @@ export type CustomFieldType =
 	| 'parameters'
 	| 'prompt'
 	| 'result'
-	| 'output';
+	| 'output'
+	| 'python';
 
 export interface IActionButton {
 	id: string;
@@ -98,6 +99,10 @@ export interface ICustomField {
 	defaultFormat?: string;
 	outputSpecs?: IOutputSpec[];
 	debugPromptOutput?: string;
+	pythonPath?: string;
+	pythonEnvMode?: 'existing' | 'create';
+	pythonCode?: string;
+	pythonOutput?: string;
 }
 
 export interface ICompositeComponent {

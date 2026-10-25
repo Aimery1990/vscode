@@ -13,6 +13,7 @@ import { ICustomModulesService } from '../../customModules/common/customModules.
 import { IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
+import { ITerminalService } from '../../terminal/browser/terminal.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
 
@@ -106,6 +107,29 @@ export interface IPrimitiveCatalogItem {
 	supportedOutputs?: string[];
 }
 
+export interface IPythonExecutionResult {
+	success: boolean;
+	output: string;
+	exitCode: number;
+	durationMs: number;
+	pythonPath: string;
+	error?: string;
+}
+
+export interface IVirtualEnvResult {
+	success: boolean;
+	venvPath: string;
+	pythonPath: string;
+	output: string;
+	error?: string;
+}
+
+export interface IPythonTestResult {
+	success: boolean;
+	version: string;
+	error?: string;
+}
+
 export interface ITicketWorkflowRuntimeService {
 	readonly _serviceBrand: undefined;
 
@@ -123,6 +147,24 @@ export interface ITicketWorkflowRuntimeService {
 
 	getPrimitivesCatalog(workspaceUri?: string | URI): Promise<IPrimitiveCatalogItem[]>;
 	GET_PRIMITIVES_CATALOG(workspaceUri?: string | URI): Promise<IPrimitiveCatalogItem[]>;
+
+	executePythonScript(
+		workspaceUri: string | URI,
+		ticketUri: string | URI,
+		pythonPath: string,
+		code: string,
+		contextVariables?: Record<string, any>
+	): Promise<IPythonExecutionResult>;
+
+	createVirtualEnv(
+		workspaceUri: string | URI,
+		venvName?: string
+	): Promise<IVirtualEnvResult>;
+
+	testPythonInterpreter(
+		workspaceUri: string | URI,
+		pythonPath: string
+	): Promise<IPythonTestResult>;
 }
 
 
@@ -135,7 +177,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		@IFileService private readonly fileService: IFileService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
 		@ILogService private readonly logService: ILogService,
-		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService
+		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService,
+		@ITerminalService private readonly terminalService: ITerminalService
 	) { }
 
 	/**
@@ -220,6 +263,17 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							content: String(contentVal),
 							credentials: f.credentials || [],
 							lastFetched: contentVal ? new Date().toISOString() : ''
+						});
+					} else if (f.type === 'python') {
+						const codeVal = (typeof initialFields[fKey] === 'string' ? initialFields[fKey] : '') || f.pythonCode || f.defaultContent || '';
+						customMetadata[fKey] = JSON.stringify({
+							pythonPath: f.pythonPath || '',
+							pythonEnvMode: f.pythonEnvMode || 'existing',
+							code: String(codeVal),
+							output: '',
+							exitCode: undefined,
+							durationMs: undefined,
+							lastExecuted: ''
 						});
 					} else if (f.type === 'prompt') {
 						const promptVal = (typeof initialFields[fKey] === 'string' ? initialFields[fKey] : '') || f.defaultContent || '';
@@ -644,6 +698,63 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							break;
 						}
 
+						case 'python': {
+							// 4. Python Primitive: execute automation script using specified interpreter or virtualenv
+							let rawCode = field.pythonCode || '';
+							let pythonPath = field.pythonPath || '';
+							let existingOutput = '';
+
+							if (customMetadata[fieldLabel]) {
+								const metaVal = customMetadata[fieldLabel];
+								if (typeof metaVal === 'string') {
+									const trimmed = metaVal.trim();
+									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+										try {
+											const parsed = JSON.parse(trimmed);
+											if (parsed.code !== undefined) rawCode = String(parsed.code);
+											if (parsed.pythonCode !== undefined) rawCode = String(parsed.pythonCode);
+											if (parsed.pythonPath !== undefined) pythonPath = String(parsed.pythonPath);
+											if (parsed.output !== undefined) existingOutput = String(parsed.output);
+										} catch {
+											rawCode = trimmed;
+										}
+									} else {
+										rawCode = trimmed;
+									}
+								} else if (typeof metaVal === 'object' && metaVal !== null) {
+									if ((metaVal as any).code !== undefined) rawCode = String((metaVal as any).code);
+									if ((metaVal as any).pythonCode !== undefined) rawCode = String((metaVal as any).pythonCode);
+									if ((metaVal as any).pythonPath !== undefined) pythonPath = String((metaVal as any).pythonPath);
+									if ((metaVal as any).output !== undefined) existingOutput = String((metaVal as any).output);
+								}
+							}
+
+							if (!rawCode && field.defaultContent) {
+								rawCode = field.defaultContent;
+							}
+
+							const interpolatedCode = this._interpolateVariables(rawCode, contextVariables);
+
+							this.logService.info(`[TicketWorkflowRuntime] Executing Python primitive '${fieldLabel}'...`);
+							const execResult = await this.executePythonScript(wsUri, ticketUri, pythonPath, interpolatedCode, contextVariables);
+
+							stepOutput = execResult.output || existingOutput || 'Script completed with no output.';
+							customMetadata[fieldLabel] = JSON.stringify({
+								pythonPath: execResult.pythonPath || pythonPath,
+								code: rawCode,
+								interpolatedCode: interpolatedCode,
+								output: stepOutput,
+								exitCode: execResult.exitCode,
+								durationMs: execResult.durationMs,
+								lastExecuted: new Date().toISOString()
+							});
+							contextVariables[fieldLabel] = stepOutput;
+							contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+							contextVariables[`${this._cleanKey(fieldLabel)}_output`] = stepOutput;
+							contextVariables[`${this._cleanKey(fieldLabel)}_code`] = rawCode;
+							break;
+						}
+
 						case 'output':
 						case 'result': {
 							// 4. Output Manifest Primitive: aggregate enabled primitive outputs
@@ -791,6 +902,16 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				executionBehavior: 'Verifies remote URL, checkout branch, and provides git context metadata to workflow.',
 				supportedInputs: ['git remote URL', 'branch name'],
 				supportedOutputs: ['commit hash', 'branch status']
+			},
+			{
+				type: 'python',
+				label: 'Python (Code Automation & Scripting)',
+				icon: 'code',
+				category: 'processing',
+				description: 'Automated script execution using local Python interpreter or virtual environment with stdout/stderr logging.',
+				executionBehavior: 'Interpolates variables, executes Python script in virtualenv or local interpreter, captures stdout/stderr, and registers output in context.',
+				supportedInputs: ['script template', 'Python interpreter / venv path', 'workflow context variables'],
+				supportedOutputs: ['execution output (stdout)', 'logs', 'exit code', 'execution duration']
 			},
 			{
 				type: 'output',
@@ -1246,6 +1367,12 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 				try {
 					const parsed = JSON.parse(trimmed);
+					// Python primitive
+					if (parsed.pythonCode !== undefined || parsed.code !== undefined || parsed.pythonPath !== undefined) {
+						return parsed.output && parsed.output.trim()
+							? parsed.output
+							: (parsed.code || '(Python script ready)');
+					}
 					// Browser primitive
 					if (parsed.content !== undefined) {
 						return parsed.content;
@@ -1370,6 +1497,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			let type: any = 'text';
 			if (k.toLowerCase().includes('browser') || /^https?:\/\//i.test(v)) {
 				type = 'browser';
+			} else if (k.toLowerCase().includes('python') || k.toLowerCase().includes('script')) {
+				type = 'python';
 			} else if (k.toLowerCase().includes('prompt')) {
 				type = 'prompt';
 			} else if (k.toLowerCase().includes('output') || k.toLowerCase().includes('result')) {
@@ -1433,6 +1562,320 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			await this.fileService.writeFile(targetLogUri, VSBuffer.fromString(existingText + logHeader + logBody));
 		} catch (err) {
 			this.logService.warn(`[TicketWorkflowRuntime] Failed to persist execution state to worklog:`, err);
+		}
+	}
+
+	async executePythonScript(
+		workspaceUri: string | URI,
+		ticketUri: string | URI,
+		pythonPath: string,
+		code: string,
+		contextVariables?: Record<string, any>
+	): Promise<IPythonExecutionResult> {
+		const startTime = Date.now();
+		const wsUri = this._toUri(workspaceUri);
+		const tUri = this._toUri(ticketUri);
+
+		try {
+			// 1. Prepare directory and script path under .agents/
+			const agentsDirUri = URI.joinPath(tUri, '.agents');
+			try {
+				if (!await this.fileService.exists(agentsDirUri)) {
+					await this.fileService.createFolder(agentsDirUri);
+				}
+			} catch {}
+
+			const timestamp = Date.now();
+			const scriptUri = URI.joinPath(agentsDirUri, `run_python_${timestamp}.py`);
+			const logUri = URI.joinPath(agentsDirUri, `run_python_${timestamp}.log`);
+
+			// 2. Prepare script with injected context variables
+			const ctxJson = JSON.stringify(contextVariables || {});
+			const header = `# -*- coding: utf-8 -*-
+import os, sys, json
+try:
+    _ctx_data = json.loads(${JSON.stringify(ctxJson)})
+    os.environ['ANY_AGENT_CONTEXT'] = json.dumps(_ctx_data)
+except Exception:
+    pass
+
+`;
+			await this.fileService.writeFile(scriptUri, VSBuffer.fromString(header + code));
+
+			// 3. Resolve Python interpreter
+			let resolvedPython = (pythonPath || '').trim();
+			if (!resolvedPython) {
+				const isWin = typeof process !== 'undefined' && process.platform === 'win32';
+				const venvPy = isWin
+					? URI.joinPath(wsUri, '.venv', 'Scripts', 'python.exe')
+					: URI.joinPath(wsUri, '.venv', 'bin', 'python');
+				if (await this.fileService.exists(venvPy)) {
+					resolvedPython = venvPy.fsPath;
+				} else {
+					resolvedPython = 'python3';
+				}
+			} else if (resolvedPython.startsWith('.')) {
+				resolvedPython = URI.joinPath(wsUri, resolvedPython).fsPath;
+			}
+
+			// 4. Run via background terminal
+			const terminal = await this.terminalService.createTerminal({
+				config: {
+					name: 'AnyAgent Python Runner',
+					cwd: wsUri,
+					hideFromUser: true
+				}
+			});
+
+			const sentinel = `___ANY_AGENT_PY_${timestamp}___`;
+			const escapedPy = resolvedPython.includes(' ') ? `"${resolvedPython}"` : resolvedPython;
+			const escapedScript = `"${scriptUri.fsPath}"`;
+			const escapedLog = `"${logUri.fsPath}"`;
+			const runCmd = `${escapedPy} -u ${escapedScript} > ${escapedLog} 2>&1; echo "${sentinel}:$?"`;
+
+			let exitCode = 0;
+			let finished = false;
+
+			const waitPromise = new Promise<void>((resolve) => {
+				const regex = new RegExp(`${sentinel}:(\\d+)`);
+				const dataListener = terminal.onData(data => {
+					const match = regex.exec(data);
+					if (match) {
+						exitCode = parseInt(match[1], 10);
+						finished = true;
+						dataListener.dispose();
+						resolve();
+					}
+				});
+
+				terminal.onExit(code => {
+					if (!finished) {
+						if (typeof code === 'number') exitCode = code;
+						finished = true;
+						resolve();
+					}
+				});
+
+				setTimeout(() => {
+					if (!finished) {
+						finished = true;
+						resolve();
+					}
+				}, 60000);
+			});
+
+			await terminal.sendText(runCmd, true);
+			await waitPromise;
+
+			// 5. Read output log
+			let output = '';
+			if (await this.fileService.exists(logUri)) {
+				try {
+					output = (await this.fileService.readFile(logUri)).value.toString();
+				} catch {}
+			}
+
+			terminal.dispose();
+
+			return {
+				success: exitCode === 0,
+				output: output.trim(),
+				exitCode,
+				durationMs: Date.now() - startTime,
+				pythonPath: resolvedPython
+			};
+		} catch (err: any) {
+			this.logService.error('[TicketWorkflowRuntime] executePythonScript error:', err);
+			return {
+				success: false,
+				output: '',
+				exitCode: 1,
+				durationMs: Date.now() - startTime,
+				pythonPath,
+				error: err.message || String(err)
+			};
+		}
+	}
+
+	async createVirtualEnv(workspaceUri: string | URI, venvName: string = '.venv'): Promise<IVirtualEnvResult> {
+		const wsUri = this._toUri(workspaceUri);
+		const targetVenvUri = URI.joinPath(wsUri, venvName);
+		const isWin = typeof process !== 'undefined' && process.platform === 'win32';
+		const targetPythonUri = isWin
+			? URI.joinPath(targetVenvUri, 'Scripts', 'python.exe')
+			: URI.joinPath(targetVenvUri, 'bin', 'python');
+		const timestamp = Date.now();
+		const logUri = URI.joinPath(wsUri, `.venv_create_${timestamp}.log`);
+
+		try {
+			const terminal = await this.terminalService.createTerminal({
+				config: {
+					name: 'AnyAgent Venv Creator',
+					cwd: wsUri,
+					hideFromUser: true
+				}
+			});
+
+			const sentinel = `___VENV_CREATE_${timestamp}___`;
+			const cmd = `python3 -m venv "${targetVenvUri.fsPath}" > "${logUri.fsPath}" 2>&1; echo "${sentinel}:$?"`;
+
+			let exitCode = 0;
+			let finished = false;
+
+			const waitPromise = new Promise<void>((resolve) => {
+				const regex = new RegExp(`${sentinel}:(\\d+)`);
+				const dataListener = terminal.onData(data => {
+					const match = regex.exec(data);
+					if (match) {
+						exitCode = parseInt(match[1], 10);
+						finished = true;
+						dataListener.dispose();
+						resolve();
+					}
+				});
+
+				terminal.onExit(code => {
+					if (!finished) {
+						if (typeof code === 'number') exitCode = code;
+						finished = true;
+						resolve();
+					}
+				});
+
+				setTimeout(() => {
+					if (!finished) {
+						finished = true;
+						resolve();
+					}
+				}, 60000);
+			});
+
+			await terminal.sendText(cmd, true);
+			await waitPromise;
+
+			let logOutput = '';
+			if (await this.fileService.exists(logUri)) {
+				try {
+					logOutput = (await this.fileService.readFile(logUri)).value.toString();
+					await this.fileService.del(logUri);
+				} catch {}
+			}
+
+			terminal.dispose();
+
+			const pyRelPath = isWin ? `${venvName}/Scripts/python.exe` : `${venvName}/bin/python`;
+			const exists = await this.fileService.exists(targetPythonUri);
+			if (exists || exitCode === 0) {
+				return {
+					success: true,
+					venvPath: targetVenvUri.fsPath,
+					pythonPath: pyRelPath,
+					output: `Virtual environment created successfully at ${venvName}. Interpreter: ${pyRelPath}`
+				};
+			} else {
+				return {
+					success: false,
+					venvPath: targetVenvUri.fsPath,
+					pythonPath: '',
+					output: logOutput,
+					error: `Virtual environment creation exited with code ${exitCode}. ${logOutput}`
+				};
+			}
+		} catch (err: any) {
+			return {
+				success: false,
+				venvPath: targetVenvUri.fsPath,
+				pythonPath: '',
+				output: '',
+				error: err.message || String(err)
+			};
+		}
+	}
+
+	async testPythonInterpreter(workspaceUri: string | URI, pythonPath: string): Promise<IPythonTestResult> {
+		const wsUri = this._toUri(workspaceUri);
+		let resolved = (pythonPath || '').trim();
+		const isWin = typeof process !== 'undefined' && process.platform === 'win32';
+		if (!resolved) {
+			const venvPy = isWin
+				? URI.joinPath(wsUri, '.venv', 'Scripts', 'python.exe')
+				: URI.joinPath(wsUri, '.venv', 'bin', 'python');
+			if (await this.fileService.exists(venvPy)) {
+				resolved = venvPy.fsPath;
+			} else {
+				resolved = 'python3';
+			}
+		} else if (resolved.startsWith('.')) {
+			resolved = URI.joinPath(wsUri, resolved).fsPath;
+		}
+
+		const timestamp = Date.now();
+		const logUri = URI.joinPath(wsUri, `.py_test_${timestamp}.log`);
+
+		try {
+			const terminal = await this.terminalService.createTerminal({
+				config: {
+					name: 'AnyAgent Python Tester',
+					cwd: wsUri,
+					hideFromUser: true
+				}
+			});
+
+			const sentinel = `___PY_TEST_${timestamp}___`;
+			const escaped = resolved.includes(' ') ? `"${resolved}"` : resolved;
+			const cmd = `${escaped} --version > "${logUri.fsPath}" 2>&1; echo "${sentinel}:$?"`;
+
+			let exitCode = 0;
+			let finished = false;
+
+			const waitPromise = new Promise<void>((resolve) => {
+				const regex = new RegExp(`${sentinel}:(\\d+)`);
+				const dataListener = terminal.onData(data => {
+					const match = regex.exec(data);
+					if (match) {
+						exitCode = parseInt(match[1], 10);
+						finished = true;
+						dataListener.dispose();
+						resolve();
+					}
+				});
+
+				terminal.onExit(code => {
+					if (!finished) {
+						if (typeof code === 'number') exitCode = code;
+						finished = true;
+						resolve();
+					}
+				});
+
+				setTimeout(() => {
+					if (!finished) {
+						finished = true;
+						resolve();
+					}
+				}, 15000);
+			});
+
+			await terminal.sendText(cmd, true);
+			await waitPromise;
+
+			let output = '';
+			if (await this.fileService.exists(logUri)) {
+				try {
+					output = (await this.fileService.readFile(logUri)).value.toString().trim();
+					await this.fileService.del(logUri);
+				} catch {}
+			}
+
+			terminal.dispose();
+
+			if (exitCode === 0 && output) {
+				return { success: true, version: output };
+			} else {
+				return { success: false, version: '', error: output || `Interpreter test exited with code ${exitCode}` };
+			}
+		} catch (err: any) {
+			return { success: false, version: '', error: err.message || String(err) };
 		}
 	}
 }

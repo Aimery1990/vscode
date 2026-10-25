@@ -1906,6 +1906,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 				try {
 					const parsed = JSON.parse(trimmed);
+					// Python primitive
+					if (parsed.pythonCode !== undefined || parsed.code !== undefined || parsed.pythonPath !== undefined) {
+						return parsed.output && parsed.output.trim()
+							? parsed.output
+							: (parsed.code || '(Python script ready)');
+					}
 					// Browser primitive
 					if (parsed.content !== undefined) {
 						return parsed.content;

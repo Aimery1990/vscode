@@ -450,6 +450,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				defaultName: 'Git Repository'
 			},
 			{
+				label: 'Python (Code Automation)',
+				icon: Codicon.code,
+				type: 'python',
+				defaultName: 'Python Script'
+			},
+			{
 				label: 'Output',
 				icon: Codicon.output,
 				type: 'output',
@@ -546,6 +552,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			if (bc.type === 'git') {
 				newField.gitRemoteUrl = '';
 				newField.gitBranch = 'main';
+			}
+			if (bc.type === 'python') {
+				newField.pythonPath = '';
+				newField.pythonEnvMode = 'existing';
+				newField.pythonCode = '# Write Python automation script here\nimport sys, os, json\n\nprint("Hello from AnyAgent Python primitive!")\n';
+				newField.pythonOutput = '';
 			}
 			if (bc.type === 'parameters') {
 				newField.parameters = [
@@ -874,13 +886,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				// Badge
 				const isBrowser = field.type === 'browser';
 				const isGit = field.type === 'git';
+				const isPython = field.type === 'python';
 				const isParameters = field.type === 'parameters';
 				const isPrompt = field.type === 'prompt';
 				const isOutput = field.type === 'output' || field.type === 'result';
-				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isParameters ? 'INPUT PARAMETERS' : (isPrompt ? 'AI PROMPT' : (isOutput ? 'OUTPUT' : field.type.toUpperCase())))))));
-				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : 'rgba(99, 102, 241, 0.18)')))))));
-				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isOutput ? '#818cf8' : '#818cf8')))))));
-				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : 'rgba(99, 102, 241, 0.35)')))))));
+				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isPython ? 'PYTHON' : (isParameters ? 'INPUT PARAMETERS' : (isPrompt ? 'AI PROMPT' : (isOutput ? 'OUTPUT' : field.type.toUpperCase()))))))));
+				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isPython ? 'rgba(234, 179, 8, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : 'rgba(99, 102, 241, 0.18)'))))))));
+				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isPython ? '#facc15' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isOutput ? '#818cf8' : '#818cf8'))))))));
+				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isPython ? 'rgba(234, 179, 8, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : 'rgba(99, 102, 241, 0.35)'))))))));
 
 				append(headerLeft, $('span.type-badge', {
 					style: `font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; letter-spacing: 0.04em;`
@@ -2501,6 +2514,56 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						this.notificationService.info(`Synced ${count} primitive(s) into Output Manifest.`);
 					};
 				}
+
+				// Python Primitive Configuration Box
+				if (field.type === 'python') {
+					const pythonBox = append(fieldCard, $('.python-schema-config', {
+						style: 'display: flex; flex-direction: column; gap: 12px; background: rgba(0, 0, 0, 0.2); padding: 12px 14px; border-radius: 6px; border: 1px solid rgba(234, 179, 8, 0.25);'
+					}));
+
+					const pythonNote = append(pythonBox, $('div', { style: 'font-size: 11px; opacity: 0.9; line-height: 1.4; color: #facc15; display: flex; align-items: center; gap: 6px;' }));
+					append(pythonNote, $('span' + ThemeIcon.asCSSSelector(Codicon.code)));
+					append(pythonNote, $('span', {}, 'Python Code Automation & Scripting Primitive. Run local scripts with custom Python interpreters or virtual environments.'));
+
+					// Default Interpreter Path Row
+					const interpRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+					const interpTop = append(interpRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+					append(interpTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85; color: #facc15;' }, 'Default Python Interpreter / Virtualenv (Optional):'));
+					append(interpTop, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'e.g. .venv/bin/python, /usr/bin/python3, or python3'));
+					const interpInput = append(interpRow, $('input.monaco-inputbox', {
+						placeholder: 'e.g. .venv/bin/python or python3 (defaults to active venv or python3)',
+						style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);'
+					})) as HTMLInputElement;
+					interpInput.value = field.pythonPath || '';
+					interpInput.oninput = () => {
+						field.pythonPath = interpInput.value.trim();
+						this._syncDraft();
+					};
+
+					// Default Script Template Row
+					const codeRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+					const codeTop = append(codeRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+					append(codeTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Default Script Template:'));
+					append(codeTop, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'Supports {{variable}} interpolation'));
+					const codeTextarea = append(codeRow, $('textarea.monaco-inputbox', {
+						rows: '4',
+						placeholder: '# Enter Python automation script template...',
+						style: 'width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical;'
+					})) as HTMLTextAreaElement;
+					codeTextarea.value = field.pythonCode || '';
+					codeTextarea.oninput = () => {
+						field.pythonCode = codeTextarea.value;
+						this._syncDraft();
+					};
+
+					// Output Preview Box
+					const previewRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+					append(previewRow, $('label', { style: 'font-size: 10.5px; font-weight: 600; opacity: 0.65; text-transform: uppercase;' }, 'Execution Output & Logs Preview:'));
+					const previewBox = append(previewRow, $('div', {
+						style: 'padding: 8px 10px; font-size: 11px; border-radius: 5px; border: 1px dashed rgba(234, 179, 8, 0.3); background: rgba(234, 179, 8, 0.04); color: rgba(255, 255, 255, 0.6); font-family: var(--vscode-editor-font-family, monospace);'
+					}));
+					previewBox.textContent = '[Ready to execute] Output, stdout/stderr, and runtime duration will appear here when run.';
+				}
 			});
 
 			// Persistent Drop Zone at the bottom of the right canvas!
@@ -3396,6 +3459,8 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 					valToInsert = JSON.stringify(paramMap);
 				} else if (f.type === 'prompt') {
 					valToInsert = f.debugPromptOutput || f.defaultContent || '';
+				} else if (f.type === 'python') {
+					valToInsert = f.pythonOutput || f.pythonCode || '';
 				} else if (f.type === 'git') {
 					valToInsert = f.gitRemoteUrl || '';
 				} else {

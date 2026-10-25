@@ -271,6 +271,38 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 		tips: ['Supports standard Markdown formatting for structured descriptions.']
 	},
 
+	python: {
+		type: 'python',
+		title: 'Python (Code Automation & Scripting)',
+		icon: Codicon.code,
+		category: 'Execution & Automation',
+		summary: 'Executes Python automation scripts within tickets using a specified local interpreter or virtual environment. Supports data transformation, API calls, file processing, and runtime context access.',
+		designerConfig: [
+			{ name: 'Field Label / Name', desc: 'Display title for the Python automation step.' },
+			{ name: 'Python Interpreter / Virtualenv', desc: 'Specify path to Python binary (e.g. .venv/bin/python, /usr/bin/python3, or python3).' },
+			{ name: 'Default Script Template', desc: 'Initial code template preloaded into new tickets of this type.' }
+		],
+		runTicketsFlow: {
+			headline: 'How RUN_TICKETS Executes Python Primitive',
+			steps: [
+				{ step: '1. Interpreter Resolution', detail: 'Resolves specified Python binary or auto-detects active virtualenv (.venv/bin/python) / system python3.' },
+				{ step: '2. Variable Interpolation & Context Injection', detail: 'Interpolates {{variables}} and injects ticket runtime variables into ANY_AGENT_CONTEXT environment variable.' },
+				{ step: '3. Script Execution & Log Capture', detail: 'Runs script synchronously with timeout protection, capturing stdout, stderr, exit code, and runtime duration.' },
+				{ step: '4. Context Registration & Metadata Update', detail: 'Stores captured stdout into contextVariables and updates ticket customMetadata.' }
+			],
+			variableResolution: '{Field Label} or {Field Label_output}',
+			downstreamPassing: 'Captured output (stdout) can be passed directly to downstream AI Prompts, Browsers, or Output Manifests.'
+		},
+		syntaxExamples: [
+			'import os, json\ncontext = json.loads(os.environ.get("ANY_AGENT_CONTEXT", "{}"))\nprint(f"Processing ticket: {context.get(\'title\')}")',
+			'{Field Label}'
+		],
+		tips: [
+			'Use the "Create venv" button in the ticket view to instantly initialize a local virtual environment for package dependencies.',
+			'Any standard library or installed pip packages in your virtualenv are immediately available to your script.'
+		]
+	},
+
 	number: {
 		type: 'number',
 		title: 'Number Input (Numeric)',
