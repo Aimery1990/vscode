@@ -867,6 +867,19 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// Python Primitive: Browse Interpreter button click
+			const browsePyBtn = target.closest('.python-browse-interpreter-btn') as HTMLElement | null;
+			if (browsePyBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = browsePyBtn.getAttribute('data-field-key') || '';
+				const card = browsePyBtn.closest('.python-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._browsePythonInterpreterInEditor(card, fieldKey);
+				}
+				return;
+			}
+
 			// Python Primitive: Copy Output button click
 			const copyPyOutBtn = target.closest('.python-copy-output-btn') as HTMLElement | null;
 			if (copyPyOutBtn) {
@@ -3562,6 +3575,33 @@ ${rawErr}
 		}
 	}
 
+	private async _browsePythonInterpreterInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
+		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
+		try {
+			const uris = await this._fileDialogService.showOpenDialog({
+				canSelectFiles: true,
+				canSelectFolders: true,
+				canSelectMany: false,
+				title: 'Select Python Interpreter or Virtualenv Folder'
+			});
+			if (uris && uris.length > 0) {
+				const pickedUri = uris[0];
+				const wsUri = this._entityUri ? this._workspacesExplorerService.findRootWorkspace(this._entityUri) || this._entityUri : this._entityUri;
+				let finalPath = pickedUri.fsPath;
+				if (wsUri && finalPath.startsWith(wsUri.fsPath)) {
+					finalPath = finalPath.substring(wsUri.fsPath.length).replace(/^[/\\]+/, '');
+				}
+				if (interpInput) {
+					interpInput.value = finalPath;
+				}
+				await this._savePythonDataFromCard(card, fieldKey);
+				await this._testPythonInterpreterInEditor(card, fieldKey);
+			}
+		} catch (err: any) {
+			this._notificationService.error(`Failed to pick folder: ${err.message || err}`);
+		}
+	}
+
 	private async _testPythonInterpreterInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
 		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
 		const statusEl = card.querySelector('.python-test-status') as HTMLElement | null;
@@ -5110,7 +5150,7 @@ ${interpolatedPrompt}`;
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(234,179,8,0.18); color: #facc15; font-weight: 700; text-transform: uppercase;">Python</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.12); color: #38bdf8; font-weight: 700; text-transform: uppercase;">Python</span>
 									<span class="python-env-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.7); font-family: monospace;">${this._escapeHtml(pythonPath || '.venv / python3')}</span>
 								</div>
 								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="python" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(pythonCode)}" title="Edit ${k} with AI">
@@ -5122,22 +5162,23 @@ ${interpolatedPrompt}`;
 								<!-- Virtual Environment & Interpreter Row -->
 								<div style="background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;">
 									<div style="display: flex; justify-content: space-between; align-items: center;">
-										<label style="font-size: 11px; font-weight: 600; color: #facc15; display: flex; align-items: center; gap: 6px;">
+										<label style="font-size: 11px; font-weight: 600; opacity: 0.85; color: inherit; display: flex; align-items: center; gap: 6px;">
 											<span>Virtual Environment / Interpreter:</span>
 										</label>
 										<span class="python-test-status" style="font-size: 10px; opacity: 0.65;"></span>
 									</div>
-									<div style="display: flex; gap: 8px; align-items: center;">
-										<input type="text" class="python-interpreter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(pythonPath)}" placeholder="e.g. .venv/bin/python, /usr/bin/python3, or python3" style="flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
+									<div style="display: flex; gap: 6px; align-items: center;">
+										<input type="text" class="python-interpreter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(pythonPath)}" placeholder="e.g. .venv, .venv/bin/python, /usr/bin/python3, or python3" style="flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
+										<button type="button" class="python-browse-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Select Python Interpreter or Virtualenv Folder" style="padding: 5px 10px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M14.5 3H7.71l-.85-.85L6.51 2h-5l-.5.5v11l.5.5h13l.5-.5v-10l-.5-.5zm-.5 10H2V3h4.29l.85.85.35.15H14v9z"/></svg><span>Browse...</span></button>
 										<button type="button" class="python-test-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Test Python binary and check version" style="padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); white-space: nowrap;">Test</button>
-										<button type="button" class="python-create-venv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Initialize a local virtual environment (.venv) via python3 -m venv" style="padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(234,179,8,0.15); color: #facc15; border: 1px solid rgba(234,179,8,0.35); white-space: nowrap;">Create venv</button>
+										<button type="button" class="python-create-venv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Initialize a local virtual environment (.venv) via python3 -m venv" style="padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.12); color: #38bdf8; border: 1px solid rgba(56,189,248,0.35); white-space: nowrap;">Create venv</button>
 									</div>
 								</div>
 
 								<!-- Python Source Code Textarea -->
 								<div style="display: flex; flex-direction: column; gap: 4px;">
 									<div style="display: flex; justify-content: space-between; align-items: center;">
-										<label style="font-size: 11px; font-weight: 600; opacity: 0.85;">Python Automation Code:</label>
+										<label style="font-size: 11px; font-weight: 600; opacity: 0.85;">Source Code:</label>
 										<span style="font-size: 10px; opacity: 0.55;">Supports {{variables}} interpolation and ANY_AGENT_CONTEXT</span>
 									</div>
 									<textarea class="python-code-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="6" placeholder="Enter Python script to execute..." spellcheck="false" style="width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; tab-size: 4;">${this._escapeHtml(pythonCode)}</textarea>
@@ -5146,7 +5187,7 @@ ${interpolatedPrompt}`;
 								<!-- Action Buttons Row -->
 								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
 									<div style="display: flex; gap: 8px; align-items: center;">
-										<button type="button" class="python-run-script-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 16px; font-size: 11.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(234,179,8,0.18); color: #facc15; border: 1px solid rgba(234,179,8,0.45); transition: all 0.15s ease;" title="Run Python script in virtualenv or interpreter">
+										<button type="button" class="python-run-script-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 16px; font-size: 11.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45); transition: all 0.15s ease;" title="Run Python script in virtualenv or interpreter">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5l9 5.5-9 5.5v-11z"/></svg>
 											<span>Run Script</span>
 										</button>

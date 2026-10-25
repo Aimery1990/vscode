@@ -349,7 +349,7 @@ export class CustomModulesSchemaDesignerDialog {
 						attachment: { bg: 'rgba(16,185,129,0.15)', text: '#10b981' },
 						browser: { bg: 'rgba(56,189,248,0.15)', text: '#38bdf8' },
 						git: { bg: 'rgba(249,115,22,0.15)', text: '#f97316' },
-						python: { bg: 'rgba(234,179,8,0.15)', text: '#eab308' }
+						python: { bg: 'rgba(56,189,248,0.15)', text: '#38bdf8' }
 					};
 					const c = colorMap[type] || colorMap.text;
 					return `font-size: 9px; padding: 2px 6px; border-radius: 4px; background: ${c.bg}; color: ${c.text}; text-transform: uppercase; font-weight: bold; letter-spacing: 0.05em;`;

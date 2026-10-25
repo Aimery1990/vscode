@@ -17,7 +17,7 @@ import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { ICustomModule, ICustomField, CustomFieldType, ICompositeComponent, IStatusDefinition, IActionButton, DEFAULT_STATUS_DEFINITIONS, IOutputSpec } from '../../entityPersistence/common/entityPersistence.js';
-import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { ICustomModulesService } from '../common/customModules.js';
 import { CustomModuleSchemaEditorInput } from './customModuleSchemaEditorInput.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
@@ -30,6 +30,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { IAgentsManagerService, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
 import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
+import { ITicketWorkflowRuntimeService } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
 
 
 export class CustomModuleSchemaEditor extends EditorPane {
@@ -38,6 +39,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 	private _container?: HTMLElement;
 	private _activeModule?: ICustomModule;
 	private _isToolboxCompact: boolean = false;
+	private _workspaceUri?: URI;
 
 	constructor(
 		group: IEditorGroup,
@@ -50,7 +52,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		@IRequestService private readonly _requestService: IRequestService,
 		@ICommandService private readonly _commandService: ICommandService,
 		@IClipboardService private readonly _clipboardService: IClipboardService,
-		@IInstantiationService private readonly _instantiationService: IInstantiationService
+		@IInstantiationService private readonly _instantiationService: IInstantiationService,
+		@IFileDialogService private readonly _fileDialogService: IFileDialogService
 	) {
 		super(CustomModuleSchemaEditor.ID, group, telemetryService, themeService, storageService);
 	}
@@ -106,6 +109,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			return;
 		}
 		clearNode(this._container);
+		this._workspaceUri = input.workspaceUri;
 
 		if (input.draftModule) {
 			this._activeModule = input.draftModule;
@@ -891,9 +895,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				const isPrompt = field.type === 'prompt';
 				const isOutput = field.type === 'output' || field.type === 'result';
 				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isPython ? 'PYTHON' : (isParameters ? 'INPUT PARAMETERS' : (isPrompt ? 'AI PROMPT' : (isOutput ? 'OUTPUT' : field.type.toUpperCase()))))))));
-				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isPython ? 'rgba(234, 179, 8, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : 'rgba(99, 102, 241, 0.18)'))))))));
-				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isPython ? '#facc15' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isOutput ? '#818cf8' : '#818cf8'))))))));
-				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isPython ? 'rgba(234, 179, 8, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : 'rgba(99, 102, 241, 0.35)'))))))));
+				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isPython ? 'rgba(56, 189, 248, 0.15)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : 'rgba(99, 102, 241, 0.18)'))))))));
+				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isPython ? '#38bdf8' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isOutput ? '#818cf8' : '#818cf8'))))))));
+				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isPython ? 'rgba(56, 189, 248, 0.35)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : 'rgba(99, 102, 241, 0.35)'))))))));
 
 				append(headerLeft, $('span.type-badge', {
 					style: `font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; letter-spacing: 0.04em;`
@@ -2518,51 +2522,323 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				// Python Primitive Configuration Box
 				if (field.type === 'python') {
 					const pythonBox = append(fieldCard, $('.python-schema-config', {
-						style: 'display: flex; flex-direction: column; gap: 12px; background: rgba(0, 0, 0, 0.2); padding: 12px 14px; border-radius: 6px; border: 1px solid rgba(234, 179, 8, 0.25);'
+						style: 'display: flex; flex-direction: column; gap: 12px; background: rgba(0, 0, 0, 0.2); padding: 12px 14px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);'
 					}));
 
-					const pythonNote = append(pythonBox, $('div', { style: 'font-size: 11px; opacity: 0.9; line-height: 1.4; color: #facc15; display: flex; align-items: center; gap: 6px;' }));
+					const pythonNote = append(pythonBox, $('div', { style: 'font-size: 11px; opacity: 0.8; line-height: 1.4; color: inherit; display: flex; align-items: center; gap: 6px;' }));
 					append(pythonNote, $('span' + ThemeIcon.asCSSSelector(Codicon.code)));
 					append(pythonNote, $('span', {}, 'Python Code Automation & Scripting Primitive. Run local scripts with custom Python interpreters or virtual environments.'));
 
-					// Default Interpreter Path Row
-					const interpRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+					// Python Interpreter / Virtualenv Row
+					const interpRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 5px;' }));
 					const interpTop = append(interpRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
-					append(interpTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85; color: #facc15;' }, 'Default Python Interpreter / Virtualenv (Optional):'));
-					append(interpTop, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'e.g. .venv/bin/python, /usr/bin/python3, or python3'));
-					const interpInput = append(interpRow, $('input.monaco-inputbox', {
-						placeholder: 'e.g. .venv/bin/python or python3 (defaults to active venv or python3)',
-						style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);'
+					append(interpTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85; color: inherit;' }, 'Python Interpreter / Virtualenv:'));
+					append(interpTop, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'Folder or executable path (optional)'));
+
+					const interpInputBar = append(interpRow, $('div', { style: 'display: flex; gap: 6px; align-items: center;' }));
+					const interpInput = append(interpInputBar, $('input.monaco-inputbox', {
+						placeholder: 'e.g. .venv, .venv/bin/python, or python3 (defaults to active venv or python3)',
+						style: 'flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);'
 					})) as HTMLInputElement;
 					interpInput.value = field.pythonPath || '';
-					interpInput.oninput = () => {
-						field.pythonPath = interpInput.value.trim();
+
+					const browseBtn = append(interpInputBar, $('button', {
+						style: 'padding: 5px 10px; font-size: 11px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;',
+						title: 'Select Python Interpreter or Virtualenv Folder'
+					}));
+					append(browseBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.folder)));
+					append(browseBtn, $('span', {}, 'Browse...'));
+
+					const testInterpBtn = append(interpInputBar, $('button', {
+						style: 'padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; white-space: nowrap;',
+						title: 'Test Python Interpreter and Verify Version'
+					}, 'Test'));
+
+					// Detection feedback & Create venv bar
+					const statusRow = append(interpRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px;' }));
+					const statusBadge = append(statusRow, $('div', {
+						style: 'font-size: 10.5px; display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.7);'
+					}));
+					const venvCreateBtn = append(statusRow, $('button', {
+						style: 'display: none; padding: 3px 10px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(56, 189, 248, 0.12); color: #38bdf8; cursor: pointer; white-space: nowrap;',
+						title: 'Create a new virtual environment at this path'
+					}, '+ Create Virtualenv'));
+
+					const updateDetectionStatus = async () => {
+						const currentVal = interpInput.value.trim();
+						field.pythonPath = currentVal;
 						this._syncDraft();
+
+						const runtime = this._instantiationService.invokeFunction(accessor => {
+							try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+						});
+						const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
+
+						if (!runtime || !wsUri) {
+							statusBadge.textContent = currentVal ? `Path: ${currentVal}` : 'Default: System / Active .venv';
+							statusBadge.style.color = 'rgba(255, 255, 255, 0.7)';
+							statusBadge.style.background = 'rgba(255, 255, 255, 0.05)';
+							statusBadge.style.border = 'none';
+							venvCreateBtn.style.display = 'none';
+							return;
+						}
+
+						try {
+							const det = await runtime.detectPythonEnvironment(wsUri, currentVal);
+							if (det.isValid) {
+								venvCreateBtn.style.display = 'none';
+								if (det.isVenv) {
+									statusBadge.textContent = `✓ Virtualenv (${det.venvRoot || det.interpreterPath})`;
+									statusBadge.style.color = '#4ade80';
+									statusBadge.style.background = 'rgba(74, 222, 128, 0.12)';
+									statusBadge.style.border = '1px solid rgba(74, 222, 128, 0.3)';
+								} else {
+									statusBadge.textContent = `✓ Interpreter (${det.interpreterPath})`;
+									statusBadge.style.color = '#38bdf8';
+									statusBadge.style.background = 'rgba(56, 189, 248, 0.12)';
+									statusBadge.style.border = '1px solid rgba(56, 189, 248, 0.3)';
+								}
+							} else {
+								statusBadge.textContent = `⚠ ${det.error || 'Virtual environment not found'}`;
+								statusBadge.style.color = '#f87171';
+								statusBadge.style.background = 'rgba(248, 113, 113, 0.12)';
+								statusBadge.style.border = '1px solid rgba(248, 113, 113, 0.3)';
+								venvCreateBtn.style.display = 'inline-block';
+							}
+						} catch {
+							statusBadge.textContent = currentVal || 'Default: System / Active .venv';
+							statusBadge.style.color = 'rgba(255, 255, 255, 0.7)';
+							statusBadge.style.background = 'rgba(255, 255, 255, 0.05)';
+							statusBadge.style.border = 'none';
+							venvCreateBtn.style.display = 'none';
+						}
 					};
 
-					// Default Script Template Row
+					interpInput.oninput = () => {
+						updateDetectionStatus();
+					};
+
+					browseBtn.onclick = async (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						try {
+							const uris = await this._fileDialogService.showOpenDialog({
+								canSelectFiles: true,
+								canSelectFolders: true,
+								canSelectMany: false,
+								title: 'Select Python Interpreter or Virtualenv Folder'
+							});
+							if (uris && uris.length > 0) {
+								const pickedUri = uris[0];
+								const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
+								let finalPath = pickedUri.fsPath;
+								if (wsUri && finalPath.startsWith(wsUri.fsPath)) {
+									finalPath = finalPath.substring(wsUri.fsPath.length).replace(/^[/\\]+/, '');
+								}
+								interpInput.value = finalPath;
+								await updateDetectionStatus();
+							}
+						} catch (err: any) {
+							this.notificationService.error(`Failed to pick folder: ${err.message || err}`);
+						}
+					};
+
+					testInterpBtn.onclick = async (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						const runtime = this._instantiationService.invokeFunction(accessor => {
+							try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+						});
+						const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
+						if (!runtime || !wsUri) {
+							this.notificationService.warn('Workspace runtime not available for testing.');
+							return;
+						}
+						testInterpBtn.setAttribute('disabled', 'true');
+						testInterpBtn.textContent = 'Testing...';
+						try {
+							const res = await runtime.testPythonInterpreter(wsUri, interpInput.value.trim());
+							if (res.success) {
+								statusBadge.textContent = `${res.version} ✓`;
+								statusBadge.style.color = '#4ade80';
+								statusBadge.style.background = 'rgba(74, 222, 128, 0.12)';
+								statusBadge.style.border = '1px solid rgba(74, 222, 128, 0.3)';
+								this.notificationService.info(`Python interpreter verified: ${res.version}`);
+							} else {
+								statusBadge.textContent = 'Interpreter test failed ✗';
+								statusBadge.style.color = '#f87171';
+								statusBadge.style.background = 'rgba(248, 113, 113, 0.12)';
+								statusBadge.style.border = '1px solid rgba(248, 113, 113, 0.3)';
+								this.notificationService.warn(`Test failed: ${res.error}`);
+							}
+						} catch (err: any) {
+							this.notificationService.error(`Test error: ${err.message || err}`);
+						} finally {
+							testInterpBtn.removeAttribute('disabled');
+							testInterpBtn.textContent = 'Test';
+						}
+					};
+
+					venvCreateBtn.onclick = async (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						const runtime = this._instantiationService.invokeFunction(accessor => {
+							try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+						});
+						const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
+						if (!runtime || !wsUri) {
+							this.notificationService.warn('Workspace runtime not available.');
+							return;
+						}
+						venvCreateBtn.setAttribute('disabled', 'true');
+						venvCreateBtn.textContent = 'Creating venv...';
+						statusBadge.textContent = 'Initializing virtualenv via python3 -m venv... ⏳';
+						try {
+							const targetName = interpInput.value.trim() || '.venv';
+							const res = await runtime.createVirtualEnv(wsUri, targetName);
+							if (res.success) {
+								this.notificationService.info(`Virtualenv created at ${res.venvPath}`);
+								if (!interpInput.value.trim()) {
+									interpInput.value = '.venv';
+								}
+								await updateDetectionStatus();
+							} else {
+								this.notificationService.error(`Failed to create virtualenv: ${res.error}`);
+							}
+						} catch (err: any) {
+							this.notificationService.error(`Creation error: ${err.message || err}`);
+						} finally {
+							venvCreateBtn.removeAttribute('disabled');
+							venvCreateBtn.textContent = '+ Create Virtualenv';
+						}
+					};
+
+					// Trigger initial detection on render
+					updateDetectionStatus();
+
+					// Source Code Row
 					const codeRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
 					const codeTop = append(codeRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
-					append(codeTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Default Script Template:'));
+					append(codeTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Source Code:'));
 					append(codeTop, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'Supports {{variable}} interpolation'));
 					const codeTextarea = append(codeRow, $('textarea.monaco-inputbox', {
-						rows: '4',
-						placeholder: '# Enter Python automation script template...',
+						rows: '6',
+						placeholder: '# Enter Python automation script...',
 						style: 'width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical;'
 					})) as HTMLTextAreaElement;
 					codeTextarea.value = field.pythonCode || '';
+					codeTextarea.onkeydown = (e) => {
+						if (e.key === 'Tab') {
+							e.preventDefault();
+							const start = codeTextarea.selectionStart;
+							const end = codeTextarea.selectionEnd;
+							codeTextarea.value = codeTextarea.value.substring(0, start) + '    ' + codeTextarea.value.substring(end);
+							codeTextarea.selectionStart = codeTextarea.selectionEnd = start + 4;
+							field.pythonCode = codeTextarea.value;
+							this._syncDraft();
+						}
+					};
 					codeTextarea.oninput = () => {
 						field.pythonCode = codeTextarea.value;
 						this._syncDraft();
 					};
 
-					// Output Preview Box
-					const previewRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
-					append(previewRow, $('label', { style: 'font-size: 10.5px; font-weight: 600; opacity: 0.65; text-transform: uppercase;' }, 'Execution Output & Logs Preview:'));
-					const previewBox = append(previewRow, $('div', {
-						style: 'padding: 8px 10px; font-size: 11px; border-radius: 5px; border: 1px dashed rgba(234, 179, 8, 0.3); background: rgba(234, 179, 8, 0.04); color: rgba(255, 255, 255, 0.6); font-family: var(--vscode-editor-font-family, monospace);'
+					// DEBUG: Execution Output & Logs Preview Row
+					const previewRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
+					const previewHeader = append(previewRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+
+					const previewHeaderLeft = append(previewHeader, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+					append(previewHeaderLeft, $('label', { style: 'font-size: 10.5px; font-weight: 600; opacity: 0.85; text-transform: uppercase;' }, 'DEBUG: Execution Output & Logs Preview:'));
+					append(previewHeaderLeft, $('span', {
+						style: 'font-size: 9.5px; padding: 1px 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1); opacity: 0.75;'
+					}, '[Template Debug Only]'));
+
+					const previewActions = append(previewHeader, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
+
+					const testRunBtn = append(previewActions, $('button', {
+						style: 'padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(56, 189, 248, 0.12); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;',
+						title: 'Run script with current interpreter to test output'
 					}));
-					previewBox.textContent = '[Ready to execute] Output, stdout/stderr, and runtime duration will appear here when run.';
+					append(testRunBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
+					append(testRunBtn, $('span', {}, 'Test'));
+
+					const copyBtn = append(previewActions, $('button', {
+						style: 'padding: 3px 8px; font-size: 10.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.05); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;',
+						title: 'Copy output to clipboard'
+					}));
+					append(copyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+					append(copyBtn, $('span', {}, 'Copy'));
+
+					const clearBtn = append(previewActions, $('button', {
+						style: 'padding: 3px 8px; font-size: 10.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(255, 255, 255, 0.05); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;',
+						title: 'Clear output preview'
+					}));
+					append(clearBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.clearAll)));
+					append(clearBtn, $('span', {}, 'Clear'));
+
+					const previewBox = append(previewRow, $('div', {
+						style: 'padding: 8px 10px; font-size: 11px; border-radius: 5px; border: 1px dashed rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: rgba(255, 255, 255, 0.75); font-family: var(--vscode-editor-font-family, monospace); min-height: 48px; max-height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;'
+					}));
+					previewBox.textContent = field.pythonOutput || '[Ready to execute] Output, stdout/stderr, and runtime duration will appear here when run.';
+
+					testRunBtn.onclick = async (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						const runtime = this._instantiationService.invokeFunction(accessor => {
+							try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+						});
+						const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
+						if (!runtime || !wsUri) {
+							this.notificationService.warn('Workspace runtime not available for execution.');
+							return;
+						}
+						testRunBtn.setAttribute('disabled', 'true');
+						testRunBtn.style.opacity = '0.6';
+						previewBox.textContent = '[Executing script...] Running in background terminal...';
+						try {
+							const scriptCode = codeTextarea.value;
+							const res = await runtime.executePythonScript(wsUri, wsUri, interpInput.value.trim(), scriptCode, {});
+							const durationStr = `${res.durationMs}ms`;
+							const exitCodeStr = `Exit code: ${res.exitCode}`;
+							const headerLine = `[Finished in ${durationStr} | ${exitCodeStr}]\n`;
+							const fullOutput = headerLine + (res.output ? res.output : '(Script completed with no output)');
+							previewBox.textContent = fullOutput;
+							field.pythonOutput = fullOutput;
+							this._syncDraft();
+							if (res.success) {
+								this.notificationService.info(`Script executed successfully (${durationStr})`);
+							} else {
+								this.notificationService.warn(`Script finished with exit code ${res.exitCode}`);
+							}
+						} catch (err: any) {
+							previewBox.textContent = `[Error executing script]: ${err.message || err}`;
+							this.notificationService.error(`Execution error: ${err.message || err}`);
+						} finally {
+							testRunBtn.removeAttribute('disabled');
+							testRunBtn.style.opacity = '1';
+						}
+					};
+
+					copyBtn.onclick = async (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						const text = previewBox.textContent || '';
+						if (!text) { return; }
+						try {
+							await this._clipboardService.writeText(text);
+							this.notificationService.info('Output copied to clipboard.');
+						} catch {
+							this.notificationService.warn('Could not copy output to clipboard.');
+						}
+					};
+
+					clearBtn.onclick = (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						previewBox.textContent = '[Ready to execute] Output, stdout/stderr, and runtime duration will appear here when run.';
+						field.pythonOutput = '';
+						this._syncDraft();
+					};
 				}
 			});
 

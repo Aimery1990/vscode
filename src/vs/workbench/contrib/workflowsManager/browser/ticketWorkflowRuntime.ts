@@ -130,6 +130,15 @@ export interface IPythonTestResult {
 	error?: string;
 }
 
+export interface IPythonEnvironmentDetectionResult {
+	isValid: boolean;
+	isVenv: boolean;
+	interpreterPath: string;
+	venvRoot?: string;
+	version?: string;
+	error?: string;
+}
+
 export interface ITicketWorkflowRuntimeService {
 	readonly _serviceBrand: undefined;
 
@@ -165,6 +174,11 @@ export interface ITicketWorkflowRuntimeService {
 		workspaceUri: string | URI,
 		pythonPath: string
 	): Promise<IPythonTestResult>;
+
+	detectPythonEnvironment(
+		workspaceUri: string | URI,
+		candidatePath?: string
+	): Promise<IPythonEnvironmentDetectionResult>;
 }
 
 
@@ -1602,20 +1616,22 @@ except Exception:
 `;
 			await this.fileService.writeFile(scriptUri, VSBuffer.fromString(header + code));
 
-			// 3. Resolve Python interpreter
-			let resolvedPython = (pythonPath || '').trim();
-			if (!resolvedPython) {
-				const isWin = typeof process !== 'undefined' && process.platform === 'win32';
-				const venvPy = isWin
-					? URI.joinPath(wsUri, '.venv', 'Scripts', 'python.exe')
-					: URI.joinPath(wsUri, '.venv', 'bin', 'python');
-				if (await this.fileService.exists(venvPy)) {
-					resolvedPython = venvPy.fsPath;
+			// 3. Resolve Python interpreter and virtualenv environment variables
+			const envDetection = await this.detectPythonEnvironment(wsUri, pythonPath);
+			const resolvedPython = envDetection.interpreterPath || 'python3';
+			const venvRoot = envDetection.venvRoot;
+
+			const isWin = typeof process !== 'undefined' && process.platform === 'win32';
+			let venvPrefix = '';
+			if (venvRoot) {
+				const binDir = isWin
+					? URI.joinPath(URI.file(venvRoot), 'Scripts').fsPath
+					: URI.joinPath(URI.file(venvRoot), 'bin').fsPath;
+				if (isWin) {
+					venvPrefix = `set "VIRTUAL_ENV=${venvRoot}" && set "PATH=${binDir};%PATH%" && set "PYTHONHOME=" && `;
 				} else {
-					resolvedPython = 'python3';
+					venvPrefix = `export VIRTUAL_ENV="${venvRoot}"; export PATH="${binDir}:$PATH"; unset PYTHONHOME; `;
 				}
-			} else if (resolvedPython.startsWith('.')) {
-				resolvedPython = URI.joinPath(wsUri, resolvedPython).fsPath;
 			}
 
 			// 4. Run via background terminal
@@ -1631,7 +1647,7 @@ except Exception:
 			const escapedPy = resolvedPython.includes(' ') ? `"${resolvedPython}"` : resolvedPython;
 			const escapedScript = `"${scriptUri.fsPath}"`;
 			const escapedLog = `"${logUri.fsPath}"`;
-			const runCmd = `${escapedPy} -u ${escapedScript} > ${escapedLog} 2>&1; echo "${sentinel}:$?"`;
+			const runCmd = `${venvPrefix}${escapedPy} -u ${escapedScript} > ${escapedLog} 2>&1; echo "${sentinel}:$?"`;
 
 			let exitCode = 0;
 			let finished = false;
@@ -1699,7 +1715,14 @@ except Exception:
 
 	async createVirtualEnv(workspaceUri: string | URI, venvName: string = '.venv'): Promise<IVirtualEnvResult> {
 		const wsUri = this._toUri(workspaceUri);
-		const targetVenvUri = URI.joinPath(wsUri, venvName);
+		const rawName = (venvName || '.venv').trim();
+		let targetVenvUri: URI;
+		if (rawName.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(rawName)) {
+			targetVenvUri = URI.file(rawName);
+		} else {
+			targetVenvUri = URI.joinPath(wsUri, rawName);
+		}
+
 		const isWin = typeof process !== 'undefined' && process.platform === 'win32';
 		const targetPythonUri = isWin
 			? URI.joinPath(targetVenvUri, 'Scripts', 'python.exe')
@@ -1763,14 +1786,14 @@ except Exception:
 
 			terminal.dispose();
 
-			const pyRelPath = isWin ? `${venvName}/Scripts/python.exe` : `${venvName}/bin/python`;
+			const pyRelPath = targetPythonUri.fsPath;
 			const exists = await this.fileService.exists(targetPythonUri);
 			if (exists || exitCode === 0) {
 				return {
 					success: true,
 					venvPath: targetVenvUri.fsPath,
 					pythonPath: pyRelPath,
-					output: `Virtual environment created successfully at ${venvName}. Interpreter: ${pyRelPath}`
+					output: `Virtual environment created successfully at ${targetVenvUri.fsPath}. Interpreter: ${pyRelPath}`
 				};
 			} else {
 				return {
@@ -1794,19 +1817,28 @@ except Exception:
 
 	async testPythonInterpreter(workspaceUri: string | URI, pythonPath: string): Promise<IPythonTestResult> {
 		const wsUri = this._toUri(workspaceUri);
-		let resolved = (pythonPath || '').trim();
+		const envDetection = await this.detectPythonEnvironment(wsUri, pythonPath);
+		if (!envDetection.isValid && envDetection.error) {
+			return {
+				success: false,
+				version: '',
+				error: envDetection.error
+			};
+		}
+
+		const resolved = envDetection.interpreterPath || 'python3';
+		const venvRoot = envDetection.venvRoot;
 		const isWin = typeof process !== 'undefined' && process.platform === 'win32';
-		if (!resolved) {
-			const venvPy = isWin
-				? URI.joinPath(wsUri, '.venv', 'Scripts', 'python.exe')
-				: URI.joinPath(wsUri, '.venv', 'bin', 'python');
-			if (await this.fileService.exists(venvPy)) {
-				resolved = venvPy.fsPath;
+		let venvPrefix = '';
+		if (venvRoot) {
+			const binDir = isWin
+				? URI.joinPath(URI.file(venvRoot), 'Scripts').fsPath
+				: URI.joinPath(URI.file(venvRoot), 'bin').fsPath;
+			if (isWin) {
+				venvPrefix = `set "VIRTUAL_ENV=${venvRoot}" && set "PATH=${binDir};%PATH%" && set "PYTHONHOME=" && `;
 			} else {
-				resolved = 'python3';
+				venvPrefix = `export VIRTUAL_ENV="${venvRoot}"; export PATH="${binDir}:$PATH"; unset PYTHONHOME; `;
 			}
-		} else if (resolved.startsWith('.')) {
-			resolved = URI.joinPath(wsUri, resolved).fsPath;
 		}
 
 		const timestamp = Date.now();
@@ -1823,7 +1855,7 @@ except Exception:
 
 			const sentinel = `___PY_TEST_${timestamp}___`;
 			const escaped = resolved.includes(' ') ? `"${resolved}"` : resolved;
-			const cmd = `${escaped} --version > "${logUri.fsPath}" 2>&1; echo "${sentinel}:$?"`;
+			const cmd = `${venvPrefix}${escaped} --version > "${logUri.fsPath}" 2>&1; echo "${sentinel}:$?"`;
 
 			let exitCode = 0;
 			let finished = false;
@@ -1870,12 +1902,123 @@ except Exception:
 			terminal.dispose();
 
 			if (exitCode === 0 && output) {
-				return { success: true, version: output };
+				const venvSuffix = envDetection.isVenv ? ` (venv: ${venvRoot})` : '';
+				return { success: true, version: `${output}${venvSuffix}` };
 			} else {
 				return { success: false, version: '', error: output || `Interpreter test exited with code ${exitCode}` };
 			}
 		} catch (err: any) {
 			return { success: false, version: '', error: err.message || String(err) };
 		}
+	}
+
+	async detectPythonEnvironment(workspaceUri: string | URI, candidatePath?: string): Promise<IPythonEnvironmentDetectionResult> {
+		const wsUri = this._toUri(workspaceUri);
+		const rawPath = (candidatePath || '').trim();
+		const isWin = typeof process !== 'undefined' && process.platform === 'win32';
+
+		// Case 1: Empty candidate -> Check for standard .venv in workspace, else fallback to python3
+		if (!rawPath) {
+			const venvPy = isWin
+				? URI.joinPath(wsUri, '.venv', 'Scripts', 'python.exe')
+				: URI.joinPath(wsUri, '.venv', 'bin', 'python');
+			if (await this.fileService.exists(venvPy)) {
+				return {
+					isValid: true,
+					isVenv: true,
+					interpreterPath: venvPy.fsPath,
+					venvRoot: URI.joinPath(wsUri, '.venv').fsPath
+				};
+			}
+			return {
+				isValid: true,
+				isVenv: false,
+				interpreterPath: 'python3'
+			};
+		}
+
+		// Case 2: Named system command without slashes (e.g. 'python3', 'python')
+		if (!rawPath.includes('/') && !rawPath.includes('\\')) {
+			return {
+				isValid: true,
+				isVenv: false,
+				interpreterPath: rawPath
+			};
+		}
+
+		// Case 3: Path provided (relative or absolute)
+		let targetUri: URI;
+		if (rawPath.startsWith('.')) {
+			targetUri = URI.joinPath(wsUri, rawPath);
+		} else if (rawPath.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(rawPath)) {
+			targetUri = URI.file(rawPath);
+		} else {
+			targetUri = URI.joinPath(wsUri, rawPath);
+		}
+
+		const exists = await this.fileService.exists(targetUri);
+		if (!exists) {
+			return {
+				isValid: false,
+				isVenv: false,
+				interpreterPath: '',
+				error: `Path '${rawPath}' does not exist.`
+			};
+		}
+
+		// Check if it is a directory containing a virtual environment
+		const candidateVenvPy = isWin
+			? URI.joinPath(targetUri, 'Scripts', 'python.exe')
+			: URI.joinPath(targetUri, 'bin', 'python');
+		const candidateVenvPyAlt = isWin
+			? URI.joinPath(targetUri, 'Scripts', 'python')
+			: URI.joinPath(targetUri, 'bin', 'python3');
+
+		if (await this.fileService.exists(candidateVenvPy)) {
+			return {
+				isValid: true,
+				isVenv: true,
+				interpreterPath: candidateVenvPy.fsPath,
+				venvRoot: targetUri.fsPath
+			};
+		}
+		if (await this.fileService.exists(candidateVenvPyAlt)) {
+			return {
+				isValid: true,
+				isVenv: true,
+				interpreterPath: candidateVenvPyAlt.fsPath,
+				venvRoot: targetUri.fsPath
+			};
+		}
+
+		// Check if targetUri itself is the python executable file
+		const baseName = targetUri.path.split('/').pop()?.toLowerCase() || '';
+		if (baseName === 'python' || baseName === 'python.exe' || baseName.startsWith('python3')) {
+			const parentDir = URI.joinPath(targetUri, '..');
+			const parentName = parentDir.path.split('/').pop()?.toLowerCase() || '';
+			if (parentName === 'bin' || parentName === 'scripts') {
+				const venvRootDir = URI.joinPath(parentDir, '..');
+				return {
+					isValid: true,
+					isVenv: true,
+					interpreterPath: targetUri.fsPath,
+					venvRoot: venvRootDir.fsPath
+				};
+			}
+			return {
+				isValid: true,
+				isVenv: false,
+				interpreterPath: targetUri.fsPath
+			};
+		}
+
+		// Target exists, but has no python in bin/ or Scripts/
+		return {
+			isValid: false,
+			isVenv: false,
+			interpreterPath: '',
+			venvRoot: targetUri.fsPath,
+			error: `Folder '${rawPath}' is not a valid Python virtual environment (missing bin/python or Scripts/python.exe).`
+		};
 	}
 }
