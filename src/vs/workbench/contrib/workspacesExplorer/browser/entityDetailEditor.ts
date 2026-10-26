@@ -5751,7 +5751,7 @@ ${interpolatedPrompt}`;
 										</div>
 									</div>
 									<textarea class="output-item-raw-content" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="display: none;">${this._escapeHtml(itemText)}</textarea>
-									<div class="output-item-viewport desc-content-box" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">
+									<div class="output-item-viewport desc-content-box" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="min-height: 80px; max-height: 300px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">
 										${itemViewportHtml}
 									</div>
 								</div>

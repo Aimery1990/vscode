@@ -758,7 +758,15 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								} else if (typeof metaVal === 'object' && metaVal !== null) {
 									if ((metaVal as any).code !== undefined) rawCode = String((metaVal as any).code);
 									if ((metaVal as any).pythonCode !== undefined) rawCode = String((metaVal as any).pythonCode);
-									if ((metaVal as any).pythonPath !== undefined) pythonPath = String((metaVal as any).pythonPath);
+									if ((metaVal as any).pythonPath !== undefined) {
+										const p = (metaVal as any).pythonPath;
+										if (typeof p === 'object' && p !== null) {
+											pythonPath = String(p.interpreterPath || p.pythonPath || '');
+										} else {
+											const s = String(p);
+											pythonPath = s === '[object Object]' ? '' : s;
+										}
+									}
 									if ((metaVal as any).output !== undefined) existingOutput = String((metaVal as any).output);
 								}
 							}
@@ -1712,7 +1720,17 @@ atexit.register(_anyagent_capture_exit_output)
 			await this.fileService.writeFile(scriptUri, VSBuffer.fromString(header + code));
 
 			// 3. Resolve Python interpreter and virtualenv environment variables
-			const envDetection = await this.detectPythonEnvironment(wsUri, pythonPath);
+			let cleanPyPath = '';
+			if (typeof pythonPath === 'string') {
+				cleanPyPath = pythonPath.trim();
+			} else if (pythonPath && typeof pythonPath === 'object') {
+				cleanPyPath = String((pythonPath as any).interpreterPath || (pythonPath as any).pythonPath || '').trim();
+			}
+			if (cleanPyPath === '[object Object]' || cleanPyPath === 'undefined' || cleanPyPath === 'null') {
+				cleanPyPath = '';
+			}
+
+			const envDetection = await this.detectPythonEnvironment(wsUri, cleanPyPath);
 			const resolvedPython = envDetection.interpreterPath || 'python3';
 			const venvRoot = envDetection.venvRoot;
 
@@ -2036,9 +2054,17 @@ atexit.register(_anyagent_capture_exit_output)
 		}
 	}
 
-	async detectPythonEnvironment(workspaceUri: string | URI, candidatePath?: string): Promise<IPythonEnvironmentDetectionResult> {
+	async detectPythonEnvironment(workspaceUri: string | URI, candidatePath?: string | any): Promise<IPythonEnvironmentDetectionResult> {
 		const wsUri = this._toUri(workspaceUri);
-		const rawPath = (candidatePath || '').trim();
+		let rawPath = '';
+		if (typeof candidatePath === 'string') {
+			rawPath = candidatePath.trim();
+		} else if (candidatePath && typeof candidatePath === 'object') {
+			rawPath = String(candidatePath.interpreterPath || candidatePath.pythonPath || '').trim();
+		}
+		if (rawPath === '[object Object]' || rawPath === 'undefined' || rawPath === 'null') {
+			rawPath = '';
+		}
 		const isWin = typeof process !== 'undefined' && process.platform === 'win32';
 
 		// Case 1: Empty candidate -> Check for standard .venv in workspace, else fallback to python3

@@ -4456,8 +4456,9 @@
 	display: flex;
 	flex-direction: column;
 	gap: 6px;
-	max-height: 520px;
+	max-height: 580px;
 	overflow-y: auto;
+	scroll-behavior: smooth;
 }
 
 /* Section Strip */
@@ -4586,18 +4587,20 @@
 .workflow-output-section-body {
 	border-top: 1px solid rgba(255, 255, 255, 0.06);
 	background: rgba(0, 0, 0, 0.45);
-	padding: 6px 8px;
+	padding: 8px 10px;
 }
 
 .workflow-output-pre {
 	margin: 0;
-	padding: 2px 0;
+	padding: 4px 2px;
 	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 	font-size: 11px;
-	line-height: 1.5;
+	line-height: 1.55;
 	color: #e2e8f0;
-	max-height: 260px;
+	min-height: 80px;
+	max-height: 320px;
 	overflow-y: auto;
+	overflow-x: auto;
 	white-space: pre-wrap;
 	word-break: break-word;
 	user-select: text;

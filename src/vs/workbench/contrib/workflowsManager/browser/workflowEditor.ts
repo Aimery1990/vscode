@@ -11100,7 +11100,15 @@ export class WorkflowEditor extends EditorPane {
 
 				stripHeader.onclick = (e) => {
 					e.stopPropagation();
-					setExpanded(!isExpanded);
+					const nextExpanded = !isExpanded;
+					setExpanded(nextExpanded);
+					if (nextExpanded) {
+						setTimeout(() => {
+							if (sectionEl.isConnected) {
+								sectionEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+							}
+						}, 60);
+					}
 				};
 
 				sectionToggles.push((open: boolean) => setExpanded(open));
