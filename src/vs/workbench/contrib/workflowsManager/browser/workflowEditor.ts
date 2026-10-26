@@ -371,6 +371,11 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private async _loadFlowchartData(): Promise<void> {
+		if (this._workflowUri) {
+			try {
+				await this._workflowExecutionService.loadRunsForWorkflow(this._workflowUri);
+			} catch {}
+		}
 		if (!this._flowchartJsonUri) return;
 
 		try {
@@ -2005,6 +2010,21 @@ export class WorkflowEditor extends EditorPane {
 			const jsonStr = JSON.stringify(run, null, 2);
 			await this._clipboardService.writeText(jsonStr);
 			this._notificationService.info('Run snapshot JSON copied to clipboard.');
+		};
+
+		// 3. Delete Run Button
+		const delRunBtn = append(actionsArea, $('button.history-action-btn.danger'));
+		append(delRunBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+		append(delRunBtn, $('span')).textContent = 'Delete Run';
+		delRunBtn.title = 'Permanently delete this execution run from history';
+		delRunBtn.onclick = () => {
+			this._workflowExecutionService.deleteRun(run.runId);
+			if (this._selectedHistoryRunId === run.runId) {
+				this._selectedHistoryRunId = undefined;
+			}
+			this._refreshHistoryDrawer();
+			this._updateHistoryCountBadge();
+			this._notificationService.info(`Run #${run.runNumber || run.runId} deleted.`);
 		};
 
 		// 2. Sections Container

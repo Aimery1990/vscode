@@ -5,6 +5,7 @@
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
+import { VSBuffer } from '../../../../base/common/buffer.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
@@ -419,6 +420,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	private readonly _humanWaiters = new Map<string, (input: any) => void>();
 	private readonly _stepWaiters = new Map<string, () => void>();
 	private readonly _cancelledRuns = new Set<string>();
+	private readonly _persistDebounceMap = new Map<string, any>();
 
 	private readonly _onDidChangeRunState = new Emitter<IWorkflowExecutionRun>();
 	readonly onDidChangeRunState: Event<IWorkflowExecutionRun> = this._onDidChangeRunState.event;
@@ -439,6 +441,116 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	private readonly _displayCardsByWorkflow = new Map<string, IWorkflowDisplayCard[]>();
 
+	private _getWorkflowRunsFileUri(workflowUriStr: string): URI {
+		try {
+			const uri = URI.parse(workflowUriStr);
+			const isFile = uri.path.endsWith('.json') || uri.path.endsWith('.workflow');
+			const dirUri = isFile ? URI.joinPath(uri, '..') : uri;
+			return URI.joinPath(dirUri, '.agents', 'workflow_runs.json');
+		} catch {
+			const homeDir = (typeof process !== 'undefined' && process.env?.HOME) ? process.env.HOME : '/Users/aimery';
+			return URI.file(`${homeDir}/.anyagent/workflow_history/default_runs.json`);
+		}
+	}
+
+	private _getGlobalBackupRunsFileUri(workflowUriStr: string): URI {
+		const safeKey = workflowUriStr.replace(/[^a-zA-Z0-9_-]/g, '_');
+		const homeDir = (typeof process !== 'undefined' && process.env?.HOME) ? process.env.HOME : '/Users/aimery';
+		return URI.file(`${homeDir}/.anyagent/workflow_history/${safeKey}_runs.json`);
+	}
+
+	async loadRunsForWorkflow(workflowUri: URI | string): Promise<IWorkflowExecutionRun[]> {
+		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+		const primaryFileUri = this._getWorkflowRunsFileUri(uriStr);
+		const backupFileUri = this._getGlobalBackupRunsFileUri(uriStr);
+
+		let loadedRuns: IWorkflowExecutionRun[] = [];
+
+		// 1. Try primary location (.agents/workflow_runs.json)
+		try {
+			if (await this.fileService.exists(primaryFileUri)) {
+				const content = await this.fileService.readFile(primaryFileUri);
+				const parsed = JSON.parse(content.value.toString());
+				if (Array.isArray(parsed)) {
+					loadedRuns = parsed;
+				}
+			}
+		} catch (err) {
+			this.logService.warn(`[WorkflowExecution] Failed to load runs from primary file ${primaryFileUri.toString()}:`, err);
+		}
+
+		// 2. Fallback to global backup if primary had nothing
+		if (loadedRuns.length === 0) {
+			try {
+				if (await this.fileService.exists(backupFileUri)) {
+					const content = await this.fileService.readFile(backupFileUri);
+					const parsed = JSON.parse(content.value.toString());
+					if (Array.isArray(parsed)) {
+						loadedRuns = parsed;
+					}
+				}
+			} catch (err) {
+				// ignore backup read error
+			}
+		}
+
+		if (loadedRuns.length > 0) {
+			for (const r of loadedRuns) {
+				if (r && r.runId) {
+					const existing = this._runs.get(r.runId);
+					if (!existing || existing.status !== 'running') {
+						this._runs.set(r.runId, r);
+					}
+				}
+			}
+		}
+
+		return this.getRunsForWorkflow(uriStr);
+	}
+
+	async persistRunsForWorkflow(workflowUri: URI | string): Promise<void> {
+		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+		const runs = this.getRunsForWorkflow(uriStr);
+		const jsonStr = JSON.stringify(runs, null, 2);
+		const buffer = VSBuffer.fromString(jsonStr);
+
+		// 1. Primary location (.agents/workflow_runs.json)
+		const primaryFileUri = this._getWorkflowRunsFileUri(uriStr);
+		try {
+			const parentDir = URI.joinPath(primaryFileUri, '..');
+			if (!(await this.fileService.exists(parentDir))) {
+				await this.fileService.createFolder(parentDir);
+			}
+			await this.fileService.writeFile(primaryFileUri, buffer);
+			this.logService.info(`[WorkflowExecution] Persisted ${runs.length} runs to ${primaryFileUri.toString()}`);
+		} catch (err) {
+			this.logService.warn(`[WorkflowExecution] Failed to write runs to ${primaryFileUri.toString()}:`, err);
+		}
+
+		// 2. Global backup location (~/.anyagent/workflow_history/<safeKey>_runs.json)
+		const backupFileUri = this._getGlobalBackupRunsFileUri(uriStr);
+		try {
+			const backupParentDir = URI.joinPath(backupFileUri, '..');
+			if (!(await this.fileService.exists(backupParentDir))) {
+				await this.fileService.createFolder(backupParentDir);
+			}
+			await this.fileService.writeFile(backupFileUri, buffer);
+		} catch {
+			// ignore backup write failure
+		}
+	}
+
+	private _schedulePersist(workflowUriStr: string): void {
+		if (this._persistDebounceMap.has(workflowUriStr)) {
+			clearTimeout(this._persistDebounceMap.get(workflowUriStr));
+		}
+		const timeout = setTimeout(() => {
+			this._persistDebounceMap.delete(workflowUriStr);
+			this.persistRunsForWorkflow(workflowUriStr);
+		}, 600);
+		this._persistDebounceMap.set(workflowUriStr, timeout);
+	}
+
 	getActiveRun(workflowUri: URI | string): IWorkflowExecutionRun | undefined {
 		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
 		const runId = this._activeRunsByWorkflow.get(uriStr);
@@ -457,11 +569,32 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	}
 
 	deleteRun(runId: string): void {
+		const run = this._runs.get(runId);
 		this._runs.delete(runId);
 		for (const [uri, id] of this._activeRunsByWorkflow.entries()) {
 			if (id === runId) {
 				this._activeRunsByWorkflow.delete(uri);
 			}
+		}
+		if (run) {
+			this.persistRunsForWorkflow(run.workflowUri);
+			this._notifyRunChanged(run);
+		}
+	}
+
+	clearRuns(workflowUri?: URI | string): void {
+		if (workflowUri) {
+			const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+			for (const [id, r] of this._runs.entries()) {
+				if (r.workflowUri === uriStr) {
+					this._runs.delete(id);
+				}
+			}
+			this._activeRunsByWorkflow.delete(uriStr);
+			this.persistRunsForWorkflow(uriStr);
+		} else {
+			this._runs.clear();
+			this._activeRunsByWorkflow.clear();
 		}
 	}
 
@@ -618,7 +751,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		this._notifyRunChanged(run);
 
 		// Execute asynchronously
-		this._runWorkflowAsync(run, flowchartData, options).catch(err => {
+		this._runWorkflowAsync(run, flowchartData, options).catch(async err => {
 			this.logService.error(`[WorkflowExecution] Fatal error in run ${runId}:`, err);
 			run.status = 'failed';
 			run.error = err.message || String(err);
@@ -627,6 +760,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			run.durationMs = run.completedAt - run.startedAt;
 			this._emitLog(run, 'error', `Execution failed: ${run.error}`);
 			this._notifyRunChanged(run);
+			await this.persistRunsForWorkflow(run.workflowUri);
 		});
 
 		return run;
@@ -1042,6 +1176,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			this._emitLog(run, 'info', `Workflow '${run.workflowName}' executed successfully to completion in ${(run.durationMs / 1000).toFixed(1)}s!`);
 			this.notificationService.info(`Workflow '${run.workflowName}' completed successfully (${(run.durationMs / 1000).toFixed(1)}s).`);
 			this._notifyRunChanged(run);
+			await this.persistRunsForWorkflow(run.workflowUri);
 		}
 	}
 
@@ -2419,5 +2554,6 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	private _notifyRunChanged(run: IWorkflowExecutionRun): void {
 		run.updatedAt = Date.now();
 		this._onDidChangeRunState.fire(run);
+		this._schedulePersist(run.workflowUri);
 	}
 }

@@ -61,6 +61,8 @@ export interface IWorkflowExecutionService {
 	getActiveRun(workflowUri: URI | string): IWorkflowExecutionRun | undefined;
 	getRun(runId: string): IWorkflowExecutionRun | undefined;
 	getRunsForWorkflow(workflowUri: URI | string): IWorkflowExecutionRun[];
+	loadRunsForWorkflow(workflowUri: URI | string): Promise<IWorkflowExecutionRun[]>;
+	persistRunsForWorkflow(workflowUri: URI | string): Promise<void>;
 	deleteRun(runId: string): void;
 	clearRuns(workflowUri?: URI | string): void;
 	resetWorkflow(workflowUri: URI | string): void;
