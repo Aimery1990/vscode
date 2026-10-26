@@ -4458,7 +4458,25 @@
 	gap: 6px;
 	max-height: 580px;
 	overflow-y: auto;
+	overscroll-behavior: contain;
 	scroll-behavior: smooth;
+}
+
+.workflow-display-sections-container::-webkit-scrollbar {
+	width: 6px;
+}
+
+.workflow-display-sections-container::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.workflow-display-sections-container::-webkit-scrollbar-thumb {
+	background: rgba(148, 163, 184, 0.25);
+	border-radius: 4px;
+}
+
+.workflow-display-sections-container::-webkit-scrollbar-thumb:hover {
+	background: rgba(56, 189, 248, 0.5);
 }
 
 /* Section Strip */
@@ -4592,18 +4610,37 @@
 
 .workflow-output-pre {
 	margin: 0;
-	padding: 4px 2px;
+	padding: 4px 4px;
 	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 	font-size: 11px;
 	line-height: 1.55;
 	color: #e2e8f0;
 	min-height: 80px;
-	max-height: 320px;
+	max-height: 180px;
 	overflow-y: auto;
 	overflow-x: auto;
+	overscroll-behavior: contain;
 	white-space: pre-wrap;
 	word-break: break-word;
 	user-select: text;
+}
+
+.workflow-output-pre::-webkit-scrollbar {
+	width: 5px;
+	height: 5px;
+}
+
+.workflow-output-pre::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.workflow-output-pre::-webkit-scrollbar-thumb {
+	background: rgba(148, 163, 184, 0.3);
+	border-radius: 4px;
+}
+
+.workflow-output-pre::-webkit-scrollbar-thumb:hover {
+	background: rgba(56, 189, 248, 0.6);
 }
 
 
