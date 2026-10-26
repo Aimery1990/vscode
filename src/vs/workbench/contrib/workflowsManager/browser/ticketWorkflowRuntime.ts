@@ -822,6 +822,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								finalOutput = stepOutput;
 							}
 
+							if (Array.isArray(field.outputSpecs)) {
+								customMetadata['outputSpecs'] = JSON.stringify(field.outputSpecs);
+							}
 							customMetadata[fieldLabel] = typeof stepOutput === 'object' ? JSON.stringify(stepOutput, null, 2) : String(stepOutput);
 							contextVariables[fieldLabel] = stepOutput;
 							contextVariables['output'] = stepOutput;
@@ -873,6 +876,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const totalDuration = Date.now() - startTime;
 			this.logService.info(`[TicketWorkflowRuntime] Finished running ticket '${ticketResult.ticketId}' in ${totalDuration}ms`);
 
+			const outField = schema?.fields?.find(f => f.type === 'output' || f.type === 'result');
 			return {
 				success: true,
 				ticketId: ticketResult.ticketId,
@@ -881,6 +885,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				entityUri: ticketResult.entityUri,
 				status: 'success',
 				output: finalOutput,
+				outputSpecs: outField?.outputSpecs || [],
 				stepResults: stepResults,
 				contextVariables: contextVariables,
 				durationMs: totalDuration

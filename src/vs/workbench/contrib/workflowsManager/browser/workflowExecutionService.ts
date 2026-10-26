@@ -1386,7 +1386,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							value: {
 								ticketId: execRes.ticketId || ticketIdOrPath,
 								ticketName: execRes.ticketName || ticketIdOrPath,
-								ticketType: execRes.ticketType || 'ticket'
+								ticketType: execRes.ticketType || 'ticket',
+								outputSpecs: (execRes as any).outputSpecs || []
 							},
 							enumerable: false,
 							configurable: true,
@@ -1740,6 +1741,20 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		let ticketType = displayVal?.ticketType || displayVal?.__ticketMetadata?.ticketType || '';
 
 		let extractedOutputs: Record<string, any> = {};
+		const outputFormats: Record<string, string> = {};
+
+		// Extract candidate outputSpecs from direct metadata or properties
+		const candidateSpecs: any[] = displayVal?.outputSpecs || displayVal?.__ticketMetadata?.outputSpecs || [];
+		if (Array.isArray(candidateSpecs)) {
+			for (const spec of candidateSpecs) {
+				if (spec && spec.defaultFormat) {
+					const k = spec.label || spec.fieldKey;
+					outputFormats[k] = spec.defaultFormat;
+					outputFormats[spec.fieldKey] = spec.defaultFormat;
+					outputFormats[k.toLowerCase().replace(/[^a-z0-9]/g, '')] = spec.defaultFormat;
+				}
+			}
+		}
 
 		const isExplicitTicket = typeof displayVal === 'object' && displayVal !== null && !Array.isArray(displayVal) && (
 			displayVal.ticketId !== undefined ||
@@ -1751,10 +1766,27 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		);
 
 		if (isExplicitTicket) {
+			const fields = displayVal.fields || displayVal.customMetadata || {};
+			const rawSpecs = fields['outputSpecs'] || fields['output_specs'];
+			if (rawSpecs && typeof rawSpecs === 'string' && rawSpecs.trim().startsWith('[')) {
+				try {
+					const parsed = JSON.parse(rawSpecs);
+					if (Array.isArray(parsed)) {
+						for (const spec of parsed) {
+							if (spec && spec.defaultFormat) {
+								const k = spec.label || spec.fieldKey;
+								outputFormats[k] = spec.defaultFormat;
+								outputFormats[spec.fieldKey] = spec.defaultFormat;
+								outputFormats[k.toLowerCase().replace(/[^a-z0-9]/g, '')] = spec.defaultFormat;
+							}
+						}
+					}
+				} catch {}
+			}
+
 			if (displayVal.outputs && typeof displayVal.outputs === 'object' && Object.keys(displayVal.outputs).length > 0) {
 				extractedOutputs = { ...displayVal.outputs };
 			} else if (displayVal.fields || displayVal.customMetadata) {
-				const fields = displayVal.fields || displayVal.customMetadata || {};
 				const outMeta = fields['Output'] || fields['output'] || fields['Result'] || fields['result'];
 				if (outMeta && typeof outMeta === 'string' && outMeta.trim().startsWith('{')) {
 					try {
@@ -1765,6 +1797,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 									const key = spec.label || spec.fieldKey;
 									const raw = fields[key] || fields[spec.fieldKey];
 									extractedOutputs[key] = this._extractPrimitiveCleanValue(raw, spec.defaultFormat);
+									if (spec.defaultFormat) {
+										outputFormats[key] = spec.defaultFormat;
+										outputFormats[spec.fieldKey] = spec.defaultFormat;
+										outputFormats[key.toLowerCase().replace(/[^a-z0-9]/g, '')] = spec.defaultFormat;
+									}
 								}
 							}
 						}
@@ -1773,7 +1810,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 				if (Object.keys(extractedOutputs).length === 0) {
 					for (const [k, v] of Object.entries(fields)) {
-						if (k.toLowerCase().startsWith('param') || k === 'parameters') continue;
+						if (k.toLowerCase().startsWith('param') || k === 'parameters' || k === 'outputspecs' || k === 'output_specs') continue;
 						const extracted = this._extractPrimitiveCleanValue(v);
 						if (extracted !== undefined) {
 							extractedOutputs[k] = extracted;
@@ -1796,7 +1833,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 			} else {
 				for (const [k, v] of Object.entries(displayVal)) {
-					if (k.startsWith('__')) continue;
+					if (k.startsWith('__') || k === 'outputSpecs' || k === 'output_specs') continue;
 					extractedOutputs[k] = v;
 				}
 			}
@@ -1827,39 +1864,70 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			// Build structured output items for accordion rendering
 			const outputItems: IWorkflowDisplayOutputItem[] = [];
 			for (const [key, val] of Object.entries(extractedOutputs)) {
-				let fmt = 'text';
+				const cleanKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+				const configuredFormat = (outputFormats[key] || outputFormats[cleanKey])?.toLowerCase();
+				let fmt = configuredFormat || 'text';
 				let strVal = '';
 
 				if (typeof val === 'object' && val !== null) {
-					fmt = Array.isArray(val) ? 'json' : 'json';
-					strVal = JSON.stringify(val, null, 2);
+					if (configuredFormat === 'text') {
+						if (Array.isArray(val)) {
+							const allPrimitive = val.every(item => typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean');
+							strVal = allPrimitive ? val.join('\n') : JSON.stringify(val, null, 2);
+						} else {
+							strVal = JSON.stringify(val, null, 2);
+						}
+						fmt = 'text';
+					} else if (configuredFormat === 'table') {
+						fmt = 'table';
+						strVal = typeof val === 'object' ? JSON.stringify(val, null, 2) : String(val);
+					} else {
+						fmt = configuredFormat || (Array.isArray(val) ? 'json' : 'json');
+						strVal = JSON.stringify(val, null, 2);
+					}
 				} else if (typeof val === 'string') {
 					strVal = val.trim();
-					if ((strVal.startsWith('{') && strVal.endsWith('}')) || (strVal.startsWith('[') && strVal.endsWith(']'))) {
-						try {
-							const parsed = JSON.parse(strVal);
-							fmt = 'json';
-							strVal = JSON.stringify(parsed, null, 2);
-						} catch {
-							fmt = 'text';
+					if (configuredFormat) {
+						fmt = configuredFormat;
+						if ((strVal.startsWith('{') && strVal.endsWith('}')) || (strVal.startsWith('[') && strVal.endsWith(']'))) {
+							try {
+								const parsed = JSON.parse(strVal);
+								if (configuredFormat === 'text' && Array.isArray(parsed)) {
+									const allPrimitive = parsed.every(item => typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean');
+									if (allPrimitive) strVal = parsed.join('\n');
+								} else {
+									strVal = JSON.stringify(parsed, null, 2);
+								}
+							} catch {}
 						}
 					} else {
-						const jsonBlock = strVal.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-						if (jsonBlock && jsonBlock[1]) {
+						// Auto-inference fallback
+						if ((strVal.startsWith('{') && strVal.endsWith('}')) || (strVal.startsWith('[') && strVal.endsWith(']'))) {
 							try {
-								const parsed = JSON.parse(jsonBlock[1].trim());
+								const parsed = JSON.parse(strVal);
 								fmt = 'json';
 								strVal = JSON.stringify(parsed, null, 2);
 							} catch {
-								fmt = 'markdown';
+								fmt = 'text';
 							}
-						} else if (strVal.startsWith('#') || strVal.includes('•') || strVal.includes('http')) {
-							fmt = 'text';
+						} else {
+							const jsonBlock = strVal.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+							if (jsonBlock && jsonBlock[1]) {
+								try {
+									const parsed = JSON.parse(jsonBlock[1].trim());
+									fmt = 'json';
+									strVal = JSON.stringify(parsed, null, 2);
+								} catch {
+									fmt = 'markdown';
+								}
+							} else if (strVal.startsWith('#') || strVal.includes('•') || strVal.includes('http')) {
+								fmt = 'text';
+							}
 						}
 					}
 				} else {
 					strVal = String(val);
-					fmt = typeof val;
+					fmt = configuredFormat || typeof val;
 				}
 
 				const isPending = !strVal || strVal.includes('Pending AI Execution');
