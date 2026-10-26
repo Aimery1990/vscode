@@ -1006,7 +1006,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		const baseCatalog: IPrimitiveCatalogItem[] = [
 			{
 				type: 'parameters',
-				label: 'Input Parameters (Runtime Variables)',
+				label: 'Inputs (Runtime Variables)',
 				icon: 'symbol-parameter',
 				category: 'input',
 				description: 'Defines runtime input parameters and default values accessible by subsequent primitives via variable interpolation.',
@@ -1026,7 +1026,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			},
 			{
 				type: 'browser',
-				label: 'Browser (Web Navigation & Data)',
+				label: 'Browser (Web Application)',
 				icon: 'globe',
 				category: 'processing',
 				description: 'Automated web navigation and readable content extraction with optional credential authentication.',
@@ -1183,7 +1183,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			},
 			{
 				type: 'attachment',
-				label: 'Attachment (Files Upload)',
+				label: 'Attachment (Files)',
 				icon: 'paperclip',
 				category: 'data',
 				description: 'Attached files, PDFs, images, or documents.',

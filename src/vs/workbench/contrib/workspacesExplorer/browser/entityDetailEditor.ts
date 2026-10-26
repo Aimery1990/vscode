@@ -5107,7 +5107,7 @@ ${interpolatedPrompt}`;
 					// Git primitive is integrated into the dedicated sidebar Git repository binding
 					continue;
 				} else if (fType === 'parameters') {
-					// Input Parameters Primitive
+					// Inputs Primitive
 					const paramDefs: IParameterDefinition[] = fieldItem.parameters || [];
 					let paramValues: { [name: string]: string } = {};
 					if (v) {

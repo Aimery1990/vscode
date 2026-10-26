@@ -368,8 +368,8 @@ export class CustomModulesSchemaDesignerDialog {
 					{ type: 'time_range', label: 'Time Range (Start ~ End)', icon: Codicon.watch },
 					{ type: 'datetime_range', label: 'DateTime Range (Start ~ End)', icon: Codicon.history },
 					{ type: 'dynamic_list', label: 'Container (Nested Subfields)', icon: Codicon.layers },
-					{ type: 'attachment', label: 'Attachment (Files / Images / PDF)', icon: Codicon.files },
-					{ type: 'browser', label: 'Browser (Web Navigation)', icon: Codicon.globe },
+					{ type: 'attachment', label: 'Attachment (Files)', icon: Codicon.files },
+					{ type: 'browser', label: 'Browser (Web Application)', icon: Codicon.globe },
 					{ type: 'git', label: 'Git Repository Binding', icon: Codicon.sourceControl },
 					{ type: 'python', label: 'Python (Code Automation)', icon: Codicon.code }
 				];

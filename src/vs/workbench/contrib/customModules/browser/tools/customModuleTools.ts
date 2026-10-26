@@ -66,13 +66,13 @@ const VALID_FIELD_TYPES: Set<CustomFieldType> = new Set([
 const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'parameters',
-		label: 'Input Parameters (Runtime Variables)',
+		label: 'Inputs (Runtime Variables)',
 		description: 'Runtime input parameters and variables for tickets with optional choices. Interpolated via {{param_name}} in URLs and prompts.',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: {
 			id: 'runtime_params',
-			label: 'Input Parameters',
+			label: 'Inputs',
 			type: 'parameters',
 			parameters: [
 				{ id: 'param_1', name: 'start', label: 'Start Offset', defaultValue: '0' },
@@ -98,8 +98,8 @@ const BASE_PRIMITIVES_CATALOG = [
 	},
 	{
 		type: 'browser',
-		label: 'Browser (Web Navigation & Data Extraction)',
-		description: 'Embedded web browser primitive for navigating URLs, extracting web content/HTML for AI consumption, and managing credentials.',
+		label: 'Browser (Web Application)',
+		description: 'Embedded web browser primitive for navigating URLs, interacting with web applications, and managing credentials.',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: {
@@ -257,8 +257,8 @@ const BASE_PRIMITIVES_CATALOG = [
 	},
 	{
 		type: 'attachment',
-		label: 'Attachment (Files / Images / PDF / Receipts)',
-		description: 'File upload field for invoices, PDF documents, proof receipts, or images.',
+		label: 'Attachment (Files)',
+		description: 'File upload field for documents, files, proof receipts, or images.',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: { id: 'receipt_files', label: 'Receipts & Invoices', type: 'attachment' }

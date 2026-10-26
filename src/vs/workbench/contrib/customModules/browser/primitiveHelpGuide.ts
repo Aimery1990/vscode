@@ -27,17 +27,17 @@ export interface IPrimitiveGuide {
 const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 	parameters: {
 		type: 'parameters',
-		title: 'Input Parameters (Runtime Variables)',
+		title: 'Inputs (Runtime Variables)',
 		icon: Codicon.symbolVariable,
-		category: 'Input & Parameter Definition',
+		category: 'Input & Variable Definition',
 		summary: 'Defines dynamic input parameters, variable names, and default fallback values passed into the ticket during manual runs or automated workflow execution.',
 		designerConfig: [
-			{ name: 'Field Label / Name', desc: 'Display title for the parameter group.' },
+			{ name: 'Field Label / Name', desc: 'Display title for the inputs group.' },
 			{ name: 'Parameter Keys & Defaults', desc: 'Declare key names and initial fallback values (e.g. query: "AI Search").' },
 			{ name: 'Required Constraints', desc: 'Marks specific parameters as mandatory before execution.' }
 		],
 		runTicketsFlow: {
-			headline: 'How RUN_TICKETS Executes Input Parameters',
+			headline: 'How RUN_TICKETS Executes Inputs',
 			steps: [
 				{
 					step: '1. Inbound Arguments Ingestion',
@@ -68,9 +68,9 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 
 	browser: {
 		type: 'browser',
-		title: 'Browser (Web Navigation & Data Extraction)',
+		title: 'Browser (Web Application)',
 		icon: Codicon.globe,
-		category: 'Web Navigation & Data Scraping',
+		category: 'Web Application & Navigation',
 		summary: 'Automates URL navigation, headless DOM rendering, and readable text extraction to provide real-time external web data for AI reasoning.',
 		designerConfig: [
 			{ name: 'Target URL Template', desc: 'Target URL supporting dynamic variable interpolation (e.g. https://news.ycombinator.com?q={topic}).' },
@@ -425,7 +425,7 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 
 	attachment: {
 		type: 'attachment',
-		title: 'Attachment (Files / Images / PDF)',
+		title: 'Attachment (Files)',
 		icon: Codicon.files,
 		category: 'Assets & Media',
 		summary: 'Manages file attachments, documents, images, and workspace relative assets.',
