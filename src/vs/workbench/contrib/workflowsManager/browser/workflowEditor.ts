@@ -30,7 +30,7 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
 import { IWorkflowExecutionService, IWorkflowDisplayCard } from '../common/workflowExecutionService.js';
-import { IWorkflowExecutionRun, IWorkflowLogEntry } from '../common/workflowExecutionModel.js';
+import { IWorkflowExecutionRun, IWorkflowLogEntry, IPrimitiveExecutionStepResult, IExecutedTicketRecord } from '../common/workflowExecutionModel.js';
 
 export interface INodeVariable {
 	name: string;
@@ -279,10 +279,13 @@ export class WorkflowEditor extends EditorPane {
 	private _inspectorTogglePill?: HTMLElement;
 	private _toolbarEl?: HTMLElement;
 	private _isLogDrawerOpen: boolean = false;
-	private _activeDrawerTab: 'logs' | 'vars' = 'logs';
+	private _activeDrawerTab: 'logs' | 'vars' | 'history' = 'logs';
 	private _logDrawerEl?: HTMLElement;
 	private _logBodyEl?: HTMLElement;
 	private _varsBodyEl?: HTMLElement;
+	private _historyBodyEl?: HTMLElement;
+	private _historyCountBadgeEl?: HTMLElement;
+	private _selectedHistoryRunId?: string;
 	private _varsCountBadgeEl?: HTMLElement;
 	private _logCountBadgeEl?: HTMLElement;
 	private _logStatusBadgeEl?: HTMLElement;
@@ -598,7 +601,14 @@ export class WorkflowEditor extends EditorPane {
 					});
 				}
 				if (this._isLogDrawerOpen) {
-					this._refreshLogs(run);
+					if (this._activeDrawerTab === 'logs') {
+						this._refreshLogs(run);
+					} else if (this._activeDrawerTab === 'vars') {
+						this._refreshVariablesDrawer();
+					} else if (this._activeDrawerTab === 'history') {
+						this._refreshHistoryDrawer();
+					}
+					this._updateHistoryCountBadge();
 				}
 			}
 		}));
@@ -1065,16 +1075,19 @@ export class WorkflowEditor extends EditorPane {
 				if (activeRun) {
 					this._refreshLogs(activeRun);
 				}
-			} else {
+			} else if (this._activeDrawerTab === 'vars') {
 				this._refreshVariablesDrawer();
+			} else if (this._activeDrawerTab === 'history') {
+				this._refreshHistoryDrawer();
 			}
+			this._updateHistoryCountBadge();
 		}
 		if (this._toolbarEl) {
 			this._renderToolbar(this._toolbarEl);
 		}
 	}
 
-	private _openDrawerTab(tab: 'logs' | 'vars', targetNodeId?: string): void {
+	private _openDrawerTab(tab: 'logs' | 'vars' | 'history', targetNodeId?: string): void {
 		this._activeDrawerTab = tab;
 		this._isLogDrawerOpen = true;
 		if (this._logDrawerEl) {
@@ -1087,12 +1100,16 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
-	private _switchDrawerTab(tab: 'logs' | 'vars', targetNodeId?: string): void {
+	private _switchDrawerTab(tab: 'logs' | 'vars' | 'history', targetNodeId?: string): void {
 		this._activeDrawerTab = tab;
 		if (!this._logDrawerEl) return;
 
 		const tabs = this._logDrawerEl.querySelectorAll('.drawer-tab');
-		if (tabs.length >= 2) {
+		if (tabs.length >= 3) {
+			tabs[0].classList.toggle('active', tab === 'logs');
+			tabs[1].classList.toggle('active', tab === 'vars');
+			tabs[2].classList.toggle('active', tab === 'history');
+		} else if (tabs.length >= 2) {
 			tabs[0].classList.toggle('active', tab === 'logs');
 			tabs[1].classList.toggle('active', tab === 'vars');
 		}
@@ -1111,6 +1128,14 @@ export class WorkflowEditor extends EditorPane {
 				this._refreshVariablesDrawer(targetNodeId);
 			}
 		}
+		if (this._historyBodyEl) {
+			this._historyBodyEl.style.display = tab === 'history' ? 'flex' : 'none';
+			if (tab === 'history') {
+				this._refreshHistoryDrawer();
+			}
+		}
+
+		this._updateHistoryCountBadge();
 
 		if (activeRun) {
 			if (this._logStatusBadgeEl) {
@@ -1810,6 +1835,402 @@ export class WorkflowEditor extends EditorPane {
 		};
 	}
 
+	private _updateHistoryCountBadge(): void {
+		if (this._historyCountBadgeEl && this._workflowUri) {
+			const runs = this._workflowExecutionService.getRunsForWorkflow(this._workflowUri);
+			this._historyCountBadgeEl.textContent = `${runs.length} run${runs.length === 1 ? '' : 's'}`;
+		}
+	}
+
+	private _refreshHistoryDrawer(): void {
+		if (!this._historyBodyEl || !this._workflowUri) return;
+		clearNode(this._historyBodyEl);
+
+		const runs = this._workflowExecutionService.getRunsForWorkflow(this._workflowUri);
+		this._updateHistoryCountBadge();
+
+		if ((!this._selectedHistoryRunId || !runs.some(r => r.runId === this._selectedHistoryRunId)) && runs.length > 0) {
+			this._selectedHistoryRunId = runs[0].runId;
+		}
+
+		// Left Sidebar: Runs List
+		const sidebar = append(this._historyBodyEl, $('.workflow-history-sidebar'));
+		const sidebarHeader = append(sidebar, $('.workflow-history-sidebar-header'));
+		const headerTitle = append(sidebarHeader, $('span'));
+		headerTitle.textContent = 'RUN HISTORY';
+
+		if (runs.length > 0) {
+			const clearAllBtn = append(sidebarHeader, $('.history-clear-all-btn'));
+			clearAllBtn.title = 'Clear All Run History';
+			append(clearAllBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.clearAll)));
+			clearAllBtn.onclick = (e) => {
+				e.stopPropagation();
+				if (this._workflowUri) {
+					this._workflowExecutionService.clearRuns(this._workflowUri);
+					this._selectedHistoryRunId = undefined;
+					this._refreshHistoryDrawer();
+				}
+			};
+		}
+
+		const listEl = append(sidebar, $('div.workflow-history-list'));
+		if (runs.length === 0) {
+			const emptyItem = append(listEl, $('.workflow-history-empty'));
+			emptyItem.textContent = 'No execution runs recorded yet. Execute the workflow to capture run snapshots.';
+		} else {
+			for (const r of runs) {
+				const isSelected = r.runId === this._selectedHistoryRunId;
+				const item = append(listEl, $(`.workflow-history-item${isSelected ? '.selected' : ''}`));
+
+				const topRow = append(item, $('.history-item-top'));
+				const buildNumber = append(topRow, $('span.history-build-num'));
+				buildNumber.textContent = `#${r.runNumber ?? r.runId.substring(4, 9)}`;
+
+				const statusBadge = append(topRow, $(`span.history-status-badge.status-${r.status}`));
+				statusBadge.textContent = r.status.toUpperCase();
+
+				const delBtn = append(topRow, $('.history-item-del-btn'));
+				delBtn.title = 'Delete run record';
+				append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+				delBtn.onclick = (e) => {
+					e.stopPropagation();
+					this._workflowExecutionService.deleteRun(r.runId);
+					if (this._selectedHistoryRunId === r.runId) {
+						this._selectedHistoryRunId = undefined;
+					}
+					this._refreshHistoryDrawer();
+				};
+
+				const botRow = append(item, $('.history-item-bottom'));
+				const timeSpan = append(botRow, $('span.history-time'));
+				const dateObj = new Date(r.startedAt);
+				timeSpan.textContent = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+				const durSpan = append(botRow, $('span.history-duration'));
+				const durMs = r.durationMs ?? (r.completedAt ? r.completedAt - r.startedAt : 0);
+				durSpan.textContent = durMs > 0 ? `${(durMs / 1000).toFixed(1)}s` : (r.status === 'running' ? 'running...' : '0s');
+
+				item.onclick = () => {
+					this._selectedHistoryRunId = r.runId;
+					this._refreshHistoryDrawer();
+				};
+			}
+		}
+
+		// Right Pane: Detail & Component Traces
+		const detailEl = append(this._historyBodyEl, $('.workflow-history-detail'));
+		const selectedRun = runs.find(r => r.runId === this._selectedHistoryRunId);
+
+		if (!selectedRun) {
+			const placeholder = append(detailEl, $('.workflow-history-placeholder'));
+			append(placeholder, $('span' + ThemeIcon.asCSSSelector(Codicon.history)));
+			const pText = append(placeholder, $('p'));
+			pText.textContent = runs.length === 0
+				? 'Workflow has not been executed yet. Run the workflow to inspect full component traces and execution logs.'
+				: 'Select an execution run from the left history to view detailed primitive traces, logs, and outputs.';
+			return;
+		}
+
+		this._renderRunDetail(detailEl, selectedRun);
+	}
+
+	private _renderRunDetail(parent: HTMLElement, run: IWorkflowExecutionRun): void {
+		// 1. Top Detail Header
+		const header = append(parent, $('.history-detail-header'));
+		const titleArea = append(header, $('.history-detail-title-area'));
+		const title = append(titleArea, $('h3.history-detail-title'));
+		title.textContent = `Build #${run.runNumber ?? run.runId} (${run.workflowName})`;
+
+		const tagsRow = append(titleArea, $('.history-detail-tags'));
+		const statusTag = append(tagsRow, $(`span.history-status-badge.status-${run.status}`));
+		statusTag.textContent = run.status.toUpperCase();
+
+		const timeTag = append(tagsRow, $('span.history-tag'));
+		const durMs = run.durationMs ?? (run.completedAt ? run.completedAt - run.startedAt : 0);
+		timeTag.textContent = `Duration: ${(durMs / 1000).toFixed(2)}s`;
+
+		const startTag = append(tagsRow, $('span.history-tag'));
+		startTag.textContent = `Started: ${new Date(run.startedAt).toLocaleString()}`;
+
+		const modeTag = append(tagsRow, $('span.history-tag'));
+		modeTag.textContent = `Mode: ${run.mode}`;
+
+		const actionsArea = append(header, $('.history-detail-actions'));
+		const copyJsonBtn = append(actionsArea, $('button.history-action-btn'));
+		append(copyJsonBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+		append(copyJsonBtn, $('span')).textContent = 'Copy Run JSON';
+		copyJsonBtn.onclick = async () => {
+			const jsonStr = JSON.stringify(run, null, 2);
+			await this._clipboardService.writeText(jsonStr);
+			this._notificationService.info('Run snapshot copied to clipboard.');
+		};
+
+		// 2. Sections Container
+		const contentArea = append(parent, $('.history-detail-content'));
+
+		// Collect all executed ticket records from all nodeStates
+		const allTickets: { nodeLabel: string; ticket: IExecutedTicketRecord }[] = [];
+		for (const [nodeId, nState] of Object.entries(run.nodeStates || {})) {
+			if (nState.executedTickets && nState.executedTickets.length > 0) {
+				for (const t of nState.executedTickets) {
+					allTickets.push({ nodeLabel: nState.nodeLabel || nodeId, ticket: t });
+				}
+			}
+		}
+
+		// SECTION A: Primitive Execution Traces
+		const traceSection = append(contentArea, $('.history-section'));
+		const traceSecHeader = append(traceSection, $('.history-section-header'));
+		append(traceSecHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
+		append(traceSecHeader, $('h4')).textContent = `Component & Primitive Execution Traces (${allTickets.length} ticket${allTickets.length === 1 ? '' : 's'})`;
+
+		if (allTickets.length === 0) {
+			const noTrace = append(traceSection, $('.history-empty-hint'));
+			noTrace.textContent = 'No ticket primitives executed in this run.';
+		} else {
+			for (const { nodeLabel, ticket } of allTickets) {
+				const ticketCard = append(traceSection, $('.history-ticket-card'));
+				const tHeader = append(ticketCard, $('.history-ticket-header'));
+
+				const tLeft = append(tHeader, $('.history-ticket-left'));
+				const tTitle = append(tLeft, $('span.history-ticket-title'));
+				tTitle.textContent = `${ticket.ticketName || ticket.ticketId} [${ticket.ticketType || 'task'}]`;
+				const nodeBadge = append(tLeft, $('span.history-node-badge'));
+				nodeBadge.textContent = nodeLabel;
+
+				const tRight = append(tHeader, $('.history-ticket-right'));
+				const tStatus = append(tRight, $(`span.history-status-badge.status-${ticket.status}`));
+				tStatus.textContent = ticket.status.toUpperCase();
+				if (ticket.durationMs) {
+					const tDur = append(tRight, $('span.history-ticket-dur'));
+					tDur.textContent = `${(ticket.durationMs / 1000).toFixed(1)}s`;
+				}
+
+				// Primitive steps inside this ticket
+				const steps = ticket.stepResults || [];
+				if (steps.length === 0) {
+					const noSteps = append(ticketCard, $('.history-step-empty'));
+					noSteps.textContent = 'Ticket completed without sub-primitive steps.';
+				} else {
+					const stepsContainer = append(ticketCard, $('.history-steps-container'));
+					for (let sIdx = 0; sIdx < steps.length; sIdx++) {
+						const step = steps[sIdx];
+						this._renderPrimitiveStepTrace(stepsContainer, step, sIdx + 1);
+					}
+				}
+			}
+		}
+
+		// SECTION B: Run Logs
+		const logsSection = append(contentArea, $('.history-section'));
+		const logsSecHeader = append(logsSection, $('.history-section-header'));
+		append(logsSecHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
+		append(logsSecHeader, $('h4')).textContent = `Execution Event Logs (${run.logs?.length || 0} events)`;
+
+		const logsContainer = append(logsSection, $('.history-logs-container'));
+		if (!run.logs || run.logs.length === 0) {
+			const emptyLog = append(logsContainer, $('.history-empty-hint'));
+			emptyLog.textContent = 'No logs recorded for this run.';
+		} else {
+			for (const l of run.logs) {
+				const lRow = append(logsContainer, $('.history-log-row'));
+				const lTime = append(lRow, $('span.history-log-time'));
+				lTime.textContent = new Date(l.timestamp).toLocaleTimeString();
+				const lLevel = append(lRow, $(`span.history-log-level.level-${l.level}`));
+				lLevel.textContent = l.level.toUpperCase();
+				if (l.nodeId) {
+					const lNode = append(lRow, $('span.history-log-node'));
+					lNode.textContent = l.nodeId;
+				}
+				const lMsg = append(lRow, $('span.history-log-msg'));
+				lMsg.textContent = l.message;
+			}
+		}
+
+		// SECTION C: Context Variables Snapshot
+		if (run.contextVariables && Object.keys(run.contextVariables).length > 0) {
+			const varsSection = append(contentArea, $('.history-section'));
+			const varsSecHeader = append(varsSection, $('.history-section-header'));
+			append(varsSecHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+			append(varsSecHeader, $('h4')).textContent = `Context Variables Snapshot (${Object.keys(run.contextVariables).length} variables)`;
+
+			const varsTable = append(varsSection, $('table.history-vars-table'));
+			const thead = append(varsTable, $('thead'));
+			const hRow = append(thead, $('tr'));
+			append(hRow, $('th')).textContent = 'Variable';
+			append(hRow, $('th')).textContent = 'Type';
+			append(hRow, $('th')).textContent = 'Value';
+
+			const tbody = append(varsTable, $('tbody'));
+			for (const [vName, vVal] of Object.entries(run.contextVariables)) {
+				const bRow = append(tbody, $('tr'));
+				const nameTd = append(bRow, $('td.history-var-name'));
+				nameTd.textContent = vName;
+				const typeTd = append(bRow, $('td.history-var-type'));
+				typeTd.textContent = Array.isArray(vVal) ? 'array' : typeof vVal;
+				const valTd = append(bRow, $('td.history-var-val'));
+				valTd.textContent = typeof vVal === 'object' && vVal !== null ? JSON.stringify(vVal) : String(vVal);
+			}
+		}
+	}
+
+	private _renderPrimitiveStepTrace(parent: HTMLElement, step: IPrimitiveExecutionStepResult, index: number): void {
+		const card = append(parent, $('.workflow-trace-card'));
+		const header = append(card, $('.workflow-trace-header'));
+
+		const left = append(header, $('.workflow-trace-left'));
+		const numBadge = append(left, $('span.workflow-trace-num'));
+		numBadge.textContent = `#${index}`;
+
+		const typeBadge = append(left, $('span.workflow-output-format-badge'));
+		typeBadge.textContent = step.fieldType.toUpperCase();
+
+		const titleSpan = append(left, $('span.workflow-trace-title'));
+		titleSpan.textContent = step.fieldLabel;
+
+		const right = append(header, $('.workflow-trace-right'));
+		const statusBadge = append(right, $(`span.workflow-output-status-badge.${step.status}`));
+		statusBadge.textContent = step.status === 'success' ? 'SUCCESS' : (step.status === 'failed' ? 'FAILED' : 'SKIPPED');
+
+		if (step.durationMs) {
+			const durSpan = append(right, $('span.workflow-trace-dur'));
+			durSpan.textContent = `${step.durationMs}ms`;
+		}
+
+		const body = append(card, $('.workflow-trace-body'));
+		const d = step.details || {};
+
+		// 1. Python Primitive Trace
+		if (step.fieldType === 'python') {
+			if (d.commandLogs) {
+				const logSection = append(body, $('.trace-sub-section'));
+				const logTitleRow = append(logSection, $('.trace-sub-title-row'));
+				const logTitle = append(logTitleRow, $('span.trace-sub-title'));
+				append(logTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.terminal)));
+				append(logTitle, $('span')).textContent = 'Python Command Line Logs (stdout & stderr)';
+
+				const copyLogBtn = append(logTitleRow, $('button.trace-mini-copy-btn'));
+				append(copyLogBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+				append(copyLogBtn, $('span')).textContent = 'Copy Logs';
+				copyLogBtn.onclick = async () => {
+					await this._clipboardService.writeText(String(d.commandLogs));
+					this._notificationService.info('Command logs copied.');
+				};
+
+				const termBox = append(logSection, $('pre.workflow-trace-term'));
+				termBox.textContent = String(d.commandLogs).trim();
+			}
+
+			if (d.result !== undefined) {
+				const resSection = append(body, $('.trace-sub-section'));
+				const resTitle = append(resSection, $('.trace-sub-title'));
+				append(resTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.pass)));
+				append(resTitle, $('span')).textContent = 'Pure Return Value (OUTPUT)';
+
+				const resPre = append(resSection, $('pre.workflow-trace-pre'));
+				resPre.textContent = typeof d.result === 'object' && d.result !== null ? JSON.stringify(d.result, null, 2) : String(d.result);
+			}
+
+			if (d.executedCode) {
+				const codeSection = append(body, $('.trace-sub-section'));
+				const codeDetails = append(codeSection, $('details.trace-code-details'));
+				const summary = append(codeDetails, $('summary.trace-code-summary'));
+				summary.textContent = 'View Executed Python Code';
+				const codePre = append(codeDetails, $('pre.workflow-trace-code'));
+				codePre.textContent = String(d.executedCode).trim();
+			}
+		}
+		// 2. AI Prompt Primitive Trace
+		else if (step.fieldType === 'prompt') {
+			if (d.sentPrompt || d.rawPrompt) {
+				const promptSec = append(body, $('.trace-sub-section'));
+				const pTitle = append(promptSec, $('.trace-sub-title'));
+				append(pTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.sparkle)));
+				append(pTitle, $('span')).textContent = `Sent Prompt (${d.model || 'model'})`;
+				const pPre = append(promptSec, $('pre.workflow-trace-pre'));
+				pPre.textContent = String(d.sentPrompt || d.rawPrompt).trim();
+			}
+			if (d.response) {
+				const respSec = append(body, $('.trace-sub-section'));
+				const rTitle = append(respSec, $('.trace-sub-title'));
+				append(rTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.commentDiscussion)));
+				append(rTitle, $('span')).textContent = 'AI Model Response';
+				const rPre = append(respSec, $('pre.workflow-trace-pre'));
+				rPre.textContent = String(d.response).trim();
+			}
+		}
+		// 3. Browser Primitive Trace
+		else if (step.fieldType === 'browser') {
+			if (d.requestedUrl || d.targetUrl) {
+				const urlSec = append(body, $('.trace-sub-section'));
+				const uTitle = append(urlSec, $('.trace-sub-title'));
+				append(uTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.link)));
+				append(uTitle, $('span')).textContent = 'Requested URL';
+				const linkEl = append(urlSec, $('a.trace-url-link'));
+				linkEl.href = String(d.requestedUrl || d.targetUrl);
+				linkEl.target = '_blank';
+				linkEl.textContent = String(d.requestedUrl || d.targetUrl);
+			}
+			if (d.content) {
+				const cSec = append(body, $('.trace-sub-section'));
+				const cTitleRow = append(cSec, $('.trace-sub-title-row'));
+				const cTitle = append(cTitleRow, $('span.trace-sub-title'));
+				append(cTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.globe)));
+				append(cTitle, $('span')).textContent = `Fetched Web Content (${d.contentLength || String(d.content).length} chars)`;
+
+				const copyBtn = append(cTitleRow, $('button.trace-mini-copy-btn'));
+				append(copyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+				append(copyBtn, $('span')).textContent = 'Copy Content';
+				copyBtn.onclick = async () => {
+					await this._clipboardService.writeText(String(d.content));
+					this._notificationService.info('Fetched web content copied.');
+				};
+
+				const cPre = append(cSec, $('pre.workflow-trace-pre'));
+				cPre.textContent = String(d.content).substring(0, 3000) + (String(d.content).length > 3000 ? '\n... (truncated)' : '');
+			}
+		}
+		// 4. Parameters Primitive Trace
+		else if (step.fieldType === 'parameters') {
+			if (d.parameters && Object.keys(d.parameters).length > 0) {
+				const pSec = append(body, $('.trace-sub-section'));
+				const pTitle = append(pSec, $('.trace-sub-title'));
+				append(pTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.gear)));
+				append(pTitle, $('span')).textContent = 'Resolved Parameters';
+				const pPre = append(pSec, $('pre.workflow-trace-pre'));
+				pPre.textContent = JSON.stringify(d.parameters, null, 2);
+			}
+		}
+		// 5. Output Manifest Primitive Trace
+		else if (step.fieldType === 'output' || step.fieldType === 'result') {
+			if (d.aggregatedOutputs && Object.keys(d.aggregatedOutputs).length > 0) {
+				const oSec = append(body, $('.trace-sub-section'));
+				const oTitle = append(oSec, $('.trace-sub-title'));
+				append(oTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.layers)));
+				append(oTitle, $('span')).textContent = 'Aggregated Output Manifest';
+				const oPre = append(oSec, $('pre.workflow-trace-pre'));
+				oPre.textContent = JSON.stringify(d.aggregatedOutputs, null, 2);
+			}
+		}
+		// 6. Generic Default Fallback
+		else {
+			const gSec = append(body, $('.trace-sub-section'));
+			const gTitle = append(gSec, $('.trace-sub-title'));
+			append(gTitle, $('span')).textContent = 'Value';
+			const gPre = append(gSec, $('pre.workflow-trace-pre'));
+			gPre.textContent = typeof step.output === 'object' && step.output !== null ? JSON.stringify(step.output, null, 2) : String(step.output ?? '(empty)');
+		}
+
+		if (step.error) {
+			const errSec = append(body, $('.trace-sub-section.error'));
+			const errTitle = append(errSec, $('.trace-sub-title.error'));
+			append(errTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.error)));
+			append(errTitle, $('span')).textContent = 'Step Error';
+			const errPre = append(errSec, $('pre.workflow-trace-err'));
+			errPre.textContent = step.error;
+		}
+	}
+
 	private _centerOnNode(node: IFlowchartNode): void {
 		const wrapper = this._canvas?.parentElement;
 		if (!wrapper) return;
@@ -1888,11 +2309,21 @@ export class WorkflowEditor extends EditorPane {
 		const varCount = (this._data?.nodes || []).reduce((acc, n) => acc + this._getNodeVariables(n).length, 0);
 		this._varsCountBadgeEl.textContent = `${varCount} vars`;
 
+		const historyTab = append(tabs, $(`.drawer-tab${this._activeDrawerTab === 'history' ? '.active' : ''}`));
+		append(historyTab, $('span' + ThemeIcon.asCSSSelector(Codicon.history)));
+		append(historyTab, $('span')).textContent = localize('runHistoryTitle', 'History');
+		this._historyCountBadgeEl = append(historyTab, $('.drawer-tab-badge'));
+		const runsCount = this._workflowUri ? this._workflowExecutionService.getRunsForWorkflow(this._workflowUri).length : 0;
+		this._historyCountBadgeEl.textContent = `${runsCount} run${runsCount === 1 ? '' : 's'}`;
+
 		logsTab.onclick = () => {
 			this._switchDrawerTab('logs');
 		};
 		varsTab.onclick = () => {
 			this._switchDrawerTab('vars');
+		};
+		historyTab.onclick = () => {
+			this._switchDrawerTab('history');
 		};
 
 		const right = append(header, $('.log-header-right'));
@@ -2022,6 +2453,9 @@ export class WorkflowEditor extends EditorPane {
 
 		// Body 2: Context Variables Table
 		this._varsBodyEl = append(drawer, $('.workflow-vars-body'));
+
+		// Body 3: Run History & Trace Inspector
+		this._historyBodyEl = append(drawer, $('.workflow-history-body'));
 
 		this._switchDrawerTab(this._activeDrawerTab);
 	}

@@ -30,6 +30,17 @@ export interface IWorkflowLogEntry {
 	data?: any;
 }
 
+export interface IPrimitiveExecutionStepResult {
+	fieldId: string;
+	fieldLabel: string;
+	fieldType: string;
+	output?: any;
+	status: 'success' | 'skipped' | 'failed';
+	durationMs: number;
+	error?: string;
+	details?: Record<string, any>;
+}
+
 export interface IExecutedTicketRecord {
 	ticketId: string;
 	ticketName: string;
@@ -37,6 +48,9 @@ export interface IExecutedTicketRecord {
 	agentName?: string;
 	status: 'success' | 'failed';
 	output?: any;
+	outputSpecs?: any[];
+	stepResults?: IPrimitiveExecutionStepResult[];
+	contextVariables?: Record<string, any>;
 	durationMs?: number;
 }
 
@@ -65,15 +79,18 @@ export interface IWorkflowNodeExecutionState {
 
 export interface IWorkflowExecutionRun {
 	runId: string;
+	runNumber?: number;
 	workflowUri: string;
 	workflowName: string;
 	status: WorkflowRunStatus;
 	mode: 'standard' | 'daemon' | 'step';
+	trigger?: 'manual' | 'schedule' | 'api' | 'button';
 	currentNodeId?: string;
 	visitedNodeIds: string[];
 	startedAt: number;
 	updatedAt: number;
 	completedAt?: number;
+	durationMs?: number;
 	contextVariables: Record<string, any>;
 	nodeStates: Record<string, IWorkflowNodeExecutionState>;
 	logs: IWorkflowLogEntry[];

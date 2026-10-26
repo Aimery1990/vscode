@@ -448,7 +448,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	getRunsForWorkflow(workflowUri: URI | string): IWorkflowExecutionRun[] {
 		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
-		return Array.from(this._runs.values()).filter(r => r.workflowUri === uriStr);
+		return Array.from(this._runs.values())
+			.filter(r => r.workflowUri === uriStr && r.runId)
+			.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+	}
+
+	deleteRun(runId: string): void {
+		this._runs.delete(runId);
+		for (const [uri, id] of this._activeRunsByWorkflow.entries()) {
+			if (id === runId) {
+				this._activeRunsByWorkflow.delete(uri);
+			}
+		}
 	}
 
 	getDisplayCards(workflowUri: URI | string): IWorkflowDisplayCard[] {
@@ -547,12 +558,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 		const workflowName = this._resolveWorkflowName(uriStr);
 
+		const priorRuns = this.getRunsForWorkflow(uriStr);
+		const maxRunNumber = priorRuns.reduce((max, r) => Math.max(max, r.runNumber || 0), 0);
+		const runNumber = maxRunNumber + 1;
+
 		const run: IWorkflowExecutionRun = {
 			runId,
+			runNumber,
 			workflowUri: uriStr,
 			workflowName,
 			status: 'running',
 			mode: options?.mode || 'standard',
+			trigger: 'manual',
 			currentNodeId: undefined,
 			visitedNodeIds: [],
 			startedAt: Date.now(),
@@ -602,6 +619,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			run.error = err.message || String(err);
 			run.updatedAt = Date.now();
 			run.completedAt = Date.now();
+			run.durationMs = run.completedAt - run.startedAt;
 			this._emitLog(run, 'error', `Execution failed: ${run.error}`);
 			this._notifyRunChanged(run);
 		});
@@ -988,9 +1006,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		if (!this._cancelledRuns.has(run.runId)) {
 			run.status = 'completed';
 			run.completedAt = Date.now();
+			run.durationMs = run.completedAt - run.startedAt;
 			run.updatedAt = Date.now();
-			this._emitLog(run, 'info', `Workflow '${run.workflowName}' executed successfully to completion!`);
-			this.notificationService.info(`Workflow '${run.workflowName}' completed successfully.`);
+			this._emitLog(run, 'info', `Workflow '${run.workflowName}' executed successfully to completion in ${(run.durationMs / 1000).toFixed(1)}s!`);
+			this.notificationService.info(`Workflow '${run.workflowName}' completed successfully (${(run.durationMs / 1000).toFixed(1)}s).`);
 			this._notifyRunChanged(run);
 		}
 	}
@@ -1395,12 +1414,15 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						});
 					} catch {}
 				}
-				const ticketRecord = {
+				const ticketRecord: IExecutedTicketRecord = {
 					ticketId: execRes.ticketId || ticketIdOrPath,
 					ticketName: execRes.ticketName || ticketIdOrPath,
 					ticketType: execRes.ticketType || 'task',
 					status: (execRes.success ? 'success' : 'failed') as 'success' | 'failed',
 					output: execRes.output,
+					outputSpecs: (execRes as any).outputSpecs,
+					stepResults: execRes.stepResults,
+					contextVariables: execRes.contextVariables,
 					durationMs: Date.now() - startMs
 				};
 				state.executedTickets.push(ticketRecord);

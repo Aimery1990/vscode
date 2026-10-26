@@ -80,6 +80,7 @@ export interface IPrimitiveExecutionStepResult {
 	status: 'success' | 'skipped' | 'failed';
 	durationMs: number;
 	error?: string;
+	details?: Record<string, any>;
 }
 
 export interface ITicketRunResult {
@@ -568,6 +569,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 				try {
 					let stepOutput: any = undefined;
+					let stepDetails: Record<string, any> = {};
 
 					switch (fieldType) {
 						case 'parameters': {
@@ -594,6 +596,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							stepOutput = resolvedParams;
 							contextVariables[fieldLabel] = resolvedParams;
 							contextVariables[this._cleanKey(fieldLabel)] = resolvedParams;
+							stepDetails = {
+								parameters: resolvedParams,
+								parameterCount: Object.keys(resolvedParams).length,
+								schema: (field.parameters || []).map(p => ({ name: p.name || p.id, type: p.type, defaultValue: p.defaultValue }))
+							};
 							break;
 						}
 
@@ -668,6 +675,14 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								stepOutput = `[Browser: Skipped - Invalid or empty URL: '${targetUrl}']`;
 								contextVariables[fieldLabel] = stepOutput;
 							}
+
+							stepDetails = {
+								targetUrl: targetUrl,
+								requestedUrl: interpolatedUrl || targetUrl,
+								content: stepOutput,
+								contentLength: typeof stepOutput === 'string' ? stepOutput.length : 0,
+								credentials: browserCreds || []
+							};
 							break;
 						}
 
@@ -729,6 +744,14 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							});
 							contextVariables[fieldLabel] = stepOutput;
 							contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+
+							stepDetails = {
+								rawPrompt: rawPrompt,
+								sentPrompt: interpolatedPrompt,
+								model: promptModel,
+								provider: promptProvider || 'auto',
+								response: stepOutput
+							};
 							break;
 						}
 
@@ -798,6 +821,16 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							contextVariables[`${this._cleanKey(fieldLabel)}_output`] = returnVal;
 							contextVariables[`${this._cleanKey(fieldLabel)}_logs`] = execResult.output;
 							contextVariables[`${this._cleanKey(fieldLabel)}_code`] = rawCode;
+
+							stepDetails = {
+								pythonPath: execResult.pythonPath || pythonPath,
+								rawCode: rawCode,
+								executedCode: interpolatedCode,
+								commandLogs: execResult.output, // stdout & stderr
+								result: execResult.result,
+								exitCode: execResult.exitCode,
+								durationMs: execResult.durationMs
+							};
 							break;
 						}
 
@@ -828,6 +861,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							customMetadata[fieldLabel] = typeof stepOutput === 'object' ? JSON.stringify(stepOutput, null, 2) : String(stepOutput);
 							contextVariables[fieldLabel] = stepOutput;
 							contextVariables['output'] = stepOutput;
+
+							stepDetails = {
+								outputSpecs: field.outputSpecs || [],
+								aggregatedOutputs: aggregatedMap
+							};
 							break;
 						}
 
@@ -839,6 +877,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							stepOutput = currentVal;
 							contextVariables[fieldLabel] = currentVal;
 							contextVariables[this._cleanKey(fieldLabel)] = currentVal;
+
+							stepDetails = {
+								initialValue: currentVal,
+								runtimeValue: stepOutput
+							};
 							break;
 						}
 					}
@@ -849,7 +892,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						fieldType: fieldType,
 						output: stepOutput,
 						status: 'success',
-						durationMs: Date.now() - stepStart
+						durationMs: Date.now() - stepStart,
+						details: stepDetails
 					});
 				} catch (stepErr: any) {
 					this.logService.error(`[TicketWorkflowRuntime] Step '${fieldLabel}' failed:`, stepErr);
@@ -859,7 +903,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						fieldType: fieldType,
 						status: 'failed',
 						error: stepErr.message || String(stepErr),
-						durationMs: Date.now() - stepStart
+						durationMs: Date.now() - stepStart,
+						details: stepDetails
 					});
 				}
 			}
