@@ -11069,7 +11069,7 @@ export class WorkflowEditor extends EditorPane {
 				titleSpan.textContent = item.label;
 
 				if (item.format) {
-					const formatBadge = append(leftGroup, $(`span.workflow-output-format-badge.${item.format.toLowerCase()}`));
+					const formatBadge = append(leftGroup, $('span.workflow-output-format-badge'));
 					formatBadge.textContent = item.format.toUpperCase();
 				}
 

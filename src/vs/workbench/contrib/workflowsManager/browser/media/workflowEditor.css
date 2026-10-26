@@ -4557,33 +4557,9 @@
 	border-radius: 3px;
 	letter-spacing: 0.04em;
 	flex-shrink: 0;
-	color: #c084fc;
-	background: rgba(192, 132, 252, 0.12);
-	border: 1px solid rgba(192, 132, 252, 0.25);
-}
-
-.workflow-output-format-badge.text {
-	color: #94a3b8;
-	background: rgba(148, 163, 184, 0.14);
-	border-color: rgba(148, 163, 184, 0.28);
-}
-
-.workflow-output-format-badge.table {
 	color: #38bdf8;
-	background: rgba(56, 189, 248, 0.14);
-	border-color: rgba(56, 189, 248, 0.3);
-}
-
-.workflow-output-format-badge.json {
-	color: #c084fc;
-	background: rgba(192, 132, 252, 0.12);
-	border-color: rgba(192, 132, 252, 0.25);
-}
-
-.workflow-output-format-badge.markdown {
-	color: #fbbf24;
-	background: rgba(251, 191, 36, 0.14);
-	border-color: rgba(251, 191, 36, 0.3);
+	background: rgba(56, 189, 248, 0.12);
+	border: 1px solid rgba(56, 189, 248, 0.25);
 }
 
 .workflow-output-status-badge {
