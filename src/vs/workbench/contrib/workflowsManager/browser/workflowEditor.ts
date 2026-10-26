@@ -30,7 +30,15 @@ import { IWorkspaceContextService } from '../../../../platform/workspace/common/
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
 import { IWorkflowExecutionService, IWorkflowDisplayCard } from '../common/workflowExecutionService.js';
-import { IWorkflowExecutionRun, IWorkflowLogEntry, IPrimitiveExecutionStepResult, IExecutedTicketRecord } from '../common/workflowExecutionModel.js';
+import {
+	IWorkflowExecutionRun,
+	IWorkflowLogEntry,
+	IPrimitiveExecutionStepResult,
+	IExecutedTicketRecord,
+	IWorkflowPathStep,
+	IWorkflowNodeOperation,
+	IWorkflowStepTransition
+} from '../common/workflowExecutionModel.js';
 
 export interface INodeVariable {
 	name: string;
@@ -2012,69 +2020,60 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		// SECTION A: Primitive Execution Traces (Hierarchical Drill-Down Accordion)
+		// SECTION A: Chronological Execution Path & Node-by-Node Traces
 		const traceSection = append(contentArea, $('.history-section'));
-		const traceSecHeader = append(traceSection, $('.history-section-header'));
+		const traceSecHeader = append(traceSection, $('.history-section-header.collapsible'));
+		const traceSecChevron = append(traceSecHeader, $('span.history-chevron'));
+		append(traceSecChevron, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
 		append(traceSecHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
-		append(traceSecHeader, $('h4')).textContent = `Component & Primitive Execution Traces (${allTickets.length} ticket${allTickets.length === 1 ? '' : 's'})`;
+		const traceTitle = append(traceSecHeader, $('h4'));
 
-		if (allTickets.length === 0) {
-			const noTrace = append(traceSection, $('.history-empty-hint'));
-			noTrace.textContent = 'No ticket primitives executed in this run.';
+		const traceContainer = append(traceSection, $('.history-trace-container'));
+
+		const pathSteps = run.executionPath || [];
+		traceTitle.textContent = pathSteps.length > 0
+			? `Chronological Execution Path & Node Traces (${pathSteps.length} step${pathSteps.length === 1 ? '' : 's'})`
+			: `Component & Primitive Execution Traces (${allTickets.length} ticket${allTickets.length === 1 ? '' : 's'})`;
+
+		let isTraceSecExpanded = true;
+		traceSecHeader.onclick = () => {
+			isTraceSecExpanded = !isTraceSecExpanded;
+			traceContainer.style.display = isTraceSecExpanded ? 'block' : 'none';
+			clearNode(traceSecChevron);
+			append(traceSecChevron, $('span' + ThemeIcon.asCSSSelector(isTraceSecExpanded ? Codicon.chevronDown : Codicon.chevronRight)));
+		};
+
+		if (pathSteps.length > 0) {
+			for (const pStep of pathSteps) {
+				this._renderPathStep(traceContainer, pStep);
+			}
+		} else if (allTickets.length === 0) {
+			const noTrace = append(traceContainer, $('.history-empty-hint'));
+			noTrace.textContent = 'No ticket primitives or nodes recorded in this run.';
 		} else {
+			// Fallback for older runs
 			for (const { nodeLabel, ticket } of allTickets) {
-				const ticketCard = append(traceSection, $('.history-ticket-card'));
-				const tHeader = append(ticketCard, $('.history-ticket-header'));
-
-				const tLeft = append(tHeader, $('.history-ticket-left'));
-				const tChevron = append(tLeft, $('span.history-chevron' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
-				const tTitle = append(tLeft, $('span.history-ticket-title'));
-				tTitle.textContent = `${ticket.ticketName || ticket.ticketId} [${ticket.ticketType || 'task'}]`;
-				const nodeBadge = append(tLeft, $('span.history-node-badge'));
-				nodeBadge.textContent = nodeLabel;
-
-				const steps = ticket.stepResults || [];
-
-				const tRight = append(tHeader, $('.history-ticket-right'));
-				const countBadge = append(tRight, $('span.history-count-tag'));
-				countBadge.textContent = `${steps.length} components`;
-
-				const tStatus = append(tRight, $(`span.history-status-badge.status-${ticket.status}`));
-				tStatus.textContent = ticket.status.toUpperCase();
-				if (ticket.durationMs) {
-					const tDur = append(tRight, $('span.history-ticket-dur'));
-					tDur.textContent = `${(ticket.durationMs / 1000).toFixed(1)}s`;
-				}
-
-				// Primitive steps inside this ticket (expandable container)
-				const stepsContainer = append(ticketCard, $('.history-steps-container'));
-				let isTicketExpanded = true;
-				tHeader.onclick = () => {
-					isTicketExpanded = !isTicketExpanded;
-					stepsContainer.style.display = isTicketExpanded ? 'flex' : 'none';
-					clearNode(tChevron);
-					append(tChevron, $('span' + ThemeIcon.asCSSSelector(isTicketExpanded ? Codicon.chevronDown : Codicon.chevronRight)));
-				};
-
-				if (steps.length === 0) {
-					const noSteps = append(stepsContainer, $('.history-step-empty'));
-					noSteps.textContent = 'Ticket completed without sub-primitive steps.';
-				} else {
-					for (let sIdx = 0; sIdx < steps.length; sIdx++) {
-						const step = steps[sIdx];
-						this._renderPrimitiveStepTrace(stepsContainer, step, sIdx + 1);
-					}
-				}
+				this._renderTicketCard(traceContainer, ticket, nodeLabel);
 			}
 		}
 
-		// SECTION B: Run Logs
+		// SECTION B: Run Logs (Collapsible)
 		const logsSection = append(contentArea, $('.history-section'));
-		const logsSecHeader = append(logsSection, $('.history-section-header'));
+		const logsSecHeader = append(logsSection, $('.history-section-header.collapsible'));
+		const logsSecChevron = append(logsSecHeader, $('span.history-chevron'));
+		append(logsSecChevron, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
 		append(logsSecHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
 		append(logsSecHeader, $('h4')).textContent = `Execution Event Logs (${run.logs?.length || 0} events)`;
 
 		const logsContainer = append(logsSection, $('.history-logs-container'));
+		let isLogsSecExpanded = true;
+		logsSecHeader.onclick = () => {
+			isLogsSecExpanded = !isLogsSecExpanded;
+			logsContainer.style.display = isLogsSecExpanded ? 'block' : 'none';
+			clearNode(logsSecChevron);
+			append(logsSecChevron, $('span' + ThemeIcon.asCSSSelector(isLogsSecExpanded ? Codicon.chevronDown : Codicon.chevronRight)));
+		};
+
 		if (!run.logs || run.logs.length === 0) {
 			const emptyLog = append(logsContainer, $('.history-empty-hint'));
 			emptyLog.textContent = 'No logs recorded for this run.';
@@ -2094,14 +2093,25 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		// SECTION C: Context Variables Snapshot
+		// SECTION C: Context Variables Snapshot (Collapsible)
 		if (run.contextVariables && Object.keys(run.contextVariables).length > 0) {
 			const varsSection = append(contentArea, $('.history-section'));
-			const varsSecHeader = append(varsSection, $('.history-section-header'));
+			const varsSecHeader = append(varsSection, $('.history-section-header.collapsible'));
+			const varsSecChevron = append(varsSecHeader, $('span.history-chevron'));
+			append(varsSecChevron, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
 			append(varsSecHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
 			append(varsSecHeader, $('h4')).textContent = `Context Variables Snapshot (${Object.keys(run.contextVariables).length} variables)`;
 
-			const varsTable = append(varsSection, $('table.history-vars-table'));
+			const varsContainer = append(varsSection, $('.history-vars-container'));
+			let isVarsSecExpanded = true;
+			varsSecHeader.onclick = () => {
+				isVarsSecExpanded = !isVarsSecExpanded;
+				varsContainer.style.display = isVarsSecExpanded ? 'block' : 'none';
+				clearNode(varsSecChevron);
+				append(varsSecChevron, $('span' + ThemeIcon.asCSSSelector(isVarsSecExpanded ? Codicon.chevronDown : Codicon.chevronRight)));
+			};
+
+			const varsTable = append(varsContainer, $('table.history-vars-table'));
 			const thead = append(varsTable, $('thead'));
 			const hRow = append(thead, $('tr'));
 			append(hRow, $('th')).textContent = 'Variable';
@@ -2121,12 +2131,187 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
+	private _renderPathStep(parent: HTMLElement, pStep: IWorkflowPathStep): void {
+		const stepCard = append(parent, $('.history-path-step-card'));
+		const header = append(stepCard, $('.history-path-step-header'));
+
+		const left = append(header, $('.history-path-step-left'));
+		const stepChevron = append(left, $('span.history-chevron'));
+		append(stepChevron, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
+
+		const numBadge = append(left, $('span.history-step-num-badge'));
+		numBadge.textContent = `Step #${pStep.stepIndex}`;
+
+		const typeBadge = append(left, $('span.history-node-type-badge'));
+		typeBadge.textContent = (pStep.nodeType || 'node').toUpperCase();
+
+		const titleSpan = append(left, $('span.history-path-step-title'));
+		titleSpan.textContent = pStep.nodeLabel;
+
+		const right = append(header, $('.history-path-step-right'));
+		if (pStep.operations && pStep.operations.length > 0) {
+			const opBadge = append(right, $('span.history-count-tag'));
+			opBadge.textContent = `${pStep.operations.length} action${pStep.operations.length === 1 ? '' : 's'}`;
+		}
+
+		const statusBadge = append(right, $(`span.history-status-badge.status-${pStep.status}`));
+		statusBadge.textContent = pStep.status.toUpperCase();
+
+		if (pStep.durationMs !== undefined && pStep.durationMs > 0) {
+			const durSpan = append(right, $('span.history-ticket-dur'));
+			durSpan.textContent = pStep.durationMs >= 1000 ? `${(pStep.durationMs / 1000).toFixed(2)}s` : `${pStep.durationMs}ms`;
+		}
+
+		const body = append(stepCard, $('.history-path-step-body'));
+		let isExpanded = true;
+		header.onclick = () => {
+			isExpanded = !isExpanded;
+			body.style.display = isExpanded ? 'flex' : 'none';
+			clearNode(stepChevron);
+			append(stepChevron, $('span' + ThemeIcon.asCSSSelector(isExpanded ? Codicon.chevronDown : Codicon.chevronRight)));
+		};
+
+		// 1. Render operations executed inside this node
+		if (pStep.operations && pStep.operations.length > 0) {
+			for (const op of pStep.operations) {
+				if (op.type === 'run_ticket' && op.executedTicket) {
+					this._renderTicketCard(body, op.executedTicket, pStep.nodeLabel);
+				} else if (op.type === 'create_ticket') {
+					const opCard = append(body, $('.history-op-card.create-ticket'));
+					const opHeader = append(opCard, $('.history-op-header'));
+					append(opHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.gitCommit)));
+					append(opHeader, $('span.history-op-title')).textContent = op.label;
+
+					const opBody = append(opCard, $('.history-op-body'));
+					const d = op.details || {};
+					if (d.ticketId) {
+						const row = append(opBody, $('.history-op-row'));
+						append(row, $('span.history-op-key')).textContent = 'Created Ticket:';
+						append(row, $('span.history-op-val.highlight')).textContent = `${d.ticketId} (${d.title || ''})`;
+					}
+					if (d.targetFolder) {
+						const row = append(opBody, $('.history-op-row'));
+						append(row, $('span.history-op-key')).textContent = 'Target Folder:';
+						append(row, $('span.history-op-val')).textContent = d.targetFolder;
+					}
+					if (d.parameters && Object.keys(d.parameters).length > 0) {
+						const row = append(opBody, $('.history-op-row'));
+						append(row, $('span.history-op-key')).textContent = 'Parameters:';
+						const pPre = append(row, $('pre.workflow-trace-pre'));
+						pPre.textContent = JSON.stringify(d.parameters, null, 2);
+					}
+				} else if (op.type === 'set_variable') {
+					const opCard = append(body, $('.history-op-card.set-var'));
+					const opHeader = append(opCard, $('.history-op-header'));
+					append(opHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+					append(opHeader, $('span.history-op-title')).textContent = op.label;
+
+					if (op.details?.expression) {
+						const opBody = append(opCard, $('.history-op-body'));
+						const row = append(opBody, $('.history-op-row'));
+						append(row, $('span.history-op-key')).textContent = 'Expression:';
+						append(row, $('span.history-op-val')).textContent = op.details.expression;
+					}
+				} else if (op.type === 'display') {
+					const opCard = append(body, $('.history-op-card.display'));
+					const opHeader = append(opCard, $('.history-op-header'));
+					append(opHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.preview)));
+					append(opHeader, $('span.history-op-title')).textContent = op.label;
+
+					if (op.details?.formattedText) {
+						const opBody = append(opCard, $('.history-op-body'));
+						const dPre = append(opBody, $('pre.workflow-trace-pre'));
+						dPre.textContent = op.details.formattedText;
+					}
+				} else {
+					const opCard = append(body, $('.history-op-card.general'));
+					const opHeader = append(opCard, $('.history-op-header'));
+					append(opHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.info)));
+					append(opHeader, $('span.history-op-title')).textContent = op.label;
+				}
+			}
+		}
+
+		// 2. Render outgoing transition & condition evaluation
+		if (pStep.transition) {
+			const t = pStep.transition;
+			const transRow = append(body, $('.history-step-transition'));
+			const transIcon = append(transRow, $('span.history-trans-icon'));
+			append(transIcon, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowRight)));
+
+			const transLabel = append(transRow, $('span.history-trans-label'));
+			transLabel.textContent = 'Transition:';
+
+			const pill = append(transRow, $('span.history-transition-pill'));
+			if (t.conditionLabel) {
+				pill.classList.add('condition');
+				pill.textContent = t.explanation || t.conditionLabel;
+				if (t.toNodeLabel) {
+					const destSpan = append(transRow, $('span.history-trans-dest'));
+					destSpan.textContent = `──▶ Navigate to '${t.toNodeLabel}'`;
+				}
+			} else {
+				pill.classList.add('unconditional');
+				pill.textContent = t.explanation || `Proceed to '${t.toNodeLabel || 'Next Node'}'`;
+			}
+		}
+	}
+
+	private _renderTicketCard(parent: HTMLElement, ticket: IExecutedTicketRecord, nodeLabel: string): void {
+		const ticketCard = append(parent, $('.history-ticket-card'));
+		const tHeader = append(ticketCard, $('.history-ticket-header'));
+
+		const tLeft = append(tHeader, $('.history-ticket-left'));
+		const tChevron = append(tLeft, $('span.history-chevron'));
+		append(tChevron, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
+
+		const tTitle = append(tLeft, $('span.history-ticket-title'));
+		tTitle.textContent = `${ticket.ticketName || ticket.ticketId} [${ticket.ticketType || 'task'}]`;
+		const nodeBadge = append(tLeft, $('span.history-node-badge'));
+		nodeBadge.textContent = nodeLabel;
+
+		const steps = ticket.stepResults || [];
+
+		const tRight = append(tHeader, $('.history-ticket-right'));
+		const countBadge = append(tRight, $('span.history-count-tag'));
+		countBadge.textContent = `${steps.length} components`;
+
+		const tStatus = append(tRight, $(`span.history-status-badge.status-${ticket.status}`));
+		tStatus.textContent = ticket.status.toUpperCase();
+		if (ticket.durationMs) {
+			const tDur = append(tRight, $('span.history-ticket-dur'));
+			tDur.textContent = `${(ticket.durationMs / 1000).toFixed(1)}s`;
+		}
+
+		// Primitive steps inside this ticket (expandable container)
+		const stepsContainer = append(ticketCard, $('.history-steps-container'));
+		let isTicketExpanded = true;
+		tHeader.onclick = () => {
+			isTicketExpanded = !isTicketExpanded;
+			stepsContainer.style.display = isTicketExpanded ? 'flex' : 'none';
+			clearNode(tChevron);
+			append(tChevron, $('span' + ThemeIcon.asCSSSelector(isTicketExpanded ? Codicon.chevronDown : Codicon.chevronRight)));
+		};
+
+		if (steps.length === 0) {
+			const noSteps = append(stepsContainer, $('.history-step-empty'));
+			noSteps.textContent = 'Ticket completed without sub-primitive steps.';
+		} else {
+			for (let sIdx = 0; sIdx < steps.length; sIdx++) {
+				const step = steps[sIdx];
+				this._renderPrimitiveStepTrace(stepsContainer, step, sIdx + 1);
+			}
+		}
+	}
+
 	private _renderPrimitiveStepTrace(parent: HTMLElement, step: IPrimitiveExecutionStepResult, index: number): void {
 		const card = append(parent, $('.workflow-trace-card'));
 		const header = append(card, $('.workflow-trace-header'));
 
 		const left = append(header, $('.workflow-trace-left'));
-		const stepChevron = append(left, $('span.history-chevron' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
+		const stepChevron = append(left, $('span.history-chevron'));
+		append(stepChevron, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
+
 		const numBadge = append(left, $('span.workflow-trace-num'));
 		numBadge.textContent = `#${index}`;
 
@@ -2360,7 +2545,50 @@ export class WorkflowEditor extends EditorPane {
 		lines.push(sep);
 		lines.push('');
 
-		// 1. Executed Tickets & Components
+		// 1. Chronological Node Execution Path (if present)
+		if (run.executionPath && run.executionPath.length > 0) {
+			lines.push('--- CHRONOLOGICAL EXECUTION PATH & NODE TRACES ---');
+			for (const pStep of run.executionPath) {
+				const sDur = pStep.durationMs ? `${(pStep.durationMs / 1000).toFixed(2)}s` : '0s';
+				lines.push(`\n[Step #${pStep.stepIndex}] Node: '${pStep.nodeLabel}' (${pStep.nodeType}) | Status: ${pStep.status.toUpperCase()} | Duration: ${sDur}`);
+				if (pStep.operations && pStep.operations.length > 0) {
+					for (const op of pStep.operations) {
+						lines.push(`  • Action: ${op.label}`);
+						if (op.type === 'create_ticket' && op.details) {
+							if (op.details.ticketId) lines.push(`    Created Ticket ID: ${op.details.ticketId}`);
+							if (op.details.targetFolder) lines.push(`    Target Folder: ${op.details.targetFolder}`);
+							if (op.details.parameters) lines.push(`    Parameters: ${JSON.stringify(op.details.parameters)}`);
+						} else if (op.type === 'set_variable' && op.details) {
+							if (op.details.expression) lines.push(`    Expression: ${op.details.expression}`);
+						} else if (op.type === 'run_ticket' && op.executedTicket) {
+							const t = op.executedTicket;
+							lines.push(`    Ticket: ${t.ticketName} [${t.ticketType || 'task'}] (${t.status.toUpperCase()})`);
+							for (const step of (t.stepResults || [])) {
+								const d = step.details || {};
+								lines.push(`      - Component: ${step.fieldLabel} [${step.fieldType.toUpperCase()}]`);
+								if (step.fieldType === 'python') {
+									if (d.commandLogs) lines.push(`        Python Logs: ${String(d.commandLogs).trim().replace(/\n/g, '\n        ')}`);
+									if (d.result !== undefined) lines.push(`        OUTPUT: ${JSON.stringify(d.result)}`);
+								} else if (step.fieldType === 'prompt') {
+									if (d.sentPrompt) lines.push(`        Prompt: ${String(d.sentPrompt).trim()}`);
+									if (d.response) lines.push(`        Response: ${String(d.response).trim()}`);
+								} else if (step.fieldType === 'browser') {
+									if (d.requestedUrl) lines.push(`        URL: ${d.requestedUrl}`);
+								} else {
+									lines.push(`        Value: ${typeof step.output === 'object' ? JSON.stringify(step.output) : String(step.output)}`);
+								}
+							}
+						}
+					}
+				}
+				if (pStep.transition) {
+					lines.push(`  ──▶ Transition: ${pStep.transition.explanation || pStep.transition.conditionLabel || 'Proceed'}`);
+				}
+			}
+			lines.push('');
+		}
+
+		// 2. Executed Tickets & Components (Fallback or summary)
 		lines.push('--- EXECUTED TICKETS & COMPONENT TRACES ---');
 		const allTickets: { nodeLabel: string; ticket: IExecutedTicketRecord }[] = [];
 		for (const [nodeId, nState] of Object.entries(run.nodeStates || {})) {

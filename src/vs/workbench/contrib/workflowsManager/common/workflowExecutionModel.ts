@@ -77,6 +77,38 @@ export interface IWorkflowNodeExecutionState {
 	waitingHumanPrompt?: IWorkflowHumanPrompt;
 }
 
+export interface IWorkflowNodeOperation {
+	type: 'create_ticket' | 'run_ticket' | 'set_variable' | 'call_function' | 'display' | 'general';
+	label: string;
+	details?: Record<string, any>;
+	executedTicket?: IExecutedTicketRecord;
+	durationMs?: number;
+}
+
+export interface IWorkflowStepTransition {
+	fromNodeId: string;
+	fromNodeLabel: string;
+	toNodeId?: string;
+	toNodeLabel?: string;
+	conditionLabel?: string;
+	conditionEvaluation?: boolean;
+	explanation?: string;
+}
+
+export interface IWorkflowPathStep {
+	stepIndex: number;
+	nodeId: string;
+	nodeLabel: string;
+	nodeType: string;
+	startedAt: number;
+	completedAt?: number;
+	durationMs?: number;
+	status: 'success' | 'failed' | 'running';
+	error?: string;
+	operations: IWorkflowNodeOperation[];
+	transition?: IWorkflowStepTransition;
+}
+
 export interface IWorkflowExecutionRun {
 	runId: string;
 	runNumber?: number;
@@ -93,6 +125,7 @@ export interface IWorkflowExecutionRun {
 	durationMs?: number;
 	contextVariables: Record<string, any>;
 	nodeStates: Record<string, IWorkflowNodeExecutionState>;
+	executionPath?: IWorkflowPathStep[];
 	logs: IWorkflowLogEntry[];
 	error?: string;
 }

@@ -15,7 +15,10 @@ import {
 	IWorkflowEngineOptions,
 	IWorkflowExecutionRun,
 	IWorkflowLogEntry,
-	IWorkflowNodeExecutionState
+	IWorkflowNodeExecutionState,
+	IWorkflowPathStep,
+	IWorkflowNodeOperation,
+	IWorkflowStepTransition
 } from '../common/workflowExecutionModel.js';
 
 interface INodePipelineStep {
@@ -531,6 +534,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			updatedAt: Date.now(),
 			contextVariables: {},
 			nodeStates: {},
+			executionPath: [],
 			logs: []
 		};
 		this._notifyRunChanged(idleRun);
@@ -576,6 +580,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			updatedAt: Date.now(),
 			contextVariables: { ...(options?.initialInputs || {}) },
 			nodeStates: {},
+			executionPath: [],
 			logs: []
 		};
 
@@ -783,12 +788,29 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const nextNodesNested = await Promise.all(
 					currentNodes.map(async (node) => {
 						const nodeState = run.nodeStates[node.id];
+						const pathStep: IWorkflowPathStep = {
+							stepIndex: (run.executionPath?.length || 0) + 1,
+							nodeId: node.id,
+							nodeLabel: node.label || node.id,
+							nodeType: node.type,
+							startedAt: Date.now(),
+							status: 'running',
+							operations: []
+						};
+						if (!run.executionPath) {
+							run.executionPath = [];
+						}
+						run.executionPath.push(pathStep);
+
 						this._emitLog(run, 'info', `Executing node: '${node.label}' (${node.type})`, { nodeId: node.id });
 						try {
-							await this._executeNode(run, node, nodeState);
+							await this._executeNode(run, node, nodeState, pathStep);
 							nodeState.status = 'success';
 							nodeState.completedAt = Date.now();
 							nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
+							pathStep.status = 'success';
+							pathStep.completedAt = nodeState.completedAt;
+							pathStep.durationMs = nodeState.durationMs;
 							this._emitLog(run, 'info', `Completed node: '${node.label}' in ${nodeState.durationMs}ms`, { nodeId: node.id });
 
 							// Assign to bound context variables if present
@@ -950,6 +972,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							nodeState.error = err.message || String(err);
 							nodeState.completedAt = Date.now();
 							nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
+							pathStep.status = 'failed';
+							pathStep.error = nodeState.error;
+							pathStep.completedAt = nodeState.completedAt;
+							pathStep.durationMs = nodeState.durationMs;
 							this._emitLog(run, 'error', `Node '${node.label}' failed: ${nodeState.error}`, { nodeId: node.id });
 							throw err;
 						} finally {
@@ -959,11 +985,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						// Check if end node
 						if (this._isEndNode(node)) {
 							this._emitLog(run, 'info', `Reached end node: '${node.label}'. Execution branch completed.`);
+							pathStep.operations.push({
+								type: 'general',
+								label: `End: Completed branch at '${node.label}'`,
+								details: { message: 'Reached workflow termination node' }
+							});
 							return [];
 						}
 
 						// Resolve next nodes from this node
-						return await this._resolveNextNodes(run, node, data);
+						return await this._resolveNextNodes(run, node, data, pathStep);
 					})
 				);
 
@@ -1017,11 +1048,17 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	private async _executeNode(
 		run: IWorkflowExecutionRun,
 		node: IFlowchartNode,
-		state: IWorkflowNodeExecutionState
+		state: IWorkflowNodeExecutionState,
+		pathStep?: IWorkflowPathStep
 	): Promise<void> {
 		// 1. Start Node
 		if (node.type === 'circle' && (node.label.toLowerCase() === 'start' || !node.label)) {
 			state.output = { message: 'Workflow started' };
+			pathStep?.operations.push({
+				type: 'general',
+				label: `Start Node: '${node.label || 'Start'}'`,
+				details: { message: 'Workflow execution initiated' }
+			});
 			return;
 		}
 
@@ -1155,10 +1192,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const isCallFnStep = step.type === 'call_function' || (step.expression && this._isFunctionCallExpression(step.expression));
 
 				if (isCallFnStep) {
-					await this._executeFunctionStep(run, node, step, i, state);
+					await this._executeFunctionStep(run, node, step, i, state, pathStep);
 				} else if (isRunTicketStep && step.ticketName) {
 					this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'${step.parameters ? ` (PARAM: ${step.parameters})` : ''}`);
 					const ticketRecord = await runTicket(step.ticketName, step.ticketType, step.ticketUri, step.parameters);
+					pathStep?.operations.push({
+						type: 'run_ticket',
+						label: `Run Ticket: '${step.ticketName}' [${step.ticketType || 'task'}]`,
+						executedTicket: ticketRecord,
+						durationMs: ticketRecord.durationMs
+					});
 					if (step.targetVariable) {
 						const varKey = step.targetVariable.trim().replace(/^@/, '');
 						run.contextVariables[varKey] = ticketRecord.output;
@@ -1214,6 +1257,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					run.contextVariables[varKey] = val;
 					run.contextVariables[`@${varKey}`] = val;
 					this._emitLog(run, 'info', `[Step #${i + 1}] Variable assigned: @${varKey} = ${JSON.stringify(val)}`);
+					pathStep?.operations.push({
+						type: 'set_variable',
+						label: `Set Variable: @${varKey} = ${JSON.stringify(val)}`,
+						details: {
+							variable: varKey,
+							expression: expr,
+							oldValue: oldVal,
+							newValue: val
+						}
+					});
 				}
 			}
 
@@ -1319,7 +1372,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		node: IFlowchartNode,
 		step: INodePipelineStep,
 		stepIndex: number,
-		state: IWorkflowNodeExecutionState
+		state: IWorkflowNodeExecutionState,
+		pathStep?: IWorkflowPathStep
 	): Promise<void> {
 		const rawExpr = (step.expression || '').trim();
 		const wsUri = URI.parse(run.workflowUri);
@@ -1426,6 +1480,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					durationMs: Date.now() - startMs
 				};
 				state.executedTickets.push(ticketRecord);
+				pathStep?.operations.push({
+					type: 'run_ticket',
+					label: `RUN_TICKETS: '${ticketRecord.ticketName || ticketRecord.ticketId}' [${ticketRecord.ticketType || 'task'}]`,
+					executedTicket: ticketRecord,
+					durationMs: ticketRecord.durationMs
+				});
 
 				if (ticketRecord.ticketName) {
 					run.contextVariables[ticketRecord.ticketName] = execRes.output;
@@ -1478,6 +1538,19 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					throw new Error(createRes.error || `Failed to create ticket '${opts.title}'`);
 				}
 				result = createRes;
+				pathStep?.operations.push({
+					type: 'create_ticket',
+					label: `CREATE_TICKETS: '${opts.title}' [${opts.ticketType}]`,
+					details: {
+						ticketType: opts.ticketType,
+						title: opts.title,
+						ticketId: createRes.ticketId,
+						ticketName: createRes.ticketName,
+						targetFolder: createRes.targetFolder,
+						parameters: opts.parameters
+					},
+					durationMs: Date.now() - startMs
+				});
 			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS' || upperFn === 'GETTICKET') {
 				const ticketIdOrPath = String(kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.ticket ?? args[0] ?? '').trim();
 				const getRes = await this.ticketRuntimeService.GET_TICKETS(workflowDir, ticketIdOrPath);
@@ -1527,6 +1600,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				cardList.unshift(displayCard);
 
 				this._onDidDisplayVariable.fire(displayCard);
+				pathStep?.operations.push({
+					type: 'display',
+					label: `DISPLAY [${nodeLabelName}]`,
+					details: { formattedText, cleanValue, ticketTitle, ticketId, ticketType }
+				});
 			} else {
 				// Fallback evaluation for general expressions
 				try {
@@ -2029,7 +2107,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	private async _resolveNextNodes(
 		run: IWorkflowExecutionRun,
 		currentNode: IFlowchartNode,
-		data: IFlowchartData
+		data: IFlowchartData,
+		pathStep?: IWorkflowPathStep
 	): Promise<IFlowchartNode[]> {
 		const outgoingLinks = data.links.filter(l => l.from === currentNode.id);
 		if (outgoingLinks.length === 0) {
@@ -2047,14 +2126,26 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				if (!rawLabel) continue;
 
 				const condResult = this._evaluateCondition(rawLabel, run.contextVariables, run.nodeStates[currentNode.id], run);
+				const target = data.nodes.find(n => n.id === link.to);
+				const explanation = this._explainCondition(rawLabel, run.contextVariables, condResult);
 				if (condResult === true) {
-					const target = data.nodes.find(n => n.id === link.to);
 					if (target) {
-						this._emitLog(run, 'info', `Condition MATCHED: '${link.label}' -> navigating to '${target.label}'`);
+						this._emitLog(run, 'info', `Condition MATCHED: '${link.label}' -> navigating to '${target.label}' (${explanation})`);
 						matchedNodes.push(target);
+						if (pathStep && !pathStep.transition) {
+							pathStep.transition = {
+								fromNodeId: currentNode.id,
+								fromNodeLabel: currentNode.label,
+								toNodeId: target.id,
+								toNodeLabel: target.label,
+								conditionLabel: rawLabel,
+								conditionEvaluation: true,
+								explanation: explanation
+							};
+						}
 					}
 				} else if (condResult === false) {
-					this._emitLog(run, 'info', `Condition REJECTED: '${link.label}' (context: ${JSON.stringify(run.contextVariables)})`);
+					this._emitLog(run, 'info', `Condition REJECTED: '${link.label}' (${explanation})`);
 				}
 			}
 
@@ -2069,6 +2160,17 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					.map(l => data.nodes.find(n => n.id === l.to))
 					.filter((n): n is IFlowchartNode => !!n);
 				this._emitLog(run, 'info', `Fallback branch(es) taken -> navigating to ${fallbackNodes.map(n => `'${n.label}'`).join(', ')}`);
+				if (fallbackNodes.length > 0 && pathStep && !pathStep.transition) {
+					pathStep.transition = {
+						fromNodeId: currentNode.id,
+						fromNodeLabel: currentNode.label,
+						toNodeId: fallbackNodes[0].id,
+						toNodeLabel: fallbackNodes[0].label,
+						conditionLabel: 'default fallback',
+						conditionEvaluation: true,
+						explanation: 'Fallback branch taken'
+					};
+				}
 				return fallbackNodes;
 			}
 
@@ -2079,17 +2181,50 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		if (outgoingLinks.length === 1) {
 			const targetId = outgoingLinks[0].to;
 			const target = data.nodes.find(n => n.id === targetId);
+			if (target && pathStep && !pathStep.transition) {
+				pathStep.transition = {
+					fromNodeId: currentNode.id,
+					fromNodeLabel: currentNode.label,
+					toNodeId: target.id,
+					toNodeLabel: target.label,
+					explanation: `Proceed to '${target.label}'`
+				};
+			}
 			return target ? [target] : [];
 		}
 
 		// Parallel Fork (Unconditional / Fan-Out):
-		// All outgoing branches are taken concurrently!
 		const targetNodes = outgoingLinks
 			.map(l => data.nodes.find(n => n.id === l.to))
 			.filter((n): n is IFlowchartNode => !!n);
-
-		this._emitLog(run, 'info', `Parallel fork: simultaneously executing ${targetNodes.length} branches -> [${targetNodes.map(n => `'${n.label}'`).join(', ')}]`);
+		if (targetNodes.length > 0 && pathStep && !pathStep.transition) {
+			pathStep.transition = {
+				fromNodeId: currentNode.id,
+				fromNodeLabel: currentNode.label,
+				toNodeId: targetNodes[0].id,
+				toNodeLabel: targetNodes.map(t => t.label).join(', '),
+				explanation: `Parallel fan-out to ${targetNodes.length} nodes`
+			};
+		}
 		return targetNodes;
+	}
+
+	private _explainCondition(expr: string, context: Record<string, any>, result: boolean): string {
+		const varMatches = expr.match(/@?[a-zA-Z0-9_]+/g);
+		const varVals: Record<string, any> = {};
+		if (varMatches) {
+			for (const rawVar of varMatches) {
+				const clean = rawVar.replace(/^@/, '');
+				if (context[clean] !== undefined && typeof context[clean] !== 'function') {
+					varVals[clean] = context[clean];
+				}
+			}
+		}
+		const varInfo = Object.entries(varVals)
+			.map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+			.join(', ');
+		const truthStr = result ? 'TRUE' : 'FALSE';
+		return varInfo ? `${expr} (${varInfo}) => ${truthStr}` : `${expr} => ${truthStr}`;
 	}
 
 	private _evaluateCondition(
