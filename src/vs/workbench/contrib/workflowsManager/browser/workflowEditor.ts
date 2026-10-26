@@ -2125,8 +2125,9 @@ export class WorkflowEditor extends EditorPane {
 				nameTd.textContent = vName;
 				const typeTd = append(bRow, $('td.history-var-type'));
 				typeTd.textContent = Array.isArray(vVal) ? 'array' : typeof vVal;
-				const valTd = append(bRow, $('td.history-var-val'));
-				valTd.textContent = typeof vVal === 'object' && vVal !== null ? JSON.stringify(vVal) : String(vVal);
+				const valTd = append(bRow, $('td.history-var-val-cell'));
+				const valBox = append(valTd, $('div.history-var-val'));
+				valBox.textContent = typeof vVal === 'object' && vVal !== null ? JSON.stringify(vVal) : String(vVal);
 			}
 		}
 	}
