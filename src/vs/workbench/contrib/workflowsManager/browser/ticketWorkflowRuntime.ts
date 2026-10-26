@@ -110,6 +110,7 @@ export interface IPrimitiveCatalogItem {
 export interface IPythonExecutionResult {
 	success: boolean;
 	output: string;
+	result?: any;
 	exitCode: number;
 	durationMs: number;
 	pythonPath: string;
@@ -771,19 +772,23 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							this.logService.info(`[TicketWorkflowRuntime] Executing Python primitive '${fieldLabel}'...`);
 							const execResult = await this.executePythonScript(wsUri, ticketUri, pythonPath, interpolatedCode, contextVariables);
 
-							stepOutput = execResult.output || existingOutput || 'Script completed with no output.';
+							const returnVal = execResult.result !== undefined ? execResult.result : (execResult.output || existingOutput || 'Script completed with no output.');
+							stepOutput = returnVal;
 							customMetadata[fieldLabel] = JSON.stringify({
 								pythonPath: execResult.pythonPath || pythonPath,
 								code: rawCode,
 								interpolatedCode: interpolatedCode,
-								output: stepOutput,
+								result: execResult.result,
+								output: execResult.output,
 								exitCode: execResult.exitCode,
 								durationMs: execResult.durationMs,
 								lastExecuted: new Date().toISOString()
 							});
-							contextVariables[fieldLabel] = stepOutput;
-							contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
-							contextVariables[`${this._cleanKey(fieldLabel)}_output`] = stepOutput;
+							contextVariables[fieldLabel] = returnVal;
+							contextVariables[this._cleanKey(fieldLabel)] = returnVal;
+							contextVariables[`${this._cleanKey(fieldLabel)}_result`] = execResult.result;
+							contextVariables[`${this._cleanKey(fieldLabel)}_output`] = returnVal;
+							contextVariables[`${this._cleanKey(fieldLabel)}_logs`] = execResult.output;
 							contextVariables[`${this._cleanKey(fieldLabel)}_code`] = rawCode;
 							break;
 						}
@@ -1402,6 +1407,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					const parsed = JSON.parse(trimmed);
 					// Python primitive
 					if (parsed.pythonCode !== undefined || parsed.code !== undefined || parsed.pythonPath !== undefined) {
+						if (parsed.result !== undefined) {
+							return parsed.result;
+						}
 						return parsed.output && parsed.output.trim()
 							? parsed.output
 							: (parsed.code || '(Python script ready)');
@@ -1621,11 +1629,28 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const timestamp = Date.now();
 			const scriptUri = URI.joinPath(agentsDirUri, `run_python_${timestamp}.py`);
 			const logUri = URI.joinPath(agentsDirUri, `run_python_${timestamp}.log`);
+			const resultUri = URI.joinPath(agentsDirUri, `run_python_${timestamp}.result.json`);
 
-			// 2. Prepare script with injected context variables and TICKET_CONTEXT dictionary
+			// 2. Prepare script with injected context variables, return value capture, and TICKET_CONTEXT dictionary
 			const ctxJson = JSON.stringify(contextVariables || {});
+			const resultFilePathStr = resultUri.fsPath.replace(/\\/g, '\\\\');
 			const header = `# -*- coding: utf-8 -*-
-import os, sys, json
+import os, sys, json, atexit
+
+_ANYAGENT_RESULT_FILE = "${resultFilePathStr}"
+_ANYAGENT_HAS_EXPLICIT_OUTPUT = False
+
+def set_output(val):
+    global _ANYAGENT_HAS_EXPLICIT_OUTPUT
+    _ANYAGENT_HAS_EXPLICIT_OUTPUT = True
+    try:
+        with open(_ANYAGENT_RESULT_FILE, "w", encoding="utf-8") as _f:
+            json.dump({"hasOutput": True, "value": val}, _f, ensure_ascii=False, default=str)
+    except Exception:
+        pass
+
+def return_output(val):
+    set_output(val)
 
 try:
     _raw_context = json.loads(${JSON.stringify(ctxJson)})
@@ -1667,6 +1692,21 @@ try:
     os.environ['ANY_AGENT_CONTEXT'] = json.dumps(_raw_context)
 except Exception:
     pass
+
+def _anyagent_capture_exit_output():
+    if _ANYAGENT_HAS_EXPLICIT_OUTPUT or os.path.exists(_ANYAGENT_RESULT_FILE):
+        return
+    gl = globals()
+    for candidate in ['OUTPUT', 'RESULT', 'output', 'result', 'RETURN_VALUE', 'return_value']:
+        if candidate in gl and gl[candidate] is not None:
+            try:
+                with open(_ANYAGENT_RESULT_FILE, "w", encoding="utf-8") as _f:
+                    json.dump({"hasOutput": True, "value": gl[candidate]}, _f, ensure_ascii=False, default=str)
+                break
+            except Exception:
+                pass
+
+atexit.register(_anyagent_capture_exit_output)
 
 `;
 			await this.fileService.writeFile(scriptUri, VSBuffer.fromString(header + code));
@@ -1738,7 +1778,7 @@ except Exception:
 			await terminal.sendText(runCmd, true);
 			await waitPromise;
 
-			// 5. Read output log
+			// 5. Read output log and result JSON
 			let output = '';
 			if (await this.fileService.exists(logUri)) {
 				try {
@@ -1746,11 +1786,40 @@ except Exception:
 				} catch {}
 			}
 
+			let scriptResult: any = undefined;
+			if (await this.fileService.exists(resultUri)) {
+				try {
+					const resultRaw = (await this.fileService.readFile(resultUri)).value.toString();
+					const parsed = JSON.parse(resultRaw);
+					if (parsed && parsed.hasOutput) {
+						scriptResult = parsed.value;
+					}
+				} catch {}
+			}
+
+			// Fallback: If no explicit OUTPUT was set, check if stdout contains JSON or markdown json
+			if (scriptResult === undefined && output.trim()) {
+				const trimmed = output.trim();
+				if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+					try {
+						scriptResult = JSON.parse(trimmed);
+					} catch {}
+				} else {
+					const match = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+					if (match && match[1]) {
+						try {
+							scriptResult = JSON.parse(match[1].trim());
+						} catch {}
+					}
+				}
+			}
+
 			terminal.dispose();
 
 			return {
 				success: exitCode === 0,
 				output: output.trim(),
+				result: scriptResult,
 				exitCode,
 				durationMs: Date.now() - startTime,
 				pythonPath: resolvedPython

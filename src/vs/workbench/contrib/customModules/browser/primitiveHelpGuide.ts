@@ -287,17 +287,21 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 			steps: [
 				{ step: '1. Interpreter Resolution', detail: 'Resolves specified Python binary or auto-detects active virtualenv (.venv/bin/python) / system python3.' },
 				{ step: '2. Variable Interpolation & Context Injection', detail: 'Interpolates {{variables}} and automatically injects pre-parsed ticket variables into native TICKET_CONTEXT dictionary and ANY_AGENT_CONTEXT environment variable.' },
-				{ step: '3. Script Execution & Log Capture', detail: 'Runs script synchronously with timeout protection, capturing stdout, stderr, exit code, and runtime duration.' },
-				{ step: '4. Context Registration & Metadata Update', detail: 'Stores captured stdout into contextVariables and updates ticket customMetadata.' }
+				{ step: '3. Script Execution & Return Value Capture', detail: 'Runs script synchronously with timeout protection, capturing stdout, stderr, exit code, runtime duration, and the explicit Return Value (OUTPUT = ..., set_output(...), or RESULT).' },
+				{ step: '4. Output Manifest & Return Value Decoupling', detail: 'Distinguishes between Console Logs (stdout/stderr) and the actual Return Value (OUTPUT). Downstream primitives and Output Manifests receive the clean returned value (dict, list, number, boolean, or string) without terminal log banners.' }
 			],
 			variableResolution: 'TICKET_CONTEXT[\'Field Label\'] or {Field Label}',
-			downstreamPassing: 'Captured output (stdout) can be passed directly to downstream AI Prompts, Browsers, or Output Manifests.'
+			downstreamPassing: 'The Return Value (OUTPUT) is passed directly to Output Manifests and downstream primitives as structured data (dict, list, or text).'
 		},
 		syntaxExamples: [
-			'# Directly access upstream data via TICKET_CONTEXT (auto-parsed from JSON / Markdown)\njob_data = TICKET_CONTEXT.get("Linkedin Job Info Summary", {})\nprint(f"Processing: {job_data}")',
+			'# Directly access upstream data via TICKET_CONTEXT (auto-parsed from JSON / Markdown)\njob_data = TICKET_CONTEXT.get("Linkedin Job Info Summary", {})\n\n# Define clean return value consumed by Output Manifest:\nOUTPUT = {"status": "success", "processed_jobs": len(job_data)}',
+			'set_output({"total": 100, "items": [...]})',
 			'TICKET_CONTEXT[\'Field Label\']'
 		],
 		tips: [
+			'Assign to OUTPUT (e.g. OUTPUT = my_result) or call set_output(data) to define the clean return value for Output Manifest and downstream steps.',
+			'Use the "+ OUTPUT =" chip below the script editor to insert the return value assignment at cursor.',
+			'Console prints (print(...)) and stderr logs are recorded in Execution Logs & Preview for debugging, kept separate from the Return Value.',
 			'Use the "Insert Context" chips below the script box to insert TICKET_CONTEXT[\'...\'] for any field with one click.',
 			'Upstream outputs (like JSON or markdown code blocks from AI Prompts) are automatically parsed into Python dictionaries or lists inside TICKET_CONTEXT.',
 			'Use the "Create venv" button in the ticket view to instantly initialize a local virtual environment for package dependencies.',

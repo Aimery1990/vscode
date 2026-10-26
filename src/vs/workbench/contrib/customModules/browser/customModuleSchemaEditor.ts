@@ -580,7 +580,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			if (bc.type === 'python') {
 				newField.pythonPath = '';
 				newField.pythonEnvMode = 'existing';
-				newField.pythonCode = '# Write Python automation script here\nimport sys, os, json\n\nprint("Hello from AnyAgent Python primitive!")\n';
+				newField.pythonCode = '# Write Python automation script here\nimport sys, os, json\n\n# Access upstream context via TICKET_CONTEXT (e.g. TICKET_CONTEXT.get("Field Name"))\n# Define the return value for Output Manifest and downstream steps:\nOUTPUT = {"status": "success", "message": "Hello from Python primitive"}\n';
 				newField.pythonOutput = '';
 			}
 			if (bc.type === 'parameters') {
@@ -2801,6 +2801,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						insertTextAtCursor("TICKET_CONTEXT['']", -2);
 					};
 
+					// Return Value Chip: + OUTPUT =
+					const outputChip = append(varBar, $('button', {
+						style: chipStyle + ' font-weight: 600; border-color: rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.1); color: #34d399;',
+						title: 'Insert return value assignment OUTPUT = ... (consumed by downstream primitives & Output Manifest)'
+					}, '+ OUTPUT = '));
+					outputChip.onclick = (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						insertTextAtCursor('\nOUTPUT = ');
+					};
+
 					// Specific Field Chips from Schema
 					const otherFields = (fields || this._activeModule?.fields || []).filter(f => f && f.id !== field.id);
 					const maxInitialVisible = 2;
@@ -2929,7 +2940,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								} else if (f.type === 'prompt') {
 									val = f.debugPromptOutput || f.defaultContent || '';
 								} else if (f.type === 'python') {
-									val = f.pythonOutput || f.pythonCode || '';
+									val = f.pythonResult !== undefined ? f.pythonResult : (f.pythonOutput || f.pythonCode || '');
 								} else if (f.type === 'git') {
 									val = f.gitRemoteUrl || '';
 								} else {
@@ -2945,9 +2956,16 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							const durationStr = `${res.durationMs}ms`;
 							const exitCodeStr = `Exit code: ${res.exitCode}`;
 							const headerLine = `[Finished in ${durationStr} | ${exitCodeStr}]\n`;
-							const fullOutput = headerLine + (res.output ? res.output : '(Script completed with no output)');
-							previewBox.textContent = fullOutput;
-							field.pythonOutput = fullOutput;
+							let displayText = '';
+							if (res.result !== undefined) {
+								const formattedResult = typeof res.result === 'object' ? JSON.stringify(res.result, null, 2) : String(res.result);
+								displayText = `=== RETURN VALUE (OUTPUT) ===\n${formattedResult}\n\n=== CONSOLE LOGS & EXECUTION ===\n${headerLine}${res.output || '(No console stdout/stderr output)'}`;
+							} else {
+								displayText = `${headerLine}${res.output ? res.output : '(Script completed with no output)'}`;
+							}
+							previewBox.textContent = displayText;
+							field.pythonOutput = displayText;
+							field.pythonResult = res.result;
 							this._syncDraft();
 							await this._persistCurrentModule();
 							if (res.success) {
@@ -2982,6 +3000,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						e.stopPropagation();
 						previewBox.textContent = '[Ready to execute] Output, stdout/stderr, and runtime duration will appear here when run.';
 						field.pythonOutput = '';
+						field.pythonResult = undefined;
 						this._syncDraft();
 						await this._persistCurrentModule();
 					};
@@ -3883,7 +3902,9 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				} else if (f.type === 'prompt') {
 					valToInsert = f.debugPromptOutput || f.defaultContent || '';
 				} else if (f.type === 'python') {
-					valToInsert = f.pythonOutput || f.pythonCode || '';
+					valToInsert = f.pythonResult !== undefined
+						? (typeof f.pythonResult === 'object' ? JSON.stringify(f.pythonResult, null, 2) : String(f.pythonResult))
+						: (f.pythonOutput || f.pythonCode || '');
 				} else if (f.type === 'git') {
 					valToInsert = f.gitRemoteUrl || '';
 				} else {

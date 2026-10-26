@@ -947,16 +947,19 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = clearPyOutBtn.getAttribute('data-field-key') || '';
 				const card = clearPyOutBtn.closest('.python-primitive-card') as HTMLElement | null;
 				if (card) {
+					(card as any)._lastPythonResult = undefined;
+					const resultBlock = card.querySelector('.python-result-block') as HTMLElement | null;
+					if (resultBlock) resultBlock.remove();
 					const outputDisplay = card.querySelector('.python-output-display') as HTMLElement | null;
 					if (outputDisplay) {
-						outputDisplay.innerHTML = '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run Script" above to execute the automation code.</span>';
+						outputDisplay.innerHTML = '<span style="opacity: 0.4; font-style: italic;">No execution logs yet. Click "Run Script" above to execute the automation code.</span>';
 					}
 					const statusText = card.querySelector('.python-status-text') as HTMLElement | null;
 					if (statusText) {
-						statusText.textContent = 'Output cleared';
+						statusText.textContent = 'Logs and output cleared';
 						statusText.style.color = 'inherit';
 					}
-					await this._savePythonDataFromCard(card, fieldKey, '');
+					await this._savePythonDataFromCard(card, fieldKey, '', undefined, undefined, null);
 				}
 				return;
 			}
@@ -3440,7 +3443,7 @@ ${rawErr}
 		});
 	}
 
-	private async _savePythonDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string, exitCodeOverride?: number, durationMsOverride?: number): Promise<any> {
+	private async _savePythonDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string, exitCodeOverride?: number, durationMsOverride?: number, resultOverride?: any): Promise<any> {
 		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
 		const codeTextarea = card.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
 		const outputDisplay = card.querySelector('.python-output-display') as HTMLElement | null;
@@ -3448,12 +3451,18 @@ ${rawErr}
 		const pythonPath = interpInput?.value.trim() || '';
 		const code = codeTextarea?.value || '';
 		let output = outputOverride !== undefined ? outputOverride : (outputDisplay?.textContent || '');
-		if (output.startsWith('No execution output yet')) output = '';
+		if (output.startsWith('No execution output yet') || output.startsWith('No execution logs yet')) output = '';
+
+		let result = resultOverride;
+		if (result === undefined && (card as any)._lastPythonResult !== undefined) {
+			result = (card as any)._lastPythonResult;
+		}
 
 		const pythonData: any = {
 			pythonPath,
 			code,
 			output,
+			result,
 			exitCode: exitCodeOverride,
 			durationMs: durationMsOverride,
 			lastExecuted: outputOverride !== undefined && outputOverride === '' ? '' : new Date().toISOString()
@@ -3524,8 +3533,35 @@ ${rawErr}
 				ticketContext
 			);
 
+			(card as any)._lastPythonResult = res.result;
+
+			let resultBlock = card.querySelector('.python-result-block') as HTMLElement | null;
+			if (res.result !== undefined) {
+				const formattedResult = typeof res.result === 'object' ? JSON.stringify(res.result, null, 2) : String(res.result);
+				if (!resultBlock) {
+					const outSection = card.querySelector('.python-output-section') as HTMLElement | null;
+					if (outSection) {
+						resultBlock = document.createElement('div');
+						resultBlock.className = 'python-result-block';
+						resultBlock.style.cssText = 'background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;';
+						resultBlock.innerHTML = `
+							<div style="display: flex; justify-content: space-between; align-items: center;">
+								<span style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">Return Value (Output):</span>
+								<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
+							</div>
+							<pre class="python-result-display" style="margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;"></pre>
+						`;
+						outSection.insertBefore(resultBlock, outSection.firstChild);
+					}
+				}
+				const pre = resultBlock?.querySelector('.python-result-display') as HTMLElement | null;
+				if (pre) pre.textContent = formattedResult;
+			} else if (resultBlock) {
+				resultBlock.remove();
+			}
+
 			if (outputDisplay) {
-				outputDisplay.textContent = res.output || (res.success ? '(Script completed with 0 exit code and no stdout output)' : `Error: ${res.error || 'Execution failed'}`);
+				outputDisplay.textContent = res.output || (res.success ? '(Script completed with 0 exit code and no stdout/stderr output)' : `Error: ${res.error || 'Execution failed'}`);
 			}
 
 			if (statusText) {
@@ -3536,7 +3572,7 @@ ${rawErr}
 			}
 
 			// Update customMetadata
-			await this._savePythonDataFromCard(card, fieldKey, res.output, res.exitCode, res.durationMs);
+			await this._savePythonDataFromCard(card, fieldKey, res.output, res.exitCode, res.durationMs, res.result);
 
 			// Also update interpreter input if auto-resolved
 			if (interpInput && !pythonPath && res.pythonPath) {
@@ -5153,6 +5189,7 @@ ${interpolatedPrompt}`;
 					let pythonPath = fieldItem.pythonPath || '';
 					let pythonCode = fieldItem.pythonCode || '';
 					let pythonOutput = '';
+					let pythonResult: any = undefined;
 					let exitCode: number | undefined;
 					let durationMs: number | undefined;
 					let lastExecutedText = '';
@@ -5166,6 +5203,7 @@ ${interpolatedPrompt}`;
 									if (pObj.pythonPath !== undefined) pythonPath = pObj.pythonPath;
 									if (pObj.code !== undefined) pythonCode = pObj.code;
 									if (pObj.pythonCode !== undefined && !pythonCode) pythonCode = pObj.pythonCode;
+									if (pObj.result !== undefined) pythonResult = pObj.result;
 									if (pObj.output !== undefined) pythonOutput = pObj.output;
 									if (pObj.exitCode !== undefined) exitCode = pObj.exitCode;
 									if (pObj.durationMs !== undefined) durationMs = pObj.durationMs;
@@ -5181,6 +5219,7 @@ ${interpolatedPrompt}`;
 							if (obj.pythonPath !== undefined) pythonPath = String(obj.pythonPath);
 							if (obj.code !== undefined) pythonCode = String(obj.code);
 							if (obj.pythonCode !== undefined && !pythonCode) pythonCode = String(obj.pythonCode);
+							if (obj.result !== undefined) pythonResult = obj.result;
 							if (obj.output !== undefined) pythonOutput = String(obj.output);
 							if (obj.exitCode !== undefined) exitCode = Number(obj.exitCode);
 							if (obj.durationMs !== undefined) durationMs = Number(obj.durationMs);
@@ -5189,7 +5228,7 @@ ${interpolatedPrompt}`;
 					}
 
 					if (!pythonCode) {
-						pythonCode = '# Write Python automation script\n# Context variables are available via TICKET_CONTEXT dictionary (e.g. TICKET_CONTEXT[\'Field Name\'])\n# Or via ANY_AGENT_CONTEXT environment variable\nimport os, sys, json\n\nprint("Executing Python script...")\n';
+						pythonCode = '# Write Python automation script\n# Context variables are available via TICKET_CONTEXT dictionary (e.g. TICKET_CONTEXT[\'Field Name\'])\n# Define the clean return value for Output Manifest & downstream primitives:\nOUTPUT = {"status": "ready"}\n';
 					}
 
 					const statusTag = lastExecutedText
@@ -5198,6 +5237,7 @@ ${interpolatedPrompt}`;
 
 					const otherFields = (customModule?.fields || []).filter(f => f && f.id !== rawKey && (f.label || f.id) !== k);
 					const baseChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['']" data-cursor-offset="-2" style="padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert TICKET_CONTEXT[''] into script">+ TICKET_CONTEXT['']</button>`;
+					const outputChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="&#10;OUTPUT = " data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.1); color: #34d399; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert return value assignment OUTPUT = ... (consumed by downstream primitives & Output Manifest)">+ OUTPUT =</button>`;
 
 					const maxInitialVisible = 2;
 					const visibleFields = otherFields.slice(0, maxInitialVisible);
@@ -5262,6 +5302,7 @@ ${interpolatedPrompt}`;
 									<div class="python-ctx-chips-bar" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0;">
 										<span style="font-size: 10.5px; opacity: 0.65;">Insert Context:</span>
 										${baseChipHtml}
+										${outputChipHtml}
 										${visibleChipsHtml}
 										${hiddenChipsHtml}
 										${moreBtnHtml}
@@ -5284,17 +5325,26 @@ ${interpolatedPrompt}`;
 
 								<!-- Debug & Execution Output Box -->
 								<div class="python-output-section" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">
+									${pythonResult !== undefined ? `
+										<div class="python-result-block" style="background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;">
+											<div style="display: flex; justify-content: space-between; align-items: center;">
+												<span style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">Return Value (Output):</span>
+												<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
+											</div>
+											<pre class="python-result-display" style="margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;">${this._escapeHtml(typeof pythonResult === 'object' ? JSON.stringify(pythonResult, null, 2) : String(pythonResult))}</pre>
+										</div>
+									` : ''}
 									<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px;">
 										<div style="display: flex; align-items: center; gap: 8px;">
-											<span style="font-size: 11px; font-weight: 600; opacity: 0.85;">Execution Output & Logs:</span>
+											<span style="font-size: 11px; font-weight: 600; opacity: 0.85;">Console Logs & Execution:</span>
 											${exitCode !== undefined ? `<span style="font-size: 10px; padding: 1px 6px; border-radius: 3px; background: ${exitCode === 0 ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)'}; color: ${exitCode === 0 ? '#4ade80' : '#f87171'};">Exit code: ${exitCode}</span>` : ''}
 										</div>
 										<div style="display: flex; gap: 6px;">
-											<button type="button" class="python-copy-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Copy</button>
+											<button type="button" class="python-copy-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Copy Logs</button>
 											<button type="button" class="python-clear-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Clear</button>
 										</div>
 									</div>
-									<div class="python-output-display desc-content-box" style="max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${pythonOutput ? this._escapeHtml(pythonOutput) : '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run Script" above to execute the automation code.</span>'}</div>
+									<div class="python-output-display desc-content-box" style="max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${pythonOutput ? this._escapeHtml(pythonOutput) : '<span style="opacity: 0.4; font-style: italic;">No execution logs yet. Click "Run Script" above to execute the automation code.</span>'}</div>
 								</div>
 							</div>
 						</div>

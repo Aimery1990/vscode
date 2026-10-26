@@ -103,6 +103,7 @@ export interface ICustomField {
 	pythonEnvMode?: 'existing' | 'create';
 	pythonCode?: string;
 	pythonOutput?: string;
+	pythonResult?: any;
 }
 
 export interface ICompositeComponent {
