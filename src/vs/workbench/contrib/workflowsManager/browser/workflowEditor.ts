@@ -1971,7 +1971,7 @@ export class WorkflowEditor extends EditorPane {
 		const actionsArea = append(header, $('.history-detail-actions'));
 
 		// 1. One-Click Copy Complete Build Report (Human-readable plain text/markdown)
-		const copyReportBtn = append(actionsArea, $('button.history-action-btn.primary'));
+		const copyReportBtn = append(actionsArea, $('button.history-action-btn'));
 		append(copyReportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
 		append(copyReportBtn, $('span')).textContent = 'Copy Report';
 		copyReportBtn.title = 'Copy complete human-readable build log, all component traces, and variable snapshots to clipboard';
