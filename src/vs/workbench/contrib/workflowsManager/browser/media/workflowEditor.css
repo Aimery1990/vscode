@@ -5233,4 +5233,53 @@
 	word-break: break-all;
 }
 
+.history-action-btn.primary {
+	background: rgba(56, 189, 248, 0.2);
+	border-color: rgba(56, 189, 248, 0.5);
+	color: #38bdf8;
+	font-weight: 700;
+}
+
+.history-action-btn.primary:hover {
+	background: rgba(56, 189, 248, 0.35);
+	border-color: rgba(56, 189, 248, 0.7);
+}
+
+.history-ticket-header {
+	cursor: pointer;
+	user-select: none;
+	transition: background 0.15s ease;
+}
+
+.history-ticket-header:hover {
+	background: rgba(255, 255, 255, 0.05);
+}
+
+.workflow-trace-header {
+	cursor: pointer;
+	user-select: none;
+	transition: background 0.15s ease;
+}
+
+.workflow-trace-header:hover {
+	background: rgba(255, 255, 255, 0.05);
+}
+
+.history-chevron {
+	font-size: 11px;
+	color: #64748b;
+	transition: transform 0.15s ease;
+	display: inline-flex;
+	align-items: center;
+}
+
+.history-count-tag {
+	font-size: 9.5px;
+	color: #94a3b8;
+	background: rgba(255, 255, 255, 0.05);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	padding: 1px 6px;
+	border-radius: 3px;
+}
+
 

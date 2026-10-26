@@ -1956,13 +1956,47 @@ export class WorkflowEditor extends EditorPane {
 		modeTag.textContent = `Mode: ${run.mode}`;
 
 		const actionsArea = append(header, $('.history-detail-actions'));
+
+		// 1. One-Click Copy Complete Build Report (Human-readable plain text/markdown)
+		const copyReportBtn = append(actionsArea, $('button.history-action-btn.primary'));
+		append(copyReportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+		append(copyReportBtn, $('span')).textContent = 'Copy Full Build Report';
+		copyReportBtn.title = 'Copy complete human-readable build log, all component traces, and variable snapshots to clipboard';
+		copyReportBtn.onclick = async () => {
+			const report = this._generateBuildReport(run);
+			let ok = false;
+			try {
+				await this._clipboardService.writeText(report);
+				ok = true;
+			} catch {}
+			if (ok) {
+				clearNode(copyReportBtn);
+				append(copyReportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.check)));
+				append(copyReportBtn, $('span')).textContent = 'Copied Full Report!';
+				copyReportBtn.style.color = '#10b981';
+				this._notificationService.info('Full build report with all component traces copied to clipboard.');
+				setTimeout(() => {
+					if (copyReportBtn.isConnected) {
+						clearNode(copyReportBtn);
+						append(copyReportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+						append(copyReportBtn, $('span')).textContent = 'Copy Full Build Report';
+						copyReportBtn.style.color = '';
+					}
+				}, 2000);
+			} else {
+				this._notificationService.error('Failed to copy report to clipboard.');
+			}
+		};
+
+		// 2. Copy Run JSON
 		const copyJsonBtn = append(actionsArea, $('button.history-action-btn'));
-		append(copyJsonBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
-		append(copyJsonBtn, $('span')).textContent = 'Copy Run JSON';
+		append(copyJsonBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.json)));
+		append(copyJsonBtn, $('span')).textContent = 'Copy JSON';
+		copyJsonBtn.title = 'Copy structured JSON representation of this run';
 		copyJsonBtn.onclick = async () => {
 			const jsonStr = JSON.stringify(run, null, 2);
 			await this._clipboardService.writeText(jsonStr);
-			this._notificationService.info('Run snapshot copied to clipboard.');
+			this._notificationService.info('Run snapshot JSON copied to clipboard.');
 		};
 
 		// 2. Sections Container
@@ -1978,7 +2012,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		// SECTION A: Primitive Execution Traces
+		// SECTION A: Primitive Execution Traces (Hierarchical Drill-Down Accordion)
 		const traceSection = append(contentArea, $('.history-section'));
 		const traceSecHeader = append(traceSection, $('.history-section-header'));
 		append(traceSecHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
@@ -1993,12 +2027,18 @@ export class WorkflowEditor extends EditorPane {
 				const tHeader = append(ticketCard, $('.history-ticket-header'));
 
 				const tLeft = append(tHeader, $('.history-ticket-left'));
+				const tChevron = append(tLeft, $('span.history-chevron' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
 				const tTitle = append(tLeft, $('span.history-ticket-title'));
 				tTitle.textContent = `${ticket.ticketName || ticket.ticketId} [${ticket.ticketType || 'task'}]`;
 				const nodeBadge = append(tLeft, $('span.history-node-badge'));
 				nodeBadge.textContent = nodeLabel;
 
+				const steps = ticket.stepResults || [];
+
 				const tRight = append(tHeader, $('.history-ticket-right'));
+				const countBadge = append(tRight, $('span.history-count-tag'));
+				countBadge.textContent = `${steps.length} components`;
+
 				const tStatus = append(tRight, $(`span.history-status-badge.status-${ticket.status}`));
 				tStatus.textContent = ticket.status.toUpperCase();
 				if (ticket.durationMs) {
@@ -2006,13 +2046,20 @@ export class WorkflowEditor extends EditorPane {
 					tDur.textContent = `${(ticket.durationMs / 1000).toFixed(1)}s`;
 				}
 
-				// Primitive steps inside this ticket
-				const steps = ticket.stepResults || [];
+				// Primitive steps inside this ticket (expandable container)
+				const stepsContainer = append(ticketCard, $('.history-steps-container'));
+				let isTicketExpanded = true;
+				tHeader.onclick = () => {
+					isTicketExpanded = !isTicketExpanded;
+					stepsContainer.style.display = isTicketExpanded ? 'flex' : 'none';
+					clearNode(tChevron);
+					append(tChevron, $('span' + ThemeIcon.asCSSSelector(isTicketExpanded ? Codicon.chevronDown : Codicon.chevronRight)));
+				};
+
 				if (steps.length === 0) {
-					const noSteps = append(ticketCard, $('.history-step-empty'));
+					const noSteps = append(stepsContainer, $('.history-step-empty'));
 					noSteps.textContent = 'Ticket completed without sub-primitive steps.';
 				} else {
-					const stepsContainer = append(ticketCard, $('.history-steps-container'));
 					for (let sIdx = 0; sIdx < steps.length; sIdx++) {
 						const step = steps[sIdx];
 						this._renderPrimitiveStepTrace(stepsContainer, step, sIdx + 1);
@@ -2079,6 +2126,7 @@ export class WorkflowEditor extends EditorPane {
 		const header = append(card, $('.workflow-trace-header'));
 
 		const left = append(header, $('.workflow-trace-left'));
+		const stepChevron = append(left, $('span.history-chevron' + ThemeIcon.asCSSSelector(Codicon.chevronDown)));
 		const numBadge = append(left, $('span.workflow-trace-num'));
 		numBadge.textContent = `#${index}`;
 
@@ -2092,16 +2140,31 @@ export class WorkflowEditor extends EditorPane {
 		const statusBadge = append(right, $(`span.workflow-output-status-badge.${step.status}`));
 		statusBadge.textContent = step.status === 'success' ? 'SUCCESS' : (step.status === 'failed' ? 'FAILED' : 'SKIPPED');
 
-		if (step.durationMs) {
+		if (step.durationMs !== undefined && step.durationMs > 0) {
 			const durSpan = append(right, $('span.workflow-trace-dur'));
 			durSpan.textContent = `${step.durationMs}ms`;
 		}
 
 		const body = append(card, $('.workflow-trace-body'));
+		let isStepExpanded = true;
+		header.onclick = (e) => {
+			e.stopPropagation();
+			isStepExpanded = !isStepExpanded;
+			body.style.display = isStepExpanded ? 'flex' : 'none';
+			clearNode(stepChevron);
+			append(stepChevron, $('span' + ThemeIcon.asCSSSelector(isStepExpanded ? Codicon.chevronDown : Codicon.chevronRight)));
+		};
+
 		const d = step.details || {};
 
 		// 1. Python Primitive Trace
 		if (step.fieldType === 'python') {
+			if (d.pythonPath || d.exitCode !== undefined) {
+				const metaRow = append(body, $('.trace-sub-section'));
+				const metaText = append(metaRow, $('span.trace-sub-title'));
+				metaText.textContent = `Interpreter: ${d.pythonPath || 'system default'} | Exit Code: ${d.exitCode ?? 0}`;
+			}
+
 			if (d.commandLogs) {
 				const logSection = append(body, $('.trace-sub-section'));
 				const logTitleRow = append(logSection, $('.trace-sub-title-row'));
@@ -2112,7 +2175,8 @@ export class WorkflowEditor extends EditorPane {
 				const copyLogBtn = append(logTitleRow, $('button.trace-mini-copy-btn'));
 				append(copyLogBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
 				append(copyLogBtn, $('span')).textContent = 'Copy Logs';
-				copyLogBtn.onclick = async () => {
+				copyLogBtn.onclick = async (e) => {
+					e.stopPropagation();
 					await this._clipboardService.writeText(String(d.commandLogs));
 					this._notificationService.info('Command logs copied.');
 				};
@@ -2146,7 +2210,7 @@ export class WorkflowEditor extends EditorPane {
 				const promptSec = append(body, $('.trace-sub-section'));
 				const pTitle = append(promptSec, $('.trace-sub-title'));
 				append(pTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.sparkle)));
-				append(pTitle, $('span')).textContent = `Sent Prompt (${d.model || 'model'})`;
+				append(pTitle, $('span')).textContent = `Sent Prompt (Model: ${d.model || 'model'}, Provider: ${d.provider || 'auto'})`;
 				const pPre = append(promptSec, $('pre.workflow-trace-pre'));
 				pPre.textContent = String(d.sentPrompt || d.rawPrompt).trim();
 			}
@@ -2181,7 +2245,8 @@ export class WorkflowEditor extends EditorPane {
 				const copyBtn = append(cTitleRow, $('button.trace-mini-copy-btn'));
 				append(copyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
 				append(copyBtn, $('span')).textContent = 'Copy Content';
-				copyBtn.onclick = async () => {
+				copyBtn.onclick = async (e) => {
+					e.stopPropagation();
 					await this._clipboardService.writeText(String(d.content));
 					this._notificationService.info('Fetched web content copied.');
 				};
@@ -2212,7 +2277,55 @@ export class WorkflowEditor extends EditorPane {
 				oPre.textContent = JSON.stringify(d.aggregatedOutputs, null, 2);
 			}
 		}
-		// 6. Generic Default Fallback
+		// 6. Text / Textarea / Description / Single-line Input
+		else if (step.fieldType === 'text' || step.fieldType === 'textarea' || step.fieldType === 'string') {
+			const tSec = append(body, $('.trace-sub-section'));
+			const tTitle = append(tSec, $('.trace-sub-title'));
+			append(tTitle, $('span')).textContent = 'Text Value';
+			const tPre = append(tSec, $('pre.workflow-trace-pre'));
+			tPre.textContent = String(d.runtimeValue ?? d.initialValue ?? step.output ?? '(empty)');
+			if (d.initialValue && d.runtimeValue && d.initialValue !== d.runtimeValue) {
+				const initSpan = append(tSec, $('span.trace-sub-title'));
+				initSpan.textContent = `Template: ${d.initialValue}`;
+			}
+		}
+		// 7. Select / Multiselect / Dropdown / Classes / Tags
+		else if (step.fieldType === 'select' || step.fieldType === 'multiselect' || step.fieldType === 'options' || step.fieldType === 'classes') {
+			const sSec = append(body, $('.trace-sub-section'));
+			const sTitle = append(sSec, $('.trace-sub-title'));
+			append(sTitle, $('span')).textContent = 'Selected Option(s)';
+			const sPre = append(sSec, $('pre.workflow-trace-pre'));
+			sPre.textContent = Array.isArray(step.output) ? step.output.join(', ') : String(step.output ?? '(none)');
+			if (d.options && Array.isArray(d.options)) {
+				const optSpan = append(sSec, $('span.trace-sub-title'));
+				optSpan.textContent = `Available Options: ${d.options.map((o: any) => typeof o === 'object' ? (o.label || o.value) : o).join(', ')}`;
+			}
+		}
+		// 8. Number
+		else if (step.fieldType === 'number') {
+			const nSec = append(body, $('.trace-sub-section'));
+			const nTitle = append(nSec, $('.trace-sub-title'));
+			append(nTitle, $('span')).textContent = 'Numeric Value';
+			const nPre = append(nSec, $('pre.workflow-trace-pre'));
+			nPre.textContent = String(step.output ?? 0);
+		}
+		// 9. Switch / Boolean
+		else if (step.fieldType === 'switch' || step.fieldType === 'boolean') {
+			const bSec = append(body, $('.trace-sub-section'));
+			const bTitle = append(bSec, $('.trace-sub-title'));
+			append(bTitle, $('span')).textContent = 'State';
+			const bPre = append(bSec, $('pre.workflow-trace-pre'));
+			bPre.textContent = Boolean(step.output) ? 'true (enabled)' : 'false (disabled)';
+		}
+		// 10. Date / Timestamp
+		else if (step.fieldType === 'date' || step.fieldType === 'datetime' || step.fieldType === 'timestamp') {
+			const dSec = append(body, $('.trace-sub-section'));
+			const dTitle = append(dSec, $('.trace-sub-title'));
+			append(dTitle, $('span')).textContent = 'Timestamp Value';
+			const dPre = append(dSec, $('pre.workflow-trace-pre'));
+			dPre.textContent = String(step.output ?? '');
+		}
+		// 11. Generic Default Fallback
 		else {
 			const gSec = append(body, $('.trace-sub-section'));
 			const gTitle = append(gSec, $('.trace-sub-title'));
@@ -2229,6 +2342,127 @@ export class WorkflowEditor extends EditorPane {
 			const errPre = append(errSec, $('pre.workflow-trace-err'));
 			errPre.textContent = step.error;
 		}
+	}
+
+	private _generateBuildReport(run: IWorkflowExecutionRun): string {
+		const lines: string[] = [];
+		const sep = '='.repeat(60);
+
+		lines.push(sep);
+		lines.push(`ANYAGENT WORKFLOW BUILD REPORT: #${run.runNumber ?? run.runId}`);
+		lines.push(`Workflow: ${run.workflowName}`);
+		lines.push(`Run ID: ${run.runId}`);
+		lines.push(`Status: ${run.status.toUpperCase()}`);
+		const durMs = run.durationMs ?? (run.completedAt ? run.completedAt - run.startedAt : 0);
+		lines.push(`Duration: ${(durMs / 1000).toFixed(2)}s`);
+		lines.push(`Started At: ${new Date(run.startedAt).toLocaleString()}`);
+		lines.push(`Trigger: ${run.trigger || 'manual'} | Mode: ${run.mode}`);
+		lines.push(sep);
+		lines.push('');
+
+		// 1. Executed Tickets & Components
+		lines.push('--- EXECUTED TICKETS & COMPONENT TRACES ---');
+		const allTickets: { nodeLabel: string; ticket: IExecutedTicketRecord }[] = [];
+		for (const [nodeId, nState] of Object.entries(run.nodeStates || {})) {
+			if (nState.executedTickets && nState.executedTickets.length > 0) {
+				for (const t of nState.executedTickets) {
+					allTickets.push({ nodeLabel: nState.nodeLabel || nodeId, ticket: t });
+				}
+			}
+		}
+
+		if (allTickets.length === 0) {
+			lines.push('No tickets executed in this build.');
+		} else {
+			for (let tIdx = 0; tIdx < allTickets.length; tIdx++) {
+				const { nodeLabel, ticket } = allTickets[tIdx];
+				const tDur = ticket.durationMs ? `${(ticket.durationMs / 1000).toFixed(2)}s` : '0s';
+				lines.push(`\n[Ticket #${tIdx + 1}] ${ticket.ticketName || ticket.ticketId} [${ticket.ticketType || 'task'}]`);
+				lines.push(`  Node: ${nodeLabel} | Status: ${ticket.status.toUpperCase()} | Duration: ${tDur}`);
+
+				const steps = ticket.stepResults || [];
+				if (steps.length === 0) {
+					lines.push('  (No primitive component steps recorded)');
+				} else {
+					for (let sIdx = 0; sIdx < steps.length; sIdx++) {
+						const step = steps[sIdx];
+						const sDur = step.durationMs ? `${step.durationMs}ms` : '0ms';
+						lines.push(`  • Step #${sIdx + 1}: ${step.fieldLabel} [${step.fieldType.toUpperCase()}] (${step.status.toUpperCase()}, ${sDur})`);
+
+						const d = step.details || {};
+						if (step.fieldType === 'python') {
+							if (d.pythonPath) lines.push(`    Interpreter: ${d.pythonPath}`);
+							if (d.exitCode !== undefined) lines.push(`    Exit Code: ${d.exitCode}`);
+							if (d.commandLogs) {
+								lines.push(`    --- Python Command Line Logs (stdout & stderr) ---`);
+								const logLines = String(d.commandLogs).trim().split('\n');
+								for (const ll of logLines) {
+									lines.push(`      ${ll}`);
+								}
+								lines.push(`    --------------------------------------------------`);
+							}
+							if (d.result !== undefined) {
+								const resStr = typeof d.result === 'object' && d.result !== null ? JSON.stringify(d.result, null, 2) : String(d.result);
+								lines.push(`    Pure Return Value (OUTPUT):\n      ${resStr.replace(/\n/g, '\n      ')}`);
+							}
+							if (d.executedCode) {
+								lines.push(`    Executed Script:\n      ${String(d.executedCode).trim().replace(/\n/g, '\n      ')}`);
+							}
+						} else if (step.fieldType === 'prompt') {
+							if (d.model) lines.push(`    Model: ${d.model} (${d.provider || 'auto'})`);
+							if (d.sentPrompt || d.rawPrompt) lines.push(`    Sent Prompt:\n      ${String(d.sentPrompt || d.rawPrompt).trim().replace(/\n/g, '\n      ')}`);
+							if (d.response) lines.push(`    AI Response:\n      ${String(d.response).trim().replace(/\n/g, '\n      ')}`);
+						} else if (step.fieldType === 'browser') {
+							if (d.requestedUrl || d.targetUrl) lines.push(`    Requested URL: ${d.requestedUrl || d.targetUrl}`);
+							if (d.content) {
+								const preview = String(d.content).substring(0, 500);
+								lines.push(`    Fetched Content (${d.contentLength || String(d.content).length} chars):\n      ${preview.replace(/\n/g, '\n      ')}${String(d.content).length > 500 ? '\n      ... (truncated)' : ''}`);
+							}
+						} else if (step.fieldType === 'parameters') {
+							if (d.parameters) lines.push(`    Resolved Parameters: ${JSON.stringify(d.parameters, null, 2).replace(/\n/g, '\n      ')}`);
+						} else if (step.fieldType === 'output' || step.fieldType === 'result') {
+							if (d.aggregatedOutputs) lines.push(`    Output Manifest: ${JSON.stringify(d.aggregatedOutputs, null, 2).replace(/\n/g, '\n      ')}`);
+						} else {
+							const valStr = typeof step.output === 'object' && step.output !== null ? JSON.stringify(step.output, null, 2) : String(step.output ?? '(empty)');
+							lines.push(`    Value: ${valStr.replace(/\n/g, '\n      ')}`);
+						}
+
+						if (step.error) {
+							lines.push(`    ERROR: ${step.error}`);
+						}
+					}
+				}
+			}
+		}
+
+		// 2. Context Variables Snapshot
+		lines.push('');
+		lines.push('--- CONTEXT VARIABLES SNAPSHOT ---');
+		if (run.contextVariables && Object.keys(run.contextVariables).length > 0) {
+			for (const [k, v] of Object.entries(run.contextVariables)) {
+				const valStr = typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v);
+				lines.push(`  • ${k}: ${valStr}`);
+			}
+		} else {
+			lines.push('  (No context variables)');
+		}
+
+		// 3. Execution Event Logs
+		lines.push('');
+		lines.push('--- EXECUTION EVENT LOGS ---');
+		if (run.logs && run.logs.length > 0) {
+			for (const l of run.logs) {
+				const timeStr = new Date(l.timestamp).toLocaleTimeString();
+				const nodeStr = l.nodeId ? ` [${l.nodeId}]` : '';
+				lines.push(`  [${timeStr}] [${l.level.toUpperCase()}]${nodeStr} ${l.message}`);
+			}
+		} else {
+			lines.push('  (No execution logs)');
+		}
+
+		lines.push('');
+		lines.push(sep);
+		return lines.join('\n');
 	}
 
 	private _centerOnNode(node: IFlowchartNode): void {

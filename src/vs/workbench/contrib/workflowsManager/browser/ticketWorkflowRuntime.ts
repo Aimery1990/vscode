@@ -562,8 +562,45 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				const fieldLabel = field.label || field.id;
 				const fieldType = field.type;
 
-				// Skip mandatory root fields that require no execution
-				if (field.id === 'title' || field.id === 'description') {
+				// Record root fields title and description as explicit step results for complete visibility
+				if (field.id === 'title') {
+					const titleVal = inputOverrides['title'] || customMetadata['title'] || ticketResult.ticketName || '';
+					stepResults.push({
+						fieldId: field.id,
+						fieldLabel: field.label || 'Title',
+						fieldType: 'text',
+						output: titleVal,
+						status: 'success',
+						durationMs: 0,
+						details: {
+							fieldLabel: field.label || 'Title',
+							type: 'text',
+							initialValue: titleVal,
+							runtimeValue: titleVal,
+							value: titleVal
+						}
+					});
+					contextVariables['title'] = titleVal;
+					continue;
+				}
+				if (field.id === 'description') {
+					const descVal = inputOverrides['description'] || customMetadata['description'] || (field as any).defaultContent || '';
+					stepResults.push({
+						fieldId: field.id,
+						fieldLabel: field.label || 'Description',
+						fieldType: 'textarea',
+						output: descVal,
+						status: 'success',
+						durationMs: 0,
+						details: {
+							fieldLabel: field.label || 'Description',
+							type: 'textarea',
+							initialValue: descVal,
+							runtimeValue: descVal,
+							value: descVal
+						}
+					});
+					contextVariables['description'] = descVal;
 					continue;
 				}
 
@@ -870,17 +907,25 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						}
 
 						default: {
-							// 5. Standard field (text, number, select, date, classes, etc.)
-							const currentVal = inputOverrides[fieldLabel] !== undefined
+							// 5. Standard field (text, textarea, number, select, multiselect, date, switch, classes, etc.)
+							const rawVal = inputOverrides[fieldLabel] !== undefined
 								? inputOverrides[fieldLabel]
 								: (customMetadata[fieldLabel] !== undefined ? customMetadata[fieldLabel] : (field.defaultContent || ''));
-							stepOutput = currentVal;
-							contextVariables[fieldLabel] = currentVal;
-							contextVariables[this._cleanKey(fieldLabel)] = currentVal;
+							const resolvedVal = typeof rawVal === 'string'
+								? this._interpolateVariables(rawVal, contextVariables)
+								: rawVal;
+							stepOutput = resolvedVal;
+							contextVariables[fieldLabel] = resolvedVal;
+							contextVariables[this._cleanKey(fieldLabel)] = resolvedVal;
 
 							stepDetails = {
-								initialValue: currentVal,
-								runtimeValue: stepOutput
+								fieldLabel: fieldLabel,
+								type: fieldType,
+								initialValue: rawVal,
+								runtimeValue: resolvedVal,
+								value: resolvedVal,
+								options: (field as any).options,
+								defaultValue: (field as any).defaultValue
 							};
 							break;
 						}
