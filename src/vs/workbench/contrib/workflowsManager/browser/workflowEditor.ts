@@ -11038,11 +11038,18 @@ export class WorkflowEditor extends EditorPane {
 			countLabel.textContent = `Outputs (${card.outputItems.length})`;
 
 			const toggleAllBtn = append(sectionsToolbar, $('button.workflow-display-btn-toggle-all'));
-			toggleAllBtn.textContent = 'Collapse All';
+			toggleAllBtn.textContent = 'Expand All';
 
 			const sectionsContainer = append(cardEl, $('.workflow-display-sections-container'));
 			const sectionToggles: ((open: boolean) => void)[] = [];
-			let areAllExpanded = true;
+			const itemStates: boolean[] = card.outputItems.map(() => false);
+			let areAllExpanded = false;
+
+			const updateToggleAllBtn = () => {
+				const allExpanded = itemStates.every(Boolean);
+				areAllExpanded = allExpanded;
+				toggleAllBtn.textContent = allExpanded ? 'Collapse All' : 'Expand All';
+			};
 
 			card.outputItems.forEach((item, idx) => {
 				const sectionEl = append(sectionsContainer, $('.workflow-output-section-strip'));
@@ -11053,7 +11060,7 @@ export class WorkflowEditor extends EditorPane {
 
 				const leftGroup = append(stripHeader, $('.workflow-output-section-left'));
 				const chevron = append(leftGroup, $('span.workflow-output-chevron'));
-				chevron.textContent = '▼';
+				chevron.textContent = '▶';
 
 				const indexBadge = append(leftGroup, $('span.workflow-output-index-badge'));
 				indexBadge.textContent = `#${idx + 1}`;
@@ -11088,21 +11095,15 @@ export class WorkflowEditor extends EditorPane {
 				const preContent = append(stripBody, $('pre.workflow-output-pre'));
 				preContent.textContent = item.content;
 
-				// Expand first item by default, collapse others if many
-				let isExpanded = idx === 0 || card.outputItems!.length <= 2;
-				const setExpanded = (expanded: boolean) => {
+				// All items collapsed by default
+				let isExpanded = false;
+				const setExpanded = (expanded: boolean, scrollIntoView = false) => {
 					isExpanded = expanded;
+					itemStates[idx] = expanded;
 					sectionEl.classList.toggle('expanded', isExpanded);
 					chevron.textContent = isExpanded ? '▼' : '▶';
 					stripBody.style.display = isExpanded ? 'block' : 'none';
-				};
-				setExpanded(isExpanded);
-
-				stripHeader.onclick = (e) => {
-					e.stopPropagation();
-					const nextExpanded = !isExpanded;
-					setExpanded(nextExpanded);
-					if (nextExpanded) {
+					if (scrollIntoView && isExpanded) {
 						setTimeout(() => {
 							if (sectionEl.isConnected) {
 								sectionEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -11110,8 +11111,15 @@ export class WorkflowEditor extends EditorPane {
 						}, 60);
 					}
 				};
+				setExpanded(false);
 
-				sectionToggles.push((open: boolean) => setExpanded(open));
+				stripHeader.onclick = (e) => {
+					e.stopPropagation();
+					setExpanded(!isExpanded, true);
+					updateToggleAllBtn();
+				};
+
+				sectionToggles.push((open: boolean) => setExpanded(open, false));
 			});
 
 			toggleAllBtn.onclick = (e) => {
