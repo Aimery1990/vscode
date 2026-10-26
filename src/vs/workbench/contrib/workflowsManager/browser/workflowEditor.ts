@@ -1973,7 +1973,7 @@ export class WorkflowEditor extends EditorPane {
 		// 1. One-Click Copy Complete Build Report (Human-readable plain text/markdown)
 		const copyReportBtn = append(actionsArea, $('button.history-action-btn.primary'));
 		append(copyReportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
-		append(copyReportBtn, $('span')).textContent = 'Copy Full Build Report';
+		append(copyReportBtn, $('span')).textContent = 'Copy Report';
 		copyReportBtn.title = 'Copy complete human-readable build log, all component traces, and variable snapshots to clipboard';
 		copyReportBtn.onclick = async () => {
 			const report = this._generateBuildReport(run);
@@ -1985,14 +1985,14 @@ export class WorkflowEditor extends EditorPane {
 			if (ok) {
 				clearNode(copyReportBtn);
 				append(copyReportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.check)));
-				append(copyReportBtn, $('span')).textContent = 'Copied Full Report!';
+				append(copyReportBtn, $('span')).textContent = 'Copied Report!';
 				copyReportBtn.style.color = '#10b981';
 				this._notificationService.info('Full build report with all component traces copied to clipboard.');
 				setTimeout(() => {
 					if (copyReportBtn.isConnected) {
 						clearNode(copyReportBtn);
 						append(copyReportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
-						append(copyReportBtn, $('span')).textContent = 'Copy Full Build Report';
+						append(copyReportBtn, $('span')).textContent = 'Copy Report';
 						copyReportBtn.style.color = '';
 					}
 				}, 2000);
@@ -2010,21 +2010,6 @@ export class WorkflowEditor extends EditorPane {
 			const jsonStr = JSON.stringify(run, null, 2);
 			await this._clipboardService.writeText(jsonStr);
 			this._notificationService.info('Run snapshot JSON copied to clipboard.');
-		};
-
-		// 3. Delete Run Button
-		const delRunBtn = append(actionsArea, $('button.history-action-btn.danger'));
-		append(delRunBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
-		append(delRunBtn, $('span')).textContent = 'Delete Run';
-		delRunBtn.title = 'Permanently delete this execution run from history';
-		delRunBtn.onclick = () => {
-			this._workflowExecutionService.deleteRun(run.runId);
-			if (this._selectedHistoryRunId === run.runId) {
-				this._selectedHistoryRunId = undefined;
-			}
-			this._refreshHistoryDrawer();
-			this._updateHistoryCountBadge();
-			this._notificationService.info(`Run #${run.runNumber || run.runId} deleted.`);
 		};
 
 		// 2. Sections Container
