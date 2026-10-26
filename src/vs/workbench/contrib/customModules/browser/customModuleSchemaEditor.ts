@@ -2559,14 +2559,25 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const interpRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 5px;' }));
 					const interpTop = append(interpRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
 					append(interpTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85; color: inherit;' }, 'Python Interpreter / Virtualenv:'));
-					append(interpTop, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'Folder or executable path (optional)'));
+					append(interpTop, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'Leave empty for auto-detection (.venv or python3)'));
+
+					let initialPyPath = '';
+					if (typeof field.pythonPath === 'string') {
+						initialPyPath = field.pythonPath.trim();
+					} else if (field.pythonPath && typeof field.pythonPath === 'object') {
+						initialPyPath = String((field.pythonPath as any).interpreterPath || (field.pythonPath as any).pythonPath || '').trim();
+					}
+					if (initialPyPath === '[object Object]' || initialPyPath === 'undefined' || initialPyPath === 'null') {
+						initialPyPath = '';
+					}
+					field.pythonPath = initialPyPath;
 
 					const interpInputBar = append(interpRow, $('div', { style: 'display: flex; gap: 6px; align-items: center;' }));
 					const interpInput = append(interpInputBar, $('input.monaco-inputbox', {
-						placeholder: 'e.g. .venv, .venv/bin/python, or python3 (defaults to active venv or python3)',
+						placeholder: 'Auto-detect (.venv or system python3) — or click Browse... to select',
 						style: 'flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);'
 					})) as HTMLInputElement;
-					interpInput.value = field.pythonPath || '';
+					interpInput.value = initialPyPath;
 
 					const browseBtn = append(interpInputBar, $('button', {
 						style: 'padding: 5px 10px; font-size: 11px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;',
@@ -2591,7 +2602,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}, '+ Create Virtualenv'));
 
 					const updateDetectionStatus = async () => {
-						const currentVal = interpInput.value.trim();
+						let currentVal = interpInput.value.trim();
+						if (currentVal === '[object Object]' || currentVal === 'undefined' || currentVal === 'null') {
+							currentVal = '';
+							interpInput.value = '';
+						}
 						field.pythonPath = currentVal;
 						this._syncDraft();
 

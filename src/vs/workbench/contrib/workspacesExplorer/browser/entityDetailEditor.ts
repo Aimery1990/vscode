@@ -5200,7 +5200,15 @@ ${interpolatedPrompt}`;
 							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 								try {
 									const pObj = JSON.parse(trimmed);
-									if (pObj.pythonPath !== undefined) pythonPath = pObj.pythonPath;
+									if (pObj.pythonPath !== undefined) {
+										const p = pObj.pythonPath;
+										if (typeof p === 'object' && p !== null) {
+											pythonPath = String(p.interpreterPath || p.pythonPath || '');
+										} else {
+											const s = String(p);
+											pythonPath = s === '[object Object]' ? '' : s;
+										}
+									}
 									if (pObj.code !== undefined) pythonCode = pObj.code;
 									if (pObj.pythonCode !== undefined && !pythonCode) pythonCode = pObj.pythonCode;
 									if (pObj.result !== undefined) pythonResult = pObj.result;
@@ -5216,7 +5224,15 @@ ${interpolatedPrompt}`;
 							}
 						} else if (typeof v === 'object' && v !== null) {
 							const obj = v as Record<string, unknown>;
-							if (obj.pythonPath !== undefined) pythonPath = String(obj.pythonPath);
+							if (obj.pythonPath !== undefined) {
+								const p = obj.pythonPath;
+								if (typeof p === 'object' && p !== null) {
+									pythonPath = String((p as any).interpreterPath || (p as any).pythonPath || '');
+								} else {
+									const s = String(p);
+									pythonPath = s === '[object Object]' ? '' : s;
+								}
+							}
 							if (obj.code !== undefined) pythonCode = String(obj.code);
 							if (obj.pythonCode !== undefined && !pythonCode) pythonCode = String(obj.pythonCode);
 							if (obj.result !== undefined) pythonResult = obj.result;
@@ -5225,6 +5241,13 @@ ${interpolatedPrompt}`;
 							if (obj.durationMs !== undefined) durationMs = Number(obj.durationMs);
 							if (obj.lastExecuted) lastExecutedText = String(obj.lastExecuted);
 						}
+					}
+
+					if (typeof pythonPath === 'object' && pythonPath !== null) {
+						pythonPath = String((pythonPath as any).interpreterPath || (pythonPath as any).pythonPath || '');
+					}
+					if (pythonPath === '[object Object]' || pythonPath === 'undefined' || pythonPath === 'null') {
+						pythonPath = '';
 					}
 
 					if (!pythonCode) {
@@ -5285,7 +5308,7 @@ ${interpolatedPrompt}`;
 										<span class="python-test-status" style="font-size: 10px; opacity: 0.65;"></span>
 									</div>
 									<div style="display: flex; gap: 6px; align-items: center;">
-										<input type="text" class="python-interpreter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(pythonPath)}" placeholder="e.g. .venv, .venv/bin/python, /usr/bin/python3, or python3" style="flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
+										<input type="text" class="python-interpreter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(pythonPath)}" placeholder="Auto-detect (.venv or system python3) — or click Browse... to select" style="flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
 										<button type="button" class="python-browse-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Select Python Interpreter or Virtualenv Folder" style="padding: 5px 10px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M14.5 3H7.71l-.85-.85L6.51 2h-5l-.5.5v11l.5.5h13l.5-.5v-10l-.5-.5zm-.5 10H2V3h4.29l.85.85.35.15H14v9z"/></svg><span>Browse...</span></button>
 										<button type="button" class="python-test-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Test Python binary and check version" style="padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); white-space: nowrap;">Test</button>
 										<button type="button" class="python-create-venv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Initialize a local virtual environment (.venv) via python3 -m venv" style="padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.12); color: #38bdf8; border: 1px solid rgba(56,189,248,0.35); white-space: nowrap;">Create venv</button>
