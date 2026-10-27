@@ -2979,7 +2979,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const scriptsList = append(scriptsRow, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
 
 					const renderScriptsList = () => {
-						scriptsList.innerHTML = '';
+						clearNode(scriptsList);
 						const exts: string[] = field.externalScripts || [];
 						if (exts.length === 0) {
 							append(scriptsList, $('div', {

@@ -3855,10 +3855,10 @@ ${rawErr}
 		const listEl = card.querySelector('.python-scripts-list') as HTMLElement | null;
 		if (!listEl) return;
 		if (scripts.length === 0) {
-			listEl.innerHTML = `<div class="python-scripts-empty" style="font-size: 10.5px; opacity: 0.5; padding: 3px 4px; font-style: italic;">No external scripts configured. Executes inline source code only.</div>`;
+			this._setElementHTML(listEl, `<div class="python-scripts-empty" style="font-size: 10.5px; opacity: 0.5; padding: 3px 4px; font-style: italic;">No external scripts configured. Executes inline source code only.</div>`);
 			return;
 		}
-		listEl.innerHTML = scripts.map((s, idx) => `
+		this._setElementHTML(listEl, scripts.map((s, idx) => `
 			<div class="python-script-item" data-index="${idx}" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); font-size: 11px; font-family: var(--vscode-editor-font-family, monospace);">
 				<div style="display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
 					<span style="opacity: 0.5; font-size: 10px; font-weight: 600;">#${idx + 1}</span>
@@ -3867,7 +3867,7 @@ ${rawErr}
 				</div>
 				<button type="button" class="python-remove-script-btn" data-field-key="${this._escapeHtmlAttr(fieldKey)}" data-index="${idx}" style="padding: 2px 6px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: transparent; color: rgba(255, 255, 255, 0.6); cursor: pointer; display: inline-flex; align-items: center;" title="Remove this script"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854Z"/></svg></button>
 			</div>
-		`).join('');
+		`).join(''));
 	}
 
 	private async _browsePythonInterpreterInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
