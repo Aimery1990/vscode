@@ -13,6 +13,7 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
 import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
 import { ICustomModulesService } from '../common/customModules.js';
@@ -80,7 +81,7 @@ registerAction2(class NewCustomModuleAction extends Action2 {
 				id: MenuId.ViewTitle,
 				group: 'navigation',
 				order: 1,
-				when: undefined
+				when: ContextKeyExpr.equals('view', CustomModulesViewPaneId)
 			}
 		});
 	}
@@ -101,7 +102,7 @@ registerAction2(class RefreshCustomModulesAction extends Action2 {
 				id: MenuId.ViewTitle,
 				group: 'navigation',
 				order: 2,
-				when: undefined
+				when: ContextKeyExpr.equals('view', CustomModulesViewPaneId)
 			}
 		});
 	}

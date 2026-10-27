@@ -90,8 +90,31 @@ const viewDescriptors: IViewDescriptor[] = [
 
 viewsRegistry.registerViews(viewDescriptors, viewContainer);
 
-// 5. Register Header Actions: Open Workflow & New Workflow buttons
+// 5. Register Header Actions: New Workflow, Open Workflow & Refresh Workflow buttons
 for (const vd of viewDescriptors) {
+	registerAction2(class AddWorkflowAction extends Action2 {
+		constructor() {
+			super({
+				id: `workbench.action.workflowsManager.addWorkflow.${vd.id}`,
+				title: localize2('addWorkflow', "New Workflow..."),
+				icon: Codicon.plus,
+				menu: {
+					id: MenuId.ViewTitle,
+					when: ContextKeyExpr.equals('view', vd.id),
+					group: 'navigation',
+					order: 1
+				}
+			});
+		}
+
+		async run(accessor: ServicesAccessor): Promise<void> {
+			const workspaceContextService = accessor.get(IWorkspaceContextService);
+			const folders = workspaceContextService.getWorkspace().folders;
+			const targetFolderUri = folders[0]?.uri;
+			await createWorkflowDialog(accessor, targetFolderUri);
+		}
+	});
+
 	registerAction2(class OpenWorkflowAction extends Action2 {
 		constructor() {
 			super({
@@ -102,7 +125,7 @@ for (const vd of viewDescriptors) {
 					id: MenuId.ViewTitle,
 					when: ContextKeyExpr.equals('view', vd.id),
 					group: 'navigation',
-					order: 1
+					order: 2
 				}
 			});
 		}
@@ -122,26 +145,24 @@ for (const vd of viewDescriptors) {
 		}
 	});
 
-	registerAction2(class AddWorkflowAction extends Action2 {
+	registerAction2(class RefreshWorkflowsAction extends Action2 {
 		constructor() {
 			super({
-				id: `workbench.action.workflowsManager.addWorkflow.${vd.id}`,
-				title: localize2('addWorkflow', "New / Open Workflow"),
-				icon: Codicon.plus,
+				id: `workbench.action.workflowsManager.refresh.${vd.id}`,
+				title: localize2('refreshWorkflows', "Refresh Workflows"),
+				icon: Codicon.refresh,
 				menu: {
 					id: MenuId.ViewTitle,
 					when: ContextKeyExpr.equals('view', vd.id),
 					group: 'navigation',
-					order: 2
+					order: 3
 				}
 			});
 		}
 
 		async run(accessor: ServicesAccessor): Promise<void> {
-			const workspaceContextService = accessor.get(IWorkspaceContextService);
-			const folders = workspaceContextService.getWorkspace().folders;
-			const targetFolderUri = folders[0]?.uri;
-			await createWorkflowDialog(accessor, targetFolderUri);
+			const workflowsManagerService = accessor.get(IWorkflowsManagerService);
+			workflowsManagerService.refresh();
 		}
 	});
 }

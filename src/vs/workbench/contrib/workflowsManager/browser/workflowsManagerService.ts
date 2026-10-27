@@ -70,6 +70,10 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 		this._onDidExpandPane.fire(paneId);
 	}
 
+	refresh(): void {
+		this._onDidChangeWorkflows.fire();
+	}
+
 	private get savedWorkflowsKey(): string {
 		const email = this.workspacesExplorerService.getActiveUserEmail();
 		return `${SAVED_WORKFLOWS_STORAGE_KEY}:${email || 'unauthenticated'}`;

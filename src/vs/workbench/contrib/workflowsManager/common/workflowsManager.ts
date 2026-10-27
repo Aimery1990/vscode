@@ -41,4 +41,5 @@ export interface IWorkflowsManagerService {
 	saveWorkflow(record: ISavedWorkflowRecord): Promise<void>;
 	removeSavedWorkflow(uri: URI | string): Promise<void>;
 	deleteWorkflow(id: string): Promise<void>;
+	refresh(): void;
 }
