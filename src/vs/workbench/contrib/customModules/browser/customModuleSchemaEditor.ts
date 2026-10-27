@@ -2532,8 +2532,20 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					append(titleEl, $('span', {}, 'Output Manifest & Export Selection'));
 
 					const syncBtn = append(headerRow, $('button.sync-primitives-btn', {
-						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(129, 140, 248, 0.15); color: #818cf8; border: 1px solid rgba(129, 140, 248, 0.35); cursor: pointer; transition: all 0.15s ease;'
-					}));
+						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; font-size: 11px; font-weight: 600; border-radius: 6px; background: rgba(129, 140, 248, 0.12); color: #a5b4fc; border: 1px solid rgba(129, 140, 248, 0.35); cursor: pointer; transition: all 0.15s ease;'
+					})) as HTMLButtonElement;
+					syncBtn.onmouseenter = () => {
+						syncBtn.style.background = 'rgba(129, 140, 248, 0.22)';
+						syncBtn.style.borderColor = 'rgba(129, 140, 248, 0.6)';
+						syncBtn.style.color = '#ffffff';
+						syncBtn.style.boxShadow = '0 0 10px rgba(129, 140, 248, 0.25)';
+					};
+					syncBtn.onmouseleave = () => {
+						syncBtn.style.background = 'rgba(129, 140, 248, 0.12)';
+						syncBtn.style.borderColor = 'rgba(129, 140, 248, 0.35)';
+						syncBtn.style.color = '#a5b4fc';
+						syncBtn.style.boxShadow = 'none';
+					};
 					append(syncBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.refresh)));
 					append(syncBtn, $('span', {}, 'Sync Primitives'));
 
@@ -2612,36 +2624,94 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								if (!spec) {
 									return;
 								}
+								const isEnabled = spec.enabled ?? true;
 								const row = append(specsContainer, $('.output-spec-row', {
-									style: 'display: flex; align-items: center; justify-content: space-between; padding: 7px 10px; background: rgba(0, 0, 0, 0.25); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 5px; gap: 10px;'
+									style: `display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: ${isEnabled ? 'rgba(37, 99, 235, 0.08)' : 'rgba(0, 0, 0, 0.22)'}; border: 1px solid ${isEnabled ? 'rgba(59, 130, 246, 0.35)' : 'rgba(255, 255, 255, 0.08)'}; border-radius: 6px; gap: 12px; transition: all 0.15s ease;`
 								}));
 
-								const leftPart = append(row, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
-								const checkbox = append(leftPart, $('input', {
-									type: 'checkbox',
-									style: 'cursor: pointer; width: 14px; height: 14px;'
-								})) as HTMLInputElement;
-								checkbox.checked = spec.enabled ?? true;
-								checkbox.onchange = () => {
-									spec.enabled = checkbox.checked;
-									this._syncDraft();
-								};
+								const leftPart = append(row, $('div.custom-checkbox-wrapper', {
+									style: 'display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; flex: 1;'
+								}));
 
-								append(leftPart, $('span', {
-									style: 'font-size: 11.5px; font-weight: 500; color: #f1f5f9;'
+								// Custom checkbox box
+								const checkSquare = append(leftPart, $('div.custom-check-square', {
+									style: `width: 16px; height: 16px; min-width: 16px; min-height: 16px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; transition: all 0.15s ease; ${isEnabled ? 'background: #2563eb; border: 1.5px solid #3b82f6; box-shadow: 0 0 8px rgba(37, 99, 235, 0.4);' : 'background: rgba(0, 0, 0, 0.35); border: 1.5px solid rgba(255, 255, 255, 0.25);'}`
+								}));
+
+								const checkSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+								checkSvg.setAttribute('width', '10');
+								checkSvg.setAttribute('height', '10');
+								checkSvg.setAttribute('viewBox', '0 0 12 12');
+								checkSvg.setAttribute('fill', 'none');
+								checkSvg.style.display = isEnabled ? 'block' : 'none';
+								const checkPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+								checkPath.setAttribute('d', 'M2.5 6L5 8.5L9.5 3.5');
+								checkPath.setAttribute('stroke', '#ffffff');
+								checkPath.setAttribute('stroke-width', '2');
+								checkPath.setAttribute('stroke-linecap', 'round');
+								checkPath.setAttribute('stroke-linejoin', 'round');
+								checkSvg.appendChild(checkPath);
+								checkSquare.appendChild(checkSvg);
+
+								const labelSpan = append(leftPart, $('span', {
+									style: `font-size: 12px; font-weight: ${isEnabled ? '600' : '500'}; color: ${isEnabled ? '#f8fafc' : '#94a3b8'}; transition: color 0.15s ease;`
 								}, spec.label || spec.fieldKey || `Output ${specIdx + 1}`));
 
+								const updateCheckboxState = (checked: boolean) => {
+									spec.enabled = checked;
+									this._syncDraft();
+									if (checked) {
+										row.style.background = 'rgba(37, 99, 235, 0.08)';
+										row.style.borderColor = 'rgba(59, 130, 246, 0.35)';
+										checkSquare.style.background = '#2563eb';
+										checkSquare.style.borderColor = '#3b82f6';
+										checkSquare.style.boxShadow = '0 0 8px rgba(37, 99, 235, 0.4)';
+										checkSvg.style.display = 'block';
+										labelSpan.style.color = '#f8fafc';
+										labelSpan.style.fontWeight = '600';
+									} else {
+										row.style.background = 'rgba(0, 0, 0, 0.22)';
+										row.style.borderColor = 'rgba(255, 255, 255, 0.08)';
+										checkSquare.style.background = 'rgba(0, 0, 0, 0.35)';
+										checkSquare.style.borderColor = 'rgba(255, 255, 255, 0.25)';
+										checkSquare.style.boxShadow = 'none';
+										checkSvg.style.display = 'none';
+										labelSpan.style.color = '#94a3b8';
+										labelSpan.style.fontWeight = '500';
+									}
+								};
+
+								leftPart.onclick = (e) => {
+									e.preventDefault();
+									const nextChecked = !(spec.enabled ?? true);
+									updateCheckboxState(nextChecked);
+								};
+
+								leftPart.onmouseenter = () => {
+									if (!spec.enabled) {
+										checkSquare.style.borderColor = 'rgba(59, 130, 246, 0.6)';
+									}
+								};
+								leftPart.onmouseleave = () => {
+									if (!spec.enabled) {
+										checkSquare.style.borderColor = 'rgba(255, 255, 255, 0.25)';
+									}
+								};
+
 								const rightPart = append(row, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
-								append(rightPart, $('span', { style: 'font-size: 10.5px; opacity: 0.6;' }, 'Default View:'));
+								append(rightPart, $('span', { style: 'font-size: 10.5px; opacity: 0.65; white-space: nowrap;' }, 'Default View:'));
 								const formatSelect = append(rightPart, $('select', {
-									style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit;'
+									style: 'padding: 3px 8px; font-size: 11px; font-weight: 500; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(18, 18, 18, 0.7); color: #e2e8f0; outline: none; cursor: pointer; transition: border-color 0.15s ease;'
 								})) as HTMLSelectElement;
 
+								formatSelect.onfocus = () => { formatSelect.style.borderColor = 'rgba(56, 189, 248, 0.5)'; };
+								formatSelect.onblur = () => { formatSelect.style.borderColor = 'rgba(255, 255, 255, 0.15)'; };
+
 								const formatOptions = [
-									{ value: 'table', label: 'Table' },
-									{ value: 'markdown', label: 'Markdown' },
-									{ value: 'json', label: 'JSON' },
-									{ value: 'text', label: 'Text' }
+									{ value: 'table', label: '📊 Table' },
+									{ value: 'markdown', label: '📝 Markdown' },
+									{ value: 'json', label: '{ } JSON' },
+									{ value: 'text', label: '📄 Plain Text' }
 								];
 
 								formatOptions.forEach(opt => {

@@ -240,7 +240,7 @@ export class AccountManagementDialog extends Disposable {
 					btn.textContent = item.label;
 					btn.onmouseenter = () => {
 						if (!isActive) {
-							btn.style.background = '#222222';
+							btn.style.background = 'rgba(255, 255, 255, 0.08)';
 							btn.style.color = '#ffffff';
 						}
 					};
@@ -1405,17 +1405,28 @@ export class AccountManagementDialog extends Disposable {
 		if (activeModel) {
 			const activeTestBtn = targetDocument.createElement('button');
 			activeTestBtn.style.cssText = `
-				background: #2563eb;
+				background: linear-gradient(135deg, #2563eb, #1d4ed8);
 				color: #ffffff;
-				border: none;
+				border: 1px solid rgba(59, 130, 246, 0.5);
 				border-radius: 6px;
-				padding: 7px 14px;
+				padding: 7px 16px;
 				font-size: 11.5px;
 				font-weight: 600;
 				cursor: pointer;
 				white-space: nowrap;
+				box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3);
 				transition: all 0.15s ease;
 			`;
+			activeTestBtn.onmouseenter = () => {
+				activeTestBtn.style.background = 'linear-gradient(135deg, #3b82f6, #2563eb)';
+				activeTestBtn.style.boxShadow = '0 4px 14px rgba(37, 99, 235, 0.45)';
+				activeTestBtn.style.transform = 'translateY(-1px)';
+			};
+			activeTestBtn.onmouseleave = () => {
+				activeTestBtn.style.background = 'linear-gradient(135deg, #2563eb, #1d4ed8)';
+				activeTestBtn.style.boxShadow = '0 2px 8px rgba(37, 99, 235, 0.3)';
+				activeTestBtn.style.transform = 'translateY(0)';
+			};
 			activeTestBtn.textContent = 'Test Active Model';
 			activeTestBtn.onclick = async () => {
 				activeTestBtn.disabled = true;
@@ -1444,18 +1455,30 @@ export class AccountManagementDialog extends Disposable {
 
 		const addModelToggleBtn = targetDocument.createElement('button');
 		addModelToggleBtn.style.cssText = `
-			background: #2563eb;
+			background: linear-gradient(135deg, #2563eb, #1d4ed8);
 			color: #ffffff;
-			border: none;
+			border: 1px solid rgba(59, 130, 246, 0.5);
 			border-radius: 6px;
-			padding: 5px 12px;
+			padding: 5px 14px;
 			font-size: 11.5px;
 			font-weight: 600;
 			cursor: pointer;
 			display: flex;
 			align-items: center;
 			gap: 4px;
+			box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3);
+			transition: all 0.15s ease;
 		`;
+		addModelToggleBtn.onmouseenter = () => {
+			addModelToggleBtn.style.background = 'linear-gradient(135deg, #3b82f6, #2563eb)';
+			addModelToggleBtn.style.boxShadow = '0 4px 14px rgba(37, 99, 235, 0.45)';
+			addModelToggleBtn.style.transform = 'translateY(-1px)';
+		};
+		addModelToggleBtn.onmouseleave = () => {
+			addModelToggleBtn.style.background = 'linear-gradient(135deg, #2563eb, #1d4ed8)';
+			addModelToggleBtn.style.boxShadow = '0 2px 8px rgba(37, 99, 235, 0.3)';
+			addModelToggleBtn.style.transform = 'translateY(0)';
+		};
 		addModelToggleBtn.textContent = '+ Add Voice Model';
 		listHeaderRow.appendChild(addModelToggleBtn);
 		container.appendChild(listHeaderRow);
@@ -1506,14 +1529,14 @@ export class AccountManagementDialog extends Disposable {
 
 			if (model.isBuiltIn) {
 				const builtInBadge = targetDocument.createElement('span');
-				builtInBadge.style.cssText = `font-size: 10px; color: #888888; background: #222222; padding: 1px 5px; border-radius: 4px;`;
+				builtInBadge.style.cssText = `font-size: 10px; font-weight: 500; color: #94a3b8; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.12); padding: 1px 6px; border-radius: 4px;`;
 				builtInBadge.textContent = 'Built-in';
 				titleRow.appendChild(builtInBadge);
 			}
 
 			if (isCurrentActive) {
 				const activeFlag = targetDocument.createElement('span');
-				activeFlag.style.cssText = `font-size: 10px; font-weight: 600; color: #22c55e; border: 1px solid #22c55e; padding: 1px 6px; border-radius: 10px;`;
+				activeFlag.style.cssText = `font-size: 10px; font-weight: 600; color: #22c55e; background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.4); padding: 1px 8px; border-radius: 12px;`;
 				activeFlag.textContent = 'DEFAULT';
 				titleRow.appendChild(activeFlag);
 			}
@@ -1581,16 +1604,28 @@ export class AccountManagementDialog extends Disposable {
 			if (!isCurrentActive) {
 				const setDefaultBtn = targetDocument.createElement('button');
 				setDefaultBtn.style.cssText = `
-					background: #222222;
-					color: #ffffff;
-					border: 1px solid #333333;
-					border-radius: 5px;
-					padding: 5px 10px;
+					background: rgba(34, 197, 94, 0.1);
+					color: #4ade80;
+					border: 1px solid rgba(34, 197, 94, 0.3);
+					border-radius: 6px;
+					padding: 5px 12px;
 					font-size: 11px;
 					font-weight: 500;
 					cursor: pointer;
-					transition: all 0.1s ease;
+					transition: all 0.15s ease;
 				`;
+				setDefaultBtn.onmouseenter = () => {
+					setDefaultBtn.style.background = 'rgba(34, 197, 94, 0.2)';
+					setDefaultBtn.style.borderColor = 'rgba(34, 197, 94, 0.55)';
+					setDefaultBtn.style.color = '#ffffff';
+					setDefaultBtn.style.boxShadow = '0 0 10px rgba(34, 197, 94, 0.2)';
+				};
+				setDefaultBtn.onmouseleave = () => {
+					setDefaultBtn.style.background = 'rgba(34, 197, 94, 0.1)';
+					setDefaultBtn.style.borderColor = 'rgba(34, 197, 94, 0.3)';
+					setDefaultBtn.style.color = '#4ade80';
+					setDefaultBtn.style.boxShadow = 'none';
+				};
 				setDefaultBtn.textContent = 'Set as Default';
 				setDefaultBtn.onclick = async () => {
 					await this.voiceModelService.setActiveVoiceModel(model.id);
@@ -1603,16 +1638,26 @@ export class AccountManagementDialog extends Disposable {
 			// Configure Button (available on ALL models, built-in or custom)
 			const configBtn = targetDocument.createElement('button');
 			configBtn.style.cssText = `
-				background: #222222;
-				color: #cccccc;
-				border: 1px solid #333333;
-				border-radius: 5px;
-				padding: 5px 10px;
+				background: rgba(255, 255, 255, 0.06);
+				color: #e2e8f0;
+				border: 1px solid rgba(255, 255, 255, 0.16);
+				border-radius: 6px;
+				padding: 5px 12px;
 				font-size: 11px;
 				font-weight: 500;
 				cursor: pointer;
-				transition: all 0.1s ease;
+				transition: all 0.15s ease;
 			`;
+			configBtn.onmouseenter = () => {
+				configBtn.style.background = 'rgba(255, 255, 255, 0.12)';
+				configBtn.style.borderColor = 'rgba(255, 255, 255, 0.3)';
+				configBtn.style.color = '#ffffff';
+			};
+			configBtn.onmouseleave = () => {
+				configBtn.style.background = 'rgba(255, 255, 255, 0.06)';
+				configBtn.style.borderColor = 'rgba(255, 255, 255, 0.16)';
+				configBtn.style.color = '#e2e8f0';
+			};
 			configBtn.textContent = 'Configure';
 			configBtn.onclick = () => {
 				openEditModal(model);
@@ -1621,16 +1666,28 @@ export class AccountManagementDialog extends Disposable {
 
 			const testBtn = targetDocument.createElement('button');
 			testBtn.style.cssText = `
-				background: rgba(37, 99, 235, 0.1);
-				color: #60a5fa;
-				border: 1px solid rgba(37, 99, 235, 0.25);
-				border-radius: 5px;
-				padding: 5px 10px;
+				background: rgba(56, 189, 248, 0.12);
+				color: #38bdf8;
+				border: 1px solid rgba(56, 189, 248, 0.35);
+				border-radius: 6px;
+				padding: 5px 14px;
 				font-size: 11px;
-				font-weight: 500;
+				font-weight: 600;
 				cursor: pointer;
-				transition: all 0.1s ease;
+				transition: all 0.15s ease;
 			`;
+			testBtn.onmouseenter = () => {
+				testBtn.style.background = 'rgba(56, 189, 248, 0.22)';
+				testBtn.style.borderColor = 'rgba(56, 189, 248, 0.6)';
+				testBtn.style.color = '#ffffff';
+				testBtn.style.boxShadow = '0 0 10px rgba(56, 189, 248, 0.25)';
+			};
+			testBtn.onmouseleave = () => {
+				testBtn.style.background = 'rgba(56, 189, 248, 0.12)';
+				testBtn.style.borderColor = 'rgba(56, 189, 248, 0.35)';
+				testBtn.style.color = '#38bdf8';
+				testBtn.style.boxShadow = 'none';
+			};
 			testBtn.textContent = 'Test';
 			testBtn.onclick = async () => {
 				testBtn.disabled = true;
@@ -1651,14 +1708,27 @@ export class AccountManagementDialog extends Disposable {
 				const delBtn = targetDocument.createElement('button');
 				delBtn.style.cssText = `
 					background: rgba(244, 63, 94, 0.1);
-					color: #f43f5e;
-					border: 1px solid rgba(244, 63, 94, 0.25);
-					border-radius: 5px;
-					padding: 5px 10px;
+					color: #f87171;
+					border: 1px solid rgba(244, 63, 94, 0.3);
+					border-radius: 6px;
+					padding: 5px 12px;
 					font-size: 11px;
 					font-weight: 500;
 					cursor: pointer;
+					transition: all 0.15s ease;
 				`;
+				delBtn.onmouseenter = () => {
+					delBtn.style.background = 'rgba(244, 63, 94, 0.2)';
+					delBtn.style.borderColor = 'rgba(244, 63, 94, 0.5)';
+					delBtn.style.color = '#ffffff';
+					delBtn.style.boxShadow = '0 0 10px rgba(244, 63, 94, 0.2)';
+				};
+				delBtn.onmouseleave = () => {
+					delBtn.style.background = 'rgba(244, 63, 94, 0.1)';
+					delBtn.style.borderColor = 'rgba(244, 63, 94, 0.3)';
+					delBtn.style.color = '#f87171';
+					delBtn.style.boxShadow = 'none';
+				};
 				delBtn.textContent = 'Delete';
 				delBtn.onclick = async () => {
 					await this.voiceModelService.removeVoiceModel(model.id);
@@ -1782,7 +1852,29 @@ export class AccountManagementDialog extends Disposable {
 			modalBtnRow.style.cssText = `display:flex; justify-content:space-between; align-items:center; margin-top:8px;`;
 
 			const modalTestBtn = targetDocument.createElement('button');
-			modalTestBtn.style.cssText = `background:rgba(37,99,235,0.1); color:#60a5fa; border:1px solid rgba(37,99,235,0.3); border-radius:6px; padding:7px 14px; font-size:11.5px; font-weight:600; cursor:pointer;`;
+			modalTestBtn.style.cssText = `
+				background: rgba(56, 189, 248, 0.12);
+				color: #38bdf8;
+				border: 1px solid rgba(56, 189, 248, 0.35);
+				border-radius: 6px;
+				padding: 7px 16px;
+				font-size: 11.5px;
+				font-weight: 600;
+				cursor: pointer;
+				transition: all 0.15s ease;
+			`;
+			modalTestBtn.onmouseenter = () => {
+				modalTestBtn.style.background = 'rgba(56, 189, 248, 0.22)';
+				modalTestBtn.style.borderColor = 'rgba(56, 189, 248, 0.6)';
+				modalTestBtn.style.color = '#ffffff';
+				modalTestBtn.style.boxShadow = '0 0 10px rgba(56, 189, 248, 0.25)';
+			};
+			modalTestBtn.onmouseleave = () => {
+				modalTestBtn.style.background = 'rgba(56, 189, 248, 0.12)';
+				modalTestBtn.style.borderColor = 'rgba(56, 189, 248, 0.35)';
+				modalTestBtn.style.color = '#38bdf8';
+				modalTestBtn.style.boxShadow = 'none';
+			};
 			modalTestBtn.textContent = 'Test Connection';
 			modalTestBtn.onclick = async () => {
 				modalTestBtn.disabled = true;
@@ -1834,13 +1926,50 @@ export class AccountManagementDialog extends Disposable {
 			rightBtns.style.cssText = `display:flex; gap:10px;`;
 
 			const cancelBtn = targetDocument.createElement('button');
-			cancelBtn.style.cssText = `background:#222222; color:#cccccc; border:1px solid #333333; border-radius:6px; padding:7px 14px; font-size:12px; cursor:pointer;`;
+			cancelBtn.style.cssText = `
+				background: rgba(255, 255, 255, 0.08);
+				color: #e2e8f0;
+				border: 1px solid rgba(255, 255, 255, 0.16);
+				border-radius: 6px;
+				padding: 7px 16px;
+				font-size: 12px;
+				font-weight: 500;
+				cursor: pointer;
+				transition: all 0.15s ease;
+			`;
+			cancelBtn.onmouseenter = () => {
+				cancelBtn.style.background = 'rgba(255, 255, 255, 0.14)';
+				cancelBtn.style.color = '#ffffff';
+			};
+			cancelBtn.onmouseleave = () => {
+				cancelBtn.style.background = 'rgba(255, 255, 255, 0.08)';
+				cancelBtn.style.color = '#e2e8f0';
+			};
 			cancelBtn.textContent = 'Cancel';
 			cancelBtn.onclick = () => editOverlay.remove();
 			rightBtns.appendChild(cancelBtn);
 
 			const saveEditBtn = targetDocument.createElement('button');
-			saveEditBtn.style.cssText = `background:#2563eb; color:#ffffff; border:none; border-radius:6px; padding:7px 18px; font-size:12px; font-weight:600; cursor:pointer;`;
+			saveEditBtn.style.cssText = `
+				background: linear-gradient(135deg, #2563eb, #1d4ed8);
+				color: #ffffff;
+				border: 1px solid rgba(59, 130, 246, 0.5);
+				border-radius: 6px;
+				padding: 7px 18px;
+				font-size: 12px;
+				font-weight: 600;
+				cursor: pointer;
+				box-shadow: 0 2px 8px rgba(37, 99, 235, 0.3);
+				transition: all 0.15s ease;
+			`;
+			saveEditBtn.onmouseenter = () => {
+				saveEditBtn.style.background = 'linear-gradient(135deg, #3b82f6, #2563eb)';
+				saveEditBtn.style.boxShadow = '0 4px 14px rgba(37, 99, 235, 0.45)';
+			};
+			saveEditBtn.onmouseleave = () => {
+				saveEditBtn.style.background = 'linear-gradient(135deg, #2563eb, #1d4ed8)';
+				saveEditBtn.style.boxShadow = '0 2px 8px rgba(37, 99, 235, 0.3)';
+			};
 			saveEditBtn.textContent = 'Save Changes';
 			saveEditBtn.onclick = async () => {
 				let finalKey = model.apiKey;
