@@ -73,6 +73,7 @@ export interface IWorkflowNodeExecutionState {
 	input?: any;
 	output?: any;
 	error?: string;
+	failedStepIndex?: number;
 	executedTickets: IExecutedTicketRecord[];
 	waitingHumanPrompt?: IWorkflowHumanPrompt;
 }

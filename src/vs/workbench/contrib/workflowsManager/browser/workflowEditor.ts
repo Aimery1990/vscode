@@ -611,9 +611,17 @@ export class WorkflowEditor extends EditorPane {
 						if (this._toolbarEl) {
 							this._renderToolbar(this._toolbarEl);
 						}
+						if (this._pipelinePanelEl && this._activePipelineNodeId) {
+							const activePipelineNode = this._nodes.find(n => n.id === this._activePipelineNodeId);
+							if (activePipelineNode) {
+								this._renderPipelinePanel(this._pipelinePanelEl, activePipelineNode);
+							}
+						}
 					});
 				}
-				if (this._isLogDrawerOpen) {
+				if (run.status === 'failed' && !this._isLogDrawerOpen) {
+					this._openDrawerTab('logs');
+				} else if (this._isLogDrawerOpen) {
 					if (this._activeDrawerTab === 'logs') {
 						this._refreshLogs(run);
 					} else if (this._activeDrawerTab === 'vars') {
@@ -4380,9 +4388,12 @@ export class WorkflowEditor extends EditorPane {
 				}, 50);
 			};
 		} else {
+			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+			const nodeRunState = activeRun?.nodeStates[node.id];
 			for (let i = 0; i < node.pipeline.length; i++) {
 				const step = node.pipeline[i];
-				const stepCard = append(stepsList, $('.pipeline-step-card'));
+				const isFailedStep = nodeRunState?.status === 'failed' && nodeRunState?.failedStepIndex === i;
+				const stepCard = append(stepsList, $('.pipeline-step-card' + (isFailedStep ? '.step-failed' : '')));
 				stepCard.draggable = true;
 				stepCard.dataset.stepIndex = String(i);
 				stepCard.dataset.stepId = step.id;
@@ -4621,6 +4632,22 @@ export class WorkflowEditor extends EditorPane {
 					addPipelineChip('CREATE_TICKETS', '@new_ticket = CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})');
 					addPipelineChip('GET_TICKETS', '@ticket_data = GET_TICKETS(ticket_name="")');
 					addPipelineChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
+				}
+
+				if (isFailedStep) {
+					const failBadge = append(topRow, $('.pipeline-step-badge-error'));
+					failBadge.textContent = 'FAILED';
+					failBadge.title = nodeRunState?.error || 'Step execution failed';
+
+					if (nodeRunState?.error) {
+						const errBanner = append(content, $('.pipeline-step-error-banner'));
+						errBanner.textContent = `Error: ${nodeRunState.error}`;
+						errBanner.title = 'Click to open execution log';
+						errBanner.onclick = (e) => {
+							e.stopPropagation();
+							this._openDrawerTab('logs', node.id);
+						};
+					}
 				}
 
 				// Right: Actions
@@ -6108,6 +6135,17 @@ export class WorkflowEditor extends EditorPane {
 					nodeEl.classList.add('status-success');
 				} else if (nodeRunState.status === 'failed') {
 					nodeEl.classList.add('status-failed');
+
+					// Failed Error Interactive Badge
+					const errBadge = append(nodeEl, $('.node-error-badge'));
+					const stepText = nodeRunState.failedStepIndex !== undefined ? ` (Step #${nodeRunState.failedStepIndex + 1})` : '';
+					errBadge.textContent = `[X] Failed${stepText} [View Log]`;
+					errBadge.title = nodeRunState.error || 'Click to view execution error log';
+					errBadge.onmousedown = (e) => e.stopPropagation();
+					errBadge.onclick = (e) => {
+						e.stopPropagation();
+						this._openDrawerTab('logs', node.id);
+					};
 				} else if (nodeRunState.status === 'waiting_human') {
 					nodeEl.classList.add('status-waiting-human');
 

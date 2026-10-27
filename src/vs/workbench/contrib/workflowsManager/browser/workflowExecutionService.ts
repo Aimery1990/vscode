@@ -1326,82 +1326,87 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const isRunTicketStep = step.type === 'run_ticket' || step.type === 'run_tickets' || step.type === 'RUN_TICKETS' || step.type === 'runTickets';
 				const isCallFnStep = step.type === 'call_function' || (step.expression && this._isFunctionCallExpression(step.expression));
 
-				if (isCallFnStep) {
-					await this._executeFunctionStep(run, node, step, i, state, pathStep);
-				} else if (isRunTicketStep && step.ticketName) {
-					this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'${step.parameters ? ` (PARAM: ${step.parameters})` : ''}`);
-					const ticketRecord = await runTicket(step.ticketName, step.ticketType, step.ticketUri, step.parameters);
-					pathStep?.operations.push({
-						type: 'run_ticket',
-						label: `Run Ticket: '${step.ticketName}' [${step.ticketType || 'task'}]`,
-						executedTicket: ticketRecord,
-						durationMs: ticketRecord.durationMs
-					});
-					if (step.targetVariable) {
+				try {
+					if (isCallFnStep) {
+						await this._executeFunctionStep(run, node, step, i, state, pathStep);
+					} else if (isRunTicketStep && step.ticketName) {
+						this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'${step.parameters ? ` (PARAM: ${step.parameters})` : ''}`);
+						const ticketRecord = await runTicket(step.ticketName, step.ticketType, step.ticketUri, step.parameters);
+						pathStep?.operations.push({
+							type: 'run_ticket',
+							label: `Run Ticket: '${step.ticketName}' [${step.ticketType || 'task'}]`,
+							executedTicket: ticketRecord,
+							durationMs: ticketRecord.durationMs
+						});
+						if (step.targetVariable) {
+							const varKey = step.targetVariable.trim().replace(/^@/, '');
+							run.contextVariables[varKey] = ticketRecord.output;
+							this._emitLog(run, 'info', `[Step #${i + 1}] Output stored in variable: @${varKey}`);
+						}
+					} else if (step.type === 'set_variable' && step.targetVariable) {
 						const varKey = step.targetVariable.trim().replace(/^@/, '');
-						run.contextVariables[varKey] = ticketRecord.output;
-						this._emitLog(run, 'info', `[Step #${i + 1}] Output stored in variable: @${varKey}`);
-					}
-				} else if (step.type === 'set_variable' && step.targetVariable) {
-					const varKey = step.targetVariable.trim().replace(/^@/, '');
-					let val: any = undefined;
-					let expr = (step.expression || '').trim();
+						let val: any = undefined;
+						let expr = (step.expression || '').trim();
 
-					// Strip self-assignment prefix if present (e.g. "monitor = monitor + 1" or "monitor += 1")
-					if (expr.startsWith(`${varKey} =`)) {
-						expr = expr.substring(`${varKey} =`.length).trim();
-					} else if (expr.startsWith(`${varKey}=`)) {
-						expr = expr.substring(`${varKey}=`.length).trim();
-					} else if (expr.startsWith(`${varKey} +=`)) {
-						expr = `+=${expr.substring(`${varKey} +=`.length).trim()}`;
-					} else if (expr.startsWith(`${varKey}+=`)) {
-						expr = `+=${expr.substring(`${varKey}+=`.length).trim()}`;
-					} else if (expr.startsWith(`${varKey} -=`)) {
-						expr = `-=${expr.substring(`${varKey} -=`.length).trim()}`;
-					} else if (expr.startsWith(`${varKey}-=`)) {
-						expr = `-=${expr.substring(`${varKey}-=`.length).trim()}`;
-					}
-					if (expr.startsWith('=')) {
-						expr = expr.substring(1).trim();
-					}
+						// Strip self-assignment prefix if present (e.g. "monitor = monitor + 1" or "monitor += 1")
+						if (expr.startsWith(`${varKey} =`)) {
+							expr = expr.substring(`${varKey} =`.length).trim();
+						} else if (expr.startsWith(`${varKey}=`)) {
+							expr = expr.substring(`${varKey}=`.length).trim();
+						} else if (expr.startsWith(`${varKey} +=`)) {
+							expr = `+=${expr.substring(`${varKey} +=`.length).trim()}`;
+						} else if (expr.startsWith(`${varKey}+=`)) {
+							expr = `+=${expr.substring(`${varKey}+=`.length).trim()}`;
+						} else if (expr.startsWith(`${varKey} -=`)) {
+							expr = `-=${expr.substring(`${varKey} -=`.length).trim()}`;
+						} else if (expr.startsWith(`${varKey}-=`)) {
+							expr = `-=${expr.substring(`${varKey}-=`.length).trim()}`;
+						}
+						if (expr.startsWith('=')) {
+							expr = expr.substring(1).trim();
+						}
 
-					const oldVal = run.contextVariables[varKey];
-					if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
-						const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-						val = base + 1;
-					} else if (expr === '- 1' || expr === '--' || expr === '-= 1' || expr === '-=1') {
-						const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-						val = base - 1;
-					} else if (/^(\+\=|\+)\s*(\d+(\.\d+)?)$/.test(expr)) {
-						const delta = Number(expr.replace(/^(\+\=|\+)/, '').trim());
-						const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-						val = base + delta;
-					} else if (/^(-\=|-)\s*(\d+(\.\d+)?)$/.test(expr)) {
-						const delta = Number(expr.replace(/^(-\=|-)/, '').trim());
-						const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-						val = base - delta;
-					} else if (expr) {
-						try {
-							const evaluator = new PythonExpressionEvaluator(expr, run.contextVariables);
-							val = evaluator.evaluate();
-						} catch (evalErr: any) {
-							this._emitLog(run, 'error', `[Syntax Error] Step #${i + 1} variable '${varKey}' failed to evaluate '${expr}': ${evalErr.message}`, { nodeId: node.id });
-							throw new Error(`[Syntax Error] Step #${i + 1} ('${expr}'): ${evalErr.message}`);
+						const oldVal = run.contextVariables[varKey];
+						if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
+							const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+							val = base + 1;
+						} else if (expr === '- 1' || expr === '--' || expr === '-= 1' || expr === '-=1') {
+							const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+							val = base - 1;
+						} else if (/^(\+\=|\+)\s*(\d+(\.\d+)?)$/.test(expr)) {
+							const delta = Number(expr.replace(/^(\+\=|\+)/, '').trim());
+							const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+							val = base + delta;
+						} else if (/^(-\=|-)\s*(\d+(\.\d+)?)$/.test(expr)) {
+							const delta = Number(expr.replace(/^(-\=|-)/, '').trim());
+							const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+							val = base - delta;
+						} else if (expr) {
+							try {
+								const evaluator = new PythonExpressionEvaluator(expr, run.contextVariables);
+								val = evaluator.evaluate();
+							} catch (evalErr: any) {
+								this._emitLog(run, 'error', `[Syntax Error] Step #${i + 1} variable '${varKey}' failed to evaluate '${expr}': ${evalErr.message}`, { nodeId: node.id });
+								throw new Error(`[Syntax Error] Step #${i + 1} ('${expr}'): ${evalErr.message}`);
+							}
 						}
+						run.contextVariables[varKey] = val;
+						run.contextVariables[`@${varKey}`] = val;
+						this._emitLog(run, 'info', `[Step #${i + 1}] Variable assigned: @${varKey} = ${JSON.stringify(val)}`);
+						pathStep?.operations.push({
+							type: 'set_variable',
+							label: `Set Variable: @${varKey} = ${JSON.stringify(val)}`,
+							details: {
+								variable: varKey,
+								expression: expr,
+								oldValue: oldVal,
+								newValue: val
+							}
+						});
 					}
-					run.contextVariables[varKey] = val;
-					run.contextVariables[`@${varKey}`] = val;
-					this._emitLog(run, 'info', `[Step #${i + 1}] Variable assigned: @${varKey} = ${JSON.stringify(val)}`);
-					pathStep?.operations.push({
-						type: 'set_variable',
-						label: `Set Variable: @${varKey} = ${JSON.stringify(val)}`,
-						details: {
-							variable: varKey,
-							expression: expr,
-							oldValue: oldVal,
-							newValue: val
-						}
-					});
+				} catch (stepErr: any) {
+					state.failedStepIndex = i;
+					throw stepErr;
 				}
 			}
 
