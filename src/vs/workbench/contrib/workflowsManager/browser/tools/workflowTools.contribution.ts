@@ -44,22 +44,28 @@ export class WorkflowToolsContribution extends Disposable implements IWorkbenchC
 		const runTicketTool = new RunTicketTool(ticketRuntimeService);
 		const getCatalogTool = new GetPrimitivesCatalogTool(ticketRuntimeService);
 
-		this._register(toolsService.registerTool(executeTool.getToolData(), executeTool));
-		this._register(toolsService.registerTool(stateTool.getToolData(), stateTool));
-		this._register(toolsService.registerTool(resumeTool.getToolData(), resumeTool));
-		this._register(toolsService.registerTool(stopTool.getToolData(), stopTool));
+		const registerSafe = (data: any, impl: any) => {
+			if (!toolsService.getTool(data.id)) {
+				this._register(toolsService.registerTool(data, impl));
+			}
+		};
+
+		registerSafe(executeTool.getToolData(), executeTool);
+		registerSafe(stateTool.getToolData(), stateTool);
+		registerSafe(resumeTool.getToolData(), resumeTool);
+		registerSafe(stopTool.getToolData(), stopTool);
 
 		// Primary UPPERCASE tools
-		this._register(toolsService.registerTool(createTicketTool.getToolData(), createTicketTool));
-		this._register(toolsService.registerTool(getTicketTool.getToolData(), getTicketTool));
-		this._register(toolsService.registerTool(runTicketTool.getToolData(), runTicketTool));
-		this._register(toolsService.registerTool(getCatalogTool.getToolData(), getCatalogTool));
+		registerSafe(createTicketTool.getToolData(), createTicketTool);
+		registerSafe(getTicketTool.getToolData(), getTicketTool);
+		registerSafe(runTicketTool.getToolData(), runTicketTool);
+		registerSafe(getCatalogTool.getToolData(), getCatalogTool);
 
 		// Legacy & lowercase aliases
-		this._register(toolsService.registerTool({ ...createTicketTool.getToolData(), id: LegacyCreateTicketToolId, toolReferenceName: 'createTickets' }, createTicketTool));
-		this._register(toolsService.registerTool({ ...getTicketTool.getToolData(), id: LegacyGetTicketToolId, toolReferenceName: 'getTickets' }, getTicketTool));
-		this._register(toolsService.registerTool({ ...runTicketTool.getToolData(), id: LegacyRunTicketToolId, toolReferenceName: 'runTickets' }, runTicketTool));
-		this._register(toolsService.registerTool({ ...getCatalogTool.getToolData(), id: LegacyGetPrimitivesCatalogToolId, toolReferenceName: 'getPrimitivesCatalog' }, getCatalogTool));
+		registerSafe({ ...createTicketTool.getToolData(), id: LegacyCreateTicketToolId, toolReferenceName: 'createTickets' }, createTicketTool);
+		registerSafe({ ...getTicketTool.getToolData(), id: LegacyGetTicketToolId, toolReferenceName: 'getTickets' }, getTicketTool);
+		registerSafe({ ...runTicketTool.getToolData(), id: LegacyRunTicketToolId, toolReferenceName: 'runTickets' }, runTicketTool);
+		registerSafe({ ...getCatalogTool.getToolData(), id: LegacyGetPrimitivesCatalogToolId, toolReferenceName: 'getPrimitivesCatalog' }, getCatalogTool);
 	}
 }
 
