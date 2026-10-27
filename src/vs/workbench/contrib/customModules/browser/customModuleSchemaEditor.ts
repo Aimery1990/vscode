@@ -2888,11 +2888,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const previewRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 6px;' }));
 					const previewHeader = append(previewRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
 
-					const previewHeaderLeft = append(previewHeader, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
-					append(previewHeaderLeft, $('label', { style: 'font-size: 10.5px; font-weight: 600; opacity: 0.85; text-transform: uppercase;' }, 'DEBUG: Execution Output & Logs Preview:'));
+					const previewHeaderLeft = append(previewHeader, $('div', { style: 'display: flex; align-items: center; gap: 6px; min-width: 0; flex-shrink: 1;' }));
 					append(previewHeaderLeft, $('span', {
-						style: 'font-size: 9.5px; padding: 1px 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.1); opacity: 0.75;'
-					}, '[Template Debug Only]'));
+						style: 'font-size: 11px; font-weight: 600; opacity: 0.9; text-transform: uppercase; color: #94a3b8; white-space: nowrap;'
+					}, 'DEBUG: Execution Output & Logs Preview:'));
+					append(previewHeaderLeft, $('span.python-debug-badge', {
+						style: 'font-size: 9.5px; padding: 2px 6px; border-radius: 3px; background: rgba(245, 158, 11, 0.15); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); font-weight: 600; white-space: nowrap;'
+					}, 'Template Debug Only'));
 
 					const previewActions = append(previewHeader, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
 
