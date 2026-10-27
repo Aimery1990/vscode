@@ -451,11 +451,11 @@ export class AgentsManagerPane extends ViewPane {
 						}
 					}));
 				}
-				actions.push(new Action('edit_agent', 'Edit Configuration (✏️)', ThemeIcon.asClassName(Codicon.edit), true, async () => {
+				actions.push(new Action('edit_agent', 'Edit Configuration', ThemeIcon.asClassName(Codicon.edit), true, async () => {
 					this.instantiationService.invokeFunction(accessor => createOrEditAgentDialog(accessor, agent));
 				}));
 
-				actions.push(new Action('delete_agent', 'Delete Agent (🗑️)', ThemeIcon.asClassName(Codicon.trash), true, async () => {
+				actions.push(new Action('delete_agent', 'Delete Agent', ThemeIcon.asClassName(Codicon.trash), true, async () => {
 					await this.agentsManagerService.removeAgent(agent.id);
 					this.notificationService.info(`Agent '${agent.name}' removed.`);
 				}));

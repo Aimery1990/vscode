@@ -2221,7 +2221,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									pill.style.background = 'rgba(56, 189, 248, 0.12)';
 									pill.style.borderColor = 'rgba(56, 189, 248, 0.28)';
 								};
-								append(pill, $('span', { style: 'font-size: 10px; opacity: 0.85;' }, '🔗'));
+								append(pill, $('span' + ThemeIcon.asCSSSelector(Codicon.link), { style: 'font-size: 10px; opacity: 0.85;' }));
 								append(pill, $('span', { style: 'font-weight: 600;' }, varInfo.label));
 							} else {
 								promptDisplay.appendChild(document.createTextNode(match[0]));
@@ -2626,30 +2626,27 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								}
 								const isEnabled = spec.enabled ?? true;
 								const row = append(specsContainer, $('.output-spec-row', {
-									style: `display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; background: ${isEnabled ? 'rgba(37, 99, 235, 0.08)' : 'rgba(0, 0, 0, 0.22)'}; border: 1px solid ${isEnabled ? 'rgba(59, 130, 246, 0.35)' : 'rgba(255, 255, 255, 0.08)'}; border-radius: 6px; gap: 12px; transition: all 0.15s ease;`
+									style: `display: flex; align-items: center; justify-content: space-between; padding: 7px 12px; background: ${isEnabled ? 'rgba(0, 122, 204, 0.08)' : 'rgba(255, 255, 255, 0.02)'}; border: 1px solid ${isEnabled ? 'rgba(0, 122, 204, 0.4)' : 'rgba(255, 255, 255, 0.08)'}; border-radius: 4px; gap: 12px; transition: all 0.15s ease;`
 								}));
 
 								const leftPart = append(row, $('div.custom-checkbox-wrapper', {
 									style: 'display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; flex: 1;'
 								}));
 
-								// Custom checkbox box
+								// Custom checkbox box with system blue and balanced proportions
 								const checkSquare = append(leftPart, $('div.custom-check-square', {
-									style: `width: 16px; height: 16px; min-width: 16px; min-height: 16px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; transition: all 0.15s ease; ${isEnabled ? 'background: #2563eb; border: 1.5px solid #3b82f6; box-shadow: 0 0 8px rgba(37, 99, 235, 0.4);' : 'background: rgba(0, 0, 0, 0.35); border: 1.5px solid rgba(255, 255, 255, 0.25);'}`
+									style: `width: 14px; height: 14px; min-width: 14px; min-height: 14px; border-radius: 2.5px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; transition: all 0.15s ease; ${isEnabled ? 'background: #007acc; border: 1px solid #007acc;' : 'background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.3);'}`
 								}));
 
 								const checkSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
 								checkSvg.setAttribute('width', '10');
 								checkSvg.setAttribute('height', '10');
-								checkSvg.setAttribute('viewBox', '0 0 12 12');
+								checkSvg.setAttribute('viewBox', '0 0 16 16');
 								checkSvg.setAttribute('fill', 'none');
 								checkSvg.style.display = isEnabled ? 'block' : 'none';
 								const checkPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-								checkPath.setAttribute('d', 'M2.5 6L5 8.5L9.5 3.5');
-								checkPath.setAttribute('stroke', '#ffffff');
-								checkPath.setAttribute('stroke-width', '2');
-								checkPath.setAttribute('stroke-linecap', 'round');
-								checkPath.setAttribute('stroke-linejoin', 'round');
+								checkPath.setAttribute('d', 'M13.854 3.646a.5.5 0 0 1 0 .708l-7 7a.5.5 0 0 1-.708 0l-3.5-3.5a.5.5 0 1 1 .708-.708L6.5 10.293l6.646-6.647a.5.5 0 0 1 .708 0z');
+								checkPath.setAttribute('fill', '#ffffff');
 								checkSvg.appendChild(checkPath);
 								checkSquare.appendChild(checkSvg);
 
@@ -2661,20 +2658,18 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									spec.enabled = checked;
 									this._syncDraft();
 									if (checked) {
-										row.style.background = 'rgba(37, 99, 235, 0.08)';
-										row.style.borderColor = 'rgba(59, 130, 246, 0.35)';
-										checkSquare.style.background = '#2563eb';
-										checkSquare.style.borderColor = '#3b82f6';
-										checkSquare.style.boxShadow = '0 0 8px rgba(37, 99, 235, 0.4)';
+										row.style.background = 'rgba(0, 122, 204, 0.08)';
+										row.style.borderColor = 'rgba(0, 122, 204, 0.4)';
+										checkSquare.style.background = '#007acc';
+										checkSquare.style.borderColor = '#007acc';
 										checkSvg.style.display = 'block';
 										labelSpan.style.color = '#f8fafc';
 										labelSpan.style.fontWeight = '600';
 									} else {
-										row.style.background = 'rgba(0, 0, 0, 0.22)';
+										row.style.background = 'rgba(255, 255, 255, 0.02)';
 										row.style.borderColor = 'rgba(255, 255, 255, 0.08)';
 										checkSquare.style.background = 'rgba(0, 0, 0, 0.35)';
-										checkSquare.style.borderColor = 'rgba(255, 255, 255, 0.25)';
-										checkSquare.style.boxShadow = 'none';
+										checkSquare.style.borderColor = 'rgba(255, 255, 255, 0.3)';
 										checkSvg.style.display = 'none';
 										labelSpan.style.color = '#94a3b8';
 										labelSpan.style.fontWeight = '500';
@@ -2689,29 +2684,29 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 								leftPart.onmouseenter = () => {
 									if (!spec.enabled) {
-										checkSquare.style.borderColor = 'rgba(59, 130, 246, 0.6)';
+										checkSquare.style.borderColor = '#007acc';
 									}
 								};
 								leftPart.onmouseleave = () => {
 									if (!spec.enabled) {
-										checkSquare.style.borderColor = 'rgba(255, 255, 255, 0.25)';
+										checkSquare.style.borderColor = 'rgba(255, 255, 255, 0.3)';
 									}
 								};
 
 								const rightPart = append(row, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
 								append(rightPart, $('span', { style: 'font-size: 10.5px; opacity: 0.65; white-space: nowrap;' }, 'Default View:'));
 								const formatSelect = append(rightPart, $('select', {
-									style: 'padding: 3px 8px; font-size: 11px; font-weight: 500; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(18, 18, 18, 0.7); color: #e2e8f0; outline: none; cursor: pointer; transition: border-color 0.15s ease;'
+									style: 'padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit; outline: none; cursor: pointer; transition: border-color 0.15s ease;'
 								})) as HTMLSelectElement;
 
-								formatSelect.onfocus = () => { formatSelect.style.borderColor = 'rgba(56, 189, 248, 0.5)'; };
+								formatSelect.onfocus = () => { formatSelect.style.borderColor = '#007acc'; };
 								formatSelect.onblur = () => { formatSelect.style.borderColor = 'rgba(255, 255, 255, 0.15)'; };
 
 								const formatOptions = [
-									{ value: 'table', label: '📊 Table' },
-									{ value: 'markdown', label: '📝 Markdown' },
-									{ value: 'json', label: '{ } JSON' },
-									{ value: 'text', label: '📄 Plain Text' }
+									{ value: 'table', label: 'Table' },
+									{ value: 'markdown', label: 'Markdown' },
+									{ value: 'json', label: 'JSON' },
+									{ value: 'text', label: 'Plain Text' }
 								];
 
 								formatOptions.forEach(opt => {
@@ -2971,7 +2966,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const modeBadge = append(codeTopRight, $('span', {
 						style: 'font-size: 9.5px; padding: 1.5px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); font-weight: 600; cursor: pointer; user-select: none;',
 						title: 'Click to toggle between Code Highlight Preview and Raw Text Editor'
-					}, '🎨 Highlighted'));
+					}, 'Highlighted'));
 
 					const codeWrapper = append(codeRow, $('div.python-code-wrapper', {
 						style: 'position: relative; width: 100%; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.28); box-sizing: border-box; overflow: hidden; transition: border-color 0.15s ease;'
@@ -3010,7 +3005,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						if (h > 60) {
 							codeTextarea.style.height = `${Math.max(120, Math.round(h))}px`;
 						}
-						modeBadge.textContent = '✏️ Editing';
+						modeBadge.textContent = 'Editing';
 						modeBadge.style.color = '#f59e0b';
 						modeBadge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
 						modeBadge.style.background = 'rgba(245, 158, 11, 0.12)';
@@ -3025,7 +3020,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						renderHighlightedCode();
 						codeTextarea.style.display = 'none';
 						codeDisplay.style.display = 'block';
-						modeBadge.textContent = '🎨 Highlighted';
+						modeBadge.textContent = 'Highlighted';
 						modeBadge.style.color = '#38bdf8';
 						modeBadge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
 						modeBadge.style.background = 'rgba(56, 189, 248, 0.12)';

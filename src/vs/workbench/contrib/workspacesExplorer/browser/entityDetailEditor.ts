@@ -895,7 +895,7 @@ export class EntityDetailEditor extends EditorPane {
 						textarea.style.height = `${Math.max(120, Math.round(h))}px`;
 					}
 					if (badge) {
-						badge.textContent = '✏️ Editing';
+						badge.textContent = 'Editing';
 						badge.style.color = '#f59e0b';
 						badge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
 						badge.style.background = 'rgba(245, 158, 11, 0.12)';
@@ -917,7 +917,7 @@ export class EntityDetailEditor extends EditorPane {
 						renderHighlightedPythonToDOM(pyDisplayEl, textarea.value, { showLineNumbers: true });
 						textarea.style.display = 'none';
 						pyDisplayEl.style.display = 'block';
-						pyBadge.textContent = '🎨 Highlighted';
+						pyBadge.textContent = 'Highlighted';
 						pyBadge.style.color = '#38bdf8';
 						pyBadge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
 						pyBadge.style.background = 'rgba(56, 189, 248, 0.12)';
@@ -928,7 +928,7 @@ export class EntityDetailEditor extends EditorPane {
 						if (h > 60) {
 							textarea.style.height = `${Math.max(120, Math.round(h))}px`;
 						}
-						pyBadge.textContent = '✏️ Editing';
+						pyBadge.textContent = 'Editing';
 						pyBadge.style.color = '#f59e0b';
 						pyBadge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
 						pyBadge.style.background = 'rgba(245, 158, 11, 0.12)';
@@ -1394,7 +1394,7 @@ export class EntityDetailEditor extends EditorPane {
 						pyTextarea.style.display = 'none';
 						pyDisplay.style.display = 'block';
 						if (badge) {
-							badge.textContent = '🎨 Highlighted';
+							badge.textContent = 'Highlighted';
 							badge.style.color = '#38bdf8';
 							badge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
 							badge.style.background = 'rgba(56, 189, 248, 0.12)';
@@ -1430,7 +1430,7 @@ export class EntityDetailEditor extends EditorPane {
 						pyTextarea.style.display = 'none';
 						pyDisplay.style.display = 'block';
 						if (badge) {
-							badge.textContent = '🎨 Highlighted';
+							badge.textContent = 'Highlighted';
 							badge.style.color = '#38bdf8';
 							badge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
 							badge.style.background = 'rgba(56, 189, 248, 0.12)';
@@ -3459,12 +3459,12 @@ ${rawErr}
 		if (targetBadge) {
 			if (isAgent) {
 				const agName = (agentSelect as HTMLSelectElement)?.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || 'Agent';
-				targetBadge.textContent = `🤖 Agent: ${agName}`;
+				targetBadge.textContent = `Agent: ${agName}`;
 				targetBadge.style.background = 'rgba(56, 189, 248, 0.15)';
 				targetBadge.style.color = '#38bdf8';
 			} else {
 				const mName = (modelSelect as HTMLSelectElement)?.value || 'gemini-1.5-flash';
-				targetBadge.textContent = `⚡ Model: ${mName}`;
+				targetBadge.textContent = `Model: ${mName}`;
 				targetBadge.style.background = 'rgba(59, 130, 246, 0.15)';
 				targetBadge.style.color = '#60a5fa';
 			}
@@ -5425,7 +5425,7 @@ ${interpolatedPrompt}`;
 										<label style="font-size: 11px; font-weight: 600; opacity: 0.85;">Source Code:</label>
 										<div style="display: flex; align-items: center; gap: 8px;">
 											<span style="font-size: 10px; opacity: 0.55;">Supports TICKET_CONTEXT, {{variables}}, and ANY_AGENT_CONTEXT</span>
-											<span class="python-mode-badge" style="font-size: 9.5px; padding: 1.5px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); font-weight: 600; cursor: pointer; user-select: none;" title="Click to toggle between Code Highlight Preview and Raw Text Editor">🎨 Highlighted</span>
+											<span class="python-mode-badge" style="font-size: 9.5px; padding: 1.5px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); font-weight: 600; cursor: pointer; user-select: none;" title="Click to toggle between Code Highlight Preview and Raw Text Editor">Highlighted</span>
 										</div>
 									</div>
 									<div class="python-code-wrapper" style="position: relative; width: 100%; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); box-sizing: border-box; overflow: hidden; transition: border-color 0.15s ease;">
@@ -5631,8 +5631,8 @@ ${interpolatedPrompt}`;
 
 					const isAgentMode = promptMode === 'agent';
 					const targetBadgeText = isAgentMode
-						? `🤖 Agent: ${promptAgentName || promptAgentId || 'Unassigned'}`
-						: `⚡ Model: ${promptModel || 'gemini-1.5-flash'}`;
+						? `Agent: ${promptAgentName || promptAgentId || 'Unassigned'}`
+						: `Model: ${promptModel || 'gemini-1.5-flash'}`;
 					const targetBadgeBg = isAgentMode ? 'rgba(56, 189, 248, 0.15)' : 'rgba(59, 130, 246, 0.15)';
 					const targetBadgeColor = isAgentMode ? '#38bdf8' : '#60a5fa';
 
@@ -5671,8 +5671,8 @@ ${interpolatedPrompt}`;
 								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.06);">
 									<div style="display: flex; align-items: center; gap: 6px;">
 										<span style="font-size: 11px; font-weight: 600; opacity: 0.75;">Target:</span>
-										<button type="button" class="prompt-mode-btn prompt-mode-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-mode="model" style="padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; border: 1px solid ${!isAgentMode ? 'rgba(59,130,246,0.5)' : 'rgba(255,255,255,0.1)'}; background: ${!isAgentMode ? 'rgba(59,130,246,0.18)' : 'transparent'}; color: ${!isAgentMode ? '#60a5fa' : 'inherit'};">⚡ Model</button>
-										<button type="button" class="prompt-mode-btn prompt-mode-agent-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-mode="agent" style="padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; border: 1px solid ${isAgentMode ? 'rgba(56,189,248,0.5)' : 'rgba(255,255,255,0.1)'}; background: ${isAgentMode ? 'rgba(56,189,248,0.2)' : 'transparent'}; color: ${isAgentMode ? '#38bdf8' : 'inherit'};">🤖 AI Agent</button>
+										<button type="button" class="prompt-mode-btn prompt-mode-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-mode="model" style="padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; border: 1px solid ${!isAgentMode ? 'rgba(59,130,246,0.5)' : 'rgba(255,255,255,0.1)'}; background: ${!isAgentMode ? 'rgba(59,130,246,0.18)' : 'transparent'}; color: ${!isAgentMode ? '#60a5fa' : 'inherit'};">Model</button>
+										<button type="button" class="prompt-mode-btn prompt-mode-agent-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-mode="agent" style="padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; border: 1px solid ${isAgentMode ? 'rgba(56,189,248,0.5)' : 'rgba(255,255,255,0.1)'}; background: ${isAgentMode ? 'rgba(56,189,248,0.2)' : 'transparent'}; color: ${isAgentMode ? '#38bdf8' : 'inherit'};">AI Agent</button>
 									</div>
 									<div class="prompt-target-selector-box" style="flex: 1; max-width: 320px; min-width: 200px;">
 										<select class="prompt-model-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; ${isAgentMode ? 'display: none;' : ''}">
