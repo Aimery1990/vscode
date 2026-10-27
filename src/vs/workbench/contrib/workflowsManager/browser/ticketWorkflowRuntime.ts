@@ -605,10 +605,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					continue;
 				}
 
-				try {
-					let stepOutput: any = undefined;
-					let stepDetails: Record<string, any> = {};
+				let stepOutput: any = undefined;
+				let stepDetails: Record<string, any> = {};
 
+				try {
 					switch (fieldType) {
 						case 'parameters': {
 							// 1. Parameters Primitive: resolve runtime arguments and defaults
@@ -798,11 +798,12 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							let rawCode = field.pythonCode || '';
 							let pythonPath = field.pythonPath || '';
 							let existingOutput = '';
+							let externalScripts: string[] = Array.isArray(field.externalScripts) ? [...field.externalScripts] : [];
 
-							if (customMetadata[fieldLabel]) {
-								const metaVal = customMetadata[fieldLabel];
-								if (typeof metaVal === 'string') {
-									const trimmed = metaVal.trim();
+							const rawMetaVal = customMetadata[fieldLabel];
+							if (rawMetaVal) {
+								if (typeof rawMetaVal === 'string') {
+									const trimmed = rawMetaVal.trim();
 									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 										try {
 											const parsed = JSON.parse(trimmed);
@@ -810,17 +811,18 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 											if (parsed.pythonCode !== undefined) rawCode = String(parsed.pythonCode);
 											if (parsed.pythonPath !== undefined) pythonPath = String(parsed.pythonPath);
 											if (parsed.output !== undefined) existingOutput = String(parsed.output);
+											if (Array.isArray(parsed.externalScripts)) externalScripts = parsed.externalScripts;
 										} catch {
 											rawCode = trimmed;
 										}
 									} else {
 										rawCode = trimmed;
 									}
-								} else if (typeof metaVal === 'object' && metaVal !== null) {
-									if ((metaVal as any).code !== undefined) rawCode = String((metaVal as any).code);
-									if ((metaVal as any).pythonCode !== undefined) rawCode = String((metaVal as any).pythonCode);
-									if ((metaVal as any).pythonPath !== undefined) {
-										const p = (metaVal as any).pythonPath;
+								} else if (typeof rawMetaVal === 'object' && rawMetaVal !== null) {
+									if ((rawMetaVal as any).code !== undefined) rawCode = String((rawMetaVal as any).code);
+									if ((rawMetaVal as any).pythonCode !== undefined) rawCode = String((rawMetaVal as any).pythonCode);
+									if ((rawMetaVal as any).pythonPath !== undefined) {
+										const p = (rawMetaVal as any).pythonPath;
 										if (typeof p === 'object' && p !== null) {
 											pythonPath = String(p.interpreterPath || p.pythonPath || '');
 										} else {
@@ -828,7 +830,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 											pythonPath = s === '[object Object]' ? '' : s;
 										}
 									}
-									if ((metaVal as any).output !== undefined) existingOutput = String((metaVal as any).output);
+									if ((rawMetaVal as any).output !== undefined) existingOutput = String((rawMetaVal as any).output);
+									if (Array.isArray((rawMetaVal as any).externalScripts)) {
+										externalScripts = (rawMetaVal as any).externalScripts;
+									}
 								}
 							}
 
@@ -837,14 +842,6 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							}
 
 							const interpolatedCode = this._interpolateVariables(rawCode, contextVariables);
-
-							let externalScripts: string[] = [];
-							if (Array.isArray(field.externalScripts)) {
-								externalScripts = field.externalScripts;
-							}
-							if (metaVal && typeof metaVal === 'object' && Array.isArray((metaVal as any).externalScripts)) {
-								externalScripts = (metaVal as any).externalScripts;
-							}
 
 							this.logService.info(`[TicketWorkflowRuntime] Executing Python primitive '${fieldLabel}'...`);
 							const execResult = await this.executePythonScript(wsUri, ticketUri, pythonPath, interpolatedCode, contextVariables, externalScripts);

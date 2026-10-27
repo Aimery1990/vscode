@@ -1587,6 +1587,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					inputParams: mergedInputs
 				});
 
+				if (!execRes.success) {
+					throw new Error(execRes.error || `Execution of ticket '${ticketIdOrPath}' failed.`);
+				}
+
 				result = execRes.output !== undefined ? execRes.output : execRes;
 				if (result && typeof result === 'object' && !Array.isArray(result)) {
 					try {
