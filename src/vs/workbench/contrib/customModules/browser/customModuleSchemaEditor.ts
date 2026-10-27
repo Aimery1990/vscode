@@ -2138,15 +2138,31 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					append(promptTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Default Instruction / Prompt Template:'));
 					append(promptTop, $('span', { style: 'font-size: 10px; color: #38bdf8;' }, 'Supports {Field Label} or @Field references'));
 
-					const promptTextarea = append(promptTextRow, $('textarea.monaco-inputbox', {
+					const promptWrapper = append(promptTextRow, $('div.prompt-template-wrapper', {
+						style: 'position: relative; width: 100%;'
+					}));
+
+					// Tokenized Display View (Cursor-style pills for referenced outputs)
+					const promptDisplay = append(promptWrapper, $('div.prompt-tokenized-display', {
+						style: 'width: 100%; min-height: 98px; max-height: 280px; overflow-y: auto; padding: 8px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.5; white-space: pre-wrap; word-break: break-word; cursor: text; transition: all 0.15s ease;',
+						title: 'Click or double-click to edit prompt template'
+					}));
+					promptDisplay.onmouseenter = () => {
+						promptDisplay.style.borderColor = 'rgba(56, 189, 248, 0.35)';
+					};
+					promptDisplay.onmouseleave = () => {
+						promptDisplay.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+					};
+
+					const promptTextarea = append(promptWrapper, $('textarea.monaco-inputbox', {
 						rows: 5,
 						placeholder: 'e.g. Please analyze the ticket details:\nGet the result of {Linkedin Product Manager AI Software} above and extract each job as json...',
-						style: 'width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45;'
+						style: 'width: 100%; min-height: 98px; padding: 8px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(56, 189, 248, 0.5); background: rgba(0, 0, 0, 0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.5; display: none; resize: vertical;'
 					})) as HTMLTextAreaElement;
 					promptTextarea.value = field.defaultContent || '';
 
 					// Floating Autocomplete Menu for @ and {
-					const autocompleteMenu = append(promptTextRow, $('div.prompt-autocomplete-menu', {
+					const autocompleteMenu = append(promptWrapper, $('div.prompt-autocomplete-menu', {
 						style: 'display: none; position: absolute; z-index: 50; max-height: 160px; overflow-y: auto; background: #1e293b; border: 1px solid #38bdf8; border-radius: 5px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); width: 280px; padding: 4px;'
 					}));
 
@@ -2154,6 +2170,111 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const previewRow = append(promptTextRow, $('div.prompt-references-preview', {
 						style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center; min-height: 18px; font-size: 10px;'
 					}));
+
+					const buildVarMap = () => {
+						const map = new Map<string, { label: string; type: string }>();
+						map.set('title', { label: 'Title', type: 'INPUT' });
+						map.set('description', { label: 'Description', type: 'INPUT' });
+						referenceableFields.forEach(rf => {
+							const l = rf.label || rf.id;
+							if (l) {
+								map.set(l.toLowerCase().trim(), { label: l, type: (rf.type || 'PRIMITIVE').toUpperCase() });
+							}
+							if (rf.id && rf.id !== l) {
+								map.set(rf.id.toLowerCase().trim(), { label: rf.id, type: (rf.type || 'PRIMITIVE').toUpperCase() });
+							}
+						});
+						return map;
+					};
+
+					const renderTokenizedView = () => {
+						clearNode(promptDisplay);
+						const content = promptTextarea.value;
+						if (!content) {
+							append(promptDisplay, $('span', {
+								style: 'color: rgba(255, 255, 255, 0.35); font-style: italic;'
+							}, 'e.g. Please analyze the ticket details:\nGet the result of {Linkedin Product Manager AI Software} above and extract each job as json...'));
+							return;
+						}
+
+						const varMap = buildVarMap();
+						const regex = /\{([^{}\n]+)\}/g;
+						let lastIndex = 0;
+						let match: RegExpExecArray | null;
+
+						while ((match = regex.exec(content)) !== null) {
+							const matchStart = match.index;
+							const matchEnd = regex.lastIndex;
+							const varRawName = match[1].trim();
+							const varInfo = varMap.get(varRawName.toLowerCase());
+
+							if (matchStart > lastIndex) {
+								promptDisplay.appendChild(document.createTextNode(content.substring(lastIndex, matchStart)));
+							}
+
+							if (varInfo) {
+								const pill = append(promptDisplay, $('span.prompt-token-pill', {
+									style: 'display: inline-flex; align-items: center; gap: 3.5px; padding: 1.5px 6px; font-size: 11px; font-weight: 500; border-radius: 3.5px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.28); vertical-align: baseline; font-family: var(--vscode-editor-font-family, monospace); user-select: none; margin: 0 1.5px; line-height: 1.35; cursor: pointer; transition: all 0.15s ease;',
+									title: `Referenced Output: ${varInfo.label} [${varInfo.type}] (Click to edit)`
+								}));
+								pill.onmouseenter = () => {
+									pill.style.background = 'rgba(56, 189, 248, 0.22)';
+									pill.style.borderColor = 'rgba(56, 189, 248, 0.45)';
+								};
+								pill.onmouseleave = () => {
+									pill.style.background = 'rgba(56, 189, 248, 0.12)';
+									pill.style.borderColor = 'rgba(56, 189, 248, 0.28)';
+								};
+								append(pill, $('span', { style: 'font-size: 10px; opacity: 0.85;' }, '🔗'));
+								append(pill, $('span', { style: 'font-weight: 600;' }, varInfo.label));
+							} else {
+								promptDisplay.appendChild(document.createTextNode(match[0]));
+							}
+
+							lastIndex = matchEnd;
+						}
+
+						if (lastIndex < content.length) {
+							promptDisplay.appendChild(document.createTextNode(content.substring(lastIndex)));
+						}
+					};
+
+					let isEditMode = false;
+
+					const switchToEdit = () => {
+						if (isEditMode) return;
+						isEditMode = true;
+						promptDisplay.style.display = 'none';
+						promptTextarea.style.display = 'block';
+						const h = promptDisplay.getBoundingClientRect().height;
+						if (h > 60) {
+							promptTextarea.style.height = `${Math.max(98, Math.round(h))}px`;
+						}
+						promptTextarea.focus();
+					};
+
+					const switchToDisplay = () => {
+						if (!isEditMode) return;
+						isEditMode = false;
+						field.defaultContent = promptTextarea.value;
+						renderTokenizedView();
+						updateReferencePreview();
+						promptTextarea.style.display = 'none';
+						promptDisplay.style.display = 'block';
+					};
+
+					promptDisplay.onclick = () => switchToEdit();
+
+					let blurTimer: any = null;
+					promptTextarea.onblur = () => {
+						if (blurTimer) clearTimeout(blurTimer);
+						blurTimer = setTimeout(() => {
+							if (autocompleteMenu.style.display === 'block') {
+								return;
+							}
+							switchToDisplay();
+						}, 200);
+					};
 
 					const updateReferencePreview = () => {
 						clearNode(previewRow);
@@ -2187,6 +2308,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					};
 
 					const insertTextAtCursor = (insertText: string) => {
+						if (!isEditMode) {
+							switchToEdit();
+						}
 						const start = promptTextarea.selectionStart || 0;
 						const end = promptTextarea.selectionEnd || 0;
 						const current = promptTextarea.value;
@@ -2195,8 +2319,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						field.defaultContent = promptTextarea.value;
 						promptTextarea.focus();
 						updateReferencePreview();
+						renderTokenizedView();
 						autocompleteMenu.style.display = 'none';
 					};
+
+					renderTokenizedView();
 
 					// Quick Reference Insert Toolbar (Clickable Chips) - Placed below the textarea
 					if (referenceableFields.length > 0) {
@@ -2327,7 +2454,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					promptTextarea.onkeydown = (e) => {
 						if (e.key === 'Escape') {
-							autocompleteMenu.style.display = 'none';
+							if (autocompleteMenu.style.display === 'block') {
+								autocompleteMenu.style.display = 'none';
+							} else {
+								switchToDisplay();
+							}
 						}
 					};
 
