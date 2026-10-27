@@ -124,3 +124,108 @@ export function highlightPythonToHTML(code: string, options: IPythonHighlightOpt
 
 	return html;
 }
+
+/**
+ * Pure DOM rendering method for Python syntax highlighting.
+ * Directly appends text nodes and styled spans without using innerHTML,
+ * completely immune to TrustedHTML policy restrictions and XSS risks.
+ */
+export function renderHighlightedPythonToDOM(container: HTMLElement, code: string, options: IPythonHighlightOptions = {}): void {
+	container.textContent = '';
+
+	if (!code) {
+		const emptySpan = document.createElement('span');
+		emptySpan.style.cssText = 'color: rgba(255, 255, 255, 0.3); font-style: italic;';
+		emptySpan.textContent = '# No Python code specified';
+		container.appendChild(emptySpan);
+		return;
+	}
+
+	const rootDiv = document.createElement('div');
+	rootDiv.style.cssText = 'display: flex; gap: 0; min-height: 100%;';
+
+	let targetContent: HTMLElement = rootDiv;
+
+	if (options.showLineNumbers) {
+		const lines = code.split('\n');
+		const gutter = document.createElement('div');
+		gutter.style.cssText = 'user-select: none; opacity: 0.35; text-align: right; padding: 0 10px 0 0; border-right: 1px solid rgba(255, 255, 255, 0.08); margin-right: 10px; font-variant-numeric: tabular-nums; line-height: 1.5; font-size: 11px; white-space: pre;';
+		gutter.textContent = Array.from({ length: lines.length }, (_, i) => `${i + 1}`).join('\n');
+		rootDiv.appendChild(gutter);
+
+		const contentDiv = document.createElement('div');
+		contentDiv.style.cssText = 'flex: 1; overflow-x: auto; line-height: 1.5; white-space: pre-wrap; word-break: break-word;';
+		rootDiv.appendChild(contentDiv);
+		targetContent = contentDiv;
+	}
+
+	const masterRegex = new RegExp([
+		'(#.*$)',
+		'((?:[frbFRB]{0,2})"""[\\s\\S]*?"""|(?:[frbFRB]{0,2})\'\'\'[\\s\\S]*?\'\'\')',
+		'((?:[frbFRB]{0,2})"(?:\\\\.|[^"\\r\\n])*"|(?:[frbFRB]{0,2})\'(?:\\\\.|[^\'\\r\\n])*\')',
+		'(\\b(?:TICKET_CONTEXT|OUTPUT|RESULT|RETURN_VALUE|set_output)\\b)',
+		'(\\b(?:def|class|return|if|elif|else|for|while|try|except|finally|with|as|import|from|in|is|not|and|or|lambda|yield|pass|break|continue|raise|global|nonlocal|async|await|del|assert)\\b)',
+		'(\\b(?:True|False|None)\\b)',
+		'(\\b(?:print|len|range|str|int|dict|list|set|tuple|bool|float|open|type|dir|enumerate|zip|isinstance|issubclass|Exception|BaseException|ValueError|TypeError|KeyError|IndexError|exit|sys|os|json|time|math|re)\\b)',
+		'(\\b0[xX][0-9a-fA-F]+\\b|\\b0[bB][01]+\\b|\\b0[oO][0-7]+\\b|\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b)',
+		'(@[a-zA-Z_]\\w*)'
+	].join('|'), 'gm');
+
+	let lastIndex = 0;
+	let match: RegExpExecArray | null;
+
+	while ((match = masterRegex.exec(code)) !== null) {
+		const matchStart = match.index;
+		const matchEnd = masterRegex.lastIndex;
+
+		if (matchStart > lastIndex) {
+			targetContent.appendChild(document.createTextNode(code.substring(lastIndex, matchStart)));
+		}
+
+		let style = '';
+		let val = '';
+		if (match[1]) {
+			style = TOKEN_STYLES.comment;
+			val = match[1];
+		} else if (match[2]) {
+			style = TOKEN_STYLES.string;
+			val = match[2];
+		} else if (match[3]) {
+			style = TOKEN_STYLES.string;
+			val = match[3];
+		} else if (match[4]) {
+			style = TOKEN_STYLES.customVar;
+			val = match[4];
+		} else if (match[5]) {
+			style = TOKEN_STYLES.keyword;
+			val = match[5];
+		} else if (match[6]) {
+			style = TOKEN_STYLES.boolean;
+			val = match[6];
+		} else if (match[7]) {
+			style = TOKEN_STYLES.builtin;
+			val = match[7];
+		} else if (match[8]) {
+			style = TOKEN_STYLES.number;
+			val = match[8];
+		} else if (match[9]) {
+			style = TOKEN_STYLES.decorator;
+			val = match[9];
+		}
+
+		if (style && val) {
+			const span = document.createElement('span');
+			span.style.cssText = style;
+			span.textContent = val;
+			targetContent.appendChild(span);
+		}
+
+		lastIndex = matchEnd;
+	}
+
+	if (lastIndex < code.length) {
+		targetContent.appendChild(document.createTextNode(code.substring(lastIndex)));
+	}
+
+	container.appendChild(rootDiv);
+}

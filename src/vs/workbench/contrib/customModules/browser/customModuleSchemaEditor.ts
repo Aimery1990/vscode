@@ -31,7 +31,7 @@ import { IWebContentExtractorService, WebContentExtractResult } from '../../../.
 import { IAgentsManagerService, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
 import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
 import { ITicketWorkflowRuntimeService } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
-import { highlightPythonToHTML } from './pythonSyntaxHighlighter.js';
+import { renderHighlightedPythonToDOM } from './pythonSyntaxHighlighter.js';
 
 
 export class CustomModuleSchemaEditor extends EditorPane {
@@ -2927,7 +2927,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					codeTextarea.value = field.pythonCode || '';
 
 					const renderHighlightedCode = () => {
-						codeDisplay.innerHTML = highlightPythonToHTML(codeTextarea.value, { showLineNumbers: true });
+						renderHighlightedPythonToDOM(codeDisplay, codeTextarea.value, { showLineNumbers: true });
 					};
 
 					let isCodeEditing = false;

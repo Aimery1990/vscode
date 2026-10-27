@@ -38,7 +38,7 @@ import { IMainProcessService } from '../../../../platform/ipc/common/mainProcess
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { ITicketWorkflowRuntimeService } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
-import { highlightPythonToHTML } from '../../customModules/browser/pythonSyntaxHighlighter.js';
+import { highlightPythonToHTML, renderHighlightedPythonToDOM } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
 	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
@@ -914,7 +914,7 @@ export class EntityDetailEditor extends EditorPane {
 				if (card && textarea && pyDisplayEl) {
 					const isEditing = textarea.style.display !== 'none';
 					if (isEditing) {
-						pyDisplayEl.innerHTML = highlightPythonToHTML(textarea.value, { showLineNumbers: true });
+						renderHighlightedPythonToDOM(pyDisplayEl, textarea.value, { showLineNumbers: true });
 						textarea.style.display = 'none';
 						pyDisplayEl.style.display = 'block';
 						pyBadge.textContent = '🎨 Highlighted';
@@ -957,7 +957,7 @@ export class EntityDetailEditor extends EditorPane {
 					textarea.selectionStart = textarea.selectionEnd = newCursor;
 					const pyDisplayEl = card?.querySelector('.python-code-display') as HTMLElement | null;
 					if (pyDisplayEl) {
-						pyDisplayEl.innerHTML = highlightPythonToHTML(textarea.value, { showLineNumbers: true });
+						renderHighlightedPythonToDOM(pyDisplayEl, textarea.value, { showLineNumbers: true });
 					}
 					textarea.focus();
 					const fieldKey = insertPyCtxChip.getAttribute('data-field-key') || '';
@@ -1390,7 +1390,7 @@ export class EntityDetailEditor extends EditorPane {
 					const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
 					const badge = card?.querySelector('.python-mode-badge') as HTMLElement | null;
 					if (card && pyDisplay) {
-						pyDisplay.innerHTML = highlightPythonToHTML(pyTextarea.value, { showLineNumbers: true });
+						renderHighlightedPythonToDOM(pyDisplay, pyTextarea.value, { showLineNumbers: true });
 						pyTextarea.style.display = 'none';
 						pyDisplay.style.display = 'block';
 						if (badge) {
@@ -1426,7 +1426,7 @@ export class EntityDetailEditor extends EditorPane {
 				const badge = card?.querySelector('.python-mode-badge') as HTMLElement | null;
 				if (card && pyDisplay) {
 					setTimeout(() => {
-						pyDisplay.innerHTML = highlightPythonToHTML(pyTextarea.value, { showLineNumbers: true });
+						renderHighlightedPythonToDOM(pyDisplay, pyTextarea.value, { showLineNumbers: true });
 						pyTextarea.style.display = 'none';
 						pyDisplay.style.display = 'block';
 						if (badge) {
