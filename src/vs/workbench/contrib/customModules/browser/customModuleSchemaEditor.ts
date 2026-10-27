@@ -2166,11 +2166,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'display: none; position: absolute; z-index: 50; max-height: 160px; overflow-y: auto; background: #1e293b; border: 1px solid #38bdf8; border-radius: 5px; box-shadow: 0 4px 16px rgba(0,0,0,0.5); width: 280px; padding: 4px;'
 					}));
 
-					// Live Referenced Primitives Preview Bar
-					const previewRow = append(promptTextRow, $('div.prompt-references-preview', {
-						style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center; min-height: 18px; font-size: 10px;'
-					}));
-
 					const buildVarMap = () => {
 						const map = new Map<string, { label: string; type: string }>();
 						map.set('title', { label: 'Title', type: 'INPUT' });
@@ -2258,7 +2253,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						isEditMode = false;
 						field.defaultContent = promptTextarea.value;
 						renderTokenizedView();
-						updateReferencePreview();
 						promptTextarea.style.display = 'none';
 						promptDisplay.style.display = 'block';
 					};
@@ -2276,37 +2270,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}, 200);
 					};
 
-					const updateReferencePreview = () => {
-						clearNode(previewRow);
-						const val = promptTextarea.value;
-						if (!val || referenceableFields.length === 0) return;
-
-						const matchedRefs: typeof referenceableFields = [];
-						for (const rf of referenceableFields) {
-							const rfLabel = rf.label || rf.id;
-							if (!rfLabel) continue;
-							const escapedLabel = rfLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-							const reBrace = new RegExp(`\\{\\s*${escapedLabel}\\s*\\}`, 'i');
-							const reAt = new RegExp(`@${escapedLabel}\\b`, 'i');
-							const escapedId = rf.id ? rf.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : null;
-							const reIdBrace = escapedId ? new RegExp(`\\{\\s*${escapedId}\\s*\\}`, 'i') : null;
-
-							if (reBrace.test(val) || reAt.test(val) || (reIdBrace && reIdBrace.test(val))) {
-								matchedRefs.push(rf);
-							}
-						}
-
-						if (matchedRefs.length > 0) {
-							append(previewRow, $('span', { style: 'color: #94a3b8; font-weight: 600;' }, 'Linked Outputs:'));
-							matchedRefs.forEach(rf => {
-								const pill = append(previewRow, $('span.prompt-ref-pill', {
-									style: 'padding: 2px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600; display: inline-flex; align-items: center; gap: 4px;'
-								}));
-								pill.textContent = `🔗 ${rf.label || rf.id} [${rf.type.toUpperCase()}]`;
-							});
-						}
-					};
-
 					const insertTextAtCursor = (insertText: string) => {
 						if (!isEditMode) {
 							switchToEdit();
@@ -2318,7 +2281,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						promptTextarea.selectionStart = promptTextarea.selectionEnd = start + insertText.length;
 						field.defaultContent = promptTextarea.value;
 						promptTextarea.focus();
-						updateReferencePreview();
 						renderTokenizedView();
 						autocompleteMenu.style.display = 'none';
 					};
@@ -2422,7 +2384,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									insertTextAtCursor(`{${rfLabel}}`);
 								}
 								field.defaultContent = promptTextarea.value;
-								updateReferencePreview();
+								renderTokenizedView();
 								autocompleteMenu.style.display = 'none';
 							};
 						});
@@ -2434,7 +2396,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					promptTextarea.oninput = () => {
 						field.defaultContent = promptTextarea.value;
-						updateReferencePreview();
 
 						const cursor = promptTextarea.selectionStart || 0;
 						const before = promptTextarea.value.substring(0, cursor);
@@ -2461,8 +2422,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							}
 						}
 					};
-
-					updateReferencePreview();
 
 					// Debug: AI Prompt Test Execution Area (Template Preview)
 					const promptDebugArea = append(promptSchemaBox, $('.prompt-debug-container', {
