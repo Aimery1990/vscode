@@ -1824,6 +1824,9 @@ atexit.register(_anyagent_capture_exit_output)
 
 `;
 			await this.fileService.writeFile(scriptUri, VSBuffer.fromString(header + code));
+			try {
+				await this.fileService.writeFile(logUri, VSBuffer.fromString(''));
+			} catch {}
 
 			// 3. Resolve Python interpreter and virtualenv environment variables
 			let cleanPyPath = '';
@@ -1869,29 +1872,33 @@ atexit.register(_anyagent_capture_exit_output)
 
 			// Pipeline: Execute external scripts in order first, then inline script
 			const commands: string[] = [];
-			if (Array.isArray(externalScripts) && externalScripts.length > 0) {
-				for (let i = 0; i < externalScripts.length; i++) {
-					const rawScript = externalScripts[i].trim();
-					if (!rawScript) continue;
-					let targetPath = rawScript;
-					if (!rawScript.startsWith('/') && !/^[a-zA-Z]:[/\\]/.test(rawScript)) {
-						targetPath = URI.joinPath(wsUri, rawScript).fsPath;
-					}
-					const escExt = `"${targetPath}"`;
-					const banner = `[Running external script ${i + 1}/${externalScripts.length}: ${rawScript}]`;
-					commands.push(`echo ${JSON.stringify(banner)} >> ${escapedLog}`);
-					commands.push(`${escapedPy} -u ${escExt} >> ${escapedLog} 2>&1`);
+			const validExtScripts = (Array.isArray(externalScripts) ? externalScripts : []).map(s => (typeof s === 'string' ? s.trim() : '')).filter(Boolean);
+			const hasInlineCode = Boolean(code && code.trim().length > 0);
+			const totalSteps = validExtScripts.length + (hasInlineCode ? 1 : 0);
+			let stepIdx = 0;
+
+			for (let i = 0; i < validExtScripts.length; i++) {
+				stepIdx++;
+				const rawScript = validExtScripts[i];
+				let targetPath = rawScript;
+				if (!rawScript.startsWith('/') && !/^[a-zA-Z]:[/\\]/.test(rawScript)) {
+					targetPath = URI.joinPath(wsUri, rawScript).fsPath;
 				}
+				const escExt = `"${targetPath}"`;
+				const banner = `>>> [Pipeline Step ${stepIdx}/${totalSteps}] External Script: ${rawScript}`;
+				commands.push(`echo ${JSON.stringify(banner)} >> ${escapedLog}`);
+				commands.push(`${escapedPy} -u ${escExt} >> ${escapedLog} 2>&1`);
+				commands.push(`echo "[✓ Step ${stepIdx} finished with exit code 0]\n" >> ${escapedLog}`);
 			}
 
-			const hasInlineCode = Boolean(code && code.trim().length > 0);
 			if (hasInlineCode || commands.length === 0) {
-				if (commands.length > 0) {
-					commands.push(`echo "[Running inline Python script]" >> ${escapedLog}`);
-					commands.push(`${escapedPy} -u ${escapedScript} >> ${escapedLog} 2>&1`);
-				} else {
-					commands.push(`${escapedPy} -u ${escapedScript} > ${escapedLog} 2>&1`);
-				}
+				stepIdx++;
+				const banner = totalSteps > 1
+					? `>>> [Pipeline Step ${stepIdx}/${totalSteps}] Inline Python Code`
+					: `>>> Running Python Script`;
+				commands.push(`echo ${JSON.stringify(banner)} >> ${escapedLog}`);
+				commands.push(`${escapedPy} -u ${escapedScript} >> ${escapedLog} 2>&1`);
+				commands.push(`echo "[✓ Step ${stepIdx} finished with exit code 0]" >> ${escapedLog}`);
 			}
 
 			const chained = commands.join(' && ');

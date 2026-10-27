@@ -3272,9 +3272,30 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					const previewActions = append(previewHeader, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
 
+					// View mode toggle pills
+					let currentViewMode: 'all' | 'logs' | 'result' = 'all';
+					const viewModePillGroup = append(previewActions, $('div', {
+						style: 'display: inline-flex; align-items: center; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.25); padding: 1px;'
+					}));
+					const btnViewAll = append(viewModePillGroup, $('button', {
+						type: 'button',
+						style: 'padding: 2px 7px; font-size: 10px; border-radius: 3px; border: none; background: rgba(255, 255, 255, 0.14); color: #ffffff; cursor: pointer;',
+						title: 'Show both Logs & Return Value'
+					}, 'All'));
+					const btnViewLogs = append(viewModePillGroup, $('button', {
+						type: 'button',
+						style: 'padding: 2px 7px; font-size: 10px; border-radius: 3px; border: none; background: transparent; color: rgba(255, 255, 255, 0.6); cursor: pointer;',
+						title: 'Show only Console Logs & Execution Trace'
+					}, 'Logs'));
+					const btnViewResult = append(viewModePillGroup, $('button', {
+						type: 'button',
+						style: 'padding: 2px 7px; font-size: 10px; border-radius: 3px; border: none; background: transparent; color: rgba(255, 255, 255, 0.6); cursor: pointer;',
+						title: 'Show only Return Value (OUTPUT)'
+					}, 'Return Value'));
+
 					const testRunBtn = append(previewActions, $('button', {
 						style: 'padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(56, 189, 248, 0.12); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 4px;',
-						title: 'Run script with current interpreter to test output'
+						title: 'Run pipeline & script with current interpreter to test output'
 					}));
 					append(testRunBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
 					append(testRunBtn, $('span', {}, 'Test'));
@@ -3293,10 +3314,87 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					append(clearBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.clearAll)));
 					append(clearBtn, $('span', {}, 'Clear'));
 
-					const previewBox = append(previewRow, $('div', {
-						style: 'padding: 8px 10px; font-size: 11px; border-radius: 5px; border: 1px dashed rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: rgba(255, 255, 255, 0.75); font-family: var(--vscode-editor-font-family, monospace); min-height: 48px; max-height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;'
+					// Main preview container housing both Sections
+					const previewContainer = append(previewRow, $('div', {
+						style: 'display: flex; flex-direction: column; gap: 6px;'
 					}));
-					previewBox.textContent = field.pythonOutput || '[Ready to execute] Output, stdout/stderr, and runtime duration will appear here when run.';
+
+					// 1. Pipeline & Console Logs Section
+					const logsCard = append(previewContainer, $('div.python-debug-logs-card', {
+						style: 'display: flex; flex-direction: column; gap: 4px; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 5px; padding: 6px 8px;'
+					}));
+					const logsHeader = append(logsCard, $('div', {
+						style: 'display: flex; justify-content: space-between; align-items: center; font-size: 10.5px;'
+					}));
+					const logsTitle = append(logsHeader, $('div', {
+						style: 'display: flex; align-items: center; gap: 6px; font-weight: 600; color: #94a3b8;'
+					}));
+					append(logsTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.terminal)));
+					append(logsTitle, $('span', {}, 'CONSOLE LOGS & EXECUTION TRACE'));
+					const logsStatusBadge = append(logsHeader, $('span.python-logs-status-badge', {
+						style: 'font-size: 10px; opacity: 0.7; font-family: var(--vscode-editor-font-family, monospace);'
+					}, '[Ready to execute]'));
+					const logsDisplayBox = append(logsCard, $('pre.python-debug-logs-display', {
+						style: 'margin: 0; padding: 4px 6px; font-size: 11px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); color: #cbd5e1; min-height: 48px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;'
+					}));
+					logsDisplayBox.textContent = field.pythonOutput || '[Ready to execute] Output, stdout/stderr, and pipeline steps will appear here when run.';
+
+					// 2. Return Value (OUTPUT) Section
+					const resultCard = append(previewContainer, $('div.python-debug-result-card', {
+						style: 'display: none; flex-direction: column; gap: 4px; background: rgba(56, 189, 248, 0.04); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 6px 8px;'
+					}));
+					const resultHeader = append(resultCard, $('div', {
+						style: 'display: flex; justify-content: space-between; align-items: center; font-size: 10.5px;'
+					}));
+					const resultTitle = append(resultHeader, $('div', {
+						style: 'display: flex; align-items: center; gap: 6px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;'
+					}));
+					append(resultTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
+					append(resultTitle, $('span', {}, 'RETURN VALUE (OUTPUT)'));
+					append(resultHeader, $('span', {
+						style: 'font-size: 9.5px; opacity: 0.7; color: #38bdf8;'
+					}, 'Payload for Output Manifest & Downstream Primitives'));
+					const resultDisplayBox = append(resultCard, $('pre.python-debug-result-display', {
+						style: 'margin: 0; padding: 4px 6px; font-size: 11px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); color: #e0f2fe; min-height: 40px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;'
+					}));
+
+					const updateViewMode = (mode: 'all' | 'logs' | 'result') => {
+						currentViewMode = mode;
+						const activeBg = 'rgba(255, 255, 255, 0.14)';
+						const activeColor = '#ffffff';
+						const inactiveBg = 'transparent';
+						const inactiveColor = 'rgba(255, 255, 255, 0.6)';
+
+						btnViewAll.style.background = mode === 'all' ? activeBg : inactiveBg;
+						btnViewAll.style.color = mode === 'all' ? activeColor : inactiveColor;
+						btnViewLogs.style.background = mode === 'logs' ? activeBg : inactiveBg;
+						btnViewLogs.style.color = mode === 'logs' ? activeColor : inactiveColor;
+						btnViewResult.style.background = mode === 'result' ? activeBg : inactiveBg;
+						btnViewResult.style.color = mode === 'result' ? activeColor : inactiveColor;
+
+						const hasResult = field.pythonResult !== undefined;
+						if (mode === 'all') {
+							logsCard.style.display = 'flex';
+							resultCard.style.display = hasResult ? 'flex' : 'none';
+						} else if (mode === 'logs') {
+							logsCard.style.display = 'flex';
+							resultCard.style.display = 'none';
+						} else if (mode === 'result') {
+							logsCard.style.display = 'none';
+							resultCard.style.display = hasResult ? 'flex' : 'none';
+						}
+					};
+
+					btnViewAll.onclick = (e) => { e.preventDefault(); e.stopPropagation(); updateViewMode('all'); };
+					btnViewLogs.onclick = (e) => { e.preventDefault(); e.stopPropagation(); updateViewMode('logs'); };
+					btnViewResult.onclick = (e) => { e.preventDefault(); e.stopPropagation(); updateViewMode('result'); };
+
+					if (field.pythonResult !== undefined) {
+						resultDisplayBox.textContent = typeof field.pythonResult === 'object'
+							? JSON.stringify(field.pythonResult, null, 2)
+							: String(field.pythonResult);
+						resultCard.style.display = 'flex';
+					}
 
 					testRunBtn.onclick = async (e) => {
 						e.preventDefault();
@@ -3311,7 +3409,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 						testRunBtn.setAttribute('disabled', 'true');
 						testRunBtn.style.opacity = '0.6';
-						previewBox.textContent = '[Executing script...] Running in background terminal...';
+						logsStatusBadge.textContent = 'Running...';
+						logsStatusBadge.style.color = '#38bdf8';
+						logsDisplayBox.textContent = '[Executing script pipeline...] Running external scripts and inline code in background terminal...';
+						resultCard.style.display = 'none';
 						try {
 							const scriptCode = codeTextarea.value;
 
@@ -3343,29 +3444,41 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								schemaContext['Title'] = this._activeModule.name;
 							}
 
-							const res = await runtime.executePythonScript(wsUri, wsUri, interpInput.value.trim(), scriptCode, schemaContext);
+							const extScripts = Array.isArray(field.externalScripts) ? [...field.externalScripts] : [];
+							const res = await runtime.executePythonScript(wsUri, wsUri, interpInput.value.trim(), scriptCode, schemaContext, extScripts);
 							const durationStr = `${res.durationMs}ms`;
 							const exitCodeStr = `Exit code: ${res.exitCode}`;
-							const headerLine = `[Finished in ${durationStr} | ${exitCodeStr}]\n`;
-							let displayText = '';
+
+							logsStatusBadge.textContent = res.success
+								? `Completed in ${durationStr} (exit 0)`
+								: `Failed (${exitCodeStr} | ${durationStr})`;
+							logsStatusBadge.style.color = res.success ? '#4ade80' : '#f87171';
+
+							logsDisplayBox.textContent = res.output ? res.output : '(Script pipeline completed with no stdout/stderr output)';
+
 							if (res.result !== undefined) {
-								const formattedResult = typeof res.result === 'object' ? JSON.stringify(res.result, null, 2) : String(res.result);
-								displayText = `=== RETURN VALUE (OUTPUT) ===\n${formattedResult}\n\n=== CONSOLE LOGS & EXECUTION ===\n${headerLine}${res.output || '(No console stdout/stderr output)'}`;
+								resultDisplayBox.textContent = typeof res.result === 'object'
+									? JSON.stringify(res.result, null, 2)
+									: String(res.result);
+								field.pythonResult = res.result;
 							} else {
-								displayText = `${headerLine}${res.output ? res.output : '(Script completed with no output)'}`;
+								field.pythonResult = undefined;
 							}
-							previewBox.textContent = displayText;
-							field.pythonOutput = displayText;
-							field.pythonResult = res.result;
+
+							field.pythonOutput = res.output;
+							updateViewMode(currentViewMode);
+
 							this._syncDraft();
 							await this._persistCurrentModule();
 							if (res.success) {
-								this.notificationService.info(`Script executed successfully (${durationStr})`);
+								this.notificationService.info(`Script pipeline executed successfully (${durationStr})`);
 							} else {
-								this.notificationService.warn(`Script finished with exit code ${res.exitCode}`);
+								this.notificationService.warn(`Script pipeline finished with exit code ${res.exitCode}`);
 							}
 						} catch (err: any) {
-							previewBox.textContent = `[Error executing script]: ${err.message || err}`;
+							logsStatusBadge.textContent = 'Error';
+							logsStatusBadge.style.color = '#f87171';
+							logsDisplayBox.textContent = `[Execution error]: ${err.message || err}`;
 							this.notificationService.error(`Execution error: ${err.message || err}`);
 						} finally {
 							testRunBtn.removeAttribute('disabled');
@@ -3376,10 +3489,21 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					copyBtn.onclick = async (e) => {
 						e.preventDefault();
 						e.stopPropagation();
-						const text = previewBox.textContent || '';
-						if (!text) { return; }
+						let textToCopy = '';
+						if (currentViewMode === 'result') {
+							textToCopy = resultDisplayBox.textContent || '';
+						} else if (currentViewMode === 'logs') {
+							textToCopy = logsDisplayBox.textContent || '';
+						} else {
+							const logs = logsDisplayBox.textContent || '';
+							const result = field.pythonResult !== undefined ? (resultDisplayBox.textContent || '') : '';
+							textToCopy = result
+								? `=== CONSOLE LOGS & EXECUTION TRACE ===\n${logs}\n\n=== RETURN VALUE (OUTPUT) ===\n${result}`
+								: logs;
+						}
+						if (!textToCopy) { return; }
 						try {
-							await this._clipboardService.writeText(text);
+							await this._clipboardService.writeText(textToCopy);
 							this.notificationService.info('Output copied to clipboard.');
 						} catch {
 							this.notificationService.warn('Could not copy output to clipboard.');
@@ -3389,9 +3513,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					clearBtn.onclick = async (e) => {
 						e.preventDefault();
 						e.stopPropagation();
-						previewBox.textContent = '[Ready to execute] Output, stdout/stderr, and runtime duration will appear here when run.';
+						logsDisplayBox.textContent = '[Ready to execute] Output, stdout/stderr, and pipeline steps will appear here when run.';
+						logsStatusBadge.textContent = '[Cleared]';
+						logsStatusBadge.style.color = '';
+						resultDisplayBox.textContent = '';
 						field.pythonOutput = '';
 						field.pythonResult = undefined;
+						resultCard.style.display = 'none';
 						this._syncDraft();
 						await this._persistCurrentModule();
 					};
