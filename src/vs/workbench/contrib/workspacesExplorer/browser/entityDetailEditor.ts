@@ -881,6 +881,33 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// Python Primitive: Add External Script button click
+			const addScriptBtn = target.closest('.python-add-script-btn') as HTMLElement | null;
+			if (addScriptBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = addScriptBtn.getAttribute('data-field-key') || '';
+				const card = addScriptBtn.closest('.python-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._addExternalScriptInEditor(card, fieldKey);
+				}
+				return;
+			}
+
+			// Python Primitive: Remove External Script button click
+			const removeScriptBtn = target.closest('.python-remove-script-btn') as HTMLElement | null;
+			if (removeScriptBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = removeScriptBtn.getAttribute('data-field-key') || '';
+				const indexStr = removeScriptBtn.getAttribute('data-index') || '';
+				const card = removeScriptBtn.closest('.python-primitive-card') as HTMLElement | null;
+				if (card && indexStr !== '') {
+					await this._removeExternalScriptInEditor(card, fieldKey, parseInt(indexStr, 10));
+				}
+				return;
+			}
+
 			// Python Primitive: Click on syntax highlighted code display to enter edit mode
 			const pyDisplay = target.closest('.python-code-display') as HTMLElement | null;
 			if (pyDisplay) {
@@ -3547,12 +3574,25 @@ ${rawErr}
 		});
 	}
 
+	private _getCardExternalScripts(card: HTMLElement): string[] {
+		if ((card as any)._externalScripts) return (card as any)._externalScripts;
+		const raw = card.getAttribute('data-external-scripts') || '[]';
+		try {
+			const parsed = JSON.parse(raw);
+			(card as any)._externalScripts = Array.isArray(parsed) ? parsed : [];
+		} catch {
+			(card as any)._externalScripts = [];
+		}
+		return (card as any)._externalScripts;
+	}
+
 	private async _savePythonDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string, exitCodeOverride?: number, durationMsOverride?: number, resultOverride?: any): Promise<any> {
 		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
 		const codeTextarea = card.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
 		const outputDisplay = card.querySelector('.python-output-display') as HTMLElement | null;
 
 		const pythonPath = interpInput?.value.trim() || '';
+		const externalScripts = this._getCardExternalScripts(card);
 		const code = codeTextarea?.value || '';
 		let output = outputOverride !== undefined ? outputOverride : (outputDisplay?.textContent || '');
 		if (output.startsWith('No execution output yet') || output.startsWith('No execution logs yet')) output = '';
@@ -3564,6 +3604,7 @@ ${rawErr}
 
 		const pythonData: any = {
 			pythonPath,
+			externalScripts,
 			code,
 			output,
 			result,
@@ -3629,12 +3670,14 @@ ${rawErr}
 				...(this._lastParsedData?.customMetadata || {})
 			};
 
+			const externalScripts = this._getCardExternalScripts(card);
 			const res = await runtimeService.executePythonScript(
 				workspaceUri,
 				this._entityUri,
 				pythonPath,
 				interpolatedCode,
-				ticketContext
+				ticketContext,
+				externalScripts
 			);
 
 			(card as any)._lastPythonResult = res.result;
@@ -3761,9 +3804,70 @@ ${rawErr}
 		} finally {
 			if (createBtn) {
 				createBtn.removeAttribute('disabled');
-				createBtn.textContent = 'Create venv';
+				createBtn.textContent = '+ Create Virtualenv';
 			}
 		}
+	}
+
+	private async _addExternalScriptInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
+		try {
+			const uris = await this._fileDialogService.showOpenDialog({
+				canSelectFiles: true,
+				canSelectFolders: false,
+				canSelectMany: true,
+				filters: [{ name: 'Python Scripts', extensions: ['py'] }],
+				title: 'Select External Python Script (.py)'
+			});
+			if (uris && uris.length > 0) {
+				const wsUri = this._entityUri ? this._workspacesExplorerService.findRootWorkspace(this._entityUri) || this._entityUri : this._entityUri;
+				const currentScripts = this._getCardExternalScripts(card);
+				for (const u of uris) {
+					let p = u.fsPath;
+					if (wsUri && p.startsWith(wsUri.fsPath)) {
+						p = p.substring(wsUri.fsPath.length).replace(/^[/\\]+/, '');
+					}
+					if (!currentScripts.includes(p)) {
+						currentScripts.push(p);
+					}
+				}
+				(card as any)._externalScripts = currentScripts;
+				card.setAttribute('data-external-scripts', JSON.stringify(currentScripts));
+				this._renderExternalScriptsInCard(card, fieldKey, currentScripts);
+				await this._savePythonDataFromCard(card, fieldKey);
+			}
+		} catch (err: any) {
+			this._notificationService.error(`Failed to add script: ${err.message || err}`);
+		}
+	}
+
+	private async _removeExternalScriptInEditor(card: HTMLElement, fieldKey: string, index: number): Promise<void> {
+		const currentScripts = this._getCardExternalScripts(card);
+		if (index >= 0 && index < currentScripts.length) {
+			currentScripts.splice(index, 1);
+			(card as any)._externalScripts = currentScripts;
+			card.setAttribute('data-external-scripts', JSON.stringify(currentScripts));
+			this._renderExternalScriptsInCard(card, fieldKey, currentScripts);
+			await this._savePythonDataFromCard(card, fieldKey);
+		}
+	}
+
+	private _renderExternalScriptsInCard(card: HTMLElement, fieldKey: string, scripts: string[]): void {
+		const listEl = card.querySelector('.python-scripts-list') as HTMLElement | null;
+		if (!listEl) return;
+		if (scripts.length === 0) {
+			listEl.innerHTML = `<div class="python-scripts-empty" style="font-size: 10.5px; opacity: 0.5; padding: 3px 4px; font-style: italic;">No external scripts configured. Executes inline source code only.</div>`;
+			return;
+		}
+		listEl.innerHTML = scripts.map((s, idx) => `
+			<div class="python-script-item" data-index="${idx}" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); font-size: 11px; font-family: var(--vscode-editor-font-family, monospace);">
+				<div style="display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+					<span style="opacity: 0.5; font-size: 10px; font-weight: 600;">#${idx + 1}</span>
+					<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 1h7l3.5 3.5v10.5l-.5.5h-10l-.5-.5v-13.5l.5-.5zm6.5 4v-3h-6v13h9v-10h-3z"/></svg>
+					<span title="${this._escapeHtmlAttr(s)}" style="color: inherit;">${this._escapeHtml(s)}</span>
+				</div>
+				<button type="button" class="python-remove-script-btn" data-field-key="${this._escapeHtmlAttr(fieldKey)}" data-index="${idx}" style="padding: 2px 6px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: transparent; color: rgba(255, 255, 255, 0.6); cursor: pointer; display: inline-flex; align-items: center;" title="Remove this script"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854Z"/></svg></button>
+			</div>
+		`).join('');
 	}
 
 	private async _browsePythonInterpreterInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
@@ -5320,6 +5424,7 @@ ${interpolatedPrompt}`;
 									if (pObj.exitCode !== undefined) exitCode = pObj.exitCode;
 									if (pObj.durationMs !== undefined) durationMs = pObj.durationMs;
 									if (pObj.lastExecuted) lastExecutedText = pObj.lastExecuted;
+									if (Array.isArray(pObj.externalScripts)) externalScripts = pObj.externalScripts;
 								} catch {
 									pythonCode = trimmed;
 								}
@@ -5344,7 +5449,12 @@ ${interpolatedPrompt}`;
 							if (obj.exitCode !== undefined) exitCode = Number(obj.exitCode);
 							if (obj.durationMs !== undefined) durationMs = Number(obj.durationMs);
 							if (obj.lastExecuted) lastExecutedText = String(obj.lastExecuted);
+							if (Array.isArray(obj.externalScripts)) externalScripts = obj.externalScripts as string[];
 						}
+					}
+
+					if (externalScripts.length === 0 && fieldItem && Array.isArray((fieldItem as any).externalScripts)) {
+						externalScripts = [...(fieldItem as any).externalScripts];
 					}
 
 					if (typeof pythonPath === 'object' && pythonPath !== null) {
@@ -5389,8 +5499,21 @@ ${interpolatedPrompt}`;
 						moreBtnHtml = `<button type="button" class="python-ctx-more-btn" data-count="${hiddenFields.length}" style="padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;" title="Toggle more context fields">+${hiddenFields.length} More...</button>`;
 					}
 
+					const externalScriptsListHtml = externalScripts.length === 0
+						? `<div class="python-scripts-empty" style="font-size: 10.5px; opacity: 0.5; padding: 3px 4px; font-style: italic;">No external scripts configured. Executes inline source code only.</div>`
+						: externalScripts.map((s, idx) => `
+							<div class="python-script-item" data-index="${idx}" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); font-size: 11px; font-family: var(--vscode-editor-font-family, monospace);">
+								<div style="display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+									<span style="opacity: 0.5; font-size: 10px; font-weight: 600;">#${idx + 1}</span>
+									<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.5 1h7l3.5 3.5v10.5l-.5.5h-10l-.5-.5v-13.5l.5-.5zm6.5 4v-3h-6v13h9v-10h-3z"/></svg>
+									<span title="${this._escapeHtmlAttr(s)}" style="color: inherit;">${this._escapeHtml(s)}</span>
+								</div>
+								<button type="button" class="python-remove-script-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-index="${idx}" style="padding: 2px 6px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: transparent; color: rgba(255, 255, 255, 0.6); cursor: pointer; display: inline-flex; align-items: center;" title="Remove this script"><svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor"><path d="M2.146 2.854a.5.5 0 1 1 .708-.708L8 7.293l5.146-5.147a.5.5 0 0 1 .708.708L8.707 8l5.147 5.146a.5.5 0 0 1-.708.708L8 8.707l-5.146 5.147a.5.5 0 0 1-.708-.708L7.293 8 2.146 2.854Z"/></svg></button>
+							</div>
+						`).join('');
+
 					customFieldsHtml += `
-						<div class="section-card custom-property-card python-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
+						<div class="section-card custom-property-card python-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-external-scripts="${this._escapeHtmlAttr(JSON.stringify(externalScripts))}">
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
@@ -5411,11 +5534,32 @@ ${interpolatedPrompt}`;
 										</label>
 										<span class="python-test-status" style="font-size: 10px; opacity: 0.65;"></span>
 									</div>
+									<!-- Row 1: Path Input & Browse -->
 									<div style="display: flex; gap: 6px; align-items: center;">
-										<input type="text" class="python-interpreter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(pythonPath)}" placeholder="Auto-detect (.venv or system python3) — or click Browse... to select" style="flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
-										<button type="button" class="python-browse-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Select Python Interpreter or Virtualenv Folder" style="padding: 5px 10px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M14.5 3H7.71l-.85-.85L6.51 2h-5l-.5.5v11l.5.5h13l.5-.5v-10l-.5-.5zm-.5 10H2V3h4.29l.85.85.35.15H14v9z"/></svg><span>Browse...</span></button>
-										<button type="button" class="python-test-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Test Python binary and check version" style="padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); white-space: nowrap;">Test</button>
-										<button type="button" class="python-create-venv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Initialize a local virtual environment (.venv) via python3 -m venv" style="padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.12); color: #38bdf8; border: 1px solid rgba(56,189,248,0.35); white-space: nowrap;">Create venv</button>
+										<input type="text" class="python-interpreter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(pythonPath)}" placeholder="Auto-detect (.venv or system python3) — or click Browse to select" style="flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
+										<button type="button" class="python-browse-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Select Python Interpreter or Virtualenv Folder" style="padding: 5px 12px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M14.5 3H7.71l-.85-.85L6.51 2h-5l-.5.5v11l.5.5h13l.5-.5v-10l-.5-.5zm-.5 10H2V3h4.29l.85.85.35.15H14v9z"/></svg><span>Browse</span></button>
+									</div>
+									<!-- Row 2: Status Badge & Actions -->
+									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 3px;">
+										<div class="python-env-badge" style="font-size: 10.5px; display: inline-flex; align-items: center; gap: 6px; padding: 2.5px 8px; border-radius: 4px; background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.7);">${this._escapeHtml(pythonPath ? `Path: ${pythonPath}` : 'Auto-detect: System / Active .venv')}</div>
+										<div style="display: flex; gap: 6px; align-items: center;">
+											<button type="button" class="python-test-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Test Python binary and check version" style="padding: 3.5px 12px; font-size: 11px; font-weight: 500; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); white-space: nowrap;">Test</button>
+											<button type="button" class="python-create-venv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Initialize a local virtual environment (.venv) via python3 -m venv" style="padding: 3.5px 12px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(0,122,204,0.15); color: #38bdf8; border: 1px solid rgba(0,122,204,0.4); white-space: nowrap;">+ Create Virtualenv</button>
+										</div>
+									</div>
+								</div>
+
+								<!-- External Scripts Pipeline Row -->
+								<div class="python-scripts-container" style="display: flex; flex-direction: column; gap: 6px; background: rgba(0, 0, 0, 0.16); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 8px 10px;">
+									<div style="display: flex; justify-content: space-between; align-items: center;">
+										<span style="font-size: 11px; font-weight: 600; opacity: 0.85;">External Python Scripts (Executed sequentially prior to inline code):</span>
+										<button type="button" class="python-add-script-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 3px 10px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;" title="Select an external Python script file (.py) to execute in order">
+											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/></svg>
+											<span>Add Script File...</span>
+										</button>
+									</div>
+									<div class="python-scripts-list" style="display: flex; flex-direction: column; gap: 4px;">
+										${externalScriptsListHtml}
 									</div>
 								</div>
 

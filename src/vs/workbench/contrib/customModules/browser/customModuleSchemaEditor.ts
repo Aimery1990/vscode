@@ -2773,31 +2773,34 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					const interpInputBar = append(interpRow, $('div', { style: 'display: flex; gap: 6px; align-items: center;' }));
 					const interpInput = append(interpInputBar, $('input.monaco-inputbox', {
-						placeholder: 'Auto-detect (.venv or system python3) — or click Browse... to select',
+						placeholder: 'Auto-detect (.venv or system python3) — or click Browse to select',
 						style: 'flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);'
 					})) as HTMLInputElement;
 					interpInput.value = initialPyPath;
 
 					const browseBtn = append(interpInputBar, $('button', {
-						style: 'padding: 5px 10px; font-size: 11px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;',
+						style: 'padding: 5px 12px; font-size: 11px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;',
 						title: 'Select Python Interpreter or Virtualenv Folder'
 					}));
 					append(browseBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.folder)));
-					append(browseBtn, $('span', {}, 'Browse...'));
+					append(browseBtn, $('span', {}, 'Browse'));
 
-					const testInterpBtn = append(interpInputBar, $('button', {
-						style: 'padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; white-space: nowrap;',
+					// Detection feedback & Actions row (Tier 2)
+					const statusRow = append(interpRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 3px;' }));
+					const statusBadge = append(statusRow, $('div', {
+						style: 'font-size: 10.5px; display: inline-flex; align-items: center; gap: 6px; padding: 2.5px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.7);'
+					}));
+
+					const interpActions = append(statusRow, $('div', { style: 'display: flex; gap: 6px; align-items: center;' }));
+
+					const testInterpBtn = append(interpActions, $('button', {
+						style: 'padding: 3.5px 12px; font-size: 11px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; white-space: nowrap;',
 						title: 'Test Python Interpreter and Verify Version'
 					}, 'Test'));
 
-					// Detection feedback & Create venv bar
-					const statusRow = append(interpRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px;' }));
-					const statusBadge = append(statusRow, $('div', {
-						style: 'font-size: 10.5px; display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.7);'
-					}));
-					const venvCreateBtn = append(statusRow, $('button', {
-						style: 'display: none; padding: 3px 10px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(56, 189, 248, 0.12); color: #38bdf8; cursor: pointer; white-space: nowrap;',
-						title: 'Create a new virtual environment at this path'
+					const venvCreateBtn = append(interpActions, $('button', {
+						style: 'display: none; padding: 3.5px 12px; font-size: 11px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(0, 122, 204, 0.4); background: rgba(0, 122, 204, 0.15); color: #38bdf8; cursor: pointer; white-space: nowrap;',
+						title: 'Create a new virtual environment at this path via python3 -m venv'
 					}, '+ Create Virtualenv'));
 
 					const updateDetectionStatus = async () => {
@@ -2953,8 +2956,97 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 					};
 
-					// Trigger initial detection on render
 					updateDetectionStatus();
+
+					// External Scripts Pipeline Row
+					if (!Array.isArray(field.externalScripts)) {
+						field.externalScripts = [];
+					}
+					const scriptsRow = append(pythonBox, $('div', {
+						style: 'display: flex; flex-direction: column; gap: 6px; background: rgba(0, 0, 0, 0.16); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 8px 10px;'
+					}));
+					const scriptsTop = append(scriptsRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+					const scriptsTitle = append(scriptsTop, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
+					append(scriptsTitle, $('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'External Python Scripts (Executed sequentially prior to inline code):'));
+
+					const addScriptBtn = append(scriptsTop, $('button', {
+						style: 'padding: 3px 10px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;',
+						title: 'Select an external Python script file (.py) to execute in order'
+					}));
+					append(addScriptBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
+					append(addScriptBtn, $('span', {}, 'Add Script File...'));
+
+					const scriptsList = append(scriptsRow, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+
+					const renderScriptsList = () => {
+						scriptsList.innerHTML = '';
+						const exts: string[] = field.externalScripts || [];
+						if (exts.length === 0) {
+							append(scriptsList, $('div', {
+								style: 'font-size: 10.5px; opacity: 0.5; padding: 3px 4px; font-style: italic;'
+							}, 'No external scripts configured. Executes inline source code only.'));
+							return;
+						}
+
+						exts.forEach((scriptPath, idx) => {
+							const item = append(scriptsList, $('div', {
+								style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); font-size: 11px; font-family: var(--vscode-editor-font-family, monospace);'
+							}));
+
+							const left = append(item, $('div', { style: 'display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }));
+							append(left, $('span', { style: 'opacity: 0.5; font-size: 10px; font-weight: 600;' }, `#${idx + 1}`));
+							append(left, $('span' + ThemeIcon.asCSSSelector(Codicon.fileCode)));
+							append(left, $('span', { style: 'color: inherit;', title: scriptPath }, scriptPath));
+
+							const removeBtn = append(item, $('button', {
+								style: 'padding: 2px 6px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: transparent; color: rgba(255, 255, 255, 0.6); cursor: pointer; display: inline-flex; align-items: center;',
+								title: 'Remove this script from pipeline'
+							}));
+							append(removeBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+							removeBtn.onclick = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								field.externalScripts.splice(idx, 1);
+								this._syncDraft();
+								renderScriptsList();
+							};
+						});
+					};
+
+					addScriptBtn.onclick = async (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						try {
+							const uris = await this._fileDialogService.showOpenDialog({
+								canSelectFiles: true,
+								canSelectFolders: false,
+								canSelectMany: true,
+								filters: [{ name: 'Python Scripts', extensions: ['py'] }],
+								title: 'Select External Python Script (.py)'
+							});
+							if (uris && uris.length > 0) {
+								if (!Array.isArray(field.externalScripts)) {
+									field.externalScripts = [];
+								}
+								const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
+								for (const u of uris) {
+									let p = u.fsPath;
+									if (wsUri && p.startsWith(wsUri.fsPath)) {
+										p = p.substring(wsUri.fsPath.length).replace(/^[/\\]+/, '');
+									}
+									if (!field.externalScripts.includes(p)) {
+										field.externalScripts.push(p);
+									}
+								}
+								this._syncDraft();
+								renderScriptsList();
+							}
+						} catch (err: any) {
+							this.notificationService.error(`Failed to pick script: ${err.message || err}`);
+						}
+					};
+
+					renderScriptsList();
 
 					// Source Code Row
 					const codeRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));

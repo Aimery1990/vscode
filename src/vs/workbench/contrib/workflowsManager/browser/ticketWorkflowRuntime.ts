@@ -164,7 +164,8 @@ export interface ITicketWorkflowRuntimeService {
 		ticketUri: string | URI,
 		pythonPath: string,
 		code: string,
-		contextVariables?: Record<string, any>
+		contextVariables?: Record<string, any>,
+		externalScripts?: string[]
 	): Promise<IPythonExecutionResult>;
 
 	createVirtualEnv(
@@ -837,13 +838,22 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 							const interpolatedCode = this._interpolateVariables(rawCode, contextVariables);
 
+							let externalScripts: string[] = [];
+							if (Array.isArray(field.externalScripts)) {
+								externalScripts = field.externalScripts;
+							}
+							if (metaVal && typeof metaVal === 'object' && Array.isArray((metaVal as any).externalScripts)) {
+								externalScripts = (metaVal as any).externalScripts;
+							}
+
 							this.logService.info(`[TicketWorkflowRuntime] Executing Python primitive '${fieldLabel}'...`);
-							const execResult = await this.executePythonScript(wsUri, ticketUri, pythonPath, interpolatedCode, contextVariables);
+							const execResult = await this.executePythonScript(wsUri, ticketUri, pythonPath, interpolatedCode, contextVariables, externalScripts);
 
 							const returnVal = execResult.result !== undefined ? execResult.result : (execResult.output || existingOutput || 'Script completed with no output.');
 							stepOutput = returnVal;
 							customMetadata[fieldLabel] = JSON.stringify({
 								pythonPath: execResult.pythonPath || pythonPath,
+								externalScripts,
 								code: rawCode,
 								interpolatedCode: interpolatedCode,
 								result: execResult.result,
@@ -1714,7 +1724,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		ticketUri: string | URI,
 		pythonPath: string,
 		code: string,
-		contextVariables?: Record<string, any>
+		contextVariables?: Record<string, any>,
+		externalScripts?: string[]
 	): Promise<IPythonExecutionResult> {
 		const startTime = Date.now();
 		const wsUri = this._toUri(workspaceUri);
@@ -1855,7 +1866,36 @@ atexit.register(_anyagent_capture_exit_output)
 			const escapedPy = resolvedPython.includes(' ') ? `"${resolvedPython}"` : resolvedPython;
 			const escapedScript = `"${scriptUri.fsPath}"`;
 			const escapedLog = `"${logUri.fsPath}"`;
-			const runCmd = `${venvPrefix}${escapedPy} -u ${escapedScript} > ${escapedLog} 2>&1; echo "${sentinel}:$?"`;
+
+			// Pipeline: Execute external scripts in order first, then inline script
+			const commands: string[] = [];
+			if (Array.isArray(externalScripts) && externalScripts.length > 0) {
+				for (let i = 0; i < externalScripts.length; i++) {
+					const rawScript = externalScripts[i].trim();
+					if (!rawScript) continue;
+					let targetPath = rawScript;
+					if (!rawScript.startsWith('/') && !/^[a-zA-Z]:[/\\]/.test(rawScript)) {
+						targetPath = URI.joinPath(wsUri, rawScript).fsPath;
+					}
+					const escExt = `"${targetPath}"`;
+					const banner = `[Running external script ${i + 1}/${externalScripts.length}: ${rawScript}]`;
+					commands.push(`echo ${JSON.stringify(banner)} >> ${escapedLog}`);
+					commands.push(`${escapedPy} -u ${escExt} >> ${escapedLog} 2>&1`);
+				}
+			}
+
+			const hasInlineCode = Boolean(code && code.trim().length > 0);
+			if (hasInlineCode || commands.length === 0) {
+				if (commands.length > 0) {
+					commands.push(`echo "[Running inline Python script]" >> ${escapedLog}`);
+					commands.push(`${escapedPy} -u ${escapedScript} >> ${escapedLog} 2>&1`);
+				} else {
+					commands.push(`${escapedPy} -u ${escapedScript} > ${escapedLog} 2>&1`);
+				}
+			}
+
+			const chained = commands.join(' && ');
+			const runCmd = `${venvPrefix}${chained}; echo "${sentinel}:$?"`;
 
 			let exitCode = 0;
 			let finished = false;
