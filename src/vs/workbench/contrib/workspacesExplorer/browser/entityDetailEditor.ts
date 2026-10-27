@@ -38,6 +38,7 @@ import { IMainProcessService } from '../../../../platform/ipc/common/mainProcess
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { ITicketWorkflowRuntimeService } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
+import { highlightPythonToHTML } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
 	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
@@ -880,6 +881,63 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// Python Primitive: Click on syntax highlighted code display to enter edit mode
+			const pyDisplay = target.closest('.python-code-display') as HTMLElement | null;
+			if (pyDisplay) {
+				const card = pyDisplay.closest('.python-primitive-card') as HTMLElement | null;
+				const textarea = card?.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+				const badge = card?.querySelector('.python-mode-badge') as HTMLElement | null;
+				if (card && textarea) {
+					pyDisplay.style.display = 'none';
+					textarea.style.display = 'block';
+					const h = pyDisplay.getBoundingClientRect().height;
+					if (h > 60) {
+						textarea.style.height = `${Math.max(120, Math.round(h))}px`;
+					}
+					if (badge) {
+						badge.textContent = '✏️ Editing';
+						badge.style.color = '#f59e0b';
+						badge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
+						badge.style.background = 'rgba(245, 158, 11, 0.12)';
+					}
+					textarea.focus();
+				}
+				return;
+			}
+
+			// Python Primitive: Mode badge toggle
+			const pyBadge = target.closest('.python-mode-badge') as HTMLElement | null;
+			if (pyBadge) {
+				const card = pyBadge.closest('.python-primitive-card') as HTMLElement | null;
+				const pyDisplayEl = card?.querySelector('.python-code-display') as HTMLElement | null;
+				const textarea = card?.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+				if (card && textarea && pyDisplayEl) {
+					const isEditing = textarea.style.display !== 'none';
+					if (isEditing) {
+						pyDisplayEl.innerHTML = highlightPythonToHTML(textarea.value, { showLineNumbers: true });
+						textarea.style.display = 'none';
+						pyDisplayEl.style.display = 'block';
+						pyBadge.textContent = '🎨 Highlighted';
+						pyBadge.style.color = '#38bdf8';
+						pyBadge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+						pyBadge.style.background = 'rgba(56, 189, 248, 0.12)';
+					} else {
+						pyDisplayEl.style.display = 'none';
+						textarea.style.display = 'block';
+						const h = pyDisplayEl.getBoundingClientRect().height;
+						if (h > 60) {
+							textarea.style.height = `${Math.max(120, Math.round(h))}px`;
+						}
+						pyBadge.textContent = '✏️ Editing';
+						pyBadge.style.color = '#f59e0b';
+						pyBadge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
+						pyBadge.style.background = 'rgba(245, 158, 11, 0.12)';
+						textarea.focus();
+					}
+				}
+				return;
+			}
+
 			// Python Primitive: Insert Context Chip click
 			const insertPyCtxChip = target.closest('.python-insert-ctx-chip') as HTMLElement | null;
 			if (insertPyCtxChip) {
@@ -897,6 +955,10 @@ export class EntityDetailEditor extends EditorPane {
 					textarea.value = before + textToInsert + after;
 					const newCursor = start + textToInsert.length + cursorOffset;
 					textarea.selectionStart = textarea.selectionEnd = newCursor;
+					const pyDisplayEl = card?.querySelector('.python-code-display') as HTMLElement | null;
+					if (pyDisplayEl) {
+						pyDisplayEl.innerHTML = highlightPythonToHTML(textarea.value, { showLineNumbers: true });
+					}
 					textarea.focus();
 					const fieldKey = insertPyCtxChip.getAttribute('data-field-key') || '';
 					if (fieldKey && card) {
@@ -1321,6 +1383,26 @@ export class EntityDetailEditor extends EditorPane {
 					return;
 				}
 			}
+			if (e.key === 'Escape') {
+				const pyTextarea = (e.target as HTMLElement)?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
+				if (pyTextarea) {
+					const card = pyTextarea.closest('.python-primitive-card') as HTMLElement | null;
+					const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
+					const badge = card?.querySelector('.python-mode-badge') as HTMLElement | null;
+					if (card && pyDisplay) {
+						pyDisplay.innerHTML = highlightPythonToHTML(pyTextarea.value, { showLineNumbers: true });
+						pyTextarea.style.display = 'none';
+						pyDisplay.style.display = 'block';
+						if (badge) {
+							badge.textContent = '🎨 Highlighted';
+							badge.style.color = '#38bdf8';
+							badge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+							badge.style.background = 'rgba(56, 189, 248, 0.12)';
+						}
+					}
+					return;
+				}
+			}
 			if (e.key === 'Enter') {
 				const urlInput = (e.target as HTMLElement)?.closest('.browser-url-input') as HTMLInputElement | null;
 				if (urlInput) {
@@ -1332,6 +1414,28 @@ export class EntityDetailEditor extends EditorPane {
 					if (card && fieldKey) {
 						await this._executeBrowserFetch(card, fieldKey, false);
 					}
+				}
+			}
+		});
+
+		this._container.addEventListener('focusout', (e: FocusEvent) => {
+			const pyTextarea = (e.target as HTMLElement)?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
+			if (pyTextarea) {
+				const card = pyTextarea.closest('.python-primitive-card') as HTMLElement | null;
+				const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
+				const badge = card?.querySelector('.python-mode-badge') as HTMLElement | null;
+				if (card && pyDisplay) {
+					setTimeout(() => {
+						pyDisplay.innerHTML = highlightPythonToHTML(pyTextarea.value, { showLineNumbers: true });
+						pyTextarea.style.display = 'none';
+						pyDisplay.style.display = 'block';
+						if (badge) {
+							badge.textContent = '🎨 Highlighted';
+							badge.style.color = '#38bdf8';
+							badge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+							badge.style.background = 'rgba(56, 189, 248, 0.12)';
+						}
+					}, 180);
 				}
 			}
 		});
@@ -5319,9 +5423,15 @@ ${interpolatedPrompt}`;
 								<div style="display: flex; flex-direction: column; gap: 4px;">
 									<div style="display: flex; justify-content: space-between; align-items: center;">
 										<label style="font-size: 11px; font-weight: 600; opacity: 0.85;">Source Code:</label>
-										<span style="font-size: 10px; opacity: 0.55;">Supports TICKET_CONTEXT, {{variables}}, and ANY_AGENT_CONTEXT</span>
+										<div style="display: flex; align-items: center; gap: 8px;">
+											<span style="font-size: 10px; opacity: 0.55;">Supports TICKET_CONTEXT, {{variables}}, and ANY_AGENT_CONTEXT</span>
+											<span class="python-mode-badge" style="font-size: 9.5px; padding: 1.5px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); font-weight: 600; cursor: pointer; user-select: none;" title="Click to toggle between Code Highlight Preview and Raw Text Editor">🎨 Highlighted</span>
+										</div>
 									</div>
-									<textarea class="python-code-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="6" placeholder="Enter Python script to execute..." spellcheck="false" style="width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; tab-size: 4;">${this._escapeHtml(pythonCode)}</textarea>
+									<div class="python-code-wrapper" style="position: relative; width: 100%; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); box-sizing: border-box; overflow: hidden; transition: border-color 0.15s ease;">
+										<div class="python-code-display" style="width: 100%; min-height: 120px; max-height: 380px; overflow-y: auto; padding: 8px 10px; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.5; tab-size: 4; white-space: pre-wrap; word-break: break-word; color: #d4d4d4; cursor: text; box-sizing: border-box;" title="Click to edit Python script">${highlightPythonToHTML(pythonCode, { showLineNumbers: true })}</div>
+										<textarea class="python-code-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="6" placeholder="Enter Python script to execute..." spellcheck="false" style="width: 100%; min-height: 120px; padding: 8px 10px; font-size: 11.5px; border: none; outline: none; background: rgba(0,0,0,0.4); color: #f1f5f9; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.5; resize: vertical; tab-size: 4; display: none;">${this._escapeHtml(pythonCode)}</textarea>
+									</div>
 									<div class="python-ctx-chips-bar" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0;">
 										<span style="font-size: 10.5px; opacity: 0.65;">Insert Context:</span>
 										${baseChipHtml}

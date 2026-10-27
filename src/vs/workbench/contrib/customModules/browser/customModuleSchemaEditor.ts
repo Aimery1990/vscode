@@ -31,6 +31,7 @@ import { IWebContentExtractorService, WebContentExtractResult } from '../../../.
 import { IAgentsManagerService, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
 import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
 import { ITicketWorkflowRuntimeService } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
+import { highlightPythonToHTML } from './pythonSyntaxHighlighter.js';
 
 
 export class CustomModuleSchemaEditor extends EditorPane {
@@ -2894,13 +2895,83 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const codeRow = append(pythonBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
 					const codeTop = append(codeRow, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
 					append(codeTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Source Code:'));
-					append(codeTop, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'Supports {{variable}} interpolation'));
-					const codeTextarea = append(codeRow, $('textarea.monaco-inputbox', {
+					const codeTopRight = append(codeTop, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+					append(codeTopRight, $('span', { style: 'font-size: 10px; opacity: 0.55;' }, 'Supports {{variable}} interpolation'));
+
+					const modeBadge = append(codeTopRight, $('span', {
+						style: 'font-size: 9.5px; padding: 1.5px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); font-weight: 600; cursor: pointer; user-select: none;',
+						title: 'Click to toggle between Code Highlight Preview and Raw Text Editor'
+					}, '🎨 Highlighted'));
+
+					const codeWrapper = append(codeRow, $('div.python-code-wrapper', {
+						style: 'position: relative; width: 100%; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.28); box-sizing: border-box; overflow: hidden; transition: border-color 0.15s ease;'
+					}));
+
+					// Syntax Highlighted Display View with line numbers
+					const codeDisplay = append(codeWrapper, $('div.python-code-display', {
+						style: 'width: 100%; min-height: 120px; max-height: 380px; overflow-y: auto; padding: 8px 10px; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.5; tab-size: 4; white-space: pre-wrap; word-break: break-word; color: #d4d4d4; cursor: text; box-sizing: border-box;',
+						title: 'Click to edit Python script'
+					}));
+					codeDisplay.onmouseenter = () => {
+						codeWrapper.style.borderColor = 'rgba(56, 189, 248, 0.35)';
+					};
+					codeDisplay.onmouseleave = () => {
+						codeWrapper.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+					};
+
+					const codeTextarea = append(codeWrapper, $('textarea.monaco-inputbox', {
 						rows: '6',
 						placeholder: '# Enter Python automation script...',
-						style: 'width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical;'
+						style: 'width: 100%; min-height: 120px; padding: 8px 10px; font-size: 11.5px; border: none; outline: none; background: rgba(0, 0, 0, 0.35); color: #f1f5f9; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.5; resize: vertical; tab-size: 4; display: none;'
 					})) as HTMLTextAreaElement;
 					codeTextarea.value = field.pythonCode || '';
+
+					const renderHighlightedCode = () => {
+						codeDisplay.innerHTML = highlightPythonToHTML(codeTextarea.value, { showLineNumbers: true });
+					};
+
+					let isCodeEditing = false;
+					const switchToCodeEdit = () => {
+						if (isCodeEditing) return;
+						isCodeEditing = true;
+						codeDisplay.style.display = 'none';
+						codeTextarea.style.display = 'block';
+						const h = codeDisplay.getBoundingClientRect().height;
+						if (h > 60) {
+							codeTextarea.style.height = `${Math.max(120, Math.round(h))}px`;
+						}
+						modeBadge.textContent = '✏️ Editing';
+						modeBadge.style.color = '#f59e0b';
+						modeBadge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
+						modeBadge.style.background = 'rgba(245, 158, 11, 0.12)';
+						codeTextarea.focus();
+					};
+
+					const switchToCodeDisplay = () => {
+						if (!isCodeEditing) return;
+						isCodeEditing = false;
+						field.pythonCode = codeTextarea.value;
+						this._syncDraft();
+						renderHighlightedCode();
+						codeTextarea.style.display = 'none';
+						codeDisplay.style.display = 'block';
+						modeBadge.textContent = '🎨 Highlighted';
+						modeBadge.style.color = '#38bdf8';
+						modeBadge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
+						modeBadge.style.background = 'rgba(56, 189, 248, 0.12)';
+					};
+
+					codeDisplay.onclick = () => switchToCodeEdit();
+					modeBadge.onclick = (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						if (isCodeEditing) {
+							switchToCodeDisplay();
+						} else {
+							switchToCodeEdit();
+						}
+					};
+
 					codeTextarea.onkeydown = (e) => {
 						if (e.key === 'Tab') {
 							e.preventDefault();
@@ -2910,12 +2981,21 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							codeTextarea.selectionStart = codeTextarea.selectionEnd = start + 4;
 							field.pythonCode = codeTextarea.value;
 							this._syncDraft();
+						} else if (e.key === 'Escape') {
+							switchToCodeDisplay();
 						}
 					};
 					codeTextarea.oninput = () => {
 						field.pythonCode = codeTextarea.value;
 						this._syncDraft();
 					};
+					codeTextarea.onblur = () => {
+						setTimeout(() => {
+							switchToCodeDisplay();
+						}, 180);
+					};
+
+					renderHighlightedCode();
 
 					// Context Variable Insert Bar under Source Code
 					const varBar = append(codeRow, $('div', {
@@ -2924,6 +3004,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					append(varBar, $('span', { style: 'font-size: 10.5px; opacity: 0.65;' }, 'Insert Context:'));
 
 					const insertTextAtCursor = (textToInsert: string, cursorOffsetFromEnd: number = 0) => {
+						if (!isCodeEditing) {
+							switchToCodeEdit();
+						}
 						const start = codeTextarea.selectionStart;
 						const end = codeTextarea.selectionEnd;
 						const before = codeTextarea.value.substring(0, start);
@@ -2934,6 +3017,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						codeTextarea.focus();
 						field.pythonCode = codeTextarea.value;
 						this._syncDraft();
+						renderHighlightedCode();
 					};
 
 					// Base Chip: + TICKET_CONTEXT['']
