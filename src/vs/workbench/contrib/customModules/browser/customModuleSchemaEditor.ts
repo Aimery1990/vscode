@@ -2138,26 +2138,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					append(promptTop, $('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Default Instruction / Prompt Template:'));
 					append(promptTop, $('span', { style: 'font-size: 10px; color: #38bdf8;' }, 'Supports {Field Label} or @Field references'));
 
-					// Quick Reference Insert Toolbar (Clickable Chips)
-					if (referenceableFields.length > 0) {
-						const chipBar = append(promptTextRow, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center; background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.15); border-radius: 4px; padding: 4px 8px;' }));
-						append(chipBar, $('span', { style: 'font-size: 10px; font-weight: 600; color: #94a3b8;' }, 'Insert Primitive:'));
-						referenceableFields.forEach(rf => {
-							const rfLabel = rf.label || rf.id;
-							const chip = append(chipBar, $('button.prompt-insert-chip', {
-								type: 'button',
-								style: 'padding: 2px 7px; font-size: 10px; font-weight: 600; border-radius: 3px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.28); cursor: pointer; transition: all 0.15s ease;'
-							}));
-							chip.textContent = `+ {${rfLabel}}`;
-							chip.title = `Click to insert reference to ${rfLabel} (${rf.type.toUpperCase()})`;
-							chip.onclick = (e) => {
-								e.preventDefault();
-								e.stopPropagation();
-								insertTextAtCursor(`{${rfLabel}}`);
-							};
-						});
-					}
-
 					const promptTextarea = append(promptTextRow, $('textarea.monaco-inputbox', {
 						rows: 5,
 						placeholder: 'e.g. Please analyze the ticket details:\nGet the result of {Linkedin Product Manager AI Software} above and extract each job as json...',
@@ -2172,7 +2152,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					// Live Referenced Primitives Preview Bar
 					const previewRow = append(promptTextRow, $('div.prompt-references-preview', {
-						style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center; min-height: 20px; font-size: 10px;'
+						style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center; min-height: 18px; font-size: 10px;'
 					}));
 
 					const updateReferencePreview = () => {
@@ -2217,6 +2197,69 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						updateReferencePreview();
 						autocompleteMenu.style.display = 'none';
 					};
+
+					// Quick Reference Insert Toolbar (Clickable Chips) - Placed below the textarea
+					if (referenceableFields.length > 0) {
+						const chipBar = append(promptTextRow, $('div', {
+							style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 2px;'
+						}));
+						append(chipBar, $('span', { style: 'font-size: 10.5px; opacity: 0.65;' }, 'Insert Output:'));
+						const chipStyle = 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap; transition: all 0.15s ease;';
+
+						const maxInitialVisible = 4;
+						const visibleFields = referenceableFields.slice(0, maxInitialVisible);
+						const hiddenFields = referenceableFields.slice(maxInitialVisible);
+
+						visibleFields.forEach(rf => {
+							const rfLabel = rf.label || rf.id;
+							const chip = append(chipBar, $('button.prompt-insert-chip', {
+								type: 'button',
+								style: chipStyle,
+								title: `Click to insert reference {${rfLabel}} (${rf.type.toUpperCase()})`
+							}));
+							chip.textContent = `+ {${rfLabel}}`;
+							chip.onclick = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								insertTextAtCursor(`{${rfLabel}}`);
+							};
+						});
+
+						if (hiddenFields.length > 0) {
+							const hiddenContainer = append(chipBar, $('span', { style: 'display: none;' }));
+							hiddenFields.forEach(rf => {
+								const rfLabel = rf.label || rf.id;
+								const chip = append(hiddenContainer, $('button.prompt-insert-chip', {
+									type: 'button',
+									style: chipStyle,
+									title: `Click to insert reference {${rfLabel}} (${rf.type.toUpperCase()})`
+								}));
+								chip.textContent = `+ {${rfLabel}}`;
+								chip.onclick = (e) => {
+									e.preventDefault();
+									e.stopPropagation();
+									insertTextAtCursor(`{${rfLabel}}`);
+								};
+							});
+
+							let isExpanded = false;
+							const moreBtn = append(chipBar, $('button', {
+								type: 'button',
+								style: 'padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;',
+								title: 'Toggle more referenceable outputs'
+							}, `+${hiddenFields.length} More...`));
+
+							moreBtn.onclick = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								isExpanded = !isExpanded;
+								hiddenContainer.style.display = isExpanded ? 'inline-flex' : 'none';
+								hiddenContainer.style.flexWrap = 'wrap';
+								hiddenContainer.style.gap = '5px';
+								moreBtn.textContent = isExpanded ? 'Less' : `+${hiddenFields.length} More...`;
+							};
+						}
+					}
 
 					const showAutocomplete = (prefix: string) => {
 						clearNode(autocompleteMenu);
