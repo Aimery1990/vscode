@@ -11964,6 +11964,7 @@ export class WorkflowEditor extends EditorPane {
 			// Ticket Meta Banner if available
 			if (card.ticketTitle || card.ticketId) {
 				const bannerEl = append(cardEl, $('.workflow-display-ticket-banner'));
+				const bannerTitle = append(bannerEl, $('span.workflow-display-ticket-title'));
 				const hasTitle = Boolean(card.ticketTitle && card.ticketTitle.trim().length > 0);
 				const hasId = Boolean(card.ticketId && card.ticketId.trim().length > 0);
 				if (hasTitle && hasId && card.ticketTitle !== card.ticketId) {
