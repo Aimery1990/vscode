@@ -5443,6 +5443,7 @@ ${interpolatedPrompt}`;
 					let exitCode: number | undefined;
 					let durationMs: number | undefined;
 					let lastExecutedText = '';
+					let externalScripts: string[] = [];
 
 					if (v) {
 						if (typeof v === 'string') {
