@@ -2513,11 +2513,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 		// 1. Check standard boolean and status keywords
 		const lower = raw.toLowerCase();
-		if (lower === 'true' || lower === 'yes' || lower === 'success' || lower === 'pass' ||
-		    lower === 'proceed' || lower === 'continue' || lower === 'next' || lower === 'ok' || lower === 'always') {
+		const positiveKeywords = new Set(['true', 'yes', 'success', 'pass', 'continue', 'ok', 'always']);
+		if (positiveKeywords.has(lower)) {
 			return true;
 		}
-		if (lower === 'false' || lower === 'no' || lower === 'fail' || lower === 'reject') {
+		const negativeKeywords = new Set(['false', 'no', 'fail', 'reject']);
+		if (negativeKeywords.has(lower)) {
 			if (nodeState && (nodeState.status === 'failed' || nodeState.output?.approved === false || nodeState.output?.action === 'rejected')) {
 				return true;
 			}
