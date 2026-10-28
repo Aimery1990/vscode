@@ -5846,7 +5846,10 @@ export class WorkflowEditor extends EditorPane {
 			if (!this._selectedNodeIds.has(node.id)) {
 				this._selectedNodeIds.clear();
 				this._selectedNodeIds.add(node.id);
-				this._renderNodes();
+				const prevSelected = (this._nodesContainer || this._canvas)?.querySelectorAll('.workflow-node.selected');
+				prevSelected?.forEach(el => el.classList.remove('selected'));
+				const nodeEl = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${node.id}"]`);
+				nodeEl?.classList.add('selected');
 				if (this._inspectorEl) {
 					this._renderInspector(this._inspectorEl);
 				}
@@ -6032,7 +6035,10 @@ export class WorkflowEditor extends EditorPane {
 			if (!this._selectedNodeIds.has(node.id)) {
 				this._selectedNodeIds.clear();
 				this._selectedNodeIds.add(node.id);
-				this._renderNodes();
+				const prevSelected = (this._nodesContainer || this._canvas)?.querySelectorAll('.workflow-node.selected');
+				prevSelected?.forEach(el => el.classList.remove('selected'));
+				const nodeEl = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${node.id}"]`);
+				nodeEl?.classList.add('selected');
 				if (this._inspectorEl) {
 					this._renderInspector(this._inspectorEl);
 				}
@@ -7033,8 +7039,8 @@ export class WorkflowEditor extends EditorPane {
 			this._activeFunctionDraftInputEl = null;
 		}
 
-		// 1. If existingStep is a ticket (type === 'run_ticket' or has ticketName), do NOT open inline function editor with ticket body; open it in a VS Code editor tab!
-		if (existingStep && (existingStep.type === 'run_ticket' || existingStep.ticketName)) {
+		// 1. If existingStep is explicitly a run_ticket step, open it in a VS Code editor tab!
+		if (existingStep && existingStep.type === 'run_ticket') {
 			const ticketType = existingStep.ticketType || 'ticket';
 			const ticketName = existingStep.ticketName || existingStep.stepName || '';
 			if (ticketName) {
@@ -7061,6 +7067,17 @@ export class WorkflowEditor extends EditorPane {
 				const wfDir = URI.joinPath(this._workflowUri, '..');
 				const rel = wfDir.path.substring(wsFolder.uri.path.length).replace(/^\/+|\/+$/g, '');
 				defaultPath = rel || '.';
+			}
+		}
+
+		// Collect all canvas variables available across nodes & pipelines
+		const availableVars = new Set<string>();
+		for (const n of this._data?.nodes || []) {
+			for (const v of this._getNodeVariables(n)) {
+				if (v.name) availableVars.add(v.name.replace(/^@/, ''));
+			}
+			for (const p of n.pipeline || []) {
+				if (p.targetVariable) availableVars.add(p.targetVariable.replace(/^@/, ''));
 			}
 		}
 
@@ -7251,7 +7268,7 @@ export class WorkflowEditor extends EditorPane {
 			fieldsRow.querySelectorAll('.node-function-field-chip, .node-function-field-hint').forEach(el => el.remove());
 
 			// Collect all canvas variables available across nodes & pipelines
-			const availableVars = new Set<string>();
+			availableVars.clear();
 			for (const n of this._data?.nodes || []) {
 				for (const v of this._getNodeVariables(n)) {
 					if (v.name) availableVars.add(v.name.replace(/^@/, ''));
