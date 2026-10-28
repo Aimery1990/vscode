@@ -87,6 +87,7 @@ export interface ITicketRunResult {
 	success: boolean;
 	ticketId: string;
 	ticketName: string;
+	title?: string;
 	ticketType: string;
 	entityUri: string;
 	status: 'success' | 'failed';
@@ -410,13 +411,44 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			// 1. Search in cached snapshots first
 			const allSnapshots = this.entityPersistenceService.getAllSnapshots();
-			let matched = allSnapshots.find(s =>
-				s.ticketId?.toLowerCase() === needle ||
-				s.entityName.toLowerCase() === needle ||
-				s.title?.toLowerCase() === needle ||
-				s.entityUri.toLowerCase() === needle ||
-				s.entityUri.toLowerCase().endsWith('/' + needle)
-			);
+			let matched = allSnapshots.find(s => s.ticketId?.toLowerCase() === needle);
+
+			if (!matched) {
+				const isMatch = (s: IBaseEntitySnapshot) =>
+					s.ticketId?.toLowerCase() === needle ||
+					s.entityName.toLowerCase() === needle ||
+					s.title?.toLowerCase() === needle ||
+					s.entityUri.toLowerCase() === needle ||
+					s.entityUri.toLowerCase().endsWith('/' + needle);
+
+				const wsPrefix = wsUri.toString().toLowerCase();
+				const wsMatches = allSnapshots.filter(s => {
+					const inWs = !workspaceUri ||
+						(s.belongsToWorkspaceUri && s.belongsToWorkspaceUri.toLowerCase() === wsPrefix) ||
+						(s.entityUri && s.entityUri.toLowerCase().startsWith(wsPrefix));
+					return inWs && isMatch(s);
+				});
+
+				const candidates = wsMatches.length > 0 ? wsMatches : allSnapshots.filter(isMatch);
+				if (candidates.length > 0) {
+					// When multiple tickets match (e.g. created repeatedly with same title in a workflow loop),
+					// sort to pick the newest created ticket (highest numeric ticket ID suffix, then createdAt)
+					candidates.sort((a, b) => {
+						const numA = parseInt(a.ticketId?.match(/-(\d+)$/)?.[1] || '0', 10);
+						const numB = parseInt(b.ticketId?.match(/-(\d+)$/)?.[1] || '0', 10);
+						if (numA !== numB) {
+							return numB - numA;
+						}
+						const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+						const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+						if (timeA !== timeB) {
+							return timeB - timeA;
+						}
+						return 0;
+					});
+					matched = candidates[0];
+				}
+			}
 
 			// 2. If not found in snapshot cache, try scanning folder path directly
 			let ticketUri: URI | undefined = matched ? URI.parse(matched.entityUri) : undefined;
@@ -978,6 +1010,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				success: true,
 				ticketId: ticketResult.ticketId,
 				ticketName: ticketResult.ticketName,
+				title: ticketResult.title,
 				ticketType: ticketResult.ticketType,
 				entityUri: ticketResult.entityUri,
 				status: 'success',

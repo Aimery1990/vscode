@@ -1570,6 +1570,23 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 				}
 
+				// If ticketIdOrPath references a context variable name (e.g. RUN_TICKETS(new_ticket) or RUN_TICKETS("new_ticket"))
+				if (ticketIdOrPath && run.contextVariables[ticketIdOrPath]) {
+					const ctxVal = run.contextVariables[ticketIdOrPath];
+					if (typeof ctxVal === 'object' && ctxVal !== null && ctxVal.ticketId) {
+						ticketIdOrPath = ctxVal.ticketId;
+					}
+				}
+				// Also check if any ticket was created in this run whose title or name matches ticketIdOrPath
+				if (ticketIdOrPath) {
+					for (const ctxVal of Object.values(run.contextVariables)) {
+						if (ctxVal && typeof ctxVal === 'object' && ctxVal.ticketId && (ctxVal.title === ticketIdOrPath || ctxVal.ticketName === ticketIdOrPath)) {
+							ticketIdOrPath = ctxVal.ticketId;
+							break;
+						}
+					}
+				}
+
 				// Merge any loose keyword arguments directly into inputParams (e.g. RUN_TICKETS("jobs/calc", start=@start))
 				// Keyword arguments explicitly passed to the function call ALWAYS take precedence!
 				const reservedKeys = new Set(['ticket_name', 'ticket_id', 'ticketIdOrPath', 'ticket', 'params', 'input_params', 'parameters', 'inputParams']);
@@ -1603,6 +1620,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							value: {
 								ticketId: execRes.ticketId || ticketIdOrPath,
 								ticketName: execRes.ticketName || ticketIdOrPath,
+								title: execRes.title,
 								ticketType: execRes.ticketType || 'ticket',
 								outputSpecs: (execRes as any).outputSpecs || []
 							},
@@ -1682,6 +1700,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					throw new Error(createRes.error || `Failed to create ticket '${opts.title}'`);
 				}
 				result = createRes;
+				if (createRes.title) {
+					run.contextVariables[createRes.title] = createRes;
+					run.contextVariables[`@${createRes.title}`] = createRes;
+				}
+				if (createRes.ticketId) {
+					run.contextVariables[createRes.ticketId] = createRes;
+					run.contextVariables[`@${createRes.ticketId}`] = createRes;
+				}
 				pathStep?.operations.push({
 					type: 'create_ticket',
 					label: `CREATE_TICKETS: '${opts.title}' [${opts.ticketType}]`,
@@ -1981,7 +2007,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 		// 2. Check if displayVal is an executed Ticket or contains Ticket Fields/Outputs
 		let ticketId = displayVal?.ticketId || displayVal?.__ticketMetadata?.ticketId || '';
-		let ticketName = displayVal?.ticketName || displayVal?.title || displayVal?.__ticketMetadata?.ticketName || '';
+		let ticketTitle = displayVal?.title || displayVal?.__ticketMetadata?.title || displayVal?.ticketTitle || '';
+		let ticketName = displayVal?.ticketName || displayVal?.__ticketMetadata?.ticketName || ticketTitle || ticketId || '';
 		let ticketType = displayVal?.ticketType || displayVal?.__ticketMetadata?.ticketType || '';
 
 		let extractedOutputs: Record<string, any> = {};
@@ -2088,8 +2115,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			const lines: string[] = [];
 
 			if (ticketName || ticketId || ticketType) {
+				const hasTitle = (ticketTitle || ticketName) && (ticketTitle || ticketName) !== ticketId;
+				const displayHeading = hasTitle ? `${ticketTitle || ticketName} (${ticketId})` : (ticketId || ticketTitle || ticketName || 'Ticket');
 				lines.push(`======================================================================`);
-				lines.push(`Ticket Outputs: ${ticketName || 'Ticket'}${ticketId ? ` (${ticketId})` : ''}${ticketType ? ` [${ticketType}]` : ''}`);
+				lines.push(`Ticket Outputs: ${displayHeading}${ticketType ? ` [${ticketType}]` : ''}`);
 				lines.push(`======================================================================`);
 			}
 
@@ -2189,7 +2218,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				formattedText: lines.join('\n').trim(),
 				summaryType: `Outputs (${outputEntries.length} items)`,
 				cleanValue: extractedOutputs,
-				ticketTitle: ticketName || undefined,
+				ticketTitle: ticketTitle || ticketName || undefined,
 				ticketId: ticketId || undefined,
 				ticketType: ticketType || undefined,
 				outputItems: outputItems
