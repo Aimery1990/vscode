@@ -1044,14 +1044,14 @@ export class WorkflowEditor extends EditorPane {
 								outputVariables: [{
 									name: 'res',
 									initialValue: 'None',
-									expression: '@res = RUN_TICKETS(ticket_name="", params={})'
+									expression: '@res = RUN_TICKETS(ticket="", params={})'
 								}],
 								pipeline: [{
 									id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 									type: 'call_function',
 									targetVariable: 'res',
 									functionName: 'RUN_TICKETS',
-									expression: '@res = RUN_TICKETS(ticket_name="", params={})'
+									expression: '@res = RUN_TICKETS(ticket="", params={})'
 								}],
 								color: this._activeNodeColor,
 								textColor: this._activeTextColor,
@@ -4628,9 +4628,9 @@ export class WorkflowEditor extends EditorPane {
 							commitFn();
 						};
 					};
-					addPipelineChip('RUN_TICKETS', '@res = RUN_TICKETS(ticket_name="", params={})');
+					addPipelineChip('RUN_TICKETS', '@res = RUN_TICKETS(ticket="", params={})');
 					addPipelineChip('CREATE_TICKETS', '@new_ticket = CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})');
-					addPipelineChip('GET_TICKETS', '@ticket_data = GET_TICKETS(ticket_name="")');
+					addPipelineChip('GET_TICKETS', '@ticket_data = GET_TICKETS(ticket="")');
 					addPipelineChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
 				}
 
@@ -7065,7 +7065,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Initial expression value (including @return_var = ...)
-		let initialExpr = '@res = RUN_TICKETS(ticket_name="", params={})';
+		let initialExpr = '@res = RUN_TICKETS(ticket="", params={})';
 
 		if (existingStep) {
 			if (existingStep.expression) {
@@ -7077,11 +7077,11 @@ export class WorkflowEditor extends EditorPane {
 					if (fn === 'CREATE_TICKETS') {
 						expr = `${retVar}CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`;
 					} else if (fn === 'GET_TICKETS') {
-						expr = `${retVar}GET_TICKETS(ticket_name="")`;
+						expr = `${retVar}GET_TICKETS(ticket="")`;
 					} else if (fn === 'GET_PRIMITIVES_CATALOG') {
 						expr = `${retVar}GET_PRIMITIVES_CATALOG()`;
 					} else {
-						expr = `${retVar}RUN_TICKETS(ticket_name="", params={})`;
+						expr = `${retVar}RUN_TICKETS(ticket="", params={})`;
 					}
 				}
 				initialExpr = expr;
@@ -7093,11 +7093,11 @@ export class WorkflowEditor extends EditorPane {
 				if (existingStep.functionName === 'CREATE_TICKETS') {
 					initialExpr = `${retVar || '@new_ticket = '}CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`;
 				} else if (existingStep.functionName === 'GET_TICKETS') {
-					initialExpr = `${retVar || '@ticket_data = '}GET_TICKETS(ticket_name="")`;
+					initialExpr = `${retVar || '@ticket_data = '}GET_TICKETS(ticket="")`;
 				} else if (existingStep.functionName === 'GET_PRIMITIVES_CATALOG') {
 					initialExpr = `${retVar || '@catalog = '}GET_PRIMITIVES_CATALOG()`;
 				} else {
-					initialExpr = `${retVar || '@res = '}${existingStep.functionName}(ticket_name="", params={})`;
+					initialExpr = `${retVar || '@res = '}${existingStep.functionName}(ticket="", params={})`;
 				}
 			}
 		}
@@ -7211,9 +7211,18 @@ export class WorkflowEditor extends EditorPane {
 			};
 		};
 
-		addChip('RUN_TICKETS', '@res = RUN_TICKETS(ticket_name="", params={})');
+		const ticketVarCandidate = Array.from(availableVars).find(v => /ticket/i.test(v));
+		const startCandidate = Array.from(availableVars).find(v => /^(start|start_offset|idx|index|count|counter|offset)$/i.test(v));
+		let runTicketsTemplate = '@res = RUN_TICKETS(ticket="")';
+		if (ticketVarCandidate && startCandidate) {
+			runTicketsTemplate = `@res = RUN_TICKETS(ticket=@${ticketVarCandidate}, start=@${startCandidate})`;
+		} else if (ticketVarCandidate) {
+			runTicketsTemplate = `@res = RUN_TICKETS(ticket=@${ticketVarCandidate})`;
+		}
+
+		addChip('RUN_TICKETS', runTicketsTemplate);
 		addChip('CREATE_TICKETS', `@new_ticket = CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`);
-		addChip('GET_TICKETS', '@ticket_data = GET_TICKETS(ticket_name="")');
+		addChip('GET_TICKETS', ticketVarCandidate ? `@ticket_data = GET_TICKETS(ticket=@${ticketVarCandidate})` : '@ticket_data = GET_TICKETS(ticket="")');
 		addChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
 		addChip('DISPLAY', 'DISPLAY(new_ticket)');
 
@@ -7225,7 +7234,7 @@ export class WorkflowEditor extends EditorPane {
 		codeArea.rows = 3;
 		codeArea.spellcheck = false;
 		codeArea.value = initialExpr;
-		codeArea.placeholder = 'res = RUN_TICKETS(ticket_name="", params={})';
+		codeArea.placeholder = 'res = RUN_TICKETS(ticket="", start=0)';
 		codeArea.onmousedown = (e) => e.stopPropagation();
 		codeArea.onclick = (e) => e.stopPropagation();
 
@@ -7326,23 +7335,25 @@ export class WorkflowEditor extends EditorPane {
 				// If a ticket variable exists on canvas (e.g. @new_ticket), prioritize suggesting it
 				const ticketVarCandidate = Array.from(availableVars).find(v => /ticket/i.test(v));
 				const ticketDefault = ticketVarCandidate ? `@${ticketVarCandidate}` : '';
-				paramSpecs.push({ name: 'ticket_name', defaultValue: ticketDefault });
+				paramSpecs.push({ name: 'ticket', defaultValue: ticketDefault, isStandard: true });
+				paramSpecs.push({ name: 'tickets', defaultValue: ticketDefault });
 
-				// If a start or counter variable exists on canvas (e.g. @start), prioritize suggesting it
-				const startCandidate = Array.from(availableVars).find(v => /^(start|idx|index|count|counter|offset)$/i.test(v));
+				// If a start or counter variable exists on canvas (e.g. @start or @start_offset), prioritize suggesting it
+				const startCandidate = Array.from(availableVars).find(v => /^(start|start_offset|idx|index|count|counter|offset)$/i.test(v));
 				const startDefault = startCandidate ? `@${startCandidate}` : 0;
-				paramSpecs.push({ name: 'start', defaultValue: startDefault });
+				paramSpecs.push({ name: 'start', defaultValue: startDefault, isStandard: true });
 
 				// Also offer any other canvas variables as convenient keyword parameter chips
 				for (const vName of availableVars) {
-					if (vName !== 'ticket_name' && vName !== 'start' && vName !== ticketVarCandidate && vName !== startCandidate && vName !== 'res') {
+					if (vName !== 'ticket' && vName !== 'tickets' && vName !== 'ticket_name' && vName !== 'start' && vName !== ticketVarCandidate && vName !== startCandidate && vName !== 'res') {
 						paramSpecs.push({ name: vName, defaultValue: `@${vName}` });
 					}
 				}
 			} else if (/GET_TICKETS/i.test(val)) {
 				fieldsLabel.textContent = 'Parameters (GET_TICKETS):';
 				const ticketVarCandidate = Array.from(availableVars).find(v => /ticket/i.test(v));
-				paramSpecs.push({ name: 'ticket_name', defaultValue: ticketVarCandidate ? `@${ticketVarCandidate}` : '' });
+				paramSpecs.push({ name: 'ticket', defaultValue: ticketVarCandidate ? `@${ticketVarCandidate}` : '', isStandard: true });
+				paramSpecs.push({ name: 'tickets', defaultValue: ticketVarCandidate ? `@${ticketVarCandidate}` : '' });
 			} else {
 				fieldsLabel.textContent = 'Parameters:';
 			}
@@ -7438,9 +7449,9 @@ export class WorkflowEditor extends EditorPane {
 			const seen = new Set<string>();
 
 			const fns = [
-				{ name: 'RUN_TICKETS', detail: 'RUN_TICKETS(ticket_name="", params={})', snippet: 'RUN_TICKETS(ticket_name="", params={})' },
+				{ name: 'RUN_TICKETS', detail: 'RUN_TICKETS(ticket="", start=0)', snippet: 'RUN_TICKETS(ticket="", start=0)' },
 				{ name: 'CREATE_TICKETS', detail: `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`, snippet: `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")` },
-				{ name: 'GET_TICKETS', detail: 'GET_TICKETS(ticket_name="")', snippet: 'GET_TICKETS(ticket_name="")' },
+				{ name: 'GET_TICKETS', detail: 'GET_TICKETS(ticket="")', snippet: 'GET_TICKETS(ticket="")' },
 				{ name: 'GET_PRIMITIVES_CATALOG', detail: 'GET_PRIMITIVES_CATALOG()', snippet: 'GET_PRIMITIVES_CATALOG()' }
 			];
 			for (const f of fns) {
@@ -11959,7 +11970,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Hint Bar: Ticket ready to run
 			const hintEl = append(handleEl, $('.workflow-display-handle-hint'));
-			hintEl.textContent = `Ticket ready. Use RUN_TICKETS(ticket_name="${th.ticketName || th.ticketId}") to execute.`;
+			hintEl.textContent = `Ticket ready. Use RUN_TICKETS(ticket="${th.ticketId || th.ticketName}") to execute.`;
 		} else if (card.outputItems && card.outputItems.length > 0) {
 			// Ticket Meta Banner if available
 			if (card.ticketTitle || card.ticketId) {

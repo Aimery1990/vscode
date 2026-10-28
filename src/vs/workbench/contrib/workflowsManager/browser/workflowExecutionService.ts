@@ -1555,8 +1555,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketIdOrPath = args[0].ticketId || args[0].ticketName || args[0].ticketIdOrPath || args[0].ticket_name || args[0].id || '';
 					inputParams = args[0].parameters || args[0].inputParams || args[0].params || {};
 				} else {
-					const rawTicketArg = kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.ticket ?? args[0] ?? '';
-					if (typeof rawTicketArg === 'object' && rawTicketArg !== null) {
+					const rawTicketArg = kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? args[0] ?? '';
+					if (Array.isArray(rawTicketArg) && rawTicketArg.length > 0) {
+						const first = rawTicketArg[0];
+						if (typeof first === 'object' && first !== null) {
+							ticketIdOrPath = first.ticketId || first.ticketName || first.ticketIdOrPath || first.id || '';
+							if (first.parameters && typeof first.parameters === 'object') {
+								inputParams = { ...first.parameters };
+							}
+						} else {
+							ticketIdOrPath = String(first).trim();
+						}
+					} else if (typeof rawTicketArg === 'object' && rawTicketArg !== null) {
 						ticketIdOrPath = rawTicketArg.ticketId || rawTicketArg.ticketName || rawTicketArg.ticketIdOrPath || rawTicketArg.id || '';
 						if (rawTicketArg.parameters && typeof rawTicketArg.parameters === 'object') {
 							inputParams = { ...rawTicketArg.parameters };
@@ -1589,7 +1599,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 				// Merge any loose keyword arguments directly into inputParams (e.g. RUN_TICKETS("jobs/calc", start=@start))
 				// Keyword arguments explicitly passed to the function call ALWAYS take precedence!
-				const reservedKeys = new Set(['ticket_name', 'ticket_id', 'ticketIdOrPath', 'ticket', 'params', 'input_params', 'parameters', 'inputParams']);
+				const reservedKeys = new Set(['ticket', 'tickets', 'ticket_name', 'ticket_id', 'ticketIdOrPath', 'params', 'input_params', 'parameters', 'inputParams']);
 				for (const [k, v] of Object.entries(kwargs)) {
 					if (!reservedKeys.has(k)) {
 						inputParams[k] = v;
@@ -1722,7 +1732,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					durationMs: Date.now() - startMs
 				});
 			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS' || upperFn === 'GETTICKET') {
-				const ticketIdOrPath = String(kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.ticket ?? args[0] ?? '').trim();
+				const ticketIdOrPath = String(kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? args[0] ?? '').trim();
 				const getRes = await this.ticketRuntimeService.GET_TICKETS(workflowDir, ticketIdOrPath);
 				result = getRes.output !== undefined ? getRes.output : getRes;
 			} else if (upperFn === 'GET_PRIMITIVES_CATALOG' || upperFn === 'GETPRIMITIVESCATALOG') {

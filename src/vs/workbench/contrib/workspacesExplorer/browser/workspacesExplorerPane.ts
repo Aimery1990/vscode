@@ -852,8 +852,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		for (const child of children) {
 			const canonicalChildId = this.getCanonicalId(child.id);
+			const isContainer = child.type === 'folder' || child.type === 'workspace' || child.type === 'project';
 			const isDirectory = child.type !== 'file';
-			const isExpanded = isDirectory && this.expandedWorkspaces.has(canonicalChildId);
+			const isExpanded = isContainer && this.expandedWorkspaces.has(canonicalChildId);
 			const isChildSelected = this.selectedWorkspaceId === parentWsId && this.selectedItemId === canonicalChildId;
 
 			const isRemoved = !!(child.status && (
@@ -1073,7 +1074,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 			childLeft.style.flex = '1';
 
 			// Folder expansion chevron
-			if (isDirectory) {
+			if (isContainer) {
 				const chevronIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(isExpanded ? Codicon.chevronDown : Codicon.chevronRight)));
 				chevronIcon.style.opacity = '0.6';
 				chevronIcon.style.fontSize = '11px';
@@ -1087,6 +1088,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 					this.renderContent();
 				};
+			} else {
+				const spacer = append(childLeft, $('span'));
+				spacer.style.display = 'inline-block';
+				spacer.style.width = '11px';
+				spacer.style.flexShrink = '0';
 			}
 
 			let childIcon: HTMLElement;
@@ -1212,12 +1218,17 @@ export class MainWorkspaceViewPane extends ViewPane {
 				};
 			}
 
-			// Single Click: Select item, expand if directory, open preview if md file
+			// Single Click: Select item, expand if container folder, open editor if entity/workflow, or open file
 			childRow.onclick = async () => {
 				this.selectedWorkspaceId = parentWsId;
 				this.selectedItemId = canonicalChildId;
 
-				if (isDirectory) {
+				if (child.type === 'workflow') {
+					await this.editorService.openEditor(new WorkflowEditorInput(child.uri, child.name), { pinned: true });
+				} else if (child.type !== 'file' && child.type !== 'folder') {
+					// Ticket entity (custom modules like xxx, task, job, case, issue, agent, note, etc.)
+					await this.editorService.openEditor(new EntityDetailEditorInput(child.uri, child.name), { pinned: true });
+				} else if (child.type === 'folder' || child.type === 'workspace' || child.type === 'project') {
 					if (!this.expandedWorkspaces.has(canonicalChildId)) {
 						this.expandedWorkspaces.add(canonicalChildId);
 					} else {
@@ -1227,11 +1238,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					const configDir = URI.joinPath(child.uri, '.agents');
 					const legacyConfigExists = await this.fileService.exists(URI.joinPath(child.uri, 'instruction.md')) || await this.fileService.exists(URI.joinPath(child.uri, 'README.md'));
 					if (await this.fileService.exists(configDir) || legacyConfigExists) {
-						if (child.type === 'workflow') {
-							await this.editorService.openEditor(new WorkflowEditorInput(child.uri, child.name), { pinned: true });
-						} else {
-							await this.editorService.openEditor(new EntityDetailEditorInput(child.uri, child.name), { pinned: true });
-						}
+						await this.editorService.openEditor(new EntityDetailEditorInput(child.uri, child.name), { pinned: true });
 					}
 				} else if (child.uri.path.toLowerCase().endsWith('.md')) {
 					const fileName = child.uri.path.split('/').pop() || '';

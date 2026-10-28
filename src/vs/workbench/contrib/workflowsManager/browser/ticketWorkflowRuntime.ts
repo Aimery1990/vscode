@@ -430,22 +430,22 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				});
 
 				const candidates = wsMatches.length > 0 ? wsMatches : allSnapshots.filter(isMatch);
-				if (candidates.length > 0) {
-					// When multiple tickets match (e.g. created repeatedly with same title in a workflow loop),
-					// sort to pick the newest created ticket (highest numeric ticket ID suffix, then createdAt)
-					candidates.sort((a, b) => {
-						const numA = parseInt(a.ticketId?.match(/-(\d+)$/)?.[1] || '0', 10);
-						const numB = parseInt(b.ticketId?.match(/-(\d+)$/)?.[1] || '0', 10);
-						if (numA !== numB) {
-							return numB - numA;
-						}
-						const timeA = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-						const timeB = b.createdAt ? new Date(b.createdAt).getTime() : 0;
-						if (timeA !== timeB) {
-							return timeB - timeA;
-						}
-						return 0;
-					});
+				if (candidates.length > 1) {
+					const matchedIds = candidates.map(c => c.ticketId || c.entityName);
+					return {
+						success: false,
+						ticketId: ticketIdOrPath,
+						ticketName: '',
+						ticketType: '',
+						entityUri: '',
+						title: '',
+						description: '',
+						status: '',
+						priority: '',
+						customMetadata: {},
+						error: `Ambiguous ticket: found ${candidates.length} tickets matching name '${ticketIdOrPath}' in '${wsUri.fsPath}' (${matchedIds.join(', ')}). Please use ticket='<ticket_id>' (e.g. ticket='${candidates[0].ticketId}') or pass variable (e.g. ticket=@new_ticket) instead.`
+					};
+				} else if (candidates.length === 1) {
 					matched = candidates[0];
 				}
 			}
@@ -456,6 +456,37 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				const candidateUri = URI.joinPath(wsUri, ticketIdOrPath.trim());
 				if (await this.fileService.exists(candidateUri)) {
 					ticketUri = candidateUri;
+				} else {
+					try {
+						const wsChildren = await this.workspacesExplorerService.scanWorkspaceChildren(wsUri, true);
+						const matchingChildren: { id: string; name: string; uri: URI }[] = [];
+						for (const child of wsChildren) {
+							if (child.type === 'file' || child.type === 'folder') continue;
+							const snap = this.workspacesExplorerService.getMetadataSnapshot(child.uri);
+							const titleMatch = snap?.title?.toLowerCase() === needle;
+							const idMatch = child.name.toLowerCase() === needle || snap?.ticketId?.toLowerCase() === needle;
+							if (titleMatch || idMatch) {
+								matchingChildren.push(child);
+							}
+						}
+						if (matchingChildren.length > 1) {
+							return {
+								success: false,
+								ticketId: ticketIdOrPath,
+								ticketName: '',
+								ticketType: '',
+								entityUri: '',
+								title: '',
+								description: '',
+								status: '',
+								priority: '',
+								customMetadata: {},
+								error: `Ambiguous ticket: found ${matchingChildren.length} tickets matching name '${ticketIdOrPath}' in '${wsUri.fsPath}' (${matchingChildren.map(c => c.name).join(', ')}). Please use ticket='<ticket_id>' or pass variable (e.g. ticket=@new_ticket) instead.`
+							};
+						} else if (matchingChildren.length === 1) {
+							ticketUri = matchingChildren[0].uri;
+						}
+					} catch {}
 				}
 			}
 

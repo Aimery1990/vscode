@@ -198,6 +198,10 @@ export class EntityDetailEditor extends EditorPane {
 		parent.appendChild(this._container);
 
 		this._bindContainerEvents();
+
+		if (this._entityUri) {
+			this._resolvePathsAndLoadData();
+		}
 	}
 
 	override layout(dimension: Dimension): void {
@@ -232,10 +236,25 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private _setElementHTML(element: HTMLElement, html: string): void {
-		if (ttPolicy) {
-			element.innerHTML = ttPolicy.createHTML(html) as unknown as string;
-		} else {
-			element.innerHTML = html;
+		try {
+			if (ttPolicy) {
+				element.innerHTML = ttPolicy.createHTML(html) as unknown as string;
+			} else {
+				element.innerHTML = html;
+			}
+		} catch {
+			try {
+				element.innerHTML = html;
+			} catch {
+				while (element.firstChild) {
+					element.removeChild(element.firstChild);
+				}
+				const parser = new DOMParser();
+				const doc = parser.parseFromString(html, 'text/html');
+				while (doc.body.firstChild) {
+					element.appendChild(doc.body.firstChild);
+				}
+			}
 		}
 	}
 
@@ -488,6 +507,29 @@ export class EntityDetailEditor extends EditorPane {
 			}
 		} catch (err) {
 			console.error('Failed to resolve and render entity detail:', err);
+			if (this._container) {
+				const errMsg = err && (err as any).message ? (err as any).message : String(err);
+				const errStack = (err as any)?.stack ? String((err as any).stack) : '';
+				this._setElementHTML(this._container, `
+					<div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 40px; color: var(--vscode-editor-foreground); text-align: center;">
+						<div style="font-size: 20px; font-weight: 600; margin-bottom: 12px; color: #ef4444;">Error Loading Ticket Detail</div>
+						<div style="font-size: 13px; opacity: 0.8; max-width: 600px; margin-bottom: 16px;">
+							${this._escapeHtml(errMsg)}
+						</div>
+						${errStack ? `
+						<div style="font-size: 11px; opacity: 0.6; font-family: monospace; max-width: 700px; white-space: pre-wrap; margin-bottom: 20px; text-align: left; background: rgba(0,0,0,0.3); padding: 12px; border-radius: 6px; overflow-x: auto;">
+							${this._escapeHtml(errStack)}
+						</div>` : ''}
+						<button id="entity-detail-error-retry-btn" style="padding: 6px 18px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500;">
+							Retry
+						</button>
+					</div>
+				`);
+				const retryBtn = this._container.querySelector('#entity-detail-error-retry-btn') as HTMLElement | null;
+				if (retryBtn) {
+					retryBtn.onclick = () => this._resolvePathsAndLoadData();
+				}
+			}
 		}
 	}
 
@@ -1713,12 +1755,12 @@ export class EntityDetailEditor extends EditorPane {
 		};
 	}
 
-	private _escapeHtmlAttr(str: string | undefined): string {
-		if (!str) return '';
+	private _escapeHtmlAttr(str: any): string {
+		if (str === undefined || str === null) return '';
 		return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 	}
 
-	private _escapeHtml(str: string | undefined): string {
+	private _escapeHtml(str: any): string {
 		return this._escapeHtmlAttr(str);
 	}
 
@@ -5140,7 +5182,7 @@ ${interpolatedPrompt}`;
 							<div class="custom-field-view" style="display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0;">
 								${selectedArr.length > 0 ? selectedArr.map(item => `
 									<span style="display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 12px; background: rgba(99,102,241,0.15); color: #818cf8; border: 1px solid rgba(99,102,241,0.3); font-size: 0.85em; font-weight: 500;">
-										🏷️ ${this._escapeHtmlAttr(String(item))}
+										<span class="codicon codicon-tag" style="font-size: 11px; margin-right: 4px;"></span>${this._escapeHtmlAttr(String(item))}
 									</span>
 								`).join('') : '<span style="opacity: 0.45; font-style: italic;">No options selected.</span>'}
 							</div>
@@ -5743,13 +5785,13 @@ ${interpolatedPrompt}`;
 							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 								try {
 									const pObj = JSON.parse(trimmed);
-									if (pObj.prompt !== undefined) promptText = pObj.prompt;
+									if (pObj.prompt !== undefined) promptText = String(pObj.prompt);
 									if (pObj.targetMode) promptMode = pObj.targetMode;
-									if (pObj.targetModel) promptModel = pObj.targetModel;
-									if (pObj.targetAgentId) promptAgentId = pObj.targetAgentId;
-									if (pObj.targetAgentName) promptAgentName = pObj.targetAgentName;
-									if (pObj.output) promptOutput = pObj.output;
-									if (pObj.lastExecuted) lastExecutedText = pObj.lastExecuted;
+									if (pObj.targetModel) promptModel = String(pObj.targetModel);
+									if (pObj.targetAgentId) promptAgentId = typeof pObj.targetAgentId === 'string' ? pObj.targetAgentId : String((pObj.targetAgentId as any)?.id || '');
+									if (pObj.targetAgentName) promptAgentName = typeof pObj.targetAgentName === 'string' ? pObj.targetAgentName : String((pObj.targetAgentName as any)?.name || '');
+									if (pObj.output) promptOutput = typeof pObj.output === 'string' ? pObj.output : JSON.stringify(pObj.output);
+									if (pObj.lastExecuted) lastExecutedText = String(pObj.lastExecuted);
 								} catch {
 									promptText = trimmed;
 								}
@@ -5761,9 +5803,9 @@ ${interpolatedPrompt}`;
 							if (obj.prompt !== undefined) { promptText = String(obj.prompt); }
 							if (obj.targetMode) { promptMode = obj.targetMode as 'model' | 'agent'; }
 							if (obj.targetModel) { promptModel = String(obj.targetModel); }
-							if (obj.targetAgentId) { promptAgentId = String(obj.targetAgentId); }
-							if (obj.targetAgentName) { promptAgentName = String(obj.targetAgentName); }
-							if (obj.output) { promptOutput = String(obj.output); }
+							if (obj.targetAgentId) { promptAgentId = typeof obj.targetAgentId === 'string' ? obj.targetAgentId : String((obj.targetAgentId as any)?.id || ''); }
+							if (obj.targetAgentName) { promptAgentName = typeof obj.targetAgentName === 'string' ? obj.targetAgentName : String((obj.targetAgentName as any)?.name || ''); }
+							if (obj.output) { promptOutput = typeof obj.output === 'string' ? obj.output : JSON.stringify(obj.output); }
 							if (obj.lastExecuted) { lastExecutedText = String(obj.lastExecuted); }
 						}
 					}
