@@ -667,6 +667,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			updatedAt: Date.now(),
 			contextVariables: {},
 			nodeStates: {},
+			linkStates: {},
 			executionPath: [],
 			logs: []
 		};
@@ -713,6 +714,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			updatedAt: Date.now(),
 			contextVariables: { ...(options?.initialInputs || {}) },
 			nodeStates: {},
+			linkStates: {},
 			executionPath: [],
 			logs: []
 		};
@@ -1169,12 +1171,17 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		} while (isDaemonLoop && !this._cancelledRuns.has(run.runId));
 
 		if (!this._cancelledRuns.has(run.runId)) {
-			run.status = 'completed';
 			run.completedAt = Date.now();
 			run.durationMs = run.completedAt - run.startedAt;
 			run.updatedAt = Date.now();
-			this._emitLog(run, 'info', `Workflow '${run.workflowName}' executed successfully to completion in ${(run.durationMs / 1000).toFixed(1)}s!`);
-			this.notificationService.info(`Workflow '${run.workflowName}' completed successfully (${(run.durationMs / 1000).toFixed(1)}s).`);
+			if (run.status !== 'failed') {
+				run.status = 'completed';
+				this._emitLog(run, 'info', `Workflow '${run.workflowName}' executed successfully to completion in ${(run.durationMs / 1000).toFixed(1)}s!`);
+				this.notificationService.info(`Workflow '${run.workflowName}' completed successfully (${(run.durationMs / 1000).toFixed(1)}s).`);
+			} else {
+				this._emitLog(run, 'error', `Workflow '${run.workflowName}' stopped with errors in ${(run.durationMs / 1000).toFixed(1)}s: ${run.error || 'Execution blocked'}`);
+				this.notificationService.error(`Workflow '${run.workflowName}' execution failed: ${run.error || 'Blocked'}`);
+			}
 			this._notifyRunChanged(run);
 			await this.persistRunsForWorkflow(run.workflowUri);
 		}
@@ -2304,14 +2311,50 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		if (conditionalLinks.length > 0) {
 			this._emitLog(run, 'info', `Evaluating condition(s) on ${outgoingLinks.length} outgoing branch(es) from '${currentNode.label}'`);
 			const matchedNodes: IFlowchartNode[] = [];
+			let firstConditionError: string | undefined = undefined;
+			if (!run.linkStates) run.linkStates = {};
+
 			for (const link of outgoingLinks) {
+				const linkKey = link.id || `${link.from}->${link.to}`;
 				const rawLabel = (link.label || '').trim();
 				if (!rawLabel) continue;
 
-				const condResult = this._evaluateCondition(rawLabel, run.contextVariables, run.nodeStates[currentNode.id], run);
+				let condResult: boolean | null = null;
+				let conditionError: string | undefined = undefined;
+				try {
+					condResult = this._evaluateCondition(rawLabel, run.contextVariables, run.nodeStates[currentNode.id], run);
+				} catch (err: any) {
+					conditionError = err.message || String(err);
+					if (!firstConditionError) firstConditionError = conditionError;
+				}
+
 				const target = data.nodes.find(n => n.id === link.to);
 				const explanation = this._explainCondition(rawLabel, run.contextVariables, condResult);
-				if (condResult === true) {
+
+				if (conditionError) {
+					run.linkStates[linkKey] = {
+						linkId: link.id,
+						fromNodeId: link.from,
+						toNodeId: link.to,
+						status: 'error',
+						conditionLabel: rawLabel,
+						evaluationResult: false,
+						error: conditionError,
+						explanation: `Syntax/Evaluation Error: ${conditionError}`
+					};
+					if (link.id) run.linkStates[`${link.from}->${link.to}`] = run.linkStates[linkKey];
+				} else if (condResult === true) {
+					run.linkStates[linkKey] = {
+						linkId: link.id,
+						fromNodeId: link.from,
+						toNodeId: link.to,
+						status: 'passed',
+						conditionLabel: rawLabel,
+						evaluationResult: true,
+						explanation: explanation
+					};
+					if (link.id) run.linkStates[`${link.from}->${link.to}`] = run.linkStates[linkKey];
+
 					if (target) {
 						this._emitLog(run, 'info', `Condition MATCHED: '${link.label}' -> navigating to '${target.label}' (${explanation})`);
 						matchedNodes.push(target);
@@ -2328,6 +2371,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						}
 					}
 				} else if (condResult === false) {
+					run.linkStates[linkKey] = {
+						linkId: link.id,
+						fromNodeId: link.from,
+						toNodeId: link.to,
+						status: 'rejected',
+						conditionLabel: rawLabel,
+						evaluationResult: false,
+						explanation: explanation
+					};
+					if (link.id) run.linkStates[`${link.from}->${link.to}`] = run.linkStates[linkKey];
 					this._emitLog(run, 'info', `Condition REJECTED: '${link.label}' (${explanation})`);
 				}
 			}
@@ -2357,7 +2410,36 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				return fallbackNodes;
 			}
 
-			this._emitLog(run, 'warn', `No outgoing branch condition was satisfied from '${currentNode.label}'. Execution stopped.`);
+			// Execution BLOCKED: No outgoing branch condition was satisfied!
+			const blockMsg = firstConditionError
+				? `Condition error on branch from '${currentNode.label}': ${firstConditionError}`
+				: `No outgoing branch condition was satisfied from '${currentNode.label}'. Execution stopped.`;
+
+			if (run.nodeStates[currentNode.id]) {
+				run.nodeStates[currentNode.id].status = 'failed';
+				run.nodeStates[currentNode.id].error = blockMsg;
+			}
+			if (pathStep) {
+				pathStep.status = 'failed';
+				pathStep.error = blockMsg;
+			}
+			run.status = 'failed';
+			run.error = blockMsg;
+
+			// Highlight all unsatisfied outgoing links as error / blocked
+			for (const l of outgoingLinks) {
+				const key = l.id || `${l.from}->${l.to}`;
+				if (run.linkStates[key]) {
+					run.linkStates[key].status = 'error';
+					if (!run.linkStates[key].error) {
+						run.linkStates[key].error = `Condition '${l.label}' not satisfied, execution blocked here.`;
+					}
+					if (l.id) run.linkStates[`${l.from}->${l.to}`] = run.linkStates[key];
+				}
+			}
+
+			this._emitLog(run, 'error', `Execution BLOCKED: ${blockMsg}`);
+			this._notifyRunChanged(run);
 			return [];
 		}
 
@@ -2373,6 +2455,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					explanation: `Proceed to '${target.label}'`
 				};
 			}
+			if (!run.linkStates) run.linkStates = {};
+			const lKey = outgoingLinks[0].id || `${outgoingLinks[0].from}->${outgoingLinks[0].to}`;
+			run.linkStates[lKey] = {
+				linkId: outgoingLinks[0].id,
+				fromNodeId: outgoingLinks[0].from,
+				toNodeId: outgoingLinks[0].to,
+				status: 'passed',
+				evaluationResult: true
+			};
+			if (outgoingLinks[0].id) run.linkStates[`${outgoingLinks[0].from}->${outgoingLinks[0].to}`] = run.linkStates[lKey];
 			return target ? [target] : [];
 		}
 
@@ -2421,7 +2513,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 		// 1. Check standard boolean and status keywords
 		const lower = raw.toLowerCase();
-		if (lower === 'true' || lower === 'yes' || lower === 'success' || lower === 'pass') {
+		if (lower === 'true' || lower === 'yes' || lower === 'success' || lower === 'pass' ||
+		    lower === 'proceed' || lower === 'continue' || lower === 'next' || lower === 'ok' || lower === 'always') {
 			return true;
 		}
 		if (lower === 'false' || lower === 'no' || lower === 'fail' || lower === 'reject') {
@@ -2445,7 +2538,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			if (run) {
 				this._emitLog(run, 'error', `[Condition Syntax Error] Failed to evaluate condition '${raw}': ${err.message}`);
 			}
-			return false;
+			throw err;
 		}
 
 		return null;

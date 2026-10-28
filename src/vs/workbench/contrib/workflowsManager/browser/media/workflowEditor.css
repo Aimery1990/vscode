@@ -979,6 +979,36 @@
 	z-index: 50 !important;
 }
 
+.workflow-link-label.status-error {
+	border-color: #ef4444 !important;
+	color: #fee2e2 !important;
+	background: rgba(239, 68, 68, 0.25) !important;
+	box-shadow: 0 0 14px rgba(239, 68, 68, 0.55), inset 0 0 6px rgba(239, 68, 68, 0.25) !important;
+	font-weight: 600 !important;
+}
+
+.workflow-link-label.status-passed {
+	border-color: #10b981 !important;
+	color: #d1fae5 !important;
+	background: rgba(16, 185, 129, 0.2) !important;
+	box-shadow: 0 0 10px rgba(16, 185, 129, 0.4) !important;
+}
+
+.workflow-link-label.status-rejected {
+	border-color: rgba(255, 255, 255, 0.2) !important;
+	opacity: 0.65 !important;
+}
+
+.workflow-connection-line.status-error {
+	stroke: #ef4444 !important;
+	stroke-width: 2.5px !important;
+}
+
+.workflow-connection-line.status-passed {
+	stroke: #10b981 !important;
+	stroke-width: 2px !important;
+}
+
 .workflow-link-label-editor {
 	position: absolute;
 	transform: translate(-50%, -50%);

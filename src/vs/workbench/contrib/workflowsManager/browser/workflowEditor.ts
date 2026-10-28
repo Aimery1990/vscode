@@ -608,6 +608,7 @@ export class WorkflowEditor extends EditorPane {
 					requestAnimationFrame(() => {
 						renderPending = false;
 						this._renderNodes();
+						this._drawLinks();
 						if (this._toolbarEl) {
 							this._renderToolbar(this._toolbarEl);
 						}
@@ -6145,7 +6146,8 @@ export class WorkflowEditor extends EditorPane {
 					// Failed Error Interactive Badge
 					const errBadge = append(nodeEl, $('.node-error-badge'));
 					const stepText = nodeRunState.failedStepIndex !== undefined ? ` (Step #${nodeRunState.failedStepIndex + 1})` : '';
-					errBadge.textContent = `[X] Failed${stepText} [View Log]`;
+					const isConditionErr = nodeRunState.error && /condition/i.test(nodeRunState.error);
+					errBadge.textContent = isConditionErr ? '[!] Condition Error [View Log]' : `[X] Failed${stepText} [View Log]`;
 					errBadge.title = nodeRunState.error || 'Click to view execution error log';
 					errBadge.onmousedown = (e) => e.stopPropagation();
 					errBadge.onclick = (e) => {
@@ -9518,9 +9520,23 @@ export class WorkflowEditor extends EditorPane {
 		}, 20);
 	}
 
-	private _renderLinkLabelContent(parent: HTMLElement, rawLabel: string): void {
+	private _renderLinkLabelContent(parent: HTMLElement, rawLabel: string, status?: string): void {
 		clearNode(parent);
 		if (!rawLabel) return;
+
+		if (status === 'error') {
+			const errTag = append(parent, $('span.link-condition-error-tag'));
+			errTag.textContent = '[!] ';
+			errTag.style.color = '#f87171';
+			errTag.style.fontWeight = '700';
+			errTag.style.marginRight = '3px';
+		} else if (status === 'passed') {
+			const okTag = append(parent, $('span.link-condition-passed-tag'));
+			okTag.textContent = '✓ ';
+			okTag.style.color = '#10b981';
+			okTag.style.fontWeight = '700';
+			okTag.style.marginRight = '3px';
+		}
 
 		const knownVars = new Set<string>();
 		for (const n of this._data?.nodes || []) {
@@ -9626,9 +9642,29 @@ export class WorkflowEditor extends EditorPane {
 			const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
 			path.classList.add('workflow-connection-line');
 
+			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+			const linkState = activeRun?.linkStates?.[link.id] || activeRun?.linkStates?.[`${link.from}->${link.to}`];
+
 			// Custom Link Color or Default (match fromNode color / theme)
-			const linkHex = (link.color || '#0d9488').toLowerCase();
+			let linkHex = (link.color || '#0d9488').toLowerCase();
+			if (linkState?.status === 'error') {
+				linkHex = '#ef4444';
+			} else if (linkState?.status === 'passed') {
+				linkHex = '#10b981';
+			}
 			path.style.stroke = linkHex;
+
+			if (linkState?.status === 'error') {
+				path.classList.add('status-error');
+				path.style.stroke = '#ef4444';
+				path.style.strokeWidth = '2.5px';
+			} else if (linkState?.status === 'passed') {
+				path.classList.add('status-passed');
+				path.style.stroke = '#10b981';
+				path.style.strokeWidth = '2px';
+			} else if (linkState?.status === 'rejected') {
+				path.classList.add('status-rejected');
+			}
 
 			// Highlight line if selected
 			const isSelected = this._selectedLinkIds.has(link.id);
@@ -9646,7 +9682,12 @@ export class WorkflowEditor extends EditorPane {
 			// Link Styles markers (Arrow marker endpoint)
 			const validMarkerColors = new Set(['ffffff', '0d9488', '38bdf8', '7c3aed', 'facc15', 'f43f5e']);
 			const hexClean = linkHex.replace('#', '');
-			const markerColorId = isSelected ? 'arrow-selected' : (validMarkerColors.has(hexClean) ? `arrow-${hexClean}` : 'arrow');
+			let markerColorId = isSelected ? 'arrow-selected' : (validMarkerColors.has(hexClean) ? `arrow-${hexClean}` : 'arrow');
+			if (linkState?.status === 'error') {
+				markerColorId = 'arrow-f43f5e';
+			} else if (linkState?.status === 'passed') {
+				markerColorId = 'arrow-0d9488';
+			}
 
 			if (link.style === 'dashed') {
 				path.style.strokeDasharray = '6, 4';
@@ -9714,7 +9755,7 @@ export class WorkflowEditor extends EditorPane {
 				const maxLabelWidth = Math.max(90, Math.min(160, Math.round(linkDist * 0.65)));
 
 				const labelEl = append(this._linkDeletesContainer, $('.workflow-link-label'));
-				this._renderLinkLabelContent(labelEl, link.label);
+				this._renderLinkLabelContent(labelEl, link.label, linkState?.status);
 				labelEl.setAttribute('data-link-id', link.id);
 				labelEl.style.left = `${labelPt.x}px`;
 				labelEl.style.top = `${labelPt.y}px`;
@@ -9722,6 +9763,17 @@ export class WorkflowEditor extends EditorPane {
 				labelEl.title = `${link.label}\n\n• Drag along line to reposition\n• Double-click to edit (Type @ to autocomplete variables)`;
 				if (isSelected) {
 					labelEl.classList.add('selected');
+				}
+
+				if (linkState?.status === 'error') {
+					labelEl.classList.add('status-error');
+					labelEl.title = `[!] Condition Error / Blocked\nCondition: ${link.label}\n${linkState.error ? `Error: ${linkState.error}\n` : ''}${linkState.explanation || 'Execution blocked at this condition.'}`;
+				} else if (linkState?.status === 'passed') {
+					labelEl.classList.add('status-passed');
+					labelEl.title = `[✓] Condition Matched: ${link.label}\n${linkState.explanation || ''}`;
+				} else if (linkState?.status === 'rejected') {
+					labelEl.classList.add('status-rejected');
+					labelEl.title = `[✗] Condition Rejected: ${link.label}\n${linkState.explanation || ''}`;
 				}
 
 				labelEl.onmousedown = (e) => {

@@ -126,9 +126,23 @@ export interface IWorkflowExecutionRun {
 	durationMs?: number;
 	contextVariables: Record<string, any>;
 	nodeStates: Record<string, IWorkflowNodeExecutionState>;
+	linkStates?: Record<string, IWorkflowLinkExecutionState>;
 	executionPath?: IWorkflowPathStep[];
 	logs: IWorkflowLogEntry[];
 	error?: string;
+}
+
+export type WorkflowLinkStatus = 'passed' | 'rejected' | 'error';
+
+export interface IWorkflowLinkExecutionState {
+	linkId?: string;
+	fromNodeId: string;
+	toNodeId: string;
+	status: WorkflowLinkStatus;
+	conditionLabel?: string;
+	evaluationResult?: boolean;
+	error?: string;
+	explanation?: string;
 }
 
 export interface IWorkflowEngineOptions {
