@@ -4,8 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { clearNode, Dimension, h } from '../../../../base/browser/dom.js';
+import { toDisposable } from '../../../../base/common/lifecycle.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
+import { ThemeIcon } from '../../../../base/common/themables.js';
+import { Codicon } from '../../../../base/common/codicons.js';
 import { localize } from '../../../../nls.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
@@ -14,13 +17,15 @@ import { IThemeService } from '../../../../platform/theme/common/themeService.js
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
-import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { URI } from '../../../../base/common/uri.js';
+import { FileAccess } from '../../../../base/common/network.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
-import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { isWindows } from '../../../../base/common/platform.js';
+import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { dirname, basename } from '../../../../base/common/resources.js';
 import { IAgentsManagerService, IAgentItem, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
@@ -31,14 +36,18 @@ import { IInstantiationService } from '../../../../platform/instantiation/common
 
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { parseYaml } from '../../customModules/browser/customModulesService.js';
-import { IActionButton, ICredentialPair, IParameterDefinition } from '../../entityPersistence/common/entityPersistence.js';
+import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
+import { ICustomModulesService } from '../../customModules/common/customModules.js';
+import { IActionButton, ICredentialPair, IParameterDefinition, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
+import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { ITicketWorkflowRuntimeService } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
-import { highlightPythonToHTML, renderHighlightedPythonToDOM } from '../../customModules/browser/pythonSyntaxHighlighter.js';
+import { highlightPythonToHTML, renderHighlightedPythonToDOM, buildPythonLineNumbersText } from '../../customModules/browser/pythonSyntaxHighlighter.js';
+import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
 
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
 	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
@@ -152,6 +161,29 @@ export class EntityDetailEditor extends EditorPane {
 		}
 	};
 
+	private _suppressAutoReloadUntil: number = 0;
+	private _loadSeq: number = 0;
+	private _saveEpoch: number = 0;
+	private _activeSaveCount: number = 0;
+	private _saveChain: Promise<void> = Promise.resolve();
+	private _isEmbeddedInWorkflow: boolean = false;
+	private _onSwitchToFlowchart?: () => void;
+	private _isPreviewMode: boolean = false;
+	private _previewModule?: any;
+	private _previewWorkLog: string = '';
+	private _currentScrollKey: string = '';
+	private _isRestoringScroll: boolean = false;
+	private _userHasScrolledSinceRender: boolean = false;
+	private _isAttributesCollapsed: boolean = (() => {
+		try {
+			return localStorage.getItem('anyagent.ticketDetail.attributesCollapsed') === 'true';
+		} catch {
+			return false;
+		}
+	})();
+	private static readonly _savedScrollByKey = new Map<string, number>();
+	private readonly _outputPaginationState = new Map<string, { page: number; pageSize: number }>();
+
 	constructor(
 		group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
@@ -159,6 +191,7 @@ export class EntityDetailEditor extends EditorPane {
 		@IStorageService private readonly _storageService: IStorageService,
 		@IFileService private readonly _fileService: IFileService,
 		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
+		@IDialogService private readonly _dialogService: IDialogService,
 		@INotificationService private readonly _notificationService: INotificationService,
 		@INativeEnvironmentService private readonly _environmentService: INativeEnvironmentService,
 		@IAgentsManagerService private readonly _agentsManagerService: IAgentsManagerService,
@@ -168,14 +201,65 @@ export class EntityDetailEditor extends EditorPane {
 		@ICommandService private readonly _commandService: ICommandService,
 		@IClipboardService private readonly _clipboardService: IClipboardService,
 		@IQuickInputService private readonly _quickInputService: IQuickInputService,
-		@IRequestService private readonly _requestService: IRequestService
+		@IRequestService private readonly _requestService: IRequestService,
+		@ICustomModulesService private readonly _customModulesService: ICustomModulesService
 	) {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
 
+		this._register(this._customModulesService.onDidChangeModules(() => {
+			if (!this._entityUri || (!this.isVisible() && !this._isEmbeddedInWorkflow)) return;
+			if (this._isPreviewMode && this._previewModule?.id) {
+				this._reloadPreviewModuleFromDisk();
+				return;
+			}
+			if (this._activeSaveCount > 0 || Date.now() < this._suppressAutoReloadUntil) return;
+			const activeEl = document.activeElement as HTMLElement | null;
+			if (activeEl && this._container?.contains(activeEl) && (activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'INPUT')) {
+				return;
+			}
+			this._resolvePathsAndLoadData();
+		}));
+
 		// Auto-reload data when underlying files are modified on disk (by AI or other tools)
 		this._register(this._fileService.onDidFilesChange(e => {
-			if (!this._entityUri || !this.isVisible()) return;
-			if (e.affects(this._entityUri)) {
+			if (!this._entityUri || (!this.isVisible() && !this._isEmbeddedInWorkflow)) return;
+			if (this._activeSaveCount > 0 || Date.now() < this._suppressAutoReloadUntil) return;
+			const isTemplateChanged = e.rawUpdated.some(u => u.path.includes('/entity_type/') || u.path.includes('/entity_types/'));
+			if (this._isPreviewMode && isTemplateChanged && this._previewModule?.id) {
+				this._reloadPreviewModuleFromDisk();
+				return;
+			}
+			const activeEl = document.activeElement as HTMLElement | null;
+			if (activeEl && this._container?.contains(activeEl) && (activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'INPUT')) {
+				return;
+			}
+			if (isTemplateChanged) {
+				this._resolvePathsAndLoadData();
+				return;
+			}
+			if (!e.affects(this._entityUri)) {
+				return;
+			}
+			const entityPathPrefix = this._entityUri.path.replace(/\/+$/, '') + '/';
+			const allChangedUris = [...e.rawAdded, ...e.rawUpdated, ...e.rawDeleted];
+			const relevantMdNames = new Set([
+				'ticket.md', 'workspace.md', 'job.md', 'project.md', 'task.md',
+				'agent.md', 'workflow.md', 'case.md', 'issue.md', 'analysis.md',
+				'readme.md', 'instruction.md', 'worklog.md', 'work_log.md'
+			]);
+			const isRelevantEntityChange = allChangedUris.some(u => {
+				if (!u.path.startsWith(entityPathPrefix)) return false;
+				const rel = u.path.substring(entityPathPrefix.length);
+				if (!rel || rel.includes('/')) {
+					return rel.startsWith('attachments/') || (rel.startsWith('.agents/') && relevantMdNames.has(rel.substring('.agents/'.length).toLowerCase()));
+				}
+				const fileNameLower = rel.toLowerCase();
+				if (fileNameLower.startsWith('.') || fileNameLower.startsWith('run_python_') || fileNameLower.endsWith('.sqlite') || fileNameLower.endsWith('.db') || fileNameLower.endsWith('.sqlite-journal') || fileNameLower.endsWith('.sqlite-wal') || fileNameLower.endsWith('.sqlite-shm')) {
+					return false;
+				}
+				return relevantMdNames.has(fileNameLower);
+			});
+			if (isRelevantEntityChange) {
 				this._resolvePathsAndLoadData();
 			}
 		}));
@@ -183,6 +267,44 @@ export class EntityDetailEditor extends EditorPane {
 
 	public async refresh(): Promise<void> {
 		await this._resolvePathsAndLoadData();
+	}
+
+	public async refreshPreviewModule(mod: any): Promise<void> {
+		this._isPreviewMode = true;
+		this._previewModule = mod;
+		this._lastParsedData = this._buildPreviewParsedData(mod);
+		await this._renderPreviewModeData();
+	}
+
+	public mountEmbeddedInWorkflow(parent: HTMLElement, entityUri: URI, entityName: string, onSwitchToFlowchart?: () => void): void {
+		this._isEmbeddedInWorkflow = true;
+		this._onSwitchToFlowchart = onSwitchToFlowchart;
+		this._entityUri = entityUri;
+		this._entityName = entityName;
+		this._entityType = 'workflow';
+		this.createEditor(parent);
+		if (this._container) {
+			this._container.style.padding = '54px 32px 24px 32px';
+			this._container.style.userSelect = 'none';
+			(this._container.style as any).webkitUserSelect = 'none';
+		}
+	}
+
+	public async updateEmbeddedEntity(entityUri: URI, entityName: string, visible: boolean): Promise<void> {
+		this._entityUri = entityUri;
+		this._entityName = entityName;
+		this._entityType = 'workflow';
+		this._isEmbeddedInWorkflow = visible;
+		if (visible) {
+			await this._resolvePathsAndLoadData();
+		}
+	}
+
+	public setEmbeddedVisible(visible: boolean): void {
+		this._isEmbeddedInWorkflow = visible;
+		if (visible && this._entityUri) {
+			this._resolvePathsAndLoadData();
+		}
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
@@ -195,6 +317,8 @@ export class EntityDetailEditor extends EditorPane {
 		this._container.style.color = 'var(--vscode-editor-foreground)';
 		this._container.style.boxSizing = 'border-box';
 		this._container.style.padding = '24px 32px';
+		this._container.style.userSelect = 'none';
+		(this._container.style as any).webkitUserSelect = 'none';
 		parent.appendChild(this._container);
 
 		this._bindContainerEvents();
@@ -208,31 +332,124 @@ export class EntityDetailEditor extends EditorPane {
 		// Native DOM in _container auto-sizes smoothly.
 	}
 
+	private _getScrollStateKey(): string {
+		if (this._isPreviewMode && this._previewModule) {
+			return `preview::${String(this._previewModule.id || this._previewModule.name || this._entityName || 'default').toLowerCase()}`;
+		}
+		if (this._entityUri) {
+			return `entity::${this._entityUri.toString()}`;
+		}
+		if (this._entityName) {
+			return `name::${this._entityName.toLowerCase()}`;
+		}
+		return '';
+	}
+
+	private _saveCurrentScrollPosition(): void {
+		if (!this._container || this._isRestoringScroll || !this._currentScrollKey || this._container.clientHeight <= 0) {
+			return;
+		}
+		const top = this._container.scrollTop;
+		EntityDetailEditor._savedScrollByKey.set(this._currentScrollKey, top);
+		try {
+			this._storageService.store(`entityDetailEditor.scroll.${this._currentScrollKey}`, String(top), StorageScope.PROFILE, StorageTarget.MACHINE);
+		} catch {}
+	}
+
+	private _getSavedScrollTop(key: string): number {
+		if (!key) {
+			return 0;
+		}
+		const cached = EntityDetailEditor._savedScrollByKey.get(key);
+		if (typeof cached === 'number') {
+			return cached;
+		}
+		try {
+			const raw = this._storageService.get(`entityDetailEditor.scroll.${key}`, StorageScope.PROFILE);
+			if (raw !== undefined) {
+				const parsed = Number(raw);
+				if (!isNaN(parsed) && parsed >= 0) {
+					EntityDetailEditor._savedScrollByKey.set(key, parsed);
+					return parsed;
+				}
+			}
+		} catch {}
+		return 0;
+	}
+
+	private _applySavedScrollPosition(key: string): void {
+		if (!this._container || this._userHasScrolledSinceRender || this._currentScrollKey !== key) {
+			this._isRestoringScroll = false;
+			return;
+		}
+		const targetTop = this._getSavedScrollTop(key);
+		if (targetTop > 0) {
+			this._isRestoringScroll = true;
+			this._container.scrollTop = targetTop;
+			requestAnimationFrame(() => {
+				if (this._container && !this._userHasScrolledSinceRender && this._currentScrollKey === key) {
+					this._container.scrollTop = targetTop;
+				}
+				this._isRestoringScroll = false;
+			});
+		} else {
+			this._isRestoringScroll = false;
+		}
+	}
+
 	override async setInput(input: EntityDetailEditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
+		this._saveCurrentScrollPosition();
 		await super.setInput(input, options, context, token);
 
 		this._entityUri = input.entityUri;
 		this._entityName = input.entityName;
+		this._isPreviewMode = !!input.previewModule;
+		this._previewModule = input.previewModule;
+		if (this._isPreviewMode) {
+			this._ticketFileUri = undefined;
+			this._instructionUri = undefined;
+			this._readmeUri = undefined;
+			this._workLogUri = undefined;
+			this._lastParsedData = undefined;
+			this._previewWorkLog = '';
+		}
 
 		await this._resolvePathsAndLoadData();
 	}
 
 	override clearInput(): void {
+		this._saveCurrentScrollPosition();
+		this._disposeMediaCleanupFns();
 		if (this._container) {
 			clearNode(this._container);
 		}
 		this._entityUri = undefined;
+		this._isPreviewMode = false;
+		this._previewModule = undefined;
+		this._previewWorkLog = '';
 		this._lastParsedData = undefined;
 		this._lastCustomModule = undefined;
 		super.clearInput();
 	}
 
 	override dispose(): void {
+		this._disposeMediaCleanupFns();
 		if (this._container) {
 			clearNode(this._container);
 			this._container = undefined;
 		}
 		super.dispose();
+	}
+
+	private _mediaCleanupFns: Array<() => void> = [];
+
+	private _disposeMediaCleanupFns(): void {
+		while (this._mediaCleanupFns.length > 0) {
+			const fn = this._mediaCleanupFns.pop();
+			try {
+				fn?.();
+			} catch {}
+		}
 	}
 
 	private _setElementHTML(element: HTMLElement, html: string): void {
@@ -259,8 +476,11 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	override setEditorVisible(visible: boolean): void {
+		if (!visible) {
+			this._saveCurrentScrollPosition();
+		}
 		super.setEditorVisible(visible);
-		if (visible && this._entityUri) {
+		if (visible && this._entityUri && this._container && this._container.childElementCount === 0) {
 			this._resolvePathsAndLoadData();
 		}
 	}
@@ -269,8 +489,8 @@ export class EntityDetailEditor extends EditorPane {
 		const targetId = (typeId || '').trim().toLowerCase();
 		if (!targetId) return null;
 
-		// Fast-bail for built-in system types to avoid redundant disk scans
-		const builtInTypes = new Set(['workspace', 'job', 'task', 'project', 'workflow', 'agent', 'case', 'issue', 'analysis']);
+		// Fast-bail only for non-customizable container/file types
+		const builtInTypes = new Set(['workspace', 'folder', 'file']);
 		if (builtInTypes.has(targetId)) {
 			return null;
 		}
@@ -337,10 +557,282 @@ export class EntityDetailEditor extends EditorPane {
 		return parseYaml(yaml);
 	}
 
+	private async _reloadPreviewModuleFromDisk(): Promise<void> {
+		if (!this._isPreviewMode || !this._previewModule?.id) {
+			return;
+		}
+		try {
+			const fallbackUri = this._entityUri || URI.file(this._environmentService.userHome.fsPath);
+			const freshMod = await this._readCustomModule(fallbackUri, this._previewModule.id);
+			if (freshMod) {
+				this._previewModule = freshMod;
+				this._lastParsedData = this._buildPreviewParsedData(freshMod);
+				await this._renderPreviewModeData();
+			}
+		} catch {}
+	}
+
+	private _buildPreviewParsedData(mod: any): IParsedTicketData {
+		const modId = String(mod?.id || 'preview');
+		const modName = String(mod?.name || modId);
+		const fields: any[] = Array.isArray(mod?.fields) ? mod.fields : [];
+
+		const titleField = fields.find(f => (f.id || '').toLowerCase() === 'title' || (f.label || '').toLowerCase() === 'title');
+		const descField = fields.find(f => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description');
+
+		const title = (titleField?.defaultContent && String(titleField.defaultContent).trim())
+			? String(titleField.defaultContent).trim()
+			: `Sample ${modName} Ticket`;
+		const description = (descField?.defaultContent && String(descField.defaultContent).trim())
+			? String(descField.defaultContent).trim()
+			: (mod?.description || `This is an interactive live preview of a ticket generated from the **${modName}** template.`);
+
+		const rawCode = modId.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5) || 'PREV';
+		const ticketId = `${rawCode}-0001`;
+		const initialStatus = (Array.isArray(mod?.statuses) && mod.statuses.length > 0)
+			? (mod.statuses[0].label || mod.statuses[0].id || 'Todo')
+			: 'Todo';
+
+		const customMetadata: { [key: string]: string } = {};
+		let gitRemoteUrl = '';
+		let gitBranch = '';
+
+		const todayStr = new Date().toISOString().split('T')[0];
+
+		for (const f of fields) {
+			const fKey = f.id || f.label || '';
+			const fLabel = f.label || f.id || '';
+			if (!fLabel || fKey.toLowerCase() === 'title' || fLabel.toLowerCase() === 'title' || fKey.toLowerCase() === 'description' || fLabel.toLowerCase() === 'description') {
+				continue;
+			}
+			const fType = f.type || 'text';
+			if (fType === 'switch' || fType === 'boolean') {
+				customMetadata[fLabel] = f.defaultContent === 'true' ? 'true' : 'false';
+			} else if (fType === 'select' || fType === 'single_select') {
+				customMetadata[fLabel] = f.defaultContent || (Array.isArray(f.options) && f.options.length > 0 ? String(f.options[0]) : '');
+			} else if (fType === 'multiselect' || fType === 'tags') {
+				customMetadata[fLabel] = f.defaultContent || (Array.isArray(f.options) && f.options.length > 0 ? JSON.stringify([f.options[0]]) : '[]');
+			} else if (fType === 'number') {
+				customMetadata[fLabel] = (f.defaultContent !== undefined && f.defaultContent !== '') ? String(f.defaultContent) : '100';
+			} else if (fType === 'date') {
+				customMetadata[fLabel] = f.defaultContent || todayStr;
+			} else if (fType === 'time') {
+				customMetadata[fLabel] = f.defaultContent || '09:00';
+			} else if (fType === 'datetime') {
+				customMetadata[fLabel] = f.defaultContent || `${todayStr} 09:00`;
+			} else if (fType === 'date_range' || fType === 'time_range' || fType === 'datetime_range') {
+				customMetadata[fLabel] = f.defaultContent || `${todayStr} ~ ${todayStr}`;
+			} else if (fType === 'parameters') {
+				const paramObj: Record<string, string> = {};
+				if (Array.isArray(f.parameters)) {
+					for (const p of f.parameters) {
+						const pKey = p.name || p.id;
+						if (pKey) {
+							paramObj[pKey] = p.defaultValue || '';
+						}
+					}
+				}
+				customMetadata[fLabel] = JSON.stringify(paramObj);
+			} else if (fType === 'browser') {
+				customMetadata[fLabel] = JSON.stringify({
+					url: f.defaultUrl || '',
+					credentials: Array.isArray(f.credentials) ? f.credentials : [],
+					content: f.defaultContent || '',
+					lastFetched: ''
+				});
+			} else if (fType === 'prompt') {
+				customMetadata[fLabel] = JSON.stringify({
+					targetMode: f.targetMode || 'model',
+					targetProvider: f.targetProvider || 'gemini',
+					targetModel: f.targetModel || 'gemini-1.5-flash',
+					targetCredentialId: f.targetCredentialId || '',
+					targetAgentId: f.targetAgentId || '',
+					targetAgentName: f.targetAgentName || '',
+					preInjectedPrompt: f.defaultContent || '',
+					promptPreInjectedVisible: !!f.promptPreInjectedVisible,
+					userPrompt: f.defaultUserPrompt || '',
+					prompt: f.defaultUserPrompt || '',
+					output: f.debugPromptOutput || '',
+					lastExecuted: ''
+				});
+			} else if (fType === 'python') {
+				customMetadata[fLabel] = JSON.stringify({
+					pythonInterpreter: f.pythonInterpreter || '',
+					code: f.pythonCode || '',
+					output: f.pythonOutput || '',
+					result: f.pythonResult,
+					externalScripts: Array.isArray(f.pythonExternalScripts) ? f.pythonExternalScripts : []
+				});
+			} else if (fType === 'tts') {
+				customMetadata[fLabel] = JSON.stringify({
+					text: f.defaultContent || '',
+					displayText: f.ttsDisplayText || '',
+					ttsShowSpeechTextInTicket: !!f.ttsShowSpeechTextInTicket,
+					targetProvider: f.targetProvider || 'gemini',
+					targetModel: f.targetModel || 'gemini-2.5-flash-preview-tts',
+					targetCredentialId: f.targetCredentialId || '',
+					ttsFormat: f.ttsFormat || 'mp3',
+					ttsVoice: f.ttsVoice || 'Kore',
+					ttsAutoPlay: !!f.ttsAutoPlay
+				});
+			} else if (fType === 'media_player') {
+				customMetadata[fLabel] = JSON.stringify({
+					mediaFilePath: f.mediaFilePath || '',
+					mediaFileName: f.mediaFileName || '',
+					mediaKind: f.mediaKind || 'audio',
+					mediaMimeType: f.mediaMimeType || '',
+					mediaPlaybackRate: typeof f.mediaPlaybackRate === 'number' ? f.mediaPlaybackRate : 1.0,
+					mediaAutoPlay: !!f.mediaAutoPlay
+				});
+			} else if (fType === 'table') {
+				const isBoundSqlite = (f.tableDbEngine || 'sqlite') === 'sqlite' && Boolean(f.tableDbPath && f.tableDbPath.trim());
+				customMetadata[fLabel] = JSON.stringify({
+					columns: Array.isArray(f.tableColumns) ? f.tableColumns : [],
+					rows: !isBoundSqlite && Array.isArray(f.tableRows) ? f.tableRows : [],
+					dbEngine: f.tableDbEngine || 'sqlite',
+					dbPath: f.tableDbPath || '',
+					tableName: f.tableDbTableName || fLabel.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+					autoSyncDb: Boolean(f.tableAutoSyncDb),
+					sqlQuery: f.tableSqlQuery || '',
+					sqlOutput: f.debugSqlOutput || ''
+				});
+			} else if (fType === 'git') {
+				gitRemoteUrl = f.gitRemoteUrl || '';
+				gitBranch = f.gitBranch || 'main';
+			} else {
+				customMetadata[fLabel] = f.defaultContent || '';
+			}
+		}
+
+		const nowFormatted = `${todayStr} ${new Date().toTimeString().split(' ')[0].substring(0, 5)}`;
+		const typeDefPath = mod?.storageScope === 'workspace'
+			? `.agents/entity_type/${modId}.yaml`
+			: `~/.anyagent/entity_type/${modId}.yaml`;
+
+		return {
+			title,
+			description,
+			ticketType: modId,
+			ticketId,
+			workspaceId: 'PREVIEW-0000',
+			ticketCode: rawCode,
+			status: initialStatus,
+			priority: 'Medium',
+			assignedAgentName: 'None',
+			typeDefinition: typeDefPath,
+			typePrompt: mod?.prompt || 'None',
+			ticketPrompt: 'Preview mode: instance-specific ticket prompt rules will appear here.',
+			createdBy: 'Template Designer (Preview)',
+			ownerAccount: 'Preview Mode',
+			createdAt: nowFormatted,
+			lastUpdatedAt: nowFormatted,
+			lastUpdatedBy: 'Template Designer',
+			linkTo: 'None',
+			linkedBy: 'None',
+			gitRemoteUrl,
+			gitBranch,
+			localPath: '',
+			customMetadata,
+			metadata: {
+				'Ticket Type Prompt': mod?.prompt || ''
+			},
+			readmeNotes: '',
+			instructionNotes: '',
+			breadcrumbSegments: [
+				{ label: 'Custom Modules (Preview)' },
+				{ label: modName },
+				{ label: ticketId }
+			]
+		};
+	}
+
+	private async _renderPreviewModeData(): Promise<void> {
+		if (!this._container || !this._previewModule) {
+			return;
+		}
+		const mod = this._previewModule;
+		this._lastCustomModule = mod;
+		this._entityType = mod.id || 'task';
+
+		if (!this._lastParsedData) {
+			this._lastParsedData = this._buildPreviewParsedData(mod);
+		}
+
+		if (Array.isArray(mod.statuses) && mod.statuses.length > 0) {
+			const stNames = mod.statuses.map((s: any) => s.label || s.id);
+			const mapping: { [status: string]: 'Todo' | 'In Progress' | 'Done' | 'Blocked' | 'Removed' } = {};
+			for (const s of mod.statuses) {
+				const stLabel = s.label || s.id;
+				mapping[stLabel] = s.category || 'Todo';
+			}
+			this._workspaceStatuses = {
+				statuses: stNames,
+				mapping,
+				removedStatus: stNames.find((st: string) => mapping[st] === 'Removed') || 'Removed',
+				initialStatus: stNames[0] || 'Todo',
+				getCategory: (st?: string) => {
+					if (!st) return 'Todo';
+					return mapping[st] || 'Todo';
+				}
+			};
+		}
+
+		const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
+		const allTickets = await this._loadAllAvailableTickets();
+		const workLogContent = this._previewWorkLog || `## ${new Date().toISOString().split('T')[0]} ${new Date().toTimeString().split(' ')[0].substring(0, 5)}\n\n### Template Preview Initialized\n\n- **Template**: \`${mod.name || mod.id}\`\n- **Fields Configured**: ${Array.isArray(mod.fields) ? mod.fields.length : 0}\n- **Status Stages**: ${Array.isArray(mod.statuses) ? mod.statuses.map((s: any) => s.label || s.id).join(' -> ') : 'Default'}\n`;
+
+		const scrollKey = this._getScrollStateKey();
+		if (this._currentScrollKey === scrollKey && this._container.clientHeight > 0 && !this._isRestoringScroll) {
+			this._saveCurrentScrollPosition();
+		}
+		this._currentScrollKey = scrollKey;
+		this._userHasScrolledSinceRender = false;
+		this._isRestoringScroll = true;
+
+		const html = this._generateHtml(this._lastParsedData, workLogContent, [], mod, agents, allTickets);
+		this._disposeMediaCleanupFns();
+		this._setElementHTML(this._container, html);
+		this._applySavedScrollPosition(scrollKey);
+		this._hydratePythonPrimitiveCards();
+		await this._hydratePromptPrimitiveCards();
+		await this._hydrateTtsPrimitiveCards();
+		await this._hydrateMediaPlayerPrimitiveCards();
+		await this._hydrateTablePrimitiveCards();
+		this._applySavedScrollPosition(scrollKey);
+		setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
+
+		const directInfoBtn = this._container.querySelector('#status-lifecycle-info-btn') as HTMLElement | null;
+		const popoverEl = this._container.querySelector('#status-lifecycle-popover') as HTMLElement | null;
+		const closePopoverBtn = this._container.querySelector('#close-status-lifecycle-popover-btn') as HTMLElement | null;
+		if (directInfoBtn && popoverEl) {
+			directInfoBtn.onclick = (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				const isHidden = popoverEl.style.display === 'none' || !popoverEl.style.display;
+				popoverEl.style.display = isHidden ? 'flex' : 'none';
+			};
+		}
+		if (closePopoverBtn && popoverEl) {
+			closePopoverBtn.onclick = (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				popoverEl.style.display = 'none';
+			};
+		}
+	}
+
 	private async _resolvePathsAndLoadData(): Promise<void> {
 		if (!this._entityUri || !this._container) {
 			return;
 		}
+
+		if (this._isPreviewMode && this._previewModule) {
+			await this._renderPreviewModeData();
+			return;
+		}
+
+		const loadSeq = ++this._loadSeq;
+		const startSaveEpoch = this._saveEpoch;
 
 		try {
 			// 1. Resolve 4-MD file paths (robust checking of workspace.md/ticket.md, .agents and root)
@@ -419,6 +911,10 @@ export class EntityDetailEditor extends EditorPane {
 			parsed.gitRemoteUrl = gitRemoteUrl;
 			parsed.gitBranch = gitBranch;
 
+			if (loadSeq !== this._loadSeq || startSaveEpoch !== this._saveEpoch) {
+				return;
+			}
+
 			this._lastParsedData = parsed;
 			this._entityType = parsed.ticketType || 'task';
 
@@ -432,17 +928,35 @@ export class EntityDetailEditor extends EditorPane {
 			const customModule = await this._readCustomModule(this._entityUri, this._entityType);
 			this._lastCustomModule = customModule;
 
-			// If customModule exists, prune empty deleted fields from customMetadata so stale schemas do not linger
+			// If customModule exists, migrate/prune legacy ID keys (e.g. "Output 1" -> "Output") and empty deleted fields from customMetadata
 			if (customModule && Array.isArray(customModule.fields) && parsed.customMetadata) {
 				const validKeys = new Set<string>();
 				for (const f of customModule.fields) {
-					if (f.label) validKeys.add(f.label.toLowerCase());
-					if (f.id) validKeys.add(f.id.toLowerCase());
+					const fLabel = f.label || f.id;
+					const fId = f.id || f.label;
+					if (fLabel) {
+						validKeys.add(fLabel.toLowerCase());
+						validKeys.add(fLabel.toLowerCase().replace(/_/g, ' '));
+					}
+					if (fId && fLabel && fId.toLowerCase().replace(/_/g, ' ') !== fLabel.toLowerCase().replace(/_/g, ' ')) {
+						// Check if customMetadata has a legacy key matching fId or fId with spaces (e.g. "output_1" or "Output 1")
+						for (const existingKey of Object.keys(parsed.customMetadata)) {
+							const ekLower = existingKey.toLowerCase();
+							if (ekLower === fId.toLowerCase() || ekLower.replace(/_/g, ' ') === fId.toLowerCase().replace(/_/g, ' ')) {
+								if (parsed.customMetadata[fLabel] === undefined) {
+									parsed.customMetadata[fLabel] = parsed.customMetadata[existingKey];
+								}
+								delete parsed.customMetadata[existingKey];
+							}
+						}
+					}
 				}
+				delete parsed.customMetadata['outputSpecs'];
+				delete parsed.customMetadata['output_specs'];
 				const internalLifecycleKeys = ['ticket statuses', 'status mapping', 'removed status', 'git remote url', 'git branch'];
 				for (const k of Object.keys(parsed.customMetadata)) {
 					if (internalLifecycleKeys.includes(k.toLowerCase())) continue;
-					if (!validKeys.has(k.toLowerCase())) {
+					if (!validKeys.has(k.toLowerCase()) && !validKeys.has(k.toLowerCase().replace(/_/g, ' '))) {
 						const val = parsed.customMetadata[k];
 						const isEmpty = val === undefined || val === null || String(val).trim() === '' || String(val).trim() === '[]' || String(val).trim() === '{}';
 						if (isEmpty) {
@@ -482,9 +996,30 @@ export class EntityDetailEditor extends EditorPane {
 			} catch {}
 			parsed.breadcrumbSegments = breadcrumbSegments;
 
+			if (loadSeq !== this._loadSeq || startSaveEpoch !== this._saveEpoch || !this._container) {
+				return;
+			}
+
 			// 3. Render directly into this._container as native high-performance DOM
+			const scrollKey = this._getScrollStateKey();
+			if (this._currentScrollKey === scrollKey && this._container.clientHeight > 0 && !this._isRestoringScroll) {
+				this._saveCurrentScrollPosition();
+			}
+			this._currentScrollKey = scrollKey;
+			this._userHasScrolledSinceRender = false;
+			this._isRestoringScroll = true;
+
 			const html = this._generateHtml(parsed, workLogContent, attachments, customModule, agents, allTickets);
+			this._disposeMediaCleanupFns();
 			this._setElementHTML(this._container, html);
+			this._applySavedScrollPosition(scrollKey);
+			this._hydratePythonPrimitiveCards();
+			await this._hydratePromptPrimitiveCards();
+			await this._hydrateTtsPrimitiveCards();
+			await this._hydrateMediaPlayerPrimitiveCards();
+			await this._hydrateTablePrimitiveCards();
+			this._applySavedScrollPosition(scrollKey);
+			setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
 			// 4. Attach direct click handlers for key interactive elements
 			const directInfoBtn = this._container.querySelector('#status-lifecycle-info-btn') as HTMLElement | null;
@@ -536,6 +1071,141 @@ export class EntityDetailEditor extends EditorPane {
 	private _bindContainerEvents(): void {
 		if (!this._container) return;
 
+		const markUserManualScroll = () => {
+			this._userHasScrolledSinceRender = true;
+			this._isRestoringScroll = false;
+		};
+		for (const evtName of ['wheel', 'touchmove', 'pointerdown', 'keydown'] as const) {
+			this._container.addEventListener(evtName, markUserManualScroll, { passive: true });
+		}
+		this._container.addEventListener('scroll', () => {
+			if (this._isRestoringScroll || !this._container || this._container.clientHeight <= 0) {
+				return;
+			}
+			const key = this._currentScrollKey || this._getScrollStateKey();
+			if (key) {
+				const top = this._container.scrollTop;
+				EntityDetailEditor._savedScrollByKey.set(key, top);
+				try {
+					this._storageService.store(`entityDetailEditor.scroll.${key}`, String(top), StorageScope.PROFILE, StorageTarget.MACHINE);
+				} catch {}
+			}
+		}, { passive: true });
+
+		this._container.addEventListener('mousedown', (e: MouseEvent) => {
+			const target = e.target as HTMLElement | null;
+			if (!target) {
+				return;
+			}
+
+			// Prevent chip buttons from stealing focus or resetting selection in textareas/inputs
+			const chipBtn = target.closest('.prompt-insert-ctx-chip, .prompt-ctx-more-btn, .browser-insert-ctx-chip, .python-insert-ctx-chip, .python-ctx-more-btn, .python-copy-code-btn, .python-paste-code-btn, .python-lock-code-btn, .tts-insert-ctx-chip') as HTMLElement | null;
+			if (chipBtn) {
+				const itemEl = chipBtn.closest('.prompt-user-input-item') as HTMLElement | null;
+				const cardEl = chipBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				const ta = (itemEl?.querySelector('.prompt-instruction-textarea') || cardEl?.querySelector('.prompt-instruction-textarea')) as HTMLTextAreaElement | null;
+				if (ta && ta.style.display !== 'none' && typeof ta.selectionStart === 'number') {
+					ta.setAttribute('data-last-selection-start', String(ta.selectionStart));
+					ta.setAttribute('data-last-selection-end', String(typeof ta.selectionEnd === 'number' ? ta.selectionEnd : ta.selectionStart));
+				}
+				e.preventDefault();
+				return;
+			}
+		});
+
+		const extractSelectedTextPreservingTokens = (): string => {
+			const sel = window.getSelection();
+			if (!sel || sel.rangeCount === 0) {
+				return '';
+			}
+			const range = sel.getRangeAt(0);
+			const commonEl = (range.commonAncestorContainer instanceof HTMLElement
+				? range.commonAncestorContainer
+				: range.commonAncestorContainer.parentElement) as HTMLElement | null;
+			const displayEl = commonEl?.closest('.prompt-tokenized-display') as HTMLElement | null;
+			if (displayEl && this._container && this._container.contains(displayEl)) {
+				const ta = displayEl.parentElement?.querySelector('textarea') as HTMLTextAreaElement | null;
+				if (ta && typeof ta.value === 'string' && ta.value.length > 0) {
+					const resolveRawOffset = (container: Node, offset: number, isEnd: boolean): number | undefined => {
+						if (container === displayEl) {
+							if (offset <= 0) {
+								return 0;
+							}
+							if (offset >= displayEl.childNodes.length) {
+								return ta.value.length;
+							}
+							const child = displayEl.childNodes[isEnd ? offset - 1 : offset] as HTMLElement | undefined;
+							if (child && child instanceof HTMLElement) {
+								const attr = isEnd ? child.getAttribute('data-raw-end') : child.getAttribute('data-raw-start');
+								if (attr !== null && !isNaN(Number(attr))) {
+									return Number(attr);
+								}
+							}
+							return undefined;
+						}
+						let node: Node | null = container;
+						while (node && node !== displayEl) {
+							if (node instanceof HTMLElement) {
+								if (node.classList.contains('prompt-token-pill')) {
+									const rawPos = Number(node.getAttribute(isEnd ? 'data-raw-end' : 'data-raw-start'));
+									return !isNaN(rawPos) ? rawPos : undefined;
+								}
+								if (node.classList.contains('prompt-raw-segment')) {
+									const segStart = Number(node.getAttribute('data-raw-start'));
+									if (!isNaN(segStart)) {
+										return segStart + offset;
+									}
+								}
+							}
+							node = node.parentNode;
+						}
+						return undefined;
+					};
+					const rawStart = resolveRawOffset(range.startContainer, range.startOffset, false);
+					const rawEnd = resolveRawOffset(range.endContainer, range.endOffset, true);
+					if (typeof rawStart === 'number' && typeof rawEnd === 'number' && rawEnd > rawStart) {
+						return ta.value.substring(rawStart, rawEnd);
+					}
+				}
+			}
+			return sel.toString();
+		};
+
+		// Ensure Cmd+C / Ctrl+C and native copy work for selected text inside locked prompt boxes, AI output boxes, and read-only blocks
+		this._container.addEventListener('keydown', (e: KeyboardEvent) => {
+			if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'c') {
+				const activeEl = document.activeElement as HTMLElement | null;
+				if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+					const inputEl = activeEl as HTMLInputElement | HTMLTextAreaElement;
+					if (typeof inputEl.selectionStart === 'number' && typeof inputEl.selectionEnd === 'number' && inputEl.selectionStart !== inputEl.selectionEnd) {
+						return;
+					}
+				}
+				const sel = window.getSelection();
+				const selectedText = extractSelectedTextPreservingTokens();
+				if (selectedText && this._container && sel?.anchorNode && this._container.contains(sel.anchorNode)) {
+					e.stopPropagation();
+					this._clipboardService.writeText(selectedText);
+				}
+			}
+		});
+
+		this._container.addEventListener('copy', (e: ClipboardEvent) => {
+			const activeEl = document.activeElement as HTMLElement | null;
+			if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+				return;
+			}
+			const sel = window.getSelection();
+			const selectedText = extractSelectedTextPreservingTokens();
+			if (selectedText && this._container && sel?.anchorNode && this._container.contains(sel.anchorNode)) {
+				if (e.clipboardData) {
+					e.clipboardData.setData('text/plain', selectedText);
+					e.preventDefault();
+				}
+				this._clipboardService.writeText(selectedText);
+			}
+		});
+
 		this._container.addEventListener('click', async (e: MouseEvent) => {
 			const target = e.target as HTMLElement | null;
 			if (!target) return;
@@ -544,8 +1214,74 @@ export class EntityDetailEditor extends EditorPane {
 			if (target.id === 'entity-detail-refresh-btn' || target.closest('#entity-detail-refresh-btn')) {
 				e.preventDefault();
 				e.stopPropagation();
+				if (this._isPreviewMode) {
+					await this._reloadPreviewModuleFromDisk();
+					await this._resolvePathsAndLoadData();
+					this._notificationService.info(`Refreshed template preview for '${this._previewModule?.name || this._entityName || 'ticket'}'.`);
+					return;
+				}
 				await this._resolvePathsAndLoadData();
 				this._notificationService.info(`Refreshed ticket data for '${this._entityName || 'ticket'}'.`);
+				return;
+			}
+
+			// 0.005 Toggle Attributes Sidebar Panel (Collapse / Expand)
+			if (target.closest('.toggle-attributes-panel-btn')) {
+				e.preventDefault();
+				e.stopPropagation();
+				this._isAttributesCollapsed = !this._isAttributesCollapsed;
+				try {
+					localStorage.setItem('anyagent.ticketDetail.attributesCollapsed', this._isAttributesCollapsed ? 'true' : 'false');
+				} catch {}
+				if (this._container) {
+					const layoutEl = this._container.querySelector('.layout-container') as HTMLElement | null;
+					if (layoutEl) {
+						layoutEl.classList.toggle('attributes-collapsed', this._isAttributesCollapsed);
+					}
+					const headerToggleBtn = this._container.querySelector('#entity-detail-toggle-attributes-btn') as HTMLElement | null;
+					if (headerToggleBtn) {
+						headerToggleBtn.title = this._isAttributesCollapsed ? 'Show Attributes Panel' : 'Hide Attributes Panel';
+						headerToggleBtn.style.background = this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.06)';
+						headerToggleBtn.style.borderColor = this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.4)' : 'rgba(255, 255, 255, 0.1)';
+						headerToggleBtn.style.color = this._isAttributesCollapsed ? '#38bdf8' : 'var(--vscode-foreground)';
+					}
+				}
+				return;
+			}
+
+			// 0.01 Preview Mode: Reset Defaults & Edit Schema buttons
+			if (target.id === 'preview-reset-btn' || target.closest('#preview-reset-btn')) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (this._isPreviewMode && this._previewModule) {
+					this._lastParsedData = this._buildPreviewParsedData(this._previewModule);
+					this._previewWorkLog = '';
+					await this._renderPreviewModeData();
+					this._notificationService.info('Preview reset to template default values.');
+				}
+				return;
+			}
+
+			if (target.id === 'preview-edit-schema-btn' || target.closest('#preview-edit-schema-btn') || target.closest('.preview-edit-schema-trigger')) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (this._previewModule) {
+					const modId = this._previewModule.id || this._entityName;
+					const modName = this._previewModule.name || modId;
+					await this._editorService.openEditor(new CustomModuleSchemaEditorInput(modId, modName, this._entityUri), { pinned: true });
+				}
+				return;
+			}
+
+			// 0.02 Switch to Workflow Flowchart Button click
+			if (target.id === 'entity-detail-switch-flowchart-btn' || target.closest('#entity-detail-switch-flowchart-btn')) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (this._onSwitchToFlowchart) {
+					this._onSwitchToFlowchart();
+				} else if (this._entityUri) {
+					await this._editorService.openEditor(new WorkflowEditorInput(this._entityUri, this._entityName || 'Workflow'), { pinned: true });
+				}
 				return;
 			}
 
@@ -654,9 +1390,9 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = clearContentBtn.getAttribute('data-field-key') || '';
 				const card = clearContentBtn.closest('.browser-primitive-card') as HTMLElement | null;
 				if (card) {
-					const contentEl = card.querySelector('.browser-content-display');
+					const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
 					if (contentEl) {
-						contentEl.innerHTML = '<span style="opacity: 0.4; font-style: italic;">No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to extract page contents.</span>';
+						this._setElementHTML(contentEl, '<span style="opacity: 0.4; font-style: italic;">No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to extract page contents.</span>');
 					}
 					const statusEl = card.querySelector('.browser-fetch-status') as HTMLElement | null;
 					if (statusEl) {
@@ -704,10 +1440,10 @@ export class EntityDetailEditor extends EditorPane {
 				const card = newTabBtn.closest('.browser-primitive-card') as HTMLElement | null;
 				const urlInput = card?.querySelector('.browser-url-input') as HTMLInputElement | null;
 				let url = urlInput?.value.trim() || 'https://www.google.com';
+				url = this._interpolateParameters(url);
 				if (!/^https?:\/\//i.test(url)) {
 					url = 'https://' + url;
 				}
-				url = this._interpolateParameters(url);
 				try {
 					const uri = URI.parse(url);
 					await this._commandService.executeCommand('simpleBrowser.api.open', uri, {
@@ -720,6 +1456,50 @@ export class EntityDetailEditor extends EditorPane {
 					} catch (err) {
 						console.error('Failed to open simpleBrowser:', err);
 					}
+				}
+				return;
+			}
+
+			// 0.166 Browser Insert Output Chip click
+			const insertBrowserChip = target.closest('.browser-insert-ctx-chip') as HTMLElement | null;
+			if (insertBrowserChip) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = insertBrowserChip.closest('.browser-primitive-card') as HTMLElement | null;
+				const urlInput = card?.querySelector('.browser-url-input') as HTMLInputElement | null;
+				const textToInsert = insertBrowserChip.getAttribute('data-insert') || '';
+				if (urlInput && textToInsert) {
+					const start = urlInput.selectionStart ?? urlInput.value.length;
+					const end = urlInput.selectionEnd ?? urlInput.value.length;
+					urlInput.value = urlInput.value.substring(0, start) + textToInsert + urlInput.value.substring(end);
+					urlInput.selectionStart = urlInput.selectionEnd = start + textToInsert.length;
+					urlInput.focus();
+					const fieldKey = insertBrowserChip.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
+					if (fieldKey && card) {
+						const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
+						const statusEl = card.querySelector('.browser-fetch-status') as HTMLElement | null;
+						let existingContent = contentEl?.textContent || '';
+						if (existingContent.includes('No webpage content extracted yet.')) {
+							existingContent = '';
+						}
+						await this._saveBrowserPrimitiveData(fieldKey, urlInput.value.trim(), existingContent, statusEl?.textContent || '');
+					}
+				}
+				return;
+			}
+
+			// 0.167 Browser Insert Output More / Less toggle
+			const moreBrowserCtxBtn = target.closest('.browser-ctx-more-btn') as HTMLElement | null;
+			if (moreBrowserCtxBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const bar = moreBrowserCtxBtn.closest('.browser-ctx-chips-bar') as HTMLElement | null;
+				const hiddenGroup = bar?.querySelector('.browser-ctx-hidden-group') as HTMLElement | null;
+				if (hiddenGroup) {
+					const isHidden = hiddenGroup.style.display === 'none';
+					hiddenGroup.style.display = isHidden ? 'contents' : 'none';
+					const remainingCount = moreBrowserCtxBtn.getAttribute('data-count') || '';
+					moreBrowserCtxBtn.textContent = isHidden ? 'Less' : `+${remainingCount} More...`;
 				}
 				return;
 			}
@@ -798,14 +1578,16 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const fieldKey = openCentralBtn.getAttribute('data-field-key') || '';
 				const card = openCentralBtn.closest('.prompt-primitive-card') as HTMLElement | null;
-				const textarea = card?.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
-				const promptVal = textarea?.value.trim() || '';
+				const resolved = card
+					? this._resolveCombinedPromptFromCard(card)
+					: { preInjectedPrompt: '', userPrompt: '', combinedRawPrompt: '', interpolatedPrompt: '' };
 				await this._handleMessage({
 					type: 'openAgentCentral',
 					field: `/Custom/${fieldKey}`,
 					fieldType: 'prompt',
 					label: fieldKey,
-					currentValue: promptVal,
+					currentValue: resolved.userPrompt,
+					preInjectedPrompt: this._interpolateParameters(resolved.preInjectedPrompt),
 					options: [],
 					source: `/Custom/${fieldKey}`
 				});
@@ -826,15 +1608,30 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// 0.445 Prompt Primitive: Inspect Full Sent Prompt (Structured Breakdown & Raw Payload)
+			const inspectSentPromptBtn = target.closest('.prompt-inspect-sent-btn') as HTMLElement | null;
+			if (inspectSentPromptBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = inspectSentPromptBtn.getAttribute('data-field-key') || '';
+				const card = inspectSentPromptBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card) {
+					this._openSentPromptInspectorModal(card, fieldKey);
+				}
+				return;
+			}
+
 			// 0.45 Prompt Primitive: Copy Output
 			const copyPromptOutBtn = target.closest('.prompt-copy-output-btn') as HTMLElement | null;
 			if (copyPromptOutBtn) {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = copyPromptOutBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				const rawTa = card?.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
 				const display = card?.querySelector('.prompt-output-display') as HTMLElement | null;
-				if (display && display.textContent) {
-					this._clipboardService.writeText(display.textContent);
+				const fullOut = rawTa?.value || display?.textContent || '';
+				if (fullOut) {
+					this._clipboardService.writeText(fullOut);
 					this._notificationService.info('Copied AI execution output to clipboard.');
 				}
 				return;
@@ -848,11 +1645,312 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = clearPromptOutBtn.getAttribute('data-field-key') || '';
 				const card = clearPromptOutBtn.closest('.prompt-primitive-card') as HTMLElement | null;
 				if (card) {
+					const rawTa = card.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
+					if (rawTa) rawTa.value = '';
 					const display = card.querySelector('.prompt-output-display') as HTMLElement | null;
-					if (display) display.innerHTML = '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.</span>';
+					if (display) this._setElementHTML(display, '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.</span>');
 					const statusText = card.querySelector('.prompt-status-text') as HTMLElement | null;
 					if (statusText) statusText.textContent = 'Ready';
 					await this._savePromptDataFromCard(card, fieldKey, '');
+				}
+				return;
+			}
+
+			// 0.464 Prompt Primitive: Voice Input (Speech-to-Text) Mic Button
+			const voiceMicBtn = target.closest('.prompt-voice-mic-btn') as HTMLButtonElement | null;
+			if (voiceMicBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const wrapper = voiceMicBtn.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
+				if (wrapper && wrapper.getAttribute('data-locked') === 'true') {
+					this._pulsePromptLockBtn(wrapper);
+					this._notificationService.info('This prompt box is locked. Click the lock icon in the top-right to unlock before recording voice input.');
+					return;
+				}
+				await this._togglePromptVoiceInput(voiceMicBtn);
+				return;
+			}
+
+			// 0.4641 Prompt Primitive: Lock / Unlock Input Box Button
+			const lockBoxBtn = target.closest('.prompt-lock-box-btn') as HTMLElement | null;
+			if (lockBoxBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const wrapper = lockBoxBtn.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
+				const card = lockBoxBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				const fieldKey = card?.getAttribute('data-field-key') || '';
+				if (wrapper) {
+					this._togglePromptBoxLock(wrapper);
+					if (card && fieldKey) {
+						await this._savePromptDataFromCard(card, fieldKey);
+					}
+				}
+				return;
+			}
+
+			// 0.4642 Prompt Primitive: Expand / Collapse Long Input Box Button
+			const expandBoxBtn = target.closest('.prompt-expand-box-btn, .prompt-expand-bottom-pill') as HTMLElement | null;
+			if (expandBoxBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const wrapper = expandBoxBtn.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
+				if (wrapper) {
+					this._togglePromptBoxExpand(wrapper);
+				}
+				return;
+			}
+
+			// 0.4644 Prompt Primitive: Click Tokenized Display to Switch to Edit Textarea at Clicked Offset
+			const promptTokenizedDisplay = target.closest('.prompt-tokenized-display') as HTMLElement | null;
+			if (promptTokenizedDisplay) {
+				const currentSelection = window.getSelection()?.toString() || '';
+				if (currentSelection.length > 0) {
+					// User dragged to select text (e.g. to copy from a locked or unlocked prompt box); preserve selection
+					return;
+				}
+				e.stopPropagation();
+				this._switchPromptDisplayToEdit(promptTokenizedDisplay, e);
+				return;
+			}
+
+			// 0.4645 Prompt Primitive: Add User Prompt Input Box
+			const addPromptUserInputBtn = target.closest('.prompt-add-user-input-btn') as HTMLButtonElement | null;
+			if (addPromptUserInputBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = addPromptUserInputBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				const fieldKey = addPromptUserInputBtn.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
+				if (card) {
+					const listEl = card.querySelector('.prompt-user-inputs-list') as HTMLElement | null;
+					if (listEl) {
+						const existingItems = listEl.querySelectorAll('.prompt-user-input-item');
+						const nextIdx = existingItems.length;
+						const firstItemChips = listEl.querySelector('.prompt-user-input-chips')?.innerHTML || card.getAttribute('data-prompt-chips-html') || '';
+						const newItemHtml = this._buildPromptUserInputItemHtml(fieldKey, nextIdx, nextIdx + 1, '', firstItemChips, false);
+						const tempDiv = document.createElement('div');
+						tempDiv.innerHTML = ttPolicy ? (ttPolicy.createHTML(newItemHtml) as unknown as string) : newItemHtml;
+						const newItemEl = tempDiv.firstElementChild as HTMLElement | null;
+						if (newItemEl) {
+							listEl.appendChild(newItemEl);
+							this._refreshPromptUserInputItemsUi(card);
+							const newDisplay = newItemEl.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+							if (newDisplay) {
+								this._switchPromptDisplayToEdit(newDisplay, undefined, 0);
+							} else {
+								const newTa = newItemEl.querySelector('.prompt-user-textarea') as HTMLTextAreaElement | null;
+								newTa?.focus();
+							}
+							if (fieldKey) {
+								await this._savePromptDataFromCard(card, fieldKey);
+							}
+						}
+					}
+				}
+				return;
+			}
+
+			// 0.4646 Prompt Primitive: Remove User Prompt Input Box (with User Confirmation Dialog)
+			const removePromptUserInputBtn = target.closest('.prompt-remove-user-input-btn') as HTMLButtonElement | null;
+			if (removePromptUserInputBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = removePromptUserInputBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				const itemEl = removePromptUserInputBtn.closest('.prompt-user-input-item') as HTMLElement | null;
+				const fieldKey = removePromptUserInputBtn.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
+				if (card && itemEl) {
+					const listEl = card.querySelector('.prompt-user-inputs-list') as HTMLElement | null;
+					const allItems = listEl ? Array.from(listEl.querySelectorAll('.prompt-user-input-item')) : [];
+					const itemIdx = allItems.indexOf(itemEl);
+					const totalCount = allItems.length;
+					const ta = itemEl.querySelector('.prompt-user-textarea') as HTMLTextAreaElement | null;
+					const rawContent = (ta?.value || '').trim();
+					const previewSnippet = rawContent
+						? (rawContent.length > 120 ? `${rawContent.slice(0, 120)}...` : rawContent)
+						: '(Empty input box)';
+					const boxTitle = totalCount > 1 && itemIdx >= 0
+						? `User Prompt Input #${itemIdx + 1}`
+						: 'this User Prompt Input Box';
+
+					const confirmed = await this._confirmPromptBoxDeletion(
+						`Are you sure you want to delete ${boxTitle}?`,
+						rawContent
+							? `Content preview:\n"${previewSnippet}"\n\nThis segment will be removed from the prompt list.`
+							: `This will remove ${boxTitle} from the prompt list.`
+					);
+					if (!confirmed) {
+						return;
+					}
+
+					const existingChips = itemEl.querySelector('.prompt-user-input-chips')?.innerHTML || '';
+					if (existingChips && !card.getAttribute('data-prompt-chips-html')) {
+						card.setAttribute('data-prompt-chips-html', existingChips);
+					}
+					itemEl.remove();
+					this._refreshPromptUserInputItemsUi(card);
+					if (fieldKey) {
+						await this._savePromptDataFromCard(card, fieldKey);
+					}
+				}
+				return;
+			}
+
+			// 0.4647 Prompt Primitive: Move User Prompt Input Box Up / Down
+			const moveUpPromptBtn = target.closest('.prompt-move-up-user-input-btn') as HTMLButtonElement | null;
+			if (moveUpPromptBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = moveUpPromptBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				const itemEl = moveUpPromptBtn.closest('.prompt-user-input-item') as HTMLElement | null;
+				const fieldKey = card?.getAttribute('data-field-key') || '';
+				if (card && itemEl && itemEl.parentElement) {
+					const prevEl = itemEl.previousElementSibling as HTMLElement | null;
+					if (prevEl && prevEl.classList.contains('prompt-user-input-item')) {
+						itemEl.parentElement.insertBefore(itemEl, prevEl);
+						this._refreshPromptUserInputItemsUi(card);
+						this._flashMovedPromptBox(itemEl);
+						if (fieldKey) {
+							await this._savePromptDataFromCard(card, fieldKey);
+						}
+					}
+				}
+				return;
+			}
+
+			const moveDownPromptBtn = target.closest('.prompt-move-down-user-input-btn') as HTMLButtonElement | null;
+			if (moveDownPromptBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = moveDownPromptBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+				const itemEl = moveDownPromptBtn.closest('.prompt-user-input-item') as HTMLElement | null;
+				const fieldKey = card?.getAttribute('data-field-key') || '';
+				if (card && itemEl && itemEl.parentElement) {
+					const nextEl = itemEl.nextElementSibling as HTMLElement | null;
+					if (nextEl && nextEl.classList.contains('prompt-user-input-item')) {
+						itemEl.parentElement.insertBefore(nextEl, itemEl);
+						this._refreshPromptUserInputItemsUi(card);
+						this._flashMovedPromptBox(itemEl);
+						if (fieldKey) {
+							await this._savePromptDataFromCard(card, fieldKey);
+						}
+					}
+				}
+				return;
+			}
+
+			// 0.4648 Prompt Primitive: Click #N Badge to Jump / Reorder User Prompt Input Box to Any Position
+			const promptIndexBadge = target.closest('.prompt-user-input-badge') as HTMLElement | null;
+			if (promptIndexBadge) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = promptIndexBadge.closest('.prompt-primitive-card') as HTMLElement | null;
+				const itemEl = promptIndexBadge.closest('.prompt-user-input-item') as HTMLElement | null;
+				const fieldKey = card?.getAttribute('data-field-key') || '';
+				if (card && itemEl) {
+					await this._promptJumpUserInputPosition(card, itemEl, fieldKey);
+				}
+				return;
+			}
+
+			// 0.465 Prompt Primitive: Insert Reference Chip into User Prompt Textarea and Render as Visual Tag Pill
+			const insertPromptChip = target.closest('.prompt-insert-ctx-chip') as HTMLElement | null;
+			if (insertPromptChip) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = insertPromptChip.closest('.prompt-primitive-card') as HTMLElement | null;
+				const inputItem = insertPromptChip.closest('.prompt-user-input-item') as HTMLElement | null;
+				const wrapper = (inputItem?.querySelector('.voice-input-textarea-wrapper') || card?.querySelector('.voice-input-textarea-wrapper')) as HTMLElement | null;
+				if (wrapper && wrapper.getAttribute('data-locked') === 'true') {
+					this._pulsePromptLockBtn(wrapper);
+					this._notificationService.info('This prompt box is locked. Click the lock icon in the top-right to unlock before inserting fields.');
+					return;
+				}
+				const textarea = (inputItem?.querySelector('.prompt-instruction-textarea') || card?.querySelector('.prompt-instruction-textarea')) as HTMLTextAreaElement | null;
+				const textToInsert = insertPromptChip.getAttribute('data-insert') || '';
+				if (textarea && textToInsert) {
+					const currentVal = textarea.value || '';
+					const isEditing = textarea.style.display !== 'none';
+					const recordedStartAttr = textarea.getAttribute('data-last-selection-start');
+					const recordedEndAttr = textarea.getAttribute('data-last-selection-end');
+					const start = isEditing && typeof textarea.selectionStart === 'number'
+						? textarea.selectionStart
+						: (recordedStartAttr !== null ? Math.min(currentVal.length, Math.max(0, Number(recordedStartAttr))) : currentVal.length);
+					const end = isEditing && typeof textarea.selectionEnd === 'number'
+						? textarea.selectionEnd
+						: (recordedEndAttr !== null ? Math.min(currentVal.length, Math.max(start, Number(recordedEndAttr))) : start);
+					textarea.value = currentVal.substring(0, start) + textToInsert + currentVal.substring(end);
+					const nextCursor = start + textToInsert.length;
+					textarea.selectionStart = nextCursor;
+					textarea.selectionEnd = nextCursor;
+					textarea.setAttribute('data-last-selection-start', String(nextCursor));
+					textarea.setAttribute('data-last-selection-end', String(nextCursor));
+					this._syncPromptTokenizedDisplay(textarea, true);
+					const fieldKey = insertPromptChip.getAttribute('data-field-key') || '';
+					if (fieldKey && card) {
+						await this._savePromptDataFromCard(card, fieldKey);
+					}
+				}
+				return;
+			}
+
+			// 0.4651 Prompt Primitive: Toggle More / Less Reference Chips (Single-line by default)
+			const morePromptCtxBtn = target.closest('.prompt-ctx-more-btn') as HTMLElement | null;
+			if (morePromptCtxBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const bar = morePromptCtxBtn.closest('.prompt-user-input-chips') as HTMLElement | null;
+				const hiddenGroup = bar?.querySelector('.prompt-ctx-hidden-group') as HTMLElement | null;
+				if (hiddenGroup) {
+					const isHidden = hiddenGroup.style.display === 'none';
+					hiddenGroup.style.display = isHidden ? 'contents' : 'none';
+					const remainingCount = morePromptCtxBtn.getAttribute('data-count') || '';
+					morePromptCtxBtn.textContent = isHidden ? 'Less' : `+${remainingCount} More...`;
+				}
+				return;
+			}
+
+			// 0.47 TTS Primitive: Send & Generate Audio button click
+			const ttsSendBtn = target.closest('.tts-send-btn') as HTMLElement | null;
+			if (ttsSendBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = ttsSendBtn.getAttribute('data-field-key') || '';
+				const card = ttsSendBtn.closest('.tts-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._executeTtsSynthesisInEditor(card, fieldKey);
+				}
+				return;
+			}
+
+			// 0.48 TTS Primitive: Play / Pause Audio button click
+			const ttsPlayBtn = target.closest('.tts-play-btn') as HTMLElement | null;
+			if (ttsPlayBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = ttsPlayBtn.closest('.tts-primitive-card') as HTMLElement | null;
+				const audioEl = card?.querySelector('audio') as HTMLAudioElement | null;
+				if (audioEl && audioEl.src) {
+					if (audioEl.paused) {
+						audioEl.play().catch(err => {
+							this._notificationService.warn(`Audio playback failed: ${err.message || err}`);
+						});
+					} else {
+						audioEl.pause();
+					}
+				} else {
+					this._notificationService.warn('No saved audio file found. Click "Send & Generate Audio" first.');
+				}
+				return;
+			}
+
+			// 0.49 TTS Primitive: Delete / Clear Audio file button click
+			const ttsDeleteAudioBtn = target.closest('.tts-delete-audio-btn') as HTMLElement | null;
+			if (ttsDeleteAudioBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = ttsDeleteAudioBtn.getAttribute('data-field-key') || '';
+				const card = ttsDeleteAudioBtn.closest('.tts-primitive-card') as HTMLElement | null;
+				if (card) {
+					await this._deleteTtsAudioFileInEditor(card, fieldKey, false);
 				}
 				return;
 			}
@@ -881,6 +1979,33 @@ export class EntityDetailEditor extends EditorPane {
 					await this._savePythonDataFromCard(card, fieldKey);
 					this._notificationService.info('Saved Python automation script.');
 				}
+				return;
+			}
+
+			// Python Primitive: Copy Source Code button click
+			const copyPyCodeBtn = target.closest('.python-copy-code-btn') as HTMLElement | null;
+			if (copyPyCodeBtn) {
+				const card = copyPyCodeBtn.closest('.python-primitive-card') as HTMLElement | null;
+				if (card?.getAttribute('data-python-hydrated') === 'true') {
+					return;
+				}
+				e.preventDefault();
+				e.stopPropagation();
+				const textarea = card?.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+				const code = textarea ? textarea.value : '';
+				await this._clipboardService.writeText(code);
+				const iconEl = copyPyCodeBtn.querySelector('.codicon') as HTMLElement | null;
+				if (iconEl) {
+					iconEl.className = 'codicon codicon-check';
+				}
+				copyPyCodeBtn.style.color = '#34d399';
+				setTimeout(() => {
+					if (iconEl) {
+						iconEl.className = 'codicon codicon-copy';
+					}
+					copyPyCodeBtn.style.color = 'var(--vscode-foreground)';
+				}, 1500);
+				this._notificationService.info('Copied Python source code to clipboard.');
 				return;
 			}
 
@@ -950,59 +2075,16 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
-			// Python Primitive: Click on syntax highlighted code display to enter edit mode
+			// Python Primitive: Click on syntax highlighted code display to focus live textarea
 			const pyDisplay = target.closest('.python-code-display') as HTMLElement | null;
 			if (pyDisplay) {
 				const card = pyDisplay.closest('.python-primitive-card') as HTMLElement | null;
-				const textarea = card?.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
-				const badge = card?.querySelector('.python-mode-badge') as HTMLElement | null;
-				if (card && textarea) {
-					pyDisplay.style.display = 'none';
-					textarea.style.display = 'block';
-					const h = pyDisplay.getBoundingClientRect().height;
-					if (h > 60) {
-						textarea.style.height = `${Math.max(120, Math.round(h))}px`;
-					}
-					if (badge) {
-						badge.textContent = 'Editing';
-						badge.style.color = '#f59e0b';
-						badge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
-						badge.style.background = 'rgba(245, 158, 11, 0.12)';
-					}
-					textarea.focus();
+				if (card?.getAttribute('data-python-hydrated') === 'true') {
+					return;
 				}
-				return;
-			}
-
-			// Python Primitive: Mode badge toggle
-			const pyBadge = target.closest('.python-mode-badge') as HTMLElement | null;
-			if (pyBadge) {
-				const card = pyBadge.closest('.python-primitive-card') as HTMLElement | null;
-				const pyDisplayEl = card?.querySelector('.python-code-display') as HTMLElement | null;
 				const textarea = card?.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
-				if (card && textarea && pyDisplayEl) {
-					const isEditing = textarea.style.display !== 'none';
-					if (isEditing) {
-						renderHighlightedPythonToDOM(pyDisplayEl, textarea.value, { showLineNumbers: true });
-						textarea.style.display = 'none';
-						pyDisplayEl.style.display = 'block';
-						pyBadge.textContent = 'Highlighted';
-						pyBadge.style.color = '#38bdf8';
-						pyBadge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
-						pyBadge.style.background = 'rgba(56, 189, 248, 0.12)';
-					} else {
-						pyDisplayEl.style.display = 'none';
-						textarea.style.display = 'block';
-						const h = pyDisplayEl.getBoundingClientRect().height;
-						if (h > 60) {
-							textarea.style.height = `${Math.max(120, Math.round(h))}px`;
-						}
-						pyBadge.textContent = 'Editing';
-						pyBadge.style.color = '#f59e0b';
-						pyBadge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
-						pyBadge.style.background = 'rgba(245, 158, 11, 0.12)';
-						textarea.focus();
-					}
+				if (textarea) {
+					textarea.focus();
 				}
 				return;
 			}
@@ -1010,9 +2092,12 @@ export class EntityDetailEditor extends EditorPane {
 			// Python Primitive: Insert Context Chip click
 			const insertPyCtxChip = target.closest('.python-insert-ctx-chip') as HTMLElement | null;
 			if (insertPyCtxChip) {
+				const card = insertPyCtxChip.closest('.python-primitive-card') as HTMLElement | null;
+				if (card?.getAttribute('data-python-hydrated') === 'true') {
+					return;
+				}
 				e.preventDefault();
 				e.stopPropagation();
-				const card = insertPyCtxChip.closest('.python-primitive-card') as HTMLElement | null;
 				const textarea = card?.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
 				const textToInsert = insertPyCtxChip.getAttribute('data-insert') || '';
 				const cursorOffset = parseInt(insertPyCtxChip.getAttribute('data-cursor-offset') || '0', 10);
@@ -1025,8 +2110,16 @@ export class EntityDetailEditor extends EditorPane {
 					const newCursor = start + textToInsert.length + cursorOffset;
 					textarea.selectionStart = textarea.selectionEnd = newCursor;
 					const pyDisplayEl = card?.querySelector('.python-code-display') as HTMLElement | null;
+					const pyGutterEl = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+					if (pyGutterEl) {
+						pyGutterEl.textContent = buildPythonLineNumbersText(textarea.value);
+					}
 					if (pyDisplayEl) {
-						renderHighlightedPythonToDOM(pyDisplayEl, textarea.value, { showLineNumbers: true });
+						renderHighlightedPythonToDOM(pyDisplayEl, textarea.value, {
+							showLineNumbers: false,
+							isLiveBackdrop: true,
+							placeholder: 'Enter Python script to execute...'
+						});
 					}
 					textarea.focus();
 					const fieldKey = insertPyCtxChip.getAttribute('data-field-key') || '';
@@ -1083,7 +2176,7 @@ export class EntityDetailEditor extends EditorPane {
 					if (resultBlock) resultBlock.remove();
 					const outputDisplay = card.querySelector('.python-output-display') as HTMLElement | null;
 					if (outputDisplay) {
-						outputDisplay.innerHTML = '<span style="opacity: 0.4; font-style: italic;">No execution logs yet. Click "Run Script" above to execute the automation code.</span>';
+						this._setElementHTML(outputDisplay, '<span style="opacity: 0.4; font-style: italic;">No execution logs yet. Click "Run Script" above to execute the automation code.</span>');
 					}
 					const statusText = card.querySelector('.python-status-text') as HTMLElement | null;
 					if (statusText) {
@@ -1125,6 +2218,24 @@ export class EntityDetailEditor extends EditorPane {
 				const rawTa = item?.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
 				const text = rawTa?.value || '';
 				this._exportResultToCsv(text, specKey);
+				return;
+			}
+
+			// Output / Result Pagination: Prev / Next / First / Last Page Button
+			const outputPageBtn = target.closest('.output-page-btn') as HTMLElement | null;
+			if (outputPageBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				if (outputPageBtn.hasAttribute('disabled') || outputPageBtn.getAttribute('data-disabled') === 'true') {
+					return;
+				}
+				const stateKey = outputPageBtn.getAttribute('data-state-key') || '';
+				const targetPage = parseInt(outputPageBtn.getAttribute('data-target-page') || '1', 10);
+				if (stateKey && Number.isFinite(targetPage) && targetPage >= 1) {
+					const curState = this._outputPaginationState.get(stateKey) || { page: 1, pageSize: 10 };
+					this._outputPaginationState.set(stateKey, { page: targetPage, pageSize: curState.pageSize });
+					this._rerenderOutputViewportByStateKey(outputPageBtn, stateKey);
+				}
 				return;
 			}
 
@@ -1221,7 +2332,16 @@ export class EntityDetailEditor extends EditorPane {
 				const field = aiBtn.getAttribute('data-ai-field') || '/Description';
 				const fieldType = aiBtn.getAttribute('data-ai-field-type') || 'text';
 				const label = aiBtn.getAttribute('data-ai-field-label') || '';
-				const currentValue = aiBtn.getAttribute('data-ai-current-value') || '';
+				let currentValue = aiBtn.getAttribute('data-ai-current-value') || '';
+				let preInjectedPrompt: string | undefined = undefined;
+				if (fieldType === 'prompt') {
+					const promptCard = aiBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+					if (promptCard) {
+						const resolved = this._resolveCombinedPromptFromCard(promptCard);
+						currentValue = resolved.userPrompt;
+						preInjectedPrompt = this._interpolateParameters(resolved.preInjectedPrompt);
+					}
+				}
 				const optionsRaw = aiBtn.getAttribute('data-ai-options') || '';
 				let options: any[] = [];
 				if (optionsRaw) {
@@ -1233,6 +2353,7 @@ export class EntityDetailEditor extends EditorPane {
 					fieldType,
 					label,
 					currentValue,
+					preInjectedPrompt,
 					options,
 					source: field
 				});
@@ -1279,6 +2400,32 @@ export class EntityDetailEditor extends EditorPane {
 				const val = textarea?.value?.trim();
 				if (val) {
 					await this._handleMessage({ type: 'addWorkLog', log: val });
+				}
+				return;
+			}
+
+			// 5.5 Expand / Collapse long Work Log entry
+			const worklogToggleBtn = target.closest('.worklog-expand-toggle-btn') as HTMLElement | null;
+			if (worklogToggleBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const itemEl = worklogToggleBtn.closest('.timeline-item') as HTMLElement | null;
+				if (itemEl) {
+					const previewEl = itemEl.querySelector('.worklog-preview-content') as HTMLElement | null;
+					const fullEl = itemEl.querySelector('.worklog-full-content') as HTMLElement | null;
+					const isExpanded = worklogToggleBtn.getAttribute('data-expanded') === 'true';
+					const charCount = worklogToggleBtn.getAttribute('data-char-count') || '';
+					if (isExpanded) {
+						if (previewEl) { previewEl.style.display = 'block'; }
+						if (fullEl) { fullEl.style.display = 'none'; }
+						worklogToggleBtn.setAttribute('data-expanded', 'false');
+						worklogToggleBtn.textContent = charCount ? `Show Full Log (${charCount} chars)` : 'Show Full Log';
+					} else {
+						if (previewEl) { previewEl.style.display = 'none'; }
+						if (fullEl) { fullEl.style.display = 'block'; }
+						worklogToggleBtn.setAttribute('data-expanded', 'true');
+						worklogToggleBtn.textContent = 'Show Less';
+					}
 				}
 				return;
 			}
@@ -1367,6 +2514,17 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			const outputPageSizeSelect = target?.closest('.output-page-size-select') as HTMLSelectElement | null;
+			if (outputPageSizeSelect) {
+				const stateKey = outputPageSizeSelect.getAttribute('data-state-key') || '';
+				const nextSize = parseInt(outputPageSizeSelect.value || '10', 10) || 10;
+				if (stateKey) {
+					this._outputPaginationState.set(stateKey, { page: 1, pageSize: nextSize });
+					this._rerenderOutputViewportByStateKey(outputPageSizeSelect, stateKey);
+				}
+				return;
+			}
+
 			const outputItemSelector = target?.closest('.output-item-format-selector') as HTMLSelectElement | null;
 			if (outputItemSelector) {
 				const fieldKey = outputItemSelector.getAttribute('data-field-key') || '';
@@ -1384,6 +2542,92 @@ export class EntityDetailEditor extends EditorPane {
 				const card = formatSelector.closest('.result-primitive-card, .output-primitive-card') as HTMLElement | null;
 				if (card) {
 					await this._updateResultCardFormat(card, fieldKey, formatSelector.value);
+				}
+				return;
+			}
+
+			const promptProviderSelect = target?.closest('.prompt-provider-select') as HTMLSelectElement | null;
+			if (promptProviderSelect) {
+				const fieldKey = promptProviderSelect.getAttribute('data-field-key') || '';
+				const card = promptProviderSelect.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card?.getAttribute('data-prompt-hydrated') === 'true') {
+					return;
+				}
+				if (card && fieldKey) {
+					const providerId = promptProviderSelect.value;
+					card.setAttribute('data-target-provider', providerId);
+					const modelSelect = card.querySelector('.prompt-model-select') as HTMLSelectElement | null;
+					const customModelInput = card.querySelector('.prompt-custom-model-input') as HTMLInputElement | null;
+					const providerModelsMap = this._getPromptProviderModelsMap();
+					const models = providerModelsMap[providerId] || providerModelsMap['openai'];
+					if (modelSelect) {
+						while (modelSelect.firstChild) {
+							modelSelect.removeChild(modelSelect.firstChild);
+						}
+						models.forEach((m, idx) => {
+							const opt = document.createElement('option');
+							opt.value = m.id;
+							opt.textContent = m.label;
+							if (idx === 0) {
+								opt.selected = true;
+							}
+							modelSelect.appendChild(opt);
+						});
+						if (models.length > 0) {
+							modelSelect.value = models[0].id;
+						}
+					}
+					if (customModelInput) {
+						customModelInput.style.display = modelSelect?.value === 'custom' ? 'block' : 'none';
+					}
+					const effectiveModel = (modelSelect?.value === 'custom' ? customModelInput?.value.trim() : modelSelect?.value) || 'gpt-4o';
+					const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
+					if (targetBadge) {
+						targetBadge.textContent = `Model: ${effectiveModel}`;
+					}
+					card.setAttribute('data-user-customized-target', 'true');
+					await this._savePromptDataFromCard(card, fieldKey);
+				}
+				return;
+			}
+
+			const promptModelSelect = target?.closest('.prompt-model-select') as HTMLSelectElement | null;
+			if (promptModelSelect) {
+				const fieldKey = promptModelSelect.getAttribute('data-field-key') || '';
+				const card = promptModelSelect.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card && fieldKey) {
+					const customModelInput = card.querySelector('.prompt-custom-model-input') as HTMLInputElement | null;
+					if (customModelInput) {
+						if (promptModelSelect.value === 'custom') {
+							customModelInput.style.display = 'block';
+							customModelInput.focus();
+						} else {
+							customModelInput.style.display = 'none';
+						}
+					}
+					const effectiveModel = (promptModelSelect.value === 'custom' ? customModelInput?.value.trim() : promptModelSelect.value) || 'gemini-1.5-flash';
+					const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
+					if (targetBadge) {
+						targetBadge.textContent = `Model: ${effectiveModel}`;
+					}
+					card.setAttribute('data-user-customized-target', 'true');
+					await this._savePromptDataFromCard(card, fieldKey);
+				}
+				return;
+			}
+
+			const promptAgentSelect = target?.closest('.prompt-agent-select') as HTMLSelectElement | null;
+			if (promptAgentSelect) {
+				const fieldKey = promptAgentSelect.getAttribute('data-field-key') || '';
+				const card = promptAgentSelect.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card && fieldKey) {
+					const agName = promptAgentSelect.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || '';
+					const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
+					if (targetBadge) {
+						targetBadge.textContent = `Agent: ${ promptAgentSelect.value ? (agName || promptAgentSelect.value) : 'Unassigned' }`;
+					}
+					card.setAttribute('data-user-customized-target', 'true');
+					await this._savePromptDataFromCard(card, fieldKey);
 				}
 				return;
 			}
@@ -1409,6 +2653,123 @@ export class EntityDetailEditor extends EditorPane {
 				const newValue = paramInput.value;
 				if (fieldKey && paramName) {
 					await this._saveTicketParameterValue(fieldKey, paramName, newValue);
+				}
+				return;
+			}
+			const promptCustomModelInput = target?.closest('.prompt-custom-model-input') as HTMLInputElement | null;
+			if (promptCustomModelInput) {
+				const fieldKey = promptCustomModelInput.getAttribute('data-field-key') || '';
+				const card = promptCustomModelInput.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card && fieldKey) {
+					const effectiveModel = promptCustomModelInput.value.trim() || 'gpt-4o';
+					const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
+					if (targetBadge) {
+						targetBadge.textContent = `Model: ${effectiveModel}`;
+					}
+					card.setAttribute('data-user-customized-target', 'true');
+					await this._savePromptDataFromCard(card, fieldKey);
+				}
+				return;
+			}
+			const promptPreInjectedTa = target?.closest('.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
+			if (promptPreInjectedTa) {
+				if (typeof promptPreInjectedTa.selectionStart === 'number') {
+					promptPreInjectedTa.setAttribute('data-last-selection-start', String(promptPreInjectedTa.selectionStart));
+					promptPreInjectedTa.setAttribute('data-last-selection-end', String(typeof promptPreInjectedTa.selectionEnd === 'number' ? promptPreInjectedTa.selectionEnd : promptPreInjectedTa.selectionStart));
+				}
+				this._syncPromptTokenizedDisplay(promptPreInjectedTa, true);
+				const fieldKey = promptPreInjectedTa.getAttribute('data-field-key') || '';
+				const card = promptPreInjectedTa.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card && fieldKey) {
+					card.setAttribute('data-pre-injected-prompt', promptPreInjectedTa.value);
+					await this._savePromptDataFromCard(card, fieldKey);
+				}
+				return;
+			}
+			const promptUserTa = target?.closest('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+			if (promptUserTa) {
+				if (typeof promptUserTa.selectionStart === 'number') {
+					promptUserTa.setAttribute('data-last-selection-start', String(promptUserTa.selectionStart));
+					promptUserTa.setAttribute('data-last-selection-end', String(typeof promptUserTa.selectionEnd === 'number' ? promptUserTa.selectionEnd : promptUserTa.selectionStart));
+				}
+				this._syncPromptTokenizedDisplay(promptUserTa, true);
+				const fieldKey = promptUserTa.getAttribute('data-field-key') || '';
+				const card = promptUserTa.closest('.prompt-primitive-card') as HTMLElement | null;
+				if (card && fieldKey) {
+					await this._savePromptDataFromCard(card, fieldKey);
+				}
+			}
+		}, true);
+
+		this._container.addEventListener('mousedown', (e: MouseEvent) => {
+			const target = e.target as HTMLElement | null;
+			const voiceMicBtn = target?.closest('.prompt-voice-mic-btn, .prompt-lock-box-btn, .prompt-expand-box-btn, .prompt-expand-bottom-pill, .prompt-move-up-user-input-btn, .prompt-move-down-user-input-btn, .prompt-user-input-badge, .prompt-remove-user-input-btn') as HTMLElement | null;
+			if (voiceMicBtn) {
+				e.preventDefault();
+			}
+		});
+
+		this._container.addEventListener('input', (e: Event) => {
+			const target = e.target as HTMLElement | null;
+			const promptTa = target?.closest('.prompt-instruction-textarea, .prompt-preinjected-textarea') as HTMLTextAreaElement | null;
+			if (promptTa) {
+				const wrapper = promptTa.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
+				if (wrapper) {
+					this._syncPromptBoxExpandUi(wrapper);
+				}
+			}
+			const pyTextarea = target?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
+			if (pyTextarea) {
+				const card = pyTextarea.closest('.python-primitive-card') as HTMLElement | null;
+				if (card?.getAttribute('data-python-hydrated') === 'true') {
+					return;
+				}
+				const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
+				const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+				if (pyGutter) {
+					pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
+					pyGutter.scrollTop = 0;
+				}
+				if (pyDisplay) {
+					renderHighlightedPythonToDOM(pyDisplay, pyTextarea.value, {
+						showLineNumbers: false,
+						isLiveBackdrop: true,
+						placeholder: 'Enter Python script to execute...'
+					});
+					pyDisplay.scrollTop = 0;
+					pyDisplay.scrollLeft = 0;
+				}
+				if (pyTextarea.scrollTop !== 0) {
+					pyTextarea.scrollTop = 0;
+				}
+				if (pyTextarea.scrollLeft !== 0) {
+					pyTextarea.scrollLeft = 0;
+				}
+			}
+		});
+
+		this._container.addEventListener('scroll', (e: Event) => {
+			const target = e.target as HTMLElement | null;
+			if (target && target.classList && target.classList.contains('python-code-textarea')) {
+				const pyTextarea = target as HTMLTextAreaElement;
+				const card = pyTextarea.closest('.python-primitive-card') as HTMLElement | null;
+				if (card?.getAttribute('data-python-hydrated') === 'true') {
+					return;
+				}
+				const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
+				const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+				if (pyTextarea.scrollTop !== 0) {
+					pyTextarea.scrollTop = 0;
+				}
+				if (pyTextarea.scrollLeft !== 0) {
+					pyTextarea.scrollLeft = 0;
+				}
+				if (pyDisplay) {
+					pyDisplay.scrollTop = 0;
+					pyDisplay.scrollLeft = 0;
+				}
+				if (pyGutter) {
+					pyGutter.scrollTop = 0;
 				}
 			}
 		}, true);
@@ -1443,36 +2804,91 @@ export class EntityDetailEditor extends EditorPane {
 			if (e.key === 'Tab') {
 				const pyTextarea = (e.target as HTMLElement)?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
 				if (pyTextarea) {
+					const card = pyTextarea.closest('.python-primitive-card') as HTMLElement | null;
+					if (card?.getAttribute('data-python-hydrated') === 'true') {
+						return;
+					}
 					e.preventDefault();
 					e.stopPropagation();
 					const start = pyTextarea.selectionStart;
 					const end = pyTextarea.selectionEnd;
 					pyTextarea.value = pyTextarea.value.substring(0, start) + '    ' + pyTextarea.value.substring(end);
 					pyTextarea.selectionStart = pyTextarea.selectionEnd = start + 4;
-					return;
-				}
-			}
-			if (e.key === 'Escape') {
-				const pyTextarea = (e.target as HTMLElement)?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
-				if (pyTextarea) {
-					const card = pyTextarea.closest('.python-primitive-card') as HTMLElement | null;
 					const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
-					const badge = card?.querySelector('.python-mode-badge') as HTMLElement | null;
-					if (card && pyDisplay) {
-						renderHighlightedPythonToDOM(pyDisplay, pyTextarea.value, { showLineNumbers: true });
-						pyTextarea.style.display = 'none';
-						pyDisplay.style.display = 'block';
-						if (badge) {
-							badge.textContent = 'Highlighted';
-							badge.style.color = '#38bdf8';
-							badge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
-							badge.style.background = 'rgba(56, 189, 248, 0.12)';
-						}
+					const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+					if (pyGutter) {
+						pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
+					}
+					if (pyDisplay) {
+						renderHighlightedPythonToDOM(pyDisplay, pyTextarea.value, {
+							showLineNumbers: false,
+							isLiveBackdrop: true,
+							placeholder: 'Enter Python script to execute...'
+						});
 					}
 					return;
 				}
 			}
+			if (e.key === 'Escape') {
+				const promptTa = (e.target as HTMLElement)?.closest('.prompt-instruction-textarea, .prompt-preinjected-textarea') as HTMLTextAreaElement | null;
+				if (promptTa) {
+					if (typeof promptTa.selectionStart === 'number') {
+						promptTa.setAttribute('data-last-selection-start', String(promptTa.selectionStart));
+						promptTa.setAttribute('data-last-selection-end', String(typeof promptTa.selectionEnd === 'number' ? promptTa.selectionEnd : promptTa.selectionStart));
+					}
+					this._syncPromptTokenizedDisplay(promptTa, true);
+					return;
+				}
+				const pyTextarea = (e.target as HTMLElement)?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
+				if (pyTextarea) {
+					const card = pyTextarea.closest('.python-primitive-card') as HTMLElement | null;
+					if (card?.getAttribute('data-python-hydrated') === 'true') {
+						return;
+					}
+					pyTextarea.blur();
+					return;
+				}
+			}
 			if (e.key === 'Enter') {
+				const pyTextarea = (e.target as HTMLElement)?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
+				if (pyTextarea) {
+					const card = pyTextarea.closest('.python-primitive-card') as HTMLElement | null;
+					if (card?.getAttribute('data-python-hydrated') === 'true') {
+						return;
+					}
+					const start = pyTextarea.selectionStart;
+					const end = pyTextarea.selectionEnd;
+					const before = pyTextarea.value.substring(0, start);
+					const lastNewline = before.lastIndexOf('\n');
+					const currentLine = before.substring(lastNewline + 1);
+					const indentMatch = currentLine.match(/^[ \t]*/);
+					let indent = indentMatch ? indentMatch[0] : '';
+					if (currentLine.trimEnd().endsWith(':')) {
+						indent += '    ';
+					}
+					if (indent.length > 0) {
+						e.preventDefault();
+						e.stopPropagation();
+						const insertStr = '\n' + indent;
+						pyTextarea.value = before + insertStr + pyTextarea.value.substring(end);
+						pyTextarea.selectionStart = pyTextarea.selectionEnd = start + insertStr.length;
+						const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
+						const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+						if (pyGutter) {
+							pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
+							pyGutter.scrollTop = pyTextarea.scrollTop;
+						}
+						if (pyDisplay) {
+							renderHighlightedPythonToDOM(pyDisplay, pyTextarea.value, {
+								showLineNumbers: false,
+								isLiveBackdrop: true,
+								placeholder: 'Enter Python script to execute...'
+							});
+							pyDisplay.scrollTop = pyTextarea.scrollTop;
+						}
+						return;
+					}
+				}
 				const urlInput = (e.target as HTMLElement)?.closest('.browser-url-input') as HTMLInputElement | null;
 				if (urlInput) {
 					e.preventDefault();
@@ -1487,24 +2903,42 @@ export class EntityDetailEditor extends EditorPane {
 			}
 		});
 
+		this._container.addEventListener('focusin', (e: FocusEvent) => {
+			const pyTextarea = (e.target as HTMLElement)?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
+			if (pyTextarea) {
+				const card = pyTextarea.closest('.python-primitive-card') as HTMLElement | null;
+				if (card?.getAttribute('data-python-hydrated') === 'true') {
+					return;
+				}
+				const wrapper = card?.querySelector('.python-code-wrapper') as HTMLElement | null;
+				if (wrapper) {
+					wrapper.style.borderColor = 'rgba(56, 189, 248, 0.55)';
+				}
+			}
+		});
+
 		this._container.addEventListener('focusout', (e: FocusEvent) => {
 			const pyTextarea = (e.target as HTMLElement)?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
 			if (pyTextarea) {
 				const card = pyTextarea.closest('.python-primitive-card') as HTMLElement | null;
+				if (card?.getAttribute('data-python-hydrated') === 'true') {
+					return;
+				}
 				const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
-				const badge = card?.querySelector('.python-mode-badge') as HTMLElement | null;
-				if (card && pyDisplay) {
-					setTimeout(() => {
-						renderHighlightedPythonToDOM(pyDisplay, pyTextarea.value, { showLineNumbers: true });
-						pyTextarea.style.display = 'none';
-						pyDisplay.style.display = 'block';
-						if (badge) {
-							badge.textContent = 'Highlighted';
-							badge.style.color = '#38bdf8';
-							badge.style.borderColor = 'rgba(56, 189, 248, 0.3)';
-							badge.style.background = 'rgba(56, 189, 248, 0.12)';
-						}
-					}, 180);
+				const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+				const wrapper = card?.querySelector('.python-code-wrapper') as HTMLElement | null;
+				if (wrapper) {
+					wrapper.style.borderColor = 'rgba(255, 255, 255, 0.15)';
+				}
+				if (pyGutter) {
+					pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
+				}
+				if (pyDisplay) {
+					renderHighlightedPythonToDOM(pyDisplay, pyTextarea.value, {
+						showLineNumbers: false,
+						isLiveBackdrop: true,
+						placeholder: 'Enter Python script to execute...'
+					});
 				}
 			}
 		});
@@ -1598,15 +3032,37 @@ export class EntityDetailEditor extends EditorPane {
 				const key = match[1].trim();
 				const val = match[2].trim().replace(/^[`'"]+|[`'"]+$/g, '');
 				if (inSelfDefined && line.startsWith('  -')) {
+					if (customMetadata[key] !== undefined && val.startsWith('{') && customMetadata[key].trim().startsWith('{')) {
+						// If duplicate entry exists in file, preserve whichever has non-empty output
+						try {
+							const prevObj = JSON.parse(customMetadata[key].trim());
+							const nextObj = JSON.parse(val);
+							const prevOut = String(prevObj.output ?? prevObj.result ?? '').trim();
+							const nextOut = String(nextObj.output ?? nextObj.result ?? '').trim();
+							if (prevOut && !nextOut) {
+								currentCustomKey = null;
+								continue;
+							}
+						} catch {}
+					}
 					customMetadata[key] = val;
 					currentCustomKey = key;
 				} else {
+					if (inSelfDefined && key !== 'Self Defined Data Structure' && key !== 'Self Defined Data Value') {
+						inSelfDefined = false;
+					}
 					metadata[key] = val;
 					currentCustomKey = null;
 				}
 			} else if (inSelfDefined && currentCustomKey && !line.startsWith('#') && !line.startsWith('---') && !line.match(/^\s*-\s*\*\*/)) {
+				if (line.trim() === '' && (customMetadata[currentCustomKey]?.trim().startsWith('{') || customMetadata[currentCustomKey]?.trim().startsWith('['))) {
+					continue;
+				}
 				customMetadata[currentCustomKey] = (customMetadata[currentCustomKey] || '') + '\n' + line;
 			}
+		}
+		for (const ck of Object.keys(customMetadata)) {
+			customMetadata[ck] = customMetadata[ck].trim();
 		}
 
 		// 2. Parse README.md
@@ -1813,24 +3269,43 @@ export class EntityDetailEditor extends EditorPane {
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
 			if (line.startsWith('### Self Defined Data')) {
-				inSelfDefined = true;
 				newLines.push(line);
+				if (customUpdates) {
+					let savedStructureLine: string | null = null;
+					while (i + 1 < lines.length) {
+						const nextLine = lines[i + 1];
+						if (nextLine.startsWith('- **Self Defined Data Structure**:')) {
+							savedStructureLine = nextLine;
+							i++;
+							continue;
+						}
+						if (nextLine.startsWith('- **Self Defined Data Value**:')) {
+							i++;
+							continue;
+						}
+						if (nextLine.startsWith('#') || nextLine.startsWith('---') || (nextLine.startsWith('- **') && !nextLine.startsWith('- **Self Defined Data'))) {
+							break;
+						}
+						i++;
+					}
+					if (savedStructureLine) {
+						newLines.push(savedStructureLine);
+					}
+					const hasCustomEntries = Object.keys(customUpdates).length > 0;
+					newLines.push(hasCustomEntries ? '- **Self Defined Data Value**:' : '- **Self Defined Data Value**: None');
+					for (const [k, v] of Object.entries(customUpdates)) {
+						const singleLineVal = String(v ?? '').trim().replace(/\r?\n/g, ' ');
+						newLines.push(`  - **${k}**: ${singleLineVal}`);
+					}
+					newLines.push('');
+					inSelfDefined = false;
+					continue;
+				}
+				inSelfDefined = true;
 				continue;
 			}
 			if (inSelfDefined && (line.startsWith('### ') || (line.startsWith('## ') && !line.startsWith('## Overview')) || line.startsWith('- **Current AI Agent') || line.startsWith('- **Status'))) {
 				inSelfDefined = false;
-			}
-
-			if (inSelfDefined && customUpdates && line.startsWith('- **Self Defined Data Value**:')) {
-				newLines.push(line);
-				for (const [k, v] of Object.entries(customUpdates)) {
-					newLines.push(`  - **${k}**: ${v}`);
-				}
-				// Skip old custom fields
-				while (i + 1 < lines.length && (lines[i + 1].startsWith('  -') || (lines[i + 1].trim() === '' && i + 2 < lines.length && lines[i + 2].startsWith('  -')))) {
-					i++;
-				}
-				continue;
 			}
 
 			const match = line.match(/^\s*-\s*\*\*([^*]+)\*\*:\s*(.*)$/);
@@ -2408,17 +3883,58 @@ export class EntityDetailEditor extends EditorPane {
 				} else {
 					const rawVal = v !== undefined && v !== null ? String(v).trim() : '';
 					const isValEmpty = !rawVal || rawVal === 'None' || rawVal === 'null' || rawVal === 'undefined' || rawVal === 'N/A';
-					const strVal = isValEmpty ? 'None' : rawVal;
-					const isRange = strVal !== 'None' && (strVal.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(strVal));
+					let strVal = isValEmpty ? 'None' : rawVal;
+					const isPromptJson = rawVal.startsWith('{') && (rawVal.includes('"targetMode"') || rawVal.includes('"preInjectedPrompt"') || rawVal.includes('"userPrompt"'));
+					const isRange = strVal !== 'None' && !rawVal.startsWith('{') && rawVal.length < 60 && (strVal.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(strVal));
 					const isMultiline = strVal.length > 80 || strVal.includes('\n');
 
 					let resolvedType = modField?.type;
 					if (!resolvedType) {
 						if (isAttachment) resolvedType = 'attachment';
+						else if (isPromptJson) resolvedType = 'prompt';
 						else if (isRange) resolvedType = 'date_range';
 						else if (strVal.toLowerCase() === 'true' || strVal.toLowerCase() === 'false') resolvedType = 'switch';
 						else if (isMultiline) resolvedType = 'textarea';
 						else resolvedType = 'text';
+					}
+
+					let nodePreInjectedPrompt: string | undefined = undefined;
+					if (resolvedType === 'prompt') {
+						const templatePreInjected = (modField?.defaultContent || '').trim();
+						let extractedUserPrompt = modField?.defaultUserPrompt || '';
+						let extractedPreInjected = templatePreInjected;
+						if (typeof v === 'object' && v !== null) {
+							const obj = v as Record<string, any>;
+							if (obj.userPrompt !== undefined) {
+								extractedUserPrompt = String(obj.userPrompt);
+							} else if (obj.prompt !== undefined && !templatePreInjected) {
+								extractedUserPrompt = String(obj.prompt);
+							}
+							if (!extractedPreInjected && obj.preInjectedPrompt) {
+								extractedPreInjected = String(obj.preInjectedPrompt).trim();
+							}
+						} else if (rawVal.startsWith('{') && rawVal.endsWith('}')) {
+							try {
+								const parsed = JSON.parse(rawVal);
+								if (parsed.userPrompt !== undefined) {
+									extractedUserPrompt = String(parsed.userPrompt);
+								} else if (parsed.prompt !== undefined && !templatePreInjected) {
+									extractedUserPrompt = String(parsed.prompt);
+								}
+								if (!extractedPreInjected && parsed.preInjectedPrompt) {
+									extractedPreInjected = String(parsed.preInjectedPrompt).trim();
+								}
+							} catch { }
+						} else if (!isValEmpty && !templatePreInjected) {
+							extractedUserPrompt = rawVal;
+						}
+						if (extractedPreInjected && extractedUserPrompt.trim() === extractedPreInjected) {
+							extractedUserPrompt = '';
+						}
+						strVal = extractedUserPrompt.trim() ? extractedUserPrompt.trim() : 'None';
+						if (extractedPreInjected) {
+							nodePreInjectedPrompt = this._interpolateParameters(extractedPreInjected);
+						}
 					}
 
 					customChildren.push({
@@ -2426,6 +3942,7 @@ export class EntityDetailEditor extends EditorPane {
 						label: k,
 						fieldType: resolvedType,
 						currentValue: strVal,
+						preInjectedPrompt: nodePreInjectedPrompt,
 						options: modField?.options || modField?.choices || [],
 						unit: modField?.unit,
 						precision: modField?.precision
@@ -2450,6 +3967,56 @@ export class EntityDetailEditor extends EditorPane {
 		const e = (eventData && eventData.message) ? eventData.message : eventData;
 		if (!e || !this._entityUri) {
 			return;
+		}
+
+		if (this._isPreviewMode && this._lastParsedData) {
+			if (e.type === 'saveAllData' || e.type === 'saveTitleAndDescription' || e.type === 'saveDescription' || e.type === 'saveMetadata') {
+				if (e.title !== undefined) {
+					this._lastParsedData.title = e.title;
+				}
+				if (e.description !== undefined) {
+					this._lastParsedData.description = e.description;
+				}
+				if (e.metadata) {
+					this._lastParsedData.metadata = { ...this._lastParsedData.metadata, ...e.metadata };
+					if (e.metadata['Title'] !== undefined) {
+						this._lastParsedData.title = e.metadata['Title'];
+					}
+					if (e.metadata['Description'] !== undefined) {
+						this._lastParsedData.description = e.metadata['Description'];
+					}
+					if (e.metadata['Status'] !== undefined) {
+						this._lastParsedData.status = e.metadata['Status'];
+					}
+					if (e.metadata['Priority'] !== undefined) {
+						this._lastParsedData.priority = e.metadata['Priority'];
+					}
+					if (e.metadata['Current AI Agent'] !== undefined) {
+						this._lastParsedData.assignedAgentName = e.metadata['Current AI Agent'];
+					}
+					if (e.metadata['Ticket Prompt'] !== undefined) {
+						this._lastParsedData.ticketPrompt = e.metadata['Ticket Prompt'];
+					}
+					if (e.metadata['Ticket Type Prompt'] !== undefined) {
+						this._lastParsedData.typePrompt = e.metadata['Ticket Type Prompt'];
+					}
+					if (e.metadata['Link To'] !== undefined) {
+						this._lastParsedData.linkTo = e.metadata['Link To'];
+					}
+				}
+				if (e.customMetadata) {
+					this._lastParsedData.customMetadata = { ...this._lastParsedData.customMetadata, ...e.customMetadata };
+				}
+				await this._renderPreviewModeData();
+				return;
+			}
+			if (e.type === 'addWorkLog') {
+				const baseLog = this._previewWorkLog || '# Work Log\n';
+				this._previewWorkLog = this._addLogToContent(baseLog, e.log);
+				this._notificationService.info('Preview work log recorded (in-memory).');
+				await this._renderPreviewModeData();
+				return;
+			}
 		}
 
 		switch (e.type) {
@@ -2485,6 +4052,7 @@ export class EntityDetailEditor extends EditorPane {
 						label: e.label,
 						fieldType: e.fieldType,
 						currentValue: e.currentValue,
+						preInjectedPrompt: e.preInjectedPrompt,
 						options: e.options,
 						hierarchyTree: hierarchyTree,
 						entityUri: this._entityUri?.toString()
@@ -2747,7 +4315,7 @@ export class EntityDetailEditor extends EditorPane {
 		const currentStatus = this._lastParsedData?.status || 'Todo';
 		if (!targetStatus || targetStatus.trim() === '') {
 			this._notificationService.info(`Action '${actionLabel}' triggered.`);
-			if (this._workLogUri) {
+			if (this._workLogUri || this._isPreviewMode) {
 				const logEntry = `- **Action**: Clicked '${actionLabel}'\n- **Status Transition**: None configured. Current status remains **${currentStatus}**.`;
 				await this._handleMessage({ type: 'addWorkLog', log: logEntry });
 			}
@@ -2766,7 +4334,7 @@ export class EntityDetailEditor extends EditorPane {
 				customMetadata: {}
 			});
 
-			if (this._workLogUri) {
+			if (this._workLogUri || this._isPreviewMode) {
 				const logEntry = `- **Action Triggered**: '${actionLabel}'\n- **Status Transition**: Changed status from **${currentStatus}** to **${targetStatus}**.`;
 				await this._handleMessage({ type: 'addWorkLog', log: logEntry });
 			}
@@ -3035,12 +4603,15 @@ export class EntityDetailEditor extends EditorPane {
 			return;
 		}
 
-		if (!/^https?:\/\//i.test(url)) {
+		if (!url.startsWith('{') && !url.startsWith('@') && !/^https?:\/\//i.test(url)) {
 			url = 'https://' + url;
 			if (urlInput) urlInput.value = url;
 		}
 
-		const finalUrl = this._interpolateParameters(url);
+		let finalUrl = this._interpolateParameters(url);
+		if (!/^https?:\/\//i.test(finalUrl)) {
+			finalUrl = 'https://' + finalUrl;
+		}
 
 		const statusEl = card.querySelector('.browser-fetch-status') as HTMLElement | null;
 		const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
@@ -3116,7 +4687,7 @@ export class EntityDetailEditor extends EditorPane {
 					statusEl.style.color = '#fbbf24';
 				}
 				const formattedNotice = `[AUTH REQUIRED / PROTECTED PAGE]
-Target URL: ${url}
+Target URL: ${finalUrl}
 Timestamp: ${timestamp}
 Status: Authentication Required / Access Restricted
 
@@ -3125,7 +4696,7 @@ ${rawErr}
 
 --- [AUTOMATION & TROUBLESHOOTING GUIDANCE] ---
 1. Why this happened:
-   The destination endpoint (${url}) requires an active authenticated session or blocks unauthenticated automated background crawlers (CORS / Anti-Scraping / 307 Redirect to Login).
+   The destination endpoint (${finalUrl}) requires an active authenticated session or blocks unauthenticated automated background crawlers (CORS / Anti-Scraping / 307 Redirect to Login).
 
 2. Interactive Login:
    Click the "Open in Tab" or "+ New Tab" button directly above this card to open a browser tab beside and log in.
@@ -3144,7 +4715,7 @@ ${rawErr}
 					statusEl.style.color = '#ef4444';
 				}
 				const formattedErr = `[HTTP / NETWORK FETCH ERROR]
-Target URL: ${url}
+Target URL: ${finalUrl}
 Timestamp: ${timestamp}
 
 --- [RAW SERVER & NETWORK ERROR] ---
@@ -3195,6 +4766,7 @@ ${rawErr}
 			metadata: {},
 			customMetadata: updatedCustom
 		});
+		await this._autoUpdateOutputPrimitives(content, fieldKey);
 	}
 
 	private async _saveTicketParameterValue(fieldKey: string, paramName: string, newValue: string): Promise<void> {
@@ -3218,18 +4790,25 @@ ${rawErr}
 			metadata: {},
 			customMetadata: updatedCustom
 		});
+		await this._autoUpdateOutputPrimitives(JSON.stringify(paramValues, null, 2), fieldKey);
 	}
 
-	private _interpolateParameters(text: string): string {
-		if (!text) return text;
-
+	private _buildInterpolationParamMap(): Map<string, string> {
 		const paramMap = new Map<string, string>();
 
 		// 0. Base Ticket Attributes
 		if (this._lastParsedData) {
-			if (this._lastParsedData.title) paramMap.set('title', this._lastParsedData.title);
-			if (this._lastParsedData.description) paramMap.set('description', this._lastParsedData.description);
-			if (this._lastParsedData.ticketId) paramMap.set('ticketId', this._lastParsedData.ticketId);
+			if (this._lastParsedData.title) {
+				paramMap.set('title', this._lastParsedData.title);
+				paramMap.set('Title', this._lastParsedData.title);
+			}
+			if (this._lastParsedData.description) {
+				paramMap.set('description', this._lastParsedData.description);
+				paramMap.set('Description', this._lastParsedData.description);
+			}
+			if (this._lastParsedData.ticketId) {
+				paramMap.set('ticketId', this._lastParsedData.ticketId);
+			}
 		}
 
 		// 1. Schema default parameters
@@ -3282,8 +4861,8 @@ ${rawErr}
 				let primitiveVal = '';
 				const subProps: Record<string, string> = {};
 
-				// Look up saved metadata
-				const rawSaved = this._lastParsedData?.customMetadata?.[fKey] ?? this._lastParsedData?.customMetadata?.[f.id];
+				// Look up saved metadata (also matching legacy ID-based keys like "AI Prompt 5" when field was renamed)
+				const rawSaved = this._lookupCustomMetadataByField(fKey, f);
 				let savedObj: any = null;
 				if (typeof rawSaved === 'string') {
 					try { savedObj = JSON.parse(rawSaved); } catch { savedObj = rawSaved; }
@@ -3291,18 +4870,25 @@ ${rawErr}
 					savedObj = rawSaved;
 				}
 
+				const findLiveCard = (): HTMLElement | null => {
+					if (!this._container) {
+						return null;
+					}
+					return (this._container.querySelector(`.custom-property-card[data-field-key="${fKey}"]`) ||
+						this._container.querySelector(`.custom-property-card[data-field-id="${f.id}"]`) ||
+						this._container.querySelector(`.custom-primitive-card[data-field-key="${fKey}"]`) ||
+						this._container.querySelector(`.custom-primitive-card[data-field-id="${f.id}"]`)) as HTMLElement | null;
+				};
+
 				if (f.type === 'browser') {
 					let url = '';
 					let content = '';
-					if (this._container) {
-						const card = this._container.querySelector(`.custom-primitive-card[data-field-key="${fKey}"]`) ||
-									this._container.querySelector(`.custom-primitive-card[data-field-id="${f.id}"]`);
-						if (card) {
-							const urlInput = card.querySelector('.browser-url-input') as HTMLInputElement | null;
-							const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
-							if (urlInput) url = urlInput.value.trim();
-							if (contentEl) content = contentEl.textContent || '';
-						}
+					const card = findLiveCard();
+					if (card) {
+						const urlInput = card.querySelector('.browser-url-input') as HTMLInputElement | null;
+						const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
+						if (urlInput) url = urlInput.value.trim();
+						if (contentEl) content = contentEl.textContent || '';
 					}
 					if (!url && savedObj && typeof savedObj === 'object') {
 						url = savedObj.url || '';
@@ -3311,6 +4897,7 @@ ${rawErr}
 						content = savedObj.content || '';
 					}
 					if (!url) url = f.defaultUrl || '';
+					if (!content) content = f.defaultContent || '';
 
 					if (content.includes('No webpage content extracted yet.')) {
 						content = '';
@@ -3318,19 +4905,68 @@ ${rawErr}
 
 					subProps['url'] = url;
 					subProps['content'] = content;
-					primitiveVal = `--- [Primitive: ${label} (Browser)] ---\nTarget URL: ${url}\nExtracted Web Content:\n${content}\n--- [End of ${label}] ---`;
+					primitiveVal = content || url;
+				} else if (f.type === 'python') {
+					let pyResultStr = '';
+					let pyOutputStr = '';
+					let pyCodeStr = '';
+					const card = findLiveCard();
+					if (card) {
+						const resEl = card.querySelector('.python-result-display') as HTMLElement | null;
+						const outEl = card.querySelector('.python-output-display') as HTMLElement | null;
+						const codeEl = card.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+						if (resEl && resEl.textContent) {
+							pyResultStr = resEl.textContent.trim();
+						} else if ((card as any)._lastPythonResult !== undefined && (card as any)._lastPythonResult !== null) {
+							const lr = (card as any)._lastPythonResult;
+							pyResultStr = typeof lr === 'object' ? JSON.stringify(lr) : String(lr).trim();
+						}
+						if (outEl && outEl.textContent) {
+							pyOutputStr = outEl.textContent.trim();
+						}
+						if (codeEl) {
+							pyCodeStr = codeEl.value || '';
+						}
+					}
+					if (!pyResultStr && savedObj && typeof savedObj === 'object' && savedObj.result !== undefined && savedObj.result !== null) {
+						pyResultStr = typeof savedObj.result === 'object' ? JSON.stringify(savedObj.result) : String(savedObj.result).trim();
+					}
+					if (!pyOutputStr && savedObj && typeof savedObj === 'object' && savedObj.output) {
+						pyOutputStr = String(savedObj.output).trim();
+					}
+					if (!pyCodeStr && savedObj && typeof savedObj === 'object' && savedObj.code) {
+						pyCodeStr = String(savedObj.code);
+					}
+					if (!pyResultStr && f.pythonResult !== undefined && f.pythonResult !== null) {
+						pyResultStr = typeof f.pythonResult === 'object' ? JSON.stringify(f.pythonResult) : String(f.pythonResult).trim();
+					}
+					if (!pyOutputStr && f.pythonOutput) {
+						pyOutputStr = String(f.pythonOutput).trim();
+					}
+					if (pyOutputStr.includes('No execution logs yet.') || pyOutputStr.includes('No execution output yet.')) {
+						pyOutputStr = '';
+					}
+
+					primitiveVal = pyResultStr !== '' ? pyResultStr : pyOutputStr;
+					subProps['result'] = pyResultStr || pyOutputStr;
+					subProps['output'] = pyOutputStr || pyResultStr;
+					subProps['code'] = pyCodeStr;
 				} else if (f.type === 'prompt') {
 					let prompt = '';
 					let output = '';
-					if (this._container) {
-						const card = this._container.querySelector(`.custom-primitive-card[data-field-key="${fKey}"]`) ||
-									this._container.querySelector(`.custom-primitive-card[data-field-id="${f.id}"]`);
-						if (card) {
+					const card = findLiveCard();
+					if (card) {
+						const userTas = Array.from(card.querySelectorAll('.prompt-user-textarea')) as HTMLTextAreaElement[];
+						const preTa = card.querySelector('.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
+						const preTxt = preTa ? preTa.value : (card.getAttribute('data-pre-injected-prompt') || '');
+						if (userTas.length > 0) {
+							prompt = this._formatCombinedPromptForLlm(preTxt, userTas.map(t => t.value || '')).combinedRawPrompt;
+						} else {
 							const ta = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
-							const out = card.querySelector('.prompt-output-display') as HTMLElement | null;
 							if (ta) prompt = ta.value;
-							if (out) output = out.textContent || '';
 						}
+						const out = card.querySelector('.prompt-output-display') as HTMLElement | null;
+						if (out) output = out.textContent || '';
 					}
 					if (!prompt && savedObj && typeof savedObj === 'object') {
 						prompt = savedObj.prompt || '';
@@ -3338,10 +4974,13 @@ ${rawErr}
 					if (!output && savedObj && typeof savedObj === 'object') {
 						output = savedObj.output || '';
 					}
-					if (!prompt) prompt = f.defaultContent || '';
+					if (!prompt) prompt = f.defaultUserPrompt || f.defaultContent || '';
+					if (!output) output = f.debugPromptOutput || '';
 
-					if (output.includes('No execution output yet.')) {
-						output = '';
+					if (output.includes('No execution output yet.') || output.startsWith('Processing prompt with ')) {
+						output = (savedObj && typeof savedObj === 'object' && savedObj.output && !String(savedObj.output).includes('No execution output yet.'))
+							? String(savedObj.output)
+							: '';
 					}
 
 					subProps['prompt'] = prompt;
@@ -3349,21 +4988,18 @@ ${rawErr}
 					primitiveVal = output || prompt;
 				} else if (f.type === 'output' || f.type === 'result') {
 					let resText = '';
-					if (this._container) {
-						const card = this._container.querySelector(`.custom-primitive-card[data-field-key="${fKey}"]`) ||
-									this._container.querySelector(`.custom-primitive-card[data-field-id="${f.id}"]`);
-						if (card) {
-							const contentEl = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
-							if (contentEl) { resText = contentEl.value || ''; }
-							const specItems = card.querySelectorAll('.output-spec-item');
-							specItems.forEach(it => {
-								const sKey = it.getAttribute('data-spec-key') || '';
-								const ta = it.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
-								if (sKey && ta?.value) {
-									subProps[sKey] = ta.value;
-								}
-							});
-						}
+					const card = findLiveCard();
+					if (card) {
+						const contentEl = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
+						if (contentEl) { resText = contentEl.value || ''; }
+						const specItems = card.querySelectorAll('.output-spec-item');
+						specItems.forEach(it => {
+							const sKey = it.getAttribute('data-spec-key') || '';
+							const ta = it.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+							if (sKey && ta?.value) {
+								subProps[sKey] = ta.value;
+							}
+						});
 					}
 					if (!resText && savedObj) {
 						if (typeof savedObj === 'object' && savedObj !== null) {
@@ -3392,6 +5028,60 @@ ${rawErr}
 						}
 					}
 					primitiveVal = lines.join('\n');
+				} else if (f.type === 'table') {
+					let cols: any[] = Array.isArray(f.tableColumns) ? f.tableColumns : [];
+					let rows: any[] = Array.isArray(f.tableRows) ? f.tableRows : [];
+					let dbPath = f.tableDbPath || '';
+					let tableName = f.tableDbTableName || '';
+					let sqlOut = (f.debugSqlOutput || '').trim();
+					if (savedObj && typeof savedObj === 'object') {
+						if (Array.isArray(savedObj.columns)) cols = savedObj.columns;
+						if (Array.isArray(savedObj.rows)) rows = savedObj.rows;
+						if (savedObj.dbPath !== undefined) dbPath = String(savedObj.dbPath);
+						if (savedObj.tableName !== undefined) tableName = String(savedObj.tableName);
+						if (savedObj.sqlOutput !== undefined || savedObj.debugSqlOutput !== undefined) {
+							sqlOut = String(savedObj.sqlOutput ?? savedObj.debugSqlOutput ?? '').trim();
+						}
+					}
+					const card = findLiveCard();
+					if (card) {
+						const liveJsonStr = card.getAttribute('data-table-json');
+						if (liveJsonStr) {
+							try {
+								const liveParsed = JSON.parse(liveJsonStr);
+								if (Array.isArray(liveParsed.columns)) cols = liveParsed.columns;
+								if (Array.isArray(liveParsed.rows)) rows = liveParsed.rows;
+								if (liveParsed.dbPath !== undefined) dbPath = String(liveParsed.dbPath);
+								if (liveParsed.tableName !== undefined) tableName = String(liveParsed.tableName);
+								if (liveParsed.sqlOutput !== undefined) sqlOut = String(liveParsed.sqlOutput).trim();
+							} catch {}
+						}
+						const liveSqlBox = card.querySelector('.sql-output-box') as HTMLElement | null;
+						if (liveSqlBox && liveSqlBox.style.fontStyle !== 'italic' && liveSqlBox.textContent) {
+							const boxTxt = liveSqlBox.textContent.trim();
+							if (boxTxt && !boxTxt.startsWith('No SQL execution output yet.')) {
+								sqlOut = boxTxt;
+							}
+						}
+					}
+					const colNames = cols.length > 0
+						? cols.map((c: any) => c.name || c.id)
+						: (rows.length > 0 && typeof rows[0] === 'object' && rows[0] !== null ? Object.keys(rows[0]) : []);
+					const mdTable = colNames.length > 0
+						? [
+							`| ${colNames.join(' | ')} |`,
+							`| ${colNames.map(() => '---').join(' | ')} |`,
+							...rows.map((r: any) => `| ${colNames.map((cn: string) => String(r?.[cn] ?? '').replace(/\|/g, '\\|')).join(' | ')} |`)
+						].join('\n')
+						: JSON.stringify(rows);
+					primitiveVal = sqlOut || mdTable;
+					subProps['output'] = sqlOut || mdTable;
+					subProps['sqlOutput'] = sqlOut;
+					subProps['table'] = mdTable;
+					subProps['json'] = JSON.stringify(rows);
+					subProps['rows'] = JSON.stringify(rows);
+					subProps['dbPath'] = dbPath;
+					subProps['tableName'] = tableName;
 				} else {
 					if (savedObj) {
 						primitiveVal = typeof savedObj === 'object' ? JSON.stringify(savedObj, null, 2) : String(savedObj);
@@ -3432,7 +5122,14 @@ ${rawErr}
 			}
 		}
 
-		// Interpolate {{param}} and {param}
+		return paramMap;
+	}
+
+	private _interpolateParameters(text: string): string {
+		if (!text) return text;
+		const paramMap = this._buildInterpolationParamMap();
+
+		// Interpolate {{param}}, {param}, and @param
 		const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 		let result = text;
 		for (const [pName, pVal] of paramMap.entries()) {
@@ -3440,132 +5137,1837 @@ ${rawErr}
 			const escapedName = escapeRegExp(pName);
 			const reDouble = new RegExp(`\\{\\{\\s*${escapedName}\\s*\\}\\}`, 'gi');
 			const reSingle = new RegExp(`\\{\\s*${escapedName}\\s*\\}`, 'gi');
-			result = result.replace(reDouble, pVal).replace(reSingle, pVal);
+			const reAt = new RegExp(`@${escapedName}(?![a-zA-Z0-9_-])`, 'gi');
+			result = result.replace(reDouble, () => pVal).replace(reSingle, () => pVal).replace(reAt, () => pVal);
 		}
 		return result;
 	}
 
-	private async _savePromptPrimitiveData(fieldKey: string, promptData: any): Promise<void> {
-		const updatedCustom = {
-			...(this._lastParsedData?.customMetadata || {}),
-			[fieldKey]: JSON.stringify(promptData)
+	private _lookupCustomMetadataByField(labelOrKey: string, matchingField?: any): any {
+		const meta = this._lastParsedData?.customMetadata;
+		if (!meta) { return undefined; }
+
+		const candidates: string[] = [];
+		const addCandidate = (s?: string) => {
+			if (!s || !s.trim()) { return; }
+			const t = s.trim();
+			if (!candidates.includes(t)) { candidates.push(t); }
+			const spaceNorm = t.replace(/_/g, ' ');
+			if (!candidates.includes(spaceNorm)) { candidates.push(spaceNorm); }
+			const underNorm = t.replace(/\s+/g, '_');
+			if (!candidates.includes(underNorm)) { candidates.push(underNorm); }
 		};
-		await this._handleMessage({
-			type: 'saveMetadata',
-			metadata: {},
-			customMetadata: updatedCustom
+
+		addCandidate(labelOrKey);
+		if (matchingField) {
+			addCandidate(matchingField.label);
+			addCandidate(matchingField.id);
+		} else if (this._lastCustomModule?.fields) {
+			const found = this._lastCustomModule.fields.find((f: any) =>
+				(f.label && f.label.toLowerCase() === labelOrKey.toLowerCase()) ||
+				(f.id && f.id.toLowerCase() === labelOrKey.toLowerCase()) ||
+				(f.id && f.id.toLowerCase().replace(/_/g, ' ') === labelOrKey.toLowerCase().replace(/_/g, ' '))
+			);
+			if (found) {
+				addCandidate(found.label);
+				addCandidate(found.id);
+			}
+		}
+
+		for (const c of candidates) {
+			if (meta[c] !== undefined) {
+				return meta[c];
+			}
+		}
+		const lowerCandidates = new Set(candidates.map(c => c.toLowerCase()));
+		for (const [k, v] of Object.entries(meta)) {
+			if (lowerCandidates.has(k.toLowerCase()) || lowerCandidates.has(k.toLowerCase().replace(/_/g, ' '))) {
+				return v;
+			}
+		}
+		return undefined;
+	}
+
+	private async _savePromptPrimitiveData(fieldKey: string, promptData: any): Promise<void> {
+		await this._persistCustomFieldQuietly(fieldKey, JSON.stringify(promptData));
+	}
+
+	private async _persistCustomFieldQuietly(fieldKey: string, serializedValue: string): Promise<void> {
+		this._saveEpoch++;
+		this._suppressAutoReloadUntil = Date.now() + 5000;
+		const updatedCustom: Record<string, string> = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: serializedValue
+		};
+		// Also sync under the current schema field label if fieldKey was a legacy ID-based key (e.g. "AI Prompt 5" -> "Skills and Features")
+		if (this._lastCustomModule?.fields) {
+			const matchedSchemaField = this._lastCustomModule.fields.find((f: any) =>
+				(f.label && f.label.toLowerCase() === fieldKey.toLowerCase()) ||
+				(f.id && f.id.toLowerCase() === fieldKey.toLowerCase()) ||
+				(f.id && f.id.toLowerCase().replace(/_/g, ' ') === fieldKey.toLowerCase().replace(/_/g, ' '))
+			);
+			if (matchedSchemaField?.label && matchedSchemaField.label !== fieldKey) {
+				updatedCustom[matchedSchemaField.label] = serializedValue;
+			}
+		}
+		if (this._lastParsedData) {
+			this._lastParsedData.customMetadata = updatedCustom;
+		}
+		if (this._ticketFileUri && !this._isPreviewMode) {
+			const targetUri = this._ticketFileUri;
+			this._activeSaveCount++;
+			const runSave = async () => {
+				try {
+					this._suppressAutoReloadUntil = Date.now() + 5000;
+					const latestCustom = this._lastParsedData?.customMetadata || updatedCustom;
+					const content = await this._safeReadFile(targetUri);
+					const updated = this._updateTicketMdContent(content, {}, latestCustom);
+					await this._fileService.writeFile(targetUri, VSBuffer.fromString(updated));
+					this._suppressAutoReloadUntil = Date.now() + 5000;
+				} catch (err) {
+					console.error(`Failed to persist custom field '${fieldKey}':`, err);
+				} finally {
+					this._activeSaveCount = Math.max(0, this._activeSaveCount - 1);
+				}
+			};
+			this._saveChain = this._saveChain.then(runSave, runSave);
+			await this._saveChain;
+		}
+	}
+
+	private async _togglePromptVoiceInput(micBtn: HTMLButtonElement): Promise<void> {
+		const wrapper = micBtn.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
+		const card = micBtn.closest('.prompt-primitive-card') as HTMLElement | null;
+		const textarea = wrapper?.querySelector('textarea') as HTMLTextAreaElement | null;
+		const recordingIndicator = wrapper?.querySelector('.prompt-voice-recording-indicator') as HTMLElement | null;
+		const recordingTimeSpan = recordingIndicator?.querySelector('.prompt-voice-recording-time') as HTMLElement | null;
+		const fieldKey = micBtn.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
+		if (!textarea) {
+			return;
+		}
+
+		const btnState = (micBtn as any)._voiceInputState as {
+			isRecording: boolean;
+			isTranscribing: boolean;
+			mediaRecorder?: any;
+			recordingTimer?: any;
+			recordingSeconds: number;
+			stream?: MediaStream;
+			lastSelectionStart?: number;
+			lastSelectionEnd?: number;
+			stopRecording?: () => void;
+		} | undefined;
+
+		if (btnState?.isRecording && btnState.stopRecording) {
+			btnState.stopRecording();
+			return;
+		}
+		if (btnState?.isTranscribing) {
+			return;
+		}
+
+		const state = {
+			isRecording: false,
+			isTranscribing: false,
+			mediaRecorder: undefined as any,
+			recordingTimer: undefined as any,
+			recordingSeconds: 0,
+			stream: undefined as MediaStream | undefined,
+			lastSelectionStart: typeof textarea.selectionStart === 'number' ? textarea.selectionStart : textarea.value.length,
+			lastSelectionEnd: typeof textarea.selectionEnd === 'number' ? textarea.selectionEnd : textarea.value.length,
+			stopRecording: () => {}
+		};
+		(micBtn as any)._voiceInputState = state;
+
+		const applyVisualState = () => {
+			if (state.isRecording) {
+				micBtn.classList.add('recording');
+				micBtn.style.color = '#ff3b30';
+				micBtn.style.opacity = '1';
+				micBtn.style.background = 'rgba(255, 59, 48, 0.14)';
+				micBtn.style.border = 'none';
+				micBtn.style.boxShadow = 'none';
+				micBtn.title = 'Stop recording and transcribe';
+			} else {
+				micBtn.classList.remove('recording');
+				micBtn.style.color = 'var(--vscode-foreground)';
+				micBtn.style.opacity = state.isTranscribing ? '1' : '0.65';
+				micBtn.style.background = 'transparent';
+				micBtn.style.border = 'none';
+				micBtn.style.boxShadow = 'none';
+				micBtn.title = 'Record voice input (Speech-to-Text)';
+			}
+		};
+
+		state.stopRecording = () => {
+			if (state.recordingTimer) {
+				clearInterval(state.recordingTimer);
+				state.recordingTimer = undefined;
+			}
+			if (state.mediaRecorder && state.isRecording) {
+				try {
+					state.mediaRecorder.stop();
+				} catch {}
+				state.isRecording = false;
+			} else {
+				state.isRecording = false;
+				if (!state.isTranscribing && recordingIndicator) {
+					recordingIndicator.style.display = 'none';
+				}
+			}
+			applyVisualState();
+		};
+
+		try {
+			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+			state.stream = stream;
+			const audioChunks: BlobPart[] = [];
+			const mediaRecorder = new (window as any).MediaRecorder(stream);
+			state.mediaRecorder = mediaRecorder;
+
+			mediaRecorder.ondataavailable = (e: any) => {
+				if (e.data && e.data.size > 0) {
+					audioChunks.push(e.data);
+				}
+			};
+
+			mediaRecorder.onstop = async () => {
+				state.isTranscribing = true;
+				applyVisualState();
+				stream.getTracks().forEach(track => track.stop());
+				state.stream = undefined;
+
+				const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+				if (recordingIndicator) {
+					recordingIndicator.style.display = 'inline-flex';
+				}
+				if (recordingTimeSpan) {
+					recordingTimeSpan.textContent = 'Transcribing voice...';
+				}
+
+				try {
+					const voiceModelService = this._instantiationService.invokeFunction(accessor => accessor.get(IVoiceModelService));
+					const result = await voiceModelService.transcribeAudio(audioBlob);
+					if (result.text && result.text.trim()) {
+						const transcribed = result.text.trim();
+						const existing = textarea.value || '';
+						let start = typeof textarea.selectionStart === 'number'
+							? textarea.selectionStart
+							: (state.lastSelectionStart ?? existing.length);
+						let end = typeof textarea.selectionEnd === 'number'
+							? textarea.selectionEnd
+							: (state.lastSelectionEnd ?? existing.length);
+
+						if (start < 0 || start > existing.length) { start = existing.length; }
+						if (end < 0 || end > existing.length) { end = existing.length; }
+						if (start > end) { const tmp = start; start = end; end = tmp; }
+
+						const beforeText = existing.substring(0, start);
+						const afterText = existing.substring(end);
+						let insertText = transcribed;
+						if (start > 0 && !/\s$/.test(beforeText) && !/^\s/.test(insertText)) {
+							insertText = ' ' + insertText;
+						}
+						if (end < existing.length && !/^\s/.test(afterText) && !/\s$/.test(insertText)) {
+							insertText = insertText + ' ';
+						}
+
+						textarea.value = beforeText + insertText + afterText;
+						const newCursorPos = start + insertText.length;
+						textarea.selectionStart = newCursorPos;
+						textarea.selectionEnd = newCursorPos;
+						textarea.setAttribute('data-last-selection-start', String(newCursorPos));
+						textarea.setAttribute('data-last-selection-end', String(newCursorPos));
+						this._syncPromptTokenizedDisplay(textarea, false);
+						if (textarea.style.display !== 'none') {
+							textarea.focus({ preventScroll: true });
+						}
+
+						if (textarea.classList.contains('prompt-preinjected-textarea') && card) {
+							card.setAttribute('data-pre-injected-prompt', textarea.value);
+						}
+						if (card && fieldKey) {
+							await this._savePromptDataFromCard(card, fieldKey);
+						}
+					} else if (result.error) {
+						this._notificationService.warn(`Voice Transcription: ${result.error}`);
+					}
+				} catch (err: any) {
+					console.error('Failed to transcribe voice input:', err);
+					this._notificationService.error(`Voice transcription error: ${err?.message || err}`);
+				} finally {
+					state.isTranscribing = false;
+					if (recordingIndicator) {
+						recordingIndicator.style.display = 'none';
+					}
+					applyVisualState();
+				}
+			};
+
+			mediaRecorder.start();
+			state.isRecording = true;
+			state.recordingSeconds = 0;
+			if (recordingIndicator) {
+				recordingIndicator.style.display = 'inline-flex';
+			}
+			if (recordingTimeSpan) {
+				recordingTimeSpan.textContent = '0:00 / 5:00';
+			}
+			applyVisualState();
+
+			state.recordingTimer = setInterval(() => {
+				state.recordingSeconds++;
+				if (recordingTimeSpan) {
+					const mins = Math.floor(state.recordingSeconds / 60);
+					const secs = state.recordingSeconds % 60;
+					recordingTimeSpan.textContent = `${mins}:${secs < 10 ? '0' : ''}${secs} / 5:00`;
+				}
+				if (state.recordingSeconds >= 300) {
+					state.stopRecording();
+				}
+			}, 1000);
+		} catch (err: any) {
+			console.error('Error accessing microphone:', err);
+			this._notificationService.error(`Microphone access error: ${err?.message || err}`);
+		}
+	}
+
+	private _renderPromptTokenizedHtml(rawText: string, placeholderText: string): string {
+		if (!rawText) {
+			return `<span style="color: rgba(255, 255, 255, 0.35); font-style: italic;">${this._escapeHtml(placeholderText)}</span>`;
+		}
+		const regex = /\{\{([^{}\n]+)\}\}|\{([^{}\n]+)\}/g;
+		let lastIndex = 0;
+		let match: RegExpExecArray | null;
+		let outHtml = '';
+
+		const appendRawText = (startIdx: number, endIdx: number) => {
+			if (endIdx <= startIdx) {
+				return;
+			}
+			outHtml += `<span class="prompt-raw-segment" data-raw-start="${startIdx}" data-raw-end="${endIdx}">${this._escapeHtml(rawText.substring(startIdx, endIdx))}</span>`;
+		};
+
+		while ((match = regex.exec(rawText)) !== null) {
+			const matchStart = match.index;
+			const matchEnd = regex.lastIndex;
+			const varLabel = (match[1] || match[2] || '').trim();
+			if (matchStart > lastIndex) {
+				appendRawText(lastIndex, matchStart);
+			}
+			if (varLabel) {
+				const rawToken = rawText.substring(matchStart, matchEnd);
+				const openBrace = rawToken.startsWith('{{') ? '{{' : '{';
+				const closeBrace = rawToken.endsWith('}}') ? '}}' : '}';
+				outHtml += `<span class="prompt-token-pill" data-raw-start="${matchStart}" data-raw-end="${matchEnd}" data-raw-token="${this._escapeHtmlAttr(rawToken)}" style="display: inline; white-space: nowrap; padding: 1px 6px; font-size: 11px; font-weight: 500; border-radius: 3.5px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.28); vertical-align: baseline; font-family: var(--vscode-editor-font-family, monospace); user-select: text; -webkit-user-select: text; margin: 0 1.5px; line-height: 1.35; cursor: text; transition: all 0.15s ease;" title="Referenced Field: ${this._escapeHtmlAttr(varLabel)} (Click to edit)"><span class="codicon codicon-link" style="font-size: 10px; opacity: 0.85; margin-right: 3.5px; vertical-align: -1px; user-select: none; -webkit-user-select: none;"></span><span style="font-size: 0; line-height: 0; opacity: 0;">${openBrace}</span><span style="font-weight: 600;">${this._escapeHtml(varLabel)}</span><span style="font-size: 0; line-height: 0; opacity: 0;">${closeBrace}</span></span>`;
+			} else {
+				appendRawText(matchStart, matchEnd);
+			}
+			lastIndex = matchEnd;
+		}
+		if (lastIndex < rawText.length) {
+			appendRawText(lastIndex, rawText.length);
+		}
+		return outHtml;
+	}
+
+	private static readonly _PROMPT_BOX_DEFAULT_MAX_HEIGHT = 156;
+
+	private _isPromptBoxContentLong(
+		rawText: string,
+		displayEl?: HTMLElement | null,
+		textareaEl?: HTMLTextAreaElement | null
+	): boolean {
+		const text = rawText || '';
+		if (text.length > 240) {
+			return true;
+		}
+		const lineCount = text.split(/\r?\n/).length;
+		if (lineCount > 5) {
+			return true;
+		}
+		const maxH = EntityDetailEditor._PROMPT_BOX_DEFAULT_MAX_HEIGHT + 6;
+		if (displayEl && displayEl.scrollHeight > maxH) {
+			return true;
+		}
+		if (textareaEl && textareaEl.scrollHeight > maxH) {
+			return true;
+		}
+		return false;
+	}
+
+	private _syncPromptBoxExpandUi(wrapper: HTMLElement): void {
+		const isExpanded = wrapper.getAttribute('data-expanded') === 'true';
+		const displayEl = wrapper.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+		const textareaEl = wrapper.querySelector('textarea') as HTMLTextAreaElement | null;
+		const topExpandBtn = wrapper.querySelector('.prompt-expand-box-btn') as HTMLElement | null;
+		const bottomExpandPill = wrapper.querySelector('.prompt-expand-bottom-pill') as HTMLElement | null;
+		const rawVal = textareaEl?.value || '';
+		const isLong = isExpanded || this._isPromptBoxContentLong(rawVal, displayEl, textareaEl);
+		const defaultMaxPx = `${EntityDetailEditor._PROMPT_BOX_DEFAULT_MAX_HEIGHT}px`;
+
+		if (displayEl) {
+			if (isExpanded) {
+				displayEl.style.maxHeight = 'none';
+				displayEl.style.height = 'auto';
+			} else {
+				displayEl.style.maxHeight = defaultMaxPx;
+				displayEl.style.height = 'auto';
+			}
+		}
+
+		if (textareaEl) {
+			if (isExpanded) {
+				textareaEl.style.maxHeight = 'none';
+				if (textareaEl.style.display !== 'none') {
+					const fullH = Math.max(200, textareaEl.scrollHeight + 12);
+					textareaEl.style.height = `${fullH}px`;
+				}
+			} else {
+				textareaEl.style.maxHeight = defaultMaxPx;
+				textareaEl.style.height = '140px';
+			}
+		}
+
+		if (topExpandBtn) {
+			topExpandBtn.style.display = isLong ? 'inline-flex' : 'none';
+			topExpandBtn.title = isExpanded
+				? 'Collapse input box to default compact height'
+				: 'Expand input box to show full content';
+			topExpandBtn.style.background = 'transparent';
+			topExpandBtn.style.border = 'none';
+			const iconEl = topExpandBtn.querySelector('.codicon') as HTMLElement | null;
+			if (iconEl) {
+				iconEl.className = isExpanded ? 'codicon codicon-chevron-up' : 'codicon codicon-chevron-down';
+			}
+		}
+
+		if (bottomExpandPill) {
+			bottomExpandPill.style.display = 'none';
+		}
+	}
+
+	private _togglePromptBoxExpand(wrapper: HTMLElement): void {
+		const currentlyExpanded = wrapper.getAttribute('data-expanded') === 'true';
+		wrapper.setAttribute('data-expanded', currentlyExpanded ? 'false' : 'true');
+		this._syncPromptBoxExpandUi(wrapper);
+	}
+
+	private _syncPromptTokenizedDisplay(textarea: HTMLTextAreaElement, switchToDisplayMode: boolean): void {
+		const wrapper = textarea.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
+		const displayEl = wrapper?.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+		if (!displayEl || !wrapper) {
+			return;
+		}
+		const placeholderText = textarea.getAttribute('placeholder') || displayEl.getAttribute('data-placeholder') || '';
+		displayEl.setAttribute('data-placeholder', placeholderText);
+		const renderedHtml = this._renderPromptTokenizedHtml(textarea.value || '', placeholderText);
+		displayEl.innerHTML = ttPolicy ? (ttPolicy.createHTML(renderedHtml) as unknown as string) : renderedHtml;
+		if (switchToDisplayMode) {
+			const savedScrollTop = textarea.scrollTop;
+			textarea.style.display = 'none';
+			displayEl.style.display = 'block';
+			this._syncPromptBoxExpandUi(wrapper);
+			if (savedScrollTop > 0 && wrapper.getAttribute('data-expanded') !== 'true') {
+				displayEl.scrollTop = savedScrollTop;
+			}
+		} else {
+			this._syncPromptBoxExpandUi(wrapper);
+		}
+	}
+
+	private _resolveClickOffsetInPromptDisplay(displayEl: HTMLElement, ev?: MouseEvent): number | undefined {
+		if (!ev) {
+			return undefined;
+		}
+		const doc = displayEl.ownerDocument as Document & {
+			caretRangeFromPoint?: (x: number, y: number) => Range | null;
+		};
+		const targetEl = ev.target as HTMLElement | null;
+		if (targetEl) {
+			const pillEl = targetEl.closest('.prompt-token-pill') as HTMLElement | null;
+			if (pillEl && displayEl.contains(pillEl)) {
+				const rawStart = Number(pillEl.getAttribute('data-raw-start'));
+				const rawEnd = Number(pillEl.getAttribute('data-raw-end'));
+				if (!isNaN(rawStart) && !isNaN(rawEnd)) {
+					const rect = pillEl.getBoundingClientRect();
+					return ev.clientX >= rect.left + rect.width / 2 ? rawEnd : rawStart;
+				}
+			}
+		}
+		if (typeof doc.caretRangeFromPoint === 'function') {
+			const range = doc.caretRangeFromPoint(ev.clientX, ev.clientY);
+			if (range && displayEl.contains(range.startContainer)) {
+				let node: Node | null = range.startContainer;
+				const offsetInNode = range.startOffset;
+				while (node && node !== displayEl) {
+					if (node instanceof HTMLElement) {
+						if (node.classList.contains('prompt-raw-segment')) {
+							const segStart = Number(node.getAttribute('data-raw-start'));
+							if (!isNaN(segStart)) {
+								return segStart + offsetInNode;
+							}
+						}
+						if (node.classList.contains('prompt-token-pill')) {
+							const pillStart = Number(node.getAttribute('data-raw-start'));
+							const pillEnd = Number(node.getAttribute('data-raw-end'));
+							if (!isNaN(pillStart) && !isNaN(pillEnd)) {
+								const rect = node.getBoundingClientRect();
+								return ev.clientX >= rect.left + rect.width / 2 ? pillEnd : pillStart;
+							}
+						}
+					}
+					node = node.parentNode;
+				}
+			}
+		}
+		return undefined;
+	}
+
+	private _syncPromptBoxLockUi(wrapper: HTMLElement): void {
+		const isLocked = wrapper.getAttribute('data-locked') === 'true';
+		const lockBtn = wrapper.querySelector('.prompt-lock-box-btn') as HTMLElement | null;
+		const displayEl = wrapper.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+		const micBtn = wrapper.querySelector('.prompt-voice-mic-btn') as HTMLElement | null;
+		const itemEl = wrapper.closest('.prompt-user-input-item') as HTMLElement | null;
+		const chipsContainer = itemEl?.querySelector('.prompt-user-input-chips') as HTMLElement | null;
+
+		if (lockBtn) {
+			lockBtn.style.color = isLocked ? '#fbbf24' : '#34d399';
+			lockBtn.style.background = 'transparent';
+			lockBtn.style.border = 'none';
+			lockBtn.title = isLocked
+				? 'Locked (Read-Only) — Click to Unlock for editing'
+				: 'Unlocked (Editable) — Click to Lock and protect from accidental edits';
+			const iconEl = lockBtn.querySelector('.codicon') as HTMLElement | null;
+			if (iconEl) {
+				iconEl.className = isLocked ? 'codicon codicon-lock' : 'codicon codicon-unlock';
+			}
+		}
+
+		if (displayEl) {
+			displayEl.style.cursor = 'text';
+			displayEl.title = isLocked
+				? 'Locked (Read-Only, text can be selected & copied) — Click the lock icon in the top-right to unlock and edit'
+				: 'Click anywhere to edit prompt text';
+		}
+
+		if (micBtn) {
+			micBtn.style.opacity = isLocked ? '0.28' : '0.65';
+			micBtn.title = isLocked
+				? 'Locked — Unlock this prompt box first to record voice input'
+				: 'Record voice input (Speech-to-Text)';
+		}
+
+		if (chipsContainer) {
+			chipsContainer.style.opacity = isLocked ? '0.5' : '1';
+		}
+	}
+
+	private _togglePromptBoxLock(wrapper: HTMLElement): void {
+		const currentlyLocked = wrapper.getAttribute('data-locked') === 'true';
+		const nextLocked = !currentlyLocked;
+		wrapper.setAttribute('data-locked', nextLocked ? 'true' : 'false');
+		const textarea = wrapper.querySelector('textarea') as HTMLTextAreaElement | null;
+		if (nextLocked && textarea && textarea.style.display !== 'none') {
+			if (typeof textarea.selectionStart === 'number') {
+				textarea.setAttribute('data-last-selection-start', String(textarea.selectionStart));
+				textarea.setAttribute('data-last-selection-end', String(typeof textarea.selectionEnd === 'number' ? textarea.selectionEnd : textarea.selectionStart));
+			}
+			this._syncPromptTokenizedDisplay(textarea, true);
+			textarea.blur();
+		}
+		this._syncPromptBoxLockUi(wrapper);
+	}
+
+	private _pulsePromptLockBtn(wrapper: HTMLElement): void {
+		const lockBtn = wrapper.querySelector('.prompt-lock-box-btn') as HTMLElement | null;
+		const displayEl = wrapper.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+		if (lockBtn) {
+			const prevShadow = lockBtn.style.boxShadow;
+			const prevTransform = lockBtn.style.transform;
+			lockBtn.style.boxShadow = '0 0 0 3px rgba(245, 158, 11, 0.45)';
+			lockBtn.style.transform = 'scale(1.12)';
+			setTimeout(() => {
+				lockBtn.style.boxShadow = prevShadow || '';
+				lockBtn.style.transform = prevTransform || '';
+			}, 450);
+		}
+		if (displayEl) {
+			const prevBorder = displayEl.style.borderColor;
+			displayEl.style.borderColor = 'rgba(245, 158, 11, 0.55)';
+			setTimeout(() => {
+				displayEl.style.borderColor = prevBorder || 'rgba(255,255,255,0.15)';
+			}, 450);
+		}
+	}
+
+	private _switchPromptDisplayToEdit(displayEl: HTMLElement, ev?: MouseEvent, explicitCaretOffset?: number): void {
+		const wrapper = displayEl.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
+		const textarea = wrapper?.querySelector('textarea') as HTMLTextAreaElement | null;
+		if (!textarea || !wrapper) {
+			return;
+		}
+		if (wrapper.getAttribute('data-locked') === 'true') {
+			this._pulsePromptLockBtn(wrapper);
+			return;
+		}
+		const clickOffset = typeof explicitCaretOffset === 'number'
+			? explicitCaretOffset
+			: this._resolveClickOffsetInPromptDisplay(displayEl, ev);
+		const savedScrollTop = displayEl.scrollTop;
+		const isExpanded = wrapper.getAttribute('data-expanded') === 'true';
+		const h = displayEl.getBoundingClientRect().height;
+		displayEl.style.display = 'none';
+		textarea.style.display = 'block';
+		if (isExpanded) {
+			textarea.style.maxHeight = 'none';
+			textarea.style.height = `${Math.max(180, Math.round(h), textarea.scrollHeight + 12)}px`;
+		} else {
+			textarea.style.maxHeight = `${EntityDetailEditor._PROMPT_BOX_DEFAULT_MAX_HEIGHT}px`;
+			textarea.style.height = `${Math.min(EntityDetailEditor._PROMPT_BOX_DEFAULT_MAX_HEIGHT, Math.max(118, Math.round(h || 140)))}px`;
+		}
+		this._syncPromptBoxExpandUi(wrapper);
+		const textLen = (textarea.value || '').length;
+		const recordedStartAttr = textarea.getAttribute('data-last-selection-start');
+		const targetPos = typeof clickOffset === 'number'
+			? Math.max(0, Math.min(textLen, clickOffset))
+			: (recordedStartAttr !== null ? Math.max(0, Math.min(textLen, Number(recordedStartAttr))) : textLen);
+		textarea.setAttribute('data-last-selection-start', String(targetPos));
+		textarea.setAttribute('data-last-selection-end', String(targetPos));
+		textarea.focus({ preventScroll: true });
+		textarea.setSelectionRange(targetPos, targetPos);
+		if (savedScrollTop > 0) {
+			textarea.scrollTop = savedScrollTop;
+		}
+	}
+
+	private async _confirmPromptBoxDeletion(message: string, detail?: string): Promise<boolean> {
+		try {
+			const dialogService = this._instantiationService.invokeFunction(accessor => {
+				try { return accessor.get(IDialogService); } catch { return undefined; }
+			});
+			if (dialogService) {
+				const res = await dialogService.confirm({
+					type: 'warning',
+					title: 'Confirm Delete Prompt Input Box',
+					message,
+					detail,
+					primaryButton: 'Delete',
+					cancelButton: 'Cancel'
+				});
+				return Boolean(res.confirmed);
+			}
+		} catch {}
+		return window.confirm(detail ? `${message}\n\n${detail}` : message);
+	}
+
+	private _flashMovedPromptBox(itemEl: HTMLElement): void {
+		const displayEl = itemEl.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+		const targetEl = displayEl || itemEl;
+		try {
+			itemEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+		} catch {}
+		const prevBorder = targetEl.style.borderColor;
+		const prevShadow = targetEl.style.boxShadow;
+		targetEl.style.borderColor = '#38bdf8';
+		targetEl.style.boxShadow = '0 0 0 2px rgba(56, 189, 248, 0.35)';
+		setTimeout(() => {
+			targetEl.style.borderColor = prevBorder || 'rgba(255,255,255,0.15)';
+			targetEl.style.boxShadow = prevShadow || '';
+		}, 750);
+	}
+
+	private async _promptJumpUserInputPosition(card: HTMLElement, itemEl: HTMLElement, fieldKey: string): Promise<void> {
+		const listEl = card.querySelector('.prompt-user-inputs-list') as HTMLElement | null;
+		if (!listEl) {
+			return;
+		}
+		const items = Array.from(listEl.querySelectorAll('.prompt-user-input-item')) as HTMLElement[];
+		const total = items.length;
+		const currentIdx = items.indexOf(itemEl);
+		if (total <= 1 || currentIdx < 0) {
+			return;
+		}
+
+		const picks = items.map((it, idx) => {
+			const ta = it.querySelector('.prompt-user-textarea') as HTMLTextAreaElement | null;
+			const firstLine = (ta?.value || '').trim().split(/\r?\n/)[0] || '(Empty)';
+			const snippet = firstLine.length > 56 ? `${firstLine.slice(0, 56)}...` : firstLine;
+			const isCurrent = idx === currentIdx;
+			return {
+				label: isCurrent
+					? `#${idx + 1} (Current Position)`
+					: `Move to #${idx + 1}${idx === 0 ? ' (Top)' : idx === total - 1 ? ' (Bottom)' : ''}`,
+				description: `Currently at #${idx + 1}: ${snippet}`,
+				targetIndex: idx
+			};
 		});
+
+		const picked = await this._quickInputService.pick(picks, {
+			title: `Reorder User Prompt Input #${currentIdx + 1} (of ${total})`,
+			placeHolder: `Select or type target position (1 ~ ${total}) to move #${currentIdx + 1} to...`
+		});
+
+		if (!picked || picked.targetIndex === currentIdx) {
+			return;
+		}
+
+		const targetIdx = picked.targetIndex;
+		if (targetIdx < currentIdx) {
+			listEl.insertBefore(itemEl, items[targetIdx]);
+		} else {
+			const afterNode = items[targetIdx].nextElementSibling;
+			if (afterNode) {
+				listEl.insertBefore(itemEl, afterNode);
+			} else {
+				listEl.appendChild(itemEl);
+			}
+		}
+
+		this._refreshPromptUserInputItemsUi(card);
+		this._flashMovedPromptBox(itemEl);
+		if (fieldKey) {
+			await this._savePromptDataFromCard(card, fieldKey);
+		}
+	}
+
+	private _buildPromptUserInputItemHtml(
+		rawKey: string,
+		boxIdx: number,
+		totalBoxes: number,
+		boxVal: string,
+		promptChipsHtml: string,
+		isLocked?: boolean
+	): string {
+		const isMulti = totalBoxes > 1;
+		const canMoveUp = isMulti && boxIdx > 0;
+		const canMoveDown = isMulti && boxIdx < totalBoxes - 1;
+		const rightPadPx = isMulti ? 106 : 48;
+		const effectiveLocked = typeof isLocked === 'boolean' ? isLocked : Boolean((boxVal || '').trim().length > 0);
+		const placeholderText = isMulti
+			? `Enter or voice-dictate User Input #${boxIdx + 1} (e.g. experience / item #${boxIdx + 1})...`
+			: 'Enter your prompt or custom instructions here...';
+		const chipsInner = promptChipsHtml.includes('Insert Output:')
+			? promptChipsHtml
+			: `<span style="font-size: 10.5px; opacity: 0.65;">Insert Output:</span>${promptChipsHtml}`;
+		const tokenizedHtml = this._renderPromptTokenizedHtml(boxVal || '', placeholderText);
+		const isLong = this._isPromptBoxContentLong(boxVal || '');
+		const maxH = EntityDetailEditor._PROMPT_BOX_DEFAULT_MAX_HEIGHT;
+		const lockColor = effectiveLocked ? '#fbbf24' : '#34d399';
+		const lockIcon = effectiveLocked ? 'codicon-lock' : 'codicon-unlock';
+		const lockTitle = effectiveLocked
+			? 'Locked (Read-Only) — Click to Unlock for editing'
+			: 'Unlocked (Editable) — Click to Lock and protect from accidental edits';
+		const displayTitle = effectiveLocked
+			? 'Locked (Read-Only, text can be selected & copied) — Click the lock icon in the top-right to unlock and edit'
+			: 'Click anywhere to edit prompt text';
+		const micOpacity = effectiveLocked ? '0.28' : '0.65';
+		const micTitle = effectiveLocked
+			? 'Locked — Unlock this prompt box first to record voice input'
+			: 'Record voice input (Speech-to-Text)';
+		const chipsOpacity = effectiveLocked ? '0.5' : '1';
+		return `
+			<div class="prompt-user-input-item" data-input-index="${boxIdx}" style="display: flex; flex-direction: column; gap: 6px;">
+				<div class="voice-input-textarea-wrapper" data-expanded="false" data-locked="${effectiveLocked ? 'true' : 'false'}" style="position: relative; width: 100%;">
+					<div class="prompt-user-input-top-actions" style="position: absolute; top: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 2px;">
+						<span class="prompt-user-input-badge" title="Click to jump / move User Input #${boxIdx + 1} to any position (1 ~ ${totalBoxes})" style="font-size: 9.5px; font-weight: 700; color: #38bdf8; background: transparent; border: none; padding: 0 3px; line-height: 1; user-select: none; cursor: pointer; display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; opacity: 0.85;">#${boxIdx + 1}</span>
+						<button type="button" class="prompt-lock-box-btn" style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: ${lockColor}; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;" title="${lockTitle}">
+							<span class="codicon ${lockIcon}" style="font-size: 12px;"></span>
+						</button>
+						<button type="button" class="prompt-move-up-user-input-btn" style="display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: ${canMoveUp ? 'pointer' : 'default'}; color: #cbd5e1; background: transparent; border: none; opacity: ${canMoveUp ? '0.8' : '0.22'}; pointer-events: ${canMoveUp ? 'auto' : 'none'}; padding: 0; transition: all 120ms ease;" title="${canMoveUp ? `Move User Input #${boxIdx + 1} Up (to #${boxIdx})` : 'Already at the top (#1)'}">
+							<span class="codicon codicon-arrow-up" style="font-size: 12px;"></span>
+						</button>
+						<button type="button" class="prompt-move-down-user-input-btn" style="display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: ${canMoveDown ? 'pointer' : 'default'}; color: #cbd5e1; background: transparent; border: none; opacity: ${canMoveDown ? '0.8' : '0.22'}; pointer-events: ${canMoveDown ? 'auto' : 'none'}; padding: 0; transition: all 120ms ease;" title="${canMoveDown ? `Move User Input #${boxIdx + 1} Down (to #${boxIdx + 2})` : `Already at the bottom (#${totalBoxes})`}">
+							<span class="codicon codicon-arrow-down" style="font-size: 12px;"></span>
+						</button>
+						<button type="button" class="prompt-expand-box-btn" style="display: ${isLong ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #38bdf8; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;" title="Expand input box to show full content">
+							<span class="codicon codicon-chevron-down" style="font-size: 13px;"></span>
+						</button>
+						<button type="button" class="prompt-remove-user-input-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #f87171; background: transparent; border: none; opacity: 0.72; padding: 0; transition: all 120ms ease;" title="${isMulti ? `Delete User Input #${boxIdx + 1} (Requires Confirmation)` : 'Delete User Prompt Input Box (Requires Confirmation)'}">
+							<span class="codicon codicon-trash" style="font-size: 12px;"></span>
+						</button>
+					</div>
+					<div class="prompt-tokenized-display" data-placeholder="${this._escapeHtmlAttr(placeholderText)}" title="${displayTitle}" style="width: 100%; min-height: 118px; max-height: ${maxH}px; padding: 8px ${rightPadPx}px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; cursor: text; user-select: text; -webkit-user-select: text; resize: vertical; overflow-y: auto;">${tokenizedHtml}</div>
+					<textarea class="prompt-instruction-textarea prompt-user-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-input-index="${boxIdx}" rows="5" placeholder="${this._escapeHtmlAttr(placeholderText)}" style="width: 100%; min-height: 118px; max-height: ${maxH}px; height: 140px; padding: 8px ${rightPadPx}px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid #38bdf8; background: rgba(0,0,0,0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; overflow-y: auto; display: none; outline: none;">${this._escapeHtml(boxVal)}</textarea>
+					<button type="button" class="prompt-expand-bottom-pill" style="display: none;"></button>
+					<div class="prompt-voice-input-controls" style="position: absolute; bottom: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 4px;">
+						<div class="prompt-voice-recording-indicator" style="display: none; align-items: center; gap: 6px; font-size: 11px; color: #ff3b30; font-weight: 500; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(255, 59, 48, 0.35); padding: 2px 8px; border-radius: 12px; user-select: none;">
+							<span class="prompt-voice-recording-dot" style="width: 8px; height: 8px; border-radius: 50%; background-color: #ff3b30; display: inline-block;"></span>
+							<span class="prompt-voice-recording-time">0:00 / 5:00</span>
+						</div>
+						<button type="button" class="prompt-voice-mic-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-voice-target="user" style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: var(--vscode-foreground); background: transparent; border: none; opacity: ${micOpacity}; padding: 0; transition: all 120ms ease;" title="${micTitle}">
+							<span class="codicon codicon-mic" style="font-size: 12.5px;"></span>
+						</button>
+					</div>
+				</div>
+				<div class="prompt-user-input-chips" style="display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 2px; opacity: ${chipsOpacity};">
+					${chipsInner}
+				</div>
+			</div>
+		`;
+	}
+
+	private _refreshPromptUserInputItemsUi(card: HTMLElement): void {
+		const listEl = card.querySelector('.prompt-user-inputs-list') as HTMLElement | null;
+		const countBadge = card.querySelector('.prompt-user-inputs-count-badge') as HTMLElement | null;
+		if (!listEl) {
+			return;
+		}
+		const items = Array.from(listEl.querySelectorAll('.prompt-user-input-item')) as HTMLElement[];
+		const total = items.length;
+		const isMulti = total > 1;
+		const rightPadPx = isMulti ? 106 : 48;
+		listEl.style.display = total > 0 ? 'flex' : 'none';
+		if (countBadge) {
+			if (isMulti) {
+				countBadge.style.display = 'inline-block';
+				countBadge.textContent = `${total} Inputs`;
+			} else {
+				countBadge.style.display = 'none';
+			}
+		}
+		items.forEach((item, idx) => {
+			item.setAttribute('data-input-index', String(idx));
+			item.style.cssText = 'display: flex; flex-direction: column; gap: 6px;';
+			const badge = item.querySelector('.prompt-user-input-badge') as HTMLElement | null;
+			if (badge) {
+				badge.textContent = `#${idx + 1}`;
+				badge.style.display = isMulti ? 'inline-flex' : 'none';
+				badge.title = `Click to jump / move User Input #${idx + 1} to any position (1 ~ ${total})`;
+			}
+			const moveUpBtn = item.querySelector('.prompt-move-up-user-input-btn') as HTMLElement | null;
+			if (moveUpBtn) {
+				const canUp = isMulti && idx > 0;
+				moveUpBtn.style.display = isMulti ? 'inline-flex' : 'none';
+				moveUpBtn.style.opacity = canUp ? '0.88' : '0.28';
+				moveUpBtn.style.pointerEvents = canUp ? 'auto' : 'none';
+				moveUpBtn.style.cursor = canUp ? 'pointer' : 'default';
+				moveUpBtn.title = canUp ? `Move User Input #${idx + 1} Up (to #${idx})` : 'Already at the top (#1)';
+			}
+			const moveDownBtn = item.querySelector('.prompt-move-down-user-input-btn') as HTMLElement | null;
+			if (moveDownBtn) {
+				const canDown = isMulti && idx < total - 1;
+				moveDownBtn.style.display = isMulti ? 'inline-flex' : 'none';
+				moveDownBtn.style.opacity = canDown ? '0.88' : '0.28';
+				moveDownBtn.style.pointerEvents = canDown ? 'auto' : 'none';
+				moveDownBtn.style.cursor = canDown ? 'pointer' : 'default';
+				moveDownBtn.title = canDown ? `Move User Input #${idx + 1} Down (to #${idx + 2})` : `Already at the bottom (#${total})`;
+			}
+			const removeBtn = item.querySelector('.prompt-remove-user-input-btn') as HTMLElement | null;
+			if (removeBtn) {
+				removeBtn.title = isMulti ? `Delete User Input #${idx + 1} (Requires Confirmation)` : 'Delete User Prompt Input Box (Requires Confirmation)';
+			}
+			const displayEl = item.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+			if (displayEl) {
+				displayEl.style.paddingRight = `${rightPadPx}px`;
+			}
+			const ta = item.querySelector('.prompt-user-textarea') as HTMLTextAreaElement | null;
+			if (ta) {
+				ta.style.paddingRight = `${rightPadPx}px`;
+				ta.setAttribute('data-input-index', String(idx));
+				ta.placeholder = isMulti
+					? `Enter or voice-dictate User Input #${idx + 1} (e.g. experience / item #${idx + 1})...`
+					: 'Enter your prompt or custom instructions here...';
+				this._syncPromptTokenizedDisplay(ta, false);
+			}
+			const wrapper = item.querySelector('.voice-input-textarea-wrapper') as HTMLElement | null;
+			if (wrapper) {
+				this._syncPromptBoxLockUi(wrapper);
+			}
+		});
+	}
+
+	private _formatCombinedPromptForLlm(rawPreInjected: string, userPromptsList: string[]): {
+		formattedUserPrompt: string;
+		combinedRawPrompt: string;
+	} {
+		const pre = (rawPreInjected || '').trim();
+		const nonEmptyInputs = (userPromptsList || []).map(s => (s || '').trim()).filter(s => s.length > 0);
+		if (nonEmptyInputs.length === 0) {
+			return {
+				formattedUserPrompt: '',
+				combinedRawPrompt: pre
+			};
+		}
+		if (nonEmptyInputs.length === 1 && (userPromptsList || []).length <= 1) {
+			const singleUser = nonEmptyInputs[0];
+			return {
+				formattedUserPrompt: singleUser,
+				combinedRawPrompt: pre
+					? `${pre}\n\n--- [USER PROMPT / INSTRUCTIONS] ---\n${singleUser}`
+					: singleUser
+			};
+		}
+		const multiBody = [
+			`The user has provided ${nonEmptyInputs.length} separate input segment(s) in sequential order below. Please process all ${nonEmptyInputs.length} user input(s) together according to the instructions:`,
+			'',
+			...nonEmptyInputs.map((seg, idx) => `[User Input #${idx + 1} of ${nonEmptyInputs.length}]:\n${seg}`)
+		].join('\n\n');
+		return {
+			formattedUserPrompt: nonEmptyInputs.map((seg, idx) => `[User Input #${idx + 1}]:\n${seg}`).join('\n\n'),
+			combinedRawPrompt: pre
+				? `${pre}\n\n--- [USER PROMPT INPUTS (${nonEmptyInputs.length} SEPARATE USER INPUTS IN ORDER)] ---\n${multiBody}`
+				: `--- [USER PROMPT INPUTS (${nonEmptyInputs.length} SEPARATE USER INPUTS IN ORDER)] ---\n${multiBody}`
+		};
+	}
+
+	private _resolveCombinedPromptFromCard(card: HTMLElement): {
+		preInjectedPrompt: string;
+		userPrompt: string;
+		userPrompts: string[];
+		combinedRawPrompt: string;
+		interpolatedPrompt: string;
+	} {
+		const preInjectedTa = card.querySelector('.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
+		const userInputsListEl = card.querySelector('.prompt-user-inputs-list') as HTMLElement | null;
+		const userTextareas = Array.from(card.querySelectorAll('.prompt-user-textarea')) as HTMLTextAreaElement[];
+		const preInjectedPrompt = (preInjectedTa ? preInjectedTa.value : (card.getAttribute('data-pre-injected-prompt') || '')).trim();
+		if (preInjectedTa) {
+			card.setAttribute('data-pre-injected-prompt', preInjectedTa.value);
+		}
+		const isUserInputVisible = card.getAttribute('data-user-input-visible') !== 'false';
+		let userPrompts: string[];
+		if (!isUserInputVisible) {
+			userPrompts = [];
+		} else if (userInputsListEl) {
+			userPrompts = userTextareas.map(ta => ta.value || '');
+		} else {
+			userPrompts = userTextareas.length > 0
+				? userTextareas.map(ta => ta.value || '')
+				: [((card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null)?.value || '')];
+		}
+		const { formattedUserPrompt, combinedRawPrompt } = this._formatCombinedPromptForLlm(preInjectedPrompt, userPrompts);
+		const interpolatedPrompt = this._interpolateParameters(combinedRawPrompt);
+		return {
+			preInjectedPrompt,
+			userPrompt: formattedUserPrompt,
+			userPrompts,
+			combinedRawPrompt,
+			interpolatedPrompt
+		};
+	}
+
+	private _isModelFromAnotherProvider(modelId: string, providerId: string): boolean {
+		if (!modelId || modelId === 'custom') {
+			return false;
+		}
+		const m = modelId.toLowerCase();
+		if (providerId !== 'gemini' && (m.startsWith('gemini') || m.startsWith('gemma') || m.startsWith('learnlm'))) {
+			return true;
+		}
+		if (providerId !== 'openai' && (m.startsWith('gpt-') || m.startsWith('o1') || m.startsWith('o3') || m.startsWith('chatgpt-'))) {
+			return true;
+		}
+		if (providerId !== 'anthropic' && m.startsWith('claude')) {
+			return true;
+		}
+		if (providerId !== 'ollama' && (m.startsWith('llama') || m.startsWith('qwen') || m.startsWith('mistral') || m.startsWith('deepseek-r1'))) {
+			return true;
+		}
+		const map = this._getPromptProviderModelsMap();
+		for (const [otherProv, list] of Object.entries(map)) {
+			if (otherProv !== providerId && list.some(item => item.id === modelId && item.id !== 'custom')) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private _getPromptProviderModelsMap(): Record<string, { id: string; label: string }[]> {
+		return {
+			openai: [
+				{ id: 'gpt-4o', label: 'OpenAI GPT-4o (Omni Flagship)' },
+				{ id: 'gpt-4o-mini', label: 'OpenAI GPT-4o-mini (Lightweight)' },
+				{ id: 'o3-mini', label: 'OpenAI o3-mini (Reasoning)' },
+				{ id: 'gpt-4-turbo', label: 'OpenAI GPT-4 Turbo' },
+				{ id: 'gpt-3.5-turbo', label: 'OpenAI GPT-3.5 Turbo' },
+				{ id: 'custom', label: 'Custom Model ID...' }
+			],
+			gemini: [
+				{ id: 'gemini-2.5-flash', label: 'Google Gemini 2.5 Flash' },
+				{ id: 'gemini-2.5-pro', label: 'Google Gemini 2.5 Pro' },
+				{ id: 'gemini-2.0-flash', label: 'Google Gemini 2.0 Flash' },
+				{ id: 'gemini-1.5-pro', label: 'Google Gemini 1.5 Pro' },
+				{ id: 'gemini-1.5-flash', label: 'Google Gemini 1.5 Flash' },
+				{ id: 'custom', label: 'Custom Model ID...' }
+			],
+			anthropic: [
+				{ id: 'claude-3-5-sonnet-20241022', label: 'Anthropic Claude 3.5 Sonnet' },
+				{ id: 'claude-3-5-haiku-20241022', label: 'Anthropic Claude 3.5 Haiku' },
+				{ id: 'claude-3-opus-20240229', label: 'Anthropic Claude 3 Opus' },
+				{ id: 'custom', label: 'Custom Model ID...' }
+			],
+			ollama: [
+				{ id: 'llama3.1', label: 'Ollama Llama 3.1' },
+				{ id: 'qwen2.5-coder', label: 'Ollama Qwen 2.5 Coder' },
+				{ id: 'mistral', label: 'Ollama Mistral' },
+				{ id: 'deepseek-r1', label: 'Ollama DeepSeek-R1' },
+				{ id: 'custom', label: 'Custom Model ID...' }
+			],
+			'custom-openai': [
+				{ id: 'custom', label: 'Custom Endpoint Model' }
+			]
+		};
+	}
+
+	private _buildSentPromptSnapshot(card: HTMLElement, fieldKey: string, markAsExecutedNow: boolean = false): {
+		fieldKey: string;
+		executedAt: string;
+		targetMode: 'model' | 'agent';
+		targetProvider: string;
+		targetModel: string;
+		targetAgentId: string;
+		targetAgentName: string;
+		preInjectedRaw: string;
+		preInjectedInterpolated: string;
+		userPromptsRaw: string[];
+		userPromptsInterpolated: string[];
+		referencedVariables: Array<{
+			token: string;
+			name: string;
+			resolvedValue: string;
+			charCount: number;
+			sourceLocations: string[];
+		}>;
+		combinedRawPrompt: string;
+		fullInterpolatedPrompt: string;
+		isFromSavedRun: boolean;
+	} {
+		const providerSelect = card.querySelector('.prompt-provider-select') as HTMLSelectElement | null;
+		const modelSelect = card.querySelector('.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
+		const selectedModelText = card.querySelector('.prompt-selected-model-text') as HTMLElement | null;
+		const customModelInput = card.querySelector('.prompt-custom-model-input') as HTMLInputElement | null;
+		const agentSelect = card.querySelector('.prompt-agent-select') as HTMLSelectElement | null;
+
+		const lockedMode = card.getAttribute('data-target-mode') as 'model' | 'agent' | null;
+		const targetMode: 'model' | 'agent' = lockedMode === 'agent' ? 'agent' : 'model';
+		const targetProvider = card.getAttribute('data-target-provider') || providerSelect?.value.trim() || 'openai';
+		let targetModel = card.getAttribute('data-target-model') || modelSelect?.value.trim() || selectedModelText?.textContent?.trim() || 'gemini-1.5-flash';
+		if (targetModel === 'custom' && customModelInput) {
+			targetModel = customModelInput.value.trim() || 'gpt-4o';
+		}
+		const targetAgentId = agentSelect?.value.trim() || '';
+		const targetAgentName = targetAgentId
+			? (agentSelect?.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || '')
+			: '';
+
+		const { preInjectedPrompt, userPrompts, combinedRawPrompt, interpolatedPrompt } = this._resolveCombinedPromptFromCard(card);
+		const paramMap = this._buildInterpolationParamMap();
+		const preInjectedInterpolated = this._interpolateParameters(preInjectedPrompt);
+		const nonEmptyRawSegments = (userPrompts || []).map(s => (s || '').trim()).filter(s => s.length > 0);
+		const userPromptsInterpolated = nonEmptyRawSegments.map(seg => this._interpolateParameters(seg));
+
+		// Extract all referenced {{param}} and {Field Label} tokens across Pre-Injected Prompt and User Input segments
+		const refMap = new Map<string, {
+			token: string;
+			name: string;
+			resolvedValue: string;
+			charCount: number;
+			sourceLocations: string[];
+		}>();
+
+		const scanTokensInText = (text: string, locationLabel: string) => {
+			if (!text) {
+				return;
+			}
+			const doubleBraceRegex = /\{\{\s*([a-zA-Z0-9_-]+)\s*\}\}/g;
+			let match: RegExpExecArray | null;
+			while ((match = doubleBraceRegex.exec(text)) !== null) {
+				const rawName = (match[1] || '').trim();
+				const keyLower = rawName.toLowerCase();
+				if (!rawName) {
+					continue;
+				}
+				const resolvedVal = paramMap.has(keyLower) ? (paramMap.get(keyLower) ?? '') : '(Unresolved / Empty)';
+				const existing = refMap.get(keyLower);
+				if (existing) {
+					if (!existing.sourceLocations.includes(locationLabel)) {
+						existing.sourceLocations.push(locationLabel);
+					}
+				} else {
+					refMap.set(keyLower, {
+						token: `{{${rawName}}}`,
+						name: rawName,
+						resolvedValue: resolvedVal,
+						charCount: resolvedVal.length,
+						sourceLocations: [locationLabel]
+					});
+				}
+			}
+
+			const singleBraceRegex = /(?<!\{)\{([^{}\n\r]+)\}(?!\})/g;
+			while ((match = singleBraceRegex.exec(text)) !== null) {
+				const rawName = (match[1] || '').trim();
+				const keyLower = rawName.toLowerCase();
+				if (!rawName || !paramMap.has(keyLower)) {
+					continue;
+				}
+				const resolvedVal = paramMap.get(keyLower) ?? '';
+				const existing = refMap.get(keyLower);
+				if (existing) {
+					if (!existing.sourceLocations.includes(locationLabel)) {
+						existing.sourceLocations.push(locationLabel);
+					}
+				} else {
+					refMap.set(keyLower, {
+						token: `{${rawName}}`,
+						name: rawName,
+						resolvedValue: resolvedVal,
+						charCount: resolvedVal.length,
+						sourceLocations: [locationLabel]
+					});
+				}
+			}
+		};
+
+		if (preInjectedPrompt) {
+			scanTokensInText(preInjectedPrompt, 'Pre-Injected Prompt');
+		}
+		nonEmptyRawSegments.forEach((seg, idx) => {
+			scanTokensInText(seg, nonEmptyRawSegments.length > 1 ? `User Input #${idx + 1}` : 'User Prompt');
+		});
+
+		const statusEl = card.querySelector('.prompt-status-text') as HTMLElement | null;
+		const statusStr = (statusEl?.textContent || '').trim();
+		const executedAt = markAsExecutedNow
+			? `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`
+			: (statusStr && statusStr !== 'Ready' ? statusStr.replace(/^Executed:\s*/i, '') : 'Current Prompt State');
+
+		return {
+			fieldKey,
+			executedAt,
+			targetMode,
+			targetProvider,
+			targetModel,
+			targetAgentId,
+			targetAgentName,
+			preInjectedRaw: preInjectedPrompt,
+			preInjectedInterpolated,
+			userPromptsRaw: nonEmptyRawSegments,
+			userPromptsInterpolated,
+			referencedVariables: Array.from(refMap.values()),
+			combinedRawPrompt,
+			fullInterpolatedPrompt: interpolatedPrompt,
+			isFromSavedRun: markAsExecutedNow
+		};
+	}
+
+	private _formatSentPromptSnapshotAsMarkdown(snapshot: {
+		fieldKey: string;
+		executedAt: string;
+		targetMode: 'model' | 'agent';
+		targetProvider: string;
+		targetModel: string;
+		targetAgentName: string;
+		preInjectedRaw: string;
+		preInjectedInterpolated: string;
+		userPromptsRaw: string[];
+		userPromptsInterpolated: string[];
+		referencedVariables: Array<{
+			token: string;
+			name: string;
+			resolvedValue: string;
+			charCount: number;
+			sourceLocations: string[];
+		}>;
+		combinedRawPrompt: string;
+		fullInterpolatedPrompt: string;
+		isFromSavedRun: boolean;
+	}): string {
+		const targetDesc = snapshot.targetMode === 'agent'
+			? `AI Agent: ${snapshot.targetAgentName || 'Assigned Agent'}`
+			: `AI Model: ${snapshot.targetModel} (${(snapshot.targetProvider || 'openai').toUpperCase()})`;
+		const totalChars = (snapshot.fullInterpolatedPrompt || '').length;
+		const approxTokens = Math.max(1, Math.round(totalChars / 3.8));
+		const lines: string[] = [
+			`# Sent Prompt Inspector — ${snapshot.fieldKey}`,
+			``,
+			`- **Target**: ${targetDesc}`,
+			`- **Snapshot Time / Status**: ${snapshot.executedAt} (${snapshot.isFromSavedRun ? 'Exact Execution Snapshot' : 'Reconstructed from Current Prompt'})`,
+			`- **Final Sent Prompt Size**: ${totalChars.toLocaleString()} chars (~${approxTokens.toLocaleString()} est. tokens)`,
+			`- **User Input Segments**: ${snapshot.userPromptsRaw.length}`,
+			`- **Referenced \`{Field}\` / \`{{Param}}\` Variables**: ${snapshot.referencedVariables.length}`,
+			``,
+			`---`,
+			``,
+			`## 1. Pre-Injected Prompt (Template System Instruction)`,
+			``
+		];
+
+		if (snapshot.preInjectedRaw.trim()) {
+			lines.push('```markdown');
+			lines.push(snapshot.preInjectedInterpolated || snapshot.preInjectedRaw);
+			lines.push('```');
+		} else {
+			lines.push('_No Pre-Injected Prompt configured._');
+		}
+
+		lines.push('', '---', '', `## 2. Referenced Fields & Parameters Injected (${snapshot.referencedVariables.length})`, '');
+		if (snapshot.referencedVariables.length > 0) {
+			snapshot.referencedVariables.forEach((rv, idx) => {
+				lines.push(`### 2.${idx + 1} \`${rv.token}\` (${rv.charCount.toLocaleString()} chars · Used in: ${rv.sourceLocations.join(', ')})`);
+				lines.push('```text');
+				lines.push(rv.resolvedValue || '(Empty)');
+				lines.push('```');
+				lines.push('');
+			});
+		} else {
+			lines.push('_No `{Field}` or `{{parameter}}` placeholders referenced in this prompt._', '');
+		}
+
+		lines.push('---', '', `## 3. User Prompt Input Segments (${snapshot.userPromptsInterpolated.length})`, '');
+		if (snapshot.userPromptsInterpolated.length > 0) {
+			snapshot.userPromptsInterpolated.forEach((seg, idx) => {
+				lines.push(`### Segment #${idx + 1} (${seg.length.toLocaleString()} chars)`);
+				lines.push('```text');
+				lines.push(seg);
+				lines.push('```');
+				lines.push('');
+			});
+		} else {
+			lines.push('_No user prompt input segments provided._', '');
+		}
+
+		lines.push('---', '', `## 4. Complete Final Prompt Sent to AI (Verbatim Full Payload — ${totalChars.toLocaleString()} chars)`, '');
+		lines.push('```text');
+		lines.push(snapshot.fullInterpolatedPrompt || '(Empty prompt)');
+		lines.push('```', '');
+
+		return lines.join('\n');
+	}
+
+	private async _openSentPromptInEditorTab(snapshot: any, fieldKey: string): Promise<void> {
+		try {
+			const mdContent = this._formatSentPromptSnapshotAsMarkdown(snapshot);
+			await this._editorService.openEditor({
+				resource: undefined,
+				contents: mdContent,
+				languageId: 'markdown',
+				options: { pinned: true }
+			});
+		} catch (err: any) {
+			this._notificationService.error(`Failed to open prompt in new tab: ${err?.message || String(err)}`);
+		}
+	}
+
+	private _openSentPromptInspectorModal(card: HTMLElement, fieldKey: string): void {
+		const liveSnapshot = this._buildSentPromptSnapshot(card, fieldKey, false);
+		let savedSnapshot: any = null;
+		const rawSaved = card.getAttribute('data-last-sent-payload');
+		if (rawSaved) {
+			try {
+				const parsed = JSON.parse(rawSaved);
+				if (parsed && typeof parsed.fullInterpolatedPrompt === 'string' && parsed.fullInterpolatedPrompt.trim().length > 0) {
+					savedSnapshot = { ...parsed, isFromSavedRun: true };
+				}
+			} catch {}
+		}
+
+		let activeSnapshot = savedSnapshot || liveSnapshot;
+		let activeTab: 'structured' | 'raw' = 'structured';
+
+		const existingOverlay = document.querySelector('.prompt-sent-inspector-modal-overlay');
+		if (existingOverlay) {
+			existingOverlay.remove();
+		}
+
+		const overlay = document.createElement('div');
+		overlay.className = 'prompt-sent-inspector-modal-overlay';
+		overlay.style.cssText = 'position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); z-index: 10000; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(3px); padding: 24px; box-sizing: border-box;';
+
+		const dialog = document.createElement('div');
+		dialog.style.cssText = 'background: var(--vscode-editorWidget-background, #18181b); color: var(--vscode-editorWidget-foreground, #e4e4e7); border: 1px solid rgba(56, 189, 248, 0.38); border-radius: 10px; width: min(1060px, 94vw); height: min(840px, 90vh); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.78); display: flex; flex-direction: column; overflow: hidden; font-family: var(--vscode-font-family, sans-serif);';
+
+		const closeDialog = () => {
+			if (overlay.parentNode) {
+				overlay.parentNode.removeChild(overlay);
+			}
+		};
+
+		const renderModalContent = () => {
+			const totalChars = (activeSnapshot.fullInterpolatedPrompt || '').length;
+			const approxTokens = Math.max(1, Math.round(totalChars / 3.8));
+			const targetLabel = activeSnapshot.targetMode === 'agent'
+				? `Agent: ${activeSnapshot.targetAgentName || 'AI Agent'}`
+				: `Model: ${activeSnapshot.targetModel || 'gpt-4o'} (${(activeSnapshot.targetProvider || 'openai').toUpperCase()})`;
+			const refVars: Array<{ token: string; name: string; resolvedValue: string; charCount: number; sourceLocations: string[] }> = Array.isArray(activeSnapshot.referencedVariables)
+				? activeSnapshot.referencedVariables
+				: [];
+			const userSegsRaw: string[] = Array.isArray(activeSnapshot.userPromptsRaw) ? activeSnapshot.userPromptsRaw : [];
+			const userSegsInterp: string[] = Array.isArray(activeSnapshot.userPromptsInterpolated) ? activeSnapshot.userPromptsInterpolated : [];
+			const preRaw = String(activeSnapshot.preInjectedRaw || '');
+			const preInterp = String(activeSnapshot.preInjectedInterpolated || preRaw);
+
+			const refVarsHtml = refVars.length > 0
+				? refVars.map((rv, idx) => `
+					<div style="border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 6px; background: rgba(15, 23, 42, 0.55); overflow: hidden;">
+						<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 12px; background: rgba(56, 189, 248, 0.1); border-bottom: 1px solid rgba(56, 189, 248, 0.18); flex-wrap: wrap;">
+							<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+								<span style="font-size: 11px; font-weight: 700; color: #38bdf8; font-family: var(--vscode-editor-font-family, monospace); padding: 1px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.16); border: 1px solid rgba(56, 189, 248, 0.35);">${this._escapeHtml(rv.token)}</span>
+								<span style="font-size: 10.5px; opacity: 0.78;">Used in: <strong>${this._escapeHtml((rv.sourceLocations || []).join(', '))}</strong></span>
+								<span style="font-size: 10px; padding: 1px 6px; border-radius: 10px; background: rgba(255, 255, 255, 0.08); opacity: 0.8;">${Number(rv.charCount || 0).toLocaleString()} chars</span>
+							</div>
+							<button type="button" class="inspector-copy-chunk-btn" data-copy-kind="ref" data-copy-index="${idx}" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 10px; color: inherit; cursor: pointer;">Copy Value</button>
+						</div>
+						<pre style="margin: 0; padding: 10px 12px; max-height: 220px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;">${rv.resolvedValue ? this._escapeHtml(rv.resolvedValue) : '<span style="opacity: 0.45; font-style: italic;">(Empty value)</span>'}</pre>
+					</div>
+				`).join('')
+				: `<div style="padding: 10px 12px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.12); font-size: 11.5px; opacity: 0.65;">No <code>{Field}</code> or <code>{{parameter}}</code> tags were referenced in this prompt.</div>`;
+
+			const userSegsHtml = userSegsInterp.length > 0
+				? userSegsInterp.map((segInterp, idx) => {
+					const segRaw = userSegsRaw[idx] || segInterp;
+					const hasTokens = segRaw !== segInterp;
+					return `
+						<div style="border: 1px solid rgba(52, 211, 153, 0.25); border-radius: 6px; background: rgba(15, 23, 42, 0.45); overflow: hidden;">
+							<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 12px; background: rgba(16, 185, 129, 0.1); border-bottom: 1px solid rgba(52, 211, 153, 0.18); flex-wrap: wrap;">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span style="font-size: 10.5px; font-weight: 700; color: #34d399; padding: 1px 7px; border-radius: 4px; background: rgba(16, 185, 129, 0.18); border: 1px solid rgba(52, 211, 153, 0.35);">User Input #${idx + 1} of ${userSegsInterp.length}</span>
+									<span style="font-size: 10px; opacity: 0.75;">${segInterp.length.toLocaleString()} chars</span>
+									${hasTokens ? '<span style="font-size: 9.5px; color: #38bdf8; background: rgba(56,189,248,0.12); padding: 1px 6px; border-radius: 4px;">Includes resolved {Field} tags</span>' : ''}
+								</div>
+								<button type="button" class="inspector-copy-chunk-btn" data-copy-kind="user" data-copy-index="${idx}" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 10px; color: inherit; cursor: pointer;">Copy #${idx + 1}</button>
+							</div>
+							<pre style="margin: 0; padding: 10px 12px; max-height: 210px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;">${this._escapeHtml(segInterp)}</pre>
+						</div>
+					`;
+				}).join('')
+				: `<div style="padding: 10px 12px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.12); font-size: 11.5px; opacity: 0.65;">No user input segments entered.</div>`;
+
+			const bodyContentHtml = activeTab === 'structured' ? `
+				<div style="display: flex; flex-direction: column; gap: 16px;">
+					<!-- Section 1: Pre-Injected Prompt -->
+					<div style="border: 1px solid rgba(96, 165, 250, 0.3); border-radius: 8px; background: rgba(30, 41, 59, 0.35); overflow: hidden;">
+						<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(59, 130, 246, 0.14); border-bottom: 1px solid rgba(96, 165, 250, 0.22); flex-wrap: wrap;">
+							<div style="display: flex; align-items: center; gap: 8px;">
+								<span style="font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(59, 130, 246, 0.25); color: #60a5fa;">1. SYSTEM / TEMPLATE</span>
+								<span style="font-size: 12px; font-weight: 600; color: #93c5fd;">Pre-Injected Prompt (Template Instruction)</span>
+								<span style="font-size: 10.5px; opacity: 0.72;">(${preInterp.length.toLocaleString()} chars)</span>
+							</div>
+							<button type="button" class="inspector-copy-chunk-btn" data-copy-kind="pre" style="background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.16); border-radius: 4px; padding: 3px 9px; font-size: 10.5px; color: inherit; cursor: pointer;">Copy System Instruction</button>
+						</div>
+						<div style="padding: 12px 14px;">
+							${preInterp.trim()
+								? `<pre style="margin: 0; max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;">${this._escapeHtml(preInterp)}</pre>`
+								: `<div style="font-size: 11.5px; opacity: 0.55; font-style: italic;">No Pre-Injected Prompt configured in this template.</div>`
+							}
+						</div>
+					</div>
+
+					<!-- Section 2: Referenced {Field} / {{Parameter}} Injected Values -->
+					<div style="border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; background: rgba(30, 41, 59, 0.35); overflow: hidden;">
+						<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(56, 189, 248, 0.12); border-bottom: 1px solid rgba(56, 189, 248, 0.22); flex-wrap: wrap;">
+							<div style="display: flex; align-items: center; gap: 8px;">
+								<span style="font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.22); color: #38bdf8;">2. INJECTED FIELDS</span>
+								<span style="font-size: 12px; font-weight: 600; color: #7dd3fc;">Referenced {Field} &amp; {{Parameter}} Values</span>
+								<span style="font-size: 10.5px; opacity: 0.75;">(${refVars.length} referenced)</span>
+							</div>
+						</div>
+						<div style="padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;">
+							${refVarsHtml}
+						</div>
+					</div>
+
+					<!-- Section 3: User Prompt Input Segments -->
+					<div style="border: 1px solid rgba(52, 211, 153, 0.3); border-radius: 8px; background: rgba(30, 41, 59, 0.35); overflow: hidden;">
+						<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(16, 185, 129, 0.12); border-bottom: 1px solid rgba(52, 211, 153, 0.22); flex-wrap: wrap;">
+							<div style="display: flex; align-items: center; gap: 8px;">
+								<span style="font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(16, 185, 129, 0.22); color: #34d399;">3. USER INPUTS</span>
+								<span style="font-size: 12px; font-weight: 600; color: #6ee7b7;">User Prompt / Instruction Segments (In Order)</span>
+								<span style="font-size: 10.5px; opacity: 0.75;">(${userSegsInterp.length} segment${userSegsInterp.length === 1 ? '' : 's'})</span>
+							</div>
+						</div>
+						<div style="padding: 12px 14px; display: flex; flex-direction: column; gap: 10px;">
+							${userSegsHtml}
+						</div>
+					</div>
+
+					<!-- Section 4: Complete Final Merged Prompt Sent to AI -->
+					<div style="border: 1px solid rgba(192, 132, 252, 0.35); border-radius: 8px; background: rgba(30, 41, 59, 0.45); overflow: hidden;">
+						<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(168, 85, 247, 0.15); border-bottom: 1px solid rgba(192, 132, 252, 0.25); flex-wrap: wrap;">
+							<div style="display: flex; align-items: center; gap: 8px;">
+								<span style="font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(168, 85, 247, 0.25); color: #c084fc;">4. FULL FINAL PAYLOAD</span>
+								<span style="font-size: 12px; font-weight: 600; color: #d8b4fe;">Complete Verbatim Prompt Sent to AI</span>
+								<span style="font-size: 10.5px; opacity: 0.75;">(${totalChars.toLocaleString()} chars · ~${approxTokens.toLocaleString()} tokens)</span>
+							</div>
+							<button type="button" class="inspector-copy-chunk-btn" data-copy-kind="full" style="background: rgba(168, 85, 247, 0.22); border: 1px solid rgba(192, 132, 252, 0.4); border-radius: 4px; padding: 3px 10px; font-size: 10.5px; font-weight: 600; color: #e9d5ff; cursor: pointer;">Copy Full Prompt</button>
+						</div>
+						<div style="padding: 12px 14px;">
+							<pre style="margin: 0; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #f1f5f9; background: rgba(0, 0, 0, 0.3); padding: 12px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);">${activeSnapshot.fullInterpolatedPrompt ? this._escapeHtml(activeSnapshot.fullInterpolatedPrompt) : '<span style="opacity: 0.45; font-style: italic;">(Empty prompt)</span>'}</pre>
+						</div>
+					</div>
+				</div>
+			` : `
+				<div style="display: flex; flex-direction: column; height: 100%; gap: 8px;">
+					<div style="display: flex; align-items: center; justify-content: space-between; font-size: 11px; opacity: 0.75; padding: 0 2px;">
+						<span>Exact 100% verbatim final string sent to <strong>${this._escapeHtml(targetLabel)}</strong> after merging all sections and resolving all <code>{Field}</code> placeholders:</span>
+						<span>${totalChars.toLocaleString()} chars (~${approxTokens.toLocaleString()} est. tokens)</span>
+					</div>
+					<pre style="flex: 1; margin: 0; padding: 14px 16px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; background: rgba(0, 0, 0, 0.38); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; color: #f1f5f9;">${activeSnapshot.fullInterpolatedPrompt ? this._escapeHtml(activeSnapshot.fullInterpolatedPrompt) : '<span style="opacity: 0.45; font-style: italic;">(Empty prompt)</span>'}</pre>
+				</div>
+			`;
+
+			const modalHtml = `
+				<!-- Modal Header -->
+				<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; background: rgba(15, 23, 42, 0.75); border-bottom: 1px solid rgba(255, 255, 255, 0.1); flex-wrap: wrap;">
+					<div style="display: flex; flex-direction: column; gap: 4px;">
+						<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+							<span class="codicon codicon-eye" style="font-size: 15px; color: #38bdf8;"></span>
+							<span style="font-size: 14px; font-weight: 700; color: #f8fafc;">Sent Prompt Inspector — ${this._escapeHtml(fieldKey)}</span>
+							<span style="font-size: 10.5px; padding: 2px 8px; border-radius: 12px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600;">${this._escapeHtml(targetLabel)}</span>
+						</div>
+						<div style="display: flex; align-items: center; gap: 12px; font-size: 11px; opacity: 0.72; flex-wrap: wrap;">
+							<span>Status: <strong>${this._escapeHtml(activeSnapshot.executedAt || 'Ready')}</strong></span>
+							<span>·</span>
+							<span>Total: <strong>${totalChars.toLocaleString()} chars</strong> (~${approxTokens.toLocaleString()} tokens)</span>
+							<span>·</span>
+							<span>User Segments: <strong>${userSegsInterp.length}</strong></span>
+							<span>·</span>
+							<span>Injected Fields: <strong>${refVars.length}</strong></span>
+						</div>
+					</div>
+					<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+						<button type="button" class="inspector-open-tab-btn" style="display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.14); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35);" title="Open the structured breakdown and full prompt in a new Markdown editor tab">
+							<span class="codicon codicon-go-to-file" style="font-size: 12px;"></span>
+							<span>Open in Editor Tab</span>
+						</button>
+						<button type="button" class="inspector-copy-chunk-btn" data-copy-kind="full" style="display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4);" title="Copy the complete final prompt sent to AI">
+							<span class="codicon codicon-copy" style="font-size: 12px;"></span>
+							<span>Copy Full Prompt</span>
+						</button>
+						<button type="button" class="inspector-close-btn" style="display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; background: rgba(255, 255, 255, 0.06); color: inherit; border: 1px solid rgba(255, 255, 255, 0.14);" title="Close (Esc)">
+							<span class="codicon codicon-close" style="font-size: 14px;"></span>
+						</button>
+					</div>
+				</div>
+
+				<!-- View Mode Sub-Bar -->
+				<div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 18px; background: rgba(0, 0, 0, 0.28); border-bottom: 1px solid rgba(255, 255, 255, 0.08); flex-wrap: wrap;">
+					<div style="display: inline-flex; align-items: center; gap: 6px; background: rgba(255, 255, 255, 0.04); padding: 3px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);">
+						<button type="button" class="inspector-tab-btn" data-tab="structured" style="padding: 4px 12px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer; border: none; background: ${activeTab === 'structured' ? 'rgba(56, 189, 248, 0.22)' : 'transparent'}; color: ${activeTab === 'structured' ? '#38bdf8' : 'inherit'};">
+							Structured Breakdown
+						</button>
+						<button type="button" class="inspector-tab-btn" data-tab="raw" style="padding: 4px 12px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer; border: none; background: ${activeTab === 'raw' ? 'rgba(56, 189, 248, 0.22)' : 'transparent'}; color: ${activeTab === 'raw' ? '#38bdf8' : 'inherit'};">
+							Full Verbatim Prompt
+						</button>
+					</div>
+					<div style="display: flex; align-items: center; gap: 8px; font-size: 11px;">
+						${savedSnapshot ? `
+							<span style="opacity: 0.7;">Snapshot Source:</span>
+							<button type="button" class="inspector-source-btn" data-source="saved" style="padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; border: 1px solid ${activeSnapshot === savedSnapshot ? 'rgba(52, 211, 153, 0.45)' : 'rgba(255,255,255,0.14)'}; background: ${activeSnapshot === savedSnapshot ? 'rgba(16, 185, 129, 0.18)' : 'transparent'}; color: ${activeSnapshot === savedSnapshot ? '#34d399' : 'inherit'};">Last Execution Snapshot</button>
+							<button type="button" class="inspector-source-btn" data-source="live" style="padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; border: 1px solid ${activeSnapshot === liveSnapshot ? 'rgba(56, 189, 248, 0.45)' : 'rgba(255,255,255,0.14)'}; background: ${activeSnapshot === liveSnapshot ? 'rgba(56, 189, 248, 0.18)' : 'transparent'}; color: ${activeSnapshot === liveSnapshot ? '#38bdf8' : 'inherit'};">Live Current Inputs</button>
+						` : `
+							<span style="opacity: 0.65; font-style: italic;">Showing full resolved prompt from current ticket fields &amp; segments</span>
+						`}
+					</div>
+				</div>
+
+				<!-- Modal Body -->
+				<div style="flex: 1; padding: 16px 18px; overflow-y: auto; box-sizing: border-box;">
+					${bodyContentHtml}
+				</div>
+			`;
+
+			if (ttPolicy) {
+				dialog.innerHTML = ttPolicy.createHTML(modalHtml) as unknown as string;
+			} else {
+				dialog.innerHTML = modalHtml;
+			}
+
+			// Wire interactive buttons inside the dialog
+			const closeBtn = dialog.querySelector('.inspector-close-btn') as HTMLElement | null;
+			if (closeBtn) {
+				closeBtn.onclick = () => closeDialog();
+			}
+
+			const openTabBtn = dialog.querySelector('.inspector-open-tab-btn') as HTMLElement | null;
+			if (openTabBtn) {
+				openTabBtn.onclick = () => {
+					this._openSentPromptInEditorTab(activeSnapshot, fieldKey);
+					closeDialog();
+				};
+			}
+
+			const tabBtns = Array.from(dialog.querySelectorAll('.inspector-tab-btn')) as HTMLElement[];
+			tabBtns.forEach(btn => {
+				btn.onclick = () => {
+					const t = btn.getAttribute('data-tab') as 'structured' | 'raw';
+					if (t && t !== activeTab) {
+						activeTab = t;
+						renderModalContent();
+					}
+				};
+			});
+
+			const sourceBtns = Array.from(dialog.querySelectorAll('.inspector-source-btn')) as HTMLElement[];
+			sourceBtns.forEach(btn => {
+				btn.onclick = () => {
+					const src = btn.getAttribute('data-source');
+					if (src === 'saved' && savedSnapshot) {
+						activeSnapshot = savedSnapshot;
+						renderModalContent();
+					} else if (src === 'live') {
+						activeSnapshot = liveSnapshot;
+						renderModalContent();
+					}
+				};
+			});
+
+			const copyBtns = Array.from(dialog.querySelectorAll('.inspector-copy-chunk-btn')) as HTMLElement[];
+			copyBtns.forEach(btn => {
+				btn.onclick = () => {
+					const kind = btn.getAttribute('data-copy-kind');
+					const idx = Number(btn.getAttribute('data-copy-index') || '0');
+					let textToCopy = '';
+					let label = 'Prompt';
+					if (kind === 'full') {
+						textToCopy = activeSnapshot.fullInterpolatedPrompt || '';
+						label = 'Full Sent Prompt';
+					} else if (kind === 'pre') {
+						textToCopy = preInterp || '';
+						label = 'Pre-Injected System Instruction';
+					} else if (kind === 'ref' && refVars[idx]) {
+						textToCopy = refVars[idx].resolvedValue || '';
+						label = refVars[idx].token;
+					} else if (kind === 'user' && userSegsInterp[idx] !== undefined) {
+						textToCopy = userSegsInterp[idx] || '';
+						label = `User Input #${idx + 1}`;
+					}
+					this._clipboardService.writeText(textToCopy);
+					this._notificationService.info(`Copied ${label} to clipboard (${textToCopy.length.toLocaleString()} chars).`);
+				};
+			});
+		};
+
+		renderModalContent();
+		overlay.appendChild(dialog);
+		overlay.addEventListener('click', (ev) => {
+			if (ev.target === overlay) {
+				closeDialog();
+			}
+		});
+		const onKeyDown = (ev: KeyboardEvent) => {
+			if (ev.key === 'Escape') {
+				document.removeEventListener('keydown', onKeyDown);
+				closeDialog();
+			}
+		};
+		document.addEventListener('keydown', onKeyDown);
+		document.body.appendChild(overlay);
 	}
 
 	private async _savePromptDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string): Promise<any> {
 		const textarea = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
-		const modelSelect = card.querySelector('.prompt-model-select') as HTMLSelectElement | null;
+		const providerSelect = card.querySelector('.prompt-provider-select') as HTMLSelectElement | null;
+		const modelSelect = card.querySelector('.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
+		const selectedModelText = card.querySelector('.prompt-selected-model-text') as HTMLElement | null;
+		const customModelInput = card.querySelector('.prompt-custom-model-input') as HTMLInputElement | null;
 		const agentSelect = card.querySelector('.prompt-agent-select') as HTMLSelectElement | null;
-		const modelBtn = card.querySelector('.prompt-mode-model-btn') as HTMLElement | null;
-		const isModel = modelBtn?.style.background.includes('rgba(236') || false;
+		const rawOutputTa = card.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
 		const outputDisplay = card.querySelector('.prompt-output-display') as HTMLElement | null;
 
-		const targetMode = isModel ? 'model' : 'agent';
-		const targetModel = modelSelect?.value.trim() || 'gemini-1.5-flash';
+		const lockedMode = card.getAttribute('data-target-mode') as 'model' | 'agent' | null;
+		const targetMode: 'model' | 'agent' = lockedMode === 'agent' ? 'agent' : 'model';
+		const targetProvider = card.getAttribute('data-target-provider') || providerSelect?.value.trim() || 'openai';
+		let targetModel = card.getAttribute('data-target-model') || modelSelect?.value.trim() || selectedModelText?.textContent?.trim() || 'gemini-1.5-flash';
+		if (targetModel === 'custom' && customModelInput) {
+			targetModel = customModelInput.value.trim() || 'gpt-4o';
+		}
 		const targetAgentId = agentSelect?.value.trim() || '';
-		const targetAgentName = agentSelect?.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || '';
-		const prompt = textarea?.value || '';
-		const output = outputOverride !== undefined ? outputOverride : (outputDisplay?.textContent || '');
+		const targetAgentName = targetAgentId
+			? (agentSelect?.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || '')
+			: '';
+		const userCustomizedTarget = card.getAttribute('data-user-customized-target') === 'true';
+		const userTextareas = Array.from(card.querySelectorAll('.prompt-user-textarea')) as HTMLTextAreaElement[];
+		const userPrompts = userTextareas.length > 0
+			? userTextareas.map(ta => ta.value || '')
+			: [textarea?.value || ''];
+		const userPromptsLocked = userTextareas.length > 0
+			? userTextareas.map(ta => ta.closest('.voice-input-textarea-wrapper')?.getAttribute('data-locked') === 'true')
+			: [textarea?.closest('.voice-input-textarea-wrapper')?.getAttribute('data-locked') === 'true'];
+		const preInjectedTa = card.querySelector('.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
+		const preInjectedPrompt = preInjectedTa ? preInjectedTa.value : (card.getAttribute('data-pre-injected-prompt') || '');
+		const preInjectedWrapper = preInjectedTa?.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
+		const preInjectedLocked = preInjectedWrapper ? preInjectedWrapper.getAttribute('data-locked') === 'true' : undefined;
+		if (preInjectedTa) {
+			card.setAttribute('data-pre-injected-prompt', preInjectedPrompt);
+		}
+		const { formattedUserPrompt: userPrompt, combinedRawPrompt: combinedPrompt } = this._formatCombinedPromptForLlm(preInjectedPrompt, userPrompts);
+		if (outputOverride !== undefined && rawOutputTa) {
+			rawOutputTa.value = outputOverride;
+		}
+		let output = outputOverride !== undefined ? outputOverride : (rawOutputTa?.value || outputDisplay?.textContent || '');
+		if (output.includes('No execution output yet.')) {
+			output = '';
+		}
 		const lastExecuted = outputOverride !== undefined && outputOverride === '' ? '' : `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
 
-		const promptData = {
-			prompt,
+		const promptData: Record<string, any> = {
+			userPrompt,
+			userPrompts,
+			userPromptsLocked,
+			preInjectedPrompt,
+			prompt: combinedPrompt,
 			targetMode,
+			targetProvider,
 			targetModel,
 			targetAgentId,
 			targetAgentName,
+			userCustomizedTarget,
 			output,
 			lastExecuted
 		};
+		if (typeof preInjectedLocked === 'boolean') {
+			promptData.preInjectedLocked = preInjectedLocked;
+		}
+		const savedLastSentAttr = card.getAttribute('data-last-sent-payload');
+		if (savedLastSentAttr) {
+			try {
+				promptData.lastSentPayload = JSON.parse(savedLastSentAttr);
+			} catch {}
+		}
 
 		await this._savePromptPrimitiveData(fieldKey, promptData);
 		return promptData;
 	}
 
 	private _togglePromptMode(card: HTMLElement, fieldKey: string, mode: 'model' | 'agent'): void {
-		const isAgent = mode === 'agent';
-		const modelBtn = card.querySelector('.prompt-mode-model-btn') as HTMLElement | null;
-		const agentBtn = card.querySelector('.prompt-mode-agent-btn') as HTMLElement | null;
-		const modelSelect = card.querySelector('.prompt-model-select') as HTMLElement | null;
-		const agentSelect = card.querySelector('.prompt-agent-select') as HTMLElement | null;
-		const runModelBtn = card.querySelector('.prompt-run-model-btn') as HTMLElement | null;
-		const dispatchAgentBtn = card.querySelector('.prompt-dispatch-agent-btn') as HTMLElement | null;
-		const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
-
-		if (modelBtn && agentBtn) {
-			if (isAgent) {
-				agentBtn.style.border = '1px solid rgba(56,189,248,0.5)';
-				agentBtn.style.background = 'rgba(56,189,248,0.2)';
-				agentBtn.style.color = '#38bdf8';
-				modelBtn.style.border = '1px solid rgba(255,255,255,0.1)';
-				modelBtn.style.background = 'transparent';
-				modelBtn.style.color = 'inherit';
-			} else {
-				modelBtn.style.border = '1px solid rgba(59,130,246,0.5)';
-				modelBtn.style.background = 'rgba(59,130,246,0.18)';
-				modelBtn.style.color = '#60a5fa';
-				agentBtn.style.border = '1px solid rgba(255,255,255,0.1)';
-				agentBtn.style.background = 'transparent';
-				agentBtn.style.color = 'inherit';
-			}
-		}
-
-		if (modelSelect && agentSelect) {
-			modelSelect.style.display = isAgent ? 'none' : 'block';
-			agentSelect.style.display = isAgent ? 'block' : 'none';
-		}
-
-		if (runModelBtn && dispatchAgentBtn) {
-			runModelBtn.style.display = isAgent ? 'none' : 'inline-flex';
-			dispatchAgentBtn.style.display = isAgent ? 'inline-flex' : 'none';
-		}
-
-		if (targetBadge) {
-			if (isAgent) {
-				const agName = (agentSelect as HTMLSelectElement)?.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || 'Agent';
-				targetBadge.textContent = `Agent: ${agName}`;
-				targetBadge.style.background = 'rgba(56, 189, 248, 0.15)';
-				targetBadge.style.color = '#38bdf8';
-			} else {
-				const mName = (modelSelect as HTMLSelectElement)?.value || 'gemini-1.5-flash';
-				targetBadge.textContent = `Model: ${mName}`;
-				targetBadge.style.background = 'rgba(59, 130, 246, 0.15)';
-				targetBadge.style.color = '#60a5fa';
-			}
-		}
-
+		// Target mode (Model vs AI Agent) is locked to the module template definition and cannot be switched by ticket users.
 		this._savePromptDataFromCard(card, fieldKey).catch(() => {});
+	}
+
+	private _inFlightPromptRuns = new Map<string, { modelId: string; startedAt: number }>();
+
+	private _findLivePromptCard(fieldKey: string, fallbackCard: HTMLElement): HTMLElement {
+		if (this._container) {
+			const cards = Array.from(this._container.querySelectorAll('.prompt-primitive-card')) as HTMLElement[];
+			const match = cards.find(c => c.getAttribute('data-field-key') === fieldKey);
+			if (match) {
+				return match;
+			}
+		}
+		return fallbackCard;
+	}
+
+	private _parseJsonOrPythonListVal(val: any): any[] {
+		if (Array.isArray(val)) {
+			return val.map(v => String(v ?? '').trim()).filter(Boolean);
+		}
+		if (typeof val !== 'string') {
+			return [];
+		}
+		const s = val.trim();
+		if (!s || s === '[]' || s === 'null' || s === 'None') {
+			return [];
+		}
+		try {
+			const p = JSON.parse(s);
+			if (Array.isArray(p)) {
+				return p.map(v => String(v ?? '').trim()).filter(Boolean);
+			}
+		} catch {}
+		if (s.startsWith('[') && s.endsWith(']')) {
+			const inner = s.slice(1, -1).trim();
+			if (!inner) {
+				return [];
+			}
+			const items: string[] = [];
+			const itemRegex = /'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"/g;
+			let m: RegExpExecArray | null;
+			while ((m = itemRegex.exec(inner)) !== null) {
+				const rawItem = m[1] !== undefined ? m[1] : m[2];
+				const unescaped = rawItem
+					.replace(/\\'/g, "'")
+					.replace(/\\"/g, '"')
+					.replace(/\\n/g, '\n')
+					.replace(/\\t/g, '\t')
+					.replace(/\\\\/g, '\\')
+					.trim();
+				if (unescaped) {
+					items.push(unescaped);
+				}
+			}
+			if (items.length > 0) {
+				return items;
+			}
+			return inner.split(',').map(part => part.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+		}
+		return [s];
+	}
+
+	private _tryExtractJsonRecordsFromTicketTable(rawPrompt: string, forceExtract: boolean = false): string | undefined {
+		if (!rawPrompt) {
+			return undefined;
+		}
+		const lowerPrompt = rawPrompt.toLowerCase();
+		const isJsonArrayRequest = (
+			lowerPrompt.includes('json array') ||
+			lowerPrompt.includes('valid json') ||
+			lowerPrompt.includes('json list')
+		) && (
+			lowerPrompt.includes('database query result') ||
+			lowerPrompt.includes('every returned record') ||
+			lowerPrompt.includes('do not omit any rows') ||
+			lowerPrompt.includes('convert each row into one json object') ||
+			forceExtract
+		);
+		if (!isJsonArrayRequest && !forceExtract) {
+			return undefined;
+		}
+
+		const referencedNames: string[] = [];
+		const singleBraceRegex = /(?<!\{)\{([^{}\n\r]+)\}(?!\})/g;
+		let match: RegExpExecArray | null;
+		while ((match = singleBraceRegex.exec(rawPrompt)) !== null) {
+			const name = (match[1] || '').trim();
+			if (name && !referencedNames.includes(name)) {
+				referencedNames.push(name);
+			}
+		}
+
+		let sourceRows: any[] | undefined;
+		for (const refName of referencedNames) {
+			const matchingField = this._lastCustomModule?.fields?.find((f: any) =>
+				(f.label && f.label.toLowerCase() === refName.toLowerCase()) ||
+				(f.id && f.id.toLowerCase() === refName.toLowerCase()) ||
+				(f.id && f.id.toLowerCase().replace(/_/g, ' ') === refName.toLowerCase().replace(/_/g, ' '))
+			);
+			const mVal = this._lookupCustomMetadataByField(refName, matchingField);
+			if (mVal) {
+				try {
+					const parsed = typeof mVal === 'string' ? JSON.parse(mVal) : mVal;
+					if (Array.isArray(parsed) && parsed.length > 0) {
+						sourceRows = parsed;
+						break;
+					} else if (parsed && typeof parsed === 'object' && Array.isArray((parsed as any).rows) && (parsed as any).rows.length > 0) {
+						sourceRows = (parsed as any).rows;
+						break;
+					}
+				} catch {}
+			}
+		}
+
+		if (!sourceRows || sourceRows.length === 0) {
+			return undefined;
+		}
+		if (!forceExtract && sourceRows.length <= 15) {
+			return undefined;
+		}
+
+		const listColumns = new Set(['what_to_do', 'require_base', 'require_bonus', 'keywords', 'tags', 'skills', 'benefits', 'responsibilities', 'requirements']);
+		const normalizedRows = sourceRows.map(row => {
+			if (!row || typeof row !== 'object' || Array.isArray(row)) {
+				return row;
+			}
+			const out: Record<string, any> = {};
+			for (const [k, v] of Object.entries(row)) {
+				if (listColumns.has(k.toLowerCase())) {
+					out[k] = this._parseJsonOrPythonListVal(v);
+				} else if (typeof v === 'string' && (v.trim().startsWith('[') && v.trim().endsWith(']'))) {
+					out[k] = this._parseJsonOrPythonListVal(v);
+				} else {
+					out[k] = v ?? '';
+				}
+			}
+			return out;
+		});
+
+		return JSON.stringify(normalizedRows, null, 2);
+	}
+
+	private _formatPromptOutputPreviewText(text: string): string {
+		if (!text) {
+			return '';
+		}
+		const trimmed = text.trim();
+		if (trimmed.startsWith('[')) {
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (Array.isArray(parsed) && parsed.length > 10) {
+					const previewSlice = parsed.slice(0, 10);
+					return `${JSON.stringify(previewSlice, null, 2)}\n\n... [${parsed.length - 10} more records omitted in UI preview (showing first 10 of ${parsed.length} total records). All ${parsed.length} complete records are preserved in runtime data & Output pagination.]`;
+				}
+			} catch {}
+		}
+		if (trimmed.length > 24000) {
+			return `${trimmed.slice(0, 24000)}\n\n... [Preview truncated in UI (${trimmed.length.toLocaleString()} total chars). Complete data is preserved in runtime data & Output pagination.]`;
+		}
+		return text;
 	}
 
 	private async _executePromptWithModel(card: HTMLElement, fieldKey: string): Promise<void> {
 		const textarea = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
-		const rawPrompt = textarea?.value.trim() || '';
-		if (!rawPrompt) {
+		const { combinedRawPrompt, interpolatedPrompt } = this._resolveCombinedPromptFromCard(card);
+		if (!combinedRawPrompt) {
 			this._notificationService.warn('Please enter a prompt instruction before running.');
 			textarea?.focus();
 			return;
 		}
 
-		const modelSelect = card.querySelector('.prompt-model-select') as HTMLSelectElement | null;
-		const modelId = modelSelect?.value.trim() || 'gemini-1.5-flash';
+		const sentSnapshot = this._buildSentPromptSnapshot(card, fieldKey, true);
+		const sentSnapshotJson = JSON.stringify(sentSnapshot);
+		card.setAttribute('data-last-sent-payload', sentSnapshotJson);
 
-		const interpolatedPrompt = this._interpolateParameters(rawPrompt);
-
-		const statusText = card.querySelector('.prompt-status-text') as HTMLElement | null;
-		const outputDisplay = card.querySelector('.prompt-output-display') as HTMLElement | null;
-
-		if (statusText) {
-			statusText.textContent = `Running with ${modelId}... ⏳`;
-			statusText.style.color = '#f472b6';
+		const modelSelect = card.querySelector('.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
+		const selectedModelText = card.querySelector('.prompt-selected-model-text') as HTMLElement | null;
+		const customModelInput = card.querySelector('.prompt-custom-model-input') as HTMLInputElement | null;
+		let modelId = card.getAttribute('data-target-model') || modelSelect?.value.trim() || selectedModelText?.textContent?.trim() || 'gemini-1.5-flash';
+		if (modelId === 'custom' && customModelInput) {
+			modelId = customModelInput.value.trim() || 'gpt-4o';
 		}
-		if (outputDisplay) {
-			outputDisplay.textContent = `Processing prompt with ${modelId}...`;
+
+		// Fast-path deterministic extraction when parsing large SQLite query results into a JSON array
+		const directTableJson = this._tryExtractJsonRecordsFromTicketTable(combinedRawPrompt, false);
+		if (directTableJson) {
+			const liveCard = this._findLivePromptCard(fieldKey, card);
+			liveCard.setAttribute('data-last-sent-payload', sentSnapshotJson);
+			const liveStatus = liveCard.querySelector('.prompt-status-text') as HTMLElement | null;
+			const liveRawTa = liveCard.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
+			const liveOutput = liveCard.querySelector('.prompt-output-display') as HTMLElement | null;
+			if (liveRawTa) {
+				liveRawTa.value = directTableJson;
+			}
+			if (liveOutput) {
+				liveOutput.textContent = this._formatPromptOutputPreviewText(directTableJson);
+			}
+			if (liveStatus) {
+				liveStatus.textContent = `Completed at ${new Date().toLocaleTimeString()} (${directTableJson.length.toLocaleString()} chars — 100% records preserved)`;
+				liveStatus.style.color = '#34d399';
+			}
+			await this._savePromptDataFromCard(liveCard, fieldKey, directTableJson);
+			await this._autoUpdateOutputPrimitives(directTableJson, fieldKey);
+			return;
 		}
+
+		const startedAt = Date.now();
+		this._inFlightPromptRuns.set(fieldKey, { modelId, startedAt });
+
+		const updateRunningUi = () => {
+			const liveCard = this._findLivePromptCard(fieldKey, card);
+			const elapsedSec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+			const liveStatus = liveCard.querySelector('.prompt-status-text') as HTMLElement | null;
+			const liveOutput = liveCard.querySelector('.prompt-output-display') as HTMLElement | null;
+			if (liveStatus) {
+				liveStatus.textContent = `Running with ${modelId}... ⏳ (${elapsedSec}s)`;
+				liveStatus.style.color = '#f472b6';
+			}
+			if (liveOutput && (liveOutput.textContent || '').startsWith('Processing prompt with')) {
+				liveOutput.textContent = `Processing prompt with ${modelId}... (${elapsedSec}s elapsed — reasoning models may take 20~90s for long inputs)`;
+			}
+		};
+
+		const initialStatus = card.querySelector('.prompt-status-text') as HTMLElement | null;
+		const initialOutput = card.querySelector('.prompt-output-display') as HTMLElement | null;
+		if (initialStatus) {
+			initialStatus.textContent = `Running with ${modelId}... ⏳ (0s)`;
+			initialStatus.style.color = '#f472b6';
+		}
+		if (initialOutput) {
+			initialOutput.textContent = `Processing prompt with ${modelId}... (0s elapsed — reasoning models may take 20~90s for long inputs)`;
+		}
+
+		const elapsedTimer = setInterval(updateRunningUi, 1000);
 
 		try {
 			const credService = this._instantiationService.invokeFunction(accessor => {
@@ -3576,44 +6978,5496 @@ ${rawErr}
 				throw new Error('AI Credential service not available.');
 			}
 
-			const res = await credService.executePrompt(modelId, interpolatedPrompt);
+			const providerSelect = card.querySelector('.prompt-provider-select') as HTMLSelectElement | null;
+			const targetProviderId = card.getAttribute('data-target-provider') || providerSelect?.value.trim() || undefined;
+			const res = await credService.executePrompt(modelId, interpolatedPrompt, undefined, targetProviderId);
+
+			this._inFlightPromptRuns.delete(fieldKey);
+			clearInterval(elapsedTimer);
+
+			const liveCard = this._findLivePromptCard(fieldKey, card);
+			liveCard.setAttribute('data-last-sent-payload', sentSnapshotJson);
+			const liveStatus = liveCard.querySelector('.prompt-status-text') as HTMLElement | null;
+			const liveRawTa = liveCard.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
+			const liveOutput = liveCard.querySelector('.prompt-output-display') as HTMLElement | null;
 
 			if (res.success && res.text) {
-				if (outputDisplay) {
-					outputDisplay.textContent = res.text;
+				let finalOutText = res.text;
+				if (finalOutText.includes('"error"') && (finalOutText.includes('supplied preview does not include all') || finalOutText.includes('records are omitted'))) {
+					const fallbackJson = this._tryExtractJsonRecordsFromTicketTable(combinedRawPrompt, true);
+					if (fallbackJson) {
+						finalOutText = fallbackJson;
+					}
 				}
-				if (statusText) {
-					statusText.textContent = `Completed at ${new Date().toLocaleTimeString()} (${res.text.length} chars)`;
-					statusText.style.color = '#34d399';
+				if (liveRawTa) {
+					liveRawTa.value = finalOutText;
 				}
-				await this._savePromptDataFromCard(card, fieldKey, res.text);
-				await this._autoUpdateOutputPrimitives(res.text, fieldKey);
+				if (liveOutput) {
+					liveOutput.textContent = this._formatPromptOutputPreviewText(finalOutText);
+				}
+				if (liveStatus) {
+					liveStatus.textContent = `Completed at ${new Date().toLocaleTimeString()} (${finalOutText.length.toLocaleString()} chars)`;
+					liveStatus.style.color = '#34d399';
+				}
+				await this._savePromptDataFromCard(liveCard, fieldKey, finalOutText);
+				await this._autoUpdateOutputPrimitives(finalOutText, fieldKey);
 			} else {
+				const fallbackJson = this._tryExtractJsonRecordsFromTicketTable(combinedRawPrompt, true);
+				if (fallbackJson) {
+					if (liveRawTa) {
+						liveRawTa.value = fallbackJson;
+					}
+					if (liveOutput) {
+						liveOutput.textContent = this._formatPromptOutputPreviewText(fallbackJson);
+					}
+					if (liveStatus) {
+						liveStatus.textContent = `Completed at ${new Date().toLocaleTimeString()} (${fallbackJson.length.toLocaleString()} chars)`;
+						liveStatus.style.color = '#34d399';
+					}
+					await this._savePromptDataFromCard(liveCard, fieldKey, fallbackJson);
+					await this._autoUpdateOutputPrimitives(fallbackJson, fieldKey);
+					return;
+				}
 				throw new Error(res.error || 'Execution failed');
 			}
 		} catch (err: any) {
+			this._inFlightPromptRuns.delete(fieldKey);
+			clearInterval(elapsedTimer);
+
 			const errMsg = err?.message || String(err);
-			if (outputDisplay) {
-				outputDisplay.textContent = `[Execution Error]\n${errMsg}`;
+			const liveCard = this._findLivePromptCard(fieldKey, card);
+			liveCard.setAttribute('data-last-sent-payload', sentSnapshotJson);
+			const liveStatus = liveCard.querySelector('.prompt-status-text') as HTMLElement | null;
+			const liveOutput = liveCard.querySelector('.prompt-output-display') as HTMLElement | null;
+			if (liveOutput) {
+				liveOutput.textContent = `[Execution Error]\n${errMsg}`;
+			}
+			if (liveStatus) {
+				liveStatus.textContent = `Failed: ${errMsg.slice(0, 30)}`;
+				liveStatus.style.color = '#ef4444';
+			}
+			await this._savePromptDataFromCard(liveCard, fieldKey, `[Error: ${errMsg}]`);
+		}
+	}
+
+	private async _hydratePromptPrimitiveCards(): Promise<void> {
+		if (!this._container) return;
+		const cards = Array.from(this._container.querySelectorAll('.prompt-primitive-card')) as HTMLElement[];
+		if (cards.length === 0) return;
+
+		let loadedCredentials: any[] = [];
+		let credServiceRef: IAgentCredentialService | undefined;
+		try {
+			credServiceRef = this._instantiationService.invokeFunction(accessor => {
+				try { return accessor.get(IAgentCredentialService); } catch { return undefined; }
+			});
+			if (credServiceRef) {
+				const allCreds = await credServiceRef.getCredentials();
+				loadedCredentials = allCreds.filter(c => c.isEnabled !== false);
+				// Dynamically fetch models in background for any enabled credential missing cachedModels
+				for (const cred of loadedCredentials) {
+					if (!Array.isArray(cred.cachedModels) || cred.cachedModels.length === 0) {
+						credServiceRef.getApiKey(cred.id).then(async (apiKey) => {
+							if (apiKey && credServiceRef) {
+								try {
+									const fetched = await credServiceRef.fetchModels(cred.providerId, apiKey, cred.customUrl);
+									if (Array.isArray(fetched) && fetched.length > 0) {
+										cred.cachedModels = fetched;
+										await credServiceRef.updateCredential({
+											...cred,
+											cachedModels: fetched,
+											connectionStatus: 'connected',
+											lastVerifiedAt: Date.now()
+										});
+									}
+								} catch {}
+							}
+						}).catch(() => {});
+					}
+				}
+			}
+		} catch {}
+
+		const providerModelsMap = this._getPromptProviderModelsMap();
+
+		for (const card of cards) {
+			const wrappers = Array.from(card.querySelectorAll('.voice-input-textarea-wrapper')) as HTMLElement[];
+			wrappers.forEach(w => this._syncPromptBoxExpandUi(w));
+			const cardFieldKey = card.getAttribute('data-field-key') || '';
+			const inFlight = cardFieldKey ? this._inFlightPromptRuns.get(cardFieldKey) : undefined;
+			if (inFlight) {
+				const elapsedSec = Math.max(0, Math.floor((Date.now() - inFlight.startedAt) / 1000));
+				const liveStatus = card.querySelector('.prompt-status-text') as HTMLElement | null;
+				const liveOutput = card.querySelector('.prompt-output-display') as HTMLElement | null;
+				if (liveStatus) {
+					liveStatus.textContent = `Running with ${inFlight.modelId}... ⏳ (${elapsedSec}s)`;
+					liveStatus.style.color = '#f472b6';
+				}
+				if (liveOutput) {
+					liveOutput.textContent = `Processing prompt with ${inFlight.modelId}... (${elapsedSec}s elapsed — reasoning models may take 20~90s for long inputs)`;
+				}
+			}
+			const mode = card.getAttribute('data-target-mode') || 'model';
+			if (mode === 'agent') {
+				continue;
+			}
+			card.setAttribute('data-prompt-hydrated', 'true');
+			const fieldKey = card.getAttribute('data-field-key') || '';
+			const providerSelect = card.querySelector('.prompt-provider-select') as HTMLSelectElement | null;
+			const modelHiddenInput = card.querySelector('.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
+			const modelPickerBtn = card.querySelector('.prompt-model-picker-btn') as HTMLButtonElement | null;
+			const selectedModelText = card.querySelector('.prompt-selected-model-text') as HTMLElement | null;
+			const modelDropdown = card.querySelector('.prompt-model-dropdown') as HTMLElement | null;
+			const modelSearchInput = card.querySelector('.prompt-model-search-input') as HTMLInputElement | null;
+			const dropdownProviderBadge = card.querySelector('.prompt-dropdown-provider-badge') as HTMLElement | null;
+			const modelListEl = card.querySelector('.prompt-model-list') as HTMLElement | null;
+			const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
+
+			let activeProvider = card.getAttribute('data-target-provider') || 'openai';
+			let activeModel = card.getAttribute('data-target-model') || modelHiddenInput?.value || selectedModelText?.textContent?.trim() || 'gpt-4o';
+			if (activeModel === 'o1-mini' || activeModel === 'o1-preview') {
+				activeModel = 'gpt-4o';
+			}
+
+			const getModelsForProvider = (provId: string): Array<{ id: string; badge?: string }> => {
+				const matchingCreds = loadedCredentials.filter(c => c.providerId === provId || c.id === provId);
+				const combined: Array<{ id: string; badge?: string }> = [];
+				const seen = new Set<string>();
+
+				// 1. First add all live cachedModels from user's configured credentials for this provider
+				for (const c of matchingCreds) {
+					if (Array.isArray(c.cachedModels)) {
+						for (const cm of c.cachedModels) {
+							if (cm && !seen.has(cm)) {
+								seen.add(cm);
+								combined.push({ id: cm, badge: provId.toUpperCase() });
+							}
+						}
+					}
+				}
+
+				// 2. Also include fallback presets if not already in cachedModels
+				const fallbacks = providerModelsMap[provId] || providerModelsMap['openai'] || [];
+				for (const fb of fallbacks) {
+					if (fb.id && fb.id !== 'custom' && !seen.has(fb.id)) {
+						seen.add(fb.id);
+						combined.push({ id: fb.id, badge: provId.toUpperCase() });
+					}
+				}
+
+				return combined;
+			};
+
+			const syncCardModelUi = (newModel: string, newProvider: string) => {
+				activeModel = newModel;
+				activeProvider = newProvider;
+				card.setAttribute('data-target-model', activeModel);
+				card.setAttribute('data-target-provider', activeProvider);
+				if (modelHiddenInput) {
+					modelHiddenInput.value = activeModel;
+				}
+				if (selectedModelText) {
+					selectedModelText.textContent = activeModel;
+				}
+				if (targetBadge) {
+					targetBadge.textContent = `Model: ${activeModel}`;
+				}
+				if (dropdownProviderBadge) {
+					dropdownProviderBadge.textContent = activeProvider.toUpperCase();
+				}
+			};
+
+			// Populate Provider / Credential Select
+			if (providerSelect) {
+				clearNode(providerSelect);
+				const standardProviders = [
+					{ id: 'openai', label: 'OpenAI' },
+					{ id: 'gemini', label: 'Google Gemini' },
+					{ id: 'anthropic', label: 'Anthropic Claude' },
+					{ id: 'ollama', label: 'Ollama Local' },
+					{ id: 'custom-openai', label: 'Custom Endpoint' }
+				];
+
+				// Show configured credentials labels while keeping providerId value compatibility
+				standardProviders.forEach(sp => {
+					const matchingCred = loadedCredentials.find(c => c.providerId === sp.id);
+					const opt = document.createElement('option');
+					opt.value = sp.id;
+					const countSuffix = (matchingCred && Array.isArray(matchingCred.cachedModels) && matchingCred.cachedModels.length > 0)
+						? ` (${matchingCred.cachedModels.length} models)`
+						: '';
+					opt.textContent = matchingCred
+						? `${matchingCred.name} (${sp.id.toUpperCase()})${countSuffix}`
+						: sp.label;
+					if (sp.id === activeProvider) {
+						opt.selected = true;
+					}
+					providerSelect.appendChild(opt);
+				});
+
+				providerSelect.onchange = () => {
+					const nextProv = providerSelect.value || 'openai';
+					const models = getModelsForProvider(nextProv);
+					let nextModel = activeModel;
+					if (!models.some(m => m.id === nextModel) || this._isModelFromAnotherProvider(nextModel, nextProv)) {
+						// Pick smart default for provider
+						const preferred = nextProv === 'gemini'
+							? ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash']
+							: nextProv === 'anthropic'
+								? ['claude-sonnet-4-5', 'claude-3-5-sonnet-20241022', 'claude-3-5-sonnet']
+								: ['gpt-4o', 'gpt-4o-mini', 'gpt-5'];
+						const foundPref = preferred.map(p => models.find(m => m.id === p || m.id.includes(p))).find(Boolean);
+						nextModel = foundPref ? foundPref.id : (models[0]?.id || 'gpt-4o');
+					}
+					syncCardModelUi(nextModel, nextProv);
+					renderModelOptions(modelSearchInput?.value || '');
+					card.setAttribute('data-user-customized-target', 'true');
+					this._savePromptDataFromCard(card, fieldKey).catch(() => {});
+				};
+			}
+
+			const renderModelOptions = (filterQuery: string = '') => {
+				if (!modelListEl) return;
+				clearNode(modelListEl);
+				if (dropdownProviderBadge) {
+					dropdownProviderBadge.textContent = activeProvider.toUpperCase();
+				}
+
+				const allModels = getModelsForProvider(activeProvider);
+				const q = filterQuery.trim().toLowerCase();
+				const filtered = q
+					? allModels.filter(m => m.id.toLowerCase().includes(q))
+					: allModels;
+
+				if (q && !filtered.some(m => m.id.toLowerCase() === q)) {
+					filtered.unshift({ id: filterQuery.trim(), badge: 'Custom ID' });
+				}
+
+				if (filtered.length === 0) {
+					const emptyEl = document.createElement('div');
+					emptyEl.style.cssText = 'padding: 8px 10px; font-size: 11px; opacity: 0.6; font-style: italic;';
+					emptyEl.textContent = 'No matching models. Type any custom model ID above.';
+					modelListEl.appendChild(emptyEl);
+					return;
+				}
+
+				filtered.forEach(m => {
+					const item = document.createElement('div');
+					const isSelected = activeModel === m.id;
+					item.style.cssText = `padding: 6px 8px; font-size: 11.5px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; background: ${isSelected ? 'rgba(59, 130, 246, 0.22)' : 'transparent'}; color: ${isSelected ? '#60a5fa' : 'inherit'};`;
+					item.onmouseenter = () => { if (activeModel !== m.id) item.style.background = 'rgba(255,255,255,0.06)'; };
+					item.onmouseleave = () => { item.style.background = activeModel === m.id ? 'rgba(59, 130, 246, 0.22)' : 'transparent'; };
+
+					const leftWrap = document.createElement('div');
+					leftWrap.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+
+					if (m.badge) {
+						const bSpan = document.createElement('span');
+						bSpan.style.cssText = 'font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(59, 130, 246, 0.16); color: #93c5fd; flex-shrink: 0;';
+						bSpan.textContent = m.badge;
+						leftWrap.appendChild(bSpan);
+					}
+
+					const nameSpan = document.createElement('span');
+					nameSpan.style.cssText = 'font-weight: 500; font-family: var(--vscode-editor-font-family, monospace); overflow: hidden; text-overflow: ellipsis;';
+					nameSpan.textContent = m.id;
+					leftWrap.appendChild(nameSpan);
+					item.appendChild(leftWrap);
+
+					item.onmousedown = (ev) => {
+						ev.preventDefault();
+						ev.stopPropagation();
+						syncCardModelUi(m.id, activeProvider);
+						if (modelDropdown) modelDropdown.style.display = 'none';
+						card.setAttribute('data-user-customized-target', 'true');
+						this._savePromptDataFromCard(card, fieldKey).catch(() => {});
+					};
+					modelListEl.appendChild(item);
+				});
+			};
+
+			syncCardModelUi(activeModel, activeProvider);
+			renderModelOptions('');
+
+			if (modelPickerBtn && modelDropdown) {
+				modelPickerBtn.onclick = (ev) => {
+					ev.preventDefault();
+					ev.stopPropagation();
+					const isOpen = modelDropdown.style.display === 'flex';
+					modelDropdown.style.display = isOpen ? 'none' : 'flex';
+					if (!isOpen && modelSearchInput) {
+						modelSearchInput.value = '';
+						renderModelOptions('');
+						setTimeout(() => modelSearchInput.focus(), 20);
+					}
+				};
+			}
+
+			if (modelSearchInput && modelDropdown) {
+				modelSearchInput.oninput = () => {
+					renderModelOptions(modelSearchInput.value);
+				};
+				modelSearchInput.onkeydown = (ev) => {
+					if (ev.key === 'Enter' && modelSearchInput.value.trim()) {
+						ev.preventDefault();
+						ev.stopPropagation();
+						const q = modelSearchInput.value.trim().toLowerCase();
+						const allModels = getModelsForProvider(activeProvider);
+						const firstMatch = allModels.find(m => m.id.toLowerCase().includes(q));
+						const chosen = firstMatch ? firstMatch.id : modelSearchInput.value.trim();
+						syncCardModelUi(chosen, activeProvider);
+						modelDropdown.style.display = 'none';
+						card.setAttribute('data-user-customized-target', 'true');
+						this._savePromptDataFromCard(card, fieldKey).catch(() => {});
+					} else if (ev.key === 'Escape') {
+						modelDropdown.style.display = 'none';
+					}
+				};
+				modelSearchInput.onblur = () => {
+					setTimeout(() => {
+						modelDropdown.style.display = 'none';
+					}, 180);
+				};
+			}
+		}
+	}
+
+	private async _hydrateTtsPrimitiveCards(): Promise<void> {
+		if (!this._container) return;
+		const cards = Array.from(this._container.querySelectorAll('.tts-primitive-card')) as HTMLElement[];
+		if (cards.length === 0) return;
+
+		let loadedCredentials: any[] = [];
+		try {
+			const credService = this._instantiationService.invokeFunction(accessor => {
+				try { return accessor.get(IAgentCredentialService); } catch { return undefined; }
+			});
+			if (credService) {
+				const allCreds = await credService.getCredentials();
+				loadedCredentials = allCreds.filter(c => c.isEnabled !== false);
+			}
+		} catch {}
+
+		const builtInTtsModels: Record<string, Array<{ id: string; badge: string }>> = {
+			gemini: [
+				{ id: 'gemini-2.5-flash-preview-tts', badge: 'TTS Voice' },
+				{ id: 'gemini-2.5-pro-preview-tts', badge: 'TTS HD' },
+				{ id: 'gemini-2.0-flash', badge: 'Audio Output' },
+				{ id: 'gemini-2.5-flash', badge: 'Multimodal' }
+			],
+			openai: [
+				{ id: 'tts-1', badge: 'TTS Standard' },
+				{ id: 'tts-1-hd', badge: 'TTS HD' },
+				{ id: 'gpt-4o-mini-tts', badge: 'GPT-4o TTS' },
+				{ id: 'gpt-4o-audio-preview', badge: 'Audio' }
+			],
+			'custom-openai': [
+				{ id: 'tts-1', badge: 'TTS' },
+				{ id: 'gpt-4o-mini-tts', badge: 'TTS' }
+			]
+		};
+
+		const providerVoices: Record<string, string[]> = {
+			gemini: ['Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede', 'Zephyr', 'Leda', 'Orus'],
+			openai: ['alloy', 'nova', 'shimmer', 'echo', 'onyx', 'fable', 'coral', 'sage', 'ash', 'ballad', 'verse'],
+			'custom-openai': ['alloy', 'nova', 'shimmer', 'echo', 'onyx', 'fable', 'Kore', 'Puck']
+		};
+
+		for (const card of cards) {
+			const fieldKey = card.getAttribute('data-field-key') || '';
+			const credSelect = card.querySelector('.tts-cred-select') as HTMLSelectElement | null;
+			const modelPickerBtn = card.querySelector('.tts-model-picker-btn') as HTMLButtonElement | null;
+			const selectedModelText = card.querySelector('.tts-selected-model-text') as HTMLElement | null;
+			const modelDropdown = card.querySelector('.tts-model-dropdown') as HTMLElement | null;
+			const modelSearchInput = card.querySelector('.tts-model-search-input') as HTMLInputElement | null;
+			const dropdownProviderBadge = card.querySelector('.tts-dropdown-provider-badge') as HTMLElement | null;
+			const modelListEl = card.querySelector('.tts-model-list') as HTMLElement | null;
+			const formatSelect = card.querySelector('.tts-format-select') as HTMLSelectElement | null;
+			const voiceSelect = card.querySelector('.tts-voice-select') as HTMLSelectElement | null;
+			const autoPlayCheckbox = card.querySelector('.tts-autoplay-checkbox') as HTMLInputElement | null;
+			const headerModelBadge = card.querySelector('.tts-header-model-badge') as HTMLElement | null;
+			const llmTextInput = card.querySelector('.tts-llm-text-input') as HTMLTextAreaElement | null;
+			const speechTextBody = card.querySelector('.tts-speech-text-body') as HTMLElement | null;
+			const toggleSpeechTextBtn = card.querySelector('.tts-toggle-speech-text-btn') as HTMLButtonElement | null;
+			const textInput = card.querySelector('.tts-text-input') as HTMLTextAreaElement | null;
+			const copyTextBtn = card.querySelector('.tts-copy-text-btn') as HTMLButtonElement | null;
+			const editTextBtn = card.querySelector('.tts-edit-text-btn') as HTMLButtonElement | null;
+			const clearTextBtn = card.querySelector('.tts-clear-text-btn') as HTMLButtonElement | null;
+			const playerMount = card.querySelector('.tts-audio-player-mount') as HTMLElement | null;
+			const playBtn = card.querySelector('.tts-play-btn') as HTMLButtonElement | null;
+			const deleteAudioBtn = card.querySelector('.tts-delete-audio-btn') as HTMLButtonElement | null;
+			const cachedBadge = card.querySelector('.tts-cached-badge') as HTMLElement | null;
+			const statusText = card.querySelector('.tts-status-text') as HTMLElement | null;
+
+			let activeCredId = card.getAttribute('data-cred-id') || '';
+			let activeProvider = card.getAttribute('data-provider') || 'gemini';
+			let activeModel = card.getAttribute('data-model') || (activeProvider === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
+			let activeFormat = card.getAttribute('data-format') || 'mp3';
+			let activeVoice = card.getAttribute('data-voice') || (activeProvider === 'openai' ? 'alloy' : 'Kore');
+
+			const updateHeaderBadge = () => {
+				if (headerModelBadge) {
+					headerModelBadge.textContent = `Model: ${activeModel} (${(activeFormat || 'mp3').toUpperCase()})`;
+				}
+			};
+
+			const populateVoices = (provId: string) => {
+				if (!voiceSelect) return;
+				clearNode(voiceSelect);
+				const voices = providerVoices[provId] || providerVoices.gemini;
+				if (!activeVoice || !voices.includes(activeVoice)) {
+					activeVoice = voices[0];
+					card.setAttribute('data-voice', activeVoice);
+				}
+				voices.forEach(v => {
+					const opt = document.createElement('option');
+					opt.value = v;
+					opt.textContent = v;
+					if (v === activeVoice) opt.selected = true;
+					voiceSelect.appendChild(opt);
+				});
+			};
+
+			const renderModelOptions = (filterQuery: string = '') => {
+				if (!modelListEl) return;
+				clearNode(modelListEl);
+				const selCred = loadedCredentials.find(c => c.id === activeCredId);
+				const provId = selCred ? selCred.providerId : (activeProvider || 'gemini');
+				if (dropdownProviderBadge) {
+					dropdownProviderBadge.textContent = provId.toUpperCase();
+				}
+
+				const cachedModels: string[] = Array.isArray(selCred?.cachedModels) ? selCred.cachedModels : [];
+				const recommended = builtInTtsModels[provId] || builtInTtsModels.gemini;
+				const combined: Array<{ id: string; badge?: string }> = [...recommended];
+				cachedModels.forEach(cm => {
+					if (!combined.some(item => item.id === cm)) {
+						combined.push({ id: cm, badge: cm.toLowerCase().includes('tts') || cm.toLowerCase().includes('audio') ? 'Voice' : 'Model' });
+					}
+				});
+
+				const q = filterQuery.trim().toLowerCase();
+				const filtered = q ? combined.filter(m => m.id.toLowerCase().includes(q)) : combined;
+				if (q && !filtered.some(m => m.id.toLowerCase() === q)) {
+					filtered.unshift({ id: filterQuery.trim(), badge: 'Custom ID' });
+				}
+
+				filtered.forEach(m => {
+					const item = document.createElement('div');
+					item.style.cssText = `padding: 6px 8px; font-size: 11.5px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; background: ${activeModel === m.id ? 'rgba(236,72,153,0.2)' : 'transparent'}; color: ${activeModel === m.id ? '#f472b6' : 'inherit'};`;
+					item.onmouseenter = () => { if (activeModel !== m.id) item.style.background = 'rgba(255,255,255,0.06)'; };
+					item.onmouseleave = () => { item.style.background = activeModel === m.id ? 'rgba(236,72,153,0.2)' : 'transparent'; };
+
+					const nameSpan = document.createElement('span');
+					nameSpan.style.fontWeight = '500';
+					nameSpan.textContent = m.id;
+					item.appendChild(nameSpan);
+
+					if (m.badge) {
+						const bSpan = document.createElement('span');
+						bSpan.style.cssText = 'font-size: 9px; padding: 1px 5px; border-radius: 3px; background: rgba(255,255,255,0.08); opacity: 0.8;';
+						bSpan.textContent = m.badge;
+						item.appendChild(bSpan);
+					}
+
+					item.onmousedown = (ev) => {
+						ev.preventDefault();
+						ev.stopPropagation();
+						activeModel = m.id;
+						card.setAttribute('data-model', activeModel);
+						if (selectedModelText) selectedModelText.textContent = activeModel;
+						if (modelDropdown) modelDropdown.style.display = 'none';
+						updateHeaderBadge();
+						this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					};
+					modelListEl.appendChild(item);
+				});
+			};
+
+			// Populate Credential / Provider Dropdown (Agent Central style)
+			if (credSelect) {
+				clearNode(credSelect);
+				if (loadedCredentials.length > 0) {
+					loadedCredentials.forEach(c => {
+						const opt = document.createElement('option');
+						opt.value = c.id;
+						opt.textContent = `${c.name} (${c.providerId.toUpperCase()})`;
+						if (c.id === activeCredId || (!activeCredId && c.providerId === activeProvider)) {
+							opt.selected = true;
+							activeCredId = c.id;
+							activeProvider = c.providerId;
+						}
+						credSelect.appendChild(opt);
+					});
+					const sel = loadedCredentials.find(c => c.id === credSelect.value) || loadedCredentials[0];
+					if (sel) {
+						activeCredId = sel.id;
+						activeProvider = sel.providerId;
+						card.setAttribute('data-cred-id', activeCredId);
+						card.setAttribute('data-provider', activeProvider);
+					}
+				} else {
+					[
+						{ id: 'gemini', label: 'Google Gemini (GEMINI)' },
+						{ id: 'openai', label: 'OpenAI (OPENAI)' },
+						{ id: 'custom-openai', label: 'Custom OpenAI Endpoint' }
+					].forEach(p => {
+						const opt = document.createElement('option');
+						opt.value = p.id;
+						opt.textContent = p.label;
+						if (p.id === activeProvider) opt.selected = true;
+						credSelect.appendChild(opt);
+					});
+				}
+
+				credSelect.onchange = () => {
+					const sel = loadedCredentials.find(c => c.id === credSelect.value);
+					if (sel) {
+						activeCredId = sel.id;
+						activeProvider = sel.providerId;
+					} else {
+						activeCredId = '';
+						activeProvider = credSelect.value || 'gemini';
+					}
+					card.setAttribute('data-cred-id', activeCredId);
+					card.setAttribute('data-provider', activeProvider);
+					const rec = builtInTtsModels[activeProvider] || builtInTtsModels.gemini;
+					activeModel = rec[0].id;
+					card.setAttribute('data-model', activeModel);
+					if (selectedModelText) selectedModelText.textContent = activeModel;
+					populateVoices(activeProvider);
+					renderModelOptions(modelSearchInput?.value || '');
+					updateHeaderBadge();
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+				};
+			}
+
+			populateVoices(activeProvider);
+			renderModelOptions('');
+
+			if (modelPickerBtn && modelDropdown) {
+				modelPickerBtn.onclick = (ev) => {
+					ev.preventDefault();
+					ev.stopPropagation();
+					const isOpen = modelDropdown.style.display === 'flex';
+					modelDropdown.style.display = isOpen ? 'none' : 'flex';
+					if (!isOpen && modelSearchInput) {
+						modelSearchInput.value = '';
+						renderModelOptions('');
+						setTimeout(() => modelSearchInput.focus(), 20);
+					}
+				};
+			}
+
+			if (modelSearchInput && modelDropdown) {
+				modelSearchInput.oninput = () => {
+					renderModelOptions(modelSearchInput.value);
+				};
+				modelSearchInput.onblur = () => {
+					setTimeout(() => {
+						modelDropdown.style.display = 'none';
+					}, 180);
+				};
+			}
+
+			if (formatSelect) {
+				formatSelect.onchange = () => {
+					activeFormat = formatSelect.value || 'mp3';
+					card.setAttribute('data-format', activeFormat);
+					updateHeaderBadge();
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+				};
+			}
+
+			if (voiceSelect) {
+				voiceSelect.onchange = () => {
+					activeVoice = voiceSelect.value;
+					card.setAttribute('data-voice', activeVoice);
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+				};
+			}
+
+			if (autoPlayCheckbox) {
+				autoPlayCheckbox.onchange = () => {
+					card.setAttribute('data-autoplay', autoPlayCheckbox.checked ? 'true' : 'false');
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+				};
+			}
+
+			if (toggleSpeechTextBtn && speechTextBody) {
+				toggleSpeechTextBtn.onclick = () => {
+					const isCurrentlyExpanded = speechTextBody.style.display !== 'none';
+					const nextExpanded = !isCurrentlyExpanded;
+					speechTextBody.style.display = nextExpanded ? 'flex' : 'none';
+					card.setAttribute('data-show-speech-text', nextExpanded ? 'true' : 'false');
+					toggleSpeechTextBtn.textContent = nextExpanded ? 'Collapse AI Section' : 'Show AI Section';
+				};
+			}
+
+			let autoSaveTimer: any = undefined;
+			const scheduleAutoSave = () => {
+				if (autoSaveTimer) {
+					clearTimeout(autoSaveTimer);
+				}
+				autoSaveTimer = setTimeout(() => {
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+				}, 350);
+			};
+
+			if (llmTextInput) {
+				llmTextInput.oninput = () => {
+					card.setAttribute('data-llm-text', llmTextInput.value);
+					const currentLlmVal = llmTextInput.value.trim();
+					const lastSynth = (card.getAttribute('data-last-synthesized') || '').trim();
+					const audioRel = card.getAttribute('data-audio-path') || '';
+					if (!currentLlmVal && !(textInput?.value.trim()) && audioRel) {
+						this._deleteTtsAudioFileInEditor(card, fieldKey, true).catch(() => {});
+					} else {
+						if (audioRel && lastSynth && currentLlmVal !== lastSynth && statusText) {
+							statusText.textContent = 'AI Speech Text modified — click "Send & Generate Audio" to update MP3';
+							statusText.style.color = '#fbbf24';
+						}
+						scheduleAutoSave();
+					}
+				};
+				llmTextInput.onblur = () => {
+					if (autoSaveTimer) {
+						clearTimeout(autoSaveTimer);
+						autoSaveTimer = undefined;
+					}
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+				};
+			}
+
+			let isDisplayTextUnlocked = false;
+			if (textInput) {
+				textInput.readOnly = true;
+				textInput.oninput = () => {
+					if (textInput.readOnly) {
+						return;
+					}
+					scheduleAutoSave();
+				};
+				textInput.onblur = () => {
+					if (!textInput.readOnly) {
+						if (autoSaveTimer) {
+							clearTimeout(autoSaveTimer);
+							autoSaveTimer = undefined;
+						}
+						this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					}
+				};
+			}
+
+			if (copyTextBtn && textInput) {
+				copyTextBtn.onclick = async (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					const valToCopy = textInput.value || '';
+					await this._clipboardService.writeText(valToCopy);
+					const labelSpan = copyTextBtn.querySelector('.tts-copy-btn-label') as HTMLElement | null;
+					const iconSpan = copyTextBtn.querySelector('.codicon') as HTMLElement | null;
+					if (labelSpan) labelSpan.textContent = 'Copied!';
+					if (iconSpan) iconSpan.className = 'codicon codicon-check';
+					copyTextBtn.style.color = '#4ade80';
+					copyTextBtn.style.borderColor = 'rgba(74, 222, 128, 0.5)';
+					setTimeout(() => {
+						if (labelSpan) labelSpan.textContent = 'Copy';
+						if (iconSpan) iconSpan.className = 'codicon codicon-copy';
+						copyTextBtn.style.color = '#7dd3fc';
+						copyTextBtn.style.borderColor = 'rgba(56, 189, 248, 0.35)';
+					}, 1500);
+				};
+			}
+
+			if (editTextBtn && textInput) {
+				editTextBtn.onclick = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					isDisplayTextUnlocked = !isDisplayTextUnlocked;
+					textInput.readOnly = !isDisplayTextUnlocked;
+					const editIcon = editTextBtn.querySelector('.tts-edit-btn-icon') as HTMLElement | null;
+					const editLabel = editTextBtn.querySelector('.tts-edit-btn-label') as HTMLElement | null;
+					if (isDisplayTextUnlocked) {
+						textInput.style.borderColor = 'rgba(56, 189, 248, 0.75)';
+						textInput.style.background = 'rgba(0, 0, 0, 0.4)';
+						if (clearTextBtn) clearTextBtn.style.display = 'inline-flex';
+						if (editIcon) editIcon.className = 'tts-edit-btn-icon codicon codicon-lock';
+						if (editLabel) editLabel.textContent = 'Lock';
+						editTextBtn.style.background = 'rgba(0, 122, 204, 0.25)';
+						editTextBtn.style.borderColor = 'rgba(56, 189, 248, 0.5)';
+						editTextBtn.style.color = '#7dd3fc';
+						textInput.focus();
+					} else {
+						textInput.style.borderColor = 'rgba(59, 130, 246, 0.28)';
+						textInput.style.background = 'rgba(0, 0, 0, 0.25)';
+						if (clearTextBtn) clearTextBtn.style.display = 'none';
+						if (editIcon) editIcon.className = 'tts-edit-btn-icon codicon codicon-edit';
+						if (editLabel) editLabel.textContent = 'Edit';
+						editTextBtn.style.background = 'rgba(255, 255, 255, 0.06)';
+						editTextBtn.style.borderColor = 'rgba(255, 255, 255, 0.18)';
+						editTextBtn.style.color = 'inherit';
+						if (autoSaveTimer) {
+							clearTimeout(autoSaveTimer);
+							autoSaveTimer = undefined;
+						}
+						this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					}
+				};
+			}
+
+			if (clearTextBtn && textInput) {
+				clearTextBtn.onclick = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					if (textInput.readOnly) {
+						return;
+					}
+					textInput.value = '';
+					if (autoSaveTimer) {
+						clearTimeout(autoSaveTimer);
+						autoSaveTimer = undefined;
+					}
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					textInput.focus();
+				};
+			}
+
+			// Mount Custom Dark-Themed Audio Player and load saved local MP3 file (or template audio) if present
+			// NOTE: Never use .innerHTML here because VS Code workbench enforces TrustedHTML!
+			if (playerMount) {
+				clearNode(playerMount);
+				const audioEl = document.createElement('audio');
+				audioEl.preload = 'metadata';
+				audioEl.style.display = 'none';
+				playerMount.appendChild(audioEl);
+
+				const customPlayerBar = document.createElement('div');
+				customPlayerBar.className = 'tts-custom-dark-player';
+				customPlayerBar.style.cssText = 'display: none; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; padding: 6px 12px; border-radius: 20px; background: rgba(0, 0, 0, 0.45); border: 1px solid rgba(56, 189, 248, 0.35); box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);';
+
+				const roundPlayBtn = document.createElement('button');
+				roundPlayBtn.type = 'button';
+				roundPlayBtn.style.cssText = 'width: 26px; height: 26px; border-radius: 50%; border: 1px solid rgba(56, 189, 248, 0.6); background: rgba(0, 122, 204, 0.28); color: #38bdf8; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; padding: 0; transition: all 0.15s ease;';
+				roundPlayBtn.title = 'Play / Pause Audio';
+				const roundPlayIcon = document.createElement('span');
+				roundPlayIcon.className = 'codicon codicon-play';
+				roundPlayIcon.style.fontSize = '13px';
+				roundPlayBtn.appendChild(roundPlayIcon);
+
+				const timeBadge = document.createElement('span');
+				timeBadge.style.cssText = 'font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); color: #7dd3fc; font-weight: 600; min-width: 74px; text-align: center; flex-shrink: 0; user-select: none;';
+				timeBadge.textContent = '0:00 / 0:00';
+
+				const progressTrack = document.createElement('div');
+				progressTrack.style.cssText = 'flex: 1; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.12); position: relative; cursor: pointer; overflow: hidden; min-width: 80px;';
+				progressTrack.title = 'Click to seek audio position';
+				const progressFill = document.createElement('div');
+				progressFill.style.cssText = 'width: 0%; height: 100%; border-radius: 3px; background: linear-gradient(90deg, #007acc, #38bdf8); transition: width 0.08s linear;';
+				progressTrack.appendChild(progressFill);
+
+				// Playback Speed Selector (0.25x ~ 2.5x)
+				const rawSavedRate = parseFloat(card.getAttribute('data-playback-rate') || '1');
+				let cardPlaybackRate = (Number.isFinite(rawSavedRate) && rawSavedRate >= 0.25 && rawSavedRate <= 2.5) ? rawSavedRate : 1.0;
+
+				const speedSelect = document.createElement('select');
+				speedSelect.className = 'tts-playback-rate-select';
+				speedSelect.style.cssText = 'background: rgba(0, 122, 204, 0.22); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.4); border-radius: 10px; padding: 2px 6px; font-size: 10.5px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace); cursor: pointer; outline: none; flex-shrink: 0;';
+				speedSelect.title = 'Playback Speed (0.25x - 2.5x)';
+				const speedOptions = [0.25, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5];
+				for (const spd of speedOptions) {
+					const opt = document.createElement('option');
+					opt.value = String(spd);
+					opt.textContent = `${spd}x`;
+					opt.style.cssText = 'background: #1e1e2e; color: #f8fafc;';
+					if (Math.abs(spd - cardPlaybackRate) < 0.01) {
+						opt.selected = true;
+					}
+					speedSelect.appendChild(opt);
+				}
+
+				const muteBtn = document.createElement('button');
+				muteBtn.type = 'button';
+				muteBtn.style.cssText = 'background: transparent; border: none; color: #cbd5e1; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 2px; opacity: 0.85; flex-shrink: 0;';
+				muteBtn.title = 'Mute / Unmute';
+				const muteIcon = document.createElement('span');
+				muteIcon.className = 'codicon codicon-unmute';
+				muteIcon.style.fontSize = '14px';
+				muteBtn.appendChild(muteIcon);
+
+				const downloadBtn = document.createElement('button');
+				downloadBtn.type = 'button';
+				downloadBtn.style.cssText = 'background: rgba(0, 122, 204, 0.2); border: 1px solid rgba(56, 189, 248, 0.4); border-radius: 50%; width: 24px; height: 24px; color: #7dd3fc; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 0; opacity: 0.95; flex-shrink: 0; transition: all 0.15s ease;';
+				downloadBtn.title = 'Download Audio File';
+				const downloadIcon = document.createElement('span');
+				downloadIcon.className = 'codicon codicon-arrow-down';
+				downloadIcon.style.fontSize = '13px';
+				downloadBtn.appendChild(downloadIcon);
+
+				customPlayerBar.appendChild(roundPlayBtn);
+				customPlayerBar.appendChild(timeBadge);
+				customPlayerBar.appendChild(progressTrack);
+				customPlayerBar.appendChild(speedSelect);
+				customPlayerBar.appendChild(muteBtn);
+				customPlayerBar.appendChild(downloadBtn);
+				playerMount.appendChild(customPlayerBar);
+
+				let cardBlobUrl: string | undefined;
+				let cardAudioBytes: Uint8Array | undefined;
+				let cardAudioMime: string = 'audio/mpeg';
+				let cardKnownDuration = 0;
+
+				const fmtSec = (sec: number): string => {
+					if (!Number.isFinite(sec) || sec < 0) return '0:00';
+					const s = Math.round(sec);
+					const m = Math.floor(s / 60);
+					const r = s % 60;
+					return `${m}:${r < 10 ? '0' : ''}${r}`;
+				};
+
+				const syncTimeUi = () => {
+					const cur = Number.isFinite(audioEl.currentTime) ? audioEl.currentTime : 0;
+					const dur = (Number.isFinite(audioEl.duration) && audioEl.duration > 0) ? audioEl.duration : cardKnownDuration;
+					timeBadge.textContent = `${fmtSec(cur)} / ${fmtSec(dur)}`;
+					const pct = dur > 0 ? Math.min(100, Math.max(0, (cur / dur) * 100)) : 0;
+					progressFill.style.width = `${pct}%`;
+				};
+
+				const loadBytesIntoCardPlayer = async (bytes: Uint8Array, mimeHint: string, autoPlayNow: boolean) => {
+					if (cardBlobUrl) {
+						URL.revokeObjectURL(cardBlobUrl);
+						cardBlobUrl = undefined;
+					}
+					let mimeType = mimeHint || 'audio/mpeg';
+					if (bytes.byteLength > 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
+						mimeType = 'audio/wav';
+					}
+					cardAudioBytes = bytes;
+					cardAudioMime = mimeType;
+					const blob = new Blob([bytes.slice(0)], { type: mimeType });
+					cardBlobUrl = URL.createObjectURL(blob);
+					audioEl.src = cardBlobUrl;
+					audioEl.defaultPlaybackRate = cardPlaybackRate;
+					audioEl.playbackRate = cardPlaybackRate;
+					customPlayerBar.style.display = 'flex';
+					if (playBtn) playBtn.style.display = 'inline-flex';
+					if (deleteAudioBtn) deleteAudioBtn.style.display = 'inline-flex';
+					if (cachedBadge) cachedBadge.style.display = 'inline-block';
+
+					try {
+						const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+						if (AudioCtx) {
+							const actx = new AudioCtx();
+							const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+							const decoded = await actx.decodeAudioData(arrayBuf);
+							if (decoded && Number.isFinite(decoded.duration) && decoded.duration > 0) {
+								cardKnownDuration = decoded.duration;
+								syncTimeUi();
+							}
+							actx.close().catch(() => {});
+						}
+					} catch {
+						if (mimeType === 'audio/wav' && bytes.byteLength > 44) {
+							const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+							const byteRate = view.getUint32(28, true);
+							if (byteRate > 0) {
+								cardKnownDuration = (bytes.byteLength - 44) / byteRate;
+								syncTimeUi();
+							}
+						}
+					}
+
+					if (autoPlayNow) {
+						audioEl.play().catch(() => {});
+					}
+				};
+
+				const resetCardPlayer = () => {
+					cardKnownDuration = 0;
+					cardAudioBytes = undefined;
+					audioEl.pause();
+					audioEl.removeAttribute('src');
+					if (cardBlobUrl) {
+						URL.revokeObjectURL(cardBlobUrl);
+						cardBlobUrl = undefined;
+					}
+					customPlayerBar.style.display = 'none';
+					progressFill.style.width = '0%';
+					timeBadge.textContent = '0:00 / 0:00';
+				};
+
+				(card as any)._loadTtsBytes = loadBytesIntoCardPlayer;
+				(card as any)._resetTtsPlayer = resetCardPlayer;
+
+				roundPlayBtn.onclick = () => {
+					if (!audioEl.src) return;
+					if (audioEl.paused) {
+						audioEl.playbackRate = cardPlaybackRate;
+						audioEl.play().catch(() => {});
+					} else {
+						audioEl.pause();
+					}
+				};
+
+				speedSelect.onclick = (e: MouseEvent) => e.stopPropagation();
+				speedSelect.onmousedown = (e: MouseEvent) => e.stopPropagation();
+				speedSelect.onchange = (e: Event) => {
+					e.stopPropagation();
+					const nextRate = parseFloat(speedSelect.value);
+					cardPlaybackRate = Number.isFinite(nextRate) ? Math.min(2.5, Math.max(0.25, nextRate)) : 1.0;
+					card.setAttribute('data-playback-rate', String(cardPlaybackRate));
+					audioEl.defaultPlaybackRate = cardPlaybackRate;
+					audioEl.playbackRate = cardPlaybackRate;
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+				};
+
+				progressTrack.onclick = (e: MouseEvent) => {
+					const dur = (Number.isFinite(audioEl.duration) && audioEl.duration > 0) ? audioEl.duration : cardKnownDuration;
+					if (dur <= 0) return;
+					const rect = progressTrack.getBoundingClientRect();
+					const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+					audioEl.currentTime = ratio * dur;
+					syncTimeUi();
+				};
+
+				muteBtn.onclick = () => {
+					audioEl.muted = !audioEl.muted;
+					muteIcon.className = audioEl.muted ? 'codicon codicon-mute' : 'codicon codicon-unmute';
+					muteBtn.style.color = audioEl.muted ? '#f87171' : '#cbd5e1';
+				};
+
+				downloadBtn.onclick = async () => {
+					if (!cardAudioBytes || cardAudioBytes.byteLength === 0) {
+						this._notificationService.warn('No audio available to download.');
+						return;
+					}
+					const ext = cardAudioMime.includes('wav')
+						? 'wav'
+						: (cardAudioMime.includes('opus') ? 'opus' : (cardAudioMime.includes('aac') ? 'aac' : (card.getAttribute('data-format') || 'mp3').toLowerCase()));
+					const existingFileName = card.getAttribute('data-audio-file') || '';
+					const safeSlug = fieldKey.replace(/[^a-zA-Z0-9_-]/g, '_').toLowerCase();
+					const defaultFileName = existingFileName || `tts_${safeSlug}.${ext}`;
+					try {
+						let defaultDirUri = this._entityUri;
+						const userHomeUri = this._environmentService?.userHome;
+						if (userHomeUri) {
+							if (isWindows) {
+								const winDownloadsUri = URI.joinPath(userHomeUri, 'Downloads');
+								try {
+									if (await this._fileService.exists(winDownloadsUri)) {
+										defaultDirUri = winDownloadsUri;
+									} else {
+										defaultDirUri = userHomeUri;
+									}
+								} catch {
+									defaultDirUri = userHomeUri;
+								}
+							} else {
+								// macOS / Linux: default directly to the logged-in user's home directory (/Users/<username>)
+								defaultDirUri = userHomeUri;
+							}
+						}
+						const defaultUri = defaultDirUri
+							? URI.joinPath(defaultDirUri, defaultFileName)
+							: URI.file(defaultFileName);
+						const saveUri = await this._fileDialogService.showSaveDialog({
+							defaultUri,
+							title: 'Download Audio File',
+							filters: [{ name: `${ext.toUpperCase()} Audio`, extensions: [ext] }]
+						});
+						if (saveUri) {
+							await this._fileService.writeFile(saveUri, VSBuffer.wrap(cardAudioBytes));
+							this._notificationService.info(`Audio downloaded to ${saveUri.fsPath}`);
+						}
+					} catch {
+						if (cardBlobUrl) {
+							const a = document.createElement('a');
+							a.href = cardBlobUrl;
+							a.download = defaultFileName;
+							document.body.appendChild(a);
+							a.click();
+							document.body.removeChild(a);
+						}
+					}
+				};
+
+				audioEl.onplay = () => {
+					audioEl.playbackRate = cardPlaybackRate;
+					if (playBtn) playBtn.textContent = 'Pause Audio';
+					roundPlayIcon.className = 'codicon codicon-debug-pause';
+					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.52)';
+				};
+				audioEl.onpause = () => {
+					if (playBtn) playBtn.textContent = 'Play Audio';
+					roundPlayIcon.className = 'codicon codicon-play';
+					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.28)';
+				};
+				audioEl.onended = () => {
+					if (playBtn) playBtn.textContent = 'Play Audio';
+					roundPlayIcon.className = 'codicon codicon-play';
+					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.28)';
+					progressFill.style.width = '100%';
+					syncTimeUi();
+				};
+				audioEl.onloadedmetadata = () => {
+					audioEl.defaultPlaybackRate = cardPlaybackRate;
+					audioEl.playbackRate = cardPlaybackRate;
+					if (Number.isFinite(audioEl.duration) && audioEl.duration > 0) {
+						cardKnownDuration = audioEl.duration;
+					}
+					syncTimeUi();
+				};
+				audioEl.ondurationchange = () => {
+					if (Number.isFinite(audioEl.duration) && audioEl.duration > 0) {
+						cardKnownDuration = audioEl.duration;
+					}
+					syncTimeUi();
+				};
+				audioEl.ontimeupdate = () => {
+					syncTimeUi();
+				};
+
+				const audioRelPath = card.getAttribute('data-audio-path') || '';
+				const audioFileName = card.getAttribute('data-audio-file') || '';
+				const templateAudioDataUrl = card.getAttribute('data-template-audio') || '';
+
+				const setupAutoPlayObserver = () => {
+					const shouldAutoPlay = card.getAttribute('data-autoplay') === 'true';
+					if (shouldAutoPlay) {
+						let hasAutoPlayed = false;
+						const observer = new IntersectionObserver((entries) => {
+							for (const entry of entries) {
+								if (entry.isIntersecting && !hasAutoPlayed && audioEl.src) {
+									hasAutoPlayed = true;
+									observer.disconnect();
+									audioEl.play().catch(() => {});
+								}
+							}
+						}, { threshold: 0.25 });
+						observer.observe(card);
+					}
+				};
+
+				if (audioRelPath && this._entityUri) {
+					try {
+						const audioFileUri = URI.joinPath(this._entityUri, audioRelPath);
+						if (await this._fileService.exists(audioFileUri)) {
+							const fileContent = await this._fileService.readFile(audioFileUri);
+							const ext = (audioFileName || audioRelPath).split('.').pop()?.toLowerCase() || 'mp3';
+							const mimeMap: Record<string, string> = {
+								mp3: 'audio/mpeg',
+								wav: 'audio/wav',
+								opus: 'audio/opus',
+								aac: 'audio/aac'
+							};
+							const buf = fileContent.value.buffer;
+							await loadBytesIntoCardPlayer(buf, mimeMap[ext] || 'audio/mpeg', false);
+							setupAutoPlayObserver();
+						} else {
+							card.setAttribute('data-audio-path', '');
+							card.setAttribute('data-audio-file', '');
+							resetCardPlayer();
+							if (playBtn) playBtn.style.display = 'none';
+							if (deleteAudioBtn) deleteAudioBtn.style.display = 'none';
+							if (cachedBadge) cachedBadge.style.display = 'none';
+							if (statusText) statusText.textContent = 'No audio file saved yet';
+						}
+					} catch (e) {
+						console.error('Failed to load saved TTS audio file:', e);
+					}
+				} else if (templateAudioDataUrl) {
+					// Fallback to audio synthesized in the Template Designer if ticket has no local file yet
+					try {
+						const match = templateAudioDataUrl.match(/^data:([^;]+);base64,(.+)$/);
+						if (match) {
+							const mime = match[1] || 'audio/mpeg';
+							const binStr = atob(match[2]);
+							const bytes = new Uint8Array(binStr.length);
+							for (let i = 0; i < binStr.length; i++) {
+								bytes[i] = binStr.charCodeAt(i);
+							}
+							await loadBytesIntoCardPlayer(bytes, mime, false);
+							if (statusText) {
+								statusText.textContent = 'Loaded from template audio';
+								statusText.style.color = '#4ade80';
+							}
+							setupAutoPlayObserver();
+						}
+					} catch (e) {
+						console.error('Failed to load template TTS audio data URL:', e);
+					}
+				}
+			}
+		}
+	}
+
+	private async _saveTtsDataFromCard(card: HTMLElement, fieldKey: string, overrides?: Partial<{
+		llmText: string;
+		audioFileName: string;
+		audioRelativePath: string;
+		lastGenerated: string;
+		lastSynthesizedText: string;
+	}>): Promise<any> {
+		const llmTextInput = card.querySelector('.tts-llm-text-input') as HTMLTextAreaElement | null;
+		const textInput = card.querySelector('.tts-text-input') as HTMLTextAreaElement | null;
+		const formatSelect = card.querySelector('.tts-format-select') as HTMLSelectElement | null;
+		const voiceSelect = card.querySelector('.tts-voice-select') as HTMLSelectElement | null;
+		const autoPlayCheckbox = card.querySelector('.tts-autoplay-checkbox') as HTMLInputElement | null;
+		const storedLlmText = overrides?.llmText !== undefined
+			? overrides.llmText
+			: (llmTextInput ? llmTextInput.value : (card.getAttribute('data-llm-text') || ''));
+
+		card.setAttribute('data-llm-text', storedLlmText);
+
+		const ttsData = {
+			text: storedLlmText,
+			displayText: textInput ? textInput.value : '',
+			ttsShowSpeechTextInTicket: card.getAttribute('data-show-speech-text') === 'true',
+			targetCredentialId: card.getAttribute('data-cred-id') || '',
+			targetProvider: card.getAttribute('data-provider') || 'gemini',
+			targetModel: card.getAttribute('data-model') || 'gemini-2.5-flash-preview-tts',
+			ttsFormat: formatSelect?.value || card.getAttribute('data-format') || 'mp3',
+			ttsVoice: voiceSelect?.value || card.getAttribute('data-voice') || 'Kore',
+			ttsAutoPlay: autoPlayCheckbox ? autoPlayCheckbox.checked : (card.getAttribute('data-autoplay') === 'true'),
+			ttsPlaybackRate: parseFloat(card.getAttribute('data-playback-rate') || '1') || 1.0,
+			audioFileName: overrides?.audioFileName !== undefined ? overrides.audioFileName : (card.getAttribute('data-audio-file') || ''),
+			audioRelativePath: overrides?.audioRelativePath !== undefined ? overrides.audioRelativePath : (card.getAttribute('data-audio-path') || ''),
+			lastGenerated: overrides?.lastGenerated !== undefined ? overrides.lastGenerated : (card.getAttribute('data-last-generated') || ''),
+			lastSynthesizedText: overrides?.lastSynthesizedText !== undefined ? overrides.lastSynthesizedText : (card.getAttribute('data-last-synthesized') || '')
+		};
+
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: JSON.stringify(ttsData)
+		};
+		if (this._lastParsedData) {
+			this._lastParsedData.customMetadata = updatedCustom;
+		}
+		if (this._ticketFileUri) {
+			try {
+				this._suppressAutoReloadUntil = Date.now() + 2500;
+				const content = await this._safeReadFile(this._ticketFileUri);
+				const updated = this._updateTicketMdContent(content, {}, updatedCustom);
+				await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+			} catch (err) {
+				console.error('Failed to persist TTS metadata quietly:', err);
+			}
+		}
+		return ttsData;
+	}
+
+	private async _saveMediaPlayerDataFromCard(card: HTMLElement, fieldKey: string): Promise<void> {
+		const mediaData = {
+			mediaFilePath: card.getAttribute('data-media-path') || '',
+			mediaFileName: card.getAttribute('data-media-name') || '',
+			mediaKind: card.getAttribute('data-media-kind') || 'audio',
+			mediaMimeType: card.getAttribute('data-media-mime') || '',
+			mediaPlaybackRate: parseFloat(card.getAttribute('data-playback-rate') || '1') || 1.0,
+			mediaAutoPlay: card.getAttribute('data-autoplay') === 'true'
+		};
+
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: JSON.stringify(mediaData)
+		};
+		if (this._lastParsedData) {
+			this._lastParsedData.customMetadata = updatedCustom;
+		}
+		if (this._ticketFileUri) {
+			try {
+				this._suppressAutoReloadUntil = Date.now() + 2500;
+				const content = await this._safeReadFile(this._ticketFileUri);
+				const updated = this._updateTicketMdContent(content, {}, updatedCustom);
+				await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+			} catch (err) {
+				console.error('Failed to persist Media Player metadata quietly:', err);
+			}
+		}
+	}
+
+	private async _hydrateMediaPlayerPrimitiveCards(): Promise<void> {
+		if (!this._container) return;
+		const cards = Array.from(this._container.querySelectorAll('.media-player-primitive-card')) as HTMLElement[];
+		if (cards.length === 0) return;
+
+		for (const card of cards) {
+			const fieldKey = card.getAttribute('data-field-key') || '';
+			const mountEl = card.querySelector('.media-player-card-mount') as HTMLElement | null;
+			const headerBadgeEl = card.querySelector('.media-player-header-badge') as HTMLElement | null;
+			if (!mountEl) continue;
+
+			clearNode(mountEl);
+
+			const hiddenFileInput = document.createElement('input');
+			hiddenFileInput.type = 'file';
+			hiddenFileInput.accept = `audio/*,video/*,${MEDIA_PLAYER_ALL_EXTENSIONS.map(e => `.${e}`).join(',')}`;
+			hiddenFileInput.style.display = 'none';
+			mountEl.appendChild(hiddenFileInput);
+
+			const dropZone = document.createElement('div');
+			dropZone.className = 'media-player-dropzone';
+			dropZone.style.cssText = 'display: flex; flex-direction: column; gap: 8px; padding: 12px 14px; border-radius: 6px; border: 1.5px dashed rgba(251, 191, 36, 0.4); background: rgba(0, 0, 0, 0.24); transition: all 0.15s ease;';
+			mountEl.appendChild(dropZone);
+
+			const topPickerRow = document.createElement('div');
+			topPickerRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;';
+			dropZone.appendChild(topPickerRow);
+
+			const fileInfoLeft = document.createElement('div');
+			fileInfoLeft.style.cssText = 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 180px; flex-wrap: wrap;';
+			topPickerRow.appendChild(fileInfoLeft);
+
+			const mediaKindBadge = document.createElement('span');
+			mediaKindBadge.style.cssText = 'font-size: 9.5px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.18); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); text-transform: uppercase; letter-spacing: 0.04em; display: none;';
+			fileInfoLeft.appendChild(mediaKindBadge);
+
+			const savedFileName = card.getAttribute('data-media-name') || '';
+			const savedFilePath = card.getAttribute('data-media-path') || '';
+
+			const fileNameLabel = document.createElement('span');
+			fileNameLabel.style.cssText = 'font-size: 12px; font-weight: 600; color: #f8fafc; word-break: break-all;';
+			fileNameLabel.textContent = savedFileName || 'No media file selected';
+			fileInfoLeft.appendChild(fileNameLabel);
+
+			const dropHintSub = document.createElement('div');
+			dropHintSub.style.cssText = 'font-size: 11px; color: rgba(255, 255, 255, 0.55); display: flex; align-items: center; gap: 6px;';
+			const uploadIcon = document.createElement('span');
+			uploadIcon.className = 'codicon codicon-cloud-upload';
+			uploadIcon.style.cssText = 'font-size: 12px; color: #fbbf24;';
+			dropHintSub.appendChild(uploadIcon);
+
+			const filePathSubText = document.createElement('span');
+			filePathSubText.style.cssText = 'font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px; word-break: break-all;';
+			filePathSubText.textContent = savedFilePath || 'Drag & drop a local MP3 / MP4 (or WAV, M4A, AAC, OGG, FLAC, WebM, MOV) file here, or click "Select File".';
+			dropHintSub.appendChild(filePathSubText);
+			dropZone.appendChild(dropHintSub);
+
+			const pickerBtnGroup = document.createElement('div');
+			pickerBtnGroup.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-shrink: 0;';
+			topPickerRow.appendChild(pickerBtnGroup);
+
+			const selectFileBtn = document.createElement('button');
+			selectFileBtn.type = 'button';
+			selectFileBtn.className = 'monaco-button';
+			selectFileBtn.style.cssText = 'padding: 4px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(245, 158, 11, 0.2); border: 1px solid rgba(251, 191, 36, 0.55); color: #fbbf24; display: inline-flex; align-items: center; gap: 5px;';
+			selectFileBtn.title = 'Select local MP3 / MP4 or audio/video file';
+			const folderIcon = document.createElement('span');
+			folderIcon.className = 'codicon codicon-folder-opened';
+			folderIcon.style.fontSize = '12px';
+			selectFileBtn.appendChild(folderIcon);
+			const selectFileBtnLabel = document.createElement('span');
+			selectFileBtnLabel.textContent = savedFileName ? 'Change File' : 'Select File';
+			selectFileBtn.appendChild(selectFileBtnLabel);
+			pickerBtnGroup.appendChild(selectFileBtn);
+
+			const clearFileBtn = document.createElement('button');
+			clearFileBtn.type = 'button';
+			clearFileBtn.className = 'monaco-button';
+			clearFileBtn.style.cssText = `padding: 4px 9px; font-size: 10.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(239, 68, 68, 0.14); border: 1px solid rgba(239, 68, 68, 0.4); color: #f87171; display: ${(savedFileName || savedFilePath) ? 'inline-flex' : 'none'}; align-items: center; gap: 4px;`;
+			clearFileBtn.title = 'Clear imported media file';
+			const trashIcon = document.createElement('span');
+			trashIcon.className = 'codicon codicon-trash';
+			trashIcon.style.fontSize = '11px';
+			clearFileBtn.appendChild(trashIcon);
+			const clearFileBtnLabel = document.createElement('span');
+			clearFileBtnLabel.textContent = 'Clear';
+			clearFileBtn.appendChild(clearFileBtnLabel);
+			pickerBtnGroup.appendChild(clearFileBtn);
+
+			const errorBanner = document.createElement('div');
+			errorBanner.style.cssText = 'display: none; align-items: center; gap: 8px; padding: 8px 12px; border-radius: 6px; background: rgba(239, 68, 68, 0.14); border: 1px solid rgba(239, 68, 68, 0.45); color: #fca5a5; font-size: 11.5px; line-height: 1.4;';
+			const warnIcon = document.createElement('span');
+			warnIcon.className = 'codicon codicon-warning';
+			warnIcon.style.cssText = 'font-size: 14px; color: #f87171; flex-shrink: 0;';
+			errorBanner.appendChild(warnIcon);
+			const errorBannerText = document.createElement('span');
+			errorBanner.appendChild(errorBannerText);
+			mountEl.appendChild(errorBanner);
+
+			const videoStageWrap = document.createElement('div');
+			videoStageWrap.style.cssText = 'display: none; flex-direction: column; align-items: center; justify-content: center; width: 100%; background: #000000; border-radius: 8px; border: 1px solid rgba(56, 189, 248, 0.35); overflow: hidden; position: relative; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);';
+			const videoEl = document.createElement('video');
+			videoEl.preload = 'metadata';
+			videoEl.playsInline = true;
+			videoEl.style.cssText = 'width: 100%; max-height: 360px; display: block; background: #000000; cursor: pointer; outline: none;';
+			videoStageWrap.appendChild(videoEl);
+			mountEl.appendChild(videoStageWrap);
+
+			const audioEl = document.createElement('audio');
+			audioEl.preload = 'metadata';
+			audioEl.style.display = 'none';
+			mountEl.appendChild(audioEl);
+
+			const customPlayerBar = document.createElement('div');
+			customPlayerBar.className = 'tts-custom-dark-player media-custom-dark-player';
+			customPlayerBar.style.cssText = 'display: none; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%; box-sizing: border-box; padding: 6px 12px; border-radius: 20px; background: rgba(0, 0, 0, 0.45); border: 1px solid rgba(56, 189, 248, 0.35); box-shadow: inset 0 1px 3px rgba(0,0,0,0.5); user-select: none;';
+
+			const roundPlayBtn = document.createElement('button');
+			roundPlayBtn.type = 'button';
+			roundPlayBtn.style.cssText = 'width: 26px; height: 26px; border-radius: 50%; border: 1px solid rgba(56, 189, 248, 0.6); background: rgba(0, 122, 204, 0.28); color: #38bdf8; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; flex-shrink: 0; padding: 0; transition: all 0.15s ease;';
+			roundPlayBtn.title = 'Play / Pause Media';
+			const roundPlayIcon = document.createElement('span');
+			roundPlayIcon.className = 'codicon codicon-play';
+			roundPlayIcon.style.fontSize = '13px';
+			roundPlayBtn.appendChild(roundPlayIcon);
+
+			const timeBadge = document.createElement('span');
+			timeBadge.style.cssText = 'font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); color: #7dd3fc; font-weight: 600; min-width: 78px; text-align: center; flex-shrink: 0; user-select: none;';
+			timeBadge.textContent = '0:00 / 0:00';
+
+			const progressTrack = document.createElement('div');
+			progressTrack.style.cssText = 'flex: 1; height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.14); position: relative; cursor: pointer; min-width: 80px; display: flex; align-items: center;';
+			progressTrack.title = 'Click or drag to seek playback position';
+			const progressFill = document.createElement('div');
+			progressFill.style.cssText = 'width: 0%; height: 100%; border-radius: 3px; background: linear-gradient(90deg, #007acc, #38bdf8); pointer-events: none;';
+			const progressThumb = document.createElement('div');
+			progressThumb.style.cssText = 'width: 10px; height: 10px; border-radius: 50%; background: #38bdf8; border: 1.5px solid #ffffff; position: absolute; left: 0%; transform: translate(-50%, 0); box-shadow: 0 1px 4px rgba(0,0,0,0.6); pointer-events: none;';
+			progressTrack.appendChild(progressFill);
+			progressTrack.appendChild(progressThumb);
+
+			const rawSavedRate = parseFloat(card.getAttribute('data-playback-rate') || '1');
+			let cardPlaybackRate = (Number.isFinite(rawSavedRate) && rawSavedRate >= 0.25 && rawSavedRate <= 2.0) ? rawSavedRate : 1.0;
+
+			const speedSelect = document.createElement('select');
+			speedSelect.className = 'media-playback-rate-select';
+			speedSelect.style.cssText = 'background: rgba(0, 122, 204, 0.22); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.4); border-radius: 10px; padding: 2px 6px; font-size: 10.5px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace); cursor: pointer; outline: none; flex-shrink: 0;';
+			speedSelect.title = 'Playback Speed (0.25x - 2.0x)';
+			for (const spd of MEDIA_PLAYER_SPEED_OPTIONS) {
+				const opt = document.createElement('option');
+				opt.value = String(spd.rate);
+				opt.textContent = spd.label;
+				opt.title = spd.desc;
+				opt.style.cssText = 'background: #1e1e2e; color: #f8fafc;';
+				if (Math.abs(spd.rate - cardPlaybackRate) < 0.01) {
+					opt.selected = true;
+				}
+				speedSelect.appendChild(opt);
+			}
+
+			const muteBtn = document.createElement('button');
+			muteBtn.type = 'button';
+			muteBtn.style.cssText = 'background: transparent; border: none; color: #cbd5e1; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 2px; opacity: 0.85; flex-shrink: 0;';
+			muteBtn.title = 'Mute / Unmute';
+			const muteIcon = document.createElement('span');
+			muteIcon.className = 'codicon codicon-unmute';
+			muteIcon.style.fontSize = '14px';
+			muteBtn.appendChild(muteIcon);
+
+			const fullscreenBtn = document.createElement('button');
+			fullscreenBtn.type = 'button';
+			fullscreenBtn.style.cssText = 'background: transparent; border: none; color: #cbd5e1; cursor: pointer; display: none; align-items: center; justify-content: center; padding: 2px; opacity: 0.85; flex-shrink: 0;';
+			fullscreenBtn.title = 'Fullscreen Video';
+			const fsIcon = document.createElement('span');
+			fsIcon.className = 'codicon codicon-screen-full';
+			fsIcon.style.fontSize = '13px';
+			fullscreenBtn.appendChild(fsIcon);
+
+			customPlayerBar.appendChild(roundPlayBtn);
+			customPlayerBar.appendChild(timeBadge);
+			customPlayerBar.appendChild(progressTrack);
+			customPlayerBar.appendChild(speedSelect);
+			customPlayerBar.appendChild(muteBtn);
+			customPlayerBar.appendChild(fullscreenBtn);
+			mountEl.appendChild(customPlayerBar);
+
+			let activeKind: 'audio' | 'video' = card.getAttribute('data-media-kind') === 'video' ? 'video' : 'audio';
+			let cardBlobUrl: string | undefined;
+			let cardLocalFileUri: URI | undefined;
+			let cardTriedProtocolFallback = false;
+			let cardKnownDuration = 0;
+			let isScrubbing = false;
+			let isCardVideoFullscreen = false;
+			let cardFullscreenOverlayEl: HTMLElement | undefined;
+
+			const onCardFsKeyDown = (ev: KeyboardEvent) => {
+				if (!isCardVideoFullscreen) return;
+				if (ev.key === 'Escape') {
+					ev.stopPropagation();
+					ev.preventDefault();
+					exitCardVideoFullscreen();
+				}
+			};
+
+			const exitCardVideoFullscreen = () => {
+				if (!isCardVideoFullscreen) return;
+				isCardVideoFullscreen = false;
+				window.removeEventListener('keydown', onCardFsKeyDown, true);
+				if (document.fullscreenElement) {
+					document.exitFullscreen().catch(() => {});
+				}
+				const wasPlaying = !videoEl.paused && !videoEl.ended;
+				videoStageWrap.style.flex = '';
+				videoStageWrap.style.minHeight = '';
+				videoStageWrap.style.height = '';
+				videoEl.style.maxHeight = '360px';
+				videoEl.style.height = '';
+				videoEl.style.objectFit = '';
+				try {
+					mountEl.insertBefore(videoStageWrap, audioEl);
+					mountEl.appendChild(customPlayerBar);
+				} catch {}
+				if (cardFullscreenOverlayEl && cardFullscreenOverlayEl.parentElement) {
+					cardFullscreenOverlayEl.parentElement.removeChild(cardFullscreenOverlayEl);
+				}
+				cardFullscreenOverlayEl = undefined;
+				fsIcon.className = 'codicon codicon-screen-full';
+				fullscreenBtn.title = 'Fullscreen Video';
+				fullscreenBtn.style.color = '#cbd5e1';
+				if (wasPlaying && videoEl.paused) {
+					videoEl.play().catch(() => {});
+				}
+			};
+
+			const enterCardVideoFullscreen = () => {
+				if (isCardVideoFullscreen || activeKind !== 'video') return;
+				isCardVideoFullscreen = true;
+				const wasPlaying = !videoEl.paused && !videoEl.ended;
+				const hostRoot = (document.querySelector('.monaco-workbench') as HTMLElement) || document.body;
+				const overlay = document.createElement('div');
+				overlay.className = 'media-player-fullscreen-overlay';
+				overlay.style.cssText = 'position: fixed; inset: 0; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 2147483647; background: rgba(5, 8, 15, 0.96); backdrop-filter: blur(8px); display: flex; flex-direction: column; justify-content: space-between; padding: 16px 24px 20px 24px; box-sizing: border-box; gap: 12px;';
+				hostRoot.appendChild(overlay);
+				cardFullscreenOverlayEl = overlay;
+
+				const topBar = document.createElement('div');
+				topBar.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-shrink: 0;';
+				const titleWrap = document.createElement('div');
+				titleWrap.style.cssText = 'display: flex; align-items: center; gap: 8px; min-width: 0;';
+				const badgeSpan = document.createElement('span');
+				badgeSpan.style.cssText = 'font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 7px; border-radius: 4px; background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.45);';
+				badgeSpan.textContent = mediaKindBadge.textContent || 'VIDEO';
+				const nameSpan = document.createElement('span');
+				nameSpan.style.cssText = 'font-size: 13px; font-weight: 600; color: #f8fafc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+				nameSpan.textContent = card.getAttribute('data-media-name') || fileNameLabel.textContent || 'Video Player';
+				titleWrap.appendChild(badgeSpan);
+				titleWrap.appendChild(nameSpan);
+				topBar.appendChild(titleWrap);
+
+				const closeFsBtn = document.createElement('button');
+				closeFsBtn.type = 'button';
+				closeFsBtn.className = 'monaco-button';
+				closeFsBtn.style.cssText = 'padding: 4px 12px; font-size: 11px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.22); color: #f8fafc; display: inline-flex; align-items: center; gap: 6px;';
+				closeFsBtn.title = 'Exit Fullscreen (Esc)';
+				const closeIcon = document.createElement('span');
+				closeIcon.className = 'codicon codicon-screen-normal';
+				closeIcon.style.fontSize = '12px';
+				const closeLbl = document.createElement('span');
+				closeLbl.textContent = 'Exit Fullscreen (Esc)';
+				closeFsBtn.appendChild(closeIcon);
+				closeFsBtn.appendChild(closeLbl);
+				closeFsBtn.onclick = (ev) => {
+					ev.stopPropagation();
+					exitCardVideoFullscreen();
+				};
+				topBar.appendChild(closeFsBtn);
+				overlay.appendChild(topBar);
+
+				videoStageWrap.style.flex = '1';
+				videoStageWrap.style.minHeight = '0';
+				videoStageWrap.style.height = '100%';
+				videoEl.style.maxHeight = 'calc(100vh - 130px)';
+				videoEl.style.height = '100%';
+				videoEl.style.objectFit = 'contain';
+
+				overlay.appendChild(videoStageWrap);
+				overlay.appendChild(customPlayerBar);
+
+				fsIcon.className = 'codicon codicon-screen-normal';
+				fullscreenBtn.title = 'Exit Fullscreen (Esc)';
+				fullscreenBtn.style.color = '#38bdf8';
+
+				window.addEventListener('keydown', onCardFsKeyDown, true);
+				if (wasPlaying && videoEl.paused) {
+					videoEl.play().catch(() => {});
+				}
+			};
+
+			const toggleCardVideoFullscreen = () => {
+				if (isCardVideoFullscreen) {
+					exitCardVideoFullscreen();
+				} else {
+					enterCardVideoFullscreen();
+				}
+			};
+
+			const getActiveEl = (): HTMLMediaElement => activeKind === 'video' ? videoEl : audioEl;
+
+			const fmtSec = (sec: number): string => {
+				if (!Number.isFinite(sec) || sec < 0) return '0:00';
+				const total = Math.floor(sec);
+				const hrs = Math.floor(total / 3600);
+				const mins = Math.floor((total % 3600) / 60);
+				const s = total % 60;
+				if (hrs > 0) {
+					return `${hrs}:${mins < 10 ? '0' : ''}${mins}:${s < 10 ? '0' : ''}${s}`;
+				}
+				return `${mins}:${s < 10 ? '0' : ''}${s}`;
+			};
+
+			const syncTimeUi = () => {
+				const el = getActiveEl();
+				const cur = Number.isFinite(el.currentTime) ? el.currentTime : 0;
+				const dur = (Number.isFinite(el.duration) && el.duration > 0) ? el.duration : cardKnownDuration;
+				timeBadge.textContent = `${fmtSec(cur)} / ${fmtSec(dur)}`;
+				const pct = dur > 0 ? Math.min(100, Math.max(0, (cur / dur) * 100)) : 0;
+				progressFill.style.width = `${pct}%`;
+				progressThumb.style.left = `${pct}%`;
+			};
+
+			const cleanupCardMedia = () => {
+				exitCardVideoFullscreen();
+				for (const el of [audioEl, videoEl]) {
+					try {
+						el.pause();
+						el.removeAttribute('src');
+						el.load();
+					} catch {}
+				}
+				if (cardBlobUrl) {
+					try {
+						URL.revokeObjectURL(cardBlobUrl);
+					} catch {}
+					cardBlobUrl = undefined;
+				}
+				cardKnownDuration = 0;
+				roundPlayIcon.className = 'codicon codicon-play';
+				roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.28)';
+				progressFill.style.width = '0%';
+				progressThumb.style.left = '0%';
+				timeBadge.textContent = '0:00 / 0:00';
+			};
+
+			this._mediaCleanupFns.push(cleanupCardMedia);
+
+			const showErr = (msg: string) => {
+				errorBannerText.textContent = msg;
+				errorBanner.style.display = 'flex';
+			};
+			const hideErr = () => {
+				errorBannerText.textContent = '';
+				errorBanner.style.display = 'none';
+			};
+
+			const updateBadges = (fileName: string, filePath: string, kind: 'audio' | 'video', ext: string) => {
+				if (fileName || filePath) {
+					const disp = fileName || (filePath.split(/[\\/]/).pop() || filePath);
+					fileNameLabel.textContent = disp;
+					filePathSubText.textContent = filePath || disp;
+					const badgeText = `${kind.toUpperCase()} · ${(ext || kind).toUpperCase()}`;
+					mediaKindBadge.style.display = 'inline-block';
+					mediaKindBadge.textContent = badgeText;
+					if (kind === 'video') {
+						mediaKindBadge.style.background = 'rgba(245, 158, 11, 0.2)';
+						mediaKindBadge.style.color = '#fbbf24';
+						mediaKindBadge.style.borderColor = 'rgba(251, 191, 36, 0.45)';
+					} else {
+						mediaKindBadge.style.background = 'rgba(56, 189, 248, 0.18)';
+						mediaKindBadge.style.color = '#38bdf8';
+						mediaKindBadge.style.borderColor = 'rgba(56, 189, 248, 0.35)';
+					}
+					if (headerBadgeEl) {
+						headerBadgeEl.textContent = badgeText;
+						headerBadgeEl.style.display = 'inline-block';
+					}
+					selectFileBtnLabel.textContent = 'Change File';
+					clearFileBtn.style.display = 'inline-flex';
+				} else {
+					fileNameLabel.textContent = 'No media file selected';
+					filePathSubText.textContent = 'Drag & drop a local MP3 / MP4 (or WAV, M4A, AAC, OGG, FLAC, WebM, MOV) file here, or click "Select File".';
+					mediaKindBadge.style.display = 'none';
+					if (headerBadgeEl) {
+						headerBadgeEl.style.display = 'none';
+					}
+					selectFileBtnLabel.textContent = 'Select File';
+					clearFileBtn.style.display = 'none';
+				}
+			};
+
+			const mountBlob = (blob: Blob, fileName: string, filePath: string, explicitMime?: string) => {
+				cleanupCardMedia();
+				hideErr();
+				cardTriedProtocolFallback = false;
+				cardLocalFileUri = filePath ? (filePath.startsWith('file://') ? URI.parse(filePath) : URI.file(filePath)) : undefined;
+
+				const info = detectMediaFileInfo(fileName || filePath, explicitMime || blob.type);
+				activeKind = info.kind;
+				const finalName = fileName || (filePath.split(/[\\/]/).pop() || 'media');
+				card.setAttribute('data-media-name', finalName);
+				if (filePath) {
+					card.setAttribute('data-media-path', filePath);
+				}
+				card.setAttribute('data-media-kind', info.kind);
+				card.setAttribute('data-media-mime', info.mimeType);
+
+				updateBadges(finalName, filePath || card.getAttribute('data-media-path') || '', info.kind, info.ext);
+
+				if (!info.isRecognizedMedia) {
+					videoStageWrap.style.display = 'none';
+					customPlayerBar.style.display = 'none';
+					showErr(`Unsupported file "${finalName}": Please select a supported audio or video format (MP3, MP4, WAV, M4A, AAC, OGG, FLAC, WebM, MOV, etc.).`);
+					return;
+				}
+
+				const typedBlob = blob.type ? blob : new Blob([blob], { type: info.mimeType });
+				cardBlobUrl = URL.createObjectURL(typedBlob);
+
+				const targetEl = getActiveEl();
+				if (activeKind === 'video') {
+					videoStageWrap.style.display = 'flex';
+					fullscreenBtn.style.display = 'inline-flex';
+				} else {
+					videoStageWrap.style.display = 'none';
+					fullscreenBtn.style.display = 'none';
+				}
+				customPlayerBar.style.display = 'flex';
+
+				targetEl.src = cardBlobUrl;
+				targetEl.defaultPlaybackRate = cardPlaybackRate;
+				targetEl.playbackRate = cardPlaybackRate;
+				targetEl.load();
+			};
+
+			const loadCardFromLocalPath = async (localPath: string, displayFileName?: string, persistToTicket: boolean = true) => {
+				const cleanPath = (localPath || '').trim();
+				if (!cleanPath) return;
+				const resolvedName = displayFileName || cleanPath.split(/[\\/]/).pop() || cleanPath;
+				const info = detectMediaFileInfo(resolvedName || cleanPath, card.getAttribute('data-media-mime') || '');
+				updateBadges(resolvedName, cleanPath, info.kind, info.ext);
+				try {
+					let fileUri: URI;
+					if (cleanPath.startsWith('file://')) {
+						fileUri = URI.parse(cleanPath);
+					} else if ((cleanPath.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(cleanPath))) {
+						fileUri = URI.file(cleanPath);
+					} else if (this._entityUri) {
+						fileUri = URI.joinPath(this._entityUri, cleanPath);
+					} else {
+						fileUri = URI.file(cleanPath);
+					}
+					if (!(await this._fileService.exists(fileUri))) {
+						showErr(`Media file not found at "${cleanPath}". Please re-select the local file.`);
+						return;
+					}
+					const content = await this._fileService.readFile(fileUri);
+					const rawBytes = content.value.buffer;
+					const safeBytes = new Uint8Array(rawBytes.buffer, rawBytes.byteOffset, rawBytes.byteLength);
+					const blob = new Blob([safeBytes.slice(0)], { type: info.mimeType });
+					mountBlob(blob, resolvedName, fileUri.fsPath, info.mimeType);
+					if (persistToTicket) {
+						await this._saveMediaPlayerDataFromCard(card, fieldKey);
+					}
+				} catch (err: any) {
+					showErr(`Failed to read local media file "${resolvedName}": ${err?.message || err}`);
+				}
+			};
+
+			const handleDroppedOrPickedFile = async (file: File) => {
+				let localPath = '';
+				try {
+					localPath = getPathForFile(file) || (file as any).path || '';
+				} catch {
+					localPath = (file as any).path || '';
+				}
+				mountBlob(file, file.name, localPath, file.type);
+				await this._saveMediaPlayerDataFromCard(card, fieldKey);
+			};
+
+			const wireMediaEvents = (el: HTMLMediaElement, kind: 'audio' | 'video') => {
+				el.onplay = () => {
+					if (activeKind !== kind) return;
+					el.playbackRate = cardPlaybackRate;
+					roundPlayIcon.className = 'codicon codicon-debug-pause';
+					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.52)';
+				};
+				el.onpause = () => {
+					if (activeKind !== kind) return;
+					roundPlayIcon.className = 'codicon codicon-play';
+					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.28)';
+				};
+				el.onended = () => {
+					if (activeKind !== kind) return;
+					roundPlayIcon.className = 'codicon codicon-play';
+					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.28)';
+					progressFill.style.width = '100%';
+					progressThumb.style.left = '100%';
+					syncTimeUi();
+				};
+				el.onloadedmetadata = () => {
+					if (activeKind !== kind) return;
+					hideErr();
+					el.defaultPlaybackRate = cardPlaybackRate;
+					el.playbackRate = cardPlaybackRate;
+					if (Number.isFinite(el.duration) && el.duration > 0) {
+						cardKnownDuration = el.duration;
+					}
+					syncTimeUi();
+				};
+				el.ondurationchange = () => {
+					if (activeKind !== kind) return;
+					if (Number.isFinite(el.duration) && el.duration > 0) {
+						cardKnownDuration = el.duration;
+					}
+					syncTimeUi();
+				};
+				el.ontimeupdate = () => {
+					if (activeKind !== kind || isScrubbing) return;
+					syncTimeUi();
+				};
+				el.onerror = () => {
+					if (activeKind !== kind || !el.getAttribute('src')) return;
+					if (!cardTriedProtocolFallback && cardLocalFileUri) {
+						cardTriedProtocolFallback = true;
+						try {
+							const browserUriStr = FileAccess.uriToBrowserUri(cardLocalFileUri).toString(true);
+							el.src = browserUriStr;
+							el.defaultPlaybackRate = cardPlaybackRate;
+							el.playbackRate = cardPlaybackRate;
+							el.load();
+							return;
+						} catch {}
+					}
+					showErr(`Unable to play "${card.getAttribute('data-media-name') || 'media file'}": This format or codec is not supported by the browser's native HTML5 ${kind} decoder.`);
+				};
+			};
+
+			wireMediaEvents(audioEl, 'audio');
+			wireMediaEvents(videoEl, 'video');
+
+			const togglePlay = () => {
+				const el = getActiveEl();
+				if (!el.src) return;
+				if (el.paused || el.ended) {
+					if (el.ended) el.currentTime = 0;
+					el.playbackRate = cardPlaybackRate;
+					el.play().catch(err => showErr(`Playback error: ${err?.message || err}`));
+				} else {
+					el.pause();
+				}
+			};
+
+			roundPlayBtn.onclick = (e) => {
+				e.stopPropagation();
+				togglePlay();
+			};
+			videoEl.onclick = (e) => {
+				e.stopPropagation();
+				togglePlay();
+			};
+			videoEl.ondblclick = (e) => {
+				e.stopPropagation();
+				toggleCardVideoFullscreen();
+			};
+			fullscreenBtn.onclick = (e) => {
+				e.stopPropagation();
+				toggleCardVideoFullscreen();
+			};
+
+			const seekToX = (clientX: number) => {
+				const el = getActiveEl();
+				const dur = (Number.isFinite(el.duration) && el.duration > 0) ? el.duration : cardKnownDuration;
+				if (dur <= 0) return;
+				const rect = progressTrack.getBoundingClientRect();
+				if (rect.width <= 0) return;
+				const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+				el.currentTime = ratio * dur;
+				const pct = ratio * 100;
+				progressFill.style.width = `${pct}%`;
+				progressThumb.style.left = `${pct}%`;
+				timeBadge.textContent = `${fmtSec(ratio * dur)} / ${fmtSec(dur)}`;
+			};
+
+			progressTrack.onmousedown = (e: MouseEvent) => {
+				e.stopPropagation();
+				e.preventDefault();
+				isScrubbing = true;
+				seekToX(e.clientX);
+
+				const onMove = (me: MouseEvent) => {
+					if (!isScrubbing) return;
+					seekToX(me.clientX);
+				};
+				const onUp = (ue: MouseEvent) => {
+					if (isScrubbing) {
+						seekToX(ue.clientX);
+						isScrubbing = false;
+					}
+					window.removeEventListener('mousemove', onMove, true);
+					window.removeEventListener('mouseup', onUp, true);
+				};
+				window.addEventListener('mousemove', onMove, true);
+				window.addEventListener('mouseup', onUp, true);
+			};
+
+			speedSelect.onclick = (e: MouseEvent) => e.stopPropagation();
+			speedSelect.onmousedown = (e: MouseEvent) => e.stopPropagation();
+			speedSelect.onchange = (e: Event) => {
+				e.stopPropagation();
+				const nextRate = parseFloat(speedSelect.value);
+				cardPlaybackRate = Number.isFinite(nextRate) ? Math.min(2.0, Math.max(0.25, nextRate)) : 1.0;
+				card.setAttribute('data-playback-rate', String(cardPlaybackRate));
+				for (const el of [audioEl, videoEl]) {
+					el.defaultPlaybackRate = cardPlaybackRate;
+					el.playbackRate = cardPlaybackRate;
+				}
+				this._saveMediaPlayerDataFromCard(card, fieldKey).catch(() => {});
+			};
+
+			muteBtn.onclick = (e: MouseEvent) => {
+				e.stopPropagation();
+				const el = getActiveEl();
+				const nextMuted = !el.muted;
+				audioEl.muted = nextMuted;
+				videoEl.muted = nextMuted;
+				muteIcon.className = nextMuted ? 'codicon codicon-mute' : 'codicon codicon-unmute';
+				muteBtn.style.color = nextMuted ? '#f87171' : '#cbd5e1';
+			};
+
+			selectFileBtn.onclick = async (e: MouseEvent) => {
+				e.stopPropagation();
+				try {
+					const picked = await this._fileDialogService.showOpenDialog({
+						canSelectFiles: true,
+						canSelectFolders: false,
+						canSelectMany: false,
+						title: 'Select Audio or Video File (MP3 / MP4...)',
+						filters: [
+							{ name: 'Audio & Video Media', extensions: [...MEDIA_PLAYER_ALL_EXTENSIONS] },
+							{ name: 'All Files', extensions: ['*'] }
+						]
+					});
+					if (picked && picked.length > 0) {
+						const fileUri = picked[0];
+						const fName = fileUri.fsPath.split(/[\\/]/).pop() || 'media';
+						await loadCardFromLocalPath(fileUri.fsPath, fName, true);
+					}
+				} catch {
+					hiddenFileInput.value = '';
+					hiddenFileInput.click();
+				}
+			};
+
+			hiddenFileInput.onchange = async () => {
+				const file = hiddenFileInput.files?.[0];
+				if (file) {
+					await handleDroppedOrPickedFile(file);
+				}
+			};
+
+			clearFileBtn.onclick = async (e: MouseEvent) => {
+				e.stopPropagation();
+				cleanupCardMedia();
+				hideErr();
+				card.setAttribute('data-media-path', '');
+				card.setAttribute('data-media-name', '');
+				card.setAttribute('data-media-kind', 'audio');
+				card.setAttribute('data-media-mime', '');
+				videoStageWrap.style.display = 'none';
+				customPlayerBar.style.display = 'none';
+				updateBadges('', '', 'audio', '');
+				await this._saveMediaPlayerDataFromCard(card, fieldKey);
+			};
+
+			const onDragOver = (e: DragEvent) => {
+				e.preventDefault();
+				e.stopPropagation();
+				if (e.dataTransfer) {
+					e.dataTransfer.dropEffect = 'copy';
+				}
+				dropZone.style.borderColor = '#38bdf8';
+				dropZone.style.background = 'rgba(56, 189, 248, 0.12)';
+			};
+			const onDragLeave = (e: DragEvent) => {
+				e.preventDefault();
+				e.stopPropagation();
+				dropZone.style.borderColor = 'rgba(251, 191, 36, 0.4)';
+				dropZone.style.background = 'rgba(0, 0, 0, 0.24)';
+			};
+			const onDrop = async (e: DragEvent) => {
+				e.preventDefault();
+				e.stopPropagation();
+				dropZone.style.borderColor = 'rgba(251, 191, 36, 0.4)';
+				dropZone.style.background = 'rgba(0, 0, 0, 0.24)';
+				const droppedFiles = e.dataTransfer?.files;
+				if (droppedFiles && droppedFiles.length > 0) {
+					await handleDroppedOrPickedFile(droppedFiles[0]);
+					return;
+				}
+				const uriListRaw = e.dataTransfer?.getData('ResourceURLs') || e.dataTransfer?.getData('text/uri-list') || '';
+				if (uriListRaw) {
+					try {
+						let firstUriStr = '';
+						if (uriListRaw.trim().startsWith('[')) {
+							const arr = JSON.parse(uriListRaw);
+							if (Array.isArray(arr) && arr.length > 0) {
+								firstUriStr = String(arr[0]);
+							}
+						} else {
+							firstUriStr = uriListRaw.split(/\r?\n/)[0].trim();
+						}
+						if (firstUriStr) {
+							const parsedUri = URI.parse(firstUriStr);
+							if (parsedUri.fsPath) {
+								const fName = parsedUri.fsPath.split(/[\\/]/).pop() || 'media';
+								await loadCardFromLocalPath(parsedUri.fsPath, fName, true);
+							}
+						}
+					} catch {}
+				}
+			};
+
+			dropZone.ondragenter = onDragOver;
+			dropZone.ondragover = onDragOver;
+			dropZone.ondragleave = onDragLeave;
+			dropZone.ondrop = onDrop;
+
+			if (savedFilePath) {
+				await loadCardFromLocalPath(savedFilePath, savedFileName, false);
+			}
+		}
+	}
+
+	private async _executeTtsSynthesisInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
+		const llmTextInput = card.querySelector('.tts-llm-text-input') as HTMLTextAreaElement | null;
+		const textInput = card.querySelector('.tts-text-input') as HTMLTextAreaElement | null;
+		const llmText = (llmTextInput ? llmTextInput.value : (card.getAttribute('data-llm-text') || '')).trim();
+		const displayTextVal = textInput?.value.trim() || '';
+		// Use the AI Speech Synthesis Text first; fall back to display text only if speech text is empty
+		const rawText = llmText || displayTextVal;
+		if (!rawText) {
+			this._notificationService.warn('No speech synthesis text configured to convert to audio.');
+			(llmTextInput || textInput)?.focus();
+			return;
+		}
+
+		const interpolatedText = this._interpolateParameters(rawText);
+		const credId = card.getAttribute('data-cred-id') || '';
+		const providerId = card.getAttribute('data-provider') || 'gemini';
+		const modelId = card.getAttribute('data-model') || (providerId === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
+		const formatSelect = card.querySelector('.tts-format-select') as HTMLSelectElement | null;
+		const voiceSelect = card.querySelector('.tts-voice-select') as HTMLSelectElement | null;
+		const format = (formatSelect?.value || card.getAttribute('data-format') || 'mp3').toLowerCase();
+		const voice = voiceSelect?.value || card.getAttribute('data-voice') || '';
+
+		const sendBtn = card.querySelector('.tts-send-btn') as HTMLButtonElement | null;
+		const playBtn = card.querySelector('.tts-play-btn') as HTMLButtonElement | null;
+		const deleteAudioBtn = card.querySelector('.tts-delete-audio-btn') as HTMLButtonElement | null;
+		const cachedBadge = card.querySelector('.tts-cached-badge') as HTMLElement | null;
+		const statusText = card.querySelector('.tts-status-text') as HTMLElement | null;
+		const audioEl = card.querySelector('audio') as HTMLAudioElement | null;
+
+		if (sendBtn) {
+			sendBtn.disabled = true;
+			sendBtn.style.opacity = '0.6';
+		}
+		if (statusText) {
+			statusText.textContent = `Synthesizing speech with ${modelId}...`;
+			statusText.style.color = '#f472b6';
+		}
+
+		try {
+			const credService = this._instantiationService.invokeFunction(accessor => {
+				try { return accessor.get(IAgentCredentialService); } catch { return undefined; }
+			});
+			if (!credService || !credService.synthesizeSpeech) {
+				throw new Error('AI Credential service is not available.');
+			}
+
+			const res = await credService.synthesizeSpeech({
+				text: interpolatedText,
+				modelId,
+				credentialId: credId || undefined,
+				providerId,
+				format,
+				voice
+			});
+
+			if (!res.success || !res.audioBuffer) {
+				throw new Error(res.error || 'Failed to synthesize speech.');
+			}
+
+			if (!this._entityUri) {
+				throw new Error('Ticket folder URI is not available.');
+			}
+
+			// Save the audio file inside the ticket's attachments/ folder
+			const attachmentsDir = URI.joinPath(this._entityUri, 'attachments');
+			if (!(await this._fileService.exists(attachmentsDir))) {
+				await this._fileService.createFolder(attachmentsDir);
+			}
+
+			const safeKey = fieldKey.toLowerCase().replace(/[^a-z0-9_-]/g, '_') || 'tts_audio';
+			const audioFileName = `tts_${safeKey}.${format}`;
+			const audioRelativePath = `attachments/${audioFileName}`;
+			const audioFileUri = URI.joinPath(this._entityUri, audioRelativePath);
+
+			this._suppressAutoReloadUntil = Date.now() + 2500;
+			await this._fileService.writeFile(audioFileUri, VSBuffer.wrap(res.audioBuffer));
+
+			const nowStr = `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
+			card.setAttribute('data-audio-file', audioFileName);
+			card.setAttribute('data-audio-path', audioRelativePath);
+			card.setAttribute('data-last-generated', nowStr);
+			card.setAttribute('data-last-synthesized', rawText);
+
+			await this._saveTtsDataFromCard(card, fieldKey, {
+				audioFileName,
+				audioRelativePath,
+				lastGenerated: nowStr,
+				lastSynthesizedText: rawText
+			});
+
+			if (typeof (card as any)._loadTtsBytes === 'function') {
+				await (card as any)._loadTtsBytes(res.audioBuffer, res.mimeType || 'audio/mpeg', true);
+			} else if (audioEl) {
+				const blob = new Blob([res.audioBuffer.slice(0)], { type: res.mimeType || 'audio/mpeg' });
+				const blobUrl = URL.createObjectURL(blob);
+				audioEl.src = blobUrl;
+				audioEl.play().catch(() => {});
+			}
+			if (playBtn) {
+				playBtn.style.display = 'inline-flex';
+			}
+			if (deleteAudioBtn) {
+				deleteAudioBtn.style.display = 'inline-flex';
+			}
+			if (cachedBadge) {
+				cachedBadge.textContent = `Saved Locally (${audioFileName})`;
+				cachedBadge.style.display = 'inline-block';
 			}
 			if (statusText) {
-				statusText.textContent = `Failed: ${errMsg.slice(0, 30)}`;
+				statusText.textContent = `Saved: ${audioFileName} (${nowStr})`;
+				statusText.style.color = '#4ade80';
+			}
+			this._notificationService.info(`Generated and saved audio file '${audioFileName}' in ticket.`);
+		} catch (err: any) {
+			const errMsg = err?.message || String(err);
+			if (statusText) {
+				statusText.textContent = `Error: ${errMsg.slice(0, 60)}`;
 				statusText.style.color = '#ef4444';
 			}
-			await this._savePromptDataFromCard(card, fieldKey, `[Error: ${errMsg}]`);
+			this._notificationService.error(`TTS Synthesis Failed: ${errMsg}`);
+		} finally {
+			if (sendBtn) {
+				sendBtn.disabled = false;
+				sendBtn.style.opacity = '1';
+			}
+		}
+	}
+
+	private async _deleteTtsAudioFileInEditor(card: HTMLElement, fieldKey: string, alsoClearText: boolean): Promise<void> {
+		const audioRelPath = card.getAttribute('data-audio-path') || '';
+		if (audioRelPath && this._entityUri) {
+			try {
+				const audioFileUri = URI.joinPath(this._entityUri, audioRelPath);
+				if (await this._fileService.exists(audioFileUri)) {
+					await this._fileService.del(audioFileUri);
+				}
+			} catch (e) {
+				console.warn('Failed to delete TTS audio file from disk:', e);
+			}
+		}
+
+		const textInput = card.querySelector('.tts-text-input') as HTMLTextAreaElement | null;
+		if (alsoClearText && textInput) {
+			textInput.value = '';
+		}
+
+		if (typeof (card as any)._resetTtsPlayer === 'function') {
+			(card as any)._resetTtsPlayer();
+		} else {
+			const audioEl = card.querySelector('audio') as HTMLAudioElement | null;
+			if (audioEl) {
+				audioEl.pause();
+				audioEl.removeAttribute('src');
+				audioEl.style.display = 'none';
+			}
+		}
+
+		const playBtn = card.querySelector('.tts-play-btn') as HTMLButtonElement | null;
+		const deleteAudioBtn = card.querySelector('.tts-delete-audio-btn') as HTMLButtonElement | null;
+		const cachedBadge = card.querySelector('.tts-cached-badge') as HTMLElement | null;
+		const statusText = card.querySelector('.tts-status-text') as HTMLElement | null;
+
+		if (playBtn) {
+			playBtn.style.display = 'none';
+			playBtn.textContent = 'Play Audio';
+		}
+		if (deleteAudioBtn) {
+			deleteAudioBtn.style.display = 'none';
+		}
+		if (cachedBadge) {
+			cachedBadge.style.display = 'none';
+		}
+		if (statusText) {
+			statusText.textContent = alsoClearText ? 'Text and audio cleared' : 'Audio file deleted';
+			statusText.style.color = '';
+		}
+
+		card.setAttribute('data-audio-file', '');
+		card.setAttribute('data-audio-path', '');
+		card.setAttribute('data-last-generated', '');
+		card.setAttribute('data-last-synthesized', '');
+
+		await this._saveTtsDataFromCard(card, fieldKey, {
+			audioFileName: '',
+			audioRelativePath: '',
+			lastGenerated: '',
+			lastSynthesizedText: ''
+		});
+		this._notificationService.info(alsoClearText ? `Cleared text and deleted audio file for '${fieldKey}'.` : `Deleted saved audio file for '${fieldKey}'.`);
+	}
+
+	private async _saveTableDataFromCard(card: HTMLElement, fieldKey: string, payload: {
+		columns: any[];
+		rows: Record<string, any>[];
+		dbEngine: 'sqlite' | 'none';
+		dbPath: string;
+		tableName: string;
+		autoSyncDb?: boolean;
+		sqlQuery?: string;
+		sqlOutput?: string;
+		output?: string;
+		pageSize?: number;
+		lastSynced?: string;
+	}): Promise<void> {
+		const serialized = JSON.stringify(payload);
+		card.setAttribute('data-table-json', serialized);
+		const aiBtn = card.querySelector('.ai-edit-btn') as HTMLElement | null;
+		if (aiBtn) {
+			aiBtn.setAttribute('data-ai-current-value', serialized);
+		}
+		const updatedCustom = {
+			...(this._lastParsedData?.customMetadata || {}),
+			[fieldKey]: serialized
+		};
+		if (this._lastParsedData) {
+			this._lastParsedData.customMetadata = updatedCustom;
+		}
+		if (this._ticketFileUri && !this._isPreviewMode) {
+			try {
+				this._suppressAutoReloadUntil = Date.now() + 2500;
+				const content = await this._safeReadFile(this._ticketFileUri);
+				const updated = this._updateTicketMdContent(content, {}, updatedCustom);
+				await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
+			} catch (err) {
+				console.error('Failed to persist table metadata quietly:', err);
+			}
+		}
+		const effectiveTableOutput = (typeof payload.sqlOutput === 'string' && payload.sqlOutput.trim() !== '')
+			? payload.sqlOutput.trim()
+			: (Array.isArray(payload.rows) && payload.rows.length > 0 ? JSON.stringify(payload.rows, null, 2) : '');
+		await this._autoUpdateOutputPrimitives(effectiveTableOutput, fieldKey);
+	}
+
+	private async _hydrateTablePrimitiveCards(): Promise<void> {
+		if (!this._container) return;
+		const cards = Array.from(this._container.querySelectorAll('.table-primitive-card')) as HTMLElement[];
+		if (cards.length === 0) return;
+
+		const sqliteDataTypes = [
+			'TEXT',
+			'VARCHAR(255)',
+			'INTEGER',
+			'REAL',
+			'NUMERIC',
+			'BOOLEAN',
+			'DATE',
+			'DATETIME',
+			'JSON',
+			'BLOB'
+		];
+
+		for (const card of cards) {
+			const fieldKey = card.getAttribute('data-field-key') || 'Data Table';
+			const rawJson = card.getAttribute('data-table-json') || '{}';
+			let parsed: any = {};
+			try {
+				parsed = JSON.parse(rawJson);
+			} catch {}
+
+			let columns: Array<{
+				id: string;
+				name: string;
+				label?: string;
+				dataType: string;
+				primaryKey?: boolean;
+				nullable?: boolean;
+				defaultValue?: string;
+			}> = Array.isArray(parsed.columns) && parsed.columns.length > 0
+				? parsed.columns
+				: [
+					{ id: 'col_1', name: 'id', label: 'id', dataType: 'INTEGER', primaryKey: true, nullable: false },
+					{ id: 'col_2', name: 'name', label: 'name', dataType: 'TEXT', primaryKey: false, nullable: true },
+					{ id: 'col_3', name: 'status', label: 'status', dataType: 'TEXT', primaryKey: false, nullable: true },
+					{ id: 'col_4', name: 'created_at', label: 'created_at', dataType: 'DATETIME', primaryKey: false, nullable: true }
+				];
+			let rows: Record<string, any>[] = Array.isArray(parsed.rows) ? parsed.rows : [];
+			let dbEngine: 'sqlite' | 'none' = parsed.dbEngine === 'none' ? 'none' : 'sqlite';
+			let dbPath: string = String(parsed.dbPath || '');
+			let tableName: string = String(parsed.tableName || fieldKey.toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'ticket_table');
+			let autoSyncDb: boolean = Boolean(parsed.autoSyncDb);
+			let sqlQuery: string = String(parsed.sqlQuery || '');
+			let sqlOutput: string = String(parsed.sqlOutput || parsed.debugSqlOutput || '');
+			let pageSize: number = Number(parsed.pageSize) > 0 ? Number(parsed.pageSize) : 50;
+			let currentPage = 1;
+			let totalDbRowCount: number | undefined = undefined;
+			let lastSynced: string = String(parsed.lastSynced || '');
+
+			const mountEl = card.querySelector('.table-card-mount') as HTMLElement | null;
+			const headerStatsBadge = card.querySelector('.table-header-stats-badge') as HTMLElement | null;
+			if (!mountEl) continue;
+			clearNode(mountEl);
+
+			const persistNow = () => {
+				if (headerStatsBadge) {
+					const dbShort = dbPath ? ` · SQLite: ${dbPath.split(/[/\\]/).pop()}` : '';
+					headerStatsBadge.textContent = `${columns.length} cols · ${rows.length} rows${dbShort}`;
+				}
+				this._saveTableDataFromCard(card, fieldKey, {
+					columns,
+					rows,
+					dbEngine,
+					dbPath,
+					tableName,
+					autoSyncDb,
+					sqlQuery,
+					sqlOutput,
+					output: sqlOutput || JSON.stringify(rows),
+					pageSize,
+					lastSynced
+				}).catch(() => {});
+			};
+
+			// Create the 4 section containers in top-to-bottom visual order:
+			// 1) Database Storage & SQLite Sync
+			// 2) SQL Statement & Table Query Execution
+			// 3) Table Columns & SQLite Data Types
+			// 4) Interactive Data Grid (Inline Edit / Paste / Paginated Query)
+			const dbSection = document.createElement('div');
+			dbSection.style.cssText = 'display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(15,23,42,0.55); border: 1px solid rgba(20,184,166,0.3);';
+			mountEl.appendChild(dbSection);
+
+			const sqlSection = document.createElement('div');
+			sqlSection.style.cssText = 'display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(15,23,42,0.55); border: 1px solid rgba(56,189,248,0.3);';
+			mountEl.appendChild(sqlSection);
+
+			const colSection = document.createElement('div');
+			colSection.style.cssText = 'display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border-radius: 6px; background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.08);';
+			mountEl.appendChild(colSection);
+
+			const gridSection = document.createElement('div');
+			gridSection.style.cssText = 'display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; border-radius: 6px; background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.08);';
+			mountEl.appendChild(gridSection);
+
+			// Collapsible Column Schema Designer Bar
+			const colHeaderRow = document.createElement('div');
+			colHeaderRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;';
+			colSection.appendChild(colHeaderRow);
+
+			const colTitleBtn = document.createElement('button');
+			colTitleBtn.type = 'button';
+			colTitleBtn.style.cssText = 'background: transparent; border: none; color: #5eead4; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px; margin: -2px -4px; border-radius: 4px;';
+			colTitleBtn.title = 'Click to expand or collapse table columns';
+			colHeaderRow.appendChild(colTitleBtn);
+
+			const colToggleChevron = document.createElement('span');
+			colToggleChevron.className = ThemeIcon.asClassName(Codicon.chevronRight);
+			colToggleChevron.style.cssText = 'font-size: 12px; color: #2dd4bf;';
+			colTitleBtn.appendChild(colToggleChevron);
+
+			const colTitleText = document.createElement('span');
+			colTitleText.textContent = 'Table Columns';
+			colTitleBtn.appendChild(colTitleText);
+
+			const colCountBadge = document.createElement('span');
+			colCountBadge.style.cssText = 'font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 10px; background: rgba(20,184,166,0.16); color: #5eead4; border: 1px solid rgba(20,184,166,0.3); text-transform: none;';
+			colCountBadge.textContent = `${columns.length}`;
+			colTitleBtn.appendChild(colCountBadge);
+
+			const colHeaderBtns = document.createElement('div');
+			colHeaderBtns.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+			colHeaderRow.appendChild(colHeaderBtns);
+
+			const attachColBtnTooltip = (targetEl: HTMLElement, text: string, accentColor: string) => {
+				let tipEl: HTMLElement | null = null;
+				const hideTooltip = () => {
+					if (tipEl) { tipEl.remove(); tipEl = null; }
+					document.querySelectorAll('.anyagent-instant-tooltip').forEach(el => el.remove());
+				};
+				const showTooltip = () => {
+					hideTooltip();
+					if (!targetEl.isConnected) { return; }
+					tipEl = document.createElement('div');
+					tipEl.className = 'anyagent-instant-tooltip';
+					tipEl.style.cssText = `position: fixed; z-index: 100000; pointer-events: none; background: #141417; color: #f4f4f5; border: 1px solid ${accentColor}; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.65); padding: 5px 10px; border-radius: 6px; font-size: 11px; font-weight: 500; white-space: nowrap; line-height: 1.35; letter-spacing: 0.01em;`;
+					const colonIdx = text.indexOf(':');
+					if (colonIdx > 0 && colonIdx < 28) {
+						const titleSpan = document.createElement('span');
+						titleSpan.style.cssText = `font-weight: 700; color: ${accentColor}; margin-right: 4px;`;
+						titleSpan.textContent = text.slice(0, colonIdx + 1);
+						const descSpan = document.createElement('span');
+						descSpan.textContent = text.slice(colonIdx + 1).trim();
+						tipEl.appendChild(titleSpan);
+						tipEl.appendChild(descSpan);
+					} else {
+						tipEl.textContent = text;
+					}
+					document.body.appendChild(tipEl);
+					const rect = targetEl.getBoundingClientRect();
+					const tipRect = tipEl.getBoundingClientRect();
+					let left = rect.left + (rect.width / 2) - (tipRect.width / 2);
+					const maxLeft = window.innerWidth - tipRect.width - 10;
+					if (left > maxLeft) { left = maxLeft; }
+					if (left < 10) { left = 10; }
+					let top = rect.bottom + 7;
+					if (top + tipRect.height > window.innerHeight - 8) {
+						top = rect.top - tipRect.height - 7;
+					}
+					tipEl.style.left = `${Math.round(left)}px`;
+					tipEl.style.top = `${Math.round(top)}px`;
+				};
+				targetEl.addEventListener('mouseenter', showTooltip);
+				targetEl.addEventListener('mouseleave', hideTooltip);
+				targetEl.addEventListener('mousedown', hideTooltip);
+				targetEl.addEventListener('click', hideTooltip);
+				targetEl.addEventListener('blur', hideTooltip);
+			};
+
+			const queryColsBtn = document.createElement('button');
+			queryColsBtn.type = 'button';
+			queryColsBtn.style.cssText = 'padding: 4px 7px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(56,189,248,0.16); color: #38bdf8; border: 1px solid rgba(56,189,248,0.4); cursor: pointer; display: inline-flex; align-items: center; justify-content: center;';
+			const queryColsIcon = document.createElement('span');
+			queryColsIcon.className = ThemeIcon.asCSSSelector(Codicon.sync).replace(/^\./, '').split('.').join(' ');
+			queryColsIcon.style.fontSize = '12px';
+			queryColsBtn.appendChild(queryColsIcon);
+			attachColBtnTooltip(queryColsBtn, 'Query Table Columns: Inspect & sync columns and data types from SQLite table', '#38bdf8');
+			colHeaderBtns.appendChild(queryColsBtn);
+
+			const updateHeaderBtn = document.createElement('button');
+			updateHeaderBtn.type = 'button';
+			updateHeaderBtn.style.cssText = 'padding: 4px 7px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(245,158,11,0.18); color: #fbbf24; border: 1px solid rgba(245,158,11,0.45); cursor: pointer; display: inline-flex; align-items: center; justify-content: center;';
+			const updateHeaderIcon = document.createElement('span');
+			updateHeaderIcon.className = ThemeIcon.asCSSSelector(Codicon.cloudUpload).replace(/^\./, '').split('.').join(' ');
+			updateHeaderIcon.style.fontSize = '12px';
+			updateHeaderBtn.appendChild(updateHeaderIcon);
+			attachColBtnTooltip(updateHeaderBtn, 'Update Header: Create table or update SQLite table header columns', '#fbbf24');
+			colHeaderBtns.appendChild(updateHeaderBtn);
+
+			const copyColsBtn = document.createElement('button');
+			copyColsBtn.type = 'button';
+			copyColsBtn.style.cssText = 'padding: 4px 7px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(168,85,247,0.16); color: #c084fc; border: 1px solid rgba(168,85,247,0.4); cursor: pointer; display: inline-flex; align-items: center; justify-content: center;';
+			const copyColsIcon = document.createElement('span');
+			copyColsIcon.className = ThemeIcon.asCSSSelector(Codicon.copy).replace(/^\./, '').split('.').join(' ');
+			copyColsIcon.style.fontSize = '12px';
+			copyColsBtn.appendChild(copyColsIcon);
+			attachColBtnTooltip(copyColsBtn, 'Copy Columns: Copy all column names, SQLite data types & Primary Keys', '#c084fc');
+			copyColsBtn.onclick = async (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				if (columns.length === 0) {
+					this._notificationService.warn('No columns defined to copy.');
+					return;
+				}
+				const typeDescMap: Record<string, string> = {
+					'TEXT': 'TEXT (String / UTF-8 Text)',
+					'VARCHAR(255)': 'VARCHAR(255) (Bounded String)',
+					'INTEGER': 'INTEGER (64-bit Signed Int)',
+					'REAL': 'REAL (Floating Point)',
+					'NUMERIC': 'NUMERIC (Decimal / Exact)',
+					'BOOLEAN': 'BOOLEAN (0 / 1 Flag)',
+					'DATE': 'DATE (YYYY-MM-DD)',
+					'DATETIME': 'DATETIME (Timestamp)',
+					'JSON': 'JSON (Structured Object/Array)',
+					'BLOB': 'BLOB (Binary Data)'
+				};
+				const lines = columns.map(c => {
+					const rawDt = (c.dataType || 'TEXT').toUpperCase();
+					const typeDesc = typeDescMap[rawDt] || rawDt;
+					const pkDesc = c.primaryKey ? ' | PK (Primary Key)' : '';
+					return `${c.name} | Type: ${typeDesc}${pkDesc}`;
+				});
+				await this._clipboardService.writeText(lines.join('\n'));
+				this._notificationService.info(`Copied ${columns.length} column(s) and their attributes to clipboard.`);
+			};
+			colHeaderBtns.appendChild(copyColsBtn);
+
+			const addColBtn = document.createElement('button');
+			addColBtn.type = 'button';
+			addColBtn.style.cssText = 'padding: 3px 9px; font-size: 10.5px; font-weight: 600; border-radius: 4px; background: rgba(20,184,166,0.16); color: #2dd4bf; border: 1px solid rgba(20,184,166,0.4); cursor: pointer;';
+			addColBtn.textContent = '+ Add Column';
+			colHeaderBtns.appendChild(addColBtn);
+
+			const schemaDiffBanner = document.createElement('div');
+			schemaDiffBanner.style.cssText = 'display: none; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 6px 10px; border-radius: 5px; background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.4); color: #fcd34d; font-size: 11px;';
+			colSection.appendChild(schemaDiffBanner);
+
+			const colCollapsedSummary = document.createElement('div');
+			colCollapsedSummary.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 4px 8px; border-radius: 4px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.1); font-size: 11px; color: #94a3b8; cursor: pointer;';
+			colCollapsedSummary.title = 'Click to expand Table Columns';
+			colSection.appendChild(colCollapsedSummary);
+
+			const colListWrap = document.createElement('div');
+			colListWrap.style.cssText = 'display: none; flex-direction: column; gap: 5px;';
+			colSection.appendChild(colListWrap);
+
+			let colsExpanded = false;
+			const applyColsExpandedState = (expanded: boolean) => {
+				colsExpanded = expanded;
+				colListWrap.style.display = colsExpanded ? 'flex' : 'none';
+				colCollapsedSummary.style.display = colsExpanded ? 'none' : 'flex';
+				colToggleChevron.className = ThemeIcon.asClassName(colsExpanded ? Codicon.chevronDown : Codicon.chevronRight);
+			};
+			colTitleBtn.onclick = () => applyColsExpandedState(!colsExpanded);
+			colCollapsedSummary.onclick = () => applyColsExpandedState(true);
+
+			// Interactive Data Grid Section
+			const gridToolbar = document.createElement('div');
+			gridToolbar.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;';
+			gridSection.appendChild(gridToolbar);
+
+			const gridTitle = document.createElement('span');
+			gridTitle.style.cssText = 'font-size: 11px; font-weight: 700; color: #99f6e4; text-transform: uppercase; letter-spacing: 0.04em;';
+			gridTitle.textContent = 'Interactive Data Grid (Inline Edit / Paste / Paginated Query)';
+			gridToolbar.appendChild(gridTitle);
+
+			const gridBtns = document.createElement('div');
+			gridBtns.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+			gridToolbar.appendChild(gridBtns);
+
+			const addRowBtn = document.createElement('button');
+			addRowBtn.type = 'button';
+			addRowBtn.style.cssText = 'padding: 3px 9px; font-size: 10.5px; font-weight: 600; border-radius: 4px; background: rgba(20,184,166,0.18); color: #2dd4bf; border: 1px solid rgba(20,184,166,0.45); cursor: pointer;';
+			addRowBtn.textContent = '+ Add Row';
+			gridBtns.appendChild(addRowBtn);
+
+			const pasteToggleBtn = document.createElement('button');
+			pasteToggleBtn.type = 'button';
+			pasteToggleBtn.style.cssText = 'padding: 3px 9px; font-size: 10.5px; font-weight: 600; border-radius: 4px; background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.38); cursor: pointer;';
+			pasteToggleBtn.textContent = 'Paste Data';
+			gridBtns.appendChild(pasteToggleBtn);
+
+			const copyMdBtn = document.createElement('button');
+			copyMdBtn.type = 'button';
+			copyMdBtn.style.cssText = 'padding: 3px 8px; font-size: 10.5px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15); cursor: pointer;';
+			copyMdBtn.textContent = 'Copy MD';
+			gridBtns.appendChild(copyMdBtn);
+
+			const copyJsonBtn = document.createElement('button');
+			copyJsonBtn.type = 'button';
+			copyJsonBtn.style.cssText = 'padding: 3px 8px; font-size: 10.5px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15); cursor: pointer;';
+			copyJsonBtn.textContent = 'Copy JSON';
+			gridBtns.appendChild(copyJsonBtn);
+
+			const clearRowsBtn = document.createElement('button');
+			clearRowsBtn.type = 'button';
+			clearRowsBtn.style.cssText = 'padding: 3px 8px; font-size: 10.5px; border-radius: 4px; background: rgba(239,68,68,0.12); color: #f87171; border: 1px solid rgba(239,68,68,0.35); cursor: pointer;';
+			clearRowsBtn.textContent = 'Clear Rows';
+			gridBtns.appendChild(clearRowsBtn);
+
+			// Paginated Query Toolbar inside Grid Section
+			const paginationBar = document.createElement('div');
+			paginationBar.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 6px 10px; border-radius: 5px; background: rgba(15,23,42,0.45); border: 1px solid rgba(255,255,255,0.07);';
+			gridSection.appendChild(paginationBar);
+
+			const pageLeftWrap = document.createElement('div');
+			pageLeftWrap.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+			paginationBar.appendChild(pageLeftWrap);
+
+			const pageSizeLbl = document.createElement('span');
+			pageSizeLbl.style.cssText = 'font-size: 11px; opacity: 0.8;';
+			pageSizeLbl.textContent = 'Page Size:';
+			pageLeftWrap.appendChild(pageSizeLbl);
+
+			const pageSizeSelect = document.createElement('select');
+			pageSizeSelect.style.cssText = 'padding: 3px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(20,184,166,0.35); background: #141c24; color: #5eead4; font-weight: 600; cursor: pointer;';
+			[10, 20, 50, 100, 200, 500].forEach(sz => {
+				const opt = document.createElement('option');
+				opt.value = String(sz);
+				opt.textContent = `${sz} rows / page`;
+				if (sz === pageSize) {
+					opt.selected = true;
+				}
+				pageSizeSelect.appendChild(opt);
+			});
+			pageLeftWrap.appendChild(pageSizeSelect);
+
+			const queryPageBtn = document.createElement('button');
+			queryPageBtn.type = 'button';
+			queryPageBtn.style.cssText = 'padding: 3px 10px; font-size: 10.5px; font-weight: 600; border-radius: 4px; background: rgba(168,85,247,0.18); color: #c084fc; border: 1px solid rgba(168,85,247,0.45); cursor: pointer;';
+			queryPageBtn.textContent = 'Query Data';
+			queryPageBtn.title = 'Query rows from SQLite database with current page size and page number';
+			pageLeftWrap.appendChild(queryPageBtn);
+
+			const pageRightWrap = document.createElement('div');
+			pageRightWrap.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+			paginationBar.appendChild(pageRightWrap);
+
+			const prevPageBtn = document.createElement('button');
+			prevPageBtn.type = 'button';
+			prevPageBtn.style.cssText = 'padding: 2px 8px; font-size: 10.5px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15); cursor: pointer;';
+			prevPageBtn.textContent = '< Prev';
+			pageRightWrap.appendChild(prevPageBtn);
+
+			const pageInfoLabel = document.createElement('span');
+			pageInfoLabel.style.cssText = 'font-size: 10.5px; color: #cbd5e1; font-family: var(--vscode-editor-font-family, monospace); min-width: 110px; text-align: center;';
+			pageInfoLabel.textContent = 'Page 1 / 1';
+			pageRightWrap.appendChild(pageInfoLabel);
+
+			const nextPageBtn = document.createElement('button');
+			nextPageBtn.type = 'button';
+			nextPageBtn.style.cssText = 'padding: 2px 8px; font-size: 10.5px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15); cursor: pointer;';
+			nextPageBtn.textContent = 'Next >';
+			pageRightWrap.appendChild(nextPageBtn);
+
+			// Paste Drawer
+			const pasteDrawer = document.createElement('div');
+			pasteDrawer.style.cssText = 'display: none; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 5px; background: rgba(15,23,42,0.65); border: 1px dashed rgba(56,189,248,0.4);';
+			gridSection.appendChild(pasteDrawer);
+
+			const pasteHint = document.createElement('div');
+			pasteHint.style.cssText = 'font-size: 10.5px; color: #7dd3fc;';
+			pasteHint.textContent = 'Paste Excel/Google Sheets (TSV), CSV, Markdown table, or JSON array below:';
+			pasteDrawer.appendChild(pasteHint);
+
+			const pasteTextarea = document.createElement('textarea');
+			pasteTextarea.rows = 4;
+			pasteTextarea.placeholder = 'id\tname\tstatus\n1\tAlice\tActive\n2\tBob\tPending';
+			pasteTextarea.style.cssText = 'width: 100%; padding: 6px 8px; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.35); color: inherit; box-sizing: border-box; resize: vertical;';
+			pasteDrawer.appendChild(pasteTextarea);
+
+			const pasteFooter = document.createElement('div');
+			pasteFooter.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;';
+			pasteDrawer.appendChild(pasteFooter);
+
+			const headerCheckLabel = document.createElement('label');
+			headerCheckLabel.style.cssText = 'display: inline-flex; align-items: center; gap: 5px; font-size: 11px; cursor: pointer; opacity: 0.85;';
+			const headerCheckInput = document.createElement('input');
+			headerCheckInput.type = 'checkbox';
+			headerCheckInput.checked = true;
+			headerCheckLabel.appendChild(headerCheckInput);
+			const headerCheckSpan = document.createElement('span');
+			headerCheckSpan.textContent = 'First line contains column headers';
+			headerCheckLabel.appendChild(headerCheckSpan);
+			pasteFooter.appendChild(headerCheckLabel);
+
+			const pasteActionBtns = document.createElement('div');
+			pasteActionBtns.style.cssText = 'display: flex; align-items: center; gap: 6px;';
+			pasteFooter.appendChild(pasteActionBtns);
+
+			const appendPasteBtn = document.createElement('button');
+			appendPasteBtn.type = 'button';
+			appendPasteBtn.style.cssText = 'padding: 3px 10px; font-size: 10.5px; font-weight: 600; border-radius: 4px; background: rgba(20,184,166,0.2); color: #2dd4bf; border: 1px solid rgba(20,184,166,0.45); cursor: pointer;';
+			appendPasteBtn.textContent = 'Append Pasted Rows';
+			pasteActionBtns.appendChild(appendPasteBtn);
+
+			const replacePasteBtn = document.createElement('button');
+			replacePasteBtn.type = 'button';
+			replacePasteBtn.style.cssText = 'padding: 3px 10px; font-size: 10.5px; font-weight: 600; border-radius: 4px; background: rgba(56,189,248,0.2); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45); cursor: pointer;';
+			replacePasteBtn.textContent = 'Replace All Rows';
+			pasteActionBtns.appendChild(replacePasteBtn);
+
+			const cancelPasteBtn = document.createElement('button');
+			cancelPasteBtn.type = 'button';
+			cancelPasteBtn.style.cssText = 'padding: 3px 8px; font-size: 10.5px; border-radius: 4px; background: transparent; color: rgba(255,255,255,0.65); border: 1px solid rgba(255,255,255,0.15); cursor: pointer;';
+			cancelPasteBtn.textContent = 'Cancel';
+			pasteActionBtns.appendChild(cancelPasteBtn);
+
+			const gridTableContainer = document.createElement('div');
+			gridTableContainer.style.cssText = 'width: 100%; overflow-x: auto; max-height: 360px; overflow-y: auto; border-radius: 5px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.26);';
+			gridSection.appendChild(gridTableContainer);
+
+			const parseAndImportText = (rawText: string, firstRowIsHeader: boolean, replaceExisting: boolean) => {
+				const trimmed = rawText.trim();
+				if (!trimmed) return;
+				const importedRows: Record<string, any>[] = [];
+
+				if (trimmed.startsWith('[')) {
+					try {
+						const arr = JSON.parse(trimmed);
+						if (Array.isArray(arr)) {
+							for (const item of arr) {
+								if (item && typeof item === 'object' && !Array.isArray(item)) {
+									for (const k of Object.keys(item)) {
+										if (!columns.some(c => c.name.toLowerCase() === k.toLowerCase())) {
+											columns.push({
+												id: `col_${Date.now()}_${columns.length + 1}`,
+												name: k,
+												label: k,
+												dataType: 'TEXT',
+												primaryKey: false,
+												nullable: true
+											});
+										}
+									}
+									importedRows.push({ ...item });
+								}
+							}
+						}
+					} catch {}
+				}
+
+				if (importedRows.length === 0) {
+					const lines = trimmed.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+					if (lines.length === 0) return;
+
+					const isMarkdown = lines[0].includes('|') && lines.length >= 2 && /^\|?[\s:-]+\|/.test(lines[1]);
+					let matrix: string[][] = [];
+					if (isMarkdown) {
+						const dataLines = lines.filter((_, idx) => idx !== 1);
+						matrix = dataLines.map(line => {
+							const clean = line.replace(/^\|/, '').replace(/\|$/, '');
+							return clean.split('|').map(c => c.trim());
+						});
+					} else {
+						const delim = lines[0].includes('\t') ? '\t' : ',';
+						matrix = lines.map(line => line.split(delim).map(c => c.trim().replace(/^"|"$/g, '')));
+					}
+
+					if (matrix.length > 0) {
+						let headerNames: string[] = [];
+						let startIdx = 0;
+						if (firstRowIsHeader || isMarkdown) {
+							headerNames = matrix[0].map((h, i) => h || `col_${i + 1}`);
+							startIdx = 1;
+							for (const hName of headerNames) {
+								if (!columns.some(c => c.name.toLowerCase() === hName.toLowerCase())) {
+									columns.push({
+										id: `col_${Date.now()}_${columns.length + 1}`,
+										name: hName,
+										label: hName,
+										dataType: 'TEXT',
+										primaryKey: false,
+										nullable: true
+									});
+								}
+							}
+						} else {
+							headerNames = columns.map(c => c.name);
+						}
+
+						for (let r = startIdx; r < matrix.length; r++) {
+							const cells = matrix[r];
+							const rowObj: Record<string, any> = {};
+							for (let c = 0; c < headerNames.length; c++) {
+								const h = headerNames[c];
+								const matchCol = columns.find(col => col.name.toLowerCase() === h.toLowerCase());
+								const key = matchCol ? matchCol.name : h;
+								if (key) {
+									rowObj[key] = cells[c] !== undefined ? cells[c] : '';
+								}
+							}
+							importedRows.push(rowObj);
+						}
+					}
+				}
+
+				if (importedRows.length > 0) {
+					rows = replaceExisting ? importedRows : [...rows, ...importedRows];
+					renderCols();
+					renderGrid();
+					persistNow();
+					this._notificationService.info(`Imported ${importedRows.length} row(s) into '${fieldKey}'.`);
+				}
+			};
+
+			const updatePaginationControls = () => {
+				const effectiveTotal = totalDbRowCount !== undefined ? Math.max(totalDbRowCount, rows.length) : rows.length;
+				const totalPages = Math.max(1, Math.ceil(effectiveTotal / pageSize));
+				if (currentPage > totalPages) {
+					currentPage = totalPages;
+				}
+				if (currentPage < 1) {
+					currentPage = 1;
+				}
+				pageInfoLabel.textContent = `Page ${currentPage} / ${totalPages} (Total: ${effectiveTotal})`;
+				prevPageBtn.disabled = currentPage <= 1;
+				nextPageBtn.disabled = currentPage >= totalPages;
+				prevPageBtn.style.opacity = prevPageBtn.disabled ? '0.4' : '1';
+				nextPageBtn.style.opacity = nextPageBtn.disabled ? '0.4' : '1';
+			};
+
+			const renderGrid = () => {
+				clearNode(gridTableContainer);
+				updatePaginationControls();
+				if (columns.length === 0) {
+					const emptyMsg = document.createElement('div');
+					emptyMsg.style.cssText = 'padding: 14px; text-align: center; font-size: 11px; opacity: 0.6; font-style: italic;';
+					emptyMsg.textContent = 'No columns defined. Click "Query Table Columns" or "+ Add Column" above.';
+					gridTableContainer.appendChild(emptyMsg);
+					return;
+				}
+
+				const tableEl = document.createElement('table');
+				tableEl.style.cssText = 'width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;';
+				gridTableContainer.appendChild(tableEl);
+
+				const thead = document.createElement('thead');
+				tableEl.appendChild(thead);
+				const trHead = document.createElement('tr');
+				trHead.style.cssText = 'background: rgba(20,184,166,0.14); border-bottom: 1px solid rgba(20,184,166,0.32);';
+				thead.appendChild(trHead);
+
+				const thIdx = document.createElement('th');
+				thIdx.style.cssText = 'padding: 6px 8px; width: 34px; text-align: center; font-size: 10px; opacity: 0.65; border-right: 1px solid rgba(255,255,255,0.06);';
+				thIdx.textContent = '#';
+				trHead.appendChild(thIdx);
+
+				columns.forEach(c => {
+					const th = document.createElement('th');
+					th.style.cssText = 'padding: 6px 8px; font-weight: 600; color: #e2e8f0; border-right: 1px solid rgba(255,255,255,0.06); white-space: nowrap;';
+					const wrap = document.createElement('div');
+					wrap.style.cssText = 'display: flex; align-items: center; gap: 5px;';
+					const nameSpan = document.createElement('span');
+					nameSpan.textContent = c.name;
+					wrap.appendChild(nameSpan);
+					const typeBadge = document.createElement('span');
+					typeBadge.style.cssText = 'font-size: 9px; padding: 1px 4px; border-radius: 3px; background: rgba(20,184,166,0.2); color: #5eead4; font-weight: 700;';
+					typeBadge.textContent = c.dataType || 'TEXT';
+					wrap.appendChild(typeBadge);
+					if (c.primaryKey) {
+						const pkBadge = document.createElement('span');
+						pkBadge.style.cssText = 'font-size: 8.5px; padding: 1px 4px; border-radius: 3px; background: rgba(245,158,11,0.22); color: #fbbf24; font-weight: 700;';
+						pkBadge.textContent = 'PK';
+						wrap.appendChild(pkBadge);
+					}
+					th.appendChild(wrap);
+					trHead.appendChild(th);
+				});
+
+				const thDel = document.createElement('th');
+				thDel.style.cssText = 'padding: 6px 8px; width: 38px; text-align: center; font-size: 10px; opacity: 0.65;';
+				thDel.textContent = 'Del';
+				trHead.appendChild(thDel);
+
+				const tbody = document.createElement('tbody');
+				tableEl.appendChild(tbody);
+
+				if (rows.length === 0) {
+					const trEmpty = document.createElement('tr');
+					const tdEmpty = document.createElement('td');
+					tdEmpty.colSpan = columns.length + 2;
+					tdEmpty.style.cssText = 'padding: 14px; text-align: center; font-size: 11px; opacity: 0.55; font-style: italic;';
+					tdEmpty.textContent = 'No rows yet. Click "Query Data", "+ Add Row", or "Paste Data" above.';
+					trEmpty.appendChild(tdEmpty);
+					tbody.appendChild(trEmpty);
+				} else {
+					const isLocalMultiPage = rows.length > pageSize;
+					const visibleRows = isLocalMultiPage
+						? rows.slice((currentPage - 1) * pageSize, currentPage * pageSize)
+						: rows;
+					const baseRowNumber = (currentPage - 1) * pageSize;
+
+					visibleRows.forEach((rowObj, vIdx) => {
+						const actualRowIdx = isLocalMultiPage ? (baseRowNumber + vIdx) : vIdx;
+						const displayRowNum = baseRowNumber + vIdx + 1;
+						const tr = document.createElement('tr');
+						tr.style.cssText = 'border-bottom: 1px solid rgba(255,255,255,0.05);';
+						tbody.appendChild(tr);
+
+						const tdNum = document.createElement('td');
+						tdNum.style.cssText = 'padding: 4px 6px; text-align: center; font-size: 10.5px; opacity: 0.5; border-right: 1px solid rgba(255,255,255,0.06);';
+						tdNum.textContent = String(displayRowNum);
+						tr.appendChild(tdNum);
+
+						columns.forEach(c => {
+							const td = document.createElement('td');
+							td.style.cssText = 'padding: 2px 4px; border-right: 1px solid rgba(255,255,255,0.06); min-width: 90px;';
+							const inp = document.createElement('input');
+							inp.type = 'text';
+							inp.placeholder = c.dataType || 'TEXT';
+							inp.style.cssText = 'width: 100%; padding: 4px 6px; font-size: 11.5px; border: 1px solid transparent; border-radius: 3px; background: transparent; color: inherit; box-sizing: border-box;';
+							const cellVal = rowObj ? rowObj[c.name] : '';
+							inp.value = cellVal === undefined || cellVal === null ? '' : (typeof cellVal === 'object' ? JSON.stringify(cellVal) : String(cellVal));
+							inp.onfocus = () => {
+								inp.style.borderColor = 'rgba(20,184,166,0.5)';
+								inp.style.background = 'rgba(0,0,0,0.35)';
+							};
+							inp.onblur = () => {
+								inp.style.borderColor = 'transparent';
+								inp.style.background = 'transparent';
+							};
+							inp.oninput = () => {
+								rowObj[c.name] = inp.value;
+								persistNow();
+							};
+							inp.onpaste = (ev) => {
+								const clip = ev.clipboardData?.getData('text/plain') || '';
+								if (clip.includes('\n') || clip.includes('\t')) {
+									ev.preventDefault();
+									parseAndImportText(clip, false, false);
+								}
+							};
+							td.appendChild(inp);
+							tr.appendChild(td);
+						});
+
+						const tdDel = document.createElement('td');
+						tdDel.style.cssText = 'padding: 2px 4px; text-align: center;';
+						const delBtn = document.createElement('button');
+						delBtn.type = 'button';
+						delBtn.style.cssText = 'background: transparent; border: none; color: #f87171; cursor: pointer; font-size: 12px; opacity: 0.8;';
+						delBtn.textContent = '✕';
+						delBtn.title = 'Delete Row';
+						delBtn.onclick = () => {
+							rows.splice(actualRowIdx, 1);
+							renderGrid();
+							persistNow();
+						};
+						tdDel.appendChild(delBtn);
+						tr.appendChild(tdDel);
+					});
+				}
+			};
+
+			let updateSchemaDiffBanner = () => {};
+			let hasLocalColumnEdits = false;
+			let lastKnownDbColumns: Array<{ id?: string; name: string; label?: string; dataType: string; primaryKey?: boolean; nullable?: boolean; defaultValue?: string }> | undefined = undefined;
+			let lastKnownTableExists = false;
+			let schemaLoadSeq = 0;
+			let lastConfirmedDbPath = (dbPath || '').trim();
+			let lastConfirmedTableExpr = (tableName || '').trim();
+
+			const normalizeColDataType = (dt?: string): string => {
+				const raw = (dt || 'TEXT').trim().toUpperCase();
+				if (raw.includes('INT')) return 'INTEGER';
+				if (raw.includes('CHAR') || raw.includes('CLOB') || raw.includes('TEXT')) {
+					return raw.startsWith('VARCHAR') ? 'VARCHAR(255)' : 'TEXT';
+				}
+				if (raw.includes('BLOB')) return 'BLOB';
+				if (raw.includes('REAL') || raw.includes('FLOA') || raw.includes('DOUB')) return 'REAL';
+				if (raw.includes('BOOL')) return 'BOOLEAN';
+				if (raw.includes('DATETIME') || raw.includes('TIMESTAMP')) return 'DATETIME';
+				if (raw.includes('DATE')) return 'DATE';
+				if (raw.includes('JSON')) return 'JSON';
+				if (raw.includes('NUM') || raw.includes('DEC')) return 'NUMERIC';
+				return 'TEXT';
+			};
+
+			const cloneColumnDef = (c: any, idx: number) => ({
+				id: c?.id || `col_${Date.now()}_${idx + 1}`,
+				name: String(c?.name || c?.label || `col_${idx + 1}`).trim(),
+				label: String(c?.label || c?.name || `col_${idx + 1}`).trim(),
+				dataType: normalizeColDataType(c?.dataType),
+				primaryKey: Boolean(c?.primaryKey),
+				nullable: c?.nullable !== false,
+				defaultValue: c?.defaultValue !== undefined && c?.defaultValue !== null ? String(c.defaultValue) : ''
+			});
+
+			const cloneColumnsList = (cols: any[] | undefined) =>
+				Array.isArray(cols) ? cols.map((c, idx) => cloneColumnDef(c, idx)) : [];
+
+			const areSchemasEqual = (colsA: any[] | undefined, colsB: any[] | undefined): boolean => {
+				const a = colsA || [];
+				const b = colsB || [];
+				if (a.length !== b.length) {
+					return false;
+				}
+				for (let i = 0; i < a.length; i++) {
+					const ca = a[i];
+					const cb = b[i];
+					if ((ca?.name || '').trim() !== (cb?.name || '').trim()) {
+						return false;
+					}
+					if (normalizeColDataType(ca?.dataType) !== normalizeColDataType(cb?.dataType)) {
+						return false;
+					}
+					if (Boolean(ca?.primaryKey) !== Boolean(cb?.primaryKey)) {
+						return false;
+					}
+					if (ca?.nullable !== undefined && cb?.nullable !== undefined && Boolean(ca.nullable) !== Boolean(cb.nullable)) {
+						return false;
+					}
+					const dfltA = ca?.defaultValue !== undefined && ca?.defaultValue !== null ? String(ca.defaultValue) : '';
+					const dfltB = cb?.defaultValue !== undefined && cb?.defaultValue !== null ? String(cb.defaultValue) : '';
+					if (ca?.defaultValue !== undefined && cb?.defaultValue !== undefined && dfltA !== dfltB) {
+						return false;
+					}
+				}
+				return true;
+			};
+
+			const isSchemaDirty = (): boolean => {
+				if (!hasLocalColumnEdits) {
+					return false;
+				}
+				if (lastKnownDbColumns === undefined) {
+					return true;
+				}
+				return !areSchemasEqual(columns, lastKnownDbColumns);
+			};
+
+			const renderCols = () => {
+				clearNode(colListWrap);
+				clearNode(colCollapsedSummary);
+				colCountBadge.textContent = `${columns.length}`;
+				if (columns.length === 0) {
+					const emptySpan = document.createElement('span');
+					emptySpan.style.cssText = 'font-style: italic; opacity: 0.7;';
+					emptySpan.textContent = 'No columns defined (click to expand)';
+					colCollapsedSummary.appendChild(emptySpan);
+				} else {
+					columns.forEach(c => {
+						const chip = document.createElement('span');
+						chip.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 4px; background: rgba(20,184,166,0.12); color: #cbd5e1; border: 1px solid rgba(20,184,166,0.28); font-size: 10.5px; font-family: var(--vscode-editor-font-family, monospace);';
+						const cNameEl = document.createElement('span');
+						cNameEl.style.cssText = 'font-weight: 600; color: #f1f5f9;';
+						cNameEl.textContent = c.name || 'col';
+						chip.appendChild(cNameEl);
+						const cTypeEl = document.createElement('span');
+						cTypeEl.style.cssText = 'font-size: 9.5px; color: #5eead4; opacity: 0.85;';
+						cTypeEl.textContent = (c.dataType || 'TEXT').toUpperCase();
+						chip.appendChild(cTypeEl);
+						if (c.primaryKey) {
+							const cPkEl = document.createElement('span');
+							cPkEl.style.cssText = 'font-size: 9px; font-weight: 700; color: #fbbf24;';
+							cPkEl.textContent = 'PK';
+							chip.appendChild(cPkEl);
+						}
+						colCollapsedSummary.appendChild(chip);
+					});
+				}
+				columns.forEach((col, cIdx) => {
+					const rowEl = document.createElement('div');
+					rowEl.style.cssText = 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 6px; border-radius: 4px; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);';
+					colListWrap.appendChild(rowEl);
+
+					const idxSpan = document.createElement('span');
+					idxSpan.style.cssText = 'font-size: 10px; opacity: 0.55; min-width: 44px; font-family: var(--vscode-editor-font-family, monospace);';
+					idxSpan.textContent = `Col #${cIdx + 1}`;
+					rowEl.appendChild(idxSpan);
+
+					const nameInp = document.createElement('input');
+					nameInp.type = 'text';
+					nameInp.value = col.name || '';
+					nameInp.placeholder = 'Column Name';
+					nameInp.style.cssText = 'flex: 1; min-width: 120px; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.3); color: inherit;';
+					nameInp.oninput = () => {
+						const prevName = col.name;
+						const nextName = nameInp.value.trim() || `col_${cIdx + 1}`;
+						col.name = nextName;
+						col.label = nextName;
+						hasLocalColumnEdits = true;
+						if (prevName && prevName !== nextName) {
+							rows.forEach(r => {
+								if (r && Object.prototype.hasOwnProperty.call(r, prevName)) {
+									r[nextName] = r[prevName];
+									delete r[prevName];
+								}
+							});
+						}
+						renderGrid();
+						persistNow();
+						updateSchemaDiffBanner();
+					};
+					rowEl.appendChild(nameInp);
+
+					const typeLabel = document.createElement('span');
+					typeLabel.style.cssText = 'font-size: 10.5px; opacity: 0.7;';
+					typeLabel.textContent = 'Type:';
+					rowEl.appendChild(typeLabel);
+
+					const typeSelect = document.createElement('select');
+					typeSelect.style.cssText = 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(20,184,166,0.35); background: #141c24; color: #5eead4; font-weight: 600; cursor: pointer;';
+					sqliteDataTypes.forEach(dt => {
+						const opt = document.createElement('option');
+						opt.value = dt;
+						opt.textContent = dt;
+						if ((col.dataType || 'TEXT').toUpperCase() === dt) {
+							opt.selected = true;
+						}
+						typeSelect.appendChild(opt);
+					});
+					typeSelect.onchange = () => {
+						col.dataType = typeSelect.value;
+						hasLocalColumnEdits = true;
+						renderGrid();
+						persistNow();
+						updateSchemaDiffBanner();
+					};
+					rowEl.appendChild(typeSelect);
+
+					const pkBtn = document.createElement('button');
+					pkBtn.type = 'button';
+					pkBtn.textContent = 'PK';
+					pkBtn.title = 'Toggle Primary Key constraint';
+					pkBtn.style.cssText = col.primaryKey
+						? 'padding: 3px 7px; font-size: 10px; font-weight: 700; border-radius: 4px; background: rgba(245,158,11,0.22); color: #fbbf24; border: 1px solid rgba(245,158,11,0.5); cursor: pointer;'
+						: 'padding: 3px 7px; font-size: 10px; font-weight: 600; border-radius: 4px; background: rgba(255,255,255,0.04); color: rgba(255,255,255,0.5); border: 1px solid rgba(255,255,255,0.12); cursor: pointer;';
+					pkBtn.onclick = () => {
+						col.primaryKey = !col.primaryKey;
+						hasLocalColumnEdits = true;
+						renderCols();
+						renderGrid();
+						persistNow();
+						updateSchemaDiffBanner();
+					};
+					rowEl.appendChild(pkBtn);
+
+					const delColBtn = document.createElement('button');
+					delColBtn.type = 'button';
+					delColBtn.textContent = '✕';
+					delColBtn.title = 'Delete Column';
+					delColBtn.style.cssText = 'background: transparent; border: none; color: #ef4444; cursor: pointer; font-size: 12px; opacity: 0.8;';
+					delColBtn.onclick = () => {
+						if (columns.length <= 1) {
+							this._notificationService.warn('Table must have at least one column.');
+							return;
+						}
+						const removed = columns.splice(cIdx, 1)[0];
+						hasLocalColumnEdits = true;
+						if (removed) {
+							rows.forEach(r => { if (r) delete r[removed.name]; });
+						}
+						renderCols();
+						renderGrid();
+						persistNow();
+						updateSchemaDiffBanner();
+					};
+					rowEl.appendChild(delColBtn);
+				});
+			};
+
+			addColBtn.onclick = () => {
+				if (!colsExpanded) {
+					applyColsExpandedState(true);
+				}
+				const nextIdx = columns.length + 1;
+				let cName = `column_${nextIdx}`;
+				while (columns.some(c => c.name.toLowerCase() === cName.toLowerCase())) {
+					cName = `column_${nextIdx}_${Math.floor(Math.random() * 100)}`;
+				}
+				columns.push({
+					id: `col_${Date.now()}_${nextIdx}`,
+					name: cName,
+					label: cName,
+					dataType: 'TEXT',
+					primaryKey: false,
+					nullable: true
+				});
+				hasLocalColumnEdits = true;
+				renderCols();
+				renderGrid();
+				persistNow();
+				updateSchemaDiffBanner();
+			};
+
+			addRowBtn.onclick = () => {
+				const newRow: Record<string, any> = {};
+				columns.forEach(c => {
+					if (c.primaryKey && (c.dataType || '').toUpperCase() === 'INTEGER') {
+						newRow[c.name] = rows.length + 1;
+					} else {
+						newRow[c.name] = c.defaultValue ?? '';
+					}
+				});
+				rows.push(newRow);
+				renderGrid();
+				persistNow();
+			};
+
+			pasteToggleBtn.onclick = () => {
+				const isHidden = pasteDrawer.style.display === 'none';
+				pasteDrawer.style.display = isHidden ? 'flex' : 'none';
+				if (isHidden) {
+					setTimeout(() => pasteTextarea.focus(), 20);
+				}
+			};
+			cancelPasteBtn.onclick = () => {
+				pasteDrawer.style.display = 'none';
+			};
+			appendPasteBtn.onclick = () => {
+				parseAndImportText(pasteTextarea.value, headerCheckInput.checked, false);
+				pasteTextarea.value = '';
+				pasteDrawer.style.display = 'none';
+			};
+			replacePasteBtn.onclick = () => {
+				parseAndImportText(pasteTextarea.value, headerCheckInput.checked, true);
+				pasteTextarea.value = '';
+				pasteDrawer.style.display = 'none';
+			};
+
+			copyMdBtn.onclick = async () => {
+				const colNames = columns.map(c => c.name);
+				const header = `| ${colNames.join(' | ')} |`;
+				const sep = `| ${colNames.map(() => '---').join(' | ')} |`;
+				const body = rows.map(r => `| ${colNames.map(cn => String(r?.[cn] ?? '').replace(/\|/g, '\\|')).join(' | ')} |`);
+				await this._clipboardService.writeText([header, sep, ...body].join('\n'));
+				this._notificationService.info('Table Markdown copied to clipboard.');
+			};
+
+			copyJsonBtn.onclick = async () => {
+				await this._clipboardService.writeText(JSON.stringify(rows, null, 2));
+				this._notificationService.info('Table JSON rows copied to clipboard.');
+			};
+
+			clearRowsBtn.onclick = () => {
+				rows = [];
+				renderGrid();
+				persistNow();
+			};
+
+			// SQLite Database Storage & Operations Panel
+			const dbTopRow = document.createElement('div');
+			dbTopRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;';
+			dbSection.appendChild(dbTopRow);
+
+			const dbTitle = document.createElement('span');
+			dbTitle.style.cssText = 'font-size: 11px; font-weight: 700; color: #2dd4bf; text-transform: uppercase; letter-spacing: 0.04em;';
+			dbTitle.textContent = 'Database Storage Binding (SQLite)';
+			dbTopRow.appendChild(dbTitle);
+
+			const autoSyncWrap = document.createElement('label');
+			autoSyncWrap.style.cssText = 'display: inline-flex; align-items: center; gap: 5px; font-size: 11px; cursor: pointer; color: #cbd5e1;';
+			const autoSyncInput = document.createElement('input');
+			autoSyncInput.type = 'checkbox';
+			autoSyncInput.checked = autoSyncDb;
+			autoSyncInput.onchange = () => {
+				autoSyncDb = autoSyncInput.checked;
+				persistNow();
+			};
+			autoSyncWrap.appendChild(autoSyncInput);
+			const autoSyncText = document.createElement('span');
+			autoSyncText.textContent = 'Auto-sync on workflow run';
+			autoSyncWrap.appendChild(autoSyncText);
+			dbTopRow.appendChild(autoSyncWrap);
+
+			// Step 1: DB Engine + SQLite File Path + Select / Create New SQLite
+			const dbPathRow = document.createElement('div');
+			dbPathRow.style.cssText = 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;';
+			dbSection.appendChild(dbPathRow);
+
+			const pathLabel = document.createElement('span');
+			pathLabel.style.cssText = 'font-size: 11px; opacity: 0.8; min-width: 72px;';
+			pathLabel.textContent = 'SQLite File:';
+			dbPathRow.appendChild(pathLabel);
+
+			const engSelect = document.createElement('select');
+			engSelect.style.cssText = 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #141c24; color: #5eead4; font-weight: 600; cursor: pointer;';
+			[
+				{ value: 'sqlite', label: 'SQLite (.sqlite / .db)' },
+				{ value: 'none', label: 'Ticket JSON Only' }
+			].forEach(item => {
+				const opt = document.createElement('option');
+				opt.value = item.value;
+				opt.textContent = item.label;
+				if (dbEngine === item.value) opt.selected = true;
+				engSelect.appendChild(opt);
+			});
+			engSelect.onchange = () => {
+				dbEngine = engSelect.value as 'sqlite' | 'none';
+				persistNow();
+			};
+			dbPathRow.appendChild(engSelect);
+
+			const pathInput = document.createElement('input');
+			pathInput.type = 'text';
+			pathInput.value = dbPath;
+			pathInput.placeholder = 'Enter SQLite file path (e.g. Jobs.sqlite) or click Select / + New SQLite...';
+			pathInput.style.cssText = 'flex: 1; min-width: 190px; padding: 5px 8px; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit;';
+			pathInput.oninput = () => {
+				dbPath = pathInput.value.trim();
+				persistNow();
+			};
+			dbPathRow.appendChild(pathInput);
+
+			const browseDbBtn = document.createElement('button');
+			browseDbBtn.type = 'button';
+			browseDbBtn.style.cssText = 'padding: 4px 10px; font-size: 11px; border-radius: 4px; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.18); cursor: pointer;';
+			browseDbBtn.textContent = 'Select SQLite...';
+			dbPathRow.appendChild(browseDbBtn);
+
+			const newDbBtn = document.createElement('button');
+			newDbBtn.type = 'button';
+			newDbBtn.style.cssText = 'padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(20,184,166,0.18); color: #2dd4bf; border: 1px solid rgba(20,184,166,0.45); cursor: pointer;';
+			newDbBtn.textContent = '+ New SQLite...';
+			newDbBtn.title = 'Create a new empty SQLite database file with your chosen filename';
+			dbPathRow.appendChild(newDbBtn);
+
+			// Step 2: Target Table Selection (Existing DB Tables Dropdown OR New Table Name) + Confirm Table
+			const dbTableRow = document.createElement('div');
+			dbTableRow.style.cssText = 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;';
+			dbSection.appendChild(dbTableRow);
+
+			const tblLabel = document.createElement('span');
+			tblLabel.style.cssText = 'font-size: 11px; opacity: 0.8; min-width: 72px;';
+			tblLabel.textContent = 'Target Table:';
+			dbTableRow.appendChild(tblLabel);
+
+			const tblSelect = document.createElement('select');
+			tblSelect.style.cssText = 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(56,189,248,0.35); background: #141c24; color: #7dd3fc; font-weight: 600; cursor: pointer; min-width: 180px;';
+			tblSelect.title = 'Choose an existing table in this SQLite database, select "+ Create New Table", or select "Use or create by INPUTS parameter" (e.g. {table name})';
+			dbTableRow.appendChild(tblSelect);
+
+			const tblInputWrapper = document.createElement('div');
+			tblInputWrapper.style.cssText = 'flex: 1; min-width: 140px; position: relative;';
+			dbTableRow.appendChild(tblInputWrapper);
+
+			const tblDisplayEl = document.createElement('div');
+			tblDisplayEl.className = 'prompt-tokenized-display';
+			tblDisplayEl.style.cssText = 'display: flex; align-items: center; min-height: 27px; padding: 3px 8px; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: text; white-space: pre; overflow-x: auto; box-sizing: border-box;';
+			tblInputWrapper.appendChild(tblDisplayEl);
+
+			const tblInput = document.createElement('input');
+			tblInput.type = 'text';
+			tblInput.value = tableName;
+			tblInput.placeholder = 'Enter table name or INPUTS variable (e.g. {table name})';
+			tblInput.style.cssText = 'display: none; width: 100%; min-height: 27px; padding: 4px 8px; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 4px; border: 1px solid rgba(56,189,248,0.65); background: rgba(0,0,0,0.45); color: inherit; box-sizing: border-box; outline: none;';
+			tblInputWrapper.appendChild(tblInput);
+
+			const renderTblInputTokenized = (rawVal?: string) => {
+				const text = (rawVal ?? tblInput.value) || '';
+				clearNode(tblDisplayEl);
+				if (!text) {
+					const emptySpan = document.createElement('span');
+					emptySpan.style.cssText = 'opacity: 0.45; font-style: italic;';
+					emptySpan.textContent = tblInput.placeholder || 'Enter table name or {table name}';
+					tblDisplayEl.appendChild(emptySpan);
+					return;
+				}
+				const tokenRegex = /(\{[^{}\n]+\}|@[a-zA-Z0-9_\-\u4e00-\u9fa5]+)/g;
+				let lastIdx = 0;
+				let match: RegExpExecArray | null;
+				while ((match = tokenRegex.exec(text)) !== null) {
+					if (match.index > lastIdx) {
+						tblDisplayEl.appendChild(document.createTextNode(text.slice(lastIdx, match.index)));
+					}
+					const fullMatch = match[0];
+					const cleanTokenName = fullMatch.startsWith('{') && fullMatch.endsWith('}')
+						? fullMatch.slice(1, -1).trim()
+						: fullMatch.slice(1).trim();
+					if (cleanTokenName && fullMatch.startsWith('{') && fullMatch.endsWith('}')) {
+						const pill = document.createElement('span');
+						pill.className = 'prompt-token-pill';
+						pill.title = `INPUTS reference: ${cleanTokenName}`;
+						pill.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; margin: 0 1px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(14, 99, 156, 0.28); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); vertical-align: baseline; user-select: none;';
+						const iconSpan = document.createElement('span');
+						iconSpan.className = ThemeIcon.asCSSSelector(Codicon.link).replace(/^\./, '').split('.').join(' ');
+						iconSpan.style.fontSize = '10px';
+						const txtSpan = document.createElement('span');
+						txtSpan.textContent = cleanTokenName;
+						pill.appendChild(iconSpan);
+						pill.appendChild(txtSpan);
+						tblDisplayEl.appendChild(pill);
+					} else {
+						tblDisplayEl.appendChild(document.createTextNode(fullMatch));
+					}
+					lastIdx = tokenRegex.lastIndex;
+				}
+				if (lastIdx < text.length) {
+					tblDisplayEl.appendChild(document.createTextNode(text.slice(lastIdx)));
+				}
+			};
+
+			const switchToTblInputEdit = (selectAll: boolean = false) => {
+				tblDisplayEl.style.display = 'none';
+				tblInput.style.display = 'block';
+				tblInput.focus();
+				if (selectAll) {
+					tblInput.select();
+				}
+			};
+
+			tblDisplayEl.onclick = () => switchToTblInputEdit(false);
+			tblInput.onblur = () => {
+				setTimeout(() => {
+					tblInput.style.display = 'none';
+					tblDisplayEl.style.display = 'flex';
+					renderTblInputTokenized();
+					persistNow();
+				}, 160);
+			};
+			tblInput.onkeydown = (ev) => {
+				if (ev.key === 'Enter') {
+					ev.preventDefault();
+					tblInput.blur();
+				}
+			};
+			renderTblInputTokenized();
+
+			const confirmTableBtn = document.createElement('button');
+			confirmTableBtn.type = 'button';
+			confirmTableBtn.style.cssText = 'padding: 4px 11px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(56,189,248,0.22); color: #38bdf8; border: 1px solid rgba(56,189,248,0.5); cursor: pointer;';
+			confirmTableBtn.textContent = '✓ Confirm Table';
+			confirmTableBtn.title = 'Confirm target table: selects and loads existing table as query scope, or reserves/creates table by name or INPUTS parameter';
+			dbTableRow.appendChild(confirmTableBtn);
+
+			const refreshTablesBtn = document.createElement('button');
+			refreshTablesBtn.type = 'button';
+			refreshTablesBtn.style.cssText = 'padding: 4px 8px; font-size: 11px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15); cursor: pointer;';
+			refreshTablesBtn.textContent = '↻';
+			refreshTablesBtn.title = 'Refresh list of tables in the SQLite database';
+			dbTableRow.appendChild(refreshTablesBtn);
+
+			const tblParamChipsRow = document.createElement('div');
+			tblParamChipsRow.style.cssText = 'display: none; align-items: center; gap: 6px; flex-wrap: wrap; padding-left: 78px;';
+			dbSection.appendChild(tblParamChipsRow);
+
+			const renderTableParamChips = () => {
+				if (tblInput.style.display === 'none') {
+					renderTblInputTokenized();
+				}
+				clearNode(tblParamChipsRow);
+				const isParamSelected = tblSelect.value === '__param__' || /\{[^{}]+\}/.test(tblInput.value);
+				if (!isParamSelected) {
+					tblParamChipsRow.style.display = 'none';
+					return;
+				}
+				tblParamChipsRow.style.display = 'flex';
+				const chipLabel = document.createElement('span');
+				chipLabel.style.cssText = 'font-size: 10.5px; color: #c084fc; opacity: 0.9;';
+				chipLabel.textContent = 'INPUTS Table Variable:';
+				tblParamChipsRow.appendChild(chipLabel);
+
+				const paramTokens: string[] = [];
+				for (const pKey of Object.keys(this._parameterValues || {})) {
+					const trimmed = pKey.trim();
+					if (trimmed && !paramTokens.includes(trimmed)) {
+						paramTokens.push(trimmed);
+					}
+				}
+				if (this._lastCustomModule?.fields) {
+					for (const cf of this._lastCustomModule.fields) {
+						if (cf?.type === 'parameters' && Array.isArray(cf.parameters)) {
+							for (const p of cf.parameters) {
+								const pName = (p.name || '').trim();
+								if (pName && !paramTokens.includes(pName)) {
+									paramTokens.push(pName);
+								}
+							}
+						}
+					}
+				}
+				if (paramTokens.length === 0) {
+					paramTokens.push('table name');
+				}
+
+				paramTokens.forEach(token => {
+					const chip = document.createElement('button');
+					chip.type = 'button';
+					chip.textContent = `+ {${token}}`;
+					chip.title = `Set Target Table variable to {${token}}`;
+					chip.style.cssText = 'padding: 1px 7px; font-size: 10px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 10px; border: 1px solid rgba(168,85,247,0.45); background: rgba(168,85,247,0.14); color: #d8b4fe; cursor: pointer;';
+					chip.onclick = () => {
+						tblInput.value = `{${token}}`;
+						tableName = `{${token}}`;
+						tblSelect.value = '__param__';
+						renderTblInputTokenized(`{${token}}`);
+						persistNow();
+					};
+					tblParamChipsRow.appendChild(chip);
+				});
+			};
+
+			// Step 3: Direct SQLite Operations Bar
+			const dbOpsRow = document.createElement('div');
+			dbOpsRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.06);';
+			dbSection.appendChild(dbOpsRow);
+
+			const dbOpsBtnGroup = document.createElement('div');
+			dbOpsBtnGroup.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+			dbOpsRow.appendChild(dbOpsBtnGroup);
+
+			const saveDbBtn = document.createElement('button');
+			saveDbBtn.type = 'button';
+			saveDbBtn.style.cssText = 'padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(20,184,166,0.22); color: #2dd4bf; border: 1px solid rgba(20,184,166,0.5); cursor: pointer;';
+			saveDbBtn.textContent = 'Save to SQLite';
+			saveDbBtn.title = 'Create table if needed and store current grid rows into SQLite';
+			dbOpsBtnGroup.appendChild(saveDbBtn);
+
+			const updateDbBtn = document.createElement('button');
+			updateDbBtn.type = 'button';
+			updateDbBtn.style.cssText = 'padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(56,189,248,0.18); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45); cursor: pointer;';
+			updateDbBtn.textContent = 'Update in SQLite';
+			updateDbBtn.title = 'Alter/add new columns if needed and upsert/update current rows in SQLite';
+			dbOpsBtnGroup.appendChild(updateDbBtn);
+
+			const loadDbBtn = document.createElement('button');
+			loadDbBtn.type = 'button';
+			loadDbBtn.style.cssText = 'padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(168,85,247,0.16); color: #c084fc; border: 1px solid rgba(168,85,247,0.4); cursor: pointer;';
+			loadDbBtn.textContent = 'Load from SQLite';
+			loadDbBtn.title = 'Load table columns and rows from SQLite into this ticket';
+			dbOpsBtnGroup.appendChild(loadDbBtn);
+
+			const deleteDbBtn = document.createElement('button');
+			deleteDbBtn.type = 'button';
+			deleteDbBtn.style.cssText = 'padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.4); cursor: pointer;';
+			deleteDbBtn.textContent = 'Delete Data in SQLite';
+			deleteDbBtn.title = 'Delete all rows of this table inside the SQLite database';
+			dbOpsBtnGroup.appendChild(deleteDbBtn);
+
+			const dbStatusSpan = document.createElement('span');
+			dbStatusSpan.style.cssText = 'font-size: 10.5px; color: #94a3b8; font-family: var(--vscode-editor-font-family, monospace);';
+			dbStatusSpan.textContent = lastSynced
+				? `Last synced: ${lastSynced}`
+				: (dbPath ? `Bound: ${tableName}` : 'Step 1: Select or create a SQLite file above.');
+			dbOpsRow.appendChild(dbStatusSpan);
+
+			let knownDbTables: string[] = [];
+
+			const computeColumnDiff = (uiCols: Array<{ name: string; dataType?: string; primaryKey?: boolean }>, dbCols: Array<{ name: string; dataType?: string; primaryKey?: boolean }>) => {
+				const uiMap = new Map<string, { name: string; dataType: string; primaryKey: boolean }>();
+				uiCols.forEach(c => {
+					const n = (c.name || '').trim();
+					if (n) {
+						uiMap.set(n.toLowerCase(), { name: n, dataType: normalizeColDataType(c.dataType), primaryKey: Boolean(c.primaryKey) });
+					}
+				});
+				const dbMap = new Map<string, { name: string; dataType: string; primaryKey: boolean }>();
+				dbCols.forEach(c => {
+					const n = (c.name || '').trim();
+					if (n) {
+						dbMap.set(n.toLowerCase(), { name: n, dataType: normalizeColDataType(c.dataType), primaryKey: Boolean(c.primaryKey) });
+					}
+				});
+
+				const added: string[] = [];
+				const removed: string[] = [];
+				const modified: string[] = [];
+
+				uiMap.forEach((uCol, key) => {
+					const dCol = dbMap.get(key);
+					if (!dCol) {
+						added.push(`${uCol.name} (${uCol.dataType}${uCol.primaryKey ? ', PK' : ''})`);
+					} else if (uCol.dataType !== dCol.dataType || uCol.primaryKey !== dCol.primaryKey || uCol.name !== dCol.name) {
+						modified.push(`${uCol.name} (DB: ${dCol.name} ${dCol.dataType}${dCol.primaryKey ? ' PK' : ''} -> UI: ${uCol.name} ${uCol.dataType}${uCol.primaryKey ? ' PK' : ''})`);
+					}
+				});
+				dbMap.forEach((dCol, key) => {
+					if (!uiMap.has(key)) {
+						removed.push(`${dCol.name} (${dCol.dataType}${dCol.primaryKey ? ', PK' : ''})`);
+					}
+				});
+
+				return { added, removed, modified, hasDiff: added.length > 0 || removed.length > 0 || modified.length > 0 };
+			};
+
+			updateSchemaDiffBanner = () => {
+				clearNode(schemaDiffBanner);
+				if (!lastKnownDbColumns) {
+					if (hasLocalColumnEdits) {
+						schemaDiffBanner.style.display = 'flex';
+						const msgSpan = document.createElement('span');
+						msgSpan.textContent = `Unsaved local column edits for '${tblInput.value.trim() || tableName}'. Click "Update Header" to write to SQLite.`;
+						schemaDiffBanner.appendChild(msgSpan);
+					} else {
+						schemaDiffBanner.style.display = 'none';
+					}
+					return;
+				}
+				const diff = computeColumnDiff(columns, lastKnownDbColumns);
+				const exactEqual = areSchemasEqual(columns, lastKnownDbColumns);
+				if (!diff.hasDiff && exactEqual) {
+					schemaDiffBanner.style.display = 'none';
+					return;
+				}
+				schemaDiffBanner.style.display = 'flex';
+				const parts: string[] = [];
+				if (diff.added.length > 0) parts.push(`Added (+): ${diff.added.join(', ')}`);
+				if (diff.removed.length > 0) parts.push(`Removed (-): ${diff.removed.join(', ')}`);
+				if (diff.modified.length > 0) parts.push(`Modified (~): ${diff.modified.join(', ')}`);
+				if (parts.length === 0 && !exactEqual) {
+					parts.push('Column order or attribute changed');
+				}
+				const msgSpan = document.createElement('span');
+				msgSpan.textContent = `Unsaved column changes vs SQLite table '${tblInput.value.trim() || tableName}': ${parts.join(' | ')}. Click "Update Header" to write to DB or "Query Table Columns" to reload from DB.`;
+				schemaDiffBanner.appendChild(msgSpan);
+			};
+
+			const reconcileSchemaChanges = async (
+				tblLabel: string,
+				prevDbCols: any[],
+				localCols: any[],
+				newDbCols: any[],
+				newTableExists: boolean
+			): Promise<{ nextCols: any[]; nextDirty: boolean }> => {
+				if (!newTableExists) {
+					const confirmRes = await this._dialogService.confirm({
+						type: 'warning',
+						message: `Table '${tblLabel}' Was Dropped in SQLite`,
+						detail: `The SQL execution dropped table '${tblLabel}', while you have unsaved local column edits in Table Columns.\n\nWould you like to clear Table Columns to match the dropped table, or keep your local column definitions?`,
+						primaryButton: 'Clear Table Columns',
+						cancelButton: 'Keep Local Edits'
+					});
+					if (confirmRes.confirmed) {
+						return { nextCols: [], nextDirty: false };
+					}
+					return { nextCols: cloneColumnsList(localCols), nextDirty: true };
+				}
+
+				const prevMap = new Map<string, any>();
+				prevDbCols.forEach(c => prevMap.set(c.name.toLowerCase(), c));
+				const localMap = new Map<string, any>();
+				localCols.forEach(c => localMap.set(c.name.toLowerCase(), c));
+				const newDbMap = new Map<string, any>();
+				newDbCols.forEach(c => newDbMap.set(c.name.toLowerCase(), c));
+
+				const localAdded = localCols.filter(c => !prevMap.has(c.name.toLowerCase()));
+				const localRemovedKeys = new Set<string>();
+				prevDbCols.forEach(c => {
+					if (!localMap.has(c.name.toLowerCase())) {
+						localRemovedKeys.add(c.name.toLowerCase());
+					}
+				});
+				const localModifiedMap = new Map<string, any>();
+				localCols.forEach(c => {
+					const p = prevMap.get(c.name.toLowerCase());
+					if (p && !areSchemasEqual([p], [c])) {
+						localModifiedMap.set(c.name.toLowerCase(), c);
+					}
+				});
+
+				let hasConflict = false;
+				for (const la of localAdded) {
+					const dbMatch = newDbMap.get(la.name.toLowerCase());
+					if (dbMatch && !areSchemasEqual([la], [dbMatch])) {
+						hasConflict = true;
+					}
+				}
+				localModifiedMap.forEach((locCol, key) => {
+					const prevCol = prevMap.get(key);
+					const nextDbCol = newDbMap.get(key);
+					if (!nextDbCol || (prevCol && !areSchemasEqual([prevCol], [nextDbCol]))) {
+						hasConflict = true;
+					}
+				});
+
+				const mergedCols: any[] = [];
+				for (const dbCol of newDbCols) {
+					const key = dbCol.name.toLowerCase();
+					const prevCol = prevMap.get(key);
+					if (localRemovedKeys.has(key) && prevCol && areSchemasEqual([prevCol], [dbCol])) {
+						continue;
+					}
+					const locMod = localModifiedMap.get(key);
+					if (locMod && prevCol && areSchemasEqual([prevCol], [dbCol])) {
+						mergedCols.push(cloneColumnDef(locMod, mergedCols.length));
+					} else {
+						mergedCols.push(cloneColumnDef(dbCol, mergedCols.length));
+					}
+				}
+				for (const la of localAdded) {
+					if (!newDbMap.has(la.name.toLowerCase())) {
+						mergedCols.push(cloneColumnDef(la, mergedCols.length));
+					}
+				}
+
+				if (hasConflict) {
+					const confirmRes = await this._dialogService.confirm({
+						type: 'warning',
+						message: `Database Schema Changed for '${tblLabel}'`,
+						detail: `The SQL execution modified the schema of '${tblLabel}' in SQLite, which conflicts with your unsaved local edits in Table Columns.\n\nChoose "Keep Reconciled Local Edits" to merge your local changes with the new DB schema, or "Use Database Schema" to adopt the exact SQLite schema.`,
+						primaryButton: 'Keep Reconciled Local Edits',
+						cancelButton: 'Use Database Schema'
+					});
+					if (!confirmRes.confirmed) {
+						return { nextCols: cloneColumnsList(newDbCols), nextDirty: false };
+					}
+				} else {
+					this._notificationService.info(`Synchronized SQLite schema changes for '${tblLabel}' while preserving your unsaved local column edits.`);
+				}
+
+				const stillDirty = !areSchemasEqual(mergedCols, newDbCols);
+				return { nextCols: mergedCols, nextDirty: stillDirty };
+			};
+
+			const isParamTableExpr = (val: string): boolean => /\{[^{}]+\}/.test(val.trim());
+
+			const resolveTargetTableName = (rawInput?: string): { rawExpr: string; resolvedTable: string; isParamExpr: boolean } => {
+				const rawExpr = (rawInput ?? tblInput.value).trim();
+				if (!rawExpr) {
+					return { rawExpr: '', resolvedTable: '', isParamExpr: false };
+				}
+				const isParam = isParamTableExpr(rawExpr) || tblSelect.value === '__param__';
+				if (!isParam) {
+					const cleaned = rawExpr.replace(/[^a-zA-Z0-9_]/g, '_');
+					return { rawExpr: cleaned, resolvedTable: cleaned, isParamExpr: false };
+				}
+				const normalizedExpr = isParamTableExpr(rawExpr) ? rawExpr : `{${rawExpr}}`;
+				const interpolated = this._interpolateParameters(normalizedExpr).trim();
+				const candidate = (!interpolated || isParamTableExpr(interpolated))
+					? normalizedExpr.replace(/\{|\}/g, '').trim()
+					: interpolated;
+				const resolvedTable = candidate.replace(/[^a-zA-Z0-9_]/g, '_').replace(/^_+|_+$/g, '') || 'param_table';
+				return { rawExpr: normalizedExpr, resolvedTable, isParamExpr: true };
+			};
+
+			const populateTableSelectDropdown = (tables: string[], currentTarget?: string) => {
+				knownDbTables = tables;
+				clearNode(tblSelect);
+				const target = (currentTarget ?? tblInput.value.trim()).trim();
+				const targetIsParam = isParamTableExpr(target);
+
+				if (tables.length > 0) {
+					tables.forEach(tName => {
+						const opt = document.createElement('option');
+						opt.value = tName;
+						opt.textContent = `Existing Table: ${tName}`;
+						if (!targetIsParam && target && tName.toLowerCase() === target.toLowerCase()) {
+							opt.selected = true;
+						}
+						tblSelect.appendChild(opt);
+					});
+				}
+				const newOpt = document.createElement('option');
+				newOpt.value = '__new__';
+				newOpt.textContent = tables.length > 0 ? '+ Create New Table (Enter Name)...' : '+ Create New Table (No tables in DB yet)';
+				tblSelect.appendChild(newOpt);
+
+				const paramOpt = document.createElement('option');
+				paramOpt.value = '__param__';
+				paramOpt.textContent = 'Use or create by INPUTS parameter';
+				tblSelect.appendChild(paramOpt);
+
+				const matchedExisting = !targetIsParam ? tables.find(t => target && t.toLowerCase() === target.toLowerCase()) : undefined;
+				if (targetIsParam) {
+					paramOpt.selected = true;
+					tblInput.placeholder = 'Enter INPUTS table variable, e.g. {table name}';
+				} else if (!matchedExisting) {
+					newOpt.selected = true;
+					tblInput.placeholder = 'Enter new or target table name (e.g. Job_Data)';
+				} else {
+					tblInput.value = matchedExisting;
+					tblInput.placeholder = 'Enter new or target table name (e.g. Job_Data)';
+				}
+				renderTableParamChips();
+			};
+
+			const syncTableSchemaFromSqlite = async (opts?: { isInitialLoad?: boolean; loadFirstPageRows?: boolean }) => {
+				const curDbPath = pathInput.value.trim();
+				if (!curDbPath || dbEngine === 'none') {
+					return;
+				}
+				const { rawExpr, resolvedTable, isParamExpr } = resolveTargetTableName();
+				if (!resolvedTable) {
+					return;
+				}
+				const runtime = this._instantiationService.invokeFunction(accessor => {
+					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+				});
+				if (!runtime) {
+					return;
+				}
+				const reqSeq = ++schemaLoadSeq;
+				const wsRoot = this._entityUri ? await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri) : undefined;
+				const inspectRes = await runtime.executeSqliteTableOperation({
+					workspaceUri: wsRoot || this._entityUri,
+					ticketUri: this._entityUri,
+					dbPath: curDbPath,
+					tableName: resolvedTable,
+					action: 'inspect_schema'
+				});
+				if (reqSeq !== schemaLoadSeq) {
+					return;
+				}
+				if (inspectRes.success && Array.isArray(inspectRes.tables)) {
+					populateTableSelectDropdown(inspectRes.tables, rawExpr);
+				}
+				if (inspectRes.success && inspectRes.tableExists && Array.isArray(inspectRes.columns)) {
+					const actualCols = cloneColumnsList(inspectRes.columns);
+					lastKnownTableExists = true;
+					lastKnownDbColumns = cloneColumnsList(actualCols);
+					if (typeof inspectRes.rowCount === 'number') {
+						totalDbRowCount = inspectRes.rowCount;
+					}
+					const hadDiffFromSaved = !areSchemasEqual(columns, actualCols);
+					if (!hasLocalColumnEdits) {
+						columns = cloneColumnsList(actualCols);
+						hasLocalColumnEdits = false;
+					}
+					if (opts?.loadFirstPageRows) {
+						const loadRes = await runtime.executeSqliteTableOperation({
+							workspaceUri: wsRoot || this._entityUri,
+							ticketUri: this._entityUri,
+							dbPath: curDbPath,
+							tableName: resolvedTable,
+							action: 'load',
+							limit: pageSize,
+							offset: 0
+						});
+						if (reqSeq !== schemaLoadSeq) {
+							return;
+						}
+						if (loadRes.success && Array.isArray(loadRes.rows)) {
+							rows = loadRes.rows;
+							currentPage = 1;
+						}
+					}
+					lastConfirmedDbPath = curDbPath;
+					lastConfirmedTableExpr = rawExpr;
+					const prevContainerScroll = this._container ? this._container.scrollTop : 0;
+					renderCols();
+					renderGrid();
+					updateSchemaDiffBanner();
+					if (opts?.isInitialLoad && !this._userHasScrolledSinceRender && this._currentScrollKey) {
+						this._applySavedScrollPosition(this._currentScrollKey);
+					} else if (this._container && prevContainerScroll > 0) {
+						this._container.scrollTop = prevContainerScroll;
+					}
+					if (!opts?.isInitialLoad) {
+						persistNow();
+					}
+					const labelDesc = isParamExpr ? `${rawExpr} -> '${inspectRes.tableName || resolvedTable}'` : `'${inspectRes.tableName || resolvedTable}'`;
+					dbStatusSpan.textContent = `Loaded schema from SQLite table ${labelDesc} (${actualCols.length} col(s), ${inspectRes.rowCount ?? 0} row(s)).`;
+					dbStatusSpan.style.color = '#34d399';
+				} else if (inspectRes.success && !inspectRes.tableExists) {
+					lastKnownTableExists = false;
+					lastKnownDbColumns = [];
+					lastConfirmedDbPath = curDbPath;
+					lastConfirmedTableExpr = rawExpr;
+					updateSchemaDiffBanner();
+					const tblCount = Array.isArray(inspectRes.tables) ? inspectRes.tables.length : 0;
+					dbStatusSpan.textContent = tblCount > 0
+						? `Found ${tblCount} table(s) in DB. Table '${resolvedTable}' not created yet.`
+						: `Database has 0 tables. Enter a new table name and click "Confirm Table".`;
+					dbStatusSpan.style.color = '#5eead4';
+				}
+			};
+
+			tblSelect.onchange = async () => {
+				if (tblSelect.value === '__param__') {
+					tblInput.placeholder = 'Enter INPUTS table variable, e.g. {table name}';
+					const currentVal = tblInput.value.trim();
+					if (!currentVal || knownDbTables.some(t => t.toLowerCase() === currentVal.toLowerCase())) {
+						let defaultParamToken = 'table name';
+						const paramKeys = Object.keys(this._parameterValues || {});
+						if (paramKeys.length > 0 && paramKeys[0].trim()) {
+							defaultParamToken = paramKeys[0].trim();
+						} else if (this._lastCustomModule?.fields) {
+							for (const cf of this._lastCustomModule.fields) {
+								if (cf?.type === 'parameters' && Array.isArray(cf.parameters) && cf.parameters.length > 0) {
+									const firstParam = (cf.parameters[0].name || '').trim();
+									if (firstParam) {
+										defaultParamToken = firstParam;
+										break;
+									}
+								}
+							}
+						}
+						tblInput.value = `{${defaultParamToken}}`;
+					} else if (!isParamTableExpr(currentVal)) {
+						tblInput.value = `{${currentVal}}`;
+					}
+					tableName = tblInput.value.trim();
+					renderTblInputTokenized();
+					renderTableParamChips();
+					persistNow();
+				} else if (tblSelect.value !== '__new__') {
+					const nextTableVal = tblSelect.value;
+					if (nextTableVal.toLowerCase() !== (lastConfirmedTableExpr || '').toLowerCase() && isSchemaDirty()) {
+						const confirmSwitch = await this._dialogService.confirm({
+							type: 'warning',
+							message: 'Discard Unsaved Column Edits?',
+							detail: `You have unsaved local modifications in Table Columns. Switching to table '${nextTableVal}' will load its schema from SQLite and discard your unsaved local changes.`,
+							primaryButton: 'Switch Table & Load Schema',
+							cancelButton: 'Cancel'
+						});
+						if (!confirmSwitch.confirmed) {
+							populateTableSelectDropdown(knownDbTables, lastConfirmedTableExpr);
+							return;
+						}
+					}
+					hasLocalColumnEdits = false;
+					tblInput.placeholder = 'Enter new or target table name (e.g. Job_Data)';
+					tblInput.value = nextTableVal;
+					tableName = nextTableVal;
+					renderTblInputTokenized();
+					renderTableParamChips();
+					persistNow();
+					await syncTableSchemaFromSqlite({ isInitialLoad: false, loadFirstPageRows: true });
+				} else {
+					tblInput.placeholder = 'Enter new or target table name (e.g. Job_Data)';
+					if (isParamTableExpr(tblInput.value)) {
+						tblInput.value = tblInput.value.replace(/\{|\}/g, '').trim().replace(/[^a-zA-Z0-9_]/g, '_');
+						tableName = tblInput.value;
+					}
+					renderTblInputTokenized();
+					renderTableParamChips();
+					persistNow();
+					switchToTblInputEdit(true);
+				}
+			};
+
+			tblInput.oninput = () => {
+				const rawVal = tblInput.value.trim();
+				if (tblSelect.value === '__param__' || isParamTableExpr(rawVal)) {
+					tableName = rawVal;
+					tblSelect.value = '__param__';
+					tblInput.placeholder = 'Enter INPUTS table variable, e.g. {table name}';
+				} else {
+					const cleaned = rawVal.replace(/[^a-zA-Z0-9_]/g, '_');
+					tableName = cleaned;
+					const matched = knownDbTables.find(t => t.toLowerCase() === cleaned.toLowerCase());
+					tblSelect.value = matched ? matched : '__new__';
+				}
+				renderTableParamChips();
+				persistNow();
+			};
+
+			const refreshDbTablesList = async (autoSelectFirstIfEmpty: boolean = false) => {
+				const curDbPath = pathInput.value.trim();
+				if (!curDbPath) {
+					populateTableSelectDropdown([], tblInput.value.trim());
+					return;
+				}
+				const runtime = this._instantiationService.invokeFunction(accessor => {
+					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+				});
+				if (!runtime) return;
+				const wsRoot = this._entityUri ? await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri) : undefined;
+				const { resolvedTable } = resolveTargetTableName();
+				const res = await runtime.executeSqliteTableOperation({
+					workspaceUri: wsRoot || this._entityUri,
+					ticketUri: this._entityUri,
+					dbPath: curDbPath,
+					tableName: resolvedTable || 'ticket_table',
+					action: 'list_tables'
+				});
+				if (res.success && Array.isArray(res.tables)) {
+					if (autoSelectFirstIfEmpty && !tblInput.value.trim() && res.tables.length > 0) {
+						tblInput.value = res.tables[0];
+						tableName = res.tables[0];
+					}
+					populateTableSelectDropdown(res.tables, tblInput.value.trim());
+					dbStatusSpan.textContent = res.tables.length > 0
+						? `Found ${res.tables.length} table(s) in DB. Select or enter table name and click "Confirm Table".`
+						: `Database has 0 tables. Enter a new table name and click "Confirm Table".`;
+					dbStatusSpan.style.color = '#5eead4';
+				} else {
+					populateTableSelectDropdown([], tblInput.value.trim());
+				}
+			};
+
+			populateTableSelectDropdown([], tableName || '');
+			if (dbPath) {
+				syncTableSchemaFromSqlite({ isInitialLoad: true }).catch(() => {});
+			}
+
+			refreshTablesBtn.onclick = () => {
+				refreshDbTablesList(false);
+			};
+
+			pathInput.onblur = async () => {
+				const nextDbPath = pathInput.value.trim();
+				if (!nextDbPath) {
+					return;
+				}
+				if (nextDbPath !== lastConfirmedDbPath && isSchemaDirty()) {
+					const confirmDbSwitch = await this._dialogService.confirm({
+						type: 'warning',
+						message: 'Discard Unsaved Column Edits?',
+						detail: `You have unsaved local modifications in Table Columns. Switching the SQLite database to '${nextDbPath}' will load the schema from the selected database and discard your unsaved local changes.`,
+						primaryButton: 'Switch Database & Load Schema',
+						cancelButton: 'Cancel'
+					});
+					if (!confirmDbSwitch.confirmed) {
+						pathInput.value = lastConfirmedDbPath;
+						dbPath = lastConfirmedDbPath;
+						persistNow();
+						return;
+					}
+				}
+				if (nextDbPath !== lastConfirmedDbPath) {
+					hasLocalColumnEdits = false;
+				}
+				await refreshDbTablesList(true);
+				await syncTableSchemaFromSqlite({ isInitialLoad: false, loadFirstPageRows: false });
+			};
+
+			confirmTableBtn.onclick = async () => {
+				const curDbPath = pathInput.value.trim();
+				if (!curDbPath) {
+					this._notificationService.warn('Please specify, select, or create a SQLite database file first.');
+					return;
+				}
+				const rawSelection = (tblSelect.value !== '__new__' && tblSelect.value !== '__param__')
+					? tblSelect.value
+					: tblInput.value.trim();
+				const { rawExpr, resolvedTable, isParamExpr } = resolveTargetTableName(rawSelection);
+				if (!resolvedTable) {
+					this._notificationService.warn('Please select an existing table, enter a new table name, or enter an INPUTS variable (e.g. {table name}) before confirming.');
+					tblInput.focus();
+					return;
+				}
+
+				const runtime = this._instantiationService.invokeFunction(accessor => {
+					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+				});
+				if (!runtime) return;
+				const reqSeq = ++schemaLoadSeq;
+				const wsRoot = this._entityUri ? await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri) : undefined;
+
+				const inspectRes = await runtime.executeSqliteTableOperation({
+					workspaceUri: wsRoot || this._entityUri,
+					ticketUri: this._entityUri,
+					dbPath: curDbPath,
+					tableName: resolvedTable,
+					action: 'inspect_schema'
+				});
+				if (reqSeq !== schemaLoadSeq) {
+					return;
+				}
+
+				if (inspectRes.success && inspectRes.tableExists && isSchemaDirty()) {
+					const confirmOverwrite = await this._dialogService.confirm({
+						type: 'warning',
+						message: `Load Columns from Existing Table '${resolvedTable}'?`,
+						detail: `You have unsaved local modifications in Table Columns. Confirming existing table '${resolvedTable}' will load its actual schema from SQLite and replace your unsaved local column edits.`,
+						primaryButton: 'Load Table Schema from SQLite',
+						cancelButton: 'Cancel'
+					});
+					if (!confirmOverwrite.confirmed) {
+						return;
+					}
+				}
+
+				dbPath = curDbPath;
+				tableName = rawExpr;
+				tblInput.value = rawExpr;
+				lastConfirmedDbPath = curDbPath;
+				lastConfirmedTableExpr = rawExpr;
+				persistNow();
+
+				if (inspectRes.success && Array.isArray(inspectRes.tables)) {
+					populateTableSelectDropdown(inspectRes.tables, rawExpr);
+				}
+
+				if (inspectRes.success && inspectRes.tableExists) {
+					const actualCols = cloneColumnsList(inspectRes.columns);
+					lastKnownTableExists = true;
+					lastKnownDbColumns = cloneColumnsList(actualCols);
+					columns = cloneColumnsList(actualCols);
+					hasLocalColumnEdits = false;
+					await runSqliteAction('load', 1, pageSize, true);
+					updateSchemaDiffBanner();
+					const labelDesc = isParamExpr ? `${rawExpr} -> '${resolvedTable}'` : `'${resolvedTable}'`;
+					dbStatusSpan.textContent = `Confirmed existing table ${labelDesc} (${actualCols.length} cols, ${inspectRes.rowCount ?? 0} rows) as active query scope.`;
+					dbStatusSpan.style.color = '#34d399';
+					this._notificationService.info(`Selected existing table ${labelDesc} (${actualCols.length} columns, ${inspectRes.rowCount ?? 0} rows).`);
+				} else if (isParamExpr) {
+					const createRes = await runtime.executeSqliteTableOperation({
+						workspaceUri: wsRoot || this._entityUri,
+						ticketUri: this._entityUri,
+						dbPath: curDbPath,
+						tableName: resolvedTable,
+						action: 'update_header',
+						columns: columns as any,
+						rows
+					});
+					if (reqSeq !== schemaLoadSeq) {
+						return;
+					}
+					if (createRes.success) {
+						if (Array.isArray(createRes.tables)) {
+							populateTableSelectDropdown(createRes.tables, rawExpr);
+						}
+						const createdCols = cloneColumnsList(createRes.columns || columns);
+						lastKnownTableExists = true;
+						lastKnownDbColumns = cloneColumnsList(createdCols);
+						columns = cloneColumnsList(createdCols);
+						hasLocalColumnEdits = false;
+						renderCols();
+						renderGrid();
+						updateSchemaDiffBanner();
+						persistNow();
+						dbStatusSpan.textContent = `Bound INPUTS parameter ${rawExpr} -> created/verified table '${resolvedTable}' in SQLite.`;
+						dbStatusSpan.style.color = '#34d399';
+						this._notificationService.info(`Confirmed INPUTS parameter ${rawExpr}: table '${resolvedTable}' is ready in SQLite.`);
+					} else {
+						persistNow();
+						dbStatusSpan.textContent = `Bound INPUTS parameter ${rawExpr} (resolved: '${resolvedTable}').`;
+						dbStatusSpan.style.color = '#fbbf24';
+					}
+				} else {
+					lastKnownTableExists = false;
+					lastKnownDbColumns = [];
+					updateSchemaDiffBanner();
+					persistNow();
+					dbStatusSpan.textContent = `Confirmed new table '${resolvedTable}' (not created in DB yet — create via SQL or click "Update Header" below).`;
+					dbStatusSpan.style.color = '#fbbf24';
+					this._notificationService.info(`Confirmed new table name '${resolvedTable}'. You can now create it via SQL or by clicking "Update Header" in the Table Columns section.`);
+				}
+			};
+
+			const runSqliteAction = async (
+				action: 'save' | 'update' | 'load' | 'load_schema' | 'delete_data',
+				pageOverride?: number,
+				pageSizeOverride?: number,
+				skipDirtyConfirm: boolean = false,
+				preserveDirtyColumnsOnPageLoad: boolean = false
+			) => {
+				const runtime = this._instantiationService.invokeFunction(accessor => {
+					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+				});
+				if (!runtime) {
+					this._notificationService.warn('Ticket workflow runtime service is unavailable.');
+					return;
+				}
+				const curDbPath = pathInput.value.trim();
+				const { rawExpr, resolvedTable: curTableName } = resolveTargetTableName();
+				if (!curDbPath) {
+					this._notificationService.warn('Please select or create a SQLite database file first.');
+					return;
+				}
+				if (!curTableName) {
+					this._notificationService.warn('Please select or enter a Target Table name and click "Confirm Table" first.');
+					tblInput.focus();
+					return;
+				}
+
+				if ((action === 'load_schema' || (action === 'load' && !preserveDirtyColumnsOnPageLoad)) && !skipDirtyConfirm && isSchemaDirty()) {
+					const confirmDiscard = await this._dialogService.confirm({
+						type: 'warning',
+						message: `Overwrite Unsaved Column Edits for '${curTableName}'?`,
+						detail: `You have unsaved local modifications in Table Columns. Reloading from SQLite will overwrite Table Columns with the actual database schema of '${curTableName}'.`,
+						primaryButton: 'Reload from SQLite',
+						cancelButton: 'Cancel'
+					});
+					if (!confirmDiscard.confirmed) {
+						return;
+					}
+				}
+
+				const reqSeq = ++schemaLoadSeq;
+				dbPath = curDbPath;
+				tableName = rawExpr;
+				const reqPage = pageOverride && pageOverride > 0 ? pageOverride : currentPage;
+				const reqSize = pageSizeOverride && pageSizeOverride > 0 ? pageSizeOverride : pageSize;
+				dbStatusSpan.textContent = `Running '${action}' on ${curTableName}...`;
+				dbStatusSpan.style.color = '#38bdf8';
+
+				const wsRoot = this._entityUri ? await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri) : undefined;
+
+				if (action === 'load_schema') {
+					const prevUiCols = cloneColumnsList(columns);
+					const res = await runtime.executeSqliteTableOperation({
+						workspaceUri: wsRoot || this._entityUri,
+						ticketUri: this._entityUri,
+						dbPath: curDbPath,
+						tableName: curTableName,
+						action: 'load_schema',
+						columns: columns as any
+					});
+					if (reqSeq !== schemaLoadSeq) {
+						return;
+					}
+					if (res.success) {
+						if (typeof res.rowCount === 'number') {
+							totalDbRowCount = res.rowCount;
+						}
+						const loadedCols = cloneColumnsList(res.columns);
+						lastKnownTableExists = true;
+						lastKnownDbColumns = cloneColumnsList(loadedCols);
+						columns = cloneColumnsList(loadedCols);
+						hasLocalColumnEdits = false;
+						const diff = computeColumnDiff(prevUiCols, loadedCols);
+						if (diff.hasDiff || !areSchemasEqual(prevUiCols, loadedCols)) {
+							const diffNotes: string[] = [];
+							if (diff.removed.length > 0) diffNotes.push(`In DB (+loaded): ${diff.removed.join(', ')}`);
+							if (diff.added.length > 0) diffNotes.push(`Local only (-replaced): ${diff.added.join(', ')}`);
+							if (diff.modified.length > 0) diffNotes.push(`Type/PK changes: ${diff.modified.join(', ')}`);
+							this._notificationService.info(`Synced ${loadedCols.length} column(s) from '${curTableName}'${diffNotes.length > 0 ? ` — ${diffNotes.join(' | ')}` : ''}.`);
+						} else {
+							this._notificationService.info(res.message || `Queried ${loadedCols.length} column(s) from '${curTableName}' (matches current header).`);
+						}
+						renderCols();
+						renderGrid();
+						updateSchemaDiffBanner();
+						lastSynced = new Date().toLocaleTimeString();
+						persistNow();
+						dbStatusSpan.textContent = res.message || `Loaded schema for '${curTableName}'.`;
+						dbStatusSpan.style.color = '#34d399';
+					} else {
+						if (res.tableExists === false) {
+							lastKnownTableExists = false;
+							lastKnownDbColumns = [];
+							updateSchemaDiffBanner();
+						}
+						dbStatusSpan.textContent = `Error: ${res.error || 'Operation failed'}`;
+						dbStatusSpan.style.color = '#f87171';
+						this._notificationService.error(`SQLite Error: ${res.error || 'Operation failed'}`);
+					}
+					return;
+				}
+
+				const res = await runtime.executeSqliteTableOperation({
+					workspaceUri: wsRoot || this._entityUri,
+					ticketUri: this._entityUri,
+					dbPath: curDbPath,
+					tableName: curTableName,
+					action,
+					columns: columns as any,
+					rows,
+					limit: reqSize,
+					offset: (reqPage - 1) * reqSize
+				});
+				if (reqSeq !== schemaLoadSeq) {
+					return;
+				}
+
+				if (res.success) {
+					if (typeof res.rowCount === 'number') {
+						totalDbRowCount = res.rowCount;
+					}
+					if (Array.isArray(res.tables)) {
+						populateTableSelectDropdown(res.tables, rawExpr);
+					}
+					if (action === 'load') {
+						currentPage = reqPage;
+						pageSize = reqSize;
+						if (Array.isArray(res.columns) && res.columns.length > 0) {
+							const loadedCols = cloneColumnsList(res.columns);
+							lastKnownTableExists = true;
+							lastKnownDbColumns = cloneColumnsList(loadedCols);
+							if (!preserveDirtyColumnsOnPageLoad || !isSchemaDirty()) {
+								columns = cloneColumnsList(loadedCols);
+								hasLocalColumnEdits = false;
+							}
+						}
+						if (Array.isArray(res.rows)) {
+							rows = res.rows;
+						}
+						renderCols();
+						renderGrid();
+						updateSchemaDiffBanner();
+					} else if (action === 'delete_data') {
+						totalDbRowCount = 0;
+						currentPage = 1;
+						rows = [];
+						renderGrid();
+					} else {
+						if (Array.isArray(res.columns) && res.columns.length > 0) {
+							const syncedCols = cloneColumnsList(res.columns);
+							lastKnownTableExists = true;
+							lastKnownDbColumns = cloneColumnsList(syncedCols);
+							columns = cloneColumnsList(syncedCols);
+							hasLocalColumnEdits = false;
+						}
+						if (Array.isArray(res.rows)) {
+							rows = res.rows;
+						}
+						renderCols();
+						renderGrid();
+						updateSchemaDiffBanner();
+					}
+					lastSynced = new Date().toLocaleTimeString();
+					persistNow();
+					dbStatusSpan.textContent = res.message || `SQLite ${action} completed (${lastSynced}).`;
+					dbStatusSpan.style.color = '#34d399';
+					this._notificationService.info(res.message || `SQLite ${action} completed.`);
+				} else {
+					dbStatusSpan.textContent = `Error: ${res.error || 'Operation failed'}`;
+					dbStatusSpan.style.color = '#f87171';
+					this._notificationService.error(`SQLite Error: ${res.error || 'Operation failed'}`);
+				}
+			};
+
+			queryColsBtn.onclick = () => runSqliteAction('load_schema');
+
+			updateHeaderBtn.onclick = async () => {
+				const curDbPath = pathInput.value.trim();
+				const { rawExpr, resolvedTable: curTableName } = resolveTargetTableName();
+				if (!curDbPath) {
+					this._notificationService.warn('Please select or create a SQLite database file first.');
+					return;
+				}
+				if (!curTableName) {
+					this._notificationService.warn('Please select or enter a Target Table name and click "Confirm Table" first.');
+					tblInput.focus();
+					return;
+				}
+				tableName = rawExpr;
+				const runtime = this._instantiationService.invokeFunction(accessor => {
+					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+				});
+				if (!runtime) return;
+				const wsRoot = this._entityUri ? await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri) : undefined;
+
+				const inspectRes = await runtime.executeSqliteTableOperation({
+					workspaceUri: wsRoot || this._entityUri,
+					ticketUri: this._entityUri,
+					dbPath: curDbPath,
+					tableName: curTableName,
+					action: 'inspect_schema'
+				});
+
+				if (!inspectRes.success) {
+					this._notificationService.error(`Failed to inspect SQLite database: ${inspectRes.error || 'Unknown error'}`);
+					return;
+				}
+
+				if (inspectRes.tableExists && Array.isArray(inspectRes.columns)) {
+					const diff = computeColumnDiff(columns, inspectRes.columns);
+					const exactMatch = areSchemasEqual(columns, inspectRes.columns);
+					if (!diff.hasDiff && exactMatch) {
+						lastKnownTableExists = true;
+						lastKnownDbColumns = cloneColumnsList(inspectRes.columns);
+						hasLocalColumnEdits = false;
+						updateSchemaDiffBanner();
+						this._notificationService.info(`Table header for '${curTableName}' is already in sync with the SQLite database (${columns.length} columns).`);
+						return;
+					}
+
+					const detailLines: string[] = [
+						`The columns defined in Table Header Columns differ from existing SQLite table '${curTableName}':`,
+						''
+					];
+					if (diff.added.length > 0) {
+						detailLines.push(`• Columns to ADD (+): ${diff.added.join(', ')}`);
+					}
+					if (diff.removed.length > 0) {
+						detailLines.push(`• Columns to REMOVE (-): ${diff.removed.join(', ')}`);
+					}
+					if (diff.modified.length > 0) {
+						detailLines.push(`• Columns with Type / PK changes (~): ${diff.modified.join(', ')}`);
+					}
+					if (!diff.hasDiff && !exactMatch) {
+						detailLines.push(`• Column order or default/nullable attributes modified.`);
+					}
+					detailLines.push('', 'Existing rows for matching columns will be preserved. Apply these header changes to the SQLite table?');
+
+					const confirmRes = await this._dialogService.confirm({
+						type: 'warning',
+						message: `Update Table Header for '${curTableName}'?`,
+						detail: detailLines.join('\n'),
+						primaryButton: 'Update Table Header',
+						cancelButton: 'Cancel'
+					});
+					if (!confirmRes.confirmed) {
+						return;
+					}
+				}
+
+				const reqSeq = ++schemaLoadSeq;
+				const updateRes = await runtime.executeSqliteTableOperation({
+					workspaceUri: wsRoot || this._entityUri,
+					ticketUri: this._entityUri,
+					dbPath: curDbPath,
+					tableName: curTableName,
+					action: 'update_header',
+					columns: columns as any,
+					rows,
+					limit: pageSize,
+					offset: (currentPage - 1) * pageSize
+				});
+				if (reqSeq !== schemaLoadSeq) {
+					return;
+				}
+
+				if (updateRes.success) {
+					if (Array.isArray(updateRes.columns) && updateRes.columns.length > 0) {
+						const updatedCols = cloneColumnsList(updateRes.columns);
+						columns = cloneColumnsList(updatedCols);
+						lastKnownTableExists = true;
+						lastKnownDbColumns = cloneColumnsList(updatedCols);
+						hasLocalColumnEdits = false;
+					}
+					if (Array.isArray(updateRes.tables)) {
+						populateTableSelectDropdown(updateRes.tables, rawExpr);
+					}
+					renderCols();
+					renderGrid();
+					updateSchemaDiffBanner();
+					lastSynced = new Date().toLocaleTimeString();
+					persistNow();
+					dbStatusSpan.textContent = updateRes.message || `Updated header for '${curTableName}'.`;
+					dbStatusSpan.style.color = '#34d399';
+					this._notificationService.info(updateRes.message || `Updated table header for '${curTableName}'.`);
+				} else {
+					dbStatusSpan.textContent = `Error: ${updateRes.error || 'Header update failed'}`;
+					dbStatusSpan.style.color = '#f87171';
+					this._notificationService.error(`SQLite Error: ${updateRes.error || 'Header update failed'}`);
+				}
+			};
+
+			pageSizeSelect.onchange = () => {
+				const nextSize = parseInt(pageSizeSelect.value, 10);
+				if (!isNaN(nextSize) && nextSize > 0) {
+					pageSize = nextSize;
+					currentPage = 1;
+					persistNow();
+					if (pathInput.value.trim() && tblInput.value.trim()) {
+						runSqliteAction('load', 1, pageSize, true, true);
+					} else {
+						renderGrid();
+					}
+				}
+			};
+
+			queryPageBtn.onclick = () => {
+				if (pathInput.value.trim() && tblInput.value.trim()) {
+					runSqliteAction('load', currentPage, pageSize, true, true);
+				} else {
+					renderGrid();
+					this._notificationService.info(`Showing page ${currentPage} (${pageSize} rows/page) of local table data.`);
+				}
+			};
+
+			prevPageBtn.onclick = () => {
+				if (currentPage > 1) {
+					currentPage--;
+					if (pathInput.value.trim() && tblInput.value.trim() && rows.length <= pageSize) {
+						runSqliteAction('load', currentPage, pageSize, true, true);
+					} else {
+						renderGrid();
+					}
+				}
+			};
+
+			nextPageBtn.onclick = () => {
+				const effectiveTotal = totalDbRowCount !== undefined ? Math.max(totalDbRowCount, rows.length) : rows.length;
+				const totalPages = Math.max(1, Math.ceil(effectiveTotal / pageSize));
+				if (currentPage < totalPages) {
+					currentPage++;
+					if (pathInput.value.trim() && tblInput.value.trim() && rows.length <= pageSize) {
+						runSqliteAction('load', currentPage, pageSize, true, true);
+					} else {
+						renderGrid();
+					}
+				}
+			};
+
+			browseDbBtn.onclick = async () => {
+				const defaultUri = this._entityUri || URI.file(this._environmentService.userHome.fsPath);
+				const uris = await this._fileDialogService.showOpenDialog({
+					canSelectFiles: true,
+					canSelectFolders: false,
+					canSelectMany: false,
+					defaultUri,
+					title: 'Select SQLite Database File',
+					filters: [{ name: 'SQLite Database', extensions: ['sqlite', 'db', 'sqlite3'] }, { name: 'All Files', extensions: ['*'] }]
+				});
+				if (uris && uris.length > 0) {
+					const chosen = uris[0].fsPath;
+					if (chosen !== lastConfirmedDbPath && isSchemaDirty()) {
+						const confirmSwitch = await this._dialogService.confirm({
+							type: 'warning',
+							message: 'Discard Unsaved Column Edits?',
+							detail: `You have unsaved local modifications in Table Columns. Selecting database '${chosen}' will load the schema from the selected database and discard your unsaved local changes.`,
+							primaryButton: 'Select Database & Load Schema',
+							cancelButton: 'Cancel'
+						});
+						if (!confirmSwitch.confirmed) {
+							return;
+						}
+					}
+					hasLocalColumnEdits = false;
+					dbPath = chosen;
+					pathInput.value = dbPath;
+					lastConfirmedDbPath = dbPath;
+					persistNow();
+					await refreshDbTablesList(true);
+					await syncTableSchemaFromSqlite({ isInitialLoad: false, loadFirstPageRows: true });
+				}
+			};
+
+			newDbBtn.onclick = async () => {
+				const baseUri = this._entityUri || URI.file(this._environmentService.userHome.fsPath);
+				const typedPath = pathInput.value.trim();
+				let suggestedName = typedPath ? (typedPath.split(/[/\\]/).pop() || '') : '';
+				if (!suggestedName) {
+					suggestedName = 'new_database.sqlite';
+				} else if (!/\.(sqlite|db|sqlite3)$/i.test(suggestedName)) {
+					suggestedName = `${suggestedName}.sqlite`;
+				}
+				const saveUri = await this._fileDialogService.showSaveDialog({
+					defaultUri: URI.joinPath(baseUri, suggestedName),
+					title: 'Create New SQLite Database File (Specify Filename)',
+					filters: [{ name: 'SQLite Database', extensions: ['sqlite', 'db', 'sqlite3'] }]
+				});
+				if (saveUri) {
+					dbPath = saveUri.fsPath;
+					pathInput.value = dbPath;
+					persistNow();
+
+					const runtime = this._instantiationService.invokeFunction(accessor => {
+						try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+					});
+					if (runtime) {
+						const wsRoot = this._entityUri ? await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri) : undefined;
+						const initRes = await runtime.executeSqliteTableOperation({
+							workspaceUri: wsRoot || this._entityUri,
+							ticketUri: this._entityUri,
+							dbPath,
+							tableName: tblInput.value.trim() || 'ticket_table',
+							action: 'init_db'
+						});
+						if (initRes.success) {
+							populateTableSelectDropdown(initRes.tables || [], tblInput.value.trim());
+							dbStatusSpan.textContent = `Created SQLite file '${dbPath.split(/[/\\]/).pop()}'. Now enter/select a Target Table name and click "Confirm Table".`;
+							dbStatusSpan.style.color = '#34d399';
+							this._notificationService.info(`Created empty SQLite database '${dbPath.split(/[/\\]/).pop()}'. Please specify a Target Table name and click "Confirm Table".`);
+						}
+					}
+				}
+			};
+
+			saveDbBtn.onclick = () => runSqliteAction('save');
+			updateDbBtn.onclick = () => runSqliteAction('update');
+			loadDbBtn.onclick = () => runSqliteAction('load', currentPage, pageSize);
+			deleteDbBtn.onclick = async () => {
+				const { resolvedTable: curTableName } = resolveTargetTableName();
+				const confirmDel = await this._dialogService.confirm({
+					type: 'warning',
+					message: `Delete All Rows in SQLite Table '${curTableName || 'table'}'?`,
+					detail: `This will permanently delete all rows from table '${curTableName || 'table'}' in '${pathInput.value.trim()}'. This action cannot be undone.`,
+					primaryButton: 'Delete All Data in SQLite',
+					cancelButton: 'Cancel'
+				});
+				if (confirmDel.confirmed) {
+					await runSqliteAction('delete_data');
+				}
+			};
+
+			// SQL Statement & Table Query Execution Panel
+			const sqlTopRow = document.createElement('div');
+			sqlTopRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;';
+			sqlSection.appendChild(sqlTopRow);
+
+			const sqlTitleWrap = document.createElement('div');
+			sqlTitleWrap.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+			sqlTopRow.appendChild(sqlTitleWrap);
+
+			const sqlTitle = document.createElement('span');
+			sqlTitle.style.cssText = 'font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.04em;';
+			sqlTitle.textContent = 'SQL Statement & Table Query Execution';
+			sqlTitleWrap.appendChild(sqlTitle);
+
+			const sqlTitleHint = document.createElement('span');
+			sqlTitleHint.style.cssText = 'font-size: 10px; font-weight: 500; opacity: 0.72; color: #cbd5e1;';
+			sqlTitleHint.textContent = '(Supports {Field Label} output references)';
+			sqlTitleWrap.appendChild(sqlTitleHint);
+
+			const sqlActionBtns = document.createElement('div');
+			sqlActionBtns.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+			sqlTopRow.appendChild(sqlActionBtns);
+
+			const runSqlBtn = document.createElement('button');
+			runSqlBtn.type = 'button';
+			runSqlBtn.style.cssText = 'padding: 4px 11px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(56,189,248,0.22); color: #38bdf8; border: 1px solid rgba(56,189,248,0.5); cursor: pointer;';
+			runSqlBtn.textContent = 'Run SQL';
+			runSqlBtn.title = 'Execute SQL statement(s) against the table and SQLite database';
+			sqlActionBtns.appendChild(runSqlBtn);
+
+			const clearSqlBtn = document.createElement('button');
+			clearSqlBtn.type = 'button';
+			clearSqlBtn.style.cssText = 'padding: 4px 8px; font-size: 10.5px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15); cursor: pointer;';
+			clearSqlBtn.textContent = 'Clear';
+			sqlActionBtns.appendChild(clearSqlBtn);
+
+			const sqlSnippetsRow = document.createElement('div');
+			sqlSnippetsRow.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+			sqlSection.appendChild(sqlSnippetsRow);
+
+			const sqlSnippetsLabel = document.createElement('span');
+			sqlSnippetsLabel.style.cssText = 'font-size: 10.5px; opacity: 0.7;';
+			sqlSnippetsLabel.textContent = 'SQL Templates:';
+			sqlSnippetsRow.appendChild(sqlSnippetsLabel);
+
+			// Quick-insert reference chips for other fields / outputs ({Field Label})
+			const sqlRefTokens: string[] = Array.isArray(parsed.refTokens) && parsed.refTokens.length > 0
+				? [...parsed.refTokens]
+				: ['Title', 'Description'];
+			if (sqlRefTokens.length <= 2 && this._lastCustomModule?.fields) {
+				for (const cf of this._lastCustomModule.fields) {
+					if (!cf) { continue; }
+					const cfLabel = (cf.label || cf.id || '').trim();
+					const cfType = (cf.type || '').toLowerCase();
+					if (!cfLabel || cfLabel === fieldKey || cf.id === fieldKey || cfType === 'output' || cfType === 'result') {
+						continue;
+					}
+					if (cfType === 'parameters' && Array.isArray(cf.parameters)) {
+						for (const p of cf.parameters) {
+							const pName = (p.name || '').trim();
+							if (pName && !sqlRefTokens.includes(pName)) {
+								sqlRefTokens.push(pName);
+							}
+						}
+					}
+					if (!sqlRefTokens.includes(cfLabel)) {
+						sqlRefTokens.push(cfLabel);
+					}
+				}
+			}
+
+			const sqlEditorWrapper = document.createElement('div');
+			sqlEditorWrapper.style.cssText = 'position: relative; width: 100%;';
+			sqlSection.appendChild(sqlEditorWrapper);
+
+			const sqlDisplayEl = document.createElement('div');
+			sqlDisplayEl.className = 'prompt-tokenized-display';
+			sqlDisplayEl.style.cssText = 'min-height: 84px; padding: 8px 10px; font-size: 11.5px; line-height: 1.6; font-family: var(--vscode-editor-font-family, monospace); border-radius: 5px; border: 1px solid rgba(56,189,248,0.3); background: rgba(0,0,0,0.35); color: #e2e8f0; cursor: text; white-space: pre-wrap; word-break: break-word; box-sizing: border-box;';
+			sqlEditorWrapper.appendChild(sqlDisplayEl);
+
+			const sqlTextarea = document.createElement('textarea');
+			sqlTextarea.rows = 4;
+			sqlTextarea.value = sqlQuery;
+			sqlTextarea.placeholder = "Write SQL statements to query or modify this table. Use {Field Label} to reference outputs from other primitives (e.g. {SQL Generation} or INSERT INTO table_name (job_title) VALUES ('{JD_Data}');)...";
+			sqlTextarea.style.cssText = 'display: none; width: 100%; min-height: 84px; padding: 8px 10px; font-size: 11.5px; line-height: 1.6; font-family: var(--vscode-editor-font-family, monospace); border-radius: 5px; border: 1px solid rgba(56,189,248,0.65); background: rgba(0,0,0,0.45); color: #e2e8f0; box-sizing: border-box; resize: vertical; outline: none;';
+			sqlEditorWrapper.appendChild(sqlTextarea);
+
+			const renderSqlTokenized = (rawText: string) => {
+				clearNode(sqlDisplayEl);
+				if (!rawText) {
+					const emptySpan = document.createElement('span');
+					emptySpan.style.cssText = 'opacity: 0.45; font-style: italic;';
+					emptySpan.textContent = 'Click to edit SQL statement... (Use {Field Label} to reference outputs like {SQL Generation})';
+					sqlDisplayEl.appendChild(emptySpan);
+					return;
+				}
+				const tokenRegex = /(\{[^{}\n]+\}|@[a-zA-Z0-9_\-\u4e00-\u9fa5]+)/g;
+				let lastIdx = 0;
+				let match: RegExpExecArray | null;
+				while ((match = tokenRegex.exec(rawText)) !== null) {
+					if (match.index > lastIdx) {
+						sqlDisplayEl.appendChild(document.createTextNode(rawText.slice(lastIdx, match.index)));
+					}
+					const fullMatch = match[0];
+					const cleanTokenName = fullMatch.startsWith('{') && fullMatch.endsWith('}')
+						? fullMatch.slice(1, -1).trim()
+						: fullMatch.slice(1).trim();
+
+					const matchedToken = sqlRefTokens.find(rt => rt.toLowerCase() === cleanTokenName.toLowerCase()) || (fullMatch.startsWith('{') && fullMatch.endsWith('}') ? cleanTokenName : undefined);
+					if (matchedToken) {
+						const pill = document.createElement('span');
+						pill.className = 'prompt-token-pill';
+						pill.title = `Reference: ${matchedToken}`;
+						pill.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; margin: 0 2px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(14, 99, 156, 0.28); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); vertical-align: baseline; user-select: none;';
+						const iconSpan = document.createElement('span');
+						iconSpan.className = ThemeIcon.asCSSSelector(Codicon.link).replace(/^\./, '').split('.').join(' ');
+						iconSpan.style.fontSize = '10px';
+						const txtSpan = document.createElement('span');
+						txtSpan.textContent = matchedToken;
+						pill.appendChild(iconSpan);
+						pill.appendChild(txtSpan);
+						sqlDisplayEl.appendChild(pill);
+					} else {
+						sqlDisplayEl.appendChild(document.createTextNode(fullMatch));
+					}
+					lastIdx = tokenRegex.lastIndex;
+				}
+				if (lastIdx < rawText.length) {
+					sqlDisplayEl.appendChild(document.createTextNode(rawText.slice(lastIdx)));
+				}
+			};
+
+			sqlDisplayEl.onclick = () => {
+				sqlDisplayEl.style.display = 'none';
+				sqlTextarea.style.display = 'block';
+				sqlTextarea.focus();
+			};
+			sqlTextarea.oninput = () => {
+				sqlQuery = sqlTextarea.value;
+				persistNow();
+			};
+			sqlTextarea.onblur = () => {
+				setTimeout(() => {
+					sqlTextarea.style.display = 'none';
+					sqlDisplayEl.style.display = 'block';
+					sqlQuery = sqlTextarea.value;
+					renderSqlTokenized(sqlTextarea.value);
+					persistNow();
+				}, 160);
+			};
+			renderSqlTokenized(sqlQuery);
+
+			if (sqlRefTokens.length > 0) {
+				const sqlRefBar = document.createElement('div');
+				sqlRefBar.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+				sqlSection.appendChild(sqlRefBar);
+
+				const sqlRefLabel = document.createElement('span');
+				sqlRefLabel.style.cssText = 'font-size: 10.5px; opacity: 0.65;';
+				sqlRefLabel.textContent = 'Insert Output:';
+				sqlRefBar.appendChild(sqlRefLabel);
+
+				const MAX_VISIBLE_SQL_CHIPS = 4;
+				let sqlChipsExpanded = false;
+				const sqlChipEls: HTMLButtonElement[] = [];
+
+				sqlRefTokens.forEach((token, idx) => {
+					const chip = document.createElement('button');
+					chip.type = 'button';
+					chip.textContent = `+ {${token}}`;
+					chip.title = `Insert {${token}} output reference into SQL statement`;
+					chip.style.cssText = 'padding: 1px 7px; font-size: 10px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 10px; border: 1px solid rgba(56,189,248,0.35); background: rgba(56,189,248,0.12); color: #38bdf8; cursor: pointer;';
+					if (idx >= MAX_VISIBLE_SQL_CHIPS) {
+						chip.style.display = 'none';
+					}
+					sqlChipEls.push(chip);
+					chip.onclick = () => {
+						const insertStr = `{${token}}`;
+						if (sqlTextarea.style.display === 'none') {
+							sqlTextarea.value = sqlTextarea.value ? `${sqlTextarea.value} ${insertStr}` : insertStr;
+							sqlQuery = sqlTextarea.value;
+							renderSqlTokenized(sqlQuery);
+							persistNow();
+						} else {
+							const start = sqlTextarea.selectionStart ?? sqlTextarea.value.length;
+							const end = sqlTextarea.selectionEnd ?? sqlTextarea.value.length;
+							sqlTextarea.value = sqlTextarea.value.slice(0, start) + insertStr + sqlTextarea.value.slice(end);
+							sqlQuery = sqlTextarea.value;
+							persistNow();
+							sqlTextarea.focus();
+							const nextPos = start + insertStr.length;
+							sqlTextarea.setSelectionRange(nextPos, nextPos);
+						}
+					};
+					sqlRefBar.appendChild(chip);
+				});
+
+				if (sqlRefTokens.length > MAX_VISIBLE_SQL_CHIPS) {
+					const hiddenCount = sqlRefTokens.length - MAX_VISIBLE_SQL_CHIPS;
+					const moreBtn = document.createElement('button');
+					moreBtn.type = 'button';
+					moreBtn.textContent = `+${hiddenCount} More...`;
+					moreBtn.style.cssText = 'padding: 1px 8px; font-size: 10px; font-weight: 600; border-radius: 10px; border: 1px solid rgba(255,255,255,0.2); background: rgba(255,255,255,0.06); color: inherit; cursor: pointer;';
+					moreBtn.onclick = () => {
+						sqlChipsExpanded = !sqlChipsExpanded;
+						sqlChipEls.forEach((el, i) => {
+							if (i >= MAX_VISIBLE_SQL_CHIPS) {
+								el.style.display = sqlChipsExpanded ? 'inline-block' : 'none';
+							}
+						});
+						moreBtn.textContent = sqlChipsExpanded ? 'Show Less' : `+${hiddenCount} More...`;
+					};
+					sqlRefBar.appendChild(moreBtn);
+				}
+			}
+
+			const getCurrentTableName = () => tblInput.value.trim() || tableName || fieldKey.toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'ticket_table';
+			const sqlSnippetDefs = [
+				{
+					label: 'CREATE TABLE',
+					build: () => {
+						const pkCols = columns.filter(c => c.primaryKey).map(c => `"${c.name}"`);
+						const colDefs = columns.map(c => {
+							const singlePk = pkCols.length === 1 && c.primaryKey ? ' PRIMARY KEY' : '';
+							return `"${c.name}" ${c.dataType || 'TEXT'}${singlePk}`;
+						});
+						if (pkCols.length > 1) {
+							colDefs.push(`PRIMARY KEY (${pkCols.join(', ')})`);
+						}
+						return `CREATE TABLE IF NOT EXISTS "${getCurrentTableName()}" (${colDefs.join(', ') || '"id" INTEGER PRIMARY KEY, "name" TEXT'});`;
+					}
+				},
+				{
+					label: 'SELECT *',
+					build: () => `SELECT * FROM "${getCurrentTableName()}" LIMIT 100;`
+				},
+				{
+					label: 'INSERT INTO',
+					build: () => {
+						const cols = columns.map(c => `"${c.name}"`).join(', ') || '"id", "name"';
+						const vals = columns.map(c => (c.dataType || '').toUpperCase() === 'INTEGER' ? '1' : `'value'`).join(', ') || `1, 'sample'`;
+						return `INSERT INTO "${getCurrentTableName()}" (${cols}) VALUES (${vals});`;
+					}
+				},
+				{
+					label: 'UPDATE SET',
+					build: () => {
+						const pkCol = columns.find(c => c.primaryKey)?.name || columns[0]?.name || 'id';
+						const targetCol = columns.find(c => !c.primaryKey)?.name || columns[1]?.name || 'name';
+						return `UPDATE "${getCurrentTableName()}" SET "${targetCol}" = 'updated_value' WHERE "${pkCol}" = 1;`;
+					}
+				},
+				{
+					label: 'DELETE WHERE',
+					build: () => {
+						const pkCol = columns.find(c => c.primaryKey)?.name || columns[0]?.name || 'id';
+						return `DELETE FROM "${getCurrentTableName()}" WHERE "${pkCol}" = 1;`;
+					}
+				},
+				{
+					label: 'ALTER ADD COLUMN',
+					build: () => `ALTER TABLE "${getCurrentTableName()}" ADD COLUMN "new_column" TEXT;`
+				}
+			];
+
+			sqlSnippetDefs.forEach(tpl => {
+				const chip = document.createElement('button');
+				chip.type = 'button';
+				chip.style.cssText = 'padding: 2px 7px; font-size: 10px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 4px; border: 1px solid rgba(56,189,248,0.35); background: rgba(56,189,248,0.1); color: #7dd3fc; cursor: pointer;';
+				chip.textContent = `+ ${tpl.label}`;
+				chip.onclick = () => {
+					const snippet = tpl.build();
+					sqlTextarea.value = sqlTextarea.value.trim() ? `${sqlTextarea.value.trim()}\n${snippet}` : snippet;
+					sqlQuery = sqlTextarea.value;
+					renderSqlTokenized(sqlQuery);
+					persistNow();
+				};
+				sqlSnippetsRow.appendChild(chip);
+			});
+
+			// Formal SQL Execution Output Section
+			const sqlOutputSection = document.createElement('div');
+			sqlOutputSection.style.cssText = 'display: flex; flex-direction: column; gap: 6px; margin-top: 6px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.1);';
+			sqlSection.appendChild(sqlOutputSection);
+
+			const sqlOutputHeader = document.createElement('div');
+			sqlOutputHeader.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;';
+			sqlOutputSection.appendChild(sqlOutputHeader);
+
+			const sqlOutputHeaderLeft = document.createElement('div');
+			sqlOutputHeaderLeft.style.cssText = 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;';
+			sqlOutputHeader.appendChild(sqlOutputHeaderLeft);
+
+			const sqlOutputTitle = document.createElement('span');
+			sqlOutputTitle.style.cssText = 'font-size: 11px; font-weight: 600; opacity: 0.75; text-transform: uppercase; letter-spacing: 0.04em;';
+			sqlOutputTitle.textContent = 'SQL Execution Output:';
+			sqlOutputHeaderLeft.appendChild(sqlOutputTitle);
+
+			const sqlStatusBadge = document.createElement('span');
+			sqlStatusBadge.style.cssText = 'font-size: 10.5px; padding: 1px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); opacity: 0.85; display: none;';
+			sqlOutputHeaderLeft.appendChild(sqlStatusBadge);
+
+			const sqlOutputActions = document.createElement('div');
+			sqlOutputActions.style.cssText = 'display: flex; align-items: center; gap: 6px;';
+			sqlOutputHeader.appendChild(sqlOutputActions);
+
+			const testSqlBtn = document.createElement('button');
+			testSqlBtn.type = 'button';
+			testSqlBtn.style.cssText = 'padding: 3px 10px; width: auto; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(14, 99, 156, 0.25); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); cursor: pointer;';
+			testSqlBtn.textContent = '▷ Test';
+			testSqlBtn.title = 'Interpolate {Field Label} references and execute this SQL statement against SQLite';
+			sqlOutputActions.appendChild(testSqlBtn);
+
+			const copySqlOutBtn = document.createElement('button');
+			copySqlOutBtn.type = 'button';
+			copySqlOutBtn.style.cssText = 'padding: 3px 8px; width: auto; font-size: 11px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.12); cursor: pointer;';
+			copySqlOutBtn.textContent = 'Copy';
+			sqlOutputActions.appendChild(copySqlOutBtn);
+
+			const clearSqlOutBtn = document.createElement('button');
+			clearSqlOutBtn.type = 'button';
+			clearSqlOutBtn.style.cssText = 'padding: 3px 8px; width: auto; font-size: 11px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.12); cursor: pointer;';
+			clearSqlOutBtn.textContent = 'Clear';
+			sqlOutputActions.appendChild(clearSqlOutBtn);
+
+			const sqlOutputDisplay = document.createElement('div');
+			sqlOutputDisplay.className = 'sql-output-box';
+			sqlOutputDisplay.style.cssText = 'min-height: 88px; max-height: 220px; overflow-y: auto; padding: 10px 12px; font-size: 12px; line-height: 1.55; border-radius: 5px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.25); color: var(--vscode-editor-foreground); white-space: pre-wrap; word-break: break-word; font-family: var(--vscode-editor-font-family, monospace); user-select: text;';
+			sqlOutputSection.appendChild(sqlOutputDisplay);
+
+			const setSqlOutputDisplayContent = (text: string) => {
+				if (text && text.trim()) {
+					sqlOutputDisplay.textContent = text;
+					sqlOutputDisplay.style.opacity = '1';
+					sqlOutputDisplay.style.fontStyle = 'normal';
+				} else {
+					sqlOutputDisplay.textContent = 'No SQL execution output yet. Click "▷ Test" or "▷ Run SQL" to execute the SQL statement and inspect the resolved SQL & query result here.';
+					sqlOutputDisplay.style.opacity = '0.5';
+					sqlOutputDisplay.style.fontStyle = 'italic';
+				}
+			};
+			setSqlOutputDisplayContent(sqlOutput);
+			if (sqlOutput.trim()) {
+				sqlStatusBadge.style.display = 'inline-block';
+				sqlStatusBadge.textContent = 'Saved Output';
+				sqlStatusBadge.style.color = '#10b981';
+			}
+
+			const sqlResultContainer = document.createElement('div');
+			sqlResultContainer.style.cssText = 'display: none; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 5px; background: rgba(0,0,0,0.32); border: 1px solid rgba(56,189,248,0.25); max-height: 240px; overflow: auto;';
+			sqlOutputSection.appendChild(sqlResultContainer);
+
+			copySqlOutBtn.onclick = async () => {
+				const out = sqlOutput.trim() || (sqlOutputDisplay.style.fontStyle !== 'italic' ? (sqlOutputDisplay.textContent || '').trim() : '');
+				if (!out) {
+					this._notificationService.warn('Nothing to copy from SQL Execution Output.');
+					return;
+				}
+				await this._clipboardService.writeText(out);
+				this._notificationService.info('SQL execution output copied to clipboard.');
+			};
+
+			clearSqlOutBtn.onclick = () => {
+				sqlOutput = '';
+				setSqlOutputDisplayContent('');
+				sqlStatusBadge.style.display = 'none';
+				sqlResultContainer.style.display = 'none';
+				clearNode(sqlResultContainer);
+				persistNow();
+			};
+
+			clearSqlBtn.onclick = () => {
+				sqlTextarea.value = '';
+				sqlQuery = '';
+				sqlOutput = '';
+				renderSqlTokenized('');
+				setSqlOutputDisplayContent('');
+				sqlStatusBadge.style.display = 'none';
+				sqlResultContainer.style.display = 'none';
+				clearNode(sqlResultContainer);
+				persistNow();
+			};
+
+			const executeSqlStatement = async () => {
+				const rawSql = sqlTextarea.value.trim();
+				if (!rawSql) {
+					this._notificationService.warn('Please enter a SQL statement to execute.');
+					return;
+				}
+				const runtime = this._instantiationService.invokeFunction(accessor => {
+					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+				});
+				if (!runtime) {
+					this._notificationService.warn('Ticket workflow runtime service is unavailable.');
+					return;
+				}
+				const { rawExpr, resolvedTable } = resolveTargetTableName();
+				const curTableName = resolvedTable || getCurrentTableName();
+				let interpolatedSql = this._interpolateParameters(rawSql);
+				if (rawExpr && isParamTableExpr(rawExpr) && interpolatedSql.includes(rawExpr)) {
+					interpolatedSql = interpolatedSql.split(rawExpr).join(curTableName);
+				}
+				const cleanedInterpolatedSql = interpolatedSql
+					.replace(/^```(?:sql|sqlite|sqlite3)?\s*\n?/i, '')
+					.replace(/\n?```\s*$/i, '')
+					.trim();
+				const curDbPath = pathInput.value.trim();
+
+				runSqlBtn.disabled = true;
+				runSqlBtn.textContent = 'Running...';
+				testSqlBtn.disabled = true;
+				testSqlBtn.textContent = 'Running...';
+				sqlStatusBadge.style.display = 'inline-block';
+				sqlStatusBadge.textContent = `Running on '${curTableName}'...`;
+				sqlStatusBadge.style.color = '#38bdf8';
+				setSqlOutputDisplayContent(
+					`Executing SQL statement against table '${curTableName}'${curDbPath ? ` (${curDbPath})` : ' (in-memory)'}...\n\n--- [Resolved SQL Statement] ---\n${cleanedInterpolatedSql || interpolatedSql}`
+				);
+
+				const reqSeq = ++schemaLoadSeq;
+				const prevDbCols = lastKnownDbColumns ? cloneColumnsList(lastKnownDbColumns) : [];
+				const prevTableExisted = lastKnownTableExists;
+				const wasDirty = isSchemaDirty();
+				const localColsSnapshot = cloneColumnsList(columns);
+
+				const startMs = Date.now();
+				try {
+					const wsRoot = this._entityUri ? await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri) : undefined;
+					const res = await runtime.executeSqliteTableOperation({
+						workspaceUri: wsRoot || this._entityUri,
+						ticketUri: this._entityUri,
+						dbPath: curDbPath,
+						tableName: curTableName,
+						action: 'query',
+						columns: columns as any,
+						rows,
+						sqlQuery: cleanedInterpolatedSql || interpolatedSql
+					});
+					if (reqSeq !== schemaLoadSeq) {
+						return;
+					}
+					const elapsedSec = ((Date.now() - startMs) / 1000).toFixed(1);
+
+					if (res.success) {
+						if (Array.isArray(res.tables)) {
+							populateTableSelectDropdown(res.tables, rawExpr || curTableName);
+						}
+
+						const newTableExists = Boolean(res.tableExists);
+						const newDbCols = newTableExists && Array.isArray(res.columns) ? cloneColumnsList(res.columns) : [];
+						const actualDbSchemaChanged =
+							(prevTableExisted !== newTableExists) ||
+							!areSchemasEqual(prevDbCols, newDbCols);
+
+						lastKnownTableExists = newTableExists;
+						lastKnownDbColumns = cloneColumnsList(newDbCols);
+
+						if (actualDbSchemaChanged) {
+							if (!wasDirty) {
+								columns = cloneColumnsList(newDbCols);
+								hasLocalColumnEdits = false;
+							} else {
+								const reconciled = await reconcileSchemaChanges(
+									curTableName,
+									prevDbCols,
+									localColsSnapshot,
+									newDbCols,
+									newTableExists
+								);
+								columns = reconciled.nextCols;
+								hasLocalColumnEdits = reconciled.nextDirty;
+							}
+						} else if (prevDbCols.length === 0 && !wasDirty && newTableExists && newDbCols.length > 0) {
+							columns = cloneColumnsList(newDbCols);
+							hasLocalColumnEdits = false;
+						}
+
+						if (!res.isSelectQuery && !res.isPragmaQuery) {
+							if (Array.isArray(res.rows)) {
+								rows = res.rows;
+							}
+							if (typeof res.rowCount === 'number') {
+								totalDbRowCount = res.rowCount;
+							}
+						} else if (res.isSelectQuery && !res.isPragmaQuery && Array.isArray(res.queryRows)) {
+							rows = res.queryRows;
+						}
+						sqlStatusBadge.textContent = `Done (${elapsedSec}s)`;
+						sqlStatusBadge.style.color = '#10b981';
+
+						const summaryLines: string[] = [
+							`Status: SUCCESS (${elapsedSec}s)`,
+							`Database: ${curDbPath || ':memory:'}`,
+							`Target Table: ${curTableName}${rawExpr && rawExpr !== curTableName ? ` (resolved from ${rawExpr})` : ''}`,
+							`Result: ${res.message || 'SQL statement executed successfully.'}`,
+							'',
+							'--- [Resolved SQL Statement] ---',
+							cleanedInterpolatedSql || interpolatedSql
+						];
+						if (res.isSelectQuery && Array.isArray(res.queryRows)) {
+							const previewLimit = 10;
+							const isLargePreview = !res.isPragmaQuery && res.queryRows.length > previewLimit;
+							summaryLines.push('', `--- [Query Rows Preview (${res.queryRows.length} row(s))] ---`);
+							if (isLargePreview) {
+								summaryLines.push(JSON.stringify(res.queryRows.slice(0, previewLimit), null, 2));
+								summaryLines.push(`\n... [${res.queryRows.length - previewLimit} more row(s) omitted in text preview (showing first ${previewLimit} of ${res.queryRows.length} rows). All ${res.queryRows.length} complete rows are preserved in programmatic data & paginated table view.]`);
+							} else {
+								summaryLines.push(JSON.stringify(res.queryRows, null, 2));
+							}
+						}
+						sqlOutput = summaryLines.join('\n');
+						setSqlOutputDisplayContent(sqlOutput);
+
+						renderCols();
+						renderGrid();
+						updateSchemaDiffBanner();
+						lastSynced = new Date().toLocaleTimeString();
+						persistNow();
+
+						clearNode(sqlResultContainer);
+						if (res.isSelectQuery && Array.isArray(res.queryRows)) {
+							sqlResultContainer.style.display = 'flex';
+							const allQueryRows = res.queryRows;
+							const qCols = Array.isArray(res.queryColumns) && res.queryColumns.length > 0
+								? res.queryColumns
+								: (allQueryRows[0] ? Object.keys(allQueryRows[0]).map((k, idx) => ({ id: `c_${idx}`, name: k, dataType: 'TEXT' })) : []);
+
+							let qCurPage = 1;
+							const qPageSize = 10;
+							const renderPaginatedQueryResult = () => {
+								clearNode(sqlResultContainer);
+								const qTotalRows = allQueryRows.length;
+								const qTotalPages = Math.max(1, Math.ceil(qTotalRows / qPageSize));
+								if (qCurPage > qTotalPages) { qCurPage = qTotalPages; }
+								if (qCurPage < 1) { qCurPage = 1; }
+								const qStartIdx = (qCurPage - 1) * qPageSize;
+								const qEndIdx = Math.min(qStartIdx + qPageSize, qTotalRows);
+
+								const qTopBar = document.createElement('div');
+								qTopBar.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;';
+								sqlResultContainer.appendChild(qTopBar);
+
+								const qCountSpan = document.createElement('span');
+								qCountSpan.style.cssText = 'font-size: 10.5px; font-weight: 600; color: #7dd3fc;';
+								qCountSpan.textContent = qTotalRows > 0
+									? `Query Result (Showing ${qStartIdx + 1}–${qEndIdx} of ${qTotalRows} row(s) — Full ${qTotalRows} rows preserved)`
+									: `Query Result (0 row(s))`;
+								qTopBar.appendChild(qCountSpan);
+
+								const qRightControls = document.createElement('div');
+								qRightControls.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+								qTopBar.appendChild(qRightControls);
+
+								if (qTotalPages > 1) {
+									const prevBtn = document.createElement('button');
+									prevBtn.type = 'button';
+									prevBtn.disabled = qCurPage <= 1;
+									prevBtn.style.cssText = `padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15); cursor: ${qCurPage <= 1 ? 'default' : 'pointer'}; opacity: ${qCurPage <= 1 ? '0.4' : '1'};`;
+									prevBtn.textContent = '‹ Prev';
+									prevBtn.onclick = () => {
+										if (qCurPage > 1) {
+											qCurPage--;
+											renderPaginatedQueryResult();
+										}
+									};
+									qRightControls.appendChild(prevBtn);
+
+									const pageIndicator = document.createElement('span');
+									pageIndicator.style.cssText = 'font-size: 10px; font-family: var(--vscode-editor-font-family, monospace); opacity: 0.85; padding: 0 4px;';
+									pageIndicator.textContent = `Page ${qCurPage} / ${qTotalPages}`;
+									qRightControls.appendChild(pageIndicator);
+
+									const nextBtn = document.createElement('button');
+									nextBtn.type = 'button';
+									nextBtn.disabled = qCurPage >= qTotalPages;
+									nextBtn.style.cssText = `padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15); cursor: ${qCurPage >= qTotalPages ? 'default' : 'pointer'}; opacity: ${qCurPage >= qTotalPages ? '0.4' : '1'};`;
+									nextBtn.textContent = 'Next ›';
+									nextBtn.onclick = () => {
+										if (qCurPage < qTotalPages) {
+											qCurPage++;
+											renderPaginatedQueryResult();
+										}
+									};
+									qRightControls.appendChild(nextBtn);
+								}
+
+								const applyResultBtn = document.createElement('button');
+								applyResultBtn.type = 'button';
+								applyResultBtn.style.cssText = 'padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; background: rgba(20,184,166,0.2); color: #2dd4bf; border: 1px solid rgba(20,184,166,0.45); cursor: pointer;';
+								applyResultBtn.textContent = 'Replace Grid with Query Result';
+								applyResultBtn.onclick = () => {
+									rows = allQueryRows || [];
+									renderGrid();
+									persistNow();
+									this._notificationService.info('Applied query result rows to table grid.');
+								};
+								qRightControls.appendChild(applyResultBtn);
+
+								if (qTotalRows === 0) {
+									const emptyDiv = document.createElement('div');
+									emptyDiv.style.cssText = 'font-size: 11px; opacity: 0.6; font-style: italic;';
+									emptyDiv.textContent = 'Query returned 0 rows.';
+									sqlResultContainer.appendChild(emptyDiv);
+								} else {
+									const qTbl = document.createElement('table');
+									qTbl.style.cssText = 'width: 100%; border-collapse: collapse; font-size: 11px; text-align: left;';
+									sqlResultContainer.appendChild(qTbl);
+
+									const qThead = document.createElement('thead');
+									qTbl.appendChild(qThead);
+									const qTrH = document.createElement('tr');
+									qTrH.style.cssText = 'background: rgba(56,189,248,0.14); border-bottom: 1px solid rgba(56,189,248,0.3);';
+									qThead.appendChild(qTrH);
+									qCols.forEach(qc => {
+										const th = document.createElement('th');
+										th.style.cssText = 'padding: 4px 8px; font-weight: 600; color: #bae6fd; border-right: 1px solid rgba(255,255,255,0.06);';
+										th.textContent = qc.name;
+										qTrH.appendChild(th);
+									});
+
+									const qTbody = document.createElement('tbody');
+									qTbl.appendChild(qTbody);
+									allQueryRows.slice(qStartIdx, qEndIdx).forEach(qr => {
+										const qTr = document.createElement('tr');
+										qTr.style.cssText = 'border-bottom: 1px solid rgba(255,255,255,0.05);';
+										qTbody.appendChild(qTr);
+										qCols.forEach(qc => {
+											const td = document.createElement('td');
+											td.style.cssText = 'padding: 4px 8px; border-right: 1px solid rgba(255,255,255,0.06); font-family: var(--vscode-editor-font-family, monospace);';
+											const v = qr[qc.name];
+											td.textContent = v === null || v === undefined ? 'NULL' : String(v);
+											qTr.appendChild(td);
+										});
+									});
+								}
+							};
+							renderPaginatedQueryResult();
+						} else {
+							sqlResultContainer.style.display = 'none';
+						}
+					} else {
+						sqlStatusBadge.textContent = `Failed (${elapsedSec}s)`;
+						sqlStatusBadge.style.color = '#f87171';
+						sqlOutput = [
+							`Status: FAILED (${elapsedSec}s)`,
+							`Database: ${curDbPath || ':memory:'}`,
+							`Target Table: ${curTableName}`,
+							`SQL Error: ${res.error || 'Execution failed'}`,
+							'',
+							'--- [Resolved SQL Statement] ---',
+							cleanedInterpolatedSql || interpolatedSql
+						].join('\n');
+						setSqlOutputDisplayContent(sqlOutput);
+						persistNow();
+						this._notificationService.error(`SQL Error: ${res.error || 'Execution failed'}`);
+					}
+				} finally {
+					runSqlBtn.disabled = false;
+					runSqlBtn.textContent = '▷ Run SQL';
+					testSqlBtn.disabled = false;
+					testSqlBtn.textContent = '▷ Test';
+				}
+			};
+
+			runSqlBtn.onclick = executeSqlStatement;
+			testSqlBtn.onclick = executeSqlStatement;
+
+			renderCols();
+			renderGrid();
+		}
+	}
+
+	private _hydratePythonPrimitiveCards(): void {
+		if (!this._container) return;
+		const cards = Array.from(this._container.querySelectorAll('.python-primitive-card')) as HTMLElement[];
+		for (const card of cards) {
+			card.setAttribute('data-python-hydrated', 'true');
+			const fieldKey = card.getAttribute('data-field-key') || '';
+			const initialCode = (card.getAttribute('data-python-code') ?? '').replace(/\r\n?/g, '\n');
+			let isLocked = card.getAttribute('data-python-locked') === 'true';
+
+			const codeWrapper = card.querySelector('.python-code-wrapper') as HTMLElement | null;
+			const lineNumbersGutter = card.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+			const codeDisplay = card.querySelector('.python-code-display') as HTMLElement | null;
+			const codeTextarea = card.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+			const copyCodeBtn = card.querySelector('.python-copy-code-btn') as HTMLButtonElement | null;
+			const pasteCodeBtn = card.querySelector('.python-paste-code-btn') as HTMLButtonElement | null;
+			const lockCodeBtn = card.querySelector('.python-lock-code-btn') as HTMLButtonElement | null;
+			const chipsBar = card.querySelector('.python-ctx-chips-bar') as HTMLElement | null;
+
+			if (!codeWrapper || !lineNumbersGutter || !codeDisplay || !codeTextarea) {
+				continue;
+			}
+
+			codeTextarea.value = initialCode;
+
+			let isCodeEditing = false;
+			let lastCodeSelectionStart: number | undefined = undefined;
+			let lastCodeSelectionEnd: number | undefined = undefined;
+			let saveDebounceTimer: any = undefined;
+
+			const syncScrollPositions = () => {
+				if (codeTextarea.scrollTop !== 0) {
+					codeTextarea.scrollTop = 0;
+				}
+				if (codeTextarea.scrollLeft !== 0) {
+					codeTextarea.scrollLeft = 0;
+				}
+				codeDisplay.scrollTop = 0;
+				codeDisplay.scrollLeft = 0;
+				lineNumbersGutter.scrollTop = 0;
+			};
+
+			const renderHighlightedCode = () => {
+				const val = codeTextarea.value || '';
+				card.setAttribute('data-python-code', val);
+				const aiBtn = card.querySelector('.ai-edit-btn') as HTMLElement | null;
+				if (aiBtn) {
+					aiBtn.setAttribute('data-ai-current-value', val);
+				}
+				lineNumbersGutter.textContent = buildPythonLineNumbersText(val);
+				renderHighlightedPythonToDOM(codeDisplay, val, {
+					showLineNumbers: false,
+					isLiveBackdrop: true,
+					placeholder: '# Enter Python automation script...'
+				});
+				syncScrollPositions();
+			};
+
+			const recordCodeSelection = () => {
+				if (typeof codeTextarea.selectionStart === 'number') {
+					lastCodeSelectionStart = codeTextarea.selectionStart;
+				}
+				if (typeof codeTextarea.selectionEnd === 'number') {
+					lastCodeSelectionEnd = codeTextarea.selectionEnd;
+				}
+			};
+
+			const applyLockUi = () => {
+				card.setAttribute('data-python-locked', isLocked ? 'true' : 'false');
+				codeTextarea.readOnly = isLocked;
+				codeTextarea.style.cursor = isLocked ? 'default' : 'text';
+				if (lockCodeBtn) {
+					const iconEl = lockCodeBtn.querySelector('.codicon') as HTMLElement | null;
+					if (iconEl) {
+						iconEl.className = isLocked ? 'codicon codicon-lock' : 'codicon codicon-unlock';
+					}
+					lockCodeBtn.style.color = isLocked ? '#fbbf24' : '#34d399';
+					lockCodeBtn.style.borderColor = isLocked ? 'rgba(251, 191, 36, 0.45)' : 'rgba(52, 211, 153, 0.4)';
+					lockCodeBtn.style.background = isLocked ? 'rgba(251, 191, 36, 0.12)' : 'rgba(52, 211, 153, 0.1)';
+					lockCodeBtn.title = isLocked
+						? 'Locked (Read-Only) — Click to Unlock for editing'
+						: 'Unlocked (Editable) — Click to Lock and protect from accidental edits';
+				}
+				if (pasteCodeBtn) {
+					pasteCodeBtn.style.opacity = isLocked ? '0.4' : '1';
+					pasteCodeBtn.title = isLocked
+						? 'Locked — Click the lock icon to unlock before pasting'
+						: 'Paste clipboard content into Python source code';
+				}
+				if (chipsBar) {
+					chipsBar.style.opacity = isLocked ? '0.45' : '1';
+				}
+				if (!isCodeEditing) {
+					codeWrapper.style.borderColor = isLocked ? 'rgba(251, 191, 36, 0.28)' : 'rgba(255, 255, 255, 0.15)';
+				}
+			};
+
+			const pulseLockBtn = () => {
+				if (lockCodeBtn) {
+					const prevShadow = lockCodeBtn.style.boxShadow;
+					const prevTransform = lockCodeBtn.style.transform;
+					lockCodeBtn.style.boxShadow = '0 0 0 3px rgba(245, 158, 11, 0.45)';
+					lockCodeBtn.style.transform = 'scale(1.12)';
+					setTimeout(() => {
+						lockCodeBtn.style.boxShadow = prevShadow || '';
+						lockCodeBtn.style.transform = prevTransform || '';
+					}, 450);
+				}
+				const prevBorder = codeWrapper.style.borderColor;
+				codeWrapper.style.borderColor = 'rgba(245, 158, 11, 0.55)';
+				setTimeout(() => {
+					codeWrapper.style.borderColor = prevBorder || 'rgba(255, 255, 255, 0.15)';
+				}, 450);
+			};
+
+			codeTextarea.addEventListener('mousedown', (e) => {
+				e.stopPropagation();
+			});
+			codeTextarea.addEventListener('mouseup', (e) => {
+				e.stopPropagation();
+				recordCodeSelection();
+			});
+			codeTextarea.addEventListener('click', (e) => {
+				e.stopPropagation();
+				recordCodeSelection();
+			});
+			codeTextarea.addEventListener('keyup', recordCodeSelection);
+			codeTextarea.addEventListener('select', recordCodeSelection);
+			codeTextarea.addEventListener('scroll', syncScrollPositions);
+
+			codeWrapper.onmouseenter = () => {
+				if (!isCodeEditing && !isLocked) {
+					codeWrapper.style.borderColor = 'rgba(56, 189, 248, 0.35)';
+				}
+			};
+			codeWrapper.onmouseleave = () => {
+				if (!isCodeEditing) {
+					codeWrapper.style.borderColor = isLocked ? 'rgba(251, 191, 36, 0.28)' : 'rgba(255, 255, 255, 0.15)';
+				}
+			};
+
+			codeTextarea.onfocus = () => {
+				isCodeEditing = true;
+				codeWrapper.style.borderColor = isLocked ? 'rgba(251, 191, 36, 0.45)' : 'rgba(56, 189, 248, 0.55)';
+			};
+
+			codeTextarea.onblur = () => {
+				recordCodeSelection();
+				isCodeEditing = false;
+				codeWrapper.style.borderColor = isLocked ? 'rgba(251, 191, 36, 0.28)' : 'rgba(255, 255, 255, 0.15)';
+				renderHighlightedCode();
+				if (saveDebounceTimer) {
+					clearTimeout(saveDebounceTimer);
+					saveDebounceTimer = undefined;
+					if (fieldKey) {
+						this._savePythonDataFromCard(card, fieldKey);
+					}
+				}
+			};
+
+			codeTextarea.onkeydown = (e) => {
+				if (e.key === 'Escape') {
+					codeTextarea.blur();
+					return;
+				}
+				if (isLocked) {
+					if (!e.metaKey && !e.ctrlKey && !e.altKey && (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete' || e.key === 'Enter' || e.key === 'Tab')) {
+						e.preventDefault();
+						pulseLockBtn();
+					}
+					return;
+				}
+				if (e.key === 'Tab') {
+					e.preventDefault();
+					e.stopPropagation();
+					const start = codeTextarea.selectionStart;
+					const end = codeTextarea.selectionEnd;
+					codeTextarea.value = codeTextarea.value.substring(0, start) + '    ' + codeTextarea.value.substring(end);
+					codeTextarea.selectionStart = codeTextarea.selectionEnd = start + 4;
+					recordCodeSelection();
+					renderHighlightedCode();
+					if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+					saveDebounceTimer = setTimeout(() => {
+						if (fieldKey) this._savePythonDataFromCard(card, fieldKey);
+					}, 400);
+				} else if (e.key === 'Enter') {
+					const start = codeTextarea.selectionStart;
+					const end = codeTextarea.selectionEnd;
+					const before = codeTextarea.value.substring(0, start);
+					const lastNewline = before.lastIndexOf('\n');
+					const currentLine = before.substring(lastNewline + 1);
+					const indentMatch = currentLine.match(/^[ \t]*/);
+					let indent = indentMatch ? indentMatch[0] : '';
+					if (currentLine.trimEnd().endsWith(':')) {
+						indent += '    ';
+					}
+					if (indent.length > 0) {
+						e.preventDefault();
+						e.stopPropagation();
+						const insertStr = '\n' + indent;
+						codeTextarea.value = before + insertStr + codeTextarea.value.substring(end);
+						codeTextarea.selectionStart = codeTextarea.selectionEnd = start + insertStr.length;
+						recordCodeSelection();
+						renderHighlightedCode();
+						if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+						saveDebounceTimer = setTimeout(() => {
+							if (fieldKey) this._savePythonDataFromCard(card, fieldKey);
+						}, 400);
+					}
+				}
+			};
+
+			codeTextarea.oninput = () => {
+				recordCodeSelection();
+				renderHighlightedCode();
+				if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+				saveDebounceTimer = setTimeout(() => {
+					if (fieldKey) this._savePythonDataFromCard(card, fieldKey);
+				}, 400);
+			};
+
+			if (copyCodeBtn) {
+				copyCodeBtn.onmousedown = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					recordCodeSelection();
+				};
+				copyCodeBtn.onclick = async (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					const rawCode = codeTextarea.value ?? '';
+					await this._clipboardService.writeText(rawCode);
+					const iconEl = copyCodeBtn.querySelector('.codicon') as HTMLElement | null;
+					if (iconEl) {
+						iconEl.className = 'codicon codicon-check';
+					}
+					copyCodeBtn.style.color = '#34d399';
+					copyCodeBtn.style.borderColor = 'rgba(52, 211, 153, 0.45)';
+					copyCodeBtn.style.background = 'rgba(52, 211, 153, 0.14)';
+					setTimeout(() => {
+						if (iconEl) {
+							iconEl.className = 'codicon codicon-copy';
+						}
+						copyCodeBtn.style.color = 'inherit';
+						copyCodeBtn.style.borderColor = 'rgba(255, 255, 255, 0.16)';
+						copyCodeBtn.style.background = 'rgba(255, 255, 255, 0.07)';
+					}, 1500);
+					this._notificationService.info('Copied Python source code to clipboard.');
+				};
+			}
+
+			if (pasteCodeBtn) {
+				pasteCodeBtn.onmousedown = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					recordCodeSelection();
+				};
+				pasteCodeBtn.onclick = async (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					if (isLocked) {
+						pulseLockBtn();
+						this._notificationService.info('This Python editor is locked. Click the lock icon to unlock before pasting.');
+						return;
+					}
+					const clipText = (await this._clipboardService.readText()) || '';
+					if (!clipText) {
+						this._notificationService.warn('Clipboard is empty.');
+						return;
+					}
+					const normalizedClip = clipText.replace(/\r\n?/g, '\n');
+					const hasRangeSelection = typeof lastCodeSelectionStart === 'number' && typeof lastCodeSelectionEnd === 'number' && lastCodeSelectionEnd > lastCodeSelectionStart;
+					if (hasRangeSelection) {
+						const start = Math.max(0, Math.min(codeTextarea.value.length, lastCodeSelectionStart!));
+						const end = Math.max(start, Math.min(codeTextarea.value.length, lastCodeSelectionEnd!));
+						codeTextarea.value = codeTextarea.value.substring(0, start) + normalizedClip + codeTextarea.value.substring(end);
+						const nextCursor = start + normalizedClip.length;
+						lastCodeSelectionStart = nextCursor;
+						lastCodeSelectionEnd = nextCursor;
+						codeTextarea.focus({ preventScroll: true });
+						codeTextarea.setSelectionRange(nextCursor, nextCursor);
+					} else {
+						codeTextarea.value = normalizedClip;
+						const nextCursor = normalizedClip.length;
+						lastCodeSelectionStart = nextCursor;
+						lastCodeSelectionEnd = nextCursor;
+						codeTextarea.focus({ preventScroll: true });
+						codeTextarea.setSelectionRange(nextCursor, nextCursor);
+					}
+					renderHighlightedCode();
+					if (fieldKey) {
+						await this._savePythonDataFromCard(card, fieldKey);
+					}
+					const iconEl = pasteCodeBtn.querySelector('.codicon') as HTMLElement | null;
+					if (iconEl) {
+						iconEl.className = 'codicon codicon-check';
+					}
+					pasteCodeBtn.style.color = '#34d399';
+					pasteCodeBtn.style.borderColor = 'rgba(52, 211, 153, 0.45)';
+					pasteCodeBtn.style.background = 'rgba(52, 211, 153, 0.14)';
+					setTimeout(() => {
+						if (iconEl) {
+							iconEl.className = 'codicon codicon-clippy';
+						}
+						pasteCodeBtn.style.color = 'inherit';
+						pasteCodeBtn.style.borderColor = 'rgba(255, 255, 255, 0.16)';
+						pasteCodeBtn.style.background = 'rgba(255, 255, 255, 0.07)';
+					}, 1500);
+					this._notificationService.info('Pasted clipboard content into Python source code.');
+				};
+			}
+
+			if (lockCodeBtn) {
+				lockCodeBtn.onmousedown = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+				};
+				lockCodeBtn.onclick = async (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					isLocked = !isLocked;
+					applyLockUi();
+					if (isLocked && document.activeElement === codeTextarea) {
+						codeTextarea.blur();
+					}
+					if (fieldKey) {
+						await this._savePythonDataFromCard(card, fieldKey);
+					}
+				};
+			}
+
+			const chipBtns = Array.from(card.querySelectorAll('.python-insert-ctx-chip')) as HTMLButtonElement[];
+			for (const chipBtn of chipBtns) {
+				chipBtn.onmousedown = (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					recordCodeSelection();
+				};
+				chipBtn.onclick = async (e) => {
+					e.preventDefault();
+					e.stopPropagation();
+					if (isLocked) {
+						pulseLockBtn();
+						this._notificationService.info('This Python editor is locked. Click the lock icon to unlock before inserting context variables.');
+						return;
+					}
+					const textToInsert = chipBtn.getAttribute('data-insert') || '';
+					const cursorOffset = parseInt(chipBtn.getAttribute('data-cursor-offset') || '0', 10);
+					if (!textToInsert) {
+						return;
+					}
+					const current = codeTextarea.value || '';
+					const start = isCodeEditing && typeof codeTextarea.selectionStart === 'number'
+						? codeTextarea.selectionStart
+						: (typeof lastCodeSelectionStart === 'number' ? Math.min(current.length, Math.max(0, lastCodeSelectionStart)) : current.length);
+					const end = isCodeEditing && typeof codeTextarea.selectionEnd === 'number'
+						? codeTextarea.selectionEnd
+						: (typeof lastCodeSelectionEnd === 'number' ? Math.min(current.length, Math.max(start, lastCodeSelectionEnd)) : start);
+					codeTextarea.value = current.substring(0, start) + textToInsert + current.substring(end);
+					const newCursor = start + textToInsert.length + cursorOffset;
+					lastCodeSelectionStart = newCursor;
+					lastCodeSelectionEnd = newCursor;
+					codeTextarea.focus({ preventScroll: true });
+					codeTextarea.setSelectionRange(newCursor, newCursor);
+					renderHighlightedCode();
+					if (fieldKey) {
+						await this._savePythonDataFromCard(card, fieldKey);
+					}
+				};
+			}
+
+			applyLockUi();
+			renderHighlightedCode();
 		}
 	}
 
 	private async _savePythonPrimitiveData(fieldKey: string, pythonData: any): Promise<void> {
-		const updatedCustom = {
-			...(this._lastParsedData?.customMetadata || {}),
-			[fieldKey]: typeof pythonData === 'string' ? pythonData : JSON.stringify(pythonData)
-		};
-		await this._handleMessage({
-			type: 'saveMetadata',
-			metadata: {},
-			customMetadata: updatedCustom
-		});
+		const serialized = typeof pythonData === 'string' ? pythonData : JSON.stringify(pythonData);
+		await this._persistCustomFieldQuietly(fieldKey, serialized);
 	}
 
 	private _getCardExternalScripts(card: HTMLElement): string[] {
@@ -3636,6 +12490,7 @@ ${rawErr}
 		const pythonPath = interpInput?.value.trim() || '';
 		const externalScripts = this._getCardExternalScripts(card);
 		const code = codeTextarea?.value || '';
+		const locked = card.getAttribute('data-python-locked') === 'true';
 		let output = outputOverride !== undefined ? outputOverride : (outputDisplay?.textContent || '');
 		if (output.startsWith('No execution output yet') || output.startsWith('No execution logs yet')) output = '';
 
@@ -3648,6 +12503,7 @@ ${rawErr}
 			pythonPath,
 			externalScripts,
 			code,
+			locked,
 			output,
 			result,
 			exitCode: exitCodeOverride,
@@ -3698,24 +12554,94 @@ ${rawErr}
 				throw new Error('Ticket workflow runtime service not available.');
 			}
 
-			const workspaceUri = this._entityUri ? this._workspacesExplorerService.findRootWorkspace(this._entityUri) || this._entityUri : this._entityUri;
-			if (!workspaceUri || !this._entityUri) {
+			let resolvedWsRoot: URI | undefined;
+			if (this._entityUri) {
+				try {
+					resolvedWsRoot = await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri);
+				} catch {}
+			}
+			const workspaceUri = this._previewWorkspaceUri || resolvedWsRoot || this._entityUri;
+			const effectiveEntityUri = this._isPreviewMode ? (workspaceUri || this._entityUri) : this._entityUri;
+			if (!workspaceUri || !effectiveEntityUri) {
 				throw new Error('No active ticket or workspace selected.');
 			}
 
 			const ticketContext: { [key: string]: any } = {
 				title: this._lastParsedData?.title || '',
+				Title: this._lastParsedData?.title || '',
 				description: this._lastParsedData?.description || '',
+				Description: this._lastParsedData?.description || '',
 				ticketId: this._lastParsedData?.ticketId || '',
 				status: this._lastParsedData?.status || '',
 				...((this._lastParsedData as any)?.data || {}),
 				...(this._lastParsedData?.customMetadata || {})
 			};
 
+			// Populate clean resolved field values from live DOM and saved metadata (including renamed fields like 'Position Tree')
+			try {
+				const resolvedMap = this._buildInterpolationParamMap();
+				resolvedMap.forEach((val, key) => {
+					if (val !== undefined && val !== '') {
+						ticketContext[key] = val;
+					}
+				});
+			} catch {}
+
+			if (this._lastCustomModule?.fields) {
+				for (const f of this._lastCustomModule.fields) {
+					if (f.type === 'parameters' && Array.isArray(f.parameters)) {
+						const pKey = f.label || f.id || 'Parameters';
+						const pMap: Record<string, any> = {};
+						for (const p of f.parameters) {
+							if (p.name) {
+								pMap[p.name] = p.defaultValue ?? '';
+							}
+						}
+						const rawSavedP = this._lastParsedData?.customMetadata?.[pKey] ?? this._lastParsedData?.customMetadata?.[f.id];
+						if (rawSavedP && typeof rawSavedP === 'string') {
+							try {
+								const parsedP = JSON.parse(rawSavedP);
+								if (parsedP && typeof parsedP === 'object' && !Array.isArray(parsedP)) {
+									Object.assign(pMap, parsedP);
+								}
+							} catch {}
+						}
+						if (this._container) {
+							const pInputs = this._container.querySelectorAll('.ticket-parameter-input') as NodeListOf<HTMLInputElement | HTMLSelectElement>;
+							pInputs.forEach(inp => {
+								const pName = inp.getAttribute('data-param-name');
+								if (pName && Object.prototype.hasOwnProperty.call(pMap, pName)) {
+									pMap[pName] = inp.value;
+								}
+							});
+						}
+						ticketContext[pKey] = pMap;
+						ticketContext['Parameters'] = { ...(ticketContext['Parameters'] || {}), ...pMap };
+					} else if (f.type === 'table') {
+						const tKey = f.label || f.id;
+						if (tKey) {
+							const rowsJsonStr = ticketContext[`${tKey}.rows`];
+							if (typeof rowsJsonStr === 'string' && rowsJsonStr.trim().startsWith('[')) {
+								try {
+									const parsedRows = JSON.parse(rowsJsonStr.trim());
+									if (Array.isArray(parsedRows)) {
+										ticketContext[tKey] = {
+											rows: parsedRows,
+											columns: f.tableColumns || [],
+											sqlOutput: ticketContext[`${tKey}.sqlOutput`] || ''
+										};
+									}
+								} catch {}
+							}
+						}
+					}
+				}
+			}
+
 			const externalScripts = this._getCardExternalScripts(card);
 			const res = await runtimeService.executePythonScript(
 				workspaceUri,
-				this._entityUri,
+				effectiveEntityUri,
 				pythonPath,
 				interpolatedCode,
 				ticketContext,
@@ -3733,13 +12659,13 @@ ${rawErr}
 						resultBlock = document.createElement('div');
 						resultBlock.className = 'python-result-block';
 						resultBlock.style.cssText = 'background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;';
-						resultBlock.innerHTML = `
+						this._setElementHTML(resultBlock, `
 							<div style="display: flex; justify-content: space-between; align-items: center;">
 								<span style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">Return Value (Output):</span>
 								<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
 							</div>
 							<pre class="python-result-display" style="margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;"></pre>
-						`;
+						`);
 						outSection.insertBefore(resultBlock, outSection.firstChild);
 					}
 				}
@@ -3762,6 +12688,14 @@ ${rawErr}
 
 			// Update customMetadata
 			await this._savePythonDataFromCard(card, fieldKey, res.output, res.exitCode, res.durationMs, res.result);
+
+			// Automatically sync return value / output to any downstream Output Manifest primitive cards
+			if (res.success && (res.result !== undefined || (res.output && res.output.trim()))) {
+				const syncOutStr = res.result !== undefined
+					? (typeof res.result === 'object' ? JSON.stringify(res.result, null, 2) : String(res.result))
+					: res.output;
+				await this._autoUpdateOutputPrimitives(syncOutStr, fieldKey);
+			}
 
 			// Also update interpreter input if auto-resolved
 			if (interpInput && !pythonPath && res.pythonPath) {
@@ -3811,7 +12745,11 @@ ${rawErr}
 			if (!runtimeService) {
 				throw new Error('Ticket workflow runtime service not available.');
 			}
-			const workspaceUri = this._entityUri ? this._workspacesExplorerService.findRootWorkspace(this._entityUri) || this._entityUri : this._entityUri;
+			let wsRoot: URI | undefined;
+			if (this._entityUri) {
+				try { wsRoot = await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri); } catch {}
+			}
+			const workspaceUri = wsRoot || this._entityUri;
 			if (!workspaceUri) {
 				throw new Error('No workspace context.');
 			}
@@ -3861,7 +12799,10 @@ ${rawErr}
 				title: 'Select External Python Script (.py)'
 			});
 			if (uris && uris.length > 0) {
-				const wsUri = this._entityUri ? this._workspacesExplorerService.findRootWorkspace(this._entityUri) || this._entityUri : this._entityUri;
+				let wsUri: URI | undefined = this._entityUri;
+				if (this._entityUri) {
+					try { wsUri = (await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri)) || this._entityUri; } catch {}
+				}
 				const currentScripts = this._getCardExternalScripts(card);
 				for (const u of uris) {
 					let p = u.fsPath;
@@ -3923,7 +12864,10 @@ ${rawErr}
 			});
 			if (uris && uris.length > 0) {
 				const pickedUri = uris[0];
-				const wsUri = this._entityUri ? this._workspacesExplorerService.findRootWorkspace(this._entityUri) || this._entityUri : this._entityUri;
+				let wsUri: URI | undefined = this._entityUri;
+				if (this._entityUri) {
+					try { wsUri = (await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri)) || this._entityUri; } catch {}
+				}
 				let finalPath = pickedUri.fsPath;
 				if (wsUri && finalPath.startsWith(wsUri.fsPath)) {
 					finalPath = finalPath.substring(wsUri.fsPath.length).replace(/^[/\\]+/, '');
@@ -3961,7 +12905,11 @@ ${rawErr}
 			if (!runtimeService) {
 				throw new Error('Ticket workflow runtime service not available.');
 			}
-			const workspaceUri = this._entityUri ? this._workspacesExplorerService.findRootWorkspace(this._entityUri) || this._entityUri : this._entityUri;
+			let wsRoot: URI | undefined;
+			if (this._entityUri) {
+				try { wsRoot = await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri); } catch {}
+			}
+			const workspaceUri = wsRoot || this._entityUri;
 			if (!workspaceUri) {
 				throw new Error('No workspace context.');
 			}
@@ -4004,22 +12952,34 @@ ${rawErr}
 			if (subItems.length > 0) {
 				let targetItem: HTMLElement | null = null;
 				if (sourceFieldKey) {
+					const sourceSchemaField = this._lastCustomModule?.fields?.find((f: any) =>
+						(f.label && f.label.toLowerCase() === sourceFieldKey.toLowerCase()) ||
+						(f.id && f.id.toLowerCase() === sourceFieldKey.toLowerCase()) ||
+						(f.id && f.id.toLowerCase().replace(/_/g, ' ') === sourceFieldKey.toLowerCase().replace(/_/g, ' '))
+					);
+					const matchAliases = new Set<string>([sourceFieldKey.toLowerCase(), sourceFieldKey.toLowerCase().replace(/_/g, ' ')]);
+					if (sourceSchemaField?.label) {
+						matchAliases.add(sourceSchemaField.label.toLowerCase());
+					}
+					if (sourceSchemaField?.id) {
+						matchAliases.add(sourceSchemaField.id.toLowerCase());
+						matchAliases.add(sourceSchemaField.id.toLowerCase().replace(/_/g, ' '));
+					}
 					for (const item of Array.from(subItems)) {
-						const specKey = item.getAttribute('data-spec-key') || '';
-						if (specKey.toLowerCase() === sourceFieldKey.toLowerCase()) {
+						const specKey = (item.getAttribute('data-spec-key') || '').trim().toLowerCase();
+						if (specKey && (matchAliases.has(specKey) || matchAliases.has(specKey.replace(/_/g, ' ')))) {
 							targetItem = item;
 							break;
 						}
 					}
-				}
-				if (!targetItem) {
+				} else {
 					targetItem = subItems[0];
 				}
 				if (targetItem) {
 					const specKey = targetItem.getAttribute('data-spec-key') || '';
 					await this._setOutputItemContent(card, fieldKey, specKey, output);
 				}
-			} else {
+			} else if (!sourceFieldKey) {
 				await this._setResultCardContent(card, fieldKey, output);
 			}
 		}
@@ -4027,6 +12987,99 @@ ${rawErr}
 
 	private async _autoUpdateResultPrimitives(output: string): Promise<void> {
 		await this._autoUpdateOutputPrimitives(output);
+	}
+
+	private _getOutputPaginationState(stateKey: string): { page: number; pageSize: number } {
+		if (!stateKey) {
+			return { page: 1, pageSize: 10 };
+		}
+		let st = this._outputPaginationState.get(stateKey);
+		if (!st) {
+			st = { page: 1, pageSize: 10 };
+			this._outputPaginationState.set(stateKey, st);
+		}
+		return st;
+	}
+
+	private _renderOutputPaginationBarHtml(stateKey: string, totalRows: number, page: number, pageSize: number, unitLabel: string = 'records'): string {
+		if (totalRows <= 10 && pageSize === 10) {
+			return '';
+		}
+		const safePageSize = Math.max(1, pageSize || 10);
+		const totalPages = Math.max(1, Math.ceil(totalRows / safePageSize));
+		const safePage = Math.min(Math.max(1, page || 1), totalPages);
+		const startIdx = totalRows === 0 ? 0 : (safePage - 1) * safePageSize + 1;
+		const endIdx = Math.min(safePage * safePageSize, totalRows);
+		const canPrev = safePage > 1;
+		const canNext = safePage < totalPages;
+		const escKey = this._escapeHtmlAttr(stateKey);
+
+		const btnBaseStyle = 'padding: 2px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(255,255,255,0.16); background: rgba(255,255,255,0.06); color: inherit; transition: all 0.12s ease;';
+		const prevStyle = `${btnBaseStyle} cursor: ${canPrev ? 'pointer' : 'default'}; opacity: ${canPrev ? '0.92' : '0.35'};`;
+		const nextStyle = `${btnBaseStyle} cursor: ${canNext ? 'pointer' : 'default'}; opacity: ${canNext ? '0.92' : '0.35'};`;
+
+		const pageSizes = [10, 25, 50, 100];
+		const sizeOptsHtml = pageSizes
+			.map(sz => `<option value="${sz}" ${sz === safePageSize ? 'selected' : ''}>${sz} / page</option>`)
+			.join('');
+
+		return `
+			<div class="output-pagination-toolbar" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 6px 10px; margin-bottom: 6px; border-radius: 6px; background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(99, 102, 241, 0.25); font-size: 11px;">
+				<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+					<span style="color: #a5b4fc; font-weight: 600;">Showing ${startIdx}–${endIdx} of ${totalRows} ${this._escapeHtml(unitLabel)}</span>
+					<span style="font-size: 10px; padding: 1px 6px; border-radius: 10px; background: rgba(16, 185, 129, 0.14); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.3);" title="Programmatic runtime receives all ${totalRows} complete records">Full ${totalRows} preserved in runtime</span>
+				</div>
+				<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="1" data-disabled="${!canPrev}" ${!canPrev ? 'disabled' : ''} style="${prevStyle}" title="First Page">«</button>
+					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${safePage - 1}" data-disabled="${!canPrev}" ${!canPrev ? 'disabled' : ''} style="${prevStyle}" title="Previous Page">‹ Prev</button>
+					<span style="font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px; padding: 0 4px; opacity: 0.9;">Page <strong>${safePage}</strong> / ${totalPages}</span>
+					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${safePage + 1}" data-disabled="${!canNext}" ${!canNext ? 'disabled' : ''} style="${nextStyle}" title="Next Page">Next ›</button>
+					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${totalPages}" data-disabled="${!canNext}" ${!canNext ? 'disabled' : ''} style="${nextStyle}" title="Last Page">»</button>
+					<select class="output-page-size-select" data-state-key="${escKey}" style="padding: 2px 6px; font-size: 10.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.35); color: inherit; cursor: pointer;" title="Records per page">
+						${sizeOptsHtml}
+					</select>
+				</div>
+			</div>
+		`;
+	}
+
+	private _renderOutputViewportByFormat(text: string, format: string, stateKey: string): string {
+		const { page, pageSize } = this._getOutputPaginationState(stateKey);
+		if (format === 'table') {
+			return this._renderResultTableHtml(text, page, pageSize, stateKey);
+		} else if (format === 'markdown') {
+			return this._markdownToHtml(text);
+		} else if (format === 'json') {
+			return this._renderResultJsonHtml(text, page, pageSize, stateKey);
+		} else {
+			return this._renderResultTextHtml(text, page, pageSize, stateKey);
+		}
+	}
+
+	private _rerenderOutputViewportByStateKey(triggerEl: HTMLElement, stateKey: string): void {
+		const specItem = triggerEl.closest('.output-spec-item') as HTMLElement | null;
+		if (specItem) {
+			const rawTa = specItem.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+			const formatSelector = specItem.querySelector('.output-item-format-selector') as HTMLSelectElement | null;
+			const viewport = specItem.querySelector('.output-item-viewport') as HTMLElement | null;
+			if (viewport) {
+				const text = rawTa?.value || '';
+				const format = formatSelector?.value || 'table';
+				this._setElementHTML(viewport, this._renderOutputViewportByFormat(text, format, stateKey));
+			}
+			return;
+		}
+		const card = triggerEl.closest('.result-primitive-card, .output-primitive-card') as HTMLElement | null;
+		if (card) {
+			const rawTa = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
+			const formatSelector = card.querySelector('.result-format-selector') as HTMLSelectElement | null;
+			const viewport = card.querySelector('.result-viewport-container') as HTMLElement | null;
+			if (viewport) {
+				const text = rawTa?.value || '';
+				const format = formatSelector?.value || 'table';
+				this._setElementHTML(viewport, this._renderOutputViewportByFormat(text, format, stateKey));
+			}
+		}
 	}
 
 	private async _setOutputItemContent(card: HTMLElement, fieldKey: string, specKey: string, content: string): Promise<void> {
@@ -4038,18 +13091,12 @@ ${rawErr}
 
 		const formatSelector = itemContainer.querySelector('.output-item-format-selector') as HTMLSelectElement | null;
 		const format = formatSelector?.value || 'table';
+		const stateKey = `${fieldKey}::${specKey}`;
 
 		const viewport = itemContainer.querySelector('.output-item-viewport') as HTMLElement | null;
 		if (viewport) {
-			if (format === 'table') {
-				viewport.innerHTML = this._renderResultTableHtml(content);
-			} else if (format === 'markdown') {
-				viewport.innerHTML = this._markdownToHtml(content);
-			} else if (format === 'json') {
-				viewport.innerHTML = this._renderResultJsonHtml(content);
-			} else {
-				viewport.innerHTML = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(content)}</pre>`;
-			}
+			viewport.setAttribute('data-state-key', stateKey);
+			this._setElementHTML(viewport, this._renderOutputViewportByFormat(content, format, stateKey));
 		}
 
 		let currentData: Record<string, unknown> = {};
@@ -4071,15 +13118,7 @@ ${rawErr}
 			lastUpdated: new Date().toLocaleTimeString()
 		};
 
-		const updatedCustom = {
-			...(this._lastParsedData?.customMetadata || {}),
-			[fieldKey]: JSON.stringify(currentData)
-		};
-		await this._handleMessage({
-			type: 'saveMetadata',
-			metadata: {},
-			customMetadata: updatedCustom
-		});
+		await this._persistCustomFieldQuietly(fieldKey, JSON.stringify(currentData));
 	}
 
 	private async _updateOutputItemFormat(card: HTMLElement, fieldKey: string, specKey: string, format: string): Promise<void> {
@@ -4088,18 +13127,12 @@ ${rawErr}
 
 		const rawTa = itemContainer.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
 		const text = rawTa?.value || '';
+		const stateKey = `${fieldKey}::${specKey}`;
 
 		const viewport = itemContainer.querySelector('.output-item-viewport') as HTMLElement | null;
 		if (viewport) {
-			if (format === 'table') {
-				viewport.innerHTML = this._renderResultTableHtml(text);
-			} else if (format === 'markdown') {
-				viewport.innerHTML = this._markdownToHtml(text);
-			} else if (format === 'json') {
-				viewport.innerHTML = this._renderResultJsonHtml(text);
-			} else {
-				viewport.innerHTML = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(text)}</pre>`;
-			}
+			viewport.setAttribute('data-state-key', stateKey);
+			this._setElementHTML(viewport, this._renderOutputViewportByFormat(text, format, stateKey));
 		}
 
 		let currentData: Record<string, unknown> = {};
@@ -4121,23 +13154,16 @@ ${rawErr}
 			lastUpdated: new Date().toLocaleTimeString()
 		};
 
-		const updatedCustom = {
-			...(this._lastParsedData?.customMetadata || {}),
-			[fieldKey]: JSON.stringify(currentData)
-		};
-		await this._handleMessage({
-			type: 'saveMetadata',
-			metadata: {},
-			customMetadata: updatedCustom
-		});
+		await this._persistCustomFieldQuietly(fieldKey, JSON.stringify(currentData));
 	}
 
 	private async _syncAllOutputItems(card: HTMLElement, fieldKey: string): Promise<void> {
 		const items = card.querySelectorAll('.output-spec-item') as NodeListOf<HTMLElement>;
 		if (items.length === 0) {
 			const promptCard = this._container?.querySelector('.prompt-primitive-card');
+			const rawPromptTa = promptCard?.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
 			const promptOut = promptCard?.querySelector('.prompt-output-display');
-			const text = promptOut?.textContent || '';
+			const text = rawPromptTa?.value || promptOut?.textContent || '';
 			if (text && !text.includes('No execution output yet.')) {
 				await this._setResultCardContent(card, fieldKey, text);
 				this._notificationService.info(`Output synced from AI Prompt into '${fieldKey}'.`);
@@ -4161,58 +13187,123 @@ ${rawErr}
 
 			let resolvedText = '';
 
+			const matchingField = this._lastCustomModule?.fields?.find((f: any) =>
+				(f.label && f.label.toLowerCase() === specKey.toLowerCase()) ||
+				(f.id && f.id.toLowerCase() === specKey.toLowerCase()) ||
+				(f.id && f.id.toLowerCase().replace(/_/g, ' ') === specKey.toLowerCase().replace(/_/g, ' '))
+			);
+
 			if (this._container) {
-				const matchedCard = this._container.querySelector(`.section-card[data-field-key="${specKey}"], [data-field-key="${specKey}"]`);
+				const candidateSelectors = [
+					`.section-card[data-field-key="${specKey}"]`,
+					`[data-field-key="${specKey}"]`
+				];
+				if (matchingField?.id) {
+					candidateSelectors.push(`[data-field-id="${matchingField.id}"]`);
+					const idSpaced = matchingField.id.replace(/_/g, ' ');
+					candidateSelectors.push(`[data-field-key="${idSpaced}"]`);
+				}
+				let matchedCard: Element | null = null;
+				for (const sel of candidateSelectors) {
+					matchedCard = this._container.querySelector(sel);
+					if (matchedCard) { break; }
+				}
+				if (!matchedCard && matchingField?.id) {
+					const allCards = Array.from(this._container.querySelectorAll('.section-card[data-field-key]'));
+					matchedCard = allCards.find(c => {
+						const fk = (c.getAttribute('data-field-key') || '').toLowerCase();
+						return fk === specKey.toLowerCase() || fk === matchingField.id.toLowerCase().replace(/_/g, ' ');
+					}) || null;
+				}
 				if (matchedCard) {
 					const browserContent = matchedCard.querySelector('.browser-content-display') as HTMLElement | null;
+					const promptRawTa = matchedCard.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
 					const promptContent = matchedCard.querySelector('.prompt-output-display') as HTMLElement | null;
+					const tableJsonAttr = matchedCard.getAttribute('data-table-json');
+					const sqlContent = matchedCard.querySelector('.sql-output-box') as HTMLElement | null;
 					if (browserContent && !browserContent.textContent?.startsWith('No webpage content')) {
 						resolvedText = browserContent.textContent || '';
+					} else if (promptRawTa && promptRawTa.value.trim() !== '') {
+						resolvedText = promptRawTa.value;
 					} else if (promptContent && !promptContent.textContent?.includes('No execution output yet.')) {
 						resolvedText = promptContent.textContent || '';
+					} else if (tableJsonAttr) {
+						try {
+							const tObj = JSON.parse(tableJsonAttr);
+							if (Array.isArray(tObj.rows) && tObj.rows.length > 0) {
+								resolvedText = JSON.stringify(tObj.rows, null, 2);
+							}
+						} catch {}
+						if (!resolvedText && sqlContent && sqlContent.style.fontStyle !== 'italic' && !sqlContent.textContent?.startsWith('No SQL execution output yet.')) {
+							resolvedText = sqlContent.textContent || '';
+						}
+					} else if (sqlContent && sqlContent.style.fontStyle !== 'italic' && !sqlContent.textContent?.startsWith('No SQL execution output yet.')) {
+						resolvedText = sqlContent.textContent || '';
 					}
 				}
 			}
 
 			if (!resolvedText && this._lastParsedData?.customMetadata) {
-				const mVal = this._lastParsedData.customMetadata[specKey];
-				const matchingField = this._lastCustomModule?.fields?.find((f: any) =>
-					(f.label && f.label.toLowerCase() === specKey.toLowerCase()) ||
-					(f.id && f.id.toLowerCase() === specKey.toLowerCase())
-				);
+				const mVal = this._lookupCustomMetadataByField(specKey, matchingField);
 				const isBrowserField = matchingField?.type === 'browser' || specKey.toLowerCase().includes('browser');
 				const isPromptField = matchingField?.type === 'prompt' || specKey.toLowerCase().includes('prompt');
+				const isPythonField = matchingField?.type === 'python' || specKey.toLowerCase().includes('python');
+				const isParametersField = matchingField?.type === 'parameters' || specKey.toLowerCase() === 'parameters';
+				const isTableField = matchingField?.type === 'table' || specKey.toLowerCase().includes('table');
+
+				const extractFromRec = (pRec: Record<string, unknown>): string => {
+					if (isBrowserField) {
+						return String(pRec.content ?? matchingField?.defaultContent ?? '');
+					} else if (isPromptField) {
+						return String(pRec.output ?? pRec.text ?? '');
+					} else if (isPythonField) {
+						const v = (pRec.result !== undefined && pRec.result !== null && pRec.result !== '') ? pRec.result : (pRec.output ?? '');
+						return typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v ?? '');
+					} else if (isParametersField) {
+						return JSON.stringify(pRec, null, 2);
+					} else if (isTableField) {
+						if (Array.isArray(pRec.rows) && pRec.rows.length > 0) {
+							return JSON.stringify(pRec.rows, null, 2);
+						}
+						if (typeof pRec.sqlOutput === 'string' && pRec.sqlOutput.trim() !== '') {
+							return pRec.sqlOutput.trim();
+						}
+						return Array.isArray(pRec.rows) ? JSON.stringify(pRec.rows, null, 2) : JSON.stringify(pRec, null, 2);
+					} else {
+						const v = pRec.result ?? pRec.output ?? pRec.content ?? pRec.text;
+						if (v !== undefined && v !== null) {
+							return typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v);
+						}
+						return JSON.stringify(pRec, null, 2);
+					}
+				};
 
 				if (typeof mVal === 'string') {
 					try {
 						const parsed = JSON.parse(mVal);
-						if (typeof parsed === 'object' && parsed !== null) {
-							const pRec = parsed as Record<string, unknown>;
-							if (isBrowserField) {
-								resolvedText = String(pRec.content ?? matchingField?.defaultContent ?? '');
-							} else if (isPromptField) {
-								resolvedText = String(pRec.output ?? '');
-							} else {
-								resolvedText = String(pRec.output ?? pRec.content ?? pRec.result ?? '');
-							}
+						if (Array.isArray(parsed)) {
+							resolvedText = JSON.stringify(parsed, null, 2);
+						} else if (typeof parsed === 'object' && parsed !== null) {
+							resolvedText = extractFromRec(parsed as Record<string, unknown>);
 						} else if (isBrowserField) {
 							resolvedText = matchingField?.defaultContent || '';
 						} else if (isPromptField) {
 							resolvedText = '';
+						} else {
+							resolvedText = mVal;
 						}
 					} catch {
 						if (isBrowserField) {
 							resolvedText = matchingField?.defaultContent || '';
+						} else if (!isPromptField) {
+							resolvedText = mVal;
 						}
 					}
 				} else if (typeof mVal === 'object' && mVal !== null) {
-					const mRec = mVal as Record<string, unknown>;
-					if (isBrowserField) {
-						resolvedText = String(mRec.content ?? matchingField?.defaultContent ?? '');
-					} else if (isPromptField) {
-						resolvedText = String(mRec.output ?? '');
+					if (Array.isArray(mVal)) {
+						resolvedText = JSON.stringify(mVal, null, 2);
 					} else {
-						resolvedText = String(mRec.output ?? mRec.content ?? mRec.result ?? '');
+						resolvedText = extractFromRec(mVal as Record<string, unknown>);
 					}
 				}
 			}
@@ -4223,18 +13314,12 @@ ${rawErr}
 
 				const formatSelector = item.querySelector('.output-item-format-selector') as HTMLSelectElement | null;
 				const format = formatSelector?.value || 'table';
+				const stateKey = `${fieldKey}::${specKey}`;
 
 				const viewport = item.querySelector('.output-item-viewport') as HTMLElement | null;
 				if (viewport) {
-					if (format === 'table') {
-						viewport.innerHTML = this._renderResultTableHtml(resolvedText);
-					} else if (format === 'markdown') {
-						viewport.innerHTML = this._markdownToHtml(resolvedText);
-					} else if (format === 'json') {
-						viewport.innerHTML = this._renderResultJsonHtml(resolvedText);
-					} else {
-						viewport.innerHTML = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(resolvedText)}</pre>`;
-					}
+					viewport.setAttribute('data-state-key', stateKey);
+					this._setElementHTML(viewport, this._renderOutputViewportByFormat(resolvedText, format, stateKey));
 				}
 
 				currentData[specKey] = {
@@ -4245,16 +13330,7 @@ ${rawErr}
 			}
 		}
 
-		const updatedCustom = {
-			...(this._lastParsedData?.customMetadata || {}),
-			[fieldKey]: JSON.stringify(currentData)
-		};
-		await this._handleMessage({
-			type: 'saveMetadata',
-			metadata: {},
-			customMetadata: updatedCustom
-		});
-
+		await this._persistCustomFieldQuietly(fieldKey, JSON.stringify(currentData));
 		this._notificationService.info(`Output items synchronized from live primitives.`);
 	}
 
@@ -4263,18 +13339,12 @@ ${rawErr}
 		const format = formatSelector?.value || 'table';
 		const rawTa = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
 		if (rawTa) rawTa.value = output;
+		const stateKey = `${fieldKey}::__single__`;
 
 		const viewport = card.querySelector('.result-viewport-container') as HTMLElement | null;
 		if (viewport) {
-			if (format === 'table') {
-				viewport.innerHTML = this._renderResultTableHtml(output);
-			} else if (format === 'markdown') {
-				viewport.innerHTML = this._markdownToHtml(output);
-			} else if (format === 'json') {
-				viewport.innerHTML = this._renderResultJsonHtml(output);
-			} else {
-				viewport.innerHTML = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(output)}</pre>`;
-			}
+			viewport.setAttribute('data-state-key', stateKey);
+			this._setElementHTML(viewport, this._renderOutputViewportByFormat(output, format, stateKey));
 		}
 
 		const statusEl = card.querySelector('.result-status-text') as HTMLElement | null;
@@ -4289,32 +13359,18 @@ ${rawErr}
 			format,
 			lastUpdated: timeStr
 		};
-		const updatedCustom = {
-			...(this._lastParsedData?.customMetadata || {}),
-			[fieldKey]: JSON.stringify(resultData)
-		};
-		await this._handleMessage({
-			type: 'saveMetadata',
-			metadata: {},
-			customMetadata: updatedCustom
-		});
+		await this._persistCustomFieldQuietly(fieldKey, JSON.stringify(resultData));
 	}
 
 	private async _updateResultCardFormat(card: HTMLElement, fieldKey: string, format: string): Promise<void> {
 		const rawTa = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
 		const text = rawTa?.value || '';
+		const stateKey = `${fieldKey}::__single__`;
 
 		const viewport = card.querySelector('.result-viewport-container') as HTMLElement | null;
 		if (viewport) {
-			if (format === 'table') {
-				viewport.innerHTML = this._renderResultTableHtml(text);
-			} else if (format === 'markdown') {
-				viewport.innerHTML = this._markdownToHtml(text);
-			} else if (format === 'json') {
-				viewport.innerHTML = this._renderResultJsonHtml(text);
-			} else {
-				viewport.innerHTML = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(text)}</pre>`;
-			}
+			viewport.setAttribute('data-state-key', stateKey);
+			this._setElementHTML(viewport, this._renderOutputViewportByFormat(text, format, stateKey));
 		}
 
 		const statusEl = card.querySelector('.result-status-text') as HTMLElement | null;
@@ -4324,25 +13380,23 @@ ${rawErr}
 			format,
 			lastUpdated: rawStatus.includes(':') ? rawStatus.replace(/^(?:Updated|Auto-synced):\s*/, '') : ''
 		};
-		const updatedCustom = {
-			...(this._lastParsedData?.customMetadata || {}),
-			[fieldKey]: JSON.stringify(resultData)
-		};
-		await this._handleMessage({
-			type: 'saveMetadata',
-			metadata: {},
-			customMetadata: updatedCustom
-		});
+		await this._persistCustomFieldQuietly(fieldKey, JSON.stringify(resultData));
 	}
 
-	private _renderResultTableHtml(text: string): string {
+	private _renderResultTableHtml(text: string, page: number = 1, pageSize: number = 10, stateKey: string = ''): string {
 		if (!text || !text.trim()) {
 			return '<span style="opacity: 0.4; font-style: italic;">No result content to display in table.</span>';
 		}
 
 		const trimmed = text.trim();
+		const safePageSize = Math.max(1, pageSize || 10);
 
-		// 1. Try parsing JSON array of objects
+		// 0. If content is a SQL Execution Output log, preserve the full log & query preview as clean pre-formatted text
+		if (/^Status:\s*(SUCCESS|FAILED)\b/i.test(trimmed) || trimmed.includes('--- [Resolved SQL Statement] ---')) {
+			return `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(trimmed)}</pre>`;
+		}
+
+		// 1. Try parsing JSON array of objects (or wrapper object containing an array of objects)
 		let jsonObj: any = null;
 		if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
 			try {
@@ -4356,19 +13410,56 @@ ${rawErr}
 		}
 
 		if (jsonObj) {
-			const rows = Array.isArray(jsonObj) ? jsonObj : (Array.isArray(jsonObj.data) ? jsonObj.data : (Array.isArray(jsonObj.items) ? jsonObj.items : (Array.isArray(jsonObj.results) ? jsonObj.results : null)));
+			// If jsonObj is an internal Data Table state object ({ columns, rows, dbEngine, sqlOutput }), prefer rows if non-empty, else sqlOutput
+			if (!Array.isArray(jsonObj) && typeof jsonObj === 'object' && ('sqlOutput' in jsonObj || ('columns' in jsonObj && 'rows' in jsonObj) || 'dbEngine' in jsonObj)) {
+				if (Array.isArray(jsonObj.rows) && jsonObj.rows.length > 0) {
+					jsonObj = jsonObj.rows;
+				} else if (typeof jsonObj.sqlOutput === 'string' && jsonObj.sqlOutput.trim() !== '') {
+					return `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(jsonObj.sqlOutput.trim())}</pre>`;
+				} else if (Array.isArray(jsonObj.rows)) {
+					jsonObj = jsonObj.rows;
+				}
+			}
+			let rows: any[] | null = Array.isArray(jsonObj)
+				? jsonObj
+				: (Array.isArray(jsonObj.data) ? jsonObj.data
+					: (Array.isArray(jsonObj.items) ? jsonObj.items
+						: (Array.isArray(jsonObj.results) ? jsonObj.results
+							: (Array.isArray(jsonObj.jobs) ? jsonObj.jobs
+								: (Array.isArray(jsonObj.rows) ? jsonObj.rows
+									: (Array.isArray(jsonObj.records) ? jsonObj.records : null))))));
+			if (!rows && typeof jsonObj === 'object' && jsonObj !== null && !Array.isArray(jsonObj)) {
+				const arrayKeys = Object.keys(jsonObj).filter(k => k !== 'columns' && Array.isArray(jsonObj[k]) && jsonObj[k].length > 0 && typeof jsonObj[k][0] === 'object' && jsonObj[k][0] !== null);
+				if (arrayKeys.length === 1) {
+					rows = jsonObj[arrayKeys[0]];
+				}
+			}
 			if (rows && rows.length > 0 && typeof rows[0] === 'object' && rows[0] !== null) {
-				const headers = Array.from(new Set(rows.flatMap(r => typeof r === 'object' && r !== null ? Object.keys(r) : [])));
-				let tableHtml = '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
+				const totalRows = rows.length;
+				const totalPages = Math.max(1, Math.ceil(totalRows / safePageSize));
+				const safePage = Math.min(Math.max(1, page || 1), totalPages);
+				const startIdx = (safePage - 1) * safePageSize;
+				const endIdx = Math.min(startIdx + safePageSize, totalRows);
+				const pageRows = rows.slice(startIdx, endIdx);
+
+				const sampleForHeaders = rows.length > 50 ? [...pageRows, ...rows.slice(0, 30)] : rows;
+				const headers = Array.from(new Set(sampleForHeaders.flatMap(r => typeof r === 'object' && r !== null ? Object.keys(r) : [])));
+				const paginationBar = this._renderOutputPaginationBarHtml(stateKey, totalRows, safePage, safePageSize, 'records');
+
+				let tableHtml = paginationBar;
+				tableHtml += '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
 				tableHtml += '<table class="result-data-table" style="width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;">';
 				tableHtml += '<thead><tr style="background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15); position: sticky; top: 0; z-index: 1;">';
+				tableHtml += `<th style="padding: 8px 10px; font-weight: 600; color: #94a3b8; width: 36px; text-align: center;">#</th>`;
 				for (const h of headers) {
 					tableHtml += `<th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc; text-transform: capitalize; white-space: nowrap;">${this._escapeHtml(h)}</th>`;
 				}
 				tableHtml += '</tr></thead><tbody>';
-				rows.forEach((r, idx) => {
+				pageRows.forEach((r, idx) => {
+					const globalIdx = startIdx + idx + 1;
 					const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.12)';
 					tableHtml += `<tr style="background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05); transition: background 0.15s ease;">`;
+					tableHtml += `<td style="padding: 7px 10px; vertical-align: top; text-align: center; opacity: 0.55; font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px;">${globalIdx}</td>`;
 					for (const h of headers) {
 						const cellVal = r[h] !== undefined && r[h] !== null ? (typeof r[h] === 'object' ? JSON.stringify(r[h]) : String(r[h])) : '';
 						const isLink = /^https?:\/\//i.test(cellVal.trim());
@@ -4400,15 +13491,24 @@ ${rawErr}
 				return inner.split('|').map(c => c.trim());
 			};
 
+			const totalRows = dataLines.length;
+			const totalPages = Math.max(1, Math.ceil(totalRows / safePageSize));
+			const safePage = Math.min(Math.max(1, page || 1), totalPages);
+			const startIdx = (safePage - 1) * safePageSize;
+			const endIdx = Math.min(startIdx + safePageSize, totalRows);
+			const pageLines = dataLines.slice(startIdx, endIdx);
+
 			const headers = splitCells(headerLine);
-			let tableHtml = '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
+			const paginationBar = this._renderOutputPaginationBarHtml(stateKey, totalRows, safePage, safePageSize, 'rows');
+			let tableHtml = paginationBar;
+			tableHtml += '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
 			tableHtml += '<table class="result-data-table" style="width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;">';
 			tableHtml += '<thead><tr style="background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15); position: sticky; top: 0; z-index: 1;">';
 			for (const h of headers) {
 				tableHtml += `<th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc; white-space: nowrap;">${this._escapeHtml(h)}</th>`;
 			}
 			tableHtml += '</tr></thead><tbody>';
-			dataLines.forEach((line, idx) => {
+			pageLines.forEach((line, idx) => {
 				const cells = splitCells(line);
 				const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.12)';
 				tableHtml += `<tr style="background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05);">`;
@@ -4426,38 +13526,39 @@ ${rawErr}
 			return tableHtml;
 		}
 
-		// 3. Fallback: Key-Value pairs check
-		const kvPairs: Array<{ key: string; val: string }> = [];
-		for (const line of lines) {
-			const m = line.match(/^([^:\n]{1,40}):\s*(.+)$/);
-			if (m) {
-				kvPairs.push({ key: m[1].trim(), val: m[2].trim() });
+		// 3. Fallback: Key-Value pairs check (only when text is not JSON and most non-empty lines are clean Key: Value pairs)
+		if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+			const nonEmptyLines = lines.map(l => l.trim()).filter(Boolean);
+			const kvPairs: Array<{ key: string; val: string }> = [];
+			for (const line of nonEmptyLines) {
+				const m = line.match(/^([^:\n"{}\[\]]{1,40}):\s*(.+)$/);
+				if (m) {
+					kvPairs.push({ key: m[1].trim(), val: m[2].trim() });
+				}
+			}
+			if (kvPairs.length >= 2 && kvPairs.length >= nonEmptyLines.length * 0.7) {
+				let tableHtml = '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
+				tableHtml += '<table class="result-data-table" style="width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;">';
+				tableHtml += '<thead><tr style="background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15);"><th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc; width: 30%;">Property</th><th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc;">Value</th></tr></thead><tbody>';
+				kvPairs.forEach((kv, idx) => {
+					const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.12)';
+					tableHtml += `<tr style="background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05);"><td style="padding: 7px 12px; font-weight: 500; opacity: 0.85;">${this._escapeHtml(kv.key)}</td><td style="padding: 7px 12px;">${this._escapeHtml(kv.val)}</td></tr>`;
+				});
+				tableHtml += '</tbody></table></div>';
+				return tableHtml;
 			}
 		}
-		if (kvPairs.length >= 2) {
-			let tableHtml = '<div style="overflow-x: auto; max-height: 380px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.08);">';
-			tableHtml += '<table class="result-data-table" style="width: 100%; border-collapse: collapse; font-size: 11.5px; text-align: left;">';
-			tableHtml += '<thead><tr style="background: rgba(255,255,255,0.08); border-bottom: 2px solid rgba(255,255,255,0.15);"><th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc; width: 30%;">Property</th><th style="padding: 8px 12px; font-weight: 600; color: #a5b4fc;">Value</th></tr></thead><tbody>';
-			kvPairs.forEach((kv, idx) => {
-				const bg = idx % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.12)';
-				tableHtml += `<tr style="background: ${bg}; border-bottom: 1px solid rgba(255,255,255,0.05);"><td style="padding: 7px 12px; font-weight: 500; opacity: 0.85;">${this._escapeHtml(kv.key)}</td><td style="padding: 7px 12px;">${this._escapeHtml(kv.val)}</td></tr>`;
-			});
-			tableHtml += '</tbody></table></div>';
-			return tableHtml;
-		}
 
-		// 4. Default fallback: Render as pre-formatted text with suggestion note
-		return `
-			<div style="margin-bottom: 8px; font-size: 10.5px; color: #fbbf24; opacity: 0.85;">ℹ Output is plain text or unstructured. Switch to Markdown or Text view for optimal layout:</div>
-			<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; background: rgba(0,0,0,0.2); padding: 8px; border-radius: 5px;">${this._escapeHtml(trimmed)}</pre>
-		`;
+		// 4. Default fallback: Render as clean pre-formatted text (with pagination if huge)
+		return this._renderResultTextHtml(trimmed, page, pageSize, stateKey);
 	}
 
-	private _renderResultJsonHtml(text: string): string {
+	private _renderResultJsonHtml(text: string, page: number = 1, pageSize: number = 10, stateKey: string = ''): string {
 		if (!text || !text.trim()) {
 			return '<span style="opacity: 0.4; font-style: italic;">No JSON content to display.</span>';
 		}
 		const trimmed = text.trim();
+		const safePageSize = Math.max(1, pageSize || 10);
 		let parsed: any = null;
 		try {
 			parsed = JSON.parse(trimmed);
@@ -4469,14 +13570,56 @@ ${rawErr}
 		}
 
 		if (parsed !== null) {
+			const arr = Array.isArray(parsed)
+				? parsed
+				: (parsed && typeof parsed === 'object' && Array.isArray(parsed.rows) ? parsed.rows : null);
+			if (arr && (arr.length > 10 || safePageSize !== 10)) {
+				const totalRows = arr.length;
+				const totalPages = Math.max(1, Math.ceil(totalRows / safePageSize));
+				const safePage = Math.min(Math.max(1, page || 1), totalPages);
+				const startIdx = (safePage - 1) * safePageSize;
+				const endIdx = Math.min(startIdx + safePageSize, totalRows);
+				const pageSlice = arr.slice(startIdx, endIdx);
+				const paginationBar = this._renderOutputPaginationBarHtml(stateKey, totalRows, safePage, safePageSize, 'records');
+				const formatted = JSON.stringify(pageSlice, null, 2);
+				const noteFooter = totalRows > safePageSize
+					? `\n// ... Showing records ${startIdx + 1}–${endIdx} of ${totalRows} (Page ${safePage}/${totalPages}). Complete ${totalRows} records are preserved in runtime data.`
+					: '';
+				return `${paginationBar}<pre style="font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);">${this._escapeHtml(formatted + noteFooter)}</pre>`;
+			}
 			const formatted = JSON.stringify(parsed, null, 2);
-			return `<pre style="font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);">${this._escapeHtml(formatted)}</pre>`;
+			return `<pre style="font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);">${this._escapeHtml(formatted)}</pre>`;
 		}
 
-		return `
-			<div style="margin-bottom: 8px; font-size: 10.5px; color: #fbbf24; opacity: 0.85;">⚠ Content is not strictly valid JSON. Displaying raw format:</div>
-			<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; background: rgba(0,0,0,0.25); padding: 10px; border-radius: 6px; margin: 0;">${this._escapeHtml(trimmed)}</pre>
-		`;
+		return this._renderResultTextHtml(trimmed, page, pageSize, stateKey);
+	}
+
+	private _renderResultTextHtml(text: string, page: number = 1, pageSize: number = 10, stateKey: string = ''): string {
+		if (!text || !text.trim()) {
+			return '<span style="opacity: 0.4; font-style: italic;">No text content.</span>';
+		}
+		const trimmed = text.trim();
+		const safePageSize = Math.max(1, pageSize || 10);
+		if (trimmed.startsWith('[')) {
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (Array.isArray(parsed) && (parsed.length > 10 || safePageSize !== 10)) {
+					const totalRows = parsed.length;
+					const totalPages = Math.max(1, Math.ceil(totalRows / safePageSize));
+					const safePage = Math.min(Math.max(1, page || 1), totalPages);
+					const startIdx = (safePage - 1) * safePageSize;
+					const endIdx = Math.min(startIdx + safePageSize, totalRows);
+					const pageSlice = parsed.slice(startIdx, endIdx);
+					const paginationBar = this._renderOutputPaginationBarHtml(stateKey, totalRows, safePage, safePageSize, 'records');
+					const formatted = JSON.stringify(pageSlice, null, 2);
+					const noteFooter = totalRows > safePageSize
+						? `\n\n... [Showing records ${startIdx + 1}–${endIdx} of ${totalRows} (Page ${safePage}/${totalPages}). Complete ${totalRows} records are preserved in runtime data.]`
+						: '';
+					return `${paginationBar}<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(formatted + noteFooter)}</pre>`;
+				}
+			} catch {}
+		}
+		return `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(trimmed)}</pre>`;
 	}
 
 	private _exportResultToCsv(rawText: string, fieldKey: string): void {
@@ -4564,8 +13707,8 @@ ${rawErr}
 
 	private async _dispatchPromptToAgent(card: HTMLElement, fieldKey: string): Promise<void> {
 		const textarea = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
-		const rawPrompt = textarea?.value.trim() || '';
-		if (!rawPrompt) {
+		const { combinedRawPrompt, interpolatedPrompt } = this._resolveCombinedPromptFromCard(card);
+		if (!combinedRawPrompt) {
 			this._notificationService.warn('Please enter a prompt instruction before dispatching.');
 			textarea?.focus();
 			return;
@@ -4580,8 +13723,9 @@ ${rawErr}
 		}
 
 		const agentName = agentSelect.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || 'AI Agent';
-		const interpolatedPrompt = this._interpolateParameters(rawPrompt);
 		const taskTitle = `Task (${fieldKey}): ${this._lastParsedData?.title || 'Ticket Task'}`;
+		const sentSnapshot = this._buildSentPromptSnapshot(card, fieldKey, true);
+		card.setAttribute('data-last-sent-payload', JSON.stringify(sentSnapshot));
 
 		const statusText = card.querySelector('.prompt-status-text') as HTMLElement | null;
 		const outputDisplay = card.querySelector('.prompt-output-display') as HTMLElement | null;
@@ -4650,20 +13794,20 @@ ${interpolatedPrompt}`;
 			.replace(/"/g, '&quot;')
 			.replace(/'/g, '&#039;');
 
-		html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color: #38bdf8; text-decoration: none;">$1</a>');
-		html = html.replace(/^### (.*$)/gim, '<h4 style="margin: 12px 0 4px 0; color: #38bdf8; font-size: 0.95em; font-weight: 600;">$1</h4>');
-		html = html.replace(/^## (.*$)/gim, '<h3 style="margin: 16px 0 8px 0; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.08); color: var(--vscode-editor-foreground); font-size: 1.05em; font-weight: 600;">$1</h3>');
-		html = html.replace(/^# (.*$)/gim, '<h2 style="margin: 20px 0 10px 0; color: var(--vscode-editor-foreground); font-size: 1.15em; font-weight: bold;">$1</h2>');
-		html = html.replace(/\*\*([^*]+)\*\*/g, '<strong style="color: var(--vscode-editor-foreground);">$1</strong>');
-		html = html.replace(/`([^`]+)`/g, '<code style="background: rgba(255,255,255,0.08); padding: 2px 5px; border-radius: 4px; font-family: monospace; font-size: 0.9em; border: 1px solid rgba(255,255,255,0.06);">$1</code>');
-		html = html.replace(/^\s*-\s+(.*$)/gim, '<li style="margin-left: 18px; margin-bottom: 4px; line-height: 1.5;">$1</li>');
-		html = html.replace(/^\s*\*\s+(.*$)/gim, '<li style="margin-left: 18px; margin-bottom: 4px; line-height: 1.5;">$1</li>');
+		html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" style="color: #38bdf8; text-decoration: none; overflow-wrap: anywhere; word-break: break-word;">$1</a>');
+		html = html.replace(/^### (.*$)/gim, '<h4 style="margin: 12px 0 4px 0; color: #38bdf8; font-size: 0.95em; font-weight: 600; overflow-wrap: anywhere; word-break: break-word;">$1</h4>');
+		html = html.replace(/^## (.*$)/gim, '<h3 style="margin: 16px 0 8px 0; padding-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,0.08); color: var(--vscode-editor-foreground); font-size: 1.05em; font-weight: 600; overflow-wrap: anywhere; word-break: break-word;">$1</h3>');
+		html = html.replace(/^# (.*$)/gim, '<h2 style="margin: 20px 0 10px 0; color: var(--vscode-editor-foreground); font-size: 1.15em; font-weight: bold; overflow-wrap: anywhere; word-break: break-word;">$1</h2>');
+		html = html.replace(/\*\*([^*]+)\*\*/g, '<strong style="color: var(--vscode-editor-foreground); overflow-wrap: anywhere; word-break: break-word;">$1</strong>');
+		html = html.replace(/`([^`]+)`/g, '<code style="background: rgba(255,255,255,0.08); padding: 2px 5px; border-radius: 4px; font-family: monospace; font-size: 0.9em; border: 1px solid rgba(255,255,255,0.06); overflow-wrap: anywhere; word-break: break-all; white-space: pre-wrap;">$1</code>');
+		html = html.replace(/^\s*-\s+(.*$)/gim, '<li style="margin-left: 18px; margin-bottom: 4px; line-height: 1.5; overflow-wrap: anywhere; word-break: break-word;">$1</li>');
+		html = html.replace(/^\s*\*\s+(.*$)/gim, '<li style="margin-left: 18px; margin-bottom: 4px; line-height: 1.5; overflow-wrap: anywhere; word-break: break-word;">$1</li>');
 
 		const lines = html.split('\n');
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i].trim();
 			if (line && !line.startsWith('<h') && !line.startsWith('<li') && !line.startsWith('<ul') && !line.startsWith('<ol') && !line.startsWith('<code') && !line.startsWith('---')) {
-				lines[i] = `<p style="margin: 4px 0; line-height: 1.5; opacity: 0.95;">${lines[i]}</p>`;
+				lines[i] = `<p style="margin: 4px 0; line-height: 1.5; opacity: 0.95; max-width: 100%; overflow-wrap: anywhere; word-break: break-word; white-space: pre-wrap;">${lines[i]}</p>`;
 			} else if (line === '---') {
 				lines[i] = '<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.08); margin: 16px 0;" />';
 			}
@@ -4763,7 +13907,7 @@ ${interpolatedPrompt}`;
 		if (logsList.length <= 1 && !workLog.trim().startsWith('##')) {
 			workLogHtml = '<p style="opacity: 0.45; font-style: italic; font-size: 0.88em; margin: 8px 0;">No work logs recorded yet.</p>';
 		} else {
-			workLogHtml = '<div class="timeline" style="border-left: 2px solid rgba(255,255,255,0.08); margin-left: 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 16px; margin-top: 15px;">';
+			workLogHtml = '<div class="timeline" style="border-left: 2px solid rgba(255,255,255,0.08); margin-left: 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 16px; margin-top: 15px; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;">';
 			for (let entry of logsList) {
 				entry = entry.trim();
 				if (!entry) continue;
@@ -4781,14 +13925,40 @@ ${interpolatedPrompt}`;
 					continue;
 				}
 				const body = lines.slice(1).join('\n').trim();
+				const bodyLines = body ? body.split('\n') : [];
+				const isLongWorkLog = body.length > 360 || bodyLines.length > 6;
 				const bodyHtml = this._markdownToHtml(body);
-				workLogHtml += `
-					<div class="timeline-item" style="position: relative;">
-						<div class="timeline-dot" style="position: absolute; left: -27px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-button-background); border: 2px solid var(--vscode-editor-background);"></div>
-						<div style="font-weight: 600; font-size: 0.92em; color: var(--vscode-editor-foreground); margin-bottom: 4px;">${header}</div>
-						<div class="timeline-body" style="font-size: 0.88em; opacity: 0.88; line-height: 1.5;">${bodyHtml}</div>
-					</div>
-				`;
+
+				if (isLongWorkLog) {
+					let previewRaw = bodyLines.slice(0, 5).join('\n');
+					if (previewRaw.length > 320) {
+						previewRaw = previewRaw.slice(0, 320);
+					}
+					const openBackticks = (previewRaw.match(/`/g) || []).length;
+					if (openBackticks % 2 !== 0) {
+						previewRaw += '`';
+					}
+					const previewHtml = this._markdownToHtml(previewRaw + ' ...');
+					workLogHtml += `
+						<div class="timeline-item" style="position: relative; max-width: 100%; min-width: 0; box-sizing: border-box;">
+							<div class="timeline-dot" style="position: absolute; left: -27px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-button-background); border: 2px solid var(--vscode-editor-background);"></div>
+							<div style="font-weight: 600; font-size: 0.92em; color: var(--vscode-editor-foreground); margin-bottom: 4px; max-width: 100%; overflow-wrap: anywhere; word-break: break-word;">${header}</div>
+							<div class="timeline-body worklog-preview-content" style="font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;">${previewHtml}</div>
+							<div class="timeline-body worklog-full-content" style="display: none; font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;">${bodyHtml}</div>
+							<div style="margin-top: 6px;">
+								<button type="button" class="worklog-expand-toggle-btn" data-expanded="false" data-char-count="${body.length}" style="font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); cursor: pointer;">Show Full Log (${body.length} chars)</button>
+							</div>
+						</div>
+					`;
+				} else {
+					workLogHtml += `
+						<div class="timeline-item" style="position: relative; max-width: 100%; min-width: 0; box-sizing: border-box;">
+							<div class="timeline-dot" style="position: absolute; left: -27px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-button-background); border: 2px solid var(--vscode-editor-background);"></div>
+							<div style="font-weight: 600; font-size: 0.92em; color: var(--vscode-editor-foreground); margin-bottom: 4px; max-width: 100%; overflow-wrap: anywhere; word-break: break-word;">${header}</div>
+							<div class="timeline-body" style="font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;">${bodyHtml}</div>
+						</div>
+					`;
+				}
 			}
 			workLogHtml += '</div>';
 		}
@@ -4818,6 +13988,32 @@ ${interpolatedPrompt}`;
 			outputSpecs?: IOutputSpec[];
 			defaultFormat?: string;
 			defaultContent?: string;
+			promptPreInjectedVisible?: boolean;
+			defaultUserPrompt?: string;
+			targetMode?: 'model' | 'agent';
+			targetModel?: string;
+			targetProvider?: string;
+			targetCredentialId?: string;
+			targetAgentId?: string;
+			targetAgentName?: string;
+			ttsFormat?: string;
+			ttsVoice?: string;
+			ttsAutoPlay?: boolean;
+			ttsDisplayText?: string;
+			ttsShowSpeechTextInTicket?: boolean;
+			ttsAudioDataUrl?: string;
+			ttsPlaybackRate?: number;
+			id?: string;
+			pythonPath?: string;
+			pythonCode?: string;
+			tableColumns?: any[];
+			tableRows?: Record<string, any>[];
+			tableDbEngine?: 'sqlite' | 'none';
+			tableDbPath?: string;
+			tableDbTableName?: string;
+			tableAutoSyncDb?: boolean;
+			tableSqlQuery?: string;
+			tablePageSize?: number;
 		}
 
 		const fieldsToRender: IRenderField[] = [];
@@ -4845,13 +14041,45 @@ ${interpolatedPrompt}`;
 				let matchedKey = '';
 				let val: any = '';
 				for (const [k, v] of rawCustomMap.entries()) {
+					if (handledKeys.has(k)) {
+						continue;
+					}
 					if (k.toLowerCase() === fLabel.toLowerCase() ||
-						k.toLowerCase() === fKey.toLowerCase() ||
-						k.toLowerCase() === fKey.toLowerCase().replace(/_/g, ' ') ||
 						k.toLowerCase().replace(/_/g, ' ') === fLabel.toLowerCase().replace(/_/g, ' ')) {
 						matchedKey = k;
 						val = v;
 						break;
+					}
+				}
+				if (!matchedKey) {
+					for (const [k, v] of rawCustomMap.entries()) {
+						if (handledKeys.has(k)) {
+							continue;
+						}
+						if (k.toLowerCase() === fKey.toLowerCase() ||
+							k.toLowerCase().replace(/_/g, ' ') === fKey.toLowerCase().replace(/_/g, ' ')) {
+							matchedKey = k;
+							val = v;
+							break;
+						}
+					}
+				}
+				// Mark all keys matching either fLabel or fKey (and their space-normalized aliases, e.g. "output_1" -> "Output 1") as handled
+				for (const k of rawCustomMap.keys()) {
+					const kNorm = k.toLowerCase().replace(/_/g, ' ');
+					if (
+						k.toLowerCase() === fLabel.toLowerCase() ||
+						kNorm === fLabel.toLowerCase().replace(/_/g, ' ') ||
+						k.toLowerCase() === fKey.toLowerCase() ||
+						kNorm === fKey.toLowerCase().replace(/_/g, ' ')
+					) {
+						handledKeys.add(k);
+						if (fLabel && k !== fLabel && this._lastParsedData?.customMetadata) {
+							if (this._lastParsedData.customMetadata[fLabel] === undefined) {
+								this._lastParsedData.customMetadata[fLabel] = rawCustomMap.get(k);
+							}
+							delete this._lastParsedData.customMetadata[k];
+						}
 					}
 				}
 				if (matchedKey) {
@@ -4883,7 +14111,7 @@ ${interpolatedPrompt}`;
 				}
 
 				fieldsToRender.push({
-					key: matchedKey || fLabel,
+					key: fLabel || matchedKey,
 					label: fLabel,
 					type: f.type || 'text',
 					val: val,
@@ -4898,33 +14126,44 @@ ${interpolatedPrompt}`;
 					parameters: (f as any).parameters,
 					outputSpecs: (f as any).outputSpecs,
 					defaultFormat: (f as any).defaultFormat,
-					defaultContent: (f as any).defaultContent
+					defaultContent: (f as any).defaultContent,
+					promptPreInjectedVisible: (f as any).promptPreInjectedVisible,
+					defaultUserPrompt: (f as any).defaultUserPrompt,
+					targetMode: (f as any).targetMode,
+					targetModel: (f as any).targetModel,
+					targetProvider: (f as any).targetProvider,
+					targetCredentialId: (f as any).targetCredentialId,
+					targetAgentId: (f as any).targetAgentId,
+					targetAgentName: (f as any).targetAgentName,
+					ttsFormat: (f as any).ttsFormat,
+					ttsVoice: (f as any).ttsVoice,
+					ttsAutoPlay: (f as any).ttsAutoPlay,
+					ttsDisplayText: (f as any).ttsDisplayText,
+					ttsShowSpeechTextInTicket: (f as any).ttsShowSpeechTextInTicket,
+					ttsAudioDataUrl: (f as any).ttsAudioDataUrl,
+					ttsPlaybackRate: (f as any).ttsPlaybackRate,
+					mediaFilePath: (f as any).mediaFilePath,
+					mediaFileName: (f as any).mediaFileName,
+					mediaKind: (f as any).mediaKind,
+					mediaMimeType: (f as any).mediaMimeType,
+					mediaPlaybackRate: (f as any).mediaPlaybackRate,
+					mediaAutoPlay: (f as any).mediaAutoPlay,
+					id: f.id,
+					pythonPath: (f as any).pythonPath,
+					pythonCode: (f as any).pythonCode,
+					tableColumns: (f as any).tableColumns,
+					tableRows: (f as any).tableRows,
+					tableDbEngine: (f as any).tableDbEngine,
+					tableDbPath: (f as any).tableDbPath,
+					tableDbTableName: (f as any).tableDbTableName,
+					tableAutoSyncDb: (f as any).tableAutoSyncDb,
+					tableSqlQuery: (f as any).tableSqlQuery,
+					tablePageSize: (f as any).tablePageSize
 				});
-			}
-
-			// 2. Extra keys in ticket.md not in customModule.fields
-			// If value is non-empty, preserve it so historical user data is never lost.
-			for (const [k, v] of rawCustomMap.entries()) {
-				if (!handledKeys.has(k)) {
-					if (k.toLowerCase() === 'title' || k.toLowerCase() === 'description') {
-						continue;
-					}
-					const isNonEmpty = v !== undefined && v !== null && String(v).trim() !== '' && String(v).trim() !== '[]' && String(v).trim() !== '{}';
-					if (isNonEmpty) {
-						const isAtt = k.toLowerCase().includes('attachment') || (typeof v === 'string' && (v.trim().startsWith('[{"name":') || v.trim().startsWith('{"name":')));
-						fieldsToRender.push({
-							key: k,
-							label: k,
-							type: isAtt ? 'attachment' : ((typeof v === 'string' && v.trim().startsWith('[') && v.trim().endsWith(']')) ? 'dynamic_list' : 'text'),
-							val: v,
-							options: []
-						});
-					}
-				}
 			}
 		} else {
 			for (const [k, v] of rawCustomMap.entries()) {
-				if (k.toLowerCase() === 'title' || k.toLowerCase() === 'description') {
+				if (k.toLowerCase() === 'title' || k.toLowerCase() === 'description' || k.toLowerCase() === 'flowchartjson') {
 					continue;
 				}
 				const isAtt = k.toLowerCase().includes('attachment') || (typeof v === 'string' && (v.trim().startsWith('[{"name":') || v.trim().startsWith('{"name":')));
@@ -4943,13 +14182,31 @@ ${interpolatedPrompt}`;
 				const k = fieldItem.label;
 				const rawKey = fieldItem.key;
 				const v = fieldItem.val;
-				const fType = fieldItem.type;
+				let fType = fieldItem.type;
+
+				if ((fType === 'text' || !fType) && typeof v === 'string' && v.trim().startsWith('{') && v.trim().endsWith('}')) {
+					try {
+						const parsedCheck = JSON.parse(v.trim());
+						if (parsedCheck && typeof parsedCheck === 'object') {
+							if (parsedCheck.targetMode !== undefined && (parsedCheck.userPrompt !== undefined || parsedCheck.prompt !== undefined)) {
+								fType = 'prompt';
+							} else if (parsedCheck.ttsFormat !== undefined || parsedCheck.ttsVoice !== undefined) {
+								fType = 'tts';
+							} else if (parsedCheck.mediaFilePath !== undefined || parsedCheck.mediaPlaybackRate !== undefined || parsedCheck.mediaKind !== undefined) {
+								fType = 'media_player';
+							} else if (parsedCheck.code !== undefined && parsedCheck.pythonInterpreter !== undefined) {
+								fType = 'python';
+							} else if (parsedCheck.url !== undefined && Array.isArray(parsedCheck.credentials)) {
+								fType = 'browser';
+							}
+						}
+					} catch { }
+				}
 
 				// 1:1 DEDICATED ATTACHMENT COMPONENT - ATOMIC, NEVER TREATED AS DYNAMIC LIST OR CONTAINER
 				const isAttachmentField = fType === 'attachment' ||
 					(customModule?.fields && Array.isArray(customModule.fields) && customModule.fields.some((f: any) => (f.label?.toLowerCase() === k.toLowerCase() || f.id?.toLowerCase() === k.toLowerCase()) && f.type === 'attachment')) ||
-					k.toLowerCase().includes('attachment') ||
-					(typeof v === 'string' && (v.trim().startsWith('[{"name":') || v.trim().startsWith('{"name":')));
+					((fType === 'text' || !fType) && (k.toLowerCase().includes('attachment') || (typeof v === 'string' && (v.trim().startsWith('[{"name":') || v.trim().startsWith('{"name":')))));
 
 				if (isAttachmentField) {
 					let parsedAttachmentList: Array<{ name: string; size?: number }> | null = null;
@@ -5015,7 +14272,7 @@ ${interpolatedPrompt}`;
 							</div>
 						</div>
 					`;
-				} else if (fType === 'dynamic_list' || (typeof v === 'string' && v.trim().startsWith('[') && v.trim().endsWith(']'))) {
+				} else if (fType === 'dynamic_list' || ((fType === 'text' || !fType) && typeof v === 'string' && v.trim().startsWith('[') && v.trim().endsWith(']'))) {
 					let parsedArray: any[] | null = null;
 					if (typeof v === 'string' && v.trim().startsWith('[')) {
 						try {
@@ -5251,7 +14508,12 @@ ${interpolatedPrompt}`;
 							</div>
 						</div>
 					`;
-				} else if (fType === 'date_range' || fType === 'time_range' || fType === 'datetime_range' || (typeof v === 'string' && (v.includes('~') || /^\d{4}-\d{2}-\d{2}/.test(v)))) {
+				} else if (
+					fType === 'date_range' ||
+					fType === 'time_range' ||
+					fType === 'datetime_range' ||
+					((fType === 'text' || !fType) && typeof v === 'string' && !v.trim().startsWith('{') && !v.trim().startsWith('[') && v.length < 64 && /^\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}/.test(v.trim()) && (v.includes('~') || /^\d{4}-\d{2}-\d{2}$/.test(v.trim())))
+				) {
 					const rangeType = fType || 'date_range';
 					customFieldsHtml += `
 						<div class="section-card custom-property-card">
@@ -5401,12 +14663,12 @@ ${interpolatedPrompt}`;
 							<div class="ticket-parameter-row" style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-radius: 6px; background: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.06);">
 								<div style="display: flex; flex-direction: column; gap: 2px; min-width: 130px;">
 									<div style="display: flex; align-items: center; gap: 6px;">
-										<span style="font-size: 12px; font-weight: 600;">${this._escapeHtml(param.label || param.name)}</span>
+										<span style="font-size: 12px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);">${this._escapeHtml(param.name)}</span>
 										<button type="button" class="ticket-param-copy-tag" data-token="${this._escapeHtmlAttr(copyToken)}" title="Click to copy '${copyToken}'" style="border: 1px solid rgba(168, 85, 247, 0.35); background: rgba(168, 85, 247, 0.12); color: #c084fc; font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px; font-weight: 700; border-radius: 4px; padding: 1px 6px; cursor: pointer; transition: all 0.15s ease;">
 											${this._escapeHtml(copyToken)}
 										</button>
 									</div>
-									${param.description ? `<span style="font-size: 10px; opacity: 0.55;">${this._escapeHtml(param.description)}</span>` : ''}
+									${(param.description && param.description !== 'Zero-based pagination start index') ? `<span style="font-size: 10px; opacity: 0.55;">${this._escapeHtml(param.description)}</span>` : ''}
 								</div>
 								<div style="display: flex; align-items: center; gap: 8px; flex: 1; max-width: 380px;">
 									${controlHtml}
@@ -5438,6 +14700,7 @@ ${interpolatedPrompt}`;
 				} else if (fType === 'python') {
 					let pythonPath = fieldItem.pythonPath || '';
 					let pythonCode = fieldItem.pythonCode || '';
+					let pythonLocked = Boolean((fieldItem as any).pythonLocked);
 					let pythonOutput = '';
 					let pythonResult: any = undefined;
 					let exitCode: number | undefined;
@@ -5462,6 +14725,7 @@ ${interpolatedPrompt}`;
 									}
 									if (pObj.code !== undefined) pythonCode = pObj.code;
 									if (pObj.pythonCode !== undefined && !pythonCode) pythonCode = pObj.pythonCode;
+									if (pObj.locked !== undefined) pythonLocked = Boolean(pObj.locked);
 									if (pObj.result !== undefined) pythonResult = pObj.result;
 									if (pObj.output !== undefined) pythonOutput = pObj.output;
 									if (pObj.exitCode !== undefined) exitCode = pObj.exitCode;
@@ -5487,6 +14751,7 @@ ${interpolatedPrompt}`;
 							}
 							if (obj.code !== undefined) pythonCode = String(obj.code);
 							if (obj.pythonCode !== undefined && !pythonCode) pythonCode = String(obj.pythonCode);
+							if (obj.locked !== undefined) pythonLocked = Boolean(obj.locked);
 							if (obj.result !== undefined) pythonResult = obj.result;
 							if (obj.output !== undefined) pythonOutput = String(obj.output);
 							if (obj.exitCode !== undefined) exitCode = Number(obj.exitCode);
@@ -5515,31 +14780,52 @@ ${interpolatedPrompt}`;
 						? `Executed: ${lastExecutedText.substring(0, 16)} (${durationMs !== undefined ? `${durationMs}ms` : 'ok'})`
 						: 'Ready to execute';
 
-					const otherFields = (customModule?.fields || []).filter(f => f && f.id !== rawKey && (f.label || f.id) !== k);
+					const otherFields = (customModule?.fields || []).filter((f: any) => f && f.id !== rawKey && (f.label || f.id) !== k && f.type !== 'output' && f.type !== 'result' && (f.label || f.id || '').toLowerCase() !== 'output' && (f.label || f.id || '').toLowerCase() !== 'result');
 					const baseChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['']" data-cursor-offset="-2" style="padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert TICKET_CONTEXT[''] into script">+ TICKET_CONTEXT['']</button>`;
 					const outputChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="&#10;OUTPUT = " data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.1); color: #34d399; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert return value assignment OUTPUT = ... (consumed by downstream primitives & Output Manifest)">+ OUTPUT =</button>`;
 
-					const maxInitialVisible = 2;
-					const visibleFields = otherFields.slice(0, maxInitialVisible);
-					const hiddenFields = otherFields.slice(maxInitialVisible);
+					const pythonContextExprs: string[] = [];
+					for (const ofField of otherFields) {
+						const ofLabel = (ofField.label || ofField.id || '').trim();
+						if (ofField.type === 'parameters' && Array.isArray(ofField.parameters)) {
+							const paramGroupKey = ofLabel || 'Inputs';
+							for (const p of ofField.parameters) {
+								const pName = (p.name || '').trim();
+								if (pName) {
+									const expr = `TICKET_CONTEXT['${paramGroupKey}']['${pName}']`;
+									if (!pythonContextExprs.includes(expr)) {
+										pythonContextExprs.push(expr);
+									}
+								}
+							}
+						}
+						if (ofLabel) {
+							const expr = `TICKET_CONTEXT['${ofLabel}']`;
+							if (!pythonContextExprs.includes(expr)) {
+								pythonContextExprs.push(expr);
+							}
+						}
+					}
 
-					const visibleChipsHtml = visibleFields.map(of => {
-						const ofLabel = of.label || of.id;
-						return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']">+ TICKET_CONTEXT['${this._escapeHtml(ofLabel)}']</button>`;
+					const maxInitialVisible = 2;
+					const visibleExprs = pythonContextExprs.slice(0, maxInitialVisible);
+					const hiddenExprs = pythonContextExprs.slice(maxInitialVisible);
+
+					const visibleChipsHtml = visibleExprs.map(expr => {
+						return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="${this._escapeHtmlAttr(expr)}" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert ${this._escapeHtmlAttr(expr)}">+ ${this._escapeHtml(expr)}</button>`;
 					}).join('');
 
 					let hiddenChipsHtml = '';
 					let moreBtnHtml = '';
-					if (hiddenFields.length > 0) {
+					if (hiddenExprs.length > 0) {
 						hiddenChipsHtml = `
 							<span class="python-ctx-hidden-group" style="display: none;">
-								${hiddenFields.map(of => {
-									const ofLabel = of.label || of.id;
-									return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert TICKET_CONTEXT['${this._escapeHtmlAttr(ofLabel)}']">+ TICKET_CONTEXT['${this._escapeHtml(ofLabel)}']</button>`;
+								${hiddenExprs.map(expr => {
+									return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="${this._escapeHtmlAttr(expr)}" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert ${this._escapeHtmlAttr(expr)}">+ ${this._escapeHtml(expr)}</button>`;
 								}).join('')}
 							</span>
 						`;
-						moreBtnHtml = `<button type="button" class="python-ctx-more-btn" data-count="${hiddenFields.length}" style="padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;" title="Toggle more context fields">+${hiddenFields.length} More...</button>`;
+						moreBtnHtml = `<button type="button" class="python-ctx-more-btn" data-count="${hiddenExprs.length}" style="padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;" title="Toggle more context fields">+${hiddenExprs.length} More...</button>`;
 					}
 
 					const externalScriptsListHtml = externalScripts.length === 0
@@ -5556,7 +14842,7 @@ ${interpolatedPrompt}`;
 						`).join('');
 
 					customFieldsHtml += `
-						<div class="section-card custom-property-card python-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-external-scripts="${this._escapeHtmlAttr(JSON.stringify(externalScripts))}">
+						<div class="section-card custom-property-card python-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-external-scripts="${this._escapeHtmlAttr(JSON.stringify(externalScripts))}" data-python-code="${this._escapeHtmlAttr(pythonCode)}" data-python-locked="${pythonLocked ? 'true' : 'false'}">
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
@@ -5571,21 +14857,21 @@ ${interpolatedPrompt}`;
 							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
 								<!-- Virtual Environment & Interpreter Row -->
 								<div style="background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;">
-									<div style="display: flex; justify-content: space-between; align-items: center;">
+									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
 										<label style="font-size: 11px; font-weight: 600; opacity: 0.85; color: inherit; display: flex; align-items: center; gap: 6px;">
 											<span>Virtual Environment / Interpreter:</span>
 										</label>
 										<span class="python-test-status" style="font-size: 10px; opacity: 0.65;"></span>
 									</div>
 									<!-- Row 1: Path Input & Browse -->
-									<div style="display: flex; gap: 6px; align-items: center;">
-										<input type="text" class="python-interpreter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(pythonPath)}" placeholder="Auto-detect (.venv or system python3) — or click Browse to select" style="flex: 1; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
+									<div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap;">
+										<input type="text" class="python-interpreter-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(pythonPath)}" placeholder="Auto-detect (.venv or system python3) — or click Browse to select" style="flex: 1; min-width: 160px; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
 										<button type="button" class="python-browse-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Select Python Interpreter or Virtualenv Folder" style="padding: 5px 12px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;"><svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M14.5 3H7.71l-.85-.85L6.51 2h-5l-.5.5v11l.5.5h13l.5-.5v-10l-.5-.5zm-.5 10H2V3h4.29l.85.85.35.15H14v9z"/></svg><span>Browse</span></button>
 									</div>
 									<!-- Row 2: Status Badge & Actions -->
-									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 3px;">
-										<div class="python-env-badge" style="font-size: 10.5px; display: inline-flex; align-items: center; gap: 6px; padding: 2.5px 8px; border-radius: 4px; background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.7);">${this._escapeHtml(pythonPath ? `Path: ${pythonPath}` : 'Auto-detect: System / Active .venv')}</div>
-										<div style="display: flex; gap: 6px; align-items: center;">
+									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 3px;">
+										<div class="python-env-badge" style="font-size: 10.5px; display: inline-flex; align-items: center; gap: 6px; padding: 2.5px 8px; border-radius: 4px; background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.7); word-break: break-all;">${this._escapeHtml(pythonPath ? `Path: ${pythonPath}` : 'Auto-detect: System / Active .venv')}</div>
+										<div style="display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-left: auto;">
 											<button type="button" class="python-test-interpreter-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Test Python binary and check version" style="padding: 3.5px 12px; font-size: 11px; font-weight: 500; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); white-space: nowrap;">Test</button>
 											<button type="button" class="python-create-venv-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Initialize a local virtual environment (.venv) via python3 -m venv" style="padding: 3.5px 12px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(0,122,204,0.15); color: #38bdf8; border: 1px solid rgba(0,122,204,0.4); white-space: nowrap;">+ Create Virtualenv</button>
 										</div>
@@ -5594,7 +14880,7 @@ ${interpolatedPrompt}`;
 
 								<!-- External Scripts Pipeline Row -->
 								<div class="python-scripts-container" style="display: flex; flex-direction: column; gap: 6px; background: rgba(0, 0, 0, 0.16); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; padding: 8px 10px;">
-									<div style="display: flex; justify-content: space-between; align-items: center;">
+									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
 										<span style="font-size: 11px; font-weight: 600; opacity: 0.85;">External Python Scripts (Executed sequentially prior to inline code):</span>
 										<button type="button" class="python-add-script-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 3px 10px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(255, 255, 255, 0.08); color: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;" title="Select an external Python script file (.py) to execute in order">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M8 2a.5.5 0 0 1 .5.5v5h5a.5.5 0 0 1 0 1h-5v5a.5.5 0 0 1-1 0v-5h-5a.5.5 0 0 1 0-1h5v-5A.5.5 0 0 1 8 2Z"/></svg>
@@ -5608,18 +14894,29 @@ ${interpolatedPrompt}`;
 
 								<!-- Python Source Code Textarea -->
 								<div style="display: flex; flex-direction: column; gap: 4px;">
-									<div style="display: flex; justify-content: space-between; align-items: center;">
+									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
 										<label style="font-size: 11px; font-weight: 600; opacity: 0.85;">Source Code:</label>
-										<div style="display: flex; align-items: center; gap: 8px;">
-											<span style="font-size: 10px; opacity: 0.55;">Supports TICKET_CONTEXT, {{variables}}, and ANY_AGENT_CONTEXT</span>
-											<span class="python-mode-badge" style="font-size: 9.5px; padding: 1.5px 6px; border-radius: 3px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); font-weight: 600; cursor: pointer; user-select: none;" title="Click to toggle between Code Highlight Preview and Raw Text Editor">Highlighted</span>
+										<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
+											<span style="font-size: 10px; opacity: 0.55; margin-right: 2px;">Supports TICKET_CONTEXT, {{variables}}, and ANY_AGENT_CONTEXT</span>
+											<button type="button" class="python-copy-code-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: rgba(255, 255, 255, 0.07); color: inherit; border: 1px solid rgba(255, 255, 255, 0.16); user-select: none; -webkit-user-select: none;" title="Copy complete Python source code to clipboard">
+												<span class="codicon codicon-copy" style="font-size: 12.5px;"></span>
+											</button>
+											<button type="button" class="python-paste-code-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: rgba(255, 255, 255, 0.07); color: inherit; border: 1px solid rgba(255, 255, 255, 0.16); opacity: ${pythonLocked ? '0.4' : '1'}; user-select: none; -webkit-user-select: none;" title="${pythonLocked ? 'Locked — Click the lock icon to unlock before pasting' : 'Paste clipboard content into Python source code'}">
+												<span class="codicon codicon-clippy" style="font-size: 12.5px;"></span>
+											</button>
+											<button type="button" class="python-lock-code-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: ${pythonLocked ? 'rgba(251, 191, 36, 0.12)' : 'rgba(52, 211, 153, 0.1)'}; color: ${pythonLocked ? '#fbbf24' : '#34d399'}; border: 1px solid ${pythonLocked ? 'rgba(251, 191, 36, 0.45)' : 'rgba(52, 211, 153, 0.4)'}; user-select: none; -webkit-user-select: none;" title="${pythonLocked ? 'Locked (Read-Only) — Click to Unlock for editing' : 'Unlocked (Editable) — Click to Lock and protect from accidental edits'}">
+												<span class="codicon ${pythonLocked ? 'codicon-lock' : 'codicon-unlock'}" style="font-size: 12.5px;"></span>
+											</button>
 										</div>
 									</div>
-									<div class="python-code-wrapper" style="position: relative; width: 100%; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); box-sizing: border-box; overflow: hidden; transition: border-color 0.15s ease;">
-										<div class="python-code-display" style="width: 100%; min-height: 120px; max-height: 380px; overflow-y: auto; padding: 8px 10px; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.5; tab-size: 4; white-space: pre-wrap; word-break: break-word; color: #d4d4d4; cursor: text; box-sizing: border-box;" title="Click to edit Python script">${highlightPythonToHTML(pythonCode, { showLineNumbers: true })}</div>
-										<textarea class="python-code-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="6" placeholder="Enter Python script to execute..." spellcheck="false" style="width: 100%; min-height: 120px; padding: 8px 10px; font-size: 11.5px; border: none; outline: none; background: rgba(0,0,0,0.4); color: #f1f5f9; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.5; resize: vertical; tab-size: 4; display: none;">${this._escapeHtml(pythonCode)}</textarea>
+									<div class="python-code-wrapper" style="display: flex; align-items: stretch; position: relative; width: 100%; border-radius: 6px; border: 1px solid ${pythonLocked ? 'rgba(251, 191, 36, 0.28)' : 'rgba(255,255,255,0.15)'}; background: rgba(0,0,0,0.3); box-sizing: border-box; overflow: hidden; user-select: none; -webkit-user-select: none;">
+										<div class="python-line-numbers-gutter" style="user-select: none !important; -webkit-user-select: none !important; pointer-events: none !important; color: rgba(255, 255, 255, 0.28); text-align: right; padding: 8px 8px 26px 6px; border-right: 1px solid rgba(255, 255, 255, 0.08); background: rgba(0, 0, 0, 0.18); font-size: 11px; font-family: var(--monaco-monospace-font, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace); line-height: 18px; flex-shrink: 0; min-width: 32px; white-space: pre; overflow: hidden; box-sizing: border-box;">${this._escapeHtml(buildPythonLineNumbersText(pythonCode))}</div>
+										<div class="python-code-stage" style="position: relative; flex: 1; min-width: 0; min-height: 140px; display: block;">
+											<div class="python-code-display" style="position: relative; width: 100%; min-height: 140px; pointer-events: none !important; user-select: none !important; -webkit-user-select: none !important; overflow: hidden; padding: 8px 10px 26px 10px; margin: 0; border: none; font-size: 12px; font-family: var(--monaco-monospace-font, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace); font-weight: 400; font-style: normal; font-variant-ligatures: none; letter-spacing: 0px; word-spacing: 0px; line-height: 18px; tab-size: 4; white-space: pre-wrap; word-break: break-all; overflow-wrap: break-word; color: #d4d4d4; box-sizing: border-box; z-index: 1;">${highlightPythonToHTML(pythonCode, { showLineNumbers: false, isLiveBackdrop: true, placeholder: 'Enter Python script to execute...' })}</div>
+											<textarea class="python-code-textarea" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="6" ${pythonLocked ? 'readonly' : ''} spellcheck="false" autocapitalize="off" autocomplete="off" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; display: block; width: 100%; height: 100%; min-height: 140px; max-height: none !important; overflow: hidden !important; padding: 8px 10px 26px 10px; margin: 0; font-size: 12px; border: none; outline: none; background: transparent !important; color: transparent !important; -webkit-text-fill-color: transparent !important; caret-color: #38bdf8 !important; box-sizing: border-box; font-family: var(--monaco-monospace-font, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace); font-weight: 400; font-style: normal; font-variant-ligatures: none; letter-spacing: 0px; word-spacing: 0px; line-height: 18px; white-space: pre-wrap; word-break: break-all; overflow-wrap: break-word; resize: none !important; tab-size: 4; user-select: text !important; -webkit-user-select: text !important; pointer-events: auto !important; cursor: ${pythonLocked ? 'default' : 'text'};">${this._escapeHtml((pythonCode || '').replace(/\r\n?/g, '\n'))}</textarea>
+										</div>
 									</div>
-									<div class="python-ctx-chips-bar" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0;">
+									<div class="python-ctx-chips-bar" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0; opacity: ${pythonLocked ? '0.45' : '1'};">
 										<span style="font-size: 10.5px; opacity: 0.65;">Insert Context:</span>
 										${baseChipHtml}
 										${outputChipHtml}
@@ -5647,19 +14944,19 @@ ${interpolatedPrompt}`;
 								<div class="python-output-section" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">
 									${pythonResult !== undefined ? `
 										<div class="python-result-block" style="background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;">
-											<div style="display: flex; justify-content: space-between; align-items: center;">
+											<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
 												<span style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">Return Value (Output):</span>
 												<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
 											</div>
 											<pre class="python-result-display" style="margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;">${this._escapeHtml(typeof pythonResult === 'object' ? JSON.stringify(pythonResult, null, 2) : String(pythonResult))}</pre>
 										</div>
 									` : ''}
-									<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px;">
-										<div style="display: flex; align-items: center; gap: 8px;">
+									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px;">
+										<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
 											<span style="font-size: 11px; font-weight: 600; opacity: 0.85;">Console Logs & Execution:</span>
 											${exitCode !== undefined ? `<span style="font-size: 10px; padding: 1px 6px; border-radius: 3px; background: ${exitCode === 0 ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)'}; color: ${exitCode === 0 ? '#4ade80' : '#f87171'};">Exit code: ${exitCode}</span>` : ''}
 										</div>
-										<div style="display: flex; gap: 6px;">
+										<div style="display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto;">
 											<button type="button" class="python-copy-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Copy Logs</button>
 											<button type="button" class="python-clear-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Clear</button>
 										</div>
@@ -5699,6 +14996,45 @@ ${interpolatedPrompt}`;
 						}
 					}
 
+					const browserRefChips: string[] = ['Title', 'Description'];
+					const seenBrowserRefSet = new Set<string>(['title', 'description']);
+					if (customModule?.fields) {
+						for (const cf of customModule.fields) {
+							if (!cf) { continue; }
+							const cfLabel = (cf.label || cf.id || '').trim();
+							const cfLower = cfLabel.toLowerCase();
+							const cfType = (cf.type || '').toLowerCase();
+							if (!cfLabel || cfLower === rawKey.toLowerCase() || cfType === 'output' || cfType === 'result' || cfLower === 'output' || cfLower === 'result') {
+								continue;
+							}
+							if (cfType === 'parameters' && Array.isArray(cf.parameters)) {
+								for (const p of cf.parameters) {
+									const pName = (p.name || '').trim();
+									if (pName && !seenBrowserRefSet.has(pName.toLowerCase())) {
+										seenBrowserRefSet.add(pName.toLowerCase());
+										browserRefChips.push(pName);
+									}
+								}
+							}
+							if (!seenBrowserRefSet.has(cfLower)) {
+								seenBrowserRefSet.add(cfLower);
+								browserRefChips.push(cfLabel);
+							}
+						}
+					}
+					const renderBrowserChipBtn = (refLabel: string) => {
+						const token = `{${refLabel}}`;
+						return `<button type="button" class="browser-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="${this._escapeHtmlAttr(token)}" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert ${this._escapeHtmlAttr(token)} into URL">+ ${this._escapeHtml(token)}</button>`;
+					};
+					const maxVisibleBrowserChips = 4;
+					const visibleBrowserRefs = browserRefChips.slice(0, maxVisibleBrowserChips);
+					const hiddenBrowserRefs = browserRefChips.slice(maxVisibleBrowserChips);
+					const visibleBrowserChipsHtml = visibleBrowserRefs.map(renderBrowserChipBtn).join('');
+					const hiddenBrowserChipsHtml = hiddenBrowserRefs.length > 0
+						? `<span class="browser-ctx-hidden-group" style="display: none;">${hiddenBrowserRefs.map(renderBrowserChipBtn).join('')}</span><button type="button" class="browser-ctx-more-btn" data-count="${hiddenBrowserRefs.length}" style="padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;" title="Show / hide more referenceable outputs">+${hiddenBrowserRefs.length} More...</button>`
+						: '';
+					const browserChipsHtml = visibleBrowserChipsHtml + hiddenBrowserChipsHtml;
+
 					customFieldsHtml += `
 						<div class="section-card custom-property-card browser-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
 							<div class="section-title">
@@ -5713,8 +15049,9 @@ ${interpolatedPrompt}`;
 							</div>
 
 							<!-- URL Input Bar (Full Width) -->
-							<div style="width: 100%; margin-bottom: 8px;">
-								<input type="text" class="browser-url-input" value="${this._escapeHtmlAttr(browserUrl)}" placeholder="https://example.com..." style="width: 100%; padding: 7px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
+							<div style="width: 100%; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px;">
+								<input type="text" class="browser-url-input" value="${this._escapeHtmlAttr(browserUrl)}" placeholder="https://example.com... (Supports {Field Label} or {param} references)" style="width: 100%; padding: 7px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);" />
+								${browserChipsHtml ? `<div class="browser-ctx-chips-bar" style="display: flex; flex-wrap: wrap; gap: 5px; align-items: center;"><span style="font-size: 10.5px; opacity: 0.65;">Insert Output:</span>${browserChipsHtml}</div>` : ''}
 							</div>
 
 							<!-- Action Buttons Row (Below URL) -->
@@ -5757,12 +15094,12 @@ ${interpolatedPrompt}`;
 
 							<!-- Web Content Display Area -->
 							<div class="browser-content-container" style="display: flex; flex-direction: column; gap: 6px;">
-								<div style="display: flex; justify-content: space-between; align-items: center;">
-									<div style="display: flex; align-items: center; gap: 8px;">
+								<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
+									<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
 										<span style="font-size: 11px; font-weight: 600; opacity: 0.75; text-transform: uppercase;">Extracted Web Content (AI-Ready):</span>
 										<span class="browser-fetch-status" style="font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;">${lastFetchedText ? `Last fetched: ${this._escapeHtmlAttr(lastFetchedText)}` : 'Not fetched yet'}</span>
 									</div>
-									<div style="display: flex; gap: 6px;">
+									<div style="display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto;">
 										<button type="button" class="browser-copy-content-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Copy Text</button>
 										<button type="button" class="browser-clear-content-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Clear</button>
 									</div>
@@ -5772,13 +15109,27 @@ ${interpolatedPrompt}`;
 						</div>
 					`;
 				} else if (fType === 'prompt') {
-					let promptText = fieldItem.defaultContent || '';
-					let promptMode: 'model' | 'agent' = fieldItem.targetMode || 'model';
+					const preInjectedPrompt = fieldItem.defaultContent || '';
+					const isPreInjectedVisible = Boolean(fieldItem.promptPreInjectedVisible);
+					const isUserInputVisible = fieldItem.promptUserInputVisible !== false;
+					let userPromptText = fieldItem.defaultUserPrompt || '';
+					let userPromptsList: string[] = Array.isArray(fieldItem.defaultUserPrompts)
+						? [...fieldItem.defaultUserPrompts]
+						: [];
+					let userPromptsLockedList: (boolean | undefined)[] = [];
+					let preInjectedLockedState: boolean | undefined = undefined;
+					let hasSavedUserPromptsArray = false;
+					// Target Mode (Model vs AI Agent) is locked to the module template creator's choice
+					const templateMode: 'model' | 'agent' | undefined = fieldItem.targetMode;
+					let promptMode: 'model' | 'agent' = templateMode || 'model';
+					let promptProvider = fieldItem.targetProvider || '';
 					let promptModel = fieldItem.targetModel || 'gemini-1.5-flash';
 					let promptAgentId = fieldItem.targetAgentId || '';
 					let promptAgentName = fieldItem.targetAgentName || '';
+					let userCustomizedTarget = false;
 					let promptOutput = '';
 					let lastExecutedText = '';
+					let lastSentPayloadJson = '';
 
 					if (v) {
 						if (typeof v === 'string') {
@@ -5786,34 +15137,117 @@ ${interpolatedPrompt}`;
 							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 								try {
 									const pObj = JSON.parse(trimmed);
-									if (pObj.prompt !== undefined) promptText = String(pObj.prompt);
-									if (pObj.targetMode) promptMode = pObj.targetMode;
-									if (pObj.targetModel) promptModel = String(pObj.targetModel);
-									if (pObj.targetAgentId) promptAgentId = typeof pObj.targetAgentId === 'string' ? pObj.targetAgentId : String((pObj.targetAgentId as any)?.id || '');
-									if (pObj.targetAgentName) promptAgentName = typeof pObj.targetAgentName === 'string' ? pObj.targetAgentName : String((pObj.targetAgentName as any)?.name || '');
+									if (Array.isArray(pObj.userPrompts)) {
+										hasSavedUserPromptsArray = true;
+										userPromptsList = pObj.userPrompts.map((item: any) => String(item ?? ''));
+									}
+									if (Array.isArray(pObj.userPromptsLocked)) {
+										userPromptsLockedList = pObj.userPromptsLocked.map((item: any) => typeof item === 'boolean' ? item : undefined);
+									}
+									if (typeof pObj.preInjectedLocked === 'boolean') {
+										preInjectedLockedState = pObj.preInjectedLocked;
+									}
+									if (pObj.userPrompt !== undefined) {
+										userPromptText = String(pObj.userPrompt);
+									} else if (pObj.prompt !== undefined && !preInjectedPrompt) {
+										userPromptText = String(pObj.prompt);
+									}
+									if (!templateMode && pObj.targetMode) {
+										promptMode = pObj.targetMode;
+									}
+									if (pObj.userCustomizedTarget) {
+										userCustomizedTarget = true;
+										if (pObj.targetProvider) promptProvider = String(pObj.targetProvider);
+										if (pObj.targetModel) promptModel = String(pObj.targetModel);
+										if (pObj.targetAgentId !== undefined) promptAgentId = typeof pObj.targetAgentId === 'string' ? pObj.targetAgentId : String((pObj.targetAgentId as any)?.id || '');
+										if (pObj.targetAgentName !== undefined) promptAgentName = typeof pObj.targetAgentName === 'string' ? pObj.targetAgentName : String((pObj.targetAgentName as any)?.name || '');
+									} else {
+										if (!fieldItem.targetProvider && pObj.targetProvider) promptProvider = String(pObj.targetProvider);
+										if (!fieldItem.targetModel && pObj.targetModel) promptModel = String(pObj.targetModel);
+										if (!fieldItem.targetAgentId && pObj.targetAgentId) promptAgentId = typeof pObj.targetAgentId === 'string' ? pObj.targetAgentId : String((pObj.targetAgentId as any)?.id || '');
+										if (!fieldItem.targetAgentName && pObj.targetAgentName) promptAgentName = typeof pObj.targetAgentName === 'string' ? pObj.targetAgentName : String((pObj.targetAgentName as any)?.name || '');
+									}
 									if (pObj.output) promptOutput = typeof pObj.output === 'string' ? pObj.output : JSON.stringify(pObj.output);
 									if (pObj.lastExecuted) lastExecutedText = String(pObj.lastExecuted);
+									if (pObj.lastSentPayload && typeof pObj.lastSentPayload === 'object') {
+										try { lastSentPayloadJson = JSON.stringify(pObj.lastSentPayload); } catch {}
+									}
 								} catch {
-									promptText = trimmed;
+									if (!preInjectedPrompt && trimmed !== preInjectedPrompt.trim()) {
+										userPromptText = trimmed;
+									}
 								}
-							} else {
-								promptText = trimmed;
+							} else if (!preInjectedPrompt && trimmed !== preInjectedPrompt.trim()) {
+								userPromptText = trimmed;
 							}
 						} else if (typeof v === 'object' && v !== null) {
 							const obj = v as Record<string, unknown>;
-							if (obj.prompt !== undefined) { promptText = String(obj.prompt); }
-							if (obj.targetMode) { promptMode = obj.targetMode as 'model' | 'agent'; }
-							if (obj.targetModel) { promptModel = String(obj.targetModel); }
-							if (obj.targetAgentId) { promptAgentId = typeof obj.targetAgentId === 'string' ? obj.targetAgentId : String((obj.targetAgentId as any)?.id || ''); }
-							if (obj.targetAgentName) { promptAgentName = typeof obj.targetAgentName === 'string' ? obj.targetAgentName : String((obj.targetAgentName as any)?.name || ''); }
+							if (Array.isArray(obj.userPrompts)) {
+								hasSavedUserPromptsArray = true;
+								userPromptsList = obj.userPrompts.map((item: any) => String(item ?? ''));
+							}
+							if (Array.isArray(obj.userPromptsLocked)) {
+								userPromptsLockedList = (obj.userPromptsLocked as any[]).map(item => typeof item === 'boolean' ? item : undefined);
+							}
+							if (typeof obj.preInjectedLocked === 'boolean') {
+								preInjectedLockedState = obj.preInjectedLocked;
+							}
+							if (obj.userPrompt !== undefined) {
+								userPromptText = String(obj.userPrompt);
+							} else if (obj.prompt !== undefined && !preInjectedPrompt) {
+								userPromptText = String(obj.prompt);
+							}
+							if (!templateMode && obj.targetMode) { promptMode = obj.targetMode as 'model' | 'agent'; }
+							if (obj.userCustomizedTarget) {
+								userCustomizedTarget = true;
+								if (obj.targetProvider) { promptProvider = String(obj.targetProvider); }
+								if (obj.targetModel) { promptModel = String(obj.targetModel); }
+								if (obj.targetAgentId !== undefined) { promptAgentId = typeof obj.targetAgentId === 'string' ? obj.targetAgentId : String((obj.targetAgentId as any)?.id || ''); }
+								if (obj.targetAgentName !== undefined) { promptAgentName = typeof obj.targetAgentName === 'string' ? obj.targetAgentName : String((obj.targetAgentName as any)?.name || ''); }
+							} else {
+								if (!fieldItem.targetProvider && obj.targetProvider) { promptProvider = String(obj.targetProvider); }
+								if (!fieldItem.targetModel && obj.targetModel) { promptModel = String(obj.targetModel); }
+								if (!fieldItem.targetAgentId && obj.targetAgentId) { promptAgentId = typeof obj.targetAgentId === 'string' ? obj.targetAgentId : String((obj.targetAgentId as any)?.id || ''); }
+								if (!fieldItem.targetAgentName && obj.targetAgentName) { promptAgentName = typeof obj.targetAgentName === 'string' ? obj.targetAgentName : String((obj.targetAgentName as any)?.name || ''); }
+							}
 							if (obj.output) { promptOutput = typeof obj.output === 'string' ? obj.output : JSON.stringify(obj.output); }
 							if (obj.lastExecuted) { lastExecutedText = String(obj.lastExecuted); }
+							if (obj.lastSentPayload && typeof obj.lastSentPayload === 'object') {
+								try { lastSentPayloadJson = JSON.stringify(obj.lastSentPayload); } catch {}
+							}
 						}
+					}
+
+					if (preInjectedPrompt.trim() && userPromptText.trim() === preInjectedPrompt.trim()) {
+						userPromptText = '';
+					}
+					if (!isUserInputVisible) {
+						userPromptsList = [];
+					} else if (!hasSavedUserPromptsArray && !Array.isArray(fieldItem.defaultUserPrompts) && userPromptsList.length === 0) {
+						userPromptsList = [userPromptText];
 					}
 
 					if (promptAgentId && !promptAgentName) {
 						const matchingAg = agents.find(a => a.id === promptAgentId);
 						if (matchingAg) { promptAgentName = matchingAg.name; }
+					}
+
+					if (!promptProvider) {
+						if (promptModel.startsWith('gemini')) { promptProvider = 'gemini'; }
+						else if (promptModel.startsWith('claude')) { promptProvider = 'anthropic'; }
+						else if (promptModel.startsWith('llama') || promptModel.startsWith('qwen') || promptModel.startsWith('mistral') || promptModel.startsWith('deepseek-r1')) { promptProvider = 'ollama'; }
+						else { promptProvider = 'openai'; }
+					}
+
+					const providerModelsMap = this._getPromptProviderModelsMap();
+					const activeProviderModels = providerModelsMap[promptProvider] || providerModelsMap['openai'];
+					if (this._isModelFromAnotherProvider(promptModel, promptProvider)) {
+						promptModel = activeProviderModels[0]?.id || 'gpt-4o';
+					}
+					const hasPresetMatch = activeProviderModels.some(pm => pm.id === promptModel);
+					let modelOptionsHtml = activeProviderModels.map(pm => `<option value="${this._escapeHtmlAttr(pm.id)}" ${pm.id === promptModel ? 'selected' : ''}>${this._escapeHtml(pm.label)}</option>`).join('');
+					if (!hasPresetMatch && promptModel && promptModel !== 'custom') {
+						modelOptionsHtml = `<option value="${this._escapeHtmlAttr(promptModel)}" selected>Custom: ${this._escapeHtml(promptModel)}</option>` + modelOptionsHtml;
 					}
 
 					const isAgentMode = promptMode === 'agent';
@@ -5823,66 +15257,197 @@ ${interpolatedPrompt}`;
 					const targetBadgeBg = isAgentMode ? 'rgba(56, 189, 248, 0.15)' : 'rgba(59, 130, 246, 0.15)';
 					const targetBadgeColor = isAgentMode ? '#38bdf8' : '#60a5fa';
 
-					const agentOptionsHtml = agents.length > 0
-						? agents.map(ag => `<option value="${this._escapeHtmlAttr(ag.id)}" ${ag.id === promptAgentId ? 'selected' : ''}>${this._escapeHtml(ag.name)} (${this._escapeHtml(ag.role || 'Agent')})</option>`).join('')
-						: '<option value="">-- No AI Agents configured --</option>';
+					const agentOptionsHtml = `<option value="" ${!promptAgentId ? 'selected' : ''}>-- Select AI Agent --</option>` + (
+						agents.length > 0
+							? agents.map(ag => `<option value="${this._escapeHtmlAttr(ag.id)}" ${ag.id === promptAgentId ? 'selected' : ''}>${this._escapeHtml(ag.name)} (${this._escapeHtml(ag.role || 'Agent')})</option>`).join('')
+							: '<option value="" disabled>-- No AI Agents configured --</option>'
+					);
 
-					const presetModels = [
-						{ id: 'gemini-1.5-flash', label: 'Google Gemini 1.5 Flash' },
-						{ id: 'gemini-1.5-pro', label: 'Google Gemini 1.5 Pro' },
-						{ id: 'gpt-4o', label: 'OpenAI GPT-4o' },
-						{ id: 'gpt-4o-mini', label: 'OpenAI GPT-4o-mini' },
-						{ id: 'claude-3-5-sonnet-20241022', label: 'Anthropic Claude 3.5 Sonnet' },
-						{ id: 'claude-3-5-haiku-20241022', label: 'Anthropic Claude 3.5 Haiku' },
-						{ id: 'deepseek-chat', label: 'DeepSeek Chat' }
+					const standardProviders = [
+						{ id: 'openai', label: 'OpenAI' },
+						{ id: 'gemini', label: 'Google Gemini' },
+						{ id: 'anthropic', label: 'Anthropic Claude' },
+						{ id: 'ollama', label: 'Ollama Local' },
+						{ id: 'custom-openai', label: 'Custom Endpoint' }
 					];
-					let modelOptionsHtml = presetModels.map(pm => `<option value="${this._escapeHtmlAttr(pm.id)}" ${pm.id === promptModel ? 'selected' : ''}>${this._escapeHtml(pm.label)}</option>`).join('');
-					if (!presetModels.some(pm => pm.id === promptModel) && promptModel) {
-						modelOptionsHtml += `<option value="${this._escapeHtmlAttr(promptModel)}" selected>Custom: ${this._escapeHtml(promptModel)}</option>`;
+					const providerOptionsHtml = standardProviders.map(sp => `<option value="${this._escapeHtmlAttr(sp.id)}" ${sp.id === promptProvider ? 'selected' : ''}>${this._escapeHtml(sp.label)}</option>`).join('');
+
+					const promptRefFields: Array<{ label: string }> = [
+						{ label: 'Title' },
+						{ label: 'Description' }
+					];
+					const seenPromptRefSet = new Set<string>(['title', 'description']);
+					for (const f of (customModule?.fields || [])) {
+						if (!f || (f.label || f.id || '').trim().toLowerCase() === k.trim().toLowerCase()) { continue; }
+						const fTypeLower = (f.type || '').toLowerCase();
+						const fLabelTrim = (f.label || f.id || '').trim();
+						const fLabelLower = fLabelTrim.toLowerCase();
+						if (!fLabelTrim || fTypeLower === 'output' || fTypeLower === 'result' || fLabelLower === 'output' || fLabelLower === 'result') {
+							continue;
+						}
+						if (fTypeLower === 'parameters' && Array.isArray(f.parameters)) {
+							for (const p of f.parameters) {
+								const pName = (p.name || '').trim();
+								if (pName && !seenPromptRefSet.has(pName.toLowerCase())) {
+									seenPromptRefSet.add(pName.toLowerCase());
+									promptRefFields.push({ label: pName });
+								}
+							}
+						}
+						if (!seenPromptRefSet.has(fLabelLower)) {
+							seenPromptRefSet.add(fLabelLower);
+							promptRefFields.push({ label: fLabelTrim });
+						}
 					}
+					const renderPromptChipBtn = (rf: { label: string }) => {
+						const tokenStr = `{${rf.label}}`;
+						return `<button type="button" class="prompt-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="${this._escapeHtmlAttr(tokenStr)}" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert ${this._escapeHtmlAttr(tokenStr)}">+ ${this._escapeHtml(tokenStr)}</button>`;
+					};
+					const maxVisiblePromptChips = 4;
+					const visiblePromptRefs = promptRefFields.slice(0, maxVisiblePromptChips);
+					const hiddenPromptRefs = promptRefFields.slice(maxVisiblePromptChips);
+					const visibleChipsHtml = visiblePromptRefs.map(renderPromptChipBtn).join('');
+					const hiddenChipsHtml = hiddenPromptRefs.length > 0
+						? `<span class="prompt-ctx-hidden-group" style="display: none;">${hiddenPromptRefs.map(renderPromptChipBtn).join('')}</span><button type="button" class="prompt-ctx-more-btn" data-count="${hiddenPromptRefs.length}" style="padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;" title="Show / hide more referenceable fields">+${hiddenPromptRefs.length} More...</button>`
+						: '';
+					const promptChipsHtml = visibleChipsHtml + hiddenChipsHtml;
+
+					const preInjectedPlaceholder = 'No pre-injected prompt configured in template.';
+					const preInjectedTokenizedHtml = this._renderPromptTokenizedHtml(preInjectedPrompt || '', preInjectedPlaceholder);
+					const isPreInjectedLong = this._isPromptBoxContentLong(preInjectedPrompt || '');
+					const maxPromptBoxH = EntityDetailEditor._PROMPT_BOX_DEFAULT_MAX_HEIGHT;
+					const effectivePreInjectedLocked = typeof preInjectedLockedState === 'boolean'
+						? preInjectedLockedState
+						: Boolean((preInjectedPrompt || '').trim().length > 0);
+					const preLockColor = effectivePreInjectedLocked ? '#fbbf24' : '#34d399';
+					const preLockIcon = effectivePreInjectedLocked ? 'codicon-lock' : 'codicon-unlock';
+					const preLockTitle = effectivePreInjectedLocked
+						? 'Locked (Read-Only) — Click to Unlock for editing'
+						: 'Unlocked (Editable) — Click to Lock and protect from accidental edits';
+					const preDisplayTitle = effectivePreInjectedLocked
+						? 'Locked (Read-Only, text can be selected & copied) — Click the lock icon in the top-right to unlock and edit'
+						: 'Click anywhere to edit prompt text';
+					const preMicOpacity = effectivePreInjectedLocked ? '0.28' : '0.65';
+					const preMicTitle = effectivePreInjectedLocked
+						? 'Locked — Unlock this prompt box first to record voice input'
+						: 'Record voice input (Speech-to-Text)';
+					const preInjectedBlockHtml = isPreInjectedVisible ? `
+								<!-- Pre-Injected Prompt (Visible in Ticket) -->
+								<div class="prompt-preinjected-section" style="display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 6px; background: rgba(59, 130, 246, 0.04); border: 1px solid rgba(59, 130, 246, 0.22);">
+									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
+										<div style="display: flex; align-items: center; gap: 8px;">
+											<label style="font-size: 11px; font-weight: 600; color: #60a5fa;">Pre-Injected Prompt (Template Instruction):</label>
+										</div>
+										<span style="font-size: 10px; color: #38bdf8;">Pre-configured in module template</span>
+									</div>
+									<div class="voice-input-textarea-wrapper" data-expanded="false" data-locked="${effectivePreInjectedLocked ? 'true' : 'false'}" style="position: relative; width: 100%;">
+										<div class="prompt-user-input-top-actions" style="position: absolute; top: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 2px;">
+											<button type="button" class="prompt-lock-box-btn" style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: ${preLockColor}; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;" title="${preLockTitle}">
+												<span class="codicon ${preLockIcon}" style="font-size: 12px;"></span>
+											</button>
+											<button type="button" class="prompt-expand-box-btn" style="display: ${isPreInjectedLong ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #38bdf8; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;" title="Expand input box to show full content">
+												<span class="codicon codicon-chevron-down" style="font-size: 13px;"></span>
+											</button>
+										</div>
+										<div class="prompt-tokenized-display" data-placeholder="${this._escapeHtmlAttr(preInjectedPlaceholder)}" title="${preDisplayTitle}" style="width: 100%; min-height: 118px; max-height: ${maxPromptBoxH}px; padding: 8px 48px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; cursor: text; user-select: text; -webkit-user-select: text; resize: vertical; overflow-y: auto;">${preInjectedTokenizedHtml}</div>
+										<textarea class="prompt-preinjected-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="5" placeholder="${this._escapeHtmlAttr(preInjectedPlaceholder)}" style="width: 100%; min-height: 118px; max-height: ${maxPromptBoxH}px; height: 140px; padding: 8px 48px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid #38bdf8; background: rgba(0, 0, 0, 0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; overflow-y: auto; display: none; outline: none;">${this._escapeHtml(preInjectedPrompt)}</textarea>
+										<button type="button" class="prompt-expand-bottom-pill" style="display: none;"></button>
+										<div class="prompt-voice-input-controls" style="position: absolute; bottom: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 4px;">
+											<div class="prompt-voice-recording-indicator" style="display: none; align-items: center; gap: 6px; font-size: 11px; color: #ff3b30; font-weight: 500; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(255, 59, 48, 0.35); padding: 2px 8px; border-radius: 12px; user-select: none;">
+												<span class="prompt-voice-recording-dot" style="width: 8px; height: 8px; border-radius: 50%; background-color: #ff3b30; display: inline-block;"></span>
+												<span class="prompt-voice-recording-time">0:00 / 5:00</span>
+											</div>
+											<button type="button" class="prompt-voice-mic-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-voice-target="preinjected" style="display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: var(--vscode-foreground); background: transparent; border: none; opacity: ${preMicOpacity}; padding: 0; transition: all 120ms ease;" title="${preMicTitle}">
+												<span class="codicon codicon-mic" style="font-size: 12.5px;"></span>
+											</button>
+										</div>
+									</div>
+								</div>
+					` : '';
+
+					const targetSelectorRowHtml = isAgentMode ? `
+								<!-- Target AI Agent Selector (Mode locked by template, Agent selectable by ticket user) -->
+								<div style="display: flex; flex-direction: column; gap: 6px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.22);">
+									<label style="font-size: 11px; font-weight: 600; color: #38bdf8;">Target AI Agent:</label>
+									<select class="prompt-agent-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(56,189,248,0.35); background: rgba(0,0,0,0.25); color: inherit;">
+										${agentOptionsHtml}
+									</select>
+								</div>
+					` : `
+								<!-- Target AI Model Selector (Mode locked by template, Provider & Searchable Model Picker consistent with Agent Central & Settings) -->
+								<div style="display: flex; flex-direction: column; gap: 6px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(59, 130, 246, 0.22);">
+									<label style="font-size: 11px; font-weight: 600; color: #60a5fa;">Target AI Model:</label>
+									<div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+										<select class="prompt-provider-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="min-width: 170px; padding: 6px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; cursor: pointer;" title="Select AI Provider / Configured Credential">
+											${providerOptionsHtml}
+										</select>
+										<input type="hidden" class="prompt-model-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" value="${this._escapeHtmlAttr(promptModel)}" />
+										<div class="prompt-model-picker-container" style="flex: 1; min-width: 220px; position: relative;">
+											<button type="button" class="prompt-model-picker-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;" title="Select or search AI model from your configured provider credentials (consistent with Agent Central)">
+												<span style="display: inline-flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+													<svg width="12" height="12" viewBox="0 0 16 16" fill="#60a5fa"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+													<span class="prompt-selected-model-text" style="font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);">${this._escapeHtml(promptModel)}</span>
+												</span>
+												<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="opacity: 0.7;"><path d="M4 6l4 4 4-4H4z"/></svg>
+											</button>
+											<div class="prompt-model-dropdown" style="display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1200; background: #1e1e1e; border: 1px solid rgba(59,130,246,0.45); border-radius: 6px; box-shadow: 0 10px 28px rgba(0,0,0,0.7); padding: 6px; flex-direction: column; gap: 6px;">
+												<div style="display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-bottom: 1px solid rgba(255,255,255,0.08);">
+													<span class="codicon codicon-search" style="font-size: 12px; opacity: 0.65;"></span>
+													<input type="text" class="prompt-model-search-input" placeholder="Search models (e.g. flash, sonnet, 4o, gpt-5) or enter ID..." style="flex: 1; background: transparent; border: none; outline: none; color: inherit; font-size: 11.5px; padding: 4px 2px;" />
+													<span class="prompt-dropdown-provider-badge" style="font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(59,130,246,0.2); color: #60a5fa; text-transform: uppercase;">${this._escapeHtml((promptProvider || 'openai').toUpperCase())}</span>
+												</div>
+												<div class="prompt-model-list" style="max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;"></div>
+											</div>
+										</div>
+									</div>
+								</div>
+					`;
+
+					const userInputsItemsHtml = userPromptsList.map((boxVal, boxIdx) =>
+						this._buildPromptUserInputItemHtml(rawKey, boxIdx, userPromptsList.length, boxVal, promptChipsHtml, userPromptsLockedList[boxIdx])
+					).join('');
+					const userPromptSectionHtml = isUserInputVisible ? `
+								<!-- User Prompt Input Space (Supports 1 or Multiple Sequential Input Boxes) -->
+								<div class="prompt-user-inputs-section" style="display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(59, 130, 246, 0.04); border: 1px solid rgba(59, 130, 246, 0.22);">
+									<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
+										<div style="display: flex; align-items: center; gap: 8px;">
+											<label style="font-size: 11px; font-weight: 600; color: #60a5fa;">User Prompt / Instructions:</label>
+											<span class="prompt-user-inputs-count-badge" style="font-size: 9.5px; padding: 1px 6px; border-radius: 10px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600; display: ${userPromptsList.length > 1 ? 'inline-block' : 'none'};">${userPromptsList.length} Inputs</span>
+										</div>
+										<span style="font-size: 10px; color: #38bdf8;">Combined in order when sent to AI · Supports {{param_name}} or {Field Label}</span>
+									</div>
+									<div class="prompt-user-inputs-list" style="display: ${userPromptsList.length > 0 ? 'flex' : 'none'}; flex-direction: column; gap: 10px;">
+										${userInputsItemsHtml}
+									</div>
+									<div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 4px;">
+										<button type="button" class="prompt-add-user-input-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 6px; cursor: pointer; background: linear-gradient(135deg, #059669, #10b981); color: #ffffff; border: 1px solid #34d399; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3); transition: all 0.15s ease;" title="Add a user prompt input box below to enter or voice-dictate an input segment">
+											<span class="codicon codicon-add" style="font-size: 12px;"></span>
+											<span>Add User Prompt Input Box</span>
+										</button>
+									</div>
+								</div>
+					` : '';
 
 					customFieldsHtml += `
-						<div class="section-card custom-property-card prompt-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
+						<div class="section-card custom-property-card prompt-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-target-mode="${this._escapeHtmlAttr(promptMode)}" data-target-provider="${this._escapeHtmlAttr(promptProvider)}" data-target-model="${this._escapeHtmlAttr(promptModel)}" data-user-customized-target="${userCustomizedTarget ? 'true' : 'false'}" data-pre-injected-prompt="${this._escapeHtmlAttr(preInjectedPrompt)}" data-pre-injected-visible="${isPreInjectedVisible ? 'true' : 'false'}" data-user-input-visible="${isUserInputVisible ? 'true' : 'false'}" data-prompt-chips-html="${this._escapeHtmlAttr(promptChipsHtml)}" data-last-sent-payload="${this._escapeHtmlAttr(lastSentPayloadJson)}">
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
 									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(59,130,246,0.18); color: #60a5fa; font-weight: 700; text-transform: uppercase;">Prompt</span>
 									<span class="prompt-target-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: ${targetBadgeBg}; color: ${targetBadgeColor}; font-weight: 600;">${this._escapeHtml(targetBadgeText)}</span>
 								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="prompt" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(promptText)}" title="Edit ${k} with AI">
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="prompt" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(userPromptText)}" title="Edit ${k} with AI">
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
 							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
-								<!-- Mode Switcher & Target Row -->
-								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.06);">
-									<div style="display: flex; align-items: center; gap: 6px;">
-										<span style="font-size: 11px; font-weight: 600; opacity: 0.75;">Target:</span>
-										<button type="button" class="prompt-mode-btn prompt-mode-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-mode="model" style="padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; border: 1px solid ${!isAgentMode ? 'rgba(59,130,246,0.5)' : 'rgba(255,255,255,0.1)'}; background: ${!isAgentMode ? 'rgba(59,130,246,0.18)' : 'transparent'}; color: ${!isAgentMode ? '#60a5fa' : 'inherit'};">Model</button>
-										<button type="button" class="prompt-mode-btn prompt-mode-agent-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-mode="agent" style="padding: 3px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; border: 1px solid ${isAgentMode ? 'rgba(56,189,248,0.5)' : 'rgba(255,255,255,0.1)'}; background: ${isAgentMode ? 'rgba(56,189,248,0.2)' : 'transparent'}; color: ${isAgentMode ? '#38bdf8' : 'inherit'};">AI Agent</button>
-									</div>
-									<div class="prompt-target-selector-box" style="flex: 1; max-width: 320px; min-width: 200px;">
-										<select class="prompt-model-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; ${isAgentMode ? 'display: none;' : ''}">
-											${modelOptionsHtml}
-										</select>
-										<select class="prompt-agent-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(56,189,248,0.3); background: #1a1a1a; color: inherit; ${!isAgentMode ? 'display: none;' : ''}">
-											${agentOptionsHtml}
-										</select>
-									</div>
-								</div>
-
-								<!-- Prompt Instruction Input -->
-								<div style="display: flex; flex-direction: column; gap: 4px;">
-									<div style="display: flex; justify-content: space-between; align-items: center;">
-										<label style="font-size: 11px; font-weight: 600; opacity: 0.85;">Instruction Prompt:</label>
-										<span style="font-size: 10px; opacity: 0.55;">Use {{param_name}} to reference variables</span>
-									</div>
-									<textarea class="prompt-instruction-textarea monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="3" placeholder="Enter prompt instruction for model or AI agent..." style="width: 100%; padding: 8px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical;">${this._escapeHtml(promptText)}</textarea>
-								</div>
+${targetSelectorRowHtml}
+${preInjectedBlockHtml}
+${userPromptSectionHtml}
 
 								<!-- Action Buttons Row -->
 								<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-									<div style="display: flex; gap: 8px; align-items: center;">
+									<div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
 										<button type="button" class="prompt-run-model-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59,130,246,0.18); color: #60a5fa; border: 1px solid rgba(59,130,246,0.4); ${isAgentMode ? 'display: none;' : ''}" title="Execute prompt with selected model">
 											<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M4 2.5l9 5.5-9 5.5v-11z"/></svg>
 											<span>Run with Model</span>
@@ -5903,19 +15468,450 @@ ${interpolatedPrompt}`;
 
 								<!-- Output Area -->
 								<div class="prompt-output-section" style="background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;">
-									<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px;">
-										<div style="display: flex; align-items: center; gap: 8px;">
+									<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px; gap: 8px; flex-wrap: wrap;">
+										<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
 											<span style="font-size: 11px; font-weight: 600; opacity: 0.85;">AI Execution Output:</span>
 											<span class="prompt-status-text" style="font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;">${lastExecutedText ? `Executed: ${this._escapeHtmlAttr(lastExecutedText)}` : 'Ready'}</span>
 										</div>
-										<div style="display: gap: 6px;">
+										<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto;">
+											<button type="button" class="prompt-inspect-sent-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; font-weight: 600; cursor: pointer; color: #38bdf8;" title="Inspect the complete prompt sent to AI (Structured breakdown + Full verbatim prompt)">
+												<span class="codicon codicon-eye" style="font-size: 11.5px;"></span>
+												<span>View Sent Prompt</span>
+											</button>
 											<button type="button" class="prompt-copy-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Copy</button>
 											<button type="button" class="prompt-clear-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Clear</button>
 										</div>
 									</div>
-									<div class="prompt-output-display desc-content-box" style="max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${promptOutput ? this._escapeHtml(promptOutput) : '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.</span>'}</div>
+									<textarea class="prompt-raw-output" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: none;">${this._escapeHtml(promptOutput)}</textarea>
+									<div class="prompt-output-display desc-content-box" style="max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">${promptOutput ? this._escapeHtml(this._formatPromptOutputPreviewText(promptOutput)) : '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.</span>'}</div>
 								</div>
 							</div>
+						</div>
+					`;
+				} else if (fType === 'tts') {
+					let ttsText = fieldItem.defaultContent || '';
+					let ttsDisplayText = fieldItem.ttsDisplayText || '';
+					let hasExplicitDisplayText = Boolean(fieldItem.ttsDisplayText !== undefined && fieldItem.ttsDisplayText !== '');
+					let ttsShowSpeechTextInTicket = Boolean(fieldItem.ttsShowSpeechTextInTicket);
+					let ttsCredentialId = fieldItem.targetCredentialId || '';
+					let ttsProvider = fieldItem.targetProvider || 'gemini';
+					let ttsModel = fieldItem.targetModel || (ttsProvider === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
+					let ttsFormat = fieldItem.ttsFormat || 'mp3';
+					let ttsVoice = fieldItem.ttsVoice || (ttsProvider === 'openai' ? 'alloy' : 'Kore');
+					let ttsAutoPlay = Boolean(fieldItem.ttsAutoPlay);
+					let ttsPlaybackRate = (typeof fieldItem.ttsPlaybackRate === 'number' && fieldItem.ttsPlaybackRate >= 0.25 && fieldItem.ttsPlaybackRate <= 2.5) ? fieldItem.ttsPlaybackRate : 1.0;
+					let audioFileName = '';
+					let audioRelativePath = '';
+					let lastGenerated = '';
+					let lastSynthesizedText = '';
+
+					if (v) {
+						if (typeof v === 'string') {
+							const trimmed = v.trim();
+							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+								try {
+									const tObj = JSON.parse(trimmed);
+									if (tObj.text !== undefined) ttsText = String(tObj.text);
+									if (tObj.displayText !== undefined) {
+										ttsDisplayText = String(tObj.displayText);
+										hasExplicitDisplayText = true;
+									} else if (tObj.ttsDisplayText !== undefined) {
+										ttsDisplayText = String(tObj.ttsDisplayText);
+										hasExplicitDisplayText = true;
+									}
+									if (tObj.ttsShowSpeechTextInTicket !== undefined) {
+										ttsShowSpeechTextInTicket = Boolean(tObj.ttsShowSpeechTextInTicket);
+									}
+									if (tObj.targetCredentialId !== undefined) ttsCredentialId = String(tObj.targetCredentialId || '');
+									if (tObj.targetProvider) ttsProvider = String(tObj.targetProvider);
+									if (tObj.targetModel) ttsModel = String(tObj.targetModel);
+									if (tObj.ttsFormat) ttsFormat = String(tObj.ttsFormat);
+									if (tObj.ttsVoice) ttsVoice = String(tObj.ttsVoice);
+									if (tObj.ttsAutoPlay !== undefined) ttsAutoPlay = Boolean(tObj.ttsAutoPlay);
+									if (tObj.ttsPlaybackRate !== undefined && Number.isFinite(Number(tObj.ttsPlaybackRate))) {
+										ttsPlaybackRate = Math.min(2.5, Math.max(0.25, Number(tObj.ttsPlaybackRate)));
+									}
+									if (tObj.audioFileName) audioFileName = String(tObj.audioFileName);
+									if (tObj.audioRelativePath) audioRelativePath = String(tObj.audioRelativePath);
+									if (tObj.lastGenerated) lastGenerated = String(tObj.lastGenerated);
+									if (tObj.lastSynthesizedText !== undefined) lastSynthesizedText = String(tObj.lastSynthesizedText);
+								} catch {
+									ttsDisplayText = trimmed;
+									hasExplicitDisplayText = true;
+								}
+							} else {
+								ttsDisplayText = trimmed;
+								hasExplicitDisplayText = true;
+							}
+						} else if (typeof v === 'object' && v !== null) {
+							const tObj = v as Record<string, any>;
+							if (tObj.text !== undefined) ttsText = String(tObj.text);
+							if (tObj.displayText !== undefined) {
+								ttsDisplayText = String(tObj.displayText);
+								hasExplicitDisplayText = true;
+							} else if (tObj.ttsDisplayText !== undefined) {
+								ttsDisplayText = String(tObj.ttsDisplayText);
+								hasExplicitDisplayText = true;
+							}
+							if (tObj.ttsShowSpeechTextInTicket !== undefined) {
+								ttsShowSpeechTextInTicket = Boolean(tObj.ttsShowSpeechTextInTicket);
+							}
+							if (tObj.targetCredentialId !== undefined) ttsCredentialId = String(tObj.targetCredentialId || '');
+							if (tObj.targetProvider) ttsProvider = String(tObj.targetProvider);
+							if (tObj.targetModel) ttsModel = String(tObj.targetModel);
+							if (tObj.ttsFormat) ttsFormat = String(tObj.ttsFormat);
+							if (tObj.ttsVoice) ttsVoice = String(tObj.ttsVoice);
+							if (tObj.ttsAutoPlay !== undefined) ttsAutoPlay = Boolean(tObj.ttsAutoPlay);
+							if (tObj.ttsPlaybackRate !== undefined && Number.isFinite(Number(tObj.ttsPlaybackRate))) {
+								ttsPlaybackRate = Math.min(2.5, Math.max(0.25, Number(tObj.ttsPlaybackRate)));
+							}
+							if (tObj.audioFileName) audioFileName = String(tObj.audioFileName);
+							if (tObj.audioRelativePath) audioRelativePath = String(tObj.audioRelativePath);
+							if (tObj.lastGenerated) lastGenerated = String(tObj.lastGenerated);
+							if (tObj.lastSynthesizedText !== undefined) lastSynthesizedText = String(tObj.lastSynthesizedText);
+						}
+					}
+
+					if (!hasExplicitDisplayText && !ttsDisplayText && ttsText) {
+						ttsDisplayText = ttsText;
+					}
+
+					const interpolatedSpeechText = this._interpolateParameters(ttsText);
+					const interpolatedDisplayText = this._interpolateParameters(ttsDisplayText);
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card tts-primitive-card"
+							data-field-key="${this._escapeHtmlAttr(rawKey)}"
+							data-llm-text="${this._escapeHtmlAttr(ttsText)}"
+							data-show-speech-text="${ttsShowSpeechTextInTicket ? 'true' : 'false'}"
+							data-template-audio="${this._escapeHtmlAttr(fieldItem.ttsAudioDataUrl || '')}"
+							data-cred-id="${this._escapeHtmlAttr(ttsCredentialId)}"
+							data-provider="${this._escapeHtmlAttr(ttsProvider)}"
+							data-model="${this._escapeHtmlAttr(ttsModel)}"
+							data-format="${this._escapeHtmlAttr(ttsFormat)}"
+							data-voice="${this._escapeHtmlAttr(ttsVoice)}"
+							data-autoplay="${ttsAutoPlay ? 'true' : 'false'}"
+							data-playback-rate="${this._escapeHtmlAttr(String(ttsPlaybackRate))}"
+							data-audio-file="${this._escapeHtmlAttr(audioFileName)}"
+							data-audio-path="${this._escapeHtmlAttr(audioRelativePath)}"
+							data-last-synthesized="${this._escapeHtmlAttr(lastSynthesizedText)}"
+							data-last-generated="${this._escapeHtmlAttr(lastGenerated)}">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(236,72,153,0.18); color: #f472b6; font-weight: 700; text-transform: uppercase;">Audio / TTS</span>
+									<span class="tts-header-model-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(236,72,153,0.12); color: #f9a8d4; font-weight: 600;">Model: ${this._escapeHtml(ttsModel)} (${this._escapeHtml(ttsFormat.toUpperCase())})</span>
+									<span class="tts-cached-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(34,197,94,0.15); color: #4ade80; font-weight: 600; display: ${audioRelativePath ? 'inline-block' : 'none'};">Saved Locally (${this._escapeHtml(audioFileName || ttsFormat.toUpperCase())})</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="tts" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(ttsDisplayText)}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+
+							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
+								<!-- Zone 1: Expandable / Collapsible AI Model Settings + Speech Synthesis Source + Send & Delete Audio Controls -->
+								<div style="display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(236, 72, 153, 0.05); border: 1px solid rgba(236, 72, 153, 0.22);">
+									<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
+										<div style="display: flex; align-items: center; gap: 6px;">
+											<label style="font-size: 11px; font-weight: 600; color: #f472b6;">AI Model &amp; Speech Synthesis Script:</label>
+											<span style="font-size: 9.5px; padding: 1px 6px; border-radius: 3px; background: rgba(236,72,153,0.14); color: #f9a8d4;">Model Config &amp; Speech Source</span>
+										</div>
+										<button type="button" class="tts-toggle-speech-text-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 2px 9px; font-size: 10.5px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(236, 72, 153, 0.15); border: 1px solid rgba(236, 72, 153, 0.35); color: #f9a8d4;" title="Expand or collapse AI model settings, speech synthesis text, and generation buttons">${ttsShowSpeechTextInTicket ? 'Collapse AI Section' : 'Show AI Section'}</button>
+									</div>
+									<div class="tts-speech-text-body" style="display: ${ttsShowSpeechTextInTicket ? 'flex' : 'none'}; flex-direction: column; gap: 8px;">
+										<!-- Agent Central-Style Provider/Credential + Searchable Model Selector + Format + Voice + Auto-Play -->
+										<div style="display: flex; flex-direction: column; gap: 8px; background: rgba(0,0,0,0.22); padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(236,72,153,0.2);">
+											<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+												<span style="font-size: 11px; font-weight: 600; color: #f472b6; min-width: 65px;">AI Model:</span>
+												<select class="tts-cred-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="min-width: 170px; padding: 5px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(236,72,153,0.35); background: #1a1a1a; color: inherit; cursor: pointer;" title="Select AI Provider / Credential (Agent Central)">
+													<option value="${this._escapeHtmlAttr(ttsProvider)}">${this._escapeHtml(ttsProvider.toUpperCase())}</option>
+												</select>
+												<div class="tts-model-picker-container" style="flex: 1; min-width: 210px; position: relative;">
+													<button type="button" class="tts-model-picker-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="width: 100%; padding: 5px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(236,72,153,0.35); background: #1a1a1a; color: inherit; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;" title="Select or search voice / TTS model (consistent with Agent Central)">
+														<span style="display: inline-flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+															<svg width="11" height="11" viewBox="0 0 16 16" fill="#f472b6"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+															<span class="tts-selected-model-text" style="font-weight: 600;">${this._escapeHtml(ttsModel)}</span>
+														</span>
+														<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" style="opacity: 0.7;"><path d="M4 6l4 4 4-4H4z"/></svg>
+													</button>
+													<div class="tts-model-dropdown" style="display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1200; background: #1e1e1e; border: 1px solid rgba(236,72,153,0.45); border-radius: 6px; box-shadow: 0 10px 28px rgba(0,0,0,0.7); padding: 6px; flex-direction: column; gap: 6px;">
+														<div style="display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-bottom: 1px solid rgba(255,255,255,0.08);">
+															<input type="text" class="tts-model-search-input" placeholder="Search or enter model ID..." style="flex: 1; background: transparent; border: none; outline: none; color: inherit; font-size: 11.5px; padding: 4px 2px;" />
+															<span class="tts-dropdown-provider-badge" style="font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(236,72,153,0.2); color: #f472b6; text-transform: uppercase;">${this._escapeHtml(ttsProvider.toUpperCase())}</span>
+														</div>
+														<div class="tts-model-list" style="max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;"></div>
+													</div>
+												</div>
+											</div>
+
+											<div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.05);">
+												<div style="display: flex; align-items: center; gap: 6px;">
+													<span style="font-size: 11px; font-weight: 600; opacity: 0.8;">Format:</span>
+													<select class="tts-format-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #1a1a1a; color: inherit;">
+														<option value="mp3" ${ttsFormat === 'mp3' ? 'selected' : ''}>MP3 (Default)</option>
+														<option value="wav" ${ttsFormat === 'wav' ? 'selected' : ''}>WAV</option>
+														<option value="opus" ${ttsFormat === 'opus' ? 'selected' : ''}>OPUS</option>
+														<option value="aac" ${ttsFormat === 'aac' ? 'selected' : ''}>AAC</option>
+													</select>
+												</div>
+												<div style="display: flex; align-items: center; gap: 6px;">
+													<span style="font-size: 11px; font-weight: 600; opacity: 0.8;">Voice:</span>
+													<select class="tts-voice-select monaco-select" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #1a1a1a; color: inherit;">
+														<option value="${this._escapeHtmlAttr(ttsVoice)}">${this._escapeHtml(ttsVoice)}</option>
+													</select>
+												</div>
+												<label style="display: inline-flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer; user-select: none; margin-left: auto; padding: 3px 8px; border-radius: 4px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);" title="Automatically play this MP3 audio when viewing this module">
+													<input type="checkbox" class="tts-autoplay-checkbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" ${ttsAutoPlay ? 'checked' : ''} style="cursor: pointer; margin: 0;" />
+													<span>Auto-Play Audio</span>
+												</label>
+											</div>
+										</div>
+
+										<textarea class="tts-llm-text-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="3" placeholder="Pure listening text sent to AI model for speech synthesis..." style="width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(236,72,153,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;">${this._escapeHtml(interpolatedSpeechText)}</textarea>
+										<div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+											<span class="tts-status-text" style="font-size: 10.5px; opacity: 0.78;">${audioRelativePath ? `Saved: ${this._escapeHtml(audioFileName || audioRelativePath)}${lastGenerated ? ` (${this._escapeHtml(lastGenerated)})` : ''}` : 'No audio file saved yet'}</span>
+											<div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
+												<button type="button" class="tts-send-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(236,72,153,0.22); color: #f472b6; border: 1px solid rgba(236,72,153,0.5); transition: all 0.15s ease;" title="Send Speech Synthesis Text to AI model API to generate MP3 audio (consumes model tokens)">
+													<span class="codicon codicon-send" style="font-size: 11px;"></span>
+													<span>Send &amp; Generate Audio</span>
+												</button>
+												<button type="button" class="tts-delete-audio-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: ${audioRelativePath ? 'inline-flex' : 'none'}; align-items: center; gap: 4px; padding: 4px 9px; font-size: 10.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.4);" title="Delete saved MP3 audio file from this component">
+													<span class="codicon codicon-trash" style="font-size: 11px;"></span>
+													<span>Delete Audio</span>
+												</button>
+											</div>
+										</div>
+									</div>
+								</div>
+
+								<!-- Zone 2: Isolated Reading Content & Study Notes + Dedicated Audio Player Bar -->
+								<div style="display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(56, 189, 248, 0.04); border: 1px solid rgba(56, 189, 248, 0.22);">
+									<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
+										<div style="display: flex; align-items: center; gap: 6px;">
+											<label style="font-size: 11px; font-weight: 600; color: #93c5fd;">Reading Content &amp; Study Notes:</label>
+											<span style="font-size: 9.5px; padding: 1px 6px; border-radius: 3px; background: rgba(59,130,246,0.14); color: #60a5fa;">Notes &amp; Annotations</span>
+										</div>
+										<div style="display: flex; align-items: center; gap: 6px;">
+											<button type="button" class="tts-copy-text-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(0, 122, 204, 0.16); border: 1px solid rgba(56, 189, 248, 0.35); color: #7dd3fc;" title="Copy all reading content to clipboard">
+												<span class="codicon codicon-copy" style="font-size: 11px;"></span>
+												<span class="tts-copy-btn-label">Copy</span>
+											</button>
+											<button type="button" class="tts-edit-text-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.18); color: inherit;" title="Click Edit to unlock and modify or clear reading content (auto-saves changes)">
+												<span class="tts-edit-btn-icon codicon codicon-edit" style="font-size: 11px;"></span>
+												<span class="tts-edit-btn-label">Edit</span>
+											</button>
+											<button type="button" class="tts-clear-text-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: none; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: #f87171;" title="Clear reading content">
+												<span class="codicon codicon-clear-all" style="font-size: 11px;"></span>
+												<span>Clear</span>
+											</button>
+										</div>
+									</div>
+									<textarea class="tts-text-input monaco-inputbox" data-field-key="${this._escapeHtmlAttr(rawKey)}" rows="4" readonly placeholder="Reading passage with vocabulary notes and translations..." style="width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(59,130,246,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;">${this._escapeHtml(interpolatedDisplayText)}</textarea>
+									<div class="tts-audio-player-mount" style="width: 100%; display: flex; align-items: center;"></div>
+								</div>
+							</div>
+						</div>
+					`;
+				} else if (fType === 'media_player') {
+					let mediaFilePath = fieldItem.mediaFilePath || '';
+					let mediaFileName = fieldItem.mediaFileName || '';
+					let mediaKind = fieldItem.mediaKind || 'audio';
+					let mediaMimeType = fieldItem.mediaMimeType || '';
+					let mediaPlaybackRate = (typeof fieldItem.mediaPlaybackRate === 'number' && fieldItem.mediaPlaybackRate >= 0.25 && fieldItem.mediaPlaybackRate <= 2.0) ? fieldItem.mediaPlaybackRate : 1.0;
+					let mediaAutoPlay = Boolean(fieldItem.mediaAutoPlay);
+
+					if (v) {
+						if (typeof v === 'string') {
+							const trimmed = v.trim();
+							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+								try {
+									const mObj = JSON.parse(trimmed);
+									if (mObj.mediaFilePath !== undefined) mediaFilePath = String(mObj.mediaFilePath);
+									else if (mObj.filePath !== undefined) mediaFilePath = String(mObj.filePath);
+									if (mObj.mediaFileName !== undefined) mediaFileName = String(mObj.mediaFileName);
+									else if (mObj.fileName !== undefined) mediaFileName = String(mObj.fileName);
+									if (mObj.mediaKind) mediaKind = String(mObj.mediaKind);
+									if (mObj.mediaMimeType) mediaMimeType = String(mObj.mediaMimeType);
+									if (mObj.mediaPlaybackRate !== undefined && Number.isFinite(Number(mObj.mediaPlaybackRate))) {
+										mediaPlaybackRate = Math.min(2.0, Math.max(0.25, Number(mObj.mediaPlaybackRate)));
+									}
+									if (mObj.mediaAutoPlay !== undefined) mediaAutoPlay = Boolean(mObj.mediaAutoPlay);
+								} catch {
+									mediaFilePath = trimmed;
+								}
+							} else {
+								mediaFilePath = trimmed;
+							}
+						} else if (typeof v === 'object' && v !== null) {
+							const mObj = v as Record<string, any>;
+							if (mObj.mediaFilePath !== undefined) mediaFilePath = String(mObj.mediaFilePath);
+							else if (mObj.filePath !== undefined) mediaFilePath = String(mObj.filePath);
+							if (mObj.mediaFileName !== undefined) mediaFileName = String(mObj.mediaFileName);
+							else if (mObj.fileName !== undefined) mediaFileName = String(mObj.fileName);
+							if (mObj.mediaKind) mediaKind = String(mObj.mediaKind);
+							if (mObj.mediaMimeType) mediaMimeType = String(mObj.mediaMimeType);
+							if (mObj.mediaPlaybackRate !== undefined && Number.isFinite(Number(mObj.mediaPlaybackRate))) {
+								mediaPlaybackRate = Math.min(2.0, Math.max(0.25, Number(mObj.mediaPlaybackRate)));
+							}
+							if (mObj.mediaAutoPlay !== undefined) mediaAutoPlay = Boolean(mObj.mediaAutoPlay);
+						}
+					}
+
+					const interpolatedMediaPath = this._interpolateParameters(mediaFilePath);
+					const resolvedFileName = mediaFileName || (interpolatedMediaPath ? (interpolatedMediaPath.split(/[\\/]/).pop() || interpolatedMediaPath) : '');
+					const detected = detectMediaFileInfo(resolvedFileName || interpolatedMediaPath, mediaMimeType);
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card media-player-primitive-card"
+							data-field-key="${this._escapeHtmlAttr(rawKey)}"
+							data-media-path="${this._escapeHtmlAttr(interpolatedMediaPath)}"
+							data-media-name="${this._escapeHtmlAttr(resolvedFileName)}"
+							data-media-kind="${this._escapeHtmlAttr(detected.kind || mediaKind)}"
+							data-media-mime="${this._escapeHtmlAttr(detected.mimeType || mediaMimeType)}"
+							data-playback-rate="${this._escapeHtmlAttr(String(mediaPlaybackRate))}"
+							data-autoplay="${mediaAutoPlay ? 'true' : 'false'}">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(245, 158, 11, 0.18); color: #fbbf24; font-weight: 700; text-transform: uppercase;">MP3 / MP4 Player</span>
+									<span class="media-player-header-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.14); color: #38bdf8; font-weight: 600; display: ${resolvedFileName ? 'inline-block' : 'none'};">${this._escapeHtml(detected.kind.toUpperCase())} · ${this._escapeHtml((detected.ext || 'MEDIA').toUpperCase())}</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="media_player" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(interpolatedMediaPath)}" title="Edit ${k} with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
+								<div class="media-player-card-mount" style="width: 100%; display: flex; flex-direction: column; gap: 10px;"></div>
+							</div>
+						</div>
+					`;
+				} else if (fType === 'table') {
+					let tableColumns: any[] = Array.isArray(fieldItem.tableColumns) && fieldItem.tableColumns.length > 0
+						? fieldItem.tableColumns
+						: [
+							{ id: 'col_1', name: 'id', label: 'id', dataType: 'INTEGER', primaryKey: true, nullable: false },
+							{ id: 'col_2', name: 'name', label: 'name', dataType: 'TEXT', primaryKey: false, nullable: true },
+							{ id: 'col_3', name: 'status', label: 'status', dataType: 'TEXT', primaryKey: false, nullable: true },
+							{ id: 'col_4', name: 'created_at', label: 'created_at', dataType: 'DATETIME', primaryKey: false, nullable: true }
+						];
+					let tableRows: Record<string, any>[] = Array.isArray(fieldItem.tableRows) ? fieldItem.tableRows : [];
+					let dbEngine: 'sqlite' | 'none' = fieldItem.tableDbEngine === 'none' ? 'none' : 'sqlite';
+					let dbPath: string = fieldItem.tableDbPath || '';
+					let tableName: string = fieldItem.tableDbTableName || rawKey.toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'ticket_table';
+					let autoSyncDb: boolean = Boolean(fieldItem.tableAutoSyncDb);
+					let sqlQuery: string = fieldItem.tableSqlQuery || '';
+					let sqlOutput: string = fieldItem.debugSqlOutput || '';
+					let pageSize: number = fieldItem.tablePageSize && fieldItem.tablePageSize > 0 ? fieldItem.tablePageSize : 10;
+					let lastSynced: string = '';
+
+					if (v) {
+						if (typeof v === 'string') {
+							const trimmed = v.trim();
+							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+								try {
+									const pObj = JSON.parse(trimmed);
+									if (Array.isArray(pObj.columns) && pObj.columns.length > 0) tableColumns = pObj.columns;
+									if (Array.isArray(pObj.rows)) tableRows = pObj.rows;
+									if (pObj.dbEngine) dbEngine = pObj.dbEngine === 'none' ? 'none' : 'sqlite';
+									if (pObj.dbPath !== undefined) dbPath = String(pObj.dbPath);
+									if (pObj.tableName !== undefined) tableName = String(pObj.tableName);
+									if (pObj.autoSyncDb !== undefined) autoSyncDb = Boolean(pObj.autoSyncDb);
+									if (pObj.sqlQuery !== undefined) sqlQuery = String(pObj.sqlQuery);
+									if (pObj.sqlOutput !== undefined) sqlOutput = String(pObj.sqlOutput);
+									if (Number(pObj.pageSize) > 0) pageSize = Number(pObj.pageSize);
+									if (pObj.lastSynced) lastSynced = String(pObj.lastSynced);
+								} catch {}
+							} else if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+								try {
+									const arr = JSON.parse(trimmed);
+									if (Array.isArray(arr)) tableRows = arr;
+								} catch {}
+							}
+						} else if (typeof v === 'object' && v !== null) {
+							if (Array.isArray((v as any).columns) && (v as any).columns.length > 0) tableColumns = (v as any).columns;
+							if (Array.isArray((v as any).rows)) tableRows = (v as any).rows;
+							if ((v as any).dbEngine) dbEngine = (v as any).dbEngine === 'none' ? 'none' : 'sqlite';
+							if ((v as any).dbPath !== undefined) dbPath = String((v as any).dbPath);
+							if ((v as any).tableName !== undefined) tableName = String((v as any).tableName);
+							if ((v as any).autoSyncDb !== undefined) autoSyncDb = Boolean((v as any).autoSyncDb);
+							if ((v as any).sqlQuery !== undefined) sqlQuery = String((v as any).sqlQuery);
+							if ((v as any).sqlOutput !== undefined) sqlOutput = String((v as any).sqlOutput);
+							if (Number((v as any).pageSize) > 0) pageSize = Number((v as any).pageSize);
+							if ((v as any).lastSynced) lastSynced = String((v as any).lastSynced);
+						}
+					}
+
+					const tableRefTokens: string[] = ['Title', 'Description'];
+					fieldsToRender.forEach(otherF => {
+						if (otherF.type === 'parameters') {
+							if (Array.isArray(otherF.parameters)) {
+								otherF.parameters.forEach((p: any) => {
+									const pk = (p?.name || p?.key || '').trim();
+									if (pk && !tableRefTokens.includes(pk)) {
+										tableRefTokens.push(pk);
+									}
+								});
+							}
+							if (otherF.val) {
+								try {
+									const parsedP = typeof otherF.val === 'string' ? JSON.parse(otherF.val) : otherF.val;
+									if (Array.isArray(parsedP)) {
+										parsedP.forEach((p: any) => {
+											const pk = (p?.name || p?.key || '').trim();
+											if (pk && !tableRefTokens.includes(pk)) {
+												tableRefTokens.push(pk);
+											}
+										});
+									} else if (typeof parsedP === 'object' && parsedP !== null) {
+										Object.keys(parsedP).forEach(pk => {
+											const trimmedPk = pk.trim();
+											if (trimmedPk && !tableRefTokens.includes(trimmedPk)) {
+												tableRefTokens.push(trimmedPk);
+											}
+										});
+									}
+								} catch {}
+							}
+						}
+					});
+					fieldsToRender.forEach(otherF => {
+						if (otherF.key !== rawKey && otherF.label !== k && otherF.type !== 'output' && otherF.type !== 'result') {
+							const tk = (otherF.label || otherF.key || '').trim();
+							if (tk && !tableRefTokens.includes(tk)) {
+								tableRefTokens.push(tk);
+							}
+						}
+					});
+
+					const tablePayloadStr = JSON.stringify({
+						columns: tableColumns,
+						rows: tableRows,
+						dbEngine,
+						dbPath,
+						tableName,
+						autoSyncDb,
+						sqlQuery,
+						sqlOutput,
+						pageSize,
+						refTokens: tableRefTokens,
+						lastSynced
+					});
+					const dbShort = dbPath ? ` · SQLite: ${dbPath.split(/[/\\]/).pop()}` : '';
+					const statsText = `${tableColumns.length} cols · ${tableRows.length} rows${dbShort}`;
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card table-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-table-json="${this._escapeHtmlAttr(tablePayloadStr)}">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(20, 184, 166, 0.18); color: #2dd4bf; font-weight: 700; text-transform: uppercase;">Data Table</span>
+									<span class="table-header-stats-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #5eead4; font-family: monospace;">${this._escapeHtml(statsText)}</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="table" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(tablePayloadStr)}" title="Operate ${k} table & SQLite with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view table-card-mount" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;"></div>
 						</div>
 					`;
 				} else if (fType === 'output' || fType === 'result') {
@@ -5960,8 +15956,11 @@ ${interpolatedPrompt}`;
 					let itemsHtml = '';
 
 					if (enabledSpecs.length > 0) {
+						let savedMapNeedsSync = false;
 						for (const spec of enabledSpecs) {
 							let itemText = '';
+							let savedSpecText = '';
+							let livePrimText = '';
 							let itemFormat = spec.defaultFormat || 'text';
 							const specData = savedMap[spec.fieldKey] || savedMap[spec.label];
 
@@ -5974,67 +15973,136 @@ ${interpolatedPrompt}`;
 							);
 							const isBrowserField = matchingField?.type === 'browser' || spec.fieldKey.toLowerCase().includes('browser') || spec.label.toLowerCase().includes('browser');
 							const isPromptField = matchingField?.type === 'prompt' || spec.fieldKey.toLowerCase().includes('prompt') || spec.label.toLowerCase().includes('summary') || spec.label.toLowerCase().includes('instruction');
+							const isPythonField = matchingField?.type === 'python' || spec.fieldKey.toLowerCase().includes('python') || spec.label.toLowerCase().includes('python');
+							const isParametersField = matchingField?.type === 'parameters' || spec.fieldKey.toLowerCase() === 'parameters' || spec.label.toLowerCase() === 'parameters';
+							const isTableField = matchingField?.type === 'table' || spec.fieldKey.toLowerCase().includes('table') || spec.label.toLowerCase().includes('table');
 
-							if (specData) {
-								if (typeof specData === 'object' && specData !== null) {
+							const extractSpecItemText = (pRec: Record<string, unknown>): string => {
+								if (isBrowserField) {
+									return String(pRec.content ?? matchingField?.defaultContent ?? '');
+								} else if (isPromptField) {
+									return String(pRec.output ?? pRec.text ?? '');
+								} else if (isPythonField) {
+									const v = (pRec.result !== undefined && pRec.result !== null && pRec.result !== '') ? pRec.result : (pRec.output ?? '');
+									return typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v ?? '');
+								} else if (isParametersField) {
+									return JSON.stringify(pRec, null, 2);
+								} else if (isTableField) {
+									if (Array.isArray(pRec.rows) && pRec.rows.length > 0) {
+										return JSON.stringify(pRec.rows, null, 2);
+									}
+									if (typeof pRec.sqlOutput === 'string' && pRec.sqlOutput.trim() !== '') {
+										return pRec.sqlOutput.trim();
+									}
+									return Array.isArray(pRec.rows) ? JSON.stringify(pRec.rows, null, 2) : JSON.stringify(pRec, null, 2);
+								} else {
+									const v = pRec.result ?? pRec.output ?? pRec.content ?? pRec.text;
+									if (v !== undefined && v !== null) {
+										return typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v);
+									}
+									return JSON.stringify(pRec, null, 2);
+								}
+							};
+
+							if (specData !== undefined && specData !== null) {
+								if (Array.isArray(specData)) {
+									savedSpecText = JSON.stringify(specData, null, 2);
+								} else if (typeof specData === 'object') {
 									const sRec = specData as Record<string, unknown>;
-									if (isBrowserField) {
-										itemText = String(sRec.content ?? sRec.text ?? '');
-									} else if (isPromptField) {
-										itemText = String(sRec.output ?? sRec.result ?? '');
+									const isTableStateObj = isTableField || 'sqlOutput' in sRec || ('columns' in sRec && 'rows' in sRec) || 'dbEngine' in sRec;
+									if (isTableStateObj) {
+										if (Array.isArray(sRec.rows) && sRec.rows.length > 0) {
+											savedSpecText = JSON.stringify(sRec.rows, null, 2);
+										} else if (typeof sRec.sqlOutput === 'string' && sRec.sqlOutput.trim() !== '') {
+											savedSpecText = sRec.sqlOutput.trim();
+										} else if (typeof sRec.output === 'string' && sRec.output.trim() !== '' && !sRec.output.trim().startsWith('{"columns":')) {
+											savedSpecText = sRec.output.trim();
+										} else if (typeof sRec.text === 'string' && sRec.text.trim() !== '' && !sRec.text.trim().startsWith('{"columns":')) {
+											savedSpecText = sRec.text.trim();
+										}
 									} else {
-										itemText = String(sRec.text ?? sRec.content ?? sRec.result ?? sRec.output ?? JSON.stringify(specData, null, 2));
+										const hasWrapperKey = 'text' in sRec || 'content' in sRec || 'result' in sRec || 'output' in sRec;
+										if (hasWrapperKey) {
+											let rawV: unknown;
+											if (isBrowserField) {
+												rawV = sRec.content ?? sRec.text ?? '';
+											} else if (isPromptField) {
+												rawV = sRec.text ?? sRec.output ?? sRec.result ?? '';
+											} else if (isPythonField) {
+												rawV = (sRec.result !== undefined && sRec.result !== null && sRec.result !== '') ? sRec.result : (sRec.output ?? sRec.text ?? sRec.content ?? '');
+											} else {
+												rawV = sRec.text ?? sRec.content ?? sRec.result ?? sRec.output;
+											}
+											savedSpecText = typeof rawV === 'object' && rawV !== null ? JSON.stringify(rawV, null, 2) : String(rawV ?? '');
+										} else {
+											savedSpecText = JSON.stringify(specData, null, 2);
+										}
 									}
 									if (sRec.format) { itemFormat = String(sRec.format); }
 								} else {
-									itemText = String(specData);
-								}
-							} else {
-								const primRaw = this._lastParsedData?.customMetadata?.[spec.fieldKey] ?? this._lastParsedData?.customMetadata?.[spec.label];
-								if (primRaw) {
-									if (typeof primRaw === 'string') {
-										try {
-											const pObj = JSON.parse(primRaw);
-											if (typeof pObj === 'object' && pObj !== null) {
-												const pRec = pObj as Record<string, unknown>;
-												if (isBrowserField) {
-													itemText = String(pRec.content ?? matchingField?.defaultContent ?? '');
-												} else if (isPromptField) {
-													itemText = String(pRec.output ?? '');
-												} else {
-													itemText = String(pRec.output ?? pRec.content ?? pRec.result ?? '');
-												}
-											} else if (isBrowserField) {
-												itemText = matchingField?.defaultContent || '';
-											} else if (isPromptField) {
-												itemText = '';
-											} else {
-												itemText = primRaw;
-											}
-										} catch {
-											if (isBrowserField) {
-												itemText = matchingField?.defaultContent || '';
-											} else if (isPromptField) {
-												itemText = '';
-											} else {
-												itemText = primRaw;
-											}
-										}
-									} else if (typeof primRaw === 'object' && primRaw !== null) {
-										const pRec = primRaw as Record<string, unknown>;
-										if (isBrowserField) {
-											itemText = String(pRec.content ?? matchingField?.defaultContent ?? '');
-										} else if (isPromptField) {
-											itemText = String(pRec.output ?? '');
-										} else {
-											itemText = String(pRec.output ?? pRec.content ?? pRec.result ?? '');
-										}
-									}
-								} else if (isBrowserField && matchingField?.defaultContent) {
-									itemText = matchingField.defaultContent;
+									savedSpecText = String(specData);
 								}
 							}
 
+							const primRaw = this._lookupCustomMetadataByField(spec.fieldKey, matchingField) ?? this._lookupCustomMetadataByField(spec.label, matchingField);
+							if (primRaw) {
+								if (typeof primRaw === 'string') {
+									try {
+										const pObj = JSON.parse(primRaw);
+										if (Array.isArray(pObj)) {
+											livePrimText = JSON.stringify(pObj, null, 2);
+										} else if (typeof pObj === 'object' && pObj !== null) {
+											livePrimText = extractSpecItemText(pObj as Record<string, unknown>);
+										} else if (isBrowserField) {
+											livePrimText = matchingField?.defaultContent || '';
+										} else if (isPromptField) {
+											livePrimText = '';
+										} else {
+											livePrimText = primRaw;
+										}
+									} catch {
+										if (isBrowserField) {
+											livePrimText = matchingField?.defaultContent || '';
+										} else if (isPromptField) {
+											livePrimText = '';
+										} else {
+											livePrimText = primRaw;
+										}
+									}
+								} else if (typeof primRaw === 'object' && primRaw !== null) {
+									if (Array.isArray(primRaw)) {
+										livePrimText = JSON.stringify(primRaw, null, 2);
+									} else {
+										livePrimText = extractSpecItemText(primRaw as Record<string, unknown>);
+									}
+								}
+							} else if (isBrowserField && matchingField?.defaultContent) {
+								livePrimText = matchingField.defaultContent;
+							}
+
+							// Always prioritize the live primitive's actual latest execution result over stale cached Output entries
+							if (livePrimText && livePrimText.trim() !== '') {
+								itemText = livePrimText;
+								if (livePrimText.trim() !== (savedSpecText || '').trim()) {
+									const targetKey = (spec.fieldKey in savedMap) ? spec.fieldKey : ((spec.label in savedMap) ? spec.label : spec.fieldKey);
+									const existingEntry = savedMap[targetKey];
+									if (existingEntry && typeof existingEntry === 'object' && !Array.isArray(existingEntry) && ('text' in (existingEntry as Record<string, unknown>) || 'format' in (existingEntry as Record<string, unknown>))) {
+										savedMap[targetKey] = {
+											...(existingEntry as Record<string, unknown>),
+											text: livePrimText,
+											format: itemFormat,
+											lastUpdated: new Date().toLocaleTimeString()
+										};
+									} else {
+										savedMap[targetKey] = livePrimText;
+									}
+									savedMapNeedsSync = true;
+								}
+							} else {
+								itemText = savedSpecText;
+							}
+
+							const specStateKey = `${rawKey}::${spec.fieldKey}`;
 							let itemViewportHtml = '';
 							if (!itemText) {
 								const notReadyHint = isBrowserField
@@ -6042,19 +16110,13 @@ ${interpolatedPrompt}`;
 									: (isPromptField
 										? 'No AI output generated yet. Run Model or Agent in the Prompt card above or run workflow.'
 										: 'No output data recorded yet.');
-								itemViewportHtml = `<div style="opacity: 0.45; font-style: italic; font-size: 11px; padding: 4px 0;">${notReadyHint}</div>`;
-							} else if (itemFormat === 'table') {
-								itemViewportHtml = this._renderResultTableHtml(itemText);
-							} else if (itemFormat === 'markdown') {
-								itemViewportHtml = this._markdownToHtml(itemText);
-							} else if (itemFormat === 'json') {
-								itemViewportHtml = this._renderResultJsonHtml(itemText);
+								itemViewportHtml = `<div style="opacity: 0.45; font-style: italic; font-size: 11px; margin: 0;">${notReadyHint}</div>`;
 							} else {
-								itemViewportHtml = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(itemText)}</pre>`;
+								itemViewportHtml = this._renderOutputViewportByFormat(itemText, itemFormat, specStateKey);
 							}
 
 							itemsHtml += `
-								<div class="output-spec-item" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="display: flex; flex-direction: column; gap: 6px;">
+								<div class="output-spec-item" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="display: flex; flex-direction: column; gap: 4px;">
 									<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;">
 										<div style="display: flex; align-items: center; gap: 6px;">
 											<span style="font-weight: 600; font-size: 12px; color: #a5b4fc;">${this._escapeHtml(spec.label)}</span>
@@ -6071,23 +16133,16 @@ ${interpolatedPrompt}`;
 										</div>
 									</div>
 									<textarea class="output-item-raw-content" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="display: none;">${this._escapeHtml(itemText)}</textarea>
-									<div class="output-item-viewport desc-content-box" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" style="min-height: 80px; max-height: 300px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">
-										${itemViewportHtml}
-									</div>
+									<div class="output-item-viewport desc-content-box" data-spec-key="${this._escapeHtmlAttr(spec.fieldKey)}" data-state-key="${this._escapeHtmlAttr(specStateKey)}" style="padding: 8px 12px; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; word-break: break-word;">${itemViewportHtml}</div>
 								</div>
 							`;
 						}
-					} else {
-						let initialViewportHtml = '';
-						if (singleResultFormat === 'table') {
-							initialViewportHtml = this._renderResultTableHtml(singleResultText);
-						} else if (singleResultFormat === 'markdown') {
-							initialViewportHtml = singleResultText ? this._markdownToHtml(singleResultText) : '<span style="opacity: 0.4; font-style: italic;">No markdown content to display.</span>';
-						} else if (singleResultFormat === 'json') {
-							initialViewportHtml = this._renderResultJsonHtml(singleResultText);
-						} else {
-							initialViewportHtml = `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${singleResultText ? this._escapeHtml(singleResultText) : '<span style="opacity: 0.4; font-style: italic;">No text content.</span>'}</pre>`;
+						if (savedMapNeedsSync && !this._isPreviewMode && this._lastParsedData?.customMetadata) {
+							this._lastParsedData.customMetadata[rawKey] = JSON.stringify(savedMap);
 						}
+					} else {
+						const singleStateKey = `${rawKey}::__single__`;
+						const initialViewportHtml = this._renderOutputViewportByFormat(singleResultText, singleResultFormat, singleStateKey);
 
 						itemsHtml = `
 							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -6106,9 +16161,7 @@ ${interpolatedPrompt}`;
 								</div>
 							</div>
 							<textarea class="result-raw-content" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="display: none;">${this._escapeHtml(singleResultText)}</textarea>
-							<div class="result-viewport-container desc-content-box" style="max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;">
-								${initialViewportHtml}
-							</div>
+							<div class="result-viewport-container desc-content-box" data-state-key="${this._escapeHtmlAttr(singleStateKey)}" style="padding: 8px 12px; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; word-break: break-word;">${initialViewportHtml}</div>
 						`;
 					}
 
@@ -6194,8 +16247,63 @@ ${interpolatedPrompt}`;
 
 		return `
 			<style>
+				.entity-detail-editor {
+					user-select: none;
+					-webkit-user-select: none;
+				}
 				.entity-detail-editor * {
 					box-sizing: border-box;
+				}
+				.entity-detail-editor .python-code-display,
+				.entity-detail-editor .python-code-display *,
+				.entity-detail-editor .python-line-numbers-gutter {
+					user-select: none !important;
+					-webkit-user-select: none !important;
+					pointer-events: none !important;
+				}
+				.entity-detail-editor input,
+				.entity-detail-editor textarea,
+				.entity-detail-editor .python-code-textarea,
+				.entity-detail-editor .desc-content-box,
+				.entity-detail-editor .desc-content-box *,
+				.entity-detail-editor .prompt-tokenized-display,
+				.entity-detail-editor .prompt-tokenized-display *,
+				.entity-detail-editor .prompt-output-display,
+				.entity-detail-editor .prompt-output-display *,
+				.entity-detail-editor .browser-content-display,
+				.entity-detail-editor .browser-content-display *,
+				.entity-detail-editor .python-output-display,
+				.entity-detail-editor .python-output-display *,
+				.entity-detail-editor .python-result-display,
+				.entity-detail-editor .python-result-display *,
+				.entity-detail-editor .sql-output-box,
+				.entity-detail-editor .sql-output-box *,
+				.entity-detail-editor .output-item-display,
+				.entity-detail-editor .output-item-display *,
+				.entity-detail-editor .result-display-box,
+				.entity-detail-editor .result-display-box *,
+				.entity-detail-editor .instruction-item,
+				.entity-detail-editor .instruction-item *,
+				.entity-detail-editor #work-logs-container,
+				.entity-detail-editor #work-logs-container *,
+				.entity-detail-editor .ticket-title,
+				.entity-detail-editor .sidebar-value,
+				.entity-detail-editor pre,
+				.entity-detail-editor pre *,
+				.entity-detail-editor code,
+				.entity-detail-editor code * {
+					user-select: text !important;
+					-webkit-user-select: text !important;
+				}
+				.entity-detail-editor .desc-content-box,
+				.entity-detail-editor .prompt-tokenized-display,
+				.entity-detail-editor .prompt-output-display,
+				.entity-detail-editor .browser-content-display,
+				.entity-detail-editor .python-output-display,
+				.entity-detail-editor .python-result-display,
+				.entity-detail-editor .sql-output-box,
+				.entity-detail-editor pre {
+					cursor: text;
 				}
 				.entity-detail-editor .layout-container {
 					display: grid;
@@ -6203,6 +16311,62 @@ ${interpolatedPrompt}`;
 					gap: 28px;
 					width: 100%;
 					margin: 0;
+					position: relative;
+				}
+				.entity-detail-editor .layout-container.attributes-collapsed {
+					grid-template-columns: minmax(0, 1fr);
+					gap: 0;
+				}
+				.entity-detail-editor .layout-container.attributes-collapsed .sidebar {
+					display: none;
+				}
+				.entity-detail-editor .attributes-collapsed-drawer-btn {
+					display: none;
+				}
+				.entity-detail-editor .layout-container.attributes-collapsed .attributes-collapsed-drawer-btn {
+					display: inline-flex;
+					align-items: center;
+					justify-content: center;
+					gap: 5px;
+					position: sticky;
+					top: 6px;
+					justify-self: end;
+					margin-bottom: -26px;
+					z-index: 20;
+					padding: 4px 8px;
+					border-radius: 6px;
+					background: rgba(30, 41, 59, 0.85);
+					border: 1px solid rgba(56, 189, 248, 0.35);
+					color: #38bdf8;
+					font-size: 11px;
+					font-weight: 600;
+					cursor: pointer;
+					backdrop-filter: blur(6px);
+					box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+					transition: all 0.15s ease;
+				}
+				.entity-detail-editor .layout-container.attributes-collapsed .attributes-collapsed-drawer-btn:hover {
+					background: rgba(56, 189, 248, 0.22);
+					border-color: rgba(56, 189, 248, 0.6);
+				}
+				.entity-detail-editor .sidebar-collapse-icon-btn {
+					display: inline-flex;
+					align-items: center;
+					justify-content: center;
+					width: 22px;
+					height: 22px;
+					padding: 0;
+					border-radius: 5px;
+					background: rgba(255, 255, 255, 0.04);
+					border: 1px solid rgba(255, 255, 255, 0.1);
+					color: var(--vscode-descriptionForeground, rgba(255, 255, 255, 0.65));
+					cursor: pointer;
+					transition: all 0.15s ease;
+				}
+				.entity-detail-editor .sidebar-collapse-icon-btn:hover {
+					background: rgba(56, 189, 248, 0.15);
+					border-color: rgba(56, 189, 248, 0.45);
+					color: #38bdf8;
 				}
 				.entity-detail-editor .main-content {
 					display: flex;
@@ -6307,6 +16471,11 @@ ${interpolatedPrompt}`;
 					outline: 1px solid var(--vscode-focusBorder, #007acc);
 					border-color: var(--vscode-focusBorder, #007acc);
 				}
+				.entity-detail-editor .python-code-textarea::selection {
+					background: rgba(56, 189, 248, 0.28) !important;
+					color: transparent !important;
+					-webkit-text-fill-color: transparent !important;
+				}
 				.entity-detail-editor .section-card {
 					background: rgba(255,255,255,0.015);
 					border: 1px solid rgba(255,255,255,0.05);
@@ -6402,6 +16571,31 @@ ${interpolatedPrompt}`;
 				}
 			</style>
 
+			${this._isPreviewMode ? `
+				<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; margin-bottom: 18px; border-radius: 8px; background: linear-gradient(90deg, rgba(56, 189, 248, 0.14) 0%, rgba(129, 140, 248, 0.10) 100%); border: 1px solid rgba(56, 189, 248, 0.35); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);">
+					<div style="display: flex; align-items: center; gap: 10px;">
+						<span class="codicon codicon-eye" style="font-size: 16px; color: #38bdf8;"></span>
+						<div style="display: flex; flex-direction: column; gap: 2px;">
+							<div style="display: flex; align-items: center; gap: 8px;">
+								<span style="font-size: 11.5px; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Template Ticket Preview</span>
+								<span style="font-size: 11px; padding: 1px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.2); color: #bae6fd; font-weight: 600;">${this._escapeHtml(customModule?.name || data.ticketType)}</span>
+							</div>
+							<span style="font-size: 11px; opacity: 0.78;">Interactive preview of how a ticket generated from this template looks and behaves. Changes here are in-memory only.</span>
+						</div>
+					</div>
+					<div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
+						<button type="button" id="preview-reset-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; border-radius: 5px; cursor: pointer;" title="Reset preview to template default values">
+							<span class="codicon codicon-debug-restart" style="font-size: 12px;"></span>
+							<span>Reset Defaults</span>
+						</button>
+						<button type="button" id="preview-edit-schema-btn" class="btn-primary" style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.45);" title="Open or switch to the Module Schema Designer for this template">
+							<span class="codicon codicon-tools" style="font-size: 12px;"></span>
+							<span>Edit Template Schema</span>
+						</button>
+					</div>
+				</div>
+			` : ''}
+
 			<!-- Top Header Area -->
 			<div style="width: 100%; margin: 0 0 20px 0; text-align: left; display: flex; justify-content: space-between; align-items: flex-start;">
 				<div style="flex: 1; min-width: 0;">
@@ -6413,7 +16607,7 @@ ${interpolatedPrompt}`;
 							`).join('')
 							: `<span>${this._escapeHtml(data.workspaceId || 'Workspace')}</span><span class="breadcrumb-sep" style="opacity: 0.35; margin: 0 4px;">/</span><span>${this._escapeHtml(data.ticketId)}</span>`
 						}
-						<span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-block; margin-left: 6px;">${typeUpper}</span>
+						<span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 3px; margin-left: 6px;"><span class="${ThemeIcon.asClassName(resolveCustomModuleIcon(customModule?.icon, data.ticketType))}" style="font-size: 9.5px; color: ${colorSetting.text};"></span><span>${typeUpper}</span></span>
 					</div>
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
@@ -6423,18 +16617,44 @@ ${interpolatedPrompt}`;
 					</div>
 				</div>
 				<div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+					${this._isPreviewMode ? `
+						<button type="button" class="btn-primary preview-edit-schema-trigger" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.22); border: 1px solid rgba(192, 132, 252, 0.45); color: #e9d5ff;" title="Switch to Edit Template Schema Mode">
+							<span class="codicon codicon-edit" style="font-size: 12px;"></span>
+							<span>Edit Template</span>
+						</button>
+					` : ''}
+					${(this._isEmbeddedInWorkflow || (data.ticketType && data.ticketType.toLowerCase() === 'workflow')) ? `
+						<button type="button" id="entity-detail-switch-flowchart-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(13, 148, 136, 0.16); border: 1px solid rgba(45, 212, 191, 0.35); color: #2dd4bf;" title="Switch back to Workflow Flowchart View">
+							<span class="codicon codicon-type-hierarchy-sub" style="font-size: 12px;"></span>
+							<span>Flowchart</span>
+						</button>
+					` : ''}
 					<button type="button" id="entity-detail-refresh-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer;" title="Refresh Ticket (Reload latest data from disk)">
 						<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="display:inline-block;"><path d="M13.65 2.35A7.958 7.958 0 0 0 8 0a8 8 0 1 0 8 8h-2a6 6 0 1 1-1.76-4.24l-2.24 2.24H16V0l-2.35 2.35z"/></svg>
 						<span>Refresh</span>
+					</button>
+					<button type="button" id="entity-detail-toggle-attributes-btn" class="btn-secondary toggle-attributes-panel-btn" style="display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 5px 9px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.06)'}; border: 1px solid ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.4)' : 'rgba(255, 255, 255, 0.1)'}; color: ${this._isAttributesCollapsed ? '#38bdf8' : 'var(--vscode-foreground)'};" title="${this._isAttributesCollapsed ? 'Show Attributes Panel' : 'Hide Attributes Panel'}">
+						<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;">
+							<rect x="1.5" y="2.5" width="13" height="11" rx="1.5"></rect>
+							<line x1="10" y1="2.5" x2="10" y2="13.5"></line>
+						</svg>
 					</button>
 				</div>
 			</div>
 
 			<!-- Main Layout Container -->
-			<div class="layout-container">
+			<div class="layout-container ${this._isAttributesCollapsed ? 'attributes-collapsed' : ''}">
+				<button type="button" class="attributes-collapsed-drawer-btn toggle-attributes-panel-btn" title="Expand Attributes Panel">
+					<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+						<polyline points="10 4 6 8 10 12"></polyline>
+						<line x1="13" y1="3" x2="13" y2="13"></line>
+					</svg>
+					<span>Attributes</span>
+				</button>
 				<!-- Left Column: Main Stream -->
 				<div class="main-content">
 					<!-- 1. Description / Role Card -->
+					${(isAgent || !customModule || !Array.isArray(customModule.fields) || customModule.fields.some(f => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description')) ? `
 					<div class="section-card">
 						<div class="section-title">
 							<div style="display: flex; align-items: center; gap: 8px;">
@@ -6449,6 +16669,7 @@ ${interpolatedPrompt}`;
 							${data.description ? this._markdownToHtml(data.description) : `<span style="opacity: 0.45; font-style: italic;">No ${isAgent ? 'role description' : 'description'} provided.</span>`}
 						</div>
 					</div>
+					` : ''}
 
 					${isAgent ? `
 						<!-- AI Model & Execution Engine Card -->
@@ -6549,7 +16770,7 @@ ${interpolatedPrompt}`;
 					${customFieldsHtml}
 
 					<!-- Work Logs Card -->
-					<div class="section-card">
+					<div class="section-card" style="max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;">
 						<div class="section-title">
 							<span>${isAgent ? 'Task History & Work Logs' : 'Work Logs'}</span>
 							<button id="add-log-btn" class="btn-primary" style="font-size: 0.8em; padding: 4px 10px;">+ Add Log</button>
@@ -6564,7 +16785,7 @@ ${interpolatedPrompt}`;
 							</div>
 						</div>
 
-						<div id="work-logs-container">
+						<div id="work-logs-container" style="max-width: 100%; min-width: 0; width: 100%; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;">
 							${workLogHtml}
 						</div>
 					</div>
@@ -6574,9 +16795,17 @@ ${interpolatedPrompt}`;
 				<div class="sidebar">
 					<div class="sidebar-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;">
 						<h3 style="margin: 0; font-size: 1.05em; font-weight: 700; color: var(--vscode-editor-foreground);">${isAgent ? 'Agent Attributes' : 'Attributes'}</h3>
-						<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" data-ai-field-type="attributes" data-ai-field-label="Attributes" title="Edit Attributes with AI">
-							<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-						</button>
+						<div style="display: flex; align-items: center; gap: 6px;">
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes" data-ai-field-type="attributes" data-ai-field-label="Attributes" title="Edit Attributes with AI">
+								<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+							</button>
+							<button type="button" class="sidebar-collapse-icon-btn toggle-attributes-panel-btn" title="Collapse / Hide Attributes Panel">
+								<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+									<polyline points="6 4 10 8 6 12"></polyline>
+									<line x1="13" y1="3" x2="13" y2="13"></line>
+								</svg>
+							</button>
+						</div>
 					</div>
 					
 					<!-- Status -->

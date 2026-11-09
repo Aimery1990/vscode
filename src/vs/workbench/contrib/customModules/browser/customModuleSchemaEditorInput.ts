@@ -7,14 +7,37 @@ import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IUntypedEditorInput, EditorInputCapabilities } from '../../../common/editor.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
-import { customModulesViewIcon } from './customModules.contribution.js';
-import { ICustomModule } from '../../entityPersistence/common/entityPersistence.js';
+import { Codicon } from '../../../../base/common/codicons.js';
+import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
+import { localize } from '../../../../nls.js';
+import { Emitter } from '../../../../base/common/event.js';
+import { ICustomModule, ICustomField } from '../../entityPersistence/common/entityPersistence.js';
+
+export const customModulesViewIcon = registerIcon(
+	'custom-modules-view-icon',
+	Codicon.layout,
+	localize('customModulesViewIcon', 'View icon of the Custom Modules & Data Types view.')
+);
 
 export class CustomModuleSchemaEditorInput extends EditorInput {
 	static readonly ID = 'workbench.input.customModuleSchema';
 
 	private readonly _resource: URI;
 	public draftModule?: ICustomModule;
+	public isFlowchartNodeMode?: boolean;
+	public nodeId?: string;
+	public workflowVariablesProvider?: () => Array<{ label: string; type: string; ticketType?: string }>;
+	public workflowRuntimeContextProvider?: () => Record<string, any>;
+	public onNodeFieldsChange?: (fields: ICustomField[]) => void;
+	public focusFieldId?: string;
+
+	private readonly _onDidUpdateExternalDraft = this._register(new Emitter<string | undefined>());
+	public readonly onDidUpdateExternalDraft = this._onDidUpdateExternalDraft.event;
+
+	public notifyExternalDraftUpdated(focusFieldId?: string): void {
+		this.focusFieldId = focusFieldId;
+		this._onDidUpdateExternalDraft.fire(focusFieldId);
+	}
 
 	override get capabilities(): EditorInputCapabilities {
 		return super.capabilities | EditorInputCapabilities.Singleton;
@@ -41,11 +64,13 @@ export class CustomModuleSchemaEditorInput extends EditorInput {
 	}
 
 	override getName(): string {
-		return `Edit Module Schema: ${this.moduleName}`;
+		return this.isFlowchartNodeMode
+			? `Node: ${this.moduleName}`
+			: `Edit Module Schema: ${this.moduleName}`;
 	}
 
 	override getDescription(): string {
-		return 'Schema Designer';
+		return this.isFlowchartNodeMode ? 'Flowchart Node Components' : 'Schema Designer';
 	}
 
 	override getIcon(): ThemeIcon {

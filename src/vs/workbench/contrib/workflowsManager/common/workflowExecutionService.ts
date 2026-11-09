@@ -45,12 +45,24 @@ export interface IWorkflowDisplayCard {
 	ticketHandle?: ITicketHandleInfo;
 }
 
+export interface INotebookCellExecutionResult {
+	ok: boolean;
+	value?: any;
+	stdout?: string;
+	error?: string;
+	variables: Record<string, any>;
+	displayCards: IWorkflowDisplayCard[];
+	durationMs: number;
+	executionCount: number;
+}
+
 export interface IWorkflowExecutionService {
 	readonly _serviceBrand: undefined;
 
 	readonly onDidChangeRunState: Event<IWorkflowExecutionRun>;
 	readonly onDidEmitLog: Event<{ runId: string; log: IWorkflowLogEntry }>;
 	readonly onDidDisplayVariable: Event<IWorkflowDisplayCard>;
+	readonly onDidUpdateNodeComponents: Event<{ workflowUri: string; nodeId: string; node: any }>;
 
 	executeWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions): Promise<IWorkflowExecutionRun>;
 	stepWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions, runId?: string): Promise<IWorkflowExecutionRun>;
@@ -70,4 +82,11 @@ export interface IWorkflowExecutionService {
 	getDisplayCards(workflowUri: URI | string): IWorkflowDisplayCard[];
 	clearDisplayCards(workflowUri: URI | string): void;
 	removeDisplayCard(workflowUri: URI | string, cardId: string): void;
+
+	executeNotebookCell(
+		workflowUri: URI | string,
+		code: string,
+		options?: { nodeId?: string; nodeLabel?: string; pythonPath?: string; mode?: 'exec' | 'eval' }
+	): Promise<INotebookCellExecutionResult>;
+	restartNotebookKernel(workflowUri: URI | string): Promise<void>;
 }

@@ -40,193 +40,18 @@ import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { VIEW_ID } from '../../files/common/files.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
-import { ICustomModule, IActionButton } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomModule, IActionButton, resolveCustomModuleIcon, getDefaultCustomModuleColor } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomModulesService } from '../../customModules/common/customModules.js';
+import { stringifyYaml, parseYaml } from '../../customModules/browser/customModulesService.js';
 
-function stringifyYaml(obj: any, indent = 0): string {
-	const spacing = ' '.repeat(indent);
-	if (Array.isArray(obj)) {
-		if (obj.length === 0) return ' []';
-		let res = '';
-		for (const item of obj) {
-			if (typeof item === 'object' && item !== null) {
-				const entries = Object.entries(item).filter(([_, v]) => v !== undefined);
-				if (entries.length > 0) {
-					const [firstK, firstV] = entries[0];
-					let firstVStr = '';
-					if (typeof firstV === 'object' && firstV !== null) {
-						firstVStr = stringifyYaml(firstV, indent + 4);
-						res += `\n${spacing}- ${firstK}:${firstVStr}`;
-					} else {
-						const valFormatted = typeof firstV === 'string' && (firstV.includes('\n') || firstV.includes(':') || firstV.startsWith('#') || firstV.includes(',') || firstV.includes('[') || firstV.includes(']'))
-							? JSON.stringify(firstV)
-							: firstV;
-						res += `\n${spacing}- ${firstK}: ${valFormatted}`;
-					}
-					for (let j = 1; j < entries.length; j++) {
-						const [k, v] = entries[j];
-						if (typeof v === 'object' && v !== null) {
-							res += `\n${spacing}  ${k}:${stringifyYaml(v, indent + 4)}`;
-						} else {
-							const valFormatted = typeof v === 'string' && (v.includes('\n') || v.includes(':') || v.startsWith('#') || v.includes(',') || v.includes('[') || v.includes(']'))
-								? JSON.stringify(v)
-								: v;
-							res += `\n${spacing}  ${k}: ${valFormatted}`;
-						}
-					}
-				}
-			} else {
-				res += `\n${spacing}- ${item}`;
-			}
-		}
-		return res;
-	} else if (typeof obj === 'object' && obj !== null) {
-		let res = '';
-		for (const [k, v] of Object.entries(obj)) {
-			if (v === undefined) continue;
-			if (typeof v === 'object' && v !== null) {
-				res += `${res ? '\n' : ''}${spacing}${k}:${stringifyYaml(v, indent + 2)}`;
-			} else {
-				const valStr = typeof v === 'string' && (v.includes('\n') || v.includes(':') || v.startsWith('#') || v.includes(',') || v.includes('[') || v.includes(']')) 
-					? JSON.stringify(v)
-					: v;
-				res += `${res ? '\n' : ''}${spacing}${k}: ${valStr}`;
-			}
-		}
-		return res;
-	}
-	return String(obj);
-}
-
-function parseYaml(yaml: string): any {
-	const lines = yaml.split(/\r?\n/);
-	let i = 0;
-
-	function parseBlock(currentIndent: number): any {
-		let isArray = false;
-		const arrayResult: any[] = [];
-		const objectResult: any = {};
-
-		while (i < lines.length) {
-			const line = lines[i];
-			const trimmed = line.trim();
-			if (!trimmed || trimmed.startsWith('#')) {
-				i++;
-				continue;
-			}
-
-			const indent = line.length - line.trimStart().length;
-			if (indent < currentIndent) {
-				break;
-			}
-
-			if (trimmed.startsWith('-')) {
-				isArray = true;
-				const itemContent = trimmed.substring(1).trim();
-				i++;
-				if (!itemContent) {
-					const child = parseBlock(indent + 2);
-					arrayResult.push(child);
-				} else if (itemContent.includes(':')) {
-					const colonIdx = itemContent.indexOf(':');
-					const key = itemContent.substring(0, colonIdx).trim();
-					let valStr = itemContent.substring(colonIdx + 1).trim();
-					const obj: any = {};
-					const cleanEmptyObj = (v: any) => (typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).length === 0) ? '' : v;
-					if (valStr) {
-						if (valStr.startsWith('"') && valStr.endsWith('"')) {
-							try { valStr = JSON.parse(valStr); } catch {}
-						} else if (valStr === 'true') {
-							valStr = true as any;
-						} else if (valStr === 'false') {
-							valStr = false as any;
-						}
-						obj[key] = valStr;
-					} else {
-						const parsed = parseBlock(indent + 2);
-						obj[key] = cleanEmptyObj(parsed);
-					}
-
-					while (i < lines.length) {
-						const nextLine = lines[i];
-						const nextTrimmed = nextLine.trim();
-						if (!nextTrimmed || nextTrimmed.startsWith('#')) {
-							i++;
-							continue;
-						}
-						const nextIndent = nextLine.length - nextLine.trimStart().length;
-						if (nextIndent <= indent) {
-							break;
-						}
-						if (nextTrimmed.startsWith('-')) {
-							break;
-						}
-						const nextColonIdx = nextTrimmed.indexOf(':');
-						if (nextColonIdx !== -1) {
-							const nKey = nextTrimmed.substring(0, nextColonIdx).trim();
-							let nVal = nextTrimmed.substring(nextColonIdx + 1).trim();
-							i++;
-							if (nVal) {
-								if (nVal.startsWith('"') && nVal.endsWith('"')) {
-									try { nVal = JSON.parse(nVal); } catch {}
-								} else if (nVal === 'true') {
-									nVal = true as any;
-								} else if (nVal === 'false') {
-									nVal = false as any;
-								}
-								obj[nKey] = nVal;
-							} else {
-								const parsed = parseBlock(nextIndent + 2);
-								obj[nKey] = cleanEmptyObj(parsed);
-							}
-						} else {
-							i++;
-						}
-					}
-					arrayResult.push(obj);
-				} else {
-					let val: any = itemContent;
-					if (val.startsWith('"') && val.endsWith('"')) {
-						try { val = JSON.parse(val); } catch {}
-					} else if (val === 'true') {
-						val = true;
-					} else if (val === 'false') {
-						val = false;
-					}
-					arrayResult.push(val);
-				}
-			} else if (trimmed.includes(':')) {
-				const colonIdx = trimmed.indexOf(':');
-				const key = trimmed.substring(0, colonIdx).trim();
-				let valStr = trimmed.substring(colonIdx + 1).trim();
-				i++;
-				if (valStr) {
-					if (valStr.startsWith('"') && valStr.endsWith('"')) {
-						try { valStr = JSON.parse(valStr); } catch {}
-					} else if (valStr === 'true') {
-						valStr = true as any;
-					} else if (valStr === 'false') {
-						valStr = false as any;
-					}
-					objectResult[key] = valStr;
-				} else {
-					const cleanEmptyObj = (v: any) => (typeof v === 'object' && v !== null && !Array.isArray(v) && Object.keys(v).length === 0) ? '' : v;
-					const parsed = parseBlock(indent + 2);
-					objectResult[key] = cleanEmptyObj(parsed);
-				}
-			} else {
-				i++;
-			}
-		}
-
-		if (isArray) return arrayResult;
-		return objectResult;
-	}
-
-	return parseBlock(0) || {};
-}
-
-function getTicketTypeBadge(type: string): { color: string; bg: string } {
+function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
 	const t = (type || 'task').toLowerCase();
+	if (customModulesMap) {
+		const customVisual = customModulesMap.get(t);
+		if (customVisual && customVisual.color) {
+			return { color: customVisual.color, bg: hexToRgba(customVisual.color, 0.18) };
+		}
+	}
 	switch (t) {
 		case 'job': return { color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.18)' };
 		case 'task': return { color: '#a78bfa', bg: 'rgba(167, 139, 250, 0.18)' };
@@ -238,8 +63,34 @@ function getTicketTypeBadge(type: string): { color: string; bg: string } {
 		case 'analysis': return { color: '#34d399', bg: 'rgba(52, 211, 153, 0.18)' };
 		case 'note': return { color: '#00b4d8', bg: 'rgba(0, 180, 216, 0.18)' };
 		case 'workspace': return { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.18)' };
-		default: return { color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.18)' };
+		default: {
+			const fallbackColor = getDefaultCustomModuleColor(t);
+			return { color: fallbackColor, bg: hexToRgba(fallbackColor, 0.18) };
+		}
 	}
+}
+
+function getCustomIconForName(name: string | undefined): ThemeIcon {
+	return resolveCustomModuleIcon(undefined, name);
+}
+
+function buildCustomModulesVisualMap(mods: ICustomModule[]): Map<string, { color: string; icon: ThemeIcon }> {
+	const map = new Map<string, { color: string; icon: ThemeIcon }>();
+
+	for (const m of mods) {
+		const keyId = (m.id || '').toLowerCase();
+		const keyName = (m.name || '').toLowerCase();
+		if (!keyId && !keyName) continue;
+
+		// Use the persisted icon and color directly so they remain permanently stable
+		const icon = resolveCustomModuleIcon(m.icon, keyId || keyName);
+		const color = m.color || getDefaultCustomModuleColor(keyName || keyId);
+
+		const visual = { color, icon };
+		if (keyId) map.set(keyId, visual);
+		if (keyName) map.set(keyName, visual);
+	}
+	return map;
 }
 
 function getColorForName(name: string | undefined): string {
@@ -285,13 +136,23 @@ function hexToRgba(hex: string | undefined, alpha: number): string {
 }
 
 export class MainWorkspaceViewPane extends ViewPane {
+	private static readonly INITIAL_CHILDREN_BATCH_SIZE = 50;
+	private static readonly LOAD_MORE_BATCH_SIZE = 50;
+
 	private containerEl?: HTMLElement;
 	private renderVersion = 0;
 	private expandedWorkspaces = new Set<string>();
+	private nodeVisibleLimitMap = new Map<string, number>();
+	private _isAutoLoadingMore = false;
 	private hasInitializedExpansion = false;
 	private filterText = '';
 	private selectedWorkspaceId?: string;
 	private selectedItemId?: string;
+	private selectedItemIds = new Set<string>();
+	private lastSelectedAnchorId?: string;
+	private renderedOrder: { canonicalId: string; child: IWorkspaceChildItem; parentWsId: string; parentFolderUri: URI; rowEl: HTMLElement }[] = [];
+	private batchActionBarEl?: HTMLElement;
+	private treeBoxEl?: HTMLElement;
 	private targetSelectedElement?: HTMLElement;
 
 	private getCanonicalId(target: string | URI): string {
@@ -322,7 +183,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		@IHoverService hoverService: IHoverService,
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@IFileDialogService private readonly fileDialogService: IFileDialogService,
-		@IDialogService _dialogService: IDialogService,
+		@IDialogService private readonly dialogService: IDialogService,
 		@ICommandService private readonly commandService: ICommandService,
 		@IWorkspacesService private readonly workspacesService: IWorkspacesService,
 		@INotificationService private readonly notificationService: INotificationService,
@@ -335,15 +196,49 @@ export class MainWorkspaceViewPane extends ViewPane {
 		@IWorkspaceEditingService private readonly workspaceEditingService: IWorkspaceEditingService,
 		@IViewsService private readonly viewsService: IViewsService,
 		@IUriIdentityService private readonly uriIdentityService: IUriIdentityService,
-		@IClipboardService private readonly clipboardService: IClipboardService
+		@IClipboardService private readonly clipboardService: IClipboardService,
+		@ICustomModulesService private readonly customModulesService: ICustomModulesService
 	) {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 		this._storageService = storageService;
 		this._showRemovedItems = this._storageService.getBoolean('anyagent.workspacesExplorer.showRemovedItems', StorageScope.PROFILE, false);
 
-		this._register(this.workspacesExplorerService.onDidChangeWorkspaces(() => this.renderContent()));
-		this._register(this.workspaceContextService.onDidChangeWorkspaceFolders(() => this.renderContent()));
-		this._register(this.workspacesService.onDidChangeRecentlyOpened(() => this.renderContent()));
+		let renderTimer: ReturnType<typeof setTimeout> | undefined;
+		this._register({
+			dispose: () => {
+				if (renderTimer) {
+					clearTimeout(renderTimer);
+					renderTimer = undefined;
+				}
+			}
+		});
+		const scheduleRender = () => {
+			if (!this.isBodyVisible()) {
+				return;
+			}
+			if (renderTimer) {
+				clearTimeout(renderTimer);
+			}
+			renderTimer = setTimeout(() => {
+				renderTimer = undefined;
+				if (this.isBodyVisible()) {
+					this.renderContent();
+				}
+			}, 60);
+		};
+		this._register(this.workspacesExplorerService.onDidChangeWorkspaces(scheduleRender));
+		this._register(this.customModulesService.onDidChangeModules(scheduleRender));
+		this._register(this.fileService.onDidFilesChange(e => {
+			if (e.rawUpdated.some(u => u.path.includes('/entity_type/') || u.path.includes('/entity_types/'))) {
+				scheduleRender();
+			}
+		}));
+		this._register(this.workspaceContextService.onDidChangeWorkspaceFolders(scheduleRender));
+		this._register(this.onDidChangeBodyVisibility(visible => {
+			if (visible) {
+				this.renderContent();
+			}
+		}));
 	}
 
 	async showInExplorer(resourceUri: URI): Promise<void> {
@@ -406,33 +301,230 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 		`;
 
+		this.containerEl.tabIndex = 0;
+		this.containerEl.style.outline = 'none';
+		this.containerEl.onkeydown = async (e: KeyboardEvent) => {
+			const activeTag = (document.activeElement as HTMLElement | null)?.tagName?.toUpperCase();
+			if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') {
+				return;
+			}
+			if ((e.key === 'Delete' || e.key === 'Backspace') && this.selectedItemIds.size > 0) {
+				e.preventDefault();
+				e.stopPropagation();
+				await this.deleteSelectedItems();
+			} else if (e.key === 'Escape' && this.selectedItemIds.size > 1) {
+				e.preventDefault();
+				e.stopPropagation();
+				this.selectedItemIds.clear();
+				this.updateSelectionVisuals();
+			}
+		};
+
 		this.renderContent();
 	}
 
-	private async renderContent(): Promise<void> {
-		if (!this.containerEl) {
-			return;
-		}
-
-		const existingTreeBox = this.containerEl.querySelector('.tree-box') as HTMLElement | null;
-		const savedScrollTop = existingTreeBox ? existingTreeBox.scrollTop : 0;
-
-		const currentVersion = ++this.renderVersion;
-		clearNode(this.containerEl);
-
-		const workspaces = await this.workspacesExplorerService.getWorkspaces();
-		if (this.renderVersion !== currentVersion || !this.containerEl) {
-			return;
-		}
-
-		// Initial expansion setup: Default expand active workspace once
-		if (!this.hasInitializedExpansion) {
-			for (const ws of workspaces) {
-				if (ws.isCurrent) {
-					this.expandedWorkspaces.add(this.getCanonicalId(ws.id));
+	private updateSelectionVisuals(): void {
+		if (this.treeBoxEl) {
+			const wsCards = this.treeBoxEl.querySelectorAll('.workspace-item-card');
+			for (let i = 0; i < wsCards.length; i++) {
+				const card = wsCards[i] as HTMLElement;
+				const wsId = card.getAttribute('data-ws-id');
+				if (wsId && wsId === this.selectedWorkspaceId) {
+					card.style.backgroundColor = 'rgba(56, 189, 248, 0.12)';
+					card.style.border = '1px solid #38bdf8';
+				} else {
+					card.style.backgroundColor = 'rgba(255, 255, 255, 0.03)';
+					card.style.border = '1px solid rgba(255, 255, 255, 0.07)';
 				}
 			}
-			this.hasInitializedExpansion = true;
+		}
+
+		for (const entry of this.renderedOrder) {
+			const isSelected = this.selectedItemIds.has(entry.canonicalId);
+			if (isSelected) {
+				entry.rowEl.style.backgroundColor = 'rgba(56, 189, 248, 0.25)';
+				entry.rowEl.style.border = '1px solid #38bdf8';
+			} else {
+				entry.rowEl.style.backgroundColor = 'transparent';
+				entry.rowEl.style.border = '1px solid transparent';
+			}
+		}
+
+		if (!this.batchActionBarEl) {
+			return;
+		}
+		const selectedEntries = this.renderedOrder.filter(r => this.selectedItemIds.has(r.canonicalId));
+		if (selectedEntries.length <= 1) {
+			this.batchActionBarEl.style.display = 'none';
+			clearNode(this.batchActionBarEl);
+			return;
+		}
+
+		this.batchActionBarEl.style.display = 'flex';
+		clearNode(this.batchActionBarEl);
+
+		const leftInfo = append(this.batchActionBarEl, $('span', {
+			style: 'font-size: 11px; font-weight: 600; color: #38bdf8; white-space: nowrap;'
+		}, `${selectedEntries.length} Selected`));
+
+		const actionsGroup = append(this.batchActionBarEl, $('div', {
+			style: 'display: flex; align-items: center; gap: 4px; flex-wrap: wrap;'
+		}));
+
+		// Select All Siblings button
+		const selectSiblingsBtn = append(actionsGroup, $('button', {
+			style: 'padding: 2px 6px; font-size: 10px; border-radius: 3px; cursor: pointer; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8; font-weight: 500;'
+		}, 'All Siblings'));
+		selectSiblingsBtn.title = 'Select all sibling tickets in the same folder';
+		selectSiblingsBtn.onclick = (e) => {
+			e.stopPropagation();
+			const parentPaths = new Set(selectedEntries.map(s => s.parentFolderUri.toString()));
+			for (const entry of this.renderedOrder) {
+				if (parentPaths.has(entry.parentFolderUri.toString()) && entry.child.type !== 'file') {
+					this.selectedItemIds.add(entry.canonicalId);
+				}
+			}
+			this.updateSelectionVisuals();
+		};
+
+		// Batch Delete button
+		const delBtn = append(actionsGroup, $('button', {
+			style: 'padding: 2px 7px; font-size: 10px; border-radius: 3px; cursor: pointer; background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.5); color: #f87171; font-weight: 600; display: flex; align-items: center; gap: 3px;'
+		}));
+		append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { style: 'font-size: 10px;' }));
+		append(delBtn, $('span', {}, `Delete (${selectedEntries.length})`));
+		delBtn.title = 'Delete all selected tickets/items (Move to Trash)';
+		delBtn.onclick = async (e) => {
+			e.stopPropagation();
+			await this.deleteSelectedItems(selectedEntries.map(s => s.child));
+		};
+
+		// Clear selection button
+		const clearBtn = append(actionsGroup, $('button', {
+			style: 'padding: 2px 5px; font-size: 10px; border-radius: 3px; cursor: pointer; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.15); color: inherit; opacity: 0.8;'
+		}, '✕'));
+		clearBtn.title = 'Clear selection (Esc)';
+		clearBtn.onclick = (e) => {
+			e.stopPropagation();
+			this.selectedItemIds.clear();
+			this.updateSelectionVisuals();
+		};
+		void leftInfo;
+	}
+
+	private async deleteSelectedItems(explicitItems?: IWorkspaceChildItem[]): Promise<void> {
+		const rawItems = explicitItems && explicitItems.length > 0
+			? explicitItems
+			: this.renderedOrder.filter(r => this.selectedItemIds.has(r.canonicalId)).map(r => r.child);
+
+		if (rawItems.length === 0) {
+			return;
+		}
+
+		// Deduplicate and filter out descendants whose parent directory is also in the delete list
+		const uniqueByPath = new Map<string, IWorkspaceChildItem>();
+		for (const item of rawItems) {
+			uniqueByPath.set(item.uri.fsPath, item);
+		}
+		const allPaths = Array.from(uniqueByPath.keys());
+		const topLevelItems = Array.from(uniqueByPath.values()).filter(item => {
+			const p = item.uri.fsPath;
+			return !allPaths.some(other => other !== p && p.startsWith(other + '/'));
+		});
+
+		const itemLabels = topLevelItems.slice(0, 8).map(it => {
+			const snap = this.workspacesExplorerService.getMetadataSnapshot(it.uri);
+			const tid = it.ticketId || snap?.ticketId || it.code || it.name;
+			const title = it.title || snap?.title || '';
+			return title && title !== tid ? `${tid}: ${title}` : tid;
+		});
+		if (topLevelItems.length > 8) {
+			itemLabels.push(`...and ${topLevelItems.length - 8} more`);
+		}
+
+		const confirmRes = await this.dialogService.confirm({
+			type: 'warning',
+			message: topLevelItems.length === 1
+				? `Delete '${itemLabels[0]}'?`
+				: `Delete ${topLevelItems.length} selected items?`,
+			detail: `The following item(s) will be moved to Trash:\n\n${itemLabels.map(l => `• ${l}`).join('\n')}`,
+			primaryButton: topLevelItems.length === 1 ? 'Delete' : `Delete ${topLevelItems.length} Items`,
+			cancelButton: 'Cancel'
+		});
+
+		if (!confirmRes.confirmed) {
+			return;
+		}
+
+		// Close any open editor tabs belonging to the deleted items
+		for (const editorIdentifier of this.editorService.editors) {
+			const resource = editorIdentifier.resource;
+			const wfUri = (editorIdentifier as any).workflowUri as URI | undefined;
+			const targetUri = wfUri || resource;
+			if (targetUri) {
+				const shouldClose = topLevelItems.some(it =>
+					this.uriIdentityService.extUri.isEqualOrParent(targetUri, it.uri)
+				);
+				if (shouldClose) {
+					try {
+						const groups = this.editorService.findEditors(editorIdentifier);
+						for (const g of groups) {
+							await g.group.closeEditor(editorIdentifier);
+						}
+					} catch {}
+				}
+			}
+		}
+
+		let deletedCount = 0;
+		for (const item of topLevelItems) {
+			try {
+				await this.fileService.del(item.uri, { recursive: true, useTrash: true });
+				deletedCount++;
+			} catch {
+				try {
+					await this.fileService.del(item.uri, { recursive: true, useTrash: false });
+					deletedCount++;
+				} catch (err) {
+					this.notificationService.error(`Failed to delete '${item.name}': ${err}`);
+				}
+			}
+		}
+
+		this.selectedItemIds.clear();
+		this.selectedItemId = undefined;
+		this.lastSelectedAnchorId = undefined;
+		this.notificationService.info(`Deleted ${deletedCount} item(s).`);
+		await this.renderContent();
+	}
+
+	private async markSelectedItemsRemoved(explicitItems?: IWorkspaceChildItem[]): Promise<void> {
+		const items = explicitItems && explicitItems.length > 0
+			? explicitItems
+			: this.renderedOrder.filter(r => this.selectedItemIds.has(r.canonicalId)).map(r => r.child);
+		if (items.length === 0) {
+			return;
+		}
+		let updatedCount = 0;
+		for (const item of items) {
+			if (item.type === 'file' || item.type === 'folder') {
+				continue;
+			}
+			try {
+				const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(item.uri);
+				const removedStatus = wsStatuses.removedStatus || 'Removed';
+				await this.workspacesExplorerService.setEntityStatus(item.uri, removedStatus);
+				updatedCount++;
+			} catch {}
+		}
+		this.selectedItemIds.clear();
+		this.notificationService.info(`Marked ${updatedCount} ticket(s) as Removed.`);
+		await this.renderContent();
+	}
+
+	private _ensureStaticChrome(): void {
+		if (!this.containerEl || this.treeBoxEl) {
+			return;
 		}
 
 		// --- 1. Header Row ---
@@ -473,15 +565,108 @@ export class MainWorkspaceViewPane extends ViewPane {
 			this.renderContent();
 		};
 
+		// --- 2.5 Batch Selection Bar (visible when 2+ items are selected via Cmd/Ctrl+Click or Shift+Click) ---
+		this.batchActionBarEl = append(this.containerEl, $('.batch-selection-bar', {
+			style: 'display: none; align-items: center; justify-content: space-between; gap: 6px; padding: 5px 8px; border-radius: 5px; background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.35); flex-shrink: 0;'
+		}));
+
 		// --- 3. Workspace Multi-Tree List ---
-		const treeBox = append(this.containerEl, $('.tree-box'));
-		treeBox.style.flex = '1';
-		treeBox.style.overflowY = 'auto';
-		treeBox.style.display = 'flex';
-		treeBox.style.flexDirection = 'column';
-		treeBox.style.gap = '6px';
-		treeBox.style.minHeight = '0';
-		treeBox.style.paddingRight = '2px';
+		this.treeBoxEl = append(this.containerEl, $('.tree-box'));
+		this.treeBoxEl.style.flex = '1';
+		this.treeBoxEl.style.overflowY = 'auto';
+		this.treeBoxEl.style.display = 'flex';
+		this.treeBoxEl.style.flexDirection = 'column';
+		this.treeBoxEl.style.gap = '6px';
+		this.treeBoxEl.style.minHeight = '0';
+		this.treeBoxEl.style.paddingRight = '2px';
+	}
+
+	private _reconcileDomChildren(liveParent: HTMLElement, stagingParent: HTMLElement): void {
+		const desiredNodes = Array.from(stagingParent.children) as HTMLElement[];
+		const desiredKeys = new Set<string>();
+		for (const node of desiredNodes) {
+			const k = node.getAttribute('data-sync-key');
+			if (k) {
+				desiredKeys.add(k);
+			}
+		}
+
+		// 1. Remove any stale nodes in liveParent that are no longer in desiredNodes
+		const existingByKey = new Map<string, HTMLElement>();
+		const currentChildren = Array.from(liveParent.children) as HTMLElement[];
+		for (const child of currentChildren) {
+			const k = child.getAttribute('data-sync-key');
+			if (!k || !desiredKeys.has(k)) {
+				child.remove();
+			} else {
+				existingByKey.set(k, child);
+			}
+		}
+
+		// 2. Reconcile in-order without disturbing unchanged nodes or scroll positions
+		for (let i = 0; i < desiredNodes.length; i++) {
+			const desired = desiredNodes[i];
+			const key = desired.getAttribute('data-sync-key');
+			const existing = key ? existingByKey.get(key) : undefined;
+			const isContainer = desired.getAttribute('data-sync-container') === '1';
+
+			if (existing) {
+				if (isContainer) {
+					if (liveParent.children[i] !== existing) {
+						liveParent.insertBefore(existing, liveParent.children[i] || null);
+					}
+					this._reconcileDomChildren(existing, desired);
+				} else {
+					const existingSig = existing.getAttribute('data-visual-sig');
+					const desiredSig = desired.getAttribute('data-visual-sig');
+					if (existingSig !== null && existingSig === desiredSig) {
+						if ((desired as any).__renderEntry) {
+							(existing as any).__renderEntry = {
+								...(desired as any).__renderEntry,
+								rowEl: existing
+							};
+						}
+						if ((desired as any).__loadNextBatch) {
+							(existing as any).__loadNextBatch = (desired as any).__loadNextBatch;
+						}
+						if (liveParent.children[i] !== existing) {
+							liveParent.insertBefore(existing, liveParent.children[i] || null);
+						}
+					} else {
+						liveParent.replaceChild(desired, existing);
+					}
+				}
+			} else {
+				liveParent.insertBefore(desired, liveParent.children[i] || null);
+			}
+		}
+	}
+
+	private async renderContent(): Promise<void> {
+		if (!this.containerEl) {
+			return;
+		}
+
+		this._ensureStaticChrome();
+		const currentVersion = ++this.renderVersion;
+
+		const workspaces = await this.workspacesExplorerService.getWorkspaces();
+		if (this.renderVersion !== currentVersion || !this.containerEl || !this.treeBoxEl) {
+			return;
+		}
+
+		// Initial expansion setup: Default expand active workspace once
+		if (!this.hasInitializedExpansion) {
+			for (const ws of workspaces) {
+				if (ws.isCurrent) {
+					this.expandedWorkspaces.add(this.getCanonicalId(ws.id));
+				}
+			}
+			this.hasInitializedExpansion = true;
+		}
+
+		// Build desired DOM structure offscreen so live DOM stays 100% untouched during async disk scans
+		const treeBox = $('.tree-box-staging');
 
 		const filteredWorkspaces = workspaces.filter(w => !this.filterText || w.name.toLowerCase().includes(this.filterText) || w.uri.fsPath.toLowerCase().includes(this.filterText));
 
@@ -492,11 +677,16 @@ export class MainWorkspaceViewPane extends ViewPane {
 		this.targetSelectedElement = undefined;
 
 		if (filteredWorkspaces.length === 0) {
-			append(treeBox, $('div', { style: 'font-size: 11px; opacity: 0.5; padding: 10px 0; text-align: center;' }, 'No workspaces added yet.'));
+			const emptyEl = append(treeBox, $('div', { style: 'font-size: 11px; opacity: 0.5; padding: 10px 0; text-align: center;' }, 'No workspaces added yet.'));
+			emptyEl.setAttribute('data-sync-key', 'empty-workspaces');
+			emptyEl.setAttribute('data-visual-sig', 'empty');
 		} else {
 			for (const ws of filteredWorkspaces) {
 				const canonicalWsId = this.getCanonicalId(ws.id);
 				const wsCard = append(treeBox, $('.workspace-item-card'));
+				wsCard.setAttribute('data-sync-key', `ws:${canonicalWsId}`);
+				wsCard.setAttribute('data-sync-container', '1');
+				wsCard.setAttribute('data-ws-id', canonicalWsId);
 				wsCard.style.borderRadius = '6px';
 				wsCard.style.flexShrink = '0';
 
@@ -568,6 +758,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 				// Card Header
 				const cardHeader = append(wsCard, $('.card-header-row'));
+				cardHeader.setAttribute('data-sync-key', `ws-header:${canonicalWsId}`);
 				cardHeader.style.display = 'flex';
 				cardHeader.style.alignItems = 'center';
 				cardHeader.style.justifyContent = 'space-between';
@@ -651,20 +842,19 @@ export class MainWorkspaceViewPane extends ViewPane {
 					e.stopPropagation();
 					if (this.expandedWorkspaces.has(canonicalWsId)) {
 						this.expandedWorkspaces.delete(canonicalWsId);
+						this.nodeVisibleLimitMap.delete(canonicalWsId);
+						chevronIcon.className = ThemeIcon.asClassName(Codicon.chevronRight);
+						chevronIcon.title = 'Expand';
 					} else {
 						this.expandedWorkspaces.add(canonicalWsId);
+						chevronIcon.className = ThemeIcon.asClassName(Codicon.chevronDown);
+						chevronIcon.title = 'Collapse';
 					}
 					this.renderContent();
 				};
 
 				const customModules = await this._getCustomModules(ws.uri);
-				const customModulesMap = new Map<string, string>();
-				for (const m of customModules) {
-					if (m.id && m.color) {
-						customModulesMap.set(m.id.toLowerCase(), m.color);
-						customModulesMap.set(m.name.toLowerCase(), m.color);
-					}
-				}
+				const customModulesMap = buildCustomModulesVisualMap(customModules);
 
 				let wsIcon: HTMLElement;
 				let badgeText = '';
@@ -714,8 +904,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 					badgeBg = 'rgba(45, 212, 191, 0.2)';
 					badgeFg = '#2dd4bf';
 				} else if (ws.detectedType && ws.detectedType !== 'workspace' && ws.detectedType !== 'folder') {
-					wsIcon = append(headerLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.package)));
-					const customColor = customModulesMap.get(ws.detectedType.toLowerCase()) || getColorForName(ws.detectedType);
+					const visual = customModulesMap.get(ws.detectedType.toLowerCase());
+					const customIcon = visual?.icon || getCustomIconForName(ws.detectedType);
+					const customColor = visual?.color || getColorForName(ws.detectedType);
+					wsIcon = append(headerLeft, $('span' + ThemeIcon.asCSSSelector(customIcon)));
 					wsIcon.style.color = customColor;
 					badgeText = ws.detectedType.toUpperCase();
 					badgeBg = hexToRgba(customColor, 0.2);
@@ -758,6 +950,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 					badge.title = `Entity Type: ${badgeText}`;
 				}
 
+				cardHeader.setAttribute(
+					'data-visual-sig',
+					`${isExpanded ? '1' : '0'}|${ws.detectedType || ''}|${wsDisplayText}|${badgeText}|${badgeBg}|${badgeFg}|${wsIcon.className}|${wsIcon.style.color}`
+				);
+
 				// Header Actions
 				const headerActions = append(headerRight, $('.header-actions'));
 				headerActions.style.display = 'flex';
@@ -777,12 +974,17 @@ export class MainWorkspaceViewPane extends ViewPane {
 				cardHeader.onclick = async () => {
 					this.selectedWorkspaceId = canonicalWsId;
 					this.selectedItemId = canonicalWsId;
+					this.selectedItemIds.clear();
+					this.lastSelectedAnchorId = undefined;
 
 					if (this.expandedWorkspaces.has(canonicalWsId)) {
 						this.expandedWorkspaces.delete(canonicalWsId);
+						this.nodeVisibleLimitMap.delete(canonicalWsId);
 					} else {
 						this.expandedWorkspaces.add(canonicalWsId);
 					}
+
+					this.renderContent();
 
 					try {
 						if (ws.detectedType === 'workflow') {
@@ -793,13 +995,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 					} catch (err) {
 						console.error('Failed to open Workspace domain editor', err);
 					}
-
-					this.renderContent();
 				};
 
 				// Expanded Body: Inner Scrollable Children Container
 				if (isExpanded) {
 					const childrenContainer = append(wsCard, $('.children-container'));
+					childrenContainer.setAttribute('data-sync-key', `ws-children:${canonicalWsId}`);
+					childrenContainer.setAttribute('data-sync-container', '1');
 					childrenContainer.style.padding = '4px 8px 8px 6px';
 					childrenContainer.style.display = 'flex';
 					childrenContainer.style.flexDirection = 'column';
@@ -813,11 +1015,52 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 		}
 
-		// Auto-scroll / anchor selected element into view, or restore scroll position
-		if (this.targetSelectedElement) {
-			this.targetSelectedElement.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
-		} else if (savedScrollTop > 0 && treeBox) {
-			treeBox.scrollTop = savedScrollTop;
+		if (this.renderVersion === currentVersion && this.treeBoxEl) {
+			this._reconcileDomChildren(this.treeBoxEl, treeBox);
+			const liveScrollContainers = this.treeBoxEl.querySelectorAll('.children-container');
+			for (let i = 0; i < liveScrollContainers.length; i++) {
+				const sc = liveScrollContainers[i] as HTMLElement;
+				if (!(sc as any).__hasScrollPaginationListener) {
+					(sc as any).__hasScrollPaginationListener = true;
+					sc.addEventListener('scroll', () => {
+						if (this._isAutoLoadingMore) {
+							return;
+						}
+						const loadMoreRows = sc.querySelectorAll('.load-more-children-row');
+						if (loadMoreRows.length === 0) {
+							return;
+						}
+						const scRect = sc.getBoundingClientRect();
+						for (let j = loadMoreRows.length - 1; j >= 0; j--) {
+							const row = loadMoreRows[j] as HTMLElement;
+							const fn = (row as any).__loadNextBatch as (() => void) | undefined;
+							if (!fn) {
+								continue;
+							}
+							const rowRect = row.getBoundingClientRect();
+							if (rowRect.top <= scRect.bottom + 60 && rowRect.bottom >= scRect.top) {
+								this._isAutoLoadingMore = true;
+								fn();
+								setTimeout(() => {
+									this._isAutoLoadingMore = false;
+								}, 180);
+								break;
+							}
+						}
+					}, { passive: true });
+				}
+			}
+			this.renderedOrder = [];
+			const liveRows = this.treeBoxEl.querySelectorAll('.child-item-row');
+			for (let i = 0; i < liveRows.length; i++) {
+				const rowEl = liveRows[i] as HTMLElement;
+				const entry = (rowEl as any).__renderEntry;
+				if (entry) {
+					entry.rowEl = rowEl;
+					this.renderedOrder.push(entry);
+				}
+			}
+			this.updateSelectionVisuals();
 		}
 	}
 
@@ -827,20 +1070,20 @@ export class MainWorkspaceViewPane extends ViewPane {
 		parentWsId: string,
 		depth: number,
 		currentVersion: number,
-		customModulesMap?: Map<string, string>
+		customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>
 	): Promise<void> {
 		if (!customModulesMap) {
 			const mods = await this._getCustomModules(folderUri);
-			customModulesMap = new Map<string, string>();
-			for (const m of mods) {
-				if (m.id && m.color) {
-					customModulesMap.set(m.id.toLowerCase(), m.color);
-					customModulesMap.set(m.name.toLowerCase(), m.color);
-				}
-			}
+			customModulesMap = buildCustomModulesVisualMap(mods);
 		}
 
-		const children = await this.workspacesExplorerService.scanWorkspaceChildren(folderUri, this._showRemovedItems);
+		const parentCanonicalKey = this.getCanonicalId(folderUri);
+		const visibleLimit = this.filterText
+			? undefined
+			: (this.nodeVisibleLimitMap.get(parentCanonicalKey) || MainWorkspaceViewPane.INITIAL_CHILDREN_BATCH_SIZE);
+
+		const page = await this.workspacesExplorerService.scanWorkspaceChildrenPaginated(folderUri, this._showRemovedItems, visibleLimit);
+		const children = page.items;
 		if (this.renderVersion !== currentVersion || !this.containerEl) {
 			return;
 		}
@@ -849,7 +1092,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 			const isPlainFolder = !await this.fileService.exists(URI.joinPath(folderUri, '.agents', 'ticket.md')) &&
 			                      !await this.fileService.exists(URI.joinPath(folderUri, 'ticket.md'));
 			if (isPlainFolder) {
-				append(parentContainer, $('div', { style: `font-size: 11px; opacity: 0.4; padding: 4px 0 4px ${depth * 12}px;` }, '(Empty folder)'));
+				const emptyFolderEl = append(parentContainer, $('div', { style: `font-size: 11px; opacity: 0.4; padding: 4px 0 4px ${depth * 12}px;` }, '(Empty folder)'));
+				emptyFolderEl.setAttribute('data-sync-key', `empty:${folderUri.toString()}`);
+				emptyFolderEl.setAttribute('data-visual-sig', `empty:${depth}`);
 			}
 			return;
 		}
@@ -858,7 +1103,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 			const canonicalChildId = this.getCanonicalId(child.id);
 			const isDirectory = child.type !== 'file';
 			const isExpanded = isDirectory && this.expandedWorkspaces.has(canonicalChildId);
-			const isChildSelected = this.selectedWorkspaceId === parentWsId && this.selectedItemId === canonicalChildId;
+			const isChildSelected = this.selectedItemIds.has(canonicalChildId) || (this.selectedWorkspaceId === parentWsId && this.selectedItemId === canonicalChildId);
+			if (isChildSelected && this.selectedItemIds.size === 0) {
+				this.selectedItemIds.add(canonicalChildId);
+			}
 
 			const isRemoved = !!(child.status && (
 				child.status.toLowerCase() === 'removed' ||
@@ -867,15 +1115,25 @@ export class MainWorkspaceViewPane extends ViewPane {
 			));
 
 			const childRow = append(parentContainer, $('.child-item-row'));
+			childRow.setAttribute('data-sync-key', `row:${canonicalChildId}`);
 			childRow.style.display = 'flex';
 			childRow.style.alignItems = 'center';
 			childRow.style.justifyContent = 'space-between';
 			childRow.style.padding = `4px 6px 4px ${depth * 12}px`;
 			childRow.style.borderRadius = '4px';
 			childRow.style.cursor = 'pointer';
+			childRow.style.userSelect = 'none';
 			if (isRemoved) {
 				childRow.style.opacity = '0.55';
 			}
+
+			(childRow as any).__renderEntry = {
+				canonicalId: canonicalChildId,
+				child,
+				parentWsId,
+				parentFolderUri: folderUri,
+				rowEl: childRow
+			};
 
 			let isDraggable = true;
 			if (child.type === 'file' || child.type === 'folder' || isRemoved) {
@@ -914,12 +1172,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 			}
 
 			childRow.onmouseenter = () => {
-				if (!isChildSelected) {
+				if (!this.selectedItemIds.has(canonicalChildId)) {
 					childRow.style.backgroundColor = 'rgba(255, 255, 255, 0.06)';
 				}
 			};
 			childRow.onmouseleave = () => {
-				if (!isChildSelected) {
+				if (!this.selectedItemIds.has(canonicalChildId)) {
 					childRow.style.backgroundColor = 'transparent';
 				}
 			};
@@ -928,6 +1186,19 @@ export class MainWorkspaceViewPane extends ViewPane {
 			childRow.oncontextmenu = async (e) => {
 				e.preventDefault();
 				e.stopPropagation();
+
+				if (!this.selectedItemIds.has(canonicalChildId)) {
+					this.selectedWorkspaceId = parentWsId;
+					this.selectedItemId = canonicalChildId;
+					this.lastSelectedAnchorId = canonicalChildId;
+					this.selectedItemIds.clear();
+					this.selectedItemIds.add(canonicalChildId);
+					this.updateSelectionVisuals();
+				}
+
+				const selectedChildren = this.renderedOrder
+					.filter(r => this.selectedItemIds.has(r.canonicalId))
+					.map(r => r.child);
 
 				const wsRootUri = await this.workspacesExplorerService.findWorkspaceRootUri(child.uri);
 				const allWorkspaces = await this.workspacesExplorerService.getWorkspaces();
@@ -948,7 +1219,24 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const snapshot = this.workspacesExplorerService.getMetadataSnapshot(child.uri);
 				const realTicketId = snapshot?.ticketId || child.code || child.name;
 
-				const childActions: Action[] = [
+				const childActions: Action[] = [];
+
+				if (selectedChildren.length > 1) {
+					childActions.push(
+						new Action('batch_delete_selected', `Delete Selected (${selectedChildren.length} Items)...`, ThemeIcon.asClassName(Codicon.trash), true, async () => {
+							await this.deleteSelectedItems(selectedChildren);
+						}),
+						new Action('batch_mark_removed', `Mark Selected (${selectedChildren.length}) as Removed`, ThemeIcon.asClassName(Codicon.archive), true, async () => {
+							await this.markSelectedItemsRemoved(selectedChildren);
+						}),
+						new Action('batch_clear_selection', `Clear Selection (${selectedChildren.length})`, ThemeIcon.asClassName(Codicon.clearAll), true, async () => {
+							this.selectedItemIds.clear();
+							this.updateSelectionVisuals();
+						})
+					);
+				}
+
+				childActions.push(
 					new Action('refresh_child', 'Refresh', ThemeIcon.asClassName(Codicon.refresh), true, async () => {
 						this.renderContent();
 						const activeEditor = this.editorService.activeEditorPane;
@@ -957,7 +1245,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 						}
 						this.notificationService.info(`Refreshed '${child.name}'.`);
 					})
-				];
+				);
 
 				if (isDirectory && !isRemoved) {
 					childActions.push(new Action('create_sub_entity', `Create Sub-Entity...`, ThemeIcon.asClassName(Codicon.sparkleFilled), true, () => {
@@ -1049,7 +1337,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 				}
 
 				childActions.push(
-					new Action('trash_child', 'Move to Trash...', ThemeIcon.asClassName(Codicon.sparkleFilled), true, async () => {
+					new Action('direct_delete_child', selectedChildren.length > 1 ? `Delete Selected (${selectedChildren.length} Items)...` : `Delete '${child.title || realTicketId}'...`, ThemeIcon.asClassName(Codicon.trash), true, async () => {
+						await this.deleteSelectedItems(selectedChildren.length > 1 ? selectedChildren : [child]);
+					}),
+					new Action('trash_child', 'Move to Trash (via AI)...', ThemeIcon.asClassName(Codicon.sparkleFilled), true, async () => {
 						this.commandService.executeCommand('workbench.action.chat.toggleCenteredChatPopup', {
 							workspaceId: actualWsName,
 							ticketId: realTicketId,
@@ -1086,8 +1377,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 					e.stopPropagation();
 					if (this.expandedWorkspaces.has(canonicalChildId)) {
 						this.expandedWorkspaces.delete(canonicalChildId);
+						this.nodeVisibleLimitMap.delete(canonicalChildId);
+						chevronIcon.className = ThemeIcon.asClassName(Codicon.chevronRight);
+						chevronIcon.title = 'Expand';
 					} else {
 						this.expandedWorkspaces.add(canonicalChildId);
+						chevronIcon.className = ThemeIcon.asClassName(Codicon.chevronDown);
+						chevronIcon.title = 'Collapse';
 					}
 					this.renderContent();
 				};
@@ -1109,86 +1405,101 @@ export class MainWorkspaceViewPane extends ViewPane {
 				badgeText = 'WORKSPACE';
 				badgeBg = 'rgba(56, 189, 248, 0.2)';
 				badgeFg = '#38bdf8';
-			} else if (child.type === 'job') {
-				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.rocket)));
-				childIcon.style.color = '#fbbf24';
-				badgeText = 'JOB';
-				badgeBg = 'rgba(251, 191, 36, 0.2)';
-				badgeFg = '#fbbf24';
-			} else if (child.type === 'project') {
-				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.project)));
-				childIcon.style.color = '#60a5fa';
-				badgeText = 'PROJECT';
-				badgeBg = 'rgba(96, 165, 250, 0.2)';
-				badgeFg = '#60a5fa';
-			} else if (child.type === 'agent') {
-				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.robot)));
-				childIcon.style.color = '#38bdf8';
-				badgeText = 'AGENT';
-				badgeBg = 'rgba(56, 189, 248, 0.2)';
-				badgeFg = '#38bdf8';
-			} else if (child.type === 'task') {
-				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.checklist)));
-				childIcon.style.color = '#a78bfa';
-				badgeText = 'TASK';
-				badgeBg = 'rgba(167, 139, 250, 0.2)';
-				badgeFg = '#a78bfa';
-			} else if (child.type === 'case') {
-				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.beaker)));
-				childIcon.style.color = '#f472b6';
-				badgeText = 'CASE';
-				badgeBg = 'rgba(244, 114, 182, 0.2)';
-				badgeFg = '#f472b6';
-			} else if (child.type === 'issue') {
-				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.bug)));
-				childIcon.style.color = '#ef4444';
-				badgeText = 'ISSUE';
-				badgeBg = 'rgba(239, 68, 68, 0.2)';
-				badgeFg = '#ef4444';
-			} else if (child.type === 'analysis') {
-				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.graph)));
-				childIcon.style.color = '#34d399';
-				badgeText = 'ANALYSIS';
-				badgeBg = 'rgba(52, 211, 153, 0.2)';
-				badgeFg = '#34d399';
-			} else if (child.type === 'workflow') {
-				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.githubAction)));
-				childIcon.style.color = '#0d9488';
-				badgeText = 'WORKFLOW';
-				badgeBg = 'rgba(13, 148, 136, 0.2)';
-				badgeFg = '#0d9488';
-			} else if (child.type === 'note') {
-				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.book)));
-				childIcon.style.color = '#2dd4bf';
-				badgeText = 'NOTE';
-				badgeBg = 'rgba(45, 212, 191, 0.2)';
-				badgeFg = '#2dd4bf';
-			} else if (child.type !== 'folder' && child.type !== 'file') {
-				// Custom Module!
-				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.package)));
-				const color = customModulesMap.get(child.type.toLowerCase()) || getColorForName(child.type);
-				childIcon.style.color = color;
-				badgeText = child.type.toUpperCase();
-				badgeBg = hexToRgba(color, 0.2);
-				badgeFg = color;
 			} else if (child.type === 'folder') {
 				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.folder)));
 				childIcon.style.opacity = '0.8';
-			} else {
+			} else if (child.type === 'file') {
 				childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.file)));
 				childIcon.style.opacity = '0.7';
+			} else {
+				const typeLower = (child.type || '').toLowerCase();
+				const configuredVisual = customModulesMap.get(typeLower);
+				if (configuredVisual) {
+					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(configuredVisual.icon)));
+					childIcon.style.color = configuredVisual.color;
+					badgeText = child.type.toUpperCase();
+					badgeBg = hexToRgba(configuredVisual.color, 0.2);
+					badgeFg = configuredVisual.color;
+				} else if (typeLower === 'job') {
+					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.rocket)));
+					childIcon.style.color = '#fbbf24';
+					badgeText = 'JOB';
+					badgeBg = 'rgba(251, 191, 36, 0.2)';
+					badgeFg = '#fbbf24';
+				} else if (typeLower === 'project') {
+					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.project)));
+					childIcon.style.color = '#60a5fa';
+					badgeText = 'PROJECT';
+					badgeBg = 'rgba(96, 165, 250, 0.2)';
+					badgeFg = '#60a5fa';
+				} else if (typeLower === 'agent') {
+					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.robot)));
+					childIcon.style.color = '#38bdf8';
+					badgeText = 'AGENT';
+					badgeBg = 'rgba(56, 189, 248, 0.2)';
+					badgeFg = '#38bdf8';
+				} else if (typeLower === 'task') {
+					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.checklist)));
+					childIcon.style.color = '#a78bfa';
+					badgeText = 'TASK';
+					badgeBg = 'rgba(167, 139, 250, 0.2)';
+					badgeFg = '#a78bfa';
+				} else if (typeLower === 'case') {
+					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.beaker)));
+					childIcon.style.color = '#f472b6';
+					badgeText = 'CASE';
+					badgeBg = 'rgba(244, 114, 182, 0.2)';
+					badgeFg = '#f472b6';
+				} else if (typeLower === 'issue') {
+					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.bug)));
+					childIcon.style.color = '#ef4444';
+					badgeText = 'ISSUE';
+					badgeBg = 'rgba(239, 68, 68, 0.2)';
+					badgeFg = '#ef4444';
+				} else if (typeLower === 'analysis') {
+					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.graph)));
+					childIcon.style.color = '#34d399';
+					badgeText = 'ANALYSIS';
+					badgeBg = 'rgba(52, 211, 153, 0.2)';
+					badgeFg = '#34d399';
+				} else if (typeLower === 'workflow') {
+					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.githubAction)));
+					childIcon.style.color = '#0d9488';
+					badgeText = 'WORKFLOW';
+					badgeBg = 'rgba(13, 148, 136, 0.2)';
+					badgeFg = '#0d9488';
+				} else if (typeLower === 'note') {
+					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.book)));
+					childIcon.style.color = '#2dd4bf';
+					badgeText = 'NOTE';
+					badgeBg = 'rgba(45, 212, 191, 0.2)';
+					badgeFg = '#2dd4bf';
+				} else {
+					const customIcon = resolveCustomModuleIcon(undefined, child.type);
+					const color = getDefaultCustomModuleColor(child.type);
+					childIcon = append(childLeft, $('span' + ThemeIcon.asCSSSelector(customIcon)));
+					childIcon.style.color = color;
+					badgeText = child.type.toUpperCase();
+					badgeBg = hexToRgba(color, 0.2);
+					badgeFg = color;
+				}
 			}
 
 			const childSnapshot = this.workspacesExplorerService.getMetadataSnapshot(child.uri);
-			const childTicketId = childSnapshot?.ticketId || child.name;
-			const childTitle = childSnapshot?.title || '';
-			const childDisplayText = (childTitle && childTitle !== childTicketId) ? `${childTicketId} ${childTitle}` : (childTicketId || child.name);
+			const childTicketId = child.ticketId || childSnapshot?.ticketId || child.code || child.name;
+			const childTitle = child.title || childSnapshot?.title || '';
+			const isTicketEntity = child.type !== 'folder' && child.type !== 'file';
+			const childDisplayText = isTicketEntity
+				? (childTitle || childTicketId || child.name)
+				: ((childTitle && childTitle !== childTicketId) ? `${childTicketId} ${childTitle}` : (childTicketId || child.name));
 
 			const childTitleSpan = append(childLeft, $('span', {
 				style: 'font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;'
 			}));
 			childTitleSpan.innerText = childDisplayText;
-			childTitleSpan.title = `${childDisplayText} (${child.uri.fsPath})`;
+			childTitleSpan.title = isTicketEntity
+				? `${childDisplayText} [${childTicketId} · ${badgeText}] (${child.uri.fsPath})`
+				: `${childDisplayText} (${child.uri.fsPath})`;
 
 			// Right-Aligned Badges & Actions Group
 			const childRight = append(childRow, $('.child-right'));
@@ -1198,8 +1509,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 			childRight.style.flexShrink = '0';
 
 			if (badgeText) {
-				const badge = append(childRight, $('span', { style: `font-size: 8px; padding: 1px 5px; border-radius: 3px; background: ${badgeBg}; color: ${badgeFg}; font-weight: 600; text-transform: uppercase;` }, badgeText));
-				badge.title = `Entity Type: ${badgeText}`;
+				const displayedBadgeText = isTicketEntity ? childTicketId : badgeText;
+				const badge = append(childRight, $('span', { style: `font-size: 8px; padding: 1px 5px; border-radius: 3px; background: ${badgeBg}; color: ${badgeFg}; font-weight: 600; text-transform: uppercase;` }, displayedBadgeText));
+				badge.title = isTicketEntity
+					? `Ticket ID: ${childTicketId} · Type: ${badgeText}`
+					: `Entity Type: ${badgeText}`;
 			}
 
 			if (isRemoved) {
@@ -1221,10 +1535,65 @@ export class MainWorkspaceViewPane extends ViewPane {
 				};
 			}
 
-			// Single Click: Select item, expand if container folder, open editor if entity/workflow, or open file
-			childRow.onclick = async () => {
+			childRow.setAttribute(
+				'data-visual-sig',
+				`${isDirectory ? (isExpanded ? 'exp' : 'col') : 'leaf'}|${depth}|${child.type}|${childDisplayText}|${childTicketId}|${badgeText}|${badgeBg}|${badgeFg}|${childIcon.className}|${childIcon.style.color}|${isRemoved ? '1' : '0'}|${isDraggable ? '1' : '0'}`
+			);
+
+			// Single Click / Cmd+Click (multi-select) / Shift+Click (range-select)
+			childRow.onclick = async (e: MouseEvent) => {
+				this.containerEl?.focus();
+
+				if (e.shiftKey) {
+					e.preventDefault();
+					e.stopPropagation();
+					const anchorId = this.lastSelectedAnchorId || this.selectedItemId;
+					const anchorIdx = anchorId ? this.renderedOrder.findIndex(r => r.canonicalId === anchorId) : -1;
+					const targetIdx = this.renderedOrder.findIndex(r => r.canonicalId === canonicalChildId);
+
+					if (anchorIdx !== -1 && targetIdx !== -1) {
+						if (!e.metaKey && !e.ctrlKey) {
+							this.selectedItemIds.clear();
+						}
+						const start = Math.min(anchorIdx, targetIdx);
+						const end = Math.max(anchorIdx, targetIdx);
+						for (let i = start; i <= end; i++) {
+							this.selectedItemIds.add(this.renderedOrder[i].canonicalId);
+						}
+					} else {
+						this.selectedItemIds.add(canonicalChildId);
+						this.lastSelectedAnchorId = canonicalChildId;
+					}
+					this.selectedWorkspaceId = parentWsId;
+					this.selectedItemId = canonicalChildId;
+					this.updateSelectionVisuals();
+					return;
+				}
+
+				if (e.metaKey || e.ctrlKey) {
+					e.preventDefault();
+					e.stopPropagation();
+					if (this.selectedItemIds.size === 0 && this.selectedItemId && this.selectedItemId !== canonicalChildId) {
+						this.selectedItemIds.add(this.selectedItemId);
+					}
+					if (this.selectedItemIds.has(canonicalChildId)) {
+						this.selectedItemIds.delete(canonicalChildId);
+					} else {
+						this.selectedItemIds.add(canonicalChildId);
+					}
+					this.lastSelectedAnchorId = canonicalChildId;
+					this.selectedWorkspaceId = parentWsId;
+					this.selectedItemId = canonicalChildId;
+					this.updateSelectionVisuals();
+					return;
+				}
+
 				this.selectedWorkspaceId = parentWsId;
 				this.selectedItemId = canonicalChildId;
+				this.lastSelectedAnchorId = canonicalChildId;
+				this.selectedItemIds.clear();
+				this.selectedItemIds.add(canonicalChildId);
+				this.updateSelectionVisuals();
 
 				if (child.type === 'workflow') {
 					await this.editorService.openEditor(new WorkflowEditorInput(child.uri, child.name), { pinned: true });
@@ -1233,6 +1602,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 						this.expandedWorkspaces.add(canonicalChildId);
 					} else {
 						this.expandedWorkspaces.delete(canonicalChildId);
+						this.nodeVisibleLimitMap.delete(canonicalChildId);
 					}
 					this.renderContent();
 					// Also check if directory contains a primary md file like .agents folder or legacy files
@@ -1270,18 +1640,75 @@ export class MainWorkspaceViewPane extends ViewPane {
 				} else {
 					await this.openerService.open(child.uri);
 				}
-
-				this.renderContent();
 			};
 
 			// If directory is expanded, recursively render sub-tree container
 			if (isExpanded) {
 				const subContainer = append(parentContainer, $('.sub-children-container'));
+				subContainer.setAttribute('data-sync-key', `sub:${canonicalChildId}`);
+				subContainer.setAttribute('data-sync-container', '1');
 				subContainer.style.display = 'flex';
 				subContainer.style.flexDirection = 'column';
 				subContainer.style.gap = '2px';
 				await this.renderChildrenTree(subContainer, child.uri, parentWsId, depth + 1, currentVersion, customModulesMap);
 			}
+		}
+
+		if (page.hasMore) {
+			const remainingCount = Math.max(1, page.totalCount - children.length);
+			const nextStep = Math.min(MainWorkspaceViewPane.LOAD_MORE_BATCH_SIZE, remainingCount);
+			const loadMoreRow = append(parentContainer, $('.load-more-children-row'));
+			loadMoreRow.setAttribute('data-sync-key', `load-more:${parentCanonicalKey}`);
+			loadMoreRow.setAttribute('data-visual-sig', `load-more:${children.length}:${page.totalCount}:${depth}`);
+			loadMoreRow.style.display = 'flex';
+			loadMoreRow.style.alignItems = 'center';
+			loadMoreRow.style.justifyContent = 'space-between';
+			loadMoreRow.style.gap = '6px';
+			loadMoreRow.style.padding = `5px 8px 5px ${depth * 12 + 16}px`;
+			loadMoreRow.style.marginTop = '2px';
+			loadMoreRow.style.borderRadius = '4px';
+			loadMoreRow.style.background = 'rgba(56, 189, 248, 0.06)';
+			loadMoreRow.style.border = '1px dashed rgba(56, 189, 248, 0.22)';
+			loadMoreRow.style.fontSize = '10.5px';
+			loadMoreRow.style.color = 'rgba(226, 232, 240, 0.8)';
+
+			const infoSpan = append(loadMoreRow, $('span', {
+				style: 'white-space: nowrap; overflow: hidden; text-overflow: ellipsis;'
+			}, `Showing ${children.length} of ${page.totalCount}`));
+
+			const actionsWrap = append(loadMoreRow, $('div', {
+				style: 'display: flex; align-items: center; gap: 6px; flex-shrink: 0;'
+			}));
+
+			const loadNextBatch = () => {
+				const currentLim = this.nodeVisibleLimitMap.get(parentCanonicalKey) || MainWorkspaceViewPane.INITIAL_CHILDREN_BATCH_SIZE;
+				this.nodeVisibleLimitMap.set(parentCanonicalKey, currentLim + MainWorkspaceViewPane.LOAD_MORE_BATCH_SIZE);
+				this.renderContent();
+			};
+			(loadMoreRow as any).__loadNextBatch = loadNextBatch;
+
+			const loadMoreBtn = append(actionsWrap, $('button', {
+				style: 'padding: 2px 7px; font-size: 10px; border-radius: 3px; cursor: pointer; background: rgba(56, 189, 248, 0.16); border: 1px solid rgba(56, 189, 248, 0.38); color: #38bdf8; font-weight: 600;'
+			}, `Load More (+${nextStep})`));
+			loadMoreBtn.title = `Load next ${nextStep} child items`;
+			loadMoreBtn.onclick = (e) => {
+				e.stopPropagation();
+				loadNextBatch();
+			};
+
+			if (remainingCount > MainWorkspaceViewPane.LOAD_MORE_BATCH_SIZE) {
+				const loadAllBtn = append(actionsWrap, $('button', {
+					style: 'padding: 2px 6px; font-size: 10px; border-radius: 3px; cursor: pointer; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.16); color: rgba(226, 232, 240, 0.85); font-weight: 500;'
+				}, 'Show All'));
+				loadAllBtn.title = `Load all ${page.totalCount} child items`;
+				loadAllBtn.onclick = (e) => {
+					e.stopPropagation();
+					this.nodeVisibleLimitMap.set(parentCanonicalKey, page.totalCount + 1000);
+					this.renderContent();
+				};
+			}
+
+			void infoSpan;
 		}
 	}
 
@@ -2268,28 +2695,27 @@ export class MainWorkspaceViewPane extends ViewPane {
 	/**
 	 * Renders a spacious Create Resource Modal Overlay under the target Workspace or Folder
 	 */
-	public showCreateResourceModal(target: IWorkspaceItem | URI, parentName?: string, onSuccess?: (type: string, name: string) => void): void {
-		if (!this.containerEl) {
-			return;
-		}
-
+	public showCreateResourceModal(target?: IWorkspaceItem | URI, parentName?: string, onSuccess?: (type: string, name: string) => void, initialType?: string): void {
 		let targetUri: URI;
 		let targetName: string;
 
 		if (target && typeof target === 'object' && 'uri' in target && 'name' in target) {
 			targetUri = (target as IWorkspaceItem).uri;
 			targetName = (target as IWorkspaceItem).name;
-		} else {
+		} else if (target) {
 			targetUri = target as URI;
-			targetName = parentName || 'Folder';
+			targetName = parentName || targetUri.path.split('/').filter(Boolean).pop() || 'Workspace';
+		} else {
+			targetUri = URI.file('/Users/aimery/Documents');
+			targetName = parentName || 'Workspace';
 		}
 
-		const existingModal = this.containerEl.querySelector('.create-resource-modal-overlay');
+		const existingModal = document.querySelector('.create-resource-modal-overlay');
 		if (existingModal) {
 			existingModal.remove();
 		}
 
-		const overlay = append(this.containerEl, $('.create-resource-modal-overlay'));
+		const overlay = append(document.body, $('.create-resource-modal-overlay'));
 		overlay.style.position = 'fixed';
 		overlay.style.top = '0';
 		overlay.style.left = '0';
@@ -2300,7 +2726,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		overlay.style.display = 'flex';
 		overlay.style.alignItems = 'center';
 		overlay.style.justifyContent = 'center';
-		overlay.style.zIndex = '10000';
+		overlay.style.zIndex = '100000';
 		overlay.style.padding = '20px';
 
 		let clickListener: ((e: MouseEvent) => void) | undefined;
@@ -2316,6 +2742,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 		modal.style.maxWidth = '92vw';
 		modal.style.maxHeight = '88vh';
 		modal.style.backgroundColor = 'var(--vscode-editorWidget-background, #1e1e1e)';
+		modal.style.color = 'var(--vscode-foreground, #cccccc)';
+		modal.style.fontFamily = 'var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif)';
+		modal.style.fontSize = '12px';
 		modal.style.border = '1px solid rgba(255, 255, 255, 0.18)';
 		modal.style.borderRadius = '12px';
 		modal.style.padding = '24px 28px';
@@ -2337,7 +2766,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		const modalTitle = append(modalHeader, $('div', { style: 'font-weight: 600; font-size: 14px; color: #38bdf8; display: flex; align-items: center; gap: 8px;' }));
 		append(modalTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.folderActive)));
-		append(modalTitle, $('span', {}, modalHeadingText));
+		const modalTitleText = append(modalTitle, $('span', {}, modalHeadingText));
 
 		const headerRight = append(modalHeader, $('div', { style: 'display: flex; align-items: center; gap: 12px;' }));
 
@@ -2429,6 +2858,13 @@ export class MainWorkspaceViewPane extends ViewPane {
 		modalBody.style.gap = '16px';
 		modalBody.style.paddingRight = '6px';
 
+		// Target Location / Workspace Selector Row
+		const locationBox = append(modalBody, $('.form-group'));
+		append(locationBox, $('label', { style: 'display: block; margin-bottom: 6px; font-size: 11.5px; opacity: 0.85; font-weight: 500;' }, 'Target Location / Workspace:'));
+		const locationSelect = append(locationBox, $('select.monaco-select', {
+			style: 'width: 100%; padding: 7px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.18); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer; outline: none;'
+		})) as HTMLSelectElement;
+
 		// Category / Type Selection Row
 		const categoryBox = append(modalBody, $('.form-group'));
 		const labelRow = append(categoryBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;' }));
@@ -2441,8 +2877,48 @@ export class MainWorkspaceViewPane extends ViewPane {
 		manageBtn.onmouseenter = () => manageBtn.style.opacity = '1.0';
 		manageBtn.onmouseleave = () => manageBtn.style.opacity = '0.85';
 
-		let selectedType: string = 'job';
+		let selectedType: string = initialType || 'job';
 		const categoryGrid = append(categoryBox, $('.category-grid'));
+
+		const initLocationSelector = async () => {
+			clearNode(locationSelect);
+			const managedWorkspaces = await this.workspacesExplorerService.getWorkspaces();
+			const wsList = [...managedWorkspaces];
+
+			// If no target was passed, default to the first managed workspace if available
+			if (!target && wsList.length > 0) {
+				targetUri = wsList[0].uri;
+				targetName = wsList[0].name;
+				modalTitleText.textContent = `Create Entity in ${targetName}`;
+			}
+
+			let matchedTarget = false;
+			for (const ws of wsList) {
+				const opt = append(locationSelect, $('option', { value: ws.uri.toString(), 'data-name': ws.name }, `📁 ${ws.name} (${ws.uri.fsPath})`)) as HTMLOptionElement;
+				if (ws.uri.toString() === targetUri.toString() || ws.uri.fsPath === targetUri.fsPath) {
+					opt.selected = true;
+					matchedTarget = true;
+				}
+			}
+
+			if (!matchedTarget && targetUri) {
+				const subOpt = $('option', { value: targetUri.toString(), 'data-name': targetName }, `📂 ${targetName} (${targetUri.fsPath})`) as HTMLOptionElement;
+				subOpt.selected = true;
+				locationSelect.insertBefore(subOpt, locationSelect.firstChild);
+			}
+
+			locationSelect.onchange = async () => {
+				const val = locationSelect.value;
+				const selOpt = locationSelect.options[locationSelect.selectedIndex];
+				if (val) {
+					targetUri = URI.parse(val);
+					targetName = selOpt?.getAttribute('data-name') || targetUri.path.split('/').filter(Boolean).pop() || 'Workspace';
+					modalTitleText.textContent = `Create Entity in ${targetName}`;
+					await renderTypeGrid();
+					await refreshNameAndBadge();
+				}
+			};
+		};
 
 		const typeButtons: HTMLElement[] = [];
 		let typesList: { type: string; label: string; icon: ThemeIcon; color: string; bg: string }[] = [];
@@ -2527,13 +3003,16 @@ export class MainWorkspaceViewPane extends ViewPane {
 			});
 
 			const customTypes = customModules.map(m => {
-				const icon = systemPreconfiguredIcons[m.id.toLowerCase()] || Codicon.package;
+				const icon = m.icon
+					? resolveCustomModuleIcon(m.icon, m.id)
+					: (systemPreconfiguredIcons[m.id.toLowerCase()] || resolveCustomModuleIcon(undefined, m.id));
+				const color = m.color || getDefaultCustomModuleColor(m.name || m.id);
 				return {
 					type: m.id,
 					label: m.name,
 					icon,
-					color: m.color,
-					bg: hexToRgba(m.color, 0.18)
+					color,
+					bg: hexToRgba(color, 0.18)
 				};
 			});
 
@@ -3386,6 +3865,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				codeBox.style.display = 'none';
 				badgeBox.style.display = 'none';
 				titleBox.style.display = 'none';
+				descBox.style.display = 'block';
 				typeDefBox.style.display = 'none';
 				statusBox.style.display = 'none';
 				priorityBox.style.display = 'none';
@@ -3399,12 +3879,16 @@ export class MainWorkspaceViewPane extends ViewPane {
 				baseAgentBox.style.display = 'none';
 				nameLabel.innerText = 'Folder Name:';
 				nameInput.value = 'new_folder';
+				nameInput.readOnly = false;
+				nameInput.style.opacity = '1.0';
+				nameInput.style.cursor = 'text';
 				descLabel.innerText = 'Description:';
 				descInput.placeholder = 'Brief purpose of this entity...';
 			} else if (selectedType === 'file') {
 				codeBox.style.display = 'none';
 				badgeBox.style.display = 'none';
 				titleBox.style.display = 'none';
+				descBox.style.display = 'block';
 				typeDefBox.style.display = 'none';
 				statusBox.style.display = 'none';
 				priorityBox.style.display = 'none';
@@ -3418,77 +3902,45 @@ export class MainWorkspaceViewPane extends ViewPane {
 				baseAgentBox.style.display = 'none';
 				nameLabel.innerText = 'File Name:';
 				nameInput.value = 'new_file.md';
+				nameInput.readOnly = false;
+				nameInput.style.opacity = '1.0';
+				nameInput.style.cursor = 'text';
 				descLabel.innerText = 'Description:';
 				descInput.placeholder = 'Brief purpose of this entity...';
-			} else if (selectedType === 'agent') {
-				codeBox.style.display = 'block';
-				badgeBox.style.display = 'block';
-				titleBox.style.display = 'block';
-				typeDefBox.style.display = 'block';
-				statusBox.style.display = 'block';
-				priorityBox.style.display = 'none';
-				agentBox.style.display = 'none';
-				linkBox.style.display = 'block';
-				typePromptBox.style.display = 'block';
-				ruleBox.style.display = 'none';
-				credBox.style.display = 'block';
-				modelBox.style.display = 'block';
-				promptBox.style.display = 'block';
-				baseAgentBox.style.display = 'block';
-				nameLabel.innerText = 'Agent Code / Ticket ID:';
-				titleLabel.innerText = 'Agent Title / Name:';
-				descLabel.innerText = 'Role & Description:';
-				descInput.placeholder = 'e.g. NestJS Backend Specialist, Monaco UI Refactoring Architect';
-
-				const customCode = codeInput.value.trim();
-				const seq = await this.workspacesExplorerService.generateNextSequentialName(targetUri, selectedType, customCode);
-				nameInput.value = seq.name;
-				previewBadge.innerText = `Generated Ticket ID: ${seq.name} (Prefix Code: ${seq.code})`;
-				const currentTypeObj = typesList.find(t => t.type === selectedType);
-				const badgeColor = currentTypeObj ? currentTypeObj.color : '#38bdf8';
-				previewBadge.style.color = badgeColor;
-				previewBadge.style.borderColor = `${badgeColor}58`;
-				const isBuiltInAgent = !matchingModule;
-				if (isBuiltInAgent) {
-					typeDefInput.value = 'Built-in (System)';
-					typeDefInput.placeholder = 'Built-in (System)';
-					typeDefInput.readOnly = true;
-					typeDefInput.style.opacity = '0.65';
-					typeDefInput.style.cursor = 'not-allowed';
-				} else {
-					const defFile = (matchingModule as any)?.definitionFile;
-					const modDesc = typeof matchingModule?.description === 'string' ? matchingModule.description.trim() : '';
-					typeDefInput.value = defFile || modDesc || `.agents/entity_type/${selectedType}.yaml`;
-					typeDefInput.placeholder = `.agents/entity_type/${selectedType}.yaml`;
-					typeDefInput.readOnly = false;
-					typeDefInput.style.opacity = '1.0';
-					typeDefInput.style.cursor = 'text';
-				}
-				const modPrompt = typeof matchingModule?.prompt === 'string' ? matchingModule.prompt.trim() : '';
-				typePromptInput.value = modPrompt || builtInTypePrompts[selectedType] || '';
 			} else {
+				const hasDescField = !!(matchingModule && Array.isArray(matchingModule.fields) && matchingModule.fields.some(f => f.id?.toLowerCase() === 'description' || f.label?.toLowerCase() === 'description'));
+				const descFieldDef = matchingModule?.fields?.find(f => f.id?.toLowerCase() === 'description' || f.label?.toLowerCase() === 'description');
+				const titleFieldDef = matchingModule?.fields?.find(f => f.id?.toLowerCase() === 'title' || f.label?.toLowerCase() === 'title');
+
 				codeBox.style.display = 'block';
 				badgeBox.style.display = 'block';
 				titleBox.style.display = 'block';
+				descBox.style.display = hasDescField ? 'block' : 'none';
+				if (!hasDescField) {
+					descInput.value = '';
+				}
 				typeDefBox.style.display = 'block';
 				statusBox.style.display = 'block';
 				priorityBox.style.display = 'block';
-				agentBox.style.display = 'block';
-				linkBox.style.display = 'block';
-				typePromptBox.style.display = 'block';
-				ruleBox.style.display = 'block';
+				agentBox.style.display = 'none';
+				linkBox.style.display = 'none';
+				typePromptBox.style.display = 'none';
+				ruleBox.style.display = 'none';
 				credBox.style.display = 'none';
 				modelBox.style.display = 'none';
 				promptBox.style.display = 'none';
 				baseAgentBox.style.display = 'none';
 				nameLabel.innerText = 'Entity Folder Name / Ticket ID:';
-				titleLabel.innerText = 'Title:';
-				descLabel.innerText = 'Description:';
+				titleLabel.innerText = titleFieldDef?.label ? `${titleFieldDef.label}:` : 'Title:';
+				descLabel.innerText = descFieldDef?.label ? `${descFieldDef.label}:` : 'Description:';
 				descInput.placeholder = 'Brief purpose of this entity...';
 
 				const customCode = codeInput.value.trim();
 				const seq = await this.workspacesExplorerService.generateNextSequentialName(targetUri, selectedType, customCode);
 				nameInput.value = seq.name;
+				nameInput.readOnly = true;
+				nameInput.style.opacity = '0.65';
+				nameInput.style.cursor = 'not-allowed';
 				previewBadge.innerText = `Generated Ticket ID: ${seq.name} (Prefix Code: ${seq.code})`;
 				const currentTypeObj = typesList.find(t => t.type === selectedType);
 				const badgeColor = currentTypeObj ? currentTypeObj.color : '#38bdf8';
@@ -3499,18 +3951,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 				if (isBuiltIn) {
 					typeDefInput.value = 'Built-in (System)';
 					typeDefInput.placeholder = 'Built-in (System)';
-					typeDefInput.readOnly = true;
-					typeDefInput.style.opacity = '0.65';
-					typeDefInput.style.cursor = 'not-allowed';
 				} else {
 					const defFile = (matchingModule as any)?.definitionFile;
 					const modDesc = typeof matchingModule?.description === 'string' ? matchingModule.description.trim() : '';
 					typeDefInput.value = defFile || modDesc || `.agents/entity_type/${selectedType}.yaml`;
 					typeDefInput.placeholder = `.agents/entity_type/${selectedType}.yaml`;
-					typeDefInput.readOnly = false;
-					typeDefInput.style.opacity = '1.0';
-					typeDefInput.style.cursor = 'text';
 				}
+				typeDefInput.readOnly = true;
+				typeDefInput.style.opacity = '0.65';
+				typeDefInput.style.cursor = 'not-allowed';
 				const modPrompt = typeof matchingModule?.prompt === 'string' ? matchingModule.prompt.trim() : '';
 				typePromptInput.value = modPrompt || builtInTypePrompts[selectedType] || '';
 			}
@@ -3928,26 +4377,149 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 						const urlRow = append(browserBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
 						append(urlRow, $('label', { style: 'font-size: 10.5px; opacity: 0.8; font-weight: 500;' }, 'Target URL:'));
-						const urlInput = append(urlRow, $('input.monaco-inputbox.browser-url-input', {
+
+						const urlInputWrapper = append(urlRow, $('div', { style: 'position: relative; width: 100%;' }));
+						const urlDisplayEl = append(urlInputWrapper, $('div.prompt-tokenized-display', {
+							style: 'display: flex; align-items: center; min-height: 29px; padding: 5px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; cursor: text; white-space: pre; overflow-x: auto; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);'
+						}));
+						const urlInput = append(urlInputWrapper, $('input.monaco-inputbox.browser-url-input', {
 							placeholder: 'https://example.com...',
 							value: field.defaultUrl || '',
-							style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box;'
+							style: 'display: none; width: 100%; min-height: 29px; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.65); background: rgba(0,0,0,0.35); color: #fff; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); outline: none;'
 						})) as HTMLInputElement;
 
-						const creds = field.credentials || [];
-						if (creds.length > 0) {
-							const credsBadgeRow = append(browserBox, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 2px;' }));
-							append(credsBadgeRow, $('span', { style: 'font-size: 10px; opacity: 0.6; font-weight: 600;' }, 'Credentials:'));
-							for (const c of creds) {
-								append(credsBadgeRow, $('span', {
-									style: 'font-size: 10px; padding: 2px 6px; border-radius: 3px; background: rgba(167, 139, 250, 0.15); color: #c084fc; border: 1px solid rgba(167, 139, 250, 0.3);'
-								}, `${c.key}: ••••••`));
+						const renderUrlTokenized = () => {
+							const text = urlInput.value || '';
+							clearNode(urlDisplayEl);
+							if (!text) {
+								append(urlDisplayEl, $('span', { style: 'opacity: 0.45; font-style: italic;' }, urlInput.placeholder));
+								return;
 							}
-						}
+							const tokenRegex = /(\{\{[^{}\n]+\}\}|\{[^{}\n]+\}|@[a-zA-Z0-9_\-\u4e00-\u9fa5]+)/g;
+							let lastIdx = 0;
+							let match: RegExpExecArray | null;
+							while ((match = tokenRegex.exec(text)) !== null) {
+								if (match.index > lastIdx) {
+									append(urlDisplayEl, $('span', {}, text.slice(lastIdx, match.index)));
+								}
+								const fullMatch = match[0];
+								const cleanTokenName = fullMatch.startsWith('{{') && fullMatch.endsWith('}}')
+									? fullMatch.slice(2, -2).trim()
+									: (fullMatch.startsWith('{') && fullMatch.endsWith('}') ? fullMatch.slice(1, -1).trim() : fullMatch.slice(1).trim());
+								if (cleanTokenName) {
+									const pill = append(urlDisplayEl, $('span.prompt-token-pill', {
+										title: `Reference: ${cleanTokenName}`,
+										style: 'display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; margin: 0 1px; border-radius: 4px; font-size: 11px; font-weight: 600; background: rgba(14, 99, 156, 0.28); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); vertical-align: baseline; user-select: none;'
+									}));
+									append(pill, $('span' + ThemeIcon.asCSSSelector(Codicon.link), { style: 'font-size: 10px;' }));
+									append(pill, $('span', {}, cleanTokenName));
+								} else {
+									append(urlDisplayEl, $('span', {}, fullMatch));
+								}
+								lastIdx = tokenRegex.lastIndex;
+							}
+							if (lastIdx < text.length) {
+								append(urlDisplayEl, $('span', {}, text.slice(lastIdx)));
+							}
+						};
+
+						urlDisplayEl.onclick = () => {
+							urlDisplayEl.style.display = 'none';
+							urlInput.style.display = 'block';
+							urlInput.focus();
+						};
+						urlInput.onblur = () => {
+							urlInput.style.display = 'none';
+							urlDisplayEl.style.display = 'flex';
+							renderUrlTokenized();
+						};
+						urlInput.onkeydown = (ev) => {
+							if (ev.key === 'Enter') {
+								ev.preventDefault();
+								urlInput.blur();
+							}
+						};
+						renderUrlTokenized();
+
+						// Interactive Credentials Section (Editable Key-Value Pairs)
+						const credsList: Array<{ id: string; key: string; value: string }> = Array.isArray(field.credentials)
+							? field.credentials
+								.filter((c: any) => c && typeof c === 'object')
+								.map((c: any, idx: number) => ({
+									id: c.id || `cred_${Date.now()}_${idx + 1}`,
+									key: typeof c.key === 'string' ? c.key : '',
+									value: typeof c.value === 'string' ? c.value : ''
+								}))
+							: [];
+
+						const credsSection = append(browserBox, $('div', {
+							style: 'display: flex; flex-direction: column; gap: 6px; margin-top: 2px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.06);'
+						}));
+						const credsTop = append(credsSection, $('div', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
+						append(credsTop, $('span', { style: 'font-size: 10.5px; opacity: 0.85; font-weight: 600; color: #a78bfa;' }, 'Credentials (Optional):'));
+
+						const addCredBtn = append(credsTop, $('button.monaco-button', {
+							type: 'button',
+							style: 'padding: 2px 8px; font-size: 10px; border-radius: 4px; cursor: pointer; background: rgba(167, 139, 250, 0.14); border: 1px solid rgba(167, 139, 250, 0.32); color: #c084fc; font-weight: 500;'
+						}));
+						addCredBtn.textContent = '+ Add Credential';
+
+						const credsRowsBox = append(credsSection, $('div', { style: 'display: flex; flex-direction: column; gap: 5px;' }));
+
+						const renderCredRows = () => {
+							clearNode(credsRowsBox);
+							if (credsList.length === 0) {
+								append(credsRowsBox, $('div', {
+									style: 'font-size: 10.5px; opacity: 0.45; font-style: italic;'
+								}, 'No credentials set. Click "+ Add Credential" to enter login key/value pairs.'));
+								return;
+							}
+							credsList.forEach((c, cIdx) => {
+								const row = append(credsRowsBox, $('div', {
+									style: 'display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 5px; padding: 5px 7px;'
+								}));
+								append(row, $('span', {
+									style: 'font-size: 9.5px; font-weight: 700; color: #a78bfa; padding: 1px 5px; background: rgba(167, 139, 250, 0.12); border-radius: 3px;'
+								}, `#${cIdx + 1}`));
+								const keyInp = append(row, $('input.monaco-inputbox', {
+									placeholder: 'Key (e.g. username, token)',
+									value: c.key,
+									style: 'width: 130px; padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff;'
+								})) as HTMLInputElement;
+								keyInp.oninput = () => { c.key = keyInp.value; };
+								append(row, $('span', { style: 'opacity: 0.5; font-size: 11px;' }, ':'));
+								const valInp = append(row, $('input.monaco-inputbox', {
+									placeholder: 'Value / Credential secret',
+									value: c.value,
+									style: 'flex: 1; padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff;'
+								})) as HTMLInputElement;
+								valInp.oninput = () => { c.value = valInp.value; };
+								const delBtn = append(row, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
+									title: 'Remove Credential',
+									style: 'cursor: pointer; opacity: 0.7; font-size: 11px; color: #ef4444; padding: 3px;'
+								}));
+								delBtn.onclick = () => {
+									credsList.splice(cIdx, 1);
+									renderCredRows();
+								};
+							});
+						};
+
+						addCredBtn.onclick = (e) => {
+							e.preventDefault();
+							credsList.push({
+								id: `cred_${Date.now()}_${credsList.length + 1}`,
+								key: '',
+								value: ''
+							});
+							renderCredRows();
+						};
+
+						renderCredRows();
 
 						(browserBox as any).__getBrowserData = () => ({
 							url: urlInput.value.trim(),
-							credentials: creds,
+							credentials: credsList.filter(c => c.key.trim() || c.value.trim()),
 							content: field.defaultContent || '',
 							lastFetched: field.defaultContent ? 'Initialized from Schema' : ''
 						});
@@ -3964,26 +4536,173 @@ export class MainWorkspaceViewPane extends ViewPane {
 							: `Model: ${field.targetModel || 'gemini-1.5-flash'}`;
 
 						const topRow = append(promptBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px;' }));
-						append(topRow, $('span', { style: 'font-size: 10.5px; opacity: 0.8; font-weight: 600; color: #60a5fa;' }, `AI Instruction (${targetDesc})`));
+						append(topRow, $('span', { style: 'font-size: 10.5px; opacity: 0.85; font-weight: 600; color: #60a5fa;' }, `AI Instruction (${targetDesc})`));
 
-						const promptTextarea = append(promptBox, $('textarea.monaco-inputbox.prompt-text-input', {
-							placeholder: 'AI Prompt Instruction...',
-							rows: 3,
-							style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; line-height: 1.4;'
+						const preInjectedText = field.defaultContent || '';
+						const isPreInjectedVisible = Boolean(field.promptPreInjectedVisible);
+
+						if (isPreInjectedVisible) {
+							const preInjectedContainer = append(promptBox, $('div', {
+								style: 'display: flex; flex-direction: column; gap: 5px; padding: 8px 10px; border-radius: 6px; background: rgba(59, 130, 246, 0.05); border: 1px solid rgba(59, 130, 246, 0.22);'
+							}));
+							const preHeader = append(preInjectedContainer, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 6px;' }));
+							append(preHeader, $('span', { style: 'font-size: 10.5px; font-weight: 600; color: #60a5fa;' }, 'Pre-Injected Prompt (Template Instruction):'));
+							const preTextarea = append(preInjectedContainer, $('textarea.monaco-inputbox', {
+								readonly: 'readonly',
+								rows: 5,
+								style: 'width: 100%; min-height: 118px; padding: 8px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #cbd5e1; box-sizing: border-box; line-height: 1.45; resize: vertical; opacity: 0.9;'
+							})) as HTMLTextAreaElement;
+							preTextarea.value = preInjectedText;
+						}
+
+						const userInputContainer = append(promptBox, $('div', {
+							style: 'display: flex; flex-direction: column; gap: 4px;'
+						}));
+						append(userInputContainer, $('span', { style: 'font-size: 10.5px; font-weight: 600; color: #60a5fa;' }, 'User Prompt / Instructions:'));
+
+						const promptTextarea = append(userInputContainer, $('textarea.monaco-inputbox.prompt-text-input', {
+							placeholder: 'Enter your prompt or custom instructions here...',
+							rows: 5,
+							style: 'width: 100%; min-height: 118px; padding: 8px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; line-height: 1.45; resize: vertical;'
 						})) as HTMLTextAreaElement;
-						promptTextarea.value = field.defaultContent || '';
+						promptTextarea.value = field.defaultUserPrompt || '';
 
-						(promptBox as any).__getPromptData = () => ({
-							prompt: promptTextarea.value.trim(),
-							targetMode: field.targetMode || 'model',
-							targetModel: field.targetModel || 'gemini-1.5-flash',
-							targetAgentId: field.targetAgentId || '',
-							targetAgentName: field.targetAgentName || '',
+						(promptBox as any).__getPromptData = () => {
+							const userPromptVal = promptTextarea.value.trim();
+							const preTrimmed = preInjectedText.trim();
+							const combinedPrompt = (preTrimmed && userPromptVal)
+								? `${preTrimmed}\n\n--- User Prompt / Instructions ---\n${userPromptVal}`
+								: (preTrimmed || userPromptVal);
+							return {
+								userPrompt: userPromptVal,
+								preInjectedPrompt: preInjectedText,
+								prompt: combinedPrompt,
+								targetMode: field.targetMode || 'model',
+								targetProvider: field.targetProvider || '',
+								targetModel: field.targetModel || 'gemini-1.5-flash',
+								targetAgentId: field.targetAgentId || '',
+								targetAgentName: field.targetAgentName || '',
+								output: '',
+								lastExecuted: ''
+							};
+						};
+					} else if (field.type === 'tts') {
+						const ttsBox = append(fieldGroup, $('.tts-field-container.custom-field-input', {
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							'data-field-type': field.type,
+							style: 'display: flex; flex-direction: column; gap: 8px; border: 1px solid rgba(236, 72, 153, 0.25); background: rgba(236, 72, 153, 0.04); border-radius: 8px; padding: 10px 12px;'
+						}));
+
+						const topRow = append(ttsBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px;' }));
+						append(topRow, $('span', { style: 'font-size: 10.5px; opacity: 0.9; font-weight: 600; color: #f472b6;' }, `1. Speech Synthesis Text (Sent to AI Model Only · ${field.targetModel || 'gemini-2.5-flash-preview-tts'} · ${(field.ttsFormat || 'mp3').toUpperCase()})`));
+
+						const ttsTextarea = append(ttsBox, $('textarea.monaco-inputbox.tts-text-input', {
+							placeholder: 'Pure listening text sent to the AI model to synthesize into speech (hidden in ticket view)...',
+							rows: 2,
+							style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(236, 72, 153, 0.3); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; line-height: 1.4;'
+						})) as HTMLTextAreaElement;
+						ttsTextarea.value = field.defaultContent || '';
+
+						const displayRow = append(ttsBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-top: 2px;' }));
+						append(displayRow, $('span', { style: 'font-size: 10.5px; opacity: 0.9; font-weight: 600; color: #38bdf8;' }, '2. Display Text (Shown to Human Reader in Ticket · With Vocabulary Notes)'));
+
+						const ttsDisplayTextarea = append(ttsBox, $('textarea.monaco-inputbox.tts-display-text-input', {
+							placeholder: 'Annotated text shown to the human reader in the ticket (e.g. vocabulary notes not sent to the AI model)...',
+							rows: 3,
+							style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; line-height: 1.4;'
+						})) as HTMLTextAreaElement;
+						ttsDisplayTextarea.value = field.ttsDisplayText || '';
+
+						(ttsBox as any).__getTtsData = () => ({
+							text: ttsTextarea.value.trim(),
+							displayText: ttsDisplayTextarea.value.trim(),
+							targetCredentialId: field.targetCredentialId || '',
+							targetProvider: field.targetProvider || 'gemini',
+							targetModel: field.targetModel || 'gemini-2.5-flash-preview-tts',
+							ttsFormat: field.ttsFormat || 'mp3',
+							ttsVoice: field.ttsVoice || 'Kore',
+							ttsAutoPlay: Boolean(field.ttsAutoPlay),
+							audioFileName: '',
+							audioRelativePath: '',
+							lastGenerated: '',
+							lastSynthesizedText: ''
+						});
+					} else if (field.type === 'python') {
+						const pyBox = append(fieldGroup, $('.python-field-container.custom-field-input', {
+							'data-field-id': field.id,
+							'data-field-label': field.label,
+							'data-field-type': field.type,
+							style: 'display: flex; flex-direction: column; gap: 8px; border: 1px solid rgba(234, 179, 8, 0.25); background: rgba(234, 179, 8, 0.04); border-radius: 8px; padding: 10px 12px;'
+						}));
+						const pyTextarea = append(pyBox, $('textarea.monaco-inputbox.python-code-input', {
+							placeholder: '# Python source code...',
+							rows: 3,
+							style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.4;'
+						})) as HTMLTextAreaElement;
+						pyTextarea.value = field.defaultContent || '';
+						(pyBox as any).__getPythonData = () => ({
+							code: pyTextarea.value,
+							pythonInterpreter: field.pythonInterpreter || '',
+							externalScripts: field.externalScripts || [],
 							output: '',
+							logs: '',
 							lastExecuted: ''
 						});
-					} else if (field.type === 'git') {
-						// Git primitive is managed via gitBox above, remove duplicate generic input
+					} else if (field.type === 'parameters') {
+						const paramsList = Array.isArray((field as any).parameters) ? (field as any).parameters : [];
+						if (paramsList.length === 0) {
+							fieldGroup.remove();
+						} else {
+							const paramBox = append(fieldGroup, $('.parameters-field-container.custom-field-input', {
+								'data-field-id': field.id,
+								'data-field-label': field.label,
+								'data-field-type': field.type,
+								style: 'display: flex; flex-direction: column; gap: 8px; border: 1px solid rgba(168, 85, 247, 0.25); background: rgba(168, 85, 247, 0.04); border-radius: 8px; padding: 10px 12px;'
+							}));
+							const paramInputsMap: Record<string, HTMLInputElement | HTMLSelectElement> = {};
+							for (const p of paramsList) {
+								const pKey = (p.name || p.id || '').trim();
+								if (!pKey) continue;
+								const pRow = append(paramBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+								const pLabelRow = append(pRow, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
+								append(pLabelRow, $('label', { style: 'font-size: 11px; opacity: 0.9; font-weight: 600; color: #c084fc; font-family: var(--vscode-editor-font-family, monospace);' }, `${pKey}:`));
+								append(pLabelRow, $('span', {
+									style: 'font-size: 9.5px; font-family: var(--vscode-editor-font-family, monospace); font-weight: 600; color: #c084fc; background: rgba(168, 85, 247, 0.14); border: 1px solid rgba(168, 85, 247, 0.3); border-radius: 3px; padding: 1px 5px;'
+								}, `{{${pKey}}}`));
+
+								const defaultValStr = p.defaultValue !== undefined && p.defaultValue !== null ? String(p.defaultValue) : '';
+								if (Array.isArray(p.options) && p.options.length > 0) {
+									const pSelect = append(pRow, $('select.monaco-select', {
+										style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; cursor: pointer;'
+									})) as HTMLSelectElement;
+									for (const opt of p.options) {
+										const optEl = append(pSelect, $('option', { value: String(opt) }, String(opt))) as HTMLOptionElement;
+										if (String(opt) === defaultValStr) {
+											optEl.selected = true;
+										}
+									}
+									paramInputsMap[pKey] = pSelect;
+								} else {
+									const pInput = append(pRow, $('input.monaco-inputbox', {
+										type: p.type === 'number' ? 'number' : 'text',
+										placeholder: defaultValStr ? `Default: ${defaultValStr}` : `Enter ${pKey}...`,
+										value: defaultValStr,
+										style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);'
+									})) as HTMLInputElement;
+									paramInputsMap[pKey] = pInput;
+								}
+							}
+							(paramBox as any).__getParametersData = () => {
+								const obj: Record<string, any> = {};
+								for (const [k, inp] of Object.entries(paramInputsMap)) {
+									obj[k] = inp.value;
+								}
+								return obj;
+							};
+						}
+					} else if (field.type === 'git' || field.type === 'output' || field.type === 'table') {
+						// Git primitive is managed via gitBox above; Output manifest & Data Table are hydrated from schema
 						fieldGroup.remove();
 					} else {
 						append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
@@ -3995,6 +4714,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 						}));
 					}
 				}
+				if (customFieldsBox.children.length === 0) {
+					customFieldsBox.style.display = 'none';
+				}
 			} else {
 				clearNode(customFieldsBox);
 				customFieldsBox.style.display = 'none';
@@ -4004,7 +4726,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 		};
 
 		// Initial render and refresh
-		renderTypeGrid().then(() => {
+		initLocationSelector().then(() => renderTypeGrid()).then(() => {
 			refreshNameAndBadge();
 		});
 
@@ -4036,26 +4758,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 				}
 			}
 
-			if (selectedType === 'agent') {
-				const roleVal = descInput.value.trim();
-				const promptVal = promptInput.value.trim();
-				if (!roleVal) {
-					this.notificationService.warn('Please enter a Role Description.');
-					descInput.focus();
-					return;
-				}
-				if (!promptVal) {
-					this.notificationService.warn('Please enter System Prompt instructions.');
-					promptInput.focus();
-					return;
-				}
-				if (credSelect.value === 'none') {
-					this.notificationService.warn('Please configure and select an API Connection Credential first.');
-					credSelect.focus();
-					return;
-				}
-			}
-
 			const gitRepoUrl = gitRemoteInput.value.trim();
 			const originalBtnHtml = submitBtn.innerHTML;
 			const btn = submitBtn as HTMLButtonElement;
@@ -4070,42 +4772,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const assignedAgentId = agentSelect.value || undefined;
 				const assignedAgentName = (assignedAgentId && selectedOpt) ? (selectedOpt.getAttribute('data-name') || selectedOpt.text.replace(/^🤖\s*/, '').replace(/\s*\(.*\)$/, '')) : undefined;
 
-				let agentModelOpt: any = undefined;
-				if (selectedType === 'agent') {
-					let selectedModel = modelInput.value.trim();
-					selectedModel = selectedModel.replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-');
-					if (!selectedModel) {
-						this.notificationService.warn('Please enter an AI Model ID.');
-						modelInput.focus();
-						return;
-					}
-
-					let providerIdVal = 'gemini';
-					let modelIdVal = selectedModel;
-					let credentialIdVal: string | undefined = undefined;
-
-					if (credSelect.value !== 'default' && credSelect.value !== 'none') {
-						credentialIdVal = credSelect.value;
-						const cred = savedCredentials.find(c => c.id === credentialIdVal);
-						if (cred) {
-							providerIdVal = cred.providerId;
-						}
-					}
-					if (selectedModel.includes('/')) {
-						const parts = selectedModel.split('/');
-						providerIdVal = parts[0];
-						modelIdVal = parts[1];
-					} else {
-						if (credSelect.value === 'default' || credSelect.value === 'none') {
-							providerIdVal = selectedModel.startsWith('gpt') ? 'openai' : selectedModel.startsWith('claude') ? 'anthropic' : 'gemini';
-						}
-					}
-					agentModelOpt = {
-						providerId: providerIdVal,
-						modelId: modelIdVal,
-						credentialId: credentialIdVal
-					};
-				}
+				const agentModelOpt: any = undefined;
 
 				let initialStatusOverride = '';
 				const customMetadata: { [key: string]: string } = {};
@@ -4174,6 +4841,18 @@ export class MainWorkspaceViewPane extends ViewPane {
 							const getPData = (inputEl as any).__getPromptData;
 							const pData = getPData ? getPData() : { prompt: '', targetMode: 'model' };
 							customMetadata[fieldLabel] = JSON.stringify(pData);
+						} else if (inputEl.classList.contains('tts-field-container')) {
+							const getTData = (inputEl as any).__getTtsData;
+							const tData = getTData ? getTData() : { text: '', ttsFormat: 'mp3' };
+							customMetadata[fieldLabel] = JSON.stringify(tData);
+						} else if (inputEl.classList.contains('python-field-container')) {
+							const getPyData = (inputEl as any).__getPythonData;
+							const pyData = getPyData ? getPyData() : { code: '', pythonInterpreter: '' };
+							customMetadata[fieldLabel] = JSON.stringify(pyData);
+						} else if (inputEl.classList.contains('parameters-field-container')) {
+							const getParamsData = (inputEl as any).__getParametersData;
+							const paramsData = getParamsData ? getParamsData() : {};
+							customMetadata[fieldLabel] = JSON.stringify(paramsData);
 						} else {
 							customMetadata[fieldLabel] = (inputEl as any).value || '';
 						}
@@ -4197,11 +4876,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 						wsRootUri = parent;
 					}
 
-					// 2. Materialize YAML in workspace .agents/entity_type/<type>.yaml
+					// 2. Materialize / sync latest YAML in workspace .agents/entity_type/<type>.yaml
 					const localYamlUri = URI.joinPath(wsRootUri, '.agents', 'entity_type', `${selectedType}.yaml`);
-					if (!await this.fileService.exists(localYamlUri)) {
-						await this._writeYamlFile(localYamlUri, { ...matchingModule, storageScope: 'workspace' });
-					}
+					await this._writeYamlFile(localYamlUri, { ...matchingModule, storageScope: 'workspace' });
 				}
 
 				const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(targetUri);
@@ -4364,60 +5041,12 @@ export class MainWorkspaceViewPane extends ViewPane {
 	}
 
 	private async _getCustomModules(workspaceUri: URI): Promise<ICustomModule[]> {
-		const modulesMap = new Map<string, ICustomModule>();
 		try {
-			const globalDir = this._getGlobalEntityTypeDir();
-			const localDir = URI.joinPath(workspaceUri, '.agents', 'entity_type');
-			const localDirPlural = URI.joinPath(workspaceUri, '.agents', 'entity_types');
-			const parentLocalDir = URI.joinPath(dirname(workspaceUri), '.agents', 'entity_type');
-
-			try {
-				if (await this.fileService.exists(globalDir)) {
-					const stat = await this.fileService.resolve(globalDir);
-					if (stat.children) {
-						for (const child of stat.children) {
-							if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
-								const mod = await this._readYamlFile(child.resource);
-								if (mod && mod.id) {
-									mod.storageScope = 'global';
-									modulesMap.set(mod.id.toLowerCase(), mod);
-								}
-							}
-						}
-					}
-				}
-			} catch (e) {
-				console.error('Error listing global entity types:', e);
-			}
-
-			const checkDirs = [localDir, localDirPlural, parentLocalDir];
-			for (const dir of checkDirs) {
-				try {
-					if (await this.fileService.exists(dir)) {
-						const stat = await this.fileService.resolve(dir);
-						if (stat.children) {
-							for (const child of stat.children) {
-								if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
-									const mod = await this._readYamlFile(child.resource);
-									if (mod && mod.id) {
-										if (!modulesMap.has(mod.id.toLowerCase())) {
-											mod.storageScope = 'global';
-											modulesMap.set(mod.id.toLowerCase(), mod);
-										}
-									}
-								}
-							}
-						}
-					}
-				} catch (e) {
-					console.error('Error listing local entity types:', e);
-				}
-			}
+			return await this.customModulesService.getCustomModules(workspaceUri);
 		} catch (e) {
-			console.error('Error in _getCustomModules overall resolution:', e);
+			console.error('Error in _getCustomModules via customModulesService:', e);
+			return [];
 		}
-
-		return Array.from(modulesMap.values());
 	}
 
 	private async _openCustomModulesManager(targetUri: URI, onUpdate: () => void): Promise<void> {

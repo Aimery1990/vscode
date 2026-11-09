@@ -8,8 +8,9 @@
 
 set -e
 
-# Skip Node.js version constraint check
+# Skip Node.js version constraint check & ensure Electron runs in GUI mode (not as plain Node)
 export VSCODE_SKIP_NODE_VERSION_CHECK=1
+unset ELECTRON_RUN_AS_NODE
 
 # Resolve paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

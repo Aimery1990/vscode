@@ -15,7 +15,6 @@ import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/c
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { KeyMod, KeyCode } from '../../../../base/common/keyCodes.js';
-import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { URI } from '../../../../base/common/uri.js';
 
@@ -27,9 +26,17 @@ import { ITicketWorkflowRuntimeService, TicketWorkflowRuntime } from './ticketWo
 import { WorkflowsManagerPane } from './workflowsManagerPane.js';
 import { WorkflowEditor } from './workflowEditor.js';
 import { WorkflowEditorInput } from './workflowEditorInput.js';
+import { WorkflowNotebookEditor, WorkflowNotebookEditorInput } from './workflowNotebookEditor.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../common/editor.js';
 import { createWorkflowDialog } from './workflowEditorDialog.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { IFileService } from '../../../../platform/files/common/files.js';
+import { INotificationService } from '../../../../platform/notification/common/notification.js';
+import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomModulesService } from '../../customModules/common/customModules.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
+import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import './tools/workflowTools.contribution.js';
 
 export const WORKFLOWS_MANAGER_VIEWLET_ID = 'workbench.view.workflowsManager';
@@ -85,6 +92,15 @@ const viewDescriptors: IViewDescriptor[] = [
 		canToggleVisibility: true,
 		canMoveView: true,
 		containerIcon: Codicon.globe
+	},
+	{
+		id: 'workbench.view.workflowsManager.independent',
+		name: localize2('workflowsIndependent', "Independent Workflows"),
+		ctorDescriptor: new SyncDescriptor(WorkflowsManagerPane),
+		order: 3,
+		canToggleVisibility: true,
+		canMoveView: true,
+		containerIcon: Codicon.circleSlash
 	}
 ];
 
@@ -108,10 +124,8 @@ for (const vd of viewDescriptors) {
 		}
 
 		async run(accessor: ServicesAccessor): Promise<void> {
-			const workspaceContextService = accessor.get(IWorkspaceContextService);
-			const folders = workspaceContextService.getWorkspace().folders;
-			const targetFolderUri = folders[0]?.uri;
-			await createWorkflowDialog(accessor, targetFolderUri);
+			const defaultUri = vd.id.endsWith('.independent') ? URI.file('/Users/aimery/Documents/workflows') : undefined;
+			await createWorkflowDialog(accessor, defaultUri);
 		}
 	});
 
@@ -179,6 +193,17 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 	]
 );
 
+Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane(
+	EditorPaneDescriptor.create(
+		WorkflowNotebookEditor,
+		WorkflowNotebookEditor.ID,
+		localize('workflowNotebookEditor', "Workflow Jupyter Notebook Editor")
+	),
+	[
+		new SyncDescriptor(WorkflowNotebookEditorInput)
+	]
+);
+
 class WorkflowEditorInputSerializer implements IEditorSerializer {
 	canSerialize(): boolean {
 		return false;
@@ -195,3 +220,107 @@ class WorkflowEditorInputSerializer implements IEditorSerializer {
 
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory)
 	.registerEditorSerializer(WorkflowEditorInput.ID, WorkflowEditorInputSerializer);
+Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory)
+	.registerEditorSerializer(WorkflowNotebookEditorInput.ID, WorkflowEditorInputSerializer);
+
+// 7. Register "Sync to Workflow" Action for `.workflow.py` Editor Tabs
+registerAction2(class SyncPythonToWorkflowAction extends Action2 {
+	constructor() {
+		super({
+			id: 'workbench.action.workflowsManager.syncPythonToWorkflow',
+			title: localize2('syncToWorkflow', "Sync to Workflow"),
+			icon: Codicon.sync,
+			f1: true,
+			menu: [
+				{
+					id: MenuId.EditorTitle,
+					when: ContextKeyExpr.regex('resourceFilename', /\.workflow\.py$/i),
+					group: 'navigation',
+					order: -100
+				},
+				{
+					id: MenuId.EditorContext,
+					when: ContextKeyExpr.regex('resourceFilename', /\.workflow\.py$/i),
+					group: 'navigation',
+					order: 1
+				}
+			]
+		});
+	}
+
+	async run(accessor: ServicesAccessor, resourceArg?: URI): Promise<void> {
+		const editorService = accessor.get(IEditorService);
+		const fileService = accessor.get(IFileService);
+		const notificationService = accessor.get(INotificationService);
+		const entityPersistenceService = accessor.get(IEntityPersistenceService);
+		const ticketRuntimeService = accessor.get(ITicketWorkflowRuntimeService);
+
+		const activePane = editorService.activeEditorPane;
+		const activeControl: any = activePane?.getControl?.();
+		const activeResource = resourceArg || editorService.activeEditor?.resource;
+
+		await WorkflowEditor.syncPythonEditorToWorkflow(
+			activeResource,
+			activeControl,
+			fileService,
+			notificationService,
+			entityPersistenceService,
+			ticketRuntimeService
+		);
+	}
+});
+
+// 8. Automatically attach the left-side Python Toolbox to any active `.workflow.py` editor tab
+class WorkflowPythonEditorToolboxContribution extends Disposable implements IWorkbenchContribution {
+	static readonly ID = 'workbench.contrib.workflowPythonEditorToolbox';
+
+	constructor(
+		@IEditorService private readonly _editorService: IEditorService,
+		@IFileService private readonly _fileService: IFileService,
+		@INotificationService private readonly _notificationService: INotificationService,
+		@IEntityPersistenceService private readonly _entityPersistenceService: IEntityPersistenceService,
+		@ITicketWorkflowRuntimeService private readonly _ticketRuntimeService: ITicketWorkflowRuntimeService,
+		@ICustomModulesService private readonly _customModulesService: ICustomModulesService
+	) {
+		super();
+		this._register(this._editorService.onDidActiveEditorChange(() => this._checkActiveEditor()));
+		this._register(this._editorService.onDidVisibleEditorsChange(() => this._checkActiveEditor()));
+		this._register(this._customModulesService.onDidChangeModules(() => this._checkActiveEditor()));
+		this._checkActiveEditor();
+	}
+
+	private _checkActiveEditor(): void {
+		setTimeout(() => {
+			try {
+				for (const pane of this._editorService.visibleEditorPanes) {
+					const resource = pane.input?.resource;
+					const control: any = pane.getControl?.();
+					if (control && resource && /\.workflow\.py$/i.test(resource.path)) {
+						WorkflowEditor.attachWorkflowPythonToolbox(
+							control,
+							this._fileService,
+							this._notificationService,
+							this._entityPersistenceService,
+							this._ticketRuntimeService,
+							this._editorService,
+							this._customModulesService,
+							resource
+						);
+					} else if (control && (control as any).__wfPyToolboxController) {
+						(control as any).__wfPyToolboxController.refreshContext(resource);
+					}
+				}
+			} catch (err) {
+				console.error('[WorkflowPythonEditorToolboxContribution] Failed to attach toolbox:', err);
+			}
+		}, 30);
+	}
+}
+
+registerWorkbenchContribution2(
+	WorkflowPythonEditorToolboxContribution.ID,
+	WorkflowPythonEditorToolboxContribution,
+	WorkbenchPhase.AfterRestored
+);
+
+

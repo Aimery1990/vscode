@@ -106,11 +106,27 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 	async saveSnapshot(snapshot: IBaseEntitySnapshot): Promise<void> {
 		const key = this.normalizeUriString(snapshot.entityUri);
-		this._memorySnapshots.set(key, {
+		const prev = this._memorySnapshots.get(key) || this._memorySnapshots.get(key.toLowerCase());
+		const next: IBaseEntitySnapshot = {
 			...snapshot,
 			entityUri: key
-		});
-		this._onDidChangeSnapshots.fire();
+		};
+		this._memorySnapshots.set(key, next);
+
+		const isTreeMetadataChanged = !prev ||
+			prev.entityName !== next.entityName ||
+			prev.title !== next.title ||
+			prev.ticketId !== next.ticketId ||
+			prev.workspaceId !== next.workspaceId ||
+			prev.entityType !== next.entityType ||
+			prev.entityCode !== next.entityCode ||
+			prev.status !== next.status ||
+			prev.ownerAccount !== next.ownerAccount ||
+			prev.belongsToWorkspaceUri !== next.belongsToWorkspaceUri;
+
+		if (isTreeMetadataChanged) {
+			this._onDidChangeSnapshots.fire();
+		}
 	}
 
 	getSnapshot(uri: URI | string): IBaseEntitySnapshot | undefined {

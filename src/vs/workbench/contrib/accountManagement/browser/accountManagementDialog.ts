@@ -1027,18 +1027,31 @@ export class AccountManagementDialog extends Disposable {
 		const updateTestModelDefaults = () => {
 			testModelSelect.textContent = '';
 			const prov = provSelect.value;
+			const matchingCreds = credentials.filter(c => c.providerId === prov && Array.isArray(c.cachedModels) && c.cachedModels.length > 0);
+			const cachedList: string[] = [];
+			for (const c of matchingCreds) {
+				for (const m of (c.cachedModels || [])) {
+					if (!cachedList.includes(m)) {
+						cachedList.push(m);
+					}
+				}
+			}
+
 			let opts: { value: string; label: string }[] = [];
 			if (prov === 'gemini') {
 				opts = [
-					{ value: 'gemini-1.5-flash', label: 'gemini-1.5-flash (Default)' },
+					{ value: 'gemini-2.5-flash', label: 'gemini-2.5-flash (Default)' },
+					{ value: 'gemini-2.5-pro', label: 'gemini-2.5-pro' },
+					{ value: 'gemini-2.0-flash', label: 'gemini-2.0-flash' },
 					{ value: 'gemini-1.5-pro', label: 'gemini-1.5-pro' },
-					{ value: 'gemini-2.0-flash', label: 'gemini-2.0-flash' }
+					{ value: 'gemini-1.5-flash', label: 'gemini-1.5-flash' }
 				];
 			} else if (prov === 'openai') {
 				opts = [
 					{ value: 'gpt-4o-mini', label: 'gpt-4o-mini (Default)' },
 					{ value: 'gpt-4o', label: 'gpt-4o' },
-					{ value: 'gpt-4-turbo', label: 'gpt-4-turbo' }
+					{ value: 'gpt-4-turbo', label: 'gpt-4-turbo' },
+					{ value: 'gpt-3.5-turbo', label: 'gpt-3.5-turbo' }
 				];
 			} else if (prov === 'anthropic') {
 				opts = [
@@ -1050,6 +1063,13 @@ export class AccountManagementDialog extends Disposable {
 					{ value: 'default-model', label: 'default-model (Default)' }
 				];
 			}
+
+			for (const m of cachedList) {
+				if (!opts.some(o => o.value === m)) {
+					opts.push({ value: m, label: m });
+				}
+			}
+
 			for (const opt of opts) {
 				const optionEl = targetDocument.createElement('option');
 				optionEl.value = opt.value;

@@ -15,6 +15,7 @@ export const DeleteTicketToolId = 'anyagent_delete_ticket';
 export const UpdateTicketToolId = 'anyagent_update_ticket';
 export const ManageLinksToolId = 'anyagent_manage_links';
 export const QueryWorkspaceTreeToolId = 'anyagent_query_workspace_tree';
+export const OperateTicketTableToolId = 'anyagent_operate_ticket_table';
 
 function toolResult(data: any, message?: string): IToolResult {
 	return {
@@ -536,6 +537,155 @@ export class QueryWorkspaceTreeTool implements IToolImpl {
 		try {
 			const res = await this.ticketEngine.queryWorkspaceTree(invocation.parameters as any);
 			return toolResult(res, `Workspace tree retrieved for ${invocation.parameters?.workspace_id}`);
+		} catch (err: any) {
+			return toolError(err.message || String(err));
+		}
+	}
+}
+
+// -------------------------------------------------------------
+// 7. anyagent_operate_ticket_table
+// -------------------------------------------------------------
+export class OperateTicketTableTool implements IToolImpl {
+
+	constructor(
+		private readonly ticketEngine: TicketDataEngine
+	) { }
+
+	getToolData(): IToolData {
+		return {
+			id: OperateTicketTableToolId,
+			toolReferenceName: 'operateTicketTable',
+			displayName: localize('ticket.tool.table.displayName', "Operate Ticket Data Table & SQLite"),
+			userDescription: localize('ticket.tool.table.userDescription', "Inspect, define columns, insert/update/delete rows, and sync or query SQLite for a ticket's Data Table primitive"),
+			modelDescription: "Perform structured data and SQLite database operations on a ticket's Data Table ('table') primitive. Supports reading table schema & rows ('get_table'), defining column headers & SQLite data types ('define_columns' with TEXT, VARCHAR(255), INTEGER, REAL, NUMERIC, BOOLEAN, DATE, DATETIME, JSON, BLOB), inserting rows ('insert_rows'), updating/upserting rows ('update_rows'), replacing all rows ('set_rows'), deleting rows ('delete_rows', 'clear_rows'), binding a new or existing SQLite file ('bind_sqlite'), storing/updating/loading/deleting table data in SQLite ('save_to_sqlite', 'update_in_sqlite', 'load_from_sqlite', 'delete_from_sqlite'), and running custom SQL queries ('sql_query').",
+			source: ToolDataSource.Internal,
+			canBeReferencedInPrompt: true,
+			icon: Codicon.table,
+			inputSchema: {
+				type: 'object',
+				properties: {
+					workspace_id: {
+						type: 'string',
+						description: "The root workspace ID (e.g. 'FNDJ1-0000' or 'GFLOW-0000')."
+					},
+					ticket_id: {
+						type: 'string',
+						description: "The target ticket ID (e.g. 'FNDJ1-0001')."
+					},
+					parent_path: {
+						type: 'string',
+						description: "Optional parent path (e.g. '/FNDJ1-0006' or '/')."
+					},
+					table_field: {
+						type: 'string',
+						description: "The label or ID of the Data Table primitive field in the ticket (e.g. 'Data Table 1' or 'Job Postings')."
+					},
+					operation: {
+						type: 'string',
+						enum: [
+							'get_table',
+							'define_columns',
+							'insert_rows',
+							'update_rows',
+							'set_rows',
+							'delete_rows',
+							'clear_rows',
+							'bind_sqlite',
+							'save_to_sqlite',
+							'update_in_sqlite',
+							'load_from_sqlite',
+							'delete_from_sqlite',
+							'sql_query'
+						],
+						description: "Operation to perform on the table and/or bound SQLite database."
+					},
+					columns: {
+						type: 'array',
+						description: "Column header definitions when operation is 'define_columns' or 'set_rows'.",
+						items: {
+							type: 'object',
+							properties: {
+								name: { type: 'string', description: "Column header name (e.g. 'job_id', 'company', 'salary')." },
+								dataType: {
+									type: 'string',
+									enum: ['TEXT', 'VARCHAR(255)', 'INTEGER', 'REAL', 'NUMERIC', 'BOOLEAN', 'DATE', 'DATETIME', 'JSON', 'BLOB'],
+									description: "SQLite / SQL column data type."
+								},
+								primaryKey: { type: 'boolean', description: "Whether this column is the Primary Key." },
+								nullable: { type: 'boolean', description: "Whether NULL values are allowed." },
+								defaultValue: { type: 'string', description: "Optional default value." }
+							},
+							required: ['name']
+						}
+					},
+					rows: {
+						type: 'array',
+						description: "Array of row objects (keyed by column name) for 'insert_rows', 'update_rows', or 'set_rows'.",
+						items: {
+							type: 'object'
+						}
+					},
+					match_column: {
+						type: 'string',
+						description: "Optional column name to match when updating or deleting specific rows (e.g. 'id')."
+					},
+					match_value: {
+						type: ['string', 'number', 'boolean'],
+						description: "Optional cell value to match against match_column when updating or deleting rows."
+					},
+					row_indices: {
+						type: 'array',
+						items: { type: 'number' },
+						description: "Optional zero-based row indices for 'update_rows' or 'delete_rows'."
+					},
+					db_path: {
+						type: 'string',
+						description: "Optional SQLite database file path (.sqlite / .db) to create or bind (relative to workspace/ticket or absolute path)."
+					},
+					db_table_name: {
+						type: 'string',
+						description: "Optional target table name inside the SQLite database."
+					},
+					sync_sqlite: {
+						type: 'boolean',
+						description: "When true, immediately syncs the modified table to the bound SQLite database."
+					},
+					sql_query: {
+						type: 'string',
+						description: "Raw SQL query to execute when operation is 'sql_query'."
+					},
+					worklog_record: {
+						type: 'object',
+						description: "Optional worklog entry to record in the ticket's worklog.md.",
+						properties: {
+							user_request: { type: 'string' },
+							update_summary: { type: 'string' },
+							update_details: { type: 'string' },
+							update_conclusion: { type: 'string' }
+						},
+						required: ['user_request', 'update_summary', 'update_details', 'update_conclusion']
+					}
+				},
+				required: ['workspace_id', 'ticket_id', 'table_field', 'operation']
+			}
+		};
+	}
+
+	async prepareToolInvocation(context: IToolInvocationPreparationContext, _token: CancellationToken): Promise<IPreparedToolInvocation> {
+		const op = context.parameters?.operation || 'operate';
+		const tbl = context.parameters?.table_field || 'table';
+		const tId = context.parameters?.ticket_id || '';
+		return {
+			invocationMessage: localize('ticket.tool.table.invoking', "Executing '{0}' on table '{1}' in ticket {2}...", op, tbl, tId),
+			pastTenseMessage: localize('ticket.tool.table.done', "Executed '{0}' on table '{1}' in ticket {2}", op, tbl, tId)
+		};
+	}
+
+	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
+		try {
+			const res = await this.ticketEngine.operateTicketTable(invocation.parameters as any);
+			return toolResult(res, res.summary || `Table '${res.table_field}' operation '${res.operation}' completed.`);
 		} catch (err: any) {
 			return toolError(err.message || String(err));
 		}

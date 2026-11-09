@@ -22,14 +22,25 @@ export class EntityDetailEditorInput extends EditorInput {
 	constructor(
 		public readonly entityUri: URI,
 		public readonly entityName: string,
-		public readonly startInEditMode?: boolean
+		public readonly startInEditMode?: boolean,
+		public previewModule?: any
 	) {
 		super();
 		this._resource = URI.from({
 			scheme: Schemas.vscodeEntityDetail,
-			path: `/${encodeURIComponent(entityUri.toString())}`,
+			path: previewModule
+				? `/preview/${encodeURIComponent(previewModule.id || entityName)}`
+				: `/${encodeURIComponent(entityUri.toString())}`,
 		});
-		this._name = `${entityName} (Detail)`;
+		this._name = previewModule
+			? `Preview: ${previewModule.name || entityName} (Ticket)`
+			: `${entityName} (Detail)`;
+	}
+
+	public updatePreviewModule(mod: any): void {
+		this.previewModule = mod;
+		this._name = `Preview: ${mod.name || this.entityName} (Ticket)`;
+		this._onDidChangeLabel.fire();
 	}
 
 	override get typeId(): string {
@@ -50,6 +61,12 @@ export class EntityDetailEditorInput extends EditorInput {
 
 	override matches(other: EditorInput | IUntypedEditorInput): boolean {
 		if (other instanceof EntityDetailEditorInput) {
+			if (this.previewModule && other.previewModule) {
+				return String(this.previewModule.id || '').toLowerCase() === String(other.previewModule.id || '').toLowerCase();
+			}
+			if (!!this.previewModule !== !!other.previewModule) {
+				return false;
+			}
 			return other.entityUri.toString() === this.entityUri.toString();
 		}
 		return false;

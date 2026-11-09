@@ -349,7 +349,8 @@ export class CustomModulesSchemaDesignerDialog {
 						attachment: { bg: 'rgba(16,185,129,0.15)', text: '#10b981' },
 						browser: { bg: 'rgba(56,189,248,0.15)', text: '#38bdf8' },
 						git: { bg: 'rgba(249,115,22,0.15)', text: '#f97316' },
-						python: { bg: 'rgba(56,189,248,0.15)', text: '#38bdf8' }
+						python: { bg: 'rgba(56,189,248,0.15)', text: '#38bdf8' },
+						tts: { bg: 'rgba(236,72,153,0.15)', text: '#ec4899' }
 					};
 					const c = colorMap[type] || colorMap.text;
 					return `font-size: 9px; padding: 2px 6px; border-radius: 4px; background: ${c.bg}; color: ${c.text}; text-transform: uppercase; font-weight: bold; letter-spacing: 0.05em;`;
@@ -371,7 +372,9 @@ export class CustomModulesSchemaDesignerDialog {
 					{ type: 'attachment', label: 'Attachment (Files)', icon: Codicon.files },
 					{ type: 'browser', label: 'Browser (Web Application)', icon: Codicon.globe },
 					{ type: 'git', label: 'Git Repository Binding', icon: Codicon.sourceControl },
-					{ type: 'python', label: 'Python (Code Automation)', icon: Codicon.code }
+					{ type: 'python', label: 'Python (Code Automation)', icon: Codicon.code },
+					{ type: 'tts', label: 'Audio / TTS (Text-to-Speech)', icon: Codicon.unmute },
+					{ type: 'media_player', label: 'MP3 / MP4 Player', icon: Codicon.deviceCameraVideo }
 				];
 
 				let currentDraggingItem: { source: 'palette' | 'canvas' | 'subcanvas'; type?: string; label?: string; isClass?: boolean; classId?: string; itemFields?: any[]; canvasIndex?: number; subIndex?: number } | null = null;

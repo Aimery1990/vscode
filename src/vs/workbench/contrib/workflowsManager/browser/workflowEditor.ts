@@ -16,7 +16,7 @@ import { IEditorOpenContext } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
+import { IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { WorkflowEditorInput } from './workflowEditorInput.js';
 import { URI } from '../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
@@ -24,12 +24,24 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
-import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IParameterDefinition, generateSmartPythonVarName, sanitizePythonVarName } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomModulesService } from '../../customModules/common/customModules.js';
+import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
+import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
+import { EntityDetailEditor } from '../../workspacesExplorer/browser/entityDetailEditor.js';
 import { IWorkflowExecutionService, IWorkflowDisplayCard } from '../common/workflowExecutionService.js';
+import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
+import {
+	WorkflowToPythonConverter,
+	PythonToWorkflowParser,
+	PythonCodeBlockParser,
+	WorkflowSyncManager,
+	WorkflowPythonEditorBridge
+} from './workflowPythonSync.js';
 import {
 	IWorkflowExecutionRun,
 	IWorkflowLogEntry,
@@ -49,7 +61,7 @@ export interface INodeVariable {
 
 export interface INodePipelineStep {
 	id: string;
-	type: 'run_ticket' | 'set_variable' | 'custom_code' | 'call_function';
+	type: 'run_ticket' | 'set_variable' | 'custom_code' | 'call_function' | 'component';
 	ticketName?: string;
 	ticketType?: string;
 	ticketUri?: string;
@@ -58,6 +70,7 @@ export interface INodePipelineStep {
 	functionName?: string;   // e.g. "RUN_TICKETS", "CREATE_TICKETS"
 	label?: string;          // Human-readable title
 	parameters?: string;     // Runtime parameters (e.g. "--fast", "param1")
+	component?: ICustomField; // Component-driven node step (Inputs, Output, Create Tickets, Run Tickets, AI Prompt, Table, Browser, Python, etc.)
 }
 
 interface IFlowchartNode {
@@ -97,12 +110,16 @@ interface IFlowchartLink {
 	label?: string;
 	condition?: string;
 	labelPosition?: number;
+	labelWidth?: number;
+	labelHeight?: number;
+	waypoints?: { x: number; y: number }[];
 }
 
 interface IFlowchartData {
 	nodes: IFlowchartNode[];
 	links: IFlowchartLink[];
 	routingMode?: 'orthogonal' | 'curved';
+	pythonPath?: string;
 }
 
 function hexToRgba(hex?: string, alpha = 0.12): string {
@@ -173,13 +190,23 @@ function getEntityBadgeStyle(type?: string): { color: string; bg: string; icon: 
 			return { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.18)', icon: Codicon.rootFolder };
 		default: {
 			const c = getColorForName(type || 'custom');
-			return { color: c, bg: hexToRgba(c, 0.18), icon: Codicon.package };
+			const lower = (type || '').toLowerCase();
+			let icon = Codicon.package;
+			if (lower.includes('url') || lower.includes('web') || lower.includes('link') || lower.includes('site') || lower.includes('http')) {
+				icon = Codicon.globe;
+			} else if (lower.includes('data') || lower.includes('table') || lower.includes('db') || lower.includes('sql')) {
+				icon = Codicon.database;
+			} else if (lower.includes('jd') || lower.includes('position') || lower.includes('career') || lower.includes('hire')) {
+				icon = Codicon.briefcase;
+			}
+			return { color: c, bg: hexToRgba(c, 0.18), icon };
 		}
 	}
 }
 
 export class WorkflowEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.workflowEditor';
+	private static readonly _openWorkflowEditors: Set<WorkflowEditor> = new Set();
 
 	private _container: HTMLElement | undefined;
 	private readonly _contentDisposables = this._register(new DisposableStore());
@@ -208,6 +235,8 @@ export class WorkflowEditor extends EditorPane {
 	private _isSelectingBox = false;
 	private _selectBoxStartX = 0;
 	private _selectBoxStartY = 0;
+	private _selectBoxBaseNodeIds: Set<string> = new Set();
+	private _selectBoxBaseLinkIds: Set<string> = new Set();
 
 	// Dragging State
 	private _isDragging = false;
@@ -215,11 +244,29 @@ export class WorkflowEditor extends EditorPane {
 	private _dragStartX = 0;
 	private _dragStartY = 0;
 
-	// Link Label Dragging State
+	// Link Label Dragging & Resizing State
 	private _isDraggingLinkLabel: string | null = null;
 	private _dragLabelHasMoved = false;
 	private _dragLabelStartX = 0;
 	private _dragLabelStartY = 0;
+	private _isResizingLinkLabel: string | null = null;
+	private _resizeLinkLabelStartWidth = 0;
+	private _resizeLinkLabelStartHeight = 0;
+	private _resizeLinkLabelStartX = 0;
+	private _resizeLinkLabelStartY = 0;
+
+	// Link Orthogonal Segment Dragging State
+	private _isDraggingLinkSegment: string | null = null;
+	private _dragLinkSegmentIndex = -1;
+	private _dragLinkSegmentIsVertical = true;
+	private _dragLinkSegmentInitialIndex = -1;
+	private _dragLinkSegmentPrepared = false;
+	private _dragLinkSegmentWaypoints: { x: number; y: number }[] = [];
+	private _dragLinkSegmentStartX = 0;
+	private _dragLinkSegmentStartY = 0;
+	private _dragLinkSegmentCanvasX = 0;
+	private _dragLinkSegmentCanvasY = 0;
+	private _dragLinkSegmentHasMoved = false;
 
 	// Connecting State
 	private _isConnecting = false;
@@ -314,6 +361,23 @@ export class WorkflowEditor extends EditorPane {
 	private _activePipelineDropdown: HTMLElement | null = null;
 	private _ticketHoverPopoverEl: HTMLElement | null = null;
 	private _ticketHoverTimeout: any = null;
+	private _pythonStepHoverPopoverEl: HTMLElement | null = null;
+	private _pythonStepHoverShowTimeout: any = null;
+	private _pythonStepHoverHideTimeout: any = null;
+	private _isPythonStepPopoverPinned: boolean = false;
+	private _pythonStepPopoverOutsideClickHandler: ((e: MouseEvent) => void) | null = null;
+	private _activePythonPopoverNode: IFlowchartNode | null = null;
+	private _activePythonPopoverStep: INodePipelineStep | null = null;
+	private _viewMode: 'flowchart' | 'fields' = 'flowchart';
+	private _fieldsViewContainerEl?: HTMLElement;
+	private _embeddedDetailEditor?: EntityDetailEditor;
+	private _floatingFieldsToggleBtn?: HTMLElement;
+	private _floatingZoomBarEl?: HTMLElement;
+	private _floatingPythonEnvBtn?: HTMLElement;
+	private _isFloatingToolbarExpanded: boolean = false;
+	private _detectedPythonPath: string = 'python3';
+	private _cachedCustomModules: ICustomModule[] = [];
+	private _lastStepPillClick: { nodeId: string; stepId: string; time: number } | undefined;
 
 	constructor(
 		group: IEditorGroup,
@@ -325,9 +389,13 @@ export class WorkflowEditor extends EditorPane {
 		@IViewsService private readonly _viewsService: IViewsService,
 		@IEntityPersistenceService private readonly _entityPersistenceService: IEntityPersistenceService,
 		@IEditorService private readonly _editorService: IEditorService,
+		@IEditorGroupsService private readonly _editorGroupService: IEditorGroupsService,
 		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
 		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
-		@IWorkflowExecutionService private readonly _workflowExecutionService: IWorkflowExecutionService
+		@IWorkflowExecutionService private readonly _workflowExecutionService: IWorkflowExecutionService,
+		@IInstantiationService private readonly _instantiationService: IInstantiationService,
+		@ITicketWorkflowRuntimeService private readonly _ticketRuntimeService: ITicketWorkflowRuntimeService,
+		@ICustomModulesService private readonly _customModulesService: ICustomModulesService
 	) {
 		super(WorkflowEditor.ID, group, telemetryService, themeService, _storageService);
 		this._isToolbarCompact = this._storageService.getBoolean('workflowEditor.toolbarCompact', StorageScope.PROFILE, false);
@@ -347,6 +415,49 @@ export class WorkflowEditor extends EditorPane {
 		this._activeIsStrikethrough = this._storageService.getBoolean('workflowEditor.isStrikethrough', StorageScope.PROFILE, false);
 		this._drawerHeight = this._storageService.getNumber('workflowEditor.drawerHeight', StorageScope.PROFILE, 280);
 		this._pipelineDockSide = (this._storageService.get('workflowEditor.pipelineDockSide', StorageScope.PROFILE, 'right') as any) || 'right';
+		WorkflowEditor._openWorkflowEditors.add(this);
+		this._register({ dispose: () => WorkflowEditor._openWorkflowEditors.delete(this) });
+		this._register(this._customModulesService.onDidChangeModules(async () => {
+			try {
+				const modules = await this._customModulesService.getCustomModules(this._workflowUri);
+				this._cachedCustomModules = modules;
+				let changed = false;
+				for (const mod of modules) {
+					for (const f of mod.fields || []) {
+						const newLbl = (f.label || '').trim();
+						const prevs: string[] = Array.isArray((f as any).previousLabels) ? (f as any).previousLabels : [];
+						if (!newLbl || prevs.length === 0) { continue; }
+						for (const oldLbl of prevs) {
+							if (!oldLbl || oldLbl === newLbl) { continue; }
+							const escOld = oldLbl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+							const sqRe = new RegExp(`(\\[')${escOld}('\\])`, 'g');
+							const dqRe = new RegExp(`(\\[")${escOld}("\\])`, 'g');
+							for (const n of this._data.nodes || []) {
+								if (n.pythonScript && (sqRe.test(n.pythonScript) || dqRe.test(n.pythonScript))) {
+									n.pythonScript = n.pythonScript.replace(sqRe, `$1${newLbl}$2`).replace(dqRe, `$1${newLbl}$2`);
+									changed = true;
+								}
+								for (const st of n.pipeline || []) {
+									if (st.expression && (sqRe.test(st.expression) || dqRe.test(st.expression))) {
+										st.expression = st.expression.replace(sqRe, `$1${newLbl}$2`).replace(dqRe, `$1${newLbl}$2`);
+										changed = true;
+									}
+									if (st.componentField?.pythonCode && (sqRe.test(st.componentField.pythonCode) || dqRe.test(st.componentField.pythonCode))) {
+										st.componentField.pythonCode = st.componentField.pythonCode.replace(sqRe, `$1${newLbl}$2`).replace(dqRe, `$1${newLbl}$2`);
+										changed = true;
+									}
+								}
+							}
+						}
+					}
+				}
+				if (changed) {
+					await this._saveFlowchartData();
+					this._renderNodesAndLinks();
+					this._renderInspector();
+				}
+			} catch { }
+		}));
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
@@ -357,6 +468,7 @@ export class WorkflowEditor extends EditorPane {
 	override async setInput(input: EditorInput, options: IEditorOptions | undefined, context: IEditorOpenContext, token: CancellationToken): Promise<void> {
 		await super.setInput(input, options, context, token);
 
+		this._viewMode = 'flowchart';
 		this._isPureDiagram = !!(input as any).isPureDiagram || !!(input as any).diagramUri;
 		if (this._isPureDiagram) {
 			this._workflowUri = (input as any).diagramUri || (input as any).resource || URI.file('');
@@ -374,7 +486,10 @@ export class WorkflowEditor extends EditorPane {
 		if (this._workflowUri) {
 			try {
 				await this._workflowExecutionService.loadRunsForWorkflow(this._workflowUri);
-			} catch {}
+			} catch { }
+			try {
+				this._cachedCustomModules = await this._customModulesService.getCustomModules(this._workflowUri);
+			} catch { }
 		}
 		if (!this._flowchartJsonUri) return;
 
@@ -429,14 +544,21 @@ export class WorkflowEditor extends EditorPane {
 					style: (l.style === 'arrow-double' || l.style === 'arrow-none' || l.style === 'dashed') ? l.style : 'arrow-single',
 					routing: l.routing,
 					color: l.color,
-					label: l.label,
-					labelPosition: typeof l.labelPosition === 'number' ? l.labelPosition : undefined
+					label: l.label ?? l.condition,
+					condition: l.condition ?? l.label,
+					labelPosition: typeof l.labelPosition === 'number' ? l.labelPosition : undefined,
+					labelWidth: typeof l.labelWidth === 'number' ? l.labelWidth : undefined,
+					labelHeight: typeof l.labelHeight === 'number' ? l.labelHeight : undefined,
+					waypoints: Array.isArray(l.waypoints)
+						? l.waypoints.filter((p: any) => p && typeof p.x === 'number' && typeof p.y === 'number').map((p: any) => ({ x: p.x, y: p.y }))
+						: undefined
 				}));
 
 				this._data = {
 					nodes,
 					links,
-					routingMode: parsed?.routingMode || 'orthogonal'
+					routingMode: parsed?.routingMode || 'orthogonal',
+					pythonPath: parsed?.pythonPath || undefined
 				};
 
 				if (this._data.routingMode) {
@@ -518,6 +640,7 @@ export class WorkflowEditor extends EditorPane {
 			this._undoStack = [];
 			this._redoStack = [];
 			this._lastSavedStateJson = JSON.stringify(this._data);
+			this._rebindOpenNodeSchemaEditors();
 		} catch (err) {
 			this._notificationService.error(`Failed to load flowchart: ${err}`);
 			this._data = { nodes: [], links: [] };
@@ -577,14 +700,39 @@ export class WorkflowEditor extends EditorPane {
 		// Native layout override
 	}
 
+	private static readonly _viewportStateByUri = new Map<string, { scrollLeft: number; scrollTop: number; zoomLevel: number }>();
+
 	private _renderEditor(): void {
 		if (!this._container) return;
+
+		const wfUriKey = this._workflowUri?.toString() || '';
+		let savedViewport = wfUriKey ? WorkflowEditor._viewportStateByUri.get(wfUriKey) : undefined;
+		if (!savedViewport && wfUriKey) {
+			try {
+				const raw = this._storageService.get(`workflowEditor.viewport.${wfUriKey}`, StorageScope.PROFILE);
+				if (raw) {
+					const parsed = JSON.parse(raw);
+					if (parsed && typeof parsed.scrollLeft === 'number' && typeof parsed.scrollTop === 'number') {
+						savedViewport = {
+							scrollLeft: parsed.scrollLeft,
+							scrollTop: parsed.scrollTop,
+							zoomLevel: typeof parsed.zoomLevel === 'number' ? parsed.zoomLevel : this._zoomLevel
+						};
+						WorkflowEditor._viewportStateByUri.set(wfUriKey, savedViewport);
+					}
+				}
+			} catch { }
+		}
+		if (savedViewport && typeof savedViewport.zoomLevel === 'number' && savedViewport.zoomLevel >= 0.25 && savedViewport.zoomLevel <= 2.0) {
+			this._zoomLevel = savedViewport.zoomLevel;
+		}
 
 		if (this._pipelinePanelEl) {
 			this._pipelinePanelEl.remove();
 			this._pipelinePanelEl = undefined;
 		}
 
+		this._embeddedDetailEditor = undefined;
 		this._contentDisposables.clear();
 		clearNode(this._container);
 
@@ -603,47 +751,116 @@ export class WorkflowEditor extends EditorPane {
 					this._activeDisplayRunId = run.runId;
 					this._clearDisplayInspectorCards();
 				}
-				if (!renderPending) {
+
+				// Always update status badge and event count immediately regardless of active drawer tab
+				if (this._logStatusBadgeEl) {
+					this._logStatusBadgeEl.textContent = run.status.toUpperCase();
+					this._logStatusBadgeEl.className = `log-status-badge status-${run.status}`;
+				}
+				if (this._logCountBadgeEl) {
+					this._logCountBadgeEl.textContent = `${run.logs?.length || 0} events`;
+				}
+				this._updateHistoryCountBadge();
+
+				const isTerminalState = run.status === 'completed' || run.status === 'failed' || run.status === 'stopped' || run.status === 'idle';
+				const syncCanvasAndToolbar = () => {
+					this._renderNodes();
+					this._drawLinks();
+					if (this._toolbarEl) {
+						this._renderToolbar(this._toolbarEl);
+					}
+					if (this._pipelinePanelEl && this._activePipelineNodeId) {
+						const activePipelineNode = this._nodes.find(n => n.id === this._activePipelineNodeId);
+						if (activePipelineNode) {
+							this._renderPipelinePanel(this._pipelinePanelEl, activePipelineNode);
+						}
+					}
+				};
+
+				if (isTerminalState) {
+					renderPending = false;
+					syncCanvasAndToolbar();
+				} else if (!renderPending) {
 					renderPending = true;
 					requestAnimationFrame(() => {
 						renderPending = false;
-						this._renderNodes();
-						this._drawLinks();
-						if (this._toolbarEl) {
-							this._renderToolbar(this._toolbarEl);
-						}
-						if (this._pipelinePanelEl && this._activePipelineNodeId) {
-							const activePipelineNode = this._nodes.find(n => n.id === this._activePipelineNodeId);
-							if (activePipelineNode) {
-								this._renderPipelinePanel(this._pipelinePanelEl, activePipelineNode);
-							}
-						}
+						syncCanvasAndToolbar();
 					});
 				}
+
 				if (run.status === 'failed' && !this._isLogDrawerOpen) {
 					this._openDrawerTab('logs');
 				} else if (this._isLogDrawerOpen) {
-					if (this._activeDrawerTab === 'logs') {
+					if (this._activeDrawerTab === 'logs' || isTerminalState) {
 						this._refreshLogs(run);
-					} else if (this._activeDrawerTab === 'vars') {
+					}
+					if (this._activeDrawerTab === 'vars') {
 						this._refreshVariablesDrawer();
 					} else if (this._activeDrawerTab === 'history') {
 						this._refreshHistoryDrawer();
 					}
-					this._updateHistoryCountBadge();
 				}
 			}
 		}));
 
 		this._contentDisposables.add(this._workflowExecutionService.onDidEmitLog(({ runId, log }) => {
 			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
-			if (activeRun && activeRun.runId === runId && this._isLogDrawerOpen) {
-				this._appendLogEntry(log, true);
+			if (activeRun && activeRun.runId === runId) {
+				if (this._logCountBadgeEl) {
+					this._logCountBadgeEl.textContent = `${activeRun.logs?.length || 0} events`;
+				}
+				if (this._isLogDrawerOpen) {
+					this._appendLogEntry(log, this._activeDrawerTab === 'logs');
+				}
 			}
 		}));
 
 		this._contentDisposables.add(this._workflowExecutionService.onDidDisplayVariable(card => {
 			this._addDisplayInspectorCard(card);
+		}));
+
+		this._contentDisposables.add(this._workflowExecutionService.onDidUpdateNodeComponents(({ workflowUri, nodeId, node }) => {
+			if (!this._workflowUri || workflowUri !== this._workflowUri.toString()) {
+				return;
+			}
+			const localNode = this._data?.nodes?.find(n => n.id === nodeId);
+			if (localNode && Array.isArray(localNode.pipeline) && Array.isArray(node?.pipeline)) {
+				for (const srcStep of node.pipeline) {
+					const srcComp = (srcStep as any)?.component;
+					if (!srcComp) continue;
+					const dstStep = localNode.pipeline.find(s =>
+						(s.id && s.id === srcStep.id) ||
+						(s.component?.id && s.component.id === srcComp.id)
+					);
+					if (dstStep) {
+						if (dstStep.component) {
+							Object.assign(dstStep.component, srcComp);
+						} else {
+							dstStep.component = { ...srcComp };
+						}
+						this._syncComponentStepMetadata(dstStep);
+					}
+				}
+				this._ensureNodeFitsPipeline(localNode);
+				this._syncToNode(localNode, true);
+				this._lastSavedStateJson = JSON.stringify(this._data);
+				this._renderNodes();
+				this._drawLinks();
+				if (this._inspectorEl) {
+					this._renderInspector(this._inspectorEl);
+				}
+				const schemaInput = this._nodeEditorInputsByNodeId.get(nodeId);
+				if (schemaInput && !schemaInput.isDisposed() && schemaInput.draftModule) {
+					const updatedNodeFields: ICustomField[] = localNode.pipeline
+						.filter(st => !!st.component)
+						.map(st => st.component!);
+					schemaInput.draftModule.fields = [
+						{ id: 'title', label: 'Title', type: 'text', required: true },
+						...updatedNodeFields
+					];
+					schemaInput.notifyExternalDraftUpdated();
+				}
+			}
 		}));
 
 		// 2. Center Drawing Viewport (Fixed container for floating controls)
@@ -655,6 +872,45 @@ export class WorkflowEditor extends EditorPane {
 
 		// Canvas Scroll Wrapper inside Viewport
 		const canvasWrapper = append(canvasViewport, $('.workflow-editor-canvas-wrapper'));
+
+		let isRestoringViewport = true;
+		const persistViewportState = () => {
+			if (isRestoringViewport || !wfUriKey || canvasWrapper.clientWidth <= 0 || canvasWrapper.clientHeight <= 0) {
+				return;
+			}
+			const state = {
+				scrollLeft: Math.round(canvasWrapper.scrollLeft),
+				scrollTop: Math.round(canvasWrapper.scrollTop),
+				zoomLevel: this._zoomLevel
+			};
+			WorkflowEditor._viewportStateByUri.set(wfUriKey, state);
+			this._storageService.store(`workflowEditor.viewport.${wfUriKey}`, JSON.stringify(state), StorageScope.PROFILE, StorageTarget.USER);
+		};
+		this._contentDisposables.add(addDisposableListener(canvasWrapper, 'scroll', () => persistViewportState()));
+		this._contentDisposables.add(addDisposableListener(this._container, 'wheel', () => setTimeout(persistViewportState, 20)));
+		this._contentDisposables.add(addDisposableListener(this._container, 'click', () => setTimeout(persistViewportState, 20)));
+
+		const applyRestoredScroll = () => {
+			if (!canvasWrapper.isConnected) return;
+			if (savedViewport) {
+				canvasWrapper.scrollLeft = savedViewport.scrollLeft;
+				canvasWrapper.scrollTop = savedViewport.scrollTop;
+			} else if (this._data?.nodes && this._data.nodes.length > 0 && canvasWrapper.clientWidth > 0) {
+				const topNode = this._data.nodes.reduce((best, n) => (n.y < best.y ? n : best), this._data.nodes[0]);
+				const targetLeft = Math.max(0, Math.round((topNode.x + (topNode.width || 120) / 2) * this._zoomLevel - canvasWrapper.clientWidth / 2));
+				const targetTop = Math.max(0, Math.round(topNode.y * this._zoomLevel - 60));
+				canvasWrapper.scrollLeft = targetLeft;
+				canvasWrapper.scrollTop = targetTop;
+			}
+		};
+		queueMicrotask(() => {
+			applyRestoredScroll();
+			requestAnimationFrame(() => {
+				applyRestoredScroll();
+				isRestoringViewport = false;
+				persistViewportState();
+			});
+		});
 
 		// Sizer container to enforce scroll boundaries when zoomed
 		this._zoomSizerEl = append(canvasWrapper, $('.workflow-canvas-sizer'));
@@ -709,52 +965,83 @@ export class WorkflowEditor extends EditorPane {
 		// Selection Box Overlay element
 		this._selectionBoxEl = append(this._canvas, $('.workflow-selection-box'));
 
-		// Permanent Floating Zoom Toolbar at top-center of drawing viewport (never scrolls away)
-		const floatingZoom = append(canvasViewport, $('.workflow-floating-zoom-control'));
-		const fZoomOut = append(floatingZoom, $('.floating-zoom-btn'));
+		// Permanent Floating Zoom Toolbar at top-center of editor container (collapsible capsule, collapsed by default to avoid overlapping panels)
+		const floatingZoom = append(this._container, $(`.workflow-floating-zoom-control${this._isFloatingToolbarExpanded ? '' : '.collapsed'}`));
+		this._floatingZoomBarEl = floatingZoom;
+
+		const updateFloatingZoomCollapsedState = () => {
+			const isCollapsed = !this._isFloatingToolbarExpanded;
+			floatingZoom.classList.toggle('collapsed', isCollapsed);
+			if (this._floatingZoomBadgeEl) {
+				this._floatingZoomBadgeEl.title = isCollapsed
+					? `Zoom: ${Math.round(this._zoomLevel * 100)}% (Click to expand toolbar)`
+					: 'Reset Zoom to 100%';
+			}
+		};
+
+		floatingZoom.onclick = (e) => {
+			if (!this._isFloatingToolbarExpanded) {
+				e.stopPropagation();
+				this._isFloatingToolbarExpanded = true;
+				updateFloatingZoomCollapsedState();
+			}
+		};
+
+		const fZoomOut = append(floatingZoom, $('.floating-zoom-btn.canvas-only-item.floating-zoom-expandable'));
 		fZoomOut.textContent = '−';
 		fZoomOut.title = 'Zoom Out (−10%)';
 		fZoomOut.onclick = (e) => { e.stopPropagation(); this._setZoom(this._zoomLevel - 0.1); };
 
-		this._floatingZoomBadgeEl = append(floatingZoom, $('.floating-zoom-badge'));
+		this._floatingZoomBadgeEl = append(floatingZoom, $('.floating-zoom-badge.canvas-only-item'));
 		this._floatingZoomBadgeEl.textContent = `${Math.round(this._zoomLevel * 100)}%`;
-		this._floatingZoomBadgeEl.title = 'Reset Zoom to 100%';
-		this._floatingZoomBadgeEl.onclick = (e) => { e.stopPropagation(); this._setZoom(1.0); };
+		this._floatingZoomBadgeEl.onclick = (e) => {
+			e.stopPropagation();
+			if (!this._isFloatingToolbarExpanded) {
+				this._isFloatingToolbarExpanded = true;
+				updateFloatingZoomCollapsedState();
+				return;
+			}
+			this._setZoom(1.0);
+		};
 
-		const fZoomIn = append(floatingZoom, $('.floating-zoom-btn'));
+		const fExpandHint = append(floatingZoom, $('.floating-zoom-expand-hint'));
+		append(fExpandHint, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronRight)));
+		fExpandHint.title = 'Click to expand toolbar';
+
+		const fZoomIn = append(floatingZoom, $('.floating-zoom-btn.canvas-only-item.floating-zoom-expandable'));
 		fZoomIn.textContent = '+';
 		fZoomIn.title = 'Zoom In (+10%)';
 		fZoomIn.onclick = (e) => { e.stopPropagation(); this._setZoom(this._zoomLevel + 0.1); };
 
-		const fDivider = append(floatingZoom, $('.floating-zoom-divider'));
+		const fDivider = append(floatingZoom, $('.floating-zoom-divider.canvas-only-item.floating-zoom-expandable'));
 		fDivider.style.width = '1px';
 		fDivider.style.height = '12px';
 		fDivider.style.background = 'rgba(255, 255, 255, 0.15)';
 		fDivider.style.margin = '0 2px';
 
-		const fFitBtn = append(floatingZoom, $('.floating-zoom-btn.fit-btn'));
+		const fFitBtn = append(floatingZoom, $('.floating-zoom-btn.fit-btn.canvas-only-item.floating-zoom-expandable'));
 		append(fFitBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.screenFull)));
 		fFitBtn.title = 'Fit Content to Screen';
 		fFitBtn.onclick = (e) => { e.stopPropagation(); this._fitView(); };
 
-		const fExportDivider = append(floatingZoom, $('.floating-zoom-divider'));
+		const fExportDivider = append(floatingZoom, $('.floating-zoom-divider.canvas-only-item.floating-zoom-expandable'));
 		fExportDivider.style.width = '1px';
 		fExportDivider.style.height = '12px';
 		fExportDivider.style.background = 'rgba(255, 255, 255, 0.15)';
 		fExportDivider.style.margin = '0 2px';
 
-		const fExportBtn = append(floatingZoom, $('.floating-zoom-btn.export-btn'));
+		const fExportBtn = append(floatingZoom, $('.floating-zoom-btn.export-btn.canvas-only-item.floating-zoom-expandable'));
 		append(fExportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.desktopDownload)));
 		fExportBtn.title = 'Export / Download Flowchart (PNG, JPEG, SVG, PDF)';
 		fExportBtn.onclick = (e) => { e.stopPropagation(); this._showExportMenu(fExportBtn); };
 
-		const fLiveDivider = append(floatingZoom, $('.floating-zoom-divider'));
+		const fLiveDivider = append(floatingZoom, $('.floating-zoom-divider.canvas-only-item.floating-zoom-expandable'));
 		fLiveDivider.style.width = '1px';
 		fLiveDivider.style.height = '12px';
 		fLiveDivider.style.background = 'rgba(255, 255, 255, 0.15)';
 		fLiveDivider.style.margin = '0 2px';
 
-		this._floatingLiveDisplayBtn = append(floatingZoom, $('.floating-zoom-btn.live-display-btn'));
+		this._floatingLiveDisplayBtn = append(floatingZoom, $('.floating-zoom-btn.live-display-btn.canvas-only-item.floating-zoom-expandable'));
 		this._floatingLiveDisplayBtn.onclick = (e) => {
 			e.stopPropagation();
 			if (!this._displayInspectorContainer || !this._displayInspectorContainer.isConnected) {
@@ -767,6 +1054,56 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 		this._updateLiveDisplayToolbarBtn();
+
+		// Python Interpreter Selector in Top Floating Toolbar (Icon only)
+		const fPyDivider = append(floatingZoom, $('.floating-zoom-divider.canvas-only-item.floating-zoom-expandable'));
+		fPyDivider.style.width = '1px';
+		fPyDivider.style.height = '12px';
+		fPyDivider.style.background = 'rgba(255, 255, 255, 0.15)';
+		fPyDivider.style.margin = '0 2px';
+
+		this._floatingPythonEnvBtn = append(floatingZoom, $('.floating-zoom-btn.python-env-btn.canvas-only-item.floating-zoom-expandable'));
+		this._floatingPythonEnvBtn.style.color = '#c084fc';
+		this._floatingPythonEnvBtn.onclick = (e) => {
+			e.stopPropagation();
+			if (this._floatingPythonEnvBtn) {
+				this._showPythonInterpreterMenu(this._floatingPythonEnvBtn);
+			}
+		};
+		this._updatePythonEnvButtonLabel();
+
+		if (!this._isPureDiagram) {
+			const fFieldsDivider = append(floatingZoom, $('.floating-zoom-divider.floating-zoom-expandable'));
+			fFieldsDivider.style.width = '1px';
+			fFieldsDivider.style.height = '12px';
+			fFieldsDivider.style.background = 'rgba(255, 255, 255, 0.15)';
+			fFieldsDivider.style.margin = '0 2px';
+
+			this._floatingFieldsToggleBtn = append(floatingZoom, $('.floating-zoom-btn.fields-toggle-btn.floating-zoom-expandable'));
+			append(this._floatingFieldsToggleBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.listSelection)));
+			this._floatingFieldsToggleBtn.title = 'Switch to Ticket Fields View (Template & Metadata)';
+			this._floatingFieldsToggleBtn.onclick = (e) => {
+				e.stopPropagation();
+				this._setViewMode(this._viewMode === 'flowchart' ? 'fields' : 'flowchart');
+			};
+		}
+
+		const fCollapseDivider = append(floatingZoom, $('.floating-zoom-divider.floating-zoom-expandable'));
+		fCollapseDivider.style.width = '1px';
+		fCollapseDivider.style.height = '12px';
+		fCollapseDivider.style.background = 'rgba(255, 255, 255, 0.15)';
+		fCollapseDivider.style.margin = '0 2px';
+
+		const fCollapseBtn = append(floatingZoom, $('.floating-zoom-btn.collapse-toolbar-btn.floating-zoom-expandable'));
+		append(fCollapseBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronLeft)));
+		fCollapseBtn.title = 'Collapse Toolbar';
+		fCollapseBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._isFloatingToolbarExpanded = false;
+			updateFloatingZoomCollapsedState();
+		};
+
+		updateFloatingZoomCollapsedState();
 
 		// Permanent Floating Trigger Pill at top-right of drawing viewport when inspector is collapsed
 		this._inspectorTogglePill = append(canvasViewport, $('.workflow-inspector-toggle-pill'));
@@ -799,8 +1136,12 @@ export class WorkflowEditor extends EditorPane {
 		this._inspectorEl = inspector;
 		this._renderInspector(inspector);
 
+		// 4. Ticket Fields / Template View Container (Shared within Workflow Editor)
+		this._fieldsViewContainerEl = append(this._container, $('.workflow-fields-view-container'));
+
 		// Wheel zoom with Ctrl/Cmd key
 		this._contentDisposables.add(addDisposableListener(canvasWrapper, 'wheel', (e: WheelEvent) => {
+			if (this._viewMode === 'fields') return;
 			if (e.ctrlKey || e.metaKey) {
 				e.preventDefault();
 				e.stopPropagation();
@@ -813,10 +1154,61 @@ export class WorkflowEditor extends EditorPane {
 		this._contentDisposables.add(addDisposableListener(window, 'mousemove', (e: MouseEvent) => this._onMouseMove(e)));
 		this._contentDisposables.add(addDisposableListener(window, 'mouseup', (e: MouseEvent) => this._onMouseUp(e)));
 
+		// Ensure clicking anywhere on the flowchart canvas (nodes, SVG links, background) moves DOM focus into _container
+		// even when child handlers call e.stopPropagation()
+		this._container.tabIndex = -1;
+		this._container.style.outline = 'none';
+		this._contentDisposables.add(addDisposableListener(this._container, 'mousedown', (e: MouseEvent) => {
+			if (this._viewMode === 'fields') {
+				return;
+			}
+			const target = e.target as HTMLElement | null;
+			const tag = target?.tagName?.toLowerCase();
+			if (
+				tag !== 'input' &&
+				tag !== 'textarea' &&
+				tag !== 'select' &&
+				!target?.isContentEditable &&
+				!target?.closest('[contenteditable="true"], .monaco-editor, .node-inline-editor, .workflow-fields-view-container, .entity-detail-editor, .custom-module-schema-editor, .workflow-log-drawer, .workflow-display-inspector-panel')
+			) {
+				try {
+					this._container?.focus({ preventScroll: true });
+				} catch { }
+			}
+		}, true));
+
 		// Global Keydown Delete and Copy/Paste handler
 		this._contentDisposables.add(addDisposableListener(window, 'keydown', (e: KeyboardEvent) => {
-			const activeTag = document.activeElement?.tagName.toLowerCase();
-			if (activeTag === 'input' || activeTag === 'textarea' || document.activeElement?.classList.contains('node-inline-editor')) {
+			if (!this.isVisible() || !this._container || this._container.offsetParent === null || !document.hasFocus()) {
+				return;
+			}
+			if (this._viewMode === 'fields' || document.activeElement?.closest('.workflow-fields-view-container')) {
+				return;
+			}
+			const activeEl = document.activeElement as HTMLElement | null;
+			const activeTag = activeEl?.tagName.toLowerCase();
+			if (
+				activeTag === 'input' ||
+				activeTag === 'textarea' ||
+				activeTag === 'select' ||
+				activeTag === 'webview' ||
+				activeTag === 'iframe' ||
+				activeEl?.isContentEditable ||
+				activeEl?.closest('[contenteditable="true"], [contenteditable="plaintext-only"]') ||
+				activeEl?.closest('.monaco-editor') ||
+				activeEl?.classList.contains('node-inline-editor') ||
+				activeEl?.closest('.custom-module-schema-editor, .entity-detail-editor, .monaco-inputbox, .quick-input-widget, .browser-editor, .browser-url-container, .browser-url-display, .xterm')
+			) {
+				return;
+			}
+			if (activeEl && activeEl !== document.body && activeEl !== document.documentElement && !this._container.contains(activeEl)) {
+				return;
+			}
+			const isFlowchartFocusedOrActive =
+				this._editorService.activeEditorPane === this ||
+				(activeEl ? this._container.contains(activeEl) : false) ||
+				(this.group?.activeEditorPane === this && this._container.matches(':hover'));
+			if (!isFlowchartFocusedOrActive) {
 				return;
 			}
 
@@ -912,6 +1304,8 @@ export class WorkflowEditor extends EditorPane {
 						}
 					}
 
+					this._selectBoxBaseNodeIds = new Set(this._selectedNodeIds);
+					this._selectBoxBaseLinkIds = new Set(this._selectedLinkIds);
 					this._isSelectingBox = true;
 					const rect = this._canvas!.getBoundingClientRect();
 					this._selectBoxStartX = (e.clientX - rect.left) / this._zoomLevel;
@@ -987,29 +1381,23 @@ export class WorkflowEditor extends EditorPane {
 						const x = Math.round(rawX / grid) * grid;
 						const y = Math.round(rawY / grid) * grid;
 
-						if (parsed && (parsed.kind === 'variable' || parsed.kind === 'variable_widget')) {
+						if (parsed && (parsed.kind === 'variable' || parsed.kind === 'variable_widget' || parsed.kind === 'function' || parsed.kind === 'function_widget')) {
 							const id = `node_${Date.now()}`;
-							const defaultVarName = this._generateNextVarName();
-							const initialVar: INodeVariable = {
-								name: defaultVarName,
-								initialValue: '0'
-							};
 							const initialStep: INodePipelineStep = {
 								id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-								type: 'set_variable',
-								targetVariable: defaultVarName,
-								expression: '0'
+								type: 'call_function',
+								functionName: 'PYTHON',
+								expression: ''
 							};
 							const newNode: IFlowchartNode = {
 								id,
 								type: 'round-rect',
-								x: Math.max(10, x - 50),
-								y: Math.max(10, y - 25),
-								width: 110,
-								height: 50,
-								label: 'State',
-								outputVariables: [initialVar],
-								outputVariable: initialVar,
+								x: Math.max(10, x - 140),
+								y: Math.max(10, y - 48),
+								width: 280,
+								height: 96,
+								label: 'Python Step',
+								outputVariables: [],
 								pipeline: [initialStep],
 								color: this._activeNodeColor,
 								textColor: this._activeTextColor,
@@ -1029,49 +1417,9 @@ export class WorkflowEditor extends EditorPane {
 							if (this._inspectorEl) this._renderInspector(this._inspectorEl);
 							this._refreshVariablesDrawer(id);
 							setTimeout(() => {
-								this._openNodeVariableInlineEditor(newNode, initialVar, undefined, initialStep);
-							}, 40);
-							return;
-						} else if (parsed && (parsed.kind === 'function' || parsed.kind === 'function_widget')) {
-							const id = `node_${Date.now()}`;
-							const newNode: IFlowchartNode = {
-								id,
-								type: 'round-rect',
-								x: Math.max(10, x - 60),
-								y: Math.max(10, y - 25),
-								width: 120,
-								height: 50,
-								label: 'Call Function',
-								outputVariables: [{
-									name: 'res',
-									initialValue: 'None',
-									expression: '@res = RUN_TICKETS(ticket="", params={})'
-								}],
-								pipeline: [{
-									id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-									type: 'call_function',
-									targetVariable: 'res',
-									functionName: 'RUN_TICKETS',
-									expression: '@res = RUN_TICKETS(ticket="", params={})'
-								}],
-								color: this._activeNodeColor,
-								textColor: this._activeTextColor,
-								textAlign: this._activeTextAlign,
-								verticalAlign: this._activeVerticalAlign,
-								isBold: this._activeIsBold,
-								isItalic: this._activeIsItalic,
-								isUnderline: this._activeIsUnderline,
-								isStrikethrough: this._activeIsStrikethrough
-							};
-							this._data.nodes.push(newNode);
-							this._selectedNodeIds.clear();
-							this._selectedNodeIds.add(id);
-							this._saveFlowchartData();
-							this._renderNodes();
-							this._drawLinks();
-							if (this._inspectorEl) this._renderInspector(this._inspectorEl);
-							setTimeout(() => {
-								this._openNodeFunctionInlineEditor(newNode);
+								const nodeDom = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${id}"]`);
+								const pillEl = nodeDom?.querySelector('.node-function-pill, .node-variable-pill') as HTMLElement | undefined;
+								this._openNodeFunctionInlineEditor(newNode, initialStep, pillEl);
 							}, 40);
 							return;
 						}
@@ -1085,6 +1433,72 @@ export class WorkflowEditor extends EditorPane {
 		// Render Nodes and draw connections
 		this._renderNodes();
 		this._drawLinks();
+		this._applyViewMode();
+	}
+
+	private _setViewMode(mode: 'flowchart' | 'fields'): void {
+		if (this._isPureDiagram) {
+			mode = 'flowchart';
+		}
+		if (this._viewMode === mode) {
+			return;
+		}
+		this._viewMode = mode;
+		this._applyViewMode();
+	}
+
+	private _applyViewMode(): void {
+		const isFields = this._viewMode === 'fields' && !this._isPureDiagram;
+
+		if (this._toolbarEl) {
+			this._toolbarEl.style.display = isFields ? 'none' : '';
+		}
+		if (this._canvasViewport) {
+			this._canvasViewport.style.display = isFields ? 'none' : '';
+		}
+		if (this._inspectorEl) {
+			this._inspectorEl.style.display = isFields ? 'none' : '';
+		}
+		if (this._pipelinePanelEl && isFields) {
+			this._pipelinePanelEl.style.display = 'none';
+		}
+		if (this._fieldsViewContainerEl) {
+			this._fieldsViewContainerEl.style.display = isFields ? 'block' : 'none';
+		}
+
+		if (this._floatingZoomBarEl) {
+			this._floatingZoomBarEl.classList.toggle('fields-mode-active', isFields);
+		}
+
+		if (this._floatingFieldsToggleBtn) {
+			this._floatingFieldsToggleBtn.classList.toggle('active', isFields);
+			this._floatingFieldsToggleBtn.title = isFields
+				? 'Switch to Workflow Flowchart View (Drawing Canvas)'
+				: 'Switch to Ticket Fields View (Template & Metadata)';
+		}
+
+		if (isFields && this._workflowUri && this._fieldsViewContainerEl) {
+			const wfName = (this.input as WorkflowEditorInput)?.workflowName || this._workflowUri.path.split('/').filter(Boolean).pop() || 'Workflow';
+			if (!this._embeddedDetailEditor) {
+				this._embeddedDetailEditor = this._contentDisposables.add(
+					this._instantiationService.createInstance(EntityDetailEditor, this.group)
+				);
+				this._embeddedDetailEditor.mountEmbeddedInWorkflow(
+					this._fieldsViewContainerEl,
+					this._workflowUri,
+					wfName,
+					() => this._setViewMode('flowchart')
+				);
+			} else {
+				this._embeddedDetailEditor.updateEmbeddedEntity(this._workflowUri, wfName, true);
+			}
+		} else if (!isFields) {
+			if (this._embeddedDetailEditor) {
+				this._embeddedDetailEditor.setEmbeddedVisible(false);
+			}
+			this._renderNodes();
+			this._drawLinks();
+		}
 	}
 
 	private _openLogDrawer(): void {
@@ -1520,7 +1934,8 @@ export class WorkflowEditor extends EditorPane {
 			const valTd = append(row, $('td'));
 			const runtimeVal = activeRun?.contextVariables ? activeRun.contextVariables[item.variable.name] : undefined;
 			const valBadge = append(valTd, $(`.vars-table-val-badge${runtimeVal === undefined ? '.not-run' : ''}`));
-			const valStr = runtimeVal !== undefined ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : '(not evaluated)';
+			const rawValStr = runtimeVal !== undefined ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : '(not evaluated)';
+			const valStr = rawValStr.length > 300 ? rawValStr.substring(0, 300) + ' ...' : rawValStr;
 			valBadge.textContent = valStr;
 			valBadge.title = valStr;
 
@@ -1990,7 +2405,7 @@ export class WorkflowEditor extends EditorPane {
 			try {
 				await this._clipboardService.writeText(report);
 				ok = true;
-			} catch {}
+			} catch { }
 			if (ok) {
 				clearNode(copyReportBtn);
 				append(copyReportBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.check)));
@@ -2134,6 +2549,9 @@ export class WorkflowEditor extends EditorPane {
 
 			const tbody = append(varsTable, $('tbody'));
 			for (const [vName, vVal] of Object.entries(run.contextVariables)) {
+				if (vName.startsWith('@') && vName.substring(1) in run.contextVariables) {
+					continue;
+				}
 				const bRow = append(tbody, $('tr'));
 				const nameTd = append(bRow, $('td.history-var-name'));
 				nameTd.textContent = vName;
@@ -2141,7 +2559,8 @@ export class WorkflowEditor extends EditorPane {
 				typeTd.textContent = Array.isArray(vVal) ? 'array' : typeof vVal;
 				const valTd = append(bRow, $('td.history-var-val-cell'));
 				const valBox = append(valTd, $('div.history-var-val'));
-				valBox.textContent = typeof vVal === 'object' && vVal !== null ? JSON.stringify(vVal) : String(vVal);
+				const rawVStr = typeof vVal === 'object' && vVal !== null ? JSON.stringify(vVal) : String(vVal);
+				valBox.textContent = rawVStr.length > 500 ? rawVStr.substring(0, 500) + ' ...' : rawVStr;
 			}
 		}
 	}
@@ -2732,7 +3151,8 @@ export class WorkflowEditor extends EditorPane {
 			const nodeBadge = append(line, $('.log-node'));
 			nodeBadge.textContent = `[${node?.label || log.nodeId}]`;
 		}
-		append(line, $('.log-msg')).textContent = log.message;
+		const rawMsg = log.message || '';
+		append(line, $('.log-msg')).textContent = rawMsg.length > 1200 ? rawMsg.substring(0, 1200) + ' ... [truncated]' : rawMsg;
 
 		if (this._logCountBadgeEl) {
 			const count = this._logBodyEl.children.length;
@@ -2868,14 +3288,14 @@ export class WorkflowEditor extends EditorPane {
 			try {
 				await this._clipboardService.writeText(text);
 				ok = true;
-			} catch {}
+			} catch { }
 			if (!ok) {
 				try {
 					if (navigator?.clipboard?.writeText) {
 						await navigator.clipboard.writeText(text);
 						ok = true;
 					}
-				} catch {}
+				} catch { }
 			}
 			if (!ok) {
 				try {
@@ -2889,7 +3309,7 @@ export class WorkflowEditor extends EditorPane {
 					ta.select();
 					ok = document.execCommand('copy');
 					ta.remove();
-				} catch {}
+				} catch { }
 			}
 
 			if (ok) {
@@ -2971,13 +3391,14 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
-		const isRunning = activeRun && (activeRun.status === 'running' || activeRun.status === 'waiting_human');
+		const isRunning = activeRun && (activeRun.status === 'running' || activeRun.status === 'waiting_human' || activeRun.status === 'paused');
 
 		const execGrid = append(execSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
 
 		// 1. Run Button
 		const runBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
-		runBtn.title = isRunning ? 'Workflow executing...' : 'Run Workflow';
+		runBtn.setAttribute('data-role', 'workflow-run-btn');
+		runBtn.title = isRunning ? 'Workflow executing...' : 'Run Workflow (select nodes with Cmd/Ctrl/Shift+Click to run only selected nodes)';
 		append(runBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
 		if (!this._isToolbarCompact) {
 			append(runBtn, $('.item-label')).textContent = isRunning ? 'Running' : 'Run';
@@ -2985,14 +3406,21 @@ export class WorkflowEditor extends EditorPane {
 		if (isRunning) {
 			runBtn.classList.add('active');
 		}
+		this._updateRunButtonSelectionBadge(runBtn);
+		runBtn.onmousedown = (e) => {
+			e.stopPropagation();
+		};
 		runBtn.onclick = async () => {
 			if (!this._workflowUri) return;
 			try {
+				const { entryNodeId, selectedNodeIds } = this._resolveExecutionOptionsForRun(false);
 				this._openLogDrawer();
 				this._clearDisplayInspectorCards();
 				await this._workflowExecutionService.executeWorkflow(this._workflowUri, {
 					mode: 'standard',
-					initialData: this._data
+					initialData: this._data,
+					entryNodeId,
+					selectedNodeIds
 				});
 				this._renderToolbar(parent);
 				this._renderNodes();
@@ -3003,21 +3431,27 @@ export class WorkflowEditor extends EditorPane {
 
 		// 2. Step Button
 		const stepBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
-		stepBtn.title = 'Step Next Node';
+		stepBtn.title = 'Step Next Node (starts from selected node when beginning a new run)';
 		append(stepBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.debugStepOver)));
 		if (!this._isToolbarCompact) {
 			append(stepBtn, $('.item-label')).textContent = 'Step';
 		}
+		stepBtn.onmousedown = (e) => {
+			e.stopPropagation();
+		};
 		stepBtn.onclick = async () => {
 			if (!this._workflowUri) return;
 			try {
+				const { entryNodeId, selectedNodeIds } = this._resolveExecutionOptionsForRun(true);
 				this._openLogDrawer();
 				const activeRun = this._workflowExecutionService.getActiveRun(this._workflowUri);
-				if (!activeRun || activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'stopped') {
+				if (!activeRun || activeRun.status === 'completed' || activeRun.status === 'failed' || activeRun.status === 'stopped' || activeRun.status === 'idle') {
 					this._clearDisplayInspectorCards();
 				}
 				await this._workflowExecutionService.stepWorkflow(this._workflowUri, {
-					initialData: this._data
+					initialData: this._data,
+					entryNodeId,
+					selectedNodeIds
 				});
 				this._renderToolbar(parent);
 				this._renderNodes();
@@ -3052,9 +3486,14 @@ export class WorkflowEditor extends EditorPane {
 				append(stopBtn, $('.item-label')).textContent = 'Stop';
 			}
 			stopBtn.onclick = async () => {
+				if (this._logStatusBadgeEl) {
+					this._logStatusBadgeEl.textContent = 'STOPPING...';
+					this._logStatusBadgeEl.className = 'log-status-badge status-stopped';
+				}
 				await this._workflowExecutionService.stopWorkflow(activeRun.runId);
 				this._renderToolbar(parent);
 				this._renderNodes();
+				this._drawLinks();
 			};
 		}
 
@@ -3141,68 +3580,143 @@ export class WorkflowEditor extends EditorPane {
 			};
 		}
 
-		// Section: Context Variables & Functions
-		const varSec = append(parent, $('.workflow-toolbar-section.variables-section'));
+		// Section: Python & Built-in Steps (Dedicated section for classic inline Python Step capsule)
+		const pyStepSec = append(parent, $('.workflow-toolbar-section.variables-section'));
 		if (!this._isToolbarCompact) {
-			const varTitle = append(varSec, $('.workflow-toolbar-title'));
-			varTitle.textContent = localize('contextVariablesAndFunctions', 'Context Variables & Functions');
+			const pyStepTitle = append(pyStepSec, $('.workflow-toolbar-title'));
+			pyStepTitle.textContent = localize('pythonCodingSteps', 'Python & Built-in Steps');
 		}
-
-		const varGrid = append(varSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
-		const varItem = append(varGrid, $(`.workflow-toolbar-item.variable-toolbar-item${this._isToolbarCompact ? '.compact-item' : ''}`));
-		varItem.setAttribute('draggable', 'true');
-		varItem.title = localize('dragVariableTitle', 'Context Variable (Drag into any node to bind output)');
-		varItem.ondragstart = (e: DragEvent) => {
-			e.dataTransfer?.setData('text/plain', JSON.stringify({ kind: 'variable_widget' }));
-			if (e.dataTransfer) {
-				e.dataTransfer.effectAllowed = 'copy';
-			}
-		};
-
-		const vBoxBadge = append(varItem, $('.var-icon-badge'));
-		vBoxBadge.textContent = '[V]';
-		if (!this._isToolbarCompact) {
-			append(varItem, $('.item-label')).textContent = localize('varLabel', 'Variable');
-		}
-		varItem.onclick = () => {
-			if (this._selectedNodeIds.size === 1) {
-				const selectedId = Array.from(this._selectedNodeIds)[0];
-				const targetNode = this._data.nodes.find(n => n.id === selectedId);
-				if (targetNode) {
-					this._openNodeVariableInlineEditor(targetNode);
-				}
-			} else {
-				this._notificationService.info(localize('dragVariableHint', 'Drag Variable onto any node to define, update, or capture ticket results.'));
-			}
-		};
-
-		// Function Component [fx]
-		const fnItem = append(varGrid, $(`.workflow-toolbar-item.function-toolbar-item${this._isToolbarCompact ? '.compact-item' : ''}`));
-		fnItem.setAttribute('draggable', 'true');
-		fnItem.title = localize('dragFunctionTitle', 'Function Call (Drag into any node or canvas to call RUN_TICKETS, CREATE_TICKETS, etc.)');
-		fnItem.ondragstart = (e: DragEvent) => {
+		const pyStepGrid = append(pyStepSec, $('.workflow-shape-grid.compact-1col'));
+		const pyStepItem = append(pyStepGrid, $(`.workflow-toolbar-item.function-toolbar-item${this._isToolbarCompact ? '.compact-item' : ''}`));
+		pyStepItem.setAttribute('draggable', 'true');
+		this._attachToolboxInstantTooltip(
+			pyStepItem,
+			localize('pyLabel', 'Python Step'),
+			'Classic inline Python capsule (Variables, CREATE_TICKETS, RUN_TICKETS, GET_OUTPUTS, DISPLAY, expressions). Drag onto node to inject capsule.',
+			'#38bdf8'
+		);
+		pyStepItem.ondragstart = (e: DragEvent) => {
 			e.dataTransfer?.setData('text/plain', JSON.stringify({ kind: 'function_widget' }));
 			if (e.dataTransfer) {
 				e.dataTransfer.effectAllowed = 'copy';
 			}
 		};
-
-		const fnBoxBadge = append(fnItem, $('.fn-icon-badge'));
-		fnBoxBadge.textContent = '[fx]';
+		const pyStepBadge = append(pyStepItem, $('span.fn-icon-badge' + ThemeIcon.asCSSSelector(Codicon.python)));
+		pyStepBadge.style.fontSize = '14px';
 		if (!this._isToolbarCompact) {
-			append(fnItem, $('.item-label')).textContent = localize('fnLabel', 'Function');
+			append(pyStepItem, $('.item-label')).textContent = localize('pyLabel', 'Python Step');
 		}
-		fnItem.onclick = () => {
+		pyStepItem.onclick = () => {
 			if (this._selectedNodeIds.size === 1) {
 				const selectedId = Array.from(this._selectedNodeIds)[0];
 				const targetNode = this._data.nodes.find(n => n.id === selectedId);
 				if (targetNode) {
-					this._openNodeFunctionInlineEditor(targetNode);
+					if (!targetNode.pipeline || targetNode.pipeline.length === 0) {
+						this._syncFromNode(targetNode, true);
+					}
+					if (!targetNode.pipeline) {
+						targetNode.pipeline = [];
+					}
+					const newStep: INodePipelineStep = {
+						id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+						type: 'call_function',
+						functionName: 'PYTHON',
+						expression: ''
+					};
+					targetNode.pipeline.push(newStep);
+					this._ensureNodeFitsPipeline(targetNode);
+					this._syncToNode(targetNode, true);
+					this._saveFlowchartData();
+					this._renderNodes();
+					this._drawLinks();
+					if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+					if (this._pipelinePanelEl && this._activePipelineNodeId === targetNode.id) {
+						this._renderPipelinePanel(this._pipelinePanelEl, targetNode);
+					}
+					setTimeout(() => {
+						const nodeDom = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${targetNode.id}"]`);
+						const pills = nodeDom?.querySelectorAll('.node-function-pill, .node-variable-pill');
+						const lastPill = pills && pills.length > 0 ? (pills[pills.length - 1] as HTMLElement) : undefined;
+						this._openNodeFunctionInlineEditor(targetNode, newStep, lastPill);
+					}, 50);
 				}
 			} else {
-				this._notificationService.info(localize('dragFunctionHint', 'Drag Function [fx] onto any node or canvas to call RUN_TICKETS, CREATE_TICKETS, etc.'));
+				this._notificationService.info(localize('dragPythonStepHint', 'Select a node first or drag "Python Step" onto any node in the flowchart.'));
 			}
 		};
+
+		if (this._isToolbarCompact) {
+			append(parent, $('.workflow-compact-divider'));
+		}
+
+		// Section: Node Components (Template & Built-in Components)
+		const varSec = append(parent, $('.workflow-toolbar-section.variables-section'));
+		if (!this._isToolbarCompact) {
+			const varTitle = append(varSec, $('.workflow-toolbar-title'));
+			varTitle.textContent = localize('nodeComponentsTitle', 'Node Components');
+		}
+
+		const varGrid = append(varSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
+		const nodeComponentPalette: {
+			compType: CustomFieldType;
+			label: string;
+			icon: ThemeIcon;
+			accent: string;
+			desc: string;
+		}[] = [
+			{ compType: 'parameters', label: localize('compInputs', 'Inputs'), icon: Codicon.symbolVariable, accent: '#c084fc', desc: 'Node Inputs component (at most 1 per node, placed at top). Supports Workflow Global Variables or literal values.' },
+			{ compType: 'output', label: localize('compOutput', 'Output'), icon: Codicon.output, accent: '#34d399', desc: 'Node Output component (at most 1 per node, placed at bottom). Exports values to Workflow variables.' },
+			{ compType: 'python', label: localize('compPythonCard', 'Python Card'), icon: Codicon.python, accent: '#38bdf8', desc: 'Full Python Script component card in side editor. Supports TICKET_CONTEXT, interpreter selection, test runner, and OUTPUT.' },
+			{ compType: 'create_tickets', label: localize('compCreateTickets', 'Create Tickets'), icon: Codicon.add, accent: '#c084fc', desc: 'CREATE_TICKETS built-in component. Automatically loads target Ticket Type Inputs schema; stores ticket handle in Component Title.' },
+			{ compType: 'run_tickets', label: localize('compRunTickets', 'Run Tickets'), icon: Codicon.playCircle, accent: '#a855f7', desc: 'RUN_TICKETS built-in component. Automatically loads target Ticket Type Inputs schema; stores run result in Component Title.' },
+			{ compType: 'get_outputs', label: localize('compGetOutputs', 'Get Outputs'), icon: Codicon.signOut, accent: '#818cf8', desc: 'GET_OUTPUTS built-in component. Reads OUTPUT dictionary from target ticket into Component Title variable.' },
+			{ compType: 'get_tickets', label: localize('compGetTickets', 'Get Tickets'), icon: Codicon.search, accent: '#60a5fa', desc: 'GET_TICKETS built-in component. Queries workspace tickets by Type, Status, or Title into Component Title variable.' },
+			{ compType: 'display', label: localize('compDisplay', 'Display'), icon: Codicon.eye, accent: '#f472b6', desc: 'DISPLAY built-in component. Renders variable or value to Live Output panel.' },
+			{ compType: 'prompt', label: localize('compPrompt', 'AI Prompt'), icon: Codicon.sparkle, accent: '#2dd4bf', desc: 'AI Prompt execution component. Supports {Component Title} and {workflow_var} interpolation.' },
+			{ compType: 'table', label: localize('compTable', 'Data Table'), icon: Codicon.table, accent: '#fb923c', desc: 'SQLite Data Table & SQL query component. Stores query rows in Component Title variable.' },
+			{ compType: 'browser', label: localize('compBrowser', 'Browser'), icon: Codicon.globe, accent: '#38bdf8', desc: 'Headless Browser & Scraper component. Stores extracted content in Component Title variable.' },
+			{ compType: 'tts', label: localize('compTts', 'Audio / TTS'), icon: Codicon.unmute, accent: '#f87171', desc: 'Text-to-Speech synthesis component.' },
+			{ compType: 'media_player', label: localize('compMediaPlayer', 'MP3 / MP4 Player'), icon: Codicon.deviceCameraVideo, accent: '#f59e0b', desc: 'Local MP3 / MP4 & multi-format Audio/Video Player component with 0.25x-2.0x speed control.' },
+			{ compType: 'git', label: localize('compGit', 'Git Repo'), icon: Codicon.gitMerge, accent: '#a3e635', desc: 'Git repository operations component.' }
+		];
+
+		for (const itemDef of nodeComponentPalette) {
+			const fnItem = append(varGrid, $(`.workflow-toolbar-item.function-toolbar-item.node-component-palette-item${this._isToolbarCompact ? '.compact-item' : ''}`));
+			fnItem.setAttribute('draggable', 'true');
+			this._attachToolboxInstantTooltip(fnItem, itemDef.label, itemDef.desc, itemDef.accent);
+			fnItem.ondragstart = (e: DragEvent) => {
+				e.dataTransfer?.setData('text/plain', JSON.stringify({ kind: 'node_component', compType: itemDef.compType }));
+				if (e.dataTransfer) {
+					e.dataTransfer.effectAllowed = 'copy';
+				}
+			};
+
+			const fnBoxBadge = append(fnItem, $('span.fn-icon-badge' + ThemeIcon.asCSSSelector(itemDef.icon)));
+			fnBoxBadge.style.fontSize = itemDef.compType === 'python' ? '11px' : '14px';
+			fnBoxBadge.style.color = itemDef.accent;
+			if (itemDef.compType === 'python') {
+				fnBoxBadge.style.border = '1.5px solid currentColor';
+				fnBoxBadge.style.borderRadius = '3.5px';
+				fnBoxBadge.style.padding = '2px 3px';
+				fnBoxBadge.style.background = 'transparent';
+				fnBoxBadge.style.lineHeight = '1';
+			}
+			if (!this._isToolbarCompact) {
+				const lbl = append(fnItem, $('.item-label'));
+				lbl.textContent = itemDef.label;
+			}
+			fnItem.onclick = () => {
+				if (this._selectedNodeIds.size === 1) {
+					const selectedId = Array.from(this._selectedNodeIds)[0];
+					const targetNode = this._data.nodes.find(n => n.id === selectedId);
+					if (targetNode) {
+						this._addOrOpenComponentOnNode(targetNode, itemDef.compType);
+					}
+				} else {
+					this._notificationService.info(localize('dragComponentHint', 'Select a node first or drag "{0}" onto any node in the flowchart.', itemDef.label));
+				}
+			};
+		}
 
 		// Divider for compact mode
 		if (this._isToolbarCompact) {
@@ -3333,6 +3847,69 @@ export class WorkflowEditor extends EditorPane {
 				};
 			}
 		}
+
+		// Upgrade any remaining toolbar items with native `title` to instant floating tooltips
+		parent.querySelectorAll('.workflow-toolbar-item, .workflow-format-btn, .toolbar-toggle-btn').forEach(el => {
+			const htmlEl = el as HTMLElement;
+			const rawTitle = htmlEl.getAttribute('title');
+			if (rawTitle) {
+				htmlEl.removeAttribute('title');
+				const dashIdx = rawTitle.indexOf(' (');
+				if (dashIdx !== -1) {
+					this._attachToolboxInstantTooltip(htmlEl, rawTitle.substring(0, dashIdx).trim(), rawTitle.substring(dashIdx + 1).trim(), '#38bdf8');
+				} else {
+					this._attachToolboxInstantTooltip(htmlEl, rawTitle, undefined, '#38bdf8');
+				}
+			}
+		});
+	}
+
+	private _activeToolboxTooltipEl: HTMLElement | null = null;
+	private _activeToolboxTooltipTimer: any = null;
+
+	private _hideToolboxInstantTooltip(): void {
+		if (this._activeToolboxTooltipTimer) {
+			clearTimeout(this._activeToolboxTooltipTimer);
+			this._activeToolboxTooltipTimer = null;
+		}
+		if (this._activeToolboxTooltipEl) {
+			this._activeToolboxTooltipEl.remove();
+			this._activeToolboxTooltipEl = null;
+		}
+	}
+
+	private _attachToolboxInstantTooltip(targetEl: HTMLElement, titleText: string, descText?: string, accentColor: string = '#38bdf8'): void {
+		targetEl.removeAttribute('title');
+		const showTooltip = () => {
+			this._hideToolboxInstantTooltip();
+			this._activeToolboxTooltipTimer = setTimeout(() => {
+				if (!targetEl.isConnected) {
+					return;
+				}
+				const rect = targetEl.getBoundingClientRect();
+				const tip = append(document.body, $('div.workflow-toolbox-instant-tooltip', {
+					style: `position: fixed; z-index: 100000; pointer-events: none; font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif); background: rgba(15, 23, 42, 0.96); border: 1px solid ${accentColor}; border-left: 3px solid ${accentColor}; border-radius: 7px; padding: 7px 11px; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.75); max-width: 260px; display: flex; flex-direction: column; gap: 3px; backdrop-filter: blur(6px);`
+				}));
+				append(tip, $('div', {
+					style: `font-size: 12px; font-weight: 700; color: ${accentColor}; line-height: 1.25; font-family: inherit;`
+				}, titleText));
+				if (descText) {
+					append(tip, $('div', {
+						style: 'font-size: 11px; color: #cbd5e1; line-height: 1.4; font-family: inherit;'
+					}, descText));
+				}
+				const tipRect = tip.getBoundingClientRect();
+				const left = Math.min(window.innerWidth - tipRect.width - 12, rect.right + 10);
+				const top = Math.max(8, Math.min(window.innerHeight - tipRect.height - 8, rect.top + rect.height / 2 - tipRect.height / 2));
+				tip.style.left = `${left}px`;
+				tip.style.top = `${top}px`;
+				this._activeToolboxTooltipEl = tip;
+			}, 35);
+		};
+		targetEl.addEventListener('mouseenter', showTooltip);
+		targetEl.addEventListener('mouseleave', () => this._hideToolboxInstantTooltip());
+		targetEl.addEventListener('mousedown', () => this._hideToolboxInstantTooltip());
+		targetEl.addEventListener('dragstart', () => this._hideToolboxInstantTooltip());
 	}
 
 	private _showColorPickerFlyout(anchorEl: HTMLElement, currentColor: string, colors: { name: string; hex: string }[], onSelect: (hex: string) => void): void {
@@ -3379,6 +3956,11 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _openNodePipelinePanel(nodeId: string, highlightTicketName?: string): void {
+		// Temporarily disabled (commented out per user request: use Python File / Jupyter Notebook mode instead)
+		void nodeId;
+		void highlightTicketName;
+		return;
+		/*
 		if (this._activePipelineNodeId === nodeId && this._pipelinePanelEl && this._canvasViewport?.contains(this._pipelinePanelEl)) {
 			if (highlightTicketName) {
 				const escaped = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(highlightTicketName) : highlightTicketName;
@@ -3442,6 +4024,7 @@ export class WorkflowEditor extends EditorPane {
 				}
 			}, 80);
 		}
+		*/
 	}
 
 	private _closeNodePipelinePanel(): void {
@@ -3637,9 +4220,122 @@ export class WorkflowEditor extends EditorPane {
 		popover.style.left = `${left}px`;
 	}
 
-	private _hideTicketPopover(): void {
+	private _isActionNodeForSelectiveRun(node: IFlowchartNode): boolean {
+		const lbl = (node.label || '').trim().toLowerCase();
+		if (lbl === 'end' || lbl === 'stop' || lbl === 'exit' || lbl === 'finish' || lbl === 'quit') {
+			return false;
+		}
+		const hasPipeline = Boolean(node.pipeline && node.pipeline.length > 0);
+		const hasImports = Boolean(node.imports && node.imports.length > 0);
+		const hasVars = Boolean((node.outputVariables && node.outputVariables.length > 0) || node.outputVariable?.name);
+		if (hasPipeline || hasImports || hasVars) {
+			return true;
+		}
+		if (node.type === 'circle' || /^start(\s+debug)?$/i.test(lbl)) {
+			return false;
+		}
+		return true;
+	}
+
+	private _resolveExecutionOptionsForRun(isStepMode: boolean = false): { entryNodeId?: string; selectedNodeIds?: string[] } {
+		if (this._selectedNodeIds.size > 0 && this._data && Array.isArray(this._data.nodes)) {
+			const selectedNodes = Array.from(this._selectedNodeIds)
+				.map(id => this._data.nodes.find(n => n.id === id))
+				.filter((n): n is IFlowchartNode => !!n);
+			const selectedActionNodes = selectedNodes.filter(n => this._isActionNodeForSelectiveRun(n));
+			if (selectedActionNodes.length > 0) {
+				const selectedNodeIds = selectedActionNodes.map(n => n.id);
+				return {
+					entryNodeId: selectedNodeIds[0],
+					selectedNodeIds
+				};
+			}
+		}
+		return {
+			entryNodeId: this._resolveStartNodeIdForExecution(isStepMode),
+			selectedNodeIds: undefined
+		};
+	}
+
+	private _updateRunButtonSelectionBadge(targetRunBtn?: HTMLElement): void {
+		const runBtn = targetRunBtn || (this._toolbarEl?.querySelector('[data-role="workflow-run-btn"]') as HTMLElement | null);
+		if (!runBtn) {
+			return;
+		}
+		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+		const isRunning = activeRun && (activeRun.status === 'running' || activeRun.status === 'waiting_human' || activeRun.status === 'paused');
+		if (isRunning) {
+			return;
+		}
+		const selectedActionNodes = Array.from(this._selectedNodeIds)
+			.map(id => this._data?.nodes?.find(n => n.id === id))
+			.filter((n): n is IFlowchartNode => !!n && this._isActionNodeForSelectiveRun(n));
+		const labelEl = runBtn.querySelector('.item-label') as HTMLElement | null;
+		if (selectedActionNodes.length > 0) {
+			if (labelEl) {
+				labelEl.textContent = `Run (${selectedActionNodes.length})`;
+			}
+			const names = selectedActionNodes.map((n, i) => `#${i + 1} ${n.label}`).join(' → ');
+			runBtn.title = `Run Selected Node(s) Only (${selectedActionNodes.length}): ${names}\n(Click empty canvas or 'Start' node to run entire workflow)`;
+		} else {
+			if (labelEl) {
+				labelEl.textContent = 'Run';
+			}
+			runBtn.title = 'Run Entire Workflow (or Cmd/Ctrl/Shift + Click nodes to run only selected nodes)';
+		}
+	}
+
+	private _resolveStartNodeIdForExecution(isStepMode: boolean = false): string | undefined {
+		// 1. If the user explicitly selected a node on the canvas, always start from the selected node
+		if (this._selectedNodeIds.size > 0) {
+			const selectedIds = Array.from(this._selectedNodeIds);
+			return selectedIds[selectedIds.length - 1];
+		}
+
+		if (!this._data || !Array.isArray(this._data.nodes) || this._data.nodes.length === 0) {
+			return undefined;
+		}
+
+		// 2. Identify all entry node candidates (nodes with 0 incoming links that are not end nodes)
+		const targetIds = new Set((this._data.links || []).map(l => l.to));
+		const isEndLabel = (lbl: string) => {
+			const t = (lbl || '').trim().toLowerCase();
+			return t === 'end' || t === 'stop' || t === 'exit' || t === 'finish' || t === 'quit';
+		};
+		const entryCandidates = this._data.nodes.filter(n => !targetIds.has(n.id) && !isEndLabel(n.label));
+
+		// If the page has only a single unique entry node, start from it automatically
+		if (entryCandidates.length === 1) {
+			return entryCandidates[0].id;
+		}
+
+		// If there are multiple entry nodes and none is currently selected, check if one was most recently clicked
+		if (entryCandidates.length > 1) {
+			const clickedCandidates = entryCandidates
+				.filter(n => typeof (n as any)._lastClickTime === 'number' && (n as any)._lastClickTime > 0)
+				.sort((a, b) => ((b as any)._lastClickTime || 0) - ((a as any)._lastClickTime || 0));
+			if (clickedCandidates.length > 0) {
+				return clickedCandidates[0].id;
+			}
+			if (!isStepMode) {
+				throw new Error('Multiple entry nodes exist on the canvas. Please click/select the node you want to start from before clicking Run.');
+			}
+		}
+
+		return undefined;
+	}
+
+	private _hideTicketPopover(immediate: boolean = false): void {
 		if (this._ticketHoverTimeout) {
 			clearTimeout(this._ticketHoverTimeout);
+			this._ticketHoverTimeout = null;
+		}
+		if (immediate) {
+			if (this._ticketHoverPopoverEl) {
+				this._ticketHoverPopoverEl.remove();
+				this._ticketHoverPopoverEl = null;
+			}
+			return;
 		}
 		this._ticketHoverTimeout = setTimeout(() => {
 			if (this._ticketHoverPopoverEl) {
@@ -3647,6 +4343,450 @@ export class WorkflowEditor extends EditorPane {
 				this._ticketHoverPopoverEl = null;
 			}
 		}, 120);
+	}
+
+	private _schedulePythonStepPopover(
+		targetEl: HTMLElement,
+		node: IFlowchartNode,
+		step: INodePipelineStep,
+		stepIndex: number | undefined,
+		fullCode: string,
+		isVariableStep: boolean,
+		runtimeValStr: string
+	): void {
+		if (this._isPythonStepPopoverPinned && this._activePythonPopoverStep === step && this._pythonStepHoverPopoverEl?.isConnected) {
+			return;
+		}
+		if (this._pythonStepHoverShowTimeout) {
+			clearTimeout(this._pythonStepHoverShowTimeout);
+			this._pythonStepHoverShowTimeout = null;
+		}
+		if (this._pythonStepHoverHideTimeout) {
+			clearTimeout(this._pythonStepHoverHideTimeout);
+			this._pythonStepHoverHideTimeout = null;
+		}
+		// Standard IDE hover delay (350ms, matching VS Code editor.hover.delay)
+		this._pythonStepHoverShowTimeout = setTimeout(() => {
+			this._pythonStepHoverShowTimeout = null;
+			if (!targetEl.isConnected) {
+				return;
+			}
+			if (node.pipeline && !node.pipeline.includes(step)) {
+				return;
+			}
+			this._showPythonStepPopover(targetEl, node, step, stepIndex, fullCode, isVariableStep, runtimeValStr);
+		}, 350);
+	}
+
+	private _showPythonStepPopover(
+		targetEl: HTMLElement,
+		node: IFlowchartNode,
+		step: INodePipelineStep,
+		stepIndex: number | undefined,
+		fullCode: string,
+		isVariableStep: boolean,
+		runtimeValStr: string
+	): void {
+		if (this._pythonStepHoverHideTimeout) {
+			clearTimeout(this._pythonStepHoverHideTimeout);
+			this._pythonStepHoverHideTimeout = null;
+		}
+		if (this._pythonStepPopoverOutsideClickHandler) {
+			window.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
+			this._pythonStepPopoverOutsideClickHandler = null;
+		}
+		this._isPythonStepPopoverPinned = false;
+		this._activePythonPopoverNode = node;
+		this._activePythonPopoverStep = step;
+
+		if (!this._pythonStepHoverPopoverEl) {
+			this._pythonStepHoverPopoverEl = document.createElement('div');
+			this._pythonStepHoverPopoverEl.className = 'workflow-python-step-popover';
+			document.body.appendChild(this._pythonStepHoverPopoverEl);
+
+			this._pythonStepHoverPopoverEl.addEventListener('mouseenter', () => {
+				if (this._pythonStepHoverHideTimeout) {
+					clearTimeout(this._pythonStepHoverHideTimeout);
+					this._pythonStepHoverHideTimeout = null;
+				}
+			});
+			this._pythonStepHoverPopoverEl.addEventListener('mouseleave', () => {
+				if (this._isPythonStepPopoverPinned) {
+					return;
+				}
+				this._hidePythonStepPopover();
+			});
+			this._pythonStepHoverPopoverEl.addEventListener('mousedown', (e) => {
+				e.stopPropagation();
+			});
+		}
+
+		const popover = this._pythonStepHoverPopoverEl;
+		clearNode(popover);
+
+		const comp = step.component;
+		const compMetaMap: Record<string, { label: string; icon: ThemeIcon; color: string; bg: string; border: string }> = {
+			table: { label: 'DATA TABLE', icon: Codicon.table, color: '#fb923c', bg: 'rgba(249, 115, 22, 0.16)', border: 'rgba(251, 146, 60, 0.45)' },
+			prompt: { label: 'AI PROMPT', icon: Codicon.sparkle, color: '#2dd4bf', bg: 'rgba(20, 184, 166, 0.16)', border: 'rgba(45, 212, 191, 0.45)' },
+			python: { label: 'PYTHON SCRIPT', icon: Codicon.python, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.16)', border: 'rgba(56, 189, 248, 0.45)' },
+			browser: { label: 'BROWSER', icon: Codicon.globe, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.16)', border: 'rgba(56, 189, 248, 0.45)' },
+			tts: { label: 'O2 TTS', icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.45)' },
+			media_player: { label: 'MP3 / MP4 PLAYER', icon: Codicon.deviceCameraVideo, color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.45)' },
+			git: { label: 'GIT BRANCH', icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.45)' },
+			create_tickets: { label: 'CREATE TICKETS', icon: Codicon.add, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.45)' },
+			run_tickets: { label: 'RUN TICKETS', icon: Codicon.playCircle, color: '#a855f7', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(168, 85, 247, 0.45)' },
+			get_outputs: { label: 'GET OUTPUTS', icon: Codicon.signOut, color: '#818cf8', bg: 'rgba(99, 102, 241, 0.16)', border: 'rgba(129, 140, 248, 0.45)' },
+			get_tickets: { label: 'GET TICKETS', icon: Codicon.search, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.45)' },
+			display: { label: 'DISPLAY', icon: Codicon.eye, color: '#f472b6', bg: 'rgba(236, 72, 153, 0.16)', border: 'rgba(244, 114, 182, 0.45)' },
+			parameters: { label: 'INPUTS', icon: Codicon.symbolVariable, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.45)' },
+			output: { label: 'OUTPUT', icon: Codicon.output, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.45)' }
+		};
+		const compMeta = comp ? compMetaMap[comp.type] : undefined;
+
+		const accentColor = compMeta ? compMeta.color : (isVariableStep ? '#38bdf8' : '#c084fc');
+		const accentBg = compMeta ? compMeta.bg : (isVariableStep ? 'rgba(56, 189, 248, 0.16)' : 'rgba(192, 132, 252, 0.18)');
+		const accentBorder = compMeta ? compMeta.border : (isVariableStep ? 'rgba(56, 189, 248, 0.4)' : 'rgba(192, 132, 252, 0.42)');
+
+		const varName = comp
+			? ((comp.type !== 'parameters' && comp.type !== 'output' && comp.type !== 'result' && comp.type !== 'display')
+				? this._getComponentOutputVarName(comp)
+				: '')
+			: (step.targetVariable || '').replace(/^@/, '').trim();
+
+		// Determine whether this step renders Python code (1 line by default, expandable) or Component Metadata
+		const isPythonCodeTooltip = !comp || comp.type === 'python' || comp.type === 'create_tickets' || comp.type === 'run_tickets' || comp.type === 'get_outputs' || comp.type === 'get_tickets' || comp.type === 'display';
+
+		let effectiveCode = fullCode;
+		if (comp?.type === 'python') {
+			effectiveCode = (comp.pythonCode || (comp as any).defaultValue || comp.defaultContent || '').replace(/\r\n/g, '\n').trim() || '# Empty Python script';
+		} else if (comp && (comp.type === 'create_tickets' || comp.type === 'run_tickets' || comp.type === 'get_outputs' || comp.type === 'get_tickets' || comp.type === 'display')) {
+			effectiveCode = this._buildBuiltinComponentPythonExpression(comp);
+		}
+
+		// Resolve metadata text for non-code component types (Table, AI Prompt, Browser, O2 TTS, Git Branch)
+		let metadataLabel = '';
+		let metadataValue = '';
+		if (comp && !isPythonCodeTooltip) {
+			switch (comp.type) {
+				case 'table': {
+					metadataLabel = 'Table Name';
+					metadataValue = (comp.tableDbTableName || (comp as any).tableName || '').trim();
+					break;
+				}
+				case 'prompt': {
+					metadataLabel = 'Model';
+					metadataValue = comp.targetMode === 'agent'
+						? (comp.targetAgentName || comp.targetAgentId || 'AI Agent')
+						: (comp.targetModel || (comp.targetProvider === 'gemini' ? 'gemini-2.5-flash' : comp.targetProvider === 'anthropic' ? 'claude-sonnet-4-5' : 'gpt-4o'));
+					break;
+				}
+				case 'browser': {
+					metadataLabel = 'URL';
+					metadataValue = (comp.defaultUrl || (comp as any).browserUrl || '').trim();
+					break;
+				}
+				case 'tts': {
+					metadataLabel = 'Model';
+					metadataValue = (comp.targetModel || (comp.targetProvider === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts')).trim();
+					break;
+				}
+				case 'media_player': {
+					metadataLabel = 'Media File';
+					metadataValue = (comp.mediaFileName || comp.mediaFilePath || '(no file selected)').trim();
+					break;
+				}
+				case 'git': {
+					metadataLabel = 'Default Git Remote URL';
+					metadataValue = (comp.gitRemoteUrl || '').trim();
+					break;
+				}
+				default: {
+					metadataValue = fullCode;
+					break;
+				}
+			}
+		}
+
+		const positionPopover = () => {
+			const rect = targetEl.getBoundingClientRect();
+			popover.style.display = 'flex';
+			const popRect = popover.getBoundingClientRect();
+
+			let top = rect.top - popRect.height - 8;
+			if (top < 12) {
+				top = rect.bottom + 8;
+			}
+			if (top + popRect.height > window.innerHeight - 12) {
+				top = Math.max(12, window.innerHeight - popRect.height - 12);
+			}
+			let left = rect.left;
+			if (left + popRect.width > window.innerWidth - 12) {
+				left = Math.max(12, window.innerWidth - popRect.width - 12);
+			}
+			if (left < 12) {
+				left = 12;
+			}
+
+			popover.style.top = `${top}px`;
+			popover.style.left = `${left}px`;
+		};
+
+		// 1. Header bar
+		const header = append(popover, $('.python-step-popover-header'));
+		const badge = append(header, $('.python-step-popover-badge'));
+		badge.style.background = accentBg;
+		badge.style.color = accentColor;
+		badge.style.border = `1px solid ${accentBorder}`;
+		const badgeIcon = append(badge, $('span' + ThemeIcon.asCSSSelector(compMeta ? compMeta.icon : Codicon.python)));
+		badgeIcon.style.color = accentColor;
+		append(badge, $('span', {}, compMeta ? compMeta.label : (stepIndex !== undefined ? `STEP #${stepIndex}` : 'PYTHON')));
+
+		if (varName) {
+			append(header, $('span.python-step-popover-var-pill', {
+				style: 'font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; font-weight: 600; color: #e2e8f0; padding: 1px 6px; border-radius: 4px; background: rgba(255, 255, 255, 0.07);'
+			}, varName));
+		}
+
+		const headerTitleText = comp
+			? (comp.type === 'table'
+				? ((comp.tableDbTableName || (comp as any).tableName || comp.label || '').trim() || 'Data Table')
+				: (comp.label || (node.label || node.id)))
+			: (node.label || node.id);
+		const nodeTitleSpan = append(header, $('span.python-step-popover-node-name', {}, headerTitleText));
+		void nodeTitleSpan;
+
+		const codeLines = effectiveCode.replace(/\r\n/g, '\n').split('\n');
+		if (isPythonCodeTooltip) {
+			append(header, $('span.python-step-popover-lines-meta', {}, `${codeLines.length} ${codeLines.length === 1 ? 'line' : 'lines'}`));
+		}
+
+		const actionsWrap = append(header, $('.python-step-popover-actions'));
+		const textToCopy = isPythonCodeTooltip ? effectiveCode : (metadataValue || varName || fullCode);
+		if (textToCopy) {
+			const copyBtn = append(actionsWrap, $('button.python-step-popover-btn'));
+			copyBtn.type = 'button';
+			copyBtn.title = 'Copy to clipboard';
+			append(copyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+			const copyLabel = append(copyBtn, $('span', {}, 'Copy'));
+			copyBtn.onclick = (e) => {
+				e.stopPropagation();
+				navigator.clipboard?.writeText(textToCopy);
+				copyLabel.textContent = 'Copied ✓';
+				setTimeout(() => {
+					copyLabel.textContent = 'Copy';
+				}, 1200);
+			};
+		}
+
+		const editBtn = append(actionsWrap, $('button.python-step-popover-btn.primary'));
+		editBtn.type = 'button';
+		editBtn.title = comp ? 'Open Component Editor' : 'Edit this Python step inline';
+		append(editBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.edit)));
+		append(editBtn, $('span', {}, 'Edit'));
+		editBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._hidePythonStepPopover(true);
+			if (step.component) {
+				this._openNodeComponentEditorModal(node, step);
+			} else {
+				this._openNodeFunctionInlineEditor(node, step, targetEl);
+			}
+		};
+
+		const closePopBtn = append(actionsWrap, $('button.python-step-popover-btn', {
+			type: 'button',
+			title: 'Close popover',
+			style: 'padding: 2px 5px; opacity: 0.75;'
+		}, '✕'));
+		closePopBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._hidePythonStepPopover(true);
+		};
+
+		const pinPopoverOpen = () => {
+			this._isPythonStepPopoverPinned = true;
+			if (this._pythonStepHoverHideTimeout) {
+				clearTimeout(this._pythonStepHoverHideTimeout);
+				this._pythonStepHoverHideTimeout = null;
+			}
+			if (this._pythonStepPopoverOutsideClickHandler) {
+				window.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
+			}
+			this._pythonStepPopoverOutsideClickHandler = (ev: MouseEvent) => {
+				const tgt = ev.target as Node | null;
+				if (tgt && popover.contains(tgt)) {
+					return;
+				}
+				this._hidePythonStepPopover(true);
+			};
+			setTimeout(() => {
+				if (this._isPythonStepPopoverPinned && this._pythonStepPopoverOutsideClickHandler) {
+					window.addEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
+				}
+			}, 20);
+		};
+
+		// 2. Body: Either Python Code (1 line by default, expandable) or Component-specific Metadata
+		if (isPythonCodeTooltip) {
+			const codeContainer = append(popover, $('.python-step-popover-code-box'));
+			let isCodeExpanded = false;
+
+			// Pick the first meaningful line for the 1-line collapsed preview
+			let previewLineIdx = codeLines.findIndex(l => l.trim().length > 0 && !l.trim().startsWith('#'));
+			if (previewLineIdx === -1) {
+				previewLineIdx = 0;
+			}
+
+			const renderCodeLines = () => {
+				clearNode(codeContainer);
+				if (!isCodeExpanded && codeLines.length > 1) {
+					const lineText = codeLines[previewLineIdx] || '';
+					const row = append(codeContainer, $('.python-step-popover-code-line'));
+					append(row, $('span.python-step-popover-lineno', {}, String(previewLineIdx + 1)));
+					const codeTextSpan = append(row, $('span.python-step-popover-codetext'));
+					this._renderExpressionWithTicketBadges(codeTextSpan, lineText, true, 0, true);
+
+					const moreBtnRow = append(codeContainer, $('div', {
+						style: 'display: flex; align-items: center; justify-content: flex-end; padding: 3px 8px 1px 8px; border-top: 1px dashed rgba(255, 255, 255, 0.08); margin-top: 3px;'
+					}));
+					const expandBtn = append(moreBtnRow, $('button.python-step-popover-btn', {
+						type: 'button',
+						style: 'font-size: 10.5px; padding: 1px 7px; color: #38bdf8; background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 3px; cursor: pointer;'
+					}, `+${codeLines.length - 1} more ${codeLines.length - 1 === 1 ? 'line' : 'lines'} (Expand)`));
+					expandBtn.onmousedown = (e) => {
+						e.stopPropagation();
+						e.preventDefault();
+					};
+					expandBtn.onclick = (e) => {
+						e.stopPropagation();
+						e.preventDefault();
+						isCodeExpanded = true;
+						pinPopoverOpen();
+						renderCodeLines();
+						positionPopover();
+					};
+				} else {
+					let runningParenDepth = 0;
+					codeLines.forEach((lineText, idx) => {
+						const row = append(codeContainer, $('.python-step-popover-code-line'));
+						append(row, $('span.python-step-popover-lineno', {}, String(idx + 1)));
+						const codeTextSpan = append(row, $('span.python-step-popover-codetext'));
+						if (lineText) {
+							this._renderExpressionWithTicketBadges(codeTextSpan, lineText, true, runningParenDepth, true);
+							let inQuote: string | null = null;
+							for (let cIdx = 0; cIdx < lineText.length; cIdx++) {
+								const ch = lineText[cIdx];
+								if (inQuote) {
+									if (ch === inQuote && lineText[cIdx - 1] !== '\\') {
+										inQuote = null;
+									}
+								} else if (ch === '#') {
+									break;
+								} else if (ch === '"' || ch === "'") {
+									inQuote = ch;
+								} else if (ch === '(') {
+									runningParenDepth++;
+								} else if (ch === ')') {
+									runningParenDepth = Math.max(0, runningParenDepth - 1);
+								}
+							}
+						} else {
+							codeTextSpan.textContent = ' ';
+						}
+					});
+
+					if (codeLines.length > 1) {
+						const collapseRow = append(codeContainer, $('div', {
+							style: 'display: flex; align-items: center; justify-content: flex-end; padding: 3px 8px 1px 8px; border-top: 1px dashed rgba(255, 255, 255, 0.08); margin-top: 3px;'
+						}));
+						const collapseBtn = append(collapseRow, $('button.python-step-popover-btn', {
+							type: 'button',
+							style: 'font-size: 10.5px; padding: 1px 7px; color: #94a3b8; background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 3px; cursor: pointer;'
+						}, 'Collapse to 1 line'));
+						collapseBtn.onmousedown = (e) => {
+							e.stopPropagation();
+							e.preventDefault();
+						};
+						collapseBtn.onclick = (e) => {
+							e.stopPropagation();
+							e.preventDefault();
+							isCodeExpanded = false;
+							this._isPythonStepPopoverPinned = false;
+							if (this._pythonStepPopoverOutsideClickHandler) {
+								window.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
+								this._pythonStepPopoverOutsideClickHandler = null;
+							}
+							renderCodeLines();
+							positionPopover();
+						};
+					}
+				}
+			};
+			renderCodeLines();
+		} else if (metadataValue) {
+			const metaContainer = append(popover, $('.python-step-popover-code-box'));
+			const row = append(metaContainer, $('.python-step-popover-code-line', {
+				style: 'display: flex; align-items: center; gap: 8px; padding: 4px 10px;'
+			}));
+			if (metadataLabel) {
+				append(row, $('span', {
+					style: 'font-size: 11px; font-weight: 600; color: #94a3b8; white-space: nowrap;'
+				}, `${metadataLabel}:`));
+			}
+			append(row, $('span.python-step-popover-codetext', {
+				style: 'font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; color: #f1f5f9; word-break: break-all;'
+			}, metadataValue));
+		}
+
+		// 3. Optional Runtime Output section
+		if (runtimeValStr) {
+			const rtSection = append(popover, $('.python-step-popover-runtime'));
+			append(rtSection, $('div.python-step-popover-runtime-title', {}, 'Last Runtime Value:'));
+			const rtValBox = append(rtSection, $('pre.python-step-popover-runtime-val'));
+			rtValBox.textContent = runtimeValStr.length > 600 ? runtimeValStr.substring(0, 600) + '...' : runtimeValStr;
+		}
+
+		// Position popover relative to targetEl
+		positionPopover();
+	}
+
+	private _hidePythonStepPopover(immediate: boolean = false): void {
+		if (!immediate && this._isPythonStepPopoverPinned) {
+			return;
+		}
+		if (this._pythonStepHoverShowTimeout) {
+			clearTimeout(this._pythonStepHoverShowTimeout);
+			this._pythonStepHoverShowTimeout = null;
+		}
+		if (this._pythonStepHoverHideTimeout) {
+			clearTimeout(this._pythonStepHoverHideTimeout);
+			this._pythonStepHoverHideTimeout = null;
+		}
+		if (immediate) {
+			this._isPythonStepPopoverPinned = false;
+			this._activePythonPopoverNode = null;
+			this._activePythonPopoverStep = null;
+			if (this._pythonStepPopoverOutsideClickHandler) {
+				window.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
+				this._pythonStepPopoverOutsideClickHandler = null;
+			}
+			if (this._pythonStepHoverPopoverEl) {
+				this._pythonStepHoverPopoverEl.remove();
+				this._pythonStepHoverPopoverEl = null;
+			}
+			return;
+		}
+		this._pythonStepHoverHideTimeout = setTimeout(() => {
+			if (this._isPythonStepPopoverPinned) {
+				return;
+			}
+			this._activePythonPopoverNode = null;
+			this._activePythonPopoverStep = null;
+			if (this._pythonStepHoverPopoverEl) {
+				this._pythonStepHoverPopoverEl.remove();
+				this._pythonStepHoverPopoverEl = null;
+			}
+		}, 140);
 	}
 
 	private _pipelineNeedsAlignment(node: IFlowchartNode): boolean {
@@ -3668,10 +4808,23 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Check 2: Variables present in node.outputVariables but completely absent from pipeline
-		const pipelineVars = new Set(node.pipeline.filter(s => s.type === 'set_variable').map(s => s.targetVariable?.replace(/^@/, '')).filter(Boolean));
-		const nodeVars = (node.outputVariables || []).map(v => v.name.replace(/^@/, '')).filter(Boolean);
-		for (const vName of nodeVars) {
-			if (!pipelineVars.has(vName)) {
+		const pipelineVars = new Set(
+			node.pipeline
+				.filter(s => s.type === 'set_variable' || s.type === 'call_function')
+				.map(s => s.targetVariable?.replace(/^@/, ''))
+				.filter(Boolean)
+		);
+		const pipelineExprs = new Set(
+			node.pipeline
+				.filter(s => s.type === 'set_variable' || s.type === 'call_function')
+				.map(s => (s.expression || '').trim())
+				.filter(Boolean)
+		);
+		const nodeVars = (node.outputVariables || []).filter(v => Boolean(v.name && v.name.replace(/^@/, '').trim()));
+		for (const v of nodeVars) {
+			const vName = v.name.replace(/^@/, '').trim();
+			const vExpr = (v.expression || v.initialValue || '').trim();
+			if (!pipelineVars.has(vName) && (!vExpr || !pipelineExprs.has(vExpr))) {
 				return true;
 			}
 		}
@@ -3679,8 +4832,47 @@ export class WorkflowEditor extends EditorPane {
 		return false;
 	}
 
+	private _deduplicateNodePipeline(node: IFlowchartNode): boolean {
+		if (!node.pipeline || node.pipeline.length === 0) {
+			return false;
+		}
+		const callFnExprs = new Set<string>();
+		const callFnVars = new Set<string>();
+		for (const step of node.pipeline) {
+			if (step.type === 'call_function') {
+				const expr = (step.expression || '').replace(/\r\n/g, '\n').trim();
+				if (expr) callFnExprs.add(expr);
+				const tv = step.targetVariable?.replace(/^@/, '').trim();
+				if (tv) callFnVars.add(tv);
+			}
+		}
+		const beforeLen = node.pipeline.length;
+		const seenSetVarExprs = new Set<string>();
+		node.pipeline = node.pipeline.filter(step => {
+			if (step.type !== 'set_variable') {
+				return true;
+			}
+			const expr = (step.expression || '').replace(/\r\n/g, '\n').trim();
+			const tv = step.targetVariable?.replace(/^@/, '').trim();
+			const fullAssign = (tv && expr && !/^[a-zA-Z_][a-zA-Z0-9_]*\s*=/.test(expr)) ? `${tv} = ${expr}` : expr;
+			if ((expr && callFnExprs.has(expr)) || (fullAssign && callFnExprs.has(fullAssign)) || (tv && callFnVars.has(tv))) {
+				return false;
+			}
+			const dedupKey = fullAssign || tv || '';
+			if (dedupKey && seenSetVarExprs.has(dedupKey)) {
+				return false;
+			}
+			if (dedupKey) {
+				seenSetVarExprs.add(dedupKey);
+			}
+			return true;
+		});
+		return node.pipeline.length !== beforeLen;
+	}
+
 	private _syncFromNode(node: IFlowchartNode, silent: boolean = false): void {
 		if (!node.pipeline) node.pipeline = [];
+		this._deduplicateNodePipeline(node);
 
 		const ticketImports = (node.imports || []).filter(i =>
 			['task', 'job', 'project', 'case', 'issue', 'workflow', 'agent', 'ticket'].includes((i.type || '').toLowerCase()) || Boolean(i.name)
@@ -3709,16 +4901,19 @@ export class WorkflowEditor extends EditorPane {
 			for (const v of nodeVars) {
 				const cleanVar = v.name.replace(/^@/, '').trim();
 				if (cleanVar) {
+					const rawVal = (v.expression || v.initialValue || 'None').trim();
+					const fullExpr = /^[a-zA-Z_][a-zA-Z0-9_]*\s*=/.test(rawVal) ? rawVal : `${cleanVar} = ${rawVal}`;
 					node.pipeline.push({
 						id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-						type: 'set_variable',
+						type: 'call_function',
 						targetVariable: cleanVar,
-						expression: v.expression || v.initialValue || 'None'
+						functionName: 'PYTHON',
+						expression: fullExpr
 					});
 				}
 			}
 		} else {
-			// Pipeline already exists: only append any newly added imports or variables missing from pipeline
+			// Pipeline already exists: only append any newly added imports missing from pipeline
 			const existingRunners = new Set(node.pipeline.filter(s => s.type === 'run_ticket').map(s => s.ticketName).filter(Boolean));
 			for (const imp of ticketImports) {
 				if (imp.name && !existingRunners.has(imp.name)) {
@@ -3730,20 +4925,6 @@ export class WorkflowEditor extends EditorPane {
 						ticketType: imp.type,
 						ticketUri: imp.uri,
 						parameters: (imp as any).parameters
-					});
-				}
-			}
-
-			const existingVars = new Set(node.pipeline.filter(s => s.type === 'set_variable').map(s => s.targetVariable?.replace(/^@/, '')).filter(Boolean));
-			for (const v of nodeVars) {
-				const cleanVar = v.name.replace(/^@/, '').trim();
-				if (cleanVar && !existingVars.has(cleanVar)) {
-					existingVars.add(cleanVar);
-					node.pipeline.push({
-						id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-						type: 'set_variable',
-						targetVariable: cleanVar,
-						expression: v.expression || v.initialValue || 'None'
 					});
 				}
 			}
@@ -3812,12 +4993,25 @@ export class WorkflowEditor extends EditorPane {
 		if (newVars.length > 0 || node.outputVariables) {
 			node.outputVariables = newVars;
 		}
+		this._ensureNodeFitsPipeline(node);
 
 		this._saveFlowchartData();
 		this._renderNodes();
 		if (!silent) {
 			this._notificationService.info(`Synced to node '${node.label}': ${updatedTickets} ticket(s) and ${updatedVars} variable(s) updated.`);
 		}
+	}
+
+	private _ensureNodeFitsPipeline(node: IFlowchartNode): boolean {
+		if (node.type === 'circle' || node.type === 'diamond') {
+			return false;
+		}
+		let changed = false;
+		if (node.label === 'Call Function' || node.label === 'State') {
+			node.label = 'Python Step';
+			changed = true;
+		}
+		return changed;
 	}
 
 
@@ -4581,22 +5775,22 @@ export class WorkflowEditor extends EditorPane {
 						this._syncToNode(node, true);
 						this._saveFlowchartData();
 					};
-				} else if (step.type === 'call_function') {
-					// 1. Badge: [fx] FUNC
+				} else if (step.type === 'call_function' || step.type === 'custom_code') {
+					// 1. Badge: PYTHON
 					const badge = append(topRow, $('.pipeline-step-badge-fn'));
-					const fnTag = append(badge, $('span.fn-icon-badge'));
-					fnTag.textContent = '[fx]';
+					const fnTag = append(badge, $('span.fn-icon-badge' + ThemeIcon.asCSSSelector(Codicon.python)));
 					fnTag.style.color = '#c084fc';
-					fnTag.style.marginRight = '2px';
-					append(badge, $('span', {}, 'FUNC'));
+					fnTag.style.marginRight = '3px';
+					append(badge, $('span', {}, 'PYTHON'));
 
-					// 2. Function expression input
+					// 2. Python expression input
 					const fnInput = append(topRow, $('input.pipeline-step-input.pipeline-fn-input')) as HTMLInputElement;
 					fnInput.type = 'text';
 					const cleanVar = step.targetVariable?.replace(/^@/, '');
-					fnInput.value = step.expression || (cleanVar ? `@${cleanVar} = ${step.functionName || 'RUN_TICKETS'}()` : (step.functionName ? `${step.functionName}()` : 'RUN_TICKETS()'));
-					fnInput.placeholder = '@res = RUN_TICKETS("jobs/calc", {})';
-					fnInput.title = 'Function Call Expression (e.g. @news = RUN_TICKETS("jobs/news_digest", { target_keyword: "AI" }))';
+					const rawStepExpr = (step.expression ?? (cleanVar && step.functionName && step.functionName !== 'PYTHON' ? `${cleanVar} = ${step.functionName}()` : '')).replace(/(^|[^a-zA-Z0-9_])@([a-zA-Z_][a-zA-Z0-9_]*)/g, '$1$2');
+					fnInput.value = /^(?:res\s*=\s*)?RUN_TICKETS\(\s*ticket\s*=\s*""\s*(?:,\s*params\s*=\s*\{\s*\}\s*)?\)$/i.test(rawStepExpr.trim()) ? '' : rawStepExpr;
+					fnInput.placeholder = '';
+					fnInput.title = 'Python Step Expression (Double-click pill on node for full multiline Python editor)';
 
 					const commitFn = () => {
 						const val = fnInput.value.trim();
@@ -4623,16 +5817,35 @@ export class WorkflowEditor extends EditorPane {
 					const addPipelineChip = (label: string, snippet: string) => {
 						const chip = append(cfgRow, $('.node-function-template-chip'));
 						chip.textContent = label;
+						chip.title = `Click to insert ${label} at cursor`;
+						chip.onmousedown = (e) => {
+							e.stopPropagation();
+							e.preventDefault();
+						};
 						chip.onclick = (e) => {
 							e.stopPropagation();
-							fnInput.value = snippet;
+							const selStart = fnInput.selectionStart ?? fnInput.value.length;
+							const selEnd = fnInput.selectionEnd ?? selStart;
+							const before = fnInput.value.substring(0, selStart);
+							const after = fnInput.value.substring(selEnd);
+							fnInput.value = `${before}${snippet}${after}`;
+							fnInput.focus();
+							const quoteIdx = snippet.indexOf('""');
+							if (quoteIdx !== -1) {
+								fnInput.selectionStart = fnInput.selectionEnd = selStart + quoteIdx + 1;
+							} else if (snippet.endsWith('()')) {
+								fnInput.selectionStart = fnInput.selectionEnd = selStart + snippet.length - 1;
+							} else {
+								fnInput.selectionStart = fnInput.selectionEnd = selStart + snippet.length;
+							}
 							commitFn();
 						};
 					};
-					addPipelineChip('RUN_TICKETS', '@res = RUN_TICKETS(ticket="", params={})');
-					addPipelineChip('CREATE_TICKETS', '@new_ticket = CREATE_TICKETS(ticket_type="task", title="", target_folder="", parameters={})');
-					addPipelineChip('GET_TICKETS', '@ticket_data = GET_TICKETS(ticket="")');
-					addPipelineChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
+					addPipelineChip('RUN_TICKETS', 'RUN_TICKETS(ticket="")');
+					addPipelineChip('CREATE_TICKETS', 'CREATE_TICKETS(ticket_type="Task", title="", path=".")');
+					addPipelineChip('GET_TICKETS', 'GET_TICKETS(ticket="")');
+					addPipelineChip('GET_OUTPUTS', 'GET_OUTPUTS(ticket="")');
+					addPipelineChip('DISPLAY', 'DISPLAY()');
 				}
 
 				if (isFailedStep) {
@@ -4702,12 +5915,7 @@ export class WorkflowEditor extends EditorPane {
 				ticketName: '',
 				parameters: ''
 			};
-			const varIdx = node.pipeline.findIndex(s => s.type === 'set_variable');
-			if (varIdx !== -1) {
-				node.pipeline.splice(varIdx, 0, newStep);
-			} else {
-				node.pipeline.push(newStep);
-			}
+			node.pipeline.push(newStep);
 			this._syncToNode(node, true);
 			this._saveFlowchartData();
 			this._renderPipelinePanel(panel, node);
@@ -4717,58 +5925,28 @@ export class WorkflowEditor extends EditorPane {
 			}, 50);
 		};
 
-		// 2. Add Variable Step
-		const addVarBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-secondary'));
-		const vBtnTag = append(addVarBtn, $('span.var-icon-badge'));
-		vBtnTag.textContent = '[V]';
-		vBtnTag.style.color = '#38bdf8';
-		vBtnTag.style.marginRight = '4px';
-		append(addVarBtn, $('span', {}, 'Add Variable'));
-		addVarBtn.title = 'Add variable definition step';
-		addVarBtn.onclick = (e) => {
-			e.stopPropagation();
-			if (!node.pipeline) node.pipeline = [];
-			const newStepId = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-			node.pipeline.push({
-				id: newStepId,
-				type: 'set_variable',
-				targetVariable: '',
-				expression: ''
-			});
-			this._syncToNode(node, true);
-			this._saveFlowchartData();
-			this._renderPipelinePanel(panel, node);
-			setTimeout(() => {
-				const input = panel.querySelector(`[data-step-id="${newStepId}"] input.pipeline-var-name-input`) as HTMLInputElement;
-				if (input) input.focus();
-			}, 50);
-		};
-
-		// 3. Add Function Step
+		// 2. Add Unified Python Step
 		const addFnBtn = append(toolbarRow, $('.pipeline-btn.pipeline-btn-secondary'));
-		const fnBtnTag = append(addFnBtn, $('span.fn-icon-badge'));
-		fnBtnTag.textContent = '[fx]';
+		const fnBtnTag = append(addFnBtn, $('span.fn-icon-badge' + ThemeIcon.asCSSSelector(Codicon.python)));
 		fnBtnTag.style.color = '#c084fc';
 		fnBtnTag.style.marginRight = '4px';
-		append(addFnBtn, $('span', {}, 'Add Function'));
-		addFnBtn.title = 'Add function / ticket primitive call step';
+		append(addFnBtn, $('span', {}, 'Add Python Step'));
+		addFnBtn.title = 'Add Python step (variables, expressions, loops, functions, or built-in ticket calls)';
 		addFnBtn.onclick = (e) => {
 			e.stopPropagation();
 			if (!node.pipeline) node.pipeline = [];
 			const newStepId = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-			node.pipeline.push({
+			const newStep: INodePipelineStep = {
 				id: newStepId,
 				type: 'call_function',
-				functionName: 'RUN_TICKETS',
-				expression: 'RUN_TICKETS("")'
-			});
+				functionName: 'PYTHON',
+				expression: ''
+			};
+			node.pipeline.push(newStep);
 			this._syncToNode(node, true);
 			this._saveFlowchartData();
 			this._renderPipelinePanel(panel, node);
-			setTimeout(() => {
-				const input = panel.querySelector(`[data-step-id="${newStepId}"] input.pipeline-fn-input`) as HTMLInputElement;
-				if (input) input.focus();
-			}, 50);
+			this._openNodeFunctionInlineEditor(node, newStep);
 		};
 
 		// Divider line separating Add buttons from Sync To Node button
@@ -5787,6 +6965,9 @@ export class WorkflowEditor extends EditorPane {
 		const zoomText = `${Math.round(this._zoomLevel * 100)}%`;
 		if (this._floatingZoomBadgeEl) {
 			this._floatingZoomBadgeEl.textContent = zoomText;
+			this._floatingZoomBadgeEl.title = !this._isFloatingToolbarExpanded
+				? `Zoom: ${zoomText} (Click to expand toolbar)`
+				: 'Reset Zoom to 100%';
 		}
 	}
 
@@ -5836,7 +7017,8 @@ export class WorkflowEditor extends EditorPane {
 		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
 		const runtimeVal = activeRun?.contextVariables ? activeRun.contextVariables[v.name] : undefined;
 		const displayVal = v.initialValue || 'None';
-		const runtimeTooltip = runtimeVal !== undefined && runtimeVal !== null ? `\n(Latest Runtime Value: ${typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)})` : '';
+		const rawRtStr = runtimeVal !== undefined && runtimeVal !== null ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : '';
+		const runtimeTooltip = rawRtStr ? `\n(Latest Runtime Value: ${rawRtStr.length > 250 ? rawRtStr.substring(0, 250) + ' ...' : rawRtStr})` : '';
 
 		const varPill = append(container, $('.node-variable-pill'));
 		varPill.onmousedown = (e) => {
@@ -5862,10 +7044,10 @@ export class WorkflowEditor extends EditorPane {
 			this._openNodeVariableInlineEditor(node, v, varPill, pipelineStep);
 		};
 
-		const vBadge = append(varPill, $('.var-tag-icon'));
-		vBadge.textContent = '[V]';
+		const vBadge = append(varPill, $('span.var-tag-icon' + ThemeIcon.asCSSSelector(Codicon.python)));
 		vBadge.style.whiteSpace = 'nowrap';
 		vBadge.style.flexShrink = '0';
+		vBadge.style.color = '#38bdf8';
 
 		// Check if this variable is bound to a ticket
 		const findReferencedTicket = (rawRef?: string) => {
@@ -5980,10 +7162,10 @@ export class WorkflowEditor extends EditorPane {
 					pillText = `${v.name} = ${cleanExpr}`;
 				}
 			}
-			if (pillText.length > 55) {
-				pillText = pillText.substring(0, 52) + '...';
+			if (pillText.length > 75) {
+				pillText = pillText.substring(0, 72) + '...';
 			}
-			pillContent.textContent = pillText;
+			this._renderExpressionWithTicketBadges(pillContent, pillText, false);
 			varPill.title = stepIndex
 				? `[Step #${stepIndex} VAR] ${v.name} = ${displayVal}${runtimeTooltip}\n(Double-click to inline edit, click to edit in Pipeline)`
 				: `Context Variable: ${v.name} = ${displayVal}${runtimeTooltip}\n(Double-click to inline edit, click to select)`;
@@ -5992,12 +7174,22 @@ export class WorkflowEditor extends EditorPane {
 		const removeVarBtn = append(varPill, $('.var-pill-remove'));
 		removeVarBtn.title = 'Remove variable';
 		append(removeVarBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+		removeVarBtn.onmouseenter = () => {
+			if (this._pythonStepHoverShowTimeout) {
+				clearTimeout(this._pythonStepHoverShowTimeout);
+				this._pythonStepHoverShowTimeout = null;
+			}
+		};
 		removeVarBtn.onmousedown = (e) => {
 			e.stopPropagation();
+			this._hidePythonStepPopover(true);
+			this._hideTicketPopover(true);
 		};
 		removeVarBtn.onclick = (e) => {
 			e.stopPropagation();
 			e.preventDefault();
+			this._hidePythonStepPopover(true);
+			this._hideTicketPopover(true);
 			if (node.pipeline && pipelineStep) {
 				const idx = node.pipeline.indexOf(pipelineStep);
 				if (idx !== -1) {
@@ -6010,10 +7202,287 @@ export class WorkflowEditor extends EditorPane {
 		return varPill;
 	}
 
+	private static readonly _PYTHON_KEYWORDS = new Set([
+		'def', 'class', 'for', 'in', 'if', 'elif', 'else', 'while', 'return', 'yield',
+		'import', 'from', 'as', 'try', 'except', 'finally', 'raise', 'with', 'pass',
+		'break', 'continue', 'lambda', 'and', 'or', 'not', 'is', 'global', 'nonlocal',
+		'assert', 'del', 'async', 'await'
+	]);
+
+	private static readonly _PYTHON_CONSTANTS = new Set([
+		'True', 'False', 'None', 'self', 'cls', 'true', 'false', 'null'
+	]);
+
+	private static readonly _WORKFLOW_BUILTINS = new Set([
+		'RUN_TICKETS', 'CREATE_TICKETS', 'GET_TICKETS', 'GET_OUTPUTS', 'GET_PRIMITIVES_CATALOG', 'DISPLAY',
+		'run_tickets', 'create_tickets', 'get_tickets', 'get_outputs', 'get_primitives_catalog', 'display',
+		'NOW', 'DATE', 'TIME', 'TODAY', 'DATETIME', 'TIMESTAMP'
+	]);
+
+	private _isTicketTypeStringLiteral(innerStr: string, beforeText: string): boolean {
+		const clean = (innerStr || '').trim();
+		if (!clean || clean.includes('{') || clean.includes('}')) {
+			return false;
+		}
+		if (/(?:\b(?:ticket_type|entity_type|module_type)\s*=\s*|\b(?:CREATE_TICKETS|create_tickets)\s*\(\s*)$/.test(beforeText)) {
+			return true;
+		}
+		return false;
+	}
+
+	private _createTicketIdBadge(container: HTMLElement, ticketId: string, isTextareaBackdrop: boolean): HTMLElement {
+		const upperId = ticketId.toUpperCase();
+		if (isTextareaBackdrop) {
+			const badge = append(container, $('span.workflow-ticket-id-badge.code-overlay-badge'));
+			badge.textContent = upperId;
+			return badge;
+		}
+		const badge = append(container, $('span.workflow-ticket-id-badge.interactive-badge'));
+		badge.textContent = upperId;
+		badge.title = `Ticket ID: ${upperId} (Click to open Ticket in new Editor Tab)`;
+		badge.onmousedown = (e) => {
+			e.stopPropagation();
+		};
+		badge.ondblclick = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+		};
+		badge.onclick = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+			this._hidePythonStepPopover(true);
+			this._openModuleInEditor({ type: 'ticket', name: upperId });
+		};
+		return badge;
+	}
+
+	private _createTicketTypeBadge(container: HTMLElement, typeName: string, isTextareaBackdrop: boolean): HTMLElement {
+		const cleanName = typeName.trim();
+		if (isTextareaBackdrop) {
+			const badge = append(container, $('span.workflow-ticket-type-badge.code-overlay-badge'));
+			badge.textContent = cleanName;
+			return badge;
+		}
+		const badge = append(container, $('span.workflow-ticket-type-badge.interactive-badge'));
+		badge.textContent = cleanName;
+		badge.title = `Ticket Type: ${cleanName} (Click to preview Template in new Editor Tab)`;
+		badge.onmousedown = (e) => {
+			e.stopPropagation();
+		};
+		badge.ondblclick = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+		};
+		badge.onclick = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+			this._openTicketTypePreviewInEditor(cleanName);
+		};
+		return badge;
+	}
+
+	private async _openTicketTypePreviewInEditor(typeNameOrId: string): Promise<void> {
+		const cleanType = (typeNameOrId || '').trim().replace(/^["']|["']$/g, '').trim();
+		if (!cleanType) {
+			return;
+		}
+		this._hidePythonStepPopover(true);
+
+		let wsUri: URI | undefined = this._workflowUri ? URI.joinPath(this._workflowUri, '..') : undefined;
+		const folders = this._workspaceContextService.getWorkspace().folders;
+		if (!wsUri && folders.length > 0) {
+			wsUri = folders[0].uri;
+		}
+
+		try {
+			const modules = await this._customModulesService.getCustomModules(wsUri);
+			this._cachedCustomModules = modules;
+			const targetLower = cleanType.toLowerCase();
+			const targetSlug = targetLower.replace(/[\s_]+/g, '-');
+			let matchedMod = modules.find(m =>
+				m.name.toLowerCase() === targetLower ||
+				m.id.toLowerCase() === targetLower ||
+				m.id.toLowerCase() === targetSlug ||
+				m.name.toLowerCase().replace(/[\s_]+/g, '-') === targetSlug
+			);
+
+			if (!matchedMod && wsUri && this._workflowUri && wsUri.toString() !== this._workflowUri.toString()) {
+				const wfModules = await this._customModulesService.getCustomModules(this._workflowUri);
+				matchedMod = wfModules.find(m =>
+					m.name.toLowerCase() === targetLower ||
+					m.id.toLowerCase() === targetLower ||
+					m.id.toLowerCase() === targetSlug ||
+					m.name.toLowerCase().replace(/[\s_]+/g, '-') === targetSlug
+				);
+			}
+
+			if (matchedMod) {
+				const previewTargetUri = wsUri || this._workflowUri || URI.file('/');
+				await this._editorService.openEditor(
+					new EntityDetailEditorInput(previewTargetUri, matchedMod.name || matchedMod.id, false, matchedMod),
+					{ pinned: true }
+				);
+				return;
+			}
+
+			this._notificationService.warn(`Ticket Type template '${cleanType}' was not found in this workspace.`);
+		} catch (err) {
+			this._notificationService.error(`Failed to open template preview for '${cleanType}': ${err}`);
+		}
+	}
+
+	private _renderExpressionWithTicketBadges(
+		container: HTMLElement,
+		text: string,
+		isCodeOverlay: boolean = false,
+		initialParenDepth: number = 0,
+		isInteractivePopover: boolean = false
+	): boolean {
+		clearNode(container);
+		if (!text) {
+			return false;
+		}
+
+		const isTextareaBackdrop = isCodeOverlay && !isInteractivePopover;
+
+		if (isCodeOverlay) {
+			const tokenRegex = /(#[^\n]*)|((?:[fFrRbBuU]{1,2})?(?:"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$)|"(?:\\.|[^"\\\n])*"?|'(?:\\.|[^'\\\n])*'?))|\b([A-Za-z][A-Za-z0-9_]{1,15}-\d{1,8})\b|\b(\d+(?:\.\d+)?)\b|\b([A-Za-z_][A-Za-z0-9_]*)\b/g;
+			let lastIndex = 0;
+			let match: RegExpExecArray | null;
+
+			while ((match = tokenRegex.exec(text)) !== null) {
+				if (match.index > lastIndex) {
+					container.appendChild(document.createTextNode(text.substring(lastIndex, match.index)));
+				}
+
+				const fullToken = match[0];
+				const beforeText = text.slice(0, match.index);
+				if (match[1] !== undefined) {
+					// 1. Comment (#...)
+					append(container, $('span.py-tok-comment', {}, fullToken));
+				} else if (match[2] !== undefined) {
+					// 2. String literal (or quoted Ticket ID badge / Ticket Type badge)
+					const ticketIdMatch = fullToken.match(/^(["'])([A-Za-z][A-Za-z0-9_]{1,15}-\d{1,8})\1$/);
+					const stringInnerMatch = fullToken.match(/^(["'])([^"'\n]+)\1$/);
+					if (ticketIdMatch) {
+						this._createTicketIdBadge(container, ticketIdMatch[2], isTextareaBackdrop);
+					} else if (stringInnerMatch && this._isTicketTypeStringLiteral(stringInnerMatch[2], beforeText)) {
+						this._createTicketTypeBadge(container, stringInnerMatch[2], isTextareaBackdrop);
+					} else if (fullToken.includes('{') && fullToken.includes('}')) {
+						const strSpan = append(container, $('span.py-tok-string'));
+						const parts = fullToken.split(/(\{[^{}\n]+\})/g);
+						for (const part of parts) {
+							if (!part) continue;
+							if (part.startsWith('{') && part.endsWith('}')) {
+								append(strSpan, $('span.py-tok-interp', {}, part));
+							} else {
+								strSpan.appendChild(document.createTextNode(part));
+							}
+						}
+					} else {
+						append(container, $('span.py-tok-string', {}, fullToken));
+					}
+				} else if (match[3] !== undefined) {
+					// 3. Unquoted Ticket ID literal (e.g. FINDJ-0002)
+					this._createTicketIdBadge(container, match[3], isTextareaBackdrop);
+				} else if (match[4] !== undefined) {
+					// 4. Number literal
+					append(container, $('span.py-tok-number', {}, fullToken));
+				} else if (match[5] !== undefined) {
+					// 5. Identifier / Keyword / Built-in / Kwarg
+					const ident = match[5];
+					const afterText = text.slice(match.index + ident.length);
+
+					if (WorkflowEditor._PYTHON_KEYWORDS.has(ident)) {
+						append(container, $('span.py-tok-keyword', {}, ident));
+					} else if (WorkflowEditor._PYTHON_CONSTANTS.has(ident)) {
+						append(container, $('span.py-tok-constant', {}, ident));
+					} else if (WorkflowEditor._WORKFLOW_BUILTINS.has(ident)) {
+						append(container, $('span.py-tok-wf-builtin', {}, ident));
+					} else if (/(?:def|class)\s+$/.test(beforeText)) {
+						append(container, $('span.py-tok-defname', {}, ident));
+					} else if (/^\s*\(/.test(afterText)) {
+						append(container, $('span.py-tok-func', {}, ident));
+					} else if (/^\s*=(?!=)/.test(afterText)) {
+						// Check if inside parentheses (keyword argument) vs variable assignment
+						let parenDepth = initialParenDepth;
+						for (let k = 0; k < beforeText.length; k++) {
+							if (beforeText[k] === '(') parenDepth++;
+							else if (beforeText[k] === ')') parenDepth = Math.max(0, parenDepth - 1);
+						}
+						if (parenDepth > 0) {
+							append(container, $('span.py-tok-kwarg', {}, ident));
+						} else {
+							append(container, $('span.py-tok-var-assign', {}, ident));
+						}
+					} else {
+						append(container, $('span.py-tok-ident', {}, ident));
+					}
+				}
+
+				lastIndex = match.index + fullToken.length;
+			}
+
+			if (lastIndex < text.length) {
+				container.appendChild(document.createTextNode(text.substring(lastIndex)));
+			}
+			if (text.endsWith('\n')) {
+				container.appendChild(document.createTextNode(' '));
+			}
+			return true;
+		}
+
+		// Non-overlay mode (node capsules & parameter chips): render clickable Ticket ID badges and Ticket Type badges
+		const pillBadgeRegex = /((["'])([A-Za-z][A-Za-z0-9_]{1,15}-\d{1,8})\2|\b([A-Za-z][A-Za-z0-9_]{1,15}-\d{1,8})\b)|((["'])([^"'{}\n]+)\6)/g;
+		let lastIndex = 0;
+		let hasMatch = false;
+		let match: RegExpExecArray | null;
+
+		while ((match = pillBadgeRegex.exec(text)) !== null) {
+			const fullMatch = match[0];
+			const beforeText = text.slice(0, match.index);
+			const ticketId = match[3] || match[4];
+			const stringInner = match[7];
+
+			if (ticketId) {
+				hasMatch = true;
+				if (match.index > lastIndex) {
+					container.appendChild(document.createTextNode(text.substring(lastIndex, match.index)));
+				}
+				this._createTicketIdBadge(container, ticketId, false);
+				lastIndex = match.index + fullMatch.length;
+			} else if (stringInner !== undefined && this._isTicketTypeStringLiteral(stringInner, beforeText)) {
+				hasMatch = true;
+				if (match.index > lastIndex) {
+					container.appendChild(document.createTextNode(text.substring(lastIndex, match.index)));
+				}
+				this._createTicketTypeBadge(container, stringInner, false);
+				lastIndex = match.index + fullMatch.length;
+			}
+		}
+
+		if (!hasMatch) {
+			container.textContent = text;
+			return false;
+		}
+
+		if (lastIndex < text.length) {
+			container.appendChild(document.createTextNode(text.substring(lastIndex)));
+		}
+		return true;
+	}
+
 	private _isFunctionCallExpression(expr?: string): boolean {
 		if (!expr) return false;
 		const trimmed = expr.trim();
-		return /^(?:@?[a-zA-Z0-9_\u4e00-\u9fa5]+\s*=\s*)?[a-zA-Z0-9_]+\s*\(.*?\)$/s.test(trimmed);
+		const m = trimmed.match(/^(?:@?[a-zA-Z0-9_\u4e00-\u9fa5]+\s*=\s*)?([a-zA-Z0-9_]+)\s*\([\s\S]*\)$/);
+		if (!m) return false;
+		const fn = m[1].toLowerCase();
+		const valueOperatorFns = new Set([
+			'date', 'today', 'time', 'now', 'datetime', 'timestamp',
+			'str', 'int', 'float', 'bool', 'len', 'abs', 'min', 'max', 'round'
+		]);
+		return !valueOperatorFns.has(fn);
 	}
 
 	private _renderFunctionPill(
@@ -6022,61 +7491,292 @@ export class WorkflowEditor extends EditorPane {
 		step: INodePipelineStep,
 		stepIndex?: number
 	): HTMLElement {
+		if (step.component) {
+			this._syncComponentStepMetadata(step);
+		}
 		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
 		const cleanVar = step.targetVariable?.replace(/^@/, '');
-		const runtimeVal = (activeRun?.contextVariables && cleanVar) ? activeRun.contextVariables[cleanVar] : undefined;
-		const runtimeTooltip = runtimeVal !== undefined && runtimeVal !== null ? `\n(Runtime Output: ${typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)})` : '';
+		const runtimeVal = activeRun?.contextVariables
+			? ((cleanVar ? activeRun.contextVariables[cleanVar] : undefined) ?? (step.component?.label ? activeRun.contextVariables[step.component.label] : undefined))
+			: undefined;
+		const rawFnRtStr = runtimeVal !== undefined && runtimeVal !== null ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : '';
+		const runtimeTooltip = rawFnRtStr ? `\n(Runtime Output: ${rawFnRtStr.length > 250 ? rawFnRtStr.substring(0, 250) + ' ...' : rawFnRtStr})` : '';
 
 		const fnPill = append(container, $('.node-function-pill'));
+		const openStepEditor = () => {
+			if (step.component) {
+				this._openNodeComponentEditorModal(node, step);
+			} else {
+				this._openNodeFunctionInlineEditor(node, step, fnPill);
+			}
+		};
 		fnPill.onmousedown = (e) => {
+			if (e.shiftKey || e.ctrlKey || e.metaKey) {
+				return;
+			}
+			const targetEl = e.target as HTMLElement | null;
+			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input')) {
+				e.stopPropagation();
+				return;
+			}
 			e.stopPropagation();
+			if (e.button !== 0) {
+				return;
+			}
+			const now = Date.now();
+			const stepKey = step.id || step.component?.id || `${stepIndex}`;
+			if (
+				this._lastStepPillClick &&
+				this._lastStepPillClick.nodeId === node.id &&
+				this._lastStepPillClick.stepId === stepKey &&
+				now - this._lastStepPillClick.time < 400
+			) {
+				this._lastStepPillClick = undefined;
+				e.preventDefault();
+				openStepEditor();
+				return;
+			}
+			this._lastStepPillClick = { nodeId: node.id, stepId: stepKey, time: now };
 		};
 		fnPill.onclick = (e) => {
+			if (e.shiftKey || e.ctrlKey || e.metaKey) {
+				return;
+			}
+			const targetEl = e.target as HTMLElement | null;
+			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input')) {
+				e.stopPropagation();
+				return;
+			}
 			e.stopPropagation();
-			if (!this._selectedNodeIds.has(node.id)) {
+			if ((fnPill as any)._justDraggedAt && Date.now() - (fnPill as any)._justDraggedAt < 250) {
+				return;
+			}
+			if (!this._selectedNodeIds.has(node.id) || this._selectedNodeIds.size > 1) {
 				this._selectedNodeIds.clear();
 				this._selectedNodeIds.add(node.id);
-				const prevSelected = (this._nodesContainer || this._canvas)?.querySelectorAll('.workflow-node.selected');
-				prevSelected?.forEach(el => el.classList.remove('selected'));
-				const nodeEl = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${node.id}"]`);
-				nodeEl?.classList.add('selected');
-				if (this._inspectorEl) {
-					this._renderInspector(this._inspectorEl);
-				}
+				this._renderNodes();
+			}
+			// If this is a component pill and a side group or node component editor is already open, sync/focus it on click as well
+			if (step.component && this._editorGroupService.groups.some(g => g.id !== this.group.id)) {
+				this._openNodeComponentEditorModal(node, step);
 			}
 		};
 		fnPill.ondblclick = (e) => {
+			const targetEl = e.target as HTMLElement | null;
+			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input')) {
+				e.stopPropagation();
+				return;
+			}
 			e.stopPropagation();
 			e.preventDefault();
-			this._openNodeFunctionInlineEditor(node, step, fnPill);
+			this._lastStepPillClick = undefined;
+			openStepEditor();
 		};
 
-		const fnBadge = append(fnPill, $('.fn-tag-icon'));
-		fnBadge.textContent = '[fx]';
+		const compIconMap: Record<string, { icon: ThemeIcon; color: string; bg: string; border: string; textColor: string }> = {
+			parameters: { icon: Codicon.symbolVariable, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.5)', textColor: '#f3e8ff' },
+			output: { icon: Codicon.output, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.5)', textColor: '#d1fae5' },
+			create_tickets: { icon: Codicon.add, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.5)', textColor: '#f3e8ff' },
+			run_tickets: { icon: Codicon.playCircle, color: '#a855f7', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(168, 85, 247, 0.5)', textColor: '#f3e8ff' },
+			get_outputs: { icon: Codicon.signOut, color: '#818cf8', bg: 'rgba(99, 102, 241, 0.16)', border: 'rgba(129, 140, 248, 0.5)', textColor: '#e0e7ff' },
+			get_tickets: { icon: Codicon.search, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.5)', textColor: '#dbeafe' },
+			display: { icon: Codicon.eye, color: '#f472b6', bg: 'rgba(236, 72, 153, 0.16)', border: 'rgba(244, 114, 182, 0.5)', textColor: '#fce7f3' },
+			prompt: { icon: Codicon.sparkle, color: '#2dd4bf', bg: 'rgba(20, 184, 166, 0.16)', border: 'rgba(45, 212, 191, 0.5)', textColor: '#ccfbf1' },
+			table: { icon: Codicon.table, color: '#fb923c', bg: 'rgba(249, 115, 22, 0.16)', border: 'rgba(251, 146, 60, 0.5)', textColor: '#ffedd5' },
+			browser: { icon: Codicon.globe, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.16)', border: 'rgba(56, 189, 248, 0.5)', textColor: '#e0f2fe' },
+			tts: { icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.5)', textColor: '#fee2e2' },
+			media_player: { icon: Codicon.deviceCameraVideo, color: '#fbbf24', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.5)', textColor: '#fef3c7' },
+			git: { icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.5)', textColor: '#ecfccb' },
+			python: { icon: Codicon.python, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.14)', border: 'rgba(56, 189, 248, 0.45)', textColor: '#e0f2fe' }
+		};
+		const compTheme = step.component ? compIconMap[step.component.type] : undefined;
+
+		const fnBadge = append(fnPill, $('span.fn-tag-icon' + ThemeIcon.asCSSSelector(compTheme ? compTheme.icon : Codicon.python)));
 		fnBadge.style.whiteSpace = 'nowrap';
 		fnBadge.style.flexShrink = '0';
+		fnBadge.style.color = compTheme ? compTheme.color : '#c084fc';
+		if (step.component?.type === 'python') {
+			fnBadge.style.border = '1.2px solid currentColor';
+			fnBadge.style.borderRadius = '3px';
+			fnBadge.style.padding = '1px 2px';
+			fnBadge.style.background = 'transparent';
+			fnBadge.style.fontSize = '10px';
+			fnBadge.style.lineHeight = '1';
+		}
 
 		const pillContent = append(fnPill, $('.fn-pill-text'));
-		let displayExpr = step.expression || (cleanVar ? `@${cleanVar} = ${step.functionName || 'RUN_TICKETS'}()` : (step.functionName ? `${step.functionName}()` : 'RUN_TICKETS()'));
-		if (displayExpr.length > 250 || displayExpr.includes('\n') || displayExpr.startsWith('#') || displayExpr.startsWith('+ content') || displayExpr.includes('URL: https://')) {
-			displayExpr = cleanVar ? `@${cleanVar} = ${step.functionName || 'RUN_TICKETS'}()` : (step.functionName ? `${step.functionName}()` : 'RUN_TICKETS()');
+		const isUntouchedDefault = step.expression && /^(?:res\s*=\s*)?RUN_TICKETS\(\s*ticket\s*=\s*""\s*(?:,\s*params\s*=\s*\{\s*\}\s*)?\)$/i.test(step.expression.trim());
+		let rawExpr = step.component
+			? this._formatNodeComponentSummary(step.component)
+			: ((!isUntouchedDefault && step.expression)
+				? step.expression
+				: (cleanVar && !isUntouchedDefault && step.functionName && step.functionName !== 'PYTHON' ? `${cleanVar} = ${step.functionName}()` : 'Python Step'));
+		if (!step.component && (rawExpr.startsWith('#') || rawExpr.startsWith('+ content') || rawExpr.includes('URL: https://'))) {
+			rawExpr = cleanVar ? `${cleanVar} = ${step.functionName || 'PYTHON'}()` : 'Python Step';
 		}
-		if (displayExpr.length > 55) {
-			displayExpr = displayExpr.substring(0, 52) + '...';
+		rawExpr = rawExpr.replace(/(^|[^a-zA-Z0-9_])@([a-zA-Z_][a-zA-Z0-9_]*)/g, '$1$2');
+		// If this step is a set_variable step whose expression doesn't yet include `var = `, prefix it
+		if (!step.component && step.type === 'set_variable' && cleanVar && !/^[a-zA-Z_][a-zA-Z0-9_]*\s*(?::\s*[^=]+)?(?:\+|-|\*|\/)?=(?!=)/.test(rawExpr.trim())) {
+			rawExpr = `${cleanVar} = ${rawExpr.trim()}`;
 		}
-		pillContent.textContent = displayExpr;
 
-		fnPill.title = `[Step #${stepIndex !== undefined ? stepIndex : ''} FUNC] ${displayExpr}${runtimeTooltip}\n(Double-click to inline edit function, click to select)`;
+		// Distinguish pure variable definition / value assignment (Blue pill) vs built-in function call / control flow (Purple pill) vs Component pill
+		const callsWorkflowBuiltin = /\b(RUN_TICKETS|CREATE_TICKETS|GET_TICKETS|GET_OUTPUTS|DISPLAY|PRINT|GET_PRIMITIVES_CATALOG)\s*\(/.test(rawExpr);
+		const isControlFlowOrDef = /^(?:for|while|if|elif|else|def|async\s+def|class|try|with|return|raise|import|from)\b/.test(rawExpr.trim());
+		const isPureVariableStep = !step.component && !callsWorkflowBuiltin && !isControlFlowOrDef && (
+			step.type === 'set_variable' ||
+			/^[a-zA-Z_][a-zA-Z0-9_]*(?:\s*,\s*[a-zA-Z_][a-zA-Z0-9_]*)*\s*(?::\s*[^=]+)?(?:\+|-|\*|\/)?=(?!=)/.test(rawExpr.trim())
+		);
+		if (compTheme) {
+			fnPill.style.background = compTheme.bg;
+			fnPill.style.borderColor = compTheme.border;
+			fnPill.style.color = compTheme.textColor;
+			fnBadge.style.color = compTheme.color;
+			pillContent.style.color = compTheme.textColor;
+		} else if (isPureVariableStep) {
+			fnPill.style.background = 'rgba(14, 165, 233, 0.14)';
+			fnPill.style.borderColor = 'rgba(56, 189, 248, 0.45)';
+			fnPill.style.color = '#e0f2fe';
+			fnBadge.style.color = '#38bdf8';
+			pillContent.style.color = '#bae6fd';
+		}
+
+		const lines = rawExpr.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+		let displayExpr = lines[0] || rawExpr;
+		if (lines.length > 1) {
+			displayExpr = `${displayExpr} (+${lines.length - 1} lines)`;
+		}
+		const comp = step.component;
+		const isStandardComponentCapsule = Boolean(
+			comp && !['parameters', 'output', 'result', 'display', 'create_tickets', 'run_tickets', 'get_outputs', 'get_tickets'].includes(comp.type)
+		);
+		const maxCapsuleChars = isStandardComponentCapsule ? 96 : 75;
+		if (displayExpr.length > maxCapsuleChars) {
+			displayExpr = displayExpr.substring(0, maxCapsuleChars - 3) + '...';
+		}
+
+		const isEditableComponentVar = comp && comp.type !== 'parameters' && comp.type !== 'output' && comp.type !== 'result' && comp.type !== 'display';
+		const eqIdx = isEditableComponentVar ? displayExpr.indexOf(' = ') : -1;
+
+		if (isEditableComponentVar && comp && eqIdx > 0) {
+			const varNameStr = displayExpr.substring(0, eqIdx).trim();
+			const rhsExprStr = displayExpr.substring(eqIdx + 3);
+
+			const varBadge = append(pillContent, $('span.fn-pill-var-badge', {
+				style: 'display: inline; padding: 0; margin: 0; background: transparent; border: none; color: inherit; font-family: inherit; font-weight: inherit; cursor: pointer; transition: text-decoration-color 0.12s ease;'
+			}, varNameStr));
+
+			varBadge.onmouseenter = () => {
+				varBadge.style.textDecoration = 'underline dashed rgba(255, 255, 255, 0.55)';
+			};
+			varBadge.onmouseleave = () => {
+				varBadge.style.textDecoration = 'none';
+			};
+
+			varBadge.onclick = (e) => {
+				e.stopPropagation();
+				e.preventDefault();
+				this._hidePythonStepPopover(true);
+
+				const currentVar = this._getComponentOutputVarName(comp);
+				const inlineInput = $('input.fn-pill-var-input', {
+					type: 'text',
+					value: currentVar,
+					title: 'Enter Python variable name (press Enter to save, Esc to cancel, or clear to auto-derive)',
+					style: `width: ${Math.max(76, currentVar.length * 7.5 + 16)}px; padding: 0px 4px; margin-right: 1px; font-size: 11px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace); color: inherit; background: rgba(15, 23, 42, 0.85); border: 1px solid rgba(56, 189, 248, 0.75); border-radius: 3px; outline: none;`
+				}) as HTMLInputElement;
+
+				varBadge.replaceWith(inlineInput);
+				inlineInput.focus();
+				inlineInput.select();
+
+				let committed = false;
+				const commitVarEdit = (cancel: boolean) => {
+					if (committed) {
+						return;
+					}
+					committed = true;
+					if (!cancel) {
+						const rawTyped = inlineInput.value.trim();
+						const autoCandidate = generateSmartPythonVarName(comp.label || comp.id, comp.type);
+						const nextVar = rawTyped ? sanitizePythonVarName(rawTyped, comp.type) : autoCandidate;
+						comp.outputVariableManual = rawTyped.length > 0 && nextVar !== autoCandidate;
+						comp.outputVariableName = nextVar;
+						this._syncComponentStepMetadata(step);
+						this._syncToNode(node, true);
+						this._saveFlowchartData();
+						const existingInput = this._nodeEditorInputsByNodeId.get(node.id);
+						if (existingInput && !existingInput.isDisposed() && existingInput.draftModule) {
+							const nodeFields = (node.pipeline || [])
+								.filter(st => !!st.component)
+								.map(st => st.component!);
+							existingInput.draftModule.fields = [
+								{ id: 'title', label: 'Title', type: 'text', required: true },
+								...nodeFields
+							];
+							existingInput.notifyExternalDraftUpdated();
+						}
+					}
+					this._renderNodes();
+				};
+
+				inlineInput.onkeydown = (ke) => {
+					ke.stopPropagation();
+					if (ke.key === 'Enter') {
+						ke.preventDefault();
+						commitVarEdit(false);
+					} else if (ke.key === 'Escape') {
+						ke.preventDefault();
+						commitVarEdit(true);
+					}
+				};
+				inlineInput.onblur = () => {
+					commitVarEdit(false);
+				};
+			};
+
+			append(pillContent, $('span', {}, ' = '));
+			const rhsSpan = append(pillContent, $('span'));
+			if (isStandardComponentCapsule) {
+				rhsSpan.textContent = rhsExprStr;
+			} else {
+				this._renderExpressionWithTicketBadges(rhsSpan, rhsExprStr, false);
+			}
+		} else {
+			this._renderExpressionWithTicketBadges(pillContent, displayExpr, false);
+		}
+		void runtimeTooltip;
+
+		fnPill.onmouseenter = () => {
+			const latestRawExpr = step.component ? this._formatNodeComponentSummary(step.component) : rawExpr;
+			this._schedulePythonStepPopover(fnPill, node, step, stepIndex, latestRawExpr, isPureVariableStep, rawFnRtStr);
+		};
+		fnPill.onmouseleave = () => {
+			this._hidePythonStepPopover();
+		};
+		fnPill.addEventListener('mousedown', () => {
+			this._hidePythonStepPopover(true);
+		});
 
 		const removeFnBtn = append(fnPill, $('.var-pill-remove'));
 		removeFnBtn.title = 'Remove function step';
 		append(removeFnBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+		removeFnBtn.onmouseenter = () => {
+			if (this._pythonStepHoverShowTimeout) {
+				clearTimeout(this._pythonStepHoverShowTimeout);
+				this._pythonStepHoverShowTimeout = null;
+			}
+		};
 		removeFnBtn.onmousedown = (e) => {
 			e.stopPropagation();
+			this._hidePythonStepPopover(true);
+			this._hideTicketPopover(true);
 		};
 		removeFnBtn.onclick = (e) => {
 			e.stopPropagation();
 			e.preventDefault();
+			this._hidePythonStepPopover(true);
+			this._hideTicketPopover(true);
 			if (node.pipeline) {
 				const idx = node.pipeline.indexOf(step);
 				if (idx !== -1) {
@@ -6084,6 +7784,10 @@ export class WorkflowEditor extends EditorPane {
 					this._syncToNode(node, true);
 					this._saveFlowchartData();
 					this._renderNodes();
+					const existingInput = this._nodeEditorInputsByNodeId.get(node.id);
+					if (existingInput && this._editorService.editors.some(ed => ed.matches(existingInput))) {
+						this._openNodeComponentsInSideEditor(node);
+					}
 				}
 			}
 		};
@@ -6091,7 +7795,149 @@ export class WorkflowEditor extends EditorPane {
 		return fnPill;
 	}
 
+	private _attachCapsuleDragReorder(
+		pillEl: HTMLElement,
+		badgesContainer: HTMLElement,
+		node: IFlowchartNode,
+		stepIndex: number
+	): void {
+		pillEl.setAttribute('data-pipeline-step-idx', String(stepIndex));
+		pillEl.addEventListener('mousedown', (e: MouseEvent) => {
+			if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) {
+				return;
+			}
+			const targetEl = e.target as HTMLElement | null;
+			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input')) {
+				return;
+			}
+			e.stopPropagation();
+
+			const startX = e.clientX;
+			const startY = e.clientY;
+			let isDragging = false;
+			let targetInsertIdx = stepIndex;
+			let ghostEl: HTMLElement | null = null;
+
+			const clearDropIndicators = () => {
+				badgesContainer
+					.querySelectorAll('.capsule-drop-before, .capsule-drop-after')
+					.forEach(el => el.classList.remove('capsule-drop-before', 'capsule-drop-after'));
+			};
+
+			const onMouseMove = (mvEvent: MouseEvent) => {
+				const dist = Math.hypot(mvEvent.clientX - startX, mvEvent.clientY - startY);
+				if (!isDragging && dist >= 4) {
+					isDragging = true;
+					this._lastStepPillClick = undefined;
+					this._hidePythonStepPopover(true);
+					this._hideTicketPopover();
+					pillEl.classList.add('capsule-dragging');
+
+					ghostEl = $('.workflow-capsule-drag-ghost');
+					ghostEl.textContent = (pillEl.querySelector('.fn-pill-text, .badge-text')?.textContent || pillEl.textContent || 'Step').trim();
+					const compStyle = window.getComputedStyle(pillEl);
+					if (compStyle.borderColor) {
+						ghostEl.style.borderColor = compStyle.borderColor;
+					}
+					if (compStyle.color) {
+						ghostEl.style.color = compStyle.color;
+					}
+					document.body.appendChild(ghostEl);
+				}
+
+				if (!isDragging) {
+					return;
+				}
+				mvEvent.preventDefault();
+				mvEvent.stopPropagation();
+
+				if (ghostEl) {
+					ghostEl.style.left = `${mvEvent.clientX + 10}px`;
+					ghostEl.style.top = `${mvEvent.clientY - 12}px`;
+				}
+
+				const allPills = Array.from(badgesContainer.querySelectorAll<HTMLElement>('[data-pipeline-step-idx]'));
+				clearDropIndicators();
+
+				let foundBefore = false;
+				for (let k = 0; k < allPills.length; k++) {
+					const r = allPills[k].getBoundingClientRect();
+					const midY = r.top + r.height / 2;
+					if (mvEvent.clientY < midY) {
+						targetInsertIdx = k;
+						allPills[k].classList.add('capsule-drop-before');
+						foundBefore = true;
+						break;
+					}
+				}
+				if (!foundBefore && allPills.length > 0) {
+					targetInsertIdx = allPills.length;
+					allPills[allPills.length - 1].classList.add('capsule-drop-after');
+				}
+			};
+
+			const onMouseUp = (upEvent: MouseEvent) => {
+				window.removeEventListener('mousemove', onMouseMove, true);
+				window.removeEventListener('mouseup', onMouseUp, true);
+
+				if (ghostEl) {
+					ghostEl.remove();
+					ghostEl = null;
+				}
+				pillEl.classList.remove('capsule-dragging');
+				clearDropIndicators();
+
+				if (!isDragging) {
+					return;
+				}
+				upEvent.preventDefault();
+				upEvent.stopPropagation();
+				(pillEl as any)._justDraggedAt = Date.now();
+
+				if (node.pipeline && node.pipeline.length > 1) {
+					const fromIdx = stepIndex;
+					let toIdx = targetInsertIdx > fromIdx ? targetInsertIdx - 1 : targetInsertIdx;
+					toIdx = Math.max(0, Math.min(node.pipeline.length - 1, toIdx));
+					if (toIdx !== fromIdx) {
+						const [moved] = node.pipeline.splice(fromIdx, 1);
+						node.pipeline.splice(toIdx, 0, moved);
+						this._syncToNode(node, true);
+						this._saveFlowchartData();
+						this._renderNodes();
+						this._drawLinks();
+						if (this._inspectorEl) {
+							this._renderInspector(this._inspectorEl);
+						}
+						if (this._pipelinePanelEl && this._activePipelineNodeId === node.id) {
+							this._renderPipelinePanel(this._pipelinePanelEl, node);
+						}
+						const existingInput = this._nodeEditorInputsByNodeId.get(node.id);
+						if (existingInput && !existingInput.isDisposed() && existingInput.draftModule) {
+							const nodeFields = (node.pipeline || [])
+								.filter(st => !!st.component)
+								.map(st => st.component!);
+							existingInput.draftModule.fields = [
+								{ id: 'title', label: 'Title', type: 'text', required: true },
+								...nodeFields
+							];
+							existingInput.notifyExternalDraftUpdated();
+						}
+					}
+				}
+			};
+
+			window.addEventListener('mousemove', onMouseMove, true);
+			window.addEventListener('mouseup', onMouseUp, true);
+		});
+	}
+
 	private _renderNodes(): void {
+		if (
+			this._activePythonPopoverStep &&
+			(!this._activePythonPopoverNode || !this._data?.nodes?.includes(this._activePythonPopoverNode) || !this._activePythonPopoverNode.pipeline?.includes(this._activePythonPopoverStep))
+		) {
+			this._hidePythonStepPopover(true);
+		}
 		this._updateCanvasDimensions();
 		if (!this._nodesContainer) return;
 		clearNode(this._nodesContainer);
@@ -6100,7 +7946,20 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
+		const selectedActionOrderMap = new Map<string, number>();
+		let selOrderIdx = 1;
+		for (const selId of this._selectedNodeIds) {
+			const selNode = this._data.nodes.find(n => n.id === selId);
+			if (selNode && this._isActionNodeForSelectiveRun(selNode)) {
+				selectedActionOrderMap.set(selId, selOrderIdx++);
+			}
+		}
+
 		for (const node of this._data.nodes) {
+			if (this._deduplicateNodePipeline(node)) {
+				this._saveFlowchartData();
+			}
+			this._ensureNodeFitsPipeline(node);
 			const nodeEl = append(this._nodesContainer, $(`.workflow-node.${node.type}${node.groupId ? '.grouped' : ''}`));
 			nodeEl.setAttribute('data-node-id', node.id);
 			if (node.groupId) {
@@ -6134,10 +7993,13 @@ export class WorkflowEditor extends EditorPane {
 
 			// Execution Status Visual Highlighting & Human Interaction
 			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+			const isActiveRunLive = Boolean(activeRun && (activeRun.status === 'running' || activeRun.status === 'waiting_human' || activeRun.status === 'paused'));
 			const nodeRunState = activeRun?.nodeStates[node.id];
 			if (nodeRunState) {
 				if (nodeRunState.status === 'running') {
-					nodeEl.classList.add('status-running');
+					if (isActiveRunLive) {
+						nodeEl.classList.add('status-running');
+					}
 				} else if (nodeRunState.status === 'success') {
 					nodeEl.classList.add('status-success');
 				} else if (nodeRunState.status === 'failed') {
@@ -6154,7 +8016,7 @@ export class WorkflowEditor extends EditorPane {
 						e.stopPropagation();
 						this._openDrawerTab('logs', node.id);
 					};
-				} else if (nodeRunState.status === 'waiting_human') {
+				} else if (nodeRunState.status === 'waiting_human' && isActiveRunLive) {
 					nodeEl.classList.add('status-waiting-human');
 
 					// Human Approval Interactive Card
@@ -6172,6 +8034,15 @@ export class WorkflowEditor extends EditorPane {
 			const isSelected = this._selectedNodeIds.has(node.id);
 			if (isSelected) {
 				nodeEl.classList.add('selected');
+
+				const orderNum = selectedActionOrderMap.get(node.id);
+				if (orderNum !== undefined && selectedActionOrderMap.size >= 1) {
+					const orderBadge = append(nodeEl, $('.node-selection-order-badge'));
+					orderBadge.textContent = selectedActionOrderMap.size > 1 ? `▶ #${orderNum}` : '▶ Selected';
+					orderBadge.title = selectedActionOrderMap.size > 1
+						? `Selected to run #${orderNum} of ${selectedActionOrderMap.size} (Hold Cmd/Ctrl/Shift + Click to toggle nodes)`
+						: `Selected node: clicking Run executes this node (Hold Cmd/Ctrl/Shift + Click other nodes to run multiple non-contiguous nodes)`;
+				}
 
 				// Add resize handle at bottom-right corner (only if it's the single selected node)
 				if (this._selectedNodeIds.size === 1) {
@@ -6218,6 +8089,25 @@ export class WorkflowEditor extends EditorPane {
 			};
 
 			// Drag over and Drop support on Node (Context Variables & Module Imports)
+			const computeNodeCapsuleDropIndex = (clientY: number, showIndicator: boolean): number => {
+				const allPills = Array.from(nodeEl.querySelectorAll<HTMLElement>('[data-pipeline-step-idx]'));
+				nodeEl.querySelectorAll('.capsule-drop-before, .capsule-drop-after').forEach(el => el.classList.remove('capsule-drop-before', 'capsule-drop-after'));
+				for (let k = 0; k < allPills.length; k++) {
+					const r = allPills[k].getBoundingClientRect();
+					const midY = r.top + r.height / 2;
+					if (clientY < midY) {
+						if (showIndicator) {
+							allPills[k].classList.add('capsule-drop-before');
+						}
+						return k;
+					}
+				}
+				if (showIndicator && allPills.length > 0) {
+					allPills[allPills.length - 1].classList.add('capsule-drop-after');
+				}
+				return node.pipeline ? node.pipeline.length : 0;
+			};
+
 			nodeEl.ondragover = (e: DragEvent) => {
 				e.preventDefault();
 				e.stopPropagation();
@@ -6225,39 +8115,64 @@ export class WorkflowEditor extends EditorPane {
 					e.dataTransfer.dropEffect = 'copy';
 				}
 				nodeEl.classList.add('drag-hover');
+				computeNodeCapsuleDropIndex(e.clientY, true);
 			};
 
-			nodeEl.ondragleave = () => {
-				nodeEl.classList.remove('drag-hover');
+			nodeEl.ondragleave = (e: DragEvent) => {
+				if (!nodeEl.contains(e.relatedTarget as Node)) {
+					nodeEl.classList.remove('drag-hover');
+					nodeEl.querySelectorAll('.capsule-drop-before, .capsule-drop-after').forEach(el => el.classList.remove('capsule-drop-before', 'capsule-drop-after'));
+				}
 			};
 
 			nodeEl.ondrop = (e: DragEvent) => {
 				e.preventDefault();
 				e.stopPropagation();
 				nodeEl.classList.remove('drag-hover');
+				const dropInsertIdx = computeNodeCapsuleDropIndex(e.clientY, false);
 
 				const dataStr = e.dataTransfer?.getData('text/plain');
 				if (!dataStr) return;
 
-				// 1. Context Variable dropped onto node
+				// 1. Python Step [py] / Component / Variable / Function dropped onto node
 				try {
 					const parsed = JSON.parse(dataStr);
-					if (parsed && (parsed.kind === 'variable' || parsed.kind === 'variable_widget')) {
-						this._selectedNodeIds.clear();
-						this._selectedNodeIds.add(node.id);
-						this._renderNodes();
-						if (this._inspectorEl) this._renderInspector(this._inspectorEl);
-						setTimeout(() => {
-							this._openNodeVariableInlineEditor(node);
-						}, 50);
+					if (parsed && parsed.kind === 'node_component' && parsed.compType) {
+						this._addOrOpenComponentOnNode(node, parsed.compType as CustomFieldType, dropInsertIdx);
 						return;
-					} else if (parsed && (parsed.kind === 'function' || parsed.kind === 'function_widget')) {
+					}
+					if (parsed && (parsed.kind === 'variable' || parsed.kind === 'variable_widget' || parsed.kind === 'function' || parsed.kind === 'function_widget')) {
+						if (!node.pipeline || node.pipeline.length === 0) {
+							this._syncFromNode(node, true);
+						}
+						if (!node.pipeline) {
+							node.pipeline = [];
+						}
+						const newStep: INodePipelineStep = {
+							id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+							type: 'call_function',
+							functionName: 'PYTHON',
+							expression: ''
+						};
+						const safeIdx = Math.max(0, Math.min(node.pipeline.length, dropInsertIdx));
+						node.pipeline.splice(safeIdx, 0, newStep);
+						this._ensureNodeFitsPipeline(node);
+						this._syncToNode(node, true);
 						this._selectedNodeIds.clear();
 						this._selectedNodeIds.add(node.id);
+						this._saveFlowchartData();
 						this._renderNodes();
+						this._drawLinks();
 						if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+						if (this._pipelinePanelEl && this._activePipelineNodeId === node.id) {
+							this._renderPipelinePanel(this._pipelinePanelEl, node);
+						}
 						setTimeout(() => {
-							this._openNodeFunctionInlineEditor(node);
+							const nodeDom = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${node.id}"]`);
+							const targetPill = nodeDom?.querySelector(`[data-pipeline-step-idx="${safeIdx}"]`) as HTMLElement | null;
+							const pills = nodeDom?.querySelectorAll('.node-function-pill, .node-variable-pill');
+							const fallbackPill = pills && pills.length > 0 ? (pills[pills.length - 1] as HTMLElement) : undefined;
+							this._openNodeFunctionInlineEditor(node, newStep, targetPill || fallbackPill);
 						}, 50);
 						return;
 					}
@@ -6276,18 +8191,14 @@ export class WorkflowEditor extends EditorPane {
 					if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
 						node.imports.push({ type: type as any, name });
 						if (!node.pipeline) node.pipeline = [];
-						const varIdx = node.pipeline.findIndex(s => s.type === 'set_variable');
 						const newStep: INodePipelineStep = {
 							id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 							type: 'run_ticket',
 							ticketName: name,
 							ticketType: type
 						};
-						if (varIdx !== -1) {
-							node.pipeline.splice(varIdx, 0, newStep);
-						} else {
-							node.pipeline.push(newStep);
-						}
+						const safeIdx = Math.max(0, Math.min(node.pipeline.length, dropInsertIdx));
+						node.pipeline.splice(safeIdx, 0, newStep);
 						this._saveFlowchartData();
 						this._renderNodes();
 						this._drawLinks();
@@ -6322,6 +8233,7 @@ export class WorkflowEditor extends EditorPane {
 				badgesContainer.style.width = '100%';
 				badgesContainer.style.boxSizing = 'border-box';
 				badgesContainer.style.padding = '0 8px';
+				/*
 				badgesContainer.style.cursor = 'pointer';
 				badgesContainer.title = 'Click to open Pipeline';
 				badgesContainer.onmousedown = (e) => {
@@ -6332,30 +8244,47 @@ export class WorkflowEditor extends EditorPane {
 					this._hideTicketPopover();
 					this._openNodePipelinePanel(node.id);
 				};
+				*/
 
 				if (hasPipeline) {
+					badgesContainer.style.flexDirection = 'column';
+					badgesContainer.style.alignItems = 'flex-start';
 					// Execution Pipeline Sequence: render each step in exact sequential order!
 					const pipeBadge = append(badgesContainer, $('.node-import-badge'));
 					pipeBadge.style.background = 'rgba(56, 189, 248, 0.18)';
 					pipeBadge.style.color = '#38bdf8';
 					pipeBadge.style.border = '1px solid rgba(56, 189, 248, 0.45)';
 					pipeBadge.style.cursor = 'pointer';
-					pipeBadge.title = `Pipeline: ${node.pipeline!.length} step(s) configured (Click to open Pipeline)`;
+					pipeBadge.title = `Pipeline: ${node.pipeline!.length} step(s) configured — Click to open Node Component Editor on the right`;
 					append(pipeBadge, $('span' + ThemeIcon.asCSSSelector(Codicon.threeBars)));
 					append(pipeBadge, $('span.badge-text', {}, `${node.pipeline!.length} steps`));
 					pipeBadge.onmousedown = (e) => {
+						if (e.shiftKey || e.ctrlKey || e.metaKey) {
+							return;
+						}
 						e.stopPropagation();
 					};
 					pipeBadge.onclick = (e) => {
+						if (e.shiftKey || e.ctrlKey || e.metaKey) {
+							return;
+						}
 						e.stopPropagation();
 						this._hideTicketPopover();
-						this._openNodePipelinePanel(node.id);
+						if (node.pipeline?.some(s => !!s.component)) {
+							this._openNodeComponentsInSideEditor(node);
+						} else {
+							this._openNodePipelinePanel(node.id);
+						}
 					};
 					pipeBadge.ondblclick = (e) => {
 						e.stopPropagation();
 						e.preventDefault();
 						this._hideTicketPopover();
-						this._openNodePipelinePanel(node.id);
+						if (node.pipeline?.some(s => !!s.component)) {
+							this._openNodeComponentsInSideEditor(node);
+						} else {
+							this._openNodePipelinePanel(node.id);
+						}
 					};
 
 					for (let i = 0; i < node.pipeline!.length; i++) {
@@ -6381,7 +8310,7 @@ export class WorkflowEditor extends EditorPane {
 								append(badgeText, $('span.badge-param-text', {}, `(${paramText})`));
 							}
 
-							badge.title = `[Step #${stepNumber} RUN] ${typeLabel}: ${step.ticketName}${paramText ? `\nPARAM: ${paramText}` : ''}\n(Double-click to open in Tab, click to edit in Pipeline)`;
+							badge.title = `[Step #${stepNumber} RUN] ${typeLabel}: ${step.ticketName}${paramText ? `\nPARAM: ${paramText}` : ''}\n(Drag to reorder · Double-click to open in Tab · Click to edit in Pipeline)`;
 
 							badge.onmouseenter = () => {
 								this._showTicketPopover(badge, { name: step.ticketName || '', type: step.ticketType || 'ticket', uri: step.ticketUri, parameters: step.parameters }, node, stepNumber);
@@ -6390,7 +8319,13 @@ export class WorkflowEditor extends EditorPane {
 								this._hideTicketPopover();
 							};
 							badge.onclick = (e) => {
+								if (e.shiftKey || e.ctrlKey || e.metaKey) {
+									return;
+								}
 								e.stopPropagation();
+								if ((badge as any)._justDraggedAt && Date.now() - (badge as any)._justDraggedAt < 250) {
+									return;
+								}
 								this._hideTicketPopover();
 								this._openNodePipelinePanel(node.id, step.ticketName);
 							};
@@ -6404,24 +8339,11 @@ export class WorkflowEditor extends EditorPane {
 									uri: step.ticketUri
 								});
 							};
-						} else if (step.type === 'call_function' || (step.expression && this._isFunctionCallExpression(step.expression))) {
-							this._renderFunctionPill(badgesContainer, node, step, stepNumber);
-						} else if (step.type === 'set_variable' && step.targetVariable) {
-							const cleanName = step.targetVariable.replace(/^@/, '');
-							const vObj: INodeVariable = {
-								name: cleanName,
-								initialValue: step.expression || 'None',
-								expression: step.expression
-							};
-							this._renderVariablePill(badgesContainer, node, vObj, stepNumber, step);
+							this._attachCapsuleDragReorder(badge, badgesContainer, node, i);
+						} else if (step.type === 'call_function' || step.type === 'set_variable' || step.type === 'component' || step.component || step.expression) {
+							const fnPillEl = this._renderFunctionPill(badgesContainer, node, step, stepNumber);
+							this._attachCapsuleDragReorder(fnPillEl, badgesContainer, node, i);
 						}
-					}
-
-					// Also render any outputVariables that are not yet in pipeline
-					const pipelineVarNames = new Set(node.pipeline!.filter(s => s.type === 'set_variable' || s.type === 'call_function').map(s => s.targetVariable?.replace(/^@/, '')).filter(Boolean));
-					const extraVars = this._getNodeVariables(node).filter(v => !pipelineVarNames.has(v.name.replace(/^@/, '')));
-					for (const extraV of extraVars) {
-						this._renderVariablePill(badgesContainer, node, extraV);
 					}
 				} else {
 					// Fallback: No pipeline configured yet (standard separate imports badges)
@@ -6499,10 +8421,11 @@ export class WorkflowEditor extends EditorPane {
 			labelWrapper.style.textAlign = titleAlign;
 			labelWrapper.style.width = '100%';
 			labelWrapper.style.display = 'block';
+			labelWrapper.style.flexShrink = '0';
 
 			contentWrapper.style.alignItems = 'stretch';
 
-			const verticalAlign = node.verticalAlign || 'center';
+			const verticalAlign = node.verticalAlign || (hasPipeline ? 'top' : 'center');
 			if (verticalAlign === 'top') {
 				contentWrapper.style.justifyContent = 'flex-start';
 				contentWrapper.style.paddingTop = '6px';
@@ -6678,6 +8601,7 @@ export class WorkflowEditor extends EditorPane {
 		if (this._inspectorEl) {
 			this._renderInspector(this._inspectorEl);
 		}
+		this._updateRunButtonSelectionBadge();
 	}
 
 	private _showInlineEditor(nodeEl: HTMLElement, node: IFlowchartNode): void {
@@ -6747,16 +8671,19 @@ export class WorkflowEditor extends EditorPane {
 		};
 
 		textarea.onkeydown = (e) => {
+			if (e.isComposing || e.keyCode === 229) {
+				e.stopPropagation();
+				return;
+			}
 			if (e.key === 'Enter') {
 				if (e.shiftKey) {
 					// Shift+Enter creates a new line in textarea natively
 					e.stopPropagation();
 				} else {
-					// Plain Enter saves and closes, then creates a sibling node
+					// Plain Enter only finishes text input and saves (does not spawn a new node)
 					e.preventDefault();
 					e.stopPropagation();
 					saveText();
-					this._createSiblingNode(node);
 				}
 			} else if (e.key === 'Tab') {
 				// Tab saves and creates a child node
@@ -6766,6 +8693,7 @@ export class WorkflowEditor extends EditorPane {
 				this._createChildNode(node);
 			} else if (e.key === 'Escape') {
 				e.preventDefault();
+				e.stopPropagation();
 				this._renderNodes();
 				this._drawLinks();
 			}
@@ -6779,256 +8707,177 @@ export class WorkflowEditor extends EditorPane {
 	private _activeVariableDraftInputEl: HTMLElement | null = null;
 	private _activeFunctionDraftInputEl: HTMLElement | null = null;
 
+	private _setupDraftPopupPositionAndDrag(
+		nodeEl: HTMLElement,
+		draftWrapper: HTMLElement,
+		headerRow: HTMLElement
+	): () => void {
+		// 1. Add visual drag grip icon to header title and set tooltip
+		const titleEl = headerRow.querySelector('.node-function-header-title');
+		if (titleEl && !titleEl.querySelector('.draft-drag-grip')) {
+			const grip = document.createElement('span');
+			grip.className = 'draft-drag-grip';
+			grip.textContent = '\u283F';
+			grip.title = 'Drag header to move panel';
+			titleEl.insertBefore(grip, titleEl.firstChild);
+		}
+		headerRow.title = 'Drag header to move panel';
+
+		// 2. Compute non-obstructing initial position (default below node; flip above/beside if near bottom of viewport)
+		const nodeW = nodeEl.offsetWidth || 240;
+		const nodeH = nodeEl.offsetHeight || 110;
+		const popupW = draftWrapper.offsetWidth || 500;
+		const popupH = draftWrapper.offsetHeight || 250;
+
+		let left = Math.round((nodeW - popupW) / 2);
+		let top = nodeH + 14;
+
+		const canvasEl = this._canvas || nodeEl.parentElement;
+		if (canvasEl) {
+			const canvasRect = canvasEl.getBoundingClientRect();
+			const nodeRect = nodeEl.getBoundingClientRect();
+			const zoom = this._zoomLevel || 1;
+
+			const logDrawer = this._container?.querySelector('.workflow-log-drawer') as HTMLElement | null;
+			const logDrawerTop = (logDrawer && logDrawer.style.display !== 'none' && logDrawer.offsetHeight > 0)
+				? logDrawer.getBoundingClientRect().top
+				: canvasRect.bottom;
+
+			const visibleBottom = Math.min(canvasRect.bottom, logDrawerTop) - 12;
+			const visibleTop = canvasRect.top + 12;
+			const visibleLeft = canvasRect.left + 12;
+			const visibleRight = canvasRect.right - 12;
+
+			const spaceBelow = visibleBottom - nodeRect.bottom;
+			const spaceAbove = nodeRect.top - visibleTop;
+			const spaceRight = visibleRight - nodeRect.right;
+			const spaceLeft = nodeRect.left - visibleLeft;
+
+			const neededH = popupH * zoom + 14;
+			const neededW = popupW * zoom + 16;
+
+			let placedBeside = false;
+			if (spaceBelow >= neededH) {
+				top = nodeH + 14;
+			} else if (spaceAbove >= neededH) {
+				top = -(popupH + 14);
+			} else if (spaceRight >= neededW) {
+				left = nodeW + 16;
+				top = Math.max(-Math.round((nodeRect.top - visibleTop) / zoom), Math.round((nodeH - popupH) / 2));
+				placedBeside = true;
+			} else if (spaceLeft >= neededW) {
+				left = -(popupW + 16);
+				top = Math.max(-Math.round((nodeRect.top - visibleTop) / zoom), Math.round((nodeH - popupH) / 2));
+				placedBeside = true;
+			} else {
+				top = spaceBelow >= spaceAbove ? (nodeH + 14) : -(popupH + 14);
+			}
+
+			if (!placedBeside) {
+				const screenRight = nodeRect.left + (left + popupW) * zoom;
+				if (screenRight > visibleRight) {
+					left -= Math.ceil((screenRight - visibleRight) / zoom);
+				}
+				const screenLeft = nodeRect.left + left * zoom;
+				if (screenLeft < visibleLeft) {
+					left += Math.ceil((visibleLeft - screenLeft) / zoom);
+				}
+			}
+		}
+
+		draftWrapper.style.left = `${left}px`;
+		draftWrapper.style.top = `${top}px`;
+		draftWrapper.style.transform = 'none';
+
+		// 3. Attach drag handler on headerRow
+		let activeMoveHandler: ((ev: MouseEvent) => void) | null = null;
+		let activeUpHandler: ((ev: MouseEvent) => void) | null = null;
+
+		const cleanupDragListeners = () => {
+			draftWrapper.classList.remove('is-dragging');
+			if (activeMoveHandler) {
+				window.removeEventListener('mousemove', activeMoveHandler, true);
+				activeMoveHandler = null;
+			}
+			if (activeUpHandler) {
+				window.removeEventListener('mouseup', activeUpHandler, true);
+				activeUpHandler = null;
+			}
+		};
+
+		headerRow.onmousedown = (e: MouseEvent) => {
+			e.stopPropagation();
+			const target = e.target as HTMLElement | null;
+			if (target && target.closest('.var-draft-cancel-btn, .node-function-open-tab-btn, button')) {
+				return;
+			}
+			e.preventDefault();
+			cleanupDragListeners();
+
+			const startClientX = e.clientX;
+			const startClientY = e.clientY;
+			const startLeft = parseFloat(draftWrapper.style.left || '0') || draftWrapper.offsetLeft;
+			const startTop = parseFloat(draftWrapper.style.top || '0') || draftWrapper.offsetTop;
+
+			draftWrapper.classList.add('is-dragging');
+
+			activeMoveHandler = (moveEvent: MouseEvent) => {
+				moveEvent.stopPropagation();
+				const zoom = this._zoomLevel || 1;
+				const dx = (moveEvent.clientX - startClientX) / zoom;
+				const dy = (moveEvent.clientY - startClientY) / zoom;
+				draftWrapper.style.left = `${Math.round(startLeft + dx)}px`;
+				draftWrapper.style.top = `${Math.round(startTop + dy)}px`;
+				draftWrapper.style.transform = 'none';
+			};
+
+			activeUpHandler = (upEvent: MouseEvent) => {
+				upEvent.stopPropagation();
+				cleanupDragListeners();
+			};
+
+			window.addEventListener('mousemove', activeMoveHandler, true);
+			window.addEventListener('mouseup', activeUpHandler, true);
+		};
+
+		return cleanupDragListeners;
+	}
+
 	private _openNodeVariableInlineEditor(
 		node: IFlowchartNode,
 		targetVar?: INodeVariable,
 		targetPillElement?: HTMLElement,
 		pipelineStep?: INodePipelineStep
 	): void {
-		if (this._activeVariableDraftInputEl) {
-			this._activeVariableDraftInputEl.remove();
-			this._activeVariableDraftInputEl = null;
-		}
-
-		const nodeEl = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${node.id}"]`) as HTMLElement;
-		if (!nodeEl) {
-			console.warn('[WorkflowEditor] Node element not found for id:', node.id);
+		// Redirect all variable editing to the unified Python Step Editor [py]!
+		if (pipelineStep) {
+			this._openNodeFunctionInlineEditor(node, pipelineStep, targetPillElement);
 			return;
 		}
-		nodeEl.classList.add('editing-variable');
-
-		let varsContainer = nodeEl.querySelector('.node-variables-container') as HTMLElement;
-		if (!varsContainer) {
-			const contentWrapper = nodeEl.querySelector('.node-content-wrapper') as HTMLElement || nodeEl;
-			varsContainer = append(contentWrapper, $('.node-variables-container'));
-			varsContainer.style.display = 'flex';
-			varsContainer.style.flexWrap = 'wrap';
-			varsContainer.style.gap = '4px';
-			varsContainer.style.marginTop = '4px';
-			varsContainer.style.justifyContent = 'center';
-		}
-
-		let targetPillEl: HTMLElement | null = targetPillElement || null;
-		if (targetVar && !targetPillEl) {
-			const allPills = varsContainer.querySelectorAll('.node-variable-pill');
-			for (const p of Array.from(allPills)) {
-				const text = p.querySelector('.var-pill-text')?.textContent || '';
-				if (text.startsWith(`${targetVar.name} `) || text === targetVar.name || text.startsWith(`${targetVar.name}=`)) {
-					targetPillEl = p as HTMLElement;
-					break;
-				}
-			}
-		}
-		if (targetPillEl) {
-			targetPillEl.style.display = 'none';
-		}
-
-		nodeEl.classList.add('editing-variable');
-
-		const draftWrapper = document.createElement('div');
-		draftWrapper.className = 'node-variable-draft-wrapper';
-		this._activeVariableDraftInputEl = draftWrapper;
-
-		// Row 1: Header (Title + Badge + Close Button)
-		const headerRow = append(draftWrapper, $('.node-function-header-row'));
-		headerRow.onmousedown = (e) => e.stopPropagation();
-
-		const titleGroup = append(headerRow, $('.node-function-header-title'));
-		const vBadge = append(titleGroup, $('.var-tag-icon'));
-		vBadge.textContent = '[V]';
-		vBadge.style.color = '#38bdf8';
-		const titleText = append(titleGroup, $('span'));
-		titleText.textContent = 'Variable Assignment Editor';
-
-		const cancelBtn = append(headerRow, $('.var-draft-cancel-btn'));
-		cancelBtn.title = 'Cancel (Esc)';
-		cancelBtn.textContent = '\u2715';
-		cancelBtn.style.cursor = 'pointer';
-		cancelBtn.onmousedown = (e) => {
-			e.stopPropagation();
-			e.preventDefault();
-		};
-
-		const cleanup = () => {
-			nodeEl.classList.remove('editing-variable');
-			if (targetPillEl) targetPillEl.style.display = '';
-			draftWrapper.remove();
-			this._activeVariableDraftInputEl = null;
-		};
-
-		cancelBtn.onclick = (e) => {
-			e.stopPropagation();
-			cleanup();
-		};
-
-		const curVarName = targetVar?.name || this._generateNextVarName();
-
-		// Row 2: Template Chips
-		const chipsRow = append(draftWrapper, $('.node-function-templates-row'));
-		chipsRow.onmousedown = (e) => e.stopPropagation();
-		append(chipsRow, $('.node-function-templates-label', {}, 'Templates:'));
-
-		const applyTemplate = (tpl: string) => {
-			codeArea.value = tpl;
-			codeArea.focus();
-			codeArea.selectionStart = codeArea.selectionEnd = tpl.length;
-		};
-
-		const addTplChip = (name: string, template: string) => {
-			const chip = append(chipsRow, $('.node-function-template-chip'));
-			chip.textContent = name;
-			chip.title = `Click to load ${name} template`;
-			chip.onmousedown = (e) => {
-				e.stopPropagation();
-				e.preventDefault();
-			};
-			chip.onclick = (e) => {
-				e.stopPropagation();
-				applyTemplate(template);
-			};
-		};
-
-		addTplChip('Number', `@${curVarName} = 0`);
-		addTplChip('None', `@${curVarName} = None`);
-		addTplChip('String', `@${curVarName} = ""`);
-		addTplChip('++', `@${curVarName}++`);
-		addTplChip('--', `@${curVarName}--`);
-		addTplChip('Dict {}', `@${curVarName} = {}`);
-		addTplChip('List []', `@${curVarName} = []`);
-
-		// Row 3: Multiline Code / Expression Area
-		const codeRow = append(draftWrapper, $('.node-function-code-row'));
-		codeRow.onmousedown = (e) => e.stopPropagation();
-
-		const codeArea = append(codeRow, $('textarea.node-function-code-area')) as HTMLTextAreaElement;
-		codeArea.rows = 3;
-		codeArea.spellcheck = false;
-		codeArea.placeholder = `@${curVarName} = 0`;
-		codeArea.onmousedown = (e) => e.stopPropagation();
-		codeArea.onclick = (e) => e.stopPropagation();
-
-		let initialVal = `@${curVarName} = 0`;
 		if (targetVar) {
-			if (targetVar.expression) {
-				const expr = targetVar.expression.trim();
-				if (expr.length > 250 || expr.includes('\n') || expr.startsWith('#') || expr.startsWith('+ content') || expr.includes('URL: https://')) {
-					initialVal = `@${targetVar.name} = None`;
-				} else if (expr.startsWith('@') || expr.includes('=')) {
-					initialVal = expr.startsWith('@') ? expr : `@${expr}`;
-				} else {
-					initialVal = `@${targetVar.name} = ${expr}`;
-				}
-			} else {
-				let initV = targetVar.initialValue || '0';
-				if (initV.length > 250 || initV.includes('\n') || initV.startsWith('#') || initV.startsWith('+ content') || initV.includes('URL: https://')) {
-					initV = 'None';
-				}
-				initialVal = `@${targetVar.name} = ${initV}`;
-			}
-		}
-		codeArea.value = initialVal;
-
-		// Row 4: Workflow Variables Reference Helper
-		const varsRow = append(draftWrapper, $('.node-function-templates-row'));
-		varsRow.style.marginTop = '2px';
-		varsRow.onmousedown = (e) => e.stopPropagation();
-		append(varsRow, $('.node-function-templates-label', {}, 'Variables:'));
-
-		// Collect existing variables
-		const seenVars = new Set<string>();
-		const varSuggestions: string[] = [];
-		for (const n of this._data?.nodes || []) {
-			for (const v of this._getNodeVariables(n)) {
-				if (!seenVars.has(v.name)) {
-					seenVars.add(v.name);
-					varSuggestions.push(v.name);
-				}
-			}
-		}
-		for (const n of this._data?.nodes || []) {
-			for (const p of n.pipeline || []) {
-				if (p.targetVariable) {
-					const cleanV = p.targetVariable.replace(/^@/, '');
-					if (!seenVars.has(cleanV)) {
-						seenVars.add(cleanV);
-						varSuggestions.push(cleanV);
-					}
-				}
-			}
-		}
-
-		if (varSuggestions.length > 0) {
-			for (const vName of varSuggestions.slice(0, 8)) {
-				const vChip = append(varsRow, $('.node-function-field-chip.standard'));
-				vChip.textContent = `@${vName}`;
-				vChip.title = `Click to insert @${vName}`;
-				vChip.onmousedown = (e) => {
-					e.stopPropagation();
-					e.preventDefault();
+			let step = (node.pipeline || []).find(
+				s => s.targetVariable?.replace(/^@/, '') === targetVar.name.replace(/^@/, '')
+			);
+			if (!step) {
+				if (!node.pipeline) node.pipeline = [];
+				const rawExpr = (targetVar.expression || targetVar.initialValue || 'None').trim();
+				const cleanName = targetVar.name.replace(/^@/, '');
+				const fullExpr = rawExpr.startsWith(cleanName) || rawExpr.startsWith(`@${cleanName}`)
+					? rawExpr.replace(/^@/, '')
+					: `${cleanName} = ${rawExpr.replace(/^=\s*/, '')}`;
+				step = {
+					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+					type: 'call_function',
+					targetVariable: cleanName,
+					functionName: 'PYTHON',
+					expression: fullExpr
 				};
-				vChip.onclick = (e) => {
-					e.stopPropagation();
-					const selStart = codeArea.selectionStart;
-					const val = codeArea.value;
-					const before = val.substring(0, selStart);
-					const after = val.substring(codeArea.selectionEnd);
-					codeArea.value = `${before}@${vName}${after}`;
-					codeArea.focus();
-					codeArea.selectionStart = codeArea.selectionEnd = selStart + vName.length + 1;
-				};
+				node.pipeline.push(step);
 			}
-		} else {
-			const noVars = append(varsRow, $('span'));
-			noVars.style.fontSize = '10.5px';
-			noVars.style.opacity = '0.5';
-			noVars.style.fontStyle = 'italic';
-			noVars.textContent = 'None yet';
+			this._openNodeFunctionInlineEditor(node, step, targetPillElement);
+			return;
 		}
-
-		// Row 5: Footer Actions
-		const footerRow = append(draftWrapper, $('.node-function-footer-row'));
-		footerRow.onmousedown = (e) => e.stopPropagation();
-
-		const hintEl = append(footerRow, $('.node-function-footer-hint'));
-		hintEl.textContent = 'Format: @var = value | Press Enter or click Save';
-
-		const actionsBox = append(footerRow, $('.node-function-footer-actions'));
-		const cancelActionBtn = append(actionsBox, $('button.node-function-btn.node-function-btn-cancel'));
-		cancelActionBtn.textContent = 'Cancel';
-		cancelActionBtn.onclick = (e) => {
-			e.stopPropagation();
-			cleanup();
-		};
-
-		const commit = () => {
-			const text = codeArea.value.trim();
-			cleanup();
-			if (text) {
-				this._parseAndApplyVariableExpression(node, text, targetVar, pipelineStep);
-			}
-		};
-
-		const saveBtn = append(actionsBox, $('button.node-function-btn.node-variable-btn-save'));
-		saveBtn.textContent = 'Save Variable';
-		saveBtn.onclick = (e) => {
-			e.stopPropagation();
-			commit();
-		};
-
-		codeArea.onkeydown = (e) => {
-			e.stopPropagation();
-			if (e.key === 'Enter' && !e.shiftKey) {
-				e.preventDefault();
-				commit();
-			} else if (e.key === 'Escape') {
-				e.preventDefault();
-				cleanup();
-			}
-		};
-
-		nodeEl.appendChild(draftWrapper);
-		codeArea.focus();
-		codeArea.select();
+		this._openNodeFunctionInlineEditor(node, undefined, targetPillElement);
 	}
 
 	private _openNodeFunctionInlineEditor(
@@ -7039,6 +8888,12 @@ export class WorkflowEditor extends EditorPane {
 		if (this._activeFunctionDraftInputEl) {
 			this._activeFunctionDraftInputEl.remove();
 			this._activeFunctionDraftInputEl = null;
+		}
+
+		// 0. If existingStep is a component step, open the Component Editor Modal!
+		if (existingStep && existingStep.component) {
+			this._openNodeComponentEditorModal(node, existingStep);
+			return;
 		}
 
 		// 1. If existingStep is explicitly a run_ticket step, open it in a VS Code editor tab!
@@ -7058,7 +8913,7 @@ export class WorkflowEditor extends EditorPane {
 		nodeEl.classList.add('editing-function');
 
 		if (targetPillElement) {
-			targetPillElement.style.display = 'none';
+			targetPillElement.classList.add('editing-active-pill');
 		}
 
 		// Calculate current workflow relative folder path
@@ -7079,45 +8934,47 @@ export class WorkflowEditor extends EditorPane {
 				if (v.name) availableVars.add(v.name.replace(/^@/, ''));
 			}
 			for (const p of n.pipeline || []) {
+				if (p.component && p.component.type !== 'parameters' && p.component.type !== 'output' && p.component.type !== 'display') {
+					availableVars.add(this._getComponentOutputVarName(p.component));
+				}
 				if (p.targetVariable) availableVars.add(p.targetVariable.replace(/^@/, ''));
 			}
 		}
 
-		// Initial expression value (including @return_var = ...)
-		let initialExpr = '@res = RUN_TICKETS(ticket="", params={})';
+		// Initial expression value (default empty so we never pre-fill code the user didn't ask for)
+		let initialExpr = '';
 
 		if (existingStep) {
 			if (existingStep.expression) {
 				let expr = existingStep.expression.trim();
-				// If expression was polluted by raw markdown/scraped content or excessive length, sanitize it back to clean function call!
-				if (expr.length > 250 || expr.includes('\n') || expr.startsWith('#') || expr.startsWith('+ content') || expr.includes('URL: https://')) {
-					const retVar = existingStep.targetVariable ? `@${existingStep.targetVariable.replace(/^@/, '')} = ` : '@res = ';
-					const fn = existingStep.functionName || 'CREATE_TICKETS';
-					if (fn === 'CREATE_TICKETS') {
-						expr = `${retVar}CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`;
-					} else if (fn === 'GET_TICKETS') {
-						expr = `${retVar}GET_TICKETS(ticket="")`;
-					} else if (fn === 'GET_PRIMITIVES_CATALOG') {
-						expr = `${retVar}GET_PRIMITIVES_CATALOG()`;
+				// If expression is the legacy untouched default placeholder `res = RUN_TICKETS(ticket="", params={})`, treat as empty
+				if (/^(?:res\s*=\s*)?RUN_TICKETS\(\s*ticket\s*=\s*""\s*(?:,\s*params\s*=\s*\{\s*\}\s*)?\)$/i.test(expr)) {
+					expr = '';
+				}
+				// If expression was polluted by raw markdown/scraped content, sanitize it back
+				if (expr.startsWith('+ content') || expr.includes('URL: https://')) {
+					expr = '';
+				}
+				if (expr && existingStep.type === 'set_variable' && existingStep.targetVariable) {
+					const vName = existingStep.targetVariable.replace(/^@/, '');
+					if (!expr.startsWith(vName) && !expr.startsWith(`@${vName}`)) {
+						expr = `${vName} = ${expr.replace(/^=\s*/, '')}`;
+					}
+				}
+				// Strip legacy @ prefixes before variable identifiers
+				expr = expr.replace(/(^|[^a-zA-Z0-9_])@([a-zA-Z_][a-zA-Z0-9_]*)/g, '$1$2');
+				// Unwrap accidental RUN_TICKETS(ticket="CREATE_TICKETS(...)", params={...}) if user clicked CREATE_TICKETS inside ticket=""
+				const accidentalWrap = expr.match(/^(?:([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*)?RUN_TICKETS\(\s*ticket\s*=\s*"((?:CREATE_TICKETS|GET_TICKETS|GET_OUTPUTS)\([\s\S]+\))"\s*(?:,\s*(params\s*=\s*\{[\s\S]*\}))?\s*\)$/i);
+				if (accidentalWrap) {
+					const innerCall = accidentalWrap[2];
+					const trailingParams = accidentalWrap[3];
+					if (trailingParams && !/\bparams\s*=/.test(innerCall) && innerCall.endsWith(')')) {
+						expr = `new_ticket = ${innerCall.slice(0, -1)}, ${trailingParams})`;
 					} else {
-						expr = `${retVar}RUN_TICKETS(ticket="", params={})`;
+						expr = `new_ticket = ${innerCall}`;
 					}
 				}
 				initialExpr = expr;
-				if (!initialExpr.startsWith('@') && existingStep.targetVariable) {
-					initialExpr = `@${existingStep.targetVariable.replace(/^@/, '')} = ${initialExpr}`;
-				}
-			} else if (existingStep.functionName) {
-				const retVar = existingStep.targetVariable ? `@${existingStep.targetVariable.replace(/^@/, '')} = ` : '';
-				if (existingStep.functionName === 'CREATE_TICKETS') {
-					initialExpr = `${retVar || '@new_ticket = '}CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`;
-				} else if (existingStep.functionName === 'GET_TICKETS') {
-					initialExpr = `${retVar || '@ticket_data = '}GET_TICKETS(ticket="")`;
-				} else if (existingStep.functionName === 'GET_PRIMITIVES_CATALOG') {
-					initialExpr = `${retVar || '@catalog = '}GET_PRIMITIVES_CATALOG()`;
-				} else {
-					initialExpr = `${retVar || '@res = '}${existingStep.functionName}(ticket="", params={})`;
-				}
 			}
 		}
 
@@ -7131,15 +8988,49 @@ export class WorkflowEditor extends EditorPane {
 		draftWrapper.onclick = (e) => e.stopPropagation();
 		draftWrapper.ondblclick = (e) => e.stopPropagation();
 
-		// Row 1: Header + Close Button
+		// Row 1: Header + Interpreter Badge + Close Button
 		const headerRow = append(draftWrapper, $('.node-function-header-row'));
 		headerRow.onmousedown = (e) => e.stopPropagation();
 
 		const titleDiv = append(headerRow, $('.node-function-header-title'));
-		const fnTag = append(titleDiv, $('.fn-tag-icon'));
-		fnTag.textContent = '[fx]';
+		const fnTag = append(titleDiv, $('span.fn-tag-icon' + ThemeIcon.asCSSSelector(Codicon.python)));
+		fnTag.style.fontSize = '14px';
+		fnTag.style.color = '#c084fc';
 		const titleText = append(titleDiv, $('.node-function-title-text'));
-		titleText.textContent = 'Function Call Editor';
+		titleText.textContent = 'Python Step Editor';
+
+		const pyEnvChip = append(headerRow, $('span.node-function-py-env-chip'));
+		const rawPyPath: any = this._data?.pythonPath || this._detectedPythonPath || 'python3';
+		const activePyPath = typeof rawPyPath === 'string' ? rawPyPath : String(rawPyPath?.interpreterPath || 'python3');
+		const shortPyLabel = activePyPath.includes('.venv') ? '.venv (Python)' : (activePyPath.split('/').pop() || 'python3');
+		const renderPyEnvChipContent = (labelStr: string) => {
+			clearNode(pyEnvChip);
+			const iconEl = append(pyEnvChip, $('span' + ThemeIcon.asCSSSelector(Codicon.python)));
+			iconEl.style.fontSize = '11px';
+			append(pyEnvChip, $('span', {}, labelStr));
+		};
+		renderPyEnvChipContent(shortPyLabel);
+		pyEnvChip.title = `Active Python Interpreter: ${activePyPath}\n(Click to change Python interpreter)`;
+		pyEnvChip.style.cursor = 'pointer';
+		pyEnvChip.style.marginLeft = '8px';
+		pyEnvChip.style.padding = '1px 7px';
+		pyEnvChip.style.fontSize = '10px';
+		pyEnvChip.style.borderRadius = '3px';
+		pyEnvChip.style.background = 'rgba(56, 189, 248, 0.14)';
+		pyEnvChip.style.border = '1px solid rgba(56, 189, 248, 0.35)';
+		pyEnvChip.style.color = '#7dd3fc';
+		pyEnvChip.style.display = 'inline-flex';
+		pyEnvChip.style.alignItems = 'center';
+		pyEnvChip.style.gap = '4px';
+		pyEnvChip.onmousedown = (e) => { e.stopPropagation(); e.preventDefault(); };
+		pyEnvChip.onclick = (e) => {
+			e.stopPropagation();
+			this._showPythonInterpreterMenu(pyEnvChip, (newPath) => {
+				const lbl = newPath.includes('.venv') ? '.venv (Python)' : (newPath.split('/').pop() || 'python3');
+				renderPyEnvChipContent(lbl);
+				pyEnvChip.title = `Active Python Interpreter: ${newPath}`;
+			});
+		};
 
 		// Optional: Open referenced ticket in Editor Tab button
 		const candidateTicket = (node.imports || [])[0] || (node.pipeline || []).find(s => s.type === 'run_ticket' && s.ticketName);
@@ -7183,13 +9074,21 @@ export class WorkflowEditor extends EditorPane {
 			e.preventDefault();
 		};
 
+		let disposeDrag: (() => void) | null = null;
 		const cleanup = () => {
+			if (disposeDrag) {
+				disposeDrag();
+				disposeDrag = null;
+			}
 			nodeEl.classList.remove('editing-function');
 			if (popover) {
 				popover.remove();
 				popover = null;
 			}
-			if (targetPillElement) targetPillElement.style.display = '';
+			if (targetPillElement) {
+				targetPillElement.classList.remove('editing-active-pill');
+				targetPillElement.style.display = '';
+			}
 			draftWrapper.remove();
 			this._activeFunctionDraftInputEl = null;
 		};
@@ -7199,77 +9098,404 @@ export class WorkflowEditor extends EditorPane {
 			cleanup();
 		};
 
-		// Row 2: Template Chips
+		// Row 2: Template Chips (insert at cursor position instead of overwriting editor)
 		const chipsRow = append(draftWrapper, $('.node-function-templates-row'));
 		chipsRow.onmousedown = (e) => e.stopPropagation();
-		append(chipsRow, $('.node-function-templates-label', {}, 'Templates:'));
+		append(chipsRow, $('.node-function-templates-label', {}, 'Insert:'));
 
-		const applyTemplate = (tpl: string) => {
-			codeArea.value = tpl;
+		const isDefaultPlaceholderLine = (lineStr: string): boolean => {
+			const trimmed = lineStr.trim();
+			return /^(?:res\s*=\s*)?RUN_TICKETS\(\s*ticket\s*=\s*""\s*(?:,\s*params\s*=\s*\{\s*\}\s*)?\)$/i.test(trimmed);
+		};
+
+		const insertSnippetAtCursor = (snippet: string, defaultAssignVar?: string) => {
+			const val = codeArea.value;
+			const selStart = codeArea.selectionStart ?? val.length;
+			const selEnd = codeArea.selectionEnd ?? selStart;
+
+			// If editor only contains the untouched default `res = RUN_TICKETS(ticket="", params={})`, replace it cleanly
+			if (selStart === selEnd && isDefaultPlaceholderLine(val)) {
+				const fullReplacement = defaultAssignVar ? `${defaultAssignVar} = ${snippet}` : snippet;
+				codeArea.value = fullReplacement;
+				codeArea.focus();
+				const quoteIdx = fullReplacement.indexOf('""');
+				if (quoteIdx !== -1) {
+					codeArea.selectionStart = codeArea.selectionEnd = quoteIdx + 1;
+				} else if (fullReplacement.endsWith('()')) {
+					codeArea.selectionStart = codeArea.selectionEnd = fullReplacement.length - 1;
+				} else {
+					codeArea.selectionStart = codeArea.selectionEnd = fullReplacement.length;
+				}
+				updateFieldChips();
+				return;
+			}
+
+			// Check if cursor is currently inside quotes "..." when inserting a statement/function that itself contains quotes
+			let inQuoteChar: string | null = null;
+			for (let i = 0; i < selStart; i++) {
+				const ch = val[i];
+				if (inQuoteChar) {
+					if (ch === inQuoteChar && val[i - 1] !== '\\') {
+						inQuoteChar = null;
+					}
+				} else if (ch === '"' || ch === "'") {
+					inQuoteChar = ch;
+				}
+			}
+
+			// If cursor is inside a string literal and snippet has quotes/newlines, insert on a new line after the current line instead of breaking the string
+			if (inQuoteChar && (snippet.includes('"') || snippet.includes('\n'))) {
+				const lineEndIdx = val.indexOf('\n', selEnd);
+				const insertPos = lineEndIdx === -1 ? val.length : lineEndIdx;
+				const lineStartIdx = val.lastIndexOf('\n', selStart - 1) + 1;
+				const indentMatch = val.substring(lineStartIdx, selStart).match(/^[ \t]*/);
+				const indent = indentMatch ? indentMatch[0] : '';
+				const lineText = defaultAssignVar ? `${defaultAssignVar} = ${snippet}` : snippet;
+				const formatted = '\n' + lineText.split('\n').map(ln => indent + ln).join('\n');
+				codeArea.value = val.substring(0, insertPos) + formatted + val.substring(insertPos);
+				codeArea.focus();
+				const quoteIdx = formatted.indexOf('""');
+				if (quoteIdx !== -1) {
+					codeArea.selectionStart = codeArea.selectionEnd = insertPos + quoteIdx + 1;
+				} else {
+					codeArea.selectionStart = codeArea.selectionEnd = insertPos + formatted.length;
+				}
+				updateFieldChips();
+				return;
+			}
+
+			const before = val.substring(0, selStart);
+			const after = val.substring(selEnd);
+
+			let formattedSnippet = snippet;
+			if (snippet.includes('\n')) {
+				const lineStart = before.lastIndexOf('\n') + 1;
+				const currentLineBefore = before.substring(lineStart);
+				const indentMatch = currentLineBefore.match(/^[ \t]*/);
+				const indent = indentMatch ? indentMatch[0] : '';
+				if (indent) {
+					const lines = snippet.split('\n');
+					formattedSnippet = lines.map((ln, idx) => idx === 0 ? ln : indent + ln).join('\n');
+				}
+			}
+
+			codeArea.value = `${before}${formattedSnippet}${after}`;
 			codeArea.focus();
-			const quoteIdx = tpl.indexOf('""');
+			const quoteIdx = formattedSnippet.indexOf('""');
 			if (quoteIdx !== -1) {
-				codeArea.selectionStart = codeArea.selectionEnd = quoteIdx + 1;
+				codeArea.selectionStart = codeArea.selectionEnd = selStart + quoteIdx + 1;
+			} else if (formattedSnippet.endsWith('()')) {
+				codeArea.selectionStart = codeArea.selectionEnd = selStart + formattedSnippet.length - 1;
 			} else {
-				codeArea.selectionStart = codeArea.selectionEnd = tpl.length;
+				codeArea.selectionStart = codeArea.selectionEnd = selStart + formattedSnippet.length;
 			}
 			updateFieldChips();
 		};
 
-		const addChip = (name: string, template: string) => {
+		const addChip = (name: string, snippet: string, defaultAssignVar?: string) => {
 			const chip = append(chipsRow, $('.node-function-template-chip'));
 			chip.textContent = name;
-			chip.title = `Click to load ${name} template`;
+			chip.title = `Click to insert ${name} at cursor position`;
 			chip.onmousedown = (e) => {
 				e.stopPropagation();
 				e.preventDefault();
 			};
 			chip.onclick = (e) => {
 				e.stopPropagation();
-				applyTemplate(template);
+				insertSnippetAtCursor(snippet, defaultAssignVar);
 			};
 		};
 
-		const ticketVarCandidate = Array.from(availableVars).find(v => /ticket/i.test(v));
-		const startCandidate = Array.from(availableVars).find(v => /^(start|start_offset|idx|index|count|counter|offset)$/i.test(v));
-		let runTicketsTemplate = '@res = RUN_TICKETS(ticket="")';
-		if (ticketVarCandidate && startCandidate) {
-			runTicketsTemplate = `@res = RUN_TICKETS(ticket=@${ticketVarCandidate}, start=@${startCandidate})`;
-		} else if (ticketVarCandidate) {
-			runTicketsTemplate = `@res = RUN_TICKETS(ticket=@${ticketVarCandidate})`;
-		}
+		addChip('RUN_TICKETS', 'RUN_TICKETS(ticket="", params={})', 'res');
+		addChip('CREATE_TICKETS', `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}", params={})`, 'new_ticket');
+		addChip('GET_TICKETS', 'GET_TICKETS(ticket="")', 'ticket_data');
+		addChip('GET_OUTPUTS', 'GET_OUTPUTS(ticket="")', 'out');
+		addChip('DISPLAY', 'DISPLAY()');
+		addChip('var = 0', 'start_offset = 0');
+		addChip('var = []', 'my_positions = []');
+		addChip('var = {}', 'data = {}');
+		addChip('for ...:', 'for item in items:\n    pass');
+		addChip('def ...:', 'def helper(x):\n    return x');
+		addChip('class ...:', 'class Record:\n    def __init__(self, name):\n        self.name = name');
 
-		addChip('RUN_TICKETS', runTicketsTemplate);
-		addChip('CREATE_TICKETS', `@new_ticket = CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`);
-		addChip('GET_TICKETS', ticketVarCandidate ? `@ticket_data = GET_TICKETS(ticket=@${ticketVarCandidate})` : '@ticket_data = GET_TICKETS(ticket="")');
-		addChip('GET_PRIMITIVES_CATALOG', '@catalog = GET_PRIMITIVES_CATALOG()');
-		addChip('DISPLAY', 'DISPLAY(new_ticket)');
-
-		// Row 3: Multiline Code Area (unified return variable + function call)
+		// Row 3: Multiline Code Area (full Python code + built-in functions)
 		const codeRow = append(draftWrapper, $('.node-function-code-row'));
 		codeRow.onmousedown = (e) => e.stopPropagation();
 
+		const codeBackdrop = append(codeRow, $('.node-function-code-backdrop'));
 		const codeArea = append(codeRow, $('textarea.node-function-code-area')) as HTMLTextAreaElement;
-		codeArea.rows = 3;
+		codeArea.rows = 5;
 		codeArea.spellcheck = false;
 		codeArea.value = initialExpr;
-		codeArea.placeholder = 'res = RUN_TICKETS(ticket="", start=0)';
+		codeArea.placeholder = '';
 		codeArea.onmousedown = (e) => e.stopPropagation();
 		codeArea.onclick = (e) => e.stopPropagation();
+
+		const syncFnBackdrop = () => {
+			const hasBadges = this._renderExpressionWithTicketBadges(codeBackdrop, codeArea.value, true);
+			codeRow.classList.toggle('has-ticket-badges', hasBadges);
+		};
+		codeArea.onscroll = () => {
+			codeBackdrop.scrollTop = codeArea.scrollTop;
+		};
+		syncFnBackdrop();
 
 		// Row 4: Parameters Reference
 		const fieldsRow = append(draftWrapper, $('.node-function-fields-row'));
 		fieldsRow.onmousedown = (e) => e.stopPropagation();
 		const fieldsLabel = append(fieldsRow, $('.node-function-fields-label', {}, 'Parameters:'));
 
-		const updateFieldChips = () => {
+		// Row 4b: Available Context Variables & Date/Time Symbols Reference Row
+		const varsRefRow = append(draftWrapper, $('.node-function-templates-row'));
+		varsRefRow.style.marginTop = '1px';
+		varsRefRow.onmousedown = (e) => e.stopPropagation();
+
+		const insertTokenAtCursor = (tokenInsideQuotes: string, tokenOutsideQuotes: string) => {
+			const selStart = codeArea.selectionStart ?? codeArea.value.length;
+			const selEnd = codeArea.selectionEnd ?? selStart;
 			const val = codeArea.value;
-			const typeMatch = val.match(/ticket_type\s*=\s*["']([^"']+)["']/i);
+			const before = val.substring(0, selStart);
+			const after = val.substring(selEnd);
+			let inStringQuote: string | null = null;
+			for (let i = 0; i < before.length; i++) {
+				const ch = before[i];
+				if (inStringQuote) {
+					if (ch === inStringQuote && before[i - 1] !== '\\') {
+						inStringQuote = null;
+					}
+				} else if (ch === '"' || ch === "'") {
+					inStringQuote = ch;
+				}
+			}
+			const insertText = inStringQuote ? tokenInsideQuotes : tokenOutsideQuotes;
+			codeArea.value = `${before}${insertText}${after}`;
+			codeArea.focus();
+			codeArea.selectionStart = codeArea.selectionEnd = selStart + insertText.length;
+			updateFieldChips();
+		};
+
+		let isVarsRefExpanded = false;
+		const renderVarsRefChips = () => {
+			clearNode(varsRefRow);
+			append(varsRefRow, $('.node-function-templates-label', {}, 'Variables:'));
+			const allVarNames = Array.from(availableVars);
+			const maxInitialVars = 4;
+			const visibleVarNames = allVarNames.slice(0, maxInitialVars);
+			const hiddenVarNames = allVarNames.slice(maxInitialVars);
+
+			const renderVarChip = (parentEl: HTMLElement, vName: string) => {
+				const vChip = append(parentEl, $('.node-function-field-chip.standard'));
+				vChip.textContent = vName;
+				vChip.title = `Click to insert Python variable '${vName}' at cursor`;
+				vChip.onmousedown = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+				};
+				vChip.onclick = (e) => {
+					e.stopPropagation();
+					insertTokenAtCursor(`{${vName}}`, vName);
+				};
+			};
+
+			for (const vName of visibleVarNames) {
+				renderVarChip(varsRefRow, vName);
+			}
+
+			if (hiddenVarNames.length > 0) {
+				const hiddenWrap = append(varsRefRow, $('span', {
+					style: isVarsRefExpanded ? 'display: contents;' : 'display: none;'
+				}));
+				for (const vName of hiddenVarNames) {
+					renderVarChip(hiddenWrap, vName);
+				}
+				const moreChip = append(varsRefRow, $('button', {
+					type: 'button',
+					style: 'padding: 1px 7px; font-size: 9.5px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.45); background: rgba(56, 189, 248, 0.08); color: #38bdf8; cursor: pointer; white-space: nowrap;',
+					title: 'Show / hide more variables'
+				}, isVarsRefExpanded ? 'Less' : `+${hiddenVarNames.length} More...`));
+				moreChip.onmousedown = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+				};
+				moreChip.onclick = (e) => {
+					e.stopPropagation();
+					isVarsRefExpanded = !isVarsRefExpanded;
+					hiddenWrap.style.display = isVarsRefExpanded ? 'contents' : 'none';
+					moreChip.textContent = isVarsRefExpanded ? 'Less' : `+${hiddenVarNames.length} More...`;
+				};
+			}
+
+			const dateTimeSymbols = [
+				{ label: 'DATE()', tip: 'Insert current date YYYY-MM-DD (inserts {DATE()} inside quotes, or DATE() outside quotes)' },
+				{ label: 'NOW()', tip: 'Insert current date & time YYYY-MM-DD HH:mm:ss (inserts {NOW()} inside quotes, or NOW() outside quotes)' },
+				{ label: 'TIME()', tip: 'Insert current time HH:mm:ss (inserts {TIME()} inside quotes, or TIME() outside quotes)' }
+			];
+			for (const sym of dateTimeSymbols) {
+				const sChip = append(varsRefRow, $('.node-function-template-chip'));
+				sChip.textContent = sym.label;
+				sChip.title = sym.tip;
+				sChip.onmousedown = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+				};
+				sChip.onclick = (e) => {
+					e.stopPropagation();
+					insertTokenAtCursor(`{${sym.label}}`, sym.label);
+				};
+			}
+		};
+
+		const extractSchemaParamsForType = (typeName: string): { name: string; defaultValue: any }[] => {
+			const extracted: { name: string; defaultValue: any }[] = [];
+			if (!typeName) return extracted;
+			const normTarget = typeName.trim().toLowerCase().replace(/[-_]/g, ' ');
+			const matchedMod = (this._cachedCustomModules || []).find(m =>
+				m.id?.trim().toLowerCase() === typeName.trim().toLowerCase() ||
+				m.name?.trim().toLowerCase() === typeName.trim().toLowerCase() ||
+				m.id?.trim().toLowerCase().replace(/[-_]/g, ' ') === normTarget ||
+				m.name?.trim().toLowerCase().replace(/[-_]/g, ' ') === normTarget
+			);
+			if (matchedMod?.fields && Array.isArray(matchedMod.fields)) {
+				for (const f of matchedMod.fields) {
+					if (f.type === 'parameters' && Array.isArray(f.parameters)) {
+						for (const p of f.parameters) {
+							const pName = (p.name || p.id || '').trim();
+							if (pName && !extracted.some(item => item.name.toLowerCase() === pName.toLowerCase())) {
+								extracted.push({
+									name: pName,
+									defaultValue: p.defaultValue !== undefined && p.defaultValue !== null ? p.defaultValue : ''
+								});
+							}
+						}
+					}
+				}
+			}
+			return extracted;
+		};
+
+		let lastAutoPrefilledType = '';
+		let lastAutoPrefilledDict = '';
+
+		const buildParamsDictLiteral = (specs: { name: string; defaultValue: any }[]): string => {
+			if (specs.length === 0) return '{}';
+			const entries = specs.map(sp => {
+				const isVarRef = typeof sp.defaultValue === 'string' && sp.defaultValue.startsWith('@');
+				const valStr = typeof sp.defaultValue === 'number' || typeof sp.defaultValue === 'boolean'
+					? String(sp.defaultValue)
+					: (isVarRef ? sp.defaultValue.substring(1) : JSON.stringify(String(sp.defaultValue ?? '')));
+				return `"${sp.name}": ${valStr}`;
+			});
+			return `{${entries.join(', ')}}`;
+		};
+
+		const autoPrefillParamsInCode = (targetTypeKey: string, specs: { name: string; defaultValue: any }[]) => {
+			if (specs.length === 0) return;
+			const dictLiteral = buildParamsDictLiteral(specs);
+			const curVal = codeArea.value;
+			const prevSelStart = codeArea.selectionStart ?? curVal.length;
+			const prevSelEnd = codeArea.selectionEnd ?? prevSelStart;
+
+			// 1. If `params={}` is currently empty, pre-fill it with `"key": defaultValue` pairs!
+			const emptyParamsMatch = /\b(params|parameters)\s*=\s*\{\s*\}/.exec(curVal);
+			if (emptyParamsMatch && emptyParamsMatch.index !== undefined) {
+				const keyWord = emptyParamsMatch[1];
+				const replacement = `${keyWord}=${dictLiteral}`;
+				codeArea.value = curVal.substring(0, emptyParamsMatch.index) + replacement + curVal.substring(emptyParamsMatch.index + emptyParamsMatch[0].length);
+				lastAutoPrefilledType = targetTypeKey.toLowerCase();
+				lastAutoPrefilledDict = dictLiteral;
+				if (prevSelStart <= emptyParamsMatch.index) {
+					codeArea.selectionStart = prevSelStart;
+					codeArea.selectionEnd = prevSelEnd;
+				}
+				return;
+			}
+
+			// 2. If user switched `ticket_type` and `params={...}` still equals the previous unmodified auto-prefilled dict, update it to the new type's keys!
+			if (lastAutoPrefilledDict && lastAutoPrefilledType && lastAutoPrefilledType !== targetTypeKey.toLowerCase()) {
+				const idx = curVal.indexOf(lastAutoPrefilledDict);
+				if (idx !== -1) {
+					codeArea.value = curVal.substring(0, idx) + dictLiteral + curVal.substring(idx + lastAutoPrefilledDict.length);
+					lastAutoPrefilledType = targetTypeKey.toLowerCase();
+					lastAutoPrefilledDict = dictLiteral;
+					if (prevSelStart <= idx) {
+						codeArea.selectionStart = prevSelStart;
+						codeArea.selectionEnd = prevSelEnd;
+					}
+					return;
+				}
+			}
+
+			// 3. If CREATE_TICKETS(...) does not have `params=` at all yet (and none of the input keys are passed yet), append `, params={...}` automatically!
+			if (/CREATE_TICKETS\s*\(/i.test(curVal) && !/\b(params|parameters)\s*=/.test(curVal)) {
+				const anyKeyAlreadyPassed = specs.some(sp => new RegExp(`(?:["']${sp.name}["']\\s*:|\\b${sp.name}\\s*=)`, 'i').test(curVal));
+				if (!anyKeyAlreadyPassed) {
+					const lastParen = curVal.lastIndexOf(')');
+					if (lastParen !== -1) {
+						let beforeClose = curVal.substring(0, lastParen).trimEnd();
+						if (beforeClose.endsWith(',')) {
+							beforeClose = beforeClose.slice(0, -1).trimEnd();
+						}
+						const sep = beforeClose.endsWith('(') ? '' : ', ';
+						const insertion = `${sep}params=${dictLiteral}`;
+						codeArea.value = beforeClose + insertion + curVal.substring(lastParen);
+						lastAutoPrefilledType = targetTypeKey.toLowerCase();
+						lastAutoPrefilledDict = dictLiteral;
+						if (prevSelStart <= beforeClose.length) {
+							codeArea.selectionStart = prevSelStart;
+							codeArea.selectionEnd = prevSelEnd;
+						}
+					}
+				}
+			}
+		};
+
+		let isParamsChipsExpanded = false;
+		const updateFieldChips = () => {
+			// Auto-unwrap accidental `RUN_TICKETS(ticket="CREATE_TICKETS(...)", params={})` if present
+			const rawCheck = codeArea.value.trim();
+			const wrapMatch = rawCheck.match(/^(?:([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*)?RUN_TICKETS\(\s*ticket\s*=\s*"((?:CREATE_TICKETS|GET_TICKETS|GET_OUTPUTS)\([\s\S]+\))"\s*(?:,\s*(params\s*=\s*\{[\s\S]*\}))?\s*\)$/i);
+			if (wrapMatch) {
+				const innerCall = wrapMatch[2];
+				const trailingParams = wrapMatch[3];
+				if (trailingParams && !/\bparams\s*=/.test(innerCall) && innerCall.endsWith(')')) {
+					codeArea.value = `new_ticket = ${innerCall.slice(0, -1)}, ${trailingParams})`;
+				} else {
+					codeArea.value = `new_ticket = ${innerCall}`;
+				}
+			}
+
+			const typeMatch = codeArea.value.match(/ticket_type\s*=\s*["']([^"']+)["']/i);
 			const curType = typeMatch ? typeMatch[1] : 'Task';
 
-			fieldsRow.querySelectorAll('.node-function-field-chip, .node-function-field-hint').forEach(el => el.remove());
+			// Pre-discover schema params for CREATE_TICKETS / RUN_TICKETS so we can auto-prefill `params={...}` before rendering backdrop
+			if (/CREATE_TICKETS/i.test(codeArea.value)) {
+				const schemaParams = extractSchemaParamsForType(curType);
+				if (schemaParams.length > 0) {
+					autoPrefillParamsInCode(curType, schemaParams);
+				}
+			} else if (/RUN_TICKETS/i.test(codeArea.value)) {
+				const runTicketIdMatch = codeArea.value.match(/ticket\s*=\s*["']([^"']+)["']/i);
+				if (runTicketIdMatch && runTicketIdMatch[1]) {
+					const snapshots = this._entityPersistenceService.getAllSnapshots();
+					const targetSnap = snapshots.find(s =>
+						s.ticketId?.toLowerCase() === runTicketIdMatch[1].toLowerCase() ||
+						s.entityName?.toLowerCase() === runTicketIdMatch[1].toLowerCase()
+					);
+					if (targetSnap?.entityType) {
+						const schemaParams = extractSchemaParamsForType(targetSnap.entityType);
+						if (schemaParams.length > 0) {
+							autoPrefillParamsInCode(targetSnap.entityType, schemaParams);
+						}
+					}
+				}
+			}
 
-			// Collect all canvas variables available across nodes & pipelines
+			syncFnBackdrop();
+			const val = codeArea.value;
+
+			fieldsRow.querySelectorAll('.node-function-field-chip, .node-function-field-hint, .node-function-more-btn, .node-function-hidden-wrap').forEach(el => el.remove());
+
+			// Collect all canvas variables available across nodes & pipelines + local editor variables
 			availableVars.clear();
 			for (const n of this._data?.nodes || []) {
 				for (const v of this._getNodeVariables(n)) {
@@ -7279,30 +9505,55 @@ export class WorkflowEditor extends EditorPane {
 					if (p.targetVariable) availableVars.add(p.targetVariable.replace(/^@/, ''));
 				}
 			}
+			// Also extract local variables & loop variables from current Python code
+			const localAssignRe = /(?:^|\n)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\+|-|\*|\/)?=(?!=)/g;
+			let lm: RegExpExecArray | null;
+			while ((lm = localAssignRe.exec(val)) !== null) {
+				if (lm[1] && !WorkflowEditor._PYTHON_KEYWORDS.has(lm[1])) {
+					availableVars.add(lm[1]);
+				}
+			}
+			const localForRe = /\bfor\s+([a-zA-Z_][a-zA-Z0-9_]*(?:\s*,\s*[a-zA-Z_][a-zA-Z0-9_]*)*)\s+in\b/g;
+			while ((lm = localForRe.exec(val)) !== null) {
+				for (const part of lm[1].split(',')) {
+					const cleanPart = part.trim();
+					if (cleanPart && !WorkflowEditor._PYTHON_KEYWORDS.has(cleanPart)) {
+						availableVars.add(cleanPart);
+					}
+				}
+			}
+			renderVarsRefChips();
 
 			interface IParamSpec {
 				name: string;
 				defaultValue: any;
 				isStandard?: boolean;
+				isDictParam?: boolean;
 			}
 			const paramSpecs: IParamSpec[] = [];
 
 			if (/CREATE_TICKETS/i.test(val)) {
-				fieldsLabel.textContent = `Parameters (${curType}):`;
+				fieldsLabel.textContent = `Parameters (${curType} Inputs):`;
 
-				// Discover parameters from snapshot customMetadata
+				// 1. Discover Inputs / Parameters directly from Custom Module YAML schema (ICustomModulesService)
+				const schemaParams = extractSchemaParamsForType(curType);
+				for (const sp of schemaParams) {
+					if (!paramSpecs.some(p => p.name.toLowerCase() === sp.name.toLowerCase())) {
+						paramSpecs.push({ name: sp.name, defaultValue: sp.defaultValue, isDictParam: true });
+					}
+				}
+
+				// 2. Also discover parameters from snapshot customMetadata if any exist
 				const snapshots = this._entityPersistenceService.getAllSnapshots();
 				const sample = snapshots.find(s => s.entityType?.toLowerCase() === curType.toLowerCase());
 				if (sample?.customMetadata) {
 					for (const [k, v] of Object.entries(sample.customMetadata)) {
 						if (k === 'flowchartJson' || k === 'title' || k === 'path') continue;
 
-						// If value is a parameters primitive (JSON object e.g. Parameters 1: {"start": 0}), extract child variables!
 						if (typeof v === 'string' && v.trim().startsWith('{') && v.trim().endsWith('}')) {
 							try {
 								const parsed = JSON.parse(v.trim());
 								if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-									// Strictly skip browser, git, prompt, output primitives and other non-parameter objects
 									if (parsed.url !== undefined || parsed.content !== undefined || parsed.credentials !== undefined ||
 										parsed.gitRemoteUrl !== undefined || parsed.gitBranch !== undefined ||
 										parsed.instruction !== undefined || parsed.prompt !== undefined ||
@@ -7316,7 +9567,7 @@ export class WorkflowEditor extends EditorPane {
 										if (typeof pVal === 'string' && pVal.length > 80) continue;
 
 										if (!paramSpecs.some(p => p.name.toLowerCase() === lowerName)) {
-											paramSpecs.push({ name: pName, defaultValue: pVal !== undefined ? pVal : 0 });
+											paramSpecs.push({ name: pName, defaultValue: pVal !== undefined ? pVal : 0, isDictParam: true });
 										}
 									}
 									continue;
@@ -7326,88 +9577,112 @@ export class WorkflowEditor extends EditorPane {
 					}
 				}
 
-				// Built-in / known fallbacks
+				// 3. Built-in / known fallbacks
 				if (curType.toLowerCase() === 'xxx') {
 					if (!paramSpecs.some(p => p.name.toLowerCase() === 'start')) {
-						paramSpecs.push({ name: 'start', defaultValue: 0 });
+						paramSpecs.push({ name: 'start', defaultValue: 0, isDictParam: true });
 					}
 				} else if (curType.toLowerCase() === 'task') {
 					if (!paramSpecs.some(p => p.name.toLowerCase() === 'priority')) {
-						paramSpecs.push({ name: 'priority', defaultValue: 'normal' });
+						paramSpecs.push({ name: 'priority', defaultValue: 'normal', isDictParam: true });
 					}
 					if (!paramSpecs.some(p => p.name.toLowerCase() === 'status')) {
-						paramSpecs.push({ name: 'status', defaultValue: 'todo' });
+						paramSpecs.push({ name: 'status', defaultValue: 'todo', isDictParam: true });
 					}
 				}
 
-				// Standard options
+				// 4. Standard options
 				paramSpecs.push({ name: 'title', defaultValue: '', isStandard: true });
 				paramSpecs.push({ name: 'path', defaultValue: defaultPath, isStandard: true });
-
-				// If canvas has a start or counter variable, suggest it too
-				const startCandidate = Array.from(availableVars).find(v => /^(start|idx|index|count|counter|offset)$/i.test(v));
-				if (startCandidate && !paramSpecs.some(p => p.name.toLowerCase() === 'start')) {
-					paramSpecs.push({ name: 'start', defaultValue: `@${startCandidate}` });
-				}
 			} else if (/RUN_TICKETS/i.test(val)) {
 				fieldsLabel.textContent = 'Parameters (RUN_TICKETS):';
-				// If a ticket variable exists on canvas (e.g. @new_ticket), prioritize suggesting it
 				const ticketVarCandidate = Array.from(availableVars).find(v => /ticket/i.test(v));
 				const ticketDefault = ticketVarCandidate ? `@${ticketVarCandidate}` : '';
 				paramSpecs.push({ name: 'ticket', defaultValue: ticketDefault, isStandard: true });
-				paramSpecs.push({ name: 'tickets', defaultValue: ticketDefault });
 
-				// If a start or counter variable exists on canvas (e.g. @start or @start_offset), prioritize suggesting it
+				// If ticket="TICKET-ID" is specified, also surface that ticket's Inputs / Parameters
+				const runTicketIdMatch = val.match(/ticket\s*=\s*["']([^"']+)["']/i);
+				if (runTicketIdMatch && runTicketIdMatch[1]) {
+					const snapshots = this._entityPersistenceService.getAllSnapshots();
+					const targetSnap = snapshots.find(s =>
+						s.ticketId?.toLowerCase() === runTicketIdMatch[1].toLowerCase() ||
+						s.entityName?.toLowerCase() === runTicketIdMatch[1].toLowerCase()
+					);
+					if (targetSnap?.entityType) {
+						for (const sp of extractSchemaParamsForType(targetSnap.entityType)) {
+							if (!paramSpecs.some(p => p.name.toLowerCase() === sp.name.toLowerCase())) {
+								paramSpecs.push({ name: sp.name, defaultValue: sp.defaultValue, isDictParam: true });
+							}
+						}
+					}
+				}
+
 				const startCandidate = Array.from(availableVars).find(v => /^(start|start_offset|idx|index|count|counter|offset)$/i.test(v));
 				const startDefault = startCandidate ? `@${startCandidate}` : 0;
-				paramSpecs.push({ name: 'start', defaultValue: startDefault, isStandard: true });
-
-				// Also offer any other canvas variables as convenient keyword parameter chips
-				for (const vName of availableVars) {
-					if (vName !== 'ticket' && vName !== 'tickets' && vName !== 'ticket_name' && vName !== 'start' && vName !== ticketVarCandidate && vName !== startCandidate && vName !== 'res') {
-						paramSpecs.push({ name: vName, defaultValue: `@${vName}` });
-					}
+				if (!paramSpecs.some(p => p.name.toLowerCase() === 'start')) {
+					paramSpecs.push({ name: 'start', defaultValue: startDefault, isDictParam: true });
 				}
 			} else if (/GET_TICKETS/i.test(val)) {
 				fieldsLabel.textContent = 'Parameters (GET_TICKETS):';
 				const ticketVarCandidate = Array.from(availableVars).find(v => /ticket/i.test(v));
 				paramSpecs.push({ name: 'ticket', defaultValue: ticketVarCandidate ? `@${ticketVarCandidate}` : '', isStandard: true });
-				paramSpecs.push({ name: 'tickets', defaultValue: ticketVarCandidate ? `@${ticketVarCandidate}` : '' });
+			} else if (/GET_OUTPUTS/i.test(val)) {
+				fieldsLabel.textContent = 'Parameters (GET_OUTPUTS):';
+				const ticketVarCandidate = Array.from(availableVars).find(v => /ticket/i.test(v));
+				paramSpecs.push({ name: 'ticket', defaultValue: ticketVarCandidate ? `@${ticketVarCandidate}` : '', isStandard: true });
+				paramSpecs.push({ name: 'field', defaultValue: '' });
 			} else {
 				fieldsLabel.textContent = 'Parameters:';
 			}
 
 			if (paramSpecs.length === 0) {
 				const hint = append(fieldsRow, $('.node-function-field-hint'));
-				hint.textContent = 'None required';
+				hint.textContent = 'Standard Python syntax enabled (variables, lists, dicts, loops, def, class)';
 				hint.style.fontSize = '9.5px';
 				hint.style.opacity = '0.5';
 				hint.style.fontStyle = 'italic';
 				return;
 			}
 
-			for (const p of paramSpecs) {
-				const isIncluded = new RegExp(`\\b${p.name}\\s*=`, 'i').test(val);
+			const maxInitialParams = 4;
+			const visibleParamSpecs = paramSpecs.slice(0, maxInitialParams);
+			const hiddenParamSpecs = paramSpecs.slice(maxInitialParams);
+
+			const renderParamSpecChip = (parentEl: HTMLElement, p: IParamSpec) => {
+				const dictEntryRegex = new RegExp(`(["']${p.name}["']\\s*:\\s*)(["'][^"']*["']|[^,\\}\\n]+)`, 'i');
+				const kwargEntryRegex = new RegExp(`(\\b${p.name}\\s*=\\s*)(["'][^"']*["']|[^,\\)\\n]+)`, 'i');
+				const dictMatch = dictEntryRegex.exec(val);
+				const kwargMatch = kwargEntryRegex.exec(val);
+				const isIncluded = Boolean(dictMatch || kwargMatch);
+
 				const isVarRef = typeof p.defaultValue === 'string' && p.defaultValue.startsWith('@');
+				const cleanVarRef = isVarRef ? String(p.defaultValue).substring(1) : '';
 				const formattedVal = typeof p.defaultValue === 'number' || typeof p.defaultValue === 'boolean'
 					? String(p.defaultValue)
-					: (isVarRef ? p.defaultValue : `"${p.defaultValue}"`);
+					: (isVarRef ? cleanVarRef : `"${p.defaultValue}"`);
 				const safeDisplayVal = formattedVal.length > 35 ? formattedVal.substring(0, 32) + '..."' : formattedVal;
-				const rawSnippet = typeof p.defaultValue === 'number' || typeof p.defaultValue === 'boolean'
-					? `${p.name}=${p.defaultValue}`
-					: (isVarRef ? `${p.name}=${p.defaultValue}` : `${p.name}="${p.defaultValue}"`);
 
-				const chip = append(fieldsRow, $('.node-function-field-chip'));
+				const chip = append(parentEl, $('.node-function-field-chip'));
 				if (isIncluded) {
 					chip.classList.add('included');
-					chip.textContent = `\u2713 ${p.name} = ${safeDisplayVal}`;
-					chip.title = `${p.name} is currently configured in expression`;
+					const actualValRaw = dictMatch ? dictMatch[2].trim() : (kwargMatch ? kwargMatch[2].trim() : safeDisplayVal);
+					const actualValDisplay = actualValRaw.length > 35 ? actualValRaw.substring(0, 32) + '..."' : actualValRaw;
+					const chipText = dictMatch
+						? `\u2713 "${p.name}": ${actualValDisplay}`
+						: `\u2713 ${p.name} = ${actualValDisplay}`;
+					this._renderExpressionWithTicketBadges(chip, chipText, false);
+					chip.title = `${p.name} is configured (Click to select value and edit or replace with a variable)`;
 				} else {
 					if (p.isStandard) {
 						chip.classList.add('standard');
 					}
-					chip.textContent = `+ ${p.name} = ${safeDisplayVal}`;
-					chip.title = `Click to insert ${p.name} = ${formattedVal}`;
+					const chipText = p.isDictParam
+						? `+ "${p.name}": ${safeDisplayVal}`
+						: `+ ${p.name} = ${safeDisplayVal}`;
+					this._renderExpressionWithTicketBadges(chip, chipText, false);
+					chip.title = p.isDictParam
+						? `Click to insert "${p.name}": ${formattedVal} into params={...}`
+						: `Click to insert ${p.name}=${formattedVal}`;
 				}
 
 				chip.onmousedown = (e) => {
@@ -7418,36 +9693,112 @@ export class WorkflowEditor extends EditorPane {
 				chip.onclick = (e) => {
 					e.stopPropagation();
 					if (isIncluded) {
-						// Focus and highlight parameter in text area
-						const matchIdx = codeArea.value.search(new RegExp(`\\b${p.name}\\s*=`, 'i'));
-						if (matchIdx !== -1) {
+						const curMatch = dictEntryRegex.exec(codeArea.value) || kwargEntryRegex.exec(codeArea.value);
+						if (curMatch && curMatch.index !== undefined) {
+							const valStart = curMatch.index + curMatch[1].length;
+							const valEnd = valStart + curMatch[2].trimEnd().length;
 							codeArea.focus();
-							codeArea.setSelectionRange(matchIdx, matchIdx + p.name.length);
+							codeArea.setSelectionRange(valStart, valEnd);
 						}
+					} else if (p.isDictParam) {
+						// Insert `"name": formattedVal` into `params={...}` dict if present, or create `params={"name": formattedVal}`
+						const paramsDictRe = /\b(params|parameters)\s*=\s*\{([\s\S]*?)\}/;
+						const pm = paramsDictRe.exec(codeArea.value);
+						if (pm && pm.index !== undefined) {
+							const closeBraceIdx = pm.index + pm[0].lastIndexOf('}');
+							let beforeBrace = codeArea.value.substring(0, closeBraceIdx).trimEnd();
+							if (beforeBrace.endsWith(',')) {
+								beforeBrace = beforeBrace.slice(0, -1).trimEnd();
+							}
+							const sep = beforeBrace.endsWith('{') ? '' : ', ';
+							const entryPrefix = `${sep}"${p.name}": `;
+							const afterBrace = codeArea.value.substring(closeBraceIdx);
+							codeArea.value = `${beforeBrace}${entryPrefix}${formattedVal}${afterBrace}`;
+							const valStart = beforeBrace.length + entryPrefix.length;
+							codeArea.focus();
+							codeArea.setSelectionRange(valStart, valStart + formattedVal.length);
+						} else {
+							const lastParen = codeArea.value.lastIndexOf(')');
+							if (lastParen !== -1) {
+								let beforeClose = codeArea.value.substring(0, lastParen).trimEnd();
+								if (beforeClose.endsWith(',')) {
+									beforeClose = beforeClose.slice(0, -1).trimEnd();
+								}
+								const sep = beforeClose.endsWith('(') ? '' : ', ';
+								const dictPrefix = `${sep}params={"${p.name}": `;
+								const afterClose = codeArea.value.substring(lastParen);
+								codeArea.value = `${beforeClose}${dictPrefix}${formattedVal}}${afterClose}`;
+								const valStart = beforeClose.length + dictPrefix.length;
+								codeArea.focus();
+								codeArea.setSelectionRange(valStart, valStart + formattedVal.length);
+							}
+						}
+						updateFieldChips();
 					} else {
-						// Append parameter to call expression
+						// Standard kwarg (title=..., path=...)
 						const lastParen = codeArea.value.lastIndexOf(')');
 						if (lastParen !== -1) {
-							const openParen = codeArea.value.indexOf('(');
-							const inside = openParen !== -1 ? codeArea.value.substring(openParen + 1, lastParen).trim() : '';
-							const prefix = inside.length > 0 ? ', ' : '';
-							codeArea.value = codeArea.value.substring(0, lastParen).trimEnd() + prefix + rawSnippet + codeArea.value.substring(lastParen);
-						} else {
-							codeArea.value += ', ' + rawSnippet;
+							let beforeClose = codeArea.value.substring(0, lastParen).trimEnd();
+							if (beforeClose.endsWith(',')) {
+								beforeClose = beforeClose.slice(0, -1).trimEnd();
+							}
+							const sep = beforeClose.endsWith('(') ? '' : ', ';
+							const paramPrefix = `${sep}${p.name}=`;
+							const afterClose = codeArea.value.substring(lastParen);
+							codeArea.value = `${beforeClose}${paramPrefix}${formattedVal}${afterClose}`;
+							const valStart = beforeClose.length + paramPrefix.length;
+							const valEnd = valStart + formattedVal.length;
+							codeArea.focus();
+							codeArea.setSelectionRange(valStart, valEnd);
 						}
-						codeArea.focus();
 						updateFieldChips();
 					}
+				};
+			};
+
+			for (const p of visibleParamSpecs) {
+				renderParamSpecChip(fieldsRow, p);
+			}
+
+			if (hiddenParamSpecs.length > 0) {
+				const hiddenWrap = append(fieldsRow, $('span.node-function-hidden-wrap', {
+					style: isParamsChipsExpanded ? 'display: contents;' : 'display: none;'
+				}));
+				for (const p of hiddenParamSpecs) {
+					renderParamSpecChip(hiddenWrap, p);
+				}
+				const moreBtn = append(fieldsRow, $('button.node-function-more-btn', {
+					type: 'button',
+					style: 'padding: 1px 7px; font-size: 9.5px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.45); background: rgba(56, 189, 248, 0.08); color: #38bdf8; cursor: pointer; white-space: nowrap;',
+					title: 'Show / hide more parameters'
+				}, isParamsChipsExpanded ? 'Less' : `+${hiddenParamSpecs.length} More...`));
+				moreBtn.onmousedown = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+				};
+				moreBtn.onclick = (e) => {
+					e.stopPropagation();
+					isParamsChipsExpanded = !isParamsChipsExpanded;
+					hiddenWrap.style.display = isParamsChipsExpanded ? 'contents' : 'none';
+					moreBtn.textContent = isParamsChipsExpanded ? 'Less' : `+${hiddenParamSpecs.length} More...`;
 				};
 			}
 		};
 		codeArea.oninput = () => updateFieldChips();
 		updateFieldChips();
+		if (this._workflowUri) {
+			this._customModulesService.getCustomModules(this._workflowUri).then(mods => {
+				if (Array.isArray(mods) && mods.length > 0) {
+					this._cachedCustomModules = mods;
+					updateFieldChips();
+				}
+			}).catch(() => { });
+		}
 
 		// Row 5: Action buttons
 		const footerRow = append(draftWrapper, $('.node-function-footer-row'));
 		footerRow.onmousedown = (e) => e.stopPropagation();
-		append(footerRow, $('.node-function-footer-hint', {}, 'Ctrl+Enter to save, Esc to cancel'));
+		append(footerRow, $('.node-function-footer-hint', {}, 'Enter for newline | Cmd/Ctrl+Enter to save | Esc to cancel'));
 
 		const actionsDiv = append(footerRow, $('.node-function-footer-actions'));
 		const btnCancel = append(actionsDiv, $('button.node-function-btn.node-function-btn-cancel', {}, 'Cancel'));
@@ -7471,13 +9822,15 @@ export class WorkflowEditor extends EditorPane {
 				{ name: 'RUN_TICKETS', detail: 'RUN_TICKETS(ticket="", start=0)', snippet: 'RUN_TICKETS(ticket="", start=0)' },
 				{ name: 'CREATE_TICKETS', detail: `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`, snippet: `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")` },
 				{ name: 'GET_TICKETS', detail: 'GET_TICKETS(ticket="")', snippet: 'GET_TICKETS(ticket="")' },
-				{ name: 'GET_PRIMITIVES_CATALOG', detail: 'GET_PRIMITIVES_CATALOG()', snippet: 'GET_PRIMITIVES_CATALOG()' }
+				{ name: 'GET_OUTPUTS', detail: 'GET_OUTPUTS(ticket_id="")', snippet: 'GET_OUTPUTS(ticket_id="")' },
+				{ name: 'GET_PRIMITIVES_CATALOG', detail: 'GET_PRIMITIVES_CATALOG()', snippet: 'GET_PRIMITIVES_CATALOG()' },
+				{ name: 'DISPLAY', detail: 'DISPLAY(value)', snippet: 'DISPLAY()' }
 			];
 			for (const f of fns) {
 				suggestions.push({
 					name: f.name,
 					type: 'func',
-					badgeLabel: 'FX',
+					badgeLabel: 'PY',
 					detail: f.detail,
 					snippet: f.snippet
 				});
@@ -7539,26 +9892,16 @@ export class WorkflowEditor extends EditorPane {
 		};
 
 		const insertAcItem = (item: { name: string; type: string; snippet?: string }) => {
-			if (item.type === 'func') {
-				codeArea.value = item.snippet || `${item.name}()`;
-				const quoteIdx = codeArea.value.indexOf('""');
-				if (quoteIdx !== -1) {
-					codeArea.selectionStart = codeArea.selectionEnd = quoteIdx + 1;
-				}
-			} else {
-				const selStart = codeArea.selectionStart || 0;
-				const val = codeArea.value;
-				const textBefore = val.slice(0, selStart);
-				const textAfter = val.slice(selStart);
-				const atIdx = textBefore.lastIndexOf('@');
-
-				if (atIdx !== -1) {
-					const needsSpace = textAfter.length > 0 && !textAfter.startsWith(' ') && !textAfter.startsWith(',') && !textAfter.startsWith(')');
-					codeArea.value = textBefore.slice(0, atIdx) + `@${item.name}` + (needsSpace ? ` ${textAfter}` : textAfter);
-				} else {
-					codeArea.value = val + `@${item.name} `;
-				}
-			}
+			const selStart = codeArea.selectionStart || 0;
+			const val = codeArea.value;
+			const textBefore = val.slice(0, selStart);
+			const textAfter = val.slice(selStart);
+			const wordMatch = textBefore.match(/@?([a-zA-Z0-9_\u4e00-\u9fa5]*)$/);
+			const replaceFrom = wordMatch ? selStart - wordMatch[0].length : selStart;
+			const replacement = item.type === 'func' ? (item.snippet || `${item.name}()`) : item.name;
+			codeArea.value = val.slice(0, replaceFrom) + replacement + textAfter;
+			const newCursor = replaceFrom + replacement.length;
+			codeArea.selectionStart = codeArea.selectionEnd = newCursor;
 			closePopover();
 			codeArea.focus();
 			updateFieldChips();
@@ -7567,7 +9910,7 @@ export class WorkflowEditor extends EditorPane {
 		const updateAc = () => {
 			const selStart = codeArea.selectionStart || 0;
 			const textBefore = codeArea.value.slice(0, selStart);
-			const match = textBefore.match(/@?([a-zA-Z0-9_\u4e00-\u9fa5]*)$/);
+			const match = textBefore.match(/@?([a-zA-Z0-9_\u4e00-\u9fa5]{2,})$/);
 			if (!match || !match[1]) {
 				closePopover();
 				return;
@@ -7575,7 +9918,7 @@ export class WorkflowEditor extends EditorPane {
 
 			const query = match[1].toLowerCase();
 			const all = collectSuggestions();
-			currentMatches = all.filter(item => item.name.toLowerCase().includes(query));
+			currentMatches = all.filter(item => item.name.toLowerCase().includes(query) && item.name.toLowerCase() !== query);
 			if (currentMatches.length === 0) {
 				closePopover();
 				return;
@@ -7611,30 +9954,27 @@ export class WorkflowEditor extends EditorPane {
 			if (committed) return;
 			committed = true;
 
-			let rawExpr = codeArea.value.trim();
+			const rawExpr = codeArea.value.replace(/\r\n/g, '\n').trim();
 			if (!rawExpr) {
 				cleanup();
 				return;
 			}
 
-			// Clean multiple lines into single line expression for pipeline step
-			const normalizedExpr = rawExpr.replace(/\r?\n\s*/g, ' ').trim();
+			// Preserve multiline Python code while extracting top-level (depth-0) targetVariable and functionName
+			const assignedVars = WorkflowEditor.extractPythonVariablesFromSource(rawExpr);
 
-			// Parse: e.g. "@new_ticket = CREATE_TICKETS(...)" or "CREATE_TICKETS(...)"
-			let targetVar: string | undefined = undefined;
-			let fnName = 'RUN_TICKETS';
-
-			const m = normalizedExpr.match(/^(?:@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*)?([a-zA-Z0-9_]+)\s*(?:\(([\s\S]*)\))?$/);
-			if (m) {
-				if (m[1]) targetVar = m[1].replace(/^@/, '');
-				if (m[2]) fnName = m[2];
+			const targetVar = assignedVars[0];
+			let fnName = 'PYTHON';
+			const singleLineCallMatch = rawExpr.match(/^(?:@?[a-zA-Z0-9_\u4e00-\u9fa5]+\s*=\s*)?([a-zA-Z0-9_]+)\s*\([\s\S]*\)$/);
+			if (singleLineCallMatch && !rawExpr.includes('\n')) {
+				fnName = singleLineCallMatch[1];
 			}
 
 			if (!node.pipeline) node.pipeline = [];
 
 			if (existingStep) {
 				existingStep.type = 'call_function';
-				existingStep.expression = normalizedExpr;
+				existingStep.expression = rawExpr;
 				existingStep.targetVariable = targetVar;
 				existingStep.functionName = fnName;
 			} else {
@@ -7643,23 +9983,26 @@ export class WorkflowEditor extends EditorPane {
 					type: 'call_function',
 					targetVariable: targetVar,
 					functionName: fnName,
-					expression: normalizedExpr
+					expression: rawExpr
 				};
 				node.pipeline.push(newStep);
 			}
 
-			// Sync output variables (DO NOT overwrite with unparseable expression that breaks python evaluation)
-			if (targetVar) {
+			// Register any assigned variables in node.outputVariables so variable autocomplete & context tracking know about them
+			if (assignedVars.length > 0) {
 				if (!node.outputVariables) node.outputVariables = [];
-				const existingVar = node.outputVariables.find(v => v.name === targetVar);
-				if (existingVar) {
-					existingVar.expression = normalizedExpr;
-				} else {
-					node.outputVariables.push({
-						name: targetVar,
-						initialValue: 'None',
-						expression: normalizedExpr
-					});
+				for (const vName of assignedVars) {
+					const existingVar = node.outputVariables.find(v => v.name.replace(/^@/, '') === vName);
+					if (existingVar) {
+						existingVar.name = vName;
+						existingVar.expression = rawExpr;
+					} else {
+						node.outputVariables.push({
+							name: vName,
+							initialValue: 'None',
+							expression: rawExpr
+						});
+					}
 				}
 			}
 
@@ -7691,7 +10034,7 @@ export class WorkflowEditor extends EditorPane {
 					activeAcIdx = (activeAcIdx - 1 + currentMatches.length) % currentMatches.length;
 					updateAc();
 					return;
-				} else if (e.key === 'Enter' || e.key === 'Tab') {
+				} else if (e.key === 'Tab') {
 					e.preventDefault();
 					insertAcItem(currentMatches[activeAcIdx]);
 					return;
@@ -7702,10 +10045,42 @@ export class WorkflowEditor extends EditorPane {
 				}
 			}
 
-			if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || !e.shiftKey)) {
+			if (e.key === 'Tab') {
+				e.preventDefault();
+				const start = codeArea.selectionStart ?? 0;
+				const end = codeArea.selectionEnd ?? start;
+				codeArea.value = codeArea.value.substring(0, start) + '    ' + codeArea.value.substring(end);
+				codeArea.selectionStart = codeArea.selectionEnd = start + 4;
+				updateFieldChips();
+				return;
+			}
+
+			if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
 				e.preventDefault();
 				commit();
-			} else if (e.key === 'Escape') {
+				return;
+			}
+
+			if (e.key === 'Enter' && !e.ctrlKey && !e.metaKey) {
+				e.preventDefault();
+				const start = codeArea.selectionStart ?? 0;
+				const end = codeArea.selectionEnd ?? start;
+				const before = codeArea.value.substring(0, start);
+				const after = codeArea.value.substring(end);
+				const currentLine = before.split('\n').pop() || '';
+				const indentMatch = currentLine.match(/^(\s*)/);
+				let indent = indentMatch ? indentMatch[1] : '';
+				if (currentLine.trimEnd().endsWith(':')) {
+					indent += '    ';
+				}
+				const ins = '\n' + indent;
+				codeArea.value = before + ins + after;
+				codeArea.selectionStart = codeArea.selectionEnd = start + ins.length;
+				updateFieldChips();
+				return;
+			}
+
+			if (e.key === 'Escape') {
 				e.preventDefault();
 				cleanup();
 			}
@@ -7714,6 +10089,7 @@ export class WorkflowEditor extends EditorPane {
 		codeArea.onkeydown = handleKeyDown;
 
 		nodeEl.appendChild(draftWrapper);
+		disposeDrag = this._setupDraftPopupPositionAndDrag(nodeEl, draftWrapper, headerRow);
 		codeArea.focus();
 		const quoteIdx = codeArea.value.indexOf('""');
 		if (quoteIdx !== -1) {
@@ -7771,8 +10147,8 @@ export class WorkflowEditor extends EditorPane {
 			}
 
 			const incMatch = trimmed.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*(\+\+|--)$/);
-			const opMatch = trimmed.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*(\+=|-=|\*=|\/=|%=)\s*(.+)$/);
-			const assignMatch = trimmed.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*(.+)$/);
+			const opMatch = trimmed.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*(\+=|-=|\*=|\/=|%=)\s*([\s\S]+)$/);
+			const assignMatch = trimmed.match(/^@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*([\s\S]+)$/);
 
 			if (incMatch) {
 				varName = incMatch[1];
@@ -7798,7 +10174,11 @@ export class WorkflowEditor extends EditorPane {
 					imp.name.replace(/[^a-zA-Z0-9_]/g, '_') === cleanRhs
 				);
 
+				const isBuiltinOperatorExpr = /\b(list|dict|set|tuple|date|today|now|datetime|time|timestamp|str|int|float|bool|len|abs|min|max|round)\s*\(/i.test(cleanRhs) ||
+					/^(DATE|TODAY|NOW|DATETIME|TIME|TIMESTAMP)$/.test(cleanRhs);
+
 				const isExpression = !!matchingTicket ||
+					isBuiltinOperatorExpr ||
 					rhs.startsWith('@') ||
 					rhs.startsWith('ticket') ||
 					rhs.includes('+') || rhs.includes('-') || rhs.includes('*') || rhs.includes('/') || rhs.includes('%') ||
@@ -7834,9 +10214,11 @@ export class WorkflowEditor extends EditorPane {
 						expression = targetVar.expression;
 						initialValue = targetVar.initialValue || 'None';
 					} else {
-						// User provided a RHS value/expression for targetVar (e.g. "monitor1 + monitor2", "100", "@ticket")
+						// User provided a RHS value/expression for targetVar (e.g. "monitor1 + monitor2", "100", "@ticket", "DATE()")
 						varName = targetVar.name;
-						if (trimmed.includes('+') || trimmed.includes('-') || trimmed.includes('*') || trimmed.includes('/') || trimmed.includes('%') ||
+						const isBuiltinOp = /\b(list|dict|set|tuple|date|today|now|datetime|time|timestamp|str|int|float|bool|len|abs|min|max|round)\s*\(/i.test(cleanRhs) ||
+							/^(DATE|TODAY|NOW|DATETIME|TIME|TIMESTAMP)$/.test(cleanRhs);
+						if (isBuiltinOp || trimmed.includes('+') || trimmed.includes('-') || trimmed.includes('*') || trimmed.includes('/') || trimmed.includes('%') ||
 							trimmed.startsWith('@') || trimmed.startsWith('ticket') || allKnownVars.has(cleanRhs) || cleanRhs === 'None') {
 							expression = cleanRhs;
 							initialValue = 'None';
@@ -8127,50 +10509,67 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		const dir = this._activeBranchDirection || 'right';
-		const verticalGap = 20;
-		const horizontalGap = 20;
-
-		// Find parent link if current has a parent
-		const parentLink = this._data.links.find(l => l.to === current.id);
-		const parentNode = parentLink ? this._data.nodes.find(n => n.id === parentLink.from) : undefined;
+		const verticalGap = 40;
+		const horizontalGap = 40;
+		const nodeW = current.width || 120;
+		const nodeH = current.height || 50;
 
 		let siblingX = current.x;
 		let siblingY = current.y;
 
-		if (dir === 'right' || dir === 'left') {
-			// Sibling stacks vertically
-			siblingX = current.x;
-			siblingY = current.y + (current.height || 50) + verticalGap;
-			if (parentNode) {
-				const siblingLinks = this._data.links.filter(l => l.from === parentNode.id);
-				const allSiblings = siblingLinks
-					.map(l => this._data.nodes.find(n => n.id === l.to))
-					.filter(Boolean) as IFlowchartNode[];
-				if (allSiblings.length > 0) {
-					const maxBottom = Math.max(...allSiblings.map(s => s.y + (s.height || 50)), current.y + (current.height || 50));
-					siblingY = maxBottom + verticalGap;
-				}
-			}
-		} else {
-			// For vertical branching (down/up), sibling stacks horizontally
+		if (dir === 'right') {
+			siblingX = current.x + nodeW + horizontalGap;
 			siblingY = current.y;
-			siblingX = current.x + (current.width || 120) + horizontalGap;
-			if (parentNode) {
-				const siblingLinks = this._data.links.filter(l => l.from === parentNode.id);
-				const allSiblings = siblingLinks
-					.map(l => this._data.nodes.find(n => n.id === l.to))
-					.filter(Boolean) as IFlowchartNode[];
-				if (allSiblings.length > 0) {
-					const maxRight = Math.max(...allSiblings.map(s => s.x + (s.width || 120)), current.x + (current.width || 120));
-					siblingX = maxRight + horizontalGap;
+		} else if (dir === 'bottom') {
+			siblingX = current.x;
+			siblingY = current.y + nodeH + verticalGap;
+		} else if (dir === 'left') {
+			siblingX = Math.max(20, current.x - nodeW - horizontalGap);
+			siblingY = current.y;
+		} else if (dir === 'top') {
+			siblingX = current.x;
+			siblingY = Math.max(20, current.y - nodeH - verticalGap);
+		}
+
+		// Step along the active direction `dir` to avoid overlapping any existing node on canvas
+		const margin = 20;
+		for (let i = 0; i < 60; i++) {
+			const obstacle = this._data.nodes.find(other => {
+				if (other.id === current.id) {
+					return false;
+				}
+				const otherW = other.width || 120;
+				const otherH = other.height || 50;
+				return (
+					siblingX < other.x + otherW + margin &&
+					siblingX + nodeW + margin > other.x &&
+					siblingY < other.y + otherH + margin &&
+					siblingY + nodeH + margin > other.y
+				);
+			});
+			if (!obstacle) {
+				break;
+			}
+			const obstacleW = obstacle.width || 120;
+			const obstacleH = obstacle.height || 50;
+			if (dir === 'right') {
+				siblingX = obstacle.x + obstacleW + horizontalGap;
+			} else if (dir === 'bottom') {
+				siblingY = obstacle.y + obstacleH + verticalGap;
+			} else if (dir === 'left') {
+				if (obstacle.x - nodeW - horizontalGap >= 20) {
+					siblingX = obstacle.x - nodeW - horizontalGap;
+				} else {
+					siblingY = obstacle.y + obstacleH + verticalGap;
+				}
+			} else if (dir === 'top') {
+				if (obstacle.y - nodeH - verticalGap >= 20) {
+					siblingY = obstacle.y - nodeH - verticalGap;
+				} else {
+					siblingX = obstacle.x + obstacleW + horizontalGap;
 				}
 			}
 		}
-
-		// Smart collision avoidance against all existing canvas nodes
-		const safePos = this._findNonOverlappingPosition(siblingX, siblingY, current.width || 120, current.height || 50, dir, current.id);
-		siblingX = safePos.x;
-		siblingY = safePos.y;
 
 		const newId = `node_${Date.now()}`;
 		const newSibling: IFlowchartNode = {
@@ -8178,8 +10577,8 @@ export class WorkflowEditor extends EditorPane {
 			type: current.type || 'round-rect',
 			x: siblingX,
 			y: siblingY,
-			width: current.width || 120,
-			height: current.height || 50,
+			width: nodeW,
+			height: nodeH,
 			label: 'New Node',
 			color: current.color || this._activeNodeColor,
 			textColor: current.textColor || this._activeTextColor,
@@ -8192,20 +10591,6 @@ export class WorkflowEditor extends EditorPane {
 		};
 
 		this._data.nodes.push(newSibling);
-
-		if (parentNode && parentLink) {
-			const newLink: IFlowchartLink = {
-				id: `link_${Date.now()}`,
-				from: parentNode.id,
-				fromPort: parentLink.fromPort || (dir === 'bottom' ? 'bottom' : (dir === 'top' ? 'top' : (dir === 'left' ? 'left' : 'right'))),
-				to: newId,
-				toPort: parentLink.toPort || (dir === 'bottom' ? 'top' : (dir === 'top' ? 'bottom' : (dir === 'left' ? 'right' : 'left'))),
-				style: parentLink.style || this._activeLinkStyle || 'arrow-single',
-				routing: parentLink.routing || this._activeRoutingMode || 'orthogonal',
-				color: parentNode.color || current.color || this._activeLineColor || '#0d9488'
-			};
-			this._data.links.push(newLink);
-		}
 
 		this._saveFlowchartData();
 
@@ -8268,7 +10653,7 @@ export class WorkflowEditor extends EditorPane {
 			width = 60;
 			height = 60;
 		} else if (type === 'diamond') {
-			width = 80;
+			width = 110;
 			height = 80;
 		}
 
@@ -8307,7 +10692,7 @@ export class WorkflowEditor extends EditorPane {
 			width = 60;
 			height = 60;
 		} else if (type === 'diamond') {
-			width = 80;
+			width = 110;
 			height = 80;
 		}
 
@@ -8439,6 +10824,25 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
+		if (this._isResizingLinkLabel) {
+			const link = this._data.links.find(l => l.id === this._isResizingLinkLabel);
+			if (link) {
+				const dw = (e.clientX - this._resizeLinkLabelStartX) / this._zoomLevel;
+				const dh = (e.clientY - this._resizeLinkLabelStartY) / this._zoomLevel;
+				link.labelWidth = Math.max(36, Math.round(this._resizeLinkLabelStartWidth + dw));
+				link.labelHeight = Math.max(20, Math.round(this._resizeLinkLabelStartHeight + dh));
+
+				const labelEl = this._linkDeletesContainer?.querySelector(`.workflow-link-label[data-link-id="${link.id}"]`) as HTMLElement;
+				if (labelEl) {
+					labelEl.style.width = `${link.labelWidth}px`;
+					labelEl.style.maxWidth = 'none';
+					labelEl.style.height = `${link.labelHeight}px`;
+					labelEl.style.maxHeight = 'none';
+				}
+			}
+			return;
+		}
+
 		if (this._isDraggingLinkLabel) {
 			if (!this._dragLabelHasMoved && Math.hypot(e.clientX - this._dragLabelStartX, e.clientY - this._dragLabelStartY) > 3) {
 				this._dragLabelHasMoved = true;
@@ -8461,12 +10865,87 @@ export class WorkflowEditor extends EditorPane {
 					const startCoords = this._getPortCoords(fromNode, fromPort);
 					const endCoords = this._getPortCoords(toNode, toPort);
 					const routingMode = link.routing || this._activeRoutingMode || 'orthogonal';
-					const pt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, t);
+					const pt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, t, link.waypoints);
 
 					const labelEl = this._linkDeletesContainer?.querySelector(`.workflow-link-label[data-link-id="${link.id}"]`) as HTMLElement;
 					if (labelEl) {
 						labelEl.style.left = `${pt.x}px`;
 						labelEl.style.top = `${pt.y}px`;
+					}
+				}
+			}
+			return;
+		}
+
+		if (this._isDraggingLinkSegment) {
+			const dxClient = e.clientX - this._dragLinkSegmentStartX;
+			const dyClient = e.clientY - this._dragLinkSegmentStartY;
+			if (!this._dragLinkSegmentHasMoved && Math.hypot(dxClient, dyClient) > 3) {
+				this._dragLinkSegmentHasMoved = true;
+			}
+			if (!this._dragLinkSegmentHasMoved) {
+				return;
+			}
+
+			const link = this._data.links.find(l => l.id === this._isDraggingLinkSegment);
+			if (link && this._canvas) {
+				const fromNode = this._data.nodes.find(n => n.id === link.from);
+				const toNode = this._data.nodes.find(n => n.id === link.to);
+				if (fromNode && toNode) {
+					const closest = this._getClosestPorts(fromNode, toNode);
+					const fromPort = link.fromPort || closest.fromPort;
+					const toPort = link.toPort || closest.toPort;
+
+					if (!this._dragLinkSegmentPrepared) {
+						let chosenIdx = this._dragLinkSegmentInitialIndex;
+						const basePts = this._dragLinkSegmentWaypoints;
+						if (chosenIdx >= 0 && chosenIdx < basePts.length - 1) {
+							const pA = basePts[chosenIdx];
+							const pB = basePts[chosenIdx + 1];
+							const segIsVert = Math.abs(pA.x - pB.x) <= Math.abs(pA.y - pB.y);
+							const wantHorizontalMove = Math.abs(dxClient) >= Math.abs(dyClient);
+							if (segIsVert !== wantHorizontalMove) {
+								const candidates: { idx: number; dist: number }[] = [];
+								if (chosenIdx - 1 >= 0) {
+									const distPrev = Math.hypot(this._dragLinkSegmentCanvasX - pA.x, this._dragLinkSegmentCanvasY - pA.y);
+									candidates.push({ idx: chosenIdx - 1, dist: distPrev });
+								}
+								if (chosenIdx + 1 < basePts.length - 1) {
+									const distNext = Math.hypot(this._dragLinkSegmentCanvasX - pB.x, this._dragLinkSegmentCanvasY - pB.y);
+									candidates.push({ idx: chosenIdx + 1, dist: distNext });
+								}
+								candidates.sort((a, b) => a.dist - b.dist);
+								if (candidates.length > 0 && candidates[0].dist <= 80) {
+									chosenIdx = candidates[0].idx;
+								}
+							}
+						}
+						const prep = this._prepareSegmentDragWaypoints(basePts, chosenIdx, fromPort, toPort);
+						this._dragLinkSegmentWaypoints = prep.pts;
+						this._dragLinkSegmentIndex = prep.segIdx;
+						this._dragLinkSegmentIsVertical = prep.isVertical;
+						this._dragLinkSegmentPrepared = true;
+					}
+
+					const rect = this._canvas.getBoundingClientRect();
+					const mouseX = (e.clientX - rect.left) / this._zoomLevel;
+					const mouseY = (e.clientY - rect.top) / this._zoomLevel;
+					const grid = 5;
+					const snappedX = Math.round(mouseX / grid) * grid;
+					const snappedY = Math.round(mouseY / grid) * grid;
+
+					const pts = this._dragLinkSegmentWaypoints.map(p => ({ x: p.x, y: p.y }));
+					const idx = this._dragLinkSegmentIndex;
+					if (idx >= 0 && idx < pts.length - 1) {
+						if (this._dragLinkSegmentIsVertical) {
+							pts[idx].x = snappedX;
+							pts[idx + 1].x = snappedX;
+						} else {
+							pts[idx].y = snappedY;
+							pts[idx + 1].y = snappedY;
+						}
+						link.waypoints = pts.slice(1, -1);
+						this._drawLinks();
 					}
 				}
 			}
@@ -8581,20 +11060,26 @@ export class WorkflowEditor extends EditorPane {
 			this._selectionBoxEl.style.width = `${width}px`;
 			this._selectionBoxEl.style.height = `${height}px`;
 
-			// Calculate overlapping nodes
+			// Calculate overlapping nodes (preserve base selection when Shift/Ctrl/Cmd was held, and order newly boxed nodes top-to-bottom)
 			this._selectedNodeIds.clear();
-			for (const node of this._data.nodes) {
-				const overlap = !(node.x + node.width < x_start ||
+			for (const baseId of this._selectBoxBaseNodeIds) {
+				this._selectedNodeIds.add(baseId);
+			}
+			const overlappingNodes = this._data.nodes.filter(node =>
+				!(node.x + node.width < x_start ||
 					node.x > x_start + width ||
 					node.y + node.height < y_start ||
-					node.y > y_start + height);
-				if (overlap) {
-					this._selectedNodeIds.add(node.id);
-				}
+					node.y > y_start + height)
+			).sort((a, b) => (a.y - b.y) || (a.x - b.x));
+			for (const node of overlappingNodes) {
+				this._selectedNodeIds.add(node.id);
 			}
 
 			// Calculate overlapping links (midpoint overlaps)
 			this._selectedLinkIds.clear();
+			for (const baseLinkId of this._selectBoxBaseLinkIds) {
+				this._selectedLinkIds.add(baseLinkId);
+			}
 			for (const link of this._data.links) {
 				const fromNode = this._data.nodes.find(n => n.id === link.from);
 				const toNode = this._data.nodes.find(n => n.id === link.to);
@@ -8665,6 +11150,49 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _onMouseUp(e: MouseEvent): void {
+		if (this._isResizingLinkLabel) {
+			this._isResizingLinkLabel = null;
+			this._saveFlowchartData();
+			this._drawLinks();
+			return;
+		}
+
+		if (this._isDraggingLinkSegment) {
+			const linkId = this._isDraggingLinkSegment;
+			const hasMoved = this._dragLinkSegmentHasMoved;
+			this._isDraggingLinkSegment = null;
+			this._dragLinkSegmentHasMoved = false;
+			this._dragLinkSegmentPrepared = false;
+			this._dragLinkSegmentWaypoints = [];
+
+			if (hasMoved) {
+				this._saveFlowchartData();
+				this._drawLinks();
+			} else {
+				const isMultiKey = e && (e.shiftKey || e.ctrlKey || e.metaKey);
+				if (!isMultiKey) {
+					this._selectedLinkIds.clear();
+					this._selectedNodeIds.clear();
+					this._selectedLinkIds.add(linkId);
+				} else {
+					if (this._selectedLinkIds.has(linkId)) {
+						this._selectedLinkIds.delete(linkId);
+					} else {
+						this._selectedLinkIds.add(linkId);
+					}
+				}
+				this._isInspectorCollapsed = false;
+				this._inspectorEl?.classList.remove('collapsed');
+				this._inspectorTogglePill?.classList.add('hidden');
+				this._renderNodes();
+				this._drawLinks();
+				if (this._inspectorEl) {
+					this._renderInspector(this._inspectorEl);
+				}
+			}
+			return;
+		}
+
 		if (this._isDraggingLinkLabel) {
 			const linkId = this._isDraggingLinkLabel;
 			const hasMoved = this._dragLabelHasMoved;
@@ -8951,8 +11479,29 @@ export class WorkflowEditor extends EditorPane {
 		fromPort: 'top' | 'right' | 'bottom' | 'left',
 		x2: number,
 		y2: number,
-		toPort: 'top' | 'right' | 'bottom' | 'left'
+		toPort: 'top' | 'right' | 'bottom' | 'left',
+		customWaypoints?: { x: number; y: number }[]
 	): { x: number; y: number }[] {
+		if (customWaypoints && customWaypoints.length >= 2) {
+			const pts: { x: number; y: number }[] = [
+				{ x: x1, y: y1 },
+				...customWaypoints.map(p => ({ x: p.x, y: p.y })),
+				{ x: x2, y: y2 }
+			];
+			if (fromPort === 'left' || fromPort === 'right') {
+				pts[1].y = y1;
+			} else {
+				pts[1].x = x1;
+			}
+			const lastInteriorIdx = pts.length - 2;
+			if (toPort === 'left' || toPort === 'right') {
+				pts[lastInteriorIdx].y = y2;
+			} else {
+				pts[lastInteriorIdx].x = x2;
+			}
+			return pts;
+		}
+
 		const offset = 20;
 		const alignSnapTolerance = 12;
 
@@ -9161,10 +11710,11 @@ export class WorkflowEditor extends EditorPane {
 		x2: number,
 		y2: number,
 		toPort: 'top' | 'right' | 'bottom' | 'left',
-		mode: 'orthogonal' | 'curved'
+		mode: 'orthogonal' | 'curved',
+		customWaypoints?: { x: number; y: number }[]
 	): string {
 		if (mode === 'orthogonal') {
-			const waypoints = this._computeOrthogonalWaypoints(x1, y1, fromPort, x2, y2, toPort);
+			const waypoints = this._computeOrthogonalWaypoints(x1, y1, fromPort, x2, y2, toPort, customWaypoints);
 			return this._pointsToSvgPath(waypoints, 5);
 		} else {
 			const dx = x2 - x1;
@@ -9193,18 +11743,19 @@ export class WorkflowEditor extends EditorPane {
 
 		const routingMode = link.routing || this._activeRoutingMode || 'orthogonal';
 		const t = typeof link.labelPosition === 'number' ? link.labelPosition : 0.5;
-		return this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, t);
+		return this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, t, link.waypoints);
 	}
 
 	private _computePointFromCoords(
 		x1: number, y1: number, fromPort: 'top' | 'right' | 'bottom' | 'left',
 		x2: number, y2: number, toPort: 'top' | 'right' | 'bottom' | 'left',
 		routingMode: 'orthogonal' | 'curved',
-		t: number = 0.5
+		t: number = 0.5,
+		customWaypoints?: { x: number; y: number }[]
 	): { x: number; y: number } {
 		t = Math.max(0, Math.min(1, t));
 		if (routingMode === 'orthogonal') {
-			const waypoints = this._computeOrthogonalWaypoints(x1, y1, fromPort, x2, y2, toPort);
+			const waypoints = this._computeOrthogonalWaypoints(x1, y1, fromPort, x2, y2, toPort, customWaypoints);
 			return this._getOrthogonalPointAtT(waypoints, t);
 		} else {
 			const dx = x2 - x1;
@@ -9232,9 +11783,10 @@ export class WorkflowEditor extends EditorPane {
 	private _computeMidpointFromCoords(
 		x1: number, y1: number, fromPort: 'top' | 'right' | 'bottom' | 'left',
 		x2: number, y2: number, toPort: 'top' | 'right' | 'bottom' | 'left',
-		routingMode: 'orthogonal' | 'curved'
+		routingMode: 'orthogonal' | 'curved',
+		customWaypoints?: { x: number; y: number }[]
 	): { x: number; y: number } {
-		return this._computePointFromCoords(x1, y1, fromPort, x2, y2, toPort, routingMode, 0.5);
+		return this._computePointFromCoords(x1, y1, fromPort, x2, y2, toPort, routingMode, 0.5, customWaypoints);
 	}
 
 	private _getOrthogonalPointAtT(waypoints: { x: number; y: number }[], t: number): { x: number; y: number } {
@@ -9280,7 +11832,7 @@ export class WorkflowEditor extends EditorPane {
 		const routingMode = link.routing || this._activeRoutingMode || 'orthogonal';
 
 		if (routingMode === 'orthogonal') {
-			const waypoints = this._computeOrthogonalWaypoints(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort);
+			const waypoints = this._computeOrthogonalWaypoints(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, link.waypoints);
 			if (waypoints.length < 2) return 0.5;
 
 			let totalLen = 0;
@@ -9331,7 +11883,7 @@ export class WorkflowEditor extends EditorPane {
 			const samples = 100;
 			for (let i = 0; i <= samples; i++) {
 				const t = i / samples;
-				const pt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, t);
+				const pt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, t, link.waypoints);
 				const distSq = (px - pt.x) * (px - pt.x) + (py - pt.y) * (py - pt.y);
 				if (distSq < bestDistSq) {
 					bestDistSq = distSq;
@@ -9339,6 +11891,107 @@ export class WorkflowEditor extends EditorPane {
 				}
 			}
 			return Math.max(0.05, Math.min(0.95, Number(bestT.toFixed(3))));
+		}
+	}
+
+	private _findClosestSegmentOnWaypoints(waypoints: { x: number; y: number }[], px: number, py: number): number {
+		let bestIdx = 0;
+		let bestDistSq = Infinity;
+		for (let i = 0; i < waypoints.length - 1; i++) {
+			const ax = waypoints[i].x;
+			const ay = waypoints[i].y;
+			const bx = waypoints[i + 1].x;
+			const by = waypoints[i + 1].y;
+			const dx = bx - ax;
+			const dy = by - ay;
+			const lenSq = dx * dx + dy * dy;
+			if (lenSq < 1) continue;
+			let u = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+			u = Math.max(0, Math.min(1, u));
+			const qx = ax + u * dx;
+			const qy = ay + u * dy;
+			const distSq = (px - qx) * (px - qx) + (py - qy) * (py - qy);
+			if (distSq < bestDistSq) {
+				bestDistSq = distSq;
+				bestIdx = i;
+			}
+		}
+		return bestIdx;
+	}
+
+	private _prepareSegmentDragWaypoints(
+		pts: { x: number; y: number }[],
+		segIdx: number,
+		fromPort: 'top' | 'right' | 'bottom' | 'left',
+		toPort: 'top' | 'right' | 'bottom' | 'left'
+	): { pts: { x: number; y: number }[]; segIdx: number; isVertical: boolean } {
+		const copy = pts.map(p => ({ x: p.x, y: p.y }));
+		let idx = Math.max(0, Math.min(copy.length - 2, segIdx));
+		const pA = copy[idx];
+		const pB = copy[idx + 1];
+		const isVertical = Math.abs(pA.x - pB.x) <= Math.abs(pA.y - pB.y);
+
+		if (idx === 0) {
+			const stubDist = 20;
+			let sx = copy[0].x;
+			let sy = copy[0].y;
+			if (fromPort === 'right') sx += stubDist;
+			else if (fromPort === 'left') sx -= stubDist;
+			else if (fromPort === 'bottom') sy += stubDist;
+			else if (fromPort === 'top') sy -= stubDist;
+			copy.splice(1, 0, { x: sx, y: sy }, { x: sx, y: sy });
+			idx += 2;
+		}
+		if (idx === copy.length - 2) {
+			const stubDist = 20;
+			const last = copy[copy.length - 1];
+			let ex = last.x;
+			let ey = last.y;
+			if (toPort === 'left') ex -= stubDist;
+			else if (toPort === 'right') ex += stubDist;
+			else if (toPort === 'top') ey -= stubDist;
+			else if (toPort === 'bottom') ey += stubDist;
+			copy.splice(copy.length - 1, 0, { x: ex, y: ey }, { x: ex, y: ey });
+		}
+
+		return { pts: copy, segIdx: idx, isVertical };
+	}
+
+	private _startLinkSegmentDrag(
+		e: MouseEvent,
+		link: IFlowchartLink,
+		baseWaypoints: { x: number; y: number }[],
+		segIdx: number,
+		canvasX: number,
+		canvasY: number,
+		isExplicitHandle: boolean
+	): void {
+		if (e.button !== 0) return;
+		e.stopPropagation();
+		this._isDraggingLinkSegment = link.id;
+		this._dragLinkSegmentInitialIndex = segIdx;
+		this._dragLinkSegmentIndex = segIdx;
+		this._dragLinkSegmentWaypoints = baseWaypoints.map(p => ({ x: p.x, y: p.y }));
+		this._dragLinkSegmentStartX = e.clientX;
+		this._dragLinkSegmentStartY = e.clientY;
+		this._dragLinkSegmentCanvasX = canvasX;
+		this._dragLinkSegmentCanvasY = canvasY;
+		this._dragLinkSegmentHasMoved = false;
+		this._dragLinkSegmentPrepared = false;
+
+		if (isExplicitHandle) {
+			const fromNode = this._data.nodes.find(n => n.id === link.from);
+			const toNode = this._data.nodes.find(n => n.id === link.to);
+			if (fromNode && toNode) {
+				const closest = this._getClosestPorts(fromNode, toNode);
+				const fromPort = link.fromPort || closest.fromPort;
+				const toPort = link.toPort || closest.toPort;
+				const prep = this._prepareSegmentDragWaypoints(this._dragLinkSegmentWaypoints, segIdx, fromPort, toPort);
+				this._dragLinkSegmentWaypoints = prep.pts;
+				this._dragLinkSegmentIndex = prep.segIdx;
+				this._dragLinkSegmentIsVertical = prep.isVertical;
+				this._dragLinkSegmentPrepared = true;
+			}
 		}
 	}
 
@@ -9580,10 +12233,14 @@ export class WorkflowEditor extends EditorPane {
 	private _drawLinks(): void {
 		if (!this._svgOverlay || !this._linkDeletesContainer) return;
 
-		// Clear previous lines and handles
-		const lines = this._svgOverlay.querySelectorAll('.workflow-connection-line');
+		// Clear previous lines and handles (preserve any open inline link condition editor)
+		const lines = this._svgOverlay.querySelectorAll('.workflow-connection-line, .workflow-connection-hit-area');
 		lines.forEach(l => l.remove());
+		const activeLinkEditor = this._linkDeletesContainer.querySelector('.workflow-link-label-editor-wrapper');
 		clearNode(this._linkDeletesContainer);
+		if (activeLinkEditor) {
+			this._linkDeletesContainer.appendChild(activeLinkEditor);
+		}
 
 		if (!this._data || !Array.isArray(this._data.links) || !Array.isArray(this._data.nodes)) {
 			return;
@@ -9676,7 +12333,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Use link-specific routing or fallback to active flowchart routing mode
 			const routingMode = link.routing || this._activeRoutingMode || 'orthogonal';
-			const d = this._getLinkPathData(x1, y1, fromPort, x2, y2, toPort, routingMode);
+			const d = this._getLinkPathData(x1, y1, fromPort, x2, y2, toPort, routingMode, link.waypoints);
 			path.setAttribute('d', d);
 
 			// Link Styles markers (Arrow marker endpoint)
@@ -9699,28 +12356,65 @@ export class WorkflowEditor extends EditorPane {
 				path.setAttribute('marker-end', `url(#${markerColorId})`);
 			}
 
+			// Wide transparent hit area so users can easily grab and drag any line segment
+			const hitPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+			hitPath.classList.add('workflow-connection-hit-area');
+			hitPath.setAttribute('d', d);
+
 			this._svgOverlay.appendChild(path);
+			this._svgOverlay.appendChild(hitPath);
 
 			// Calculate midpoint for labels and double click editor
-			const midPoint = this._computeMidpointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode);
+			const midPoint = this._computeMidpointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, link.waypoints);
 
-			// Double click connection line to edit/add text label
-			path.ondblclick = (e) => {
+			const onLineDblClick = (e: MouseEvent) => {
 				e.stopPropagation();
 				e.preventDefault();
 				this._showLinkInlineEditor(link, midPoint.x, midPoint.y);
 			};
+			path.ondblclick = onLineDblClick;
+			hitPath.ondblclick = onLineDblClick;
 
-			// Right Click connection context menu
-			path.oncontextmenu = (e) => {
+			const onLineContextMenu = (e: MouseEvent) => {
 				e.preventDefault();
 				e.stopPropagation();
 				this._showContextMenu(e.clientX, e.clientY, 'link', link.id);
 			};
+			path.oncontextmenu = onLineContextMenu;
+			hitPath.oncontextmenu = onLineContextMenu;
 
-			// Connection line selection (click)
-			path.onclick = (e) => {
+			const onLineMouseDown = (e: MouseEvent) => {
+				if (e.button !== 0) return;
+				const now = Date.now();
+				const lastLineClick = (link as any)._lastLineClickTime || 0;
+				(link as any)._lastLineClickTime = now;
+				if (now - lastLineClick < 350) {
+					(link as any)._lastLineClickTime = 0;
+					this._isDraggingLinkSegment = null;
+					e.stopPropagation();
+					e.preventDefault();
+					const curMid = this._computeMidpointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, link.waypoints);
+					this._showLinkInlineEditor(link, curMid.x, curMid.y);
+					return;
+				}
+				if (routingMode === 'orthogonal' && this._canvas) {
+					const rect = this._canvas.getBoundingClientRect();
+					const mouseX = (e.clientX - rect.left) / this._zoomLevel;
+					const mouseY = (e.clientY - rect.top) / this._zoomLevel;
+					const orthoPts = this._computeOrthogonalWaypoints(x1, y1, fromPort, x2, y2, toPort, link.waypoints);
+					const segIdx = this._findClosestSegmentOnWaypoints(orthoPts, mouseX, mouseY);
+					this._startLinkSegmentDrag(e, link, orthoPts, segIdx, mouseX, mouseY, false);
+				}
+			};
+			path.onmousedown = onLineMouseDown;
+			hitPath.onmousedown = onLineMouseDown;
+
+			const onLineClick = (e: MouseEvent) => {
 				e.stopPropagation();
+				if (routingMode === 'orthogonal') {
+					// Handled in _onMouseUp when _isDraggingLinkSegment finishes without moving
+					return;
+				}
 				const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey;
 				if (!isMultiKey) {
 					this._selectedLinkIds.clear();
@@ -9742,25 +12436,57 @@ export class WorkflowEditor extends EditorPane {
 					this._renderInspector(this._inspectorEl);
 				}
 			};
+			path.onclick = onLineClick;
+			hitPath.onclick = onLineClick;
 
 			// Render text label badge if present
+			let renderedLabelPt: { x: number; y: number } | undefined;
 			if (link.label) {
 				const labelPos = typeof link.labelPosition === 'number' ? link.labelPosition : 0.5;
-				const labelPt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, labelPos);
+				const labelPt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, labelPos, link.waypoints);
+				renderedLabelPt = labelPt;
 
 				const dx = endCoords.x - startCoords.x;
 				const dy = endCoords.y - startCoords.y;
 				const linkDist = Math.hypot(dx, dy);
-				// Max width bound: bounded between 90px and 160px, up to ~65% of node-to-node distance
-				const maxLabelWidth = Math.max(90, Math.min(160, Math.round(linkDist * 0.65)));
+				// Generous default max width so condition expressions display more content without prematurely wrapping/truncating
+				const maxLabelWidth = Math.max(220, Math.min(360, Math.round(linkDist * 0.9)));
 
 				const labelEl = append(this._linkDeletesContainer, $('.workflow-link-label'));
 				this._renderLinkLabelContent(labelEl, link.label, linkState?.status);
 				labelEl.setAttribute('data-link-id', link.id);
 				labelEl.style.left = `${labelPt.x}px`;
 				labelEl.style.top = `${labelPt.y}px`;
-				labelEl.style.maxWidth = `${maxLabelWidth}px`;
-				labelEl.title = `${link.label}\n\n• Drag along line to reposition\n• Double-click to edit (Type @ to autocomplete variables)`;
+				if (typeof link.labelWidth === 'number') {
+					labelEl.style.width = `${link.labelWidth}px`;
+					labelEl.style.maxWidth = 'none';
+				} else {
+					labelEl.style.maxWidth = `${maxLabelWidth}px`;
+				}
+				if (typeof link.labelHeight === 'number') {
+					labelEl.style.height = `${link.labelHeight}px`;
+					labelEl.style.maxHeight = 'none';
+				}
+				labelEl.title = `${link.label}\n\n• Drag along line to reposition\n• Drag bottom-right corner to resize\n• Double-click to edit (Type @ to autocomplete variables)`;
+
+				// Resize handle at bottom-right corner of the condition box
+				const labelResizeHandle = append(labelEl, $('.link-label-resize-handle'));
+				labelResizeHandle.title = 'Drag to resize condition box';
+				labelResizeHandle.onmousedown = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+					this._isResizingLinkLabel = link.id;
+					this._resizeLinkLabelStartWidth = link.labelWidth ?? labelEl.offsetWidth;
+					this._resizeLinkLabelStartHeight = link.labelHeight ?? labelEl.offsetHeight;
+					this._resizeLinkLabelStartX = e.clientX;
+					this._resizeLinkLabelStartY = e.clientY;
+				};
+				labelResizeHandle.onclick = (e) => {
+					e.stopPropagation();
+				};
+				labelResizeHandle.ondblclick = (e) => {
+					e.stopPropagation();
+				};
 				if (isSelected) {
 					labelEl.classList.add('selected');
 				}
@@ -9779,6 +12505,17 @@ export class WorkflowEditor extends EditorPane {
 				labelEl.onmousedown = (e) => {
 					e.stopPropagation();
 					if (e.button !== 0) return;
+					const now = Date.now();
+					const lastLabelClick = (link as any)._lastLabelClickTime || 0;
+					(link as any)._lastLabelClickTime = now;
+					if (now - lastLabelClick < 350) {
+						(link as any)._lastLabelClickTime = 0;
+						this._isDraggingLinkLabel = null;
+						e.preventDefault();
+						const currentPt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, typeof link.labelPosition === 'number' ? link.labelPosition : 0.5, link.waypoints);
+						this._showLinkInlineEditor(link, currentPt.x, currentPt.y);
+						return;
+					}
 					this._isDraggingLinkLabel = link.id;
 					this._dragLabelHasMoved = false;
 					this._dragLabelStartX = e.clientX;
@@ -9809,7 +12546,7 @@ export class WorkflowEditor extends EditorPane {
 				labelEl.ondblclick = (e) => {
 					e.stopPropagation();
 					e.preventDefault();
-					const currentPt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, typeof link.labelPosition === 'number' ? link.labelPosition : 0.5);
+					const currentPt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, typeof link.labelPosition === 'number' ? link.labelPosition : 0.5, link.waypoints);
 					this._showLinkInlineEditor(link, currentPt.x, currentPt.y);
 				};
 
@@ -9818,6 +12555,79 @@ export class WorkflowEditor extends EditorPane {
 					e.stopPropagation();
 					this._showContextMenu(e.clientX, e.clientY, 'link', link.id);
 				};
+			}
+
+			// Render orthogonal segment drag handles so users can grab and pull any segment outward/inward
+			const segmentHandles: HTMLElement[] = [];
+			if (routingMode === 'orthogonal') {
+				const orthoPts = this._computeOrthogonalWaypoints(x1, y1, fromPort, x2, y2, toPort, link.waypoints);
+				for (let segIdx = 0; segIdx < orthoPts.length - 1; segIdx++) {
+					const pA = orthoPts[segIdx];
+					const pB = orthoPts[segIdx + 1];
+					const segLen = Math.hypot(pB.x - pA.x, pB.y - pA.y);
+					const isInterior = segIdx > 0 && segIdx < orthoPts.length - 2;
+					if (segLen < (isInterior ? 16 : 36)) continue;
+
+					const isVert = Math.abs(pA.x - pB.x) <= Math.abs(pA.y - pB.y);
+					let hx = Math.round((pA.x + pB.x) / 2);
+					let hy = Math.round((pA.y + pB.y) / 2);
+
+					// If condition label is sitting near the midpoint of this segment, shift the handle along the segment so it stays accessible
+					if (renderedLabelPt && Math.abs(hx - renderedLabelPt.x) < 70 && Math.abs(hy - renderedLabelPt.y) < 32 && segLen >= 80) {
+						hx = Math.round(pA.x + (pB.x - pA.x) * 0.22);
+						hy = Math.round(pA.y + (pB.y - pA.y) * 0.22);
+					}
+
+					const segHandle = append(this._linkDeletesContainer, $(`.workflow-link-segment-handle.${isVert ? 'vertical' : 'horizontal'}`));
+					segHandle.style.left = `${hx}px`;
+					segHandle.style.top = `${hy}px`;
+					segHandle.title = isVert
+						? 'Drag left/right to adjust line path · Double-click to add/edit condition (Alt+Double-click to reset path)'
+						: 'Drag up/down to adjust line path · Double-click to add/edit condition (Alt+Double-click to reset path)';
+					if (isSelected || this._isDraggingLinkSegment === link.id) {
+						segHandle.classList.add('selected');
+					}
+					segHandle.onmousedown = (e) => {
+						if (e.button !== 0) return;
+						const now = Date.now();
+						const lastSegClick = (link as any)._lastLineClickTime || 0;
+						(link as any)._lastLineClickTime = now;
+						if (now - lastSegClick < 350) {
+							(link as any)._lastLineClickTime = 0;
+							this._isDraggingLinkSegment = null;
+							e.stopPropagation();
+							e.preventDefault();
+							if (e.altKey || e.shiftKey) {
+								delete link.waypoints;
+								this._saveFlowchartData();
+								this._drawLinks();
+							} else {
+								const curMid = this._computeMidpointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, link.waypoints);
+								this._showLinkInlineEditor(link, curMid.x, curMid.y);
+							}
+							return;
+						}
+						if (!this._canvas) return;
+						const rect = this._canvas.getBoundingClientRect();
+						const mx = (e.clientX - rect.left) / this._zoomLevel;
+						const my = (e.clientY - rect.top) / this._zoomLevel;
+						this._startLinkSegmentDrag(e, link, orthoPts, segIdx, mx, my, true);
+					};
+					segHandle.ondblclick = (e) => {
+						e.stopPropagation();
+						e.preventDefault();
+						if (e.altKey || e.shiftKey) {
+							delete link.waypoints;
+							this._saveFlowchartData();
+							this._drawLinks();
+						} else {
+							const curMid = this._computeMidpointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, link.waypoints);
+							this._showLinkInlineEditor(link, curMid.x, curMid.y);
+						}
+					};
+					segHandle.oncontextmenu = onLineContextMenu;
+					segmentHandles.push(segHandle);
+				}
 			}
 
 			// Reconnection handles (rendered at x1, y1 and x2, y2)
@@ -9838,14 +12648,20 @@ export class WorkflowEditor extends EditorPane {
 			}
 
 			// Add hover linking
-			path.onmouseenter = () => {
+			const onHoverEnter = () => {
 				handleStart.classList.add('hovered');
 				handleEnd.classList.add('hovered');
+				segmentHandles.forEach(h => h.classList.add('hovered'));
 			};
-			path.onmouseleave = () => {
+			const onHoverLeave = () => {
 				handleStart.classList.remove('hovered');
 				handleEnd.classList.remove('hovered');
+				segmentHandles.forEach(h => h.classList.remove('hovered'));
 			};
+			path.onmouseenter = onHoverEnter;
+			path.onmouseleave = onHoverLeave;
+			hitPath.onmouseenter = onHoverEnter;
+			hitPath.onmouseleave = onHoverLeave;
 
 			handleStart.onmousedown = (e) => {
 				e.stopPropagation();
@@ -9900,14 +12716,66 @@ export class WorkflowEditor extends EditorPane {
 				this._drawLinks();
 			}
 
-			// Pipeline... is the most frequently used node action - placed as the very first menu item
 			if (!this._isPureDiagram) {
+				const selectedActionNodes = Array.from(this._selectedNodeIds)
+					.map(id => this._data.nodes.find(n => n.id === id))
+					.filter((n): n is IFlowchartNode => !!n && this._isActionNodeForSelectiveRun(n));
+				if (selectedActionNodes.length > 0) {
+					const runSelectedItem = append(menu, $('.context-menu-item'));
+					runSelectedItem.style.color = '#38bdf8';
+					runSelectedItem.style.fontWeight = '600';
+					runSelectedItem.textContent = selectedActionNodes.length > 1
+						? `▶ Run Selected Nodes Only (${selectedActionNodes.length})`
+						: `▶ Run This Node Only`;
+					runSelectedItem.onclick = async () => {
+						this._closeContextMenu();
+						if (!this._workflowUri) return;
+						try {
+							const selectedNodeIds = selectedActionNodes.map(n => n.id);
+							this._openLogDrawer();
+							this._clearDisplayInspectorCards();
+							await this._workflowExecutionService.executeWorkflow(this._workflowUri, {
+								mode: 'standard',
+								initialData: this._data,
+								entryNodeId: selectedNodeIds[0],
+								selectedNodeIds
+							});
+							if (this._toolbarEl) this._renderToolbar(this._toolbarEl);
+							this._renderNodes();
+						} catch (e: any) {
+							this._notificationService.error(e.message || String(e));
+						}
+					};
+				}
+
+				const runFromHereItem = append(menu, $('.context-menu-item'));
+				runFromHereItem.textContent = '▶ Run Workflow From This Node';
+				runFromHereItem.onclick = async () => {
+					this._closeContextMenu();
+					if (!this._workflowUri) return;
+					try {
+						this._openLogDrawer();
+						this._clearDisplayInspectorCards();
+						await this._workflowExecutionService.executeWorkflow(this._workflowUri, {
+							mode: 'standard',
+							initialData: this._data,
+							entryNodeId: targetId
+						});
+						if (this._toolbarEl) this._renderToolbar(this._toolbarEl);
+						this._renderNodes();
+					} catch (e: any) {
+						this._notificationService.error(e.message || String(e));
+					}
+				};
+
+				/*
 				const pipelineItem = append(menu, $('.context-menu-item'));
 				pipelineItem.textContent = 'Pipeline...';
 				pipelineItem.onclick = () => {
 					this._closeContextMenu();
 					this._openNodePipelinePanel(targetId);
 				};
+				*/
 
 				const fnItem = append(menu, $('.context-menu-item'));
 				fnItem.textContent = 'Call Function [fx]...';
@@ -9927,6 +12795,20 @@ export class WorkflowEditor extends EditorPane {
 					if (targetNode) {
 						this._openNodeVariableInlineEditor(targetNode);
 					}
+				};
+
+				const editAsPyItem = append(menu, $('.context-menu-item'));
+				editAsPyItem.textContent = 'Edit as a Python File';
+				editAsPyItem.onclick = () => {
+					this._closeContextMenu();
+					this._openWorkflowAsPythonFile(targetId);
+				};
+
+				const editAsNbItem = append(menu, $('.context-menu-item'));
+				editAsNbItem.textContent = 'Edit as a Jupyter Notebook';
+				editAsNbItem.onclick = () => {
+					this._closeContextMenu();
+					WorkflowPythonEditorBridge.openWorkflowAsNotebook(this, targetId);
 				};
 			}
 		}
@@ -9982,18 +12864,13 @@ export class WorkflowEditor extends EditorPane {
 									if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
 										node.imports.push({ type: type as any, name });
 										if (!node.pipeline) node.pipeline = [];
-										const varIdx = node.pipeline.findIndex(s => s.type === 'set_variable');
 										const newStep: INodePipelineStep = {
 											id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 											type: 'run_ticket',
 											ticketName: name,
 											ticketType: type
 										};
-										if (varIdx !== -1) {
-											node.pipeline.splice(varIdx, 0, newStep);
-										} else {
-											node.pipeline.push(newStep);
-										}
+										node.pipeline.push(newStep);
 										this._saveFlowchartData();
 										this._renderNodes();
 										this._drawLinks();
@@ -10393,8 +13270,9 @@ export class WorkflowEditor extends EditorPane {
 						codicon = Codicon.githubAction;
 						color = '#0d9488';
 					} else {
-						codicon = Codicon.package;
-						color = getColorForName(imp.type);
+						const v = getWorkflowEntityTypeVisual(imp.type);
+						codicon = v.icon;
+						color = v.color;
 					}
 
 					const iconEl = append(item, $('.module-icon'));
@@ -10531,6 +13409,20 @@ export class WorkflowEditor extends EditorPane {
 						}
 					});
 				};
+
+				const editCanvasAsPyItem = append(menu, $('.context-menu-item'));
+				editCanvasAsPyItem.textContent = 'Edit as a Python File';
+				editCanvasAsPyItem.onclick = () => {
+					this._closeContextMenu();
+					this._openWorkflowAsPythonFile();
+				};
+
+				const editCanvasAsNbItem = append(menu, $('.context-menu-item'));
+				editCanvasAsNbItem.textContent = 'Edit as a Jupyter Notebook';
+				editCanvasAsNbItem.onclick = () => {
+					this._closeContextMenu();
+					WorkflowPythonEditorBridge.openWorkflowAsNotebook(this);
+				};
 			}
 
 			// Export Canvas Submenu
@@ -10594,6 +13486,19 @@ export class WorkflowEditor extends EditorPane {
 					this._closeContextMenu();
 					if (linkObj) {
 						delete linkObj.labelPosition;
+						this._saveFlowchartData();
+						this._drawLinks();
+					}
+				};
+			}
+
+			if (linkObj?.waypoints && linkObj.waypoints.length > 0) {
+				const resetWaypointsItem = append(menu, $('.context-menu-item'));
+				resetWaypointsItem.textContent = 'Reset Line Path (Auto Route)';
+				resetWaypointsItem.onclick = () => {
+					this._closeContextMenu();
+					if (linkObj) {
+						delete linkObj.waypoints;
 						this._saveFlowchartData();
 						this._drawLinks();
 					}
@@ -11048,10 +13953,24 @@ export class WorkflowEditor extends EditorPane {
 			}
 		} catch { }
 
-		// 3. Build candidate workflow base directories (including ~ strip, hyphen/space variants)
+		// 2.5 Check TicketRuntimeService for sibling or workspace tickets by ticket ID / title
+		if (this._workflowUri) {
+			try {
+				const rtTicket = await this._ticketRuntimeService.getTicket(this._workflowUri, cleanName);
+				if (rtTicket && rtTicket.folderUri) {
+					const rtUri = URI.parse(rtTicket.folderUri);
+					if (await this._fileService.exists(rtUri)) {
+						return rtUri;
+					}
+				}
+			} catch { }
+		}
+
+		// 3. Build candidate workflow base directories (including parent workspace, ~ strip, hyphen/space variants)
 		const candidateWorkflowBases: URI[] = [];
 		if (this._workflowUri) {
 			candidateWorkflowBases.push(this._workflowUri);
+			candidateWorkflowBases.push(URI.joinPath(this._workflowUri, '..'));
 
 			const wfPath = this._workflowUri.path;
 			const lastSegment = wfPath.split('/').filter(Boolean).pop() || '';
@@ -11257,73 +14176,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _createPdfFromJpeg(jpegBytes: Uint8Array, imgWidth: number, imgHeight: number): Uint8Array {
-		const ptWidth = Math.round(imgWidth * 0.75 * 100) / 100;
-		const ptHeight = Math.round(imgHeight * 0.75 * 100) / 100;
-
-		const chunks: Uint8Array[] = [];
-		const offsets: number[] = [];
-		let byteLength = 0;
-
-		const encoder = new TextEncoder();
-		function addText(str: string) {
-			const arr = encoder.encode(str);
-			chunks.push(arr);
-			byteLength += arr.length;
-		}
-
-		function addBytes(arr: Uint8Array) {
-			chunks.push(arr);
-			byteLength += arr.length;
-		}
-
-		function markObject(objNum: number) {
-			offsets[objNum] = byteLength;
-			addText(`${objNum} 0 obj\n`);
-		}
-
-		addText('%PDF-1.4\n%\xE2\xE3\xCF\xD3\n');
-
-		// 1 0 obj: Catalog
-		markObject(1);
-		addText('<< /Type /Catalog /Pages 2 0 R >>\nendobj\n');
-
-		// 2 0 obj: Pages
-		markObject(2);
-		addText('<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n');
-
-		// 3 0 obj: Page
-		markObject(3);
-		addText(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${ptWidth} ${ptHeight}] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>\nendobj\n`);
-
-		// 4 0 obj: Contents Stream
-		const contentStream = `q\n${ptWidth} 0 0 ${ptHeight} 0 0 cm\n/Im1 Do\nQ\n`;
-		markObject(4);
-		addText(`<< /Length ${contentStream.length} >>\nstream\n${contentStream}endstream\nendobj\n`);
-
-		// 5 0 obj: Image XObject
-		markObject(5);
-		addText(`<< /Type /XObject /Subtype /Image /Width ${imgWidth} /Height ${imgHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${jpegBytes.length} >>\nstream\n`);
-		addBytes(jpegBytes);
-		addText('\nendstream\nendobj\n');
-
-		// xref table
-		const startXref = byteLength;
-		addText('xref\n0 6\n0000000000 65535 f \n');
-		for (let i = 1; i <= 5; i++) {
-			const offStr = String(offsets[i]).padStart(10, '0');
-			addText(`${offStr} 00000 n \n`);
-		}
-
-		// trailer
-		addText(`trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${startXref}\n%%EOF\n`);
-
-		const result = new Uint8Array(byteLength);
-		let cur = 0;
-		for (const chunk of chunks) {
-			result.set(chunk, cur);
-			cur += chunk.length;
-		}
-		return result;
+		return WorkflowPythonEditorBridge.createPdfFromJpeg(jpegBytes, imgWidth, imgHeight);
 	}
 
 	private _generateSvgString(
@@ -11332,146 +14185,7 @@ export class WorkflowEditor extends EditorPane {
 		bounds: { minX: number; minY: number; width: number; height: number },
 		format: 'png' | 'jpeg' | 'svg' | 'pdf'
 	): string {
-		const { minX, minY, width, height } = bounds;
-
-		const usedColors = new Set<string>(['#0d9488', '#ffffff', '#38bdf8', '#7c3aed', '#facc15', '#f43f5e', '#a78bfa', '#fbbf24', '#f87171', '#34d399']);
-		linksToExport.forEach(l => { if (l.color) usedColors.add(l.color); });
-		nodesToExport.forEach(n => { if (n.color) usedColors.add(n.color); });
-
-		let defs = '<defs>\n';
-		usedColors.forEach(color => {
-			const clean = color.replace('#', '');
-			defs += `    <marker id="export-arrow-${clean}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-        <path d="M 0 1 L 10 5 L 0 9 z" fill="${color}" />
-    </marker>
-    <marker id="export-arrow-start-${clean}" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-        <path d="M 10 1 L 0 5 L 10 9 z" fill="${color}" />
-    </marker>\n`;
-		});
-		defs += '</defs>\n';
-
-		const bgFill = (format === 'jpeg' || format === 'pdf') ? '#1e1e1e' : '#18181b';
-		let body = `  <rect x="${minX}" y="${minY}" width="${width}" height="${height}" fill="${bgFill}" rx="8"/>\n`;
-
-		// Links
-		for (const link of linksToExport) {
-			const fromNode = nodesToExport.find(n => n.id === link.from);
-			const toNode = nodesToExport.find(n => n.id === link.to);
-			if (!fromNode || !toNode) continue;
-
-			const closest = this._getClosestPorts(fromNode, toNode);
-			const fromPort = link.fromPort || closest.fromPort;
-			const toPort = link.toPort || closest.toPort;
-
-			const startCoords = this._getPortCoords(fromNode, fromPort);
-			const endCoords = this._getPortCoords(toNode, toPort);
-
-			let x1 = startCoords.x;
-			let y1 = startCoords.y;
-			let x2 = endCoords.x;
-			let y2 = endCoords.y;
-
-			if ((fromPort === 'right' && toPort === 'left') || (fromPort === 'left' && toPort === 'right')) {
-				if (Math.abs(y1 - y2) <= 12) y2 = y1;
-			}
-			if ((fromPort === 'top' && toPort === 'bottom') || (fromPort === 'bottom' && toPort === 'top')) {
-				if (Math.abs(x1 - x2) <= 12) x2 = x1;
-			}
-
-			const hasEndArrow = link.style === 'arrow-single' || link.style === 'arrow-double';
-			const hasStartArrow = link.style === 'arrow-double';
-
-			if (hasStartArrow) {
-				if (fromPort === 'right') x1 += 8;
-				else if (fromPort === 'left') x1 -= 8;
-				else if (fromPort === 'bottom') y1 += 8;
-				else if (fromPort === 'top') y1 -= 8;
-			}
-			if (hasEndArrow) {
-				if (toPort === 'left') x2 -= 8;
-				else if (toPort === 'right') x2 += 8;
-				else if (toPort === 'top') y2 -= 8;
-				else if (toPort === 'bottom') y2 -= 8;
-			}
-
-			const routingMode = link.routing || this._activeRoutingMode || 'orthogonal';
-			const d = this._getLinkPathData(x1, y1, fromPort, x2, y2, toPort, routingMode);
-
-			const linkColor = link.color || '#0d9488';
-			const cleanColor = linkColor.replace('#', '');
-			const dashAttr = link.style === 'dashed' ? 'stroke-dasharray="6,4"' : '';
-			const markerEnd = hasEndArrow ? `marker-end="url(#export-arrow-${cleanColor})"` : '';
-			const markerStart = hasStartArrow ? `marker-start="url(#export-arrow-start-${cleanColor})"` : '';
-
-			body += `  <path d="${d}" fill="none" stroke="${linkColor}" stroke-width="2" ${dashAttr} ${markerStart} ${markerEnd} />\n`;
-
-			if (link.label) {
-				const mid = this._getLinkMidpoint(link);
-				const escapedLabel = this._escapeXml(link.label);
-				const labelW = Math.max(40, link.label.length * 7 + 16);
-				body += `  <rect x="${mid.x - labelW / 2}" y="${mid.y - 11}" width="${labelW}" height="22" rx="4" fill="#1e1e1e" stroke="${linkColor}" stroke-width="1"/>\n`;
-				body += `  <text x="${mid.x}" y="${mid.y + 4}" fill="#ffffff" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="11" font-weight="500" text-anchor="middle">${escapedLabel}</text>\n`;
-			}
-		}
-
-		// Nodes
-		for (const node of nodesToExport) {
-			const nodeColor = node.color || '#0d9488';
-			const fillColor = hexToRgba(nodeColor, 0.18);
-			const strokeWidth = 2;
-
-			if (node.type === 'round-rect') {
-				body += `  <rect x="${node.x}" y="${node.y}" width="${node.width}" height="${node.height}" rx="12" ry="12" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
-			} else if (node.type === 'rect') {
-				body += `  <rect x="${node.x}" y="${node.y}" width="${node.width}" height="${node.height}" rx="4" ry="4" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
-			} else if (node.type === 'circle') {
-				const cx = node.x + node.width / 2;
-				const cy = node.y + node.height / 2;
-				body += `  <ellipse cx="${cx}" cy="${cy}" rx="${node.width / 2}" ry="${node.height / 2}" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
-			} else if (node.type === 'diamond') {
-				const cx = node.x + node.width / 2;
-				const cy = node.y + node.height / 2;
-				const pts = `${cx},${node.y} ${node.x + node.width},${cy} ${cx},${node.y + node.height} ${node.x},${cy}`;
-				body += `  <polygon points="${pts}" fill="${fillColor}" stroke="${nodeColor}" stroke-width="${strokeWidth}" />\n`;
-			}
-
-			const textColor = node.textColor || '#ffffff';
-			const isBold = node.isBold ? 'font-weight="bold"' : 'font-weight="500"';
-			const isItalic = node.isItalic ? 'font-style="italic"' : '';
-			const textDec = (node.isUnderline && node.isStrikethrough) ? 'text-decoration="underline line-through"' : (node.isUnderline ? 'text-decoration="underline"' : (node.isStrikethrough ? 'text-decoration="line-through"' : ''));
-
-			const maxTextWidth = (node.type === 'diamond') ? Math.max(20, Math.floor(node.width * 0.65)) : Math.max(20, node.width - 16);
-			const lines = this._wrapText(node.label || '', maxTextWidth, 11);
-			const lineHeight = 15;
-			const totalTextHeight = lines.length * lineHeight;
-
-			let textAnchor = 'middle';
-			let textX = node.x + node.width / 2;
-			if (node.textAlign === 'left' && node.type !== 'diamond') {
-				textAnchor = 'start';
-				textX = node.x + 8;
-			} else if (node.textAlign === 'right' && node.type !== 'diamond') {
-				textAnchor = 'end';
-				textX = node.x + node.width - 8;
-			}
-
-			let startY = node.y + (node.height - totalTextHeight) / 2 + 11;
-			if (node.verticalAlign === 'top' && node.type !== 'diamond') {
-				startY = node.y + 13;
-			} else if (node.verticalAlign === 'bottom' && node.type !== 'diamond') {
-				startY = node.y + node.height - totalTextHeight + 11;
-			}
-
-			body += `  <text x="${textX}" y="${startY}" fill="${textColor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" ${isBold} ${isItalic} ${textDec} text-anchor="${textAnchor}">\n`;
-			for (let i = 0; i < lines.length; i++) {
-				const lineText = this._escapeXml(lines[i]);
-				const dy = i === 0 ? 0 : lineHeight;
-				body += `    <tspan x="${textX}" dy="${dy}">${lineText}</tspan>\n`;
-			}
-			body += `  </text>\n`;
-		}
-
-		return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="${minX} ${minY} ${width} ${height}">\n${defs}${body}</svg>`;
+		return WorkflowPythonEditorBridge.generateSvgString(this, nodesToExport, linksToExport, bounds, format);
 	}
 
 	private _wrapText(text: string, maxWidth: number, fontSize: number = 11): string[] {
@@ -11839,20 +14553,21 @@ export class WorkflowEditor extends EditorPane {
 			this._activeDisplayRunId = card.runId;
 		}
 
-		if (!this._displayInspectorCards.some(c => c.id === card.id)) {
-			this._displayInspectorCards.unshift(card);
-		}
-
-		this._ensureDisplayInspectorPanel();
-		if (this._isDisplayInspectorMinimized) {
-			this._isDisplayInspectorMinimized = false;
-			this._displayInspectorContainer?.classList.remove('minimized');
-			const minBtn = this._displayInspectorContainer?.querySelector('.workflow-display-btn-toggle') as HTMLElement | null;
-			if (minBtn) {
-				minBtn.textContent = '–';
-				minBtn.title = 'Minimize Inspector';
+		const existingDupIdx = this._displayInspectorCards.findIndex(
+			c => c.id === card.id
+		);
+		if (existingDupIdx !== -1) {
+			const removed = this._displayInspectorCards.splice(existingDupIdx, 1)[0];
+			if (removed && this._displayInspectorCardsContainer) {
+				const existingEl = this._displayInspectorCardsContainer.querySelector(`[data-card-id="${removed.id}"]`);
+				existingEl?.remove();
 			}
 		}
+		this._displayInspectorCards.unshift(card);
+
+		// Ensure panel exists and update card counter in the background,
+		// but respect user's minimized state — never force-expand when minimized!
+		this._ensureDisplayInspectorPanel();
 
 		if (!this._displayInspectorCardsContainer) return;
 
@@ -11862,322 +14577,768 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _renderDisplayInspectorCardElement(card: IWorkflowDisplayCard): HTMLElement {
-		// Create Card element
-		const cardEl = document.createElement('div');
-		cardEl.className = 'workflow-display-card';
-		cardEl.setAttribute('data-card-id', card.id);
-
-		// Card Header
-		const cardHeader = append(cardEl, $('.workflow-display-card-header'));
-		const metaBox = append(cardHeader, $('.workflow-display-card-meta'));
-		const nodeBadge = append(metaBox, $('.workflow-display-card-node'));
-
-		// Friendly node label defined by user (standard neutral white text) + internal ID in parens
-		const friendlyName = (card.nodeTitle && card.nodeTitle.trim()) ? card.nodeTitle.trim() : 'Node';
-		const nodeTitleSpan = append(nodeBadge, $('span.node-title-main'));
-		nodeTitleSpan.textContent = friendlyName;
-
-		if (card.nodeId) {
-			const rawNum = card.nodeId.replace(/^node_/, '');
-			const nodeIdSpan = append(nodeBadge, $('span.node-id-sub'));
-			nodeIdSpan.textContent = ` (${rawNum})`;
-			nodeIdSpan.title = `Internal ID: ${card.nodeId}`;
+		const el = WorkflowPythonEditorBridge.renderDisplayInspectorCardElement(this, card);
+		if (card.id) {
+			el.dataset.cardId = card.id;
 		}
+		return el;
+	}
 
-		const timeEl = append(metaBox, $('.workflow-display-card-time'));
-		timeEl.textContent = card.timestamp;
+	private async _updatePythonEnvButtonLabel(): Promise<void> {
+		if (!this._floatingPythonEnvBtn) return;
+		const wfDir = this._workflowUri
+			? (this._workflowUri.path.endsWith('.json') || this._workflowUri.path.endsWith('.workflow') ? URI.joinPath(this._workflowUri, '..') : this._workflowUri)
+			: undefined;
 
-		const copyText = async (text: string): Promise<boolean> => {
-			let ok = false;
+		let resolvedPath = this._data?.pythonPath || '';
+		if (wfDir) {
 			try {
-				if (navigator?.clipboard?.writeText) {
-					await navigator.clipboard.writeText(text);
-					ok = true;
-				}
-			} catch {}
-			if (!ok) {
-				try {
-					const ta = document.createElement('textarea');
-					ta.value = text;
-					ta.style.position = 'fixed';
-					ta.style.left = '-9999px';
-					ta.style.top = '-9999px';
-					document.body.appendChild(ta);
-					ta.focus();
-					ta.select();
-					ok = document.execCommand('copy');
-					ta.remove();
-				} catch {}
+				const envInfo = await this._ticketRuntimeService.detectPythonEnvironment(wfDir, this._data?.pythonPath);
+				resolvedPath = typeof envInfo === 'string'
+					? envInfo
+					: (envInfo?.interpreterPath || this._data?.pythonPath || 'python3');
+				this._detectedPythonPath = String(resolvedPath || 'python3');
+			} catch {
+				resolvedPath = this._data?.pythonPath || 'python3';
 			}
-			if (!ok) {
-				try {
-					await this._clipboardService.writeText(text);
-					ok = true;
-				} catch {}
-			}
-			return ok;
-		};
-
-		const cardActions = append(cardHeader, $('.workflow-display-card-actions'));
-		const copyBtn = append(cardActions, $('button.workflow-display-btn-action'));
-		copyBtn.textContent = 'Copy';
-		copyBtn.title = 'Copy entire card value';
-		copyBtn.onclick = async (e) => {
-			e.stopPropagation();
-			const ok = await copyText(card.formattedText);
-			copyBtn.textContent = ok ? 'Copied!' : 'Failed';
-			setTimeout(() => { if (copyBtn.isConnected) copyBtn.textContent = 'Copy'; }, 1500);
-		};
-
-		const dismissBtn = append(cardActions, $('button.workflow-display-btn-action'));
-		dismissBtn.textContent = '✕';
-		dismissBtn.title = 'Dismiss card';
-		dismissBtn.onclick = (e) => {
-			e.stopPropagation();
-			cardEl.remove();
-			this._displayInspectorCards = this._displayInspectorCards.filter(c => c.id !== card.id);
-			if (this._workflowUri) {
-				this._workflowExecutionService.removeDisplayCard(this._workflowUri, card.id);
-			}
-			if (this._displayInspectorContainer) {
-				const titleText = this._displayInspectorContainer.querySelector('.inspector-title-text');
-				if (titleText) {
-					titleText.textContent = `Live Display (${this._displayInspectorCards.length})`;
-				}
-				if (this._displayInspectorCards.length === 0) {
-					this._displayInspectorContainer.remove();
-					this._displayInspectorContainer = null;
-					this._displayInspectorCardsContainer = null;
-				}
-			}
-			this._updateLiveDisplayToolbarBtn();
-		};
-
-		// Expression Pill
-		const exprEl = append(cardEl, $('.workflow-display-card-expr'));
-		exprEl.textContent = card.expression;
-
-		// Card Body / Outputs Sections or Ticket Handle
-		if (card.ticketHandle) {
-			const th = card.ticketHandle;
-			const handleEl = append(cardEl, $('.workflow-display-ticket-handle-card'));
-
-			// Banner: Ticket Code & Type with Open in Tab button
-			const bannerEl = append(handleEl, $('.workflow-display-ticket-banner'));
-			bannerEl.title = 'Double-click to open in Editor Tab';
-			bannerEl.ondblclick = (e) => {
-				e.stopPropagation();
-				this._openModuleInEditor({ type: th.ticketType, name: th.ticketName || th.ticketId });
-			};
-
-			const leftGroup = append(bannerEl, $('.workflow-display-ticket-banner-left'));
-			const ticketBadge = append(leftGroup, $('span.workflow-display-ticket-badge'));
-			const rawType = th.ticketType || card.ticketType || 'Ticket';
-			ticketBadge.textContent = rawType.toUpperCase();
-			const badgeStyle = getEntityBadgeStyle(rawType);
-			ticketBadge.style.color = badgeStyle.color;
-			ticketBadge.style.backgroundColor = badgeStyle.bg;
-			ticketBadge.style.borderColor = hexToRgba(badgeStyle.color, 0.4);
-
-			const bannerTitle = append(leftGroup, $('span.workflow-display-ticket-title'));
-			bannerTitle.textContent = `${th.ticketId}${th.title && th.title !== th.ticketId ? ` (${th.title})` : ''}`;
-
-			const rightGroup = append(bannerEl, $('.workflow-display-ticket-banner-right'));
-			const statusChip = append(rightGroup, $('span.workflow-display-handle-status'));
-			statusChip.textContent = th.status || 'Todo';
-
-			// Open in Tab Button
-			const openTabBtn = append(rightGroup, $('button.workflow-display-btn-open-tab'));
-			openTabBtn.textContent = '↗ Tab';
-			openTabBtn.title = 'Open ticket in Editor Tab';
-			openTabBtn.onclick = (e) => {
-				e.stopPropagation();
-				this._openModuleInEditor({ type: th.ticketType, name: th.ticketName || th.ticketId });
-			};
-
-			// Metadata Grid
-			const metaGrid = append(handleEl, $('.workflow-display-handle-meta-grid'));
-
-			// Row 1: Created At
-			if (th.createdAt) {
-				const row = append(metaGrid, $('.workflow-display-handle-meta-row'));
-				const label = append(row, $('.handle-meta-label'));
-				label.textContent = 'Created:';
-				const val = append(row, $('.handle-meta-val'));
-				val.textContent = th.createdAt;
-			}
-
-			// Row 2: Target Path
-			if (th.targetFolder) {
-				const row = append(metaGrid, $('.workflow-display-handle-meta-row'));
-				const label = append(row, $('.handle-meta-label'));
-				label.textContent = 'Folder:';
-				const val = append(row, $('.handle-meta-val.folder-path'));
-				const displayFolder = th.targetFolder.length > 45 ? '...' + th.targetFolder.substring(th.targetFolder.length - 42) : th.targetFolder;
-				val.textContent = displayFolder;
-				val.title = th.targetFolder;
-			}
-
-			// Row 3: Parameters
-			if (th.parameters && Object.keys(th.parameters).length > 0) {
-				const paramsBox = append(handleEl, $('.workflow-display-handle-params-box'));
-				const paramsHeader = append(paramsBox, $('.workflow-display-handle-params-header'));
-				paramsHeader.textContent = `Parameters (${Object.keys(th.parameters).length})`;
-				const paramsList = append(paramsBox, $('.workflow-display-handle-params-list'));
-				for (const [pk, pv] of Object.entries(th.parameters)) {
-					const chip = append(paramsList, $('.workflow-display-handle-param-chip'));
-					const kSpan = append(chip, $('span.param-key'));
-					kSpan.textContent = pk;
-					const eqSpan = append(chip, $('span.param-sep'));
-					eqSpan.textContent = '=';
-					const vSpan = append(chip, $('span.param-val'));
-					const rawValStr = typeof pv === 'object' ? JSON.stringify(pv) : String(pv);
-					vSpan.textContent = rawValStr.length > 50 ? rawValStr.substring(0, 47) + '...' : rawValStr;
-					vSpan.title = rawValStr;
-				}
-			}
-
-			// Hint Bar: Ticket ready to run
-			const hintEl = append(handleEl, $('.workflow-display-handle-hint'));
-			hintEl.textContent = `Ticket ready. Use RUN_TICKETS(ticket="${th.ticketId || th.ticketName}") to execute.`;
-		} else if (card.outputItems && card.outputItems.length > 0) {
-			// Ticket Meta Banner if available
-			if (card.ticketTitle || card.ticketId) {
-				const bannerEl = append(cardEl, $('.workflow-display-ticket-banner'));
-				const bannerTitle = append(bannerEl, $('span.workflow-display-ticket-title'));
-				const hasTitle = Boolean(card.ticketTitle && card.ticketTitle.trim().length > 0);
-				const hasId = Boolean(card.ticketId && card.ticketId.trim().length > 0);
-				if (hasTitle && hasId && card.ticketTitle !== card.ticketId) {
-					bannerTitle.textContent = `${card.ticketTitle} (${card.ticketId})`;
-				} else {
-					bannerTitle.textContent = card.ticketTitle || card.ticketId || 'Ticket';
-				}
-				if (card.ticketType) {
-					const bannerType = append(bannerEl, $('span.workflow-display-ticket-type'));
-					bannerType.textContent = card.ticketType;
-				}
-			}
-
-			// Sections Toolbar (Expand All / Collapse All)
-			const sectionsToolbar = append(cardEl, $('.workflow-display-sections-toolbar'));
-			const countLabel = append(sectionsToolbar, $('span.workflow-display-sections-count'));
-			countLabel.textContent = `Outputs (${card.outputItems.length})`;
-
-			const toggleAllBtn = append(sectionsToolbar, $('button.workflow-display-btn-toggle-all'));
-			toggleAllBtn.textContent = 'Expand All';
-
-			const sectionsContainer = append(cardEl, $('.workflow-display-sections-container'));
-			const sectionToggles: ((open: boolean) => void)[] = [];
-			const itemStates: boolean[] = card.outputItems.map(() => false);
-			let areAllExpanded = false;
-
-			const updateToggleAllBtn = () => {
-				const allExpanded = itemStates.every(Boolean);
-				areAllExpanded = allExpanded;
-				toggleAllBtn.textContent = allExpanded ? 'Collapse All' : 'Expand All';
-			};
-
-			card.outputItems.forEach((item, idx) => {
-				const sectionEl = append(sectionsContainer, $('.workflow-output-section-strip'));
-
-				// Strip Header
-				const stripHeader = append(sectionEl, $('.workflow-output-section-header'));
-				stripHeader.title = 'Click to expand / collapse';
-
-				const leftGroup = append(stripHeader, $('.workflow-output-section-left'));
-				const chevron = append(leftGroup, $('span.workflow-output-chevron'));
-				chevron.textContent = '▶';
-
-				const indexBadge = append(leftGroup, $('span.workflow-output-index-badge'));
-				indexBadge.textContent = `#${idx + 1}`;
-
-				const titleSpan = append(leftGroup, $('span.workflow-output-title'));
-				titleSpan.textContent = item.label;
-
-				if (item.format) {
-					const formatBadge = append(leftGroup, $('span.workflow-output-format-badge'));
-					formatBadge.textContent = item.format.toUpperCase();
-				}
-
-				if (item.status) {
-					const statusBadge = append(leftGroup, $(`span.workflow-output-status-badge.${item.status}`));
-					statusBadge.textContent = item.status === 'ready' ? 'Ready' : (item.status === 'pending' ? 'Pending' : (item.status === 'failed' ? 'Failed' : 'Empty'));
-				}
-
-				// Right Action: Item Copy
-				const rightGroup = append(stripHeader, $('.workflow-output-section-right'));
-				const itemCopyBtn = append(rightGroup, $('button.workflow-display-btn-action.output-item-copy'));
-				itemCopyBtn.textContent = 'Copy';
-				itemCopyBtn.title = 'Copy this output content';
-				itemCopyBtn.onclick = async (e) => {
-					e.stopPropagation();
-					const ok = await copyText(item.content);
-					itemCopyBtn.textContent = ok ? 'Copied!' : 'Failed';
-					setTimeout(() => { if (itemCopyBtn.isConnected) itemCopyBtn.textContent = 'Copy'; }, 1500);
-				};
-
-				// Strip Content Body
-				const stripBody = append(sectionEl, $('.workflow-output-section-body'));
-				const preContent = append(stripBody, $('pre.workflow-output-pre'));
-				preContent.textContent = item.content;
-
-				// All items collapsed by default
-				let isExpanded = false;
-				const setExpanded = (expanded: boolean, scrollIntoView = false) => {
-					isExpanded = expanded;
-					itemStates[idx] = expanded;
-					sectionEl.classList.toggle('expanded', isExpanded);
-					chevron.textContent = isExpanded ? '▼' : '▶';
-					stripBody.style.display = isExpanded ? 'block' : 'none';
-					if (scrollIntoView && isExpanded) {
-						setTimeout(() => {
-							if (sectionEl.isConnected) {
-								sectionEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-							}
-						}, 60);
-					}
-				};
-				setExpanded(false);
-
-				stripHeader.onclick = (e) => {
-					e.stopPropagation();
-					setExpanded(!isExpanded, true);
-					updateToggleAllBtn();
-				};
-
-				sectionToggles.push((open: boolean) => setExpanded(open, false));
-			});
-
-			toggleAllBtn.onclick = (e) => {
-				e.stopPropagation();
-				areAllExpanded = !areAllExpanded;
-				sectionToggles.forEach(t => t(areAllExpanded));
-				toggleAllBtn.textContent = areAllExpanded ? 'Collapse All' : 'Expand All';
-			};
 		} else {
-			// Card Body Fallback
-			const bodyEl = append(cardEl, $('.workflow-display-card-body'));
-			bodyEl.textContent = card.formattedText;
+			resolvedPath = this._data?.pythonPath || 'python3';
 		}
 
-		// Card Footer
-		const footerEl = append(cardEl, $('.workflow-display-card-footer'));
-		const valType = typeof card.value;
-		let typeDesc = valType;
-		if (valType === 'object') {
-			if (card.value === null) {
-				typeDesc = 'null';
-			} else if (Array.isArray(card.value)) {
-				typeDesc = `array [${card.value.length}]`;
-			} else {
-				typeDesc = `object {${Object.keys(card.value).length} keys}`;
+		if (!this._floatingPythonEnvBtn.isConnected) return;
+		const cleanResolved = String(resolvedPath || 'python3');
+		const isVenv = cleanResolved.includes('.venv') || cleanResolved.includes('venv');
+		const shortLabel = isVenv ? '.venv (Python)' : (cleanResolved.split('/').pop() || 'python3');
+		clearNode(this._floatingPythonEnvBtn);
+		append(this._floatingPythonEnvBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.python)));
+		this._floatingPythonEnvBtn.title = `Python Environment: ${shortLabel}\nPath: ${cleanResolved}\n(Click to select Python interpreter, test environment, or create .venv)`;
+	}
+
+	private _showPythonInterpreterMenu(anchorEl: HTMLElement, onUpdated?: (newPath: string) => void): void {
+		WorkflowPythonEditorBridge.showPythonInterpreterMenu(this, anchorEl, onUpdated);
+	}
+
+	public getWorkflowUri(): URI | undefined {
+		return this._workflowUri;
+	}
+
+	private async _openWorkflowAsPythonFile(focusNodeId?: string): Promise<void> {
+		if (!this._workflowUri) {
+			this._notificationService.warn('Cannot open Python editor: Workflow URI is not available.');
+			return;
+		}
+
+		const snapshot = this._entityPersistenceService.getSnapshot(this._workflowUri);
+		const workflowId = snapshot?.ticketId || (this.input as WorkflowEditorInput)?.workflowName || this._workflowUri.path.split('/').pop() || 'workflow';
+		const workflowName = snapshot?.entityName || (this.input as WorkflowEditorInput)?.workflowName || workflowId;
+		const safeId = workflowId.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+		const pyFileUri = this._isPureDiagram
+			? URI.file(`${this._workflowUri.fsPath}.workflow.py`)
+			: URI.joinPath(this._workflowUri, '.agents', `${safeId}.workflow.py`);
+
+		const pyContent = WorkflowToPythonConverter.convertWorkflowToPython(this._data, {
+			workflowId,
+			workflowName,
+			workflowUri: this._workflowUri.toString()
+		});
+
+		try {
+			await this._fileService.writeFile(pyFileUri, VSBuffer.fromString(pyContent));
+		} catch (err: any) {
+			this._notificationService.error(`Failed to write workflow Python file: ${err?.message || err}`);
+			return;
+		}
+
+		const pane = await this._editorService.openEditor({
+			resource: pyFileUri,
+			options: { pinned: true, preserveFocus: false }
+		});
+
+		const control: any = pane?.getControl?.();
+		if (control && typeof control.getModel === 'function') {
+			const model = control.getModel();
+			if (model && typeof model.getValue === 'function' && model.getValue() !== pyContent) {
+				model.setValue(pyContent);
 			}
-		} else if (valType === 'string') {
-			typeDesc = `string (${card.value.length} chars)`;
-		}
-		footerEl.textContent = `Type: ${typeDesc}`;
 
-		return cardEl;
+			WorkflowEditor.attachWorkflowPythonToolbox(
+				control,
+				this._fileService,
+				this._notificationService,
+				this._entityPersistenceService,
+				this._ticketRuntimeService,
+				this._editorService,
+				this._customModulesService,
+				pyFileUri,
+				workflowId,
+				workflowName,
+				this._workflowUri
+			);
+
+			if (focusNodeId) {
+				const lines = pyContent.split('\n');
+				const targetLineIdx = lines.findIndex(l => l.trim() === `# NODE_ID: ${focusNodeId}`);
+				if (targetLineIdx !== -1) {
+					const codeLineNo = Math.min(lines.length, targetLineIdx + 6);
+					if (typeof control.revealLineInCenter === 'function') {
+						control.revealLineInCenter(codeLineNo);
+					}
+					if (typeof control.setPosition === 'function') {
+						control.setPosition({ lineNumber: codeLineNo, column: 1 });
+					}
+					if (typeof control.focus === 'function') {
+						control.focus();
+					}
+				}
+			}
+		}
+	}
+
+	public static extractPythonVariablesFromSource(source: string): string[] {
+		return WorkflowPythonEditorBridge.extractPythonVariablesFromSource(source);
+	}
+
+	public static attachWorkflowPythonToolbox(
+		codeEditor: any,
+		fileService: IFileService,
+		notificationService: INotificationService,
+		entityPersistenceService: IEntityPersistenceService,
+		ticketRuntimeService: ITicketWorkflowRuntimeService,
+		editorService: IEditorService,
+		customModulesService?: ICustomModulesService,
+		initialPyFileUri?: URI,
+		initialWorkflowId?: string,
+		initialWorkflowName?: string,
+		initialWorkflowUri?: URI
+	): void {
+		WorkflowPythonEditorBridge.attachWorkflowPythonToolbox(
+			codeEditor,
+			fileService,
+			notificationService,
+			entityPersistenceService,
+			ticketRuntimeService,
+			editorService,
+			customModulesService,
+			initialPyFileUri,
+			initialWorkflowId,
+			initialWorkflowName,
+			initialWorkflowUri
+		);
+	}
+
+	public async applySynchronizedFlowchartData(updatedData: IFlowchartData): Promise<void> {
+		this._data = updatedData;
+		for (const node of this._data.nodes) {
+			if (this._deduplicateNodePipeline(node)) {
+				this._saveFlowchartData();
+			}
+			this._ensureNodeFitsPipeline(node);
+		}
+		this._saveFlowchartData();
+		this._renderNodes();
+		this._drawLinks();
+		if (this._inspectorEl) {
+			this._renderInspector(this._inspectorEl);
+		}
+		if (this._pipelinePanelEl && this._activePipelineNodeId) {
+			const activeNode = this._data.nodes.find(n => n.id === this._activePipelineNodeId);
+			if (activeNode) {
+				this._renderPipelinePanel(this._pipelinePanelEl, activeNode);
+			}
+		}
+	}
+
+	private _collectWorkflowAndNodeVariables(currentNode?: IFlowchartNode): { name: string; source: 'workflow' | 'node' | 'handle'; ticketType?: string }[] {
+		const result: { name: string; source: 'workflow' | 'node' | 'handle'; ticketType?: string }[] = [];
+		const seen = new Set<string>();
+		const addVar = (name: string | undefined, source: 'workflow' | 'node' | 'handle', ticketType?: string) => {
+			const clean = (name || '').trim().replace(/^@/, '');
+			if (!clean || seen.has(clean)) {
+				return;
+			}
+			seen.add(clean);
+			result.push({ name: clean, source, ticketType });
+		};
+
+		// 1. Current node components (Inputs parameters, Create Tickets handles, other component output variables)
+		if (currentNode?.pipeline) {
+			for (const step of currentNode.pipeline) {
+				if (step.component) {
+					if (step.component.type === 'parameters' && Array.isArray(step.component.parameters)) {
+						for (const p of step.component.parameters) {
+							addVar(p.name, 'node');
+						}
+					} else if (step.component.type === 'create_tickets') {
+						addVar(this._getComponentOutputVarName(step.component), 'handle', step.component.wfTicketType);
+						addVar(step.component.label, 'handle', step.component.wfTicketType);
+					} else if (step.component.type !== 'output' && step.component.type !== 'display') {
+						addVar(this._getComponentOutputVarName(step.component), 'node');
+						addVar(step.component.label, 'node');
+					}
+				}
+				if (step.targetVariable) {
+					addVar(step.targetVariable, 'node');
+				}
+			}
+		}
+
+		// 2. Workflow-wide variables and handles across all nodes
+		for (const n of this._data.nodes) {
+			for (const v of (n.outputVariables || [])) {
+				addVar(v.name, 'workflow');
+			}
+			if (n.outputVariable) {
+				addVar(n.outputVariable.name, 'workflow');
+			}
+			for (const s of (n.pipeline || [])) {
+				if (s.component?.type === 'create_tickets' && s.component.label) {
+					addVar(this._getComponentOutputVarName(s.component), 'handle', s.component.wfTicketType);
+					addVar(s.component.label, 'handle', s.component.wfTicketType);
+				} else if (s.component?.type === 'output' && Array.isArray(s.component.outputSpecs)) {
+					for (const spec of s.component.outputSpecs) {
+						addVar((spec as any).name || spec.label || spec.fieldKey, 'workflow');
+					}
+				} else if (s.component?.label && s.component.type !== 'parameters' && s.component.type !== 'display') {
+					addVar(this._getComponentOutputVarName(s.component), 'workflow');
+					addVar(s.component.label, 'workflow');
+				}
+				if (s.targetVariable) {
+					addVar(s.targetVariable, 'workflow');
+				}
+				if (s.expression) {
+					const m = s.expression.trim().match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=/);
+					if (m) {
+						const createMatch = s.expression.match(/CREATE_TICKETS\s*\([^)]*ticket_type\s*=\s*["']([^"']+)["']/i);
+						addVar(m[1], createMatch ? 'handle' : 'workflow', createMatch ? createMatch[1] : undefined);
+					}
+				}
+			}
+		}
+		return result;
+	}
+
+	private _getComponentOutputVarName(comp: ICustomField): string {
+		if (!comp.outputVariableName) {
+			comp.outputVariableName = generateSmartPythonVarName(comp.label || comp.id, comp.type);
+		}
+		return comp.outputVariableName;
+	}
+
+	private _formatNodeComponentSummary(comp: ICustomField): string {
+		const title = (comp.label || '').trim() || comp.type;
+		const varName = (comp.type !== 'parameters' && comp.type !== 'output' && comp.type !== 'result' && comp.type !== 'display')
+			? this._getComponentOutputVarName(comp)
+			: '';
+		switch (comp.type) {
+			case 'parameters': {
+				const params = comp.parameters || [];
+				if (params.length === 0) {
+					return 'Inputs: (click to add parameters)';
+				}
+				const pairs = params.map(p => `${p.name}=${p.defaultValue !== undefined && p.defaultValue !== '' ? p.defaultValue : '""'}`);
+				return `Inputs (${params.length}): ${pairs.join(', ')}`;
+			}
+			case 'output': {
+				const specs = comp.outputSpecs || [];
+				if (specs.length === 0) {
+					return 'Output: (click to configure outputs)';
+				}
+				const pairs = specs.map(s => `${(s as any).name || s.label || s.fieldKey}=${(s as any).value || '""'}`);
+				return `Output (${specs.length}): ${pairs.join(', ')}`;
+			}
+			case 'create_tickets':
+			case 'run_tickets':
+			case 'get_outputs':
+			case 'get_tickets':
+			case 'display':
+				return this._buildBuiltinComponentPythonExpression(comp);
+			case 'prompt':
+				return `${varName} = ${title} (AI Prompt)`;
+			case 'table': {
+				const tblDisplay = (comp.tableDbTableName || (comp as any).tableName || comp.label || '').trim() || 'Data Table';
+				return `${varName} = ${tblDisplay} (Data Table)`;
+			}
+			case 'browser':
+				return `${varName} = ${title} (Browser)`;
+			case 'tts':
+				return `${varName} = ${title} (O2 TTS)`;
+			case 'media_player':
+				return `${varName} = ${comp.mediaFileName || title} (MP3 / MP4 Player)`;
+			case 'git':
+				return `${varName} = ${title} (Git Branch)`;
+			case 'python':
+				return `${varName} = ${title} (Python Script)`;
+			default:
+				return varName ? `${varName} = ${title} (${comp.type})` : `${title} (${comp.type})`;
+		}
+	}
+
+	private _formatParamValueForPythonExpr(rawVal: string): string {
+		const trimmed = (rawVal || '').trim();
+		if (!trimmed) {
+			return '""';
+		}
+		// Exact single variable reference {var_name} -> pass variable identifier directly if valid Python identifier
+		const singleBrace = trimmed.match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/);
+		if (singleBrace) {
+			return singleBrace[1];
+		}
+		if (/^-?\d+(\.\d+)?$/.test(trimmed) || trimmed === 'True' || trimmed === 'False' || trimmed === 'None') {
+			return trimmed;
+		}
+		return JSON.stringify(trimmed);
+	}
+
+	private _buildBuiltinComponentPythonExpression(comp: ICustomField): string {
+		const varName = comp.type === 'display' ? '' : (this._getComponentOutputVarName(comp) || 'res');
+		if (comp.type === 'create_tickets') {
+			const tType = comp.wfTicketType || '';
+			const tTitle = comp.wfTicketTitle || '';
+			const tPath = comp.wfTicketPath || '.';
+			const paramEntries = Object.entries(comp.wfTicketParams || {}).filter(([k]) => k.trim().length > 0);
+			const paramsStr = paramEntries.map(([k, v]) => `${JSON.stringify(k)}: ${this._formatParamValueForPythonExpr(v)}`).join(', ');
+			return `${varName} = CREATE_TICKETS(\n    ticket_type=${JSON.stringify(tType)},\n    title=${JSON.stringify(tTitle)},\n    path=${JSON.stringify(tPath)},\n    params={${paramsStr}}\n)`;
+		}
+		if (comp.type === 'run_tickets') {
+			const rawTarget = (comp.wfTicketTarget || '').trim();
+			const targetExpr = this._formatParamValueForPythonExpr(rawTarget);
+			const paramEntries = Object.entries(comp.wfTicketParams || {}).filter(([k, v]) => k.trim().length > 0 && v !== undefined && v !== '');
+			const paramsStr = paramEntries.map(([k, v]) => `${JSON.stringify(k)}: ${this._formatParamValueForPythonExpr(v)}`).join(', ');
+			return `${varName} = RUN_TICKETS(ticket=${targetExpr}, params={${paramsStr}})`;
+		}
+		if (comp.type === 'get_outputs') {
+			const rawTarget = (comp.wfTicketTarget || '').trim();
+			const targetExpr = this._formatParamValueForPythonExpr(rawTarget);
+			return `${varName} = GET_OUTPUTS(ticket=${targetExpr})`;
+		}
+		if (comp.type === 'get_tickets') {
+			const args: string[] = [];
+			if (comp.wfTicketType) args.push(`ticket_type=${JSON.stringify(comp.wfTicketType)}`);
+			if (comp.wfTicketStatus) args.push(`status=${JSON.stringify(comp.wfTicketStatus)}`);
+			if (comp.wfTicketTitle) args.push(`title=${JSON.stringify(comp.wfTicketTitle)}`);
+			if (comp.wfTicketPath) args.push(`path=${JSON.stringify(comp.wfTicketPath)}`);
+			return `${varName} = GET_TICKETS(${args.join(', ')})`;
+		}
+		if (comp.type === 'display') {
+			const rawVal = (comp.wfDisplayValue || '').trim();
+			const valExpr = this._formatParamValueForPythonExpr(rawVal);
+			return `DISPLAY(${valExpr})`;
+		}
+		return this._formatNodeComponentSummary(comp);
+	}
+
+	private _syncComponentStepMetadata(step: INodePipelineStep): void {
+		const comp = step.component;
+		if (!comp) {
+			return;
+		}
+		step.label = comp.label;
+		const outVar = (comp.type === 'parameters' || comp.type === 'output' || comp.type === 'result' || comp.type === 'display')
+			? undefined
+			: this._getComponentOutputVarName(comp);
+		if (comp.type === 'create_tickets' || comp.type === 'run_tickets' || comp.type === 'get_outputs' || comp.type === 'get_tickets' || comp.type === 'display') {
+			step.type = 'call_function';
+			step.functionName = comp.type.toUpperCase();
+			step.targetVariable = outVar;
+			step.expression = this._buildBuiltinComponentPythonExpression(comp);
+		} else {
+			step.type = 'component';
+			step.functionName = comp.type.toUpperCase();
+			step.targetVariable = outVar;
+			step.expression = this._formatNodeComponentSummary(comp);
+		}
+	}
+
+	private _addOrOpenComponentOnNode(node: IFlowchartNode, compType: CustomFieldType, insertIndex?: number): void {
+		if (!node.pipeline) {
+			node.pipeline = [];
+		}
+
+		// Single-instance enforcement for Inputs ('parameters') and Output ('output')
+		if (compType === 'parameters') {
+			const existingInputs = node.pipeline.find(s => s.component?.type === 'parameters');
+			if (existingInputs) {
+				this._notificationService.info('Each Flowchart Node can have at most one Inputs component.');
+				this._openNodeComponentsInSideEditor(node, existingInputs.component?.id);
+				return;
+			}
+		}
+		if (compType === 'output') {
+			const existingOutput = node.pipeline.find(s => s.component?.type === 'output');
+			if (existingOutput) {
+				this._notificationService.info('Each Flowchart Node can have at most one Output component.');
+				this._openNodeComponentsInSideEditor(node, existingOutput.component?.id);
+				return;
+			}
+		}
+
+		const defaultLabels: Record<string, string> = {
+			parameters: 'Inputs',
+			output: 'Output',
+			create_tickets: 'new_ticket_handle',
+			run_tickets: 'run_res',
+			get_outputs: 'ticket_output',
+			get_tickets: 'found_tickets',
+			display: 'Display Result',
+			prompt: 'AI Prompt',
+			table: 'Data Table',
+			browser: 'Web Scraper',
+			tts: 'Voice Output',
+			media_player: 'MP3 / MP4 Player',
+			git: 'Git Repo',
+			python: 'Python Script'
+		};
+
+		const baseLabel = defaultLabels[compType] || compType;
+		let finalLabel = baseLabel;
+		if (compType !== 'parameters' && compType !== 'output' && compType !== 'display') {
+			const existingLabels = new Set((node.pipeline || []).map(s => s.component?.label || s.targetVariable).filter(Boolean));
+			let counter = 2;
+			while (existingLabels.has(finalLabel)) {
+				finalLabel = `${baseLabel} ${counter++}`;
+			}
+		}
+
+		const ts = Date.now();
+		const newComp: ICustomField = {
+			id: `comp_${ts}_${Math.random().toString(36).substring(2, 6)}`,
+			label: finalLabel,
+			type: compType,
+			required: false,
+			defaultValue: compType === 'python'
+				? '# Write Python automation script here\nimport sys, os, json\n\nOUTPUT = None\n'
+				: '',
+			parameters: compType === 'parameters'
+				? [{ name: 'param1', defaultValue: '', description: '' }]
+				: undefined,
+			outputSpecs: compType === 'output'
+				? []
+				: undefined,
+			tableColumns: compType === 'table'
+				? [
+					{ id: `col_${ts}_1`, name: 'id', label: 'id', dataType: 'INTEGER', primaryKey: true, nullable: false },
+					{ id: `col_${ts}_2`, name: 'name', label: 'name', dataType: 'TEXT', primaryKey: false, nullable: true }
+				]
+				: undefined,
+			tableRows: compType === 'table' ? [] : undefined,
+			tableDbEngine: compType === 'table' ? 'sqlite' : undefined,
+			tableAutoSyncDb: compType === 'table' ? false : undefined,
+			wfTicketType: '',
+			wfTicketTitle: compType === 'create_tickets' ? 'New Ticket' : '',
+			wfTicketPath: compType === 'create_tickets' ? '.' : '',
+			wfTicketTarget: '',
+			wfTicketStatus: '',
+			wfTicketParams: {},
+			wfDisplayValue: ''
+		};
+
+		const newStep: INodePipelineStep = {
+			id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+			type: 'component',
+			label: finalLabel,
+			component: newComp
+		};
+		this._syncComponentStepMetadata(newStep);
+
+		// Insert at user's drop position or append at the end (no forced ordering restrictions)
+		if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= node.pipeline.length) {
+			node.pipeline.splice(insertIndex, 0, newStep);
+		} else {
+			node.pipeline.push(newStep);
+		}
+
+		this._ensureNodeFitsPipeline(node);
+		this._syncToNode(node, true);
+		this._selectedNodeIds.clear();
+		this._selectedNodeIds.add(node.id);
+		this._saveFlowchartData();
+		this._renderNodes();
+		this._drawLinks();
+		if (this._inspectorEl) {
+			this._renderInspector(this._inspectorEl);
+		}
+		this._openNodeComponentsInSideEditor(node, newComp.id);
+	}
+
+	private _nodeEditorInputsByNodeId = new Map<string, CustomModuleSchemaEditorInput>();
+
+	private _ensureStepHasComponent(step: INodePipelineStep, index: number): ICustomField {
+		if (step.component) {
+			return step.component;
+		}
+		const expr = (step.expression || '').trim();
+		const id = `comp_${step.id || index}`;
+		const label = (step.targetVariable || step.label || `Step ${index + 1}`).replace(/^@/, '');
+		const createMatch = expr.match(/^(?:([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*)?CREATE_TICKETS\s*\(([\s\S]*)\)$/i);
+		if (createMatch) {
+			const typeMatch = createMatch[2].match(/ticket_type\s*=\s*["']([^"']*)["']/i);
+			const titleMatch = createMatch[2].match(/title\s*=\s*["']([^"']*)["']/i);
+			const pathMatch = createMatch[2].match(/path\s*=\s*["']([^"']*)["']/i);
+			step.component = {
+				id,
+				label: createMatch[1] || label,
+				type: 'create_tickets',
+				wfTicketType: typeMatch ? typeMatch[1] : '',
+				wfTicketTitle: titleMatch ? titleMatch[1] : '',
+				wfTicketPath: pathMatch ? pathMatch[1] : '.',
+				wfTicketParams: {}
+			};
+			return step.component;
+		}
+		const runMatch = expr.match(/^(?:([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*)?RUN_TICKETS\s*\(([\s\S]*)\)$/i);
+		if (runMatch) {
+			const tgtMatch = runMatch[2].match(/ticket\s*=\s*([^,)]+)/i);
+			const rawTgt = tgtMatch ? tgtMatch[1].trim().replace(/^["']|["']$/g, '') : '';
+			step.component = {
+				id,
+				label: runMatch[1] || label,
+				type: 'run_tickets',
+				wfTicketTarget: rawTgt && !/^[A-Z]+-\d+$/.test(rawTgt) ? `{${rawTgt}}` : rawTgt,
+				wfTicketParams: {}
+			};
+			return step.component;
+		}
+		const outMatch = expr.match(/^(?:([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*)?GET_OUTPUTS\s*\(([\s\S]*)\)$/i);
+		if (outMatch) {
+			const tgtMatch = outMatch[2].match(/ticket\s*=\s*([^,)]+)/i);
+			const rawTgt = tgtMatch ? tgtMatch[1].trim().replace(/^["']|["']$/g, '') : '';
+			step.component = {
+				id,
+				label: outMatch[1] || label,
+				type: 'get_outputs',
+				wfTicketTarget: rawTgt && !/^[A-Z]+-\d+$/.test(rawTgt) ? `{${rawTgt}}` : rawTgt
+			};
+			return step.component;
+		}
+		const dispMatch = expr.match(/^DISPLAY\s*\(([\s\S]*)\)$/i);
+		if (dispMatch) {
+			const rawVal = dispMatch[1].trim().replace(/^["']|["']$/g, '');
+			step.component = {
+				id,
+				label: 'Display',
+				type: 'display',
+				wfDisplayValue: `{${rawVal}}`
+			};
+			return step.component;
+		}
+		step.component = {
+			id,
+			label,
+			type: 'python',
+			defaultValue: expr || '# Write Python automation script here\nOUTPUT = None\n'
+		};
+		return step.component;
+	}
+
+	private async _openNodeComponentEditorModal(node: IFlowchartNode, step: INodePipelineStep): Promise<void> {
+		const comp = this._ensureStepHasComponent(step, (node.pipeline || []).indexOf(step));
+		await this._openNodeComponentsInSideEditor(node, comp.id);
+	}
+
+	private _rebindOpenNodeSchemaEditors(): void {
+		if (!this._data?.nodes) {
+			return;
+		}
+		for (const ed of this._editorService.editors) {
+			if (ed instanceof CustomModuleSchemaEditorInput && !ed.isDisposed() && ed.moduleId.startsWith('wf_node_')) {
+				const targetNodeId = ed.nodeId || ed.moduleId.slice('wf_node_'.length);
+				const liveNode = this._data.nodes.find(n => n.id === targetNodeId);
+				if (liveNode) {
+					this._bindNodeSchemaEditorInput(liveNode, ed);
+				}
+			}
+		}
+	}
+
+	private _bindNodeSchemaEditorInput(node: IFlowchartNode, schemaInput: CustomModuleSchemaEditorInput, focusFieldId?: string): void {
+		if (!node.pipeline) {
+			node.pipeline = [];
+		}
+		const targetNodeId = node.id;
+		const nodeFields: ICustomField[] = node.pipeline
+			.filter(st => !!st.component)
+			.map(st => st.component!);
+		const draftModule: ICustomModule = {
+			id: `wf_node_${targetNodeId}`,
+			name: node.label || 'Flowchart Node',
+			slug: `wf-node-${targetNodeId}`,
+			color: '#38bdf8',
+			storageScope: 'workspace',
+			description: `Flowchart Node Components for ${node.label || targetNodeId}`,
+			prompt: '',
+			fields: [
+				{ id: 'title', label: 'Title', type: 'text', required: true },
+				...nodeFields
+			]
+		};
+
+		if (this._nodeEditorInputsByNodeId.get(targetNodeId) !== schemaInput) {
+			schemaInput.onWillDispose(() => {
+				if (this._nodeEditorInputsByNodeId.get(targetNodeId) === schemaInput) {
+					this._nodeEditorInputsByNodeId.delete(targetNodeId);
+				}
+			});
+			this._nodeEditorInputsByNodeId.set(targetNodeId, schemaInput);
+		}
+
+		schemaInput.moduleName = node.label || 'Flowchart Node';
+		schemaInput.isFlowchartNodeMode = true;
+		schemaInput.nodeId = targetNodeId;
+		schemaInput.draftModule = draftModule;
+		if (focusFieldId !== undefined) {
+			schemaInput.focusFieldId = focusFieldId;
+		}
+		schemaInput.workflowVariablesProvider = () => {
+			const liveNode = this._data?.nodes?.find(n => n.id === targetNodeId) || node;
+			return this._collectWorkflowAndNodeVariables(liveNode).map(v => ({
+				label: v.name,
+				type: v.source === 'handle' ? 'HANDLE' : v.source === 'node' ? 'NODE' : 'WORKFLOW',
+				ticketType: v.ticketType
+			}));
+		};
+		schemaInput.workflowRuntimeContextProvider = () => {
+			const ctx: Record<string, any> = {};
+			if (this._workflowUri) {
+				const activeRun = this._workflowExecutionService.getActiveRun(this._workflowUri);
+				if (activeRun?.contextVariables) {
+					Object.assign(ctx, activeRun.contextVariables);
+				} else {
+					const runs = this._workflowExecutionService.getRunsForWorkflow(this._workflowUri);
+					if (runs && runs.length > 0 && runs[0]?.contextVariables) {
+						Object.assign(ctx, runs[0].contextVariables);
+					}
+				}
+			}
+			return ctx;
+		};
+		schemaInput.onNodeFieldsChange = (updatedFields: ICustomField[]) => {
+			const liveNode = this._data?.nodes?.find(n => n.id === targetNodeId) || node;
+			// Enforce single-instance rule & rebuild liveNode.pipeline in real time while preserving classic non-component [py] capsules
+			let seenInputs = false;
+			let seenOutput = false;
+			const filteredFields: ICustomField[] = [];
+			for (const f of updatedFields) {
+				if (!f || f.id === 'title') {
+					continue;
+				}
+				if (f.type === 'parameters') {
+					if (seenInputs) continue;
+					seenInputs = true;
+				}
+				if (f.type === 'output') {
+					if (seenOutput) continue;
+					seenOutput = true;
+				}
+				filteredFields.push(f);
+			}
+			const existingStepById = new Map<string, INodePipelineStep>();
+			for (const st of (liveNode.pipeline || [])) {
+				if (st.component?.id) {
+					existingStepById.set(st.component.id, st);
+				}
+			}
+
+			const mapFieldToStep = (f: ICustomField): INodePipelineStep => {
+				const existing = existingStepById.get(f.id);
+				const stepObj: INodePipelineStep = existing || {
+					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+					type: 'component',
+					label: f.label,
+					component: f
+				};
+				stepObj.component = f;
+				this._syncComponentStepMetadata(stepObj);
+				return stepObj;
+			};
+
+			const mappedComponentSteps = filteredFields.map(mapFieldToStep);
+			const rebuiltPipeline: INodePipelineStep[] = [];
+			let compCursor = 0;
+			for (const st of (liveNode.pipeline || [])) {
+				if (st.component) {
+					if (compCursor < mappedComponentSteps.length) {
+						rebuiltPipeline.push(mappedComponentSteps[compCursor++]);
+					}
+				} else {
+					rebuiltPipeline.push(st);
+				}
+			}
+			while (compCursor < mappedComponentSteps.length) {
+				rebuiltPipeline.push(mappedComponentSteps[compCursor++]);
+			}
+			liveNode.pipeline = rebuiltPipeline;
+
+			this._ensureNodeFitsPipeline(liveNode);
+			this._syncToNode(liveNode, true);
+			this._saveFlowchartData();
+			this._renderNodes();
+			this._drawLinks();
+			if (this._inspectorEl) {
+				this._renderInspector(this._inspectorEl);
+			}
+		};
+	}
+
+	private async _openNodeComponentsInSideEditor(node: IFlowchartNode, focusFieldId?: string): Promise<void> {
+		if (!node.pipeline) {
+			node.pipeline = [];
+		}
+
+		const targetNodeId = node.id;
+		let schemaInput = this._nodeEditorInputsByNodeId.get(targetNodeId);
+		if (!schemaInput || schemaInput.isDisposed()) {
+			const existingOpenInput = this._editorService.editors.find(
+				(ed): ed is CustomModuleSchemaEditorInput =>
+					ed instanceof CustomModuleSchemaEditorInput &&
+					!ed.isDisposed() &&
+					ed.moduleId === `wf_node_${targetNodeId}`
+			);
+			schemaInput = existingOpenInput || new CustomModuleSchemaEditorInput(
+				`wf_node_${targetNodeId}`,
+				node.label || 'Flowchart Node',
+				this._workflowUri
+			);
+		}
+		this._bindNodeSchemaEditorInput(node, schemaInput, focusFieldId);
+
+		// Determine target editor group: reuse any existing side group (even if currently empty), else SIDE_GROUP
+		let targetGroup: any = SIDE_GROUP;
+		for (const grp of this._editorGroupService.groups) {
+			if (grp.id !== this.group.id) {
+				targetGroup = grp.id;
+				break;
+			}
+		}
+
+		const wasAlreadyOpen = this._editorService.editors.some(
+			ed => ed instanceof CustomModuleSchemaEditorInput && ed.matches(schemaInput!)
+		);
+		await this._editorService.openEditor(
+			schemaInput,
+			{ pinned: true, preserveFocus: true },
+			targetGroup
+		);
+		if (wasAlreadyOpen) {
+			schemaInput.notifyExternalDraftUpdated(focusFieldId);
+		}
+	}
+
+	public static async syncPythonEditorToWorkflow(
+		pyFileUri: URI | undefined,
+		activeCodeEditor: any,
+		fileService: IFileService,
+		notificationService: INotificationService,
+		entityPersistenceService: IEntityPersistenceService,
+		ticketRuntimeService: ITicketWorkflowRuntimeService
+	): Promise<boolean> {
+		return WorkflowPythonEditorBridge.syncPythonEditorToWorkflow(
+			pyFileUri,
+			activeCodeEditor,
+			fileService,
+			notificationService,
+			entityPersistenceService,
+			ticketRuntimeService
+		);
 	}
 }
-

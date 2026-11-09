@@ -8,6 +8,8 @@ import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IWorkspacesExplorerService } from '../../common/workspacesExplorer.js';
 import { IAgentsManagerService } from '../../../agentsManager/common/agentsManager.js';
+import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
+import { ITicketWorkflowRuntimeService } from '../../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { parse as parseYaml } from '../../../../../base/common/yaml.js';
 
 export interface IWorklogRecord {
@@ -64,6 +66,44 @@ export interface IManageLinksToolOptions {
 	worklog_record: IWorklogRecord;
 }
 
+export interface IOperateTicketTableToolOptions {
+	workspace_id: string;
+	ticket_id: string;
+	parent_path?: string;
+	table_field: string;
+	operation:
+		| 'get_table'
+		| 'define_columns'
+		| 'insert_rows'
+		| 'update_rows'
+		| 'set_rows'
+		| 'delete_rows'
+		| 'clear_rows'
+		| 'bind_sqlite'
+		| 'save_to_sqlite'
+		| 'update_in_sqlite'
+		| 'load_from_sqlite'
+		| 'delete_from_sqlite'
+		| 'sql_query';
+	columns?: Array<{
+		name: string;
+		dataType?: string;
+		primaryKey?: boolean;
+		nullable?: boolean;
+		defaultValue?: string;
+	}>;
+	rows?: Array<Record<string, any>>;
+	match_column?: string;
+	match_value?: any;
+	row_indices?: number[];
+	db_path?: string;
+	db_table_name?: string;
+	auto_sync_db?: boolean;
+	sync_sqlite?: boolean;
+	sql_query?: string;
+	worklog_record?: IWorklogRecord;
+}
+
 export interface ITicketResolvedPaths {
 	folderUri: URI;
 	ticketMdUri: URI;
@@ -80,17 +120,98 @@ export class TicketDataEngine {
 	constructor(
 		@IFileService private readonly fileService: IFileService,
 		@IWorkspacesExplorerService private readonly workspacesExplorerService: IWorkspacesExplorerService,
-		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService
+		@IAgentsManagerService private readonly agentsManagerService: IAgentsManagerService,
+		@IInstantiationService private readonly instantiationService: IInstantiationService
 	) { }
+
+	private _resolveGlobalWorkspaceUri(workspaceId?: string, ticketId?: string): URI | undefined {
+		const trimmedId = (workspaceId || '').trim();
+		const lowerId = trimmedId.toLowerCase();
+		const normId = lowerId.replace(/[\s_\-]+/g, '');
+		const cleanCodeFromWsId = lowerId.replace(/-0000$/i, '').replace(/[\s_\-]+/g, '');
+
+		// 1. Direct filesystem path or file:// URI
+		if (trimmedId.startsWith('file://')) {
+			try {
+				return URI.parse(trimmedId);
+			} catch { }
+		}
+		if (trimmedId.startsWith('/') && trimmedId.length > 1) {
+			return URI.file(trimmedId);
+		}
+		if (trimmedId.startsWith('~/')) {
+			return URI.file('/Users/aimery/' + trimmedId.slice(2));
+		}
+
+		// 2. Global Workflows Directory (/Users/aimery/Documents/workflows -> GFLOW / GFLOW-0000)
+		if (
+			cleanCodeFromWsId === 'gflow' ||
+			normId === 'gflow' ||
+			normId === 'gflow0000' ||
+			normId === 'globalworkflow' ||
+			normId === 'globalworkflows' ||
+			normId === 'independent' ||
+			normId === 'independentflow' ||
+			normId === 'independentworkflow' ||
+			normId === 'workflows'
+		) {
+			return URI.file('/Users/aimery/Documents/workflows');
+		}
+
+		// 3. Global Agents Directory (/Users/aimery/Documents/agents -> GAGENT / GAGENT-0000)
+		if (
+			cleanCodeFromWsId === 'gagent' ||
+			normId === 'gagent' ||
+			normId === 'gagent0000' ||
+			normId === 'globalagent' ||
+			normId === 'globalagents' ||
+			normId === 'agents'
+		) {
+			return URI.file('/Users/aimery/Documents/agents');
+		}
+
+		// 4. Global Jobs Directory (/Users/aimery/repos/jobs -> GLOBAL / GLOBAL-0000)
+		if (
+			cleanCodeFromWsId === 'global' ||
+			normId === 'global' ||
+			normId === 'global0000' ||
+			normId === 'globaljobs'
+		) {
+			return URI.file('/Users/aimery/repos/jobs');
+		}
+
+		// 5. Infer from ticketId prefix (GFLOW-xxxx, GAGENT-xxxx, GLOBAL-xxxx)
+		if (ticketId) {
+			const cleanTicket = ticketId.trim().replace(/^[/\\]+/, '');
+			if (/^gflow[-_]\d+/i.test(cleanTicket)) {
+				return URI.file('/Users/aimery/Documents/workflows');
+			}
+			if (/^gagent[-_]\d+/i.test(cleanTicket)) {
+				return URI.file('/Users/aimery/Documents/agents');
+			}
+			if (/^global[-_]\d+/i.test(cleanTicket)) {
+				return URI.file('/Users/aimery/repos/jobs');
+			}
+		}
+
+		return undefined;
+	}
 
 	/**
 	 * Find the workspace root URI from workspace_id or active workspaces with smart matching
 	 */
 	public async findWorkspaceUri(workspaceId?: string, ticketId?: string): Promise<URI | undefined> {
-		const workspaces = await this.workspacesExplorerService.getWorkspaces();
-		if (!workspaces || workspaces.length === 0) return undefined;
+		// 0. Check Global Workspaces (GFLOW-0000, GAGENT-0000, GLOBAL-0000) or direct path first
+		const globalUri = this._resolveGlobalWorkspaceUri(workspaceId, ticketId);
+		if (globalUri) {
+			if (await this.fileService.exists(globalUri)) {
+				return globalUri;
+			}
+		}
 
-		// 0. Ensure workspaces have their code populated if missing
+		const workspaces = (await this.workspacesExplorerService.getWorkspaces()) || [];
+
+		// Ensure workspaces have their code populated if missing
 		for (const w of workspaces) {
 			if (!w.code) {
 				try {
@@ -230,7 +351,7 @@ export class TicketDataEngine {
 			return bestMatch.uri;
 		}
 
-		// 6.5 If ticketId is provided, scan all workspaces to see which one physically contains this ticket
+		// 6.5 If ticketId is provided, scan all workspaces and global directories to see which one physically contains this ticket
 		if (ticketId) {
 			for (const w of workspaces) {
 				try {
@@ -240,11 +361,30 @@ export class TicketDataEngine {
 					}
 				} catch { }
 			}
+			const globalCandidateDirs = [
+				URI.file('/Users/aimery/Documents/workflows'),
+				URI.file('/Users/aimery/Documents/agents'),
+				URI.file('/Users/aimery/repos/jobs')
+			];
+			for (const gDir of globalCandidateDirs) {
+				try {
+					if (await this.fileService.exists(gDir)) {
+						const found = await this.resolveTicketPaths(gDir, ticketId);
+						if (found) {
+							return gDir;
+						}
+					}
+				} catch { }
+			}
 		}
 
 		// 7. SAFETY: DO NOT silently fall back to workspaces[0]!
 		// Throw an informative error listing all available workspaces so AI and user know exactly what exists
-		const availableList = workspaces.map(w => `"${w.name}" (Code: ${w.code || 'N/A'})${w.isCurrent ? ' [Active]' : ''}`).join(', ');
+		const availableList = [
+			...workspaces.map(w => `"${w.name}" (Code: ${w.code || 'N/A'})${w.isCurrent ? ' [Active]' : ''}`),
+			'"Global Workflows" (Code: GFLOW-0000)',
+			'"Global Agents" (Code: GAGENT-0000)'
+		].join(', ');
 		throw new Error(`Workspace '${workspaceId}' was not found. Currently available workspaces in AnyAgent are: [${availableList}]. Please specify one of these valid workspace names, or ask the user to clarify if unsure.`);
 	}
 
@@ -801,11 +941,34 @@ export class TicketDataEngine {
 
 		// Try load type schema YAML if any
 		let schemaDefinition: any = null;
-		const typeYamlUri = URI.joinPath(wsUri, '.agents', 'entity_type', `${paths.ticketType}.yaml`);
-		if (await this.fileService.exists(typeYamlUri)) {
+		const typeYamlCandidates = [
+			URI.joinPath(wsUri, '.agents', 'entity_type', `${paths.ticketType}.yaml`),
+			URI.file(`/Users/aimery/.anyagent/entity_type/${paths.ticketType}.yaml`)
+		];
+		for (const typeYamlUri of typeYamlCandidates) {
+			if (await this.fileService.exists(typeYamlUri)) {
+				try {
+					const yamlStr = (await this.fileService.readFile(typeYamlUri)).value.toString();
+					schemaDefinition = parseYaml(yamlStr);
+					if (schemaDefinition) break;
+				} catch {}
+			}
+		}
+
+		// Also merge customMetadata from .agents/entity_snapshot.json if present (e.g. Workflows)
+		const mergedSelfDefinedData: Record<string, any> = { ...parsedTicket.selfDefinedData };
+		const snapshotUri = URI.joinPath(paths.folderUri, '.agents', 'entity_snapshot.json');
+		if (await this.fileService.exists(snapshotUri)) {
 			try {
-				const yamlStr = (await this.fileService.readFile(typeYamlUri)).value.toString();
-				schemaDefinition = parseYaml(yamlStr);
+				const snapRaw = (await this.fileService.readFile(snapshotUri)).value.toString();
+				const snapObj = JSON.parse(snapRaw);
+				if (snapObj && snapObj.customMetadata && typeof snapObj.customMetadata === 'object') {
+					for (const [k, v] of Object.entries(snapObj.customMetadata)) {
+						if (mergedSelfDefinedData[k] === undefined) {
+							mergedSelfDefinedData[k] = v;
+						}
+					}
+				}
 			} catch {}
 		}
 
@@ -821,7 +984,7 @@ export class TicketDataEngine {
 			parent_path: parsedTicket.parentPath || '/',
 			children: discoveredChildren,
 			profile_data: parsedTicket.profileData,
-			self_defined_data: parsedTicket.selfDefinedData,
+			self_defined_data: mergedSelfDefinedData,
 			links: {
 				link_to: parsedTicket.linkTo || 'None',
 				linked_by: parsedTicket.linkedBy || 'None'
@@ -1040,20 +1203,20 @@ export class TicketDataEngine {
 			// 1. Title
 			if (path === '/Title' || path === 'Title' || path === '/README/Title') {
 				if (rawVal) {
-					readmeContent = readmeContent.replace(/^-\s*\*\*Title\*\*:\s*.*$/m, `- **Title**: ${rawVal}`);
+					readmeContent = readmeContent.replace(/^-\s*\*\*Title\*\*:\s*.*$/m, () => `- **Title**: ${rawVal}`);
 					readmeModified = true;
 				}
 			}
 			// 2. Description
 			else if (path === '/Description' || path === 'Description' || path === '/README/Description') {
 				const descVal = rawVal || 'None';
-				readmeContent = readmeContent.replace(/^-\s*\*\*Description\*\*:\s*.*$/m, `- **Description**: ${descVal}`);
+				readmeContent = readmeContent.replace(/^-\s*\*\*Description\*\*:\s*.*$/m, () => `- **Description**: ${descVal}`);
 				readmeModified = true;
 			}
 			// 3. Status
 			else if (path === '/Status' || path === '/Attributes/Status' || path === 'Status') {
 				if (rawVal) {
-					ticketContent = ticketContent.replace(/^-\s*\*\*Status\*\*:\s*.*$/m, `- **Status**: ${rawVal}`);
+					ticketContent = ticketContent.replace(/^-\s*\*\*Status\*\*:\s*.*$/m, () => `- **Status**: ${rawVal}`);
 					ticketModified = true;
 					// Synchronize through explorer service as well
 					await this.workspacesExplorerService.setEntityStatus(paths.folderUri, rawVal);
@@ -1062,25 +1225,25 @@ export class TicketDataEngine {
 			// 4. Priority
 			else if (path === '/Priority' || path === '/Attributes/Priority' || path === 'Priority') {
 				if (rawVal) {
-					ticketContent = ticketContent.replace(/^-\s*\*\*Priority\*\*:\s*.*$/m, `- **Priority**: ${rawVal}`);
+					ticketContent = ticketContent.replace(/^-\s*\*\*Priority\*\*:\s*.*$/m, () => `- **Priority**: ${rawVal}`);
 					ticketModified = true;
 				}
 			}
 			// 5. Current AI Agent
 			else if (path === '/Current AI Agent' || path === '/Attributes/Current AI Agent') {
 				const agentVal = rawVal || 'None';
-				ticketContent = ticketContent.replace(/^-\s*\*\*Current AI Agent\*\*:\s*.*$/m, `- **Current AI Agent**: ${agentVal}`);
+				ticketContent = ticketContent.replace(/^-\s*\*\*Current AI Agent\*\*:\s*.*$/m, () => `- **Current AI Agent**: ${agentVal}`);
 				ticketModified = true;
 			}
 			// 6. Prompts in instruction.md
 			else if (path === '/Instructions/Ticket Prompt' || path === '/Ticket Prompt') {
 				const pVal = rawVal || 'None';
-				instructionContent = instructionContent.replace(/^-\s*\*\*Ticket Prompt\*\*:\s*.*$/m, `- **Ticket Prompt**: ${pVal}`);
+				instructionContent = instructionContent.replace(/^-\s*\*\*Ticket Prompt\*\*:\s*.*$/m, () => `- **Ticket Prompt**: ${pVal}`);
 				instructionModified = true;
 			}
 			else if (path === '/Instructions/Ticket Type Prompt' || path === '/Ticket Type Prompt') {
 				const pVal = rawVal || 'None';
-				instructionContent = instructionContent.replace(/^-\s*\*\*Ticket Type Prompt\*\*:\s*.*$/m, `- **Ticket Type Prompt**: ${pVal}`);
+				instructionContent = instructionContent.replace(/^-\s*\*\*Ticket Type Prompt\*\*:\s*.*$/m, () => `- **Ticket Type Prompt**: ${pVal}`);
 				instructionModified = true;
 			}
 			else if (path === '/Instructions/Instruction Notes' || path === '/Instruction Notes' || path === '/Instructions') {
@@ -1174,6 +1337,43 @@ export class TicketDataEngine {
 		}
 		if (instructionModified) {
 			await this.fileService.writeFile(paths.instructionMdUri, VSBuffer.fromString(instructionContent));
+		}
+
+		// Sync .agents/entity_snapshot.json if present (e.g. Workflows or snapshots)
+		const snapshotUri = URI.joinPath(paths.folderUri, '.agents', 'entity_snapshot.json');
+		if (await this.fileService.exists(snapshotUri)) {
+			try {
+				const snapRaw = (await this.fileService.readFile(snapshotUri)).value.toString();
+				const snapObj = JSON.parse(snapRaw);
+				if (snapObj && typeof snapObj === 'object') {
+					let snapModified = false;
+					if (!snapObj.customMetadata || typeof snapObj.customMetadata !== 'object') {
+						snapObj.customMetadata = {};
+					}
+					for (const [rawPath, rawVal] of Object.entries(options.updates)) {
+						const p = rawPath.trim();
+						if (p === '/Title' || p === 'Title' || p === '/README/Title') {
+							if (rawVal) { snapObj.title = String(rawVal); snapModified = true; }
+						} else if (p === '/Description' || p === 'Description' || p === '/README/Description') {
+							snapObj.description = String(rawVal || ''); snapModified = true;
+						} else if (p === '/Status' || p === '/Attributes/Status' || p === 'Status') {
+							if (rawVal) { snapObj.status = String(rawVal); snapModified = true; }
+						} else if (p === '/Priority' || p === '/Attributes/Priority' || p === 'Priority') {
+							if (rawVal) { snapObj.priority = String(rawVal); snapModified = true; }
+						} else if (p.startsWith('/Custom/') || p.startsWith('Custom/')) {
+							const cleanKey = p.replace(/^\/?Custom\//, '').split('/')[0];
+							if (cleanKey) {
+								snapObj.customMetadata[cleanKey] = (typeof rawVal === 'object' && rawVal !== null) ? JSON.stringify(rawVal) : String(rawVal ?? '');
+								snapModified = true;
+							}
+						}
+					}
+					if (snapModified) {
+						snapObj.updatedAt = new Date().toISOString();
+						await this.fileService.writeFile(snapshotUri, VSBuffer.fromString(JSON.stringify(snapObj, null, 2)));
+					}
+				}
+			} catch {}
 		}
 
 		// Append worklog
@@ -1403,11 +1603,24 @@ export class TicketDataEngine {
 		const parts = path.split('/').filter(Boolean);
 		if (parts.length === 0) return content;
 
-		// 1. /Custom/<key>/add -> Add items to list or dynamic card
+		// 1. /Custom/<key>/add -> Add items to list, table, or dynamic card
 		if (parts.length === 2 && parts[1] === 'add' && val !== undefined && val !== null) {
 			const listKey = parts[0];
 			const propRegex = new RegExp(`^(\\s*-\\s*\\*\\*${listKey}\\*\\*:)(.*)$`, 'm');
 			const propMatch = content.match(propRegex);
+
+			// Check if listKey is a Data Table JSON object ({ columns, rows, ... })
+			if (propMatch && propMatch[2].trim().startsWith('{')) {
+				try {
+					const parsedObj = JSON.parse(propMatch[2].trim());
+					if (parsedObj && typeof parsedObj === 'object' && Array.isArray(parsedObj.rows)) {
+						const rowsToAdd = Array.isArray(val) ? val : [val];
+						parsedObj.rows.push(...rowsToAdd);
+						content = content.replace(propRegex, () => `  - **${listKey}**: ${JSON.stringify(parsedObj)}`);
+						return content;
+					}
+				} catch {}
+			}
 
 			// Check if listKey is stored as a JSON array / flat line
 			const isArrayOrAttachment = Array.isArray(val) || (typeof val === 'object' && ('name' in val || 'file' in val || 'uri' in val)) || (propMatch && propMatch[2].trim().startsWith('['));
@@ -1435,12 +1648,12 @@ export class TicketDataEngine {
 
 				const updatedJson = JSON.stringify(existingArr);
 				if (propMatch) {
-					content = content.replace(propRegex, `  - **${listKey}**: ${updatedJson}`);
+					content = content.replace(propRegex, () => `  - **${listKey}**: ${updatedJson}`);
 				} else {
 					if (/^-\s*\*\*Self Defined Data Value\*\*:/m.test(content)) {
-						content = content.replace(/(^-\s*\*\*Self Defined Data Value\**:)/m, `$1\n  - **${listKey}**: ${updatedJson}`);
+						content = content.replace(/(^-\s*\*\*Self Defined Data Value\**:)/m, (_m, p1) => `${p1}\n  - **${listKey}**: ${updatedJson}`);
 					} else if (/### Self Defined Data Value/m.test(content)) {
-						content = content.replace(/(### Self Defined Data Value:?\n)/m, `$1  - **${listKey}**: ${updatedJson}\n`);
+						content = content.replace(/(### Self Defined Data Value:?\n)/m, (_m, p1) => `${p1}  - **${listKey}**: ${updatedJson}\n`);
 					} else {
 						content += `\n  - **${listKey}**: ${updatedJson}\n`;
 					}
@@ -1459,12 +1672,12 @@ export class TicketDataEngine {
 			// Find listKey in Self Defined Data Value
 			const listRegex = new RegExp(`(  - \\*\\*${listKey}\\*\\*:\\n?)([\\s\\S]*?)(?=(\\n  - \\*\\*|\\n\\n|\\n###|$))`);
 			if (listRegex.test(content)) {
-				content = content.replace(listRegex, `$1$2${newCardBlock}`);
+				content = content.replace(listRegex, (_m, p1, p2) => `${p1}${p2}${newCardBlock}`);
 			} else {
 				if (/^-\s*\*\*Self Defined Data Value\*\*:/m.test(content)) {
-					content = content.replace(/(^-\s*\*\*Self Defined Data Value\**:)/m, `$1\n  - **${listKey}**: ${newCardBlock}`);
+					content = content.replace(/(^-\s*\*\*Self Defined Data Value\**:)/m, (_m, p1) => `${p1}\n  - **${listKey}**: ${newCardBlock}`);
 				} else if (/### Self Defined Data Value/m.test(content)) {
-					content = content.replace(/(### Self Defined Data Value:?\n)/m, `$1  - **${listKey}**: ${newCardBlock}`);
+					content = content.replace(/(### Self Defined Data Value:?\n)/m, (_m, p1) => `${p1}  - **${listKey}**: ${newCardBlock}`);
 				}
 			}
 			return content;
@@ -1484,7 +1697,7 @@ export class TicketDataEngine {
 							const itemName = typeof item === 'object' && item ? (item.name || item.key || item.title) : String(item);
 							return itemName !== targetName;
 						});
-						content = content.replace(propRegex, `  - **${listKey}**: ${JSON.stringify(arr)}`);
+						content = content.replace(propRegex, () => `  - **${listKey}**: ${JSON.stringify(arr)}`);
 					}
 				} catch { }
 			}
@@ -1496,7 +1709,7 @@ export class TicketDataEngine {
 			const [, cardKey, attr] = parts;
 			const attrRegex = new RegExp(`(  - \\*\\*${cardKey}\\*\\*:[\\s\\S]*?    - \\*\\*${attr}\\*\\*:).*$`, 'm');
 			if (attrRegex.test(content)) {
-				content = content.replace(attrRegex, `$1 ${val}`);
+				content = content.replace(attrRegex, (_m, p1) => `${p1} ${val}`);
 			}
 			return content;
 		}
@@ -1517,12 +1730,12 @@ export class TicketDataEngine {
 			if (val === null || val === undefined) {
 				content = content.replace(propRegex, '');
 			} else if (propRegex.test(content)) {
-				content = content.replace(propRegex, `  - **${key}**: ${valStr}`);
+				content = content.replace(propRegex, () => `  - **${key}**: ${valStr}`);
 			} else {
 				if (/^-\s*\*\*Self Defined Data Value\*\*:/m.test(content)) {
-					content = content.replace(/(^-\s*\*\*Self Defined Data Value\**:)/m, `$1\n  - **${key}**: ${valStr}`);
+					content = content.replace(/(^-\s*\*\*Self Defined Data Value\**:)/m, (_m, p1) => `${p1}\n  - **${key}**: ${valStr}`);
 				} else if (/### Self Defined Data Value/m.test(content)) {
-					content = content.replace(/(### Self Defined Data Value:?\n)/m, `$1  - **${key}**: ${valStr}\n`);
+					content = content.replace(/(### Self Defined Data Value:?\n)/m, (_m, p1) => `${p1}  - **${key}**: ${valStr}\n`);
 				} else {
 					content += `\n  - **${key}**: ${valStr}\n`;
 				}
@@ -1640,5 +1853,355 @@ export class TicketDataEngine {
 			out[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
 		}
 		return out;
+	}
+
+	/**
+	 * 6. anyagent_operate_ticket_table
+	 * Structured AI interface for Data Table primitives & SQLite persistence
+	 */
+	public async operateTicketTable(options: IOperateTicketTableToolOptions): Promise<any> {
+		const wsUri = await this.findWorkspaceUri(options.workspace_id, options.ticket_id);
+		if (!wsUri) {
+			throw new Error(`Workspace '${options.workspace_id}' not found.`);
+		}
+
+		const paths = await this.resolveTicketPaths(wsUri, options.ticket_id, options.parent_path);
+		if (!paths) {
+			throw new Error(`Ticket '${options.ticket_id}' not found in workspace '${options.workspace_id}'.`);
+		}
+
+		let ticketContent = (await this.fileService.readFile(paths.ticketMdUri)).value.toString();
+		const parsedTicket = this._parseTicketMd(ticketContent);
+
+		let schema: any = null;
+		const typeYamlCandidates = [
+			URI.joinPath(paths.folderUri, '.agents', 'entity_type', `${paths.ticketType}.yaml`),
+			URI.joinPath(wsUri, '.agents', 'entity_type', `${paths.ticketType}.yaml`),
+			URI.file(`/Users/aimery/.anyagent/entity_type/${paths.ticketType}.yaml`)
+		];
+		for (const typeYamlUri of typeYamlCandidates) {
+			if (await this.fileService.exists(typeYamlUri)) {
+				try {
+					const yamlStr = (await this.fileService.readFile(typeYamlUri)).value.toString();
+					schema = parseYaml(yamlStr);
+					if (schema) break;
+				} catch {}
+			}
+		}
+
+		const requestedField = (options.table_field || '').trim();
+		if (!requestedField) {
+			throw new Error(`'table_field' is required.`);
+		}
+
+		// Match schema field or custom data key case-insensitively
+		const schemaFields: any[] = Array.isArray(schema?.fields) ? schema.fields : [];
+		const matchedSchemaField = schemaFields.find(f =>
+			(f.label && f.label.toLowerCase() === requestedField.toLowerCase()) ||
+			(f.id && f.id.toLowerCase() === requestedField.toLowerCase())
+		);
+		const canonicalKey = matchedSchemaField?.label || matchedSchemaField?.id || requestedField;
+
+		let existingRaw: any = parsedTicket.selfDefinedData?.[canonicalKey] ?? parsedTicket.selfDefinedData?.[requestedField];
+		if (typeof existingRaw === 'string' && existingRaw.trim().startsWith('{')) {
+			try {
+				existingRaw = JSON.parse(existingRaw.trim());
+			} catch {}
+		}
+
+		let columns: Array<{
+			id: string;
+			name: string;
+			label?: string;
+			dataType: string;
+			primaryKey?: boolean;
+			nullable?: boolean;
+			defaultValue?: string;
+		}> = [];
+		let rows: Record<string, any>[] = [];
+		let dbEngine: 'sqlite' | 'none' = 'sqlite';
+		let dbPath = '';
+		let tableName = canonicalKey.toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'ticket_table';
+		let autoSyncDb = Boolean(matchedSchemaField?.tableAutoSyncDb);
+		let lastSynced = '';
+
+		if (existingRaw && typeof existingRaw === 'object' && !Array.isArray(existingRaw)) {
+			if (Array.isArray(existingRaw.columns)) columns = existingRaw.columns;
+			if (Array.isArray(existingRaw.rows)) rows = existingRaw.rows;
+			if (existingRaw.dbEngine) dbEngine = existingRaw.dbEngine === 'none' ? 'none' : 'sqlite';
+			if (existingRaw.dbPath !== undefined) dbPath = String(existingRaw.dbPath);
+			if (existingRaw.tableName !== undefined) tableName = String(existingRaw.tableName);
+			if (existingRaw.autoSyncDb !== undefined) autoSyncDb = Boolean(existingRaw.autoSyncDb);
+			if (existingRaw.lastSynced) lastSynced = String(existingRaw.lastSynced);
+		} else if (Array.isArray(existingRaw)) {
+			rows = existingRaw;
+		}
+
+		if (columns.length === 0 && Array.isArray(matchedSchemaField?.tableColumns) && matchedSchemaField.tableColumns.length > 0) {
+			columns = JSON.parse(JSON.stringify(matchedSchemaField.tableColumns));
+		}
+		if (!dbPath && matchedSchemaField?.tableDbPath) {
+			dbPath = String(matchedSchemaField.tableDbPath);
+		}
+		if (rows.length === 0 && !dbPath && Array.isArray(matchedSchemaField?.tableRows) && matchedSchemaField.tableRows.length > 0 && !existingRaw) {
+			rows = JSON.parse(JSON.stringify(matchedSchemaField.tableRows));
+		}
+		if (matchedSchemaField?.tableDbTableName && (!existingRaw || !existingRaw.tableName)) {
+			tableName = String(matchedSchemaField.tableDbTableName);
+		}
+		if (columns.length === 0) {
+			columns = [
+				{ id: 'col_1', name: 'id', label: 'id', dataType: 'INTEGER', primaryKey: true, nullable: false },
+				{ id: 'col_2', name: 'name', label: 'name', dataType: 'TEXT', primaryKey: false, nullable: true }
+			];
+		}
+
+		if (options.db_path !== undefined) {
+			dbPath = String(options.db_path).trim();
+		}
+		if (options.db_table_name !== undefined && String(options.db_table_name).trim()) {
+			tableName = String(options.db_table_name).trim().replace(/[^a-zA-Z0-9_]/g, '_');
+		}
+		if (options.auto_sync_db !== undefined) {
+			autoSyncDb = Boolean(options.auto_sync_db);
+		}
+
+		const op = options.operation;
+		if (op === 'get_table') {
+			return {
+				ticket_id: paths.ticketId,
+				table_field: canonicalKey,
+				columns,
+				rows,
+				row_count: rows.length,
+				db_engine: dbEngine,
+				db_path: dbPath,
+				db_table_name: tableName,
+				auto_sync_db: autoSyncDb,
+				last_synced: lastSynced
+			};
+		}
+
+		const ensureColumnsForRow = (rowObj: Record<string, any>) => {
+			if (!rowObj || typeof rowObj !== 'object') return;
+			for (const k of Object.keys(rowObj)) {
+				if (!columns.some(c => c.name.toLowerCase() === k.toLowerCase())) {
+					columns.push({
+						id: `col_${Date.now()}_${columns.length + 1}`,
+						name: k,
+						label: k,
+						dataType: 'TEXT',
+						primaryKey: false,
+						nullable: true
+					});
+				}
+			}
+		};
+
+		let operationSummary = '';
+		let sqliteResult: any = undefined;
+
+		if (op === 'define_columns') {
+			if (!Array.isArray(options.columns) || options.columns.length === 0) {
+				throw new Error(`'columns' array is required for operation 'define_columns'.`);
+			}
+			columns = options.columns.map((c, idx) => ({
+				id: `col_${Date.now()}_${idx + 1}`,
+				name: String(c.name || `col_${idx + 1}`).trim(),
+				label: String(c.name || `col_${idx + 1}`).trim(),
+				dataType: String(c.dataType || 'TEXT').trim().toUpperCase(),
+				primaryKey: Boolean(c.primaryKey),
+				nullable: c.nullable !== false,
+				defaultValue: c.defaultValue !== undefined ? String(c.defaultValue) : undefined
+			}));
+			operationSummary = `Defined ${columns.length} column(s) for table '${canonicalKey}'.`;
+		} else if (op === 'insert_rows') {
+			const toInsert = Array.isArray(options.rows) ? options.rows : [];
+			toInsert.forEach(r => {
+				if (r && typeof r === 'object') {
+					ensureColumnsForRow(r);
+					rows.push({ ...r });
+				}
+			});
+			operationSummary = `Inserted ${toInsert.length} row(s) into table '${canonicalKey}' (total: ${rows.length}).`;
+		} else if (op === 'set_rows') {
+			const nextRows = Array.isArray(options.rows) ? options.rows : [];
+			if (Array.isArray(options.columns) && options.columns.length > 0) {
+				columns = options.columns.map((c, idx) => ({
+					id: `col_${Date.now()}_${idx + 1}`,
+					name: String(c.name || `col_${idx + 1}`).trim(),
+					label: String(c.name || `col_${idx + 1}`).trim(),
+					dataType: String(c.dataType || 'TEXT').trim().toUpperCase(),
+					primaryKey: Boolean(c.primaryKey),
+					nullable: c.nullable !== false,
+					defaultValue: c.defaultValue !== undefined ? String(c.defaultValue) : undefined
+				}));
+			}
+			nextRows.forEach(r => ensureColumnsForRow(r));
+			rows = nextRows.map(r => ({ ...r }));
+			operationSummary = `Set ${rows.length} row(s) in table '${canonicalKey}'.`;
+		} else if (op === 'update_rows') {
+			const incoming = Array.isArray(options.rows) ? options.rows : [];
+			const pkCols = columns.filter(c => c.primaryKey).map(c => c.name);
+			let updatedCount = 0;
+			if (options.match_column && options.match_value !== undefined && incoming.length > 0) {
+				const patch = incoming[0];
+				ensureColumnsForRow(patch);
+				rows = rows.map(r => {
+					if (r && String(r[options.match_column!]) === String(options.match_value)) {
+						updatedCount++;
+						return { ...r, ...patch };
+					}
+					return r;
+				});
+			} else if (pkCols.length > 0 && incoming.length > 0) {
+				for (const item of incoming) {
+					if (!item || typeof item !== 'object') continue;
+					ensureColumnsForRow(item);
+					const hasAllPkValues = pkCols.every(pk => item[pk] !== undefined);
+					if (hasAllPkValues) {
+						const existingIdx = rows.findIndex(r => r && pkCols.every(pk => String(r[pk]) === String(item[pk])));
+						if (existingIdx >= 0) {
+							rows[existingIdx] = { ...rows[existingIdx], ...item };
+							updatedCount++;
+						} else {
+							rows.push({ ...item });
+							updatedCount++;
+						}
+					} else {
+						rows.push({ ...item });
+						updatedCount++;
+					}
+				}
+			} else if (Array.isArray(options.row_indices) && incoming.length > 0) {
+				options.row_indices.forEach((rIdx, i) => {
+					const patch = incoming[i] || incoming[0];
+					if (rIdx >= 0 && rIdx < rows.length && patch) {
+						ensureColumnsForRow(patch);
+						rows[rIdx] = { ...rows[rIdx], ...patch };
+						updatedCount++;
+					}
+				});
+			}
+			operationSummary = `Updated ${updatedCount} row(s) in table '${canonicalKey}'.`;
+		} else if (op === 'delete_rows') {
+			const beforeLen = rows.length;
+			if (Array.isArray(options.row_indices) && options.row_indices.length > 0) {
+				const idxSet = new Set(options.row_indices);
+				rows = rows.filter((_, idx) => !idxSet.has(idx));
+			} else if (options.match_column && options.match_value !== undefined) {
+				rows = rows.filter(r => !r || String(r[options.match_column!]) !== String(options.match_value));
+			}
+			const deletedCount = beforeLen - rows.length;
+			operationSummary = `Deleted ${deletedCount} row(s) from table '${canonicalKey}' (remaining: ${rows.length}).`;
+		} else if (op === 'clear_rows') {
+			rows = [];
+			operationSummary = `Cleared all rows from table '${canonicalKey}'.`;
+		} else if (op === 'bind_sqlite') {
+			dbEngine = 'sqlite';
+			operationSummary = `Bound table '${canonicalKey}' to SQLite file '${dbPath}' (table: '${tableName}').`;
+		}
+
+		// Execute SQLite operation if requested or if sync_sqlite / autoSyncDb is active
+		const isExplicitSqliteOp = op === 'save_to_sqlite' || op === 'update_in_sqlite' || op === 'load_from_sqlite' || op === 'delete_from_sqlite' || op === 'sql_query';
+		const shouldAutoSync = (options.sync_sqlite === true || (options.sync_sqlite !== false && autoSyncDb)) && dbEngine === 'sqlite' && Boolean(dbPath.trim()) && ['define_columns', 'insert_rows', 'set_rows', 'update_rows', 'bind_sqlite'].includes(op);
+
+		if (isExplicitSqliteOp || shouldAutoSync) {
+			const runtime = this.instantiationService.invokeFunction(accessor => {
+				try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+			});
+			if (!runtime) {
+				if (isExplicitSqliteOp) {
+					throw new Error('TicketWorkflowRuntimeService is unavailable for SQLite execution.');
+				}
+			} else {
+				let sqliteAction: 'save' | 'update' | 'insert' | 'update_header' | 'inspect_schema' | 'load' | 'delete_data' | 'query' = 'update';
+				let rowsForSqlite = rows;
+				if (op === 'save_to_sqlite' || op === 'set_rows') {
+					sqliteAction = 'save';
+				} else if (op === 'insert_rows') {
+					sqliteAction = 'insert';
+					rowsForSqlite = Array.isArray(options.rows) ? options.rows.filter(r => r && typeof r === 'object') : [];
+				} else if (op === 'define_columns') {
+					sqliteAction = 'update_header';
+				} else if (op === 'bind_sqlite') {
+					sqliteAction = 'inspect_schema';
+				} else if (op === 'update_in_sqlite' || op === 'update_rows') {
+					sqliteAction = 'update';
+				} else if (op === 'load_from_sqlite') {
+					sqliteAction = 'load';
+				} else if (op === 'delete_from_sqlite') {
+					sqliteAction = 'delete_data';
+				} else if (op === 'sql_query') {
+					sqliteAction = 'query';
+				}
+
+				const sqRes = await runtime.executeSqliteTableOperation({
+					workspaceUri: wsUri,
+					workingDirUri: paths.folderUri,
+					dbPath,
+					tableName,
+					action: sqliteAction,
+					columns: columns as any,
+					rows: rowsForSqlite,
+					sqlQuery: options.sql_query
+				});
+				sqliteResult = sqRes;
+
+				if (!sqRes.success && isExplicitSqliteOp) {
+					throw new Error(sqRes.error || `SQLite operation '${op}' failed.`);
+				}
+				if (sqRes.success) {
+					if (op === 'load_from_sqlite') {
+						if (Array.isArray(sqRes.columns) && sqRes.columns.length > 0) {
+							columns = sqRes.columns as any;
+						}
+						if (Array.isArray(sqRes.rows)) {
+							rows = sqRes.rows;
+						}
+					} else if (op === 'delete_from_sqlite') {
+						rows = [];
+					} else if (Array.isArray(sqRes.rows) && (op === 'save_to_sqlite' || op === 'update_in_sqlite')) {
+						rows = sqRes.rows;
+					}
+					lastSynced = new Date().toISOString();
+					if (!operationSummary) {
+						operationSummary = sqRes.message || `Executed SQLite operation '${op}' on '${tableName}'.`;
+					}
+				}
+			}
+		}
+
+		const updatedTablePayload = {
+			columns,
+			rows,
+			dbEngine,
+			dbPath,
+			tableName,
+			autoSyncDb,
+			lastSynced
+		};
+
+		ticketContent = this._applyCustomUpdate(ticketContent, canonicalKey, updatedTablePayload);
+		await this.fileService.writeFile(paths.ticketMdUri, VSBuffer.fromString(ticketContent));
+
+		if (options.worklog_record) {
+			await this.appendWorklog(paths.worklogMdUri, options.worklog_record);
+		}
+
+		return {
+			success: true,
+			ticket_id: paths.ticketId,
+			table_field: canonicalKey,
+			operation: op,
+			summary: operationSummary,
+			columns,
+			rows,
+			row_count: rows.length,
+			db_engine: dbEngine,
+			db_path: dbPath,
+			db_table_name: tableName,
+			sqlite_result: sqliteResult
+		};
 	}
 }

@@ -5,7 +5,7 @@
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
-import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot, CanonicalStatusCategory, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
+import { IWorkspacesExplorerService, IWorkspaceItem, IWorkspaceChildItem, IWorkspaceChildrenPage, ICreateResourceOptions, ICreateResourceResult, ICreateWorkspaceResult, ResourceType, IEntityMetadataSnapshot, CanonicalStatusCategory, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IWorkspacesService, isRecentFolder, isRecentWorkspace } from '../../../../platform/workspaces/common/workspaces.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -34,6 +34,31 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	private activeUserEmail: string = '';
 	private activeUserInitPromise: Promise<void>;
 
+	private readonly _childEntityMetaCache = new Map<string, {
+		type: ResourceType;
+		status?: string;
+		ticketId?: string;
+		title?: string;
+		timestamp: number;
+	}>();
+	private readonly _workspaceStatusesCache = new Map<string, {
+		info: IWorkspaceStatusesInfo;
+		timestamp: number;
+	}>();
+
+	private _invalidateCacheForUri(uri: URI | string): void {
+		const norm = this.normalizeUriString(uri);
+		this._childEntityMetaCache.delete(norm);
+		const uriObj = typeof uri === 'string' ? URI.parse(uri) : uri;
+		const parentDir = dirname(uriObj);
+		const parentNorm = this.normalizeUriString(parentDir);
+		this._childEntityMetaCache.delete(parentNorm);
+		if (parentDir.path.endsWith('/.agents') || parentDir.path.endsWith('.agents')) {
+			const grandParentNorm = this.normalizeUriString(dirname(parentDir));
+			this._childEntityMetaCache.delete(grandParentNorm);
+		}
+	}
+
 	constructor(
 		@IWorkspaceContextService private readonly workspaceContextService: IWorkspaceContextService,
 		@IWorkspacesService private readonly workspacesService: IWorkspacesService,
@@ -53,8 +78,46 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				this._onDidChangeWorkspaces.fire();
 			}
 		}));
-		this._register(this.workspacesService.onDidChangeRecentlyOpened(() => this._onDidChangeWorkspaces.fire()));
-		this._register(this.entityPersistenceService.onDidChangeSnapshots(() => this._onDidChangeWorkspaces.fire()));
+		this._register(this.entityPersistenceService.onDidChangeSnapshots(() => {
+			this._onDidChangeWorkspaces.fire();
+		}));
+		let fileChangeTimer: ReturnType<typeof setTimeout> | undefined;
+		this._register({
+			dispose: () => {
+				if (fileChangeTimer) {
+					clearTimeout(fileChangeTimer);
+					fileChangeTimer = undefined;
+				}
+			}
+		});
+		this._register(this.fileService.onDidFilesChange(e => {
+			const isRelevantMetaFile = (u: URI) => u.path.endsWith('/ticket.md') || u.path.endsWith('/README.md') || u.path.endsWith('/workspace.md');
+			for (const u of [...e.rawAdded, ...e.rawUpdated, ...e.rawDeleted]) {
+				if (isRelevantMetaFile(u)) {
+					this._invalidateCacheForUri(u);
+					if (u.path.endsWith('/ticket.md') || u.path.endsWith('/workspace.md')) {
+						this._workspaceStatusesCache.clear();
+					}
+				} else if (e.rawDeleted.includes(u)) {
+					this._invalidateCacheForUri(u);
+				}
+			}
+			if (e.rawAdded.some(isRelevantMetaFile) || e.rawDeleted.some(isRelevantMetaFile) || e.rawDeleted.length > 0) {
+				if (fileChangeTimer) {
+					clearTimeout(fileChangeTimer);
+					fileChangeTimer = undefined;
+				}
+				this._onDidChangeWorkspaces.fire();
+			} else if (e.rawUpdated.some(isRelevantMetaFile)) {
+				if (fileChangeTimer) {
+					clearTimeout(fileChangeTimer);
+				}
+				fileChangeTimer = setTimeout(() => {
+					fileChangeTimer = undefined;
+					this._onDidChangeWorkspaces.fire();
+				}, 150);
+			}
+		}));
 
 		this._register(this.authenticationService.onDidChangeSessions(async (e: any) => {
 			await this.updateActiveUser();
@@ -188,6 +251,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		return {
 			entityUri: snapshot.entityUri,
 			entityName: snapshot.entityName,
+			title: snapshot.title,
+			ticketId: snapshot.ticketId,
+			workspaceId: snapshot.workspaceId,
 			entityType: snapshot.entityType as ResourceType,
 			ownerAccount: snapshot.ownerAccount || this.activeUserEmail || 'unauthenticated',
 			createdAt: snapshot.createdAt || '',
@@ -203,6 +269,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	async saveMetadataSnapshot(snapshot: IEntityMetadataSnapshot): Promise<void> {
+		if (snapshot.entityUri) {
+			this._invalidateCacheForUri(snapshot.entityUri);
+		}
 		await this.entityPersistenceService.saveSnapshot({
 			...snapshot,
 			entityType: snapshot.entityType as any
@@ -210,6 +279,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	async removeSnapshot(uri: URI): Promise<void> {
+		this._invalidateCacheForUri(uri);
 		await this.entityPersistenceService.removeSnapshot(uri);
 		this._onDidChangeWorkspaces.fire();
 	}
@@ -323,6 +393,12 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					await this.fileService.exists(URI.joinPath(targetBase, 'workspace.md'));
 
 				if (!hasWorkspaceMd && !item.isSaved && !isCurrent) {
+					return;
+				}
+
+				const detectedType = await this.detectCustomEntityTypeFromDisk(targetBase);
+				item.detectedType = detectedType;
+				if (!item.isSaved && detectedType !== 'workspace' && detectedType !== 'folder') {
 					return;
 				}
 
@@ -667,39 +743,219 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		// optional order persistence logic
 	}
 
-	async scanWorkspaceChildren(workspaceUri: URI, includeRemoved: boolean = false): Promise<IWorkspaceChildItem[]> {
-		return this.getWorkspaceChildren(workspaceUri, includeRemoved);
+	private async _readChildEntityMetadataFast(
+		childUri: URI,
+		fallbackName: string
+	): Promise<{ type: ResourceType; status?: string; ticketId?: string; title?: string }> {
+		const cacheKey = this.normalizeUriString(childUri);
+		const snap = this.getMetadataSnapshot(childUri);
+		const cached = this._childEntityMetaCache.get(cacheKey);
+		if (cached && (Date.now() - cached.timestamp) < 300000) {
+			const resolvedId = cached.ticketId || snap?.ticketId || fallbackName;
+			const resolvedTitle = cached.title || (snap?.title && snap.title !== resolvedId && snap.title !== fallbackName ? snap.title : undefined);
+			return {
+				type: cached.type !== 'folder' ? cached.type : (snap?.entityType || cached.type),
+				status: cached.status,
+				ticketId: resolvedId,
+				title: resolvedTitle
+			};
+		}
+
+		const configDir = URI.joinPath(childUri, '.agents');
+		const ticketUris = [URI.joinPath(configDir, 'ticket.md'), URI.joinPath(childUri, 'ticket.md')];
+
+		let detectedType: ResourceType | undefined;
+		let detectedStatus: string | undefined;
+		let ticketIdFromTicket = '';
+		let titleFromTicket = '';
+		let foundTicketFile = false;
+
+		for (const uri of ticketUris) {
+			try {
+				const content = await this.fileService.readFile(uri, { length: 8192 });
+				const text = content.value.toString();
+				foundTicketFile = true;
+
+				const typeMatch = text.match(/-\s+\*\*Ticket\s+Type\*\*:\s*([^\r\n]+)/i) || text.match(/-\s+\*\*Entity\s+Type\*\*:\s*([^\r\n]+)/i);
+				if (typeMatch && typeMatch[1]) {
+					const cleaned = typeMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '').trim();
+					if (cleaned && cleaned.toLowerCase() !== 'none') {
+						detectedType = cleaned.toLowerCase() as ResourceType;
+					}
+				}
+
+				const statusMatch = text.match(/-\s+\*\*Status\*\*:\s*([^\r\n]+)/i);
+				if (statusMatch && statusMatch[1]) {
+					detectedStatus = statusMatch[1].trim();
+				}
+
+				const idMatch = text.match(/-\s+\*\*(?:Ticket|Entity)\s+ID\*\*:\s*([^\r\n]+)/i);
+				if (idMatch && idMatch[1]) {
+					const v = idMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+					if (v && v !== 'None') {
+						ticketIdFromTicket = v;
+					}
+				}
+
+				const tMatch = text.match(/-\s+\*\*Title\*\*:\s*([^\r\n]+)/i);
+				if (tMatch && tMatch[1]) {
+					const v = tMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+					if (v && v !== 'None') {
+						titleFromTicket = v;
+					}
+				}
+				break;
+			} catch {
+				// file does not exist or unreadable, try next
+			}
+		}
+
+		let ticketIdFromReadme = '';
+		let titleFromReadme = '';
+		let h1FromReadme = '';
+
+		// Only read README.md if ticket.md did not already supply both ticketId and title
+		if (!foundTicketFile || !ticketIdFromTicket || !titleFromTicket) {
+			const readmeUris = [URI.joinPath(configDir, 'README.md'), URI.joinPath(childUri, 'README.md')];
+			for (const uri of readmeUris) {
+				try {
+					const content = await this.fileService.readFile(uri, { length: 8192 });
+					const text = content.value.toString();
+					const idMatch = text.match(/-\s+\*\*(?:Ticket|Entity)\s+ID\*\*:\s*([^\r\n]+)/i);
+					if (idMatch && idMatch[1]) {
+						const v = idMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+						if (v && v !== 'None') {
+							ticketIdFromReadme = v;
+						}
+					}
+					const tMatch = text.match(/-\s+\*\*Title\*\*:\s*([^\r\n]+)/i);
+					if (tMatch && tMatch[1]) {
+						const v = tMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
+						if (v && v !== 'None') {
+							titleFromReadme = v;
+						}
+					}
+					const h1Match = text.match(/^#\s+([^\r\n]+)/m);
+					if (h1Match && h1Match[1]) {
+						const v = h1Match[1].trim();
+						if (v && v !== 'None') {
+							h1FromReadme = v;
+						}
+					}
+					break;
+				} catch {
+					// ignore
+				}
+			}
+		}
+
+		if (!detectedType) {
+			if (snap?.entityType && snap.entityType !== 'folder') {
+				detectedType = snap.entityType;
+			} else {
+				try {
+					const stat = await this.fileService.resolve(configDir);
+					if (stat.children) {
+						for (const child of stat.children) {
+							if (!child.isDirectory && child.name.endsWith('.md')) {
+								const nameLower = child.name.toLowerCase();
+								if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md' && nameLower !== 'ticket.md') {
+									detectedType = child.name.substring(0, child.name.length - 3) as ResourceType;
+									break;
+								}
+							}
+						}
+					}
+				} catch {
+					// ignore
+				}
+			}
+		}
+
+		const finalType: ResourceType = detectedType || 'folder';
+		const resolvedTicketId = ticketIdFromTicket || ticketIdFromReadme || snap?.ticketId || fallbackName;
+		let resolvedTitle = '';
+		if (titleFromReadme && titleFromReadme !== resolvedTicketId && titleFromReadme !== fallbackName) {
+			resolvedTitle = titleFromReadme;
+		} else if (titleFromTicket && titleFromTicket !== resolvedTicketId && titleFromTicket !== fallbackName) {
+			resolvedTitle = titleFromTicket;
+		} else if (snap?.title && snap.title !== resolvedTicketId && snap.title !== fallbackName) {
+			resolvedTitle = snap.title;
+		} else if (h1FromReadme && h1FromReadme !== resolvedTicketId && h1FromReadme !== fallbackName) {
+			resolvedTitle = h1FromReadme;
+		} else {
+			resolvedTitle = titleFromReadme || titleFromTicket || snap?.title || '';
+		}
+
+		const entry = {
+			type: finalType,
+			status: detectedStatus,
+			ticketId: resolvedTicketId,
+			title: resolvedTitle || undefined,
+			timestamp: Date.now()
+		};
+		this._childEntityMetaCache.set(cacheKey, entry);
+		return entry;
 	}
 
-	async getWorkspaceChildren(workspaceUri: URI, includeRemoved: boolean = false): Promise<IWorkspaceChildItem[]> {
+	async scanWorkspaceChildren(workspaceUri: URI, includeRemoved: boolean = false): Promise<IWorkspaceChildItem[]> {
+		const page = await this.scanWorkspaceChildrenPaginated(workspaceUri, includeRemoved, undefined);
+		return page.items;
+	}
+
+	async scanWorkspaceChildrenPaginated(
+		workspaceUri: URI,
+		includeRemoved: boolean = false,
+		limit?: number
+	): Promise<IWorkspaceChildrenPage> {
 		let targetBase = workspaceUri;
 		if (workspaceUri.path.endsWith('.code-workspace')) {
 			targetBase = dirname(workspaceUri);
 		}
 
 		try {
-			if (!await this.fileService.exists(targetBase)) {
-				return [];
+			const stat = await this.fileService.resolve(targetBase);
+			if (!stat.children || stat.children.length === 0) {
+				return { items: [], totalCount: 0, hasMore: false };
 			}
 
-			const stat = await this.fileService.resolve(targetBase);
-			if (!stat.children) {
-				return [];
+			const validChildren = stat.children.filter(child => {
+				if (child.name.startsWith('.') || child.name.startsWith('~')) {
+					return false;
+				}
+				if (!child.isDirectory && (child.name === 'desktop.ini' || child.name === 'Thumbs.db')) {
+					return false;
+				}
+				return true;
+			});
+
+			if (validChildren.length === 0) {
+				return { items: [], totalCount: 0, hasMore: false };
 			}
+
+			// Deterministic natural sort so paginated slices are stable
+			validChildren.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
 
 			const wsStatuses = await this.getWorkspaceStatuses(targetBase);
 			const childrenItems: IWorkspaceChildItem[] = [];
+			const BATCH_SIZE = 25;
+			let processedCount = 0;
 
-			for (const child of stat.children) {
-				if (child.name.startsWith('.') || child.name.startsWith('~')) {
-					continue;
-				}
+			for (let i = 0; i < validChildren.length; i += BATCH_SIZE) {
+				const slice = validChildren.slice(i, i + BATCH_SIZE);
+				const batchResults = await Promise.all(slice.map(async (child): Promise<IWorkspaceChildItem | null> => {
+					if (!child.isDirectory) {
+						return {
+							id: child.resource.toString(),
+							name: child.name,
+							type: 'file',
+							uri: child.resource
+						};
+					}
 
-				if (child.isDirectory) {
 					const childUri = child.resource;
-					const childType = await this.detectCustomEntityTypeFromDisk(childUri);
-					const childStatus = await this.detectCustomEntityStatusFromDisk(childUri);
-
+					const meta = await this._readChildEntityMetadataFast(childUri, child.name);
+					const childStatus = meta.status;
 					const isRemoved = childStatus && (
 						wsStatuses.getCategory(childStatus) === 'Removed' ||
 						childStatus.toLowerCase() === wsStatuses.removedStatus.toLowerCase() ||
@@ -710,35 +966,63 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					);
 
 					if (isRemoved && !includeRemoved) {
-						continue;
+						return null;
 					}
 
-					childrenItems.push({
+					return {
 						id: childUri.toString(),
 						name: child.name,
-						type: childType,
+						type: meta.type,
+						ticketId: meta.ticketId,
+						title: meta.title,
 						status: childStatus,
 						uri: childUri
-					});
-				} else {
-					if (!child.name.startsWith('.') && !child.name.startsWith('~') && child.name !== 'desktop.ini' && child.name !== 'Thumbs.db') {
-						childrenItems.push({
-							id: child.resource.toString(),
-							name: child.name,
-							type: 'file',
-							uri: child.resource
-						});
+					};
+				}));
+
+				for (const item of batchResults) {
+					if (item) {
+						childrenItems.push(item);
 					}
+				}
+				processedCount += slice.length;
+
+				if (limit !== undefined && limit > 0 && childrenItems.length >= limit) {
+					break;
 				}
 			}
 
-			return childrenItems;
+			const unscannedCount = Math.max(0, validChildren.length - processedCount);
+			const totalCount = childrenItems.length + unscannedCount;
+			const hasMore = limit !== undefined && limit > 0
+				? (childrenItems.length > limit || unscannedCount > 0)
+				: false;
+			const finalItems = (limit !== undefined && limit > 0 && childrenItems.length > limit)
+				? childrenItems.slice(0, limit)
+				: childrenItems;
+
+			return {
+				items: finalItems,
+				totalCount,
+				hasMore
+			};
 		} catch {
-			return [];
+			return { items: [], totalCount: 0, hasMore: false };
 		}
 	}
 
+	async getWorkspaceChildren(workspaceUri: URI, includeRemoved: boolean = false): Promise<IWorkspaceChildItem[]> {
+		const page = await this.scanWorkspaceChildrenPaginated(workspaceUri, includeRemoved, undefined);
+		return page.items;
+	}
+
 	public async getWorkspaceStatuses(targetUri: URI): Promise<IWorkspaceStatusesInfo> {
+		const cacheKey = this.normalizeUriString(targetUri);
+		const cached = this._workspaceStatusesCache.get(cacheKey);
+		if (cached && (Date.now() - cached.timestamp) < 60000) {
+			return cached.info;
+		}
+
 		const inferCategory = (name: string): CanonicalStatusCategory => {
 			const lower = name.toLowerCase();
 			if (lower.includes('progress') || lower.includes('dev') || lower.includes('doing') || lower.includes('test') || lower.includes('review') || lower.includes('deploy') || lower.includes('working') || lower.includes('wip')) {
@@ -795,11 +1079,18 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				.sort((a, b) => b.uri.path.length - a.uri.path.length)[0];
 
 			if (matchedWs) {
+				const wsCacheKey = this.normalizeUriString(matchedWs.uri);
+				const wsCached = this._workspaceStatusesCache.get(wsCacheKey);
+				if (wsCached && (Date.now() - wsCached.timestamp) < 60000) {
+					this._workspaceStatusesCache.set(cacheKey, wsCached);
+					return wsCached.info;
+				}
+
 				const wsTicketUri = URI.joinPath(matchedWs.uri, '.agents', 'ticket.md');
 				const rootTicketUri = URI.joinPath(matchedWs.uri, 'ticket.md');
 				for (const uri of [wsTicketUri, rootTicketUri]) {
-					if (await this.fileService.exists(uri)) {
-						const content = (await this.fileService.readFile(uri)).value.toString();
+					try {
+						const content = (await this.fileService.readFile(uri, { length: 8192 })).value.toString();
 						const statusesMatch = content.match(/-\s+\*\*Ticket\s+Statuses\*\*:\s*([^\r\n]+)/i);
 						const mappingMatch = content.match(/-\s+\*\*Status\s+Mapping\*\*:\s*([^\r\n]+)/i);
 						const removedMatch = content.match(/-\s+\*\*Removed\s+Status\*\*:\s*([^\r\n]+)/i);
@@ -822,8 +1113,15 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 							if (parsedStatuses.length === 0) {
 								parsedStatuses = Object.keys(parsedMapping);
 							}
-							return buildInfo(parsedStatuses, parsedMapping, removedMatch?.[1]?.trim());
+							const info = buildInfo(parsedStatuses, parsedMapping, removedMatch?.[1]?.trim());
+							const entry = { info, timestamp: Date.now() };
+							this._workspaceStatusesCache.set(wsCacheKey, entry);
+							this._workspaceStatusesCache.set(cacheKey, entry);
+							return info;
 						}
+						break;
+					} catch {
+						// file does not exist
 					}
 				}
 			}
@@ -831,7 +1129,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			console.error('Failed to get workspace statuses:', err);
 		}
 
-		return buildInfo(
+		const fallbackInfo = buildInfo(
 			['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'],
 			{
 				'Todo': 'Todo',
@@ -842,30 +1140,26 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			},
 			'Removed'
 		);
+		this._workspaceStatusesCache.set(cacheKey, { info: fallbackInfo, timestamp: Date.now() });
+		return fallbackInfo;
+	}
+
+	public async detectCustomEntityIdentityFromDisk(childUri: URI, fallbackName: string): Promise<{ ticketId?: string; title?: string }> {
+		const meta = await this._readChildEntityMetadataFast(childUri, fallbackName);
+		return {
+			ticketId: meta.ticketId,
+			title: meta.title
+		};
 	}
 
 	public async detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined> {
-		const configDir = URI.joinPath(childUri, '.agents');
-		const ticketUri = URI.joinPath(configDir, 'ticket.md');
-		const rootTicketUri = URI.joinPath(childUri, 'ticket.md');
-		for (const uri of [ticketUri, rootTicketUri]) {
-			try {
-				if (await this.fileService.exists(uri)) {
-					const content = await this.fileService.readFile(uri);
-					const text = content.value.toString();
-					const statusMatch = text.match(/-\s+\*\*Status\*\*:\s*([^\r\n]+)/i);
-					if (statusMatch && statusMatch[1]) {
-						return statusMatch[1].trim();
-					}
-				}
-			} catch {
-				// ignore
-			}
-		}
-		return undefined;
+		const fallbackName = childUri.path.split('/').filter(Boolean).pop() || '';
+		const meta = await this._readChildEntityMetadataFast(childUri, fallbackName);
+		return meta.status;
 	}
 
 	public async setEntityStatus(entityUri: URI, newStatus: string): Promise<void> {
+		this._invalidateCacheForUri(entityUri);
 		const configDir = URI.joinPath(entityUri, '.agents');
 		const ticketUri = URI.joinPath(configDir, 'ticket.md');
 		const rootTicketUri = URI.joinPath(entityUri, 'ticket.md');
@@ -888,6 +1182,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					updated = text + `\n- **Status**: ${newStatus}\n`;
 				}
 				await this.fileService.writeFile(targetUri, VSBuffer.fromString(updated));
+				this._invalidateCacheForUri(entityUri);
 			} catch (err) {
 				console.error('Failed to update status in ticket.md:', err);
 			}
@@ -896,40 +1191,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	public async detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType> {
-		const configDir = URI.joinPath(childUri, '.agents');
-		const ticketUri = URI.joinPath(configDir, 'ticket.md');
-		try {
-			if (await this.fileService.exists(ticketUri)) {
-				const content = await this.fileService.readFile(ticketUri);
-				const text = content.value.toString();
-				const typeMatch = text.match(/-\s+\*\*Ticket\s+Type\*\*:\s*([a-zA-Z0-9_-]+)/i) || text.match(/-\s+\*\*Entity\s+Type\*\*:\s*([a-zA-Z0-9_-]+)/i);
-				if (typeMatch && typeMatch[1]) {
-					return typeMatch[1].trim().toLowerCase() as ResourceType;
-				}
-			}
-		} catch {
-			// ignore
-		}
-
-		try {
-			if (await this.fileService.exists(configDir)) {
-				const stat = await this.fileService.resolve(configDir);
-				if (stat.children) {
-					for (const child of stat.children) {
-						if (!child.isDirectory && child.name.endsWith('.md')) {
-							const nameLower = child.name.toLowerCase();
-							if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md' && nameLower !== 'ticket.md') {
-								return child.name.substring(0, child.name.length - 3) as ResourceType;
-							}
-						}
-					}
-				}
-			}
-		} catch {
-			// ignore
-		}
-
-		return 'folder';
+		const fallbackName = childUri.path.split('/').filter(Boolean).pop() || '';
+		const meta = await this._readChildEntityMetadataFast(childUri, fallbackName);
+		return meta.type;
 	}
 
 	private generateWorkspaceCodeFromName(name: string): string {
@@ -950,13 +1214,28 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		if (pathLower === '/users/aimery/repos/jobs' || pathLower.endsWith('/repos/jobs')) {
 			return 'GLOBAL';
 		}
+		if (pathLower === '/users/aimery/documents/workflows' || pathLower.endsWith('/documents/workflows')) {
+			return 'GFLOW';
+		}
+		if (pathLower === '/users/aimery/documents/agents' || pathLower.endsWith('/documents/agents')) {
+			return 'GAGENT';
+		}
 
 		// Look up snapshot hierarchy or .agents/*.md on disk
 		let curr: URI | undefined = targetParentUri;
 		while (curr) {
 			const snapshot = this.getMetadataSnapshot(curr);
 			if (snapshot && snapshot.entityCode) {
-				return snapshot.entityCode;
+				const snapCode = snapshot.entityCode.replace(/-0000$/i, '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+				if (snapCode && snapCode !== 'NONE') {
+					return snapCode;
+				}
+			}
+			if (snapshot && snapshot.workspaceId) {
+				const snapWsCode = snapshot.workspaceId.replace(/-0000$/i, '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+				if (snapWsCode && snapWsCode !== 'NONE') {
+					return snapWsCode;
+				}
 			}
 
 			// Disk fallback: check .agents for main md file
@@ -981,12 +1260,16 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 			if (foundMdUri) {
 				try {
-					const content = (await this.fileService.readFile(foundMdUri)).value.toString();
-					const match = content.match(/-\s*\*\*(?:Entity|Ticket) Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/) ||
-						content.match(/-\s*\*\*Workspace ID\*\*:\s*`?([A-Za-z0-9_-]+)`?/);
-					if (match && match[1]) {
-						const code = match[1].replace(/-0000$/i, '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-						if (code) return code;
+					const content = (await this.fileService.readFile(foundMdUri, { length: 8192 })).value.toString();
+					const codeMatch = content.match(/-\s*\*\*(?:Entity|Ticket) Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/i);
+					if (codeMatch && codeMatch[1]) {
+						const code = codeMatch[1].replace(/-0000$/i, '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+						if (code && code !== 'NONE') return code;
+					}
+					const wsIdMatch = content.match(/-\s*\*\*Workspace ID\*\*:\s*`?([A-Za-z0-9_-]+)`?/i);
+					if (wsIdMatch && wsIdMatch[1]) {
+						const code = wsIdMatch[1].replace(/-0000$/i, '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+						if (code && code !== 'NONE') return code;
 					}
 				} catch {}
 			}
@@ -996,8 +1279,9 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			curr = parentPath;
 		}
 
-		// Fallback code derived from parent folder name
-		const folderName = targetParentUri.path.split('/').filter(Boolean).pop() || 'WS';
+		// Fallback code derived from workspace root folder name
+		const wsRoot = await this.findWorkspaceRootUri(targetParentUri);
+		const folderName = wsRoot.path.split('/').filter(Boolean).pop() || targetParentUri.path.split('/').filter(Boolean).pop() || 'WS';
 		return this.generateWorkspaceCodeFromName(folderName);
 	}
 
@@ -1327,6 +1611,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			await this.ensureGitRepositoryReady(entityFolderUri, options.gitRepoUrl, options.gitBranch);
 		}
 
+		const isIndependentAgent = type === 'agent' && activeCode === 'GAGENT';
+		const isIndependentWorkflow = type === 'workflow' && activeCode === 'GFLOW';
 		await this.entityPersistenceService.writeEntity4MDFiles({
 			entityUri: entityFolderUri.toString(),
 			entityName: name,
@@ -1340,13 +1626,13 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			agentRulePrompt: options.agentRulePrompt,
 			ownerAccount: this.activeUserEmail || 'unauthenticated',
 			description: description || (options.title ? options.title : `${parentType} ${type}`),
-			belongsToWorkspaceUri: workspaceRootUri.toString(),
+			belongsToWorkspaceUri: (isIndependentAgent || isIndependentWorkflow) ? undefined : workspaceRootUri.toString(),
 			role: description || `${parentType} Agent`,
 			modelName: finalModel.modelId,
 			systemPrompt: finalSystemPrompt,
-			scopeType: parentType as any,
-			scopeId: targetFolderUri.toString(),
-			scopeName: parentName,
+			scopeType: (isIndependentAgent ? 'none' : parentType) as any,
+			scopeId: isIndependentAgent ? 'none' : targetFolderUri.toString(),
+			scopeName: (isIndependentAgent || isIndependentWorkflow) ? 'Independent' : parentName,
 			typeDefinition: (options.typeDefinition && options.typeDefinition !== 'Built-in (System)' && options.typeDefinition !== 'None') ? options.typeDefinition : undefined,
 			typePrompt: options.typePrompt,
 			ticketPrompt: options.ticketPrompt || options.agentRulePrompt,
@@ -1359,15 +1645,17 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 
 		if (type === 'agent' && this.agentsManagerService) {
 			await this.agentsManagerService.addAgent({
-				name,
+				name: options.title || name,
+				ticketId: name,
+				title: options.title || name,
 				role: description || `${parentType} Agent`,
 				description: description || `${parentType} Agent`,
 				systemPrompt: finalSystemPrompt,
 				model: finalModel,
 				avatarIcon: 'robot',
-				scopeType: parentType as any,
-				scopeId: targetFolderUri.toString(),
-				scopeName: parentName,
+				scopeType: (isIndependentAgent ? 'none' : parentType) as any,
+				scopeId: isIndependentAgent ? 'none' : targetFolderUri.toString(),
+				scopeName: isIndependentAgent ? 'Independent' : parentName,
 				folderPath: entityFolderUri.fsPath,
 				status: 'idle'
 			}, targetFolderUri);

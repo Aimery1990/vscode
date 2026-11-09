@@ -9,6 +9,7 @@ import { URI } from '../../../../base/common/uri.js';
 
 export const WORKSPACES_EXPLORER_VIEWLET_ID = 'workbench.view.workspacesExplorer';
 export const WORKSPACE_PANE_VIEW_ID = 'workbench.workspacesExplorer.mainPane';
+export const WORKSPACES_EXPLORER_VIEW_ID = WORKSPACE_PANE_VIEW_ID;
 
 export interface IWorkspaceItem {
 	id: string;
@@ -32,6 +33,8 @@ export interface IWorkspaceChildItem {
 	uri: URI;
 	type: ResourceType;
 	code?: string;
+	ticketId?: string;
+	title?: string;
 	status?: string;
 	isMissing?: boolean;
 	missingReason?: string;
@@ -134,6 +137,12 @@ export interface IEntityMetadataSnapshot {
 	git?: IEntityGitSnapshot;
 }
 
+export interface IWorkspaceChildrenPage {
+	items: IWorkspaceChildItem[];
+	totalCount: number;
+	hasMore: boolean;
+}
+
 export const IWorkspacesExplorerService = createDecorator<IWorkspacesExplorerService>('workspacesExplorerService');
 
 export interface IWorkspacesExplorerService {
@@ -145,6 +154,7 @@ export interface IWorkspacesExplorerService {
 	addWorkspace(uri: URI, name?: string): Promise<void>;
 	removeWorkspace(uri: URI): Promise<void>;
 	scanWorkspaceChildren(workspaceUri: URI, includeRemoved?: boolean): Promise<IWorkspaceChildItem[]>;
+	scanWorkspaceChildrenPaginated(workspaceUri: URI, includeRemoved?: boolean, limit?: number): Promise<IWorkspaceChildrenPage>;
 	detectCustomEntityTypeFromDisk(childUri: URI): Promise<ResourceType>;
 	detectCustomEntityStatusFromDisk(childUri: URI): Promise<string | undefined>;
 	setEntityStatus(entityUri: URI, status: string): Promise<void>;

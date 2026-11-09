@@ -18,6 +18,8 @@ export interface IAgentModelReference {
 export interface IAgentItem {
 	id: string;
 	name: string;
+	ticketId?: string;
+	title?: string;
 	role: string;
 	description?: string;
 	systemPrompt: string;
@@ -61,6 +63,20 @@ export interface IAgentCredentialService {
 	fetchModels(providerId: string, apiKey: string, customUrl?: string): Promise<string[]>;
 	refreshCredential(id: string): Promise<void>;
 	executePrompt(modelId: string, prompt: string, systemPrompt?: string, targetProviderId?: string): Promise<{ success: boolean; text?: string; error?: string }>;
+	synthesizeSpeech(options: {
+		text: string;
+		modelId?: string;
+		credentialId?: string;
+		providerId?: string;
+		format?: string;
+		voice?: string;
+	}): Promise<{
+		success: boolean;
+		audioBuffer?: Uint8Array;
+		mimeType?: string;
+		format?: string;
+		error?: string;
+	}>;
 }
 
 export const IAgentsManagerService = createDecorator<IAgentsManagerService>('agentsManagerService');

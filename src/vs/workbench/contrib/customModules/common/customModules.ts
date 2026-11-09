@@ -24,4 +24,5 @@ export interface ICustomModulesService {
 	deleteCompositeComponent(component: ICompositeComponent, workspaceUri?: URI): Promise<void>;
 
 	openSchemaDesigner(options?: { targetModuleId?: string; workspaceUri?: URI; onUpdate?: () => void }): Promise<void>;
+	openModuleTicketPreview(moduleOrId: string | ICustomModule, workspaceUri?: URI): Promise<void>;
 }

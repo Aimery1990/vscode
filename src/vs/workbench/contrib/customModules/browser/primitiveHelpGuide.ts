@@ -201,6 +201,38 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 		]
 	},
 
+	table: {
+		type: 'table',
+		title: 'Data Table (SQLite / Structured Grid)',
+		icon: Codicon.table,
+		category: 'Database & Structured Data Grid',
+		summary: 'Defines a typed database table with customizable column headers, SQLite / SQL data types (TEXT, INTEGER, REAL, NUMERIC, BOOLEAN, DATE, DATETIME, JSON, VARCHAR(255), BLOB), manual and clipboard data entry, AI CRUD tool operations, and direct SQLite database persistence.',
+		designerConfig: [
+			{ name: 'Column Headers & Data Types', desc: 'Specify each column name, select its SQLite / SQL data type via dropdown, and optionally mark a Primary Key.' },
+			{ name: 'Interactive Data Grid & Paste', desc: 'Manually type rows or paste CSV, TSV (Excel/Sheets), Markdown tables, or JSON arrays directly into the grid.' },
+			{ name: 'SQLite Database Storage', desc: 'Create a new SQLite (.db) file or select an existing one to store, update (upsert), load, or delete the table data.' }
+		],
+		runTicketsFlow: {
+			headline: 'How RUN_TICKETS & AI Operate Data Table',
+			steps: [
+				{ step: '1. Schema & Row Resolution', detail: 'Loads defined tableColumns and tableRows from the ticket metadata or linked SQLite database.' },
+				{ step: '2. AI & Script Manipulation', detail: 'AI agents can read, insert, update, delete rows, or run SQL queries via anyagent_operate_ticket_table.' },
+				{ step: '3. SQLite Database Sync', detail: 'Automatically creates the SQLite table (CREATE TABLE IF NOT EXISTS) and persists/updates or deletes records in the bound .db file.' }
+			],
+			variableResolution: '{Field Label}, {Field Label.json}, {Field Label.dbPath}, {Field Label.tableName}',
+			downstreamPassing: 'Downstream AI Prompts receive a formatted Markdown table, and Python scripts can access rows and dbPath via TICKET_CONTEXT.'
+		},
+		syntaxExamples: [
+			'{Job Listings Table}',
+			'{Job Listings Table.json}',
+			"TICKET_CONTEXT['Job Listings Table']"
+		],
+		tips: [
+			'Mark a unique identifier column (such as id or job_id) as Primary Key (PK) so "Update in SQLite" performs clean upserts.',
+			'Press Cmd+V / Ctrl+V directly inside the table or click "Paste Data" to bulk-import rows from spreadsheets or Markdown.'
+		]
+	},
+
 	git: {
 		type: 'git',
 		title: 'Git Repository & Branch Binding',
@@ -493,6 +525,69 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 			'{SeoPack}'
 		],
 		tips: ['Build reusable classes for domain-specific groups like "SEO Metadata", "Approval Block", or "Deployment Specs".']
+	},
+
+	tts: {
+		type: 'tts',
+		title: 'Audio / TTS (Text-to-Speech)',
+		icon: Codicon.unmute,
+		category: 'AI Voice & Audio Synthesis',
+		summary: 'Converts multilingual text (English, Chinese, French, etc.) into an audio file (default MP3) using AI models from Agent Central (Google Gemini, OpenAI, Custom OpenAI) and saves the audio file directly inside the ticket folder for persistent playback without repeating LLM calls.',
+		designerConfig: [
+			{ name: 'Provider & Model Selection', desc: 'Select configured AI Provider/Credential and TTS/Voice Model (same selector as Agent Central).' },
+			{ name: 'Audio Format & Voice', desc: 'Choose output format (default MP3, or WAV, OPUS, AAC) and voice profile (e.g. Alloy, Nova, Kore, Puck).' },
+			{ name: 'Auto-Play Toggle', desc: 'Configure whether saved audio automatically plays when viewing the module or plays manually on click.' },
+			{ name: '1. Speech Synthesis Text (AI Model)', desc: 'Pure multilingual text sent to the TTS model API to synthesize speech (hidden in the Ticket page).' },
+			{ name: '2. Display Text (Human View)', desc: 'Annotated text with native-language vocabulary notes or phonetic hints shown to the user in the Ticket page.' }
+		],
+		runTicketsFlow: {
+			headline: 'How RUN_TICKETS Executes Audio / TTS Primitive',
+			steps: [
+				{ step: '1. Cache & Persistence Check', detail: 'Checks if an audio file (e.g. .mp3) has already been generated for the current text and saved inside the ticket folder.' },
+				{ step: '2. Variable Interpolation & Synthesis', detail: 'If not cached or if forced, interpolates {Field Label} variables and dispatches text to the selected AI model API to synthesize speech.' },
+				{ step: '3. Local Ticket Storage', detail: 'Saves the returned audio binary (MP3/WAV) into the ticket attachments directory and records the file path in customMetadata.' }
+			],
+			variableResolution: 'Exposes the saved audio file path and text under {Field Label} in contextVariables.',
+			downstreamPassing: 'Downstream steps or Output primitives can reference the generated audio file path.'
+		},
+		syntaxExamples: [
+			'{Title}',
+			'{AI Prompt 1}',
+			'{TTS Audio 1}'
+		],
+		tips: [
+			'Once generated, the MP3 file is saved locally inside the ticket folder so reopening the ticket never re-calls the LLM API unless you clear the audio file or change the text.',
+			'Enable Auto-Play if you want the audio to play automatically when opening the ticket.'
+		]
+	},
+
+	media_player: {
+		type: 'media_player',
+		title: 'MP3 / MP4 Player (Local Audio & Video)',
+		icon: Codicon.deviceCameraVideo,
+		category: 'Local Media Playback',
+		summary: 'Plays local MP3 audio, MP4 video, and other browser-compatible audio/video formats (WAV, M4A, AAC, OGG, FLAC, WebM, MOV, M4V, etc.) directly inside the Workflow or Ticket using native HTML5 Audio / Video capabilities.',
+		designerConfig: [
+			{ name: 'File Import (Select or Drag & Drop)', desc: 'Click the file selection button or drag and drop a local audio/video file directly into the component.' },
+			{ name: 'Auto-Switching Audio / Video Player', desc: 'Automatically detects whether the imported file is Audio (e.g. MP3) or Video (e.g. MP4) and displays the matching player UI.' },
+			{ name: 'Playback Speed Control (0.25x - 2.0x)', desc: 'Adjust playback speed across 0.25x, 0.5x, 0.75x, 1.0x, 1.25x, 1.5x, 1.75x, and 2.0x for both audio and video.' }
+		],
+		runTicketsFlow: {
+			headline: 'How RUN_TICKETS Executes MP3 / MP4 Player Primitive',
+			steps: [
+				{ step: '1. File Path Resolution', detail: 'Resolves the imported local media file path and auto-detects Audio vs. Video format.' },
+				{ step: '2. Context Export', detail: 'Exposes the local media file path to downstream steps in contextVariables.' }
+			],
+			variableResolution: 'Exposes the local media file path under {Field Label} in contextVariables.',
+			downstreamPassing: 'Downstream Python or AI Prompt steps can reference the imported media file path.'
+		},
+		syntaxExamples: [
+			'{MP3 / MP4 Player 1}'
+		],
+		tips: [
+			'Supports both clicking to select a local file and dragging & dropping a file from Finder / Explorer.',
+			'Scrub or click anywhere on the progress bar to jump to a specific timestamp.'
+		]
 	}
 };
 

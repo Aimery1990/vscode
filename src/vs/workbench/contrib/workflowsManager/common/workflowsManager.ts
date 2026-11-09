@@ -19,6 +19,8 @@ export interface ISavedWorkflowRecord {
 export interface IWorkflowItem {
 	id: string; // Workflow directory URI string
 	name: string;
+	ticketId?: string;
+	title?: string;
 	description?: string;
 	createdAt: string;
 	ownerAccount?: string;

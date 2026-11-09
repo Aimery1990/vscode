@@ -190,7 +190,9 @@ const tokenColorSchema: IJSONSchema = {
 
 const tokenColorCustomizationSchema: IConfigurationPropertySchema = {
 	description: nls.localize('editorColors', "Overrides editor syntax colors and font style from the currently selected color theme."),
-	default: {},
+	default: {
+		comments: '#6A9955'
+	},
 	allOf: [{ ...tokenColorSchema, patternProperties: { '^\\[': {} } }]
 };
 

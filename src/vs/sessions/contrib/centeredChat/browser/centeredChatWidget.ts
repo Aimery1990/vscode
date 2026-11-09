@@ -141,6 +141,7 @@ export interface IContextLocator {
 	label?: string;
 	fieldType?: string;
 	currentValue?: string;
+	preInjectedPrompt?: string;
 	options?: any[];
 	interactiveModifiedValue?: string;
 	hierarchyTree?: any[];
@@ -289,6 +290,52 @@ export class CenteredChatWidget extends Disposable {
 		return undefined;
 	}
 
+	private _sanitizePromptNodeValue(rawVal: string | undefined, existingPreInjected?: string): { cleanValue: string; preInjectedPrompt: string } {
+		let val = typeof rawVal === 'string' ? rawVal : '';
+		let pre = typeof existingPreInjected === 'string' ? existingPreInjected : '';
+		const trimmed = val.trim();
+		if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (parsed && typeof parsed === 'object' && ('userPrompt' in parsed || 'preInjectedPrompt' in parsed || 'targetMode' in parsed)) {
+					if (typeof parsed.preInjectedPrompt === 'string' && parsed.preInjectedPrompt && !pre) {
+						pre = parsed.preInjectedPrompt;
+					}
+					val = typeof parsed.userPrompt === 'string' ? parsed.userPrompt : '';
+				}
+			} catch { }
+		}
+		if (pre) {
+			if (val.trim() === pre.trim()) {
+				val = '';
+			} else if (val.startsWith(pre)) {
+				val = val.slice(pre.length).trim();
+			}
+		}
+		return { cleanValue: val, preInjectedPrompt: pre };
+	}
+
+	private _sanitizeHierarchyNodes(nodes: any[] | undefined): void {
+		if (!Array.isArray(nodes)) {
+			return;
+		}
+		for (const node of nodes) {
+			if (!node || typeof node !== 'object') {
+				continue;
+			}
+			if (node.fieldType === 'prompt' || node.preInjectedPrompt || (typeof node.currentValue === 'string' && node.currentValue.trim().startsWith('{'))) {
+				const sanitized = this._sanitizePromptNodeValue(node.currentValue, node.preInjectedPrompt);
+				node.currentValue = sanitized.cleanValue;
+				if (sanitized.preInjectedPrompt) {
+					node.preInjectedPrompt = sanitized.preInjectedPrompt;
+				}
+			}
+			if (Array.isArray(node.children) && node.children.length > 0) {
+				this._sanitizeHierarchyNodes(node.children);
+			}
+		}
+	}
+
 	public drillDownTo(targetPath: string): void {
 		if (!this.activeContextLocator) return;
 		const tree = this.activeContextLocator.hierarchyTree;
@@ -298,6 +345,7 @@ export class CenteredChatWidget extends Disposable {
 			this.activeContextLocator.label = node.label;
 			this.activeContextLocator.fieldType = node.fieldType;
 			this.activeContextLocator.currentValue = node.currentValue || '';
+			this.activeContextLocator.preInjectedPrompt = node.preInjectedPrompt || '';
 			this.activeContextLocator.options = node.options;
 			this.activeContextLocator.interactiveModifiedValue = node.currentValue || '';
 		} else {
@@ -407,6 +455,18 @@ export class CenteredChatWidget extends Disposable {
 	}
 
 	public setContextLocator(locator: IContextLocator | null): void {
+		if (locator) {
+			this._sanitizeHierarchyNodes(locator.hierarchyTree);
+			const activeNodeForSanitize = (locator.hierarchyTree && locator.field) ? this._findNodeByPath(locator.hierarchyTree, locator.field) : undefined;
+			const mergedPre = locator.preInjectedPrompt || activeNodeForSanitize?.preInjectedPrompt || '';
+			if (locator.fieldType === 'prompt' || activeNodeForSanitize?.fieldType === 'prompt' || mergedPre || (typeof locator.currentValue === 'string' && locator.currentValue.trim().startsWith('{'))) {
+				const sanitized = this._sanitizePromptNodeValue(locator.currentValue ?? activeNodeForSanitize?.currentValue, mergedPre);
+				locator.currentValue = sanitized.cleanValue;
+				if (sanitized.preInjectedPrompt) {
+					locator.preInjectedPrompt = sanitized.preInjectedPrompt;
+				}
+			}
+		}
 		this.activeContextLocator = locator;
 		if (!this.contextLocatorContainer) {
 			return;
@@ -735,7 +795,7 @@ export class CenteredChatWidget extends Disposable {
 			const editableValue = isNoneOrUnassigned ? '' : currentVal;
 			locator.interactiveModifiedValue = editableValue;
 
-			const fType = locator.fieldType || (activeNode ? activeNode.fieldType : undefined) || (editableValue.includes('~') ? 'date_range' : (/^\d{4}-\d{2}-\d{2}/.test(editableValue) ? 'date' : (editableValue.toLowerCase() === 'true' || editableValue.toLowerCase() === 'false' ? 'switch' : 'text')));
+			const fType = locator.fieldType || (activeNode ? activeNode.fieldType : undefined) || ((!editableValue.startsWith('{') && editableValue.length < 60 && editableValue.includes('~')) ? 'date_range' : (/^\d{4}-\d{2}-\d{2}/.test(editableValue) ? 'date' : (editableValue.toLowerCase() === 'true' || editableValue.toLowerCase() === 'false' ? 'switch' : 'text')));
 
 			if (fType === 'date_range') {
 				const [sDate, eDate] = editableValue.split('~').map((s: string) => s.trim());
@@ -1959,7 +2019,7 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; parentPath?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string; autoSend?: boolean }): void {
+	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; parentPath?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; preInjectedPrompt?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string; autoSend?: boolean }): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
@@ -1971,12 +2031,13 @@ export class CenteredChatWidget extends Disposable {
 						label: initialContext.label,
 						fieldType: initialContext.fieldType,
 						currentValue: initialContext.currentValue,
+						preInjectedPrompt: initialContext.preInjectedPrompt,
 						options: initialContext.options,
 						hierarchyTree: initialContext.hierarchyTree,
 						entityUri: initialContext.entityUri
 					});
 				}
-				if (initialContext.prompt && this.inputField) {
+				if (initialContext.prompt !== undefined && this.inputField) {
 					this.inputField.value = initialContext.prompt;
 				}
 				if (initialContext.companionMode || initialContext.companionPosition) {
@@ -2247,6 +2308,7 @@ export class CenteredChatWidget extends Disposable {
 					label: initialContext.label,
 					fieldType: initialContext.fieldType,
 					currentValue: initialContext.currentValue,
+					preInjectedPrompt: initialContext.preInjectedPrompt,
 					options: initialContext.options,
 					hierarchyTree: initialContext.hierarchyTree,
 					entityUri: initialContext.entityUri
@@ -2317,7 +2379,7 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; parentPath?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string; autoSend?: boolean }): void {
+	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; parentPath?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; preInjectedPrompt?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string; autoSend?: boolean }): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
@@ -2329,12 +2391,13 @@ export class CenteredChatWidget extends Disposable {
 						label: initialContext.label,
 						fieldType: initialContext.fieldType,
 						currentValue: initialContext.currentValue,
+						preInjectedPrompt: initialContext.preInjectedPrompt,
 						options: initialContext.options,
 						hierarchyTree: initialContext.hierarchyTree,
 						entityUri: initialContext.entityUri
 					});
 				}
-				if (initialContext.prompt && this.inputField) {
+				if (initialContext.prompt !== undefined && this.inputField) {
 					this.inputField.value = initialContext.prompt;
 				}
 				if (initialContext.companionMode || initialContext.companionPosition) {
@@ -3103,41 +3166,66 @@ When the user asks you to create, synthesize, design, or generate a new entity t
    - 'type_prompt': Specific AI guidelines & instructions telling subsequent AI agents how to process, validate, calculate, check compliance, and route tickets of this module type.
    - 'fields': Thoughtfully mapped array of fields choosing the best primitives. For approval workflows, always include relevant fields such as approval subject/title, category dropdown, amount/cost, date/period, itemized sub-table ('dynamic_list'), justification ('textarea'), approval flags ('switch'), and attachments for proof documents ('attachment').
    - 'auto_open': Set to true (default) so the Schema Designer immediately opens for the user.
+3. UPDATING EXISTING CUSTOM MODULE TYPE DEFINITION OR TYPE PROMPT:
+   When the user context targets a Custom Module Template's '/Type Definition' or '/Type Prompt' (e.g. via [Pre-Injected Template Instruction]):
+   - Keep 'type_definition' concise and high-level (1 to 2 sentences describing the module's overall purpose) and keep 'type_prompt' directional (explaining what each major stage generally does), WITHOUT hardcoding specific field names, SQLite column names, or {Variable} placeholder tokens that might later change.
+   - Call 'anyagent_generate_custom_module' passing 'module_id' and the updated 'type_definition' or 'type_prompt' (and 'auto_open': false), omitting 'fields' so all existing template fields and settings are preserved intact.
 
 Always explain the result clearly to the user once tool execution completes.`;
 
 	private async getDynamicSystemPrompt(): Promise<string> {
 		let prompt = CenteredChatWidget.ANYAGENT_SYSTEM_PROMPT;
 		try {
-			const workspaces = await this.workspacesExplorerService.getWorkspaces();
-			if (workspaces && workspaces.length > 0) {
-				const activeTicketId = this.activeContextLocator?.ticketId;
-				const wsBlocks: string[] = [];
+			const workspaces = (await this.workspacesExplorerService.getWorkspaces()) || [];
+			const activeTicketId = this.activeContextLocator?.ticketId;
+			const activeWorkspaceId = (this.activeContextLocator?.workspaceId || '').trim();
+			const wsBlocks: string[] = [];
 
-				for (const w of workspaces) {
-					const codeStr = w.code ? ` (Code: ${w.code})` : '';
-					const activeStr = w.isCurrent ? ' [CURRENT ACTIVE WORKSPACE]' : '';
-					let block = `📁 Workspace "${w.name}"${codeStr}${activeStr}`;
+			for (const w of workspaces) {
+				const codeStr = w.code ? ` (Code: ${w.code})` : '';
+				const activeStr = w.isCurrent ? ' [CURRENT ACTIVE WORKSPACE]' : '';
+				let block = `📁 Workspace "${w.name}"${codeStr}${activeStr}`;
 
-					try {
-						// Render ultra-compact ASCII skeleton tree
-						const treeView = await this.ticketDataEngine.buildCompactWorkspaceTree(w.uri, activeTicketId, 2);
-						block += `\n${treeView}`;
-					} catch (treeErr) {
-						block += `\n  (Could not read workspace tree: ${treeErr})`;
-					}
-
-					wsBlocks.push(block);
+				try {
+					// Render ultra-compact ASCII skeleton tree
+					const treeView = await this.ticketDataEngine.buildCompactWorkspaceTree(w.uri, activeTicketId, 2);
+					block += `\n${treeView}`;
+				} catch (treeErr) {
+					block += `\n  (Could not read workspace tree: ${treeErr})`;
 				}
 
+				wsBlocks.push(block);
+			}
+
+			// Also include Global Workspaces (GFLOW-0000 -> /Users/aimery/Documents/workflows, GAGENT-0000 -> /Users/aimery/Documents/agents)
+			const globalWorkspaces = [
+				{ name: 'Global Workflows', code: 'GFLOW-0000', uri: URI.file('/Users/aimery/Documents/workflows') },
+				{ name: 'Global Agents', code: 'GAGENT-0000', uri: URI.file('/Users/aimery/Documents/agents') }
+			];
+			for (const gw of globalWorkspaces) {
+				try {
+					if (await this.fileService.exists(gw.uri)) {
+						const isFocusWs = activeWorkspaceId.toUpperCase() === gw.code ||
+							activeWorkspaceId.toUpperCase() === gw.code.replace('-0000', '') ||
+							(activeTicketId && activeTicketId.toUpperCase().startsWith(gw.code.replace('-0000', '') + '-'));
+						const activeStr = isFocusWs ? ' [CURRENT ACTIVE GLOBAL WORKSPACE]' : '';
+						let block = `🌐 Global Workspace "${gw.name}" (Code: ${gw.code}, Path: ${gw.uri.fsPath})${activeStr}`;
+						const treeView = await this.ticketDataEngine.buildCompactWorkspaceTree(gw.uri, activeTicketId, 2);
+						block += `\n${treeView}`;
+						wsBlocks.push(block);
+					}
+				} catch {}
+			}
+
+			if (wsBlocks.length > 0) {
 				prompt += `\n\n=== ACCESSIBLE WORKSPACES & COMPACT HIERARCHICAL TREES ===
 ${wsBlocks.join('\n\n')}
 
 CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
-1. Workspace Resolution: When calling tools such as 'anyagent_create_ticket', you MUST specify a valid 'workspace_id' matching one of the accessible workspaces above (use exact Name or Code). Resolve acoustic STT variants (e.g. "new workspace" -> "neoWorkspace").
+1. Workspace Resolution: When calling tools such as 'anyagent_get_ticket_data', 'anyagent_create_ticket', 'anyagent_update_ticket', or 'anyagent_delete_ticket', specify a valid 'workspace_id' matching one of the accessible workspaces or global workspaces above (e.g. 'GFLOW-0000' for Global Workflows, 'GAGENT-0000' for Global Agents, or a user workspace Name/Code). Global workspaces ('GFLOW-0000', 'GAGENT-0000', 'GLOBAL-0000') resolve directly to their global directories without needing to appear in the user Workspaces Explorer sidebar.
 2. Parent Ticket Resolution: When a user asks to perform CRUD (create, update, delete, view, link) under or on an existing entity:
-   - Match against the hierarchical tree above! For example, "job 0001", "job 1", or "0001" corresponds to the job ticket whose ID ends with "-0001" (e.g. "NEOWO-0001").
-   - Set 'parent_path' to the exact Ticket ID (e.g. "NEOWO-0001" or "/NEOWO-0001").
+   - Match against the hierarchical tree above! For example, "job 0001", "job 1", or "0001" corresponds to the job ticket whose ID ends with "-0001" (e.g. "NEOWO-0001" or "GFLOW-0004").
+   - Set 'parent_path' to the exact Ticket ID (e.g. "NEOWO-0001" or "/GFLOW-0004").
    - NEVER pass an arbitrary folder string like "/job 0001"!
    - If creating at the workspace root, pass "/".
 3. On-Demand Tree Exploration: If a branch is deep or collapsed, or if you need to find a ticket by keyword/content, invoke 'anyagent_query_workspace_tree' to search and retrieve the updated sub-tree before acting.
@@ -3186,6 +3274,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		let fullPrompt = text;
 		let displayText = text;
 		let locatorSummary = '';
+		let hiddenPreInjected = (this.activeContextLocator?.preInjectedPrompt || '').trim();
 		if (text.startsWith('[Workspace:') || text.startsWith('[Action:') || (this.activeContextLocator?.field && (this.activeContextLocator.field.startsWith('/Action') || this.activeContextLocator.field.startsWith('/Trash') || this.activeContextLocator.field.startsWith('/Remove')))) {
 			// Already a formatted command/action prompt from context menu or toolbar
 			fullPrompt = text;
@@ -3278,6 +3367,9 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 				this.setContextLocator(null);
 			} else {
 				const targetNode = this._findNodeByPath(loc.hierarchyTree, loc.field || '');
+				if (!hiddenPreInjected && targetNode?.preInjectedPrompt) {
+					hiddenPreInjected = String(targetNode.preInjectedPrompt).trim();
+				}
 				if (targetNode && targetNode.children && targetNode.children.length > 0) {
 					const firstWithSub = targetNode.children.find((c: any) => c.children && c.children.length > 0);
 					if (firstWithSub && firstWithSub.children) {
@@ -3396,6 +3488,10 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			promptContent.textContent = displayText;
 		}
 
+		const llmPayloadPrompt = hiddenPreInjected
+			? `${fullPrompt}\n\n[Pre-Injected Template Instruction]:\n${hiddenPreInjected}`
+			: fullPrompt;
+
 		// Collapsible Prompt Inspector (Click to expand Full System Prompt & Tools)
 		const promptInspector = append(userMsg, document.createElement('details'));
 		promptInspector.className = 'centered-chat-prompt-inspector';
@@ -3415,13 +3511,13 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		const payloadTitle = append(promptBody, $('.centered-chat-prompt-section-title'));
 		payloadTitle.textContent = 'User Payload Sent to LLM:';
 		const payloadPre = append(promptBody, $('pre.centered-chat-prompt-pre'));
-		payloadPre.textContent = fullPrompt;
+		payloadPre.textContent = llmPayloadPrompt;
 
 		const copyFullPromptBtn = append(promptBody, $('button.centered-chat-copy-full-prompt-btn'));
 		copyFullPromptBtn.textContent = '📋 Copy Complete Prompt & System Context';
 		copyFullPromptBtn.onclick = (e) => {
 			e.stopPropagation();
-			const fullTraceText = `=== SYSTEM PROMPT ===\n${dynamicSystemPrompt}\n\n=== USER PAYLOAD ===\n${fullPrompt}`;
+			const fullTraceText = `=== SYSTEM PROMPT ===\n${dynamicSystemPrompt}\n\n=== USER PAYLOAD ===\n${llmPayloadPrompt}`;
 			this.copyToClipboard(fullTraceText);
 		};
 
@@ -3444,7 +3540,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		userCopyLabel.textContent = 'Copy';
 		userCopyBtn.onclick = (e) => {
 			e.stopPropagation();
-			this.copyToClipboard(fullPrompt, userCopyLabel);
+			this.copyToClipboard(llmPayloadPrompt, userCopyLabel);
 		};
 
 		// Append user message to active session
@@ -3465,8 +3561,8 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
 		}
 
-		// 2. Start Real Streaming Response
-		await this.startStreamingResponse(fullPrompt, cred, apiKey);
+		// 2. Start Real Streaming Response (combine hidden pre-injected prompt when sending to AI without exposing it in UI)
+		await this.startStreamingResponse(llmPayloadPrompt, cred, apiKey);
 	}
 
 	private async startStreamingResponse(prompt: string, cred: IAgentCredential, apiKey: string | undefined): Promise<void> {
@@ -4027,37 +4123,267 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			];
 			const tools = this.getOpenAITools();
 			const baseEndpoint = customUrl || 'https://api.openai.com/v1';
-			const cleanBase = baseEndpoint.replace(/\/chat\/completions\/?$/, '');
+			const cleanBase = baseEndpoint.replace(/\/chat\/completions\/?$/, '').replace(/\/responses\/?$/, '').replace(/\/completions\/?$/, '').replace(/\/$/, '');
 			const url = `${cleanBase}/chat/completions`;
 			const headers = {
 				'Content-Type': 'application/json',
 				'Authorization': `Bearer ${apiKey}`
 			};
 
+			let useReasoningEffortNone = false;
+			let disableToolsForModel = false;
+			let useResponsesEndpoint = false;
+
+			const runViaResponsesEndpoint = async (): Promise<void> => {
+				const responsesUrl = `${cleanBase}/responses`;
+				const responsesTools = tools.map((t: any) => ({
+					type: 'function',
+					name: t.function?.name,
+					description: t.function?.description,
+					parameters: t.function?.parameters
+				})).filter((t: any) => Boolean(t.name));
+
+				const inputItems: any[] = [
+					{ role: 'user', content: prompt }
+				];
+				let disableResponsesTools = false;
+
+				for (let rTurn = 0; rTurn < maxTurns; rTurn++) {
+					if (cancellationTokenSource.token.isCancellationRequested) break;
+
+					const buildResponsesPayload = () => JSON.stringify({
+						model: sanitizedModel || 'gpt-4o',
+						...(systemPrompt ? { instructions: systemPrompt } : {}),
+						input: inputItems,
+						tools: (!disableResponsesTools && responsesTools.length > 0) ? responsesTools : undefined
+					});
+
+					let resp = await this.requestService.request({
+						type: 'POST',
+						url: responsesUrl,
+						headers,
+						data: buildResponsesPayload(),
+						callSite: 'centeredChat.streamLlm.responses'
+					}, cancellationTokenSource.token);
+
+					if (resp.res.statusCode && (resp.res.statusCode < 200 || resp.res.statusCode >= 300)) {
+						const rErr = await this.extractResponseErrorMessage(resp, 'OPENAI API');
+						if (!disableResponsesTools && (rErr.toLowerCase().includes('tool') || rErr.toLowerCase().includes('function'))) {
+							disableResponsesTools = true;
+							resp = await this.requestService.request({
+								type: 'POST',
+								url: responsesUrl,
+								headers,
+								data: buildResponsesPayload(),
+								callSite: 'centeredChat.streamLlm.responsesRetry'
+							}, cancellationTokenSource.token);
+							if (resp.res.statusCode && (resp.res.statusCode < 200 || resp.res.statusCode >= 300)) {
+								const retryErr = await this.extractResponseErrorMessage(resp, 'OPENAI API');
+								throw new Error(retryErr);
+							}
+						} else {
+							throw new Error(rErr);
+						}
+					}
+
+					let rawBody = '';
+					await new Promise<void>((resolve, reject) => {
+						const streamDisposables = new DisposableStore();
+						streamDisposables.add(cancellationTokenSource.token.onCancellationRequested(() => {
+							streamDisposables.dispose();
+							resolve();
+						}));
+						listenStream(resp.stream, {
+							onData: (chunk: VSBuffer) => { rawBody += chunk.toString(); },
+							onError: (err) => { streamDisposables.dispose(); reject(err); },
+							onEnd: () => { streamDisposables.dispose(); resolve(); }
+						}, cancellationTokenSource.token);
+					});
+
+					let parsedResp: any;
+					try {
+						parsedResp = JSON.parse(rawBody);
+					} catch {
+						if (rawBody.trim()) {
+							onToken(rawBody);
+						}
+						break;
+					}
+
+					const functionCallItems: Array<{ call_id: string; name: string; arguments: string; rawItem: any }> = [];
+					let emittedAnyText = false;
+
+					if (Array.isArray(parsedResp?.output)) {
+						for (const item of parsedResp.output) {
+							if (item.type === 'message' && Array.isArray(item.content)) {
+								for (const c of item.content) {
+									if (typeof c.text === 'string' && c.text) {
+										onToken(c.text);
+										emittedAnyText = true;
+									}
+								}
+								inputItems.push(item);
+							} else if (item.type === 'function_call') {
+								const callId = item.call_id || item.id || `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+								functionCallItems.push({
+									call_id: callId,
+									name: item.name || '',
+									arguments: item.arguments || '{}',
+									rawItem: {
+										type: 'function_call',
+										call_id: callId,
+										name: item.name || '',
+										arguments: item.arguments || '{}'
+									}
+								});
+							}
+						}
+					}
+					if (!emittedAnyText && typeof parsedResp?.output_text === 'string' && parsedResp.output_text) {
+						onToken(parsedResp.output_text);
+					}
+
+					if (functionCallItems.length === 0) {
+						break;
+					}
+
+					for (const fc of functionCallItems) {
+						inputItems.push(fc.rawItem);
+						let parsedArgs: any = {};
+						try { parsedArgs = JSON.parse(fc.arguments || '{}'); } catch { }
+
+						const formattedArgs = JSON.stringify(parsedArgs, null, 2);
+						onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${fc.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
+						let resultContent = '';
+						try {
+							const result = await this.languageModelToolsService.invokeTool(
+								{ callId: fc.call_id, toolId: fc.name, parameters: parsedArgs, context: undefined },
+								async (t) => Math.ceil(t.length / 4),
+								cancellationTokenSource.token
+							);
+							const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
+							resultContent = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
+
+							let prettyResult = resultContent;
+							try {
+								const parsed = JSON.parse(resultContent);
+								prettyResult = JSON.stringify(parsed, null, 2);
+							} catch { }
+							onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> ✅ **Tool Completed Successfully**\n\n`);
+						} catch (err: any) {
+							resultContent = `Tool execution error: ${err.message || String(err)}`;
+							onToken(`>\n> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
+						}
+
+						inputItems.push({
+							type: 'function_call_output',
+							call_id: fc.call_id,
+							output: resultContent
+						});
+					}
+				}
+			};
+
 			for (let turn = 0; turn < maxTurns; turn++) {
 				if (cancellationTokenSource.token.isCancellationRequested) break;
+				if (useResponsesEndpoint) {
+					await runViaResponsesEndpoint();
+					break;
+				}
 
-				const data = JSON.stringify({
+				const buildChatPayload = () => JSON.stringify({
 					model: sanitizedModel || 'gpt-4o',
 					stream: true,
 					messages,
-					tools: tools.length > 0 ? tools : undefined
+					tools: (!disableToolsForModel && tools.length > 0) ? tools : undefined,
+					...(useReasoningEffortNone ? { reasoning_effort: 'none' } : {})
 				});
 
 				const toolCallsMap = new Map<number, { id: string; name: string; arguments: string }>();
 				let currentText = '';
 
-				const response = await this.requestService.request({
+				let response = await this.requestService.request({
 					type: 'POST',
 					url,
 					headers,
-					data,
+					data: buildChatPayload(),
 					callSite: 'centeredChat.streamLlm'
 				}, cancellationTokenSource.token);
 
 				if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
-					const errMsg = await this.extractResponseErrorMessage(response, 'OPENAI API');
-					throw new Error(errMsg);
+					let errMsg = await this.extractResponseErrorMessage(response, 'OPENAI API');
+					const errLower = errMsg.toLowerCase();
+
+					// Fallback A: Newer OpenAI reasoning models (e.g. gpt-5.6-sol) disallow function tools with default reasoning_effort in /v1/chat/completions
+					if (errLower.includes('reasoning_effort') && !useReasoningEffortNone) {
+						useReasoningEffortNone = true;
+						response = await this.requestService.request({
+							type: 'POST',
+							url,
+							headers,
+							data: buildChatPayload(),
+							callSite: 'centeredChat.streamLlm.reasoningNone'
+						}, cancellationTokenSource.token);
+						if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+							errMsg = await this.extractResponseErrorMessage(response, 'OPENAI API');
+						}
+					}
+
+					// Fallback B: System role rejected by reasoning models (e.g. o1-mini / o1-preview)
+					if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+						const latestLower = errMsg.toLowerCase();
+						if (latestLower.includes("'system'") || (latestLower.includes('role') && latestLower.includes('messages[0]'))) {
+							if (messages.length > 0 && messages[0].role === 'system') {
+								const sysText = messages[0].content;
+								messages = messages.slice(1);
+								if (messages.length > 0 && messages[0].role === 'user') {
+									messages[0] = { role: 'user', content: `${sysText}\n\n${messages[0].content}` };
+								}
+								response = await this.requestService.request({
+									type: 'POST',
+									url,
+									headers,
+									data: buildChatPayload(),
+									callSite: 'centeredChat.streamLlm.noSystemRole'
+								}, cancellationTokenSource.token);
+								if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+									errMsg = await this.extractResponseErrorMessage(response, 'OPENAI API');
+								}
+							}
+						}
+					}
+
+					// Fallback C: Model requires /v1/responses endpoint (e.g. gpt-5-pro, o1-pro, codex, or if reasoning_effort='none' was rejected)
+					if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+						const latestLower = errMsg.toLowerCase();
+						if (latestLower.includes('/v1/responses') || latestLower.includes('v1/responses') || latestLower.includes('responses endpoint')) {
+							useResponsesEndpoint = true;
+							await runViaResponsesEndpoint();
+							break;
+						}
+					}
+
+					// Fallback D: Model does not support function calling / tools at all
+					if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+						const latestLower = errMsg.toLowerCase();
+						if (!disableToolsForModel && (latestLower.includes('tools is not supported') || latestLower.includes('does not support tools') || latestLower.includes('function calling is not supported') || latestLower.includes('tools are not supported'))) {
+							disableToolsForModel = true;
+							response = await this.requestService.request({
+								type: 'POST',
+								url,
+								headers,
+								data: buildChatPayload(),
+								callSite: 'centeredChat.streamLlm.noTools'
+							}, cancellationTokenSource.token);
+							if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+								errMsg = await this.extractResponseErrorMessage(response, 'OPENAI API');
+							}
+						}
+					}
+
+					if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
+						throw new Error(errMsg);
+					}
 				}
 
 				await new Promise<void>((resolve, reject) => {

@@ -17,6 +17,7 @@ export const StopWorkflowToolId = 'anyagent_stop_workflow';
 
 export const CreateTicketsToolId = 'CREATE_TICKETS';
 export const GetTicketsToolId = 'GET_TICKETS';
+export const GetOutputsToolId = 'GET_OUTPUTS';
 export const RunTicketsToolId = 'RUN_TICKETS';
 export const GetPrimitivesCatalogToolId = 'GET_PRIMITIVES_CATALOG';
 
@@ -26,6 +27,7 @@ export const GetTicketToolId = GetTicketsToolId;
 export const RunTicketToolId = RunTicketsToolId;
 export const LegacyCreateTicketToolId = 'anyagent_create_ticket';
 export const LegacyGetTicketToolId = 'anyagent_get_ticket';
+export const LegacyGetOutputsToolId = 'anyagent_get_outputs';
 export const LegacyRunTicketToolId = 'anyagent_run_ticket';
 export const LegacyGetPrimitivesCatalogToolId = 'anyagent_get_primitives_catalog';
 
@@ -568,4 +570,66 @@ export class GetPrimitivesCatalogTool implements IToolImpl {
 		}
 	}
 }
+
+// -------------------------------------------------------------
+// 9. GET_OUTPUTS
+// -------------------------------------------------------------
+export class GetOutputsTool implements IToolImpl {
+	constructor(
+		private readonly ticketRuntimeService: ITicketWorkflowRuntimeService
+	) { }
+
+	getToolData(): IToolData {
+		return {
+			id: GetOutputsToolId,
+			toolReferenceName: 'GET_OUTPUTS',
+			displayName: localize('workflow.tool.getOutputs.displayName', "GET_OUTPUTS"),
+			userDescription: localize('workflow.tool.getOutputs.userDescription', "Retrieve only the structured Output component fields of a ticket"),
+			modelDescription: 'Retrieve the OUTPUT component dictionary of a ticket by ticket_id or ticket handle. Returns null if the ticket template has no OUTPUT component; if an individual output field has no value, its dictionary entry is null.',
+			source: ToolDataSource.Internal,
+			canBeReferencedInPrompt: true,
+			icon: Codicon.output,
+			inputSchema: {
+				type: 'object',
+				properties: {
+					workspace_uri: {
+						type: 'string',
+						description: "Optional workspace URI or path."
+					},
+					ticket_id: {
+						type: 'string',
+						description: "Ticket identifier, code, folder name, or relative path (e.g. 'FINDJ-0002')."
+					},
+					ticket: {
+						description: "Ticket handle object or ticket identifier."
+					}
+				}
+			}
+		};
+	}
+
+	async prepareToolInvocation(context: IToolInvocationPreparationContext, _token: CancellationToken): Promise<IPreparedToolInvocation> {
+		const tid = context.parameters?.ticket_id || context.parameters?.ticket || '';
+		const label = typeof tid === 'object' ? (tid.ticketId || tid.ticketName || 'ticket') : String(tid);
+		return {
+			invocationMessage: localize('workflow.tool.getOutputs.invoking', "Fetching outputs for ticket '{0}'...", label),
+			pastTenseMessage: localize('workflow.tool.getOutputs.done', "Fetched outputs for ticket '{0}'", label)
+		};
+	}
+
+	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
+		try {
+			const { workspace_uri, ticket_id, ticket, ticket_id_or_path } = invocation.parameters || {};
+			const target = ticket_id ?? ticket ?? ticket_id_or_path;
+			if (!target) {
+				return toolError("Either 'ticket_id' or 'ticket' is required.");
+			}
+			const outputs = await this.ticketRuntimeService.getOutputs(workspace_uri || '', target);
+			return toolResult(outputs, outputs === null ? `Ticket template has no OUTPUT component (returned None).` : `Retrieved ${Object.keys(outputs).length} output field(s).`);
+		} catch (err: any) {
+			return toolError(err.message || String(err));
+		}
+	}
+}
+
 

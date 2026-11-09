@@ -5,6 +5,7 @@
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
+import { streamToBuffer, decodeBase64 } from '../../../../base/common/buffer.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
@@ -439,12 +440,14 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				'Authorization': `Bearer ${apiKey}`
 			};
 
-			// Attempt 1: Chat completions with max_tokens
+			// Attempt 1: Chat completions
+			const lowerModel = cleanModel.toLowerCase();
+			const isReasoningOrNewerModel = /gpt-[5-9]/.test(lowerModel) || /^o[1-9]/.test(lowerModel) || lowerModel.startsWith('codex') || lowerModel.includes('-sol') || lowerModel.includes('-luna');
 			let attemptUrl = `${cleanBase}/chat/completions`;
 			let attemptData: any = {
 				model: cleanModel,
 				messages: [{ role: 'user', content: 'Hello! Respond with "Connection Test Successful" if you receive this.' }],
-				max_tokens: 30
+				...(isReasoningOrNewerModel ? { max_completion_tokens: 512 } : { max_tokens: 30 })
 			};
 
 			let res = await this._executeRequest(attemptUrl, headers, JSON.stringify(attemptData));
@@ -453,23 +456,47 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			}
 
 			// Analyse the error to do smart fallback
-			const errText = res.message || '';
-			if (errText.includes('max_tokens') && errText.includes('max_completion_tokens')) {
-				// Fallback 1a: Reasoning model uses max_completion_tokens instead of max_tokens
-				delete attemptData.max_tokens;
-				attemptData.max_completion_tokens = 30;
+			let errText = res.message || '';
+			if (errText.includes('max_tokens') || errText.includes('max_completion_tokens')) {
+				// Fallback 1a: Swap between max_tokens and max_completion_tokens
+				if (attemptData.max_tokens !== undefined) {
+					delete attemptData.max_tokens;
+					attemptData.max_completion_tokens = 512;
+				} else {
+					delete attemptData.max_completion_tokens;
+					attemptData.max_tokens = 64;
+				}
 				res = await this._executeRequest(attemptUrl, headers, JSON.stringify(attemptData));
 				if (res.success) return res;
-			} else if (errText.includes('v1/responses') || errText.includes('responses endpoint')) {
+				errText = res.message || '';
+			}
+			if (errText.includes('REASONING_TOKEN_LIMIT_EXCEEDED')) {
+				delete attemptData.max_completion_tokens;
+				delete attemptData.max_tokens;
+				res = await this._executeRequest(attemptUrl, headers, JSON.stringify(attemptData));
+				if (res.success) return res;
+				errText = res.message || '';
+			}
+			if (errText.includes('reasoning_effort')) {
+				attemptData.reasoning_effort = 'none';
+				res = await this._executeRequest(attemptUrl, headers, JSON.stringify(attemptData));
+				if (res.success) return res;
+				errText = res.message || '';
+			}
+			if (errText.includes('v1/responses') || errText.includes('responses endpoint') || isReasoningOrNewerModel) {
 				// Fallback 2: Model requires v1/responses endpoint
 				attemptUrl = `${cleanBase}/responses`;
 				const responseData = {
 					model: cleanModel,
 					input: 'Hello! Respond with "Connection Test Successful" if you receive this.'
 				};
-				res = await this._executeRequest(attemptUrl, headers, JSON.stringify(responseData));
-				if (res.success) return res;
-			} else if (errText.includes('v1/completions') || errText.includes('not a chat model') || errText.includes('v1/chat/completions endpoint')) {
+				const respRes = await this._executeRequest(attemptUrl, headers, JSON.stringify(responseData));
+				if (respRes.success) return respRes;
+				if (errText.includes('v1/responses') || errText.includes('responses endpoint')) {
+					res = respRes;
+				}
+			}
+			if (!res.success && (errText.includes('v1/completions') || errText.includes('not a chat model') || errText.includes('v1/chat/completions endpoint'))) {
 				// Fallback 3: Model requires completions endpoint
 				attemptUrl = `${cleanBase}/completions`;
 				const completionData = {
@@ -481,33 +508,20 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				if (res.success) return res;
 			}
 
-			// If the model name itself suggests completion or reasoning/newer API, do proactive fallbacks
-			if (!res.success) {
-				const lowerModel = cleanModel.toLowerCase();
-				if (lowerModel.includes('gpt-5') || lowerModel.startsWith('o1') || lowerModel.startsWith('o3')) {
-					// Proactive reasoning model check
-					attemptUrl = `${cleanBase}/chat/completions`;
-					delete attemptData.max_tokens;
-					attemptData.max_completion_tokens = 30;
-					res = await this._executeRequest(attemptUrl, headers, JSON.stringify(attemptData));
-					if (res.success) return res;
-				}
-			}
-
 			return res;
 		}
 
 		return { success: false, message: `Unsupported provider: ${providerId}` };
 	}
 
-	private async _executeRequest(url: string, headers: Record<string, string>, body: string): Promise<{ success: boolean; message: string }> {
+	private async _executeRequest(url: string, headers: Record<string, string>, body: string, timeoutMs: number = 300000): Promise<{ success: boolean; message: string }> {
 		try {
 			const response = await this.requestService.request({
 				type: 'POST',
 				url,
 				headers,
 				data: body,
-				timeout: 60000,
+				timeout: timeoutMs,
 				callSite: 'agentCredentialService.executePrompt'
 			}, CancellationToken.None);
 
@@ -561,21 +575,81 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			let responseMessage = '';
 
 			if (url.includes('/chat/completions')) {
-				responseMessage = data.choices?.[0]?.message?.content || JSON.stringify(data);
+				const firstChoice = data.choices?.[0];
+				const msgContent = firstChoice?.message?.content;
+				if (typeof msgContent === 'string' && msgContent.trim().length > 0) {
+					responseMessage = msgContent;
+				} else if (Array.isArray(msgContent)) {
+					const parts = msgContent
+						.map((p: any) => (typeof p === 'string' ? p : (p?.text || p?.content || '')))
+						.filter((s: string) => Boolean(s));
+					responseMessage = parts.join('\n');
+				}
+
+				if (!responseMessage.trim()) {
+					if (firstChoice?.message?.refusal) {
+						return {
+							success: false,
+							message: `Model Refusal: ${firstChoice.message.refusal}`
+						};
+					}
+					const reasoningTokens = data.usage?.completion_tokens_details?.reasoning_tokens || 0;
+					if (firstChoice?.finish_reason === 'length' || reasoningTokens > 0) {
+						return {
+							success: false,
+							message: `REASONING_TOKEN_LIMIT_EXCEEDED: Model '${data.model || 'reasoning-model'}' exhausted all ${data.usage?.completion_tokens || reasoningTokens} completion tokens on internal thinking (reasoning_tokens: ${reasoningTokens}) before generating visible text output.`
+						};
+					}
+					responseMessage = JSON.stringify(data);
+				}
 			} else if (url.includes('/completions')) {
 				responseMessage = data.choices?.[0]?.text || JSON.stringify(data);
 			} else if (url.includes('/responses')) {
-				if (Array.isArray(data.output)) {
-					const msgObj = data.output.find((o: any) => o.type === 'message' && o.content);
-					const textObj = msgObj?.content?.find((c: any) => c.text);
-					responseMessage = textObj?.text || JSON.stringify(data);
-				} else {
+				if (typeof data.output_text === 'string' && data.output_text.trim()) {
+					responseMessage = data.output_text;
+				} else if (Array.isArray(data.output)) {
+					const texts: string[] = [];
+					for (const o of data.output) {
+						if (o.type === 'message' && Array.isArray(o.content)) {
+							for (const c of o.content) {
+								if (typeof c.text === 'string' && c.text) {
+									texts.push(c.text);
+								}
+							}
+						} else if (typeof o.text === 'string' && o.text) {
+							texts.push(o.text);
+						}
+					}
+					responseMessage = texts.length > 0 ? texts.join('\n') : '';
+				}
+				if (!responseMessage.trim()) {
+					if (data.status === 'incomplete' && data.incomplete_details?.reason === 'max_output_tokens') {
+						return {
+							success: false,
+							message: `REASONING_TOKEN_LIMIT_EXCEEDED: Model '${data.model || 'reasoning-model'}' reached max_output_tokens during internal reasoning before generating visible output.`
+						};
+					}
 					responseMessage = JSON.stringify(data);
 				}
 			} else if (url.includes('generativelanguage.googleapis.com')) {
-				responseMessage = data.candidates?.[0]?.content?.parts?.[0]?.text || JSON.stringify(data);
+				const parts = data.candidates?.[0]?.content?.parts;
+				if (Array.isArray(parts)) {
+					const textParts = parts
+						.filter((p: any) => typeof p?.text === 'string' && !p?.thought)
+						.map((p: any) => p.text);
+					responseMessage = textParts.length > 0 ? textParts.join('') : (parts[0]?.text || JSON.stringify(data));
+				} else {
+					responseMessage = JSON.stringify(data);
+				}
 			} else if (url.includes('api.anthropic.com')) {
-				responseMessage = data.content?.[0]?.text || JSON.stringify(data);
+				if (Array.isArray(data.content)) {
+					const textBlocks = data.content
+						.filter((b: any) => b?.type === 'text' && typeof b?.text === 'string')
+						.map((b: any) => b.text);
+					responseMessage = textBlocks.length > 0 ? textBlocks.join('\n') : (data.content?.[0]?.text || JSON.stringify(data));
+				} else {
+					responseMessage = JSON.stringify(data);
+				}
 			} else {
 				responseMessage = JSON.stringify(data);
 			}
@@ -594,15 +668,16 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 
 	async executePrompt(modelId: string, prompt: string, systemPrompt?: string, targetProviderId?: string): Promise<{ success: boolean; text?: string; error?: string }> {
 		await this.initializationPromise;
-		const sanitizedModel = (modelId || 'gemini-1.5-flash').replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
+		let sanitizedModel = (modelId || 'gemini-1.5-flash').replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
 
 		let providerId = targetProviderId || 'gemini';
 		if (!targetProviderId) {
-			if (sanitizedModel.startsWith('gpt') || sanitizedModel.startsWith('o1') || sanitizedModel.startsWith('o3') || sanitizedModel.startsWith('text-embedding')) {
+			const lowerM = sanitizedModel.toLowerCase();
+			if (lowerM.startsWith('gpt') || /^o[1-9]/.test(lowerM) || lowerM.startsWith('chatgpt') || lowerM.startsWith('codex') || lowerM.startsWith('omni-') || lowerM.startsWith('text-embedding') || lowerM.startsWith('computer-use')) {
 				providerId = 'openai';
-			} else if (sanitizedModel.startsWith('claude')) {
+			} else if (lowerM.startsWith('claude')) {
 				providerId = 'anthropic';
-			} else if (sanitizedModel.startsWith('deepseek') || sanitizedModel.startsWith('qwen') || sanitizedModel.startsWith('llama')) {
+			} else if (lowerM.startsWith('deepseek') || lowerM.startsWith('qwen') || lowerM.startsWith('llama')) {
 				providerId = 'custom-openai';
 			}
 		}
@@ -645,7 +720,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				const endpoint = 'https://api.anthropic.com/v1/messages';
 				const payload: any = {
 					model: sanitizedModel,
-					max_tokens: 4096,
+					max_tokens: 8192,
 					messages: [{ role: 'user', content: prompt }]
 				};
 				if (systemPrompt) {
@@ -657,30 +732,406 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					'anthropic-version': '2023-06-01',
 					'dangerously-allow-html-and-other-things': 'true'
 				};
-				const res = await this._executeRequest(endpoint, headers, JSON.stringify(payload));
+				let res = await this._executeRequest(endpoint, headers, JSON.stringify(payload));
+				if (!res.success && (res.message || '').includes('max_tokens')) {
+					payload.max_tokens = 4096;
+					res = await this._executeRequest(endpoint, headers, JSON.stringify(payload));
+				}
 				return res.success ? { success: true, text: res.message } : { success: false, error: res.message };
 			} else {
 				const baseEndpoint = cred.providerId === 'openai' ? 'https://api.openai.com/v1' : (cred.customUrl || 'http://localhost:11434/v1');
 				const cleanBase = baseEndpoint.replace(/\/chat\/completions\/?$/, '').replace(/\/completions\/?$/, '').replace(/\/responses\/?$/, '').replace(/\/$/, '');
-				const messages: any[] = [];
-				if (systemPrompt) {
-					messages.push({ role: 'system', content: systemPrompt });
-				}
-				messages.push({ role: 'user', content: prompt });
-				const payload: any = {
-					model: sanitizedModel,
-					messages,
-					max_tokens: 4096
-				};
 				const headers = {
 					'Content-Type': 'application/json',
 					'Authorization': `Bearer ${apiKey}`
 				};
-				const res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
+
+				const runOpenAiPrompt = async (activeModel: string): Promise<{ success: boolean; message: string }> => {
+					const lowerModel = activeModel.toLowerCase();
+					const isReasoningOrNewer = /gpt-[5-9]/.test(lowerModel) || /^o[1-9]/.test(lowerModel) || lowerModel.startsWith('codex') || lowerModel.includes('-sol') || lowerModel.includes('-luna');
+					const messages: any[] = [];
+					if (systemPrompt) {
+						messages.push({ role: isReasoningOrNewer ? 'developer' : 'system', content: systemPrompt });
+					}
+					messages.push({ role: 'user', content: prompt });
+
+					// Do not artificially cap max_completion_tokens at 4096, because reasoning models (e.g. gpt-6.1-sol, gpt-5.x, o1/o3/o4)
+					// count internal reasoning_tokens against max_completion_tokens and would exhaust 4096 tokens before writing visible output.
+					const payload: any = {
+						model: activeModel,
+						messages
+					};
+
+					let res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
+					if (res.success) {
+						return res;
+					}
+
+					let errText = res.message || '';
+
+					// 0. If reasoning model exhausted default server completion token cap on internal reasoning, retry with high max_completion_tokens + low/none reasoning_effort
+					if (errText.includes('REASONING_TOKEN_LIMIT_EXCEEDED')) {
+						payload.max_completion_tokens = 32768;
+						payload.reasoning_effort = 'low';
+						res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
+						if (res.success) return res;
+						errText = res.message || '';
+						if (errText.includes('reasoning_effort') || errText.includes('REASONING_TOKEN_LIMIT_EXCEEDED')) {
+							payload.reasoning_effort = 'none';
+							res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
+							if (res.success) return res;
+							errText = res.message || '';
+						}
+						if (errText.includes('max_completion_tokens') || errText.includes('max_tokens')) {
+							payload.max_completion_tokens = 16384;
+							res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
+							if (res.success) return res;
+							errText = res.message || '';
+						}
+					}
+
+					// 1. Handle explicit max_tokens / max_completion_tokens requirement from custom OpenAI-compatible servers
+					if (errText.includes('max_tokens') || errText.includes('max_completion_tokens')) {
+						if (errText.includes('max_completion_tokens') && !errText.includes('Unsupported parameter: \'max_completion_tokens\'')) {
+							delete payload.max_tokens;
+							payload.max_completion_tokens = 16384;
+						} else {
+							delete payload.max_completion_tokens;
+							payload.max_tokens = 4096;
+						}
+						res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
+						if (res.success) return res;
+						errText = res.message || '';
+					}
+
+					// 2. Handle system/developer role restriction (e.g. o1-mini / o1-preview)
+					if (systemPrompt && (errText.includes("'system'") || errText.includes("'developer'") || errText.includes('role') || errText.includes('messages[0]'))) {
+						payload.messages = [{ role: 'user', content: `${systemPrompt}\n\n${prompt}` }];
+						res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
+						if (res.success) return res;
+						errText = res.message || '';
+					}
+
+					// 3. Handle reasoning_effort restriction
+					if (errText.includes('reasoning_effort')) {
+						payload.reasoning_effort = 'none';
+						res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
+						if (res.success) return res;
+						errText = res.message || '';
+					}
+
+					// 4. Fallback to /v1/responses endpoint for newer OpenAI models (e.g. gpt-6.x, gpt-5-pro, o1-pro, codex, search-api)
+					if (errText.includes('v1/responses') || errText.includes('responses endpoint') || errText.includes('REASONING_TOKEN_LIMIT_EXCEEDED') || isReasoningOrNewer) {
+						const responsesPayload: any = {
+							model: activeModel,
+							input: prompt
+						};
+						if (systemPrompt) {
+							responsesPayload.instructions = systemPrompt;
+						}
+						const respRes = await this._executeRequest(`${cleanBase}/responses`, headers, JSON.stringify(responsesPayload));
+						if (respRes.success) return respRes;
+						if (errText.includes('v1/responses') || errText.includes('responses endpoint')) {
+							res = respRes;
+							errText = res.message || '';
+						}
+					}
+
+					// 5. Fallback to /v1/completions for legacy completion models
+					if (!res.success && (errText.includes('v1/completions') || errText.includes('not a chat model') || errText.includes('v1/chat/completions endpoint'))) {
+						const completionPayload = {
+							model: activeModel,
+							prompt: systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt,
+							max_tokens: 4096
+						};
+						const compRes = await this._executeRequest(`${cleanBase}/completions`, headers, JSON.stringify(completionPayload));
+						if (compRes.success) return compRes;
+					}
+
+					return res;
+				};
+
+				let res = await runOpenAiPrompt(sanitizedModel);
+				// Automatic migration fallback if an old ticket still references retired 'o1-mini' or 'o1-preview'
+				if (!res.success && (sanitizedModel === 'o1-mini' || sanitizedModel === 'o1-preview') && (res.message || '').includes('404')) {
+					const fallbackModel = (Array.isArray(cred.cachedModels) && cred.cachedModels.includes('gpt-4o'))
+						? 'gpt-4o'
+						: 'gpt-4o-mini';
+					res = await runOpenAiPrompt(fallbackModel);
+				}
+
 				return res.success ? { success: true, text: res.message } : { success: false, error: res.message };
 			}
 		} catch (err: any) {
 			return { success: false, error: `Prompt execution failed: ${err.message || String(err)}` };
 		}
+	}
+
+	async synthesizeSpeech(options: {
+		text: string;
+		modelId?: string;
+		credentialId?: string;
+		providerId?: string;
+		format?: string;
+		voice?: string;
+	}): Promise<{
+		success: boolean;
+		audioBuffer?: Uint8Array;
+		mimeType?: string;
+		format?: string;
+		error?: string;
+	}> {
+		await this.initializationPromise;
+		const inputText = (options.text || '').trim();
+		if (!inputText) {
+			return { success: false, error: 'Text input is empty. Please enter text to convert to speech.' };
+		}
+
+		const sanitizedModel = (options.modelId || 'tts-1').replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
+		const requestedFormat = (options.format || 'mp3').toLowerCase() as 'mp3' | 'wav' | 'opus' | 'aac';
+		const voice = (options.voice || '').trim();
+
+		// 1. Resolve credential
+		let cred: IAgentCredential | undefined;
+		if (options.credentialId) {
+			cred = this._credentials.find(c => c.id === options.credentialId);
+		}
+		if (!cred && options.providerId) {
+			cred = this._credentials.find(c => (c.id === options.providerId || c.providerId === options.providerId || c.name.toLowerCase() === options.providerId!.toLowerCase()) && c.isEnabled !== false);
+		}
+		if (!cred) {
+			let inferredProvider = 'openai';
+			if (sanitizedModel.toLowerCase().includes('gemini')) {
+				inferredProvider = 'gemini';
+			} else if (sanitizedModel.toLowerCase().startsWith('tts-') || sanitizedModel.toLowerCase().includes('gpt')) {
+				inferredProvider = 'openai';
+			}
+			cred = this._credentials.find(c => c.providerId === inferredProvider && c.isEnabled !== false);
+		}
+		if (!cred) {
+			cred = this._credentials.find(c => c.isEnabled !== false);
+		}
+
+		if (!cred) {
+			return {
+				success: false,
+				error: 'No configured AI credential found. Please configure an API Key in Agent Central / Models.'
+			};
+		}
+
+		const apiKey = await this.getApiKey(cred.id);
+		if (!apiKey) {
+			return {
+				success: false,
+				error: `API key not found for credential '${cred.name}'. Please re-enter the API key in Settings.`
+			};
+		}
+
+		const mimeMap: Record<string, string> = {
+			mp3: 'audio/mpeg',
+			wav: 'audio/wav',
+			opus: 'audio/opus',
+			aac: 'audio/aac'
+		};
+
+		try {
+			if (cred.providerId === 'gemini') {
+				const geminiVoices = ['Puck', 'Charon', 'Kore', 'Fenrir', 'Aoede', 'Zephyr', 'Leda', 'Orus'];
+				const selectedGeminiVoice = geminiVoices.find(v => v.toLowerCase() === voice.toLowerCase()) || 'Kore';
+
+				// Candidate models to try in order (selected model first if it's a TTS/2.0/2.5 model, then dedicated Gemini TTS models)
+				const candidateModels: string[] = [];
+				if (sanitizedModel && sanitizedModel.toLowerCase().includes('gemini')) {
+					candidateModels.push(sanitizedModel.replace(/^models\//, ''));
+				}
+				for (const fallbackModel of ['gemini-2.5-flash-preview-tts', 'gemini-2.0-flash', 'gemini-2.0-flash-exp']) {
+					if (!candidateModels.includes(fallbackModel)) {
+						candidateModels.push(fallbackModel);
+					}
+				}
+
+				let lastError = '';
+				for (const candidateModel of candidateModels) {
+					const isDedicatedTtsModel = candidateModel.toLowerCase().includes('-tts');
+					const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${candidateModel}:generateContent?key=${apiKey}`;
+					const promptText = isDedicatedTtsModel
+						? inputText
+						: `Please read the following text aloud verbatim without adding any extra commentary:\n\n${inputText}`;
+
+					const payload = {
+						contents: [{ parts: [{ text: promptText }] }],
+						generationConfig: {
+							responseModalities: ['AUDIO'],
+							speechConfig: {
+								voiceConfig: {
+									prebuiltVoiceConfig: {
+										voiceName: selectedGeminiVoice
+									}
+								}
+							}
+						}
+					};
+
+					const response = await this.requestService.request({
+						type: 'POST',
+						url: endpoint,
+						headers: { 'Content-Type': 'application/json' },
+						data: JSON.stringify(payload),
+						timeout: 60000,
+						callSite: 'agentCredentialService.synthesizeSpeech.gemini'
+					}, CancellationToken.None);
+
+					if (response.res.statusCode === 200) {
+						const data = await asJson<any>(response);
+						const parts = data?.candidates?.[0]?.content?.parts || [];
+						const audioPart = parts.find((p: any) => p.inlineData && p.inlineData.data);
+						if (audioPart && audioPart.inlineData?.data) {
+							const rawMime: string = audioPart.inlineData.mimeType || 'audio/pcm';
+							const rawBytes = decodeBase64(audioPart.inlineData.data).buffer;
+							// If Gemini returns raw L16 PCM bytes, wrap with a 44-byte WAV header so <audio> plays natively
+							if (rawMime.toLowerCase().includes('l16') || rawMime.toLowerCase().includes('pcm')) {
+								const rateMatch = rawMime.match(/rate=(\d+)/i);
+								const sampleRate = rateMatch ? parseInt(rateMatch[1], 10) : 24000;
+								const wavBytes = this._wrapPcmInWavHeader(rawBytes, sampleRate, 1, 16);
+								return {
+									success: true,
+									audioBuffer: wavBytes,
+									mimeType: 'audio/wav',
+									format: requestedFormat
+								};
+							}
+							return {
+								success: true,
+								audioBuffer: rawBytes,
+								mimeType: rawMime || mimeMap[requestedFormat] || 'audio/mpeg',
+								format: requestedFormat
+							};
+						}
+						lastError = 'Model response did not contain audio inlineData.';
+					} else {
+						const errText = await asText(response) || '';
+						try {
+							const parsed = JSON.parse(errText);
+							lastError = parsed.error?.message || errText;
+						} catch {
+							lastError = errText || `HTTP ${response.res.statusCode}`;
+						}
+					}
+				}
+
+				return {
+					success: false,
+					error: `Gemini TTS synthesis failed: ${lastError || 'Unable to generate audio.'}`
+				};
+			} else if (cred.providerId === 'openai' || cred.providerId === 'custom-openai') {
+				const baseEndpoint = cred.providerId === 'openai' ? 'https://api.openai.com/v1' : (cred.customUrl || 'http://localhost:11434/v1');
+				const cleanBase = baseEndpoint.replace(/\/chat\/completions\/?$/, '').replace(/\/completions\/?$/, '').replace(/\/audio\/speech\/?$/, '').replace(/\/$/, '');
+				const speechUrl = `${cleanBase}/audio/speech`;
+
+				const openaiVoices = ['alloy', 'ash', 'ballad', 'coral', 'echo', 'fable', 'onyx', 'nova', 'sage', 'shimmer', 'verse'];
+				const selectedVoice = openaiVoices.find(v => v.toLowerCase() === voice.toLowerCase()) || (cred.providerId === 'custom-openai' && voice ? voice : 'alloy');
+
+				// Try the user's selected model first; if it's a chat model (like gpt-4o) that fails on /audio/speech, fallback to tts-1
+				const candidateModels: string[] = [];
+				if (sanitizedModel) {
+					candidateModels.push(sanitizedModel);
+				}
+				for (const fb of ['tts-1', 'gpt-4o-mini-tts', 'tts-1-hd']) {
+					if (!candidateModels.includes(fb)) {
+						candidateModels.push(fb);
+					}
+				}
+
+				let lastError = '';
+				for (const candidateModel of candidateModels) {
+					const payload = {
+						model: candidateModel,
+						input: inputText,
+						voice: selectedVoice,
+						response_format: requestedFormat
+					};
+
+					const response = await this.requestService.request({
+						type: 'POST',
+						url: speechUrl,
+						headers: {
+							'Content-Type': 'application/json',
+							'Authorization': `Bearer ${apiKey}`
+						},
+						data: JSON.stringify(payload),
+						timeout: 60000,
+						callSite: 'agentCredentialService.synthesizeSpeech.openai'
+					}, CancellationToken.None);
+
+					if (response.res.statusCode === 200) {
+						const vsBuffer = await streamToBuffer(response.stream);
+						if (vsBuffer.byteLength > 0) {
+							return {
+								success: true,
+								audioBuffer: vsBuffer.buffer,
+								mimeType: mimeMap[requestedFormat] || 'audio/mpeg',
+								format: requestedFormat
+							};
+						}
+						lastError = 'Received empty audio stream from server.';
+					} else {
+						const errText = await asText(response) || '';
+						try {
+							const parsed = JSON.parse(errText);
+							lastError = parsed.error?.message || errText;
+						} catch {
+							lastError = errText || `HTTP ${response.res.statusCode}`;
+						}
+					}
+				}
+
+				return {
+					success: false,
+					error: `TTS synthesis failed: ${lastError}`
+				};
+			} else {
+				return {
+					success: false,
+					error: `Provider '${cred.providerId}' does not natively support TTS audio synthesis. Please select an OpenAI, Google Gemini, or Custom OpenAI credential.`
+				};
+			}
+		} catch (err: any) {
+			return {
+				success: false,
+				error: `Speech synthesis failed: ${err.message || String(err)}`
+			};
+		}
+	}
+
+	private _wrapPcmInWavHeader(pcmBytes: Uint8Array, sampleRate = 24000, numChannels = 1, bitsPerSample = 16): Uint8Array {
+		const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+		const blockAlign = numChannels * (bitsPerSample / 8);
+		const dataSize = pcmBytes.byteLength;
+		const buffer = new ArrayBuffer(44 + dataSize);
+		const view = new DataView(buffer);
+
+		const writeString = (offset: number, str: string) => {
+			for (let i = 0; i < str.length; i++) {
+				view.setUint8(offset + i, str.charCodeAt(i));
+			}
+		};
+
+		writeString(0, 'RIFF');
+		view.setUint32(4, 36 + dataSize, true);
+		writeString(8, 'WAVE');
+		writeString(12, 'fmt ');
+		view.setUint32(16, 16, true); // Subchunk1Size (16 for PCM)
+		view.setUint16(20, 1, true);  // AudioFormat (1 = PCM)
+		view.setUint16(22, numChannels, true);
+		view.setUint32(24, sampleRate, true);
+		view.setUint32(28, byteRate, true);
+		view.setUint16(32, blockAlign, true);
+		view.setUint16(34, bitsPerSample, true);
+		writeString(36, 'data');
+		view.setUint32(40, dataSize, true);
+
+		const wavBytes = new Uint8Array(buffer);
+		wavBytes.set(pcmBytes, 44);
+		return wavBytes;
 	}
 }

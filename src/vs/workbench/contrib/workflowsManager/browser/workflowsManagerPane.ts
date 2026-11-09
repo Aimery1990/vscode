@@ -68,14 +68,16 @@ export class WorkflowsManagerPane extends ViewPane {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
 		this._register(this.workflowsManagerService.onDidChangeWorkflows(() => {
-			this.updatePaneTitle();
-			this.renderContent();
+			if (this.isBodyVisible() && this.containerEl) {
+				this.renderContent();
+			} else {
+				this.updatePaneTitle();
+			}
 		}));
 
 		this._register(this.onDidChangeBodyVisibility(visible => {
 			if (visible) {
 				this.workflowsManagerService.notifyPaneExpanded(this.id);
-				this.updatePaneTitle();
 				this.renderContent();
 			}
 		}));
@@ -85,8 +87,6 @@ export class WorkflowsManagerPane extends ViewPane {
 				if (!this.isExpanded()) {
 					this.setExpanded(true);
 				}
-				this.updatePaneTitle();
-				this.renderContent();
 			} else if (this.isExpanded()) {
 				this.setExpanded(false);
 			}
@@ -132,11 +132,26 @@ export class WorkflowsManagerPane extends ViewPane {
 		this.renderContent();
 	}
 
-	private getTargetScope(): 'all' | 'workspace' {
+	private getTargetScope(): 'all' | 'workspace' | 'independent' {
 		if (this.id.endsWith('.workspace')) {
 			return 'workspace';
 		}
+		if (this.id.endsWith('.independent')) {
+			return 'independent';
+		}
 		return 'all';
+	}
+
+	private isIndependentWorkflow(w: IWorkflowItem): boolean {
+		const wsUriLower = (w.belongsToWorkspaceUri || '').toLowerCase();
+		const idLower = (w.id || '').toLowerCase();
+		if (idLower.includes('/documents/workflows/') || wsUriLower.endsWith('/documents/workflows') || wsUriLower.endsWith('/repos/jobs')) {
+			return true;
+		}
+		if (!w.belongsToWorkspaceUri || w.belongsToWorkspaceName === 'Independent') {
+			return true;
+		}
+		return false;
 	}
 
 	private async updatePaneTitle(): Promise<void> {
@@ -145,15 +160,16 @@ export class WorkflowsManagerPane extends ViewPane {
 
 		let list = all;
 		if (targetScope === 'workspace') {
-			const activeFolder = this.workspaceContextService.getWorkspace().folders[0];
-			if (activeFolder) {
-				list = all.filter(w => w.belongsToWorkspaceUri && w.belongsToWorkspaceUri.toLowerCase() === activeFolder.uri.toString().toLowerCase());
-			} else {
-				list = [];
-			}
+			list = all.filter(w => !this.isIndependentWorkflow(w));
+		} else if (targetScope === 'independent') {
+			list = all.filter(w => this.isIndependentWorkflow(w));
 		}
 
-		const baseName = targetScope === 'workspace' ? 'Workspace Workflows' : 'All Workflows';
+		const baseName = targetScope === 'workspace'
+			? 'Workspace Workflows'
+			: targetScope === 'independent'
+				? 'Independent Workflows'
+				: 'All Workflows';
 		this.updateTitle(`${baseName} (${list.length})`);
 	}
 
@@ -172,19 +188,19 @@ export class WorkflowsManagerPane extends ViewPane {
 
 		const targetScope = this.getTargetScope();
 		let scoped = all;
-		const activeFolder = this.workspaceContextService.getWorkspace().folders[0];
 
 		if (targetScope === 'workspace') {
-			if (activeFolder) {
-				const activeUriStr = activeFolder.uri.toString().toLowerCase();
-				scoped = all.filter(w => w.belongsToWorkspaceUri && w.belongsToWorkspaceUri.toLowerCase() === activeUriStr);
-			} else {
-				scoped = [];
-			}
+			scoped = all.filter(w => !this.isIndependentWorkflow(w));
+		} else if (targetScope === 'independent') {
+			scoped = all.filter(w => this.isIndependentWorkflow(w));
 		}
 
 		// Update Title synchronously with scoped items
-		const baseName = targetScope === 'workspace' ? 'Workspace Workflows' : 'All Workflows';
+		const baseName = targetScope === 'workspace'
+			? 'Workspace Workflows'
+			: targetScope === 'independent'
+				? 'Independent Workflows'
+				: 'All Workflows';
 		this.updateTitle(`${baseName} (${scoped.length})`);
 
 		// Search Filter
@@ -280,10 +296,18 @@ export class WorkflowsManagerPane extends ViewPane {
 		icon.style.color = workflow.isMissing ? '#ef4444' : '#0d9488';
 
 		const title = append(left, $('.card-title'));
-		title.textContent = workflow.name;
+		const displayTitle = workflow.title || workflow.name;
+		const displayTicketId = workflow.ticketId || workflow.name;
+		title.textContent = displayTitle;
+		title.title = `${displayTitle} [${displayTicketId} · WORKFLOW]`;
 
 		// Header Actions
 		const cardActions = append(header, $('.card-actions'));
+
+		const idBadge = append(cardActions, $('span', {
+			style: 'font-size: 8px; padding: 1px 5px; border-radius: 3px; background: rgba(13, 148, 136, 0.2); color: #0d9488; font-weight: 600; text-transform: uppercase; margin-right: 4px;'
+		}, displayTicketId));
+		idBadge.title = `Ticket ID: ${displayTicketId} · Type: WORKFLOW`;
 
 		if (workflow.isMissing) {
 			const removeBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
@@ -435,7 +459,7 @@ export class WorkflowsManagerPane extends ViewPane {
 		const footer = append(card, $('.card-footer'));
 		const workspaceBadge = append(footer, $('.workspace-badge'));
 		let wsName = workflow.belongsToWorkspaceName || 'Workspace';
-		if (!workflow.belongsToWorkspaceUri || workflow.belongsToWorkspaceUri.toLowerCase().endsWith('/repos/jobs')) {
+		if (this.isIndependentWorkflow(workflow)) {
 			wsName = 'Independent';
 		}
 		workspaceBadge.textContent = wsName;
@@ -443,8 +467,7 @@ export class WorkflowsManagerPane extends ViewPane {
 	}
 
 	private async createNewWorkflow(): Promise<void> {
-		const folders = this.workspaceContextService.getWorkspace().folders;
-		const targetFolderUri = folders[0]?.uri;
-		this.instantiationService.invokeFunction(accessor => createWorkflowDialog(accessor, targetFolderUri));
+		const defaultUri = this.getTargetScope() === 'independent' ? URI.file('/Users/aimery/Documents/workflows') : undefined;
+		this.instantiationService.invokeFunction(accessor => createWorkflowDialog(accessor, defaultUri));
 	}
 }

@@ -7,10 +7,10 @@ import './media/customModules.css';
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
 import { IViewDescriptor, IViewsRegistry, Extensions as ViewContainerExtensions, WindowEnablement, ViewContainer, IViewContainersRegistry, ViewContainerLocation } from '../../../common/views.js';
+import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { URI } from '../../../../base/common/uri.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
 import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
@@ -22,18 +22,13 @@ import { CustomModulesPane, CustomModulesViewPaneId } from './customModulesPane.
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../common/editor.js';
 import { CustomModuleSchemaEditor } from './customModuleSchemaEditor.js';
-import { CustomModuleSchemaEditorInput } from './customModuleSchemaEditorInput.js';
+import { CustomModuleSchemaEditorInput, customModulesViewIcon } from './customModuleSchemaEditorInput.js';
 import './tools/customModuleTools.contribution.js';
 
 // 1. Register Singleton Service
 registerSingleton(ICustomModulesService, CustomModulesService, InstantiationType.Delayed);
 
-// 2. Register Icon
-export const customModulesViewIcon = registerIcon(
-	'custom-modules-view-icon',
-	Codicon.layout,
-	localize('customModulesViewIcon', 'View icon of the Custom Modules & Data Types view.')
-);
+export { customModulesViewIcon };
 
 export const CUSTOM_MODULES_VIEWLET_ID = 'workbench.view.customModules';
 const CUSTOM_MODULES_VIEW_TITLE = localize2('customModules.view.label', "Custom Modules");
@@ -108,8 +103,14 @@ registerAction2(class RefreshCustomModulesAction extends Action2 {
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		const service = accessor.get(ICustomModulesService);
-		await service.getCustomModules();
+		const viewsService = accessor.get(IViewsService);
+		const pane = viewsService.getActiveViewWithId<CustomModulesPane>(CustomModulesViewPaneId);
+		if (pane && typeof pane.renderContent === 'function') {
+			await pane.renderContent();
+		} else {
+			const service = accessor.get(ICustomModulesService);
+			await service.getCustomModules();
+		}
 	}
 });
 

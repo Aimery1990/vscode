@@ -60,7 +60,11 @@ const VALID_FIELD_TYPES: Set<CustomFieldType> = new Set([
 	'parameters',
 	'prompt',
 	'result',
-	'output'
+	'output',
+	'python',
+	'tts',
+	'media_player',
+	'table'
 ]);
 
 const BASE_PRIMITIVES_CATALOG = [
@@ -75,8 +79,8 @@ const BASE_PRIMITIVES_CATALOG = [
 			label: 'Inputs',
 			type: 'parameters',
 			parameters: [
-				{ id: 'param_1', name: 'start', label: 'Start Offset', defaultValue: '0' },
-				{ id: 'param_2', name: 'env', label: 'Environment', defaultValue: 'testing', options: ['testing', 'developing', 'production'] }
+				{ id: 'param_1', name: 'start', defaultValue: '0' },
+				{ id: 'param_2', name: 'env', defaultValue: 'testing', options: ['testing', 'developing', 'production'] }
 			]
 		}
 	},
@@ -94,6 +98,38 @@ const BASE_PRIMITIVES_CATALOG = [
 			targetMode: 'model',
 			targetModel: 'gemini-1.5-flash',
 			targetAgentId: ''
+		}
+	},
+	{
+		type: 'tts',
+		label: 'Audio / TTS (Text-to-Speech)',
+		description: 'Multilingual text-to-speech audio generator using Agent Central AI models. Synthesizes speech into MP3 (default) or WAV/OPUS/AAC and saves the audio file persistently inside the ticket.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'tts_audio',
+			label: 'TTS Audio',
+			type: 'tts',
+			defaultContent: 'Hello! Welcome to AnyAgent multilingual voice synthesis.',
+			targetModel: 'tts-1',
+			ttsFormat: 'mp3',
+			ttsVoice: 'alloy',
+			ttsAutoPlay: false
+		}
+	},
+	{
+		type: 'media_player',
+		label: 'MP3 / MP4 Player',
+		description: 'Local HTML5 Audio & Video player supporting MP3, MP4, WAV, M4A, AAC, OGG, FLAC, WebM, MOV, etc. with drag-and-drop file import and 0.25x-2.0x playback speed control.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'media_player_1',
+			label: 'MP3 / MP4 Player',
+			type: 'media_player',
+			mediaFilePath: '',
+			mediaFileName: '',
+			mediaPlaybackRate: 1.0
 		}
 	},
 	{
@@ -139,6 +175,27 @@ const BASE_PRIMITIVES_CATALOG = [
 			type: 'output',
 			defaultContent: '',
 			outputSpecs: []
+		}
+	},
+	{
+		type: 'table',
+		label: 'Data Table (SQLite / Structured Grid)',
+		description: 'Structured database table primitive with typed columns (TEXT, INTEGER, REAL, NUMERIC, BOOLEAN, DATE, DATETIME, JSON, VARCHAR(255), BLOB), manual/clipboard data entry, AI data manipulation, and direct SQLite database storage/sync.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'job_listings_table',
+			label: 'Job Listings Table',
+			type: 'table',
+			tableDbEngine: 'sqlite',
+			tableDbTableName: 'job_listings',
+			tableColumns: [
+				{ id: 'col_1', name: 'job_id', dataType: 'INTEGER', primaryKey: true },
+				{ id: 'col_2', name: 'title', dataType: 'TEXT' },
+				{ id: 'col_3', name: 'company', dataType: 'TEXT' },
+				{ id: 'col_4', name: 'created_at', dataType: 'DATETIME' }
+			],
+			tableRows: []
 		}
 	},
 	{
@@ -393,12 +450,12 @@ export class ListCustomModulesTool implements IToolImpl {
 // -------------------------------------------------------------
 export interface IGenerateCustomModuleParameters {
 	module_id: string;
-	module_name: string;
+	module_name?: string;
 	color?: string;
-	type_definition: string;
-	type_prompt: string;
+	type_definition?: string;
+	type_prompt?: string;
 	storage_scope?: 'global' | 'workspace';
-	fields: Array<{
+	fields?: Array<{
 		id: string;
 		label: string;
 		type: CustomFieldType;
@@ -498,9 +555,36 @@ export class GenerateCustomModuleTool implements IToolImpl {
 										'browser',
 										'git',
 										'parameters',
-										'prompt'
+										'prompt',
+										'python',
+										'tts',
+										'media_player',
+										'table',
+										'output'
 									],
 									description: "Component type from Base Primitives catalog."
+								},
+								tableColumns: {
+									type: 'array',
+									description: "Column definitions if type is 'table' (each with name, dataType such as TEXT/INTEGER/REAL/NUMERIC/BOOLEAN/DATE/DATETIME/JSON/BLOB, and optional primaryKey).",
+									items: {
+										type: 'object',
+										properties: {
+											id: { type: 'string' },
+											name: { type: 'string', description: "Column header / SQL column name" },
+											dataType: { type: 'string', description: "SQLite / SQL column data type (e.g. TEXT, INTEGER, REAL, NUMERIC, BOOLEAN, DATE, DATETIME, JSON, VARCHAR(255), BLOB)" },
+											primaryKey: { type: 'boolean' }
+										},
+										required: ['name', 'dataType']
+									}
+								},
+								tableDbPath: {
+									type: 'string',
+									description: "Optional SQLite database file path (.db / .sqlite) if type is 'table'."
+								},
+								tableDbTableName: {
+									type: 'string',
+									description: "Optional target SQLite table name if type is 'table'."
 								},
 								options: {
 									type: 'array',
@@ -572,7 +656,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 						description: "Whether to automatically open the visual Schema Designer editor in Workbench upon creation. Defaults to true."
 					}
 				},
-				required: ['module_id', 'module_name', 'type_definition', 'type_prompt', 'fields']
+				required: ['module_id']
 			}
 		};
 	}
@@ -580,8 +664,8 @@ export class GenerateCustomModuleTool implements IToolImpl {
 	async invoke(invocation: IToolInvocation, countTokens: CountTokensCallback, progress: ToolProgress, token: CancellationToken): Promise<IToolResult> {
 		try {
 			const params = invocation.parameters as IGenerateCustomModuleParameters;
-			if (!params || !params.module_id || !params.module_name) {
-				return toolError("Missing required parameters: 'module_id' and 'module_name' must be provided.");
+			if (!params || !params.module_id) {
+				return toolError("Missing required parameter: 'module_id' must be provided.");
 			}
 
 			const rawId = params.module_id.trim();
@@ -592,115 +676,159 @@ export class GenerateCustomModuleTool implements IToolImpl {
 
 			const workspaceUri = await resolveWorkspaceUri(this.workspacesExplorerService, params.workspace_id);
 
-			// Clean and validate fields
-			const rawFields = Array.isArray(params.fields) ? params.fields : [];
-			const cleanedFields: ICustomField[] = [];
+			// CRITICAL: getCustomModules first so we can preserve existing module properties & fields when updating
+			const existingModules = await this.customModulesService.getCustomModules(workspaceUri);
+			const existingMod = existingModules.find(m => m.id.toLowerCase() === cleanId.toLowerCase());
 
-			for (let idx = 0; idx < rawFields.length; idx++) {
-				const f = rawFields[idx];
-				if (!f || !f.id || !f.label || !f.type) {
-					continue;
-				}
-				const fieldType = f.type.toLowerCase().trim() as CustomFieldType;
-				if (!VALID_FIELD_TYPES.has(fieldType)) {
-					return toolError(`Field '${f.id}' has invalid type '${f.type}'. Allowed types: ${Array.from(VALID_FIELD_TYPES).join(', ')}`);
-				}
-
-				const fieldId = f.id.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-				const cleanField: ICustomField = {
-					id: fieldId,
-					label: f.label.trim(),
-					type: fieldType
-				};
-
-				if (fieldType === 'select' || fieldType === 'multiselect') {
-					if (Array.isArray(f.options) && f.options.length > 0) {
-						cleanField.options = f.options.map(opt => String(opt).trim()).filter(Boolean);
-					} else {
-						// Supply sensible default options if omitted
-						cleanField.options = ['Option 1', 'Option 2', 'Option 3'];
-					}
-				}
-
-				if (fieldType === 'dynamic_list') {
-					if (Array.isArray(f.itemFields) && f.itemFields.length > 0) {
-						cleanField.itemFields = f.itemFields.map((sub: any, sIdx: number) => {
-							const subType = (sub.type ? sub.type.toLowerCase().trim() : 'text') as CustomFieldType;
-							const subClean: ICustomField = {
-								id: (sub.id || `sub_${sIdx + 1}`).trim().replace(/[^a-zA-Z0-9_-]/g, '_'),
-								label: (sub.label || `Item ${sIdx + 1}`).trim(),
-								type: VALID_FIELD_TYPES.has(subType) ? subType : 'text'
-							};
-							if ((subType === 'select' || subType === 'multiselect') && Array.isArray(sub.options)) {
-								subClean.options = sub.options.map((o: any) => String(o).trim()).filter(Boolean);
-							}
-							return subClean;
-						});
-					} else if (f.componentRef) {
-						cleanField.componentRef = f.componentRef.trim();
-					} else {
-						// Default container subfields
-						cleanField.itemFields = [
-							{ id: 'item_name', label: 'Item Name', type: 'text' },
-							{ id: 'description', label: 'Description', type: 'textarea' }
-						];
-					}
-				}
-
-				if (fieldType === 'button_group' || fieldType === 'button') {
-					if (Array.isArray(f.buttons) && f.buttons.length > 0) {
-						cleanField.buttons = f.buttons.map((b: any, bIdx: number) => ({
-							id: (b.id || `btn_${bIdx + 1}`).trim().replace(/[^a-zA-Z0-9_-]/g, '_'),
-							label: (b.label || `Action ${bIdx + 1}`).trim(),
-							color: b.color && /^#[0-9a-fA-F]{3,8}$/.test(b.color.trim()) ? b.color.trim() : '#3b82f6',
-							targetStatus: b.targetStatus ? String(b.targetStatus).trim() : undefined
-						}));
-					} else {
-						cleanField.buttons = [
-							{ id: 'btn_approve', label: 'Approve', color: '#10b981', targetStatus: 'Done' },
-							{ id: 'btn_reject', label: 'Reject', color: '#ef4444', targetStatus: 'Blocked' }
-						];
-					}
-				}
-
-				if (fieldType === 'number') {
-					cleanField.unit = f.unit ? String(f.unit).trim() : undefined;
-					cleanField.precision = typeof f.precision === 'number' ? f.precision : 2;
-					if (typeof f.min === 'number') cleanField.min = f.min;
-					if (typeof f.max === 'number') cleanField.max = f.max;
-					if (typeof f.step === 'number') cleanField.step = f.step;
-				}
-
-				cleanedFields.push(cleanField);
+			if (!existingMod && !params.module_name) {
+				return toolError("Missing required parameter: 'module_name' must be provided when creating a new module.");
 			}
 
-			// Enforce Title and Description as mandatory root fields at index 0 and 1
-			const titleField: ICustomField = {
-				id: 'title',
-				label: 'Title',
-				type: 'text',
-				required: true
-			};
-			const descField: ICustomField = {
-				id: 'description',
-				label: 'Description',
-				type: 'textarea',
-				required: true
-			};
-			const finalFields: ICustomField[] = [
-				titleField,
-				descField,
-				...cleanedFields.filter(f =>
-					f.id.toLowerCase() !== 'title' &&
-					f.label.toLowerCase() !== 'title' &&
-					f.id.toLowerCase() !== 'description' &&
-					f.label.toLowerCase() !== 'description'
-				)
-			];
+			// Clean and validate fields if provided
+			const rawFields = Array.isArray(params.fields) ? params.fields : [];
+			let finalFields: ICustomField[];
+
+			if (rawFields.length === 0 && existingMod && Array.isArray(existingMod.fields) && existingMod.fields.length > 0) {
+				// Preserve existing fields verbatim (including Python scripts, Prompt configs, SQLite tables, etc.)
+				finalFields = JSON.parse(JSON.stringify(existingMod.fields));
+			} else {
+				const cleanedFields: ICustomField[] = [];
+
+				for (let idx = 0; idx < rawFields.length; idx++) {
+					const f = rawFields[idx];
+					if (!f || !f.id || !f.label || !f.type) {
+						continue;
+					}
+					const fieldType = f.type.toLowerCase().trim() as CustomFieldType;
+					if (!VALID_FIELD_TYPES.has(fieldType)) {
+						return toolError(`Field '${f.id}' has invalid type '${f.type}'. Allowed types: ${Array.from(VALID_FIELD_TYPES).join(', ')}`);
+					}
+
+					const fieldId = f.id.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+					const existingFieldMatch = existingMod?.fields?.find(
+						ef => ef.id.toLowerCase() === fieldId.toLowerCase() || (ef.label && ef.label.toLowerCase() === f.label.trim().toLowerCase())
+					);
+
+					const cleanField: ICustomField = {
+						...(existingFieldMatch ? JSON.parse(JSON.stringify(existingFieldMatch)) : {}),
+						id: existingFieldMatch?.id || fieldId,
+						label: f.label.trim(),
+						type: fieldType
+					};
+
+					if (fieldType === 'select' || fieldType === 'multiselect') {
+						if (Array.isArray(f.options) && f.options.length > 0) {
+							cleanField.options = f.options.map(opt => String(opt).trim()).filter(Boolean);
+						} else if (!cleanField.options || cleanField.options.length === 0) {
+							cleanField.options = ['Option 1', 'Option 2', 'Option 3'];
+						}
+					}
+
+					if (fieldType === 'dynamic_list') {
+						if (Array.isArray(f.itemFields) && f.itemFields.length > 0) {
+							cleanField.itemFields = f.itemFields.map((sub: any, sIdx: number) => {
+								const subType = (sub.type ? sub.type.toLowerCase().trim() : 'text') as CustomFieldType;
+								const subClean: ICustomField = {
+									id: (sub.id || `sub_${sIdx + 1}`).trim().replace(/[^a-zA-Z0-9_-]/g, '_'),
+									label: (sub.label || `Item ${sIdx + 1}`).trim(),
+									type: VALID_FIELD_TYPES.has(subType) ? subType : 'text'
+								};
+								if ((subType === 'select' || subType === 'multiselect') && Array.isArray(sub.options)) {
+									subClean.options = sub.options.map((o: any) => String(o).trim()).filter(Boolean);
+								}
+								return subClean;
+							});
+						} else if (f.componentRef) {
+							cleanField.componentRef = f.componentRef.trim();
+						} else if (!cleanField.itemFields || cleanField.itemFields.length === 0) {
+							cleanField.itemFields = [
+								{ id: 'item_name', label: 'Item Name', type: 'text' },
+								{ id: 'description', label: 'Description', type: 'textarea' }
+							];
+						}
+					}
+
+					if (fieldType === 'button_group' || fieldType === 'button') {
+						if (Array.isArray(f.buttons) && f.buttons.length > 0) {
+							cleanField.buttons = f.buttons.map((b: any, bIdx: number) => ({
+								id: (b.id || `btn_${bIdx + 1}`).trim().replace(/[^a-zA-Z0-9_-]/g, '_'),
+								label: (b.label || `Action ${bIdx + 1}`).trim(),
+								color: b.color && /^#[0-9a-fA-F]{3,8}$/.test(b.color.trim()) ? b.color.trim() : '#3b82f6',
+								targetStatus: b.targetStatus ? String(b.targetStatus).trim() : undefined
+							}));
+						} else if (!cleanField.buttons || cleanField.buttons.length === 0) {
+							cleanField.buttons = [
+								{ id: 'btn_approve', label: 'Approve', color: '#10b981', targetStatus: 'Done' },
+								{ id: 'btn_reject', label: 'Reject', color: '#ef4444', targetStatus: 'Blocked' }
+							];
+						}
+					}
+
+					if (fieldType === 'number') {
+						if (f.unit !== undefined) cleanField.unit = f.unit ? String(f.unit).trim() : undefined;
+						if (typeof f.precision === 'number') cleanField.precision = f.precision;
+						else if (cleanField.precision === undefined) cleanField.precision = 2;
+						if (typeof f.min === 'number') cleanField.min = f.min;
+						if (typeof f.max === 'number') cleanField.max = f.max;
+						if (typeof f.step === 'number') cleanField.step = f.step;
+					}
+
+					if (fieldType === 'table') {
+						cleanField.tableDbEngine = 'sqlite';
+						if ((f as any).tableDbPath !== undefined) {
+							cleanField.tableDbPath = String((f as any).tableDbPath).trim();
+						} else if (!cleanField.tableDbPath) {
+							cleanField.tableDbPath = '';
+						}
+						if ((f as any).tableDbTableName !== undefined) {
+							cleanField.tableDbTableName = String((f as any).tableDbTableName).trim();
+						} else if (!cleanField.tableDbTableName) {
+							cleanField.tableDbTableName = fieldId.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+						}
+						if (Array.isArray((f as any).tableColumns) && (f as any).tableColumns.length > 0) {
+							cleanField.tableColumns = (f as any).tableColumns.map((col: any, cIdx: number) => ({
+								id: (col.id || `col_${cIdx + 1}`).trim(),
+								name: String(col.name || `column_${cIdx + 1}`).trim(),
+								dataType: String(col.dataType || 'TEXT').toUpperCase().trim(),
+								primaryKey: Boolean(col.primaryKey)
+							}));
+						} else if (!cleanField.tableColumns || cleanField.tableColumns.length === 0) {
+							cleanField.tableColumns = [
+								{ id: 'col_1', name: 'id', dataType: 'INTEGER', primaryKey: true },
+								{ id: 'col_2', name: 'name', dataType: 'TEXT' },
+								{ id: 'col_3', name: 'status', dataType: 'TEXT' },
+								{ id: 'col_4', name: 'created_at', dataType: 'DATETIME' }
+							];
+						}
+						if (Array.isArray((f as any).tableRows)) {
+							cleanField.tableRows = (f as any).tableRows;
+						} else if (!cleanField.tableRows) {
+							cleanField.tableRows = [];
+						}
+					}
+
+					cleanedFields.push(cleanField);
+				}
+
+				// Enforce only Title as mandatory root field at index 0 (Description is optional)
+				const titleField: ICustomField = {
+					id: 'title',
+					label: 'Title',
+					type: 'text',
+					required: true
+				};
+				finalFields = [
+					titleField,
+					...cleanedFields.filter(f =>
+						f.id.toLowerCase() !== 'title' &&
+						f.label.toLowerCase() !== 'title'
+					)
+				];
+			}
 
 			const color = params.color && /^#[0-9a-fA-F]{3,8}$/.test(params.color.trim())
 				? params.color.trim()
-				: '#10b981';
+				: (existingMod?.color || '#10b981');
 
 			let cleanedStatuses: IStatusDefinition[] | undefined;
 			if (Array.isArray(params.statuses) && params.statuses.length > 0) {
@@ -714,23 +842,25 @@ export class GenerateCustomModuleTool implements IToolImpl {
 						description: st.description ? String(st.description).trim() : undefined
 					};
 				});
+			} else if (existingMod && Array.isArray(existingMod.statuses) && existingMod.statuses.length > 0) {
+				cleanedStatuses = JSON.parse(JSON.stringify(existingMod.statuses));
 			} else {
 				cleanedStatuses = DEFAULT_STATUS_DEFINITIONS.map(d => ({ ...d }));
 			}
 
 			const newModule: ICustomModule = {
+				...(existingMod ? JSON.parse(JSON.stringify(existingMod)) : {}),
 				id: cleanId,
-				name: params.module_name.trim(),
+				name: (params.module_name || existingMod?.name || cleanId).trim(),
 				color: color,
-				storageScope: params.storage_scope === 'workspace' ? 'workspace' : 'global',
-				description: (params.type_definition || '').trim(),
-				prompt: (params.type_prompt || '').trim(),
+				storageScope: params.storage_scope ? (params.storage_scope === 'workspace' ? 'workspace' : 'global') : (existingMod?.storageScope || 'global'),
+				description: params.type_definition !== undefined ? String(params.type_definition).trim() : (existingMod?.description || ''),
+				prompt: params.type_prompt !== undefined ? String(params.type_prompt).trim() : (existingMod?.prompt || ''),
+				updatedAt: Date.now(),
 				fields: finalFields,
 				statuses: cleanedStatuses
 			};
 
-			// CRITICAL: getCustomModules first to prevent saveCustomModules from deleting other modules
-			const existingModules = await this.customModulesService.getCustomModules(workspaceUri);
 			const updatedModules: ICustomModule[] = [];
 			let replaced = false;
 
@@ -748,9 +878,9 @@ export class GenerateCustomModuleTool implements IToolImpl {
 
 			await this.customModulesService.saveCustomModules(updatedModules, workspaceUri);
 
-			// Open Schema Designer editor if auto_open is not explicitly false
+			// Open Schema Designer editor if auto_open is explicitly true or when creating a new module (not needed if already open & updating)
 			let designerOpened = false;
-			if (params.auto_open !== false) {
+			if (params.auto_open !== false && !replaced) {
 				try {
 					await this.customModulesService.openSchemaDesigner({
 						targetModuleId: cleanId,
@@ -777,7 +907,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 				},
 				designer_opened: designerOpened,
 				total_custom_modules: updatedModules.length
-			}, `Custom Module '${newModule.name}' (${newModule.id}) successfully ${replaced ? 'updated' : 'created'} with ${cleanedFields.length} field(s). Type Definition and Type Prompt are configured.`);
+			}, `Custom Module '${newModule.name}' (${newModule.id}) successfully ${replaced ? 'updated' : 'created'} with ${newModule.fields?.length || 0} field(s). Type Definition and Type Prompt are configured.`);
 		} catch (err: any) {
 			return toolError(`Failed to generate custom module: ${err.message || err}`);
 		}
@@ -847,6 +977,7 @@ export class ToggleCustomModuleStatusTool implements IToolImpl {
 			}
 
 			targetMod.isDeprecated = (params.action === 'disable');
+			targetMod.updatedAt = Date.now();
 			await this.customModulesService.saveCustomModules(modules, workspaceUri);
 
 			return toolResult({

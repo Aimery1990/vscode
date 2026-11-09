@@ -54,7 +54,7 @@ const viewContainer: ViewContainer = Registry.as<IViewContainersRegistry>(ViewEx
 	}
 }, ViewContainerLocation.Sidebar, { isDefault: true });
 
-// 4. Register 6 Native View Panes under AI AGENTS Viewlet
+// 4. Register 3 Native View Panes under AI AGENTS Viewlet (All, Workspace, Independent)
 const viewsRegistry = Registry.as<IViewsRegistry>(ViewExtensions.ViewsRegistry);
 
 const viewDescriptors: IViewDescriptor[] = [
@@ -77,37 +77,10 @@ const viewDescriptors: IViewDescriptor[] = [
 		containerIcon: Codicon.globe
 	},
 	{
-		id: 'workbench.view.agentsManager.project',
-		name: localize2('agentsCentralProject', "Project Agents"),
+		id: 'workbench.view.agentsManager.standalone',
+		name: localize2('agentsCentralIndependent', "Independent Agents"),
 		ctorDescriptor: new SyncDescriptor(AgentsManagerPane),
 		order: 3,
-		canToggleVisibility: true,
-		canMoveView: true,
-		containerIcon: Codicon.folder
-	},
-	{
-		id: 'workbench.view.agentsManager.job',
-		name: localize2('agentsCentralJob', "Job Agents"),
-		ctorDescriptor: new SyncDescriptor(AgentsManagerPane),
-		order: 4,
-		canToggleVisibility: true,
-		canMoveView: true,
-		containerIcon: Codicon.target
-	},
-	{
-		id: 'workbench.view.agentsManager.workflow',
-		name: localize2('agentsCentralWorkflow', "Workflow Agents"),
-		ctorDescriptor: new SyncDescriptor(AgentsManagerPane),
-		order: 5,
-		canToggleVisibility: true,
-		canMoveView: true,
-		containerIcon: Codicon.githubAction
-	},
-	{
-		id: 'workbench.view.agentsManager.standalone',
-		name: localize2('agentsCentralStandalone', "Standalone / Global Agents"),
-		ctorDescriptor: new SyncDescriptor(AgentsManagerPane),
-		order: 6,
 		canToggleVisibility: true,
 		canMoveView: true,
 		containerIcon: Codicon.circleSlash
@@ -134,7 +107,8 @@ for (const vd of viewDescriptors) {
 		}
 
 		async run(accessor: ServicesAccessor): Promise<void> {
-			await createOrEditAgentDialog(accessor);
+			const defaultScope = vd.id.endsWith('.standalone') ? 'none' : 'workspace';
+			await createOrEditAgentDialog(accessor, undefined, defaultScope);
 		}
 	});
 }

@@ -18,7 +18,7 @@ import { IHoverService } from '../../../../platform/hover/browser/hover.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { ICustomModule } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomModule, resolveCustomModuleIcon } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../common/customModules.js';
 
 export const CustomModulesViewPaneId = 'workbench.view.customModules.pane';
@@ -27,6 +27,7 @@ export class CustomModulesPane extends ViewPane {
 	private containerEl?: HTMLElement;
 	private filterText = '';
 	private renderVersion = 0;
+	private selectedModuleId?: string;
 
 	constructor(
 		options: IViewPaneOptions,
@@ -47,6 +48,11 @@ export class CustomModulesPane extends ViewPane {
 		this._register(this.customModulesService.onDidChangeModules(() => {
 			this.renderContent();
 		}));
+		this._register(this.onDidChangeBodyVisibility(visible => {
+			if (visible) {
+				this.renderContent();
+			}
+		}));
 	}
 
 	protected override renderBody(parent: HTMLElement): void {
@@ -63,24 +69,21 @@ export class CustomModulesPane extends ViewPane {
 		}
 
 		const currentVersion = ++this.renderVersion;
-		clearNode(this.containerEl);
+		const prevScrollTop = this.containerEl.scrollTop;
 
 		const [customModules, compositeClasses] = await Promise.all([
 			this.customModulesService.getCustomModules(),
 			this.customModulesService.getCompositeComponents()
 		]);
 
-		if (currentVersion !== this.renderVersion) {
+		if (currentVersion !== this.renderVersion || !this.containerEl) {
 			return;
 		}
 
-		const systemModules = this.customModulesService.getSystemModules();
+		clearNode(this.containerEl);
 
-		// Combine custom and system modules into unified list
-		const allModulesMap = new Map<string, ICustomModule>();
-		systemModules.forEach(m => allModulesMap.set(m.id.toLowerCase(), m));
-		customModules.forEach(m => allModulesMap.set(m.id.toLowerCase(), m));
-		const allModules = Array.from(allModulesMap.values());
+		// Use actual persisted modules directly (sorted by most recently edited first)
+		const allModules = customModules;
 
 		// Update native pane title cleanly (e.g. "Custom Modules (11)")
 		this.updateTitle(`Custom Modules (${allModules.length})`);
@@ -98,37 +101,56 @@ export class CustomModulesPane extends ViewPane {
 		// 2. Modules List Container
 		const listContainer = append(this.containerEl, $('.custom-modules-list'));
 
+		const updateSelectedCardStyle = () => {
+			listContainer.querySelectorAll('.custom-module-card[data-module-id]').forEach(el => {
+				const cardEl = el as HTMLElement;
+				const cardModId = (cardEl.getAttribute('data-module-id') || '').toLowerCase();
+				if (this.selectedModuleId && cardModId === this.selectedModuleId.toLowerCase()) {
+					cardEl.classList.add('selected');
+				} else {
+					cardEl.classList.remove('selected');
+				}
+			});
+		};
+
 		const renderList = () => {
 			clearNode(listContainer);
 
 			let filtered = allModules;
 			if (this.filterText) {
 				filtered = filtered.filter(m =>
-					m.name.toLowerCase().includes(this.filterText) ||
-					(m.description && m.description.toLowerCase().includes(this.filterText))
+					(m.name || '').toLowerCase().includes(this.filterText) ||
+					(typeof m.description === 'string' && m.description.toLowerCase().includes(this.filterText))
 				);
 			}
 
 			if (filtered.length === 0) {
 				const empty = append(listContainer, $('.custom-modules-empty'));
-				append(empty, $('span' + ThemeIcon.asCSSSelector(Codicon.package), { class: 'custom-modules-empty-icon' }));
+				append(empty, $('span.custom-modules-empty-icon' + ThemeIcon.asCSSSelector(Codicon.package)));
 				append(empty, $('div', { class: 'custom-modules-empty-text' }, this.filterText ? 'No modules match your search.' : 'No modules defined yet.'));
 				return;
 			}
 
 			filtered.forEach(m => {
 				const card = append(listContainer, $('.custom-module-card'));
+				card.setAttribute('data-module-id', m.id);
+				if (this.selectedModuleId && m.id.toLowerCase() === this.selectedModuleId.toLowerCase()) {
+					card.classList.add('selected');
+				}
 				if (m.isDeprecated) {
 					card.classList.add('deprecated');
 				}
 
-				// Top row: color dot, module name, action buttons
+				// Top row: module icon, module name, action buttons
 				const cardTop = append(card, $('.custom-module-card-top'));
 				const titleLeft = append(cardTop, $('.custom-module-card-title-left'));
 
-				const dot = append(titleLeft, $('.custom-module-color-dot'));
-				dot.style.backgroundColor = m.color || '#38bdf8';
-				dot.style.color = m.color || '#38bdf8';
+				const modColor = m.color || '#38bdf8';
+				const modIcon = resolveCustomModuleIcon(m.icon, m.id);
+				const iconSpan = append(titleLeft, $('span' + ThemeIcon.asCSSSelector(modIcon), {
+					style: `color: ${modColor}; font-size: 14px; flex-shrink: 0;`
+				}));
+				iconSpan.title = `Icon: ${modIcon.id} · Color: ${modColor}`;
 
 				const nameSpan = append(titleLeft, $('span.custom-module-name', {}, m.name));
 				if (m.isDeprecated) {
@@ -138,22 +160,29 @@ export class CustomModulesPane extends ViewPane {
 				}
 
 				// Description (between header and footer)
-				if (m.description) {
+				if (typeof m.description === 'string' && m.description.trim()) {
 					append(card, $('.custom-module-desc', {}, m.description));
 				}
 
-				// Footer row: clean field count on left, action icons on right
+				// Footer row: clean field count on left
 				const footer = append(card, $('.custom-module-card-footer'));
 				const fieldCount = m.fields ? m.fields.length : 0;
 				append(footer, $('.custom-module-fields-count', {}, `${fieldCount} ${fieldCount === 1 ? 'field' : 'fields'}`));
 
-				// Action icons container in bottom-right
+				/*
+				// Action icons container in bottom-right (commented out per user preference: all actions are performed in the Schema Editor header)
 				const footerActions = append(footer, $('.custom-module-footer-actions'));
 
+				// 0. Preview Ticket button (opens live Ticket Preview tab in Editor Area)
+				const previewBtn = append(footerActions, $('span.action-icon-btn.preview-btn' + ThemeIcon.asCSSSelector(Codicon.eye)));
+				previewBtn.title = 'Preview Ticket Template';
+				previewBtn.onclick = async (e) => {
+					e.stopPropagation();
+					await this.customModulesService.openModuleTicketPreview(m);
+				};
+
 				// 1. Toggle Disable/Enable button
-				const toggleBtn = append(footerActions, $('span' + ThemeIcon.asCSSSelector(m.isDeprecated ? Codicon.check : Codicon.circleSlash), {
-					class: `action-icon-btn ${m.isDeprecated ? 'enable-btn' : 'disable-btn'}`
-				}));
+				const toggleBtn = append(footerActions, $(`span.action-icon-btn.${m.isDeprecated ? 'enable-btn' : 'disable-btn'}` + ThemeIcon.asCSSSelector(m.isDeprecated ? Codicon.check : Codicon.circleSlash)));
 				toggleBtn.title = m.isDeprecated ? 'Enable Module' : 'Disable Module';
 				toggleBtn.onclick = async (e) => {
 					e.stopPropagation();
@@ -161,42 +190,39 @@ export class CustomModulesPane extends ViewPane {
 				};
 
 				// 2. Edit button (opens in Editor Area)
-				const editBtn = append(footerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.edit), { class: 'action-icon-btn edit-btn' }));
+				const editBtn = append(footerActions, $('span.action-icon-btn.edit-btn' + ThemeIcon.asCSSSelector(Codicon.edit)));
 				editBtn.title = 'Edit Module Schema';
 				editBtn.onclick = (e) => {
 					e.stopPropagation();
+					this.selectedModuleId = m.id;
+					updateSelectedCardStyle();
 					this.customModulesService.openSchemaDesigner({
-						targetModuleId: m.id,
-						onUpdate: () => this.renderContent()
+						targetModuleId: m.id
 					});
 				};
 
-				// 3. Delete button (only for custom modules, omitted for system modules)
-				const isSystem = systemModules.some(sm => sm.id.toLowerCase() === m.id.toLowerCase());
-				if (!isSystem) {
-					const delBtn = append(footerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
-						class: 'action-icon-btn delete-btn'
-					}));
-					delBtn.title = 'Delete Module';
-					delBtn.onclick = async (e) => {
-						e.stopPropagation();
-						const res = await this.dialogService.confirm({
-							message: `Delete module "${m.name}"?`,
-							detail: `This will remove the YAML schema file (${m.id}.yaml). Existing entities of this type will preserve their data.`,
-							primaryButton: 'Delete'
-						});
-						if (res.confirmed) {
-							await this.customModulesService.deleteCustomModule(m.id);
-							this.renderContent();
-						}
-					};
-				}
+				// 3. Delete button
+				const delBtn = append(footerActions, $('span.action-icon-btn.delete-btn' + ThemeIcon.asCSSSelector(Codicon.trash)));
+				delBtn.title = 'Delete Module';
+				delBtn.onclick = async (e) => {
+					e.stopPropagation();
+					const res = await this.dialogService.confirm({
+						message: `Delete module "${m.name}"?`,
+						detail: `This will remove the YAML schema file (${m.id}.yaml). Existing entities of this type will preserve their data.`,
+						primaryButton: 'Delete'
+					});
+					if (res.confirmed) {
+						await this.customModulesService.deleteCustomModule(m.id);
+					}
+				};
+				*/
 
-				// Clicking card directly launches the schema editor in main workspace
+				// Clicking card directly launches the schema editor in main workspace without re-rendering or resetting scroll
 				card.onclick = () => {
+					this.selectedModuleId = m.id;
+					updateSelectedCardStyle();
 					this.customModulesService.openSchemaDesigner({
-						targetModuleId: m.id,
-						onUpdate: () => this.renderContent()
+						targetModuleId: m.id
 					});
 				};
 			});
@@ -223,7 +249,7 @@ export class CustomModulesPane extends ViewPane {
 					append(footer, $('.custom-module-fields-count', {}, `${subCount} ${subCount === 1 ? 'sub-field' : 'sub-fields'}`));
 
 					const footerActions = append(footer, $('.custom-module-footer-actions'));
-					const delBtn = append(footerActions, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { class: 'action-icon-btn delete-btn' }));
+					const delBtn = append(footerActions, $('span.action-icon-btn.delete-btn' + ThemeIcon.asCSSSelector(Codicon.trash)));
 					delBtn.title = 'Delete Reusable Class';
 					delBtn.onclick = async (e) => {
 						e.stopPropagation();
@@ -242,17 +268,22 @@ export class CustomModulesPane extends ViewPane {
 		};
 
 		renderList();
+		this.containerEl.scrollTop = prevScrollTop;
 	}
 
+	/*
 	private async _toggleModuleStatus(m: ICustomModule, customModules: ICustomModule[]): Promise<void> {
 		m.isDeprecated = !m.isDeprecated;
+		m.updatedAt = Date.now();
 		const existingIndex = customModules.findIndex(cm => cm.id.toLowerCase() === m.id.toLowerCase());
 		if (existingIndex !== -1) {
 			customModules[existingIndex].isDeprecated = m.isDeprecated;
+			customModules[existingIndex].updatedAt = m.updatedAt;
 		} else {
 			customModules.push(m);
 		}
 		await this.customModulesService.saveCustomModules(customModules);
 		this.renderContent();
 	}
+	*/
 }

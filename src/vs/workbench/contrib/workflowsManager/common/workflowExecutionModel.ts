@@ -150,6 +150,7 @@ export interface IWorkflowEngineOptions {
 	initialInputs?: Record<string, any>;
 	initialData?: any;
 	entryNodeId?: string;
+	selectedNodeIds?: string[];
 	daemonIntervalMs?: number;
 	maxSteps?: number;
 }

@@ -191,6 +191,12 @@
 	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
+.custom-module-card.selected {
+	border-color: rgba(56, 189, 248, 0.65);
+	background: rgba(56, 189, 248, 0.08);
+	box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.2);
+}
+
 .custom-module-card.deprecated {
 	opacity: 0.55;
 }
@@ -339,6 +345,11 @@
 	background: rgba(245, 158, 11, 0.15);
 }
 
+.custom-module-footer-actions .action-icon-btn.preview-btn:hover {
+	color: #38bdf8;
+	background: rgba(56, 189, 248, 0.15);
+}
+
 .custom-module-footer-actions .action-icon-btn.edit-btn:hover {
 	color: #38bdf8;
 	background: rgba(56, 189, 248, 0.15);
@@ -456,6 +467,45 @@
 .custom-module-schema-editor {
 	display: flex;
 	flex-direction: column;
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.custom-module-schema-editor .python-code-display,
+.custom-module-schema-editor .python-code-display *,
+.custom-module-schema-editor .python-line-numbers-gutter {
+	user-select: none !important;
+	-webkit-user-select: none !important;
+	pointer-events: none !important;
+}
+
+.custom-module-schema-editor input,
+.custom-module-schema-editor textarea,
+.custom-module-schema-editor .python-live-code-textarea,
+.custom-module-schema-editor .prompt-tokenized-display,
+.custom-module-schema-editor .prompt-tokenized-display *,
+.custom-module-schema-editor .prompt-output-display,
+.custom-module-schema-editor .prompt-output-display *,
+.custom-module-schema-editor .python-debug-logs-display,
+.custom-module-schema-editor .python-debug-logs-display *,
+.custom-module-schema-editor .python-debug-result-display,
+.custom-module-schema-editor .python-debug-result-display *,
+.custom-module-schema-editor .sql-output-box,
+.custom-module-schema-editor .sql-output-box *,
+.custom-module-schema-editor [data-selectable-box="true"],
+.custom-module-schema-editor [data-selectable-box="true"] *,
+.custom-module-schema-editor pre,
+.custom-module-schema-editor pre *,
+.custom-module-schema-editor code,
+.custom-module-schema-editor code * {
+	user-select: text !important;
+	-webkit-user-select: text !important;
+}
+
+.custom-module-schema-editor .python-live-code-textarea::selection {
+	background: rgba(56, 189, 248, 0.28) !important;
+	color: transparent !important;
+	-webkit-text-fill-color: transparent !important;
 }
 
 .custom-module-schema-editor .schema-editor-wrapper {
@@ -589,4 +639,11 @@
 .button-row-drag-handle:active {
 	cursor: grabbing;
 }
+
+.python-live-code-textarea::selection {
+	background: rgba(56, 189, 248, 0.28) !important;
+	color: transparent !important;
+	-webkit-text-fill-color: transparent !important;
+}
+
 

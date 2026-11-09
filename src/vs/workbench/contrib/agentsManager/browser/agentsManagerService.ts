@@ -165,72 +165,120 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 		);
 	}
 
+	private _enrichAgent(a: IAgentItem): IAgentItem {
+		if (!a.folderPath) {
+			return a;
+		}
+		const folderBasename = a.folderPath.split(/[\\/]/).filter(Boolean).pop() || a.name;
+		const snap = this.entityPersistenceService.getSnapshot(URI.file(a.folderPath));
+		const resolvedTicketId = a.ticketId || snap?.ticketId || folderBasename;
+		const resolvedTitle = a.title || snap?.title || a.name;
+		return {
+			...a,
+			name: resolvedTitle,
+			title: resolvedTitle,
+			ticketId: resolvedTicketId,
+			role: snap?.description || a.role
+		};
+	}
+
 	async getAgents(): Promise<IAgentItem[]> {
 		await this.activeUserInitPromise;
-		return [...this._agents];
+		return this._agents.map(a => this._enrichAgent(a));
 	}
 
 	async getAgentsByScope(scopeType: AgentScopeType, scopeId?: string): Promise<IAgentItem[]> {
 		await this.activeUserInitPromise;
-		return this._agents.filter(a => a.scopeType === scopeType && (!scopeId || a.scopeId === scopeId));
+		return this._agents
+			.filter(a => a.scopeType === scopeType && (!scopeId || a.scopeId === scopeId))
+			.map(a => this._enrichAgent(a));
 	}
 
 	async getAgent(id: string): Promise<IAgentItem | undefined> {
-		return this._agents.find(a => a.id === id);
+		const found = this._agents.find(a => a.id === id);
+		return found ? this._enrichAgent(found) : undefined;
 	}
 
 	async addAgent(agentData: Omit<IAgentItem, 'id' | 'createdAt' | 'updatedAt'>, targetParentUri?: URI): Promise<IAgentItem> {
 		const newAgent: IAgentItem = {
 			...agentData,
+			name: agentData.title || agentData.name,
+			title: agentData.title || agentData.name,
 			model: agentData.model || { providerId: 'gemini', modelId: 'gemini-1.5-flash' },
 			id: generateUuid(),
 			createdAt: Date.now(),
 			updatedAt: Date.now()
 		};
 
-		// 1. Determine parent URI for physical 4-MD folder creation
-		let parentUri = targetParentUri;
-		if (!parentUri) {
-			const activeFolder = this.workspaceContextService.getWorkspace().folders[0];
-			if (activeFolder) {
-				parentUri = activeFolder.uri;
+		// Only write physical 4-MD files if folderPath was not already created by createResourceUnderWorkspace
+		if (!newAgent.folderPath) {
+			let parentUri = targetParentUri;
+			if (!parentUri) {
+				const activeFolder = this.workspaceContextService.getWorkspace().folders[0];
+				if (activeFolder) {
+					parentUri = activeFolder.uri;
+				}
 			}
+
+			if (parentUri) {
+				try {
+					const entityFolderName = newAgent.ticketId || newAgent.name;
+					const folderUri = await this.entityPersistenceService.writeEntity4MDFiles({
+						entityUri: parentUri.toString(),
+						entityName: entityFolderName,
+						title: newAgent.title || newAgent.name,
+						entityType: 'agent',
+						ownerAccount: this.activeUserEmail || 'unauthenticated',
+						description: newAgent.role,
+						systemPrompt: newAgent.systemPrompt,
+						role: newAgent.role,
+						modelName: newAgent.model?.modelId || 'gemini-1.5-flash',
+						avatarIcon: newAgent.avatarIcon,
+						scopeType: newAgent.scopeType,
+						scopeId: newAgent.scopeId,
+						scopeName: newAgent.scopeName
+					}, parentUri, true);
+					newAgent.folderPath = folderUri.fsPath;
+					if (!newAgent.ticketId) {
+						newAgent.ticketId = folderUri.path.split('/').filter(Boolean).pop() || newAgent.name;
+					}
+				} catch (err) {
+					console.error('Failed to create agent 4-MD folder via persistence engine', err);
+				}
+			}
+		} else if (!newAgent.ticketId) {
+			newAgent.ticketId = newAgent.folderPath.split(/[\\/]/).filter(Boolean).pop() || newAgent.name;
 		}
 
-		// 2. Write physical 4-MD files using unified EntityPersistenceService
-		if (parentUri) {
-			try {
-				const folderUri = await this.entityPersistenceService.writeEntity4MDFiles({
-					entityUri: parentUri.toString(),
-					entityName: newAgent.name,
-					entityType: 'agent',
-					ownerAccount: this.activeUserEmail || 'unauthenticated',
-					description: newAgent.role,
-					systemPrompt: newAgent.systemPrompt,
-					role: newAgent.role,
-					modelName: newAgent.model?.modelId || 'gemini-1.5-flash',
-					avatarIcon: newAgent.avatarIcon,
-					scopeType: newAgent.scopeType,
-					scopeId: newAgent.scopeId,
-					scopeName: newAgent.scopeName
-				}, parentUri, true);
-				newAgent.folderPath = folderUri.fsPath;
-			} catch (err) {
-				console.error('Failed to create agent 4-MD folder via persistence engine', err);
+		// Dedup by folderPath if already registered
+		if (newAgent.folderPath) {
+			const existingIdx = this._agents.findIndex(a => a.folderPath === newAgent.folderPath);
+			if (existingIdx !== -1) {
+				newAgent.id = this._agents[existingIdx].id;
+				this._agents[existingIdx] = newAgent;
+				this._saveAgents();
+				this._onDidChangeAgents.fire();
+				return this._enrichAgent(newAgent);
 			}
 		}
 
 		this._agents.push(newAgent);
 		this._saveAgents();
 		this._onDidChangeAgents.fire();
-		return newAgent;
+		return this._enrichAgent(newAgent);
 	}
 
 	async updateAgent(updated: IAgentItem): Promise<void> {
 		const idx = this._agents.findIndex(a => a.id === updated.id);
 		if (idx !== -1) {
+			const folderBasename = updated.folderPath ? updated.folderPath.split(/[\\/]/).filter(Boolean).pop() : undefined;
+			const resolvedTicketId = updated.ticketId || this._agents[idx].ticketId || folderBasename || updated.name;
+			const resolvedTitle = updated.title || updated.name;
 			this._agents[idx] = {
 				...updated,
+				name: resolvedTitle,
+				title: resolvedTitle,
+				ticketId: resolvedTicketId,
 				updatedAt: Date.now()
 			};
 
@@ -240,7 +288,8 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 					const folderUri = URI.file(updated.folderPath);
 					await this.entityPersistenceService.writeEntity4MDFiles({
 						entityUri: folderUri.toString(),
-						entityName: updated.name,
+						entityName: resolvedTicketId,
+						title: resolvedTitle,
 						entityType: 'agent',
 						ownerAccount: this.activeUserEmail || 'unauthenticated',
 						description: updated.role,

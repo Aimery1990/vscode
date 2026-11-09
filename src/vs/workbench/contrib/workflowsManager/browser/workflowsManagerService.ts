@@ -38,25 +38,25 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 
 		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
 			if (e.key === this.savedWorkflowsKey || e.key === this.removedWorkflowsKey || e.key === SAVED_WORKFLOWS_STORAGE_KEY || e.key === REMOVED_WORKFLOWS_STORAGE_KEY) {
-				this._onDidChangeWorkflows.fire();
+				this._invalidateCacheAndFire();
 			}
 		}));
 
 		this._register(this.entityPersistenceService.onDidChangeSnapshots(() => {
-			this._onDidChangeWorkflows.fire();
+			this._invalidateCacheAndFire();
 		}));
 
 		this._register(this.workspacesExplorerService.onDidChangeWorkspaces(() => {
-			this._onDidChangeWorkflows.fire();
+			this._invalidateCacheAndFire();
 		}));
 
 		// Auto-track workflows when opened in editor (active / viewed workflows)
 		this._register(this.editorService.onDidActiveEditorChange(() => {
 			const active = this.editorService.activeEditor;
 			if (active instanceof WorkflowEditorInput) {
-				const norm = this.normalizeUriString(active.workflowUri);
+				const norm = this.normalizeUriString(active.workflowUri).toLowerCase();
 				const saved = this.getSavedWorkflows();
-				if (!saved.some(w => this.normalizeUriString(w.uri) === norm)) {
+				if (!saved.some(w => this.normalizeUriString(w.uri).toLowerCase() === norm)) {
 					this.saveWorkflow({
 						uri: active.workflowUri.toString(),
 						name: active.workflowName
@@ -66,12 +66,22 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 		}));
 	}
 
+	private _cachedWorkflows: IWorkflowItem[] | null = null;
+	private _cachedWorkflowsTimestamp = 0;
+	private _inflightGetWorkflows: Promise<IWorkflowItem[]> | null = null;
+
+	private _invalidateCacheAndFire(): void {
+		this._cachedWorkflows = null;
+		this._cachedWorkflowsTimestamp = 0;
+		this._onDidChangeWorkflows.fire();
+	}
+
 	notifyPaneExpanded(paneId: string): void {
 		this._onDidExpandPane.fire(paneId);
 	}
 
 	refresh(): void {
-		this._onDidChangeWorkflows.fire();
+		this._invalidateCacheAndFire();
 	}
 
 	private get savedWorkflowsKey(): string {
@@ -110,7 +120,31 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 			return [];
 		}
 		try {
-			return JSON.parse(raw) as ISavedWorkflowRecord[];
+			const parsed = JSON.parse(raw) as ISavedWorkflowRecord[];
+			if (!Array.isArray(parsed)) {
+				return [];
+			}
+			const seen = new Set<string>();
+			const deduped: ISavedWorkflowRecord[] = [];
+			for (const item of parsed) {
+				if (!item || !item.uri) {
+					continue;
+				}
+				const key = this.normalizeUriString(item.uri).toLowerCase();
+				if (!seen.has(key)) {
+					seen.add(key);
+					deduped.push(item);
+				}
+			}
+			// Self-heal storage if duplicate records accumulated previously
+			if (deduped.length !== parsed.length) {
+				const cleanJson = JSON.stringify(deduped);
+				this.storageService.store(this.savedWorkflowsKey, cleanJson, StorageScope.PROFILE, StorageTarget.USER);
+				if (this.storageService.get(SAVED_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE, '')) {
+					this.storageService.store(SAVED_WORKFLOWS_STORAGE_KEY, cleanJson, StorageScope.PROFILE, StorageTarget.USER);
+				}
+			}
+			return deduped;
 		} catch {
 			return [];
 		}
@@ -130,8 +164,9 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 
 	async saveWorkflow(record: ISavedWorkflowRecord): Promise<void> {
 		const normUriStr = this.normalizeUriString(record.uri);
+		const normLower = normUriStr.toLowerCase();
 		const saved = this.getSavedWorkflows();
-		const existingIdx = saved.findIndex(w => this.normalizeUriString(w.uri) === normUriStr);
+		const existingIdx = saved.findIndex(w => this.normalizeUriString(w.uri).toLowerCase() === normLower);
 		if (existingIdx >= 0) {
 			const existing = saved[existingIdx];
 			if (existing.name === record.name &&
@@ -149,46 +184,69 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 		}
 
 		// Also remove from removed list if user reopened it
-		const removed = this.getRemovedWorkflowUris().filter(u => u !== normUriStr);
+		const removed = this.getRemovedWorkflowUris().filter(u => u.toLowerCase() !== normLower);
 		this.storageService.store(this.removedWorkflowsKey, JSON.stringify(removed), StorageScope.PROFILE, StorageTarget.USER);
 
 		this.storageService.store(this.savedWorkflowsKey, JSON.stringify(saved), StorageScope.PROFILE, StorageTarget.USER);
-		this._onDidChangeWorkflows.fire();
+		this._invalidateCacheAndFire();
 	}
 
 	async removeSavedWorkflow(uri: URI | string): Promise<void> {
 		const normUriStr = this.normalizeUriString(uri);
-		const saved = this.getSavedWorkflows().filter(w => this.normalizeUriString(w.uri) !== normUriStr);
+		const normLower = normUriStr.toLowerCase();
+		const saved = this.getSavedWorkflows().filter(w => this.normalizeUriString(w.uri).toLowerCase() !== normLower);
 		this.storageService.store(this.savedWorkflowsKey, JSON.stringify(saved), StorageScope.PROFILE, StorageTarget.USER);
 
 		const removed = this.getRemovedWorkflowUris();
-		if (!removed.includes(normUriStr)) {
+		if (!removed.some(u => u.toLowerCase() === normLower)) {
 			removed.push(normUriStr);
 			this.storageService.store(this.removedWorkflowsKey, JSON.stringify(removed), StorageScope.PROFILE, StorageTarget.USER);
 		}
 
-		this._onDidChangeWorkflows.fire();
+		this._invalidateCacheAndFire();
 	}
 
 	async getWorkflows(): Promise<IWorkflowItem[]> {
+		if (this._cachedWorkflows && (Date.now() - this._cachedWorkflowsTimestamp) < 400) {
+			return this._cachedWorkflows;
+		}
+		if (this._inflightGetWorkflows) {
+			return this._inflightGetWorkflows;
+		}
+		this._inflightGetWorkflows = this._doGetWorkflows().finally(() => {
+			this._inflightGetWorkflows = null;
+		});
+		return this._inflightGetWorkflows;
+	}
+
+	private async _doGetWorkflows(): Promise<IWorkflowItem[]> {
 		const workflows: IWorkflowItem[] = [];
 		const seenUris = new Set<string>();
-		const removedUris = new Set(this.getRemovedWorkflowUris());
+		const removedUris = new Set(this.getRemovedWorkflowUris().map(u => u.toLowerCase()));
 
-		const addWorkflow = (uri: URI, name: string, description?: string, createdAt?: string, wsUri?: string, wsName?: string) => {
+		const addWorkflow = (uri: URI, name: string, description?: string, createdAt?: string, wsUri?: string, wsName?: string, ticketId?: string, title?: string) => {
 			const norm = this.normalizeUriString(uri).toLowerCase();
 			if (removedUris.has(norm)) {
 				return;
 			}
+			const snap = this.workspacesExplorerService.getMetadataSnapshot(uri);
+			const resolvedTicketId = ticketId || snap?.ticketId || name;
+			const resolvedTitle = title || snap?.title || name;
+			const rawWsUri = wsUri || snap?.belongsToWorkspaceUri || '';
+			const isIndependentPath = uri.path.toLowerCase().startsWith('/users/aimery/documents/workflows/') ||
+				rawWsUri.toLowerCase().endsWith('/documents/workflows') ||
+				rawWsUri.toLowerCase().endsWith('/repos/jobs');
 			if (!seenUris.has(norm)) {
 				seenUris.add(norm);
 				workflows.push({
 					id: uri.toString(),
 					name,
-					description,
-					createdAt: createdAt || '',
-					belongsToWorkspaceUri: wsUri || '',
-					belongsToWorkspaceName: wsName || '',
+					ticketId: resolvedTicketId,
+					title: resolvedTitle,
+					description: description || snap?.description,
+					createdAt: createdAt || snap?.createdAt || '',
+					belongsToWorkspaceUri: isIndependentPath ? '' : rawWsUri,
+					belongsToWorkspaceName: isIndependentPath ? 'Independent' : (wsName || snap?.scopeName || ''),
 					isMissing: false
 				});
 			}
@@ -202,26 +260,30 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 			}
 		}
 
-		// 2. Check direct workflows in currently open workspaces (direct children only)
+		// 2. Check direct workflows in currently open workspaces (in parallel)
 		const workspaces = await this.workspacesExplorerService.getWorkspaces();
-		for (const ws of workspaces) {
+		await Promise.all(workspaces.map(async ws => {
 			try {
 				const children = await this.workspacesExplorerService.scanWorkspaceChildren(ws.uri);
 				for (const child of children) {
 					if (child.type === 'workflow') {
-						addWorkflow(child.uri, child.name, undefined, undefined, ws.uri.toString(), ws.name);
+						addWorkflow(child.uri, child.name, undefined, undefined, ws.uri.toString(), ws.name, child.ticketId, child.title);
 					}
 				}
 			} catch {
 				// ignore
 			}
-		}
+		}));
 
-		// 3. Check user saved/opened workflows from StorageService - READ ONLY, NO STATE MUTATION
+		// 3. Check user saved/opened workflows from StorageService (in parallel)
 		const savedList = this.getSavedWorkflows();
-		for (const item of savedList) {
+		await Promise.all(savedList.map(async item => {
 			try {
 				const uri = URI.parse(item.uri);
+				const norm = this.normalizeUriString(uri).toLowerCase();
+				if (seenUris.has(norm) || removedUris.has(norm)) {
+					return;
+				}
 				const exists = await this.fileService.exists(uri);
 				if (exists) {
 					addWorkflow(uri, item.name, item.description, item.createdAt, item.belongsToWorkspaceUri, item.belongsToWorkspaceName);
@@ -229,8 +291,10 @@ export class WorkflowsManagerService extends Disposable implements IWorkflowsMan
 			} catch {
 				// ignore
 			}
-		}
+		}));
 
+		this._cachedWorkflows = workflows;
+		this._cachedWorkflowsTimestamp = Date.now();
 		return workflows;
 	}
 

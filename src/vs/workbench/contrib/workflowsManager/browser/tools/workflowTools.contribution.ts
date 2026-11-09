@@ -15,10 +15,12 @@ import {
 	StopWorkflowTool,
 	CreateTicketTool,
 	GetTicketTool,
+	GetOutputsTool,
 	RunTicketTool,
 	GetPrimitivesCatalogTool,
 	LegacyCreateTicketToolId,
 	LegacyGetTicketToolId,
+	LegacyGetOutputsToolId,
 	LegacyRunTicketToolId,
 	LegacyGetPrimitivesCatalogToolId
 } from './workflowTools.js';
@@ -41,6 +43,7 @@ export class WorkflowToolsContribution extends Disposable implements IWorkbenchC
 
 		const createTicketTool = new CreateTicketTool(ticketRuntimeService);
 		const getTicketTool = new GetTicketTool(ticketRuntimeService);
+		const getOutputsTool = new GetOutputsTool(ticketRuntimeService);
 		const runTicketTool = new RunTicketTool(ticketRuntimeService);
 		const getCatalogTool = new GetPrimitivesCatalogTool(ticketRuntimeService);
 
@@ -58,12 +61,15 @@ export class WorkflowToolsContribution extends Disposable implements IWorkbenchC
 		// Primary UPPERCASE tools
 		registerSafe(createTicketTool.getToolData(), createTicketTool);
 		registerSafe(getTicketTool.getToolData(), getTicketTool);
+		registerSafe(getOutputsTool.getToolData(), getOutputsTool);
 		registerSafe(runTicketTool.getToolData(), runTicketTool);
 		registerSafe(getCatalogTool.getToolData(), getCatalogTool);
 
 		// Legacy & lowercase aliases
 		registerSafe({ ...createTicketTool.getToolData(), id: LegacyCreateTicketToolId, toolReferenceName: 'createTickets' }, createTicketTool);
 		registerSafe({ ...getTicketTool.getToolData(), id: LegacyGetTicketToolId, toolReferenceName: 'getTickets' }, getTicketTool);
+		registerSafe({ ...getOutputsTool.getToolData(), id: LegacyGetOutputsToolId, toolReferenceName: 'getOutputs' }, getOutputsTool);
+		registerSafe({ ...getOutputsTool.getToolData(), id: 'get_outputs', toolReferenceName: 'get_outputs' }, getOutputsTool);
 		registerSafe({ ...runTicketTool.getToolData(), id: LegacyRunTicketToolId, toolReferenceName: 'runTickets' }, runTicketTool);
 		registerSafe({ ...getCatalogTool.getToolData(), id: LegacyGetPrimitivesCatalogToolId, toolReferenceName: 'getPrimitivesCatalog' }, getCatalogTool);
 	}

@@ -72,20 +72,21 @@ export class AgentsManagerPane extends ViewPane {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 
 		// Proactively update title on agent change or load
-		this._register(this.agentsManagerService.onDidChangeAgents(() => {
-			this.updatePaneTitle();
-			this.renderContent();
-		}));
-
-		this._register(this.entityPersistenceService.onDidChangeSnapshots(() => {
-			this.updatePaneTitle();
-			this.renderContent();
-		}));
+		const refreshAgentsPane = () => {
+			if (this.isBodyVisible() && this.containerEl) {
+				this.renderContent();
+			} else {
+				this.updatePaneTitle();
+			}
+		};
+		this._register(this.agentsManagerService.onDidChangeAgents(refreshAgentsPane));
+		this._register(this.entityPersistenceService.onDidChangeSnapshots(refreshAgentsPane));
 
 		// Accordion Exclusive Single Expansion: Notify service when this pane is expanded
 		this._register(this.onDidChangeBodyVisibility(visible => {
 			if (visible) {
 				this.agentsManagerService.notifyPaneExpanded(this.id);
+				this.renderContent();
 			}
 		}));
 
@@ -141,39 +142,40 @@ export class AgentsManagerPane extends ViewPane {
 		this.renderContent();
 	}
 
-	private getTargetScope(): 'all' | AgentScopeType {
+	private getTargetScope(): 'all' | 'workspace' | 'independent' {
 		if (this.id.endsWith('.workspace')) {
 			return 'workspace';
 		}
-		if (this.id.endsWith('.project')) {
-			return 'project';
-		}
-		if (this.id.endsWith('.job')) {
-			return 'job';
-		}
-		if (this.id.endsWith('.workflow')) {
-			return 'workflow';
-		}
-		if (this.id.endsWith('.standalone')) {
-			return 'none';
+		if (this.id.endsWith('.standalone') || this.id.endsWith('.independent')) {
+			return 'independent';
 		}
 		return 'all';
+	}
+
+	private isIndependentAgent(a: IAgentItem): boolean {
+		const folderLower = (a.folderPath || '').toLowerCase();
+		if (folderLower.includes('/documents/agents/')) {
+			return true;
+		}
+		if (a.scopeType === 'none' || a.scopeName === 'Independent' || a.scopeName === 'Standalone') {
+			return true;
+		}
+		return false;
 	}
 
 	private async updatePaneTitle(): Promise<void> {
 		const allAgents = await this.agentsManagerService.getAgents();
 		const targetScope = this.getTargetScope();
 		let scopedAgents = allAgents;
-		if (targetScope !== 'all') {
-			scopedAgents = allAgents.filter(a => a.scopeType === targetScope);
+		if (targetScope === 'workspace') {
+			scopedAgents = allAgents.filter(a => !this.isIndependentAgent(a));
+		} else if (targetScope === 'independent') {
+			scopedAgents = allAgents.filter(a => this.isIndependentAgent(a));
 		}
 		const baseTitles: Record<string, string> = {
 			all: 'All Agents',
 			workspace: 'Workspace Agents',
-			project: 'Project Agents',
-			job: 'Job Agents',
-			workflow: 'Workflow Agents',
-			none: 'Standalone / Global Agents'
+			independent: 'Independent Agents'
 		};
 		const baseName = baseTitles[targetScope] || 'Agents';
 		this.updateTitle(`${baseName} (${scopedAgents.length})`);
@@ -196,8 +198,10 @@ export class AgentsManagerPane extends ViewPane {
 
 		// Filter by View Pane Scope
 		let scopedAgents = allAgents;
-		if (targetScope !== 'all') {
-			scopedAgents = allAgents.filter(a => a.scopeType === targetScope);
+		if (targetScope === 'workspace') {
+			scopedAgents = allAgents.filter(a => !this.isIndependentAgent(a));
+		} else if (targetScope === 'independent') {
+			scopedAgents = allAgents.filter(a => this.isIndependentAgent(a));
 		}
 
 		// Update Native View Pane Header Title with Dynamic Item Count
@@ -209,6 +213,8 @@ export class AgentsManagerPane extends ViewPane {
 				return true;
 			}
 			return a.name.toLowerCase().includes(this.filterText) ||
+				(a.title && a.title.toLowerCase().includes(this.filterText)) ||
+				(a.ticketId && a.ticketId.toLowerCase().includes(this.filterText)) ||
 				a.role.toLowerCase().includes(this.filterText) ||
 				(a.model && a.model.modelId.toLowerCase().includes(this.filterText)) ||
 				a.scopeName.toLowerCase().includes(this.filterText);
@@ -248,7 +254,7 @@ export class AgentsManagerPane extends ViewPane {
 			}));
 			createBtn.innerText = '+ Create Agent';
 			createBtn.onclick = () => {
-				const defaultScope: AgentScopeType = targetScope === 'all' ? 'workspace' : targetScope;
+				const defaultScope: AgentScopeType = targetScope === 'independent' ? 'none' : 'workspace';
 				this.instantiationService.invokeFunction(accessor => createOrEditAgentDialog(accessor, undefined, defaultScope));
 			};
 			return;
@@ -270,6 +276,9 @@ export class AgentsManagerPane extends ViewPane {
 	}
 
 	private async renderAgentCard(parent: HTMLElement, agent: IAgentItem, scopeColor: string): Promise<void> {
+		const displayTitle = agent.title || agent.name;
+		const displayTicketId = agent.ticketId || (agent.folderPath ? agent.folderPath.split('/').filter(Boolean).pop() : '') || '';
+
 		const card = append(parent, $('.agent-item-card'));
 		card.draggable = true;
 		card.style.cursor = 'pointer';
@@ -283,9 +292,9 @@ export class AgentsManagerPane extends ViewPane {
 				}
 
 				if (folderUri) {
-					await this.editorService.openEditor(new EntityDetailEditorInput(folderUri, agent.name), { pinned: true });
+					await this.editorService.openEditor(new EntityDetailEditorInput(folderUri, displayTitle), { pinned: true });
 				} else {
-					this.notificationService.warn(`Could not locate entity folder for Agent '${agent.name}'.`);
+					this.notificationService.warn(`Could not locate entity folder for Agent '${displayTitle}'.`);
 				}
 			} catch (err) {
 				this.notificationService.error(`Failed to open agent details: ${err}`);
@@ -294,7 +303,7 @@ export class AgentsManagerPane extends ViewPane {
 		card.ondragstart = (e) => {
 			e.stopPropagation();
 			if (e.dataTransfer) {
-				e.dataTransfer.setData('text/plain', `any-agent-import:agent:${agent.name}`);
+				e.dataTransfer.setData('text/plain', `any-agent-import:agent:${displayTitle}`);
 				e.dataTransfer.effectAllowed = 'copy';
 			}
 			card.style.opacity = '0.5';
@@ -339,10 +348,18 @@ export class AgentsManagerPane extends ViewPane {
 		aIcon.style.flexShrink = '0';
 
 		const nameText = append(cardLeft, $('span.agent-name'));
-		nameText.textContent = agent.name;
+		nameText.textContent = displayTitle;
+		nameText.title = displayTicketId ? `${displayTitle} (${displayTicketId})` : displayTitle;
 
 		// Card Right Actions
 		const cardActions = append(cardHeader, $('.card-actions'));
+
+		if (displayTicketId) {
+			const idBadge = append(cardActions, $('span', {
+				style: 'font-size: 8px; padding: 1px 5px; border-radius: 3px; background: rgba(56, 189, 248, 0.18); color: #38bdf8; font-weight: 600; text-transform: uppercase; margin-right: 4px;'
+			}, displayTicketId));
+			idBadge.title = `Ticket ID: ${displayTicketId} · Type: AGENT`;
+		}
 
 		if (isMissing) {
 			// Remove Action (Trash 🗑️)
