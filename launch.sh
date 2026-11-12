@@ -7,6 +7,7 @@
 # ==============================================================================
 
 set -e
+set -m
 
 # Skip Node.js version constraint check & ensure Electron runs in GUI mode (not as plain Node)
 export VSCODE_SKIP_NODE_VERSION_CHECK=1
@@ -41,6 +42,11 @@ else
     fi
 fi
 
+# Ensure executable permissions on macOS app bundle
+if [[ "$OSTYPE" == "darwin"* ]] && [ -f "$CODE_EXE" ]; then
+    chmod +x "$CODE_EXE" 2>/dev/null || true
+fi
+
 PID_DIR="$HOME/.anyagent"
 PID_FILE="$PID_DIR/anyagent.pid"
 mkdir -p "$PID_DIR"
@@ -72,7 +78,7 @@ EOF
 # Check if application is running
 function is_running() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        pgrep -x "$EXE_NAME" >/dev/null 2>&1 || pgrep -f "Any Agent.app/Contents/MacOS" >/dev/null 2>&1
+        pgrep -f "Any Agent.app" >/dev/null 2>&1 || pgrep -x "$EXE_NAME" >/dev/null 2>&1
     else
         pgrep -x "$APP_NAME" >/dev/null 2>&1 || pgrep -f "out/main.js" >/dev/null 2>&1
     fi
@@ -83,7 +89,7 @@ function check_status() {
     if is_running; then
         echo "🟢 AnyAgent Desktop is running."
         if [[ "$OSTYPE" == "darwin"* ]]; then
-            ps aux | grep -E "(Any Agent.app|$EXE_NAME)" | grep -v grep | awk '{printf "   PID: %-7s CPU: %-5s MEM: %-5s COMMAND: %s\n", $2, $3, $4, $11}'
+            ps aux | grep -E "(Any Agent\.app|$EXE_NAME)" | grep -v grep | awk '{printf "   PID: %-7s CPU: %-5s MEM: %-5s COMMAND: %s\n", $2, $3, $4, $11}'
         else
             ps aux | grep -E "($APP_NAME|out/main.js)" | grep -v grep | awk '{printf "   PID: %-7s CPU: %-5s MEM: %-5s COMMAND: %s\n", $2, $3, $4, $11}'
         fi
@@ -102,8 +108,8 @@ function stop_app() {
 
     echo "🛑 Stopping AnyAgent Desktop..."
     if [[ "$OSTYPE" == "darwin"* ]]; then
+        pkill -f "Any Agent.app" 2>/dev/null || true
         pkill -x "$EXE_NAME" 2>/dev/null || true
-        pkill -f "Any Agent.app/Contents/MacOS" 2>/dev/null || true
     else
         pkill -x "$APP_NAME" 2>/dev/null || true
         pkill -f "out/main.js" 2>/dev/null || true
@@ -113,8 +119,8 @@ function stop_app() {
     if is_running; then
         echo "⚠️  Force terminating remaining processes..."
         if [[ "$OSTYPE" == "darwin"* ]]; then
+            pkill -9 -f "Any Agent.app" 2>/dev/null || true
             pkill -9 -x "$EXE_NAME" 2>/dev/null || true
-            pkill -9 -f "Any Agent.app/Contents/MacOS" 2>/dev/null || true
         else
             pkill -9 -x "$APP_NAME" 2>/dev/null || true
             pkill -9 -f "out/main.js" 2>/dev/null || true
@@ -128,7 +134,7 @@ function stop_app() {
 function build_client() {
     echo "🔨 Compiling AnyAgent Desktop client..."
     export VSCODE_SKIP_NODE_VERSION_CHECK=1
-    npm run compile-client
+    npm run transpile-client
     echo "✅ Build completed successfully."
 }
 
@@ -178,8 +184,8 @@ function ensure_binary() {
         node build/lib/preLaunch.ts
     fi
 
-    if [ ! -d "./out" ] || [ ! -f "./out/main.js" ]; then
-        echo "⚠️  Core build artifacts not found, compiling..."
+    if [ ! -d "./out" ] || [ ! -f "./out/main.js" ] || [ ! -f "./out/vs/platform/update/common/update.config.contribution.js" ]; then
+        echo "⚠️  Core build artifacts not found or incomplete, compiling..."
         build_client
     fi
 }
@@ -236,7 +242,7 @@ DISABLE_TEST_EXTENSION="--disable-extension=vscode.vscode-api-tests"
 if [ "$MODE" == "dev" ]; then
     echo "🚀 Starting AnyAgent Desktop (Development Mode)..."
     echo "💡 Note: Watch compiler running in background, live logs shown below. Press Ctrl+C to exit."
-    
+
     # Start background transpile watcher
     npm run watch-client-transpile > /dev/null 2>&1 &
     WATCH_PID=$!
@@ -249,17 +255,21 @@ if [ "$MODE" == "dev" ]; then
     }
     trap cleanup SIGINT SIGTERM EXIT
 
-    "$CODE_EXE" . "${TARGET_ARGS[@]}" $DISABLE_TEST_EXTENSION
+    env -u ELECTRON_RUN_AS_NODE "$CODE_EXE" "$DESKTOP_DIR" "${TARGET_ARGS[@]}" $DISABLE_TEST_EXTENSION
 else
     # Detached GUI Mode (Normal application lifecycle)
     if is_running; then
-        echo "ℹ️  AnyAgent Desktop is already running. Opening new window..."
+        echo "ℹ️  AnyAgent Desktop is already running. Activating and opening window..."
         if [ ${#TARGET_ARGS[@]} -eq 0 ]; then
-            "$CODE_EXE" . --new-window $DISABLE_TEST_EXTENSION >/dev/null 2>&1 &
+            env -u ELECTRON_RUN_AS_NODE "$CODE_EXE" "$DESKTOP_DIR" --new-window $DISABLE_TEST_EXTENSION >/dev/null 2>&1 &
         else
-            "$CODE_EXE" . "${TARGET_ARGS[@]}" $DISABLE_TEST_EXTENSION >/dev/null 2>&1 &
+            env -u ELECTRON_RUN_AS_NODE "$CODE_EXE" "$DESKTOP_DIR" "${TARGET_ARGS[@]}" $DISABLE_TEST_EXTENSION >/dev/null 2>&1 &
         fi
-        echo "✅ Request sent to running instance, new window opened."
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            sleep 0.5
+            osascript -e 'tell application "System Events" to set frontmost of (first process whose name is "'"$EXE_NAME"'" or name is "'"$APP_NAME"'") to true' 2>/dev/null || true
+        fi
+        echo "✅ Request sent to running instance, window activated."
         exit 0
     fi
 
@@ -267,17 +277,42 @@ else
 
     LOG_FILE="$PID_DIR/desktop.log"
 
+    LOCAL_ARGS=()
+    if [ ${#TARGET_ARGS[@]} -eq 0 ]; then
+        LOCAL_ARGS=("--new-window")
+    else
+        LOCAL_ARGS=("${TARGET_ARGS[@]}")
+    fi
+
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        nohup "$CODE_EXE" . "${TARGET_ARGS[@]}" $DISABLE_TEST_EXTENSION > "$LOG_FILE" 2>&1 &
+        nohup env -u ELECTRON_RUN_AS_NODE "$CODE_EXE" "$DESKTOP_DIR" "${LOCAL_ARGS[@]}" $DISABLE_TEST_EXTENSION > "$LOG_FILE" 2>&1 &
         APP_PID=$!
         disown $APP_PID 2>/dev/null || true
     else
-        nohup "$CODE_EXE" . "${TARGET_ARGS[@]}" $DISABLE_TEST_EXTENSION > "$LOG_FILE" 2>&1 &
+        nohup env -u ELECTRON_RUN_AS_NODE "$CODE_EXE" "$DESKTOP_DIR" "${LOCAL_ARGS[@]}" $DISABLE_TEST_EXTENSION > "$LOG_FILE" 2>&1 &
         APP_PID=$!
         disown $APP_PID 2>/dev/null || true
     fi
 
     echo "$APP_PID" > "$PID_FILE"
+
+    # Startup health check: ensure process does not crash immediately
+    sleep 3
+    if ! kill -0 "$APP_PID" 2>/dev/null; then
+        echo "❌ Error: AnyAgent Desktop failed to start (Process PID $APP_PID exited immediately)."
+        if [ -f "$LOG_FILE" ]; then
+            echo "📄 Recent error log output:"
+            tail -n 25 "$LOG_FILE"
+        fi
+        rm -f "$PID_FILE"
+        exit 1
+    fi
+
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        osascript -e 'tell application "System Events" to set frontmost of (first process whose name is "'"$EXE_NAME"'" or name is "'"$APP_NAME"'") to true' 2>/dev/null || true
+    fi
+
+
 
     echo "✨ AnyAgent Desktop launched successfully!"
     echo "   - PID: $APP_PID"
