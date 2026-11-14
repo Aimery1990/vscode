@@ -4,7 +4,6 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { clearNode, Dimension, h } from '../../../../base/browser/dom.js';
-import { toDisposable } from '../../../../base/common/lifecycle.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
@@ -38,7 +37,7 @@ import { IClipboardService } from '../../../../platform/clipboard/common/clipboa
 import { parseYaml } from '../../customModules/browser/customModulesService.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
-import { IActionButton, ICredentialPair, IParameterDefinition, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
+import { IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
@@ -182,7 +181,9 @@ export class EntityDetailEditor extends EditorPane {
 		}
 	})();
 	private static readonly _savedScrollByKey = new Map<string, number>();
+	private static _copiedTicketJsonCache: string = '';
 	private readonly _outputPaginationState = new Map<string, { page: number; pageSize: number }>();
+	private readonly _sshPanelExpandedByFieldKey = new Map<string, boolean>();
 
 	constructor(
 		group: IEditorGroup,
@@ -353,7 +354,7 @@ export class EntityDetailEditor extends EditorPane {
 		EntityDetailEditor._savedScrollByKey.set(this._currentScrollKey, top);
 		try {
 			this._storageService.store(`entityDetailEditor.scroll.${this._currentScrollKey}`, String(top), StorageScope.PROFILE, StorageTarget.MACHINE);
-		} catch {}
+		} catch { }
 	}
 
 	private _getSavedScrollTop(key: string): number {
@@ -373,7 +374,7 @@ export class EntityDetailEditor extends EditorPane {
 					return parsed;
 				}
 			}
-		} catch {}
+		} catch { }
 		return 0;
 	}
 
@@ -448,7 +449,7 @@ export class EntityDetailEditor extends EditorPane {
 			const fn = this._mediaCleanupFns.pop();
 			try {
 				fn?.();
-			} catch {}
+			} catch { }
 		}
 	}
 
@@ -513,11 +514,18 @@ export class EntityDetailEditor extends EditorPane {
 			curr = parent;
 		}
 
+		const targetNorm = targetId.replace(/[-_\s]+/g, '_');
+		const targetHyphen = targetId.replace(/[-_\s]+/g, '-');
 		for (const dir of checkDirs) {
 			try {
 				if (await this._fileService.exists(dir)) {
 					// 1. Check direct file names
-					const directNames = [`${targetId}.yaml`, `${targetId}.yml`, `${typeId}.yaml`, `${typeId}.yml`];
+					const directNames = [
+						`${targetId}.yaml`, `${targetId}.yml`,
+						`${targetHyphen}.yaml`, `${targetHyphen}.yml`,
+						`${targetNorm}.yaml`, `${targetNorm}.yml`,
+						`${typeId}.yaml`, `${typeId}.yml`
+					];
 					for (const dName of directNames) {
 						const directUri = URI.joinPath(dir, dName);
 						if (await this._fileService.exists(directUri)) {
@@ -534,11 +542,17 @@ export class EntityDetailEditor extends EditorPane {
 							if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
 								const content = await this._fileService.readFile(child.resource);
 								const mod = this._parseSimpleYaml(content.value.toString());
+								const modIdNorm = (mod?.id || '').trim().toLowerCase().replace(/[-_\s]+/g, '_');
+								const modNameNorm = (mod?.name || '').trim().toLowerCase().replace(/[-_\s]+/g, '_');
 								if (mod && (
 									mod.id?.toLowerCase() === targetId ||
 									mod.name?.toLowerCase() === targetId ||
+									modIdNorm === targetNorm ||
+									modNameNorm === targetNorm ||
 									child.name.toLowerCase() === `${targetId}.yaml` ||
-									child.name.toLowerCase() === `${targetId}.yml`
+									child.name.toLowerCase() === `${targetId}.yml` ||
+									child.name.toLowerCase() === `${targetHyphen}.yaml` ||
+									child.name.toLowerCase() === `${targetHyphen}.yml`
 								)) {
 									return mod;
 								}
@@ -569,7 +583,7 @@ export class EntityDetailEditor extends EditorPane {
 				this._lastParsedData = this._buildPreviewParsedData(freshMod);
 				await this._renderPreviewModeData();
 			}
-		} catch {}
+		} catch { }
 	}
 
 	private _buildPreviewParsedData(mod: any): IParsedTicketData {
@@ -696,6 +710,48 @@ export class EntityDetailEditor extends EditorPane {
 					sqlQuery: f.tableSqlQuery || '',
 					sqlOutput: f.debugSqlOutput || ''
 				});
+			} else if (fType === 'ssh') {
+				const outLines = typeof f.sshOutputLines === 'number' && f.sshOutputLines > 0 ? f.sshOutputLines : 50;
+				const initCmds = normalizeSshCommandsList(f.sshCommands, f.sshCommand || f.defaultContent || '');
+				customMetadata[fLabel] = JSON.stringify({
+					host: f.sshHost || '',
+					port: typeof f.sshPort === 'number' ? f.sshPort : 22,
+					user: f.sshUser || 'root',
+					password: f.sshPassword || '',
+					cwd: f.sshCwd || '~',
+					command: initCmds[0] || '',
+					commands: initCmds,
+					sshCommands: initCmds,
+					output: f.sshOutput || '',
+					lastRawOutput: f.sshLastRawOutput ?? '',
+					lastRawEntries: Array.isArray(f.sshLastRawEntries) ? f.sshLastRawEntries : [],
+					lastNOutput: f.sshLastOutput ?? '',
+					outputLines: outLines,
+					quickCommands: normalizeSshQuickCommands(f.sshQuickCommands),
+					lastExecuted: ''
+				});
+			} else if (fType === 'http_request') {
+				customMetadata[fLabel] = JSON.stringify({
+					method: f.httpMethod || 'GET',
+					url: f.httpUrl || '',
+					params: Array.isArray(f.httpParams) ? f.httpParams : [],
+					headers: Array.isArray(f.httpHeaders) ? f.httpHeaders : [],
+					authType: f.httpAuthType || 'none',
+					authToken: f.httpAuthToken || '',
+					apiKeyName: f.httpApiKeyName || '',
+					apiKeyValue: f.httpApiKeyValue || '',
+					apiKeyLocation: f.httpApiKeyLocation || 'header',
+					authUsername: f.httpAuthUsername || '',
+					authPassword: f.httpAuthPassword || '',
+					bodyType: f.httpBodyType || 'none',
+					bodyContent: f.httpBodyContent || '',
+					timeoutMs: f.httpTimeoutMs || 30000,
+					responseStatus: f.httpResponseStatus,
+					responseStatusText: f.httpResponseStatusText,
+					responseHeaders: f.httpResponseHeaders,
+					responseBody: f.httpResponseBody,
+					responseData: f.httpResponseData
+				});
 			} else if (fType === 'git') {
 				gitRemoteUrl = f.gitRemoteUrl || '';
 				gitBranch = f.gitBranch || 'main';
@@ -798,6 +854,7 @@ export class EntityDetailEditor extends EditorPane {
 		await this._hydrateTtsPrimitiveCards();
 		await this._hydrateMediaPlayerPrimitiveCards();
 		await this._hydrateTablePrimitiveCards();
+		await this._hydrateSshPrimitiveCards();
 		this._applySavedScrollPosition(scrollKey);
 		setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
@@ -877,7 +934,7 @@ export class EntityDetailEditor extends EditorPane {
 									gitBranch = headContent.replace('ref: refs/heads/', '').trim();
 								}
 							}
-						} catch {}
+						} catch { }
 					}
 					if (!gitRemoteUrl) {
 						try {
@@ -889,7 +946,7 @@ export class EntityDetailEditor extends EditorPane {
 									gitRemoteUrl = match[1].trim();
 								}
 							}
-						} catch {}
+						} catch { }
 					}
 				}
 			}
@@ -905,7 +962,7 @@ export class EntityDetailEditor extends EditorPane {
 							gitRemoteUrl = match[1].trim();
 						}
 					}
-				} catch {}
+				} catch { }
 			}
 
 			parsed.gitRemoteUrl = gitRemoteUrl;
@@ -921,7 +978,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (this._entityUri && this._workspacesExplorerService) {
 				try {
 					this._workspaceStatuses = await this._workspacesExplorerService.getWorkspaceStatuses(this._entityUri);
-				} catch {}
+				} catch { }
 			}
 
 			const attachments = await this._getAttachments(this._entityUri);
@@ -993,7 +1050,7 @@ export class EntityDetailEditor extends EditorPane {
 					}
 				}
 				breadcrumbSegments.push({ label: parsed.ticketId || parsed.title || this._entityName });
-			} catch {}
+			} catch { }
 			parsed.breadcrumbSegments = breadcrumbSegments;
 
 			if (loadSeq !== this._loadSeq || startSaveEpoch !== this._saveEpoch || !this._container) {
@@ -1018,6 +1075,7 @@ export class EntityDetailEditor extends EditorPane {
 			await this._hydrateTtsPrimitiveCards();
 			await this._hydrateMediaPlayerPrimitiveCards();
 			await this._hydrateTablePrimitiveCards();
+			await this._hydrateSshPrimitiveCards();
 			this._applySavedScrollPosition(scrollKey);
 			setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
@@ -1088,7 +1146,7 @@ export class EntityDetailEditor extends EditorPane {
 				EntityDetailEditor._savedScrollByKey.set(key, top);
 				try {
 					this._storageService.store(`entityDetailEditor.scroll.${key}`, String(top), StorageScope.PROFILE, StorageTarget.MACHINE);
-				} catch {}
+				} catch { }
 			}
 		}, { passive: true });
 
@@ -1225,6 +1283,24 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// 0.002 Copy Ticket Content as JSON Button click
+			const copyJsonBtn = (target.id === 'entity-detail-copy-json-btn' ? target : target.closest('#entity-detail-copy-json-btn')) as HTMLElement | null;
+			if (copyJsonBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				await this.copyTicketAsJson(copyJsonBtn);
+				return;
+			}
+
+			// 0.003 Paste Ticket Content from JSON Button click
+			const pasteJsonBtn = (target.id === 'entity-detail-paste-json-btn' ? target : target.closest('#entity-detail-paste-json-btn')) as HTMLElement | null;
+			if (pasteJsonBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				await this.pasteTicketFromJson(pasteJsonBtn);
+				return;
+			}
+
 			// 0.005 Toggle Attributes Sidebar Panel (Collapse / Expand)
 			if (target.closest('.toggle-attributes-panel-btn')) {
 				e.preventDefault();
@@ -1232,7 +1308,7 @@ export class EntityDetailEditor extends EditorPane {
 				this._isAttributesCollapsed = !this._isAttributesCollapsed;
 				try {
 					localStorage.setItem('anyagent.ticketDetail.attributesCollapsed', this._isAttributesCollapsed ? 'true' : 'false');
-				} catch {}
+				} catch { }
 				if (this._container) {
 					const layoutEl = this._container.querySelector('.layout-container') as HTMLElement | null;
 					if (layoutEl) {
@@ -2360,6 +2436,110 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// 1.5 Manual inline edit clicks on fields
+			// Ignore clicks if target is an interactive form element inside an active editor
+			if (!target.closest('.custom-field-edit-wrapper') && target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA' && target.tagName !== 'SELECT') {
+				// Title click
+				const titleHeading = target.closest('#title-heading') as HTMLElement | null;
+				if (titleHeading && !titleHeading.getAttribute('data-inline-editing')) {
+					e.preventDefault();
+					e.stopPropagation();
+					this._enterTitleInlineEdit(titleHeading);
+					return;
+				}
+
+				// Description click
+				const descBox = target.closest('#desc-view-mode') as HTMLElement | null;
+				if (descBox && !descBox.getAttribute('data-inline-editing')) {
+					e.preventDefault();
+					e.stopPropagation();
+					this._enterDescriptionInlineEdit(descBox);
+					return;
+				}
+
+				// Instruction prompt click
+				const promptContent = target.closest('.instruction-prompt-content') as HTMLElement | null;
+				if (promptContent && !promptContent.getAttribute('data-inline-editing')) {
+					const promptKey = promptContent.getAttribute('data-prompt-key') as 'Ticket Prompt' | 'Ticket Type Prompt';
+					if (promptKey) {
+						e.preventDefault();
+						e.stopPropagation();
+						this._enterInstructionPromptInlineEdit(promptContent, promptKey);
+						return;
+					}
+				}
+
+				// Custom switch toggle
+				const switchView = target.closest('.custom-switch-view') as HTMLElement | null;
+				if (switchView) {
+					e.preventDefault();
+					e.stopPropagation();
+					const fieldKey = switchView.getAttribute('data-field-key');
+					if (fieldKey) {
+						const curVal = this._lastParsedData?.customMetadata?.[fieldKey] ?? switchView.getAttribute('data-current-val') ?? 'false';
+						const isChecked = String(curVal).trim().toLowerCase() === 'true';
+						const nextVal = isChecked ? 'false' : 'true';
+						await this._saveCustomFieldDirectly(fieldKey, nextVal);
+						return;
+					}
+				}
+
+				// Custom select view
+				const selectView = target.closest('.custom-select-view') as HTMLElement | null;
+				if (selectView && !selectView.getAttribute('data-inline-editing')) {
+					e.preventDefault();
+					e.stopPropagation();
+					const fieldKey = selectView.getAttribute('data-field-key');
+					if (fieldKey) {
+						const optionsRaw = selectView.getAttribute('data-select-options') || '[]';
+						let options: any[] = [];
+						try { options = JSON.parse(optionsRaw); } catch { }
+						this._enterSelectInlineEdit(selectView, fieldKey, options);
+						return;
+					}
+				}
+
+				// Dynamic list subfield value click
+				const subfieldValEl = target.closest('.dynamic-subfield-val') as HTMLElement | null;
+				if (subfieldValEl && !subfieldValEl.getAttribute('data-inline-editing')) {
+					const fieldKey = subfieldValEl.getAttribute('data-field-key');
+					const itemIdx = Number(subfieldValEl.getAttribute('data-item-idx'));
+					const subKey = subfieldValEl.getAttribute('data-sub-key');
+					const isMultiline = subfieldValEl.getAttribute('data-multiline') === 'true';
+					if (fieldKey && !isNaN(itemIdx) && subKey) {
+						e.preventDefault();
+						e.stopPropagation();
+						this._enterDynamicSubfieldInlineEdit(subfieldValEl, fieldKey, itemIdx, subKey, isMultiline);
+						return;
+					}
+				}
+
+				// Generic Custom Field View click (Text, Textarea, Number)
+				const customFieldView = target.closest('.custom-field-view') as HTMLElement | null;
+				if (
+					customFieldView &&
+					!customFieldView.getAttribute('data-inline-editing') &&
+					!customFieldView.closest('.action-button-group-card') &&
+					!customFieldView.closest('.output-primitive-card') &&
+					!customFieldView.closest('.browser-primitive-card') &&
+					!customFieldView.closest('.prompt-primitive-card') &&
+					!customFieldView.closest('.python-primitive-card') &&
+					!customFieldView.closest('.tts-primitive-card') &&
+					!customFieldView.closest('.media-player-primitive-card') &&
+					!customFieldView.closest('.ssh-primitive-card')
+				) {
+					const fieldKey = customFieldView.getAttribute('data-field-key');
+					if (fieldKey) {
+						e.preventDefault();
+						e.stopPropagation();
+						const isMultiline = customFieldView.getAttribute('data-multiline') === 'true';
+						const initialVal = this._lastParsedData?.customMetadata?.[fieldKey] ?? '';
+						this._enterCustomFieldInlineEdit(customFieldView, fieldKey, initialVal, isMultiline);
+						return;
+					}
+				}
+			}
+
 			// 2. Ticket Link Chip click
 			const ticketChip = target.closest('.ticket-link-chip') as HTMLElement | null;
 			if (ticketChip) {
@@ -2624,7 +2804,7 @@ export class EntityDetailEditor extends EditorPane {
 					const agName = promptAgentSelect.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || '';
 					const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
 					if (targetBadge) {
-						targetBadge.textContent = `Agent: ${ promptAgentSelect.value ? (agName || promptAgentSelect.value) : 'Unassigned' }`;
+						targetBadge.textContent = `Agent: ${promptAgentSelect.value ? (agName || promptAgentSelect.value) : 'Unassigned'}`;
 					}
 					card.setAttribute('data-user-customized-target', 'true');
 					await this._savePromptDataFromCard(card, fieldKey);
@@ -3043,7 +3223,7 @@ export class EntityDetailEditor extends EditorPane {
 								currentCustomKey = null;
 								continue;
 							}
-						} catch {}
+						} catch { }
 					}
 					customMetadata[key] = val;
 					currentCustomKey = key;
@@ -3265,6 +3445,7 @@ export class EntityDetailEditor extends EditorPane {
 		const lines = content.split(/\r?\n/);
 		const newLines: string[] = [];
 		let inSelfDefined = false;
+		let replacedSelfDefined = false;
 
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
@@ -3299,6 +3480,7 @@ export class EntityDetailEditor extends EditorPane {
 					}
 					newLines.push('');
 					inSelfDefined = false;
+					replacedSelfDefined = true;
 					continue;
 				}
 				inSelfDefined = true;
@@ -3319,7 +3501,1478 @@ export class EntityDetailEditor extends EditorPane {
 			newLines.push(line);
 		}
 
+		if (customUpdates && !replacedSelfDefined && Object.keys(customUpdates).length > 0) {
+			newLines.push('', '### Self Defined Data (If any)', '- **Self Defined Data Value**:');
+			for (const [k, v] of Object.entries(customUpdates)) {
+				const singleLineVal = String(v ?? '').trim().replace(/\r?\n/g, ' ');
+				newLines.push(`  - **${k}**: ${singleLineVal}`);
+			}
+			newLines.push('');
+		}
+
 		return newLines.join('\n');
+	}
+
+	private async _flushLiveDomEditsToMemory(): Promise<void> {
+		if (!this._container || !this._lastParsedData) {
+			return;
+		}
+		try {
+			// 1. Sync parameter inputs
+			const paramInputs = Array.from(this._container.querySelectorAll('.ticket-parameter-input')) as Array<HTMLInputElement | HTMLSelectElement>;
+			if (paramInputs.length > 0) {
+				const byField = new Map<string, Record<string, string>>();
+				for (const inp of paramInputs) {
+					const fk = inp.getAttribute('data-field-key') || '';
+					const pn = inp.getAttribute('data-param-name') || '';
+					if (!fk || !pn) continue;
+					if (!byField.has(fk)) {
+						let existing: Record<string, string> = {};
+						const rawVal = this._lastParsedData.customMetadata?.[fk];
+						if (rawVal) {
+							try {
+								const p = JSON.parse(rawVal);
+								if (p && typeof p === 'object' && !Array.isArray(p)) existing = { ...p };
+							} catch { }
+						}
+						byField.set(fk, existing);
+					}
+					byField.get(fk)![pn] = inp.value;
+				}
+				for (const [fk, paramObj] of byField.entries()) {
+					this._lastParsedData.customMetadata[fk] = JSON.stringify(paramObj);
+				}
+			}
+
+			// 2. Sync browser cards
+			const browserCards = Array.from(this._container.querySelectorAll('.browser-primitive-card')) as HTMLElement[];
+			for (const card of browserCards) {
+				const fetchBtn = card.querySelector('.browser-silent-fetch-btn') as HTMLElement | null;
+				const fk = fetchBtn?.getAttribute('data-field-key') || card.getAttribute('data-field-key') || '';
+				const urlInput = card.querySelector('.browser-url-input') as HTMLInputElement | null;
+				if (fk && urlInput) {
+					let bObj: any = {};
+					const rawVal = this._lastParsedData.customMetadata?.[fk];
+					if (rawVal) {
+						try { bObj = JSON.parse(rawVal); } catch { }
+					}
+					bObj.url = urlInput.value.trim();
+					this._lastParsedData.customMetadata[fk] = JSON.stringify(bObj);
+				}
+			}
+
+			// 3. Sync prompt cards
+			const promptCards = Array.from(this._container.querySelectorAll('.prompt-primitive-card')) as HTMLElement[];
+			for (const card of promptCards) {
+				const fk = card.getAttribute('data-field-key') || '';
+				if (fk) {
+					await this._savePromptDataFromCard(card, fk);
+				}
+			}
+
+			// 4. Sync python cards
+			const pythonCards = Array.from(this._container.querySelectorAll('.python-primitive-card')) as HTMLElement[];
+			for (const card of pythonCards) {
+				const fk = card.getAttribute('data-field-key') || '';
+				if (fk) {
+					await this._savePythonDataFromCard(card, fk);
+				}
+			}
+
+			// 5. Sync TTS cards
+			const ttsCards = Array.from(this._container.querySelectorAll('.tts-primitive-card')) as HTMLElement[];
+			for (const card of ttsCards) {
+				const fk = card.getAttribute('data-field-key') || '';
+				if (fk) {
+					await this._saveTtsDataFromCard(card, fk);
+				}
+			}
+
+			// 6. Sync media player cards
+			const mediaCards = Array.from(this._container.querySelectorAll('.media-player-primitive-card')) as HTMLElement[];
+			for (const card of mediaCards) {
+				const fk = card.getAttribute('data-field-key') || '';
+				if (fk) {
+					await this._saveMediaPlayerDataFromCard(card, fk);
+				}
+			}
+
+			// 7. Sync SSH cards
+			const sshCards = Array.from(this._container.querySelectorAll('.ssh-primitive-card')) as HTMLElement[];
+			for (const card of sshCards) {
+				const fk = card.getAttribute('data-field-key') || '';
+				const rawSshJson = card.getAttribute('data-ssh-json') || '';
+				if (fk && rawSshJson) {
+					this._lastParsedData.customMetadata[fk] = rawSshJson;
+				}
+			}
+		} catch (err) {
+			console.warn('Non-fatal warning while flushing live DOM edits before JSON export:', err);
+		}
+	}
+
+	private static _buildTicketJsonObject(data: IParsedTicketData): Record<string, any> {
+		const internalKeys = new Set(['ticket statuses', 'status mapping', 'removed status']);
+		const fields: Record<string, any> = {};
+		for (const [k, rawVal] of Object.entries(data.customMetadata || {})) {
+			if (internalKeys.has(k.toLowerCase())) {
+				continue;
+			}
+			if (typeof rawVal === 'string') {
+				const trimmed = rawVal.trim();
+				if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+					try {
+						fields[k] = JSON.parse(trimmed);
+						continue;
+					} catch { }
+				}
+			}
+			fields[k] = rawVal;
+		}
+
+		return {
+			__anyagent_ticket__: true,
+			version: 1,
+			exportedAt: new Date().toISOString(),
+			ticketId: data.ticketId || '',
+			ticketCode: data.ticketCode || '',
+			ticketType: data.ticketType || 'task',
+			workspaceId: data.workspaceId || '',
+			title: data.title || '',
+			description: data.description || '',
+			status: data.status || 'Todo',
+			priority: data.priority || 'Medium',
+			assignedAgentName: data.assignedAgentName || 'None',
+			typeDefinition: data.typeDefinition || 'None',
+			typePrompt: data.typePrompt || 'None',
+			ticketPrompt: data.ticketPrompt || 'None',
+			linkTo: data.linkTo || 'None',
+			linkedBy: data.linkedBy || 'None',
+			gitRemoteUrl: data.gitRemoteUrl || '',
+			gitBranch: data.gitBranch || '',
+			localPath: data.localPath || '',
+			fields,
+			readmeNotes: data.readmeNotes || '',
+			instructionNotes: data.instructionNotes || ''
+		};
+	}
+
+	private static _parseClipboardJsonString(rawText: string): Record<string, any> | null {
+		let cleaned = (rawText || '').trim();
+		if (!cleaned) {
+			return null;
+		}
+		const fenceMatch = cleaned.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+		if (fenceMatch && fenceMatch[1]) {
+			cleaned = fenceMatch[1].trim();
+		}
+		try {
+			const parsed = JSON.parse(cleaned);
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				return parsed as Record<string, any>;
+			}
+		} catch { }
+		return null;
+	}
+
+	public async copyTicketAsJson(btnEl?: HTMLElement | null): Promise<void> {
+		try {
+			await this._flushLiveDomEditsToMemory();
+			if (!this._lastParsedData) {
+				await this._resolvePathsAndLoadData();
+			}
+			if (!this._lastParsedData) {
+				this._notificationService.warn('Ticket data is not loaded yet.');
+				return;
+			}
+
+			const payload = EntityDetailEditor._buildTicketJsonObject(this._lastParsedData);
+			const jsonStr = JSON.stringify(payload, null, 2);
+			EntityDetailEditor._copiedTicketJsonCache = jsonStr;
+			await this._clipboardService.writeText(jsonStr);
+
+			if (btnEl) {
+				const iconEl = btnEl.querySelector('.codicon') as HTMLElement | null;
+				const labelEl = btnEl.querySelector('.copy-json-btn-label') as HTMLElement | null;
+				if (iconEl) iconEl.className = 'codicon codicon-check';
+				if (labelEl) labelEl.textContent = 'Copied JSON!';
+				btnEl.style.color = '#34d399';
+				btnEl.style.borderColor = 'rgba(52, 211, 153, 0.5)';
+				btnEl.style.background = 'rgba(52, 211, 153, 0.16)';
+				setTimeout(() => {
+					if (iconEl) iconEl.className = 'codicon codicon-copy';
+					if (labelEl) labelEl.textContent = 'Copy JSON';
+					btnEl.style.color = '#38bdf8';
+					btnEl.style.borderColor = 'rgba(56, 189, 248, 0.35)';
+					btnEl.style.background = 'rgba(56, 189, 248, 0.14)';
+				}, 1600);
+			}
+
+			const ticketLabel = this._lastParsedData.title || this._lastParsedData.ticketId || this._entityName || 'Ticket';
+			const fieldCount = Object.keys(payload.fields || {}).length;
+			this._notificationService.info(`Copied ticket "${ticketLabel}" content (${fieldCount} field${fieldCount === 1 ? '' : 's'}) as JSON to clipboard.`);
+		} catch (err) {
+			console.error('Failed to copy ticket as JSON:', err);
+			this._notificationService.error(`Failed to copy ticket JSON: ${String(err)}`);
+		}
+	}
+
+	public async pasteTicketFromJson(btnEl?: HTMLElement | null, openModalDirectly?: boolean): Promise<void> {
+		let clipText = '';
+		try {
+			clipText = (await this._clipboardService.readText()) || '';
+		} catch { }
+		if (!clipText.trim() && EntityDetailEditor._copiedTicketJsonCache) {
+			clipText = EntityDetailEditor._copiedTicketJsonCache;
+		}
+
+		if (!openModalDirectly) {
+			const parsedObj = EntityDetailEditor._parseClipboardJsonString(clipText);
+			if (parsedObj) {
+				await this._applyTicketJsonPayload(parsedObj, btnEl);
+				return;
+			}
+		}
+
+		this._showPasteTicketJsonModal(clipText, btnEl);
+	}
+
+	private _showPasteTicketJsonModal(initialText: string, btnEl?: HTMLElement | null): void {
+		const existing = document.getElementById('anyagent-paste-ticket-json-modal');
+		if (existing) {
+			existing.remove();
+		}
+
+		const overlay = document.createElement('div');
+		overlay.id = 'anyagent-paste-ticket-json-modal';
+		overlay.style.cssText = 'position: fixed; inset: 0; z-index: 100000; background: rgba(0, 0, 0, 0.65); display: flex; align-items: center; justify-content: center; padding: 24px; backdrop-filter: blur(2px);';
+
+		const dialog = document.createElement('div');
+		dialog.style.cssText = 'width: 100%; max-width: 680px; background: var(--vscode-editorWidget-background, #18181b); color: var(--vscode-editorWidget-foreground, #f4f4f5); border: 1px solid rgba(168, 85, 247, 0.45); border-radius: 10px; box-shadow: 0 18px 48px rgba(0, 0, 0, 0.7); display: flex; flex-direction: column; overflow: hidden;';
+		overlay.appendChild(dialog);
+
+		const header = document.createElement('div');
+		header.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid rgba(255, 255, 255, 0.08); background: rgba(168, 85, 247, 0.1);';
+		dialog.appendChild(header);
+
+		const headerTitle = document.createElement('div');
+		headerTitle.style.cssText = 'display: flex; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 700; color: #e9d5ff;';
+		const headerIcon = document.createElement('span');
+		headerIcon.className = 'codicon codicon-clippy';
+		headerIcon.style.cssText = 'font-size: 15px; color: #c084fc;';
+		headerTitle.appendChild(headerIcon);
+		const headerText = document.createElement('span');
+		headerText.textContent = 'Paste Ticket JSON Content';
+		headerTitle.appendChild(headerText);
+		header.appendChild(headerTitle);
+
+		const closeBtn = document.createElement('button');
+		closeBtn.type = 'button';
+		closeBtn.textContent = '✕';
+		closeBtn.style.cssText = 'background: transparent; border: none; color: inherit; opacity: 0.7; cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 4px;';
+		header.appendChild(closeBtn);
+
+		const body = document.createElement('div');
+		body.style.cssText = 'padding: 16px 18px; display: flex; flex-direction: column; gap: 10px;';
+		dialog.appendChild(body);
+
+		const desc = document.createElement('div');
+		desc.style.cssText = 'font-size: 12px; opacity: 0.8; line-height: 1.45;';
+		desc.textContent = 'Paste a Ticket JSON object copied from another ticket (or any structured JSON with title, description, or custom field values) to populate this ticket:';
+		body.appendChild(desc);
+
+		const textarea = document.createElement('textarea');
+		textarea.rows = 14;
+		textarea.value = initialText || '';
+		textarea.placeholder = '{\n  "__anyagent_ticket__": true,\n  "title": "...",\n  "description": "...",\n  "fields": {\n    ...\n  }\n}';
+		textarea.style.cssText = 'width: 100%; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.5; padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(0, 0, 0, 0.35); color: inherit; resize: vertical; outline: none;';
+		body.appendChild(textarea);
+
+		const errorBox = document.createElement('div');
+		errorBox.style.cssText = 'display: none; font-size: 11.5px; color: #f87171; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.35); padding: 8px 10px; border-radius: 6px;';
+		body.appendChild(errorBox);
+
+		const footer = document.createElement('div');
+		footer.style.cssText = 'display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 12px 18px; border-top: 1px solid rgba(255, 255, 255, 0.08); background: rgba(0, 0, 0, 0.2);';
+		dialog.appendChild(footer);
+
+		const cancelBtn = document.createElement('button');
+		cancelBtn.type = 'button';
+		cancelBtn.textContent = 'Cancel';
+		cancelBtn.style.cssText = 'padding: 6px 14px; font-size: 12px; border-radius: 6px; cursor: pointer; background: rgba(255, 255, 255, 0.08); color: inherit; border: 1px solid rgba(255, 255, 255, 0.14);';
+		footer.appendChild(cancelBtn);
+
+		const applyBtn = document.createElement('button');
+		applyBtn.type = 'button';
+		applyBtn.textContent = 'Apply JSON to Ticket';
+		applyBtn.style.cssText = 'padding: 6px 16px; font-size: 12px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.25); color: #e9d5ff; border: 1px solid rgba(192, 132, 252, 0.55);';
+		footer.appendChild(applyBtn);
+
+		const cleanup = () => {
+			document.removeEventListener('keydown', onKeyDown);
+			overlay.remove();
+		};
+		const onKeyDown = (ev: KeyboardEvent) => {
+			if (ev.key === 'Escape') {
+				cleanup();
+			}
+		};
+		document.addEventListener('keydown', onKeyDown);
+		closeBtn.onclick = cleanup;
+		cancelBtn.onclick = cleanup;
+		overlay.onclick = (ev) => {
+			if (ev.target === overlay) {
+				cleanup();
+			}
+		};
+
+		applyBtn.onclick = async () => {
+			const parsed = EntityDetailEditor._parseClipboardJsonString(textarea.value);
+			if (!parsed) {
+				errorBox.textContent = 'Invalid JSON format. Please paste a valid JSON object ({ ... }).';
+				errorBox.style.display = 'block';
+				return;
+			}
+			cleanup();
+			await this._applyTicketJsonPayload(parsed, btnEl);
+		};
+
+		document.body.appendChild(overlay);
+		setTimeout(() => {
+			textarea.focus();
+			textarea.select();
+		}, 20);
+	}
+
+	private async _applyTicketJsonPayload(parsedObj: Record<string, any>, btnEl?: HTMLElement | null): Promise<void> {
+		try {
+			if (!this._lastParsedData) {
+				await this._resolvePathsAndLoadData();
+			}
+			if (!this._lastParsedData) {
+				this._notificationService.warn('Ticket data is not loaded yet.');
+				return;
+			}
+
+			// 1. Strict Ticket Type Verification: Only allow pasting between tickets of the same type
+			const normType = (t: string) => (t || '').trim().toLowerCase().replace(/[-_\s]+/g, '_');
+			const sourceTicketType = normType(parsedObj.ticketType || parsedObj.type || parsedObj.ticket_type || '');
+			const targetTicketType = normType(this._lastParsedData.ticketType || this._entityType || '');
+
+			if (!sourceTicketType) {
+				this._notificationService.error('Cannot paste ticket data: The clipboard JSON does not specify a valid ticket type.');
+				return;
+			}
+
+			if (sourceTicketType !== targetTicketType) {
+				const rawSource = parsedObj.ticketType || parsedObj.type || parsedObj.ticket_type || 'Unknown';
+				const rawTarget = this._lastParsedData.ticketType || this._entityType || 'Unknown';
+				this._notificationService.error(
+					`Cannot paste ticket data: Ticket type mismatch! Source ticket is "${rawSource}", but target ticket is "${rawTarget}". Paste is only allowed between tickets of the same type.`
+				);
+				return;
+			}
+
+			// 2. Overwrite Confirmation & Data Protection Check
+			const sourceLabel = parsedObj.title || parsedObj.ticketId || `[${parsedObj.ticketType || 'Source'}]`;
+			const targetLabel = this._lastParsedData.title || this._lastParsedData.ticketId || this._entityName || 'Current Ticket';
+			const confirmResult = await this._dialogService.confirm({
+				type: 'warning',
+				message: `Overwrite data for "${targetLabel}"?`,
+				detail: `This will completely overwrite the existing fields and content of this ${this._lastParsedData.ticketType || 'ticket'} with data copied from "${sourceLabel}". Any unsaved changes will be lost.\n\nDo you want to proceed?`,
+				primaryButton: 'Overwrite and Paste',
+				cancelButton: 'Cancel'
+			});
+
+			if (!confirmResult.confirmed) {
+				return;
+			}
+
+			const newTitle = typeof parsedObj.title === 'string'
+				? parsedObj.title
+				: (typeof parsedObj.Title === 'string' ? parsedObj.Title : undefined);
+			const newDesc = typeof parsedObj.description === 'string'
+				? parsedObj.description
+				: (typeof parsedObj.Description === 'string' ? parsedObj.Description : undefined);
+
+			// Preserve target's distinct custom title if already set, unless target was untitled or matches fallback ID
+			const curTitle = this._lastParsedData.title;
+			const finalTitle = (curTitle && curTitle !== 'Untitled' && curTitle !== this._lastParsedData.ticketId && curTitle !== this._entityName)
+				? curTitle
+				: (newTitle || curTitle);
+
+			const metadataUpdates: Record<string, string> = {};
+			if (finalTitle !== undefined) metadataUpdates['Title'] = finalTitle;
+			if (newDesc !== undefined) metadataUpdates['Description'] = newDesc;
+			if (typeof parsedObj.status === 'string' && parsedObj.status.trim()) {
+				metadataUpdates['Status'] = parsedObj.status.trim();
+			}
+			if (typeof parsedObj.priority === 'string' && parsedObj.priority.trim()) {
+				metadataUpdates['Priority'] = parsedObj.priority.trim();
+			}
+			if (typeof parsedObj.assignedAgentName === 'string' && parsedObj.assignedAgentName.trim()) {
+				metadataUpdates['Current AI Agent'] = parsedObj.assignedAgentName.trim();
+			}
+			if (typeof parsedObj.ticketPrompt === 'string') {
+				metadataUpdates['Ticket Prompt'] = parsedObj.ticketPrompt;
+			}
+			if (typeof parsedObj.typePrompt === 'string') {
+				metadataUpdates['Ticket Type Prompt'] = parsedObj.typePrompt;
+			}
+			if (typeof parsedObj.linkTo === 'string') {
+				metadataUpdates['Link To'] = parsedObj.linkTo;
+			}
+			if (typeof parsedObj.gitRemoteUrl === 'string') {
+				metadataUpdates['Git Remote URL'] = parsedObj.gitRemoteUrl;
+			}
+			if (typeof parsedObj.gitBranch === 'string') {
+				metadataUpdates['Git Branch'] = parsedObj.gitBranch;
+			}
+			if (typeof parsedObj.localPath === 'string') {
+				metadataUpdates['Local Path'] = parsedObj.localPath;
+			}
+			if (typeof parsedObj.instructionNotes === 'string' && parsedObj.instructionNotes.trim()) {
+				metadataUpdates['Instruction Notes'] = parsedObj.instructionNotes;
+			}
+
+			// 3. Complete Field Overwrite (preserving only internal system lifecycle config)
+			const internalKeys = new Set(['ticket statuses', 'status mapping', 'removed status']);
+			const overwrittenCustom: Record<string, string> = {};
+			for (const [k, v] of Object.entries(this._lastParsedData.customMetadata || {})) {
+				if (internalKeys.has(k.toLowerCase())) {
+					overwrittenCustom[k] = v;
+				}
+			}
+
+			const resolveCanonicalFieldKey = (incomingKey: string): string => {
+				const norm = incomingKey.trim().toLowerCase().replace(/_/g, ' ');
+				if (this._lastCustomModule && Array.isArray(this._lastCustomModule.fields)) {
+					for (const f of this._lastCustomModule.fields) {
+						const fLabel = String(f.label || f.id || '').trim();
+						const fId = String(f.id || f.label || '').trim();
+						if (
+							fLabel.toLowerCase() === incomingKey.trim().toLowerCase() ||
+							fLabel.toLowerCase().replace(/_/g, ' ') === norm ||
+							fId.toLowerCase() === incomingKey.trim().toLowerCase() ||
+							fId.toLowerCase().replace(/_/g, ' ') === norm
+						) {
+							return fLabel || incomingKey;
+						}
+					}
+				}
+				for (const existingKey of Object.keys(overwrittenCustom)) {
+					if (
+						existingKey.toLowerCase() === incomingKey.trim().toLowerCase() ||
+						existingKey.toLowerCase().replace(/_/g, ' ') === norm
+					) {
+						return existingKey;
+					}
+				}
+				return incomingKey;
+			};
+
+			const applyCustomSourceMap = (sourceMap: Record<string, any>) => {
+				for (const [rawK, rawV] of Object.entries(sourceMap)) {
+					if (rawV === undefined || internalKeys.has(rawK.toLowerCase())) continue;
+					const canonicalKey = resolveCanonicalFieldKey(rawK);
+					if (typeof rawV === 'object' && rawV !== null) {
+						overwrittenCustom[canonicalKey] = JSON.stringify(rawV);
+					} else {
+						overwrittenCustom[canonicalKey] = String(rawV ?? '');
+					}
+				}
+			};
+
+			if (parsedObj.customMetadata && typeof parsedObj.customMetadata === 'object' && !Array.isArray(parsedObj.customMetadata)) {
+				applyCustomSourceMap(parsedObj.customMetadata);
+			}
+			if (parsedObj.selfDefinedData && typeof parsedObj.selfDefinedData === 'object' && !Array.isArray(parsedObj.selfDefinedData)) {
+				applyCustomSourceMap(parsedObj.selfDefinedData);
+			}
+			if (parsedObj.self_defined_data && typeof parsedObj.self_defined_data === 'object' && !Array.isArray(parsedObj.self_defined_data)) {
+				applyCustomSourceMap(parsedObj.self_defined_data);
+			}
+			if (parsedObj.fields && typeof parsedObj.fields === 'object' && !Array.isArray(parsedObj.fields)) {
+				applyCustomSourceMap(parsedObj.fields);
+			}
+
+			// Also support pasting a flat JSON object whose keys directly represent custom fields or parameters
+			const hasExplicitContainers = Boolean(
+				parsedObj.__anyagent_ticket__ ||
+				parsedObj.fields ||
+				parsedObj.customMetadata ||
+				parsedObj.selfDefinedData ||
+				parsedObj.self_defined_data
+			);
+			if (!hasExplicitContainers) {
+				const reservedRootKeys = new Set([
+					'__anyagent_ticket__', 'version', 'exportedat', 'ticketid', 'ticketcode', 'tickettype',
+					'workspaceid', 'title', 'description', 'status', 'priority', 'assignedagentname',
+					'typedefinition', 'typeprompt', 'ticketprompt', 'linkto', 'linkedby',
+					'gitremoteurl', 'gitbranch', 'localpath', 'readmenotes', 'instructionnotes', 'worklog'
+				]);
+				const flatFields: Record<string, any> = {};
+				for (const [k, v] of Object.entries(parsedObj)) {
+					if (!reservedRootKeys.has(k.toLowerCase())) {
+						flatFields[k] = v;
+					}
+				}
+				if (Object.keys(flatFields).length > 0) {
+					applyCustomSourceMap(flatFields);
+				}
+			}
+
+			// Preview mode handling
+			if (this._isPreviewMode && this._lastParsedData) {
+				if (finalTitle !== undefined) this._lastParsedData.title = finalTitle;
+				if (newDesc !== undefined) this._lastParsedData.description = newDesc;
+				if (metadataUpdates['Status']) this._lastParsedData.status = metadataUpdates['Status'];
+				if (metadataUpdates['Priority']) this._lastParsedData.priority = metadataUpdates['Priority'];
+				if (metadataUpdates['Current AI Agent']) this._lastParsedData.assignedAgentName = metadataUpdates['Current AI Agent'];
+				if (metadataUpdates['Ticket Prompt'] !== undefined) this._lastParsedData.ticketPrompt = metadataUpdates['Ticket Prompt'];
+				if (metadataUpdates['Ticket Type Prompt'] !== undefined) this._lastParsedData.typePrompt = metadataUpdates['Ticket Type Prompt'];
+				this._lastParsedData.customMetadata = overwrittenCustom;
+				if (typeof parsedObj.workLog === 'string' && parsedObj.workLog.trim()) {
+					this._previewWorkLog = parsedObj.workLog;
+				}
+				await this._renderPreviewModeData();
+			} else {
+				this._suppressAutoReloadUntil = Date.now() + 4000;
+				await this._handleMessage({
+					type: 'saveAllData',
+					title: finalTitle ?? this._lastParsedData?.title,
+					description: newDesc ?? this._lastParsedData?.description,
+					metadata: metadataUpdates,
+					customMetadata: overwrittenCustom
+				});
+			}
+
+			if (btnEl) {
+				const iconEl = btnEl.querySelector('.codicon') as HTMLElement | null;
+				const labelEl = btnEl.querySelector('.paste-json-btn-label') as HTMLElement | null;
+				if (iconEl) iconEl.className = 'codicon codicon-check';
+				if (labelEl) labelEl.textContent = 'Pasted JSON!';
+				btnEl.style.color = '#34d399';
+				btnEl.style.borderColor = 'rgba(52, 211, 153, 0.5)';
+				btnEl.style.background = 'rgba(52, 211, 153, 0.16)';
+				setTimeout(() => {
+					if (iconEl) iconEl.className = 'codicon codicon-clippy';
+					if (labelEl) labelEl.textContent = 'Paste JSON';
+					btnEl.style.color = '#c084fc';
+					btnEl.style.borderColor = 'rgba(168, 85, 247, 0.35)';
+					btnEl.style.background = 'rgba(168, 85, 247, 0.14)';
+				}, 1600);
+			}
+
+			const fieldCount = Object.keys(overwrittenCustom).filter(k => !internalKeys.has(k.toLowerCase())).length;
+			this._notificationService.info(`Successfully pasted and overwritten ${fieldCount} field${fieldCount === 1 ? '' : 's'} from "${sourceLabel}" into "${targetLabel}".`);
+		} catch (err) {
+			console.error('Failed to paste ticket JSON:', err);
+			this._notificationService.error(`Failed to paste ticket JSON: ${String(err)}`);
+		}
+	}
+
+	private async _saveCustomFieldDirectly(fieldKey: string, newValue: string): Promise<void> {
+		if (!this._lastParsedData) {
+			await this._resolvePathsAndLoadData();
+		}
+		if (!this._lastParsedData) {
+			return;
+		}
+		if (!this._lastParsedData.customMetadata) {
+			this._lastParsedData.customMetadata = {};
+		}
+		this._lastParsedData.customMetadata[fieldKey] = newValue;
+
+		// Keep AI edit button's data attribute in sync
+		if (this._container) {
+			const aiBtn = this._container.querySelector(`.ai-edit-btn[data-ai-field="/Custom/${fieldKey}"]`) as HTMLElement | null;
+			if (aiBtn) {
+				aiBtn.setAttribute('data-ai-current-value', newValue);
+			}
+		}
+
+		if (this._isPreviewMode) {
+			await this._renderPreviewModeData();
+			return;
+		}
+
+		await this._handleMessage({
+			type: 'saveMetadata',
+			metadata: {},
+			customMetadata: {
+				...this._lastParsedData.customMetadata,
+				[fieldKey]: newValue
+			}
+		});
+	}
+
+	private async _saveTitleDirectly(newTitle: string): Promise<void> {
+		const trimmedTitle = newTitle.trim();
+		if (!this._lastParsedData || !trimmedTitle) {
+			return;
+		}
+		this._lastParsedData.title = trimmedTitle;
+
+		if (this._container) {
+			const aiBtn = this._container.querySelector('.ai-edit-btn[data-ai-field="/Title"]') as HTMLElement | null;
+			if (aiBtn) {
+				aiBtn.setAttribute('data-ai-current-value', trimmedTitle);
+			}
+		}
+
+		if (this._isPreviewMode) {
+			await this._renderPreviewModeData();
+			return;
+		}
+
+		await this._handleMessage({
+			type: 'saveTitleAndDescription',
+			title: trimmedTitle,
+			description: this._lastParsedData.description
+		});
+	}
+
+	private async _saveDescriptionDirectly(newDescription: string): Promise<void> {
+		if (!this._lastParsedData) {
+			return;
+		}
+		this._lastParsedData.description = newDescription;
+
+		if (this._container) {
+			const aiBtn = this._container.querySelector('.ai-edit-btn[data-ai-field="/Description"]') as HTMLElement | null;
+			if (aiBtn) {
+				aiBtn.setAttribute('data-ai-current-value', newDescription);
+			}
+		}
+
+		if (this._isPreviewMode) {
+			await this._renderPreviewModeData();
+			return;
+		}
+
+		await this._handleMessage({
+			type: 'saveDescription',
+			title: this._lastParsedData.title,
+			description: newDescription
+		});
+	}
+
+	private async _saveInstructionPromptDirectly(promptKey: 'Ticket Prompt' | 'Ticket Type Prompt', newPrompt: string): Promise<void> {
+		if (!this._lastParsedData) {
+			return;
+		}
+		if (promptKey === 'Ticket Prompt') {
+			this._lastParsedData.ticketPrompt = newPrompt;
+		} else {
+			this._lastParsedData.typePrompt = newPrompt;
+		}
+
+		if (this._container) {
+			const aiBtn = this._container.querySelector(`.ai-edit-btn[data-ai-field="/Instructions/${promptKey}"]`) as HTMLElement | null;
+			if (aiBtn) {
+				aiBtn.setAttribute('data-ai-current-value', newPrompt);
+			}
+		}
+
+		if (this._isPreviewMode) {
+			await this._renderPreviewModeData();
+			return;
+		}
+
+		await this._handleMessage({
+			type: 'saveMetadata',
+			metadata: {
+				[promptKey]: newPrompt
+			}
+		});
+	}
+
+	private _enterCustomFieldInlineEdit(viewEl: HTMLElement, fieldKey: string, initialValue: string, isMultiline: boolean): void {
+		if (viewEl.getAttribute('data-inline-editing') === 'true') {
+			return;
+		}
+		viewEl.setAttribute('data-inline-editing', 'true');
+
+		const originalHtml = viewEl.innerHTML;
+		clearNode(viewEl);
+
+		if (isMultiline) {
+			const wrapper = document.createElement('div');
+			wrapper.className = 'custom-field-edit-wrapper';
+			wrapper.style.cssText = 'display: flex; flex-direction: column; gap: 8px; width: 100%;';
+
+			const textarea = document.createElement('textarea');
+			textarea.className = 'custom-field-inline-textarea input-field';
+			textarea.rows = 6;
+			textarea.value = initialValue;
+			textarea.placeholder = `Enter ${fieldKey}...`;
+			textarea.style.cssText = 'width: 100%; box-sizing: border-box; background: var(--vscode-input-background, #1e1e1e); color: var(--vscode-input-foreground, #eee); border: 1px solid var(--vscode-focusBorder, #007acc); border-radius: 6px; padding: 10px 12px; font-size: 12.5px; font-family: var(--vscode-editor-font-family, inherit); line-height: 1.5; outline: none; resize: vertical;';
+			wrapper.appendChild(textarea);
+
+			const btnRow = document.createElement('div');
+			btnRow.style.cssText = 'display: flex; justify-content: flex-end; align-items: center; gap: 8px;';
+
+			const hint = document.createElement('span');
+			hint.style.cssText = 'font-size: 11px; opacity: 0.55;';
+			hint.textContent = 'Ctrl+Enter or Cmd+Enter to save, Esc to cancel';
+			btnRow.appendChild(hint);
+
+			const cancelBtn = document.createElement('button');
+			cancelBtn.type = 'button';
+			cancelBtn.textContent = 'Cancel';
+			cancelBtn.className = 'btn-secondary';
+			cancelBtn.style.cssText = 'padding: 4px 10px; font-size: 11.5px; border-radius: 4px; cursor: pointer;';
+			btnRow.appendChild(cancelBtn);
+
+			const saveBtn = document.createElement('button');
+			saveBtn.type = 'button';
+			saveBtn.textContent = 'Save';
+			saveBtn.className = 'btn-primary';
+			saveBtn.style.cssText = 'padding: 4px 14px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer;';
+			btnRow.appendChild(saveBtn);
+
+			wrapper.appendChild(btnRow);
+			viewEl.appendChild(wrapper);
+
+			let isCommitted = false;
+			const commitSave = async () => {
+				if (isCommitted) return;
+				isCommitted = true;
+				viewEl.removeAttribute('data-inline-editing');
+				const newVal = textarea.value;
+				await this._saveCustomFieldDirectly(fieldKey, newVal);
+			};
+
+			const cancelEdit = () => {
+				if (isCommitted) return;
+				isCommitted = true;
+				viewEl.removeAttribute('data-inline-editing');
+				this._setElementHTML(viewEl, originalHtml);
+			};
+
+			saveBtn.onclick = (e) => { e.stopPropagation(); commitSave(); };
+			cancelBtn.onclick = (e) => { e.stopPropagation(); cancelEdit(); };
+
+			textarea.onkeydown = (e) => {
+				if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+					e.preventDefault();
+					commitSave();
+				} else if (e.key === 'Escape') {
+					e.preventDefault();
+					cancelEdit();
+				}
+			};
+
+			setTimeout(() => {
+				textarea.focus();
+				textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+			}, 10);
+		} else {
+			const wrapper = document.createElement('div');
+			wrapper.style.cssText = 'display: flex; align-items: center; gap: 8px; width: 100%;';
+
+			const input = document.createElement('input');
+			input.type = 'text';
+			input.className = 'custom-field-inline-input input-field';
+			input.value = initialValue;
+			input.placeholder = `Enter ${fieldKey}...`;
+			input.style.cssText = 'flex: 1; box-sizing: border-box; background: var(--vscode-input-background, #1e1e1e); color: var(--vscode-input-foreground, #eee); border: 1px solid var(--vscode-focusBorder, #007acc); border-radius: 6px; padding: 7px 12px; font-size: 12.5px; font-family: var(--vscode-editor-font-family, inherit); outline: none;';
+			wrapper.appendChild(input);
+
+			const saveBtn = document.createElement('button');
+			saveBtn.type = 'button';
+			saveBtn.textContent = 'Save';
+			saveBtn.className = 'btn-primary';
+			saveBtn.style.cssText = 'padding: 6px 12px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer; flex-shrink: 0;';
+			wrapper.appendChild(saveBtn);
+
+			const cancelBtn = document.createElement('button');
+			cancelBtn.type = 'button';
+			cancelBtn.textContent = 'Cancel';
+			cancelBtn.className = 'btn-secondary';
+			cancelBtn.style.cssText = 'padding: 6px 10px; font-size: 11.5px; border-radius: 4px; cursor: pointer; flex-shrink: 0;';
+			wrapper.appendChild(cancelBtn);
+
+			viewEl.appendChild(wrapper);
+
+			let isCommitted = false;
+			const commitSave = async () => {
+				if (isCommitted) return;
+				isCommitted = true;
+				viewEl.removeAttribute('data-inline-editing');
+				const newVal = input.value;
+				await this._saveCustomFieldDirectly(fieldKey, newVal);
+			};
+
+			const cancelEdit = () => {
+				if (isCommitted) return;
+				isCommitted = true;
+				viewEl.removeAttribute('data-inline-editing');
+				this._setElementHTML(viewEl, originalHtml);
+			};
+
+			saveBtn.onclick = (e) => { e.stopPropagation(); commitSave(); };
+			cancelBtn.onclick = (e) => { e.stopPropagation(); cancelEdit(); };
+
+			input.onkeydown = (e) => {
+				if (e.key === 'Enter') {
+					e.preventDefault();
+					commitSave();
+				} else if (e.key === 'Escape') {
+					e.preventDefault();
+					cancelEdit();
+				}
+			};
+
+			input.onblur = (e) => {
+				if (e.relatedTarget === saveBtn || e.relatedTarget === cancelBtn) {
+					return;
+				}
+				if (input.value !== initialValue) {
+					commitSave();
+				} else {
+					cancelEdit();
+				}
+			};
+
+			setTimeout(() => {
+				input.focus();
+				input.select();
+			}, 10);
+		}
+	}
+
+	private _enterTitleInlineEdit(titleEl: HTMLElement): void {
+		if (titleEl.getAttribute('data-inline-editing') === 'true') {
+			return;
+		}
+		titleEl.setAttribute('data-inline-editing', 'true');
+
+		const originalHtml = titleEl.innerHTML;
+		const curTitle = this._lastParsedData?.title || titleEl.textContent?.trim() || '';
+		clearNode(titleEl);
+
+		const wrapper = document.createElement('div');
+		wrapper.className = 'custom-field-edit-wrapper';
+		wrapper.style.cssText = 'display: flex; align-items: center; gap: 8px; width: 100%;';
+
+		const input = document.createElement('input');
+		input.type = 'text';
+		input.className = 'input-field';
+		input.value = curTitle;
+		input.placeholder = 'Enter ticket title...';
+		input.style.cssText = 'flex: 1; font-size: 1.35em; font-weight: 700; padding: 6px 12px; border-radius: 6px; background: var(--vscode-input-background, #1e1e1e); color: var(--vscode-input-foreground, #fff); border: 1px solid var(--vscode-focusBorder, #007acc); outline: none;';
+		wrapper.appendChild(input);
+
+		const saveBtn = document.createElement('button');
+		saveBtn.type = 'button';
+		saveBtn.textContent = 'Save';
+		saveBtn.className = 'btn-primary';
+		saveBtn.style.cssText = 'padding: 6px 14px; font-size: 12px; font-weight: 600; border-radius: 5px; cursor: pointer; flex-shrink: 0;';
+		wrapper.appendChild(saveBtn);
+
+		const cancelBtn = document.createElement('button');
+		cancelBtn.type = 'button';
+		cancelBtn.textContent = 'Cancel';
+		cancelBtn.className = 'btn-secondary';
+		cancelBtn.style.cssText = 'padding: 6px 10px; font-size: 12px; border-radius: 5px; cursor: pointer; flex-shrink: 0;';
+		wrapper.appendChild(cancelBtn);
+
+		titleEl.appendChild(wrapper);
+
+		let committed = false;
+		const commit = async () => {
+			if (committed) return;
+			committed = true;
+			titleEl.removeAttribute('data-inline-editing');
+			const newVal = input.value.trim();
+			if (newVal && newVal !== curTitle) {
+				await this._saveTitleDirectly(newVal);
+			} else {
+				this._setElementHTML(titleEl, originalHtml);
+			}
+		};
+
+		const cancel = () => {
+			if (committed) return;
+			committed = true;
+			titleEl.removeAttribute('data-inline-editing');
+			this._setElementHTML(titleEl, originalHtml);
+		};
+
+		saveBtn.onclick = (e) => { e.stopPropagation(); commit(); };
+		cancelBtn.onclick = (e) => { e.stopPropagation(); cancel(); };
+
+		input.onkeydown = (e) => {
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				commit();
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				cancel();
+			}
+		};
+
+		input.onblur = (e) => {
+			if (e.relatedTarget === saveBtn || e.relatedTarget === cancelBtn) {
+				return;
+			}
+			if (input.value.trim() && input.value.trim() !== curTitle) {
+				commit();
+			} else {
+				cancel();
+			}
+		};
+
+		setTimeout(() => {
+			input.focus();
+			input.select();
+		}, 10);
+	}
+
+	private _enterDescriptionInlineEdit(descEl: HTMLElement): void {
+		if (descEl.getAttribute('data-inline-editing') === 'true') {
+			return;
+		}
+		descEl.setAttribute('data-inline-editing', 'true');
+
+		const originalHtml = descEl.innerHTML;
+		const curDesc = this._lastParsedData?.description || '';
+		clearNode(descEl);
+
+		const wrapper = document.createElement('div');
+		wrapper.className = 'custom-field-edit-wrapper';
+		wrapper.style.cssText = 'display: flex; flex-direction: column; gap: 8px; width: 100%;';
+
+		const textarea = document.createElement('textarea');
+		textarea.className = 'input-field';
+		textarea.rows = 8;
+		textarea.value = curDesc;
+		textarea.placeholder = 'Enter description (Markdown supported)...';
+		textarea.style.cssText = 'width: 100%; box-sizing: border-box; background: var(--vscode-input-background, #1e1e1e); color: var(--vscode-input-foreground, #eee); border: 1px solid var(--vscode-focusBorder, #007acc); border-radius: 6px; padding: 10px 12px; font-size: 12.5px; font-family: var(--vscode-editor-font-family, inherit); line-height: 1.5; outline: none; resize: vertical;';
+		wrapper.appendChild(textarea);
+
+		const btnRow = document.createElement('div');
+		btnRow.style.cssText = 'display: flex; justify-content: flex-end; align-items: center; gap: 8px;';
+
+		const hint = document.createElement('span');
+		hint.style.cssText = 'font-size: 11px; opacity: 0.55;';
+		hint.textContent = 'Ctrl+Enter or Cmd+Enter to save, Esc to cancel';
+		btnRow.appendChild(hint);
+
+		const cancelBtn = document.createElement('button');
+		cancelBtn.type = 'button';
+		cancelBtn.textContent = 'Cancel';
+		cancelBtn.className = 'btn-secondary';
+		cancelBtn.style.cssText = 'padding: 4px 10px; font-size: 11.5px; border-radius: 4px; cursor: pointer;';
+		btnRow.appendChild(cancelBtn);
+
+		const saveBtn = document.createElement('button');
+		saveBtn.type = 'button';
+		saveBtn.textContent = 'Save';
+		saveBtn.className = 'btn-primary';
+		saveBtn.style.cssText = 'padding: 4px 14px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer;';
+		btnRow.appendChild(saveBtn);
+
+		wrapper.appendChild(btnRow);
+		descEl.appendChild(wrapper);
+
+		let committed = false;
+		const commit = async () => {
+			if (committed) return;
+			committed = true;
+			descEl.removeAttribute('data-inline-editing');
+			const newVal = textarea.value;
+			await this._saveDescriptionDirectly(newVal);
+		};
+
+		const cancel = () => {
+			if (committed) return;
+			committed = true;
+			descEl.removeAttribute('data-inline-editing');
+			this._setElementHTML(descEl, originalHtml);
+		};
+
+		saveBtn.onclick = (e) => { e.stopPropagation(); commit(); };
+		cancelBtn.onclick = (e) => { e.stopPropagation(); cancel(); };
+
+		textarea.onkeydown = (e) => {
+			if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+				e.preventDefault();
+				commit();
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				cancel();
+			}
+		};
+
+		setTimeout(() => {
+			textarea.focus();
+			textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+		}, 10);
+	}
+
+	private _enterInstructionPromptInlineEdit(promptEl: HTMLElement, promptKey: 'Ticket Prompt' | 'Ticket Type Prompt'): void {
+		if (promptEl.getAttribute('data-inline-editing') === 'true') {
+			return;
+		}
+		promptEl.setAttribute('data-inline-editing', 'true');
+
+		const originalHtml = promptEl.innerHTML;
+		const curVal = promptKey === 'Ticket Prompt' ? (this._lastParsedData?.ticketPrompt || '') : (this._lastParsedData?.typePrompt || '');
+		clearNode(promptEl);
+
+		const wrapper = document.createElement('div');
+		wrapper.className = 'custom-field-edit-wrapper';
+		wrapper.style.cssText = 'display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: 4px;';
+
+		const textarea = document.createElement('textarea');
+		textarea.className = 'input-field';
+		textarea.rows = 5;
+		textarea.value = curVal;
+		textarea.placeholder = `Enter ${promptKey}...`;
+		textarea.style.cssText = 'width: 100%; box-sizing: border-box; background: var(--vscode-input-background, #1e1e1e); color: var(--vscode-input-foreground, #eee); border: 1px solid var(--vscode-focusBorder, #007acc); border-radius: 6px; padding: 8px 10px; font-size: 12px; font-family: var(--vscode-editor-font-family, inherit); line-height: 1.5; outline: none; resize: vertical;';
+		wrapper.appendChild(textarea);
+
+		const btnRow = document.createElement('div');
+		btnRow.style.cssText = 'display: flex; justify-content: flex-end; align-items: center; gap: 8px;';
+
+		const hint = document.createElement('span');
+		hint.style.cssText = 'font-size: 11px; opacity: 0.55;';
+		hint.textContent = 'Ctrl+Enter or Cmd+Enter to save, Esc to cancel';
+		btnRow.appendChild(hint);
+
+		const cancelBtn = document.createElement('button');
+		cancelBtn.type = 'button';
+		cancelBtn.textContent = 'Cancel';
+		cancelBtn.className = 'btn-secondary';
+		cancelBtn.style.cssText = 'padding: 3px 8px; font-size: 11px; border-radius: 4px; cursor: pointer;';
+		btnRow.appendChild(cancelBtn);
+
+		const saveBtn = document.createElement('button');
+		saveBtn.type = 'button';
+		saveBtn.textContent = 'Save';
+		saveBtn.className = 'btn-primary';
+		saveBtn.style.cssText = 'padding: 3px 12px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer;';
+		btnRow.appendChild(saveBtn);
+
+		wrapper.appendChild(btnRow);
+		promptEl.appendChild(wrapper);
+
+		let committed = false;
+		const commit = async () => {
+			if (committed) return;
+			committed = true;
+			promptEl.removeAttribute('data-inline-editing');
+			const newVal = textarea.value;
+			await this._saveInstructionPromptDirectly(promptKey, newVal);
+		};
+
+		const cancel = () => {
+			if (committed) return;
+			committed = true;
+			promptEl.removeAttribute('data-inline-editing');
+			this._setElementHTML(promptEl, originalHtml);
+		};
+
+		saveBtn.onclick = (e) => { e.stopPropagation(); commit(); };
+		cancelBtn.onclick = (e) => { e.stopPropagation(); cancel(); };
+
+		textarea.onkeydown = (e) => {
+			if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+				e.preventDefault();
+				commit();
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				cancel();
+			}
+		};
+
+		setTimeout(() => {
+			textarea.focus();
+			textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+		}, 10);
+	}
+
+	private _enterSelectInlineEdit(selectViewEl: HTMLElement, fieldKey: string, options: any[]): void {
+		if (selectViewEl.getAttribute('data-inline-editing') === 'true') {
+			return;
+		}
+		selectViewEl.setAttribute('data-inline-editing', 'true');
+
+		const originalHtml = selectViewEl.innerHTML;
+		const curVal = this._lastParsedData?.customMetadata?.[fieldKey] ?? '';
+		clearNode(selectViewEl);
+
+		const wrapper = document.createElement('div');
+		wrapper.className = 'custom-field-edit-wrapper';
+		wrapper.style.cssText = 'display: inline-flex; align-items: center; gap: 8px; width: 100%; max-width: 320px;';
+
+		const select = document.createElement('select');
+		select.className = 'input-field';
+		select.style.cssText = 'flex: 1; padding: 5px 8px; font-size: 12px; border-radius: 4px; background: var(--vscode-input-background, #1e1e1e); color: var(--vscode-input-foreground, #eee); border: 1px solid var(--vscode-focusBorder, #007acc); outline: none; cursor: pointer;';
+
+		const emptyOpt = document.createElement('option');
+		emptyOpt.value = '';
+		emptyOpt.textContent = '-- Select an option --';
+		select.appendChild(emptyOpt);
+
+		for (const opt of options) {
+			const optVal = typeof opt === 'object' && opt !== null ? (opt.value ?? opt.label ?? '') : String(opt);
+			const optLabel = typeof opt === 'object' && opt !== null ? (opt.label ?? opt.value ?? '') : String(opt);
+			const optionEl = document.createElement('option');
+			optionEl.value = optVal;
+			optionEl.textContent = optLabel;
+			if (optVal === curVal) {
+				optionEl.selected = true;
+			}
+			select.appendChild(optionEl);
+		}
+
+		wrapper.appendChild(select);
+
+		const saveBtn = document.createElement('button');
+		saveBtn.type = 'button';
+		saveBtn.textContent = 'Save';
+		saveBtn.className = 'btn-primary';
+		saveBtn.style.cssText = 'padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; flex-shrink: 0;';
+		wrapper.appendChild(saveBtn);
+
+		const cancelBtn = document.createElement('button');
+		cancelBtn.type = 'button';
+		cancelBtn.textContent = 'Cancel';
+		cancelBtn.className = 'btn-secondary';
+		cancelBtn.style.cssText = 'padding: 4px 8px; font-size: 11px; border-radius: 4px; cursor: pointer; flex-shrink: 0;';
+		wrapper.appendChild(cancelBtn);
+
+		selectViewEl.appendChild(wrapper);
+
+		let committed = false;
+		const commit = async () => {
+			if (committed) return;
+			committed = true;
+			selectViewEl.removeAttribute('data-inline-editing');
+			const newVal = select.value;
+			await this._saveCustomFieldDirectly(fieldKey, newVal);
+		};
+
+		const cancel = () => {
+			if (committed) return;
+			committed = true;
+			selectViewEl.removeAttribute('data-inline-editing');
+			this._setElementHTML(selectViewEl, originalHtml);
+		};
+
+		select.onchange = () => {
+			commit();
+		};
+		saveBtn.onclick = (e) => { e.stopPropagation(); commit(); };
+		cancelBtn.onclick = (e) => { e.stopPropagation(); cancel(); };
+
+		select.onkeydown = (e) => {
+			if (e.key === 'Escape') {
+				e.preventDefault();
+				cancel();
+			}
+		};
+
+		setTimeout(() => {
+			select.focus();
+		}, 10);
+	}
+
+	private _enterDynamicSubfieldInlineEdit(subfieldValEl: HTMLElement, fieldKey: string, itemIdx: number, subKey: string, isMultiline: boolean): void {
+		if (subfieldValEl.getAttribute('data-inline-editing') === 'true') {
+			return;
+		}
+		subfieldValEl.setAttribute('data-inline-editing', 'true');
+
+		const originalHtml = subfieldValEl.innerHTML;
+		let arr: any[] = [];
+		const raw = this._lastParsedData?.customMetadata?.[fieldKey];
+		if (raw) {
+			try {
+				const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
+				if (Array.isArray(p)) arr = p;
+			} catch { }
+		}
+
+		const item = arr[itemIdx];
+		const initialVal = item ? String(item[subKey] ?? '') : '';
+		clearNode(subfieldValEl);
+
+		const wrapper = document.createElement('div');
+		wrapper.className = 'custom-field-edit-wrapper';
+		wrapper.style.cssText = 'display: inline-flex; align-items: center; gap: 6px; width: 100%;';
+
+		const input = document.createElement(isMultiline ? 'textarea' : 'input') as HTMLInputElement | HTMLTextAreaElement;
+		if (!isMultiline) {
+			(input as HTMLInputElement).type = 'text';
+		} else {
+			(input as HTMLTextAreaElement).rows = 4;
+		}
+		input.className = 'input-field';
+		input.value = initialVal;
+		input.placeholder = `Enter ${subKey}...`;
+		input.style.cssText = 'flex: 1; box-sizing: border-box; background: var(--vscode-input-background, #1e1e1e); color: var(--vscode-input-foreground, #eee); border: 1px solid var(--vscode-focusBorder, #007acc); border-radius: 4px; padding: 4px 8px; font-size: 12px; font-family: inherit; outline: none;';
+		wrapper.appendChild(input);
+
+		const saveBtn = document.createElement('button');
+		saveBtn.type = 'button';
+		saveBtn.textContent = 'Save';
+		saveBtn.className = 'btn-primary';
+		saveBtn.style.cssText = 'padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; flex-shrink: 0;';
+		wrapper.appendChild(saveBtn);
+
+		const cancelBtn = document.createElement('button');
+		cancelBtn.type = 'button';
+		cancelBtn.textContent = 'Cancel';
+		cancelBtn.className = 'btn-secondary';
+		cancelBtn.style.cssText = 'padding: 4px 8px; font-size: 11px; border-radius: 4px; cursor: pointer; flex-shrink: 0;';
+		wrapper.appendChild(cancelBtn);
+
+		subfieldValEl.appendChild(wrapper);
+
+		let committed = false;
+		const commit = async () => {
+			if (committed) return;
+			committed = true;
+			subfieldValEl.removeAttribute('data-inline-editing');
+			const newVal = input.value;
+			if (item) {
+				item[subKey] = newVal;
+				await this._saveCustomFieldDirectly(fieldKey, JSON.stringify(arr));
+			} else {
+				this._setElementHTML(subfieldValEl, originalHtml);
+			}
+		};
+
+		const cancel = () => {
+			if (committed) return;
+			committed = true;
+			subfieldValEl.removeAttribute('data-inline-editing');
+			this._setElementHTML(subfieldValEl, originalHtml);
+		};
+
+		saveBtn.onclick = (e) => { e.stopPropagation(); commit(); };
+		cancelBtn.onclick = (e) => { e.stopPropagation(); cancel(); };
+
+		input.onkeydown = (e) => {
+			if (isMultiline) {
+				if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+					e.preventDefault();
+					commit();
+				} else if (e.key === 'Escape') {
+					e.preventDefault();
+					cancel();
+				}
+			} else {
+				if (e.key === 'Enter') {
+					e.preventDefault();
+					commit();
+				} else if (e.key === 'Escape') {
+					e.preventDefault();
+					cancel();
+				}
+			}
+		};
+
+		setTimeout(() => {
+			input.focus();
+			input.select();
+		}, 10);
+	}
+
+	public static async copyTicketAtUriToClipboard(
+		entityUri: URI,
+		entityName: string,
+		fileService: IFileService,
+		clipboardService: IClipboardService,
+		notificationService: INotificationService
+	): Promise<void> {
+		try {
+			const resolveCandidate = async (names: string[]): Promise<URI> => {
+				for (const name of names) {
+					const p1 = URI.joinPath(entityUri, '.agents', name);
+					if (await fileService.exists(p1)) return p1;
+					const p2 = URI.joinPath(entityUri, name);
+					if (await fileService.exists(p2)) return p2;
+				}
+				return URI.joinPath(entityUri, '.agents', names[0]);
+			};
+			const safeRead = async (u: URI): Promise<string> => {
+				if (await fileService.exists(u)) {
+					return (await fileService.readFile(u)).value.toString();
+				}
+				return '';
+			};
+
+			const ticketUri = await resolveCandidate(['workspace.md', 'job.md', 'project.md', 'task.md', 'ticket.md', 'agent.md', 'workflow.md', 'case.md', 'issue.md', 'analysis.md']);
+			const readmeUri = await resolveCandidate(['README.md']);
+			const instructionUri = await resolveCandidate(['instruction.md']);
+
+			const [ticketContent, readmeContent, instructionContent] = await Promise.all([
+				safeRead(ticketUri),
+				safeRead(readmeUri),
+				safeRead(instructionUri)
+			]);
+
+			const tempInstance = Object.create(EntityDetailEditor.prototype) as EntityDetailEditor;
+			(tempInstance as any)._entityUri = entityUri;
+			(tempInstance as any)._entityName = entityName;
+			(tempInstance as any)._entityType = 'task';
+			const parsed = tempInstance._parseAllEntityData(ticketContent, readmeContent, instructionContent);
+			const payload = EntityDetailEditor._buildTicketJsonObject(parsed);
+			const jsonStr = JSON.stringify(payload, null, 2);
+			EntityDetailEditor._copiedTicketJsonCache = jsonStr;
+			await clipboardService.writeText(jsonStr);
+
+			const label = parsed.title || parsed.ticketId || entityName || 'Ticket';
+			const fieldCount = Object.keys(payload.fields || {}).length;
+			notificationService.info(`Copied ticket "${label}" content (${fieldCount} field${fieldCount === 1 ? '' : 's'}) as JSON to clipboard.`);
+		} catch (err) {
+			notificationService.error(`Failed to copy ticket JSON: ${String(err)}`);
+		}
+	}
+
+	public static async pasteTicketJsonAtUri(
+		entityUri: URI,
+		entityName: string,
+		fileService: IFileService,
+		clipboardService: IClipboardService,
+		notificationService: INotificationService
+	): Promise<boolean> {
+		try {
+			let clipText = '';
+			try {
+				clipText = (await clipboardService.readText()) || '';
+			} catch { }
+			if (!clipText.trim() && EntityDetailEditor._copiedTicketJsonCache) {
+				clipText = EntityDetailEditor._copiedTicketJsonCache;
+			}
+			const parsedObj = EntityDetailEditor._parseClipboardJsonString(clipText);
+			if (!parsedObj) {
+				notificationService.warn('Clipboard does not contain valid Ticket JSON. Click "Copy JSON" on a source ticket first.');
+				return false;
+			}
+
+			const resolveCandidate = async (names: string[]): Promise<URI> => {
+				for (const name of names) {
+					const p1 = URI.joinPath(entityUri, '.agents', name);
+					if (await fileService.exists(p1)) return p1;
+					const p2 = URI.joinPath(entityUri, name);
+					if (await fileService.exists(p2)) return p2;
+				}
+				return URI.joinPath(entityUri, '.agents', names[0]);
+			};
+			const safeRead = async (u: URI): Promise<string> => {
+				if (await fileService.exists(u)) {
+					return (await fileService.readFile(u)).value.toString();
+				}
+				return '';
+			};
+
+			const ticketUri = await resolveCandidate(['workspace.md', 'job.md', 'project.md', 'task.md', 'ticket.md', 'agent.md', 'workflow.md', 'case.md', 'issue.md', 'analysis.md']);
+			const readmeUri = await resolveCandidate(['README.md']);
+			const instructionUri = await resolveCandidate(['instruction.md']);
+
+			const [ticketContent, readmeContent, instructionContent] = await Promise.all([
+				safeRead(ticketUri),
+				safeRead(readmeUri),
+				safeRead(instructionUri)
+			]);
+
+			const tempInstance = Object.create(EntityDetailEditor.prototype) as EntityDetailEditor;
+			(tempInstance as any)._entityUri = entityUri;
+			(tempInstance as any)._entityName = entityName;
+			(tempInstance as any)._entityType = 'task';
+			const existingParsed = tempInstance._parseAllEntityData(ticketContent, readmeContent, instructionContent);
+
+			// Validate ticket type
+			const normType = (t: string) => (t || '').trim().toLowerCase().replace(/[-_\s]+/g, '_');
+			const sourceTicketType = normType(parsedObj.ticketType || parsedObj.type || parsedObj.ticket_type || '');
+			const targetTicketType = normType(existingParsed.ticketType || tempInstance._entityType || '');
+
+			if (!sourceTicketType) {
+				notificationService.error('Cannot paste ticket data: The clipboard JSON does not specify a valid ticket type.');
+				return false;
+			}
+
+			if (sourceTicketType !== targetTicketType) {
+				const rawSource = parsedObj.ticketType || parsedObj.type || 'Unknown';
+				const rawTarget = existingParsed.ticketType || tempInstance._entityType || 'Unknown';
+				notificationService.error(
+					`Cannot paste ticket data: Ticket type mismatch! Source ticket is "${rawSource}", but target ticket is "${rawTarget}". Paste is only allowed between tickets of the same type.`
+				);
+				return false;
+			}
+
+			const newTitle = typeof parsedObj.title === 'string'
+				? parsedObj.title
+				: (typeof parsedObj.Title === 'string' ? parsedObj.Title : undefined);
+			const newDesc = typeof parsedObj.description === 'string'
+				? parsedObj.description
+				: (typeof parsedObj.Description === 'string' ? parsedObj.Description : undefined);
+
+			// Preserve target's custom title if set
+			const curTitle = existingParsed.title;
+			const finalTitle = (curTitle && curTitle !== 'Untitled' && curTitle !== existingParsed.ticketId && curTitle !== entityName)
+				? curTitle
+				: (newTitle || curTitle);
+
+			const metadataUpdates: Record<string, string> = {};
+			if (finalTitle !== undefined) metadataUpdates['Title'] = finalTitle;
+			if (newDesc !== undefined) metadataUpdates['Description'] = newDesc;
+			if (typeof parsedObj.status === 'string' && parsedObj.status.trim()) metadataUpdates['Status'] = parsedObj.status.trim();
+			if (typeof parsedObj.priority === 'string' && parsedObj.priority.trim()) metadataUpdates['Priority'] = parsedObj.priority.trim();
+			if (typeof parsedObj.assignedAgentName === 'string' && parsedObj.assignedAgentName.trim()) metadataUpdates['Current AI Agent'] = parsedObj.assignedAgentName.trim();
+			if (typeof parsedObj.ticketPrompt === 'string') metadataUpdates['Ticket Prompt'] = parsedObj.ticketPrompt;
+			if (typeof parsedObj.typePrompt === 'string') metadataUpdates['Ticket Type Prompt'] = parsedObj.typePrompt;
+			if (typeof parsedObj.linkTo === 'string') metadataUpdates['Link To'] = parsedObj.linkTo;
+			if (typeof parsedObj.gitRemoteUrl === 'string') metadataUpdates['Git Remote URL'] = parsedObj.gitRemoteUrl;
+			if (typeof parsedObj.gitBranch === 'string') metadataUpdates['Git Branch'] = parsedObj.gitBranch;
+			if (typeof parsedObj.localPath === 'string') metadataUpdates['Local Path'] = parsedObj.localPath;
+			if (typeof parsedObj.instructionNotes === 'string' && parsedObj.instructionNotes.trim()) metadataUpdates['Instruction Notes'] = parsedObj.instructionNotes;
+
+			const internalKeys = new Set(['ticket statuses', 'status mapping', 'removed status']);
+			const overwrittenCustom: Record<string, string> = {};
+			for (const [k, v] of Object.entries(existingParsed.customMetadata || {})) {
+				if (internalKeys.has(k.toLowerCase())) {
+					overwrittenCustom[k] = v;
+				}
+			}
+			const applyCustomMap = (src: Record<string, any>) => {
+				for (const [k, v] of Object.entries(src)) {
+					if (v === undefined || internalKeys.has(k.toLowerCase())) continue;
+					overwrittenCustom[k] = (typeof v === 'object' && v !== null) ? JSON.stringify(v) : String(v ?? '');
+				}
+			};
+			if (parsedObj.customMetadata && typeof parsedObj.customMetadata === 'object' && !Array.isArray(parsedObj.customMetadata)) {
+				applyCustomMap(parsedObj.customMetadata);
+			}
+			if (parsedObj.fields && typeof parsedObj.fields === 'object' && !Array.isArray(parsedObj.fields)) {
+				applyCustomMap(parsedObj.fields);
+			}
+
+			if (finalTitle !== undefined || newDesc !== undefined) {
+				const updatedReadme = tempInstance._updateReadmeContent(readmeContent, finalTitle, newDesc);
+				await fileService.writeFile(readmeUri, VSBuffer.fromString(updatedReadme));
+			}
+			const updatedTicketMd = tempInstance._updateTicketMdContent(ticketContent, metadataUpdates, overwrittenCustom);
+			await fileService.writeFile(ticketUri, VSBuffer.fromString(updatedTicketMd));
+
+			if (metadataUpdates['Ticket Prompt'] !== undefined || metadataUpdates['Ticket Type Prompt'] !== undefined || metadataUpdates['Instruction Notes'] !== undefined) {
+				const updatedInst = tempInstance._updateInstructionContent(instructionContent, metadataUpdates);
+				await fileService.writeFile(instructionUri, VSBuffer.fromString(updatedInst));
+			}
+
+			notificationService.info(`Pasted ticket JSON content into "${newTitle || existingParsed.title || entityName}".`);
+			return true;
+		} catch (err) {
+			notificationService.error(`Failed to paste ticket JSON: ${String(err)}`);
+			return false;
+		}
 	}
 
 	private _updateInstructionContent(content: string, updates: { [key: string]: string }): string {
@@ -4648,7 +6301,7 @@ export class EntityDetailEditor extends EditorPane {
 					if (Array.isArray(parsed.credentials)) {
 						creds = parsed.credentials;
 					}
-				} catch {}
+				} catch { }
 			}
 		}
 		if (!creds && this._lastCustomModule?.fields) {
@@ -4743,7 +6396,7 @@ ${rawErr}
 				if (Array.isArray(parsed.credentials)) {
 					creds = parsed.credentials;
 				}
-			} catch {}
+			} catch { }
 		}
 		if (creds.length === 0 && this._lastCustomModule?.fields) {
 			const matchingF = this._lastCustomModule.fields.find((f: any) => f.label?.toLowerCase() === fieldKey.toLowerCase() || f.id?.toLowerCase() === fieldKey.toLowerCase());
@@ -4778,7 +6431,7 @@ ${rawErr}
 				if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
 					paramValues = parsed;
 				}
-			} catch {}
+			} catch { }
 		}
 		paramValues[paramName] = newValue;
 		const updatedCustom = {
@@ -4835,7 +6488,7 @@ ${rawErr}
 								paramMap.set(pName, String(pVal ?? ''));
 							}
 						}
-					} catch {}
+					} catch { }
 				}
 			}
 		}
@@ -5054,7 +6707,7 @@ ${rawErr}
 								if (liveParsed.dbPath !== undefined) dbPath = String(liveParsed.dbPath);
 								if (liveParsed.tableName !== undefined) tableName = String(liveParsed.tableName);
 								if (liveParsed.sqlOutput !== undefined) sqlOut = String(liveParsed.sqlOutput).trim();
-							} catch {}
+							} catch { }
 						}
 						const liveSqlBox = card.querySelector('.sql-output-box') as HTMLElement | null;
 						if (liveSqlBox && liveSqlBox.style.fontStyle !== 'italic' && liveSqlBox.textContent) {
@@ -5082,6 +6735,107 @@ ${rawErr}
 					subProps['rows'] = JSON.stringify(rows);
 					subProps['dbPath'] = dbPath;
 					subProps['tableName'] = tableName;
+				} else if (f.type === 'ssh') {
+					let sshOut = (f as any).sshOutput || '';
+					let sshLastRaw: string | undefined = (f as any).sshLastRawOutput !== undefined ? String((f as any).sshLastRawOutput) : undefined;
+					let sshLastRawEntries: ISshRawCommandEntry[] | undefined = Array.isArray((f as any).sshLastRawEntries) ? (f as any).sshLastRawEntries : undefined;
+					let sshLastN: string | undefined = (f as any).sshLastOutput !== undefined ? String((f as any).sshLastOutput) : undefined;
+					let sshOutLines: number = typeof (f as any).sshOutputLines === 'number' && (f as any).sshOutputLines > 0 ? (f as any).sshOutputLines : 50;
+					let sshHost = (f as any).sshHost || '';
+					let sshCwd = (f as any).sshCwd || '~';
+					let sshCmd = (f as any).sshCommand || '';
+					if (savedObj && typeof savedObj === 'object') {
+						if (savedObj.output !== undefined || savedObj.sshOutput !== undefined) {
+							sshOut = String(savedObj.output ?? savedObj.sshOutput ?? '');
+						}
+						if (savedObj.lastRawOutput !== undefined || savedObj.sshLastRawOutput !== undefined) {
+							sshLastRaw = String(savedObj.lastRawOutput ?? savedObj.sshLastRawOutput ?? '');
+						}
+						if (Array.isArray(savedObj.lastRawEntries) || Array.isArray(savedObj.sshLastRawEntries)) {
+							sshLastRawEntries = savedObj.lastRawEntries ?? savedObj.sshLastRawEntries;
+						}
+						if (savedObj.lastNOutput !== undefined || savedObj.sshLastOutput !== undefined) {
+							sshLastN = String(savedObj.lastNOutput ?? savedObj.sshLastOutput ?? '');
+						}
+						if (savedObj.outputLines !== undefined || savedObj.sshOutputLines !== undefined) {
+							const parsedN = Number(savedObj.outputLines ?? savedObj.sshOutputLines);
+							if (!isNaN(parsedN) && parsedN > 0) sshOutLines = parsedN;
+						}
+						if (savedObj.host !== undefined || savedObj.sshHost !== undefined) sshHost = String(savedObj.host ?? savedObj.sshHost ?? '');
+						if (savedObj.cwd !== undefined || savedObj.sshCwd !== undefined) sshCwd = String(savedObj.cwd ?? savedObj.sshCwd ?? '~');
+						if (savedObj.command !== undefined || savedObj.sshCommand !== undefined) sshCmd = String(savedObj.command ?? savedObj.sshCommand ?? '');
+					}
+					const card = findLiveCard();
+					if (card) {
+						const liveJsonStr = card.getAttribute('data-ssh-json');
+						if (liveJsonStr) {
+							try {
+								const liveParsed = JSON.parse(liveJsonStr);
+								if (liveParsed.output !== undefined) sshOut = String(liveParsed.output);
+								if (liveParsed.lastRawOutput !== undefined) sshLastRaw = String(liveParsed.lastRawOutput);
+								if (Array.isArray(liveParsed.lastRawEntries)) sshLastRawEntries = liveParsed.lastRawEntries;
+								if (liveParsed.lastNOutput !== undefined) sshLastN = String(liveParsed.lastNOutput);
+								if (liveParsed.outputLines !== undefined) {
+									const parsedN = Number(liveParsed.outputLines);
+									if (!isNaN(parsedN) && parsedN > 0) sshOutLines = parsedN;
+								}
+								if (liveParsed.host !== undefined) sshHost = String(liveParsed.host);
+								if (liveParsed.cwd !== undefined) sshCwd = String(liveParsed.cwd);
+								if (liveParsed.command !== undefined) sshCmd = String(liveParsed.command);
+							} catch { }
+						}
+					}
+					const lastNOut = (sshLastRawEntries && sshLastRawEntries.length > 0)
+						? formatSshCommandsJsonOutput(sshLastRawEntries, sshOutLines)
+						: (sshLastN !== undefined && sshLastN !== ''
+							? extractSshOutputLastNLines(sshLastN, sshOutLines)
+							: (sshLastRaw !== undefined && sshLastRaw !== '' ? extractSshOutputLastNLines(sshLastRaw, sshOutLines) : extractSshOutputLastNLines(sshOut, sshOutLines)));
+					primitiveVal = lastNOut;
+					subProps['output'] = lastNOut;
+					subProps['fullOutput'] = sshOut;
+					subProps['host'] = sshHost;
+					subProps['cwd'] = sshCwd;
+					subProps['command'] = sshCmd;
+				} else if (f.type === 'http_request') {
+					let resBody = '';
+					let resData: any = undefined;
+					let resStatus = 0;
+					let resStatusText = '';
+					let isOk = false;
+					if (savedObj && typeof savedObj === 'object') {
+						if (savedObj.responseBody !== undefined) resBody = String(savedObj.responseBody);
+						if (savedObj.responseData !== undefined) resData = savedObj.responseData;
+						if (savedObj.responseStatus !== undefined) resStatus = Number(savedObj.responseStatus);
+						if (savedObj.responseStatusText !== undefined) resStatusText = String(savedObj.responseStatusText);
+						if (savedObj.ok !== undefined) isOk = Boolean(savedObj.ok);
+					}
+					if (!resBody && f.httpResponseBody) resBody = f.httpResponseBody;
+					if (!resData && f.httpResponseData) resData = f.httpResponseData;
+					if (!resStatus && f.httpResponseStatus) resStatus = f.httpResponseStatus;
+					if (!resStatusText && f.httpResponseStatusText) resStatusText = f.httpResponseStatusText;
+					if (!isOk && resStatus >= 200 && resStatus < 300) isOk = true;
+
+					const card = findLiveCard();
+					if (card) {
+						const bodyDisplay = card.querySelector('.http-response-body-display') as HTMLElement | null;
+						if (bodyDisplay && bodyDisplay.textContent && !bodyDisplay.textContent.includes('No response received yet.')) {
+							resBody = bodyDisplay.textContent.trim();
+						}
+					}
+					primitiveVal = (resData && typeof resData === 'object') ? JSON.stringify(resData, null, 2) : (resBody || '');
+					subProps['body'] = resBody;
+					subProps['status'] = String(resStatus || '');
+					subProps['statusText'] = resStatusText;
+					subProps['ok'] = String(isOk);
+					if (resData && typeof resData === 'object') {
+						subProps['data'] = typeof resData === 'object' ? JSON.stringify(resData, null, 2) : String(resData);
+						if (typeof resData === 'object' && !Array.isArray(resData)) {
+							for (const [k, v] of Object.entries(resData)) {
+								subProps[`data.${k}`] = typeof v === 'object' ? JSON.stringify(v) : String(v);
+								subProps[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
+							}
+						}
+					}
 				} else {
 					if (savedObj) {
 						primitiveVal = typeof savedObj === 'object' ? JSON.stringify(savedObj, null, 2) : String(savedObj);
@@ -5275,7 +7029,7 @@ ${rawErr}
 			stream: undefined as MediaStream | undefined,
 			lastSelectionStart: typeof textarea.selectionStart === 'number' ? textarea.selectionStart : textarea.value.length,
 			lastSelectionEnd: typeof textarea.selectionEnd === 'number' ? textarea.selectionEnd : textarea.value.length,
-			stopRecording: () => {}
+			stopRecording: () => { }
 		};
 		(micBtn as any)._voiceInputState = state;
 
@@ -5307,7 +7061,7 @@ ${rawErr}
 			if (state.mediaRecorder && state.isRecording) {
 				try {
 					state.mediaRecorder.stop();
-				} catch {}
+				} catch { }
 				state.isRecording = false;
 			} else {
 				state.isRecording = false;
@@ -5758,7 +7512,7 @@ ${rawErr}
 				});
 				return Boolean(res.confirmed);
 			}
-		} catch {}
+		} catch { }
 		return window.confirm(detail ? `${message}\n\n${detail}` : message);
 	}
 
@@ -5767,7 +7521,7 @@ ${rawErr}
 		const targetEl = displayEl || itemEl;
 		try {
 			itemEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-		} catch {}
+		} catch { }
 		const prevBorder = targetEl.style.borderColor;
 		const prevShadow = targetEl.style.boxShadow;
 		targetEl.style.borderColor = '#38bdf8';
@@ -6361,7 +8115,7 @@ ${rawErr}
 				if (parsed && typeof parsed.fullInterpolatedPrompt === 'string' && parsed.fullInterpolatedPrompt.trim().length > 0) {
 					savedSnapshot = { ...parsed, isFromSavedRun: true };
 				}
-			} catch {}
+			} catch { }
 		}
 
 		let activeSnapshot = savedSnapshot || liveSnapshot;
@@ -6449,9 +8203,9 @@ ${rawErr}
 						</div>
 						<div style="padding: 12px 14px;">
 							${preInterp.trim()
-								? `<pre style="margin: 0; max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;">${this._escapeHtml(preInterp)}</pre>`
-								: `<div style="font-size: 11.5px; opacity: 0.55; font-style: italic;">No Pre-Injected Prompt configured in this template.</div>`
-							}
+					? `<pre style="margin: 0; max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;">${this._escapeHtml(preInterp)}</pre>`
+					: `<div style="font-size: 11.5px; opacity: 0.55; font-style: italic;">No Pre-Injected Prompt configured in this template.</div>`
+				}
 						</div>
 					</div>
 
@@ -6725,7 +8479,7 @@ ${rawErr}
 		if (savedLastSentAttr) {
 			try {
 				promptData.lastSentPayload = JSON.parse(savedLastSentAttr);
-			} catch {}
+			} catch { }
 		}
 
 		await this._savePromptPrimitiveData(fieldKey, promptData);
@@ -6734,7 +8488,7 @@ ${rawErr}
 
 	private _togglePromptMode(card: HTMLElement, fieldKey: string, mode: 'model' | 'agent'): void {
 		// Target mode (Model vs AI Agent) is locked to the module template definition and cannot be switched by ticket users.
-		this._savePromptDataFromCard(card, fieldKey).catch(() => {});
+		this._savePromptDataFromCard(card, fieldKey).catch(() => { });
 	}
 
 	private _inFlightPromptRuns = new Map<string, { modelId: string; startedAt: number }>();
@@ -6766,7 +8520,7 @@ ${rawErr}
 			if (Array.isArray(p)) {
 				return p.map(v => String(v ?? '').trim()).filter(Boolean);
 			}
-		} catch {}
+		} catch { }
 		if (s.startsWith('[') && s.endsWith(']')) {
 			const inner = s.slice(1, -1).trim();
 			if (!inner) {
@@ -6806,12 +8560,12 @@ ${rawErr}
 			lowerPrompt.includes('valid json') ||
 			lowerPrompt.includes('json list')
 		) && (
-			lowerPrompt.includes('database query result') ||
-			lowerPrompt.includes('every returned record') ||
-			lowerPrompt.includes('do not omit any rows') ||
-			lowerPrompt.includes('convert each row into one json object') ||
-			forceExtract
-		);
+				lowerPrompt.includes('database query result') ||
+				lowerPrompt.includes('every returned record') ||
+				lowerPrompt.includes('do not omit any rows') ||
+				lowerPrompt.includes('convert each row into one json object') ||
+				forceExtract
+			);
 		if (!isJsonArrayRequest && !forceExtract) {
 			return undefined;
 		}
@@ -6844,7 +8598,7 @@ ${rawErr}
 						sourceRows = (parsed as any).rows;
 						break;
 					}
-				} catch {}
+				} catch { }
 			}
 		}
 
@@ -6888,7 +8642,7 @@ ${rawErr}
 					const previewSlice = parsed.slice(0, 10);
 					return `${JSON.stringify(previewSlice, null, 2)}\n\n... [${parsed.length - 10} more records omitted in UI preview (showing first 10 of ${parsed.length} total records). All ${parsed.length} complete records are preserved in runtime data & Output pagination.]`;
 				}
-			} catch {}
+			} catch { }
 		}
 		if (trimmed.length > 24000) {
 			return `${trimmed.slice(0, 24000)}\n\n... [Preview truncated in UI (${trimmed.length.toLocaleString()} total chars). Complete data is preserved in runtime data & Output pagination.]`;
@@ -7080,13 +8834,13 @@ ${rawErr}
 											lastVerifiedAt: Date.now()
 										});
 									}
-								} catch {}
+								} catch { }
 							}
-						}).catch(() => {});
+						}).catch(() => { });
 					}
 				}
 			}
-		} catch {}
+		} catch { }
 
 		const providerModelsMap = this._getPromptProviderModelsMap();
 
@@ -7222,7 +8976,7 @@ ${rawErr}
 					syncCardModelUi(nextModel, nextProv);
 					renderModelOptions(modelSearchInput?.value || '');
 					card.setAttribute('data-user-customized-target', 'true');
-					this._savePromptDataFromCard(card, fieldKey).catch(() => {});
+					this._savePromptDataFromCard(card, fieldKey).catch(() => { });
 				};
 			}
 
@@ -7280,7 +9034,7 @@ ${rawErr}
 						syncCardModelUi(m.id, activeProvider);
 						if (modelDropdown) modelDropdown.style.display = 'none';
 						card.setAttribute('data-user-customized-target', 'true');
-						this._savePromptDataFromCard(card, fieldKey).catch(() => {});
+						this._savePromptDataFromCard(card, fieldKey).catch(() => { });
 					};
 					modelListEl.appendChild(item);
 				});
@@ -7318,7 +9072,7 @@ ${rawErr}
 						syncCardModelUi(chosen, activeProvider);
 						modelDropdown.style.display = 'none';
 						card.setAttribute('data-user-customized-target', 'true');
-						this._savePromptDataFromCard(card, fieldKey).catch(() => {});
+						this._savePromptDataFromCard(card, fieldKey).catch(() => { });
 					} else if (ev.key === 'Escape') {
 						modelDropdown.style.display = 'none';
 					}
@@ -7346,7 +9100,7 @@ ${rawErr}
 				const allCreds = await credService.getCredentials();
 				loadedCredentials = allCreds.filter(c => c.isEnabled !== false);
 			}
-		} catch {}
+		} catch { }
 
 		const builtInTtsModels: Record<string, Array<{ id: string; badge: string }>> = {
 			gemini: [
@@ -7478,7 +9232,7 @@ ${rawErr}
 						if (selectedModelText) selectedModelText.textContent = activeModel;
 						if (modelDropdown) modelDropdown.style.display = 'none';
 						updateHeaderBadge();
-						this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+						this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 					};
 					modelListEl.appendChild(item);
 				});
@@ -7538,7 +9292,7 @@ ${rawErr}
 					populateVoices(activeProvider);
 					renderModelOptions(modelSearchInput?.value || '');
 					updateHeaderBadge();
-					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 				};
 			}
 
@@ -7575,7 +9329,7 @@ ${rawErr}
 					activeFormat = formatSelect.value || 'mp3';
 					card.setAttribute('data-format', activeFormat);
 					updateHeaderBadge();
-					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 				};
 			}
 
@@ -7583,14 +9337,14 @@ ${rawErr}
 				voiceSelect.onchange = () => {
 					activeVoice = voiceSelect.value;
 					card.setAttribute('data-voice', activeVoice);
-					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 				};
 			}
 
 			if (autoPlayCheckbox) {
 				autoPlayCheckbox.onchange = () => {
 					card.setAttribute('data-autoplay', autoPlayCheckbox.checked ? 'true' : 'false');
-					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 				};
 			}
 
@@ -7610,7 +9364,7 @@ ${rawErr}
 					clearTimeout(autoSaveTimer);
 				}
 				autoSaveTimer = setTimeout(() => {
-					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 				}, 350);
 			};
 
@@ -7621,7 +9375,7 @@ ${rawErr}
 					const lastSynth = (card.getAttribute('data-last-synthesized') || '').trim();
 					const audioRel = card.getAttribute('data-audio-path') || '';
 					if (!currentLlmVal && !(textInput?.value.trim()) && audioRel) {
-						this._deleteTtsAudioFileInEditor(card, fieldKey, true).catch(() => {});
+						this._deleteTtsAudioFileInEditor(card, fieldKey, true).catch(() => { });
 					} else {
 						if (audioRel && lastSynth && currentLlmVal !== lastSynth && statusText) {
 							statusText.textContent = 'AI Speech Text modified — click "Send & Generate Audio" to update MP3';
@@ -7635,7 +9389,7 @@ ${rawErr}
 						clearTimeout(autoSaveTimer);
 						autoSaveTimer = undefined;
 					}
-					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 				};
 			}
 
@@ -7654,7 +9408,7 @@ ${rawErr}
 							clearTimeout(autoSaveTimer);
 							autoSaveTimer = undefined;
 						}
-						this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+						this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 					}
 				};
 			}
@@ -7711,7 +9465,7 @@ ${rawErr}
 							clearTimeout(autoSaveTimer);
 							autoSaveTimer = undefined;
 						}
-						this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+						this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 					}
 				};
 			}
@@ -7728,7 +9482,7 @@ ${rawErr}
 						clearTimeout(autoSaveTimer);
 						autoSaveTimer = undefined;
 					}
-					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 					textInput.focus();
 				};
 			}
@@ -7864,7 +9618,7 @@ ${rawErr}
 								cardKnownDuration = decoded.duration;
 								syncTimeUi();
 							}
-							actx.close().catch(() => {});
+							actx.close().catch(() => { });
 						}
 					} catch {
 						if (mimeType === 'audio/wav' && bytes.byteLength > 44) {
@@ -7878,7 +9632,7 @@ ${rawErr}
 					}
 
 					if (autoPlayNow) {
-						audioEl.play().catch(() => {});
+						audioEl.play().catch(() => { });
 					}
 				};
 
@@ -7903,7 +9657,7 @@ ${rawErr}
 					if (!audioEl.src) return;
 					if (audioEl.paused) {
 						audioEl.playbackRate = cardPlaybackRate;
-						audioEl.play().catch(() => {});
+						audioEl.play().catch(() => { });
 					} else {
 						audioEl.pause();
 					}
@@ -7918,7 +9672,7 @@ ${rawErr}
 					card.setAttribute('data-playback-rate', String(cardPlaybackRate));
 					audioEl.defaultPlaybackRate = cardPlaybackRate;
 					audioEl.playbackRate = cardPlaybackRate;
-					this._saveTtsDataFromCard(card, fieldKey).catch(() => {});
+					this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 				};
 
 				progressTrack.onclick = (e: MouseEvent) => {
@@ -8040,7 +9794,7 @@ ${rawErr}
 								if (entry.isIntersecting && !hasAutoPlayed && audioEl.src) {
 									hasAutoPlayed = true;
 									observer.disconnect();
-									audioEl.play().catch(() => {});
+									audioEl.play().catch(() => { });
 								}
 							}
 						}, { threshold: 0.25 });
@@ -8393,7 +10147,7 @@ ${rawErr}
 				isCardVideoFullscreen = false;
 				window.removeEventListener('keydown', onCardFsKeyDown, true);
 				if (document.fullscreenElement) {
-					document.exitFullscreen().catch(() => {});
+					document.exitFullscreen().catch(() => { });
 				}
 				const wasPlaying = !videoEl.paused && !videoEl.ended;
 				videoStageWrap.style.flex = '';
@@ -8405,7 +10159,7 @@ ${rawErr}
 				try {
 					mountEl.insertBefore(videoStageWrap, audioEl);
 					mountEl.appendChild(customPlayerBar);
-				} catch {}
+				} catch { }
 				if (cardFullscreenOverlayEl && cardFullscreenOverlayEl.parentElement) {
 					cardFullscreenOverlayEl.parentElement.removeChild(cardFullscreenOverlayEl);
 				}
@@ -8414,7 +10168,7 @@ ${rawErr}
 				fullscreenBtn.title = 'Fullscreen Video';
 				fullscreenBtn.style.color = '#cbd5e1';
 				if (wasPlaying && videoEl.paused) {
-					videoEl.play().catch(() => {});
+					videoEl.play().catch(() => { });
 				}
 			};
 
@@ -8478,7 +10232,7 @@ ${rawErr}
 
 				window.addEventListener('keydown', onCardFsKeyDown, true);
 				if (wasPlaying && videoEl.paused) {
-					videoEl.play().catch(() => {});
+					videoEl.play().catch(() => { });
 				}
 			};
 
@@ -8521,12 +10275,12 @@ ${rawErr}
 						el.pause();
 						el.removeAttribute('src');
 						el.load();
-					} catch {}
+					} catch { }
 				}
 				if (cardBlobUrl) {
 					try {
 						URL.revokeObjectURL(cardBlobUrl);
-					} catch {}
+					} catch { }
 					cardBlobUrl = undefined;
 				}
 				cardKnownDuration = 0;
@@ -8724,7 +10478,7 @@ ${rawErr}
 							el.playbackRate = cardPlaybackRate;
 							el.load();
 							return;
-						} catch {}
+						} catch { }
 					}
 					showErr(`Unable to play "${card.getAttribute('data-media-name') || 'media file'}": This format or codec is not supported by the browser's native HTML5 ${kind} decoder.`);
 				};
@@ -8809,7 +10563,7 @@ ${rawErr}
 					el.defaultPlaybackRate = cardPlaybackRate;
 					el.playbackRate = cardPlaybackRate;
 				}
-				this._saveMediaPlayerDataFromCard(card, fieldKey).catch(() => {});
+				this._saveMediaPlayerDataFromCard(card, fieldKey).catch(() => { });
 			};
 
 			muteBtn.onclick = (e: MouseEvent) => {
@@ -8911,7 +10665,7 @@ ${rawErr}
 								await loadCardFromLocalPath(parsedUri.fsPath, fName, true);
 							}
 						}
-					} catch {}
+					} catch { }
 				}
 			};
 
@@ -9022,7 +10776,7 @@ ${rawErr}
 				const blob = new Blob([res.audioBuffer.slice(0)], { type: res.mimeType || 'audio/mpeg' });
 				const blobUrl = URL.createObjectURL(blob);
 				audioEl.src = blobUrl;
-				audioEl.play().catch(() => {});
+				audioEl.play().catch(() => { });
 			}
 			if (playBtn) {
 				playBtn.style.display = 'inline-flex';
@@ -9153,9 +10907,10 @@ ${rawErr}
 				console.error('Failed to persist table metadata quietly:', err);
 			}
 		}
-		const effectiveTableOutput = (typeof payload.sqlOutput === 'string' && payload.sqlOutput.trim() !== '')
-			? payload.sqlOutput.trim()
-			: (Array.isArray(payload.rows) && payload.rows.length > 0 ? JSON.stringify(payload.rows, null, 2) : '');
+		const sqlOutStr = typeof payload.sqlOutput === 'string' ? payload.sqlOutput.trim() : '';
+		const effectiveTableOutput = (Array.isArray(payload.rows) && payload.rows.length > 0)
+			? JSON.stringify(payload.rows, null, 2)
+			: (sqlOutStr !== '' ? sqlOutStr : (Array.isArray(payload.rows) ? '[]' : ''));
 		await this._autoUpdateOutputPrimitives(effectiveTableOutput, fieldKey);
 	}
 
@@ -9183,7 +10938,7 @@ ${rawErr}
 			let parsed: any = {};
 			try {
 				parsed = JSON.parse(rawJson);
-			} catch {}
+			} catch { }
 
 			let columns: Array<{
 				id: string;
@@ -9194,13 +10949,13 @@ ${rawErr}
 				nullable?: boolean;
 				defaultValue?: string;
 			}> = Array.isArray(parsed.columns) && parsed.columns.length > 0
-				? parsed.columns
-				: [
-					{ id: 'col_1', name: 'id', label: 'id', dataType: 'INTEGER', primaryKey: true, nullable: false },
-					{ id: 'col_2', name: 'name', label: 'name', dataType: 'TEXT', primaryKey: false, nullable: true },
-					{ id: 'col_3', name: 'status', label: 'status', dataType: 'TEXT', primaryKey: false, nullable: true },
-					{ id: 'col_4', name: 'created_at', label: 'created_at', dataType: 'DATETIME', primaryKey: false, nullable: true }
-				];
+					? parsed.columns
+					: [
+						{ id: 'col_1', name: 'id', label: 'id', dataType: 'INTEGER', primaryKey: true, nullable: false },
+						{ id: 'col_2', name: 'name', label: 'name', dataType: 'TEXT', primaryKey: false, nullable: true },
+						{ id: 'col_3', name: 'status', label: 'status', dataType: 'TEXT', primaryKey: false, nullable: true },
+						{ id: 'col_4', name: 'created_at', label: 'created_at', dataType: 'DATETIME', primaryKey: false, nullable: true }
+					];
 			let rows: Record<string, any>[] = Array.isArray(parsed.rows) ? parsed.rows : [];
 			let dbEngine: 'sqlite' | 'none' = parsed.dbEngine === 'none' ? 'none' : 'sqlite';
 			let dbPath: string = String(parsed.dbPath || '');
@@ -9235,7 +10990,7 @@ ${rawErr}
 					output: sqlOutput || JSON.stringify(rows),
 					pageSize,
 					lastSynced
-				}).catch(() => {});
+				}).catch(() => { });
 			};
 
 			// Create the 4 section containers in top-to-bottom visual order:
@@ -9603,7 +11358,7 @@ ${rawErr}
 								}
 							}
 						}
-					} catch {}
+					} catch { }
 				}
 
 				if (importedRows.length === 0) {
@@ -9819,7 +11574,7 @@ ${rawErr}
 				}
 			};
 
-			let updateSchemaDiffBanner = () => {};
+			let updateSchemaDiffBanner = () => { };
 			let hasLocalColumnEdits = false;
 			let lastKnownDbColumns: Array<{ id?: string; name: string; label?: string; dataType: string; primaryKey?: boolean; nullable?: boolean; defaultValue?: string }> | undefined = undefined;
 			let lastKnownTableExists = false;
@@ -10319,7 +12074,7 @@ ${rawErr}
 				tblParamChipsRow.appendChild(chipLabel);
 
 				const paramTokens: string[] = [];
-				for (const pKey of Object.keys(this._parameterValues || {})) {
+				for (const pKey of Object.keys((this as any)._parameterValues || {})) {
 					const trimmed = pKey.trim();
 					if (trimmed && !paramTokens.includes(trimmed)) {
 						paramTokens.push(trimmed);
@@ -10669,7 +12424,6 @@ ${rawErr}
 					if (typeof inspectRes.rowCount === 'number') {
 						totalDbRowCount = inspectRes.rowCount;
 					}
-					const hadDiffFromSaved = !areSchemasEqual(columns, actualCols);
 					if (!hasLocalColumnEdits) {
 						columns = cloneColumnsList(actualCols);
 						hasLocalColumnEdits = false;
@@ -10729,7 +12483,7 @@ ${rawErr}
 					const currentVal = tblInput.value.trim();
 					if (!currentVal || knownDbTables.some(t => t.toLowerCase() === currentVal.toLowerCase())) {
 						let defaultParamToken = 'table name';
-						const paramKeys = Object.keys(this._parameterValues || {});
+						const paramKeys = Object.keys((this as any)._parameterValues || {});
 						if (paramKeys.length > 0 && paramKeys[0].trim()) {
 							defaultParamToken = paramKeys[0].trim();
 						} else if (this._lastCustomModule?.fields) {
@@ -10839,7 +12593,7 @@ ${rawErr}
 
 			populateTableSelectDropdown([], tableName || '');
 			if (dbPath) {
-				syncTableSchemaFromSqlite({ isInitialLoad: true }).catch(() => {});
+				syncTableSchemaFromSqlite({ isInitialLoad: true }).catch(() => { });
 			}
 
 			refreshTablesBtn.onclick = () => {
@@ -12090,6 +13844,1444 @@ ${rawErr}
 		}
 	}
 
+	private async _hydrateSshPrimitiveCards(): Promise<void> {
+		if (!this._container) return;
+		const cards = Array.from(this._container.querySelectorAll('.ssh-primitive-card')) as HTMLElement[];
+		for (const card of cards) {
+			const fieldKey = card.getAttribute('data-field-key') || '';
+			const rawJson = card.getAttribute('data-ssh-json') || '{}';
+			const mount = card.querySelector('.ssh-card-mount') as HTMLElement | null;
+			if (!mount || !fieldKey) continue;
+			clearNode(mount);
+
+			let parsed: any = {};
+			try { parsed = JSON.parse(rawJson); } catch { }
+
+			let sshHost: string = String(parsed.host ?? parsed.sshHost ?? '');
+			let sshPort: number | string = (parsed.port ?? parsed.sshPort) !== undefined && String(parsed.port ?? parsed.sshPort).trim() !== ''
+				? (Number(parsed.port ?? parsed.sshPort) > 0 ? Number(parsed.port ?? parsed.sshPort) : String(parsed.port ?? parsed.sshPort))
+				: 22;
+			let sshUser: string = String(parsed.user ?? parsed.sshUser ?? 'root');
+			let sshPassword: string = String(parsed.password ?? parsed.sshPassword ?? '');
+			let sshCwd: string = String(parsed.cwd ?? parsed.sshCwd ?? '~');
+			let sshCommands: string[] = normalizeSshCommandsList(
+				parsed.commands ?? parsed.sshCommands,
+				String(parsed.command ?? parsed.sshCommand ?? '')
+			);
+			let sshCommand: string = sshCommands[0] || '';
+			let sshOutput: string = String(parsed.output ?? parsed.sshOutput ?? '');
+			let sshLastRawOutput: string | undefined = parsed.lastRawOutput !== undefined
+				? String(parsed.lastRawOutput)
+				: (parsed.sshLastRawOutput !== undefined ? String(parsed.sshLastRawOutput) : undefined);
+			let sshLastRawEntries: ISshRawCommandEntry[] = Array.isArray(parsed.lastRawEntries)
+				? parsed.lastRawEntries
+				: (Array.isArray(parsed.sshLastRawEntries) ? parsed.sshLastRawEntries : []);
+			let sshLastOutput: string | undefined = parsed.lastNOutput !== undefined
+				? String(parsed.lastNOutput)
+				: (parsed.sshLastOutput !== undefined ? String(parsed.sshLastOutput) : undefined);
+			let sshOutputLines: number = Number(parsed.outputLines ?? parsed.sshOutputLines) > 0
+				? Math.floor(Number(parsed.outputLines ?? parsed.sshOutputLines))
+				: 50;
+			let quickCommands: ISshQuickCommand[] = normalizeSshQuickCommands(parsed.quickCommands ?? parsed.sshQuickCommands);
+			let lastExecuted: string = String(parsed.lastExecuted ?? '');
+			let lastDurationMs: number | undefined = (parsed.durationMs ?? parsed.lastExecutionDurationMs) !== undefined
+				? Number(parsed.durationMs ?? parsed.lastExecutionDurationMs)
+				: undefined;
+			let hasCompletedCmdRun = Boolean(lastExecuted) || Boolean(sshLastOutput) || sshLastRawEntries.length > 0;
+
+			const headerBadgeEl = card.querySelector('.ssh-header-target-badge') as HTMLElement | null;
+
+			let activeTargetInput: HTMLInputElement | undefined;
+			let activeCmdRowIdx = 0;
+			const cmdInputElements: HTMLInputElement[] = [];
+			const cmdRowPromptLabels: HTMLElement[] = [];
+			const cmdRowRunButtons: Array<{ btn: HTMLButtonElement; label: HTMLElement }> = [];
+
+			const syncCommandsState = () => {
+				if (Array.isArray(sshCommands) && cmdInputElements.length > 0) {
+					cmdInputElements.forEach((inp, idx) => {
+						if (idx < sshCommands.length && inp && inp.isConnected) {
+							sshCommands[idx] = inp.value;
+						}
+					});
+				}
+				sshCommands = normalizeSshCommandsList(sshCommands);
+				sshCommand = sshCommands[0] || '';
+			};
+
+			let saveDebounce: any;
+			const persistState = (immediate = false) => {
+				syncCommandsState();
+				const computedLastN = sshLastRawEntries.length > 0
+					? formatSshCommandsJsonOutput(sshLastRawEntries, sshOutputLines)
+					: (sshLastOutput !== undefined && sshLastOutput !== ''
+						? extractSshOutputLastNLines(sshLastOutput, sshOutputLines)
+						: (sshLastRawOutput !== undefined ? extractSshOutputLastNLines(sshLastRawOutput, sshOutputLines) : ''));
+				const payload = {
+					host: sshHost,
+					port: sshPort,
+					user: sshUser,
+					password: sshPassword,
+					cwd: sshCwd,
+					command: sshCommand,
+					commands: sshCommands,
+					sshCommands,
+					output: sshOutput,
+					lastRawOutput: sshLastRawOutput ?? '',
+					lastRawEntries: sshLastRawEntries,
+					outputLines: sshOutputLines,
+					lastNOutput: computedLastN,
+					quickCommands,
+					lastExecuted,
+					durationMs: lastDurationMs
+				};
+				const str = JSON.stringify(payload);
+				card.setAttribute('data-ssh-json', str);
+				if (headerBadgeEl) {
+					headerBadgeEl.textContent = sshHost ? `${sshUser || 'root'}@${sshHost}:${sshPort || 22}` : 'Not Connected';
+				}
+				const aiBtn = card.querySelector('.ai-edit-btn') as HTMLElement | null;
+				if (aiBtn) {
+					aiBtn.setAttribute('data-ai-current-value', sshCommand || '');
+				}
+				if (saveDebounce) clearTimeout(saveDebounce);
+				if (immediate) {
+					this._persistCustomFieldQuietly(fieldKey, str);
+				} else {
+					saveDebounce = setTimeout(() => {
+						this._persistCustomFieldQuietly(fieldKey, str);
+					}, 350);
+				}
+			};
+
+			// Collapsible Panel States (Collapsed by default; preserved across re-renders)
+			const sshPanelStateKey = `${this._entityUri?.toString() || 'preview'}::${fieldKey}`;
+			const sshCmdBarsStateKey = `${sshPanelStateKey}::cmdBars`;
+			const sshQuickCmdsStateKey = `${sshPanelStateKey}::quickCmds`;
+			let isOperationPanelExpanded = this._sshPanelExpandedByFieldKey.get(sshPanelStateKey) ?? false;
+			let isCmdBarsExpanded = this._sshPanelExpandedByFieldKey.get(sshCmdBarsStateKey) ?? false;
+			let isQuickCmdsExpanded = this._sshPanelExpandedByFieldKey.get(sshQuickCmdsStateKey) ?? false;
+
+			const getActiveCmdCount = () => sshCommands.filter(c => String(c || '').trim().length > 0).length;
+			const formatPanelCmdBadgeText = () => {
+				const totalBars = sshCommands.length;
+				const nonEmpty = getActiveCmdCount();
+				return nonEmpty > 0 ? `${nonEmpty} cmd${nonEmpty > 1 ? 's' : ''}` : `${totalBars} bar${totalBars > 1 ? 's' : ''}`;
+			};
+
+			// 1. SSH Connection Settings Panel (IP, Port, Username, Password, CWD, Test Login & Open IDE Terminal)
+			const connCard = document.createElement('div');
+			connCard.style.cssText = 'display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: 7px; background: rgba(16, 185, 129, 0.06); border: 1px solid rgba(16, 185, 129, 0.25);';
+			mount.appendChild(connCard);
+
+			const connHeaderRow = document.createElement('div');
+			connHeaderRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;';
+			connCard.appendChild(connHeaderRow);
+
+			const connTitleWrap = document.createElement('div');
+			connTitleWrap.style.cssText = 'display: flex; align-items: center; gap: 7px;';
+			connHeaderRow.appendChild(connTitleWrap);
+
+			const connIcon = document.createElement('span');
+			connIcon.className = 'codicon codicon-vm-connect';
+			connIcon.style.cssText = 'color: #34d399; font-size: 14px;';
+			connTitleWrap.appendChild(connIcon);
+
+			const connTitle = document.createElement('span');
+			connTitle.style.cssText = 'font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #34d399;';
+			connTitle.textContent = 'SSH Connection Credentials (IP / Port / Account / Password)';
+			connTitleWrap.appendChild(connTitle);
+
+			const connActionsWrap = document.createElement('div');
+			connActionsWrap.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+			connHeaderRow.appendChild(connActionsWrap);
+
+			const connStatusPill = document.createElement('span');
+			connStatusPill.style.cssText = 'font-size: 10.5px; padding: 2px 8px; border-radius: 10px; background: rgba(255,255,255,0.06); color: #94a3b8; font-family: var(--vscode-editor-font-family, monospace);';
+			connStatusPill.textContent = sshHost ? `${sshUser || 'root'}@${sshHost}:${sshPort || 22}` : 'Ready';
+			connActionsWrap.appendChild(connStatusPill);
+
+			const testConnBtn = document.createElement('button');
+			testConnBtn.type = 'button';
+			testConnBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 5px; background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.45); cursor: pointer;';
+			const testConnIcon = document.createElement('span');
+			testConnIcon.className = 'codicon codicon-plug';
+			testConnBtn.appendChild(testConnIcon);
+			const testConnLabel = document.createElement('span');
+			testConnLabel.textContent = 'Test Login';
+			testConnBtn.appendChild(testConnLabel);
+			connActionsWrap.appendChild(testConnBtn);
+
+			const openIdeTermBtn = document.createElement('button');
+			openIdeTermBtn.type = 'button';
+			openIdeTermBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 5px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); cursor: pointer;';
+			openIdeTermBtn.title = 'Open an interactive SSH session in the bottom IDE Terminal with automatic password login';
+			const openIdeIcon = document.createElement('span');
+			openIdeIcon.className = 'codicon codicon-terminal';
+			openIdeTermBtn.appendChild(openIdeIcon);
+			const openIdeLabel = document.createElement('span');
+			openIdeLabel.textContent = 'Open in IDE Terminal';
+			openIdeTermBtn.appendChild(openIdeLabel);
+			connActionsWrap.appendChild(openIdeTermBtn);
+
+			const connGrid = document.createElement('div');
+			connGrid.style.cssText = 'display: grid; grid-template-columns: minmax(0, 1.8fr) 80px minmax(0, 1.1fr) minmax(0, 1.4fr) minmax(0, 1.1fr); gap: 8px; align-items: end; width: 100%; box-sizing: border-box;';
+			connCard.appendChild(connGrid);
+
+			const createLabeledInput = (labelText: string, placeholder: string, initialVal: string, type: 'text' | 'number' | 'password' = 'text') => {
+				const col = document.createElement('div');
+				col.style.cssText = 'display: flex; flex-direction: column; gap: 4px; min-width: 0;';
+				const lbl = document.createElement('label');
+				lbl.style.cssText = 'font-size: 10px; font-weight: 600; opacity: 0.75; text-transform: uppercase; letter-spacing: 0.03em;';
+				lbl.textContent = labelText;
+				col.appendChild(lbl);
+
+				const inpWrap = document.createElement('div');
+				inpWrap.style.cssText = 'position: relative; display: flex; align-items: center; width: 100%;';
+				col.appendChild(inpWrap);
+
+				const inp = document.createElement('input');
+				inp.type = type;
+				inp.value = initialVal;
+				inp.placeholder = placeholder;
+				inp.style.cssText = 'width: 100%; padding: 5px 8px; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 4px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.3); color: inherit; box-sizing: border-box;';
+				inp.onfocus = () => { activeTargetInput = inp; };
+				inpWrap.appendChild(inp);
+
+				if (type === 'password') {
+					inp.style.paddingRight = '26px';
+					const toggleEye = document.createElement('button');
+					toggleEye.type = 'button';
+					toggleEye.title = 'Show / Hide Password';
+					toggleEye.style.cssText = 'position: absolute; right: 4px; background: transparent; border: none; color: rgba(255,255,255,0.6); cursor: pointer; padding: 2px; display: inline-flex; align-items: center;';
+					const eyeIcon = document.createElement('span');
+					eyeIcon.className = 'codicon codicon-eye';
+					eyeIcon.style.fontSize = '12px';
+					toggleEye.appendChild(eyeIcon);
+					toggleEye.onclick = (e) => {
+						e.stopPropagation();
+						const isPwd = inp.type === 'password';
+						inp.type = isPwd ? 'text' : 'password';
+						eyeIcon.className = isPwd ? 'codicon codicon-eye-closed' : 'codicon codicon-eye';
+					};
+					inpWrap.appendChild(toggleEye);
+				}
+
+				connGrid.appendChild(col);
+				return inp;
+			};
+
+			const hostInput = createLabeledInput('IP / Host', 'e.g. 192.168.1.100 or {server_ip}', sshHost, 'text');
+			const portInput = createLabeledInput('Port', '22', String(sshPort), 'text');
+			const userInput = createLabeledInput('Username', 'root or {ssh_user}', sshUser, 'text');
+			const passInput = createLabeledInput('Password', 'SSH Password or {ssh_pass}', sshPassword, 'password');
+			const cwdInput = createLabeledInput('Remote Dir (CWD)', '~ or /var/www', sshCwd, 'text');
+
+			const getPromptPrefixText = () => {
+				const h = (sshHost || 'remote').trim() || 'remote';
+				const u = (sshUser || 'root').trim() || 'root';
+				const c = (sshCwd || '~').trim() || '~';
+				return `${u}@${h}:${c}$`;
+			};
+
+			let updatePromptPrefix = () => { };
+
+			hostInput.oninput = () => {
+				sshHost = hostInput.value.trim();
+				connStatusPill.textContent = sshHost ? `${sshUser || 'root'}@${sshHost}:${sshPort || 22}` : 'Ready';
+				updatePromptPrefix();
+				persistState();
+			};
+			portInput.oninput = () => {
+				const rawPort = portInput.value.trim();
+				const p = parseInt(rawPort, 10);
+				sshPort = !isNaN(p) && p > 0 ? p : (rawPort || 22);
+				connStatusPill.textContent = sshHost ? `${sshUser || 'root'}@${sshHost}:${sshPort || 22}` : 'Ready';
+				persistState();
+			};
+			userInput.oninput = () => {
+				sshUser = userInput.value.trim() || 'root';
+				connStatusPill.textContent = sshHost ? `${sshUser}@${sshHost}:${sshPort || 22}` : 'Ready';
+				updatePromptPrefix();
+				persistState();
+			};
+			passInput.oninput = () => {
+				sshPassword = passInput.value;
+				persistState();
+			};
+			cwdInput.oninput = () => {
+				sshCwd = cwdInput.value.trim() || '~';
+				updatePromptPrefix();
+				persistState();
+			};
+
+			// 2. Collapsible Terminal & Quick Commands Panel (Collapsed by default; integrates Terminal Window + Quick Linux Commands)
+			const sshCollapsiblePanel = document.createElement('div');
+			sshCollapsiblePanel.className = 'ssh-collapsible-panel';
+			sshCollapsiblePanel.style.cssText = 'display: flex; flex-direction: column; border-radius: 7px; border: 1px solid rgba(52, 211, 153, 0.34); background: rgba(9, 13, 22, 0.55); overflow: hidden; width: 100%; box-sizing: border-box;';
+			mount.appendChild(sshCollapsiblePanel);
+
+			const sshPanelToggleBar = document.createElement('div');
+			sshPanelToggleBar.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 12px; background: rgba(17, 24, 39, 0.9); flex-wrap: wrap; cursor: pointer; user-select: none;';
+			sshPanelToggleBar.title = 'Click to expand or collapse SSH Terminal & Command Console';
+			sshCollapsiblePanel.appendChild(sshPanelToggleBar);
+
+			const sshPanelToggleLeft = document.createElement('div');
+			sshPanelToggleLeft.style.cssText = 'display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; color: #6ee7b7; cursor: pointer; user-select: none; min-width: 0; flex-wrap: wrap;';
+			sshPanelToggleBar.appendChild(sshPanelToggleLeft);
+
+			const panelChevronIcon = document.createElement('span');
+			panelChevronIcon.className = 'codicon codicon-chevron-right';
+			panelChevronIcon.style.cssText = 'font-size: 12px; color: #34d399;';
+			sshPanelToggleLeft.appendChild(panelChevronIcon);
+
+			const panelTermIcon = document.createElement('span');
+			panelTermIcon.className = 'codicon codicon-terminal';
+			panelTermIcon.style.cssText = 'font-size: 12px; color: #34d399;';
+			sshPanelToggleLeft.appendChild(panelTermIcon);
+
+			const panelTitleText = document.createElement('span');
+			panelTitleText.textContent = 'SSH Terminal & Command Console';
+			sshPanelToggleLeft.appendChild(panelTitleText);
+
+			const sshCollapsibleBody = document.createElement('div');
+			sshCollapsibleBody.className = 'ssh-collapsible-operation-body';
+			sshCollapsibleBody.style.cssText = 'display: none; flex-direction: column; gap: 10px; padding: 10px 11px; border-top: 1px solid rgba(52, 211, 153, 0.2); width: 100%; box-sizing: border-box;';
+			sshCollapsiblePanel.appendChild(sshCollapsibleBody);
+
+			// 2a. Terminal Display Window
+			const termContainer = document.createElement('div');
+			termContainer.style.cssText = 'display: flex; flex-direction: column; border-radius: 7px; overflow: hidden; border: 1px solid rgba(16, 185, 129, 0.35); background: #090d16; box-shadow: inset 0 2px 10px rgba(0,0,0,0.6);';
+			sshCollapsibleBody.appendChild(termContainer);
+
+			const termHeader = document.createElement('div');
+			termHeader.style.cssText = 'display: flex; align-items: center; justify-content: space-between; padding: 6px 12px; background: #111827; border-bottom: 1px solid rgba(255,255,255,0.08); gap: 8px; flex-wrap: wrap;';
+			termContainer.appendChild(termHeader);
+
+			const termHeaderLeft = document.createElement('div');
+			termHeaderLeft.style.cssText = 'display: flex; align-items: center; gap: 8px; min-width: 0; user-select: none;';
+			termHeader.appendChild(termHeaderLeft);
+
+			const dotsWrap = document.createElement('div');
+			dotsWrap.style.cssText = 'display: flex; align-items: center; gap: 5px; flex-shrink: 0;';
+			['#ef4444', '#f59e0b', '#10b981'].forEach(col => {
+				const dot = document.createElement('span');
+				dot.style.cssText = `width: 9px; height: 9px; border-radius: 50%; background: ${col}; display: inline-block; opacity: 0.85;`;
+				dotsWrap.appendChild(dot);
+			});
+			termHeaderLeft.appendChild(dotsWrap);
+
+			const termTitleLabel = document.createElement('span');
+			termTitleLabel.style.cssText = 'font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); color: #94a3b8; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+			termTitleLabel.textContent = `bash — ${getPromptPrefixText()}`;
+			termHeaderLeft.appendChild(termTitleLabel);
+
+			const termHeaderRight = document.createElement('div');
+			termHeaderRight.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto;';
+			termHeader.appendChild(termHeaderRight);
+
+			const copyTermBtn = document.createElement('button');
+			copyTermBtn.type = 'button';
+			copyTermBtn.style.cssText = 'padding: 2px 8px; font-size: 10.5px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #cbd5e1; border: 1px solid rgba(255,255,255,0.14); cursor: pointer; white-space: nowrap;';
+			copyTermBtn.title = 'Copy full terminal screen content to clipboard';
+			copyTermBtn.textContent = 'Copy';
+			termHeaderRight.appendChild(copyTermBtn);
+
+			const clearTermBtn = document.createElement('button');
+			clearTermBtn.type = 'button';
+			clearTermBtn.style.cssText = 'padding: 2px 8px; font-size: 10.5px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #cbd5e1; border: 1px solid rgba(255,255,255,0.14); cursor: pointer; white-space: nowrap;';
+			clearTermBtn.title = 'Clear terminal screen content';
+			clearTermBtn.textContent = 'Clear';
+			termHeaderRight.appendChild(clearTermBtn);
+
+			const termInitialPlaceholder = `# SSH Terminal ready. Configure IP, Port, Username, and Password above, then click a Quick Command or send Linux commands below.`;
+			const termViewport = document.createElement('pre');
+			termViewport.style.cssText = 'margin: 0; padding: 10px 14px; min-height: 140px; max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace); font-size: 11.5px; line-height: 1.55; color: #d1fae5; white-space: pre-wrap; word-break: break-word; user-select: text; -webkit-user-select: text; cursor: text;';
+			termViewport.textContent = sshOutput || termInitialPlaceholder;
+			termContainer.appendChild(termViewport);
+
+			// 2b. Independent Collapsible Panel: SSH Command Send
+			const multiCmdCard = document.createElement('div');
+			multiCmdCard.className = 'ssh-multi-command-card';
+			multiCmdCard.style.cssText = 'display: flex; flex-direction: column; border-radius: 7px; border: 1px solid rgba(52, 211, 153, 0.34); background: rgba(15, 23, 42, 0.8); overflow: hidden; width: 100%; box-sizing: border-box;';
+			mount.appendChild(multiCmdCard);
+
+			const multiCmdHeader = document.createElement('div');
+			multiCmdHeader.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 12px; background: rgba(17, 24, 39, 0.9); flex-wrap: wrap;';
+			multiCmdCard.appendChild(multiCmdHeader);
+
+			const multiCmdTitleWrap = document.createElement('div');
+			multiCmdTitleWrap.style.cssText = 'display: flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; color: #6ee7b7; cursor: pointer; user-select: none; min-width: 0; flex-wrap: wrap;';
+			multiCmdTitleWrap.title = 'Click to expand or collapse SSH Command Send';
+			multiCmdHeader.appendChild(multiCmdTitleWrap);
+
+			const cmdBarsChevronIcon = document.createElement('span');
+			cmdBarsChevronIcon.className = 'codicon codicon-chevron-right';
+			cmdBarsChevronIcon.style.cssText = 'font-size: 12px; color: #34d399;';
+			multiCmdTitleWrap.appendChild(cmdBarsChevronIcon);
+
+			const listIcon = document.createElement('span');
+			listIcon.className = 'codicon codicon-list-ordered';
+			listIcon.style.cssText = 'font-size: 12px; color: #34d399;';
+			multiCmdTitleWrap.appendChild(listIcon);
+
+			const multiCmdTitleText = document.createElement('span');
+			multiCmdTitleText.textContent = 'SSH Command Send';
+			multiCmdTitleWrap.appendChild(multiCmdTitleText);
+
+			const panelCmdCountBadge = document.createElement('span');
+			panelCmdCountBadge.style.cssText = 'font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 10px; background: rgba(16, 185, 129, 0.14); color: #a7f3d0; border: 1px solid rgba(52, 211, 153, 0.3); font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;';
+			panelCmdCountBadge.textContent = formatPanelCmdBadgeText();
+			multiCmdTitleWrap.appendChild(panelCmdCountBadge);
+
+			const multiCmdBtns = document.createElement('div');
+			multiCmdBtns.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto;';
+			multiCmdHeader.appendChild(multiCmdBtns);
+
+			const addCmdRowBtn = document.createElement('button');
+			addCmdRowBtn.type = 'button';
+			addCmdRowBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; font-size: 10.5px; font-weight: 600; border-radius: 4px; background: rgba(56, 189, 248, 0.14); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.4); cursor: pointer; white-space: nowrap;';
+			addCmdRowBtn.title = 'Add a new SSH command send bar';
+			const addCmdIcon = document.createElement('span');
+			addCmdIcon.className = 'codicon codicon-add';
+			addCmdIcon.style.fontSize = '11px';
+			addCmdRowBtn.appendChild(addCmdIcon);
+			const addCmdLbl = document.createElement('span');
+			addCmdLbl.textContent = 'Add Command';
+			addCmdRowBtn.appendChild(addCmdLbl);
+			multiCmdBtns.appendChild(addCmdRowBtn);
+
+			const runAllCmdsBtn = document.createElement('button');
+			runAllCmdsBtn.type = 'button';
+			runAllCmdsBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 3px 11px; font-size: 10.5px; font-weight: 600; border-radius: 4px; background: rgba(16, 185, 129, 0.28); color: #6ee7b7; border: 1px solid rgba(52, 211, 153, 0.6); cursor: pointer; white-space: nowrap;';
+			runAllCmdsBtn.title = 'Execute all SSH command send bars sequentially (#1 → #2 → ...)';
+			const runAllCmdsIcon = document.createElement('span');
+			runAllCmdsIcon.className = 'codicon codicon-run-all';
+			runAllCmdsIcon.style.fontSize = '11px';
+			runAllCmdsBtn.appendChild(runAllCmdsIcon);
+			const runAllCmdsBtnLabel = document.createElement('span');
+			runAllCmdsBtnLabel.textContent = 'Run All';
+			runAllCmdsBtn.appendChild(runAllCmdsBtnLabel);
+			multiCmdBtns.appendChild(runAllCmdsBtn);
+
+			const multiCmdBody = document.createElement('div');
+			multiCmdBody.className = 'ssh-multi-command-body';
+			multiCmdBody.style.cssText = 'display: none; flex-direction: column; gap: 8px; padding: 10px 12px; border-top: 1px solid rgba(52, 211, 153, 0.2); width: 100%; box-sizing: border-box;';
+			multiCmdCard.appendChild(multiCmdBody);
+
+			// Quick Linux Commands Bar (Moved inside SSH Command Send panel; displays 2 rows by default; toggle More / Less chip)
+			const quickCard = document.createElement('div');
+			quickCard.style.cssText = 'display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 6px; background: rgba(0, 0, 0, 0.24); border: 1px solid rgba(255, 255, 255, 0.1);';
+			multiCmdBody.appendChild(quickCard);
+
+			const quickHeader = document.createElement('div');
+			quickHeader.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;';
+			quickCard.appendChild(quickHeader);
+
+			const quickTitleLeft = document.createElement('div');
+			quickTitleLeft.style.cssText = 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;';
+			quickHeader.appendChild(quickTitleLeft);
+
+			const quickTitle = document.createElement('span');
+			quickTitle.style.cssText = 'font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.04em;';
+			quickTitle.textContent = 'Quick Linux Commands';
+			quickTitleLeft.appendChild(quickTitle);
+
+			const quickRightBtns = document.createElement('div');
+			quickRightBtns.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;';
+			quickHeader.appendChild(quickRightBtns);
+
+			const addQuickToggleBtn = document.createElement('button');
+			addQuickToggleBtn.type = 'button';
+			addQuickToggleBtn.style.cssText = 'padding: 2px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); cursor: pointer;';
+			addQuickToggleBtn.textContent = '+ Add Shortcut';
+			quickRightBtns.appendChild(addQuickToggleBtn);
+
+			const resetQuickBtn = document.createElement('button');
+			resetQuickBtn.type = 'button';
+			resetQuickBtn.style.cssText = 'padding: 2px 8px; font-size: 10px; border-radius: 4px; background: rgba(255, 255, 255, 0.05); color: rgba(255, 255, 255, 0.7); border: 1px solid rgba(255, 255, 255, 0.12); cursor: pointer;';
+			resetQuickBtn.textContent = 'Reset Defaults';
+			quickRightBtns.appendChild(resetQuickBtn);
+
+			let activeCategory = 'All';
+			const catRow = document.createElement('div');
+			catRow.style.cssText = 'display: flex; align-items: center; gap: 5px; flex-wrap: wrap;';
+			quickCard.appendChild(catRow);
+
+			const addQuickForm = document.createElement('div');
+			addQuickForm.style.cssText = 'display: none; align-items: center; gap: 6px; flex-wrap: wrap; padding: 6px 8px; border-radius: 5px; background: rgba(56, 189, 248, 0.07); border: 1px solid rgba(56, 189, 248, 0.25);';
+			quickCard.appendChild(addQuickForm);
+
+			const newQuickLabelInp = document.createElement('input');
+			newQuickLabelInp.type = 'text';
+			newQuickLabelInp.placeholder = 'Label (e.g. Tail Nginx Log)';
+			newQuickLabelInp.style.cssText = 'padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.35); color: inherit; width: 150px;';
+			addQuickForm.appendChild(newQuickLabelInp);
+
+			const newQuickCmdInp = document.createElement('input');
+			newQuickCmdInp.type = 'text';
+			newQuickCmdInp.placeholder = 'Command (e.g. tail -n 50 /var/log/nginx/error.log)';
+			newQuickCmdInp.style.cssText = 'flex: 1; min-width: 200px; padding: 4px 7px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 4px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.35); color: inherit;';
+			addQuickForm.appendChild(newQuickCmdInp);
+
+			const newQuickCatSelect = document.createElement('select');
+			newQuickCatSelect.style.cssText = 'padding: 4px 7px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.16); background: var(--vscode-dropdown-background, #1e1e1e); color: inherit;';
+			['System', 'Files', 'Network', 'Docker', 'Custom'].forEach(c => {
+				const opt = document.createElement('option');
+				opt.value = c;
+				opt.textContent = c;
+				newQuickCatSelect.appendChild(opt);
+			});
+			addQuickForm.appendChild(newQuickCatSelect);
+
+			const saveQuickBtn = document.createElement('button');
+			saveQuickBtn.type = 'button';
+			saveQuickBtn.style.cssText = 'padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(16, 185, 129, 0.22); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.45); cursor: pointer;';
+			saveQuickBtn.textContent = 'Add';
+			addQuickForm.appendChild(saveQuickBtn);
+
+			const chipsWrap = document.createElement('div');
+			chipsWrap.style.cssText = 'display: flex; align-items: center; gap: 5px; flex-wrap: wrap; width: 100%;';
+			quickCard.appendChild(chipsWrap);
+
+			// Reference Token Insertion Row (supports {Field Label} interpolation in active command bar or connection input)
+			const refChipsRow = document.createElement('div');
+			refChipsRow.style.cssText = 'display: flex; align-items: center; gap: 5px; flex-wrap: wrap; padding: 4px 8px; border-radius: 4px; background: rgba(255, 255, 255, 0.03); border: 1px dashed rgba(255,255,255,0.1);';
+			multiCmdBody.appendChild(refChipsRow);
+
+			const refLabel = document.createElement('span');
+			refLabel.style.cssText = 'font-size: 10px; opacity: 0.7;';
+			refLabel.textContent = 'Insert Ticket Variable:';
+			refChipsRow.appendChild(refLabel);
+
+			const refTokens: string[] = ['Title', 'Description'];
+			if (this._lastCustomModule?.fields) {
+				for (const cf of this._lastCustomModule.fields) {
+					if (cf?.type === 'parameters' && Array.isArray(cf.parameters)) {
+						for (const p of cf.parameters) {
+							const pName = (p.name || '').trim();
+							if (pName && !refTokens.includes(pName)) {
+								refTokens.push(pName);
+							}
+						}
+					}
+					const cfLabel = (cf?.label || cf?.id || '').trim();
+					if (cfLabel && cfLabel !== fieldKey && cf?.type !== 'output' && cf?.type !== 'result' && !refTokens.includes(cfLabel)) {
+						refTokens.push(cfLabel);
+					}
+				}
+			}
+			refTokens.forEach(tok => {
+				const tokBtn = document.createElement('button');
+				tokBtn.type = 'button';
+				tokBtn.style.cssText = 'padding: 1px 6px; font-size: 10px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 8px; background: rgba(56, 189, 248, 0.12); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.3); cursor: pointer;';
+				tokBtn.textContent = `{${tok}}`;
+				tokBtn.title = `Insert {${tok}} into active SSH input`;
+				tokBtn.onmousedown = (ev) => { ev.stopPropagation(); };
+				tokBtn.onclick = (ev) => {
+					ev.preventDefault();
+					ev.stopPropagation();
+					const targetInp = activeTargetInput || cmdInputElements[activeCmdRowIdx] || cmdInputElements[0];
+					if (!targetInp) return;
+					const start = targetInp.selectionStart ?? targetInp.value.length;
+					const end = targetInp.selectionEnd ?? targetInp.value.length;
+					const tokenStr = `{${tok}}`;
+					targetInp.value = targetInp.value.slice(0, start) + tokenStr + targetInp.value.slice(end);
+					targetInp.dispatchEvent(new Event('input'));
+					targetInp.focus();
+					targetInp.setSelectionRange(start + tokenStr.length, start + tokenStr.length);
+				};
+				refChipsRow.appendChild(tokBtn);
+			});
+
+			const cmdRowsContainer = document.createElement('div');
+			cmdRowsContainer.style.cssText = 'display: flex; flex-direction: column; gap: 6px; width: 100%;';
+			multiCmdBody.appendChild(cmdRowsContainer);
+
+			let refreshQuickCommandsOnExpand: (() => void) | undefined;
+			const applyCmdBarsExpandedState = () => {
+				this._sshPanelExpandedByFieldKey.set(sshCmdBarsStateKey, isCmdBarsExpanded);
+				if (isCmdBarsExpanded) {
+					multiCmdBody.style.display = 'flex';
+					cmdBarsChevronIcon.className = 'codicon codicon-chevron-down';
+					refreshQuickCommandsOnExpand?.();
+				} else {
+					multiCmdBody.style.display = 'none';
+					cmdBarsChevronIcon.className = 'codicon codicon-chevron-right';
+				}
+			};
+			const toggleCmdBarsPanel = (ev?: MouseEvent) => {
+				ev?.preventDefault();
+				ev?.stopPropagation();
+				isCmdBarsExpanded = !isCmdBarsExpanded;
+				applyCmdBarsExpandedState();
+			};
+			multiCmdTitleWrap.onclick = toggleCmdBarsPanel;
+			multiCmdBody.onclick = (ev) => {
+				ev.stopPropagation();
+			};
+			applyCmdBarsExpandedState();
+
+			updatePromptPrefix = () => {
+				const p = getPromptPrefixText();
+				termTitleLabel.textContent = `bash — ${p}`;
+				cmdRowPromptLabels.forEach(lbl => { lbl.textContent = p; });
+				panelCmdCountBadge.textContent = formatPanelCmdBadgeText();
+			};
+
+			// 3. Independent JSON Output Result Box (Consistent with Workflow & Schema Editor; Standard JSON Format: { "<command>": ["line1", ...] })
+			const sshOutputSection = document.createElement('div');
+			sshOutputSection.className = 'ssh-output-result-section';
+			sshOutputSection.style.cssText = 'display: flex; flex-direction: column; gap: 6px; margin-top: 2px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.12);';
+			mount.appendChild(sshOutputSection);
+
+			const sshOutputHeader = document.createElement('div');
+			sshOutputHeader.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;';
+			sshOutputSection.appendChild(sshOutputHeader);
+
+			const sshOutputHeaderLeft = document.createElement('div');
+			sshOutputHeaderLeft.style.cssText = 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;';
+			sshOutputHeader.appendChild(sshOutputHeaderLeft);
+
+			const sshOutputTitle = document.createElement('span');
+			sshOutputTitle.style.cssText = 'font-size: 11px; font-weight: 600; opacity: 0.85; text-transform: uppercase; letter-spacing: 0.04em;';
+			sshOutputTitle.textContent = 'SSH JSON Output:';
+			sshOutputHeaderLeft.appendChild(sshOutputTitle);
+
+			const sshJsonFormatBadge = document.createElement('span');
+			sshJsonFormatBadge.style.cssText = 'font-size: 9.5px; padding: 1px 6px; border-radius: 3px; background: rgba(16, 185, 129, 0.14); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.35); font-weight: 600; white-space: nowrap;';
+			sshJsonFormatBadge.textContent = 'Standard JSON';
+			sshOutputHeaderLeft.appendChild(sshJsonFormatBadge);
+
+			const sshOutStatusBadge = document.createElement('span');
+			sshOutStatusBadge.style.cssText = 'font-size: 10.5px; padding: 1px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); opacity: 0.9; display: none;';
+			sshOutputHeaderLeft.appendChild(sshOutStatusBadge);
+
+			const sshOutputActions = document.createElement('div');
+			sshOutputActions.style.cssText = 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto;';
+			sshOutputHeader.appendChild(sshOutputActions);
+
+			const outLinesWrap = document.createElement('div');
+			outLinesWrap.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border-radius: 4px; background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(52, 211, 153, 0.28);';
+			outLinesWrap.title = 'Retain only the last N lines per command in the JSON Output array';
+			const outLinesLabel = document.createElement('span');
+			outLinesLabel.style.cssText = 'font-size: 10px; font-weight: 600; color: #6ee7b7; white-space: nowrap;';
+			outLinesLabel.textContent = 'Output Lines:';
+			outLinesWrap.appendChild(outLinesLabel);
+			const outLinesInp = document.createElement('input');
+			outLinesInp.type = 'number';
+			outLinesInp.min = '1';
+			outLinesInp.max = '5000';
+			outLinesInp.value = String(sshOutputLines);
+			outLinesInp.style.cssText = 'width: 52px; padding: 1px 4px; font-size: 10.5px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.18); background: rgba(0,0,0,0.45); color: #f8fafc; font-family: var(--vscode-editor-font-family, monospace); text-align: center; box-sizing: border-box;';
+			outLinesWrap.appendChild(outLinesInp);
+			sshOutputActions.appendChild(outLinesWrap);
+
+			const copySshOutBtn = document.createElement('button');
+			copySshOutBtn.type = 'button';
+			copySshOutBtn.style.cssText = 'padding: 3px 8px; width: auto; font-size: 11px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.12); cursor: pointer;';
+			copySshOutBtn.title = 'Copy current JSON Output to clipboard';
+			copySshOutBtn.textContent = 'Copy';
+			sshOutputActions.appendChild(copySshOutBtn);
+
+			const clearSshOutBtn = document.createElement('button');
+			clearSshOutBtn.type = 'button';
+			clearSshOutBtn.style.cssText = 'padding: 3px 8px; width: auto; font-size: 11px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.12); cursor: pointer;';
+			clearSshOutBtn.title = 'Clear current JSON Output';
+			clearSshOutBtn.textContent = 'Clear';
+			sshOutputActions.appendChild(clearSshOutBtn);
+
+			const sshOutputDisplay = document.createElement('div');
+			sshOutputDisplay.className = 'ssh-output-box';
+			sshOutputDisplay.style.cssText = 'min-height: 88px; max-height: 220px; overflow-y: auto; padding: 10px 12px; font-size: 12px; line-height: 1.55; border-radius: 5px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.28); color: var(--vscode-editor-foreground); white-space: pre-wrap; word-break: break-word; font-family: var(--vscode-editor-font-family, monospace); user-select: text;';
+			sshOutputSection.appendChild(sshOutputDisplay);
+
+			const setSshOutputDisplayContent = (text: string | undefined, emptyAfterExec = false) => {
+				if (text && text.length > 0) {
+					sshOutputDisplay.textContent = text;
+					sshOutputDisplay.style.opacity = '1';
+					sshOutputDisplay.style.fontStyle = 'normal';
+				} else if (emptyAfterExec) {
+					sshOutputDisplay.textContent = '{}';
+					sshOutputDisplay.style.opacity = '0.85';
+					sshOutputDisplay.style.fontStyle = 'normal';
+				} else {
+					sshOutputDisplay.textContent = 'No command output yet. Expand "SSH Terminal & Command Console" to configure command bars or click "Run All" — outputs are returned here as standard JSON: { "cmd": ["line 1", ...] }.';
+					sshOutputDisplay.style.opacity = '0.5';
+					sshOutputDisplay.style.fontStyle = 'italic';
+				}
+			};
+
+			if (hasCompletedCmdRun) {
+				const initialSliced = sshLastRawEntries.length > 0
+					? formatSshCommandsJsonOutput(sshLastRawEntries, sshOutputLines)
+					: (sshLastOutput !== undefined && sshLastOutput.length > 0
+						? extractSshOutputLastNLines(sshLastOutput, sshOutputLines)
+						: (sshLastRawOutput !== undefined && sshLastRawOutput.length > 0 ? extractSshOutputLastNLines(sshLastRawOutput, sshOutputLines) : ''));
+				sshLastOutput = initialSliced;
+				setSshOutputDisplayContent(initialSliced, initialSliced === '');
+				if (lastDurationMs !== undefined && !isNaN(lastDurationMs)) {
+					sshOutStatusBadge.style.display = 'inline-block';
+					sshOutStatusBadge.textContent = `${lastDurationMs}ms`;
+					sshOutStatusBadge.style.color = '#10b981';
+				}
+			} else {
+				setSshOutputDisplayContent(undefined, false);
+			}
+
+			const refreshSshOutputByLineLimit = () => {
+				if (!hasCompletedCmdRun) return;
+				if (sshLastRawEntries.length > 0) {
+					sshLastOutput = formatSshCommandsJsonOutput(sshLastRawEntries, sshOutputLines);
+				} else if (sshLastOutput !== undefined && sshLastOutput !== '') {
+					sshLastOutput = extractSshOutputLastNLines(sshLastOutput, sshOutputLines);
+				} else if (sshLastRawOutput !== undefined) {
+					sshLastOutput = extractSshOutputLastNLines(sshLastRawOutput, sshOutputLines);
+				}
+				setSshOutputDisplayContent(sshLastOutput, sshLastOutput === '');
+				if (sshOutStatusBadge.style.display !== 'none' && lastDurationMs !== undefined && !isNaN(lastDurationMs)) {
+					sshOutStatusBadge.textContent = `${lastDurationMs}ms`;
+				}
+			};
+
+			outLinesInp.oninput = () => {
+				const parsedN = parseInt(outLinesInp.value, 10);
+				sshOutputLines = !isNaN(parsedN) && parsedN > 0 ? parsedN : 50;
+				refreshSshOutputByLineLimit();
+				persistState();
+			};
+			outLinesInp.onchange = () => {
+				const parsedN = parseInt(outLinesInp.value, 10);
+				sshOutputLines = !isNaN(parsedN) && parsedN > 0 ? parsedN : 50;
+				outLinesInp.value = String(sshOutputLines);
+				refreshSshOutputByLineLimit();
+				persistState(true);
+			};
+
+			let isRunningCmd = false;
+
+			const getExistingCleanTerminalTranscript = (): string => {
+				const prev = (sshOutput || '').trim();
+				if (!prev || prev.startsWith('# SSH Terminal ready') || prev.startsWith('SSH Terminal ready')) {
+					return '';
+				}
+				return prev;
+			};
+
+			const resolveTicketSshCommands = (rawList: ReadonlyArray<string>): string[] => {
+				const resolved: string[] = [];
+				for (const rawItem of (rawList || [])) {
+					const trimmedRaw = String(rawItem ?? '').trim();
+					if (!trimmedRaw) continue;
+					const pureToken = trimmedRaw.match(/^@?\{\{?([^{}]+)\}?\}/);
+					const interpolated = this._interpolateParameters(trimmedRaw).trim();
+					if (pureToken && pureToken[0] === trimmedRaw && interpolated.startsWith('[') && interpolated.endsWith(']')) {
+						try {
+							const parsedArr = JSON.parse(interpolated);
+							if (Array.isArray(parsedArr)) {
+								for (const item of parsedArr) {
+									const cleaned = cleanInterpolatedSshCommand(String(item ?? ''));
+									if (cleaned) resolved.push(cleaned);
+								}
+								continue;
+							}
+						} catch { }
+					}
+					const cleaned = cleanInterpolatedSshCommand(interpolated);
+					if (cleaned) {
+						resolved.push(cleaned);
+					}
+				}
+				return resolved;
+			};
+
+			const setButtonsRunningState = (running: boolean, activeRowIdx?: number, mode?: 'connect' | 'single' | 'all') => {
+				isRunningCmd = running;
+				testConnBtn.disabled = running;
+				runAllCmdsBtn.disabled = running;
+				addCmdRowBtn.disabled = running;
+				testConnLabel.textContent = (running && mode === 'connect') ? 'Testing...' : 'Test Login';
+				runAllCmdsBtnLabel.textContent = (running && mode === 'all') ? 'Running...' : 'Run All';
+				cmdRowRunButtons.forEach((item, idx) => {
+					item.btn.disabled = running;
+					item.label.textContent = (running && mode === 'single' && activeRowIdx === idx) ? 'Sending...' : '▷ Send';
+				});
+			};
+
+			const executeConnectCheck = async () => {
+				if (isRunningCmd) return;
+				const interpolatedHost = this._interpolateParameters(sshHost).trim();
+				const interpolatedPort = Number(this._interpolateParameters(String(sshPort || 22)).trim()) || 22;
+				const interpolatedUser = this._interpolateParameters(sshUser).trim() || 'root';
+				const interpolatedPassword = this._interpolateParameters(sshPassword);
+				const interpolatedCwd = this._interpolateParameters(sshCwd).trim() || '~';
+
+				if (!interpolatedHost) {
+					this._notificationService.warn('Please enter the SSH Server IP / Host before testing login.');
+					hostInput.focus();
+					return;
+				}
+				const runtime = this._instantiationService.invokeFunction(accessor => {
+					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+				});
+				if (!runtime) {
+					this._notificationService.error('Ticket workflow runtime service is not available.');
+					return;
+				}
+
+				setButtonsRunningState(true, undefined, 'connect');
+				connStatusPill.textContent = `Connecting to ${interpolatedUser}@${interpolatedHost}:${interpolatedPort}...`;
+				connStatusPill.style.color = '#fbbf24';
+
+				try {
+					const batchRes = await runtime.executeSshBatchCommands({
+						workspaceUri: this._entityUri ? dirname(this._entityUri) : undefined,
+						host: interpolatedHost,
+						port: interpolatedPort,
+						user: interpolatedUser,
+						password: interpolatedPassword,
+						cwd: interpolatedCwd,
+						commands: [],
+						outputLines: sshOutputLines,
+						existingTerminalLog: getExistingCleanTerminalTranscript()
+					});
+
+					if (batchRes.cwd && !cwdInput.value.trim().includes('{')) {
+						sshCwd = batchRes.cwd;
+						cwdInput.value = sshCwd;
+					}
+					updatePromptPrefix();
+					sshOutput = batchRes.terminalTranscript;
+					termViewport.textContent = sshOutput || termInitialPlaceholder;
+					termViewport.scrollTop = termViewport.scrollHeight;
+
+					if (!batchRes.success || batchRes.connectionFailed) {
+						const errMsg = batchRes.error || `SSH Connection Failed (${interpolatedUser}@${interpolatedHost}:${interpolatedPort})`;
+						connStatusPill.textContent = `Connection Failed · ${interpolatedHost}:${interpolatedPort}`;
+						connStatusPill.style.color = '#f87171';
+						this._notificationService.error(errMsg);
+					} else {
+						connStatusPill.textContent = `Connected · ${interpolatedUser}@${interpolatedHost}:${interpolatedPort} (${batchRes.durationMs}ms)`;
+						connStatusPill.style.color = '#34d399';
+					}
+					persistState(true);
+				} catch (err: any) {
+					const errMsg = err?.message || String(err);
+					connStatusPill.textContent = 'Connection Failed';
+					connStatusPill.style.color = '#f87171';
+					this._notificationService.error(`SSH Connection Failed: ${errMsg}`);
+				} finally {
+					setButtonsRunningState(false);
+				}
+			};
+
+			const executeCommandSequence = async (mode: 'single' | 'all', targetRowIdx?: number) => {
+				if (isRunningCmd) return;
+				syncCommandsState();
+
+				const interpolatedHost = this._interpolateParameters(sshHost).trim();
+				const interpolatedPort = Number(this._interpolateParameters(String(sshPort || 22)).trim()) || 22;
+				const interpolatedUser = this._interpolateParameters(sshUser).trim() || 'root';
+				const interpolatedPassword = this._interpolateParameters(sshPassword);
+				const interpolatedCwd = this._interpolateParameters(sshCwd).trim() || '~';
+
+				if (!interpolatedHost) {
+					this._notificationService.warn('Please enter the SSH Server IP / Host before running commands.');
+					hostInput.focus();
+					return;
+				}
+
+				let commandsToRun: string[] = [];
+				if (mode === 'single' && targetRowIdx !== undefined) {
+					const rawRowCmd = sshCommands[targetRowIdx] ?? '';
+					commandsToRun = resolveTicketSshCommands([rawRowCmd]);
+					if (commandsToRun.length === 0) {
+						this._notificationService.warn(`Command #${targetRowIdx + 1} is empty.`);
+						cmdInputElements[targetRowIdx]?.focus();
+						return;
+					}
+				} else {
+					commandsToRun = resolveTicketSshCommands(sshCommands);
+					if (commandsToRun.length === 0) {
+						if (!isCmdBarsExpanded) {
+							isCmdBarsExpanded = true;
+							applyCmdBarsExpandedState();
+						}
+						this._notificationService.warn('Please enter at least one SSH command before clicking Run All.');
+						cmdInputElements[0]?.focus();
+						return;
+					}
+				}
+
+				const runtime = this._instantiationService.invokeFunction(accessor => {
+					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+				});
+				if (!runtime) {
+					this._notificationService.error('Ticket workflow runtime service is not available.');
+					return;
+				}
+
+				const totalCmdCount = commandsToRun.length;
+				let liveTranscript = getExistingCleanTerminalTranscript();
+
+				setButtonsRunningState(true, targetRowIdx, mode);
+				sshOutStatusBadge.style.display = 'inline-block';
+				sshOutStatusBadge.textContent = `Running 0/${totalCmdCount}...`;
+				sshOutStatusBadge.style.color = '#fbbf24';
+				connStatusPill.textContent = `Running (${totalCmdCount} cmd${totalCmdCount > 1 ? 's' : ''}) on ${interpolatedUser}@${interpolatedHost}...`;
+				connStatusPill.style.color = '#fbbf24';
+
+				try {
+					const batchRes = await runtime.executeSshBatchCommands({
+						workspaceUri: this._entityUri ? dirname(this._entityUri) : undefined,
+						host: interpolatedHost,
+						port: interpolatedPort,
+						user: interpolatedUser,
+						password: interpolatedPassword,
+						cwd: interpolatedCwd,
+						commands: commandsToRun,
+						outputLines: sshOutputLines,
+						existingTerminalLog: liveTranscript,
+						onCommandProgress: (prog) => {
+							if (prog.phase === 'start') {
+								const shortCmd = prog.command.length > 30 ? prog.command.slice(0, 30) + '...' : prog.command;
+								sshOutStatusBadge.textContent = `Running ${prog.index + 1}/${prog.total}: ${shortCmd}`;
+							} else if (prog.phase === 'done') {
+								if (prog.cwd) {
+									if (!cwdInput.value.trim().includes('{')) {
+										sshCwd = prog.cwd;
+										cwdInput.value = sshCwd;
+									}
+									updatePromptPrefix();
+								}
+								const blockHeader = `${interpolatedUser}@${interpolatedHost}:${prog.cwd || interpolatedCwd || '~'}$ ${prog.command}`;
+								const blockBody = prog.rawOutput || '(Command completed with no stdout)';
+								liveTranscript = liveTranscript
+									? `${liveTranscript}\n\n${blockHeader}\n${blockBody}`
+									: `${blockHeader}\n${blockBody}`;
+								if (liveTranscript.length > 48000) {
+									liveTranscript = '...(earlier terminal history truncated)...\n' + liveTranscript.slice(liveTranscript.length - 44000);
+								}
+								sshOutput = liveTranscript;
+								termViewport.textContent = sshOutput;
+								termViewport.scrollTop = termViewport.scrollHeight;
+
+								if (prog.jsonOutput !== undefined) {
+									hasCompletedCmdRun = true;
+									sshLastOutput = prog.jsonOutput;
+									setSshOutputDisplayContent(sshLastOutput, false);
+								}
+							}
+						}
+					});
+
+					if (batchRes.cwd && !cwdInput.value.trim().includes('{')) {
+						sshCwd = batchRes.cwd;
+						cwdInput.value = sshCwd;
+					}
+					updatePromptPrefix();
+					sshOutput = batchRes.terminalTranscript;
+					termViewport.textContent = sshOutput || termInitialPlaceholder;
+					termViewport.scrollTop = termViewport.scrollHeight;
+
+					lastExecuted = new Date().toLocaleTimeString();
+					lastDurationMs = batchRes.durationMs;
+					hasCompletedCmdRun = true;
+					sshLastRawEntries = batchRes.rawEntries;
+					sshLastRawOutput = batchRes.rawEntries.length > 0 ? batchRes.rawEntries[batchRes.rawEntries.length - 1].rawOutput : '';
+					sshLastOutput = batchRes.jsonOutput;
+					setSshOutputDisplayContent(sshLastOutput, sshLastOutput === '');
+
+					sshOutStatusBadge.style.display = 'inline-block';
+					if (!batchRes.success || batchRes.connectionFailed) {
+						const connErrMsg = batchRes.error || `SSH Connection Failed (${interpolatedUser}@${interpolatedHost}:${interpolatedPort})`;
+						sshOutStatusBadge.textContent = `SSH Connection Failed (${batchRes.durationMs}ms)`;
+						sshOutStatusBadge.style.color = '#f87171';
+						connStatusPill.textContent = `Connection Failed · ${interpolatedHost}:${interpolatedPort}`;
+						connStatusPill.style.color = '#f87171';
+						this._notificationService.error(connErrMsg);
+					} else {
+						sshOutStatusBadge.textContent = `${batchRes.durationMs}ms`;
+						sshOutStatusBadge.style.color = '#10b981';
+						connStatusPill.textContent = `Connected · ${interpolatedUser}@${interpolatedHost}:${interpolatedPort}`;
+						connStatusPill.style.color = '#34d399';
+					}
+					persistState(true);
+				} catch (err: any) {
+					const errMsg = err?.message || String(err);
+					hasCompletedCmdRun = true;
+					sshLastRawEntries = [];
+					sshLastRawOutput = `[SSH Exception] ${errMsg}`;
+					sshLastOutput = JSON.stringify({ error: [errMsg] }, null, 2);
+					setSshOutputDisplayContent(sshLastOutput, false);
+					sshOutStatusBadge.style.display = 'inline-block';
+					sshOutStatusBadge.textContent = 'Exception';
+					sshOutStatusBadge.style.color = '#f87171';
+					connStatusPill.textContent = 'Connection Failed';
+					connStatusPill.style.color = '#f87171';
+					persistState(true);
+				} finally {
+					setButtonsRunningState(false);
+				}
+			};
+
+			const renderCommandRows = () => {
+				syncCommandsState();
+				clearNode(cmdRowsContainer);
+				cmdInputElements.length = 0;
+				cmdRowPromptLabels.length = 0;
+				cmdRowRunButtons.length = 0;
+
+				if (activeCmdRowIdx >= sshCommands.length) {
+					activeCmdRowIdx = Math.max(0, sshCommands.length - 1);
+				}
+
+				const currentPrefix = getPromptPrefixText();
+
+				sshCommands.forEach((cmdVal, rowIdx) => {
+					const rowBar = document.createElement('div');
+					rowBar.className = 'ssh-cmd-row';
+					rowBar.style.cssText = 'display: flex; align-items: center; gap: 7px; padding: 5px 8px; border-radius: 5px; background: #090d16; border: 1px solid rgba(52, 211, 153, 0.28); width: 100%; box-sizing: border-box;';
+					cmdRowsContainer.appendChild(rowBar);
+
+					const seqBadge = document.createElement('span');
+					seqBadge.style.cssText = 'font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 3px; background: rgba(16, 185, 129, 0.16); color: #6ee7b7; border: 1px solid rgba(52, 211, 153, 0.3); font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap; user-select: none; flex-shrink: 0;';
+					seqBadge.title = `Command #${rowIdx + 1} (executed sequentially)`;
+					seqBadge.textContent = `#${rowIdx + 1}`;
+					rowBar.appendChild(seqBadge);
+
+					const rowPromptLbl = document.createElement('span');
+					rowPromptLbl.style.cssText = 'font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; font-weight: 700; color: #34d399; user-select: none; flex-shrink: 0; max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+					rowPromptLbl.textContent = currentPrefix;
+					rowBar.appendChild(rowPromptLbl);
+					cmdRowPromptLabels.push(rowPromptLbl);
+
+					const rowInput = document.createElement('input');
+					rowInput.type = 'text';
+					rowInput.value = cmdVal;
+					rowInput.placeholder = 'Enter Linux command or {Variable} (e.g. cd {dir} && ls -la)...';
+					rowInput.style.cssText = 'flex: 1; min-width: 0; padding: 4px 6px; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; color: #f8fafc; background: transparent; border: none; outline: none;';
+					rowBar.appendChild(rowInput);
+					cmdInputElements.push(rowInput);
+					if (rowIdx === activeCmdRowIdx && activeTargetInput === undefined) {
+						activeTargetInput = rowInput;
+					}
+
+					rowInput.onfocus = () => {
+						activeCmdRowIdx = rowIdx;
+						activeTargetInput = rowInput;
+						rowBar.style.borderColor = '#34d399';
+					};
+					rowInput.onblur = () => {
+						rowBar.style.borderColor = 'rgba(52, 211, 153, 0.28)';
+					};
+					rowInput.oninput = () => {
+						sshCommands[rowIdx] = rowInput.value;
+						sshCommand = sshCommands[0] || '';
+						panelCmdCountBadge.textContent = formatPanelCmdBadgeText();
+						persistState();
+					};
+					rowInput.onkeydown = (ev) => {
+						if (ev.key === 'Enter') {
+							ev.preventDefault();
+							ev.stopPropagation();
+							executeCommandSequence('single', rowIdx);
+						}
+					};
+
+					const rowRunBtn = document.createElement('button');
+					rowRunBtn.type = 'button';
+					rowRunBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; font-size: 11px; font-weight: 700; border-radius: 4px; background: rgba(16, 185, 129, 0.25); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.55); cursor: pointer; flex-shrink: 0; white-space: nowrap;';
+					rowRunBtn.title = `Send & Execute Command #${rowIdx + 1}`;
+					const rowRunLbl = document.createElement('span');
+					rowRunLbl.textContent = '▷ Send';
+					rowRunBtn.appendChild(rowRunLbl);
+					rowBar.appendChild(rowRunBtn);
+					cmdRowRunButtons.push({ btn: rowRunBtn, label: rowRunLbl });
+					rowRunBtn.onmousedown = (ev) => { ev.stopPropagation(); };
+					rowRunBtn.onclick = (ev) => {
+						ev.preventDefault();
+						ev.stopPropagation();
+						executeCommandSequence('single', rowIdx);
+					};
+
+					const rowDelBtn = document.createElement('button');
+					rowDelBtn.type = 'button';
+					rowDelBtn.style.cssText = 'padding: 3px 6px; font-size: 11px; border-radius: 4px; cursor: pointer; background: transparent; border: 1px solid rgba(255, 255, 255, 0.12); color: #94a3b8; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;';
+					rowDelBtn.title = sshCommands.length > 1 ? `Remove Command Bar #${rowIdx + 1}` : 'Clear command';
+					const delIcon = document.createElement('span');
+					delIcon.className = 'codicon codicon-close';
+					delIcon.style.fontSize = '11px';
+					rowDelBtn.appendChild(delIcon);
+					rowBar.appendChild(rowDelBtn);
+					rowDelBtn.onmousedown = (ev) => { ev.stopPropagation(); };
+					rowDelBtn.onclick = (ev) => {
+						ev.preventDefault();
+						ev.stopPropagation();
+						if (isRunningCmd) return;
+						syncCommandsState();
+						if (sshCommands.length > 1) {
+							sshCommands.splice(rowIdx, 1);
+						} else {
+							sshCommands[0] = '';
+						}
+						sshCommand = sshCommands[0] || '';
+						activeTargetInput = undefined;
+						isCmdBarsExpanded = true;
+						applyCmdBarsExpandedState();
+						renderCommandRows();
+						panelCmdCountBadge.textContent = formatPanelCmdBadgeText();
+						persistState(true);
+					};
+				});
+			};
+
+			addCmdRowBtn.onmousedown = (ev) => {
+				ev.stopPropagation();
+			};
+			addCmdRowBtn.onclick = (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				if (isRunningCmd) return;
+				syncCommandsState();
+				sshCommands.push('');
+				activeCmdRowIdx = sshCommands.length - 1;
+				activeTargetInput = undefined;
+				isCmdBarsExpanded = true;
+				applyCmdBarsExpandedState();
+				renderCommandRows();
+				panelCmdCountBadge.textContent = formatPanelCmdBadgeText();
+				const addedInp = cmdInputElements[activeCmdRowIdx];
+				if (addedInp) {
+					activeTargetInput = addedInp;
+					addedInp.focus();
+				}
+				persistState(true);
+			};
+
+			const toggleQuickCmdsExpanded = (ev?: MouseEvent) => {
+				ev?.preventDefault();
+				ev?.stopPropagation();
+				isQuickCmdsExpanded = !isQuickCmdsExpanded;
+				this._sshPanelExpandedByFieldKey.set(sshQuickCmdsStateKey, isQuickCmdsExpanded);
+				renderQuickCommands();
+			};
+
+			const renderQuickCommands = () => {
+				clearNode(catRow);
+				clearNode(chipsWrap);
+				this._sshPanelExpandedByFieldKey.set(sshQuickCmdsStateKey, isQuickCmdsExpanded);
+
+				const categories = ['All'];
+				quickCommands.forEach(qc => {
+					const c = qc.category || 'Custom';
+					if (!categories.includes(c)) categories.push(c);
+				});
+
+				categories.forEach(cat => {
+					const catBtn = document.createElement('button');
+					catBtn.type = 'button';
+					const isAct = activeCategory === cat;
+					catBtn.style.cssText = `padding: 2px 8px; font-size: 10px; font-weight: ${isAct ? '700' : '500'}; border-radius: 10px; cursor: pointer; background: ${isAct ? 'rgba(56, 189, 248, 0.22)' : 'rgba(255,255,255,0.04)'}; color: ${isAct ? '#38bdf8' : 'rgba(255,255,255,0.65)'}; border: 1px solid ${isAct ? 'rgba(56, 189, 248, 0.45)' : 'rgba(255,255,255,0.08)'};`;
+					catBtn.textContent = cat;
+					catBtn.onmousedown = (ev) => { ev.stopPropagation(); };
+					catBtn.onclick = (ev) => {
+						ev.preventDefault();
+						ev.stopPropagation();
+						activeCategory = cat;
+						renderQuickCommands();
+					};
+					catRow.appendChild(catBtn);
+				});
+
+				const filtered = activeCategory === 'All'
+					? quickCommands
+					: quickCommands.filter(q => (q.category || 'Custom') === activeCategory);
+
+				const chipElements: HTMLElement[] = [];
+
+				filtered.forEach(qc => {
+					const chip = document.createElement('div');
+					chip.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 5px; background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.32); color: #a7f3d0; font-size: 11px; cursor: pointer; transition: background 0.15s ease;';
+					chip.title = `${qc.description ? qc.description + '\n' : ''}Click to insert into active command bar: ${qc.command}`;
+					chip.onmouseenter = () => { chip.style.background = 'rgba(16, 185, 129, 0.24)'; };
+					chip.onmouseleave = () => { chip.style.background = 'rgba(16, 185, 129, 0.12)'; };
+
+					const lblSpan = document.createElement('span');
+					lblSpan.style.cssText = 'font-weight: 600; color: #ecfdf5;';
+					lblSpan.textContent = qc.label;
+					chip.appendChild(lblSpan);
+
+					const cmdPreviewSpan = document.createElement('span');
+					cmdPreviewSpan.style.cssText = 'font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; color: #34d399; opacity: 0.9;';
+					cmdPreviewSpan.textContent = qc.command.length > 26 ? qc.command.slice(0, 24) + '…' : qc.command;
+					chip.appendChild(cmdPreviewSpan);
+
+					const delChipBtn = document.createElement('span');
+					delChipBtn.textContent = '×';
+					delChipBtn.title = 'Remove shortcut';
+					delChipBtn.style.cssText = 'margin-left: 2px; font-size: 12px; opacity: 0.55; padding: 0 2px; cursor: pointer;';
+					delChipBtn.onclick = (ev) => {
+						ev.stopPropagation();
+						quickCommands = quickCommands.filter(item => item.id !== qc.id);
+						renderQuickCommands();
+						persistState(true);
+					};
+					chip.appendChild(delChipBtn);
+
+					chip.onmousedown = (ev) => { ev.stopPropagation(); };
+					chip.onclick = (ev) => {
+						ev.preventDefault();
+						ev.stopPropagation();
+						syncCommandsState();
+						if (!isCmdBarsExpanded) {
+							isCmdBarsExpanded = true;
+							applyCmdBarsExpandedState();
+						}
+						let targetIdx = activeCmdRowIdx;
+						if (targetIdx < 0 || targetIdx >= cmdInputElements.length) {
+							targetIdx = Math.max(0, cmdInputElements.length - 1);
+						}
+						const targetInp = cmdInputElements[targetIdx];
+						if (targetInp) {
+							targetInp.value = qc.command;
+							sshCommands[targetIdx] = qc.command;
+							sshCommand = sshCommands[0] || '';
+							activeTargetInput = targetInp;
+							panelCmdCountBadge.textContent = formatPanelCmdBadgeText();
+							persistState();
+							targetInp.focus();
+							targetInp.setSelectionRange(targetInp.value.length, targetInp.value.length);
+						}
+					};
+
+					chipsWrap.appendChild(chip);
+					chipElements.push(chip);
+				});
+
+				// Inline More / Less toggle chip
+				const inlineMoreLessChip = document.createElement('button');
+				inlineMoreLessChip.type = 'button';
+				inlineMoreLessChip.style.cssText = 'display: none; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 12px; font-size: 10.5px; font-weight: 600; background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.42); color: #7dd3fc; cursor: pointer; user-select: none; white-space: nowrap;';
+				inlineMoreLessChip.title = isQuickCmdsExpanded ? 'Collapse quick commands to 2 rows' : 'Expand all quick commands';
+				const inlineMoreLessIcon = document.createElement('span');
+				inlineMoreLessIcon.className = isQuickCmdsExpanded ? 'codicon codicon-chevron-up' : 'codicon codicon-chevron-down';
+				inlineMoreLessIcon.style.fontSize = '10px';
+				inlineMoreLessChip.appendChild(inlineMoreLessIcon);
+				const inlineMoreLessLabel = document.createElement('span');
+				inlineMoreLessLabel.textContent = isQuickCmdsExpanded ? 'Less' : 'More';
+				inlineMoreLessChip.appendChild(inlineMoreLessLabel);
+				inlineMoreLessChip.onmousedown = (ev) => { ev.stopPropagation(); };
+				inlineMoreLessChip.onclick = toggleQuickCmdsExpanded;
+				chipsWrap.appendChild(inlineMoreLessChip);
+
+				const applyTwoRowClamp = () => {
+					if (chipElements.length === 0) {
+						inlineMoreLessChip.style.display = 'none';
+						return;
+					}
+					chipElements.forEach(el => { el.style.display = 'inline-flex'; });
+					inlineMoreLessChip.style.display = 'none';
+
+					if (chipsWrap.clientWidth > 0) {
+						const rowTops: number[] = [];
+						const chipRowIndices: number[] = [];
+						for (let i = 0; i < chipElements.length; i++) {
+							const top = chipElements[i].offsetTop;
+							let rIdx = rowTops.findIndex(rt => Math.abs(rt - top) <= 6);
+							if (rIdx === -1) {
+								rIdx = rowTops.length;
+								rowTops.push(top);
+							}
+							chipRowIndices.push(rIdx);
+						}
+						const hasMoreThanTwoRows = rowTops.length > 2;
+						if (!hasMoreThanTwoRows) {
+							inlineMoreLessChip.style.display = 'none';
+							return;
+						}
+						inlineMoreLessIcon.className = isQuickCmdsExpanded ? 'codicon codicon-chevron-up' : 'codicon codicon-chevron-down';
+						inlineMoreLessLabel.textContent = isQuickCmdsExpanded ? 'Less' : 'More';
+						inlineMoreLessChip.style.display = 'inline-flex';
+
+						if (!isQuickCmdsExpanded) {
+							let lastVisibleIdx = -1;
+							for (let i = 0; i < chipElements.length; i++) {
+								if (chipRowIndices[i] >= 2) {
+									chipElements[i].style.display = 'none';
+								} else {
+									lastVisibleIdx = i;
+								}
+							}
+							const secondRowTop = rowTops[1];
+							while (lastVisibleIdx > 0 && inlineMoreLessChip.offsetTop > secondRowTop + 6) {
+								chipElements[lastVisibleIdx].style.display = 'none';
+								lastVisibleIdx--;
+							}
+						}
+					} else {
+						const defaultTwoRowLimit = 8;
+						const hasMore = chipElements.length > defaultTwoRowLimit;
+						inlineMoreLessIcon.className = isQuickCmdsExpanded ? 'codicon codicon-chevron-up' : 'codicon codicon-chevron-down';
+						inlineMoreLessLabel.textContent = isQuickCmdsExpanded ? 'Less' : 'More';
+						inlineMoreLessChip.style.display = hasMore ? 'inline-flex' : 'none';
+						if (hasMore && !isQuickCmdsExpanded) {
+							for (let i = defaultTwoRowLimit - 1; i < chipElements.length; i++) {
+								chipElements[i].style.display = 'none';
+							}
+						}
+					}
+				};
+
+				applyTwoRowClamp();
+				if (isCmdBarsExpanded && chipsWrap.clientWidth === 0) {
+					requestAnimationFrame(() => applyTwoRowClamp());
+				}
+			};
+
+			const applyOperationPanelExpandedState = () => {
+				this._sshPanelExpandedByFieldKey.set(sshPanelStateKey, isOperationPanelExpanded);
+				if (isOperationPanelExpanded) {
+					sshCollapsibleBody.style.display = 'flex';
+					panelChevronIcon.className = 'codicon codicon-chevron-down';
+					termViewport.scrollTop = termViewport.scrollHeight;
+				} else {
+					sshCollapsibleBody.style.display = 'none';
+					panelChevronIcon.className = 'codicon codicon-chevron-right';
+				}
+			};
+			const toggleOperationPanel = (ev?: MouseEvent) => {
+				ev?.preventDefault();
+				ev?.stopPropagation();
+				isOperationPanelExpanded = !isOperationPanelExpanded;
+				applyOperationPanelExpandedState();
+			};
+			sshPanelToggleBar.onclick = toggleOperationPanel;
+			sshCollapsibleBody.onclick = (ev) => {
+				ev.stopPropagation();
+			};
+
+			refreshQuickCommandsOnExpand = renderQuickCommands;
+			renderCommandRows();
+			renderQuickCommands();
+			applyOperationPanelExpandedState();
+
+			addQuickToggleBtn.onclick = (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				const isHidden = addQuickForm.style.display === 'none';
+				addQuickForm.style.display = isHidden ? 'flex' : 'none';
+				if (isHidden) newQuickLabelInp.focus();
+			};
+
+			saveQuickBtn.onclick = (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				const lbl = newQuickLabelInp.value.trim();
+				const cmd = newQuickCmdInp.value.trim();
+				if (!lbl || !cmd) {
+					this._notificationService.warn('Please provide both a shortcut label and a Linux command.');
+					return;
+				}
+				quickCommands.push({
+					id: `qc_${Date.now()}`,
+					label: lbl,
+					command: cmd,
+					category: newQuickCatSelect.value || 'Custom'
+				});
+				newQuickLabelInp.value = '';
+				newQuickCmdInp.value = '';
+				addQuickForm.style.display = 'none';
+				renderQuickCommands();
+				persistState(true);
+			};
+
+			resetQuickBtn.onclick = (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				quickCommands = SSH_DEFAULT_QUICK_COMMANDS.map(c => ({ ...c }));
+				activeCategory = 'All';
+				renderQuickCommands();
+				persistState(true);
+				this._notificationService.info('Restored default common Linux quick commands.');
+			};
+
+			runAllCmdsBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); executeCommandSequence('all'); };
+			testConnBtn.onclick = (ev) => { ev.preventDefault(); ev.stopPropagation(); executeConnectCheck(); };
+
+			openIdeTermBtn.onclick = async (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				const interpolatedHost = this._interpolateParameters(sshHost).trim();
+				const interpolatedPort = Number(this._interpolateParameters(String(sshPort || 22)).trim()) || 22;
+				const interpolatedUser = this._interpolateParameters(sshUser).trim() || 'root';
+				const interpolatedPassword = this._interpolateParameters(sshPassword);
+				const interpolatedCwd = this._interpolateParameters(sshCwd).trim() || '~';
+				if (!interpolatedHost) {
+					this._notificationService.warn('Please enter the SSH Server IP / Host first.');
+					hostInput.focus();
+					return;
+				}
+				const runtime = this._instantiationService.invokeFunction(accessor => {
+					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+				});
+				if (!runtime) {
+					this._notificationService.error('Ticket workflow runtime service is not available.');
+					return;
+				}
+				await runtime.openInteractiveSshTerminal({
+					host: interpolatedHost,
+					port: interpolatedPort,
+					user: interpolatedUser,
+					password: interpolatedPassword,
+					cwd: interpolatedCwd
+				});
+			};
+
+			copyTermBtn.onclick = async (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				const text = (sshOutput || '').trim();
+				if (!text) {
+					this._notificationService.warn('Terminal screen is empty.');
+					return;
+				}
+				await this._clipboardService.writeText(text);
+				this._notificationService.info('Terminal screen content copied to clipboard.');
+			};
+
+			clearTermBtn.onclick = (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				sshOutput = '';
+				termViewport.textContent = termInitialPlaceholder;
+				persistState(true);
+			};
+
+			copySshOutBtn.onclick = async (ev) => {
+				ev.preventDefault();
+				ev.stopPropagation();
+				const out = (sshLastOutput ?? '').trim();
+				if (!out) {
+					this._notificationService.warn('SSH JSON Output is empty.');
+					return;
+				}
+				await this._clipboardService.writeText(out);
+				this._notificationService.info(`SSH JSON Output copied to clipboard (Last ${sshOutputLines} lines/cmd).`);
+			};
+
+			clearSshOutBtn.onclick = () => {
+				hasCompletedCmdRun = false;
+				sshLastRawEntries = [];
+				sshLastRawOutput = '';
+				sshLastOutput = '';
+				setSshOutputDisplayContent(undefined, false);
+				sshOutStatusBadge.style.display = 'none';
+				persistState(true);
+			};
+		}
+	}
+
 	private _hydratePythonPrimitiveCards(): void {
 		if (!this._container) return;
 		const cards = Array.from(this._container.querySelectorAll('.python-primitive-card')) as HTMLElement[];
@@ -12558,9 +15750,9 @@ ${rawErr}
 			if (this._entityUri) {
 				try {
 					resolvedWsRoot = await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri);
-				} catch {}
+				} catch { }
 			}
-			const workspaceUri = this._previewWorkspaceUri || resolvedWsRoot || this._entityUri;
+			const workspaceUri = (this as any)._previewWorkspaceUri || resolvedWsRoot || this._entityUri;
 			const effectiveEntityUri = this._isPreviewMode ? (workspaceUri || this._entityUri) : this._entityUri;
 			if (!workspaceUri || !effectiveEntityUri) {
 				throw new Error('No active ticket or workspace selected.');
@@ -12585,7 +15777,7 @@ ${rawErr}
 						ticketContext[key] = val;
 					}
 				});
-			} catch {}
+			} catch { }
 
 			if (this._lastCustomModule?.fields) {
 				for (const f of this._lastCustomModule.fields) {
@@ -12604,7 +15796,7 @@ ${rawErr}
 								if (parsedP && typeof parsedP === 'object' && !Array.isArray(parsedP)) {
 									Object.assign(pMap, parsedP);
 								}
-							} catch {}
+							} catch { }
 						}
 						if (this._container) {
 							const pInputs = this._container.querySelectorAll('.ticket-parameter-input') as NodeListOf<HTMLInputElement | HTMLSelectElement>;
@@ -12631,7 +15823,7 @@ ${rawErr}
 											sqlOutput: ticketContext[`${tKey}.sqlOutput`] || ''
 										};
 									}
-								} catch {}
+								} catch { }
 							}
 						}
 					}
@@ -12747,7 +15939,7 @@ ${rawErr}
 			}
 			let wsRoot: URI | undefined;
 			if (this._entityUri) {
-				try { wsRoot = await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri); } catch {}
+				try { wsRoot = await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri); } catch { }
 			}
 			const workspaceUri = wsRoot || this._entityUri;
 			if (!workspaceUri) {
@@ -12801,7 +15993,7 @@ ${rawErr}
 			if (uris && uris.length > 0) {
 				let wsUri: URI | undefined = this._entityUri;
 				if (this._entityUri) {
-					try { wsUri = (await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri)) || this._entityUri; } catch {}
+					try { wsUri = (await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri)) || this._entityUri; } catch { }
 				}
 				const currentScripts = this._getCardExternalScripts(card);
 				for (const u of uris) {
@@ -12866,7 +16058,7 @@ ${rawErr}
 				const pickedUri = uris[0];
 				let wsUri: URI | undefined = this._entityUri;
 				if (this._entityUri) {
-					try { wsUri = (await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri)) || this._entityUri; } catch {}
+					try { wsUri = (await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri)) || this._entityUri; } catch { }
 				}
 				let finalPath = pickedUri.fsPath;
 				if (wsUri && finalPath.startsWith(wsUri.fsPath)) {
@@ -12907,7 +16099,7 @@ ${rawErr}
 			}
 			let wsRoot: URI | undefined;
 			if (this._entityUri) {
-				try { wsRoot = await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri); } catch {}
+				try { wsRoot = await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri); } catch { }
 			}
 			const workspaceUri = wsRoot || this._entityUri;
 			if (!workspaceUri) {
@@ -12983,10 +16175,6 @@ ${rawErr}
 				await this._setResultCardContent(card, fieldKey, output);
 			}
 		}
-	}
-
-	private async _autoUpdateResultPrimitives(output: string): Promise<void> {
-		await this._autoUpdateOutputPrimitives(output);
 	}
 
 	private _getOutputPaginationState(stateKey: string): { page: number; pageSize: number } {
@@ -13102,7 +16290,7 @@ ${rawErr}
 		let currentData: Record<string, unknown> = {};
 		const rawVal = this._lastParsedData?.customMetadata?.[fieldKey];
 		if (typeof rawVal === 'string') {
-			try { currentData = JSON.parse(rawVal); } catch {}
+			try { currentData = JSON.parse(rawVal); } catch { }
 		} else if (typeof rawVal === 'object' && rawVal !== null) {
 			currentData = rawVal as Record<string, unknown>;
 		}
@@ -13138,7 +16326,7 @@ ${rawErr}
 		let currentData: Record<string, unknown> = {};
 		const rawVal = this._lastParsedData?.customMetadata?.[fieldKey];
 		if (typeof rawVal === 'string') {
-			try { currentData = JSON.parse(rawVal); } catch {}
+			try { currentData = JSON.parse(rawVal); } catch { }
 		} else if (typeof rawVal === 'object' && rawVal !== null) {
 			currentData = rawVal as Record<string, unknown>;
 		}
@@ -13176,7 +16364,7 @@ ${rawErr}
 		let currentData: Record<string, unknown> = {};
 		const rawVal = this._lastParsedData?.customMetadata?.[fieldKey];
 		if (typeof rawVal === 'string') {
-			try { currentData = JSON.parse(rawVal); } catch {}
+			try { currentData = JSON.parse(rawVal); } catch { }
 		} else if (typeof rawVal === 'object' && rawVal !== null) {
 			currentData = rawVal as Record<string, unknown>;
 		}
@@ -13233,7 +16421,7 @@ ${rawErr}
 							if (Array.isArray(tObj.rows) && tObj.rows.length > 0) {
 								resolvedText = JSON.stringify(tObj.rows, null, 2);
 							}
-						} catch {}
+						} catch { }
 						if (!resolvedText && sqlContent && sqlContent.style.fontStyle !== 'italic' && !sqlContent.textContent?.startsWith('No SQL execution output yet.')) {
 							resolvedText = sqlContent.textContent || '';
 						}
@@ -13404,7 +16592,7 @@ ${rawErr}
 			} catch {
 				const jsonMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
 				if (jsonMatch) {
-					try { jsonObj = JSON.parse(jsonMatch[1]); } catch {}
+					try { jsonObj = JSON.parse(jsonMatch[1]); } catch { }
 				}
 			}
 		}
@@ -13565,7 +16753,7 @@ ${rawErr}
 		} catch {
 			const m = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
 			if (m) {
-				try { parsed = JSON.parse(m[1]); } catch {}
+				try { parsed = JSON.parse(m[1]); } catch { }
 			}
 		}
 
@@ -13617,7 +16805,7 @@ ${rawErr}
 						: '';
 					return `${paginationBar}<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(formatted + noteFooter)}</pre>`;
 				}
-			} catch {}
+			} catch { }
 		}
 		return `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(trimmed)}</pre>`;
 	}
@@ -13639,7 +16827,7 @@ ${rawErr}
 			} catch {
 				const m = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
 				if (m) {
-					try { jsonObj = JSON.parse(m[1]); } catch {}
+					try { jsonObj = JSON.parse(m[1]); } catch { }
 				}
 			}
 		}
@@ -13647,7 +16835,7 @@ ${rawErr}
 		if (jsonObj) {
 			const rows = Array.isArray(jsonObj) ? jsonObj : (Array.isArray(jsonObj.data) ? jsonObj.data : (Array.isArray(jsonObj.items) ? jsonObj.items : (Array.isArray(jsonObj.results) ? jsonObj.results : null)));
 			if (rows && rows.length > 0 && typeof rows[0] === 'object' && rows[0] !== null) {
-				const headers = Array.from(new Set(rows.flatMap(r => typeof r === 'object' && r !== null ? Object.keys(r) : [])));
+				const headers = Array.from(new Set(rows.flatMap((r: any) => typeof r === 'object' && r !== null ? Object.keys(r) : [])));
 				const escapeCsv = (val: any) => {
 					const str = val !== undefined && val !== null ? String(val) : '';
 					if (str.includes(',') || str.includes('"') || str.includes('\n')) {
@@ -13656,8 +16844,8 @@ ${rawErr}
 					return str;
 				};
 				csv += headers.map(escapeCsv).join(',') + '\n';
-				rows.forEach(r => {
-					csv += headers.map(h => escapeCsv(r[h])).join(',') + '\n';
+				rows.forEach((r: any) => {
+					csv += headers.map((h: any) => escapeCsv((r as any)[h])).join(',') + '\n';
 				});
 			}
 		}
@@ -13722,7 +16910,7 @@ ${rawErr}
 			return;
 		}
 
-		const agentName = agentSelect.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || 'AI Agent';
+		const agentName = agentSelect?.selectedOptions?.[0]?.textContent?.split('(')[0]?.trim() || 'AI Agent';
 		const taskTitle = `Task (${fieldKey}): ${this._lastParsedData?.title || 'Ticket Task'}`;
 		const sentSnapshot = this._buildSentPromptSnapshot(card, fieldKey, true);
 		card.setAttribute('data-last-sent-payload', JSON.stringify(sentSnapshot));
@@ -13985,11 +17173,13 @@ ${interpolatedPrompt}`;
 			gitRemoteUrl?: string;
 			gitBranch?: string;
 			parameters?: IParameterDefinition[];
-			outputSpecs?: IOutputSpec[];
+			outputSpecs?: any[];
 			defaultFormat?: string;
 			defaultContent?: string;
 			promptPreInjectedVisible?: boolean;
+			promptUserInputVisible?: boolean;
 			defaultUserPrompt?: string;
+			defaultUserPrompts?: string[];
 			targetMode?: 'model' | 'agent';
 			targetModel?: string;
 			targetProvider?: string;
@@ -14003,6 +17193,13 @@ ${interpolatedPrompt}`;
 			ttsShowSpeechTextInTicket?: boolean;
 			ttsAudioDataUrl?: string;
 			ttsPlaybackRate?: number;
+			mediaFilePath?: string;
+			mediaFileName?: string;
+			mediaKind?: string;
+			mediaMimeType?: string;
+			mediaPlaybackRate?: number;
+			mediaAutoPlay?: boolean;
+			debugSqlOutput?: boolean;
 			id?: string;
 			pythonPath?: string;
 			pythonCode?: string;
@@ -14014,6 +17211,19 @@ ${interpolatedPrompt}`;
 			tableAutoSyncDb?: boolean;
 			tableSqlQuery?: string;
 			tablePageSize?: number;
+			sshHost?: string;
+			sshPort?: number | string;
+			sshUser?: string;
+			sshPassword?: string;
+			sshCwd?: string;
+			sshCommand?: string;
+			sshCommands?: string[];
+			sshOutput?: string;
+			sshLastRawOutput?: string;
+			sshLastRawEntries?: ISshRawCommandEntry[];
+			sshLastOutput?: string;
+			sshOutputLines?: number;
+			sshQuickCommands?: ISshQuickCommand[];
 		}
 
 		const fieldsToRender: IRenderField[] = [];
@@ -14158,7 +17368,20 @@ ${interpolatedPrompt}`;
 					tableDbTableName: (f as any).tableDbTableName,
 					tableAutoSyncDb: (f as any).tableAutoSyncDb,
 					tableSqlQuery: (f as any).tableSqlQuery,
-					tablePageSize: (f as any).tablePageSize
+					tablePageSize: (f as any).tablePageSize,
+					sshHost: (f as any).sshHost,
+					sshPort: (f as any).sshPort,
+					sshUser: (f as any).sshUser,
+					sshPassword: (f as any).sshPassword,
+					sshCwd: (f as any).sshCwd,
+					sshCommand: (f as any).sshCommand,
+					sshCommands: (f as any).sshCommands,
+					sshOutput: (f as any).sshOutput,
+					sshLastRawOutput: (f as any).sshLastRawOutput,
+					sshLastRawEntries: (f as any).sshLastRawEntries,
+					sshLastOutput: (f as any).sshLastOutput,
+					sshOutputLines: (f as any).sshOutputLines,
+					sshQuickCommands: (f as any).sshQuickCommands
 				});
 			}
 		} else {
@@ -14198,6 +17421,10 @@ ${interpolatedPrompt}`;
 								fType = 'python';
 							} else if (parsedCheck.url !== undefined && Array.isArray(parsedCheck.credentials)) {
 								fType = 'browser';
+							} else if (parsedCheck.method !== undefined && parsedCheck.url !== undefined && (parsedCheck.authType !== undefined || parsedCheck.headers !== undefined || parsedCheck.params !== undefined)) {
+								fType = 'http_request';
+							} else if (parsedCheck.host !== undefined && (parsedCheck.port !== undefined || parsedCheck.quickCommands !== undefined || parsedCheck.sshHost !== undefined)) {
+								fType = 'ssh';
 							}
 						}
 					} catch { }
@@ -14280,7 +17507,7 @@ ${interpolatedPrompt}`;
 							if (Array.isArray(parsed)) {
 								parsedArray = parsed;
 							}
-						} catch {}
+						} catch { }
 					} else if (Array.isArray(v)) {
 						parsedArray = v;
 					} else {
@@ -14296,10 +17523,10 @@ ${interpolatedPrompt}`;
 						parsedArray.forEach((item: any, idx: number) => {
 							const idxNum = item._index || (idx + 1);
 							const itemTitle = item._title || item.title || item.name || item.company || `Entry #${idxNum}`;
-							
+
 							let itemSubFieldsView = '';
 							const itemEntries = Object.entries(item).filter(([subK]) => subK !== '_index' && subK !== '_title');
-							
+
 							if (itemEntries.length === 0) {
 								itemSubFieldsView = '<div style="opacity: 0.5; font-size: 0.85em;">No sub-fields recorded.</div>';
 							} else {
@@ -14312,20 +17539,22 @@ ${interpolatedPrompt}`;
 										<div class="dynamic-subfield-row" style="margin-bottom: 6px; display: flex; flex-direction: ${isLong ? 'column' : 'row'}; gap: ${isLong ? '4px' : '8px'}; align-items: ${isLong ? 'flex-start' : 'center'}; justify-content: space-between;">
 											<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
 												<span style="font-size: 0.82em; font-weight: 600; opacity: 0.7; text-transform: uppercase; letter-spacing: 0.04em;">${subK}:</span>
-												${isDateOrRange ? `
-													<span class="range-badge" style="font-size: 0.82em; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 4px;">
-														${subVal}
-													</span>
-												` : (!isLong ? `
-													<span style="font-size: 0.9em; font-weight: 500; color: var(--vscode-editor-foreground);">${subVal || '<span style="opacity:0.4; font-style:italic;">None</span>'}</span>
-												` : '')}
+												<div class="dynamic-subfield-val" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-item-idx="${idx}" data-sub-key="${this._escapeHtmlAttr(subK)}" data-multiline="false" style="cursor: text; display: inline-block;" title="Click to edit ${this._escapeHtmlAttr(subK)} manually">
+													${isDateOrRange ? `
+														<span class="range-badge" style="font-size: 0.82em; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 4px;">
+															${subVal}
+														</span>
+													` : `
+														<span style="font-size: 0.9em; font-weight: 500; color: var(--vscode-editor-foreground);">${subVal || '<span style="opacity:0.4; font-style:italic;">None</span>'}</span>
+													`}
+												</div>
 											</div>
 											<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}/${idxNum}/${subK}" data-ai-field-type="${isDateOrRange ? 'date_range' : (isLong ? 'textarea' : 'text')}" data-ai-field-label="${subK}" data-ai-current-value="${this._escapeHtmlAttr(subVal)}" title="Edit ${subK} with AI" style="padding: 2px 5px; font-size: 0.75em;">
 												<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 											</button>
 										</div>
 										${isLong ? `
-											<div class="desc-content-box" style="margin-top: 2px; margin-bottom: 8px; font-size: 0.88em; padding: 8px 12px;">
+											<div class="dynamic-subfield-val desc-content-box" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-item-idx="${idx}" data-sub-key="${this._escapeHtmlAttr(subK)}" data-multiline="true" style="margin-top: 2px; margin-bottom: 8px; font-size: 0.88em; padding: 8px 12px; cursor: text;" title="Click to edit ${this._escapeHtmlAttr(subK)} manually">
 												${this._markdownToHtml(subVal)}
 											</div>
 										` : ''}
@@ -14381,7 +17610,7 @@ ${interpolatedPrompt}`;
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
-							<div class="custom-field-view" style="display: flex; align-items: center; gap: 10px; padding: 6px 0;">
+							<div class="custom-field-view custom-switch-view" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-current-val="${isChecked ? 'true' : 'false'}" style="display: flex; align-items: center; gap: 10px; padding: 6px 0; cursor: pointer;" title="Click to toggle ${this._escapeHtmlAttr(k)}">
 								<div style="width: 36px; height: 20px; border-radius: 10px; background: ${isChecked ? '#10b981' : 'rgba(255,255,255,0.14)'}; position: relative; border: 1px solid ${isChecked ? '#059669' : 'rgba(255,255,255,0.2)'};">
 									<div style="width: 14px; height: 14px; border-radius: 50%; background: #fff; position: absolute; top: 2px; left: ${isChecked ? '18px' : '2px'}; box-shadow: 0 1px 3px rgba(0,0,0,0.4);"></div>
 								</div>
@@ -14403,13 +17632,13 @@ ${interpolatedPrompt}`;
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
-							<div class="custom-field-view" style="padding: 4px 0;">
+							<div class="custom-field-view custom-select-view" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-select-options="${this._escapeHtmlAttr(JSON.stringify(fieldItem.options || []))}" data-current-val="${this._escapeHtmlAttr(String(v || ''))}" style="padding: 4px 0; cursor: pointer;" title="Click to change ${this._escapeHtmlAttr(k)}">
 								${v ? `
 									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #93c5fd; border: 1px solid rgba(59,130,246,0.25); font-size: 0.9em; font-weight: 500;">
 										<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M3 9.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z"/></svg>
 										${v}
 									</span>
-								` : '<span style="opacity: 0.45; font-style: italic;">No option selected.</span>'}
+								` : '<span style="opacity: 0.45; font-style: italic;">No option selected. Click to select.</span>'}
 							</div>
 						</div>
 					`;
@@ -14420,7 +17649,7 @@ ${interpolatedPrompt}`;
 					} else if (typeof v === 'string') {
 						const tr = v.trim();
 						if (tr.startsWith('[')) {
-							try { selectedArr = JSON.parse(tr); } catch {}
+							try { selectedArr = JSON.parse(tr); } catch { }
 						} else if (tr && tr !== 'None' && tr !== 'null' && tr !== 'undefined') {
 							selectedArr = tr.split(',').map(s => s.trim()).filter(Boolean);
 						}
@@ -14606,12 +17835,12 @@ ${interpolatedPrompt}`;
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
-							<div class="custom-field-view" style="padding: 4px 0;">
+							<div class="custom-field-view number-field-view" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-multiline="false" style="padding: 4px 0; cursor: text;" title="Click to edit ${this._escapeHtmlAttr(k)} manually">
 								${formattedVal ? `
 									<div style="display: inline-flex; align-items: baseline; gap: 6px; background: rgba(234, 179, 8, 0.08); border: 1px solid rgba(234, 179, 8, 0.25); border-radius: 6px; padding: 6px 14px;">
 										<span style="font-size: 1.25em; font-weight: 700; color: #facc15; font-variant-numeric: tabular-nums;">${formattedVal}</span>
 									</div>
-								` : '<span style="opacity: 0.45; font-style: italic;">No number set.</span>'}
+								` : '<span style="opacity: 0.45; font-style: italic;">No number set. Click to edit.</span>'}
 							</div>
 						</div>
 					`;
@@ -14821,8 +18050,8 @@ ${interpolatedPrompt}`;
 						hiddenChipsHtml = `
 							<span class="python-ctx-hidden-group" style="display: none;">
 								${hiddenExprs.map(expr => {
-									return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="${this._escapeHtmlAttr(expr)}" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert ${this._escapeHtmlAttr(expr)}">+ ${this._escapeHtml(expr)}</button>`;
-								}).join('')}
+							return `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="${this._escapeHtmlAttr(expr)}" data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert ${this._escapeHtmlAttr(expr)}">+ ${this._escapeHtml(expr)}</button>`;
+						}).join('')}
 							</span>
 						`;
 						moreBtnHtml = `<button type="button" class="python-ctx-more-btn" data-count="${hiddenExprs.length}" style="padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;" title="Toggle more context fields">+${hiddenExprs.length} More...</button>`;
@@ -15170,7 +18399,7 @@ ${interpolatedPrompt}`;
 									if (pObj.output) promptOutput = typeof pObj.output === 'string' ? pObj.output : JSON.stringify(pObj.output);
 									if (pObj.lastExecuted) lastExecutedText = String(pObj.lastExecuted);
 									if (pObj.lastSentPayload && typeof pObj.lastSentPayload === 'object') {
-										try { lastSentPayloadJson = JSON.stringify(pObj.lastSentPayload); } catch {}
+										try { lastSentPayloadJson = JSON.stringify(pObj.lastSentPayload); } catch { }
 									}
 								} catch {
 									if (!preInjectedPrompt && trimmed !== preInjectedPrompt.trim()) {
@@ -15213,7 +18442,7 @@ ${interpolatedPrompt}`;
 							if (obj.output) { promptOutput = typeof obj.output === 'string' ? obj.output : JSON.stringify(obj.output); }
 							if (obj.lastExecuted) { lastExecutedText = String(obj.lastExecuted); }
 							if (obj.lastSentPayload && typeof obj.lastSentPayload === 'object') {
-								try { lastSentPayloadJson = JSON.stringify(obj.lastSentPayload); } catch {}
+								try { lastSentPayloadJson = JSON.stringify(obj.lastSentPayload); } catch { }
 							}
 						}
 					}
@@ -15800,7 +19029,7 @@ ${userPromptSectionHtml}
 					let tableName: string = fieldItem.tableDbTableName || rawKey.toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'ticket_table';
 					let autoSyncDb: boolean = Boolean(fieldItem.tableAutoSyncDb);
 					let sqlQuery: string = fieldItem.tableSqlQuery || '';
-					let sqlOutput: string = fieldItem.debugSqlOutput || '';
+					let sqlOutput: string = String(fieldItem.debugSqlOutput || '');
 					let pageSize: number = fieldItem.tablePageSize && fieldItem.tablePageSize > 0 ? fieldItem.tablePageSize : 10;
 					let lastSynced: string = '';
 
@@ -15820,12 +19049,12 @@ ${userPromptSectionHtml}
 									if (pObj.sqlOutput !== undefined) sqlOutput = String(pObj.sqlOutput);
 									if (Number(pObj.pageSize) > 0) pageSize = Number(pObj.pageSize);
 									if (pObj.lastSynced) lastSynced = String(pObj.lastSynced);
-								} catch {}
+								} catch { }
 							} else if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
 								try {
 									const arr = JSON.parse(trimmed);
 									if (Array.isArray(arr)) tableRows = arr;
-								} catch {}
+								} catch { }
 							}
 						} else if (typeof v === 'object' && v !== null) {
 							if (Array.isArray((v as any).columns) && (v as any).columns.length > 0) tableColumns = (v as any).columns;
@@ -15870,7 +19099,7 @@ ${userPromptSectionHtml}
 											}
 										});
 									}
-								} catch {}
+								} catch { }
 							}
 						}
 					});
@@ -15914,12 +19143,142 @@ ${userPromptSectionHtml}
 							<div class="custom-field-view table-card-mount" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;"></div>
 						</div>
 					`;
+				} else if (fType === 'ssh') {
+					let sshHost: string = fieldItem.sshHost || '';
+					let sshPort: number | string = fieldItem.sshPort || 22;
+					let sshUser: string = fieldItem.sshUser || 'root';
+					let sshPassword: string = fieldItem.sshPassword || '';
+					let sshCwd: string = fieldItem.sshCwd || '~';
+					let sshCommands: string[] = normalizeSshCommandsList(fieldItem.sshCommands, fieldItem.sshCommand || fieldItem.defaultContent || '');
+					let sshOutput: string = fieldItem.sshOutput || '';
+					let sshLastRawOutput: string | undefined = fieldItem.sshLastRawOutput !== undefined ? String(fieldItem.sshLastRawOutput) : undefined;
+					let sshLastRawEntries: ISshRawCommandEntry[] = Array.isArray(fieldItem.sshLastRawEntries) ? fieldItem.sshLastRawEntries : [];
+					let sshLastOutput: string | undefined = fieldItem.sshLastOutput !== undefined ? String(fieldItem.sshLastOutput) : undefined;
+					let sshOutputLines: number = typeof fieldItem.sshOutputLines === 'number' && fieldItem.sshOutputLines > 0 ? fieldItem.sshOutputLines : 50;
+					let sshQuickCommands: ISshQuickCommand[] = normalizeSshQuickCommands(fieldItem.sshQuickCommands);
+					let lastExecuted: string = '';
+
+					if (v) {
+						if (typeof v === 'string') {
+							const trimmed = v.trim();
+							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+								try {
+									const pObj = JSON.parse(trimmed);
+									if (pObj.host !== undefined || pObj.sshHost !== undefined) sshHost = String(pObj.host ?? pObj.sshHost ?? '');
+									if (pObj.port !== undefined || pObj.sshPort !== undefined) sshPort = pObj.port ?? pObj.sshPort ?? 22;
+									if (pObj.user !== undefined || pObj.sshUser !== undefined) sshUser = String(pObj.user ?? pObj.sshUser ?? 'root');
+									if (pObj.password !== undefined || pObj.sshPassword !== undefined) sshPassword = String(pObj.password ?? pObj.sshPassword ?? '');
+									if (pObj.cwd !== undefined || pObj.sshCwd !== undefined) sshCwd = String(pObj.cwd ?? pObj.sshCwd ?? '~');
+									if (Array.isArray(pObj.commands) || Array.isArray(pObj.sshCommands)) {
+										sshCommands = normalizeSshCommandsList(pObj.commands ?? pObj.sshCommands);
+									} else if (pObj.command !== undefined || pObj.sshCommand !== undefined) {
+										sshCommands = normalizeSshCommandsList(undefined, String(pObj.command ?? pObj.sshCommand ?? ''));
+									}
+									if (pObj.output !== undefined || pObj.sshOutput !== undefined) sshOutput = String(pObj.output ?? pObj.sshOutput ?? '');
+									if (pObj.lastRawOutput !== undefined || pObj.sshLastRawOutput !== undefined) {
+										sshLastRawOutput = String(pObj.lastRawOutput ?? pObj.sshLastRawOutput ?? '');
+									}
+									if (Array.isArray(pObj.lastRawEntries) || Array.isArray(pObj.sshLastRawEntries)) {
+										sshLastRawEntries = pObj.lastRawEntries ?? pObj.sshLastRawEntries;
+									}
+									if (pObj.lastNOutput !== undefined || pObj.sshLastOutput !== undefined) {
+										sshLastOutput = String(pObj.lastNOutput ?? pObj.sshLastOutput ?? '');
+									}
+									if (pObj.outputLines !== undefined || pObj.sshOutputLines !== undefined) {
+										const parsedN = Number(pObj.outputLines ?? pObj.sshOutputLines);
+										if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+									}
+									if (Array.isArray(pObj.quickCommands) && pObj.quickCommands.length > 0) {
+										sshQuickCommands = normalizeSshQuickCommands(pObj.quickCommands);
+									} else if (Array.isArray(pObj.sshQuickCommands) && pObj.sshQuickCommands.length > 0) {
+										sshQuickCommands = normalizeSshQuickCommands(pObj.sshQuickCommands);
+									}
+									if (pObj.lastExecuted) lastExecuted = String(pObj.lastExecuted);
+								} catch { }
+							} else {
+								sshCommands = [trimmed];
+							}
+						} else if (Array.isArray(v)) {
+							sshCommands = normalizeSshCommandsList(v);
+						} else if (typeof v === 'object' && v !== null) {
+							const pObj = v as any;
+							if (pObj.host !== undefined || pObj.sshHost !== undefined) sshHost = String(pObj.host ?? pObj.sshHost ?? '');
+							if (pObj.port !== undefined || pObj.sshPort !== undefined) sshPort = pObj.port ?? pObj.sshPort ?? 22;
+							if (pObj.user !== undefined || pObj.sshUser !== undefined) sshUser = String(pObj.user ?? pObj.sshUser ?? 'root');
+							if (pObj.password !== undefined || pObj.sshPassword !== undefined) sshPassword = String(pObj.password ?? pObj.sshPassword ?? '');
+							if (pObj.cwd !== undefined || pObj.sshCwd !== undefined) sshCwd = String(pObj.cwd ?? pObj.sshCwd ?? '~');
+							if (Array.isArray(pObj.commands) || Array.isArray(pObj.sshCommands)) {
+								sshCommands = normalizeSshCommandsList(pObj.commands ?? pObj.sshCommands);
+							} else if (pObj.command !== undefined || pObj.sshCommand !== undefined) {
+								sshCommands = normalizeSshCommandsList(undefined, String(pObj.command ?? pObj.sshCommand ?? ''));
+							}
+							if (pObj.output !== undefined || pObj.sshOutput !== undefined) sshOutput = String(pObj.output ?? pObj.sshOutput ?? '');
+							if (pObj.lastRawOutput !== undefined || pObj.sshLastRawOutput !== undefined) {
+								sshLastRawOutput = String(pObj.lastRawOutput ?? pObj.sshLastRawOutput ?? '');
+							}
+							if (Array.isArray(pObj.lastRawEntries) || Array.isArray(pObj.sshLastRawEntries)) {
+								sshLastRawEntries = pObj.lastRawEntries ?? pObj.sshLastRawEntries;
+							}
+							if (pObj.lastNOutput !== undefined || pObj.sshLastOutput !== undefined) {
+								sshLastOutput = String(pObj.lastNOutput ?? pObj.sshLastOutput ?? '');
+							}
+							if (pObj.outputLines !== undefined || pObj.sshOutputLines !== undefined) {
+								const parsedN = Number(pObj.outputLines ?? pObj.sshOutputLines);
+								if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+							}
+							if (Array.isArray(pObj.quickCommands) && pObj.quickCommands.length > 0) {
+								sshQuickCommands = normalizeSshQuickCommands(pObj.quickCommands);
+							}
+							if (pObj.lastExecuted) lastExecuted = String(pObj.lastExecuted);
+						}
+					}
+
+					const sshCommand = sshCommands[0] || '';
+					const resolvedLastNOutput = sshLastRawEntries.length > 0
+						? formatSshCommandsJsonOutput(sshLastRawEntries, sshOutputLines)
+						: (sshLastOutput !== undefined && sshLastOutput !== ''
+							? extractSshOutputLastNLines(sshLastOutput, sshOutputLines)
+							: (sshLastRawOutput ? extractSshOutputLastNLines(sshLastRawOutput, sshOutputLines) : ''));
+
+					const sshPayloadStr = JSON.stringify({
+						host: sshHost,
+						port: sshPort,
+						user: sshUser,
+						password: sshPassword,
+						cwd: sshCwd,
+						command: sshCommand,
+						commands: sshCommands,
+						sshCommands,
+						output: sshOutput,
+						lastRawOutput: sshLastRawOutput ?? '',
+						lastRawEntries: sshLastRawEntries,
+						outputLines: sshOutputLines,
+						lastNOutput: resolvedLastNOutput,
+						quickCommands: sshQuickCommands,
+						lastExecuted
+					});
+					const connTargetLabel = sshHost ? `${sshUser || 'root'}@${sshHost}:${sshPort}` : 'Not Connected';
+
+					customFieldsHtml += `
+						<div class="section-card custom-property-card ssh-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-ssh-json="${this._escapeHtmlAttr(sshPayloadStr)}">
+							<div class="section-title">
+								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+									<span>${k}</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(16, 185, 129, 0.18); color: #34d399; font-weight: 700; text-transform: uppercase;">SSH Terminal</span>
+									<span class="ssh-header-target-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #6ee7b7; font-family: monospace;">${this._escapeHtml(connTargetLabel)}</span>
+								</div>
+								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="ssh" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(sshCommand)}" title="Edit ${k} SSH command with AI">
+									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+								</button>
+							</div>
+							<div class="custom-field-view ssh-card-mount" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;"></div>
+						</div>
+					`;
 				} else if (fType === 'output' || fType === 'result') {
 					const enabledSpecs = (fieldItem.outputSpecs || []).filter(s => s.enabled);
 					let savedMap: Record<string, unknown> = {};
 					let singleResultText = fieldItem.defaultContent || '';
 					let singleResultFormat = fieldItem.defaultFormat || 'text';
-					let lastUpdatedText = '';
 
 					if (v) {
 						if (typeof v === 'string') {
@@ -15932,7 +19291,6 @@ ${userPromptSectionHtml}
 										if (pRec.result !== undefined || pRec.output !== undefined) {
 											singleResultText = String(pRec.result ?? pRec.output ?? '');
 											if (pRec.format) { singleResultFormat = String(pRec.format); }
-											if (pRec.lastUpdated) { lastUpdatedText = String(pRec.lastUpdated); }
 										}
 										savedMap = pRec;
 									}
@@ -15947,7 +19305,6 @@ ${userPromptSectionHtml}
 							if (rObj.result !== undefined || rObj.output !== undefined) {
 								singleResultText = String(rObj.result ?? rObj.output ?? '');
 								if (rObj.format) { singleResultFormat = String(rObj.format); }
-								if (rObj.lastUpdated) { lastUpdatedText = String(rObj.lastUpdated); }
 							}
 							savedMap = rObj;
 						}
@@ -15976,15 +19333,39 @@ ${userPromptSectionHtml}
 							const isPythonField = matchingField?.type === 'python' || spec.fieldKey.toLowerCase().includes('python') || spec.label.toLowerCase().includes('python');
 							const isParametersField = matchingField?.type === 'parameters' || spec.fieldKey.toLowerCase() === 'parameters' || spec.label.toLowerCase() === 'parameters';
 							const isTableField = matchingField?.type === 'table' || spec.fieldKey.toLowerCase().includes('table') || spec.label.toLowerCase().includes('table');
+							const isSshField = matchingField?.type === 'ssh' || spec.fieldKey.toLowerCase().includes('ssh') || spec.label.toLowerCase().includes('ssh');
+							const isHttpRequestField = matchingField?.type === 'http_request' || spec.fieldKey.toLowerCase().includes('http') || spec.label.toLowerCase().includes('api');
 
 							const extractSpecItemText = (pRec: Record<string, unknown>): string => {
 								if (isBrowserField) {
 									return String(pRec.content ?? matchingField?.defaultContent ?? '');
+								} else if (isHttpRequestField) {
+									if (pRec.responseData !== undefined && pRec.responseData !== null) {
+										return typeof pRec.responseData === 'object' ? JSON.stringify(pRec.responseData, null, 2) : String(pRec.responseData);
+									}
+									if (pRec.responseBody !== undefined && pRec.responseBody !== null) {
+										return String(pRec.responseBody);
+									}
+									return String(pRec.output ?? '');
 								} else if (isPromptField) {
 									return String(pRec.output ?? pRec.text ?? '');
 								} else if (isPythonField) {
 									const v = (pRec.result !== undefined && pRec.result !== null && pRec.result !== '') ? pRec.result : (pRec.output ?? '');
 									return typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v ?? '');
+								} else if (isSshField) {
+									const nLines = Number(pRec.outputLines ?? pRec.sshOutputLines ?? matchingField?.sshOutputLines ?? 50);
+									const validN = !isNaN(nLines) && nLines > 0 ? nLines : 50;
+									if (Array.isArray(pRec.lastRawEntries) && pRec.lastRawEntries.length > 0) {
+										return formatSshCommandsJsonOutput(pRec.lastRawEntries, validN);
+									}
+									if (pRec.lastNOutput !== undefined && String(pRec.lastNOutput) !== '') {
+										return extractSshOutputLastNLines(String(pRec.lastNOutput), validN);
+									}
+									if (pRec.lastRawOutput !== undefined && String(pRec.lastRawOutput) !== '') {
+										return extractSshOutputLastNLines(String(pRec.lastRawOutput), validN);
+									}
+									const rawSshLog = String(pRec.output ?? pRec.sshOutput ?? '');
+									return extractSshOutputLastNLines(rawSshLog, validN);
 								} else if (isParametersField) {
 									return JSON.stringify(pRec, null, 2);
 								} else if (isTableField) {
@@ -16189,7 +19570,7 @@ ${userPromptSectionHtml}
 					// Textarea or Single-line Text
 					const isMultiline = fType === 'textarea' || (typeof v === 'string' && (v.length > 80 || v.includes('\n') || ['experience', 'description', 'detail', 'content', 'notes', 'summary', 'project', 'background'].some(sub => k.toLowerCase().includes(sub))));
 					customFieldsHtml += `
-						<div class="section-card custom-property-card">
+						<div class="section-card custom-property-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
@@ -16199,8 +19580,8 @@ ${userPromptSectionHtml}
 									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 								</button>
 							</div>
-							<div class="custom-field-view desc-content-box">
-								${v ? this._markdownToHtml(String(v)) : '<span style="opacity: 0.45; font-style: italic;">No content provided.</span>'}
+							<div class="custom-field-view desc-content-box" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-multiline="${isMultiline ? 'true' : 'false'}" style="cursor: text;" title="Click to edit manually">
+								${v ? this._markdownToHtml(String(v)) : '<span style="opacity: 0.45; font-style: italic;">No content provided. Click to edit.</span>'}
 							</div>
 						</div>
 					`;
@@ -16247,13 +19628,15 @@ ${userPromptSectionHtml}
 
 		return `
 			<style>
-				.entity-detail-editor {
-					user-select: none;
-					-webkit-user-select: none;
+				.entity-detail-editor,
+				.entity-detail-editor * {
+					user-select: text !important;
+					-webkit-user-select: text !important;
 				}
 				.entity-detail-editor * {
 					box-sizing: border-box;
 				}
+				.entity-detail-editor .codicon,
 				.entity-detail-editor .python-code-display,
 				.entity-detail-editor .python-code-display *,
 				.entity-detail-editor .python-line-numbers-gutter {
@@ -16569,6 +19952,32 @@ ${userPromptSectionHtml}
 					transform: none !important;
 					transition: opacity 0.1s ease 0s, background 0.15s ease, color 0.15s ease, border-color 0.15s ease !important;
 				}
+				.entity-detail-editor #title-heading {
+					cursor: pointer;
+					transition: color 0.15s ease;
+				}
+				.entity-detail-editor #title-heading:hover {
+					color: #38bdf8;
+					text-decoration: underline dotted rgba(56, 189, 248, 0.5);
+				}
+				.entity-detail-editor #desc-view-mode,
+				.entity-detail-editor .custom-field-view:not(.custom-switch-view),
+				.entity-detail-editor .instruction-prompt-content,
+				.entity-detail-editor .dynamic-subfield-val {
+					transition: border-color 0.15s ease, background 0.15s ease;
+				}
+				.entity-detail-editor #desc-view-mode:hover,
+				.entity-detail-editor .custom-field-view:not(.custom-switch-view):hover,
+				.entity-detail-editor .instruction-prompt-content:hover,
+				.entity-detail-editor .dynamic-subfield-val:hover {
+					border-color: rgba(56, 189, 248, 0.4) !important;
+				}
+				.entity-detail-editor .custom-switch-view:hover {
+					opacity: 0.85;
+				}
+				.entity-detail-editor .custom-select-view:hover {
+					background: rgba(59, 130, 246, 0.08);
+				}
 			</style>
 
 			${this._isPreviewMode ? `
@@ -16601,16 +20010,16 @@ ${userPromptSectionHtml}
 				<div style="flex: 1; min-width: 0;">
 					<div class="header-breadcrumb">
 						${(data.breadcrumbSegments && data.breadcrumbSegments.length > 0)
-							? data.breadcrumbSegments.map((s, idx) => `
+				? data.breadcrumbSegments.map((s, idx) => `
 								<span class="breadcrumb-item" data-uri="${this._escapeHtmlAttr(s.uri || '')}" style="${s.uri ? 'cursor: pointer;' : ''}" title="${s.uri ? 'Click to navigate to ' + this._escapeHtmlAttr(s.label) : ''}">${this._escapeHtml(s.label)}</span>
 								${idx < data.breadcrumbSegments!.length - 1 ? '<span class="breadcrumb-sep" style="opacity: 0.35; margin: 0 4px;">/</span>' : ''}
 							`).join('')
-							: `<span>${this._escapeHtml(data.workspaceId || 'Workspace')}</span><span class="breadcrumb-sep" style="opacity: 0.35; margin: 0 4px;">/</span><span>${this._escapeHtml(data.ticketId)}</span>`
-						}
+				: `<span>${this._escapeHtml(data.workspaceId || 'Workspace')}</span><span class="breadcrumb-sep" style="opacity: 0.35; margin: 0 4px;">/</span><span>${this._escapeHtml(data.ticketId)}</span>`
+			}
 						<span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 3px; margin-left: 6px;"><span class="${ThemeIcon.asClassName(resolveCustomModuleIcon(customModule?.icon, data.ticketType))}" style="font-size: 9.5px; color: ${colorSetting.text};"></span><span>${typeUpper}</span></span>
 					</div>
 					<div class="header-title-row">
-						<h1 class="ticket-title" id="title-heading">${data.title}</h1>
+						<h1 class="ticket-title" id="title-heading" style="cursor: pointer;" title="Click to edit Title manually">${data.title}</h1>
 						<button type="button" class="ai-edit-btn" data-ai-field="/Title" data-ai-field-type="text" data-ai-field-label="Title" data-ai-current-value="${this._escapeHtmlAttr(data.title)}" title="Edit Title with AI">
 							<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 						</button>
@@ -16629,6 +20038,14 @@ ${userPromptSectionHtml}
 							<span>Flowchart</span>
 						</button>
 					` : ''}
+					<button type="button" id="entity-detail-copy-json-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8;" title="Copy Ticket JSON (One-click copy all existing content of this ticket as JSON to clipboard)">
+						<span class="codicon codicon-copy" style="font-size: 12px;"></span>
+						<span class="copy-json-btn-label">Copy JSON</span>
+					</button>
+					<button type="button" id="entity-detail-paste-json-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.14); border: 1px solid rgba(168, 85, 247, 0.35); color: #c084fc;" title="Paste Ticket JSON (Paste and overwrite fields from a copied ticket of the same type)">
+						<span class="codicon codicon-clippy" style="font-size: 12px;"></span>
+						<span class="paste-json-btn-label">Paste JSON</span>
+					</button>
 					<button type="button" id="entity-detail-refresh-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer;" title="Refresh Ticket (Reload latest data from disk)">
 						<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="display:inline-block;"><path d="M13.65 2.35A7.958 7.958 0 0 0 8 0a8 8 0 1 0 8 8h-2a6 6 0 1 1-1.76-4.24l-2.24 2.24H16V0l-2.35 2.35z"/></svg>
 						<span>Refresh</span>
@@ -16654,7 +20071,7 @@ ${userPromptSectionHtml}
 				<!-- Left Column: Main Stream -->
 				<div class="main-content">
 					<!-- 1. Description / Role Card -->
-					${(isAgent || !customModule || !Array.isArray(customModule.fields) || customModule.fields.some(f => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description')) ? `
+					${(isAgent || !customModule || !Array.isArray(customModule.fields) || customModule.fields.some((f: any) => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description')) ? `
 					<div class="section-card">
 						<div class="section-title">
 							<div style="display: flex; align-items: center; gap: 8px;">
@@ -16665,8 +20082,8 @@ ${userPromptSectionHtml}
 							</button>
 						</div>
 						
-						<div id="desc-view-mode" class="desc-content-box">
-							${data.description ? this._markdownToHtml(data.description) : `<span style="opacity: 0.45; font-style: italic;">No ${isAgent ? 'role description' : 'description'} provided.</span>`}
+						<div id="desc-view-mode" class="desc-content-box" style="cursor: text;" title="Click to edit Description manually">
+							${data.description ? this._markdownToHtml(data.description) : `<span style="opacity: 0.45; font-style: italic;">No ${isAgent ? 'role description' : 'description'} provided. Click to edit manually.</span>`}
 						</div>
 					</div>
 					` : ''}
@@ -16750,7 +20167,7 @@ ${userPromptSectionHtml}
 										<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 									</button>
 								</div>
-								<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${ticketPromptDisplay ? this._markdownToHtml(ticketPromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Prompt configured.</span>'}</div>
+								<div class="instruction-prompt-content" data-prompt-key="Ticket Prompt" style="font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;" title="Click to edit Ticket Prompt manually">${ticketPromptDisplay ? this._markdownToHtml(ticketPromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Prompt configured. Click to edit manually.</span>'}</div>
 							</div>
 
 							<!-- Ticket Type Prompt -->
@@ -16761,7 +20178,7 @@ ${userPromptSectionHtml}
 										<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 									</button>
 								</div>
-								<div style="font-size: 0.9em; opacity: 0.9; line-height: 1.5;">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Type Prompt configured.</span>'}</div>
+								<div class="instruction-prompt-content" data-prompt-key="Ticket Type Prompt" style="font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;" title="Click to edit Ticket Type Prompt manually">${typePromptDisplay ? this._markdownToHtml(typePromptDisplay) : '<span style="opacity: 0.45; font-style: italic;">No Ticket Type Prompt configured. Click to edit manually.</span>'}</div>
 							</div>
 						</div>
 					</div>
@@ -16821,7 +20238,7 @@ ${userPromptSectionHtml}
 									</svg>
 								</button>
 							</div>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map(s => s.label || s.id) : this._workspaceStatuses.statuses)))}" title="Edit Status with AI">
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map((s: any) => s.label || s.id) : this._workspaceStatuses.statuses)))}" title="Edit Status with AI">
 								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							</button>
 						</div>
@@ -16855,78 +20272,78 @@ ${userPromptSectionHtml}
 							<!-- 5 Categories -->
 							<div style="display: flex; flex-direction: column; gap: 6px;">
 								${(() => {
-									let mappingObj: { [key: string]: string } = {};
-									let hasCustomMapping = false;
-									if (customModule?.statuses && Array.isArray(customModule.statuses) && customModule.statuses.length > 0) {
-										for (const stDef of customModule.statuses) {
-											const stName = stDef.label || stDef.id;
-											mappingObj[stName] = stDef.category || 'Todo';
-										}
-										hasCustomMapping = true;
-									} else if (this._workspaceStatuses?.mapping && Object.keys(this._workspaceStatuses.mapping).length > 0) {
-										mappingObj = { ...this._workspaceStatuses.mapping };
-										hasCustomMapping = true;
-									} else if (data.customMetadata?.['Status Mapping']) {
-										try {
-											mappingObj = JSON.parse(data.customMetadata['Status Mapping']);
-											hasCustomMapping = true;
-										} catch {}
-									}
-									if (Object.keys(mappingObj).length === 0) {
-										mappingObj = {
-											'Todo': 'Todo',
-											'In Progress': 'In Progress',
-											'Done': 'Done',
-											'Blocked': 'Blocked',
-											'Removed': 'Removed'
-										};
-										hasCustomMapping = false;
-									}
+				let mappingObj: { [key: string]: string } = {};
+				let hasCustomMapping = false;
+				if (customModule?.statuses && Array.isArray(customModule.statuses) && customModule.statuses.length > 0) {
+					for (const stDef of customModule.statuses) {
+						const stName = stDef.label || stDef.id;
+						mappingObj[stName] = stDef.category || 'Todo';
+					}
+					hasCustomMapping = true;
+				} else if (this._workspaceStatuses?.mapping && Object.keys(this._workspaceStatuses.mapping).length > 0) {
+					mappingObj = { ...this._workspaceStatuses.mapping };
+					hasCustomMapping = true;
+				} else if (data.customMetadata?.['Status Mapping']) {
+					try {
+						mappingObj = JSON.parse(data.customMetadata['Status Mapping']);
+						hasCustomMapping = true;
+					} catch { }
+				}
+				if (Object.keys(mappingObj).length === 0) {
+					mappingObj = {
+						'Todo': 'Todo',
+						'In Progress': 'In Progress',
+						'Done': 'Done',
+						'Blocked': 'Blocked',
+						'Removed': 'Removed'
+					};
+					hasCustomMapping = false;
+				}
 
-									const categoriesDef = [
-										{ id: 'Todo', label: 'Todo', color: '#818cf8', bg: 'rgba(129, 140, 248, 0.15)', desc: 'Initial backlog / pending' },
-										{ id: 'In Progress', label: 'In Progress', color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.15)', desc: 'Active development' },
-										{ id: 'Done', label: 'Done', color: '#34d399', bg: 'rgba(52, 211, 153, 0.15)', desc: 'Completed & delivered' },
-										{ id: 'Blocked', label: 'Blocked', color: '#f43f5e', bg: 'rgba(244, 63, 94, 0.15)', desc: 'Waiting / on hold' },
-										{ id: 'Removed', label: 'Removed', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.15)', desc: 'Archived / purged' }
-									];
+				const categoriesDef = [
+					{ id: 'Todo', label: 'Todo', color: '#818cf8', bg: 'rgba(129, 140, 248, 0.15)', desc: 'Initial backlog / pending' },
+					{ id: 'In Progress', label: 'In Progress', color: '#fbbf24', bg: 'rgba(251, 191, 36, 0.15)', desc: 'Active development' },
+					{ id: 'Done', label: 'Done', color: '#34d399', bg: 'rgba(52, 211, 153, 0.15)', desc: 'Completed & delivered' },
+					{ id: 'Blocked', label: 'Blocked', color: '#f43f5e', bg: 'rgba(244, 63, 94, 0.15)', desc: 'Waiting / on hold' },
+					{ id: 'Removed', label: 'Removed', color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.15)', desc: 'Archived / purged' }
+				];
 
-									const categoryGroupMap: { [cat: string]: string[] } = {
-										'Todo': [],
-										'In Progress': [],
-										'Done': [],
-										'Blocked': [],
-										'Removed': []
-									};
-									for (const [st, cat] of Object.entries(mappingObj)) {
-										if (categoryGroupMap[cat]) {
-											if (!categoryGroupMap[cat].includes(st)) {
-												categoryGroupMap[cat].push(st);
-											}
-										} else {
-											categoryGroupMap['Todo'].push(st);
-										}
-									}
+				const categoryGroupMap: { [cat: string]: string[] } = {
+					'Todo': [],
+					'In Progress': [],
+					'Done': [],
+					'Blocked': [],
+					'Removed': []
+				};
+				for (const [st, cat] of Object.entries(mappingObj)) {
+					if (categoryGroupMap[cat]) {
+						if (!categoryGroupMap[cat].includes(st)) {
+							categoryGroupMap[cat].push(st);
+						}
+					} else {
+						categoryGroupMap['Todo'].push(st);
+					}
+				}
 
-									let htmlRows = '';
-									for (const cat of categoriesDef) {
-										const mappedList = categoryGroupMap[cat.id] || [];
-										let chipsHtml = '';
-										if (mappedList.length === 0) {
-											chipsHtml = `<span style="font-size: 10.5px; opacity: 0.45; font-style: italic;">None mapped</span>`;
-										} else {
-											for (const st of mappedList) {
-												const isCur = st.toLowerCase() === (status || '').toLowerCase();
-												chipsHtml += `
+				let htmlRows = '';
+				for (const cat of categoriesDef) {
+					const mappedList = categoryGroupMap[cat.id] || [];
+					let chipsHtml = '';
+					if (mappedList.length === 0) {
+						chipsHtml = `<span style="font-size: 10.5px; opacity: 0.45; font-style: italic;">None mapped</span>`;
+					} else {
+						for (const st of mappedList) {
+							const isCur = st.toLowerCase() === (status || '').toLowerCase();
+							chipsHtml += `
 													<span style="display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; font-size: 11px; font-weight: ${isCur ? '700' : '500'}; background: ${isCur ? `${cat.color}25` : 'rgba(255,255,255,0.04)'}; color: ${isCur ? cat.color : 'inherit'}; border: ${isCur ? `1px solid ${cat.color}80` : '1px solid rgba(255,255,255,0.1)'};">
 														${this._escapeHtmlAttr(st)}
 														${isCur ? `<span style="font-size: 8.5px; background: ${cat.color}; color: #000; padding: 0 3px; border-radius: 2px; font-weight: 800;">CURRENT</span>` : ''}
 													</span>
 												`;
-											}
-										}
+						}
+					}
 
-										htmlRows += `
+					htmlRows += `
 											<div style="display: flex; gap: 8px; align-items: flex-start; padding: 5px 8px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px;">
 												<div style="width: 80px; flex-shrink: 0;">
 													<span style="display: inline-block; font-size: 10.5px; font-weight: 700; color: ${cat.color}; background: ${cat.bg}; border: 1px solid ${cat.color}40; padding: 1px 6px; border-radius: 3px;">${cat.label}</span>
@@ -16936,9 +20353,9 @@ ${userPromptSectionHtml}
 												</div>
 											</div>
 										`;
-									}
+				}
 
-									const noticeHtml = hasCustomMapping ? `
+				const noticeHtml = hasCustomMapping ? `
 										<div style="font-size: 10.5px; color: #34d399; background: rgba(52, 211, 153, 0.08); border: 1px solid rgba(52, 211, 153, 0.2); padding: 5px 8px; border-radius: 5px; line-height: 1.3;">
 											✓ Configured with workspace custom status mapping (${Object.keys(mappingObj).length} entries).
 										</div>
@@ -16948,8 +20365,8 @@ ${userPromptSectionHtml}
 										</div>
 									`;
 
-									return htmlRows + noticeHtml;
-								})()}
+				return htmlRows + noticeHtml;
+			})()}
 							</div>
 						</div>
 					</div>
@@ -17075,13 +20492,13 @@ ${userPromptSectionHtml}
 						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.createdAt}</span>
 					</div>
 
-					<div class="sidebar-row" style="${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some(f => f.type === 'git'))) ? '' : 'border-bottom: none; margin-bottom: 0;'}">
+					<div class="sidebar-row" style="${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some((f: any) => f.type === 'git'))) ? '' : 'border-bottom: none; margin-bottom: 0;'}">
 						<span class="sidebar-label">LAST UPDATED AT</span>
 						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
 					</div>
 
 					<!-- Git Configuration (Repository & Branch) -->
-					${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some(f => f.type === 'git'))) ? `
+					${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some((f: any) => f.type === 'git'))) ? `
 						<div class="sidebar-row" style="margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);">
 							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 								<span class="sidebar-label" style="display: flex; align-items: center; gap: 5px;">

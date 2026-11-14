@@ -560,10 +560,25 @@
 	border: 1px solid rgba(13, 148, 136, 0.35);
 }
 
+.workflow-toolbar-item.exec-btn.full-speed-btn {
+	background: rgba(245, 158, 11, 0.14);
+	border: 1px solid rgba(245, 158, 11, 0.42);
+}
+
+.workflow-toolbar-item.exec-btn.full-speed-btn .codicon {
+	color: #fbbf24;
+}
+
 .workflow-toolbar-item.exec-btn.active {
 	background: rgba(56, 189, 248, 0.25);
 	border-color: #38bdf8;
 	box-shadow: 0 0 8px rgba(56, 189, 248, 0.4);
+}
+
+.workflow-toolbar-item.exec-btn.full-speed-btn.active {
+	background: rgba(245, 158, 11, 0.28);
+	border-color: #fbbf24;
+	box-shadow: 0 0 8px rgba(251, 191, 36, 0.45);
 }
 
 /* --- Node Resize Handle --- */
@@ -4124,6 +4139,61 @@
 	transform: translateY(-1px);
 }
 
+.node-function-pill.step-disabled {
+	opacity: 0.48 !important;
+	filter: grayscale(0.85) brightness(0.82) !important;
+	border-style: dashed !important;
+}
+
+.node-function-pill.step-disabled:hover {
+	opacity: 0.82 !important;
+	filter: grayscale(0.4) brightness(0.92) !important;
+}
+
+.node-function-toggle-btn {
+	background: rgba(34, 197, 94, 0.16);
+	border: 1px solid rgba(34, 197, 94, 0.45);
+	color: #4ade80;
+	transition: all 0.15s ease;
+}
+
+.node-function-toggle-btn:hover {
+	box-shadow: 0 0 8px rgba(74, 222, 128, 0.3);
+}
+
+.node-function-toggle-btn.is-disabled-step {
+	background: rgba(148, 163, 184, 0.16) !important;
+	border: 1px dashed rgba(148, 163, 184, 0.5) !important;
+	color: #94a3b8 !important;
+}
+
+.node-function-toggle-btn.is-disabled-step:hover {
+	background: rgba(148, 163, 184, 0.28) !important;
+	border-color: #cbd5e1 !important;
+	color: #e2e8f0 !important;
+	box-shadow: 0 0 8px rgba(148, 163, 184, 0.3) !important;
+}
+
+.node-function-draft-wrapper.step-commented-out {
+	border-color: rgba(148, 163, 184, 0.5) !important;
+}
+
+.node-function-draft-wrapper.step-commented-out .node-function-code-backdrop,
+.node-function-draft-wrapper.step-commented-out .node-function-code-area {
+	opacity: 0.75;
+}
+
+.pipeline-step-card.step-card-disabled {
+	opacity: 0.52;
+	border-style: dashed !important;
+	filter: grayscale(0.5);
+}
+
+.pipeline-step-card.step-card-disabled:hover {
+	opacity: 0.85;
+	filter: grayscale(0.2);
+}
+
 .workflow-capsule-drag-ghost {
 	position: fixed;
 	z-index: 100000;
@@ -4842,7 +4912,8 @@
 	border-color: rgba(255, 255, 255, 0.22);
 }
 
-.workflow-display-btn-action.workflow-display-btn-toggle {
+.workflow-display-btn-action.workflow-display-btn-toggle,
+.workflow-display-btn-action.workflow-display-btn-card-toggle {
 	width: 20px;
 	height: 20px;
 	padding: 0;
@@ -4885,12 +4956,69 @@
 	to { transform: translateY(0); opacity: 1; }
 }
 
+.workflow-display-card.collapsed {
+	padding: 6px 10px;
+	gap: 0;
+}
+
+.workflow-display-card.collapsed .workflow-display-card-collapsed-tag {
+	display: inline-block;
+}
+
+.workflow-display-card.collapsed .workflow-display-card-expr,
+.workflow-display-card.collapsed .workflow-display-card-body,
+.workflow-display-card.collapsed .workflow-display-card-footer,
+.workflow-display-card.collapsed .workflow-display-ticket-handle-card,
+.workflow-display-card.collapsed .workflow-display-sections-toolbar,
+.workflow-display-card.collapsed .workflow-display-sections-container {
+	display: none !important;
+}
+
 .workflow-display-card-header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
 	font-size: 11px;
 	flex-shrink: 0;
+	cursor: pointer;
+	user-select: none;
+	border-radius: 4px;
+	padding: 1px 2px;
+	transition: background 0.15s ease;
+}
+
+.workflow-display-card-header:hover .node-title-main {
+	color: #38bdf8;
+}
+
+.workflow-display-card-chevron {
+	font-size: 11px;
+	color: #94a3b8;
+	margin-right: 2px;
+	display: inline-flex;
+	align-items: center;
+	transition: color 0.15s ease;
+	flex-shrink: 0;
+}
+
+.workflow-display-card-header:hover .workflow-display-card-chevron {
+	color: #38bdf8;
+}
+
+.workflow-display-card-collapsed-tag {
+	display: none;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	font-size: 10px;
+	padding: 1px 6px;
+	background: rgba(56, 189, 248, 0.12);
+	border: 1px solid rgba(56, 189, 248, 0.3);
+	border-radius: 3px;
+	color: #7dd3fc;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 200px;
+	line-height: 1.3;
 }
 
 .workflow-display-card-meta {

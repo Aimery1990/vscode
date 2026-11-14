@@ -266,6 +266,8 @@ export function formatComponentStepComment(step: INodePipelineStep, stepNumber: 
 			table: 'Data Table',
 			browser: 'Browser',
 			tts: 'O2 TTS',
+			ssh: 'SSH Terminal',
+			http_request: 'HTTP Request',
 			git: 'Git Branch',
 			create_tickets: 'Create Tickets',
 			run_tickets: 'Run Tickets',
@@ -2881,7 +2883,15 @@ export class WorkflowPythonEditorBridge {
 
 		// Card Header
 		const cardHeader = append(cardEl, $('.workflow-display-card-header'));
+		cardHeader.title = 'Click to toggle collapse / expand';
+
 		const metaBox = append(cardHeader, $('.workflow-display-card-meta'));
+
+		// Collapse/Expand chevron indicator
+		let isCollapsed = Boolean(card._isCollapsed);
+		const chevronIcon = append(metaBox, $('span.workflow-display-card-chevron' + ThemeIcon.asCSSSelector(isCollapsed ? Codicon.chevronRight : Codicon.chevronDown)));
+		chevronIcon.title = 'Click to toggle collapse / expand';
+
 		const nodeBadge = append(metaBox, $('.workflow-display-card-node'));
 
 		// Friendly node label defined by user (standard neutral white text) + internal ID in parens
@@ -2894,6 +2904,11 @@ export class WorkflowPythonEditorBridge {
 			const nodeIdSpan = append(nodeBadge, $('span.node-id-sub'));
 			nodeIdSpan.textContent = ` (${rawNum})`;
 			nodeIdSpan.title = `Internal ID: ${card.nodeId}`;
+		}
+
+		if (card.expression) {
+			const collapsedTag = append(metaBox, $('span.workflow-display-card-collapsed-tag'));
+			editor._renderExpressionWithTicketBadges(collapsedTag, card.expression, false);
 		}
 
 		const timeEl = append(metaBox, $('.workflow-display-card-time'));
@@ -2931,6 +2946,12 @@ export class WorkflowPythonEditorBridge {
 		};
 
 		const cardActions = append(cardHeader, $('.workflow-display-card-actions'));
+
+		// Collapse / Expand toggle button
+		const collapseBtn = append(cardActions, $('button.workflow-display-btn-action.workflow-display-btn-card-toggle'));
+		collapseBtn.textContent = isCollapsed ? '+' : '–';
+		collapseBtn.title = isCollapsed ? 'Expand card (展开)' : 'Collapse card (折叠)';
+
 		const copyBtn = append(cardActions, $('button.workflow-display-btn-action'));
 		copyBtn.textContent = 'Copy';
 		copyBtn.title = 'Copy entire card value';
@@ -2963,6 +2984,39 @@ export class WorkflowPythonEditorBridge {
 				}
 			}
 			editor._updateLiveDisplayToolbarBtn();
+		};
+
+		const applyCollapseState = (collapsed: boolean) => {
+			cardEl.classList.toggle('collapsed', collapsed);
+			collapseBtn.textContent = collapsed ? '+' : '–';
+			collapseBtn.title = collapsed ? 'Expand card (展开)' : 'Collapse card (折叠)';
+			chevronIcon.className = 'workflow-display-card-chevron ' + ThemeIcon.asCSSSelector(collapsed ? Codicon.chevronRight : Codicon.chevronDown);
+		};
+
+		if (isCollapsed) {
+			applyCollapseState(true);
+		}
+
+		const toggleCollapse = (e?: Event) => {
+			if (e) {
+				e.stopPropagation();
+			}
+			isCollapsed = !isCollapsed;
+			card._isCollapsed = isCollapsed;
+			applyCollapseState(isCollapsed);
+		};
+
+		collapseBtn.onclick = (e) => {
+			e.stopPropagation();
+			toggleCollapse(e);
+		};
+
+		cardHeader.onclick = (e) => {
+			const target = e.target as HTMLElement | null;
+			if (target?.closest('.workflow-display-btn-action:not(.workflow-display-btn-card-toggle)')) {
+				return;
+			}
+			toggleCollapse(e);
 		};
 
 		// Expression Pill

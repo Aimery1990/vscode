@@ -37,7 +37,7 @@ export class CustomModulesSchemaDesignerDialog {
 
 	public async open(options: ISchemaDesignerOptions): Promise<void> {
 		const targetUri = options.workspaceUri;
-		const onUpdate = options.onUpdate || (() => {});
+		const onUpdate = options.onUpdate || (() => { });
 
 		const mgOverlay = append(document.body, $('.manage-modules-overlay'));
 		mgOverlay.style.position = 'fixed';
@@ -322,7 +322,7 @@ export class CustomModulesSchemaDesignerDialog {
 
 				// Main columns
 				const modalLayoutContainer = append(mgModal, $('.modal-layout-container', { style: 'display: flex; gap: 20px; width: 100%; height: 480px; overflow: hidden;' }));
-				
+
 				// Left Column: Palette library
 				const leftColumn = append(modalLayoutContainer, $('.left-col', { style: 'flex: 32; border-right: 1px solid rgba(255,255,255,0.08); padding-right: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto;' }));
 
@@ -350,7 +350,9 @@ export class CustomModulesSchemaDesignerDialog {
 						browser: { bg: 'rgba(56,189,248,0.15)', text: '#38bdf8' },
 						git: { bg: 'rgba(249,115,22,0.15)', text: '#f97316' },
 						python: { bg: 'rgba(56,189,248,0.15)', text: '#38bdf8' },
-						tts: { bg: 'rgba(236,72,153,0.15)', text: '#ec4899' }
+						tts: { bg: 'rgba(236,72,153,0.15)', text: '#ec4899' },
+						media_player: { bg: 'rgba(245,158,11,0.15)', text: '#fbbf24' },
+						ssh: { bg: 'rgba(16,185,129,0.15)', text: '#34d399' }
 					};
 					const c = colorMap[type] || colorMap.text;
 					return `font-size: 9px; padding: 2px 6px; border-radius: 4px; background: ${c.bg}; color: ${c.text}; text-transform: uppercase; font-weight: bold; letter-spacing: 0.05em;`;
@@ -374,7 +376,9 @@ export class CustomModulesSchemaDesignerDialog {
 					{ type: 'git', label: 'Git Repository Binding', icon: Codicon.sourceControl },
 					{ type: 'python', label: 'Python (Code Automation)', icon: Codicon.code },
 					{ type: 'tts', label: 'Audio / TTS (Text-to-Speech)', icon: Codicon.unmute },
-					{ type: 'media_player', label: 'MP3 / MP4 Player', icon: Codicon.deviceCameraVideo }
+					{ type: 'media_player', label: 'MP3 / MP4 Player', icon: Codicon.deviceCameraVideo },
+					{ type: 'ssh', label: 'SSH Terminal (Remote Linux)', icon: Codicon.terminal },
+					{ type: 'http_request', label: 'HTTP Request (API / REST Client)', icon: Codicon.cloudUpload }
 				];
 
 				let currentDraggingItem: { source: 'palette' | 'canvas' | 'subcanvas'; type?: string; label?: string; isClass?: boolean; classId?: string; itemFields?: any[]; canvasIndex?: number; subIndex?: number } | null = null;

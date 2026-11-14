@@ -8,7 +8,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IInstantiationService, createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
-import { IEntityPersistenceService, IBaseEntitySnapshot, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, generateSmartPythonVarName, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, IBaseEntitySnapshot, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, extractSshOutputLastNLines, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
@@ -71,6 +71,8 @@ export interface ITicketRunOptions {
 	ticketIdOrPath: string;
 	inputParams?: Record<string, any>;
 	isCancelled?: () => boolean;
+	onStepStart?: (info: { fieldId: string; fieldLabel: string; fieldType: string; stepIndex: number; totalSteps: number }) => void;
+	onStepProgress?: (stepResult: IPrimitiveExecutionStepResult, index: number, total: number) => void;
 }
 
 export interface IPrimitiveExecutionStepResult {
@@ -82,6 +84,20 @@ export interface IPrimitiveExecutionStepResult {
 	durationMs: number;
 	error?: string;
 	details?: Record<string, any>;
+}
+
+export interface IHttpRequestExecutionResult {
+	status: number;
+	statusText: string;
+	ok: boolean;
+	headers: Record<string, string>;
+	body: any;
+	data: any;
+	rawText: string;
+	url: string;
+	method: string;
+	durationMs: number;
+	error?: string;
 }
 
 export interface ITicketRunResult {
@@ -179,6 +195,77 @@ export interface ISqliteTableOperationResult {
 	error?: string;
 }
 
+export interface ISshCommandOptions {
+	workspaceUri?: string | URI;
+	host: string;
+	port?: number | string;
+	user?: string;
+	password?: string;
+	command?: string;
+	cwd?: string;
+	action?: 'connect' | 'exec';
+	timeoutSec?: number;
+}
+
+export interface ISshCommandResult {
+	success: boolean;
+	connectionFailed?: boolean;
+	host: string;
+	port: number;
+	user: string;
+	cwd: string;
+	command: string;
+	output: string;
+	exitCode: number;
+	durationMs: number;
+	systemInfo?: string;
+	error?: string;
+}
+
+export interface ISshBatchCommandProgress {
+	index: number;
+	total: number;
+	command: string;
+	phase: 'start' | 'done';
+	cwd: string;
+	rawOutput?: string;
+	jsonOutput?: string;
+	result?: ISshCommandResult;
+}
+
+export interface ISshBatchExecutionOptions {
+	workspaceUri?: string | URI;
+	host: string;
+	port?: number | string;
+	user?: string;
+	password?: string;
+	cwd?: string;
+	commands: ReadonlyArray<string>;
+	outputLines?: number;
+	existingTerminalLog?: string;
+	contextVariables?: Record<string, any>;
+	isCancelled?: () => boolean;
+	onCommandProgress?: (progress: ISshBatchCommandProgress) => void;
+}
+
+export interface ISshBatchExecutionResult {
+	success: boolean;
+	connectionFailed?: boolean;
+	host: string;
+	port: number;
+	user: string;
+	cwd: string;
+	resolvedCommands: string[];
+	rawEntries: ISshRawCommandEntry[];
+	jsonOutput: string;
+	terminalTranscript: string;
+	exitCode: number;
+	durationMs: number;
+	error?: string;
+	failedCommandIndex?: number;
+	failedCommand?: string;
+}
+
 export interface ITicketWorkflowRuntimeService {
 	readonly _serviceBrand: undefined;
 
@@ -227,6 +314,23 @@ export interface ITicketWorkflowRuntimeService {
 	executeSqliteTableOperation(
 		options: ISqliteTableOperationOptions
 	): Promise<ISqliteTableOperationResult>;
+
+	executeSshCommand(
+		options: ISshCommandOptions
+	): Promise<ISshCommandResult>;
+
+	executeSshBatchCommands(
+		options: ISshBatchExecutionOptions
+	): Promise<ISshBatchExecutionResult>;
+
+	openInteractiveSshTerminal(
+		options: ISshCommandOptions
+	): Promise<void>;
+
+	executeHttpRequest(
+		field: ICustomField,
+		contextVariables: Record<string, any>
+	): Promise<IHttpRequestExecutionResult>;
 
 	executeNodeComponent(
 		workspaceUri: string | URI,
@@ -316,12 +420,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const title = options.title?.trim() || 'New Ticket';
 			const ticketType = options.ticketType?.trim() || 'task';
 
-			// 1. Locate schema definition
+			// 1. Locate schema definition (normalize spaces, hyphens, and underscores so "Job_Filter", "Job Filter", and "job-filter" all match)
 			const allModules = await this.customModulesService.getCustomModules(wsUri);
-			const matchedModule = allModules.find(m =>
-				m.id.toLowerCase() === ticketType.toLowerCase() ||
-				m.name.toLowerCase() === ticketType.toLowerCase()
-			);
+			const matchedModule = this._findMatchingCustomModule(allModules, ticketType);
+			const canonicalTicketType = matchedModule ? matchedModule.id : ticketType;
 
 			// 2. Prepare target parent folder path & find root workspace URI
 			const targetSubPath = (options.targetPath || '').trim().replace(/^\/+|\/+$/g, '');
@@ -366,12 +468,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			// 4. Initialize field values and customMetadata
 			const customMetadata: Record<string, string> = {};
 			const initialFields = { ...(options.parameters || {}), ...(options.fieldValues || {}) };
+			const normalizeKeyForLookup = (s: string) => s.trim().toLowerCase().replace(/[-_\s]+/g, '_');
 			const lookupInitialField = (key?: string): any => {
 				if (!key) return undefined;
 				if (initialFields[key] !== undefined) return initialFields[key];
-				const norm = key.trim().toLowerCase().replace(/_/g, ' ');
+				const norm = normalizeKeyForLookup(key);
 				for (const [ik, iv] of Object.entries(initialFields)) {
-					if (ik.trim().toLowerCase().replace(/_/g, ' ') === norm) {
+					if (normalizeKeyForLookup(ik) === norm) {
 						return iv;
 					}
 				}
@@ -495,6 +598,100 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							mediaPlaybackRate: mediaRate,
 							mediaAutoPlay: Boolean(f.mediaAutoPlay)
 						});
+					} else if (f.type === 'ssh') {
+						let sshHost = f.sshHost || '';
+						let sshPort: number | string = f.sshPort || 22;
+						let sshUser = f.sshUser || 'root';
+						let sshPassword = f.sshPassword || '';
+						let sshCwd = f.sshCwd || '';
+						let sshCommands = normalizeSshCommandsList(f.sshCommands, f.sshCommand || f.defaultContent || '');
+						let sshOutputLines = typeof f.sshOutputLines === 'number' && f.sshOutputLines > 0 ? f.sshOutputLines : 50;
+						const passedVal = initialFields[fKey] ?? initialFields[f.id];
+						if (typeof passedVal === 'string' && passedVal.trim()) {
+							sshCommands = [passedVal.trim()];
+						} else if (Array.isArray(passedVal)) {
+							sshCommands = normalizeSshCommandsList(passedVal);
+						} else if (passedVal && typeof passedVal === 'object') {
+							if ((passedVal as any).sshHost !== undefined || (passedVal as any).host !== undefined) sshHost = String((passedVal as any).sshHost ?? (passedVal as any).host ?? '');
+							if ((passedVal as any).sshPort !== undefined || (passedVal as any).port !== undefined) sshPort = (passedVal as any).sshPort ?? (passedVal as any).port ?? 22;
+							if ((passedVal as any).sshUser !== undefined || (passedVal as any).user !== undefined) sshUser = String((passedVal as any).sshUser ?? (passedVal as any).user ?? 'root');
+							if ((passedVal as any).sshPassword !== undefined || (passedVal as any).password !== undefined) sshPassword = String((passedVal as any).sshPassword ?? (passedVal as any).password ?? '');
+							if ((passedVal as any).sshCwd !== undefined || (passedVal as any).cwd !== undefined) sshCwd = String((passedVal as any).sshCwd ?? (passedVal as any).cwd ?? '');
+							if (Array.isArray((passedVal as any).sshCommands) || Array.isArray((passedVal as any).commands)) {
+								sshCommands = normalizeSshCommandsList((passedVal as any).sshCommands ?? (passedVal as any).commands);
+							} else if ((passedVal as any).sshCommand !== undefined || (passedVal as any).command !== undefined) {
+								sshCommands = normalizeSshCommandsList(undefined, String((passedVal as any).sshCommand ?? (passedVal as any).command ?? ''));
+							}
+							if ((passedVal as any).sshOutputLines !== undefined || (passedVal as any).outputLines !== undefined) {
+								const parsedN = Number((passedVal as any).sshOutputLines ?? (passedVal as any).outputLines);
+								if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+							}
+						}
+						customMetadata[fKey] = JSON.stringify({
+							sshHost,
+							sshPort: Number(sshPort) || 22,
+							sshUser,
+							sshPassword,
+							sshCwd,
+							sshCommand: sshCommands[0] || '',
+							sshCommands,
+							commands: sshCommands,
+							sshOutputLines,
+							outputLines: sshOutputLines,
+							sshQuickCommands: normalizeSshQuickCommands(f.sshQuickCommands),
+							output: '',
+							lastRawOutput: '',
+							lastRawEntries: [],
+							lastNOutput: '',
+							history: []
+						});
+					} else if (f.type === 'http_request') {
+						let httpUrl = f.httpUrl || f.defaultUrl || '';
+						let httpMethod = (f.httpMethod || 'GET').toUpperCase();
+						let httpAuthType = f.httpAuthType || 'none';
+						let httpBodyType = f.httpBodyType || 'none';
+						let httpBodyContent = f.httpBodyContent || '';
+						let httpParams = Array.isArray(f.httpParams) ? f.httpParams : [];
+						let httpHeaders = Array.isArray(f.httpHeaders) ? f.httpHeaders : [];
+						const passedVal = initialFields[fKey] ?? initialFields[f.id];
+						if (typeof passedVal === 'string' && /^https?:\/\//i.test(passedVal.trim())) {
+							httpUrl = passedVal.trim();
+						} else if (passedVal && typeof passedVal === 'object') {
+							if ((passedVal as any).url) httpUrl = String((passedVal as any).url);
+							if ((passedVal as any).method) httpMethod = String((passedVal as any).method).toUpperCase();
+							if ((passedVal as any).body) httpBodyContent = typeof (passedVal as any).body === 'string' ? (passedVal as any).body : JSON.stringify((passedVal as any).body);
+						}
+						customMetadata[fKey] = JSON.stringify({
+							httpUrl,
+							httpMethod,
+							httpAuthType,
+							httpBodyType,
+							httpBodyContent,
+							httpParams,
+							httpHeaders,
+							status: 0,
+							ok: false,
+							output: ''
+						});
+					} else if (f.type === 'table') {
+						const passedVal = lookupInitialField(fKey) ?? lookupInitialField(f.id) ?? lookupInitialField(f.outputVariableName);
+						const isBoundSqlite = (f.tableDbEngine || 'sqlite') === 'sqlite' && Boolean(f.tableDbPath && f.tableDbPath.trim());
+						let rowsVal: any[] = !isBoundSqlite && Array.isArray(f.tableRows) ? f.tableRows : [];
+						if (Array.isArray(passedVal)) {
+							rowsVal = passedVal;
+						} else if (passedVal && typeof passedVal === 'object' && Array.isArray((passedVal as any).rows)) {
+							rowsVal = (passedVal as any).rows;
+						}
+						customMetadata[fKey] = JSON.stringify({
+							columns: Array.isArray(f.tableColumns) ? f.tableColumns : [],
+							rows: rowsVal,
+							dbEngine: f.tableDbEngine || 'sqlite',
+							dbPath: f.tableDbPath || '',
+							tableName: f.tableDbTableName || this._cleanKey(fKey) || 'ticket_table',
+							autoSyncDb: Boolean(f.tableAutoSyncDb),
+							sqlQuery: f.tableSqlQuery || '',
+							sqlOutput: ''
+						});
 					} else if (f.type === 'output' || f.type === 'result') {
 						const passedVal = initialFields[fKey] ?? initialFields[f.id];
 						if (passedVal !== undefined) {
@@ -512,20 +709,21 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			// Apply any additional passed-in custom fields (exclude parameter names that belong to parameters primitives)
 			const knownParamNames = new Set<string>();
+			const knownParamNorms = new Set<string>();
 			if (matchedModule?.fields) {
 				for (const f of matchedModule.fields) {
 					if (f.type === 'parameters' && Array.isArray(f.parameters)) {
 						for (const p of f.parameters) {
-							if (p.name) knownParamNames.add(p.name);
-							if (p.id) knownParamNames.add(p.id);
-							if (p.label) knownParamNames.add(p.label);
+							if (p.name) { knownParamNames.add(p.name); knownParamNorms.add(normalizeKeyForLookup(p.name)); }
+							if (p.id) { knownParamNames.add(p.id); knownParamNorms.add(normalizeKeyForLookup(p.id)); }
+							if (p.label) { knownParamNames.add(p.label); knownParamNorms.add(normalizeKeyForLookup(p.label)); }
 						}
 					}
 				}
 			}
 
 			for (const [k, v] of Object.entries(initialFields)) {
-				if (customMetadata[k] === undefined && !knownParamNames.has(k)) {
+				if (customMetadata[k] === undefined && !knownParamNames.has(k) && !knownParamNorms.has(normalizeKeyForLookup(k))) {
 					customMetadata[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
 				}
 			}
@@ -537,7 +735,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				title: title,
 				ticketId: ticketCode,
 				entityCode: ticketEntityCode,
-				entityType: ticketType,
+				entityType: canonicalTicketType,
 				status: options.status || (matchedModule?.statuses?.[0]?.label) || 'Todo',
 				priority: options.priority || 'Medium',
 				description: options.description || `${matchedModule?.name || ticketType}: ${title}`,
@@ -797,16 +995,15 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			// Load schema definition (search ticket's parent workspace first, then wsUri)
 			let schema: ICustomModule | undefined;
 			if (ticketData.ticketType) {
-				const targetTypeLower = ticketData.ticketType.toLowerCase();
 				let ticketWsUri = URI.joinPath(ticketUri, '..');
 				try {
 					ticketWsUri = await this.workspacesExplorerService.findWorkspaceRootUri(ticketUri);
 				} catch { }
 				const modules = await this.customModulesService.getCustomModules(ticketWsUri);
-				schema = modules.find(m => m.id.toLowerCase() === targetTypeLower || m.name.toLowerCase() === targetTypeLower);
+				schema = this._findMatchingCustomModule(modules, ticketData.ticketType);
 				if (!schema && ticketWsUri.toString() !== wsUri.toString()) {
 					const fallbackModules = await this.customModulesService.getCustomModules(wsUri);
-					schema = fallbackModules.find(m => m.id.toLowerCase() === targetTypeLower || m.name.toLowerCase() === targetTypeLower);
+					schema = this._findMatchingCustomModule(fallbackModules, ticketData.ticketType);
 				}
 			}
 
@@ -981,9 +1178,12 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			this.logService.info(`[TicketWorkflowRuntime] Running ticket '${ticketResult.ticketId}' with ${fieldsToRun.length} primitive(s)...`);
 
 			let finalOutput: any = undefined;
+			let fieldIndex = 0;
+			const totalFieldsCount = fieldsToRun.length;
 
 			// Step-by-step sequential primitive execution
 			for (const field of fieldsToRun) {
+				fieldIndex++;
 				if (isCancelled()) {
 					throw new Error('Ticket execution cancelled by Stop request');
 				}
@@ -991,10 +1191,20 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				const fieldLabel = field.label || field.id;
 				const fieldType = field.type;
 
+				try {
+					options.onStepStart?.({
+						fieldId: field.id,
+						fieldLabel: fieldLabel,
+						fieldType: fieldType,
+						stepIndex: fieldIndex,
+						totalSteps: totalFieldsCount
+					});
+				} catch { }
+
 				// Record root fields title and description as explicit step results for complete visibility
 				if (field.id === 'title') {
 					const titleVal = inputOverrides['title'] || customMetadata['title'] || ticketResult.ticketName || '';
-					stepResults.push({
+					const titleStepRes: IPrimitiveExecutionStepResult = {
 						fieldId: field.id,
 						fieldLabel: field.label || 'Title',
 						fieldType: 'text',
@@ -1008,13 +1218,15 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							runtimeValue: titleVal,
 							value: titleVal
 						}
-					});
+					};
+					stepResults.push(titleStepRes);
+					try { options.onStepProgress?.(titleStepRes, fieldIndex, totalFieldsCount); } catch { }
 					contextVariables['title'] = titleVal;
 					continue;
 				}
 				if (field.id === 'description') {
 					const descVal = inputOverrides['description'] || customMetadata['description'] || (field as any).defaultContent || '';
-					stepResults.push({
+					const descStepRes: IPrimitiveExecutionStepResult = {
 						fieldId: field.id,
 						fieldLabel: field.label || 'Description',
 						fieldType: 'textarea',
@@ -1028,7 +1240,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							runtimeValue: descVal,
 							value: descVal
 						}
-					});
+					};
+					stepResults.push(descStepRes);
+					try { options.onStepProgress?.(descStepRes, fieldIndex, totalFieldsCount); } catch { }
 					contextVariables['description'] = descVal;
 					continue;
 				}
@@ -1057,9 +1271,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							const lookupFromMap = (map: Record<string, any>, key?: string): any => {
 								if (!key) return undefined;
 								if (map[key] !== undefined) return map[key];
-								const norm = key.trim().toLowerCase().replace(/_/g, ' ');
+								const norm = key.trim().toLowerCase().replace(/[-_\s]+/g, '_');
 								for (const [mk, mv] of Object.entries(map)) {
-									if (mk.trim().toLowerCase().replace(/_/g, ' ') === norm) {
+									if (mk.trim().toLowerCase().replace(/[-_\s]+/g, '_') === norm) {
 										return mv;
 									}
 								}
@@ -1070,7 +1284,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								for (const p of field.parameters) {
 									const pKey = p.name || p.id;
 									const overrideVal = lookupFromMap(inputOverrides, pKey) ?? lookupFromMap(inputOverrides, p.label);
-									const savedVal = lookupFromMap(savedParamObj, pKey) ?? lookupFromMap(savedParamObj, p.label);
+									const savedVal = lookupFromMap(savedParamObj, pKey)
+										?? lookupFromMap(savedParamObj, p.label)
+										?? lookupFromMap(customMetadata, pKey)
+										?? lookupFromMap(customMetadata, p.label);
 									const ctxVal = contextVariables[pKey];
 									const val = overrideVal !== undefined
 										? overrideVal
@@ -1083,6 +1300,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 									contextVariables[pKey] = val;
 									if (p.label) {
 										contextVariables[p.label] = val;
+									}
+									// Clean up any loose top-level parameter entries in customMetadata from legacy ticket creation
+									if (pKey && pKey !== fieldLabel && customMetadata[pKey] !== undefined) {
+										delete customMetadata[pKey];
+									}
+									if (p.label && p.label !== fieldLabel && customMetadata[p.label] !== undefined) {
+										delete customMetadata[p.label];
 									}
 								}
 							}
@@ -1581,40 +1805,278 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							break;
 						}
 
+						case 'ssh': {
+							let sshHost = field.sshHost || '';
+							let sshPort: number | string = field.sshPort || 22;
+							let sshUser = field.sshUser || 'root';
+							let sshPassword = field.sshPassword || '';
+							let sshCwd = field.sshCwd || '';
+							let rawCommandsList: string[] = normalizeSshCommandsList(field.sshCommands, field.sshCommand || field.defaultContent || '');
+							let existingOutput = field.sshOutput || '';
+							let sshOutputLines: number = typeof field.sshOutputLines === 'number' && field.sshOutputLines > 0 ? field.sshOutputLines : 50;
+							let history: any[] = [];
+
+							const rawSshMeta = customMetadata[fieldLabel];
+							if (rawSshMeta) {
+								if (typeof rawSshMeta === 'string') {
+									const trimmed = rawSshMeta.trim();
+									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+										try {
+											const parsed = JSON.parse(trimmed);
+											if (parsed.sshHost !== undefined || parsed.host !== undefined) sshHost = String(parsed.sshHost ?? parsed.host ?? '');
+											if (parsed.sshPort !== undefined || parsed.port !== undefined) sshPort = parsed.sshPort ?? parsed.port ?? 22;
+											if (parsed.sshUser !== undefined || parsed.user !== undefined) sshUser = String(parsed.sshUser ?? parsed.user ?? 'root');
+											if (parsed.sshPassword !== undefined || parsed.password !== undefined) sshPassword = String(parsed.sshPassword ?? parsed.password ?? '');
+											if (parsed.sshCwd !== undefined || parsed.cwd !== undefined) sshCwd = String(parsed.sshCwd ?? parsed.cwd ?? '');
+											if (Array.isArray(parsed.sshCommands) || Array.isArray(parsed.commands)) {
+												rawCommandsList = normalizeSshCommandsList(parsed.sshCommands ?? parsed.commands);
+											} else if (parsed.sshCommand !== undefined || parsed.command !== undefined) {
+												rawCommandsList = normalizeSshCommandsList(undefined, String(parsed.sshCommand ?? parsed.command ?? ''));
+											}
+											if (parsed.output !== undefined) existingOutput = String(parsed.output);
+											if (parsed.outputLines !== undefined || parsed.sshOutputLines !== undefined) {
+												const parsedN = Number(parsed.outputLines ?? parsed.sshOutputLines);
+												if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+											}
+											if (Array.isArray(parsed.history)) history = parsed.history;
+										} catch {
+											rawCommandsList = [trimmed];
+										}
+									} else {
+										rawCommandsList = [trimmed];
+									}
+								} else if (Array.isArray(rawSshMeta)) {
+									rawCommandsList = normalizeSshCommandsList(rawSshMeta);
+								} else if (typeof rawSshMeta === 'object' && rawSshMeta !== null) {
+									const obj = rawSshMeta as any;
+									if (obj.sshHost !== undefined || obj.host !== undefined) sshHost = String(obj.sshHost ?? obj.host ?? '');
+									if (obj.sshPort !== undefined || obj.port !== undefined) sshPort = obj.sshPort ?? obj.port ?? 22;
+									if (obj.sshUser !== undefined || obj.user !== undefined) sshUser = String(obj.sshUser ?? obj.user ?? 'root');
+									if (obj.sshPassword !== undefined || obj.password !== undefined) sshPassword = String(obj.sshPassword ?? obj.password ?? '');
+									if (obj.sshCwd !== undefined || obj.cwd !== undefined) sshCwd = String(obj.sshCwd ?? obj.cwd ?? '');
+									if (Array.isArray(obj.sshCommands) || Array.isArray(obj.commands)) {
+										rawCommandsList = normalizeSshCommandsList(obj.sshCommands ?? obj.commands);
+									} else if (obj.sshCommand !== undefined || obj.command !== undefined) {
+										rawCommandsList = normalizeSshCommandsList(undefined, String(obj.sshCommand ?? obj.command ?? ''));
+									}
+									if (obj.output !== undefined) existingOutput = String(obj.output);
+									if (obj.outputLines !== undefined || obj.sshOutputLines !== undefined) {
+										const parsedN = Number(obj.outputLines ?? obj.sshOutputLines);
+										if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+									}
+									if (Array.isArray(obj.history)) history = obj.history;
+								}
+							}
+
+							if (inputOverrides[fieldLabel] !== undefined) {
+								const ovVal = inputOverrides[fieldLabel];
+								if (typeof ovVal === 'string') {
+									rawCommandsList = [ovVal];
+								} else if (Array.isArray(ovVal)) {
+									rawCommandsList = normalizeSshCommandsList(ovVal);
+								} else if (typeof ovVal === 'object' && ovVal !== null) {
+									const ov = ovVal as any;
+									if (ov.sshHost || ov.host) sshHost = String(ov.sshHost || ov.host);
+									if (ov.sshPort || ov.port) sshPort = ov.sshPort || ov.port;
+									if (ov.sshUser || ov.user) sshUser = String(ov.sshUser || ov.user);
+									if (ov.sshPassword || ov.password) sshPassword = String(ov.sshPassword || ov.password);
+									if (ov.sshCwd || ov.cwd) sshCwd = String(ov.sshCwd || ov.cwd);
+									if (Array.isArray(ov.sshCommands) || Array.isArray(ov.commands)) {
+										rawCommandsList = normalizeSshCommandsList(ov.sshCommands ?? ov.commands);
+									} else if (ov.sshCommand || ov.command) {
+										rawCommandsList = normalizeSshCommandsList(undefined, String(ov.sshCommand || ov.command));
+									}
+									if (ov.sshOutputLines || ov.outputLines) {
+										const parsedN = Number(ov.sshOutputLines ?? ov.outputLines);
+										if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+									}
+								}
+							}
+
+							const batchRes = await this.executeSshBatchCommands({
+								workspaceUri: wsUri,
+								host: sshHost,
+								port: sshPort,
+								user: sshUser,
+								password: sshPassword,
+								cwd: sshCwd,
+								commands: rawCommandsList,
+								outputLines: sshOutputLines,
+								existingTerminalLog: existingOutput,
+								contextVariables,
+								isCancelled,
+								onCommandProgress: (prog) => {
+									if (prog.phase === 'done' && prog.result) {
+										history = [...history.slice(-49), {
+											timestamp: new Date().toISOString(),
+											cwd: prog.cwd || '~',
+											command: prog.command,
+											output: prog.rawOutput || '',
+											exitCode: prog.result.exitCode,
+											durationMs: prog.result.durationMs
+										}];
+									}
+								}
+							});
+
+							if (!batchRes.success) {
+								stepDetails = {
+									host: batchRes.host,
+									port: batchRes.port,
+									user: batchRes.user,
+									cwd: batchRes.cwd,
+									commands: batchRes.resolvedCommands,
+									failedCommandIndex: batchRes.failedCommandIndex,
+									failedCommand: batchRes.failedCommand,
+									error: batchRes.error
+								};
+								throw new Error(batchRes.error || `SSH Connection Failed (${batchRes.user}@${batchRes.host}:${batchRes.port})`);
+							}
+
+							stepOutput = batchRes.jsonOutput;
+							customMetadata[fieldLabel] = JSON.stringify({
+								sshHost: batchRes.host,
+								sshPort: batchRes.port,
+								sshUser: batchRes.user,
+								sshPassword: this._interpolateVariables(sshPassword, contextVariables),
+								sshCwd: batchRes.cwd,
+								sshCommand: batchRes.resolvedCommands[0] || rawCommandsList[0] || '',
+								sshCommands: rawCommandsList,
+								commands: batchRes.resolvedCommands,
+								sshOutputLines,
+								outputLines: sshOutputLines,
+								sshQuickCommands: normalizeSshQuickCommands(field.sshQuickCommands),
+								output: batchRes.terminalTranscript,
+								lastRawOutput: batchRes.rawEntries.length > 0 ? batchRes.rawEntries[batchRes.rawEntries.length - 1].rawOutput : '',
+								lastRawEntries: batchRes.rawEntries,
+								lastNOutput: stepOutput,
+								exitCode: batchRes.exitCode,
+								durationMs: batchRes.durationMs,
+								lastExecuted: new Date().toISOString(),
+								history
+							});
+							stepDetails = {
+								host: batchRes.host,
+								port: batchRes.port,
+								user: batchRes.user,
+								cwd: batchRes.cwd,
+								commands: batchRes.resolvedCommands,
+								outputLines: sshOutputLines,
+								output: stepOutput,
+								exitCode: batchRes.exitCode,
+								durationMs: batchRes.durationMs
+							};
+							contextVariables[fieldLabel] = stepOutput;
+							contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+							contextVariables[`${this._cleanKey(fieldLabel)}_output`] = stepOutput;
+							break;
+						}
+
+						case 'http_request': {
+							const httpRes = await this.executeHttpRequest(field, contextVariables);
+							field.httpResponseStatus = httpRes.status;
+							field.httpResponseStatusText = httpRes.statusText;
+							field.httpResponseHeaders = httpRes.headers;
+							field.httpResponseBody = httpRes.rawText;
+							field.httpResponseData = httpRes.data;
+							field.httpLastExecutionTime = new Date().toISOString();
+							field.httpLastDurationMs = httpRes.durationMs;
+
+							stepOutput = {
+								status: httpRes.status,
+								statusText: httpRes.statusText,
+								ok: httpRes.ok,
+								headers: httpRes.headers,
+								data: httpRes.data,
+								body: httpRes.body,
+								rawText: httpRes.rawText,
+								url: httpRes.url,
+								method: httpRes.method,
+								error: httpRes.error
+							};
+							if (httpRes.data && typeof httpRes.data === 'object' && !Array.isArray(httpRes.data)) {
+								for (const [k, v] of Object.entries(httpRes.data)) {
+									if (!(k in stepOutput)) {
+										stepOutput[k] = v;
+									}
+								}
+							}
+
+							customMetadata[fieldLabel] = JSON.stringify({
+								url: httpRes.url,
+								method: httpRes.method,
+								status: httpRes.status,
+								statusText: httpRes.statusText,
+								ok: httpRes.ok,
+								headers: httpRes.headers,
+								data: httpRes.data,
+								body: httpRes.body,
+								rawText: httpRes.rawText,
+								lastExecuted: new Date().toISOString()
+							});
+							customMetadata[`${fieldLabel}_status`] = String(httpRes.status);
+							customMetadata[`${fieldLabel}_ok`] = String(httpRes.ok);
+
+							contextVariables[fieldLabel] = stepOutput;
+							contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+							contextVariables[`${fieldLabel}_status`] = httpRes.status;
+							contextVariables[`${this._cleanKey(fieldLabel)}_status`] = httpRes.status;
+							contextVariables[`${fieldLabel}_ok`] = httpRes.ok;
+							contextVariables[`${this._cleanKey(fieldLabel)}_ok`] = httpRes.ok;
+							if (httpRes.data !== null && httpRes.data !== undefined) {
+								contextVariables[`${fieldLabel}_data`] = httpRes.data;
+								contextVariables[`${this._cleanKey(fieldLabel)}_data`] = httpRes.data;
+							}
+							contextVariables[`${fieldLabel}_body`] = httpRes.body;
+							contextVariables[`${this._cleanKey(fieldLabel)}_body`] = httpRes.body;
+
+							stepDetails = {
+								method: httpRes.method,
+								url: httpRes.url,
+								status: httpRes.status,
+								ok: httpRes.ok,
+								durationMs: httpRes.durationMs,
+								error: httpRes.error
+							};
+							break;
+						}
+
 						case 'table': {
 							// 4.5 Data Table (SQLite / Structured Grid) Primitive
+							const defaultTableSlug = this._cleanKey(fieldLabel) || 'ticket_table';
 							let tableColumns: ITableColumnDefinition[] = Array.isArray(field.tableColumns) ? [...field.tableColumns] : [];
 							let tableRows: Record<string, any>[] = Array.isArray(field.tableRows) ? [...field.tableRows] : [];
-							let dbEngine: 'sqlite' | 'none' = field.tableDbEngine || 'sqlite';
+							let dbEngine: 'sqlite' | 'none' = (field.tableDbEngine as 'sqlite' | 'none') || 'sqlite';
 							let dbPath = field.tableDbPath || '';
-							let dbTableName = field.tableDbTableName || this._cleanKey(fieldLabel) || 'ticket_table';
+							let dbTableName = field.tableDbTableName || defaultTableSlug;
 							let autoSyncDb = Boolean(field.tableAutoSyncDb);
 							let sqlQuery = field.tableSqlQuery || '';
 
 							const rawTableMeta = customMetadata[fieldLabel];
 							if (rawTableMeta) {
+								let parsedObj: any = undefined;
 								if (typeof rawTableMeta === 'string') {
 									const trimmed = rawTableMeta.trim();
 									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 										try {
-											const parsed = JSON.parse(trimmed);
-											if (Array.isArray(parsed.columns)) tableColumns = parsed.columns;
-											if (Array.isArray(parsed.rows)) tableRows = parsed.rows;
-											if (parsed.dbEngine) dbEngine = parsed.dbEngine;
-											if (parsed.dbPath !== undefined) dbPath = String(parsed.dbPath);
-											if (parsed.tableName !== undefined) dbTableName = String(parsed.tableName);
-											if (parsed.autoSyncDb !== undefined) autoSyncDb = Boolean(parsed.autoSyncDb);
-											if (parsed.sqlQuery !== undefined) sqlQuery = String(parsed.sqlQuery);
+											parsedObj = JSON.parse(trimmed);
 										} catch { }
 									}
 								} else if (typeof rawTableMeta === 'object' && rawTableMeta !== null) {
-									if (Array.isArray((rawTableMeta as any).columns)) tableColumns = (rawTableMeta as any).columns;
-									if (Array.isArray((rawTableMeta as any).rows)) tableRows = (rawTableMeta as any).rows;
-									if ((rawTableMeta as any).dbEngine) dbEngine = (rawTableMeta as any).dbEngine;
-									if ((rawTableMeta as any).dbPath !== undefined) dbPath = String((rawTableMeta as any).dbPath);
-									if ((rawTableMeta as any).tableName !== undefined) dbTableName = String((rawTableMeta as any).tableName);
-									if ((rawTableMeta as any).autoSyncDb !== undefined) autoSyncDb = Boolean((rawTableMeta as any).autoSyncDb);
-									if ((rawTableMeta as any).sqlQuery !== undefined) sqlQuery = String((rawTableMeta as any).sqlQuery);
+									parsedObj = rawTableMeta;
+								}
+								if (parsedObj && typeof parsedObj === 'object') {
+									if (Array.isArray(parsedObj.columns) && parsedObj.columns.length > 0) tableColumns = parsedObj.columns;
+									if (Array.isArray(parsedObj.rows) && parsedObj.rows.length > 0) tableRows = parsedObj.rows;
+									if (parsedObj.dbEngine) dbEngine = parsedObj.dbEngine;
+									if (typeof parsedObj.dbPath === 'string' && parsedObj.dbPath.trim() !== '') dbPath = parsedObj.dbPath;
+									if (typeof parsedObj.tableName === 'string' && parsedObj.tableName.trim() !== '') {
+										if (!(field.tableDbTableName && parsedObj.tableName.trim() === defaultTableSlug && field.tableDbTableName !== defaultTableSlug)) {
+											dbTableName = parsedObj.tableName;
+										}
+									}
+									if (parsedObj.autoSyncDb !== undefined) autoSyncDb = Boolean(parsedObj.autoSyncDb);
+									if (typeof parsedObj.sqlQuery === 'string' && parsedObj.sqlQuery.trim() !== '') sqlQuery = parsedObj.sqlQuery;
 								}
 							}
 
@@ -1781,19 +2243,26 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							const tablePayload = {
 								columns: tableColumns,
 								rows: tableRows,
+								queryColumns: (sqliteSyncResult?.isSelectQuery && !sqliteSyncResult?.isPragmaQuery && Array.isArray(sqliteSyncResult?.queryColumns))
+									? sqliteSyncResult.queryColumns
+									: undefined,
+								queryRows: (sqliteSyncResult?.isSelectQuery && !sqliteSyncResult?.isPragmaQuery && Array.isArray(sqliteSyncResult?.queryRows))
+									? sqliteSyncResult.queryRows
+									: undefined,
 								dbEngine,
 								dbPath,
 								tableName: dbTableName,
 								autoSyncDb,
 								sqlQuery,
 								sqlOutput: sqlOutputText,
-								output: sqlOutputText || JSON.stringify(tableRows),
+								output: Array.isArray(tableRows) && tableRows.length > 0 ? JSON.stringify(tableRows) : (sqlOutputText || JSON.stringify(tableRows)),
 								lastSynced: sqliteSyncResult?.success ? new Date().toISOString() : undefined
 							};
 							customMetadata[fieldLabel] = JSON.stringify(tablePayload);
-							stepOutput = sqlOutputText || tableRows;
-							contextVariables[fieldLabel] = tablePayload;
-							contextVariables[this._cleanKey(fieldLabel)] = tablePayload;
+							stepOutput = Array.isArray(tableRows) ? tableRows : (sqlOutputText || []);
+							contextVariables[fieldLabel] = tableRows;
+							contextVariables[this._cleanKey(fieldLabel)] = tableRows;
+							contextVariables[`${this._cleanKey(fieldLabel)}_payload`] = tablePayload;
 							contextVariables[`${this._cleanKey(fieldLabel)}_output`] = sqlOutputText;
 							contextVariables[`${this._cleanKey(fieldLabel)}_rows`] = tableRows;
 							contextVariables[`${this._cleanKey(fieldLabel)}_columns`] = tableColumns;
@@ -1816,12 +2285,31 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							// 4. Output Manifest Primitive: aggregate enabled primitive outputs
 							const aggregatedMap: Record<string, any> = {};
 							const specs: IOutputSpec[] = field.outputSpecs || [];
-							const enabledSpecs = specs.filter(s => s.enabled);
+							const enabledSpecs = specs.filter(s => s.enabled !== false);
 
 							if (enabledSpecs.length > 0) {
 								for (const spec of enabledSpecs) {
 									const specKey = spec.label || spec.fieldKey;
-									const rawVal = contextVariables[specKey] ?? contextVariables[spec.fieldKey] ?? contextVariables[this._cleanKey(specKey)] ?? customMetadata[specKey] ?? customMetadata[spec.fieldKey];
+									const matchedSchemaField = fieldsToRun.find(f =>
+										f.type !== 'output' && f.type !== 'result' && (
+											f.label === specKey ||
+											f.label === spec.fieldKey ||
+											f.id === spec.fieldKey ||
+											f.id === specKey
+										)
+									);
+									const outVarCand = matchedSchemaField
+										? ((matchedSchemaField.outputVariableName || '').trim() || generateSmartPythonVarName(matchedSchemaField.label || matchedSchemaField.id, matchedSchemaField.type))
+										: '';
+									const rawVal = contextVariables[specKey]
+										?? contextVariables[spec.fieldKey]
+										?? contextVariables[this._cleanKey(specKey)]
+										?? (spec.fieldKey ? contextVariables[this._cleanKey(spec.fieldKey)] : undefined)
+										?? (matchedSchemaField?.label ? contextVariables[matchedSchemaField.label] : undefined)
+										?? (matchedSchemaField?.id ? contextVariables[matchedSchemaField.id] : undefined)
+										?? (outVarCand ? contextVariables[outVarCand] : undefined)
+										?? customMetadata[specKey]
+										?? customMetadata[spec.fieldKey];
 									aggregatedMap[specKey] = this._formatOutputValue(rawVal, spec.defaultFormat || 'table');
 								}
 								stepOutput = aggregatedMap;
@@ -2006,7 +2494,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						}
 					}
 
-					stepResults.push({
+					const successStepRes: IPrimitiveExecutionStepResult = {
 						fieldId: field.id,
 						fieldLabel: fieldLabel,
 						fieldType: fieldType,
@@ -2014,13 +2502,15 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						status: 'success',
 						durationMs: Date.now() - stepStart,
 						details: stepDetails
-					});
+					};
+					stepResults.push(successStepRes);
+					try { options.onStepProgress?.(successStepRes, fieldIndex, totalFieldsCount); } catch { }
 				} catch (stepErr: any) {
 					if (isCancelled()) {
 						throw stepErr;
 					}
 					this.logService.error(`[TicketWorkflowRuntime] Step '${fieldLabel}' failed:`, stepErr);
-					stepResults.push({
+					const failedStepRes: IPrimitiveExecutionStepResult = {
 						fieldId: field.id,
 						fieldLabel: fieldLabel,
 						fieldType: fieldType,
@@ -2028,7 +2518,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						error: stepErr.message || String(stepErr),
 						durationMs: Date.now() - stepStart,
 						details: stepDetails
-					});
+					};
+					stepResults.push(failedStepRes);
+					try { options.onStepProgress?.(failedStepRes, fieldIndex, totalFieldsCount); } catch { }
 				}
 			}
 
@@ -2267,6 +2759,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						sqlQuery: sqlQuery || undefined
 					});
 					stepOutput = sqlRes.isSelectQuery && Array.isArray(sqlRes.queryRows) ? sqlRes.queryRows : (sqlRes.rows || []);
+					if (sqlRes.isSelectQuery && Array.isArray(sqlRes.queryRows)) {
+						(field as any).lastQueryRows = sqlRes.queryRows;
+					}
 					if (!dbPath || (field.tableDbEngine || 'sqlite') === 'none') {
 						if (sqlRes.isSelectQuery && Array.isArray(sqlRes.queryRows)) {
 							field.tableRows = sqlRes.queryRows;
@@ -2355,6 +2850,154 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						mimeType: detected.mimeType,
 						playbackRate: rate
 					};
+					break;
+				}
+				case 'ssh': {
+					const rawCommandsList = normalizeSshCommandsList(field.sshCommands, field.sshCommand || field.defaultContent || '');
+					const sshOutLines = typeof field.sshOutputLines === 'number' && field.sshOutputLines > 0 ? field.sshOutputLines : 50;
+
+					const batchRes = await this.executeSshBatchCommands({
+						workspaceUri: wsUri,
+						host: field.sshHost || '',
+						port: field.sshPort || 22,
+						user: field.sshUser || 'root',
+						password: field.sshPassword || '',
+						cwd: field.sshCwd || '',
+						commands: rawCommandsList,
+						outputLines: sshOutLines,
+						existingTerminalLog: field.sshOutput || '',
+						contextVariables
+					});
+
+					field.sshOutput = batchRes.terminalTranscript;
+					field.sshLastRawEntries = batchRes.rawEntries;
+					field.sshLastRawOutput = batchRes.rawEntries.length > 0 ? batchRes.rawEntries[batchRes.rawEntries.length - 1].rawOutput : '';
+					field.sshLastOutput = batchRes.jsonOutput;
+					if (batchRes.cwd) {
+						field.sshCwd = batchRes.cwd;
+					}
+
+					if (!batchRes.success) {
+						const connErrMsg = batchRes.error || `SSH Connection Failed (${batchRes.user}@${batchRes.host}:${batchRes.port})`;
+						(field as any).lastExecutionLog = `>>> SSH [${batchRes.user}@${batchRes.host || '(no host)'}:${batchRes.port}] Connection Error:\n${connErrMsg}`;
+						(field as any).lastExecutionOutput = batchRes.jsonOutput;
+						(field as any).lastExecutionExitCode = batchRes.exitCode;
+						(field as any).lastExecutionStatus = 'failed';
+						(field as any).lastExecutionDurationMs = batchRes.durationMs || (Date.now() - stepStart);
+						(field as any).lastExecutedAt = executedAt;
+						return {
+							fieldId: field.id,
+							fieldLabel,
+							fieldType,
+							output: batchRes.jsonOutput,
+							status: 'failed',
+							error: connErrMsg,
+							durationMs: batchRes.durationMs || (Date.now() - stepStart),
+							details: {
+								host: batchRes.host,
+								port: batchRes.port,
+								user: batchRes.user,
+								cwd: batchRes.cwd,
+								commands: batchRes.resolvedCommands,
+								failedCommandIndex: batchRes.failedCommandIndex,
+								failedCommand: batchRes.failedCommand,
+								outputLines: sshOutLines,
+								output: batchRes.jsonOutput,
+								exitCode: batchRes.exitCode,
+								durationMs: batchRes.durationMs,
+								error: connErrMsg
+							}
+						};
+					}
+
+					stepOutput = batchRes.jsonOutput;
+					(field as any).lastExecutionLog = `>>> SSH [${batchRes.user}@${batchRes.host}:${batchRes.port}] (${batchRes.cwd || '~'}) [${batchRes.resolvedCommands.length} command(s), Output: Last ${sshOutLines} lines/cmd]\n${stepOutput}`;
+					(field as any).lastExecutionOutput = stepOutput;
+					(field as any).lastExecutionExitCode = batchRes.exitCode;
+					(field as any).lastExecutionStatus = 'success';
+					(field as any).lastExecutionDurationMs = batchRes.durationMs || (Date.now() - stepStart);
+					(field as any).lastExecutedAt = executedAt;
+					stepDetails = {
+						host: batchRes.host,
+						port: batchRes.port,
+						user: batchRes.user,
+						cwd: batchRes.cwd,
+						commands: batchRes.resolvedCommands,
+						outputLines: sshOutLines,
+						output: stepOutput,
+						exitCode: batchRes.exitCode,
+						durationMs: batchRes.durationMs
+					};
+					contextVariables[fieldLabel] = stepOutput;
+					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+					break;
+				}
+				case 'http_request': {
+					const httpRes = await this.executeHttpRequest(field, contextVariables);
+					field.httpResponseStatus = httpRes.status;
+					field.httpResponseStatusText = httpRes.statusText;
+					field.httpResponseHeaders = httpRes.headers;
+					field.httpResponseBody = httpRes.rawText;
+					field.httpResponseData = httpRes.data;
+					field.httpLastExecutionTime = executedAt;
+					field.httpLastDurationMs = httpRes.durationMs;
+
+					// Base step output is an object with full metadata and data
+					stepOutput = {
+						status: httpRes.status,
+						statusText: httpRes.statusText,
+						ok: httpRes.ok,
+						headers: httpRes.headers,
+						data: httpRes.data,
+						body: httpRes.body,
+						rawText: httpRes.rawText,
+						url: httpRes.url,
+						method: httpRes.method,
+						error: httpRes.error
+					};
+
+					// If response data is a JSON object, merge top-level properties so downstream can directly access {FieldLabel.prop}
+					if (httpRes.data && typeof httpRes.data === 'object' && !Array.isArray(httpRes.data)) {
+						for (const [k, v] of Object.entries(httpRes.data)) {
+							if (!(k in stepOutput)) {
+								stepOutput[k] = v;
+							}
+						}
+					}
+
+					// Register convenience sub-variables into context
+					contextVariables[`${fieldLabel}_status`] = httpRes.status;
+					contextVariables[`${this._cleanKey(fieldLabel)}_status`] = httpRes.status;
+					contextVariables[`${fieldLabel}_ok`] = httpRes.ok;
+					contextVariables[`${this._cleanKey(fieldLabel)}_ok`] = httpRes.ok;
+					if (httpRes.data !== null && httpRes.data !== undefined) {
+						contextVariables[`${fieldLabel}_data`] = httpRes.data;
+						contextVariables[`${this._cleanKey(fieldLabel)}_data`] = httpRes.data;
+					}
+					contextVariables[`${fieldLabel}_body`] = httpRes.body;
+					contextVariables[`${this._cleanKey(fieldLabel)}_body`] = httpRes.body;
+
+					contextVariables[fieldLabel] = stepOutput;
+					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+
+					(field as any).lastExecutionLog = `>>> HTTP Request [${httpRes.method} ${httpRes.url}]\nStatus: ${httpRes.status} ${httpRes.statusText} (${httpRes.durationMs}ms)\n${httpRes.error ? `Error: ${httpRes.error}\n` : ''}Response Body Preview:\n${httpRes.rawText ? (httpRes.rawText.length > 2000 ? httpRes.rawText.substring(0, 2000) + '... [truncated]' : httpRes.rawText) : '(empty response)'}`;
+					(field as any).lastExecutionOutput = stepOutput;
+
+					stepDetails = {
+						method: httpRes.method,
+						url: httpRes.url,
+						status: httpRes.status,
+						statusText: httpRes.statusText,
+						ok: httpRes.ok,
+						durationMs: httpRes.durationMs,
+						headers: httpRes.headers,
+						error: httpRes.error
+					};
+
+					if (!httpRes.ok && httpRes.status === 0) {
+						// Network/client failure
+						throw new Error(`HTTP Request Failed: ${httpRes.error}`);
+					}
 					break;
 				}
 				case 'create_tickets': {
@@ -2590,6 +3233,16 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				executionBehavior: 'Resolves imported local audio/video file path, auto-detects Audio vs. Video mode, and exposes media path to workflow context.',
 				supportedInputs: ['local audio/video file (click to select or drag-and-drop)', 'playback speed (0.25x - 2.0x)'],
 				supportedOutputs: ['local media file path']
+			},
+			{
+				type: 'ssh',
+				label: 'SSH Terminal (Remote Linux)',
+				icon: 'terminal',
+				category: 'processing',
+				description: 'Interactive SSH connection & terminal component with unified collapsible console, dynamic multi-command send bars, automatic workflow SSH connection, and structured JSON output.',
+				executionBehavior: 'Resolves dynamic IP/Port/User/Password/CWD and multiple command bars from upstream variables, connects via SSH (terminating immediately on connection failure), executes commands sequentially, and outputs a standard JSON object mapping each command to its last N output lines.',
+				supportedInputs: ['host/IP (supports {variables})', 'port', 'username', 'password', 'remote CWD', 'multiple Linux shell commands (supports {variables})'],
+				supportedOutputs: ['JSON object { "command": ["line 1", ...] }', 'remote working directory', 'exit code']
 			},
 			{
 				type: 'browser',
@@ -2835,6 +3488,26 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return k.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase();
 	}
 
+	private _findMatchingCustomModule(modules: ICustomModule[], typeStr: string): ICustomModule | undefined {
+		const raw = (typeStr || '').trim();
+		if (!raw || !Array.isArray(modules) || modules.length === 0) {
+			return undefined;
+		}
+		const lower = raw.toLowerCase();
+		const exact = modules.find(m =>
+			(m.id || '').toLowerCase() === lower ||
+			(m.name || '').toLowerCase() === lower
+		);
+		if (exact) {
+			return exact;
+		}
+		const norm = lower.replace(/[-_\s]+/g, '_');
+		return modules.find(m =>
+			(m.id || '').trim().toLowerCase().replace(/[-_\s]+/g, '_') === norm ||
+			(m.name || '').trim().toLowerCase().replace(/[-_\s]+/g, '_') === norm
+		);
+	}
+
 	private _formatTablePayloadAsMarkdown(columns: ITableColumnDefinition[] | undefined, rows: Record<string, any>[]): string {
 		const colNames = (Array.isArray(columns) && columns.length > 0)
 			? columns.map(c => c.name || c.id)
@@ -2856,12 +3529,16 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 	private _getCleanPrimitiveContent(rawVal: any): string {
 		if (rawVal === undefined || rawVal === null) return '';
+		if (typeof rawVal === 'boolean' || typeof rawVal === 'number') return String(rawVal);
 		if (typeof rawVal === 'string') {
 			const trimmed = rawVal.trim();
 			if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 				try {
 					const parsed = JSON.parse(trimmed);
 					if (Array.isArray(parsed.rows)) {
+						if (parsed.rows.length > 0) {
+							return JSON.stringify(parsed.rows, null, 2);
+						}
 						if (typeof parsed.sqlOutput === 'string' && parsed.sqlOutput.trim() !== '') {
 							return parsed.sqlOutput.trim();
 						}
@@ -2871,7 +3548,22 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					if (parsed.result !== undefined && parsed.result !== null && String(parsed.result).trim() !== '') {
 						return typeof parsed.result === 'object' ? JSON.stringify(parsed.result) : String(parsed.result).trim();
 					}
-					if (parsed.output !== undefined) return String(parsed.output);
+					if (parsed.data !== undefined && parsed.data !== null && (parsed.status !== undefined || parsed.ok !== undefined)) {
+						return typeof parsed.data === 'object' ? JSON.stringify(parsed.data, null, 2) : String(parsed.data);
+					}
+					if (parsed.body !== undefined && parsed.body !== null && (parsed.status !== undefined || parsed.ok !== undefined)) {
+						return typeof parsed.body === 'object' ? JSON.stringify(parsed.body, null, 2) : String(parsed.body);
+					}
+					if (Array.isArray(parsed.lastRawEntries) && parsed.lastRawEntries.length > 0) {
+						return formatSshCommandsJsonOutput(parsed.lastRawEntries, Number(parsed.outputLines ?? parsed.sshOutputLines ?? 50));
+					}
+					if (parsed.lastNOutput !== undefined && String(parsed.lastNOutput).trim() !== '') {
+						return extractSshOutputLastNLines(String(parsed.lastNOutput), Number(parsed.outputLines ?? parsed.sshOutputLines ?? 50));
+					}
+					if (parsed.output !== undefined && (parsed.outputLines !== undefined || parsed.sshOutputLines !== undefined || parsed.sshHost !== undefined || parsed.host !== undefined)) {
+						return extractSshOutputLastNLines(String(parsed.output), Number(parsed.outputLines ?? parsed.sshOutputLines ?? 50));
+					}
+					if (parsed.output !== undefined && !Array.isArray(parsed.output)) return String(parsed.output);
 					if (parsed.url !== undefined && parsed.content === undefined) return String(parsed.url);
 				} catch { }
 			}
@@ -2879,6 +3571,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		}
 		if (typeof rawVal === 'object') {
 			if (Array.isArray(rawVal.rows)) {
+				if (rawVal.rows.length > 0) {
+					return JSON.stringify(rawVal.rows, null, 2);
+				}
 				if (typeof rawVal.sqlOutput === 'string' && rawVal.sqlOutput.trim() !== '') {
 					return rawVal.sqlOutput.trim();
 				}
@@ -2888,10 +3583,81 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			if (rawVal.result !== undefined && rawVal.result !== null && String(rawVal.result).trim() !== '') {
 				return typeof rawVal.result === 'object' ? JSON.stringify(rawVal.result) : String(rawVal.result).trim();
 			}
-			if (rawVal.output !== undefined) return String(rawVal.output);
+			if (rawVal.data !== undefined && rawVal.data !== null && (rawVal.status !== undefined || rawVal.ok !== undefined)) {
+				return typeof rawVal.data === 'object' ? JSON.stringify(rawVal.data, null, 2) : String(rawVal.data);
+			}
+			if (rawVal.body !== undefined && rawVal.body !== null && (rawVal.status !== undefined || rawVal.ok !== undefined)) {
+				return typeof rawVal.body === 'object' ? JSON.stringify(rawVal.body, null, 2) : String(rawVal.body);
+			}
+			if (Array.isArray(rawVal.lastRawEntries) && rawVal.lastRawEntries.length > 0) {
+				return formatSshCommandsJsonOutput(rawVal.lastRawEntries, Number(rawVal.outputLines ?? rawVal.sshOutputLines ?? 50));
+			}
+			if (rawVal.lastNOutput !== undefined && String(rawVal.lastNOutput).trim() !== '') {
+				return extractSshOutputLastNLines(String(rawVal.lastNOutput), Number(rawVal.outputLines ?? rawVal.sshOutputLines ?? 50));
+			}
+			if (rawVal.output !== undefined && (rawVal.outputLines !== undefined || rawVal.sshOutputLines !== undefined || rawVal.sshHost !== undefined || rawVal.host !== undefined)) {
+				return extractSshOutputLastNLines(String(rawVal.output), Number(rawVal.outputLines ?? rawVal.sshOutputLines ?? 50));
+			}
+			if (rawVal.output !== undefined && !Array.isArray(rawVal.output)) return String(rawVal.output);
 			return JSON.stringify(rawVal, null, 2);
 		}
 		return String(rawVal);
+	}
+
+	private _resolveSshCommandsForExecution(rawCommands: ReadonlyArray<string>, context: Record<string, any>): string[] {
+		const resolvedList: string[] = [];
+		const lookupContextRaw = (key: string): any => {
+			const trimmed = key.trim();
+			if (context[trimmed] !== undefined) return context[trimmed];
+			const clean = this._cleanKey(trimmed);
+			if (context[clean] !== undefined) return context[clean];
+			const lower = trimmed.toLowerCase();
+			for (const [ck, cv] of Object.entries(context)) {
+				if (ck.toLowerCase() === lower && cv !== undefined) {
+					return cv;
+				}
+			}
+			return undefined;
+		};
+
+		for (const rawEntry of (rawCommands || [])) {
+			const rawStr = String(rawEntry ?? '').trim();
+			if (!rawStr) {
+				continue;
+			}
+			const pureVarMatch = rawStr.match(/^@?\{\{?([^{}]+)\}?\}/);
+			if (pureVarMatch && pureVarMatch[0] === rawStr) {
+				const rawVal = lookupContextRaw(pureVarMatch[1]);
+				if (Array.isArray(rawVal)) {
+					for (const item of rawVal) {
+						const cleaned = cleanInterpolatedSshCommand(this._interpolateVariables(String(item ?? ''), context));
+						if (cleaned) {
+							resolvedList.push(cleaned);
+						}
+					}
+					continue;
+				}
+				if (typeof rawVal === 'string' && rawVal.trim().startsWith('[') && rawVal.trim().endsWith(']')) {
+					try {
+						const parsedArr = JSON.parse(rawVal.trim());
+						if (Array.isArray(parsedArr)) {
+							for (const item of parsedArr) {
+								const cleaned = cleanInterpolatedSshCommand(this._interpolateVariables(String(item ?? ''), context));
+								if (cleaned) {
+									resolvedList.push(cleaned);
+								}
+							}
+							continue;
+						}
+					} catch { }
+				}
+			}
+			const interpolated = cleanInterpolatedSshCommand(this._interpolateVariables(rawStr, context));
+			if (interpolated) {
+				resolvedList.push(interpolated);
+			}
+		}
+		return resolvedList;
 	}
 
 	private _interpolateVariables(text: string, context: Record<string, any>): string {
@@ -2915,14 +3681,30 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					return this._getCleanPrimitiveContent(cv);
 				}
 			}
-			// 3. Dot-notation match (e.g. "output.Browser 1" or "FNDJ1-0008.AI Prompt 1")
+			// 3. Dot-notation match (e.g. "output.Browser 1", "ApiRequest.data.share_path", or "FNDJ1-0008.AI Prompt 1")
 			if (trimmedKey.includes('.')) {
 				const parts = trimmedKey.split('.');
 				const root = parts[0].trim();
 				const sub = parts.slice(1).join('.').trim();
 				const rootObj = context[root] ?? context[this._cleanKey(root)];
 				if (rootObj && typeof rootObj === 'object') {
-					const subVal = rootObj[sub] ?? rootObj[this._cleanKey(sub)];
+					let subVal = rootObj[sub] ?? rootObj[this._cleanKey(sub)];
+					// Deep nested object traversal (e.g. data.share_path or resume_data.hero.headline)
+					if (subVal === undefined && parts.length > 2) {
+						let cur: any = rootObj;
+						for (let i = 1; i < parts.length; i++) {
+							const seg = parts[i].trim();
+							if (cur && typeof cur === 'object' && seg in cur) {
+								cur = cur[seg];
+							} else if (cur && typeof cur === 'object' && this._cleanKey(seg) in cur) {
+								cur = cur[this._cleanKey(seg)];
+							} else {
+								cur = undefined;
+								break;
+							}
+						}
+						subVal = cur;
+					}
 					if (subVal !== undefined) {
 						return this._getCleanPrimitiveContent(subVal);
 					}
@@ -3265,17 +4047,17 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		if (rawVal === undefined || rawVal === null) return '';
 		if (typeof rawVal === 'object') {
 			if (!Array.isArray(rawVal) && ('sqlOutput' in rawVal || ('columns' in rawVal && 'rows' in rawVal) || 'dbEngine' in rawVal)) {
-				if (Array.isArray(rawVal.rows) && rawVal.rows.length > 0) {
-					return rawVal.rows;
+				const sqlOutStr = typeof rawVal.sqlOutput === 'string' ? rawVal.sqlOutput.trim() : '';
+				if (Array.isArray(rawVal.rows)) {
+					if (rawVal.rows.length > 0 || !/^Status:\s*FAILED\b/i.test(sqlOutStr)) {
+						return rawVal.rows;
+					}
 				}
-				if (typeof rawVal.sqlOutput === 'string' && rawVal.sqlOutput.trim() !== '') {
-					return rawVal.sqlOutput.trim();
+				if (sqlOutStr !== '') {
+					return sqlOutStr;
 				}
 				if (typeof rawVal.output === 'string' && rawVal.output.trim() !== '' && !rawVal.output.trim().startsWith('{"columns":')) {
 					return rawVal.output.trim();
-				}
-				if (Array.isArray(rawVal.rows)) {
-					return this._formatTablePayloadAsMarkdown(rawVal.columns, rawVal.rows);
 				}
 				return '';
 			}
@@ -3345,15 +4127,16 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 	private _extractCleanRealizedValueFromMeta(rawMeta: any): any {
 		if (rawMeta === undefined || rawMeta === null) return null;
 		if (typeof rawMeta === 'object') {
-			if (Array.isArray(rawMeta)) return rawMeta.length > 0 ? rawMeta : null;
+			if (Array.isArray(rawMeta)) return rawMeta;
 			if (Array.isArray(rawMeta.rows) || 'sqlOutput' in rawMeta || ('columns' in rawMeta && 'dbEngine' in rawMeta)) {
-				if (Array.isArray(rawMeta.rows) && rawMeta.rows.length > 0) {
+				const sqlOutStr = typeof rawMeta.sqlOutput === 'string' ? rawMeta.sqlOutput.trim() : '';
+				if (Array.isArray(rawMeta.rows) && (rawMeta.rows.length > 0 || (sqlOutStr !== '' && !/^Status:\s*FAILED\b/i.test(sqlOutStr)))) {
 					return rawMeta.rows;
 				}
-				if (typeof rawMeta.sqlOutput === 'string' && rawMeta.sqlOutput.trim() !== '') {
-					return rawMeta.sqlOutput.trim();
+				if (sqlOutStr !== '') {
+					return sqlOutStr;
 				}
-				return Array.isArray(rawMeta.rows) && rawMeta.rows.length > 0 ? rawMeta.rows : null;
+				return Array.isArray(rawMeta.rows) ? rawMeta.rows : null;
 			}
 			if (rawMeta.prompt !== undefined || rawMeta.preInjectedPrompt !== undefined || rawMeta.userPrompt !== undefined || rawMeta.userPrompts !== undefined) {
 				const out = rawMeta.output !== undefined ? String(rawMeta.output).trim() : '';
@@ -3369,6 +4152,18 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			if (rawMeta.url !== undefined && rawMeta.content !== undefined) {
 				const c = String(rawMeta.content).trim();
 				return c ? this._parseOutputFieldValue(c) : null;
+			}
+			if (Array.isArray(rawMeta.lastRawEntries) || rawMeta.lastNOutput !== undefined || rawMeta.sshHost !== undefined || (rawMeta.host !== undefined && (rawMeta.outputLines !== undefined || rawMeta.sshOutputLines !== undefined || Array.isArray(rawMeta.sshCommands)))) {
+				const maxLines = Number(rawMeta.outputLines ?? rawMeta.sshOutputLines ?? 50);
+				if (Array.isArray(rawMeta.lastRawEntries) && rawMeta.lastRawEntries.length > 0) {
+					return buildSshCommandsJsonObject(rawMeta.lastRawEntries, maxLines);
+				}
+				if (rawMeta.lastNOutput !== undefined && String(rawMeta.lastNOutput).trim() !== '') {
+					const sliced = extractSshOutputLastNLines(String(rawMeta.lastNOutput).trim(), maxLines);
+					return this._parseOutputFieldValue(sliced);
+				}
+				const out = rawMeta.output !== undefined ? extractSshOutputLastNLines(String(rawMeta.output).trim(), maxLines) : '';
+				return out ? this._parseOutputFieldValue(out) : {};
 			}
 			if (rawMeta.text !== undefined) {
 				const t = String(rawMeta.text).trim();
@@ -3647,6 +4442,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 				try {
 					const parsed = JSON.parse(trimmed);
+					// Data Table primitive
+					if (Array.isArray(parsed.rows) || 'sqlOutput' in parsed || ('columns' in parsed && 'dbEngine' in parsed)) {
+						if (Array.isArray(parsed.rows) && (parsed.rows.length > 0 || !/^Status:\s*FAILED\b/i.test(String(parsed.sqlOutput || '').trim()))) {
+							return parsed.rows;
+						}
+						return parsed.sqlOutput || parsed.rows || [];
+					}
 					// Python primitive
 					if (parsed.pythonCode !== undefined || parsed.code !== undefined || parsed.pythonPath !== undefined) {
 						if (parsed.result !== undefined) {
@@ -3659,6 +4461,17 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					// Browser primitive
 					if (parsed.content !== undefined) {
 						return parsed.content;
+					}
+					// SSH Terminal primitive
+					if (Array.isArray(parsed.lastRawEntries) || parsed.lastNOutput !== undefined || parsed.sshHost !== undefined || (parsed.host !== undefined && (parsed.outputLines !== undefined || parsed.sshOutputLines !== undefined || Array.isArray(parsed.sshCommands)))) {
+						const maxLines = Number(parsed.outputLines ?? parsed.sshOutputLines ?? 50);
+						if (Array.isArray(parsed.lastRawEntries) && parsed.lastRawEntries.length > 0) {
+							return formatSshCommandsJsonOutput(parsed.lastRawEntries, maxLines);
+						}
+						if (parsed.lastNOutput !== undefined && String(parsed.lastNOutput).trim() !== '') {
+							return extractSshOutputLastNLines(String(parsed.lastNOutput).trim(), maxLines);
+						}
+						return parsed.output ? extractSshOutputLastNLines(String(parsed.output), maxLines) : '{}';
 					}
 					// Prompt primitive
 					if (parsed.prompt !== undefined || parsed.output !== undefined) {
@@ -4149,12 +4962,14 @@ def _anyagent_extract_clean_meta_val(raw_val):
         return None
     if isinstance(raw_val, (list, dict)):
         if isinstance(raw_val, list):
-            return raw_val if len(raw_val) > 0 else None
+            return raw_val
         if 'rows' in raw_val and isinstance(raw_val['rows'], list):
             sql_out = str(raw_val.get('sqlOutput') or '').strip()
+            if len(raw_val['rows']) > 0 or (sql_out and not sql_out.startswith('Status: FAILED')):
+                return raw_val['rows']
             if sql_out:
                 return sql_out
-            return raw_val['rows'] if len(raw_val['rows']) > 0 else None
+            return raw_val['rows']
         if any(k in raw_val for k in ('prompt', 'preInjectedPrompt', 'userPrompt', 'userPrompts')):
             out = str(raw_val.get('output') or '').strip()
             return _anyagent_smart_parse(out) if out else None
@@ -4167,6 +4982,26 @@ def _anyagent_extract_clean_meta_val(raw_val):
         if 'url' in raw_val and 'content' in raw_val:
             c = str(raw_val.get('content') or '').strip()
             return _anyagent_smart_parse(c) if c else None
+        if any(k in raw_val for k in ('lastRawEntries', 'lastNOutput', 'sshHost', 'sshCommands')) or ('host' in raw_val and ('outputLines' in raw_val or 'sshOutputLines' in raw_val)):
+            raw_entries = raw_val.get('lastRawEntries')
+            max_l = int(raw_val.get('outputLines') or raw_val.get('sshOutputLines') or 50)
+            if isinstance(raw_entries, list) and len(raw_entries) > 0:
+                ssh_obj = {}
+                for ent in raw_entries:
+                    if isinstance(ent, dict):
+                        c_key = str(ent.get('command') or '').strip()
+                        if c_key:
+                            r_out = str(ent.get('rawOutput') or '').replace('\\r\\n', '\\n').replace('\\r', '\\n')
+                            r_lines = r_out.split('\\n') if r_out else []
+                            while len(r_lines) > 0 and r_lines[-1] == '':
+                                r_lines.pop()
+                            ssh_obj[c_key] = r_lines[-max_l:] if max_l > 0 and len(r_lines) > max_l else r_lines
+                return ssh_obj
+            last_n = str(raw_val.get('lastNOutput') or '').strip()
+            if last_n:
+                return _anyagent_smart_parse(last_n)
+            out = str(raw_val.get('output') or '').strip()
+            return _anyagent_smart_parse(out) if out else {}
         if 'text' in raw_val:
             t = str(raw_val.get('text') or '').strip()
             return _anyagent_smart_parse(t) if t else None
@@ -4238,17 +5073,28 @@ def get_outputs(ticket=None, *, ticket_id=None, ticket_name=None, tickets=None):
     # Locate schema yaml to check for output component and outputSpecs
     schema_paths = []
     if ticket_type:
+        slug_variants = []
+        for cand_slug in [
+            ticket_type.strip(),
+            ticket_type.strip().lower(),
+            re.sub(r'[-_\\s]+', '-', ticket_type.strip().lower()),
+            re.sub(r'[-_\\s]+', '_', ticket_type.strip().lower()),
+        ]:
+            if cand_slug and cand_slug not in slug_variants:
+                slug_variants.append(cand_slug)
         cur = t_dir
         for _ in range(4):
-            schema_paths.append(os.path.join(cur, '.agents', 'entity_type', f'{ticket_type}.yaml'))
-            schema_paths.append(os.path.join(cur, '.agents', 'entity_type', f'{ticket_type}.yml'))
+            for sv in slug_variants:
+                schema_paths.append(os.path.join(cur, '.agents', 'entity_type', f'{sv}.yaml'))
+                schema_paths.append(os.path.join(cur, '.agents', 'entity_type', f'{sv}.yml'))
             parent = os.path.dirname(cur)
             if not parent or parent == cur:
                 break
             cur = parent
         home_dir = os.path.expanduser('~')
-        schema_paths.append(os.path.join(home_dir, '.anyagent', 'entity_type', f'{ticket_type}.yaml'))
-        schema_paths.append(os.path.join(home_dir, '.anyagent', 'entity_type', f'{ticket_type}.yml'))
+        for sv in slug_variants:
+            schema_paths.append(os.path.join(home_dir, '.anyagent', 'entity_type', f'{sv}.yaml'))
+            schema_paths.append(os.path.join(home_dir, '.anyagent', 'entity_type', f'{sv}.yml'))
     has_output_comp = False
     output_specs = []
     for sp in schema_paths:
@@ -5822,5 +6668,811 @@ atexit.register(_anyagent_capture_exit_output)
 				error: err.message || String(err)
 			};
 		}
+	}
+
+	async executeHttpRequest(
+		field: ICustomField,
+		contextVariables: Record<string, any>
+	): Promise<IHttpRequestExecutionResult> {
+		const start = Date.now();
+		const startEpoch = this._cancelEpoch;
+
+		// 1. Method
+		const rawMethod = (field.httpMethod || 'GET').trim().toUpperCase();
+		const method = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(rawMethod) ? rawMethod : 'GET';
+
+		// 2. URL and Variable Interpolation
+		let rawUrl = (field.httpUrl || '').trim();
+		if (!rawUrl && field.defaultUrl) {
+			rawUrl = field.defaultUrl.trim();
+		}
+		let interpolatedUrl = this._interpolateVariables(rawUrl, contextVariables).trim();
+
+		// 3. Query Parameters
+		const paramsList = Array.isArray(field.httpParams) ? field.httpParams : [];
+		const activeParams: Array<{ key: string; value: string }> = [];
+		for (const p of paramsList) {
+			if (p && p.enabled !== false && p.key) {
+				const interKey = this._interpolateVariables(p.key, contextVariables).trim();
+				const interVal = this._interpolateVariables(p.value ?? '', contextVariables);
+				if (interKey) {
+					activeParams.push({ key: interKey, value: interVal });
+				}
+			}
+		}
+
+		// 4. Authentication & Headers
+		const reqHeaders: Record<string, string> = {};
+		const authType = (field.httpAuthType || 'none').toLowerCase();
+
+		if (authType === 'bearer') {
+			const token = this._interpolateVariables(field.httpAuthToken || '', contextVariables).trim();
+			if (token) {
+				reqHeaders['Authorization'] = `Bearer ${token}`;
+			}
+		} else if (authType === 'api_key') {
+			const keyName = this._interpolateVariables(field.httpApiKeyName || 'X-API-Key', contextVariables).trim() || 'X-API-Key';
+			const keyVal = this._interpolateVariables(field.httpApiKeyValue || '', contextVariables).trim();
+			const keyLoc = (field.httpApiKeyLocation || 'header').toLowerCase();
+			if (keyVal) {
+				if (keyLoc === 'query') {
+					activeParams.push({ key: keyName, value: keyVal });
+				} else {
+					reqHeaders[keyName] = keyVal;
+				}
+			}
+		} else if (authType === 'basic') {
+			const u = this._interpolateVariables(field.httpAuthUsername || '', contextVariables);
+			const p = this._interpolateVariables(field.httpAuthPassword || '', contextVariables);
+			const b64 = typeof btoa === 'function' ? btoa(`${u}:${p}`) : Buffer.from(`${u}:${p}`).toString('base64');
+			reqHeaders['Authorization'] = `Basic ${b64}`;
+		}
+
+		// Append activeParams to URL query string
+		if (activeParams.length > 0 && interpolatedUrl) {
+			const urlHasQuery = interpolatedUrl.includes('?');
+			const qs = activeParams.map(ap => `${encodeURIComponent(ap.key)}=${encodeURIComponent(ap.value)}`).join('&');
+			interpolatedUrl = urlHasQuery ? `${interpolatedUrl}&${qs}` : `${interpolatedUrl}?${qs}`;
+		}
+
+		// 5. Custom Headers
+		const headersList = Array.isArray(field.httpHeaders) ? field.httpHeaders : [];
+		for (const h of headersList) {
+			if (h && h.enabled !== false && h.key) {
+				const hk = this._interpolateVariables(h.key, contextVariables).trim();
+				const hv = this._interpolateVariables(h.value ?? '', contextVariables);
+				if (hk) {
+					reqHeaders[hk] = hv;
+				}
+			}
+		}
+
+		// 6. Request Body
+		let bodyData: any = undefined;
+		const bodyType = (field.httpBodyType || 'none').toLowerCase();
+		if (method !== 'GET' && method !== 'HEAD' && bodyType !== 'none') {
+			const rawBodyContent = field.httpBodyContent || '';
+			const interpolatedBody = this._interpolateVariables(rawBodyContent, contextVariables);
+
+			if (bodyType === 'json') {
+				const hasContentType = Object.keys(reqHeaders).some(k => k.toLowerCase() === 'content-type');
+				if (!hasContentType) {
+					reqHeaders['Content-Type'] = 'application/json; charset=utf-8';
+				}
+				bodyData = interpolatedBody;
+			} else if (bodyType === 'x-www-form-urlencoded') {
+				const hasContentType = Object.keys(reqHeaders).some(k => k.toLowerCase() === 'content-type');
+				if (!hasContentType) {
+					reqHeaders['Content-Type'] = 'application/x-www-form-urlencoded; charset=utf-8';
+				}
+				bodyData = interpolatedBody;
+			} else {
+				// raw / text
+				bodyData = interpolatedBody;
+			}
+		}
+
+		// Default Accept header if not explicitly overridden
+		if (!Object.keys(reqHeaders).some(k => k.toLowerCase() === 'accept')) {
+			reqHeaders['Accept'] = 'application/json, text/plain, */*';
+		}
+
+		// 7. Timeout & AbortController
+		const timeoutMs = typeof field.httpTimeoutMs === 'number' && field.httpTimeoutMs > 0 ? field.httpTimeoutMs : 30000;
+		const controller = new AbortController();
+		this._activeAbortControllers.add(controller);
+
+		const timeoutId = setTimeout(() => {
+			controller.abort(new Error(`Request timed out after ${timeoutMs}ms`));
+		}, timeoutMs);
+
+		try {
+			if (this._cancelEpoch !== startEpoch) {
+				throw new Error('HTTP Request cancelled by Stop request');
+			}
+			if (!interpolatedUrl || !/^https?:\/\//i.test(interpolatedUrl)) {
+				throw new Error(`Invalid or empty HTTP Request URL: "${interpolatedUrl}"`);
+			}
+
+			const fetchOptions: RequestInit = {
+				method,
+				headers: reqHeaders,
+				signal: controller.signal
+			};
+			if (bodyData !== undefined) {
+				fetchOptions.body = bodyData;
+			}
+
+			const resp = await fetch(interpolatedUrl, fetchOptions);
+			clearTimeout(timeoutId);
+			this._activeAbortControllers.delete(controller);
+
+			const durationMs = Date.now() - start;
+
+			// Extract response headers
+			const respHeaders: Record<string, string> = {};
+			try {
+				resp.headers.forEach((v, k) => {
+					respHeaders[k.toLowerCase()] = v;
+				});
+			} catch { }
+
+			// Read response text
+			const rawText = await resp.text();
+
+			// Attempt JSON parse
+			let parsedJson: any = undefined;
+			if (rawText && (rawText.trim().startsWith('{') || rawText.trim().startsWith('['))) {
+				try {
+					parsedJson = JSON.parse(rawText.trim());
+				} catch { }
+			}
+
+			return {
+				status: resp.status,
+				statusText: resp.statusText,
+				ok: resp.ok,
+				headers: respHeaders,
+				body: parsedJson !== undefined ? parsedJson : rawText,
+				data: parsedJson !== undefined ? parsedJson : null,
+				rawText,
+				url: interpolatedUrl,
+				method,
+				durationMs,
+				error: !resp.ok ? `HTTP ${resp.status} ${resp.statusText}` : undefined
+			};
+		} catch (err: any) {
+			clearTimeout(timeoutId);
+			this._activeAbortControllers.delete(controller);
+			const durationMs = Date.now() - start;
+			const isAbort = controller.signal.aborted || err?.name === 'AbortError';
+			const errMsg = isAbort ? (controller.signal.reason?.message || 'Request timed out') : (err?.message || String(err));
+			return {
+				status: 0,
+				statusText: 'Network / Client Error',
+				ok: false,
+				headers: {},
+				body: null,
+				data: null,
+				rawText: '',
+				url: interpolatedUrl,
+				method,
+				durationMs,
+				error: errMsg
+			};
+		}
+	}
+
+	async executeSshBatchCommands(options: ISshBatchExecutionOptions): Promise<ISshBatchExecutionResult> {
+		const ctx = options.contextVariables;
+		const interp = (val: string) => ctx ? this._interpolateVariables(val, ctx) : val;
+
+		const resolvedHost = interp(String(options.host || '')).trim();
+		const resolvedPort = Number(interp(String(options.port || 22)).trim()) || 22;
+		const resolvedUser = interp(String(options.user || 'root')).trim() || 'root';
+		const resolvedPassword = interp(String(options.password ?? ''));
+		let currentCwd = interp(String(options.cwd || '')).trim();
+		const validOutputLines = typeof options.outputLines === 'number' && !isNaN(options.outputLines) && options.outputLines > 0
+			? Math.floor(options.outputLines)
+			: 50;
+
+		const resolvedCommands = ctx
+			? this._resolveSshCommandsForExecution(options.commands || [], ctx)
+			: (options.commands || []).map(c => cleanInterpolatedSshCommand(String(c ?? ''))).filter(c => c.length > 0);
+
+		let terminalTranscript = options.existingTerminalLog || '';
+		const appendTranscript = (headerLine: string, bodyText: string) => {
+			terminalTranscript = terminalTranscript
+				? `${terminalTranscript.trimEnd()}\n\n${headerLine}\n${bodyText}`
+				: `${headerLine}\n${bodyText}`;
+			if (terminalTranscript.length > 48000) {
+				terminalTranscript = '...(earlier terminal history truncated)...\n' + terminalTranscript.slice(terminalTranscript.length - 44000);
+			}
+		};
+
+		if (!resolvedHost) {
+			return {
+				success: false,
+				connectionFailed: true,
+				host: '',
+				port: resolvedPort,
+				user: resolvedUser,
+				cwd: currentCwd,
+				resolvedCommands,
+				rawEntries: [],
+				jsonOutput: '{}',
+				terminalTranscript,
+				exitCode: 1,
+				durationMs: 0,
+				error: 'SSH Connection Error: Server IP / Host is required.'
+			};
+		}
+
+		const rawEntries: ISshRawCommandEntry[] = [];
+		let totalDurationMs = 0;
+		let lastExitCode = 0;
+
+		if (resolvedCommands.length === 0) {
+			const connRes = await this.executeSshCommand({
+				workspaceUri: options.workspaceUri,
+				host: resolvedHost,
+				port: resolvedPort,
+				user: resolvedUser,
+				password: resolvedPassword,
+				cwd: currentCwd,
+				command: '',
+				action: 'connect'
+			});
+			totalDurationMs += connRes.durationMs || 0;
+			lastExitCode = connRes.exitCode;
+			if (connRes.cwd) {
+				currentCwd = connRes.cwd;
+			}
+			const rawConnOut = connRes.output || (connRes.error ? `[SSH Connection Error] ${connRes.error}` : '');
+			appendTranscript(`${resolvedUser}@${resolvedHost}:${currentCwd || '~'}$ [SSH Login Check]`, rawConnOut || '(Connected)');
+
+			if (connRes.connectionFailed || !connRes.success) {
+				return {
+					success: false,
+					connectionFailed: true,
+					host: resolvedHost,
+					port: resolvedPort,
+					user: resolvedUser,
+					cwd: currentCwd,
+					resolvedCommands: [],
+					rawEntries: [],
+					jsonOutput: '{}',
+					terminalTranscript,
+					exitCode: lastExitCode || 1,
+					durationMs: totalDurationMs,
+					error: connRes.error || `SSH Connection Failed (${resolvedUser}@${resolvedHost}:${resolvedPort})`
+				};
+			}
+			return {
+				success: true,
+				connectionFailed: false,
+				host: resolvedHost,
+				port: resolvedPort,
+				user: resolvedUser,
+				cwd: currentCwd,
+				resolvedCommands: [],
+				rawEntries: [],
+				jsonOutput: '{}',
+				terminalTranscript,
+				exitCode: 0,
+				durationMs: totalDurationMs
+			};
+		}
+
+		for (let idx = 0; idx < resolvedCommands.length; idx++) {
+			if (options.isCancelled?.()) {
+				return {
+					success: false,
+					connectionFailed: false,
+					host: resolvedHost,
+					port: resolvedPort,
+					user: resolvedUser,
+					cwd: currentCwd,
+					resolvedCommands,
+					rawEntries,
+					jsonOutput: formatSshCommandsJsonOutput(rawEntries, validOutputLines),
+					terminalTranscript,
+					exitCode: 130,
+					durationMs: totalDurationMs,
+					error: 'SSH execution cancelled by Stop request',
+					failedCommandIndex: idx,
+					failedCommand: resolvedCommands[idx]
+				};
+			}
+
+			const cmd = resolvedCommands[idx];
+			options.onCommandProgress?.({
+				index: idx,
+				total: resolvedCommands.length,
+				command: cmd,
+				phase: 'start',
+				cwd: currentCwd
+			});
+
+			const sshRes = await this.executeSshCommand({
+				workspaceUri: options.workspaceUri,
+				host: resolvedHost,
+				port: resolvedPort,
+				user: resolvedUser,
+				password: resolvedPassword,
+				cwd: currentCwd,
+				command: cmd,
+				action: 'exec'
+			});
+			totalDurationMs += sshRes.durationMs || 0;
+			lastExitCode = sshRes.exitCode;
+
+			if (sshRes.connectionFailed) {
+				const connErrMsg = sshRes.error || `SSH Connection Failed (${resolvedUser}@${resolvedHost}:${resolvedPort})`;
+				appendTranscript(`${resolvedUser}@${resolvedHost}:${currentCwd || '~'}$ ${cmd}`, `[SSH Connection Error] ${connErrMsg}`);
+				const partialJson = formatSshCommandsJsonOutput(rawEntries, validOutputLines);
+				return {
+					success: false,
+					connectionFailed: true,
+					host: resolvedHost,
+					port: resolvedPort,
+					user: resolvedUser,
+					cwd: currentCwd,
+					resolvedCommands,
+					rawEntries,
+					jsonOutput: partialJson,
+					terminalTranscript,
+					exitCode: sshRes.exitCode || 255,
+					durationMs: totalDurationMs,
+					error: connErrMsg,
+					failedCommandIndex: idx,
+					failedCommand: cmd
+				};
+			}
+
+			if (sshRes.cwd) {
+				currentCwd = sshRes.cwd;
+			}
+			const rawOut = sshRes.output || (sshRes.error ? sshRes.error : '');
+			rawEntries.push({
+				command: cmd,
+				rawOutput: rawOut
+			});
+			appendTranscript(`${resolvedUser}@${resolvedHost}:${currentCwd || '~'}$ ${cmd}`, rawOut || '(Command completed with no stdout)');
+
+			const currentJson = formatSshCommandsJsonOutput(rawEntries, validOutputLines);
+			options.onCommandProgress?.({
+				index: idx,
+				total: resolvedCommands.length,
+				command: cmd,
+				phase: 'done',
+				cwd: currentCwd,
+				rawOutput: rawOut,
+				jsonOutput: currentJson,
+				result: sshRes
+			});
+		}
+
+		const finalJson = formatSshCommandsJsonOutput(rawEntries, validOutputLines);
+		return {
+			success: true,
+			connectionFailed: false,
+			host: resolvedHost,
+			port: resolvedPort,
+			user: resolvedUser,
+			cwd: currentCwd,
+			resolvedCommands,
+			rawEntries,
+			jsonOutput: finalJson,
+			terminalTranscript,
+			exitCode: lastExitCode,
+			durationMs: totalDurationMs
+		};
+	}
+
+	async executeSshCommand(options: ISshCommandOptions): Promise<ISshCommandResult> {
+		const startTime = Date.now();
+		const host = (options.host || '').trim();
+		const port = Number(options.port) || 22;
+		const user = (options.user || 'root').trim() || 'root';
+		const password = options.password ?? '';
+		const cwd = (options.cwd || '').trim();
+		const action = options.action || 'exec';
+		const rawCommand = (options.command || '').trim();
+		const command = rawCommand || (action === 'connect' ? 'echo "Connected to $(hostname) ($(uname -sr 2>/dev/null || uname -a))" && uptime 2>/dev/null || true' : 'pwd');
+		const timeoutSec = typeof options.timeoutSec === 'number' && options.timeoutSec > 0 ? options.timeoutSec : 30;
+
+		if (!host) {
+			return {
+				success: false,
+				connectionFailed: true,
+				host: '',
+				port,
+				user,
+				cwd,
+				command,
+				output: '',
+				exitCode: 1,
+				durationMs: 0,
+				error: 'SSH Host / IP is required.'
+			};
+		}
+
+		const timestamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+		const tmpDirUri = URI.file('/tmp');
+		const inJsonUri = URI.joinPath(tmpDirUri, `.anyagent_ssh_in_${timestamp}.json`);
+		const outJsonUri = URI.joinPath(tmpDirUri, `.anyagent_ssh_out_${timestamp}.json`);
+		const runnerPyUri = URI.joinPath(tmpDirUri, `.anyagent_ssh_runner_${timestamp}.py`);
+		const logUri = URI.joinPath(tmpDirUri, `.anyagent_ssh_log_${timestamp}.log`);
+
+		const payload = {
+			host,
+			port,
+			user,
+			password,
+			command,
+			cwd,
+			action,
+			timeoutSec
+		};
+
+		const pythonRunner = [
+			'import sys, os, json, time, pty, select, re, signal',
+			'',
+			`IN_PATH = ${JSON.stringify(inJsonUri.fsPath)}`,
+			`OUT_PATH = ${JSON.stringify(outJsonUri.fsPath)}`,
+			'',
+			'def main():',
+			'    t0 = time.time()',
+			'    with open(IN_PATH, "r", encoding="utf-8") as f:',
+			'        req = json.load(f)',
+			'    host = str(req.get("host") or "").strip()',
+			'    port = int(req.get("port") or 22)',
+			'    user = str(req.get("user") or "root").strip() or "root"',
+			'    password = str(req.get("password") or "")',
+			'    cmd = str(req.get("command") or "pwd")',
+			'    cwd = str(req.get("cwd") or "").strip()',
+			'    timeout_sec = float(req.get("timeoutSec") or 30.0)',
+			'',
+			'    res = {',
+			'        "success": False,',
+			'        "connectionFailed": False,',
+			'        "host": host,',
+			'        "port": port,',
+			'        "user": user,',
+			'        "cwd": cwd,',
+			'        "command": cmd,',
+			'        "output": "",',
+			'        "exitCode": 1,',
+			'        "durationMs": 0',
+			'    }',
+			'',
+			'    safe_cwd = cwd.replace("\'", "\'\\"\'\\"\'") if cwd else ""',
+			'    cd_prefix = f"if [ -n \'{safe_cwd}\' ] && [ -d \'{safe_cwd}\' ]; then cd \'{safe_cwd}\' 2>/dev/null; fi\\n" if safe_cwd else ""',
+			'    remote_script = (',
+			'        f"printf \'\\\\n___ANYAGENT_SSH_CONNECTED___\\\\n\'\\n"',
+			'        f"{cd_prefix}"',
+			'        f"{cmd}\\n"',
+			'        f"__aa_ec=$?\\n"',
+			'        f"printf \'\\\\n___ANYAGENT_SSH_META___:%s:%s___\\\\n\' \\"$(pwd)\\" \\"$__aa_ec\\"\\n"',
+			'        f"exit $__aa_ec"',
+			'    )',
+			'',
+			'    ssh_args = [',
+			'        "ssh",',
+			'        "-p", str(port),',
+			'        "-o", "StrictHostKeyChecking=no",',
+			'        "-o", "UserKnownHostsFile=/dev/null",',
+			'        "-o", "LogLevel=ERROR",',
+			'        "-o", "ConnectTimeout=10",',
+			'        "-o", "NumberOfPasswordPrompts=1",',
+			'        "-o", "PreferredAuthentications=password,keyboard-interactive,publickey",',
+			'        f"{user}@{host}",',
+			'        remote_script',
+			'    ]',
+			'',
+			'    try:',
+			'        pid, master_fd = pty.fork()',
+			'        if pid == 0:',
+			'            os.environ["LC_ALL"] = "C"',
+			'            os.environ["TERM"] = "xterm-256color"',
+			'            os.execvp("ssh", ssh_args)',
+			'            os._exit(127)',
+			'',
+			'        raw_buf = b""',
+			'        output_buf = b""',
+			'        password_sent = False',
+			'        yes_sent = False',
+			'        deadline = time.time() + timeout_sec',
+			'        exit_code = None',
+			'',
+			'        while time.time() < deadline:',
+			'            rlist, _, _ = select.select([master_fd], [], [], 0.15)',
+			'            if master_fd in rlist:',
+			'                try:',
+			'                    chunk = os.read(master_fd, 8192)',
+			'                except OSError:',
+			'                    chunk = b""',
+			'                if not chunk:',
+			'                    break',
+			'                raw_buf += chunk',
+			'                output_buf += chunk',
+			'                lower_tail = raw_buf[-512:].decode("utf-8", errors="ignore").lower()',
+			'                if (not yes_sent) and ("continue connecting" in lower_tail and "yes/no" in lower_tail):',
+			'                    try:',
+			'                        os.write(master_fd, b"yes\\n")',
+			'                        yes_sent = True',
+			'                        output_buf = b""',
+			'                    except OSError:',
+			'                        pass',
+			'                elif (not password_sent) and ("password:" in lower_tail or "passphrase" in lower_tail or "verification code" in lower_tail):',
+			'                    try:',
+			'                        os.write(master_fd, (password + "\\n").encode("utf-8"))',
+			'                        password_sent = True',
+			'                        output_buf = b""',
+			'                    except OSError:',
+			'                        pass',
+			'            try:',
+			'                wpid, wstatus = os.waitpid(pid, os.WNOHANG)',
+			'                if wpid == pid:',
+			'                    exit_code = os.waitstatus_to_exitcode(wstatus) if hasattr(os, "waitstatus_to_exitcode") else (wstatus >> 8)',
+			'                    while True:',
+			'                        r2, _, _ = select.select([master_fd], [], [], 0.05)',
+			'                        if not r2:',
+			'                            break',
+			'                        try:',
+			'                            c2 = os.read(master_fd, 8192)',
+			'                            if not c2:',
+			'                                break',
+			'                            output_buf += c2',
+			'                        except OSError:',
+			'                            break',
+			'                    break',
+			'            except ChildProcessError:',
+			'                break',
+			'',
+			'        if exit_code is None:',
+			'            try:',
+			'                os.kill(pid, signal.SIGTERM)',
+			'            except Exception:',
+			'                pass',
+			'            try:',
+			'                wpid, wstatus = os.waitpid(pid, 0)',
+			'                exit_code = os.waitstatus_to_exitcode(wstatus) if hasattr(os, "waitstatus_to_exitcode") else (wstatus >> 8)',
+			'            except Exception:',
+			'                exit_code = 124',
+			'',
+			'        try:',
+			'            os.close(master_fd)',
+			'        except Exception:',
+			'            pass',
+			'',
+			'        text = output_buf.decode("utf-8", errors="replace").replace("\\r\\n", "\\n").replace("\\r", "\\n")',
+			'        if password_sent and text.startswith("\\n"):',
+			'            text = text[1:]',
+			'',
+			'        connected_ok = "___ANYAGENT_SSH_CONNECTED___" in text',
+			'        if connected_ok:',
+			'            text = re.sub(r"\\n?___ANYAGENT_SSH_CONNECTED___\\n?", "", text, count=1)',
+			'',
+			'        meta_match = re.search(r"\\n?___ANYAGENT_SSH_META___:(.*?):(-?\\d+)___\\n?", text)',
+			'        if meta_match:',
+			'            detected_cwd = meta_match.group(1).strip()',
+			'            detected_ec = int(meta_match.group(2))',
+			'            if detected_cwd:',
+			'                res["cwd"] = detected_cwd',
+			'            exit_code = detected_ec',
+			'            text = text[:meta_match.start()] + text[meta_match.end():]',
+			'',
+			'        clean_text = text.strip("\\n")',
+			'        res["output"] = clean_text',
+			'        res["exitCode"] = int(exit_code if exit_code is not None else 0)',
+			'        if not connected_ok:',
+			'            res["connectionFailed"] = True',
+			'            res["success"] = False',
+			'            err_detail = clean_text or ("exit code " + str(res["exitCode"]))',
+			'            res["error"] = f"SSH Connection Failed ({user}@{host}:{port}): {err_detail}"',
+			'        else:',
+			'            res["success"] = (res["exitCode"] == 0)',
+			'            if not res["success"] and not res.get("error"):',
+			'                res["error"] = clean_text or f"SSH exited with code {res[\'exitCode\']}"',
+			'    except Exception as e:',
+			'        res["connectionFailed"] = True',
+			'        res["success"] = False',
+			'        res["error"] = str(e)',
+			'',
+			'    res["durationMs"] = int((time.time() - t0) * 1000)',
+			'    with open(OUT_PATH, "w", encoding="utf-8") as out_f:',
+			'        json.dump(res, out_f, ensure_ascii=False)',
+			'',
+			'if __name__ == "__main__":',
+			'    main()',
+			''
+		].join('\n');
+
+		try {
+			await this.fileService.writeFile(inJsonUri, VSBuffer.fromString(JSON.stringify(payload, null, 2)));
+			await this.fileService.writeFile(runnerPyUri, VSBuffer.fromString(pythonRunner));
+
+			const workDirUri = options.workspaceUri ? this._toUri(options.workspaceUri) : tmpDirUri;
+			const envDetection = await this.detectPythonEnvironment(workDirUri);
+			const pythonCmd = envDetection.interpreterPath || 'python3';
+			const escapedPython = pythonCmd.includes(' ') ? `"${pythonCmd}"` : pythonCmd;
+
+			const terminal = await this.terminalService.createTerminal({
+				config: {
+					name: 'AnyAgent SSH Runner',
+					cwd: tmpDirUri,
+					hideFromUser: true
+				}
+			});
+
+			const sentinel = `___SSH_OP_${timestamp}___`;
+			const cmd = `${escapedPython} "${runnerPyUri.fsPath}" > "${logUri.fsPath}" 2>&1; echo "${sentinel}:$?"`;
+
+			let finished = false;
+			let activeEntry: { terminal: any; abort: () => void; label: string } | undefined;
+			const waitPromise = new Promise<void>((resolve) => {
+				let dataListener: { dispose(): void } | undefined;
+				let exitListener: { dispose(): void } | undefined;
+				const finishOnce = () => {
+					if (!finished) {
+						finished = true;
+						dataListener?.dispose();
+						exitListener?.dispose();
+						resolve();
+					}
+				};
+				activeEntry = {
+					terminal,
+					abort: finishOnce,
+					label: 'AnyAgent SSH Runner'
+				};
+				this._activeTerminals.add(activeEntry);
+				const regex = new RegExp(`${sentinel}:(\\d+)`);
+				dataListener = terminal.onData(data => {
+					if (regex.test(data)) {
+						finishOnce();
+					}
+				});
+				exitListener = terminal.onExit(() => {
+					finishOnce();
+				});
+				setTimeout(() => {
+					finishOnce();
+				}, (timeoutSec + 5) * 1000);
+			});
+
+			try {
+				await terminal.sendText(cmd, true);
+				await waitPromise;
+			} finally {
+				if (activeEntry) {
+					this._activeTerminals.delete(activeEntry);
+				}
+			}
+
+			let resultObj: ISshCommandResult | undefined;
+			if (await this.fileService.exists(outJsonUri)) {
+				try {
+					const rawOut = (await this.fileService.readFile(outJsonUri)).value.toString();
+					resultObj = JSON.parse(rawOut);
+				} catch { }
+			}
+
+			let logText = '';
+			if (await this.fileService.exists(logUri)) {
+				try {
+					logText = (await this.fileService.readFile(logUri)).value.toString().trim();
+				} catch { }
+			}
+
+			for (const tmpUri of [inJsonUri, outJsonUri, runnerPyUri, logUri]) {
+				try {
+					if (await this.fileService.exists(tmpUri)) {
+						await this.fileService.del(tmpUri);
+					}
+				} catch { }
+			}
+			terminal.dispose();
+
+			if (resultObj) {
+				return resultObj;
+			}
+			return {
+				success: false,
+				connectionFailed: true,
+				host,
+				port,
+				user,
+				cwd,
+				command,
+				output: logText,
+				exitCode: 1,
+				durationMs: Date.now() - startTime,
+				error: logText || 'SSH runner failed to produce a response.'
+			};
+		} catch (err: any) {
+			for (const tmpUri of [inJsonUri, outJsonUri, runnerPyUri, logUri]) {
+				try {
+					if (await this.fileService.exists(tmpUri)) {
+						await this.fileService.del(tmpUri);
+					}
+				} catch { }
+			}
+			return {
+				success: false,
+				connectionFailed: true,
+				host,
+				port,
+				user,
+				cwd,
+				command,
+				output: '',
+				exitCode: 1,
+				durationMs: Date.now() - startTime,
+				error: err.message || String(err)
+			};
+		}
+	}
+
+	async openInteractiveSshTerminal(options: ISshCommandOptions): Promise<void> {
+		const host = (options.host || '').trim();
+		const port = Number(options.port) || 22;
+		const user = (options.user || 'root').trim() || 'root';
+		const password = options.password ?? '';
+		if (!host) {
+			return;
+		}
+
+		const terminal = await this.terminalService.createTerminal({
+			config: {
+				name: `SSH: ${user}@${host}:${port}`
+			}
+		});
+		this.terminalService.setActiveInstance(terminal);
+		await this.terminalService.revealActiveTerminal();
+
+		if (!password) {
+			await terminal.sendText(`ssh -p ${port} -o StrictHostKeyChecking=no ${user}@${host}`, true);
+			return;
+		}
+
+		const timestamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+		const tmpDirUri = URI.file('/tmp');
+		const cfgUri = URI.joinPath(tmpDirUri, `.anyagent_ssh_interactive_${timestamp}.json`);
+		const scriptUri = URI.joinPath(tmpDirUri, `.anyagent_ssh_interactive_${timestamp}.py`);
+
+		const pyInteractive = [
+			'import os, sys, json, pty',
+			`CFG_PATH = ${JSON.stringify(cfgUri.fsPath)}`,
+			'with open(CFG_PATH, "r", encoding="utf-8") as f:',
+			'    cfg = json.load(f)',
+			'try:',
+			'    os.remove(CFG_PATH)',
+			'    os.remove(__file__)',
+			'except Exception:',
+			'    pass',
+			'host = cfg.get("host", "")',
+			'port = str(cfg.get("port", 22))',
+			'user = cfg.get("user", "root")',
+			'password = cfg.get("password", "")',
+			'pw_sent = [False]',
+			'buf = [b""]',
+			'def master_read(fd):',
+			'    data = os.read(fd, 4096)',
+			'    if data and not pw_sent[0]:',
+			'        buf[0] = (buf[0] + data)[-512:]',
+			'        low = buf[0].decode("utf-8", errors="ignore").lower()',
+			'        if "password:" in low or "passphrase" in low:',
+			'            os.write(fd, (password + "\\n").encode("utf-8"))',
+			'            pw_sent[0] = True',
+			'    return data',
+			'pty.spawn(["ssh", "-p", port, "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", f"{user}@{host}"], master_read)',
+		].join('\n');
+
+		await this.fileService.writeFile(cfgUri, VSBuffer.fromString(JSON.stringify({ host, port, user, password })));
+		await this.fileService.writeFile(scriptUri, VSBuffer.fromString(pyInteractive));
+		await terminal.sendText(`python3 "${scriptUri.fsPath}"`, true);
 	}
 }

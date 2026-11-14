@@ -51,7 +51,165 @@ export type CustomFieldType =
 	| 'run_tickets'
 	| 'get_tickets'
 	| 'get_outputs'
-	| 'display';
+	| 'display'
+	| 'ssh'
+	| 'http_request';
+
+export interface IHttpRequestParam {
+	id?: string;
+	key: string;
+	value: string;
+	enabled?: boolean;
+	description?: string;
+}
+
+export interface IHttpRequestHeader {
+	id?: string;
+	key: string;
+	value: string;
+	enabled?: boolean;
+	description?: string;
+}
+
+export interface ISshQuickCommand {
+	id?: string;
+	label: string;
+	command: string;
+	category?: string;
+	description?: string;
+}
+
+export const SSH_DEFAULT_QUICK_COMMANDS: ISshQuickCommand[] = [
+	{ label: 'List Directory (ls -la)', command: 'ls -la', category: 'Files & Dirs' },
+	{ label: 'Current Path (pwd)', command: 'pwd', category: 'Files & Dirs' },
+	{ label: 'System Info (uname -a)', command: 'uname -a && cat /etc/os-release 2>/dev/null | head -n 6', category: 'System' },
+	{ label: 'Uptime & Load (uptime)', command: 'uptime', category: 'System' },
+	{ label: 'Memory Usage (free -h)', command: 'free -h', category: 'Resources' },
+	{ label: 'Disk Space (df -h)', command: 'df -h', category: 'Resources' },
+	{ label: 'Top 10 Processes (ps)', command: 'ps aux --sort=-%mem | head -n 11', category: 'Resources' },
+	{ label: 'Listening Ports (ss -tulnp)', command: 'ss -tulnp || netstat -tulnp', category: 'Network' },
+	{ label: 'IP Addresses (ip a)', command: 'ip -br a || ifconfig', category: 'Network' },
+	{ label: 'Docker Containers (docker ps)', command: 'docker ps --format "table {{.Names}}\\t{{.Status}}\\t{{.Ports}}"', category: 'Docker & Services' },
+	{ label: 'Docker Stats (docker stats)', command: 'docker stats --no-stream', category: 'Docker & Services' },
+	{ label: 'Running Services (systemctl)', command: 'systemctl list-units --type=service --state=running --no-pager | head -n 25', category: 'Docker & Services' },
+	{ label: 'System Logs (journalctl)', command: 'journalctl -n 30 --no-pager', category: 'Logs' },
+	{ label: 'Large Files >100M (find)', command: 'find . -maxdepth 3 -type f -size +100M -exec ls -lh {} + 2>/dev/null', category: 'Files & Dirs' }
+];
+
+const SSH_LEGACY_CN_LABEL_MAP: Record<string, { label: string; category: string }> = {
+	'查看目录 (ls -la)': { label: 'List Directory (ls -la)', category: 'Files & Dirs' },
+	'当前路径 (pwd)': { label: 'Current Path (pwd)', category: 'Files & Dirs' },
+	'系统信息 (uname -a)': { label: 'System Info (uname -a)', category: 'System' },
+	'运行时间 & 负载 (uptime)': { label: 'Uptime & Load (uptime)', category: 'System' },
+	'内存使用 (free -h)': { label: 'Memory Usage (free -h)', category: 'Resources' },
+	'磁盘空间 (df -h)': { label: 'Disk Space (df -h)', category: 'Resources' },
+	'CPU/内存 Top 10 进程': { label: 'Top 10 Processes (ps)', category: 'Resources' },
+	'监听端口 (ss -tulnp)': { label: 'Listening Ports (ss -tulnp)', category: 'Network' },
+	'公网/网卡 IP (ip a)': { label: 'IP Addresses (ip a)', category: 'Network' },
+	'Docker 运行容器 (docker ps)': { label: 'Docker Containers (docker ps)', category: 'Docker & Services' },
+	'Docker 资源占用 (docker stats)': { label: 'Docker Stats (docker stats)', category: 'Docker & Services' },
+	'运行中 Systemd 服务': { label: 'Running Services (systemctl)', category: 'Docker & Services' },
+	'系统最新日志 (journalctl)': { label: 'System Logs (journalctl)', category: 'Logs' },
+	'大文件扫描 (>100M)': { label: 'Large Files >100M (find)', category: 'Files & Dirs' }
+};
+
+export function normalizeSshQuickCommands(cmds?: ISshQuickCommand[]): ISshQuickCommand[] {
+	if (!Array.isArray(cmds) || cmds.length === 0) {
+		return SSH_DEFAULT_QUICK_COMMANDS.map(c => ({ ...c }));
+	}
+	return cmds.map(c => {
+		const mapped = c?.label ? SSH_LEGACY_CN_LABEL_MAP[c.label.trim()] : undefined;
+		if (mapped) {
+			return {
+				...c,
+				label: mapped.label,
+				category: mapped.category
+			};
+		}
+		return { ...c };
+	});
+}
+
+export interface ISshRawCommandEntry {
+	command: string;
+	rawOutput: string;
+}
+
+export function normalizeSshCommandsList(sshCommands?: unknown, fallbackCommand?: string): string[] {
+	if (Array.isArray(sshCommands) && sshCommands.length > 0) {
+		return sshCommands.map(cmd => String(cmd ?? ''));
+	}
+	if (typeof fallbackCommand === 'string' && fallbackCommand.trim().length > 0) {
+		return [fallbackCommand];
+	}
+	return [''];
+}
+
+export function cleanInterpolatedSshCommand(rawResolved: string): string {
+	let trimmed = String(rawResolved ?? '').trim();
+	if (trimmed.startsWith('```') && trimmed.endsWith('```')) {
+		trimmed = trimmed
+			.replace(/^```(?:bash|sh|zsh|shell|console)?\s*\n?/i, '')
+			.replace(/\n?```\s*$/i, '')
+			.trim();
+	}
+	return trimmed;
+}
+
+export function extractSshOutputLinesArray(rawLog: string | undefined, maxLines?: number): string[] {
+	const normalized = String(rawLog ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n+$/, '');
+	if (!normalized) {
+		return [];
+	}
+	const n = typeof maxLines === 'number' && !isNaN(maxLines) && maxLines > 0 ? Math.floor(maxLines) : 50;
+	const lines = normalized.split('\n');
+	return lines.slice(-n);
+}
+
+export function buildSshCommandsJsonObject(entries: ReadonlyArray<ISshRawCommandEntry>, maxLines?: number): Record<string, string[]> {
+	const result: Record<string, string[]> = {};
+	for (const entry of (entries || [])) {
+		const cmdKey = String(entry?.command ?? '').trim();
+		if (!cmdKey) {
+			continue;
+		}
+		result[cmdKey] = extractSshOutputLinesArray(entry?.rawOutput, maxLines);
+	}
+	return result;
+}
+
+export function formatSshCommandsJsonOutput(entries: ReadonlyArray<ISshRawCommandEntry>, maxLines?: number): string {
+	const obj = buildSshCommandsJsonObject(entries, maxLines);
+	return JSON.stringify(obj, null, 2);
+}
+
+export function extractSshOutputLastNLines(rawLog: string | undefined, maxLines?: number): string {
+	const text = String(rawLog ?? '').replace(/\r\n/g, '\n').trimEnd();
+	if (!text) {
+		return '';
+	}
+	// Preserve valid JSON object output from multi-command SSH runs while re-slicing line arrays if needed
+	const trimmed = text.trim();
+	if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+		try {
+			const parsed = JSON.parse(trimmed);
+			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				const values = Object.values(parsed);
+				if (values.every(v => Array.isArray(v))) {
+					const n = typeof maxLines === 'number' && !isNaN(maxLines) && maxLines > 0 ? Math.floor(maxLines) : 50;
+					const slicedObj: Record<string, string[]> = {};
+					for (const [k, v] of Object.entries(parsed)) {
+						slicedObj[k] = (v as any[]).map(line => String(line ?? '')).slice(-n);
+					}
+					return JSON.stringify(slicedObj, null, 2);
+				}
+			}
+		} catch { }
+	}
+	const n = typeof maxLines === 'number' && !isNaN(maxLines) && maxLines > 0 ? Math.floor(maxLines) : 50;
+	const lines = text.split('\n');
+	return lines.slice(-n).join('\n');
+}
 
 export type TableColumnDataType =
 	| 'TEXT'
@@ -176,6 +334,40 @@ export interface ICustomField {
 	wfDisplayValue?: string;
 	outputVariableName?: string;
 	outputVariableManual?: boolean;
+	sshHost?: string;
+	sshPort?: number | string;
+	sshUser?: string;
+	sshPassword?: string;
+	sshCwd?: string;
+	sshCommand?: string;
+	sshCommands?: string[];
+	sshOutput?: string;
+	sshLastOutput?: string;
+	sshLastRawOutput?: string;
+	sshLastRawEntries?: ISshRawCommandEntry[];
+	sshOutputLines?: number;
+	sshQuickCommands?: ISshQuickCommand[];
+	httpUrl?: string;
+	httpMethod?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD' | 'OPTIONS' | string;
+	httpParams?: IHttpRequestParam[];
+	httpHeaders?: IHttpRequestHeader[];
+	httpAuthType?: 'none' | 'bearer' | 'api_key' | 'basic' | 'custom' | string;
+	httpAuthToken?: string;
+	httpApiKeyName?: string;
+	httpApiKeyValue?: string;
+	httpApiKeyLocation?: 'header' | 'query';
+	httpAuthUsername?: string;
+	httpAuthPassword?: string;
+	httpBodyType?: 'none' | 'json' | 'raw' | 'x-www-form-urlencoded' | string;
+	httpBodyContent?: string;
+	httpTimeoutMs?: number;
+	httpResponseStatus?: number;
+	httpResponseStatusText?: string;
+	httpResponseHeaders?: Record<string, string>;
+	httpResponseBody?: string;
+	httpResponseData?: any;
+	httpLastExecutionTime?: string;
+	httpLastDurationMs?: number;
 }
 
 const PYTHON_RESERVED_KEYWORDS = new Set([

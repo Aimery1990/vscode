@@ -64,7 +64,9 @@ const VALID_FIELD_TYPES: Set<CustomFieldType> = new Set([
 	'python',
 	'tts',
 	'media_player',
-	'table'
+	'table',
+	'ssh',
+	'http_request'
 ]);
 
 const BASE_PRIMITIVES_CATALOG = [
@@ -334,6 +336,29 @@ const BASE_PRIMITIVES_CATALOG = [
 				{ id: 'btn_approve', label: 'Approve', color: '#10b981', targetStatus: 'Done' },
 				{ id: 'btn_reject', label: 'Reject', color: '#ef4444', targetStatus: 'Blocked' }
 			]
+		}
+	},
+	{
+		type: 'http_request',
+		label: 'HTTP Request (API / REST Client)',
+		description: 'Universal HTTP / REST API communication component supporting GET, POST, PUT, PATCH, DELETE, HEAD, and OPTIONS with dynamic variable URL, query parameters, custom headers, Bearer/API-Key/Basic authentication, request body, and rich structured JSON output passed cleanly to downstream nodes.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'api_request_1',
+			label: 'Upload Tailored Resume',
+			type: 'http_request',
+			httpUrl: 'https://aimery.link/api/tailored-resumes/upload',
+			httpMethod: 'POST',
+			httpAuthType: 'bearer',
+			httpAuthToken: '{ADMIN_PASSWORD}',
+			httpHeaders: [
+				{ key: 'Content-Type', value: 'application/json; charset=utf-8', enabled: true },
+				{ key: 'Accept', value: 'application/json', enabled: true }
+			],
+			httpParams: [],
+			httpBodyType: 'json',
+			httpBodyContent: '{\n  "job_id": "{job_id}",\n  "source": "linkedin",\n  "job_title": "{job_title}",\n  "company": "{company}",\n  "status": "published",\n  "job_url": "{job_url}",\n  "resume_content": {ai_resume_json}\n}'
 		}
 	}
 ];

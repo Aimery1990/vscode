@@ -58,7 +58,7 @@ function notifyCopiedComponentChanged(): void {
 	copiedComponentListeners.forEach(listener => {
 		try {
 			listener();
-		} catch {}
+		} catch { }
 	});
 }
 
@@ -250,7 +250,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			const fn = this._renderCleanupFns.pop();
 			try {
 				fn?.();
-			} catch {}
+			} catch { }
 		}
 	}
 
@@ -278,7 +278,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		savedSchemaScrollStateByKey.set(this._currentScrollKey, nextState);
 		try {
 			this._storageService.store(`customModuleSchemaEditor.scroll.${this._currentScrollKey}`, JSON.stringify(nextState), StorageScope.PROFILE, StorageTarget.MACHINE);
-		} catch {}
+		} catch { }
 	}
 
 	private _getSavedScrollState(scrollKey: string): { mainScrollTop: number; toolboxScrollTop: number } | undefined {
@@ -302,7 +302,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					return loaded;
 				}
 			}
-		} catch {}
+		} catch { }
 		return undefined;
 	}
 
@@ -536,7 +536,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			savedSchemaScrollStateByKey.set(scrollKey, nextState);
 			try {
 				this._storageService.store(`customModuleSchemaEditor.scroll.${scrollKey}`, JSON.stringify(nextState), StorageScope.PROFILE, StorageTarget.MACHINE);
-			} catch {}
+			} catch { }
 		}, { passive: true });
 		leftLibrary.addEventListener('scroll', () => {
 			if (this._isRestoringScroll || leftLibrary.clientHeight <= 0 || !scrollKey) {
@@ -550,7 +550,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			savedSchemaScrollStateByKey.set(scrollKey, nextState);
 			try {
 				this._storageService.store(`customModuleSchemaEditor.scroll.${scrollKey}`, JSON.stringify(nextState), StorageScope.PROFILE, StorageTarget.MACHINE);
-			} catch {}
+			} catch { }
 		}, { passive: true });
 
 		const applySavedScrollPosition = () => {
@@ -1116,6 +1116,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				defaultName: 'Python Script'
 			},
 			{
+				label: 'HTTP Request (API / REST Client)',
+				icon: Codicon.cloudUpload,
+				type: 'http_request',
+				defaultName: 'API Request'
+			},
+			{
 				label: 'Data Table (SQLite / Grid)',
 				icon: Codicon.table,
 				type: 'table',
@@ -1288,6 +1294,16 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				newField.mediaKind = 'audio';
 				newField.mediaPlaybackRate = 1.0;
 				newField.mediaAutoPlay = false;
+			}
+			if (bc.type === 'http_request') {
+				newField.httpUrl = 'https://aimery.link/api/tailored-resumes/JOB-41298374';
+				newField.httpMethod = 'GET';
+				newField.httpAuthType = 'none';
+				newField.httpBodyType = 'none';
+				newField.httpBodyContent = '';
+				newField.httpHeaders = [{ key: 'Accept', value: 'application/json', enabled: true }];
+				newField.httpParams = [];
+				newField.httpTimeoutMs = 30000;
 			}
 			if (bc.type === 'table') {
 				const ts = Date.now();
@@ -1488,7 +1504,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								resolvedType = 'python';
 							}
 						}
-					} catch {}
+					} catch { }
 					const bc = baseComponents.find(c => c.type === resolvedType);
 					if (bc) {
 						addFieldFromDef(bc, insertPos);
@@ -1518,7 +1534,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 		const refreshAllPasteUi = () => {
 			pasteUiRefreshers.forEach(fn => {
-				try { fn(); } catch {}
+				try { fn(); } catch { }
 			});
 		};
 
@@ -1606,7 +1622,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					sourceModuleName: activeMod.name,
 					field: clonedField
 				}, null, 2));
-			} catch {}
+			} catch { }
 
 			if (btnIconEl) {
 				btnIconEl.className = ThemeIcon.asClassName(Codicon.check);
@@ -1639,7 +1655,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							notifyCopiedComponentChanged();
 						}
 					}
-				} catch {}
+				} catch { }
 			}
 
 			if (!sourceEntry || !sourceEntry.field) {
@@ -1770,7 +1786,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			lastKeyboardPasteTimestamp = now;
 			e.preventDefault();
 			e.stopPropagation();
-			pasteCopiedComponent().catch(() => {});
+			pasteCopiedComponent().catch(() => { });
 		};
 
 		const onWindowPaste = (e: ClipboardEvent) => {
@@ -1791,7 +1807,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			lastKeyboardPasteTimestamp = now;
 			e.preventDefault();
 			e.stopPropagation();
-			pasteCopiedComponent().catch(() => {});
+			pasteCopiedComponent().catch(() => { });
 		};
 
 		window.addEventListener('keydown', onWindowKeyDown, true);
@@ -1840,7 +1856,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			const referenceChipRefreshers: Array<() => void> = [];
 			const refreshAllReferenceChipBars = () => {
 				referenceChipRefreshers.forEach(fn => {
-					try { fn(); } catch {}
+					try { fn(); } catch { }
 				});
 			};
 
@@ -1860,7 +1876,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								tokens.push({ label: wLabel, type: wv.type || 'WORKFLOW' });
 							}
 						});
-					} catch {}
+					} catch { }
 				}
 				allSchemaFields.forEach(rf => {
 					if (!rf) { return; }
@@ -1942,7 +1958,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						requestAnimationFrame(() => {
 							try {
 								fieldCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-							} catch {}
+							} catch { }
 						});
 					}
 					fieldCard.style.borderColor = '#34d399';
@@ -2054,6 +2070,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				const isPrompt = field.type === 'prompt';
 				const isTts = field.type === 'tts';
 				const isMediaPlayer = field.type === 'media_player';
+				const isHttpRequest = field.type === 'http_request';
 				const isOutput = field.type === 'output' || field.type === 'result';
 				const isWfBuiltin = field.type === 'create_tickets' || field.type === 'run_tickets' || field.type === 'get_outputs' || field.type === 'get_tickets' || field.type === 'display';
 				const wfBadgeLabels: Record<string, string> = {
@@ -2063,10 +2080,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					get_tickets: 'GET TICKETS',
 					display: 'DISPLAY'
 				};
-				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isPython ? 'PYTHON' : (isTable ? 'DATA TABLE' : (isParameters ? 'INPUTS' : (isPrompt ? 'AI PROMPT' : (isTts ? 'AUDIO / TTS' : (isMediaPlayer ? 'MP3 / MP4 PLAYER' : (isOutput ? 'OUTPUT' : (wfBadgeLabels[field.type] || field.type.toUpperCase()))))))))))));
-				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isPython ? 'rgba(56, 189, 248, 0.15)' : (isTable ? 'rgba(20, 184, 166, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isTts ? 'rgba(236, 72, 153, 0.18)' : (isMediaPlayer ? 'rgba(245, 158, 11, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.22)' : 'rgba(99, 102, 241, 0.18)'))))))))))));
-				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isPython ? '#38bdf8' : (isTable ? '#2dd4bf' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isTts ? '#f472b6' : (isMediaPlayer ? '#fbbf24' : (isOutput ? '#818cf8' : (isWfBuiltin ? '#d8b4fe' : '#818cf8'))))))))))));
-				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isPython ? 'rgba(56, 189, 248, 0.35)' : (isTable ? 'rgba(20, 184, 166, 0.4)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isTts ? 'rgba(236, 72, 153, 0.35)' : (isMediaPlayer ? 'rgba(251, 191, 36, 0.35)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.45)' : 'rgba(99, 102, 241, 0.35)'))))))))))));
+				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isPython ? 'PYTHON' : (isTable ? 'DATA TABLE' : (isParameters ? 'INPUTS' : (isPrompt ? 'AI PROMPT' : (isTts ? 'AUDIO / TTS' : (isMediaPlayer ? 'MP3 / MP4 PLAYER' : (isHttpRequest ? 'HTTP REQUEST' : (isOutput ? 'OUTPUT' : (wfBadgeLabels[field.type] || field.type.toUpperCase())))))))))))));
+				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isPython ? 'rgba(56, 189, 248, 0.15)' : (isTable ? 'rgba(20, 184, 166, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isTts ? 'rgba(236, 72, 153, 0.18)' : (isMediaPlayer ? 'rgba(245, 158, 11, 0.18)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.22)' : 'rgba(99, 102, 241, 0.18)')))))))))))));
+				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isPython ? '#38bdf8' : (isTable ? '#2dd4bf' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isTts ? '#f472b6' : (isMediaPlayer ? '#fbbf24' : (isHttpRequest ? '#06b6d4' : (isOutput ? '#818cf8' : (isWfBuiltin ? '#d8b4fe' : '#818cf8')))))))))))));
+				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isPython ? 'rgba(56, 189, 248, 0.35)' : (isTable ? 'rgba(20, 184, 166, 0.4)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isTts ? 'rgba(236, 72, 153, 0.35)' : (isMediaPlayer ? 'rgba(251, 191, 36, 0.35)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.4)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.45)' : 'rgba(99, 102, 241, 0.35)')))))))))))));
 
 				append(headerLeft, $('span.type-badge', {
 					style: `font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; letter-spacing: 0.04em;`
@@ -2100,6 +2117,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					showPrimitiveHelpModal(this._container!, field.type, field.label || field.id, field.componentRef);
 				};
 
+				let propagateLabelRenameInModule: (oldLbl: string, newLbl: string) => void = () => { };
+				let labelInput: HTMLInputElement;
 
 				const headerRight = append(cardHeader, $('.header-right', {
 					style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto;'
@@ -2126,7 +2145,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				};
 				pasteBelowBtn.onclick = (e) => {
 					e.stopPropagation();
-					pasteCopiedComponent(fIdx).catch(() => {});
+					pasteCopiedComponent(fIdx).catch(() => { });
 				};
 				pasteUiRefreshers.push(() => {
 					pasteBelowBtn.style.display = copiedSchemaComponentClipboard ? 'inline-flex' : 'none';
@@ -2185,7 +2204,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					};
 					copyFieldBtn.onclick = (e) => {
 						e.stopPropagation();
-						copyFieldComponent(field, badgeText, copyFieldBtn).catch(() => {});
+						copyFieldComponent(field, badgeText, copyFieldBtn).catch(() => { });
 					};
 
 					// Delete button (with confirmation dialog)
@@ -2218,7 +2237,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					style: 'display: flex; align-items: center; gap: 10px; flex-wrap: wrap;'
 				}));
 				append(labelRow, $('span', { style: 'font-size: 11.5px; opacity: 0.8; font-weight: 500; min-width: 75px;' }, 'Field Label:'));
-				const labelInput = append(labelRow, $('input.monaco-inputbox', {
+				labelInput = append(labelRow, $('input.monaco-inputbox', {
 					style: 'flex: 1; min-width: 140px; padding: 6px 10px; font-size: 12px; font-weight: 500; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit;'
 				})) as HTMLInputElement;
 				labelInput.value = field.label || field.id;
@@ -2239,7 +2258,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				} else {
 					let lastCommittedLabel = (field.label || field.id || '').trim();
 					let lastCommittedOutVar = (field.outputVariableName || '').trim();
-					const propagateLabelRenameInModule = (oldLbl: string, newLbl: string) => {
+					propagateLabelRenameInModule = (oldLbl: string, newLbl: string) => {
 						if (!oldLbl || !newLbl || oldLbl === newLbl || !this._activeModule) {
 							return;
 						}
@@ -2281,6 +2300,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					};
 					labelInput.oninput = () => {
 						field.label = labelInput.value.trim() || `Field_${fIdx + 1}`;
+						cardTitleText.textContent = field.label;
 						if (hasOutputVariable && !field.outputVariableManual) {
 							const nextAutoVar = generateSmartPythonVarName(field.label, field.type);
 							field.outputVariableName = nextAutoVar;
@@ -2294,6 +2314,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					labelInput.onblur = () => {
 						const newLabel = labelInput.value.trim() || `Field_${fIdx + 1}`;
 						field.label = newLabel;
+						cardTitleText.textContent = newLabel;
 						if (hasOutputVariable && !field.outputVariableManual) {
 							const nextAutoVar = generateSmartPythonVarName(newLabel, field.type);
 							field.outputVariableName = nextAutoVar;
@@ -2311,7 +2332,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 						this._syncDraft();
 						refreshAllReferenceChipBars();
-						this._persistCurrentModule().catch(() => {});
+						this._persistCurrentModule().catch(() => { });
 					};
 
 					// Output Variable Name Row (Right below Field Label)
@@ -2393,7 +2414,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							updateAutoBadgeStyle();
 							this._syncDraft();
 							refreshAllReferenceChipBars();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 
 						outputVarAutoBadge.onclick = (e) => {
@@ -2412,7 +2433,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							updateAutoBadgeStyle();
 							this._syncDraft();
 							refreshAllReferenceChipBars();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 
 						copyVarBtn.onclick = (e) => {
@@ -3114,7 +3135,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							field.defaultUrl = urlInput.value.trim();
 							renderUrlTokenized();
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						}, 160);
 					};
 
@@ -3213,7 +3234,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						field.defaultUrl = urlInput.value.trim();
 						renderUrlTokenized();
 						this._syncDraft();
-						this._persistCurrentModule().catch(() => {});
+						this._persistCurrentModule().catch(() => { });
 					};
 
 					const urlChipBar = append(urlRow, $('div', {
@@ -3623,7 +3644,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							nameInput.onblur = () => {
 								this._syncDraft();
 								refreshAllReferenceChipBars();
-								this._persistCurrentModule().catch(() => {});
+								this._persistCurrentModule().catch(() => { });
 							};
 
 							const delBtn = append(topLine, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
@@ -3648,7 +3669,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								this._syncDraft();
 								renderParamList();
 								refreshAllReferenceChipBars();
-								this._persistCurrentModule().catch(() => {});
+								this._persistCurrentModule().catch(() => { });
 							};
 
 							// Default Value
@@ -3824,7 +3845,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						this._syncDraft();
 						renderParamList();
 						refreshAllReferenceChipBars();
-						this._persistCurrentModule().catch(() => {});
+						this._persistCurrentModule().catch(() => { });
 					};
 
 					// Last Execution Trace & Resolved Values Box (Inputs Component)
@@ -3968,7 +3989,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								const selAgent = agentsList.find(a => a.id === agentSelect.value);
 								field.targetAgentName = selAgent?.name || '';
 								this._syncDraft();
-								this._persistCurrentModule().catch(() => {});
+								this._persistCurrentModule().catch(() => { });
 							};
 						} else {
 							append(targetSelectContainer, $('label', { style: 'font-size: 11px; font-weight: 600; color: #60a5fa;' }, 'Target AI Model:'));
@@ -4125,7 +4146,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										modelBtnLabel.textContent = m.id;
 										modelDropdown.style.display = 'none';
 										this._syncDraft();
-										this._persistCurrentModule().catch(() => {});
+										this._persistCurrentModule().catch(() => { });
 									};
 								});
 							};
@@ -4139,7 +4160,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									if (credService) {
 										configuredCreds = await credService.getCredentials();
 									}
-								} catch {}
+								} catch { }
 
 								const standardProviders = [
 									{ id: 'openai', label: 'OpenAI' },
@@ -4196,7 +4217,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								providerBadgeEl.textContent = field.targetProvider.toUpperCase();
 								renderModelDropdownItems(modelSearchInput.value);
 								this._syncDraft();
-								this._persistCurrentModule().catch(() => {});
+								this._persistCurrentModule().catch(() => { });
 							};
 
 							modelPickerBtn.onclick = (e) => {
@@ -4226,7 +4247,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									modelBtnLabel.textContent = field.targetModel;
 									modelDropdown.style.display = 'none';
 									this._syncDraft();
-									this._persistCurrentModule().catch(() => {});
+									this._persistCurrentModule().catch(() => { });
 								} else if (e.key === 'Escape') {
 									modelDropdown.style.display = 'none';
 								}
@@ -4250,7 +4271,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						agentModeBtn.style.borderColor = 'rgba(255, 255, 255, 0.15)';
 						renderTargetSelector();
 						this._syncDraft();
-						this._persistCurrentModule().catch(() => {});
+						this._persistCurrentModule().catch(() => { });
 					};
 
 					agentModeBtn.onclick = () => {
@@ -4263,7 +4284,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						modelModeBtn.style.borderColor = 'rgba(255, 255, 255, 0.15)';
 						renderTargetSelector();
 						this._syncDraft();
-						this._persistCurrentModule().catch(() => {});
+						this._persistCurrentModule().catch(() => { });
 					};
 
 					renderTargetSelector();
@@ -4345,7 +4366,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						field.promptPreInjectedVisible = !field.promptPreInjectedVisible;
 						updatePreInjectedVisibilityUI();
 						this._syncDraft();
-						this._persistCurrentModule().catch(() => {});
+						this._persistCurrentModule().catch(() => { });
 					};
 
 					const buildVarMap = () => {
@@ -4744,7 +4765,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							if (mediaRecorder && isRecordingVoice) {
 								try {
 									mediaRecorder.stop();
-								} catch {}
+								} catch { }
 								isRecordingVoice = false;
 							} else {
 								isRecordingVoice = false;
@@ -5300,7 +5321,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							field.defaultContent = val;
 							this._syncDraft();
 							if (persistNow) {
-								this._persistCurrentModule().catch(() => {});
+								this._persistCurrentModule().catch(() => { });
 							}
 						}
 					);
@@ -5393,7 +5414,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 						this._syncDraft();
 						if (persistNow) {
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						}
 					};
 
@@ -5935,7 +5956,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								const allCreds = await credService.getCredentials();
 								loadedCredentials = allCreds.filter(c => c.isEnabled !== false);
 							}
-						} catch {}
+						} catch { }
 
 						if (loadedCredentials.length > 0) {
 							loadedCredentials.forEach(c => {
@@ -6371,7 +6392,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									knownDurationSec = decoded.duration;
 									updateTimeUi();
 								}
-								actx.close().catch(() => {});
+								actx.close().catch(() => { });
 							}
 						} catch {
 							// Fallback for WAV header byteRate calculation if decodeAudioData fails
@@ -6386,7 +6407,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 
 						if (autoPlayAfterLoad) {
-							audioPlayerEl.play().catch(() => {});
+							audioPlayerEl.play().catch(() => { });
 						}
 					};
 
@@ -6571,7 +6592,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						if (!ttsDisplayTextarea.readOnly) {
 							field.ttsDisplayText = ttsDisplayTextarea.value;
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						}
 					};
 
@@ -6828,7 +6849,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						isVideoFullscreen = false;
 						window.removeEventListener('keydown', onFullscreenKeyDown, true);
 						if (document.fullscreenElement) {
-							document.exitFullscreen().catch(() => {});
+							document.exitFullscreen().catch(() => { });
 						}
 						const wasPlaying = !videoPlayerEl.paused && !videoPlayerEl.ended;
 						videoStageWrap.style.flex = '';
@@ -6840,7 +6861,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						try {
 							mediaBox.insertBefore(videoStageWrap, audioPlayerEl);
 							mediaBox.appendChild(customPlayerWrap);
-						} catch {}
+						} catch { }
 						if (fullscreenOverlayEl && fullscreenOverlayEl.parentElement) {
 							fullscreenOverlayEl.parentElement.removeChild(fullscreenOverlayEl);
 						}
@@ -6849,7 +6870,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						fullscreenBtn.title = 'Fullscreen Video';
 						fullscreenBtn.style.color = '#cbd5e1';
 						if (wasPlaying && videoPlayerEl.paused) {
-							videoPlayerEl.play().catch(() => {});
+							videoPlayerEl.play().catch(() => { });
 						}
 					};
 
@@ -6906,7 +6927,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 						window.addEventListener('keydown', onFullscreenKeyDown, true);
 						if (wasPlaying && videoPlayerEl.paused) {
-							videoPlayerEl.play().catch(() => {});
+							videoPlayerEl.play().catch(() => { });
 						}
 					};
 
@@ -6954,12 +6975,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								el.pause();
 								el.removeAttribute('src');
 								el.load();
-							} catch {}
+							} catch { }
 						}
 						if (currentBlobUrl) {
 							try {
 								URL.revokeObjectURL(currentBlobUrl);
-							} catch {}
+							} catch { }
 							currentBlobUrl = undefined;
 						}
 						knownDurationSec = 0;
@@ -7163,7 +7184,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									el.playbackRate = currentPlaybackRate;
 									el.load();
 									return;
-								} catch {}
+								} catch { }
 							}
 							showMediaError(`Unable to play "${field.mediaFileName || 'media file'}": This format or codec is not supported by the browser's native HTML5 ${kind} decoder.`);
 						};
@@ -7372,7 +7393,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										await loadFromLocalPath(parsedUri.fsPath, fName, true);
 									}
 								}
-							} catch {}
+							} catch { }
 						}
 					};
 
@@ -7383,7 +7404,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					// Auto-load persisted local media file if present
 					if (field.mediaFilePath) {
-						loadFromLocalPath(field.mediaFilePath, field.mediaFileName, false).catch(() => {});
+						loadFromLocalPath(field.mediaFilePath, field.mediaFileName, false).catch(() => { });
 					}
 				}
 
@@ -8659,6 +8680,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								let val: any = '';
 								if (f.type === 'browser') {
 									val = f.defaultContent || f.defaultUrl || '';
+								} else if (f.type === 'http_request') {
+									val = f.httpResponseData || f.httpResponseBody || '';
 								} else if (f.type === 'parameters' && f.parameters) {
 									const pMap: Record<string, any> = {};
 									f.parameters.forEach(p => {
@@ -8733,6 +8756,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							(field as any).lastExecutionLog = field.pythonOutput;
 							updateViewMode(currentViewMode);
 
+							refreshAllReferenceChipBars();
 							this._syncDraft();
 							await this._persistCurrentModule();
 							if (res.success) {
@@ -8794,6 +8818,716 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						this._syncDraft();
 						await this._persistCurrentModule();
 					};
+				}
+
+				if (field.type === 'http_request') {
+					field.httpMethod = (field.httpMethod || 'GET').toUpperCase();
+					field.httpUrl = field.httpUrl || '';
+					field.httpAuthType = field.httpAuthType || 'none';
+					field.httpBodyType = field.httpBodyType || 'none';
+					field.httpBodyContent = field.httpBodyContent || '';
+					field.httpHeaders = Array.isArray(field.httpHeaders) ? field.httpHeaders : [{ key: 'Accept', value: 'application/json', enabled: true }];
+					field.httpParams = Array.isArray(field.httpParams) ? field.httpParams : [];
+					field.httpTimeoutMs = typeof field.httpTimeoutMs === 'number' && field.httpTimeoutMs > 0 ? field.httpTimeoutMs : 30000;
+
+					const httpBox = append(fieldCard, $('.http-request-schema-config', {
+						style: 'display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; background: rgba(6, 182, 212, 0.04); border: 1px solid rgba(6, 182, 212, 0.28); border-radius: 6px; margin-top: 4px; width: 100%; box-sizing: border-box;'
+					}));
+
+					// Method color helper
+					const getMethodColor = (m: string) => {
+						const norm = (m || 'GET').toUpperCase();
+						if (norm === 'GET') return '#10b981';
+						if (norm === 'POST') return '#3b82f6';
+						if (norm === 'PUT') return '#f59e0b';
+						if (norm === 'PATCH') return '#f97316';
+						if (norm === 'DELETE') return '#ef4444';
+						return '#8b5cf6';
+					};
+
+					// 1. Top URL & Method & Test Action Bar
+					const topRow = append(httpBox, $('div', {
+						style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap; width: 100%;'
+					}));
+
+					// Method Selector Dropdown
+					const methodSelect = append(topRow, $('select.monaco-select-box', {
+						style: `padding: 5px 8px; font-size: 11.5px; font-weight: 700; border-radius: 4px; border: 1px solid rgba(6, 182, 212, 0.5); background: rgba(0, 0, 0, 0.3); color: ${getMethodColor(field.httpMethod)}; cursor: pointer; outline: none; font-family: var(--vscode-editor-font-family, monospace); min-width: 90px;`
+					})) as HTMLSelectElement;
+
+					const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+					methods.forEach(m => {
+						const opt = append(methodSelect, $('option', { value: m }, m)) as HTMLOptionElement;
+						if (m === field.httpMethod) opt.selected = true;
+					});
+
+					// URL Input
+					const urlWrapper = append(topRow, $('div', {
+						style: 'flex: 1 1 280px; display: flex; align-items: center; position: relative; min-width: 200px;'
+					}));
+
+					const urlInput = append(urlWrapper, $('input.monaco-inputbox', {
+						type: 'text',
+						placeholder: 'e.g. https://aimery.link/api/tailored-resumes/upload or {api_url}',
+						value: field.httpUrl || '',
+						style: 'width: 100%; padding: 5px 9px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(0, 0, 0, 0.25); color: inherit; font-family: var(--vscode-editor-font-family, monospace); outline: none;'
+					})) as HTMLInputElement;
+
+					urlInput.oninput = () => {
+						field.httpUrl = urlInput.value;
+						this._syncDraft();
+					};
+
+					// Test / Send Request Button
+					const sendBtn = append(topRow, $('button.monaco-button', {
+						type: 'button',
+						style: 'padding: 5px 12px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(6, 182, 212, 0.18); border: 1px solid rgba(6, 182, 212, 0.45); color: #06b6d4; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;',
+						title: 'Send test HTTP request and inspect live response'
+					})) as HTMLButtonElement;
+					const sendIcon = append(sendBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play), { style: 'font-size: 11px;' }));
+					const sendBtnLabel = append(sendBtn, $('span', {}, 'Send Request'));
+
+					// Status pill in header
+					const statusPill = append(topRow, $('span', {
+						style: 'font-size: 10.5px; font-weight: 600; padding: 3px 8px; border-radius: 10px; background: rgba(255, 255, 255, 0.06); color: #94a3b8; border: 1px solid rgba(255, 255, 255, 0.12); font-family: var(--vscode-editor-font-family, monospace); display: none;'
+					}));
+
+					const updateStatusPill = () => {
+						if (field.httpResponseStatus !== undefined && field.httpResponseStatus > 0) {
+							statusPill.style.display = 'inline-block';
+							const ok = field.httpResponseStatus >= 200 && field.httpResponseStatus < 300;
+							statusPill.textContent = `${field.httpResponseStatus} ${field.httpResponseStatusText || ''}${field.httpLastDurationMs ? ` · ${field.httpLastDurationMs}ms` : ''}`;
+							statusPill.style.color = ok ? '#10b981' : (field.httpResponseStatus >= 400 && field.httpResponseStatus < 500 ? '#f59e0b' : '#ef4444');
+							statusPill.style.background = ok ? 'rgba(16, 185, 129, 0.12)' : 'rgba(239, 68, 68, 0.12)';
+							statusPill.style.borderColor = ok ? 'rgba(16, 185, 129, 0.35)' : 'rgba(239, 68, 68, 0.35)';
+						}
+					};
+					updateStatusPill();
+
+					// 2. Sub-Tabs Bar (Params, Headers, Auth, Body, Response)
+					let activeTab = (field.httpMethod === 'POST' || field.httpMethod === 'PUT' || field.httpMethod === 'PATCH') ? 'body' : 'params';
+
+					const tabsRow = append(httpBox, $('div', {
+						style: 'display: flex; gap: 4px; border-bottom: 1px solid rgba(255, 255, 255, 0.12); padding-bottom: 2px; margin-top: 4px; flex-wrap: wrap;'
+					}));
+
+					const tabPanelsContainer = append(httpBox, $('div', {
+						style: 'display: flex; flex-direction: column; gap: 8px;'
+					}));
+
+					const paramsPanel = append(tabPanelsContainer, $('div'));
+					const headersPanel = append(tabPanelsContainer, $('div'));
+					const authPanel = append(tabPanelsContainer, $('div'));
+					const bodyPanel = append(tabPanelsContainer, $('div'));
+					const responsePanel = append(tabPanelsContainer, $('div'));
+
+					const tabBtns: Record<string, HTMLElement> = {};
+
+					const renderTabNav = () => {
+						clearNode(tabsRow);
+						const tabs = [
+							{ id: 'params', label: `Params (${field.httpParams?.filter(p => p.enabled !== false && p.key).length || 0})` },
+							{ id: 'headers', label: `Headers (${field.httpHeaders?.filter(h => h.enabled !== false && h.key).length || 0})` },
+							{ id: 'auth', label: `Auth: ${(field.httpAuthType || 'none').toUpperCase()}` },
+							{ id: 'body', label: `Body: ${(field.httpBodyType || 'none').toUpperCase()}` },
+							{ id: 'response', label: field.httpResponseStatus ? `Response (${field.httpResponseStatus})` : 'Response' }
+						];
+
+						tabs.forEach(t => {
+							const isActive = activeTab === t.id;
+							const btn = append(tabsRow, $('button.tab-nav-btn', {
+								type: 'button',
+								style: `padding: 4px 10px; font-size: 11px; font-weight: ${isActive ? '700' : '500'}; border-radius: 4px; cursor: pointer; border: 1px solid ${isActive ? 'rgba(6, 182, 212, 0.45)' : 'transparent'}; background: ${isActive ? 'rgba(6, 182, 212, 0.15)' : 'transparent'}; color: ${isActive ? '#06b6d4' : '#94a3b8'}; transition: all 0.15s ease;`
+							}, t.label));
+							tabBtns[t.id] = btn;
+							btn.onclick = () => {
+								activeTab = t.id;
+								updateTabVisibility();
+								renderTabNav();
+							};
+						});
+					};
+
+					const updateTabVisibility = () => {
+						paramsPanel.style.display = activeTab === 'params' ? 'flex' : 'none';
+						headersPanel.style.display = activeTab === 'headers' ? 'flex' : 'none';
+						authPanel.style.display = activeTab === 'auth' ? 'flex' : 'none';
+						bodyPanel.style.display = activeTab === 'body' ? 'flex' : 'none';
+						responsePanel.style.display = activeTab === 'response' ? 'flex' : 'none';
+					};
+
+					methodSelect.onchange = () => {
+						field.httpMethod = methodSelect.value;
+						methodSelect.style.color = getMethodColor(field.httpMethod);
+						if (['POST', 'PUT', 'PATCH'].includes(field.httpMethod) && (!field.httpBodyType || field.httpBodyType === 'none')) {
+							field.httpBodyType = 'json';
+							activeTab = 'body';
+						}
+						renderTabNav();
+						updateTabVisibility();
+						renderBodyPanel();
+						this._syncDraft();
+					};
+
+					// 2.1 Params Panel Rendering
+					const renderParamsPanel = () => {
+						clearNode(paramsPanel);
+						paramsPanel.style.flexDirection = 'column';
+						paramsPanel.style.gap = '6px';
+
+						const pHeader = append(paramsPanel, $('div', {
+							style: 'display: flex; justify-content: space-between; align-items: center;'
+						}));
+						append(pHeader, $('div', { style: 'font-size: 10.5px; opacity: 0.7;' }, 'URL Query Parameters (supports dynamic {variables}):'));
+
+						const addPBtn = append(pHeader, $('button.monaco-button', {
+							type: 'button',
+							style: 'padding: 2px 7px; font-size: 10.5px; cursor: pointer; background: transparent; border: 1px solid rgba(6, 182, 212, 0.35); color: #06b6d4; border-radius: 3px;'
+						}, '+ Add Param'));
+
+						addPBtn.onclick = () => {
+							field.httpParams = field.httpParams || [];
+							field.httpParams.push({ id: `p_${Date.now()}`, key: '', value: '', enabled: true });
+							renderParamsPanel();
+							renderTabNav();
+							this._syncDraft();
+						};
+
+						const pList = field.httpParams || [];
+						if (pList.length === 0) {
+							append(paramsPanel, $('div', {
+								style: 'font-size: 11px; opacity: 0.5; padding: 6px 0; font-style: italic;'
+							}, 'No query parameters configured.'));
+						} else {
+							pList.forEach((param, pIdx) => {
+								const row = append(paramsPanel, $('div', {
+									style: 'display: flex; align-items: center; gap: 6px; width: 100%;'
+								}));
+								const chk = append(row, $('input', {
+									type: 'checkbox',
+									style: 'cursor: pointer;',
+									title: 'Enable or disable this parameter'
+								})) as HTMLInputElement;
+								chk.checked = param.enabled !== false;
+								chk.onchange = () => {
+									param.enabled = chk.checked;
+									renderTabNav();
+									this._syncDraft();
+								};
+
+								const kIn = append(row, $('input.monaco-inputbox', {
+									placeholder: 'Parameter Key',
+									value: param.key || '',
+									style: 'flex: 1 1 120px; padding: 3px 6px; font-size: 11px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+								})) as HTMLInputElement;
+								kIn.oninput = () => {
+									param.key = kIn.value;
+									renderTabNav();
+									this._syncDraft();
+								};
+
+								const vIn = append(row, $('input.monaco-inputbox', {
+									placeholder: 'Parameter Value (e.g. {search})',
+									value: param.value || '',
+									style: 'flex: 2 1 180px; padding: 3px 6px; font-size: 11px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+								})) as HTMLInputElement;
+								vIn.oninput = () => {
+									param.value = vIn.value;
+									this._syncDraft();
+								};
+
+								const delBtn = append(row, $('span.action-delete-btn' + ThemeIcon.asCSSSelector(Codicon.trash), {
+									style: 'cursor: pointer; opacity: 0.6; font-size: 12px; padding: 4px; transition: opacity 0.15s;',
+									title: 'Delete parameter'
+								}));
+								delBtn.onclick = () => {
+									field.httpParams!.splice(pIdx, 1);
+									renderParamsPanel();
+									renderTabNav();
+									this._syncDraft();
+								};
+							});
+						}
+					};
+
+					// 2.2 Headers Panel Rendering
+					const renderHeadersPanel = () => {
+						clearNode(headersPanel);
+						headersPanel.style.flexDirection = 'column';
+						headersPanel.style.gap = '6px';
+
+						const hHeader = append(headersPanel, $('div', {
+							style: 'display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;'
+						}));
+						append(hHeader, $('div', { style: 'font-size: 10.5px; opacity: 0.7;' }, 'HTTP Request Headers:'));
+
+						const hBtns = append(hHeader, $('div', { style: 'display: flex; gap: 6px;' }));
+						const addPresetJson = append(hBtns, $('button.monaco-button', {
+							type: 'button',
+							style: 'padding: 2px 7px; font-size: 10px; cursor: pointer; background: transparent; border: 1px solid rgba(255, 255, 255, 0.2); color: #94a3b8; border-radius: 3px;'
+						}, '+ Content-Type: JSON'));
+						addPresetJson.onclick = () => {
+							field.httpHeaders = field.httpHeaders || [];
+							if (!field.httpHeaders.some(h => h.key.toLowerCase() === 'content-type')) {
+								field.httpHeaders.push({ id: `h_${Date.now()}`, key: 'Content-Type', value: 'application/json; charset=utf-8', enabled: true });
+								renderHeadersPanel();
+								renderTabNav();
+								this._syncDraft();
+							}
+						};
+
+						const addHBtn = append(hBtns, $('button.monaco-button', {
+							type: 'button',
+							style: 'padding: 2px 7px; font-size: 10.5px; cursor: pointer; background: transparent; border: 1px solid rgba(6, 182, 212, 0.35); color: #06b6d4; border-radius: 3px;'
+						}, '+ Add Header'));
+
+						addHBtn.onclick = () => {
+							field.httpHeaders = field.httpHeaders || [];
+							field.httpHeaders.push({ id: `h_${Date.now()}`, key: '', value: '', enabled: true });
+							renderHeadersPanel();
+							renderTabNav();
+							this._syncDraft();
+						};
+
+						const hList = field.httpHeaders || [];
+						if (hList.length === 0) {
+							append(headersPanel, $('div', {
+								style: 'font-size: 11px; opacity: 0.5; padding: 6px 0; font-style: italic;'
+							}, 'No custom headers configured.'));
+						} else {
+							hList.forEach((hdr, hIdx) => {
+								const row = append(headersPanel, $('div', {
+									style: 'display: flex; align-items: center; gap: 6px; width: 100%;'
+								}));
+								const chk = append(row, $('input', {
+									type: 'checkbox',
+									style: 'cursor: pointer;',
+									title: 'Enable or disable this header'
+								})) as HTMLInputElement;
+								chk.checked = hdr.enabled !== false;
+								chk.onchange = () => {
+									hdr.enabled = chk.checked;
+									renderTabNav();
+									this._syncDraft();
+								};
+
+								const kIn = append(row, $('input.monaco-inputbox', {
+									placeholder: 'Header Name',
+									value: hdr.key || '',
+									style: 'flex: 1 1 120px; padding: 3px 6px; font-size: 11px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+								})) as HTMLInputElement;
+								kIn.oninput = () => {
+									hdr.key = kIn.value;
+									renderTabNav();
+									this._syncDraft();
+								};
+
+								const vIn = append(row, $('input.monaco-inputbox', {
+									placeholder: 'Header Value (e.g. Bearer {token})',
+									value: hdr.value || '',
+									style: 'flex: 2 1 180px; padding: 3px 6px; font-size: 11px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+								})) as HTMLInputElement;
+								vIn.oninput = () => {
+									hdr.value = vIn.value;
+									this._syncDraft();
+								};
+
+								const delBtn = append(row, $('span.action-delete-btn' + ThemeIcon.asCSSSelector(Codicon.trash), {
+									style: 'cursor: pointer; opacity: 0.6; font-size: 12px; padding: 4px; transition: opacity 0.15s;',
+									title: 'Delete header'
+								}));
+								delBtn.onclick = () => {
+									field.httpHeaders!.splice(hIdx, 1);
+									renderHeadersPanel();
+									renderTabNav();
+									this._syncDraft();
+								};
+							});
+						}
+					};
+
+					// 2.3 Auth Panel Rendering
+					const renderAuthPanel = () => {
+						clearNode(authPanel);
+						authPanel.style.flexDirection = 'column';
+						authPanel.style.gap = '8px';
+
+						const authTypeRow = append(authPanel, $('div', {
+							style: 'display: flex; align-items: center; gap: 8px;'
+						}));
+						append(authTypeRow, $('label', { style: 'font-size: 11px; font-weight: 600; min-width: 90px;' }, 'Auth Type:'));
+						const authSelect = append(authTypeRow, $('select.monaco-select-box', {
+							style: 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; outline: none;'
+						})) as HTMLSelectElement;
+
+						const authTypes = [
+							{ id: 'none', label: 'No Auth' },
+							{ id: 'bearer', label: 'Bearer Token (Authorization: Bearer <token>)' },
+							{ id: 'api_key', label: 'API Key (Custom Header / Query Param)' },
+							{ id: 'basic', label: 'Basic Auth (Username + Password)' }
+						];
+						authTypes.forEach(at => {
+							const opt = append(authSelect, $('option', { value: at.id }, at.label)) as HTMLOptionElement;
+							if (at.id === (field.httpAuthType || 'none')) opt.selected = true;
+						});
+
+						const authConfigContainer = append(authPanel, $('div', {
+							style: 'display: flex; flex-direction: column; gap: 6px; padding-left: 98px;'
+						}));
+
+						const renderAuthConfig = () => {
+							clearNode(authConfigContainer);
+							const at = field.httpAuthType || 'none';
+							if (at === 'bearer') {
+								const tokenRow = append(authConfigContainer, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+								append(tokenRow, $('span', { style: 'font-size: 10.5px; opacity: 0.7; min-width: 50px;' }, 'Token:'));
+								const tokenIn = append(tokenRow, $('input.monaco-inputbox', {
+									type: 'text',
+									placeholder: 'e.g. {admin_password} or Bearer token secret',
+									value: field.httpAuthToken || '',
+									style: 'flex: 1; padding: 4px 8px; font-size: 11px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+								})) as HTMLInputElement;
+								tokenIn.oninput = () => {
+									field.httpAuthToken = tokenIn.value;
+									this._syncDraft();
+								};
+							} else if (at === 'api_key') {
+								const keyRow1 = append(authConfigContainer, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+								append(keyRow1, $('span', { style: 'font-size: 10.5px; opacity: 0.7; min-width: 50px;' }, 'Key:'));
+								const keyNameIn = append(keyRow1, $('input.monaco-inputbox', {
+									placeholder: 'Key Name (default: X-API-Key)',
+									value: field.httpApiKeyName || 'X-API-Key',
+									style: 'flex: 1; padding: 4px 8px; font-size: 11px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+								})) as HTMLInputElement;
+								keyNameIn.oninput = () => {
+									field.httpApiKeyName = keyNameIn.value;
+									this._syncDraft();
+								};
+
+								const keyRow2 = append(authConfigContainer, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+								append(keyRow2, $('span', { style: 'font-size: 10.5px; opacity: 0.7; min-width: 50px;' }, 'Value:'));
+								const keyValIn = append(keyRow2, $('input.monaco-inputbox', {
+									placeholder: 'API Key Value or {api_key}',
+									value: field.httpApiKeyValue || '',
+									style: 'flex: 1; padding: 4px 8px; font-size: 11px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+								})) as HTMLInputElement;
+								keyValIn.oninput = () => {
+									field.httpApiKeyValue = keyValIn.value;
+									this._syncDraft();
+								};
+
+								const keyRow3 = append(authConfigContainer, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+								append(keyRow3, $('span', { style: 'font-size: 10.5px; opacity: 0.7; min-width: 50px;' }, 'Add to:'));
+								const locSelect = append(keyRow3, $('select.monaco-select-box', {
+									style: 'padding: 3px 6px; font-size: 10.5px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit;'
+								})) as HTMLSelectElement;
+								const optH = append(locSelect, $('option', { value: 'header' }, 'Header')) as HTMLOptionElement;
+								const optQ = append(locSelect, $('option', { value: 'query' }, 'Query Param')) as HTMLOptionElement;
+								if (field.httpApiKeyLocation === 'query') optQ.selected = true; else optH.selected = true;
+								locSelect.onchange = () => {
+									field.httpApiKeyLocation = locSelect.value as any;
+									this._syncDraft();
+								};
+							} else if (at === 'basic') {
+								const uRow = append(authConfigContainer, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+								append(uRow, $('span', { style: 'font-size: 10.5px; opacity: 0.7; min-width: 50px;' }, 'User:'));
+								const uIn = append(uRow, $('input.monaco-inputbox', {
+									placeholder: 'Username or {username}',
+									value: field.httpAuthUsername || '',
+									style: 'flex: 1; padding: 4px 8px; font-size: 11px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit;'
+								})) as HTMLInputElement;
+								uIn.oninput = () => {
+									field.httpAuthUsername = uIn.value;
+									this._syncDraft();
+								};
+
+								const pRow = append(authConfigContainer, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+								append(pRow, $('span', { style: 'font-size: 10.5px; opacity: 0.7; min-width: 50px;' }, 'Password:'));
+								const pIn = append(pRow, $('input.monaco-inputbox', {
+									type: 'password',
+									placeholder: 'Password or {password}',
+									value: field.httpAuthPassword || '',
+									style: 'flex: 1; padding: 4px 8px; font-size: 11px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit;'
+								})) as HTMLInputElement;
+								pIn.oninput = () => {
+									field.httpAuthPassword = pIn.value;
+									this._syncDraft();
+								};
+							}
+						};
+						renderAuthConfig();
+
+						authSelect.onchange = () => {
+							field.httpAuthType = authSelect.value;
+							renderAuthConfig();
+							renderTabNav();
+							this._syncDraft();
+						};
+					};
+
+					// 2.4 Body Panel Rendering
+					const renderBodyPanel = () => {
+						clearNode(bodyPanel);
+						bodyPanel.style.flexDirection = 'column';
+						bodyPanel.style.gap = '8px';
+
+						const bodyTop = append(bodyPanel, $('div', {
+							style: 'display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;'
+						}));
+
+						const bodyTypeRow = append(bodyTop, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
+						append(bodyTypeRow, $('label', { style: 'font-size: 11px; font-weight: 600;' }, 'Body Type:'));
+						const bodyTypeSelect = append(bodyTypeRow, $('select.monaco-select-box', {
+							style: 'padding: 3px 6px; font-size: 11px; border-radius: 3px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit;'
+						})) as HTMLSelectElement;
+
+						const bTypes = [
+							{ id: 'none', label: 'none (no body)' },
+							{ id: 'json', label: 'JSON (application/json)' },
+							{ id: 'raw', label: 'Raw / Text' },
+							{ id: 'x-www-form-urlencoded', label: 'x-www-form-urlencoded' }
+						];
+						bTypes.forEach(bt => {
+							const opt = append(bodyTypeSelect, $('option', { value: bt.id }, bt.label)) as HTMLOptionElement;
+							if (bt.id === (field.httpBodyType || 'none')) opt.selected = true;
+						});
+
+						const bodyActions = append(bodyTop, $('div', { style: 'display: flex; gap: 6px;' }));
+						const formatJsonBtn = append(bodyActions, $('button.monaco-button', {
+							type: 'button',
+							style: 'padding: 2px 7px; font-size: 10.5px; cursor: pointer; background: transparent; border: 1px solid rgba(255, 255, 255, 0.2); color: #94a3b8; border-radius: 3px;',
+							title: 'Format JSON template'
+						}, 'Format JSON'));
+
+						const bodyContentContainer = append(bodyPanel, $('div', {
+							style: 'display: flex; flex-direction: column; gap: 4px;'
+						}));
+
+						const bodyTextarea = append(bodyContentContainer, $('textarea.monaco-inputbox', {
+							placeholder: '{\n  "job_id": "{job_id}",\n  "company": "Stripe",\n  "status": "published",\n  "resume_content": {ai_resume_json}\n}',
+							style: 'width: 100%; min-height: 140px; padding: 6px 8px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.35); color: inherit; box-sizing: border-box; resize: vertical;'
+						})) as HTMLTextAreaElement;
+						bodyTextarea.value = field.httpBodyContent || '';
+
+						bodyTextarea.oninput = () => {
+							field.httpBodyContent = bodyTextarea.value;
+							this._syncDraft();
+						};
+
+						formatJsonBtn.onclick = () => {
+							const raw = bodyTextarea.value.trim();
+							if (!raw) return;
+							try {
+								const parsed = JSON.parse(raw);
+								bodyTextarea.value = JSON.stringify(parsed, null, 2);
+								field.httpBodyContent = bodyTextarea.value;
+								this.notificationService.info('JSON formatted successfully.');
+								this._syncDraft();
+							} catch (err: any) {
+								this.notificationService.warn(`JSON Format Warning: ${err?.message || 'Invalid JSON syntax. Note that variable placeholders like {var} may make JSON temporarily non-standard until interpolated.'}`);
+							}
+						};
+
+						bodyTypeSelect.onchange = () => {
+							field.httpBodyType = bodyTypeSelect.value;
+							bodyContentContainer.style.display = field.httpBodyType === 'none' ? 'none' : 'flex';
+							formatJsonBtn.style.display = field.httpBodyType === 'json' ? 'inline-block' : 'none';
+							renderTabNav();
+							this._syncDraft();
+						};
+						bodyContentContainer.style.display = field.httpBodyType === 'none' ? 'none' : 'flex';
+						formatJsonBtn.style.display = field.httpBodyType === 'json' ? 'inline-block' : 'none';
+					};
+
+					// 2.5 Response Panel Rendering
+					const renderResponsePanel = () => {
+						clearNode(responsePanel);
+						responsePanel.style.flexDirection = 'column';
+						responsePanel.style.gap = '8px';
+
+						const hasResponse = field.httpResponseStatus !== undefined && field.httpResponseStatus > 0;
+						if (!hasResponse && !field.httpResponseBody && !field.httpResponseData) {
+							append(responsePanel, $('div', {
+								style: 'font-size: 11px; opacity: 0.6; padding: 12px; text-align: center; border: 1px dashed rgba(255, 255, 255, 0.15); border-radius: 4px;'
+							}, 'No response recorded yet. Click "Send Request" above to test this API endpoint and inspect response headers, body, and status.'));
+							return;
+						}
+
+						// Response header bar
+						const respHeaderBar = append(responsePanel, $('div', {
+							style: 'display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 4px 6px; background: rgba(0, 0, 0, 0.2); border-radius: 4px;'
+						}));
+
+						const respHeaderLeft = append(respHeaderBar, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
+						const isOk = (field.httpResponseStatus || 0) >= 200 && (field.httpResponseStatus || 0) < 300;
+						append(respHeaderLeft, $('span', {
+							style: `font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: ${isOk ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)'}; color: ${isOk ? '#10b981' : '#ef4444'}; border: 1px solid ${isOk ? 'rgba(16, 185, 129, 0.4)' : 'rgba(239, 68, 68, 0.4)'};`
+						}, `${field.httpResponseStatus} ${field.httpResponseStatusText || ''}`));
+
+						if (field.httpLastDurationMs) {
+							append(respHeaderLeft, $('span', { style: 'font-size: 10.5px; opacity: 0.7;' }, `${field.httpLastDurationMs}ms`));
+						}
+						if (field.httpLastExecutionTime) {
+							append(respHeaderLeft, $('span', { style: 'font-size: 10px; opacity: 0.5;' }, `${field.httpLastExecutionTime}`));
+						}
+
+						// Response sub-views selector: Body | Headers | Downstream Variables
+						let respSubTab: 'body' | 'headers' | 'guide' = 'body';
+						const subTabRow = append(responsePanel, $('div', { style: 'display: flex; gap: 4px;' }));
+						const subBodyBtn = append(subTabRow, $('button', {
+							style: 'padding: 2px 8px; font-size: 10px; cursor: pointer; border-radius: 3px; border: 1px solid rgba(6, 182, 212, 0.4); background: rgba(6, 182, 212, 0.15); color: #06b6d4;'
+						}, 'Response Body')) as HTMLButtonElement;
+						const subHdrsBtn = append(subTabRow, $('button', {
+							style: 'padding: 2px 8px; font-size: 10px; cursor: pointer; border-radius: 3px; border: 1px solid transparent; background: transparent; color: #94a3b8;'
+						}, 'Headers')) as HTMLButtonElement;
+						const subGuideBtn = append(subTabRow, $('button', {
+							style: 'padding: 2px 8px; font-size: 10px; cursor: pointer; border-radius: 3px; border: 1px solid transparent; background: transparent; color: #94a3b8;'
+						}, 'Downstream Variables Guide')) as HTMLButtonElement;
+
+						const subContentBox = append(responsePanel, $('div', {
+							style: 'display: flex; flex-direction: column; width: 100%;'
+						}));
+
+						const renderRespSubView = () => {
+							clearNode(subContentBox);
+							subBodyBtn.style.background = respSubTab === 'body' ? 'rgba(6, 182, 212, 0.15)' : 'transparent';
+							subBodyBtn.style.color = respSubTab === 'body' ? '#06b6d4' : '#94a3b8';
+							subBodyBtn.style.borderColor = respSubTab === 'body' ? 'rgba(6, 182, 212, 0.4)' : 'transparent';
+
+							subHdrsBtn.style.background = respSubTab === 'headers' ? 'rgba(6, 182, 212, 0.15)' : 'transparent';
+							subHdrsBtn.style.color = respSubTab === 'headers' ? '#06b6d4' : '#94a3b8';
+							subHdrsBtn.style.borderColor = respSubTab === 'headers' ? 'rgba(6, 182, 212, 0.4)' : 'transparent';
+
+							subGuideBtn.style.background = respSubTab === 'guide' ? 'rgba(6, 182, 212, 0.15)' : 'transparent';
+							subGuideBtn.style.color = respSubTab === 'guide' ? '#06b6d4' : '#94a3b8';
+							subGuideBtn.style.borderColor = respSubTab === 'guide' ? 'rgba(6, 182, 212, 0.4)' : 'transparent';
+
+							if (respSubTab === 'body') {
+								const formattedText = field.httpResponseData
+									? JSON.stringify(field.httpResponseData, null, 2)
+									: (field.httpResponseBody || '(empty response)');
+								const pre = append(subContentBox, $('pre', {
+									style: 'margin: 0; padding: 8px 10px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); background: rgba(0, 0, 0, 0.35); border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.1); max-height: 240px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: inherit;'
+								}, formattedText));
+							} else if (respSubTab === 'headers') {
+								const hdrs = field.httpResponseHeaders || {};
+								const hKeys = Object.keys(hdrs);
+								if (hKeys.length === 0) {
+									append(subContentBox, $('div', { style: 'font-size: 11px; opacity: 0.5; font-style: italic; padding: 6px 0;' }, 'No response headers available.'));
+								} else {
+									const tbl = append(subContentBox, $('table', {
+										style: 'width: 100%; border-collapse: collapse; font-size: 10.5px; font-family: var(--vscode-editor-font-family, monospace);'
+									}));
+									hKeys.forEach(hk => {
+										const tr = append(tbl, $('tr', { style: 'border-bottom: 1px solid rgba(255, 255, 255, 0.06);' }));
+										append(tr, $('td', { style: 'padding: 4px 6px; color: #06b6d4; font-weight: 600; width: 35%;' }, hk));
+										append(tr, $('td', { style: 'padding: 4px 6px; opacity: 0.85;' }, hdrs[hk]));
+									});
+								}
+							} else if (respSubTab === 'guide') {
+								const gBox = append(subContentBox, $('div', {
+									style: 'display: flex; flex-direction: column; gap: 6px; font-size: 11px; padding: 6px 0;'
+								}));
+								append(gBox, $('div', { style: 'font-weight: 600; color: #06b6d4;' }, 'Downstream Node Syntax Guide:'));
+								append(gBox, $('div', {}, `• Entire Response Body: \`{${field.label || 'API Request'}}\``));
+								append(gBox, $('div', {}, `• HTTP Status Code: \`{${field.label || 'API Request'}.status}\` (e.g. ${field.httpResponseStatus || 200})`));
+								append(gBox, $('div', {}, `• Success Boolean: \`{${field.label || 'API Request'}.ok}\` (true / false)`));
+								append(gBox, $('div', {}, `• Parsed JSON Object: \`{${field.label || 'API Request'}.data}\``));
+								if (field.httpResponseData && typeof field.httpResponseData === 'object' && !Array.isArray(field.httpResponseData)) {
+									const sampleKeys = Object.keys(field.httpResponseData).slice(0, 3);
+									sampleKeys.forEach(sk => {
+										append(gBox, $('div', {}, `• JSON Field: \`{${field.label || 'API Request'}.${sk}}\` or \`{${field.label || 'API Request'}.data.${sk}}\``));
+									});
+								}
+								append(gBox, $('div', { style: 'opacity: 0.7; margin-top: 4px;' }, `• In Python scripts: \`TICKET_CONTEXT['${field.label || 'API Request'}']['data']\``));
+							}
+						};
+
+						subBodyBtn.onclick = () => { respSubTab = 'body'; renderRespSubView(); };
+						subHdrsBtn.onclick = () => { respSubTab = 'headers'; renderRespSubView(); };
+						subGuideBtn.onclick = () => { respSubTab = 'guide'; renderRespSubView(); };
+						renderRespSubView();
+					};
+
+					// Send Button Click Handler
+					sendBtn.onclick = async () => {
+						sendBtn.disabled = true;
+						sendBtnLabel.textContent = 'Sending...';
+						clearNode(sendIcon);
+						append(sendIcon, $('span' + ThemeIcon.asCSSSelector(Codicon.loading)), { style: 'font-size: 11px;' });
+						sendIcon.classList.add('codicon-modifier-spin');
+
+						try {
+							// Gather live context
+							const liveContext: Record<string, any> = {};
+							if (this.input instanceof CustomModuleSchemaEditorInput && typeof this.input.workflowRuntimeContextProvider === 'function') {
+								try {
+									const wfCtx = this.input.workflowRuntimeContextProvider();
+									if (wfCtx && typeof wfCtx === 'object') {
+										Object.assign(liveContext, wfCtx);
+									}
+								} catch { }
+							}
+							const allFields = fields || this._activeModule?.fields || [];
+							for (const f of allFields) {
+								if (!f || f === field) continue;
+								const fKey = f.label || f.id;
+								if (f.type === 'parameters' && f.parameters) {
+									const pMap: Record<string, any> = {};
+									f.parameters.forEach(p => { if (p.name) pMap[p.name] = p.defaultValue ?? ''; });
+									liveContext[fKey] = pMap;
+									liveContext['Parameters'] = pMap;
+									liveContext['Inputs'] = pMap;
+								} else if (f.type === 'http_request') {
+									liveContext[fKey] = f.httpResponseData || f.httpResponseBody || '';
+								} else {
+									liveContext[fKey] = f.defaultContent || f.defaultValue || '';
+								}
+							}
+
+							const res = await this._ticketWorkflowRuntimeService.executeHttpRequest(field, liveContext);
+
+							field.httpResponseStatus = res.status;
+							field.httpResponseStatusText = res.statusText;
+							field.httpResponseHeaders = res.headers;
+							field.httpResponseBody = res.rawText;
+							field.httpResponseData = res.data;
+							field.httpLastExecutionTime = new Date().toLocaleTimeString();
+							field.httpLastDurationMs = res.durationMs;
+
+							updateStatusPill();
+							activeTab = 'response';
+							renderTabNav();
+							updateTabVisibility();
+							renderResponsePanel();
+
+							this._syncDraft();
+							await this._persistCurrentModule();
+
+							if (res.ok) {
+								this.notificationService.info(`HTTP Request Success: ${res.status} ${res.statusText} (${res.durationMs}ms)`);
+							} else {
+								this.notificationService.warn(`HTTP Request: ${res.status || 'Error'} ${res.statusText || res.error || ''} (${res.durationMs}ms)`);
+							}
+						} catch (err: any) {
+							this.notificationService.error(`HTTP Request Failed: ${err?.message || String(err)}`);
+						} finally {
+							sendBtn.disabled = false;
+							sendBtnLabel.textContent = 'Send Request';
+							clearNode(sendIcon);
+							append(sendIcon, $('span' + ThemeIcon.asCSSSelector(Codicon.play)), { style: 'font-size: 11px;' });
+							sendIcon.classList.remove('codicon-modifier-spin');
+						}
+					};
+
+					// Initial tab rendering
+					renderTabNav();
+					renderParamsPanel();
+					renderHeadersPanel();
+					renderAuthPanel();
+					renderBodyPanel();
+					renderResponsePanel();
+					updateTabVisibility();
 				}
 
 				if (field.type === 'table') {
@@ -8977,8 +9711,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const gridToolbar = append(gridSection, $('div', {
 						style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;'
 					}));
-					const gridTitleWrap = append(gridToolbar, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
-					append(gridTitleWrap, $('span', {
+					append(gridToolbar, $('span', {
 						style: 'font-size: 11px; font-weight: 600; color: #99f6e4; text-transform: uppercase; letter-spacing: 0.04em;'
 					}, 'Table Data Grid (Manual Edit / Paste / Paginated Query)'));
 
@@ -9127,7 +9860,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										}
 									}
 								}
-							} catch {}
+							} catch { }
 						}
 
 						if (newRows.length === 0) {
@@ -9337,7 +10070,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 					};
 
-					let updateSchemaDiffBanner = () => {};
+					let updateSchemaDiffBanner = () => { };
 					let hasLocalColumnEdits = false;
 					let lastKnownDbColumns: ITableColumnDefinition[] | undefined = undefined;
 					let lastKnownTableExists = false;
@@ -9799,7 +10532,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							}
 							renderTblNameTokenized();
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						}, 160);
 					};
 
@@ -9922,7 +10655,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								tblSelect.value = '__param__';
 								renderTblNameTokenized(`{${token}}`);
 								this._syncDraft();
-								this._persistCurrentModule().catch(() => {});
+								this._persistCurrentModule().catch(() => { });
 							};
 						};
 
@@ -10433,7 +11166,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					if (field.tableDbPath) {
 						// Requirement 1: On initialization, read the selected database and table,
 						// retrieve the actual column definitions directly from SQLite, and populate Table Columns.
-						syncTableSchemaFromSqlite({ isInitialLoad: true }).catch(() => {});
+						syncTableSchemaFromSqlite({ isInitialLoad: true }).catch(() => { });
 					}
 
 					refreshTablesBtn.onclick = () => {
@@ -11142,7 +11875,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							field.tableSqlQuery = sqlTextarea.value;
 							renderSqlTokenized(sqlTextarea.value);
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						}, 180);
 					};
 
@@ -11260,7 +11993,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									field.tableSqlQuery = sqlTextarea.value;
 									renderSqlTokenized(sqlTextarea.value);
 									this._syncDraft();
-									this._persistCurrentModule().catch(() => {});
+									this._persistCurrentModule().catch(() => { });
 								} else {
 									const start = sqlTextarea.selectionStart ?? sqlTextarea.value.length;
 									const end = sqlTextarea.selectionEnd ?? sqlTextarea.value.length;
@@ -11358,7 +12091,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							field.tableSqlQuery = sqlTextarea.value;
 							renderSqlTokenized(sqlTextarea.value);
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 					});
 
@@ -11890,12 +12623,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						titleInp.oninput = () => {
 							field.wfTicketTitle = titleInp.value;
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 						renderQuickInsertChipsForInput(titleRow, titleInp, () => {
 							field.wfTicketTitle = titleInp.value;
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						});
 
 						// Row 3: Path
@@ -11910,7 +12643,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						pathInp.oninput = () => {
 							field.wfTicketPath = pathInp.value;
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 
 						// Row 4: Dynamic Schema-Driven Inputs Parameters
@@ -11959,7 +12692,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									}
 									field.wfTicketParams[p.name] = pInp.value;
 									this._syncDraft();
-									this._persistCurrentModule().catch(() => {});
+									this._persistCurrentModule().catch(() => { });
 								};
 								pInp.oninput = saveParamVal;
 								renderQuickInsertChipsForInput(pWrap, pInp, saveParamVal);
@@ -11970,7 +12703,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							field.wfTicketType = typeSelect.value;
 							renderDynamicParams();
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 						renderDynamicParams();
 					} else if (field.type === 'run_tickets') {
@@ -12053,7 +12786,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									}
 									field.wfTicketParams[p.name] = pInp.value;
 									this._syncDraft();
-									this._persistCurrentModule().catch(() => {});
+									this._persistCurrentModule().catch(() => { });
 								};
 								pInp.oninput = saveParamVal;
 								renderQuickInsertChipsForInput(pWrap, pInp, saveParamVal);
@@ -12064,7 +12797,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							field.wfTicketTarget = targetInp.value;
 							renderRunParams();
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 						targetInp.oninput = onTargetUpdated;
 						renderQuickInsertChipsForInput(targetRow, targetInp, onTargetUpdated);
@@ -12072,7 +12805,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							field.wfTicketType = schemaSelect.value;
 							renderRunParams();
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 						renderRunParams();
 					} else if (field.type === 'get_outputs') {
@@ -12088,7 +12821,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						const onTargetChange = () => {
 							field.wfTicketTarget = targetInp.value;
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 						targetInp.oninput = onTargetChange;
 						renderQuickInsertChipsForInput(targetRow, targetInp, onTargetChange);
@@ -12108,7 +12841,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						typeSelect.onchange = () => {
 							field.wfTicketType = typeSelect.value;
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 
 						const statusRow = append(wfBox, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
@@ -12122,7 +12855,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						statusInp.oninput = () => {
 							field.wfTicketStatus = statusInp.value;
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 
 						const titleRow = append(wfBox, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
@@ -12136,7 +12869,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						titleInp.oninput = () => {
 							field.wfTicketTitle = titleInp.value;
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 					} else if (field.type === 'display') {
 						const dispRow = append(wfBox, $('div', { style: 'display: flex; flex-direction: column; gap: 3px;' }));
@@ -12151,7 +12884,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						const onDispChange = () => {
 							field.wfDisplayValue = dispInp.value;
 							this._syncDraft();
-							this._persistCurrentModule().catch(() => {});
+							this._persistCurrentModule().catch(() => { });
 						};
 						dispInp.oninput = onDispChange;
 						renderQuickInsertChipsForInput(dispRow, dispInp, onDispChange);
@@ -12287,7 +13020,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				};
 				pasteZoneBtn.onclick = (e) => {
 					e.stopPropagation();
-					pasteCopiedComponent(fields.length - 1).catch(() => {});
+					pasteCopiedComponent(fields.length - 1).catch(() => { });
 				};
 			};
 			renderDropZonePasteButton();
@@ -13133,6 +13866,24 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				valToInsert = bContent || bUrl;
 				subProps['url'] = bUrl;
 				subProps['content'] = bContent;
+			} else if (f.type === 'http_request') {
+				const jsonBody = f.httpResponseData ? JSON.stringify(f.httpResponseData, null, 2) : (f.httpResponseBody || '');
+				valToInsert = jsonBody;
+				subProps['status'] = f.httpResponseStatus !== undefined ? String(f.httpResponseStatus) : '';
+				subProps['ok'] = f.httpResponseStatus !== undefined ? String(f.httpResponseStatus >= 200 && f.httpResponseStatus < 300) : '';
+				subProps['data'] = jsonBody;
+				subProps['body'] = jsonBody;
+				subProps['url'] = f.httpUrl || '';
+				subProps['method'] = (f.httpMethod || 'GET').toUpperCase();
+				if (f.httpResponseData && typeof f.httpResponseData === 'object' && !Array.isArray(f.httpResponseData)) {
+					for (const [k, v] of Object.entries(f.httpResponseData)) {
+						if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+							subProps[k] = String(v);
+						} else if (v && typeof v === 'object') {
+							subProps[k] = JSON.stringify(v);
+						}
+					}
+				}
 			} else if (f.type === 'prompt') {
 				const pOut = (f.debugPromptOutput || '').trim();
 				const pUserPrompts = f.promptUserInputVisible === false
@@ -13800,6 +14551,10 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				refs = extractRefs([f.mediaFilePath]);
 			} else if (f.type === 'git') {
 				refs = extractRefs([f.gitRemoteUrl, f.gitBranch]);
+			} else if (f.type === 'http_request') {
+				const paramVals = (f.httpParams || []).map(p => p.value);
+				const headerVals = (f.httpHeaders || []).map(h => h.value);
+				refs = extractRefs([f.httpUrl, f.httpAuthToken, f.httpApiKeyValue, f.httpAuthUsername, f.httpAuthPassword, f.httpBodyContent, ...paramVals, ...headerVals]);
 			} else {
 				refs = extractRefs([f.defaultContent]);
 			}
@@ -13939,6 +14694,12 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 			} else if (f.type === 'git') {
 				lines.push(`- **Git Remote URL**: \`${f.gitRemoteUrl || '(not set)'}\``);
 				lines.push(`- **Git Branch**: \`${f.gitBranch || 'main'}\``);
+			} else if (f.type === 'http_request') {
+				lines.push(`- **HTTP Method**: \`${(f.httpMethod || 'GET').toUpperCase()}\``);
+				lines.push(`- **Request URL**: \`${f.httpUrl || '(not set)'}\``);
+				lines.push(`- **Authentication**: \`${f.httpAuthType || 'none'}\``);
+				lines.push(`- **Body Type**: \`${f.httpBodyType || 'none'}\``);
+				lines.push(`- **Timeout**: \`${f.httpTimeoutMs || 30000} ms\``);
 			} else if (f.type === 'output') {
 				const specs = f.outputSpecs || [];
 				lines.push(`- **Exposed Output Specifications (${specs.length})**:`);
@@ -13964,6 +14725,14 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 			delete clone.pythonOutput;
 			delete clone.pythonResult;
 			delete clone.ttsAudioDataUrl;
+			delete clone.httpResponseData;
+			delete clone.httpResponseBody;
+			delete clone.httpResponseHeaders;
+			if (clone.type === 'http_request') {
+				if (clone.httpAuthToken) { clone.httpAuthToken = '***REDACTED***'; }
+				if (clone.httpApiKeyValue) { clone.httpApiKeyValue = '***REDACTED***'; }
+				if (clone.httpAuthPassword) { clone.httpAuthPassword = '***REDACTED***'; }
+			}
 			if (clone.type === 'browser' && typeof clone.defaultContent === 'string' && clone.defaultContent.length > 300) {
 				clone.defaultContent = `[Fetched webpage preview omitted (${clone.defaultContent.length} chars)]`;
 			}
@@ -14144,4 +14913,5 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 			console.error('Failed to open Agent Central for template field:', err);
 		}
 	}
+
 }

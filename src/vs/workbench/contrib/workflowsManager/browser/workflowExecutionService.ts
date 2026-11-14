@@ -9,7 +9,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
-import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, extractSshOutputLastNLines, formatSshCommandsJsonOutput } from '../../entityPersistence/common/entityPersistence.js';
 import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutputItem, ITicketHandleInfo, INotebookCellExecutionResult } from '../common/workflowExecutionService.js';
 import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import { ITerminalService } from '../../terminal/browser/terminal.js';
@@ -34,6 +34,7 @@ interface INodePipelineStep {
 	functionName?: string;
 	label?: string;
 	parameters?: string;
+	disabled?: boolean;
 }
 
 interface IFlowchartNode {
@@ -901,6 +902,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		reqCounter: number;
 		stopped: boolean;
 		handledRpcIds: Set<string>;
+		lastSyncedVars: Map<string, any>;
 	}>();
 
 	private readonly _displayCardsByWorkflow = new Map<string, IWorkflowDisplayCard[]>();
@@ -963,11 +965,19 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			for (const r of loadedRuns) {
 				if (r && r.runId) {
 					if (Array.isArray(r.logs)) {
+						if (r.logs.length > 1500) {
+							r.logs = r.logs.slice(-1500);
+							needsPersistCleanup = true;
+						}
 						for (const l of r.logs) {
 							if (l && typeof l.message === 'string' && l.message.length > 1200) {
 								l.message = l.message.substring(0, 1200) + ' ... [truncated]';
 							}
 						}
+					}
+					if (Array.isArray(r.executionPath) && r.executionPath.length > 250) {
+						r.executionPath = r.executionPath.slice(-250);
+						needsPersistCleanup = true;
 					}
 					if (r.contextVariables && typeof r.contextVariables === 'object') {
 						for (const rk of WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS) {
@@ -1099,9 +1109,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 			const cleanNodeStates = r.nodeStates ? this._summarizeValueForHistory(r.nodeStates, 0) : {};
 			const cleanExecutionPath = Array.isArray(r.executionPath)
-				? r.executionPath.map(ps => this._summarizeValueForHistory(ps, 0))
+				? r.executionPath.slice(-250).map(ps => this._summarizeValueForHistory(ps, 0))
 				: [];
-			const cleanLogs = (r.logs || []).map(l => ({
+			const cleanLogs = (r.logs || []).slice(-1500).map(l => ({
 				...l,
 				message: typeof l.message === 'string' && l.message.length > 1200
 					? l.message.substring(0, 1200) + ' ... [truncated]'
@@ -1144,14 +1154,46 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 	}
 
+	private _fastPreviewString(val: any, maxLen: number = 180): string {
+		if (val === undefined) return 'undefined';
+		if (val === null) return 'null';
+		if (typeof val === 'string') {
+			return val.length > maxLen ? val.substring(0, maxLen) + '...' : val;
+		}
+		if (typeof val === 'number' || typeof val === 'boolean') {
+			return String(val);
+		}
+		if (Array.isArray(val)) {
+			if (val.length === 0) return '[]';
+			try {
+				const firstStr = JSON.stringify(this._summarizeValueForHistory(val[0], 2));
+				const preview = val.length === 1 ? `[${firstStr}]` : `[${firstStr}, ... (${val.length} items)]`;
+				return preview.length > maxLen ? preview.substring(0, maxLen) + '...' : preview;
+			} catch {
+				return `[Array(${val.length})]`;
+			}
+		}
+		if (typeof val === 'object') {
+			try {
+				const s = JSON.stringify(this._summarizeValueForHistory(val, 2));
+				return s.length > maxLen ? s.substring(0, maxLen) + '...' : s;
+			} catch {
+				return '[Object]';
+			}
+		}
+		return String(val).substring(0, maxLen);
+	}
+
 	private _schedulePersist(workflowUriStr: string): void {
 		if (this._persistDebounceMap.has(workflowUriStr)) {
 			clearTimeout(this._persistDebounceMap.get(workflowUriStr));
 		}
+		const activeRun = this.getActiveRun(workflowUriStr);
+		const delayMs = activeRun && activeRun.status === 'running' ? 5000 : 800;
 		const timeout = setTimeout(() => {
 			this._persistDebounceMap.delete(workflowUriStr);
 			this.persistRunsForWorkflow(workflowUriStr);
-		}, 600);
+		}, delayMs);
 		this._persistDebounceMap.set(workflowUriStr, timeout);
 	}
 
@@ -1322,6 +1364,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const maxRunNumber = priorRuns.reduce((max, r) => Math.max(max, r.runNumber || 0), 0);
 		const runNumber = maxRunNumber + 1;
 
+		const isFullSpeed = Boolean(options?.fullSpeed);
 		const run: IWorkflowExecutionRun = {
 			runId,
 			runNumber,
@@ -1329,6 +1372,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			workflowName,
 			status: 'running',
 			mode: options?.mode || 'standard',
+			fullSpeed: isFullSpeed,
 			trigger: 'manual',
 			currentNodeId: undefined,
 			visitedNodeIds: [],
@@ -1371,7 +1415,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		this._activeRunsByWorkflow.set(uriStr, runId);
 		this._cancelledRuns.delete(runId);
 
-		this._emitLog(run, 'info', `Workflow execution initiated: '${workflowName}' (${run.mode} mode)`);
+		this._emitLog(run, 'info', `Workflow execution initiated: '${workflowName}' (${isFullSpeed ? 'full-speed' : run.mode} mode)`);
 		this._notifyRunChanged(run);
 
 		// Execute asynchronously
@@ -1575,10 +1619,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						.map((id, idx) => `#${idx + 1} '${data.nodes.find(n => n.id === id)?.label || id}'`)
 						.join(' -> ');
 					this._emitLog(run, 'info', `[Selective Run] Executing ${selectiveNodeIds.length} selected node(s) only: ${orderSummary}`);
+				} else if (options?.entryNodeId && data.links.some(l => l.to === entryNode.id)) {
+					this._emitLog(run, 'info', `[Run From Node] Starting execution from selected node '${entryNode.label}' and continuing through remaining workflow...`);
 				}
 
 				let stepCount = 0;
-				const maxSteps = options?.maxSteps || 500;
+				const maxSteps = options?.maxSteps || 100000;
 				let activeNodeIds: string[] = [entryNode.id];
 
 				while (activeNodeIds.length > 0 && !this._cancelledRuns.has(run.runId)) {
@@ -1588,7 +1634,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 
 					// Always yield to the UI event loop so the renderer thread never freezes
-					await new Promise(resolve => setTimeout(resolve, 80));
+					await new Promise(resolve => setTimeout(resolve, run.fullSpeed ? 0 : 80));
 
 					// Check paused state
 					if (run.status === 'paused') {
@@ -1633,8 +1679,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					const nextNodesNested = await Promise.all(
 						currentNodes.map(async (node) => {
 							const nodeState = run.nodeStates[node.id];
+							const nextStepSeq = ((run as any)._totalStepsCounter || (run.executionPath?.length || 0)) + 1;
+							(run as any)._totalStepsCounter = nextStepSeq;
 							const pathStep: IWorkflowPathStep = {
-								stepIndex: (run.executionPath?.length || 0) + 1,
+								stepIndex: nextStepSeq,
 								nodeId: node.id,
 								nodeLabel: node.label || node.id,
 								nodeType: node.type,
@@ -1646,6 +1694,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								run.executionPath = [];
 							}
 							run.executionPath.push(pathStep);
+							if (run.executionPath.length > 250) {
+								run.executionPath.splice(0, run.executionPath.length - 250);
+							}
 
 							this._emitLog(run, 'info', `Executing node: '${node.label}' (${node.type})`, { nodeId: node.id });
 							try {
@@ -2107,31 +2158,78 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const wsUri = URI.parse(run.workflowUri);
 
 				// Real runtime execution through ticketRuntimeService
+				const inFlightTicketRecord: IExecutedTicketRecord = {
+					ticketId: ticketUri || ticketName,
+					ticketName: ticketName,
+					ticketType: ticketType || 'task',
+					status: 'running' as any,
+					durationMs: 0,
+					stepResults: []
+				};
+				const inFlightOp = {
+					type: 'run_ticket' as const,
+					label: `Run Ticket: '${ticketName}' [${ticketType || 'task'}]`,
+					executedTicket: inFlightTicketRecord,
+					durationMs: 0
+				};
+				pathStep?.operations.push(inFlightOp);
+				this._notifyRunChanged(run);
+
 				const execResult = await this.ticketRuntimeService.runTicket({
 					workspaceUri: wsUri,
 					ticketIdOrPath: ticketUri || ticketName,
 					inputParams: { ...run.contextVariables, ...inputParams },
-					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped'
+					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
+					onStepStart: (info) => {
+						this._emitLog(run, 'info', `  ▶ [${ticketName}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
+						this._notifyRunChanged(run);
+					},
+					onStepProgress: (stepRes, idx, total) => {
+						inFlightTicketRecord.stepResults = inFlightTicketRecord.stepResults || [];
+						const existingIdx = inFlightTicketRecord.stepResults.findIndex(s => s.fieldId === stepRes.fieldId);
+						if (existingIdx >= 0) {
+							inFlightTicketRecord.stepResults[existingIdx] = stepRes;
+						} else {
+							inFlightTicketRecord.stepResults.push(stepRes);
+						}
+						this._emitLog(
+							run,
+							stepRes.status === 'success' ? 'info' : 'warn',
+							`  ✔ [${ticketName}] Step ${idx}/${total}: [${stepRes.fieldType.toUpperCase()}] '${stepRes.fieldLabel}' -> ${stepRes.status} (${stepRes.durationMs}ms)`,
+							{ nodeId: node.id }
+						);
+						this._notifyRunChanged(run);
+					}
 				});
 				if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
 					throw new Error('Workflow execution was stopped');
 				}
 
-				const ticketRecord = {
+				const ticketRecord: IExecutedTicketRecord = {
 					ticketId: execResult.ticketId || ticketUri || ticketName,
 					ticketName: execResult.ticketName || ticketName,
 					ticketType: execResult.ticketType || ticketType || 'task',
 					status: (execResult.success ? 'success' : 'failed') as 'success' | 'failed',
-					output: execResult.output,
+					output: this._summarizeValueForHistory(execResult.output),
+					stepResults: execResult.stepResults,
+					outputSpecs: (execResult as any).outputSpecs,
+					contextVariables: execResult.contextVariables,
 					durationMs: Date.now() - ticketStart
 				};
+				// Update in-flight references
+				inFlightOp.executedTicket = ticketRecord;
+				inFlightOp.durationMs = ticketRecord.durationMs;
+
 				state.executedTickets.push(ticketRecord);
+				if (state.executedTickets.length > 50) {
+					state.executedTickets.splice(0, state.executedTickets.length - 50);
+				}
 
 				// Register primary outputs into contextVariables
-				run.contextVariables[ticketRecord.ticketName] = ticketRecord.output;
-				run.contextVariables[ticketRecord.ticketName.replace(/[^a-zA-Z0-9_]/g, '_')] = ticketRecord.output;
+				run.contextVariables[ticketRecord.ticketName] = execResult.output;
+				run.contextVariables[ticketRecord.ticketName.replace(/[^a-zA-Z0-9_]/g, '_')] = execResult.output;
 				if (ticketRecord.ticketId) {
-					run.contextVariables[ticketRecord.ticketId] = ticketRecord.output;
+					run.contextVariables[ticketRecord.ticketId] = execResult.output;
 				}
 
 				// Merge granular field outputs from ticket execution into workflow context
@@ -2158,10 +2256,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					throw new Error('Workflow execution was stopped');
 				}
 				const step = node.pipeline[i];
+				if (step.disabled) {
+					this._emitLog(run, 'info', `[Step #${i + 1} Skipped] Python Step is commented out (disabled), skipping execution.`, { nodeId: node.id });
+					continue;
+				}
 				const stepComp = (step as any).component;
 				const isDirectComponentStep = stepComp && (
 					step.type === 'component' ||
-					['parameters', 'output', 'prompt', 'table', 'browser', 'tts', 'media_player', 'git', 'python'].includes(stepComp.type)
+					['parameters', 'output', 'prompt', 'table', 'browser', 'tts', 'media_player', 'ssh', 'git', 'python', 'http_request'].includes(stepComp.type)
 				);
 				const isRunTicketStep = step.type === 'run_ticket' || step.type === 'run_tickets' || step.type === 'RUN_TICKETS' || step.type === 'runTickets';
 				const isCallFnStep = step.type === 'call_function' || step.type === 'custom_code' || (step.expression && this._isFunctionCallExpression(step.expression));
@@ -2201,7 +2303,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								functionName: stepComp.type.toUpperCase(),
 								targetVariable: step.targetVariable || stepComp.label,
 								expression: step.expression || stepComp.label,
-								value: compRes.output,
+								value: this._summarizeValueForHistory(compRes.output),
 								durationMs: compRes.durationMs
 							});
 							if (stepComp.type === 'python' && compRes.details?.output) {
@@ -2217,7 +2319,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								compRes.status === 'success' ? 'info' : 'error',
 								`[Step #${i + 1}] [${stepComp.type.toUpperCase()}] '${stepComp.label}' -> ${compRes.status} (${compRes.durationMs}ms)`
 							);
-							await this._persistAndNotifyNodeComponents(run, node);
+							if (!run.fullSpeed) {
+								await this._persistAndNotifyNodeComponents(run, node);
+							}
 							this._notifyRunChanged(run);
 							if (compRes.status === 'failed') {
 								throw new Error(compRes.error || `Component '${stepComp.label || stepComp.type}' execution failed`);
@@ -2225,12 +2329,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						} else if (isRunTicketStep && step.ticketName) {
 							this._emitLog(run, 'info', `[Step #${i + 1}] Run Ticket: '${step.ticketName}'${step.parameters ? ` (PARAM: ${step.parameters})` : ''}`);
 							const ticketRecord = await runTicket(step.ticketName, step.ticketType, step.ticketUri, step.parameters);
-							pathStep?.operations.push({
-								type: 'run_ticket',
-								label: `Run Ticket: '${step.ticketName}' [${step.ticketType || 'task'}]`,
-								executedTicket: ticketRecord,
-								durationMs: ticketRecord.durationMs
-							});
+							// Note: runTicket has already pushed ticketRecord into pathStep.operations during execution!
 							if (step.targetVariable) {
 								const varKey = step.targetVariable.trim().replace(/^@/, '');
 								run.contextVariables[varKey] = ticketRecord.output;
@@ -2330,16 +2429,17 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								}
 							}
 							run.contextVariables[varKey] = val;
-							run.contextVariables[`@${varKey}`] = val;
-							this._emitLog(run, 'info', `[Step #${i + 1}] Variable assigned: @${varKey} = ${JSON.stringify(val)}`);
+							delete run.contextVariables[`@${varKey}`];
+							const valPreview = this._fastPreviewString(val, 180);
+							this._emitLog(run, 'info', `[Step #${i + 1}] Variable assigned: @${varKey} = ${valPreview}`);
 							pathStep?.operations.push({
 								type: 'set_variable',
-								label: `Set Variable: @${varKey} = ${JSON.stringify(val)}`,
+								label: `Set Variable: @${varKey} = ${valPreview}`,
 								details: {
 									variable: varKey,
 									expression: expr,
-									oldValue: oldVal,
-									newValue: val
+									oldValue: this._summarizeValueForHistory(oldVal),
+									newValue: this._summarizeValueForHistory(val)
 								}
 							});
 						}
@@ -2350,15 +2450,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							const outVal = targetKey && run.contextVariables[targetKey] !== undefined
 								? run.contextVariables[targetKey]
 								: undefined;
+							const summarizedOutVal = this._summarizeValueForHistory(outVal);
 							stepComp.lastExecutionStatus = 'success';
 							stepComp.lastExecutionDurationMs = dur;
 							stepComp.lastExecutedAt = ts;
-							stepComp.lastExecutionOutput = outVal;
-							const previewStr = outVal !== undefined
-								? (typeof outVal === 'object' ? JSON.stringify(outVal, null, 2) : String(outVal))
+							stepComp.lastExecutionOutput = summarizedOutVal;
+							const previewStr = summarizedOutVal !== undefined
+								? (typeof summarizedOutVal === 'object' ? JSON.stringify(summarizedOutVal, null, 2) : String(summarizedOutVal))
 								: 'Executed successfully';
 							stepComp.lastExecutionLog = `>>> ${step.expression || stepComp.label || stepComp.type}\nTimestamp: ${ts} (${dur}ms)\nResult:\n${previewStr.length > 4000 ? previewStr.substring(0, 4000) + '\n... [truncated]' : previewStr}`;
-							await this._persistAndNotifyNodeComponents(run, node);
+							if (!run.fullSpeed) {
+								await this._persistAndNotifyNodeComponents(run, node);
+							}
 						}
 						break;
 					} catch (stepErr: any) {
@@ -2376,7 +2479,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						}
 						if (stepAttempt < maxStepAttempts && !this._cancelledRuns.has(run.runId)) {
 							this._emitLog(run, 'warn', `[Step #${i + 1} Retry ${stepAttempt}/${maxStepAttempts}] Attempt ${stepAttempt} failed (${stepErr?.message || stepErr}). Retrying...`, { nodeId: node.id });
-							await new Promise(r => setTimeout(r, 250));
+							await new Promise(r => setTimeout(r, run.fullSpeed ? 20 : 250));
 							continue;
 						}
 						if (maxStepAttempts > 1) {
@@ -2388,6 +2491,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 			}
 
+			if (run.fullSpeed) {
+				await this._persistAndNotifyNodeComponents(run, node);
+			}
 			state.output = { executedSteps: node.pipeline.length, tickets: state.executedTickets };
 			return;
 		}
@@ -2407,7 +2513,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				this._emitLog(run, 'info', `Running Ticket: [${item.type}] '${item.name}'`);
 
 				// Simulated async ticket execution with snapshot integration
-				await new Promise(r => setTimeout(r, 600));
+				if (!run.fullSpeed) {
+					await new Promise(r => setTimeout(r, 600));
+				}
 
 				const ticketRecord = {
 					ticketId: item.uri || item.name,
@@ -2475,7 +2583,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 
 		// 5. General Diagram Node Execution
-		await new Promise(r => setTimeout(r, 500));
+		if (!run.fullSpeed) {
+			await new Promise(r => setTimeout(r, 500));
+		}
 		state.output = { message: `Node '${node.label}' successfully executed` };
 	}
 
@@ -2608,10 +2718,48 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					: 'none';
 				this._emitLog(run, 'info', `[RUN_TICKETS] Executing ticket '${ticketIdOrPath}' with ${paramKeys.length} parameter(s): ${paramSummary}`, { nodeId: node.id });
 
+				const inFlightTicketRecord: IExecutedTicketRecord = {
+					ticketId: ticketIdOrPath,
+					ticketName: ticketIdOrPath,
+					ticketType: 'task',
+					status: 'running' as any,
+					durationMs: 0,
+					stepResults: []
+				};
+				const inFlightOp = {
+					type: 'run_ticket' as const,
+					label: `RUN_TICKETS: '${ticketIdOrPath}'`,
+					executedTicket: inFlightTicketRecord,
+					durationMs: 0
+				};
+				pathStep?.operations.push(inFlightOp);
+				this._notifyRunChanged(run);
+
 				const execRes = await this.ticketRuntimeService.RUN_TICKETS({
 					workspaceUri: workflowDir,
 					ticketIdOrPath,
-					inputParams: mergedInputs
+					inputParams: mergedInputs,
+					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
+					onStepStart: (info) => {
+						this._emitLog(run, 'info', `  ▶ [${ticketIdOrPath}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
+						this._notifyRunChanged(run);
+					},
+					onStepProgress: (stepRes, idx, total) => {
+						inFlightTicketRecord.stepResults = inFlightTicketRecord.stepResults || [];
+						const existingIdx = inFlightTicketRecord.stepResults.findIndex(s => s.fieldId === stepRes.fieldId);
+						if (existingIdx >= 0) {
+							inFlightTicketRecord.stepResults[existingIdx] = stepRes;
+						} else {
+							inFlightTicketRecord.stepResults.push(stepRes);
+						}
+						this._emitLog(
+							run,
+							stepRes.status === 'success' ? 'info' : 'warn',
+							`  ✔ [${ticketIdOrPath}] Step ${idx}/${total}: [${stepRes.fieldType.toUpperCase()}] '${stepRes.fieldLabel}' -> ${stepRes.status} (${stepRes.durationMs}ms)`,
+							{ nodeId: node.id }
+						);
+						this._notifyRunChanged(run);
+					}
 				});
 
 				if (!execRes.success) {
@@ -2640,22 +2788,19 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketName: execRes.ticketName || ticketIdOrPath,
 					ticketType: execRes.ticketType || 'task',
 					status: (execRes.success ? 'success' : 'failed') as 'success' | 'failed',
-					output: execRes.output,
+					output: this._summarizeValueForHistory(execRes.output),
 					outputSpecs: (execRes as any).outputSpecs,
 					stepResults: execRes.stepResults,
 					contextVariables: execRes.contextVariables,
 					durationMs: Date.now() - startMs
 				};
-				state.executedTickets.push(ticketRecord);
-				pathStep?.operations.push({
-					type: 'run_ticket',
-					label: `RUN_TICKETS: '${ticketRecord.ticketName || ticketRecord.ticketId}' [${ticketRecord.ticketType || 'task'}]`,
-					executedTicket: ticketRecord,
-					durationMs: ticketRecord.durationMs
-				});
+				inFlightOp.executedTicket = ticketRecord;
+				inFlightOp.label = `RUN_TICKETS: '${ticketRecord.ticketName || ticketRecord.ticketId}' [${ticketRecord.ticketType || 'task'}]`;
+				inFlightOp.durationMs = ticketRecord.durationMs;
 
-				if (ticketRecord.ticketName) {
-					run.contextVariables[ticketRecord.ticketName] = execRes.output;
+				state.executedTickets.push(ticketRecord);
+				if (state.executedTickets.length > 50) {
+					state.executedTickets.splice(0, state.executedTickets.length - 50);
 				}
 			} else if (upperFn === 'CREATE_TICKETS' || upperFn === 'CREATETICKETS' || upperFn === 'CREATETICKET') {
 				let opts: any = {};
@@ -2697,22 +2842,15 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 				const createParamKeys = Object.keys(opts.parameters || {});
 				const createParamSummary = createParamKeys.length > 0
-					? createParamKeys.map(k => `${k}=${JSON.stringify(opts.parameters[k])}`).join(', ')
+					? createParamKeys.map(k => `${k}=${this._fastPreviewString(opts.parameters[k], 80)}`).join(', ')
 					: 'none';
 				this._emitLog(run, 'info', `[CREATE_TICKETS] Creating ticket '${opts.title}' (type: ${opts.ticketType}) with ${createParamKeys.length} parameter(s): ${createParamSummary}`, { nodeId: node.id });
 				const createRes = await this.ticketRuntimeService.CREATE_TICKETS(opts);
 				if (!createRes.success) {
 					throw new Error(createRes.error || `Failed to create ticket '${opts.title}'`);
 				}
-				result = createRes;
-				if (createRes.title) {
-					run.contextVariables[createRes.title] = createRes;
-					run.contextVariables[`@${createRes.title}`] = createRes;
-				}
-				if (createRes.ticketId) {
-					run.contextVariables[createRes.ticketId] = createRes;
-					run.contextVariables[`@${createRes.ticketId}`] = createRes;
-				}
+				const { fields: _omitFields, ...lightCreateRes } = createRes;
+				result = lightCreateRes;
 				pathStep?.operations.push({
 					type: 'create_ticket',
 					label: `CREATE_TICKETS: '${opts.title}' [${opts.ticketType}]`,
@@ -2722,7 +2860,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						ticketId: createRes.ticketId,
 						ticketName: createRes.ticketName,
 						targetFolder: createRes.targetFolder,
-						parameters: opts.parameters
+						parameters: this._summarizeValueForHistory(opts.parameters)
 					},
 					durationMs: Date.now() - startMs
 				});
@@ -2808,12 +2946,21 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					: formattedText;
 				this._emitLog(run, 'info', `[DISPLAY] [${nodeLabelName}] (${summaryType})\n${logDisplayPreview}`, { nodeId: node.id });
 
+				const exprKey = rawExpr || `DISPLAY(${rawArgsStr})`;
+				let cardList = this._displayCardsByWorkflow.get(run.workflowUri);
+				if (!cardList) {
+					cardList = [];
+					this._displayCardsByWorkflow.set(run.workflowUri, cardList);
+				}
+				const existingIdx = cardList.findIndex(c => c.runId === run.runId && c.nodeId === node.id && c.expression === exprKey);
+				const reusedId = existingIdx !== -1 ? cardList.splice(existingIdx, 1)[0].id : `display_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
 				const displayCard: IWorkflowDisplayCard = {
-					id: `display_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+					id: reusedId,
 					runId: run.runId,
 					nodeId: node.id,
 					nodeTitle: nodeLabelName,
-					expression: rawExpr || `DISPLAY(${rawArgsStr})`,
+					expression: exprKey,
 					value: cleanValue,
 					formattedText,
 					timestamp: new Date().toLocaleTimeString(),
@@ -2824,18 +2971,22 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketHandle
 				};
 
-				let cardList = this._displayCardsByWorkflow.get(run.workflowUri);
-				if (!cardList) {
-					cardList = [];
-					this._displayCardsByWorkflow.set(run.workflowUri, cardList);
-				}
 				cardList.unshift(displayCard);
+				if (cardList.length > 30) {
+					cardList.length = 30;
+				}
 
 				this._onDidDisplayVariable.fire(displayCard);
 				pathStep?.operations.push({
 					type: 'display',
 					label: `DISPLAY [${nodeLabelName}]`,
-					details: { formattedText, cleanValue, ticketTitle, ticketId, ticketType }
+					details: {
+						summaryType,
+						preview: logDisplayPreview,
+						ticketTitle,
+						ticketId,
+						ticketType
+					}
 				});
 			} else {
 				// Fallback evaluation for general expressions (e.g. `positions = out["Position List"]`)
@@ -2850,9 +3001,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 			if (targetVar) {
 				run.contextVariables[targetVar] = result;
-				run.contextVariables[`@${targetVar}`] = result;
-				const preview = typeof result === 'object' ? JSON.stringify(result) : String(result);
-				this._emitLog(run, 'info', `[Step #${stepIndex + 1} FX] Output stored in @${targetVar}: ${preview.substring(0, 150)}`, { nodeId: node.id });
+				delete run.contextVariables[`@${targetVar}`];
+				const preview = this._fastPreviewString(result, 150);
+				this._emitLog(run, 'info', `[Step #${stepIndex + 1} FX] Output stored in @${targetVar}: ${preview}`, { nodeId: node.id });
 			} else {
 				this._emitLog(run, 'info', `[Step #${stepIndex + 1} FX] Execution completed successfully in ${Date.now() - startMs}ms`, { nodeId: node.id });
 			}
@@ -3129,13 +3280,26 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const ticketTitle = displayVal?.__ticketMetadata?.title || displayVal?.__ticketMetadata?.ticketName || '';
 		const ticketType = displayVal?.__ticketMetadata?.ticketType || '';
 		const cleanVal = this._stripInternalDisplayMeta(displayVal);
+		const totalArrayLen = Array.isArray(cleanVal) ? cleanVal.length : 0;
+		const cappedCleanVal = Array.isArray(cleanVal) && cleanVal.length > 100
+			? [...cleanVal.slice(0, 50), { __note__: `... (${cleanVal.length - 100} middle rows omitted in Live Display card; total ${cleanVal.length} rows) ...` }, ...cleanVal.slice(-50)]
+			: cleanVal;
+		let rawJsonText = '';
+		try {
+			rawJsonText = JSON.stringify(cappedCleanVal, null, 2) || '';
+		} catch {
+			rawJsonText = String(cappedCleanVal);
+		}
+		const cappedFormattedText = rawJsonText.length > 100000
+			? rawJsonText.substring(0, 100000) + `\n... [truncated (${rawJsonText.length} chars total)]`
+			: rawJsonText;
 
 		return {
-			formattedText: JSON.stringify(cleanVal, null, 2),
+			formattedText: cappedFormattedText,
 			summaryType: Array.isArray(cleanVal)
-				? `array [${cleanVal.length}]`
+				? `array [${totalArrayLen}]`
 				: `object {${Object.keys(cleanVal || {}).length} keys}`,
-			cleanValue: cleanVal,
+			cleanValue: cappedCleanVal,
 			ticketTitle: ticketTitle || undefined,
 			ticketId: ticketId || undefined,
 			ticketType: ticketType || undefined
@@ -3149,6 +3313,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 				try {
 					const parsed = JSON.parse(trimmed);
+					// Data Table primitive
+					if (Array.isArray(parsed.rows) || 'sqlOutput' in parsed || ('columns' in parsed && 'dbEngine' in parsed)) {
+						if (Array.isArray(parsed.rows) && (parsed.rows.length > 0 || !/^Status:\s*FAILED\b/i.test(String(parsed.sqlOutput || '').trim()))) {
+							return parsed.rows;
+						}
+						return parsed.sqlOutput || parsed.rows || [];
+					}
 					// Python primitive
 					if (parsed.pythonCode !== undefined || parsed.code !== undefined || parsed.pythonPath !== undefined) {
 						if (parsed.result !== undefined) {
@@ -3161,6 +3332,17 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					// Browser primitive
 					if (parsed.content !== undefined) {
 						return parsed.content;
+					}
+					// SSH Terminal primitive
+					if (Array.isArray(parsed.lastRawEntries) || parsed.lastNOutput !== undefined || parsed.sshHost !== undefined || (parsed.host !== undefined && (parsed.outputLines !== undefined || parsed.sshOutputLines !== undefined || Array.isArray(parsed.sshCommands)))) {
+						const maxLines = Number(parsed.outputLines ?? parsed.sshOutputLines ?? 50);
+						if (Array.isArray(parsed.lastRawEntries) && parsed.lastRawEntries.length > 0) {
+							return formatSshCommandsJsonOutput(parsed.lastRawEntries, maxLines);
+						}
+						if (parsed.lastNOutput !== undefined && String(parsed.lastNOutput).trim() !== '') {
+							return extractSshOutputLastNLines(String(parsed.lastNOutput).trim(), maxLines);
+						}
+						return parsed.output ? extractSshOutputLastNLines(String(parsed.output), maxLines) : '{}';
 					}
 					// Prompt primitive
 					if (parsed.prompt !== undefined || parsed.output !== undefined) {
@@ -3602,6 +3784,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const safeMessage = typeof message === 'string' && message.length > 1200
 			? message.substring(0, 1200) + ' ... [truncated]'
 			: message;
+		const safeData = data && typeof data === 'object'
+			? (Object.keys(data).length <= 2 && ('nodeId' in data || 'ticketId' in data) ? { nodeId: data.nodeId, ticketId: data.ticketId } : this._summarizeValueForHistory(data, 1))
+			: data;
 		const log: IWorkflowLogEntry = {
 			id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
 			timestamp: Date.now(),
@@ -3609,9 +3794,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			nodeId: data?.nodeId || run.currentNodeId,
 			ticketId: data?.ticketId,
 			message: safeMessage,
-			data
+			data: safeData
 		};
 		run.logs.push(log);
+		if (run.logs.length > 1500) {
+			run.logs.splice(0, run.logs.length - 1500);
+		}
 		run.updatedAt = Date.now();
 		this._onDidEmitLog.fire({ runId: run.runId, log });
 	}
@@ -3709,6 +3897,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 import sys, os, json, time, traceback, datetime, re, io
 
 KERNEL_DIR = sys.argv[1]
+FULL_SPEED = "--full-speed" in sys.argv
+POLL_SLEEP = 0.002 if FULL_SPEED else 0.025
+CMD_SLEEP = 0.002 if FULL_SPEED else 0.03
 CMD_FILE = os.path.join(KERNEL_DIR, "cmd.json")
 CMD_RES_FILE = os.path.join(KERNEL_DIR, "cmd_res.json")
 RPC_REQ_FILE = os.path.join(KERNEL_DIR, "rpc_req.json")
@@ -3777,7 +3968,24 @@ class _AttrDict(dict):
             return val
         raise KeyError(key)
 
+_orig_json_loads = json.loads
+def _safe_json_loads(s, *args, **kwargs):
+    if isinstance(s, (dict, list)):
+        return s
+    return _orig_json_loads(s, *args, **kwargs)
+json.loads = _safe_json_loads
+
 def _wrap_val(v):
+    if isinstance(v, str):
+        s = v.strip()
+        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+            try:
+                parsed = _orig_json_loads(s)
+                if isinstance(parsed, (dict, list)):
+                    return _wrap_val(parsed)
+            except Exception:
+                pass
+        return v
     if isinstance(v, dict):
         return _AttrDict({k: _wrap_val(val) for k, val in v.items()})
     elif isinstance(v, list):
@@ -3854,7 +4062,7 @@ def _rpc_call(fn_name, args, kwargs):
                     return _wrap_val(res.get("result"))
             except (json.JSONDecodeError, OSError):
                 pass
-        time.sleep(0.025)
+        time.sleep(POLL_SLEEP)
 
 def RUN_TICKETS(*args, **kwargs):
     return _rpc_call("RUN_TICKETS", args, kwargs)
@@ -3872,7 +4080,12 @@ def GET_PRIMITIVES_CATALOG(*args, **kwargs):
     return _rpc_call("GET_PRIMITIVES_CATALOG", args, kwargs)
 
 def DISPLAY(*args, **kwargs):
-    return _rpc_call("DISPLAY", args, kwargs)
+    _rpc_call("DISPLAY", args, kwargs)
+    if len(args) == 1:
+        return args[0]
+    elif len(args) > 1:
+        return list(args)
+    return kwargs
 
 def DATE():
     return datetime.date.today().strftime("%Y-%m-%d")
@@ -3922,6 +4135,8 @@ wf_globals["ANY_AGENT_CONTEXT"] = wf_globals
 
 RESERVED_KEYS = set(wf_globals.keys()) | {"__builtins__", "__name__", "__doc__", "__package__", "__loader__", "__spec__", "TICKET_CONTEXT", "CONTEXT", "ANY_AGENT_CONTEXT"}
 
+_exported_var_snapshots = {}
+
 init_ctx_path = os.path.join(KERNEL_DIR, "init_context.json")
 if os.path.exists(init_ctx_path):
     try:
@@ -3932,6 +4147,10 @@ if os.path.exists(init_ctx_path):
                 if k in ("TICKET_CONTEXT", "CONTEXT", "ANY_AGENT_CONTEXT") or k.startswith("@"):
                     continue
                 wf_globals[k] = _wrap_val(v)
+                try:
+                    _exported_var_snapshots[k] = json.dumps(v, ensure_ascii=False, default=str)
+                except Exception:
+                    pass
     except Exception:
         pass
 wf_globals["TICKET_CONTEXT"] = wf_globals
@@ -3994,13 +4213,13 @@ def _sanitize_legacy_syntax(code):
     res = re.sub(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\s*--", r"\1 -= 1", res)
     # Normalize GET_OUTPUTS(ticket=..., 'Field') -> GET_OUTPUTS(ticket=..., field='Field')
     res = re.sub(
-        r"\b(GET_OUTPUTS|get_outputs)\s*\(\s*((?:ticket_id|ticket|tickets|ticket_name)\s*=\s*[^,)]+?)\s*,\s*(?![a-zA-Z_][a-zA-Z0-9_]*\s*=)([^)]+)\)",
+        r"\b(GET_OUTPUTS|get_outputs)\s*\(\s*((?:ticket_id|ticket|tickets|ticket_name)\s*=\s*[^,)=]+?)\s*,\s*(?!\s*[a-zA-Z_][a-zA-Z0-9_]*\s*=)([^)=]+)\)",
         r"\1(\2, field=\3)",
         res
     )
     # Normalize RUN_TICKETS(ticket=..., {...}) -> RUN_TICKETS(ticket=..., params={...})
     res = re.sub(
-        r"\b(RUN_TICKETS|run_tickets)\s*\(\s*((?:ticket_id|ticket|tickets|ticket_name)\s*=\s*[^,)]+?)\s*,\s*(?![a-zA-Z_][a-zA-Z0-9_]*\s*=)(\{[\s\S]*?\})\s*\)",
+        r"\b(RUN_TICKETS|run_tickets)\s*\(\s*((?:ticket_id|ticket|tickets|ticket_name)\s*=\s*[^,)=]+?)\s*,\s*(?!\s*[a-zA-Z_][a-zA-Z0-9_]*\s*=)(\{[\s\S]*?\})\s*\)",
         r"\1(\2, params=\3)",
         res
     )
@@ -4020,10 +4239,15 @@ def _export_vars():
         if callable(v) or isinstance(v, type) or hasattr(v, "__spec__"):
             continue
         try:
-            json.dumps(v)
-            exported[k] = v
+            s = json.dumps(v, ensure_ascii=False, default=str)
+            if _exported_var_snapshots.get(k) != s:
+                _exported_var_snapshots[k] = s
+                exported[k] = v
         except Exception:
-            exported[k] = repr(v)
+            r = repr(v)
+            if _exported_var_snapshots.get(k) != r:
+                _exported_var_snapshots[k] = r
+                exported[k] = r
     return exported
 
 with open(READY_FILE, "w", encoding="utf-8") as f:
@@ -4047,7 +4271,7 @@ try:
                     cmd = json.load(f)
                 cmd_id = cmd.get("id")
                 if not cmd_id or cmd_id == last_cmd_id:
-                    time.sleep(0.025)
+                    time.sleep(POLL_SLEEP)
                     continue
                 last_cmd_id = cmd_id
                 current_cmd_id = cmd_id
@@ -4062,6 +4286,10 @@ try:
                         if sk in ("TICKET_CONTEXT", "CONTEXT", "ANY_AGENT_CONTEXT") or sk.startswith("@"):
                             continue
                         wf_globals[sk] = _wrap_val(sv)
+                        try:
+                            _exported_var_snapshots[sk] = json.dumps(sv, ensure_ascii=False, default=str)
+                        except Exception:
+                            pass
                 wf_globals["TICKET_CONTEXT"] = wf_globals
                 wf_globals["CONTEXT"] = wf_globals
                 wf_globals["ANY_AGENT_CONTEXT"] = wf_globals
@@ -4111,7 +4339,7 @@ try:
                 last_active_ts = time.time()
             except (json.JSONDecodeError, OSError):
                 pass
-        time.sleep(0.03)
+        time.sleep(CMD_SLEEP)
 finally:
     try:
         if os.path.exists(READY_FILE):
@@ -4131,7 +4359,7 @@ finally:
 				}
 			});
 
-			const cmdLine = `"${pythonPath}" "${kernelPyUri.fsPath}" "${kernelDir.fsPath}"`;
+			const cmdLine = `"${pythonPath}" "${kernelPyUri.fsPath}" "${kernelDir.fsPath}"${run.fullSpeed ? ' "--full-speed"' : ''}`;
 			await terminal.sendText(cmdLine, true);
 
 			// Wait up to 6s for ready.flag
@@ -4143,18 +4371,23 @@ finally:
 					isReady = true;
 					break;
 				}
-				await new Promise(r => setTimeout(r, 60));
+				await new Promise(r => setTimeout(r, run.fullSpeed ? 10 : 60));
 			}
 
 			if (isReady) {
 				const prevKernel = this._pythonKernels.get(run.runId);
+				const initialSyncedVars = new Map<string, any>();
+				for (const [ik, iv] of Object.entries(initVars)) {
+					initialSyncedVars.set(ik, iv);
+				}
 				this._pythonKernels.set(run.runId, {
 					kernelDir,
 					pythonPath,
 					terminal,
 					reqCounter: prevKernel ? prevKernel.reqCounter : 0,
 					stopped: false,
-					handledRpcIds: prevKernel ? prevKernel.handledRpcIds : new Set<string>()
+					handledRpcIds: prevKernel ? prevKernel.handledRpcIds : new Set<string>(),
+					lastSyncedVars: initialSyncedVars
 				});
 				this._emitLog(run, 'info', `[Python Kernel] Started persistent Python runtime (${pythonPath})`);
 			} else {
@@ -4231,13 +4464,14 @@ finally:
 		const rpcReqUri = URI.joinPath(kernel.kernelDir, 'rpc_req.json');
 		const rpcResUri = URI.joinPath(kernel.kernelDir, 'rpc_res.json');
 
-		// Sync any externally updated contextVariables (e.g. from run_ticket or component steps).
-		// Note: TICKET_CONTEXT, CONTEXT, and ANY_AGENT_CONTEXT are already bound directly to wf_globals inside kernel.py,
-		// so we must NOT duplicate fullCtx into syncVars under those keys (which previously caused recursive self-nesting and 3x payload bloat).
+		// Sync ONLY externally updated contextVariables (delta-sync) so we do not re-serialize multi-megabyte unchanged variables on every Python step.
 		const syncVars: Record<string, any> = {};
 		for (const [k, v] of Object.entries(run.contextVariables || {})) {
 			if (!k.startsWith('@') && !WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(k)) {
-				syncVars[k] = v;
+				if (!kernel.lastSyncedVars.has(k) || kernel.lastSyncedVars.get(k) !== v) {
+					syncVars[k] = v;
+					kernel.lastSyncedVars.set(k, v);
+				}
 			}
 		}
 
@@ -4316,14 +4550,15 @@ finally:
 						await this.fileService.del(cmdResUri);
 					} catch { }
 
-					// Sync back all exported Python variables into run.contextVariables
+					// Sync back changed exported Python variables into run.contextVariables
 					if (resObj.variables && typeof resObj.variables === 'object') {
 						for (const [vk, vv] of Object.entries(resObj.variables)) {
 							if (WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(vk) || vk.startsWith('@')) {
 								continue;
 							}
 							run.contextVariables[vk] = vv;
-							run.contextVariables[`@${vk}`] = vv;
+							delete run.contextVariables[`@${vk}`];
+							kernel.lastSyncedVars.set(vk, vv);
 						}
 					}
 
@@ -4345,15 +4580,15 @@ finally:
 						if (assignMatch && !trimmedCode.includes('\n')) {
 							const assignedVar = assignMatch[1];
 							const newVal = run.contextVariables[assignedVar];
-							const preview = typeof newVal === 'object' ? JSON.stringify(newVal) : String(newVal);
-							this._emitLog(run, 'info', `[Step #${stepIndex + 1} PY] ${assignedVar} = ${preview.substring(0, 180)}`, { nodeId: node.id });
+							const preview = this._fastPreviewString(newVal, 180);
+							this._emitLog(run, 'info', `[Step #${stepIndex + 1} PY] ${assignedVar} = ${preview}`, { nodeId: node.id });
 							pathStep?.operations.push({
 								type: 'set_variable',
 								label: `Python: ${assignedVar} = ${preview.substring(0, 120)}`,
 								details: {
 									variable: assignedVar,
 									expression: trimmedCode,
-									newValue: newVal
+									newValue: this._summarizeValueForHistory(newVal)
 								},
 								durationMs: Date.now() - startMs
 							});
@@ -4371,7 +4606,7 @@ finally:
 				}
 			}
 
-			await new Promise(r => setTimeout(r, 35));
+			await new Promise(r => setTimeout(r, run.fullSpeed ? 2 : 35));
 		}
 
 		throw new Error('Workflow execution was stopped');
@@ -4443,11 +4678,49 @@ finally:
 					cleanCtxParams[ck] = cv;
 				}
 				this._emitLog(run, 'info', `[RUN_TICKETS] Executing ticket '${ticketIdOrPath}'...`, { nodeId: node.id });
+
+				const inFlightTicketRecord: IExecutedTicketRecord = {
+					ticketId: ticketIdOrPath,
+					ticketName: ticketIdOrPath,
+					ticketType: 'task',
+					status: 'running' as any,
+					durationMs: 0,
+					stepResults: []
+				};
+				const inFlightOp = {
+					type: 'run_ticket' as const,
+					label: `RUN_TICKETS: '${ticketIdOrPath}'`,
+					executedTicket: inFlightTicketRecord,
+					durationMs: 0
+				};
+				pathStep?.operations.push(inFlightOp);
+				this._notifyRunChanged(run);
+
 				const execRes = await this.ticketRuntimeService.RUN_TICKETS({
 					workspaceUri: workflowDir,
 					ticketIdOrPath,
 					inputParams: { ...cleanCtxParams, ...inputParams },
-					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped'
+					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
+					onStepStart: (info) => {
+						this._emitLog(run, 'info', `  ▶ [${ticketIdOrPath}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
+						this._notifyRunChanged(run);
+					},
+					onStepProgress: (stepRes, idx, total) => {
+						inFlightTicketRecord.stepResults = inFlightTicketRecord.stepResults || [];
+						const existingIdx = inFlightTicketRecord.stepResults.findIndex(s => s.fieldId === stepRes.fieldId);
+						if (existingIdx >= 0) {
+							inFlightTicketRecord.stepResults[existingIdx] = stepRes;
+						} else {
+							inFlightTicketRecord.stepResults.push(stepRes);
+						}
+						this._emitLog(
+							run,
+							stepRes.status === 'success' ? 'info' : 'warn',
+							`  ✔ [${ticketIdOrPath}] Step ${idx}/${total}: [${stepRes.fieldType.toUpperCase()}] '${stepRes.fieldLabel}' -> ${stepRes.status} (${stepRes.durationMs}ms)`,
+							{ nodeId: node.id }
+						);
+						this._notifyRunChanged(run);
+					}
 				});
 				if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
 					throw new Error('Workflow execution was stopped');
@@ -4455,22 +4728,28 @@ finally:
 				if (!execRes.success) {
 					throw new Error(execRes.error || `Ticket '${ticketIdOrPath}' execution failed`);
 				}
-				const ticketRecord = {
+				const ticketRecord: IExecutedTicketRecord = {
 					ticketId: execRes.ticketId || ticketIdOrPath,
 					ticketName: execRes.ticketName || ticketIdOrPath,
 					ticketType: execRes.ticketType || 'task',
 					status: 'success' as const,
-					output: execRes.output,
+					output: this._summarizeValueForHistory(execRes.output),
+					outputSpecs: (execRes as any).outputSpecs,
+					stepResults: execRes.stepResults,
+					contextVariables: execRes.contextVariables,
 					durationMs: Date.now() - startMs
 				};
-				state?.executedTickets.push(ticketRecord);
-				pathStep?.operations.push({
-					type: 'run_ticket',
-					label: `RUN_TICKETS: '${ticketRecord.ticketName}' [${ticketRecord.ticketType}]`,
-					executedTicket: ticketRecord,
-					durationMs: ticketRecord.durationMs
-				});
-				const { contextVariables: _omitCtx, ...lightExecRes } = execRes;
+				inFlightOp.executedTicket = ticketRecord;
+				inFlightOp.label = `RUN_TICKETS: '${ticketRecord.ticketName}' [${ticketRecord.ticketType}]`;
+				inFlightOp.durationMs = ticketRecord.durationMs;
+
+				if (state) {
+					state.executedTickets.push(ticketRecord);
+					if (state.executedTickets.length > 50) {
+						state.executedTickets.splice(0, state.executedTickets.length - 50);
+					}
+				}
+				const { contextVariables: _omitCtx, stepResults: _omitSteps, ...lightExecRes } = execRes;
 				result = lightExecRes;
 			} else if (upperFn === 'CREATE_TICKETS') {
 				let opts: any = {};
@@ -4522,14 +4801,15 @@ finally:
 				opts.workspaceUri = workflowDir;
 				const createParamKeys = Object.keys(opts.parameters || {});
 				const createParamSummary = createParamKeys.length > 0
-					? createParamKeys.map(k => `${k}=${JSON.stringify(opts.parameters[k])}`).join(', ')
+					? createParamKeys.map(k => `${k}=${this._fastPreviewString(opts.parameters[k], 80)}`).join(', ')
 					: 'none';
 				this._emitLog(run, 'info', `[CREATE_TICKETS] Creating ticket '${opts.title}' (type: ${opts.ticketType}) with ${createParamKeys.length} parameter(s): ${createParamSummary}`, { nodeId: node.id });
 				const createRes = await this.ticketRuntimeService.CREATE_TICKETS(opts);
 				if (!createRes.success) {
 					throw new Error(createRes.error || `Failed to create ticket '${opts.title}'`);
 				}
-				result = createRes;
+				const { fields: _omitFields, ...lightCreateRes } = createRes;
+				result = lightCreateRes;
 			} else if (upperFn === 'GET_TICKETS') {
 				const rawTarget = kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.id ?? args[0] ?? '';
 				result = await this.ticketRuntimeService.GET_TICKETS(workflowDir, rawTarget);
@@ -4572,7 +4852,7 @@ finally:
 				} else {
 					displayVal = run.contextVariables;
 				}
-				result = displayVal;
+				result = true;
 
 				const { formattedText, summaryType, cleanValue, ticketTitle, ticketId, ticketType, outputItems, ticketHandle } = this._formatDisplayOutput(displayVal);
 				const nodeLabelName = (node.label && node.label.trim()) ? node.label.trim() : (node.id || 'Node');
@@ -4585,8 +4865,16 @@ finally:
 					? (reqObj as any).call_expr.trim()
 					: (stepExpression && !stepExpression.includes('\n') ? stepExpression.trim() : 'DISPLAY(...)');
 
+				let cardList = this._displayCardsByWorkflow.get(run.workflowUri);
+				if (!cardList) {
+					cardList = [];
+					this._displayCardsByWorkflow.set(run.workflowUri, cardList);
+				}
+				const existingIdx = cardList.findIndex(c => c.runId === run.runId && c.nodeId === node.id && c.expression === callExprFromPython);
+				const reusedId = existingIdx !== -1 ? cardList.splice(existingIdx, 1)[0].id : `display_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
 				const displayCard: IWorkflowDisplayCard = {
-					id: `display_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+					id: reusedId,
 					runId: run.runId,
 					nodeId: node.id,
 					nodeTitle: nodeLabelName,
@@ -4601,12 +4889,10 @@ finally:
 					ticketHandle
 				};
 
-				let cardList = this._displayCardsByWorkflow.get(run.workflowUri);
-				if (!cardList) {
-					cardList = [];
-					this._displayCardsByWorkflow.set(run.workflowUri, cardList);
-				}
 				cardList.unshift(displayCard);
+				if (cardList.length > 30) {
+					cardList.length = 30;
+				}
 				this._onDidDisplayVariable.fire(displayCard);
 			} else {
 				throw new Error(`Unknown RPC function: ${fn}`);

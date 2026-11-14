@@ -117,6 +117,7 @@ export interface IWorkflowExecutionRun {
 	workflowName: string;
 	status: WorkflowRunStatus;
 	mode: 'standard' | 'daemon' | 'step';
+	fullSpeed?: boolean;
 	trigger?: 'manual' | 'schedule' | 'api' | 'button';
 	currentNodeId?: string;
 	visitedNodeIds: string[];
@@ -147,6 +148,7 @@ export interface IWorkflowLinkExecutionState {
 
 export interface IWorkflowEngineOptions {
 	mode?: 'standard' | 'daemon' | 'step';
+	fullSpeed?: boolean;
 	initialInputs?: Record<string, any>;
 	initialData?: any;
 	entryNodeId?: string;

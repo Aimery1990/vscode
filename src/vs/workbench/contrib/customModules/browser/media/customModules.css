@@ -464,13 +464,18 @@
 }
 
 /* Schema Editor Pane in Main Workspace */
+.custom-module-schema-editor,
+.custom-module-schema-editor * {
+	user-select: text !important;
+	-webkit-user-select: text !important;
+}
+
 .custom-module-schema-editor {
 	display: flex;
 	flex-direction: column;
-	user-select: none;
-	-webkit-user-select: none;
 }
 
+.custom-module-schema-editor .codicon,
 .custom-module-schema-editor .python-code-display,
 .custom-module-schema-editor .python-code-display *,
 .custom-module-schema-editor .python-line-numbers-gutter {

@@ -33,6 +33,7 @@ import { IWorkspacesExplorerService, IWorkspaceItem, CanonicalStatusCategory } f
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IAgentsManagerService, IAgentCredentialService, IAgentCredential } from '../../agentsManager/common/agentsManager.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
+import { EntityDetailEditor } from './entityDetailEditor.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { AccountManagementDialog } from '../../accountManagement/browser/accountManagementDialog.js';
 import { IWorkspaceEditingService } from '../../../services/workspaces/common/workspaceEditing.js';
@@ -1265,6 +1266,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 								}
 							} catch (err) {
 								console.error('Failed to open Entity editor:', err);
+							}
+						}),
+						new Action('copy_ticket_json', 'Copy Ticket Content (JSON)', ThemeIcon.asClassName(Codicon.copy), true, async () => {
+							const activePane = this.editorService.activeEditorPane;
+							if (activePane && (activePane as any)._entityUri?.toString() === child.uri.toString() && typeof (activePane as any).copyTicketAsJson === 'function') {
+								await (activePane as any).copyTicketAsJson();
+							} else {
+								await EntityDetailEditor.copyTicketAtUriToClipboard(child.uri, child.name, this.fileService, this.clipboardService, this.notificationService);
 							}
 						})
 					);

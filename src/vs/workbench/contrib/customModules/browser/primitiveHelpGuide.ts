@@ -341,6 +341,78 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 		]
 	},
 
+	ssh: {
+		type: 'ssh',
+		title: 'SSH Terminal (Remote Linux Connection & Console)',
+		icon: Codicon.terminal,
+		category: 'Execution & Automation',
+		summary: 'Connects to remote Linux servers via SSH using IP/Host, Port, Username, and Password. Features a unified collapsible operation panel (Terminal Window + Quick Linux Commands + Dynamic Multi-Command Send Bars) and outputs a standard JSON object.',
+		designerConfig: [
+			{ name: 'SSH Credentials & Dynamic Variables', desc: 'Target Linux server IP/Host, Port (default 22), Username, Password, and Remote Dir (CWD) — all supporting {variable} interpolation from upstream Workflow nodes.' },
+			{ name: 'Unified Collapsible Operation Panel', desc: 'Integrates the Terminal Display Window, Quick Linux Commands bar, and Dynamic Command Send Bars into a single panel (collapsed by default; click to expand or collapse as one unit).' },
+			{ name: 'Dynamic Multi-Command Send Bars', desc: 'Add any number of command send bars (#1 → #2 → ...). Each bar can be executed individually ("Send") or all bars sequentially ("Run All"), and supports full-command or inline {variable} interpolation.' },
+			{ name: 'Unified Standard JSON Output', desc: 'Outputs a clean JSON object { "<actual_command>": ["line 1", "line 2", ...] } retaining the last N lines (Output Lines) per command without mixing with previous runs.' }
+		],
+		runTicketsFlow: {
+			headline: 'How Workflow & RUN_TICKETS Execute SSH Terminal Primitive',
+			steps: [
+				{ step: '1. Dynamic Connection & Command Resolution', detail: 'Resolves {variables} in Host, Port, Username, Password, CWD, and each Command Send Bar (supporting single commands, inline templates, or command arrays).' },
+				{ step: '2. Automatic SSH Connection & Fail-Fast Check', detail: 'Establishes SSH session via PTY password auto-login. If connection/authentication fails, execution terminates immediately with an explicit SSH connection error.' },
+				{ step: '3. Sequential Multi-Command Execution', detail: 'Executes all configured command send bars in addition order (#1 → #2 → ...), tracking working directory changes (e.g. cd /var/www) across commands.' },
+				{ step: '4. Standard JSON Output Generation', detail: 'Builds a valid JSON object mapping each executed command string to an array of its last N output lines, replacing the component Output cleanly for downstream nodes.' }
+			],
+			variableResolution: '{Field Label} or {Field Label.output}',
+			downstreamPassing: 'The complete JSON object { "pwd": ["/home/user/project"], "ls -la": ["total 128", ...] } is exposed to downstream AI Prompts, Python scripts, and Output Manifests.'
+		},
+		syntaxExamples: [
+			'{\n  "pwd": ["/home/user/project"],\n  "docker ps": ["CONTAINER ID   IMAGE   STATUS"]\n}',
+			'cd {project_dir} && git status',
+			'{dynamic_ssh_command}'
+		],
+		tips: [
+			'Click "SSH Terminal & Command Console" to expand or collapse the Terminal Window, Quick Linux Commands, and Command Send Bars together as a single unit.',
+			'Click "+ Add Command" to add multiple command send bars; use each bar\'s "Send" button to run a single command or "Run All" to execute all bars sequentially.',
+			'Adjust "Output Lines" in the JSON Output header to control how many trailing lines are retained per command array in the JSON output.',
+			'Click "IDE Terminal" to open a full interactive PTY session directly in the IDE bottom terminal panel.'
+		]
+	},
+
+	http_request: {
+		type: 'http_request',
+		title: 'HTTP Request (API / REST Client)',
+		icon: Codicon.cloudUpload,
+		category: 'Web API & Data Integration',
+		summary: 'Universal HTTP / REST API communication component supporting GET, POST, PUT, PATCH, DELETE, HEAD, and OPTIONS. Configures dynamic URL, query parameters, request headers, Bearer/API-Key/Basic authentication, request body, and rich structured JSON output passed cleanly to downstream nodes.',
+		designerConfig: [
+			{ name: 'Method & Endpoint URL', desc: 'Select HTTP method (GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS) and declare URL supporting {variable} interpolation.' },
+			{ name: 'Query Parameters & Headers', desc: 'Add key-value pairs with toggle checkboxes; automatically interpolated from upstream variables.' },
+			{ name: 'Authentication', desc: 'Bearer Token, API Key (Header or Query), Basic Auth, or Custom Header with variable binding.' },
+			{ name: 'Request Body', desc: 'JSON or raw payload editor supporting variable placeholders (e.g. {ai_generated_resume}) and JSON formatting.' }
+		],
+		runTicketsFlow: {
+			headline: 'How RUN_TICKETS & Workflow Execute HTTP Request Primitive',
+			steps: [
+				{ step: '1. Dynamic Interpolation', detail: 'Interpolates variables across URL, query parameters, headers, auth token, and request body.' },
+				{ step: '2. HTTP Dispatch', detail: 'Sends HTTP request via native fetch with configurable timeout and abort protection.' },
+				{ step: '3. Response Parsing', detail: 'Captures status code, status text, response headers, and auto-parses response body into structured JSON if valid.' },
+				{ step: '4. Downstream Output Registration', detail: 'Registers structured response into contextVariables[FieldLabel], allowing downstream nodes to access {FieldLabel.data.share_path}, {FieldLabel.status}, etc.' }
+			],
+			variableResolution: '{Field Label}, {Field Label.status}, {Field Label.data.property}, {Field Label.data}',
+			downstreamPassing: 'Subsequent AI Prompts, Python scripts (TICKET_CONTEXT), and Output Manifests receive full parsed JSON or response text.'
+		},
+		syntaxExamples: [
+			'{Upload Resume.data.share_path}',
+			'{Get Resume.resume_data.hero.headline}',
+			'{API Request.status}',
+			"TICKET_CONTEXT['Upload Resume']['data']['share_path']"
+		],
+		tips: [
+			'Use {param_name} or {{param_name}} inside the URL, headers, or body to dynamically bind upstream ticket inputs or AI outputs.',
+			'Click "Test API" in the component card to send an immediate live request and preview status, latency, headers, and parsed response JSON.',
+			'JSON responses automatically expose their fields to downstream nodes using dot notation (e.g. {API Request.data.share_path}).'
+		]
+	},
+
 	number: {
 		type: 'number',
 		title: 'Number Input (Numeric)',

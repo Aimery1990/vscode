@@ -24,7 +24,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IParameterDefinition, generateSmartPythonVarName, sanitizePythonVarName } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IParameterDefinition, generateSmartPythonVarName, sanitizePythonVarName, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshCommandsList } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
@@ -71,6 +71,7 @@ export interface INodePipelineStep {
 	label?: string;          // Human-readable title
 	parameters?: string;     // Runtime parameters (e.g. "--fast", "param1")
 	component?: ICustomField; // Component-driven node step (Inputs, Output, Create Tickets, Run Tickets, AI Prompt, Table, Browser, Python, etc.)
+	disabled?: boolean;      // When true, this step is commented out / temporarily disabled and skipped during execution
 }
 
 interface IFlowchartNode {
@@ -1624,7 +1625,8 @@ export class WorkflowEditor extends EditorPane {
 		}
 		if (!this._logBodyEl) return;
 		clearNode(this._logBodyEl);
-		for (const log of run.logs) {
+		const recentLogs = run.logs.length > 500 ? run.logs.slice(-500) : run.logs;
+		for (const log of recentLogs) {
 			this._appendLogEntry(log, false);
 		}
 		if (this._autoScrollLogs) {
@@ -2646,6 +2648,32 @@ export class WorkflowEditor extends EditorPane {
 						append(row, $('span.history-op-key')).textContent = 'Expression:';
 						append(row, $('span.history-op-val')).textContent = op.details.expression;
 					}
+				} else if (op.type === 'call_function') {
+					const opCard = append(body, $('.history-op-card.call-function'));
+					const opHeader = append(opCard, $('.history-op-header'));
+					append(opHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolEvent)));
+					append(opHeader, $('span.history-op-title')).textContent = op.label;
+
+					const opRight = append(opHeader, $('div', { style: 'display: flex; align-items: center; gap: 6px; margin-left: auto;' }));
+					if (op.durationMs !== undefined && op.durationMs > 0) {
+						const durSpan = append(opRight, $('span.history-ticket-dur'));
+						durSpan.textContent = op.durationMs >= 1000 ? `${(op.durationMs / 1000).toFixed(2)}s` : `${op.durationMs}ms`;
+					}
+
+					const opBody = append(opCard, $('.history-op-body'));
+					if ((op as any).expression) {
+						const row = append(opBody, $('.history-op-row'));
+						append(row, $('span.history-op-key')).textContent = 'Target / Expression:';
+						append(row, $('span.history-op-val')).textContent = (op as any).expression;
+					}
+					if ((op as any).value !== undefined) {
+						const row = append(opBody, $('.history-op-row'));
+						append(row, $('span.history-op-key')).textContent = 'Output:';
+						const vPre = append(row, $('pre.workflow-trace-pre'));
+						vPre.textContent = typeof (op as any).value === 'object' && (op as any).value !== null
+							? JSON.stringify((op as any).value, null, 2)
+							: String((op as any).value);
+					}
 				} else if (op.type === 'display') {
 					const opCard = append(body, $('.history-op-card.display'));
 					const opHeader = append(opCard, $('.history-op-header'));
@@ -3395,18 +3423,17 @@ export class WorkflowEditor extends EditorPane {
 
 		const execGrid = append(execSec, $(`.workflow-shape-grid${this._isToolbarCompact ? '.compact-1col' : ''}`));
 
-		// 1. Run Button
+		// 1. Run Button (Standard Mode)
 		const runBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
 		runBtn.setAttribute('data-role', 'workflow-run-btn');
-		runBtn.title = isRunning ? 'Workflow executing...' : 'Run Workflow (select nodes with Cmd/Ctrl/Shift+Click to run only selected nodes)';
+		runBtn.title = isRunning ? 'Workflow executing...' : 'Run Workflow (Select 1 node to run from that node onward, or Cmd/Ctrl/Shift+Click multiple nodes to run only selected nodes)';
 		append(runBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
 		if (!this._isToolbarCompact) {
-			append(runBtn, $('.item-label')).textContent = isRunning ? 'Running' : 'Run';
+			append(runBtn, $('.item-label')).textContent = (isRunning && !activeRun?.fullSpeed) ? 'Running' : 'Run';
 		}
-		if (isRunning) {
+		if (isRunning && !activeRun?.fullSpeed) {
 			runBtn.classList.add('active');
 		}
-		this._updateRunButtonSelectionBadge(runBtn);
 		runBtn.onmousedown = (e) => {
 			e.stopPropagation();
 		};
@@ -3418,6 +3445,42 @@ export class WorkflowEditor extends EditorPane {
 				this._clearDisplayInspectorCards();
 				await this._workflowExecutionService.executeWorkflow(this._workflowUri, {
 					mode: 'standard',
+					fullSpeed: false,
+					initialData: this._data,
+					entryNodeId,
+					selectedNodeIds
+				});
+				this._renderToolbar(parent);
+				this._renderNodes();
+			} catch (e: any) {
+				this._notificationService.error(e.message || String(e));
+			}
+		};
+
+		// 1b. Run at Full Speed Button (Independent Full-Speed Mode)
+		const fullSpeedBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn.full-speed-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+		fullSpeedBtn.setAttribute('data-role', 'workflow-full-speed-run-btn');
+		fullSpeedBtn.title = isRunning ? 'Workflow executing...' : 'Run at Full Speed (Execute workflow at maximum speed without artificial delays)';
+		append(fullSpeedBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.zap)));
+		if (!this._isToolbarCompact) {
+			append(fullSpeedBtn, $('.item-label')).textContent = (isRunning && activeRun?.fullSpeed) ? 'Running' : 'Full Speed';
+		}
+		if (isRunning && activeRun?.fullSpeed) {
+			fullSpeedBtn.classList.add('active');
+		}
+		this._updateRunButtonSelectionBadge(runBtn, fullSpeedBtn);
+		fullSpeedBtn.onmousedown = (e) => {
+			e.stopPropagation();
+		};
+		fullSpeedBtn.onclick = async () => {
+			if (!this._workflowUri) return;
+			try {
+				const { entryNodeId, selectedNodeIds } = this._resolveExecutionOptionsForRun(false);
+				this._openLogDrawer();
+				this._clearDisplayInspectorCards();
+				await this._workflowExecutionService.executeWorkflow(this._workflowUri, {
+					mode: 'standard',
+					fullSpeed: true,
 					initialData: this._data,
 					entryNodeId,
 					selectedNodeIds
@@ -3664,21 +3727,23 @@ export class WorkflowEditor extends EditorPane {
 			accent: string;
 			desc: string;
 		}[] = [
-			{ compType: 'parameters', label: localize('compInputs', 'Inputs'), icon: Codicon.symbolVariable, accent: '#c084fc', desc: 'Node Inputs component (at most 1 per node, placed at top). Supports Workflow Global Variables or literal values.' },
-			{ compType: 'output', label: localize('compOutput', 'Output'), icon: Codicon.output, accent: '#34d399', desc: 'Node Output component (at most 1 per node, placed at bottom). Exports values to Workflow variables.' },
-			{ compType: 'python', label: localize('compPythonCard', 'Python Card'), icon: Codicon.python, accent: '#38bdf8', desc: 'Full Python Script component card in side editor. Supports TICKET_CONTEXT, interpreter selection, test runner, and OUTPUT.' },
-			{ compType: 'create_tickets', label: localize('compCreateTickets', 'Create Tickets'), icon: Codicon.add, accent: '#c084fc', desc: 'CREATE_TICKETS built-in component. Automatically loads target Ticket Type Inputs schema; stores ticket handle in Component Title.' },
-			{ compType: 'run_tickets', label: localize('compRunTickets', 'Run Tickets'), icon: Codicon.playCircle, accent: '#a855f7', desc: 'RUN_TICKETS built-in component. Automatically loads target Ticket Type Inputs schema; stores run result in Component Title.' },
-			{ compType: 'get_outputs', label: localize('compGetOutputs', 'Get Outputs'), icon: Codicon.signOut, accent: '#818cf8', desc: 'GET_OUTPUTS built-in component. Reads OUTPUT dictionary from target ticket into Component Title variable.' },
-			{ compType: 'get_tickets', label: localize('compGetTickets', 'Get Tickets'), icon: Codicon.search, accent: '#60a5fa', desc: 'GET_TICKETS built-in component. Queries workspace tickets by Type, Status, or Title into Component Title variable.' },
-			{ compType: 'display', label: localize('compDisplay', 'Display'), icon: Codicon.eye, accent: '#f472b6', desc: 'DISPLAY built-in component. Renders variable or value to Live Output panel.' },
-			{ compType: 'prompt', label: localize('compPrompt', 'AI Prompt'), icon: Codicon.sparkle, accent: '#2dd4bf', desc: 'AI Prompt execution component. Supports {Component Title} and {workflow_var} interpolation.' },
-			{ compType: 'table', label: localize('compTable', 'Data Table'), icon: Codicon.table, accent: '#fb923c', desc: 'SQLite Data Table & SQL query component. Stores query rows in Component Title variable.' },
-			{ compType: 'browser', label: localize('compBrowser', 'Browser'), icon: Codicon.globe, accent: '#38bdf8', desc: 'Headless Browser & Scraper component. Stores extracted content in Component Title variable.' },
-			{ compType: 'tts', label: localize('compTts', 'Audio / TTS'), icon: Codicon.unmute, accent: '#f87171', desc: 'Text-to-Speech synthesis component.' },
-			{ compType: 'media_player', label: localize('compMediaPlayer', 'MP3 / MP4 Player'), icon: Codicon.deviceCameraVideo, accent: '#f59e0b', desc: 'Local MP3 / MP4 & multi-format Audio/Video Player component with 0.25x-2.0x speed control.' },
-			{ compType: 'git', label: localize('compGit', 'Git Repo'), icon: Codicon.gitMerge, accent: '#a3e635', desc: 'Git repository operations component.' }
-		];
+				{ compType: 'parameters', label: localize('compInputs', 'Inputs'), icon: Codicon.symbolVariable, accent: '#c084fc', desc: 'Node Inputs component (at most 1 per node, placed at top). Supports Workflow Global Variables or literal values.' },
+				{ compType: 'output', label: localize('compOutput', 'Output'), icon: Codicon.output, accent: '#34d399', desc: 'Node Output component (at most 1 per node, placed at bottom). Exports values to Workflow variables.' },
+				{ compType: 'python', label: localize('compPythonCard', 'Python Card'), icon: Codicon.python, accent: '#38bdf8', desc: 'Full Python Script component card in side editor. Supports TICKET_CONTEXT, interpreter selection, test runner, and OUTPUT.' },
+				{ compType: 'create_tickets', label: localize('compCreateTickets', 'Create Tickets'), icon: Codicon.add, accent: '#c084fc', desc: 'CREATE_TICKETS built-in component. Automatically loads target Ticket Type Inputs schema; stores ticket handle in Component Title.' },
+				{ compType: 'run_tickets', label: localize('compRunTickets', 'Run Tickets'), icon: Codicon.playCircle, accent: '#a855f7', desc: 'RUN_TICKETS built-in component. Automatically loads target Ticket Type Inputs schema; stores run result in Component Title.' },
+				{ compType: 'get_outputs', label: localize('compGetOutputs', 'Get Outputs'), icon: Codicon.signOut, accent: '#818cf8', desc: 'GET_OUTPUTS built-in component. Reads OUTPUT dictionary from target ticket into Component Title variable.' },
+				{ compType: 'get_tickets', label: localize('compGetTickets', 'Get Tickets'), icon: Codicon.search, accent: '#60a5fa', desc: 'GET_TICKETS built-in component. Queries workspace tickets by Type, Status, or Title into Component Title variable.' },
+				{ compType: 'display', label: localize('compDisplay', 'Display'), icon: Codicon.eye, accent: '#f472b6', desc: 'DISPLAY built-in component. Renders variable or value to Live Output panel.' },
+				{ compType: 'prompt', label: localize('compPrompt', 'AI Prompt'), icon: Codicon.sparkle, accent: '#2dd4bf', desc: 'AI Prompt execution component. Supports {Component Title} and {workflow_var} interpolation.' },
+				{ compType: 'table', label: localize('compTable', 'Data Table'), icon: Codicon.table, accent: '#fb923c', desc: 'SQLite Data Table & SQL query component. Stores query rows in Component Title variable.' },
+				{ compType: 'browser', label: localize('compBrowser', 'Browser'), icon: Codicon.globe, accent: '#38bdf8', desc: 'Headless Browser & Scraper component. Stores extracted content in Component Title variable.' },
+				{ compType: 'tts', label: localize('compTts', 'Audio / TTS'), icon: Codicon.unmute, accent: '#f87171', desc: 'Text-to-Speech synthesis component.' },
+				{ compType: 'media_player', label: localize('compMediaPlayer', 'MP3 / MP4 Player'), icon: Codicon.deviceCameraVideo, accent: '#f59e0b', desc: 'Local MP3 / MP4 & multi-format Audio/Video Player component with 0.25x-2.0x speed control.' },
+				{ compType: 'ssh', label: localize('compSsh', 'SSH Terminal'), icon: Codicon.terminal, accent: '#34d399', desc: 'SSH Remote Linux Terminal component (IP, Port, Account, Password, Quick Linux Commands & embedded terminal).' },
+				{ compType: 'http_request', label: localize('compHttpRequest', 'HTTP Request'), icon: Codicon.cloudUpload, accent: '#06b6d4', desc: 'Universal HTTP / REST API client. Supports GET, POST, PUT, PATCH, DELETE, Bearer/API-Key auth, params, headers, body, and structured JSON output.' },
+				{ compType: 'git', label: localize('compGit', 'Git Repo'), icon: Codicon.gitMerge, accent: '#a3e635', desc: 'Git repository operations component.' }
+			];
 
 		for (const itemDef of nodeComponentPalette) {
 			const fnItem = append(varGrid, $(`.workflow-toolbar-item.function-toolbar-item.node-component-palette-item${this._isToolbarCompact ? '.compact-item' : ''}`));
@@ -4242,12 +4307,24 @@ export class WorkflowEditor extends EditorPane {
 			const selectedNodes = Array.from(this._selectedNodeIds)
 				.map(id => this._data.nodes.find(n => n.id === id))
 				.filter((n): n is IFlowchartNode => !!n);
+			if (selectedNodes.length === 1) {
+				return {
+					entryNodeId: selectedNodes[0].id,
+					selectedNodeIds: undefined
+				};
+			}
 			const selectedActionNodes = selectedNodes.filter(n => this._isActionNodeForSelectiveRun(n));
-			if (selectedActionNodes.length > 0) {
+			if (selectedActionNodes.length >= 2) {
 				const selectedNodeIds = selectedActionNodes.map(n => n.id);
 				return {
 					entryNodeId: selectedNodeIds[0],
 					selectedNodeIds
+				};
+			}
+			if (selectedActionNodes.length === 1) {
+				return {
+					entryNodeId: selectedActionNodes[0].id,
+					selectedNodeIds: undefined
 				};
 			}
 		}
@@ -4257,9 +4334,10 @@ export class WorkflowEditor extends EditorPane {
 		};
 	}
 
-	private _updateRunButtonSelectionBadge(targetRunBtn?: HTMLElement): void {
+	private _updateRunButtonSelectionBadge(targetRunBtn?: HTMLElement, targetFullSpeedBtn?: HTMLElement): void {
 		const runBtn = targetRunBtn || (this._toolbarEl?.querySelector('[data-role="workflow-run-btn"]') as HTMLElement | null);
-		if (!runBtn) {
+		const fullSpeedBtn = targetFullSpeedBtn || (this._toolbarEl?.querySelector('[data-role="workflow-full-speed-run-btn"]') as HTMLElement | null);
+		if (!runBtn && !fullSpeedBtn) {
 			return;
 		}
 		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
@@ -4267,21 +4345,53 @@ export class WorkflowEditor extends EditorPane {
 		if (isRunning) {
 			return;
 		}
-		const selectedActionNodes = Array.from(this._selectedNodeIds)
+		const selectedNodes = Array.from(this._selectedNodeIds)
 			.map(id => this._data?.nodes?.find(n => n.id === id))
-			.filter((n): n is IFlowchartNode => !!n && this._isActionNodeForSelectiveRun(n));
-		const labelEl = runBtn.querySelector('.item-label') as HTMLElement | null;
-		if (selectedActionNodes.length > 0) {
-			if (labelEl) {
-				labelEl.textContent = `Run (${selectedActionNodes.length})`;
+			.filter((n): n is IFlowchartNode => !!n);
+		const selectedActionNodes = selectedNodes.filter(n => this._isActionNodeForSelectiveRun(n));
+		const runLabelEl = runBtn?.querySelector('.item-label') as HTMLElement | null;
+		const fullSpeedLabelEl = fullSpeedBtn?.querySelector('.item-label') as HTMLElement | null;
+		if (selectedNodes.length >= 2 && selectedActionNodes.length >= 2) {
+			if (runLabelEl) {
+				runLabelEl.textContent = `Run (${selectedActionNodes.length})`;
+			}
+			if (fullSpeedLabelEl) {
+				fullSpeedLabelEl.textContent = `Full Speed (${selectedActionNodes.length})`;
 			}
 			const names = selectedActionNodes.map((n, i) => `#${i + 1} ${n.label}`).join(' → ');
-			runBtn.title = `Run Selected Node(s) Only (${selectedActionNodes.length}): ${names}\n(Click empty canvas or 'Start' node to run entire workflow)`;
-		} else {
-			if (labelEl) {
-				labelEl.textContent = 'Run';
+			if (runBtn) {
+				runBtn.title = `Run Selected Nodes Only (${selectedActionNodes.length}): ${names}\n(Select 1 node to run from that node onward, or click empty canvas to run entire workflow)`;
 			}
-			runBtn.title = 'Run Entire Workflow (or Cmd/Ctrl/Shift + Click nodes to run only selected nodes)';
+			if (fullSpeedBtn) {
+				fullSpeedBtn.title = `Run Selected Nodes Only at Full Speed (${selectedActionNodes.length}): ${names}\n(Select 1 node to run from that node onward, or click empty canvas to run entire workflow)`;
+			}
+		} else if (selectedNodes.length === 1) {
+			const singleNode = selectedNodes[0];
+			if (runLabelEl) {
+				runLabelEl.textContent = 'Run';
+			}
+			if (fullSpeedLabelEl) {
+				fullSpeedLabelEl.textContent = 'Full Speed';
+			}
+			if (runBtn) {
+				runBtn.title = `Run Workflow From '${singleNode.label}' Onward (Continues executing remaining downstream flow)`;
+			}
+			if (fullSpeedBtn) {
+				fullSpeedBtn.title = `Run at Full Speed From '${singleNode.label}' Onward (Continues executing remaining downstream flow with minimal delay)`;
+			}
+		} else {
+			if (runLabelEl) {
+				runLabelEl.textContent = 'Run';
+			}
+			if (fullSpeedLabelEl) {
+				fullSpeedLabelEl.textContent = 'Full Speed';
+			}
+			if (runBtn) {
+				runBtn.title = 'Run Entire Workflow (Select 1 node to run from that node onward, or Cmd/Ctrl/Shift + Click multiple nodes to run only selected nodes)';
+			}
+			if (fullSpeedBtn) {
+				fullSpeedBtn.title = 'Run at Full Speed (Execute entire workflow with minimal waiting and delay)';
+			}
 		}
 	}
 
@@ -4432,6 +4542,7 @@ export class WorkflowEditor extends EditorPane {
 			browser: { label: 'BROWSER', icon: Codicon.globe, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.16)', border: 'rgba(56, 189, 248, 0.45)' },
 			tts: { label: 'O2 TTS', icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.45)' },
 			media_player: { label: 'MP3 / MP4 PLAYER', icon: Codicon.deviceCameraVideo, color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.45)' },
+			ssh: { label: 'SSH TERMINAL', icon: Codicon.terminal, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.45)' },
 			git: { label: 'GIT BRANCH', icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.45)' },
 			create_tickets: { label: 'CREATE TICKETS', icon: Codicon.add, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.45)' },
 			run_tickets: { label: 'RUN TICKETS', icon: Codicon.playCircle, color: '#a855f7', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(168, 85, 247, 0.45)' },
@@ -4495,6 +4606,19 @@ export class WorkflowEditor extends EditorPane {
 					metadataValue = (comp.mediaFileName || comp.mediaFilePath || '(no file selected)').trim();
 					break;
 				}
+				case 'ssh': {
+					metadataLabel = 'SSH Target';
+					const cmdsCount = normalizeSshCommandsList(comp.sshCommands, comp.sshCommand).filter(c => c.trim().length > 0).length;
+					metadataValue = comp.sshHost
+						? `${comp.sshUser || 'root'}@${comp.sshHost}:${comp.sshPort || 22}${cmdsCount > 0 ? ` (${cmdsCount} cmd${cmdsCount > 1 ? 's' : ''})` : ''}`
+						: '(no host configured)';
+					break;
+				}
+				case 'http_request': {
+					metadataLabel = 'API Endpoint';
+					metadataValue = comp.httpUrl ? `[${(comp.httpMethod || 'GET').toUpperCase()}] ${comp.httpUrl}` : '(no URL configured)';
+					break;
+				}
 				case 'git': {
 					metadataLabel = 'Default Git Remote URL';
 					metadataValue = (comp.gitRemoteUrl || '').trim();
@@ -4547,6 +4671,13 @@ export class WorkflowEditor extends EditorPane {
 			}, varName));
 		}
 
+		if (step.disabled) {
+			const disabledBadge = append(header, $('span.python-step-popover-disabled-badge', {
+				style: 'font-size: 9.5px; font-weight: 700; color: #94a3b8; padding: 1px 6px; border-radius: 3px; background: rgba(148, 163, 184, 0.16); border: 1px dashed rgba(148, 163, 184, 0.45); letter-spacing: 0.5px;'
+			}, 'COMMENTED OUT'));
+			disabledBadge.title = 'This step is commented out and will be skipped during workflow run';
+		}
+
 		const headerTitleText = comp
 			? (comp.type === 'table'
 				? ((comp.tableDbTableName || (comp as any).tableName || comp.label || '').trim() || 'Data Table')
@@ -4577,6 +4708,24 @@ export class WorkflowEditor extends EditorPane {
 				}, 1200);
 			};
 		}
+
+		const toggleCommentBtn = append(actionsWrap, $('button.python-step-popover-btn', {
+			style: step.disabled
+				? 'background: rgba(34, 197, 94, 0.16); border-color: rgba(34, 197, 94, 0.4); color: #4ade80;'
+				: 'background: rgba(148, 163, 184, 0.15); border-color: rgba(148, 163, 184, 0.4); color: #cbd5e1;'
+		}));
+		toggleCommentBtn.type = 'button';
+		toggleCommentBtn.title = step.disabled ? 'Re-enable this step (participate in execution)' : 'Comment out / disable this step (skip execution)';
+		append(toggleCommentBtn, $('span' + ThemeIcon.asCSSSelector(step.disabled ? Codicon.check : Codicon.circleSlash)));
+		append(toggleCommentBtn, $('span', {}, step.disabled ? 'Enable' : 'Disable'));
+		toggleCommentBtn.onclick = (e) => {
+			e.stopPropagation();
+			step.disabled = !step.disabled;
+			this._syncToNode(node, true);
+			this._saveFlowchartData();
+			this._renderNodes();
+			this._showPythonStepPopover(targetEl, node, step, stepIndex, fullCode, isVariableStep, runtimeValStr);
+		};
 
 		const editBtn = append(actionsWrap, $('button.python-step-popover-btn.primary'));
 		editBtn.type = 'button';
@@ -5588,7 +5737,7 @@ export class WorkflowEditor extends EditorPane {
 			for (let i = 0; i < node.pipeline.length; i++) {
 				const step = node.pipeline[i];
 				const isFailedStep = nodeRunState?.status === 'failed' && nodeRunState?.failedStepIndex === i;
-				const stepCard = append(stepsList, $('.pipeline-step-card' + (isFailedStep ? '.step-failed' : '')));
+				const stepCard = append(stepsList, $('.pipeline-step-card' + (isFailedStep ? '.step-failed' : '') + (step.disabled ? '.step-card-disabled' : '')));
 				stepCard.draggable = true;
 				stepCard.dataset.stepIndex = String(i);
 				stepCard.dataset.stepId = step.id;
@@ -5880,6 +6029,20 @@ export class WorkflowEditor extends EditorPane {
 						});
 					};
 				}
+
+				// Enable/Disable (Comment Out) Toggle Button
+				const toggleStepBtn = append(stepActions, $('.pipeline-icon-btn.pipeline-step-toggle-btn'));
+				append(toggleStepBtn, $('span' + ThemeIcon.asCSSSelector(step.disabled ? Codicon.circleSlash : Codicon.check)));
+				toggleStepBtn.title = step.disabled ? 'Step is commented out (disabled). Click to re-enable.' : 'Step is active. Click to comment out (disable).';
+				toggleStepBtn.style.color = step.disabled ? '#94a3b8' : '#4ade80';
+				toggleStepBtn.onclick = (e) => {
+					e.stopPropagation();
+					step.disabled = !step.disabled;
+					this._syncToNode(node, true);
+					this._saveFlowchartData();
+					this._renderNodes();
+					this._renderPipelinePanel(panel, node);
+				};
 
 				// Delete Step Button
 				const delBtn = append(stepActions, $('.pipeline-icon-btn'));
@@ -7503,6 +7666,9 @@ export class WorkflowEditor extends EditorPane {
 		const runtimeTooltip = rawFnRtStr ? `\n(Runtime Output: ${rawFnRtStr.length > 250 ? rawFnRtStr.substring(0, 250) + ' ...' : rawFnRtStr})` : '';
 
 		const fnPill = append(container, $('.node-function-pill'));
+		if (step.disabled) {
+			fnPill.classList.add('step-disabled');
+		}
 		const openStepEditor = () => {
 			if (step.component) {
 				this._openNodeComponentEditorModal(node, step);
@@ -7586,6 +7752,7 @@ export class WorkflowEditor extends EditorPane {
 			browser: { icon: Codicon.globe, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.16)', border: 'rgba(56, 189, 248, 0.5)', textColor: '#e0f2fe' },
 			tts: { icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.5)', textColor: '#fee2e2' },
 			media_player: { icon: Codicon.deviceCameraVideo, color: '#fbbf24', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.5)', textColor: '#fef3c7' },
+			ssh: { icon: Codicon.terminal, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.5)', textColor: '#d1fae5' },
 			git: { icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.5)', textColor: '#ecfccb' },
 			python: { icon: Codicon.python, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.14)', border: 'rgba(56, 189, 248, 0.45)', textColor: '#e0f2fe' }
 		};
@@ -7744,6 +7911,9 @@ export class WorkflowEditor extends EditorPane {
 			}
 		} else {
 			this._renderExpressionWithTicketBadges(pillContent, displayExpr, false);
+		}
+		if (step.disabled) {
+			fnPill.title = `[Commented Out / Disabled] ${displayExpr}\n(Skipped during workflow execution. Double-click to edit or re-enable)`;
 		}
 		void runtimeTooltip;
 
@@ -9032,6 +9202,66 @@ export class WorkflowEditor extends EditorPane {
 			});
 		};
 
+		// Step Execution Toggle: Enabled vs Commented Out (Disabled)
+		const initialDisabled = Boolean(existingStep?.disabled);
+		let isStepDisabled = initialDisabled;
+
+		const toggleBtn = append(headerRow, $('button.node-function-toggle-btn'));
+		toggleBtn.type = 'button';
+		toggleBtn.style.cursor = 'pointer';
+		toggleBtn.style.marginLeft = 'auto';
+		toggleBtn.style.marginRight = '6px';
+		toggleBtn.style.padding = '1px 8px';
+		toggleBtn.style.fontSize = '10px';
+		toggleBtn.style.borderRadius = '3px';
+		toggleBtn.style.display = 'inline-flex';
+		toggleBtn.style.alignItems = 'center';
+		toggleBtn.style.gap = '4px';
+		toggleBtn.style.userSelect = 'none';
+		toggleBtn.style.transition = 'all 0.15s ease';
+
+		const updateToggleBtnState = () => {
+			clearNode(toggleBtn);
+			if (isStepDisabled) {
+				toggleBtn.classList.remove('is-active-step');
+				toggleBtn.classList.add('is-disabled-step');
+				toggleBtn.style.background = 'rgba(148, 163, 184, 0.16)';
+				toggleBtn.style.border = '1px dashed rgba(148, 163, 184, 0.5)';
+				toggleBtn.style.color = '#94a3b8';
+				toggleBtn.title = localize('stepDisabledTip', 'Step is Commented Out (Disabled). It will be skipped during Workflow execution.\nClick to re-enable.');
+				append(toggleBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.circleSlash)));
+				append(toggleBtn, $('span', {}, localize('stepDisabledLabel', 'Commented Out')));
+				draftWrapper.classList.add('step-commented-out');
+			} else {
+				toggleBtn.classList.remove('is-disabled-step');
+				toggleBtn.classList.add('is-active-step');
+				toggleBtn.style.background = 'rgba(34, 197, 94, 0.16)';
+				toggleBtn.style.border = '1px solid rgba(34, 197, 94, 0.45)';
+				toggleBtn.style.color = '#4ade80';
+				toggleBtn.title = localize('stepEnabledTip', 'Step is Active (Enabled). It will execute normally during Workflow run.\nClick to comment out (disable).');
+				append(toggleBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.check)));
+				append(toggleBtn, $('span', {}, localize('stepEnabledLabel', 'Active')));
+				draftWrapper.classList.remove('step-commented-out');
+			}
+		};
+		updateToggleBtnState();
+
+		toggleBtn.onmousedown = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+		};
+		toggleBtn.onclick = (e) => {
+			e.stopPropagation();
+			isStepDisabled = !isStepDisabled;
+			if (existingStep) {
+				existingStep.disabled = isStepDisabled ? true : undefined;
+				this._syncToNode(node, true);
+				this._saveFlowchartData();
+				this._renderNodes();
+			}
+			updateToggleBtnState();
+		};
+
 		// Optional: Open referenced ticket in Editor Tab button
 		const candidateTicket = (node.imports || [])[0] || (node.pipeline || []).find(s => s.type === 'run_ticket' && s.ticketName);
 		if (candidateTicket) {
@@ -9041,7 +9271,7 @@ export class WorkflowEditor extends EditorPane {
 				const openTabBtn = append(headerRow, $('.node-function-open-tab-btn'));
 				openTabBtn.title = `Open Ticket '${ticketName}' in Editor Tab`;
 				openTabBtn.style.cursor = 'pointer';
-				openTabBtn.style.marginLeft = 'auto';
+				openTabBtn.style.marginLeft = '0';
 				openTabBtn.style.marginRight = '6px';
 				openTabBtn.style.padding = '1px 7px';
 				openTabBtn.style.fontSize = '10px';
@@ -9093,8 +9323,18 @@ export class WorkflowEditor extends EditorPane {
 			this._activeFunctionDraftInputEl = null;
 		};
 
+		const rollbackDisabledIfNeeded = () => {
+			if (existingStep && existingStep.disabled !== initialDisabled) {
+				existingStep.disabled = initialDisabled ? true : undefined;
+				this._syncToNode(node, true);
+				this._saveFlowchartData();
+				this._renderNodes();
+			}
+		};
+
 		cancelBtn.onclick = (e) => {
 			e.stopPropagation();
+			rollbackDisabledIfNeeded();
 			cleanup();
 		};
 
@@ -9804,6 +10044,7 @@ export class WorkflowEditor extends EditorPane {
 		const btnCancel = append(actionsDiv, $('button.node-function-btn.node-function-btn-cancel', {}, 'Cancel'));
 		btnCancel.onclick = (e) => {
 			e.stopPropagation();
+			rollbackDisabledIfNeeded();
 			cleanup();
 		};
 
@@ -9977,13 +10218,15 @@ export class WorkflowEditor extends EditorPane {
 				existingStep.expression = rawExpr;
 				existingStep.targetVariable = targetVar;
 				existingStep.functionName = fnName;
+				existingStep.disabled = isStepDisabled ? true : undefined;
 			} else {
 				const newStep: INodePipelineStep = {
 					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 					type: 'call_function',
 					targetVariable: targetVar,
 					functionName: fnName,
-					expression: rawExpr
+					expression: rawExpr,
+					disabled: isStepDisabled ? true : undefined
 				};
 				node.pipeline.push(newStep);
 			}
@@ -10082,6 +10325,7 @@ export class WorkflowEditor extends EditorPane {
 
 			if (e.key === 'Escape') {
 				e.preventDefault();
+				rollbackDisabledIfNeeded();
 				cleanup();
 			}
 		};
@@ -14526,7 +14770,7 @@ export class WorkflowEditor extends EditorPane {
 		if (!this._canvasViewport || !this._workflowUri) return;
 		const cards = this._workflowExecutionService.getDisplayCards(this._workflowUri);
 		if (cards && cards.length > 0) {
-			this._displayInspectorCards = [...cards];
+			this._displayInspectorCards = cards.slice(0, 30);
 		}
 
 		if (this._displayInspectorCards.length === 0) return;
@@ -14554,7 +14798,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		const existingDupIdx = this._displayInspectorCards.findIndex(
-			c => c.id === card.id
+			c => c.id === card.id || (c.runId === card.runId && c.nodeId === card.nodeId && c.expression === card.expression)
 		);
 		if (existingDupIdx !== -1) {
 			const removed = this._displayInspectorCards.splice(existingDupIdx, 1)[0];
@@ -14564,6 +14808,13 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 		this._displayInspectorCards.unshift(card);
+		while (this._displayInspectorCards.length > 30) {
+			const oldest = this._displayInspectorCards.pop();
+			if (oldest && this._displayInspectorCardsContainer) {
+				const oldestEl = this._displayInspectorCardsContainer.querySelector(`[data-card-id="${oldest.id}"]`);
+				oldestEl?.remove();
+			}
+		}
 
 		// Ensure panel exists and update card counter in the background,
 		// but respect user's minimized state — never force-expand when minimized!
@@ -14865,6 +15116,10 @@ export class WorkflowEditor extends EditorPane {
 				return `${varName} = ${title} (O2 TTS)`;
 			case 'media_player':
 				return `${varName} = ${comp.mediaFileName || title} (MP3 / MP4 Player)`;
+			case 'ssh':
+				return `${varName} = ${comp.sshHost ? `${comp.sshUser || 'root'}@${comp.sshHost}` : title} (SSH Terminal)`;
+			case 'http_request':
+				return `${varName} = [${comp.httpMethod || 'GET'}] ${comp.httpUrl || title} (HTTP Request)`;
 			case 'git':
 				return `${varName} = ${title} (Git Branch)`;
 			case 'python':
@@ -14986,6 +15241,8 @@ export class WorkflowEditor extends EditorPane {
 			browser: 'Web Scraper',
 			tts: 'Voice Output',
 			media_player: 'MP3 / MP4 Player',
+			ssh: 'SSH Terminal',
+			http_request: 'API Request',
 			git: 'Git Repo',
 			python: 'Python Script'
 		};
@@ -15024,6 +15281,25 @@ export class WorkflowEditor extends EditorPane {
 			tableRows: compType === 'table' ? [] : undefined,
 			tableDbEngine: compType === 'table' ? 'sqlite' : undefined,
 			tableAutoSyncDb: compType === 'table' ? false : undefined,
+			sshHost: compType === 'ssh' ? '' : undefined,
+			sshPort: compType === 'ssh' ? 22 : undefined,
+			sshUser: compType === 'ssh' ? 'root' : undefined,
+			sshPassword: compType === 'ssh' ? '' : undefined,
+			sshCwd: compType === 'ssh' ? '~' : undefined,
+			sshCommand: compType === 'ssh' ? 'pwd' : undefined,
+			sshCommands: compType === 'ssh' ? ['pwd'] : undefined,
+			sshOutput: compType === 'ssh' ? '' : undefined,
+			sshLastOutput: compType === 'ssh' ? '' : undefined,
+			sshOutputLines: compType === 'ssh' ? 50 : undefined,
+			sshQuickCommands: compType === 'ssh' ? SSH_DEFAULT_QUICK_COMMANDS.map(c => ({ ...c })) : undefined,
+			httpUrl: compType === 'http_request' ? 'https://aimery.link/api/tailored-resumes/JOB-41298374' : undefined,
+			httpMethod: compType === 'http_request' ? 'GET' : undefined,
+			httpAuthType: compType === 'http_request' ? 'none' : undefined,
+			httpBodyType: compType === 'http_request' ? 'none' : undefined,
+			httpBodyContent: compType === 'http_request' ? '' : undefined,
+			httpHeaders: compType === 'http_request' ? [{ key: 'Accept', value: 'application/json', enabled: true }] : undefined,
+			httpParams: compType === 'http_request' ? [] : undefined,
+			httpTimeoutMs: compType === 'http_request' ? 30000 : undefined,
 			wfTicketType: '',
 			wfTicketTitle: compType === 'create_tickets' ? 'New Ticket' : '',
 			wfTicketPath: compType === 'create_tickets' ? '.' : '',
