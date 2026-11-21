@@ -6,7 +6,7 @@
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
-import { IWorkflowEngineOptions, IWorkflowExecutionRun, IWorkflowLogEntry } from './workflowExecutionModel.js';
+import { IWorkflowEngineOptions, IWorkflowExecutionRun, IWorkflowIOContract, IWorkflowLogEntry } from './workflowExecutionModel.js';
 
 export const IWorkflowExecutionService = createDecorator<IWorkflowExecutionService>('workflowExecutionService');
 
@@ -31,6 +31,7 @@ export interface ITicketHandleInfo {
 
 export interface IWorkflowDisplayCard {
 	id: string;
+	workflowUri?: string;
 	runId?: string;
 	nodeId: string;
 	nodeTitle: string;
@@ -43,6 +44,9 @@ export interface IWorkflowDisplayCard {
 	ticketType?: string;
 	outputItems?: IWorkflowDisplayOutputItem[];
 	ticketHandle?: ITicketHandleInfo;
+	isTruncated?: boolean;
+	displayPreviewText?: string;
+	totalCount?: number;
 }
 
 export interface INotebookCellExecutionResult {
@@ -65,6 +69,8 @@ export interface IWorkflowExecutionService {
 	readonly onDidUpdateNodeComponents: Event<{ workflowUri: string; nodeId: string; node: any }>;
 
 	executeWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions): Promise<IWorkflowExecutionRun>;
+	resolveWorkflowIOContract(data: any): IWorkflowIOContract;
+	getWorkflowIOContract(workflowUri: URI | string): Promise<IWorkflowIOContract>;
 	stepWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions, runId?: string): Promise<IWorkflowExecutionRun>;
 	pauseWorkflow(runId: string): Promise<void>;
 	resumeWorkflow(runId: string, userInput?: any): Promise<void>;

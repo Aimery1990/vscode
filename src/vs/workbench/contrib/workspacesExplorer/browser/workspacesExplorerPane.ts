@@ -43,6 +43,7 @@ import { VIEW_ID } from '../../files/common/files.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { ICustomModule, IActionButton, resolveCustomModuleIcon, getDefaultCustomModuleColor } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
+import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 import { stringifyYaml, parseYaml } from '../../customModules/browser/customModulesService.js';
 
 function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
@@ -144,7 +145,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 	private renderVersion = 0;
 	private expandedWorkspaces = new Set<string>();
 	private nodeVisibleLimitMap = new Map<string, number>();
-	private _isAutoLoadingMore = false;
 	private hasInitializedExpansion = false;
 	private filterText = '';
 	private selectedWorkspaceId?: string;
@@ -472,7 +472,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 						for (const g of groups) {
 							await g.group.closeEditor(editorIdentifier);
 						}
-					} catch {}
+					} catch { }
 				}
 			}
 		}
@@ -516,7 +516,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const removedStatus = wsStatuses.removedStatus || 'Removed';
 				await this.workspacesExplorerService.setEntityStatus(item.uri, removedStatus);
 				updatedCount++;
-			} catch {}
+			} catch { }
 		}
 		this.selectedItemIds.clear();
 		this.notificationService.info(`Marked ${updatedCount} ticket(s) as Removed.`);
@@ -626,9 +626,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 								...(desired as any).__renderEntry,
 								rowEl: existing
 							};
-						}
-						if ((desired as any).__loadNextBatch) {
-							(existing as any).__loadNextBatch = (desired as any).__loadNextBatch;
 						}
 						if (liveParent.children[i] !== existing) {
 							liveParent.insertBefore(existing, liveParent.children[i] || null);
@@ -1018,39 +1015,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		if (this.renderVersion === currentVersion && this.treeBoxEl) {
 			this._reconcileDomChildren(this.treeBoxEl, treeBox);
-			const liveScrollContainers = this.treeBoxEl.querySelectorAll('.children-container');
-			for (let i = 0; i < liveScrollContainers.length; i++) {
-				const sc = liveScrollContainers[i] as HTMLElement;
-				if (!(sc as any).__hasScrollPaginationListener) {
-					(sc as any).__hasScrollPaginationListener = true;
-					sc.addEventListener('scroll', () => {
-						if (this._isAutoLoadingMore) {
-							return;
-						}
-						const loadMoreRows = sc.querySelectorAll('.load-more-children-row');
-						if (loadMoreRows.length === 0) {
-							return;
-						}
-						const scRect = sc.getBoundingClientRect();
-						for (let j = loadMoreRows.length - 1; j >= 0; j--) {
-							const row = loadMoreRows[j] as HTMLElement;
-							const fn = (row as any).__loadNextBatch as (() => void) | undefined;
-							if (!fn) {
-								continue;
-							}
-							const rowRect = row.getBoundingClientRect();
-							if (rowRect.top <= scRect.bottom + 60 && rowRect.bottom >= scRect.top) {
-								this._isAutoLoadingMore = true;
-								fn();
-								setTimeout(() => {
-									this._isAutoLoadingMore = false;
-								}, 180);
-								break;
-							}
-						}
-					}, { passive: true });
-				}
-			}
 			this.renderedOrder = [];
 			const liveRows = this.treeBoxEl.querySelectorAll('.child-item-row');
 			for (let i = 0; i < liveRows.length; i++) {
@@ -1091,7 +1055,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		if (children.length === 0) {
 			const isPlainFolder = !await this.fileService.exists(URI.joinPath(folderUri, '.agents', 'ticket.md')) &&
-			                      !await this.fileService.exists(URI.joinPath(folderUri, 'ticket.md'));
+				!await this.fileService.exists(URI.joinPath(folderUri, 'ticket.md'));
 			if (isPlainFolder) {
 				const emptyFolderEl = append(parentContainer, $('div', { style: `font-size: 11px; opacity: 0.4; padding: 4px 0 4px ${depth * 12}px;` }, '(Empty folder)'));
 				emptyFolderEl.setAttribute('data-sync-key', `empty:${folderUri.toString()}`);
@@ -1626,7 +1590,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				} else if (child.uri.path.toLowerCase().endsWith('.md')) {
 					const fileName = child.uri.path.split('/').pop() || '';
 					const parentUri = dirname(child.uri);
-					const isAgentMd = parentUri.path.endsWith('.agents') || ['instruction.md', 'readme.md', 'work_log.md', 'worklog.md', 'ticket.md', 'workspace.md'].includes(fileName.toLowerCase());
+					const isAgentMd = parentUri.path.endsWith('.agents') || ['instruction.md', 'readme.md', 'work_log.md', 'worklog.md', 'ticket.md', 'tickets.md', 'workspace.md'].includes(fileName.toLowerCase());
 					if (isAgentMd) {
 						let entityUri = parentUri;
 						if (parentUri.path.endsWith('.agents')) {
@@ -1694,7 +1658,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 				this.nodeVisibleLimitMap.set(parentCanonicalKey, currentLim + MainWorkspaceViewPane.LOAD_MORE_BATCH_SIZE);
 				this.renderContent();
 			};
-			(loadMoreRow as any).__loadNextBatch = loadNextBatch;
 
 			const loadMoreBtn = append(actionsWrap, $('button', {
 				style: 'padding: 2px 7px; font-size: 10px; border-radius: 3px; cursor: pointer; background: rgba(56, 189, 248, 0.16); border: 1px solid rgba(56, 189, 248, 0.38); color: #38bdf8; font-weight: 600;'
@@ -1702,6 +1665,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 			loadMoreBtn.title = `Load next ${nextStep} child items`;
 			loadMoreBtn.onclick = (e) => {
 				e.stopPropagation();
+				loadMoreBtn.disabled = true;
+				loadMoreBtn.textContent = 'Loading...';
 				loadNextBatch();
 			};
 
@@ -1712,6 +1677,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 				loadAllBtn.title = `Load all ${page.totalCount} child items`;
 				loadAllBtn.onclick = (e) => {
 					e.stopPropagation();
+					loadAllBtn.disabled = true;
+					loadAllBtn.textContent = 'Loading...';
 					this.nodeVisibleLimitMap.set(parentCanonicalKey, page.totalCount + 1000);
 					this.renderContent();
 				};
@@ -2187,7 +2154,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				for (const ag of availableAgents) {
 					append(agentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.role || 'Agent'})`));
 				}
-			}).catch(() => {});
+			}).catch(() => { });
 		}
 
 		// Link To Multi-Select Section
@@ -2523,7 +2490,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 								branchName = headContent.replace('ref: refs/heads/', '').trim();
 							}
 						}
-					} catch {}
+					} catch { }
 
 					try {
 						const configUri = URI.joinPath(foundGitUri, 'config');
@@ -2534,7 +2501,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 								gitConfigRemote = match[1].trim();
 							}
 						}
-					} catch {}
+					} catch { }
 				}
 
 				const desiredBranch = targetBranch || branchName;
@@ -3246,7 +3213,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 								branchName = headContent.replace('ref: refs/heads/', '').trim();
 							}
 						}
-					} catch {}
+					} catch { }
 
 					try {
 						const configUri = URI.joinPath(foundGitUri, 'config');
@@ -3257,7 +3224,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 								gitConfigRemote = match[1].trim();
 							}
 						}
-					} catch {}
+					} catch { }
 				}
 
 				const desiredBranch = targetBranch || branchName;
@@ -3529,7 +3496,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 					promptInput.value = baseAgent.systemPrompt || '';
 				}
-			} catch {}
+			} catch { }
 		};
 
 		// Priority Selection Box (5 Levels)
@@ -3998,7 +3965,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					}
 					const fieldGroup = append(customFieldsBox, $('.form-group', { style: 'display: flex; flex-direction: column; gap: 6px; margin-bottom: 4px;' }));
 					append(fieldGroup, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; font-weight: 600;' }, `${field.label}:`));
-					
+
 					if (field.type === 'textarea') {
 						append(fieldGroup, $('textarea.monaco-inputbox.custom-field-input', {
 							'data-field-id': field.id,
@@ -4126,7 +4093,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 								for (const subF of subFieldsList) {
 									const subRow = append(subGrid, $('.subfield-row', { style: 'display: flex; flex-direction: column; gap: 3px;' }));
 									append(subRow, $('label', { style: 'font-size: 10.5px; opacity: 0.75; font-weight: 500;' }, `${subF.label}:`));
-									
+
 									if (subF.type === 'textarea') {
 										append(subRow, $('textarea.monaco-inputbox.sub-field-input', {
 											'data-subfield-id': subF.id,
@@ -4646,14 +4613,25 @@ export class MainWorkspaceViewPane extends ViewPane {
 						}));
 						const pyTextarea = append(pyBox, $('textarea.monaco-inputbox.python-code-input', {
 							placeholder: '# Python source code...',
-							rows: 3,
+							rows: 4,
 							style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.4;'
 						})) as HTMLTextAreaElement;
-						pyTextarea.value = field.defaultContent || '';
+						const initialPyCode = (field as any).pythonCode || (field as any).code || field.defaultContent || '';
+						pyTextarea.value = initialPyCode;
+						pyTextarea.onkeydown = (e) => {
+							if (isCommentKeybinding(e)) {
+								e.preventDefault();
+								e.stopPropagation();
+								togglePythonComment(pyTextarea);
+							}
+						};
 						(pyBox as any).__getPythonData = () => ({
-							code: pyTextarea.value,
-							pythonInterpreter: field.pythonInterpreter || '',
-							externalScripts: field.externalScripts || [],
+							code: pyTextarea.value || initialPyCode,
+							pythonPath: (field as any).pythonPath || '',
+							pythonInterpreter: field.pythonInterpreter || (field as any).pythonPath || '',
+							pythonEnvMode: (field as any).pythonEnvMode || 'existing',
+							pythonLocked: Boolean((field as any).pythonLocked),
+							externalScripts: Array.isArray(field.externalScripts) ? field.externalScripts : (Array.isArray((field as any).pythonExternalScripts) ? (field as any).pythonExternalScripts : []),
 							output: '',
 							logs: '',
 							lastExecuted: ''
@@ -4705,7 +4683,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 							(paramBox as any).__getParametersData = () => {
 								const obj: Record<string, any> = {};
 								for (const [k, inp] of Object.entries(paramInputsMap)) {
-									obj[k] = inp.value;
+									const raw = inp.value;
+									const defVal = paramsList.find(p => (p.name || p.id) === k)?.defaultValue;
+									const isNonEmpty = raw !== undefined && raw !== null && String(raw).trim() !== '';
+									obj[k] = isNonEmpty ? raw : (defVal !== undefined && defVal !== null && String(defVal).trim() !== '' ? defVal : raw);
 								}
 								return obj;
 							};
@@ -4784,7 +4765,154 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const agentModelOpt: any = undefined;
 
 				let initialStatusOverride = '';
+				const customModules = await this._getCustomModules(targetUri);
+				const matchingModule = customModules.find((m: ICustomModule) => m.id === selectedType || m.name?.toLowerCase() === selectedType.toLowerCase());
+
 				const customMetadata: { [key: string]: string } = {};
+
+				// 1. Pre-populate full template defaults for ALL schema components so no component configuration or code is ever lost
+				if (matchingModule && Array.isArray(matchingModule.fields)) {
+					for (const f of matchingModule.fields) {
+						const fKey = f.label || f.id;
+						if (!fKey || f.id === 'title' || f.label?.toLowerCase() === 'title' || f.id === 'description' || f.label?.toLowerCase() === 'description') {
+							continue;
+						}
+						if (f.type === 'parameters' && Array.isArray(f.parameters)) {
+							const paramObj: Record<string, any> = {};
+							for (const p of f.parameters) {
+								const pKey = p.name || p.id;
+								if (pKey) paramObj[pKey] = (p.defaultValue !== undefined && p.defaultValue !== null && String(p.defaultValue).trim() !== '') ? p.defaultValue : '';
+							}
+							customMetadata[fKey] = JSON.stringify(paramObj);
+						} else if (f.type === 'python') {
+							const codeVal = (f as any).pythonCode || (f as any).code || f.defaultContent || '';
+							customMetadata[fKey] = JSON.stringify({
+								code: String(codeVal),
+								pythonPath: (f as any).pythonPath || '',
+								pythonInterpreter: f.pythonInterpreter || (f as any).pythonPath || '',
+								pythonEnvMode: (f as any).pythonEnvMode || 'existing',
+								pythonLocked: Boolean((f as any).pythonLocked),
+								externalScripts: Array.isArray(f.externalScripts) ? f.externalScripts : (Array.isArray((f as any).pythonExternalScripts) ? (f as any).pythonExternalScripts : []),
+								output: '',
+								logs: '',
+								lastExecuted: ''
+							});
+						} else if (f.type === 'http_request') {
+							customMetadata[fKey] = JSON.stringify({
+								method: (f as any).httpMethod || 'GET',
+								url: (f as any).httpUrl || '',
+								params: Array.isArray((f as any).httpParams) ? (f as any).httpParams : [],
+								headers: Array.isArray((f as any).httpHeaders) ? (f as any).httpHeaders : [],
+								authType: (f as any).httpAuthType || 'none',
+								authToken: (f as any).httpAuthToken || '',
+								apiKeyName: (f as any).httpApiKeyName || '',
+								apiKeyValue: (f as any).httpApiKeyValue || '',
+								apiKeyLocation: (f as any).httpApiKeyLocation || 'header',
+								authUsername: (f as any).httpAuthUsername || '',
+								authPassword: (f as any).httpAuthPassword || '',
+								bodyType: (f as any).httpBodyType || 'none',
+								bodyContent: (f as any).httpBodyContent || '',
+								timeoutMs: (f as any).httpTimeoutMs || 30000,
+								outputVariableName: (f as any).outputVariableName || '',
+								previousLabels: (f as any).previousLabels || [],
+								responseStatus: (f as any).httpResponseStatus || 0,
+								responseStatusText: (f as any).httpResponseStatusText || '',
+								responseHeaders: (f as any).httpResponseHeaders || {},
+								responseData: (f as any).httpResponseData,
+								responseBody: (f as any).httpResponseBody || '',
+								lastExecutionTime: (f as any).httpLastExecutionTime || '',
+								lastDurationMs: (f as any).httpLastDurationMs || 0
+							});
+						} else if (f.type === 'table') {
+							customMetadata[fKey] = JSON.stringify({
+								columns: Array.isArray((f as any).tableColumns) ? (f as any).tableColumns : [],
+								rows: Array.isArray((f as any).tableRows) ? (f as any).tableRows : [],
+								dbEngine: (f as any).tableDbEngine || 'sqlite',
+								dbPath: (f as any).tableDbPath || '',
+								tableName: (f as any).tableDbTableName || fKey.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+								autoSyncDb: Boolean((f as any).tableAutoSyncDb),
+								sqlQuery: (f as any).tableSqlQuery || '',
+								sqlOutput: (f as any).debugSqlOutput || ''
+							});
+						} else if (f.type === 'browser') {
+							customMetadata[fKey] = JSON.stringify({
+								url: f.defaultUrl || '',
+								credentials: Array.isArray(f.credentials) ? f.credentials : [],
+								content: f.defaultContent || '',
+								lastFetched: ''
+							});
+						} else if (f.type === 'prompt') {
+							customMetadata[fKey] = JSON.stringify({
+								targetMode: f.targetMode || 'model',
+								targetProvider: f.targetProvider || 'gemini',
+								targetModel: f.targetModel || 'gemini-1.5-flash',
+								targetCredentialId: f.targetCredentialId || '',
+								targetAgentId: f.targetAgentId || '',
+								targetAgentName: f.targetAgentName || '',
+								preInjectedPrompt: f.defaultContent || '',
+								promptPreInjectedVisible: !!f.promptPreInjectedVisible,
+								userPrompt: f.defaultUserPrompt || '',
+								userPrompts: Array.isArray(f.defaultUserPrompts) ? f.defaultUserPrompts : (f.defaultUserPrompt ? [f.defaultUserPrompt] : []),
+								prompt: f.defaultUserPrompt || f.defaultContent || '',
+								output: '',
+								lastExecuted: ''
+							});
+						} else if (f.type === 'tts') {
+							customMetadata[fKey] = JSON.stringify({
+								text: f.defaultContent || '',
+								displayText: f.ttsDisplayText || '',
+								ttsShowSpeechTextInTicket: !!f.ttsShowSpeechTextInTicket,
+								targetProvider: f.targetProvider || 'gemini',
+								targetModel: f.targetModel || 'gemini-2.5-flash-preview-tts',
+								targetCredentialId: f.targetCredentialId || '',
+								ttsFormat: f.ttsFormat || 'mp3',
+								ttsVoice: f.ttsVoice || 'Kore',
+								ttsAutoPlay: !!f.ttsAutoPlay
+							});
+						} else if (f.type === 'media_player') {
+							customMetadata[fKey] = JSON.stringify({
+								mediaFilePath: (f as any).mediaFilePath || '',
+								mediaFileName: (f as any).mediaFileName || '',
+								mediaKind: (f as any).mediaKind || 'audio',
+								mediaMimeType: (f as any).mediaMimeType || '',
+								mediaPlaybackRate: typeof (f as any).mediaPlaybackRate === 'number' ? (f as any).mediaPlaybackRate : 1.0,
+								mediaAutoPlay: !!(f as any).mediaAutoPlay
+							});
+						} else if (f.type === 'voice_note') {
+							const clips = Array.isArray((f as any).voiceClips) ? (f as any).voiceClips : [];
+							customMetadata[fKey] = JSON.stringify({
+								voiceClips: clips,
+								voiceTranscript: (f as any).voiceTranscript || clips.map((c: any) => (c?.transcript || '').trim()).filter(Boolean).join('\n\n'),
+								voiceAutoTranscribe: (f as any).voiceAutoTranscribe !== false,
+								voicePlaybackRate: typeof (f as any).voicePlaybackRate === 'number' ? (f as any).voicePlaybackRate : 1.0
+							});
+						} else if (f.type === 'ssh') {
+							const outLines = typeof (f as any).sshOutputLines === 'number' && (f as any).sshOutputLines > 0 ? (f as any).sshOutputLines : 50;
+							const initCmds = normalizeSshCommandsList((f as any).sshCommands, (f as any).sshCommand || f.defaultContent || '');
+							customMetadata[fKey] = JSON.stringify({
+								host: (f as any).sshHost || '',
+								port: typeof (f as any).sshPort === 'number' ? (f as any).sshPort : 22,
+								user: (f as any).sshUser || 'root',
+								password: (f as any).sshPassword || '',
+								cwd: (f as any).sshCwd || '~',
+								command: initCmds[0] || '',
+								commands: initCmds,
+								sshCommands: initCmds,
+								output: '',
+								lastRawOutput: '',
+								lastRawEntries: [],
+								lastNOutput: '',
+								outputLines: outLines,
+								quickCommands: normalizeSshQuickCommands((f as any).sshQuickCommands),
+								lastExecuted: ''
+							});
+						} else if (f.defaultContent !== undefined && f.defaultContent !== '') {
+							customMetadata[fKey] = String(f.defaultContent);
+						}
+					}
+				}
+
+				// 2. Apply interactive overrides from dialog input controls
 				const allPendingFieldAttachments: Array<{ name: string; size: number; dataUrl?: string }> = [];
 				const customInputs = modalBody.querySelectorAll('.custom-field-input');
 				customInputs.forEach(inputEl => {
@@ -4798,7 +4926,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 						} else if (inputEl.classList.contains('range-container')) {
 							const startVal = (inputEl.querySelector('.range-start') as HTMLInputElement)?.value || '';
 							const endVal = (inputEl.querySelector('.range-end') as HTMLInputElement)?.value || '';
-							customMetadata[fieldLabel] = (startVal || endVal) ? `${startVal} ~ ${endVal}` : '';
+							if (startVal || endVal) {
+								customMetadata[fieldLabel] = `${startVal} ~ ${endVal}`;
+							}
 						} else if (inputEl.classList.contains('dynamic-list-container')) {
 							const itemCards = inputEl.querySelectorAll('.dynamic-item-card');
 							const items: any[] = [];
@@ -4825,18 +4955,24 @@ export class MainWorkspaceViewPane extends ViewPane {
 								});
 								items.push(itemObj);
 							});
-							customMetadata[fieldLabel] = JSON.stringify(items);
+							if (items.length > 0) {
+								customMetadata[fieldLabel] = JSON.stringify(items);
+							}
 						} else if (inputEl.classList.contains('attachment-field-container')) {
 							const getFiles = (inputEl as any).__getAttachedFiles;
 							const filesList: Array<{ name: string; size: number; dataUrl?: string }> = getFiles ? getFiles() : [];
-							customMetadata[fieldLabel] = filesList.length > 0 ? JSON.stringify(filesList.map(f => ({ name: f.name, size: f.size }))) : '';
-							filesList.forEach(f => {
-								allPendingFieldAttachments.push(f);
-							});
+							if (filesList.length > 0) {
+								customMetadata[fieldLabel] = JSON.stringify(filesList.map(f => ({ name: f.name, size: f.size })));
+								filesList.forEach(f => {
+									allPendingFieldAttachments.push(f);
+								});
+							}
 						} else if (inputEl.classList.contains('action-buttons-group-row')) {
 							const getAction = (inputEl as any).__getSelectedAction;
 							const chosenAction = getAction ? getAction() : '';
-							customMetadata[fieldLabel] = chosenAction;
+							if (chosenAction) {
+								customMetadata[fieldLabel] = chosenAction;
+							}
 							const getTargetStatus = (inputEl as any).__getSelectedTargetStatus;
 							const targetSt = getTargetStatus ? getTargetStatus() : '';
 							if (targetSt) {
@@ -4844,32 +4980,42 @@ export class MainWorkspaceViewPane extends ViewPane {
 							}
 						} else if (inputEl.classList.contains('browser-field-container')) {
 							const getBData = (inputEl as any).__getBrowserData;
-							const bData = getBData ? getBData() : { url: '', credentials: [] };
-							customMetadata[fieldLabel] = JSON.stringify(bData);
+							const bData = getBData ? getBData() : undefined;
+							if (bData && (bData.url || (bData.credentials && bData.credentials.length > 0))) {
+								customMetadata[fieldLabel] = JSON.stringify(bData);
+							}
 						} else if (inputEl.classList.contains('prompt-field-container')) {
 							const getPData = (inputEl as any).__getPromptData;
-							const pData = getPData ? getPData() : { prompt: '', targetMode: 'model' };
-							customMetadata[fieldLabel] = JSON.stringify(pData);
+							const pData = getPData ? getPData() : undefined;
+							if (pData) {
+								customMetadata[fieldLabel] = JSON.stringify(pData);
+							}
 						} else if (inputEl.classList.contains('tts-field-container')) {
 							const getTData = (inputEl as any).__getTtsData;
-							const tData = getTData ? getTData() : { text: '', ttsFormat: 'mp3' };
-							customMetadata[fieldLabel] = JSON.stringify(tData);
+							const tData = getTData ? getTData() : undefined;
+							if (tData) {
+								customMetadata[fieldLabel] = JSON.stringify(tData);
+							}
 						} else if (inputEl.classList.contains('python-field-container')) {
 							const getPyData = (inputEl as any).__getPythonData;
-							const pyData = getPyData ? getPyData() : { code: '', pythonInterpreter: '' };
-							customMetadata[fieldLabel] = JSON.stringify(pyData);
+							const pyData = getPyData ? getPyData() : undefined;
+							if (pyData && pyData.code && pyData.code.trim()) {
+								customMetadata[fieldLabel] = JSON.stringify(pyData);
+							}
 						} else if (inputEl.classList.contains('parameters-field-container')) {
 							const getParamsData = (inputEl as any).__getParametersData;
-							const paramsData = getParamsData ? getParamsData() : {};
-							customMetadata[fieldLabel] = JSON.stringify(paramsData);
+							const paramsData = getParamsData ? getParamsData() : undefined;
+							if (paramsData && Object.keys(paramsData).length > 0) {
+								customMetadata[fieldLabel] = JSON.stringify(paramsData);
+							}
 						} else {
-							customMetadata[fieldLabel] = (inputEl as any).value || '';
+							const rawVal = (inputEl as any).value;
+							if (rawVal !== undefined && String(rawVal).trim() !== '') {
+								customMetadata[fieldLabel] = String(rawVal);
+							}
 						}
 					}
 				});
-
-				const customModules = await this._getCustomModules(targetUri);
-				const matchingModule = customModules.find((m: ICustomModule) => m.id === selectedType);
 
 				if (matchingModule) {
 					// 1. Resolve workspace root URI
@@ -4897,96 +5043,96 @@ export class MainWorkspaceViewPane extends ViewPane {
 				const isSubEntity = wsRootUri.path !== targetUri.path;
 
 				const createResult = await this.workspacesExplorerService.createResourceUnderWorkspace({
-						workspaceUri: wsRootUri,
-						targetParentUri: isSubEntity ? targetUri : undefined,
-						type: selectedType,
-						name,
-						title: titleInput.value.trim() || undefined,
-						code: codeInput.value.trim() || undefined,
-						status: initialStatus,
-						priority: selectedPriority,
-						assignedAgentId,
-						assignedAgentName,
-						agentRulePrompt: ruleInput.value.trim() || undefined,
-						ticketPrompt: ruleInput.value.trim() || undefined,
-						description: descInput.value.trim() || undefined,
-						typeDefinition: (typeDefInput.value.trim() && typeDefInput.value.trim() !== 'Built-in (System)' && typeDefInput.value.trim() !== 'None') ? typeDefInput.value.trim() : undefined,
-						typePrompt: typePromptInput.value.trim() || undefined,
-						linkTo: selectedLinkTickets.length > 0 ? selectedLinkTickets.join(', ') : undefined,
-						attachments: undefined,
-						agentModel: agentModelOpt,
-						agentSystemPrompt: selectedType === 'agent' ? promptInput.value.trim() : undefined,
-						gitRepoUrl: gitRepoUrl || undefined,
-						gitBranch: gitBranchInput.value.trim() || undefined,
-						customMetadata
-					});
+					workspaceUri: wsRootUri,
+					targetParentUri: isSubEntity ? targetUri : undefined,
+					type: selectedType,
+					name,
+					title: titleInput.value.trim() || undefined,
+					code: codeInput.value.trim() || undefined,
+					status: initialStatus,
+					priority: selectedPriority,
+					assignedAgentId,
+					assignedAgentName,
+					agentRulePrompt: ruleInput.value.trim() || undefined,
+					ticketPrompt: ruleInput.value.trim() || undefined,
+					description: descInput.value.trim() || undefined,
+					typeDefinition: (typeDefInput.value.trim() && typeDefInput.value.trim() !== 'Built-in (System)' && typeDefInput.value.trim() !== 'None') ? typeDefInput.value.trim() : undefined,
+					typePrompt: typePromptInput.value.trim() || undefined,
+					linkTo: selectedLinkTickets.length > 0 ? selectedLinkTickets.join(', ') : undefined,
+					attachments: undefined,
+					agentModel: agentModelOpt,
+					agentSystemPrompt: selectedType === 'agent' ? promptInput.value.trim() : undefined,
+					gitRepoUrl: gitRepoUrl || undefined,
+					gitBranch: gitBranchInput.value.trim() || undefined,
+					customMetadata
+				});
 
-					const createdUri = createResult.uri;
+				const createdUri = createResult.uri;
 
-					removeOverlay();
-					if (createResult.alreadyExists) {
-						this.notificationService.info(`'${name}' already exists in ${targetName}. Opened existing ${selectedType} files.`);
-					} else {
-						this.notificationService.info(`Created ${selectedType} '${name}' standard files in ${targetName}`);
-					}
+				removeOverlay();
+				if (createResult.alreadyExists) {
+					this.notificationService.info(`'${name}' already exists in ${targetName}. Opened existing ${selectedType} files.`);
+				} else {
+					this.notificationService.info(`Created ${selectedType} '${name}' standard files in ${targetName}`);
+				}
 
-					const canonicalParentId = this.getCanonicalId(targetUri);
-					const createdFolderUri = dirname(createdUri);
-					const canonicalCreatedId = this.getCanonicalId(createdFolderUri);
+				const canonicalParentId = this.getCanonicalId(targetUri);
+				const createdFolderUri = dirname(createdUri);
+				const canonicalCreatedId = this.getCanonicalId(createdFolderUri);
 
-					this.expandedWorkspaces.add(canonicalParentId);
-					this.expandedWorkspaces.add(canonicalCreatedId);
-					this.selectedItemId = canonicalCreatedId;
+				this.expandedWorkspaces.add(canonicalParentId);
+				this.expandedWorkspaces.add(canonicalCreatedId);
+				this.selectedItemId = canonicalCreatedId;
 
-					if (allPendingFieldAttachments.length > 0) {
-						try {
-							const attachmentsDir = URI.joinPath(createdFolderUri, 'attachments');
-							if (!(await this.fileService.exists(attachmentsDir))) {
-								await this.fileService.createFolder(attachmentsDir);
-							}
-							for (const pFile of allPendingFieldAttachments) {
-								if (pFile.dataUrl) {
-									const base64Data = pFile.dataUrl.split(',')[1] || '';
-									if (base64Data) {
-										const binaryString = atob(base64Data);
-										const bytes = new Uint8Array(binaryString.length);
-										for (let i = 0; i < binaryString.length; i++) {
-											bytes[i] = binaryString.charCodeAt(i);
-										}
-										const buf = VSBuffer.wrap(bytes);
-										const targetFileUri = URI.joinPath(attachmentsDir, pFile.name);
-										await this.fileService.writeFile(targetFileUri, buf);
+				if (allPendingFieldAttachments.length > 0) {
+					try {
+						const attachmentsDir = URI.joinPath(createdFolderUri, 'attachments');
+						if (!(await this.fileService.exists(attachmentsDir))) {
+							await this.fileService.createFolder(attachmentsDir);
+						}
+						for (const pFile of allPendingFieldAttachments) {
+							if (pFile.dataUrl) {
+								const base64Data = pFile.dataUrl.split(',')[1] || '';
+								if (base64Data) {
+									const binaryString = atob(base64Data);
+									const bytes = new Uint8Array(binaryString.length);
+									for (let i = 0; i < binaryString.length; i++) {
+										bytes[i] = binaryString.charCodeAt(i);
 									}
+									const buf = VSBuffer.wrap(bytes);
+									const targetFileUri = URI.joinPath(attachmentsDir, pFile.name);
+									await this.fileService.writeFile(targetFileUri, buf);
 								}
 							}
-						} catch (attErr) {
-							console.warn('Failed to save some field attachments:', attErr);
 						}
+					} catch (attErr) {
+						console.warn('Failed to save some field attachments:', attErr);
 					}
-
-					const isCustomEntity = selectedType !== 'file' && selectedType !== 'folder';
-					if (isCustomEntity) {
-						if (selectedType === 'workflow') {
-							await this.editorService.openEditor(new WorkflowEditorInput(createdUri, name), { pinned: true });
-						} else {
-							await this.editorService.openEditor(new EntityDetailEditorInput(createdUri, name), { pinned: true });
-						}
-					} else if (createdUri.path.toLowerCase().endsWith('.md')) {
-						await this.commandService.executeCommand('markdown.showPreview', createdUri);
-					} else {
-						await this.openerService.open(createdUri);
-					}
-					await this.renderContent();
-
-					if (onSuccess) {
-						onSuccess(selectedType, name);
-					}
-				} catch (err: any) {
-					btn.disabled = false;
-					btn.style.opacity = '1';
-					btn.innerHTML = originalBtnHtml;
-					this.notificationService.error(`Failed to create entity: ${err?.message || err}`);
 				}
+
+				const isCustomEntity = selectedType !== 'file' && selectedType !== 'folder';
+				if (isCustomEntity) {
+					if (selectedType === 'workflow') {
+						await this.editorService.openEditor(new WorkflowEditorInput(createdUri, name), { pinned: true });
+					} else {
+						await this.editorService.openEditor(new EntityDetailEditorInput(createdUri, name), { pinned: true });
+					}
+				} else if (createdUri.path.toLowerCase().endsWith('.md')) {
+					await this.commandService.executeCommand('markdown.showPreview', createdUri);
+				} else {
+					await this.openerService.open(createdUri);
+				}
+				await this.renderContent();
+
+				if (onSuccess) {
+					onSuccess(selectedType, name);
+				}
+			} catch (err: any) {
+				btn.disabled = false;
+				btn.style.opacity = '1';
+				btn.innerHTML = originalBtnHtml;
+				this.notificationService.error(`Failed to create entity: ${err?.message || err}`);
+			}
 		};
 	}
 

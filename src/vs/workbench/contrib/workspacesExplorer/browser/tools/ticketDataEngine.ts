@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { URI } from '../../../../../base/common/uri.js';
+import { dirname } from '../../../../../base/common/resources.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
 import { IWorkspacesExplorerService } from '../../common/workspacesExplorer.js';
@@ -11,6 +12,7 @@ import { IAgentsManagerService } from '../../../agentsManager/common/agentsManag
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { ITicketWorkflowRuntimeService } from '../../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { parse as parseYaml } from '../../../../../base/common/yaml.js';
+import { TicketWorklogStorage } from '../ticketWorklogStorage.js';
 
 export interface IWorklogRecord {
 	user_request: string;
@@ -1469,44 +1471,21 @@ export class TicketDataEngine {
 	}
 
 	/**
-	 * Append standard worklog record into worklog.md
+	 * Append standard worklog record into independent Worklogs storage and update worklog.md summary
 	 */
 	public async appendWorklog(worklogUri: URI, record: IWorklogRecord): Promise<void> {
 		try {
-			const fullLogDateTime = this._getFormattedDateTimeWithSecondsAndTz();
-			let content = '';
-			if (await this.fileService.exists(worklogUri)) {
-				content = (await this.fileService.readFile(worklogUri)).value.toString();
-			} else {
-				content = `# Work Log\n\n---\n\n`;
-			}
-
-			let entry = `\n---\n\n## ${fullLogDateTime}\n\n`;
-			entry += `- **Update Datetime**: ${fullLogDateTime}\n`;
-			entry += `- **Update By**: AI Agent\n\n`;
-			entry += `### User Request\n${record.user_request}\n\n`;
-			entry += `### Update Summary\n${record.update_summary}\n\n`;
-			entry += `### Update Details\n${record.update_details}\n\n`;
-			entry += `### Update Conclusion\n${record.update_conclusion}\n\n`;
-			entry += `### Commit\n`;
-			if (record.commit && record.commit.commit_id && record.commit.commit_id !== 'None') {
-				entry += `- **Repo**: ${record.commit.repo || 'None'}\n`;
-				entry += `- **Branch**: ${record.commit.branch || 'None'}\n`;
-				entry += `- **ID**: ${record.commit.commit_id}\n`;
-				entry += `- **comment**: ${record.commit.comment || 'None'}\n`;
-				entry += `- **committed by**: ${record.commit.committed_by || 'None'}\n`;
-			} else {
-				entry += `- **Repo**: None\n`;
-				entry += `- **Branch**: None\n`;
-				entry += `- **ID**: None\n`;
-				entry += `- **comment**: None\n`;
-				entry += `- **committed by**: None\n`;
-			}
-
-			content += entry;
-			await this.fileService.writeFile(worklogUri, VSBuffer.fromString(content));
+			const storage = new TicketWorklogStorage(this.fileService);
+			await storage.saveWorklog(dirname(worklogUri), {
+				user_request: record.user_request,
+				update_summary: record.update_summary,
+				update_details: record.update_details,
+				update_conclusion: record.update_conclusion,
+				commit: record.commit,
+				update_by: 'AI Agent'
+			});
 		} catch (err) {
-			console.error('Failed to append worklog:', err);
+			console.error('Failed to append worklog via TicketWorklogStorage:', err);
 		}
 	}
 

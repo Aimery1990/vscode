@@ -64,6 +64,7 @@ const VALID_FIELD_TYPES: Set<CustomFieldType> = new Set([
 	'python',
 	'tts',
 	'media_player',
+	'voice_note',
 	'table',
 	'ssh',
 	'http_request'
@@ -132,6 +133,22 @@ const BASE_PRIMITIVES_CATALOG = [
 			mediaFilePath: '',
 			mediaFileName: '',
 			mediaPlaybackRate: 1.0
+		}
+	},
+	{
+		type: 'voice_note',
+		label: 'Voice Note (Audio Recorder & Transcript)',
+		description: 'Records voice clips via microphone with automatic Speech-to-Text transcription and editable text. Automatically surfaces a top-right speaker playback icon when placed in a Workflow Flowchart Node.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'voice_note_1',
+			label: 'Voice Note',
+			type: 'voice_note',
+			voiceClips: [],
+			voiceTranscript: '',
+			voiceAutoTranscribe: true,
+			voicePlaybackRate: 1.0
 		}
 	},
 	{
@@ -584,6 +601,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 										'python',
 										'tts',
 										'media_player',
+										'voice_note',
 										'table',
 										'output'
 									],

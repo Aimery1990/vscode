@@ -6,7 +6,8 @@
 import './media/workflowEditor.css';
 import { $, append, clearNode, h, addDisposableListener } from '../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
-import { DisposableStore } from '../../../../base/common/lifecycle.js';
+import { DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
+import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { localize } from '../../../../nls.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
@@ -24,9 +25,10 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IParameterDefinition, generateSmartPythonVarName, sanitizePythonVarName, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshCommandsList } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IVoiceNoteClip, IParameterDefinition, generateSmartPythonVarName, sanitizePythonVarName, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshCommandsList } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
+import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
@@ -72,6 +74,7 @@ export interface INodePipelineStep {
 	parameters?: string;     // Runtime parameters (e.g. "--fast", "param1")
 	component?: ICustomField; // Component-driven node step (Inputs, Output, Create Tickets, Run Tickets, AI Prompt, Table, Browser, Python, etc.)
 	disabled?: boolean;      // When true, this step is commented out / temporarily disabled and skipped during execution
+	capsuleWidth?: number;   // Optional user-controlled width (px) for the capsule in the node canvas
 }
 
 interface IFlowchartNode {
@@ -379,6 +382,21 @@ export class WorkflowEditor extends EditorPane {
 	private _detectedPythonPath: string = 'python3';
 	private _cachedCustomModules: ICustomModule[] = [];
 	private _lastStepPillClick: { nodeId: string; stepId: string; time: number } | undefined;
+	private _selectedCapsule: { nodeId: string; stepId: string } | null = null;
+	private _contextMenuDisposables: IDisposable[] = [];
+	private static _copiedCapsule: {
+		step: INodePipelineStep;
+		sourceNodeLabel?: string;
+		sourceVars?: Array<{ name: string; initialValue: string; expression?: string }>;
+	} | null = null;
+	private static _lastCopyKind: 'node' | 'capsule' = 'node';
+
+	// Node Voice Note Sequential Playback State
+	private _activeVoicePlayNodeId: string | null = null;
+	private _activeVoiceAudioEl: HTMLAudioElement | null = null;
+	private _activeVoiceBlobUrl: string | null = null;
+	private _activeVoiceClipIndex = 0;
+	private _activeVoiceClipTotal = 0;
 
 	constructor(
 		group: IEditorGroup,
@@ -396,9 +414,11 @@ export class WorkflowEditor extends EditorPane {
 		@IWorkflowExecutionService private readonly _workflowExecutionService: IWorkflowExecutionService,
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 		@ITicketWorkflowRuntimeService private readonly _ticketRuntimeService: ITicketWorkflowRuntimeService,
-		@ICustomModulesService private readonly _customModulesService: ICustomModulesService
+		@ICustomModulesService private readonly _customModulesService: ICustomModulesService,
+		@IClipboardService private readonly _clipboardService: IClipboardService
 	) {
 		super(WorkflowEditor.ID, group, telemetryService, themeService, _storageService);
+		this._register({ dispose: () => this._stopNodeVoicePlayback() });
 		this._isToolbarCompact = this._storageService.getBoolean('workflowEditor.toolbarCompact', StorageScope.PROFILE, false);
 		this._isInspectorCompact = this._storageService.getBoolean('workflowEditor.inspectorCompact', StorageScope.PROFILE, false);
 		this._isInspectorCollapsed = this._storageService.getBoolean('workflowEditor.inspectorCollapsed', StorageScope.PROFILE, false);
@@ -1247,9 +1267,39 @@ export class WorkflowEditor extends EditorPane {
 				this._redo();
 			} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
 				e.preventDefault();
+				if (this._selectedCapsule && this._data?.nodes) {
+					const capNode = this._data.nodes.find(n => n.id === this._selectedCapsule!.nodeId);
+					const capStep = capNode?.pipeline?.find(s => s.id === this._selectedCapsule!.stepId);
+					if (capNode && capStep) {
+						this._copyCapsuleStep(capNode, capStep);
+						return;
+					}
+				}
 				this._copySelectedNodes();
 			} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'v') {
 				e.preventDefault();
+				if (this._selectedNodeIds.size === 1 && this._data?.nodes) {
+					const selId = Array.from(this._selectedNodeIds)[0];
+					const selNode = this._data.nodes.find(n => n.id === selId);
+					if (selNode) {
+						if (WorkflowEditor._lastCopyKind === 'capsule' && WorkflowEditor._copiedCapsule) {
+							void this._pasteCapsuleIntoNode(selNode);
+							return;
+						}
+						if (this._copiedNodes.length === 0) {
+							// Cross-window fallback: check system clipboard for a copied capsule
+							void this._clipboardService.readText().then(rawClip => {
+								const trimmed = (rawClip || '').trim();
+								if (trimmed.startsWith('{') && trimmed.includes('__anyagent_capsule_v1__')) {
+									void this._pasteCapsuleIntoNode(selNode);
+								} else {
+									this._pasteNodes();
+								}
+							}).catch(() => this._pasteNodes());
+							return;
+						}
+					}
+				}
 				this._pasteNodes();
 			} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'g') {
 				e.preventDefault();
@@ -1296,6 +1346,7 @@ export class WorkflowEditor extends EditorPane {
 
 					// Clear selection unless Shift/Ctrl is held
 					if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
+						this._selectedCapsule = null;
 						this._selectedNodeIds.clear();
 						this._selectedLinkIds.clear();
 						this._renderNodes();
@@ -2804,6 +2855,34 @@ export class WorkflowEditor extends EditorPane {
 
 		const d = step.details || {};
 
+		const attachTraceCopyBtn = (titleRow: HTMLElement, btnLabel: string, getText: () => string, toastMsg: string) => {
+			const copyBtn = append(titleRow, $('button.trace-mini-copy-btn', { type: 'button', title: `Copy full ${btnLabel.toLowerCase()}` })) as HTMLButtonElement;
+			const copyIcon = append(copyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
+			const copyTxt = append(copyBtn, $('span'));
+			copyTxt.textContent = btnLabel;
+			copyBtn.onclick = async (e) => {
+				e.preventDefault();
+				e.stopPropagation();
+				const val = getText();
+				if (!val) {
+					this._notificationService.warn('No content to copy.');
+					return;
+				}
+				await this._clipboardService.writeText(val);
+				copyIcon.className = ThemeIcon.asClassName(Codicon.check);
+				copyBtn.style.color = '#4ade80';
+				copyTxt.textContent = 'Copied!';
+				this._notificationService.info(toastMsg);
+				setTimeout(() => {
+					if (copyBtn.isConnected) {
+						copyIcon.className = ThemeIcon.asClassName(Codicon.copy);
+						copyBtn.style.color = '';
+						copyTxt.textContent = btnLabel;
+					}
+				}, 1500);
+			};
+		};
+
 		// 1. Python Primitive Trace
 		if (step.fieldType === 'python') {
 			if (d.pythonPath || d.exitCode !== undefined) {
@@ -2818,15 +2897,7 @@ export class WorkflowEditor extends EditorPane {
 				const logTitle = append(logTitleRow, $('span.trace-sub-title'));
 				append(logTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.terminal)));
 				append(logTitle, $('span')).textContent = 'Python Command Line Logs (stdout & stderr)';
-
-				const copyLogBtn = append(logTitleRow, $('button.trace-mini-copy-btn'));
-				append(copyLogBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
-				append(copyLogBtn, $('span')).textContent = 'Copy Logs';
-				copyLogBtn.onclick = async (e) => {
-					e.stopPropagation();
-					await this._clipboardService.writeText(String(d.commandLogs));
-					this._notificationService.info('Command logs copied.');
-				};
+				attachTraceCopyBtn(logTitleRow, 'Copy Logs', () => String(d.commandLogs), 'Command logs copied to clipboard.');
 
 				const termBox = append(logSection, $('pre.workflow-trace-term'));
 				termBox.textContent = String(d.commandLogs).trim();
@@ -2834,12 +2905,15 @@ export class WorkflowEditor extends EditorPane {
 
 			if (d.result !== undefined) {
 				const resSection = append(body, $('.trace-sub-section'));
-				const resTitle = append(resSection, $('.trace-sub-title'));
+				const resTitleRow = append(resSection, $('.trace-sub-title-row'));
+				const resTitle = append(resTitleRow, $('span.trace-sub-title'));
 				append(resTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.pass)));
 				append(resTitle, $('span')).textContent = 'Pure Return Value (OUTPUT)';
+				const fullResText = typeof d.result === 'object' && d.result !== null ? JSON.stringify(d.result, null, 2) : String(d.result);
+				attachTraceCopyBtn(resTitleRow, 'Copy Output', () => fullResText, 'Pure Return Value (OUTPUT) copied to clipboard.');
 
 				const resPre = append(resSection, $('pre.workflow-trace-pre'));
-				resPre.textContent = typeof d.result === 'object' && d.result !== null ? JSON.stringify(d.result, null, 2) : String(d.result);
+				resPre.textContent = fullResText;
 			}
 
 			if (d.executedCode) {
@@ -2847,6 +2921,9 @@ export class WorkflowEditor extends EditorPane {
 				const codeDetails = append(codeSection, $('details.trace-code-details'));
 				const summary = append(codeDetails, $('summary.trace-code-summary'));
 				summary.textContent = 'View Executed Python Code';
+				const codeHeaderRow = append(codeDetails, $('.trace-sub-title-row'));
+				append(codeHeaderRow, $('span.trace-sub-title')).textContent = 'Executed Python Code';
+				attachTraceCopyBtn(codeHeaderRow, 'Copy Code', () => String(d.executedCode).trim(), 'Executed Python code copied to clipboard.');
 				const codePre = append(codeDetails, $('pre.workflow-trace-code'));
 				codePre.textContent = String(d.executedCode).trim();
 			}
@@ -2855,19 +2932,25 @@ export class WorkflowEditor extends EditorPane {
 		else if (step.fieldType === 'prompt') {
 			if (d.sentPrompt || d.rawPrompt) {
 				const promptSec = append(body, $('.trace-sub-section'));
-				const pTitle = append(promptSec, $('.trace-sub-title'));
+				const pTitleRow = append(promptSec, $('.trace-sub-title-row'));
+				const pTitle = append(pTitleRow, $('span.trace-sub-title'));
 				append(pTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.sparkle)));
 				append(pTitle, $('span')).textContent = `Sent Prompt (Model: ${d.model || 'model'}, Provider: ${d.provider || 'auto'})`;
+				const fullPrompt = String(d.sentPrompt || d.rawPrompt).trim();
+				attachTraceCopyBtn(pTitleRow, 'Copy Prompt', () => fullPrompt, 'Sent prompt copied to clipboard.');
 				const pPre = append(promptSec, $('pre.workflow-trace-pre'));
-				pPre.textContent = String(d.sentPrompt || d.rawPrompt).trim();
+				pPre.textContent = fullPrompt;
 			}
 			if (d.response) {
 				const respSec = append(body, $('.trace-sub-section'));
-				const rTitle = append(respSec, $('.trace-sub-title'));
+				const rTitleRow = append(respSec, $('.trace-sub-title-row'));
+				const rTitle = append(rTitleRow, $('span.trace-sub-title'));
 				append(rTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.commentDiscussion)));
 				append(rTitle, $('span')).textContent = 'AI Model Response';
+				const fullResp = String(d.response).trim();
+				attachTraceCopyBtn(rTitleRow, 'Copy Response', () => fullResp, 'AI Model Response copied to clipboard.');
 				const rPre = append(respSec, $('pre.workflow-trace-pre'));
-				rPre.textContent = String(d.response).trim();
+				rPre.textContent = fullResp;
 			}
 		}
 		// 3. Browser Primitive Trace
@@ -2888,15 +2971,7 @@ export class WorkflowEditor extends EditorPane {
 				const cTitle = append(cTitleRow, $('span.trace-sub-title'));
 				append(cTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.globe)));
 				append(cTitle, $('span')).textContent = `Fetched Web Content (${d.contentLength || String(d.content).length} chars)`;
-
-				const copyBtn = append(cTitleRow, $('button.trace-mini-copy-btn'));
-				append(copyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
-				append(copyBtn, $('span')).textContent = 'Copy Content';
-				copyBtn.onclick = async (e) => {
-					e.stopPropagation();
-					await this._clipboardService.writeText(String(d.content));
-					this._notificationService.info('Fetched web content copied.');
-				};
+				attachTraceCopyBtn(cTitleRow, 'Copy Content', () => String(d.content), 'Complete fetched web content copied to clipboard.');
 
 				const cPre = append(cSec, $('pre.workflow-trace-pre'));
 				cPre.textContent = String(d.content).substring(0, 3000) + (String(d.content).length > 3000 ? '\n... (truncated)' : '');
@@ -2906,31 +2981,40 @@ export class WorkflowEditor extends EditorPane {
 		else if (step.fieldType === 'parameters') {
 			if (d.parameters && Object.keys(d.parameters).length > 0) {
 				const pSec = append(body, $('.trace-sub-section'));
-				const pTitle = append(pSec, $('.trace-sub-title'));
+				const pTitleRow = append(pSec, $('.trace-sub-title-row'));
+				const pTitle = append(pTitleRow, $('span.trace-sub-title'));
 				append(pTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.gear)));
 				append(pTitle, $('span')).textContent = 'Resolved Parameters';
+				const fullParams = JSON.stringify(d.parameters, null, 2);
+				attachTraceCopyBtn(pTitleRow, 'Copy', () => fullParams, 'Resolved parameters copied to clipboard.');
 				const pPre = append(pSec, $('pre.workflow-trace-pre'));
-				pPre.textContent = JSON.stringify(d.parameters, null, 2);
+				pPre.textContent = fullParams;
 			}
 		}
 		// 5. Output Manifest Primitive Trace
 		else if (step.fieldType === 'output' || step.fieldType === 'result') {
 			if (d.aggregatedOutputs && Object.keys(d.aggregatedOutputs).length > 0) {
 				const oSec = append(body, $('.trace-sub-section'));
-				const oTitle = append(oSec, $('.trace-sub-title'));
+				const oTitleRow = append(oSec, $('.trace-sub-title-row'));
+				const oTitle = append(oTitleRow, $('span.trace-sub-title'));
 				append(oTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.layers)));
 				append(oTitle, $('span')).textContent = 'Aggregated Output Manifest';
+				const fullManifest = JSON.stringify(d.aggregatedOutputs, null, 2);
+				attachTraceCopyBtn(oTitleRow, 'Copy JSON', () => fullManifest, 'Aggregated Output Manifest copied to clipboard.');
 				const oPre = append(oSec, $('pre.workflow-trace-pre'));
-				oPre.textContent = JSON.stringify(d.aggregatedOutputs, null, 2);
+				oPre.textContent = fullManifest;
 			}
 		}
 		// 6. Text / Textarea / Description / Single-line Input
 		else if (step.fieldType === 'text' || step.fieldType === 'textarea' || step.fieldType === 'string') {
 			const tSec = append(body, $('.trace-sub-section'));
-			const tTitle = append(tSec, $('.trace-sub-title'));
+			const tTitleRow = append(tSec, $('.trace-sub-title-row'));
+			const tTitle = append(tTitleRow, $('span.trace-sub-title'));
 			append(tTitle, $('span')).textContent = 'Text Value';
+			const fullText = String(d.runtimeValue ?? d.initialValue ?? step.output ?? '(empty)');
+			attachTraceCopyBtn(tTitleRow, 'Copy', () => fullText, 'Text value copied to clipboard.');
 			const tPre = append(tSec, $('pre.workflow-trace-pre'));
-			tPre.textContent = String(d.runtimeValue ?? d.initialValue ?? step.output ?? '(empty)');
+			tPre.textContent = fullText;
 			if (d.initialValue && d.runtimeValue && d.initialValue !== d.runtimeValue) {
 				const initSpan = append(tSec, $('span.trace-sub-title'));
 				initSpan.textContent = `Template: ${d.initialValue}`;
@@ -2972,20 +3056,25 @@ export class WorkflowEditor extends EditorPane {
 			const dPre = append(dSec, $('pre.workflow-trace-pre'));
 			dPre.textContent = String(step.output ?? '');
 		}
-		// 11. Generic Default Fallback
+		// 11. Generic Default Fallback (DataTable, HTTP Request, etc.)
 		else {
 			const gSec = append(body, $('.trace-sub-section'));
-			const gTitle = append(gSec, $('.trace-sub-title'));
+			const gTitleRow = append(gSec, $('.trace-sub-title-row'));
+			const gTitle = append(gTitleRow, $('span.trace-sub-title'));
 			append(gTitle, $('span')).textContent = 'Value';
+			const fullGeneric = typeof step.output === 'object' && step.output !== null ? JSON.stringify(step.output, null, 2) : String(step.output ?? '(empty)');
+			attachTraceCopyBtn(gTitleRow, 'Copy', () => fullGeneric, 'Step output value copied to clipboard.');
 			const gPre = append(gSec, $('pre.workflow-trace-pre'));
-			gPre.textContent = typeof step.output === 'object' && step.output !== null ? JSON.stringify(step.output, null, 2) : String(step.output ?? '(empty)');
+			gPre.textContent = fullGeneric;
 		}
 
 		if (step.error) {
 			const errSec = append(body, $('.trace-sub-section.error'));
-			const errTitle = append(errSec, $('.trace-sub-title.error'));
+			const errTitleRow = append(errSec, $('.trace-sub-title-row'));
+			const errTitle = append(errTitleRow, $('span.trace-sub-title.error'));
 			append(errTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.error)));
 			append(errTitle, $('span')).textContent = 'Step Error';
+			attachTraceCopyBtn(errTitleRow, 'Copy Error', () => String(step.error), 'Step error copied to clipboard.');
 			const errPre = append(errSec, $('pre.workflow-trace-err'));
 			errPre.textContent = step.error;
 		}
@@ -3727,8 +3816,8 @@ export class WorkflowEditor extends EditorPane {
 			accent: string;
 			desc: string;
 		}[] = [
-				{ compType: 'parameters', label: localize('compInputs', 'Inputs'), icon: Codicon.symbolVariable, accent: '#c084fc', desc: 'Node Inputs component (at most 1 per node, placed at top). Supports Workflow Global Variables or literal values.' },
-				{ compType: 'output', label: localize('compOutput', 'Output'), icon: Codicon.output, accent: '#34d399', desc: 'Node Output component (at most 1 per node, placed at bottom). Exports values to Workflow variables.' },
+				{ compType: 'parameters', label: localize('compInputs', 'Inputs'), icon: Codicon.symbolVariable, accent: '#c084fc', desc: 'Node Inputs component. Multiple Inputs components in the entry node are accumulated in order as Workflow Inputs.' },
+				{ compType: 'output', label: localize('compOutput', 'Output'), icon: Codicon.output, accent: '#34d399', desc: 'Node Output component. Multiple Output components in the final node are accumulated in order as Workflow Outputs.' },
 				{ compType: 'python', label: localize('compPythonCard', 'Python Card'), icon: Codicon.python, accent: '#38bdf8', desc: 'Full Python Script component card in side editor. Supports TICKET_CONTEXT, interpreter selection, test runner, and OUTPUT.' },
 				{ compType: 'create_tickets', label: localize('compCreateTickets', 'Create Tickets'), icon: Codicon.add, accent: '#c084fc', desc: 'CREATE_TICKETS built-in component. Automatically loads target Ticket Type Inputs schema; stores ticket handle in Component Title.' },
 				{ compType: 'run_tickets', label: localize('compRunTickets', 'Run Tickets'), icon: Codicon.playCircle, accent: '#a855f7', desc: 'RUN_TICKETS built-in component. Automatically loads target Ticket Type Inputs schema; stores run result in Component Title.' },
@@ -3740,6 +3829,7 @@ export class WorkflowEditor extends EditorPane {
 				{ compType: 'browser', label: localize('compBrowser', 'Browser'), icon: Codicon.globe, accent: '#38bdf8', desc: 'Headless Browser & Scraper component. Stores extracted content in Component Title variable.' },
 				{ compType: 'tts', label: localize('compTts', 'Audio / TTS'), icon: Codicon.unmute, accent: '#f87171', desc: 'Text-to-Speech synthesis component.' },
 				{ compType: 'media_player', label: localize('compMediaPlayer', 'MP3 / MP4 Player'), icon: Codicon.deviceCameraVideo, accent: '#f59e0b', desc: 'Local MP3 / MP4 & multi-format Audio/Video Player component with 0.25x-2.0x speed control.' },
+				{ compType: 'voice_note', label: localize('compVoiceNote', 'Voice Note'), icon: Codicon.mic, accent: '#94a3b8', desc: 'Record voice memos with automatic Speech-to-Text transcription. Automatically adds a top-right speaker icon on the node to play all recorded clips sequentially.' },
 				{ compType: 'ssh', label: localize('compSsh', 'SSH Terminal'), icon: Codicon.terminal, accent: '#34d399', desc: 'SSH Remote Linux Terminal component (IP, Port, Account, Password, Quick Linux Commands & embedded terminal).' },
 				{ compType: 'http_request', label: localize('compHttpRequest', 'HTTP Request'), icon: Codicon.cloudUpload, accent: '#06b6d4', desc: 'Universal HTTP / REST API client. Supports GET, POST, PUT, PATCH, DELETE, Bearer/API-Key auth, params, headers, body, and structured JSON output.' },
 				{ compType: 'git', label: localize('compGit', 'Git Repo'), icon: Codicon.gitMerge, accent: '#a3e635', desc: 'Git repository operations component.' }
@@ -4542,11 +4632,13 @@ export class WorkflowEditor extends EditorPane {
 			browser: { label: 'BROWSER', icon: Codicon.globe, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.16)', border: 'rgba(56, 189, 248, 0.45)' },
 			tts: { label: 'O2 TTS', icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.45)' },
 			media_player: { label: 'MP3 / MP4 PLAYER', icon: Codicon.deviceCameraVideo, color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.45)' },
+			voice_note: { label: 'VOICE NOTE', icon: Codicon.mic, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.35)' },
 			ssh: { label: 'SSH TERMINAL', icon: Codicon.terminal, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.45)' },
 			git: { label: 'GIT BRANCH', icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.45)' },
 			create_tickets: { label: 'CREATE TICKETS', icon: Codicon.add, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.45)' },
 			run_tickets: { label: 'RUN TICKETS', icon: Codicon.playCircle, color: '#a855f7', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(168, 85, 247, 0.45)' },
 			get_outputs: { label: 'GET OUTPUTS', icon: Codicon.signOut, color: '#818cf8', bg: 'rgba(99, 102, 241, 0.16)', border: 'rgba(129, 140, 248, 0.45)' },
+			get_ticket: { label: 'GET TICKET', icon: Codicon.tag, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.45)' },
 			get_tickets: { label: 'GET TICKETS', icon: Codicon.search, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.45)' },
 			display: { label: 'DISPLAY', icon: Codicon.eye, color: '#f472b6', bg: 'rgba(236, 72, 153, 0.16)', border: 'rgba(244, 114, 182, 0.45)' },
 			parameters: { label: 'INPUTS', icon: Codicon.symbolVariable, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.45)' },
@@ -4565,12 +4657,12 @@ export class WorkflowEditor extends EditorPane {
 			: (step.targetVariable || '').replace(/^@/, '').trim();
 
 		// Determine whether this step renders Python code (1 line by default, expandable) or Component Metadata
-		const isPythonCodeTooltip = !comp || comp.type === 'python' || comp.type === 'create_tickets' || comp.type === 'run_tickets' || comp.type === 'get_outputs' || comp.type === 'get_tickets' || comp.type === 'display';
+		const isPythonCodeTooltip = !comp || comp.type === 'python' || comp.type === 'create_tickets' || comp.type === 'run_tickets' || comp.type === 'get_outputs' || comp.type === 'get_ticket' || comp.type === 'get_tickets' || comp.type === 'display';
 
 		let effectiveCode = fullCode;
 		if (comp?.type === 'python') {
 			effectiveCode = (comp.pythonCode || (comp as any).defaultValue || comp.defaultContent || '').replace(/\r\n/g, '\n').trim() || '# Empty Python script';
-		} else if (comp && (comp.type === 'create_tickets' || comp.type === 'run_tickets' || comp.type === 'get_outputs' || comp.type === 'get_tickets' || comp.type === 'display')) {
+		} else if (comp && (comp.type === 'create_tickets' || comp.type === 'run_tickets' || comp.type === 'get_outputs' || comp.type === 'get_ticket' || comp.type === 'get_tickets' || comp.type === 'display')) {
 			effectiveCode = this._buildBuiltinComponentPythonExpression(comp);
 		}
 
@@ -4604,6 +4696,13 @@ export class WorkflowEditor extends EditorPane {
 				case 'media_player': {
 					metadataLabel = 'Media File';
 					metadataValue = (comp.mediaFileName || comp.mediaFilePath || '(no file selected)').trim();
+					break;
+				}
+				case 'voice_note': {
+					const clips = Array.isArray(comp.voiceClips) ? comp.voiceClips : [];
+					metadataLabel = `Voice Clips (${clips.length})`;
+					const previewText = (comp.voiceTranscript || clips.map(c => c.transcript || '').filter(Boolean).join(' ')).trim();
+					metadataValue = previewText ? (previewText.length > 140 ? previewText.substring(0, 140) + '...' : previewText) : (clips.length > 0 ? `${clips.length} recorded audio clip(s)` : '(no recordings yet)');
 					break;
 				}
 				case 'ssh': {
@@ -5117,7 +5216,7 @@ export class WorkflowEditor extends EditorPane {
 					} as any);
 					updatedTickets++;
 				}
-			} else if ((step.type === 'set_variable' || step.type === 'call_function') && step.targetVariable) {
+			} else if ((step.type === 'set_variable' || step.type === 'call_function' || step.type === 'component') && step.targetVariable) {
 				const cleanVar = step.targetVariable.replace(/^@/, '');
 				if (!newVars.some(v => v.name === cleanVar)) {
 					const existingVar = (node.outputVariables || []).find(v => v.name.replace(/^@/, '') === cleanVar);
@@ -5733,7 +5832,7 @@ export class WorkflowEditor extends EditorPane {
 			};
 		} else {
 			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
-			const nodeRunState = activeRun?.nodeStates[node.id];
+			const nodeRunState = activeRun?.nodeStates?.[node.id];
 			for (let i = 0; i < node.pipeline.length; i++) {
 				const step = node.pipeline[i];
 				const isFailedStep = nodeRunState?.status === 'failed' && nodeRunState?.failedStepIndex === i;
@@ -7078,6 +7177,113 @@ export class WorkflowEditor extends EditorPane {
 				};
 			}
 		}
+
+		// Workflow I/O Contract Summary (Unique Entry Input Node & Terminal Output Node)
+		if (!this._isInspectorCompact && !this._isPureDiagram) {
+			const ioContract = this._workflowExecutionService.resolveWorkflowIOContract(this._data);
+			const ioSec = append(parent, $('.workflow-toolbar-section'));
+			ioSec.style.marginTop = '10px';
+			ioSec.style.borderTop = '1px solid rgba(255,255,255,0.08)';
+			ioSec.style.paddingTop = '10px';
+
+			const ioTitleRow = append(ioSec, $('div', {
+				style: 'display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 6px;'
+			}));
+			append(ioTitleRow, $('.workflow-toolbar-title', { style: 'margin: 0;' }, 'WORKFLOW I/O CONTRACT'));
+			append(ioTitleRow, $('span', {
+				style: `font-size: 9.5px; font-weight: 700; padding: 1px 6px; border-radius: 999px; ${ioContract.isValid ? 'background: rgba(52, 211, 153, 0.16); color: #6ee7b7; border: 1px solid rgba(52, 211, 153, 0.35);' : 'background: rgba(239, 68, 68, 0.16); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.4);'}`
+			}, ioContract.isValid ? 'VALID' : 'ERROR'));
+
+			// Inputs Block
+			const inCard = append(ioSec, $('div', {
+				style: 'display: flex; flex-direction: column; gap: 4px; padding: 7px 8px; border-radius: 5px; background: rgba(168, 85, 247, 0.06); border: 1px solid rgba(192, 132, 252, 0.22); margin-bottom: 6px;'
+			}));
+			const inHeader = append(inCard, $('div', {
+				style: 'display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 10.5px; font-weight: 600; color: #c084fc;'
+			}));
+			append(inHeader, $('span', {}, `Inputs (${ioContract.inputs.length})`));
+			if (ioContract.inputNodeId) {
+				const inNodeChip = append(inHeader, $('button', {
+					type: 'button',
+					style: 'font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(192, 132, 252, 0.14); border: 1px solid rgba(192, 132, 252, 0.35); color: #e9d5ff; cursor: pointer; max-width: 115px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+					title: `Entry Input Node: ${ioContract.inputNodeLabel} (click to open)`
+				}, ioContract.inputNodeLabel || ioContract.inputNodeId)) as HTMLButtonElement;
+				inNodeChip.onclick = () => {
+					const targetNode = this._data.nodes.find(n => n.id === ioContract.inputNodeId);
+					if (targetNode) {
+						this._openNodeComponentsInSideEditor(targetNode);
+					}
+				};
+			}
+
+			if (ioContract.inputError) {
+				append(inCard, $('div', {
+					style: 'font-size: 10.5px; color: #fca5a5; line-height: 1.35;'
+				}, ioContract.inputError));
+			} else if (ioContract.inputs.length === 0) {
+				append(inCard, $('div', {
+					style: 'font-size: 10.5px; opacity: 0.55; font-style: italic;'
+				}, 'No input parameters defined on entry node.'));
+			} else {
+				for (const inp of ioContract.inputs) {
+					const row = append(inCard, $('div', {
+						style: 'display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 10.5px; padding: 2px 4px; border-radius: 3px; background: rgba(0,0,0,0.2);'
+					}));
+					append(row, $('span', {
+						style: 'font-family: var(--vscode-editor-font-family, monospace); color: #e9d5ff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
+					}, inp.name));
+					append(row, $('span', {
+						style: 'font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; opacity: 0.7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 90px;',
+						title: inp.defaultValue ? `Default: ${inp.defaultValue}` : 'No default value'
+					}, inp.defaultValue ? `= ${inp.defaultValue}` : '(empty)'));
+				}
+			}
+
+			// Outputs Block
+			const outCard = append(ioSec, $('div', {
+				style: 'display: flex; flex-direction: column; gap: 4px; padding: 7px 8px; border-radius: 5px; background: rgba(16, 185, 129, 0.06); border: 1px solid rgba(52, 211, 153, 0.22);'
+			}));
+			const outHeader = append(outCard, $('div', {
+				style: 'display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 10.5px; font-weight: 600; color: #34d399;'
+			}));
+			append(outHeader, $('span', {}, `Outputs (${ioContract.outputs.length})`));
+			if (ioContract.outputNodeId) {
+				const outNodeChip = append(outHeader, $('button', {
+					type: 'button',
+					style: 'font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(52, 211, 153, 0.14); border: 1px solid rgba(52, 211, 153, 0.35); color: #d1fae5; cursor: pointer; max-width: 115px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+					title: `Final Output Node: ${ioContract.outputNodeLabel} (click to open)`
+				}, ioContract.outputNodeLabel || ioContract.outputNodeId)) as HTMLButtonElement;
+				outNodeChip.onclick = () => {
+					const targetNode = this._data.nodes.find(n => n.id === ioContract.outputNodeId);
+					if (targetNode) {
+						this._openNodeComponentsInSideEditor(targetNode);
+					}
+				};
+			}
+
+			if (ioContract.outputError) {
+				append(outCard, $('div', {
+					style: 'font-size: 10.5px; color: #fca5a5; line-height: 1.35;'
+				}, ioContract.outputError));
+			} else if (ioContract.outputs.length === 0) {
+				append(outCard, $('div', {
+					style: 'font-size: 10.5px; opacity: 0.55; font-style: italic;'
+				}, 'No outputs defined on final node.'));
+			} else {
+				for (const out of ioContract.outputs) {
+					const row = append(outCard, $('div', {
+						style: 'display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 10.5px; padding: 2px 4px; border-radius: 3px; background: rgba(0,0,0,0.2);'
+					}));
+					append(row, $('span', {
+						style: 'color: #d1fae5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;',
+						title: `${out.label} (var: ${out.varName})`
+					}, out.label));
+					append(row, $('span', {
+						style: 'font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(56, 189, 248, 0.14); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.3); text-transform: uppercase; flex-shrink: 0;'
+					}, (out.defaultFormat || 'json').toUpperCase()));
+				}
+			}
+		}
 	}
 
 	private _updateCanvasDimensions(additionalX?: number, additionalY?: number): void {
@@ -7377,8 +7583,8 @@ export class WorkflowEditor extends EditorPane {
 	]);
 
 	private static readonly _WORKFLOW_BUILTINS = new Set([
-		'RUN_TICKETS', 'CREATE_TICKETS', 'GET_TICKETS', 'GET_OUTPUTS', 'GET_PRIMITIVES_CATALOG', 'DISPLAY',
-		'run_tickets', 'create_tickets', 'get_tickets', 'get_outputs', 'get_primitives_catalog', 'display',
+		'RUN_TICKETS', 'CREATE_TICKETS', 'GET_TICKET', 'GET_TICKETS', 'GET_OUTPUTS', 'GET_PRIMITIVES_CATALOG', 'DISPLAY',
+		'run_tickets', 'create_tickets', 'get_ticket', 'get_tickets', 'get_outputs', 'get_primitives_catalog', 'display',
 		'NOW', 'DATE', 'TIME', 'TODAY', 'DATETIME', 'TIMESTAMP'
 	]);
 
@@ -7681,7 +7887,7 @@ export class WorkflowEditor extends EditorPane {
 				return;
 			}
 			const targetEl = e.target as HTMLElement | null;
-			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input')) {
+			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input, .capsule-resize-handle')) {
 				e.stopPropagation();
 				return;
 			}
@@ -7709,7 +7915,7 @@ export class WorkflowEditor extends EditorPane {
 				return;
 			}
 			const targetEl = e.target as HTMLElement | null;
-			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input')) {
+			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input, .capsule-resize-handle')) {
 				e.stopPropagation();
 				return;
 			}
@@ -7729,7 +7935,7 @@ export class WorkflowEditor extends EditorPane {
 		};
 		fnPill.ondblclick = (e) => {
 			const targetEl = e.target as HTMLElement | null;
-			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input')) {
+			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input, .capsule-resize-handle')) {
 				e.stopPropagation();
 				return;
 			}
@@ -7745,6 +7951,7 @@ export class WorkflowEditor extends EditorPane {
 			create_tickets: { icon: Codicon.add, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.5)', textColor: '#f3e8ff' },
 			run_tickets: { icon: Codicon.playCircle, color: '#a855f7', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(168, 85, 247, 0.5)', textColor: '#f3e8ff' },
 			get_outputs: { icon: Codicon.signOut, color: '#818cf8', bg: 'rgba(99, 102, 241, 0.16)', border: 'rgba(129, 140, 248, 0.5)', textColor: '#e0e7ff' },
+			get_ticket: { icon: Codicon.tag, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.5)', textColor: '#dbeafe' },
 			get_tickets: { icon: Codicon.search, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.5)', textColor: '#dbeafe' },
 			display: { icon: Codicon.eye, color: '#f472b6', bg: 'rgba(236, 72, 153, 0.16)', border: 'rgba(244, 114, 182, 0.5)', textColor: '#fce7f3' },
 			prompt: { icon: Codicon.sparkle, color: '#2dd4bf', bg: 'rgba(20, 184, 166, 0.16)', border: 'rgba(45, 212, 191, 0.5)', textColor: '#ccfbf1' },
@@ -7752,6 +7959,7 @@ export class WorkflowEditor extends EditorPane {
 			browser: { icon: Codicon.globe, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.16)', border: 'rgba(56, 189, 248, 0.5)', textColor: '#e0f2fe' },
 			tts: { icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.5)', textColor: '#fee2e2' },
 			media_player: { icon: Codicon.deviceCameraVideo, color: '#fbbf24', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.5)', textColor: '#fef3c7' },
+			voice_note: { icon: Codicon.mic, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.38)', textColor: '#e2e8f0' },
 			ssh: { icon: Codicon.terminal, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.5)', textColor: '#d1fae5' },
 			git: { icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.5)', textColor: '#ecfccb' },
 			python: { icon: Codicon.python, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.14)', border: 'rgba(56, 189, 248, 0.45)', textColor: '#e0f2fe' }
@@ -7788,7 +7996,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Distinguish pure variable definition / value assignment (Blue pill) vs built-in function call / control flow (Purple pill) vs Component pill
-		const callsWorkflowBuiltin = /\b(RUN_TICKETS|CREATE_TICKETS|GET_TICKETS|GET_OUTPUTS|DISPLAY|PRINT|GET_PRIMITIVES_CATALOG)\s*\(/.test(rawExpr);
+		const callsWorkflowBuiltin = /\b(RUN_TICKETS|CREATE_TICKETS|GET_TICKET|GET_TICKETS|GET_OUTPUTS|DISPLAY|PRINT|GET_PRIMITIVES_CATALOG)\s*\(/.test(rawExpr);
 		const isControlFlowOrDef = /^(?:for|while|if|elif|else|def|async\s+def|class|try|with|return|raise|import|from)\b/.test(rawExpr.trim());
 		const isPureVariableStep = !step.component && !callsWorkflowBuiltin && !isControlFlowOrDef && (
 			step.type === 'set_variable' ||
@@ -7815,9 +8023,9 @@ export class WorkflowEditor extends EditorPane {
 		}
 		const comp = step.component;
 		const isStandardComponentCapsule = Boolean(
-			comp && !['parameters', 'output', 'result', 'display', 'create_tickets', 'run_tickets', 'get_outputs', 'get_tickets'].includes(comp.type)
+			comp && !['parameters', 'output', 'result', 'display', 'create_tickets', 'run_tickets', 'get_outputs', 'get_ticket', 'get_tickets'].includes(comp.type)
 		);
-		const maxCapsuleChars = isStandardComponentCapsule ? 96 : 75;
+		const maxCapsuleChars = typeof step.capsuleWidth === 'number' ? 400 : (isStandardComponentCapsule ? 240 : 180);
 		if (displayExpr.length > maxCapsuleChars) {
 			displayExpr = displayExpr.substring(0, maxCapsuleChars - 3) + '...';
 		}
@@ -7972,12 +8180,107 @@ export class WorkflowEditor extends EditorPane {
 		stepIndex: number
 	): void {
 		pillEl.setAttribute('data-pipeline-step-idx', String(stepIndex));
+
+		// Apply user-saved custom capsule width (overflow past node boundary is clipped by container)
+		const initialStep = node.pipeline?.[stepIndex];
+		if (initialStep && typeof initialStep.capsuleWidth === 'number' && initialStep.capsuleWidth > 0) {
+			pillEl.classList.add('capsule-custom-width');
+			pillEl.style.width = `${Math.round(initialStep.capsuleWidth)}px`;
+		}
+
+		// Right-edge resize handle for user-controlled capsule length
+		const resizeHandle = append(pillEl, $('span.capsule-resize-handle', {
+			title: 'Drag to resize capsule width · Double-click to reset'
+		}));
+		resizeHandle.addEventListener('click', (e: MouseEvent) => {
+			e.stopPropagation();
+			e.preventDefault();
+		});
+		resizeHandle.addEventListener('dblclick', (e: MouseEvent) => {
+			e.stopPropagation();
+			e.preventDefault();
+			const curStep = node.pipeline?.[stepIndex];
+			if (curStep && typeof curStep.capsuleWidth === 'number') {
+				delete curStep.capsuleWidth;
+				this._saveFlowchartData();
+				this._renderNodes();
+			}
+		});
+		resizeHandle.addEventListener('mousedown', (e: MouseEvent) => {
+			if (e.button !== 0) {
+				return;
+			}
+			e.stopPropagation();
+			e.preventDefault();
+			this._lastStepPillClick = undefined;
+			this._hidePythonStepPopover(true);
+			this._hideTicketPopover();
+
+			const curStep = node.pipeline?.[stepIndex];
+			if (!curStep) {
+				return;
+			}
+
+			const zoom = this._zoomLevel || 1;
+			const startX = e.clientX;
+			const startWidth = typeof curStep.capsuleWidth === 'number' && curStep.capsuleWidth > 0
+				? curStep.capsuleWidth
+				: Math.round(pillEl.getBoundingClientRect().width / zoom);
+			let nextWidth = startWidth;
+			let didResize = false;
+
+			pillEl.classList.add('capsule-custom-width', 'capsule-resizing');
+			pillEl.style.width = `${startWidth}px`;
+			document.body.style.cursor = 'ew-resize';
+
+			const onResizeMove = (mvEvent: MouseEvent) => {
+				const deltaX = (mvEvent.clientX - startX) / zoom;
+				if (!didResize && Math.abs(deltaX) >= 2) {
+					didResize = true;
+				}
+				nextWidth = Math.max(48, Math.round(startWidth + deltaX));
+				pillEl.style.width = `${nextWidth}px`;
+			};
+
+			const onResizeUp = () => {
+				window.removeEventListener('mousemove', onResizeMove);
+				window.removeEventListener('mouseup', onResizeUp);
+				pillEl.classList.remove('capsule-resizing');
+				document.body.style.cursor = '';
+
+				if (didResize) {
+					curStep.capsuleWidth = nextWidth;
+					(pillEl as any)._justDraggedAt = Date.now();
+					this._saveFlowchartData();
+				} else if (typeof curStep.capsuleWidth !== 'number') {
+					pillEl.classList.remove('capsule-custom-width');
+					pillEl.style.width = '';
+				}
+			};
+
+			window.addEventListener('mousemove', onResizeMove);
+			window.addEventListener('mouseup', onResizeUp);
+		});
+
+		pillEl.addEventListener('contextmenu', (e: MouseEvent) => {
+			e.preventDefault();
+			e.stopPropagation();
+			const curStep = node.pipeline?.[stepIndex];
+			if (curStep) {
+				this._selectedCapsule = { nodeId: node.id, stepId: curStep.id };
+				this._showCapsuleContextMenu(e.clientX, e.clientY, node, stepIndex);
+			}
+		});
 		pillEl.addEventListener('mousedown', (e: MouseEvent) => {
+			const curStep = node.pipeline?.[stepIndex];
+			if (curStep) {
+				this._selectedCapsule = { nodeId: node.id, stepId: curStep.id };
+			}
 			if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) {
 				return;
 			}
 			const targetEl = e.target as HTMLElement | null;
-			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input')) {
+			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input, .capsule-resize-handle')) {
 				return;
 			}
 			e.stopPropagation();
@@ -7986,12 +8289,17 @@ export class WorkflowEditor extends EditorPane {
 			const startY = e.clientY;
 			let isDragging = false;
 			let targetInsertIdx = stepIndex;
+			let hoveredTargetNode: IFlowchartNode | null = node;
 			let ghostEl: HTMLElement | null = null;
 
 			const clearDropIndicators = () => {
-				badgesContainer
+				const scopeRoot = this._nodesContainer || badgesContainer;
+				scopeRoot
 					.querySelectorAll('.capsule-drop-before, .capsule-drop-after')
 					.forEach(el => el.classList.remove('capsule-drop-before', 'capsule-drop-after'));
+				scopeRoot
+					.querySelectorAll('.capsule-drop-target-node')
+					.forEach(el => el.classList.remove('capsule-drop-target-node'));
 			};
 
 			const onMouseMove = (mvEvent: MouseEvent) => {
@@ -8026,23 +8334,57 @@ export class WorkflowEditor extends EditorPane {
 					ghostEl.style.top = `${mvEvent.clientY - 12}px`;
 				}
 
-				const allPills = Array.from(badgesContainer.querySelectorAll<HTMLElement>('[data-pipeline-step-idx]'));
 				clearDropIndicators();
 
+				// Detect which node the pointer is currently hovering over (topmost in DOM order)
+				let hitNodeEl: HTMLElement | null = null;
+				let hitNode: IFlowchartNode | null = null;
+				if (this._nodesContainer && this._data?.nodes) {
+					const allNodeEls = Array.from(this._nodesContainer.querySelectorAll<HTMLElement>('.workflow-node[data-node-id]'));
+					for (let idx = allNodeEls.length - 1; idx >= 0; idx--) {
+						const candEl = allNodeEls[idx];
+						const r = candEl.getBoundingClientRect();
+						if (mvEvent.clientX >= r.left && mvEvent.clientX <= r.right && mvEvent.clientY >= r.top && mvEvent.clientY <= r.bottom) {
+							const candId = candEl.getAttribute('data-node-id');
+							const candNode = candId ? this._data.nodes.find(n => n.id === candId) || null : null;
+							if (candNode) {
+								hitNodeEl = candEl;
+								hitNode = candNode;
+								break;
+							}
+						}
+					}
+				}
+
+				hoveredTargetNode = hitNode;
+				if (!hitNode || !hitNodeEl) {
+					return;
+				}
+
+				if (hitNode.id !== node.id) {
+					hitNodeEl.classList.add('capsule-drop-target-node');
+				}
+
+				const targetPills = Array.from(hitNodeEl.querySelectorAll<HTMLElement>('[data-pipeline-step-idx]'));
+				if (targetPills.length === 0) {
+					targetInsertIdx = 0;
+					return;
+				}
+
 				let foundBefore = false;
-				for (let k = 0; k < allPills.length; k++) {
-					const r = allPills[k].getBoundingClientRect();
+				for (let k = 0; k < targetPills.length; k++) {
+					const r = targetPills[k].getBoundingClientRect();
 					const midY = r.top + r.height / 2;
 					if (mvEvent.clientY < midY) {
 						targetInsertIdx = k;
-						allPills[k].classList.add('capsule-drop-before');
+						targetPills[k].classList.add('capsule-drop-before');
 						foundBefore = true;
 						break;
 					}
 				}
-				if (!foundBefore && allPills.length > 0) {
-					targetInsertIdx = allPills.length;
-					allPills[allPills.length - 1].classList.add('capsule-drop-after');
+				if (!foundBefore) {
+					targetInsertIdx = targetPills.length;
+					targetPills[targetPills.length - 1].classList.add('capsule-drop-after');
 				}
 			};
 
@@ -8064,6 +8406,17 @@ export class WorkflowEditor extends EditorPane {
 				upEvent.stopPropagation();
 				(pillEl as any)._justDraggedAt = Date.now();
 
+				if (!hoveredTargetNode) {
+					return;
+				}
+
+				// Cross-node drag & drop: move capsule from source node to target node
+				if (hoveredTargetNode.id !== node.id) {
+					this._moveCapsuleBetweenNodes(node, stepIndex, hoveredTargetNode, targetInsertIdx);
+					return;
+				}
+
+				// Same-node drag & drop: reorder capsule within the node
 				if (node.pipeline && node.pipeline.length > 1) {
 					const fromIdx = stepIndex;
 					let toIdx = targetInsertIdx > fromIdx ? targetInsertIdx - 1 : targetInsertIdx;
@@ -8099,6 +8452,169 @@ export class WorkflowEditor extends EditorPane {
 			window.addEventListener('mousemove', onMouseMove, true);
 			window.addEventListener('mouseup', onMouseUp, true);
 		});
+	}
+
+	private _getNodeVoiceNoteState(node: IFlowchartNode): {
+		hasVoiceNoteComponent: boolean;
+		firstVoiceNoteCompId?: string;
+		clips: Array<{ clip: IVoiceNoteClip; compLabel: string; playbackRate: number }>;
+	} {
+		let hasVoiceNoteComponent = false;
+		let firstVoiceNoteCompId: string | undefined = undefined;
+		const clips: Array<{ clip: IVoiceNoteClip; compLabel: string; playbackRate: number }> = [];
+		for (const step of (node.pipeline || [])) {
+			const comp = step?.component;
+			if (comp && comp.type === 'voice_note') {
+				hasVoiceNoteComponent = true;
+				if (!firstVoiceNoteCompId) {
+					firstVoiceNoteCompId = comp.id;
+				}
+				const rate = typeof comp.voicePlaybackRate === 'number' && Number.isFinite(comp.voicePlaybackRate) ? comp.voicePlaybackRate : 1.0;
+				const compClips = Array.isArray(comp.voiceClips) ? comp.voiceClips : [];
+				for (const clip of compClips) {
+					if (clip && clip.audioDataUrl) {
+						clips.push({ clip, compLabel: comp.label || 'Voice Note', playbackRate: rate });
+					}
+				}
+			}
+		}
+		return { hasVoiceNoteComponent, firstVoiceNoteCompId, clips };
+	}
+
+	private _voiceDataUrlToBlobUrl(dataUrl: string, fallbackMime?: string): string {
+		if (!dataUrl.startsWith('data:')) {
+			return dataUrl;
+		}
+		const commaIdx = dataUrl.indexOf(',');
+		if (commaIdx === -1) {
+			return dataUrl;
+		}
+		const header = dataUrl.substring(0, commaIdx);
+		const b64 = dataUrl.substring(commaIdx + 1);
+		const mimeMatch = header.match(/data:([^;]+)/i);
+		const mime = (mimeMatch ? mimeMatch[1] : '') || fallbackMime || 'audio/webm';
+		const bstr = atob(b64);
+		const len = bstr.length;
+		const u8arr = new Uint8Array(len);
+		for (let i = 0; i < len; i++) {
+			u8arr[i] = bstr.charCodeAt(i);
+		}
+		const blob = new Blob([u8arr], { type: mime });
+		return URL.createObjectURL(blob);
+	}
+
+	private _stopNodeVoicePlayback(): void {
+		const prevNodeId = this._activeVoicePlayNodeId;
+		this._activeVoicePlayNodeId = null;
+		this._activeVoiceClipIndex = 0;
+		this._activeVoiceClipTotal = 0;
+		if (this._activeVoiceAudioEl) {
+			try {
+				this._activeVoiceAudioEl.onended = null;
+				this._activeVoiceAudioEl.onerror = null;
+				this._activeVoiceAudioEl.pause();
+				this._activeVoiceAudioEl.currentTime = 0;
+			} catch { }
+			this._activeVoiceAudioEl = null;
+		}
+		if (this._activeVoiceBlobUrl) {
+			try {
+				URL.revokeObjectURL(this._activeVoiceBlobUrl);
+			} catch { }
+			this._activeVoiceBlobUrl = null;
+		}
+		if (prevNodeId) {
+			this._updateNodeVoiceSpeakerVisuals(prevNodeId);
+		}
+	}
+
+	private _updateNodeVoiceSpeakerVisuals(nodeId: string): void {
+		const nodeDom = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${nodeId}"]`);
+		if (!nodeDom) {
+			return;
+		}
+		const speakerBtn = nodeDom.querySelector('.node-voice-speaker-btn') as HTMLElement | null;
+		if (!speakerBtn) {
+			return;
+		}
+		const isPlayingThis = this._activeVoicePlayNodeId === nodeId;
+		speakerBtn.classList.toggle('playing', isPlayingThis);
+		const iconEl = speakerBtn.querySelector('.codicon') as HTMLElement | null;
+		if (iconEl) {
+			iconEl.className = 'codicon codicon-unmute';
+		}
+		const badgeEl = speakerBtn.querySelector('.voice-count-badge') as HTMLElement | null;
+		const totalClips = Number(speakerBtn.getAttribute('data-clip-count') || '0');
+		if (badgeEl) {
+			if (isPlayingThis && this._activeVoiceClipTotal > 0) {
+				badgeEl.textContent = `${this._activeVoiceClipIndex + 1}/${this._activeVoiceClipTotal}`;
+				badgeEl.style.display = 'inline';
+			} else if (totalClips > 1) {
+				badgeEl.textContent = String(totalClips);
+				badgeEl.style.display = 'inline';
+			} else {
+				badgeEl.textContent = '';
+				badgeEl.style.display = 'none';
+			}
+		}
+	}
+
+	private _toggleNodeVoicePlayback(node: IFlowchartNode): void {
+		const voiceState = this._getNodeVoiceNoteState(node);
+		if (this._activeVoicePlayNodeId === node.id) {
+			this._stopNodeVoicePlayback();
+			return;
+		}
+		if (voiceState.clips.length === 0) {
+			this._openNodeComponentsInSideEditor(node, voiceState.firstVoiceNoteCompId);
+			return;
+		}
+		this._stopNodeVoicePlayback();
+		this._activeVoicePlayNodeId = node.id;
+		this._activeVoiceClipTotal = voiceState.clips.length;
+
+		const playAtIndex = (idx: number) => {
+			if (this._activeVoicePlayNodeId !== node.id || idx >= voiceState.clips.length) {
+				this._stopNodeVoicePlayback();
+				return;
+			}
+			this._activeVoiceClipIndex = idx;
+			this._updateNodeVoiceSpeakerVisuals(node.id);
+			const entry = voiceState.clips[idx];
+			if (this._activeVoiceBlobUrl) {
+				try {
+					URL.revokeObjectURL(this._activeVoiceBlobUrl);
+				} catch { }
+				this._activeVoiceBlobUrl = null;
+			}
+			let audioSrc = entry.clip.audioDataUrl;
+			try {
+				audioSrc = this._voiceDataUrlToBlobUrl(entry.clip.audioDataUrl, entry.clip.mimeType);
+				if (audioSrc.startsWith('blob:')) {
+					this._activeVoiceBlobUrl = audioSrc;
+				}
+			} catch { }
+			const audio = new Audio(audioSrc);
+			audio.playbackRate = entry.playbackRate;
+			this._activeVoiceAudioEl = audio;
+			audio.onended = () => {
+				if (this._activeVoicePlayNodeId === node.id) {
+					playAtIndex(idx + 1);
+				}
+			};
+			audio.onerror = () => {
+				if (this._activeVoicePlayNodeId === node.id) {
+					this._notificationService.warn(`Failed to play voice clip #${idx + 1}, skipping...`);
+					playAtIndex(idx + 1);
+				}
+			};
+			void audio.play().catch(err => {
+				this._notificationService.error(`Voice playback error: ${err?.message || err}`);
+				this._stopNodeVoicePlayback();
+			});
+		};
+
+		playAtIndex(0);
 	}
 
 	private _renderNodes(): void {
@@ -8164,7 +8680,7 @@ export class WorkflowEditor extends EditorPane {
 			// Execution Status Visual Highlighting & Human Interaction
 			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
 			const isActiveRunLive = Boolean(activeRun && (activeRun.status === 'running' || activeRun.status === 'waiting_human' || activeRun.status === 'paused'));
-			const nodeRunState = activeRun?.nodeStates[node.id];
+			const nodeRunState = activeRun?.nodeStates?.[node.id];
 			if (nodeRunState) {
 				if (nodeRunState.status === 'running') {
 					if (isActiveRunLive) {
@@ -8382,6 +8898,52 @@ export class WorkflowEditor extends EditorPane {
 
 			const contentWrapper = append(nodeEl, $('.node-content-wrapper'));
 
+			// Top-right Voice Note Speaker Icon (auto-shown whenever this node contains a voice_note component)
+			const voiceState = this._getNodeVoiceNoteState(node);
+			if (voiceState.hasVoiceNoteComponent) {
+				const isPlayingThis = this._activeVoicePlayNodeId === node.id;
+				const clipCount = voiceState.clips.length;
+				const speakerBtn = append(nodeEl, $(`.node-voice-speaker-btn${clipCount === 0 ? '.empty' : ''}${isPlayingThis ? '.playing' : ''}`));
+				speakerBtn.setAttribute('data-clip-count', String(clipCount));
+				append(speakerBtn, $('span.codicon.codicon-unmute'));
+				const countBadge = append(speakerBtn, $('span.voice-count-badge'));
+				if (isPlayingThis && this._activeVoiceClipTotal > 0) {
+					countBadge.textContent = `${this._activeVoiceClipIndex + 1}/${this._activeVoiceClipTotal}`;
+					countBadge.style.display = 'inline';
+				} else if (clipCount > 1) {
+					countBadge.textContent = String(clipCount);
+					countBadge.style.display = 'inline';
+				} else {
+					countBadge.style.display = 'none';
+				}
+
+				if (clipCount > 0) {
+					const transcriptPreview = voiceState.clips
+						.map((c, idx) => c.clip.transcript?.trim() ? `#${idx + 1}: ${c.clip.transcript.trim()}` : '')
+						.filter(Boolean)
+						.join('\n');
+					const trimmedPreview = transcriptPreview.length > 260 ? transcriptPreview.substring(0, 260) + '...' : transcriptPreview;
+					speakerBtn.title = isPlayingThis
+						? `Playing voice note (${this._activeVoiceClipIndex + 1}/${this._activeVoiceClipTotal}) — Click to stop`
+						: `Voice Note (${clipCount} clip${clipCount > 1 ? 's' : ''}) — Click to play all sequentially${trimmedPreview ? `\n\n${trimmedPreview}` : ''}`;
+				} else {
+					speakerBtn.title = 'Voice Note attached (no recordings yet) — Click to open & record';
+				}
+
+				speakerBtn.onmousedown = (e) => {
+					e.stopPropagation();
+				};
+				speakerBtn.ondblclick = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+				};
+				speakerBtn.onclick = (e) => {
+					e.stopPropagation();
+					e.preventDefault();
+					this._toggleNodeVoicePlayback(node);
+				};
+			}
+
 			const labelWrapper = append(contentWrapper, $('.node-label'));
 			let displayLabel = node.label || '';
 			if (displayLabel.length > 80 || displayLabel.startsWith('#') || displayLabel.startsWith('+ content') || displayLabel.includes('URL: https://')) {
@@ -8394,7 +8956,10 @@ export class WorkflowEditor extends EditorPane {
 			labelWrapper.style.textAlign = textAlign;
 
 			// 1. Attached Modules & Execution Pipeline Steps
-			const hasPipeline = Boolean(node.pipeline && node.pipeline.length > 0);
+			const visiblePipelineEntries = (node.pipeline || [])
+				.map((step, index) => ({ step, index }))
+				.filter(({ step }) => !(step.component?.type === 'voice_note' && !step.component.voiceRunInFlow));
+			const hasPipeline = visiblePipelineEntries.length > 0;
 			const hasImports = Boolean(node.imports && node.imports.length > 0);
 
 			if (!this._isPureDiagram && (hasImports || hasPipeline)) {
@@ -8418,16 +8983,17 @@ export class WorkflowEditor extends EditorPane {
 
 				if (hasPipeline) {
 					badgesContainer.style.flexDirection = 'column';
+					badgesContainer.style.flexWrap = 'nowrap';
 					badgesContainer.style.alignItems = 'flex-start';
-					// Execution Pipeline Sequence: render each step in exact sequential order!
+					// Execution Pipeline Sequence: render each visible step in exact sequential order!
 					const pipeBadge = append(badgesContainer, $('.node-import-badge'));
 					pipeBadge.style.background = 'rgba(56, 189, 248, 0.18)';
 					pipeBadge.style.color = '#38bdf8';
 					pipeBadge.style.border = '1px solid rgba(56, 189, 248, 0.45)';
 					pipeBadge.style.cursor = 'pointer';
-					pipeBadge.title = `Pipeline: ${node.pipeline!.length} step(s) configured — Click to open Node Component Editor on the right`;
+					pipeBadge.title = `Pipeline: ${visiblePipelineEntries.length} step(s) configured — Click to open Node Component Editor on the right`;
 					append(pipeBadge, $('span' + ThemeIcon.asCSSSelector(Codicon.threeBars)));
-					append(pipeBadge, $('span.badge-text', {}, `${node.pipeline!.length} steps`));
+					append(pipeBadge, $('span.badge-text', {}, `${visiblePipelineEntries.length} steps`));
 					pipeBadge.onmousedown = (e) => {
 						if (e.shiftKey || e.ctrlKey || e.metaKey) {
 							return;
@@ -8457,9 +9023,9 @@ export class WorkflowEditor extends EditorPane {
 						}
 					};
 
-					for (let i = 0; i < node.pipeline!.length; i++) {
-						const step = node.pipeline![i];
-						const stepNumber = i + 1;
+					for (let visibleIdx = 0; visibleIdx < visiblePipelineEntries.length; visibleIdx++) {
+						const { step, index: i } = visiblePipelineEntries[visibleIdx];
+						const stepNumber = visibleIdx + 1;
 
 						if (step.type === 'run_ticket' && step.ticketName) {
 							const badge = append(badgesContainer, $(`.node-import-badge.${step.ticketType || 'ticket'}`));
@@ -8492,6 +9058,10 @@ export class WorkflowEditor extends EditorPane {
 								if (e.shiftKey || e.ctrlKey || e.metaKey) {
 									return;
 								}
+								if ((e.target as HTMLElement | null)?.closest('.capsule-resize-handle')) {
+									e.stopPropagation();
+									return;
+								}
 								e.stopPropagation();
 								if ((badge as any)._justDraggedAt && Date.now() - (badge as any)._justDraggedAt < 250) {
 									return;
@@ -8500,6 +9070,10 @@ export class WorkflowEditor extends EditorPane {
 								this._openNodePipelinePanel(node.id, step.ticketName);
 							};
 							badge.ondblclick = (e) => {
+								if ((e.target as HTMLElement | null)?.closest('.capsule-resize-handle')) {
+									e.stopPropagation();
+									return;
+								}
 								e.stopPropagation();
 								e.preventDefault();
 								this._hideTicketPopover();
@@ -8626,8 +9200,7 @@ export class WorkflowEditor extends EditorPane {
 				labelWrapper.style.color = node.textColor;
 			}
 
-			nodeEl.ondblclick = (e) => {
-				e.stopPropagation();
+			const handleNodeBlankDblClick = (e: MouseEvent) => {
 				const target = e.target as HTMLElement;
 				if (
 					target.closest('.node-imports-badges-container') ||
@@ -8639,20 +9212,33 @@ export class WorkflowEditor extends EditorPane {
 					target.closest('.node-variable-draft-wrapper') ||
 					target.closest('.node-port-handle') ||
 					target.closest('.node-resize-handle') ||
+					target.closest('.node-voice-speaker-btn') ||
 					nodeEl.classList.contains('editing-function') ||
 					nodeEl.classList.contains('editing-variable')
 				) {
 					return;
 				}
+				const labelRect = labelWrapper.getBoundingClientRect();
+				const clickedOnTitleArea = e.clientY <= labelRect.bottom + 4;
+				if (!clickedOnTitleArea && !this._isPureDiagram) {
+					this._openNodeComponentsInSideEditor(node);
+					return;
+				}
 				this._showInlineEditor(nodeEl, node);
+			};
+
+			nodeEl.ondblclick = (e) => {
+				e.stopPropagation();
+				handleNodeBlankDblClick(e);
 			};
 
 			// Handle dragging & double-click inline editing
 			nodeEl.onmousedown = (e) => {
-				// Don't drag if clicking port, resize handle, or editing inputs
+				// Don't drag if clicking port, resize handle, speaker button, or editing inputs
 				if (
 					(e.target as HTMLElement).closest('.node-port-handle') ||
 					(e.target as HTMLElement).closest('.node-resize-handle') ||
+					(e.target as HTMLElement).closest('.node-voice-speaker-btn') ||
 					(e.target as HTMLElement).closest('.node-function-draft-wrapper') ||
 					(e.target as HTMLElement).closest('.node-variable-draft-wrapper') ||
 					(e.target as HTMLElement).closest('.node-inline-editor') ||
@@ -8678,13 +9264,14 @@ export class WorkflowEditor extends EditorPane {
 						target.closest('.node-variable-draft-wrapper') ||
 						target.closest('.node-port-handle') ||
 						target.closest('.node-resize-handle') ||
+						target.closest('.node-voice-speaker-btn') ||
 						nodeEl.classList.contains('editing-function') ||
 						nodeEl.classList.contains('editing-variable')
 					) {
 						return;
 					}
 					e.preventDefault();
-					this._showInlineEditor(nodeEl, node);
+					handleNodeBlankDblClick(e);
 					return;
 				}
 
@@ -8701,6 +9288,7 @@ export class WorkflowEditor extends EditorPane {
 				}
 
 				const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey;
+				this._selectedCapsule = null;
 				this._collapseSelectionTargetNodeId = null;
 
 				if (!isMultiKey) {
@@ -8751,6 +9339,15 @@ export class WorkflowEditor extends EditorPane {
 
 				this._renderNodes();
 				this._drawLinks();
+
+				if (!isMultiKey && this._selectedNodeIds.size === 1) {
+					const hasOpenNodeSideEditor = this._editorService.editors.some(
+						ed => ed instanceof CustomModuleSchemaEditorInput && !ed.isDisposed() && (ed.isFlowchartNodeMode || ed.moduleId.startsWith('wf_node_'))
+					);
+					if (hasOpenNodeSideEditor) {
+						this._openNodeComponentsInSideEditor(node);
+					}
+				}
 
 				// Start drag logic for group dragging
 				this._isDragging = true;
@@ -9586,31 +10183,7 @@ export class WorkflowEditor extends EditorPane {
 		};
 
 		const extractSchemaParamsForType = (typeName: string): { name: string; defaultValue: any }[] => {
-			const extracted: { name: string; defaultValue: any }[] = [];
-			if (!typeName) return extracted;
-			const normTarget = typeName.trim().toLowerCase().replace(/[-_]/g, ' ');
-			const matchedMod = (this._cachedCustomModules || []).find(m =>
-				m.id?.trim().toLowerCase() === typeName.trim().toLowerCase() ||
-				m.name?.trim().toLowerCase() === typeName.trim().toLowerCase() ||
-				m.id?.trim().toLowerCase().replace(/[-_]/g, ' ') === normTarget ||
-				m.name?.trim().toLowerCase().replace(/[-_]/g, ' ') === normTarget
-			);
-			if (matchedMod?.fields && Array.isArray(matchedMod.fields)) {
-				for (const f of matchedMod.fields) {
-					if (f.type === 'parameters' && Array.isArray(f.parameters)) {
-						for (const p of f.parameters) {
-							const pName = (p.name || p.id || '').trim();
-							if (pName && !extracted.some(item => item.name.toLowerCase() === pName.toLowerCase())) {
-								extracted.push({
-									name: pName,
-									defaultValue: p.defaultValue !== undefined && p.defaultValue !== null ? p.defaultValue : ''
-								});
-							}
-						}
-					}
-				}
-			}
-			return extracted;
+			return this._extractSchemaParamsForType(typeName);
 		};
 
 		let lastAutoPrefilledType = '';
@@ -9628,6 +10201,40 @@ export class WorkflowEditor extends EditorPane {
 			return `{${entries.join(', ')}}`;
 		};
 
+		const pruneNonSchemaParams = (code: string, schemaSpecs: { name: string; defaultValue: any }[]): string => {
+			if (!code) return code;
+			const validNames = new Set(schemaSpecs.map(s => s.name.toLowerCase()));
+			return code.replace(/\b(params|parameters)\s*=\s*\{([\s\S]*?)\}/, (match, paramKw, dictBody) => {
+				const entryRegex = /(?:["']([^"']+)["']|([a-zA-Z_][a-zA-Z0-9_]*))\s*:\s*([^,\n}]+(?:\{[^{}]*\}[^,\n}]*)?)(?:,\s*|\s*|$)/g;
+				const preservedEntries: string[] = [];
+				const seenKeys = new Set<string>();
+				let em: RegExpExecArray | null;
+				while ((em = entryRegex.exec(dictBody)) !== null) {
+					const key = (em[1] || em[2] || '').trim();
+					let rawVal = (em[3] || '').trim();
+					if (!key) continue;
+					const lowerKey = key.toLowerCase();
+					if (validNames.has(lowerKey) && !seenKeys.has(lowerKey)) {
+						seenKeys.add(lowerKey);
+						const spec = schemaSpecs.find(s => s.name.toLowerCase() === lowerKey);
+						if ((rawVal === '""' || rawVal === "''") && spec && spec.defaultValue !== undefined && spec.defaultValue !== '') {
+							rawVal = typeof spec.defaultValue === 'number' || typeof spec.defaultValue === 'boolean'
+								? String(spec.defaultValue)
+								: JSON.stringify(String(spec.defaultValue));
+						}
+						preservedEntries.push(`"${spec ? spec.name : key}": ${rawVal}`);
+					}
+				}
+				if (preservedEntries.length === 0 && schemaSpecs.length > 0) {
+					return `${paramKw}=${buildParamsDictLiteral(schemaSpecs)}`;
+				}
+				if (preservedEntries.length > 1) {
+					return `${paramKw}={\n        ${preservedEntries.join(',\n        ')}\n    }`;
+				}
+				return `${paramKw}={${preservedEntries.join(', ')}}`;
+			});
+		};
+
 		const autoPrefillParamsInCode = (targetTypeKey: string, specs: { name: string; defaultValue: any }[]) => {
 			if (specs.length === 0) return;
 			const dictLiteral = buildParamsDictLiteral(specs);
@@ -9635,7 +10242,18 @@ export class WorkflowEditor extends EditorPane {
 			const prevSelStart = codeArea.selectionStart ?? curVal.length;
 			const prevSelEnd = codeArea.selectionEnd ?? prevSelStart;
 
-			// 1. If `params={}` is currently empty, pre-fill it with `"key": defaultValue` pairs!
+			// 1. If `params={...}` or `parameters={...}` has non-schema parameters, prune them!
+			if (/\b(params|parameters)\s*=\s*\{[\s\S]*?\}/.test(curVal)) {
+				const pruned = pruneNonSchemaParams(curVal, specs);
+				if (pruned !== curVal) {
+					codeArea.value = pruned;
+					lastAutoPrefilledType = targetTypeKey.toLowerCase();
+					lastAutoPrefilledDict = dictLiteral;
+					return;
+				}
+			}
+
+			// 2. If `params={}` is currently empty, pre-fill it with `"key": defaultValue` pairs!
 			const emptyParamsMatch = /\b(params|parameters)\s*=\s*\{\s*\}/.exec(curVal);
 			if (emptyParamsMatch && emptyParamsMatch.index !== undefined) {
 				const keyWord = emptyParamsMatch[1];
@@ -9650,7 +10268,7 @@ export class WorkflowEditor extends EditorPane {
 				return;
 			}
 
-			// 2. If user switched `ticket_type` and `params={...}` still equals the previous unmodified auto-prefilled dict, update it to the new type's keys!
+			// 3. If user switched `ticket_type` and `params={...}` still equals the previous unmodified auto-prefilled dict, update it to the new type's keys!
 			if (lastAutoPrefilledDict && lastAutoPrefilledType && lastAutoPrefilledType !== targetTypeKey.toLowerCase()) {
 				const idx = curVal.indexOf(lastAutoPrefilledDict);
 				if (idx !== -1) {
@@ -9665,7 +10283,7 @@ export class WorkflowEditor extends EditorPane {
 				}
 			}
 
-			// 3. If CREATE_TICKETS(...) does not have `params=` at all yet (and none of the input keys are passed yet), append `, params={...}` automatically!
+			// 4. If CREATE_TICKETS(...) does not have `params=` at all yet (and none of the input keys are passed yet), append `, params={...}` automatically!
 			if (/CREATE_TICKETS\s*\(/i.test(curVal) && !/\b(params|parameters)\s*=/.test(curVal)) {
 				const anyKeyAlreadyPassed = specs.some(sp => new RegExp(`(?:["']${sp.name}["']\\s*:|\\b${sp.name}\\s*=)`, 'i').test(curVal));
 				if (!anyKeyAlreadyPassed) {
@@ -9713,19 +10331,13 @@ export class WorkflowEditor extends EditorPane {
 				if (schemaParams.length > 0) {
 					autoPrefillParamsInCode(curType, schemaParams);
 				}
-			} else if (/RUN_TICKETS/i.test(codeArea.value)) {
-				const runTicketIdMatch = codeArea.value.match(/ticket\s*=\s*["']([^"']+)["']/i);
+			} else if (/\b(RUN_TICKETS|run_tickets)\b/i.test(codeArea.value)) {
+				const runTicketIdMatch = codeArea.value.match(/(?:ticket|ticket_id)\s*=\s*["']?([a-zA-Z0-9_\-]+)["']?/i);
 				if (runTicketIdMatch && runTicketIdMatch[1]) {
-					const snapshots = this._entityPersistenceService.getAllSnapshots();
-					const targetSnap = snapshots.find(s =>
-						s.ticketId?.toLowerCase() === runTicketIdMatch[1].toLowerCase() ||
-						s.entityName?.toLowerCase() === runTicketIdMatch[1].toLowerCase()
-					);
-					if (targetSnap?.entityType) {
-						const schemaParams = extractSchemaParamsForType(targetSnap.entityType);
-						if (schemaParams.length > 0) {
-							autoPrefillParamsInCode(targetSnap.entityType, schemaParams);
-						}
+					const targetIdentifier = runTicketIdMatch[1].trim();
+					const schemaParams = extractSchemaParamsForType(targetIdentifier);
+					if (schemaParams.length > 0) {
+						autoPrefillParamsInCode(targetIdentifier, schemaParams);
 					}
 				}
 			}
@@ -9775,7 +10387,7 @@ export class WorkflowEditor extends EditorPane {
 			if (/CREATE_TICKETS/i.test(val)) {
 				fieldsLabel.textContent = `Parameters (${curType} Inputs):`;
 
-				// 1. Discover Inputs / Parameters directly from Custom Module YAML schema (ICustomModulesService)
+				// 1. Discover Inputs / Parameters strictly from Custom Module YAML schema (ICustomModulesService)
 				const schemaParams = extractSchemaParamsForType(curType);
 				for (const sp of schemaParams) {
 					if (!paramSpecs.some(p => p.name.toLowerCase() === sp.name.toLowerCase())) {
@@ -9783,84 +10395,24 @@ export class WorkflowEditor extends EditorPane {
 					}
 				}
 
-				// 2. Also discover parameters from snapshot customMetadata if any exist
-				const snapshots = this._entityPersistenceService.getAllSnapshots();
-				const sample = snapshots.find(s => s.entityType?.toLowerCase() === curType.toLowerCase());
-				if (sample?.customMetadata) {
-					for (const [k, v] of Object.entries(sample.customMetadata)) {
-						if (k === 'flowchartJson' || k === 'title' || k === 'path') continue;
-
-						if (typeof v === 'string' && v.trim().startsWith('{') && v.trim().endsWith('}')) {
-							try {
-								const parsed = JSON.parse(v.trim());
-								if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-									if (parsed.url !== undefined || parsed.content !== undefined || parsed.credentials !== undefined ||
-										parsed.gitRemoteUrl !== undefined || parsed.gitBranch !== undefined ||
-										parsed.instruction !== undefined || parsed.prompt !== undefined ||
-										parsed.targetModel !== undefined || parsed.outputSpecs !== undefined) {
-										continue;
-									}
-
-									for (const [pName, pVal] of Object.entries(parsed)) {
-										const lowerName = pName.toLowerCase();
-										if (lowerName === 'url' || lowerName === 'content' || lowerName === 'credentials') continue;
-										if (typeof pVal === 'string' && pVal.length > 80) continue;
-
-										if (!paramSpecs.some(p => p.name.toLowerCase() === lowerName)) {
-											paramSpecs.push({ name: pName, defaultValue: pVal !== undefined ? pVal : 0, isDictParam: true });
-										}
-									}
-									continue;
-								}
-							} catch { }
-						}
-					}
-				}
-
-				// 3. Built-in / known fallbacks
-				if (curType.toLowerCase() === 'xxx') {
-					if (!paramSpecs.some(p => p.name.toLowerCase() === 'start')) {
-						paramSpecs.push({ name: 'start', defaultValue: 0, isDictParam: true });
-					}
-				} else if (curType.toLowerCase() === 'task') {
-					if (!paramSpecs.some(p => p.name.toLowerCase() === 'priority')) {
-						paramSpecs.push({ name: 'priority', defaultValue: 'normal', isDictParam: true });
-					}
-					if (!paramSpecs.some(p => p.name.toLowerCase() === 'status')) {
-						paramSpecs.push({ name: 'status', defaultValue: 'todo', isDictParam: true });
-					}
-				}
-
-				// 4. Standard options
+				// 2. Standard options
 				paramSpecs.push({ name: 'title', defaultValue: '', isStandard: true });
 				paramSpecs.push({ name: 'path', defaultValue: defaultPath, isStandard: true });
-			} else if (/RUN_TICKETS/i.test(val)) {
+			} else if (/\b(RUN_TICKETS|run_tickets)\b/i.test(val)) {
 				fieldsLabel.textContent = 'Parameters (RUN_TICKETS):';
 				const ticketVarCandidate = Array.from(availableVars).find(v => /ticket/i.test(v));
 				const ticketDefault = ticketVarCandidate ? `@${ticketVarCandidate}` : '';
 				paramSpecs.push({ name: 'ticket', defaultValue: ticketDefault, isStandard: true });
 
-				// If ticket="TICKET-ID" is specified, also surface that ticket's Inputs / Parameters
-				const runTicketIdMatch = val.match(/ticket\s*=\s*["']([^"']+)["']/i);
+				// If ticket="TICKET-ID" or ticket_id="TICKET-ID" is specified, surface ONLY that ticket's Inputs / Parameters from its Template Schema
+				const runTicketIdMatch = val.match(/(?:ticket|ticket_id)\s*=\s*["']?([a-zA-Z0-9_\-]+)["']?/i);
 				if (runTicketIdMatch && runTicketIdMatch[1]) {
-					const snapshots = this._entityPersistenceService.getAllSnapshots();
-					const targetSnap = snapshots.find(s =>
-						s.ticketId?.toLowerCase() === runTicketIdMatch[1].toLowerCase() ||
-						s.entityName?.toLowerCase() === runTicketIdMatch[1].toLowerCase()
-					);
-					if (targetSnap?.entityType) {
-						for (const sp of extractSchemaParamsForType(targetSnap.entityType)) {
-							if (!paramSpecs.some(p => p.name.toLowerCase() === sp.name.toLowerCase())) {
-								paramSpecs.push({ name: sp.name, defaultValue: sp.defaultValue, isDictParam: true });
-							}
+					const targetIdentifier = runTicketIdMatch[1].trim();
+					for (const sp of extractSchemaParamsForType(targetIdentifier)) {
+						if (!paramSpecs.some(p => p.name.toLowerCase() === sp.name.toLowerCase())) {
+							paramSpecs.push({ name: sp.name, defaultValue: sp.defaultValue, isDictParam: true });
 						}
 					}
-				}
-
-				const startCandidate = Array.from(availableVars).find(v => /^(start|start_offset|idx|index|count|counter|offset)$/i.test(v));
-				const startDefault = startCandidate ? `@${startCandidate}` : 0;
-				if (!paramSpecs.some(p => p.name.toLowerCase() === 'start')) {
-					paramSpecs.push({ name: 'start', defaultValue: startDefault, isDictParam: true });
 				}
 			} else if (/GET_TICKETS/i.test(val)) {
 				fieldsLabel.textContent = 'Parameters (GET_TICKETS):';
@@ -10060,10 +10612,10 @@ export class WorkflowEditor extends EditorPane {
 			const seen = new Set<string>();
 
 			const fns = [
-				{ name: 'RUN_TICKETS', detail: 'RUN_TICKETS(ticket="", start=0)', snippet: 'RUN_TICKETS(ticket="", start=0)' },
-				{ name: 'CREATE_TICKETS', detail: `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")`, snippet: `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}")` },
+				{ name: 'RUN_TICKETS', detail: 'RUN_TICKETS(ticket="", params={})', snippet: 'RUN_TICKETS(ticket="", params={})' },
+				{ name: 'CREATE_TICKETS', detail: `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}", params={})`, snippet: `CREATE_TICKETS(ticket_type="Task", title="", path="${defaultPath}", params={})` },
 				{ name: 'GET_TICKETS', detail: 'GET_TICKETS(ticket="")', snippet: 'GET_TICKETS(ticket="")' },
-				{ name: 'GET_OUTPUTS', detail: 'GET_OUTPUTS(ticket_id="")', snippet: 'GET_OUTPUTS(ticket_id="")' },
+				{ name: 'GET_OUTPUTS', detail: 'GET_OUTPUTS(ticket="", field="")', snippet: 'GET_OUTPUTS(ticket="", field="")' },
 				{ name: 'GET_PRIMITIVES_CATALOG', detail: 'GET_PRIMITIVES_CATALOG()', snippet: 'GET_PRIMITIVES_CATALOG()' },
 				{ name: 'DISPLAY', detail: 'DISPLAY(value)', snippet: 'DISPLAY()' }
 			];
@@ -10286,6 +10838,15 @@ export class WorkflowEditor extends EditorPane {
 					closePopover();
 					return;
 				}
+			}
+
+			if (isCommentKeybinding(e)) {
+				e.preventDefault();
+				e.stopPropagation();
+				togglePythonComment(codeArea);
+				syncFnBackdrop();
+				updateFieldChips();
+				return;
 			}
 
 			if (e.key === 'Tab') {
@@ -11652,6 +12213,15 @@ export class WorkflowEditor extends EditorPane {
 				if (this._inspectorEl) {
 					this._renderInspector(this._inspectorEl);
 				}
+				const collapsedNode = this._data.nodes.find(n => n.id === this._collapseSelectionTargetNodeId);
+				if (collapsedNode) {
+					const hasOpenNodeSideEditor = this._editorService.editors.some(
+						ed => ed instanceof CustomModuleSchemaEditorInput && !ed.isDisposed() && (ed.isFlowchartNodeMode || ed.moduleId.startsWith('wf_node_'))
+					);
+					if (hasOpenNodeSideEditor) {
+						this._openNodeComponentsInSideEditor(collapsedNode);
+					}
+				}
 			}
 			this._collapseSelectionTargetNodeId = null;
 			this._isDragging = false;
@@ -12088,185 +12658,6 @@ export class WorkflowEditor extends EditorPane {
 			}
 			if (totalLen <= 0) return 0.5;
 
-			let bestDistSq = Infinity;
-			let bestPathDist = 0;
-			let acc = 0;
-
-			for (let i = 0; i < waypoints.length - 1; i++) {
-				const ax = waypoints[i].x;
-				const ay = waypoints[i].y;
-				const bx = waypoints[i + 1].x;
-				const by = waypoints[i + 1].y;
-				const segLen = segLens[i];
-
-				const dx = bx - ax;
-				const dy = by - ay;
-				const lenSq = dx * dx + dy * dy;
-
-				let u = 0;
-				if (lenSq > 0) {
-					u = ((px - ax) * dx + (py - ay) * dy) / lenSq;
-					u = Math.max(0, Math.min(1, u));
-				}
-				const qx = ax + u * dx;
-				const qy = ay + u * dy;
-				const distSq = (px - qx) * (px - qx) + (py - qy) * (py - qy);
-
-				if (distSq < bestDistSq) {
-					bestDistSq = distSq;
-					bestPathDist = acc + u * segLen;
-				}
-				acc += segLen;
-			}
-
-			const t = bestPathDist / totalLen;
-			return Math.max(0.05, Math.min(0.95, Number(t.toFixed(3))));
-		} else {
-			let bestDistSq = Infinity;
-			let bestT = 0.5;
-			const samples = 100;
-			for (let i = 0; i <= samples; i++) {
-				const t = i / samples;
-				const pt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, t, link.waypoints);
-				const distSq = (px - pt.x) * (px - pt.x) + (py - pt.y) * (py - pt.y);
-				if (distSq < bestDistSq) {
-					bestDistSq = distSq;
-					bestT = t;
-				}
-			}
-			return Math.max(0.05, Math.min(0.95, Number(bestT.toFixed(3))));
-		}
-	}
-
-	private _findClosestSegmentOnWaypoints(waypoints: { x: number; y: number }[], px: number, py: number): number {
-		let bestIdx = 0;
-		let bestDistSq = Infinity;
-		for (let i = 0; i < waypoints.length - 1; i++) {
-			const ax = waypoints[i].x;
-			const ay = waypoints[i].y;
-			const bx = waypoints[i + 1].x;
-			const by = waypoints[i + 1].y;
-			const dx = bx - ax;
-			const dy = by - ay;
-			const lenSq = dx * dx + dy * dy;
-			if (lenSq < 1) continue;
-			let u = ((px - ax) * dx + (py - ay) * dy) / lenSq;
-			u = Math.max(0, Math.min(1, u));
-			const qx = ax + u * dx;
-			const qy = ay + u * dy;
-			const distSq = (px - qx) * (px - qx) + (py - qy) * (py - qy);
-			if (distSq < bestDistSq) {
-				bestDistSq = distSq;
-				bestIdx = i;
-			}
-		}
-		return bestIdx;
-	}
-
-	private _prepareSegmentDragWaypoints(
-		pts: { x: number; y: number }[],
-		segIdx: number,
-		fromPort: 'top' | 'right' | 'bottom' | 'left',
-		toPort: 'top' | 'right' | 'bottom' | 'left'
-	): { pts: { x: number; y: number }[]; segIdx: number; isVertical: boolean } {
-		const copy = pts.map(p => ({ x: p.x, y: p.y }));
-		let idx = Math.max(0, Math.min(copy.length - 2, segIdx));
-		const pA = copy[idx];
-		const pB = copy[idx + 1];
-		const isVertical = Math.abs(pA.x - pB.x) <= Math.abs(pA.y - pB.y);
-
-		if (idx === 0) {
-			const stubDist = 20;
-			let sx = copy[0].x;
-			let sy = copy[0].y;
-			if (fromPort === 'right') sx += stubDist;
-			else if (fromPort === 'left') sx -= stubDist;
-			else if (fromPort === 'bottom') sy += stubDist;
-			else if (fromPort === 'top') sy -= stubDist;
-			copy.splice(1, 0, { x: sx, y: sy }, { x: sx, y: sy });
-			idx += 2;
-		}
-		if (idx === copy.length - 2) {
-			const stubDist = 20;
-			const last = copy[copy.length - 1];
-			let ex = last.x;
-			let ey = last.y;
-			if (toPort === 'left') ex -= stubDist;
-			else if (toPort === 'right') ex += stubDist;
-			else if (toPort === 'top') ey -= stubDist;
-			else if (toPort === 'bottom') ey += stubDist;
-			copy.splice(copy.length - 1, 0, { x: ex, y: ey }, { x: ex, y: ey });
-		}
-
-		return { pts: copy, segIdx: idx, isVertical };
-	}
-
-	private _startLinkSegmentDrag(
-		e: MouseEvent,
-		link: IFlowchartLink,
-		baseWaypoints: { x: number; y: number }[],
-		segIdx: number,
-		canvasX: number,
-		canvasY: number,
-		isExplicitHandle: boolean
-	): void {
-		if (e.button !== 0) return;
-		e.stopPropagation();
-		this._isDraggingLinkSegment = link.id;
-		this._dragLinkSegmentInitialIndex = segIdx;
-		this._dragLinkSegmentIndex = segIdx;
-		this._dragLinkSegmentWaypoints = baseWaypoints.map(p => ({ x: p.x, y: p.y }));
-		this._dragLinkSegmentStartX = e.clientX;
-		this._dragLinkSegmentStartY = e.clientY;
-		this._dragLinkSegmentCanvasX = canvasX;
-		this._dragLinkSegmentCanvasY = canvasY;
-		this._dragLinkSegmentHasMoved = false;
-		this._dragLinkSegmentPrepared = false;
-
-		if (isExplicitHandle) {
-			const fromNode = this._data.nodes.find(n => n.id === link.from);
-			const toNode = this._data.nodes.find(n => n.id === link.to);
-			if (fromNode && toNode) {
-				const closest = this._getClosestPorts(fromNode, toNode);
-				const fromPort = link.fromPort || closest.fromPort;
-				const toPort = link.toPort || closest.toPort;
-				const prep = this._prepareSegmentDragWaypoints(this._dragLinkSegmentWaypoints, segIdx, fromPort, toPort);
-				this._dragLinkSegmentWaypoints = prep.pts;
-				this._dragLinkSegmentIndex = prep.segIdx;
-				this._dragLinkSegmentIsVertical = prep.isVertical;
-				this._dragLinkSegmentPrepared = true;
-			}
-		}
-	}
-
-	private _showLinkInlineEditor(link: IFlowchartLink, x: number, y: number): void {
-		if (!this._linkDeletesContainer) return;
-		// Remove any existing editor
-		const existing = this._linkDeletesContainer.querySelector('.workflow-link-label-editor-wrapper, .workflow-link-label-editor');
-		if (existing) existing.remove();
-
-		const wrapper = append(this._linkDeletesContainer, $('.workflow-link-label-editor-wrapper'));
-		wrapper.style.position = 'absolute';
-		wrapper.style.left = `${x}px`;
-		wrapper.style.top = `${y}px`;
-		wrapper.style.zIndex = '10000';
-
-		const textarea = append(wrapper, $('textarea.workflow-link-label-editor')) as HTMLTextAreaElement;
-		textarea.value = link.label || '';
-		textarea.placeholder = 'Condition, e.g. @monitor != None';
-
-		const adjustHeight = () => {
-			textarea.style.height = 'auto';
-			textarea.style.height = `${Math.min(90, Math.max(24, textarea.scrollHeight + 2))}px`;
-		};
-
-		let committed = false;
-		let acMenu: HTMLElement | null = null;
-		let activeAcIndex = 0;
-		let currentMatches: { name: string; initialValue: string; nodeLabel?: string }[] = [];
-
-		const availableVars: { name: string; initialValue: string; nodeLabel?: string }[] = [];
-		for (const n of this._data?.nodes || []) {
 			for (const v of this._getNodeVariables(n)) {
 				availableVars.push({
 					name: v.name,
@@ -13137,6 +13528,49 @@ export class WorkflowEditor extends EditorPane {
 				this._copySelectedNodes();
 			};
 
+			if (!this._isPureDiagram) {
+				const pasteCapItem = append(menu, $('.context-menu-item'));
+				pasteCapItem.style.color = '#c084fc';
+				const setPasteLabel = (step: INodePipelineStep) => {
+					const capLabel = step.targetVariable
+						|| step.label
+						|| step.ticketName
+						|| step.component?.label
+						|| step.functionName
+						|| 'Capsule';
+					pasteCapItem.textContent = `Paste Capsule "${capLabel}"`;
+					pasteCapItem.style.display = '';
+				};
+				if (WorkflowEditor._copiedCapsule) {
+					setPasteLabel(WorkflowEditor._copiedCapsule.step);
+				} else {
+					pasteCapItem.style.display = 'none';
+					void this._clipboardService.readText().then(rawClip => {
+						const trimmed = (rawClip || '').trim();
+						if (trimmed.startsWith('{') && trimmed.includes('__anyagent_capsule_v1__')) {
+							try {
+								const parsed = JSON.parse(trimmed);
+								if (parsed?.__anyagent_capsule_v1__ && parsed.step) {
+									WorkflowEditor._copiedCapsule = {
+										step: parsed.step,
+										sourceNodeLabel: parsed.sourceNodeLabel,
+										sourceVars: Array.isArray(parsed.sourceVars) ? parsed.sourceVars : []
+									};
+									setPasteLabel(parsed.step);
+								}
+							} catch { }
+						}
+					}).catch(() => { });
+				}
+				pasteCapItem.onclick = () => {
+					this._closeContextMenu();
+					const targetNode = this._data.nodes.find(n => n.id === targetId);
+					if (targetNode) {
+						void this._pasteCapsuleIntoNode(targetNode);
+					}
+				};
+			}
+
 			// Group & Ungroup Menu Items
 			if (this._selectedNodeIds.size >= 2) {
 				const groupItem = append(menu, $('.context-menu-item'));
@@ -13895,6 +14329,508 @@ export class WorkflowEditor extends EditorPane {
 			this._contextMenuEl.remove();
 			this._contextMenuEl = undefined;
 		}
+		while (this._contextMenuDisposables.length > 0) {
+			try { this._contextMenuDisposables.pop()?.dispose(); } catch { }
+		}
+	}
+
+	private _extractStepVariableNames(step: INodePipelineStep): string[] {
+		const vars: string[] = [];
+		const pushVar = (raw?: string) => {
+			const clean = (raw || '').replace(/^@/, '').trim();
+			if (clean && !vars.includes(clean)) {
+				vars.push(clean);
+			}
+		};
+		if (step.component) {
+			const cType = step.component.type;
+			if (cType !== 'parameters' && cType !== 'output' && cType !== 'result' && cType !== 'display') {
+				pushVar(step.component.outputVariableName || step.targetVariable || this._getComponentOutputVarName(step.component));
+			}
+		} else {
+			if (step.targetVariable) {
+				pushVar(step.targetVariable);
+			}
+			const expr = (step.expression || '').trim();
+			const assignMatch = expr.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)/);
+			if (assignMatch && assignMatch[1] && !WorkflowEditor._PYTHON_KEYWORDS.has(assignMatch[1])) {
+				pushVar(assignMatch[1]);
+			}
+		}
+		return vars;
+	}
+
+	private _copyCapsuleStep(node: IFlowchartNode, step: INodePipelineStep): void {
+		const clonedStep: INodePipelineStep = JSON.parse(JSON.stringify(step));
+		// Strip transient runtime execution logs/status from copied component while preserving all config & params
+		if (clonedStep.component) {
+			const compAny = clonedStep.component as any;
+			delete compAny.lastExecutionLog;
+			delete compAny.lastExecutionOutput;
+			delete compAny.lastExecutionStatus;
+			delete compAny.lastExecutionDurationMs;
+			delete compAny.lastExecutedAt;
+			delete compAny.lastExecutionExitCode;
+		}
+
+		const varNames = this._extractStepVariableNames(clonedStep);
+		const sourceVars: Array<{ name: string; initialValue: string; expression?: string }> = [];
+		for (const vName of varNames) {
+			const existing = (node.outputVariables || []).find(v => (v.name || '').replace(/^@/, '').trim() === vName);
+			sourceVars.push({
+				name: vName,
+				initialValue: existing?.initialValue || clonedStep.expression || 'None',
+				expression: existing?.expression || clonedStep.expression
+			});
+		}
+
+		const payload = {
+			step: clonedStep,
+			sourceNodeLabel: node.label,
+			sourceVars
+		};
+		WorkflowEditor._copiedCapsule = payload;
+		WorkflowEditor._lastCopyKind = 'capsule';
+
+		try {
+			void this._clipboardService.writeText(JSON.stringify({
+				__anyagent_capsule_v1__: true,
+				...payload
+			}));
+		} catch { }
+
+		const displayName = clonedStep.targetVariable
+			|| clonedStep.component?.label
+			|| clonedStep.ticketName
+			|| clonedStep.label
+			|| clonedStep.functionName
+			|| 'Capsule';
+		this._notificationService.info(`Copied capsule '${displayName}'. Right-click any node or press Cmd/Ctrl+V to paste.`);
+	}
+
+	private async _pasteCapsuleIntoNode(targetNode: IFlowchartNode, insertIndex?: number): Promise<void> {
+		let payload = WorkflowEditor._copiedCapsule;
+		if (!payload) {
+			try {
+				const rawClip = (await this._clipboardService.readText() || '').trim();
+				if (rawClip.startsWith('{') && rawClip.includes('__anyagent_capsule_v1__')) {
+					const parsed = JSON.parse(rawClip);
+					if (parsed && parsed.__anyagent_capsule_v1__ && parsed.step) {
+						payload = {
+							step: parsed.step,
+							sourceNodeLabel: parsed.sourceNodeLabel,
+							sourceVars: Array.isArray(parsed.sourceVars) ? parsed.sourceVars : []
+						};
+						WorkflowEditor._copiedCapsule = payload;
+					}
+				}
+			} catch { }
+		}
+		if (!payload || !payload.step) {
+			this._notificationService.warn('No copied capsule available to paste.');
+			return;
+		}
+
+		if (!targetNode.pipeline) {
+			targetNode.pipeline = [];
+		}
+
+		const clonedStep: INodePipelineStep = JSON.parse(JSON.stringify(payload.step));
+		clonedStep.id = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+		let mergedIntoExistingSingleInstance = false;
+		if (clonedStep.component) {
+			clonedStep.component.id = `comp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+			const compType = clonedStep.component.type;
+
+			// Handle single-instance components cleanly: merge parameters/outputSpecs into existing instance if present
+			if (compType === 'parameters') {
+				const existingInputsStep = targetNode.pipeline.find(s => s.component?.type === 'parameters');
+				if (existingInputsStep?.component) {
+					const existingParams = existingInputsStep.component.parameters || [];
+					const incomingParams = clonedStep.component.parameters || [];
+					for (const ip of incomingParams) {
+						const ipName = (ip.name || '').trim().toLowerCase();
+						if (ipName && !existingParams.some(ep => (ep.name || '').trim().toLowerCase() === ipName)) {
+							existingParams.push({ ...ip, id: `param_${Date.now()}_${Math.random().toString(36).substring(2, 5)}` });
+						}
+					}
+					existingInputsStep.component.parameters = existingParams;
+					this._syncComponentStepMetadata(existingInputsStep);
+					mergedIntoExistingSingleInstance = true;
+				}
+			} else if (compType === 'output') {
+				const existingOutStep = targetNode.pipeline.find(s => s.component?.type === 'output');
+				if (existingOutStep?.component) {
+					const existingSpecs = existingOutStep.component.outputSpecs || [];
+					const incomingSpecs = clonedStep.component.outputSpecs || [];
+					for (const ispec of incomingSpecs) {
+						const key = (ispec.fieldKey || ispec.label || '').trim().toLowerCase();
+						if (key && !existingSpecs.some(es => (es.fieldKey || es.label || '').trim().toLowerCase() === key)) {
+							existingSpecs.push({ ...ispec });
+						}
+					}
+					existingOutStep.component.outputSpecs = existingSpecs;
+					this._syncComponentStepMetadata(existingOutStep);
+					mergedIntoExistingSingleInstance = true;
+				}
+			}
+
+			if (!mergedIntoExistingSingleInstance) {
+				if (compType !== 'parameters' && compType !== 'output' && compType !== 'result' && compType !== 'display') {
+					const resolvedVar = (clonedStep.component.outputVariableName || clonedStep.targetVariable || this._getComponentOutputVarName(clonedStep.component)).trim();
+					if (resolvedVar) {
+						clonedStep.component.outputVariableName = resolvedVar;
+						clonedStep.targetVariable = resolvedVar;
+					}
+				}
+				this._syncComponentStepMetadata(clonedStep);
+			}
+		} else {
+			// Ensure inline Python / set_variable / call_function capsules keep targetVariable aligned with LHS assignment
+			const expr = (clonedStep.expression || '').trim();
+			const assignMatch = expr.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)/);
+			if (!clonedStep.targetVariable && assignMatch && assignMatch[1] && !WorkflowEditor._PYTHON_KEYWORDS.has(assignMatch[1])) {
+				clonedStep.targetVariable = assignMatch[1];
+			}
+		}
+
+		if (!mergedIntoExistingSingleInstance) {
+			if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= targetNode.pipeline.length) {
+				targetNode.pipeline.splice(insertIndex, 0, clonedStep);
+			} else {
+				targetNode.pipeline.push(clonedStep);
+			}
+		}
+
+		// Automatically create & synchronize associated variables in targetNode.outputVariables
+		const createdVarNames = this._extractStepVariableNames(clonedStep);
+		if (!targetNode.outputVariables) {
+			targetNode.outputVariables = [];
+		}
+		for (const vName of createdVarNames) {
+			if (!targetNode.outputVariables.some(v => (v.name || '').replace(/^@/, '').trim() === vName)) {
+				const srcMeta = payload.sourceVars?.find(sv => sv.name === vName);
+				targetNode.outputVariables.push({
+					name: vName,
+					initialValue: srcMeta?.initialValue || clonedStep.expression || 'None',
+					expression: srcMeta?.expression || clonedStep.expression
+				});
+			}
+		}
+
+		this._ensureNodeFitsPipeline(targetNode);
+		this._syncToNode(targetNode, true);
+		this._saveFlowchartData();
+		this._renderNodes();
+		this._drawLinks();
+		this._refreshVariablesDrawer(targetNode.id);
+
+		// If the side editor is currently open for targetNode, refresh it immediately
+		const openSideEditor = this._editorService.editors.find(
+			ed => ed instanceof CustomModuleSchemaEditorInput && !ed.isDisposed() && ed.isFlowchartNodeMode && ed.moduleId === `wf_node_${targetNode.id}`
+		);
+		if (openSideEditor) {
+			this._openNodeComponentsInSideEditor(targetNode);
+		}
+
+		const capLabel = clonedStep.targetVariable || clonedStep.component?.label || clonedStep.ticketName || clonedStep.label || 'Capsule';
+		const varNote = createdVarNames.length > 0 ? ` (synced variable: ${createdVarNames.join(', ')})` : '';
+		this._notificationService.info(`Pasted capsule '${capLabel}' into '${targetNode.label}'${varNote}.`);
+	}
+
+	private _moveCapsuleBetweenNodes(
+		sourceNode: IFlowchartNode,
+		sourceIndex: number,
+		targetNode: IFlowchartNode,
+		insertIndex?: number
+	): void {
+		if (sourceNode.id === targetNode.id) {
+			return;
+		}
+		if (!sourceNode.pipeline || sourceIndex < 0 || sourceIndex >= sourceNode.pipeline.length) {
+			return;
+		}
+
+		// Snapshot variable metadata from source node before removing
+		const movingStep = sourceNode.pipeline[sourceIndex];
+		const movedVarNames = this._extractStepVariableNames(movingStep);
+		const movedVarMeta = new Map<string, { initialValue: string; expression?: string; currentValue?: any }>();
+		for (const vName of movedVarNames) {
+			const existing = (sourceNode.outputVariables || []).find(v => (v.name || '').replace(/^@/, '').trim() === vName);
+			movedVarMeta.set(vName, {
+				initialValue: existing?.initialValue || movingStep.expression || 'None',
+				expression: existing?.expression || movingStep.expression,
+				currentValue: existing?.currentValue
+			});
+		}
+
+		// Snapshot ticket import metadata if run_ticket
+		const movedImportRecord = (movingStep.type === 'run_ticket' && movingStep.ticketName && Array.isArray(sourceNode.imports))
+			? sourceNode.imports.find(imp => imp.name === movingStep.ticketName)
+			: undefined;
+
+		// 1. Remove capsule from source node
+		const [movedStep] = sourceNode.pipeline.splice(sourceIndex, 1);
+
+		if (movedStep.type === 'run_ticket' && movedStep.ticketName && Array.isArray(sourceNode.imports)) {
+			const stillUsedInSource = sourceNode.pipeline.some(s => s.type === 'run_ticket' && s.ticketName === movedStep.ticketName);
+			if (!stillUsedInSource) {
+				sourceNode.imports = sourceNode.imports.filter(imp => imp.name !== movedStep.ticketName);
+			}
+		}
+
+		// Clean up orphaned variables from sourceNode.outputVariables
+		if (movedVarNames.length > 0 && Array.isArray(sourceNode.outputVariables)) {
+			const remainingSourceVars = new Set<string>();
+			for (const remStep of sourceNode.pipeline) {
+				for (const rv of this._extractStepVariableNames(remStep)) {
+					remainingSourceVars.add(rv);
+				}
+			}
+			sourceNode.outputVariables = sourceNode.outputVariables.filter(v => {
+				const vn = (v.name || '').replace(/^@/, '').trim();
+				return !movedVarNames.includes(vn) || remainingSourceVars.has(vn);
+			});
+		}
+
+		// 2. Insert or merge capsule into target node
+		if (!targetNode.pipeline) {
+			targetNode.pipeline = [];
+		}
+
+		let mergedIntoExistingSingleInstance = false;
+		if (movedStep.component) {
+			const compType = movedStep.component.type;
+			if (compType === 'parameters') {
+				const existingInputsStep = targetNode.pipeline.find(s => s.component?.type === 'parameters');
+				if (existingInputsStep?.component) {
+					const existingParams = existingInputsStep.component.parameters || [];
+					const incomingParams = movedStep.component.parameters || [];
+					for (const ip of incomingParams) {
+						const ipName = (ip.name || '').trim().toLowerCase();
+						if (ipName && !existingParams.some(ep => (ep.name || '').trim().toLowerCase() === ipName)) {
+							existingParams.push({ ...ip });
+						}
+					}
+					existingInputsStep.component.parameters = existingParams;
+					this._syncComponentStepMetadata(existingInputsStep);
+					mergedIntoExistingSingleInstance = true;
+				}
+			} else if (compType === 'output') {
+				const existingOutStep = targetNode.pipeline.find(s => s.component?.type === 'output');
+				if (existingOutStep?.component) {
+					const existingSpecs = existingOutStep.component.outputSpecs || [];
+					const incomingSpecs = movedStep.component.outputSpecs || [];
+					for (const ispec of incomingSpecs) {
+						const key = (ispec.fieldKey || ispec.label || '').trim().toLowerCase();
+						if (key && !existingSpecs.some(es => (es.fieldKey || es.label || '').trim().toLowerCase() === key)) {
+							existingSpecs.push({ ...ispec });
+						}
+					}
+					existingOutStep.component.outputSpecs = existingSpecs;
+					this._syncComponentStepMetadata(existingOutStep);
+					mergedIntoExistingSingleInstance = true;
+				}
+			}
+
+			if (!mergedIntoExistingSingleInstance) {
+				if (compType !== 'parameters' && compType !== 'output' && compType !== 'result' && compType !== 'display') {
+					const resolvedVar = (movedStep.component.outputVariableName || movedStep.targetVariable || this._getComponentOutputVarName(movedStep.component)).trim();
+					if (resolvedVar) {
+						movedStep.component.outputVariableName = resolvedVar;
+						movedStep.targetVariable = resolvedVar;
+					}
+				}
+				this._syncComponentStepMetadata(movedStep);
+			}
+		}
+
+		if (!mergedIntoExistingSingleInstance) {
+			if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= targetNode.pipeline.length) {
+				targetNode.pipeline.splice(insertIndex, 0, movedStep);
+			} else {
+				targetNode.pipeline.push(movedStep);
+			}
+		}
+
+		if (movedImportRecord) {
+			if (!targetNode.imports) {
+				targetNode.imports = [];
+			}
+			if (!targetNode.imports.some(imp => imp.name === movedImportRecord.name)) {
+				targetNode.imports.push({ ...movedImportRecord });
+			}
+		}
+
+		// Sync associated variables into targetNode.outputVariables
+		if (!targetNode.outputVariables) {
+			targetNode.outputVariables = [];
+		}
+		for (const vName of movedVarNames) {
+			if (!targetNode.outputVariables.some(v => (v.name || '').replace(/^@/, '').trim() === vName)) {
+				const meta = movedVarMeta.get(vName);
+				targetNode.outputVariables.push({
+					name: vName,
+					initialValue: meta?.initialValue || movedStep.expression || 'None',
+					expression: meta?.expression || movedStep.expression,
+					...(meta?.currentValue !== undefined ? { currentValue: meta.currentValue } : {})
+				});
+			}
+		}
+
+		// 3. Synchronize both source & target nodes, side editors, and canvas
+		if (sourceNode.pipeline.length > 0) {
+			this._syncToNode(sourceNode, true);
+		}
+		this._ensureNodeFitsPipeline(targetNode);
+		this._syncToNode(targetNode, true);
+		this._selectedCapsule = mergedIntoExistingSingleInstance ? null : { nodeId: targetNode.id, stepId: movedStep.id };
+
+		const syncSideEditorForNode = (n: IFlowchartNode) => {
+			const existingInput = this._nodeEditorInputsByNodeId.get(n.id);
+			if (existingInput && !existingInput.isDisposed() && existingInput.draftModule) {
+				const nodeFields = (n.pipeline || [])
+					.filter(st => !!st.component)
+					.map(st => st.component!);
+				existingInput.draftModule.fields = [
+					{ id: 'title', label: 'Title', type: 'text', required: true },
+					...nodeFields
+				];
+				existingInput.notifyExternalDraftUpdated();
+			}
+		};
+		syncSideEditorForNode(sourceNode);
+		syncSideEditorForNode(targetNode);
+
+		this._saveFlowchartData();
+		this._renderNodes();
+		this._drawLinks();
+		if (this._inspectorEl) {
+			this._renderInspector(this._inspectorEl);
+		}
+		if (this._pipelinePanelEl && (this._activePipelineNodeId === sourceNode.id || this._activePipelineNodeId === targetNode.id)) {
+			const activeNode = this._activePipelineNodeId === sourceNode.id ? sourceNode : targetNode;
+			this._renderPipelinePanel(this._pipelinePanelEl, activeNode);
+		}
+		this._refreshVariablesDrawer(targetNode.id);
+
+		const capLabel = movedStep.targetVariable || movedStep.component?.label || movedStep.ticketName || movedStep.label || 'Capsule';
+		const varNote = movedVarNames.length > 0 ? ` (moved variable: ${movedVarNames.join(', ')})` : '';
+		this._notificationService.info(`Moved capsule '${capLabel}' from '${sourceNode.label}' to '${targetNode.label}'${varNote}.`);
+	}
+
+	private _showCapsuleContextMenu(x: number, y: number, node: IFlowchartNode, stepIndex: number): void {
+		this._closeContextMenu();
+		const step = node.pipeline?.[stepIndex];
+		if (!step) {
+			return;
+		}
+
+		const menu = append(document.body, $('.workflow-context-menu'));
+		this._contextMenuEl = menu;
+		menu.style.position = 'fixed';
+		menu.style.left = `${x}px`;
+		menu.style.top = `${y}px`;
+		menu.style.zIndex = '20000';
+
+		const copyItem = append(menu, $('.context-menu-item'));
+		copyItem.textContent = 'Copy Capsule (Ctrl+C)';
+		copyItem.onclick = (e) => {
+			e.stopPropagation();
+			this._closeContextMenu();
+			this._copyCapsuleStep(node, step);
+		};
+
+		const dupItem = append(menu, $('.context-menu-item'));
+		dupItem.textContent = 'Duplicate Capsule';
+		dupItem.onclick = (e) => {
+			e.stopPropagation();
+			this._closeContextMenu();
+			this._copyCapsuleStep(node, step);
+			void this._pasteCapsuleIntoNode(node, stepIndex + 1);
+		};
+
+		if (WorkflowEditor._copiedCapsule) {
+			const capLabel = WorkflowEditor._copiedCapsule.step.targetVariable
+				|| WorkflowEditor._copiedCapsule.step.label
+				|| WorkflowEditor._copiedCapsule.step.ticketName
+				|| WorkflowEditor._copiedCapsule.step.component?.label
+				|| 'Capsule';
+			const pasteBelowItem = append(menu, $('.context-menu-item'));
+			pasteBelowItem.style.color = '#c084fc';
+			pasteBelowItem.textContent = `Paste Capsule "${capLabel}" Below`;
+			pasteBelowItem.onclick = (e) => {
+				e.stopPropagation();
+				this._closeContextMenu();
+				void this._pasteCapsuleIntoNode(node, stepIndex + 1);
+			};
+		}
+
+		if (typeof step.capsuleWidth === 'number') {
+			const resetWidthItem = append(menu, $('.context-menu-item'));
+			resetWidthItem.textContent = 'Reset Capsule Width';
+			resetWidthItem.onclick = (e) => {
+				e.stopPropagation();
+				this._closeContextMenu();
+				delete step.capsuleWidth;
+				this._saveFlowchartData();
+				this._renderNodes();
+			};
+		}
+
+		const delItem = append(menu, $('.context-menu-item.danger'));
+		delItem.textContent = 'Delete Capsule';
+		delItem.onclick = (e) => {
+			e.stopPropagation();
+			this._closeContextMenu();
+			if (node.pipeline && stepIndex >= 0 && stepIndex < node.pipeline.length) {
+				const removed = node.pipeline.splice(stepIndex, 1)[0];
+				if (removed?.type === 'run_ticket' && removed.ticketName && Array.isArray(node.imports)) {
+					node.imports = node.imports.filter(imp => imp.name !== removed.ticketName);
+				}
+				const removedVars = removed ? this._extractStepVariableNames(removed) : [];
+				if (removedVars.length > 0 && Array.isArray(node.outputVariables)) {
+					node.outputVariables = node.outputVariables.filter(v => !removedVars.includes((v.name || '').replace(/^@/, '').trim()));
+				}
+				if (node.pipeline.length > 0) {
+					this._syncToNode(node, true);
+				}
+				this._saveFlowchartData();
+				this._renderNodes();
+				this._drawLinks();
+				this._refreshVariablesDrawer(node.id);
+				const openSideEditor = this._editorService.editors.find(
+					ed => ed instanceof CustomModuleSchemaEditorInput && !ed.isDisposed() && ed.isFlowchartNodeMode && ed.moduleId === `wf_node_${node.id}`
+				);
+				if (openSideEditor) {
+					this._openNodeComponentsInSideEditor(node);
+				}
+			}
+		};
+
+		// Keep menu inside viewport
+		const rect = menu.getBoundingClientRect();
+		if (rect.right > window.innerWidth - 8) {
+			menu.style.left = `${Math.max(8, window.innerWidth - rect.width - 8)}px`;
+		}
+		if (rect.bottom > window.innerHeight - 8) {
+			menu.style.top = `${Math.max(8, window.innerHeight - rect.height - 8)}px`;
+		}
+
+		// Auto-close on outside click / mousedown / Escape
+		this._contextMenuDisposables.push(
+			addDisposableListener(window, 'mousedown', (ev: MouseEvent) => {
+				if (this._contextMenuEl && !this._contextMenuEl.contains(ev.target as Node)) {
+					this._closeContextMenu();
+				}
+			}, true),
+			addDisposableListener(window, 'keydown', (ev: KeyboardEvent) => {
+				if (ev.key === 'Escape') {
+					this._closeContextMenu();
+				}
+			}, true)
+		);
 	}
 
 	private async _undo(): Promise<void> {
@@ -13989,6 +14925,8 @@ export class WorkflowEditor extends EditorPane {
 
 	private _copySelectedNodes(): void {
 		if (this._selectedNodeIds.size === 0) return;
+		WorkflowEditor._lastCopyKind = 'node';
+		this._selectedCapsule = null;
 		this._copiedNodes = [];
 		this._copiedLinks = [];
 
@@ -15048,6 +15986,9 @@ export class WorkflowEditor extends EditorPane {
 					addVar(s.component.label, 'handle', s.component.wfTicketType);
 				} else if (s.component?.type === 'output' && Array.isArray(s.component.outputSpecs)) {
 					for (const spec of s.component.outputSpecs) {
+						if (spec.varName) {
+							addVar(spec.varName, 'workflow');
+						}
 						addVar((spec as any).name || spec.label || spec.fieldKey, 'workflow');
 					}
 				} else if (s.component?.label && s.component.type !== 'parameters' && s.component.type !== 'display') {
@@ -15091,16 +16032,21 @@ export class WorkflowEditor extends EditorPane {
 				return `Inputs (${params.length}): ${pairs.join(', ')}`;
 			}
 			case 'output': {
-				const specs = comp.outputSpecs || [];
+				const specs = (comp.outputSpecs || []).filter(s => s && s.enabled !== false);
 				if (specs.length === 0) {
 					return 'Output: (click to configure outputs)';
 				}
-				const pairs = specs.map(s => `${(s as any).name || s.label || s.fieldKey}=${(s as any).value || '""'}`);
+				const pairs = specs.map(s => {
+					const k = (s as any).name || s.label || s.varName || s.fieldKey;
+					const v = s.sourceExpression || (s as any).value || '';
+					return v ? `${k}=${v}` : k;
+				});
 				return `Output (${specs.length}): ${pairs.join(', ')}`;
 			}
 			case 'create_tickets':
 			case 'run_tickets':
 			case 'get_outputs':
+			case 'get_ticket':
 			case 'get_tickets':
 			case 'display':
 				return this._buildBuiltinComponentPythonExpression(comp);
@@ -15116,6 +16062,10 @@ export class WorkflowEditor extends EditorPane {
 				return `${varName} = ${title} (O2 TTS)`;
 			case 'media_player':
 				return `${varName} = ${comp.mediaFileName || title} (MP3 / MP4 Player)`;
+			case 'voice_note': {
+				const clipCount = Array.isArray(comp.voiceClips) ? comp.voiceClips.length : 0;
+				return `${varName} = ${title} (${clipCount} Voice Clip${clipCount === 1 ? '' : 's'})`;
+			}
 			case 'ssh':
 				return `${varName} = ${comp.sshHost ? `${comp.sshUser || 'root'}@${comp.sshHost}` : title} (SSH Terminal)`;
 			case 'http_request':
@@ -15127,6 +16077,55 @@ export class WorkflowEditor extends EditorPane {
 			default:
 				return varName ? `${varName} = ${title} (${comp.type})` : `${title} (${comp.type})`;
 		}
+	}
+
+	private _extractSchemaParamsForType(typeNameOrId: string): { name: string; defaultValue: any }[] {
+		const extracted: { name: string; defaultValue: any }[] = [];
+		if (!typeNameOrId) return extracted;
+		const clean = typeNameOrId.trim().replace(/^\{|\}$/g, '').trim();
+		if (!clean) return extracted;
+		const normTarget = clean.toLowerCase().replace(/[-_]/g, ' ');
+
+		let matchedMod = (this._cachedCustomModules || []).find(m =>
+			m.id?.trim().toLowerCase() === clean.toLowerCase() ||
+			m.name?.trim().toLowerCase() === clean.toLowerCase() ||
+			m.id?.trim().toLowerCase().replace(/[-_]/g, ' ') === normTarget ||
+			m.name?.trim().toLowerCase().replace(/[-_]/g, ' ') === normTarget
+		);
+
+		if (!matchedMod) {
+			const snapshots = this._entityPersistenceService.getAllSnapshots() || [];
+			const snap = snapshots.find(s =>
+				s.ticketId?.trim().toLowerCase() === clean.toLowerCase() ||
+				s.entityName?.trim().toLowerCase() === clean.toLowerCase()
+			);
+			if (snap?.entityType) {
+				const entityTypeNorm = snap.entityType.trim().toLowerCase().replace(/[-_]/g, ' ');
+				matchedMod = (this._cachedCustomModules || []).find(m =>
+					m.id?.trim().toLowerCase() === snap.entityType!.trim().toLowerCase() ||
+					m.name?.trim().toLowerCase() === snap.entityType!.trim().toLowerCase() ||
+					m.id?.trim().toLowerCase().replace(/[-_]/g, ' ') === entityTypeNorm ||
+					m.name?.trim().toLowerCase().replace(/[-_]/g, ' ') === entityTypeNorm
+				);
+			}
+		}
+
+		if (matchedMod?.fields && Array.isArray(matchedMod.fields)) {
+			for (const f of matchedMod.fields) {
+				if (f.type === 'parameters' && Array.isArray(f.parameters)) {
+					for (const p of f.parameters) {
+						const pName = (p.name || p.id || '').trim();
+						if (pName && !extracted.some(item => item.name.toLowerCase() === pName.toLowerCase())) {
+							extracted.push({
+								name: pName,
+								defaultValue: p.defaultValue !== undefined && p.defaultValue !== null ? p.defaultValue : ''
+							});
+						}
+					}
+				}
+			}
+		}
+		return extracted;
 	}
 
 	private _formatParamValueForPythonExpr(rawVal: string): string {
@@ -15151,21 +16150,42 @@ export class WorkflowEditor extends EditorPane {
 			const tType = comp.wfTicketType || '';
 			const tTitle = comp.wfTicketTitle || '';
 			const tPath = comp.wfTicketPath || '.';
-			const paramEntries = Object.entries(comp.wfTicketParams || {}).filter(([k]) => k.trim().length > 0);
+			const schemaParams = this._extractSchemaParamsForType(tType);
+			const validNames = new Set(schemaParams.map(p => p.name.toLowerCase()));
+			const paramEntries = Object.entries(comp.wfTicketParams || {})
+				.filter(([k]) => validNames.size === 0 || validNames.has(k.toLowerCase()));
 			const paramsStr = paramEntries.map(([k, v]) => `${JSON.stringify(k)}: ${this._formatParamValueForPythonExpr(v)}`).join(', ');
 			return `${varName} = CREATE_TICKETS(\n    ticket_type=${JSON.stringify(tType)},\n    title=${JSON.stringify(tTitle)},\n    path=${JSON.stringify(tPath)},\n    params={${paramsStr}}\n)`;
 		}
 		if (comp.type === 'run_tickets') {
 			const rawTarget = (comp.wfTicketTarget || '').trim();
 			const targetExpr = this._formatParamValueForPythonExpr(rawTarget);
-			const paramEntries = Object.entries(comp.wfTicketParams || {}).filter(([k, v]) => k.trim().length > 0 && v !== undefined && v !== '');
+			const schemaParams = this._extractSchemaParamsForType(comp.wfTicketType || rawTarget);
+			const validNames = new Set(schemaParams.map(p => p.name.toLowerCase()));
+			const paramEntries = Object.entries(comp.wfTicketParams || {})
+				.filter(([k, v]) => (validNames.size === 0 || validNames.has(k.toLowerCase())) && k.trim().length > 0 && v !== undefined && v !== '');
 			const paramsStr = paramEntries.map(([k, v]) => `${JSON.stringify(k)}: ${this._formatParamValueForPythonExpr(v)}`).join(', ');
 			return `${varName} = RUN_TICKETS(ticket=${targetExpr}, params={${paramsStr}})`;
 		}
 		if (comp.type === 'get_outputs') {
 			const rawTarget = (comp.wfTicketTarget || '').trim();
 			const targetExpr = this._formatParamValueForPythonExpr(rawTarget);
-			return `${varName} = GET_OUTPUTS(ticket=${targetExpr})`;
+			const args: string[] = [`ticket=${targetExpr}`];
+			const rawField = (comp.wfTicketField || '').trim();
+			if (rawField) {
+				args.push(`field=${this._formatParamValueForPythonExpr(rawField)}`);
+			}
+			return `${varName} = GET_OUTPUTS(${args.join(', ')})`;
+		}
+		if (comp.type === 'get_ticket') {
+			const rawTarget = (comp.wfTicketTarget || comp.wfTicketId || comp.wfTicketVariable || '').trim();
+			const targetExpr = this._formatParamValueForPythonExpr(rawTarget);
+			const args: string[] = [`ticket=${targetExpr}`];
+			const rawField = (comp.wfTicketField || '').trim();
+			if (rawField) {
+				args.push(`field=${this._formatParamValueForPythonExpr(rawField)}`);
+			}
+			return `${varName} = GET_TICKET(${args.join(', ')})`;
 		}
 		if (comp.type === 'get_tickets') {
 			const args: string[] = [];
@@ -15192,7 +16212,7 @@ export class WorkflowEditor extends EditorPane {
 		const outVar = (comp.type === 'parameters' || comp.type === 'output' || comp.type === 'result' || comp.type === 'display')
 			? undefined
 			: this._getComponentOutputVarName(comp);
-		if (comp.type === 'create_tickets' || comp.type === 'run_tickets' || comp.type === 'get_outputs' || comp.type === 'get_tickets' || comp.type === 'display') {
+		if (comp.type === 'create_tickets' || comp.type === 'run_tickets' || comp.type === 'get_outputs' || comp.type === 'get_ticket' || comp.type === 'get_tickets' || comp.type === 'display') {
 			step.type = 'call_function';
 			step.functionName = comp.type.toUpperCase();
 			step.targetVariable = outVar;
@@ -15210,23 +16230,8 @@ export class WorkflowEditor extends EditorPane {
 			node.pipeline = [];
 		}
 
-		// Single-instance enforcement for Inputs ('parameters') and Output ('output')
-		if (compType === 'parameters') {
-			const existingInputs = node.pipeline.find(s => s.component?.type === 'parameters');
-			if (existingInputs) {
-				this._notificationService.info('Each Flowchart Node can have at most one Inputs component.');
-				this._openNodeComponentsInSideEditor(node, existingInputs.component?.id);
-				return;
-			}
-		}
-		if (compType === 'output') {
-			const existingOutput = node.pipeline.find(s => s.component?.type === 'output');
-			if (existingOutput) {
-				this._notificationService.info('Each Flowchart Node can have at most one Output component.');
-				this._openNodeComponentsInSideEditor(node, existingOutput.component?.id);
-				return;
-			}
-		}
+		// Multiple Inputs ('parameters') and Output ('output') components per node are supported;
+		// they are accumulated in pipeline order for the Workflow I/O Contract.
 
 		const defaultLabels: Record<string, string> = {
 			parameters: 'Inputs',
@@ -15234,6 +16239,7 @@ export class WorkflowEditor extends EditorPane {
 			create_tickets: 'new_ticket_handle',
 			run_tickets: 'run_res',
 			get_outputs: 'ticket_output',
+			get_ticket: 'ticket_data',
 			get_tickets: 'found_tickets',
 			display: 'Display Result',
 			prompt: 'AI Prompt',
@@ -15241,6 +16247,7 @@ export class WorkflowEditor extends EditorPane {
 			browser: 'Web Scraper',
 			tts: 'Voice Output',
 			media_player: 'MP3 / MP4 Player',
+			voice_note: 'Voice Note',
 			ssh: 'SSH Terminal',
 			http_request: 'API Request',
 			git: 'Git Repo',
@@ -15300,6 +16307,11 @@ export class WorkflowEditor extends EditorPane {
 			httpHeaders: compType === 'http_request' ? [{ key: 'Accept', value: 'application/json', enabled: true }] : undefined,
 			httpParams: compType === 'http_request' ? [] : undefined,
 			httpTimeoutMs: compType === 'http_request' ? 30000 : undefined,
+			voiceClips: compType === 'voice_note' ? [] : undefined,
+			voiceTranscript: compType === 'voice_note' ? '' : undefined,
+			voiceAutoTranscribe: compType === 'voice_note' ? true : undefined,
+			voicePlaybackRate: compType === 'voice_note' ? 1.0 : undefined,
+			voiceRunInFlow: compType === 'voice_note' ? false : undefined,
 			wfTicketType: '',
 			wfTicketTitle: compType === 'create_tickets' ? 'New Ticket' : '',
 			wfTicketPath: compType === 'create_tickets' ? '.' : '',
@@ -15521,29 +16533,54 @@ export class WorkflowEditor extends EditorPane {
 					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 					type: 'component',
 					label: f.label,
-					component: f
+					component: f,
+					disabled: Boolean(f.disabled)
 				};
 				stepObj.component = f;
+				stepObj.disabled = Boolean(f.disabled);
 				this._syncComponentStepMetadata(stepObj);
 				return stepObj;
 			};
 
 			const mappedComponentSteps = filteredFields.map(mapFieldToStep);
-			const rebuiltPipeline: INodePipelineStep[] = [];
-			let compCursor = 0;
-			for (const st of (liveNode.pipeline || [])) {
-				if (st.component) {
-					if (compCursor < mappedComponentSteps.length) {
-						rebuiltPipeline.push(mappedComponentSteps[compCursor++]);
+			const hasNonComponentSteps = (liveNode.pipeline || []).some(st => !st.component);
+			if (!hasNonComponentSteps) {
+				liveNode.pipeline = mappedComponentSteps;
+			} else {
+				const activeFieldIds = new Set(filteredFields.map(f => f.id));
+				const mappedStepByFieldId = new Map(filteredFields.map(f => [f.id, mapFieldToStep(f)]));
+				const rebuiltPipeline: INodePipelineStep[] = [];
+				const processedFieldIds = new Set<string>();
+
+				for (const st of (liveNode.pipeline || [])) {
+					if (!st.component) {
+						rebuiltPipeline.push(st);
+					} else if (activeFieldIds.has(st.component.id)) {
+						const mapped = mappedStepByFieldId.get(st.component.id);
+						if (mapped && !processedFieldIds.has(st.component.id)) {
+							rebuiltPipeline.push(mapped);
+							processedFieldIds.add(st.component.id);
+						}
 					}
-				} else {
-					rebuiltPipeline.push(st);
 				}
+				for (const f of filteredFields) {
+					if (!processedFieldIds.has(f.id)) {
+						const mapped = mappedStepByFieldId.get(f.id);
+						if (mapped) {
+							rebuiltPipeline.push(mapped);
+							processedFieldIds.add(f.id);
+						}
+					}
+				}
+				liveNode.pipeline = rebuiltPipeline;
 			}
-			while (compCursor < mappedComponentSteps.length) {
-				rebuiltPipeline.push(mappedComponentSteps[compCursor++]);
+
+			if (schemaInput.draftModule) {
+				schemaInput.draftModule.fields = [
+					{ id: 'title', label: 'Title', type: 'text', required: true },
+					...filteredFields
+				];
 			}
-			liveNode.pipeline = rebuiltPipeline;
 
 			this._ensureNodeFitsPipeline(liveNode);
 			this._syncToNode(liveNode, true);

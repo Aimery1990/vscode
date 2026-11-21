@@ -30,7 +30,7 @@ export class EntityDetailEditorInput extends EditorInput {
 			scheme: Schemas.vscodeEntityDetail,
 			path: previewModule
 				? `/preview/${encodeURIComponent(previewModule.id || entityName)}`
-				: `/${encodeURIComponent(entityUri.toString())}`,
+				: `/${encodeURIComponent(entityUri.toString())}/${encodeURIComponent(entityName)}`,
 		});
 		this._name = previewModule
 			? `Preview: ${previewModule.name || entityName} (Ticket)`
@@ -67,7 +67,8 @@ export class EntityDetailEditorInput extends EditorInput {
 			if (!!this.previewModule !== !!other.previewModule) {
 				return false;
 			}
-			return other.entityUri.toString() === this.entityUri.toString();
+			return other.entityUri.toString() === this.entityUri.toString() &&
+				(other.entityName || '').trim().toLowerCase() === (this.entityName || '').trim().toLowerCase();
 		}
 		return false;
 	}

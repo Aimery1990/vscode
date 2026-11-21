@@ -3,7 +3,7 @@
 # ==============================================================================
 # AnyAgent Desktop Launcher
 # Supports detached GUI launch, multi-window instances, automatic resource
-# reclamation, and development debug mode.
+# reclamation, zombie process auto-healing, and development debug mode.
 # ==============================================================================
 
 set -e
@@ -36,6 +36,7 @@ if [[ "$OSTYPE" == "darwin"* ]]; then
     CODE_EXE="$APP_BUNDLE/Contents/MacOS/$EXE_NAME"
 else
     APP_NAME=$(node -p "require('./product.json').applicationName" 2>/dev/null || echo "anyagent")
+    EXE_NAME="$APP_NAME"
     CODE_EXE="./.build/electron/$APP_NAME"
     if [ ! -f "$CODE_EXE" ] && [ -f "./.build/electron/code-oss" ]; then
         CODE_EXE="./.build/electron/code-oss"
@@ -49,96 +50,165 @@ fi
 
 PID_DIR="$HOME/.anyagent"
 PID_FILE="$PID_DIR/anyagent.pid"
+LOG_FILE="$PID_DIR/desktop.log"
 mkdir -p "$PID_DIR"
 
-# Help manual
-function show_help() {
-    cat << EOF
-AnyAgent Desktop Launcher
+# ------------------------------------------------------------------------------
+# Process Management & Identification
+# ------------------------------------------------------------------------------
 
-Usage:
-  ./launch.sh [options] [path/workspace]
-
-Options:
-  (no args)             Launch AnyAgent Desktop in detached GUI mode (terminal returns immediately)
-  <path>                Open the specified workspace/folder (opens a new window if already running)
-  -n, --new-window      Open a new blank window
-  -d, --dev             Launch in foreground development mode (runs watch compiler with live logs)
-  -s, --status          Check running status and process PID of AnyAgent Desktop
-  -k, --stop            Gracefully stop all running AnyAgent Desktop processes
-  -b, --build           Recompile desktop client code (npm run compile-client)
-  -h, --help            Show this help message
-
-Lifecycle & Multi-Window:
-  - Multi-window supported: Use Cmd+Shift+N (or Ctrl+Shift+N) inside the app, or run './launch.sh [path]' in terminal.
-  - Automatic resource reclamation: Closing the last window automatically quits the application and frees memory, ports, and process locks.
-EOF
-}
-
-# Check if application is running
-function is_running() {
+# Get PIDs of only the true Main Process (exclude Helper and crashpad processes)
+function get_main_pids() {
+    local pids=""
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        pgrep -f "Any Agent.app" >/dev/null 2>&1 || pgrep -x "$EXE_NAME" >/dev/null 2>&1
-    else
-        pgrep -x "$APP_NAME" >/dev/null 2>&1 || pgrep -f "out/main.js" >/dev/null 2>&1
-    fi
-}
+        # 1. Exact executable process name match (matches 'Any Agent', NOT 'Any Agent Helper*')
+        pids=$(pgrep -x "$EXE_NAME" 2>/dev/null || pgrep -x "$APP_NAME" 2>/dev/null || true)
 
-# Check status
-function check_status() {
-    if is_running; then
-        echo "🟢 AnyAgent Desktop is running."
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            ps aux | grep -E "(Any Agent\.app|$EXE_NAME)" | grep -v grep | awk '{printf "   PID: %-7s CPU: %-5s MEM: %-5s COMMAND: %s\n", $2, $3, $4, $11}'
-        else
-            ps aux | grep -E "($APP_NAME|out/main.js)" | grep -v grep | awk '{printf "   PID: %-7s CPU: %-5s MEM: %-5s COMMAND: %s\n", $2, $3, $4, $11}'
+        # 2. If not found by name, check if PID_FILE points to a live main process
+        if [ -z "$pids" ] && [ -f "$PID_FILE" ]; then
+            local file_pid
+            file_pid=$(cat "$PID_FILE" 2>/dev/null | tr -d '[:space:]')
+            if [ -n "$file_pid" ] && kill -0 "$file_pid" 2>/dev/null; then
+                local cmd
+                cmd=$(ps -p "$file_pid" -o command= 2>/dev/null || true)
+                if [[ "$cmd" == *"Contents/MacOS/${EXE_NAME}"* ]] && [[ "$cmd" != *"Helper"* ]]; then
+                    pids="$file_pid"
+                fi
+            fi
         fi
     else
-        echo "⚪ AnyAgent Desktop is not running."
+        pids=$(pgrep -x "$APP_NAME" 2>/dev/null || pgrep -f "out/main.js" 2>/dev/null || true)
     fi
+    echo "$pids"
 }
 
-# Stop application
-function stop_app() {
-    if ! is_running; then
-        echo "⚪ No running AnyAgent Desktop process detected."
-        rm -f "$PID_FILE"
+# Returns 0 if main process is alive, 1 otherwise
+function is_main_running() {
+    local main_pids
+    main_pids=$(get_main_pids)
+    if [ -n "$main_pids" ]; then
         return 0
-    fi
-
-    echo "🛑 Stopping AnyAgent Desktop..."
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        pkill -f "Any Agent.app" 2>/dev/null || true
-        pkill -x "$EXE_NAME" 2>/dev/null || true
     else
-        pkill -x "$APP_NAME" 2>/dev/null || true
-        pkill -f "out/main.js" 2>/dev/null || true
+        return 1
     fi
-
-    sleep 1
-    if is_running; then
-        echo "⚠️  Force terminating remaining processes..."
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            pkill -9 -f "Any Agent.app" 2>/dev/null || true
-            pkill -9 -x "$EXE_NAME" 2>/dev/null || true
-        else
-            pkill -9 -x "$APP_NAME" 2>/dev/null || true
-            pkill -9 -f "out/main.js" 2>/dev/null || true
-        fi
-    fi
-    rm -f "$PID_FILE"
-    echo "✅ AnyAgent Desktop has stopped and all resources have been released."
 }
 
-# Compile client code
+# Get PIDs of helper or background processes associated with AnyAgent
+function get_helper_pids() {
+    local all_pids=""
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        all_pids=$(pgrep -f "Any Agent" 2>/dev/null || true)
+    else
+        all_pids=$(pgrep -f "($APP_NAME|code-oss|out/main.js)" 2>/dev/null || true)
+    fi
+    local main_pids
+    main_pids=$(get_main_pids)
+
+    local helper_pids=""
+    for p in $all_pids; do
+        local is_main=0
+        for m in $main_pids; do
+            if [ "$p" -eq "$m" ] 2>/dev/null; then
+                is_main=1
+                break
+            fi
+        done
+        if [ "$is_main" -eq 0 ]; then
+            helper_pids="$helper_pids $p"
+        fi
+    done
+    echo "$helper_pids"
+}
+
+# Clean up zombie or orphan helper processes if no main process is active
+function cleanup_orphans() {
+    local main_pids
+    main_pids=$(get_main_pids)
+    if [ -z "$main_pids" ]; then
+        local orphan_pids
+        orphan_pids=$(get_helper_pids)
+        if [ -n "$orphan_pids" ]; then
+            echo "🧹 Detected orphaned background/helper processes without active main process. Cleaning up..."
+            kill -9 $orphan_pids 2>/dev/null || true
+            rm -f "$PID_FILE"
+            sleep 0.5
+        fi
+    fi
+}
+
+# Bring application window to front without requiring accessibility permissions
+function activate_window() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        if [ -d "$APP_BUNDLE" ]; then
+            open -a "$APP_BUNDLE" 2>/dev/null || true
+        fi
+        osascript -e "tell application \"$APP_NAME\" to activate" 2>/dev/null || true
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# Build Verification & Self-Healing
+# ------------------------------------------------------------------------------
+
 function build_client() {
-    echo "🔨 Compiling AnyAgent Desktop client..."
+    echo "🔨 Compiling AnyAgent Desktop client (fast transpile)..."
     export VSCODE_SKIP_NODE_VERSION_CHECK=1
     npm run transpile-client
     echo "✅ Build completed successfully."
 }
 
-# Ensure binary and runtime ready
+function check_build_integrity() {
+    local needs_build=0
+
+    # 1. Directory presence
+    if [ ! -d "./out" ]; then
+        echo "⚠️  Build directory './out' missing."
+        needs_build=1
+    fi
+
+    # 2. Critical entrypoints check
+    if [ $needs_build -eq 0 ]; then
+        local critical_files=(
+            "./out/main.js"
+            "./out/vs/base/parts/ipc/common/ipc.js"
+            "./out/vs/code/electron-main/main.js"
+            "./out/vs/workbench/workbench.desktop.main.js"
+            "./out/vs/platform/update/common/update.config.contribution.js"
+        )
+        for cf in "${critical_files[@]}"; do
+            if [ ! -f "$cf" ]; then
+                echo "⚠️  Critical build file missing: $cf"
+                needs_build=1
+                break
+            fi
+        done
+    fi
+
+    # 3. File count check (complete build contains > 7,000 JS files)
+    if [ $needs_build -eq 0 ]; then
+        local js_count
+        js_count=$(find ./out -type f -name "*.js" 2>/dev/null | wc -l | tr -d ' ')
+        if [ "$js_count" -lt 5000 ]; then
+            echo "⚠️  Build artifacts incomplete ($js_count JS files found, expected > 5000)."
+            needs_build=1
+        fi
+    fi
+
+    # 4. Source modification timestamp check
+    if [ $needs_build -eq 0 ] && [ -f "./out/main.js" ]; then
+        local newer_file
+        newer_file=$(find ./src -type f -name "*.ts" -newer ./out/main.js 2>/dev/null | head -n 1)
+        if [ -n "$newer_file" ]; then
+            echo "⚡ Source files modified since last build (e.g. $newer_file). Auto-transpiling..."
+            needs_build=1
+        fi
+    fi
+
+    if [ $needs_build -eq 1 ]; then
+        build_client
+    fi
+}
+
 function ensure_binary() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         if [ ! -f "$CODE_EXE" ] && [ -d "./.build/electron/Code - OSS.app" ]; then
@@ -184,13 +254,110 @@ function ensure_binary() {
         node build/lib/preLaunch.ts
     fi
 
-    if [ ! -d "./out" ] || [ ! -f "./out/main.js" ] || [ ! -f "./out/vs/platform/update/common/update.config.contribution.js" ]; then
-        echo "⚠️  Core build artifacts not found or incomplete, compiling..."
-        build_client
+    # Thorough build integrity check
+    check_build_integrity
+}
+
+# ------------------------------------------------------------------------------
+# Commands
+# ------------------------------------------------------------------------------
+
+function show_help() {
+    cat << EOF
+AnyAgent Desktop Launcher
+
+Usage:
+  ./launch.sh [options] [path/workspace]
+
+Options:
+  (no args)             Launch AnyAgent Desktop in detached GUI mode (terminal returns immediately)
+  <path>                Open the specified workspace/folder (opens in running instance or launches new)
+  -n, --new-window      Open a new blank window
+  -r, --restart         Cleanly stop AnyAgent and restart with a fresh instance
+  -d, --dev             Launch in foreground development mode (runs watch compiler with live logs)
+  -s, --status          Check running status and process PID of AnyAgent Desktop
+  -k, --stop            Gracefully stop all running AnyAgent Desktop processes and clean state
+  -b, --build           Force recompile desktop client code (npm run transpile-client)
+  -h, --help            Show this help message
+
+Lifecycle & Multi-Window:
+  - Multi-window supported: Use Cmd+Shift+N inside the app, or run './launch.sh [path]' in terminal.
+  - Automatic resource reclamation: Closing all windows automatically quits the application and frees memory, ports, and process locks.
+EOF
+}
+
+function check_status() {
+    local main_pids
+    main_pids=$(get_main_pids)
+    local helper_pids
+    helper_pids=$(get_helper_pids)
+
+    if [ -n "$main_pids" ]; then
+        echo "🟢 AnyAgent Desktop is running (Main PID: $main_pids)."
+        echo "   Main Process:"
+        local main_comma
+        main_comma=$(echo $main_pids | tr ' ' ',')
+        ps -p "$main_comma" -o pid,stat,time,command 2>/dev/null | sed 's/^/     /' || true
+        if [ -n "$helper_pids" ]; then
+            echo "   Helper Processes:"
+            local helper_comma
+            helper_comma=$(echo $helper_pids | tr ' ' ',')
+            ps -p "$helper_comma" -o pid,stat,time,command 2>/dev/null | sed 's/^/     /' || true
+        fi
+    elif [ -n "$helper_pids" ]; then
+        echo "⚠️  Orphaned AnyAgent helper processes detected with NO active main process!"
+        echo "   Lingering PIDs: $helper_pids"
+        echo "   (Running './launch.sh' will automatically clean these up and start cleanly.)"
+    else
+        echo "⚪ AnyAgent Desktop is not running."
     fi
 }
 
-# Parse arguments
+function stop_app() {
+    local main_pids
+    main_pids=$(get_main_pids)
+    local all_pids=""
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        all_pids=$(pgrep -f "Any Agent" 2>/dev/null || true)
+    else
+        all_pids=$(pgrep -f "($APP_NAME|code-oss|out/main.js)" 2>/dev/null || true)
+    fi
+
+    if [ -z "$main_pids" ] && [ -z "$all_pids" ]; then
+        echo "⚪ No running AnyAgent Desktop process detected."
+        rm -f "$PID_FILE"
+        return 0
+    fi
+
+    echo "🛑 Stopping AnyAgent Desktop..."
+    if [ -n "$main_pids" ]; then
+        kill $main_pids 2>/dev/null || true
+    fi
+    if [ -n "$all_pids" ]; then
+        kill $all_pids 2>/dev/null || true
+    fi
+
+    sleep 1
+
+    local remaining=""
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        remaining=$(pgrep -f "Any Agent" 2>/dev/null || true)
+    else
+        remaining=$(pgrep -f "($APP_NAME|code-oss|out/main.js)" 2>/dev/null || true)
+    fi
+
+    if [ -n "$remaining" ]; then
+        echo "⚠️  Force terminating remaining processes ($remaining)..."
+        kill -9 $remaining 2>/dev/null || true
+    fi
+    rm -f "$PID_FILE"
+    echo "✅ AnyAgent Desktop has stopped and all resources have been released."
+}
+
+# ------------------------------------------------------------------------------
+# Argument Parsing
+# ------------------------------------------------------------------------------
+
 MODE="normal"
 TARGET_ARGS=()
 
@@ -207,6 +374,11 @@ while [[ $# -gt 0 ]]; do
         -k|--stop)
             stop_app
             exit 0
+            ;;
+        -r|--restart)
+            stop_app
+            sleep 0.5
+            shift
             ;;
         -b|--build)
             build_client
@@ -236,9 +408,12 @@ export VSCODE_CLI=1
 export ELECTRON_ENABLE_STACK_DUMPING=1
 export ELECTRON_ENABLE_LOGGING=1
 
-DISABLE_TEST_EXTENSION="--disable-extension=vscode.vscode-api-tests"
+DISABLE_TEST_EXTENSION="--disable-extension=vscode.vscode-api-tests --js-flags=--max-old-space-size=8192"
 
-# Execution branches
+# ------------------------------------------------------------------------------
+# Execution Branches
+# ------------------------------------------------------------------------------
+
 if [ "$MODE" == "dev" ]; then
     echo "🚀 Starting AnyAgent Desktop (Development Mode)..."
     echo "💡 Note: Watch compiler running in background, live logs shown below. Press Ctrl+C to exit."
@@ -251,31 +426,32 @@ if [ "$MODE" == "dev" ]; then
         echo ""
         echo "🛑 Stopping development environment..."
         kill $WATCH_PID 2>/dev/null || true
+        stop_app
         exit 0
     }
     trap cleanup SIGINT SIGTERM EXIT
 
     env -u ELECTRON_RUN_AS_NODE "$CODE_EXE" "$DESKTOP_DIR" "${TARGET_ARGS[@]}" $DISABLE_TEST_EXTENSION
 else
-    # Detached GUI Mode (Normal application lifecycle)
-    if is_running; then
-        echo "ℹ️  AnyAgent Desktop is already running. Activating and opening window..."
+    # 1. Check if an active main instance is already running
+    if is_main_running; then
+        MAIN_PID=$(get_main_pids)
+        echo "ℹ️  AnyAgent Desktop is already running (PID: $MAIN_PID). Activating window..."
         if [ ${#TARGET_ARGS[@]} -eq 0 ]; then
             env -u ELECTRON_RUN_AS_NODE "$CODE_EXE" "$DESKTOP_DIR" --new-window $DISABLE_TEST_EXTENSION >/dev/null 2>&1 &
         else
             env -u ELECTRON_RUN_AS_NODE "$CODE_EXE" "$DESKTOP_DIR" "${TARGET_ARGS[@]}" $DISABLE_TEST_EXTENSION >/dev/null 2>&1 &
         fi
-        if [[ "$OSTYPE" == "darwin"* ]]; then
-            sleep 0.5
-            osascript -e 'tell application "System Events" to set frontmost of (first process whose name is "'"$EXE_NAME"'" or name is "'"$APP_NAME"'") to true' 2>/dev/null || true
-        fi
+        sleep 0.5
+        activate_window
         echo "✅ Request sent to running instance, window activated."
         exit 0
     fi
 
-    echo "🚀 Starting AnyAgent Desktop..."
+    # 2. No main process is running. Automatically clean up any orphan helpers/zombies.
+    cleanup_orphans
 
-    LOG_FILE="$PID_DIR/desktop.log"
+    echo "🚀 Starting AnyAgent Desktop..."
 
     LOCAL_ARGS=()
     if [ ${#TARGET_ARGS[@]} -eq 0 ]; then
@@ -284,20 +460,15 @@ else
         LOCAL_ARGS=("${TARGET_ARGS[@]}")
     fi
 
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        nohup env -u ELECTRON_RUN_AS_NODE "$CODE_EXE" "$DESKTOP_DIR" "${LOCAL_ARGS[@]}" $DISABLE_TEST_EXTENSION > "$LOG_FILE" 2>&1 &
-        APP_PID=$!
-        disown $APP_PID 2>/dev/null || true
-    else
-        nohup env -u ELECTRON_RUN_AS_NODE "$CODE_EXE" "$DESKTOP_DIR" "${LOCAL_ARGS[@]}" $DISABLE_TEST_EXTENSION > "$LOG_FILE" 2>&1 &
-        APP_PID=$!
-        disown $APP_PID 2>/dev/null || true
-    fi
+    # Launch detached Electron process
+    nohup env -u ELECTRON_RUN_AS_NODE "$CODE_EXE" "$DESKTOP_DIR" "${LOCAL_ARGS[@]}" $DISABLE_TEST_EXTENSION > "$LOG_FILE" 2>&1 &
+    APP_PID=$!
+    disown $APP_PID 2>/dev/null || true
 
     echo "$APP_PID" > "$PID_FILE"
 
-    # Startup health check: ensure process does not crash immediately
-    sleep 3
+    # Startup health check: ensure process did not crash immediately
+    sleep 2.5
     if ! kill -0 "$APP_PID" 2>/dev/null; then
         echo "❌ Error: AnyAgent Desktop failed to start (Process PID $APP_PID exited immediately)."
         if [ -f "$LOG_FILE" ]; then
@@ -305,14 +476,11 @@ else
             tail -n 25 "$LOG_FILE"
         fi
         rm -f "$PID_FILE"
+        cleanup_orphans
         exit 1
     fi
 
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        osascript -e 'tell application "System Events" to set frontmost of (first process whose name is "'"$EXE_NAME"'" or name is "'"$APP_NAME"'") to true' 2>/dev/null || true
-    fi
-
-
+    activate_window
 
     echo "✨ AnyAgent Desktop launched successfully!"
     echo "   - PID: $APP_PID"

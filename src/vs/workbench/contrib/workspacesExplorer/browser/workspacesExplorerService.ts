@@ -859,7 +859,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						for (const child of stat.children) {
 							if (!child.isDirectory && child.name.endsWith('.md')) {
 								const nameLower = child.name.toLowerCase();
-								if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md' && nameLower !== 'ticket.md') {
+								if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md' && nameLower !== 'ticket.md' && nameLower !== 'tickets.md') {
 									detectedType = child.name.substring(0, child.name.length - 3) as ResourceType;
 									break;
 								}
@@ -1248,7 +1248,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						for (const child of stat.children) {
 							if (!child.isDirectory && child.name.endsWith('.md')) {
 								const nameLower = child.name.toLowerCase();
-								if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md') {
+								if (nameLower !== 'instruction.md' && nameLower !== 'readme.md' && nameLower !== 'work_log.md' && nameLower !== 'worklog.md' && nameLower !== 'ticket.md' && nameLower !== 'tickets.md') {
 									foundMdUri = child.resource;
 									break;
 								}

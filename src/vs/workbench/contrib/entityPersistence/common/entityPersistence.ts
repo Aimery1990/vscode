@@ -46,14 +46,25 @@ export type CustomFieldType =
 	| 'python'
 	| 'tts'
 	| 'media_player'
+	| 'voice_note'
 	| 'table'
 	| 'create_tickets'
 	| 'run_tickets'
-	| 'get_tickets'
+	| 'get_ticket'
 	| 'get_outputs'
 	| 'display'
 	| 'ssh'
 	| 'http_request';
+
+export interface IVoiceNoteClip {
+	id: string;
+	title?: string;
+	audioDataUrl: string;
+	mimeType?: string;
+	durationSeconds?: number;
+	transcript?: string;
+	createdAt: number;
+}
 
 export interface IHttpRequestParam {
 	id?: string;
@@ -261,6 +272,10 @@ export interface IOutputSpec {
 	label: string;
 	enabled: boolean;
 	defaultFormat?: string;
+	isCustom?: boolean;
+	varName?: string;
+	varNameManual?: boolean;
+	sourceExpression?: string;
 }
 
 export interface ICustomField {
@@ -277,7 +292,9 @@ export interface ICustomField {
 	max?: number;
 	step?: number;
 	required?: boolean;
+	disabled?: boolean;
 	defaultUrl?: string;
+	lastResolvedUrl?: string;
 	defaultContent?: string;
 	credentials?: ICredentialPair[];
 	gitRemoteUrl?: string;
@@ -316,6 +333,11 @@ export interface ICustomField {
 	mediaMimeType?: string;
 	mediaPlaybackRate?: number;
 	mediaAutoPlay?: boolean;
+	voiceClips?: IVoiceNoteClip[];
+	voiceTranscript?: string;
+	voiceAutoTranscribe?: boolean;
+	voicePlaybackRate?: number;
+	voiceRunInFlow?: boolean;
 	tableColumns?: ITableColumnDefinition[];
 	tableRows?: Array<Record<string, any>>;
 	tableDbEngine?: 'sqlite' | string;
@@ -330,6 +352,9 @@ export interface ICustomField {
 	wfTicketPath?: string;
 	wfTicketTarget?: string;
 	wfTicketStatus?: string;
+	wfTicketId?: string;
+	wfTicketVariable?: string;
+	wfTicketField?: string;
 	wfTicketParams?: Record<string, string>;
 	wfDisplayValue?: string;
 	outputVariableName?: string;
@@ -606,6 +631,7 @@ export const DEFAULT_STATUS_DEFINITIONS: IStatusDefinition[] = [
 export interface ICustomModule {
 	id: string;
 	name: string;
+	category?: string;
 	description?: string;
 	prompt?: string;
 	isDeprecated?: boolean;

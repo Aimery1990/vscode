@@ -37,6 +37,7 @@ export interface ISyncFlowchartNode {
 	verticalAlign?: 'top' | 'center' | 'bottom';
 	titleTextAlign?: 'left' | 'center' | 'right';
 	titleVerticalAlign?: 'top' | 'center' | 'bottom';
+	fontSize?: number;
 	isBold?: boolean;
 	isItalic?: boolean;
 	isUnderline?: boolean;
@@ -272,7 +273,7 @@ export function formatComponentStepComment(step: INodePipelineStep, stepNumber: 
 			create_tickets: 'Create Tickets',
 			run_tickets: 'Run Tickets',
 			get_outputs: 'Get Outputs',
-			get_tickets: 'Get Tickets',
+			get_ticket: 'Get Ticket',
 			display: 'Display'
 		};
 		const compTypeLabel = typeLabels[rawType] || rawType;
@@ -1151,7 +1152,7 @@ export class PythonCodeBlockParser {
 				// If a single ###-delimited chunk contains multiple top-level statements and at least one
 				// calls a workflow built-in (RUN_TICKETS, CREATE_TICKETS, GET_TICKETS, GET_OUTPUTS, DISPLAY, PRINT),
 				// split each top-level statement into its own visual step so none of them are hidden on the node.
-				const hasWorkflowBuiltin = /\b(RUN_TICKETS|CREATE_TICKETS|GET_TICKETS|GET_OUTPUTS|DISPLAY|PRINT|GET_PRIMITIVES_CATALOG)\s*\(/.test(text);
+				const hasWorkflowBuiltin = /\b(RUN_TICKETS|CREATE_TICKETS|GET_TICKETS|GET_TICKET|get_ticket|get_tickets|GET_OUTPUTS|DISPLAY|PRINT|GET_PRIMITIVES_CATALOG)\s*\(/.test(text);
 				if (hasWorkflowBuiltin) {
 					const chunkAnalysis = this.analyzePythonTopLevelStatements(text, 1);
 					if (!chunkAnalysis.syntaxError && chunkAnalysis.statements.length > 1) {
@@ -1796,7 +1797,7 @@ export class WorkflowPythonEditorBridge {
 		'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is',
 		'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return',
 		'try', 'while', 'with', 'yield',
-		'RUN_TICKETS', 'CREATE_TICKETS', 'GET_TICKETS', 'GET_OUTPUTS', 'DISPLAY',
+		'RUN_TICKETS', 'CREATE_TICKETS', 'GET_TICKET', 'GET_TICKETS', 'GET_OUTPUTS', 'DISPLAY',
 		'NOW', 'DATE', 'TIME'
 	]);
 
@@ -1930,7 +1931,7 @@ export class WorkflowPythonEditorBridge {
 					getDomNode: () => document.createElement('div'),
 					getPosition: () => null
 				});
-			} catch {}
+			} catch { }
 		}
 
 		const initialEditorDom = codeEditor.getDomNode() as HTMLElement | null;
@@ -2168,7 +2169,7 @@ export class WorkflowPythonEditorBridge {
 					const wfTargetUri = URI.parse(uriMatch[1].trim());
 					await editorService.openEditor(new WorkflowEditorInput(wfTargetUri, wfName || 'Workflow'), { pinned: true });
 					return;
-				} catch {}
+				} catch { }
 			}
 			const pyUri: URI | undefined = model?.uri || currentPyUri;
 			if (pyUri) {
@@ -2200,7 +2201,7 @@ export class WorkflowPythonEditorBridge {
 					const wfTargetUri = URI.parse(uriMatch[1].trim());
 					await editorService.openEditor(new WorkflowNotebookEditorInput(wfTargetUri, wfName || 'Workflow'), { pinned: true });
 					return;
-				} catch {}
+				} catch { }
 			}
 			const pyUri: URI | undefined = model?.uri || currentPyUri;
 			if (pyUri) {
@@ -2223,86 +2224,86 @@ export class WorkflowPythonEditorBridge {
 			isExpr?: boolean;
 			cursorToken?: string;
 		}> = [
-			{
-				label: 'RUN_TICKETS',
-				snippet: 'res = RUN_TICKETS(ticket="", params={})',
-				cursorToken: 'ticket="'
-			},
-			{
-				label: 'CREATE_TICKETS',
-				snippet: 'new_ticket = CREATE_TICKETS(ticket_type="Task", title="", path=".", params={})',
-				cursorToken: 'title="'
-			},
-			{
-				label: 'GET_TICKETS',
-				snippet: 'tickets = GET_TICKETS(ticket="")',
-				cursorToken: 'ticket="'
-			},
-			{
-				label: 'GET_OUTPUTS',
-				snippet: 'out = GET_OUTPUTS(ticket="")',
-				cursorToken: 'ticket="'
-			},
-			{
-				label: 'DISPLAY',
-				snippet: 'DISPLAY()',
-				cursorToken: 'DISPLAY('
-			},
-			{
-				label: 'DATE()',
-				snippet: 'DATE()',
-				isExpr: true
-			},
-			{
-				label: 'NOW()',
-				snippet: 'NOW()',
-				isExpr: true
-			},
-			{
-				label: 'TIME()',
-				snippet: 'TIME()',
-				isExpr: true
-			},
-			{
-				label: 'var = 0',
-				snippet: 'start_offset = 0',
-				cursorToken: 'start_offset'
-			},
-			{
-				label: 'var = []',
-				snippet: 'my_positions = []',
-				cursorToken: 'my_positions'
-			},
-			{
-				label: 'var = {}',
-				snippet: 'data = {}',
-				cursorToken: 'data'
-			},
-			{
-				label: 'for ...:',
-				snippet: 'for item in items:\n    pass',
-				cursorToken: 'item'
-			},
-			{
-				label: 'if ...:',
-				snippet: 'if condition:\n    pass',
-				cursorToken: 'condition'
-			},
-			{
-				label: 'def ...:',
-				snippet: 'def helper(x):\n    return x',
-				cursorToken: 'helper'
-			},
-			{
-				label: 'class ...:',
-				snippet: 'class Record:\n    def __init__(self, name):\n        self.name = name',
-				cursorToken: 'Record'
-			},
-			{
-				label: '###',
-				snippet: '###\n'
-			}
-		];
+				{
+					label: 'RUN_TICKETS',
+					snippet: 'res = RUN_TICKETS(ticket="", params={})',
+					cursorToken: 'ticket="'
+				},
+				{
+					label: 'CREATE_TICKETS',
+					snippet: 'new_ticket = CREATE_TICKETS(ticket_type="Task", title="", path=".", params={})',
+					cursorToken: 'title="'
+				},
+				{
+					label: 'GET_TICKET',
+					snippet: 'ticket = get_ticket(ticket="")',
+					cursorToken: 'ticket="'
+				},
+				{
+					label: 'GET_OUTPUTS',
+					snippet: 'out = GET_OUTPUTS(ticket="")',
+					cursorToken: 'ticket="'
+				},
+				{
+					label: 'DISPLAY',
+					snippet: 'DISPLAY()',
+					cursorToken: 'DISPLAY('
+				},
+				{
+					label: 'DATE()',
+					snippet: 'DATE()',
+					isExpr: true
+				},
+				{
+					label: 'NOW()',
+					snippet: 'NOW()',
+					isExpr: true
+				},
+				{
+					label: 'TIME()',
+					snippet: 'TIME()',
+					isExpr: true
+				},
+				{
+					label: 'var = 0',
+					snippet: 'start_offset = 0',
+					cursorToken: 'start_offset'
+				},
+				{
+					label: 'var = []',
+					snippet: 'my_positions = []',
+					cursorToken: 'my_positions'
+				},
+				{
+					label: 'var = {}',
+					snippet: 'data = {}',
+					cursorToken: 'data'
+				},
+				{
+					label: 'for ...:',
+					snippet: 'for item in items:\n    pass',
+					cursorToken: 'item'
+				},
+				{
+					label: 'if ...:',
+					snippet: 'if condition:\n    pass',
+					cursorToken: 'condition'
+				},
+				{
+					label: 'def ...:',
+					snippet: 'def helper(x):\n    return x',
+					cursorToken: 'helper'
+				},
+				{
+					label: 'class ...:',
+					snippet: 'class Record:\n    def __init__(self, name):\n        self.name = name',
+					cursorToken: 'Record'
+				},
+				{
+					label: '###',
+					snippet: '###\n'
+				}
+			];
 
 		for (const item of insertItems) {
 			const chip = append(fnChipsWrap, $('div.node-function-template-chip'));
@@ -2377,7 +2378,7 @@ export class WorkflowPythonEditorBridge {
 						model.setValue(diskText);
 						refreshLiveVariables();
 					}
-				}).catch(() => {});
+				}).catch(() => { });
 			}
 			if (isWorkflowPyModel()) {
 				refreshLiveVariables();
@@ -2456,7 +2457,7 @@ export class WorkflowPythonEditorBridge {
 		if (pyFileUri) {
 			try {
 				await fileService.writeFile(pyFileUri, VSBuffer.fromString(pythonSource));
-			} catch {}
+			} catch { }
 		}
 
 		const parsedFile = PythonToWorkflowParser.parseWorkflowPythonFile(pythonSource);
@@ -2468,7 +2469,7 @@ export class WorkflowPythonEditorBridge {
 				targetWorkflowUri = parsedFile.workflowUri.startsWith('file://')
 					? URI.parse(parsedFile.workflowUri)
 					: URI.file(parsedFile.workflowUri);
-			} catch {}
+			} catch { }
 		}
 		if (!targetWorkflowUri && pyFileUri) {
 			const fsPath = pyFileUri.fsPath.replace(/\\/g, '/');
@@ -2808,8 +2809,9 @@ export class WorkflowPythonEditorBridge {
 			const textDec = (node.isUnderline && node.isStrikethrough) ? 'text-decoration="underline line-through"' : (node.isUnderline ? 'text-decoration="underline"' : (node.isStrikethrough ? 'text-decoration="line-through"' : ''));
 
 			const maxTextWidth = (node.type === 'diamond') ? Math.max(20, Math.floor(node.width * 0.65)) : Math.max(20, node.width - 16);
-			const lines = WorkflowPythonEditorBridge.wrapText(node.label || '', maxTextWidth, 11);
-			const lineHeight = 15;
+			const nodeFontSize = typeof node.fontSize === 'number' ? node.fontSize : 11;
+			const lines = WorkflowPythonEditorBridge.wrapText(node.label || '', maxTextWidth, nodeFontSize);
+			const lineHeight = Math.round(nodeFontSize * 1.36);
 			const totalTextHeight = lines.length * lineHeight;
 
 			let textAnchor = 'middle';
@@ -2822,14 +2824,14 @@ export class WorkflowPythonEditorBridge {
 				textX = node.x + node.width - 8;
 			}
 
-			let startY = node.y + (node.height - totalTextHeight) / 2 + 11;
+			let startY = node.y + (node.height - totalTextHeight) / 2 + nodeFontSize;
 			if (node.verticalAlign === 'top' && node.type !== 'diamond') {
-				startY = node.y + 13;
+				startY = node.y + nodeFontSize + 2;
 			} else if (node.verticalAlign === 'bottom' && node.type !== 'diamond') {
-				startY = node.y + node.height - totalTextHeight + 11;
+				startY = node.y + node.height - totalTextHeight + nodeFontSize;
 			}
 
-			body += `  <text x="${textX}" y="${startY}" fill="${textColor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" ${isBold} ${isItalic} ${textDec} text-anchor="${textAnchor}">\n`;
+			body += `  <text x="${textX}" y="${startY}" fill="${textColor}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="${nodeFontSize}" ${isBold} ${isItalic} ${textDec} text-anchor="${textAnchor}">\n`;
 			for (let i = 0; i < lines.length; i++) {
 				const lineText = WorkflowPythonEditorBridge.escapeXml(lines[i]);
 				const dy = i === 0 ? 0 : lineHeight;
@@ -2915,13 +2917,24 @@ export class WorkflowPythonEditorBridge {
 		timeEl.textContent = card.timestamp;
 
 		const copyText = async (text: string): Promise<boolean> => {
+			if (typeof (editor as any)._copyToClipboard === 'function') {
+				return await (editor as any)._copyToClipboard(text);
+			}
 			let ok = false;
 			try {
-				if (navigator?.clipboard?.writeText) {
-					await navigator.clipboard.writeText(text);
+				if (editor?._clipboardService) {
+					await editor._clipboardService.writeText(text);
 					ok = true;
 				}
 			} catch { }
+			if (!ok) {
+				try {
+					if (navigator?.clipboard?.writeText) {
+						await navigator.clipboard.writeText(text);
+						ok = true;
+					}
+				} catch { }
+			}
 			if (!ok) {
 				try {
 					const ta = document.createElement('textarea');
@@ -2934,12 +2947,6 @@ export class WorkflowPythonEditorBridge {
 					ta.select();
 					ok = document.execCommand('copy');
 					ta.remove();
-				} catch { }
-			}
-			if (!ok) {
-				try {
-					await editor._clipboardService.writeText(text);
-					ok = true;
 				} catch { }
 			}
 			return ok;
@@ -3223,7 +3230,48 @@ export class WorkflowPythonEditorBridge {
 		} else {
 			// Card Body Fallback
 			const bodyEl = append(cardEl, $('.workflow-display-card-body'));
-			bodyEl.textContent = card.formattedText;
+			const isTruncated = Boolean(card.isTruncated && card.displayPreviewText);
+			let showingFull = false;
+
+			if (isTruncated) {
+				bodyEl.textContent = card.displayPreviewText;
+
+				const truncBar = append(cardEl, $('.workflow-display-truncation-bar'));
+				const infoBox = append(truncBar, $('.truncation-info'));
+				const totalDesc = Array.isArray(card.value)
+					? `Showing 50 of ${card.totalCount || card.value.length} items (truncated for display performance)`
+					: `Showing preview (truncated for display performance; ${card.totalCount || card.formattedText.length} chars total)`;
+				infoBox.textContent = `⚠️ ${totalDesc}`;
+
+				const actionsBox = append(truncBar, $('.truncation-actions'));
+
+				const toggleFullBtn = append(actionsBox, $('button.workflow-truncation-btn'));
+				toggleFullBtn.textContent = 'Show Full';
+				toggleFullBtn.title = 'Display full content in card';
+				toggleFullBtn.onclick = (e) => {
+					e.stopPropagation();
+					showingFull = !showingFull;
+					if (showingFull) {
+						bodyEl.textContent = card.formattedText;
+						toggleFullBtn.textContent = 'Show Less';
+					} else {
+						bodyEl.textContent = card.displayPreviewText;
+						toggleFullBtn.textContent = 'Show Full';
+					}
+				};
+
+				const copyFullBtn = append(actionsBox, $('button.workflow-truncation-btn'));
+				copyFullBtn.textContent = 'Copy Full';
+				copyFullBtn.title = 'Copy complete un-truncated raw data';
+				copyFullBtn.onclick = async (e) => {
+					e.stopPropagation();
+					const ok = await copyText(card.formattedText);
+					copyFullBtn.textContent = ok ? 'Copied Full!' : 'Failed';
+					setTimeout(() => { if (copyFullBtn.isConnected) copyFullBtn.textContent = 'Copy Full'; }, 1500);
+				};
+			} else {
+				bodyEl.textContent = card.formattedText;
+			}
 		}
 
 		// Card Footer

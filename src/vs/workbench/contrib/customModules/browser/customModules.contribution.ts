@@ -15,6 +15,7 @@ import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContaine
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
 import { ICustomModulesService } from '../common/customModules.js';
 import { CustomModulesService } from './customModulesService.js';
@@ -87,6 +88,34 @@ registerAction2(class NewCustomModuleAction extends Action2 {
 	}
 });
 
+registerAction2(class NewCustomModuleCategoryAction extends Action2 {
+	constructor() {
+		super({
+			id: 'workbench.action.customModules.newCategory',
+			title: localize2('newCustomModuleCategory', "New Category"),
+			icon: Codicon.newFolder,
+			menu: {
+				id: MenuId.ViewTitle,
+				group: 'navigation',
+				order: 2,
+				when: ContextKeyExpr.equals('view', CustomModulesViewPaneId)
+			}
+		});
+	}
+
+	async run(accessor: ServicesAccessor): Promise<void> {
+		const service = accessor.get(ICustomModulesService);
+		const quickInputService = accessor.get(IQuickInputService);
+		const name = await quickInputService.input({
+			prompt: localize('enterCategoryPrompt', "Enter category name to organize custom modules"),
+			placeHolder: localize('categoryPlaceholder', "e.g. Job Search, Resume Tools, Data Engine")
+		});
+		if (name && name.trim()) {
+			await service.addCategory(name.trim());
+		}
+	}
+});
+
 registerAction2(class RefreshCustomModulesAction extends Action2 {
 	constructor() {
 		super({
@@ -96,7 +125,7 @@ registerAction2(class RefreshCustomModulesAction extends Action2 {
 			menu: {
 				id: MenuId.ViewTitle,
 				group: 'navigation',
-				order: 2,
+				order: 3,
 				when: ContextKeyExpr.equals('view', CustomModulesViewPaneId)
 			}
 		});

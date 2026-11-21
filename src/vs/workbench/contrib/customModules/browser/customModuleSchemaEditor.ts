@@ -17,7 +17,7 @@ import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
-import { ICustomModule, ICustomField, CustomFieldType, ICompositeComponent, IStatusDefinition, IActionButton, DEFAULT_STATUS_DEFINITIONS, IOutputSpec, TableColumnDataType, ITableColumnDefinition, generateSmartPythonVarName, sanitizePythonVarName, CUSTOM_MODULE_ICON_LIBRARY, CUSTOM_MODULE_COLOR_PALETTE, getDefaultCustomModuleIconId, getDefaultCustomModuleColor, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IVoiceNoteClip, ICompositeComponent, IStatusDefinition, IActionButton, DEFAULT_STATUS_DEFINITIONS, IOutputSpec, TableColumnDataType, ITableColumnDefinition, generateSmartPythonVarName, sanitizePythonVarName, CUSTOM_MODULE_ICON_LIBRARY, CUSTOM_MODULE_COLOR_PALETTE, getDefaultCustomModuleIconId, getDefaultCustomModuleColor, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { ICustomModulesService } from '../common/customModules.js';
@@ -38,7 +38,7 @@ import { IWebContentExtractorService, WebContentExtractResult } from '../../../.
 import { IAgentsManagerService, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
 import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
 import { ITicketWorkflowRuntimeService } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
-import { renderHighlightedPythonToDOM, buildPythonLineNumbersText } from './pythonSyntaxHighlighter.js';
+import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeybinding, togglePythonComment } from './pythonSyntaxHighlighter.js';
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
 
 
@@ -88,7 +88,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		@ICommandService private readonly _commandService: ICommandService,
 		@IClipboardService private readonly _clipboardService: IClipboardService,
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
-		@IFileDialogService private readonly _fileDialogService: IFileDialogService
+		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
+		@IEntityPersistenceService private readonly _entityPersistenceService: IEntityPersistenceService,
+		@ITicketWorkflowRuntimeService private readonly _ticketWorkflowRuntimeService: ITicketWorkflowRuntimeService
 	) {
 		super(CustomModuleSchemaEditor.ID, group, telemetryService, themeService, _storageService);
 
@@ -334,6 +336,30 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			this._container = undefined;
 		}
 		super.dispose();
+	}
+
+	private _parseInputStringLiteral(val: any): any {
+		if (typeof val !== 'string') {
+			return val;
+		}
+		const trimmed = val.trim();
+		if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (typeof parsed === 'string') {
+					return parsed;
+				}
+			} catch {
+				// Keep original if not a valid single quoted string literal
+			}
+		}
+		if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) {
+			const inner = trimmed.slice(1, -1);
+			if (!/(^|[^\\])'/.test(inner)) {
+				return inner.replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+			}
+		}
+		return val;
 	}
 
 	private _syncDraft(): void {
@@ -1098,6 +1124,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				defaultName: 'MP3 / MP4 Player'
 			},
 			{
+				label: 'Voice Note (Recorder & Transcript)',
+				icon: Codicon.mic,
+				type: 'voice_note',
+				defaultName: 'Voice Note'
+			},
+			{
 				label: 'Browser (Web Application)',
 				icon: Codicon.globe,
 				type: 'browser',
@@ -1150,12 +1182,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				icon: Codicon.cloudDownload,
 				type: 'get_outputs',
 				defaultName: 'ticket_output'
-			},
-			{
-				label: 'Get Tickets (GET_TICKETS)',
-				icon: Codicon.search,
-				type: 'get_tickets',
-				defaultName: 'found_tickets'
 			},
 			{
 				label: 'Display (DISPLAY)',
@@ -1295,6 +1321,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				newField.mediaPlaybackRate = 1.0;
 				newField.mediaAutoPlay = false;
 			}
+			if (bc.type === 'voice_note') {
+				newField.voiceClips = [];
+				newField.voiceTranscript = '';
+				newField.voiceAutoTranscribe = true;
+				newField.voicePlaybackRate = 1.0;
+				newField.voiceRunInFlow = false;
+			}
 			if (bc.type === 'http_request') {
 				newField.httpUrl = 'https://aimery.link/api/tailored-resumes/JOB-41298374';
 				newField.httpMethod = 'GET';
@@ -1351,12 +1384,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			if (bc.type === 'get_outputs') {
 				newField.wfTicketTarget = '';
 			}
-			if (bc.type === 'get_tickets') {
-				newField.wfTicketType = '';
-				newField.wfTicketStatus = '';
-				newField.wfTicketTitle = '';
-				newField.wfTicketPath = '.';
-			}
 			if (bc.type === 'display') {
 				newField.wfDisplayValue = '';
 			}
@@ -1366,11 +1393,21 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			} else {
 				fields.push(newField);
 			}
+			this._syncDraft();
+			const savedScroll = mainViewport ? mainViewport.scrollTop : 0;
 			renderCanvas();
+			if (mainViewport) {
+				mainViewport.scrollTop = savedScroll;
+			}
 			if (insertIndex === undefined) {
 				setTimeout(() => {
-					mainViewport.scrollTop = mainViewport.scrollHeight;
+					if (mainViewport) {
+						mainViewport.scrollTop = mainViewport.scrollHeight;
+					}
 				}, 40);
+			}
+			if (!isFlowchartNodeMode) {
+				this._persistCurrentModule().catch(() => { });
 			}
 		};
 
@@ -1398,11 +1435,21 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			} else {
 				fields.push(newField);
 			}
+			this._syncDraft();
+			const savedScroll = mainViewport ? mainViewport.scrollTop : 0;
 			renderCanvas();
+			if (mainViewport) {
+				mainViewport.scrollTop = savedScroll;
+			}
 			if (insertIndex === undefined) {
 				setTimeout(() => {
-					mainViewport.scrollTop = mainViewport.scrollHeight;
+					if (mainViewport) {
+						mainViewport.scrollTop = mainViewport.scrollHeight;
+					}
 				}, 40);
+			}
+			if (!isFlowchartNodeMode) {
+				this._persistCurrentModule().catch(() => { });
 			}
 		};
 
@@ -1437,7 +1484,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								}
 								const finalPos = Math.max(1, position === 'after' ? adjustedTarget + 1 : adjustedTarget);
 								fields.splice(finalPos, 0, moved);
+								this._syncDraft();
+								const savedScroll = mainViewport ? mainViewport.scrollTop : 0;
 								renderCanvas();
+								if (mainViewport) {
+									mainViewport.scrollTop = savedScroll;
+								}
+								if (!isFlowchartNodeMode) {
+									this._persistCurrentModule().catch(() => { });
+								}
 							}
 						} else {
 							// Dropped below all cards -> move to the end
@@ -1468,7 +1523,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								}
 								const finalPos = Math.max(1, position === 'after' ? adjustedTarget + 1 : adjustedTarget);
 								fields.splice(finalPos, 0, moved);
+								this._syncDraft();
+								const savedScroll = mainViewport ? mainViewport.scrollTop : 0;
 								renderCanvas();
+								if (mainViewport) {
+									mainViewport.scrollTop = savedScroll;
+								}
+								if (!isFlowchartNodeMode) {
+									this._persistCurrentModule().catch(() => { });
+								}
 								return;
 							}
 						} else if (targetIndex === undefined && from !== fields.length - 1) {
@@ -1553,7 +1616,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		const onContainerMouseDown = (ev: MouseEvent) => {
 			lastInteractedSchemaEditor = this;
 			const target = ev.target as HTMLElement | null;
-			if (target && !target.closest('input, textarea, select, button, [contenteditable="true"], [contenteditable="plaintext-only"], .prompt-tokenized-display, .prompt-output-display, .python-debug-logs-display, .python-debug-result-display, .sql-output-box, [data-selectable-box="true"], pre, code')) {
+			if (target && !target.closest('input, textarea, select, button, [role="button"], .codicon, .param-copy-tag, .action-delete-btn, [contenteditable="true"], [contenteditable="plaintext-only"], .prompt-tokenized-display, .prompt-output-display, .python-debug-logs-display, .python-debug-result-display, .sql-output-box, [data-selectable-box="true"], pre, code')) {
 				const activeEl = document.activeElement as HTMLElement | null;
 				if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'SELECT')) {
 					activeEl.blur();
@@ -1708,6 +1771,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			lastInteractedFieldIndex = insertPos;
 			newlyPastedFieldId = newField.id;
 
+			this._syncDraft();
 			const prevScroll = mainViewport.scrollTop;
 			renderCanvas();
 			mainViewport.scrollTop = prevScroll;
@@ -1820,6 +1884,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		const renderCanvas = () => {
 			document.querySelectorAll('.anyagent-instant-tooltip').forEach(el => el.remove());
 			this._syncDraft();
+			const savedScrollTop = mainViewport ? mainViewport.scrollTop : 0;
 			clearNode(rightCanvas);
 			pasteUiRefreshers.length = 0;
 
@@ -1862,16 +1927,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 			const getReferenceTokensForField = (currentField: ICustomField | string): Array<{ label: string; type: string }> => {
 				const allSchemaFields = fields;
-				const tokens: Array<{ label: string; type: string }> = isFlowchartNodeMode
-					? []
-					: [{ label: 'Title', type: 'INPUT' }];
-				const seen = new Set<string>(isFlowchartNodeMode ? [] : ['title']);
+				const tokens: Array<{ label: string; type: string }> = [];
+				const seen = new Set<string>(['title']);
 				if (isFlowchartNodeMode && input.workflowVariablesProvider) {
 					try {
 						const wfVars = input.workflowVariablesProvider() || [];
 						wfVars.forEach(wv => {
 							const wLabel = (wv.label || '').trim();
-							if (wLabel && !seen.has(wLabel.toLowerCase())) {
+							if (wLabel && wLabel.toLowerCase() !== 'title' && !seen.has(wLabel.toLowerCase())) {
 								seen.add(wLabel.toLowerCase());
 								tokens.push({ label: wLabel, type: wv.type || 'WORKFLOW' });
 							}
@@ -1884,13 +1947,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const ft = (rf.type || '').toLowerCase();
 					const fl = (rf.label || rf.id || '').trim();
 					const flLower = fl.toLowerCase();
-					if (!fl || ft === 'output' || ft === 'result' || ft === 'display' || flLower === 'output' || flLower === 'result') {
+					if (!fl || ft === 'output' || ft === 'result' || ft === 'display' || flLower === 'output' || flLower === 'result' || rf.id === 'title' || flLower === 'title') {
 						return;
 					}
 					if (ft === 'parameters' && Array.isArray(rf.parameters)) {
 						rf.parameters.forEach(p => {
 							const pName = (p.name || '').trim();
-							if (pName && !seen.has(pName.toLowerCase())) {
+							if (pName && pName.toLowerCase() !== 'title' && !seen.has(pName.toLowerCase())) {
 								seen.add(pName.toLowerCase());
 								tokens.push({ label: pName, type: 'PARAM' });
 							}
@@ -1898,12 +1961,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}
 					if (ft !== 'parameters') {
 						const outVar = (rf.outputVariableName || '').trim() || generateSmartPythonVarName(fl, rf.type);
-						if (outVar && !seen.has(outVar.toLowerCase())) {
+						if (outVar && outVar.toLowerCase() !== 'title' && !seen.has(outVar.toLowerCase())) {
 							seen.add(outVar.toLowerCase());
 							tokens.push({ label: outVar, type: ft.toUpperCase() });
 						}
 					}
-					if (!seen.has(flLower)) {
+					if (flLower !== 'title' && !seen.has(flLower)) {
 						seen.add(flLower);
 						tokens.push({ label: fl, type: ft.toUpperCase() });
 					}
@@ -1935,6 +1998,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								? `background: rgba(234, 179, 8, 0.03); border: 1px solid ${defaultBorderColor}; border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25); transition: border-color 0.15s ease, box-shadow 0.15s ease; position: relative;`
 								: `background: var(--vscode-editor-background, #1e1e1e); border: 1px solid ${defaultBorderColor}; border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25); transition: border-color 0.15s ease, box-shadow 0.15s ease; position: relative;`))
 				}));
+
+				const isFieldDisabled = Boolean(field.disabled);
+				if (isFieldDisabled) {
+					fieldCard.style.opacity = '0.55';
+					fieldCard.style.filter = 'grayscale(0.65)';
+					fieldCard.style.borderStyle = 'dashed';
+					fieldCard.style.borderColor = 'rgba(148, 163, 184, 0.35)';
+				}
 
 				fieldCard.addEventListener('mouseenter', () => {
 					hoveredFieldIndex = fIdx;
@@ -2070,20 +2141,21 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				const isPrompt = field.type === 'prompt';
 				const isTts = field.type === 'tts';
 				const isMediaPlayer = field.type === 'media_player';
+				const isVoiceNote = field.type === 'voice_note';
 				const isHttpRequest = field.type === 'http_request';
 				const isOutput = field.type === 'output' || field.type === 'result';
-				const isWfBuiltin = field.type === 'create_tickets' || field.type === 'run_tickets' || field.type === 'get_outputs' || field.type === 'get_tickets' || field.type === 'display';
+				const isWfBuiltin = field.type === 'create_tickets' || field.type === 'run_tickets' || field.type === 'get_outputs' || field.type === 'get_ticket' || field.type === 'display';
 				const wfBadgeLabels: Record<string, string> = {
 					create_tickets: 'CREATE TICKETS',
 					run_tickets: 'RUN TICKETS',
 					get_outputs: 'GET OUTPUTS',
-					get_tickets: 'GET TICKETS',
+					get_ticket: 'GET TICKET',
 					display: 'DISPLAY'
 				};
-				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isPython ? 'PYTHON' : (isTable ? 'DATA TABLE' : (isParameters ? 'INPUTS' : (isPrompt ? 'AI PROMPT' : (isTts ? 'AUDIO / TTS' : (isMediaPlayer ? 'MP3 / MP4 PLAYER' : (isHttpRequest ? 'HTTP REQUEST' : (isOutput ? 'OUTPUT' : (wfBadgeLabels[field.type] || field.type.toUpperCase())))))))))))));
-				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isPython ? 'rgba(56, 189, 248, 0.15)' : (isTable ? 'rgba(20, 184, 166, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isTts ? 'rgba(236, 72, 153, 0.18)' : (isMediaPlayer ? 'rgba(245, 158, 11, 0.18)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.22)' : 'rgba(99, 102, 241, 0.18)')))))))))))));
-				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isPython ? '#38bdf8' : (isTable ? '#2dd4bf' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isTts ? '#f472b6' : (isMediaPlayer ? '#fbbf24' : (isHttpRequest ? '#06b6d4' : (isOutput ? '#818cf8' : (isWfBuiltin ? '#d8b4fe' : '#818cf8')))))))))))));
-				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isPython ? 'rgba(56, 189, 248, 0.35)' : (isTable ? 'rgba(20, 184, 166, 0.4)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isTts ? 'rgba(236, 72, 153, 0.35)' : (isMediaPlayer ? 'rgba(251, 191, 36, 0.35)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.4)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.45)' : 'rgba(99, 102, 241, 0.35)')))))))))))));
+				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isPython ? 'PYTHON' : (isTable ? 'DATA TABLE' : (isParameters ? 'INPUTS' : (isPrompt ? 'AI PROMPT' : (isTts ? 'AUDIO / TTS' : (isMediaPlayer ? 'MP3 / MP4 PLAYER' : (isVoiceNote ? 'VOICE NOTE' : (isHttpRequest ? 'HTTP REQUEST' : (isOutput ? 'OUTPUT' : (wfBadgeLabels[field.type] || field.type.toUpperCase()))))))))))))));
+				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isPython ? 'rgba(56, 189, 248, 0.15)' : (isTable ? 'rgba(20, 184, 166, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isTts ? 'rgba(236, 72, 153, 0.18)' : (isMediaPlayer ? 'rgba(245, 158, 11, 0.18)' : (isVoiceNote ? 'rgba(148, 163, 184, 0.16)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.22)' : 'rgba(99, 102, 241, 0.18)'))))))))))))));
+				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isPython ? '#38bdf8' : (isTable ? '#2dd4bf' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isTts ? '#f472b6' : (isMediaPlayer ? '#fbbf24' : (isVoiceNote ? '#cbd5e1' : (isHttpRequest ? '#06b6d4' : (isOutput ? '#818cf8' : (isWfBuiltin ? '#d8b4fe' : '#818cf8'))))))))))))));
+				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isPython ? 'rgba(56, 189, 248, 0.35)' : (isTable ? 'rgba(20, 184, 166, 0.4)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isTts ? 'rgba(236, 72, 153, 0.35)' : (isMediaPlayer ? 'rgba(251, 191, 36, 0.35)' : (isVoiceNote ? 'rgba(148, 163, 184, 0.34)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.4)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.45)' : 'rgba(99, 102, 241, 0.35)'))))))))))))));
 
 				append(headerLeft, $('span.type-badge', {
 					style: `font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; letter-spacing: 0.04em;`
@@ -2116,6 +2188,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					e.preventDefault();
 					showPrimitiveHelpModal(this._container!, field.type, field.label || field.id, field.componentRef);
 				};
+
+				const disabledBadge = append(headerLeft, $('span.field-disabled-status-badge', {
+					style: `font-size: 9.5px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(148, 163, 184, 0.16); color: #94a3b8; border: 1px dashed rgba(148, 163, 184, 0.45); letter-spacing: 0.04em; margin-left: 2px; display: ${isFieldDisabled ? 'inline-block' : 'none'};`
+				}, 'DISABLED (SKIPPED)'));
 
 				let propagateLabelRenameInModule: (oldLbl: string, newLbl: string) => void = () => { };
 				let labelInput: HTMLInputElement;
@@ -2156,79 +2232,218 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'font-size: 11px; color: rgba(255, 255, 255, 0.45); font-style: italic;'
 					}, 'Required Root Field'));
 				} else {
-					// Move Up / Down
+					// 1. Move Up / Down
 					const canMoveUp = fIdx > 1;
 					const upBtn = append(headerRight, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp), {
-						style: `cursor: pointer; font-size: 12px; opacity: ${canMoveUp ? '0.7;' : '0.2; pointer-events: none;'}`
+						style: `cursor: pointer; font-size: 12px; opacity: ${canMoveUp ? '0.75' : '0.2; pointer-events: none;'}; padding: 3px 4px; border-radius: 4px; transition: all 0.15s ease;`
 					}));
 					upBtn.title = 'Move Up';
-					upBtn.onclick = () => {
+					upBtn.onmouseenter = () => { if (canMoveUp) { upBtn.style.opacity = '1'; upBtn.style.background = 'rgba(255, 255, 255, 0.1)'; } };
+					upBtn.onmouseleave = () => { if (canMoveUp) { upBtn.style.opacity = '0.75'; upBtn.style.background = 'transparent'; } };
+					upBtn.onclick = (e) => {
+						e.stopPropagation();
 						if (fIdx > 1) {
 							const temp = fields[fIdx];
 							fields[fIdx] = fields[fIdx - 1];
 							fields[fIdx - 1] = temp;
+							this._syncDraft();
 							renderCanvas();
+							this._persistCurrentModule().catch(() => { });
 						}
 					};
 
 					const canMoveDown = fIdx < fields.length - 1;
 					const downBtn = append(headerRight, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowDown), {
-						style: `cursor: pointer; font-size: 12px; opacity: ${canMoveDown ? '0.7;' : '0.2; pointer-events: none;'}`
+						style: `cursor: pointer; font-size: 12px; opacity: ${canMoveDown ? '0.75' : '0.2; pointer-events: none;'}; padding: 3px 4px; border-radius: 4px; transition: all 0.15s ease;`
 					}));
 					downBtn.title = 'Move Down';
-					downBtn.onclick = () => {
+					downBtn.onmouseenter = () => { if (canMoveDown) { downBtn.style.opacity = '1'; downBtn.style.background = 'rgba(255, 255, 255, 0.1)'; } };
+					downBtn.onmouseleave = () => { if (canMoveDown) { downBtn.style.opacity = '0.75'; downBtn.style.background = 'transparent'; } };
+					downBtn.onclick = (e) => {
+						e.stopPropagation();
 						if (fIdx < fields.length - 1) {
 							const temp = fields[fIdx];
 							fields[fIdx] = fields[fIdx + 1];
 							fields[fIdx + 1] = temp;
+							this._syncDraft();
 							renderCanvas();
+							this._persistCurrentModule().catch(() => { });
 						}
 					};
 
-					// Copy Component button
-					const copyFieldBtn = append(headerRight, $('span' + ThemeIcon.asCSSSelector(Codicon.copy), {
-						style: 'cursor: pointer; font-size: 12px; color: #38bdf8; opacity: 0.85; padding: 2px 3px; border-radius: 4px; transition: all 0.15s ease;'
+					// 2. Enable / Disable Component Toggle Pill
+					const toggleEnableBtn = append(headerRight, $('button.field-enable-toggle-btn', {
+						style: `cursor: pointer; padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; border: 1px solid; transition: all 0.15s ease; outline: none; margin: 0 2px; user-select: none; ` +
+							(isFieldDisabled
+								? 'background: rgba(148, 163, 184, 0.12); color: #94a3b8; border-color: rgba(148, 163, 184, 0.35);'
+								: 'background: rgba(34, 197, 94, 0.15); color: #4ade80; border-color: rgba(34, 197, 94, 0.4);')
 					}));
+					toggleEnableBtn.type = 'button';
+					toggleEnableBtn.title = isFieldDisabled
+						? 'Component is Disabled (Skipped during execution). Click to Enable.'
+						: 'Component is Enabled (Active during execution). Click to Disable.';
+					const toggleIconSpan = append(toggleEnableBtn, $('span' + ThemeIcon.asCSSSelector(isFieldDisabled ? Codicon.circleSlash : Codicon.check), {
+						style: 'font-size: 11px;'
+					}));
+					const toggleTextSpan = append(toggleEnableBtn, $('span', {}, isFieldDisabled ? 'Disabled' : 'Enabled'));
+
+					toggleEnableBtn.onmouseenter = () => {
+						toggleEnableBtn.style.opacity = '1';
+						if (field.disabled) {
+							toggleEnableBtn.style.background = 'rgba(148, 163, 184, 0.22)';
+						} else {
+							toggleEnableBtn.style.background = 'rgba(34, 197, 94, 0.25)';
+						}
+					};
+					toggleEnableBtn.onmouseleave = () => {
+						toggleEnableBtn.style.opacity = '0.9';
+						if (field.disabled) {
+							toggleEnableBtn.style.background = 'rgba(148, 163, 184, 0.12)';
+						} else {
+							toggleEnableBtn.style.background = 'rgba(34, 197, 94, 0.15)';
+						}
+					};
+					toggleEnableBtn.onclick = async (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						field.disabled = !field.disabled;
+						const nowDisabled = Boolean(field.disabled);
+
+						fieldCard.style.opacity = nowDisabled ? '0.55' : '1';
+						fieldCard.style.filter = nowDisabled ? 'grayscale(0.65)' : 'none';
+						fieldCard.style.borderStyle = nowDisabled ? 'dashed' : 'solid';
+						fieldCard.style.borderColor = nowDisabled ? 'rgba(148, 163, 184, 0.35)' : defaultBorderColor;
+
+						disabledBadge.style.display = nowDisabled ? 'inline-block' : 'none';
+
+						toggleEnableBtn.title = nowDisabled
+							? 'Component is Disabled (Skipped during execution). Click to Enable.'
+							: 'Component is Enabled (Active during execution). Click to Disable.';
+						toggleEnableBtn.style.background = nowDisabled ? 'rgba(148, 163, 184, 0.12)' : 'rgba(34, 197, 94, 0.15)';
+						toggleEnableBtn.style.color = nowDisabled ? '#94a3b8' : '#4ade80';
+						toggleEnableBtn.style.borderColor = nowDisabled ? 'rgba(148, 163, 184, 0.35)' : 'rgba(34, 197, 94, 0.4)';
+
+						toggleIconSpan.className = ThemeIcon.asClassName(nowDisabled ? Codicon.circleSlash : Codicon.check);
+						toggleTextSpan.textContent = nowDisabled ? 'Disabled' : 'Enabled';
+
+						this._syncDraft();
+						if (!isFlowchartNodeMode) {
+							await this._persistCurrentModule();
+						}
+					};
+
+					// 3. Duplicate / Copy Component button
+					const copyFieldBtn = append(headerRight, $('button.field-copy-btn', {
+						type: 'button',
+						style: 'cursor: pointer; font-size: 13px; color: #38bdf8; background: transparent; border: 1px solid transparent; opacity: 0.85; padding: 3px 5px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; transition: all 0.15s ease;'
+					}));
+					const copyIcon = append(copyFieldBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
 					this._attachInstantTooltip(
 						copyFieldBtn,
-						`Copy Component: Copy "${field.label || field.id}" to paste into any template (⌘V)`,
+						`Duplicate Component: Clone "${field.label || field.id}" directly below (⌘C / ⌘V)`,
 						'#38bdf8'
 					);
 					copyFieldBtn.onmouseenter = () => {
 						copyFieldBtn.style.opacity = '1';
-						copyFieldBtn.style.background = 'rgba(56, 189, 248, 0.15)';
+						copyFieldBtn.style.background = 'rgba(56, 189, 248, 0.18)';
+						copyFieldBtn.style.borderColor = 'rgba(56, 189, 248, 0.35)';
 					};
 					copyFieldBtn.onmouseleave = () => {
 						copyFieldBtn.style.opacity = '0.85';
 						copyFieldBtn.style.background = 'transparent';
+						copyFieldBtn.style.borderColor = 'transparent';
 					};
-					copyFieldBtn.onclick = (e) => {
+					copyFieldBtn.onclick = async (e) => {
+						e.preventDefault();
 						e.stopPropagation();
-						copyFieldComponent(field, badgeText, copyFieldBtn).catch(() => { });
+						try {
+							const clonedField: ICustomField = JSON.parse(JSON.stringify(field));
+							clonedField.id = 'f_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7);
+							if (clonedField.label) {
+								clonedField.label = `${clonedField.label} (Copy)`;
+							}
+							if (clonedField.outputVariableName) {
+								clonedField.outputVariableName = generateSmartPythonVarName(clonedField.label || clonedField.id, clonedField.type);
+							}
+							delete (clonedField as any).lastSentPrompt;
+							delete (clonedField as any).lastExecutionLog;
+							delete (clonedField as any).lastExecutionOutput;
+							delete (clonedField as any).lastExecutionStatus;
+							delete (clonedField as any).lastExecutionDurationMs;
+							delete (clonedField as any).lastExecutedAt;
+							delete (clonedField as any).lastExecutionExitCode;
+							delete clonedField.pythonOutput;
+							delete clonedField.pythonResult;
+
+							const realIdx = fields.indexOf(field);
+							const insertIdx = realIdx !== -1 ? realIdx + 1 : fields.length;
+							fields.splice(insertIdx, 0, clonedField);
+							copyFieldComponent(field, badgeText, copyIcon).catch(() => { });
+							this._syncDraft();
+							const savedScroll = mainViewport ? mainViewport.scrollTop : 0;
+							renderCanvas();
+							if (mainViewport) {
+								mainViewport.scrollTop = savedScroll;
+							}
+							if (!isFlowchartNodeMode) {
+								await this._persistCurrentModule();
+							}
+						} catch (err) {
+							console.error('[CustomModuleSchemaEditor] Failed to duplicate component:', err);
+						}
 					};
 
-					// Delete button (with confirmation dialog)
-					const delBtn = append(headerRight, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
-						style: 'cursor: pointer; font-size: 12px; color: #ef4444; opacity: 0.8;'
+					// 4. Delete button
+					const delBtn = append(headerRight, $('button.field-delete-btn', {
+						type: 'button',
+						style: 'cursor: pointer; font-size: 13px; color: #ef4444; background: transparent; border: 1px solid transparent; opacity: 0.85; padding: 3px 5px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; transition: all 0.15s ease;'
 					}));
-					delBtn.title = 'Remove Component (Requires Confirmation)';
+					append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+					delBtn.title = isFlowchartNodeMode ? 'Remove Component from Node' : 'Remove Component (Requires Confirmation)';
+					delBtn.onmouseenter = () => {
+						delBtn.style.opacity = '1';
+						delBtn.style.background = 'rgba(239, 68, 68, 0.18)';
+						delBtn.style.borderColor = 'rgba(239, 68, 68, 0.35)';
+					};
+					delBtn.onmouseleave = () => {
+						delBtn.style.opacity = '0.85';
+						delBtn.style.background = 'transparent';
+						delBtn.style.borderColor = 'transparent';
+					};
 					delBtn.onclick = async (e) => {
+						e.preventDefault();
 						e.stopPropagation();
-						const fieldName = field.label || field.id || `Field #${fIdx + 1}`;
-						const confirmRes = await this.dialogService.confirm({
-							type: 'warning',
-							title: 'Confirm Delete Component',
-							message: `Are you sure you want to delete the [${badgeText}] component "${fieldName}"?`,
-							detail: `This will remove "${fieldName}" and its configuration from template "${activeMod.name}".`,
-							primaryButton: 'Delete Component',
-							cancelButton: 'Cancel'
-						});
-						if (!confirmRes.confirmed) {
-							return;
+						const fieldName = field.label || field.id || `Component`;
+						if (!isFlowchartNodeMode) {
+							try {
+								const confirmRes = await this.dialogService.confirm({
+									type: 'warning',
+									title: 'Confirm Delete Component',
+									message: `Are you sure you want to delete the [${badgeText}] component "${fieldName}"?`,
+									detail: `This will remove "${fieldName}" and its configuration from template "${activeMod.name}".`,
+									primaryButton: 'Delete Component',
+									cancelButton: 'Cancel'
+								});
+								if (!confirmRes.confirmed) {
+									return;
+								}
+							} catch (err) {
+								console.warn('[CustomModuleSchemaEditor] Dialog confirmation bypassed or failed:', err);
+							}
 						}
-						fields.splice(fIdx, 1);
+						const realIdx = fields.indexOf(field);
+						if (realIdx !== -1) {
+							fields.splice(realIdx, 1);
+						}
+						this._syncDraft();
+						const savedScroll = mainViewport ? mainViewport.scrollTop : 0;
 						renderCanvas();
-						await this._persistCurrentModule();
+						if (mainViewport) {
+							mainViewport.scrollTop = savedScroll;
+						}
+						if (!isFlowchartNodeMode) {
+							await this._persistCurrentModule();
+						}
 					};
 				}
 
@@ -2647,22 +2862,35 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									renderSubFieldsList();
 								};
 							}
-							const dBtn = append(subActs, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { style: 'cursor: pointer; opacity: 0.6; font-size: 11px; color: #ef4444;' }));
-							dBtn.title = 'Delete Sub-Field (Requires Confirmation)';
-							dBtn.onclick = async () => {
-								const confirmRes = await this.dialogService.confirm({
-									type: 'warning',
-									title: 'Confirm Delete Sub-Field',
-									message: `Are you sure you want to delete sub-field "${subF.label || subF.id}" (${subF.type.toUpperCase()})?`,
-									detail: `This will remove "${subF.label || subF.id}" from the "${field.label || field.id}" container component.`,
-									primaryButton: 'Delete',
-									cancelButton: 'Cancel'
-								});
-								if (!confirmRes.confirmed) {
-									return;
+							const dBtn = append(subActs, $('button', {
+								type: 'button',
+								title: isFlowchartNodeMode ? 'Delete Sub-Field' : 'Delete Sub-Field (Requires Confirmation)',
+								style: 'cursor: pointer; opacity: 0.72; font-size: 11px; color: #ef4444; background: transparent; border: none; padding: 2px 4px; display: inline-flex; align-items: center; justify-content: center;'
+							})) as HTMLButtonElement;
+							append(dBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+							dBtn.onmousedown = (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); };
+							dBtn.onclick = async (e: MouseEvent) => {
+								e.preventDefault();
+								e.stopPropagation();
+								if (!isFlowchartNodeMode) {
+									try {
+										const confirmRes = await this.dialogService.confirm({
+											type: 'warning',
+											title: 'Confirm Delete Sub-Field',
+											message: `Are you sure you want to delete sub-field "${subF.label || subF.id}" (${subF.type.toUpperCase()})?`,
+											detail: `This will remove "${subF.label || subF.id}" from the "${field.label || field.id}" container component.`,
+											primaryButton: 'Delete',
+											cancelButton: 'Cancel'
+										});
+										if (!confirmRes.confirmed) {
+											return;
+										}
+									} catch { }
 								}
 								field.itemFields?.splice(sIdx, 1);
+								this._syncDraft();
 								renderSubFieldsList();
+								this._persistCurrentModule().catch(() => { });
 							};
 
 							const subInpRow = append(subCard, $('div', { style: 'display: flex; gap: 8px; align-items: center; flex-wrap: wrap;' }));
@@ -2909,22 +3137,35 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 							// Right Actions: Remove Button (left/right arrows removed per user request)
 							const btnActs = append(btnCard, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
-							const delB = append(btnActs, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { style: 'cursor: pointer; opacity: 0.6; font-size: 12px; color: #ef4444;' }));
-							delB.title = 'Remove Button (Requires Confirmation)';
-							delB.onclick = async () => {
-								const confirmRes = await this.dialogService.confirm({
-									type: 'warning',
-									title: 'Confirm Delete Action Button',
-									message: `Are you sure you want to delete action button "${btn.label || btn.id}"?`,
-									detail: `This will remove the "${btn.label || btn.id}" button from "${field.label || field.id}".`,
-									primaryButton: 'Delete',
-									cancelButton: 'Cancel'
-								});
-								if (!confirmRes.confirmed) {
-									return;
+							const delB = append(btnActs, $('button', {
+								type: 'button',
+								title: isFlowchartNodeMode ? 'Remove Button' : 'Remove Button (Requires Confirmation)',
+								style: 'cursor: pointer; opacity: 0.72; font-size: 12px; color: #ef4444; background: transparent; border: none; padding: 2px 4px; display: inline-flex; align-items: center; justify-content: center;'
+							})) as HTMLButtonElement;
+							append(delB, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+							delB.onmousedown = (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); };
+							delB.onclick = async (e: MouseEvent) => {
+								e.preventDefault();
+								e.stopPropagation();
+								if (!isFlowchartNodeMode) {
+									try {
+										const confirmRes = await this.dialogService.confirm({
+											type: 'warning',
+											title: 'Confirm Delete Action Button',
+											message: `Are you sure you want to delete action button "${btn.label || btn.id}"?`,
+											detail: `This will remove the "${btn.label || btn.id}" button from "${field.label || field.id}".`,
+											primaryButton: 'Delete',
+											cancelButton: 'Cancel'
+										});
+										if (!confirmRes.confirmed) {
+											return;
+										}
+									} catch { }
 								}
 								field.buttons!.splice(bIdx, 1);
+								this._syncDraft();
 								renderButtonItems();
+								this._persistCurrentModule().catch(() => { });
 							};
 						});
 
@@ -3419,13 +3660,20 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								valInp.oninput = () => { c.value = valInp.value; };
 
 								// Delete row button
-								const delBtn = append(row, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
-									style: 'cursor: pointer; opacity: 0.7; font-size: 11.5px; color: #ef4444; padding: 4px;'
-								}));
-								delBtn.title = 'Remove Credential Row';
-								delBtn.onclick = () => {
+								const delBtn = append(row, $('button', {
+									type: 'button',
+									title: 'Remove Credential Row',
+									style: 'cursor: pointer; opacity: 0.72; font-size: 11.5px; color: #ef4444; background: transparent; border: none; padding: 3px 5px; display: inline-flex; align-items: center; justify-content: center;'
+								})) as HTMLButtonElement;
+								append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+								delBtn.onmousedown = (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); };
+								delBtn.onclick = (e: MouseEvent) => {
+									e.preventDefault();
+									e.stopPropagation();
 									field.credentials!.splice(cIdx, 1);
+									this._syncDraft();
 									renderCredRows();
+									this._persistCurrentModule().catch(() => { });
 								};
 							});
 						}
@@ -3474,11 +3722,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}));
 					if ((field as any).lastExecutionStatus) {
 						statusBadge.style.display = 'inline-block';
-						const isOk = (field as any).lastExecutionStatus === 'success';
-						statusBadge.textContent = isOk
-							? `Completed in ${(field as any).lastExecutionDurationMs ?? 0}ms${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`
-							: `Failed (${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
-						statusBadge.style.color = isOk ? '#4ade80' : '#f87171';
+						const st = (field as any).lastExecutionStatus;
+						if (st === 'success') {
+							statusBadge.textContent = `Completed in ${(field as any).lastExecutionDurationMs ?? 0}ms${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+							statusBadge.style.color = '#4ade80';
+						} else if (st === 'failed') {
+							statusBadge.textContent = `Failed (${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+							statusBadge.style.color = '#f87171';
+						} else if (st === 'skipped') {
+							statusBadge.textContent = 'Skipped (Disabled)';
+							statusBadge.style.color = '#94a3b8';
+						}
 					}
 
 					const contentHeaderRight = append(contentHeader, $('div', {
@@ -3647,25 +3901,50 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								this._persistCurrentModule().catch(() => { });
 							};
 
-							const delBtn = append(topLine, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
-								title: 'Delete Parameter (Requires Confirmation)',
-								style: 'cursor: pointer; opacity: 0.6; font-size: 12px; padding: 4px;'
-							}));
-							delBtn.onmouseenter = () => delBtn.style.opacity = '1';
-							delBtn.onmouseleave = () => delBtn.style.opacity = '0.6';
-							delBtn.onclick = async () => {
-								const confirmRes = await this.dialogService.confirm({
-									type: 'warning',
-									title: 'Confirm Delete Parameter',
-									message: `Are you sure you want to delete parameter "{{${param.name || 'param'}}}"?`,
-									detail: `This will remove the parameter from "${field.label || field.id}".`,
-									primaryButton: 'Delete',
-									cancelButton: 'Cancel'
-								});
-								if (!confirmRes.confirmed) {
-									return;
+							const delBtn = append(topLine, $('button.param-delete-btn', {
+								type: 'button',
+								title: isFlowchartNodeMode ? 'Delete Parameter' : 'Delete Parameter (Requires Confirmation)',
+								style: 'cursor: pointer; opacity: 0.72; font-size: 12px; padding: 3px 5px; border-radius: 4px; border: 1px solid transparent; background: transparent; color: #f87171; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; transition: all 0.12s ease;'
+							})) as HTMLButtonElement;
+							append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { style: 'font-size: 12px;' }));
+							delBtn.onmouseenter = () => {
+								delBtn.style.opacity = '1';
+								delBtn.style.background = 'rgba(239, 68, 68, 0.16)';
+								delBtn.style.borderColor = 'rgba(239, 68, 68, 0.35)';
+							};
+							delBtn.onmouseleave = () => {
+								delBtn.style.opacity = '0.72';
+								delBtn.style.background = 'transparent';
+								delBtn.style.borderColor = 'transparent';
+							};
+							delBtn.onmousedown = (e: MouseEvent) => {
+								e.preventDefault();
+								e.stopPropagation();
+							};
+							delBtn.onclick = async (e: MouseEvent) => {
+								e.preventDefault();
+								e.stopPropagation();
+								if (!isFlowchartNodeMode) {
+									try {
+										const confirmRes = await this.dialogService.confirm({
+											type: 'warning',
+											title: 'Confirm Delete Parameter',
+											message: `Are you sure you want to delete parameter "{{${param.name || 'param'}}}"?`,
+											detail: `This will remove the parameter from "${field.label || field.id}".`,
+											primaryButton: 'Delete',
+											cancelButton: 'Cancel'
+										});
+										if (!confirmRes.confirmed) {
+											return;
+										}
+									} catch (err) {
+										console.warn('[CustomModuleSchemaEditor] Parameter delete dialog bypassed:', err);
+									}
 								}
-								field.parameters!.splice(pIdx, 1);
+								if (Array.isArray(field.parameters)) {
+									const realIdx = field.parameters.indexOf(param);
+									field.parameters.splice(realIdx !== -1 ? realIdx : pIdx, 1);
+								}
 								this._syncDraft();
 								renderParamList();
 								refreshAllReferenceChipBars();
@@ -3714,10 +3993,30 @@ export class CustomModuleSchemaEditor extends EditorPane {
 											style: 'padding: 1px 6px; font-size: 10px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;',
 											title: `Click to bind Workflow variable {${vName}} into parameter "${param.name || ''}"`
 										}, `+ {${vName}}`));
+										vChip.onmousedown = (ev) => {
+											ev.preventDefault();
+											ev.stopPropagation();
+										};
 										vChip.onclick = (ev) => {
 											ev.preventDefault();
 											ev.stopPropagation();
-											defInput.value = `{${vName}}`;
+											const token = `{${vName}}`;
+											const curVal = defInput.value || '';
+											if (
+												document.activeElement === defInput &&
+												typeof defInput.selectionStart === 'number' &&
+												typeof defInput.selectionEnd === 'number' &&
+												defInput.selectionStart !== defInput.selectionEnd
+											) {
+												const start = defInput.selectionStart;
+												const end = defInput.selectionEnd;
+												defInput.value = curVal.substring(0, start) + token + curVal.substring(end);
+												const newPos = start + token.length;
+												defInput.focus({ preventScroll: true });
+												defInput.setSelectionRange(newPos, newPos);
+											} else {
+												defInput.value = token;
+											}
 											param.defaultValue = defInput.value;
 											if (!param.name || param.name === 'param1') {
 												param.name = vName;
@@ -3874,6 +4173,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						} else if (st === 'failed') {
 							paramExecStatus.textContent = `Failed (${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
 							paramExecStatus.style.color = '#f87171';
+						} else if (st === 'skipped') {
+							paramExecStatus.textContent = 'Skipped (Disabled)';
+							paramExecStatus.style.color = '#94a3b8';
 						} else {
 							paramExecStatus.textContent = '[Ready to execute]';
 							paramExecStatus.style.color = '#94a3b8';
@@ -6672,6 +6974,618 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					};
 				}
 
+				if (field.type === 'voice_note') {
+					if (!Array.isArray(field.voiceClips)) {
+						field.voiceClips = [];
+					}
+					if (field.voiceAutoTranscribe === undefined) {
+						field.voiceAutoTranscribe = true;
+					}
+					if (typeof field.voicePlaybackRate !== 'number' || !Number.isFinite(field.voicePlaybackRate)) {
+						field.voicePlaybackRate = 1.0;
+					}
+
+					const syncCombinedVoiceTranscript = () => {
+						const clips = Array.isArray(field.voiceClips) ? field.voiceClips : [];
+						field.voiceTranscript = clips
+							.map(c => (c.transcript || '').trim())
+							.filter(Boolean)
+							.join('\n\n');
+					};
+
+					const formatVoiceDuration = (sec?: number): string => {
+						const safe = typeof sec === 'number' && Number.isFinite(sec) && sec >= 0 ? Math.floor(sec) : 0;
+						const m = Math.floor(safe / 60);
+						const s = safe % 60;
+						return `${m}:${s < 10 ? '0' : ''}${s}`;
+					};
+
+					const dataUrlToBlob = (dataUrl: string): Blob => {
+						const parts = dataUrl.split(',');
+						const mimeMatch = parts[0].match(/:(.*?);/);
+						const mime = mimeMatch ? mimeMatch[1] : 'audio/webm';
+						const bstr = atob(parts[1] || '');
+						let n = bstr.length;
+						const u8arr = new Uint8Array(n);
+						while (n--) {
+							u8arr[n] = bstr.charCodeAt(n);
+						}
+						return new Blob([u8arr], { type: mime });
+					};
+
+					const blobToDataUrl = (blob: Blob): Promise<string> => new Promise((resolve, reject) => {
+						const reader = new FileReader();
+						reader.onloadend = () => resolve(String(reader.result || ''));
+						reader.onerror = () => reject(reader.error || new Error('Failed to read audio blob'));
+						reader.readAsDataURL(blob);
+					});
+
+					const voiceBox = append(fieldCard, $('.voice-note-schema-config', {
+						style: 'display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; background: rgba(148, 163, 184, 0.04); border: 1px solid rgba(148, 163, 184, 0.22); border-radius: 6px; margin-top: 4px;'
+					}));
+
+					// Header notice
+					const voiceNotice = append(voiceBox, $('div', {
+						style: 'font-size: 11px; color: rgba(203, 213, 225, 0.78); display: flex; align-items: center; gap: 6px; font-weight: 500;'
+					}));
+					append(voiceNotice, $('span' + ThemeIcon.asCSSSelector(Codicon.mic)));
+					append(voiceNotice, $('span', {}, 'Voice Note (Commentary Only): Record one or more voice memos with automatic Speech-to-Text transcription. Skipped during workflow execution; displays a top-right speaker icon on the node to play all clips sequentially.'));
+
+					// Top Control Bar
+					const controlBar = append(voiceBox, $('div', {
+						style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 8px 10px; border-radius: 6px; background: rgba(0, 0, 0, 0.24); border: 1px solid rgba(148, 163, 184, 0.18);'
+					}));
+
+					const leftControls = append(controlBar, $('div', {
+						style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;'
+					}));
+
+					const recordBtn = append(leftControls, $('button.monaco-button', {
+						type: 'button',
+						style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 11.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(148, 163, 184, 0.16); border: 1px solid rgba(148, 163, 184, 0.36); color: var(--vscode-foreground, #e2e8f0); transition: all 120ms ease;',
+						title: 'Click to record a new voice clip (Speech-to-Text)'
+					})) as HTMLButtonElement;
+					const recordBtnIcon = append(recordBtn, $('span.codicon.codicon-mic', { style: 'font-size: 13px;' }));
+					const recordBtnLabel = append(recordBtn, $('span', {}, 'Record Voice'));
+
+					const recordingIndicator = append(leftControls, $('div', {
+						style: 'display: none; align-items: center; gap: 6px; font-size: 11px; color: #ff3b30; font-weight: 600; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(255, 59, 48, 0.4); padding: 3px 9px; border-radius: 12px; user-select: none;'
+					}));
+					append(recordingIndicator, $('span', {
+						style: 'width: 8px; height: 8px; border-radius: 50%; background-color: #ff3b30; display: inline-block;'
+					}));
+					const recordingStatusSpan = append(recordingIndicator, $('span', {}, '0:00 / 5:00'));
+
+					const playAllBtn = append(leftControls, $('button.monaco-button', {
+						type: 'button',
+						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 5px 10px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.4); color: #7dd3fc;',
+						title: 'Play all recorded voice clips sequentially'
+					})) as HTMLButtonElement;
+					const playAllIcon = append(playAllBtn, $('span.codicon.codicon-unmute', { style: 'font-size: 12.5px;' }));
+					const playAllLabel = append(playAllBtn, $('span', {}, 'Play All'));
+
+					const rightControls = append(controlBar, $('div', {
+						style: 'display: flex; align-items: center; gap: 10px; flex-wrap: wrap;'
+					}));
+
+					// Speed selector
+					const speedWrap = append(rightControls, $('label', {
+						style: 'display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: rgba(255,255,255,0.72);'
+					}));
+					append(speedWrap, $('span', {}, 'Speed:'));
+					const speedSelect = append(speedWrap, $('select', {
+						style: 'font-size: 11px; padding: 2px 6px; border-radius: 4px; background: rgba(0,0,0,0.4); color: inherit; border: 1px solid rgba(255,255,255,0.18); cursor: pointer;'
+					})) as HTMLSelectElement;
+					for (const spd of [0.75, 1.0, 1.25, 1.5, 2.0]) {
+						const opt = append(speedSelect, $('option', { value: String(spd) }, `${spd}x`)) as HTMLOptionElement;
+						if (Math.abs((field.voicePlaybackRate || 1.0) - spd) < 0.01) {
+							opt.selected = true;
+						}
+					}
+
+					// Auto-transcribe checkbox
+					const autoTranscribeWrap = append(rightControls, $('label', {
+						style: 'display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: rgba(255,255,255,0.78); cursor: pointer; user-select: none;'
+					}));
+					const autoTranscribeCb = append(autoTranscribeWrap, $('input', { type: 'checkbox' })) as HTMLInputElement;
+					autoTranscribeCb.checked = field.voiceAutoTranscribe !== false;
+					append(autoTranscribeWrap, $('span', {}, 'Auto-Transcribe'));
+					autoTranscribeCb.onchange = () => {
+						field.voiceAutoTranscribe = autoTranscribeCb.checked;
+						this._syncDraft();
+					};
+
+					// Show & Play in Flow checkbox (default unchecked: commentary-only, hidden from node capsules & skipped on run)
+					const runInFlowWrap = append(rightControls, $('label', {
+						style: 'display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: rgba(255,255,255,0.78); cursor: pointer; user-select: none;',
+						title: 'When unchecked (default), this Voice Note is hidden from node capsules (accessible via top-right speaker & side panel) and skipped during workflow execution. Check to display as a capsule and play audio during execution.'
+					}));
+					const runInFlowCb = append(runInFlowWrap, $('input', { type: 'checkbox' })) as HTMLInputElement;
+					runInFlowCb.checked = Boolean(field.voiceRunInFlow);
+					append(runInFlowWrap, $('span', {}, 'Show & Play in Flow'));
+					runInFlowCb.onchange = () => {
+						field.voiceRunInFlow = runInFlowCb.checked;
+						this._syncDraft();
+						void this._persistCurrentModule();
+					};
+
+					// Clips list container
+					const clipsListContainer = append(voiceBox, $('.voice-note-clips-list', {
+						style: 'display: flex; flex-direction: column; gap: 8px;'
+					}));
+
+					// Local playback & recording state
+					let isRecordingVoice = false;
+					let isTranscribingVoice = false;
+					let mediaRecorder: any = null;
+					let activeStream: MediaStream | undefined = undefined;
+					let audioChunks: BlobPart[] = [];
+					let recordingTimer: any = undefined;
+					let recordingSeconds = 0;
+
+					let activeAudio: HTMLAudioElement | undefined = undefined;
+					let activeAudioBlobUrl: string | undefined = undefined;
+					let activePlayingClipId: string | undefined = undefined;
+					let isPlayingAllSequence = false;
+
+					const revokeActiveBlobUrl = () => {
+						if (activeAudioBlobUrl) {
+							try {
+								URL.revokeObjectURL(activeAudioBlobUrl);
+							} catch { }
+							activeAudioBlobUrl = undefined;
+						}
+					};
+
+					const stopAllAudio = () => {
+						isPlayingAllSequence = false;
+						activePlayingClipId = undefined;
+						if (activeAudio) {
+							try {
+								activeAudio.onended = null;
+								activeAudio.onerror = null;
+								activeAudio.pause();
+								activeAudio.currentTime = 0;
+							} catch { }
+							activeAudio = undefined;
+						}
+						revokeActiveBlobUrl();
+						playAllIcon.className = 'codicon codicon-unmute';
+						playAllLabel.textContent = 'Play All';
+						updateClipRowVisualStates();
+					};
+
+					const updatePlayAllBtnState = () => {
+						const clips = Array.isArray(field.voiceClips) ? field.voiceClips.filter(c => !!c.audioDataUrl) : [];
+						playAllBtn.disabled = clips.length === 0;
+						playAllBtn.style.opacity = clips.length === 0 ? '0.4' : '1';
+						playAllBtn.style.cursor = clips.length === 0 ? 'not-allowed' : 'pointer';
+						if (!isPlayingAllSequence) {
+							playAllIcon.className = 'codicon codicon-unmute';
+							playAllLabel.textContent = clips.length > 0 ? `Play All (${clips.length})` : 'Play All';
+						}
+					};
+
+					const clipRowRefs = new Map<string, {
+						playIcon: HTMLElement;
+						playBtn: HTMLButtonElement;
+						progressFill: HTMLElement;
+						timeLabel: HTMLElement;
+						cardEl: HTMLElement;
+					}>();
+
+					const updateClipRowVisualStates = () => {
+						for (const [cid, refs] of clipRowRefs.entries()) {
+							const isCurrent = activePlayingClipId === cid && activeAudio && !activeAudio.paused;
+							refs.playIcon.className = isCurrent ? 'codicon codicon-debug-pause' : 'codicon codicon-play';
+							refs.cardEl.style.borderColor = isCurrent ? 'rgba(203, 213, 225, 0.55)' : 'rgba(255, 255, 255, 0.1)';
+							refs.cardEl.style.background = isCurrent ? 'rgba(148, 163, 184, 0.12)' : 'rgba(0, 0, 0, 0.24)';
+							if (activePlayingClipId !== cid) {
+								refs.progressFill.style.width = '0%';
+							}
+						}
+					};
+
+					speedSelect.onchange = () => {
+						const val = parseFloat(speedSelect.value);
+						field.voicePlaybackRate = Number.isFinite(val) ? val : 1.0;
+						if (activeAudio) {
+							activeAudio.playbackRate = field.voicePlaybackRate;
+						}
+						this._syncDraft();
+					};
+
+					const playSingleClip = (clip: IVoiceNoteClip, onSequenceEnded?: () => void) => {
+						if (!clip.audioDataUrl) {
+							onSequenceEnded?.();
+							return;
+						}
+						if (activePlayingClipId === clip.id && activeAudio && !onSequenceEnded) {
+							if (activeAudio.paused) {
+								activeAudio.playbackRate = field.voicePlaybackRate || 1.0;
+								void activeAudio.play();
+							} else {
+								activeAudio.pause();
+							}
+							updateClipRowVisualStates();
+							return;
+						}
+
+						if (activeAudio) {
+							try {
+								activeAudio.onended = null;
+								activeAudio.onerror = null;
+								activeAudio.pause();
+							} catch { }
+						}
+						revokeActiveBlobUrl();
+						let audioSrc = clip.audioDataUrl;
+						if (audioSrc.startsWith('data:')) {
+							try {
+								const blob = dataUrlToBlob(audioSrc);
+								audioSrc = URL.createObjectURL(blob);
+								activeAudioBlobUrl = audioSrc;
+							} catch { }
+						}
+						const audio = new Audio(audioSrc);
+						audio.playbackRate = field.voicePlaybackRate || 1.0;
+						activeAudio = audio;
+						activePlayingClipId = clip.id;
+
+						audio.ontimeupdate = () => {
+							const refs = clipRowRefs.get(clip.id);
+							if (refs) {
+								const total = Number.isFinite(audio.duration) && audio.duration > 0
+									? audio.duration
+									: (clip.durationSeconds || 0);
+								const pct = total > 0 ? Math.min(100, (audio.currentTime / total) * 100) : 0;
+								refs.progressFill.style.width = `${pct}%`;
+								refs.timeLabel.textContent = `${formatVoiceDuration(audio.currentTime)} / ${formatVoiceDuration(total)}`;
+							}
+						};
+
+						audio.onended = () => {
+							const refs = clipRowRefs.get(clip.id);
+							if (refs) {
+								refs.progressFill.style.width = '0%';
+								refs.timeLabel.textContent = formatVoiceDuration(clip.durationSeconds);
+							}
+							if (onSequenceEnded) {
+								onSequenceEnded();
+							} else {
+								activePlayingClipId = undefined;
+								activeAudio = undefined;
+								updateClipRowVisualStates();
+							}
+						};
+
+						audio.onerror = () => {
+							this.notificationService.error('Failed to play recorded audio clip.');
+							if (onSequenceEnded) {
+								onSequenceEnded();
+							} else {
+								stopAllAudio();
+							}
+						};
+
+						void audio.play().catch(err => {
+							this.notificationService.error(`Audio playback error: ${err?.message || err}`);
+							stopAllAudio();
+						});
+						updateClipRowVisualStates();
+					};
+
+					playAllBtn.onclick = () => {
+						if (isPlayingAllSequence) {
+							stopAllAudio();
+							return;
+						}
+						const clips = (field.voiceClips || []).filter(c => !!c.audioDataUrl);
+						if (clips.length === 0) {
+							return;
+						}
+						isPlayingAllSequence = true;
+						playAllIcon.className = 'codicon codicon-debug-pause';
+						let idx = 0;
+						const playNext = () => {
+							if (!isPlayingAllSequence || idx >= clips.length) {
+								stopAllAudio();
+								updatePlayAllBtnState();
+								return;
+							}
+							const currentClip = clips[idx];
+							playAllLabel.textContent = `Stop (${idx + 1}/${clips.length})`;
+							idx++;
+							playSingleClip(currentClip, playNext);
+						};
+						playNext();
+					};
+
+					const renderClipsList = () => {
+						clearNode(clipsListContainer);
+						clipRowRefs.clear();
+						const clips = Array.isArray(field.voiceClips) ? field.voiceClips : [];
+						updatePlayAllBtnState();
+
+						if (clips.length === 0) {
+							const emptyHint = append(clipsListContainer, $('div', {
+								style: 'padding: 14px 12px; text-align: center; font-size: 11.5px; color: rgba(255,255,255,0.48); border: 1px dashed rgba(148, 163, 184, 0.25); border-radius: 6px; background: rgba(0,0,0,0.16);'
+							}, 'No voice recordings yet. Click "Record Voice" above to record an audio note & auto-transcribe it.'));
+							void emptyHint;
+							return;
+						}
+
+						clips.forEach((clip, clipIdx) => {
+							const clipCard = append(clipsListContainer, $('.voice-note-clip-card', {
+								style: 'display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 6px; background: rgba(0, 0, 0, 0.24); border: 1px solid rgba(255, 255, 255, 0.1); transition: all 120ms ease;'
+							}));
+
+							const clipHeader = append(clipCard, $('div', {
+								style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;'
+							}));
+
+							const clipPlayBtn = append(clipHeader, $('button', {
+								type: 'button',
+								style: 'display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; cursor: pointer; background: rgba(148, 163, 184, 0.18); border: 1px solid rgba(148, 163, 184, 0.42); color: var(--vscode-foreground, #e2e8f0); padding: 0; flex-shrink: 0;',
+								title: 'Play / Pause this clip'
+							})) as HTMLButtonElement;
+							const clipPlayIcon = append(clipPlayBtn, $('span.codicon.codicon-play', { style: 'font-size: 12px;' }));
+
+							append(clipHeader, $('span', {
+								style: 'font-size: 10.5px; font-weight: 700; color: #cbd5e1; background: rgba(148, 163, 184, 0.16); padding: 1px 6px; border-radius: 4px; flex-shrink: 0;'
+							}, `#${clipIdx + 1}`));
+
+							const progressTrack = append(clipHeader, $('div', {
+								style: 'flex: 1; min-width: 80px; height: 6px; border-radius: 3px; background: rgba(255,255,255,0.12); overflow: hidden; cursor: pointer; position: relative;'
+							}));
+							const progressFill = append(progressTrack, $('div', {
+								style: 'width: 0%; height: 100%; background: #94a3b8; transition: width 80ms linear;'
+							}));
+
+							progressTrack.onclick = (e: MouseEvent) => {
+								if (activePlayingClipId === clip.id && activeAudio && Number.isFinite(activeAudio.duration) && activeAudio.duration > 0) {
+									const rect = progressTrack.getBoundingClientRect();
+									const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+									activeAudio.currentTime = ratio * activeAudio.duration;
+								} else {
+									playSingleClip(clip);
+								}
+							};
+
+							const timeLabel = append(clipHeader, $('span', {
+								style: 'font-size: 10.5px; font-family: var(--vscode-editor-font-family, monospace); color: rgba(255,255,255,0.65); flex-shrink: 0;'
+							}, formatVoiceDuration(clip.durationSeconds)));
+
+							const reTranscribeBtn = append(clipHeader, $('button', {
+								type: 'button',
+								style: 'display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.32); color: #7dd3fc;',
+								title: 'Transcribe / Re-transcribe this audio clip using Voice Model'
+							})) as HTMLButtonElement;
+							append(reTranscribeBtn, $('span.codicon.codicon-sparkle', { style: 'font-size: 11px;' }));
+							const reTranscribeLabel = append(reTranscribeBtn, $('span', {}, 'Transcribe'));
+
+							const deleteClipBtn = append(clipHeader, $('button', {
+								type: 'button',
+								style: 'display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 4px; cursor: pointer; background: transparent; border: 1px solid transparent; color: rgba(248, 113, 113, 0.8); padding: 0;',
+								title: 'Delete this voice clip'
+							})) as HTMLButtonElement;
+							append(deleteClipBtn, $('span.codicon.codicon-trash', { style: 'font-size: 12px;' }));
+
+							const transcriptArea = append(clipCard, $('textarea.monaco-inputbox', {
+								rows: '2',
+								placeholder: 'Transcribed text will appear here (you can also edit or organize notes directly)...',
+								style: 'width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 11.5px; line-height: 1.45; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.28); color: var(--vscode-input-foreground); resize: vertical; font-family: inherit;'
+							})) as HTMLTextAreaElement;
+							transcriptArea.value = clip.transcript || '';
+							transcriptArea.oninput = () => {
+								clip.transcript = transcriptArea.value;
+								syncCombinedVoiceTranscript();
+								this._syncDraft();
+							};
+
+							clipPlayBtn.onclick = () => {
+								isPlayingAllSequence = false;
+								playAllIcon.className = 'codicon codicon-unmute';
+								updatePlayAllBtnState();
+								playSingleClip(clip);
+							};
+
+							reTranscribeBtn.onclick = async () => {
+								if (!clip.audioDataUrl) {
+									return;
+								}
+								reTranscribeBtn.disabled = true;
+								reTranscribeLabel.textContent = 'Transcribing...';
+								try {
+									const blob = dataUrlToBlob(clip.audioDataUrl);
+									const voiceModelService = this._instantiationService.invokeFunction(accessor => accessor.get(IVoiceModelService));
+									const res = await voiceModelService.transcribeAudio(blob);
+									if (res.text && res.text.trim()) {
+										clip.transcript = res.text.trim();
+										transcriptArea.value = clip.transcript;
+										syncCombinedVoiceTranscript();
+										this._syncDraft();
+										void this._persistCurrentModule();
+									} else if (res.error) {
+										this.notificationService.warn(`Voice Transcription: ${res.error}`);
+									}
+								} catch (err: any) {
+									this.notificationService.error(`Voice Transcription Error: ${err?.message || err}`);
+								} finally {
+									reTranscribeBtn.disabled = false;
+									reTranscribeLabel.textContent = 'Transcribe';
+								}
+							};
+
+							deleteClipBtn.onclick = () => {
+								if (activePlayingClipId === clip.id) {
+									stopAllAudio();
+								}
+								const idxToDel = field.voiceClips!.findIndex(c => c.id === clip.id);
+								if (idxToDel !== -1) {
+									field.voiceClips!.splice(idxToDel, 1);
+									syncCombinedVoiceTranscript();
+									this._syncDraft();
+									void this._persistCurrentModule();
+									renderClipsList();
+								}
+							};
+
+							clipRowRefs.set(clip.id, {
+								playIcon: clipPlayIcon,
+								playBtn: clipPlayBtn,
+								progressFill,
+								timeLabel,
+								cardEl: clipCard
+							});
+						});
+
+						updateClipRowVisualStates();
+					};
+
+					const stopVoiceRecording = () => {
+						if (recordingTimer) {
+							clearInterval(recordingTimer);
+							recordingTimer = undefined;
+						}
+						if (mediaRecorder && isRecordingVoice) {
+							try {
+								mediaRecorder.stop();
+							} catch { }
+							isRecordingVoice = false;
+						} else {
+							isRecordingVoice = false;
+							if (!isTranscribingVoice) {
+								recordingIndicator.style.display = 'none';
+							}
+						}
+						recordBtnIcon.className = 'codicon codicon-mic';
+						recordBtnLabel.textContent = 'Record Voice';
+						recordBtn.style.background = 'rgba(148, 163, 184, 0.16)';
+						recordBtn.style.borderColor = 'rgba(148, 163, 184, 0.36)';
+						recordBtn.style.color = 'var(--vscode-foreground, #e2e8f0)';
+					};
+
+					const startVoiceRecording = async () => {
+						if (isTranscribingVoice) {
+							return;
+						}
+						stopAllAudio();
+						try {
+							const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+							activeStream = stream;
+							audioChunks = [];
+							mediaRecorder = new (window as any).MediaRecorder(stream);
+
+							mediaRecorder.ondataavailable = (e: any) => {
+								if (e.data && e.data.size > 0) {
+									audioChunks.push(e.data);
+								}
+							};
+
+							mediaRecorder.onstop = async () => {
+								const recordedSecs = Math.max(1, recordingSeconds);
+								stream.getTracks().forEach(track => track.stop());
+								activeStream = undefined;
+
+								const actualMime = (mediaRecorder && mediaRecorder.mimeType) || 'audio/webm';
+								const audioBlob = new Blob(audioChunks, { type: actualMime });
+								let audioDataUrl = '';
+								try {
+									audioDataUrl = await blobToDataUrl(audioBlob);
+								} catch (err: any) {
+									this.notificationService.error(`Failed to save recorded audio: ${err?.message || err}`);
+									recordingIndicator.style.display = 'none';
+									return;
+								}
+
+								const newClip: IVoiceNoteClip = {
+									id: `vclip_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+									audioDataUrl,
+									mimeType: actualMime,
+									durationSeconds: recordedSecs,
+									transcript: '',
+									createdAt: Date.now()
+								};
+								field.voiceClips!.push(newClip);
+								syncCombinedVoiceTranscript();
+								this._syncDraft();
+								void this._persistCurrentModule();
+								renderClipsList();
+
+								if (field.voiceAutoTranscribe !== false) {
+									isTranscribingVoice = true;
+									recordingIndicator.style.display = 'inline-flex';
+									recordingStatusSpan.textContent = 'Transcribing voice...';
+									try {
+										const voiceModelService = this._instantiationService.invokeFunction(accessor => accessor.get(IVoiceModelService));
+										const result = await voiceModelService.transcribeAudio(audioBlob);
+										if (result.text && result.text.trim()) {
+											newClip.transcript = result.text.trim();
+											syncCombinedVoiceTranscript();
+											this._syncDraft();
+											void this._persistCurrentModule();
+											renderClipsList();
+										} else if (result.error) {
+											this.notificationService.warn(`Audio saved, but Voice Transcription failed: ${result.error}`);
+										}
+									} catch (err: any) {
+										this.notificationService.warn(`Audio saved, but Voice Transcription error: ${err?.message || err}`);
+									} finally {
+										isTranscribingVoice = false;
+										recordingIndicator.style.display = 'none';
+									}
+								} else {
+									recordingIndicator.style.display = 'none';
+								}
+							};
+
+							mediaRecorder.start();
+							isRecordingVoice = true;
+							recordingSeconds = 0;
+							recordingIndicator.style.display = 'inline-flex';
+							recordingStatusSpan.textContent = '0:00 / 5:00';
+							recordBtnIcon.className = 'codicon codicon-primitive-square';
+							recordBtnLabel.textContent = 'Stop Recording';
+							recordBtn.style.background = 'rgba(255, 59, 48, 0.25)';
+							recordBtn.style.borderColor = '#ff3b30';
+							recordBtn.style.color = '#ffffff';
+
+							recordingTimer = setInterval(() => {
+								recordingSeconds++;
+								recordingStatusSpan.textContent = `${formatVoiceDuration(recordingSeconds)} / 5:00`;
+								if (recordingSeconds >= 300) {
+									stopVoiceRecording();
+								}
+							}, 1000);
+						} catch (err: any) {
+							this.notificationService.error(`Microphone access error: ${err?.message || err}`);
+						}
+					};
+
+					recordBtn.onclick = () => {
+						if (isRecordingVoice) {
+							stopVoiceRecording();
+						} else {
+							void startVoiceRecording();
+						}
+					};
+
+					this._register(toDisposable(() => {
+						stopAllAudio();
+						if (recordingTimer) {
+							clearInterval(recordingTimer);
+							recordingTimer = undefined;
+						}
+						if (activeStream) {
+							activeStream.getTracks().forEach(t => t.stop());
+							activeStream = undefined;
+						}
+					}));
+
+					renderClipsList();
+				}
+
 				if (field.type === 'media_player') {
 					const mediaBox = append(fieldCard, $('.media-player-schema-config', {
 						style: 'display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; background: rgba(245, 158, 11, 0.05); border: 1px solid rgba(251, 191, 36, 0.25); border-radius: 6px; margin-top: 4px;'
@@ -7422,7 +8336,28 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					append(titleEl, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
 					append(titleEl, $('span', {}, 'Output Manifest & Export Selection'));
 
-					const syncBtn = append(headerRow, $('button.sync-primitives-btn', {
+					const headerBtns = append(headerRow, $('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;' }));
+
+					const addOutputBtn = append(headerBtns, $('button.add-custom-output-btn', {
+						type: 'button',
+						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; font-size: 11px; font-weight: 600; border-radius: 6px; background: rgba(52, 211, 153, 0.14); color: #6ee7b7; border: 1px solid rgba(52, 211, 153, 0.4); cursor: pointer; transition: all 0.15s ease;',
+						title: 'Add a custom output index with auto-generated variable name and bound workflow/node variable'
+					})) as HTMLButtonElement;
+					addOutputBtn.onmouseenter = () => {
+						addOutputBtn.style.background = 'rgba(52, 211, 153, 0.25)';
+						addOutputBtn.style.borderColor = 'rgba(52, 211, 153, 0.65)';
+						addOutputBtn.style.color = '#ffffff';
+					};
+					addOutputBtn.onmouseleave = () => {
+						addOutputBtn.style.background = 'rgba(52, 211, 153, 0.14)';
+						addOutputBtn.style.borderColor = 'rgba(52, 211, 153, 0.4)';
+						addOutputBtn.style.color = '#6ee7b7';
+					};
+					append(addOutputBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
+					append(addOutputBtn, $('span', {}, 'Add Output'));
+
+					const syncBtn = append(headerBtns, $('button.sync-primitives-btn', {
+						type: 'button',
 						style: 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; font-size: 11px; font-weight: 600; border-radius: 6px; background: rgba(129, 140, 248, 0.12); color: #a5b4fc; border: 1px solid rgba(129, 140, 248, 0.35); cursor: pointer; transition: all 0.15s ease;'
 					})) as HTMLButtonElement;
 					syncBtn.onmouseenter = () => {
@@ -7441,12 +8376,49 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					append(syncBtn, $('span', {}, 'Sync Primitives'));
 
 					append(outputBox, $('div', { style: 'font-size: 11px; color: rgba(255, 255, 255, 0.65); line-height: 1.4;' },
-						'Select which primitives to expose as outputs for inspection, downstream workflows, or other tickets.'
+						'Define custom output keys (bound to any workflow/node variable) or sync sibling primitives to expose structured JSON/dictionary results.'
 					));
 
 					const specsContainer = append(outputBox, $('.output-specs-container', {
 						style: 'display: flex; flex-direction: column; gap: 8px;'
 					}));
+
+					const getAvailableOutputSourceVars = (): string[] => {
+						const varNames: string[] = [];
+						const seen = new Set<string>();
+						const pushVar = (name?: string) => {
+							const clean = (name || '').trim().replace(/^@/, '');
+							if (clean && !seen.has(clean)) {
+								seen.add(clean);
+								varNames.push(clean);
+							}
+						};
+						if (this.input instanceof CustomModuleSchemaEditorInput && typeof this.input.workflowVariablesProvider === 'function') {
+							try {
+								for (const wv of (this.input.workflowVariablesProvider() || [])) {
+									pushVar(typeof wv === 'string' ? wv : (wv as any)?.name);
+								}
+							} catch { }
+						}
+						const allFields = (this._activeModule?.fields && this._activeModule.fields.length > 0) ? this._activeModule.fields : fields;
+						for (const f of allFields) {
+							if (!f || f.id === field.id || f.type === 'output' || f.type === 'result' || f.type === 'voice_note' || f.id === 'title' || f.id === 'description') {
+								continue;
+							}
+							if (f.type === 'parameters' && Array.isArray(f.parameters)) {
+								for (const p of f.parameters) {
+									pushVar(p?.name);
+								}
+							} else {
+								const outVar = (f.outputVariableName || '').trim() || generateSmartPythonVarName(f.label || f.id, f.type);
+								pushVar(outVar);
+								if (f.label && f.label !== outVar) {
+									pushVar(f.label);
+								}
+							}
+						}
+						return varNames;
+					};
 
 					const syncSpecsWithCanvas = () => {
 						try {
@@ -7456,6 +8428,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								f.id !== field.id &&
 								f.type !== 'output' &&
 								f.type !== 'result' &&
+								f.type !== 'voice_note' &&
 								f.id !== 'title' &&
 								f.id !== 'description' &&
 								f.label?.toLowerCase() !== 'title' &&
@@ -7466,22 +8439,30 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								field.outputSpecs = [];
 							}
 
+							// Always preserve user-defined custom outputs
+							const preservedCustomSpecs: IOutputSpec[] = [];
 							const existingMap = new Map<string, IOutputSpec>();
 							for (const s of field.outputSpecs) {
 								if (s && typeof s === 'object') {
-									if (s.fieldKey) { existingMap.set(s.fieldKey, s); }
-									if (s.label) { existingMap.set(s.label, s); }
+									if (s.isCustom) {
+										preservedCustomSpecs.push(s);
+									} else {
+										if (s.fieldKey) { existingMap.set(s.fieldKey, s); }
+										if (s.label) { existingMap.set(s.label, s); }
+									}
 								}
 							}
 
-							const updated: IOutputSpec[] = [];
+							const updated: IOutputSpec[] = [...preservedCustomSpecs];
 							for (const f of currentCanvasFields) {
 								const fKey = f.label || f.id || 'Primitive';
+								const autoVar = (f.outputVariableName || '').trim() || generateSmartPythonVarName(f.label || f.id, f.type);
 								const existing = existingMap.get(fKey) || (f.id ? existingMap.get(f.id) : undefined);
 								if (existing) {
 									updated.push({
 										fieldKey: fKey,
 										label: f.label || f.id || fKey,
+										varName: existing.varName || autoVar,
 										enabled: existing.enabled ?? true,
 										defaultFormat: existing.defaultFormat || 'table'
 									});
@@ -7489,6 +8470,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									updated.push({
 										fieldKey: fKey,
 										label: f.label || f.id || fKey,
+										varName: autoVar,
 										enabled: true,
 										defaultFormat: 'table'
 									});
@@ -7507,9 +8489,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							if (!Array.isArray(field.outputSpecs) || field.outputSpecs.length === 0) {
 								append(specsContainer, $('div', {
 									style: 'padding: 10px 14px; font-size: 11px; font-style: italic; color: rgba(255, 255, 255, 0.45); text-align: center; border: 1px dashed rgba(255, 255, 255, 0.15); border-radius: 4px; background: rgba(0, 0, 0, 0.15);'
-								}, 'No candidate primitives found in canvas. Add Browser, AI Prompt, or other primitives, then click "Sync Primitives" above.'));
+								}, 'No outputs defined yet. Click "+ Add Output" to create a custom output index, or "Sync Primitives" to import sibling components.'));
 								return;
 							}
+
+							const availableSourceVars = getAvailableOutputSourceVars();
 
 							field.outputSpecs.forEach((spec, specIdx) => {
 								if (!spec) {
@@ -7517,16 +8501,20 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								}
 								const isEnabled = spec.enabled ?? true;
 								const row = append(specsContainer, $('.output-spec-row', {
-									style: `display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 7px 12px; background: ${isEnabled ? 'rgba(0, 122, 204, 0.08)' : 'rgba(255, 255, 255, 0.02)'}; border: 1px solid ${isEnabled ? 'rgba(0, 122, 204, 0.4)' : 'rgba(255, 255, 255, 0.08)'}; border-radius: 4px; gap: 12px; transition: all 0.15s ease;`
+									style: `display: flex; flex-direction: column; gap: 8px; padding: 8px 10px; width: 100%; min-width: 0; box-sizing: border-box; overflow: hidden; background: ${isEnabled ? 'rgba(0, 122, 204, 0.08)' : 'rgba(255, 255, 255, 0.02)'}; border: 1px solid ${isEnabled ? 'rgba(0, 122, 204, 0.4)' : 'rgba(255, 255, 255, 0.08)'}; border-radius: 5px; transition: all 0.15s ease;`
 								}));
 
-								const leftPart = append(row, $('div.custom-checkbox-wrapper', {
-									style: 'display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; flex: 1;'
+								const topRow = append(row, $('div', {
+									style: 'display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 8px; width: 100%; min-width: 0; box-sizing: border-box;'
+								}));
+
+								const leftPart = append(topRow, $('div.custom-checkbox-wrapper', {
+									style: 'display: flex; align-items: center; gap: 6px; flex: 1 1 160px; min-width: 0; max-width: 100%; flex-wrap: wrap; box-sizing: border-box;'
 								}));
 
 								// Custom checkbox box with system blue and balanced proportions
 								const checkSquare = append(leftPart, $('div.custom-check-square', {
-									style: `width: 14px; height: 14px; min-width: 14px; min-height: 14px; border-radius: 2.5px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; transition: all 0.15s ease; ${isEnabled ? 'background: #007acc; border: 1px solid #007acc;' : 'background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.3);'}`
+									style: `width: 14px; height: 14px; min-width: 14px; min-height: 14px; border-radius: 2.5px; display: inline-flex; align-items: center; justify-content: center; box-sizing: border-box; cursor: pointer; transition: all 0.15s ease; ${isEnabled ? 'background: #007acc; border: 1px solid #007acc;' : 'background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.3);'}`
 								}));
 
 								const checkSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -7541,9 +8529,66 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								checkSvg.appendChild(checkPath);
 								checkSquare.appendChild(checkSvg);
 
-								const labelSpan = append(leftPart, $('span', {
-									style: `font-size: 12px; font-weight: ${isEnabled ? '600' : '500'}; color: ${isEnabled ? '#f8fafc' : '#94a3b8'}; transition: color 0.15s ease;`
-								}, spec.label || spec.fieldKey || `Output ${specIdx + 1}`));
+								let labelSpan: HTMLElement | undefined;
+
+								if (spec.isCustom) {
+									// Editable Index Name (Field Label)
+									const labelInput = append(leftPart, $('input.monaco-inputbox', {
+										type: 'text',
+										placeholder: 'Output Index Name (e.g. Matched Jobs)',
+										value: spec.label || '',
+										style: 'flex: 1 1 110px; min-width: 0; width: 100%; max-width: 100%; box-sizing: border-box; padding: 3px 8px; font-size: 12px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.18); background: rgba(0, 0, 0, 0.32); color: var(--vscode-input-foreground); outline: none;'
+									})) as HTMLInputElement;
+
+									// Auto-generated / editable Python variable name pill
+									const varWrap = append(leftPart, $('div', {
+										style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; border-radius: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.32); flex: 1 1 95px; min-width: 0; max-width: 100%; box-sizing: border-box;',
+										title: 'Auto-generated Python variable name (editable). Accessible both by Index Name and by this variable name.'
+									}));
+									append(varWrap, $('span', { style: 'font-size: 10px; font-weight: 700; color: #38bdf8; flex-shrink: 0;' }, '[V]'));
+									const varInput = append(varWrap, $('input', {
+										type: 'text',
+										placeholder: 'var_name',
+										value: spec.varName || generateSmartPythonVarName(spec.label || `output_${specIdx + 1}`),
+										style: 'flex: 1; min-width: 0; width: 100%; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); color: #bae6fd; background: transparent; border: none; outline: none; padding: 0;'
+									})) as HTMLInputElement;
+
+									labelInput.oninput = () => {
+										spec.label = labelInput.value;
+										if (!spec.varNameManual) {
+											const autoVar = generateSmartPythonVarName(spec.label || `output_${specIdx + 1}`);
+											spec.varName = autoVar;
+											varInput.value = autoVar;
+										}
+										spec.fieldKey = spec.label.trim() || spec.varName || `output_${specIdx + 1}`;
+										this._syncDraft();
+									};
+
+									varInput.oninput = () => {
+										const cleaned = sanitizePythonVarName(varInput.value);
+										if (!varInput.value.trim()) {
+											spec.varNameManual = false;
+											spec.varName = generateSmartPythonVarName(spec.label || `output_${specIdx + 1}`);
+										} else {
+											spec.varNameManual = true;
+											spec.varName = cleaned;
+										}
+										if (!spec.label?.trim()) {
+											spec.fieldKey = spec.varName || `output_${specIdx + 1}`;
+										}
+										this._syncDraft();
+									};
+								} else {
+									labelSpan = append(leftPart, $('span', {
+										style: `font-size: 12px; font-weight: ${isEnabled ? '600' : '500'}; color: ${isEnabled ? '#f8fafc' : '#94a3b8'}; cursor: pointer; user-select: none; transition: color 0.15s ease;`
+									}, spec.label || spec.fieldKey || `Output ${specIdx + 1}`));
+									const syncedVar = spec.varName || generateSmartPythonVarName(spec.label || spec.fieldKey);
+									if (syncedVar) {
+										append(leftPart, $('span', {
+											style: 'font-size: 10.5px; font-family: var(--vscode-editor-font-family, monospace); color: #7dd3fc; background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.25); padding: 1px 6px; border-radius: 4px;'
+										}, `[V] ${syncedVar}`));
+									}
+								}
 
 								const updateCheckboxState = (checked: boolean) => {
 									spec.enabled = checked;
@@ -7554,37 +8599,45 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										checkSquare.style.background = '#007acc';
 										checkSquare.style.borderColor = '#007acc';
 										checkSvg.style.display = 'block';
-										labelSpan.style.color = '#f8fafc';
-										labelSpan.style.fontWeight = '600';
+										if (labelSpan) {
+											labelSpan.style.color = '#f8fafc';
+											labelSpan.style.fontWeight = '600';
+										}
 									} else {
 										row.style.background = 'rgba(255, 255, 255, 0.02)';
 										row.style.borderColor = 'rgba(255, 255, 255, 0.08)';
 										checkSquare.style.background = 'rgba(0, 0, 0, 0.35)';
 										checkSquare.style.borderColor = 'rgba(255, 255, 255, 0.3)';
 										checkSvg.style.display = 'none';
-										labelSpan.style.color = '#94a3b8';
-										labelSpan.style.fontWeight = '500';
+										if (labelSpan) {
+											labelSpan.style.color = '#94a3b8';
+											labelSpan.style.fontWeight = '500';
+										}
 									}
 								};
 
-								leftPart.onclick = (e) => {
+								const toggleCheck = (e: MouseEvent) => {
 									e.preventDefault();
-									const nextChecked = !(spec.enabled ?? true);
-									updateCheckboxState(nextChecked);
+									e.stopPropagation();
+									updateCheckboxState(!(spec.enabled ?? true));
 								};
+								checkSquare.onclick = toggleCheck;
+								if (labelSpan) {
+									labelSpan.onclick = toggleCheck;
+								}
 
-								leftPart.onmouseenter = () => {
+								checkSquare.onmouseenter = () => {
 									if (!spec.enabled) {
 										checkSquare.style.borderColor = '#007acc';
 									}
 								};
-								leftPart.onmouseleave = () => {
+								checkSquare.onmouseleave = () => {
 									if (!spec.enabled) {
 										checkSquare.style.borderColor = 'rgba(255, 255, 255, 0.3)';
 									}
 								};
 
-								const rightPart = append(row, $('div', { style: 'display: flex; align-items: center; gap: 6px;' }));
+								const rightPart = append(topRow, $('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; max-width: 100%;' }));
 								append(rightPart, $('span', { style: 'font-size: 10.5px; opacity: 0.65; white-space: nowrap;' }, 'Default View:'));
 								const formatSelect = append(rightPart, $('select', {
 									style: 'padding: 3px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit; outline: none; cursor: pointer; transition: border-color 0.15s ease;'
@@ -7594,17 +8647,18 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								formatSelect.onblur = () => { formatSelect.style.borderColor = 'rgba(255, 255, 255, 0.15)'; };
 
 								const formatOptions = [
+									{ value: 'json', label: 'JSON' },
 									{ value: 'table', label: 'Table' },
 									{ value: 'markdown', label: 'Markdown' },
-									{ value: 'json', label: 'JSON' },
 									{ value: 'text', label: 'Plain Text' }
 								];
 
+								const defaultFmt = spec.defaultFormat || (spec.isCustom ? 'json' : 'table');
 								formatOptions.forEach(opt => {
 									const optEl = document.createElement('option');
 									optEl.value = opt.value;
 									optEl.textContent = opt.label;
-									if ((spec.defaultFormat || 'table') === opt.value) {
+									if (defaultFmt === opt.value) {
 										optEl.selected = true;
 									}
 									formatSelect.appendChild(optEl);
@@ -7614,11 +8668,95 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									spec.defaultFormat = formatSelect.value;
 									this._syncDraft();
 								};
+
+								if (spec.isCustom) {
+									const deleteSpecBtn = append(rightPart, $('button', {
+										type: 'button',
+										style: 'display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 4px; cursor: pointer; background: transparent; border: none; color: rgba(248, 113, 113, 0.8); padding: 0;',
+										title: 'Remove this custom output'
+									})) as HTMLButtonElement;
+									append(deleteSpecBtn, $('span.codicon.codicon-trash', { style: 'font-size: 12px;' }));
+									deleteSpecBtn.onclick = (e) => {
+										e.preventDefault();
+										e.stopPropagation();
+										field.outputSpecs!.splice(specIdx, 1);
+										this._syncDraft();
+										void this._persistCurrentModule();
+										renderSpecsList();
+									};
+
+									// Row 2: Source Variable / Value Binding Input + Quick-Pick Workflow Variable Chips
+									const sourceRow = append(row, $('div', {
+										style: 'display: flex; flex-direction: column; gap: 5px; width: 100%; min-width: 0; box-sizing: border-box;'
+									}));
+
+									const sourceInputWrap = append(sourceRow, $('div', {
+										style: 'display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; width: 100%; min-width: 0; box-sizing: border-box;'
+									}));
+									append(sourceInputWrap, $('span', {
+										style: 'font-size: 10.5px; color: rgba(255,255,255,0.62); white-space: nowrap; flex-shrink: 0;'
+									}, 'Value / Variable:'));
+									const sourceInput = append(sourceInputWrap, $('input.monaco-inputbox', {
+										type: 'text',
+										placeholder: 'Enter workflow variable (e.g. {existing_job_ds})',
+										value: spec.sourceExpression || '',
+										style: 'flex: 1 1 120px; min-width: 0; width: 100%; max-width: 100%; box-sizing: border-box; padding: 3px 8px; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(0, 0, 0, 0.32); color: #e2e8f0; outline: none;'
+									})) as HTMLInputElement;
+									sourceInput.oninput = () => {
+										spec.sourceExpression = sourceInput.value;
+										this._syncDraft();
+									};
+
+									if (availableSourceVars.length > 0) {
+										const chipsWrap = append(sourceRow, $('div', {
+											style: 'display: flex; align-items: center; gap: 4px; flex-wrap: wrap;'
+										}));
+										append(chipsWrap, $('span', { style: 'font-size: 10px; opacity: 0.55; margin-right: 2px;' }, 'Bind var:'));
+										for (const vName of availableSourceVars.slice(0, 16)) {
+											const chipBtn = append(chipsWrap, $('button', {
+												type: 'button',
+												style: 'padding: 1px 6px; font-size: 10px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 3px; cursor: pointer; background: rgba(129, 140, 248, 0.14); border: 1px solid rgba(129, 140, 248, 0.32); color: #c7d2fe;',
+												title: `Bind {${vName}} as the exported value for this output`
+											}, `{${vName}}`)) as HTMLButtonElement;
+											chipBtn.onclick = (e) => {
+												e.preventDefault();
+												e.stopPropagation();
+												spec.sourceExpression = `{${vName}}`;
+												sourceInput.value = spec.sourceExpression;
+												this._syncDraft();
+											};
+										}
+									}
+								}
 							});
 						} catch (err) {
 							console.error('[OutputPrimitive] renderSpecsList error:', err);
 							this.notificationService.error(`Render error: ${err}`);
 						}
+					};
+
+					addOutputBtn.onclick = (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						if (!Array.isArray(field.outputSpecs)) {
+							field.outputSpecs = [];
+						}
+						const nextIdx = field.outputSpecs.filter(s => s?.isCustom).length + 1;
+						const defaultLabel = `Output ${nextIdx}`;
+						const defaultVar = generateSmartPythonVarName(defaultLabel);
+						field.outputSpecs.push({
+							fieldKey: defaultLabel,
+							label: defaultLabel,
+							varName: defaultVar,
+							varNameManual: false,
+							sourceExpression: '',
+							enabled: true,
+							defaultFormat: 'json',
+							isCustom: true
+						});
+						renderSpecsList();
+						this._syncDraft();
+						void this._persistCurrentModule();
 					};
 
 					syncSpecsWithCanvas();
@@ -7635,7 +8773,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						renderSpecsList();
 						this._syncDraft();
 						const count = field.outputSpecs?.length || 0;
-						this.notificationService.info(`Synced ${count} primitive(s) into Output Manifest.`);
+						this.notificationService.info(`Synced ${count} output item(s) into Output Manifest.`);
 					};
 
 					// Last Execution Exported Outputs Box (Output Component)
@@ -8258,6 +9396,16 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							}
 							return;
 						}
+						if (isCommentKeybinding(e)) {
+							e.preventDefault();
+							e.stopPropagation();
+							togglePythonComment(codeTextarea);
+							recordCodeSelection();
+							field.pythonCode = codeTextarea.value;
+							this._syncDraft();
+							renderHighlightedCode();
+							return;
+						}
 						if (e.key === 'Tab') {
 							e.preventDefault();
 							const start = codeTextarea.selectionStart;
@@ -8566,15 +9714,28 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}));
 					append(logsTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.terminal)));
 					append(logsTitle, $('span', {}, 'CONSOLE LOGS & EXECUTION TRACE'));
-					const logsStatusBadge = append(logsHeader, $('span.python-logs-status-badge', {
+					const logsHeaderRight = append(logsHeader, $('div', {
+						style: 'display: flex; align-items: center; gap: 8px; margin-left: auto;'
+					}));
+					const logsStatusBadge = append(logsHeaderRight, $('span.python-logs-status-badge', {
 						style: 'font-size: 10px; opacity: 0.9; font-family: var(--vscode-editor-font-family, monospace);'
 					}, '[Ready to execute]'));
+					const copyLogsCardBtn = append(logsHeaderRight, $('button', {
+						type: 'button',
+						title: 'Copy complete Console Logs',
+						style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(255, 255, 255, 0.06); color: #cbd5e1; cursor: pointer;'
+					})) as HTMLButtonElement;
+					const copyLogsCardIcon = append(copyLogsCardBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy), { style: 'font-size: 11px;' }));
+					const copyLogsCardLabel = append(copyLogsCardBtn, $('span', {}, 'Copy Logs'));
 					if ((field as any).lastExecutionStatus === 'success') {
 						logsStatusBadge.textContent = `Completed in ${(field as any).lastExecutionDurationMs ?? 0}ms (exit ${(field as any).lastExecutionExitCode ?? 0})${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
 						logsStatusBadge.style.color = '#4ade80';
 					} else if ((field as any).lastExecutionStatus === 'failed') {
 						logsStatusBadge.textContent = `Failed (Exit code: ${(field as any).lastExecutionExitCode ?? 1} | ${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
 						logsStatusBadge.style.color = '#f87171';
+					} else if ((field as any).lastExecutionStatus === 'skipped') {
+						logsStatusBadge.textContent = 'Skipped (Disabled)';
+						logsStatusBadge.style.color = '#94a3b8';
 					} else if (field.pythonOutput) {
 						logsStatusBadge.textContent = 'Recorded Output';
 						logsStatusBadge.style.color = '#4ade80';
@@ -8584,6 +9745,27 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'margin: 0; padding: 4px 6px; font-size: 11px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); color: #cbd5e1; min-height: 48px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; user-select: text; -webkit-user-select: text; cursor: text;'
 					}));
 					logsDisplayBox.textContent = field.pythonOutput || (field as any).lastExecutionLog || '[Ready to execute] Output, stdout/stderr, and pipeline steps will appear here when run.';
+					copyLogsCardBtn.onclick = async (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						const rawLogs = field.pythonOutput || (field as any).lastExecutionLog || logsDisplayBox.textContent || '';
+						if (!rawLogs || rawLogs.startsWith('[Ready to execute]')) {
+							this.notificationService.warn('No console logs to copy.');
+							return;
+						}
+						await this._clipboardService.writeText(String(rawLogs));
+						copyLogsCardIcon.className = ThemeIcon.asClassName(Codicon.check);
+						copyLogsCardBtn.style.color = '#4ade80';
+						copyLogsCardLabel.textContent = 'Copied!';
+						this.notificationService.info('Complete Console Logs copied to clipboard.');
+						setTimeout(() => {
+							if (copyLogsCardBtn.isConnected) {
+								copyLogsCardIcon.className = ThemeIcon.asClassName(Codicon.copy);
+								copyLogsCardBtn.style.color = '#cbd5e1';
+								copyLogsCardLabel.textContent = 'Copy Logs';
+							}
+						}, 1500);
+					};
 
 					// 2. Return Value (OUTPUT) Section
 					const resultCard = append(previewContainer, $('div.python-debug-result-card', {
@@ -8597,13 +9779,50 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}));
 					append(resultTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
 					append(resultTitle, $('span', {}, 'RETURN VALUE (OUTPUT)'));
-					append(resultHeader, $('span', {
+					const resultHeaderRight = append(resultHeader, $('div', {
+						style: 'display: flex; align-items: center; gap: 8px; margin-left: auto;'
+					}));
+					append(resultHeaderRight, $('span', {
 						style: 'font-size: 9.5px; opacity: 0.7; color: #38bdf8;'
 					}, 'Payload for Output Manifest & Downstream Primitives'));
+					const copyResultCardBtn = append(resultHeaderRight, $('button.python-copy-result-card-btn', {
+						type: 'button',
+						title: 'Copy pure Return Value (OUTPUT) raw data only',
+						style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.45); background: rgba(56, 189, 248, 0.14); color: #7dd3fc; cursor: pointer;'
+					})) as HTMLButtonElement;
+					const copyResultCardIcon = append(copyResultCardBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy), { style: 'font-size: 11px;' }));
+					const copyResultCardLabel = append(copyResultCardBtn, $('span', {}, 'Copy Output'));
 					const resultDisplayBox = append(resultCard, $('pre.python-debug-result-display', {
 						'data-selectable-box': 'true',
 						style: 'margin: 0; padding: 4px 6px; font-size: 11px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); color: #e0f2fe; min-height: 40px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; user-select: text; -webkit-user-select: text; cursor: text;'
 					}));
+					copyResultCardBtn.onclick = async (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						const rawResult = field.pythonResult !== undefined
+							? (typeof field.pythonResult === 'object' && field.pythonResult !== null
+								? JSON.stringify(field.pythonResult, null, 2)
+								: String(field.pythonResult))
+							: (resultDisplayBox.textContent || '');
+						if (!rawResult) {
+							this.notificationService.warn('No Python Output to copy.');
+							return;
+						}
+						await this._clipboardService.writeText(rawResult);
+						copyResultCardIcon.className = ThemeIcon.asClassName(Codicon.check);
+						copyResultCardBtn.style.color = '#4ade80';
+						copyResultCardBtn.style.borderColor = 'rgba(74, 222, 128, 0.5)';
+						copyResultCardLabel.textContent = 'Copied!';
+						this.notificationService.info('Complete Python Output copied to clipboard.');
+						setTimeout(() => {
+							if (copyResultCardBtn.isConnected) {
+								copyResultCardIcon.className = ThemeIcon.asClassName(Codicon.copy);
+								copyResultCardBtn.style.color = '#7dd3fc';
+								copyResultCardBtn.style.borderColor = 'rgba(56, 189, 248, 0.45)';
+								copyResultCardLabel.textContent = 'Copy Output';
+							}
+						}, 1500);
+					};
 
 					const updateViewMode = (mode: 'all' | 'logs' | 'result') => {
 						currentViewMode = mode;
@@ -8693,7 +9912,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 											} else if (rawDef === '' && schemaContext[p.name] !== undefined) {
 												pMap[p.name] = schemaContext[p.name];
 											} else {
-												pMap[p.name] = rawDef;
+												pMap[p.name] = this._parseInputStringLiteral(rawDef);
 											}
 											schemaContext[p.name] = pMap[p.name];
 										}
@@ -8720,6 +9939,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									val = f.defaultContent || f.defaultValue || '';
 								}
 								schemaContext[fKey] = val;
+								if (f.outputVariableName) {
+									schemaContext[f.outputVariableName] = val;
+								}
+								if (f.id && f.id !== fKey) {
+									schemaContext[f.id] = val;
+								}
+								if (f.label && f.label !== fKey) {
+									schemaContext[f.label] = val;
+								}
 							}
 							if (this._activeModule?.name) {
 								schemaContext['Title'] = this._activeModule.name;
@@ -9036,15 +10264,21 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									this._syncDraft();
 								};
 
-								const delBtn = append(row, $('span.action-delete-btn' + ThemeIcon.asCSSSelector(Codicon.trash), {
-									style: 'cursor: pointer; opacity: 0.6; font-size: 12px; padding: 4px; transition: opacity 0.15s;',
+								const delBtn = append(row, $('button.action-delete-btn', {
+									type: 'button',
+									style: 'cursor: pointer; opacity: 0.72; font-size: 12px; padding: 3px 5px; border: none; background: transparent; color: #f87171; display: inline-flex; align-items: center; justify-content: center; transition: opacity 0.15s;',
 									title: 'Delete parameter'
-								}));
-								delBtn.onclick = () => {
+								})) as HTMLButtonElement;
+								append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+								delBtn.onmousedown = (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); };
+								delBtn.onclick = (e: MouseEvent) => {
+									e.preventDefault();
+									e.stopPropagation();
 									field.httpParams!.splice(pIdx, 1);
 									renderParamsPanel();
 									renderTabNav();
 									this._syncDraft();
+									this._persistCurrentModule().catch(() => { });
 								};
 							});
 						}
@@ -9132,15 +10366,21 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									this._syncDraft();
 								};
 
-								const delBtn = append(row, $('span.action-delete-btn' + ThemeIcon.asCSSSelector(Codicon.trash), {
-									style: 'cursor: pointer; opacity: 0.6; font-size: 12px; padding: 4px; transition: opacity 0.15s;',
+								const delBtn = append(row, $('button.action-delete-btn', {
+									type: 'button',
+									style: 'cursor: pointer; opacity: 0.72; font-size: 12px; padding: 3px 5px; border: none; background: transparent; color: #f87171; display: inline-flex; align-items: center; justify-content: center; transition: opacity 0.15s;',
 									title: 'Delete header'
-								}));
-								delBtn.onclick = () => {
+								})) as HTMLButtonElement;
+								append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+								delBtn.onmousedown = (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); };
+								delBtn.onclick = (e: MouseEvent) => {
+									e.preventDefault();
+									e.stopPropagation();
 									field.httpHeaders!.splice(hIdx, 1);
 									renderHeadersPanel();
 									renderTabNav();
 									this._syncDraft();
+									this._persistCurrentModule().catch(() => { });
 								};
 							});
 						}
@@ -9371,18 +10611,58 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							append(respHeaderLeft, $('span', { style: 'font-size: 10px; opacity: 0.5;' }, `${field.httpLastExecutionTime}`));
 						}
 
-						// Response sub-views selector: Body | Headers | Downstream Variables
+						// Response sub-views selector: Body | Headers | Downstream Variables + Top-Right Copy Button
 						let respSubTab: 'body' | 'headers' | 'guide' = 'body';
-						const subTabRow = append(responsePanel, $('div', { style: 'display: flex; gap: 4px;' }));
-						const subBodyBtn = append(subTabRow, $('button', {
+						const subTabRow = append(responsePanel, $('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 4px; flex-wrap: wrap;' }));
+						const subTabLeft = append(subTabRow, $('div', { style: 'display: flex; gap: 4px;' }));
+						const subBodyBtn = append(subTabLeft, $('button', {
+							type: 'button',
 							style: 'padding: 2px 8px; font-size: 10px; cursor: pointer; border-radius: 3px; border: 1px solid rgba(6, 182, 212, 0.4); background: rgba(6, 182, 212, 0.15); color: #06b6d4;'
 						}, 'Response Body')) as HTMLButtonElement;
-						const subHdrsBtn = append(subTabRow, $('button', {
+						const subHdrsBtn = append(subTabLeft, $('button', {
+							type: 'button',
 							style: 'padding: 2px 8px; font-size: 10px; cursor: pointer; border-radius: 3px; border: 1px solid transparent; background: transparent; color: #94a3b8;'
 						}, 'Headers')) as HTMLButtonElement;
-						const subGuideBtn = append(subTabRow, $('button', {
+						const subGuideBtn = append(subTabLeft, $('button', {
+							type: 'button',
 							style: 'padding: 2px 8px; font-size: 10px; cursor: pointer; border-radius: 3px; border: 1px solid transparent; background: transparent; color: #94a3b8;'
 						}, 'Downstream Variables Guide')) as HTMLButtonElement;
+
+						const copyHttpRespBtn = append(subTabRow, $('button', {
+							type: 'button',
+							title: 'Copy complete HTTP response to clipboard',
+							style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(6, 182, 212, 0.35); background: rgba(6, 182, 212, 0.1); color: #22d3ee; cursor: pointer; margin-left: auto;'
+						})) as HTMLButtonElement;
+						const copyHttpRespIcon = append(copyHttpRespBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy), { style: 'font-size: 11px;' }));
+						const copyHttpRespLabel = append(copyHttpRespBtn, $('span', {}, 'Copy'));
+						copyHttpRespBtn.onclick = async (e) => {
+							e.preventDefault();
+							e.stopPropagation();
+							let textToCopy = '';
+							if (respSubTab === 'headers') {
+								textToCopy = JSON.stringify(field.httpResponseHeaders || {}, null, 2);
+							} else {
+								textToCopy = field.httpResponseData !== undefined && field.httpResponseData !== null
+									? JSON.stringify(field.httpResponseData, null, 2)
+									: (field.httpResponseBody || '');
+							}
+							if (!textToCopy) {
+								this.notificationService.warn('No HTTP response content to copy.');
+								return;
+							}
+							await this._clipboardService.writeText(textToCopy);
+							copyHttpRespIcon.className = ThemeIcon.asClassName(Codicon.check);
+							copyHttpRespBtn.style.color = '#4ade80';
+							copyHttpRespLabel.textContent = 'Copied!';
+							this.notificationService.info(respSubTab === 'headers' ? 'HTTP response headers copied to clipboard.' : 'Complete HTTP response copied to clipboard.');
+							setTimeout(() => {
+								if (copyHttpRespBtn.isConnected) {
+									copyHttpRespIcon.className = ThemeIcon.asClassName(Codicon.copy);
+									copyHttpRespBtn.style.color = '#22d3ee';
+									copyHttpRespLabel.textContent = 'Copy';
+								}
+							}, 1500);
+						};
 
 						const subContentBox = append(responsePanel, $('div', {
 							style: 'display: flex; flex-direction: column; width: 100%;'
@@ -9402,12 +10682,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							subGuideBtn.style.color = respSubTab === 'guide' ? '#06b6d4' : '#94a3b8';
 							subGuideBtn.style.borderColor = respSubTab === 'guide' ? 'rgba(6, 182, 212, 0.4)' : 'transparent';
 
+							copyHttpRespBtn.style.display = respSubTab === 'guide' ? 'none' : 'inline-flex';
+
 							if (respSubTab === 'body') {
 								const formattedText = field.httpResponseData
 									? JSON.stringify(field.httpResponseData, null, 2)
 									: (field.httpResponseBody || '(empty response)');
-								const pre = append(subContentBox, $('pre', {
-									style: 'margin: 0; padding: 8px 10px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); background: rgba(0, 0, 0, 0.35); border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.1); max-height: 240px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: inherit;'
+								append(subContentBox, $('pre', {
+									'data-selectable-box': 'true',
+									style: 'margin: 0; padding: 8px 10px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); background: rgba(0, 0, 0, 0.35); border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.1); max-height: 240px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; color: inherit; user-select: text; -webkit-user-select: text; cursor: text;'
 								}, formattedText));
 							} else if (respSubTab === 'headers') {
 								const hdrs = field.httpResponseHeaders || {};
@@ -9474,7 +10757,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								const fKey = f.label || f.id;
 								if (f.type === 'parameters' && f.parameters) {
 									const pMap: Record<string, any> = {};
-									f.parameters.forEach(p => { if (p.name) pMap[p.name] = p.defaultValue ?? ''; });
+									f.parameters.forEach(p => { if (p.name) pMap[p.name] = this._parseInputStringLiteral(p.defaultValue ?? ''); });
 									liveContext[fKey] = pMap;
 									liveContext['Parameters'] = pMap;
 									liveContext['Inputs'] = pMap;
@@ -9482,6 +10765,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									liveContext[fKey] = f.httpResponseData || f.httpResponseBody || '';
 								} else {
 									liveContext[fKey] = f.defaultContent || f.defaultValue || '';
+								}
+								if (f.outputVariableName) {
+									liveContext[f.outputVariableName] = liveContext[fKey];
+								}
+								if (f.id && f.id !== fKey) {
+									liveContext[f.id] = liveContext[fKey];
+								}
+								if (f.label && f.label !== fKey) {
+									liveContext[f.label] = liveContext[fKey];
 								}
 							}
 
@@ -10056,15 +11348,21 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								const tdAct = append(tr, $('td', {
 									style: 'padding: 2px 4px; text-align: center;'
 								}));
-								const delRowB = append(tdAct, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
-									style: 'cursor: pointer; font-size: 11.5px; color: #f87171; opacity: 0.75;',
+								const delRowB = append(tdAct, $('button', {
+									type: 'button',
+									style: 'cursor: pointer; font-size: 11.5px; color: #f87171; opacity: 0.75; background: transparent; border: none; padding: 2px 4px; display: inline-flex; align-items: center; justify-content: center;',
 									title: 'Delete Row'
-								}));
-								delRowB.onclick = () => {
+								})) as HTMLButtonElement;
+								append(delRowB, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+								delRowB.onmousedown = (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); };
+								delRowB.onclick = (e: MouseEvent) => {
+									e.preventDefault();
+									e.stopPropagation();
 									field.tableRows!.splice(actualRowIdx, 1);
 									this._syncDraft();
 									renderGridTable();
 									updateStatsBadge();
+									this._persistCurrentModule().catch(() => { });
 								};
 							});
 						}
@@ -10254,11 +11552,16 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								updateSchemaDiffBanner();
 							};
 
-							const delColBtn = append(cRow, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
-								style: 'cursor: pointer; font-size: 12px; color: #ef4444; opacity: 0.75; padding: 2px 4px;',
+							const delColBtn = append(cRow, $('button', {
+								type: 'button',
+								style: 'cursor: pointer; font-size: 12px; color: #ef4444; opacity: 0.75; padding: 2px 4px; background: transparent; border: none; display: inline-flex; align-items: center; justify-content: center;',
 								title: 'Remove Column'
-							}));
-							delColBtn.onclick = () => {
+							})) as HTMLButtonElement;
+							append(delColBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+							delColBtn.onmousedown = (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); };
+							delColBtn.onclick = (e: MouseEvent) => {
+								e.preventDefault();
+								e.stopPropagation();
 								if (cols.length <= 1) {
 									this.notificationService.warn('Table must have at least one column.');
 									return;
@@ -10275,6 +11578,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								renderGridTable();
 								updateStatsBadge();
 								updateSchemaDiffBanner();
+								this._persistCurrentModule().catch(() => { });
 							};
 						});
 					};
@@ -11986,7 +13290,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								chip.style.display = 'none';
 							}
 							sqlChipEls.push(chip);
-							chip.onclick = () => {
+							chip.onmousedown = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
+							};
+							chip.onclick = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
 								const insertStr = `{${token}}`;
 								if (sqlTextarea.style.display === 'none') {
 									sqlTextarea.value = sqlTextarea.value ? `${sqlTextarea.value} ${insertStr}` : insertStr;
@@ -12013,7 +13323,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								type: 'button',
 								style: 'padding: 1px 8px; font-size: 10px; font-weight: 600; border-radius: 10px; border: 1px solid rgba(255, 255, 255, 0.2); background: rgba(255, 255, 255, 0.06); color: inherit; cursor: pointer;'
 							}, sqlChipsExpanded ? 'Show Less' : `+${hiddenCount} More...`));
-							moreBtn.onclick = () => {
+							moreBtn.onmousedown = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
+							};
+							moreBtn.onclick = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
 								sqlChipsExpanded = !sqlChipsExpanded;
 								sqlChipEls.forEach((el, i) => {
 									if (i >= MAX_VISIBLE_SQL_CHIPS) {
@@ -12169,6 +13485,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						} else if ((field as any).lastExecutionStatus === 'failed') {
 							sqlStatusBadge.textContent = `Failed (${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
 							sqlStatusBadge.style.color = '#f87171';
+						} else if ((field as any).lastExecutionStatus === 'skipped') {
+							sqlStatusBadge.textContent = 'Skipped (Disabled)';
+							sqlStatusBadge.style.color = '#94a3b8';
 						} else {
 							sqlStatusBadge.textContent = 'Saved Preview';
 							sqlStatusBadge.style.color = '#10b981';
@@ -12399,6 +13718,30 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										style: 'padding: 2px 7px; font-size: 10px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.14); cursor: pointer;'
 									}, 'Next ›')) as HTMLButtonElement;
 
+									const copyQueryJsonBtn = append(qControlsRight, $('button.monaco-button', {
+										type: 'button',
+										title: 'Copy all query result rows as JSON',
+										style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10px; font-weight: 500; border-radius: 4px; background: rgba(56, 189, 248, 0.14); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.35); cursor: pointer;'
+									})) as HTMLButtonElement;
+									const copyQueryJsonIcon = append(copyQueryJsonBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy), { style: 'font-size: 10.5px;' }));
+									const copyQueryJsonLabel = append(copyQueryJsonBtn, $('span', {}, 'Copy JSON'));
+									copyQueryJsonBtn.onclick = async (e) => {
+										e.preventDefault();
+										e.stopPropagation();
+										await this._clipboardService.writeText(JSON.stringify(allQueryRows || [], null, 2));
+										copyQueryJsonIcon.className = ThemeIcon.asClassName(Codicon.check);
+										copyQueryJsonBtn.style.color = '#4ade80';
+										copyQueryJsonLabel.textContent = 'Copied!';
+										this.notificationService.info(`Copied all ${(allQueryRows || []).length} query result row(s) as JSON.`);
+										setTimeout(() => {
+											if (copyQueryJsonBtn.isConnected) {
+												copyQueryJsonIcon.className = ThemeIcon.asClassName(Codicon.copy);
+												copyQueryJsonBtn.style.color = '#7dd3fc';
+												copyQueryJsonLabel.textContent = 'Copy JSON';
+											}
+										}, 1500);
+									};
+
 									const applyQueryToGridBtn = append(qControlsRight, $('button.monaco-button', {
 										type: 'button',
 										style: 'padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; background: rgba(20, 184, 166, 0.2); color: #2dd4bf; border: 1px solid rgba(20, 184, 166, 0.45); cursor: pointer;'
@@ -12501,34 +13844,91 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					testSqlBtn.onclick = executeSqlTestAndRun;
 				}
 
-				if (field.type === 'create_tickets' || field.type === 'run_tickets' || field.type === 'get_outputs' || field.type === 'get_tickets' || field.type === 'display') {
+				if (field.type === 'create_tickets' || field.type === 'run_tickets' || field.type === 'get_outputs' || field.type === 'get_ticket' || field.type === 'get_tickets' || field.type === 'display') {
 					const wfBox = append(fieldCard, $('.wf-builtin-config-box', {
 						style: 'display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 6px; background: rgba(168, 85, 247, 0.06); border: 1px solid rgba(168, 85, 247, 0.25); margin-top: 4px;'
 					}));
 
-					// Return Variable / Handle Banner (except for display)
-					if (field.type !== 'display') {
-						const handleBanner = append(wfBox, $('div', {
-							style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 6px 10px; border-radius: 5px; background: rgba(168, 85, 247, 0.14); border: 1px solid rgba(168, 85, 247, 0.32); font-size: 11px;'
-						}));
-						const hbLeft = append(handleBanner, $('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;' }));
-						append(hbLeft, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable), { style: 'color: #d8b4fe;' }));
-						append(hbLeft, $('span', { style: 'color: #e9d5ff; font-weight: 600;' }, 'Return Variable / Handle Name (Component Title):'));
-						append(hbLeft, $('code', {
-							style: 'padding: 1px 6px; border-radius: 4px; background: rgba(0,0,0,0.35); color: #38bdf8; font-weight: 700;'
-						}, `{${field.label || field.id}}`));
-						append(handleBanner, $('span', { style: 'font-size: 10.5px; opacity: 0.75;' }, 'Reference downstream via {Title} or TICKET_CONTEXT["Title"]'));
-					}
+					const formatParamValueForPythonExpr = (rawVal: string): string => {
+						const trimmed = (rawVal || '').trim();
+						if (!trimmed) return '""';
+						const singleBrace = trimmed.match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/);
+						if (singleBrace) return singleBrace[1];
+						if (/^-?\d+(\.\d+)?$/.test(trimmed) || trimmed === 'True' || trimmed === 'False' || trimmed === 'None') return trimmed;
+						return JSON.stringify(trimmed);
+					};
+
+					let refreshPythonPreview: () => void = () => { };
+					const buildCurrentPythonExpression = (): string => {
+						const varName = field.outputVariableName || generateSmartPythonVarName(field.label || field.id, field.type);
+						if (field.type === 'get_ticket') {
+							const rawTarget = (field.wfTicketTarget || field.wfTicketId || field.wfTicketVariable || '').trim();
+							const args: string[] = [];
+							if (rawTarget) args.push(`ticket=${formatParamValueForPythonExpr(rawTarget)}`);
+							if (field.wfTicketField && field.wfTicketField.trim()) args.push(`field=${formatParamValueForPythonExpr(field.wfTicketField)}`);
+							if (field.wfTicketType && field.wfTicketType.trim()) args.push(`ticket_type=${JSON.stringify(field.wfTicketType)}`);
+							return `${varName} = get_ticket(${args.join(', ')})`;
+						}
+						if (field.type === 'create_tickets') {
+							const tType = field.wfTicketType || '';
+							const tTitle = field.wfTicketTitle || '';
+							const tPath = field.wfTicketPath || '.';
+							const schemaParams = resolveModuleParameters(tType);
+							const validNames = new Set(schemaParams.map(p => p.name.toLowerCase()));
+							const paramEntries = Object.entries(field.wfTicketParams || {})
+								.filter(([k]) => validNames.size === 0 || validNames.has(k.toLowerCase()));
+							const paramsStr = paramEntries.map(([k, v]) => `${JSON.stringify(k)}: ${formatParamValueForPythonExpr(v)}`).join(', ');
+							return `${varName} = CREATE_TICKETS(\n    ticket_type=${JSON.stringify(tType)},\n    title=${JSON.stringify(tTitle)},\n    path=${JSON.stringify(tPath)},\n    params={${paramsStr}}\n)`;
+						}
+						if (field.type === 'run_tickets') {
+							const rawTarget = (field.wfTicketTarget || '').trim();
+							const targetExpr = formatParamValueForPythonExpr(rawTarget);
+							const effectiveType = resolveRunTargetTicketType();
+							const schemaParams = resolveModuleParameters(effectiveType || rawTarget);
+							const validNames = new Set(schemaParams.map(p => p.name.toLowerCase()));
+							const paramEntries = Object.entries(field.wfTicketParams || {})
+								.filter(([k, v]) => (validNames.size === 0 || validNames.has(k.toLowerCase())) && k.trim().length > 0 && v !== undefined && v !== '');
+							const paramsStr = paramEntries.map(([k, v]) => `${JSON.stringify(k)}: ${formatParamValueForPythonExpr(v)}`).join(', ');
+							return `${varName} = RUN_TICKETS(ticket=${targetExpr}, params={${paramsStr}})`;
+						}
+						if (field.type === 'get_outputs') {
+							const rawTarget = (field.wfTicketTarget || '').trim();
+							const targetExpr = formatParamValueForPythonExpr(rawTarget);
+							const args: string[] = [`ticket=${targetExpr}`];
+							if (field.wfTicketField && field.wfTicketField.trim()) {
+								args.push(`field=${formatParamValueForPythonExpr(field.wfTicketField)}`);
+							}
+							return `${varName} = GET_OUTPUTS(${args.join(', ')})`;
+						}
+						if (field.type === 'display') {
+							const rawVal = (field.wfDisplayValue || '').trim();
+							return `DISPLAY(${formatParamValueForPythonExpr(rawVal)})`;
+						}
+						return '';
+					};
 
 					const resolveModuleParameters = (typeName: string): IParameterDefinition[] => {
-						const clean = (typeName || '').trim().toLowerCase();
+						const clean = (typeName || '').trim().replace(/^\{|\}$/g, '').trim().toLowerCase();
 						if (!clean) {
 							return [];
 						}
-						const matchedMod = allWorkspaceModules.find(m =>
+						let matchedMod = allWorkspaceModules.find(m =>
 							(m.name || '').trim().toLowerCase() === clean ||
 							(m.id || '').trim().toLowerCase() === clean
 						);
+						if (!matchedMod) {
+							const snapshots = this._entityPersistenceService.getAllSnapshots() || [];
+							const snap = snapshots.find(s =>
+								s.ticketId?.toLowerCase() === clean ||
+								s.entityName?.toLowerCase() === clean
+							);
+							if (snap?.entityType) {
+								matchedMod = allWorkspaceModules.find(m =>
+									(m.name || '').trim().toLowerCase() === snap.entityType!.trim().toLowerCase() ||
+									(m.id || '').trim().toLowerCase() === snap.entityType!.trim().toLowerCase()
+								);
+							}
+						}
 						if (!matchedMod || !Array.isArray(matchedMod.fields)) {
 							return [];
 						}
@@ -12550,6 +13950,19 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						if (refTokens.length === 0) {
 							return;
 						}
+						let lastSelStart: number | undefined;
+						let lastSelEnd: number | undefined;
+						const recordInputSelection = () => {
+							if (typeof targetInp.selectionStart === 'number' && typeof targetInp.selectionEnd === 'number') {
+								lastSelStart = targetInp.selectionStart;
+								lastSelEnd = targetInp.selectionEnd;
+							}
+						};
+						targetInp.addEventListener('keyup', recordInputSelection);
+						targetInp.addEventListener('mouseup', recordInputSelection);
+						targetInp.addEventListener('select', recordInputSelection);
+						targetInp.addEventListener('input', recordInputSelection);
+
 						const chipRow = append(containerEl, $('div', {
 							style: 'display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 3px;'
 						}));
@@ -12565,9 +13978,34 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								type: 'button',
 								style: 'padding: 1px 6px; font-size: 10px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;'
 							}, `+ {${label}}`));
-							chip.onclick = () => {
+							chip.onmousedown = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								recordInputSelection();
+							};
+							chip.onclick = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
 								const cur = targetInp.value || '';
-								targetInp.value = cur ? `${cur}{${label}}` : `{${label}}`;
+								const token = `{${label}}`;
+								const isFocused = document.activeElement === targetInp;
+								let start = isFocused && typeof targetInp.selectionStart === 'number'
+									? targetInp.selectionStart
+									: (typeof lastSelStart === 'number' ? lastSelStart : cur.length);
+								let end = isFocused && typeof targetInp.selectionEnd === 'number'
+									? targetInp.selectionEnd
+									: (typeof lastSelEnd === 'number' ? lastSelEnd : start);
+
+								if (start < 0 || start > cur.length) { start = cur.length; }
+								if (end < 0 || end > cur.length) { end = cur.length; }
+								if (start > end) { const tmp = start; start = end; end = tmp; }
+
+								targetInp.value = cur.substring(0, start) + token + cur.substring(end);
+								const newPos = start + token.length;
+								lastSelStart = newPos;
+								lastSelEnd = newPos;
+								targetInp.focus({ preventScroll: true });
+								targetInp.setSelectionRange(newPos, newPos);
 								onUpdated();
 							};
 						};
@@ -12584,12 +14022,391 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								type: 'button',
 								style: 'padding: 1px 7px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center;'
 							}, `+${hiddenTokens.length} More...`));
-							moreBtn.onclick = () => {
+							moreBtn.onmousedown = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
+								recordInputSelection();
+							};
+							moreBtn.onclick = (e) => {
+								e.preventDefault();
+								e.stopPropagation();
 								isExpanded = !isExpanded;
 								hiddenContainer.style.display = isExpanded ? 'contents' : 'none';
 								moreBtn.textContent = isExpanded ? 'Show Less' : `+${hiddenTokens.length} More...`;
 							};
 						}
+					};
+
+					const renderWorkflowTicketVariableChips = (containerEl: HTMLElement, targetInp: HTMLInputElement, onUpdated: () => void) => {
+						const ticketVars: Array<{ name: string; desc?: string }> = [];
+						const seenVars = new Set<string>();
+
+						// 1. Current node fields (upstream create_tickets or run_tickets)
+						fields.forEach(f => {
+							if (!f || f === field) return;
+							if (f.type === 'create_tickets' || f.type === 'run_tickets') {
+								const vName = (f.outputVariableName || '').trim() || generateSmartPythonVarName(f.label || f.id, f.type);
+								if (vName && !seenVars.has(vName.toLowerCase())) {
+									seenVars.add(vName.toLowerCase());
+									ticketVars.push({ name: vName, desc: f.label || f.type });
+								}
+							}
+						});
+
+						// 2. Flowchart variables provider (upstream nodes in workflow)
+						if (isFlowchartNodeMode && input.workflowVariablesProvider) {
+							try {
+								const wfVars = input.workflowVariablesProvider() || [];
+								wfVars.forEach(wv => {
+									const wLabel = (wv.label || '').trim();
+									if (!wLabel) return;
+									const isTicketHandle = wv.type === 'HANDLE' ||
+										Boolean(wv.ticketType) ||
+										wv.sourceType === 'create_tickets' ||
+										wv.sourceType === 'run_tickets' ||
+										/ticket/i.test(wLabel) ||
+										/ticket/i.test(wv.type || '');
+									if (isTicketHandle && !seenVars.has(wLabel.toLowerCase())) {
+										// Avoid circular reference to current component's own output variable or label
+										const currentOutVar = (field.outputVariableName || '').trim().toLowerCase();
+										const currentFieldLabel = (field.label || '').trim().toLowerCase();
+										if (wLabel.toLowerCase() !== currentOutVar && wLabel.toLowerCase() !== currentFieldLabel) {
+											seenVars.add(wLabel.toLowerCase());
+											ticketVars.push({ name: wLabel, desc: wv.type || 'TICKET_HANDLE' });
+										}
+									}
+								});
+							} catch { }
+						}
+
+						if (ticketVars.length === 0) {
+							return;
+						}
+
+						const chipRow = append(containerEl, $('div', {
+							style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 3px;'
+						}));
+						append(chipRow, $('span', { style: 'font-size: 10px; opacity: 0.75; color: #c084fc; font-weight: 600;' }, 'Ticket Var:'));
+
+						ticketVars.forEach(tv => {
+							const chip = append(chipRow, $('button', {
+								type: 'button',
+								title: `Insert ticket variable {${tv.name}}${tv.desc ? ` (${tv.desc})` : ''}`,
+								style: 'padding: 2px 7px; font-size: 10px; border-radius: 4px; border: 1px solid rgba(192, 132, 252, 0.45); background: rgba(192, 132, 252, 0.12); color: #e9d5ff; cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap; transition: all 0.15s ease;'
+							}, `+ {${tv.name}}`));
+							chip.onmouseenter = () => { chip.style.background = 'rgba(192, 132, 252, 0.28)'; };
+							chip.onmouseleave = () => { chip.style.background = 'rgba(192, 132, 252, 0.12)'; };
+							chip.onclick = () => {
+								targetInp.value = `{${tv.name}}`;
+								onUpdated();
+							};
+						});
+					};
+
+					const attachTicketSearchDropdown = (inputEl: HTMLInputElement, onSelected: (ticketId: string) => void) => {
+						const container = inputEl.parentElement;
+						if (!container) return;
+						container.style.position = 'relative';
+
+						const menu = append(container, $('div.ticket-search-autocomplete-menu', {
+							style: 'display: none; position: absolute; left: 0; right: 0; top: calc(100% + 3px); background: #161622; border: 1px solid rgba(168, 85, 247, 0.5); border-radius: 6px; box-shadow: 0 8px 24px rgba(0,0,0,0.65); max-height: 220px; overflow-y: auto; z-index: 10000; padding: 4px;'
+						}));
+
+						let activeIndex = -1;
+						let currentCandidates: Array<{ id: string; title: string; type: string }> = [];
+
+						const hideMenu = () => {
+							menu.style.display = 'none';
+							activeIndex = -1;
+						};
+
+						const renderCandidates = (candidates: Array<{ id: string; title: string; type: string }>) => {
+							currentCandidates = candidates;
+							clearNode(menu);
+							if (candidates.length === 0) {
+								hideMenu();
+								return;
+							}
+							menu.style.display = 'block';
+							candidates.forEach((cand, idx) => {
+								const item = append(menu, $('div', {
+									style: `display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; transition: background 0.1s ease; border-bottom: 1px solid rgba(255,255,255,0.05); ${idx === activeIndex ? 'background: rgba(168, 85, 247, 0.25);' : ''}`
+								}));
+								const topRow = append(item, $('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 6px;' }));
+								append(topRow, $('span', { style: 'font-weight: 700; color: #38bdf8; font-family: var(--vscode-editor-font-family, monospace);' }, cand.id));
+								if (cand.type) {
+									append(topRow, $('span', { style: 'font-size: 9.5px; padding: 1px 5px; border-radius: 3px; background: rgba(168, 85, 247, 0.25); color: #e9d5ff;' }, cand.type));
+								}
+								if (cand.title && cand.title !== cand.id) {
+									append(item, $('span', { style: 'font-size: 10px; opacity: 0.75; color: #cbd5e1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' }, cand.title));
+								}
+								item.onmouseenter = () => {
+									Array.from(menu.children).forEach((ch, cIdx) => {
+										(ch as HTMLElement).style.background = cIdx === idx ? 'rgba(168, 85, 247, 0.25)' : 'transparent';
+									});
+									activeIndex = idx;
+								};
+								item.onmousedown = (e) => {
+									e.preventDefault();
+									e.stopPropagation();
+									inputEl.value = cand.id;
+									hideMenu();
+									onSelected(cand.id);
+								};
+							});
+						};
+
+						const doSearch = () => {
+							const q = (inputEl.value || '').trim().toLowerCase();
+							try {
+								const snapshots = this._entityPersistenceService.getAllSnapshots() || [];
+								const matched: Array<{ id: string; title: string; type: string }> = [];
+								for (const s of snapshots) {
+									const tid = (s.ticketId || s.entityName || '').trim();
+									const title = (s.title || s.entityName || '').trim();
+									const type = (s.entityType || '').trim();
+									if (!tid) continue;
+									if (!q || tid.toLowerCase().includes(q) || title.toLowerCase().includes(q) || type.toLowerCase().includes(q)) {
+										matched.push({ id: tid, title, type });
+										if (matched.length >= 8) break;
+									}
+								}
+								renderCandidates(matched);
+							} catch {
+								hideMenu();
+							}
+						};
+
+						inputEl.addEventListener('input', doSearch);
+						inputEl.addEventListener('focus', () => {
+							if (inputEl.value.trim().length > 0) {
+								doSearch();
+							}
+						});
+						inputEl.addEventListener('blur', () => {
+							setTimeout(() => hideMenu(), 200);
+						});
+						inputEl.addEventListener('keydown', (e) => {
+							if (menu.style.display === 'none') return;
+							if (e.key === 'ArrowDown') {
+								e.preventDefault();
+								activeIndex = (activeIndex + 1) % currentCandidates.length;
+								renderCandidates(currentCandidates);
+							} else if (e.key === 'ArrowUp') {
+								e.preventDefault();
+								activeIndex = (activeIndex - 1 + currentCandidates.length) % currentCandidates.length;
+								renderCandidates(currentCandidates);
+							} else if (e.key === 'Enter' && activeIndex >= 0 && activeIndex < currentCandidates.length) {
+								e.preventDefault();
+								const selected = currentCandidates[activeIndex];
+								inputEl.value = selected.id;
+								hideMenu();
+								onSelected(selected.id);
+							} else if (e.key === 'Escape') {
+								hideMenu();
+							}
+						});
+					};
+
+					const normalizeTypeSlug = (s: string): string => (s || '').trim().toLowerCase().replace(/[-_\s]+/g, ' ');
+					const resolvedTicketInfoCache = new Map<string, { ticketType?: string; schema?: ICustomModule }>();
+					const pendingTicketInfoFetches = new Set<string>();
+
+					const ensureTicketSchemaLoadedAsync = (rawTarget: string, onLoaded: () => void) => {
+						const trimmed = (rawTarget || '').trim();
+						if (!trimmed || /^\{[^{}]+\}$/.test(trimmed)) {
+							return;
+						}
+						const key = trimmed.toLowerCase();
+						if (resolvedTicketInfoCache.has(key) || pendingTicketInfoFetches.has(key)) {
+							return;
+						}
+						const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
+						if (!wsUri || !this._ticketWorkflowRuntimeService) {
+							return;
+						}
+						pendingTicketInfoFetches.add(key);
+						this._ticketWorkflowRuntimeService.getTicket(wsUri, trimmed).then(res => {
+							pendingTicketInfoFetches.delete(key);
+							if (res && res.success) {
+								resolvedTicketInfoCache.set(key, {
+									ticketType: res.ticketType || res.schema?.name || res.schema?.id || '',
+									schema: res.schema
+								});
+								onLoaded();
+							} else {
+								resolvedTicketInfoCache.set(key, {});
+							}
+						}).catch(() => {
+							pendingTicketInfoFetches.delete(key);
+							resolvedTicketInfoCache.set(key, {});
+						});
+					};
+
+					const findModuleByType = (typeName: string): ICustomModule | undefined => {
+						const clean = (typeName || '').trim();
+						if (!clean) {
+							return undefined;
+						}
+						const lower = clean.toLowerCase();
+						const norm = normalizeTypeSlug(clean);
+						return allWorkspaceModules.find(m =>
+							(m.name || '').trim().toLowerCase() === lower ||
+							(m.id || '').trim().toLowerCase() === lower ||
+							normalizeTypeSlug(m.name || '') === norm ||
+							normalizeTypeSlug(m.id || '') === norm
+						);
+					};
+
+					const detectTicketType = (rawTarget: string): string => {
+						const trimmed = (rawTarget || '').trim();
+						if (!trimmed) {
+							return '';
+						}
+						// 0. Cached runtime disk lookup
+						const cached = resolvedTicketInfoCache.get(trimmed.toLowerCase());
+						if (cached?.ticketType) {
+							return cached.ticketType;
+						}
+						// 1. Snapshot match
+						try {
+							const snapshots = this._entityPersistenceService.getAllSnapshots() || [];
+							const found = snapshots.find(s =>
+								(s.ticketId || '').toLowerCase() === trimmed.toLowerCase() ||
+								(s.entityName || '').toLowerCase() === trimmed.toLowerCase() ||
+								(s.title || '').toLowerCase() === trimmed.toLowerCase()
+							);
+							if (found && found.entityType) {
+								return found.entityType;
+							}
+						} catch { }
+
+						// 1.5 Sibling component in the same node targeting the same ticket ID with known wfTicketType
+						const siblingWithType = fields.find(f =>
+							f && f.wfTicketType &&
+							((f.wfTicketTarget || '').trim().toLowerCase() === trimmed.toLowerCase() ||
+								(f.wfTicketId || '').trim().toLowerCase() === trimmed.toLowerCase())
+						);
+						if (siblingWithType?.wfTicketType) {
+							return siblingWithType.wfTicketType;
+						}
+
+						// 2. Variable match {created_ticket_1} or created_ticket_1
+						const varMatch = trimmed.match(/^\{([^{}]+)\}$/);
+						const varName = (varMatch ? varMatch[1] : trimmed).trim().toLowerCase();
+						const upstreamField = fields.find(f => f && (f.outputVariableName || '').toLowerCase() === varName);
+						if (upstreamField && upstreamField.wfTicketType) {
+							return upstreamField.wfTicketType;
+						} else if (isFlowchartNodeMode && input.workflowVariablesProvider) {
+							try {
+								const wfVars = input.workflowVariablesProvider() || [];
+								const matchingWfVar = wfVars.find(v => (v.label || '').toLowerCase() === varName);
+								if (matchingWfVar && matchingWfVar.ticketType) {
+									return matchingWfVar.ticketType;
+								}
+							} catch { }
+						}
+
+						// 3. Direct match with module name / id / normalized slug
+						const directMod = findModuleByType(trimmed);
+						if (directMod) {
+							return directMod.name;
+						}
+
+						return '';
+					};
+
+					const resolveTargetTicketOutputs = (
+						rawTarget: string,
+						explicitType?: string,
+						includeTicketAttributes: boolean = false,
+						strictOutputsOnly: boolean = false
+					): Array<{ fieldKey: string; label: string; group: string; varName?: string; fieldName?: string }> => {
+						const options: Array<{ fieldKey: string; label: string; group: string; varName?: string; fieldName?: string }> = [];
+						const trimmed = (rawTarget || '').trim();
+						let targetType = (explicitType || '').trim();
+
+						if (!targetType && trimmed) {
+							targetType = detectTicketType(trimmed) || trimmed;
+						}
+
+						if (includeTicketAttributes && !strictOutputsOnly) {
+							options.push(
+								{ fieldKey: 'status', label: 'Ticket Status (status)', group: 'Standard Ticket Properties', varName: 'status', fieldName: 'Ticket Status' },
+								{ fieldKey: 'ticketId', label: 'Ticket ID (ticketId)', group: 'Standard Ticket Properties', varName: 'ticketId', fieldName: 'Ticket ID' },
+								{ fieldKey: 'description', label: 'Description (description)', group: 'Standard Ticket Properties', varName: 'description', fieldName: 'Description' },
+								{ fieldKey: 'outputs', label: 'Outputs Object (outputs)', group: 'Standard Ticket Properties', varName: 'outputs', fieldName: 'Outputs Object' }
+							);
+						}
+
+						// Look up module schema (supports normalized slug match + cached disk schema fallback)
+						const cachedDiskSchema = trimmed ? resolvedTicketInfoCache.get(trimmed.toLowerCase())?.schema : undefined;
+						const targetMod = findModuleByType(targetType) || cachedDiskSchema;
+						if (targetMod && Array.isArray(targetMod.fields)) {
+							// 1. Output/Result component outputSpecs
+							const outputFields = targetMod.fields.filter(f => f.type === 'output' || f.type === 'result');
+							outputFields.forEach(f => {
+								if (Array.isArray(f.outputSpecs)) {
+									f.outputSpecs.forEach(spec => {
+										// Strictly only include enabled output specs
+										if (spec && spec.enabled !== false) {
+											const specKey = (spec.fieldKey || spec.label || '').trim();
+											const specLabel = (spec.label || spec.fieldKey || '').trim();
+											if (!specKey && !specLabel) return;
+
+											const matchedComp = targetMod.fields.find(cf =>
+												cf.type !== 'output' && cf.type !== 'result' && (
+													cf.id === specKey ||
+													cf.label === specLabel ||
+													cf.label === specKey ||
+													cf.id === specLabel ||
+													(cf.outputVariableName && (cf.outputVariableName === specKey || cf.outputVariableName === specLabel))
+												)
+											);
+
+											const compTypeRaw = matchedComp?.type || 'output';
+											const fieldName = (matchedComp?.label || specLabel || specKey).trim();
+											const varName = (matchedComp?.outputVariableName || generateSmartPythonVarName(fieldName, compTypeRaw)).trim();
+
+											const primaryKey = fieldName || specKey || varName;
+
+											if (!options.some(o => o.fieldKey === primaryKey || o.fieldKey === specKey || o.varName === varName)) {
+												options.push({
+													fieldKey: primaryKey,
+													label: fieldName,
+													fieldName: fieldName,
+													group: 'Enabled Template Outputs',
+													varName: varName
+												});
+											}
+										}
+									});
+								}
+							});
+
+							// 2. Only if NOT strictOutputsOnly, include other component outputs
+							if (!strictOutputsOnly) {
+								targetMod.fields.forEach(f => {
+									if (f.type !== 'output' && f.type !== 'result' && f.type !== 'parameters') {
+										const outVar = (f.outputVariableName || '').trim();
+										const compLabel = (f.label || f.id || '').trim();
+										const key = outVar || compLabel;
+										if (key && !options.some(o => o.fieldKey === key || o.fieldName === compLabel)) {
+											const compTypeDisplay = f.type.charAt(0).toUpperCase() + f.type.slice(1);
+											options.push({
+												fieldKey: key,
+												label: `${compLabel} (${compTypeDisplay})`,
+												fieldName: compLabel,
+												group: 'Component Outputs',
+												varName: outVar || key
+											});
+										}
+									}
+								});
+							}
+						}
+
+						return options;
 					};
 
 					if (field.type === 'create_tickets') {
@@ -12750,13 +14567,29 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								f.type === 'create_tickets' &&
 								((f.label || '').trim().toLowerCase() === rawTarget || (f.id || '').trim().toLowerCase() === rawTarget)
 							);
-							return upstreamCreate?.wfTicketType || '';
+							if (upstreamCreate?.wfTicketType) {
+								return upstreamCreate.wfTicketType;
+							}
+							const snapshots = this._entityPersistenceService.getAllSnapshots() || [];
+							const matchedSnap = snapshots.find(s =>
+								s.ticketId?.toLowerCase() === rawTarget ||
+								s.entityName?.toLowerCase() === rawTarget
+							);
+							return matchedSnap?.entityType || '';
 						};
 
 						const renderRunParams = () => {
 							clearNode(paramsContainer);
 							const effectiveType = resolveRunTargetTicketType();
-							const schemaParams = resolveModuleParameters(effectiveType);
+							const schemaParams = resolveModuleParameters(effectiveType || field.wfTicketTarget || '');
+							if (field.wfTicketParams && schemaParams.length > 0) {
+								const validParamNames = new Set(schemaParams.map(p => p.name.toLowerCase()));
+								for (const k of Object.keys(field.wfTicketParams)) {
+									if (!validParamNames.has(k.toLowerCase())) {
+										delete field.wfTicketParams[k];
+									}
+								}
+							}
 							append(paramsContainer, $('div', {
 								style: 'font-size: 10.5px; font-weight: 700; text-transform: uppercase; color: #c084fc;'
 							}, effectiveType
@@ -12795,15 +14628,34 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 						const onTargetUpdated = () => {
 							field.wfTicketTarget = targetInp.value;
+							const resolvedType = resolveRunTargetTicketType();
+							if (resolvedType && !field.wfTicketType) {
+								field.wfTicketType = resolvedType;
+								schemaSelect.value = resolvedType;
+							}
 							renderRunParams();
+							refreshPythonPreview();
 							this._syncDraft();
 							this._persistCurrentModule().catch(() => { });
 						};
 						targetInp.oninput = onTargetUpdated;
-						renderQuickInsertChipsForInput(targetRow, targetInp, onTargetUpdated);
+						attachTicketSearchDropdown(targetInp, (selectedId) => {
+							field.wfTicketTarget = selectedId;
+							const resolvedType = resolveRunTargetTicketType();
+							if (resolvedType) {
+								field.wfTicketType = resolvedType;
+								schemaSelect.value = resolvedType;
+							}
+							renderRunParams();
+							refreshPythonPreview();
+							this._syncDraft();
+							this._persistCurrentModule().catch(() => { });
+						});
+						renderWorkflowTicketVariableChips(targetRow, targetInp, onTargetUpdated);
 						schemaSelect.onchange = () => {
 							field.wfTicketType = schemaSelect.value;
 							renderRunParams();
+							refreshPythonPreview();
 							this._syncDraft();
 							this._persistCurrentModule().catch(() => { });
 						};
@@ -12814,63 +14666,429 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						append(targetTop, $('label', { style: 'font-size: 11px; font-weight: 600; min-width: 95px; opacity: 0.85;' }, 'Target Ticket:'));
 						const targetInp = append(targetTop, $('input.monaco-inputbox', {
 							type: 'text',
-							placeholder: 'Ticket handle (e.g. {created_ticket_1}) or Ticket ID (e.g. FINDJ-0002)',
+							placeholder: 'Search ticket (e.g. FINDJ-3437) or enter handle {created_ticket}',
 							style: 'flex: 1; min-width: 140px; padding: 5px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.3); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
 						})) as HTMLInputElement;
 						targetInp.value = field.wfTicketTarget || '';
+
+						const fieldSection = append(wfBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+
+						let refreshFieldSelector: () => void = () => { };
+
 						const onTargetChange = () => {
 							field.wfTicketTarget = targetInp.value;
+							refreshFieldSelector();
+							refreshPythonPreview();
 							this._syncDraft();
 							this._persistCurrentModule().catch(() => { });
 						};
 						targetInp.oninput = onTargetChange;
-						renderQuickInsertChipsForInput(targetRow, targetInp, onTargetChange);
-					} else if (field.type === 'get_tickets') {
-						const typeRow = append(wfBox, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
-						append(typeRow, $('label', { style: 'font-size: 11px; font-weight: 600; min-width: 95px; opacity: 0.85;' }, 'Ticket Type:'));
-						const typeSelect = append(typeRow, $('select.monaco-select', {
-							style: 'padding: 4px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(168, 85, 247, 0.4); background: #14141d; color: #e9d5ff; min-width: 180px;'
+						attachTicketSearchDropdown(targetInp, (selectedId) => {
+							field.wfTicketTarget = selectedId;
+							refreshFieldSelector();
+							refreshPythonPreview();
+							this._syncDraft();
+							this._persistCurrentModule().catch(() => { });
+						});
+						renderWorkflowTicketVariableChips(targetRow, targetInp, onTargetChange);
+
+						refreshFieldSelector = () => {
+							clearNode(fieldSection);
+							const rawTgt = (field.wfTicketTarget || '').trim();
+							if (!rawTgt) {
+								append(fieldSection, $('div', {
+									style: 'font-size: 11px; color: #94a3b8; font-style: italic; padding: 7px 12px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.12); border-radius: 4px; margin-left: 103px;'
+								}, 'Specify a Target Ticket above to view enabled template outputs.'));
+								return;
+							}
+
+							const candidateOutputs = resolveTargetTicketOutputs(rawTgt, undefined, false, true);
+							if (candidateOutputs.length === 0) {
+								ensureTicketSchemaLoadedAsync(rawTgt, () => {
+									if (fieldSection.isConnected) {
+										refreshFieldSelector();
+									}
+								});
+							}
+
+							const fTop = append(fieldSection, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; width: 100%;' }));
+							append(fTop, $('label', {
+								style: 'font-size: 11px; font-weight: 600; min-width: 95px; flex-shrink: 0; opacity: 0.9; color: #a855f7;',
+								title: 'Extract a specific property/component output. Leave as All Outputs to get the entire output dictionary.'
+							}, 'Field (Optional):'));
+
+							const fSelect = append(fTop, $('select.monaco-select', {
+								style: 'flex: 1 1 0; min-width: 0; padding: 4px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(168, 85, 247, 0.4); background: #14141d; color: #e9d5ff; text-overflow: ellipsis;'
+							})) as HTMLSelectElement;
+
+							append(fSelect, $('option', { value: '' }, '-- All Outputs (Entire Dict) --'));
+
+							let matchedCandidate: { fieldKey: string; label: string; group: string; varName?: string; fieldName?: string } | undefined;
+							const curFieldLower = (field.wfTicketField || '').trim().toLowerCase();
+							candidateOutputs.forEach(o => {
+								const opt = append(fSelect, $('option', { value: o.fieldKey }, o.label)) as HTMLOptionElement;
+								if (
+									curFieldLower && (
+										curFieldLower === o.fieldKey.toLowerCase() ||
+										(o.varName && curFieldLower === o.varName.toLowerCase()) ||
+										(o.fieldName && curFieldLower === o.fieldName.toLowerCase())
+									)
+								) {
+									opt.selected = true;
+									matchedCandidate = o;
+								}
+							});
+
+							const customOpt = append(fSelect, $('option', { value: '__custom__' }, '-- Custom Field Name --')) as HTMLOptionElement;
+
+							const fInp = append(fTop, $('input.monaco-inputbox', {
+								type: 'text',
+								placeholder: 'Variable name (e.g. job_status)',
+								title: 'Output Variable Name defined in the Ticket Template',
+								style: 'flex: 1 1 0; min-width: 0; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.3); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+							})) as HTMLInputElement;
+							fInp.value = matchedCandidate?.varName || field.wfTicketField || '';
+
+							if (!matchedCandidate && curFieldLower) {
+								customOpt.selected = true;
+							}
+
+							fSelect.onchange = () => {
+								if (fSelect.value === '__custom__') {
+									fInp.focus();
+								} else if (!fSelect.value) {
+									field.wfTicketField = '';
+									fInp.value = '';
+									refreshPythonPreview();
+									this._syncDraft();
+									this._persistCurrentModule().catch(() => { });
+								} else {
+									const chosen = candidateOutputs.find(o => o.fieldKey === fSelect.value);
+									const resolvedVarName = (chosen?.varName || fSelect.value).trim();
+									field.wfTicketField = resolvedVarName;
+									fInp.value = resolvedVarName;
+									refreshPythonPreview();
+									this._syncDraft();
+									this._persistCurrentModule().catch(() => { });
+								}
+							};
+
+							fInp.oninput = () => {
+								field.wfTicketField = fInp.value.trim();
+								const valLower = (field.wfTicketField || '').toLowerCase();
+								const matchedOpt = Array.from(fSelect.options).find(opt => {
+									if (opt.value.toLowerCase() === valLower) return true;
+									const co = candidateOutputs.find(c => c.fieldKey.toLowerCase() === opt.value.toLowerCase());
+									return !!(co && co.varName && co.varName.toLowerCase() === valLower);
+								});
+								if (matchedOpt) {
+									matchedOpt.selected = true;
+								} else if (field.wfTicketField) {
+									customOpt.selected = true;
+								} else {
+									fSelect.value = '';
+								}
+								refreshPythonPreview();
+								this._syncDraft();
+								this._persistCurrentModule().catch(() => { });
+							};
+
+							append(fieldSection, $('span', { style: 'font-size: 10px; color: #94a3b8; margin-left: 103px;' }, 'Select an enabled Output Field from the ticket template to auto-fill its Variable Name, or leave blank to retrieve all outputs.'));
+						};
+
+						refreshFieldSelector();
+					} else if (field.type === 'get_ticket') {
+						if (!field.wfTicketTarget) {
+							field.wfTicketTarget = field.wfTicketId || field.wfTicketVariable || '';
+						}
+
+						// 1. Ticket (Target Ticket ID or Ticket Variable)
+						const targetRow = append(wfBox, $('div', { style: 'display: flex; flex-direction: column; gap: 3px;' }));
+						const targetTop = append(targetRow, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
+						append(targetTop, $('label', {
+							style: 'font-size: 11px; font-weight: 600; min-width: 105px; opacity: 0.9; color: #38bdf8;',
+							title: 'Target Ticket ID (e.g. FINDJ-3437) or Ticket Variable handle (e.g. {created_ticket_1})'
+						}, 'Ticket:'));
+						const targetInp = append(targetTop, $('input.monaco-inputbox', {
+							type: 'text',
+							placeholder: 'Search ticket (e.g. FINDJ-3437) or enter handle {created_ticket}',
+							style: 'flex: 1; min-width: 140px; padding: 5px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(0,0,0,0.3); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+						})) as HTMLInputElement;
+						targetInp.value = field.wfTicketTarget || '';
+
+						// 2. Ticket Type (Auto-detected or Manual Confirmation)
+						const typeRow = append(wfBox, $('div', { style: 'display: flex; flex-direction: column; gap: 3px;' }));
+						const typeTop = append(typeRow, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
+						append(typeTop, $('label', {
+							style: 'font-size: 11px; font-weight: 600; min-width: 105px; opacity: 0.9; color: #a855f7;',
+							title: 'Ticket Type schema definition. Automatically detected from Ticket/Variable, or manually confirmed.'
+						}, 'Ticket Type:'));
+						const typeSelect = append(typeTop, $('select.monaco-select', {
+							style: 'padding: 4px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(168, 85, 247, 0.4); background: #14141d; color: #e9d5ff; min-width: 200px;'
 						})) as HTMLSelectElement;
-						append(typeSelect, $('option', { value: '' }, '-- Any Ticket Type --'));
+						append(typeSelect, $('option', { value: '' }, '-- Auto-detect from Ticket --'));
 						allWorkspaceModules.forEach(m => {
 							const opt = append(typeSelect, $('option', { value: m.name }, m.name)) as HTMLOptionElement;
 							if ((field.wfTicketType || '').toLowerCase() === (m.name || '').toLowerCase()) {
 								opt.selected = true;
 							}
 						});
+						const typeBadge = append(typeTop, $('span', { style: 'display: inline-flex; align-items: center; margin-left: 4px;' })) as HTMLElement;
+						append(typeRow, $('span', { style: 'font-size: 10px; color: #94a3b8; margin-left: 113px;' }, 'Auto-detected from selected Ticket/Variable, or manually select to enforce the schema.'));
+
+						// 3. Field (Visual Output Property Selector)
+						const fieldSection = append(wfBox, $('div', { style: 'display: flex; flex-direction: column; gap: 4px;' }));
+
+						let refreshFieldSelector: () => void = () => { };
+
+						const syncLegacyProperties = (val: string) => {
+							field.wfTicketTarget = val;
+							const varMatch = val.match(/^\{([^{}]+)\}$/);
+							if (varMatch) {
+								field.wfTicketVariable = val;
+								field.wfTicketId = '';
+							} else {
+								field.wfTicketId = val;
+								field.wfTicketVariable = '';
+							}
+						};
+
+						const updateTypeBadgeAndInference = (isTargetChange: boolean = false) => {
+							clearNode(typeBadge);
+							const detected = detectTicketType(field.wfTicketTarget || '');
+							if (isTargetChange && detected) {
+								if (!field.wfTicketType || allWorkspaceModules.some(m => m.name.toLowerCase() === (field.wfTicketType || '').toLowerCase())) {
+									field.wfTicketType = detected;
+									typeSelect.value = detected;
+								}
+							}
+							if (field.wfTicketType && detected && field.wfTicketType.toLowerCase() === detected.toLowerCase()) {
+								append(typeBadge, $('span', {
+									style: 'font-size: 10.5px; color: #38bdf8; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.3); padding: 1px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px;'
+								}, `⚡ Auto-detected: ${detected}`));
+							} else if (field.wfTicketType && detected && field.wfTicketType.toLowerCase() !== detected.toLowerCase()) {
+								append(typeBadge, $('span', {
+									style: 'font-size: 10.5px; color: #e9d5ff; background: rgba(168, 85, 247, 0.15); border: 1px solid rgba(168, 85, 247, 0.35); padding: 1px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px;'
+								}, `Override: ${field.wfTicketType} (Detected: ${detected})`));
+							} else if (detected) {
+								append(typeBadge, $('span', {
+									style: 'font-size: 10.5px; color: #38bdf8; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.3); padding: 1px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px;'
+								}, `⚡ Detected: ${detected}`));
+							} else if (field.wfTicketType) {
+								append(typeBadge, $('span', {
+									style: 'font-size: 10.5px; color: #a78bfa; background: rgba(167, 139, 250, 0.12); border: 1px solid rgba(167, 139, 250, 0.3); padding: 1px 7px; border-radius: 4px;'
+								}, `Schema: ${field.wfTicketType}`));
+							}
+						};
+
+						const onTargetChange = () => {
+							syncLegacyProperties(targetInp.value.trim());
+							updateTypeBadgeAndInference(true);
+							refreshFieldSelector();
+							refreshPythonPreview();
+							this._syncDraft();
+							this._persistCurrentModule().catch(() => { });
+						};
+						targetInp.oninput = onTargetChange;
+						attachTicketSearchDropdown(targetInp, (selectedId) => {
+							targetInp.value = selectedId;
+							syncLegacyProperties(selectedId);
+							updateTypeBadgeAndInference(true);
+							refreshFieldSelector();
+							refreshPythonPreview();
+							this._syncDraft();
+							this._persistCurrentModule().catch(() => { });
+						});
+						renderWorkflowTicketVariableChips(targetRow, targetInp, onTargetChange);
+						append(targetRow, $('span', { style: 'font-size: 10px; color: #94a3b8; margin-left: 113px;' }, 'Direct ticket ID (e.g. FINDJ-3437) or upstream Ticket variable reference (e.g. {created_ticket_1}).'));
+
 						typeSelect.onchange = () => {
 							field.wfTicketType = typeSelect.value;
+							updateTypeBadgeAndInference(false);
+							refreshFieldSelector();
+							refreshPythonPreview();
 							this._syncDraft();
 							this._persistCurrentModule().catch(() => { });
 						};
 
-						const statusRow = append(wfBox, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
-						append(statusRow, $('label', { style: 'font-size: 11px; font-weight: 600; min-width: 95px; opacity: 0.85;' }, 'Status Filter:'));
-						const statusInp = append(statusRow, $('input.monaco-inputbox', {
-							type: 'text',
-							placeholder: 'Optional status (e.g. Done, Todo)',
-							style: 'flex: 1; min-width: 140px; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.3); color: inherit;'
-						})) as HTMLInputElement;
-						statusInp.value = field.wfTicketStatus || '';
-						statusInp.oninput = () => {
-							field.wfTicketStatus = statusInp.value;
-							this._syncDraft();
-							this._persistCurrentModule().catch(() => { });
+						refreshFieldSelector = () => {
+							clearNode(fieldSection);
+							const effectiveTarget = (field.wfTicketTarget || '').trim();
+							const effectiveType = (field.wfTicketType || '').trim();
+
+							if (!effectiveTarget && !effectiveType) {
+								append(fieldSection, $('div', {
+									style: 'font-size: 11px; color: #94a3b8; font-style: italic; padding: 7px 12px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.12); border-radius: 4px; margin-left: 113px;'
+								}, 'Select a Ticket or Ticket Type above to view and choose available Output fields.'));
+								return;
+							}
+
+							const candidateOutputs = resolveTargetTicketOutputs(effectiveTarget, effectiveType, true);
+							if (effectiveTarget && !effectiveType && candidateOutputs.length <= 4) {
+								ensureTicketSchemaLoadedAsync(effectiveTarget, () => {
+									if (fieldSection.isConnected) {
+										updateTypeBadgeAndInference(true);
+										refreshFieldSelector();
+									}
+								});
+							}
+
+							const fTop = append(fieldSection, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; width: 100%;' }));
+							append(fTop, $('label', {
+								style: 'font-size: 11px; font-weight: 600; min-width: 105px; flex-shrink: 0; opacity: 0.9; color: #a855f7;',
+								title: 'Extract a specific property/component output (e.g. status, title, job_status). Leave as Full Ticket to return the entire ticket object.'
+							}, 'Field (Optional):'));
+
+							const fSelect = append(fTop, $('select.monaco-select', {
+								style: 'flex: 1 1 0; min-width: 0; padding: 4px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(168, 85, 247, 0.4); background: #14141d; color: #e9d5ff; text-overflow: ellipsis;'
+							})) as HTMLSelectElement;
+
+							append(fSelect, $('option', { value: '' }, '-- Full Ticket Object (Default) --'));
+
+							const curFieldLower = (field.wfTicketField || '').trim().toLowerCase();
+							let matchedCandidate: { fieldKey: string; label: string; group: string; varName?: string; fieldName?: string } | undefined;
+							const matchesCurField = (o: { fieldKey: string; label: string; varName?: string; fieldName?: string }): boolean => {
+								if (!curFieldLower) return false;
+								return curFieldLower === o.fieldKey.toLowerCase()
+									|| curFieldLower === o.label.toLowerCase()
+									|| Boolean(o.varName && curFieldLower === o.varName.toLowerCase())
+									|| Boolean(o.fieldName && curFieldLower === o.fieldName.toLowerCase());
+							};
+
+							const stdProps = candidateOutputs.filter(o => o.group === 'Standard Ticket Properties');
+							if (stdProps.length > 0) {
+								const optGroup = append(fSelect, $('optgroup', { label: 'Standard Ticket Properties' }));
+								stdProps.forEach(o => {
+									const opt = append(optGroup, $('option', { value: o.fieldKey }, o.label)) as HTMLOptionElement;
+									if (matchesCurField(o)) {
+										opt.selected = true;
+										matchedCandidate = o;
+									}
+								});
+							}
+
+							const specOutputs = candidateOutputs.filter(o => o.group === 'Enabled Template Outputs' || o.group === 'Output Component Specs');
+							if (specOutputs.length > 0) {
+								const optGroup = append(fSelect, $('optgroup', { label: 'Enabled Template Outputs' }));
+								specOutputs.forEach(o => {
+									const opt = append(optGroup, $('option', { value: o.fieldKey }, o.label || o.fieldKey)) as HTMLOptionElement;
+									if (matchesCurField(o)) {
+										opt.selected = true;
+										matchedCandidate = o;
+									}
+								});
+							}
+
+							const compOutputs = candidateOutputs.filter(o => o.group === 'Component Outputs');
+							if (compOutputs.length > 0) {
+								const optGroup = append(fSelect, $('optgroup', { label: 'Component Outputs' }));
+								compOutputs.forEach(o => {
+									const opt = append(optGroup, $('option', { value: o.fieldKey }, o.label)) as HTMLOptionElement;
+									if (matchesCurField(o)) {
+										opt.selected = true;
+										matchedCandidate = o;
+									}
+								});
+							}
+
+							const customOpt = append(fSelect, $('option', { value: '__custom__' }, '-- Custom Field Name --')) as HTMLOptionElement;
+
+							const fInp = append(fTop, $('input.monaco-inputbox', {
+								type: 'text',
+								placeholder: 'Variable / field name',
+								title: 'Output Variable Name defined in the Ticket Template',
+								style: 'flex: 1 1 0; min-width: 0; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.3); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+							})) as HTMLInputElement;
+							fInp.value = matchedCandidate?.varName || field.wfTicketField || '';
+
+							if (!matchedCandidate && curFieldLower) {
+								customOpt.selected = true;
+							}
+
+							fSelect.onchange = () => {
+								if (fSelect.value === '__custom__') {
+									fInp.focus();
+								} else if (!fSelect.value) {
+									field.wfTicketField = '';
+									fInp.value = '';
+									refreshPythonPreview();
+									this._syncDraft();
+									this._persistCurrentModule().catch(() => { });
+								} else {
+									const chosen = candidateOutputs.find(o => o.fieldKey === fSelect.value);
+									const resolvedVarName = (chosen?.varName || fSelect.value).trim();
+									field.wfTicketField = resolvedVarName;
+									fInp.value = resolvedVarName;
+									refreshPythonPreview();
+									this._syncDraft();
+									this._persistCurrentModule().catch(() => { });
+								}
+							};
+
+							fInp.oninput = () => {
+								field.wfTicketField = fInp.value.trim();
+								const valLower = (field.wfTicketField || '').toLowerCase();
+								const matchedOpt = Array.from(fSelect.options).find(opt => {
+									if (opt.value.toLowerCase() === valLower) return true;
+									const co = candidateOutputs.find(c => c.fieldKey.toLowerCase() === opt.value.toLowerCase());
+									return !!(co && co.varName && co.varName.toLowerCase() === valLower);
+								});
+								if (matchedOpt) {
+									matchedOpt.selected = true;
+								} else if (field.wfTicketField) {
+									customOpt.selected = true;
+								} else {
+									fSelect.value = '';
+								}
+								refreshPythonPreview();
+								this._syncDraft();
+								this._persistCurrentModule().catch(() => { });
+							};
+
+							// Quick Selection Chips
+							const chipBar = append(fieldSection, $('div', {
+								style: 'display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 2px; margin-left: 113px;'
+							}));
+							append(chipBar, $('span', { style: 'font-size: 10px; opacity: 0.7; color: #94a3b8;' }, 'Quick Select:'));
+
+							const allChip = append(chipBar, $('button', {
+								type: 'button',
+								style: `padding: 1px 7px; font-size: 10px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.4); cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap; ${!field.wfTicketField ? 'background: rgba(56, 189, 248, 0.3); color: #38bdf8; font-weight: 700;' : 'background: rgba(56, 189, 248, 0.08); color: #7dd3fc;'}`
+							}, '[Full Ticket]'));
+							allChip.onclick = () => {
+								field.wfTicketField = '';
+								fSelect.value = '';
+								fInp.value = '';
+								refreshPythonPreview();
+								refreshFieldSelector();
+								this._syncDraft();
+								this._persistCurrentModule().catch(() => { });
+							};
+
+							const chipsToShow = candidateOutputs.slice(0, 8);
+							chipsToShow.forEach(cand => {
+								const isSelected = (field.wfTicketField || '').toLowerCase() === cand.fieldKey.toLowerCase();
+								const chip = append(chipBar, $('button', {
+									type: 'button',
+									title: `Extract ${cand.label}`,
+									style: `padding: 1px 7px; font-size: 10px; border-radius: 4px; border: 1px solid rgba(168, 85, 247, 0.4); cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap; ${isSelected ? 'background: rgba(168, 85, 247, 0.35); color: #e9d5ff; font-weight: 700;' : 'background: rgba(168, 85, 247, 0.08); color: #d8b4fe;'}`
+								}, `+ ${cand.fieldKey}`));
+								chip.onclick = () => {
+									field.wfTicketField = cand.fieldKey;
+									fSelect.value = cand.fieldKey;
+									fInp.value = cand.fieldKey;
+									refreshPythonPreview();
+									refreshFieldSelector();
+									this._syncDraft();
+									this._persistCurrentModule().catch(() => { });
+								};
+							});
+
+							append(fieldSection, $('span', { style: 'font-size: 10px; color: #94a3b8; margin-left: 113px;' }, 'Choose a specific property or component output, or leave blank to retrieve the full Ticket dictionary.'));
 						};
 
-						const titleRow = append(wfBox, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
-						append(titleRow, $('label', { style: 'font-size: 11px; font-weight: 600; min-width: 95px; opacity: 0.85;' }, 'Title Filter:'));
-						const titleInp = append(titleRow, $('input.monaco-inputbox', {
-							type: 'text',
-							placeholder: 'Optional title substring or {var}',
-							style: 'flex: 1; min-width: 140px; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.3); color: inherit;'
-						})) as HTMLInputElement;
-						titleInp.value = field.wfTicketTitle || '';
-						titleInp.oninput = () => {
-							field.wfTicketTitle = titleInp.value;
-							this._syncDraft();
-							this._persistCurrentModule().catch(() => { });
-						};
+						updateTypeBadgeAndInference(false);
+						refreshFieldSelector();
 					} else if (field.type === 'display') {
 						const dispRow = append(wfBox, $('div', { style: 'display: flex; flex-direction: column; gap: 3px;' }));
 						const dispTop = append(dispRow, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
@@ -12880,9 +15098,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							placeholder: 'Variable or expression to display (e.g. {job_views_urls})',
 							style: 'flex: 1; min-width: 140px; padding: 5px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.3); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
 						})) as HTMLInputElement;
+						if (field.wfDisplayValue === '{title}' || field.wfDisplayValue === '{Title}' || field.wfDisplayValue === 'title') {
+							field.wfDisplayValue = '';
+						}
 						dispInp.value = field.wfDisplayValue || '';
 						const onDispChange = () => {
 							field.wfDisplayValue = dispInp.value;
+							refreshPythonPreview();
 							this._syncDraft();
 							this._persistCurrentModule().catch(() => { });
 						};
@@ -12916,6 +15138,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						} else if (st === 'failed') {
 							wfExecStatus.textContent = `Failed (${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
 							wfExecStatus.style.color = '#f87171';
+						} else if (st === 'skipped') {
+							wfExecStatus.textContent = 'Skipped (Disabled)';
+							wfExecStatus.style.color = '#94a3b8';
 						} else {
 							wfExecStatus.textContent = '[Ready to execute]';
 							wfExecStatus.style.color = '#94a3b8';
@@ -12924,22 +15149,65 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					updateWfExecStatus();
 					const wfExecCopyBtn = append(wfExecRight, $('button', {
 						type: 'button',
-						style: 'padding: 1px 6px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.05); color: inherit; cursor: pointer;'
-					}, 'Copy'));
+						title: 'Copy complete execution result',
+						style: 'display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.05); color: inherit; cursor: pointer;'
+					})) as HTMLButtonElement;
+					const wfExecCopyIcon = append(wfExecCopyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy), { style: 'font-size: 10.5px;' }));
+					const wfExecCopyLabel = append(wfExecCopyBtn, $('span', {}, 'Copy'));
 					const wfExecClearBtn = append(wfExecRight, $('button', {
 						type: 'button',
 						style: 'padding: 1px 6px; font-size: 10px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.05); color: inherit; cursor: pointer;'
 					}, 'Clear'));
 					const wfExecPre = append(wfExecCard, $('pre', {
-						style: 'margin: 0; padding: 4px 6px; font-size: 11px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); color: #cbd5e1; min-height: 40px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;'
+						'data-selectable-box': 'true',
+						style: 'margin: 0; padding: 4px 6px; font-size: 11px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); color: #cbd5e1; min-height: 40px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; user-select: text; -webkit-user-select: text; cursor: text;'
 					}));
-					wfExecPre.textContent = (field as any).lastExecutionLog || '[Ready to execute] Execution trace and return values will be recorded here when the workflow or node runs.';
-					wfExecCopyBtn.onclick = () => {
-						const txt = (field as any).lastExecutionLog || wfExecPre.textContent || '';
-						if (txt) {
-							this._clipboardService.writeText(txt);
-							this.notificationService.info('Execution result copied to clipboard.');
+					const wfExecTruncNotice = append(wfExecCard, $('div', {
+						style: 'display: none; font-size: 10px; color: #94a3b8; background: rgba(148, 163, 184, 0.08); border: 1px dashed rgba(148, 163, 184, 0.28); border-radius: 4px; padding: 3px 8px;'
+					}));
+					const getFullWfExecText = (): string => {
+						const out = (field as any).lastExecutionOutput;
+						if (out !== undefined) {
+							return typeof out === 'object' && out !== null ? JSON.stringify(out, null, 2) : String(out);
 						}
+						return String((field as any).lastExecutionLog || '');
+					};
+					const renderWfExecPreview = () => {
+						const fullText = getFullWfExecText();
+						if (!fullText) {
+							wfExecPre.textContent = '[Ready to execute] Execution trace and return values will be recorded here when the workflow or node runs.';
+							wfExecTruncNotice.style.display = 'none';
+							return;
+						}
+						const uiPreviewLimit = 8000;
+						if (fullText.length > uiPreviewLimit) {
+							wfExecPre.textContent = fullText.substring(0, uiPreviewLimit);
+							wfExecTruncNotice.textContent = `UI preview truncated (showing ${uiPreviewLimit.toLocaleString()} of ${fullText.length.toLocaleString()} chars). Full original data is preserved in runtime and Copy.`;
+							wfExecTruncNotice.style.display = 'block';
+						} else {
+							wfExecPre.textContent = fullText;
+							wfExecTruncNotice.style.display = 'none';
+						}
+					};
+					renderWfExecPreview();
+					wfExecCopyBtn.onclick = async () => {
+						const txt = getFullWfExecText();
+						if (!txt || txt.startsWith('[Ready to execute]')) {
+							this.notificationService.warn('No execution result to copy.');
+							return;
+						}
+						await this._clipboardService.writeText(txt);
+						wfExecCopyIcon.className = ThemeIcon.asClassName(Codicon.check);
+						wfExecCopyBtn.style.color = '#4ade80';
+						wfExecCopyLabel.textContent = 'Copied!';
+						this.notificationService.info('Complete execution result copied to clipboard.');
+						setTimeout(() => {
+							if (wfExecCopyBtn.isConnected) {
+								wfExecCopyIcon.className = ThemeIcon.asClassName(Codicon.copy);
+								wfExecCopyBtn.style.color = '';
+								wfExecCopyLabel.textContent = 'Copy';
+							}
+						}, 1500);
 					};
 					wfExecClearBtn.onclick = async () => {
 						delete (field as any).lastExecutionLog;
@@ -12948,7 +15216,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						delete (field as any).lastExecutionDurationMs;
 						delete (field as any).lastExecutedAt;
 						updateWfExecStatus();
-						wfExecPre.textContent = '[Ready to execute] Execution trace and return values will be recorded here when the workflow or node runs.';
+						renderWfExecPreview();
 						this._syncDraft();
 						await this._persistCurrentModule();
 					};
@@ -13025,6 +15293,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			};
 			renderDropZonePasteButton();
 			pasteUiRefreshers.push(renderDropZonePasteButton);
+
+			if (mainViewport && savedScrollTop > 0) {
+				mainViewport.scrollTop = savedScrollTop;
+				requestAnimationFrame(() => {
+					if (mainViewport) {
+						mainViewport.scrollTop = savedScrollTop;
+					}
+				});
+			}
 		};
 
 		// Populate Base Components in Library
@@ -13380,9 +15657,16 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							renderModalRows();
 						};
 					}
-					const delB = append(rowActs, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), { style: 'cursor: pointer; opacity: 0.6; font-size: 12px; color: #ef4444;' }));
-					delB.title = 'Delete Status';
-					delB.onclick = () => {
+					const delB = append(rowActs, $('button', {
+						type: 'button',
+						title: 'Delete Status',
+						style: 'cursor: pointer; opacity: 0.72; font-size: 12px; color: #ef4444; background: transparent; border: none; padding: 2px 4px; display: inline-flex; align-items: center; justify-content: center;'
+					})) as HTMLButtonElement;
+					append(delB, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+					delB.onmousedown = (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); };
+					delB.onclick = (e: MouseEvent) => {
+						e.preventDefault();
+						e.stopPropagation();
 						if (currentStatuses.length <= 1) {
 							this.notificationService.warn('At least one status stage must be preserved.');
 							return;
@@ -14549,6 +16833,8 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				refs = extractRefs([f.defaultContent, f.ttsDisplayText]);
 			} else if (f.type === 'media_player') {
 				refs = extractRefs([f.mediaFilePath]);
+			} else if (f.type === 'voice_note') {
+				refs = extractRefs([f.voiceTranscript, ...(f.voiceClips || []).map(c => c.transcript)]);
 			} else if (f.type === 'git') {
 				refs = extractRefs([f.gitRemoteUrl, f.gitBranch]);
 			} else if (f.type === 'http_request') {
@@ -14691,6 +16977,14 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				lines.push(`- **Media File Path**: \`${f.mediaFilePath || '(none)'}\``);
 				lines.push(`- **Media Type**: \`${f.mediaKind || 'audio'}\``);
 				lines.push(`- **Playback Speed**: \`${f.mediaPlaybackRate || 1.0}x\``);
+			} else if (f.type === 'voice_note') {
+				const clips = Array.isArray(f.voiceClips) ? f.voiceClips : [];
+				lines.push(`- **Recorded Voice Clips**: \`${clips.length}\``);
+				lines.push(`- **Auto-Transcribe**: \`${f.voiceAutoTranscribe !== false}\``);
+				lines.push(`- **Playback Speed**: \`${f.voicePlaybackRate || 1.0}x\``);
+				clips.forEach((c, ci) => {
+					lines.push(`  - Clip #${ci + 1} (${c.durationSeconds ? `${c.durationSeconds}s` : 'audio'}): ${c.transcript ? c.transcript : '(no transcript)'}`);
+				});
 			} else if (f.type === 'git') {
 				lines.push(`- **Git Remote URL**: \`${f.gitRemoteUrl || '(not set)'}\``);
 				lines.push(`- **Git Branch**: \`${f.gitBranch || 'main'}\``);
@@ -14725,6 +17019,17 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 			delete clone.pythonOutput;
 			delete clone.pythonResult;
 			delete clone.ttsAudioDataUrl;
+			if (clone.type === 'voice_note' && Array.isArray(clone.voiceClips)) {
+				clone.voiceClips = clone.voiceClips.map((c: IVoiceNoteClip) => ({
+					id: c.id,
+					title: c.title,
+					mimeType: c.mimeType,
+					durationSeconds: c.durationSeconds,
+					transcript: c.transcript,
+					createdAt: c.createdAt,
+					hasAudio: Boolean(c.audioDataUrl)
+				}));
+			}
 			delete clone.httpResponseData;
 			delete clone.httpResponseBody;
 			delete clone.httpResponseHeaders;

@@ -9,7 +9,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
-import { IStorageService, StorageScope } from '../../../../platform/storage/common/storage.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { INativeEnvironmentService } from '../../../../platform/environment/common/environment.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
@@ -721,6 +721,100 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 		}
 
 		this._onDidChangeModules.fire();
+	}
+
+	async getCategories(): Promise<string[]> {
+		const raw = this.storageService.get('customModules.categories', StorageScope.PROFILE, '[]');
+		let stored: string[] = [];
+		try {
+			stored = JSON.parse(raw);
+		} catch {
+			stored = [];
+		}
+		if (!Array.isArray(stored)) {
+			stored = [];
+		}
+		const catSet = new Set<string>(stored.filter(c => typeof c === 'string' && c.trim().length > 0));
+		const modules = await this.getCustomModules();
+		for (const m of modules) {
+			if (m.category && typeof m.category === 'string' && m.category.trim()) {
+				catSet.add(m.category.trim());
+			}
+		}
+		return Array.from(catSet);
+	}
+
+	async addCategory(category: string): Promise<void> {
+		const trimmed = (category || '').trim();
+		if (!trimmed) return;
+		const categories = await this.getCategories();
+		if (!categories.includes(trimmed)) {
+			categories.push(trimmed);
+			this.storageService.store('customModules.categories', JSON.stringify(categories), StorageScope.PROFILE, StorageTarget.USER);
+			this._onDidChangeModules.fire();
+		}
+	}
+
+	async deleteCategory(category: string): Promise<void> {
+		const trimmed = (category || '').trim();
+		if (!trimmed) return;
+		let categories = await this.getCategories();
+		categories = categories.filter(c => c !== trimmed);
+		this.storageService.store('customModules.categories', JSON.stringify(categories), StorageScope.PROFILE, StorageTarget.USER);
+
+		const modules = await this.getCustomModules();
+		let changed = false;
+		for (const m of modules) {
+			if (m.category === trimmed) {
+				delete m.category;
+				changed = true;
+			}
+		}
+		if (changed) {
+			await this.saveCustomModules(modules);
+		} else {
+			this._onDidChangeModules.fire();
+		}
+	}
+
+	async renameCategory(oldName: string, newName: string): Promise<void> {
+		const o = (oldName || '').trim();
+		const n = (newName || '').trim();
+		if (!o || !n || o === n) return;
+
+		let categories = await this.getCategories();
+		categories = categories.map(c => c === o ? n : c);
+		if (!categories.includes(n)) {
+			categories.push(n);
+		}
+		this.storageService.store('customModules.categories', JSON.stringify(categories), StorageScope.PROFILE, StorageTarget.USER);
+
+		const modules = await this.getCustomModules();
+		let changed = false;
+		for (const m of modules) {
+			if (m.category === o) {
+				m.category = n;
+				changed = true;
+			}
+		}
+		if (changed) {
+			await this.saveCustomModules(modules);
+		} else {
+			this._onDidChangeModules.fire();
+		}
+	}
+
+	async setModuleCategory(moduleId: string, category?: string): Promise<void> {
+		const cat = category?.trim() || undefined;
+		const modules = await this.getCustomModules();
+		const mod = modules.find(m => m.id.toLowerCase() === moduleId.toLowerCase());
+		if (mod) {
+			mod.category = cat;
+			if (cat) {
+				await this.addCategory(cat);
+			}
+			await this.saveCustomModules(modules);
+		}
 	}
 
 	async getCompositeComponents(workspaceUri?: URI): Promise<ICompositeComponent[]> {

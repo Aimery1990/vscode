@@ -352,6 +352,7 @@ export class CustomModulesSchemaDesignerDialog {
 						python: { bg: 'rgba(56,189,248,0.15)', text: '#38bdf8' },
 						tts: { bg: 'rgba(236,72,153,0.15)', text: '#ec4899' },
 						media_player: { bg: 'rgba(245,158,11,0.15)', text: '#fbbf24' },
+						voice_note: { bg: 'rgba(148,163,184,0.16)', text: '#94a3b8' },
 						ssh: { bg: 'rgba(16,185,129,0.15)', text: '#34d399' }
 					};
 					const c = colorMap[type] || colorMap.text;
@@ -377,6 +378,7 @@ export class CustomModulesSchemaDesignerDialog {
 					{ type: 'python', label: 'Python (Code Automation)', icon: Codicon.code },
 					{ type: 'tts', label: 'Audio / TTS (Text-to-Speech)', icon: Codicon.unmute },
 					{ type: 'media_player', label: 'MP3 / MP4 Player', icon: Codicon.deviceCameraVideo },
+					{ type: 'voice_note', label: 'Voice Note (Audio Recorder & Transcript)', icon: Codicon.mic },
 					{ type: 'ssh', label: 'SSH Terminal (Remote Linux)', icon: Codicon.terminal },
 					{ type: 'http_request', label: 'HTTP Request (API / REST Client)', icon: Codicon.cloudUpload }
 				];

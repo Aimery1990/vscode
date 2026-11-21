@@ -24,6 +24,7 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { WorkflowEditorInput } from './workflowEditorInput.js';
+import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 
 const DEFAULT_WORKFLOWS_DIR = '/Users/aimery/Documents/workflows';
 
@@ -865,6 +866,13 @@ export async function createWorkflowDialog(
 								style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.4;'
 							})) as HTMLTextAreaElement;
 							pyTextarea.value = field.defaultContent || '';
+							pyTextarea.onkeydown = (e) => {
+								if (isCommentKeybinding(e)) {
+									e.preventDefault();
+									e.stopPropagation();
+									togglePythonComment(pyTextarea);
+								}
+							};
 							(pyBox as any).__getPythonData = () => ({
 								code: pyTextarea.value,
 								pythonInterpreter: field.pythonInterpreter || '',

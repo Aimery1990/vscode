@@ -44,8 +44,8 @@ import { IQuickInputService } from '../../../../platform/quickinput/common/quick
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
-import { ITicketWorkflowRuntimeService } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
-import { highlightPythonToHTML, renderHighlightedPythonToDOM, buildPythonLineNumbersText } from '../../customModules/browser/pythonSyntaxHighlighter.js';
+import { ITicketWorkflowRuntimeService, IPrimitiveExecutionStepResult } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
+import { highlightPythonToHTML, renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
 
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
@@ -184,6 +184,8 @@ export class EntityDetailEditor extends EditorPane {
 	private static _copiedTicketJsonCache: string = '';
 	private readonly _outputPaginationState = new Map<string, { page: number; pageSize: number }>();
 	private readonly _sshPanelExpandedByFieldKey = new Map<string, boolean>();
+	private _isTicketRunning: boolean = false;
+	private _lastExecutionStepResults?: IPrimitiveExecutionStepResult[];
 
 	constructor(
 		group: IEditorGroup,
@@ -402,6 +404,9 @@ export class EntityDetailEditor extends EditorPane {
 		this._saveCurrentScrollPosition();
 		await super.setInput(input, options, context, token);
 
+		if (this._entityUri?.toString() !== input.entityUri?.toString()) {
+			this._lastExecutionStepResults = undefined;
+		}
 		this._entityUri = input.entityUri;
 		this._entityName = input.entityName;
 		this._isPreviewMode = !!input.previewModule;
@@ -430,6 +435,8 @@ export class EntityDetailEditor extends EditorPane {
 		this._previewWorkLog = '';
 		this._lastParsedData = undefined;
 		this._lastCustomModule = undefined;
+		this._lastExecutionStepResults = undefined;
+		this._isTicketRunning = false;
 		super.clearInput();
 	}
 
@@ -697,6 +704,14 @@ export class EntityDetailEditor extends EditorPane {
 					mediaMimeType: f.mediaMimeType || '',
 					mediaPlaybackRate: typeof f.mediaPlaybackRate === 'number' ? f.mediaPlaybackRate : 1.0,
 					mediaAutoPlay: !!f.mediaAutoPlay
+				});
+			} else if (fType === 'voice_note') {
+				const clips = Array.isArray(f.voiceClips) ? f.voiceClips : [];
+				customMetadata[fLabel] = JSON.stringify({
+					voiceClips: clips,
+					voiceTranscript: f.voiceTranscript || clips.map(c => (c.transcript || '').trim()).filter(Boolean).join('\n\n'),
+					voiceAutoTranscribe: f.voiceAutoTranscribe !== false,
+					voicePlaybackRate: typeof f.voicePlaybackRate === 'number' ? f.voicePlaybackRate : 1.0
 				});
 			} else if (fType === 'table') {
 				const isBoundSqlite = (f.tableDbEngine || 'sqlite') === 'sqlite' && Boolean(f.tableDbPath && f.tableDbPath.trim());
@@ -1283,6 +1298,15 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
+			// 0.0015 Run Ticket Button click
+			const runTicketBtn = (target.id === 'entity-detail-run-ticket-btn' ? target : target.closest('#entity-detail-run-ticket-btn')) as HTMLElement | null;
+			if (runTicketBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				await this.runCurrentTicket(runTicketBtn);
+				return;
+			}
+
 			// 0.002 Copy Ticket Content as JSON Button click
 			const copyJsonBtn = (target.id === 'entity-detail-copy-json-btn' ? target : target.closest('#entity-detail-copy-json-btn')) as HTMLElement | null;
 			if (copyJsonBtn) {
@@ -1378,6 +1402,18 @@ export class EntityDetailEditor extends EditorPane {
 					}
 					return;
 				}
+			}
+
+			// 0.06 Ticket Type Badge click (navigate to template preview)
+			const typeBadge = target.closest('.ticket-type-badge-trigger') as HTMLElement | null;
+			if (typeBadge) {
+				e.preventDefault();
+				e.stopPropagation();
+				const ticketType = typeBadge.getAttribute('data-ticket-type');
+				if (ticketType) {
+					await this._customModulesService.openModuleTicketPreview(ticketType, this._entityUri);
+				}
+				return;
 			}
 
 			// 0.1 Status Lifecycle Mapping Info button click
@@ -2222,7 +2258,30 @@ export class EntityDetailEditor extends EditorPane {
 				return;
 			}
 
-			// Python Primitive: Copy Output button click
+			// Python Primitive: Copy Return Value (Output) button click
+			const copyPyResBtn = target.closest('.python-copy-result-btn') as HTMLElement | null;
+			if (copyPyResBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const card = copyPyResBtn.closest('.python-primitive-card') as HTMLElement | null;
+				const lastRes = (card as any)?._lastPythonResult;
+				const resDisplay = card?.querySelector('.python-result-display') as HTMLElement | null;
+				const text = lastRes !== undefined
+					? (typeof lastRes === 'object' ? JSON.stringify(lastRes, null, 2) : String(lastRes))
+					: (resDisplay?.textContent || '');
+				if (text) {
+					await this._clipboardService.writeText(text);
+					const prevHtml = copyPyResBtn.innerHTML;
+					this._setElementHTML(copyPyResBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span><span style="color: #4ade80;">Copied!</span>`);
+					setTimeout(() => { if (copyPyResBtn.isConnected) { this._setElementHTML(copyPyResBtn, prevHtml); } }, 1500);
+					this._notificationService.info('Complete Python Return Value (Output) copied to clipboard.');
+				} else {
+					this._notificationService.warn('No return value to copy.');
+				}
+				return;
+			}
+
+			// Python Primitive: Copy Output Logs button click
 			const copyPyOutBtn = target.closest('.python-copy-output-btn') as HTMLElement | null;
 			if (copyPyOutBtn) {
 				e.preventDefault();
@@ -2230,11 +2289,14 @@ export class EntityDetailEditor extends EditorPane {
 				const card = copyPyOutBtn.closest('.python-primitive-card') as HTMLElement | null;
 				const outputDisplay = card?.querySelector('.python-output-display') as HTMLElement | null;
 				const text = outputDisplay?.textContent || '';
-				if (text && !text.startsWith('No execution output yet')) {
-					this._clipboardService.writeText(text);
-					copyPyOutBtn.textContent = 'Copied!';
-					setTimeout(() => { copyPyOutBtn.textContent = 'Copy'; }, 1500);
-					this._notificationService.info('Copied Python execution output to clipboard.');
+				if (text && !text.startsWith('No execution')) {
+					await this._clipboardService.writeText(text);
+					const prevHtml = copyPyOutBtn.innerHTML;
+					this._setElementHTML(copyPyOutBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span><span style="color: #4ade80;">Copied!</span>`);
+					setTimeout(() => { if (copyPyOutBtn.isConnected) { this._setElementHTML(copyPyOutBtn, prevHtml); } }, 1500);
+					this._notificationService.info('Complete Python console logs copied to clipboard.');
+				} else {
+					this._notificationService.warn('No console logs to copy.');
 				}
 				return;
 			}
@@ -2276,6 +2338,9 @@ export class EntityDetailEditor extends EditorPane {
 				const text = rawTa?.value || '';
 				if (text) {
 					await this._clipboardService.writeText(text);
+					const prevHtml = copyOutputItemBtn.innerHTML;
+					this._setElementHTML(copyOutputItemBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span> <span style="color: #4ade80;">Copied!</span>`);
+					setTimeout(() => { if (copyOutputItemBtn.isConnected) { this._setElementHTML(copyOutputItemBtn, prevHtml); } }, 1500);
 					this._notificationService.info(`Output '${specKey}' copied to clipboard.`);
 				} else {
 					this._notificationService.warn('No content to copy.');
@@ -2344,7 +2409,47 @@ export class EntityDetailEditor extends EditorPane {
 					});
 					const jsonStr = JSON.stringify(allOutputs, null, 2);
 					await this._clipboardService.writeText(jsonStr);
+					const prevHtml = copyAllOutputBtn.innerHTML;
+					this._setElementHTML(copyAllOutputBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span> <span style="color: #4ade80;">Copied!</span>`);
+					setTimeout(() => { if (copyAllOutputBtn.isConnected) { this._setElementHTML(copyAllOutputBtn, prevHtml); } }, 1500);
 					this._notificationService.info('All output items copied as JSON.');
+				}
+				return;
+			}
+
+			// 0.465 Custom Field / Long Text: Copy Full Content to Clipboard
+			const copyCustomFieldBtn = target.closest('.custom-field-copy-btn') as HTMLElement | null;
+			if (copyCustomFieldBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const fieldKey = copyCustomFieldBtn.getAttribute('data-field-key') || '';
+				let textToCopy = '';
+				if (this._lastParsedData?.customMetadata && fieldKey in this._lastParsedData.customMetadata) {
+					const rawVal = this._lastParsedData.customMetadata[fieldKey];
+					textToCopy = typeof rawVal === 'object' ? JSON.stringify(rawVal, null, 2) : String(rawVal ?? '');
+				}
+				if (!textToCopy) {
+					const card = copyCustomFieldBtn.closest('.custom-property-card') as HTMLElement | null;
+					const pre = card?.querySelector('.desc-content-box pre, .custom-field-view pre');
+					if (pre) {
+						textToCopy = pre.textContent || '';
+					} else {
+						const box = card?.querySelector('.desc-content-box, .custom-field-view');
+						textToCopy = box?.textContent?.trim() || '';
+					}
+				}
+				if (textToCopy) {
+					await this._clipboardService.writeText(textToCopy);
+					const originalHtml = copyCustomFieldBtn.innerHTML;
+					this._setElementHTML(copyCustomFieldBtn, `<span class="codicon codicon-check" style="font-size: 11px; color: #4ade80;"></span><span style="color: #4ade80;">Copied!</span>`);
+					setTimeout(() => {
+						if (copyCustomFieldBtn.isConnected) {
+							this._setElementHTML(copyCustomFieldBtn, originalHtml);
+						}
+					}, 1500);
+					this._notificationService.info(`Copied full content of "${fieldKey}" to clipboard.`);
+				} else {
+					this._notificationService.warn('No content to copy.');
 				}
 				return;
 			}
@@ -2359,6 +2464,9 @@ export class EntityDetailEditor extends EditorPane {
 				const text = rawTa?.value || '';
 				if (text) {
 					await this._clipboardService.writeText(text);
+					const prevHtml = copyResultBtn.innerHTML;
+					this._setElementHTML(copyResultBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span> <span style="color: #4ade80;">Copied!</span>`);
+					setTimeout(() => { if (copyResultBtn.isConnected) { this._setElementHTML(copyResultBtn, prevHtml); } }, 1500);
 					this._notificationService.info('Result content copied to clipboard.');
 				} else {
 					this._notificationService.warn('No content to copy.');
@@ -2981,6 +3089,32 @@ export class EntityDetailEditor extends EditorPane {
 		});
 
 		this._container.addEventListener('keydown', async (e: KeyboardEvent) => {
+			if (isCommentKeybinding(e)) {
+				const pyTextarea = (e.target as HTMLElement)?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
+				if (pyTextarea) {
+					const card = pyTextarea.closest('.python-primitive-card') as HTMLElement | null;
+					if (card?.getAttribute('data-python-hydrated') === 'true') {
+						return;
+					}
+					e.preventDefault();
+					e.stopPropagation();
+					togglePythonComment(pyTextarea);
+					const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
+					const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+					if (pyGutter) {
+						pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
+						pyGutter.scrollTop = pyTextarea.scrollTop;
+					}
+					if (pyDisplay) {
+						renderHighlightedPythonToDOM(pyDisplay, pyTextarea.value, {
+							showLineNumbers: false,
+							isLiveBackdrop: true,
+							placeholder: 'Enter Python script to execute...'
+						});
+					}
+					return;
+				}
+			}
 			if (e.key === 'Tab') {
 				const pyTextarea = (e.target as HTMLElement)?.closest('.python-code-textarea') as HTMLTextAreaElement | null;
 				if (pyTextarea) {
@@ -3537,7 +3671,11 @@ export class EntityDetailEditor extends EditorPane {
 						}
 						byField.set(fk, existing);
 					}
-					byField.get(fk)![pn] = inp.value;
+					const targetObj = byField.get(fk)!;
+					const rawVal = inp.value;
+					const paramDef = this._lastCustomModule?.fields?.find(f => (f.label === fk || f.id === fk))?.parameters?.find(p => (p.name === pn || p.id === pn));
+					const isNonEmpty = rawVal !== undefined && rawVal !== null && rawVal.trim() !== '';
+					targetObj[pn] = isNonEmpty ? rawVal : (paramDef?.defaultValue ?? rawVal);
 				}
 				for (const [fk, paramObj] of byField.entries()) {
 					this._lastParsedData.customMetadata[fk] = JSON.stringify(paramObj);
@@ -3673,6 +3811,333 @@ export class EntityDetailEditor extends EditorPane {
 			}
 		} catch { }
 		return null;
+	}
+
+	private _findCardElementForStep(fieldId?: string, fieldLabel?: string, fieldType?: string): HTMLElement | null {
+		if (!this._container) return null;
+		const clean = (s?: string) => (s || '').toLowerCase().trim().replace(/[\s_\-]+/g, '');
+		const cleanId = clean(fieldId);
+		const cleanLabel = clean(fieldLabel);
+
+		const cards = Array.from(this._container.querySelectorAll<HTMLElement>('.section-card'));
+
+		// 1. Exact or normalized attribute matching
+		for (const card of cards) {
+			const cKey = clean(card.getAttribute('data-field-key') || '');
+			const cId = clean(card.getAttribute('data-field-id') || '');
+			const cLabel = clean(card.getAttribute('data-field-label') || '');
+
+			if (cleanId && (cId === cleanId || cKey === cleanId || cLabel === cleanId)) return card;
+			if (cleanLabel && (cLabel === cleanLabel || cKey === cleanLabel || cId === cleanLabel)) return card;
+		}
+
+		// 2. Title text matching
+		if (cleanLabel) {
+			for (const card of cards) {
+				const titleEl = card.querySelector('.section-title');
+				if (titleEl && clean(titleEl.textContent || '').includes(cleanLabel)) {
+					return card;
+				}
+			}
+		}
+		if (cleanId) {
+			for (const card of cards) {
+				const titleEl = card.querySelector('.section-title');
+				if (titleEl && clean(titleEl.textContent || '').includes(cleanId)) {
+					return card;
+				}
+			}
+		}
+
+		// 3. Fallback by field type
+		if (fieldType) {
+			const cType = clean(fieldType);
+			if (cType === 'parameters') {
+				const paramCard = this._container.querySelector<HTMLElement>('.ticket-parameters-card');
+				if (paramCard) return paramCard;
+			} else if (cType === 'python') {
+				const pyCard = this._container.querySelector<HTMLElement>('.python-primitive-card');
+				if (pyCard) return pyCard;
+			} else if (cType === 'output' || cType === 'result') {
+				const outCard = this._container.querySelector<HTMLElement>('.output-primitive-card');
+				if (outCard) return outCard;
+			} else if (cType === 'browser') {
+				const brCard = this._container.querySelector<HTMLElement>('.browser-primitive-card');
+				if (brCard) return brCard;
+			}
+		}
+
+		return null;
+	}
+
+	private _updateCardStatusBadge(cardEl: HTMLElement, status: 'running' | 'success' | 'failed', text: string, tooltip?: string): void {
+		const titleEl = cardEl.querySelector('.section-title');
+		if (!titleEl) return;
+
+		let badgeContainer = titleEl.querySelector<HTMLElement>('.ticket-step-badge-container');
+		if (!badgeContainer) {
+			badgeContainer = document.createElement('div');
+			badgeContainer.className = 'ticket-step-badge-container';
+			badgeContainer.style.display = 'inline-flex';
+			badgeContainer.style.alignItems = 'center';
+			badgeContainer.style.marginLeft = 'auto';
+			badgeContainer.style.marginRight = '8px';
+			const lastChild = titleEl.lastElementChild;
+			if (lastChild && lastChild !== titleEl.firstElementChild) {
+				titleEl.insertBefore(badgeContainer, lastChild);
+			} else {
+				titleEl.appendChild(badgeContainer);
+			}
+		}
+
+		let iconHtml = '';
+		if (status === 'running') {
+			iconHtml = `<span class="${ThemeIcon.asClassName(Codicon.loading)} codicon-modifier-spin" style="font-size: 11px;"></span>`;
+		} else if (status === 'success') {
+			iconHtml = `<span class="${ThemeIcon.asClassName(Codicon.check)}" style="font-size: 11px;"></span>`;
+		} else {
+			iconHtml = `<span class="${ThemeIcon.asClassName(Codicon.error)}" style="font-size: 11px;"></span>`;
+		}
+
+		badgeContainer.innerHTML = `
+			<span class="ticket-step-badge ${status}" ${tooltip ? `title="${this._escapeHtmlAttr(tooltip)}"` : ''}>
+				${iconHtml}
+				<span>${this._escapeHtml(text)}</span>
+			</span>
+		`;
+	}
+
+	private _updateCardExecutionFeedback(cardEl: HTMLElement, stepRes: IPrimitiveExecutionStepResult): void {
+		const fieldType = (cardEl.getAttribute('data-field-type') || stepRes.fieldType || '').toLowerCase();
+
+		// 1. Python Card Feedback
+		if (fieldType === 'python' || cardEl.classList.contains('python-primitive-card')) {
+			const statusTextEl = cardEl.querySelector<HTMLElement>('.python-status-text');
+			if (statusTextEl) {
+				statusTextEl.textContent = stepRes.status === 'success' ? `Done (${stepRes.durationMs}ms)` : 'Failed';
+				statusTextEl.style.color = stepRes.status === 'success' ? '#4ade80' : '#f87171';
+			}
+
+			const outputDisplayEl = cardEl.querySelector<HTMLElement>('.python-output-display');
+			const logs = stepRes.details?.commandLogs || stepRes.details?.logs || (typeof stepRes.output === 'string' ? stepRes.output : '');
+			if (outputDisplayEl && logs) {
+				outputDisplayEl.textContent = logs;
+			}
+
+			const resultVal = stepRes.details?.result !== undefined ? stepRes.details.result : stepRes.output;
+			if (resultVal !== undefined) {
+				(cardEl as any)._lastPythonResult = resultVal;
+				let resultPre = cardEl.querySelector<HTMLElement>('.python-result-display');
+				if (resultPre) {
+					resultPre.textContent = typeof resultVal === 'object' ? JSON.stringify(resultVal, null, 2) : String(resultVal);
+				} else {
+					const outputSection = cardEl.querySelector<HTMLElement>('.python-output-section');
+					if (outputSection) {
+						const resultBlock = document.createElement('div');
+						resultBlock.className = 'python-result-block';
+						resultBlock.style.background = 'rgba(56, 189, 248, 0.05)';
+						resultBlock.style.border = '1px solid rgba(56, 189, 248, 0.25)';
+						resultBlock.style.borderRadius = '5px';
+						resultBlock.style.padding = '8px 10px';
+						resultBlock.style.display = 'flex';
+						resultBlock.style.flexDirection = 'column';
+						resultBlock.style.gap = '4px';
+						resultBlock.style.marginBottom = '6px';
+						this._setElementHTML(resultBlock, `
+							<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
+								<span style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">Return Value (Output):</span>
+								<div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
+									<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
+									<button type="button" class="python-copy-result-btn" title="Copy complete Return Value (Output)" style="display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;">
+										<span class="codicon codicon-copy" style="font-size: 10.5px;"></span>
+										<span>Copy</span>
+									</button>
+								</div>
+							</div>
+							<pre class="python-result-display" style="margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;">${this._escapeHtml(typeof resultVal === 'object' ? JSON.stringify(resultVal, null, 2) : String(resultVal))}</pre>
+						`);
+						outputSection.insertBefore(resultBlock, outputSection.firstChild);
+					}
+				}
+			}
+		}
+
+		// 2. HTTP Request / HTTP Response Card Feedback
+		else if (fieldType === 'http_request' || cardEl.querySelector('.desc-content-box pre') || cardEl.classList.contains('custom-property-card')) {
+			const pre = cardEl.querySelector<HTMLElement>('.desc-content-box pre') || cardEl.querySelector<HTMLElement>('.custom-field-view pre');
+			if (pre && stepRes.output) {
+				const displayData = stepRes.output?.data !== undefined ? stepRes.output.data : (stepRes.output?.body !== undefined ? stepRes.output.body : stepRes.output);
+				pre.textContent = typeof displayData === 'object' ? JSON.stringify(displayData, null, 2) : String(displayData);
+			} else {
+				const contentBox = cardEl.querySelector<HTMLElement>('.desc-content-box') || cardEl.querySelector<HTMLElement>('.custom-field-view');
+				if (contentBox && stepRes.output && !cardEl.classList.contains('ticket-parameters-card')) {
+					const displayData = stepRes.output?.data !== undefined ? stepRes.output.data : stepRes.output;
+					const formatted = typeof displayData === 'object' ? JSON.stringify(displayData, null, 2) : String(displayData);
+					contentBox.innerHTML = `<pre style="margin: 0; padding: 2px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; background: transparent; border: none; font-weight: 400;">${this._escapeHtml(formatted)}</pre>`;
+				}
+			}
+		}
+
+		// 3. Output Card Feedback
+		if (fieldType === 'output' || cardEl.classList.contains('output-primitive-card')) {
+			const outPre = cardEl.querySelector<HTMLElement>('pre');
+			if (outPre && stepRes.output !== undefined) {
+				outPre.textContent = typeof stepRes.output === 'object' ? JSON.stringify(stepRes.output, null, 2) : String(stepRes.output);
+			}
+		}
+	}
+
+	public async runCurrentTicket(btnEl?: HTMLElement | null): Promise<void> {
+		if (this._isPreviewMode) {
+			this._notificationService.info('This ticket is currently in Template Preview mode. Create or open an actual ticket to run it.');
+			return;
+		}
+
+		if (this._isTicketRunning) {
+			this._notificationService.info('Ticket is currently running. Please wait for completion.');
+			return;
+		}
+
+		const ticketId = this._lastParsedData?.ticketId || this._entityName;
+		if (!ticketId) {
+			this._notificationService.warn('Cannot run ticket: Ticket ID could not be identified.');
+			return;
+		}
+
+		// Save any in-progress DOM edits before execution
+		await this._flushLiveDomEditsToMemory();
+
+		const wsRootUri = this._entityUri ? await this._workspacesExplorerService?.findWorkspaceRootUri(this._entityUri) : undefined;
+		const wsFolder = this._entityUri ? this._workspaceContextService.getWorkspaceFolder(this._entityUri) : undefined;
+		const wsUri = wsRootUri || (wsFolder ? wsFolder.uri : (this._entityUri ? URI.joinPath(this._entityUri, '..') : undefined));
+		if (!wsUri) {
+			this._notificationService.warn('Cannot run ticket: Workspace directory could not be resolved.');
+			return;
+		}
+
+		const runtimeService = this._instantiationService.invokeFunction(accessor => {
+			try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
+		});
+		if (!runtimeService) {
+			this._notificationService.error('Ticket workflow runtime service is unavailable.');
+			return;
+		}
+
+		this._isTicketRunning = true;
+
+		// Clear previous execution state from all component cards
+		if (this._container) {
+			this._container.querySelectorAll('.section-card').forEach(card => {
+				card.classList.remove('ticket-step-running', 'ticket-step-success', 'ticket-step-failed');
+				const badgeContainer = card.querySelector('.ticket-step-badge-container');
+				if (badgeContainer) badgeContainer.remove();
+			});
+		}
+
+		const originalHtml = btnEl ? btnEl.innerHTML : '';
+		if (btnEl) {
+			btnEl.setAttribute('disabled', 'true');
+			btnEl.style.opacity = '0.9';
+			btnEl.style.pointerEvents = 'none';
+			btnEl.innerHTML = `
+				<span class="${ThemeIcon.asClassName(Codicon.loading)} codicon-modifier-spin" style="font-size: 12px;"></span>
+				<span class="run-ticket-btn-label">Running...</span>
+			`;
+		}
+
+		let completedStepsCount = 0;
+		let failedStepsCount = 0;
+
+		try {
+			this._notificationService.info(`Running Ticket '${ticketId}'...`);
+			const result = await runtimeService.runTicket({
+				workspaceUri: wsUri,
+				ticketIdOrPath: {
+					ticketId: ticketId,
+					ticketName: this._entityName || ticketId,
+					entityUri: this._entityUri?.toString(),
+					path: (this._ticketFileUri || this._entityUri)?.toString()
+				},
+				onStepStart: (info) => {
+					const liveBtn = (this._container?.querySelector('#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+					if (liveBtn) {
+						const labelEl = liveBtn.querySelector('.run-ticket-btn-label');
+						if (labelEl) labelEl.textContent = `Running (${info.stepIndex}/${info.totalSteps})...`;
+					}
+					const cardEl = this._findCardElementForStep(info.fieldId, info.fieldLabel, info.fieldType);
+					if (cardEl) {
+						this._container?.querySelectorAll('.section-card.ticket-step-running').forEach(el => el.classList.remove('ticket-step-running'));
+						cardEl.classList.add('ticket-step-running');
+						cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+						this._updateCardStatusBadge(cardEl, 'running', `Running #${info.stepIndex}...`);
+					}
+				},
+				onStepProgress: (stepRes, index, total) => {
+					if (stepRes.status === 'success') {
+						completedStepsCount++;
+					} else if (stepRes.status === 'failed') {
+						failedStepsCount++;
+					}
+					const cardEl = this._findCardElementForStep(stepRes.fieldId, stepRes.fieldLabel, stepRes.fieldType);
+					if (cardEl) {
+						cardEl.classList.remove('ticket-step-running');
+						if (stepRes.status === 'success') {
+							cardEl.classList.add('ticket-step-success');
+							this._updateCardStatusBadge(cardEl, 'success', `Done (${stepRes.durationMs}ms)`);
+						} else {
+							cardEl.classList.add('ticket-step-failed');
+							this._updateCardStatusBadge(cardEl, 'failed', `Failed (${stepRes.durationMs}ms)`, stepRes.error);
+						}
+						this._updateCardExecutionFeedback(cardEl, stepRes);
+					}
+				}
+			});
+
+			this._lastExecutionStepResults = result.stepResults;
+
+			// Reload ticket data to synchronize in-memory and disk representation
+			await this._resolvePathsAndLoadData();
+
+			const liveBtn = (this._container?.querySelector('#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+			if (result.success && failedStepsCount === 0) {
+				this._notificationService.info(`Ticket '${ticketId}' executed successfully (${result.stepResults?.length || 0} step(s)).`);
+				if (liveBtn) {
+					liveBtn.innerHTML = `
+						<span class="${ThemeIcon.asClassName(Codicon.check)}" style="font-size: 12px; color: #4ade80;"></span>
+						<span class="run-ticket-btn-label">Done</span>
+					`;
+				}
+			} else {
+				this._notificationService.warn(`Ticket '${ticketId}' execution completed with ${failedStepsCount} issue(s). Check components for details.`);
+				if (liveBtn) {
+					liveBtn.innerHTML = `
+						<span class="${ThemeIcon.asClassName(Codicon.warning)}" style="font-size: 12px; color: #f87171;"></span>
+						<span class="run-ticket-btn-label">Finished with Warnings</span>
+					`;
+				}
+			}
+		} catch (err: any) {
+			await this._resolvePathsAndLoadData();
+			this._notificationService.warn(`Ticket '${ticketId}' execution completed with errors: ${err?.message || err}`);
+			const liveBtn = (this._container?.querySelector('#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+			if (liveBtn) {
+				liveBtn.innerHTML = `
+					<span class="${ThemeIcon.asClassName(Codicon.error)}" style="font-size: 12px; color: #f87171;"></span>
+					<span class="run-ticket-btn-label">Failed</span>
+				`;
+			}
+		} finally {
+			this._isTicketRunning = false;
+			setTimeout(() => {
+				const liveBtn = (this._container?.querySelector('#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+				if (liveBtn) {
+					liveBtn.removeAttribute('disabled');
+					liveBtn.style.opacity = '1';
+					liveBtn.style.pointerEvents = '';
+					liveBtn.innerHTML = originalHtml;
+				}
+			}, 3500);
+		}
 	}
 
 	public async copyTicketAsJson(btnEl?: HTMLElement | null): Promise<void> {
@@ -6433,7 +6898,9 @@ ${rawErr}
 				}
 			} catch { }
 		}
-		paramValues[paramName] = newValue;
+		const paramDef = this._lastCustomModule?.fields?.find(f => (f.label === fieldKey || f.id === fieldKey))?.parameters?.find(p => (p.name === paramName || p.id === paramName));
+		const isNonEmpty = newValue !== undefined && newValue !== null && newValue.trim() !== '';
+		paramValues[paramName] = isNonEmpty ? newValue : (paramDef?.defaultValue ?? newValue);
 		const updatedCustom = {
 			...(this._lastParsedData?.customMetadata || {}),
 			[fieldKey]: JSON.stringify(paramValues)
@@ -6469,8 +6936,8 @@ ${rawErr}
 			for (const f of this._lastCustomModule.fields) {
 				if (f.type === 'parameters' && f.parameters) {
 					for (const p of f.parameters) {
-						if (p.name) {
-							paramMap.set(p.name, p.defaultValue || '');
+						if (p.name && p.defaultValue !== undefined && p.defaultValue !== null && String(p.defaultValue).trim() !== '') {
+							paramMap.set(p.name, String(p.defaultValue));
 						}
 					}
 				}
@@ -6485,7 +6952,10 @@ ${rawErr}
 						const parsed = JSON.parse(v);
 						if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
 							for (const [pName, pVal] of Object.entries(parsed)) {
-								paramMap.set(pName, String(pVal ?? ''));
+								const strVal = String(pVal ?? '').trim();
+								if (strVal !== '' || !paramMap.has(pName)) {
+									paramMap.set(pName, strVal !== '' ? String(pVal) : (paramMap.get(pName) || ''));
+								}
 							}
 						}
 					} catch { }
@@ -13487,8 +13957,9 @@ ${rawErr}
 
 			const copySqlOutBtn = document.createElement('button');
 			copySqlOutBtn.type = 'button';
-			copySqlOutBtn.style.cssText = 'padding: 3px 8px; width: auto; font-size: 11px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.12); cursor: pointer;';
-			copySqlOutBtn.textContent = 'Copy';
+			copySqlOutBtn.title = 'Copy complete SQL execution output';
+			copySqlOutBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; width: auto; font-size: 11px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.12); cursor: pointer;';
+			this._setElementHTML(copySqlOutBtn, `<span class="codicon codicon-copy" style="font-size: 11px;"></span><span>Copy</span>`);
 			sqlOutputActions.appendChild(copySqlOutBtn);
 
 			const clearSqlOutBtn = document.createElement('button');
@@ -13531,6 +14002,9 @@ ${rawErr}
 					return;
 				}
 				await this._clipboardService.writeText(out);
+				const prevHtml = copySqlOutBtn.innerHTML;
+				this._setElementHTML(copySqlOutBtn, `<span class="codicon codicon-check" style="font-size: 11px; color: #4ade80;"></span><span style="color: #4ade80;">Copied!</span>`);
+				setTimeout(() => { if (copySqlOutBtn.isConnected) { this._setElementHTML(copySqlOutBtn, prevHtml); } }, 1500);
 				this._notificationService.info('SQL execution output copied to clipboard.');
 			};
 
@@ -13757,6 +14231,22 @@ ${rawErr}
 									};
 									qRightControls.appendChild(nextBtn);
 								}
+
+								const copyQueryJsonBtn = document.createElement('button');
+								copyQueryJsonBtn.type = 'button';
+								copyQueryJsonBtn.title = 'Copy all query result rows as JSON';
+								copyQueryJsonBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10px; font-weight: 500; border-radius: 4px; background: rgba(56,189,248,0.14); color: #7dd3fc; border: 1px solid rgba(56,189,248,0.35); cursor: pointer;';
+								this._setElementHTML(copyQueryJsonBtn, `<span class="codicon codicon-copy" style="font-size: 10.5px;"></span><span>Copy JSON</span>`);
+								copyQueryJsonBtn.onclick = async (e) => {
+									e.preventDefault();
+									e.stopPropagation();
+									await this._clipboardService.writeText(JSON.stringify(allQueryRows || [], null, 2));
+									const prevHtml = copyQueryJsonBtn.innerHTML;
+									this._setElementHTML(copyQueryJsonBtn, `<span class="codicon codicon-check" style="font-size: 10.5px; color: #4ade80;"></span><span style="color: #4ade80;">Copied!</span>`);
+									setTimeout(() => { if (copyQueryJsonBtn.isConnected) { this._setElementHTML(copyQueryJsonBtn, prevHtml); } }, 1500);
+									this._notificationService.info(`Copied all ${(allQueryRows || []).length} query result row(s) as JSON.`);
+								};
+								qRightControls.appendChild(copyQueryJsonBtn);
 
 								const applyResultBtn = document.createElement('button');
 								applyResultBtn.type = 'button';
@@ -15794,7 +16284,11 @@ ${rawErr}
 							try {
 								const parsedP = JSON.parse(rawSavedP);
 								if (parsedP && typeof parsedP === 'object' && !Array.isArray(parsedP)) {
-									Object.assign(pMap, parsedP);
+									for (const [k, v] of Object.entries(parsedP)) {
+										if (v !== undefined && v !== null && (typeof v !== 'string' || v.trim() !== '')) {
+											pMap[k] = v;
+										}
+									}
 								}
 							} catch { }
 						}
@@ -15803,7 +16297,9 @@ ${rawErr}
 							pInputs.forEach(inp => {
 								const pName = inp.getAttribute('data-param-name');
 								if (pName && Object.prototype.hasOwnProperty.call(pMap, pName)) {
-									pMap[pName] = inp.value;
+									if (inp.value && inp.value.trim() !== '') {
+										pMap[pName] = inp.value;
+									}
 								}
 							});
 						}
@@ -15852,9 +16348,15 @@ ${rawErr}
 						resultBlock.className = 'python-result-block';
 						resultBlock.style.cssText = 'background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;';
 						this._setElementHTML(resultBlock, `
-							<div style="display: flex; justify-content: space-between; align-items: center;">
+							<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
 								<span style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">Return Value (Output):</span>
-								<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
+								<div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
+									<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
+									<button type="button" class="python-copy-result-btn" title="Copy complete Return Value (Output)" style="display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;">
+										<span class="codicon codicon-copy" style="font-size: 10.5px;"></span>
+										<span>Copy</span>
+									</button>
+								</div>
 							</div>
 							<pre class="python-result-display" style="margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;"></pre>
 						`);
@@ -17308,11 +17810,12 @@ ${interpolatedPrompt}`;
 					}
 					for (const p of f.parameters) {
 						const pKey = p.name || p.id;
-						if (paramObj[pKey] === undefined) {
+						const isValEmpty = paramObj[pKey] === undefined || paramObj[pKey] === null || (typeof paramObj[pKey] === 'string' && paramObj[pKey].trim() === '');
+						if (isValEmpty) {
 							const found = rawCustomMap.get(pKey) ?? (p.label ? rawCustomMap.get(p.label) : undefined);
-							if (found !== undefined) {
+							if (found !== undefined && found !== null && (typeof found !== 'string' || found.trim() !== '')) {
 								paramObj[pKey] = found;
-							} else if (p.defaultValue !== undefined) {
+							} else if (p.defaultValue !== undefined && p.defaultValue !== null && (typeof p.defaultValue !== 'string' || String(p.defaultValue).trim() !== '')) {
 								paramObj[pKey] = p.defaultValue;
 							}
 						}
@@ -17417,6 +17920,8 @@ ${interpolatedPrompt}`;
 								fType = 'tts';
 							} else if (parsedCheck.mediaFilePath !== undefined || parsedCheck.mediaPlaybackRate !== undefined || parsedCheck.mediaKind !== undefined) {
 								fType = 'media_player';
+							} else if (Array.isArray(parsedCheck.voiceClips) || parsedCheck.voiceTranscript !== undefined) {
+								fType = 'voice_note';
 							} else if (parsedCheck.code !== undefined && parsedCheck.pythonInterpreter !== undefined) {
 								fType = 'python';
 							} else if (parsedCheck.url !== undefined && Array.isArray(parsedCheck.credentials)) {
@@ -17429,6 +17934,21 @@ ${interpolatedPrompt}`;
 						}
 					} catch { }
 				}
+
+				const lastStepRes = this._lastExecutionStepResults?.find(r =>
+					(r.fieldId && fieldItem.id && r.fieldId.toLowerCase() === fieldItem.id.toLowerCase()) ||
+					(r.fieldLabel && k && r.fieldLabel.toLowerCase() === k.toLowerCase()) ||
+					(r.fieldId && rawKey && r.fieldId.toLowerCase() === rawKey.toLowerCase())
+				);
+				const stepCardClass = lastStepRes ? (lastStepRes.status === 'success' ? ' ticket-step-success' : ' ticket-step-failed') : '';
+				const stepBadgeHtml = lastStepRes ? `
+					<div class="ticket-step-badge-container" style="display: inline-flex; align-items: center; margin-left: auto; margin-right: 8px;">
+						<span class="ticket-step-badge ${lastStepRes.status}" ${lastStepRes.error ? `title="${this._escapeHtmlAttr(lastStepRes.error)}"` : ''}>
+							<span class="codicon codicon-${lastStepRes.status === 'success' ? 'check' : 'error'}" style="font-size: 11px;"></span>
+							<span>${lastStepRes.status === 'success' ? `Done (${lastStepRes.durationMs}ms)` : `Failed (${lastStepRes.durationMs}ms)`}</span>
+						</span>
+					</div>
+				` : '';
 
 				// 1:1 DEDICATED ATTACHMENT COMPONENT - ATOMIC, NEVER TREATED AS DYNAMIC LIST OR CONTAINER
 				const isAttachmentField = fType === 'attachment' ||
@@ -17867,7 +18387,9 @@ ${interpolatedPrompt}`;
 					}
 
 					const rowsHtml = paramDefs.map(param => {
-						const currentVal = paramValues[param.name] !== undefined ? paramValues[param.name] : (param.defaultValue || '');
+						const rawVal = paramValues[param.name];
+						const hasNonEmptyVal = rawVal !== undefined && rawVal !== null && (typeof rawVal !== 'string' || rawVal.trim() !== '');
+						const currentVal = hasNonEmptyVal ? rawVal : (param.defaultValue || '');
 						const hasOptions = Array.isArray(param.options) && param.options.length > 0;
 						const copyToken = `{{${param.name}}}`;
 
@@ -17907,16 +18429,19 @@ ${interpolatedPrompt}`;
 					}).join('');
 
 					customFieldsHtml += `
-						<div class="section-card custom-property-card ticket-parameters-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
+						<div class="section-card custom-property-card ticket-parameters-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="parameters">
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
 									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(168, 85, 247, 0.18); color: #c084fc; font-weight: 700; text-transform: uppercase;">Parameters</span>
 									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); color: #a1a1aa; font-weight: 600;">${paramDefs.length} Vars</span>
 								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="parameters" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(typeof v === 'string' ? v : JSON.stringify(paramValues))}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
+								<div style="display: flex; align-items: center; gap: 8px;">
+									${stepBadgeHtml}
+									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="parameters" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(typeof v === 'string' ? v : JSON.stringify(paramValues))}" title="Edit ${k} with AI">
+										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									</button>
+								</div>
 							</div>
 							<div style="font-size: 11px; opacity: 0.65; margin-bottom: 8px;">
 								Runtime parameters can be referenced across URLs, prompts, and actions using <code>{{variable_name}}</code>.
@@ -18071,16 +18596,19 @@ ${interpolatedPrompt}`;
 						`).join('');
 
 					customFieldsHtml += `
-						<div class="section-card custom-property-card python-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-external-scripts="${this._escapeHtmlAttr(JSON.stringify(externalScripts))}" data-python-code="${this._escapeHtmlAttr(pythonCode)}" data-python-locked="${pythonLocked ? 'true' : 'false'}">
+						<div class="section-card custom-property-card python-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="python" data-external-scripts="${this._escapeHtmlAttr(JSON.stringify(externalScripts))}" data-python-code="${this._escapeHtmlAttr(pythonCode)}" data-python-locked="${pythonLocked ? 'true' : 'false'}">
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
 									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.12); color: #38bdf8; font-weight: 700; text-transform: uppercase;">Python</span>
 									<span class="python-env-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.7); font-family: monospace;">${this._escapeHtml(pythonPath || '.venv / python3')}</span>
 								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="python" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(pythonCode)}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
+								<div style="display: flex; align-items: center; gap: 8px;">
+									${stepBadgeHtml}
+									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="python" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(pythonCode)}" title="Edit ${k} with AI">
+										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									</button>
+								</div>
 							</div>
 
 							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
@@ -18175,7 +18703,13 @@ ${interpolatedPrompt}`;
 										<div class="python-result-block" style="background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;">
 											<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
 												<span style="font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;">Return Value (Output):</span>
-												<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
+												<div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
+													<span style="font-size: 9.5px; opacity: 0.65; color: #38bdf8;">Consumed by Output Manifest & Downstream Primitives</span>
+													<button type="button" class="python-copy-result-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy complete Return Value (Output)" style="display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;">
+														<span class="codicon codicon-copy" style="font-size: 10.5px;"></span>
+														<span>Copy</span>
+													</button>
+												</div>
 											</div>
 											<pre class="python-result-display" style="margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;">${this._escapeHtml(typeof pythonResult === 'object' ? JSON.stringify(pythonResult, null, 2) : String(pythonResult))}</pre>
 										</div>
@@ -18186,7 +18720,10 @@ ${interpolatedPrompt}`;
 											${exitCode !== undefined ? `<span style="font-size: 10px; padding: 1px 6px; border-radius: 3px; background: ${exitCode === 0 ? 'rgba(34,197,94,0.18)' : 'rgba(239,68,68,0.18)'}; color: ${exitCode === 0 ? '#4ade80' : '#f87171'};">Exit code: ${exitCode}</span>` : ''}
 										</div>
 										<div style="display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto;">
-											<button type="button" class="python-copy-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Copy Logs</button>
+											<button type="button" class="python-copy-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy complete Console Logs" style="display: inline-flex; align-items: center; gap: 4px; background: transparent; border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.85; cursor: pointer; color: inherit;">
+												<span class="codicon codicon-copy" style="font-size: 10.5px;"></span>
+												<span>Copy Logs</span>
+											</button>
 											<button type="button" class="python-clear-output-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" style="background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;">Clear</button>
 										</div>
 									</div>
@@ -18265,16 +18802,19 @@ ${interpolatedPrompt}`;
 					const browserChipsHtml = visibleBrowserChipsHtml + hiddenBrowserChipsHtml;
 
 					customFieldsHtml += `
-						<div class="section-card custom-property-card browser-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
+						<div class="section-card custom-property-card browser-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="browser">
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
 									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.18); color: #38bdf8; font-weight: 700; text-transform: uppercase;">Browser</span>
 									${browserCreds.length > 0 ? `<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(167,139,250,0.15); color: #c084fc; font-weight: 600;">🔑 ${browserCreds.length} Credentials</span>` : ''}
 								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="browser" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(browserUrl)}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
+								<div style="display: flex; align-items: center; gap: 6px;">
+									${stepBadgeHtml}
+									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="browser" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(browserUrl)}" title="Edit ${k} with AI">
+										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									</button>
+								</div>
 							</div>
 
 							<!-- URL Input Bar (Full Width) -->
@@ -18658,16 +19198,19 @@ ${interpolatedPrompt}`;
 					` : '';
 
 					customFieldsHtml += `
-						<div class="section-card custom-property-card prompt-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-target-mode="${this._escapeHtmlAttr(promptMode)}" data-target-provider="${this._escapeHtmlAttr(promptProvider)}" data-target-model="${this._escapeHtmlAttr(promptModel)}" data-user-customized-target="${userCustomizedTarget ? 'true' : 'false'}" data-pre-injected-prompt="${this._escapeHtmlAttr(preInjectedPrompt)}" data-pre-injected-visible="${isPreInjectedVisible ? 'true' : 'false'}" data-user-input-visible="${isUserInputVisible ? 'true' : 'false'}" data-prompt-chips-html="${this._escapeHtmlAttr(promptChipsHtml)}" data-last-sent-payload="${this._escapeHtmlAttr(lastSentPayloadJson)}">
+						<div class="section-card custom-property-card prompt-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="prompt" data-target-mode="${this._escapeHtmlAttr(promptMode)}" data-target-provider="${this._escapeHtmlAttr(promptProvider)}" data-target-model="${this._escapeHtmlAttr(promptModel)}" data-user-customized-target="${userCustomizedTarget ? 'true' : 'false'}" data-pre-injected-prompt="${this._escapeHtmlAttr(preInjectedPrompt)}" data-pre-injected-visible="${isPreInjectedVisible ? 'true' : 'false'}" data-user-input-visible="${isUserInputVisible ? 'true' : 'false'}" data-prompt-chips-html="${this._escapeHtmlAttr(promptChipsHtml)}" data-last-sent-payload="${this._escapeHtmlAttr(lastSentPayloadJson)}">
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
 									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(59,130,246,0.18); color: #60a5fa; font-weight: 700; text-transform: uppercase;">Prompt</span>
 									<span class="prompt-target-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: ${targetBadgeBg}; color: ${targetBadgeColor}; font-weight: 600;">${this._escapeHtml(targetBadgeText)}</span>
 								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="prompt" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(userPromptText)}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
+								<div style="display: flex; align-items: center; gap: 6px;">
+									${stepBadgeHtml}
+									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="prompt" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(userPromptText)}" title="Edit ${k} with AI">
+										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									</button>
+								</div>
 							</div>
 							<div class="custom-field-view" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;">
 ${targetSelectorRowHtml}
@@ -19014,6 +19557,48 @@ ${userPromptSectionHtml}
 							</div>
 						</div>
 					`;
+				} else if (fType === 'voice_note') {
+					let voiceClips: any[] = Array.isArray((fieldItem as any).voiceClips) ? (fieldItem as any).voiceClips : [];
+					let voiceTranscript: string = (fieldItem as any).voiceTranscript || '';
+					if (v) {
+						if (typeof v === 'string') {
+							const trimmed = v.trim();
+							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+								try {
+									const vObj = JSON.parse(trimmed);
+									if (Array.isArray(vObj.voiceClips)) voiceClips = vObj.voiceClips;
+									if (typeof vObj.voiceTranscript === 'string') voiceTranscript = vObj.voiceTranscript;
+								} catch { }
+							}
+						} else if (typeof v === 'object' && v !== null) {
+							if (Array.isArray((v as any).voiceClips)) voiceClips = (v as any).voiceClips;
+							if (typeof (v as any).voiceTranscript === 'string') voiceTranscript = (v as any).voiceTranscript;
+						}
+					}
+					const clipsHtml = voiceClips.length === 0
+						? `<div style="font-size: 11.5px; color: rgba(255,255,255,0.5); padding: 8px 10px; border: 1px dashed rgba(148,163,184,0.3); border-radius: 6px;">No voice recordings yet.</div>`
+						: voiceClips.map((c: any, ci: number) => `
+							<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 6px; background: rgba(0,0,0,0.24); border: 1px solid rgba(148,163,184,0.22);">
+								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+									<span style="font-size: 10.5px; font-weight: 700; color: #cbd5e1; background: rgba(148,163,184,0.16); padding: 1px 6px; border-radius: 4px;">#${ci + 1}</span>
+									${c?.audioDataUrl ? `<audio controls preload="metadata" src="${this._escapeHtmlAttr(c.audioDataUrl)}" style="height: 28px; flex: 1; min-width: 160px;"></audio>` : ''}
+								</div>
+								${c?.transcript ? `<div style="font-size: 11.5px; line-height: 1.45; color: var(--vscode-foreground); white-space: pre-wrap;">${this._escapeHtml(String(c.transcript))}</div>` : ''}
+							</div>
+						`).join('');
+					customFieldsHtml += `
+						<div class="custom-field-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-type="voice_note" style="background: rgba(148, 163, 184, 0.05); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;">
+							<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+								<div style="display: flex; align-items: center; gap: 8px;">
+									<span class="codicon codicon-mic" style="color: #94a3b8;"></span>
+									<span style="font-weight: 600; font-size: 13px;">${this._escapeHtml(k)}</span>
+									<span style="font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(148, 163, 184, 0.16); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.32);">VOICE NOTE (${voiceClips.length})</span>
+								</div>
+							</div>
+							<div style="display: flex; flex-direction: column; gap: 6px;">${clipsHtml}</div>
+							${voiceTranscript && voiceClips.length === 0 ? `<div style="font-size: 11.5px; color: var(--vscode-foreground); white-space: pre-wrap;">${this._escapeHtml(voiceTranscript)}</div>` : ''}
+						</div>
+					`;
 				} else if (fType === 'table') {
 					let tableColumns: any[] = Array.isArray(fieldItem.tableColumns) && fieldItem.tableColumns.length > 0
 						? fieldItem.tableColumns
@@ -19129,16 +19714,19 @@ ${userPromptSectionHtml}
 					const statsText = `${tableColumns.length} cols · ${tableRows.length} rows${dbShort}`;
 
 					customFieldsHtml += `
-						<div class="section-card custom-property-card table-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-table-json="${this._escapeHtmlAttr(tablePayloadStr)}">
+						<div class="section-card custom-property-card table-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="table" data-table-json="${this._escapeHtmlAttr(tablePayloadStr)}">
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
 									<span>${k}</span>
 									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(20, 184, 166, 0.18); color: #2dd4bf; font-weight: 700; text-transform: uppercase;">Data Table</span>
 									<span class="table-header-stats-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #5eead4; font-family: monospace;">${this._escapeHtml(statsText)}</span>
 								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="table" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(tablePayloadStr)}" title="Operate ${k} table & SQLite with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
+								<div style="display: flex; align-items: center; gap: 6px;">
+									${stepBadgeHtml}
+									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="table" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(tablePayloadStr)}" title="Operate ${k} table & SQLite with AI">
+										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									</button>
+								</div>
 							</div>
 							<div class="custom-field-view table-card-mount" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;"></div>
 						</div>
@@ -19260,16 +19848,19 @@ ${userPromptSectionHtml}
 					const connTargetLabel = sshHost ? `${sshUser || 'root'}@${sshHost}:${sshPort}` : 'Not Connected';
 
 					customFieldsHtml += `
-						<div class="section-card custom-property-card ssh-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-ssh-json="${this._escapeHtmlAttr(sshPayloadStr)}">
+						<div class="section-card custom-property-card ssh-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="ssh" data-ssh-json="${this._escapeHtmlAttr(sshPayloadStr)}">
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
 									<span>${k}</span>
 									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(16, 185, 129, 0.18); color: #34d399; font-weight: 700; text-transform: uppercase;">SSH Terminal</span>
 									<span class="ssh-header-target-badge" style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #6ee7b7; font-family: monospace;">${this._escapeHtml(connTargetLabel)}</span>
 								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="ssh" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(sshCommand)}" title="Edit ${k} SSH command with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
+								<div style="display: flex; align-items: center; gap: 6px;">
+									${stepBadgeHtml}
+									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="ssh" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(sshCommand)}" title="Edit ${k} SSH command with AI">
+										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									</button>
+								</div>
 							</div>
 							<div class="custom-field-view ssh-card-mount" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;"></div>
 						</div>
@@ -19343,8 +19934,14 @@ ${userPromptSectionHtml}
 									if (pRec.responseData !== undefined && pRec.responseData !== null) {
 										return typeof pRec.responseData === 'object' ? JSON.stringify(pRec.responseData, null, 2) : String(pRec.responseData);
 									}
+									if (pRec.data !== undefined && pRec.data !== null) {
+										return typeof pRec.data === 'object' ? JSON.stringify(pRec.data, null, 2) : String(pRec.data);
+									}
 									if (pRec.responseBody !== undefined && pRec.responseBody !== null) {
 										return String(pRec.responseBody);
+									}
+									if (pRec.body !== undefined && pRec.body !== null) {
+										return String(pRec.body);
 									}
 									return String(pRec.output ?? '');
 								} else if (isPromptField) {
@@ -19547,7 +20144,7 @@ ${userPromptSectionHtml}
 					}
 
 					customFieldsHtml += `
-						<div class="section-card custom-property-card output-primitive-card result-primitive-card custom-primitive-card" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-type="output">
+						<div class="section-card custom-property-card output-primitive-card result-primitive-card custom-primitive-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="output">
 							<!-- Card Header -->
 							<div class="section-title" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
 								<div style="display: flex; align-items: center; gap: 8px;">
@@ -19555,6 +20152,7 @@ ${userPromptSectionHtml}
 									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(129, 140, 248, 0.18); color: #818cf8; font-weight: 700; text-transform: uppercase;">OUTPUT</span>
 								</div>
 								<div style="display: flex; align-items: center; gap: 6px;">
+									${stepBadgeHtml}
 									<button type="button" class="output-sync-all-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Sync outputs from ticket primitives" style="background: rgba(129, 140, 248, 0.12); border: 1px solid rgba(129, 140, 248, 0.3); color: #818cf8; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer;">Sync Outputs</button>
 									<button type="button" class="output-copy-all-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy all output data as JSON" style="background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;">Copy All</button>
 								</div>
@@ -19569,19 +20167,48 @@ ${userPromptSectionHtml}
 				} else {
 					// Textarea or Single-line Text
 					const isMultiline = fType === 'textarea' || (typeof v === 'string' && (v.length > 80 || v.includes('\n') || ['experience', 'description', 'detail', 'content', 'notes', 'summary', 'project', 'background'].some(sub => k.toLowerCase().includes(sub))));
+					let isJson = false;
+					let formattedJson = '';
+					if (typeof v === 'object' && v !== null) {
+						isJson = true;
+						try { formattedJson = JSON.stringify(v, null, 2); } catch { formattedJson = String(v); }
+					} else if (typeof v === 'string') {
+						const trimmed = v.trim();
+						if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+							try {
+								const parsed = JSON.parse(trimmed);
+								isJson = true;
+								formattedJson = JSON.stringify(parsed, null, 2);
+							} catch { }
+						}
+					}
+
+					const displayContent = isJson
+						? `<pre style="margin: 0; padding: 2px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; background: transparent; border: none; font-weight: 400;">${this._escapeHtml(formattedJson)}</pre>`
+						: (v ? this._markdownToHtml(String(v)) : '<span style="opacity: 0.45; font-style: italic;">No content provided. Click to edit.</span>');
+
 					customFieldsHtml += `
-						<div class="section-card custom-property-card" data-field-key="${this._escapeHtmlAttr(rawKey)}">
+						<div class="section-card custom-property-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldItem.id || '')}" data-field-label="${this._escapeHtmlAttr(k)}" data-field-type="${fType}">
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
 									${isMultiline ? '<span style="font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.08); color: #ccc; font-weight: 700; text-transform: uppercase;">Textarea</span>' : ''}
 								</div>
-								<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="${isMultiline ? 'textarea' : 'text'}" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
-									<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
-								</button>
+								<div style="display: flex; align-items: center; gap: 6px;">
+									${stepBadgeHtml}
+									${(isMultiline || isJson || fType === 'http_request' || (typeof v === 'string' && v.length > 40)) ? `
+									<button type="button" class="btn-secondary custom-field-copy-btn" data-field-key="${this._escapeHtmlAttr(rawKey)}" title="Copy full content to clipboard" style="background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit; display: inline-flex; align-items: center; gap: 4px;">
+										<span class="codicon codicon-copy" style="font-size: 11px;"></span>
+										<span>Copy</span>
+									</button>
+									` : ''}
+									<button type="button" class="ai-edit-btn" data-ai-field="/Custom/${rawKey}" data-ai-field-type="${isMultiline ? 'textarea' : 'text'}" data-ai-field-label="${k}" data-ai-current-value="${this._escapeHtmlAttr(String(v || ''))}" title="Edit ${k} with AI">
+										<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
+									</button>
+								</div>
 							</div>
-							<div class="custom-field-view desc-content-box" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-multiline="${isMultiline ? 'true' : 'false'}" style="cursor: text;" title="Click to edit manually">
-								${v ? this._markdownToHtml(String(v)) : '<span style="opacity: 0.45; font-style: italic;">No content provided. Click to edit.</span>'}
+							<div class="custom-field-view desc-content-box" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-multiline="${isMultiline ? 'true' : 'false'}" style="cursor: text; max-height: 240px; overflow-y: auto; overflow-x: hidden; word-break: break-word;" title="Click to edit manually">
+								${displayContent}
 							</div>
 						</div>
 					`;
@@ -19864,6 +20491,62 @@ ${userPromptSectionHtml}
 					border: 1px solid rgba(255,255,255,0.05);
 					border-radius: 8px;
 					padding: 18px 22px;
+					transition: border-color 0.25s ease, box-shadow 0.25s ease;
+				}
+				.entity-detail-editor .section-card.ticket-step-running {
+					border-color: #38bdf8 !important;
+					box-shadow: 0 0 0 2px #38bdf8, 0 0 24px rgba(56, 189, 248, 0.45) !important;
+					animation: ticket-card-pulse 1.4s infinite ease-in-out;
+					position: relative;
+					z-index: 5;
+				}
+				.entity-detail-editor .section-card.ticket-step-success {
+					border-color: rgba(34, 197, 94, 0.65) !important;
+					box-shadow: 0 0 0 1px rgba(34, 197, 94, 0.4), 0 0 14px rgba(34, 197, 94, 0.2) !important;
+					position: relative;
+				}
+				.entity-detail-editor .section-card.ticket-step-failed {
+					border-color: #ef4444 !important;
+					box-shadow: 0 0 0 2px #ef4444, 0 0 18px rgba(239, 68, 68, 0.5) !important;
+					animation: ticket-card-shake 0.4s ease-in-out;
+					position: relative;
+				}
+				@keyframes ticket-card-pulse {
+					0% { transform: scale(1); }
+					50% { transform: scale(1.006); }
+					100% { transform: scale(1); }
+				}
+				@keyframes ticket-card-shake {
+					0%, 100% { transform: translateX(0); }
+					20%, 60% { transform: translateX(-4px); }
+					40%, 80% { transform: translateX(4px); }
+				}
+				.entity-detail-editor .ticket-step-badge {
+					display: inline-flex;
+					align-items: center;
+					gap: 5px;
+					font-size: 11px;
+					font-weight: 600;
+					padding: 2.5px 9px;
+					border-radius: 12px;
+					letter-spacing: 0.02em;
+					user-select: none;
+					transition: all 0.2s ease;
+				}
+				.entity-detail-editor .ticket-step-badge.running {
+					background: rgba(56, 189, 248, 0.18);
+					color: #38bdf8;
+					border: 1px solid rgba(56, 189, 248, 0.45);
+				}
+				.entity-detail-editor .ticket-step-badge.success {
+					background: rgba(34, 197, 94, 0.16);
+					color: #4ade80;
+					border: 1px solid rgba(34, 197, 94, 0.35);
+				}
+				.entity-detail-editor .ticket-step-badge.failed {
+					background: rgba(239, 68, 68, 0.18);
+					color: #f87171;
+					border: 1px solid rgba(239, 68, 68, 0.4);
 				}
 				.entity-detail-editor .section-title {
 					font-size: 1.05em;
@@ -19882,6 +20565,15 @@ ${userPromptSectionHtml}
 					font-size: 0.93em;
 					line-height: 1.65;
 					text-align: left;
+					max-height: 240px;
+					overflow-y: auto;
+					overflow-x: hidden;
+					word-break: break-word;
+				}
+				.ticket-type-badge-trigger:hover {
+					opacity: 0.85;
+					filter: brightness(1.2);
+					transform: scale(1.02);
 				}
 				.entity-detail-editor .dropzone {
 					border: 2px dashed rgba(255,255,255,0.12);
@@ -20016,7 +20708,7 @@ ${userPromptSectionHtml}
 							`).join('')
 				: `<span>${this._escapeHtml(data.workspaceId || 'Workspace')}</span><span class="breadcrumb-sep" style="opacity: 0.35; margin: 0 4px;">/</span><span>${this._escapeHtml(data.ticketId)}</span>`
 			}
-						<span style="font-size: 8.5px; padding: 1px 5px; border-radius: 3px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 3px; margin-left: 6px;"><span class="${ThemeIcon.asClassName(resolveCustomModuleIcon(customModule?.icon, data.ticketType))}" style="font-size: 9.5px; color: ${colorSetting.text};"></span><span>${typeUpper}</span></span>
+						<span class="ticket-type-badge-trigger" data-ticket-type="${this._escapeHtmlAttr(data.ticketType || '')}" style="font-size: 8.5px; padding: 2px 7px; border-radius: 4px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; cursor: pointer; transition: all 0.15s ease;" title="Click to view '${typeUpper}' template preview and edit schema"><span class="${ThemeIcon.asClassName(resolveCustomModuleIcon(customModule?.icon, data.ticketType))}" style="font-size: 9.5px; color: ${colorSetting.text};"></span><span>${typeUpper}</span></span>
 					</div>
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading" style="cursor: pointer;" title="Click to edit Title manually">${data.title}</h1>
@@ -20038,6 +20730,10 @@ ${userPromptSectionHtml}
 							<span>Flowchart</span>
 						</button>
 					` : ''}
+					<button type="button" id="entity-detail-run-ticket-btn" class="btn-primary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(34, 197, 94, 0.2); border: 1px solid rgba(34, 197, 94, 0.45); color: #4ade80; font-weight: 600; transition: all 0.15s ease;" title="Run Ticket (Execute current ticket with default parameters)">
+						<span class="codicon codicon-play" style="font-size: 12px;"></span>
+						<span class="run-ticket-btn-label">Run</span>
+					</button>
 					<button type="button" id="entity-detail-copy-json-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8;" title="Copy Ticket JSON (One-click copy all existing content of this ticket as JSON to clipboard)">
 						<span class="codicon codicon-copy" style="font-size: 12px;"></span>
 						<span class="copy-json-btn-label">Copy JSON</span>

@@ -472,6 +472,9 @@ import './contrib/workflowsManager/browser/workflowsManager.contribution.js';
 // Diagrams Manager
 import './contrib/diagramsManager/browser/diagramsManager.contribution.js';
 
+// Quick Notes (Scratchpad Right Panel)
+import './contrib/quickNotes/browser/quickNotes.contribution.js';
+
 // List
 import './contrib/list/browser/list.contribution.js';
 

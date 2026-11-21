@@ -26,6 +26,7 @@ import { ICustomModule, IActionButton } from '../../entityPersistence/common/ent
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
 import { AccountManagementDialog } from '../../accountManagement/browser/accountManagementDialog.js';
 import { ILanguageModelsService } from '../../chat/common/languageModels.js';
+import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 
 const DEFAULT_AGENTS_DIR = '/Users/aimery/Documents/agents';
 
@@ -1132,6 +1133,13 @@ export async function createOrEditAgentDialog(
 								style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.4;'
 							})) as HTMLTextAreaElement;
 							pyTextarea.value = field.defaultContent || '';
+							pyTextarea.onkeydown = (e) => {
+								if (isCommentKeybinding(e)) {
+									e.preventDefault();
+									e.stopPropagation();
+									togglePythonComment(pyTextarea);
+								}
+							};
 							(pyBox as any).__getPythonData = () => ({
 								code: pyTextarea.value,
 								pythonInterpreter: field.pythonInterpreter || '',

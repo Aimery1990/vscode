@@ -9,18 +9,22 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
-import { IEntityPersistenceService, extractSshOutputLastNLines, formatSshCommandsJsonOutput } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, extractSshOutputLastNLines, formatSshCommandsJsonOutput, generateSmartPythonVarName } from '../../entityPersistence/common/entityPersistence.js';
 import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutputItem, ITicketHandleInfo, INotebookCellExecutionResult } from '../common/workflowExecutionService.js';
 import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import { ITerminalService } from '../../terminal/browser/terminal.js';
 import {
 	IWorkflowEngineOptions,
 	IWorkflowExecutionRun,
+	IWorkflowIOContract,
+	IWorkflowInputParamDef,
+	IWorkflowOutputDef,
 	IWorkflowLogEntry,
 	IWorkflowNodeExecutionState,
 	IWorkflowPathStep,
 	IWorkflowNodeOperation,
-	IWorkflowStepTransition
+	IWorkflowStepTransition,
+	IPrimitiveExecutionStepResult
 } from '../common/workflowExecutionModel.js';
 
 interface INodePipelineStep {
@@ -964,6 +968,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			let needsPersistCleanup = false;
 			for (const r of loadedRuns) {
 				if (r && r.runId) {
+					if (!r.nodeStates || typeof r.nodeStates !== 'object') {
+						r.nodeStates = {};
+					}
 					if (Array.isArray(r.logs)) {
 						if (r.logs.length > 1500) {
 							r.logs = r.logs.slice(-1500);
@@ -1049,52 +1056,104 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		return this.getRunsForWorkflow(uriStr);
 	}
 
-	private _summarizeValueForHistory(val: any, depth: number = 0): any {
-		if (val === null || val === undefined || typeof val === 'number' || typeof val === 'boolean') {
+	private _summarizeValueForHistory(val: any, depth: number = 0, seen: WeakSet<object> = new WeakSet()): any {
+		if (val === null || val === undefined || typeof val === 'number' || typeof val === 'boolean' || typeof val === 'string') {
 			return val;
-		}
-		if (typeof val === 'string') {
-			if (val.length > 1200) {
-				return val.substring(0, 1200) + ` ... [truncated (${val.length} chars) in history]`;
-			}
-			return val;
-		}
-		if (Array.isArray(val)) {
-			const maxItems = 3;
-			if (val.length > maxItems) {
-				const preview = val.slice(0, maxItems).map(item => this._summarizeValueForHistory(item, depth + 1));
-				preview.push(`... (${val.length - maxItems} more items omitted in history; total ${val.length} items)`);
-				return preview;
-			}
-			return val.map(item => this._summarizeValueForHistory(item, depth + 1));
 		}
 		if (typeof val === 'object') {
-			if (depth >= 4) {
-				return '[Object summarized in history]';
+			if (seen.has(val) || depth >= 12) {
+				return Array.isArray(val) ? [] : {};
+			}
+			seen.add(val);
+			if (Array.isArray(val)) {
+				return val.map(item => this._summarizeValueForHistory(item, depth + 1, seen));
 			}
 			const out: Record<string, any> = {};
-			const entries = Object.entries(val);
-			const maxKeys = 25;
-			let count = 0;
-			for (const [k, v] of entries) {
-				if (k === 'lastSentPayload' || k === 'pythonOutput' || k === 'lastExecutionLog' || k === 'debugSqlOutput') {
+			for (const [k, v] of Object.entries(val)) {
+				if (k === 'lastSentPayload' || k === 'pythonOutput' || k === 'lastExecutionLog' || k === 'debugSqlOutput' || k === '__omittedKeys__') {
 					continue;
 				}
-				if (count >= maxKeys) {
-					out['__omittedKeys__'] = `... (${entries.length - maxKeys} more keys omitted in history)`;
-					break;
-				}
-				out[k] = this._summarizeValueForHistory(v, depth + 1);
-				count++;
+				out[k] = this._summarizeValueForHistory(v, depth + 1, seen);
 			}
 			return out;
 		}
 		return String(val);
 	}
 
+	private _sanitizeStepResultsForHistory(stepResults?: IPrimitiveExecutionStepResult[]): IPrimitiveExecutionStepResult[] {
+		if (!Array.isArray(stepResults)) {
+			return [];
+		}
+		return stepResults.map(s => {
+			let cleanDetails: Record<string, any> | undefined = undefined;
+			if (s.details && typeof s.details === 'object') {
+				cleanDetails = {};
+				for (const [dk, dv] of Object.entries(s.details)) {
+					if (dk === 'sqliteSync' && dv && typeof dv === 'object') {
+						cleanDetails[dk] = {
+							success: (dv as any).success,
+							message: (dv as any).message,
+							rowsAffected: (dv as any).rowsAffected,
+							error: (dv as any).error
+						};
+					} else if (typeof dv === 'object' && dv !== null) {
+						cleanDetails[dk] = this._summarizeValueForHistory(dv, 0);
+					} else {
+						cleanDetails[dk] = dv;
+					}
+				}
+			}
+			return {
+				fieldId: s.fieldId,
+				fieldLabel: s.fieldLabel,
+				fieldType: s.fieldType,
+				status: s.status,
+				durationMs: s.durationMs,
+				error: s.error,
+				output: typeof s.output === 'object' && s.output !== null ? this._summarizeValueForHistory(s.output, 0) : s.output,
+				details: cleanDetails
+			};
+		});
+	}
+
+	private _safeCompactNodeOutput(val: any): any {
+		if (val === undefined || val === null || typeof val !== 'object') {
+			return val;
+		}
+		if (Array.isArray(val)) {
+			return val.map(item => this._safeCompactNodeOutput(item));
+		}
+		const out: Record<string, any> = {};
+		for (const [k, v] of Object.entries(val)) {
+			if (k === '__omittedKeys__') {
+				continue;
+			}
+			if (k === 'tickets' && Array.isArray(v)) {
+				out[k] = v.map(t => ({
+					ticketId: t?.ticketId,
+					ticketName: t?.ticketName,
+					ticketType: t?.ticketType,
+					status: t?.status,
+					durationMs: t?.durationMs
+				}));
+			} else if (typeof v === 'object' && v !== null) {
+				out[k] = this._summarizeValueForHistory(v, 0);
+			} else {
+				out[k] = v;
+			}
+		}
+		return out;
+	}
+
 	async persistRunsForWorkflow(workflowUri: URI | string): Promise<void> {
 		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
-		const runs = this.getRunsForWorkflow(uriStr).slice(0, 15).map(r => {
+		const allRuns = this.getRunsForWorkflow(uriStr);
+		if (allRuns.length > 8) {
+			for (const oldRun of allRuns.slice(8)) {
+				this._runs.delete(oldRun.runId);
+			}
+		}
+		const runs = allRuns.slice(0, 8).map((r, runIdx) => {
 			const cleanVars: Record<string, any> = {};
 			if (r.contextVariables) {
 				for (const [k, v] of Object.entries(r.contextVariables)) {
@@ -1104,17 +1163,86 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					if (k.startsWith('@') && k.substring(1) in r.contextVariables) {
 						continue;
 					}
-					cleanVars[k] = this._summarizeValueForHistory(v, 0);
+					// For active / latest run (runIdx === 0), preserve complete pure context variables without any truncation markers
+					// For older historical runs (runIdx > 0), only keep scalar / small values (never injecting synthetic omission keys/markers)
+					if (runIdx === 0) {
+						if (v === null || v === undefined || typeof v === 'boolean' || typeof v === 'number' || typeof v === 'string') {
+							cleanVars[k] = v;
+						} else if (typeof v === 'object') {
+							cleanVars[k] = this._safeCompactNodeOutput(v);
+						}
+					} else {
+						if (v === null || v === undefined || typeof v === 'boolean' || typeof v === 'number') {
+							cleanVars[k] = v;
+						} else if (typeof v === 'string' && v.length <= 2000) {
+							cleanVars[k] = v;
+						} else if (Array.isArray(v) && v.length <= 20) {
+							cleanVars[k] = v;
+						} else if (typeof v === 'object' && Object.keys(v).length <= 20) {
+							cleanVars[k] = this._summarizeValueForHistory(v, 0);
+						}
+					}
 				}
 			}
-			const cleanNodeStates = r.nodeStates ? this._summarizeValueForHistory(r.nodeStates, 0) : {};
+			const cleanNodeStates: Record<string, any> = {};
+			if (r.nodeStates && typeof r.nodeStates === 'object') {
+				for (const [nId, nState] of Object.entries(r.nodeStates)) {
+					if (!nState) continue;
+					cleanNodeStates[nId] = {
+						nodeId: nState.nodeId,
+						nodeLabel: nState.nodeLabel,
+						nodeType: nState.nodeType,
+						status: nState.status,
+						startedAt: nState.startedAt,
+						completedAt: nState.completedAt,
+						durationMs: nState.durationMs,
+						error: nState.error,
+						output: this._safeCompactNodeOutput(nState.output),
+						executedTickets: Array.isArray(nState.executedTickets) ? nState.executedTickets.map(t => ({
+							ticketId: t.ticketId,
+							ticketName: t.ticketName,
+							ticketType: t.ticketType,
+							status: t.status,
+							output: (runIdx === 0) ? t.output : (typeof t.output === 'object' && t.output !== null ? this._fastPreviewString(t.output, 200) : t.output),
+							outputSpecs: t.outputSpecs,
+							stepResults: Array.isArray(t.stepResults) ? t.stepResults.map(s => ({
+								fieldId: s.fieldId,
+								fieldLabel: s.fieldLabel,
+								fieldType: s.fieldType,
+								status: s.status,
+								durationMs: s.durationMs,
+								error: s.error
+							})) : [],
+							durationMs: t.durationMs
+						})) : []
+					};
+				}
+			}
 			const cleanExecutionPath = Array.isArray(r.executionPath)
-				? r.executionPath.slice(-250).map(ps => this._summarizeValueForHistory(ps, 0))
+				? r.executionPath.slice(-50).map(step => ({
+					...step,
+					operations: Array.isArray(step.operations) ? step.operations.map(op => {
+						if (op && (op as any).executedTicket) {
+							const et = (op as any).executedTicket;
+							return {
+								...op,
+								executedTicket: {
+									ticketId: et.ticketId,
+									ticketName: et.ticketName,
+									ticketType: et.ticketType,
+									status: et.status,
+									durationMs: et.durationMs
+								}
+							};
+						}
+						return op;
+					}) : []
+				}))
 				: [];
-			const cleanLogs = (r.logs || []).slice(-1500).map(l => ({
+			const cleanLogs = (r.logs || []).slice(-500).map(l => ({
 				...l,
-				message: typeof l.message === 'string' && l.message.length > 1200
-					? l.message.substring(0, 1200) + ' ... [truncated]'
+				message: typeof l.message === 'string' && l.message.length > 2000
+					? l.message.substring(0, 2000) + ' ... [truncated]'
 					: l.message
 			}));
 			return {
@@ -1125,7 +1253,52 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				logs: cleanLogs
 			};
 		});
-		const jsonStr = JSON.stringify(runs, null, 2);
+
+		let jsonStr = '';
+		try {
+			jsonStr = JSON.stringify(runs);
+		} catch (strErr) {
+			this.logService.warn(`[WorkflowExecution] JSON.stringify failed on ${runs.length} runs, attempting aggressive compacting:`, strErr);
+			try {
+				const minimalRuns = runs.slice(0, 3).map(r => ({
+					runId: r.runId,
+					runNumber: r.runNumber,
+					workflowUri: r.workflowUri,
+					workflowName: r.workflowName,
+					status: r.status,
+					startedAt: r.startedAt,
+					completedAt: r.completedAt,
+					durationMs: r.durationMs,
+					error: r.error,
+					nodeStates: r.nodeStates || {},
+					logs: (r.logs || []).slice(-100)
+				}));
+				jsonStr = JSON.stringify(minimalRuns);
+			} catch (fallbackErr) {
+				this.logService.error(`[WorkflowExecution] Failed to serialize workflow runs even after compacting:`, fallbackErr);
+				return;
+			}
+		}
+
+		// Enforce safety ceiling (max 6 MB) to prevent renderer memory spikes
+		if (jsonStr.length > 6 * 1024 * 1024) {
+			this.logService.warn(`[WorkflowExecution] Serialized runs size is ${(jsonStr.length / 1024 / 1024).toFixed(2)} MB, enforcing aggressive compacting.`);
+			const minimalRuns = runs.slice(0, 3).map(r => ({
+				runId: r.runId,
+				runNumber: r.runNumber,
+				workflowUri: r.workflowUri,
+				workflowName: r.workflowName,
+				status: r.status,
+				startedAt: r.startedAt,
+				completedAt: r.completedAt,
+				durationMs: r.durationMs,
+				error: r.error,
+				nodeStates: r.nodeStates || {},
+				logs: (r.logs || []).slice(-50)
+			}));
+			jsonStr = JSON.stringify(minimalRuns);
+		}
+
 		const buffer = VSBuffer.fromString(jsonStr);
 
 		// 1. Primary location (.agents/workflow_runs.json)
@@ -1136,7 +1309,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				await this.fileService.createFolder(parentDir);
 			}
 			await this.fileService.writeFile(primaryFileUri, buffer);
-			this.logService.info(`[WorkflowExecution] Persisted ${runs.length} runs to ${primaryFileUri.toString()}`);
+			this.logService.info(`[WorkflowExecution] Persisted ${runs.length} runs (${(buffer.byteLength / 1024 / 1024).toFixed(2)} MB) to ${primaryFileUri.toString()}`);
 		} catch (err) {
 			this.logService.warn(`[WorkflowExecution] Failed to write runs to ${primaryFileUri.toString()}:`, err);
 		}
@@ -1200,7 +1373,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	getActiveRun(workflowUri: URI | string): IWorkflowExecutionRun | undefined {
 		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
 		const runId = this._activeRunsByWorkflow.get(uriStr);
-		return runId ? this._runs.get(runId) : undefined;
+		const run = runId ? this._runs.get(runId) : undefined;
+		if (run && (!run.nodeStates || typeof run.nodeStates !== 'object')) {
+			run.nodeStates = {};
+		}
+		return run;
 	}
 
 	getRun(runId: string): IWorkflowExecutionRun | undefined {
@@ -1349,6 +1526,23 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 		}
 
+		// If running a selective node/subset and no variables found in active run, inherit from the latest completed prior run
+		if (Object.keys(inheritedContextVariables).length === 0 && ((options?.selectedNodeIds && options.selectedNodeIds.length > 0) || options?.entryNodeId)) {
+			const priorRuns = this.getRunsForWorkflow(uriStr);
+			for (const pr of priorRuns) {
+				if (pr?.contextVariables && Object.keys(pr.contextVariables).length > 0) {
+					for (const [k, v] of Object.entries(pr.contextVariables)) {
+						if (v !== undefined && v !== 'None' && !WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(k)) {
+							inheritedContextVariables[k] = v;
+						}
+					}
+					if (Object.keys(inheritedContextVariables).length > 0) {
+						break;
+					}
+				}
+			}
+		}
+
 		// Clear previous execution cards when starting a fresh full workflow run
 		this.clearDisplayCards(uriStr);
 
@@ -1435,7 +1629,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 			this._emitLog(run, 'error', `Execution failed: ${run.error}`);
 			this._notifyRunChanged(run);
-			await this.persistRunsForWorkflow(run.workflowUri);
+			try {
+				await this.persistRunsForWorkflow(run.workflowUri);
+			} catch (persistErr) {
+				this.logService.warn(`[WorkflowExecution] Failed to persist fatal run state:`, persistErr);
+			}
 		});
 
 		return run;
@@ -1606,6 +1804,29 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				: [];
 			const selectedNodeSet = selectiveNodeIds.length > 0 ? new Set(selectiveNodeIds) : undefined;
 
+			// Resolve Workflow-level Input / Output Contract
+			const ioContract = this.resolveWorkflowIOContract(data);
+			run.ioContract = ioContract;
+			if (ioContract.inputs.length > 0) {
+				for (const inp of ioContract.inputs) {
+					if (inp.name && !Object.prototype.hasOwnProperty.call(run.contextVariables, inp.name)) {
+						run.contextVariables[inp.name] = inp.defaultValue ?? '';
+					}
+				}
+			}
+			if (selectiveNodeIds.length === 0 && !options?.entryNodeId && !ioContract.isValid && ioContract.errors.length > 0) {
+				for (const errMsg of ioContract.errors) {
+					this._emitLog(run, 'error', `[Workflow I/O Contract Error] ${errMsg}`);
+				}
+				const hasAnyIOComp = data.nodes.some(n => (n.pipeline || []).some(s => {
+					const t = (s as any)?.component?.type;
+					return t === 'parameters' || t === 'output' || t === 'result';
+				}));
+				if (hasAnyIOComp) {
+					throw new Error(ioContract.errors.join(' | '));
+				}
+			}
+
 			do {
 				// Find Start/Entry node
 				const startNodeId = selectiveNodeIds.length > 0 ? selectiveNodeIds[0] : options?.entryNodeId;
@@ -1625,403 +1846,565 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 				let stepCount = 0;
 				const maxSteps = options?.maxSteps || 100000;
-				let activeNodeIds: string[] = [entryNode.id];
 
-				while (activeNodeIds.length > 0 && !this._cancelledRuns.has(run.runId)) {
-					stepCount++;
-					if (stepCount > maxSteps) {
-						throw new Error(`Maximum step limit (${maxSteps}) reached. Possible infinite loop detected.`);
-					}
-
-					// Always yield to the UI event loop so the renderer thread never freezes
-					await new Promise(resolve => setTimeout(resolve, run.fullSpeed ? 0 : 80));
-
-					// Check paused state
-					if (run.status === 'paused') {
-						await new Promise<void>(resolve => {
-							this._stepWaiters.set(run.runId, resolve);
-						});
-					}
-
-					if (this._cancelledRuns.has(run.runId)) {
-						break;
-					}
-
-					// Resolve current active nodes
-					const currentNodes = activeNodeIds
-						.map(id => data.nodes.find(n => n.id === id))
-						.filter((n): n is IFlowchartNode => !!n);
-
-					if (currentNodes.length === 0) {
-						break;
-					}
-
-					// Mark visited and update node states to running
-					run.currentNodeId = currentNodes[0].id;
-					for (const node of currentNodes) {
-						if (!run.visitedNodeIds.includes(node.id)) {
-							run.visitedNodeIds.push(node.id);
+				if (selectiveNodeIds.length > 0) {
+					// Selective Multi-Node Sequential Execution
+					let activeNodeIds: string[] = [entryNode.id];
+					while (activeNodeIds.length > 0 && !this._cancelledRuns.has(run.runId)) {
+						stepCount++;
+						if (stepCount > maxSteps) {
+							throw new Error(`Maximum step limit (${maxSteps}) reached. Possible infinite loop detected.`);
 						}
-						const nodeState = run.nodeStates[node.id] || {
-							nodeId: node.id,
-							nodeLabel: node.label,
-							nodeType: node.type,
-							status: 'pending',
-							executedTickets: []
-						};
-						nodeState.status = 'running';
-						nodeState.startedAt = Date.now();
-						run.nodeStates[node.id] = nodeState;
-					}
-					this._notifyRunChanged(run);
-
-					// Execute all active nodes in parallel
-					const nextNodesNested = await Promise.all(
-						currentNodes.map(async (node) => {
-							const nodeState = run.nodeStates[node.id];
-							const nextStepSeq = ((run as any)._totalStepsCounter || (run.executionPath?.length || 0)) + 1;
-							(run as any)._totalStepsCounter = nextStepSeq;
-							const pathStep: IWorkflowPathStep = {
-								stepIndex: nextStepSeq,
+						await new Promise(resolve => setTimeout(resolve, run.fullSpeed ? 0 : 80));
+						if (run.status === 'paused') {
+							await new Promise<void>(resolve => {
+								this._stepWaiters.set(run.runId, resolve);
+							});
+						}
+						if (this._cancelledRuns.has(run.runId)) {
+							break;
+						}
+						const currentNodes = activeNodeIds
+							.map(id => data.nodes.find(n => n.id === id))
+							.filter((n): n is IFlowchartNode => !!n);
+						if (currentNodes.length === 0) {
+							break;
+						}
+						run.currentNodeId = currentNodes[0].id;
+						for (const node of currentNodes) {
+							if (!run.visitedNodeIds.includes(node.id)) {
+								run.visitedNodeIds.push(node.id);
+							}
+							const nodeState = run.nodeStates[node.id] || {
 								nodeId: node.id,
-								nodeLabel: node.label || node.id,
+								nodeLabel: node.label,
 								nodeType: node.type,
-								startedAt: Date.now(),
-								status: 'running',
-								operations: []
+								status: 'pending',
+								executedTickets: []
 							};
-							if (!run.executionPath) {
-								run.executionPath = [];
-							}
-							run.executionPath.push(pathStep);
-							if (run.executionPath.length > 250) {
-								run.executionPath.splice(0, run.executionPath.length - 250);
-							}
+							nodeState.status = 'running';
+							nodeState.startedAt = Date.now();
+							run.nodeStates[node.id] = nodeState;
+						}
+						this._notifyRunChanged(run);
 
-							this._emitLog(run, 'info', `Executing node: '${node.label}' (${node.type})`, { nodeId: node.id });
-							try {
-								await this._executeNode(run, node, nodeState, pathStep);
-								if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
-									nodeState.status = 'pending';
+						const nextNodesNested = await Promise.all(
+							currentNodes.map(async (node) => {
+								const nodeState = run.nodeStates[node.id];
+								const nextStepSeq = ((run as any)._totalStepsCounter || (run.executionPath?.length || 0)) + 1;
+								(run as any)._totalStepsCounter = nextStepSeq;
+								const pathStep: IWorkflowPathStep = {
+									stepIndex: nextStepSeq,
+									nodeId: node.id,
+									nodeLabel: node.label || node.id,
+									nodeType: node.type,
+									startedAt: Date.now(),
+									status: 'running',
+									operations: []
+								};
+								if (!run.executionPath) {
+									run.executionPath = [];
+								}
+								run.executionPath.push(pathStep);
+								if (run.executionPath.length > 250) {
+									run.executionPath.splice(0, run.executionPath.length - 250);
+								}
+								this._emitLog(run, 'info', `Executing node: '${node.label}' (${node.type})`, { nodeId: node.id });
+								try {
+									await this._executeNode(run, node, nodeState, pathStep);
+									if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
+										nodeState.status = 'pending';
+										nodeState.completedAt = Date.now();
+										nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
+										pathStep.completedAt = nodeState.completedAt;
+										pathStep.durationMs = nodeState.durationMs;
+										return [];
+									}
+									nodeState.status = 'success';
 									nodeState.completedAt = Date.now();
 									nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
+									pathStep.status = 'success';
 									pathStep.completedAt = nodeState.completedAt;
 									pathStep.durationMs = nodeState.durationMs;
-									return [];
-								}
-								nodeState.status = 'success';
-								nodeState.completedAt = Date.now();
-								nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
-								pathStep.status = 'success';
-								pathStep.completedAt = nodeState.completedAt;
-								pathStep.durationMs = nodeState.durationMs;
-								this._emitLog(run, 'info', `Completed node: '${node.label}' in ${nodeState.durationMs}ms`, { nodeId: node.id });
-
-								// Assign to bound context variables if present
-								// Note: If node.pipeline was already executed, all pipeline steps have already updated run.contextVariables;
-								// only sync v.currentValue from run.contextVariables and do NOT re-evaluate v.expression!
-								if (node.pipeline && node.pipeline.length > 0) {
-									const nodeVars = this._getNodeVars(node);
-									for (const v of nodeVars) {
-										if (v.name) {
-											const cleanVarName = v.name.replace(/^@/, '').trim();
-											if (run.contextVariables[cleanVarName] !== undefined) {
-												v.currentValue = run.contextVariables[cleanVarName];
-											}
-										}
+									this._emitLog(run, 'info', `Completed node: '${node.label}' in ${nodeState.durationMs}ms`, { nodeId: node.id });
+									this._syncNodeVariablesAfterExecution(run, node, nodeState);
+								} catch (err: any) {
+									if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
+										nodeState.status = 'pending';
+										pathStep.status = 'failed';
+										pathStep.error = 'Stopped by user';
+										return [];
 									}
-								} else {
-									const pipelineAssignedVars = new Set<string>();
-									if (node.pipeline && Array.isArray(node.pipeline)) {
-										for (const step of node.pipeline) {
-											if (step.targetVariable) {
-												pipelineAssignedVars.add(step.targetVariable.replace(/^@/, '').trim());
-											}
-											if (step.expression) {
-												const assignMatches = step.expression.matchAll(/(?:^|\n)\s*@?([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\+|-|\*|\/)?=(?!=)/g);
-												for (const m of assignMatches) {
-													if (m[1]) pipelineAssignedVars.add(m[1]);
-												}
-											}
-										}
-									}
-
-									const nodeVars = this._getNodeVars(node);
-									for (const v of nodeVars) {
-										if (v.name) {
-											const cleanVarName = v.name.replace(/^@/, '').trim();
-											// If this variable was already assigned by pipeline steps in this node, do not re-evaluate to avoid double mutation!
-											if (pipelineAssignedVars.has(cleanVarName)) {
-												v.currentValue = run.contextVariables[cleanVarName];
-												continue;
-											}
-
-											let assignedVal: any;
-											const oldVal = run.contextVariables[cleanVarName];
-
-											if (v.expression) {
-												let expr = v.expression.trim();
-
-												// Check if this variable was already assigned and populated by a pipeline step (e.g. call_function),
-												// or if the expression represents a function call / assignment (e.g. @var = fn(...) or fn(...))
-												const isFunctionCall = this._isFunctionCallExpression(expr) ||
-													this._isFunctionCallExpression(v.name) ||
-													(node.pipeline && node.pipeline.some(p => p.type === 'call_function' && (p.targetVariable?.replace(/^@/, '') === cleanVarName || (p.expression && p.expression.includes(cleanVarName)))));
-
-												if (isFunctionCall && run.contextVariables[cleanVarName] !== undefined) {
-													assignedVal = run.contextVariables[cleanVarName];
-												} else {
-													// Strip self-assignment prefix if present (e.g. "@monitor = ...", "monitor = monitor + 1" or "monitor += 1")
-													const assignMatch = expr.match(/^@?[a-zA-Z0-9_\u4e00-\u9fa5]+\s*=\s*([\s\S]*)$/);
-													if (assignMatch) {
-														expr = assignMatch[1].trim();
-													}
-													if (expr.startsWith(`${cleanVarName} +=`)) {
-														expr = `+=${expr.substring(`${cleanVarName} +=`.length).trim()}`;
-													} else if (expr.startsWith(`${cleanVarName}+=`)) {
-														expr = `+=${expr.substring(`${cleanVarName}+=`.length).trim()}`;
-													} else if (expr.startsWith(`${cleanVarName} -=`)) {
-														expr = `-=${expr.substring(`${cleanVarName} -=`.length).trim()}`;
-													} else if (expr.startsWith(`${cleanVarName}-=`)) {
-														expr = `-=${expr.substring(`${cleanVarName}-=`.length).trim()}`;
-													}
-													if (expr.startsWith('=')) {
-														expr = expr.substring(1).trim();
-													}
-
-													// Check if expr references a ticket or unpack index: e.g. "@my_ticket", "@my_ticket[0]", "ticket.output[1]", "FNDJ1-0008"
-													const ticketMatch = expr.match(/^@?([a-zA-Z0-9_\-]+)(\[(\d+)\])?$/);
-													const cleanTarget = ticketMatch ? ticketMatch[1] : '';
-													const unpackIdx = ticketMatch && ticketMatch[3] !== undefined ? parseInt(ticketMatch[3], 10) : undefined;
-
-													const matchedTicket = nodeState.executedTickets?.find(t =>
-														t.ticketName === cleanTarget ||
-														t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_') === cleanTarget ||
-														t.ticketName.toLowerCase() === cleanTarget.toLowerCase() ||
-														t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() === cleanTarget.toLowerCase() ||
-														t.ticketId === cleanTarget ||
-														t.ticketId.toLowerCase() === cleanTarget.toLowerCase()
-													) || (cleanTarget === 'ticket' ? nodeState.executedTickets?.[nodeState.executedTickets.length - 1] : undefined);
-
-													if (matchedTicket) {
-														let outVal = matchedTicket.output;
-														if (typeof outVal === 'string' && (outVal.startsWith('[') || outVal.startsWith('{'))) {
-															try { outVal = JSON.parse(outVal); } catch { }
-														}
-														if (unpackIdx !== undefined) {
-															if (Array.isArray(outVal)) {
-																assignedVal = outVal[unpackIdx];
-															} else if (typeof outVal === 'object' && outVal !== null) {
-																assignedVal = Object.values(outVal)[unpackIdx];
-															} else if (typeof outVal === 'string' && outVal.includes(',')) {
-																const parts = outVal.split(',').map(s => s.trim());
-																assignedVal = parts[unpackIdx];
-															} else {
-																assignedVal = outVal;
-															}
-														} else {
-															assignedVal = outVal;
-														}
-													} else if (expr === 'ticket.output' || expr === 'ticket' || expr === '@ticket') {
-														const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
-														assignedVal = lastTicket?.output ?? nodeState.output?.result ?? nodeState.output?.output ?? 'success';
-													} else if (expr === 'ticket.status' || expr === '@ticket.status') {
-														const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
-														assignedVal = lastTicket?.status ?? nodeState.status ?? 'success';
-													} else if (expr === 'ticket.id' || expr === 'ticket.name') {
-														const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
-														assignedVal = lastTicket ? (expr === 'ticket.id' ? lastTicket.ticketId : lastTicket.ticketName) : '';
-													} else if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
-														const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-														assignedVal = base + 1;
-													} else if (expr === '- 1' || expr === '--' || expr === '-= 1' || expr === '-=1') {
-														const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-														assignedVal = base - 1;
-													} else if (/^(\+\=|\+)\s*(\d+(\.\d+)?)$/.test(expr)) {
-														const delta = Number(expr.replace(/^(\+\=|\+)/, '').trim());
-														const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-														assignedVal = base + delta;
-													} else if (/^(-\=|-)\s*(\d+(\.\d+)?)$/.test(expr)) {
-														const delta = Number(expr.replace(/^(-\=|-)/, '').trim());
-														const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-														assignedVal = base - delta;
-													} else if (/^\*\=\s*(\d+(\.\d+)?)$/.test(expr)) {
-														const mult = Number(expr.replace(/^\*\=/, '').trim());
-														const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
-														assignedVal = base * mult;
-													} else if (expr.startsWith('+=')) {
-														try {
-															const rhsExpr = expr.substring(2).trim();
-															const rhsVal = this._evaluateExpressionOrLiteral(rhsExpr, run.contextVariables);
-															if (Array.isArray(oldVal)) {
-																assignedVal = Array.isArray(rhsVal) ? [...oldVal, ...rhsVal] : [...oldVal, rhsVal];
-															} else if (typeof oldVal === 'number' && typeof rhsVal === 'number') {
-																assignedVal = oldVal + rhsVal;
-															} else if (typeof oldVal === 'string' || typeof rhsVal === 'string') {
-																assignedVal = String(oldVal ?? '') + String(rhsVal ?? '');
-															} else if (oldVal && typeof oldVal === 'object' && rhsVal && typeof rhsVal === 'object') {
-																assignedVal = { ...oldVal, ...rhsVal };
-															} else if (oldVal === undefined || oldVal === null) {
-																assignedVal = rhsVal;
-															} else {
-																assignedVal = (Number(oldVal) || 0) + (Number(rhsVal) || 0);
-															}
-														} catch (evalErr: any) {
-															this._emitLog(run, 'error', `[Expression Error] '${v.name}' in '${node.label}': ${evalErr.message}`, { nodeId: node.id });
-															throw evalErr;
-														}
-													} else if (isFunctionCall && run.contextVariables[cleanVarName] !== undefined) {
-														assignedVal = run.contextVariables[cleanVarName];
-													} else {
-														try {
-															assignedVal = this._evaluateExpressionOrLiteral(expr, run.contextVariables);
-														} catch (evalErr: any) {
-															this._emitLog(run, 'error', `[Expression Error] '${v.name}' in '${node.label}': ${evalErr.message}`, { nodeId: node.id });
-															throw evalErr;
-														}
-													}
-												}
-											} else if (nodeState.executedTickets && nodeState.executedTickets.length > 0) {
-												const initClean = (v.initialValue || '').trim().replace(/^@/, '').replace(/^=\s*/, '');
-												const matchedByInit = nodeState.executedTickets.find(t =>
-													t.ticketName === initClean ||
-													t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_') === initClean ||
-													t.ticketName.toLowerCase() === initClean.toLowerCase() ||
-													t.ticketId === initClean
-												);
-												if (matchedByInit) {
-													assignedVal = matchedByInit.output;
-												} else {
-													const lastTicket = nodeState.executedTickets[nodeState.executedTickets.length - 1];
-													assignedVal = lastTicket?.output ?? 'success';
-												}
-											} else {
-												assignedVal = nodeState.output?.[v.name] ?? (nodeVars.length === 1 ? (nodeState.output?.value ?? nodeState.output?.returnValue) : undefined);
-												if (assignedVal === undefined) {
-													if (oldVal !== undefined) {
-														assignedVal = oldVal;
-													} else {
-														assignedVal = this._resolveValue(v.initialValue || 'None', run.contextVariables);
-													}
-												}
-											}
-
-											run.contextVariables[cleanVarName] = assignedVal;
-											v.currentValue = assignedVal;
-											const valPreviewStr = typeof assignedVal === 'object' && assignedVal !== null
-												? JSON.stringify(assignedVal)
-												: String(assignedVal);
-											const shortPreview = valPreviewStr.length > 200 ? valPreviewStr.substring(0, 200) + ' ...' : valPreviewStr;
-											this._emitLog(run, 'info', `[Variable Updated] '${cleanVarName}' = ${shortPreview}${v.expression ? ` (${v.expression})` : ''}`, { nodeId: node.id });
-										}
-									}
-								}
-							} catch (err: any) {
-								if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
-									nodeState.status = 'pending';
+									nodeState.status = 'failed';
+									nodeState.error = err.message || String(err);
 									nodeState.completedAt = Date.now();
 									nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
 									pathStep.status = 'failed';
-									pathStep.error = 'Stopped by user';
+									pathStep.error = nodeState.error;
 									pathStep.completedAt = nodeState.completedAt;
 									pathStep.durationMs = nodeState.durationMs;
+									this._emitLog(run, 'error', `Node '${node.label}' failed: ${nodeState.error}`, { nodeId: node.id });
+									throw err;
+								} finally {
+									this._notifyRunChanged(run);
+								}
+
+								if (this._isEndNode(node)) {
 									return [];
 								}
-								nodeState.status = 'failed';
-								nodeState.error = err.message || String(err);
-								nodeState.completedAt = Date.now();
-								nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
-								pathStep.status = 'failed';
-								pathStep.error = nodeState.error;
-								pathStep.completedAt = nodeState.completedAt;
-								pathStep.durationMs = nodeState.durationMs;
-								this._emitLog(run, 'error', `Node '${node.label}' failed: ${nodeState.error}`, { nodeId: node.id });
-								throw err;
-							} finally {
-								this._notifyRunChanged(run);
-							}
-
-							if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
-								return [];
-							}
-
-							// Check if end node
-							if (this._isEndNode(node)) {
-								this._emitLog(run, 'info', `Reached end node: '${node.label}'. Execution branch completed.`);
-								pathStep.operations.push({
-									type: 'general',
-									label: `End: Completed branch at '${node.label}'`,
-									details: { message: 'Reached workflow termination node' }
-								});
-								return [];
-							}
-
-							// Resolve next nodes from this node
-							if (selectedNodeSet) {
-								const selectedOutgoingLinks = data.links.filter(l => l.from === node.id && selectedNodeSet.has(l.to));
+								const selectedOutgoingLinks = data.links.filter(l => l.from === node.id && selectedNodeSet!.has(l.to));
 								if (selectedOutgoingLinks.length === 0) {
 									return [];
 								}
 								return await this._resolveNextNodes(run, node, { ...data, links: selectedOutgoingLinks }, pathStep, true);
-							}
-							return await this._resolveNextNodes(run, node, data, pathStep);
-						})
-					);
+							})
+						);
 
-					// Flatten and deduplicate next active nodes
-					const nextActiveIds: string[] = [];
-					for (const list of nextNodesNested) {
-						for (const nextNode of list) {
-							if (!nextActiveIds.includes(nextNode.id)) {
-								nextActiveIds.push(nextNode.id);
+						const nextActiveIds: string[] = [];
+						for (const list of nextNodesNested) {
+							for (const nextNode of list) {
+								if (!nextActiveIds.includes(nextNode.id)) {
+									nextActiveIds.push(nextNode.id);
+								}
 							}
+						}
+						if (nextActiveIds.length === 0) {
+							const nextUnvisitedId = selectiveNodeIds.find(id => !run.visitedNodeIds.includes(id));
+							const nextTarget = nextUnvisitedId ? data.nodes.find(n => n.id === nextUnvisitedId) : undefined;
+							if (nextTarget) {
+								nextActiveIds.push(nextTarget.id);
+							}
+						}
+						activeNodeIds = nextActiveIds;
+					}
+				} else {
+					// True DAG Parallel & Multi-Branch Convergence (Fork & Join) Engine
+					const getReachableFrom = (startId: string): Set<string> => {
+						const reachable = new Set<string>([startId]);
+						const queue = [startId];
+						while (queue.length > 0) {
+							const curr = queue.shift()!;
+							for (const l of data.links) {
+								if (l.from === curr && !reachable.has(l.to)) {
+									reachable.add(l.to);
+									queue.push(l.to);
+								}
+							}
+						}
+						return reachable;
+					};
+					const reachableFromEntry = getReachableFrom(entryNode.id);
+
+					// 1. Detect Back-Edges (cycles / loops) using standard DFS recursion stack
+					const backEdges = new Set<string>();
+					const dfsVisiting = new Set<string>();
+					const dfsVisited = new Set<string>();
+
+					const detectBackEdges = (u: string) => {
+						dfsVisiting.add(u);
+						for (const l of data.links) {
+							if (l.from === u) {
+								const v = l.to;
+								if (dfsVisiting.has(v)) {
+									// v is an active ancestor on the recursion stack -> Back-Edge!
+									backEdges.add(l.id || `${u}->${v}`);
+									backEdges.add(`${u}->${v}`);
+								} else if (!dfsVisited.has(v)) {
+									detectBackEdges(v);
+								}
+							}
+						}
+						dfsVisiting.delete(u);
+						dfsVisited.add(u);
+					};
+					detectBackEdges(entryNode.id);
+
+					for (const n of data.nodes) {
+						if (!dfsVisited.has(n.id) && reachableFromEntry.has(n.id)) {
+							detectBackEdges(n.id);
 						}
 					}
 
-					// In selective multi-node execution mode, if no direct link between selected nodes was taken, jump to the next unvisited selected node
-					if (selectedNodeSet && nextActiveIds.length === 0) {
-						const nextUnvisitedId = selectiveNodeIds.find(id => !run.visitedNodeIds.includes(id));
-						const nextTarget = nextUnvisitedId ? data.nodes.find(n => n.id === nextUnvisitedId) : undefined;
-						if (nextTarget) {
-							const lastNode = currentNodes[currentNodes.length - 1];
-							this._emitLog(
-								run,
-								'info',
-								`[Selective Run] Skipping unselected intermediate nodes -> jumping to next selected node: '${nextTarget.label}'`,
-								{ nodeId: nextTarget.id }
-							);
-							const lastPathStep = run.executionPath && run.executionPath.length > 0
-								? run.executionPath[run.executionPath.length - 1]
-								: undefined;
-							if (lastPathStep && !lastPathStep.transition && lastNode) {
-								lastPathStep.transition = {
-									fromNodeId: lastNode.id,
-									fromNodeLabel: lastNode.label,
-									toNodeId: nextTarget.id,
-									toNodeLabel: nextTarget.label,
-									conditionLabel: 'selective jump',
-									conditionEvaluation: true,
-									explanation: `Skipped unselected nodes -> jumped to '${nextTarget.label}'`
-								};
+					const isBackEdgeLink = (l: { id?: string; from: string; to: string }): boolean => {
+						const key = l.id || `${l.from}->${l.to}`;
+						return backEdges.has(key) || backEdges.has(`${l.from}->${l.to}`);
+					};
+
+					interface IEdgeStateInfo {
+						status: 'activated' | 'skipped';
+						generation: number;
+						preserveUntilConsumed?: boolean;
+					}
+
+					const edgeStates = new Map<string, IEdgeStateInfo>();
+					const nodeGenerations = new Map<string, number>();
+					nodeGenerations.set(entryNode.id, 1);
+					const readyQueue: string[] = [entryNode.id];
+					const runningTasks = new Map<string, Promise<void>>();
+					let currentDrainedGeneration = 1;
+
+					const getEdgeState = (l: { id?: string; from: string; to: string }): IEdgeStateInfo | undefined => {
+						const key = l.id || `${l.from}->${l.to}`;
+						return edgeStates.get(key) || edgeStates.get(`${l.from}->${l.to}`);
+					};
+
+					const isNodeReadyToExecute = (targetNodeId: string, currentFinishingNodeId?: string): { ready: boolean; shouldSkip: boolean; generation: number } => {
+						const incoming = data.links.filter(l => l.to === targetNodeId && reachableFromEntry.has(l.from));
+						if (incoming.length === 0) {
+							return { ready: true, shouldSkip: false, generation: nodeGenerations.get(targetNodeId) || 1 };
+						}
+
+						// Partition incoming links into loop-back edges vs forward convergence edges
+						const forwardIncoming = incoming.filter(l => !isBackEdgeLink(l));
+						const loopIncoming = incoming.filter(l => isBackEdgeLink(l));
+
+						// 1. Loop Re-trigger Check:
+						// If any loop-back incoming edge is activated, this node is triggered by a loop completion!
+						const activeLoopEdge = loopIncoming.find(l => getEdgeState(l)?.status === 'activated');
+						if (activeLoopEdge) {
+							const loopGen = getEdgeState(activeLoopEdge)!.generation;
+							return { ready: true, shouldSkip: false, generation: loopGen };
+						}
+
+						// 2. Forward Convergence / Join Check:
+						// If there are no forward incoming edges (pure loop target), it's only triggered by loops
+						if (forwardIncoming.length === 0) {
+							return { ready: false, shouldSkip: false, generation: 0 };
+						}
+
+						// Determine the expected generation for this forward join / target node.
+						// The target generation is the maximum generation among all incoming edges.
+						let targetGen = 0;
+						for (const l of forwardIncoming) {
+							const s = getEdgeState(l);
+							if (s && s.generation > targetGen) {
+								targetGen = s.generation;
 							}
-							nextActiveIds.push(nextTarget.id);
+						}
+						if (targetGen === 0) {
+							targetGen = nodeGenerations.get(targetNodeId) || 1;
+						}
+
+						// Check resolution status of ALL forward incoming edges:
+						// If targetNodeId is NOT inside a cycle (e.g. a Join node after a parallel branch + a loop branch),
+						// one branch may have incremented its generation via internal loop iterations (e.g. gen=10)
+						// while a non-looping sibling branch arrived at gen=1. Both are valid resolved arrivals!
+						const targetIsInCycle = data.links.some(l => l.from === targetNodeId && getReachableFrom(l.to).has(targetNodeId));
+						let allForwardResolved = true;
+						let anyForwardActivated = false;
+						let allForwardSkipped = true;
+
+						for (const l of forwardIncoming) {
+							const state = getEdgeState(l);
+							const isResolvedInGen = state && (targetIsInCycle ? state.generation === targetGen : state.generation <= targetGen);
+							if (isResolvedInGen) {
+								if (state.status === 'activated') {
+									anyForwardActivated = true;
+									allForwardSkipped = false;
+								} else if (state.status === 'skipped') {
+									// Resolved as skipped
+								}
+							} else {
+								// undefined / pending or from an older generation (< targetGen for cyclic targets):
+								// upstream branch has not yet arrived / completed!
+								allForwardResolved = false;
+								allForwardSkipped = false;
+							}
+						}
+
+						// If all forward paths were skipped in targetGen, cascade skip
+						if (allForwardResolved && allForwardSkipped) {
+							return { ready: false, shouldSkip: true, generation: targetGen };
+						}
+
+						// A Join node is ONLY ready when ALL forward incoming paths have finished in targetGen,
+						// and at least one path arrived with 'activated' status!
+						if (allForwardResolved && anyForwardActivated) {
+							return { ready: true, shouldSkip: false, generation: targetGen };
+						}
+
+						// Otherwise, at least one forward path is still pending -> MUST WAIT!
+						return { ready: false, shouldSkip: false, generation: targetGen };
+					};
+
+					const cascadeSkip = (skippedNodeId: string, generation: number) => {
+						const outgoing = data.links.filter(l => l.from === skippedNodeId);
+						for (const outL of outgoing) {
+							const lKey = outL.id || `${outL.from}->${outL.to}`;
+							const isBack = isBackEdgeLink(outL);
+							const edgeGen = isBack ? generation + 1 : generation;
+							const edgeInfo: IEdgeStateInfo = { status: 'skipped', generation: edgeGen };
+							edgeStates.set(lKey, edgeInfo);
+							edgeStates.set(`${outL.from}->${outL.to}`, edgeInfo);
+							const check = isNodeReadyToExecute(outL.to, skippedNodeId);
+							if (check.shouldSkip) {
+								cascadeSkip(outL.to, check.generation);
+							} else if (check.ready && !readyQueue.includes(outL.to) && !runningTasks.has(outL.to)) {
+								nodeGenerations.set(outL.to, check.generation);
+								const incLinks = data.links.filter(l => l.to === outL.to);
+								for (const inc of incLinks) {
+									edgeStates.delete(inc.id || `${inc.from}->${inc.to}`);
+									edgeStates.delete(`${inc.from}->${inc.to}`);
+								}
+								readyQueue.push(outL.to);
+							}
+						}
+					};
+
+					const executeSingleNode = async (node: IFlowchartNode) => {
+						const nodeState = run.nodeStates[node.id];
+						const nextStepSeq = ((run as any)._totalStepsCounter || (run.executionPath?.length || 0)) + 1;
+						(run as any)._totalStepsCounter = nextStepSeq;
+						const pathStep: IWorkflowPathStep = {
+							stepIndex: nextStepSeq,
+							nodeId: node.id,
+							nodeLabel: node.label || node.id,
+							nodeType: node.type,
+							startedAt: Date.now(),
+							status: 'running',
+							operations: []
+						};
+						if (!run.executionPath) {
+							run.executionPath = [];
+						}
+						run.executionPath.push(pathStep);
+						if (run.executionPath.length > 250) {
+							run.executionPath.splice(0, run.executionPath.length - 250);
+						}
+
+						this._emitLog(run, 'info', `Executing node: '${node.label}' (${node.type})`, { nodeId: node.id });
+						try {
+							await this._executeNode(run, node, nodeState, pathStep);
+							if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
+								nodeState.status = 'pending';
+								nodeState.completedAt = Date.now();
+								nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
+								pathStep.completedAt = nodeState.completedAt;
+								pathStep.durationMs = nodeState.durationMs;
+								return;
+							}
+							nodeState.status = 'success';
+							nodeState.completedAt = Date.now();
+							nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
+							pathStep.status = 'success';
+							pathStep.completedAt = nodeState.completedAt;
+							pathStep.durationMs = nodeState.durationMs;
+							this._emitLog(run, 'info', `Completed node: '${node.label}' in ${nodeState.durationMs}ms`, { nodeId: node.id });
+							this._syncNodeVariablesAfterExecution(run, node, nodeState);
+						} catch (err: any) {
+							if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
+								nodeState.status = 'pending';
+								pathStep.status = 'failed';
+								pathStep.error = 'Stopped by user';
+								return;
+							}
+							nodeState.status = 'failed';
+							nodeState.error = err.message || String(err);
+							nodeState.completedAt = Date.now();
+							nodeState.durationMs = nodeState.completedAt - (nodeState.startedAt || nodeState.completedAt);
+							pathStep.status = 'failed';
+							pathStep.error = nodeState.error;
+							pathStep.completedAt = nodeState.completedAt;
+							pathStep.durationMs = nodeState.durationMs;
+							this._emitLog(run, 'error', `Node '${node.label}' failed: ${nodeState.error}`, { nodeId: node.id });
+							run.status = 'failed';
+							run.error = nodeState.error;
+							this._cancelledRuns.add(run.runId);
+							throw err;
+						} finally {
+							this._notifyRunChanged(run);
+						}
+
+						if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
+							return;
+						}
+
+						// Check if end node
+						if (this._isEndNode(node)) {
+							this._emitLog(run, 'info', `Reached end node: '${node.label}'. Execution branch completed.`);
+							pathStep.operations.push({
+								type: 'general',
+								label: `End: Completed branch at '${node.label}'`,
+								details: { message: 'Reached workflow termination node' }
+							});
+							return;
+						}
+
+						// Resolve next nodes from this node
+						const myGeneration = nodeGenerations.get(node.id) || 1;
+						const nextNodes = await this._resolveNextNodes(run, node, data, pathStep);
+						const outgoingLinks = data.links.filter(l => l.from === node.id);
+						const nextNodeIdSet = new Set(nextNodes.map(n => n.id));
+
+						// Detect if this node is continuing a loop (any activated outgoing edge can reach back to this node)
+						const isContinuingLoop = outgoingLinks.some(outL =>
+							nextNodeIdSet.has(outL.to) && getReachableFrom(outL.to).has(node.id)
+						);
+
+						for (const outL of outgoingLinks) {
+							const lKey = outL.id || `${outL.from}->${outL.to}`;
+							const isBack = isBackEdgeLink(outL);
+							const edgeGen = isBack ? myGeneration + 1 : myGeneration;
+							const isActivated = nextNodeIdSet.has(outL.to);
+
+							// CRITICAL: While a loop node is still looping (taking a loop-continuation edge),
+							// DO NOT mark its loop-exit edges as 'skipped' — they are still pending a future iteration!
+							// Marking them 'skipped' would prematurely release downstream fan-in Join barriers!
+							if (!isActivated && isContinuingLoop && !getReachableFrom(outL.to).has(node.id)) {
+								continue;
+							}
+
+							const targetIsInCycle = data.links.some(l => l.from === outL.to && getReachableFrom(l.to).has(outL.to));
+							const edgeInfo: IEdgeStateInfo = {
+								status: isActivated ? 'activated' : 'skipped',
+								generation: edgeGen,
+								preserveUntilConsumed: isActivated && !targetIsInCycle
+							};
+							edgeStates.set(lKey, edgeInfo);
+							edgeStates.set(`${outL.from}->${outL.to}`, edgeInfo);
+						}
+
+						// Check downstream nodes for join readiness or activation
+						for (const outL of outgoingLinks) {
+							const targetId = outL.to;
+							const isActivated = nextNodeIdSet.has(targetId);
+							if (!isActivated && isContinuingLoop && !getReachableFrom(targetId).has(node.id)) {
+								continue;
+							}
+							const check = isNodeReadyToExecute(targetId, node.id);
+							if (check.ready) {
+								if (!readyQueue.includes(targetId) && !runningTasks.has(targetId)) {
+									nodeGenerations.set(targetId, check.generation);
+									// Consume edge states for this join node so loops can re-evaluate
+									const incoming = data.links.filter(l => l.to === targetId);
+									for (const inc of incoming) {
+										edgeStates.delete(inc.id || `${inc.from}->${inc.to}`);
+										edgeStates.delete(`${inc.from}->${inc.to}`);
+									}
+									readyQueue.push(targetId);
+								}
+							} else if (check.shouldSkip) {
+								cascadeSkip(targetId, check.generation);
+							}
+						}
+					};
+
+					while ((readyQueue.length > 0 || runningTasks.size > 0) && !this._cancelledRuns.has(run.runId)) {
+						stepCount++;
+						if (stepCount > maxSteps) {
+							throw new Error(`Maximum step limit (${maxSteps}) reached. Possible infinite loop detected.`);
+						}
+
+						await new Promise(resolve => setTimeout(resolve, run.fullSpeed ? 0 : 25));
+
+						if (run.status === 'paused') {
+							await new Promise<void>(resolve => {
+								this._stepWaiters.set(run.runId, resolve);
+							});
+						}
+						if (this._cancelledRuns.has(run.runId)) {
+							break;
+						}
+
+						if (run.mode === 'step' && readyQueue.length > 0 && runningTasks.size === 0) {
+							run.status = 'paused';
+							this._notifyRunChanged(run);
+							await new Promise<void>(resolve => {
+								this._stepWaiters.set(run.runId, resolve);
+							});
+							if (this._cancelledRuns.has(run.runId)) {
+								break;
+							}
+						}
+
+						while (readyQueue.length > 0 && !this._cancelledRuns.has(run.runId)) {
+							// Prioritize any node belonging to currentDrainedGeneration first
+							const currentGenIndex = readyQueue.findIndex(id => {
+								const gen = nodeGenerations.get(id) || 1;
+								const isLoopTarget = data.links.some(l => isBackEdgeLink(l) && l.to === id);
+								return gen <= currentDrainedGeneration && !isLoopTarget;
+							});
+
+							let nextId: string;
+							if (currentGenIndex !== -1) {
+								nextId = readyQueue.splice(currentGenIndex, 1)[0];
+							} else {
+								// Only next-generation / loop-back nodes remain in readyQueue
+								nextId = readyQueue[0];
+								const targetNodeGen = nodeGenerations.get(nextId) || 1;
+								const isLoopBackTarget = data.links.some(l => isBackEdgeLink(l) && l.to === nextId);
+
+								// Iteration Draining Barrier:
+								// If this node represents a transition to a new loop iteration / generation,
+								// we MUST ensure all in-flight asynchronous tasks from previous generation(s) are completely drained
+								// before allowing the new iteration to begin!
+								if ((isLoopBackTarget || targetNodeGen > currentDrainedGeneration) && runningTasks.size > 0) {
+									await Promise.race(runningTasks.values());
+									continue;
+								}
+								readyQueue.shift();
+							}
+
+							if (runningTasks.has(nextId)) {
+								continue;
+							}
+
+							const targetGen = nodeGenerations.get(nextId) || 1;
+							if (targetGen > currentDrainedGeneration) {
+								currentDrainedGeneration = targetGen;
+								// Prune stale edgeStates for generations older than currentDrainedGeneration - 1,
+								// while preserving unconsumed arrival tokens waiting at non-cyclic Join nodes!
+								for (const [k, v] of edgeStates.entries()) {
+									if (v.generation < currentDrainedGeneration - 1 && !v.preserveUntilConsumed) {
+										edgeStates.delete(k);
+									}
+								}
+							}
+							if (runningTasks.has(nextId)) {
+								continue;
+							}
+							const node = data.nodes.find(n => n.id === nextId);
+							if (!node) continue;
+
+							if (!run.visitedNodeIds.includes(node.id)) {
+								run.visitedNodeIds.push(node.id);
+							}
+							const nodeState = run.nodeStates[node.id] || {
+								nodeId: node.id,
+								nodeLabel: node.label,
+								nodeType: node.type,
+								status: 'pending',
+								executedTickets: []
+							};
+							nodeState.status = 'running';
+							nodeState.startedAt = Date.now();
+							run.nodeStates[node.id] = nodeState;
+							run.currentNodeId = node.id;
+							this._notifyRunChanged(run);
+
+							const taskPromise = (async () => {
+								try {
+									await executeSingleNode(node);
+								} finally {
+									runningTasks.delete(node.id);
+								}
+							})();
+
+							runningTasks.set(node.id, taskPromise);
+
+							if (run.mode === 'step') {
+								break;
+							}
+						}
+
+						if (runningTasks.size === 0 && readyQueue.length === 0) {
+							break;
+						}
+
+						if (runningTasks.size > 0) {
+							await Promise.race(runningTasks.values());
 						}
 					}
-
-					// Step mode pause before moving to the next round of active nodes
-					if (run.mode === 'step' && nextActiveIds.length > 0) {
-						run.status = 'paused';
-						this._notifyRunChanged(run);
-						await new Promise<void>(resolve => {
-							this._stepWaiters.set(run.runId, resolve);
-						});
-					}
-
-					if (this._cancelledRuns.has(run.runId)) {
-						break;
-					}
-
-					activeNodeIds = nextActiveIds;
 				}
 
 				if (isDaemonLoop && !this._cancelledRuns.has(run.runId)) {
@@ -2040,6 +2423,28 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				run.updatedAt = Date.now();
 				run.currentNodeId = undefined;
 				if (run.status !== 'failed') {
+					// Aggregate all outputs from the unique Workflow Output Node (across all output components in order)
+					if (run.ioContract?.outputNodeId && run.ioContract.outputs.length > 0) {
+						const aggregatedOutputs: Record<string, any> = {};
+						const aggregatedByVar: Record<string, any> = {};
+						for (const outDef of run.ioContract.outputs) {
+							const outVal = run.contextVariables[outDef.label]
+								?? run.contextVariables[outDef.varName]
+								?? run.contextVariables[outDef.fieldKey];
+							aggregatedOutputs[outDef.label] = outVal;
+							if (outDef.varName) {
+								aggregatedByVar[outDef.varName] = outVal;
+							}
+						}
+						run.workflowOutputs = aggregatedOutputs;
+						run.workflowOutputsByVarName = aggregatedByVar;
+						run.contextVariables['WORKFLOW_OUTPUTS'] = aggregatedOutputs;
+						this._emitLog(
+							run,
+							'info',
+							`[Workflow Outputs] Exported ${run.ioContract.outputs.length} output(s) from '${run.ioContract.outputNodeLabel || run.ioContract.outputNodeId}': ${run.ioContract.outputs.map(o => `${o.label} [${(o.defaultFormat || 'json').toUpperCase()}]`).join(', ')}`
+						);
+					}
 					run.status = 'completed';
 					this._emitLog(run, 'info', `Workflow '${run.workflowName}' executed successfully to completion in ${(run.durationMs / 1000).toFixed(1)}s!`);
 					this.notificationService.info(`Workflow '${run.workflowName}' completed successfully (${(run.durationMs / 1000).toFixed(1)}s).`);
@@ -2052,10 +2457,211 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					this._persistDebounceMap.delete(run.workflowUri);
 				}
 				this._notifyRunChanged(run);
-				await this.persistRunsForWorkflow(run.workflowUri);
+				try {
+					await this.persistRunsForWorkflow(run.workflowUri);
+				} catch (persistErr) {
+					this.logService.warn(`[WorkflowExecution] Non-fatal error while persisting runs for '${run.workflowName}':`, persistErr);
+				}
 			}
 		} finally {
 			await this._shutdownPythonKernel(run.runId);
+		}
+	}
+
+	private _syncNodeVariablesAfterExecution(
+		run: IWorkflowExecutionRun,
+		node: IFlowchartNode,
+		nodeState: IWorkflowNodeExecutionState
+	): void {
+		if (node.pipeline && node.pipeline.length > 0) {
+			const nodeVars = this._getNodeVars(node);
+			for (const v of nodeVars) {
+				if (v.name) {
+					const cleanVarName = v.name.replace(/^@/, '').trim();
+					if (run.contextVariables[cleanVarName] !== undefined) {
+						v.currentValue = run.contextVariables[cleanVarName];
+					}
+				}
+			}
+		} else {
+			const pipelineAssignedVars = new Set<string>();
+			if (node.pipeline && Array.isArray(node.pipeline)) {
+				for (const step of node.pipeline) {
+					if (step.targetVariable) {
+						pipelineAssignedVars.add(step.targetVariable.replace(/^@/, '').trim());
+					}
+					if (step.expression) {
+						const assignMatches = step.expression.matchAll(/(?:^|\n)\s*@?([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\+|-|\*|\/)?=(?!=)/g);
+						for (const m of assignMatches) {
+							if (m[1]) pipelineAssignedVars.add(m[1]);
+						}
+					}
+				}
+			}
+
+			const nodeVars = this._getNodeVars(node);
+			for (const v of nodeVars) {
+				if (v.name) {
+					const cleanVarName = v.name.replace(/^@/, '').trim();
+					if (pipelineAssignedVars.has(cleanVarName)) {
+						v.currentValue = run.contextVariables[cleanVarName];
+						continue;
+					}
+
+					let assignedVal: any;
+					const oldVal = run.contextVariables[cleanVarName];
+
+					if (v.expression) {
+						let expr = v.expression.trim();
+						const isFunctionCall = this._isFunctionCallExpression(expr) ||
+							this._isFunctionCallExpression(v.name) ||
+							(node.pipeline && node.pipeline.some(p => p.type === 'call_function' && (p.targetVariable?.replace(/^@/, '') === cleanVarName || (p.expression && p.expression.includes(cleanVarName)))));
+
+						if (isFunctionCall && run.contextVariables[cleanVarName] !== undefined) {
+							assignedVal = run.contextVariables[cleanVarName];
+						} else {
+							const assignMatch = expr.match(/^@?[a-zA-Z0-9_\u4e00-\u9fa5]+\s*=\s*([\s\S]*)$/);
+							if (assignMatch) {
+								expr = assignMatch[1].trim();
+							}
+							if (expr.startsWith(`${cleanVarName} +=`)) {
+								expr = `+=${expr.substring(`${cleanVarName} +=`.length).trim()}`;
+							} else if (expr.startsWith(`${cleanVarName}+=`)) {
+								expr = `+=${expr.substring(`${cleanVarName}+=`.length).trim()}`;
+							} else if (expr.startsWith(`${cleanVarName} -=`)) {
+								expr = `-=${expr.substring(`${cleanVarName} -=`.length).trim()}`;
+							} else if (expr.startsWith(`${cleanVarName}-=`)) {
+								expr = `-=${expr.substring(`${cleanVarName}-=`.length).trim()}`;
+							}
+							if (expr.startsWith('=')) {
+								expr = expr.substring(1).trim();
+							}
+
+							const ticketMatch = expr.match(/^@?([a-zA-Z0-9_\-]+)(\[(\d+)\])?$/);
+							const cleanTarget = ticketMatch ? ticketMatch[1] : '';
+							const unpackIdx = ticketMatch && ticketMatch[3] !== undefined ? parseInt(ticketMatch[3], 10) : undefined;
+
+							const matchedTicket = nodeState.executedTickets?.find(t =>
+								t.ticketName === cleanTarget ||
+								t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_') === cleanTarget ||
+								t.ticketName.toLowerCase() === cleanTarget.toLowerCase() ||
+								t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() === cleanTarget.toLowerCase() ||
+								t.ticketId === cleanTarget ||
+								t.ticketId.toLowerCase() === cleanTarget.toLowerCase()
+							) || (cleanTarget === 'ticket' ? nodeState.executedTickets?.[nodeState.executedTickets.length - 1] : undefined);
+
+							if (matchedTicket) {
+								let outVal = matchedTicket.output;
+								if (typeof outVal === 'string' && (outVal.startsWith('[') || outVal.startsWith('{'))) {
+									try { outVal = JSON.parse(outVal); } catch { }
+								}
+								if (unpackIdx !== undefined) {
+									if (Array.isArray(outVal)) {
+										assignedVal = outVal[unpackIdx];
+									} else if (typeof outVal === 'object' && outVal !== null) {
+										assignedVal = Object.values(outVal)[unpackIdx];
+									} else if (typeof outVal === 'string' && outVal.includes(',')) {
+										const parts = outVal.split(',').map(s => s.trim());
+										assignedVal = parts[unpackIdx];
+									} else {
+										assignedVal = outVal;
+									}
+								} else {
+									assignedVal = outVal;
+								}
+							} else if (expr === 'ticket.output' || expr === 'ticket' || expr === '@ticket') {
+								const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
+								assignedVal = lastTicket?.output ?? nodeState.output?.result ?? nodeState.output?.output ?? 'success';
+							} else if (expr === 'ticket.status' || expr === '@ticket.status') {
+								const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
+								assignedVal = lastTicket?.status ?? nodeState.status ?? 'success';
+							} else if (expr === 'ticket.id' || expr === 'ticket.name') {
+								const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
+								assignedVal = lastTicket ? (expr === 'ticket.id' ? lastTicket.ticketId : lastTicket.ticketName) : '';
+							} else if (expr === '+ 1' || expr === '++' || expr === '+= 1' || expr === '+=1') {
+								const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+								assignedVal = base + 1;
+							} else if (expr === '- 1' || expr === '--' || expr === '-= 1' || expr === '-=1') {
+								const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+								assignedVal = base - 1;
+							} else if (/^(\+\=|\+)\s*(\d+(\.\d+)?)$/.test(expr)) {
+								const delta = Number(expr.replace(/^(\+\=|\+)/, '').trim());
+								const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+								assignedVal = base + delta;
+							} else if (/^(-\=|-)\s*(\d+(\.\d+)?)$/.test(expr)) {
+								const delta = Number(expr.replace(/^(-\=|-)/, '').trim());
+								const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+								assignedVal = base - delta;
+							} else if (/^\*\=\s*(\d+(\.\d+)?)$/.test(expr)) {
+								const mult = Number(expr.replace(/^\*\=/, '').trim());
+								const base = typeof oldVal === 'number' ? oldVal : (Number(oldVal) || 0);
+								assignedVal = base * mult;
+							} else if (expr.startsWith('+=')) {
+								try {
+									const rhsExpr = expr.substring(2).trim();
+									const rhsVal = this._evaluateExpressionOrLiteral(rhsExpr, run.contextVariables);
+									if (Array.isArray(oldVal)) {
+										assignedVal = Array.isArray(rhsVal) ? [...oldVal, ...rhsVal] : [...oldVal, rhsVal];
+									} else if (typeof oldVal === 'number' && typeof rhsVal === 'number') {
+										assignedVal = oldVal + rhsVal;
+									} else if (typeof oldVal === 'string' || typeof rhsVal === 'string') {
+										assignedVal = String(oldVal ?? '') + String(rhsVal ?? '');
+									} else if (oldVal && typeof oldVal === 'object' && rhsVal && typeof rhsVal === 'object') {
+										assignedVal = { ...oldVal, ...rhsVal };
+									} else if (oldVal === undefined || oldVal === null) {
+										assignedVal = rhsVal;
+									} else {
+										assignedVal = (Number(oldVal) || 0) + (Number(rhsVal) || 0);
+									}
+								} catch (evalErr: any) {
+									this._emitLog(run, 'error', `[Expression Error] '${v.name}' in '${node.label}': ${evalErr.message}`, { nodeId: node.id });
+									throw evalErr;
+								}
+							} else if (isFunctionCall && run.contextVariables[cleanVarName] !== undefined) {
+								assignedVal = run.contextVariables[cleanVarName];
+							} else {
+								try {
+									assignedVal = this._evaluateExpressionOrLiteral(expr, run.contextVariables);
+								} catch (evalErr: any) {
+									this._emitLog(run, 'error', `[Expression Error] '${v.name}' in '${node.label}': ${evalErr.message}`, { nodeId: node.id });
+									throw evalErr;
+								}
+							}
+						}
+					} else if (nodeState.executedTickets && nodeState.executedTickets.length > 0) {
+						const initClean = (v.initialValue || '').trim().replace(/^@/, '').replace(/^=\s*/, '');
+						const matchedByInit = nodeState.executedTickets.find(t =>
+							t.ticketName === initClean ||
+							t.ticketName.replace(/[^a-zA-Z0-9_]/g, '_') === initClean ||
+							t.ticketName.toLowerCase() === initClean.toLowerCase() ||
+							t.ticketId === initClean
+						);
+						if (matchedByInit) {
+							assignedVal = matchedByInit.output;
+						} else {
+							const lastTicket = nodeState.executedTickets[nodeState.executedTickets.length - 1];
+							assignedVal = lastTicket?.output ?? 'success';
+						}
+					} else {
+						assignedVal = nodeState.output?.[v.name] ?? (nodeVars.length === 1 ? (nodeState.output?.value ?? nodeState.output?.returnValue) : undefined);
+						if (assignedVal === undefined) {
+							if (oldVal !== undefined) {
+								assignedVal = oldVal;
+							} else {
+								assignedVal = this._resolveValue(v.initialValue || 'None', run.contextVariables);
+							}
+						}
+					}
+
+					run.contextVariables[cleanVarName] = assignedVal;
+					v.currentValue = assignedVal;
+					const valPreviewStr = typeof assignedVal === 'object' && assignedVal !== null
+						? JSON.stringify(assignedVal)
+						: String(assignedVal);
+					const shortPreview = valPreviewStr.length > 200 ? valPreviewStr.substring(0, 200) + ' ...' : valPreviewStr;
+					this._emitLog(run, 'info', `[Variable Updated] '${cleanVarName}' = ${shortPreview}${v.expression ? ` (${v.expression})` : ''}`, { nodeId: node.id });
+				}
+			}
 		}
 	}
 
@@ -2211,9 +2817,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketType: execResult.ticketType || ticketType || 'task',
 					status: (execResult.success ? 'success' : 'failed') as 'success' | 'failed',
 					output: this._summarizeValueForHistory(execResult.output),
-					stepResults: execResult.stepResults,
+					stepResults: this._sanitizeStepResultsForHistory(execResult.stepResults),
 					outputSpecs: (execResult as any).outputSpecs,
-					contextVariables: execResult.contextVariables,
 					durationMs: Date.now() - ticketStart
 				};
 				// Update in-flight references
@@ -2226,19 +2831,36 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 
 				// Register primary outputs into contextVariables
-				run.contextVariables[ticketRecord.ticketName] = execResult.output;
-				run.contextVariables[ticketRecord.ticketName.replace(/[^a-zA-Z0-9_]/g, '_')] = execResult.output;
 				if (ticketRecord.ticketId) {
 					run.contextVariables[ticketRecord.ticketId] = execResult.output;
 				}
 
-				// Merge granular field outputs from ticket execution into workflow context
-				if (execResult.contextVariables) {
-					for (const [k, v] of Object.entries(execResult.contextVariables)) {
-						run.contextVariables[`${ticketRecord.ticketName}.${k}`] = v;
-						if (ticketRecord.ticketId) {
-							run.contextVariables[`${ticketRecord.ticketId}.${k}`] = v;
+				// Keep a bounded sliding window of executed ticket IDs in contextVariables (max 10)
+				// Pruning old tickets avoids multi-hundred-megabyte context variable bloat in long loops
+				const ticketHistoryWindow: string[] = (run as any)._executedTicketIdsWindow || ((run as any)._executedTicketIdsWindow = []);
+				if (ticketRecord.ticketId) {
+					ticketHistoryWindow.push(ticketRecord.ticketId);
+					if (ticketHistoryWindow.length > 10) {
+						const staleTicketId = ticketHistoryWindow.shift();
+						if (staleTicketId) {
+							delete run.contextVariables[staleTicketId];
+							for (const ck of Object.keys(run.contextVariables)) {
+								if (ck.startsWith(`${staleTicketId}.`)) {
+									delete run.contextVariables[ck];
+								}
+							}
+							const liveKernel = this._pythonKernels.get(run.runId);
+							if (liveKernel) {
+								liveKernel.lastSyncedVars.delete(staleTicketId);
+							}
 						}
+					}
+				}
+
+				// Merge granular field outputs from ticket execution into workflow context for the active ticket
+				if (execResult.contextVariables && ticketRecord.ticketId) {
+					for (const [k, v] of Object.entries(execResult.contextVariables)) {
+						run.contextVariables[`${ticketRecord.ticketId}.${k}`] = v;
 					}
 				}
 
@@ -2248,6 +2870,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 				this._emitLog(run, execResult.success ? 'info' : 'error', `Ticket '${ticketName}' finished with status: ${execResult.status} in ${ticketRecord.durationMs}ms`);
 				this._notifyRunChanged(run);
+				if (!execResult.success || ticketRecord.status === 'failed') {
+					throw new Error(execResult.error || `Ticket '${ticketName}' execution failed`);
+				}
 				return ticketRecord;
 			};
 
@@ -2256,14 +2881,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					throw new Error('Workflow execution was stopped');
 				}
 				const step = node.pipeline[i];
-				if (step.disabled) {
-					this._emitLog(run, 'info', `[Step #${i + 1} Skipped] Python Step is commented out (disabled), skipping execution.`, { nodeId: node.id });
+				const stepComp = (step as any).component;
+				if (step.disabled || (stepComp && stepComp.disabled)) {
+					const stepTitle = stepComp?.label || step.label || step.expression || 'Step';
+					this._emitLog(run, 'info', `[Step #${i + 1} Skipped] Step '${stepTitle}' is disabled / commented out, skipping execution.`, { nodeId: node.id });
 					continue;
 				}
-				const stepComp = (step as any).component;
+				if (stepComp?.type === 'voice_note' && !stepComp.voiceRunInFlow) {
+					continue;
+				}
 				const isDirectComponentStep = stepComp && (
 					step.type === 'component' ||
-					['parameters', 'output', 'prompt', 'table', 'browser', 'tts', 'media_player', 'ssh', 'git', 'python', 'http_request'].includes(stepComp.type)
+					['parameters', 'output', 'prompt', 'table', 'browser', 'tts', 'media_player', 'voice_note', 'ssh', 'git', 'python', 'http_request'].includes(stepComp.type)
 				);
 				const isRunTicketStep = step.type === 'run_ticket' || step.type === 'run_tickets' || step.type === 'RUN_TICKETS' || step.type === 'runTickets';
 				const isCallFnStep = step.type === 'call_function' || step.type === 'custom_code' || (step.expression && this._isFunctionCallExpression(step.expression));
@@ -2306,6 +2935,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								value: this._summarizeValueForHistory(compRes.output),
 								durationMs: compRes.durationMs
 							});
+							if (stepComp.type === 'browser' && compRes.details?.resolvedUrl) {
+								stepComp.lastResolvedUrl = compRes.details.resolvedUrl;
+								this._emitLog(run, 'info', `[Step #${i + 1} Browser URL] Visited Target: ${compRes.details.resolvedUrl}`, { nodeId: node.id });
+							}
 							if (stepComp.type === 'python' && compRes.details?.output) {
 								const cleanStdout = String(compRes.details.output)
 									.replace(/^>>> Running Python Script\r?\n?/, '')
@@ -2337,6 +2970,20 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							}
 						} else if (this._pythonKernels.has(run.runId) && (isCallFnStep || step.type === 'set_variable')) {
 							let pyCode = (step.expression || '').trim();
+							if (stepComp?.type === 'get_outputs' && stepComp.wfTicketField && stepComp.wfTicketField.trim()) {
+								const trimmedField = stepComp.wfTicketField.trim();
+								if (!/\bfield\s*=/i.test(pyCode) && /\b(?:GET_OUTPUTS|get_outputs)\s*\(/i.test(pyCode)) {
+									pyCode = pyCode.replace(
+										/\b(GET_OUTPUTS|get_outputs)\s*\(([^)]*)\)/,
+										(_match, fn, inner) => {
+											const innerTrimmed = inner.trim();
+											const fieldArg = `field=${JSON.stringify(trimmedField)}`;
+											return innerTrimmed ? `${fn}(${innerTrimmed}, ${fieldArg})` : `${fn}(${fieldArg})`;
+										}
+									);
+									step.expression = pyCode;
+								}
+							}
 							if (step.type === 'set_variable' && step.targetVariable) {
 								const varKey = step.targetVariable.trim().replace(/^@/, '');
 								if (!pyCode) {
@@ -2450,15 +3097,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							const outVal = targetKey && run.contextVariables[targetKey] !== undefined
 								? run.contextVariables[targetKey]
 								: undefined;
-							const summarizedOutVal = this._summarizeValueForHistory(outVal);
 							stepComp.lastExecutionStatus = 'success';
 							stepComp.lastExecutionDurationMs = dur;
 							stepComp.lastExecutedAt = ts;
-							stepComp.lastExecutionOutput = summarizedOutVal;
-							const previewStr = summarizedOutVal !== undefined
-								? (typeof summarizedOutVal === 'object' ? JSON.stringify(summarizedOutVal, null, 2) : String(summarizedOutVal))
+							stepComp.lastExecutionOutput = outVal;
+							const rawOutStr = outVal !== undefined
+								? (typeof outVal === 'object' ? JSON.stringify(outVal, null, 2) : String(outVal))
 								: 'Executed successfully';
-							stepComp.lastExecutionLog = `>>> ${step.expression || stepComp.label || stepComp.type}\nTimestamp: ${ts} (${dur}ms)\nResult:\n${previewStr.length > 4000 ? previewStr.substring(0, 4000) + '\n... [truncated]' : previewStr}`;
+							stepComp.lastExecutionLog = rawOutStr;
 							if (!run.fullSpeed) {
 								await this._persistAndNotifyNodeComponents(run, node);
 							}
@@ -2494,7 +3140,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			if (run.fullSpeed) {
 				await this._persistAndNotifyNodeComponents(run, node);
 			}
-			state.output = { executedSteps: node.pipeline.length, tickets: state.executedTickets };
+			state.output = {
+				executedSteps: node.pipeline.length,
+				tickets: state.executedTickets.map(t => ({
+					ticketId: t.ticketId,
+					ticketName: t.ticketName,
+					ticketType: t.ticketType,
+					status: t.status,
+					durationMs: t.durationMs
+				}))
+			};
 			return;
 		}
 
@@ -2578,7 +3233,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 			}
 
-			state.output = { executedCount: ticketImports.length, tickets: state.executedTickets };
+			state.output = {
+				executedCount: ticketImports.length,
+				tickets: state.executedTickets.map(t => ({
+					ticketId: t.ticketId,
+					ticketName: t.ticketName,
+					ticketType: t.ticketType,
+					status: t.status,
+					durationMs: t.durationMs
+				}))
+			};
 			return;
 		}
 
@@ -2711,7 +3375,6 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 				}
 
-				const mergedInputs = { ...run.contextVariables, ...inputParams };
 				const paramKeys = Object.keys(inputParams);
 				const paramSummary = paramKeys.length > 0
 					? paramKeys.map(k => `${k}=${JSON.stringify(inputParams[k])}`).join(', ')
@@ -2738,7 +3401,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const execRes = await this.ticketRuntimeService.RUN_TICKETS({
 					workspaceUri: workflowDir,
 					ticketIdOrPath,
-					inputParams: mergedInputs,
+					inputParams: inputParams,
 					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
 					onStepStart: (info) => {
 						this._emitLog(run, 'info', `  ▶ [${ticketIdOrPath}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
@@ -2790,8 +3453,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					status: (execRes.success ? 'success' : 'failed') as 'success' | 'failed',
 					output: this._summarizeValueForHistory(execRes.output),
 					outputSpecs: (execRes as any).outputSpecs,
-					stepResults: execRes.stepResults,
-					contextVariables: execRes.contextVariables,
+					stepResults: this._sanitizeStepResultsForHistory(execRes.stepResults),
 					durationMs: Date.now() - startMs
 				};
 				inFlightOp.executedTicket = ticketRecord;
@@ -2864,9 +3526,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					},
 					durationMs: Date.now() - startMs
 				});
-			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS' || upperFn === 'GETTICKET') {
-				const rawTarget = kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.id ?? args[0] ?? '';
-				const getRes = await this.ticketRuntimeService.GET_TICKETS(workflowDir, rawTarget);
+			} else if (upperFn === 'GET_TICKET' || upperFn === 'GETTICKET') {
+				const rawTarget = kwargs.ticket_id ?? kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticketId ?? kwargs.id ?? args[0] ?? '';
+				const field = kwargs.field ?? kwargs.key ?? kwargs.name ?? args[1];
+				const getRes = await this.ticketRuntimeService.getTicket(workflowDir, rawTarget, field);
 				if (getRes && typeof getRes === 'object') {
 					try {
 						Object.defineProperty(getRes, '__isTicketGetResult', {
@@ -2878,29 +3541,32 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					} catch { }
 				}
 				result = getRes;
+			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS') {
+				const hasQueryFilters = kwargs.ticket_type !== undefined || kwargs.status !== undefined || kwargs.title !== undefined || kwargs.field !== undefined || kwargs.ticketType !== undefined;
+				if (hasQueryFilters) {
+					result = await this.ticketRuntimeService.getTickets(workflowDir, kwargs, kwargs.field);
+				} else {
+					const rawTarget = kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.id ?? args[0] ?? '';
+					const getRes = await this.ticketRuntimeService.getTickets(workflowDir, rawTarget, kwargs.field);
+					if (getRes && typeof getRes === 'object') {
+						try {
+							Object.defineProperty(getRes, '__isTicketGetResult', {
+								value: true,
+								enumerable: false,
+								configurable: true,
+								writable: true
+							});
+						} catch { }
+					}
+					result = getRes;
+				}
 			} else if (upperFn === 'GET_OUTPUTS' || upperFn === 'GETOUTPUTS' || upperFn === 'GET_OUTPUT' || upperFn === 'GETOUTPUT') {
 				const rawTarget = kwargs.ticket_id ?? kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticketId ?? kwargs.ticketIdOrPath ?? kwargs.id ?? args[0] ?? '';
-				const outRes = await this.ticketRuntimeService.GET_OUTPUTS(workflowDir, rawTarget);
 				const requestedField = kwargs.field ?? kwargs.key ?? kwargs.name ?? kwargs.output ?? args[1];
-				if (requestedField && outRes && typeof outRes === 'object') {
-					const targetKey = String(requestedField).trim();
-					if (targetKey in outRes) {
-						result = outRes[targetKey];
-					} else {
-						const normKey = targetKey.toLowerCase().replace(/_/g, ' ');
-						let matched = Object.keys(outRes).find(k => !k.startsWith('__') && k.trim().toLowerCase().replace(/_/g, ' ') === normKey);
-						if (matched === undefined && normKey.length >= 4) {
-							const prefixMatches = Object.keys(outRes).filter(k => {
-								if (k.startsWith('__')) { return false; }
-								const kn = k.trim().toLowerCase().replace(/_/g, ' ');
-								return kn.startsWith(normKey) || normKey.startsWith(kn);
-							});
-							if (prefixMatches.length === 1) {
-								matched = prefixMatches[0];
-							}
-						}
-						result = matched !== undefined ? outRes[matched] : undefined;
-					}
+				const targetField = (requestedField !== undefined && requestedField !== null && String(requestedField).trim() !== '') ? String(requestedField).trim() : undefined;
+				const outRes = await this.ticketRuntimeService.GET_OUTPUTS(workflowDir, rawTarget, targetField);
+				if (targetField !== undefined) {
+					result = outRes;
 				} else {
 					if (outRes && typeof outRes === 'object' && !Array.isArray(outRes)) {
 						try {
@@ -2938,7 +3604,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 				result = displayVal;
 
-				const { formattedText, summaryType, cleanValue, ticketTitle, ticketId, ticketType, outputItems, ticketHandle } = this._formatDisplayOutput(displayVal);
+				const { formattedText, summaryType, cleanValue, ticketTitle, ticketId, ticketType, outputItems, ticketHandle, isTruncated, displayPreviewText, totalCount } = this._formatDisplayOutput(displayVal);
 
 				const nodeLabelName = (node.label && node.label.trim()) ? node.label.trim() : (node.id || 'Node');
 				const logDisplayPreview = formattedText.length > 500
@@ -2957,6 +3623,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 				const displayCard: IWorkflowDisplayCard = {
 					id: reusedId,
+					workflowUri: run.workflowUri,
 					runId: run.runId,
 					nodeId: node.id,
 					nodeTitle: nodeLabelName,
@@ -2968,7 +3635,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketId,
 					ticketType,
 					outputItems,
-					ticketHandle
+					ticketHandle,
+					isTruncated,
+					displayPreviewText,
+					totalCount
 				};
 
 				cardList.unshift(displayCard);
@@ -3192,6 +3862,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		ticketType?: string;
 		outputItems?: IWorkflowDisplayOutputItem[];
 		ticketHandle?: ITicketHandleInfo;
+		isTruncated?: boolean;
+		displayPreviewText?: string;
+		totalCount?: number;
 	} {
 		if (displayVal === undefined) {
 			return { formattedText: 'undefined', summaryType: 'undefined', cleanValue: undefined };
@@ -3257,18 +3930,46 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				try {
 					const parsed = JSON.parse(trimmed);
 					const cleanParsed = this._stripInternalDisplayMeta(parsed);
+					const fullFormatted = JSON.stringify(cleanParsed, null, 2);
+					const isArray = Array.isArray(cleanParsed);
+					let isTruncated = false;
+					let displayPreviewText: string | undefined = undefined;
+					let totalCount: number | undefined = undefined;
+
+					if (isArray && cleanParsed.length > 50) {
+						isTruncated = true;
+						totalCount = cleanParsed.length;
+						displayPreviewText = JSON.stringify(cleanParsed.slice(0, 50), null, 2);
+					} else if (fullFormatted.length > 30000) {
+						isTruncated = true;
+						totalCount = fullFormatted.length;
+						displayPreviewText = fullFormatted.substring(0, 30000);
+					}
+
 					return {
-						formattedText: JSON.stringify(cleanParsed, null, 2),
-						summaryType: Array.isArray(cleanParsed)
+						formattedText: fullFormatted,
+						summaryType: isArray
 							? `json array [${cleanParsed.length}]`
 							: (typeof cleanParsed === 'object' && cleanParsed !== null ? `json object {${Object.keys(cleanParsed).length} keys}` : `string (${displayVal.length} chars)`),
-						cleanValue: cleanParsed
+						cleanValue: cleanParsed,
+						isTruncated,
+						displayPreviewText,
+						totalCount
 					};
 				} catch {
 					// Not valid JSON, fall through to plain string
 				}
 			}
-			return { formattedText: displayVal, summaryType: `string (${displayVal.length} chars)`, cleanValue: displayVal };
+
+			let isTruncated = false;
+			let displayPreviewText: string | undefined = undefined;
+			let totalCount: number | undefined = undefined;
+			if (displayVal.length > 30000) {
+				isTruncated = true;
+				totalCount = displayVal.length;
+				displayPreviewText = displayVal.substring(0, 30000);
+			}
+			return { formattedText: displayVal, summaryType: `string (${displayVal.length} chars)`, cleanValue: displayVal, isTruncated, displayPreviewText, totalCount };
 		}
 
 		if (typeof displayVal === 'number' || typeof displayVal === 'boolean') {
@@ -3280,29 +3981,41 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const ticketTitle = displayVal?.__ticketMetadata?.title || displayVal?.__ticketMetadata?.ticketName || '';
 		const ticketType = displayVal?.__ticketMetadata?.ticketType || '';
 		const cleanVal = this._stripInternalDisplayMeta(displayVal);
-		const totalArrayLen = Array.isArray(cleanVal) ? cleanVal.length : 0;
-		const cappedCleanVal = Array.isArray(cleanVal) && cleanVal.length > 100
-			? [...cleanVal.slice(0, 50), { __note__: `... (${cleanVal.length - 100} middle rows omitted in Live Display card; total ${cleanVal.length} rows) ...` }, ...cleanVal.slice(-50)]
-			: cleanVal;
+		const isArray = Array.isArray(cleanVal);
+		const totalArrayLen = isArray ? cleanVal.length : 0;
 		let rawJsonText = '';
 		try {
-			rawJsonText = JSON.stringify(cappedCleanVal, null, 2) || '';
+			rawJsonText = JSON.stringify(cleanVal, null, 2) || '';
 		} catch {
-			rawJsonText = String(cappedCleanVal);
+			rawJsonText = String(cleanVal);
 		}
-		const cappedFormattedText = rawJsonText.length > 100000
-			? rawJsonText.substring(0, 100000) + `\n... [truncated (${rawJsonText.length} chars total)]`
-			: rawJsonText;
+
+		let isTruncated = false;
+		let displayPreviewText: string | undefined = undefined;
+		let totalCount: number | undefined = undefined;
+
+		if (isArray && cleanVal.length > 50) {
+			isTruncated = true;
+			totalCount = cleanVal.length;
+			displayPreviewText = JSON.stringify(cleanVal.slice(0, 50), null, 2);
+		} else if (rawJsonText.length > 30000) {
+			isTruncated = true;
+			totalCount = rawJsonText.length;
+			displayPreviewText = rawJsonText.substring(0, 30000);
+		}
 
 		return {
-			formattedText: cappedFormattedText,
-			summaryType: Array.isArray(cleanVal)
+			formattedText: rawJsonText,
+			summaryType: isArray
 				? `array [${totalArrayLen}]`
 				: `object {${Object.keys(cleanVal || {}).length} keys}`,
-			cleanValue: cappedCleanVal,
+			cleanValue: cleanVal,
 			ticketTitle: ticketTitle || undefined,
 			ticketId: ticketId || undefined,
-			ticketType: ticketType || undefined
+			ticketType: ticketType || undefined,
+			isTruncated,
+			displayPreviewText,
+			totalCount
 		};
 	}
 
@@ -3680,6 +4393,261 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		return Array.from(map.values());
 	}
 
+	public resolveWorkflowIOContract(data: IFlowchartData): IWorkflowIOContract {
+		const errors: string[] = [];
+		const inputs: IWorkflowInputParamDef[] = [];
+		const outputs: IWorkflowOutputDef[] = [];
+
+		if (!data || !Array.isArray(data.nodes) || data.nodes.length === 0) {
+			const msg = 'Workflow has no nodes; cannot determine unique Input or Output node.';
+			return {
+				isValid: false,
+				inputError: msg,
+				outputError: msg,
+				inputs,
+				outputs,
+				errors: [msg]
+			};
+		}
+
+		const nodes = data.nodes;
+		const links = Array.isArray(data.links) ? data.links : [];
+		const nodeById = new Map<string, IFlowchartNode>();
+		for (const n of nodes) {
+			nodeById.set(n.id, n);
+		}
+
+		const isPureStartCircle = (n: IFlowchartNode): boolean => {
+			const hasParamComp = (n.pipeline || []).some(s => (s as any)?.component?.type === 'parameters');
+			return !hasParamComp && n.type === 'circle' && /^\s*(start|begin|entry)\s*$/i.test(n.label || '');
+		};
+		const isPureEndCircle = (n: IFlowchartNode): boolean => {
+			const hasOutputComp = (n.pipeline || []).some(s => {
+				const t = (s as any)?.component?.type;
+				return t === 'output' || t === 'result';
+			});
+			return !hasOutputComp && this._isEndNode(n);
+		};
+
+		// 1. Resolve Unique Input Node (first execution node of the workflow)
+		let inputNode: IFlowchartNode | undefined;
+		let inputError: string | undefined;
+
+		const incomingTargetIds = new Set(links.map(l => l.to));
+		const rootCandidates = nodes.filter(n => !incomingTargetIds.has(n.id) && n.type !== 'diamond' && !this._isEndNode(n));
+
+		let rootNode: IFlowchartNode | undefined;
+		if (rootCandidates.length === 1) {
+			rootNode = rootCandidates[0];
+		} else if (rootCandidates.length > 1) {
+			const explicitStarts = rootCandidates.filter(isPureStartCircle);
+			if (explicitStarts.length === 1) {
+				rootNode = explicitStarts[0];
+			} else {
+				const names = rootCandidates.map(n => `'${n.label || n.id}'`).join(', ');
+				inputError = `Ambiguous Workflow Input node: found ${rootCandidates.length} entry nodes (${names}). Ensure there is a single unique starting node.`;
+				errors.push(inputError);
+			}
+		} else {
+			inputError = 'Cannot uniquely determine Workflow Input node (no root entry node with 0 incoming links found).';
+			errors.push(inputError);
+		}
+
+		if (rootNode && !inputError) {
+			if (isPureStartCircle(rootNode)) {
+				const firstTargets = Array.from(new Set(
+					links.filter(l => l.from === rootNode!.id).map(l => l.to)
+				))
+					.map(id => nodeById.get(id))
+					.filter((n): n is IFlowchartNode => !!n && !isPureEndCircle(n));
+
+				if (firstTargets.length === 1) {
+					inputNode = firstTargets[0];
+				} else if (firstTargets.length > 1) {
+					const withInputs = firstTargets.filter(n => (n.pipeline || []).some(s => (s as any)?.component?.type === 'parameters'));
+					if (withInputs.length === 1) {
+						inputNode = withInputs[0];
+					} else {
+						const names = firstTargets.map(n => `'${n.label || n.id}'`).join(', ');
+						inputError = `Ambiguous Workflow Input node: Start node branches into ${firstTargets.length} nodes (${names}).`;
+						errors.push(inputError);
+					}
+				} else {
+					inputNode = rootNode;
+				}
+			} else {
+				inputNode = rootNode;
+			}
+		}
+
+		// Accumulate ALL parameters from ALL Inputs ('parameters') components inside the unique Input Node in order
+		if (inputNode) {
+			for (const step of (inputNode.pipeline || [])) {
+				const comp = (step as any)?.component;
+				if (comp && comp.type === 'parameters' && Array.isArray(comp.parameters)) {
+					for (const p of comp.parameters) {
+						const pName = (p?.name || '').trim();
+						if (!pName) {
+							continue;
+						}
+						inputs.push({
+							name: pName,
+							label: (p?.label || pName).trim(),
+							defaultValue: p?.defaultValue !== undefined && p?.defaultValue !== null ? String(p.defaultValue) : '',
+							options: Array.isArray(p?.options) ? [...p.options] : undefined,
+							description: p?.description || undefined,
+							componentId: comp.id || step.id,
+							componentLabel: comp.label || 'Inputs'
+						});
+					}
+				}
+			}
+		}
+
+		// 2. Resolve Unique Output Node (last executable node of the workflow; anything placed AFTER End is ignored)
+		let outputNode: IFlowchartNode | undefined;
+		let outputError: string | undefined;
+
+		// Compute reachable executable subgraph starting from root(s), strictly stopping at End nodes
+		const executableNodeIds = new Set<string>();
+		const bfsQueue: string[] = rootNode ? [rootNode.id] : rootCandidates.map(n => n.id);
+		for (const seedId of bfsQueue) {
+			executableNodeIds.add(seedId);
+		}
+		while (bfsQueue.length > 0) {
+			const currId = bfsQueue.shift()!;
+			const currNode = nodeById.get(currId);
+			if (!currNode || this._isEndNode(currNode)) {
+				// Stop traversal at End node — nodes placed after End are never executed
+				continue;
+			}
+			for (const l of links) {
+				if (l.from === currId && !executableNodeIds.has(l.to)) {
+					executableNodeIds.add(l.to);
+					bfsQueue.push(l.to);
+				}
+			}
+		}
+
+		const activeNodes = executableNodeIds.size > 0
+			? nodes.filter(n => executableNodeIds.has(n.id))
+			: nodes;
+		const activeOutgoingSourceIds = new Set(
+			links.filter(l => executableNodeIds.has(l.from) && executableNodeIds.has(l.to)).map(l => l.from)
+		);
+		const terminalSet = new Map<string, IFlowchartNode>();
+		for (const n of activeNodes) {
+			if (isPureEndCircle(n)) {
+				// Trace executable predecessors of End circle as terminal execution nodes
+				for (const l of links) {
+					if (l.to === n.id && executableNodeIds.has(l.from)) {
+						const pred = nodeById.get(l.from);
+						if (pred && !isPureStartCircle(pred) && !isPureEndCircle(pred)) {
+							terminalSet.set(pred.id, pred);
+						}
+					}
+				}
+			} else if (!activeOutgoingSourceIds.has(n.id) && n.type !== 'diamond' && !isPureStartCircle(n)) {
+				terminalSet.set(n.id, n);
+			}
+		}
+		const terminalNodes = Array.from(terminalSet.values());
+		const nodesWithOutputComp = activeNodes.filter(n => !isPureEndCircle(n) && (n.pipeline || []).some(s => {
+			const t = (s as any)?.component?.type;
+			return t === 'output' || t === 'result';
+		}));
+
+		if (terminalNodes.length === 1) {
+			outputNode = terminalNodes[0];
+		} else if (terminalNodes.length > 1) {
+			const terminalsWithOutput = terminalNodes.filter(n => (n.pipeline || []).some(s => {
+				const t = (s as any)?.component?.type;
+				return t === 'output' || t === 'result';
+			}));
+			if (terminalsWithOutput.length === 1) {
+				outputNode = terminalsWithOutput[0];
+			} else if (nodesWithOutputComp.length === 1) {
+				outputNode = nodesWithOutputComp[0];
+			} else {
+				const names = (terminalsWithOutput.length > 1 ? terminalsWithOutput : terminalNodes)
+					.map(n => `'${n.label || n.id}'`)
+					.join(', ');
+				outputError = `Ambiguous Workflow Output node: found ${terminalNodes.length} terminal/output nodes (${names}). Ensure there is a single unique final Output node.`;
+				errors.push(outputError);
+			}
+		} else {
+			if (nodesWithOutputComp.length === 1) {
+				outputNode = nodesWithOutputComp[0];
+			} else if (nodesWithOutputComp.length > 1) {
+				const names = nodesWithOutputComp.map(n => `'${n.label || n.id}'`).join(', ');
+				outputError = `Ambiguous Workflow Output node: found ${nodesWithOutputComp.length} nodes with Output components (${names}).`;
+				errors.push(outputError);
+			} else {
+				outputError = 'Cannot uniquely determine Workflow Output node (no terminal node found).';
+				errors.push(outputError);
+			}
+		}
+
+		// Accumulate ALL enabled output specs from ALL Output ('output'/'result') components inside the unique Output Node in order
+		if (outputNode) {
+			for (const step of (outputNode.pipeline || [])) {
+				const comp = (step as any)?.component;
+				if (comp && (comp.type === 'output' || comp.type === 'result') && Array.isArray(comp.outputSpecs)) {
+					for (const spec of comp.outputSpecs) {
+						if (!spec || spec.enabled === false) {
+							continue;
+						}
+						const label = (spec.label || spec.varName || spec.fieldKey || '').trim();
+						if (!label) {
+							continue;
+						}
+						const varName = (spec.varName || '').trim() || generateSmartPythonVarName(label);
+						outputs.push({
+							label,
+							fieldKey: spec.fieldKey || label,
+							varName,
+							defaultFormat: spec.defaultFormat || (spec.isCustom ? 'json' : 'table'),
+							sourceExpression: spec.sourceExpression || undefined,
+							isCustom: Boolean(spec.isCustom),
+							componentId: comp.id || step.id,
+							componentLabel: comp.label || 'Output'
+						});
+					}
+				}
+			}
+		}
+
+		return {
+			isValid: errors.length === 0,
+			inputNodeId: inputNode?.id,
+			inputNodeLabel: inputNode?.label || inputNode?.id,
+			inputError,
+			inputs,
+			outputNodeId: outputNode?.id,
+			outputNodeLabel: outputNode?.label || outputNode?.id,
+			outputError,
+			outputs,
+			errors
+		};
+	}
+
+	public async getWorkflowIOContract(workflowUri: URI | string): Promise<IWorkflowIOContract> {
+		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+		const data = await this._loadFlowchartData(uriStr);
+		if (!data) {
+			const msg = `Unable to load workflow data for '${uriStr}'.`;
+			return {
+				isValid: false,
+				inputError: msg,
+				outputError: msg,
+				inputs: [],
+				outputs: [],
+				errors: [msg]
+			};
+		}
+		return this.resolveWorkflowIOContract(data);
+	}
+
 	private _findEntryNode(data: IFlowchartData, entryNodeId?: string): IFlowchartNode | undefined {
 		if (entryNodeId) {
 			const node = data.nodes.find(n => n.id === entryNodeId);
@@ -3845,7 +4813,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 									(s && s.component && s.component.id && s.component.id === srcComp.id)
 								);
 								if (dstStep) {
-									dstStep.component = { ...(dstStep.component || {}), ...srcComp };
+									const { lastSentPrompt, debugPromptOutput, lastExecutionLog, lastExecutionOutput, ...leanComp } = srcComp;
+									const persistedLog = typeof srcComp.lastExecutionLog === 'string' && srcComp.lastExecutionLog.length > 50000
+										? srcComp.lastExecutionLog.substring(0, 50000)
+										: srcComp.lastExecutionLog;
+									dstStep.component = {
+										...(dstStep.component || {}),
+										...leanComp,
+										lastExecutionStatus: srcComp.lastExecutionStatus,
+										lastExecutionDurationMs: srcComp.lastExecutionDurationMs,
+										lastExecutedAt: srcComp.lastExecutedAt,
+										lastExecutionLog: persistedLog
+									};
 								}
 							}
 							await this.fileService.writeFile(
@@ -4031,30 +5010,32 @@ def _rpc_call(fn_name, args, kwargs):
                     break
         except Exception:
             pass
-    payload = {"id": req_id, "cmd_id": current_cmd_id, "fn": fn_name, "args": resolved_args, "kwargs": resolved_kwargs, "call_expr": call_expr}
+    active_cmd_id = getattr(_tls, "current_cmd_id", current_cmd_id)
+    payload = {"id": req_id, "cmd_id": active_cmd_id, "fn": fn_name, "args": resolved_args, "kwargs": resolved_kwargs, "call_expr": call_expr}
+    req_file = os.path.join(KERNEL_DIR, f"rpc_req_{req_id}.json")
+    res_file = os.path.join(KERNEL_DIR, f"rpc_res_{req_id}.json")
     try:
-        if os.path.exists(RPC_RES_FILE):
-            os.remove(RPC_RES_FILE)
+        if os.path.exists(res_file):
+            os.remove(res_file)
     except OSError:
         pass
-    tmp_req = RPC_REQ_FILE + ".tmp"
+    tmp_req = req_file + ".tmp"
     with open(tmp_req, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, default=str)
-    os.replace(tmp_req, RPC_REQ_FILE)
+    os.replace(tmp_req, req_file)
 
     while True:
         last_active_ts = time.time()
         if not os.path.exists(KERNEL_DIR):
             sys.exit(0)
-        if os.path.exists(RPC_RES_FILE):
+        if os.path.exists(res_file):
             try:
-                with open(RPC_RES_FILE, "r", encoding="utf-8") as f:
+                with open(res_file, "r", encoding="utf-8") as f:
                     res = json.load(f)
                 if res.get("id") == req_id:
                     last_active_ts = time.time()
                     try:
-                        if os.path.exists(RPC_REQ_FILE):
-                            os.remove(RPC_REQ_FILE)
+                        os.remove(res_file)
                     except OSError:
                         pass
                     if res.get("error"):
@@ -4070,8 +5051,15 @@ def RUN_TICKETS(*args, **kwargs):
 def CREATE_TICKETS(*args, **kwargs):
     return _rpc_call("CREATE_TICKETS", args, kwargs)
 
+def GET_TICKET(*args, **kwargs):
+    return _rpc_call("GET_TICKET", args, kwargs)
+
+get_ticket = GET_TICKET
+
 def GET_TICKETS(*args, **kwargs):
     return _rpc_call("GET_TICKETS", args, kwargs)
+
+get_tickets = GET_TICKETS
 
 def GET_OUTPUTS(*args, **kwargs):
     return _rpc_call("GET_OUTPUTS", args, kwargs)
@@ -4111,13 +5099,15 @@ wf_globals = {
     "run_tickets": RUN_TICKETS,
     "CREATE_TICKETS": CREATE_TICKETS,
     "create_tickets": CREATE_TICKETS,
-    "GET_TICKETS": GET_TICKETS,
-    "get_tickets": GET_TICKETS,
+    "GET_TICKET": GET_TICKET,
+    "get_ticket": GET_TICKET,
     "GET_OUTPUTS": GET_OUTPUTS,
     "get_outputs": GET_OUTPUTS,
     "GET_PRIMITIVES_CATALOG": GET_PRIMITIVES_CATALOG,
     "get_primitives_catalog": GET_PRIMITIVES_CATALOG,
     "DISPLAY": DISPLAY,
+    "display": DISPLAY,
+    "title": "",
     "display": DISPLAY,
     "DATE": DATE,
     "TODAY": TODAY,
@@ -4257,6 +5247,108 @@ last_cmd_id = None
 INITIAL_PPID = os.getppid()
 last_active_ts = time.time()
 
+import concurrent.futures, threading
+
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=32)
+running_cmds = set()
+completed_cmds = set()
+running_cmds_lock = threading.Lock()
+
+class _ThreadLocalStdout(object):
+    def __init__(self, original):
+        self._orig = original
+        self._local = threading.local()
+    def set_buffer(self, buf):
+        self._local.buf = buf
+    def get_buffer(self):
+        return getattr(self._local, "buf", None)
+    def write(self, s):
+        buf = self.get_buffer()
+        if buf is not None:
+            buf.write(s)
+        else:
+            self._orig.write(s)
+    def flush(self):
+        buf = self.get_buffer()
+        if buf is not None:
+            buf.flush()
+        else:
+            self._orig.flush()
+
+_tls = threading.local()
+_orig_stdout = sys.stdout
+_tls_stdout = _ThreadLocalStdout(_orig_stdout)
+sys.stdout = _tls_stdout
+
+def _run_single_command(cmd_path, cmd_res_path, cmd):
+    global last_active_ts
+    cmd_id = cmd.get("id")
+    _tls.current_cmd_id = cmd_id
+    last_active_ts = time.time()
+    action = cmd.get("action", "exec")
+    code = cmd.get("code", "")
+    sync_vars = cmd.get("sync_vars")
+    if isinstance(sync_vars, dict):
+        for sk, sv in sync_vars.items():
+            if sk in ("TICKET_CONTEXT", "CONTEXT", "ANY_AGENT_CONTEXT") or sk.startswith("@"):
+                continue
+            wf_globals[sk] = _wrap_val(sv)
+            try:
+                _exported_var_snapshots[sk] = json.dumps(sv, ensure_ascii=False, default=str)
+            except Exception:
+                pass
+    wf_globals["TICKET_CONTEXT"] = wf_globals
+    wf_globals["CONTEXT"] = wf_globals
+    wf_globals["ANY_AGENT_CONTEXT"] = wf_globals
+
+    sanitized = _sanitize_legacy_syntax(code)
+    stdout_buf = io.StringIO()
+    _tls_stdout.set_buffer(stdout_buf)
+    eval_val = None
+    err_msg = None
+    try:
+        if action == "eval":
+            eval_val = eval(sanitized, wf_globals)
+        else:
+            try:
+                compiled = compile(sanitized, "<workflow_step>", "eval")
+                eval_val = eval(compiled, wf_globals)
+            except SyntaxError:
+                compiled = compile(sanitized, "<workflow_step>", "exec")
+                exec(compiled, wf_globals)
+    except Exception as ex:
+        err_msg = f"{type(ex).__name__}: {ex}"
+    finally:
+        _tls_stdout.set_buffer(None)
+        last_active_ts = time.time()
+
+    printed = stdout_buf.getvalue()
+    try:
+        json.dumps(eval_val)
+        safe_eval_val = eval_val
+    except Exception:
+        safe_eval_val = repr(eval_val)
+
+    res_payload = {
+        "id": cmd_id,
+        "ok": err_msg is None,
+        "value": safe_eval_val,
+        "stdout": printed,
+        "variables": _export_vars()
+    }
+    if err_msg:
+        res_payload["error"] = err_msg
+
+    tmp_res = cmd_res_path + ".tmp"
+    with open(tmp_res, "w", encoding="utf-8") as f:
+        json.dump(res_payload, f, ensure_ascii=False, default=str)
+    os.replace(tmp_res, cmd_res_path)
+    with running_cmds_lock:
+        running_cmds.discard(cmd_id)
+        completed_cmds.add(cmd_id)
+        if len(completed_cmds) > 2000:
+            completed_cmds.clear()
+
 try:
     while True:
         if not os.path.exists(KERNEL_DIR):
@@ -4265,82 +5357,58 @@ try:
             break
         if time.time() - last_active_ts > 604800:
             break
+
+        dispatched = False
+        try:
+            entries = os.listdir(KERNEL_DIR)
+        except OSError:
+            break
+
+        for fname in entries:
+            if fname.startswith("cmd_") and fname.endswith(".json") and not fname.startswith("cmd_res_") and not fname.endswith(".tmp"):
+                cmd_path = os.path.join(KERNEL_DIR, fname)
+                try:
+                    with open(cmd_path, "r", encoding="utf-8") as f:
+                        cmd = json.load(f)
+                    cmd_id = cmd.get("id")
+                    if not cmd_id:
+                        continue
+                    if cmd.get("action") == "shutdown":
+                        sys.exit(0)
+                    with running_cmds_lock:
+                        if cmd_id in running_cmds or cmd_id in completed_cmds:
+                            continue
+                        running_cmds.add(cmd_id)
+                    cmd_res_path = os.path.join(KERNEL_DIR, f"cmd_res_{cmd_id}.json")
+                    executor.submit(_run_single_command, cmd_path, cmd_res_path, cmd)
+                    dispatched = True
+                except (json.JSONDecodeError, OSError):
+                    pass
+
+        # Also support legacy single cmd.json
         if os.path.exists(CMD_FILE):
             try:
                 with open(CMD_FILE, "r", encoding="utf-8") as f:
                     cmd = json.load(f)
                 cmd_id = cmd.get("id")
-                if not cmd_id or cmd_id == last_cmd_id:
-                    time.sleep(POLL_SLEEP)
-                    continue
-                last_cmd_id = cmd_id
-                current_cmd_id = cmd_id
-                last_active_ts = time.time()
-                action = cmd.get("action", "exec")
-                if action == "shutdown":
-                    break
-                code = cmd.get("code", "")
-                sync_vars = cmd.get("sync_vars")
-                if isinstance(sync_vars, dict):
-                    for sk, sv in sync_vars.items():
-                        if sk in ("TICKET_CONTEXT", "CONTEXT", "ANY_AGENT_CONTEXT") or sk.startswith("@"):
-                            continue
-                        wf_globals[sk] = _wrap_val(sv)
-                        try:
-                            _exported_var_snapshots[sk] = json.dumps(sv, ensure_ascii=False, default=str)
-                        except Exception:
-                            pass
-                wf_globals["TICKET_CONTEXT"] = wf_globals
-                wf_globals["CONTEXT"] = wf_globals
-                wf_globals["ANY_AGENT_CONTEXT"] = wf_globals
-
-                sanitized = _sanitize_legacy_syntax(code)
-                current_step_lines = sanitized.splitlines()
-                stdout_buf = io.StringIO()
-                old_stdout = sys.stdout
-                sys.stdout = stdout_buf
-                eval_val = None
-                err_msg = None
-                try:
-                    if action == "eval":
-                        eval_val = eval(sanitized, wf_globals)
-                    else:
-                        try:
-                            compiled = compile(sanitized, "<workflow_step>", "eval")
-                            eval_val = eval(compiled, wf_globals)
-                        except SyntaxError:
-                            compiled = compile(sanitized, "<workflow_step>", "exec")
-                            exec(compiled, wf_globals)
-                except Exception as ex:
-                    err_msg = f"{type(ex).__name__}: {ex}"
-                finally:
-                    sys.stdout = old_stdout
-                    last_active_ts = time.time()
-
-                printed = stdout_buf.getvalue()
-                try:
-                    json.dumps(eval_val)
-                    safe_eval_val = eval_val
-                except Exception:
-                    safe_eval_val = repr(eval_val)
-
-                res_payload = {
-                    "id": cmd_id,
-                    "ok": err_msg is None,
-                    "value": safe_eval_val,
-                    "stdout": printed,
-                    "error": err_msg,
-                    "variables": _export_vars()
-                }
-                tmp_res = CMD_RES_FILE + ".tmp"
-                with open(tmp_res, "w", encoding="utf-8") as f:
-                    json.dump(res_payload, f, ensure_ascii=False, default=str)
-                os.replace(tmp_res, CMD_RES_FILE)
-                last_active_ts = time.time()
+                if cmd_id and cmd_id != last_cmd_id:
+                    last_cmd_id = cmd_id
+                    if cmd.get("action") == "shutdown":
+                        break
+                    with running_cmds_lock:
+                        if cmd_id not in running_cmds:
+                            running_cmds.add(cmd_id)
+                            executor.submit(_run_single_command, CMD_FILE, CMD_RES_FILE, cmd)
+                            dispatched = True
             except (json.JSONDecodeError, OSError):
                 pass
-        time.sleep(CMD_SLEEP)
+
+        time.sleep(POLL_SLEEP if dispatched else CMD_SLEEP)
 finally:
+    try:
+        executor.shutdown(wait=False)
+    except Exception:
+        pass
     try:
         if os.path.exists(READY_FILE):
             os.remove(READY_FILE)
@@ -4459,10 +5527,10 @@ finally:
 
 		kernel.reqCounter++;
 		const cmdId = `cmd_${kernel.reqCounter}_${Date.now()}`;
-		const cmdUri = URI.joinPath(kernel.kernelDir, 'cmd.json');
-		const cmdResUri = URI.joinPath(kernel.kernelDir, 'cmd_res.json');
-		const rpcReqUri = URI.joinPath(kernel.kernelDir, 'rpc_req.json');
-		const rpcResUri = URI.joinPath(kernel.kernelDir, 'rpc_res.json');
+		const cmdUri = URI.joinPath(kernel.kernelDir, `cmd_${cmdId}.json`);
+		const cmdResUri = URI.joinPath(kernel.kernelDir, `cmd_res_${cmdId}.json`);
+		const legacyRpcReqUri = URI.joinPath(kernel.kernelDir, 'rpc_req.json');
+		const legacyRpcResUri = URI.joinPath(kernel.kernelDir, 'rpc_res.json');
 
 		// Sync ONLY externally updated contextVariables (delta-sync) so we do not re-serialize multi-megabyte unchanged variables on every Python step.
 		const syncVars: Record<string, any> = {};
@@ -4475,24 +5543,29 @@ finally:
 			}
 		}
 
-		// Clean up any leftover RPC / command response files before dispatching new command
-		for (const staleUri of [rpcReqUri, rpcResUri, cmdResUri]) {
-			try {
-				if (await this.fileService.exists(staleUri)) {
-					await this.fileService.del(staleUri);
-				}
-			} catch { }
-		}
+		// Clean up any stale response file with this specific cmdId before dispatching
+		try {
+			if (await this.fileService.exists(cmdResUri)) {
+				await this.fileService.del(cmdResUri);
+			}
+		} catch { }
 
-		await this.fileService.writeFile(
-			cmdUri,
-			VSBuffer.fromString(JSON.stringify({
-				id: cmdId,
-				action: mode,
-				code: trimmedCode,
-				sync_vars: syncVars
-			}))
-		);
+		try {
+			await this.fileService.writeFile(
+				cmdUri,
+				VSBuffer.fromString(JSON.stringify({
+					id: cmdId,
+					action: mode,
+					code: trimmedCode,
+					sync_vars: syncVars
+				}))
+			);
+		} catch (writeErr: any) {
+			const writeErrMsg = String(writeErr?.message || writeErr || '');
+			if (!writeErrMsg.includes('Unable to resolve nonexistent file')) {
+				throw writeErr;
+			}
+		}
 
 		const handledRpcIds = kernel.handledRpcIds;
 		const startMs = Date.now();
@@ -4500,31 +5573,51 @@ finally:
 		const maxCmdResParseFailures = 5;
 		while (!kernel.stopped && !this._cancelledRuns.has(run.runId)) {
 			// 1. Check if Python kernel requested a built-in RPC function call
-			if (await this.fileService.exists(rpcReqUri)) {
-				let reqObj: any = undefined;
-				try {
-					const rawReq = await this.fileService.readFile(rpcReqUri);
-					reqObj = JSON.parse(rawReq.value.toString());
-				} catch {
-					// If file was mid-write, retry on next tick
-				}
-				if (reqObj && reqObj.id && !handledRpcIds.has(reqObj.id) && (!reqObj.cmd_id || reqObj.cmd_id === cmdId)) {
-					handledRpcIds.add(reqObj.id);
-					try {
-						await this.fileService.del(rpcReqUri);
-					} catch { }
-					const rpcResponse = await this._handlePythonRpcCall(run, node, stepIndex, state, pathStep, reqObj, trimmedCode);
-					try {
-						await this.fileService.writeFile(
-							rpcResUri,
-							VSBuffer.fromString(JSON.stringify(rpcResponse))
-						);
-					} catch (writeErr: any) {
-						const writeErrMsg = String(writeErr?.message || writeErr || '');
-						if (!writeErrMsg.includes('Unable to resolve nonexistent file')) {
-							throw writeErr;
+			try {
+				const dirStat = await this.fileService.resolve(kernel.kernelDir);
+				if (dirStat && dirStat.children) {
+					for (const child of dirStat.children) {
+						const cName = child.name;
+						if (cName.startsWith('rpc_req_') && cName.endsWith('.json') && !cName.endsWith('.tmp')) {
+							let reqObj: any = undefined;
+							try {
+								const rawReq = await this.fileService.readFile(child.resource);
+								reqObj = JSON.parse(rawReq.value.toString());
+							} catch { }
+
+							if (reqObj && reqObj.id && !handledRpcIds.has(reqObj.id) && (!reqObj.cmd_id || reqObj.cmd_id === cmdId)) {
+								handledRpcIds.add(reqObj.id);
+								try { await this.fileService.del(child.resource); } catch { }
+								const rpcResponse = await this._handlePythonRpcCall(run, node, stepIndex, state, pathStep, reqObj, trimmedCode);
+								const rpcResUri = URI.joinPath(kernel.kernelDir, `rpc_res_${reqObj.id}.json`);
+								try {
+									await this.fileService.writeFile(rpcResUri, VSBuffer.fromString(JSON.stringify(rpcResponse)));
+								} catch (writeErr: any) {
+									const writeErrMsg = String(writeErr?.message || writeErr || '');
+									if (!writeErrMsg.includes('Unable to resolve nonexistent file')) {
+										throw writeErr;
+									}
+								}
+							}
 						}
 					}
+				}
+			} catch { }
+
+			// Fallback check legacy rpc_req.json
+			if (await this.fileService.exists(legacyRpcReqUri)) {
+				let reqObj: any = undefined;
+				try {
+					const rawReq = await this.fileService.readFile(legacyRpcReqUri);
+					reqObj = JSON.parse(rawReq.value.toString());
+				} catch { }
+				if (reqObj && reqObj.id && !handledRpcIds.has(reqObj.id) && (!reqObj.cmd_id || reqObj.cmd_id === cmdId)) {
+					handledRpcIds.add(reqObj.id);
+					try { await this.fileService.del(legacyRpcReqUri); } catch { }
+					const rpcResponse = await this._handlePythonRpcCall(run, node, stepIndex, state, pathStep, reqObj, trimmedCode);
+					try {
+						await this.fileService.writeFile(legacyRpcResUri, VSBuffer.fromString(JSON.stringify(rpcResponse)));
+					} catch { }
 				}
 			}
 
@@ -4548,6 +5641,11 @@ finally:
 				if (resObj && resObj.id === cmdId) {
 					try {
 						await this.fileService.del(cmdResUri);
+					} catch { }
+					try {
+						if (await this.fileService.exists(cmdUri)) {
+							await this.fileService.del(cmdUri);
+						}
 					} catch { }
 
 					// Sync back changed exported Python variables into run.contextVariables
@@ -4675,7 +5773,9 @@ finally:
 				for (const [ck, cv] of Object.entries(run.contextVariables || {})) {
 					if (ck.startsWith('@')) continue;
 					if (cv && typeof cv === 'object' && ('contextVariables' in cv || 'stepResults' in cv)) continue;
-					cleanCtxParams[ck] = cv;
+					if (cv !== undefined && cv !== null && (typeof cv !== 'string' || cv.trim() !== '')) {
+						cleanCtxParams[ck] = cv;
+					}
 				}
 				this._emitLog(run, 'info', `[RUN_TICKETS] Executing ticket '${ticketIdOrPath}'...`, { nodeId: node.id });
 
@@ -4735,8 +5835,7 @@ finally:
 					status: 'success' as const,
 					output: this._summarizeValueForHistory(execRes.output),
 					outputSpecs: (execRes as any).outputSpecs,
-					stepResults: execRes.stepResults,
-					contextVariables: execRes.contextVariables,
+					stepResults: this._sanitizeStepResultsForHistory(execRes.stepResults),
 					durationMs: Date.now() - startMs
 				};
 				inFlightOp.executedTicket = ticketRecord;
@@ -4810,35 +5909,23 @@ finally:
 				}
 				const { fields: _omitFields, ...lightCreateRes } = createRes;
 				result = lightCreateRes;
-			} else if (upperFn === 'GET_TICKETS') {
-				const rawTarget = kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.id ?? args[0] ?? '';
-				result = await this.ticketRuntimeService.GET_TICKETS(workflowDir, rawTarget);
+			} else if (upperFn === 'GET_TICKET' || upperFn === 'GETTICKET') {
+				const rawTarget = kwargs.ticket_id ?? kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticketId ?? kwargs.id ?? args[0] ?? '';
+				const field = kwargs.field ?? kwargs.key ?? kwargs.name ?? args[1];
+				result = await this.ticketRuntimeService.getTicket(workflowDir, rawTarget, field);
+			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS') {
+				const hasQueryFilters = kwargs.ticket_type !== undefined || kwargs.status !== undefined || kwargs.title !== undefined || kwargs.field !== undefined || kwargs.ticketType !== undefined;
+				if (hasQueryFilters) {
+					result = await this.ticketRuntimeService.getTickets(workflowDir, kwargs, kwargs.field);
+				} else {
+					const rawTarget = kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.id ?? args[0] ?? '';
+					result = await this.ticketRuntimeService.getTickets(workflowDir, rawTarget, kwargs.field);
+				}
 			} else if (upperFn === 'GET_OUTPUTS') {
 				const rawTarget = kwargs.ticket_id ?? kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticketId ?? kwargs.ticketIdOrPath ?? kwargs.id ?? args[0] ?? '';
-				const allOutputs = await this.ticketRuntimeService.GET_OUTPUTS(workflowDir, rawTarget);
 				const requestedField = kwargs.field ?? kwargs.key ?? kwargs.name ?? kwargs.output ?? args[1];
-				if (requestedField && allOutputs && typeof allOutputs === 'object') {
-					const targetKey = String(requestedField).trim();
-					if (targetKey in allOutputs) {
-						result = allOutputs[targetKey];
-					} else {
-						const normKey = targetKey.toLowerCase().replace(/_/g, ' ');
-						let matched = Object.keys(allOutputs).find(k => !k.startsWith('__') && k.trim().toLowerCase().replace(/_/g, ' ') === normKey);
-						if (matched === undefined && normKey.length >= 4) {
-							const prefixMatches = Object.keys(allOutputs).filter(k => {
-								if (k.startsWith('__')) { return false; }
-								const kn = k.trim().toLowerCase().replace(/_/g, ' ');
-								return kn.startsWith(normKey) || normKey.startsWith(kn);
-							});
-							if (prefixMatches.length === 1) {
-								matched = prefixMatches[0];
-							}
-						}
-						result = matched !== undefined ? allOutputs[matched] : undefined;
-					}
-				} else {
-					result = allOutputs;
-				}
+				const targetField = (requestedField !== undefined && requestedField !== null && String(requestedField).trim() !== '') ? String(requestedField).trim() : undefined;
+				result = await this.ticketRuntimeService.GET_OUTPUTS(workflowDir, rawTarget, targetField);
 			} else if (upperFn === 'GET_PRIMITIVES_CATALOG') {
 				result = await this.ticketRuntimeService.GET_PRIMITIVES_CATALOG(workflowDir);
 			} else if (upperFn === 'DISPLAY') {
@@ -4854,7 +5941,7 @@ finally:
 				}
 				result = true;
 
-				const { formattedText, summaryType, cleanValue, ticketTitle, ticketId, ticketType, outputItems, ticketHandle } = this._formatDisplayOutput(displayVal);
+				const { formattedText, summaryType, cleanValue, ticketTitle, ticketId, ticketType, outputItems, ticketHandle, isTruncated, displayPreviewText, totalCount } = this._formatDisplayOutput(displayVal);
 				const nodeLabelName = (node.label && node.label.trim()) ? node.label.trim() : (node.id || 'Node');
 				const logDisplayPreview = formattedText.length > 500
 					? formattedText.substring(0, 500) + ' ... [see Live Display]'
@@ -4875,6 +5962,7 @@ finally:
 
 				const displayCard: IWorkflowDisplayCard = {
 					id: reusedId,
+					workflowUri: run.workflowUri,
 					runId: run.runId,
 					nodeId: node.id,
 					nodeTitle: nodeLabelName,
@@ -4886,7 +5974,10 @@ finally:
 					ticketId,
 					ticketType,
 					outputItems,
-					ticketHandle
+					ticketHandle,
+					isTruncated,
+					displayPreviewText,
+					totalCount
 				};
 
 				cardList.unshift(displayCard);

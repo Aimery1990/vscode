@@ -660,6 +660,65 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 			'Supports both clicking to select a local file and dragging & dropping a file from Finder / Explorer.',
 			'Scrub or click anywhere on the progress bar to jump to a specific timestamp.'
 		]
+	},
+	voice_note: {
+		type: 'voice_note',
+		title: 'Voice Note (Audio Recorder & Transcript)',
+		icon: Codicon.mic,
+		category: 'Voice Notes & Documentation',
+		summary: 'Records one or more voice memos directly via microphone with automatic Speech-to-Text transcription and editable text notes. When placed inside a Workflow Flowchart Node, the node automatically displays a speaker icon at its top-right corner to play all recorded voice clips sequentially.',
+		designerConfig: [
+			{ name: 'Microphone Recording', desc: 'Click the microphone button to record one or multiple audio clips (up to 5 minutes per clip). Audio is saved persistently inside the component.' },
+			{ name: 'Auto-Transcribe & Edit', desc: 'Automatically transcribes each recorded clip using the configured Voice Model (IVoiceModelService) and allows manual editing or re-transcription.' },
+			{ name: 'Node Top-Right Speaker Playback', desc: 'Any Workflow Flowchart Node containing a Voice Note component automatically displays a speaker icon in its top-right corner. Click it to play all recorded clips in order.' }
+		],
+		runTicketsFlow: {
+			headline: 'How Workflows & Tickets Use Voice Note',
+			steps: [
+				{ step: '1. Transcript Aggregation', detail: 'Collects transcripts from all recorded clips inside the Voice Note component.' },
+				{ step: '2. Context Export', detail: 'Exposes the combined transcript text under {Field Label} so downstream AI Prompt or Python steps can reference your spoken notes.' }
+			],
+			variableResolution: 'Exposes the combined voice transcript text under {Field Label} in contextVariables.',
+			downstreamPassing: 'Downstream AI Prompt, Python, or Display steps can reference the transcribed notes directly.'
+		},
+		syntaxExamples: [
+			'{Voice Note}'
+		],
+		tips: [
+			'Drag Voice Note into any Flowchart Node to attach spoken design rationale or usage instructions.',
+			'Click the top-right speaker icon on a Flowchart Node to play all recorded voice clips one by one without opening the side panel.'
+		]
+	},
+	get_ticket: {
+		type: 'get_ticket',
+		title: 'Get Ticket (get_ticket)',
+		icon: Codicon.search,
+		category: 'Workflow Built-in Primitives',
+		summary: 'Queries and fetches a single specific ticket by Ticket ID or Ticket Variable reference. Supports optional direct field extraction (e.g. status, title, outputs) into the output variable.',
+		designerConfig: [
+			{ name: 'Ticket ID', desc: 'Direct ticket identifier (e.g. FINDJ-0002 or variable expression {job_id}).' },
+			{ name: 'Ticket Variable', desc: 'Reference to an existing upstream ticket variable or handle (e.g. {created_ticket_1}).' },
+			{ name: 'Field (Optional)', desc: 'Extracts a specific property value directly (e.g. status, title, custom field) instead of the entire ticket dictionary.' },
+			{ name: 'Output Variable', desc: 'Python variable name where the returned ticket data or extracted field is stored.' }
+		],
+		runTicketsFlow: {
+			headline: 'How get_ticket Executes',
+			steps: [
+				{ step: '1. Target Resolution', detail: 'Resolves the Ticket ID or variable handle in the current workspace or registered repositories.' },
+				{ step: '2. Metadata & Outputs Ingestion', detail: 'Loads the ticket markdown, snapshot data, custom metadata, and output components.' },
+				{ step: '3. Field Extraction & Return', detail: 'If Field is specified, extracts only that attribute; otherwise returns the complete Ticket object.' }
+			],
+			variableResolution: 'Stores result in the designated Output Variable and exports to contextVariables.',
+			downstreamPassing: 'Downstream Python scripts or Prompt steps can directly read the output variable.'
+		},
+		syntaxExamples: [
+			'job_status = get_ticket(ticket_id="FINDJ-0002", field="status")',
+			'ticket_data = get_ticket(ticket=created_ticket)'
+		],
+		tips: [
+			'You can provide either Ticket ID or Ticket Variable to identify which ticket to fetch.',
+			'Leave Field blank if you need all metadata and outputs for downstream processing.'
+		]
 	}
 };
 

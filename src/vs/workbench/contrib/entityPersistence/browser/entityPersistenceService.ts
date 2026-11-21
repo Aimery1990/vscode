@@ -168,7 +168,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 
 		const legacyFiles = [
 			'workspace.md', 'job.md', 'project.md', 'task.md', 'agent.md', 'workflow.md',
-			'case.md', 'issue.md', 'analysis.md', 'instruction.md', 'README.md', 'work_log.md'
+			'case.md', 'issue.md', 'analysis.md', 'instruction.md', 'README.md', 'work_log.md', 'worklog.md', 'tickets.md'
 		];
 
 		for (const fileName of legacyFiles) {
@@ -527,6 +527,24 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			workLogContent += `- **comment**: None\n`;
 			workLogContent += `- **committed by**: None\n`;
 			await this.fileService.writeFile(workLogUri, VSBuffer.fromString(workLogContent));
+		}
+
+		// 4.5. tickets.md (Preserve all 5 required Markdown files)
+		const ticketsUri = URI.joinPath(configDir, 'tickets.md');
+		if (!await this.fileService.exists(ticketsUri)) {
+			let ticketsContent = `# Tickets - ${snapshot.entityName}\n\n## Overview\n\n`;
+			ticketsContent += `- **Workspace ID**: ${workspaceId}\n`;
+			ticketsContent += `- **Ticket ID**: ${ticketId}\n`;
+			ticketsContent += `- **Ticket Type**: ${type}\n`;
+			ticketsContent += `- **Parent Path**: ${parentRelPath}\n\n`;
+			ticketsContent += `---\n\n## Sub Tickets\n\nNone\n`;
+			await this.fileService.writeFile(ticketsUri, VSBuffer.fromString(ticketsContent));
+		}
+
+		// 4.6. Dedicated Worklogs/ directory
+		const worklogsDirUri = URI.joinPath(configDir, 'Worklogs');
+		if (!await this.fileService.exists(worklogsDirUri)) {
+			await this.fileService.createFolder(worklogsDirUri);
 		}
 
 		// 5. If workflow, ensure workflow_flowchart.json exists and is intact

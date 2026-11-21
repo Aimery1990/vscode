@@ -126,6 +126,142 @@
 	width: 100%;
 	flex-shrink: 0;
 	margin-top: 2px;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+/* Category Group Container & Header */
+.custom-modules-category-group {
+	display: flex;
+	flex-direction: column;
+	width: 100%;
+	margin-bottom: 6px;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.02);
+	border: 1px solid rgba(255, 255, 255, 0.06);
+	overflow: hidden;
+}
+
+.custom-modules-category-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 7px 10px;
+	cursor: pointer;
+	user-select: none;
+	background: rgba(255, 255, 255, 0.03);
+	border-bottom: 1px solid transparent;
+	transition: background 0.15s ease;
+}
+
+.custom-modules-category-header:hover {
+	background: rgba(255, 255, 255, 0.06);
+}
+
+.custom-modules-category-header.expanded {
+	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.custom-modules-category-header-left {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	flex: 1;
+}
+
+.custom-modules-category-chevron {
+	font-size: 11px;
+	opacity: 0.7;
+	transition: transform 0.15s ease;
+}
+
+.custom-modules-category-icon {
+	font-size: 13px;
+	color: #e2b340;
+}
+
+.custom-modules-category-title {
+	font-size: 11.5px;
+	font-weight: 600;
+	color: var(--vscode-foreground, #cccccc);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.custom-modules-category-count {
+	font-size: 10.5px;
+	color: #888888;
+	margin-left: 2px;
+}
+
+.custom-modules-category-header-actions {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	opacity: 0;
+	transition: opacity 0.15s ease;
+}
+
+.custom-modules-category-header:hover .custom-modules-category-header-actions {
+	opacity: 1;
+}
+
+.custom-modules-category-action-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	border-radius: 4px;
+	cursor: pointer;
+	color: #999999;
+	font-size: 12px;
+	transition: color 0.15s, background 0.15s;
+}
+
+.custom-modules-category-action-btn:hover {
+	color: #ffffff;
+	background: rgba(255, 255, 255, 0.1);
+}
+
+.custom-modules-category-body {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 8px;
+}
+
+.custom-modules-category-empty {
+	padding: 8px 10px;
+	font-size: 11px;
+	color: #777777;
+	font-style: italic;
+	text-align: center;
+}
+
+.custom-modules-uncategorized-section {
+	margin-top: 4px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	width: 100%;
+}
+
+.custom-modules-uncategorized-header {
+	font-size: 10.5px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	color: #777777;
+	padding: 4px 2px;
+	display: flex;
+	align-items: center;
+	gap: 6px;
 }
 
 .custom-modules-filter-row input.custom-modules-search-input {
@@ -513,6 +649,7 @@
 	-webkit-text-fill-color: transparent !important;
 }
 
+
 .custom-module-schema-editor .schema-editor-wrapper {
 	width: 100%;
 }
@@ -650,5 +787,118 @@
 	color: transparent !important;
 	-webkit-text-fill-color: transparent !important;
 }
+
+/* Disabled Component Card Styles */
+.canvas-field-card.field-card-disabled {
+	opacity: 0.62 !important;
+	filter: grayscale(0.85) brightness(0.82) !important;
+	border-style: dashed !important;
+	border-color: rgba(239, 68, 68, 0.45) !important;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+}
+
+.canvas-field-card.field-card-disabled.field-card-selected {
+	outline: 2px solid rgba(248, 113, 113, 0.7) !important;
+	outline-offset: 2px !important;
+}
+
+/* Interaction Restriction: Disabled card body content cannot be edited or interacted with, only selectable */
+.canvas-field-card.field-card-disabled > *:not(.card-header):not(.disabled-component-notice-bar) {
+	pointer-events: none !important;
+	user-select: text !important;
+	opacity: 0.65;
+}
+
+.canvas-field-card.field-card-disabled > *:not(.card-header) input,
+.canvas-field-card.field-card-disabled > *:not(.card-header) textarea,
+.canvas-field-card.field-card-disabled > *:not(.card-header) select,
+.canvas-field-card.field-card-disabled > *:not(.card-header) button {
+	cursor: not-allowed !important;
+	pointer-events: none !important;
+}
+
+.component-toggle-enable-btn {
+	cursor: pointer;
+	border: none;
+	outline: none;
+	background: transparent;
+	font-family: inherit;
+}
+
+.component-toggle-enable-btn:hover {
+	filter: brightness(1.2);
+}
+
+.canvas-field-card.highlight-pulse {
+	animation: fieldCardHighlightPulse 1.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes fieldCardHighlightPulse {
+	0% {
+		box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.8), 0 0 16px rgba(56, 189, 248, 0.4);
+		border-color: #38bdf8;
+	}
+	100% {
+		box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+	}
+}
+
+/* Responsive Narrow-Panel Safeguards for Component Cards (Side Editor / Split Pane) */
+.canvas-field-card {
+	container-type: inline-size;
+	max-width: 100%;
+	min-width: 0;
+	box-sizing: border-box;
+	overflow-x: hidden;
+}
+
+.canvas-field-card .primitive-config-box,
+.canvas-field-card .voice-note-schema-config,
+.canvas-field-card .media-player-schema-config,
+.canvas-field-card .output-spec-row,
+.canvas-field-card .component-exec-logs-card {
+	max-width: 100%;
+	min-width: 0;
+	box-sizing: border-box;
+	overflow-x: hidden;
+}
+
+.canvas-field-card input[type="text"],
+.canvas-field-card input[type="url"],
+.canvas-field-card input[type="number"],
+.canvas-field-card input[type="password"],
+.canvas-field-card select,
+.canvas-field-card textarea {
+	min-width: 0 !important;
+	max-width: 100% !important;
+	box-sizing: border-box !important;
+}
+
+@container (max-width: 340px) {
+	.canvas-field-card {
+		padding: 10px !important;
+	}
+	.canvas-field-card .card-header {
+		gap: 6px !important;
+	}
+	.canvas-field-card .primitive-config-box,
+	.canvas-field-card .voice-note-schema-config,
+	.canvas-field-card .media-player-schema-config {
+		padding: 8px 9px !important;
+	}
+	.canvas-field-card .output-spec-row {
+		padding: 7px 8px !important;
+		gap: 6px !important;
+	}
+	.canvas-field-card .component-exec-logs-card {
+		padding: 6px !important;
+	}
+	.canvas-field-card .add-custom-output-btn,
+	.canvas-field-card .sync-primitives-btn {
+		padding: 3px 8px !important;
+		font-size: 10.5px !important;
+	}
+}
+
 
 

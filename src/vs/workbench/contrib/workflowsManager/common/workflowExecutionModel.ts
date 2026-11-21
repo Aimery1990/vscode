@@ -110,6 +110,40 @@ export interface IWorkflowPathStep {
 	transition?: IWorkflowStepTransition;
 }
 
+export interface IWorkflowInputParamDef {
+	name: string;
+	label: string;
+	defaultValue: string;
+	options?: string[];
+	description?: string;
+	componentId: string;
+	componentLabel: string;
+}
+
+export interface IWorkflowOutputDef {
+	label: string;
+	fieldKey: string;
+	varName: string;
+	defaultFormat: 'json' | 'table' | 'markdown' | 'text' | string;
+	sourceExpression?: string;
+	isCustom?: boolean;
+	componentId: string;
+	componentLabel: string;
+}
+
+export interface IWorkflowIOContract {
+	isValid: boolean;
+	inputNodeId?: string;
+	inputNodeLabel?: string;
+	inputError?: string;
+	inputs: IWorkflowInputParamDef[];
+	outputNodeId?: string;
+	outputNodeLabel?: string;
+	outputError?: string;
+	outputs: IWorkflowOutputDef[];
+	errors: string[];
+}
+
 export interface IWorkflowExecutionRun {
 	runId: string;
 	runNumber?: number;
@@ -129,6 +163,9 @@ export interface IWorkflowExecutionRun {
 	nodeStates: Record<string, IWorkflowNodeExecutionState>;
 	linkStates?: Record<string, IWorkflowLinkExecutionState>;
 	executionPath?: IWorkflowPathStep[];
+	ioContract?: IWorkflowIOContract;
+	workflowOutputs?: Record<string, any>;
+	workflowOutputsByVarName?: Record<string, any>;
 	logs: IWorkflowLogEntry[];
 	error?: string;
 }

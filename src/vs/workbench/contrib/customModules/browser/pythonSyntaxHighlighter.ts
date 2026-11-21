@@ -232,3 +232,137 @@ export function renderHighlightedPythonToDOM(container: HTMLElement, code: strin
 		container.appendChild(rootDiv);
 	}
 }
+
+/**
+ * Checks if a KeyboardEvent corresponds to the standard comment toggle shortcut:
+ * - macOS: Command + /
+ * - Windows / Linux: Ctrl + /
+ */
+export function isCommentKeybinding(e: KeyboardEvent): boolean {
+	const isModifier = e.metaKey || e.ctrlKey;
+	if (!isModifier || e.altKey) {
+		return false;
+	}
+	return e.key === '/' || e.code === 'Slash';
+}
+
+/**
+ * Toggles Python line comments (# ) on a textarea selection or current line,
+ * matching standard VS Code behavior:
+ * - If single line or all non-empty lines in selection are commented, uncomments them.
+ * - Otherwise, comments all non-empty lines aligned at the block's minimum indentation.
+ * - Symmetrically preserves cursor position and multi-line selection ranges.
+ */
+export function togglePythonComment(textarea: HTMLTextAreaElement): boolean {
+	const val = textarea.value;
+	const selStart = textarea.selectionStart ?? 0;
+	const selEnd = textarea.selectionEnd ?? selStart;
+
+	// Line start: beginning of first selected line
+	const lineStart = val.lastIndexOf('\n', selStart - 1) + 1;
+
+	// Line end: end of last selected line
+	// If selection ends right at a newline, do not include the subsequent line (VS Code rule)
+	let effectiveSelEnd = selEnd;
+	if (effectiveSelEnd > selStart && val[effectiveSelEnd - 1] === '\n') {
+		effectiveSelEnd = effectiveSelEnd - 1;
+	}
+	const nextNewline = val.indexOf('\n', effectiveSelEnd);
+	const lineEnd = nextNewline === -1 ? val.length : nextNewline;
+
+	const selectedBlock = val.substring(lineStart, lineEnd);
+	const lines = selectedBlock.split('\n');
+
+	// Determine whether to uncomment or comment:
+	// If all non-empty lines in the range start with '#', then uncomment. Otherwise comment.
+	const nonEmptyLines = lines.filter(l => l.trim().length > 0);
+	const allCommented = nonEmptyLines.length > 0 && nonEmptyLines.every(l => /^\s*#/.test(l));
+
+	let newLines: string[];
+	let minIndent = 0;
+
+	if (allCommented) {
+		// Uncomment: strip leading '# ' or '#' while retaining base indentation
+		newLines = lines.map(line => {
+			const m = line.match(/^(\s*)#(?: (.*)|(.*))$/);
+			if (m) {
+				const indent = m[1];
+				const rest = m[2] !== undefined ? m[2] : (m[3] !== undefined ? m[3] : '');
+				return indent + rest;
+			}
+			return line;
+		});
+	} else {
+		// Comment: find minimum indentation across non-empty lines to align comments
+		let foundMin = Infinity;
+		for (const line of nonEmptyLines) {
+			const match = line.match(/^(\s*)/);
+			if (match && match[1].length < foundMin) {
+				foundMin = match[1].length;
+			}
+		}
+		minIndent = foundMin === Infinity ? 0 : foundMin;
+
+		newLines = lines.map(line => {
+			if (line.trim().length === 0) {
+				// Single empty line commented directly
+				if (lines.length === 1) {
+					return '# ';
+				}
+				return line;
+			}
+			const indentStr = line.substring(0, minIndent);
+			const remainder = line.substring(minIndent);
+			return indentStr + '# ' + remainder;
+		});
+	}
+
+	const replacement = newLines.join('\n');
+	const before = val.substring(0, lineStart);
+	const after = val.substring(lineEnd);
+
+	textarea.value = before + replacement + after;
+
+	// Adjust cursor and selection
+	if (selStart === selEnd) {
+		const oldLine = lines[0] ?? '';
+		const newLine = newLines[0] ?? '';
+		const delta = newLine.length - oldLine.length;
+		const cursorOffsetInLine = selStart - lineStart;
+		let newCursorOffset: number;
+		if (allCommented) {
+			newCursorOffset = Math.max(0, cursorOffsetInLine + delta);
+		} else {
+			if (cursorOffsetInLine <= minIndent) {
+				newCursorOffset = cursorOffsetInLine;
+			} else {
+				newCursorOffset = cursorOffsetInLine + delta;
+			}
+		}
+		const newPos = Math.max(lineStart, Math.min(lineStart + newLine.length, lineStart + newCursorOffset));
+		textarea.selectionStart = textarea.selectionEnd = newPos;
+	} else {
+		const firstOldLine = lines[0] ?? '';
+		const firstNewLine = newLines[0] ?? '';
+		const firstDelta = firstNewLine.length - firstOldLine.length;
+		const totalDelta = replacement.length - selectedBlock.length;
+
+		let newSelStart = selStart;
+		if (allCommented) {
+			newSelStart = Math.max(lineStart, selStart + firstDelta);
+		} else {
+			const selStartOffsetInLine = selStart - lineStart;
+			if (selStartOffsetInLine <= minIndent) {
+				newSelStart = selStart;
+			} else {
+				newSelStart = selStart + firstDelta;
+			}
+		}
+		const newSelEnd = Math.max(newSelStart, selEnd + totalDelta);
+		textarea.selectionStart = newSelStart;
+		textarea.selectionEnd = newSelEnd;
+	}
+
+	textarea.dispatchEvent(new Event('input', { bubbles: true }));
+	return true;
+}
