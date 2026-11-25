@@ -11,7 +11,7 @@ import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js'
 import { Extensions as ViewExtensions, IViewContainersRegistry, IViewsRegistry, ViewContainer, ViewContainerLocation, IViewDescriptor } from '../../../common/views.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
-import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
@@ -31,6 +31,7 @@ import { WorkspacesExplorerViewPaneContainer } from './workspacesExplorerViewlet
 import { MainWorkspaceViewPane } from './workspacesExplorerPane.js';
 import { EntityDetailEditor } from './entityDetailEditor.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
+import { EditorInput } from '../../../common/editor/editorInput.js';
 import './tools/ticketTools.contribution.js';
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../common/editor.js';
@@ -171,17 +172,29 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 	]
 );
 
+/** Restores open ticket / entity detail tabs on start-up. Template previews are transient and not restored. */
 class EntityDetailEditorInputSerializer implements IEditorSerializer {
-	canSerialize(): boolean {
-		return false;
+	canSerialize(input: EditorInput): boolean {
+		return input instanceof EntityDetailEditorInput && !input.previewModule;
 	}
 
-	serialize(): string | undefined {
-		return undefined;
+	serialize(input: EditorInput): string | undefined {
+		if (!(input instanceof EntityDetailEditorInput) || input.previewModule) {
+			return undefined;
+		}
+		return JSON.stringify({ entityUri: input.entityUri.toString(), entityName: input.entityName });
 	}
 
-	deserialize(): EntityDetailEditorInput | undefined {
-		return undefined;
+	deserialize(_instantiationService: IInstantiationService, raw: string): EntityDetailEditorInput | undefined {
+		try {
+			const data = JSON.parse(raw);
+			if (typeof data?.entityUri !== 'string' || typeof data?.entityName !== 'string') {
+				return undefined;
+			}
+			return new EntityDetailEditorInput(URI.parse(data.entityUri), data.entityName);
+		} catch {
+			return undefined;
+		}
 	}
 }
 

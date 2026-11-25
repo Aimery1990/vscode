@@ -32,14 +32,16 @@ export class EntityDetailEditorInput extends EditorInput {
 				? `/preview/${encodeURIComponent(previewModule.id || entityName)}`
 				: `/${encodeURIComponent(entityUri.toString())}/${encodeURIComponent(entityName)}`,
 		});
-		this._name = previewModule
-			? `Preview: ${previewModule.name || entityName} (Ticket)`
-			: `${entityName} (Detail)`;
+		this._name = previewModule?.__wfNode
+			? `Node: ${previewModule.name || entityName}`
+			: previewModule
+				? `Preview: ${previewModule.name || entityName} (Ticket)`
+				: `${entityName} (Detail)`;
 	}
 
 	public updatePreviewModule(mod: any): void {
 		this.previewModule = mod;
-		this._name = `Preview: ${mod.name || this.entityName} (Ticket)`;
+		this._name = mod?.__wfNode ? `Node: ${mod.name || this.entityName}` : `Preview: ${mod.name || this.entityName} (Ticket)`;
 		this._onDidChangeLabel.fire();
 	}
 

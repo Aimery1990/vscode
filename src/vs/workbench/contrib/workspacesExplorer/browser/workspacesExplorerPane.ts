@@ -31,7 +31,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IWorkspacesExplorerService, IWorkspaceItem, CanonicalStatusCategory } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
-import { IAgentsManagerService, IAgentCredentialService, IAgentCredential } from '../../agentsManager/common/agentsManager.js';
+import { IAgentsManagerService, IAgentCredentialService, IAgentCredential, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
 import { EntityDetailEditor } from './entityDetailEditor.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
@@ -203,6 +203,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 		super(options, keybindingService, contextMenuService, configurationService, contextKeyService, viewDescriptorService, instantiationService, openerService, themeService, hoverService);
 		this._storageService = storageService;
 		this._showRemovedItems = this._storageService.getBoolean('anyagent.workspacesExplorer.showRemovedItems', StorageScope.PROFILE, false);
+		this._restoreViewState();
+		this._register(this._storageService.onWillSaveState(() => this._saveViewState()));
 
 		let renderTimer: ReturnType<typeof setTimeout> | undefined;
 		this._register({
@@ -640,6 +642,44 @@ export class MainWorkspaceViewPane extends ViewPane {
 		}
 	}
 
+	/**
+	 * Which workspace / item is selected and which nodes are expanded is kept per window, so the tree comes back
+	 * the same way after the app is closed and reopened (together with the restored editor tabs).
+	 */
+	private static readonly VIEW_STATE_KEY = 'anyagent.workspacesExplorer.viewState';
+	private _lastSavedViewState = '';
+
+	private _restoreViewState(): void {
+		try {
+			const raw = this._storageService.get(MainWorkspaceViewPane.VIEW_STATE_KEY, StorageScope.WORKSPACE, '');
+			if (!raw) {
+				return;
+			}
+			const data = JSON.parse(raw) as { selectedWorkspaceId?: string; selectedItemId?: string; expanded?: string[] };
+			this.selectedWorkspaceId = typeof data.selectedWorkspaceId === 'string' ? data.selectedWorkspaceId : undefined;
+			this.selectedItemId = typeof data.selectedItemId === 'string' ? data.selectedItemId : undefined;
+			if (Array.isArray(data.expanded)) {
+				this.expandedWorkspaces = new Set(data.expanded.filter(id => typeof id === 'string'));
+				this.hasInitializedExpansion = true;
+			}
+			this._lastSavedViewState = raw;
+		} catch {
+			// ignore a corrupt entry; the default view state is used
+		}
+	}
+
+	private _saveViewState(): void {
+		const raw = JSON.stringify({
+			selectedWorkspaceId: this.selectedWorkspaceId,
+			selectedItemId: this.selectedItemId,
+			expanded: Array.from(this.expandedWorkspaces)
+		});
+		if (raw !== this._lastSavedViewState) {
+			this._lastSavedViewState = raw;
+			this._storageService.store(MainWorkspaceViewPane.VIEW_STATE_KEY, raw, StorageScope.WORKSPACE, StorageTarget.MACHINE);
+		}
+	}
+
 	private async renderContent(): Promise<void> {
 		if (!this.containerEl) {
 			return;
@@ -668,9 +708,11 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		const filteredWorkspaces = workspaces.filter(w => !this.filterText || w.name.toLowerCase().includes(this.filterText) || w.uri.fsPath.toLowerCase().includes(this.filterText));
 
-		if (!this.selectedWorkspaceId && filteredWorkspaces.length > 0) {
+		if (filteredWorkspaces.length > 0 && (!this.selectedWorkspaceId || (!this.filterText && !filteredWorkspaces.some(w => this.getCanonicalId(w.id) === this.selectedWorkspaceId)))) {
 			this.selectedWorkspaceId = this.getCanonicalId(filteredWorkspaces[0].id);
+			this.selectedItemId = undefined;
 		}
+		this._saveViewState();
 
 		this.targetSelectedElement = undefined;
 
@@ -3293,7 +3335,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		this.agentsManagerService.getAgents().then(agents => {
 			for (const ag of agents) {
-				append(baseAgentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.model?.modelId || 'gemini-1.5-flash'})`));
+				append(baseAgentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.model?.modelId || resolveDefaultModelId(ag.model?.providerId, 'gemini-2.5-flash')})`));
 			}
 		}).catch(() => { });
 
@@ -3575,7 +3617,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		this.agentsManagerService.getAgents().then(agents => {
 			for (const ag of agents) {
-				const opt = append(agentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.model?.modelId || 'gemini-1.5-flash'})`));
+				const opt = append(agentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.model?.modelId || resolveDefaultModelId(ag.model?.providerId, 'gemini-2.5-flash')})`));
 				opt.setAttribute('data-name', ag.name);
 			}
 		}).catch(() => { });
@@ -4509,7 +4551,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 						const targetDesc = field.targetMode === 'agent'
 							? `Agent: ${field.targetAgentName || field.targetAgentId || 'Default'}`
-							: `Model: ${field.targetModel || 'gemini-1.5-flash'}`;
+							: `Model: ${field.targetModel || resolveDefaultModelId(field.targetProvider, 'gemini-2.5-flash')}`;
 
 						const topRow = append(promptBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px;' }));
 						append(topRow, $('span', { style: 'font-size: 10.5px; opacity: 0.85; font-weight: 600; color: #60a5fa;' }, `AI Instruction (${targetDesc})`));
@@ -4554,8 +4596,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 								preInjectedPrompt: preInjectedText,
 								prompt: combinedPrompt,
 								targetMode: field.targetMode || 'model',
-								targetProvider: field.targetProvider || '',
-								targetModel: field.targetModel || 'gemini-1.5-flash',
+								targetProvider: field.targetProvider || (field.targetModel ? '' : (getGlobalDefaultModel()?.providerId || '')),
+								targetModel: field.targetModel || resolveDefaultModelId(field.targetProvider, 'gemini-2.5-flash'),
 								targetAgentId: field.targetAgentId || '',
 								targetAgentName: field.targetAgentName || '',
 								output: '',
@@ -4844,8 +4886,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 						} else if (f.type === 'prompt') {
 							customMetadata[fKey] = JSON.stringify({
 								targetMode: f.targetMode || 'model',
-								targetProvider: f.targetProvider || 'gemini',
-								targetModel: f.targetModel || 'gemini-1.5-flash',
+								targetProvider: f.targetProvider || (f.targetModel ? 'gemini' : resolveDefaultModel({ providerId: 'gemini', modelId: 'gemini-2.5-flash' }).providerId),
+								targetModel: f.targetModel || resolveDefaultModelId(f.targetProvider, 'gemini-2.5-flash'),
 								targetCredentialId: f.targetCredentialId || '',
 								targetAgentId: f.targetAgentId || '',
 								targetAgentName: f.targetAgentName || '',

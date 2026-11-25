@@ -52,7 +52,8 @@ export class WorkflowEditorInput extends EditorInput {
 
 	override matches(other: EditorInput | IUntypedEditorInput): boolean {
 		if (other instanceof WorkflowEditorInput) {
-			return other.workflowUri.toString() === this.workflowUri.toString();
+			// Subclasses (e.g. a Sub-Workflow focused canvas) are different editors of the same workflow
+			return other.typeId === this.typeId && other.workflowUri.toString() === this.workflowUri.toString();
 		}
 		return false;
 	}

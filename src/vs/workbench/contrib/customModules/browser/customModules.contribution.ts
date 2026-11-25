@@ -14,7 +14,8 @@ import { Codicon } from '../../../../base/common/codicons.js';
 import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
-import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { EditorInput } from '../../../common/editor/editorInput.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
 import { ICustomModulesService } from '../common/customModules.js';
@@ -169,17 +170,42 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 	]
 );
 
+/**
+ * Restores component / module editor tabs on start-up. Workflow-node editors (`wf_node_*`) come back unbound and are
+ * re-bound by their workflow canvas once it has loaded (see WorkflowEditor._rebindOpenNodeSchemaEditors); until then
+ * the editor shows a placeholder.
+ */
 class CustomModuleSchemaEditorInputSerializer implements IEditorSerializer {
-	canSerialize(): boolean {
-		return false;
+	canSerialize(input: EditorInput): boolean {
+		return input instanceof CustomModuleSchemaEditorInput && !!input.moduleId;
 	}
 
-	serialize(): string | undefined {
-		return undefined;
+	serialize(input: EditorInput): string | undefined {
+		if (!(input instanceof CustomModuleSchemaEditorInput)) {
+			return undefined;
+		}
+		return JSON.stringify({
+			moduleId: input.moduleId,
+			moduleName: input.moduleName,
+			workspaceUri: input.workspaceUri?.toString(),
+			nodeId: input.nodeId
+		});
 	}
 
-	deserialize(): CustomModuleSchemaEditorInput | undefined {
-		return undefined;
+	deserialize(_instantiationService: IInstantiationService, raw: string): CustomModuleSchemaEditorInput | undefined {
+		try {
+			const data = JSON.parse(raw);
+			if (typeof data?.moduleId !== 'string' || !data.moduleId) {
+				return undefined;
+			}
+			const input = new CustomModuleSchemaEditorInput(data.moduleId, data.moduleName || data.moduleId, typeof data.workspaceUri === 'string' ? URI.parse(data.workspaceUri) : undefined);
+			if (typeof data.nodeId === 'string') {
+				input.nodeId = data.nodeId;
+			}
+			return input;
+		} catch {
+			return undefined;
+		}
 	}
 }
 

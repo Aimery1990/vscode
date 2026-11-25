@@ -5,15 +5,19 @@
 
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { URI } from '../../../../base/common/uri.js';
+import { dirname } from '../../../../base/common/resources.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
+import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IEntityPersistenceService, extractSshOutputLastNLines, formatSshCommandsJsonOutput, generateSmartPythonVarName } from '../../entityPersistence/common/entityPersistence.js';
 import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutputItem, ITicketHandleInfo, INotebookCellExecutionResult } from '../common/workflowExecutionService.js';
 import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import { ITerminalService } from '../../terminal/browser/terminal.js';
 import {
+	ISubWorkflowDefinition,
+	SUB_WORKFLOWS_STORAGE_KEY,
 	IWorkflowEngineOptions,
 	IWorkflowExecutionRun,
 	IWorkflowIOContract,
@@ -825,6 +829,34 @@ class PythonExpressionEvaluator {
 export class WorkflowExecutionService implements IWorkflowExecutionService {
 	readonly _serviceBrand: undefined;
 
+	private static readonly SUB_WORKFLOW_LATEST_RUNS_STORAGE_KEY = 'anyagent.workflow.latestSubWorkflowRuns.v1';
+	private readonly _latestSubWorkflowRuns = new Map<string, IWorkflowExecutionRun>();
+	private _latestSubWorkflowRunsLoaded = false;
+	private readonly _flowchartOwnerCounts = new Map<string, number>();
+
+	public registerFlowchartOwner(workflowUri: URI | string): { dispose(): void } {
+		const key = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+		this._flowchartOwnerCounts.set(key, (this._flowchartOwnerCounts.get(key) || 0) + 1);
+		let disposed = false;
+		return {
+			dispose: () => {
+				if (disposed) {
+					return;
+				}
+				disposed = true;
+				const next = (this._flowchartOwnerCounts.get(key) || 1) - 1;
+				if (next <= 0) {
+					this._flowchartOwnerCounts.delete(key);
+				} else {
+					this._flowchartOwnerCounts.set(key, next);
+				}
+			}
+		};
+	}
+	private _subWorkflowsCache: ISubWorkflowDefinition[] | null = null;
+	private _subWorkflowByIdCache = new Map<string, ISubWorkflowDefinition>();
+	private _subWorkflowsByNodeIdCache = new Map<string, ISubWorkflowDefinition[]>();
+
 	private readonly _runs = new Map<string, IWorkflowExecutionRun>();
 	private readonly _activeRunsByWorkflow = new Map<string, string>();
 	private readonly _humanWaiters = new Map<string, (input: any) => void>();
@@ -853,15 +885,488 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		'@ANY_AGENT_CONTEXT'
 	]);
 
+	private readonly _onDidChangeSubWorkflows = new Emitter<void>();
+	public readonly onDidChangeSubWorkflows: Event<void> = this._onDidChangeSubWorkflows.event;
+
+	private readonly _onDidChangeSubWorkflowRun = new Emitter<IWorkflowExecutionRun>();
+	public readonly onDidChangeSubWorkflowRun: Event<IWorkflowExecutionRun> = this._onDidChangeSubWorkflowRun.event;
+	/** Sub-Workflow library id -> runId of its currently executing child run. */
+	private readonly _activeSubWorkflowRunIds = new Map<string, string>();
+
 	constructor(
 		@IEntityPersistenceService private readonly entityPersistenceService: IEntityPersistenceService,
 		@IFileService private readonly fileService: IFileService,
 		@ILogService private readonly logService: ILogService,
 		@INotificationService private readonly notificationService: INotificationService,
 		@ITicketWorkflowRuntimeService private readonly ticketRuntimeService: ITicketWorkflowRuntimeService,
-		@ITerminalService private readonly terminalService: ITerminalService
+		@ITerminalService private readonly terminalService: ITerminalService,
+		@IStorageService private readonly storageService: IStorageService
 	) {
 		this._cleanupStaleKernelDirsOnStartup().catch(() => { });
+	}
+
+	private _coerceInputLiteral(val: any): any {
+		if (typeof val !== 'string') {
+			return val;
+		}
+		const trimmed = val.trim();
+		if (!trimmed) {
+			return val;
+		}
+		// 1. Explicit quoted string literal (Python-style "..." or '...') -> always keep as string (e.g. '2' or "2" -> "2")
+		if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (typeof parsed === 'string') {
+					return parsed;
+				}
+			} catch {
+				// Keep original if not a valid single quoted string literal
+			}
+		}
+		if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) {
+			const inner = trimmed.slice(1, -1);
+			if (!/(^|[^\\])'/.test(inner)) {
+				return inner.replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+			}
+		}
+		// 2. Unquoted numeric literal (int / float) -> number (e.g. 2 -> 2, 3.14 -> 3.14)
+		if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(trimmed)) {
+			const num = Number(trimmed);
+			if (Number.isFinite(num)) {
+				return num;
+			}
+		}
+		// 3. Unquoted boolean / None literals
+		if (trimmed === 'true' || trimmed === 'True') {
+			return true;
+		}
+		if (trimmed === 'false' || trimmed === 'False') {
+			return false;
+		}
+		if (trimmed === 'null' || trimmed === 'None') {
+			return null;
+		}
+		// 4. Unquoted JSON list / dict literals
+		if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+			try {
+				return JSON.parse(trimmed);
+			} catch {
+				return val;
+			}
+		}
+		return val;
+	}
+
+	private async _executeSubWorkflow(
+		parentRun: IWorkflowExecutionRun,
+		subDef: ISubWorkflowDefinition,
+		resolvedInputs: Record<string, any>,
+		callerNode?: { id: string; label?: string }
+	): Promise<IWorkflowExecutionRun> {
+		// Always refresh Sub-Workflow nodes/links from the live source workflow_flowchart.json if available,
+		// so any edits the user saved on the canvas (e.g. changing Output variable names) ALWAYS take effect immediately
+		// instead of running a stale snapshot from subWorkflows.library!
+		let liveNodes: IFlowchartNode[] = JSON.parse(JSON.stringify(subDef.nodes || []));
+		let liveLinks: any[] = JSON.parse(JSON.stringify(subDef.links || []));
+		if (subDef.sourceWorkflowUri && Array.isArray(subDef.nodeIds) && subDef.nodeIds.length > 0) {
+			try {
+				const parentLiveData = (subDef.sourceWorkflowUri === parentRun.workflowUri && (parentRun as any)._liveFlowchartData)
+					? ((parentRun as any)._liveFlowchartData as IFlowchartData)
+					: undefined;
+				const sourceFlowchart = (parentLiveData && Array.isArray(parentLiveData.nodes) && parentLiveData.nodes.length > 0)
+					? parentLiveData
+					: await this._loadFlowchartData(subDef.sourceWorkflowUri);
+				if (sourceFlowchart && Array.isArray(sourceFlowchart.nodes) && sourceFlowchart.nodes.length > 0) {
+					const subIdSet = new Set(subDef.nodeIds);
+					const matchedLiveNodes = sourceFlowchart.nodes.filter(n => n && subIdSet.has(n.id));
+					if (matchedLiveNodes.length > 0) {
+						liveNodes = JSON.parse(JSON.stringify(matchedLiveNodes));
+						if (Array.isArray(sourceFlowchart.links)) {
+							liveLinks = JSON.parse(JSON.stringify(
+								sourceFlowchart.links.filter(l => l && subIdSet.has(l.from) && subIdSet.has(l.to))
+							));
+						}
+						// Keep subWorkflows.library in sync with the live source canvas
+						this.saveSubWorkflow({
+							...subDef,
+							nodes: liveNodes,
+							links: liveLinks,
+							updatedAt: Date.now()
+						});
+					}
+				}
+			} catch { }
+		}
+
+		const childFlowchartData: IFlowchartData = {
+			nodes: liveNodes,
+			links: liveLinks
+		};
+		if (!childFlowchartData.nodes || childFlowchartData.nodes.length === 0) {
+			throw new Error(`Sub-Workflow '${subDef.name}' contains no nodes.`);
+		}
+
+		const childRunId = `subrun_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+		const childWorkflowUri = subDef.sourceWorkflowUri || parentRun.workflowUri;
+		const childRun: IWorkflowExecutionRun = {
+			runId: childRunId,
+			workflowUri: childWorkflowUri,
+			workflowName: subDef.name,
+			status: 'running',
+			mode: 'standard',
+			fullSpeed: parentRun.fullSpeed,
+			trigger: 'manual',
+			currentNodeId: undefined,
+			visitedNodeIds: [],
+			startedAt: Date.now(),
+			updatedAt: Date.now(),
+			contextVariables: { ...resolvedInputs, __callerInputKeys__: Object.keys(resolvedInputs) },
+			nodeStates: {},
+			linkStates: {},
+			executionPath: [],
+			isSubWorkflowRun: true,
+			subWorkflowNamespace: subDef.namespace || generateSmartPythonVarName(subDef.name, 'sub_workflow'),
+			subWorkflowId: subDef.id,
+			parentRunId: parentRun.runId,
+			parentWorkflowUri: parentRun.workflowUri,
+			callerNodeId: callerNode?.id,
+			callerNodeLabel: callerNode?.label,
+			logs: []
+		};
+		(childRun as any)._displayRunId = (parentRun as any)._displayRunId || parentRun.runId;
+		(childRun as any)._displayWorkflowUri = (parentRun as any)._displayWorkflowUri || parentRun.workflowUri;
+
+		for (const n of childFlowchartData.nodes) {
+			childRun.nodeStates[n.id] = {
+				nodeId: n.id,
+				nodeLabel: n.label,
+				nodeType: n.type,
+				status: 'pending',
+				executedTickets: []
+			};
+		}
+
+		this._runs.set(childRunId, childRun);
+		this._activeSubWorkflowRunIds.set(subDef.id, childRunId);
+		this._onDidChangeSubWorkflowRun.fire(childRun);
+
+		// Stream all child Sub-Workflow logs live into parent run's Execution Logs for full visibility
+		const logForwarder = this.onDidEmitLog(({ runId: emittedRunId, log }) => {
+			if (emittedRunId === childRunId) {
+				this._emitLog(
+					parentRun,
+					log.level,
+					`  [Sub-Workflow: ${subDef.name}] ${log.message}`,
+					{ nodeId: log.nodeId }
+				);
+			}
+		});
+
+		try {
+			await this._runWorkflowAsync(childRun, childFlowchartData, {
+				mode: 'standard',
+				fullSpeed: parentRun.fullSpeed,
+				initialInputs: resolvedInputs,
+				initialData: childFlowchartData
+			});
+			return childRun;
+		} finally {
+			logForwarder.dispose();
+			if (childRun.status === 'running' || childRun.status === 'paused' || childRun.status === 'waiting_human') {
+				// Execution left the engine without a final status (e.g. the parent run was stopped)
+				childRun.status = 'stopped';
+				childRun.completedAt = childRun.completedAt || Date.now();
+			}
+			if (this._activeSubWorkflowRunIds.get(subDef.id) === childRunId) {
+				this._activeSubWorkflowRunIds.delete(subDef.id);
+			}
+			this._saveLatestSubWorkflowRun(subDef, childRun);
+			this._onDidChangeSubWorkflowRun.fire(childRun);
+			// Sync all executed node component outputs/logs/inputs back to the source workflow canvas
+			for (const childNode of childFlowchartData.nodes) {
+				try {
+					this._onDidUpdateNodeComponents.fire({ workflowUri: childWorkflowUri, nodeId: childNode.id, node: childNode });
+				} catch { }
+			}
+			this._runs.delete(childRunId);
+		}
+	}
+
+	private _ensureLatestSubWorkflowRunsLoaded(): void {
+		if (this._latestSubWorkflowRunsLoaded) {
+			return;
+		}
+		this._latestSubWorkflowRunsLoaded = true;
+		try {
+			const raw = this.storageService.get(WorkflowExecutionService.SUB_WORKFLOW_LATEST_RUNS_STORAGE_KEY, StorageScope.PROFILE);
+			if (!raw) {
+				return;
+			}
+			const parsed = JSON.parse(raw);
+			if (parsed && typeof parsed === 'object') {
+				for (const [subId, runSnapshot] of Object.entries(parsed)) {
+					if (subId && runSnapshot && typeof runSnapshot === 'object') {
+						this._latestSubWorkflowRuns.set(subId, runSnapshot as IWorkflowExecutionRun);
+					}
+				}
+			}
+		} catch { }
+	}
+
+	private _saveLatestSubWorkflowRun(subDef: ISubWorkflowDefinition, childRun: IWorkflowExecutionRun): void {
+		this._ensureLatestSubWorkflowRunsLoaded();
+		const cleanContext: Record<string, any> = {};
+		for (const [k, v] of Object.entries(childRun.contextVariables || {})) {
+			if (k === '__callerInputKeys__') {
+				continue;
+			}
+			cleanContext[k] = v;
+		}
+		const now = Date.now();
+		const fullSnapshot: IWorkflowExecutionRun = {
+			runId: childRun.runId,
+			workflowUri: childRun.workflowUri,
+			workflowName: childRun.workflowName,
+			status: childRun.status,
+			mode: childRun.mode,
+			trigger: childRun.trigger,
+			currentNodeId: childRun.currentNodeId,
+			visitedNodeIds: [...(childRun.visitedNodeIds || [])],
+			startedAt: childRun.startedAt,
+			updatedAt: Math.max(childRun.updatedAt || 0, now),
+			completedAt: childRun.completedAt || now,
+			error: childRun.error,
+			contextVariables: cleanContext,
+			nodeStates: JSON.parse(JSON.stringify(childRun.nodeStates || {})),
+			linkStates: JSON.parse(JSON.stringify(childRun.linkStates || {})),
+			executionPath: [],
+			isSubWorkflowRun: true,
+			subWorkflowNamespace: childRun.subWorkflowNamespace,
+			subWorkflowId: childRun.subWorkflowId,
+			parentRunId: childRun.parentRunId,
+			parentWorkflowUri: childRun.parentWorkflowUri,
+			callerNodeId: childRun.callerNodeId,
+			callerNodeLabel: childRun.callerNodeLabel,
+			workflowOutputs: childRun.workflowOutputs,
+			workflowOutputsByVarName: childRun.workflowOutputsByVarName,
+			logs: []
+		};
+		this._latestSubWorkflowRuns.set(subDef.id, fullSnapshot);
+
+		// Persist compact snapshots so expanding the Sub-Workflow after Cmd+R still shows its latest invoked state
+		try {
+			const persistObj: Record<string, any> = {};
+			for (const [sid, snap] of this._latestSubWorkflowRuns.entries()) {
+				const compactCtx: Record<string, any> = {};
+				for (const [k, v] of Object.entries(snap.contextVariables || {})) {
+					try {
+						const s = typeof v === 'string' ? v : JSON.stringify(v);
+						if (s && s.length > 256 * 1024) {
+							compactCtx[k] = s.substring(0, 256 * 1024) + ' ... (truncated)';
+						} else {
+							compactCtx[k] = v;
+						}
+					} catch {
+						compactCtx[k] = String(v);
+					}
+				}
+				const compactNodeStates: Record<string, any> = {};
+				for (const [nid, nState] of Object.entries(snap.nodeStates || {})) {
+					if (!nState || typeof nState !== 'object') continue;
+					const { output: rawNodeOut, executedTickets: rawTkts, ...restState } = nState as any;
+					compactNodeStates[nid] = {
+						...restState,
+						...(rawNodeOut !== undefined ? { output: this._safeCompactNodeOutput(rawNodeOut) } : {}),
+						...(Array.isArray(rawTkts) ? {
+							executedTickets: rawTkts.slice(-20).map((t: any) => ({
+								ticketId: t?.ticketId,
+								ticketName: t?.ticketName,
+								ticketType: t?.ticketType,
+								status: t?.status,
+								durationMs: t?.durationMs
+							}))
+						} : {})
+					};
+				}
+				persistObj[sid] = {
+					...snap,
+					nodeStates: compactNodeStates,
+					contextVariables: compactCtx
+				};
+			}
+			this.storageService.store(
+				WorkflowExecutionService.SUB_WORKFLOW_LATEST_RUNS_STORAGE_KEY,
+				JSON.stringify(persistObj),
+				StorageScope.PROFILE,
+				StorageTarget.USER
+			);
+		} catch { }
+	}
+
+	public getLatestSubWorkflowRun(subWorkflowId: string): IWorkflowExecutionRun | undefined {
+		if (!subWorkflowId) {
+			return undefined;
+		}
+		this._ensureLatestSubWorkflowRunsLoaded();
+		return this._latestSubWorkflowRuns.get(subWorkflowId);
+	}
+
+	private _rebuildSubWorkflowIndexes(list: ISubWorkflowDefinition[]): void {
+		this._subWorkflowsCache = list;
+		this._subWorkflowByIdCache.clear();
+		this._subWorkflowsByNodeIdCache.clear();
+		for (const sw of list) {
+			if (!sw || !sw.id) {
+				continue;
+			}
+			this._subWorkflowByIdCache.set(sw.id, sw);
+			if (Array.isArray(sw.nodeIds)) {
+				for (const nid of sw.nodeIds) {
+					if (!nid) continue;
+					let arr = this._subWorkflowsByNodeIdCache.get(nid);
+					if (!arr) {
+						arr = [];
+						this._subWorkflowsByNodeIdCache.set(nid, arr);
+					}
+					arr.push(sw);
+				}
+			}
+		}
+	}
+
+	private _stripHeavyMediaFromSubWorkflow(def: ISubWorkflowDefinition): { cleaned: ISubWorkflowDefinition; changed: boolean } {
+		let changed = false;
+		const cloned: ISubWorkflowDefinition = JSON.parse(JSON.stringify(def));
+		if (Array.isArray(cloned.nodes)) {
+			for (const n of cloned.nodes) {
+				if (!Array.isArray(n?.pipeline)) continue;
+				for (const st of n.pipeline) {
+					const comp = (st as any)?.component;
+					if (!comp) continue;
+					// voice_note is commentary-only and skipped during execution; never duplicate multi-MB base64 audio in Sub-Workflow storage
+					if (Array.isArray(comp.voiceClips)) {
+						for (const clip of comp.voiceClips) {
+							if (clip && typeof clip.audioDataUrl === 'string' && clip.audioDataUrl.length > 0) {
+								delete clip.audioDataUrl;
+								changed = true;
+							}
+						}
+					}
+				}
+			}
+		}
+		return { cleaned: cloned, changed };
+	}
+
+	public getActiveSubWorkflowRun(subWorkflowId: string): IWorkflowExecutionRun | undefined {
+		const activeRunId = this._activeSubWorkflowRunIds.get(subWorkflowId);
+		const live = activeRunId ? this._runs.get(activeRunId) : undefined;
+		return live || this.getLatestSubWorkflowRun(subWorkflowId);
+	}
+
+	public getLatestSubWorkflowRunForNode(nodeId: string, workflowUri?: URI | string): IWorkflowExecutionRun | undefined {
+		if (!nodeId) {
+			return undefined;
+		}
+		this._ensureLatestSubWorkflowRunsLoaded();
+		if (this._latestSubWorkflowRuns.size === 0 && this._activeSubWorkflowRunIds.size === 0) {
+			return undefined;
+		}
+		// Ensure index cache is populated (O(1) lookup, zero JSON.parse)
+		if (this._subWorkflowsCache === null) {
+			this.getSubWorkflows();
+		}
+		const matchingSubs = this._subWorkflowsByNodeIdCache.get(nodeId);
+		if (!matchingSubs || matchingSubs.length === 0) {
+			return undefined;
+		}
+		const uriStr = workflowUri ? (typeof workflowUri === 'string' ? workflowUri : workflowUri.toString()) : '';
+		let fallbackRun: IWorkflowExecutionRun | undefined;
+		for (const sw of matchingSubs) {
+			// A Sub-Workflow that is executing right now shows its live states; otherwise its latest finished snapshot
+			const liveRunId = this._activeSubWorkflowRunIds.get(sw.id);
+			const run = (liveRunId ? this._runs.get(liveRunId) : undefined) || this._latestSubWorkflowRuns.get(sw.id);
+			if (!run) {
+				continue;
+			}
+			if (uriStr && sw.sourceWorkflowUri === uriStr) {
+				return run;
+			}
+			if (!fallbackRun || (run.updatedAt || 0) > (fallbackRun.updatedAt || 0)) {
+				fallbackRun = run;
+			}
+		}
+		return fallbackRun;
+	}
+
+	public getSubWorkflows(): ISubWorkflowDefinition[] {
+		if (this._subWorkflowsCache !== null) {
+			return this._subWorkflowsCache;
+		}
+		try {
+			const raw = this.storageService.get(SUB_WORKFLOWS_STORAGE_KEY, StorageScope.PROFILE);
+			if (!raw) {
+				this._rebuildSubWorkflowIndexes([]);
+				return this._subWorkflowsCache!;
+			}
+			const parsed = JSON.parse(raw);
+			const list: ISubWorkflowDefinition[] = Array.isArray(parsed) ? parsed : [];
+			// One-time auto-slim: strip any previously stored multi-MB base64 voice audio from Sub-Workflow definitions
+			let anyCleaned = false;
+			const cleanedList = list.map(sw => {
+				const res = this._stripHeavyMediaFromSubWorkflow(sw);
+				if (res.changed) {
+					anyCleaned = true;
+				}
+				return res.cleaned;
+			});
+			this._rebuildSubWorkflowIndexes(cleanedList);
+			if (anyCleaned) {
+				try {
+					this.storageService.store(SUB_WORKFLOWS_STORAGE_KEY, JSON.stringify(cleanedList), StorageScope.PROFILE, StorageTarget.USER);
+				} catch { }
+			}
+			return this._subWorkflowsCache!;
+		} catch {
+			this._rebuildSubWorkflowIndexes([]);
+			return this._subWorkflowsCache!;
+		}
+	}
+
+	public getSubWorkflowById(id: string): ISubWorkflowDefinition | undefined {
+		if (!id) {
+			return undefined;
+		}
+		if (this._subWorkflowsCache === null) {
+			this.getSubWorkflows();
+		}
+		return this._subWorkflowByIdCache.get(id);
+	}
+
+	public saveSubWorkflow(def: ISubWorkflowDefinition): void {
+		const { cleaned } = this._stripHeavyMediaFromSubWorkflow(def);
+		const list = [...this.getSubWorkflows()];
+		const idx = list.findIndex(s => s.id === cleaned.id);
+		if (idx >= 0) {
+			list[idx] = cleaned;
+		} else {
+			list.unshift(cleaned);
+		}
+		this._rebuildSubWorkflowIndexes(list);
+		try {
+			this.storageService.store(SUB_WORKFLOWS_STORAGE_KEY, JSON.stringify(list), StorageScope.PROFILE, StorageTarget.USER);
+		} catch { }
+		this._onDidChangeSubWorkflows.fire();
+	}
+
+	public deleteSubWorkflow(id: string): void {
+		const list = this.getSubWorkflows().filter(s => s.id !== id);
+		this._rebuildSubWorkflowIndexes(list);
+		try {
+			this.storageService.store(SUB_WORKFLOWS_STORAGE_KEY, JSON.stringify(list), StorageScope.PROFILE, StorageTarget.USER);
+		} catch { }
+		this._onDidChangeSubWorkflows.fire();
 	}
 
 	private async _cleanupStaleKernelDirsOnStartup(): Promise<void> {
@@ -1048,6 +1553,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					this._activeRunsByWorkflow.set(uriStr, sorted[0].runId);
 				}
 			}
+			// Hydrate any archived large variables for the active/latest run so native types are ready after restart
+			const activeIdAfterLoad = this._activeRunsByWorkflow.get(uriStr);
+			const activeRunAfterLoad = activeIdAfterLoad ? this._runs.get(activeIdAfterLoad) : undefined;
+			if (activeRunAfterLoad?.contextVariables) {
+				await this._hydrateContextVariables(uriStr, activeRunAfterLoad.contextVariables);
+			}
 			if (needsPersistCleanup) {
 				this._schedulePersist(uriStr);
 			}
@@ -1145,6 +1656,151 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		return out;
 	}
 
+	private static readonly LARGE_VAR_SPILL_THRESHOLD_BYTES = 16 * 1024; // 16 KB
+	private readonly _spilledVarSignatures = new Map<string, string>();
+
+	private _getWorkflowVarsDirUri(workflowUriStr: string): URI {
+		const runsFileUri = this._getWorkflowRunsFileUri(workflowUriStr);
+		return URI.joinPath(dirname(runsFileUri), 'workflow_vars');
+	}
+
+	private _isSpilledVarRef(val: any): val is { __anyagentVarRef__: true; file: string; varName: string; type: string; sizeBytes: number } {
+		return Boolean(val && typeof val === 'object' && !Array.isArray(val) && val.__anyagentVarRef__ === true && typeof val.file === 'string');
+	}
+
+	private _makeSafeVarArchiveFileName(runId: string, varName: string): string {
+		const safeRun = (runId || 'run').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+		const safeVar = (varName || 'var').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+		// Short deterministic hash suffix to avoid collisions between similar variable names
+		let h = 2166136261;
+		for (let i = 0; i < varName.length; i++) {
+			h ^= varName.charCodeAt(i);
+			h = Math.imul(h, 16777619);
+		}
+		const hashHex = (h >>> 0).toString(16).padStart(8, '0');
+		return `${safeRun}__${safeVar}_${hashHex}.json`;
+	}
+
+	private async _spillVariableIfLarge(
+		varsDirUri: URI,
+		runId: string,
+		varName: string,
+		val: any,
+		referencedFiles: Set<string>
+	): Promise<any> {
+		if (val === null || val === undefined || typeof val === 'boolean' || typeof val === 'number') {
+			return val;
+		}
+		if (this._isSpilledVarRef(val)) {
+			referencedFiles.add(val.file);
+			return val;
+		}
+		let serializedVal = '';
+		try {
+			serializedVal = JSON.stringify(val);
+		} catch {
+			// Fallback to safe compacted structure if circular/non-serializable
+			try {
+				serializedVal = JSON.stringify(this._safeCompactNodeOutput(val));
+			} catch {
+				serializedVal = JSON.stringify(String(val));
+			}
+		}
+		if (!serializedVal || serializedVal.length <= WorkflowExecutionService.LARGE_VAR_SPILL_THRESHOLD_BYTES) {
+			return val;
+		}
+
+		const fileName = this._makeSafeVarArchiveFileName(runId, varName);
+		referencedFiles.add(fileName);
+		const fileUri = URI.joinPath(varsDirUri, fileName);
+		const sig = `${serializedVal.length}:${serializedVal.slice(0, 48)}:${serializedVal.slice(-48)}`;
+		const cacheKey = fileUri.toString();
+
+		if (this._spilledVarSignatures.get(cacheKey) !== sig) {
+			const archiveEnvelope = `{"__anyagentVarArchive__":true,"varName":${JSON.stringify(varName)},"runId":${JSON.stringify(runId)},"savedAt":${Date.now()},"value":${serializedVal}}`;
+			try {
+				await this.fileService.createFolder(varsDirUri);
+			} catch { }
+			await this.fileService.writeFile(fileUri, VSBuffer.fromString(archiveEnvelope));
+			this._spilledVarSignatures.set(cacheKey, sig);
+		}
+
+		const valType = Array.isArray(val) ? 'array' : typeof val;
+		return {
+			__anyagentVarRef__: true,
+			file: fileName,
+			varName,
+			type: valType,
+			sizeBytes: serializedVal.length
+		};
+	}
+
+	async hydrateContextVariables(workflowUri: URI | string, vars: Record<string, any>): Promise<Record<string, any>> {
+		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+		const copy: Record<string, any> = { ...(vars || {}) };
+		await this._hydrateContextVariables(uriStr, copy);
+		return copy;
+	}
+
+	private async _hydrateContextVariables(workflowUriStr: string, vars: Record<string, any> | undefined): Promise<void> {
+		if (!vars || typeof vars !== 'object') {
+			return;
+		}
+		const varsDirUri = this._getWorkflowVarsDirUri(workflowUriStr);
+		const entries = Object.entries(vars);
+		for (const [k, v] of entries) {
+			if (!this._isSpilledVarRef(v)) {
+				continue;
+			}
+			const fileUri = URI.joinPath(varsDirUri, v.file);
+			try {
+				if (await this.fileService.exists(fileUri)) {
+					const raw = (await this.fileService.readFile(fileUri)).value.toString();
+					const parsed = JSON.parse(raw);
+					if (parsed && parsed.__anyagentVarArchive__ === true && Object.prototype.hasOwnProperty.call(parsed, 'value')) {
+						vars[k] = parsed.value;
+					} else {
+						vars[k] = parsed;
+					}
+				}
+			} catch (err) {
+				this.logService.warn(`[WorkflowExecution] Failed to hydrate archived variable '${k}' from ${v.file}:`, err);
+			}
+		}
+	}
+
+	private async _cleanupOrphanedVarArchives(varsDirUri: URI, referencedFiles: Set<string>): Promise<void> {
+		try {
+			if (!(await this.fileService.exists(varsDirUri))) {
+				return;
+			}
+			const dirStat = await this.fileService.resolve(varsDirUri);
+			for (const child of (dirStat.children || [])) {
+				if (!child.isDirectory && child.name.endsWith('.json') && !referencedFiles.has(child.name)) {
+					try {
+						await this.fileService.del(child.resource);
+						this._spilledVarSignatures.delete(child.resource.toString());
+					} catch { }
+				}
+			}
+		} catch { }
+	}
+
+	private async _clearWorkflowVarsDir(workflowUriStr: string): Promise<void> {
+		try {
+			const varsDirUri = this._getWorkflowVarsDirUri(workflowUriStr);
+			if (await this.fileService.exists(varsDirUri)) {
+				await this.fileService.del(varsDirUri, { recursive: true });
+			}
+			const prefix = varsDirUri.toString();
+			for (const key of Array.from(this._spilledVarSignatures.keys())) {
+				if (key.startsWith(prefix)) {
+					this._spilledVarSignatures.delete(key);
+				}
+			}
+		} catch { }
+	}
+
 	async persistRunsForWorkflow(workflowUri: URI | string): Promise<void> {
 		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
 		const allRuns = this.getRunsForWorkflow(uriStr);
@@ -1153,7 +1809,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				this._runs.delete(oldRun.runId);
 			}
 		}
-		const runs = allRuns.slice(0, 8).map((r, runIdx) => {
+		const varsDirUri = this._getWorkflowVarsDirUri(uriStr);
+		const referencedVarFiles = new Set<string>();
+
+		const runs = await Promise.all(allRuns.slice(0, 8).map(async (r, runIdx) => {
 			const cleanVars: Record<string, any> = {};
 			if (r.contextVariables) {
 				for (const [k, v] of Object.entries(r.contextVariables)) {
@@ -1163,24 +1822,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					if (k.startsWith('@') && k.substring(1) in r.contextVariables) {
 						continue;
 					}
-					// For active / latest run (runIdx === 0), preserve complete pure context variables without any truncation markers
-					// For older historical runs (runIdx > 0), only keep scalar / small values (never injecting synthetic omission keys/markers)
-					if (runIdx === 0) {
-						if (v === null || v === undefined || typeof v === 'boolean' || typeof v === 'number' || typeof v === 'string') {
-							cleanVars[k] = v;
-						} else if (typeof v === 'object') {
-							cleanVars[k] = this._safeCompactNodeOutput(v);
-						}
-					} else {
-						if (v === null || v === undefined || typeof v === 'boolean' || typeof v === 'number') {
-							cleanVars[k] = v;
-						} else if (typeof v === 'string' && v.length <= 2000) {
-							cleanVars[k] = v;
-						} else if (Array.isArray(v) && v.length <= 20) {
-							cleanVars[k] = v;
-						} else if (typeof v === 'object' && Object.keys(v).length <= 20) {
-							cleanVars[k] = this._summarizeValueForHistory(v, 0);
-						}
+					// Spill large variables (> 16 KB) to dedicated typed JSON files in .agents/workflow_vars/
+					// so workflow_runs.json stays tiny & fast while NEVER dropping or truncating data!
+					try {
+						cleanVars[k] = await this._spillVariableIfLarge(varsDirUri, r.runId, k, v, referencedVarFiles);
+					} catch {
+						cleanVars[k] = typeof v === 'string' ? v.slice(0, 2000) : String(v);
 					}
 				}
 			}
@@ -1203,7 +1850,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							ticketName: t.ticketName,
 							ticketType: t.ticketType,
 							status: t.status,
-							output: (runIdx === 0) ? t.output : (typeof t.output === 'object' && t.output !== null ? this._fastPreviewString(t.output, 200) : t.output),
+							output: (runIdx === 0)
+								? (typeof t.output === 'object' && t.output !== null ? this._fastPreviewString(t.output, 2000) : t.output)
+								: (typeof t.output === 'object' && t.output !== null ? this._fastPreviewString(t.output, 200) : t.output),
 							outputSpecs: t.outputSpecs,
 							stepResults: Array.isArray(t.stepResults) ? t.stepResults.map(s => ({
 								fieldId: s.fieldId,
@@ -1252,13 +1901,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				executionPath: cleanExecutionPath,
 				logs: cleanLogs
 			};
-		});
+		}));
 
 		let jsonStr = '';
 		try {
 			jsonStr = JSON.stringify(runs);
 		} catch (strErr) {
-			this.logService.warn(`[WorkflowExecution] JSON.stringify failed on ${runs.length} runs, attempting aggressive compacting:`, strErr);
+			this.logService.warn(`[WorkflowExecution] JSON.stringify failed on ${runs.length} runs, attempting safe fallback while preserving contextVariables:`, strErr);
 			try {
 				const minimalRuns = runs.slice(0, 3).map(r => ({
 					runId: r.runId,
@@ -1270,7 +1919,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					completedAt: r.completedAt,
 					durationMs: r.durationMs,
 					error: r.error,
+					contextVariables: r.contextVariables || {},
 					nodeStates: r.nodeStates || {},
+					linkStates: r.linkStates || {},
 					logs: (r.logs || []).slice(-100)
 				}));
 				jsonStr = JSON.stringify(minimalRuns);
@@ -1280,9 +1931,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 		}
 
-		// Enforce safety ceiling (max 6 MB) to prevent renderer memory spikes
+		// Enforce safety ceiling (max 6 MB) while ALWAYS preserving contextVariables (already spilled as tiny refs) & linkStates
 		if (jsonStr.length > 6 * 1024 * 1024) {
-			this.logService.warn(`[WorkflowExecution] Serialized runs size is ${(jsonStr.length / 1024 / 1024).toFixed(2)} MB, enforcing aggressive compacting.`);
+			this.logService.warn(`[WorkflowExecution] Serialized runs size is ${(jsonStr.length / 1024 / 1024).toFixed(2)} MB, trimming heavy logs/history while preserving contextVariables.`);
 			const minimalRuns = runs.slice(0, 3).map(r => ({
 				runId: r.runId,
 				runNumber: r.runNumber,
@@ -1293,11 +1944,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				completedAt: r.completedAt,
 				durationMs: r.durationMs,
 				error: r.error,
+				contextVariables: r.contextVariables || {},
 				nodeStates: r.nodeStates || {},
+				linkStates: r.linkStates || {},
 				logs: (r.logs || []).slice(-50)
 			}));
 			jsonStr = JSON.stringify(minimalRuns);
 		}
+
+		// Garbage-collect orphaned variable archive files no longer referenced by any retained run
+		void this._cleanupOrphanedVarArchives(varsDirUri, referencedVarFiles);
 
 		const buffer = VSBuffer.fromString(jsonStr);
 
@@ -1479,6 +2135,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 		this.clearRuns(uriStr);
 		this.clearDisplayCards(uriStr);
+		void this._clearWorkflowVarsDir(uriStr);
+		void this.persistRunsForWorkflow(uriStr);
 
 		const idleRun: IWorkflowExecutionRun = {
 			runId: '',
@@ -1499,10 +2157,81 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		this._notifyRunChanged(idleRun);
 	}
 
+	resetNodes(workflowUri: URI | string, nodeIds: string[], variableNamesToClear?: string[]): void {
+		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+		if (!Array.isArray(nodeIds) || nodeIds.length === 0) {
+			return;
+		}
+		const targetSet = new Set(nodeIds.filter(Boolean));
+		if (targetSet.size === 0) {
+			return;
+		}
+		const activeRunId = this._activeRunsByWorkflow.get(uriStr);
+		let targetRun = activeRunId ? this._runs.get(activeRunId) : undefined;
+		if (!targetRun) {
+			const runs = this.getRunsForWorkflow(uriStr);
+			if (runs.length > 0) {
+				targetRun = runs[0];
+				this._activeRunsByWorkflow.set(uriStr, targetRun.runId);
+			}
+		}
+		if (!targetRun) {
+			return;
+		}
+
+		// Reset only selected node states and their outgoing link states
+		if (targetRun.nodeStates && typeof targetRun.nodeStates === 'object') {
+			for (const nid of targetSet) {
+				const prev = targetRun.nodeStates[nid];
+				if (prev) {
+					targetRun.nodeStates[nid] = {
+						nodeId: nid,
+						nodeLabel: prev.nodeLabel,
+						nodeType: prev.nodeType,
+						status: 'pending',
+						executedTickets: []
+					};
+				}
+			}
+		}
+		if (targetRun.linkStates && typeof targetRun.linkStates === 'object') {
+			for (const lk of Object.keys(targetRun.linkStates)) {
+				for (const nid of targetSet) {
+					if (lk.startsWith(`${nid}->`)) {
+						delete targetRun.linkStates[lk];
+						break;
+					}
+				}
+			}
+		}
+		if (Array.isArray(targetRun.visitedNodeIds)) {
+			targetRun.visitedNodeIds = targetRun.visitedNodeIds.filter(id => !targetSet.has(id));
+		}
+		if (targetRun.contextVariables && Array.isArray(variableNamesToClear)) {
+			for (const rawName of variableNamesToClear) {
+				const clean = (rawName || '').trim().replace(/^@/, '');
+				if (!clean) continue;
+				delete targetRun.contextVariables[clean];
+				delete targetRun.contextVariables[`@${clean}`];
+			}
+		}
+		targetRun.updatedAt = Date.now();
+		this._notifyRunChanged(targetRun);
+		void this.persistRunsForWorkflow(uriStr);
+	}
+
 	async executeWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions): Promise<IWorkflowExecutionRun> {
 		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
+		// Ensure persisted runs from before app restart are loaded so prior node data is never lost
+		if (this.getRunsForWorkflow(uriStr).length === 0) {
+			try {
+				await this.loadRunsForWorkflow(uriStr);
+			} catch { }
+		}
+		const isPartialRun = Boolean((options?.selectedNodeIds && options.selectedNodeIds.length > 0) || options?.entryNodeId);
 		const existingRunId = this._activeRunsByWorkflow.get(uriStr);
 		const inheritedContextVariables: Record<string, any> = {};
+		let priorStateSource: IWorkflowExecutionRun | undefined;
 		if (existingRunId) {
 			const existing = this._runs.get(existingRunId);
 			if (existing && (existing.status === 'running' || existing.status === 'waiting_human')) {
@@ -1517,38 +2246,114 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					stepResolve();
 				}
 			}
-			if (existing && existing.contextVariables && ((options?.selectedNodeIds && options.selectedNodeIds.length > 0) || options?.entryNodeId)) {
-				for (const [k, v] of Object.entries(existing.contextVariables)) {
-					if (v !== undefined && v !== 'None' && !WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(k)) {
-						inheritedContextVariables[k] = v;
-					}
-				}
-			}
-		}
-
-		// If running a selective node/subset and no variables found in active run, inherit from the latest completed prior run
-		if (Object.keys(inheritedContextVariables).length === 0 && ((options?.selectedNodeIds && options.selectedNodeIds.length > 0) || options?.entryNodeId)) {
-			const priorRuns = this.getRunsForWorkflow(uriStr);
-			for (const pr of priorRuns) {
-				if (pr?.contextVariables && Object.keys(pr.contextVariables).length > 0) {
-					for (const [k, v] of Object.entries(pr.contextVariables)) {
-						if (v !== undefined && v !== 'None' && !WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(k)) {
+			if (existing) {
+				priorStateSource = existing;
+				if (existing.contextVariables && isPartialRun) {
+					for (const [k, v] of Object.entries(existing.contextVariables)) {
+						if (v !== undefined && !WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(k)) {
 							inheritedContextVariables[k] = v;
 						}
 					}
-					if (Object.keys(inheritedContextVariables).length > 0) {
-						break;
+				}
+			}
+		}
+
+		// If running a selective node/subset or from a mid-workflow node and no variables found in active run, inherit from latest prior run that has data
+		if (isPartialRun) {
+			const priorRunsList = this.getRunsForWorkflow(uriStr);
+			if (!priorStateSource && priorRunsList.length > 0) {
+				priorStateSource = priorRunsList[0];
+			}
+			if (Object.keys(inheritedContextVariables).length === 0) {
+				for (const pr of priorRunsList) {
+					if (pr?.contextVariables && Object.keys(pr.contextVariables).length > 0) {
+						for (const [k, v] of Object.entries(pr.contextVariables)) {
+							if (v !== undefined && !WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(k)) {
+								inheritedContextVariables[k] = v;
+							}
+						}
+						if (!priorStateSource || Object.keys(priorStateSource.nodeStates || {}).length === 0) {
+							priorStateSource = pr;
+						}
+						if (Object.keys(inheritedContextVariables).length > 0) {
+							break;
+						}
 					}
 				}
 			}
 		}
 
-		// Clear previous execution cards when starting a fresh full workflow run
-		this.clearDisplayCards(uriStr);
+		// If running a partial/selective node that belongs to an expanded Sub-Workflow on the canvas,
+		// inherit that Sub-Workflow's latest execution snapshot contextVariables (e.g. jd_data_list, job_view_idx)
+		// so running a node inside an expanded Sub-Workflow has all of that Sub-Workflow's variables!
+		if (isPartialRun && !options?.isSubWorkflowRun) {
+			const anchorNodeId = options?.entryNodeId || options?.selectedNodeIds?.[0];
+			if (anchorNodeId) {
+				const subRun = this.getLatestSubWorkflowRunForNode(anchorNodeId, uriStr);
+				if (subRun?.contextVariables) {
+					for (const [k, v] of Object.entries(subRun.contextVariables)) {
+						if (v !== undefined && !WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(k)) {
+							inheritedContextVariables[k] = v;
+						}
+					}
+				}
+			}
+		}
+
+		// Hydrate any archived large variables inherited from prior runs so native types (dict/list/str) are restored before execution
+		if (Object.keys(inheritedContextVariables).length > 0) {
+			await this._hydrateContextVariables(uriStr, inheritedContextVariables);
+		}
+
+		// Only clear previous Display cards when starting a fresh full workflow run from Start
+		if (!isPartialRun) {
+			this.clearDisplayCards(uriStr);
+		}
 
 		const flowchartData = await this._loadFlowchartData(uriStr, options);
 		if (!flowchartData || !flowchartData.nodes || flowchartData.nodes.length === 0) {
 			throw new Error(`Cannot execute workflow: No flowchart nodes found for ${uriStr}`);
+		}
+
+		// Unified History-to-Runtime Inheritance for Partial/Selective Runs:
+		// If any visible upstream node already has a persisted `lastExecutionOutput` (the exact value shown in UI "Last Runtime Value")
+		// that is missing from `inheritedContextVariables` (e.g. from older runs before sidecar archiving), backfill it here so
+		// downstream nodes can immediately consume it without re-running upstream nodes.
+		// Strictly exclude encapsulated Sub-Workflow internal nodes so private sub-workflow variables never leak into parent scope.
+		if (isPartialRun && !options?.isSubWorkflowRun) {
+			const hiddenSubNodeIds = new Set<string>();
+			try {
+				const allSubs = this.getSubWorkflows();
+				for (const sw of allSubs) {
+					if (sw && sw.sourceWorkflowUri === uriStr && Array.isArray(sw.nodeIds)) {
+						for (const nid of sw.nodeIds) {
+							if (nid) hiddenSubNodeIds.add(nid);
+						}
+					}
+				}
+			} catch { }
+			const selectedSet = new Set(options?.selectedNodeIds || []);
+			for (const n of flowchartData.nodes) {
+				if (!n || hiddenSubNodeIds.has(n.id) || selectedSet.has(n.id)) {
+					continue;
+				}
+				for (const st of (n.pipeline || [])) {
+					const comp = (st as any)?.component;
+					if (!comp || comp.type === 'parameters' || comp.type === 'output' || comp.type === 'result' || comp.type === 'display') {
+						continue;
+					}
+					const savedVal = (comp.type === 'python' && comp.pythonResult !== undefined)
+						? comp.pythonResult
+						: comp.lastExecutionOutput;
+					if (savedVal === undefined) {
+						continue;
+					}
+					const varName = (comp.outputVariableName || st.targetVariable || '').trim().replace(/^@/, '');
+					if (varName && !WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(varName) && inheritedContextVariables[varName] === undefined) {
+						inheritedContextVariables[varName] = savedVal;
+					}
+				}
+			}
 		}
 
 		const runId = `run_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
@@ -1559,6 +2364,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const runNumber = maxRunNumber + 1;
 
 		const isFullSpeed = Boolean(options?.fullSpeed);
+		const preservedLinkStates: Record<string, any> = (isPartialRun && priorStateSource?.linkStates)
+			? JSON.parse(JSON.stringify(priorStateSource.linkStates))
+			: {};
+		const preservedVisited: string[] = (isPartialRun && Array.isArray(priorStateSource?.visitedNodeIds))
+			? [...priorStateSource!.visitedNodeIds]
+			: [];
+
 		const run: IWorkflowExecutionRun = {
 			runId,
 			runNumber,
@@ -1569,25 +2381,35 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			fullSpeed: isFullSpeed,
 			trigger: 'manual',
 			currentNodeId: undefined,
-			visitedNodeIds: [],
+			visitedNodeIds: preservedVisited,
 			startedAt: Date.now(),
 			updatedAt: Date.now(),
 			contextVariables: { ...inheritedContextVariables, ...(options?.initialInputs || {}) },
 			nodeStates: {},
-			linkStates: {},
+			linkStates: preservedLinkStates,
 			executionPath: [],
 			logs: []
 		};
 
-		// Initialize all node states to pending and register output variables
+		// Initialize node states: on partial runs, preserve previous nodeStates for all unselected nodes so prior results remain intact
+		const selectiveResetSet = new Set<string>(
+			Array.isArray(options?.selectedNodeIds) && options!.selectedNodeIds!.length > 0
+				? options!.selectedNodeIds!
+				: (options?.entryNodeId ? [options.entryNodeId] : [])
+		);
 		for (const node of flowchartData.nodes) {
-			run.nodeStates[node.id] = {
-				nodeId: node.id,
-				nodeLabel: node.label,
-				nodeType: node.type,
-				status: 'pending',
-				executedTickets: []
-			};
+			const priorNodeState = isPartialRun ? priorStateSource?.nodeStates?.[node.id] : undefined;
+			if (isPartialRun && priorNodeState && !selectiveResetSet.has(node.id)) {
+				run.nodeStates[node.id] = JSON.parse(JSON.stringify(priorNodeState));
+			} else {
+				run.nodeStates[node.id] = {
+					nodeId: node.id,
+					nodeLabel: node.label,
+					nodeType: node.type,
+					status: 'pending',
+					executedTickets: []
+				};
+			}
 			const nodeVars = this._getNodeVars(node);
 			for (const v of nodeVars) {
 				if (v.name) {
@@ -1795,6 +2617,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		data: IFlowchartData,
 		options?: IWorkflowEngineOptions
 	): Promise<void> {
+		(run as any)._liveFlowchartData = data;
 		let isDaemonLoop = run.mode === 'daemon';
 		await this._startPythonKernel(run, data.pythonPath);
 
@@ -1810,7 +2633,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			if (ioContract.inputs.length > 0) {
 				for (const inp of ioContract.inputs) {
 					if (inp.name && !Object.prototype.hasOwnProperty.call(run.contextVariables, inp.name)) {
-						run.contextVariables[inp.name] = inp.defaultValue ?? '';
+						run.contextVariables[inp.name] = this._coerceInputLiteral(inp.defaultValue ?? '');
 					}
 				}
 			}
@@ -1884,6 +2707,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							};
 							nodeState.status = 'running';
 							nodeState.startedAt = Date.now();
+							nodeState.error = undefined;
+							nodeState.failedStepIndex = undefined;
+							nodeState.failedStepId = undefined;
+							nodeState.failedStepError = undefined;
+							nodeState.failedStage = undefined;
 							run.nodeStates[node.id] = nodeState;
 						}
 						this._notifyRunChanged(run);
@@ -2048,6 +2876,27 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						return edgeStates.get(key) || edgeStates.get(`${l.from}->${l.to}`);
 					};
 
+					// A forward edge whose source sits inside a loop (cycle) that does NOT contain the target is a "loop exit".
+					// Intra-loop branch nodes never mark their exit edges 'skipped' while the loop continues, so once the loop
+					// terminates through a DIFFERENT exit, such an edge stays unresolved forever. If no node of that loop is
+					// queued or still running, the edge can never fire again and must not block the downstream join.
+					const isDeadLoopExitEdge = (l: { from: string; to: string }, targetNodeId: string, currentFinishingNodeId?: string): boolean => {
+						const srcReach = getReachableFrom(l.from);
+						const srcIsInCycle = data.links.some(x => x.from === l.from && getReachableFrom(x.to).has(l.from));
+						if (!srcIsInCycle) {
+							return false;
+						}
+						const cycleNodeIds = data.nodes
+							.map(n => n.id)
+							.filter(id => srcReach.has(id) && getReachableFrom(id).has(l.from));
+						if (cycleNodeIds.includes(targetNodeId)) {
+							return false;
+						}
+						return !cycleNodeIds.some(id =>
+							id !== currentFinishingNodeId && (readyQueue.includes(id) || runningTasks.has(id))
+						);
+					};
+
 					const isNodeReadyToExecute = (targetNodeId: string, currentFinishingNodeId?: string): { ready: boolean; shouldSkip: boolean; generation: number } => {
 						const incoming = data.links.filter(l => l.to === targetNodeId && reachableFromEntry.has(l.from));
 						if (incoming.length === 0) {
@@ -2104,6 +2953,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								} else if (state.status === 'skipped') {
 									// Resolved as skipped
 								}
+							} else if (!targetIsInCycle && isDeadLoopExitEdge(l, targetNodeId, currentFinishingNodeId)) {
+								// Loop-exit edge from a loop that has already terminated (no loop node queued or running):
+								// it can never fire anymore, so treat it as resolved-skipped instead of blocking the join forever.
 							} else {
 								// undefined / pending or from an older generation (< targetGen for cyclic targets):
 								// upstream branch has not yet arrived / completed!
@@ -2127,18 +2979,29 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						return { ready: false, shouldSkip: false, generation: targetGen };
 					};
 
-					const cascadeSkip = (skippedNodeId: string, generation: number) => {
+					const cascadeSkip = (skippedNodeId: string, generation: number, visitedSkipped: Set<string> = new Set()) => {
+						if (visitedSkipped.has(skippedNodeId)) {
+							return;
+						}
+						visitedSkipped.add(skippedNodeId);
 						const outgoing = data.links.filter(l => l.from === skippedNodeId);
 						for (const outL of outgoing) {
-							const lKey = outL.id || `${outL.from}->${outL.to}`;
 							const isBack = isBackEdgeLink(outL);
-							const edgeGen = isBack ? generation + 1 : generation;
-							const edgeInfo: IEdgeStateInfo = { status: 'skipped', generation: edgeGen };
+							if (isBack) {
+								// Never cascade-skip across loop back-edges (prevents infinite generation recursion in skipped cycles)
+								continue;
+							}
+							const lKey = outL.id || `${outL.from}->${outL.to}`;
+							const targetIsInCycle = data.links.some(l => l.from === outL.to && getReachableFrom(l.to).has(outL.to));
+							const edgeInfo: IEdgeStateInfo = { status: 'skipped', generation, preserveUntilConsumed: !targetIsInCycle };
 							edgeStates.set(lKey, edgeInfo);
 							edgeStates.set(`${outL.from}->${outL.to}`, edgeInfo);
+							if (visitedSkipped.has(outL.to)) {
+								continue;
+							}
 							const check = isNodeReadyToExecute(outL.to, skippedNodeId);
 							if (check.shouldSkip) {
-								cascadeSkip(outL.to, check.generation);
+								cascadeSkip(outL.to, check.generation, visitedSkipped);
 							} else if (check.ready && !readyQueue.includes(outL.to) && !runningTasks.has(outL.to)) {
 								nodeGenerations.set(outL.to, check.generation);
 								const incLinks = data.links.filter(l => l.to === outL.to);
@@ -2258,7 +3121,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							const edgeInfo: IEdgeStateInfo = {
 								status: isActivated ? 'activated' : 'skipped',
 								generation: edgeGen,
-								preserveUntilConsumed: isActivated && !targetIsInCycle
+								preserveUntilConsumed: !targetIsInCycle
 							};
 							edgeStates.set(lKey, edgeInfo);
 							edgeStates.set(`${outL.from}->${outL.to}`, edgeInfo);
@@ -2378,6 +3241,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							};
 							nodeState.status = 'running';
 							nodeState.startedAt = Date.now();
+							nodeState.error = undefined;
+							nodeState.failedStepIndex = undefined;
+							nodeState.failedStepId = undefined;
+							nodeState.failedStepError = undefined;
+							nodeState.failedStage = undefined;
 							run.nodeStates[node.id] = nodeState;
 							run.currentNodeId = node.id;
 							this._notifyRunChanged(run);
@@ -2423,6 +3291,25 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				run.updatedAt = Date.now();
 				run.currentNodeId = undefined;
 				if (run.status !== 'failed') {
+					// Guard: never claim outputs were exported when the Workflow Output node was never actually executed
+					// (e.g. a scheduler stall). Fail loudly instead of silently returning null/undefined to the caller.
+					const outNodeId = run.ioContract?.outputNodeId;
+					const isFullOrSubRun = run.isSubWorkflowRun || !(options?.selectedNodeIds && options.selectedNodeIds.length > 0) && !options?.entryNodeId;
+					if (outNodeId && (run.ioContract?.outputs.length || 0) > 0 && isFullOrSubRun) {
+						const outState = run.nodeStates[outNodeId];
+						if (!outState || outState.status !== 'success') {
+							const outLabel = run.ioContract?.outputNodeLabel || outNodeId;
+							run.status = 'failed';
+							run.error = `Workflow '${run.workflowName}' finished without executing its output node '${outLabel}' (status: ${outState?.status || 'not reached'}). Outputs were NOT exported.`;
+							if (outState) {
+								outState.status = 'failed';
+								outState.error = run.error;
+								outState.failedStage = 'Output node never reached (execution stalled before this node)';
+							}
+						}
+					}
+				}
+				if (run.status !== 'failed') {
 					// Aggregate all outputs from the unique Workflow Output Node (across all output components in order)
 					if (run.ioContract?.outputNodeId && run.ioContract.outputs.length > 0) {
 						const aggregatedOutputs: Record<string, any> = {};
@@ -2447,20 +3334,26 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 					run.status = 'completed';
 					this._emitLog(run, 'info', `Workflow '${run.workflowName}' executed successfully to completion in ${(run.durationMs / 1000).toFixed(1)}s!`);
-					this.notificationService.info(`Workflow '${run.workflowName}' completed successfully (${(run.durationMs / 1000).toFixed(1)}s).`);
+					if (!run.isSubWorkflowRun) {
+						this.notificationService.info(`Workflow '${run.workflowName}' completed successfully (${(run.durationMs / 1000).toFixed(1)}s).`);
+					}
 				} else {
 					this._emitLog(run, 'error', `Workflow '${run.workflowName}' stopped with errors in ${(run.durationMs / 1000).toFixed(1)}s: ${run.error || 'Execution blocked'}`);
-					this.notificationService.error(`Workflow '${run.workflowName}' execution failed: ${run.error || 'Blocked'}`);
+					if (!run.isSubWorkflowRun) {
+						this.notificationService.error(`Workflow '${run.workflowName}' execution failed: ${run.error || 'Blocked'}`);
+					}
 				}
-				if (this._persistDebounceMap.has(run.workflowUri)) {
-					clearTimeout(this._persistDebounceMap.get(run.workflowUri));
-					this._persistDebounceMap.delete(run.workflowUri);
-				}
-				this._notifyRunChanged(run);
-				try {
-					await this.persistRunsForWorkflow(run.workflowUri);
-				} catch (persistErr) {
-					this.logService.warn(`[WorkflowExecution] Non-fatal error while persisting runs for '${run.workflowName}':`, persistErr);
+				if (!run.isSubWorkflowRun) {
+					if (this._persistDebounceMap.has(run.workflowUri)) {
+						clearTimeout(this._persistDebounceMap.get(run.workflowUri));
+						this._persistDebounceMap.delete(run.workflowUri);
+					}
+					this._notifyRunChanged(run);
+					try {
+						await this.persistRunsForWorkflow(run.workflowUri);
+					} catch (persistErr) {
+						this.logService.warn(`[WorkflowExecution] Non-fatal error while persisting runs for '${run.workflowName}':`, persistErr);
+					}
 				}
 			}
 		} finally {
@@ -2897,7 +3790,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const isRunTicketStep = step.type === 'run_ticket' || step.type === 'run_tickets' || step.type === 'RUN_TICKETS' || step.type === 'runTickets';
 				const isCallFnStep = step.type === 'call_function' || step.type === 'custom_code' || (step.expression && this._isFunctionCallExpression(step.expression));
 
-				const isTicketSideEffectStep = isRunTicketStep || /\b(CREATE_TICKETS|RUN_TICKETS|create_tickets|run_tickets)\s*\(/.test(step.expression || '');
+				const isSubWorkflowStep = stepComp?.type === 'sub_workflow';
+				const isTicketSideEffectStep = isSubWorkflowStep || isRunTicketStep || /\b(CREATE_TICKETS|RUN_TICKETS|create_tickets|run_tickets)\s*\(/.test(step.expression || '');
 				const maxStepAttempts = isTicketSideEffectStep ? 1 : 3;
 				let stepAttempt = 0;
 
@@ -2908,6 +3802,116 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					stepAttempt++;
 					const stepStartMs = Date.now();
 					try {
+						if (isSubWorkflowStep) {
+							const subDef = this.getSubWorkflowById(stepComp.subWorkflowId || '');
+							if (!subDef) {
+								throw new Error(`Sub-Workflow '${stepComp.subWorkflowName || stepComp.subWorkflowId || stepComp.label}' not found in Sub-Workflow library.`);
+							}
+							const resolvedInputs: Record<string, any> = {};
+							for (const inpDef of (subDef.inputs || [])) {
+								resolvedInputs[inpDef.name] = this._coerceInputLiteral(inpDef.defaultValue ?? '');
+							}
+							const customBindings = (stepComp.subWorkflowInputs && typeof stepComp.subWorkflowInputs === 'object')
+								? stepComp.subWorkflowInputs
+								: {};
+							for (const [k, rawExpr] of Object.entries(customBindings)) {
+								const expr = String(rawExpr ?? '').trim();
+								if (!expr) {
+									continue;
+								}
+								const directMatch = expr.match(/^(?:\{\{\s*([^{}]+?)\s*\}\}|\{\s*([^{}]+?)\s*\}|@?([a-zA-Z_][a-zA-Z0-9_]*))$/);
+								if (directMatch) {
+									const isExplicitBrace = Boolean(directMatch[1] || directMatch[2]);
+									const refKey = (directMatch[1] || directMatch[2] || directMatch[3] || '').trim();
+									if (refKey && Object.prototype.hasOwnProperty.call(run.contextVariables, refKey) && run.contextVariables[refKey] !== undefined) {
+										resolvedInputs[k] = run.contextVariables[refKey];
+										continue;
+									}
+									if (isExplicitBrace && refKey) {
+										const avail = Object.keys(run.contextVariables || {})
+											.filter(ck => ck && !ck.startsWith('@') && !ck.startsWith('__') && !ck.startsWith('comp_'))
+											.slice(0, 20)
+											.join(', ');
+										throw new Error(`Sub-Workflow '${subDef.name}' input '${k}' references undefined variable '${expr}'.${avail ? ` Available variables: ${avail}` : ''}`);
+									}
+								}
+								const unresolvedSubRefs: string[] = [];
+								const interpolated = expr.replace(/\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}|\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}/g, (m, g1, g2) => {
+									const rk = (g1 || g2 || '').trim();
+									if (rk && Object.prototype.hasOwnProperty.call(run.contextVariables, rk) && run.contextVariables[rk] !== undefined) {
+										const v = run.contextVariables[rk];
+										return typeof v === 'object' ? JSON.stringify(v) : String(v ?? '');
+									}
+									if (rk && !unresolvedSubRefs.includes(rk)) {
+										unresolvedSubRefs.push(rk);
+									}
+									return m;
+								});
+								if (unresolvedSubRefs.length > 0) {
+									throw new Error(`Sub-Workflow '${subDef.name}' input '${k}' references undefined variable(s): ${unresolvedSubRefs.map(r => `{${r}}`).join(', ')}.`);
+								}
+								resolvedInputs[k] = this._coerceInputLiteral(interpolated);
+							}
+
+							try {
+								(stepComp as any).lastExecutionInputs = JSON.parse(JSON.stringify(resolvedInputs));
+							} catch {
+								(stepComp as any).lastExecutionInputs = { ...resolvedInputs };
+							}
+							this._emitLog(run, 'info', `[Step #${i + 1}] Invoking Sub-Workflow '${subDef.name}' (${subDef.nodes.length} nodes) with inputs: ${JSON.stringify(resolvedInputs)}`, { nodeId: node.id });
+							const childRun = await this._executeSubWorkflow(run, subDef, resolvedInputs, { id: node.id, label: node.label });
+
+							if (childRun.status === 'failed') {
+								const failedNode = Object.values(childRun.nodeStates || {}).find(ns => ns.status === 'failed');
+								const failedNodeInfo = failedNode ? ` at node '${failedNode.nodeLabel}'` : '';
+								const detailMsg = `Sub-Workflow '${subDef.name}' failed${failedNodeInfo}: ${childRun.error || 'Unknown error'}`;
+								stepComp.lastExecutionStatus = 'failed';
+								stepComp.lastExecutionDurationMs = Date.now() - stepStartMs;
+								stepComp.lastExecutedAt = new Date().toISOString();
+								stepComp.lastExecutionLog = `>>> ${detailMsg}\nInputs: ${JSON.stringify(resolvedInputs, null, 2)}`;
+								this._onDidUpdateNodeComponents.fire({ workflowUri: run.workflowUri, nodeId: node.id, node });
+								throw new Error(detailMsg);
+							}
+
+							const rawWorkflowOutputs = childRun.workflowOutputs ?? childRun.contextVariables['WORKFLOW_OUTPUTS'];
+							let childOutput: any;
+							if (rawWorkflowOutputs && typeof rawWorkflowOutputs === 'object' && !Array.isArray(rawWorkflowOutputs)) {
+								const outputKeys = Object.keys(rawWorkflowOutputs);
+								if (outputKeys.length === 1) {
+									// Single exported output: pass through the raw value directly (list, string, number, object, etc.) without extra dict wrapping
+									childOutput = rawWorkflowOutputs[outputKeys[0]];
+								} else if (outputKeys.length > 1) {
+									// Multiple exported outputs: return a dict keyed by variable name (falling back to label)
+									childOutput = (childRun.workflowOutputsByVarName && Object.keys(childRun.workflowOutputsByVarName).length === outputKeys.length)
+										? childRun.workflowOutputsByVarName
+										: rawWorkflowOutputs;
+								} else {
+									childOutput = childRun.contextVariables['OUTPUT'];
+								}
+							} else {
+								childOutput = rawWorkflowOutputs ?? childRun.contextVariables['OUTPUT'];
+							}
+							// Like a Python function with no return value, an empty/void Sub-Workflow returns null (Python None)
+							if (childOutput === undefined) {
+								childOutput = null;
+							}
+							const outVarName = (stepComp.outputVariableName || '').trim() || generateSmartPythonVarName(stepComp.label || subDef.name, 'sub_workflow');
+							if (outVarName) {
+								run.contextVariables[outVarName] = childOutput;
+							}
+							if (stepComp.label) {
+								run.contextVariables[stepComp.label] = childOutput;
+							}
+							const childOutPreview = childOutput === null ? 'None' : String(JSON.stringify(childOutput) ?? 'None').substring(0, 300);
+							stepComp.lastExecutionOutput = childOutput;
+							stepComp.lastExecutionStatus = 'success';
+							stepComp.lastExecutionDurationMs = Date.now() - stepStartMs;
+							stepComp.lastExecutedAt = new Date().toISOString();
+							stepComp.lastExecutionLog = `>>> Sub-Workflow '${subDef.name}' completed in ${stepComp.lastExecutionDurationMs}ms\nInputs: ${JSON.stringify(resolvedInputs)}\nOutputs: ${childOutput === null ? 'None' : JSON.stringify(childOutput, null, 2)}`;
+							this._onDidUpdateNodeComponents.fire({ workflowUri: run.workflowUri, nodeId: node.id, node });
+							this._emitLog(run, 'info', `[Step #${i + 1}] Sub-Workflow '${subDef.name}' completed (${stepComp.lastExecutionDurationMs}ms) -> ${outVarName} = ${childOutPreview}`, { nodeId: node.id });
+							break;
+						}
 						if (isDirectComponentStep) {
 							const wsUri = URI.parse(run.workflowUri);
 							this._emitLog(run, 'info', `[Step #${i + 1}] Component [${stepComp.type.toUpperCase()}] '${stepComp.label || step.label || stepComp.type}'`);
@@ -3093,17 +4097,56 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						if (!isDirectComponentStep && stepComp) {
 							const dur = Date.now() - stepStartMs;
 							const ts = new Date().toLocaleTimeString();
-							const targetKey = (step.targetVariable || stepComp.label || '').trim().replace(/^@/, '');
-							const outVal = targetKey && run.contextVariables[targetKey] !== undefined
-								? run.contextVariables[targetKey]
-								: undefined;
+							let outVal: any = undefined;
+							let formattedDisplayLog: string | undefined = undefined;
+							if (stepComp.type === 'display') {
+								const wfCards = this._displayCardsByWorkflow.get(run.workflowUri) || [];
+								let matchedCard = wfCards.find(c => c.nodeId === node.id);
+								if (!matchedCard) {
+									for (const cards of this._displayCardsByWorkflow.values()) {
+										const cand = cards.find(c => c.nodeId === node.id && c.runId === run.runId);
+										if (cand) {
+											matchedCard = cand;
+											break;
+										}
+									}
+								}
+								if (matchedCard) {
+									outVal = matchedCard.value;
+									const typeTag = outVal === null ? 'null'
+										: Array.isArray(outVal) ? `list (${outVal.length} items)`
+											: typeof outVal === 'object' ? `dict (${Object.keys(outVal).length} keys)`
+												: typeof outVal;
+									const bodyText = matchedCard.formattedText || matchedCard.displayPreviewText
+										|| (typeof outVal === 'object' && outVal !== null ? JSON.stringify(outVal, null, 2) : String(outVal));
+									formattedDisplayLog = `>>> DISPLAY (${stepComp.wfDisplayValue || matchedCard.expression || ''}) [Type: ${typeTag}]\n${bodyText}`;
+								} else {
+									const rawDispVar = (stepComp.wfDisplayValue || '').trim().replace(/^\{|\}$/g, '').trim();
+									if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(rawDispVar) && Object.prototype.hasOwnProperty.call(run.contextVariables, rawDispVar)) {
+										outVal = run.contextVariables[rawDispVar];
+										const typeTag = outVal === null ? 'null'
+											: Array.isArray(outVal) ? `list (${outVal.length} items)`
+												: typeof outVal === 'object' ? `dict (${Object.keys(outVal).length} keys)`
+													: typeof outVal;
+										const bodyText = typeof outVal === 'object' && outVal !== null ? JSON.stringify(outVal, null, 2) : String(outVal);
+										formattedDisplayLog = `>>> DISPLAY (${stepComp.wfDisplayValue || rawDispVar}) [Type: ${typeTag}]\n${bodyText}`;
+									}
+								}
+							} else {
+								const targetKey = (step.targetVariable || stepComp.label || '').trim().replace(/^@/, '');
+								outVal = targetKey && run.contextVariables[targetKey] !== undefined
+									? run.contextVariables[targetKey]
+									: undefined;
+							}
 							stepComp.lastExecutionStatus = 'success';
 							stepComp.lastExecutionDurationMs = dur;
 							stepComp.lastExecutedAt = ts;
 							stepComp.lastExecutionOutput = outVal;
-							const rawOutStr = outVal !== undefined
-								? (typeof outVal === 'object' ? JSON.stringify(outVal, null, 2) : String(outVal))
-								: 'Executed successfully';
+							const rawOutStr = formattedDisplayLog !== undefined
+								? formattedDisplayLog
+								: (outVal !== undefined
+									? (typeof outVal === 'object' && outVal !== null ? JSON.stringify(outVal, null, 2) : String(outVal))
+									: 'Executed successfully');
 							stepComp.lastExecutionLog = rawOutStr;
 							if (!run.fullSpeed) {
 								await this._persistAndNotifyNodeComponents(run, node);
@@ -3132,6 +4175,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							this._emitLog(run, 'error', `[Step #${i + 1} Halted] Stopping execution after ${stepAttempt} failed attempts: ${stepErr?.message || stepErr}`, { nodeId: node.id });
 						}
 						state.failedStepIndex = i;
+						state.failedStepId = step.id;
+						state.failedStepError = stepErr?.message || String(stepErr);
+						state.failedStage = `Step #${i + 1}: ${(step.label || step.expression || step.type || '').split('\n')[0].trim().slice(0, 60)}`;
 						throw stepErr;
 					}
 				}
@@ -3613,18 +4659,20 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				this._emitLog(run, 'info', `[DISPLAY] [${nodeLabelName}] (${summaryType})\n${logDisplayPreview}`, { nodeId: node.id });
 
 				const exprKey = rawExpr || `DISPLAY(${rawArgsStr})`;
-				let cardList = this._displayCardsByWorkflow.get(run.workflowUri);
+				const displayWfUri = (run as any)._displayWorkflowUri || run.workflowUri;
+				const displayRunId = (run as any)._displayRunId || run.runId;
+				let cardList = this._displayCardsByWorkflow.get(displayWfUri);
 				if (!cardList) {
 					cardList = [];
-					this._displayCardsByWorkflow.set(run.workflowUri, cardList);
+					this._displayCardsByWorkflow.set(displayWfUri, cardList);
 				}
-				const existingIdx = cardList.findIndex(c => c.runId === run.runId && c.nodeId === node.id && c.expression === exprKey);
+				const existingIdx = cardList.findIndex(c => c.runId === displayRunId && c.nodeId === node.id && c.expression === exprKey);
 				const reusedId = existingIdx !== -1 ? cardList.splice(existingIdx, 1)[0].id : `display_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
 				const displayCard: IWorkflowDisplayCard = {
 					id: reusedId,
-					workflowUri: run.workflowUri,
-					runId: run.runId,
+					workflowUri: displayWfUri,
+					runId: displayRunId,
 					nodeId: node.id,
 					nodeTitle: nodeLabelName,
 					expression: exprKey,
@@ -3867,10 +4915,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		totalCount?: number;
 	} {
 		if (displayVal === undefined) {
-			return { formattedText: 'undefined', summaryType: 'undefined', cleanValue: undefined };
+			return { formattedText: 'None', summaryType: 'NoneType', cleanValue: null };
 		}
 		if (displayVal === null) {
-			return { formattedText: 'null', summaryType: 'null', cleanValue: null };
+			return { formattedText: 'None', summaryType: 'NoneType', cleanValue: null };
 		}
 
 		// 1. Check if displayVal is a newly created Ticket Handle (descriptor from CREATE_TICKETS)
@@ -4551,6 +5599,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				terminalSet.set(n.id, n);
 			}
 		}
+		const pureEndNodes = activeNodes.filter(isPureEndCircle);
 		const terminalNodes = Array.from(terminalSet.values());
 		const nodesWithOutputComp = activeNodes.filter(n => !isPureEndCircle(n) && (n.pipeline || []).some(s => {
 			const t = (s as any)?.component?.type;
@@ -4568,11 +5617,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				outputNode = terminalsWithOutput[0];
 			} else if (nodesWithOutputComp.length === 1) {
 				outputNode = nodesWithOutputComp[0];
+			} else if (nodesWithOutputComp.length === 0) {
+				// Void workflow/sub-workflow (no Output components): multiple branches converging on End is completely valid
+				outputNode = pureEndNodes.length === 1 ? pureEndNodes[0] : undefined;
 			} else {
-				const names = (terminalsWithOutput.length > 1 ? terminalsWithOutput : terminalNodes)
+				const names = (terminalsWithOutput.length > 1 ? terminalsWithOutput : nodesWithOutputComp)
 					.map(n => `'${n.label || n.id}'`)
 					.join(', ');
-				outputError = `Ambiguous Workflow Output node: found ${terminalNodes.length} terminal/output nodes (${names}). Ensure there is a single unique final Output node.`;
+				outputError = `Ambiguous Workflow Output node: found ${nodesWithOutputComp.length} output nodes (${names}). Ensure there is a single unique final Output node.`;
 				errors.push(outputError);
 			}
 		} else {
@@ -4582,9 +5634,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const names = nodesWithOutputComp.map(n => `'${n.label || n.id}'`).join(', ');
 				outputError = `Ambiguous Workflow Output node: found ${nodesWithOutputComp.length} nodes with Output components (${names}).`;
 				errors.push(outputError);
-			} else {
-				outputError = 'Cannot uniquely determine Workflow Output node (no terminal node found).';
-				errors.push(outputError);
+			} else if (pureEndNodes.length === 1) {
+				outputNode = pureEndNodes[0];
 			}
 		}
 
@@ -4696,7 +5747,37 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return options.initialData;
 		}
 
-		// 2. Load from Entity Persistence Snapshot
+		// 2. Load directly from authoritative .agents/workflow_flowchart.json (or direct .json/.workflow file) on disk
+		try {
+			const uri = URI.parse(uriStr);
+			const isDirectFile = uri.path.endsWith('.json') || uri.path.endsWith('.workflow');
+			const candidateUris: URI[] = isDirectFile
+				? [uri]
+				: [URI.joinPath(uri, '.agents', 'workflow_flowchart.json')];
+			for (const candidateUri of candidateUris) {
+				if (await this.fileService.exists(candidateUri)) {
+					const fileContent = await this.fileService.readFile(candidateUri);
+					const parsed = JSON.parse(fileContent.value.toString());
+					if (Array.isArray(parsed.nodes)) {
+						return {
+							nodes: parsed.nodes,
+							links: Array.isArray(parsed.links) ? parsed.links : Array.isArray(parsed.connections) ? parsed.connections : Array.isArray(parsed.edges) ? parsed.edges : [],
+							pythonPath: parsed.pythonPath
+						};
+					}
+					if (parsed?.customMetadata?.['flowchartJson']) {
+						return JSON.parse(parsed.customMetadata['flowchartJson']);
+					}
+					if (parsed?.flowchartJson) {
+						return typeof parsed.flowchartJson === 'string' ? JSON.parse(parsed.flowchartJson) : parsed.flowchartJson;
+					}
+				}
+			}
+		} catch (e) {
+			this.logService.error('[WorkflowExecution] Failed to load flowchart from file:', e);
+		}
+
+		// 3. Fallback: Load from Entity Persistence Snapshot
 		const snapshot = this.entityPersistenceService.getSnapshot(uriStr);
 		if (snapshot?.customMetadata?.['flowchartJson']) {
 			try {
@@ -4705,30 +5786,6 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			} catch (e) {
 				this.logService.error('[WorkflowExecution] Failed to parse flowchartJson from snapshot:', e);
 			}
-		}
-
-		// 3. Load from File System (for .diagram.json, .workflow, or any file:// URI)
-		try {
-			const uri = URI.parse(uriStr);
-			if (await this.fileService.exists(uri)) {
-				const fileContent = await this.fileService.readFile(uri);
-				const parsed = JSON.parse(fileContent.value.toString());
-				if (Array.isArray(parsed.nodes)) {
-					return {
-						nodes: parsed.nodes,
-						links: Array.isArray(parsed.links) ? parsed.links : Array.isArray(parsed.connections) ? parsed.connections : Array.isArray(parsed.edges) ? parsed.edges : [],
-						pythonPath: parsed.pythonPath
-					};
-				}
-				if (parsed?.customMetadata?.['flowchartJson']) {
-					return JSON.parse(parsed.customMetadata['flowchartJson']);
-				}
-				if (parsed?.flowchartJson) {
-					return typeof parsed.flowchartJson === 'string' ? JSON.parse(parsed.flowchartJson) : parsed.flowchartJson;
-				}
-			}
-		} catch (e) {
-			this.logService.error('[WorkflowExecution] Failed to load flowchart from file:', e);
 		}
 
 		return undefined;
@@ -4774,6 +5831,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	private _notifyRunChanged(run: IWorkflowExecutionRun): void {
 		run.updatedAt = Date.now();
+		if (run.isSubWorkflowRun) {
+			// Sub-Workflow runs are not persisted as top-level runs, but live views follow their progress
+			this._onDidChangeSubWorkflowRun.fire(run);
+			return;
+		}
 		this._onDidChangeRunState.fire(run);
 		this._schedulePersist(run.workflowUri);
 	}
@@ -4786,6 +5848,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			nodeId: node.id,
 			node
 		});
+
+		// If an open Workflow Editor owns this workflow's flowchart file, it merges runtime telemetry from the event above
+		// and saves the file itself. Never write the file from here, otherwise a read-modify-write race can revert the
+		// user's latest saved edits (e.g. Output variable names) with stale on-disk content.
+		if ((this._flowchartOwnerCounts.get(run.workflowUri) || 0) > 0) {
+			return;
+		}
 
 		const debounceKey = `${run.workflowUri}::${node.id}`;
 		if (this._nodeComponentPersistDebounceMap.has(debounceKey)) {
@@ -4812,19 +5881,28 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 									(s && s.id && s.id === srcStep.id) ||
 									(s && s.component && s.component.id && s.component.id === srcComp.id)
 								);
-								if (dstStep) {
-									const { lastSentPrompt, debugPromptOutput, lastExecutionLog, lastExecutionOutput, ...leanComp } = srcComp;
+								if (dstStep && dstStep.component) {
+									// Merge ONLY runtime execution telemetry into the on-disk component —
+									// NEVER overwrite user-edited configuration (outputSpecs, parameters, wfDisplayValue, pythonCode, etc.)!
 									const persistedLog = typeof srcComp.lastExecutionLog === 'string' && srcComp.lastExecutionLog.length > 50000
 										? srcComp.lastExecutionLog.substring(0, 50000)
 										: srcComp.lastExecutionLog;
-									dstStep.component = {
-										...(dstStep.component || {}),
-										...leanComp,
-										lastExecutionStatus: srcComp.lastExecutionStatus,
-										lastExecutionDurationMs: srcComp.lastExecutionDurationMs,
-										lastExecutedAt: srcComp.lastExecutedAt,
-										lastExecutionLog: persistedLog
-									};
+									const runtimeOnlyKeys = [
+										'lastExecutionStatus', 'lastExecutionDurationMs', 'lastExecutedAt',
+										'lastExecutionOutput', 'lastExecutionInputs',
+										'pythonResult', 'pythonOutput', 'lastResolvedUrl', 'lastExecutedUrl',
+										'httpResponseStatus', 'httpResponseStatusText', 'httpResponseHeaders',
+										'httpResponseBody', 'httpResponseData', 'httpLastExecutionTime', 'httpLastDurationMs',
+										'tableLastExecutionTime', 'tableLastDurationMs', 'tableLastSqlOutput'
+									];
+									for (const rk of runtimeOnlyKeys) {
+										if ((srcComp as any)[rk] !== undefined) {
+											(dstStep.component as any)[rk] = (srcComp as any)[rk];
+										}
+									}
+									if (persistedLog !== undefined) {
+										(dstStep.component as any).lastExecutionLog = persistedLog;
+									}
 								}
 							}
 							await this.fileService.writeFile(
@@ -5952,18 +7030,20 @@ finally:
 					? (reqObj as any).call_expr.trim()
 					: (stepExpression && !stepExpression.includes('\n') ? stepExpression.trim() : 'DISPLAY(...)');
 
-				let cardList = this._displayCardsByWorkflow.get(run.workflowUri);
+				const displayWfUri = (run as any)._displayWorkflowUri || run.workflowUri;
+				const displayRunId = (run as any)._displayRunId || run.runId;
+				let cardList = this._displayCardsByWorkflow.get(displayWfUri);
 				if (!cardList) {
 					cardList = [];
-					this._displayCardsByWorkflow.set(run.workflowUri, cardList);
+					this._displayCardsByWorkflow.set(displayWfUri, cardList);
 				}
-				const existingIdx = cardList.findIndex(c => c.runId === run.runId && c.nodeId === node.id && c.expression === callExprFromPython);
+				const existingIdx = cardList.findIndex(c => c.runId === displayRunId && c.nodeId === node.id && c.expression === callExprFromPython);
 				const reusedId = existingIdx !== -1 ? cardList.splice(existingIdx, 1)[0].id : `display_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 
 				const displayCard: IWorkflowDisplayCard = {
 					id: reusedId,
-					workflowUri: run.workflowUri,
-					runId: run.runId,
+					workflowUri: displayWfUri,
+					runId: displayRunId,
 					nodeId: node.id,
 					nodeTitle: nodeLabelName,
 					expression: callExprFromPython,

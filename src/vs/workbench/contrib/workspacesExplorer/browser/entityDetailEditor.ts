@@ -27,7 +27,7 @@ import { isWindows } from '../../../../base/common/platform.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { dirname, basename } from '../../../../base/common/resources.js';
-import { IAgentsManagerService, IAgentItem, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
+import { IAgentsManagerService, IAgentItem, IAgentCredentialService, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -601,7 +601,8 @@ export class EntityDetailEditor extends EditorPane {
 		const titleField = fields.find(f => (f.id || '').toLowerCase() === 'title' || (f.label || '').toLowerCase() === 'title');
 		const descField = fields.find(f => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description');
 
-		const title = (titleField?.defaultContent && String(titleField.defaultContent).trim())
+		const wfNode = mod?.__wfNode as { nodeLabel: string; workflowName: string; workflowUri?: string; subWorkflowName?: string } | undefined;
+		const title = wfNode ? wfNode.nodeLabel : (titleField?.defaultContent && String(titleField.defaultContent).trim())
 			? String(titleField.defaultContent).trim()
 			: `Sample ${modName} Ticket`;
 		const description = (descField?.defaultContent && String(descField.defaultContent).trim())
@@ -664,8 +665,8 @@ export class EntityDetailEditor extends EditorPane {
 			} else if (fType === 'prompt') {
 				customMetadata[fLabel] = JSON.stringify({
 					targetMode: f.targetMode || 'model',
-					targetProvider: f.targetProvider || 'gemini',
-					targetModel: f.targetModel || 'gemini-1.5-flash',
+					targetProvider: f.targetProvider || (f.targetModel ? 'gemini' : resolveDefaultModel({ providerId: 'gemini', modelId: 'gemini-2.5-flash' }).providerId),
+					targetModel: f.targetModel || resolveDefaultModelId(f.targetProvider, 'gemini-2.5-flash'),
 					targetCredentialId: f.targetCredentialId || '',
 					targetAgentId: f.targetAgentId || '',
 					targetAgentName: f.targetAgentName || '',
@@ -809,7 +810,11 @@ export class EntityDetailEditor extends EditorPane {
 			},
 			readmeNotes: '',
 			instructionNotes: '',
-			breadcrumbSegments: [
+			breadcrumbSegments: wfNode ? [
+				{ label: wfNode.workflowName, uri: wfNode.workflowUri },
+				...(wfNode.subWorkflowName ? [{ label: `Sub-Workflow: ${wfNode.subWorkflowName}` }] : []),
+				{ label: `Node: ${wfNode.nodeLabel}` }
+			] : [
 				{ label: 'Custom Modules (Preview)' },
 				{ label: modName },
 				{ label: ticketId }
@@ -870,6 +875,7 @@ export class EntityDetailEditor extends EditorPane {
 		await this._hydrateMediaPlayerPrimitiveCards();
 		await this._hydrateTablePrimitiveCards();
 		await this._hydrateSshPrimitiveCards();
+		this._appendWorkflowRuntimeBlocks(mod);
 		this._applySavedScrollPosition(scrollKey);
 		setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
@@ -1345,6 +1351,33 @@ export class EntityDetailEditor extends EditorPane {
 						headerToggleBtn.style.borderColor = this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.4)' : 'rgba(255, 255, 255, 0.1)';
 						headerToggleBtn.style.color = this._isAttributesCollapsed ? '#38bdf8' : 'var(--vscode-foreground)';
 					}
+				}
+				return;
+			}
+
+			// 0.004 Workflow node view: copy a full last-run value
+			const valueCopyBtn = target.closest('.wf-value-copy-btn') as HTMLElement | null;
+			if (valueCopyBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const raw = valueCopyBtn.closest('.wf-value-box')?.querySelector('textarea.wf-value-raw') as HTMLTextAreaElement | null;
+				await this._clipboardService.writeText(raw?.value ?? '');
+				const labelEl = valueCopyBtn.querySelector('span:last-child');
+				if (labelEl) {
+					labelEl.textContent = 'Copied';
+					setTimeout(() => { labelEl.textContent = 'Copy'; }, 1200);
+				}
+				return;
+			}
+
+			// 0.005 Workflow node view: a Sub-Workflow card opens that Sub-Workflow's flowchart
+			const openSubWorkflowBtn = target.closest('.wf-step-open-subworkflow') as HTMLElement | null;
+			if (openSubWorkflowBtn) {
+				e.preventDefault();
+				e.stopPropagation();
+				const subWorkflowId = openSubWorkflowBtn.getAttribute('data-sub-workflow-id');
+				if (subWorkflowId) {
+					await this._commandService.executeCommand('workbench.action.workflowsManager.showSubWorkflowLiveView', subWorkflowId);
 				}
 				return;
 			}
@@ -2893,7 +2926,7 @@ export class EntityDetailEditor extends EditorPane {
 							customModelInput.style.display = 'none';
 						}
 					}
-					const effectiveModel = (promptModelSelect.value === 'custom' ? customModelInput?.value.trim() : promptModelSelect.value) || 'gemini-1.5-flash';
+					const effectiveModel = (promptModelSelect.value === 'custom' ? customModelInput?.value.trim() : promptModelSelect.value) || resolveDefaultModelId(card.getAttribute('data-target-provider') || (card.querySelector('.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || 'openai', 'gemini-2.5-flash');
 					const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
 					if (targetBadge) {
 						targetBadge.textContent = `Model: ${effectiveModel}`;
@@ -2949,7 +2982,7 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = promptCustomModelInput.getAttribute('data-field-key') || '';
 				const card = promptCustomModelInput.closest('.prompt-primitive-card') as HTMLElement | null;
 				if (card && fieldKey) {
-					const effectiveModel = promptCustomModelInput.value.trim() || 'gpt-4o';
+					const effectiveModel = promptCustomModelInput.value.trim() || resolveDefaultModelId(card.getAttribute('data-target-provider') || (card.querySelector('.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || 'openai', 'gpt-4o');
 					const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
 					if (targetBadge) {
 						targetBadge.textContent = `Model: ${effectiveModel}`;
@@ -5811,7 +5844,7 @@ export class EntityDetailEditor extends EditorPane {
 			(a.name.toLowerCase() === this._entityName.toLowerCase())
 		);
 
-		const agentModel = matchingAgent?.model?.modelId || data.metadata['Model Name'] || data.metadata['AI Model'] || data.metadata['Model'] || 'gemini-1.5-flash';
+		const agentModel = matchingAgent?.model?.modelId || data.metadata['Model Name'] || data.metadata['AI Model'] || data.metadata['Model'] || resolveDefaultModelId(matchingAgent?.model?.providerId || data.metadata['AI Provider'] || data.metadata['Provider'], 'gemini-2.5-flash');
 		const agentPrompt = matchingAgent?.systemPrompt || data.metadata['System Prompt'] || data.instructionNotes || data.ticketPrompt || '';
 		const agentRole = matchingAgent?.role || data.metadata['Role'] || data.description || 'AI Agent';
 
@@ -8286,7 +8319,7 @@ ${rawErr}
 		if (providerId !== 'anthropic' && m.startsWith('claude')) {
 			return true;
 		}
-		if (providerId !== 'ollama' && (m.startsWith('llama') || m.startsWith('qwen') || m.startsWith('mistral') || m.startsWith('deepseek-r1'))) {
+		if (providerId !== 'ollama' && !isOpenAICompatibleProvider(providerId) && (m.startsWith('llama') || m.startsWith('qwen') || m.startsWith('mistral') || m.startsWith('deepseek-r1'))) {
 			return true;
 		}
 		const map = this._getPromptProviderModelsMap();
@@ -8331,6 +8364,13 @@ ${rawErr}
 			],
 			'custom-openai': [
 				{ id: 'custom', label: 'Custom Endpoint Model' }
+			],
+			aliyun: [
+				{ id: 'qwen-flash', label: 'Qwen Flash' },
+				{ id: 'qwen-plus', label: 'Qwen Plus' },
+				{ id: 'qwen4-max', label: 'Qwen4 Max' },
+				{ id: 'deepseek-v4.1-flash', label: 'DeepSeek V4.1 Flash' },
+				{ id: 'custom', label: 'Custom Model ID...' }
 			]
 		};
 	}
@@ -8367,9 +8407,9 @@ ${rawErr}
 		const lockedMode = card.getAttribute('data-target-mode') as 'model' | 'agent' | null;
 		const targetMode: 'model' | 'agent' = lockedMode === 'agent' ? 'agent' : 'model';
 		const targetProvider = card.getAttribute('data-target-provider') || providerSelect?.value.trim() || 'openai';
-		let targetModel = card.getAttribute('data-target-model') || modelSelect?.value.trim() || selectedModelText?.textContent?.trim() || 'gemini-1.5-flash';
+		let targetModel = card.getAttribute('data-target-model') || modelSelect?.value.trim() || selectedModelText?.textContent?.trim() || resolveDefaultModelId(targetProvider, 'gemini-2.5-flash');
 		if (targetModel === 'custom' && customModelInput) {
-			targetModel = customModelInput.value.trim() || 'gpt-4o';
+			targetModel = customModelInput.value.trim() || resolveDefaultModelId(targetProvider, 'gpt-4o');
 		}
 		const targetAgentId = agentSelect?.value.trim() || '';
 		const targetAgentName = targetAgentId
@@ -8614,7 +8654,7 @@ ${rawErr}
 			const approxTokens = Math.max(1, Math.round(totalChars / 3.8));
 			const targetLabel = activeSnapshot.targetMode === 'agent'
 				? `Agent: ${activeSnapshot.targetAgentName || 'AI Agent'}`
-				: `Model: ${activeSnapshot.targetModel || 'gpt-4o'} (${(activeSnapshot.targetProvider || 'openai').toUpperCase()})`;
+				: `Model: ${activeSnapshot.targetModel || resolveDefaultModelId(activeSnapshot.targetProvider || 'openai', 'gpt-4o')} (${(activeSnapshot.targetProvider || 'openai').toUpperCase()})`;
 			const refVars: Array<{ token: string; name: string; resolvedValue: string; charCount: number; sourceLocations: string[] }> = Array.isArray(activeSnapshot.referencedVariables)
 				? activeSnapshot.referencedVariables
 				: [];
@@ -8894,9 +8934,9 @@ ${rawErr}
 		const lockedMode = card.getAttribute('data-target-mode') as 'model' | 'agent' | null;
 		const targetMode: 'model' | 'agent' = lockedMode === 'agent' ? 'agent' : 'model';
 		const targetProvider = card.getAttribute('data-target-provider') || providerSelect?.value.trim() || 'openai';
-		let targetModel = card.getAttribute('data-target-model') || modelSelect?.value.trim() || selectedModelText?.textContent?.trim() || 'gemini-1.5-flash';
+		let targetModel = card.getAttribute('data-target-model') || modelSelect?.value.trim() || selectedModelText?.textContent?.trim() || resolveDefaultModelId(targetProvider, 'gemini-2.5-flash');
 		if (targetModel === 'custom' && customModelInput) {
-			targetModel = customModelInput.value.trim() || 'gpt-4o';
+			targetModel = customModelInput.value.trim() || resolveDefaultModelId(targetProvider, 'gpt-4o');
 		}
 		const targetAgentId = agentSelect?.value.trim() || '';
 		const targetAgentName = targetAgentId
@@ -9136,9 +9176,10 @@ ${rawErr}
 		const modelSelect = card.querySelector('.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
 		const selectedModelText = card.querySelector('.prompt-selected-model-text') as HTMLElement | null;
 		const customModelInput = card.querySelector('.prompt-custom-model-input') as HTMLInputElement | null;
-		let modelId = card.getAttribute('data-target-model') || modelSelect?.value.trim() || selectedModelText?.textContent?.trim() || 'gemini-1.5-flash';
+		const modelCardProvider = card.getAttribute('data-target-provider') || (card.querySelector('.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || undefined;
+		let modelId = card.getAttribute('data-target-model') || modelSelect?.value.trim() || selectedModelText?.textContent?.trim() || resolveDefaultModelId(modelCardProvider, 'gemini-2.5-flash');
 		if (modelId === 'custom' && customModelInput) {
-			modelId = customModelInput.value.trim() || 'gpt-4o';
+			modelId = customModelInput.value.trim() || resolveDefaultModelId(modelCardProvider, 'gpt-4o');
 		}
 
 		// Fast-path deterministic extraction when parsing large SQLite query results into a JSON array
@@ -9203,7 +9244,8 @@ ${rawErr}
 			}
 
 			const providerSelect = card.querySelector('.prompt-provider-select') as HTMLSelectElement | null;
-			const targetProviderId = card.getAttribute('data-target-provider') || providerSelect?.value.trim() || undefined;
+			const promptDefaultModel = getGlobalDefaultModel();
+			const targetProviderId = card.getAttribute('data-target-provider') || providerSelect?.value.trim() || (promptDefaultModel && modelId === promptDefaultModel.modelId ? promptDefaultModel.providerId : undefined);
 			const res = await credService.executePrompt(modelId, interpolatedPrompt, undefined, targetProviderId);
 
 			this._inFlightPromptRuns.delete(fieldKey);
@@ -9348,7 +9390,7 @@ ${rawErr}
 			const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
 
 			let activeProvider = card.getAttribute('data-target-provider') || 'openai';
-			let activeModel = card.getAttribute('data-target-model') || modelHiddenInput?.value || selectedModelText?.textContent?.trim() || 'gpt-4o';
+			let activeModel = card.getAttribute('data-target-model') || modelHiddenInput?.value || selectedModelText?.textContent?.trim() || resolveDefaultModelId(activeProvider, 'gpt-4o');
 			if (activeModel === 'o1-mini' || activeModel === 'o1-preview') {
 				activeModel = 'gpt-4o';
 			}
@@ -9408,6 +9450,7 @@ ${rawErr}
 					{ id: 'openai', label: 'OpenAI' },
 					{ id: 'gemini', label: 'Google Gemini' },
 					{ id: 'anthropic', label: 'Anthropic Claude' },
+					{ id: 'aliyun', label: 'Alibaba Cloud Model Studio' },
 					{ id: 'ollama', label: 'Ollama Local' },
 					{ id: 'custom-openai', label: 'Custom Endpoint' }
 				];
@@ -12352,7 +12395,8 @@ ${rawErr}
 			};
 			autoSyncWrap.appendChild(autoSyncInput);
 			const autoSyncText = document.createElement('span');
-			autoSyncText.textContent = 'Auto-sync on workflow run';
+			autoSyncText.textContent = 'Create empty table if missing';
+			autoSyncWrap.title = "When the workflow runs and the target table does not exist yet, create it (empty) from this card's columns. Never writes any rows.";
 			autoSyncWrap.appendChild(autoSyncText);
 			dbTopRow.appendChild(autoSyncWrap);
 
@@ -17506,6 +17550,141 @@ ${interpolatedPrompt}`;
 		return lines.join('\n');
 	}
 
+	/** Read-only card for a workflow capsule that has no ticket component card (node view from the Workflow Outline). */
+	/** Node view: adds each capsule's last-run value under its regular component card (step cards render their own). */
+	private _appendWorkflowRuntimeBlocks(mod: any): void {
+		if (!this._container || !mod?.__wfNode || !Array.isArray(mod.fields)) {
+			return;
+		}
+		for (const f of mod.fields) {
+			if (!f?.__wfRuntime || f.__wfStep || !f.id) {
+				continue;
+			}
+			const card = this._container.querySelector(`[data-field-id="${CSS.escape(String(f.id))}"]`) as HTMLElement | null;
+			const html = this._renderWorkflowRuntimeBlockHtml(f.__wfRuntime);
+			if (card && html && !card.querySelector(':scope > .wf-runtime-block')) {
+				const holder = document.createElement('div');
+				this._setElementHTML(holder, html);
+				while (holder.firstElementChild) {
+					card.appendChild(holder.firstElementChild);
+				}
+			}
+		}
+	}
+
+	/** Compact text of a runtime value for the node view (pretty JSON for objects, truncated). */
+	private _formatWorkflowRuntimeValue(value: unknown, max = 4000): string {
+		let text: string;
+		if (value === null) {
+			text = 'null';
+		} else if (typeof value === 'object') {
+			try {
+				text = JSON.stringify(value, null, 2);
+			} catch {
+				text = String(value);
+			}
+		} else {
+			text = String(value);
+		}
+		return text.length > max ? `${text.slice(0, max)}\n… (truncated, ${text.length.toLocaleString()} chars)` : text;
+	}
+
+	/** Full-width box with a last-run value and a one-click Copy (copies the complete value, not the truncated view). */
+	private _renderWorkflowValueBoxHtml(caption: string, value: unknown): string {
+		const full = value === undefined ? '' : this._formatWorkflowRuntimeValue(value, 500000);
+		const body = value === undefined
+			? '<div class="wf-value-empty">Not run yet</div>'
+			: `<pre class="wf-step-code wf-value-pre">${this._escapeHtml(this._formatWorkflowRuntimeValue(value, 6000))}</pre><textarea class="wf-value-raw" hidden>${this._escapeHtml(full)}</textarea>`;
+		return `
+			<div class="wf-value-box">
+				<div class="wf-value-head">
+					<span>${this._escapeHtml(caption)}</span>
+					${value === undefined ? '' : '<button type="button" class="wf-value-copy-btn" title="Copy the full value"><span class="codicon codicon-copy"></span><span>Copy</span></button>'}
+				</div>
+				${body}
+			</div>
+		`;
+	}
+
+	/** "Last run" block appended to a node-view card (value + error), or '' when the capsule has not run. */
+	private _renderWorkflowRuntimeBlockHtml(runtime: any): string {
+		if (!runtime || (runtime.value === undefined && !runtime.error)) {
+			return '';
+		}
+		const err = runtime.error ? `<div style="margin-top: 6px; padding: 6px 10px; border-radius: 6px; background: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.35); color: #fda4af; font-size: 11.5px; white-space: pre-wrap; word-break: break-word;">✗ ${this._escapeHtml(String(runtime.error))}</div>` : '';
+		const val = runtime.value !== undefined ? this._renderWorkflowValueBoxHtml('Last Run Value', runtime.value) : '';
+		return `<div class="wf-runtime-block" style="margin-top: 12px;">${val}${err}</div>`;
+	}
+
+	private _renderWorkflowStepCardHtml(step: any, label: string, rawKey: string, fieldId: string, stepCardClass: string, stepBadgeHtml: string, runtime?: any): string {
+		const esc = (v: unknown) => this._escapeHtml(String(v ?? ''));
+		const kindLabel = String(step?.kindLabel || step?.kind || 'Step');
+		const target = step?.targetVariable ? `<span style="font-size: 0.78em; opacity: 0.75; font-family: var(--vscode-editor-font-family, monospace);">→ ${esc(step.targetVariable)}</span>` : '';
+		let body = '';
+		const sw = step?.subWorkflow;
+		if (sw) {
+			const inputs: Record<string, string> = sw.inputs || {};
+			const inputDefs: Array<{ name: string; label?: string; defaultValue?: string }> = Array.isArray(sw.inputDefs) ? sw.inputDefs : [];
+			const inputNames = Array.from(new Set([...inputDefs.map(d => d.name), ...Object.keys(inputs)]));
+			const lastInputs: Record<string, unknown> | undefined = runtime?.inputs;
+			const hasRun = lastInputs !== undefined || runtime?.value !== undefined;
+			for (const name of Object.keys(lastInputs || {})) {
+				if (!inputNames.includes(name)) {
+					inputNames.push(name);
+				}
+			}
+			// Stacked items (name → variable / expression → full-width last-run value), not a 3-column table
+			const ioItem = (title: string, subLabel: string, subValue: string, value: unknown) => `
+				<div class="wf-io-item">
+					<div class="wf-io-title">${esc(title)}</div>
+					<div class="wf-io-sub">${subLabel} ${subValue ? `<code>${esc(subValue)}</code>` : '<span style="opacity: 0.45; font-style: italic;">not set</span>'}</div>
+					${hasRun ? this._renderWorkflowValueBoxHtml('Last run', value) : ''}
+				</div>
+			`;
+			const inputRows = inputNames.map(name => {
+				const def = inputDefs.find(d => d.name === name);
+				return ioItem(def?.label || name, 'Passed in:', String(inputs[name] ?? def?.defaultValue ?? ''), lastInputs?.[name]);
+			}).join('');
+			const outputDefs: Array<{ label: string; varName: string }> = Array.isArray(sw.outputDefs) ? sw.outputDefs : [];
+			const outValue = runtime?.value;
+			const outputValueOf = (varName: string): unknown => {
+				if (outValue && typeof outValue === 'object' && !Array.isArray(outValue) && varName in (outValue as Record<string, unknown>)) {
+					return (outValue as Record<string, unknown>)[varName];
+				}
+				return outputDefs.length === 1 ? outValue : undefined;
+			};
+			const outputRows = outputDefs.map(o => ioItem(o.label || o.varName, 'Variable:', o.varName, outputValueOf(o.varName))).join('');
+			body = `
+				<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;">
+					<div style="font-size: 12px;">Calls <b>${esc(sw.name || sw.id)}</b></div>
+					${sw.id ? `<button type="button" class="btn-secondary wf-step-open-subworkflow" data-sub-workflow-id="${this._escapeHtmlAttr(String(sw.id))}" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; font-size: 11px; border-radius: 5px; cursor: pointer;"><span class="codicon codicon-type-hierarchy-sub" style="font-size: 12px;"></span><span>Show flowchart</span></button>` : ''}
+				</div>
+				<div style="font-size: 10.5px; font-weight: 700; text-transform: uppercase; opacity: 0.6; margin: 6px 0 4px;">Inputs</div>
+				${inputRows || '<div style="font-size: 12px; opacity: 0.5; font-style: italic;">No inputs</div>'}
+				<div style="font-size: 10.5px; font-weight: 700; text-transform: uppercase; opacity: 0.6; margin: 12px 0 4px;">Outputs</div>
+				${outputRows || '<div style="font-size: 12px; opacity: 0.5; font-style: italic;">No outputs</div>'}
+				${runtime?.error ? this._renderWorkflowRuntimeBlockHtml({ error: runtime.error }) : ''}
+			`;
+		} else {
+			const code = String(step?.code || '').trim();
+			body = (code ? `<pre class="wf-step-code">${esc(code)}</pre>` : '<div style="font-size: 12px; opacity: 0.5; font-style: italic;">No code</div>') + this._renderWorkflowRuntimeBlockHtml(runtime);
+		}
+		return `
+			<div class="section-card custom-property-card wf-step-card${stepCardClass}" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-field-id="${this._escapeHtmlAttr(fieldId)}" data-field-label="${this._escapeHtmlAttr(label)}" data-field-type="${this._escapeHtmlAttr(String(step?.kind || 'step'))}"${step?.disabled ? ' style="opacity: 0.6;"' : ''}>
+				<div class="section-title" style="flex-wrap: wrap; gap: 8px;">
+					<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0;">
+						<span>${esc(label)}</span>
+						<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(45, 212, 191, 0.16); color: #5eead4; font-weight: 700; text-transform: uppercase;">${esc(kindLabel)}</span>
+						${step?.disabled ? '<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(148, 163, 184, 0.16); color: #94a3b8; font-weight: 700; text-transform: uppercase;">Disabled</span>' : ''}
+						${target}
+					</div>
+					<div style="display: flex; align-items: center; gap: 6px;">${stepBadgeHtml}</div>
+				</div>
+				${body}
+			</div>
+		`;
+	}
+
 	private _generateHtml(
 		data: IParsedTicketData,
 		workLog: string,
@@ -17515,6 +17694,8 @@ ${interpolatedPrompt}`;
 		allTickets: any[] = []
 	): string {
 		const typeUpper = (data.ticketType || 'task').toUpperCase();
+		// A workflow node shown like a ticket (from the Workflow Outline): read-only, no template / ticket actions
+		const wfNode = this._isPreviewMode ? (customModule?.__wfNode as { nodeLabel: string; workflowName: string } | undefined) : undefined;
 
 		// 1. Status Colors
 		let status = data.status || 'Todo';
@@ -17703,6 +17884,10 @@ ${interpolatedPrompt}`;
 			mediaAutoPlay?: boolean;
 			debugSqlOutput?: boolean;
 			id?: string;
+			/** Workflow capsule without a ticket component card (Sub-Workflow call, Display, ticket operations, Python step). */
+			wfStep?: any;
+			/** Last-run data of a workflow capsule (node view): value, Sub-Workflow inputs, error. */
+			wfRuntime?: any;
 			pythonPath?: string;
 			pythonCode?: string;
 			tableColumns?: any[];
@@ -17827,6 +18012,8 @@ ${interpolatedPrompt}`;
 					key: fLabel || matchedKey,
 					label: fLabel,
 					type: f.type || 'text',
+					wfStep: (f as any).__wfStep,
+					wfRuntime: (f as any).__wfRuntime,
 					val: val,
 					options: f.options || f.choices || [],
 					buttons: (f as any).buttons || [],
@@ -18892,7 +19079,7 @@ ${interpolatedPrompt}`;
 					const templateMode: 'model' | 'agent' | undefined = fieldItem.targetMode;
 					let promptMode: 'model' | 'agent' = templateMode || 'model';
 					let promptProvider = fieldItem.targetProvider || '';
-					let promptModel = fieldItem.targetModel || 'gemini-1.5-flash';
+					let promptModel = fieldItem.targetModel || resolveDefaultModelId(fieldItem.targetProvider, 'gemini-2.5-flash');
 					let promptAgentId = fieldItem.targetAgentId || '';
 					let promptAgentName = fieldItem.targetAgentName || '';
 					let userCustomizedTarget = false;
@@ -19001,6 +19188,10 @@ ${interpolatedPrompt}`;
 						if (matchingAg) { promptAgentName = matchingAg.name; }
 					}
 
+					const promptDefaultModel = getGlobalDefaultModel();
+					if (!promptProvider && promptDefaultModel && promptModel === promptDefaultModel.modelId) {
+						promptProvider = promptDefaultModel.providerId;
+					}
 					if (!promptProvider) {
 						if (promptModel.startsWith('gemini')) { promptProvider = 'gemini'; }
 						else if (promptModel.startsWith('claude')) { promptProvider = 'anthropic'; }
@@ -19022,7 +19213,7 @@ ${interpolatedPrompt}`;
 					const isAgentMode = promptMode === 'agent';
 					const targetBadgeText = isAgentMode
 						? `Agent: ${promptAgentName || promptAgentId || 'Unassigned'}`
-						: `Model: ${promptModel || 'gemini-1.5-flash'}`;
+						: `Model: ${promptModel || resolveDefaultModelId(promptProvider, 'gemini-2.5-flash')}`;
 					const targetBadgeBg = isAgentMode ? 'rgba(56, 189, 248, 0.15)' : 'rgba(59, 130, 246, 0.15)';
 					const targetBadgeColor = isAgentMode ? '#38bdf8' : '#60a5fa';
 
@@ -19036,6 +19227,7 @@ ${interpolatedPrompt}`;
 						{ id: 'openai', label: 'OpenAI' },
 						{ id: 'gemini', label: 'Google Gemini' },
 						{ id: 'anthropic', label: 'Anthropic Claude' },
+						{ id: 'aliyun', label: 'Alibaba Cloud Model Studio' },
 						{ id: 'ollama', label: 'Ollama Local' },
 						{ id: 'custom-openai', label: 'Custom Endpoint' }
 					];
@@ -20164,6 +20356,8 @@ ${userPromptSectionHtml}
 							</div>
 						</div>
 					`;
+				} else if (fieldItem.wfStep) {
+					customFieldsHtml += this._renderWorkflowStepCardHtml(fieldItem.wfStep, k, rawKey, fieldItem.id || '', stepCardClass, stepBadgeHtml, fieldItem.wfRuntime);
 				} else {
 					// Textarea or Single-line Text
 					const isMultiline = fType === 'textarea' || (typeof v === 'string' && (v.length > 80 || v.includes('\n') || ['experience', 'description', 'detail', 'content', 'notes', 'summary', 'project', 'background'].some(sub => k.toLowerCase().includes(sub))));
@@ -20228,8 +20422,8 @@ ${userPromptSectionHtml}
 			(a.name.toLowerCase() === this._entityName.toLowerCase())
 		);
 
-		const agentModel = matchingAgent?.model?.modelId || data.metadata['Model Name'] || data.metadata['AI Model'] || data.metadata['Model'] || 'gemini-1.5-flash';
-		const agentProvider = matchingAgent?.model?.providerId || data.metadata['AI Provider'] || data.metadata['Provider'] || (agentModel.startsWith('gpt') ? 'openai' : agentModel.startsWith('claude') ? 'anthropic' : agentModel.startsWith('deepseek') ? 'deepseek' : 'gemini');
+		const agentModel = matchingAgent?.model?.modelId || data.metadata['Model Name'] || data.metadata['AI Model'] || data.metadata['Model'] || resolveDefaultModelId(matchingAgent?.model?.providerId || data.metadata['AI Provider'] || data.metadata['Provider'], 'gemini-2.5-flash');
+		const agentProvider = matchingAgent?.model?.providerId || data.metadata['AI Provider'] || data.metadata['Provider'] || (agentModel === getGlobalDefaultModel()?.modelId ? getGlobalDefaultModel()?.providerId : undefined) || (agentModel.startsWith('gpt') ? 'openai' : agentModel.startsWith('claude') ? 'anthropic' : agentModel.startsWith('deepseek') ? 'deepseek' : 'gemini');
 		const agentCredentialId = matchingAgent?.model?.credentialId || data.metadata['Credential ID'] || data.metadata['Credential'] || 'Default Provider Connection';
 		const agentRole = matchingAgent?.role || data.metadata['Role'] || data.description || `${data.workspaceId || 'Workspace'} Agent`;
 		const agentSystemPrompt = matchingAgent?.systemPrompt || data.metadata['System Prompt'] || data.instructionNotes || '';
@@ -20670,36 +20864,149 @@ ${userPromptSectionHtml}
 				.entity-detail-editor .custom-select-view:hover {
 					background: rgba(59, 130, 246, 0.08);
 				}
+				/* Keep button labels on one line; rows wrap instead when the editor is narrow (e.g. a side split) */
+				.entity-detail-editor button.btn-primary,
+				.entity-detail-editor button.btn-secondary {
+					white-space: nowrap;
+				}
+				.entity-detail-editor .wf-node-view .attributes-collapsed-drawer-btn {
+					display: none !important;
+				}
+				.entity-detail-editor .wf-step-code {
+					margin: 0;
+					padding: 10px 12px;
+					max-height: 320px;
+					overflow: auto;
+					border-radius: 6px;
+					background: rgba(0, 0, 0, 0.25);
+					border: 1px solid rgba(255, 255, 255, 0.08);
+					font-family: var(--vscode-editor-font-family, monospace);
+					font-size: 11.5px;
+					line-height: 1.5;
+					white-space: pre;
+					color: #e2e8f0;
+				}
+				.entity-detail-editor .wf-step-io-table {
+					width: 100%;
+					border-collapse: collapse;
+					font-size: 12px;
+				}
+				.entity-detail-editor .wf-step-io-table td {
+					padding: 5px 8px;
+					border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+					vertical-align: top;
+				}
+				.entity-detail-editor .wf-step-io-table td:first-child {
+					white-space: nowrap;
+					font-weight: 600;
+					color: #cbd5e1;
+					width: 1%;
+				}
+				.entity-detail-editor .wf-step-io-table code {
+					font-family: var(--vscode-editor-font-family, monospace);
+					font-size: 11px;
+					color: #a5f3fc;
+					word-break: break-all;
+				}
+				.entity-detail-editor .wf-io-item {
+					padding: 10px 0;
+					border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+				}
+				.entity-detail-editor .wf-io-item:last-child {
+					border-bottom: none;
+				}
+				.entity-detail-editor .wf-io-title {
+					font-size: 12.5px;
+					font-weight: 600;
+					color: #e2e8f0;
+				}
+				.entity-detail-editor .wf-io-sub {
+					margin-top: 2px;
+					font-size: 11.5px;
+					opacity: 0.75;
+				}
+				.entity-detail-editor .wf-io-sub code {
+					font-family: var(--vscode-editor-font-family, monospace);
+					font-size: 11px;
+					color: #a5f3fc;
+					word-break: break-all;
+				}
+				.entity-detail-editor .wf-value-box {
+					margin-top: 6px;
+				}
+				.entity-detail-editor .wf-value-head {
+					display: flex;
+					align-items: center;
+					justify-content: space-between;
+					margin-bottom: 4px;
+					font-size: 10.5px;
+					font-weight: 700;
+					text-transform: uppercase;
+					color: #a78bfa;
+				}
+				.entity-detail-editor .wf-value-copy-btn {
+					display: inline-flex;
+					align-items: center;
+					gap: 4px;
+					padding: 1px 8px;
+					font-size: 10.5px;
+					font-weight: 500;
+					text-transform: none;
+					border-radius: 4px;
+					cursor: pointer;
+					color: #e2e8f0;
+					background: rgba(255, 255, 255, 0.06);
+					border: 1px solid rgba(255, 255, 255, 0.16);
+				}
+				.entity-detail-editor .wf-value-copy-btn:hover {
+					background: rgba(255, 255, 255, 0.12);
+				}
+				.entity-detail-editor .wf-value-copy-btn .codicon {
+					font-size: 11px;
+				}
+				.entity-detail-editor pre.wf-value-pre {
+					white-space: pre-wrap;
+					word-break: break-word;
+					max-height: 280px;
+				}
+				.entity-detail-editor .wf-value-empty {
+					font-size: 11.5px;
+					opacity: 0.45;
+					font-style: italic;
+				}
+				/* Briefly highlights the component revealed from the Workflow Outline */
+				.entity-detail-editor .wf-outline-reveal-flash {
+					outline: 2px solid #38bdf8 !important;
+					outline-offset: 2px;
+					transition: outline-color 0.6s ease;
+				}
 			</style>
 
-			${this._isPreviewMode ? `
-				<div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 16px; margin-bottom: 18px; border-radius: 8px; background: linear-gradient(90deg, rgba(56, 189, 248, 0.14) 0%, rgba(129, 140, 248, 0.10) 100%); border: 1px solid rgba(56, 189, 248, 0.35); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.15);">
-					<div style="display: flex; align-items: center; gap: 10px;">
-						<span class="codicon codicon-eye" style="font-size: 16px; color: #38bdf8;"></span>
-						<div style="display: flex; flex-direction: column; gap: 2px;">
-							<div style="display: flex; align-items: center; gap: 8px;">
-								<span style="font-size: 11.5px; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;">Template Ticket Preview</span>
-								<span style="font-size: 11px; padding: 1px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.2); color: #bae6fd; font-weight: 600;">${this._escapeHtml(customModule?.name || data.ticketType)}</span>
-							</div>
-							<span style="font-size: 11px; opacity: 0.78;">Interactive preview of how a ticket generated from this template looks and behaves. Changes here are in-memory only.</span>
-						</div>
+			${wfNode ? `
+				<div style="display: flex; align-items: center; gap: 10px; padding: 10px 16px; margin-bottom: 18px; border-radius: 8px; background: linear-gradient(90deg, rgba(45, 212, 191, 0.14) 0%, rgba(56, 189, 248, 0.08) 100%); border: 1px solid rgba(45, 212, 191, 0.35);">
+					<span class="codicon codicon-type-hierarchy-sub" style="font-size: 16px; color: #2dd4bf;"></span>
+					<div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
+						<span style="font-size: 11.5px; font-weight: 700; color: #2dd4bf; letter-spacing: 0.04em; text-transform: uppercase;">Workflow Node</span>
+						<span style="font-size: 11px; opacity: 0.78;">Capsules of this node, shown as cards in pipeline order. Read-only view — edit the node on the canvas.</span>
 					</div>
-					<div style="display: flex; align-items: center; gap: 8px; flex-shrink: 0;">
-						<button type="button" id="preview-reset-btn" class="btn-secondary" style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; border-radius: 5px; cursor: pointer;" title="Reset preview to template default values">
-							<span class="codicon codicon-debug-restart" style="font-size: 12px;"></span>
-							<span>Reset Defaults</span>
-						</button>
-						<button type="button" id="preview-edit-schema-btn" class="btn-primary" style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.45);" title="Open or switch to the Module Schema Designer for this template">
-							<span class="codicon codicon-tools" style="font-size: 12px;"></span>
-							<span>Edit Template Schema</span>
-						</button>
+				</div>
+			` : this._isPreviewMode ? `
+				<div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 8px 14px; margin-bottom: 18px; border-radius: 8px; background: linear-gradient(90deg, rgba(56, 189, 248, 0.14) 0%, rgba(129, 140, 248, 0.10) 100%); border: 1px solid rgba(56, 189, 248, 0.35);">
+					<div style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0;">
+						<span class="codicon codicon-symbol-class" style="font-size: 14px; color: #38bdf8;"></span>
+						<span style="font-size: 11.5px; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap;">Ticket Template</span>
+						<span style="font-size: 11px; padding: 1px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.2); color: #bae6fd; font-weight: 600;">${this._escapeHtml(customModule?.name || data.ticketType)}</span>
 					</div>
+					<button type="button" id="preview-edit-schema-btn" class="btn-primary" style="display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.45);" title="Open the template's schema designer to change its fields and layout (existing tickets keep their values)">
+						<span class="codicon codicon-tools" style="font-size: 12px;"></span>
+						<span>Edit Template Schema</span>
+					</button>
 				</div>
 			` : ''}
 
 			<!-- Top Header Area -->
-			<div style="width: 100%; margin: 0 0 20px 0; text-align: left; display: flex; justify-content: space-between; align-items: flex-start;">
-				<div style="flex: 1; min-width: 0;">
+			<div style="width: 100%; margin: 0 0 20px 0; text-align: left; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 10px 16px;">
+				<div style="flex: 1 1 260px; min-width: 0;">
 					<div class="header-breadcrumb">
 						${(data.breadcrumbSegments && data.breadcrumbSegments.length > 0)
 				? data.breadcrumbSegments.map((s, idx) => `
@@ -20708,7 +21015,7 @@ ${userPromptSectionHtml}
 							`).join('')
 				: `<span>${this._escapeHtml(data.workspaceId || 'Workspace')}</span><span class="breadcrumb-sep" style="opacity: 0.35; margin: 0 4px;">/</span><span>${this._escapeHtml(data.ticketId)}</span>`
 			}
-						<span class="ticket-type-badge-trigger" data-ticket-type="${this._escapeHtmlAttr(data.ticketType || '')}" style="font-size: 8.5px; padding: 2px 7px; border-radius: 4px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; cursor: pointer; transition: all 0.15s ease;" title="Click to view '${typeUpper}' template preview and edit schema"><span class="${ThemeIcon.asClassName(resolveCustomModuleIcon(customModule?.icon, data.ticketType))}" style="font-size: 9.5px; color: ${colorSetting.text};"></span><span>${typeUpper}</span></span>
+						${wfNode ? '' : `<span class="ticket-type-badge-trigger" data-ticket-type="${this._escapeHtmlAttr(data.ticketType || '')}" style="font-size: 8.5px; padding: 2px 7px; border-radius: 4px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; cursor: pointer; transition: all 0.15s ease;" title="Click to view '${typeUpper}' template preview and edit schema"><span class="${ThemeIcon.asClassName(resolveCustomModuleIcon(customModule?.icon, data.ticketType))}" style="font-size: 9.5px; color: ${colorSetting.text};"></span><span>${typeUpper}</span></span>`}
 					</div>
 					<div class="header-title-row">
 						<h1 class="ticket-title" id="title-heading" style="cursor: pointer;" title="Click to edit Title manually">${data.title}</h1>
@@ -20717,7 +21024,7 @@ ${userPromptSectionHtml}
 						</button>
 					</div>
 				</div>
-				<div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+				<div style="display: ${wfNode ? 'none' : 'flex'}; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px;">
 					${this._isPreviewMode ? `
 						<button type="button" class="btn-primary preview-edit-schema-trigger" style="display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.22); border: 1px solid rgba(192, 132, 252, 0.45); color: #e9d5ff;" title="Switch to Edit Template Schema Mode">
 							<span class="codicon codicon-edit" style="font-size: 12px;"></span>
@@ -20756,7 +21063,7 @@ ${userPromptSectionHtml}
 			</div>
 
 			<!-- Main Layout Container -->
-			<div class="layout-container ${this._isAttributesCollapsed ? 'attributes-collapsed' : ''}">
+			<div class="layout-container ${this._isAttributesCollapsed || wfNode ? 'attributes-collapsed' : ''}${wfNode ? ' wf-node-view' : ''}">
 				<button type="button" class="attributes-collapsed-drawer-btn toggle-attributes-panel-btn" title="Expand Attributes Panel">
 					<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
 						<polyline points="10 4 6 8 10 12"></polyline>
@@ -20824,7 +21131,7 @@ ${userPromptSectionHtml}
 					` : ''}
 
 					<!-- Instructions / System Prompt Card -->
-					<div class="section-card">
+					<div class="section-card"${wfNode ? ' style="display: none;"' : ''}>
 						<div class="section-title">
 							<div style="display: flex; align-items: center; gap: 8px;">
 								<span>${isAgent ? 'System Prompt & Persona Instructions' : 'Instructions'}</span>
@@ -20882,8 +21189,8 @@ ${userPromptSectionHtml}
 					<!-- Custom Properties -->
 					${customFieldsHtml}
 
-					<!-- Work Logs Card -->
-					<div class="section-card" style="max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;">
+					<!-- Work Logs Card (not for previews: a template preview or a workflow node has no work log) -->
+					<div class="section-card" style="max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;${this._isPreviewMode ? ' display: none;' : ''}">
 						<div class="section-title">
 							<span>${isAgent ? 'Task History & Work Logs' : 'Work Logs'}</span>
 							<button id="add-log-btn" class="btn-primary" style="font-size: 0.8em; padding: 4px 10px;">+ Add Log</button>

@@ -11,10 +11,15 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { AccountSignInModal } from './accountSignInModal.js';
-import { IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
+import { ALIYUN_MODEL_STUDIO_REGIONS, ALIYUN_PROVIDER_ID, IAgentCredentialService, IAgentModelReference, isNonChatModelId, isOpenAICompatibleProvider } from '../../agentsManager/common/agentsManager.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IVoiceModel, IVoiceModelService, VoiceModelProvider } from '../../voiceModels/common/voiceModel.js';
+import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
+import { IVoiceModel, IVoiceModelService, VOICE_PROVIDER_CATALOG, VoiceModelProvider } from '../../voiceModels/common/voiceModel.js';
+import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
+import { IRequestService } from '../../../../platform/request/common/request.js';
+import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
+import { formatContextLength, formatPerMillion, getModelPriceCatalog, IModelPriceCatalog, lookupModelPrice } from '../../agentsManager/browser/modelPricing.js';
 
 export type AccountPanelTab = 'Account' | 'General' | 'Permissions' | 'Appearance' | 'Models' | 'VoiceModels' | 'Customizations';
 
@@ -33,9 +38,23 @@ export class AccountManagementDialog extends Disposable {
 		@IAgentCredentialService private readonly agentCredentialService: IAgentCredentialService,
 		@IClipboardService private readonly clipboardService: IClipboardService,
 		@IStorageService private readonly _storageService: IStorageService,
-		@IVoiceModelService private readonly voiceModelService: IVoiceModelService
+		@IVoiceModelService private readonly voiceModelService: IVoiceModelService,
+		@IDialogService private readonly dialogService: IDialogService,
+		@IMainProcessService private readonly mainProcessService: IMainProcessService
 	) {
 		super();
+	}
+
+	private _requestService: IRequestService | undefined;
+	private _priceCatalog: IModelPriceCatalog | undefined;
+
+	/** Estimated prices (third-party catalogs). Waits at most a few seconds so the tab never hangs offline. */
+	private async loadPriceCatalog(forceRefresh = false): Promise<IModelPriceCatalog | undefined> {
+		this._requestService ??= new RequestChannelClient(this.mainProcessService.getChannel('request'));
+		const timeout = new Promise<undefined>(resolve => setTimeout(() => resolve(undefined), forceRefresh ? 30000 : 8000));
+		const catalog = await Promise.race([getModelPriceCatalog(this._requestService, this._storageService, forceRefresh), timeout]);
+		this._priceCatalog = catalog ?? this._priceCatalog;
+		return this._priceCatalog;
 	}
 
 	public close(): void {
@@ -109,8 +128,8 @@ export class AccountManagementDialog extends Disposable {
 		const dialog = targetDocument.createElement('div');
 		dialog.className = 'anyagent-account-dialog';
 		dialog.style.cssText = `
-			width: 960px;
-			height: 640px;
+			width: min(1120px, 92vw);
+			height: min(760px, 88vh);
 			background: #1e1e1e;
 			border: 1px solid #2a2a2a;
 			border-radius: 12px;
@@ -533,6 +552,220 @@ export class AccountManagementDialog extends Disposable {
 		`);
 	}
 
+	/** "Default Model" picker: the model used wherever a model can be chosen but was not. */
+	private async renderDefaultModelCard(container: HTMLElement, targetDocument: Document): Promise<void> {
+		const credentials = (await this.agentCredentialService.getCredentials()).filter(c => c.isEnabled !== false);
+		const current = this.agentCredentialService.getDefaultModel();
+
+		const card = targetDocument.createElement('div');
+		card.style.cssText = `background: #1c1c1c; border: 1px solid ${current ? '#2563eb' : '#2a2a2a'}; border-radius: 8px; padding: 14px 16px; margin-bottom: 20px; display: flex; align-items: center; gap: 16px;`;
+
+		const textCol = targetDocument.createElement('div');
+		textCol.style.cssText = `flex: 1; min-width: 0;`;
+		const title = targetDocument.createElement('div');
+		title.style.cssText = `font-size: 13.5px; font-weight: 600; color: #ffffff; margin-bottom: 4px;`;
+		title.textContent = '★ Default Model';
+		const desc = targetDocument.createElement('div');
+		desc.style.cssText = `font-size: 11.5px; color: #888888; line-height: 1.45;`;
+		desc.textContent = 'Pre-selected everywhere you can pick a model (Agent Central chat, new agents, new prompt fields), and used whenever no model was chosen. Voice models are configured separately.';
+		textCol.appendChild(title);
+		textCol.appendChild(desc);
+		card.appendChild(textCol);
+
+		const select = targetDocument.createElement('select');
+		select.style.cssText = `flex-shrink: 0; width: 320px; padding: 7px 10px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none;`;
+		const noneOpt = targetDocument.createElement('option');
+		noneOpt.value = '';
+		noneOpt.textContent = 'Not set (each feature uses its own fallback)';
+		select.appendChild(noneOpt);
+
+		let hasAny = false;
+		for (const cred of credentials) {
+			const models = (cred.cachedModels || []).filter(m => !isNonChatModelId(m)).sort((a, b) => a.localeCompare(b));
+			if (models.length === 0) {
+				continue;
+			}
+			hasAny = true;
+			const group = targetDocument.createElement('optgroup');
+			group.label = `${cred.name} (${cred.providerId})`;
+			for (const m of models) {
+				const opt = targetDocument.createElement('option');
+				opt.value = JSON.stringify({ providerId: cred.providerId, modelId: m, credentialId: cred.id });
+				const price = lookupModelPrice(this._priceCatalog, m);
+				opt.textContent = price ? `${m}  ·  ~${formatPerMillion(price.input)} in / ${formatPerMillion(price.output)} out` : m;
+				if (current && current.modelId === m && (current.credentialId ? current.credentialId === cred.id : current.providerId === cred.providerId)) {
+					opt.selected = true;
+				}
+				group.appendChild(opt);
+			}
+			select.appendChild(group);
+		}
+		if (!hasAny) {
+			desc.textContent += ' Add a provider below and click Refresh to load its models first.';
+		}
+
+		select.onchange = async () => {
+			const ref = select.value ? JSON.parse(select.value) as IAgentModelReference : undefined;
+			this.agentCredentialService.setDefaultModel(ref);
+			this.notificationService.info(ref ? `Default model set to ${ref.modelId}.` : 'Default model cleared.');
+			await this.renderContent(container, targetDocument);
+		};
+		card.appendChild(select);
+		container.appendChild(card);
+	}
+
+	/** Makes clear that prices are estimates, with the catalog age and a manual refresh. */
+	private renderPriceDisclaimer(container: HTMLElement, targetDocument: Document): void {
+		const note = targetDocument.createElement('div');
+		note.style.cssText = `display: flex; align-items: flex-start; gap: 10px; font-size: 11.5px; line-height: 1.5; color: #9ca3af; background: rgba(148, 163, 184, 0.06); border: 1px solid #2a2a2a; border-radius: 8px; padding: 10px 14px; margin-bottom: 20px;`;
+		const text = targetDocument.createElement('div');
+		text.style.cssText = `flex: 1;`;
+		const strong = targetDocument.createElement('b');
+		strong.style.color = '#e2e8f0';
+		strong.textContent = 'Prices are estimates only. ';
+		text.appendChild(strong);
+		const updated = this._priceCatalog ? new Date(this._priceCatalog.fetchedAt).toLocaleString() : 'not available (offline?)';
+		text.appendChild(targetDocument.createTextNode(`They come from public third-party catalogs (OpenRouter, LiteLLM), shown in USD per 1M tokens, and are not official provider pricing. Actual prices may differ by region, context length, discounts or recent changes — check the provider's pricing page before relying on them. "~" means the price of the base model was used. Last updated: ${updated}.`));
+		note.appendChild(text);
+
+		const refreshBtn = targetDocument.createElement('button');
+		refreshBtn.style.cssText = `flex-shrink: 0; white-space: nowrap; background: rgba(255, 255, 255, 0.06); color: #e2e8f0; border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 6px; padding: 4px 10px; font-size: 11px; cursor: pointer;`;
+		refreshBtn.textContent = 'Refresh prices';
+		refreshBtn.onclick = async () => {
+			refreshBtn.disabled = true;
+			refreshBtn.textContent = 'Refreshing...';
+			await this.loadPriceCatalog(true);
+			await this.renderContent(container, targetDocument);
+		};
+		note.appendChild(refreshBtn);
+		container.appendChild(note);
+	}
+
+	/** Model table of one credential: estimated prices, sortable, click "Set default" for chat models. */
+	private renderCredentialModelsTable(host: HTMLElement, cred: { id: string; providerId: string }, models: readonly string[], container: HTMLElement, targetDocument: Document): void {
+		type SortKey = 'name' | 'input' | 'output';
+		let sortKey: SortKey = 'input';
+		let sortAsc = true;
+		let isExpanded = false;
+		const collapsedLimit = 8;
+
+		const rows = models.map(id => ({ id, price: lookupModelPrice(this._priceCatalog, id), chat: !isNonChatModelId(id) }));
+		const defaultRef = this.agentCredentialService.getDefaultModel();
+		const isDefault = (id: string) => !!defaultRef && defaultRef.modelId === id && (defaultRef.credentialId ? defaultRef.credentialId === cred.id : defaultRef.providerId === cred.providerId);
+
+		const wrap = targetDocument.createElement('div');
+		host.appendChild(wrap);
+
+		const cellCss = `padding: 5px 10px; border-bottom: 1px solid #232323; white-space: nowrap;`;
+		const render = () => {
+			wrap.textContent = '';
+			const sorted = [...rows].sort((a, b) => {
+				// Default model first, then chat models, then by the chosen column (unknown prices last)
+				const pin = Number(isDefault(b.id)) - Number(isDefault(a.id)) || Number(b.chat) - Number(a.chat);
+				if (pin) {
+					return pin;
+				}
+				if (sortKey === 'name') {
+					return (sortAsc ? 1 : -1) * a.id.localeCompare(b.id);
+				}
+				const av = a.price?.[sortKey];
+				const bv = b.price?.[sortKey];
+				if (av === undefined || bv === undefined) {
+					return av === undefined && bv === undefined ? a.id.localeCompare(b.id) : (av === undefined ? 1 : -1);
+				}
+				return (sortAsc ? 1 : -1) * (av - bv) || a.id.localeCompare(b.id);
+			});
+			const visible = isExpanded ? sorted : sorted.slice(0, collapsedLimit);
+
+			const scroller = targetDocument.createElement('div');
+			scroller.style.cssText = `max-height: ${isExpanded ? '360px' : 'none'}; overflow-y: auto; border: 1px solid #2a2a2a; border-radius: 6px;`;
+			const table = targetDocument.createElement('table');
+			table.style.cssText = `width: 100%; border-collapse: collapse; font-size: 11.5px; color: #cccccc;`;
+
+			const thead = targetDocument.createElement('thead');
+			const headRow = targetDocument.createElement('tr');
+			const header = (label: string, key: SortKey | undefined, align: string) => {
+				const th = targetDocument.createElement('th');
+				th.style.cssText = `${cellCss} position: sticky; top: 0; background: #1a1a1a; text-align: ${align}; font-size: 10px; font-weight: 600; text-transform: uppercase; color: #777; ${key ? 'cursor: pointer; user-select: none;' : ''}`;
+				th.textContent = label + (key && key === sortKey ? (sortAsc ? ' ▲' : ' ▼') : '');
+				if (key) {
+					th.title = 'Click to sort';
+					th.onclick = () => {
+						sortAsc = key === sortKey ? !sortAsc : true;
+						sortKey = key;
+						render();
+					};
+				}
+				headRow.appendChild(th);
+			};
+			header('Model', 'name', 'left');
+			header('Input / 1M (est.)', 'input', 'right');
+			header('Output / 1M (est.)', 'output', 'right');
+			header('Context', undefined, 'right');
+			header('', undefined, 'right');
+			thead.appendChild(headRow);
+			table.appendChild(thead);
+
+			const tbody = targetDocument.createElement('tbody');
+			for (const row of visible) {
+				const tr = targetDocument.createElement('tr');
+				const def = isDefault(row.id);
+				if (def) {
+					tr.style.background = 'rgba(37, 99, 235, 0.12)';
+				}
+				const td = (text: string, align: string, extra = '') => {
+					const cell = targetDocument.createElement('td');
+					cell.style.cssText = `${cellCss} text-align: ${align}; ${extra}`;
+					cell.textContent = text;
+					tr.appendChild(cell);
+					return cell;
+				};
+				const approx = row.price && row.price.matchedId !== row.id.toLowerCase() ? '~' : '';
+				td(def ? `★ ${row.id}` : row.id, 'left', `font-family: monospace; color: ${def ? '#ffffff' : row.chat ? '#cccccc' : '#666666'};`);
+				const priceTitle = row.price ? `Estimated, from ${row.price.source} (${row.price.matchedId}). Not an official price.` : 'No public price estimate found.';
+				td(row.price ? approx + formatPerMillion(row.price.input) : '—', 'right', 'font-variant-numeric: tabular-nums;').title = priceTitle;
+				td(row.price ? approx + formatPerMillion(row.price.output) : '—', 'right', 'font-variant-numeric: tabular-nums;').title = priceTitle;
+				td(formatContextLength(row.price?.contextLength), 'right', 'color: #888;');
+				const actionCell = td('', 'right');
+				if (def) {
+					actionCell.textContent = 'Default';
+					actionCell.style.color = '#60a5fa';
+					actionCell.style.fontWeight = '600';
+				} else if (row.chat) {
+					const btn = targetDocument.createElement('button');
+					btn.style.cssText = `background: rgba(255, 255, 255, 0.06); color: #e2e8f0; border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 4px; padding: 1px 8px; font-size: 10.5px; cursor: pointer;`;
+					btn.textContent = 'Set default';
+					btn.onclick = async () => {
+						this.agentCredentialService.setDefaultModel({ providerId: cred.providerId, modelId: row.id, credentialId: cred.id });
+						this.notificationService.info(`Default model set to ${row.id}.`);
+						await this.renderContent(container, targetDocument);
+					};
+					actionCell.appendChild(btn);
+				} else {
+					actionCell.textContent = 'non-chat';
+					actionCell.style.color = '#555';
+				}
+				tbody.appendChild(tr);
+			}
+			table.appendChild(tbody);
+			scroller.appendChild(table);
+			wrap.appendChild(scroller);
+
+			if (rows.length > collapsedLimit) {
+				const toggle = targetDocument.createElement('a');
+				toggle.style.cssText = `display: inline-block; margin-top: 6px; font-size: 10.5px; color: #38bdf8; cursor: pointer; font-weight: 600; user-select: none;`;
+				toggle.textContent = isExpanded ? 'Collapse ▲' : `Show all ${rows.length} models ▼`;
+				toggle.onclick = e => {
+					e.preventDefault();
+					isExpanded = !isExpanded;
+					render();
+				};
+				wrap.appendChild(toggle);
+			}
+		};
+		render();
+	}
+
 	private async renderModelsTab(container: HTMLElement, targetDocument: Document): Promise<void> {
 		const header = targetDocument.createElement('div');
 		header.style.marginBottom = '20px';
@@ -541,6 +774,10 @@ export class AccountManagementDialog extends Disposable {
 			<p style="margin:0;font-size:13px;color:#888888;line-height:1.5;">Configure and manage your API keys, custom endpoints, and secure credentials for Any Agent models.</p>
 		`);
 		container.appendChild(header);
+
+		await this.loadPriceCatalog();
+		await this.renderDefaultModelCard(container, targetDocument);
+		this.renderPriceDisclaimer(container, targetDocument);
 
 		// Voice & Audio Speech-to-Text Quick Navigation Banner
 		const voiceBanner = targetDocument.createElement('div');
@@ -589,26 +826,6 @@ export class AccountManagementDialog extends Disposable {
 		};
 		voiceBanner.appendChild(voiceBtn);
 		container.appendChild(voiceBanner);
-
-		// Section 1: Active System Providers
-		const sysTitle = targetDocument.createElement('h4');
-		sysTitle.style.cssText = `margin: 0 0 14px 0; font-size: 13.5px; font-weight: 600; color: #ffffff; border-bottom: 1px solid #2a2a2a; padding-bottom: 6px;`;
-		sysTitle.textContent = 'System Built-In Providers';
-		container.appendChild(sysTitle);
-
-		const sysGrid = targetDocument.createElement('div');
-		sysGrid.style.cssText = `display:grid; grid-template-columns:1fr; gap:12px; margin-bottom: 24px;`;
-		container.appendChild(sysGrid);
-
-		this.setElementHTML(sysGrid, `
-			<div style="background:#181818; border:1px solid #2a2a2a; border-radius:8px; padding:12px 16px; display:flex; justify-content:space-between; align-items:center;">
-				<div>
-					<div style="font-size:13.5px; font-weight:600; color:#ffffff; margin-bottom:2px;">Google Gemini (Default System Key)</div>
-					<div style="font-size:11.5px; color:#888888;">Optimized speed, large context, and reasoning. Powered by Any Agent Cloud.</div>
-				</div>
-				<span style="font-size:10px; font-weight:600; color:#22c55e; border:1px solid #22c55e; padding:2px 8px; border-radius:12px;">ACTIVE</span>
-			</div>
-		`);
 
 		// Section 2: User Configured Credentials (Secure OS Keychain)
 		const userTitle = targetDocument.createElement('h4');
@@ -826,7 +1043,7 @@ export class AccountManagementDialog extends Disposable {
 				`;
 				const modelsLabel = targetDocument.createElement('div');
 				modelsLabel.style.cssText = `font-size: 10px; font-weight: bold; text-transform: uppercase; color: #666; margin-bottom: 6px;`;
-				modelsLabel.textContent = 'Available Models';
+				modelsLabel.textContent = 'Available Models · estimated prices (USD)';
 				modelsBlock.appendChild(modelsLabel);
 
 				const modelsContainer = targetDocument.createElement('div');
@@ -839,54 +1056,8 @@ export class AccountManagementDialog extends Disposable {
 					noModels.textContent = status === 'unverified' ? 'Not verified yet. Click Refresh to query models.' : 'No models retrieved from provider.';
 					modelsContainer.appendChild(noModels);
 				} else {
-					const collapsedLimit = 8;
-					const shouldCollapse = cached.length > collapsedLimit;
-					let isExpanded = false;
-
-					const renderModelsList = () => {
-						modelsContainer.textContent = '';
-						const visibleCount = isExpanded ? cached.length : Math.min(cached.length, collapsedLimit);
-						
-						for (let i = 0; i < visibleCount; i++) {
-							const tag = targetDocument.createElement('span');
-							tag.style.cssText = `
-								font-size: 10.5px;
-								background: #202020;
-								border: 1px solid #2d2d2d;
-								color: #cccccc;
-								padding: 2px 6px;
-								border-radius: 4px;
-								font-family: monospace;
-							`;
-							tag.textContent = cached[i];
-							modelsContainer.appendChild(tag);
-						}
-
-						if (shouldCollapse) {
-							const toggleLink = targetDocument.createElement('a');
-							toggleLink.style.cssText = `
-								font-size: 10.5px;
-								color: #38bdf8;
-								cursor: pointer;
-								text-decoration: none;
-								display: inline-flex;
-								align-items: center;
-								align-self: center;
-								margin-left: 4px;
-								user-select: none;
-								font-weight: 600;
-							`;
-							toggleLink.textContent = isExpanded ? 'Collapse ▲' : `Expand (+${cached.length - collapsedLimit} more) ▼`;
-							toggleLink.onclick = (e) => {
-								e.preventDefault();
-								isExpanded = !isExpanded;
-								renderModelsList();
-							};
-							modelsContainer.appendChild(toggleLink);
-						}
-					};
-
-					renderModelsList();
+					modelsContainer.style.display = 'block';
+					this.renderCredentialModelsTable(modelsContainer, cred, cached, container, targetDocument);
 				}
 				modelsBlock.appendChild(modelsContainer);
 				credCard.appendChild(modelsBlock);
@@ -924,8 +1095,12 @@ export class AccountManagementDialog extends Disposable {
 		const nameInput = targetDocument.createElement('input');
 		nameInput.style.cssText = formInputStyle;
 		nameInput.placeholder = 'e.g. Gemini Pro Production, Anthropic Team Key';
+		const nameHelp = targetDocument.createElement('div');
+		nameHelp.style.cssText = `font-size: 11px; color: #888888; margin-top: 4px; line-height: 1.4;`;
+		nameHelp.textContent = 'Your own label for this key, used to tell saved credentials apart. It is shown in the credential list and in the provider dropdown of prompt nodes. Optional.';
 		nameGroup.appendChild(nameLabel);
 		nameGroup.appendChild(nameInput);
+		nameGroup.appendChild(nameHelp);
 		formCard.appendChild(nameGroup);
 
 		// Provider Selector
@@ -939,6 +1114,7 @@ export class AccountManagementDialog extends Disposable {
 			<option value="gemini">Google Gemini</option>
 			<option value="openai">OpenAI</option>
 			<option value="anthropic">Anthropic Claude</option>
+			<option value="aliyun">Alibaba Cloud Model Studio (Qwen, DeepSeek, Kimi, GLM)</option>
 			<option value="custom-openai">Custom / Other Endpoint (OpenAI/Compatible)</option>
 		`);
 		provGroup.appendChild(provLabel);
@@ -963,9 +1139,24 @@ export class AccountManagementDialog extends Disposable {
 		customEndpointGroup.appendChild(endpointHelp);
 		formCard.appendChild(customEndpointGroup);
 
+		const customEndpointHelpText = endpointHelp.textContent;
+		const aliyunRegionUrls = ALIYUN_MODEL_STUDIO_REGIONS.map(r => r.url);
 		provSelect.onchange = () => {
-			if (provSelect.value === 'custom-openai') {
+			if (provSelect.value === ALIYUN_PROVIDER_ID) {
+				// Same OpenAI-compatible form, pre-filled with the region endpoint (a key only works in its own region)
 				customEndpointGroup.style.display = 'block';
+				endpointLabel.textContent = 'Region Endpoint Base URL:';
+				if (!endpointInput.value.trim()) {
+					endpointInput.value = ALIYUN_MODEL_STUDIO_REGIONS[0].url;
+				}
+				endpointHelp.textContent = 'Use the endpoint of the region where the API key was created. ' + ALIYUN_MODEL_STUDIO_REGIONS.map(r => `${r.label}: ${r.url}`).join(' · ');
+			} else if (provSelect.value === 'custom-openai') {
+				customEndpointGroup.style.display = 'block';
+				endpointLabel.textContent = 'Custom Endpoint Base URL:';
+				if (aliyunRegionUrls.includes(endpointInput.value.trim())) {
+					endpointInput.value = '';
+				}
+				endpointHelp.textContent = customEndpointHelpText;
 			} else {
 				customEndpointGroup.style.display = 'none';
 			}
@@ -1152,7 +1343,7 @@ export class AccountManagementDialog extends Disposable {
 				const providerVal = provSelect.value;
 				let customUrlVal: string | undefined = undefined;
 
-				if (providerVal === 'custom-openai') {
+				if (isOpenAICompatibleProvider(providerVal)) {
 					const endpointVal = endpointInput.value.trim();
 					if (!endpointVal) {
 						testSpinner.style.display = 'none';
@@ -1244,7 +1435,7 @@ export class AccountManagementDialog extends Disposable {
 				const selectedModel = testModelSelect.value;
 				let customUrlVal: string | undefined = undefined;
 
-				if (providerVal === 'custom-openai') {
+				if (isOpenAICompatibleProvider(providerVal)) {
 					const endpointVal = endpointInput.value.trim();
 					if (!endpointVal) {
 						testSpinner.style.display = 'none';
@@ -1323,7 +1514,7 @@ export class AccountManagementDialog extends Disposable {
 			const providerVal = provSelect.value;
 			let customUrlVal: string | undefined = undefined;
 
-			if (providerVal === 'custom-openai') {
+			if (isOpenAICompatibleProvider(providerVal)) {
 				const endpointVal = endpointInput.value.trim();
 				if (!endpointVal) {
 					this.notificationService.warn('Please enter custom endpoint URL.');
@@ -1414,7 +1605,7 @@ export class AccountManagementDialog extends Disposable {
 		const activeDescSpan = targetDocument.createElement('span');
 		activeDescSpan.style.cssText = `font-size: 12px; color: #999999;`;
 		if (activeModel) {
-			const provUpper = activeModel.provider === 'gemini' ? 'Google Gemini' : (activeModel.provider === 'openai' ? 'OpenAI Whisper' : 'Custom Endpoint');
+			const provUpper = activeModel.provider === 'gemini' ? 'Google Gemini' : (activeModel.provider === 'openai' ? 'OpenAI' : (activeModel.provider === 'aliyun' ? 'Alibaba Cloud Model Studio' : 'Custom Endpoint'));
 			activeDescSpan.textContent = `Provider: ${provUpper} | Model ID: ${activeModel.modelId} | ${activeModel.connectionMessage || 'Ready for speech transcription'}`;
 		} else {
 			activeDescSpan.textContent = 'No voice model selected. Please choose or add a model below.';
@@ -1508,7 +1699,9 @@ export class AccountManagementDialog extends Disposable {
 		modelsListContainer.style.cssText = `display: flex; flex-direction: column; gap: 12px; margin-bottom: 28px;`;
 		container.appendChild(modelsListContainer);
 
-		for (const model of allModels) {
+		// Default model first, the rest in the order they were added
+		const orderedModels = [...allModels].sort((a, b) => Number(b.id === activeModel?.id) - Number(a.id === activeModel?.id));
+		for (const model of orderedModels) {
 			const isCurrentActive = activeModel?.id === model.id;
 			const card = targetDocument.createElement('div');
 			card.style.cssText = `
@@ -1523,7 +1716,7 @@ export class AccountManagementDialog extends Disposable {
 			`;
 
 			const infoCol = targetDocument.createElement('div');
-			infoCol.style.cssText = `display: flex; flex-direction: column; gap: 4px;`;
+			infoCol.style.cssText = `display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0;`;
 
 			const titleRow = targetDocument.createElement('div');
 			titleRow.style.cssText = `display: flex; align-items: center; gap: 8px;`;
@@ -1540,9 +1733,9 @@ export class AccountManagementDialog extends Disposable {
 				font-weight: 600;
 				padding: 1px 6px;
 				border-radius: 4px;
-				background: ${model.provider === 'gemini' ? 'rgba(59, 130, 246, 0.15)' : (model.provider === 'openai' ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)')};
-				color: ${model.provider === 'gemini' ? '#60a5fa' : (model.provider === 'openai' ? '#34d399' : '#fbbf24')};
-				border: 1px solid ${model.provider === 'gemini' ? 'rgba(59, 130, 246, 0.3)' : (model.provider === 'openai' ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)')};
+				background: rgba(148, 163, 184, 0.12);
+				color: #cbd5e1;
+				border: 1px solid rgba(148, 163, 184, 0.3);
 			`;
 			provBadge.textContent = model.provider.toUpperCase();
 			titleRow.appendChild(provBadge);
@@ -1564,7 +1757,7 @@ export class AccountManagementDialog extends Disposable {
 			infoCol.appendChild(titleRow);
 
 			const metaRow = targetDocument.createElement('div');
-			metaRow.style.cssText = `font-size: 11.5px; color: #777777; display: flex; align-items: center; gap: 12px;`;
+			metaRow.style.cssText = `font-size: 11.5px; color: #777777; display: flex; align-items: center; flex-wrap: wrap; column-gap: 12px; row-gap: 2px; white-space: nowrap;`;
 			
 			const modelIdSpan = targetDocument.createElement('span');
 			modelIdSpan.textContent = `Model ID: ${model.modelId}`;
@@ -1588,7 +1781,7 @@ export class AccountManagementDialog extends Disposable {
 					keyLabelText = 'Key: Auto-detect (Found in AI LLM Providers)';
 					keyLabelColor = '#94a3b8';
 				} else {
-					keyLabelText = 'Key: Not Configured (Click Configure)';
+					keyLabelText = 'Key: Not Configured';
 					keyLabelColor = '#fbbf24';
 				}
 			}
@@ -1609,7 +1802,7 @@ export class AccountManagementDialog extends Disposable {
 				statusSpan.style.cursor = 'pointer';
 				const isNoKey = model.connectionMessage?.includes('No API key') || model.connectionMessage?.includes('No API Key');
 				statusSpan.textContent = isNoKey ? '✗ No API Key (Click to Add)' : '✗ Connection Error';
-				statusSpan.title = model.connectionMessage || 'Connection error. Click Configure to enter or update API key.';
+				statusSpan.title = model.connectionMessage || 'Connection error. Click to enter or update the API key.';
 				statusSpan.onclick = () => openEditModal(model);
 				metaRow.appendChild(statusSpan);
 			}
@@ -1619,14 +1812,14 @@ export class AccountManagementDialog extends Disposable {
 
 			// Action Buttons
 			const actionsRow = targetDocument.createElement('div');
-			actionsRow.style.cssText = `display: flex; align-items: center; gap: 8px;`;
+			actionsRow.style.cssText = `display: flex; align-items: center; gap: 8px; flex-shrink: 0; white-space: nowrap;`;
 
 			if (!isCurrentActive) {
 				const setDefaultBtn = targetDocument.createElement('button');
 				setDefaultBtn.style.cssText = `
-					background: rgba(34, 197, 94, 0.1);
-					color: #4ade80;
-					border: 1px solid rgba(34, 197, 94, 0.3);
+					background: rgba(255, 255, 255, 0.06);
+					color: #e2e8f0;
+					border: 1px solid rgba(255, 255, 255, 0.16);
 					border-radius: 6px;
 					padding: 5px 12px;
 					font-size: 11px;
@@ -1635,16 +1828,14 @@ export class AccountManagementDialog extends Disposable {
 					transition: all 0.15s ease;
 				`;
 				setDefaultBtn.onmouseenter = () => {
-					setDefaultBtn.style.background = 'rgba(34, 197, 94, 0.2)';
-					setDefaultBtn.style.borderColor = 'rgba(34, 197, 94, 0.55)';
+					setDefaultBtn.style.background = 'rgba(255, 255, 255, 0.12)';
+					setDefaultBtn.style.borderColor = 'rgba(255, 255, 255, 0.3)';
 					setDefaultBtn.style.color = '#ffffff';
-					setDefaultBtn.style.boxShadow = '0 0 10px rgba(34, 197, 94, 0.2)';
 				};
 				setDefaultBtn.onmouseleave = () => {
-					setDefaultBtn.style.background = 'rgba(34, 197, 94, 0.1)';
-					setDefaultBtn.style.borderColor = 'rgba(34, 197, 94, 0.3)';
-					setDefaultBtn.style.color = '#4ade80';
-					setDefaultBtn.style.boxShadow = 'none';
+					setDefaultBtn.style.background = 'rgba(255, 255, 255, 0.06)';
+					setDefaultBtn.style.borderColor = 'rgba(255, 255, 255, 0.16)';
+					setDefaultBtn.style.color = '#e2e8f0';
 				};
 				setDefaultBtn.textContent = 'Set as Default';
 				setDefaultBtn.onclick = async () => {
@@ -1654,35 +1845,6 @@ export class AccountManagementDialog extends Disposable {
 				};
 				actionsRow.appendChild(setDefaultBtn);
 			}
-
-			// Configure Button (available on ALL models, built-in or custom)
-			const configBtn = targetDocument.createElement('button');
-			configBtn.style.cssText = `
-				background: rgba(255, 255, 255, 0.06);
-				color: #e2e8f0;
-				border: 1px solid rgba(255, 255, 255, 0.16);
-				border-radius: 6px;
-				padding: 5px 12px;
-				font-size: 11px;
-				font-weight: 500;
-				cursor: pointer;
-				transition: all 0.15s ease;
-			`;
-			configBtn.onmouseenter = () => {
-				configBtn.style.background = 'rgba(255, 255, 255, 0.12)';
-				configBtn.style.borderColor = 'rgba(255, 255, 255, 0.3)';
-				configBtn.style.color = '#ffffff';
-			};
-			configBtn.onmouseleave = () => {
-				configBtn.style.background = 'rgba(255, 255, 255, 0.06)';
-				configBtn.style.borderColor = 'rgba(255, 255, 255, 0.16)';
-				configBtn.style.color = '#e2e8f0';
-			};
-			configBtn.textContent = 'Configure';
-			configBtn.onclick = () => {
-				openEditModal(model);
-			};
-			actionsRow.appendChild(configBtn);
 
 			const testBtn = targetDocument.createElement('button');
 			testBtn.style.cssText = `
@@ -1724,7 +1886,7 @@ export class AccountManagementDialog extends Disposable {
 			};
 			actionsRow.appendChild(testBtn);
 
-			if (!model.isBuiltIn) {
+			{
 				const delBtn = targetDocument.createElement('button');
 				delBtn.style.cssText = `
 					background: rgba(244, 63, 94, 0.1);
@@ -1750,7 +1912,16 @@ export class AccountManagementDialog extends Disposable {
 					delBtn.style.boxShadow = 'none';
 				};
 				delBtn.textContent = 'Delete';
+				delBtn.title = model.isBuiltIn ? 'Remove this built-in model. You can add it back with "+ Add Voice Model".' : 'Remove this voice model.';
 				delBtn.onclick = async () => {
+					const { confirmed } = await this.dialogService.confirm({
+						message: `Delete voice model '${model.name}'?`,
+						detail: model.isBuiltIn ? 'This built-in model will stay removed after restart. You can add it back with "+ Add Voice Model".' : undefined,
+						primaryButton: 'Delete'
+					});
+					if (!confirmed) {
+						return;
+					}
 					await this.voiceModelService.removeVoiceModel(model.id);
 					this.notificationService.info(`Removed voice model '${model.name}'.`);
 					await this.renderContent(container, targetDocument);
@@ -2044,6 +2215,9 @@ export class AccountManagementDialog extends Disposable {
 			const isVisible = addFormCard.style.display === 'flex';
 			addFormCard.style.display = isVisible ? 'none' : 'flex';
 			addModelToggleBtn.textContent = isVisible ? '+ Add Voice Model' : '✕ Cancel';
+			if (!isVisible) {
+				addFormCard.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+			}
 		};
 
 		const formTitle = targetDocument.createElement('h4');
@@ -2051,104 +2225,143 @@ export class AccountManagementDialog extends Disposable {
 		formTitle.textContent = 'Register New Speech-to-Text Model';
 		addFormCard.appendChild(formTitle);
 
-		// Name Group
-		const nameGroup = targetDocument.createElement('div');
-		const nameLabel = targetDocument.createElement('label');
-		nameLabel.style.cssText = `display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; color: #888888;`;
-		nameLabel.textContent = 'Model Display Name:';
-		const nameInput = targetDocument.createElement('input');
-		nameInput.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box;`;
-		nameInput.placeholder = 'e.g. Gemini 2.0 Flash Audio or Custom Whisper';
-		nameGroup.appendChild(nameLabel);
-		nameGroup.appendChild(nameInput);
-		addFormCard.appendChild(nameGroup);
-
-		// Provider & Model ID Row
-		const row2 = targetDocument.createElement('div');
-		row2.style.cssText = `display: flex; gap: 16px;`;
-
-		const provGroup = targetDocument.createElement('div');
-		provGroup.style.cssText = `flex: 1;`;
-		const provLabel = targetDocument.createElement('label');
-		provLabel.style.cssText = `display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; color: #888888;`;
-		provLabel.textContent = 'Provider:';
-		const provSelect = targetDocument.createElement('select');
-		provSelect.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box;`;
-		provSelect.innerHTML = `
-			<option value="gemini">Google Gemini (Native Multimodal Audio)</option>
-			<option value="openai">OpenAI Whisper</option>
-			<option value="custom">Custom STT Endpoint (Local / Whisper.cpp)</option>
-		`;
-		provGroup.appendChild(provLabel);
-		provGroup.appendChild(provSelect);
-		row2.appendChild(provGroup);
-
-		const modelIdGroup = targetDocument.createElement('div');
-		modelIdGroup.style.cssText = `flex: 1;`;
-		const modelIdLabel = targetDocument.createElement('label');
-		modelIdLabel.style.cssText = `display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; color: #888888;`;
-		modelIdLabel.textContent = 'Model Identifier:';
-		const modelIdInput = targetDocument.createElement('input');
-		modelIdInput.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box;`;
-		modelIdInput.value = 'gemini-1.5-flash';
-		modelIdGroup.appendChild(modelIdLabel);
-		modelIdGroup.appendChild(modelIdInput);
-		row2.appendChild(modelIdGroup);
-		addFormCard.appendChild(row2);
-
-		provSelect.onchange = () => {
-			if (provSelect.value === 'gemini') {
-				modelIdInput.value = 'gemini-1.5-flash';
-				endpointGroup.style.display = 'none';
-			} else if (provSelect.value === 'openai') {
-				modelIdInput.value = 'whisper-1';
-				endpointGroup.style.display = 'none';
-			} else {
-				modelIdInput.value = 'whisper-1';
-				endpointGroup.style.display = 'block';
-			}
+		const fieldLabelCss = `display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; color: #888888;`;
+		const fieldInputCss = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box;`;
+		const hintCss = `font-size: 11.5px; color: #9ca3af; margin-top: 6px; line-height: 1.4;`;
+		const makeLabel = (text: string) => {
+			const label = targetDocument.createElement('label');
+			label.style.cssText = fieldLabelCss;
+			label.textContent = text;
+			return label;
 		};
+		const makeOption = (value: string, text: string) => {
+			const opt = targetDocument.createElement('option');
+			opt.value = value;
+			opt.textContent = text;
+			return opt;
+		};
+		const OTHER_MODEL = '__other__';
 
-		// Endpoint Group (for custom STT)
+		// Step 1: Provider
+		const provGroup = targetDocument.createElement('div');
+		provGroup.appendChild(makeLabel('1. Provider'));
+		const provSelect = targetDocument.createElement('select');
+		provSelect.style.cssText = fieldInputCss;
+		for (const p of VOICE_PROVIDER_CATALOG) {
+			provSelect.appendChild(makeOption(p.id, p.label));
+		}
+		provGroup.appendChild(provSelect);
+		addFormCard.appendChild(provGroup);
+
+		// Step 2: Model (speech-to-text models of the chosen provider)
+		const modelGroup = targetDocument.createElement('div');
+		modelGroup.appendChild(makeLabel('2. Speech-to-Text Model'));
+		const modelSelect = targetDocument.createElement('select');
+		modelSelect.style.cssText = fieldInputCss;
+		const modelIdInput = targetDocument.createElement('input');
+		modelIdInput.style.cssText = fieldInputCss + 'margin-top: 8px;';
+		modelIdInput.placeholder = 'Model ID, e.g. whisper-large-v3';
+		const modelHint = targetDocument.createElement('div');
+		modelHint.style.cssText = hintCss;
+		modelGroup.appendChild(modelSelect);
+		modelGroup.appendChild(modelIdInput);
+		modelGroup.appendChild(modelHint);
+		addFormCard.appendChild(modelGroup);
+
+		// Endpoint (custom provider only)
 		const endpointGroup = targetDocument.createElement('div');
-		endpointGroup.style.cssText = `display: none;`;
-		const endpointLabel = targetDocument.createElement('label');
-		endpointLabel.style.cssText = `display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; color: #888888;`;
-		endpointLabel.textContent = 'Custom Endpoint URL:';
+		endpointGroup.appendChild(makeLabel('Endpoint URL'));
 		const endpointInput = targetDocument.createElement('input');
-		endpointInput.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box;`;
+		endpointInput.style.cssText = fieldInputCss;
 		endpointInput.placeholder = 'e.g. http://localhost:8000/v1/audio/transcriptions';
-		endpointGroup.appendChild(endpointLabel);
 		endpointGroup.appendChild(endpointInput);
 		addFormCard.appendChild(endpointGroup);
 
-		// Key Selection Group
+		// Step 3: API key
 		const keyGroup = targetDocument.createElement('div');
-		const keyLabel = targetDocument.createElement('label');
-		keyLabel.style.cssText = `display: block; font-size: 11px; font-weight: 600; text-transform: uppercase; margin-bottom: 6px; color: #888888;`;
-		keyLabel.textContent = 'API Key Source:';
+		keyGroup.appendChild(makeLabel('3. API Key'));
 		const keySourceSelect = targetDocument.createElement('select');
-		keySourceSelect.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box; margin-bottom: 8px;`;
-		
-		let keyOptions = `<option value="auto">Auto-detect from configured AI LLM Providers</option>`;
-		credentials.forEach(c => {
-			keyOptions += `<option value="cred:${c.id}">Link to Credential: ${c.name} (${c.providerId})</option>`;
-		});
-		keyOptions += `<option value="custom">Enter Dedicated API Key for Voice...</option>`;
-		keySourceSelect.innerHTML = keyOptions;
-		keyGroup.appendChild(keyLabel);
-		keyGroup.appendChild(keySourceSelect);
-
+		keySourceSelect.style.cssText = fieldInputCss;
 		const customKeyInput = targetDocument.createElement('input');
 		customKeyInput.type = 'password';
-		customKeyInput.style.cssText = `width: 100%; padding: 8px 12px; font-size: 12px; background: #121212; border: 1px solid #2a2a2a; border-radius: 6px; color: #ffffff; outline: none; box-sizing: border-box; display: none;`;
+		customKeyInput.style.cssText = fieldInputCss + 'margin-top: 8px; display: none;';
 		customKeyInput.placeholder = 'Paste secret API Key (stored locally)';
+		const keyHint = targetDocument.createElement('div');
+		keyHint.style.cssText = hintCss;
+		keyGroup.appendChild(keySourceSelect);
 		keyGroup.appendChild(customKeyInput);
-
+		keyGroup.appendChild(keyHint);
+		addFormCard.appendChild(keyGroup);
 		keySourceSelect.onchange = () => {
 			customKeyInput.style.display = keySourceSelect.value === 'custom' ? 'block' : 'none';
 		};
-		addFormCard.appendChild(keyGroup);
+
+		// Step 4: Display name (auto-filled until the user edits it)
+		const nameGroup = targetDocument.createElement('div');
+		nameGroup.appendChild(makeLabel('4. Display Name (optional)'));
+		const nameInput = targetDocument.createElement('input');
+		nameInput.style.cssText = fieldInputCss;
+		let nameEdited = false;
+		nameInput.oninput = () => { nameEdited = nameInput.value.trim().length > 0; };
+		nameGroup.appendChild(nameInput);
+		addFormCard.appendChild(nameGroup);
+
+		const currentProvider = () => VOICE_PROVIDER_CATALOG.find(p => p.id === provSelect.value) ?? VOICE_PROVIDER_CATALOG[0];
+		const currentModelId = () => (modelSelect.style.display === 'none' || modelSelect.value === OTHER_MODEL) ? modelIdInput.value.trim() : modelSelect.value;
+
+		const updateModelDetails = () => {
+			const provider = currentProvider();
+			const option = provider.models.find(m => m.id === modelSelect.value);
+			const isOther = provider.models.length === 0 || modelSelect.value === OTHER_MODEL;
+			modelIdInput.style.display = isOther ? 'block' : 'none';
+			modelHint.textContent = option ? `${option.description} Model ID: ${option.id}` : (provider.id === 'custom' ? 'The model name your endpoint expects.' : 'Enter any speech-to-text model ID this provider supports.');
+			if (!nameEdited) {
+				nameInput.value = '';
+				nameInput.placeholder = option ? `${option.label}` : `${provider.label} voice model`;
+			}
+		};
+
+		const updateProviderDetails = () => {
+			const provider = currentProvider();
+
+			modelSelect.textContent = '';
+			for (const m of provider.models) {
+				modelSelect.appendChild(makeOption(m.id, m.recommended ? `${m.label} (Recommended)` : m.label));
+			}
+			if (provider.models.length > 0) {
+				modelSelect.appendChild(makeOption(OTHER_MODEL, 'Other (enter model ID)...'));
+			}
+			modelSelect.style.display = provider.models.length > 0 ? 'block' : 'none';
+			modelIdInput.value = '';
+			endpointGroup.style.display = provider.id === 'custom' ? 'block' : 'none';
+
+			const matching = provider.credentialProviderIds.length === 0
+				? credentials
+				: credentials.filter(c => provider.credentialProviderIds.includes(c.providerId) && c.isEnabled !== false);
+			keySourceSelect.textContent = '';
+			for (const c of matching) {
+				keySourceSelect.appendChild(makeOption(`cred:${c.id}`, `Use saved key: ${c.name}`));
+			}
+			if (provider.id === 'custom') {
+				keySourceSelect.appendChild(makeOption('auto', 'No API key needed'));
+			}
+			keySourceSelect.appendChild(makeOption('custom', 'Enter a dedicated API key for voice...'));
+			keySourceSelect.selectedIndex = 0;
+			customKeyInput.style.display = keySourceSelect.value === 'custom' ? 'block' : 'none';
+			keyHint.style.color = '#9ca3af';
+			if (matching.length > 0 || provider.id === 'custom') {
+				keyHint.textContent = provider.id === 'custom' ? 'Only needed if your endpoint requires a Bearer token.' : `Found ${matching.length} saved ${provider.label} key(s) in AI LLM Providers.`;
+			} else {
+				keyHint.style.color = '#fbbf24';
+				keyHint.textContent = `No ${provider.label} key found in AI LLM Providers. Paste one here, or add it under AI LLM Providers first.`;
+			}
+
+			updateModelDetails();
+		};
+
+		provSelect.onchange = updateProviderDetails;
+		modelSelect.onchange = updateModelDetails;
+		updateProviderDetails();
 
 		// Set as default checkbox
 		const checkRow = targetDocument.createElement('div');
@@ -2182,9 +2395,15 @@ export class AccountManagementDialog extends Disposable {
 		`;
 		saveModelBtn.textContent = 'Save Voice Model';
 		saveModelBtn.onclick = async () => {
-			const name = nameInput.value.trim() || `${provSelect.value} Voice Model`;
-			const provider = provSelect.value as VoiceModelProvider;
-			const modelId = modelIdInput.value.trim() || (provider === 'gemini' ? 'gemini-1.5-flash' : 'whisper-1');
+			const providerOption = currentProvider();
+			const provider = providerOption.id as VoiceModelProvider;
+			const modelId = currentModelId();
+			if (!modelId) {
+				this.notificationService.warn('Please choose or enter a model.');
+				modelIdInput.focus();
+				return;
+			}
+			const name = nameInput.value.trim() || nameInput.placeholder || `${providerOption.label} voice model`;
 			const isDefault = defaultCheckbox.checked;
 
 			let credentialId: string | undefined = undefined;
@@ -2202,8 +2421,15 @@ export class AccountManagementDialog extends Disposable {
 			}
 
 			const customUrl = provider === 'custom' ? endpointInput.value.trim() : undefined;
+			if (provider === 'custom' && !customUrl) {
+				this.notificationService.warn('Please enter the endpoint URL of your speech-to-text service.');
+				endpointInput.focus();
+				return;
+			}
 
-			await this.voiceModelService.addVoiceModel({
+			saveModelBtn.disabled = true;
+			saveModelBtn.textContent = 'Saving & testing...';
+			const added = await this.voiceModelService.addVoiceModel({
 				name,
 				provider,
 				modelId,
@@ -2212,6 +2438,12 @@ export class AccountManagementDialog extends Disposable {
 				customUrl,
 				isDefault
 			});
+			const test = await this.voiceModelService.testVoiceModel(added);
+			if (!test.success) {
+				this.notificationService.warn(`Voice model "${name}" saved, but the connection test failed: ${test.message}`);
+				await this.renderContent(container, targetDocument);
+				return;
+			}
 
 			this.notificationService.info(`Voice model "${name}" registered successfully!`);
 			await this.renderContent(container, targetDocument);

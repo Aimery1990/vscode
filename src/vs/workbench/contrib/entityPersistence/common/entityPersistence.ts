@@ -54,7 +54,8 @@ export type CustomFieldType =
 	| 'get_outputs'
 	| 'display'
 	| 'ssh'
-	| 'http_request';
+	| 'http_request'
+	| 'sub_workflow';
 
 export interface IVoiceNoteClip {
 	id: string;
@@ -295,6 +296,8 @@ export interface ICustomField {
 	disabled?: boolean;
 	defaultUrl?: string;
 	lastResolvedUrl?: string;
+	browserMaxRetries?: number;
+	browserRetryDelayMs?: number;
 	defaultContent?: string;
 	credentials?: ICredentialPair[];
 	gitRemoteUrl?: string;
@@ -338,6 +341,12 @@ export interface ICustomField {
 	voiceAutoTranscribe?: boolean;
 	voicePlaybackRate?: number;
 	voiceRunInFlow?: boolean;
+	subWorkflowId?: string;
+	subWorkflowName?: string;
+	subWorkflowSourceUri?: string;
+	subWorkflowInputs?: Record<string, string>;
+	subWorkflowInputDefs?: Array<{ name: string; label?: string; defaultValue?: string }>;
+	subWorkflowOutputDefs?: Array<{ label: string; varName: string; defaultFormat?: string }>;
 	tableColumns?: ITableColumnDefinition[];
 	tableRows?: Array<Record<string, any>>;
 	tableDbEngine?: 'sqlite' | string;

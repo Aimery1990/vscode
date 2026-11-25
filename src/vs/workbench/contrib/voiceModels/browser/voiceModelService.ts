@@ -11,11 +11,13 @@ import { IRequestService, asJson, asText } from '../../../../platform/request/co
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
-import { IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
+import { ALIYUN_PROVIDER_ID, getDefaultBaseUrl, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
 import { IVoiceModel, IVoiceModelService, ITranscribeResult } from '../common/voiceModel.js';
 
 const STORAGE_KEY_MODELS = 'workbench.voiceModels.models';
 const STORAGE_KEY_ACTIVE_ID = 'workbench.voiceModels.activeId';
+/** Ids of built-in models the user deleted; they are not re-added on load. */
+const STORAGE_KEY_REMOVED_BUILTINS = 'workbench.voiceModels.removedBuiltIns';
 
 const DEFAULT_MODELS: IVoiceModel[] = [
 	{
@@ -75,7 +77,7 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 		this._loadModels();
 
 		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
-			if (e.key === STORAGE_KEY_MODELS || e.key === STORAGE_KEY_ACTIVE_ID) {
+			if (e.key === STORAGE_KEY_MODELS || e.key === STORAGE_KEY_ACTIVE_ID || e.key === STORAGE_KEY_REMOVED_BUILTINS) {
 				this._loadModels();
 				this._onDidChangeVoiceModels.fire();
 			}
@@ -93,13 +95,16 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 			}
 		}
 
-		if (savedModels.length === 0) {
-			this._models = [...DEFAULT_MODELS];
+		const removedBuiltIns = this._getRemovedBuiltIns();
+		const builtIns = DEFAULT_MODELS.filter(def => !removedBuiltIns.has(def.id));
+
+		if (savedModels.length === 0 && removedBuiltIns.size === 0) {
+			this._models = [...builtIns];
 			this._activeModelId = 'gemini-1.5-flash-voice';
 			this._saveModels();
 		} else {
-			// Ensure built-in models exist
-			for (const def of DEFAULT_MODELS) {
+			// Ensure built-in models exist (unless the user deleted them)
+			for (const def of builtIns) {
 				if (!savedModels.some(m => m.id === def.id)) {
 					savedModels.push({ ...def });
 				}
@@ -110,8 +115,17 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 				this._activeModelId = savedActive;
 			} else {
 				const defActive = this._models.find(m => m.isDefault) || this._models[0];
-				this._activeModelId = defActive?.id || 'gemini-1.5-flash-voice';
+				this._activeModelId = defActive?.id || '';
 			}
+		}
+	}
+
+	private _getRemovedBuiltIns(): Set<string> {
+		try {
+			const ids = JSON.parse(this.storageService.get(STORAGE_KEY_REMOVED_BUILTINS, StorageScope.PROFILE) || '[]');
+			return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === 'string') : []);
+		} catch {
+			return new Set();
 		}
 	}
 
@@ -205,7 +219,12 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 			return;
 		}
 
-		this._models.splice(index, 1);
+		const [removed] = this._models.splice(index, 1);
+		if (removed.isBuiltIn || DEFAULT_MODELS.some(def => def.id === id)) {
+			const removedBuiltIns = this._getRemovedBuiltIns();
+			removedBuiltIns.add(id);
+			this.storageService.store(STORAGE_KEY_REMOVED_BUILTINS, JSON.stringify([...removedBuiltIns]), StorageScope.PROFILE, StorageTarget.USER);
+		}
 		if (this._activeModelId === id) {
 			const nextActive = this._models.find(m => m.isDefault) || this._models[0];
 			this._activeModelId = nextActive ? nextActive.id : '';
@@ -213,6 +232,17 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 
 		this._saveModels();
 		this._onDidChangeVoiceModels.fire();
+	}
+
+	/** OpenAI-compatible base URL for an Alibaba Cloud model: own endpoint, else the linked / first Aliyun credential's region endpoint. */
+	private async _resolveAliyunBaseUrl(model: IVoiceModel): Promise<string> {
+		if (model.customUrl?.trim()) {
+			return model.customUrl.trim().replace(/\/+$/, '');
+		}
+		const creds = await this.agentCredentialService.getCredentials();
+		const cred = (model.credentialId ? creds.find(c => c.id === model.credentialId) : undefined)
+			?? creds.find(c => c.providerId === ALIYUN_PROVIDER_ID && c.isEnabled !== false);
+		return (cred?.customUrl?.trim() || getDefaultBaseUrl(ALIYUN_PROVIDER_ID)).replace(/\/+$/, '');
 	}
 
 	private async resolveApiKey(model: IVoiceModel): Promise<string | undefined> {
@@ -284,7 +314,7 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 		if (!apiKey && model.provider !== 'custom') {
 			const res = {
 				success: false,
-				message: `No API key configured for ${model.name}. Click "Configure" to enter an API key or link an existing credential from AI LLM Providers.`
+				message: `No API key configured for ${model.name}. Click the red error status to enter an API key, or add a key under AI LLM Providers.`
 			};
 			await this._updateModelStatus(model.id, 'error', res.message);
 			return res;
@@ -343,6 +373,34 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 				} else {
 					const errorText = await asText(response) || '';
 					const msg = `OpenAI Error (${response.res.statusCode}): ${errorText.slice(0, 200)}`;
+					await this._updateModelStatus(model.id, 'error', msg);
+					return { success: false, message: msg };
+				}
+			} else if (model.provider === 'aliyun') {
+				const baseUrl = await this._resolveAliyunBaseUrl(model);
+				const response = await this.requestService.request({
+					type: 'GET',
+					url: `${baseUrl}/models`,
+					headers: { 'Authorization': `Bearer ${apiKey}` },
+					timeout: 10000,
+					callSite: 'voiceModelService.testVoiceModel'
+				}, CancellationToken.None);
+
+				if (response.res.statusCode === 200) {
+					const data = await asJson<{ data?: { id: string }[] }>(response);
+					const ids = (data?.data ?? []).map(m => m.id);
+					if (ids.length > 0 && !ids.includes(model.modelId)) {
+						const available = ids.filter(id => id.includes('asr')).join(', ') || 'none';
+						const msg = `Model '${model.modelId}' is not available for this key's region (${baseUrl}). Speech models available: ${available}.`;
+						await this._updateModelStatus(model.id, 'error', msg);
+						return { success: false, message: msg };
+					}
+					const msg = `Successfully connected to Alibaba Cloud Model Studio (${model.modelId}).`;
+					await this._updateModelStatus(model.id, 'connected', msg);
+					return { success: true, message: msg };
+				} else {
+					const errorText = await asText(response) || '';
+					const msg = `Alibaba Cloud Error (${response.res.statusCode}): ${errorText.slice(0, 200)}`;
 					await this._updateModelStatus(model.id, 'error', msg);
 					return { success: false, message: msg };
 				}
@@ -407,6 +465,8 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 				return await this._transcribeWithGemini(audioBlob, activeModel, apiKey || '');
 			} else if (activeModel.provider === 'openai') {
 				return await this._transcribeWithWhisper(audioBlob, activeModel, apiKey || '');
+			} else if (activeModel.provider === 'aliyun') {
+				return await this._transcribeWithAliyun(audioBlob, activeModel, apiKey || '');
 			} else {
 				return await this._transcribeWithCustom(audioBlob, activeModel, apiKey);
 			}
@@ -530,6 +590,46 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 			text: (resultJson.text || '').trim(),
 			modelUsed: model.name
 		};
+	}
+
+	/** Qwen ASR via Model Studio's OpenAI-compatible chat completions (audio passed as a data URI). */
+	private async _transcribeWithAliyun(audioBlob: Blob, model: IVoiceModel, apiKey: string): Promise<ITranscribeResult> {
+		const baseUrl = await this._resolveAliyunBaseUrl(model);
+		const mimeType = audioBlob.type || 'audio/webm';
+		const base64Audio = this._arrayBufferToBase64(await audioBlob.arrayBuffer());
+
+		const payload: Record<string, unknown> = {
+			model: model.modelId || 'qwen3-asr-flash-us',
+			messages: [{
+				role: 'user',
+				content: [{ type: 'input_audio', input_audio: { data: `data:${mimeType};base64,${base64Audio}` } }]
+			}],
+			stream: false
+		};
+		if (model.language && model.language !== 'auto') {
+			payload.asr_options = { language: model.language };
+		}
+
+		const response = await this.requestService.request({
+			type: 'POST',
+			url: `${baseUrl}/chat/completions`,
+			headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+			data: JSON.stringify(payload),
+			timeout: 60000,
+			callSite: 'voiceModelService.transcribeWithAliyun'
+		}, CancellationToken.None);
+
+		if (response.res.statusCode !== 200) {
+			const errorText = await asText(response) || '';
+			let errorMsg = `HTTP ${response.res.statusCode}`;
+			try {
+				errorMsg = JSON.parse(errorText).error?.message || errorMsg;
+			} catch { }
+			return { text: '', error: `Alibaba Cloud transcription failed: ${errorMsg}`, modelUsed: model.name };
+		}
+
+		const data = await asJson<{ choices?: { message?: { content?: string } }[] }>(response);
+		return { text: (data?.choices?.[0]?.message?.content || '').trim(), modelUsed: model.name };
 	}
 
 	private async _transcribeWithCustom(audioBlob: Blob, model: IVoiceModel, apiKey?: string): Promise<ITranscribeResult> {

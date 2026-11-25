@@ -7,7 +7,7 @@ import './media/centeredChat.css';
 import { $, append, addDisposableListener } from '../../../../base/browser/dom.js';
 import { Disposable, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
 import { IWorkbenchLayoutService } from '../../../../workbench/services/layout/browser/layoutService.js';
-import { IAgentCredentialService, IAgentCredential } from '../../../../workbench/contrib/agentsManager/common/agentsManager.js';
+import { IAgentCredentialService, IAgentCredential, resolveDefaultModelId } from '../../../../workbench/contrib/agentsManager/common/agentsManager.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
@@ -2798,7 +2798,12 @@ export class CenteredChatWidget extends Disposable {
 			if (matchedCred) {
 				this.providerSelect.value = matchedCred.id;
 			} else if (this.availableCredentials.length > 0) {
-				this.activeCredentialId = this.availableCredentials[0].id;
+				// Nothing chosen yet: start on the credential of the user's Default Model, else the first one
+				const defaultModel = this.agentCredentialService.getDefaultModel();
+				const defaultCred = defaultModel
+					? (this.availableCredentials.find(c => c.id === defaultModel.credentialId) || this.availableCredentials.find(c => c.providerId === defaultModel.providerId))
+					: undefined;
+				this.activeCredentialId = (defaultCred || this.availableCredentials[0]).id;
 				this.providerSelect.value = this.activeCredentialId;
 				this.storageService.store(STORAGE_KEY_CREDENTIAL_ID, this.activeCredentialId, StorageScope.PROFILE, StorageTarget.USER);
 			}
@@ -2879,7 +2884,11 @@ export class CenteredChatWidget extends Disposable {
 		if (models.length === 0) {
 			this.activeModelId = 'No Model';
 		} else if (forceFirst || !this.activeModelId || !models.includes(this.activeModelId)) {
-			this.activeModelId = models[0];
+			// Nothing chosen for this credential: prefer the user's Default Model when it belongs to it
+			const defaultModel = this.agentCredentialService.getDefaultModel();
+			const cred = this.getActiveCredential();
+			const defaultMatchesCred = !!defaultModel && !!cred && (defaultModel.credentialId ? defaultModel.credentialId === cred.id : defaultModel.providerId === cred.providerId);
+			this.activeModelId = defaultMatchesCred ? defaultModel!.modelId : models[0];
 			this.storageService.store(STORAGE_KEY_MODEL_ID, this.activeModelId, StorageScope.PROFILE, StorageTarget.USER);
 		}
 
@@ -3844,7 +3853,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		if (providerId === 'anthropic') {
 			let messages: any[] = [{ role: 'user', content: prompt }];
 			const tools = this.getAnthropicTools();
-			const cleanModel = sanitizedModel || 'claude-3-5-sonnet-20241022';
+			const cleanModel = sanitizedModel || resolveDefaultModelId(providerId, 'claude-3-5-sonnet-20241022');
 			const url = 'https://api.anthropic.com/v1/messages';
 			const headers = {
 				'Content-Type': 'application/json',
@@ -3993,7 +4002,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		} else if (providerId === 'gemini') {
 			let contents: any[] = [{ role: 'user', parts: [{ text: prompt }] }];
 			const tools = this.getGeminiTools();
-			const cleanModel = sanitizedModel || 'gemini-1.5-flash';
+			const cleanModel = sanitizedModel || resolveDefaultModelId(providerId, 'gemini-2.5-flash');
 			const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:streamGenerateContent?key=${apiKey}&alt=sse`;
 			const headers = { 'Content-Type': 'application/json' };
 
@@ -4152,7 +4161,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 					if (cancellationTokenSource.token.isCancellationRequested) break;
 
 					const buildResponsesPayload = () => JSON.stringify({
-						model: sanitizedModel || 'gpt-4o',
+						model: sanitizedModel || resolveDefaultModelId(providerId, 'gpt-4o'),
 						...(systemPrompt ? { instructions: systemPrompt } : {}),
 						input: inputItems,
 						tools: (!disableResponsesTools && responsesTools.length > 0) ? responsesTools : undefined
@@ -4292,7 +4301,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 				}
 
 				const buildChatPayload = () => JSON.stringify({
-					model: sanitizedModel || 'gpt-4o',
+					model: sanitizedModel || resolveDefaultModelId(providerId, 'gpt-4o'),
 					stream: true,
 					messages,
 					tools: (!disableToolsForModel && tools.length > 0) ? tools : undefined,

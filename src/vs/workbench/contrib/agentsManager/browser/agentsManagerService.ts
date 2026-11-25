@@ -11,7 +11,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
-import { IAgentItem, IAgentsManagerService, AgentScopeType } from '../common/agentsManager.js';
+import { IAgentItem, IAgentsManagerService, AgentScopeType, getGlobalDefaultModel, resolveDefaultModelId } from '../common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 
@@ -204,7 +204,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 			...agentData,
 			name: agentData.title || agentData.name,
 			title: agentData.title || agentData.name,
-			model: agentData.model || { providerId: 'gemini', modelId: 'gemini-1.5-flash' },
+			model: agentData.model || { ...(getGlobalDefaultModel() || { providerId: 'gemini', modelId: 'gemini-2.5-flash' }) },
 			id: generateUuid(),
 			createdAt: Date.now(),
 			updatedAt: Date.now()
@@ -232,7 +232,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 						description: newAgent.role,
 						systemPrompt: newAgent.systemPrompt,
 						role: newAgent.role,
-						modelName: newAgent.model?.modelId || 'gemini-1.5-flash',
+						modelName: newAgent.model?.modelId || resolveDefaultModelId(newAgent.model?.providerId, 'gemini-2.5-flash'),
 						avatarIcon: newAgent.avatarIcon,
 						scopeType: newAgent.scopeType,
 						scopeId: newAgent.scopeId,
@@ -295,7 +295,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 						description: updated.role,
 						systemPrompt: updated.systemPrompt,
 						role: updated.role,
-						modelName: updated.model?.modelId || 'gemini-1.5-flash',
+						modelName: updated.model?.modelId || resolveDefaultModelId(updated.model?.providerId, 'gemini-2.5-flash'),
 						avatarIcon: updated.avatarIcon,
 						scopeType: updated.scopeType,
 						scopeId: updated.scopeId,

@@ -9,7 +9,7 @@ import { streamToBuffer, decodeBase64 } from '../../../../base/common/buffer.js'
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
-import { IAgentCredential, IAgentCredentialService } from '../common/agentsManager.js';
+import { ALIYUN_PROVIDER_ID, getDefaultBaseUrl, IAgentCredential, IAgentCredentialService, IAgentModelReference, setGlobalDefaultModel } from '../common/agentsManager.js';
 import { IRequestService, asJson, asText } from '../../../../platform/request/common/request.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
@@ -21,7 +21,11 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 	private readonly _onDidChangeCredentials = this._register(new Emitter<void>());
 	readonly onDidChangeCredentials: Event<void> = this._onDidChangeCredentials.event;
 
+	private readonly _onDidChangeDefaultModel = this._register(new Emitter<void>());
+	readonly onDidChangeDefaultModel: Event<void> = this._onDidChangeDefaultModel.event;
+
 	private _credentials: IAgentCredential[] = [];
+	private _defaultModel: IAgentModelReference | undefined;
 	private activeUserEmail: string = '';
 	private readonly initializationPromise: Promise<void>;
 	private readonly requestService: IRequestService;
@@ -39,7 +43,10 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 		this._register(this.storageService.onDidChangeValue(StorageScope.PROFILE, undefined, this._store)(e => {
 			if (e.key === this.credentialsStorageKey) {
 				this._loadCredentials();
+				this._loadDefaultModel();
 				this._onDidChangeCredentials.fire();
+			} else if (e.key === this.defaultModelStorageKey) {
+				this._loadDefaultModel();
 			}
 		}));
 
@@ -90,11 +97,54 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			if (newUserIdentifier !== this.activeUserEmail) {
 				this.activeUserEmail = newUserIdentifier;
 				this._loadCredentials();
+				this._loadDefaultModel();
 				this._onDidChangeCredentials.fire();
 			}
 		} catch (err) {
 			console.error('Failed to update active user in AgentCredentialService:', err);
 		}
+	}
+
+	private get defaultModelStorageKey(): string {
+		return `workbench.agentsManager.defaultModel:${this.activeUserEmail || 'unauthenticated'}`;
+	}
+
+	private _loadDefaultModel(): void {
+		let ref: IAgentModelReference | undefined;
+		try {
+			const parsed = JSON.parse(this.storageService.get(this.defaultModelStorageKey, StorageScope.PROFILE) || 'null');
+			if (parsed && typeof parsed.providerId === 'string' && typeof parsed.modelId === 'string') {
+				ref = { providerId: parsed.providerId, modelId: parsed.modelId, credentialId: typeof parsed.credentialId === 'string' ? parsed.credentialId : undefined };
+			}
+		} catch {
+			ref = undefined;
+		}
+		this._applyDefaultModel(ref);
+	}
+
+	/** Publishes the stored Default Model, ignoring it while its credential is missing or disabled. */
+	private _applyDefaultModel(stored: IAgentModelReference | undefined): void {
+		const usable = stored && this._credentials.some(c => c.isEnabled !== false && (stored.credentialId ? c.id === stored.credentialId : c.providerId === stored.providerId))
+			? stored : undefined;
+		const changed = JSON.stringify(usable) !== JSON.stringify(this._defaultModel);
+		this._defaultModel = usable;
+		setGlobalDefaultModel(usable);
+		if (changed) {
+			this._onDidChangeDefaultModel.fire();
+		}
+	}
+
+	getDefaultModel(): IAgentModelReference | undefined {
+		return this._defaultModel;
+	}
+
+	setDefaultModel(ref: IAgentModelReference | undefined): void {
+		if (ref) {
+			this.storageService.store(this.defaultModelStorageKey, JSON.stringify(ref), StorageScope.PROFILE, StorageTarget.USER);
+		} else {
+			this.storageService.remove(this.defaultModelStorageKey, StorageScope.PROFILE);
+		}
+		this._applyDefaultModel(ref);
 	}
 
 	private get credentialsStorageKey(): string {
@@ -136,6 +186,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			StorageScope.PROFILE,
 			StorageTarget.USER
 		);
+		this._loadDefaultModel();
 	}
 
 	async getCredentials(): Promise<IAgentCredential[]> {
@@ -226,6 +277,11 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 		if (providerId.startsWith('custom-openai:')) {
 			actualProvider = 'custom-openai';
 			customUrlVal = providerId.substring('custom-openai:'.length).trim();
+		}
+		if (actualProvider === ALIYUN_PROVIDER_ID) {
+			// Alibaba Cloud Model Studio is OpenAI-compatible; only the default (region) endpoint differs
+			actualProvider = 'custom-openai';
+			customUrlVal = customUrlVal || getDefaultBaseUrl(ALIYUN_PROVIDER_ID);
 		}
 
 		try {
@@ -343,6 +399,8 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			testModel = 'gpt-4o-mini';
 		} else if (cred.providerId === 'anthropic') {
 			testModel = 'claude-3-5-haiku-20241022';
+		} else if (cred.providerId === ALIYUN_PROVIDER_ID) {
+			testModel = 'qwen-flash';
 		} else {
 			testModel = 'default-model';
 		}
@@ -401,6 +459,11 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 		if (providerId.startsWith('custom-openai:')) {
 			actualProvider = 'custom-openai';
 			customUrlVal = providerId.substring('custom-openai:'.length).trim();
+		}
+		if (actualProvider === ALIYUN_PROVIDER_ID) {
+			// Alibaba Cloud Model Studio is OpenAI-compatible; only the default (region) endpoint differs
+			actualProvider = 'custom-openai';
+			customUrlVal = customUrlVal || getDefaultBaseUrl(ALIYUN_PROVIDER_ID);
 		}
 
 		const sanitizedModel = (modelId || '').replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
@@ -668,7 +731,12 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 
 	async executePrompt(modelId: string, prompt: string, systemPrompt?: string, targetProviderId?: string): Promise<{ success: boolean; text?: string; error?: string }> {
 		await this.initializationPromise;
-		let sanitizedModel = (modelId || 'gemini-1.5-flash').replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
+		if (!modelId?.trim() && this._defaultModel && (!targetProviderId || targetProviderId === this._defaultModel.providerId)) {
+			// Nothing chosen: use the user's Default Model (and its provider unless the caller pinned one)
+			modelId = this._defaultModel.modelId;
+			targetProviderId = targetProviderId || this._defaultModel.providerId;
+		}
+		let sanitizedModel = (modelId || 'gemini-2.5-flash').replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
 
 		let providerId = targetProviderId || 'gemini';
 		if (!targetProviderId) {
@@ -682,12 +750,30 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			}
 		}
 
-		let cred = this._credentials.find(c => c.providerId === providerId && c.isEnabled !== false);
+		const enabledCreds = this._credentials.filter(c => c.isEnabled !== false);
+		let cred: IAgentCredential | undefined;
+		if (!targetProviderId) {
+			// Provider not given: prefer a key that actually lists this model, then the Default Model's key for its own model
+			const lowerModel = sanitizedModel.toLowerCase();
+			cred = enabledCreds.find(c => c.cachedModels?.some(m => m.toLowerCase() === lowerModel));
+			if (!cred && this._defaultModel && this._defaultModel.modelId.toLowerCase() === lowerModel) {
+				cred = enabledCreds.find(c => this._defaultModel!.credentialId ? c.id === this._defaultModel!.credentialId : c.providerId === this._defaultModel!.providerId);
+			}
+			if (cred) {
+				providerId = cred.providerId;
+			}
+		}
+		if (!cred && targetProviderId && this._defaultModel?.credentialId && this._defaultModel.providerId === targetProviderId) {
+			cred = enabledCreds.find(c => c.id === this._defaultModel!.credentialId);
+		}
+		cred ??= enabledCreds.find(c => c.providerId === providerId);
 		if (!cred && targetProviderId) {
 			cred = this._credentials.find(c => c.id === targetProviderId || c.name.toLowerCase() === targetProviderId.toLowerCase());
 		}
 		if (!cred) {
-			cred = this._credentials.find(c => c.isEnabled !== false);
+			// Last resort: the Default Model's key (not simply the first key in the list)
+			cred = (this._defaultModel && enabledCreds.find(c => this._defaultModel!.credentialId ? c.id === this._defaultModel!.credentialId : c.providerId === this._defaultModel!.providerId))
+				?? enabledCreds[0];
 		}
 
 		if (!cred) {
@@ -739,7 +825,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				}
 				return res.success ? { success: true, text: res.message } : { success: false, error: res.message };
 			} else {
-				const baseEndpoint = cred.providerId === 'openai' ? 'https://api.openai.com/v1' : (cred.customUrl || 'http://localhost:11434/v1');
+				const baseEndpoint = cred.providerId === 'openai' ? 'https://api.openai.com/v1' : (cred.customUrl || getDefaultBaseUrl(cred.providerId));
 				const cleanBase = baseEndpoint.replace(/\/chat\/completions\/?$/, '').replace(/\/completions\/?$/, '').replace(/\/responses\/?$/, '').replace(/\/$/, '');
 				const headers = {
 					'Content-Type': 'application/json',
@@ -1024,7 +1110,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					error: `Gemini TTS synthesis failed: ${lastError || 'Unable to generate audio.'}`
 				};
 			} else if (cred.providerId === 'openai' || cred.providerId === 'custom-openai') {
-				const baseEndpoint = cred.providerId === 'openai' ? 'https://api.openai.com/v1' : (cred.customUrl || 'http://localhost:11434/v1');
+				const baseEndpoint = cred.providerId === 'openai' ? 'https://api.openai.com/v1' : (cred.customUrl || getDefaultBaseUrl(cred.providerId));
 				const cleanBase = baseEndpoint.replace(/\/chat\/completions\/?$/, '').replace(/\/completions\/?$/, '').replace(/\/audio\/speech\/?$/, '').replace(/\/$/, '');
 				const speechUrl = `${cleanBase}/audio/speech`;
 

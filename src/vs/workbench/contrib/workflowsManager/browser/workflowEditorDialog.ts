@@ -25,6 +25,7 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { WorkflowEditorInput } from './workflowEditorInput.js';
 import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
+import { getGlobalDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 
 const DEFAULT_WORKFLOWS_DIR = '/Users/aimery/Documents/workflows';
 
@@ -764,7 +765,7 @@ export async function createWorkflowDialog(
 							}));
 							const targetDesc = field.targetMode === 'agent'
 								? `Agent: ${field.targetAgentName || field.targetAgentId || 'Default'}`
-								: `Model: ${field.targetModel || 'gemini-1.5-flash'}`;
+								: `Model: ${field.targetModel || resolveDefaultModelId(field.targetProvider, 'gemini-2.5-flash')}`;
 							const topRow = append(promptBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px;' }));
 							append(topRow, $('span', { style: 'font-size: 10.5px; opacity: 0.85; font-weight: 600; color: #60a5fa;' }, `AI Instruction (${targetDesc})`));
 
@@ -807,8 +808,8 @@ export async function createWorkflowDialog(
 									preInjectedPrompt: preInjectedText,
 									prompt: combinedPrompt,
 									targetMode: field.targetMode || 'model',
-									targetProvider: field.targetProvider || '',
-									targetModel: field.targetModel || 'gemini-1.5-flash',
+									targetProvider: field.targetProvider || (field.targetModel ? '' : (getGlobalDefaultModel()?.providerId || '')),
+									targetModel: field.targetModel || resolveDefaultModelId(field.targetProvider, 'gemini-2.5-flash'),
 									targetAgentId: field.targetAgentId || '',
 									targetAgentName: field.targetAgentName || '',
 									output: '',

@@ -4,6 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { $, append, clearNode } from '../../../../base/browser/dom.js';
+import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
+import { IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
+import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { toDisposable } from '../../../../base/common/lifecycle.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
@@ -35,9 +38,9 @@ import { isWindows } from '../../../../base/common/platform.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
-import { IAgentsManagerService, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
+import { IAgentsManagerService, IAgentCredentialService, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
-import { ITicketWorkflowRuntimeService } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
+import { ITicketWorkflowRuntimeService, findUnresolvedTemplateVariables } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeybinding, togglePythonComment } from './pythonSyntaxHighlighter.js';
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
 
@@ -362,12 +365,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		return val;
 	}
 
-	private _syncDraft(): void {
+	private _syncDraft(immediate: boolean = false): void {
 		if (this.input instanceof CustomModuleSchemaEditorInput && this._activeModule) {
 			this.input.draftModule = this._activeModule;
 			if (this.input.isFlowchartNodeMode && this.input.onNodeFieldsChange) {
 				const nodeFields = (this._activeModule.fields || []).filter(f => f && f.id !== 'title');
-				this.input.onNodeFieldsChange(nodeFields);
+				this.input.onNodeFieldsChange(nodeFields, immediate);
 			}
 		}
 	}
@@ -424,11 +427,48 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 	private _renderSeq = 0;
 
+	/**
+	 * A workflow-node editor (`wf_node_*`) restored on start-up is only usable once its workflow canvas has loaded
+	 * and re-bound it (the canvas supplies the node data and the write-back channel). Until then, show a placeholder
+	 * instead of the generic module editor, so edits can neither get lost nor be saved as a stray custom module.
+	 * Returns true when the placeholder was rendered.
+	 */
+	private _renderDetachedNodePlaceholder(input: CustomModuleSchemaEditorInput): boolean {
+		if (!this._container || input.isFlowchartNodeMode || !input.moduleId.startsWith('wf_node_')) {
+			return false;
+		}
+		this._disposeRenderCleanupFns();
+		clearNode(this._container);
+		const box = append(this._container, $('div', {
+			style: 'display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; height: 100%; padding: 24px; box-sizing: border-box; text-align: center; color: var(--vscode-descriptionForeground);'
+		}));
+		append(box, $('div', { style: 'font-size: 14px; font-weight: 600; color: var(--vscode-foreground);' }, `Node: ${input.moduleName || input.moduleId}`));
+		append(box, $('div', { style: 'font-size: 12px; max-width: 420px; line-height: 1.5;' },
+			'This node editor reconnects automatically once its workflow canvas is open.'));
+		const workflowUri = input.workspaceUri;
+		if (workflowUri) {
+			const btn = append(box, $('button', {
+				style: 'padding: 6px 14px; border-radius: 6px; border: 1px solid rgba(45, 212, 191, 0.5); background: rgba(45, 212, 191, 0.12); color: #2dd4bf; cursor: pointer; font-size: 12px;'
+			}, 'Open Workflow Canvas'));
+			btn.onclick = async () => {
+				const editorService = this._instantiationService.invokeFunction(accessor => accessor.get(IEditorService));
+				const editorGroupsService = this._instantiationService.invokeFunction(accessor => accessor.get(IEditorGroupsService));
+				const otherGroup = editorGroupsService.groups.find(g => g.id !== this.group.id);
+				const workflowName = decodeURIComponent(workflowUri.path.replace(/\/+$/, '').split('/').pop() || 'Workflow');
+				await editorService.openEditor(new WorkflowEditorInput(workflowUri, workflowName), { pinned: true }, otherGroup ? otherGroup.id : SIDE_GROUP);
+			};
+		}
+		return true;
+	}
+
 	private async _loadAndRender(input: CustomModuleSchemaEditorInput, focusFieldId?: string): Promise<void> {
 		if (!this._container) {
 			return;
 		}
 		const seq = ++this._renderSeq;
+		if (this._renderDetachedNodePlaceholder(input)) {
+			return;
+		}
 		const isFlowchartNodeMode = Boolean(input.isFlowchartNodeMode);
 		this._saveCurrentScrollPosition();
 		this._workspaceUri = input.workspaceUri;
@@ -1294,14 +1334,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			}
 			if (bc.type === 'parameters') {
 				newField.parameters = [
-					{ id: `param_${Date.now()}_1`, name: 'param_1', defaultValue: '' }
+					{ id: `param_${Date.now()}_1`, name: 'param_1' }
 				];
 			}
 			if (bc.type === 'prompt') {
 				newField.defaultContent = 'Please analyze the ticket details and execute instructions:';
 				newField.targetMode = 'model';
-				newField.targetProvider = 'gemini';
-				newField.targetModel = 'gemini-1.5-flash';
+				const newFieldModel = resolveDefaultModel({ providerId: 'gemini', modelId: 'gemini-2.5-flash' });
+				newField.targetProvider = newFieldModel.providerId;
+				newField.targetModel = newFieldModel.modelId;
 				newField.targetAgentId = '';
 			}
 			if (bc.type === 'tts') {
@@ -1593,6 +1634,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		let hoveredFieldIndex: number | null = null;
 		let lastInteractedFieldIndex: number | null = null;
 		let newlyPastedFieldId: string | null = null;
+		let reorderedFieldId: string | null = null;
 		const pasteUiRefreshers: Array<() => void> = [];
 
 		const refreshAllPasteUi = () => {
@@ -1885,6 +1927,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			document.querySelectorAll('.anyagent-instant-tooltip').forEach(el => el.remove());
 			this._syncDraft();
 			const savedScrollTop = mainViewport ? mainViewport.scrollTop : 0;
+			let didScrollToReorderedCard = false;
 			clearNode(rightCanvas);
 			pasteUiRefreshers.length = 0;
 
@@ -2019,16 +2062,30 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					lastInteractedFieldIndex = fIdx;
 				});
 
-				if ((newlyPastedFieldId && field.id === newlyPastedFieldId) || (focusFieldId && field.id === focusFieldId)) {
+				if ((newlyPastedFieldId && field.id === newlyPastedFieldId) || (reorderedFieldId && field.id === reorderedFieldId) || (focusFieldId && field.id === focusFieldId)) {
+					const isReorderedTarget = Boolean(reorderedFieldId && field.id === reorderedFieldId);
 					if (newlyPastedFieldId === field.id) {
 						newlyPastedFieldId = null;
 					}
-					if (focusFieldId === field.id) {
-						focusFieldId = undefined;
-						input.focusFieldId = undefined;
+					if (isReorderedTarget) {
+						reorderedFieldId = null;
+						didScrollToReorderedCard = true;
+					}
+					if (focusFieldId === field.id || isReorderedTarget) {
+						if (focusFieldId === field.id) {
+							focusFieldId = undefined;
+							input.focusFieldId = undefined;
+						}
 						requestAnimationFrame(() => {
 							try {
-								fieldCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+								if (mainViewport && fieldCard.isConnected) {
+									const vpRect = mainViewport.getBoundingClientRect();
+									const cardRect = fieldCard.getBoundingClientRect();
+									if (cardRect.top < vpRect.top + 12 || cardRect.bottom > vpRect.bottom - 12) {
+										const targetTop = Math.max(0, mainViewport.scrollTop + (cardRect.top - vpRect.top) - 24);
+										mainViewport.scrollTo({ top: targetTop, behavior: 'smooth' });
+									}
+								}
 							} catch { }
 						});
 					}
@@ -2039,7 +2096,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							fieldCard.style.borderColor = defaultBorderColor;
 							fieldCard.style.boxShadow = '0 2px 6px rgba(0, 0, 0, 0.25)';
 						}
-					}, 1400);
+					}, isReorderedTarget ? 900 : 1400);
 				}
 
 				// Support dropping onto a card with precise before/after detection
@@ -2142,6 +2199,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				const isTts = field.type === 'tts';
 				const isMediaPlayer = field.type === 'media_player';
 				const isVoiceNote = field.type === 'voice_note';
+				const isSubWorkflow = field.type === 'sub_workflow';
 				const isHttpRequest = field.type === 'http_request';
 				const isOutput = field.type === 'output' || field.type === 'result';
 				const isWfBuiltin = field.type === 'create_tickets' || field.type === 'run_tickets' || field.type === 'get_outputs' || field.type === 'get_ticket' || field.type === 'display';
@@ -2152,10 +2210,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					get_ticket: 'GET TICKET',
 					display: 'DISPLAY'
 				};
-				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isPython ? 'PYTHON' : (isTable ? 'DATA TABLE' : (isParameters ? 'INPUTS' : (isPrompt ? 'AI PROMPT' : (isTts ? 'AUDIO / TTS' : (isMediaPlayer ? 'MP3 / MP4 PLAYER' : (isVoiceNote ? 'VOICE NOTE' : (isHttpRequest ? 'HTTP REQUEST' : (isOutput ? 'OUTPUT' : (wfBadgeLabels[field.type] || field.type.toUpperCase()))))))))))))));
-				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isPython ? 'rgba(56, 189, 248, 0.15)' : (isTable ? 'rgba(20, 184, 166, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isTts ? 'rgba(236, 72, 153, 0.18)' : (isMediaPlayer ? 'rgba(245, 158, 11, 0.18)' : (isVoiceNote ? 'rgba(148, 163, 184, 0.16)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.22)' : 'rgba(99, 102, 241, 0.18)'))))))))))))));
-				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isPython ? '#38bdf8' : (isTable ? '#2dd4bf' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isTts ? '#f472b6' : (isMediaPlayer ? '#fbbf24' : (isVoiceNote ? '#cbd5e1' : (isHttpRequest ? '#06b6d4' : (isOutput ? '#818cf8' : (isWfBuiltin ? '#d8b4fe' : '#818cf8'))))))))))))));
-				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isPython ? 'rgba(56, 189, 248, 0.35)' : (isTable ? 'rgba(20, 184, 166, 0.4)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isTts ? 'rgba(236, 72, 153, 0.35)' : (isMediaPlayer ? 'rgba(251, 191, 36, 0.35)' : (isVoiceNote ? 'rgba(148, 163, 184, 0.34)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.4)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.45)' : 'rgba(99, 102, 241, 0.35)'))))))))))))));
+				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isPython ? 'PYTHON' : (isTable ? 'DATA TABLE' : (isParameters ? 'INPUTS' : (isPrompt ? 'AI PROMPT' : (isTts ? 'AUDIO / TTS' : (isMediaPlayer ? 'MP3 / MP4 PLAYER' : (isVoiceNote ? 'VOICE NOTE' : (isSubWorkflow ? 'SUB-WORKFLOW' : (isHttpRequest ? 'HTTP REQUEST' : (isOutput ? 'OUTPUT' : (wfBadgeLabels[field.type] || field.type.toUpperCase())))))))))))))));
+				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isPython ? 'rgba(56, 189, 248, 0.15)' : (isTable ? 'rgba(20, 184, 166, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isTts ? 'rgba(236, 72, 153, 0.18)' : (isMediaPlayer ? 'rgba(245, 158, 11, 0.18)' : (isVoiceNote ? 'rgba(148, 163, 184, 0.16)' : (isSubWorkflow ? 'rgba(6, 182, 212, 0.18)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.22)' : 'rgba(99, 102, 241, 0.18)')))))))))))))));
+				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isPython ? '#38bdf8' : (isTable ? '#2dd4bf' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isTts ? '#f472b6' : (isMediaPlayer ? '#fbbf24' : (isVoiceNote ? '#cbd5e1' : (isSubWorkflow ? '#22d3ee' : (isHttpRequest ? '#06b6d4' : (isOutput ? '#818cf8' : (isWfBuiltin ? '#d8b4fe' : '#818cf8')))))))))))))));
+				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isPython ? 'rgba(56, 189, 248, 0.35)' : (isTable ? 'rgba(20, 184, 166, 0.4)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isTts ? 'rgba(236, 72, 153, 0.35)' : (isMediaPlayer ? 'rgba(251, 191, 36, 0.35)' : (isVoiceNote ? 'rgba(148, 163, 184, 0.34)' : (isSubWorkflow ? 'rgba(34, 211, 238, 0.42)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.4)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.45)' : 'rgba(99, 102, 241, 0.35)')))))))))))))));
 
 				append(headerLeft, $('span.type-badge', {
 					style: `font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 4px; background: ${badgeBg}; color: ${badgeColor}; border: 1px solid ${badgeBorder}; letter-spacing: 0.04em;`
@@ -2234,40 +2292,64 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				} else {
 					// 1. Move Up / Down
 					const canMoveUp = fIdx > 1;
-					const upBtn = append(headerRight, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp), {
-						style: `cursor: pointer; font-size: 12px; opacity: ${canMoveUp ? '0.75' : '0.2; pointer-events: none;'}; padding: 3px 4px; border-radius: 4px; transition: all 0.15s ease;`
+					const upBtn = append(headerRight, $('button.field-reorder-up-btn', {
+						style: `cursor: ${canMoveUp ? 'pointer' : 'default'}; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: none; color: inherit; font-size: 12px; opacity: ${canMoveUp ? '0.75' : '0.2'}; padding: 0; border-radius: 4px; transition: all 0.15s ease; outline: none; flex-shrink: 0;`
 					}));
+					upBtn.type = 'button';
+					upBtn.disabled = !canMoveUp;
 					upBtn.title = 'Move Up';
-					upBtn.onmouseenter = () => { if (canMoveUp) { upBtn.style.opacity = '1'; upBtn.style.background = 'rgba(255, 255, 255, 0.1)'; } };
+					append(upBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowUp), { style: 'font-size: 12px; pointer-events: none;' }));
+					upBtn.onmouseenter = () => { if (canMoveUp) { upBtn.style.opacity = '1'; upBtn.style.background = 'rgba(255, 255, 255, 0.12)'; } };
 					upBtn.onmouseleave = () => { if (canMoveUp) { upBtn.style.opacity = '0.75'; upBtn.style.background = 'transparent'; } };
-					upBtn.onclick = (e) => {
+					upBtn.onmousedown = (e) => {
+						e.preventDefault();
 						e.stopPropagation();
-						if (fIdx > 1) {
-							const temp = fields[fIdx];
-							fields[fIdx] = fields[fIdx - 1];
-							fields[fIdx - 1] = temp;
-							this._syncDraft();
+					};
+					upBtn.onclick = (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						const curIdx = fields.indexOf(field);
+						if (curIdx > 1) {
+							const temp = fields[curIdx];
+							fields[curIdx] = fields[curIdx - 1];
+							fields[curIdx - 1] = temp;
+							activeMod.fields = fields;
+							reorderedFieldId = field.id;
 							renderCanvas();
-							this._persistCurrentModule().catch(() => { });
+							if (!isFlowchartNodeMode) {
+								this._persistCurrentModule().catch(() => { });
+							}
 						}
 					};
 
 					const canMoveDown = fIdx < fields.length - 1;
-					const downBtn = append(headerRight, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowDown), {
-						style: `cursor: pointer; font-size: 12px; opacity: ${canMoveDown ? '0.75' : '0.2; pointer-events: none;'}; padding: 3px 4px; border-radius: 4px; transition: all 0.15s ease;`
+					const downBtn = append(headerRight, $('button.field-reorder-down-btn', {
+						style: `cursor: ${canMoveDown ? 'pointer' : 'default'}; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; background: transparent; border: none; color: inherit; font-size: 12px; opacity: ${canMoveDown ? '0.75' : '0.2'}; padding: 0; border-radius: 4px; transition: all 0.15s ease; outline: none; flex-shrink: 0;`
 					}));
+					downBtn.type = 'button';
+					downBtn.disabled = !canMoveDown;
 					downBtn.title = 'Move Down';
-					downBtn.onmouseenter = () => { if (canMoveDown) { downBtn.style.opacity = '1'; downBtn.style.background = 'rgba(255, 255, 255, 0.1)'; } };
+					append(downBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.arrowDown), { style: 'font-size: 12px; pointer-events: none;' }));
+					downBtn.onmouseenter = () => { if (canMoveDown) { downBtn.style.opacity = '1'; downBtn.style.background = 'rgba(255, 255, 255, 0.12)'; } };
 					downBtn.onmouseleave = () => { if (canMoveDown) { downBtn.style.opacity = '0.75'; downBtn.style.background = 'transparent'; } };
-					downBtn.onclick = (e) => {
+					downBtn.onmousedown = (e) => {
+						e.preventDefault();
 						e.stopPropagation();
-						if (fIdx < fields.length - 1) {
-							const temp = fields[fIdx];
-							fields[fIdx] = fields[fIdx + 1];
-							fields[fIdx + 1] = temp;
-							this._syncDraft();
+					};
+					downBtn.onclick = (e) => {
+						e.preventDefault();
+						e.stopPropagation();
+						const curIdx = fields.indexOf(field);
+						if (curIdx >= 1 && curIdx < fields.length - 1) {
+							const temp = fields[curIdx];
+							fields[curIdx] = fields[curIdx + 1];
+							fields[curIdx + 1] = temp;
+							activeMod.fields = fields;
+							reorderedFieldId = field.id;
 							renderCanvas();
-							this._persistCurrentModule().catch(() => { });
+							if (!isFlowchartNodeMode) {
+								this._persistCurrentModule().catch(() => { });
+							}
 						}
 					};
 
@@ -3582,6 +3664,51 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					})) as HTMLButtonElement;
 					append(openTabBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.linkExternal)));
 					append(openTabBtn, $('span', {}, 'Open in Tab'));
+
+					// Auto Retry Configuration (default: 3 retries, 1s interval)
+					const retryCfgWrap = append(actionsRow, $('div', {
+						style: 'display: inline-flex; align-items: center; gap: 6px; margin-left: auto; padding: 3px 8px; border-radius: 5px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.1); font-size: 10.5px; color: #cbd5e1;',
+						title: 'Auto-retry when Browser fetch fails (default: 3 retries, 1s interval)'
+					}));
+					append(retryCfgWrap, $('span' + ThemeIcon.asCSSSelector(Codicon.refresh), { style: 'font-size: 11px; color: #38bdf8;' }));
+					append(retryCfgWrap, $('span', { style: 'opacity: 0.8;' }, 'Auto Retry:'));
+					const retryCountInp = append(retryCfgWrap, $('input', {
+						type: 'number',
+						min: '0',
+						max: '10',
+						step: '1',
+						title: 'Max retry attempts on failure (0 = disabled, default = 3)',
+						style: 'width: 38px; padding: 1px 4px; font-size: 11px; text-align: center; border-radius: 3px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.3); color: #f1f5f9; outline: none;'
+					})) as HTMLInputElement;
+					retryCountInp.value = String(typeof field.browserMaxRetries === 'number' && Number.isFinite(field.browserMaxRetries) ? field.browserMaxRetries : 3);
+					retryCountInp.onchange = () => {
+						const parsed = parseInt(retryCountInp.value, 10);
+						const clamped = Number.isFinite(parsed) ? Math.max(0, Math.min(10, parsed)) : 3;
+						retryCountInp.value = String(clamped);
+						field.browserMaxRetries = clamped;
+						this._syncDraft();
+						this._persistCurrentModule().catch(() => { });
+					};
+					append(retryCfgWrap, $('span', { style: 'opacity: 0.65;' }, '×'));
+					const retryDelayInp = append(retryCfgWrap, $('input', {
+						type: 'number',
+						min: '0',
+						max: '60',
+						step: '0.5',
+						title: 'Delay between retries in seconds (default = 1s)',
+						style: 'width: 42px; padding: 1px 4px; font-size: 11px; text-align: center; border-radius: 3px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.3); color: #f1f5f9; outline: none;'
+					})) as HTMLInputElement;
+					const initDelaySec = typeof field.browserRetryDelayMs === 'number' && Number.isFinite(field.browserRetryDelayMs) ? field.browserRetryDelayMs / 1000 : 1;
+					retryDelayInp.value = String(initDelaySec);
+					retryDelayInp.onchange = () => {
+						const parsed = parseFloat(retryDelayInp.value);
+						const clampedSec = Number.isFinite(parsed) ? Math.max(0, Math.min(60, parsed)) : 1;
+						retryDelayInp.value = String(clampedSec);
+						field.browserRetryDelayMs = Math.round(clampedSec * 1000);
+						this._syncDraft();
+						this._persistCurrentModule().catch(() => { });
+					};
+					append(retryCfgWrap, $('span', { style: 'opacity: 0.65;' }, 's'));
 					openTabBtn.title = 'Test in Browser: Open URL in a new VS Code browser tab beside and extract content into preview below';
 
 					const newTabBtn = append(actionsRow, $('button.monaco-button.browser-new-tab-btn', {
@@ -3593,7 +3720,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					newTabBtn.onclick = async () => {
 						this._syncDraft();
 						const rawUrl = urlInput.value.trim() || 'https://www.google.com';
-						let targetUrl = this._interpolateSchemaReferences(rawUrl, field, allBrowserSchemaFields);
+						let targetUrl = this._interpolateSchemaReferences(rawUrl, field, allBrowserSchemaFields, await this._getHydratedWorkflowRuntimeContext());
 						if (!/^https?:\/\//i.test(targetUrl)) {
 							targetUrl = 'https://' + targetUrl;
 						}
@@ -3955,12 +4082,16 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							const defCol = append(row, $('div', { style: 'display: flex; flex-direction: column; gap: 4px; margin-top: 2px;' }));
 							append(defCol, $('label', { style: 'font-size: 10.5px; opacity: 0.75;' }, this._isFlowchartNodeMode ? 'Default Value / Workflow Global Variable (e.g. {var_name}):' : 'Default Value:'));
 							const defInput = append(defCol, $('input.monaco-inputbox', {
-								placeholder: this._isFlowchartNodeMode ? 'Literal value or {workflow_var}' : 'e.g. 0',
+								placeholder: this._isFlowchartNodeMode ? 'Leave blank for required (no default), or enter value / "" / {var}' : 'Leave blank for required (no default), or e.g. 0 / ""',
 								style: 'width: 100%; padding: 5px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.12); background: rgba(0, 0, 0, 0.2); color: inherit; box-sizing: border-box;'
 							})) as HTMLInputElement;
-							defInput.value = param.defaultValue || '';
+							defInput.value = param.defaultValue !== undefined && param.defaultValue !== null ? String(param.defaultValue) : '';
 							defInput.oninput = () => {
-								param.defaultValue = defInput.value;
+								if (defInput.value.trim() === '') {
+									delete param.defaultValue;
+								} else {
+									param.defaultValue = defInput.value;
+								}
 								this._syncDraft();
 							};
 
@@ -4220,7 +4351,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						field.targetMode = 'model';
 					}
 					if (!field.targetModel) {
-						field.targetModel = 'gemini-1.5-flash';
+						field.targetModel = resolveDefaultModelId(field.targetProvider, 'gemini-2.5-flash');
+						if (!field.targetProvider) {
+							field.targetProvider = getGlobalDefaultModel()?.providerId;
+						}
 					}
 					const promptSchemaBox = append(fieldCard, $('.prompt-schema-config', {
 						style: 'display: flex; flex-direction: column; gap: 12px; background: rgba(0, 0, 0, 0.2); padding: 12px 14px; border-radius: 6px; border: 1px solid rgba(59, 130, 246, 0.25);'
@@ -4319,7 +4453,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							if (field.targetModel === 'o1-mini' || field.targetModel === 'o1-preview') {
 								field.targetModel = 'gpt-4o';
 							}
-							const modelBtnLabel = append(modelBtnLeft, $('span', { style: 'font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);' }, field.targetModel || 'gpt-4o'));
+							const modelBtnLabel = append(modelBtnLeft, $('span', { style: 'font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);' }, field.targetModel || resolveDefaultModelId(field.targetProvider, 'gpt-4o')));
 							append(modelPickerBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronDown), { style: 'font-size: 11px; opacity: 0.7;' }));
 
 							const modelDropdown = append(modelPickerWrapper, $('div.prompt-schema-model-dropdown', {
@@ -4348,7 +4482,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								gemini: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-pro', 'gemini-1.5-flash'],
 								anthropic: ['claude-3-5-sonnet-20241022', 'claude-3-5-haiku-20241022', 'claude-3-opus-20240229'],
 								ollama: ['llama3.1', 'qwen2.5-coder', 'mistral', 'deepseek-r1'],
-								'custom-openai': ['gpt-4o']
+								'custom-openai': ['gpt-4o'],
+								aliyun: ['qwen-flash', 'qwen-plus', 'qwen4-max', 'deepseek-v4.1-flash']
 							};
 
 							let configuredCreds: any[] = [];
@@ -4367,7 +4502,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								if (providerId !== 'anthropic' && m.startsWith('claude')) {
 									return true;
 								}
-								if (providerId !== 'ollama' && (m.startsWith('llama') || m.startsWith('qwen') || m.startsWith('mistral') || m.startsWith('deepseek-r1'))) {
+								if (providerId !== 'ollama' && !isOpenAICompatibleProvider(providerId) && (m.startsWith('llama') || m.startsWith('qwen') || m.startsWith('mistral') || m.startsWith('deepseek-r1'))) {
 									return true;
 								}
 								return false;
@@ -4468,6 +4603,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									{ id: 'openai', label: 'OpenAI' },
 									{ id: 'gemini', label: 'Google Gemini' },
 									{ id: 'anthropic', label: 'Anthropic Claude' },
+									{ id: 'aliyun', label: 'Alibaba Cloud Model Studio' },
 									{ id: 'ollama', label: 'Ollama Local' },
 									{ id: 'custom-openai', label: 'Custom Endpoint' }
 								];
@@ -6972,6 +7108,182 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							sendTtsBtnLabel.textContent = 'Send & Generate Audio';
 						}
 					};
+				}
+
+				if (field.type === 'sub_workflow') {
+					if (!field.subWorkflowInputs || typeof field.subWorkflowInputs !== 'object') {
+						field.subWorkflowInputs = {};
+					}
+					const subBox = append(fieldCard, $('.primitive-config-box', {
+						style: 'margin-top: 8px; padding: 10px 12px; background: rgba(6, 182, 212, 0.06); border: 1px solid rgba(34, 211, 238, 0.28); border-radius: 6px; display: flex; flex-direction: column; gap: 8px;'
+					}));
+					const subHeader = append(subBox, $('div', {
+						style: 'display: flex; align-items: center; justify-content: space-between; gap: 6px; flex-wrap: wrap;'
+					}));
+					const subTitle = append(subHeader, $('div', {
+						style: 'font-size: 11.5px; font-weight: 600; color: #22d3ee; display: inline-flex; align-items: center; gap: 6px;'
+					}));
+					append(subTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.layers)));
+					append(subTitle, $('span', {}, `Sub-Workflow: ${field.subWorkflowName || field.subWorkflowId || '(unlinked)'}`));
+
+					const refreshSubBtn = append(subHeader, $('button', {
+						type: 'button',
+						title: 'Refresh latest Inputs & Outputs from the source Sub-Workflow (clears previous execution output)',
+						style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(16, 185, 129, 0.16); border: 1px solid rgba(52, 211, 153, 0.42); color: #6ee7b7; flex-shrink: 0;'
+					})) as HTMLButtonElement;
+					append(refreshSubBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.refresh)));
+					append(refreshSubBtn, $('span', {}, 'Refresh'));
+					refreshSubBtn.onclick = async (e) => {
+						e.stopPropagation();
+						const subId = field.subWorkflowId;
+						if (!subId) {
+							this.notificationService.warn('This Sub-Workflow card is not linked to a Sub-Workflow ID.');
+							return;
+						}
+						const refreshProvider = (this.input instanceof CustomModuleSchemaEditorInput) ? this.input.subWorkflowRefreshProvider : undefined;
+						if (!refreshProvider) {
+							this.notificationService.warn('Open this node from its Workflow editor to refresh its Sub-Workflow definition.');
+							return;
+						}
+						try {
+							const fresh = await refreshProvider(subId);
+							if (!fresh) {
+								this.notificationService.warn('Original Sub-Workflow definition was not found. It may have been removed.');
+								return;
+							}
+							field.subWorkflowName = fresh.name;
+							field.subWorkflowInputDefs = fresh.inputs.map(i => ({ name: i.name, defaultValue: i.defaultValue, description: i.description }));
+							field.subWorkflowOutputDefs = fresh.outputs.map(o => ({ label: o.label, varName: o.varName, defaultFormat: o.defaultFormat }));
+							const prevInputs = (field.subWorkflowInputs && typeof field.subWorkflowInputs === 'object') ? field.subWorkflowInputs : {};
+							const nextInputs: Record<string, string> = {};
+							for (const inp of fresh.inputs) {
+								nextInputs[inp.name] = Object.prototype.hasOwnProperty.call(prevInputs, inp.name) ? prevInputs[inp.name] : (inp.defaultValue ?? '');
+							}
+							field.subWorkflowInputs = nextInputs;
+							// Clear stale execution output/logs after refreshing schema
+							delete (field as any).lastExecutionInputs;
+							delete (field as any).lastExecutionOutput;
+							delete (field as any).lastExecutionLog;
+							delete (field as any).lastExecutionStatus;
+							delete (field as any).lastExecutionDurationMs;
+							delete (field as any).lastExecutedAt;
+							this._syncDraft();
+							renderCanvas();
+							this.notificationService.info(`Refreshed Sub-Workflow '${fresh.name}' (${fresh.inputs.length} in · ${fresh.outputs.length} out).`);
+						} catch (err: any) {
+							this.notificationService.error(`Failed to refresh Sub-Workflow: ${err?.message || err}`);
+						}
+					};
+
+					const inputDefs = Array.isArray(field.subWorkflowInputDefs) ? field.subWorkflowInputDefs : [];
+					if (inputDefs.length > 0) {
+						append(subBox, $('div', { style: 'font-size: 10.5px; font-weight: 600; color: #c084fc; margin-top: 2px;' }, `Input Bindings (${inputDefs.length})`));
+						for (const inp of inputDefs) {
+							const row = append(subBox, $('div', {
+								style: 'display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; width: 100%; min-width: 0;'
+							}));
+							append(row, $('span', {
+								style: 'font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); color: #e9d5ff; flex-shrink: 0;'
+							}, `${inp.name}:`));
+							const inpEl = append(row, $('input.monaco-inputbox', {
+								type: 'text',
+								placeholder: inp.defaultValue ? `Default: ${inp.defaultValue}` : `Bind {var} or value`,
+								value: field.subWorkflowInputs[inp.name] ?? '',
+								style: 'flex: 1 1 120px; min-width: 0; width: 100%; padding: 3px 8px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 4px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.3); color: var(--vscode-input-foreground); outline: none;'
+							})) as HTMLInputElement;
+							inpEl.oninput = () => {
+								field.subWorkflowInputs![inp.name] = inpEl.value;
+								this._syncDraft();
+							};
+						}
+					} else {
+						append(subBox, $('div', { style: 'font-size: 10.5px; opacity: 0.6; font-style: italic;' }, 'No input parameters defined on this Sub-Workflow.'));
+					}
+
+					const outputDefs = Array.isArray(field.subWorkflowOutputDefs) ? field.subWorkflowOutputDefs : [];
+					if (outputDefs.length > 0) {
+						append(subBox, $('div', { style: 'font-size: 10.5px; font-weight: 600; color: #34d399; margin-top: 2px;' }, `Exposed Outputs (${outputDefs.length})`));
+						const outList = append(subBox, $('div', { style: 'display: flex; flex-wrap: wrap; gap: 4px;' }));
+						for (const out of outputDefs) {
+							append(outList, $('span', {
+								style: 'font-size: 10px; padding: 2px 6px; border-radius: 4px; background: rgba(16, 185, 129, 0.14); border: 1px solid rgba(52, 211, 153, 0.32); color: #d1fae5;',
+								title: `Index: ${out.label} · Var: ${out.varName} · Format: ${(out.defaultFormat || 'json').toUpperCase()}`
+							}, `${out.label} [${(out.defaultFormat || 'json').toUpperCase()}]`));
+						}
+					}
+
+					// Last Execution Inputs Box
+					let lastInObj: Record<string, any> | undefined = (field as any).lastExecutionInputs;
+					if (lastInObj === undefined && typeof (field as any).lastExecutionLog === 'string') {
+						const logStr = String((field as any).lastExecutionLog);
+						const inputsMatch = logStr.match(/(?:^|\n)Inputs:\s*(\{[\s\S]*?\})(?:\nOutputs:|$)/);
+						if (inputsMatch && inputsMatch[1]) {
+							try {
+								lastInObj = JSON.parse(inputsMatch[1]);
+							} catch { }
+						}
+					}
+					const hasLastIn = lastInObj !== undefined && lastInObj !== null && typeof lastInObj === 'object';
+					const lastInCount = hasLastIn ? Object.keys(lastInObj!).length : 0;
+					const lastInCard = append(subBox, $('div.component-exec-logs-card', {
+						style: 'display: flex; flex-direction: column; gap: 4px; margin-top: 4px; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(192, 132, 252, 0.28); border-radius: 5px; padding: 6px 8px;'
+					}));
+					const lastInHeader = append(lastInCard, $('div', {
+						style: 'display: flex; justify-content: space-between; align-items: center; font-size: 10.5px; gap: 6px; flex-wrap: wrap;'
+					}));
+					const lastInTitle = append(lastInHeader, $('div', {
+						style: 'display: flex; align-items: center; gap: 5px; font-weight: 600; color: #c084fc;'
+					}));
+					append(lastInTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolParameter)));
+					append(lastInTitle, $('span', {}, hasLastIn ? `LAST EXECUTION INPUTS (${lastInCount})` : 'LAST EXECUTION INPUTS'));
+					const lastInText = hasLastIn
+						? (lastInCount === 0 ? '(no inputs)' : JSON.stringify(lastInObj, null, 2))
+						: '[Ready to execute] Resolved Sub-Workflow inputs will appear here after execution.';
+					if (hasLastIn) {
+						const copyInBtn = append(lastInHeader, $('button', {
+							type: 'button',
+							style: 'padding: 1px 7px; font-size: 10px; border-radius: 3px; cursor: pointer; background: rgba(192, 132, 252, 0.14); border: 1px solid rgba(192, 132, 252, 0.35); color: #f3e8ff;'
+						}, 'Copy')) as HTMLButtonElement;
+						copyInBtn.onclick = async () => {
+							await this._clipboardService.writeText(lastInText);
+							copyInBtn.textContent = 'Copied';
+							setTimeout(() => { copyInBtn.textContent = 'Copy'; }, 1200);
+						};
+					}
+					append(lastInCard, $('pre', {
+						style: 'margin: 0; font-size: 11px; line-height: 1.45; max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: #e2e8f0; font-family: var(--vscode-editor-font-family, monospace);'
+					}, lastInText.length > 8000 ? lastInText.substring(0, 8000) + '\n... (use Copy for full inputs)' : lastInText));
+
+					// Last Execution Output Box
+					const lastOutVal = (field as any).lastExecutionOutput;
+					const lastExecCard = append(subBox, $('div.component-exec-logs-card', {
+						style: 'display: flex; flex-direction: column; gap: 4px; margin-top: 4px; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(34, 211, 238, 0.25); border-radius: 5px; padding: 6px 8px;'
+					}));
+					const lastExecHeader = append(lastExecCard, $('div', {
+						style: 'display: flex; justify-content: space-between; align-items: center; font-size: 10.5px; gap: 6px; flex-wrap: wrap;'
+					}));
+					const lastExecTitle = append(lastExecHeader, $('div', {
+						style: 'display: flex; align-items: center; gap: 5px; font-weight: 600; color: #22d3ee;'
+					}));
+					append(lastExecTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.terminal)));
+					append(lastExecTitle, $('span', {}, 'LAST EXECUTION OUTPUT'));
+					const lastExecText = lastOutVal !== undefined
+						? (lastOutVal === null ? 'None' : (typeof lastOutVal === 'string' ? lastOutVal : JSON.stringify(lastOutVal, null, 2)))
+						: ((field as any).lastExecutionLog || '[Ready to execute] Sub-Workflow output will appear here after execution.');
+					if (lastOutVal !== undefined) {
+						const copyOutBtn = append(lastExecHeader, $('button', {
+							type: 'button',
+							style: 'padding: 1px 7px; font-size: 10px; border-radius: 3px; cursor: pointer; background: rgba(34, 211, 238, 0.14); border: 1px solid rgba(34, 211, 238, 0.35); color: #cffafe;'
+						}, 'Copy')) as HTMLButtonElement;
+						copyOutBtn.onclick = async () => {
+							await this._clipboardService.writeText(lastExecText);
+							copyOutBtn.textContent = 'Copied';
+							setTimeout(() => { copyOutBtn.textContent = 'Copy'; }, 1200);
+						};
+					}
+					append(lastExecCard, $('pre', {
+						style: 'margin: 0; font-size: 11px; line-height: 1.45; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: #e2e8f0; font-family: var(--vscode-editor-font-family, monospace);'
+					}, lastExecText.length > 8000 ? lastExecText.substring(0, 8000) + '\n... (use Copy for full output)' : lastExecText));
 				}
 
 				if (field.type === 'voice_note') {
@@ -9883,25 +10195,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							const scriptCode = codeTextarea.value;
 
 							// Gather full schema context from workflow runtime variables + preceding and static fields
-							const schemaContext: Record<string, any> = {};
-							if (this.input instanceof CustomModuleSchemaEditorInput && typeof this.input.workflowRuntimeContextProvider === 'function') {
-								try {
-									const wfRuntimeCtx = this.input.workflowRuntimeContextProvider();
-									if (wfRuntimeCtx && typeof wfRuntimeCtx === 'object') {
-										Object.assign(schemaContext, wfRuntimeCtx);
-									}
-								} catch { }
-							}
+							const schemaContext: Record<string, any> = { ...(await this._getHydratedWorkflowRuntimeContext()) };
 							const allFieldsToGather = fields || this._activeModule?.fields || [];
 							for (const f of allFieldsToGather) {
 								if (!f || f === field) continue;
 								const fKey = f.label || f.id;
-								let val: any = '';
-								if (f.type === 'browser') {
-									val = f.defaultContent || f.defaultUrl || '';
-								} else if (f.type === 'http_request') {
-									val = f.httpResponseData || f.httpResponseBody || '';
-								} else if (f.type === 'parameters' && f.parameters) {
+								const hasRecordedOutput = (f as any).lastExecutionOutput !== undefined;
+								let val: any = undefined;
+								if (f.type === 'parameters' && f.parameters) {
 									const pMap: Record<string, any> = {};
 									f.parameters.forEach(p => {
 										if (p.name) {
@@ -9920,6 +10221,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									val = pMap;
 									schemaContext['Parameters'] = pMap;
 									schemaContext['Inputs'] = pMap;
+								} else if (hasRecordedOutput && f.type !== 'table') {
+									// Preserve exact native data type (dict, list, number, bool, null, string) from lastExecutionOutput
+									val = (f as any).lastExecutionOutput;
+								} else if (f.type === 'browser') {
+									val = f.defaultContent || f.defaultUrl || '';
+								} else if (f.type === 'http_request') {
+									val = f.httpResponseData || f.httpResponseBody || '';
 								} else if (f.type === 'prompt') {
 									val = f.debugPromptOutput || f.defaultContent || '';
 								} else if (f.type === 'python') {
@@ -9935,18 +10243,23 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									};
 								} else if (f.type === 'git') {
 									val = f.gitRemoteUrl || '';
+								} else if (['create_tickets', 'run_tickets', 'get_outputs', 'get_ticket', 'get_tickets', 'display', 'sub_workflow'].includes(f.type)) {
+									// Do not clobber existing live runtime value in schemaContext with '' if this card hasn't recorded lastExecutionOutput yet
+									val = undefined;
 								} else {
 									val = f.defaultContent || f.defaultValue || '';
 								}
-								schemaContext[fKey] = val;
-								if (f.outputVariableName) {
-									schemaContext[f.outputVariableName] = val;
-								}
-								if (f.id && f.id !== fKey) {
-									schemaContext[f.id] = val;
-								}
-								if (f.label && f.label !== fKey) {
-									schemaContext[f.label] = val;
+								if (val !== undefined) {
+									schemaContext[fKey] = val;
+									if (f.outputVariableName) {
+										schemaContext[f.outputVariableName] = val;
+									}
+									if (f.id && f.id !== fKey) {
+										schemaContext[f.id] = val;
+									}
+									if (f.label && f.label !== fKey) {
+										schemaContext[f.label] = val;
+									}
 								}
 							}
 							if (this._activeModule?.name) {
@@ -9982,6 +10295,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 							field.pythonOutput = res.output;
 							(field as any).lastExecutionLog = field.pythonOutput;
+							if (res.success) {
+								(field as any).lastExecutionOutput = res.result !== undefined ? res.result : res.output;
+							}
 							updateViewMode(currentViewMode);
 
 							refreshAllReferenceChipBars();
@@ -10741,39 +11057,39 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						sendIcon.classList.add('codicon-modifier-spin');
 
 						try {
-							// Gather live context
-							const liveContext: Record<string, any> = {};
-							if (this.input instanceof CustomModuleSchemaEditorInput && typeof this.input.workflowRuntimeContextProvider === 'function') {
-								try {
-									const wfCtx = this.input.workflowRuntimeContextProvider();
-									if (wfCtx && typeof wfCtx === 'object') {
-										Object.assign(liveContext, wfCtx);
-									}
-								} catch { }
-							}
+							// Gather live workflow context, with large spilled variables (__anyagentVarRef__) loaded back
+							const liveContext: Record<string, any> = { ...(await this._getHydratedWorkflowRuntimeContext()) };
+
 							const allFields = fields || this._activeModule?.fields || [];
 							for (const f of allFields) {
 								if (!f || f === field) continue;
 								const fKey = f.label || f.id;
+								let fieldVal: any = undefined;
 								if (f.type === 'parameters' && f.parameters) {
 									const pMap: Record<string, any> = {};
 									f.parameters.forEach(p => { if (p.name) pMap[p.name] = this._parseInputStringLiteral(p.defaultValue ?? ''); });
-									liveContext[fKey] = pMap;
-									liveContext['Parameters'] = pMap;
-									liveContext['Inputs'] = pMap;
+									fieldVal = pMap;
+									if (liveContext['Parameters'] === undefined) { liveContext['Parameters'] = pMap; }
+									if (liveContext['Inputs'] === undefined) { liveContext['Inputs'] = pMap; }
 								} else if (f.type === 'http_request') {
-									liveContext[fKey] = f.httpResponseData || f.httpResponseBody || '';
+									fieldVal = f.httpResponseData ?? f.httpResponseBody ?? undefined;
 								} else {
-									liveContext[fKey] = f.defaultContent || f.defaultValue || '';
+									const fAny = f as any;
+									fieldVal = fAny.lastExecutionOutput ?? fAny.pythonOutput ?? f.defaultContent ?? f.defaultValue ?? undefined;
 								}
-								if (f.outputVariableName) {
-									liveContext[f.outputVariableName] = liveContext[fKey];
+								// Never clobber hydrated runtime context values with empty fallback strings
+								const hasMeaningfulVal = fieldVal !== undefined && fieldVal !== null && fieldVal !== '';
+								if (hasMeaningfulVal || liveContext[fKey] === undefined) {
+									liveContext[fKey] = fieldVal ?? '';
 								}
-								if (f.id && f.id !== fKey) {
-									liveContext[f.id] = liveContext[fKey];
+								if (f.outputVariableName && (hasMeaningfulVal || liveContext[f.outputVariableName] === undefined)) {
+									liveContext[f.outputVariableName] = hasMeaningfulVal ? fieldVal : '';
 								}
-								if (f.label && f.label !== fKey) {
-									liveContext[f.label] = liveContext[fKey];
+								if (f.id && f.id !== fKey && (hasMeaningfulVal || liveContext[f.id] === undefined)) {
+									liveContext[f.id] = hasMeaningfulVal ? fieldVal : '';
+								}
+								if (f.label && f.label !== fKey && (hasMeaningfulVal || liveContext[f.label] === undefined)) {
+									liveContext[f.label] = hasMeaningfulVal ? fieldVal : '';
 								}
 							}
 
@@ -11692,7 +12008,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						field.tableAutoSyncDb = autoSyncCheck.checked;
 						this._syncDraft();
 					};
-					append(autoSyncLabel, $('span', {}, 'Auto-sync with SQLite on workflow run'));
+					append(autoSyncLabel, $('span', {}, 'Create empty table if missing'));
+					autoSyncLabel.title = "When the workflow runs and the target table does not exist yet, create it (empty) from this card's columns. Never writes any rows.";
 
 					// Step 1: DB Engine + SQLite File Path + Select / Create New SQLite File
 					const dbPathRow = append(dbSection, $('div', {
@@ -13548,7 +13865,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						const allFields = (this._activeModule?.fields && this._activeModule.fields.length > 0) ? this._activeModule.fields : fields;
 						const { rawExpr, resolvedTable } = resolveTargetTableName();
 						const tblName = resolvedTable || getActiveTableName();
-						let interpolatedSql = this._interpolateSchemaReferences(rawSql, field, allFields);
+						let interpolatedSql = this._interpolateSchemaReferences(rawSql, field, allFields, await this._getHydratedWorkflowRuntimeContext());
 						if (rawExpr && isParamTableExpr(rawExpr) && interpolatedSql.includes(rawExpr)) {
 							interpolatedSql = interpolatedSql.split(rawExpr).join(tblName);
 						}
@@ -13902,7 +14219,50 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 						if (field.type === 'display') {
 							const rawVal = (field.wfDisplayValue || '').trim();
-							return `DISPLAY(${formatParamValueForPythonExpr(rawVal)})`;
+							if (!rawVal) {
+								return 'DISPLAY()';
+							}
+							const exactVar = rawVal.match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/);
+							if (exactVar) {
+								return `DISPLAY(${exactVar[1]})`;
+							}
+							// Unwrap {var_name} outside quotes without ever auto-quoting expressions
+							let normExpr = '';
+							let inQ: string | null = null;
+							let idx = 0;
+							while (idx < rawVal.length) {
+								const ch = rawVal[idx];
+								if (inQ) {
+									normExpr += ch;
+									if (ch === '\\' && idx + 1 < rawVal.length) {
+										normExpr += rawVal[idx + 1];
+										idx += 2;
+										continue;
+									}
+									if (ch === inQ) {
+										inQ = null;
+									}
+									idx++;
+									continue;
+								}
+								if (ch === '"' || ch === "'") {
+									inQ = ch;
+									normExpr += ch;
+									idx++;
+									continue;
+								}
+								if (ch === '{') {
+									const m = rawVal.slice(idx).match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}/);
+									if (m) {
+										normExpr += m[1];
+										idx += m[0].length;
+										continue;
+									}
+								}
+								normExpr += ch;
+								idx++;
+							}
+							return `DISPLAY(${normExpr})`;
 						}
 						return '';
 					};
@@ -13945,162 +14305,394 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						return params;
 					};
 
-					const renderQuickInsertChipsForInput = (containerEl: HTMLElement, targetInp: HTMLInputElement, onUpdated: () => void) => {
-						const refTokens = getReferenceTokensForField(field);
-						if (refTokens.length === 0) {
-							return;
-						}
-						let lastSelStart: number | undefined;
-						let lastSelEnd: number | undefined;
-						const recordInputSelection = () => {
-							if (typeof targetInp.selectionStart === 'number' && typeof targetInp.selectionEnd === 'number') {
-								lastSelStart = targetInp.selectionStart;
-								lastSelEnd = targetInp.selectionEnd;
+					const renderQuickInsertChipsForInput = (_containerEl: HTMLElement, targetInp: HTMLInputElement, onUpdated: () => void) => {
+						// Clean `{` autocomplete dropdown menu (replaces bulky static `Insert:` chip rows)
+						let popupEl: HTMLElement | null = null;
+						let activeIndex = 0;
+						let currentMatches: Array<{ label: string; type: string }> = [];
+						let openBraceIdx = -1;
+
+						const closePopup = () => {
+							if (popupEl) {
+								popupEl.remove();
+								popupEl = null;
 							}
-						};
-						targetInp.addEventListener('keyup', recordInputSelection);
-						targetInp.addEventListener('mouseup', recordInputSelection);
-						targetInp.addEventListener('select', recordInputSelection);
-						targetInp.addEventListener('input', recordInputSelection);
-
-						const chipRow = append(containerEl, $('div', {
-							style: 'display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 3px;'
-						}));
-						append(chipRow, $('span', { style: 'font-size: 10px; opacity: 0.6;' }, 'Insert:'));
-
-						const maxVisibleChips = 4;
-						const visibleTokens = refTokens.slice(0, maxVisibleChips);
-						const hiddenTokens = refTokens.slice(maxVisibleChips);
-						let isExpanded = false;
-
-						const renderChipBtn = (parentEl: HTMLElement, label: string) => {
-							const chip = append(parentEl, $('button', {
-								type: 'button',
-								style: 'padding: 1px 6px; font-size: 10px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;'
-							}, `+ {${label}}`));
-							chip.onmousedown = (e) => {
-								e.preventDefault();
-								e.stopPropagation();
-								recordInputSelection();
-							};
-							chip.onclick = (e) => {
-								e.preventDefault();
-								e.stopPropagation();
-								const cur = targetInp.value || '';
-								const token = `{${label}}`;
-								const isFocused = document.activeElement === targetInp;
-								let start = isFocused && typeof targetInp.selectionStart === 'number'
-									? targetInp.selectionStart
-									: (typeof lastSelStart === 'number' ? lastSelStart : cur.length);
-								let end = isFocused && typeof targetInp.selectionEnd === 'number'
-									? targetInp.selectionEnd
-									: (typeof lastSelEnd === 'number' ? lastSelEnd : start);
-
-								if (start < 0 || start > cur.length) { start = cur.length; }
-								if (end < 0 || end > cur.length) { end = cur.length; }
-								if (start > end) { const tmp = start; start = end; end = tmp; }
-
-								targetInp.value = cur.substring(0, start) + token + cur.substring(end);
-								const newPos = start + token.length;
-								lastSelStart = newPos;
-								lastSelEnd = newPos;
-								targetInp.focus({ preventScroll: true });
-								targetInp.setSelectionRange(newPos, newPos);
-								onUpdated();
-							};
+							activeIndex = 0;
+							currentMatches = [];
+							openBraceIdx = -1;
 						};
 
-						visibleTokens.forEach(rt => renderChipBtn(chipRow, rt.label));
+						const applySelection = (selectedLabel: string) => {
+							const cur = targetInp.value || '';
+							const cursor = typeof targetInp.selectionStart === 'number' ? targetInp.selectionStart : cur.length;
+							if (openBraceIdx < 0 || openBraceIdx > cursor) {
+								closePopup();
+								return;
+							}
+							const afterCursor = cur.substring(cursor);
+							const alreadyHasClosingBrace = afterCursor.startsWith('}');
+							const replacement = alreadyHasClosingBrace ? `{${selectedLabel}` : `{${selectedLabel}}`;
+							targetInp.value = cur.substring(0, openBraceIdx) + replacement + afterCursor;
+							const nextPos = openBraceIdx + selectedLabel.length + 2;
+							targetInp.focus({ preventScroll: true });
+							targetInp.setSelectionRange(nextPos, nextPos);
+							closePopup();
+							onUpdated();
+						};
 
-						if (hiddenTokens.length > 0) {
-							const hiddenContainer = append(chipRow, $('span', {
-								style: 'display: none;'
-							}));
-							hiddenTokens.forEach(rt => renderChipBtn(hiddenContainer, rt.label));
+						const renderPopupItems = () => {
+							if (!popupEl) {
+								return;
+							}
+							clearNode(popupEl);
+							if (currentMatches.length === 0) {
+								append(popupEl, $('div', {
+									style: 'padding: 6px 10px; font-size: 11px; color: #94a3b8; font-style: italic;'
+								}, 'No matching variables'));
+								return;
+							}
+							currentMatches.forEach((tok, idx) => {
+								const isAct = idx === activeIndex;
+								const row = append(popupEl!, $('div', {
+									style: `display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 10px; cursor: pointer; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 4px; ${isAct ? 'background: rgba(56, 189, 248, 0.22); color: #f8fafc;' : 'color: #cbd5e1;'}`
+								}));
+								append(row, $('span', {
+									style: 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
+								}, `{${tok.label}}`));
+								if (tok.type) {
+									append(row, $('span', {
+										style: 'font-size: 9.5px; font-weight: 600; padding: 1px 5px; border-radius: 3px; background: rgba(148, 163, 184, 0.14); color: #94a3b8; flex-shrink: 0; font-family: var(--vscode-font-family, sans-serif);'
+									}, tok.type));
+								}
+								row.onmouseenter = () => {
+									activeIndex = idx;
+									renderPopupItems();
+								};
+								row.onmousedown = (ev) => {
+									ev.preventDefault();
+									ev.stopPropagation();
+									applySelection(tok.label);
+								};
+							});
+						};
 
-							const moreBtn = append(chipRow, $('button', {
-								type: 'button',
-								style: 'padding: 1px 7px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center;'
-							}, `+${hiddenTokens.length} More...`));
-							moreBtn.onmousedown = (e) => {
-								e.preventDefault();
-								e.stopPropagation();
-								recordInputSelection();
-							};
-							moreBtn.onclick = (e) => {
-								e.preventDefault();
-								e.stopPropagation();
-								isExpanded = !isExpanded;
-								hiddenContainer.style.display = isExpanded ? 'contents' : 'none';
-								moreBtn.textContent = isExpanded ? 'Show Less' : `+${hiddenTokens.length} More...`;
-							};
-						}
+						const updateAutocomplete = () => {
+							const cur = targetInp.value || '';
+							const cursor = typeof targetInp.selectionStart === 'number' ? targetInp.selectionStart : cur.length;
+							const textBefore = cur.substring(0, cursor);
+							const lastOpen = textBefore.lastIndexOf('{');
+							const lastClose = textBefore.lastIndexOf('}');
+							if (lastOpen < 0 || lastOpen < lastClose) {
+								closePopup();
+								return;
+							}
+							const query = textBefore.substring(lastOpen + 1);
+							if (query.includes('{') || query.includes('}') || query.includes('\n')) {
+								closePopup();
+								return;
+							}
+							openBraceIdx = lastOpen;
+							const qLower = query.trim().toLowerCase();
+							const allTokens = getReferenceTokensForField(field);
+							const isCleanIdent = (s: string) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(s);
+
+							const scored: Array<{ tok: { label: string; type: string }; rank: number }> = [];
+							for (const tok of allTokens) {
+								const lLower = tok.label.toLowerCase();
+								const clean = isCleanIdent(tok.label);
+								if (!qLower) {
+									scored.push({ tok, rank: clean ? 0 : 2 });
+								} else if (lLower === qLower) {
+									scored.push({ tok, rank: clean ? 0 : 1 });
+								} else if (lLower.startsWith(qLower)) {
+									scored.push({ tok, rank: clean ? 1 : 3 });
+								} else if (lLower.includes(qLower)) {
+									scored.push({ tok, rank: clean ? 2 : 4 });
+								}
+							}
+							scored.sort((a, b) => a.rank - b.rank || a.tok.label.localeCompare(b.tok.label));
+							currentMatches = scored.slice(0, 30).map(s => s.tok);
+							activeIndex = 0;
+
+							if (!popupEl) {
+								popupEl = append(document.body, $('div.anyagent-var-autocomplete-popup', {
+									style: 'position: fixed; z-index: 25000; min-width: 240px; max-width: 420px; max-height: 230px; overflow-y: auto; background: #141925; border: 1px solid rgba(56, 189, 248, 0.45); border-radius: 6px; padding: 4px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65); display: flex; flex-direction: column; gap: 2px;'
+								}));
+							}
+							const rect = targetInp.getBoundingClientRect();
+							const estHeight = Math.min(230, Math.max(36, currentMatches.length * 28 + 10));
+							const spaceBelow = window.innerHeight - rect.bottom - 12;
+							const topPos = spaceBelow >= estHeight ? rect.bottom + 4 : Math.max(8, rect.top - estHeight - 4);
+							const leftPos = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - 320));
+							popupEl.style.top = `${topPos}px`;
+							popupEl.style.left = `${leftPos}px`;
+							popupEl.style.width = `${Math.max(240, Math.min(420, rect.width))}px`;
+							renderPopupItems();
+						};
+
+						targetInp.addEventListener('input', updateAutocomplete);
+						targetInp.addEventListener('click', updateAutocomplete);
+						targetInp.addEventListener('keydown', (ev: KeyboardEvent) => {
+							if (!popupEl) {
+								return;
+							}
+							if (ev.key === 'ArrowDown') {
+								ev.preventDefault();
+								ev.stopPropagation();
+								if (currentMatches.length > 0) {
+									activeIndex = (activeIndex + 1) % currentMatches.length;
+									renderPopupItems();
+									const actEl = popupEl.children[activeIndex] as HTMLElement | undefined;
+									actEl?.scrollIntoView({ block: 'nearest' });
+								}
+							} else if (ev.key === 'ArrowUp') {
+								ev.preventDefault();
+								ev.stopPropagation();
+								if (currentMatches.length > 0) {
+									activeIndex = (activeIndex - 1 + currentMatches.length) % currentMatches.length;
+									renderPopupItems();
+									const actEl = popupEl.children[activeIndex] as HTMLElement | undefined;
+									actEl?.scrollIntoView({ block: 'nearest' });
+								}
+							} else if (ev.key === 'Enter' || ev.key === 'Tab') {
+								if (currentMatches.length > 0 && currentMatches[activeIndex]) {
+									ev.preventDefault();
+									ev.stopPropagation();
+									applySelection(currentMatches[activeIndex].label);
+								}
+							} else if (ev.key === 'Escape') {
+								ev.preventDefault();
+								ev.stopPropagation();
+								closePopup();
+							}
+						});
+						targetInp.addEventListener('blur', () => {
+							setTimeout(closePopup, 120);
+						});
+						this._renderCleanupFns.push(closePopup);
 					};
 
 					const renderWorkflowTicketVariableChips = (containerEl: HTMLElement, targetInp: HTMLInputElement, onUpdated: () => void) => {
-						const ticketVars: Array<{ name: string; desc?: string }> = [];
-						const seenVars = new Set<string>();
+						const isCleanVarName = (s: string) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(s);
+						const collectTicketHandleVars = (): Array<{ name: string; desc?: string }> => {
+							const ticketVars: Array<{ name: string; desc?: string }> = [];
+							const seenVars = new Set<string>();
+							const currentOutVar = (field.outputVariableName || '').trim().toLowerCase();
+							const currentFieldLabel = (field.label || '').trim().toLowerCase();
 
-						// 1. Current node fields (upstream create_tickets or run_tickets)
-						fields.forEach(f => {
-							if (!f || f === field) return;
-							if (f.type === 'create_tickets' || f.type === 'run_tickets') {
-								const vName = (f.outputVariableName || '').trim() || generateSmartPythonVarName(f.label || f.id, f.type);
-								if (vName && !seenVars.has(vName.toLowerCase())) {
-									seenVars.add(vName.toLowerCase());
-									ticketVars.push({ name: vName, desc: f.label || f.type });
+							const addHandle = (rawName: string | undefined, desc?: string) => {
+								const clean = (rawName || '').trim().replace(/^@/, '');
+								if (!clean || !isCleanVarName(clean)) return;
+								const lower = clean.toLowerCase();
+								if (lower === currentOutVar || lower === currentFieldLabel || seenVars.has(lower)) return;
+								seenVars.add(lower);
+								ticketVars.push({ name: clean, desc });
+							};
+
+							// 1. Current node cards: ONLY genuine ticket handle producers (create_tickets, get_ticket, or python returning a ticket handle)
+							fields.forEach(f => {
+								if (!f || f === field) return;
+								if (f.type === 'create_tickets' || f.type === 'get_ticket') {
+									const vName = (f.outputVariableName || '').trim() || generateSmartPythonVarName(f.label || f.id, f.type);
+									addHandle(vName, f.wfTicketType || f.label || f.type);
+								} else if (f.type === 'python') {
+									const outObj = f.pythonResult ?? (f as any).lastExecutionOutput;
+									const hasTicketHandleOut = Boolean(outObj && typeof outObj === 'object' && !Array.isArray(outObj) && (outObj.ticketId || outObj.entityUri));
+									const hasCreateInCode = typeof f.pythonCode === 'string' && /\b(?:CREATE_TICKETS|create_tickets|GET_TICKET|get_ticket)\s*\(/.test(f.pythonCode);
+									if (hasTicketHandleOut || hasCreateInCode) {
+										const vName = (f.outputVariableName || '').trim();
+										addHandle(vName, (outObj && typeof outObj === 'object' && outObj.ticketType) ? String(outObj.ticketType) : (f.label || 'Ticket Handle'));
+									}
+								}
+							});
+
+							// 2. Flowchart variables provider: ONLY explicitly tagged HANDLE variables (from CREATE_TICKETS / GET_TICKET)
+							if (isFlowchartNodeMode && input.workflowVariablesProvider) {
+								try {
+									const wfVars = input.workflowVariablesProvider() || [];
+									wfVars.forEach(wv => {
+										const wLabel = (wv.label || '').trim();
+										if (!wLabel || !isCleanVarName(wLabel)) return;
+										const isGenuineHandle = wv.type === 'HANDLE' ||
+											Boolean(wv.ticketType) ||
+											wv.sourceType === 'create_tickets' ||
+											wv.sourceType === 'get_ticket';
+										if (isGenuineHandle) {
+											addHandle(wLabel, wv.ticketType || 'Ticket Handle');
+										}
+									});
+								} catch { }
+							}
+							return ticketVars;
+						};
+
+						const ticketVars = collectTicketHandleVars();
+						if (ticketVars.length > 0) {
+							const chipRow = append(containerEl, $('div', {
+								style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 3px;'
+							}));
+							append(chipRow, $('span', { style: 'font-size: 10px; opacity: 0.75; color: #c084fc; font-weight: 600;' }, 'Ticket Handle:'));
+
+							ticketVars.forEach(tv => {
+								const chip = append(chipRow, $('button', {
+									type: 'button',
+									title: `Use ticket handle {${tv.name}}${tv.desc ? ` (${tv.desc})` : ''}`,
+									style: 'padding: 2px 7px; font-size: 10px; border-radius: 4px; border: 1px solid rgba(192, 132, 252, 0.45); background: rgba(192, 132, 252, 0.12); color: #e9d5ff; cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap; transition: all 0.15s ease;'
+								}, `+ {${tv.name}}`));
+								chip.onmouseenter = () => { chip.style.background = 'rgba(192, 132, 252, 0.28)'; };
+								chip.onmouseleave = () => { chip.style.background = 'rgba(192, 132, 252, 0.12)'; };
+								chip.onclick = () => {
+									targetInp.value = `{${tv.name}}`;
+									onUpdated();
+								};
+							});
+						}
+
+						// 3. Attach `{` autocomplete menu strictly filtered to genuine Ticket Handles
+						let handlePopupEl: HTMLElement | null = null;
+						let handleActiveIdx = 0;
+						let handleMatches: Array<{ name: string; desc?: string }> = [];
+						let handleOpenBraceIdx = -1;
+
+						const closeHandlePopup = () => {
+							if (handlePopupEl) {
+								handlePopupEl.remove();
+								handlePopupEl = null;
+							}
+							handleActiveIdx = 0;
+							handleMatches = [];
+							handleOpenBraceIdx = -1;
+						};
+
+						const applyHandleSelection = (selectedName: string) => {
+							targetInp.value = `{${selectedName}}`;
+							const nextPos = targetInp.value.length;
+							targetInp.focus({ preventScroll: true });
+							targetInp.setSelectionRange(nextPos, nextPos);
+							closeHandlePopup();
+							onUpdated();
+						};
+
+						const renderHandlePopupItems = () => {
+							if (!handlePopupEl) return;
+							clearNode(handlePopupEl);
+							if (handleMatches.length === 0) {
+								append(handlePopupEl, $('div', {
+									style: 'padding: 6px 10px; font-size: 11px; color: #94a3b8; font-style: italic;'
+								}, 'No matching ticket handles'));
+								return;
+							}
+							handleMatches.forEach((tv, idx) => {
+								const isAct = idx === handleActiveIdx;
+								const row = append(handlePopupEl!, $('div', {
+									style: `display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 5px 10px; cursor: pointer; font-size: 11.5px; font-family: var(--vscode-editor-font-family, monospace); border-radius: 4px; ${isAct ? 'background: rgba(192, 132, 252, 0.25); color: #f8fafc;' : 'color: #e9d5ff;'}`
+								}));
+								append(row, $('span', {
+									style: 'overflow: hidden; text-overflow: ellipsis; white-space: nowrap;'
+								}, `{${tv.name}}`));
+								if (tv.desc) {
+									append(row, $('span', {
+										style: 'font-size: 9.5px; font-weight: 600; padding: 1px 6px; border-radius: 3px; background: rgba(192, 132, 252, 0.16); color: #d8b4fe; flex-shrink: 0; font-family: var(--vscode-font-family, sans-serif);'
+									}, tv.desc));
+								}
+								row.onmouseenter = () => {
+									handleActiveIdx = idx;
+									renderHandlePopupItems();
+								};
+								row.onmousedown = (ev) => {
+									ev.preventDefault();
+									ev.stopPropagation();
+									applyHandleSelection(tv.name);
+								};
+							});
+						};
+
+						const updateHandleAutocomplete = () => {
+							const cur = targetInp.value || '';
+							const cursor = typeof targetInp.selectionStart === 'number' ? targetInp.selectionStart : cur.length;
+							const textBefore = cur.substring(0, cursor);
+							const lastOpen = textBefore.lastIndexOf('{');
+							const lastClose = textBefore.lastIndexOf('}');
+							if (lastOpen < 0 || lastOpen < lastClose) {
+								closeHandlePopup();
+								return;
+							}
+							const query = textBefore.substring(lastOpen + 1);
+							if (query.includes('{') || query.includes('}') || query.includes('\n')) {
+								closeHandlePopup();
+								return;
+							}
+							handleOpenBraceIdx = lastOpen;
+							const qLower = query.trim().toLowerCase();
+							const allHandles = collectTicketHandleVars();
+							const scored: Array<{ tv: { name: string; desc?: string }; rank: number }> = [];
+							for (const tv of allHandles) {
+								const nLower = tv.name.toLowerCase();
+								const dLower = (tv.desc || '').toLowerCase();
+								if (!qLower) {
+									scored.push({ tv, rank: 0 });
+								} else if (nLower.startsWith(qLower)) {
+									scored.push({ tv, rank: 0 });
+								} else if (nLower.includes(qLower)) {
+									scored.push({ tv, rank: 1 });
+								} else if (dLower.includes(qLower)) {
+									scored.push({ tv, rank: 2 });
 								}
 							}
+							scored.sort((a, b) => a.rank - b.rank || a.tv.name.localeCompare(b.tv.name));
+							handleMatches = scored.map(s => s.tv);
+							handleActiveIdx = 0;
+
+							if (!handlePopupEl) {
+								handlePopupEl = append(document.body, $('div.anyagent-handle-autocomplete-popup', {
+									style: 'position: fixed; z-index: 25000; min-width: 240px; max-width: 420px; max-height: 220px; overflow-y: auto; background: #171424; border: 1px solid rgba(192, 132, 252, 0.55); border-radius: 6px; padding: 4px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65); display: flex; flex-direction: column; gap: 2px;'
+								}));
+							}
+							const rect = targetInp.getBoundingClientRect();
+							const estHeight = Math.min(220, Math.max(36, handleMatches.length * 28 + 10));
+							const spaceBelow = window.innerHeight - rect.bottom - 12;
+							const topPos = spaceBelow >= estHeight ? rect.bottom + 4 : Math.max(8, rect.top - estHeight - 4);
+							const leftPos = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - 320));
+							handlePopupEl.style.top = `${topPos}px`;
+							handlePopupEl.style.left = `${leftPos}px`;
+							handlePopupEl.style.width = `${Math.max(240, Math.min(420, rect.width))}px`;
+							renderHandlePopupItems();
+						};
+
+						targetInp.addEventListener('input', updateHandleAutocomplete);
+						targetInp.addEventListener('click', updateHandleAutocomplete);
+						targetInp.addEventListener('keydown', (ev: KeyboardEvent) => {
+							if (!handlePopupEl) return;
+							if (ev.key === 'ArrowDown') {
+								ev.preventDefault();
+								ev.stopPropagation();
+								if (handleMatches.length > 0) {
+									handleActiveIdx = (handleActiveIdx + 1) % handleMatches.length;
+									renderHandlePopupItems();
+								}
+							} else if (ev.key === 'ArrowUp') {
+								ev.preventDefault();
+								ev.stopPropagation();
+								if (handleMatches.length > 0) {
+									handleActiveIdx = (handleActiveIdx - 1 + handleMatches.length) % handleMatches.length;
+									renderHandlePopupItems();
+								}
+							} else if (ev.key === 'Enter' || ev.key === 'Tab') {
+								if (handleMatches.length > 0 && handleMatches[handleActiveIdx]) {
+									ev.preventDefault();
+									ev.stopPropagation();
+									applyHandleSelection(handleMatches[handleActiveIdx].name);
+								}
+							} else if (ev.key === 'Escape') {
+								ev.preventDefault();
+								ev.stopPropagation();
+								closeHandlePopup();
+							}
 						});
-
-						// 2. Flowchart variables provider (upstream nodes in workflow)
-						if (isFlowchartNodeMode && input.workflowVariablesProvider) {
-							try {
-								const wfVars = input.workflowVariablesProvider() || [];
-								wfVars.forEach(wv => {
-									const wLabel = (wv.label || '').trim();
-									if (!wLabel) return;
-									const isTicketHandle = wv.type === 'HANDLE' ||
-										Boolean(wv.ticketType) ||
-										wv.sourceType === 'create_tickets' ||
-										wv.sourceType === 'run_tickets' ||
-										/ticket/i.test(wLabel) ||
-										/ticket/i.test(wv.type || '');
-									if (isTicketHandle && !seenVars.has(wLabel.toLowerCase())) {
-										// Avoid circular reference to current component's own output variable or label
-										const currentOutVar = (field.outputVariableName || '').trim().toLowerCase();
-										const currentFieldLabel = (field.label || '').trim().toLowerCase();
-										if (wLabel.toLowerCase() !== currentOutVar && wLabel.toLowerCase() !== currentFieldLabel) {
-											seenVars.add(wLabel.toLowerCase());
-											ticketVars.push({ name: wLabel, desc: wv.type || 'TICKET_HANDLE' });
-										}
-									}
-								});
-							} catch { }
-						}
-
-						if (ticketVars.length === 0) {
-							return;
-						}
-
-						const chipRow = append(containerEl, $('div', {
-							style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 3px;'
-						}));
-						append(chipRow, $('span', { style: 'font-size: 10px; opacity: 0.75; color: #c084fc; font-weight: 600;' }, 'Ticket Var:'));
-
-						ticketVars.forEach(tv => {
-							const chip = append(chipRow, $('button', {
-								type: 'button',
-								title: `Insert ticket variable {${tv.name}}${tv.desc ? ` (${tv.desc})` : ''}`,
-								style: 'padding: 2px 7px; font-size: 10px; border-radius: 4px; border: 1px solid rgba(192, 132, 252, 0.45); background: rgba(192, 132, 252, 0.12); color: #e9d5ff; cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap; transition: all 0.15s ease;'
-							}, `+ {${tv.name}}`));
-							chip.onmouseenter = () => { chip.style.background = 'rgba(192, 132, 252, 0.28)'; };
-							chip.onmouseleave = () => { chip.style.background = 'rgba(192, 132, 252, 0.12)'; };
-							chip.onclick = () => {
-								targetInp.value = `{${tv.name}}`;
-								onUpdated();
-							};
+						targetInp.addEventListener('blur', () => {
+							setTimeout(closeHandlePopup, 120);
 						});
+						this._renderCleanupFns.push(closeHandlePopup);
 					};
 
 					const attachTicketSearchDropdown = (inputEl: HTMLInputElement, onSelected: (ticketId: string) => void) => {
@@ -14490,19 +15082,33 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								const pWrap = append(paramsContainer, $('div', {
 									style: 'display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-radius: 5px; background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.07);'
 								}));
-								const pRow = append(pWrap, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
+								const pRow = append(pWrap, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;' }));
 								append(pRow, $('span', {
-									style: 'font-size: 11.5px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace); min-width: 110px; color: #f8fafc;'
+									style: 'font-size: 11.5px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace); min-width: 110px; color: #f8fafc; flex-shrink: 0;'
 								}, p.name));
-								append(pRow, $('span', {
-									style: `font-size: 9.5px; font-weight: 700; padding: 1px 6px; border-radius: 4px; ${hasDefault ? 'background: rgba(56, 189, 248, 0.14); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3);' : 'background: rgba(245, 158, 11, 0.18); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4);'}`
-								}, hasDefault ? `OPTIONAL (default: ${p.defaultValue})` : 'REQUIRED'));
 								const pInp = append(pRow, $('input.monaco-inputbox', {
 									type: 'text',
-									placeholder: hasDefault ? `Default: ${p.defaultValue} (or enter value / {var})` : `Enter value or {var} for ${p.name}`,
-									style: 'flex: 1; min-width: 140px; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.35); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+									placeholder: hasDefault ? `Default: ${p.defaultValue}` : `Enter value or {var} for ${p.name}`,
+									style: 'flex: 1; min-width: 120px; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.35); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
 								})) as HTMLInputElement;
-								pInp.value = field.wfTicketParams?.[p.name] ?? '';
+								const existingVal = field.wfTicketParams && Object.prototype.hasOwnProperty.call(field.wfTicketParams, p.name)
+									? field.wfTicketParams[p.name]
+									: undefined;
+								if (existingVal !== undefined && String(existingVal) !== '') {
+									pInp.value = String(existingVal);
+								} else if (hasDefault) {
+									pInp.value = String(p.defaultValue);
+									if (!field.wfTicketParams) {
+										field.wfTicketParams = {};
+									}
+									field.wfTicketParams[p.name] = pInp.value;
+								} else {
+									pInp.value = '';
+								}
+								append(pRow, $('span', {
+									title: hasDefault ? `Optional parameter (schema default: ${p.defaultValue})` : 'Required parameter',
+									style: `font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 4px; white-space: nowrap; flex-shrink: 0; ${hasDefault ? 'background: rgba(56, 189, 248, 0.12); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.28);' : 'background: rgba(245, 158, 11, 0.16); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35);'}`
+								}, hasDefault ? 'Optional' : 'Required'));
 								const saveParamVal = () => {
 									if (!field.wfTicketParams) {
 										field.wfTicketParams = {};
@@ -14555,20 +15161,37 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							style: 'display: flex; flex-direction: column; gap: 6px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.08);'
 						}));
 
-						const resolveRunTargetTicketType = (): string => {
-							if (field.wfTicketType) {
-								return field.wfTicketType;
+						const findUpstreamCreateField = (): ICustomField | undefined => {
+							const rawTarget = (field.wfTicketTarget || '').trim().replace(/^\{|\}$/g, '').trim().toLowerCase();
+							if (!rawTarget) {
+								return undefined;
 							}
+							return fields.find(f =>
+								f.type === 'create_tickets' && (
+									(f.outputVariableName || '').trim().toLowerCase() === rawTarget ||
+									(f.label || '').trim().toLowerCase() === rawTarget ||
+									(f.id || '').trim().toLowerCase() === rawTarget
+								)
+							);
+						};
+
+						const detectRunTargetTicketType = (): string => {
 							const rawTarget = (field.wfTicketTarget || '').trim().replace(/^\{|\}$/g, '').trim().toLowerCase();
 							if (!rawTarget) {
 								return '';
 							}
-							const upstreamCreate = fields.find(f =>
-								f.type === 'create_tickets' &&
-								((f.label || '').trim().toLowerCase() === rawTarget || (f.id || '').trim().toLowerCase() === rawTarget)
-							);
+							const upstreamCreate = findUpstreamCreateField();
 							if (upstreamCreate?.wfTicketType) {
 								return upstreamCreate.wfTicketType;
+							}
+							if (isFlowchartNodeMode && input.workflowVariablesProvider) {
+								try {
+									const wfVars = input.workflowVariablesProvider() || [];
+									const matchedVar = wfVars.find(v => (v.label || '').trim().toLowerCase() === rawTarget && v.ticketType);
+									if (matchedVar?.ticketType) {
+										return matchedVar.ticketType;
+									}
+								} catch { }
 							}
 							const snapshots = this._entityPersistenceService.getAllSnapshots() || [];
 							const matchedSnap = snapshots.find(s =>
@@ -14578,9 +15201,36 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							return matchedSnap?.entityType || '';
 						};
 
+						const resolveRunTargetTicketType = (): string => {
+							if (field.wfTicketType) {
+								return field.wfTicketType;
+							}
+							return detectRunTargetTicketType();
+						};
+
+						const syncDetectedTypeToSelect = (detected: string) => {
+							if (!detected) {
+								return;
+							}
+							const matchedMod = allWorkspaceModules.find(m =>
+								(m.name || '').toLowerCase() === detected.toLowerCase() ||
+								(m.id || '').toLowerCase() === detected.toLowerCase()
+							);
+							const canonical = matchedMod ? matchedMod.name : detected;
+							field.wfTicketType = canonical;
+							schemaSelect.value = canonical;
+						};
+
 						const renderRunParams = () => {
 							clearNode(paramsContainer);
+							if (!field.wfTicketType) {
+								const detected = detectRunTargetTicketType();
+								if (detected) {
+									syncDetectedTypeToSelect(detected);
+								}
+							}
 							const effectiveType = resolveRunTargetTicketType();
+							const upstreamCreate = findUpstreamCreateField();
 							const schemaParams = resolveModuleParameters(effectiveType || field.wfTicketTarget || '');
 							if (field.wfTicketParams && schemaParams.length > 0) {
 								const validParamNames = new Set(schemaParams.map(p => p.name.toLowerCase()));
@@ -14593,26 +15243,47 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							append(paramsContainer, $('div', {
 								style: 'font-size: 10.5px; font-weight: 700; text-transform: uppercase; color: #c084fc;'
 							}, effectiveType
-								? `Inputs Parameters Override for "${effectiveType}" (${schemaParams.length})`
-								: 'Inputs Parameters Override (Select Ticket Type or link a Create Tickets handle)'));
+								? `Inputs Parameters for "${effectiveType}" (${schemaParams.length})`
+								: 'Inputs Parameters (Select Ticket Type or link a Create Tickets handle)'));
 							schemaParams.forEach(p => {
 								const hasDefault = p.defaultValue !== undefined && String(p.defaultValue).trim() !== '';
 								const pWrap = append(paramsContainer, $('div', {
 									style: 'display: flex; flex-direction: column; gap: 3px; padding: 6px 8px; border-radius: 5px; background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.07);'
 								}));
-								const pRow = append(pWrap, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' }));
+								const pRow = append(pWrap, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;' }));
 								append(pRow, $('span', {
-									style: 'font-size: 11.5px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace); min-width: 110px;'
+									style: 'font-size: 11.5px; font-weight: 600; font-family: var(--vscode-editor-font-family, monospace); min-width: 110px; color: #f8fafc; flex-shrink: 0;'
 								}, p.name));
-								append(pRow, $('span', {
-									style: `font-size: 9.5px; font-weight: 700; padding: 1px 6px; border-radius: 4px; ${hasDefault ? 'background: rgba(56, 189, 248, 0.14); color: #38bdf8;' : 'background: rgba(245, 158, 11, 0.18); color: #fbbf24;'}`
-								}, hasDefault ? `OPTIONAL (default: ${p.defaultValue})` : 'REQUIRED'));
 								const pInp = append(pRow, $('input.monaco-inputbox', {
 									type: 'text',
-									placeholder: hasDefault ? `Default: ${p.defaultValue} (leave empty to keep existing)` : `Enter value or {var} for ${p.name}`,
-									style: 'flex: 1; min-width: 140px; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.35); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
+									placeholder: hasDefault ? `Default: ${p.defaultValue}` : `Enter value or {var} for ${p.name}`,
+									style: 'flex: 1; min-width: 120px; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.35); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
 								})) as HTMLInputElement;
-								pInp.value = field.wfTicketParams?.[p.name] ?? '';
+								const ownVal = field.wfTicketParams && Object.prototype.hasOwnProperty.call(field.wfTicketParams, p.name)
+									? field.wfTicketParams[p.name]
+									: undefined;
+								const inheritedVal = upstreamCreate?.wfTicketParams?.[p.name];
+								if (ownVal !== undefined && String(ownVal) !== '') {
+									pInp.value = String(ownVal);
+								} else if (inheritedVal !== undefined && String(inheritedVal) !== '') {
+									pInp.value = String(inheritedVal);
+									if (!field.wfTicketParams) {
+										field.wfTicketParams = {};
+									}
+									field.wfTicketParams[p.name] = pInp.value;
+								} else if (hasDefault) {
+									pInp.value = String(p.defaultValue);
+									if (!field.wfTicketParams) {
+										field.wfTicketParams = {};
+									}
+									field.wfTicketParams[p.name] = pInp.value;
+								} else {
+									pInp.value = '';
+								}
+								append(pRow, $('span', {
+									title: hasDefault ? `Optional parameter (schema default: ${p.defaultValue})` : 'Required parameter',
+									style: `font-size: 10px; font-weight: 600; padding: 2px 7px; border-radius: 4px; white-space: nowrap; flex-shrink: 0; ${hasDefault ? 'background: rgba(56, 189, 248, 0.12); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.28);' : 'background: rgba(245, 158, 11, 0.16); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35);'}`
+								}, hasDefault ? 'Optional' : 'Required'));
 								const saveParamVal = () => {
 									if (!field.wfTicketParams) {
 										field.wfTicketParams = {};
@@ -14628,10 +15299,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 						const onTargetUpdated = () => {
 							field.wfTicketTarget = targetInp.value;
-							const resolvedType = resolveRunTargetTicketType();
-							if (resolvedType && !field.wfTicketType) {
-								field.wfTicketType = resolvedType;
-								schemaSelect.value = resolvedType;
+							const detected = detectRunTargetTicketType();
+							if (detected) {
+								syncDetectedTypeToSelect(detected);
 							}
 							renderRunParams();
 							refreshPythonPreview();
@@ -14641,10 +15311,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						targetInp.oninput = onTargetUpdated;
 						attachTicketSearchDropdown(targetInp, (selectedId) => {
 							field.wfTicketTarget = selectedId;
-							const resolvedType = resolveRunTargetTicketType();
-							if (resolvedType) {
-								field.wfTicketType = resolvedType;
-								schemaSelect.value = resolvedType;
+							const detected = detectRunTargetTicketType();
+							if (detected) {
+								syncDetectedTypeToSelect(detected);
 							}
 							renderRunParams();
 							refreshPythonPreview();
@@ -15095,7 +15764,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						append(dispTop, $('label', { style: 'font-size: 11px; font-weight: 600; min-width: 95px; opacity: 0.85;' }, 'Display Value:'));
 						const dispInp = append(dispTop, $('input.monaco-inputbox', {
 							type: 'text',
-							placeholder: 'Variable or expression to display (e.g. {job_views_urls})',
+							placeholder: 'Python expression or variable (e.g. len(items), {jbs_app_jsons}, "hello", 42)',
 							style: 'flex: 1; min-width: 140px; padding: 5px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.3); color: inherit; font-family: var(--vscode-editor-font-family, monospace);'
 						})) as HTMLInputElement;
 						if (field.wfDisplayValue === '{title}' || field.wfDisplayValue === '{Title}' || field.wfDisplayValue === 'title') {
@@ -15147,6 +15816,60 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 					};
 					updateWfExecStatus();
+					{
+						const isActionBuiltin = field.type === 'create_tickets' || field.type === 'run_tickets';
+						const wfExecTestBtn = append(wfExecRight, $('button', {
+							type: 'button',
+							title: `Run ${field.type.toUpperCase()} using current runtime variables`,
+							style: 'display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; font-size: 10px; font-weight: 600; border-radius: 3px; border: 1px solid rgba(56, 189, 248, 0.45); background: rgba(56, 189, 248, 0.16); color: #7dd3fc; cursor: pointer;'
+						})) as HTMLButtonElement;
+						append(wfExecTestBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play), { style: 'font-size: 10px;' }));
+						const btnDefaultLabel = isActionBuiltin ? 'Run' : 'Test';
+						const wfExecTestLabel = append(wfExecTestBtn, $('span', {}, btnDefaultLabel));
+						wfExecTestBtn.onclick = async (e) => {
+							e.stopPropagation();
+							const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
+							if (!wsUri || !this._ticketWorkflowRuntimeService) {
+								this.notificationService.warn('Workspace runtime is unavailable for running this component.');
+								return;
+							}
+							wfExecTestBtn.disabled = true;
+							wfExecTestLabel.textContent = 'Running...';
+							try {
+								const liveCtx: Record<string, any> = isFlowchartNodeMode
+									? { ...(await this._getHydratedWorkflowRuntimeContext()) }
+									: {};
+								// Overlay sibling cards' latest outputs so freshly run/tested cards (e.g. {r2j_tkt}, {jbs_app_tkt}) always override stale run context
+								for (const sf of fields) {
+									if (!sf || sf === field) continue;
+									const sOut = (sf.type === 'python' && sf.pythonResult !== undefined)
+										? sf.pythonResult
+										: (sf as any).lastExecutionOutput;
+									if (sOut !== undefined) {
+										const sVar = (sf.outputVariableName || '').trim();
+										if (sVar) {
+											liveCtx[sVar] = sOut;
+										}
+										if (sf.label) {
+											liveCtx[sf.label] = sOut;
+										}
+									}
+								}
+								await this._ticketWorkflowRuntimeService.executeNodeComponent(wsUri, wsUri, field, liveCtx);
+								updateWfExecStatus();
+								renderWfExecPreview();
+								this._syncDraft();
+							} catch (err: any) {
+								(field as any).lastExecutionStatus = 'failed';
+								(field as any).lastExecutionLog = `[Run Error]: ${err?.message || err}`;
+								updateWfExecStatus();
+								renderWfExecPreview();
+							} finally {
+								wfExecTestBtn.disabled = false;
+								wfExecTestLabel.textContent = btnDefaultLabel;
+							}
+						};
+					}
 					const wfExecCopyBtn = append(wfExecRight, $('button', {
 						type: 'button',
 						title: 'Copy complete execution result',
@@ -15294,10 +16017,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			renderDropZonePasteButton();
 			pasteUiRefreshers.push(renderDropZonePasteButton);
 
-			if (mainViewport && savedScrollTop > 0) {
+			if (mainViewport && savedScrollTop > 0 && !didScrollToReorderedCard) {
 				mainViewport.scrollTop = savedScrollTop;
 				requestAnimationFrame(() => {
-					if (mainViewport) {
+					if (mainViewport && !didScrollToReorderedCard) {
 						mainViewport.scrollTop = savedScrollTop;
 					}
 				});
@@ -15778,7 +16501,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		}
 		saveBtn.onclick = async () => {
 			if (isFlowchartNodeMode) {
-				this._syncDraft();
+				if (!(this.input instanceof CustomModuleSchemaEditorInput) || !this.input.onNodeFieldsChange) {
+					this.notificationService.warn('Workflow editor connection is not active. Please re-open this node from the Workflow canvas to save.');
+					return;
+				}
+				this._syncDraft(true);
 				saveBtn.innerText = '✓ Node Saved';
 				saveBtn.style.background = '#10b981';
 				setTimeout(() => {
@@ -16068,10 +16795,31 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		}
 	}
 
+	/** Last result of `_getHydratedWorkflowRuntimeContext()`; lets synchronous interpolation resolve large spilled variables too. */
+	private _lastHydratedRuntimeCtx: Record<string, any> | undefined;
+
+	private async _getHydratedWorkflowRuntimeContext(): Promise<Record<string, any>> {
+		let ctx: Record<string, any> = {};
+		if (this.input instanceof CustomModuleSchemaEditorInput) {
+			try {
+				if (typeof this.input.hydratedWorkflowRuntimeContextProvider === 'function') {
+					ctx = await this.input.hydratedWorkflowRuntimeContextProvider();
+				} else if (typeof this.input.workflowRuntimeContextProvider === 'function') {
+					ctx = this.input.workflowRuntimeContextProvider() || {};
+				}
+			} catch (err) {
+				console.warn('[CustomModuleSchemaEditor] Failed to load workflow runtime variables:', err);
+			}
+		}
+		this._lastHydratedRuntimeCtx = ctx;
+		return ctx;
+	}
+
 	private _interpolateSchemaReferences(
 		rawText: string,
 		currentField: ICustomField,
-		allFields?: ICustomField[]
+		allFields?: ICustomField[],
+		runtimeContext?: Record<string, any>
 	): string {
 		if (!rawText) {
 			return '';
@@ -16229,6 +16977,43 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			}
 		}
 
+		// Also resolve Workflow / Sub-Workflow runtime context variables (e.g. {current_filtered_job}, {raw_working_exp}, {raw_project_exp})
+		let effectiveRuntimeCtx = runtimeContext;
+		if (!effectiveRuntimeCtx && this.input instanceof CustomModuleSchemaEditorInput && typeof this.input.workflowRuntimeContextProvider === 'function') {
+			try {
+				const rawCtx = this.input.workflowRuntimeContextProvider();
+				if (rawCtx && typeof rawCtx === 'object') {
+					effectiveRuntimeCtx = rawCtx;
+				}
+			} catch { }
+		}
+		if (effectiveRuntimeCtx && typeof effectiveRuntimeCtx === 'object') {
+			for (const [ctxKey, rawCtxVal] of Object.entries(effectiveRuntimeCtx)) {
+				let ctxVal = rawCtxVal;
+				if (ctxVal && typeof ctxVal === 'object' && (ctxVal as any).__anyagentVarRef__ === true) {
+					// Large spilled variable: use the value loaded by the last _getHydratedWorkflowRuntimeContext() call
+					const cached = this._lastHydratedRuntimeCtx?.[ctxKey];
+					ctxVal = (cached && typeof cached === 'object' && (cached as any).__anyagentVarRef__ === true) ? undefined : cached;
+				}
+				if (!ctxKey || ctxVal === undefined || ctxVal === null) {
+					continue;
+				}
+				let strVal = '';
+				if (typeof ctxVal === 'string') {
+					strVal = ctxVal;
+				} else if (typeof ctxVal === 'number' || typeof ctxVal === 'boolean') {
+					strVal = String(ctxVal);
+				} else {
+					try {
+						strVal = JSON.stringify(ctxVal, null, 2);
+					} catch {
+						strVal = String(ctxVal);
+					}
+				}
+				result = replaceToken(result, ctxKey, strVal);
+			}
+		}
+
 		return result;
 	}
 
@@ -16253,7 +17038,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			field.defaultUrl = url;
 		}
 
-		let finalUrl = this._interpolateSchemaReferences(url, field, allFields);
+		let finalUrl = this._interpolateSchemaReferences(url, field, allFields, await this._getHydratedWorkflowRuntimeContext());
 		if (!/^https?:\/\//i.test(finalUrl)) {
 			finalUrl = 'https://' + finalUrl;
 		}
@@ -16366,11 +17151,12 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 			: `--- [USER PROMPT INPUTS (${nonEmptyInputs.length} SEPARATE USER INPUTS IN ORDER)] ---\n${multiBody}`;
 	}
 
-	private _openSchemaSentPromptModal(
+	private async _openSchemaSentPromptModal(
 		promptTextarea: HTMLTextAreaElement,
 		field: ICustomField,
 		allFields?: ICustomField[]
-	): void {
+	): Promise<void> {
+		const runtimeCtx = await this._getHydratedWorkflowRuntimeContext();
 		const rawPreInjected = promptTextarea.value.trim();
 		const userPromptsList = field.promptUserInputVisible === false
 			? []
@@ -16379,9 +17165,9 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				: (field.defaultUserPrompt ? [field.defaultUserPrompt] : []));
 		const nonEmptySegments = userPromptsList.map(s => (s || '').trim()).filter(s => s.length > 0);
 		const rawCombined = this._formatCombinedPromptForLlm(rawPreInjected, userPromptsList);
-		const fullInterpolated = this._interpolateSchemaReferences(rawCombined, field, allFields);
-		const preInterpolated = this._interpolateSchemaReferences(rawPreInjected, field, allFields);
-		const segsInterpolated = nonEmptySegments.map(seg => this._interpolateSchemaReferences(seg, field, allFields));
+		const fullInterpolated = this._interpolateSchemaReferences(rawCombined, field, allFields, runtimeCtx);
+		const preInterpolated = this._interpolateSchemaReferences(rawPreInjected, field, allFields, runtimeCtx);
+		const segsInterpolated = nonEmptySegments.map(seg => this._interpolateSchemaReferences(seg, field, allFields, runtimeCtx));
 
 		const existing = document.querySelector('.schema-sent-prompt-modal-overlay');
 		if (existing) {
@@ -16408,19 +17194,63 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 		append(titleRow, $('span' + ThemeIcon.asCSSSelector(Codicon.eye), { style: 'font-size: 15px; color: #38bdf8;' }));
 		append(titleRow, $('span', { style: 'font-size: 14px; font-weight: 700; color: #f8fafc;' }, `Sent Prompt Inspector (Template Preview) — ${field.label || field.id}`));
 		append(headerLeft, $('div', { style: 'font-size: 11px; opacity: 0.72;' },
-			`Target: ${field.targetMode === 'agent' ? (field.targetAgentName || 'AI Agent') : (field.targetModel || 'gemini-1.5-flash')} · Total: ${fullInterpolated.length.toLocaleString()} chars · User Segments: ${segsInterpolated.length}`
+			`Target: ${field.targetMode === 'agent' ? (field.targetAgentName || 'AI Agent') : (field.targetModel || resolveDefaultModelId(field.targetProvider, 'gemini-2.5-flash'))} · Total: ${fullInterpolated.length.toLocaleString()} chars · User Segments: ${segsInterpolated.length}`
 		));
 
 		const headerRight = append(header, $('div', { style: 'display: flex; align-items: center; gap: 8px;' }));
 		const copyAllBtn = append(headerRight, $('button.monaco-button', {
 			type: 'button',
-			style: 'display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4);'
+			style: 'display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4); transition: all 0.15s ease;'
 		}));
-		append(copyAllBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy), { style: 'font-size: 12px;' }));
-		append(copyAllBtn, $('span', {}, 'Copy Full Prompt'));
-		copyAllBtn.onclick = () => {
-			this._clipboardService.writeText(fullInterpolated);
-			this.notificationService.info(`Copied full prompt (${fullInterpolated.length.toLocaleString()} chars).`);
+		const copyIconEl = append(copyAllBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy), { style: 'font-size: 12px;' }));
+		const copyLabelEl = append(copyAllBtn, $('span', {}, 'Copy Full Prompt'));
+		let copyResetTimer: any = null;
+		const showModalCopyToast = (msg: string, isError: boolean = false) => {
+			overlay.querySelector('.schema-modal-copy-toast')?.remove();
+			const toast = append(overlay, $('div.schema-modal-copy-toast', {
+				style: `position: fixed; top: 24px; left: 50%; transform: translateX(-50%); z-index: 10002; padding: 8px 16px; border-radius: 8px; font-size: 12px; font-weight: 600; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6); pointer-events: none; background: ${isError ? 'rgba(127, 29, 29, 0.96)' : 'rgba(6, 78, 59, 0.96)'}; color: ${isError ? '#fecaca' : '#a7f3d0'}; border: 1px solid ${isError ? 'rgba(248, 113, 113, 0.55)' : 'rgba(52, 211, 153, 0.55)'};`
+			}, msg));
+			setTimeout(() => { toast.remove(); }, isError ? 3500 : 2200);
+		};
+		copyAllBtn.onclick = async () => {
+			if (copyResetTimer) {
+				clearTimeout(copyResetTimer);
+				copyResetTimer = null;
+			}
+			try {
+				if (this._clipboardService) {
+					await this._clipboardService.writeText(fullInterpolated);
+				} else if (navigator?.clipboard?.writeText) {
+					await navigator.clipboard.writeText(fullInterpolated);
+				} else {
+					throw new Error('Clipboard API is unavailable');
+				}
+				copyIconEl.className = ThemeIcon.asClassName(Codicon.check);
+				copyLabelEl.textContent = 'Copied!';
+				copyAllBtn.style.background = 'rgba(16, 185, 129, 0.25)';
+				copyAllBtn.style.color = '#34d399';
+				copyAllBtn.style.borderColor = 'rgba(52, 211, 153, 0.55)';
+				showModalCopyToast(`✓ Copied full prompt (${fullInterpolated.length.toLocaleString()} chars)`, false);
+				this.notificationService.info(`Copied full prompt (${fullInterpolated.length.toLocaleString()} chars).`);
+			} catch (err: any) {
+				const reason = err?.message || String(err || 'Unknown clipboard error');
+				copyIconEl.className = ThemeIcon.asClassName(Codicon.error);
+				copyLabelEl.textContent = 'Copy Failed';
+				copyAllBtn.style.background = 'rgba(239, 68, 68, 0.25)';
+				copyAllBtn.style.color = '#f87171';
+				copyAllBtn.style.borderColor = 'rgba(248, 113, 113, 0.55)';
+				showModalCopyToast(`✗ Copy failed: ${reason}`, true);
+				this.notificationService.error(`Failed to copy full prompt: ${reason}`);
+			} finally {
+				copyResetTimer = setTimeout(() => {
+					copyIconEl.className = ThemeIcon.asClassName(Codicon.copy);
+					copyLabelEl.textContent = 'Copy Full Prompt';
+					copyAllBtn.style.background = 'rgba(59, 130, 246, 0.2)';
+					copyAllBtn.style.color = '#60a5fa';
+					copyAllBtn.style.borderColor = 'rgba(59, 130, 246, 0.4)';
+					copyResetTimer = null;
+				}, 2200);
+			}
 		};
 
 		const closeBtn = append(headerRight, $('button.monaco-button', {
@@ -16675,7 +17505,8 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 		}
 
 		// Interpolate referenced primitives ({Field Label}, {{Field Label}}, or @FieldLabel)
-		const interpolatedPrompt = this._interpolateSchemaReferences(rawPrompt, field, allFields);
+		const hydratedPromptCtx = await this._getHydratedWorkflowRuntimeContext();
+			const interpolatedPrompt = this._interpolateSchemaReferences(rawPrompt, field, allFields, hydratedPromptCtx);
 
 		statusEl.style.display = 'inline-block';
 		statusEl.textContent = 'Running...';
@@ -16704,7 +17535,12 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				throw new Error('AI Credential Service is not available');
 			}
 
-			let targetModel = field.targetModel || 'gemini-1.5-flash';
+			const missingVars = findUnresolvedTemplateVariables(rawPrompt, interpolatedPrompt);
+			if (missingVars.length > 0) {
+				throw new Error(`Prompt was not sent: no value found for ${missingVars.map(v => `{${v}}`).join(', ')}. Run the upstream node that produces ${missingVars.length > 1 ? 'these variables' : 'this variable'} first, or fix the variable name.`);
+			}
+
+			let targetModel = field.targetModel || resolveDefaultModelId(field.targetProvider, 'gemini-2.5-flash');
 			let systemPrompt: string | undefined = undefined;
 
 			if (field.targetMode === 'agent' && field.targetAgentId) {
@@ -16722,7 +17558,8 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				} catch { }
 			}
 
-			const res = await credService.executePrompt(targetModel, interpolatedPrompt, systemPrompt, field.targetProvider);
+			const promptDefaultModel = getGlobalDefaultModel();
+			const res = await credService.executePrompt(targetModel, interpolatedPrompt, systemPrompt, field.targetProvider || (promptDefaultModel && targetModel === promptDefaultModel.modelId ? promptDefaultModel.providerId : undefined));
 			const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
 
 			if (res.success && res.text) {
@@ -16873,7 +17710,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 					lines.push('  | :--- | :--- | :--- | :--- | :--- |');
 					params.forEach((p, pIdx) => {
 						const pName = p.name || p.label || `param_${pIdx + 1}`;
-						const pDef = p.defaultValue ? `\`${p.defaultValue}\`` : '*(empty)*';
+						const pDef = (p.defaultValue !== undefined && String(p.defaultValue).trim() !== '') ? `\`${p.defaultValue}\`` : '*(required — no default)*';
 						const pOpts = p.options && p.options.length > 0 ? p.options.map(o => `\`${o}\``).join(', ') : '-';
 						lines.push(`  | ${pIdx + 1} | **${pName}** | \`{${pName}}\` | ${pDef} | ${pOpts} |`);
 					});
@@ -16891,7 +17728,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 					lines.push(`- **Target Agent**: \`${f.targetAgentName || f.targetAgentId || 'default'}\``);
 				} else {
 					lines.push(`- **Target Provider**: \`${f.targetProvider || 'default'}\``);
-					lines.push(`- **Target Model**: \`${f.targetModel || 'gemini-1.5-flash'}\``);
+					lines.push(`- **Target Model**: \`${f.targetModel || resolveDefaultModelId(f.targetProvider, 'gemini-2.5-flash')}\``);
 				}
 				lines.push(`- **Pre-Injected Prompt Visible in Ticket**: \`${f.promptPreInjectedVisible !== false}\``);
 				const promptText = (f.defaultContent || '').trim();
@@ -16912,7 +17749,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				lines.push(`- **Database Engine**: \`${f.tableDbEngine || 'sqlite'}\``);
 				lines.push(`- **SQLite File Path**: \`${f.tableDbPath || '(default workspace database)'}\``);
 				lines.push(`- **Target Table Name / Parameter**: \`${f.tableDbTableName || '(not set)'}\``);
-				lines.push(`- **Auto-Sync with SQLite**: \`${!!f.tableAutoSyncDb}\``);
+				lines.push(`- **Create Empty Table If Missing**: \`${!!f.tableAutoSyncDb}\``);
 				const cols = f.tableColumns || [];
 				lines.push(`- **Table Columns Schema (${cols.length} columns)**:`);
 				if (cols.length > 0) {

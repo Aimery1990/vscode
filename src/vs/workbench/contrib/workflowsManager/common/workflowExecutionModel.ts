@@ -74,6 +74,9 @@ export interface IWorkflowNodeExecutionState {
 	output?: any;
 	error?: string;
 	failedStepIndex?: number;
+	failedStepId?: string;
+	failedStepError?: string;
+	failedStage?: string;
 	executedTickets: IExecutedTicketRecord[];
 	waitingHumanPrompt?: IWorkflowHumanPrompt;
 }
@@ -131,6 +134,25 @@ export interface IWorkflowOutputDef {
 	componentLabel: string;
 }
 
+export const SUB_WORKFLOWS_STORAGE_KEY = 'anyagent.subWorkflows.library';
+
+export interface ISubWorkflowDefinition {
+	id: string;
+	name: string;
+	namespace?: string;
+	description?: string;
+	sourceWorkflowUri?: string;
+	sourceWorkflowName?: string;
+	nodeIds: string[];
+	nodes: any[];
+	links: any[];
+	inputs: IWorkflowInputParamDef[];
+	outputs: IWorkflowOutputDef[];
+	isHiddenInSource?: boolean;
+	createdAt: number;
+	updatedAt: number;
+}
+
 export interface IWorkflowIOContract {
 	isValid: boolean;
 	inputNodeId?: string;
@@ -166,6 +188,17 @@ export interface IWorkflowExecutionRun {
 	ioContract?: IWorkflowIOContract;
 	workflowOutputs?: Record<string, any>;
 	workflowOutputsByVarName?: Record<string, any>;
+	isSubWorkflowRun?: boolean;
+	subWorkflowNamespace?: string;
+	/** Sub-Workflow runs only: the Sub-Workflow library id this run executes. */
+	subWorkflowId?: string;
+	/** Sub-Workflow runs only: the run that invoked this Sub-Workflow. */
+	parentRunId?: string;
+	/** Sub-Workflow runs only: workflow URI of the invoking run. */
+	parentWorkflowUri?: string;
+	/** Sub-Workflow runs only: id / label of the invoking (caller) node in the parent workflow. */
+	callerNodeId?: string;
+	callerNodeLabel?: string;
 	logs: IWorkflowLogEntry[];
 	error?: string;
 }

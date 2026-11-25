@@ -10,13 +10,111 @@ import { IInstantiationService, createDecorator } from '../../../../platform/ins
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, extractSshOutputLastNLines, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
-import { IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
+import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
 import { ITerminalService } from '../../terminal/browser/terminal.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
+
+/**
+ * Returns the variable placeholders (`{name}`, `{{name}}`, `@{name}`, optionally with `.field` / `["key"]` access) of
+ * `template` that interpolation left unresolved in `rendered`.
+ *
+ * The template is aligned against the rendered text (literal text must match; each placeholder is either kept
+ * verbatim or replaced by some value), so a placeholder that only appears in `rendered` because an inserted
+ * VALUE contains it (e.g. a table output that logs "resolved from {Table_Name}") is not reported as missing.
+ * JSON-like text such as `{"en": "..."}` is never reported because a placeholder must start with an identifier.
+ */
+export function findUnresolvedTemplateVariables(template: string, rendered: string): string[] {
+	if (!template) {
+		return [];
+	}
+	// Same brace syntax as the interpolators; only identifier-like names are reportable
+	const tokenRe = /@?\{\{?([^{}]+)\}?\}/g;
+	const reportableRe = /^\s*[A-Za-z_]\w*(?:\s*(?:\[[^\]\n{}]*\]|\.[A-Za-z_]\w*))*\s*$/;
+	type Token = { lit: string } | { ph: string; name: string };
+	const tokens: Token[] = [];
+	let last = 0;
+	let m: RegExpExecArray | null;
+	while ((m = tokenRe.exec(template)) !== null) {
+		tokens.push({ lit: template.slice(last, m.index) });
+		tokens.push({ ph: m[0], name: m[1].trim() });
+		last = tokenRe.lastIndex;
+	}
+	tokens.push({ lit: template.slice(last) });
+	const reportable = (t: { name: string }) => reportableRe.test(t.name);
+	if (!tokens.some(t => 'ph' in t && reportable(t) && rendered.includes(t.ph))) {
+		return [];
+	}
+
+	// Backtracking alignment: tokens alternate lit, ph, lit, ph, ..., lit
+	let budget = 20000;
+	const align = (ti: number, pos: number): Set<string> | null => {
+		if (--budget < 0) {
+			return null;
+		}
+		const tok = tokens[ti];
+		if ('lit' in tok) {
+			if (!rendered.startsWith(tok.lit, pos)) {
+				return null;
+			}
+			const next = pos + tok.lit.length;
+			if (ti === tokens.length - 1) {
+				return next === rendered.length ? new Set<string>() : null;
+			}
+			return align(ti + 1, next);
+		}
+		const following = tokens[ti + 1] as { lit: string };
+		const isLastPh = ti + 1 === tokens.length - 1;
+		// Option 1: the placeholder was left verbatim
+		if (rendered.startsWith(tok.ph, pos)) {
+			const res = align(ti + 1, pos + tok.ph.length);
+			if (res) {
+				if (reportable(tok)) {
+					res.add(tok.name);
+				}
+				return res;
+			}
+		}
+		// Option 2: the placeholder was replaced by some value ending where the following literal starts
+		if (isLastPh) {
+			const end = rendered.length - following.lit.length;
+			return end >= pos ? align(ti + 1, end) : null;
+		}
+		if (!following.lit) {
+			return null; // adjacent placeholders: ambiguous
+		}
+		let idx = rendered.indexOf(following.lit, pos);
+		while (idx !== -1) {
+			const res = align(ti + 1, idx);
+			if (res) {
+				return res;
+			}
+			if (budget < 0) {
+				return null;
+			}
+			idx = rendered.indexOf(following.lit, idx + 1);
+		}
+		return null;
+	};
+	const aligned = align(0, 0);
+	if (aligned) {
+		return Array.from(aligned);
+	}
+
+	// Could not align (e.g. other rewriting such as @Field substitution): a placeholder is missing only if it
+	// still appears at least as often as in the template (a resolved one can only reappear inside values)
+	const count = (text: string, needle: string) => text.split(needle).length - 1;
+	const missing = new Set<string>();
+	for (const t of tokens) {
+		if ('ph' in t && reportable(t) && count(rendered, t.ph) >= count(template, t.ph)) {
+			missing.add(t.name);
+		}
+	}
+	return Array.from(missing);
+}
 
 export interface ITicketCreateOptions {
 	workspaceUri: string | URI;
@@ -552,8 +650,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							preInjectedPrompt,
 							prompt: String(preInjectedPrompt || userPrompt),
 							targetMode: f.targetMode || 'model',
-							targetProvider: f.targetProvider || '',
-							targetModel: f.targetModel || 'gpt-4o',
+							targetProvider: f.targetProvider || (f.targetModel ? '' : (getGlobalDefaultModel()?.providerId || '')),
+							targetModel: f.targetModel || resolveDefaultModelId(f.targetProvider, 'gpt-4o'),
 							targetAgentId: f.targetAgentId || '',
 							targetAgentName: f.targetAgentName || '',
 							output: ''
@@ -1469,13 +1567,15 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 												? this._parseInputStringLiteral(savedVal)
 												: ((ctxVal !== undefined && ctxVal !== null)
 													? ctxVal
-													: this._parseInputStringLiteral(p.defaultValue ?? '')));
+													: undefined));
 									}
 
-									resolvedParams[pKey] = val;
-									contextVariables[pKey] = val;
-									if (p.label) {
-										contextVariables[p.label] = val;
+									if (val !== undefined) {
+										resolvedParams[pKey] = val;
+										contextVariables[pKey] = val;
+										if (p.label) {
+											contextVariables[p.label] = val;
+										}
 									}
 									// Clean up any loose top-level parameter entries in customMetadata from legacy ticket creation
 									if (pKey && pKey !== fieldLabel && customMetadata[pKey] !== undefined) {
@@ -1543,14 +1643,50 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								(field as any).lastExecutionStatus = 'success';
 							}
 
+							let retryLogs: string[] = [];
+							let fetchAttempts = 0;
+							let finalFetchError: string | undefined;
+
 							if (interpolatedUrl && /^https?:\/\//i.test(interpolatedUrl.trim())) {
-								this.logService.info(`[TicketWorkflowRuntime] Fetching web content from: ${interpolatedUrl}`);
-								let extracted = await this._extractWebContent(interpolatedUrl, browserCreds);
-								if ((!extracted.content || extracted.content.startsWith('[Fetch Failed') || extracted.content.startsWith('HTTP Error')) && existingContent) {
-									this.logService.info(`[TicketWorkflowRuntime] Web fetch failed or rate-limited; using preloaded content (${existingContent.length} chars)`);
+								const maxRetries = (typeof field.browserMaxRetries === 'number' && Number.isFinite(field.browserMaxRetries))
+									? Math.max(0, Math.min(10, Math.floor(field.browserMaxRetries)))
+									: 3;
+								const retryDelayMs = (typeof field.browserRetryDelayMs === 'number' && Number.isFinite(field.browserRetryDelayMs))
+									? Math.max(0, Math.min(60000, Math.floor(field.browserRetryDelayMs)))
+									: 1000;
+								this.logService.info(`[TicketWorkflowRuntime] Fetching web content from: ${interpolatedUrl} (maxRetries=${maxRetries}, delay=${retryDelayMs}ms)`);
+								const extracted = await this._extractWebContentWithRetry(interpolatedUrl, browserCreds, {
+									maxRetries,
+									retryDelayMs,
+									label: fieldLabel,
+									onRetryLog: (msg) => {
+										this.logService.warn(`[TicketWorkflowRuntime] ${msg}`);
+										options.onProgress?.({
+											stepIndex: stepIdx,
+											totalSteps: fieldsToRun.length,
+											fieldId: field.id,
+											fieldLabel,
+											fieldType: fieldType,
+											status: 'running',
+											message: msg
+										});
+									},
+									checkCancelled: () => {
+										if (this._cancelEpoch !== startEpoch) {
+											throw new Error('Ticket execution cancelled by Stop request');
+										}
+									}
+								});
+								retryLogs = extracted.retryLogs;
+								fetchAttempts = extracted.attempts;
+								finalFetchError = extracted.lastError;
+								const fetchFailed = Boolean(finalFetchError) || !extracted.content || extracted.content.startsWith('[Fetch Failed') || extracted.content.startsWith('HTTP Error');
+								if (fetchFailed && existingContent) {
+									this.logService.info(`[TicketWorkflowRuntime] Web fetch failed after ${fetchAttempts} attempt(s); using preloaded content (${existingContent.length} chars)`);
 									stepOutput = existingContent;
+									finalFetchError = undefined;
 								} else {
-									stepOutput = extracted.content || existingContent;
+									stepOutput = extracted.content || existingContent || (finalFetchError ? `[Fetch Failed: ${finalFetchError}]` : '');
 								}
 
 								customMetadata[fieldLabel] = JSON.stringify({
@@ -1588,11 +1724,27 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								resolvedUrl: interpolatedUrl || targetUrl,
 								content: stepOutput,
 								contentLength: typeof stepOutput === 'string' ? stepOutput.length : 0,
-								credentials: browserCreds || []
+								credentials: browserCreds || [],
+								attempts: fetchAttempts,
+								retryLogs
 							};
 
-							if (typeof stepOutput === 'string' && (stepOutput.startsWith('[Fetch Failed') || stepOutput.startsWith('HTTP Error') || stepOutput.startsWith('[Browser: Skipped - Invalid or empty URL'))) {
-								throw new Error(stepOutput);
+							if (finalFetchError || (typeof stepOutput === 'string' && (stepOutput.startsWith('[Fetch Failed') || stepOutput.startsWith('HTTP Error') || stepOutput.startsWith('[Browser: Skipped - Invalid or empty URL')))) {
+								(field as any).lastExecutionStatus = 'failed';
+								const errSummary = finalFetchError || String(stepOutput);
+								(field as any).lastExecutionLog = [
+									`>>> Browser Fetch Failed: ${interpolatedUrl || targetUrl}`,
+									...retryLogs,
+									`Final Error: ${errSummary}`
+								].join('\n');
+								throw new Error(errSummary);
+							}
+							if (retryLogs.length > 0) {
+								(field as any).lastExecutionLog = [
+									`>>> Visited Target URL: ${interpolatedUrl || targetUrl}`,
+									...retryLogs,
+									`Extracted Length: ${typeof stepOutput === 'string' ? stepOutput.length : 0} chars`
+								].join('\n');
 							}
 							break;
 						}
@@ -1606,7 +1758,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								? [...field.defaultUserPrompts]
 								: [];
 							let legacySavedPrompt = '';
-							let promptModel = field.targetModel || 'gpt-4o';
+							let promptModel = field.targetModel || resolveDefaultModelId(field.targetProvider, 'gpt-4o');
 							let promptProvider = field.targetProvider;
 							let existingPromptOutput = '';
 
@@ -1652,6 +1804,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 									if ((metaVal as any).output) existingPromptOutput = String((metaVal as any).output);
 								}
 							}
+							const promptDefaultModel = getGlobalDefaultModel();
+							if (!promptProvider && promptDefaultModel && promptModel === promptDefaultModel.modelId) {
+								promptProvider = promptDefaultModel.providerId;
+							}
 
 							if (!userPrompt && legacySavedPrompt && legacySavedPrompt !== preInjectedPrompt && !legacySavedPrompt.startsWith(preInjectedPrompt)) {
 								userPrompt = legacySavedPrompt;
@@ -1685,6 +1841,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								this.logService.info(`[TicketWorkflowRuntime] Deterministically extracted full JSON array from referenced table for prompt '${fieldLabel}' (${directTableJson.length} chars).`);
 								aiResponse = directTableJson;
 							} else {
+								this._assertPromptVariablesResolved(fieldLabel, rawPrompt, interpolatedPrompt);
 								try {
 									aiResponse = await this._executePrompt(promptModel, interpolatedPrompt, promptProvider);
 								} catch (promptErr) {
@@ -2780,10 +2937,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 						case 'display': {
 							const rawDisp = (field.wfDisplayValue || '').trim();
-							const singleVar = rawDisp.match(/^\{([^{}]+)\}$/);
-							const resolvedVal = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
-								? contextVariables[singleVar[1].trim()]
-								: this._interpolateVariables(rawDisp, contextVariables);
+							const resolvedVal = await this._evaluateDisplayExpression(wsUri, ticketUri, rawDisp, contextVariables);
 							stepOutput = resolvedVal;
 							stepDetails = { displayExpr: rawDisp, value: resolvedVal };
 							break;
@@ -2943,6 +3097,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			return val;
 		}
 		const trimmed = val.trim();
+		if (!trimmed) {
+			return val;
+		}
+		// 1. Explicit quoted string literal (Python-style "..." or '...') -> always keep as string (e.g. '2' or "2" -> "2")
 		if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
 			try {
 				const parsed = JSON.parse(trimmed);
@@ -2957,6 +3115,31 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const inner = trimmed.slice(1, -1);
 			if (!/(^|[^\\])'/.test(inner)) {
 				return inner.replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+			}
+		}
+		// 2. Unquoted numeric literal (int / float) -> number (e.g. 2 -> 2, 3.14 -> 3.14)
+		if (/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(trimmed)) {
+			const num = Number(trimmed);
+			if (Number.isFinite(num)) {
+				return num;
+			}
+		}
+		// 3. Unquoted boolean / None literals
+		if (trimmed === 'true' || trimmed === 'True') {
+			return true;
+		}
+		if (trimmed === 'false' || trimmed === 'False') {
+			return false;
+		}
+		if (trimmed === 'null' || trimmed === 'None') {
+			return null;
+		}
+		// 4. Unquoted JSON list / dict literals
+		if ((trimmed.startsWith('[') && trimmed.endsWith(']')) || (trimmed.startsWith('{') && trimmed.endsWith('}'))) {
+			try {
+				return JSON.parse(trimmed);
+			} catch {
+				return val;
 			}
 		}
 		return val;
@@ -3036,29 +3219,47 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						`Timestamp: ${executedAt}`
 					];
 					if (Array.isArray(field.parameters)) {
+						const callerKeys: string[] = Array.isArray(contextVariables['__callerInputKeys__']) ? contextVariables['__callerInputKeys__'] : [];
 						for (const p of field.parameters) {
 							const pKey = (p.name || p.id || '').trim();
 							if (!pKey) continue;
 							const rawDef = p.defaultValue ?? '';
 							const singleVar = typeof rawDef === 'string' ? rawDef.trim().match(/^\{([^{}]+)\}$/) : null;
 							const isNonEmpty = (v: any) => v !== undefined && v !== null && (typeof v !== 'string' || v.trim() !== '');
+							const isCallerOverride = callerKeys.includes(pKey) && isNonEmpty(contextVariables[pKey]);
 							let val: any;
-							if (singleVar && contextVariables[singleVar[1].trim()] !== undefined) {
+							let sourceNote = '';
+							if (isCallerOverride) {
+								// Explicitly passed by Sub-Workflow caller: takes priority over default value
+								val = contextVariables[pKey];
+								sourceNote = '(from caller)';
+							} else if (singleVar && contextVariables[singleVar[1].trim()] !== undefined) {
 								val = contextVariables[singleVar[1].trim()];
+								sourceNote = `(from ${rawDef})`;
 							} else if (typeof rawDef === 'string' && rawDef.includes('{')) {
 								val = this._parseInputStringLiteral(this._interpolateVariables(rawDef, contextVariables));
+								sourceNote = `(from ${rawDef})`;
 							} else if (isNonEmpty(rawDef)) {
 								val = this._parseInputStringLiteral(rawDef);
+								sourceNote = '(default)';
 							} else if (isNonEmpty(contextVariables[pKey])) {
 								val = contextVariables[pKey];
+								sourceNote = '(from context)';
+							} else if (contextVariables[pKey] !== undefined) {
+								val = contextVariables[pKey];
+								sourceNote = '(from context)';
 							} else {
-								val = contextVariables[pKey] ?? this._parseInputStringLiteral(rawDef) ?? '';
+								val = undefined;
+								sourceNote = '(required — no default)';
 							}
-							resolvedParams[pKey] = val;
-							contextVariables[pKey] = val;
-							const desc = describeRuntimeValue(val);
-							traceLines.push(`\n• ${pKey} <= ${rawDef || `(context['${pKey}'])`}  [Type: ${desc.typeTag}]`);
-							traceLines.push(desc.preview);
+							if (val !== undefined) {
+								resolvedParams[pKey] = val;
+								contextVariables[pKey] = val;
+								const desc = describeRuntimeValue(val);
+								traceLines.push(`\n• ${pKey} = ${desc.preview}  ${sourceNote}  [Type: ${desc.typeTag}]`);
+							} else {
+								traceLines.push(`\n• ${pKey}  ${sourceNote}`);
+							}
 						}
 					}
 					stepOutput = resolvedParams;
@@ -3081,13 +3282,14 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						? `${preInjected}\n\n--- [USER PROMPT / INSTRUCTIONS] ---\n${userPrompt}`
 						: (preInjected || userPrompt);
 					const interpolatedPrompt = this._interpolateVariables(rawPrompt, contextVariables);
-					const promptModel = field.targetModel || 'gemini-1.5-flash';
-					const promptProvider = field.targetProvider;
+					const promptModel = field.targetModel || resolveDefaultModelId(field.targetProvider, 'gemini-2.5-flash');
+					const promptProvider = field.targetProvider || (field.targetModel ? undefined : getGlobalDefaultModel()?.providerId);
 					let rawAiResp = '';
 					const directTableJson = this._tryExtractJsonRecordsFromTablePrompt(rawPrompt, contextVariables, undefined, false);
 					if (directTableJson !== undefined) {
 						rawAiResp = directTableJson;
 					} else {
+						this._assertPromptVariablesResolved(fieldLabel, rawPrompt, interpolatedPrompt);
 						rawAiResp = await this._executePrompt(promptModel, interpolatedPrompt, promptProvider);
 						if (!rawAiResp || /"error"\s*:\s*"[^"]*(?:rows|records|preview|omitted|batches)/i.test(rawAiResp) || rawAiResp.startsWith('[AI ')) {
 							const fallbackTableJson = this._tryExtractJsonRecordsFromTablePrompt(rawPrompt, contextVariables, undefined, true);
@@ -3130,14 +3332,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					const rawCode = field.pythonCode || field.defaultValue || field.defaultContent || '';
 					const interpolatedCode = this._interpolateVariables(rawCode, contextVariables);
 					const pyRes = await this.executePythonScript(wsUri, workUri, field.pythonPath || '', interpolatedCode, contextVariables, field.externalScripts);
-					stepOutput = pyRes.result !== undefined ? pyRes.result : pyRes.output;
-					contextVariables[fieldLabel] = stepOutput;
-					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 					const cappedPyOutput = (pyRes.output || '').length > 3000 ? (pyRes.output || '').substring(0, 3000) + ' ... [truncated]' : (pyRes.output || '(Script pipeline completed with no stdout/stderr output)');
 					field.pythonOutput = cappedPyOutput;
-					field.pythonResult = pyRes.result;
 					(field as any).lastExecutionLog = cappedPyOutput;
-					(field as any).lastExecutionOutput = stepOutput;
 					stepDetails = {
 						exitCode: pyRes.exitCode,
 						output: pyRes.output,
@@ -3150,24 +3347,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						stepDetails.error = errDetail;
 						throw new Error(errDetail);
 					}
-					break;
-					(field as any).lastExecutionExitCode = pyRes.exitCode;
-					(field as any).lastExecutionStatus = pyRes.success ? 'success' : 'failed';
-					(field as any).lastExecutionDurationMs = pyRes.durationMs || (Date.now() - stepStart);
-					(field as any).lastExecutedAt = executedAt;
-					stepDetails = { pythonPath: pyRes.pythonPath, executedCode: interpolatedCode, output: pyRes.output, result: pyRes.result, exitCode: pyRes.exitCode };
-					if (!pyRes.success) {
-						return {
-							fieldId: field.id,
-							fieldLabel,
-							fieldType,
-							output: stepOutput,
-							status: 'failed',
-							error: pyRes.error || `Python script exited with code ${pyRes.exitCode}`,
-							durationMs: pyRes.durationMs || (Date.now() - stepStart),
-							details: stepDetails
-						};
-					}
+					stepOutput = pyRes.result !== undefined ? pyRes.result : pyRes.output;
+					contextVariables[fieldLabel] = stepOutput;
+					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+					field.pythonResult = pyRes.result;
+					(field as any).lastExecutionOutput = stepOutput;
 					break;
 				}
 				case 'table': {
@@ -3263,12 +3447,45 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						field.lastResolvedUrl = interpolatedUrl;
 						(field as any).lastExecutedUrl = interpolatedUrl;
 						(field as any).lastExecutedAt = executedAt;
-						(field as any).lastExecutionStatus = 'success';
 					}
-					const extracted = interpolatedUrl ? await this._extractWebContent(interpolatedUrl, field.credentials) : { title: '', content: '' };
+					const maxRetries = (typeof field.browserMaxRetries === 'number' && Number.isFinite(field.browserMaxRetries))
+						? Math.max(0, Math.min(10, Math.floor(field.browserMaxRetries)))
+						: 3;
+					const retryDelayMs = (typeof field.browserRetryDelayMs === 'number' && Number.isFinite(field.browserRetryDelayMs))
+						? Math.max(0, Math.min(60000, Math.floor(field.browserRetryDelayMs)))
+						: 1000;
+					const extracted = interpolatedUrl
+						? await this._extractWebContentWithRetry(interpolatedUrl, field.credentials, {
+							maxRetries,
+							retryDelayMs,
+							label: fieldLabel,
+							onRetryLog: (msg) => this.logService.warn(`[TicketWorkflowRuntime] ${msg}`),
+							checkCancelled: ensureNotCancelled
+						})
+						: { title: '', content: '', attempts: 0, retryLogs: [] as string[], lastError: 'Invalid or empty URL' };
 					stepOutput = extracted.content || '';
+					stepDetails = {
+						rawUrl: field.defaultUrl,
+						url: interpolatedUrl,
+						resolvedUrl: interpolatedUrl,
+						contentLength: stepOutput.length,
+						attempts: extracted.attempts,
+						retryLogs: extracted.retryLogs
+					};
+					if (extracted.lastError || (typeof stepOutput === 'string' && (stepOutput.startsWith('[Fetch Failed') || stepOutput.startsWith('HTTP Error')))) {
+						const errMsg = extracted.lastError || stepOutput;
+						(field as any).lastExecutionStatus = 'failed';
+						(field as any).lastExecutionLog = [
+							`>>> Browser Fetch Failed: ${interpolatedUrl || '(empty)'}`,
+							...extracted.retryLogs,
+							`Final Error: ${errMsg}`
+						].join('\n');
+						throw new Error(errMsg);
+					}
+					(field as any).lastExecutionStatus = 'success';
 					const previewText = stepOutput.length > 2000 ? stepOutput.substring(0, 2000) + '\n... [truncated]' : stepOutput;
-					(field as any).lastExecutionLog = `>>> Visited Target URL: ${interpolatedUrl || '(empty)'}\nExtracted Length: ${stepOutput.length} chars\n\n${previewText}`;
+					const retryHeader = extracted.retryLogs.length > 0 ? `${extracted.retryLogs.join('\n')}\n` : '';
+					(field as any).lastExecutionLog = `>>> Visited Target URL: ${interpolatedUrl || '(empty)'}\n${retryHeader}Extracted Length: ${stepOutput.length} chars\n\n${previewText}`;
 					(field as any).lastExecutionOutput = stepOutput;
 					contextVariables[fieldLabel] = stepOutput;
 					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
@@ -3276,7 +3493,6 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					contextVariables[`${this._cleanKey(fieldLabel)}_url`] = interpolatedUrl;
 					contextVariables[`${fieldLabel}_resolved_url`] = interpolatedUrl;
 					contextVariables[`${this._cleanKey(fieldLabel)}_resolved_url`] = interpolatedUrl;
-					stepDetails = { rawUrl: field.defaultUrl, url: interpolatedUrl, resolvedUrl: interpolatedUrl, contentLength: stepOutput.length };
 					break;
 				}
 				case 'media_player': {
@@ -3577,10 +3793,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				}
 				case 'display': {
 					const rawDisp = (field.wfDisplayValue || '').trim();
-					const singleVar = rawDisp.match(/^\{([^{}]+)\}$/);
-					stepOutput = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
-						? contextVariables[singleVar[1].trim()]
-						: this._interpolateVariables(rawDisp, contextVariables);
+					stepOutput = await this._evaluateDisplayExpression(wsUri, workUri, rawDisp, contextVariables);
 					stepDetails = { displayExpr: rawDisp, value: stepOutput };
 					const desc = describeRuntimeValue(stepOutput);
 					(field as any).lastExecutionLog = `>>> DISPLAY (${rawDisp}) [Type: ${desc.typeTag}]\n${desc.preview}`;
@@ -3687,6 +3900,104 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				details: stepDetails
 			};
 		}
+	}
+
+	private _normalizeDisplayPythonExpr(rawVal: string): string {
+		const trimmed = (rawVal || '').trim();
+		if (!trimmed) {
+			return '';
+		}
+		const exactVar = trimmed.match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/);
+		if (exactVar) {
+			return exactVar[1];
+		}
+		let out = '';
+		let inQuote: string | null = null;
+		let i = 0;
+		while (i < trimmed.length) {
+			const ch = trimmed[i];
+			if (inQuote) {
+				out += ch;
+				if (ch === '\\' && i + 1 < trimmed.length) {
+					out += trimmed[i + 1];
+					i += 2;
+					continue;
+				}
+				if (ch === inQuote) {
+					inQuote = null;
+				}
+				i++;
+				continue;
+			}
+			if (ch === '"' || ch === "'") {
+				inQuote = ch;
+				out += ch;
+				i++;
+				continue;
+			}
+			if (ch === '{') {
+				const m = trimmed.slice(i).match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}/);
+				if (m) {
+					out += m[1];
+					i += m[0].length;
+					continue;
+				}
+			}
+			out += ch;
+			i++;
+		}
+		return out;
+	}
+
+	/**
+	 * Evaluate a DISPLAY expression preserving its exact native data type (number, boolean, array, object, string, null).
+	 * Never auto-wraps expressions in quotes or forces string coercion.
+	 */
+	private async _evaluateDisplayExpression(
+		workspaceUri: URI,
+		workingDirUri: URI,
+		rawDisp: string,
+		contextVariables: Record<string, any>
+	): Promise<any> {
+		const pyExpr = this._normalizeDisplayPythonExpr(rawDisp);
+		if (!pyExpr) {
+			return null;
+		}
+		// Fast path 1: exact variable name present in contextVariables (preserves exact native type)
+		if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(pyExpr) && Object.prototype.hasOwnProperty.call(contextVariables, pyExpr) && contextVariables[pyExpr] !== undefined) {
+			return contextVariables[pyExpr];
+		}
+		// Fast path 2: exact Python/JSON primitive literals (number, boolean, null)
+		if (pyExpr === 'None' || pyExpr === 'null') {
+			return null;
+		}
+		if (pyExpr === 'True' || pyExpr === 'true') {
+			return true;
+		}
+		if (pyExpr === 'False' || pyExpr === 'false') {
+			return false;
+		}
+		if (/^-?\d+(\.\d+)?$/.test(pyExpr)) {
+			return Number(pyExpr);
+		}
+		// Fast path 3: plain double-quoted JSON string literal (not f-string)
+		if (pyExpr.startsWith('"') && pyExpr.endsWith('"') && pyExpr.length >= 2) {
+			try {
+				const parsed = JSON.parse(pyExpr);
+				if (typeof parsed === 'string') {
+					return parsed;
+				}
+			} catch { }
+		}
+		// Expression path: evaluate via Python runtime so len(...), indexing, arithmetic, f-strings, dicts, lists, etc.
+		// produce their exact native data type.
+		const pyCode = `OUTPUT = (${pyExpr})\n`;
+		const pyRes = await this.executePythonScript(workspaceUri, workingDirUri, 'python3', pyCode, contextVariables);
+		if (!pyRes.success || pyRes.exitCode !== 0) {
+			const errDetail = (pyRes.error || pyRes.output || 'Failed to evaluate display expression').trim();
+			throw new Error(errDetail);
+		}
+		return pyRes.result !== undefined ? pyRes.result : null;
 	}
 
 	/**
@@ -4136,7 +4447,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						return this._formatTablePayloadAsMarkdown(parsed.columns, parsed.rows || []);
 					}
 					if (parsed.content !== undefined && String(parsed.content).trim() !== '') return String(parsed.content);
-					if (parsed.result !== undefined && parsed.result !== null && String(parsed.result).trim() !== '') {
+					if (parsed.result !== undefined && parsed.result !== null && (typeof parsed.result !== 'string' || parsed.result.trim() !== '')) {
 						return typeof parsed.result === 'object' ? JSON.stringify(parsed.result) : String(parsed.result).trim();
 					}
 					if (parsed.data !== undefined && parsed.data !== null && (parsed.status !== undefined || parsed.ok !== undefined)) {
@@ -4171,7 +4482,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				return this._formatTablePayloadAsMarkdown(rawVal.columns, rawVal.rows || []);
 			}
 			if (rawVal.content !== undefined && String(rawVal.content).trim() !== '') return String(rawVal.content);
-			if (rawVal.result !== undefined && rawVal.result !== null && String(rawVal.result).trim() !== '') {
+			if (rawVal.result !== undefined && rawVal.result !== null && (typeof rawVal.result !== 'string' || rawVal.result.trim() !== '')) {
 				return typeof rawVal.result === 'object' ? JSON.stringify(rawVal.result) : String(rawVal.result).trim();
 			}
 			if (rawVal.data !== undefined && rawVal.data !== null && (rawVal.status !== undefined || rawVal.ok !== undefined)) {
@@ -4251,19 +4562,30 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return resolvedList;
 	}
 
+	/** Refuses to send an AI prompt that still contains unresolved `{variable}` placeholders. */
+	private _assertPromptVariablesResolved(promptLabel: string, rawPrompt: string, interpolatedPrompt: string): void {
+		const missing = findUnresolvedTemplateVariables(rawPrompt, interpolatedPrompt);
+		if (missing.length > 0) {
+			throw new Error(`AI Prompt '${promptLabel}' was not sent: no value found for ${missing.map(v => `{${v}}`).join(', ')}. Run the upstream node that produces ${missing.length > 1 ? 'these variables' : 'this variable'} first, or fix the variable name.`);
+		}
+	}
+
 	private _interpolateVariables(text: string, context: Record<string, any>): string {
 		if (!text) return '';
 
+		// A large-variable reference that was never loaded back is not the variable's value: treat it as missing
+		// so the placeholder stays visible (and is reported) instead of sending the reference JSON as content.
+		const usable = (v: any): any => (v && typeof v === 'object' && v.__anyagentVarRef__ === true) ? undefined : v;
 		const findInContext = (k: string): any => {
 			if (!k) return undefined;
 			const tk = k.trim();
-			if (context[tk] !== undefined) return context[tk];
+			if (usable(context[tk]) !== undefined) return context[tk];
 			const clean = this._cleanKey(tk);
-			if (context[clean] !== undefined) return context[clean];
+			if (usable(context[clean]) !== undefined) return context[clean];
 			const lower = tk.toLowerCase();
 			for (const [ck, cv] of Object.entries(context)) {
 				if (ck.toLowerCase() === lower || this._cleanKey(ck) === clean) {
-					if (cv !== undefined) return cv;
+					if (usable(cv) !== undefined) return cv;
 				}
 			}
 			return undefined;
@@ -4418,6 +4740,78 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		}
 
 		return result;
+	}
+
+	private async _extractWebContentWithRetry(
+		targetUrl: string,
+		credentials?: Array<{ key: string; value: string }>,
+		options?: {
+			maxRetries?: number;
+			retryDelayMs?: number;
+			label?: string;
+			onRetryLog?: (msg: string) => void;
+			checkCancelled?: () => void;
+		}
+	): Promise<{ title: string; content: string; attempts: number; retryLogs: string[]; lastError?: string }> {
+		const maxRetries = typeof options?.maxRetries === 'number' && Number.isFinite(options.maxRetries)
+			? Math.max(0, Math.min(10, Math.floor(options.maxRetries)))
+			: 3;
+		const retryDelayMs = typeof options?.retryDelayMs === 'number' && Number.isFinite(options.retryDelayMs)
+			? Math.max(0, Math.min(60000, Math.floor(options.retryDelayMs)))
+			: 1000;
+		const label = options?.label || 'Browser';
+		const retryLogs: string[] = [];
+		let lastResult: { title: string; content: string } = { title: '', content: '' };
+		let lastError: string | undefined;
+
+		for (let attempt = 0; attempt <= maxRetries; attempt++) {
+			options?.checkCancelled?.();
+			try {
+				const extracted = await this._extractWebContent(targetUrl, credentials);
+				lastResult = extracted;
+				const content = extracted?.content || '';
+				const isErrorContent = !content || content.startsWith('[Fetch Failed') || content.startsWith('HTTP Error');
+				if (!isErrorContent) {
+					if (attempt > 0) {
+						const okMsg = `[Browser Retry ${attempt}/${maxRetries}] '${label}' succeeded on retry #${attempt} (${content.length} chars).`;
+						retryLogs.push(okMsg);
+						options?.onRetryLog?.(okMsg);
+					}
+					return {
+						title: extracted.title || '',
+						content,
+						attempts: attempt + 1,
+						retryLogs
+					};
+				}
+				lastError = content || '[Fetch Failed: Empty response]';
+			} catch (err: any) {
+				lastError = err?.message || String(err);
+				lastResult = { title: '', content: `[Fetch Failed: ${lastError}]` };
+			}
+
+			if (attempt < maxRetries) {
+				const retryMsg = `[Browser Retry ${attempt + 1}/${maxRetries}] '${label}' failed (${lastError}). Waiting ${retryDelayMs}ms before retry #${attempt + 1}...`;
+				retryLogs.push(retryMsg);
+				options?.onRetryLog?.(retryMsg);
+				if (retryDelayMs > 0) {
+					await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+				}
+				options?.checkCancelled?.();
+			} else {
+				const haltMsg = `[Browser Failed] '${label}' exhausted all ${maxRetries} retry attempt(s). Final error: ${lastError}`;
+				retryLogs.push(haltMsg);
+				options?.onRetryLog?.(haltMsg);
+			}
+		}
+
+		return {
+			title: lastResult.title || '',
+			content: lastResult.content || (lastError ? `[Fetch Failed: ${lastError}]` : ''),
+			attempts: maxRetries + 1,
+			retryLogs,
+			lastError
+		};
 	}
 
 	private async _extractWebContent(targetUrl: string, credentials?: Array<{ key: string; value: string }>): Promise<{ title: string; content: string }> {
@@ -4903,7 +5297,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				return out ? this._parseOutputFieldValue(out) : null;
 			}
 			if (rawMeta.pythonCode !== undefined || rawMeta.code !== undefined || rawMeta.pythonPath !== undefined) {
-				if (rawMeta.result !== undefined && rawMeta.result !== null && String(rawMeta.result).trim() !== '') {
+				if (rawMeta.result !== undefined && rawMeta.result !== null && (typeof rawMeta.result !== 'string' || rawMeta.result.trim() !== '')) {
 					return this._parseOutputFieldValue(rawMeta.result);
 				}
 				const out = rawMeta.output !== undefined ? String(rawMeta.output).trim() : '';
@@ -5577,6 +5971,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		const scriptUri = URI.file(`${tmpDirPath}/.anyagent_py_${timestamp}_${randSuffix}.py`);
 		const logUri = URI.file(`${tmpDirPath}/.anyagent_py_${timestamp}_${randSuffix}.log`);
 		const resultUri = URI.file(`${tmpDirPath}/.anyagent_py_${timestamp}_${randSuffix}.result.json`);
+		const rpcReqUri = URI.file(`${tmpDirPath}/.anyagent_py_${timestamp}_${randSuffix}.rpc_req.json`);
+		const rpcResUri = URI.file(`${tmpDirPath}/.anyagent_py_${timestamp}_${randSuffix}.rpc_res.json`);
+		const needsHostRpc = /\b(?:CREATE_TICKETS|create_tickets|RUN_TICKETS|run_tickets|GET_OUTPUTS|get_outputs|GET_TICKET|get_ticket)\s*\(/.test(code || '');
 
 		try {
 			if (this._cancelEpoch !== startEpoch) {
@@ -5608,8 +6005,16 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				const hasTicketCall = /\b(?:GET_OUTPUTS|get_outputs|GET_TICKETS|get_tickets|GET_TICKET|get_ticket)\b/.test(code || '');
 				if (hasTicketCall && contextVariables && typeof contextVariables === 'object') {
 					for (const [k, val] of Object.entries(contextVariables)) {
-						if (val && typeof val === 'object' && val.ticketId && (code || '').includes(k)) {
-							candidateTicketIds.add(String(val.ticketId).trim());
+						if (!(code || '').includes(k)) {
+							continue;
+						}
+						if (val && typeof val === 'object') {
+							const tid = val.ticketId || val.entityUri || val.ticketName;
+							if (tid) {
+								candidateTicketIds.add(String(tid).trim());
+							}
+						} else if (typeof val === 'string' && val.trim().length > 0 && val.trim().length < 512) {
+							candidateTicketIds.add(val.trim());
 						}
 					}
 				}
@@ -5619,8 +6024,14 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					if (tRes.success) {
 						const outDict = await this.getOutputs(wsUri, tRes);
 						preResolvedOutputs[tid] = outDict;
-						if (tRes.ticketId && tRes.ticketId !== tid) {
+						if (tRes.ticketId) {
 							preResolvedOutputs[tRes.ticketId] = outDict;
+						}
+						if (tRes.entityUri) {
+							preResolvedOutputs[tRes.entityUri] = outDict;
+						}
+						if (tRes.ticketName) {
+							preResolvedOutputs[tRes.ticketName] = outDict;
 						}
 						// Store only a lean descriptor, never the multi-megabyte customMetadata
 						const cleanTicket = {
@@ -6131,8 +6542,115 @@ ticket_context = TICKET_CONTEXT
 context = TICKET_CONTEXT
 
 # Expose valid Python identifiers from TICKET_CONTEXT and TICKET_CONTEXT['Parameters'] directly into globals()
-import builtins as _py_builtins, keyword as _py_keyword
-_py_reserved = set(dir(_py_builtins)) | set(_py_keyword.kwlist) | {'TICKET_CONTEXT', 'ticket_context', 'context', 'OUTPUT', 'RESULT', 'GET_OUTPUTS', 'get_outputs', 'GET_TICKETS', 'get_tickets', 'GET_TICKET', 'get_ticket', 'set_output', 'return_output'}
+import builtins as _py_builtins, keyword as _py_keyword, time as _py_time, uuid as _py_uuid
+_ANYAGENT_RPC_REQ_FILE = ${JSON.stringify(rpcReqUri.fsPath)}
+_ANYAGENT_RPC_RES_FILE = ${JSON.stringify(rpcResUri.fsPath)}
+_ANYAGENT_RPC_ENABLED = ${needsHostRpc ? 'True' : 'False'}
+
+def _anyagent_host_rpc(fn_name, payload, timeout_sec=600.0):
+    if not _ANYAGENT_RPC_ENABLED:
+        raise RuntimeError(f"Host RPC is not enabled for {fn_name}")
+    req_id = _py_uuid.uuid4().hex
+    try:
+        if os.path.exists(_ANYAGENT_RPC_RES_FILE):
+            os.remove(_ANYAGENT_RPC_RES_FILE)
+    except Exception:
+        pass
+    tmp_req = _ANYAGENT_RPC_REQ_FILE + ".tmp"
+    with open(tmp_req, "w", encoding="utf-8") as _rf:
+        json.dump({"id": req_id, "fn": fn_name, "payload": payload}, _rf, ensure_ascii=False, default=str)
+    os.replace(tmp_req, _ANYAGENT_RPC_REQ_FILE)
+    deadline = _py_time.time() + timeout_sec
+    while _py_time.time() < deadline:
+        if os.path.exists(_ANYAGENT_RPC_RES_FILE):
+            try:
+                with open(_ANYAGENT_RPC_RES_FILE, "r", encoding="utf-8") as _sf:
+                    _resp = json.load(_sf)
+                if isinstance(_resp, dict) and _resp.get("id") == req_id:
+                    try:
+                        os.remove(_ANYAGENT_RPC_RES_FILE)
+                    except Exception:
+                        pass
+                    if not _resp.get("ok", False):
+                        raise RuntimeError(_resp.get("error") or f"{fn_name} failed")
+                    return _resp.get("result")
+            except json.JSONDecodeError:
+                pass
+        _py_time.sleep(0.04)
+    raise TimeoutError(f"{fn_name} timed out waiting for AnyAgent host response")
+
+def CREATE_TICKETS(ticket_type=None, title=None, path=None, parameters=None, params=None, target_path=None, target_folder=None, folder=None, folder_name=None, auto_run=False, **kwargs):
+    merged_params = {}
+    raw_p = parameters if isinstance(parameters, dict) else (params if isinstance(params, dict) else {})
+    merged_params.update(raw_p)
+    for _k, _v in kwargs.items():
+        if _k not in ('type', 'name', 'fieldValues', 'autoRun', 'folderName'):
+            merged_params[_k] = _v
+    res = _anyagent_host_rpc("CREATE_TICKETS", {
+        "ticketType": ticket_type or kwargs.get("type") or "Task",
+        "title": title or kwargs.get("name") or "New Ticket",
+        "targetPath": path or target_path or target_folder or folder or ".",
+        "folderName": folder_name or kwargs.get("folderName"),
+        "parameters": merged_params,
+        "autoRun": bool(auto_run or kwargs.get("autoRun", False))
+    })
+    return res
+create_tickets = CREATE_TICKETS
+
+def RUN_TICKETS(ticket=None, ticket_id=None, tickets=None, ticket_name=None, parameters=None, params=None, input_params=None, **kwargs):
+    target = ticket if ticket is not None else (ticket_id if ticket_id is not None else (tickets if tickets is not None else ticket_name))
+    merged_params = {}
+    raw_p = parameters if isinstance(parameters, dict) else (params if isinstance(params, dict) else (input_params if isinstance(input_params, dict) else {}))
+    merged_params.update(raw_p)
+    for _k, _v in kwargs.items():
+        if _k not in ('fieldValues',):
+            merged_params[_k] = _v
+    res = _anyagent_host_rpc("RUN_TICKETS", {
+        "target": target,
+        "parameters": merged_params
+    })
+    return res
+run_tickets = RUN_TICKETS
+
+_orig_get_outputs = get_outputs
+def get_outputs(ticket=None, field=None, *, ticket_id=None, tickets=None, ticket_name=None, **kwargs):
+    res = _orig_get_outputs(ticket=ticket, field=field, ticket_id=ticket_id, tickets=tickets, ticket_name=ticket_name, **kwargs)
+    if res is None and _ANYAGENT_RPC_ENABLED:
+        target = ticket if ticket is not None else (ticket_id if ticket_id is not None else (tickets if tickets is not None else ticket_name))
+        if target is not None:
+            try:
+                res = _anyagent_host_rpc("GET_OUTPUTS", {"target": target, "field": field})
+            except Exception:
+                pass
+    return res
+GET_OUTPUTS = get_outputs
+
+_orig_get_ticket = get_ticket
+def get_ticket(ticket=None, *, ticket_id=None, ticket_name=None, field=None, ticket_type=None, **kwargs):
+    target = ticket if ticket is not None else (ticket_id if ticket_id is not None else ticket_name)
+    res = _orig_get_ticket(ticket=ticket, ticket_id=ticket_id, ticket_name=ticket_name, field=field, ticket_type=ticket_type, **kwargs)
+    if (res is None or res == target) and _ANYAGENT_RPC_ENABLED and target is not None:
+        try:
+            rpc_res = _anyagent_host_rpc("GET_TICKET", {"target": target, "field": field})
+            if rpc_res is not None:
+                return rpc_res
+        except Exception:
+            pass
+    return res
+GET_TICKET = get_ticket
+
+def DISPLAY(*args, **kwargs):
+    for _d_arg in args:
+        if isinstance(_d_arg, (dict, list)):
+            try:
+                print(json.dumps(_d_arg, ensure_ascii=False, indent=2, default=str))
+            except Exception:
+                print(_d_arg)
+        else:
+            print(_d_arg)
+    return args[0] if len(args) == 1 else (args if args else None)
+display = DISPLAY
+_py_reserved = set(dir(_py_builtins)) | set(_py_keyword.kwlist) | {'TICKET_CONTEXT', 'ticket_context', 'context', 'OUTPUT', 'RESULT', 'CREATE_TICKETS', 'create_tickets', 'RUN_TICKETS', 'run_tickets', 'GET_OUTPUTS', 'get_outputs', 'GET_TICKETS', 'get_tickets', 'GET_TICKET', 'get_ticket', 'DISPLAY', 'display', 'set_output', 'return_output'}
 for _ctx_k, _ctx_v in list(TICKET_CONTEXT.items()):
     if isinstance(_ctx_k, str) and _ctx_k.isidentifier() and _ctx_k not in _py_reserved and _ctx_k not in globals():
         globals()[_ctx_k] = _ctx_v
@@ -6250,6 +6768,77 @@ atexit.register(_anyagent_capture_exit_output)
 			let finished = false;
 			let activeEntry: { terminal: any; abort: () => void; label: string } | undefined;
 
+			let rpcPollTimer: any = null;
+			let rpcInFlight = false;
+			if (needsHostRpc) {
+				rpcPollTimer = setInterval(async () => {
+					if (rpcInFlight || finished) {
+						return;
+					}
+					rpcInFlight = true;
+					try {
+						if (!(await this.fileService.exists(rpcReqUri))) {
+							return;
+						}
+						const rawReq = (await this.fileService.readFile(rpcReqUri)).value.toString();
+						try {
+							await this.fileService.del(rpcReqUri);
+						} catch { }
+						const req = JSON.parse(rawReq);
+						const reqId = req?.id;
+						const fn = String(req?.fn || '').toUpperCase();
+						const payload = req?.payload || {};
+						let rpcResult: any = null;
+						let rpcError: string | undefined;
+						try {
+							if (fn === 'CREATE_TICKETS') {
+								rpcResult = await this.createTicket({
+									workspaceUri: wsUri,
+									targetPath: payload.targetPath || '.',
+									ticketType: payload.ticketType || 'Task',
+									title: payload.title || 'New Ticket',
+									folderName: payload.folderName || undefined,
+									parameters: payload.parameters && typeof payload.parameters === 'object' ? payload.parameters : {}
+								});
+								if (rpcResult?.success && payload.autoRun) {
+									await this.runTicket({
+										workspaceUri: wsUri,
+										ticketIdOrPath: rpcResult.entityUri || rpcResult.ticketId || rpcResult.ticketName || '',
+										inputParams: payload.parameters && typeof payload.parameters === 'object' ? payload.parameters : {}
+									});
+								}
+							} else if (fn === 'RUN_TICKETS') {
+								let target = payload.target;
+								if (target && typeof target === 'object') {
+									target = target.entityUri || target.ticketId || target.ticketName || '';
+								}
+								rpcResult = await this.runTicket({
+									workspaceUri: wsUri,
+									ticketIdOrPath: String(target || ''),
+									inputParams: payload.parameters && typeof payload.parameters === 'object' ? payload.parameters : {}
+								});
+							} else if (fn === 'GET_OUTPUTS') {
+								rpcResult = await this.getOutputs(wsUri, payload.target, payload.field || undefined);
+							} else if (fn === 'GET_TICKET') {
+								rpcResult = await this.getTicket(wsUri, payload.target, payload.field || undefined);
+							} else {
+								rpcError = `Unknown host RPC function: ${fn}`;
+							}
+						} catch (callErr: any) {
+							rpcError = callErr?.message || String(callErr);
+						}
+						const respPayload = rpcError
+							? { id: reqId, ok: false, error: rpcError }
+							: { id: reqId, ok: true, result: rpcResult };
+						await this.fileService.writeFile(rpcResUri, VSBuffer.fromString(JSON.stringify(respPayload)));
+					} catch {
+						// Ignore transient partial read
+					} finally {
+						rpcInFlight = false;
+					}
+				}, 80);
+			}
+
 			const waitPromise = new Promise<void>((resolve) => {
 				let dataListener: { dispose(): void } | undefined;
 				let exitListener: { dispose(): void } | undefined;
@@ -6259,6 +6848,10 @@ atexit.register(_anyagent_capture_exit_output)
 							exitCode = codeOverride;
 						}
 						finished = true;
+						if (rpcPollTimer) {
+							clearInterval(rpcPollTimer);
+							rpcPollTimer = null;
+						}
 						dataListener?.dispose();
 						exitListener?.dispose();
 						resolve();
@@ -6285,7 +6878,7 @@ atexit.register(_anyagent_capture_exit_output)
 
 				setTimeout(() => {
 					finishOnce();
-				}, 60000);
+				}, needsHostRpc ? 600000 : 60000);
 			});
 
 			try {
@@ -6296,6 +6889,12 @@ atexit.register(_anyagent_capture_exit_output)
 					await waitPromise;
 				}
 			} finally {
+				if (rpcPollTimer) {
+					clearInterval(rpcPollTimer);
+					rpcPollTimer = null;
+				}
+				try { await this.fileService.del(rpcReqUri); } catch { }
+				try { await this.fileService.del(rpcResUri); } catch { }
 				if (activeEntry) {
 					this._activeTerminals.delete(activeEntry);
 				}
@@ -7729,7 +8328,25 @@ atexit.register(_anyagent_capture_exit_output)
 				url: interpolatedUrl,
 				method,
 				durationMs,
-				error: !resp.ok ? `HTTP ${resp.status} ${resp.statusText}` : undefined
+				error: !resp.ok ? (() => {
+					const statusHead = `HTTP ${resp.status}${resp.statusText ? ' ' + resp.statusText : ''}`;
+					let detail = '';
+					if (parsedJson && typeof parsedJson === 'object') {
+						const msg = (parsedJson as any).message || (parsedJson as any).detail || (parsedJson as any).error;
+						if (typeof msg === 'string' && msg.trim()) {
+							detail = msg.trim();
+						} else if (msg !== undefined) {
+							try { detail = JSON.stringify(msg); } catch { detail = String(msg); }
+						}
+					}
+					if (!detail && rawText && rawText.trim()) {
+						detail = rawText.trim();
+					}
+					if (detail.length > 500) {
+						detail = detail.slice(0, 500) + '...';
+					}
+					return detail ? `${statusHead}: ${detail}` : statusHead;
+				})() : undefined
 			};
 		} catch (err: any) {
 			clearTimeout(timeoutId);
@@ -8308,22 +8925,52 @@ atexit.register(_anyagent_capture_exit_output)
 
 	private _resolveOutputSpecValue(spec: IOutputSpec, contextVariables: Record<string, any>): any {
 		const rawExpr = (spec.sourceExpression || '').trim();
+		const outputLabel = spec.label || spec.varName || spec.fieldKey || 'Output';
+		const formatAvailableVars = (): string => {
+			const keys = Object.keys(contextVariables || {})
+				.filter(k => k && !k.startsWith('@') && !k.startsWith('__') && !k.startsWith('comp_'))
+				.slice(0, 20);
+			return keys.length > 0 ? ` Available variables: ${keys.join(', ')}` : '';
+		};
 		if (rawExpr) {
+			// Exact Python/JSON primitive literals (never treat as undefined variable)
+			if (rawExpr === 'None' || rawExpr === 'null') return null;
+			if (rawExpr === 'True' || rawExpr === 'true') return true;
+			if (rawExpr === 'False' || rawExpr === 'false') return false;
+			if (/^-?\d+(\.\d+)?$/.test(rawExpr)) return Number(rawExpr);
+
 			// Direct single-variable reference: {var}, {{var}}, @var, or bare identifier var
 			const directMatch = rawExpr.match(/^(?:\{\{\s*([^{}]+?)\s*\}\}|\{\s*([^{}]+?)\s*\}|@?([a-zA-Z_][a-zA-Z0-9_]*))$/);
 			if (directMatch) {
 				const refKey = (directMatch[1] || directMatch[2] || directMatch[3] || '').trim();
 				if (refKey) {
-					if (Object.prototype.hasOwnProperty.call(contextVariables, refKey)) {
+					if (Object.prototype.hasOwnProperty.call(contextVariables, refKey) && contextVariables[refKey] !== undefined) {
 						return contextVariables[refKey];
 					}
 					const cleanRef = this._cleanKey(refKey);
-					if (Object.prototype.hasOwnProperty.call(contextVariables, cleanRef)) {
+					if (Object.prototype.hasOwnProperty.call(contextVariables, cleanRef) && contextVariables[cleanRef] !== undefined) {
 						return contextVariables[cleanRef];
 					}
+					throw new Error(`Output '${outputLabel}' references undefined variable '${rawExpr}'.${formatAvailableVars()}`);
 				}
 			}
-			// Interpolated expression fallback
+			// Interpolated expression: ensure no {var} / {{var}} placeholder is left unresolved
+			const unresolvedRefs: string[] = [];
+			const refScanRe = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}|\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}/g;
+			let m: RegExpExecArray | null;
+			while ((m = refScanRe.exec(rawExpr)) !== null) {
+				const rk = (m[1] || m[2] || '').trim();
+				if (!rk) continue;
+				const cleanRk = this._cleanKey(rk);
+				const found = (Object.prototype.hasOwnProperty.call(contextVariables, rk) && contextVariables[rk] !== undefined)
+					|| (Object.prototype.hasOwnProperty.call(contextVariables, cleanRk) && contextVariables[cleanRk] !== undefined);
+				if (!found && !unresolvedRefs.includes(rk)) {
+					unresolvedRefs.push(rk);
+				}
+			}
+			if (unresolvedRefs.length > 0) {
+				throw new Error(`Output '${outputLabel}' references undefined variable(s): ${unresolvedRefs.map(r => `{${r}}`).join(', ')}.${formatAvailableVars()}`);
+			}
 			return this._interpolateVariables(rawExpr, contextVariables);
 		}
 		const k = spec.label || spec.fieldKey;

@@ -17,8 +17,9 @@ import { IEditorOpenContext } from '../../../common/editor.js';
 import { EditorInput } from '../../../common/editor/editorInput.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
+import { GroupDirection, IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { WorkflowEditorInput } from './workflowEditorInput.js';
+import { openSubWorkflowLiveView, SubWorkflowCanvasEditorInput } from './subWorkflowLiveView.js';
 import { URI } from '../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
@@ -37,6 +38,7 @@ import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entity
 import { EntityDetailEditor } from '../../workspacesExplorer/browser/entityDetailEditor.js';
 import { IWorkflowExecutionService, IWorkflowDisplayCard } from '../common/workflowExecutionService.js';
 import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
+import { resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import {
 	WorkflowToPythonConverter,
 	PythonToWorkflowParser,
@@ -45,6 +47,7 @@ import {
 	WorkflowPythonEditorBridge
 } from './workflowPythonSync.js';
 import {
+	ISubWorkflowDefinition,
 	IWorkflowExecutionRun,
 	IWorkflowLogEntry,
 	IPrimitiveExecutionStepResult,
@@ -208,16 +211,94 @@ function getEntityBadgeStyle(type?: string): { color: string; bg: string; icon: 
 	}
 }
 
+/** Capsule look per component type (icon + colors), shared by node capsules on the canvas and the Workflow Outline menu. */
+interface IWfCapsuleTheme { readonly icon: ThemeIcon; readonly color: string; readonly bg: string; readonly border: string; readonly textColor: string }
+const WF_COMPONENT_CAPSULE_THEMES: Record<string, IWfCapsuleTheme> = {
+		parameters: { icon: Codicon.symbolVariable, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.5)', textColor: '#f3e8ff' },
+		output: { icon: Codicon.output, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.5)', textColor: '#d1fae5' },
+		create_tickets: { icon: Codicon.add, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.5)', textColor: '#f3e8ff' },
+		run_tickets: { icon: Codicon.playCircle, color: '#a855f7', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(168, 85, 247, 0.5)', textColor: '#f3e8ff' },
+		get_outputs: { icon: Codicon.signOut, color: '#818cf8', bg: 'rgba(99, 102, 241, 0.16)', border: 'rgba(129, 140, 248, 0.5)', textColor: '#e0e7ff' },
+		get_ticket: { icon: Codicon.tag, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.5)', textColor: '#dbeafe' },
+		get_tickets: { icon: Codicon.search, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.5)', textColor: '#dbeafe' },
+		display: { icon: Codicon.eye, color: '#f472b6', bg: 'rgba(236, 72, 153, 0.16)', border: 'rgba(244, 114, 182, 0.5)', textColor: '#fce7f3' },
+		prompt: { icon: Codicon.sparkle, color: '#2dd4bf', bg: 'rgba(20, 184, 166, 0.16)', border: 'rgba(45, 212, 191, 0.5)', textColor: '#ccfbf1' },
+		table: { icon: Codicon.table, color: '#fb923c', bg: 'rgba(249, 115, 22, 0.16)', border: 'rgba(251, 146, 60, 0.5)', textColor: '#ffedd5' },
+		browser: { icon: Codicon.globe, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.16)', border: 'rgba(56, 189, 248, 0.5)', textColor: '#e0f2fe' },
+		tts: { icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.5)', textColor: '#fee2e2' },
+		media_player: { icon: Codicon.deviceCameraVideo, color: '#fbbf24', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.5)', textColor: '#fef3c7' },
+		voice_note: { icon: Codicon.mic, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.38)', textColor: '#e2e8f0' },
+		sub_workflow: { icon: Codicon.layers, color: '#22d3ee', bg: 'rgba(6, 182, 212, 0.16)', border: 'rgba(34, 211, 238, 0.5)', textColor: '#cffafe' },
+		ssh: { icon: Codicon.terminal, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.5)', textColor: '#d1fae5' },
+		git: { icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.5)', textColor: '#ecfccb' },
+		python: { icon: Codicon.python, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.14)', border: 'rgba(56, 189, 248, 0.45)', textColor: '#e0f2fe' }
+};
+/** Classic inline Python step capsule (no component): default purple function pill. */
+const WF_PYTHON_STEP_CAPSULE_THEME: IWfCapsuleTheme = { icon: Codicon.python, color: '#c084fc', bg: 'rgba(192, 132, 252, 0.15)', border: 'rgba(192, 132, 252, 0.4)', textColor: '#f3e8ff' };
+/** Flowchart node entry in the Workflow Outline. */
+const WF_NODE_OUTLINE_THEME: IWfCapsuleTheme = { icon: Codicon.symbolClass, color: '#34d399', bg: 'rgba(16, 185, 129, 0.12)', border: 'rgba(52, 211, 153, 0.42)', textColor: '#ecfdf5' };
+
+/** One entry of the Workflow Outline cascading menu (node, capsule, Sub-Workflow, ticket component, ...). */
+interface IWfOutlineItem {
+	/** Path-unique key (parent key + local id), so the same Sub-Workflow can appear under several callers. */
+	readonly key: string;
+	readonly label: string;
+	readonly meta?: string;
+	readonly icon: ThemeIcon;
+	/** Colors of the capsule (same palette as the node capsules on the canvas). */
+	readonly theme: IWfCapsuleTheme;
+	/** Flowchart nodes: drawn as their own shape (like the shape toolbar) instead of a codicon. */
+	readonly shape?: 'rect' | 'round-rect' | 'diamond' | 'circle';
+	readonly disabled?: boolean;
+	/** Next menu level; may be async (ticket templates are loaded on demand). */
+	readonly children?: () => IWfOutlineItem[] | Promise<IWfOutlineItem[]>;
+	/** Shows the item (lightbulb): workflows as a flowchart in a split below the canvas, everything else as a form on the right. */
+	readonly open?: () => Promise<unknown> | unknown;
+	/** Whether the item is currently shown in an editor; defaults to tracking the editor returned by `open`. */
+	readonly isShown?: () => boolean;
+	/** Hides (closes) the item; defaults to closing the tracked editor. */
+	readonly hide?: () => Promise<void>;
+	/** Items showing the same editor share this key (e.g. components of one ticket). */
+	readonly showKey?: string;
+	/** Where the item is on the flowchart (a node, or a capsule inside it). Clicking highlights it together with its ancestors. */
+	readonly locateTarget?: IWfLocateTarget;
+	/** Extra action when the item is clicked (e.g. a Sub-Workflow capsule also shows its flowchart below). */
+	readonly onActivate?: () => void;
+}
+
+interface IWfLocateTarget {
+	readonly nodeId: string;
+	/** Index in `node.pipeline` when the target is a capsule. */
+	readonly stepIndex?: number;
+	/** Sub-Workflow containing the node (opened below the canvas when the node is not visible anywhere). */
+	readonly ownerSubWorkflowId?: string;
+}
+
+/** Capsule types shown in a node's ticket-like view as read-only step cards (they have no ticket component card). */
+const WF_NODE_TICKET_STEP_CARD_TYPES = new Set(['sub_workflow', 'display', 'create_tickets', 'run_tickets', 'get_outputs', 'get_ticket', 'get_tickets']);
+
+type WfOutlineTicketRef = { readonly kind: 'type'; readonly name: string } | { readonly kind: 'id'; readonly id: string };
+
 export class WorkflowEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.workflowEditor';
 	private static readonly _openWorkflowEditors: Set<WorkflowEditor> = new Set();
+	/** Item last located from a Workflow Outline, per workflow: stays highlighted on every canvas until the next one is picked. */
+	private static readonly _outlineLocated = new Map<string, { targets: IWfLocateTarget[]; owner: WorkflowEditor }>();
+	/** Items of each outline column as last rendered (to find the ancestors of a clicked item). */
+	private _outlineRenderedColumns: IWfOutlineItem[][] = [];
+	/** Key of the outline item clicked last (highlighted with its ancestors until another item is clicked). */
+	private _outlineSelectedKey: string | undefined;
 
 	private _container: HTMLElement | undefined;
 	private readonly _contentDisposables = this._register(new DisposableStore());
 
 	private _workflowUri: URI | undefined;
+	private _flowchartOwnerRegistration: { dispose(): void } | undefined;
 	private _flowchartJsonUri: URI | undefined;
 	private _data: IFlowchartData = { nodes: [], links: [] };
+	/** Set when this editor shows a single Sub-Workflow region (SubWorkflowCanvasEditorInput) instead of the whole canvas. */
+	private _focusSubWorkflowId: string | undefined;
+	private _peerRenderTimer: ReturnType<typeof setTimeout> | undefined;
 
 	// UI State
 	private readonly _selectedNodeIds: Set<string> = new Set();
@@ -327,6 +408,8 @@ export class WorkflowEditor extends EditorPane {
 	private _zoomSizerEl?: HTMLElement;
 	private _floatingZoomBadgeEl?: HTMLElement;
 	private _floatingLiveDisplayBtn?: HTMLElement;
+	/** Width share of the side panel opened from the Workflow Outline (forms, tickets, node views). */
+	private static readonly OUTLINE_SIDE_PANEL_RATIO = 0.36;
 	private static readonly DEFAULT_CANVAS_WIDTH = 8000;
 	private static readonly DEFAULT_CANVAS_HEIGHT = 6000;
 	private _currentCanvasWidth: number = WorkflowEditor.DEFAULT_CANVAS_WIDTH;
@@ -350,6 +433,9 @@ export class WorkflowEditor extends EditorPane {
 	private _logStatusBadgeEl?: HTMLElement;
 	private _autoScrollLogs: boolean = true;
 	private _isVarsFindReplaceOpen: boolean = false;
+	private _varsSearchQuery: string = '';
+	private _varsFilterEvaluatedOnly: boolean = false;
+	private _varsColWidths?: Record<string, number>;
 	private _varsLastFindQuery: string = '';
 	private _varsLastReplaceQuery: string = '';
 	private _varsFindInputEl?: HTMLInputElement;
@@ -383,12 +469,18 @@ export class WorkflowEditor extends EditorPane {
 	private _cachedCustomModules: ICustomModule[] = [];
 	private _lastStepPillClick: { nodeId: string; stepId: string; time: number } | undefined;
 	private _selectedCapsule: { nodeId: string; stepId: string } | null = null;
+	private _selectedCapsules: { nodeId: string; stepIds: Set<string>; anchorIndex: number } | null = null;
 	private _contextMenuDisposables: IDisposable[] = [];
 	private static _copiedCapsule: {
 		step: INodePipelineStep;
 		sourceNodeLabel?: string;
 		sourceVars?: Array<{ name: string; initialValue: string; expression?: string }>;
 	} | null = null;
+	private static _copiedCapsules: Array<{
+		step: INodePipelineStep;
+		sourceNodeLabel?: string;
+		sourceVars?: Array<{ name: string; initialValue: string; expression?: string }>;
+	}> = [];
 	private static _lastCopyKind: 'node' | 'capsule' = 'node';
 
 	// Node Voice Note Sequential Playback State
@@ -397,6 +489,26 @@ export class WorkflowEditor extends EditorPane {
 	private _activeVoiceBlobUrl: string | null = null;
 	private _activeVoiceClipIndex = 0;
 	private _activeVoiceClipTotal = 0;
+
+	// Sub-Workflow Encapsulation & Top-Left Dropdown State
+	private _subWorkflowWidgetEl?: HTMLElement;
+	private _isSubWorkflowDropdownOpen = false;
+	private _showEncapsulateForm = false;
+	// Workflow Outline (layers button): keys of the expanded item per menu level, library section state, lit lightbulb
+	private _outlinePath: string[] = [];
+	private _outlineLibraryOpen = false;
+	private readonly _outlineShownInputs = new Map<string, EditorInput>();
+	private _outlineFlowGroupIds: number[] = [];
+	private _outlineScroll: { left: number; tops: number[] } = { left: 0, tops: [] };
+	private _outlineLastRenderedPath = '';
+	/** Lightbulbs currently rendered in the outline / library, refreshed in place when editors open or close (no full re-render). */
+	private _outlineBulbRefreshers: (() => void)[] = [];
+	private _outlineRerenderScheduled = false;
+	private readonly _outlineAsyncChildren = new Map<string, IWfOutlineItem[] | 'loading' | 'error'>();
+
+	// Live Mouse Cursor Position in Canvas Coordinates (used as Top-Left Anchor for Paste & Sub-Workflow Expand)
+	private _lastCanvasMouseX: number | null = null;
+	private _lastCanvasMouseY: number | null = null;
 
 	constructor(
 		group: IEditorGroup,
@@ -498,9 +610,61 @@ export class WorkflowEditor extends EditorPane {
 			this._workflowUri = (input as WorkflowEditorInput).workflowUri;
 			this._flowchartJsonUri = URI.joinPath(this._workflowUri, '.agents', 'workflow_flowchart.json');
 		}
+		this._focusSubWorkflowId = input instanceof SubWorkflowCanvasEditorInput ? input.subWorkflowId : undefined;
+
+		// This editor is now the exclusive writer of workflow_flowchart.json (prevents background stale write-backs)
+		this._flowchartOwnerRegistration?.dispose();
+		this._flowchartOwnerRegistration = this._workflowUri
+			? this._workflowExecutionService.registerFlowchartOwner(this._workflowUri)
+			: undefined;
 
 		await this._loadFlowchartData();
+		const hasSavedViewport = WorkflowEditor._viewportStateByUri.has(this._getViewportKey());
 		this._renderEditor();
+		if (this._focusSubWorkflowId && !hasSavedViewport) {
+			// First time this Sub-Workflow canvas is shown: frame its nodes
+			setTimeout(() => this._fitView(), 80);
+		}
+	}
+
+	/** Other open editors showing the same workflow (e.g. the main canvas and a focused Sub-Workflow canvas). */
+	private _getPeerEditors(): WorkflowEditor[] {
+		const uri = this._workflowUri?.toString();
+		if (!uri || this._isPureDiagram) {
+			return [];
+		}
+		return Array.from(WorkflowEditor._openWorkflowEditors).filter(ed => ed !== this && !ed._isPureDiagram && ed._workflowUri?.toString() === uri);
+	}
+
+	/**
+	 * Editors of the same workflow share ONE in-memory flowchart object, so an edit made in either is never
+	 * overwritten by the other's next save. Call after replacing or saving `this._data`.
+	 */
+	private _syncPeerEditors(): void {
+		for (const peer of this._getPeerEditors()) {
+			peer._data = this._data;
+			peer._scheduleCanvasRefresh();
+		}
+	}
+
+	/** Coalesced canvas redraw (node states / structure changed elsewhere). */
+	private _scheduleCanvasRefresh(): void {
+		if (this._peerRenderTimer) {
+			return;
+		}
+		this._peerRenderTimer = setTimeout(() => {
+			this._peerRenderTimer = undefined;
+			if (!this._canvas || this._hasActiveInlineNodeEditor()) {
+				return;
+			}
+			this._renderNodes();
+			this._drawLinks();
+		}, 150);
+	}
+
+	private _getViewportKey(): string {
+		const base = this._workflowUri?.toString() || '';
+		return base && this._focusSubWorkflowId ? `${base}#subworkflow=${this._focusSubWorkflowId}` : base;
 	}
 
 	private async _loadFlowchartData(): Promise<void> {
@@ -513,6 +677,18 @@ export class WorkflowEditor extends EditorPane {
 			} catch { }
 		}
 		if (!this._flowchartJsonUri) return;
+
+		// Another editor already holds this workflow in memory: share its data instead of reading a second, diverging copy
+		const loadedPeer = this._getPeerEditors().find(peer => Array.isArray(peer._data?.nodes) && peer._data.nodes.length > 0);
+		if (loadedPeer) {
+			this._data = loadedPeer._data;
+			this._activeRoutingMode = this._data.routingMode || 'orthogonal';
+			this._undoStack = [];
+			this._redoStack = [];
+			this._lastSavedStateJson = JSON.stringify(this._data);
+			this._rebindOpenNodeSchemaEditors();
+			return;
+		}
 
 		try {
 			const exists = await this._fileService.exists(this._flowchartJsonUri);
@@ -662,39 +838,105 @@ export class WorkflowEditor extends EditorPane {
 			this._redoStack = [];
 			this._lastSavedStateJson = JSON.stringify(this._data);
 			this._rebindOpenNodeSchemaEditors();
+			this._syncPeerEditors();
 		} catch (err) {
 			this._notificationService.error(`Failed to load flowchart: ${err}`);
 			this._data = { nodes: [], links: [] };
 		}
 	}
 
-	private async _saveFlowchartData(skipHistory: boolean = false): Promise<void> {
+	private _saveFlowchartTimer: any = null;
+	private _isSyncingOwnSubWorkflows = false;
+	private _saveFlowchartPendingSkipHistory: boolean = true;
+	private _nodeComponentRenderRaf: number | null = null;
+
+	private async _saveFlowchartData(skipHistory: boolean = false, immediate: boolean = false): Promise<void> {
 		if (!this._flowchartJsonUri) return;
+		if (!skipHistory) {
+			this._saveFlowchartPendingSkipHistory = false;
+		}
+		if (immediate) {
+			if (this._saveFlowchartTimer) {
+				clearTimeout(this._saveFlowchartTimer);
+				this._saveFlowchartTimer = null;
+			}
+			await this._flushSaveFlowchartData();
+			return;
+		}
+		if (this._saveFlowchartTimer) {
+			clearTimeout(this._saveFlowchartTimer);
+		}
+		this._saveFlowchartTimer = setTimeout(() => {
+			this._saveFlowchartTimer = null;
+			void this._flushSaveFlowchartData();
+		}, 250);
+	}
+
+	private async _flushSaveFlowchartData(): Promise<void> {
+		if (!this._flowchartJsonUri) return;
+		const skipHistory = this._saveFlowchartPendingSkipHistory;
+		this._saveFlowchartPendingSkipHistory = true;
 
 		try {
-			const jsonStr = JSON.stringify(this._data, null, 2);
-			const compactStr = JSON.stringify(this._data);
+			// Single JSON.stringify pass (avoids duplicating multi-MB serialization on every edit)
+			const jsonStr = JSON.stringify(this._data);
 
 			if (!skipHistory && !this._isUndoingOrRedoing) {
-				if (this._lastSavedStateJson && this._lastSavedStateJson !== compactStr) {
+				if (this._lastSavedStateJson && this._lastSavedStateJson !== jsonStr) {
 					this._undoStack.push(this._lastSavedStateJson);
-					if (this._undoStack.length > 60) {
+					const maxUndoEntries = jsonStr.length > 2_000_000 ? 15 : 60;
+					while (this._undoStack.length > maxUndoEntries) {
 						this._undoStack.shift();
 					}
 					this._redoStack = [];
 				}
-				this._lastSavedStateJson = compactStr;
+				this._lastSavedStateJson = jsonStr;
+			} else if (skipHistory) {
+				this._lastSavedStateJson = jsonStr;
 			}
 
 			await this._fileService.writeFile(this._flowchartJsonUri, VSBuffer.fromString(jsonStr));
+			// Keep other open canvases of this workflow (e.g. a focused Sub-Workflow canvas) on the same data and redraw them
+			this._syncPeerEditors();
 
-			// Also persist into Entity Persistence Snapshot engine for disaster recovery!
 			if (this._workflowUri) {
+				// 1. Immediately sync any encapsulated Sub-Workflows owned by this workflow so subWorkflows.library NEVER goes stale
+				try {
+					const curUriStr = this._workflowUri.toString();
+					const ownedSubs = this._workflowExecutionService.getSubWorkflows().filter(sw => sw && sw.sourceWorkflowUri === curUriStr && Array.isArray(sw.nodeIds) && sw.nodeIds.length > 0);
+					this._isSyncingOwnSubWorkflows = true;
+					try {
+						for (const sw of ownedSubs) {
+							const idSet = new Set(sw.nodeIds);
+							const liveSubNodes = (this._data.nodes || []).filter(n => idSet.has(n.id));
+							if (liveSubNodes.length === 0) continue;
+							const liveSubLinks = (this._data.links || []).filter(l => idSet.has(l.from) && idSet.has(l.to));
+							const nextNodesJson = JSON.stringify(liveSubNodes);
+							const nextLinksJson = JSON.stringify(liveSubLinks);
+							if (JSON.stringify(sw.nodes || []) === nextNodesJson && JSON.stringify(sw.links || []) === nextLinksJson) {
+								continue;
+							}
+							this._workflowExecutionService.saveSubWorkflow({
+								...sw,
+								nodes: JSON.parse(nextNodesJson),
+								links: JSON.parse(nextLinksJson),
+								updatedAt: Date.now()
+							});
+						}
+					} finally {
+						this._isSyncingOwnSubWorkflows = false;
+					}
+				} catch { }
+
+				// 2. Persist lightweight structural copy into Entity Persistence Snapshot (strip multi-MB voice audioDataUrl already saved in workflow_flowchart.json)
 				const snapshot = this._entityPersistenceService.getSnapshot(this._workflowUri);
 				if (snapshot) {
+					const lightFlowchartJson = jsonStr.length > 500_000
+						? JSON.stringify(this._data, (key, value) => key === 'audioDataUrl' ? undefined : value)
+						: jsonStr;
 					snapshot.customMetadata = {
 						...(snapshot.customMetadata || {}),
-						flowchartJson: jsonStr
+						flowchartJson: lightFlowchartJson
 					};
 					await this._entityPersistenceService.saveSnapshot(snapshot);
 				}
@@ -705,6 +947,15 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	override clearInput(): void {
+		if (this._saveFlowchartTimer) {
+			clearTimeout(this._saveFlowchartTimer);
+			this._saveFlowchartTimer = null;
+			void this._flushSaveFlowchartData();
+		}
+		if (this._nodeComponentRenderRaf !== null) {
+			cancelAnimationFrame(this._nodeComponentRenderRaf);
+			this._nodeComponentRenderRaf = null;
+		}
 		if (this._displayInspectorContainer) {
 			this._displayInspectorContainer.remove();
 			this._displayInspectorContainer = null;
@@ -714,6 +965,8 @@ export class WorkflowEditor extends EditorPane {
 		if (this._container) {
 			clearNode(this._container);
 		}
+		this._flowchartOwnerRegistration?.dispose();
+		this._flowchartOwnerRegistration = undefined;
 		super.clearInput();
 	}
 
@@ -726,7 +979,8 @@ export class WorkflowEditor extends EditorPane {
 	private _renderEditor(): void {
 		if (!this._container) return;
 
-		const wfUriKey = this._workflowUri?.toString() || '';
+		// Focused Sub-Workflow canvases remember their own zoom/scroll, separate from the main canvas
+		const wfUriKey = this._getViewportKey();
 		let savedViewport = wfUriKey ? WorkflowEditor._viewportStateByUri.get(wfUriKey) : undefined;
 		if (!savedViewport && wfUriKey) {
 			try {
@@ -766,7 +1020,16 @@ export class WorkflowEditor extends EditorPane {
 		this._renderToolbar(toolbar);
 
 		let renderPending = false;
+		// Live Sub-Workflow progress: its nodes live on this canvas (shown via lightbulb or a focused Sub-Workflow tab)
+		this._contentDisposables.add(this._workflowExecutionService.onDidChangeSubWorkflowRun(run => {
+			if (this._workflowUri && run.workflowUri === this._workflowUri.toString()) {
+				this._scheduleCanvasRefresh();
+			}
+		}));
 		this._contentDisposables.add(this._workflowExecutionService.onDidChangeRunState(run => {
+			if (run.isSubWorkflowRun) {
+				return;
+			}
 			if (this._workflowUri && (run.workflowUri === this._workflowUri.toString() || run.workflowName === (this.input as any)?.name)) {
 				if (run.status === 'running' && this._activeDisplayRunId !== run.runId) {
 					this._activeDisplayRunId = run.runId;
@@ -785,8 +1048,10 @@ export class WorkflowEditor extends EditorPane {
 
 				const isTerminalState = run.status === 'completed' || run.status === 'failed' || run.status === 'stopped' || run.status === 'idle';
 				const syncCanvasAndToolbar = () => {
-					this._renderNodes();
-					this._drawLinks();
+					if (!this._hasActiveInlineNodeEditor()) {
+						this._renderNodes();
+						this._drawLinks();
+					}
 					if (this._toolbarEl) {
 						this._renderToolbar(this._toolbarEl);
 					}
@@ -854,8 +1119,25 @@ export class WorkflowEditor extends EditorPane {
 						(s.component?.id && s.component.id === srcComp.id)
 					);
 					if (dstStep) {
+						if (srcComp.type === 'voice_note' || dstStep.component?.type === 'voice_note') {
+							// Voice Note is commentary-only and never executed; preserve recorded audioDataUrl intact
+							continue;
+						}
 						if (dstStep.component) {
-							Object.assign(dstStep.component, srcComp);
+							// Merge ONLY runtime execution telemetry — NEVER overwrite user-edited configuration (outputSpecs, parameters, wfDisplayValue, pythonCode, etc.)
+							const runtimeOnlyKeys = [
+								'lastExecutionStatus', 'lastExecutionDurationMs', 'lastExecutedAt',
+								'lastExecutionOutput', 'lastExecutionLog', 'lastExecutionInputs',
+								'pythonResult', 'pythonOutput', 'lastResolvedUrl', 'lastExecutedUrl',
+								'httpResponseStatus', 'httpResponseStatusText', 'httpResponseHeaders',
+								'httpResponseBody', 'httpResponseData', 'httpLastExecutionTime', 'httpLastDurationMs',
+								'tableLastExecutionTime', 'tableLastDurationMs', 'tableLastSqlOutput', 'debugPromptOutput'
+							];
+							for (const rk of runtimeOnlyKeys) {
+								if ((srcComp as any)[rk] !== undefined) {
+									(dstStep.component as any)[rk] = (srcComp as any)[rk];
+								}
+							}
 						} else {
 							dstStep.component = { ...srcComp };
 						}
@@ -864,11 +1146,18 @@ export class WorkflowEditor extends EditorPane {
 				}
 				this._ensureNodeFitsPipeline(localNode);
 				this._syncToNode(localNode, true);
-				this._lastSavedStateJson = JSON.stringify(this._data);
-				this._renderNodes();
-				this._drawLinks();
-				if (this._inspectorEl) {
-					this._renderInspector(this._inspectorEl);
+				this._saveFlowchartData(true);
+				if (this._nodeComponentRenderRaf === null) {
+					this._nodeComponentRenderRaf = requestAnimationFrame(() => {
+						this._nodeComponentRenderRaf = null;
+						if (!this._hasActiveInlineNodeEditor()) {
+							this._renderNodes();
+							this._drawLinks();
+						}
+						if (this._inspectorEl) {
+							this._renderInspector(this._inspectorEl);
+						}
+					});
 				}
 				const schemaInput = this._nodeEditorInputsByNodeId.get(nodeId);
 				if (schemaInput && !schemaInput.isDisposed() && schemaInput.draftModule) {
@@ -887,6 +1176,33 @@ export class WorkflowEditor extends EditorPane {
 		// 2. Center Drawing Viewport (Fixed container for floating controls)
 		const canvasViewport = append(this._container, $('.workflow-canvas-viewport'));
 		this._canvasViewport = canvasViewport;
+
+		// Top-Left Floating Sub-Workflows Dropdown Widget
+		if (!this._isPureDiagram) {
+			this._subWorkflowWidgetEl = append(canvasViewport, $('.wf-subworkflow-floating-widget'));
+			this._renderSubWorkflowDropdown();
+			const scheduleOutlineRerender = () => {
+				if (!this._isSubWorkflowDropdownOpen || this._outlineRerenderScheduled) {
+					return;
+				}
+				this._outlineRerenderScheduled = true;
+				setTimeout(() => {
+					this._outlineRerenderScheduled = false;
+					if (this._isSubWorkflowDropdownOpen) {
+						this._refreshOutlineBulbs(); // in place: re-rendering the whole panel makes it flicker
+					}
+				}, 50);
+			};
+			this._contentDisposables.add(this._editorService.onDidEditorsChange(scheduleOutlineRerender));
+			this._contentDisposables.add(this._workflowExecutionService.onDidChangeSubWorkflows(() => {
+				this._renderSubWorkflowDropdown();
+				if (this._isSyncingOwnSubWorkflows || this._hasActiveInlineNodeEditor()) {
+					return;
+				}
+				this._renderNodes();
+				this._drawLinks();
+			}));
+		}
 
 		// Restore Live Display inspector if cards exist
 		this._restoreDisplayInspectorCards();
@@ -908,6 +1224,20 @@ export class WorkflowEditor extends EditorPane {
 			this._storageService.store(`workflowEditor.viewport.${wfUriKey}`, JSON.stringify(state), StorageScope.PROFILE, StorageTarget.USER);
 		};
 		this._contentDisposables.add(addDisposableListener(canvasWrapper, 'scroll', () => persistViewportState()));
+		this._contentDisposables.add(addDisposableListener(canvasViewport, 'mousemove', (e: MouseEvent) => {
+			const pos = this._clientToCanvasCoords(e.clientX, e.clientY);
+			if (pos) {
+				this._lastCanvasMouseX = pos.x;
+				this._lastCanvasMouseY = pos.y;
+			}
+		}));
+		this._contentDisposables.add(addDisposableListener(canvasViewport, 'contextmenu', (e: MouseEvent) => {
+			const pos = this._clientToCanvasCoords(e.clientX, e.clientY);
+			if (pos) {
+				this._lastCanvasMouseX = pos.x;
+				this._lastCanvasMouseY = pos.y;
+			}
+		}));
 		this._contentDisposables.add(addDisposableListener(this._container, 'wheel', () => setTimeout(persistViewportState, 20)));
 		this._contentDisposables.add(addDisposableListener(this._container, 'click', () => setTimeout(persistViewportState, 20)));
 
@@ -1008,10 +1338,11 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		const fZoomOut = append(floatingZoom, $('.floating-zoom-btn.canvas-only-item.floating-zoom-expandable'));
+		// −/+ stay visible in the collapsed capsule too, so zooming does not require expanding the toolbar
+		const fZoomOut = append(floatingZoom, $('.floating-zoom-btn.canvas-only-item'));
 		fZoomOut.textContent = '−';
 		fZoomOut.title = 'Zoom Out (−10%)';
-		fZoomOut.onclick = (e) => { e.stopPropagation(); this._setZoom(this._zoomLevel - 0.1); };
+		fZoomOut.onclick = (e) => { e.stopPropagation(); this._setZoom(this._zoomLevel - 0.1, this._zoomFocusAnchor()); };
 
 		this._floatingZoomBadgeEl = append(floatingZoom, $('.floating-zoom-badge.canvas-only-item'));
 		this._floatingZoomBadgeEl.textContent = `${Math.round(this._zoomLevel * 100)}%`;
@@ -1022,17 +1353,17 @@ export class WorkflowEditor extends EditorPane {
 				updateFloatingZoomCollapsedState();
 				return;
 			}
-			this._setZoom(1.0);
+			this._setZoom(1.0, this._zoomFocusAnchor());
 		};
+
+		const fZoomIn = append(floatingZoom, $('.floating-zoom-btn.canvas-only-item'));
+		fZoomIn.textContent = '+';
+		fZoomIn.title = 'Zoom In (+10%)';
+		fZoomIn.onclick = (e) => { e.stopPropagation(); this._setZoom(this._zoomLevel + 0.1, this._zoomFocusAnchor()); };
 
 		const fExpandHint = append(floatingZoom, $('.floating-zoom-expand-hint'));
 		append(fExpandHint, $('span' + ThemeIcon.asCSSSelector(Codicon.chevronRight)));
 		fExpandHint.title = 'Click to expand toolbar';
-
-		const fZoomIn = append(floatingZoom, $('.floating-zoom-btn.canvas-only-item.floating-zoom-expandable'));
-		fZoomIn.textContent = '+';
-		fZoomIn.title = 'Zoom In (+10%)';
-		fZoomIn.onclick = (e) => { e.stopPropagation(); this._setZoom(this._zoomLevel + 0.1); };
 
 		const fDivider = append(floatingZoom, $('.floating-zoom-divider.canvas-only-item.floating-zoom-expandable'));
 		fDivider.style.width = '1px';
@@ -1167,7 +1498,9 @@ export class WorkflowEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const delta = e.deltaY < 0 ? 0.05 : -0.05;
-				this._setZoom(this._zoomLevel + delta);
+				// Zoom around the pointer, so what is under the mouse stays under the mouse
+				const rect = canvasWrapper.getBoundingClientRect();
+				this._setZoom(this._zoomLevel + delta, { viewportX: e.clientX - rect.left, viewportY: e.clientY - rect.top });
 			}
 		}, { passive: false }));
 
@@ -1225,10 +1558,10 @@ export class WorkflowEditor extends EditorPane {
 			if (activeEl && activeEl !== document.body && activeEl !== document.documentElement && !this._container.contains(activeEl)) {
 				return;
 			}
-			const isFlowchartFocusedOrActive =
-				this._editorService.activeEditorPane === this ||
-				(activeEl ? this._container.contains(activeEl) : false) ||
-				(this.group?.activeEditorPane === this && this._container.matches(':hover'));
+			const containerHasFocus = Boolean(activeEl && this._container.contains(activeEl));
+			const isFlowchartFocusedOrActive = containerHasFocus
+				? true
+				: (this._editorService.activeEditorPane === this);
 			if (!isFlowchartFocusedOrActive) {
 				return;
 			}
@@ -1267,6 +1600,14 @@ export class WorkflowEditor extends EditorPane {
 				this._redo();
 			} else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'c') {
 				e.preventDefault();
+				if (this._selectedCapsules && this._selectedCapsules.stepIds.size > 0 && this._data?.nodes) {
+					const capNode = this._data.nodes.find(n => n.id === this._selectedCapsules!.nodeId);
+					const capSteps = (capNode?.pipeline || []).filter(s => this._selectedCapsules!.stepIds.has(s.id));
+					if (capNode && capSteps.length > 0) {
+						this._copyCapsuleSteps(capNode, capSteps);
+						return;
+					}
+				}
 				if (this._selectedCapsule && this._data?.nodes) {
 					const capNode = this._data.nodes.find(n => n.id === this._selectedCapsule!.nodeId);
 					const capStep = capNode?.pipeline?.find(s => s.id === this._selectedCapsule!.stepId);
@@ -1282,7 +1623,7 @@ export class WorkflowEditor extends EditorPane {
 					const selId = Array.from(this._selectedNodeIds)[0];
 					const selNode = this._data.nodes.find(n => n.id === selId);
 					if (selNode) {
-						if (WorkflowEditor._lastCopyKind === 'capsule' && WorkflowEditor._copiedCapsule) {
+						if (WorkflowEditor._lastCopyKind === 'capsule' && (WorkflowEditor._copiedCapsules.length > 0 || WorkflowEditor._copiedCapsule)) {
 							void this._pasteCapsuleIntoNode(selNode);
 							return;
 						}
@@ -1347,6 +1688,8 @@ export class WorkflowEditor extends EditorPane {
 					// Clear selection unless Shift/Ctrl is held
 					if (!e.shiftKey && !e.ctrlKey && !e.metaKey) {
 						this._selectedCapsule = null;
+						this._selectedCapsules = null;
+						this._updateCapsuleSelectionDom();
 						this._selectedNodeIds.clear();
 						this._selectedLinkIds.clear();
 						this._renderNodes();
@@ -1611,7 +1954,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 		if (this._varsBodyEl) {
-			this._varsBodyEl.style.display = tab === 'vars' ? 'block' : 'none';
+			this._varsBodyEl.style.display = tab === 'vars' ? 'flex' : 'none';
 			if (tab === 'vars') {
 				this._refreshVariablesDrawer(targetNodeId);
 			}
@@ -1852,163 +2195,360 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
-		const table = append(this._varsBodyEl, $('table.workflow-vars-table'));
-		const thead = append(table, $('thead'));
-		const headerRow = append(thead, $('tr'));
-		const nameTh = append(headerRow, $('th'));
-		nameTh.textContent = 'Variable Name';
-		nameTh.style.width = '150px';
+		// Load persisted column widths (or balanced defaults where Variable Name has ample room & Runtime Value is compact)
+		const defaultColWidths: Record<string, number> = {
+			name: 240,
+			node: 210,
+			init: 180,
+			refs: 92,
+			value: 260,
+			action: 62
+		};
+		const colLimits: Record<string, { min: number; max: number }> = {
+			name: { min: 130, max: 600 },
+			node: { min: 110, max: 480 },
+			init: { min: 100, max: 440 },
+			refs: { min: 70, max: 160 },
+			value: { min: 120, max: 800 },
+			action: { min: 56, max: 80 }
+		};
+		if (!this._varsColWidths) {
+			try {
+				const raw = window.localStorage.getItem('anyagent.varsTableColWidths');
+				if (raw) {
+					const parsed = JSON.parse(raw);
+					if (parsed && typeof parsed === 'object') {
+						this._varsColWidths = { ...defaultColWidths };
+						for (const k of Object.keys(defaultColWidths)) {
+							const n = Number(parsed[k]);
+							if (Number.isFinite(n) && n >= colLimits[k].min && n <= colLimits[k].max) {
+								this._varsColWidths[k] = Math.round(n);
+							}
+						}
+					}
+				}
+			} catch { }
+			if (!this._varsColWidths) {
+				this._varsColWidths = { ...defaultColWidths };
+			}
+		}
+		const saveColWidths = () => {
+			try {
+				if (this._varsColWidths) {
+					window.localStorage.setItem('anyagent.varsTableColWidths', JSON.stringify(this._varsColWidths));
+				}
+			} catch { }
+		};
 
-		const nodeTh = append(headerRow, $('th'));
-		nodeTh.textContent = 'Bound Node';
-		nodeTh.style.width = '130px';
-
-		const initTh = append(headerRow, $('th'));
-		initTh.textContent = 'Initial Value';
-		initTh.style.width = '130px';
-
-		const refTh = append(headerRow, $('th'));
-		refTh.textContent = 'References';
-		refTh.style.width = '90px';
-
-		const valTh = append(headerRow, $('th'));
-		valTh.textContent = 'Runtime Value';
-
-		const actTh = append(headerRow, $('th'));
-		actTh.textContent = 'Action';
-		actTh.style.width = '50px';
-		actTh.style.textAlign = 'center';
-
-		const tbody = append(table, $('tbody'));
 		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
 		const activeNodeId = targetNodeId || Array.from(this._selectedNodeIds)[0];
 
-		for (const item of allVars) {
-			const isTarget = item.node.id === activeNodeId;
-			const row = append(tbody, $(`tr${isTarget ? '.highlighted-var-row' : ''}`));
+		// Sticky Search & Filter Toolbar
+		const toolbar = append(this._varsBodyEl, $('.vars-search-toolbar'));
+		const searchBox = append(toolbar, $('.vars-search-box'));
+		append(searchBox, $('span.vars-search-icon' + ThemeIcon.asCSSSelector(Codicon.search)));
+		const searchInput = append(searchBox, $('input.vars-search-input')) as HTMLInputElement;
+		searchInput.type = 'text';
+		searchInput.placeholder = localize('searchVarNamePlaceholder', 'Search by variable name...');
+		searchInput.value = this._varsSearchQuery;
+		searchInput.title = localize('searchVarNameTooltip', 'Filter context variables by Variable Name (Esc to clear)');
 
-			// 1. Variable Name
-			const nameTd = append(row, $('td'));
-			const nameInput = append(nameTd, $('input.vars-table-input')) as HTMLInputElement;
-			nameInput.type = 'text';
-			nameInput.value = item.variable.name;
-			nameInput.placeholder = 'e.g. status, count';
-			nameInput.onchange = () => {
-				const cleaned = nameInput.value.trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_') || 'var_1';
-				nameInput.value = cleaned;
-				item.variable.name = cleaned;
-				item.node.outputVariable = this._getNodeVariables(item.node)[0];
-				this._saveFlowchartData();
-				this._renderNodes();
-				this._refreshVariablesDrawer();
-			};
+		const clearSearchBtn = append(searchBox, $('button.vars-search-clear-btn', { type: 'button', title: 'Clear search' })) as HTMLButtonElement;
+		append(clearSearchBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+		clearSearchBtn.style.display = this._varsSearchQuery ? 'inline-flex' : 'none';
 
-			// 2. Bound Node
-			const nodeTd = append(row, $('td'));
-			const nodeLink = append(nodeTd, $('.vars-table-node-link'));
-			append(nodeLink, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolEvent)));
-			append(nodeLink, $('span.node-link-text')).textContent = item.node.label || item.node.id;
-			nodeLink.title = `Click to locate & select node '${item.node.label}' on canvas`;
-			nodeLink.onclick = () => {
-				this._selectedNodeIds.clear();
-				this._selectedNodeIds.add(item.node.id);
-				this._renderNodes();
-				if (this._inspectorEl) this._renderInspector(this._inspectorEl);
-				this._centerOnNode(item.node);
-				this._refreshVariablesDrawer(item.node.id);
-			};
+		const evalFilterBtn = append(toolbar, $(`button.vars-filter-pill${this._varsFilterEvaluatedOnly ? '.active' : ''}`, {
+			type: 'button',
+			title: 'Show only variables that have a runtime value'
+		})) as HTMLButtonElement;
+		append(evalFilterBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolVariable)));
+		append(evalFilterBtn, $('span', {}, 'Evaluated'));
 
-			// 3. Initial Value (Python literal, compact)
-			const initTd = append(row, $('td'));
-			initTd.style.width = '140px';
-			initTd.style.maxWidth = '140px';
-			const initInput = append(initTd, $('input.vars-table-input')) as HTMLInputElement;
-			initInput.style.width = '120px';
-			initInput.style.maxWidth = '120px';
-			initInput.type = 'text';
-			initInput.value = item.variable.initialValue || 'None';
-			initInput.placeholder = "None, True, 0";
-			initInput.onchange = () => {
-				item.variable.initialValue = initInput.value.trim() || 'None';
-				this._saveFlowchartData();
-				this._renderNodes();
-				this._drawLinks();
-				if (this._inspectorEl) this._renderInspector(this._inspectorEl);
-			};
+		const countEl = append(toolbar, $('span.vars-search-count'));
 
-			// 4. References Column (Writes and Reads tracing)
-			const varName = item.variable.name;
-			const regexAt = new RegExp(`@${varName}\\b`);
-			const regexWord = new RegExp(`\\b${varName}\\b`);
+		const resetColsBtn = append(toolbar, $('button.vars-reset-cols-btn', {
+			type: 'button',
+			title: 'Reset column widths to default'
+		})) as HTMLButtonElement;
+		append(resetColsBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.layout)));
+		append(resetColsBtn, $('span', {}, 'Reset Cols'));
 
-			const writeNodes: string[] = [];
-			for (const n of this._data?.nodes || []) {
-				if (this._getNodeVariables(n).some(v => v.name === varName)) {
-					writeNodes.push(n.label || n.id);
-				}
+		const tableWrap = append(this._varsBodyEl, $('.vars-table-wrap'));
+		const table = append(tableWrap, $('table.workflow-vars-table'));
+		const colgroup = append(table, $('colgroup'));
+		const colEls: Record<string, HTMLElement> = {};
+		const colDefs: Array<{ key: string; label: string; resizable: boolean; align?: string }> = [
+			{ key: 'name', label: 'Variable Name', resizable: true },
+			{ key: 'node', label: 'Bound Node', resizable: true },
+			{ key: 'init', label: 'Initial Value', resizable: true },
+			{ key: 'refs', label: 'References', resizable: true },
+			{ key: 'value', label: 'Runtime Value', resizable: true },
+			{ key: 'action', label: 'Action', resizable: false, align: 'center' }
+		];
+
+		for (const cd of colDefs) {
+			const col = append(colgroup, $('col'));
+			col.style.width = `${this._varsColWidths[cd.key] || defaultColWidths[cd.key]}px`;
+			colEls[cd.key] = col;
+		}
+
+		const thead = append(table, $('thead'));
+		const headerRow = append(thead, $('tr'));
+		for (const cd of colDefs) {
+			const th = append(headerRow, $(`th${cd.resizable ? '.vars-resizable-th' : ''}`));
+			const labelSpan = append(th, $('span'));
+			labelSpan.textContent = cd.label;
+			if (cd.align) {
+				th.style.textAlign = cd.align;
 			}
-
-			const readLinks: { from: string; to: string; expr: string }[] = [];
-			for (const l of this._data?.links || []) {
-				const text = `${l.label || ''} ${l.condition || ''}`;
-				if (regexAt.test(text) || regexWord.test(text)) {
-					const fromNode = this._data?.nodes.find(n => n.id === l.from);
-					const toNode = this._data?.nodes.find(n => n.id === l.to);
-					readLinks.push({
-						from: fromNode?.label || l.from,
-						to: toNode?.label || l.to,
-						expr: l.label || l.condition || ''
-					});
-				}
-			}
-
-			const refTd = append(row, $('td'));
-			const refBadge = append(refTd, $('.vars-table-ref-badge'));
-			const totalRefs = writeNodes.length + readLinks.length;
-			refBadge.textContent = `${totalRefs} ref${totalRefs === 1 ? '' : 's'}`;
-
-			const refTooltip = [
-				`Defined (Written) in: ${writeNodes.join(', ')}`,
-				readLinks.length > 0
-					? `Referenced (Read) in: ${readLinks.map(rl => `${rl.from} → ${rl.to} [${rl.expr}]`).join('; ')}`
-					: 'No connection conditions referencing this variable yet'
-			].join('\n');
-			refBadge.title = refTooltip;
-			refBadge.onclick = () => {
-				this._selectedNodeIds.clear();
-				this._selectedNodeIds.add(item.node.id);
-				this._renderNodes();
-				if (this._inspectorEl) this._renderInspector(this._inspectorEl);
-				this._centerOnNode(item.node);
-				this._notificationService.info(`Variable '${varName}': ${writeNodes.length} write(s), ${readLinks.length} read(s).`);
-			};
-
-			// 5. Runtime Value
-			const valTd = append(row, $('td'));
-			const runtimeVal = activeRun?.contextVariables ? activeRun.contextVariables[item.variable.name] : undefined;
-			const valBadge = append(valTd, $(`.vars-table-val-badge${runtimeVal === undefined ? '.not-run' : ''}`));
-			const rawValStr = runtimeVal !== undefined ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : '(not evaluated)';
-			const valStr = rawValStr.length > 300 ? rawValStr.substring(0, 300) + ' ...' : rawValStr;
-			valBadge.textContent = valStr;
-			valBadge.title = valStr;
-
-			// 6. Action (Unbind / Delete)
-			const actionTd = append(row, $('td'));
-			actionTd.style.textAlign = 'center';
-			const unbindBtn = append(actionTd, $('.vars-table-action-btn'));
-			unbindBtn.title = `Unbind variable '${item.variable.name}' from '${item.node.label}'`;
-			append(unbindBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
-			unbindBtn.onclick = () => {
-				this._unbindVariableFromNode(item.node, item.variable.name);
-			};
-
-			if (isTarget) {
-				setTimeout(() => {
-					row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-					nameInput.focus();
-				}, 60);
+			if (cd.resizable) {
+				const resizer = append(th, $('.vars-col-resizer'));
+				resizer.title = 'Drag to resize column (double-click to reset)';
+				resizer.ondblclick = (ev) => {
+					ev.preventDefault();
+					ev.stopPropagation();
+					const defW = defaultColWidths[cd.key];
+					if (this._varsColWidths) {
+						this._varsColWidths[cd.key] = defW;
+					}
+					colEls[cd.key].style.width = `${defW}px`;
+					saveColWidths();
+				};
+				resizer.onmousedown = (ev) => {
+					ev.preventDefault();
+					ev.stopPropagation();
+					const startX = ev.clientX;
+					const startW = th.getBoundingClientRect().width || (this._varsColWidths?.[cd.key] ?? defaultColWidths[cd.key]);
+					const limits = colLimits[cd.key];
+					resizer.classList.add('resizing');
+					document.body.style.cursor = 'col-resize';
+					const onMove = (me: MouseEvent) => {
+						const delta = me.clientX - startX;
+						const nextW = Math.round(Math.max(limits.min, Math.min(limits.max, startW + delta)));
+						if (this._varsColWidths) {
+							this._varsColWidths[cd.key] = nextW;
+						}
+						colEls[cd.key].style.width = `${nextW}px`;
+					};
+					const onUp = () => {
+						resizer.classList.remove('resizing');
+						document.body.style.cursor = '';
+						window.removeEventListener('mousemove', onMove);
+						window.removeEventListener('mouseup', onUp);
+						saveColWidths();
+					};
+					window.addEventListener('mousemove', onMove);
+					window.addEventListener('mouseup', onUp);
+				};
 			}
 		}
+
+		resetColsBtn.onclick = () => {
+			this._varsColWidths = { ...defaultColWidths };
+			for (const cd of colDefs) {
+				colEls[cd.key].style.width = `${defaultColWidths[cd.key]}px`;
+			}
+			saveColWidths();
+		};
+
+		const tbody = append(table, $('tbody'));
+
+		const renderTableRows = (shouldScrollToTarget: boolean) => {
+			clearNode(tbody);
+			const q = this._varsSearchQuery.trim().toLowerCase();
+			const filteredVars = allVars.filter(item => {
+				if (q && !item.variable.name.toLowerCase().includes(q)) {
+					return false;
+				}
+				if (this._varsFilterEvaluatedOnly) {
+					const rt = activeRun?.contextVariables ? activeRun.contextVariables[item.variable.name] : undefined;
+					if (rt === undefined) {
+						return false;
+					}
+				}
+				return true;
+			});
+
+			countEl.textContent = (q || this._varsFilterEvaluatedOnly)
+				? `Showing ${filteredVars.length} / ${allVars.length} vars`
+				: `${allVars.length} vars`;
+			clearSearchBtn.style.display = this._varsSearchQuery ? 'inline-flex' : 'none';
+
+			if (filteredVars.length === 0) {
+				const emptyTr = append(tbody, $('tr'));
+				const emptyTd = append(emptyTr, $('td'));
+				emptyTd.setAttribute('colspan', '6');
+				emptyTd.style.textAlign = 'center';
+				emptyTd.style.padding = '22px 12px';
+				emptyTd.style.color = '#64748b';
+				emptyTd.textContent = q
+					? `No variables matching "${this._varsSearchQuery.trim()}".`
+					: 'No evaluated variables in the active run yet.';
+				return;
+			}
+
+			for (const item of filteredVars) {
+				const isTarget = item.node.id === activeNodeId;
+				const row = append(tbody, $(`tr${isTarget ? '.highlighted-var-row' : ''}`));
+
+				// 1. Variable Name
+				const nameTd = append(row, $('td'));
+				const nameInput = append(nameTd, $('input.vars-table-input')) as HTMLInputElement;
+				nameInput.type = 'text';
+				nameInput.value = item.variable.name;
+				nameInput.title = item.variable.name;
+				nameInput.placeholder = 'e.g. status, count';
+				nameInput.onchange = () => {
+					const cleaned = nameInput.value.trim().replace(/^@/, '').replace(/[^a-zA-Z0-9_\u4e00-\u9fa5]/g, '_') || 'var_1';
+					nameInput.value = cleaned;
+					item.variable.name = cleaned;
+					item.node.outputVariable = this._getNodeVariables(item.node)[0];
+					this._saveFlowchartData();
+					this._renderNodes();
+					this._refreshVariablesDrawer();
+				};
+
+				// 2. Bound Node (single-line compact pill with full tooltip)
+				const nodeTd = append(row, $('td'));
+				const nodeLink = append(nodeTd, $('.vars-table-node-link'));
+				append(nodeLink, $('span' + ThemeIcon.asCSSSelector(Codicon.symbolEvent)));
+				append(nodeLink, $('span.node-link-text')).textContent = item.node.label || item.node.id;
+				nodeLink.title = `Bound Node: ${item.node.label || item.node.id}\nClick to locate & select on canvas`;
+				nodeLink.onclick = () => {
+					this._selectedNodeIds.clear();
+					this._selectedNodeIds.add(item.node.id);
+					this._renderNodes();
+					if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+					this._centerOnNode(item.node);
+					this._refreshVariablesDrawer(item.node.id);
+				};
+
+				// 3. Initial Value (fills column width cleanly)
+				const initTd = append(row, $('td'));
+				const initInput = append(initTd, $('input.vars-table-input')) as HTMLInputElement;
+				initInput.type = 'text';
+				initInput.value = item.variable.initialValue || 'None';
+				initInput.title = item.variable.initialValue || 'None';
+				initInput.placeholder = "None, True, 0";
+				initInput.onchange = () => {
+					item.variable.initialValue = initInput.value.trim() || 'None';
+					this._saveFlowchartData();
+					this._renderNodes();
+					this._drawLinks();
+					if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+				};
+
+				// 4. References Column (Writes and Reads tracing)
+				const varName = item.variable.name;
+				const escapedVarName = varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+				const regexAt = new RegExp(`@${escapedVarName}\\b`);
+				const regexWord = new RegExp(`\\b${escapedVarName}\\b`);
+
+				const writeNodes: string[] = [];
+				for (const n of this._data?.nodes || []) {
+					if (this._getNodeVariables(n).some(v => v.name === varName)) {
+						writeNodes.push(n.label || n.id);
+					}
+				}
+
+				const readLinks: { from: string; to: string; expr: string }[] = [];
+				for (const l of this._data?.links || []) {
+					const text = `${l.label || ''} ${l.condition || ''}`;
+					if (regexAt.test(text) || regexWord.test(text)) {
+						const fromNode = this._data?.nodes.find(n => n.id === l.from);
+						const toNode = this._data?.nodes.find(n => n.id === l.to);
+						readLinks.push({
+							from: fromNode?.label || l.from,
+							to: toNode?.label || l.to,
+							expr: l.label || l.condition || ''
+						});
+					}
+				}
+
+				const refTd = append(row, $('td'));
+				const refBadge = append(refTd, $('.vars-table-ref-badge'));
+				const totalRefs = writeNodes.length + readLinks.length;
+				refBadge.textContent = `${totalRefs} ref${totalRefs === 1 ? '' : 's'}`;
+
+				const refTooltip = [
+					`Defined (Written) in: ${writeNodes.join(', ')}`,
+					readLinks.length > 0
+						? `Referenced (Read) in: ${readLinks.map(rl => `${rl.from} → ${rl.to} [${rl.expr}]`).join('; ')}`
+						: 'No connection conditions referencing this variable yet'
+				].join('\n');
+				refBadge.title = refTooltip;
+				refBadge.onclick = () => {
+					this._selectedNodeIds.clear();
+					this._selectedNodeIds.add(item.node.id);
+					this._renderNodes();
+					if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+					this._centerOnNode(item.node);
+					this._notificationService.info(`Variable '${varName}': ${writeNodes.length} write(s), ${readLinks.length} read(s).`);
+				};
+
+				// 5. Runtime Value (compact single-line preview with click-to-copy)
+				const valTd = append(row, $('td'));
+				const runtimeVal = activeRun?.contextVariables ? activeRun.contextVariables[item.variable.name] : undefined;
+				const valBadge = append(valTd, $(`.vars-table-val-badge${runtimeVal === undefined ? '.not-run' : ''}`));
+				const rawValStr = runtimeVal !== undefined ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : '(not evaluated)';
+				const displayValStr = rawValStr.length > 240 ? rawValStr.substring(0, 240) + ' ...' : rawValStr;
+				const tooltipValStr = rawValStr.length > 800 ? rawValStr.substring(0, 800) + ' ...' : rawValStr;
+				valBadge.textContent = displayValStr;
+				valBadge.title = runtimeVal !== undefined ? `${tooltipValStr}\n\n(Click to copy full value)` : '(not evaluated)';
+				if (runtimeVal !== undefined) {
+					valBadge.onclick = () => {
+						navigator.clipboard?.writeText(rawValStr).then(() => {
+							this._notificationService.info(`Copied runtime value of '${item.variable.name}' (${rawValStr.length} chars).`);
+						}).catch(() => { });
+					};
+				}
+
+				// 6. Action (Unbind / Delete)
+				const actionTd = append(row, $('td'));
+				actionTd.style.textAlign = 'center';
+				const unbindBtn = append(actionTd, $('.vars-table-action-btn'));
+				unbindBtn.title = `Unbind variable '${item.variable.name}' from '${item.node.label}'`;
+				append(unbindBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
+				unbindBtn.onclick = () => {
+					this._unbindVariableFromNode(item.node, item.variable.name);
+				};
+
+				if (shouldScrollToTarget && isTarget) {
+					setTimeout(() => {
+						row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+						if (!this._varsSearchQuery) {
+							nameInput.focus();
+						}
+					}, 60);
+				}
+			}
+		};
+
+		searchInput.oninput = () => {
+			this._varsSearchQuery = searchInput.value;
+			renderTableRows(false);
+		};
+		searchInput.onkeydown = (ke) => {
+			ke.stopPropagation();
+			if (ke.key === 'Escape' && this._varsSearchQuery) {
+				this._varsSearchQuery = '';
+				searchInput.value = '';
+				renderTableRows(false);
+			}
+		};
+		clearSearchBtn.onclick = () => {
+			this._varsSearchQuery = '';
+			searchInput.value = '';
+			renderTableRows(false);
+			searchInput.focus();
+		};
+		evalFilterBtn.onclick = () => {
+			this._varsFilterEvaluatedOnly = !this._varsFilterEvaluatedOnly;
+			evalFilterBtn.classList.toggle('active', this._varsFilterEvaluatedOnly);
+			renderTableRows(false);
+		};
+
+		renderTableRows(Boolean(targetNodeId));
 	}
 
 	private _collectVariableOccurrences(findName: string): {
@@ -3244,8 +3784,13 @@ export class WorkflowEditor extends EditorPane {
 		return lines.join('\n');
 	}
 
+	/** The scrolling viewport of the canvas (canvas → zoom sizer → wrapper). */
+	private _canvasScroller(): HTMLElement | undefined {
+		return (this._canvas?.closest('.workflow-editor-canvas-wrapper') as HTMLElement | null) ?? undefined;
+	}
+
 	private _centerOnNode(node: IFlowchartNode): void {
-		const wrapper = this._canvas?.parentElement;
+		const wrapper = this._canvasScroller();
 		if (!wrapper) return;
 		const targetX = (node.x + node.width / 2) * this._zoomLevel - wrapper.clientWidth / 2;
 		const targetY = (node.y + node.height / 2) * this._zoomLevel - wrapper.clientHeight / 2;
@@ -3341,29 +3886,12 @@ export class WorkflowEditor extends EditorPane {
 		};
 
 		const right = append(header, $('.log-header-right'));
-		// Reset Execution Button
+		// Reset Execution Button (Selected Nodes Only when nodes are selected, or Global Reset when none selected)
 		const resetBtn = append(right, $('.log-btn-icon'));
-		resetBtn.title = localize('resetExecutionTooltip', 'Reset Workflow State to IDLE & Clear Highlights');
+		resetBtn.title = localize('resetExecutionTooltip', 'Reset Workflow Execution (Selected nodes only when selected, or full workflow when none selected)');
 		append(resetBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.debugRestart)));
 		resetBtn.onclick = () => {
-			if (!this._workflowUri) return;
-			this._workflowExecutionService.resetWorkflow(this._workflowUri);
-			if (this._toolbarEl) {
-				this._renderToolbar(this._toolbarEl);
-			}
-			this._renderNodes();
-			if (this._logStatusBadgeEl) {
-				this._logStatusBadgeEl.textContent = 'IDLE';
-				this._logStatusBadgeEl.className = 'log-status-badge status-idle';
-			}
-			if (this._logCountBadgeEl) {
-				this._logCountBadgeEl.textContent = '0 events';
-			}
-			if (this._logBodyEl) {
-				clearNode(this._logBodyEl);
-			}
-			this._refreshVariablesDrawer();
-			this._notificationService.info(localize('workflowResetInfo', 'Workflow execution reset to IDLE.'));
+			this._handleResetWorkflowExecution();
 		};
 
 		// Clear Logs Button (only visible in Execution Logs tab)
@@ -3472,6 +4000,131 @@ export class WorkflowEditor extends EditorPane {
 		this._historyBodyEl = append(drawer, $('.workflow-history-body'));
 
 		this._switchDrawerTab(this._activeDrawerTab);
+	}
+
+	private _clearNodeComponentsExecutionData(node: IFlowchartNode): void {
+		if (!Array.isArray(node.pipeline)) {
+			return;
+		}
+		for (const step of node.pipeline) {
+			const comp = step?.component as any;
+			if (!comp) continue;
+			delete comp.lastExecutionOutput;
+			delete comp.lastExecutionLog;
+			delete comp.lastExecutionStatus;
+			delete comp.lastExecutionDurationMs;
+			delete comp.lastExecutedAt;
+			delete comp.lastExecutionExitCode;
+			delete comp.lastExecutionInputs;
+			delete comp.lastSentPrompt;
+			delete comp.pythonOutput;
+			delete comp.pythonResult;
+			delete comp.pythonStructuredData;
+			delete comp.structuredData;
+			delete comp.debugPromptOutput;
+			delete comp.debugSqlOutput;
+			delete comp.debugOutput;
+		}
+		const schemaInput = this._nodeEditorInputsByNodeId.get(node.id);
+		if (schemaInput && !schemaInput.isDisposed() && schemaInput.draftModule) {
+			const updatedNodeFields: ICustomField[] = node.pipeline
+				.filter(st => !!st.component)
+				.map(st => st.component!);
+			schemaInput.draftModule.fields = [
+				{ id: 'title', label: 'Title', type: 'text', required: true },
+				...updatedNodeFields
+			];
+			schemaInput.notifyExternalDraftUpdated();
+		}
+	}
+
+	private _collectNodeProducedVariableNames(node: IFlowchartNode): string[] {
+		const vars = new Set<string>();
+		const add = (raw?: string) => {
+			const clean = (raw || '').trim().replace(/^@/, '');
+			if (clean) vars.add(clean);
+		};
+		for (const v of (node.outputVariables || [])) {
+			add(v.name);
+		}
+		if (node.outputVariable?.name) {
+			add(node.outputVariable.name);
+		}
+		for (const st of (node.pipeline || [])) {
+			add(st.targetVariable);
+			if (st.component) {
+				if (st.component.type !== 'parameters') {
+					add(st.component.outputVariableName);
+					add(st.component.label);
+				}
+			}
+			if (st.expression) {
+				for (const rawLine of st.expression.split('\n')) {
+					if (/^\s/.test(rawLine)) continue;
+					const m = rawLine.trim().match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)/);
+					if (m && m[1]) add(m[1]);
+				}
+			}
+		}
+		return Array.from(vars);
+	}
+
+	private _handleResetWorkflowExecution(toolbarParent?: HTMLElement): void {
+		if (!this._workflowUri) return;
+		const selectedIds = Array.from(this._selectedNodeIds).filter(id =>
+			(this._data?.nodes || []).some(n => n.id === id)
+		);
+
+		if (selectedIds.length > 0) {
+			// Selective Node Reset: clear ONLY selected nodes' execution data & produced variables; keep all other nodes intact!
+			const varsToClear = new Set<string>();
+			for (const nid of selectedIds) {
+				const node = this._data.nodes.find(n => n.id === nid);
+				if (!node) continue;
+				this._clearNodeComponentsExecutionData(node);
+				for (const vn of this._collectNodeProducedVariableNames(node)) {
+					varsToClear.add(vn);
+				}
+			}
+			this._workflowExecutionService.resetNodes(this._workflowUri, selectedIds, Array.from(varsToClear));
+			this._saveFlowchartData(true);
+			const tb = toolbarParent || this._toolbarEl;
+			if (tb) {
+				this._renderToolbar(tb);
+			}
+			this._renderNodes();
+			this._drawLinks();
+			this._refreshVariablesDrawer();
+			this._notificationService.info(
+				localize('workflowSelectiveResetInfo', 'Reset execution data for {0} selected node(s). Other nodes preserved.', selectedIds.length)
+			);
+			return;
+		}
+
+		// Global Reset (no nodes selected): clear ALL nodes' execution data, context variables, highlights, and display cards
+		for (const node of (this._data?.nodes || [])) {
+			this._clearNodeComponentsExecutionData(node);
+		}
+		this._workflowExecutionService.resetWorkflow(this._workflowUri);
+		this._saveFlowchartData(true);
+		const tb = toolbarParent || this._toolbarEl;
+		if (tb) {
+			this._renderToolbar(tb);
+		}
+		this._renderNodes();
+		this._drawLinks();
+		if (this._logStatusBadgeEl) {
+			this._logStatusBadgeEl.textContent = 'IDLE';
+			this._logStatusBadgeEl.className = 'log-status-badge status-idle';
+		}
+		if (this._logCountBadgeEl) {
+			this._logCountBadgeEl.textContent = '0 events';
+		}
+		if (this._logBodyEl) {
+			clearNode(this._logBodyEl);
+		}
+		this._refreshVariablesDrawer();
+		this._notificationService.info(localize('workflowResetInfo', 'All workflow execution data reset to IDLE.'));
 	}
 
 	private _renderToolbar(parent: HTMLElement): void {
@@ -3667,29 +4320,18 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		// 6. Reset Execution Button
+		// 6. Reset Execution Button (Selected Nodes Only when nodes are selected, or Global Reset when none selected)
 		const resetBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
-		resetBtn.title = localize('resetWorkflowTitle', 'Reset Workflow Execution (Clear node highlights & status)');
+		const selCountForReset = this._selectedNodeIds.size;
+		resetBtn.title = selCountForReset > 0
+			? localize('resetSelectedNodesTitle', 'Reset Execution for {0} Selected Node(s) (keeps all other nodes intact)', selCountForReset)
+			: localize('resetWorkflowTitle', 'Reset All Workflow Execution Data (select nodes first to reset only selected nodes)');
 		append(resetBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.debugRestart)));
 		if (!this._isToolbarCompact) {
-			append(resetBtn, $('.item-label')).textContent = 'Reset';
+			append(resetBtn, $('.item-label')).textContent = selCountForReset > 0 ? `Reset (${selCountForReset})` : 'Reset';
 		}
 		resetBtn.onclick = () => {
-			if (!this._workflowUri) return;
-			this._workflowExecutionService.resetWorkflow(this._workflowUri);
-			this._renderToolbar(parent);
-			this._renderNodes();
-			if (this._logStatusBadgeEl) {
-				this._logStatusBadgeEl.textContent = 'IDLE';
-				this._logStatusBadgeEl.className = 'log-status-badge status-idle';
-			}
-			if (this._logCountBadgeEl) {
-				this._logCountBadgeEl.textContent = '0 events';
-			}
-			if (this._logBodyEl) {
-				clearNode(this._logBodyEl);
-			}
-			this._notificationService.info(localize('workflowResetInfo', 'Workflow execution reset to IDLE.'));
+			this._handleResetWorkflowExecution(parent);
 		};
 
 		if (this._isToolbarCompact) {
@@ -4633,6 +5275,7 @@ export class WorkflowEditor extends EditorPane {
 			tts: { label: 'O2 TTS', icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.45)' },
 			media_player: { label: 'MP3 / MP4 PLAYER', icon: Codicon.deviceCameraVideo, color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.45)' },
 			voice_note: { label: 'VOICE NOTE', icon: Codicon.mic, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.35)' },
+			sub_workflow: { label: 'SUB-WORKFLOW', icon: Codicon.layers, color: '#22d3ee', bg: 'rgba(6, 182, 212, 0.16)', border: 'rgba(34, 211, 238, 0.45)' },
 			ssh: { label: 'SSH TERMINAL', icon: Codicon.terminal, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.45)' },
 			git: { label: 'GIT BRANCH', icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.45)' },
 			create_tickets: { label: 'CREATE TICKETS', icon: Codicon.add, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.45)' },
@@ -4680,7 +5323,7 @@ export class WorkflowEditor extends EditorPane {
 					metadataLabel = 'Model';
 					metadataValue = comp.targetMode === 'agent'
 						? (comp.targetAgentName || comp.targetAgentId || 'AI Agent')
-						: (comp.targetModel || (comp.targetProvider === 'gemini' ? 'gemini-2.5-flash' : comp.targetProvider === 'anthropic' ? 'claude-sonnet-4-5' : 'gpt-4o'));
+						: (comp.targetModel || resolveDefaultModelId(comp.targetProvider, comp.targetProvider === 'gemini' ? 'gemini-2.5-flash' : comp.targetProvider === 'anthropic' ? 'claude-sonnet-4-5' : 'gpt-4o'));
 					break;
 				}
 				case 'browser': {
@@ -4703,6 +5346,13 @@ export class WorkflowEditor extends EditorPane {
 					metadataLabel = `Voice Clips (${clips.length})`;
 					const previewText = (comp.voiceTranscript || clips.map(c => c.transcript || '').filter(Boolean).join(' ')).trim();
 					metadataValue = previewText ? (previewText.length > 140 ? previewText.substring(0, 140) + '...' : previewText) : (clips.length > 0 ? `${clips.length} recorded audio clip(s)` : '(no recordings yet)');
+					break;
+				}
+				case 'sub_workflow': {
+					const inCount = Array.isArray(comp.subWorkflowInputDefs) ? comp.subWorkflowInputDefs.length : 0;
+					const outCount = Array.isArray(comp.subWorkflowOutputDefs) ? comp.subWorkflowOutputDefs.length : 0;
+					metadataLabel = 'Sub-Workflow';
+					metadataValue = `${comp.subWorkflowName || comp.subWorkflowId || '(unlinked)'} (${inCount} in · ${outCount} out)`;
 					break;
 				}
 				case 'ssh': {
@@ -4986,10 +5636,80 @@ export class WorkflowEditor extends EditorPane {
 			}, metadataValue));
 		}
 
-		// 3. Optional Runtime Output section
-		if (runtimeValStr) {
+		// 2.5. Sub-Workflow Last Runtime Inputs section
+		if (comp?.type === 'sub_workflow') {
+			let lastInputsObj: Record<string, any> | undefined = (comp as any).lastExecutionInputs;
+			if (lastInputsObj === undefined && typeof (comp as any).lastExecutionLog === 'string') {
+				const logStr = String((comp as any).lastExecutionLog);
+				const inputsMatch = logStr.match(/(?:^|\n)Inputs:\s*(\{[\s\S]*?\})(?:\nOutputs:|$)/);
+				if (inputsMatch && inputsMatch[1]) {
+					try {
+						lastInputsObj = JSON.parse(inputsMatch[1]);
+					} catch { }
+				}
+			}
+			if (lastInputsObj && typeof lastInputsObj === 'object') {
+				const inputEntries = Object.entries(lastInputsObj);
+				const inputsSection = append(popover, $('.python-step-popover-runtime'));
+				const inputsTitle = append(inputsSection, $('div.python-step-popover-runtime-title', {
+					style: 'color: #c084fc;'
+				}, `Last Runtime Inputs (${inputEntries.length}):`));
+				void inputsTitle;
+				const inputsValBox = append(inputsSection, $('pre.python-step-popover-runtime-val', {
+					style: 'max-height: 180px; overflow-y: auto; border-color: rgba(192, 132, 252, 0.28);'
+				}));
+				if (inputEntries.length === 0) {
+					inputsValBox.textContent = '(no inputs)';
+				} else {
+					let formattedInputs = '';
+					try {
+						formattedInputs = JSON.stringify(lastInputsObj, null, 2);
+					} catch {
+						formattedInputs = inputEntries.map(([k, v]) => `${k}: ${String(v)}`).join('\n');
+					}
+					inputsValBox.textContent = formattedInputs.length > 1200 ? formattedInputs.substring(0, 1200) + '\n...' : formattedInputs;
+				}
+			}
+		}
+
+		// 2.5 Failed Step Error Banner (if this exact capsule failed in the effective run)
+		const effRunForErr = this._getEffectiveRunForNode(node.id);
+		const nodeRunStateForErr = effRunForErr?.nodeStates?.[node.id];
+		const isThisFailedStep = Boolean(
+			nodeRunStateForErr?.status === 'failed' && (
+				nodeRunStateForErr.failedStepIndex !== undefined
+					? nodeRunStateForErr.failedStepIndex === stepIndex
+					: Boolean(nodeRunStateForErr.failedStepId && nodeRunStateForErr.failedStepId === step.id)
+			)
+		);
+		if (isThisFailedStep) {
+			const errSection = append(popover, $('.python-step-popover-error'));
+			append(errSection, $('div.python-step-popover-error-title', {}, `✗ Execution Error (Step #${stepIndex + 1}):`));
+			const errValBox = append(errSection, $('pre.python-step-popover-error-val'));
+			errValBox.textContent = nodeRunStateForErr?.failedStepError || nodeRunStateForErr?.error || 'Step failed during execution.';
+		}
+
+		// 3. Runtime Output / Last Displayed Content section
+		const isDisplayStep = Boolean(comp?.type === 'display' || /^DISPLAY\s*\(/i.test((fullCode || '').trim()));
+		if (isDisplayStep) {
 			const rtSection = append(popover, $('.python-step-popover-runtime'));
-			append(rtSection, $('div.python-step-popover-runtime-title', {}, 'Last Runtime Value:'));
+			append(rtSection, $('div.python-step-popover-runtime-title', {}, 'Last Displayed Content:'));
+			const rtValBox = append(rtSection, $('pre.python-step-popover-runtime-val'));
+			rtValBox.style.maxHeight = '240px';
+			rtValBox.style.overflow = 'auto';
+			rtValBox.style.whiteSpace = 'pre-wrap';
+			rtValBox.style.wordBreak = 'break-word';
+			if (runtimeValStr) {
+				rtValBox.textContent = runtimeValStr.length > 1500 ? runtimeValStr.substring(0, 1500) + '\n... (truncated)' : runtimeValStr;
+			} else {
+				rtValBox.style.opacity = '0.6';
+				rtValBox.style.fontStyle = 'italic';
+				rtValBox.textContent = '(Not displayed yet — run node or click Test to preview)';
+			}
+		} else if (runtimeValStr) {
+			const rtSection = append(popover, $('.python-step-popover-runtime'));
+			const rtTitle = isThisFailedStep ? 'Previous Iteration Value (stale — before this error):' : 'Last Runtime Value:';
+			append(rtSection, $('div.python-step-popover-runtime-title', {}, rtTitle));
 			const rtValBox = append(rtSection, $('pre.python-step-popover-runtime-val'));
 			rtValBox.textContent = runtimeValStr.length > 600 ? runtimeValStr.substring(0, 600) + '...' : runtimeValStr;
 		}
@@ -5831,7 +6551,7 @@ export class WorkflowEditor extends EditorPane {
 				}, 50);
 			};
 		} else {
-			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+			const activeRun = this._getEffectiveRunForNode(node.id);
 			const nodeRunState = activeRun?.nodeStates?.[node.id];
 			for (let i = 0; i < node.pipeline.length; i++) {
 				const step = node.pipeline[i];
@@ -7321,7 +8041,39 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
-	private _setZoom(level: number): void {
+	/**
+	 * Zoom anchor for the −/+ buttons: the node located from the Workflow Outline, else the single selected node, else the
+	 * middle of the view. A focus node that is off-screen is brought to the middle.
+	 */
+	private _zoomFocusAnchor(): { viewportX: number; viewportY: number; canvasX?: number; canvasY?: number } | undefined {
+		const wrapper = this._canvasScroller();
+		if (!wrapper) {
+			return undefined;
+		}
+		const located = this._workflowUri ? WorkflowEditor._outlineLocated.get(this._workflowUri.toString()) : undefined;
+		const locatedHere = [...(located?.targets || [])].reverse().find(t => this._nodesContainer?.querySelector(`[data-node-id="${CSS.escape(t.nodeId)}"]`));
+		const focusId = locatedHere ? locatedHere.nodeId
+			: this._selectedNodeIds.size === 1 ? Array.from(this._selectedNodeIds)[0] : undefined;
+		const node = focusId ? this._data?.nodes.find(n => n.id === focusId) : undefined;
+		const centerX = wrapper.clientWidth / 2;
+		const centerY = wrapper.clientHeight / 2;
+		if (!node) {
+			return { viewportX: centerX, viewportY: centerY };
+		}
+		const canvasX = node.x + node.width / 2;
+		const canvasY = node.y + node.height / 2;
+		const onScreenX = canvasX * this._zoomLevel - wrapper.scrollLeft;
+		const onScreenY = canvasY * this._zoomLevel - wrapper.scrollTop;
+		const isVisible = onScreenX >= 0 && onScreenX <= wrapper.clientWidth && onScreenY >= 0 && onScreenY <= wrapper.clientHeight;
+		return isVisible ? { viewportX: onScreenX, viewportY: onScreenY, canvasX, canvasY } : { viewportX: centerX, viewportY: centerY, canvasX, canvasY };
+	}
+
+	/** Sets the zoom; with `anchor`, keeps that point (viewport px, optionally pinned to a canvas point) fixed on screen. */
+	private _setZoom(level: number, anchor?: { viewportX: number; viewportY: number; canvasX?: number; canvasY?: number }): void {
+		const wrapper = this._canvasScroller();
+		const oldZoom = this._zoomLevel;
+		const anchorCanvasX = anchor ? (anchor.canvasX ?? ((wrapper?.scrollLeft ?? 0) + anchor.viewportX) / oldZoom) : 0;
+		const anchorCanvasY = anchor ? (anchor.canvasY ?? ((wrapper?.scrollTop ?? 0) + anchor.viewportY) / oldZoom) : 0;
 		this._zoomLevel = Math.max(0.25, Math.min(2.0, Math.round(level * 100) / 100));
 		if (this._canvas) {
 			this._canvas.style.transform = `scale(${this._zoomLevel})`;
@@ -7330,6 +8082,10 @@ export class WorkflowEditor extends EditorPane {
 		if (this._zoomSizerEl) {
 			this._zoomSizerEl.style.width = `${this._currentCanvasWidth * this._zoomLevel}px`;
 			this._zoomSizerEl.style.height = `${this._currentCanvasHeight * this._zoomLevel}px`;
+		}
+		if (anchor && wrapper) {
+			wrapper.scrollLeft = Math.max(0, anchorCanvasX * this._zoomLevel - anchor.viewportX);
+			wrapper.scrollTop = Math.max(0, anchorCanvasY * this._zoomLevel - anchor.viewportY);
 		}
 		const zoomText = `${Math.round(this._zoomLevel * 100)}%`;
 		if (this._floatingZoomBadgeEl) {
@@ -7341,12 +8097,14 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _fitView(): void {
-		if (!this._data.nodes.length || !this._canvas) {
+		const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
+		const visibleNodes = (this._data?.nodes || []).filter(n => !hiddenSubWfNodeIds.has(n.id));
+		if (!visibleNodes.length || !this._canvas) {
 			this._setZoom(1.0);
 			return;
 		}
 		let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-		for (const node of this._data.nodes) {
+		for (const node of visibleNodes) {
 			minX = Math.min(minX, node.x);
 			minY = Math.min(minY, node.y);
 			maxX = Math.max(maxX, node.x + node.width);
@@ -7376,6 +8134,46 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
+	private _getEffectiveRunForNode(nodeId: string): IWorkflowExecutionRun | undefined {
+		const mainRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+		const subRun = this._workflowExecutionService.getLatestSubWorkflowRunForNode(nodeId, this._workflowUri?.toString());
+		if (!subRun) {
+			return mainRun;
+		}
+		if (!mainRun) {
+			return subRun;
+		}
+		const mainState = mainRun.nodeStates?.[nodeId];
+		const mainExecutedThisNode = Boolean(mainState && mainState.status && mainState.status !== 'pending');
+		if (!mainExecutedThisNode) {
+			return subRun;
+		}
+		const subTime = subRun.completedAt || subRun.updatedAt || subRun.startedAt || 0;
+		const mainTime = mainState?.completedAt || mainState?.startedAt || mainRun.completedAt || mainRun.updatedAt || mainRun.startedAt || 0;
+		return subTime >= mainTime ? subRun : mainRun;
+	}
+
+	private _getEffectiveRunForLink(link: IFlowchartLink): IWorkflowExecutionRun | undefined {
+		const mainRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+		const subRun = this._workflowExecutionService.getLatestSubWorkflowRunForNode(link.from, this._workflowUri?.toString())
+			|| this._workflowExecutionService.getLatestSubWorkflowRunForNode(link.to, this._workflowUri?.toString());
+		if (!subRun) {
+			return mainRun;
+		}
+		if (!mainRun) {
+			return subRun;
+		}
+		const mainLinkState = mainRun.linkStates?.[link.id] || mainRun.linkStates?.[`${link.from}->${link.to}`];
+		const mainNodeState = mainRun.nodeStates?.[link.from];
+		const mainExecutedThisBranch = Boolean(mainLinkState || (mainNodeState && mainNodeState.status && mainNodeState.status !== 'pending'));
+		if (!mainExecutedThisBranch) {
+			return subRun;
+		}
+		const subTime = subRun.completedAt || subRun.updatedAt || subRun.startedAt || 0;
+		const mainTime = mainNodeState?.completedAt || mainNodeState?.startedAt || mainRun.completedAt || mainRun.updatedAt || mainRun.startedAt || 0;
+		return subTime >= mainTime ? subRun : mainRun;
+	}
+
 	private _renderVariablePill(
 		container: HTMLElement,
 		node: IFlowchartNode,
@@ -7383,7 +8181,7 @@ export class WorkflowEditor extends EditorPane {
 		stepIndex?: number,
 		pipelineStep?: INodePipelineStep
 	): HTMLElement {
-		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+		const activeRun = this._getEffectiveRunForNode(node.id);
 		const runtimeVal = activeRun?.contextVariables ? activeRun.contextVariables[v.name] : undefined;
 		const displayVal = v.initialValue || 'None';
 		const rawRtStr = runtimeVal !== undefined && runtimeVal !== null ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : '';
@@ -7650,54 +8448,57 @@ export class WorkflowEditor extends EditorPane {
 		return badge;
 	}
 
-	private async _openTicketTypePreviewInEditor(typeNameOrId: string): Promise<void> {
+	/** Finds the Ticket Type template (custom module) by name or id, in the parent workspace first, then the workflow folder. */
+	private async _findTicketTypeModule(typeNameOrId: string): Promise<{ module: ICustomModule; wsUri: URI | undefined } | undefined> {
 		const cleanType = (typeNameOrId || '').trim().replace(/^["']|["']$/g, '').trim();
 		if (!cleanType) {
-			return;
+			return undefined;
 		}
-		this._hidePythonStepPopover(true);
-
 		let wsUri: URI | undefined = this._workflowUri ? URI.joinPath(this._workflowUri, '..') : undefined;
 		const folders = this._workspaceContextService.getWorkspace().folders;
 		if (!wsUri && folders.length > 0) {
 			wsUri = folders[0].uri;
 		}
+		const targetLower = cleanType.toLowerCase();
+		const targetSlug = targetLower.replace(/[\s_]+/g, '-');
+		const matches = (m: ICustomModule) =>
+			m.name.toLowerCase() === targetLower ||
+			m.id.toLowerCase() === targetLower ||
+			m.id.toLowerCase() === targetSlug ||
+			m.name.toLowerCase().replace(/[\s_]+/g, '-') === targetSlug;
+
+		const modules = await this._customModulesService.getCustomModules(wsUri);
+		this._cachedCustomModules = modules;
+		let matchedMod = modules.find(matches);
+		if (!matchedMod && wsUri && this._workflowUri && wsUri.toString() !== this._workflowUri.toString()) {
+			const wfModules = await this._customModulesService.getCustomModules(this._workflowUri);
+			matchedMod = wfModules.find(matches);
+		}
+		return matchedMod ? { module: matchedMod, wsUri } : undefined;
+	}
+
+	private async _openTicketTypePreviewInEditor(typeNameOrId: string, group?: number | typeof SIDE_GROUP): Promise<EditorInput | undefined> {
+		const cleanType = (typeNameOrId || '').trim().replace(/^["']|["']$/g, '').trim();
+		if (!cleanType) {
+			return undefined;
+		}
+		this._hidePythonStepPopover(true);
 
 		try {
-			const modules = await this._customModulesService.getCustomModules(wsUri);
-			this._cachedCustomModules = modules;
-			const targetLower = cleanType.toLowerCase();
-			const targetSlug = targetLower.replace(/[\s_]+/g, '-');
-			let matchedMod = modules.find(m =>
-				m.name.toLowerCase() === targetLower ||
-				m.id.toLowerCase() === targetLower ||
-				m.id.toLowerCase() === targetSlug ||
-				m.name.toLowerCase().replace(/[\s_]+/g, '-') === targetSlug
-			);
-
-			if (!matchedMod && wsUri && this._workflowUri && wsUri.toString() !== this._workflowUri.toString()) {
-				const wfModules = await this._customModulesService.getCustomModules(this._workflowUri);
-				matchedMod = wfModules.find(m =>
-					m.name.toLowerCase() === targetLower ||
-					m.id.toLowerCase() === targetLower ||
-					m.id.toLowerCase() === targetSlug ||
-					m.name.toLowerCase().replace(/[\s_]+/g, '-') === targetSlug
-				);
-			}
-
-			if (matchedMod) {
-				const previewTargetUri = wsUri || this._workflowUri || URI.file('/');
-				await this._editorService.openEditor(
-					new EntityDetailEditorInput(previewTargetUri, matchedMod.name || matchedMod.id, false, matchedMod),
-					{ pinned: true }
-				);
-				return;
+			const found = await this._findTicketTypeModule(cleanType);
+			if (found) {
+				const matchedMod = found.module;
+				const previewTargetUri = found.wsUri || this._workflowUri || URI.file('/');
+				const previewInput = new EntityDetailEditorInput(previewTargetUri, matchedMod.name || matchedMod.id, false, matchedMod);
+				const pane = await this._editorService.openEditor(previewInput, { pinned: true, preserveFocus: group !== undefined }, group);
+				return pane?.input ?? previewInput;
 			}
 
 			this._notificationService.warn(`Ticket Type template '${cleanType}' was not found in this workspace.`);
 		} catch (err) {
 			this._notificationService.error(`Failed to open template preview for '${cleanType}': ${err}`);
 		}
+		return undefined;
 	}
 
 	private _renderExpressionWithTicketBadges(
@@ -7854,6 +8655,67 @@ export class WorkflowEditor extends EditorPane {
 		return !valueOperatorFns.has(fn);
 	}
 
+	/** Last runtime value of a capsule (current / last run variables, the component's own last output, Display cards). */
+	private _resolveStepRuntimeValue(node: IFlowchartNode, step: INodePipelineStep): any {
+		const activeRun = this._getEffectiveRunForNode(node.id);
+		const cleanVar = step.targetVariable?.replace(/^@/, '');
+		let runtimeVal: any = undefined;
+		if (step.component?.type === 'parameters') {
+			// Inputs component: NEVER look up by generic label "Inputs" (collides across multiple flows/sub-workflows!)
+			// Prefer this component's own lastExecutionOutput, or build strictly from its own declared parameter names
+			const ownOut = (step.component as any).lastExecutionOutput;
+			if (ownOut !== undefined && ownOut !== null) {
+				runtimeVal = ownOut;
+			} else if (activeRun?.contextVariables && Array.isArray(step.component.parameters)) {
+				const scopedParams: Record<string, any> = {};
+				let foundAny = false;
+				for (const p of step.component.parameters) {
+					const pName = (p.name || '').trim();
+					if (pName && Object.prototype.hasOwnProperty.call(activeRun.contextVariables, pName)) {
+						scopedParams[pName] = activeRun.contextVariables[pName];
+						foundAny = true;
+					}
+				}
+				if (foundAny) {
+					runtimeVal = scopedParams;
+				}
+			}
+		} else {
+			const nodeStateInRun = activeRun?.nodeStates?.[node.id];
+			const activeRunExecutedNode = Boolean(nodeStateInRun && nodeStateInRun.status && nodeStateInRun.status !== 'pending');
+			if (activeRunExecutedNode && activeRun?.contextVariables) {
+				runtimeVal = (cleanVar ? activeRun.contextVariables[cleanVar] : undefined)
+					?? (step.component?.label ? activeRun.contextVariables[step.component.label] : undefined);
+			}
+			if (runtimeVal === undefined && step.component && (step.component as any).lastExecutionOutput !== undefined) {
+				runtimeVal = (step.component as any).lastExecutionOutput;
+			}
+			if (runtimeVal === undefined && !step.component && activeRun?.contextVariables && cleanVar) {
+				runtimeVal = activeRun.contextVariables[cleanVar];
+			}
+			// Special handling for DISPLAY steps: resolve actual last displayed value (from component output, Live Display Card, or referenced variable)
+			const isDisplayPill = Boolean(step.component?.type === 'display' || (!step.component && /^DISPLAY\s*\(/i.test((step.expression || '').trim())));
+			if (isDisplayPill && runtimeVal === undefined) {
+				const wfCards = this._workflowUri ? this._workflowExecutionService.getDisplayCards(this._workflowUri) : [];
+				const dispArgRaw = step.component?.type === 'display'
+					? (step.component.wfDisplayValue || '').trim()
+					: ((step.expression || '').trim().match(/^DISPLAY\s*\(([\s\S]*)\)$/i)?.[1] || '').trim();
+				const matchedCard = wfCards.find(c => c.nodeId === node.id && (!dispArgRaw || c.expression?.includes(dispArgRaw.replace(/^\{|\}$/g, ''))))
+					|| wfCards.find(c => c.nodeId === node.id);
+				if (matchedCard) {
+					runtimeVal = matchedCard.value !== undefined ? matchedCard.value : (matchedCard.formattedText || matchedCard.displayPreviewText);
+				}
+				if (runtimeVal === undefined && dispArgRaw) {
+					const cleanArgVar = dispArgRaw.replace(/^\{|\}$/g, '').trim();
+					if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(cleanArgVar) && activeRun?.contextVariables && Object.prototype.hasOwnProperty.call(activeRun.contextVariables, cleanArgVar)) {
+						runtimeVal = activeRun.contextVariables[cleanArgVar];
+					}
+				}
+			}
+		}
+		return runtimeVal;
+	}
+
 	private _renderFunctionPill(
 		container: HTMLElement,
 		node: IFlowchartNode,
@@ -7863,17 +8725,40 @@ export class WorkflowEditor extends EditorPane {
 		if (step.component) {
 			this._syncComponentStepMetadata(step);
 		}
-		const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+		const activeRun = this._getEffectiveRunForNode(node.id);
 		const cleanVar = step.targetVariable?.replace(/^@/, '');
-		const runtimeVal = activeRun?.contextVariables
-			? ((cleanVar ? activeRun.contextVariables[cleanVar] : undefined) ?? (step.component?.label ? activeRun.contextVariables[step.component.label] : undefined))
-			: undefined;
-		const rawFnRtStr = runtimeVal !== undefined && runtimeVal !== null ? (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal)) : '';
+		const runtimeVal: any = this._resolveStepRuntimeValue(node, step);
+		const isDisplayPillForFmt = Boolean(step.component?.type === 'display' || (!step.component && /^DISPLAY\s*\(/i.test((step.expression || '').trim())));
+		let rawFnRtStr = '';
+		if (runtimeVal !== undefined) {
+			if (isDisplayPillForFmt) {
+				const tTag = runtimeVal === null ? 'null'
+					: Array.isArray(runtimeVal) ? `list (${runtimeVal.length} items)`
+						: typeof runtimeVal === 'object' ? `dict (${Object.keys(runtimeVal).length} keys)`
+							: typeof runtimeVal;
+				const valBody = runtimeVal === null ? 'null'
+					: (typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal, null, 2) : String(runtimeVal));
+				rawFnRtStr = `[${tTag}]\n${valBody}`;
+			} else if (runtimeVal !== null) {
+				rawFnRtStr = typeof runtimeVal === 'object' ? JSON.stringify(runtimeVal) : String(runtimeVal);
+			}
+		}
 		const runtimeTooltip = rawFnRtStr ? `\n(Runtime Output: ${rawFnRtStr.length > 250 ? rawFnRtStr.substring(0, 250) + ' ...' : rawFnRtStr})` : '';
 
 		const fnPill = append(container, $('.node-function-pill'));
 		if (step.disabled) {
 			fnPill.classList.add('step-disabled');
+		}
+		const nodeStateForPill = activeRun?.nodeStates?.[node.id];
+		const isFailedCapsule = Boolean(
+			nodeStateForPill?.status === 'failed' && (
+				nodeStateForPill.failedStepIndex !== undefined
+					? nodeStateForPill.failedStepIndex === stepIndex
+					: Boolean(nodeStateForPill.failedStepId && nodeStateForPill.failedStepId === step.id)
+			)
+		);
+		if (isFailedCapsule) {
+			fnPill.classList.add('step-failed');
 		}
 		const openStepEditor = () => {
 			if (step.component) {
@@ -7945,25 +8830,7 @@ export class WorkflowEditor extends EditorPane {
 			openStepEditor();
 		};
 
-		const compIconMap: Record<string, { icon: ThemeIcon; color: string; bg: string; border: string; textColor: string }> = {
-			parameters: { icon: Codicon.symbolVariable, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.5)', textColor: '#f3e8ff' },
-			output: { icon: Codicon.output, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.5)', textColor: '#d1fae5' },
-			create_tickets: { icon: Codicon.add, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.5)', textColor: '#f3e8ff' },
-			run_tickets: { icon: Codicon.playCircle, color: '#a855f7', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(168, 85, 247, 0.5)', textColor: '#f3e8ff' },
-			get_outputs: { icon: Codicon.signOut, color: '#818cf8', bg: 'rgba(99, 102, 241, 0.16)', border: 'rgba(129, 140, 248, 0.5)', textColor: '#e0e7ff' },
-			get_ticket: { icon: Codicon.tag, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.5)', textColor: '#dbeafe' },
-			get_tickets: { icon: Codicon.search, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.5)', textColor: '#dbeafe' },
-			display: { icon: Codicon.eye, color: '#f472b6', bg: 'rgba(236, 72, 153, 0.16)', border: 'rgba(244, 114, 182, 0.5)', textColor: '#fce7f3' },
-			prompt: { icon: Codicon.sparkle, color: '#2dd4bf', bg: 'rgba(20, 184, 166, 0.16)', border: 'rgba(45, 212, 191, 0.5)', textColor: '#ccfbf1' },
-			table: { icon: Codicon.table, color: '#fb923c', bg: 'rgba(249, 115, 22, 0.16)', border: 'rgba(251, 146, 60, 0.5)', textColor: '#ffedd5' },
-			browser: { icon: Codicon.globe, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.16)', border: 'rgba(56, 189, 248, 0.5)', textColor: '#e0f2fe' },
-			tts: { icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.5)', textColor: '#fee2e2' },
-			media_player: { icon: Codicon.deviceCameraVideo, color: '#fbbf24', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.5)', textColor: '#fef3c7' },
-			voice_note: { icon: Codicon.mic, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.38)', textColor: '#e2e8f0' },
-			ssh: { icon: Codicon.terminal, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.5)', textColor: '#d1fae5' },
-			git: { icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.5)', textColor: '#ecfccb' },
-			python: { icon: Codicon.python, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.14)', border: 'rgba(56, 189, 248, 0.45)', textColor: '#e0f2fe' }
-		};
+		const compIconMap = WF_COMPONENT_CAPSULE_THEMES;
 		const compTheme = step.component ? compIconMap[step.component.type] : undefined;
 
 		const fnBadge = append(fnPill, $('span.fn-tag-icon' + ThemeIcon.asCSSSelector(compTheme ? compTheme.icon : Codicon.python)));
@@ -8032,6 +8899,34 @@ export class WorkflowEditor extends EditorPane {
 
 		const isEditableComponentVar = comp && comp.type !== 'parameters' && comp.type !== 'output' && comp.type !== 'result' && comp.type !== 'display';
 		const eqIdx = isEditableComponentVar ? displayExpr.indexOf(' = ') : -1;
+
+		// Detect CREATE_TICKETS (both native create_tickets component & classic Python CREATE_TICKETS(...) step)
+		let createTicketsInfo: { varName: string; ticketType: string } | undefined;
+		if (comp?.type === 'create_tickets') {
+			createTicketsInfo = {
+				varName: this._getComponentOutputVarName(comp),
+				ticketType: (comp.wfTicketType || '').trim()
+			};
+		} else if (!comp) {
+			const ctMatch = rawExpr.trim().match(/^(?:([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*)?(?:CREATE_TICKETS|create_tickets)\s*\(([\s\S]*)\)$/);
+			if (ctMatch) {
+				const argsBody = ctMatch[2] || '';
+				let extractedType = '';
+				const kwMatch = argsBody.match(/\b(?:ticket_type|entity_type|module_type)\s*=\s*(?:"([^"]*)"|'([^']*)')/i);
+				if (kwMatch) {
+					extractedType = (kwMatch[1] ?? kwMatch[2] ?? '').trim();
+				} else {
+					const posMatch = argsBody.match(/^\s*(?:"([^"]*)"|'([^']*)')/);
+					if (posMatch) {
+						extractedType = (posMatch[1] ?? posMatch[2] ?? '').trim();
+					}
+				}
+				createTicketsInfo = {
+					varName: (ctMatch[1] || cleanVar || '').trim(),
+					ticketType: extractedType
+				};
+			}
+		}
 
 		if (isEditableComponentVar && comp && eqIdx > 0) {
 			const varNameStr = displayExpr.substring(0, eqIdx).trim();
@@ -8111,16 +9006,39 @@ export class WorkflowEditor extends EditorPane {
 			};
 
 			append(pillContent, $('span', {}, ' = '));
-			const rhsSpan = append(pillContent, $('span'));
-			if (isStandardComponentCapsule) {
-				rhsSpan.textContent = rhsExprStr;
+			if (createTicketsInfo) {
+				append(pillContent, $('span', {}, 'CREATE_TICKETS(ticket_type='));
+				const typeLabel = createTicketsInfo.ticketType || 'Unspecified Type';
+				const typeBadge = append(pillContent, $(`span.fn-pill-ticket-type-badge${createTicketsInfo.ticketType ? '' : '.empty'}`, {}, typeLabel));
+				typeBadge.title = `Create Ticket Type: ${typeLabel}`;
+				append(pillContent, $('span', {}, ', ...)'));
 			} else {
-				this._renderExpressionWithTicketBadges(rhsSpan, rhsExprStr, false);
+				const rhsSpan = append(pillContent, $('span'));
+				if (isStandardComponentCapsule) {
+					rhsSpan.textContent = rhsExprStr;
+				} else {
+					this._renderExpressionWithTicketBadges(rhsSpan, rhsExprStr, false);
+				}
 			}
+		} else if (createTicketsInfo) {
+			if (createTicketsInfo.varName) {
+				append(pillContent, $('span', {}, `${createTicketsInfo.varName} = CREATE_TICKETS(ticket_type=`));
+			} else {
+				append(pillContent, $('span', {}, 'CREATE_TICKETS(ticket_type='));
+			}
+			const typeLabel = createTicketsInfo.ticketType || 'Unspecified Type';
+			const typeBadge = append(pillContent, $(`span.fn-pill-ticket-type-badge${createTicketsInfo.ticketType ? '' : '.empty'}`, {}, typeLabel));
+			typeBadge.title = `Create Ticket Type: ${typeLabel}`;
+			append(pillContent, $('span', {}, ', ...)'));
 		} else {
 			this._renderExpressionWithTicketBadges(pillContent, displayExpr, false);
 		}
-		if (step.disabled) {
+		if (isFailedCapsule) {
+			const errBadgePill = append(fnPill, $('span.fn-pill-error-badge', {}, '✗ FAILED'));
+			const errMsg = nodeStateForPill?.failedStepError || nodeStateForPill?.error || 'Execution failed';
+			errBadgePill.title = `Step #${stepIndex + 1} Failed: ${errMsg}`;
+			fnPill.title = `[FAILED at Step #${stepIndex + 1}]: ${errMsg}`;
+		} else if (step.disabled) {
 			fnPill.title = `[Commented Out / Disabled] ${displayExpr}\n(Skipped during workflow execution. Double-click to edit or re-enable)`;
 		}
 		void runtimeTooltip;
@@ -8262,6 +9180,14 @@ export class WorkflowEditor extends EditorPane {
 			window.addEventListener('mouseup', onResizeUp);
 		});
 
+		const initStep = node.pipeline?.[stepIndex];
+		if (initStep) {
+			pillEl.setAttribute('data-pipeline-step-id', initStep.id);
+			if (this._selectedCapsules?.nodeId === node.id && this._selectedCapsules.stepIds.has(initStep.id)) {
+				pillEl.classList.add('capsule-multi-selected');
+			}
+		}
+
 		pillEl.addEventListener('contextmenu', (e: MouseEvent) => {
 			e.preventDefault();
 			e.stopPropagation();
@@ -8273,33 +9199,159 @@ export class WorkflowEditor extends EditorPane {
 		});
 		pillEl.addEventListener('mousedown', (e: MouseEvent) => {
 			const curStep = node.pipeline?.[stepIndex];
-			if (curStep) {
-				this._selectedCapsule = { nodeId: node.id, stepId: curStep.id };
-			}
-			if (e.button !== 0 || e.shiftKey || e.ctrlKey || e.metaKey) {
-				return;
-			}
 			const targetEl = e.target as HTMLElement | null;
 			if (targetEl?.closest('.var-pill-remove, .fn-pill-var-badge, .fn-pill-var-input, .capsule-resize-handle')) {
 				return;
 			}
+			if (e.button !== 0 || !curStep) {
+				return;
+			}
+
+			// Cmd/Ctrl-click: toggle individual capsule in multi-selection within this node
+			if (e.metaKey || e.ctrlKey) {
+				e.preventDefault();
+				e.stopPropagation();
+				(pillEl as any)._justDraggedAt = Date.now();
+				if (!this._selectedCapsules || this._selectedCapsules.nodeId !== node.id) {
+					const initialIds = new Set<string>();
+					if (this._selectedCapsule?.nodeId === node.id) {
+						initialIds.add(this._selectedCapsule.stepId);
+					}
+					initialIds.add(curStep.id);
+					this._selectedCapsules = { nodeId: node.id, stepIds: initialIds, anchorIndex: stepIndex };
+				} else {
+					if (this._selectedCapsules.stepIds.has(curStep.id)) {
+						this._selectedCapsules.stepIds.delete(curStep.id);
+					} else {
+						this._selectedCapsules.stepIds.add(curStep.id);
+					}
+					this._selectedCapsules.anchorIndex = stepIndex;
+					if (this._selectedCapsules.stepIds.size === 0) {
+						this._selectedCapsules = null;
+					}
+				}
+				this._selectedCapsule = { nodeId: node.id, stepId: curStep.id };
+				this._updateCapsuleSelectionDom();
+				return;
+			}
+
+			// Shift-click: range-select capsules from anchor to current index within this node
+			if (e.shiftKey) {
+				e.preventDefault();
+				e.stopPropagation();
+				(pillEl as any)._justDraggedAt = Date.now();
+				const pipeline = node.pipeline || [];
+				let anchor = stepIndex;
+				if (this._selectedCapsules?.nodeId === node.id) {
+					anchor = this._selectedCapsules.anchorIndex;
+				} else if (this._selectedCapsule?.nodeId === node.id) {
+					const prevIdx = pipeline.findIndex(s => s.id === this._selectedCapsule!.stepId);
+					if (prevIdx >= 0) {
+						anchor = prevIdx;
+					}
+				}
+				const lo = Math.max(0, Math.min(anchor, stepIndex));
+				const hi = Math.min(pipeline.length - 1, Math.max(anchor, stepIndex));
+				const rangeIds = new Set<string>();
+				for (let r = lo; r <= hi; r++) {
+					if (pipeline[r]?.id) {
+						rangeIds.add(pipeline[r].id);
+					}
+				}
+				this._selectedCapsules = { nodeId: node.id, stepIds: rangeIds, anchorIndex: anchor };
+				this._selectedCapsule = { nodeId: node.id, stepId: curStep.id };
+				this._updateCapsuleSelectionDom();
+				return;
+			}
+
+			// Plain left-click: if capsule is NOT in current multi-selection, reset multi-selection
+			const isInCurrentMultiSelection = Boolean(
+				this._selectedCapsules &&
+				this._selectedCapsules.nodeId === node.id &&
+				this._selectedCapsules.stepIds.has(curStep.id) &&
+				this._selectedCapsules.stepIds.size > 1
+			);
+			if (!isInCurrentMultiSelection) {
+				this._selectedCapsules = null;
+				this._updateCapsuleSelectionDom();
+			}
+			this._selectedCapsule = { nodeId: node.id, stepId: curStep.id };
 			e.stopPropagation();
+
+			// Compute all indices participating in this drag (single or multi-selected batch)
+			const draggedIndices: number[] = [];
+			if (isInCurrentMultiSelection && this._selectedCapsules && node.pipeline) {
+				for (let idx = 0; idx < node.pipeline.length; idx++) {
+					if (this._selectedCapsules.stepIds.has(node.pipeline[idx].id)) {
+						draggedIndices.push(idx);
+					}
+				}
+			}
+			if (draggedIndices.length === 0) {
+				draggedIndices.push(stepIndex);
+			}
 
 			const startX = e.clientX;
 			const startY = e.clientY;
 			let isDragging = false;
 			let targetInsertIdx = stepIndex;
 			let hoveredTargetNode: IFlowchartNode | null = node;
+			let hoveredTargetEditor: WorkflowEditor | null = this;
 			let ghostEl: HTMLElement | null = null;
+			let copyBadgeEl: HTMLElement | null = null;
+
+			// 2-second dwell-to-copy (or Alt/Option instant copy) state when hovering over a different target node or split editor
+			let copyHoverKey: string | null = null;
+			let copyModeReady = false;
+			let copyTimer: any = null;
+			let copyCountdownInterval: any = null;
+
+			const getEditorDropRoots = (): HTMLElement[] => {
+				const roots: HTMLElement[] = [];
+				for (const ed of WorkflowEditor._openWorkflowEditors) {
+					if (ed._nodesContainer) {
+						roots.push(ed._nodesContainer);
+					}
+				}
+				if (roots.length === 0 && badgesContainer) {
+					roots.push(badgesContainer);
+				}
+				return roots;
+			};
+
+			const resetCopyTimer = () => {
+				if (copyTimer) {
+					clearTimeout(copyTimer);
+					copyTimer = null;
+				}
+				if (copyCountdownInterval) {
+					clearInterval(copyCountdownInterval);
+					copyCountdownInterval = null;
+				}
+				copyHoverKey = null;
+				copyModeReady = false;
+				if (ghostEl) {
+					ghostEl.classList.remove('copy-ready');
+				}
+				if (copyBadgeEl) {
+					copyBadgeEl.style.display = 'none';
+					copyBadgeEl.classList.remove('is-ready');
+					copyBadgeEl.textContent = '';
+				}
+				for (const root of getEditorDropRoots()) {
+					root.querySelectorAll('.capsule-copy-ready').forEach(el => el.classList.remove('capsule-copy-ready'));
+				}
+			};
 
 			const clearDropIndicators = () => {
-				const scopeRoot = this._nodesContainer || badgesContainer;
-				scopeRoot
-					.querySelectorAll('.capsule-drop-before, .capsule-drop-after')
-					.forEach(el => el.classList.remove('capsule-drop-before', 'capsule-drop-after'));
-				scopeRoot
-					.querySelectorAll('.capsule-drop-target-node')
-					.forEach(el => el.classList.remove('capsule-drop-target-node'));
+				for (const root of getEditorDropRoots()) {
+					root
+						.querySelectorAll('.capsule-drop-before, .capsule-drop-after')
+						.forEach(el => el.classList.remove('capsule-drop-before', 'capsule-drop-after'));
+					root
+						.querySelectorAll('.capsule-drop-target-node, .capsule-copy-ready')
+						.forEach(el => el.classList.remove('capsule-drop-target-node', 'capsule-copy-ready'));
+				}
 			};
 
 			const onMouseMove = (mvEvent: MouseEvent) => {
@@ -8312,7 +9364,12 @@ export class WorkflowEditor extends EditorPane {
 					pillEl.classList.add('capsule-dragging');
 
 					ghostEl = $('.workflow-capsule-drag-ghost');
-					ghostEl.textContent = (pillEl.querySelector('.fn-pill-text, .badge-text')?.textContent || pillEl.textContent || 'Step').trim();
+					const baseLabel = (pillEl.querySelector('.fn-pill-text, .badge-text')?.textContent || pillEl.textContent || 'Step').trim();
+					const labelSpan = append(ghostEl, $('span', {}, draggedIndices.length > 1 ? `${draggedIndices.length} capsules` : baseLabel));
+					labelSpan.style.overflow = 'hidden';
+					labelSpan.style.textOverflow = 'ellipsis';
+					copyBadgeEl = append(ghostEl, $('span.workflow-capsule-copy-badge'));
+					copyBadgeEl.style.display = 'none';
 					const compStyle = window.getComputedStyle(pillEl);
 					if (compStyle.borderColor) {
 						ghostEl.style.borderColor = compStyle.borderColor;
@@ -8336,33 +9393,76 @@ export class WorkflowEditor extends EditorPane {
 
 				clearDropIndicators();
 
-				// Detect which node the pointer is currently hovering over (topmost in DOM order)
-				let hitNodeEl: HTMLElement | null = null;
-				let hitNode: IFlowchartNode | null = null;
-				if (this._nodesContainer && this._data?.nodes) {
-					const allNodeEls = Array.from(this._nodesContainer.querySelectorAll<HTMLElement>('.workflow-node[data-node-id]'));
-					for (let idx = allNodeEls.length - 1; idx >= 0; idx--) {
-						const candEl = allNodeEls[idx];
-						const r = candEl.getBoundingClientRect();
-						if (mvEvent.clientX >= r.left && mvEvent.clientX <= r.right && mvEvent.clientY >= r.top && mvEvent.clientY <= r.bottom) {
-							const candId = candEl.getAttribute('data-node-id');
-							const candNode = candId ? this._data.nodes.find(n => n.id === candId) || null : null;
-							if (candNode) {
-								hitNodeEl = candEl;
-								hitNode = candNode;
-								break;
-							}
-						}
-					}
-				}
+				// Detect which node the pointer is currently hovering over across ALL visible split WorkflowEditor instances
+				const hit = WorkflowEditor._findHoveredNodeAcrossEditors(mvEvent.clientX, mvEvent.clientY);
+				const hitEditor = hit?.editor || null;
+				const hitNodeEl = hit?.nodeEl || null;
+				const hitNode = hit?.node || null;
 
+				hoveredTargetEditor = hitEditor;
 				hoveredTargetNode = hitNode;
-				if (!hitNode || !hitNodeEl) {
+				if (!hitNode || !hitNodeEl || !hitEditor) {
+					resetCopyTimer();
 					return;
 				}
 
-				if (hitNode.id !== node.id) {
+				const isCrossNode = hitEditor !== this || hitNode.id !== node.id;
+				const currentHoverKey = `${hitEditor._workflowUri?.toString() || 'ed'}:${hitNode.id}`;
+
+				if (isCrossNode) {
 					hitNodeEl.classList.add('capsule-drop-target-node');
+					if (mvEvent.altKey) {
+						if (copyHoverKey !== currentHoverKey || !copyModeReady) {
+							resetCopyTimer();
+							copyHoverKey = currentHoverKey;
+							copyModeReady = true;
+						}
+						hitNodeEl.classList.add('capsule-copy-ready');
+						if (ghostEl) {
+							ghostEl.classList.add('copy-ready');
+						}
+						if (copyBadgeEl) {
+							copyBadgeEl.style.display = 'inline-flex';
+							copyBadgeEl.classList.add('is-ready');
+							copyBadgeEl.textContent = '✓ COPY MODE';
+						}
+					} else if (copyHoverKey !== currentHoverKey) {
+						resetCopyTimer();
+						copyHoverKey = currentHoverKey;
+						const enteredAt = Date.now();
+						const targetElRef = hitNodeEl;
+						if (copyBadgeEl) {
+							copyBadgeEl.style.display = 'inline-flex';
+							copyBadgeEl.classList.remove('is-ready');
+							copyBadgeEl.textContent = 'Hold 2.0s / Alt to Copy';
+						}
+						copyCountdownInterval = setInterval(() => {
+							const rem = Math.max(0, 2.0 - (Date.now() - enteredAt) / 1000);
+							if (copyBadgeEl && !copyModeReady) {
+								copyBadgeEl.textContent = `Hold ${rem.toFixed(1)}s / Alt to Copy`;
+							}
+						}, 100);
+						copyTimer = setTimeout(() => {
+							copyModeReady = true;
+							if (copyCountdownInterval) {
+								clearInterval(copyCountdownInterval);
+								copyCountdownInterval = null;
+							}
+							targetElRef.classList.add('capsule-copy-ready');
+							if (ghostEl) {
+								ghostEl.classList.add('copy-ready');
+							}
+							if (copyBadgeEl) {
+								copyBadgeEl.style.display = 'inline-flex';
+								copyBadgeEl.classList.add('is-ready');
+								copyBadgeEl.textContent = '✓ COPY MODE';
+							}
+						}, 2000);
+					} else if (copyModeReady) {
+						hitNodeEl.classList.add('capsule-copy-ready');
+					}
+				} else {
+					resetCopyTimer();
 				}
 
 				const targetPills = Array.from(hitNodeEl.querySelectorAll<HTMLElement>('[data-pipeline-step-idx]'));
@@ -8392,14 +9492,26 @@ export class WorkflowEditor extends EditorPane {
 				window.removeEventListener('mousemove', onMouseMove, true);
 				window.removeEventListener('mouseup', onMouseUp, true);
 
+				const dropHoverKey = hoveredTargetEditor && hoveredTargetNode
+					? `${hoveredTargetEditor._workflowUri?.toString() || 'ed'}:${hoveredTargetNode.id}`
+					: null;
+				const shouldCopy = upEvent.altKey || (copyModeReady && Boolean(dropHoverKey && dropHoverKey === copyHoverKey));
+				resetCopyTimer();
+
 				if (ghostEl) {
 					ghostEl.remove();
 					ghostEl = null;
+					copyBadgeEl = null;
 				}
 				pillEl.classList.remove('capsule-dragging');
 				clearDropIndicators();
 
 				if (!isDragging) {
+					// Plain click on a previously multi-selected capsule collapses selection to single capsule
+					if (isInCurrentMultiSelection) {
+						this._selectedCapsules = null;
+						this._updateCapsuleSelectionDom();
+					}
 					return;
 				}
 				upEvent.preventDefault();
@@ -8410,20 +9522,24 @@ export class WorkflowEditor extends EditorPane {
 					return;
 				}
 
-				// Cross-node drag & drop: move capsule from source node to target node
-				if (hoveredTargetNode.id !== node.id) {
-					this._moveCapsuleBetweenNodes(node, stepIndex, hoveredTargetNode, targetInsertIdx);
+				// Cross-node / Cross-split drag & drop: copy (if hovered >= 2s or Alt held) or move capsule(s)
+				if (hoveredTargetEditor && (hoveredTargetEditor !== this || hoveredTargetNode.id !== node.id)) {
+					this._transferCapsulesBetweenNodes(node, draggedIndices, hoveredTargetNode, targetInsertIdx, shouldCopy ? 'copy' : 'move', hoveredTargetEditor);
 					return;
 				}
 
-				// Same-node drag & drop: reorder capsule within the node
+				// Same-node drag & drop: reorder single or multi-selected capsule(s) within the node
 				if (node.pipeline && node.pipeline.length > 1) {
-					const fromIdx = stepIndex;
-					let toIdx = targetInsertIdx > fromIdx ? targetInsertIdx - 1 : targetInsertIdx;
-					toIdx = Math.max(0, Math.min(node.pipeline.length - 1, toIdx));
-					if (toIdx !== fromIdx) {
-						const [moved] = node.pipeline.splice(fromIdx, 1);
-						node.pipeline.splice(toIdx, 0, moved);
+					const sorted = Array.from(new Set(draggedIndices)).sort((a, b) => a - b);
+					const selectedSet = new Set(sorted);
+					const movingSteps = sorted.map(idx => node.pipeline![idx]);
+					const remaining = node.pipeline.filter((_, idx) => !selectedSet.has(idx));
+					const removedBeforeTarget = sorted.filter(idx => idx < targetInsertIdx).length;
+					const adjustedIdx = Math.max(0, Math.min(remaining.length, targetInsertIdx - removedBeforeTarget));
+					const nextPipeline = [...remaining.slice(0, adjustedIdx), ...movingSteps, ...remaining.slice(adjustedIdx)];
+					const changed = nextPipeline.some((st, i) => st !== node.pipeline![i]);
+					if (changed) {
+						node.pipeline = nextPipeline;
 						this._syncToNode(node, true);
 						this._saveFlowchartData();
 						this._renderNodes();
@@ -8451,6 +9567,26 @@ export class WorkflowEditor extends EditorPane {
 
 			window.addEventListener('mousemove', onMouseMove, true);
 			window.addEventListener('mouseup', onMouseUp, true);
+		});
+	}
+
+	private _updateCapsuleSelectionDom(): void {
+		if (!this._nodesContainer) {
+			return;
+		}
+		const allPills = this._nodesContainer.querySelectorAll<HTMLElement>('[data-pipeline-step-id]');
+		allPills.forEach(el => {
+			const stepId = el.getAttribute('data-pipeline-step-id');
+			const nodeEl = el.closest('.workflow-node') as HTMLElement | null;
+			const nodeId = nodeEl?.getAttribute('data-node-id');
+			const isSelected = Boolean(
+				this._selectedCapsules &&
+				nodeId &&
+				stepId &&
+				this._selectedCapsules.nodeId === nodeId &&
+				this._selectedCapsules.stepIds.has(stepId)
+			);
+			el.classList.toggle('capsule-multi-selected', isSelected);
 		});
 	}
 
@@ -8617,6 +9753,1193 @@ export class WorkflowEditor extends EditorPane {
 		playAtIndex(0);
 	}
 
+	private _clientToCanvasCoords(clientX: number, clientY: number): { x: number; y: number } | undefined {
+		if (!this._canvas) {
+			return undefined;
+		}
+		const rect = this._canvas.getBoundingClientRect();
+		const zoom = this._zoomLevel || 1;
+		return {
+			x: Math.max(0, Math.round((clientX - rect.left) / zoom)),
+			y: Math.max(0, Math.round((clientY - rect.top) / zoom))
+		};
+	}
+
+	private _getNodeSubWorkflowNamespace(nodeId: string): string | undefined {
+		const curUri = this._workflowUri?.toString() || '';
+		if (!curUri || !nodeId) {
+			return undefined;
+		}
+		const allSubs = this._workflowExecutionService.getSubWorkflows();
+		for (const sw of allSubs) {
+			if (sw.sourceWorkflowUri === curUri && Array.isArray(sw.nodeIds) && sw.nodeIds.includes(nodeId)) {
+				return sw.namespace || sw.id;
+			}
+		}
+		return undefined;
+	}
+
+	private _getHiddenSubWorkflowNodeIds(): Set<string> {
+		const hidden = new Set<string>();
+		const curUri = this._workflowUri?.toString() || '';
+		if (!curUri) {
+			return hidden;
+		}
+		if (this._focusSubWorkflowId) {
+			// Focused Sub-Workflow canvas: show exactly that Sub-Workflow's nodes (regardless of its lightbulb state) and hide everything else
+			const focusSub = this._workflowExecutionService.getSubWorkflowById(this._focusSubWorkflowId);
+			const keep = new Set(Array.isArray(focusSub?.nodeIds) ? focusSub!.nodeIds : []);
+			if (keep.size > 0) {
+				for (const n of (this._data?.nodes || [])) {
+					if (!keep.has(n.id)) {
+						hidden.add(n.id);
+					}
+				}
+				return hidden;
+			}
+		}
+		const allSubs = this._workflowExecutionService.getSubWorkflows();
+		for (const sw of allSubs) {
+			if (sw.sourceWorkflowUri === curUri && sw.isHiddenInSource && Array.isArray(sw.nodeIds)) {
+				for (const nid of sw.nodeIds) {
+					hidden.add(nid);
+				}
+			}
+		}
+		return hidden;
+	}
+
+	private _encapsulateNodesAsSubWorkflow(nodeIds: string[], rawName: string): ISubWorkflowDefinition | undefined {
+		const cleanName = rawName.trim();
+		if (!cleanName) {
+			this._notificationService.warn('Please enter a name for the Sub-Workflow.');
+			return undefined;
+		}
+		const idSet = new Set(nodeIds);
+		const subNodes = (this._data.nodes || []).filter(n => idSet.has(n.id));
+		if (subNodes.length === 0) {
+			this._notificationService.warn('Select at least one node to encapsulate as a Sub-Workflow.');
+			return undefined;
+		}
+		const subLinks = (this._data.links || []).filter(l => idSet.has(l.from) && idSet.has(l.to));
+		const contract = this._workflowExecutionService.resolveWorkflowIOContract({ nodes: subNodes, links: subLinks });
+
+		const curUri = this._workflowUri?.toString() || '';
+		const wfName = this.input?.getName() || 'Workflow';
+		const now = Date.now();
+		const def: ISubWorkflowDefinition = {
+			id: `subwf_${now}_${Math.random().toString(36).substring(2, 6)}`,
+			name: cleanName,
+			namespace: sanitizePythonVarName(cleanName) || `subwf_${now}`,
+			sourceWorkflowUri: curUri,
+			sourceWorkflowName: wfName,
+			nodeIds: subNodes.map(n => n.id),
+			nodes: JSON.parse(JSON.stringify(subNodes)),
+			links: JSON.parse(JSON.stringify(subLinks)),
+			inputs: contract.inputs,
+			outputs: contract.outputs,
+			isHiddenInSource: false,
+			createdAt: now,
+			updatedAt: now
+		};
+
+		this._workflowExecutionService.saveSubWorkflow(def);
+		this._notificationService.info(`Encapsulated '${cleanName}' (${subNodes.length} node(s), ${contract.inputs.length} input(s), ${contract.outputs.length} output(s)).`);
+		return def;
+	}
+
+	private _refreshSubWorkflowFromLiveCanvas(subWorkflowId: string, persistIfChanged: boolean = true): ISubWorkflowDefinition | undefined {
+		const sw = this._workflowExecutionService.getSubWorkflowById(subWorkflowId);
+		if (!sw) {
+			return undefined;
+		}
+		const curUri = this._workflowUri?.toString() || '';
+		if (curUri && sw.sourceWorkflowUri === curUri && Array.isArray(sw.nodeIds) && sw.nodeIds.length > 0) {
+			const idSet = new Set(sw.nodeIds);
+			const subNodes = (this._data?.nodes || []).filter(n => idSet.has(n.id));
+			if (subNodes.length > 0) {
+				const subLinks = (this._data?.links || []).filter(l => idSet.has(l.from) && idSet.has(l.to));
+				const contract = this._workflowExecutionService.resolveWorkflowIOContract({ nodes: subNodes, links: subLinks });
+				const prevInputsJson = JSON.stringify(sw.inputs || []);
+				const prevOutputsJson = JSON.stringify(sw.outputs || []);
+				sw.nodes = JSON.parse(JSON.stringify(subNodes));
+				sw.links = JSON.parse(JSON.stringify(subLinks));
+				sw.inputs = contract.inputs;
+				sw.outputs = contract.outputs;
+				if (persistIfChanged || prevInputsJson !== JSON.stringify(sw.inputs) || prevOutputsJson !== JSON.stringify(sw.outputs)) {
+					sw.updatedAt = Date.now();
+					this._workflowExecutionService.saveSubWorkflow(sw);
+				}
+			}
+		}
+		return sw;
+	}
+
+	private _addSubWorkflowCapsuleToNode(node: IFlowchartNode, rawSubDef: ISubWorkflowDefinition, insertIndex?: number): void {
+		const subDef = this._refreshSubWorkflowFromLiveCanvas(rawSubDef.id) || rawSubDef;
+		if (!node.pipeline) {
+			node.pipeline = [];
+		}
+		const existingLabels = new Set((node.pipeline || []).map(s => s.component?.label || s.targetVariable).filter(Boolean));
+		let finalLabel = subDef.name;
+		let counter = 2;
+		while (existingLabels.has(finalLabel)) {
+			finalLabel = `${subDef.name} ${counter++}`;
+		}
+		const initInputs: Record<string, string> = {};
+		for (const inp of (subDef.inputs || [])) {
+			initInputs[inp.name] = inp.defaultValue ?? '';
+		}
+		const ts = Date.now();
+		const newComp: ICustomField = {
+			id: `comp_${ts}_${Math.random().toString(36).substring(2, 6)}`,
+			label: finalLabel,
+			type: 'sub_workflow',
+			required: false,
+			outputVariableName: generateSmartPythonVarName(finalLabel, 'sub_workflow'),
+			subWorkflowId: subDef.id,
+			subWorkflowName: subDef.name,
+			subWorkflowSourceUri: subDef.sourceWorkflowUri,
+			subWorkflowInputs: initInputs,
+			subWorkflowInputDefs: (subDef.inputs || []).map(i => ({ name: i.name, label: i.label, defaultValue: i.defaultValue })),
+			subWorkflowOutputDefs: (subDef.outputs || []).map(o => ({ label: o.label, varName: o.varName, defaultFormat: o.defaultFormat }))
+		};
+		const newStep: INodePipelineStep = {
+			id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+			type: 'component',
+			label: finalLabel,
+			component: newComp
+		};
+		this._syncComponentStepMetadata(newStep);
+		if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= node.pipeline.length) {
+			node.pipeline.splice(insertIndex, 0, newStep);
+		} else {
+			node.pipeline.push(newStep);
+		}
+		this._ensureNodeFitsPipeline(node);
+		this._syncToNode(node, true);
+		this._selectedNodeIds.clear();
+		this._selectedNodeIds.add(node.id);
+		this._saveFlowchartData();
+		this._renderNodes();
+		this._drawLinks();
+		if (this._inspectorEl) {
+			this._renderInspector(this._inspectorEl);
+		}
+		this._openNodeComponentsInSideEditor(node, newComp.id);
+	}
+
+	private _renderSubWorkflowDropdown(): void {
+		if (!this._subWorkflowWidgetEl) {
+			return;
+		}
+		clearNode(this._subWorkflowWidgetEl);
+		const curUri = this._workflowUri?.toString() || '';
+		const allSubs = curUri
+			? this._workflowExecutionService.getSubWorkflows().filter(sw => sw.sourceWorkflowUri === curUri)
+			: [];
+
+		const triggerBtn = append(this._subWorkflowWidgetEl, $(`button.wf-subworkflow-trigger-btn${this._isSubWorkflowDropdownOpen ? '.is-open' : ''}`, {
+			type: 'button',
+			title: `Workflow Outline — nodes, capsules, Sub-Workflows (${allSubs.length}) and tickets`
+		})) as HTMLButtonElement;
+		append(triggerBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.layers)));
+
+		triggerBtn.onmousedown = (e) => e.stopPropagation();
+		triggerBtn.onclick = (e) => {
+			e.stopPropagation();
+			this._isSubWorkflowDropdownOpen = !this._isSubWorkflowDropdownOpen;
+			if (!this._isSubWorkflowDropdownOpen) {
+				this._showEncapsulateForm = false;
+			} else {
+				this._outlineAsyncChildren.clear(); // reload ticket templates each time the outline is opened
+			}
+			this._renderSubWorkflowDropdown();
+		};
+
+		if (!this._isSubWorkflowDropdownOpen) {
+			this._clearOutlineLocate(); // closing the outline ends the highlight it started
+			return;
+		}
+
+		this._outlineBulbRefreshers = [];
+		const panel = append(this._subWorkflowWidgetEl, $('.wf-subworkflow-dropdown-panel.wf-outline-panel'));
+		panel.onmousedown = (e) => e.stopPropagation();
+		panel.onclick = (e) => e.stopPropagation();
+		panel.onwheel = (e) => e.stopPropagation(); // scroll the menu, not the canvas
+
+		const header = append(panel, $('.wf-outline-header'));
+		append(header, $('span' + ThemeIcon.asCSSSelector(Codicon.layers)));
+		append(header, $('span', {}, 'Workflow Outline'));
+
+		// Encapsulate Selection Bar
+		const encapBar = append(panel, $('.wf-subworkflow-encap-bar'));
+		if (this._showEncapsulateForm) {
+			const nameInput = append(encapBar, $('input.wf-subworkflow-name-input', {
+				type: 'text',
+				placeholder: `Sub-Workflow name (${this._selectedNodeIds.size} node(s))...`
+			})) as HTMLInputElement;
+			const confirmBtn = append(encapBar, $('button.wf-subworkflow-encap-confirm', { type: 'button' }, 'Save')) as HTMLButtonElement;
+			const cancelBtn = append(encapBar, $('button.wf-subworkflow-encap-cancel', { type: 'button', title: 'Cancel' }));
+			append(cancelBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+
+			const doSave = () => {
+				const ids = Array.from(this._selectedNodeIds);
+				const created = this._encapsulateNodesAsSubWorkflow(ids, nameInput.value);
+				if (created) {
+					this._showEncapsulateForm = false;
+					this._renderSubWorkflowDropdown();
+				}
+			};
+			confirmBtn.onclick = doSave;
+			cancelBtn.onclick = () => {
+				this._showEncapsulateForm = false;
+				this._renderSubWorkflowDropdown();
+			};
+			nameInput.onkeydown = (e) => {
+				if (e.key === 'Enter') {
+					e.preventDefault();
+					doSave();
+				} else if (e.key === 'Escape') {
+					e.preventDefault();
+					this._showEncapsulateForm = false;
+					this._renderSubWorkflowDropdown();
+				}
+			};
+			setTimeout(() => nameInput.focus(), 0);
+		} else {
+			const startEncapBtn = append(encapBar, $('button.wf-subworkflow-encap-btn', {
+				type: 'button',
+				title: 'Encapsulate currently selected nodes into a reusable Sub-Workflow'
+			})) as HTMLButtonElement;
+			append(startEncapBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
+			append(startEncapBtn, $('span', {}, this._selectedNodeIds.size > 0 ? `Encapsulate Selected (${this._selectedNodeIds.size})` : 'Encapsulate Selected Nodes'));
+			startEncapBtn.onclick = () => {
+				if (this._selectedNodeIds.size === 0) {
+					this._notificationService.info('Select one or more nodes on the canvas first, then click Encapsulate.');
+					return;
+				}
+				this._showEncapsulateForm = true;
+				this._renderSubWorkflowDropdown();
+			};
+		}
+
+		// Sub-Workflow library (insert / drag into nodes, show-hide region, delete): kept, but collapsed and compact
+		const libToggle = append(panel, $(`button.wf-outline-section-toggle${this._outlineLibraryOpen ? '.is-open' : ''}`, {
+			type: 'button',
+			title: 'Sub-Workflows of this workflow: click a name to show / hide it; drag it onto a node (or select a node and press +) to use it'
+		})) as HTMLButtonElement;
+		append(libToggle, $('span' + ThemeIcon.asCSSSelector(this._outlineLibraryOpen ? Codicon.chevronDown : Codicon.chevronRight)));
+		append(libToggle, $('span' + ThemeIcon.asCSSSelector(Codicon.layers)));
+		append(libToggle, $('span', {}, `Sub-Workflow Library (${allSubs.length})`));
+		libToggle.onclick = () => {
+			this._outlineLibraryOpen = !this._outlineLibraryOpen;
+			this._renderSubWorkflowDropdown();
+		};
+		if (this._outlineLibraryOpen) {
+			const listEl = append(panel, $('.wf-subworkflow-list.is-compact'));
+			if (allSubs.length === 0) {
+				append(listEl, $('.wf-subworkflow-empty', {}, 'No Sub-Workflows in this workflow yet. Select nodes on canvas and encapsulate them here.'));
+			} else {
+				this._renderSubWorkflowLibraryItems(listEl, allSubs, curUri);
+			}
+		}
+
+		this._renderWorkflowOutline(panel);
+	}
+
+	private _renderSubWorkflowLibraryItems(listEl: HTMLElement, allSubs: ISubWorkflowDefinition[], curUri: string): void {
+		for (const sw of allSubs) {
+			const isFromCurrentCanvas = Boolean(curUri && sw.sourceWorkflowUri === curUri);
+			const row = append(listEl, $('.wf-subworkflow-item'));
+			row.setAttribute('draggable', 'true');
+			row.ondragstart = (e: DragEvent) => {
+				e.dataTransfer?.setData('text/plain', JSON.stringify({ kind: 'sub_workflow_ref', subWorkflowId: sw.id }));
+				if (e.dataTransfer) {
+					e.dataTransfer.effectAllowed = 'copy';
+				}
+			};
+
+			const swItem = this._outlineSubWorkflowItem(sw.id, sw.name, 'library', new Set<string>(), '');
+			void isFromCurrentCanvas;
+
+			// Label: click only shows / hides it (never changes the canvas). Adding it to a node is explicit: drag it onto
+			// a node, or select one node and press "+".
+			const infoWrap = append(row, $('.wf-subworkflow-info'));
+			infoWrap.title = `Click to show / hide '${sw.name}' below the canvas. To use it, drag it onto a node, or select a node and press +\n${sw.inputs.length} input(s) · ${sw.outputs.length} output(s)`;
+			append(infoWrap, $('.wf-subworkflow-name', {}, sw.name));
+			append(infoWrap, $('.wf-subworkflow-meta', {}, `${sw.inputs.length} in · ${sw.outputs.length} out`));
+			infoWrap.onclick = (e) => {
+				e.stopPropagation();
+				this._toggleOutlineItem(swItem);
+			};
+
+			const selectedNode = this._selectedNodeIds.size === 1 ? this._data.nodes.find(n => n.id === Array.from(this._selectedNodeIds)[0]) : undefined;
+			const addBtn = append(row, $(`button.wf-subworkflow-add-btn${selectedNode ? '' : '.is-disabled'}`, {
+				type: 'button',
+				title: selectedNode ? `Add '${sw.name}' as a capsule to the selected node '${selectedNode.label || selectedNode.id}'` : 'Select exactly one node on the canvas first (or drag this Sub-Workflow onto a node)'
+			})) as HTMLButtonElement;
+			append(addBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.add)));
+			addBtn.onclick = (e) => {
+				e.stopPropagation();
+				const target = this._selectedNodeIds.size === 1 ? this._data.nodes.find(n => n.id === Array.from(this._selectedNodeIds)[0]) : undefined;
+				if (!target) {
+					this._notificationService.info('Select one node on the canvas first, or drag the Sub-Workflow onto a node.');
+					return;
+				}
+				this._addSubWorkflowCapsuleToNode(target, sw);
+				this._renderSubWorkflowDropdown();
+			};
+
+			// Delete button
+			const delBtn = append(row, $('button.wf-subworkflow-del-btn', {
+				type: 'button',
+				title: `Remove Sub-Workflow '${sw.name}' from library`
+			})) as HTMLButtonElement;
+			append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
+			delBtn.onclick = (e) => {
+				e.stopPropagation();
+				this._workflowExecutionService.deleteSubWorkflow(sw.id);
+			};
+		}
+	}
+
+	// ---------------------------------------------------------------------------------------------
+	// Workflow Outline: cascading menu node → capsule → (Sub-Workflow nodes | ticket components), lightbulb opens to the right
+	// ---------------------------------------------------------------------------------------------
+
+	private _renderWorkflowOutline(panel: HTMLElement): void {
+		const focusDef = this._focusSubWorkflowId ? this._workflowExecutionService.getSubWorkflowById(this._focusSubWorkflowId) : undefined;
+		const scopeText = this._focusSubWorkflowId ? `Nodes of Sub-Workflow '${focusDef?.name || this._focusSubWorkflowId}'` : 'Nodes on canvas';
+		append(panel, $('.wf-outline-section-label', {}, `${scopeText} · click: locate on the flowchart, show details, expand`));
+
+		const columnsEl = append(panel, $('.wf-outline-columns'));
+
+		type Column = { items: IWfOutlineItem[]; state?: 'loading' | 'error' | 'empty' };
+		const columns: Column[] = [{ items: this._buildOutlineRootItems() }];
+		this._outlineRenderedColumns = [];
+		const validPath: string[] = [];
+		for (let level = 0; level < this._outlinePath.length; level++) {
+			const selected = columns[level].items.find(it => it.key === this._outlinePath[level]);
+			if (!selected || !selected.children) {
+				break;
+			}
+			validPath.push(selected.key);
+			const resolved = this._resolveOutlineChildren(selected);
+			if (resolved === 'loading' || resolved === 'error') {
+				columns.push({ items: [], state: resolved });
+				break;
+			}
+			columns.push(resolved.length ? { items: resolved } : { items: [], state: 'empty' });
+		}
+		this._outlinePath = validPath;
+
+		// Keep scroll positions across re-renders (the outline re-renders whenever an editor opens or closes)
+		columnsEl.onscroll = () => {
+			if (columnsEl.isConnected) {
+				this._outlineScroll.left = columnsEl.scrollLeft;
+			}
+		};
+		const columnEls: HTMLElement[] = [];
+		columns.forEach((column, level) => {
+			const colEl = append(columnsEl, $('.wf-outline-column'));
+			columnEls.push(colEl);
+			colEl.onscroll = () => {
+				if (colEl.isConnected) {
+					this._outlineScroll.tops[level] = colEl.scrollTop;
+				}
+			};
+			this._outlineRenderedColumns[level] = column.items;
+			if (column.state === 'loading') {
+				append(colEl, $('.wf-outline-empty', {}, 'Loading…'));
+				return;
+			}
+			if (column.state === 'error') {
+				append(colEl, $('.wf-outline-empty', {}, 'Could not load the ticket template.'));
+				return;
+			}
+			if (column.state === 'empty' || column.items.length === 0) {
+				append(colEl, $('.wf-outline-empty', {}, level === 0 ? 'No nodes on this canvas yet.' : 'Nothing inside.'));
+				return;
+			}
+			for (const item of column.items) {
+				this._renderOutlineItem(colEl, item, level);
+			}
+		});
+
+		this._outlineScroll.tops.length = columns.length;
+		// Restore scroll right away (the panel is already in the DOM). Never read or write the saved positions through a
+		// panel that a newer render has already replaced: a detached element reports scroll 0 and would reset the menu.
+		const restoreScroll = () => {
+			if (!columnsEl.isConnected) {
+				return;
+			}
+			columnEls.forEach((el, level) => { el.scrollTop = this._outlineScroll.tops[level] || 0; });
+			// Whenever the expanded path changes, reveal the deepest level (the panel stays narrow; scroll back for earlier levels)
+			const pathKey = this._outlinePath.join('\u0000');
+			columnsEl.scrollLeft = pathKey !== this._outlineLastRenderedPath ? columnsEl.scrollWidth : this._outlineScroll.left;
+			this._outlineLastRenderedPath = pathKey;
+			this._outlineScroll.left = columnsEl.scrollLeft;
+		};
+		if (columnsEl.isConnected) {
+			restoreScroll();
+		} else {
+			setTimeout(restoreScroll, 0);
+		}
+	}
+
+	private _renderOutlineItem(colEl: HTMLElement, item: IWfOutlineItem, level: number): void {
+		const isExpanded = this._outlinePath[level] === item.key;
+		// The clicked item and every level above it (its expanded ancestors) stay outlined
+		const isOnPath = isExpanded || this._outlineSelectedKey === item.key;
+		const row = append(colEl, $(`.wf-outline-item${isExpanded ? '.is-expanded' : ''}${isOnPath ? '.is-on-path' : ''}${item.disabled ? '.is-disabled' : ''}`));
+		row.title = item.meta ? `${item.label}\n${item.meta}` : item.label;
+
+		row.style.background = item.theme.bg;
+		row.style.borderColor = item.theme.border;
+		if (item.shape) {
+			// Node: a small outline of its shape (rounded rectangle, rectangle, diamond, circle)
+			const shapeWrap = append(row, $('span.wf-outline-shape'));
+			append(shapeWrap, $(`span.wf-outline-shape-glyph.shape-${item.shape}`)).style.borderColor = item.theme.color;
+		} else {
+			// Same small icon as the node capsules on the canvas
+			const iconEl = append(row, $('span.fn-tag-icon.wf-outline-icon' + ThemeIcon.asCSSSelector(item.icon)));
+			iconEl.style.color = item.theme.color;
+			if (item.icon === Codicon.python) {
+				iconEl.classList.add('is-python');
+			}
+		}
+		const textWrap = append(row, $('.wf-outline-text'));
+		const labelEl = append(textWrap, $('.wf-outline-label', {}, item.label));
+		labelEl.style.color = item.theme.textColor;
+		if (item.meta) {
+			const metaEl = append(textWrap, $('.wf-outline-meta', {}, item.meta));
+			metaEl.style.color = item.theme.color;
+		}
+		if (item.children) {
+			append(row, $('span.wf-outline-chevron' + ThemeIcon.asCSSSelector(Codicon.chevronRight)));
+		}
+
+		row.onclick = (e) => {
+			e.stopPropagation();
+			// Every item: 1) highlight it on the flowchart, 2) show its content on the right, 3) expand its next level
+			this._outlineSelectedKey = item.key;
+			if (!item.children) {
+				if (this._outlinePath.length > level) {
+					// A sibling branch was open deeper: close it, so only this item's real path stays outlined
+					this._outlinePath = this._outlinePath.slice(0, level);
+					this._renderSubWorkflowDropdown();
+				} else {
+					// No re-render follows: move the outline in place (ancestors are already outlined)
+					colEl.closest('.wf-outline-columns')?.querySelectorAll('.wf-outline-item.is-on-path:not(.is-expanded)').forEach(el => el.classList.remove('is-on-path'));
+					row.classList.add('is-on-path');
+				}
+			}
+			this._locateOutlineItemWithAncestors(item, level);
+			item.onActivate?.();
+			if (item.open) {
+				this._toggleOutlineItem(item, true); // show / reveal (only the lightbulb hides)
+			}
+			if (item.children) {
+				this._outlinePath = isExpanded ? this._outlinePath.slice(0, level) : [...this._outlinePath.slice(0, level), item.key];
+				this._renderSubWorkflowDropdown();
+			}
+		};
+	}
+
+	private _isOutlineItemShown(item: IWfOutlineItem): boolean {
+		if (item.isShown) {
+			return item.isShown();
+		}
+		const input = this._outlineShownInputs.get(item.showKey || item.key);
+		return !!input && !input.isDisposed() && this._editorGroupService.groups.some(g => g.contains(input));
+	}
+
+	private _refreshOutlineBulbs(): void {
+		for (const refresh of this._outlineBulbRefreshers) {
+			refresh();
+		}
+	}
+
+	/** Lightbulb: show ↔ hide. With `showOnly` (clicking a leaf row) it always shows / re-reveals, never hides. */
+	private _toggleOutlineItem(item: IWfOutlineItem, showOnly = false): void {
+		if (!item.open) {
+			this._notificationService.info(`'${item.label}' has nothing to show.`);
+			return;
+		}
+		const run = async () => {
+			if (!showOnly && this._isOutlineItemShown(item)) {
+				if (item.hide) {
+					await item.hide();
+				} else {
+					const input = this._outlineShownInputs.get(item.showKey || item.key);
+					if (input) {
+						await this._closeEditorsWhere(e => e === input);
+					}
+				}
+				this._outlineShownInputs.delete(item.showKey || item.key);
+			} else {
+				const opened = await item.open!();
+				if (opened instanceof EditorInput) {
+					this._outlineShownInputs.set(item.showKey || item.key, opened);
+				}
+			}
+		};
+		run().catch(err => this._notificationService.error(`Could not show '${item.label}': ${err instanceof Error ? err.message : String(err)}`))
+			.finally(() => {
+				if (this._isSubWorkflowDropdownOpen) {
+					this._refreshOutlineBulbs();
+				}
+			});
+	}
+
+	private async _closeEditorsWhere(predicate: (editor: EditorInput) => boolean): Promise<void> {
+		for (const group of [...this._editorGroupService.groups]) {
+			const matches = group.editors.filter(predicate);
+			if (matches.length > 0) {
+				await group.closeEditors(matches);
+			}
+		}
+	}
+
+	private _isEditorOpen(predicate: (editor: EditorInput) => boolean): boolean {
+		return this._editorGroupService.groups.some(g => g.editors.some(predicate));
+	}
+
+	private _resolveOutlineChildren(item: IWfOutlineItem): IWfOutlineItem[] | 'loading' | 'error' {
+		const cached = this._outlineAsyncChildren.get(item.key);
+		if (cached) {
+			return cached;
+		}
+		const result = item.children ? item.children() : [];
+		if (Array.isArray(result)) {
+			return result;
+		}
+		this._outlineAsyncChildren.set(item.key, 'loading');
+		result.then(children => {
+			this._outlineAsyncChildren.set(item.key, children);
+		}, err => {
+			console.error('[WorkflowOutline] Failed to load children:', err);
+			this._outlineAsyncChildren.set(item.key, 'error');
+		}).finally(() => {
+			if (this._isSubWorkflowDropdownOpen) {
+				this._renderSubWorkflowDropdown();
+			}
+		});
+		return 'loading';
+	}
+
+	/** Editor group to the right of this workflow (an existing other group, else a new side group). */
+	private _outlineSideGroup(): number | typeof SIDE_GROUP {
+		const right = this._editorGroupService.findGroup({ direction: GroupDirection.RIGHT }, this.group);
+		if (right) {
+			return right.id;
+		}
+		const other = this._editorGroupService.groups.find(g => g.id !== this.group.id && !this._outlineFlowGroupIds.includes(g.id));
+		if (other) {
+			return other.id;
+		}
+		// New side panel: narrower than half — the flowchart stays the main area, the right side is reference only
+		const side = this._editorGroupService.addGroup(this.group, GroupDirection.RIGHT);
+		try {
+			const total = this._editorGroupService.getSize(this.group).width + this._editorGroupService.getSize(side).width;
+			if (total > 0) {
+				this._editorGroupService.setSize(side, { width: Math.round(total * WorkflowEditor.OUTLINE_SIDE_PANEL_RATIO), height: this._editorGroupService.getSize(side).height });
+			}
+		} catch {
+			// keep the default split
+		}
+		return side.id;
+	}
+
+	/** Flowcharts stack top-to-bottom below the canvas: each new one splits the lowest flow split opened from here. */
+	private _outlineNewFlowGroup(): number {
+		this._outlineFlowGroupIds = this._outlineFlowGroupIds.filter(id => !!this._editorGroupService.getGroup(id));
+		const lastId = this._outlineFlowGroupIds[this._outlineFlowGroupIds.length - 1];
+		const reference = (lastId !== undefined ? this._editorGroupService.getGroup(lastId) : undefined) || this.group;
+		const newGroup = this._editorGroupService.addGroup(reference, GroupDirection.DOWN);
+		this._outlineFlowGroupIds.push(newGroup.id);
+		return newGroup.id;
+	}
+
+	private _outlineSubWorkflowsOfCanvas(): ISubWorkflowDefinition[] {
+		const curUri = this._workflowUri?.toString() || '';
+		return curUri ? this._workflowExecutionService.getSubWorkflows().filter(sw => sw.sourceWorkflowUri === curUri) : [];
+	}
+
+	private _buildOutlineRootItems(): IWfOutlineItem[] {
+		if (this._focusSubWorkflowId) {
+			const focusDef = this._workflowExecutionService.getSubWorkflowById(this._focusSubWorkflowId);
+			const focusItem = this._outlineSubWorkflowItem(this._focusSubWorkflowId, focusDef?.name || this._focusSubWorkflowId, 'focus', new Set<string>(), '');
+			const nodes = focusItem.children ? focusItem.children() : [];
+			return Array.isArray(nodes) ? nodes : [];
+		}
+		const subs = this._outlineSubWorkflowsOfCanvas();
+		const nodesInSubWorkflows = new Set<string>();
+		for (const sw of subs) {
+			for (const id of sw.nodeIds || []) {
+				nodesInSubWorkflows.add(id);
+			}
+		}
+		// Nodes of a Sub-Workflow are listed under the capsule that calls it
+		const topNodes = (this._data?.nodes || []).filter(n => !nodesInSubWorkflows.has(n.id)).sort((a, b) => (a.y - b.y) || (a.x - b.x));
+		const items = topNodes.map(n => this._outlineNodeItem(n, 'root', true, new Set<string>(), undefined));
+
+		const calledSubIds = new Set<string>();
+		for (const n of this._data?.nodes || []) {
+			for (const step of n.pipeline || []) {
+				if (step?.component?.type === 'sub_workflow' && step.component.subWorkflowId) {
+					calledSubIds.add(step.component.subWorkflowId);
+				}
+			}
+		}
+		for (const sw of subs) {
+			if (!calledSubIds.has(sw.id)) {
+				items.push(this._outlineSubWorkflowItem(sw.id, sw.name, 'root', new Set<string>(), 'Sub-Workflow · not used by any node'));
+			}
+		}
+		return items;
+	}
+
+	private _outlineNodeItem(node: IFlowchartNode, parentKey: string, isLive: boolean, visitedSubs: Set<string>, ownerSubWorkflowId: string | undefined): IWfOutlineItem {
+		const key = `${parentKey}/n:${node.id}`;
+		const steps = (node.pipeline || []).filter((s): s is INodePipelineStep => !!s);
+		const liveNode = isLive ? (this._data?.nodes || []).find(n => n.id === node.id) : undefined;
+		const shapeName = node.type === 'diamond' ? 'Decision' : node.type === 'circle' ? 'Start / End' : 'Node';
+		return {
+			key,
+			label: (node.label || '').trim() || shapeName,
+			meta: steps.length > 0 ? `${shapeName} · ${steps.length} capsule${steps.length === 1 ? '' : 's'}` : shapeName,
+			icon: node.type === 'diamond' ? Codicon.gitCompare : node.type === 'circle' ? Codicon.circleLargeOutline : Codicon.symbolClass,
+			theme: WF_NODE_OUTLINE_THEME,
+			shape: node.type,
+			children: steps.length > 0 ? () => steps.map((step, index) => this._outlineStepItem(node, step, key, liveNode, visitedSubs, ownerSubWorkflowId, index)) : undefined,
+			locateTarget: { nodeId: node.id, ownerSubWorkflowId },
+			...this._outlineNodeEditorShowHide(liveNode, undefined, ownerSubWorkflowId)
+		};
+	}
+
+	/** Show / hide for a node (form on the right), or for one of its components; nodes not on this canvas show their Sub-Workflow. */
+	private _outlineNodeEditorShowHide(liveNode: IFlowchartNode | undefined, focusFieldId: string | undefined, ownerSubWorkflowId: string | undefined): Pick<IWfOutlineItem, 'open' | 'isShown' | 'hide'> {
+		if (!liveNode) {
+			return ownerSubWorkflowId ? this._outlineSubWorkflowShowHide(ownerSubWorkflowId) : {};
+		}
+		// A node is shown like a ticket: its capsules as component cards (focusFieldId scrolls to one of them)
+		const moduleId = `wf_node_${liveNode.id}`;
+		const isNodeTicket = (e: EditorInput) => e instanceof EntityDetailEditorInput && !e.isDisposed() && e.previewModule?.id === moduleId;
+		return {
+			open: () => this._openNodeVirtualTicket(liveNode, focusFieldId),
+			isShown: () => this._isEditorOpen(isNodeTicket),
+			hide: () => this._closeEditorsWhere(isNodeTicket)
+		};
+	}
+
+	private _outlineSubWorkflowShowHide(subWorkflowId: string): Pick<IWfOutlineItem, 'open' | 'isShown' | 'hide'> {
+		const isFlowEditor = (e: EditorInput) => e instanceof SubWorkflowCanvasEditorInput && !e.isDisposed() && e.subWorkflowId === subWorkflowId;
+		return {
+			open: () => this._openOutlineSubWorkflow(subWorkflowId),
+			isShown: () => this._isEditorOpen(isFlowEditor),
+			hide: () => this._closeEditorsWhere(isFlowEditor)
+		};
+	}
+
+	private _outlineStepItem(node: IFlowchartNode, step: INodePipelineStep, parentKey: string, liveNode: IFlowchartNode | undefined, visitedSubs: Set<string>, ownerSubWorkflowId: string | undefined, index: number): IWfOutlineItem {
+		const comp = step.component;
+		// Must be stable across re-renders (the expanded path is matched by key): fall back to the capsule's position
+		const key = `${parentKey}/s:${step.id || comp?.id || `#${index}`}`;
+		const pipelineIndex = (node.pipeline || []).indexOf(step);
+		const locateTarget: IWfLocateTarget = { nodeId: node.id, stepIndex: pipelineIndex >= 0 ? pipelineIndex : index, ownerSubWorkflowId };
+		const cardShow = this._outlineNodeEditorShowHide(liveNode, this._nodeTicketFieldId(step, index), ownerSubWorkflowId);
+		const disabled = Boolean(step.disabled || (comp as any)?.disabled);
+		const firstExprLine = (step.expression || '').split('\n').map(l => l.trim()).find(l => l.length > 0) || '';
+		const label = comp ? ((comp.label || '').trim() || this._outlineComponentTypeLabel(comp.type)) : ((step.label || '').trim() || firstExprLine || step.functionName || step.type);
+		const baseMeta = comp ? this._outlineComponentTypeLabel(comp.type) : (step.functionName ? `${step.functionName} (Python step)` : step.type);
+
+		// Capsule calling a Sub-Workflow → its nodes
+		if (comp?.type === 'sub_workflow' && comp.subWorkflowId) {
+			const subId = comp.subWorkflowId;
+			const def = this._workflowExecutionService.getSubWorkflowById(subId);
+			const subName = comp.subWorkflowName || def?.name || subId;
+			const swItem = this._outlineSubWorkflowItem(subId, label || subName, parentKey, visitedSubs, `Sub-Workflow · ${subName}${disabled ? ' · disabled' : ''}`, key, disabled);
+			// Clicking the capsule: highlight it, show its card (inputs / outputs) on the right, and its flowchart in a split below
+			const showFlow = () => {
+				this._openOutlineSubWorkflow(subId).catch(err => this._notificationService.error(`Could not show Sub-Workflow '${subName}': ${err instanceof Error ? err.message : String(err)}`));
+			};
+			return liveNode ? { ...swItem, locateTarget, onActivate: showFlow, ...cardShow, showKey: undefined } : { ...swItem, locateTarget, onActivate: showFlow };
+		}
+
+		// Capsule creating / running / reading a ticket → the ticket's (or its template's) components
+		const ticketRef = this._outlineTicketRefOfStep(node, step);
+		const stepTheme = comp ? this._outlineThemeOf(comp.type) : WF_PYTHON_STEP_CAPSULE_THEME;
+		if (ticketRef) {
+			const refText = ticketRef.kind === 'id' ? `Ticket ${ticketRef.id}` : `Ticket Type: ${ticketRef.name}`;
+			return {
+				key,
+				label,
+				meta: `${baseMeta} · ${refText}${disabled ? ' · disabled' : ''}`,
+				icon: stepTheme.icon,
+				theme: stepTheme,
+				disabled,
+				children: () => this._outlineTicketFieldItems(ticketRef, key, locateTarget),
+				open: () => this._openOutlineTicket(ticketRef),
+				showKey: key,
+				locateTarget
+			};
+		}
+
+		// Every capsule (components and inline Python steps alike) is a card in the node's ticket-like view
+		return {
+			key,
+			label,
+			meta: `${baseMeta}${disabled ? ' · disabled' : ''}`,
+			icon: stepTheme.icon,
+			theme: stepTheme,
+			disabled,
+			locateTarget,
+			...cardShow
+		};
+	}
+
+	private _outlineSubWorkflowItem(subWorkflowId: string, label: string, parentKey: string, visitedSubs: Set<string>, meta: string, key?: string, disabled?: boolean): IWfOutlineItem {
+		const itemKey = key || `${parentKey}/sw:${subWorkflowId}`;
+		const isRecursive = visitedSubs.has(subWorkflowId);
+		return {
+			key: itemKey,
+			label,
+			meta: isRecursive ? `${meta} · recursive call` : meta,
+			icon: Codicon.layers,
+			theme: this._outlineThemeOf('sub_workflow'),
+			disabled,
+			children: isRecursive ? undefined : () => {
+				const def = this._workflowExecutionService.getSubWorkflowById(subWorkflowId);
+				if (!def) {
+					return [];
+				}
+				const nextVisited = new Set(visitedSubs).add(subWorkflowId);
+				const isOnThisCanvas = def.sourceWorkflowUri === (this._workflowUri?.toString() || '');
+				const liveById = new Map((this._data?.nodes || []).map(n => [n.id, n] as const));
+				const nodes: IFlowchartNode[] = isOnThisCanvas
+					? (def.nodeIds || []).map(id => liveById.get(id) || (def.nodes || []).find((sn: IFlowchartNode) => sn?.id === id)).filter((n): n is IFlowchartNode => !!n)
+					: (def.nodes || []).filter((n: IFlowchartNode) => !!n);
+				return [...nodes]
+					.sort((a, b) => (a.y - b.y) || (a.x - b.x))
+					.map(n => this._outlineNodeItem(n, itemKey, isOnThisCanvas && liveById.has(n.id), nextVisited, subWorkflowId));
+			},
+			...this._outlineSubWorkflowShowHide(subWorkflowId)
+		};
+	}
+
+	private async _openOutlineSubWorkflow(subWorkflowId: string): Promise<EditorInput> {
+		// Shown in its own split below the canvas, so its region no longer needs to be expanded on the main canvas
+		const def = this._workflowExecutionService.getSubWorkflowById(subWorkflowId);
+		if (def && !def.isHiddenInSource && def.sourceWorkflowUri === this._workflowUri?.toString()) {
+			def.isHiddenInSource = true;
+			def.updatedAt = Date.now();
+			this._workflowExecutionService.saveSubWorkflow(def);
+		}
+		return openSubWorkflowLiveView(this._editorService, this._editorGroupService, this._workflowExecutionService, subWorkflowId, {
+			parentWorkflowUri: this._workflowUri?.toString(),
+			preserveFocus: true,
+			group: () => this._outlineNewFlowGroup()
+		});
+	}
+
+	/** Which ticket a capsule creates / runs / reads: a fixed ticket id, or a Ticket Type for tickets created at run time. */
+	private _outlineTicketRefOfStep(node: IFlowchartNode, step: INodePipelineStep): WfOutlineTicketRef | undefined {
+		const isTicketId = (v: string) => /^[A-Za-z][A-Za-z0-9_]{0,15}-\d{1,8}$/.test(v);
+		const fromTarget = (rawTarget: string | undefined): WfOutlineTicketRef | undefined => {
+			const target = (rawTarget || '').trim().replace(/^["']|["']$/g, '');
+			if (!target) {
+				return undefined;
+			}
+			if (isTicketId(target)) {
+				return { kind: 'id', id: target };
+			}
+			const varMatch = /^\{?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}?$/.exec(target);
+			const typeName = varMatch ? this._outlineTicketTypeOfVariable(varMatch[1], node) : undefined;
+			return typeName ? { kind: 'type', name: typeName } : undefined;
+		};
+
+		const comp = step.component;
+		if (comp) {
+			switch (comp.type) {
+				case 'create_tickets':
+					return comp.wfTicketType ? { kind: 'type', name: comp.wfTicketType } : undefined;
+				case 'run_tickets':
+				case 'get_outputs':
+				case 'get_ticket':
+					return fromTarget(comp.wfTicketTarget) || (comp.wfTicketType ? { kind: 'type', name: comp.wfTicketType } : undefined);
+				default:
+					return undefined;
+			}
+		}
+
+		const expr = step.expression || '';
+		const createMatch = /\bCREATE_TICKETS?\s*\(([\s\S]*)/i.exec(expr);
+		if (createMatch) {
+			const typeMatch = /\bticket_type\s*=\s*["']([^"']+)["']/.exec(createMatch[1]);
+			return typeMatch ? { kind: 'type', name: typeMatch[1] } : undefined;
+		}
+		const useMatch = /\b(?:RUN_TICKETS?|GET_OUTPUTS|GET_TICKETS?)\s*\(([\s\S]*)/i.exec(expr);
+		if (useMatch) {
+			const argMatch = /\bticket(?:_id)?\s*=\s*("[^"]*"|'[^']*'|[A-Za-z_][A-Za-z0-9_]*)/.exec(useMatch[1])
+				|| /^\s*("[^"]*"|'[^']*'|[A-Za-z_][A-Za-z0-9_]*)/.exec(useMatch[1]);
+			return argMatch ? fromTarget(argMatch[1]) : undefined;
+		}
+		return undefined;
+	}
+
+	/** Ticket Type of a variable holding a ticket created by CREATE_TICKETS (same node first, then the whole canvas). */
+	private _outlineTicketTypeOfVariable(varName: string, preferNode: IFlowchartNode): string | undefined {
+		const nodes = [preferNode, ...(this._data?.nodes || []).filter(n => n.id !== preferNode.id)];
+		const assignRe = new RegExp(`(?:^|\\n)\\s*${varName}\\s*=\\s*CREATE_TICKETS?\\s*\\([\\s\\S]*?\\bticket_type\\s*=\\s*["']([^"']+)["']`, 'i');
+		for (const n of nodes) {
+			for (const step of n.pipeline || []) {
+				const comp = step?.component;
+				if (comp?.type === 'create_tickets' && comp.wfTicketType && (comp.outputVariableName === varName || this._getComponentOutputVarName(comp) === varName)) {
+					return comp.wfTicketType;
+				}
+				const m = step?.expression ? assignRe.exec(step.expression) : null;
+				if (m) {
+					return m[1];
+				}
+			}
+		}
+		return undefined;
+	}
+
+	private async _outlineTicketFieldItems(ref: WfOutlineTicketRef, parentKey: string, locateTarget?: IWfLocateTarget): Promise<IWfOutlineItem[]> {
+		let fields: ICustomField[] | undefined;
+		if (ref.kind === 'type') {
+			fields = (await this._findTicketTypeModule(ref.name))?.module.fields;
+		} else if (this._workflowUri) {
+			const ticket = await this._ticketRuntimeService.getTicket(this._workflowUri, ref.id);
+			fields = ticket?.schema?.fields;
+		}
+		if (!fields) {
+			throw new Error(ref.kind === 'type' ? `Ticket Type '${ref.name}' not found` : `Ticket '${ref.id}' not found`);
+		}
+		return fields
+			.filter(f => f && f.id !== 'title')
+			.map(f => ({
+				key: `${parentKey}/f:${f.id}`,
+				label: (f.label || f.id || '').trim(),
+				meta: `${this._outlineComponentTypeLabel(f.type)}${(f as any).disabled ? ' · disabled' : ''}`,
+				icon: this._outlineThemeOf(f.type).icon,
+				theme: this._outlineThemeOf(f.type),
+				disabled: Boolean((f as any).disabled),
+				open: () => this._openOutlineTicket(ref, f.id),
+				showKey: parentKey,
+				locateTarget
+			}));
+	}
+
+	/** Card id of a capsule in the node's ticket-like view (also used to scroll to it). */
+	private _nodeTicketFieldId(step: INodePipelineStep, index: number): string {
+		return step.component?.id || step.id || `wf_step_${index}`;
+	}
+
+	/** A node presented like a ticket: one card per capsule, in pipeline order. Not a real ticket (nothing is saved). */
+	private _buildNodeVirtualTicketModule(node: IFlowchartNode): ICustomModule {
+		const steps = (node.pipeline || []).filter((s): s is INodePipelineStep => !!s);
+		const nodeRunState = this._getEffectiveRunForNode(node.id)?.nodeStates?.[node.id];
+		const fields = steps.map((step, index) => {
+			const comp = step.component;
+			const id = this._nodeTicketFieldId(step, index);
+			const pipelineIndex = (node.pipeline || []).indexOf(step);
+			const runtime = this._stepRuntimeForNodeView(node, step, pipelineIndex, nodeRunState);
+			const firstExprLine = (step.expression || '').split('\n').map(l => l.trim()).find(l => l.length > 0) || '';
+			const label = comp ? ((comp.label || '').trim() || this._outlineComponentTypeLabel(comp.type)) : ((step.label || '').trim() || step.functionName || firstExprLine.slice(0, 60) || `Python step ${index + 1}`);
+			if (comp && !WF_NODE_TICKET_STEP_CARD_TYPES.has(comp.type)) {
+				return { ...comp, id, label, __wfRuntime: runtime };
+			}
+			const kind = comp?.type || 'python_step';
+			return {
+				...(comp || {}),
+				id,
+				label,
+				type: kind,
+				__wfRuntime: runtime,
+				__wfStep: {
+					kind,
+					kindLabel: comp ? this._outlineComponentTypeLabel(comp.type) : 'Python Step',
+					code: comp ? (kind === 'sub_workflow' ? '' : this._buildBuiltinComponentPythonExpression(comp)) : (step.expression || ''),
+					targetVariable: (step.targetVariable || '').replace(/^@/, '').trim(),
+					disabled: Boolean(step.disabled || (comp as any)?.disabled),
+					subWorkflow: kind === 'sub_workflow' ? {
+						id: comp?.subWorkflowId,
+						name: comp?.subWorkflowName || (comp?.subWorkflowId ? this._workflowExecutionService.getSubWorkflowById(comp.subWorkflowId)?.name : undefined) || comp?.subWorkflowId,
+						inputs: comp?.subWorkflowInputs || {},
+						inputDefs: comp?.subWorkflowInputDefs || [],
+						outputDefs: comp?.subWorkflowOutputDefs || []
+					} : undefined
+				}
+			};
+		});
+		const ownerSub = this._outlineSubWorkflowsOfCanvas().find(sw => (sw.nodeIds || []).includes(node.id));
+		const workflowName = this.input?.getName() || decodeURIComponent(this._workflowUri?.path.split('/').filter(Boolean).pop() || 'Workflow');
+		return {
+			id: `wf_node_${node.id}`,
+			name: (node.label || '').trim() || 'Node',
+			fields,
+			__wfNode: {
+				nodeId: node.id,
+				nodeLabel: (node.label || '').trim() || 'Node',
+				workflowName,
+				workflowUri: this._workflowUri?.toString(),
+				subWorkflowName: ownerSub?.name
+			}
+		} as unknown as ICustomModule;
+	}
+
+	/** Last-run data of a capsule for the node view: its value, a Sub-Workflow's actual inputs, and the error if it failed. */
+	private _stepRuntimeForNodeView(node: IFlowchartNode, step: INodePipelineStep, pipelineIndex: number, nodeRunState: { status?: string; failedStepIndex?: number; failedStepId?: string; failedStepError?: string; error?: string } | undefined): { value?: unknown; inputs?: Record<string, unknown>; error?: string } | undefined {
+		const comp = step.component;
+		let value: unknown;
+		try {
+			value = this._resolveStepRuntimeValue(node, step);
+		} catch {
+			value = undefined;
+		}
+		let inputs: Record<string, unknown> | undefined;
+		if (comp?.type === 'sub_workflow') {
+			inputs = (comp as any).lastExecutionInputs;
+			const log = (comp as any).lastExecutionLog;
+			if (inputs === undefined && typeof log === 'string') {
+				const m = log.match(/(?:^|\n)Inputs:\s*(\{[\s\S]*?\})(?:\nOutputs:|$)/);
+				try {
+					inputs = m?.[1] ? JSON.parse(m[1]) : undefined;
+				} catch {
+					inputs = undefined;
+				}
+			}
+		}
+		const failedHere = nodeRunState?.status === 'failed' && (nodeRunState.failedStepIndex !== undefined ? nodeRunState.failedStepIndex === pipelineIndex : Boolean(nodeRunState.failedStepId && nodeRunState.failedStepId === step.id));
+		const error = failedHere ? (nodeRunState?.failedStepError || nodeRunState?.error || 'Step failed during execution.') : undefined;
+		return value === undefined && inputs === undefined && !error ? undefined : { value, inputs, error };
+	}
+
+	/** Opens (or refreshes) the node's ticket-like view on the right; with `fieldId`, scrolls to that capsule's card. */
+	private async _openNodeVirtualTicket(node: IFlowchartNode, fieldId?: string): Promise<EditorInput | undefined> {
+		const mod = this._buildNodeVirtualTicketModule(node);
+		const existing = this._editorService.editors.find(e => e instanceof EntityDetailEditorInput && !e.isDisposed() && e.previewModule?.id === mod.id) as EntityDetailEditorInput | undefined;
+		let input: EntityDetailEditorInput;
+		if (existing) {
+			existing.updatePreviewModule(mod);
+			const existingGroup = this._editorGroupService.groups.find(g => g.contains(existing));
+			const pane = await this._editorService.openEditor(existing, { pinned: true, preserveFocus: true }, existingGroup?.id ?? this._outlineSideGroup());
+			if (pane && typeof (pane as any).refreshPreviewModule === 'function') {
+				await (pane as any).refreshPreviewModule(mod);
+			}
+			input = existing;
+		} else {
+			input = new EntityDetailEditorInput(this._workflowUri || URI.file('/'), mod.name, false, mod);
+			await this._editorService.openEditor(input, { pinned: true, preserveFocus: true }, this._outlineSideGroup());
+		}
+		if (fieldId) {
+			this._revealOutlineField(input, fieldId);
+		}
+		return input;
+	}
+
+	/** Highlights a clicked outline item together with everything above it in the menu (calling node, capsule, …). */
+	private _locateOutlineItemWithAncestors(item: IWfOutlineItem, level: number): void {
+		const chain: IWfLocateTarget[] = [];
+		for (let l = 0; l < level; l++) {
+			const ancestor = this._outlineRenderedColumns[l]?.find(it => it.key === this._outlinePath[l]);
+			if (ancestor?.locateTarget) {
+				chain.push(ancestor.locateTarget);
+			}
+		}
+		if (item.locateTarget) {
+			chain.push(item.locateTarget);
+		}
+		// A capsule target already highlights its node; drop duplicates
+		const unique = chain.filter((t, i) => chain.findIndex(o => o.nodeId === t.nodeId && o.stepIndex === t.stepIndex) === i);
+		if (unique.length > 0) {
+			this._locateOnCanvas(unique);
+		}
+	}
+
+	/**
+	 * Highlights nodes / capsules (outermost first, the clicked item last) on every canvas of this workflow and keeps them
+	 * highlighted until another item is picked (or the outline is closed). Opens the clicked node's Sub-Workflow if it is not
+	 * visible anywhere.
+	 */
+	private _locateOnCanvas(targets: IWfLocateTarget[], allowOpen = true): void {
+		const uri = this._workflowUri?.toString();
+		const deepest = targets[targets.length - 1];
+		if (!uri || !deepest) {
+			return;
+		}
+		WorkflowEditor._outlineLocated.set(uri, { targets, owner: this });
+		let deepestShown = false;
+		for (const ed of WorkflowEditor._openWorkflowEditors) {
+			if (!ed._isPureDiagram && ed._workflowUri?.toString() === uri && ed._applyOutlineLocateHighlight(true)) {
+				deepestShown = true;
+			}
+		}
+		if (!deepestShown && allowOpen && deepest.ownerSubWorkflowId) {
+			this._openOutlineSubWorkflow(deepest.ownerSubWorkflowId)
+				.then(() => setTimeout(() => this._locateOnCanvas(targets, false), 500))
+				.catch(() => { /* nothing to highlight */ });
+		}
+	}
+
+	private _clearOutlineLocate(): void {
+		const uri = this._workflowUri?.toString();
+		this._outlineSelectedKey = undefined;
+		if (uri && WorkflowEditor._outlineLocated.get(uri)?.owner === this) {
+			WorkflowEditor._outlineLocated.delete(uri);
+			for (const ed of WorkflowEditor._openWorkflowEditors) {
+				if (ed._workflowUri?.toString() === uri) {
+					ed._applyOutlineLocateHighlight(false);
+				}
+			}
+		}
+	}
+
+	/**
+	 * (Re)applies the persistent outline highlight on this canvas (every target rendered here); also called after every node
+	 * re-render. With `reveal`, scrolls to the deepest target shown here. Returns whether the clicked (deepest) target is visible here.
+	 */
+	private _applyOutlineLocateHighlight(reveal: boolean): boolean {
+		const container = this._nodesContainer;
+		if (!container) {
+			return false;
+		}
+		container.querySelectorAll('.wf-outline-locate-node, .wf-outline-locate-capsule').forEach(el => el.classList.remove('wf-outline-locate-node', 'wf-outline-locate-capsule', 'is-pulsing'));
+		const located = this._workflowUri ? WorkflowEditor._outlineLocated.get(this._workflowUri.toString()) : undefined;
+		if (!located) {
+			return false;
+		}
+		let deepestHereEl: HTMLElement | undefined;
+		let deepestHere: IWfLocateTarget | undefined;
+		let clickedVisible = false;
+		located.targets.forEach((target, i) => {
+			const nodeEl = container.querySelector(`[data-node-id="${CSS.escape(target.nodeId)}"]`) as HTMLElement | null;
+			if (!nodeEl) {
+				return; // not rendered here (e.g. inside a hidden Sub-Workflow region, or another Sub-Workflow's canvas)
+			}
+			nodeEl.classList.add('wf-outline-locate-node');
+			if (target.stepIndex !== undefined) {
+				(nodeEl.querySelector(`[data-pipeline-step-idx="${target.stepIndex}"]`) as HTMLElement | null)?.classList.add('wf-outline-locate-capsule');
+			}
+			const visible = nodeEl.isConnected && nodeEl.getClientRects().length > 0;
+			if (visible) {
+				deepestHereEl = nodeEl;
+				deepestHere = target;
+				if (i === located.targets.length - 1) {
+					clickedVisible = true;
+				}
+			}
+		});
+		if (reveal && deepestHereEl && deepestHere) {
+			deepestHereEl.classList.add('is-pulsing'); // draws attention once; the outline itself stays
+			this._revealElementInCanvas(deepestHereEl);
+		}
+		return clickedVisible;
+	}
+
+	/**
+	 * Scrolls the canvas only if `el` is not fully visible in the free part of the view (the canvas minus the Workflow Outline
+	 * panel); then centers it in that free part. Uses on-screen rectangles, so zoom / canvas offsets cannot throw it off.
+	 */
+	private _revealElementInCanvas(el: HTMLElement): void {
+		const scroller = this._canvasScroller();
+		if (!scroller) {
+			return;
+		}
+		const view = scroller.getBoundingClientRect();
+		let left = view.left;
+		const panel = this._subWorkflowWidgetEl?.querySelector('.wf-outline-panel') as HTMLElement | null;
+		if (panel) {
+			const p = panel.getBoundingClientRect();
+			// The panel sits at the top-left: use the area to its right when that leaves a reasonable width
+			if (p.width > 0 && p.right > view.left && p.right < view.right - 160) {
+				left = p.right + 8;
+			}
+		}
+		const region = { left, top: view.top, right: view.right, bottom: view.bottom };
+		const r = el.getBoundingClientRect();
+		const margin = 12;
+		const fullyVisible = r.left >= region.left + margin && r.right <= region.right - margin && r.top >= region.top + margin && r.bottom <= region.bottom - margin;
+		if (fullyVisible) {
+			return;
+		}
+		const dx = (r.left + r.width / 2) - (region.left + region.right) / 2;
+		const dy = (r.top + r.height / 2) - (region.top + region.bottom) / 2;
+		scroller.scrollTo({ left: Math.max(0, scroller.scrollLeft + dx), top: Math.max(0, scroller.scrollTop + dy), behavior: 'smooth' });
+	}
+
+	/** Opens a ticket (or Ticket Type preview) on the right; with `fieldId`, scrolls to and highlights that component. */
+	private async _openOutlineTicket(ref: WfOutlineTicketRef, fieldId?: string): Promise<EditorInput | undefined> {
+		const group = this._outlineSideGroup();
+		let opened: EditorInput | undefined;
+		if (ref.kind === 'type') {
+			opened = await this._openTicketTypePreviewInEditor(ref.name, group);
+		} else {
+			const uri = await this._resolveModuleUri({ type: 'ticket', name: ref.id });
+			if (!uri) {
+				this._notificationService.warn(`Could not locate ticket '${ref.id}'.`);
+				return undefined;
+			}
+			const input = new EntityDetailEditorInput(uri, ref.id);
+			const pane = await this._editorService.openEditor(input, { pinned: true, preserveFocus: true }, group);
+			opened = pane?.input ?? input;
+		}
+		if (opened && fieldId) {
+			this._revealOutlineField(opened, fieldId);
+		}
+		return opened;
+	}
+
+	/**
+	 * Waits for the ticket editor to render the component card, scrolls it to the top and flashes it. Keeps watching for
+	 * ~1.5s: the editor may re-render or restore its previous scroll position after loading, which would hide the card again.
+	 */
+	private _revealOutlineField(input: EditorInput, fieldId: string): void {
+		const selector = `[data-field-id="${CSS.escape(fieldId)}"]`;
+		let tries = 0;
+		let flashed: HTMLElement | undefined;
+		const tick = () => {
+			const pane = this._editorService.visibleEditorPanes.find(p => p.input === input);
+			const root = pane instanceof EditorPane ? pane.getContainer() : undefined;
+			const card = root?.querySelector(selector) as HTMLElement | null | undefined;
+			if (card && root) {
+				const view = root.getBoundingClientRect();
+				const r = card.getBoundingClientRect();
+				const isInView = r.top >= view.top - 2 && r.top < view.bottom - 40;
+				if (!isInView) {
+					card.scrollIntoView({ behavior: 'auto', block: 'start' });
+				}
+				if (card !== flashed) {
+					flashed = card;
+					card.classList.add('wf-outline-reveal-flash');
+					setTimeout(() => card.classList.remove('wf-outline-reveal-flash'), 1600);
+				}
+			}
+			if (++tries < 16) {
+				setTimeout(tick, 100);
+			}
+		};
+		tick();
+	}
+
+	private _outlineComponentTypeLabel(type: string | undefined): string {
+		const labels: Record<string, string> = {
+			prompt: 'AI Prompt', python: 'Python Script', table: 'Data Table', browser: 'Browser', http_request: 'HTTP Request',
+			parameters: 'Inputs', output: 'Output', create_tickets: 'Create Tickets', run_tickets: 'Run Tickets', get_outputs: 'Get Outputs',
+			get_ticket: 'Get Ticket', get_tickets: 'Get Tickets', display: 'Display', sub_workflow: 'Sub-Workflow', voice_note: 'Voice Note',
+			tts: 'Text to Speech', media_player: 'Media Player', ssh: 'SSH Terminal', git: 'Git', text: 'Text', select: 'Select'
+		};
+		return labels[type || ''] || (type || 'Component');
+	}
+
+	private _outlineThemeOf(type: string | undefined): IWfCapsuleTheme {
+		return WF_COMPONENT_CAPSULE_THEMES[type || ''] || { icon: Codicon.symbolField, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.12)', border: 'rgba(148, 163, 184, 0.38)', textColor: '#e2e8f0' };
+	}
+
 	private _renderNodes(): void {
 		if (
 			this._activePythonPopoverStep &&
@@ -8641,7 +10964,12 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
+		const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
+
 		for (const node of this._data.nodes) {
+			if (hiddenSubWfNodeIds.has(node.id)) {
+				continue;
+			}
 			if (this._deduplicateNodePipeline(node)) {
 				this._saveFlowchartData();
 			}
@@ -8678,7 +11006,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 
 			// Execution Status Visual Highlighting & Human Interaction
-			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+			const activeRun = this._getEffectiveRunForNode(node.id);
 			const isActiveRunLive = Boolean(activeRun && (activeRun.status === 'running' || activeRun.status === 'waiting_human' || activeRun.status === 'paused'));
 			const nodeRunState = activeRun?.nodeStates?.[node.id];
 			if (nodeRunState) {
@@ -8693,7 +11021,9 @@ export class WorkflowEditor extends EditorPane {
 
 					// Failed Error Interactive Badge
 					const errBadge = append(nodeEl, $('.node-error-badge'));
-					const stepText = nodeRunState.failedStepIndex !== undefined ? ` (Step #${nodeRunState.failedStepIndex + 1})` : '';
+					const stepText = nodeRunState.failedStepIndex !== undefined
+						? ` (Step #${nodeRunState.failedStepIndex + 1})`
+						: (nodeRunState.failedStage ? ` (${nodeRunState.failedStage})` : '');
 					const isConditionErr = nodeRunState.error && /condition/i.test(nodeRunState.error);
 					errBadge.textContent = isConditionErr ? '[!] Condition Error [View Log]' : `[X] Failed${stepText} [View Log]`;
 					errBadge.title = nodeRunState.error || 'Click to view execution error log';
@@ -8758,10 +11088,10 @@ export class WorkflowEditor extends EditorPane {
 				port.onmousedown = (e) => {
 					e.stopPropagation();
 					e.preventDefault();
-					const rect = this._canvas!.getBoundingClientRect();
+					const startCoords = this._getPortCoords(node, edge);
 					this._isConnecting = true;
-					this._tempLinkStartX = (e.clientX - rect.left) / this._zoomLevel;
-					this._tempLinkStartY = (e.clientY - rect.top) / this._zoomLevel;
+					this._tempLinkStartX = startCoords.x;
+					this._tempLinkStartY = startCoords.y;
 					this._tempLinkFromNodeId = node.id;
 					this._tempLinkFromPort = edge;
 				};
@@ -8823,6 +11153,13 @@ export class WorkflowEditor extends EditorPane {
 				// 1. Python Step [py] / Component / Variable / Function dropped onto node
 				try {
 					const parsed = JSON.parse(dataStr);
+					if (parsed && parsed.kind === 'sub_workflow_ref' && parsed.subWorkflowId) {
+						const subDef = this._workflowExecutionService.getSubWorkflowById(parsed.subWorkflowId);
+						if (subDef) {
+							this._addSubWorkflowCapsuleToNode(node, subDef, dropInsertIdx);
+						}
+						return;
+					}
 					if (parsed && parsed.kind === 'node_component' && parsed.compType) {
 						this._addOrOpenComponentOnNode(node, parsed.compType as CustomFieldType, dropInsertIdx);
 						return;
@@ -9289,6 +11626,8 @@ export class WorkflowEditor extends EditorPane {
 
 				const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey;
 				this._selectedCapsule = null;
+				this._selectedCapsules = null;
+				this._updateCapsuleSelectionDom();
 				this._collapseSelectionTargetNodeId = null;
 
 				if (!isMultiKey) {
@@ -9369,6 +11708,13 @@ export class WorkflowEditor extends EditorPane {
 			this._renderInspector(this._inspectorEl);
 		}
 		this._updateRunButtonSelectionBadge();
+		this._applyOutlineLocateHighlight(false);
+	}
+
+	private _hasActiveInlineNodeEditor(): boolean {
+		return Boolean(
+			this._nodesContainer?.querySelector('.node-inline-editor, .node-function-draft-wrapper, .node-variable-draft-wrapper')
+		);
 	}
 
 	private _showInlineEditor(nodeEl: HTMLElement, node: IFlowchartNode): void {
@@ -9422,12 +11768,14 @@ export class WorkflowEditor extends EditorPane {
 		textarea.onclick = (e) => e.stopPropagation();
 		textarea.ondblclick = (e) => e.stopPropagation();
 
-		setTimeout(() => {
-			textarea.focus();
-			textarea.select();
-		}, 50);
+		let isFinished = false;
+		let blurReady = false;
 
 		const saveText = () => {
+			if (isFinished) {
+				return;
+			}
+			isFinished = true;
 			const newText = textarea.value;
 			if (newText !== node.label) {
 				node.label = newText;
@@ -9436,6 +11784,28 @@ export class WorkflowEditor extends EditorPane {
 			this._renderNodes();
 			this._drawLinks();
 		};
+
+		const cancelEdit = () => {
+			if (isFinished) {
+				return;
+			}
+			isFinished = true;
+			this._renderNodes();
+			this._drawLinks();
+		};
+
+		textarea.focus();
+		textarea.select();
+		requestAnimationFrame(() => {
+			if (isFinished || !textarea.isConnected) {
+				return;
+			}
+			textarea.focus();
+			textarea.select();
+			setTimeout(() => {
+				blurReady = true;
+			}, 60);
+		});
 
 		textarea.onkeydown = (e) => {
 			if (e.isComposing || e.keyCode === 229) {
@@ -9461,12 +11831,23 @@ export class WorkflowEditor extends EditorPane {
 			} else if (e.key === 'Escape') {
 				e.preventDefault();
 				e.stopPropagation();
-				this._renderNodes();
-				this._drawLinks();
+				cancelEdit();
 			}
 		};
 
 		textarea.onblur = () => {
+			if (isFinished || !textarea.isConnected) {
+				return;
+			}
+			if (!blurReady) {
+				// Ignore transient blur caused by the trailing mouseup/click of the double-click gesture
+				requestAnimationFrame(() => {
+					if (!isFinished && textarea.isConnected) {
+						textarea.focus();
+					}
+				});
+				return;
+			}
 			saveText();
 		};
 	}
@@ -11369,6 +13750,7 @@ export class WorkflowEditor extends EditorPane {
 				}
 			} else if (dir === 'top') {
 				if (obstacle.y - nodeH - verticalGap >= 20) {
+
 					siblingY = obstacle.y - nodeH - verticalGap;
 				} else {
 					siblingX = obstacle.x + obstacleW + horizontalGap;
@@ -11762,31 +14144,55 @@ export class WorkflowEditor extends EditorPane {
 			const currentX = (e.clientX - rect.left) / this._zoomLevel;
 			const currentY = (e.clientY - rect.top) / this._zoomLevel;
 			const fromPort = this._tempLinkFromPort || 'right';
+			const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
 
-			// Check for target node snapping
+			// Check for target node snapping (ONLY visible nodes; prefer directly hovered DOM node first)
 			let snapNode: IFlowchartNode | undefined;
-			for (const node of this._data.nodes) {
-				if (node.id === this._tempLinkFromNodeId) continue;
-				// Detect if cursor is near or inside target node bounding box
-				if (currentX >= node.x - 24 && currentX <= node.x + node.width + 24 &&
-					currentY >= node.y - 24 && currentY <= node.y + node.height + 24) {
-					snapNode = node;
-					break;
+			let directPort: 'top' | 'right' | 'bottom' | 'left' | undefined;
+			const hoveredTarget = e.target as HTMLElement | null;
+			const hoveredPortEl = hoveredTarget?.closest('.node-port-handle') as HTMLElement | null;
+			const hoveredNodeEl = hoveredTarget?.closest('.workflow-node') as HTMLElement | null;
+			if (hoveredNodeEl) {
+				const hoveredNodeId = hoveredNodeEl.getAttribute('data-node-id');
+				if (hoveredNodeId && hoveredNodeId !== this._tempLinkFromNodeId && !hiddenSubWfNodeIds.has(hoveredNodeId)) {
+					snapNode = this._data.nodes.find(n => n.id === hoveredNodeId);
+					if (snapNode && hoveredPortEl) {
+						const classes = Array.from(hoveredPortEl.classList);
+						directPort = classes.find(c => ['top', 'right', 'bottom', 'left'].includes(c)) as any;
+					}
+				}
+			}
+
+			if (!snapNode) {
+				let bestNodeDist = Infinity;
+				for (const node of this._data.nodes) {
+					if (node.id === this._tempLinkFromNodeId || hiddenSubWfNodeIds.has(node.id)) continue;
+					// Detect if cursor is near or inside visible target node bounding box
+					if (currentX >= node.x - 24 && currentX <= node.x + node.width + 24 &&
+						currentY >= node.y - 24 && currentY <= node.y + node.height + 24) {
+						const cx = node.x + node.width / 2;
+						const cy = node.y + node.height / 2;
+						const d = Math.hypot(currentX - cx, currentY - cy);
+						if (d < bestNodeDist) {
+							bestNodeDist = d;
+							snapNode = node;
+						}
+					}
 				}
 			}
 
 			if (snapNode) {
-				// Find which port on snapNode is CLOSEST to current mouse cursor (currentX, currentY)
-				const ports: ('top' | 'right' | 'bottom' | 'left')[] = ['left', 'right', 'top', 'bottom'];
-				let snapPort: 'top' | 'right' | 'bottom' | 'left' = 'left';
-				let minDistance = Infinity;
-
-				for (const p of ports) {
-					const coords = this._getPortCoords(snapNode, p);
-					const dist = Math.hypot(currentX - coords.x, currentY - coords.y);
-					if (dist < minDistance) {
-						minDistance = dist;
-						snapPort = p;
+				let snapPort: 'top' | 'right' | 'bottom' | 'left' = directPort || 'left';
+				if (!directPort) {
+					const ports: ('top' | 'right' | 'bottom' | 'left')[] = ['left', 'right', 'top', 'bottom'];
+					let minDistance = Infinity;
+					for (const p of ports) {
+						const coords = this._getPortCoords(snapNode, p);
+						const dist = Math.hypot(currentX - coords.x, currentY - coords.y);
+						if (dist < minDistance) {
+							minDistance = dist;
+							snapPort = p;
+						}
 					}
 				}
 
@@ -11812,7 +14218,13 @@ export class WorkflowEditor extends EditorPane {
 			const rect = this._canvas!.getBoundingClientRect();
 			const currentX = (e.clientX - rect.left) / this._zoomLevel;
 			const currentY = (e.clientY - rect.top) / this._zoomLevel;
-			this._drawTempLink(currentX, currentY, this._tempLinkFixedX, this._tempLinkFixedY, 'right', 'left');
+			const reconnLink = this._data.links.find(l => l.id === this._isReconnectingStart);
+			const fixedToPort = reconnLink?.toPort || 'left';
+			const naturalFromPort: 'top' | 'right' | 'bottom' | 'left' =
+				Math.abs(this._tempLinkFixedX - currentX) >= Math.abs(this._tempLinkFixedY - currentY)
+					? (currentX <= this._tempLinkFixedX ? 'right' : 'left')
+					: (currentY <= this._tempLinkFixedY ? 'bottom' : 'top');
+			this._drawTempLink(currentX, currentY, this._tempLinkFixedX, this._tempLinkFixedY, naturalFromPort, fixedToPort);
 			return;
 		}
 
@@ -11820,7 +14232,19 @@ export class WorkflowEditor extends EditorPane {
 			const rect = this._canvas!.getBoundingClientRect();
 			const currentX = (e.clientX - rect.left) / this._zoomLevel;
 			const currentY = (e.clientY - rect.top) / this._zoomLevel;
-			this._drawTempLink(this._tempLinkFixedX, this._tempLinkFixedY, currentX, currentY, 'right', 'left');
+			const reconnLink = this._data.links.find(l => l.id === this._isReconnectingEnd);
+			const fixedFromPort = reconnLink?.fromPort || 'right';
+			let naturalToPort: 'top' | 'right' | 'bottom' | 'left' = 'left';
+			if (fixedFromPort === 'right') {
+				naturalToPort = currentX >= this._tempLinkFixedX ? 'left' : 'right';
+			} else if (fixedFromPort === 'left') {
+				naturalToPort = currentX <= this._tempLinkFixedX ? 'right' : 'left';
+			} else if (fixedFromPort === 'bottom') {
+				naturalToPort = currentY >= this._tempLinkFixedY ? 'top' : 'bottom';
+			} else if (fixedFromPort === 'top') {
+				naturalToPort = currentY <= this._tempLinkFixedY ? 'bottom' : 'top';
+			}
+			this._drawTempLink(this._tempLinkFixedX, this._tempLinkFixedY, currentX, currentY, fixedFromPort, naturalToPort);
 			return;
 		}
 
@@ -11834,15 +14258,11 @@ export class WorkflowEditor extends EditorPane {
 				node.width = Math.max(40, Math.round((this._resizeStartWidth + dw) / grid) * grid);
 				node.height = Math.max(30, Math.round((this._resizeStartHeight + dh) / grid) * grid);
 
-				// Dynamically update position in DOM
-				const nodes = this._nodesContainer?.children;
-				if (nodes) {
-					const nodeIdx = this._data.nodes.indexOf(node);
-					const nodeEl = nodes[nodeIdx] as HTMLElement;
-					if (nodeEl) {
-						nodeEl.style.width = `${node.width}px`;
-						nodeEl.style.height = `${node.height}px`;
-					}
+				// Dynamically update size in DOM by data-node-id (safe even when Sub-Workflow nodes are hidden)
+				const nodeEl = this._nodesContainer?.querySelector(`.workflow-node[data-node-id="${node.id}"]`) as HTMLElement | null;
+				if (nodeEl) {
+					nodeEl.style.width = `${node.width}px`;
+					nodeEl.style.height = `${node.height}px`;
 				}
 
 				this._drawLinks();
@@ -11870,7 +14290,9 @@ export class WorkflowEditor extends EditorPane {
 			for (const baseId of this._selectBoxBaseNodeIds) {
 				this._selectedNodeIds.add(baseId);
 			}
+			const hiddenBoxIds = this._getHiddenSubWorkflowNodeIds();
 			const overlappingNodes = this._data.nodes.filter(node =>
+				!hiddenBoxIds.has(node.id) &&
 				!(node.x + node.width < x_start ||
 					node.x > x_start + width ||
 					node.y + node.height < y_start ||
@@ -11932,15 +14354,11 @@ export class WorkflowEditor extends EditorPane {
 						maxNodeBottom = Math.max(maxNodeBottom, bottom);
 					}
 
-					// Dynamically update position in DOM
-					const nodes = this._nodesContainer?.children;
-					if (nodes) {
-						const nodeIdx = this._data.nodes.indexOf(node);
-						const nodeEl = nodes[nodeIdx] as HTMLElement;
-						if (nodeEl) {
-							nodeEl.style.left = `${node.x}px`;
-							nodeEl.style.top = `${node.y}px`;
-						}
+					// Dynamically update position in DOM by data-node-id (instant 1:1 tracking even when Sub-Workflow nodes are hidden)
+					const nodeEl = this._nodesContainer?.querySelector(`.workflow-node[data-node-id="${node.id}"]`) as HTMLElement | null;
+					if (nodeEl) {
+						nodeEl.style.left = `${node.x}px`;
+						nodeEl.style.top = `${node.y}px`;
 					}
 				}
 			}
@@ -12027,24 +14445,28 @@ export class WorkflowEditor extends EditorPane {
 				let toPort: 'top' | 'right' | 'bottom' | 'left' | undefined;
 
 				if (targetNodeEl) {
-					const nodes = this._nodesContainer?.children;
-					if (nodes) {
-						const nodeIdx = Array.from(nodes).indexOf(targetNodeEl as any);
-						targetNode = this._data.nodes[nodeIdx];
+					const targetNodeId = targetNodeEl.getAttribute("data-node-id");
+					if (targetNodeId) {
+						targetNode = this._data.nodes.find(n => n.id === targetNodeId);
 					}
 				}
 
-				// If not dropped directly on DOM node, check coordinate-based proximity snapping (within 24px)
+				// If not dropped directly on DOM node, check coordinate-based proximity snapping (within 24px, ONLY visible nodes)
 				if (!targetNode && this._canvas) {
+					const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
 					const rect = this._canvas.getBoundingClientRect();
 					const upX = (e.clientX - rect.left) / this._zoomLevel;
 					const upY = (e.clientY - rect.top) / this._zoomLevel;
+					let bestDist = Infinity;
 					for (const n of this._data.nodes) {
-						if (n.id === this._tempLinkFromNodeId) continue;
+						if (n.id === this._tempLinkFromNodeId || hiddenSubWfNodeIds.has(n.id)) continue;
 						if (upX >= n.x - 24 && upX <= n.x + n.width + 24 &&
 							upY >= n.y - 24 && upY <= n.y + n.height + 24) {
-							targetNode = n;
-							break;
+							const d = Math.hypot(upX - (n.x + n.width / 2), upY - (n.y + n.height / 2));
+							if (d < bestDist) {
+								bestDist = d;
+								targetNode = n;
+							}
 						}
 					}
 				}
@@ -12118,22 +14540,27 @@ export class WorkflowEditor extends EditorPane {
 				let port: 'top' | 'right' | 'bottom' | 'left' | undefined;
 
 				if (targetNodeEl) {
-					const nodes = this._nodesContainer?.children;
-					if (nodes) {
-						const nodeIdx = Array.from(nodes).indexOf(targetNodeEl as any);
-						targetNode = this._data.nodes[nodeIdx];
+					const targetNodeId = targetNodeEl.getAttribute("data-node-id");
+					if (targetNodeId) {
+						targetNode = this._data.nodes.find(n => n.id === targetNodeId);
 					}
 				}
 
 				if (!targetNode && this._canvas) {
+					const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
 					const rect = this._canvas.getBoundingClientRect();
 					const upX = (e.clientX - rect.left) / this._zoomLevel;
 					const upY = (e.clientY - rect.top) / this._zoomLevel;
+					let bestDist = Infinity;
 					for (const n of this._data.nodes) {
+						if (hiddenSubWfNodeIds.has(n.id)) continue;
 						if (upX >= n.x - 24 && upX <= n.x + n.width + 24 &&
 							upY >= n.y - 24 && upY <= n.y + n.height + 24) {
-							targetNode = n;
-							break;
+							const d = Math.hypot(upX - (n.x + n.width / 2), upY - (n.y + n.height / 2));
+							if (d < bestDist) {
+								bestDist = d;
+								targetNode = n;
+							}
 						}
 					}
 				}
@@ -12226,7 +14653,9 @@ export class WorkflowEditor extends EditorPane {
 			this._collapseSelectionTargetNodeId = null;
 			this._isDragging = false;
 			this._dragNodeId = null;
-			this._saveFlowchartData();
+			if (hasMoved) {
+				this._saveFlowchartData();
+			}
 		}
 	}
 
@@ -12658,6 +15087,185 @@ export class WorkflowEditor extends EditorPane {
 			}
 			if (totalLen <= 0) return 0.5;
 
+			let bestDistSq = Infinity;
+			let bestPathDist = 0;
+			let acc = 0;
+
+			for (let i = 0; i < waypoints.length - 1; i++) {
+				const ax = waypoints[i].x;
+				const ay = waypoints[i].y;
+				const bx = waypoints[i + 1].x;
+				const by = waypoints[i + 1].y;
+				const segLen = segLens[i];
+
+				const dx = bx - ax;
+				const dy = by - ay;
+				const lenSq = dx * dx + dy * dy;
+
+				let u = 0;
+				if (lenSq > 0) {
+					u = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+					u = Math.max(0, Math.min(1, u));
+				}
+				const qx = ax + u * dx;
+				const qy = ay + u * dy;
+				const distSq = (px - qx) * (px - qx) + (py - qy) * (py - qy);
+
+				if (distSq < bestDistSq) {
+					bestDistSq = distSq;
+					bestPathDist = acc + u * segLen;
+				}
+				acc += segLen;
+			}
+
+			const t = bestPathDist / totalLen;
+			return Math.max(0.05, Math.min(0.95, Number(t.toFixed(3))));
+		} else {
+			let bestDistSq = Infinity;
+			let bestT = 0.5;
+			const samples = 100;
+			for (let i = 0; i <= samples; i++) {
+				const t = i / samples;
+				const pt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, t, link.waypoints);
+				const distSq = (px - pt.x) * (px - pt.x) + (py - pt.y) * (py - pt.y);
+				if (distSq < bestDistSq) {
+					bestDistSq = distSq;
+					bestT = t;
+				}
+			}
+			return Math.max(0.05, Math.min(0.95, Number(bestT.toFixed(3))));
+		}
+	}
+
+	private _findClosestSegmentOnWaypoints(waypoints: { x: number; y: number }[], px: number, py: number): number {
+		let bestIdx = 0;
+		let bestDistSq = Infinity;
+		for (let i = 0; i < waypoints.length - 1; i++) {
+			const ax = waypoints[i].x;
+			const ay = waypoints[i].y;
+			const bx = waypoints[i + 1].x;
+			const by = waypoints[i + 1].y;
+			const dx = bx - ax;
+			const dy = by - ay;
+			const lenSq = dx * dx + dy * dy;
+			if (lenSq < 1) continue;
+			let u = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+			u = Math.max(0, Math.min(1, u));
+			const qx = ax + u * dx;
+			const qy = ay + u * dy;
+			const distSq = (px - qx) * (px - qx) + (py - qy) * (py - qy);
+			if (distSq < bestDistSq) {
+				bestDistSq = distSq;
+				bestIdx = i;
+			}
+		}
+		return bestIdx;
+	}
+
+	private _prepareSegmentDragWaypoints(
+		pts: { x: number; y: number }[],
+		segIdx: number,
+		fromPort: 'top' | 'right' | 'bottom' | 'left',
+		toPort: 'top' | 'right' | 'bottom' | 'left'
+	): { pts: { x: number; y: number }[]; segIdx: number; isVertical: boolean } {
+		const copy = pts.map(p => ({ x: p.x, y: p.y }));
+		let idx = Math.max(0, Math.min(copy.length - 2, segIdx));
+		const pA = copy[idx];
+		const pB = copy[idx + 1];
+		const isVertical = Math.abs(pA.x - pB.x) <= Math.abs(pA.y - pB.y);
+
+		if (idx === 0) {
+			const stubDist = 20;
+			let sx = copy[0].x;
+			let sy = copy[0].y;
+			if (fromPort === 'right') sx += stubDist;
+			else if (fromPort === 'left') sx -= stubDist;
+			else if (fromPort === 'bottom') sy += stubDist;
+			else if (fromPort === 'top') sy -= stubDist;
+			copy.splice(1, 0, { x: sx, y: sy }, { x: sx, y: sy });
+			idx += 2;
+		}
+		if (idx === copy.length - 2) {
+			const stubDist = 20;
+			const last = copy[copy.length - 1];
+			let ex = last.x;
+			let ey = last.y;
+			if (toPort === 'left') ex -= stubDist;
+			else if (toPort === 'right') ex += stubDist;
+			else if (toPort === 'top') ey -= stubDist;
+			else if (toPort === 'bottom') ey += stubDist;
+			copy.splice(copy.length - 1, 0, { x: ex, y: ey }, { x: ex, y: ey });
+		}
+
+		return { pts: copy, segIdx: idx, isVertical };
+	}
+
+	private _startLinkSegmentDrag(
+		e: MouseEvent,
+		link: IFlowchartLink,
+		baseWaypoints: { x: number; y: number }[],
+		segIdx: number,
+		canvasX: number,
+		canvasY: number,
+		isExplicitHandle: boolean
+	): void {
+		if (e.button !== 0) return;
+		e.stopPropagation();
+		this._isDraggingLinkSegment = link.id;
+		this._dragLinkSegmentInitialIndex = segIdx;
+		this._dragLinkSegmentIndex = segIdx;
+		this._dragLinkSegmentWaypoints = baseWaypoints.map(p => ({ x: p.x, y: p.y }));
+		this._dragLinkSegmentStartX = e.clientX;
+		this._dragLinkSegmentStartY = e.clientY;
+		this._dragLinkSegmentCanvasX = canvasX;
+		this._dragLinkSegmentCanvasY = canvasY;
+		this._dragLinkSegmentHasMoved = false;
+		this._dragLinkSegmentPrepared = false;
+
+		if (isExplicitHandle) {
+			const fromNode = this._data.nodes.find(n => n.id === link.from);
+			const toNode = this._data.nodes.find(n => n.id === link.to);
+			if (fromNode && toNode) {
+				const closest = this._getClosestPorts(fromNode, toNode);
+				const fromPort = link.fromPort || closest.fromPort;
+				const toPort = link.toPort || closest.toPort;
+				const prep = this._prepareSegmentDragWaypoints(this._dragLinkSegmentWaypoints, segIdx, fromPort, toPort);
+				this._dragLinkSegmentWaypoints = prep.pts;
+				this._dragLinkSegmentIndex = prep.segIdx;
+				this._dragLinkSegmentIsVertical = prep.isVertical;
+				this._dragLinkSegmentPrepared = true;
+			}
+		}
+	}
+
+	private _showLinkInlineEditor(link: IFlowchartLink, x: number, y: number): void {
+		if (!this._linkDeletesContainer) return;
+		// Remove any existing editor
+		const existing = this._linkDeletesContainer.querySelector('.workflow-link-label-editor-wrapper, .workflow-link-label-editor');
+		if (existing) existing.remove();
+
+		const wrapper = append(this._linkDeletesContainer, $('.workflow-link-label-editor-wrapper'));
+		wrapper.style.position = 'absolute';
+		wrapper.style.left = `${x}px`;
+		wrapper.style.top = `${y}px`;
+		wrapper.style.zIndex = '10000';
+
+		const textarea = append(wrapper, $('textarea.workflow-link-label-editor')) as HTMLTextAreaElement;
+		textarea.value = link.label || '';
+		textarea.placeholder = 'Condition, e.g. @monitor != None';
+
+		const adjustHeight = () => {
+			textarea.style.height = 'auto';
+			textarea.style.height = `${Math.min(90, Math.max(24, textarea.scrollHeight + 2))}px`;
+		};
+
+		let committed = false;
+		let acMenu: HTMLElement | null = null;
+		let activeAcIndex = 0;
+		let currentMatches: { name: string; initialValue: string; nodeLabel?: string }[] = [];
+
+		const availableVars: { name: string; initialValue: string; nodeLabel?: string }[] = [];
+		for (const n of this._data?.nodes || []) {
 			for (const v of this._getNodeVariables(n)) {
 				availableVars.push({
 					name: v.name,
@@ -12881,7 +15489,12 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
+		const hiddenSubWfNodeIds = this._getHiddenSubWorkflowNodeIds();
+
 		for (const link of this._data.links) {
+			if (hiddenSubWfNodeIds.has(link.from) || hiddenSubWfNodeIds.has(link.to)) {
+				continue;
+			}
 			const fromNode = this._data.nodes.find(n => n.id === link.from);
 			const toNode = this._data.nodes.find(n => n.id === link.to);
 
@@ -12934,7 +15547,7 @@ export class WorkflowEditor extends EditorPane {
 			const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
 			path.classList.add('workflow-connection-line');
 
-			const activeRun = this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined;
+			const activeRun = this._getEffectiveRunForLink(link);
 			const linkState = activeRun?.linkStates?.[link.id] || activeRun?.linkStates?.[`${link.from}->${link.to}`];
 
 			// Custom Link Color or Default (match fromNode color / theme)
@@ -13403,6 +16016,30 @@ export class WorkflowEditor extends EditorPane {
 					}
 				};
 
+				// Caller nodes: reopen the live view of each Sub-Workflow this node invokes
+				const targetNodeForSub = this._data.nodes.find(n => n.id === targetId);
+				const calledSubWorkflows = new Map<string, string>();
+				for (const step of (targetNodeForSub?.pipeline || [])) {
+					const comp: any = (step as any)?.component;
+					if (comp?.type === 'sub_workflow' && comp.subWorkflowId) {
+						const def = this._workflowExecutionService.getSubWorkflowById(comp.subWorkflowId);
+						calledSubWorkflows.set(comp.subWorkflowId, def?.name || comp.subWorkflowName || comp.label || comp.subWorkflowId);
+					}
+				}
+				for (const [subWorkflowId, subWorkflowName] of calledSubWorkflows) {
+					const liveViewItem = append(menu, $('.context-menu-item'));
+					liveViewItem.textContent = calledSubWorkflows.size > 1
+						? `⧉ Show Sub-Workflow Live View: ${subWorkflowName}`
+						: '⧉ Show Sub-Workflow Live View';
+					liveViewItem.onclick = () => {
+						this._closeContextMenu();
+						openSubWorkflowLiveView(this._editorService, this._editorGroupService, this._workflowExecutionService, subWorkflowId, {
+							parentWorkflowUri: this._workflowUri?.toString(),
+							preserveFocus: false
+						}).catch(e => this._notificationService.error(e?.message || String(e)));
+					};
+				}
+
 				/*
 				const pipelineItem = append(menu, $('.context-menu-item'));
 				pipelineItem.textContent = 'Pipeline...';
@@ -13445,6 +16082,20 @@ export class WorkflowEditor extends EditorPane {
 					this._closeContextMenu();
 					WorkflowPythonEditorBridge.openWorkflowAsNotebook(this, targetId);
 				};
+
+				const encapSubWfItem = append(menu, $('.context-menu-item'));
+				const selCount = this._selectedNodeIds.has(targetId) ? this._selectedNodeIds.size : 1;
+				encapSubWfItem.textContent = `Encapsulate as Sub-Workflow (${selCount} node${selCount > 1 ? 's' : ''})...`;
+				encapSubWfItem.onclick = () => {
+					this._closeContextMenu();
+					if (!this._selectedNodeIds.has(targetId)) {
+						this._selectedNodeIds.clear();
+						this._selectedNodeIds.add(targetId);
+					}
+					this._isSubWorkflowDropdownOpen = true;
+					this._showEncapsulateForm = true;
+					this._renderSubWorkflowDropdown();
+				};
 			}
 		}
 
@@ -13471,7 +16122,7 @@ export class WorkflowEditor extends EditorPane {
 			pasteItem.textContent = `Paste Node(s) (${this._copiedNodes.length}) (Ctrl+V)`;
 			pasteItem.onclick = () => {
 				this._closeContextMenu();
-				this._pasteNodes();
+				this._pasteNodes(this._clientToCanvasCoords(x, y));
 			};
 		}
 
@@ -14360,6 +17011,273 @@ export class WorkflowEditor extends EditorPane {
 		return vars;
 	}
 
+	private static _findHoveredNodeAcrossEditors(clientX: number, clientY: number): { editor: WorkflowEditor; nodeEl: HTMLElement; node: IFlowchartNode } | null {
+		for (const ed of WorkflowEditor._openWorkflowEditors) {
+			if (!ed.isVisible() || !ed._nodesContainer || ed._nodesContainer.offsetParent === null || !ed._data?.nodes) {
+				continue;
+			}
+			// Ensure pointer is actually inside this split editor's canvas viewport
+			const vpRect = (ed._canvasViewport || ed._container)?.getBoundingClientRect();
+			if (vpRect && (clientX < vpRect.left || clientX > vpRect.right || clientY < vpRect.top || clientY > vpRect.bottom)) {
+				continue;
+			}
+			const allNodeEls = Array.from(ed._nodesContainer.querySelectorAll<HTMLElement>('.workflow-node[data-node-id]'));
+			for (let idx = allNodeEls.length - 1; idx >= 0; idx--) {
+				const candEl = allNodeEls[idx];
+				const r = candEl.getBoundingClientRect();
+				if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+					const candId = candEl.getAttribute('data-node-id');
+					const candNode = candId ? ed._data.nodes.find(n => n.id === candId) || null : null;
+					if (candNode) {
+						return { editor: ed, nodeEl: candEl, node: candNode };
+					}
+				}
+			}
+		}
+		return null;
+	}
+
+	private _cloneCapsulePayload(node: IFlowchartNode, step: INodePipelineStep): {
+		step: INodePipelineStep;
+		sourceNodeLabel?: string;
+		sourceVars: Array<{ name: string; initialValue: string; expression?: string }>;
+	} {
+		const clonedStep: INodePipelineStep = JSON.parse(JSON.stringify(step));
+		if (clonedStep.component) {
+			const compAny = clonedStep.component as any;
+			delete compAny.lastExecutionLog;
+			delete compAny.lastExecutionOutput;
+			delete compAny.lastExecutionStatus;
+			delete compAny.lastExecutionDurationMs;
+			delete compAny.lastExecutedAt;
+			delete compAny.lastExecutionExitCode;
+		}
+		const varNames = this._extractStepVariableNames(clonedStep);
+		const sourceVars: Array<{ name: string; initialValue: string; expression?: string }> = [];
+		for (const vName of varNames) {
+			const existing = (node.outputVariables || []).find(v => (v.name || '').replace(/^@/, '').trim() === vName);
+			sourceVars.push({
+				name: vName,
+				initialValue: existing?.initialValue || clonedStep.expression || 'None',
+				expression: existing?.expression || clonedStep.expression
+			});
+		}
+		return {
+			step: clonedStep,
+			sourceNodeLabel: node.label,
+			sourceVars
+		};
+	}
+
+	private _copyCapsuleSteps(node: IFlowchartNode, steps: INodePipelineStep[]): void {
+		if (!steps || steps.length === 0) {
+			return;
+		}
+		if (steps.length === 1) {
+			this._copyCapsuleStep(node, steps[0]);
+			return;
+		}
+		const payloads = steps.map(st => this._cloneCapsulePayload(node, st));
+		WorkflowEditor._copiedCapsules = payloads;
+		WorkflowEditor._copiedCapsule = payloads[0];
+		WorkflowEditor._lastCopyKind = 'capsule';
+		try {
+			void this._clipboardService.writeText(JSON.stringify({
+				__anyagent_capsule_v1__: true,
+				...payloads[0],
+				capsules: payloads
+			}));
+		} catch { }
+		this._notificationService.info(`Copied ${payloads.length} capsules. Select any node (including in split view) and press Cmd/Ctrl+V to paste.`);
+	}
+
+	private _insertCapsulePayloadIntoNode(
+		targetNode: IFlowchartNode,
+		payload: { step: INodePipelineStep; sourceNodeLabel?: string; sourceVars?: Array<{ name: string; initialValue: string; expression?: string }> },
+		insertIndex?: number
+	): { createdVarNames: string[]; capLabel: string } {
+		if (!targetNode.pipeline) {
+			targetNode.pipeline = [];
+		}
+		const clonedStep: INodePipelineStep = JSON.parse(JSON.stringify(payload.step));
+		clonedStep.id = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+		let mergedIntoExistingSingleInstance = false;
+		if (clonedStep.component) {
+			clonedStep.component.id = `comp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+			const compType = clonedStep.component.type;
+			if (compType === 'parameters') {
+				const existingInputsStep = targetNode.pipeline.find(s => s.component?.type === 'parameters');
+				if (existingInputsStep?.component) {
+					const existingParams = existingInputsStep.component.parameters || [];
+					const incomingParams = clonedStep.component.parameters || [];
+					for (const ip of incomingParams) {
+						const ipName = (ip.name || '').trim().toLowerCase();
+						if (ipName && !existingParams.some(ep => (ep.name || '').trim().toLowerCase() === ipName)) {
+							existingParams.push({ ...ip, id: `param_${Date.now()}_${Math.random().toString(36).substring(2, 5)}` });
+						}
+					}
+					existingInputsStep.component.parameters = existingParams;
+					this._syncComponentStepMetadata(existingInputsStep);
+					mergedIntoExistingSingleInstance = true;
+				}
+			} else if (compType === 'output') {
+				const existingOutStep = targetNode.pipeline.find(s => s.component?.type === 'output');
+				if (existingOutStep?.component) {
+					const existingSpecs = existingOutStep.component.outputSpecs || [];
+					const incomingSpecs = clonedStep.component.outputSpecs || [];
+					for (const ispec of incomingSpecs) {
+						const key = (ispec.fieldKey || ispec.label || '').trim().toLowerCase();
+						if (key && !existingSpecs.some(es => (es.fieldKey || es.label || '').trim().toLowerCase() === key)) {
+							existingSpecs.push({ ...ispec });
+						}
+					}
+					existingOutStep.component.outputSpecs = existingSpecs;
+					this._syncComponentStepMetadata(existingOutStep);
+					mergedIntoExistingSingleInstance = true;
+				}
+			}
+			if (!mergedIntoExistingSingleInstance) {
+				if (compType !== 'parameters' && compType !== 'output' && compType !== 'result' && compType !== 'display') {
+					const resolvedVar = (clonedStep.component.outputVariableName || clonedStep.targetVariable || this._getComponentOutputVarName(clonedStep.component)).trim();
+					if (resolvedVar) {
+						clonedStep.component.outputVariableName = resolvedVar;
+						clonedStep.targetVariable = resolvedVar;
+					}
+				}
+				this._syncComponentStepMetadata(clonedStep);
+			}
+		} else {
+			const expr = (clonedStep.expression || '').trim();
+			const assignMatch = expr.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)/);
+			if (!clonedStep.targetVariable && assignMatch && assignMatch[1] && !WorkflowEditor._PYTHON_KEYWORDS.has(assignMatch[1])) {
+				clonedStep.targetVariable = assignMatch[1];
+			}
+		}
+
+		if (!mergedIntoExistingSingleInstance) {
+			if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= targetNode.pipeline.length) {
+				targetNode.pipeline.splice(insertIndex, 0, clonedStep);
+			} else {
+				targetNode.pipeline.push(clonedStep);
+			}
+		}
+
+		const createdVarNames = this._extractStepVariableNames(clonedStep);
+		if (!targetNode.outputVariables) {
+			targetNode.outputVariables = [];
+		}
+		for (const vName of createdVarNames) {
+			if (!targetNode.outputVariables.some(v => (v.name || '').replace(/^@/, '').trim() === vName)) {
+				const srcMeta = payload.sourceVars?.find(sv => sv.name === vName);
+				targetNode.outputVariables.push({
+					name: vName,
+					initialValue: srcMeta?.initialValue || clonedStep.expression || 'None',
+					expression: srcMeta?.expression || clonedStep.expression
+				});
+			}
+		}
+
+		const capLabel = clonedStep.targetVariable || clonedStep.component?.label || clonedStep.ticketName || clonedStep.label || 'Capsule';
+		return { createdVarNames, capLabel };
+	}
+
+	private _refreshNodeAfterPipelineMutation(targetNode: IFlowchartNode): void {
+		this._ensureNodeFitsPipeline(targetNode);
+		this._syncToNode(targetNode, true);
+		this._saveFlowchartData();
+		this._renderNodes();
+		this._drawLinks();
+		this._refreshVariablesDrawer(targetNode.id);
+		if (this._inspectorEl) {
+			this._renderInspector(this._inspectorEl);
+		}
+		if (this._pipelinePanelEl && this._activePipelineNodeId === targetNode.id) {
+			this._renderPipelinePanel(this._pipelinePanelEl, targetNode);
+		}
+		const openSideEditor = this._editorService.editors.find(
+			ed => ed instanceof CustomModuleSchemaEditorInput && !ed.isDisposed() && ed.isFlowchartNodeMode && ed.moduleId === `wf_node_${targetNode.id}`
+		);
+		if (openSideEditor) {
+			this._openNodeComponentsInSideEditor(targetNode);
+		}
+	}
+
+	private _transferCapsulesBetweenNodes(
+		sourceNode: IFlowchartNode,
+		sourceIndices: number[],
+		targetNode: IFlowchartNode,
+		insertIndex: number,
+		mode: 'move' | 'copy',
+		targetEditor: WorkflowEditor = this
+	): void {
+		if (!sourceNode.pipeline || sourceNode.pipeline.length === 0) {
+			return;
+		}
+		if (targetEditor === this && sourceNode.id === targetNode.id) {
+			return;
+		}
+		const sorted = Array.from(new Set(sourceIndices))
+			.filter(idx => idx >= 0 && idx < sourceNode.pipeline!.length)
+			.sort((a, b) => a - b);
+		if (sorted.length === 0) {
+			return;
+		}
+
+		const payloads = sorted.map(idx => this._cloneCapsulePayload(sourceNode, sourceNode.pipeline![idx]));
+		let curInsertIdx = typeof insertIndex === 'number' ? Math.max(0, Math.min(insertIndex, (targetNode.pipeline || []).length)) : (targetNode.pipeline || []).length;
+
+		for (const payload of payloads) {
+			const prevLen = (targetNode.pipeline || []).length;
+			targetEditor._insertCapsulePayloadIntoNode(targetNode, payload, curInsertIdx);
+			if ((targetNode.pipeline || []).length > prevLen) {
+				curInsertIdx++;
+			}
+		}
+
+		if (mode === 'move') {
+			const removeSet = new Set(sorted);
+			const removedSteps = sorted.map(idx => sourceNode.pipeline![idx]);
+			sourceNode.pipeline = sourceNode.pipeline.filter((_, idx) => !removeSet.has(idx));
+
+			// Clean up orphaned outputVariables from sourceNode that are no longer produced by remaining steps
+			const remainingVars = new Set<string>();
+			for (const remStep of sourceNode.pipeline) {
+				for (const vn of this._extractStepVariableNames(remStep)) {
+					remainingVars.add(vn);
+				}
+			}
+			const movedVars = new Set<string>();
+			for (const ms of removedSteps) {
+				for (const vn of this._extractStepVariableNames(ms)) {
+					movedVars.add(vn);
+				}
+			}
+			if (sourceNode.outputVariables && sourceNode.outputVariables.length > 0) {
+				sourceNode.outputVariables = sourceNode.outputVariables.filter(v => {
+					const clean = (v.name || '').replace(/^@/, '').trim();
+					return !movedVars.has(clean) || remainingVars.has(clean);
+				});
+			}
+			this._selectedCapsule = null;
+			this._selectedCapsules = null;
+		}
+
+		targetEditor._refreshNodeAfterPipelineMutation(targetNode);
+		if (mode === 'move') {
+			this._refreshNodeAfterPipelineMutation(sourceNode);
+		} else if (targetEditor !== this) {
+			this._renderNodes();
+		}
+
+		const verb = mode === 'copy' ? 'Copied' : 'Moved';
+		const countText = payloads.length === 1
+			? `capsule '${payloads[0].step.targetVariable || payloads[0].step.component?.label || payloads[0].step.label || 'Capsule'}'`
+			: `${payloads.length} capsules`;
+		const splitNote = targetEditor !== this ? ' (across split view)' : '';
+		targetEditor._notificationService.info(`${verb} ${countText} into '${targetNode.label || 'Node'}'${splitNote}.`);
+	}
+
 	private _copyCapsuleStep(node: IFlowchartNode, step: INodePipelineStep): void {
 		const clonedStep: INodePipelineStep = JSON.parse(JSON.stringify(step));
 		// Strip transient runtime execution logs/status from copied component while preserving all config & params
@@ -14390,6 +17308,7 @@ export class WorkflowEditor extends EditorPane {
 			sourceVars
 		};
 		WorkflowEditor._copiedCapsule = payload;
+		WorkflowEditor._copiedCapsules = [payload];
 		WorkflowEditor._lastCopyKind = 'capsule';
 
 		try {
@@ -14409,27 +17328,50 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private async _pasteCapsuleIntoNode(targetNode: IFlowchartNode, insertIndex?: number): Promise<void> {
-		let payload = WorkflowEditor._copiedCapsule;
-		if (!payload) {
+		let payloads = WorkflowEditor._copiedCapsules.length > 0
+			? WorkflowEditor._copiedCapsules
+			: (WorkflowEditor._copiedCapsule ? [WorkflowEditor._copiedCapsule] : []);
+		if (payloads.length === 0) {
 			try {
 				const rawClip = (await this._clipboardService.readText() || '').trim();
 				if (rawClip.startsWith('{') && rawClip.includes('__anyagent_capsule_v1__')) {
 					const parsed = JSON.parse(rawClip);
-					if (parsed && parsed.__anyagent_capsule_v1__ && parsed.step) {
-						payload = {
-							step: parsed.step,
-							sourceNodeLabel: parsed.sourceNodeLabel,
-							sourceVars: Array.isArray(parsed.sourceVars) ? parsed.sourceVars : []
-						};
-						WorkflowEditor._copiedCapsule = payload;
+					if (parsed && parsed.__anyagent_capsule_v1__) {
+						if (Array.isArray(parsed.capsules) && parsed.capsules.length > 0) {
+							payloads = parsed.capsules.filter((c: any) => c && c.step);
+						} else if (parsed.step) {
+							payloads = [{
+								step: parsed.step,
+								sourceNodeLabel: parsed.sourceNodeLabel,
+								sourceVars: Array.isArray(parsed.sourceVars) ? parsed.sourceVars : []
+							}];
+						}
+						if (payloads.length > 0) {
+							WorkflowEditor._copiedCapsules = payloads;
+							WorkflowEditor._copiedCapsule = payloads[0];
+						}
 					}
 				}
 			} catch { }
 		}
-		if (!payload || !payload.step) {
+		if (payloads.length === 0) {
 			this._notificationService.warn('No copied capsule available to paste.');
 			return;
 		}
+		if (payloads.length > 1) {
+			let curIdx = typeof insertIndex === 'number' ? Math.max(0, Math.min(insertIndex, (targetNode.pipeline || []).length)) : (targetNode.pipeline || []).length;
+			for (const pItem of payloads) {
+				const prevLen = (targetNode.pipeline || []).length;
+				this._insertCapsulePayloadIntoNode(targetNode, pItem, curIdx);
+				if ((targetNode.pipeline || []).length > prevLen) {
+					curIdx++;
+				}
+			}
+			this._refreshNodeAfterPipelineMutation(targetNode);
+			this._notificationService.info(`Pasted ${payloads.length} capsules into '${targetNode.label || 'Node'}'.`);
+			return;
+		}
+		const payload = payloads[0];
 
 		if (!targetNode.pipeline) {
 			targetNode.pipeline = [];
@@ -14779,6 +17721,67 @@ export class WorkflowEditor extends EditorPane {
 			};
 		}
 
+		// Smart Convert / Merge selected step(s) into Cards (CREATE_TICKETS Card, RUN_TICKETS Card, and/or merged Python Card)
+		const pipelineRef = node.pipeline || [];
+		const isMultiSelectedOnThisNode = Boolean(
+			this._selectedCapsules &&
+			this._selectedCapsules.nodeId === node.id &&
+			this._selectedCapsules.stepIds.has(step.id) &&
+			this._selectedCapsules.stepIds.size > 1
+		);
+		const targetStepIndices: number[] = isMultiSelectedOnThisNode
+			? pipelineRef
+				.map((st, idx) => (this._selectedCapsules!.stepIds.has(st.id) ? idx : -1))
+				.filter(idx => idx >= 0)
+			: [stepIndex];
+		const conversionChecks = targetStepIndices.map(idx => this._isConvertiblePythonStep(pipelineRef[idx]));
+		const allConvertible = targetStepIndices.length > 0 && conversionChecks.every(c => c.ok);
+		const anyConvertible = conversionChecks.some(c => c.ok);
+
+		if (allConvertible) {
+			const hasBuiltinAction = conversionChecks.some(c => c.kind && c.kind !== 'python');
+			const singleKind = targetStepIndices.length === 1 ? conversionChecks[0].kind : undefined;
+			const convertItem = append(menu, $('.context-menu-item'));
+			convertItem.style.color = '#38bdf8';
+			convertItem.style.fontWeight = '600';
+			if (singleKind === 'create_tickets') {
+				convertItem.textContent = 'Convert to CREATE_TICKETS Card';
+			} else if (singleKind === 'run_tickets') {
+				convertItem.textContent = 'Convert to RUN_TICKETS Card';
+			} else if (singleKind === 'get_outputs') {
+				convertItem.textContent = 'Convert to GET_OUTPUTS Card';
+			} else if (singleKind === 'get_ticket') {
+				convertItem.textContent = 'Convert to GET_TICKET Card';
+			} else if (singleKind === 'display') {
+				convertItem.textContent = 'Convert to DISPLAY Card';
+			} else if (targetStepIndices.length === 1) {
+				convertItem.textContent = 'Convert to Python Card';
+			} else if (hasBuiltinAction) {
+				convertItem.textContent = `Smart Convert ${targetStepIndices.length} Steps into Cards`;
+			} else {
+				convertItem.textContent = `Merge ${targetStepIndices.length} Python Steps into Python Card`;
+			}
+			convertItem.title = hasBuiltinAction
+				? 'Convert built-in steps (CREATE_TICKETS, RUN_TICKETS, GET_OUTPUTS, GET_TICKET, DISPLAY) to dedicated cards and merge contiguous Python steps into Python Card(s)'
+				: 'Merge selected Python step(s) into a Python Script Card with persistent logs and output capture';
+			convertItem.onclick = (e) => {
+				e.stopPropagation();
+				this._closeContextMenu();
+				this._convertPythonStepsToPythonCard(node, targetStepIndices);
+			};
+		} else if (isMultiSelectedOnThisNode && anyConvertible) {
+			const firstReason = conversionChecks.find(c => !c.ok)?.reason || 'Selection includes already-converted card(s)';
+			const disabledConvertItem = append(menu, $('.context-menu-item'));
+			disabledConvertItem.style.opacity = '0.45';
+			disabledConvertItem.style.cursor = 'not-allowed';
+			disabledConvertItem.textContent = `Convert to Cards (unavailable)`;
+			disabledConvertItem.title = firstReason;
+			disabledConvertItem.onclick = (e) => {
+				e.stopPropagation();
+				this._notificationService.warn(`Cannot convert selection: ${firstReason}`);
+			};
+		}
+
 		const delItem = append(menu, $('.context-menu-item.danger'));
 		delItem.textContent = 'Delete Capsule';
 		delItem.onclick = (e) => {
@@ -14830,6 +17833,669 @@ export class WorkflowEditor extends EditorPane {
 					this._closeContextMenu();
 				}
 			}, true)
+		);
+	}
+
+	private _isWholeSingleBuiltinCall(expr: string, fnNames: string[]): boolean {
+		const trimmed = (expr || '').trim();
+		if (!trimmed) {
+			return false;
+		}
+		const pattern = new RegExp(`^(?:@?[a-zA-Z_][a-zA-Z0-9_]*\\s*=\\s*)?(?:${fnNames.join('|')})\\s*\\(`);
+		const m = trimmed.match(pattern);
+		if (!m) {
+			return false;
+		}
+		const openIdx = trimmed.indexOf('(', m[0].length - 1);
+		if (openIdx < 0) {
+			return false;
+		}
+		let depth = 0;
+		let inQuote: string | null = null;
+		let closeIdx = -1;
+		for (let i = openIdx; i < trimmed.length; i++) {
+			const ch = trimmed[i];
+			if (inQuote) {
+				if (inQuote.length === 3) {
+					if (trimmed.slice(i, i + 3) === inQuote) {
+						inQuote = null;
+						i += 2;
+					}
+				} else if (ch === inQuote && trimmed[i - 1] !== '\\') {
+					inQuote = null;
+				}
+			} else if (ch === '#') {
+				const nl = trimmed.indexOf('\n', i);
+				if (nl < 0) break;
+				i = nl;
+			} else if (ch === '"' || ch === "'") {
+				if (trimmed.slice(i, i + 3) === ch + ch + ch) {
+					inQuote = ch + ch + ch;
+					i += 2;
+				} else {
+					inQuote = ch;
+				}
+			} else if (ch === '(' || ch === '[' || ch === '{') {
+				depth++;
+			} else if (ch === ')' || ch === ']' || ch === '}') {
+				depth--;
+				if (depth === 0 && ch === ')') {
+					closeIdx = i;
+					break;
+				}
+			}
+		}
+		if (closeIdx < 0) {
+			return false;
+		}
+		// Ensure nothing meaningful follows the closing parenthesis (only whitespace, optional ';', or trailing comment)
+		const rest = trimmed.slice(closeIdx + 1).replace(/#[^\n]*/g, '').replace(/;/g, '').trim();
+		return rest.length === 0;
+	}
+
+	private _isConvertiblePythonStep(step: INodePipelineStep | undefined): { ok: boolean; kind?: 'python' | 'create_tickets' | 'run_tickets' | 'get_outputs' | 'get_ticket' | 'display'; reason?: string } {
+		if (!step) {
+			return { ok: false, reason: 'Step not found' };
+		}
+		if (step.component) {
+			return { ok: false, reason: `"${step.component.label || step.component.type}" is already a component card` };
+		}
+		const t = String(step.type || '').toLowerCase();
+		if (t === 'run_ticket' || t === 'run_tickets') {
+			return { ok: true, kind: 'run_tickets' };
+		}
+		const expr = (step.expression || '').trim();
+		if (this._isWholeSingleBuiltinCall(expr, ['CREATE_TICKETS', 'create_tickets'])) {
+			return { ok: true, kind: 'create_tickets' };
+		}
+		if (this._isWholeSingleBuiltinCall(expr, ['RUN_TICKETS', 'run_tickets'])) {
+			return { ok: true, kind: 'run_tickets' };
+		}
+		if (this._isWholeSingleBuiltinCall(expr, ['GET_OUTPUTS', 'get_outputs'])) {
+			return { ok: true, kind: 'get_outputs' };
+		}
+		if (this._isWholeSingleBuiltinCall(expr, ['GET_TICKET', 'get_ticket'])) {
+			return { ok: true, kind: 'get_ticket' };
+		}
+		if (this._isWholeSingleBuiltinCall(expr, ['DISPLAY', 'display'])) {
+			return { ok: true, kind: 'display' };
+		}
+		return { ok: true, kind: 'python' };
+	}
+
+	private _parsePythonCallArgs(expr: string, fnRegex: RegExp): { positional: string[]; kwargs: Record<string, string> } {
+		const positional: string[] = [];
+		const kwargs: Record<string, string> = {};
+		const match = expr.match(fnRegex);
+		if (!match || match.index === undefined) {
+			return { positional, kwargs };
+		}
+		const openParenIdx = expr.indexOf('(', match.index + match[0].length - 1);
+		if (openParenIdx < 0) {
+			return { positional, kwargs };
+		}
+		let depth = 0;
+		let inQuote: string | null = null;
+		let closeParenIdx = -1;
+		for (let i = openParenIdx; i < expr.length; i++) {
+			const ch = expr[i];
+			if (inQuote) {
+				if (ch === inQuote && expr[i - 1] !== '\\') {
+					inQuote = null;
+				}
+			} else if (ch === '"' || ch === "'") {
+				inQuote = ch;
+			} else if (ch === '(' || ch === '[' || ch === '{') {
+				depth++;
+			} else if (ch === ')' || ch === ']' || ch === '}') {
+				depth--;
+				if (depth === 0 && ch === ')') {
+					closeParenIdx = i;
+					break;
+				}
+			}
+		}
+		const inner = (closeParenIdx > openParenIdx ? expr.slice(openParenIdx + 1, closeParenIdx) : expr.slice(openParenIdx + 1)).trim();
+		if (!inner) {
+			return { positional, kwargs };
+		}
+		const parts: string[] = [];
+		let cur = '';
+		depth = 0;
+		inQuote = null;
+		for (let i = 0; i < inner.length; i++) {
+			const ch = inner[i];
+			if (inQuote) {
+				cur += ch;
+				if (ch === inQuote && inner[i - 1] !== '\\') {
+					inQuote = null;
+				}
+			} else if (ch === '"' || ch === "'") {
+				inQuote = ch;
+				cur += ch;
+			} else if (ch === '(' || ch === '[' || ch === '{') {
+				depth++;
+				cur += ch;
+			} else if (ch === ')' || ch === ']' || ch === '}') {
+				depth--;
+				cur += ch;
+			} else if (ch === ',' && depth === 0) {
+				if (cur.trim()) parts.push(cur.trim());
+				cur = '';
+			} else {
+				cur += ch;
+			}
+		}
+		if (cur.trim()) parts.push(cur.trim());
+
+		for (const p of parts) {
+			const eqIdx = p.indexOf('=');
+			if (eqIdx > 0 && p[eqIdx + 1] !== '=' && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(p.slice(0, eqIdx).trim())) {
+				const k = p.slice(0, eqIdx).trim();
+				const v = p.slice(eqIdx + 1).trim();
+				kwargs[k] = v;
+			} else {
+				positional.push(p);
+			}
+		}
+		return { positional, kwargs };
+	}
+
+	private _pythonArgToTemplateValue(rawArg: string | undefined): string {
+		if (!rawArg) {
+			return '';
+		}
+		const s = rawArg.trim();
+		if (!s || s === 'None') {
+			return '';
+		}
+		// f-string: f"Hello {var}" -> Hello {var}
+		if (/^[fF](["'])[\s\S]*\1$/.test(s)) {
+			return s.slice(2, -1);
+		}
+		// Plain quoted string: "Jobs to Apply" or 'Jobs to Apply'
+		if (/^(["'])[\s\S]*\1$/.test(s)) {
+			return s.slice(1, -1);
+		}
+		// Bare Python identifier (variable reference): jbs_app_tkt -> {jbs_app_tkt}
+		if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(s) && s !== 'True' && s !== 'False') {
+			return `{${s}}`;
+		}
+		return s;
+	}
+
+	private _parsePythonDictArg(rawDict: string | undefined): Record<string, string> {
+		const out: Record<string, string> = {};
+		if (!rawDict) {
+			return out;
+		}
+		const s = rawDict.trim();
+		if (!s.startsWith('{') || !s.endsWith('}')) {
+			return out;
+		}
+		const inner = s.slice(1, -1).trim();
+		if (!inner) {
+			return out;
+		}
+		const entries: string[] = [];
+		let cur = '';
+		let depth = 0;
+		let inQuote: string | null = null;
+		for (let i = 0; i < inner.length; i++) {
+			const ch = inner[i];
+			if (inQuote) {
+				cur += ch;
+				if (ch === inQuote && inner[i - 1] !== '\\') {
+					inQuote = null;
+				}
+			} else if (ch === '"' || ch === "'") {
+				inQuote = ch;
+				cur += ch;
+			} else if (ch === '(' || ch === '[' || ch === '{') {
+				depth++;
+				cur += ch;
+			} else if (ch === ')' || ch === ']' || ch === '}') {
+				depth--;
+				cur += ch;
+			} else if (ch === ',' && depth === 0) {
+				if (cur.trim()) entries.push(cur.trim());
+				cur = '';
+			} else {
+				cur += ch;
+			}
+		}
+		if (cur.trim()) entries.push(cur.trim());
+
+		for (const entry of entries) {
+			let colonIdx = -1;
+			let q: string | null = null;
+			let d = 0;
+			for (let i = 0; i < entry.length; i++) {
+				const ch = entry[i];
+				if (q) {
+					if (ch === q && entry[i - 1] !== '\\') q = null;
+				} else if (ch === '"' || ch === "'") {
+					q = ch;
+				} else if (ch === '(' || ch === '[' || ch === '{') {
+					d++;
+				} else if (ch === ')' || ch === ']' || ch === '}') {
+					d--;
+				} else if (ch === ':' && d === 0) {
+					colonIdx = i;
+					break;
+				}
+			}
+			if (colonIdx > 0) {
+				const rawK = entry.slice(0, colonIdx).trim();
+				const rawV = entry.slice(colonIdx + 1).trim();
+				const cleanK = (/^(["'])[\s\S]*\1$/.test(rawK) ? rawK.slice(1, -1) : rawK).trim();
+				if (cleanK) {
+					out[cleanK] = this._pythonArgToTemplateValue(rawV);
+				}
+			}
+		}
+		return out;
+	}
+
+	private _convertPythonStepsToPythonCard(node: IFlowchartNode, stepIndices: number[]): void {
+		if (!node.pipeline || node.pipeline.length === 0) {
+			return;
+		}
+		const sortedIndices = Array.from(new Set(stepIndices))
+			.filter(idx => idx >= 0 && idx < node.pipeline!.length)
+			.sort((a, b) => a - b);
+		if (sortedIndices.length === 0) {
+			return;
+		}
+		const classified: Array<{ idx: number; step: INodePipelineStep; kind: 'python' | 'create_tickets' | 'run_tickets' | 'get_outputs' | 'get_ticket' | 'display' }> = [];
+		for (const idx of sortedIndices) {
+			const st = node.pipeline[idx];
+			const chk = this._isConvertiblePythonStep(st);
+			if (!chk.ok || !chk.kind) {
+				this._notificationService.warn(`Cannot convert to Card: ${chk.reason || 'Unsupported step'}`);
+				return;
+			}
+			classified.push({ idx, step: st, kind: chk.kind });
+		}
+
+		const baseNodeName = (node.label || 'Node').trim() || 'Node';
+		const existingLabels = new Set<string>(
+			node.pipeline
+				.map(st => (st.component?.label || st.label || '').trim().toLowerCase())
+				.filter(Boolean)
+		);
+		const allocateLabel = (kindLabel: string): string => {
+			let n = 0;
+			let candidate = `${baseNodeName} ${kindLabel} ${n}`;
+			while (existingLabels.has(candidate.toLowerCase())) {
+				n++;
+				candidate = `${baseNodeName} ${kindLabel} ${n}`;
+			}
+			existingLabels.add(candidate.toLowerCase());
+			return candidate;
+		};
+
+		const buildMergedPythonStep = (pySteps: INodePipelineStep[]): INodePipelineStep => {
+			const codeBlocks: string[] = [];
+			const stepEntries: Array<{ step: INodePipelineStep; cleanVar: string; rawExpr: string; code: string; isDisplayOnly: boolean }> = [];
+
+			for (const st of pySteps) {
+				const cleanVar = (st.targetVariable || '').trim().replace(/^@/, '');
+				const rawExpr = (st.expression || '').trim();
+				let blockCode = '';
+				if (cleanVar) {
+					const alreadyAssignsVar = new RegExp(`^${cleanVar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*(?:=|\\+=|-=|\\*=|\\/=)(?!=)`).test(rawExpr);
+					blockCode = alreadyAssignsVar
+						? rawExpr
+						: (rawExpr ? `${cleanVar} = ${rawExpr}` : `${cleanVar} = None`);
+				} else {
+					blockCode = rawExpr;
+				}
+				const isDisplayOnly = !cleanVar && /^(?:DISPLAY|display|print)\s*\(/.test(rawExpr);
+				stepEntries.push({ step: st, cleanVar, rawExpr, code: blockCode, isDisplayOnly });
+
+				if (blockCode) {
+					if (st.disabled) {
+						codeBlocks.push(blockCode.split('\n').map(line => `# ${line}`).join('\n'));
+					} else {
+						codeBlocks.push(blockCode);
+					}
+				}
+			}
+
+			let lastAssignedVar = '';
+			for (let i = stepEntries.length - 1; i >= 0; i--) {
+				const entry = stepEntries[i];
+				if (entry.step.disabled || entry.isDisplayOnly) {
+					continue;
+				}
+				if (entry.cleanVar && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(entry.cleanVar)) {
+					lastAssignedVar = entry.cleanVar;
+					break;
+				}
+				const lines = entry.code.split('\n');
+				for (let li = lines.length - 1; li >= 0; li--) {
+					const trimmed = lines[li].trim();
+					if (!trimmed || trimmed.startsWith('#')) {
+						continue;
+					}
+					const assignMatch = trimmed.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:=|\+=|-=|\*=|\/=)(?!=)/);
+					if (assignMatch && assignMatch[1] && !['if', 'elif', 'while', 'for', 'return', 'assert'].includes(assignMatch[1])) {
+						lastAssignedVar = assignMatch[1];
+						break;
+					}
+				}
+				if (lastAssignedVar) {
+					break;
+				}
+			}
+
+			let mergedCode = codeBlocks.join('\n');
+			const alreadySetsOutput = /(?:^|\n)\s*(?:output|OUTPUT)\s*=(?!=)|\b(?:set_output|return_output)\s*\(/.test(mergedCode);
+			if (!alreadySetsOutput) {
+				if (lastAssignedVar) {
+					mergedCode = mergedCode ? `${mergedCode}\nOUTPUT = ${lastAssignedVar}` : `OUTPUT = ${lastAssignedVar}`;
+				} else {
+					const lastActive = [...stepEntries].reverse().find(e => !e.step.disabled && !e.isDisplayOnly && e.code.trim().length > 0);
+					if (lastActive && !lastActive.code.includes('\n') && !/^(?:if|for|while|def|class|try|with|import|from|pass|break|continue|raise|del|assert)\b/.test(lastActive.code.trim())) {
+						const lastBlockIdx = codeBlocks.lastIndexOf(lastActive.code);
+						if (lastBlockIdx >= 0) {
+							codeBlocks[lastBlockIdx] = `OUTPUT = ${lastActive.code}`;
+							mergedCode = codeBlocks.join('\n');
+						}
+					}
+				}
+			}
+
+			const fieldLabel = allocateLabel('Python');
+			const outVar = lastAssignedVar || generateSmartPythonVarName(fieldLabel, 'python');
+			const newComp: ICustomField = {
+				id: `comp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+				label: fieldLabel,
+				type: 'python',
+				outputVariableName: outVar,
+				pythonCode: mergedCode
+			};
+			const newStep: INodePipelineStep = {
+				id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+				type: 'component',
+				label: fieldLabel,
+				targetVariable: outVar,
+				component: newComp
+			};
+			this._syncComponentStepMetadata(newStep);
+			return newStep;
+		};
+
+		const buildCreateTicketsStep = (st: INodePipelineStep): INodePipelineStep => {
+			const expr = (st.expression || '').trim();
+			const cleanVar = (st.targetVariable || '').trim().replace(/^@/, '')
+				|| (expr.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)/)?.[1] || '');
+			const { positional, kwargs } = this._parsePythonCallArgs(expr, /\b(?:CREATE_TICKETS|create_tickets)\s*\(/);
+			const wfTicketType = this._pythonArgToTemplateValue(kwargs['ticket_type'] || kwargs['type'] || positional[0]) || 'Task';
+			const wfTicketTitle = this._pythonArgToTemplateValue(kwargs['title'] || kwargs['name'] || positional[1]) || '';
+			const wfTicketPath = this._pythonArgToTemplateValue(kwargs['path'] || kwargs['target_path'] || kwargs['folder'] || positional[2]) || '.';
+			const wfTicketParams = this._parsePythonDictArg(kwargs['parameters'] || kwargs['params'] || kwargs['input_params']);
+			const fieldLabel = allocateLabel('Create Tickets');
+			const outVar = cleanVar || generateSmartPythonVarName(fieldLabel, 'create_tickets');
+			const newComp: ICustomField = {
+				id: `comp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+				label: fieldLabel,
+				type: 'create_tickets',
+				outputVariableName: outVar,
+				wfTicketType,
+				wfTicketTitle,
+				wfTicketPath,
+				wfTicketParams,
+				disabled: Boolean(st.disabled)
+			};
+			const newStep: INodePipelineStep = {
+				id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+				type: 'component',
+				label: fieldLabel,
+				targetVariable: outVar,
+				component: newComp,
+				disabled: Boolean(st.disabled)
+			};
+			this._syncComponentStepMetadata(newStep);
+			return newStep;
+		};
+
+		const buildRunTicketsStep = (st: INodePipelineStep, priorGeneratedSteps: INodePipelineStep[]): INodePipelineStep => {
+			const expr = (st.expression || '').trim();
+			const cleanVar = (st.targetVariable || '').trim().replace(/^@/, '')
+				|| (expr.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)/)?.[1] || '');
+			let wfTicketTarget = '';
+			let wfTicketParams: Record<string, string> = {};
+			if (st.type === 'run_ticket' && st.ticketName) {
+				wfTicketTarget = st.ticketName;
+				if (st.parameters && typeof st.parameters === 'object') {
+					for (const [k, v] of Object.entries(st.parameters)) {
+						wfTicketParams[k] = String(v ?? '');
+					}
+				}
+			} else {
+				const { positional, kwargs } = this._parsePythonCallArgs(expr, /\b(?:RUN_TICKETS|run_tickets)\s*\(/);
+				wfTicketTarget = this._pythonArgToTemplateValue(kwargs['ticket'] || kwargs['ticket_id'] || kwargs['tickets'] || kwargs['ticket_name'] || positional[0]);
+				wfTicketParams = this._parsePythonDictArg(kwargs['parameters'] || kwargs['params'] || kwargs['input_params']);
+			}
+			// Auto-detect Ticket Type & inherit params from linked CREATE_TICKETS card (or existing ticket snapshot)
+			let wfTicketType = '';
+			const cleanTargetKey = wfTicketTarget.trim().replace(/^\{|\}$/g, '').trim().toLowerCase();
+			if (cleanTargetKey) {
+				const candidateSteps = [...priorGeneratedSteps, ...(node.pipeline || [])];
+				const linkedCreate = candidateSteps.find(cand =>
+					cand.component?.type === 'create_tickets' && (
+						(cand.component.outputVariableName || '').trim().toLowerCase() === cleanTargetKey ||
+						(cand.targetVariable || '').trim().replace(/^@/, '').toLowerCase() === cleanTargetKey ||
+						(cand.component.label || '').trim().toLowerCase() === cleanTargetKey
+					)
+				);
+				if (linkedCreate?.component?.wfTicketType) {
+					wfTicketType = linkedCreate.component.wfTicketType;
+					if (Object.keys(wfTicketParams).length === 0 && linkedCreate.component.wfTicketParams) {
+						wfTicketParams = { ...linkedCreate.component.wfTicketParams };
+					}
+				} else {
+					const snapshots = this._entityPersistenceService.getAllSnapshots() || [];
+					const matchedSnap = snapshots.find(s =>
+						s.ticketId?.toLowerCase() === cleanTargetKey ||
+						s.entityName?.toLowerCase() === cleanTargetKey
+					);
+					if (matchedSnap?.entityType) {
+						wfTicketType = matchedSnap.entityType;
+					}
+				}
+			}
+			const fieldLabel = allocateLabel('Run Tickets');
+			const outVar = cleanVar || generateSmartPythonVarName(fieldLabel, 'run_tickets');
+			const newComp: ICustomField = {
+				id: `comp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+				label: fieldLabel,
+				type: 'run_tickets',
+				outputVariableName: outVar,
+				wfTicketTarget,
+				wfTicketType,
+				wfTicketParams,
+				disabled: Boolean(st.disabled)
+			};
+			const newStep: INodePipelineStep = {
+				id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+				type: 'component',
+				label: fieldLabel,
+				targetVariable: outVar,
+				component: newComp,
+				disabled: Boolean(st.disabled)
+			};
+			this._syncComponentStepMetadata(newStep);
+			return newStep;
+		};
+
+		const buildGetOutputsStep = (st: INodePipelineStep): INodePipelineStep => {
+			const expr = (st.expression || '').trim();
+			const cleanVar = (st.targetVariable || '').trim().replace(/^@/, '')
+				|| (expr.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)/)?.[1] || '');
+			const { positional, kwargs } = this._parsePythonCallArgs(expr, /\b(?:GET_OUTPUTS|get_outputs)\s*\(/);
+			const wfTicketTarget = this._pythonArgToTemplateValue(kwargs['ticket'] || kwargs['ticket_id'] || kwargs['tickets'] || kwargs['ticket_name'] || positional[0]);
+			const wfTicketField = this._pythonArgToTemplateValue(kwargs['field'] || kwargs['output_field'] || positional[1]);
+			const fieldLabel = allocateLabel('Get Outputs');
+			const outVar = cleanVar || generateSmartPythonVarName(fieldLabel, 'get_outputs');
+			const newComp: ICustomField = {
+				id: `comp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+				label: fieldLabel,
+				type: 'get_outputs',
+				outputVariableName: outVar,
+				wfTicketTarget,
+				wfTicketField,
+				disabled: Boolean(st.disabled)
+			};
+			const newStep: INodePipelineStep = {
+				id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+				type: 'component',
+				label: fieldLabel,
+				targetVariable: outVar,
+				component: newComp,
+				disabled: Boolean(st.disabled)
+			};
+			this._syncComponentStepMetadata(newStep);
+			return newStep;
+		};
+
+		const buildGetTicketStep = (st: INodePipelineStep, priorGeneratedSteps: INodePipelineStep[]): INodePipelineStep => {
+			const expr = (st.expression || '').trim();
+			const cleanVar = (st.targetVariable || '').trim().replace(/^@/, '')
+				|| (expr.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)/)?.[1] || '');
+			const { positional, kwargs } = this._parsePythonCallArgs(expr, /\b(?:GET_TICKET|get_ticket)\s*\(/);
+			const wfTicketTarget = this._pythonArgToTemplateValue(kwargs['ticket'] || kwargs['ticket_id'] || kwargs['ticket_name'] || positional[0]);
+			const wfTicketField = this._pythonArgToTemplateValue(kwargs['field'] || positional[1]);
+			let wfTicketType = this._pythonArgToTemplateValue(kwargs['ticket_type'] || kwargs['type']);
+			if (!wfTicketType && wfTicketTarget) {
+				const cleanTargetKey = wfTicketTarget.trim().replace(/^\{|\}$/g, '').trim().toLowerCase();
+				const candidateSteps = [...priorGeneratedSteps, ...(node.pipeline || [])];
+				const linkedCreate = candidateSteps.find(cand =>
+					cand.component?.type === 'create_tickets' && (
+						(cand.component.outputVariableName || '').trim().toLowerCase() === cleanTargetKey ||
+						(cand.component.label || '').trim().toLowerCase() === cleanTargetKey
+					)
+				);
+				if (linkedCreate?.component?.wfTicketType) {
+					wfTicketType = linkedCreate.component.wfTicketType;
+				}
+			}
+			const fieldLabel = allocateLabel('Get Ticket');
+			const outVar = cleanVar || generateSmartPythonVarName(fieldLabel, 'get_ticket');
+			const newComp: ICustomField = {
+				id: `comp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+				label: fieldLabel,
+				type: 'get_ticket',
+				outputVariableName: outVar,
+				wfTicketTarget,
+				wfTicketField,
+				wfTicketType,
+				disabled: Boolean(st.disabled)
+			};
+			const newStep: INodePipelineStep = {
+				id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+				type: 'component',
+				label: fieldLabel,
+				targetVariable: outVar,
+				component: newComp,
+				disabled: Boolean(st.disabled)
+			};
+			this._syncComponentStepMetadata(newStep);
+			return newStep;
+		};
+
+		const buildDisplayStep = (st: INodePipelineStep): INodePipelineStep => {
+			const expr = (st.expression || '').trim();
+			const { positional, kwargs } = this._parsePythonCallArgs(expr, /\b(?:DISPLAY|display)\s*\(/);
+			const wfDisplayValue = (kwargs['value'] || kwargs['data'] || positional[0] || '').trim();
+			const fieldLabel = allocateLabel('Display');
+			const outVar = generateSmartPythonVarName(fieldLabel, 'display');
+			const newComp: ICustomField = {
+				id: `comp_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+				label: fieldLabel,
+				type: 'display',
+				outputVariableName: outVar,
+				wfDisplayValue,
+				disabled: Boolean(st.disabled)
+			};
+			const newStep: INodePipelineStep = {
+				id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+				type: 'component',
+				label: fieldLabel,
+				targetVariable: outVar,
+				component: newComp,
+				disabled: Boolean(st.disabled)
+			};
+			this._syncComponentStepMetadata(newStep);
+			return newStep;
+		};
+
+		// Group contiguous python steps while converting built-in steps into their dedicated cards in exact order
+		const generatedSteps: INodePipelineStep[] = [];
+		let pendingPyGroup: INodePipelineStep[] = [];
+		const flushPendingPy = () => {
+			if (pendingPyGroup.length > 0) {
+				generatedSteps.push(buildMergedPythonStep(pendingPyGroup));
+				pendingPyGroup = [];
+			}
+		};
+		for (const item of classified) {
+			if (item.kind === 'create_tickets') {
+				flushPendingPy();
+				generatedSteps.push(buildCreateTicketsStep(item.step));
+			} else if (item.kind === 'run_tickets') {
+				flushPendingPy();
+				generatedSteps.push(buildRunTicketsStep(item.step, generatedSteps));
+			} else if (item.kind === 'get_outputs') {
+				flushPendingPy();
+				generatedSteps.push(buildGetOutputsStep(item.step));
+			} else if (item.kind === 'get_ticket') {
+				flushPendingPy();
+				generatedSteps.push(buildGetTicketStep(item.step, generatedSteps));
+			} else if (item.kind === 'display') {
+				flushPendingPy();
+				generatedSteps.push(buildDisplayStep(item.step));
+			} else {
+				pendingPyGroup.push(item.step);
+			}
+		}
+		flushPendingPy();
+
+		// Replace selected steps in-place at the first selected index
+		const insertIdx = sortedIndices[0];
+		const removeSet = new Set(sortedIndices);
+		const nextPipeline: INodePipelineStep[] = [];
+		for (let i = 0; i < node.pipeline.length; i++) {
+			if (i === insertIdx) {
+				nextPipeline.push(...generatedSteps);
+			}
+			if (!removeSet.has(i)) {
+				nextPipeline.push(node.pipeline[i]);
+			}
+		}
+		node.pipeline = nextPipeline;
+
+		const firstNewStep = generatedSteps[0];
+		this._selectedCapsules = null;
+		if (firstNewStep) {
+			this._selectedCapsule = { nodeId: node.id, stepId: firstNewStep.id };
+		}
+		this._ensureNodeFitsPipeline(node);
+		this._syncToNode(node, true);
+		this._saveFlowchartData(false);
+		this._renderNodes();
+		this._drawLinks();
+		this._refreshVariablesDrawer(node.id);
+		if (firstNewStep?.component?.id) {
+			void this._openNodeComponentsInSideEditor(node, firstNewStep.component.id);
+		}
+		const summaryNames = generatedSteps.map(s => `"${s.component?.label || s.label}"`).join(', ');
+		this._notificationService.info(
+			generatedSteps.length === 1
+				? `Converted ${sortedIndices.length} step(s) into ${summaryNames} (output → ${firstNewStep?.targetVariable || ''})`
+				: `Smart-converted ${sortedIndices.length} steps into ${generatedSteps.length} cards: ${summaryNames}`
 		);
 	}
 
@@ -15016,7 +18682,7 @@ export class WorkflowEditor extends EditorPane {
 		this._notificationService.info(`Ungrouped nodes`);
 	}
 
-	private _pasteNodes(): void {
+	private _pasteNodes(anchorCanvasPos?: { x: number; y: number }): void {
 		if (this._copiedNodes.length === 0) return;
 
 		// Record undo snapshot before paste
@@ -15026,6 +18692,24 @@ export class WorkflowEditor extends EditorPane {
 			this._undoStack.shift();
 		}
 		this._redoStack = [];
+
+		// Compute bounding-box top-left of copied selection and anchor it directly at the mouse cursor
+		// so ALL pasted nodes appear to the right and below the mouse pointer!
+		const minX = Math.min(...this._copiedNodes.map(n => n.x));
+		const minY = Math.min(...this._copiedNodes.map(n => n.y));
+		let anchor = anchorCanvasPos;
+		if (!anchor && this._lastCanvasMouseX !== null && this._lastCanvasMouseY !== null) {
+			anchor = { x: this._lastCanvasMouseX, y: this._lastCanvasMouseY };
+		}
+		if (!anchor) {
+			const wrapper = this._canvas?.closest('.workflow-editor-canvas-wrapper') as HTMLElement | null;
+			const zoom = this._zoomLevel || 1;
+			anchor = wrapper
+				? { x: Math.round((wrapper.scrollLeft + 40) / zoom), y: Math.round((wrapper.scrollTop + 40) / zoom) }
+				: { x: minX + 35, y: minY + 35 };
+		}
+		const dx = Math.round(anchor.x - minX);
+		const dy = Math.round(anchor.y - minY);
 
 		const oldToNewGroupMap = new Map<string, string>();
 		for (const copiedNode of this._copiedNodes) {
@@ -15041,29 +18725,33 @@ export class WorkflowEditor extends EditorPane {
 			const newId = `node_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
 			oldToNewNodeIdMap.set(copiedNode.id, newId);
 
+			const clonedNode: IFlowchartNode = JSON.parse(JSON.stringify(copiedNode));
 			const pastedNode: IFlowchartNode = {
-				...copiedNode,
+				...clonedNode,
 				id: newId,
 				groupId: copiedNode.groupId ? oldToNewGroupMap.get(copiedNode.groupId) : undefined,
-				x: copiedNode.x + 35,
-				y: copiedNode.y + 35
+				x: Math.max(0, copiedNode.x + dx),
+				y: Math.max(0, copiedNode.y + dy)
 			};
 
 			this._data.nodes.push(pastedNode);
 			newPastedIds.add(newId);
 		}
 
-		// Recreate internal connecting links between pasted nodes
+		// Recreate internal connecting links between pasted nodes (shifting any custom waypoints by dx/dy)
 		for (const copiedLink of this._copiedLinks) {
 			const newFrom = oldToNewNodeIdMap.get(copiedLink.from);
 			const newTo = oldToNewNodeIdMap.get(copiedLink.to);
 			if (newFrom && newTo) {
 				const newLinkId = `link_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
 				const pastedLink: IFlowchartLink = {
-					...copiedLink,
+					...JSON.parse(JSON.stringify(copiedLink)),
 					id: newLinkId,
 					from: newFrom,
-					to: newTo
+					to: newTo,
+					waypoints: Array.isArray(copiedLink.waypoints)
+						? copiedLink.waypoints.map(wp => ({ x: Math.max(0, wp.x + dx), y: Math.max(0, wp.y + dy) }))
+						: undefined
 				};
 				this._data.links.push(pastedLink);
 			}
@@ -15562,10 +19250,25 @@ export class WorkflowEditor extends EditorPane {
 		if (!this._displayInspectorContainer) return;
 		this._isDisplayInspectorMinimized = !this._isDisplayInspectorMinimized;
 		this._displayInspectorContainer.classList.toggle('minimized', this._isDisplayInspectorMinimized);
+		const header = this._displayInspectorContainer.querySelector('.workflow-display-inspector-header') as HTMLElement | null;
+		if (header) {
+			header.title = this._isDisplayInspectorMinimized
+				? `Live Display (${this._displayInspectorCards.length}) — Click to expand`
+				: 'Drag to reposition Live Display panel';
+		}
 		const minBtn = this._displayInspectorContainer.querySelector('.workflow-display-btn-toggle') as HTMLElement | null;
 		if (minBtn) {
 			minBtn.textContent = this._isDisplayInspectorMinimized ? '+' : '–';
-			minBtn.title = this._isDisplayInspectorMinimized ? 'Expand Inspector' : 'Minimize Inspector';
+			minBtn.title = this._isDisplayInspectorMinimized ? 'Expand Live Display' : 'Collapse Live Display';
+		}
+		// Keep expanded panel within viewport bounds if previously dragged near the right edge
+		if (!this._isDisplayInspectorMinimized && this._canvasViewport && this._displayInspectorContainer.style.left && this._displayInspectorContainer.style.left !== 'auto') {
+			const parentRect = this._canvasViewport.getBoundingClientRect();
+			const curLeft = parseFloat(this._displayInspectorContainer.style.left) || 0;
+			const maxLeft = Math.max(0, parentRect.width - this._displayInspectorContainer.offsetWidth);
+			if (curLeft > maxLeft) {
+				this._displayInspectorContainer.style.left = `${maxLeft}px`;
+			}
 		}
 		this._updateLiveDisplayToolbarBtn();
 	}
@@ -15600,6 +19303,12 @@ export class WorkflowEditor extends EditorPane {
 			if (titleText) {
 				titleText.textContent = `Live Display (${this._displayInspectorCards.length})`;
 			}
+			if (this._isDisplayInspectorMinimized) {
+				const hdr = this._displayInspectorContainer.querySelector('.workflow-display-inspector-header') as HTMLElement | null;
+				if (hdr) {
+					hdr.title = `Live Display (${this._displayInspectorCards.length}) — Click to expand`;
+				}
+			}
 			this._updateLiveDisplayToolbarBtn();
 			return this._displayInspectorContainer;
 		}
@@ -15609,13 +19318,103 @@ export class WorkflowEditor extends EditorPane {
 		if (this._isDisplayInspectorMinimized) {
 			panel.classList.add('minimized');
 		}
+		const LIVE_DISPLAY_WIDTH_KEY = 'anyagent.liveDisplayPanelWidth';
+		const DEFAULT_LIVE_DISPLAY_WIDTH = 440;
+		const MIN_LIVE_DISPLAY_WIDTH = 260;
+		const MAX_LIVE_DISPLAY_WIDTH = 1200;
+		try {
+			const savedWidthRaw = window.localStorage.getItem(LIVE_DISPLAY_WIDTH_KEY);
+			if (savedWidthRaw) {
+				const parsedW = parseInt(savedWidthRaw, 10);
+				if (Number.isFinite(parsedW) && parsedW >= MIN_LIVE_DISPLAY_WIDTH && parsedW <= MAX_LIVE_DISPLAY_WIDTH) {
+					panel.style.width = `${parsedW}px`;
+				}
+			}
+		} catch { }
 		this._displayInspectorContainer = panel;
 
-		// Header (draggable across canvas viewport)
+		const attachResizeHandle = (side: 'left' | 'right') => {
+			const handle = append(panel, $(`.workflow-display-resize-handle.${side}`));
+			handle.title = 'Drag to resize width (double-click to reset)';
+			handle.addEventListener('dblclick', (e: MouseEvent) => {
+				e.preventDefault();
+				e.stopPropagation();
+				panel.style.width = `${DEFAULT_LIVE_DISPLAY_WIDTH}px`;
+				try { window.localStorage.removeItem(LIVE_DISPLAY_WIDTH_KEY); } catch { }
+			});
+			handle.addEventListener('mousedown', (e: MouseEvent) => {
+				if (panel.classList.contains('minimized')) {
+					return;
+				}
+				e.preventDefault();
+				e.stopPropagation();
+
+				const rect = panel.getBoundingClientRect();
+				const parentRect = this._canvasViewport!.getBoundingClientRect();
+				const startX = e.clientX;
+				const startWidth = rect.width;
+				const startLeft = rect.left - parentRect.left;
+				const startRightGap = Math.max(0, parentRect.right - rect.right);
+				const isLeftPositioned = panel.style.left !== '' && panel.style.left !== 'auto';
+
+				panel.classList.add('is-resizing');
+				handle.classList.add('active');
+				document.body.style.cursor = 'ew-resize';
+
+				const onMouseMove = (moveEvent: MouseEvent) => {
+					const dx = moveEvent.clientX - startX;
+					const viewportMaxW = Math.max(MIN_LIVE_DISPLAY_WIDTH, Math.min(MAX_LIVE_DISPLAY_WIDTH, parentRect.width - 24));
+
+					if (side === 'left') {
+						const maxAllowed = isLeftPositioned
+							? Math.min(viewportMaxW, startLeft + startWidth)
+							: Math.min(viewportMaxW, parentRect.width - startRightGap - 8);
+						const newWidth = Math.round(Math.max(MIN_LIVE_DISPLAY_WIDTH, Math.min(maxAllowed, startWidth - dx)));
+						panel.style.width = `${newWidth}px`;
+						if (isLeftPositioned) {
+							const newLeft = Math.max(0, startLeft + (startWidth - newWidth));
+							panel.style.left = `${newLeft}px`;
+						}
+					} else {
+						// Right handle: keep left edge anchored
+						if (!isLeftPositioned) {
+							panel.style.right = 'auto';
+							panel.style.left = `${Math.max(0, startLeft)}px`;
+						}
+						const curLeft = parseFloat(panel.style.left) || startLeft;
+						const maxAllowed = Math.min(viewportMaxW, parentRect.width - curLeft - 8);
+						const newWidth = Math.round(Math.max(MIN_LIVE_DISPLAY_WIDTH, Math.min(maxAllowed, startWidth + dx)));
+						panel.style.width = `${newWidth}px`;
+					}
+				};
+
+				const onMouseUp = () => {
+					panel.classList.remove('is-resizing');
+					handle.classList.remove('active');
+					document.body.style.cursor = '';
+					window.removeEventListener('mousemove', onMouseMove);
+					window.removeEventListener('mouseup', onMouseUp);
+					const finalW = Math.round(panel.getBoundingClientRect().width);
+					if (Number.isFinite(finalW) && finalW >= MIN_LIVE_DISPLAY_WIDTH) {
+						try { window.localStorage.setItem(LIVE_DISPLAY_WIDTH_KEY, String(finalW)); } catch { }
+					}
+				};
+
+				window.addEventListener('mousemove', onMouseMove);
+				window.addEventListener('mouseup', onMouseUp);
+			});
+		};
+		attachResizeHandle('left');
+		attachResizeHandle('right');
+
+		// Header (draggable across canvas viewport when expanded; compact icon button when minimized)
 		const header = append(panel, $('.workflow-display-inspector-header'));
-		header.title = 'Drag to reposition Live Display panel';
+		header.title = this._isDisplayInspectorMinimized
+			? `Live Display (${this._displayInspectorCards.length}) — Click to expand`
+			: 'Drag to reposition Live Display panel';
 
 		let isDragging = false;
+		let hasDragged = false;
 		let startX = 0;
 		let startY = 0;
 		let initialLeft = 0;
@@ -15626,7 +19425,9 @@ export class WorkflowEditor extends EditorPane {
 				return;
 			}
 			e.preventDefault();
+			e.stopPropagation();
 			isDragging = true;
+			hasDragged = false;
 			startX = e.clientX;
 			startY = e.clientY;
 
@@ -15635,16 +19436,19 @@ export class WorkflowEditor extends EditorPane {
 			initialLeft = rect.left - parentRect.left;
 			initialTop = rect.top - parentRect.top;
 
-			panel.style.right = 'auto';
-			panel.style.bottom = 'auto';
-			panel.style.left = `${initialLeft}px`;
-			panel.style.top = `${initialTop}px`;
-			panel.classList.add('is-dragging');
-
 			const onMouseMove = (moveEvent: MouseEvent) => {
 				if (!isDragging) return;
 				const dx = moveEvent.clientX - startX;
 				const dy = moveEvent.clientY - startY;
+				if (!hasDragged && Math.hypot(dx, dy) > 4) {
+					hasDragged = true;
+					panel.style.right = 'auto';
+					panel.style.bottom = 'auto';
+					panel.style.left = `${initialLeft}px`;
+					panel.style.top = `${initialTop}px`;
+					panel.classList.add('is-dragging');
+				}
+				if (!hasDragged) return;
 
 				let newLeft = initialLeft + dx;
 				let newTop = initialTop + dy;
@@ -15660,10 +19464,15 @@ export class WorkflowEditor extends EditorPane {
 
 			const onMouseUp = () => {
 				if (isDragging) {
+					const didDrag = hasDragged;
 					isDragging = false;
+					hasDragged = false;
 					panel.classList.remove('is-dragging');
 					window.removeEventListener('mousemove', onMouseMove);
 					window.removeEventListener('mouseup', onMouseUp);
+					if (!didDrag && this._isDisplayInspectorMinimized) {
+						this._toggleDisplayInspectorMinimized();
+					}
 				}
 			};
 
@@ -15672,6 +19481,8 @@ export class WorkflowEditor extends EditorPane {
 		});
 
 		const titleBox = append(header, $('.workflow-display-inspector-title'));
+		const compactIcon = append(titleBox, $('span.workflow-display-compact-icon'));
+		append(compactIcon, $('span' + ThemeIcon.asCSSSelector(Codicon.terminal)));
 		const iconBadge = append(titleBox, $('span.workflow-display-header-badge'));
 		iconBadge.textContent = 'OUTPUT';
 		const titleText = append(titleBox, $('span.inspector-title-text'));
@@ -15811,10 +19622,10 @@ export class WorkflowEditor extends EditorPane {
 		return this._workflowUri;
 	}
 
-	private async _openWorkflowAsPythonFile(focusNodeId?: string): Promise<void> {
+	private async _openWorkflowAsPythonFile(focusNodeId?: string, options?: { group?: number | typeof SIDE_GROUP; focusText?: string; preserveFocus?: boolean }): Promise<EditorInput | undefined> {
 		if (!this._workflowUri) {
 			this._notificationService.warn('Cannot open Python editor: Workflow URI is not available.');
-			return;
+			return undefined;
 		}
 
 		const snapshot = this._entityPersistenceService.getSnapshot(this._workflowUri);
@@ -15836,13 +19647,13 @@ export class WorkflowEditor extends EditorPane {
 			await this._fileService.writeFile(pyFileUri, VSBuffer.fromString(pyContent));
 		} catch (err: any) {
 			this._notificationService.error(`Failed to write workflow Python file: ${err?.message || err}`);
-			return;
+			return undefined;
 		}
 
 		const pane = await this._editorService.openEditor({
 			resource: pyFileUri,
-			options: { pinned: true, preserveFocus: false }
-		});
+			options: { pinned: true, preserveFocus: options?.preserveFocus ?? false }
+		}, options?.group);
 
 		const control: any = pane?.getControl?.();
 		if (control && typeof control.getModel === 'function') {
@@ -15869,19 +19680,29 @@ export class WorkflowEditor extends EditorPane {
 				const lines = pyContent.split('\n');
 				const targetLineIdx = lines.findIndex(l => l.trim() === `# NODE_ID: ${focusNodeId}`);
 				if (targetLineIdx !== -1) {
-					const codeLineNo = Math.min(lines.length, targetLineIdx + 6);
+					let codeLineNo = Math.min(lines.length, targetLineIdx + 6);
+					// Jump to a specific Python step of that node (first line of its code) when asked to
+					const focusText = (options?.focusText || '').trim();
+					if (focusText) {
+						const nextNodeIdx = lines.findIndex((l, i) => i > targetLineIdx && l.trim().startsWith('# NODE_ID: '));
+						const stepIdx = lines.findIndex((l, i) => i > targetLineIdx && (nextNodeIdx === -1 || i < nextNodeIdx) && l.includes(focusText));
+						if (stepIdx !== -1) {
+							codeLineNo = stepIdx + 1;
+						}
+					}
 					if (typeof control.revealLineInCenter === 'function') {
 						control.revealLineInCenter(codeLineNo);
 					}
 					if (typeof control.setPosition === 'function') {
 						control.setPosition({ lineNumber: codeLineNo, column: 1 });
 					}
-					if (typeof control.focus === 'function') {
+					if (typeof control.focus === 'function' && !options?.preserveFocus) {
 						control.focus();
 					}
 				}
 			}
 		}
+		return pane?.input;
 	}
 
 	public static extractPythonVariablesFromSource(source: string): string[] {
@@ -15958,9 +19779,9 @@ export class WorkflowEditor extends EditorPane {
 						for (const p of step.component.parameters) {
 							addVar(p.name, 'node');
 						}
-					} else if (step.component.type === 'create_tickets') {
+					} else if (step.component.type === 'create_tickets' || step.component.type === 'get_ticket') {
 						addVar(this._getComponentOutputVarName(step.component), 'handle', step.component.wfTicketType);
-						addVar(step.component.label, 'handle', step.component.wfTicketType);
+						addVar(step.component.label, 'node');
 					} else if (step.component.type !== 'output' && step.component.type !== 'display') {
 						addVar(this._getComponentOutputVarName(step.component), 'node');
 						addVar(step.component.label, 'node');
@@ -15972,8 +19793,9 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		// 2. Workflow-wide variables and handles across all nodes
-		for (const n of this._data.nodes) {
+		// 2. Workflow-wide variables and handles: same-scope nodes first, then live runtime context, then remaining canvas nodes
+		const nodeNamespace = currentNode?.id ? this._getNodeSubWorkflowNamespace(currentNode.id) : undefined;
+		const collectFromNode = (n: IFlowchartNode) => {
 			for (const v of (n.outputVariables || [])) {
 				addVar(v.name, 'workflow');
 			}
@@ -15981,15 +19803,19 @@ export class WorkflowEditor extends EditorPane {
 				addVar(n.outputVariable.name, 'workflow');
 			}
 			for (const s of (n.pipeline || [])) {
-				if (s.component?.type === 'create_tickets' && s.component.label) {
+				if ((s.component?.type === 'create_tickets' || s.component?.type === 'get_ticket') && s.component.label) {
 					addVar(this._getComponentOutputVarName(s.component), 'handle', s.component.wfTicketType);
-					addVar(s.component.label, 'handle', s.component.wfTicketType);
+					addVar(s.component.label, 'workflow');
 				} else if (s.component?.type === 'output' && Array.isArray(s.component.outputSpecs)) {
 					for (const spec of s.component.outputSpecs) {
 						if (spec.varName) {
 							addVar(spec.varName, 'workflow');
 						}
 						addVar((spec as any).name || spec.label || spec.fieldKey, 'workflow');
+					}
+				} else if (s.component?.type === 'parameters' && Array.isArray(s.component.parameters)) {
+					for (const p of s.component.parameters) {
+						addVar(p.name, 'workflow');
 					}
 				} else if (s.component?.label && s.component.type !== 'parameters' && s.component.type !== 'display') {
 					addVar(this._getComponentOutputVarName(s.component), 'workflow');
@@ -15998,14 +19824,58 @@ export class WorkflowEditor extends EditorPane {
 				if (s.targetVariable) {
 					addVar(s.targetVariable, 'workflow');
 				}
-				if (s.expression) {
-					const m = s.expression.trim().match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=/);
-					if (m) {
-						const createMatch = s.expression.match(/CREATE_TICKETS\s*\([^)]*ticket_type\s*=\s*["']([^"']+)["']/i);
-						addVar(m[1], createMatch ? 'handle' : 'workflow', createMatch ? createMatch[1] : undefined);
+				const scanAssignments = (codeStr: string | undefined) => {
+					if (!codeStr) return;
+					for (const rawLine of codeStr.split('\n')) {
+						// Skip indented lines so multi-line kwargs like `  ticket_type="..."` are never mistaken for top-level variables
+						if (/^\s/.test(rawLine)) continue;
+						const line = rawLine.trim();
+						if (!line || line.startsWith('#')) continue;
+						const m = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)/);
+						if (m && m[1] && !['OUTPUT', 'output', 'RESULT', 'result'].includes(m[1])) {
+							const isCreateOrGet = /\b(?:CREATE_TICKETS|create_tickets|GET_TICKET|get_ticket)\s*\(/.test(line)
+								&& !/\b(?:GET_TICKETS|get_tickets)\s*\(/.test(line);
+							const createMatch = line.match(/CREATE_TICKETS\s*\([^)]*ticket_type\s*=\s*["']([^"']+)["']/i);
+							addVar(m[1], isCreateOrGet ? 'handle' : 'workflow', createMatch ? createMatch[1] : undefined);
+						}
 					}
+				};
+				if (s.expression) {
+					scanAssignments(s.expression);
+				}
+				if (s.component?.type === 'python' && typeof s.component.pythonCode === 'string') {
+					scanAssignments(s.component.pythonCode);
 				}
 			}
+		};
+
+		const sameScopeNodes: IFlowchartNode[] = [];
+		const otherScopeNodes: IFlowchartNode[] = [];
+		for (const n of this._data.nodes) {
+			const otherNodeNamespace = this._getNodeSubWorkflowNamespace(n.id);
+			if (otherNodeNamespace === nodeNamespace) {
+				sameScopeNodes.push(n);
+			} else {
+				otherScopeNodes.push(n);
+			}
+		}
+		for (const n of sameScopeNodes) {
+			collectFromNode(n);
+		}
+		// Overlay live runtime context variables from the effective run (if any)
+		const effectiveRun = currentNode?.id
+			? this._getEffectiveRunForNode(currentNode.id)
+			: (this._workflowUri ? this._workflowExecutionService.getActiveRun(this._workflowUri) : undefined);
+		if (effectiveRun?.contextVariables) {
+			const skipCtxKeys = new Set(['__callerInputKeys__', 'OUTPUT', 'WORKFLOW_OUTPUTS', 'Parameters', 'Inputs', 'Title', 'title']);
+			for (const k of Object.keys(effectiveRun.contextVariables)) {
+				if (!k || k.startsWith('@') || k.startsWith('__') || skipCtxKeys.has(k)) continue;
+				addVar(k, 'workflow');
+			}
+		}
+		// Include variables from other canvas nodes as fallback so early/shared variables (e.g. time_now, raw_*) are always discoverable
+		for (const n of otherScopeNodes) {
+			collectFromNode(n);
 		}
 		return result;
 	}
@@ -16028,7 +19898,10 @@ export class WorkflowEditor extends EditorPane {
 				if (params.length === 0) {
 					return 'Inputs: (click to add parameters)';
 				}
-				const pairs = params.map(p => `${p.name}=${p.defaultValue !== undefined && p.defaultValue !== '' ? p.defaultValue : '""'}`);
+				const pairs = params.map(p => {
+					const hasDef = p.defaultValue !== undefined && p.defaultValue !== null && String(p.defaultValue).trim() !== '';
+					return hasDef ? `${p.name}=${p.defaultValue}` : `${p.name} (required)`;
+				});
 				return `Inputs (${params.length}): ${pairs.join(', ')}`;
 			}
 			case 'output': {
@@ -16066,6 +19939,8 @@ export class WorkflowEditor extends EditorPane {
 				const clipCount = Array.isArray(comp.voiceClips) ? comp.voiceClips.length : 0;
 				return `${varName} = ${title} (${clipCount} Voice Clip${clipCount === 1 ? '' : 's'})`;
 			}
+			case 'sub_workflow':
+				return `${varName} = ${comp.subWorkflowName || title} (Sub-Workflow)`;
 			case 'ssh':
 				return `${varName} = ${comp.sshHost ? `${comp.sshUser || 'root'}@${comp.sshHost}` : title} (SSH Terminal)`;
 			case 'http_request':
@@ -16197,10 +20072,59 @@ export class WorkflowEditor extends EditorPane {
 		}
 		if (comp.type === 'display') {
 			const rawVal = (comp.wfDisplayValue || '').trim();
-			const valExpr = this._formatParamValueForPythonExpr(rawVal);
+			const valExpr = this._normalizeDisplayPythonExpr(rawVal);
 			return `DISPLAY(${valExpr})`;
 		}
 		return this._formatNodeComponentSummary(comp);
+	}
+
+	private _normalizeDisplayPythonExpr(rawVal: string): string {
+		const trimmed = (rawVal || '').trim();
+		if (!trimmed) {
+			return '';
+		}
+		const exactVar = trimmed.match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/);
+		if (exactVar) {
+			return exactVar[1];
+		}
+		// Unwrap {var_name} outside string literals (e.g. len({items}) -> len(items)),
+		// while preserving string literals ("...", '...', f"...") and all Python expressions verbatim (NEVER auto-quoting).
+		let out = '';
+		let inQuote: string | null = null;
+		let i = 0;
+		while (i < trimmed.length) {
+			const ch = trimmed[i];
+			if (inQuote) {
+				out += ch;
+				if (ch === '\\' && i + 1 < trimmed.length) {
+					out += trimmed[i + 1];
+					i += 2;
+					continue;
+				}
+				if (ch === inQuote) {
+					inQuote = null;
+				}
+				i++;
+				continue;
+			}
+			if (ch === '"' || ch === "'") {
+				inQuote = ch;
+				out += ch;
+				i++;
+				continue;
+			}
+			if (ch === '{') {
+				const m = trimmed.slice(i).match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}/);
+				if (m) {
+					out += m[1];
+					i += m[0].length;
+					continue;
+				}
+			}
+			out += ch;
+			i++;
+		}
+		return out;
 	}
 
 	private _syncComponentStepMetadata(step: INodePipelineStep): void {
@@ -16401,12 +20325,12 @@ export class WorkflowEditor extends EditorPane {
 		}
 		const dispMatch = expr.match(/^DISPLAY\s*\(([\s\S]*)\)$/i);
 		if (dispMatch) {
-			const rawVal = dispMatch[1].trim().replace(/^["']|["']$/g, '');
+			const rawVal = dispMatch[1].trim();
 			step.component = {
 				id,
 				label: 'Display',
 				type: 'display',
-				wfDisplayValue: `{${rawVal}}`
+				wfDisplayValue: rawVal
 			};
 			return step.component;
 		}
@@ -16434,6 +20358,7 @@ export class WorkflowEditor extends EditorPane {
 				const liveNode = this._data.nodes.find(n => n.id === targetNodeId);
 				if (liveNode) {
 					this._bindNodeSchemaEditorInput(liveNode, ed);
+					ed.notifyExternalDraftUpdated();
 				}
 			}
 		}
@@ -16444,9 +20369,68 @@ export class WorkflowEditor extends EditorPane {
 			node.pipeline = [];
 		}
 		const targetNodeId = node.id;
+		const effRunForInspector = this._getEffectiveRunForNode(targetNodeId);
+		const nodeRunStateForInspector = effRunForInspector?.nodeStates?.[targetNodeId];
 		const nodeFields: ICustomField[] = node.pipeline
 			.filter(st => !!st.component)
-			.map(st => st.component!);
+			.map(st => {
+				const comp = st.component!;
+				if (comp.type === 'output' && nodeRunStateForInspector && (nodeRunStateForInspector.status === 'success' || nodeRunStateForInspector.status === 'failed')) {
+					const compAny = comp as any;
+					if (!compAny.lastExecutionLog) {
+						compAny.lastExecutionStatus = nodeRunStateForInspector.status;
+						if (nodeRunStateForInspector.durationMs !== undefined) {
+							compAny.lastExecutionDurationMs = nodeRunStateForInspector.durationMs;
+						}
+						if (nodeRunStateForInspector.status === 'failed') {
+							compAny.lastExecutionLog = `[Execution Error]: ${nodeRunStateForInspector.failedStepError || nodeRunStateForInspector.error || 'Output node failed during execution.'}`;
+						} else {
+							const enabledSpecs = (comp.outputSpecs || []).filter(s => s && s.enabled !== false);
+							const rawOut = nodeRunStateForInspector.output;
+							const outObj = (rawOut && typeof rawOut === 'object' && !Array.isArray(rawOut)) ? rawOut as Record<string, any> : undefined;
+							const ctxVars = effRunForInspector?.contextVariables || {};
+							const describeVal = (v: any): { typeTag: string; preview: string } => {
+								if (v === null) { return { typeTag: 'null', preview: 'null' }; }
+								if (v === undefined) { return { typeTag: 'undefined', preview: 'undefined' }; }
+								if (Array.isArray(v)) {
+									let p = '';
+									try { p = JSON.stringify(v, null, 2); } catch { p = String(v); }
+									if (p.length > 4000) { p = p.slice(0, 4000) + `\n... (truncated, ${p.length} chars total)`; }
+									return { typeTag: `list (${v.length} items)`, preview: p };
+								}
+								if (typeof v === 'object') {
+									let p = '';
+									try { p = JSON.stringify(v, null, 2); } catch { p = String(v); }
+									if (p.length > 4000) { p = p.slice(0, 4000) + `\n... (truncated, ${p.length} chars total)`; }
+									return { typeTag: `dict (${Object.keys(v).length} keys)`, preview: p };
+								}
+								const s = String(v);
+								return { typeTag: typeof v, preview: s.length > 4000 ? s.slice(0, 4000) + `\n... (truncated, ${s.length} chars total)` : s };
+							};
+							const lines: string[] = [`>>> Exported Outputs from "${node.label || 'End'}" (${enabledSpecs.length} field(s))`];
+							for (const spec of enabledSpecs) {
+								const k = (spec.label || spec.varName || spec.fieldKey || '').trim();
+								if (!k) { continue; }
+								const val = (outObj && k in outObj) ? outObj[k]
+									: (outObj && spec.varName && spec.varName in outObj) ? outObj[spec.varName]
+									: (k in ctxVars) ? ctxVars[k]
+									: (spec.varName && spec.varName in ctxVars) ? ctxVars[spec.varName]
+									: undefined;
+								const desc = describeVal(val);
+								const varTag = spec.varName ? ` [var: ${spec.varName}]` : '';
+								const srcTag = spec.sourceExpression ? ` <- ${spec.sourceExpression}` : '';
+								lines.push(`\n• ${k}${varTag}${srcTag} [Type: ${desc.typeTag}]`);
+								lines.push(desc.preview);
+							}
+							compAny.lastExecutionLog = lines.join('\n');
+							if (rawOut !== undefined) {
+								compAny.lastExecutionOutput = rawOut;
+							}
+						}
+					}
+				}
+				return comp;
+			});
 		const draftModule: ICustomModule = {
 			id: `wf_node_${targetNodeId}`,
 			name: node.label || 'Flowchart Node',
@@ -16500,7 +20484,11 @@ export class WorkflowEditor extends EditorPane {
 			}
 			return ctx;
 		};
-		schemaInput.onNodeFieldsChange = (updatedFields: ICustomField[]) => {
+		schemaInput.hydratedWorkflowRuntimeContextProvider = async () => {
+			const ctx = schemaInput.workflowRuntimeContextProvider?.() || {};
+			return this._workflowUri ? this._workflowExecutionService.hydrateContextVariables(this._workflowUri, ctx) : ctx;
+		};
+		schemaInput.onNodeFieldsChange = (updatedFields: ICustomField[], immediate?: boolean) => {
 			const liveNode = this._data?.nodes?.find(n => n.id === targetNodeId) || node;
 			// Enforce single-instance rule & rebuild liveNode.pipeline in real time while preserving classic non-component [py] capsules
 			let seenInputs = false;
@@ -16584,7 +20572,7 @@ export class WorkflowEditor extends EditorPane {
 
 			this._ensureNodeFitsPipeline(liveNode);
 			this._syncToNode(liveNode, true);
-			this._saveFlowchartData();
+			void this._saveFlowchartData(false, Boolean(immediate));
 			this._renderNodes();
 			this._drawLinks();
 			if (this._inspectorEl) {
@@ -16615,14 +20603,8 @@ export class WorkflowEditor extends EditorPane {
 		}
 		this._bindNodeSchemaEditorInput(node, schemaInput, focusFieldId);
 
-		// Determine target editor group: reuse any existing side group (even if currently empty), else SIDE_GROUP
-		let targetGroup: any = SIDE_GROUP;
-		for (const grp of this._editorGroupService.groups) {
-			if (grp.id !== this.group.id) {
-				targetGroup = grp.id;
-				break;
-			}
-		}
+		// Target editor group: the group to the right of the canvas (not a flowchart split below it), else a new side group
+		const targetGroup = this._outlineSideGroup();
 
 		const wasAlreadyOpen = this._editorService.editors.some(
 			ed => ed instanceof CustomModuleSchemaEditorInput && ed.matches(schemaInput!)

@@ -11,6 +11,7 @@ import { CountTokensCallback, IPreparedToolInvocation, IToolData, IToolImpl, ITo
 import { ICustomModulesService } from '../../common/customModules.js';
 import { IWorkspacesExplorerService } from '../../../workspacesExplorer/common/workspacesExplorer.js';
 import { CustomFieldType, ICustomField, ICustomModule, IActionButton, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS } from '../../../entityPersistence/common/entityPersistence.js';
+import { resolveDefaultModel } from '../../../agentsManager/common/agentsManager.js';
 
 export const ListCustomModulesToolId = 'anyagent_list_custom_modules';
 export const GenerateCustomModuleToolId = 'anyagent_generate_custom_module';
@@ -99,7 +100,8 @@ const BASE_PRIMITIVES_CATALOG = [
 			type: 'prompt',
 			defaultContent: 'Please summarize the following ticket requirements and identify key risks.',
 			targetMode: 'model',
-			targetModel: 'gemini-1.5-flash',
+			get targetProvider() { return resolveDefaultModel({ providerId: 'gemini', modelId: 'gemini-2.5-flash' }).providerId; },
+			get targetModel() { return resolveDefaultModel({ providerId: 'gemini', modelId: 'gemini-2.5-flash' }).modelId; },
 			targetAgentId: ''
 		}
 	},

@@ -26,7 +26,7 @@ import { Action } from '../../../../base/common/actions.js';
 import { MarkdownString } from '../../../../base/common/htmlContent.js';
 import { getDefaultHoverDelegate } from '../../../../base/browser/ui/hover/hoverDelegateFactory.js';
 
-import { IAgentsManagerService, IAgentItem, AgentScopeType } from '../common/agentsManager.js';
+import { IAgentsManagerService, IAgentItem, AgentScopeType, resolveDefaultModelId } from '../common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { createOrEditAgentDialog } from './agentEditorDialog.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
@@ -499,7 +499,7 @@ export class AgentsManagerPane extends ViewPane {
 		const metaRow = append(card, $('.meta-row'));
 
 		const modelBadge = append(metaRow, $('span.model-badge'));
-		modelBadge.textContent = agent.model?.modelId || 'gemini-1.5-flash';
+		modelBadge.textContent = agent.model?.modelId || resolveDefaultModelId(agent.model?.providerId, 'gemini-2.5-flash');
 
 		const scopeBadge = append(metaRow, $('span.scope-badge'));
 		let scopeName = agent.scopeName;

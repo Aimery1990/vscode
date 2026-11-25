@@ -2081,9 +2081,10 @@ export class TicketDataEngine {
 			operationSummary = `Bound table '${canonicalKey}' to SQLite file '${dbPath}' (table: '${tableName}').`;
 		}
 
-		// Execute SQLite operation if requested or if sync_sqlite / autoSyncDb is active
+		// Execute SQLite operation if requested. Edits of a table bound to SQLite always go to the database too
+		// (unless the caller explicitly passes sync_sqlite: false); there is no separate switch for this any more.
 		const isExplicitSqliteOp = op === 'save_to_sqlite' || op === 'update_in_sqlite' || op === 'load_from_sqlite' || op === 'delete_from_sqlite' || op === 'sql_query';
-		const shouldAutoSync = (options.sync_sqlite === true || (options.sync_sqlite !== false && autoSyncDb)) && dbEngine === 'sqlite' && Boolean(dbPath.trim()) && ['define_columns', 'insert_rows', 'set_rows', 'update_rows', 'bind_sqlite'].includes(op);
+		const shouldAutoSync = options.sync_sqlite !== false && dbEngine === 'sqlite' && Boolean(dbPath.trim()) && ['define_columns', 'insert_rows', 'set_rows', 'update_rows', 'bind_sqlite'].includes(op);
 
 		if (isExplicitSqliteOp || shouldAutoSync) {
 			const runtime = this.instantiationService.invokeFunction(accessor => {

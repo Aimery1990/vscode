@@ -13,7 +13,7 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
-import { IAgentsManagerService } from '../../agentsManager/common/agentsManager.js';
+import { IAgentsManagerService, getGlobalDefaultModel } from '../../agentsManager/common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -1549,7 +1549,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		}
 		const parentName = parentSnapshot ? parentSnapshot.entityName : (targetFolderUri.path.split('/').filter(Boolean).pop() || 'Workspace');
 
-		let finalModel = { providerId: 'gemini', modelId: 'gemini-1.5-flash', credentialId: undefined as string | undefined };
+		const defaultAgentModel = getGlobalDefaultModel();
+		let finalModel = { providerId: defaultAgentModel?.providerId || 'gemini', modelId: defaultAgentModel?.modelId || 'gemini-2.5-flash', credentialId: defaultAgentModel?.credentialId as string | undefined };
 		let finalSystemPrompt = `# Agent: ${name}\n\nYou are a specialized AI Agent serving '${parentName}'.`;
 
 		if (type === 'agent') {

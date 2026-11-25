@@ -17,7 +17,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { $, append, clearNode } from '../../../../base/browser/dom.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
-import { IAgentsManagerService, IAgentItem, AgentScopeType, IAgentCredentialService, IAgentModelReference, IAgentCredential } from '../common/agentsManager.js';
+import { IAgentsManagerService, IAgentItem, AgentScopeType, IAgentCredentialService, IAgentModelReference, IAgentCredential, getGlobalDefaultModel, resolveDefaultModelId } from '../common/agentsManager.js';
 import { IWorkspacesExplorerService, WORKSPACE_PANE_VIEW_ID } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { WorkspacesExplorerPane } from '../../workspacesExplorer/browser/workspacesExplorerPane.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
@@ -335,6 +335,11 @@ export async function createOrEditAgentDialog(
 			opt.disabled = true;
 			opt.selected = true;
 		} else {
+			// New agent: preselect the credential of the user's Default Model (if any), else the first enabled one
+			const initialDefaultModel = getGlobalDefaultModel();
+			const initialDefaultCredId = initialDefaultModel
+				? (savedCredentials.find(c => c.isEnabled !== false && c.id === initialDefaultModel.credentialId) || savedCredentials.find(c => c.isEnabled !== false && c.providerId === initialDefaultModel.providerId))?.id
+				: undefined;
 			for (let i = 0; i < savedCredentials.length; i++) {
 				const cred = savedCredentials[i];
 				const displayName = cred.isEnabled !== false ? `${cred.name} (${cred.providerId})` : `${cred.name} (${cred.providerId}) [Disabled]`;
@@ -344,7 +349,7 @@ export async function createOrEditAgentDialog(
 				}
 				if (existingAgent?.model?.credentialId === cred.id) {
 					opt.selected = true;
-				} else if (!existingAgent && i === 0 && cred.isEnabled !== false) {
+				} else if (!existingAgent && (initialDefaultCredId ? cred.id === initialDefaultCredId : (i === 0 && cred.isEnabled !== false))) {
 					opt.selected = true;
 				}
 			}
@@ -591,7 +596,14 @@ export async function createOrEditAgentDialog(
 				const activeProv = selectedCredId === 'default' || selectedCredId === 'none'
 					? 'gemini'
 					: (savedCredentials.find(c => c.id === selectedCredId)?.providerId || 'gemini');
-				modelInput.value = getSmartDefaultModel(availableModels, activeProv);
+				const dialogDefaultModel = getGlobalDefaultModel();
+				const selectedCredForDefault = savedCredentials.find(c => c.id === selectedCredId);
+				if (dialogDefaultModel && selectedCredForDefault && (dialogDefaultModel.credentialId ? dialogDefaultModel.credentialId === selectedCredId : selectedCredForDefault.providerId === dialogDefaultModel.providerId)) {
+					// Nothing chosen yet for this credential: use the user's Default Model
+					modelInput.value = dialogDefaultModel.modelId;
+				} else {
+					modelInput.value = getSmartDefaultModel(availableModels, activeProv);
+				}
 			}
 		};
 
@@ -1031,7 +1043,7 @@ export async function createOrEditAgentDialog(
 							}));
 							const targetDesc = field.targetMode === 'agent'
 								? `Agent: ${field.targetAgentName || field.targetAgentId || 'Default'}`
-								: `Model: ${field.targetModel || 'gemini-1.5-flash'}`;
+								: `Model: ${field.targetModel || resolveDefaultModelId(field.targetProvider, 'gemini-2.5-flash')}`;
 							const topRow = append(promptBox, $('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px;' }));
 							append(topRow, $('span', { style: 'font-size: 10.5px; opacity: 0.85; font-weight: 600; color: #60a5fa;' }, `AI Instruction (${targetDesc})`));
 
@@ -1074,8 +1086,8 @@ export async function createOrEditAgentDialog(
 									preInjectedPrompt: preInjectedText,
 									prompt: combinedPrompt,
 									targetMode: field.targetMode || 'model',
-									targetProvider: field.targetProvider || '',
-									targetModel: field.targetModel || 'gemini-1.5-flash',
+									targetProvider: field.targetProvider || (field.targetModel ? '' : (getGlobalDefaultModel()?.providerId || '')),
+									targetModel: field.targetModel || resolveDefaultModelId(field.targetProvider, 'gemini-2.5-flash'),
 									targetAgentId: field.targetAgentId || '',
 									targetAgentName: field.targetAgentName || '',
 									output: '',

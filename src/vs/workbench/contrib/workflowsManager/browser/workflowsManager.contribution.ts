@@ -12,7 +12,8 @@ import { Extensions as ViewExtensions, IViewContainersRegistry, IViewsRegistry, 
 import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
-import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { EditorInput } from '../../../common/editor/editorInput.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { KeyMod, KeyCode } from '../../../../base/common/keyCodes.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
@@ -38,6 +39,8 @@ import { ICustomModulesService } from '../../customModules/common/customModules.
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import './tools/workflowTools.contribution.js';
+import './subWorkflowLiveView.js';
+import './restoreTabsPrompt.js';
 
 export const WORKFLOWS_MANAGER_VIEWLET_ID = 'workbench.view.workflowsManager';
 
@@ -204,24 +207,66 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
 	]
 );
 
+/**
+ * Persists open workflow canvas / notebook tabs (workflow file URI + name) so they are restored on the next
+ * start-up together with the editor layout. Run state is not part of it: the run history is persisted separately.
+ */
+interface ISerializedWorkflowEditorInput {
+	workflowUri: string;
+	workflowName: string;
+}
+
+function parseSerializedWorkflowInput(raw: string): ISerializedWorkflowEditorInput | undefined {
+	try {
+		const data = JSON.parse(raw) as Partial<ISerializedWorkflowEditorInput>;
+		return typeof data.workflowUri === 'string' && data.workflowUri ? { workflowUri: data.workflowUri, workflowName: data.workflowName || 'Workflow' } : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 class WorkflowEditorInputSerializer implements IEditorSerializer {
-	canSerialize(): boolean {
-		return false;
+	canSerialize(input: EditorInput): boolean {
+		return input instanceof WorkflowEditorInput;
 	}
 
-	serialize(): string | undefined {
-		return undefined;
+	serialize(input: EditorInput): string | undefined {
+		if (!(input instanceof WorkflowEditorInput)) {
+			return undefined;
+		}
+		const data: ISerializedWorkflowEditorInput = { workflowUri: input.workflowUri.toString(), workflowName: input.workflowName };
+		return JSON.stringify(data);
 	}
 
-	deserialize(): WorkflowEditorInput | undefined {
-		return undefined;
+	deserialize(_instantiationService: IInstantiationService, raw: string): WorkflowEditorInput | undefined {
+		const data = parseSerializedWorkflowInput(raw);
+		return data ? new WorkflowEditorInput(URI.parse(data.workflowUri), data.workflowName) : undefined;
+	}
+}
+
+class WorkflowNotebookEditorInputSerializer implements IEditorSerializer {
+	canSerialize(input: EditorInput): boolean {
+		return input instanceof WorkflowNotebookEditorInput;
+	}
+
+	serialize(input: EditorInput): string | undefined {
+		if (!(input instanceof WorkflowNotebookEditorInput)) {
+			return undefined;
+		}
+		const data: ISerializedWorkflowEditorInput = { workflowUri: input.workflowUri.toString(), workflowName: input.workflowName };
+		return JSON.stringify(data);
+	}
+
+	deserialize(_instantiationService: IInstantiationService, raw: string): WorkflowNotebookEditorInput | undefined {
+		const data = parseSerializedWorkflowInput(raw);
+		return data ? new WorkflowNotebookEditorInput(URI.parse(data.workflowUri), data.workflowName) : undefined;
 	}
 }
 
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory)
 	.registerEditorSerializer(WorkflowEditorInput.ID, WorkflowEditorInputSerializer);
 Registry.as<IEditorFactoryRegistry>(EditorExtensions.EditorFactory)
-	.registerEditorSerializer(WorkflowNotebookEditorInput.ID, WorkflowEditorInputSerializer);
+	.registerEditorSerializer(WorkflowNotebookEditorInput.ID, WorkflowNotebookEditorInputSerializer);
 
 // 7. Register "Sync to Workflow" Action for `.workflow.py` Editor Tabs
 registerAction2(class SyncPythonToWorkflowAction extends Action2 {

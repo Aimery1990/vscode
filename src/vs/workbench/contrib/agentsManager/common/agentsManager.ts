@@ -37,8 +37,8 @@ export interface IAgentItem {
 export interface IAgentCredential {
 	readonly id: string;
 	readonly name: string;
-	readonly providerId: string; // 'gemini' | 'openai' | 'anthropic' | 'custom-openai'
-	readonly customUrl?: string; // Endpoint URL
+	readonly providerId: string; // 'gemini' | 'openai' | 'anthropic' | 'aliyun' | 'custom-openai'
+	readonly customUrl?: string; // Endpoint URL (custom-openai, aliyun region endpoint)
 	readonly isEnabled?: boolean;
 	readonly lastVerifiedAt?: number;
 	readonly connectionStatus?: 'connected' | 'error' | 'unverified';
@@ -47,13 +47,78 @@ export interface IAgentCredential {
 	readonly createdAt: number;
 }
 
+/** Alibaba Cloud Model Studio (DashScope): OpenAI-compatible API hosting Qwen, DeepSeek, Kimi, GLM, ... */
+export const ALIYUN_PROVIDER_ID = 'aliyun';
+
+/** Model Studio endpoints. An API key only works in the region it was created in. */
+export const ALIYUN_MODEL_STUDIO_REGIONS: ReadonlyArray<{ readonly label: string; readonly url: string }> = [
+	{ label: 'US (Virginia)', url: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1' },
+	{ label: 'International (Singapore)', url: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1' },
+	{ label: 'China (Beijing)', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1' }
+];
+
+const DEFAULT_CUSTOM_OPENAI_BASE_URL = 'http://localhost:11434/v1';
+
+/** Providers that speak the OpenAI chat-completions protocol against a configurable base URL. */
+export function isOpenAICompatibleProvider(providerId: string | undefined): boolean {
+	return providerId === 'custom-openai' || providerId === ALIYUN_PROVIDER_ID;
+}
+
+/** Base URL to use when a credential of `providerId` has no explicit endpoint. */
+export function getDefaultBaseUrl(providerId: string | undefined): string {
+	return providerId === ALIYUN_PROVIDER_ID ? ALIYUN_MODEL_STUDIO_REGIONS[0].url : DEFAULT_CUSTOM_OPENAI_BASE_URL;
+}
+
+/**
+ * The user's global Default Model (Settings → AI LLM Providers). Kept in sync by the credential service so that
+ * code without access to the service (UI fallbacks, runtimes) can resolve "the model to use when none is chosen".
+ */
+let globalDefaultModel: IAgentModelReference | undefined;
+
+export function setGlobalDefaultModel(ref: IAgentModelReference | undefined): void {
+	globalDefaultModel = ref;
+}
+
+/** The user's Default Model, or undefined if none is set (or its credential was removed / disabled). */
+export function getGlobalDefaultModel(): IAgentModelReference | undefined {
+	return globalDefaultModel;
+}
+
+/**
+ * Model id to use when nothing was chosen. If `providerId` is given and differs from the Default Model's provider,
+ * the Default Model cannot be used there, so `providerFallback` is returned.
+ */
+export function resolveDefaultModelId(providerId: string | undefined, providerFallback: string): string {
+	const def = globalDefaultModel;
+	if (def && (!providerId || providerId === def.providerId)) {
+		return def.modelId;
+	}
+	return providerFallback;
+}
+
+/** Provider + model to use when neither was chosen: the Default Model, else `fallback`. */
+export function resolveDefaultModel(fallback: { providerId: string; modelId: string }): { providerId: string; modelId: string } {
+	return globalDefaultModel ? { providerId: globalDefaultModel.providerId, modelId: globalDefaultModel.modelId } : fallback;
+}
+
+/** Heuristic: model ids in provider catalogs that are not general chat / text models (speech, images, embeddings, ...). */
+export function isNonChatModelId(modelId: string): boolean {
+	return /(^|[-_.])(tts|asr|whisper|transcribe|embedding|embed|image|dall-e|moderation|realtime|audio|rerank|vision-only|paraformer|sambert|cosyvoice|wanx|wan[0-9]|lyria|veo|imagen|music|video|t2i|t2v|ocr)([-_.]|$)/i.test(modelId)
+		|| /^(tts-|whisper|dall-e|text-embedding|omni-moderation|sora|gpt-image|computer-use|lyria|veo|imagen|aqa)/i.test(modelId);
+}
+
 export const IAgentCredentialService = createDecorator<IAgentCredentialService>('agentCredentialService');
 
 export interface IAgentCredentialService {
 	readonly _serviceBrand: undefined;
 	readonly onDidChangeCredentials: Event<void>;
+	/** Fires when the Default Model changes (set by the user, or invalidated because its credential went away). */
+	readonly onDidChangeDefaultModel: Event<void>;
 
 	getCredentials(): Promise<IAgentCredential[]>;
+	/** The user's Default Model, used wherever a model can be chosen but was not. Undefined if none is set. */
+	getDefaultModel(): IAgentModelReference | undefined;
+	setDefaultModel(ref: IAgentModelReference | undefined): void;
 	addCredential(name: string, providerId: string, apiKey: string, customUrl?: string): Promise<IAgentCredential>;
 	updateCredential(credential: IAgentCredential): Promise<void>;
 	removeCredential(id: string): Promise<void>;

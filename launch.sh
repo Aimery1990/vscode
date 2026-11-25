@@ -209,6 +209,34 @@ function check_build_integrity() {
     fi
 }
 
+# Make the dev bundle start AnyAgent when opened from the Dock / Finder / Spotlight (no launch.sh involved):
+#  - Contents/Resources/app -> desktop source dir: Electron loads an app found there instead of its default app
+#  - LSEnvironment: the same dev environment launch.sh exports (VSCODE_DEV keeps the code-oss-dev data folder)
+# Idempotent; re-applied on every launch so it survives an Electron re-download.
+function setup_dock_launch() {
+    local res="$APP_BUNDLE/Contents/Resources"
+    local plist="$APP_BUNDLE/Contents/Info.plist"
+    if [ ! -L "$res/app" ] || [ "$(readlink "$res/app")" != "$DESKTOP_DIR" ]; then
+        rm -rf "$res/app" 2>/dev/null || true
+        ln -s "$DESKTOP_DIR" "$res/app"
+    fi
+    local changed=0
+    /usr/libexec/PlistBuddy -c "Print :LSEnvironment" "$plist" >/dev/null 2>&1 || { /usr/libexec/PlistBuddy -c "Add :LSEnvironment dict" "$plist"; changed=1; }
+    local kv key val
+    for kv in "MallocNanoZone=0" "NODE_ENV=development" "VSCODE_DEV=1" "ELECTRON_ENABLE_STACK_DUMPING=1"; do
+        key="${kv%%=*}"; val="${kv#*=}"
+        if [ "$(/usr/libexec/PlistBuddy -c "Print :LSEnvironment:$key" "$plist" 2>/dev/null)" != "$val" ]; then
+            /usr/libexec/PlistBuddy -c "Delete :LSEnvironment:$key" "$plist" >/dev/null 2>&1 || true
+            /usr/libexec/PlistBuddy -c "Add :LSEnvironment:$key string $val" "$plist"
+            changed=1
+        fi
+    done
+    if [ "$changed" -eq 1 ]; then
+        # LaunchServices caches Info.plist; re-register so the Dock picks up the new environment
+        /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP_BUNDLE" >/dev/null 2>&1 || true
+    fi
+}
+
 function ensure_binary() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         if [ ! -f "$CODE_EXE" ] && [ -d "./.build/electron/Code - OSS.app" ]; then
@@ -245,6 +273,7 @@ function ensure_binary() {
             plutil -replace CFBundleIconFile -string "Any Agent.icns" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
             plutil -replace CFBundleName -string "$APP_NAME" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
             plutil -replace CFBundleDisplayName -string "$APP_NAME" "$APP_BUNDLE/Contents/Info.plist" 2>/dev/null || true
+            setup_dock_launch
             touch "$APP_BUNDLE" 2>/dev/null || true
         fi
     fi
@@ -453,10 +482,10 @@ else
 
     echo "🚀 Starting AnyAgent Desktop..."
 
+    # Cold start without arguments: do NOT pass --new-window, so the last session (window, layout and open tabs)
+    # is restored according to `window.restoreWindows`. Use -n / --new-window to force a blank window instead.
     LOCAL_ARGS=()
-    if [ ${#TARGET_ARGS[@]} -eq 0 ]; then
-        LOCAL_ARGS=("--new-window")
-    else
+    if [ ${#TARGET_ARGS[@]} -gt 0 ]; then
         LOCAL_ARGS=("${TARGET_ARGS[@]}")
     fi
 

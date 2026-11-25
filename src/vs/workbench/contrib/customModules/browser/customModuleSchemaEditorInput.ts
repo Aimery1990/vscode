@@ -28,7 +28,14 @@ export class CustomModuleSchemaEditorInput extends EditorInput {
 	public nodeId?: string;
 	public workflowVariablesProvider?: () => Array<{ label: string; type: string; ticketType?: string }>;
 	public workflowRuntimeContextProvider?: () => Record<string, any>;
-	public onNodeFieldsChange?: (fields: ICustomField[]) => void;
+	/** Same variables as `workflowRuntimeContextProvider`, with large spilled variables (`__anyagentVarRef__`) loaded back to their real values. */
+	public hydratedWorkflowRuntimeContextProvider?: () => Promise<Record<string, any>>;
+	public subWorkflowRefreshProvider?: (subWorkflowId: string) => Promise<{
+		name: string;
+		inputs: Array<{ name: string; defaultValue?: string; description?: string }>;
+		outputs: Array<{ label: string; varName: string; defaultFormat?: string }>;
+	} | undefined>;
+	public onNodeFieldsChange?: (fields: ICustomField[], immediate?: boolean) => void;
 	public focusFieldId?: string;
 
 	private readonly _onDidUpdateExternalDraft = this._register(new Emitter<string | undefined>());
