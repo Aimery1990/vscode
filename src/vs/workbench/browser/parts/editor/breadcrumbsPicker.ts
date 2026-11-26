@@ -53,6 +53,7 @@ export abstract class BreadcrumbsPicker<TInput, TElement> {
 	protected readonly _domNode: HTMLDivElement;
 	protected _arrow!: HTMLDivElement;
 	protected _treeContainer!: HTMLDivElement;
+	private _emptyMessage: HTMLElement | undefined;
 	protected _tree!: Tree<TInput, TElement>;
 	protected _fakeEvent = new UIEvent('fakeEvent');
 	protected _layoutInfo!: ILayoutInfo;
@@ -146,9 +147,10 @@ export abstract class BreadcrumbsPicker<TInput, TElement> {
 		this._treeContainer.style.width = `${this._layoutInfo.width}px`;
 
 		if (!hasChildren) {
-			let emptyMsg = this._treeContainer.querySelector('.breadcrumbs-picker-empty-message') as HTMLElement | null;
+			let emptyMsg = this._emptyMessage && this._treeContainer.contains(this._emptyMessage) ? this._emptyMessage : undefined;
 			if (!emptyMsg) {
 				emptyMsg = document.createElement('div');
+				this._emptyMessage = emptyMsg;
 				emptyMsg.className = 'breadcrumbs-picker-empty-message';
 				emptyMsg.textContent = localize('breadcrumbs.noElements', "No items or access restricted");
 				emptyMsg.style.padding = '8px 12px';
@@ -159,8 +161,8 @@ export abstract class BreadcrumbsPicker<TInput, TElement> {
 				this._treeContainer.appendChild(emptyMsg);
 			}
 		} else {
-			const emptyMsg = this._treeContainer.querySelector('.breadcrumbs-picker-empty-message');
-			if (emptyMsg) {
+			const emptyMsg = this._emptyMessage;
+			if (emptyMsg && this._treeContainer.contains(emptyMsg)) {
 				emptyMsg.remove();
 			}
 			this._tree.layout(treeHeight, this._layoutInfo.width);

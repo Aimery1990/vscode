@@ -51,8 +51,8 @@
 	let currentScale = 1.0;
 	let currentPage = 1;
 	let pageWrappers = [];
-	let renderedPages = new Map(); // pageNum -> renderedScale
-	let pageSizes = new Map(); // pageNum -> { width, height }
+	const renderedPages = new Map(); // pageNum -> renderedScale
+	const pageSizes = new Map(); // pageNum -> { width, height }
 	let defaultPageWidth = 595.28;
 	let defaultPageHeight = 841.89;
 
@@ -154,7 +154,7 @@
 	// Render a single page into canvas
 	const renderingPages = new Set();
 	async function renderPage(pageNum) {
-		if (!pdfDoc) return;
+		if (!pdfDoc) {return;}
 		if (renderedPages.get(pageNum) === currentScale) {
 			return; // already rendered at this scale
 		}
@@ -163,9 +163,9 @@
 		}
 
 		const wrapper = pageWrappers[pageNum - 1];
-		if (!wrapper) return;
+		if (!wrapper) {return;}
 		const canvas = wrapper.querySelector('canvas');
-		if (!canvas) return;
+		if (!canvas) {return;}
 
 		renderingPages.add(pageNum);
 		try {

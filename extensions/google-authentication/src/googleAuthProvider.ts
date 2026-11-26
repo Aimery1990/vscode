@@ -1,3 +1,7 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
+ *--------------------------------------------------------------------------------------------*/
+
 import * as vscode from 'vscode';
 import { GoogleOAuthService, GoogleOAuthSession } from './googleOAuthService';
 
@@ -7,7 +11,7 @@ export class GoogleAuthenticationProvider implements vscode.AuthenticationProvid
 
 	constructor(
 		private readonly oauthService: GoogleOAuthService
-	) {}
+	) { }
 
 	public async getSessions(_scopes?: readonly string[]): Promise<vscode.AuthenticationSession[]> {
 		const storedSessions = await this.oauthService.getStoredSessions();

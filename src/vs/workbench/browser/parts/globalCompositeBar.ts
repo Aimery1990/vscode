@@ -34,13 +34,6 @@ import { IProductService } from '../../../platform/product/common/productService
 import { ISecretStorageService } from '../../../platform/secrets/common/secrets.js';
 import { INotificationService } from '../../../platform/notification/common/notification.js';
 import { AuthenticationSessionInfo, getCurrentAuthenticationSessionInfo } from '../../services/authentication/browser/authenticationService.js';
-
-import { AccountManagementDialog } from '../../contrib/accountManagement/browser/accountManagementDialog.js';
-
-import { AccountSignInModal } from '../../contrib/accountManagement/browser/accountSignInModal.js';
-
-
-
 import { AuthenticationSessionAccount, IAuthenticationService, INTERNAL_AUTH_PROVIDER_PREFIX } from '../../services/authentication/common/authentication.js';
 import { IWorkbenchEnvironmentService } from '../../services/environment/common/environmentService.js';
 import { IHoverService } from '../../../platform/hover/browser/hover.js';
@@ -298,7 +291,7 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 		@IStorageService storageService: IStorageService,
 		@ILogService private readonly logService: ILogService,
 		@IActivityService activityService: IActivityService,
-		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@IInstantiationService instantiationService: IInstantiationService,
 		@ICommandService private readonly commandService: ICommandService,
 		@INotificationService private readonly notificationService: INotificationService
 	) {
@@ -419,12 +412,11 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 				label: localize('signInOrLogIn', "Sign In / Log In..."),
 				enabled: true,
 				run: async () => {
-					this.notificationService.info("Opening Any Agent Sign In & Account Control Center...");
+					this.notificationService.info('Opening Any Agent Sign In & Account Control Center...');
 					try {
 						await this.commandService.executeCommand('anyagent.signInOrLogIn');
 					} catch (e) {
-						const modal = this.instantiationService.createInstance(AccountSignInModal);
-						modal.show();
+						this.logService.error(e);
 					}
 				}
 			}));
@@ -435,12 +427,11 @@ export class AccountsActivityActionViewItem extends AbstractGlobalActivityAction
 			label: localize('accountPreferences', "Account & Security Preferences..."),
 			enabled: true,
 			run: async () => {
-				this.notificationService.info("Opening Any Agent Account & Security Preferences...");
+				this.notificationService.info('Opening Any Agent Account & Security Preferences...');
 				try {
 					await this.commandService.executeCommand('anyagent.accountPreferences');
 				} catch (e) {
-					const dialog = this.instantiationService.createInstance(AccountManagementDialog);
-					await dialog.show('Account');
+					this.logService.error(e);
 				}
 			}
 		}));

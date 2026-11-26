@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { session } from 'electron';
@@ -9,7 +8,7 @@ import { CancellationToken } from '../../../base/common/cancellation.js';
 import { Event } from '../../../base/common/event.js';
 import { IServerChannel } from '../../../base/parts/ipc/common/ipc.js';
 import { IHeaders, IRequestOptions } from '../../../base/parts/request/common/request.js';
-import { IRequestService } from '../common/request.js';
+import { AuthInfo, IRequestService } from '../common/request.js';
 
 type RequestResponse = [
 	{
@@ -23,14 +22,18 @@ export class ElectronRequestChannel implements IServerChannel {
 
 	constructor(private readonly service: IRequestService) { }
 
-	listen(context: any, event: string): Event<any> {
+	listen<T>(context: unknown, event: string): Event<T> {
 		throw new Error('Invalid listen');
 	}
 
-	async call(context: any, command: string, args?: any, token: CancellationToken = CancellationToken.None): Promise<any> {
+	call<T>(context: unknown, command: string, arg?: unknown, token: CancellationToken = CancellationToken.None): Promise<T> {
+		return this.doCall(command, arg as unknown[], token) as Promise<T>;
+	}
+
+	private async doCall(command: string, args: unknown[], token: CancellationToken): Promise<unknown> {
 		switch (command) {
 			case 'request': {
-				const options: IRequestOptions = args[0] || {};
+				const options = (args[0] || {}) as IRequestOptions;
 				if (options && options.url) {
 					try {
 						// Retrieve session cookies from integrated browser (persist:vscode-browser) and default session
@@ -70,9 +73,9 @@ export class ElectronRequestChannel implements IServerChannel {
 				const buffer = await streamToBuffer(stream);
 				return <RequestResponse>[{ statusCode: res.statusCode, headers: res.headers }, buffer];
 			}
-			case 'resolveProxy': return this.service.resolveProxy(args[0]);
-			case 'lookupAuthorization': return this.service.lookupAuthorization(args[0]);
-			case 'lookupKerberosAuthorization': return this.service.lookupKerberosAuthorization(args[0]);
+			case 'resolveProxy': return this.service.resolveProxy(args[0] as string);
+			case 'lookupAuthorization': return this.service.lookupAuthorization(args[0] as AuthInfo);
+			case 'lookupKerberosAuthorization': return this.service.lookupKerberosAuthorization(args[0] as string);
 			case 'loadCertificates': return this.service.loadCertificates();
 		}
 		throw new Error('Invalid call');

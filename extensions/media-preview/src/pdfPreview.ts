@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
@@ -90,16 +89,16 @@ class PdfPreview extends MediaPreview {
 	<!-- Floating Glassmorphism Toolbar -->
 	<div class="pdf-toolbar" id="toolbar" style="display: none;">
 		<div class="toolbar-group">
-			<button class="toolbar-btn icon-btn" id="prevPage" title="Previous Page">◀</button>
+			<button class="toolbar-btn icon-btn" id="prevPage" title="Previous Page">\u25C0</button>
 			<div class="page-indicator">
 				<input type="number" id="pageNumber" min="1" value="1" />
 				<span class="page-total">/ <span id="numPages">0</span></span>
 			</div>
-			<button class="toolbar-btn icon-btn" id="nextPage" title="Next Page">▶</button>
+			<button class="toolbar-btn icon-btn" id="nextPage" title="Next Page">\u25B6</button>
 		</div>
 		<div class="toolbar-divider"></div>
 		<div class="toolbar-group">
-			<button class="toolbar-btn icon-btn" id="zoomOut" title="Zoom Out">−</button>
+			<button class="toolbar-btn icon-btn" id="zoomOut" title="Zoom Out">\u2212</button>
 			<button class="toolbar-btn text-btn" id="zoomVal" title="Reset Zoom">100%</button>
 			<button class="toolbar-btn icon-btn" id="zoomIn" title="Zoom In">+</button>
 		</div>

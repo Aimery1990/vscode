@@ -1,3 +1,7 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
+ *--------------------------------------------------------------------------------------------*/
+
 import * as vscode from 'vscode';
 import { GoogleOAuthService } from './googleOAuthService';
 import { GoogleAuthenticationProvider } from './googleAuthProvider';
@@ -107,4 +111,4 @@ export async function activate(context: vscode.ExtensionContext) {
 	console.log('[Google Authentication] Extension activated successfully.');
 }
 
-export function deactivate() {}
+export function deactivate() { }

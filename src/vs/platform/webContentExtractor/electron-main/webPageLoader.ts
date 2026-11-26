@@ -454,7 +454,7 @@ export class WebPageLoader extends Disposable {
 					let jobListSummary = '';
 					try {
 						jobListSummary = await this.extractJobListContent();
-					} catch {}
+					} catch { }
 
 					if (!cts.token.isCancellationRequested) {
 						result = await this.extractAccessibilityTreeContent(cts.token) ?? '';

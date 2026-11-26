@@ -1,3 +1,7 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
+ *--------------------------------------------------------------------------------------------*/
+
 import * as http from 'http';
 import * as url from 'url';
 import * as fs from 'fs';
@@ -58,7 +62,7 @@ export class GoogleOAuthService {
 		try {
 			const workspaceFolders = vscode.workspace.workspaceFolders;
 			const rootPath = workspaceFolders && workspaceFolders.length > 0 ? workspaceFolders[0].uri.fsPath : undefined;
-			
+
 			const possiblePaths = [
 				path.join(__dirname, '..', '..', '..', 'resources', 'auth', 'auth_providers.json'),
 				path.join(__dirname, '..', '..', 'resources', 'auth', 'auth_providers.json'),
