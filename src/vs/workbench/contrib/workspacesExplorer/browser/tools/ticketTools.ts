@@ -140,7 +140,7 @@ export class CreateTicketTool implements IToolImpl {
 					},
 					ticket_type: {
 						type: 'string',
-						description: 'Entity type matching an existing type definition (e.g. \'job\', \'task\', \'note\', \'resume\', \'education\').'
+						description: 'Entity type matching an existing type definition (e.g. \'job\', \'task\', \'note\', \'resume\', \'education\'). Freestyle tickets cannot be created by tools (only manually in the UI).'
 					},
 					title: {
 						type: 'string',

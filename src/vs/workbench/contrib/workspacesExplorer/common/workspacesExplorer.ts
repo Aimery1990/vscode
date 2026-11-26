@@ -77,6 +77,11 @@ export interface ICreateResourceOptions {
 	removedStatus?: string;
 	gitRepoUrl?: string;
 	gitBranch?: string;
+	/**
+	 * Set only by the manual create dialog: Freestyle tickets (type `freestyle`) may only be created there.
+	 * Without it, creating a Freestyle ticket is refused.
+	 */
+	allowFreestyle?: boolean;
 }
 
 export type CanonicalStatusCategory = 'Todo' | 'In Progress' | 'Done' | 'Blocked' | 'Removed';

@@ -23,8 +23,66 @@ export const FREESTYLE_TYPE_PROMPT = 'A Freestyle ticket defines its own compone
 /** Editor `moduleId` prefix used when the schema designer edits a Freestyle ticket's structure. */
 const FREESTYLE_DESIGNER_MODULE_ID_PREFIX = 'freestyle-ticket::';
 
+/**
+ * Normalizes a template / ticket type name for the reserved-name check: lowercase, without whitespace,
+ * `-` and `_` (so `Free Style`, `free-style`, `FREE_STYLE` all become `freestyle`).
+ */
+export function normalizeReservedTypeName(value: string | undefined | null): string {
+	return (value || '').toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+/**
+ * "freestyle" is reserved for Freestyle tickets: no template (custom module) may use it as its id or name,
+ * and a ticket type that matches it always means a Freestyle ticket.
+ */
+export function isReservedFreestyleName(value: string | undefined | null): boolean {
+	return normalizeReservedTypeName(value) === FREESTYLE_TICKET_TYPE;
+}
+
+/** True when a template's id or name is the reserved Freestyle name. */
+export function isReservedFreestyleTemplate(template: { id?: string; name?: string } | undefined | null): boolean {
+	return !!template && (isReservedFreestyleName(template.id) || isReservedFreestyleName(template.name));
+}
+
+/** A ticket type is the Freestyle type when it matches the reserved name (see {@link isReservedFreestyleName}). */
 export function isFreestyleTicketType(ticketType: string | undefined): boolean {
-	return (ticketType || '').trim().toLowerCase() === FREESTYLE_TICKET_TYPE;
+	return isReservedFreestyleName(ticketType);
+}
+
+/** Error shown when a template would be created or renamed to the reserved Freestyle name. */
+export function getReservedFreestyleNameMessage(value: string): string {
+	return `"${value}" is reserved for Freestyle tickets (tickets without a template). Please choose a different template name.`;
+}
+
+/** Error returned by every non-UI path that tries to create a Freestyle ticket. */
+export const FREESTYLE_PROGRAMMATIC_CREATE_ERROR = 'Freestyle tickets can only be created manually in the UI; choose a template type.';
+
+/**
+ * Validates a template's identity against the reserved Freestyle name. Returns an error message when the
+ * template would be created with, or renamed to, a reserved id or name; `undefined` when it is allowed.
+ * A template that already existed with exactly the same id and name (legacy data) is left alone, so saving
+ * unrelated changes keeps working; only creating or renaming into the reserved name is refused.
+ */
+export function getReservedTemplateNameError(template: { id?: string; name?: string }, existing?: { id?: string; name?: string }): string | undefined {
+	if (!isReservedFreestyleTemplate(template)) {
+		return undefined;
+	}
+	const sameIdentity = !!existing
+		&& (existing.id || '').toLowerCase() === (template.id || '').toLowerCase()
+		&& (existing.name || '') === (template.name || '');
+	if (sameIdentity) {
+		return undefined;
+	}
+	const offending = isReservedFreestyleName(template.name) ? (template.name || '') : (template.id || '');
+	return getReservedFreestyleNameMessage(offending);
+}
+
+/**
+ * Programmatic ticket creation (workflow components, the ticket runtime, AI tools) may not create Freestyle
+ * tickets. Returns the error to report when `ticketType` is the reserved Freestyle type.
+ */
+export function getProgrammaticTicketTypeError(ticketType: string | undefined): string | undefined {
+	return isReservedFreestyleName(ticketType) ? FREESTYLE_PROGRAMMATIC_CREATE_ERROR : undefined;
 }
 
 /** Where a Freestyle ticket's own structure is stored: `<ticket folder>/.agents/freestyle_schema.json`. */

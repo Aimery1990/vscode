@@ -14,7 +14,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { AgentScopeType, IAgentsManagerService, getGlobalDefaultModel } from '../../agentsManager/common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
-import { ensureFreestyleSchema, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
+import { FREESTYLE_PROGRAMMATIC_CREATE_ERROR, ensureFreestyleSchema, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
 import { AuthenticationSession, AuthenticationSessionAccount, IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { EditorsOrder } from '../../../common/editor.js';
@@ -1480,6 +1480,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	async createResourceUnderWorkspace(options: ICreateResourceOptions): Promise<ICreateResourceResult> {
+		// Freestyle tickets can only be created manually in the UI (the create dialog sets allowFreestyle)
+		if (isFreestyleTicketType(options.type) && !options.allowFreestyle) {
+			throw new Error(FREESTYLE_PROGRAMMATIC_CREATE_ERROR);
+		}
 		const targetFolderUri = options.targetParentUri || options.workspaceUri || URI.file('/Users/aimery/repos/jobs');
 		let workspaceRootUri: URI;
 		if (options.workspaceUri && !options.targetParentUri) {

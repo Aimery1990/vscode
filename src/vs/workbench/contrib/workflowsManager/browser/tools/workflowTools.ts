@@ -330,7 +330,7 @@ export class CreateTicketTool implements IToolImpl {
 					},
 					ticket_type: {
 						type: 'string',
-						description: 'The schema type ID or name (e.g. \'task\', \'job\', \'analysis\', or custom module ID).'
+						description: 'The schema type ID or name (e.g. \'task\', \'job\', \'analysis\', or custom module ID). Freestyle tickets cannot be created by tools (only manually in the UI).'
 					},
 					title: {
 						type: 'string',

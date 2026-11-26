@@ -9,7 +9,7 @@ import { IInstantiationService, createDecorator } from '../../../../platform/ins
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot, CustomFieldType, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
-import { createDefaultFreestyleSchema, ensureFreestyleSchema, isFreestyleTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
+import { FREESTYLE_PROGRAMMATIC_CREATE_ERROR, createDefaultFreestyleSchema, getProgrammaticTicketTypeError, isFreestyleTicketType, isReservedFreestyleTemplate, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
 import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
@@ -577,9 +577,19 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const title = options.title?.trim() || 'New Ticket';
 			const ticketType = options.ticketType?.trim() || 'task';
 
+			// Freestyle tickets can only be created manually in the UI (create dialog), never by workflows or AI tools
+			const freestyleError = getProgrammaticTicketTypeError(ticketType);
+			if (freestyleError) {
+				throw new Error(freestyleError);
+			}
+
 			// 1. Locate schema definition (normalize spaces, hyphens, and underscores so "Job_Filter", "Job Filter", and "job-filter" all match)
 			const allModules = await this.customModulesService.getCustomModules(wsUri);
 			const matchedModule = this._findMatchingCustomModule(allModules, ticketType);
+			if (isReservedFreestyleTemplate(matchedModule)) {
+				// A (legacy) template using the reserved name would produce a ticket read as Freestyle
+				throw new Error(FREESTYLE_PROGRAMMATIC_CREATE_ERROR);
+			}
 			const canonicalTicketType = matchedModule ? matchedModule.id : ticketType;
 
 			// 2. Prepare target parent folder path & find root workspace URI
@@ -914,9 +924,6 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			};
 
 			await this.entityPersistenceService.writeEntity4MDFiles(snapshot, parentFolderUri, true);
-			if (isFreestyleTicketType(canonicalTicketType)) {
-				await ensureFreestyleSchema(this.fileService, ticketFolderUri);
-			}
 
 			this.logService.info(`[TicketWorkflowRuntime] Created ticket '${ticketCode}' (${title}) at ${ticketFolderUri.fsPath}`);
 

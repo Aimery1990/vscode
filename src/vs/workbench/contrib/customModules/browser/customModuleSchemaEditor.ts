@@ -42,7 +42,7 @@ import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeyb
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { CodeWindow } from '../../../../base/browser/window.js';
-import { createDefaultFreestyleSchema, readFreestyleSchema, writeFreestyleSchema } from '../common/freestyleTicket.js';
+import { createDefaultFreestyleSchema, isReservedFreestyleTemplate, readFreestyleSchema, writeFreestyleSchema } from '../common/freestyleTicket.js';
 
 
 /**
@@ -1509,7 +1509,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				}));
 			}
 			if (bc.type === 'create_tickets') {
-				newField.wfTicketType = allWorkspaceModules[0]?.name || '';
+				// Freestyle tickets can only be created manually in the UI: never default to a reserved-name template
+				newField.wfTicketType = allWorkspaceModules.find(m => !isReservedFreestyleTemplate(m))?.name || '';
 				newField.wfTicketTitle = 'New Ticket {Title}';
 				newField.wfTicketPath = '.';
 				newField.wfTicketParams = {};
@@ -15127,7 +15128,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							style: 'padding: 4px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(168, 85, 247, 0.4); background: #14141d; color: #e9d5ff; min-width: 200px; cursor: pointer;'
 						})) as HTMLSelectElement;
 						append(typeSelect, $('option', { value: '' }, '-- Select Ticket Type --'));
-						allWorkspaceModules.forEach(m => {
+						// Freestyle tickets can only be created manually in the UI: not offered here
+						allWorkspaceModules.filter(m => !isReservedFreestyleTemplate(m)).forEach(m => {
 							const opt = append(typeSelect, $('option', { value: m.name }, m.name)) as HTMLOptionElement;
 							if ((field.wfTicketType || '').toLowerCase() === (m.name || '').toLowerCase()) {
 								opt.selected = true;

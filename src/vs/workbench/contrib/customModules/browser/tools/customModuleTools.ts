@@ -11,6 +11,7 @@ import { ICustomModulesService } from '../../common/customModules.js';
 import { IWorkspacesExplorerService } from '../../../workspacesExplorer/common/workspacesExplorer.js';
 import { CustomFieldType, ICustomField, ICustomModule, IActionButton, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS, normalizeFieldType } from '../../../entityPersistence/common/entityPersistence.js';
 import { resolveDefaultModel } from '../../../agentsManager/common/agentsManager.js';
+import { getReservedTemplateNameError } from '../../common/freestyleTicket.js';
 
 export const ListCustomModulesToolId = 'anyagent_list_custom_modules';
 export const GenerateCustomModuleToolId = 'anyagent_generate_custom_module';
@@ -758,7 +759,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 				properties: {
 					module_id: {
 						type: 'string',
-						description: 'Unique kebab-case or snake-case identifier for the module (e.g. \'expense_reimbursement\', \'reimbursement_approval\', \'contract_review\').'
+						description: 'Unique kebab-case or snake-case identifier for the module (e.g. \'expense_reimbursement\', \'reimbursement_approval\', \'contract_review\'). \'freestyle\' (in any spelling, e.g. \'free-style\') is reserved and cannot be used as a module id or name.'
 					},
 					module_name: {
 						type: 'string',
@@ -954,6 +955,15 @@ export class GenerateCustomModuleTool implements IToolImpl {
 
 			if (!existingMod && !params.module_name) {
 				return toolError('Missing required parameter: \'module_name\' must be provided when creating a new module.');
+			}
+
+			// "freestyle" is reserved for Freestyle tickets (no template): never create or rename a template to it
+			const reservedNameError = getReservedTemplateNameError(
+				{ id: cleanId, name: (params.module_name || existingMod?.name || cleanId).trim() },
+				existingMod ? { id: existingMod.id, name: existingMod.name } : undefined
+			);
+			if (reservedNameError) {
+				return toolError(reservedNameError);
 			}
 
 			// Clean and validate fields if provided

@@ -23,6 +23,7 @@ import {
 	getDefaultCustomModuleColor
 } from '../../entityPersistence/common/entityPersistence.js';
 import { parseTemplateYaml } from '../common/templateYaml.js';
+import { getReservedFreestyleNameMessage, getReservedTemplateNameError, isReservedFreestyleName, isReservedFreestyleTemplate } from '../common/freestyleTicket.js';
 import { ICustomModulesService } from '../common/customModules.js';
 import { CustomModuleSchemaEditorInput } from './customModuleSchemaEditorInput.js';
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
@@ -433,8 +434,49 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 		return result;
 	}
 
+	/**
+	 * "freestyle" is reserved for Freestyle tickets: returns the error for the first module that would be
+	 * created with (or renamed to) a reserved id or name. A legacy template already stored with the same id
+	 * and name is left alone so saving other changes keeps working.
+	 */
+	private async _findReservedTemplateNameError(modules: ICustomModule[], targetUri: URI | undefined): Promise<string | undefined> {
+		const globalDir = this.getGlobalEntityTypeDir();
+		for (const m of modules) {
+			if (!isReservedFreestyleTemplate(m)) {
+				continue;
+			}
+			const filename = `${m.id}.yaml`;
+			const candidates = [
+				...(targetUri ? [URI.joinPath(targetUri, '.agents', 'entity_type', filename)] : []),
+				URI.joinPath(globalDir, filename)
+			];
+			let existing: ICustomModule | null = null;
+			for (const candidate of candidates) {
+				try {
+					if (await this.fileService.exists(candidate)) {
+						existing = await this._readYamlFile<ICustomModule>(candidate);
+						if (existing) {
+							break;
+						}
+					}
+				} catch { }
+			}
+			const error = getReservedTemplateNameError(m, existing ? { id: m.id, name: typeof existing.name === 'string' ? existing.name : m.name } : undefined);
+			if (error) {
+				return error;
+			}
+		}
+		return undefined;
+	}
+
 	async saveCustomModules(modules: ICustomModule[], workspaceUri?: URI): Promise<void> {
 		const targetUri = await this._resolveTargetWorkspaceUri(workspaceUri);
+		// Checked before anything is written or deleted; callers (UI and AI tools) get the error
+		const reservedNameError = await this._findReservedTemplateNameError(modules, targetUri);
+		if (reservedNameError) {
+			this.notificationService.error(reservedNameError);
+			throw new Error(reservedNameError);
+		}
 		try {
 			const globalDir = this.getGlobalEntityTypeDir();
 			const activeIdsLower = new Set(modules.map(m => m.id.toLowerCase()));
@@ -808,19 +850,33 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 			if (found) {
 				targetModuleName = found.name;
 			} else {
+				if (isReservedFreestyleName(targetModuleId)) {
+					// Opening the designer on an unknown id would create that template
+					this.notificationService.error(getReservedFreestyleNameMessage(targetModuleId));
+					return;
+				}
 				targetModuleName = targetModuleId;
 			}
 		} else {
 			// Creating a new module: only ask for module name via quick input
 			const enteredName = await this.quickInputService.input({
 				prompt: 'Enter new custom module name',
-				placeHolder: 'e.g. Test, Release, Bug, Feature...'
+				placeHolder: 'e.g. Test, Release, Bug, Feature...',
+				validateInput: async value => {
+					const trimmed = value.trim();
+					const candidateId = trimmed.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+					return isReservedFreestyleTemplate({ id: candidateId, name: trimmed }) ? getReservedFreestyleNameMessage(trimmed) : undefined;
+				}
 			});
 			if (!enteredName || !enteredName.trim()) {
 				return;
 			}
 			targetModuleName = enteredName.trim();
 			targetModuleId = targetModuleName.toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+			if (isReservedFreestyleTemplate({ id: targetModuleId, name: targetModuleName })) {
+				this.notificationService.error(getReservedFreestyleNameMessage(targetModuleName));
+				return;
+			}
 
 			const allMods = await this.getCustomModules(targetUri);
 			const existing = allMods.find(m => m.id.toLowerCase() === targetModuleId!.toLowerCase());

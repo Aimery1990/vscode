@@ -12,7 +12,7 @@ import { IAgentsManagerService } from '../../../agentsManager/common/agentsManag
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { ISqliteTableOperationResult, ITicketWorkflowRuntimeService } from '../../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { findTemplateField, getTemplateFields, parseTemplateYaml } from '../../../customModules/common/templateYaml.js';
-import { isFreestyleTicketType, readFreestyleSchema } from '../../../customModules/common/freestyleTicket.js';
+import { getProgrammaticTicketTypeError, isFreestyleTicketType, readFreestyleSchema } from '../../../customModules/common/freestyleTicket.js';
 import { escapeRegExpCharacters } from '../../../../../base/common/strings.js';
 import { hasKey } from '../../../../../base/common/types.js';
 import { TicketWorklogStorage } from '../ticketWorklogStorage.js';
@@ -1046,6 +1046,11 @@ export class TicketDataEngine {
 	 * 2. anyagent_create_ticket
 	 */
 	public async createTicket(options: ICreateTicketToolOptions) {
+		// Freestyle tickets can only be created manually in the UI (create dialog), never by AI tools
+		const freestyleError = getProgrammaticTicketTypeError(options.ticket_type);
+		if (freestyleError) {
+			throw new Error(freestyleError);
+		}
 		const wsUri = await this.findWorkspaceUri(options.workspace_id);
 		if (!wsUri) { throw new Error(`Workspace '${options.workspace_id}' not found.`); }
 

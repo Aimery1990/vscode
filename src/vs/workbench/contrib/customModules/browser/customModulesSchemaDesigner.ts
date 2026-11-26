@@ -11,6 +11,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { ICustomModule, ICustomField, ICompositeComponent, CustomFieldType } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../common/customModules.js';
+import { getReservedFreestyleNameMessage, isReservedFreestyleTemplate } from '../common/freestyleTicket.js';
 
 export interface ISchemaDesignerOptions {
 	workspaceUri?: URI;
@@ -210,6 +211,11 @@ export class CustomModulesSchemaDesignerDialog {
 					const isReserved = ['workspace', 'job', 'project', 'task', 'workflow', 'case', 'agent', 'issue', 'analysis', 'folder', 'file'].includes(id);
 					if (isReserved) {
 						errorText.innerText = `"${val}" is a reserved system module name.`;
+						errorText.style.display = 'block';
+						return;
+					}
+					if (isReservedFreestyleTemplate({ id, name: val })) {
+						errorText.innerText = getReservedFreestyleNameMessage(val);
 						errorText.style.display = 'block';
 						return;
 					}
