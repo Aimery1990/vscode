@@ -55,11 +55,28 @@ import { IWebContentExtractorService, WebContentExtractResult } from '../../../.
 import { ITicketWorkflowRuntimeService, IPrimitiveExecutionStepResult } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
+import { parseMediaSubtitlesState, pickMediaSubtitlesState, resolveMediaSubtitlesConfig, IMediaSubtitleFieldProps } from '../../voiceModels/common/subtitleConfig.js';
+import { MediaSubtitlesPanel } from './mediaSubtitles/mediaSubtitlesPanel.js';
 
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
 	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
 
 /** Text for a DOM text node / attribute value: `undefined` / `null` become an empty string. */
+/** The subtitle settings of a media player field, passed to the ticket card as JSON (CI-45). */
+function mediaSubtitleFieldProps(field: IMediaSubtitleFieldProps): IMediaSubtitleFieldProps {
+	return {
+		mediaSubtitleProvider: field.mediaSubtitleProvider,
+		mediaSubtitleModel: field.mediaSubtitleModel,
+		mediaSubtitleLanguage: field.mediaSubtitleLanguage,
+		mediaMaxUploadMb: field.mediaMaxUploadMb,
+		mediaMaxDurationMin: field.mediaMaxDurationMin,
+		mediaSubtitleDisplayMode: field.mediaSubtitleDisplayMode,
+		mediaDictationUnit: field.mediaDictationUnit,
+		mediaDictationSeconds: field.mediaDictationSeconds,
+		mediaDictationAutoPause: field.mediaDictationAutoPause
+	};
+}
+
 function textOf(value: unknown): string {
 	return value === undefined || value === null ? '' : String(value);
 }
@@ -1247,6 +1264,8 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private _mediaCleanupFns: Array<() => void> = [];
+	/** Subtitle panels of the media player cards currently on the page (CI-45). */
+	private readonly _mediaSubtitlePanels = new WeakMap<HTMLElement, MediaSubtitlesPanel>();
 
 	private _disposeMediaCleanupFns(): void {
 		while (this._mediaCleanupFns.length > 0) {
@@ -11960,14 +11979,32 @@ ${rawErr}
 		return ttsData;
 	}
 
+	/** The stored JSON value of a media player field as an object (undefined when it is a plain path or missing). */
+	private _storedMediaPlayerValue(fieldKey: string): Record<string, unknown> | undefined {
+		const raw = this._lastParsedData?.customMetadata?.[fieldKey];
+		if (typeof raw !== 'string' || !raw.trim().startsWith('{')) {
+			return undefined;
+		}
+		try {
+			const parsed: unknown = JSON.parse(raw);
+			return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
 	private async _saveMediaPlayerDataFromCard(card: HTMLElement, fieldKey: string): Promise<void> {
+		const subtitlePanel = this._mediaSubtitlePanels.get(card);
 		const mediaData = {
 			mediaFilePath: card.getAttribute('data-media-path') || '',
 			mediaFileName: card.getAttribute('data-media-name') || '',
 			mediaKind: card.getAttribute('data-media-kind') || 'audio',
 			mediaMimeType: card.getAttribute('data-media-mime') || '',
 			mediaPlaybackRate: parseFloat(card.getAttribute('data-playback-rate') || '1') || 1.0,
-			mediaAutoPlay: card.getAttribute('data-autoplay') === 'true'
+			mediaAutoPlay: card.getAttribute('data-autoplay') === 'true',
+			// Subtitles + dictation state (CI-45): keep what is stored, the live panel wins.
+			...pickMediaSubtitlesState(this._storedMediaPlayerValue(fieldKey)),
+			...(subtitlePanel ? subtitlePanel.getState() : {})
 		};
 
 		const updatedCustom = {
@@ -12176,6 +12213,7 @@ ${rawErr}
 
 			let activeKind: 'audio' | 'video' = card.getAttribute('data-media-kind') === 'video' ? 'video' : 'audio';
 			let cardBlobUrl: string | undefined;
+			let cardSubtitlesPanel: MediaSubtitlesPanel | undefined;
 			let cardLocalFileUri: URI | undefined;
 			let cardTriedProtocolFallback = false;
 			let cardKnownDuration = 0;
@@ -12208,7 +12246,7 @@ ${rawErr}
 				videoEl.style.objectFit = '';
 				try {
 					mountEl.insertBefore(videoStageWrap, audioEl);
-					mountEl.appendChild(customPlayerBar);
+					mountEl.insertBefore(customPlayerBar, audioEl.nextSibling);
 				} catch { }
 				if (cardFullscreenOverlayEl && cardFullscreenOverlayEl.parentElement) {
 					cardFullscreenOverlayEl.parentElement.removeChild(cardFullscreenOverlayEl);
@@ -12429,6 +12467,7 @@ ${rawErr}
 				targetEl.defaultPlaybackRate = cardPlaybackRate;
 				targetEl.playbackRate = cardPlaybackRate;
 				targetEl.load();
+				cardSubtitlesPanel?.onMediaChanged();
 			};
 
 			const loadCardFromLocalPath = async (localPath: string, displayFileName?: string, persistToTicket: boolean = true) => {
@@ -12668,6 +12707,7 @@ ${rawErr}
 				videoStageWrap.style.display = 'none';
 				customPlayerBar.style.display = 'none';
 				updateBadges('', '', 'audio', '');
+				cardSubtitlesPanel?.onMediaChanged();
 				await this._saveMediaPlayerDataFromCard(card, fieldKey);
 			};
 
@@ -12723,6 +12763,38 @@ ${rawErr}
 			dropZone.ondragover = onDragOver;
 			dropZone.ondragleave = onDragLeave;
 			dropZone.ondrop = onDrop;
+
+			// Subtitles + dictation (CI-45): only when enabled in the component settings.
+			const subtitlesConfigRaw = card.getAttribute('data-subtitles-config') || '';
+			if (subtitlesConfigRaw) {
+				let fieldProps: IMediaSubtitleFieldProps = {};
+				try {
+					fieldProps = JSON.parse(subtitlesConfigRaw) as IMediaSubtitleFieldProps;
+				} catch { }
+				const subsMount = $('div.media-subtitles-mount', { style: 'width: 100%;' });
+				mountEl.insertBefore(subsMount, customPlayerBar.nextSibling);
+				const panel = this._instantiationService.createInstance(MediaSubtitlesPanel, subsMount, {
+					ticketFolder: this._entityUri,
+					fieldKey,
+					mediaElements: [audioEl, videoEl],
+					getActiveMedia: getActiveEl,
+					getMediaSource: () => {
+						const path = card.getAttribute('data-media-path') || '';
+						if (!cardBlobUrl && !path) {
+							return undefined;
+						}
+						return { name: card.getAttribute('data-media-name') || path.split(/[\\/]/).pop() || 'media', path: path || undefined, blobUrl: cardBlobUrl };
+					},
+					saveState: () => { this._saveMediaPlayerDataFromCard(card, fieldKey).catch(() => { }); }
+				}, resolveMediaSubtitlesConfig(fieldProps), parseMediaSubtitlesState(this._storedMediaPlayerValue(fieldKey)));
+				cardSubtitlesPanel = panel;
+				this._mediaSubtitlePanels.set(card, panel);
+				this._mediaCleanupFns.push(() => {
+					// Dispose first: it flushes a pending save, which still reads this panel's state.
+					panel.dispose();
+					this._mediaSubtitlePanels.delete(card);
+				});
+			}
 
 			if (savedFilePath) {
 				await loadCardFromLocalPath(savedFilePath, savedFileName, false);
@@ -19508,7 +19580,7 @@ ${interpolatedPrompt}`;
 			rawCustomMap.delete(k);
 		}
 
-		interface IRenderField {
+		interface IRenderField extends IMediaSubtitleFieldProps {
 			key: string;
 			label: string;
 			type: string;
@@ -19720,6 +19792,7 @@ ${interpolatedPrompt}`;
 					mediaMimeType: f.mediaMimeType,
 					mediaPlaybackRate: f.mediaPlaybackRate,
 					mediaAutoPlay: f.mediaAutoPlay,
+					...(f.mediaSubtitlesEnabled ? { mediaSubtitlesEnabled: true, ...mediaSubtitleFieldProps(f) } : {}),
 					id: f.id,
 					pythonPath: f.pythonPath,
 					pythonCode: f.pythonCode,
@@ -21555,7 +21628,7 @@ ${interpolatedPrompt}`;
 					const resolvedFileName = mediaFileName || (interpolatedMediaPath ? (interpolatedMediaPath.split(/[\\/]/).pop() || interpolatedMediaPath) : '');
 					const detected = detectMediaFileInfo(resolvedFileName || interpolatedMediaPath, mediaMimeType);
 
-					customFieldsContent.push(part(['sectionCards', 'mediaPlayerPrimitiveCards'], withParts(() => $('div.section-card.custom-property-card.media-player-primitive-card', { 'data-field-key': textOf(rawKey), 'data-media-path': textOf(interpolatedMediaPath), 'data-media-name': textOf(resolvedFileName), 'data-media-kind': textOf(detected.kind || mediaKind), 'data-media-mime': textOf(detected.mimeType || mediaMimeType), 'data-playback-rate': textOf(String(mediaPlaybackRate)), 'data-autoplay': (mediaAutoPlay ? 'true' : 'false') },
+					customFieldsContent.push(part(['sectionCards', 'mediaPlayerPrimitiveCards'], withParts(() => $('div.section-card.custom-property-card.media-player-primitive-card', { 'data-field-key': textOf(rawKey), 'data-media-path': textOf(interpolatedMediaPath), 'data-media-name': textOf(resolvedFileName), 'data-media-kind': textOf(detected.kind || mediaKind), 'data-media-mime': textOf(detected.mimeType || mediaMimeType), 'data-playback-rate': textOf(String(mediaPlaybackRate)), 'data-autoplay': (mediaAutoPlay ? 'true' : 'false'), 'data-subtitles-config': fieldItem.mediaSubtitlesEnabled ? JSON.stringify(mediaSubtitleFieldProps(fieldItem)) : '' },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
 								$('span', undefined, k),

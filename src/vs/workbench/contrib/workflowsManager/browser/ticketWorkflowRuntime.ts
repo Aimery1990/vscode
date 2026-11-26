@@ -3,6 +3,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { URI } from '../../../../base/common/uri.js';
+import { pickMediaSubtitlesState } from '../../voiceModels/common/subtitleConfig.js';
+import { parseSubtitleDocument, toTimedText } from '../../voiceModels/common/subtitles.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IInstantiationService, createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
@@ -2096,6 +2098,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							let mediaPlaybackRate = typeof field.mediaPlaybackRate === 'number' ? field.mediaPlaybackRate : 1.0;
 							let mediaAutoPlay = Boolean(field.mediaAutoPlay);
 							let mediaMimeType = field.mediaMimeType || '';
+							let storedMediaValue: Record<string, unknown> | undefined;
 
 							if (customMetadata[fieldLabel]) {
 								const metaVal = customMetadata[fieldLabel];
@@ -2104,6 +2107,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 										try {
 											const parsed = JSON.parse(trimmed);
+											storedMediaValue = isWorkflowRecord(parsed) ? parsed : undefined;
 											if (parsed.mediaFilePath !== undefined) { mediaFilePath = String(parsed.mediaFilePath); }
 											else if (parsed.filePath !== undefined) { mediaFilePath = String(parsed.filePath); }
 											if (parsed.mediaFileName !== undefined) { mediaFileName = String(parsed.mediaFileName); }
@@ -2131,8 +2135,18 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								mediaKind: detected.kind,
 								mediaMimeType: detected.mimeType,
 								mediaPlaybackRate,
-								mediaAutoPlay
+								mediaAutoPlay,
+								// Keep the subtitles file reference and dictation answers (CI-45).
+								...pickMediaSubtitlesState(storedMediaValue)
 							});
+							// With subtitles enabled and extracted, the field output is the timed subtitle text.
+							const subtitlesText = field.mediaSubtitlesEnabled ? await this._readMediaSubtitlesText(ticketUri, storedMediaValue) : '';
+							if (subtitlesText) {
+								contextVariables[`${fieldLabel} Path`] = stepOutput;
+								contextVariables[`${fieldLabel} Subtitles`] = subtitlesText;
+								contextVariables[this._cleanKey(`${fieldLabel} Subtitles`)] = subtitlesText;
+								stepOutput = subtitlesText;
+							}
 							contextVariables[fieldLabel] = stepOutput;
 							contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 
@@ -4648,6 +4662,21 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			return u.startsWith('file://') ? URI.parse(u) : URI.file(u);
 		}
 		return u;
+	}
+
+	/** Timed subtitle text of a media player field whose stored value references a subtitles file (CI-45); '' when there is none. */
+	private async _readMediaSubtitlesText(ticketUri: URI, storedValue: Record<string, unknown> | undefined): Promise<string> {
+		const rel = typeof storedValue?.subtitlesFile === 'string' ? storedValue.subtitlesFile : '';
+		if (!rel) {
+			return '';
+		}
+		try {
+			const content = await this.fileService.readFile(URI.joinPath(ticketUri, rel));
+			const doc = parseSubtitleDocument(content.value.toString());
+			return doc ? toTimedText(doc.segments) : '';
+		} catch {
+			return '';
+		}
 	}
 
 	private _cleanKey(k: string): string {
