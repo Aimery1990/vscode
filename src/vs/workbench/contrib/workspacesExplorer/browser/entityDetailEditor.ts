@@ -237,6 +237,13 @@ interface IEditorParts {
 	worklogPreviewContent?: HTMLElement;
 }
 
+/**
+ * Whether a ticket's page shows its "Instructions" card (the Ticket Prompt and Ticket Type Prompt boxes). Hidden for
+ * now (UI-05); only the card is hidden: the prompts are still stored in instruction.md, used by runs and the AI, and
+ * editable through the AI edit / JSON paste paths. Set to `true` to bring the card back. Agent pages always show it.
+ */
+const SHOW_TICKET_INSTRUCTIONS = false;
+
 type EditorPartRole = keyof IEditorParts;
 
 /** Roles that keep every element built for them (in build order). */
@@ -22489,78 +22496,82 @@ ${interpolatedPrompt}`;
 							)
 						)))
 					] : []),
-					part('sectionCards', withParts(() => $('div.section-card', { style: wfNode ? 'display: none;' : undefined },
-						part('sectionTitle', withParts(() => $('div.section-title', undefined,
-							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
-								$('span', undefined, isAgent ? 'System Prompt & Persona Instructions' : 'Instructions')
-							),
-							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+					// Instructions card (Ticket Prompt / Ticket Type Prompt); hidden on tickets unless SHOW_TICKET_INSTRUCTIONS is on.
+					// An agent's page keeps it: there it holds the agent's System Prompt / Persona.
+					...((SHOW_TICKET_INSTRUCTIONS || isAgent) ? [
+						part('sectionCards', withParts(() => $('div.section-card', { style: wfNode ? 'display: none;' : undefined },
+							part('sectionTitle', withParts(() => $('div.section-title', undefined,
+								$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+									$('span', undefined, isAgent ? 'System Prompt & Persona Instructions' : 'Instructions')
+								),
+								$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
+									...(isAgent && agentSystemPrompt ? [
+										$<HTMLButtonElement>('button#copy-system-prompt-btn.btn-secondary', { type: 'button', 'data-prompt': textOf(agentSystemPrompt), style: 'font-size: 0.78em; padding: 3px 8px; display: inline-flex; align-items: center; gap: 4px;', title: 'Copy System Prompt' },
+											$('span', undefined, 'Copy Prompt')
+										)
+									] : []),
+									part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': (isAgent ? '/Instructions/System Prompt' : '/Instructions'), 'data-ai-field-type': (isAgent ? 'textarea' : 'container'), 'data-ai-field-label': (isAgent ? 'System Prompt' : 'Instructions'), 'data-ai-current-value': textOf(agentSystemPrompt || data.ticketPrompt || ''), title: 'Edit with AI' },
+										$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
+											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+										)
+									))
+								)
+							))),
+							$('div', { style: 'display: flex; flex-direction: column; gap: 12px;' },
 								...(isAgent && agentSystemPrompt ? [
-									$<HTMLButtonElement>('button#copy-system-prompt-btn.btn-secondary', { type: 'button', 'data-prompt': textOf(agentSystemPrompt), style: 'font-size: 0.78em; padding: 3px 8px; display: inline-flex; align-items: center; gap: 4px;', title: 'Copy System Prompt' },
-										$('span', undefined, 'Copy Prompt')
+									$('div.instruction-item', { style: 'border-left: 3px solid #f472b6; background: rgba(244, 114, 182, 0.04); padding: 14px 18px; border-radius: 0 6px 6px 0; border: 1px solid rgba(244, 114, 182, 0.18); border-left-width: 3px;' },
+										$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;' },
+											$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #f472b6; letter-spacing: 0.04em; text-transform: uppercase;' },
+												'Core System Prompt / Persona'
+											),
+											part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/System Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'System Prompt', 'data-ai-current-value': textOf(agentSystemPrompt), title: 'Edit System Prompt with AI' },
+												$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+													$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+												)
+											))
+										),
+										$('div', { style: 'font-size: 0.9em; opacity: 0.95; line-height: 1.6; font-family: var(--vscode-editor-font-family, monospace); white-space: pre-wrap; word-break: break-word;' },
+											...this._renderMarkdown(agentSystemPrompt)
+										)
 									)
 								] : []),
-								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': (isAgent ? '/Instructions/System Prompt' : '/Instructions'), 'data-ai-field-type': (isAgent ? 'textarea' : 'container'), 'data-ai-field-label': (isAgent ? 'System Prompt' : 'Instructions'), 'data-ai-current-value': textOf(agentSystemPrompt || data.ticketPrompt || ''), title: 'Edit with AI' },
-									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
-										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
-									)
-								))
-							)
-						))),
-						$('div', { style: 'display: flex; flex-direction: column; gap: 12px;' },
-							...(isAgent && agentSystemPrompt ? [
-								$('div.instruction-item', { style: 'border-left: 3px solid #f472b6; background: rgba(244, 114, 182, 0.04); padding: 14px 18px; border-radius: 0 6px 6px 0; border: 1px solid rgba(244, 114, 182, 0.18); border-left-width: 3px;' },
-									$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;' },
-										$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #f472b6; letter-spacing: 0.04em; text-transform: uppercase;' },
-											'Core System Prompt / Persona'
+								$('div.instruction-item', { style: 'border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;' },
+									$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;' },
+										$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;' },
+											isAgent ? 'Instance Rules / Ticket Prompt' : 'Ticket Prompt'
 										),
-										part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/System Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'System Prompt', 'data-ai-current-value': textOf(agentSystemPrompt), title: 'Edit System Prompt with AI' },
+										part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/Ticket Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'Ticket Prompt', 'data-ai-current-value': textOf(data.ticketPrompt || ''), title: 'Edit Ticket Prompt with AI' },
 											$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 												$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 											)
 										))
 									),
-									$('div', { style: 'font-size: 0.9em; opacity: 0.95; line-height: 1.6; font-family: var(--vscode-editor-font-family, monospace); white-space: pre-wrap; word-break: break-word;' },
-										...this._renderMarkdown(agentSystemPrompt)
+									$('div.instruction-prompt-content', { 'data-prompt-key': 'Ticket Prompt', style: 'font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;', title: 'Click to edit Ticket Prompt manually' },
+										...(ticketPromptDisplay ? [...this._renderMarkdown(ticketPromptDisplay)] : [
+											$('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No Ticket Prompt configured. Click to edit manually.')
+										])
+									)
+								),
+								$('div.instruction-item', { style: 'border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;' },
+									$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;' },
+										$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;' },
+											isAgent ? 'System Type Prompt' : 'Ticket Type Prompt'
+										),
+										part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/Ticket Type Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'Ticket Type Prompt', 'data-ai-current-value': textOf(typePromptDisplay || ''), title: 'Edit Ticket Type Prompt with AI' },
+											$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
+												$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
+											)
+										))
+									),
+									$('div.instruction-prompt-content', { 'data-prompt-key': 'Ticket Type Prompt', style: 'font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;', title: 'Click to edit Ticket Type Prompt manually' },
+										...(typePromptDisplay ? [...this._renderMarkdown(typePromptDisplay)] : [
+											$('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No Ticket Type Prompt configured. Click to edit manually.')
+										])
 									)
 								)
-							] : []),
-							$('div.instruction-item', { style: 'border-left: 3px solid #38bdf8; background: rgba(56, 189, 248, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(56, 189, 248, 0.15); border-left-width: 3px;' },
-								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;' },
-									$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;' },
-										isAgent ? 'Instance Rules / Ticket Prompt' : 'Ticket Prompt'
-									),
-									part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/Ticket Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'Ticket Prompt', 'data-ai-current-value': textOf(data.ticketPrompt || ''), title: 'Edit Ticket Prompt with AI' },
-										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
-											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
-										)
-									))
-								),
-								$('div.instruction-prompt-content', { 'data-prompt-key': 'Ticket Prompt', style: 'font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;', title: 'Click to edit Ticket Prompt manually' },
-									...(ticketPromptDisplay ? [...this._renderMarkdown(ticketPromptDisplay)] : [
-										$('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No Ticket Prompt configured. Click to edit manually.')
-									])
-								)
-							),
-							$('div.instruction-item', { style: 'border-left: 3px solid #a78bfa; background: rgba(167, 139, 250, 0.04); padding: 12px 16px; border-radius: 0 6px 6px 0; border: 1px solid rgba(167, 139, 250, 0.15); border-left-width: 3px;' },
-								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;' },
-									$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;' },
-										isAgent ? 'System Type Prompt' : 'Ticket Type Prompt'
-									),
-									part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/Ticket Type Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'Ticket Type Prompt', 'data-ai-current-value': textOf(typePromptDisplay || ''), title: 'Edit Ticket Type Prompt with AI' },
-										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
-											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
-										)
-									))
-								),
-								$('div.instruction-prompt-content', { 'data-prompt-key': 'Ticket Type Prompt', style: 'font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;', title: 'Click to edit Ticket Type Prompt manually' },
-									...(typePromptDisplay ? [...this._renderMarkdown(typePromptDisplay)] : [
-										$('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No Ticket Type Prompt configured. Click to edit manually.')
-									])
-								)
 							)
-						)
-					))),
+						)))
+					] : []),
 					...customFieldsContent,
 					...(isFreestyleTicket ? [this._buildFreestyleAddComponentsCard()] : []),
 					part('sectionCards', withParts(() => $('div.section-card', { style: `max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;${this._isPreviewMode ? ' display: none;' : ''}` },
