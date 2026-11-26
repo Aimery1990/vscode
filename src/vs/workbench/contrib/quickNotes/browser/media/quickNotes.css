@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 .quick-notes-viewpane {
@@ -220,7 +219,7 @@
 	box-sizing: border-box;
 	background: transparent;
 	color: var(--vscode-input-foreground, var(--vscode-editor-foreground, #cccccc));
-	font-family: var(--vscode-editor-font-family, var(--monaco-monospace-font, monospace));
+	font-family: var(--monaco-monospace-font, monospace);
 	font-size: 12px;
 	line-height: 1.5;
 	white-space: pre-wrap;
@@ -322,7 +321,7 @@
 	color: inherit;
 	cursor: pointer;
 	font-size: 10.5px;
-	font-family: var(--vscode-editor-font-family, monospace);
+	font-family: monospace;
 }
 
 .quick-note-audio-play-btn .codicon {

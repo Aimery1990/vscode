@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import './media/agentsManager.css';
@@ -362,6 +361,7 @@ export class AgentsManagerPane extends ViewPane {
 		}
 
 		if (isMissing) {
+			// allow-any-unicode-next-line
 			// Remove Action (Trash 🗑️)
 			const removeBtn = append(cardActions, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
 			removeBtn.style.fontSize = '12px';
@@ -428,7 +428,7 @@ export class AgentsManagerPane extends ViewPane {
 			const actions: Action[] = [];
 
 			if (isMissing) {
-				actions.push(new Action('delete_missing_agent', 'Remove Missing Agent Record (🗑️)', ThemeIcon.asClassName(Codicon.trash), true, async () => {
+				actions.push(new Action('delete_missing_agent', 'Remove Missing Agent Record (\uD83D\uDDD1️)', ThemeIcon.asClassName(Codicon.trash), true, async () => {
 					const confirm = await this.dialogService.confirm({
 						type: 'warning',
 						message: `Remove missing agent '${agent.name}'?`,
@@ -441,7 +441,7 @@ export class AgentsManagerPane extends ViewPane {
 					}
 				}));
 			} else {
-				actions.push(new Action('open_agent_details', 'Open Agent Details (🤖)', ThemeIcon.asClassName(Codicon.layoutSidebarRightOff), true, async () => {
+				actions.push(new Action('open_agent_details', 'Open Agent Details (\uD83E\uDD16)', ThemeIcon.asClassName(Codicon.layoutSidebarRightOff), true, async () => {
 					try {
 						const folderUri = await this.agentsManagerService.ensureAgentFolder(agent.id);
 						if (folderUri) {
@@ -459,7 +459,7 @@ export class AgentsManagerPane extends ViewPane {
 					actions.push(new Action('show_in_explorer', 'Show in Explorer', ThemeIcon.asClassName(Codicon.folderLibrary), true, async () => {
 						await this.showInExplorer(agentFolderUri);
 					}));
-					actions.push(new Action('open_agent_folder', 'Open Instruction Preview (📁)', ThemeIcon.asClassName(Codicon.folderOpened), true, async () => {
+					actions.push(new Action('open_agent_folder', 'Open Instruction Preview (\uD83D\uDCC1)', ThemeIcon.asClassName(Codicon.folderOpened), true, async () => {
 						const instructionUri = URI.file(`${agent.folderPath}/.agents/instruction.md`);
 						try {
 							await this.commandService.executeCommand('markdown.showPreview', instructionUri);
@@ -487,7 +487,7 @@ export class AgentsManagerPane extends ViewPane {
 		// Role Subtitle
 		const roleRow = append(card, $('.role-row'));
 		if (isMissing) {
-			roleRow.textContent = `⚠️ Files missing on disk. Click 🗑️ to remove record.`;
+			roleRow.textContent = `⚠️ Files missing on disk. Click \uD83D\uDDD1️ to remove record.`;
 			roleRow.style.color = '#f43f5e';
 		} else if (agent.role && !agent.role.endsWith('Agent')) {
 			roleRow.textContent = agent.role;
@@ -512,7 +512,7 @@ export class AgentsManagerPane extends ViewPane {
 		// Prompt Preview
 		const promptPreview = append(card, $('.prompt-preview'));
 		promptPreview.textContent = `"${agent.systemPrompt}"`;
-		
+
 		const hoverMarkdown = {
 			markdown: new MarkdownString(agent.systemPrompt),
 			markdownNotSupportedFallback: agent.systemPrompt

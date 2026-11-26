@@ -1,15 +1,17 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Any Agent / Google Deepmind. All rights reserved.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { getActiveDocument } from '../../../../base/browser/dom.js';
-import { mainWindow } from '../../../../base/browser/window.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 
 const ttPolicy = createTrustedTypesPolicy('accountSignInModal', { createHTML: value => value });
+
+/** The overlay of the most recently opened sign-in modal, per document (shared across instances so only one is shown). */
+const activeSignInModalOverlays = new WeakMap<Document, HTMLElement>();
 
 export class AccountSignInModal extends Disposable {
 	private container: HTMLElement | undefined;
@@ -41,11 +43,11 @@ export class AccountSignInModal extends Disposable {
 	}
 
 	private createModal(isForce = false): void {
-		const targetDocument = getActiveDocument() || window.document || mainWindow.document;
+		const targetDocument = getActiveDocument();
 
 		// Remove any existing modal
-		const existing = targetDocument.querySelector('.anyagent-signin-modal-overlay');
-		if (existing) {
+		const existing = activeSignInModalOverlays.get(targetDocument);
+		if (existing && existing.isConnected) {
 			existing.remove();
 		}
 
@@ -87,7 +89,7 @@ export class AccountSignInModal extends Disposable {
 		// Close Button
 		if (!isForce) {
 			const closeBtn = targetDocument.createElement('button');
-			this.setElementHTML(closeBtn, '✕');
+			this.setElementHTML(closeBtn, '\u2715');
 			closeBtn.style.cssText = `
 				position: absolute;
 				top: 18px;
@@ -253,6 +255,7 @@ export class AccountSignInModal extends Disposable {
 		// Synchronously append overlay to DOM
 		targetDocument.body.appendChild(overlay);
 		this.container = overlay;
+		activeSignInModalOverlays.set(targetDocument, overlay);
 	}
 
 	private createProviderButton(
@@ -266,7 +269,7 @@ export class AccountSignInModal extends Disposable {
 		const btn = targetDocument.createElement('button');
 		const isPrimaryBlue = bgColor === '#2563eb' || bgColor === '#0e639c';
 		const borderStyle = isPrimaryBlue ? 'none' : '1px solid #3c3c3c';
-		
+
 		btn.style.cssText = `
 			width: 100%;
 			height: 38px;

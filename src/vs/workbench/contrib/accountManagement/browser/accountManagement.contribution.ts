@@ -1,11 +1,10 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Any Agent / Google Deepmind. All rights reserved.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { localize2 } from '../../../../nls.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
-import { CommandsRegistry } from '../../../../platform/commands/common/commands.js';
 import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../common/contributions.js';
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
@@ -74,18 +73,9 @@ registerAction2(OpenAccountPanelAction);
 registerAction2(SignInOrLogInAction);
 registerAction2(AccountPreferencesAction);
 
-// Also register explicitly in CommandsRegistry
-CommandsRegistry.registerCommand('anyagent.signInOrLogIn', (accessor: ServicesAccessor) => {
-	const instantiationService = accessor.get(IInstantiationService);
-	const modal = instantiationService.createInstance(AccountSignInModal);
-	modal.show();
-});
-
-CommandsRegistry.registerCommand('anyagent.accountPreferences', (accessor: ServicesAccessor) => {
-	const instantiationService = accessor.get(IInstantiationService);
-	const dialog = instantiationService.createInstance(AccountManagementDialog);
-	dialog.show('Account');
-});
+// The plain `anyagent.signInOrLogIn` / `anyagent.accountPreferences` commands are registered
+// next to the dialogs in accountManagementDialog.ts so that they also exist in windows that do
+// not load this contribution (the global composite bar invokes them by id).
 
 export class AccountManagementContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.accountManagement';

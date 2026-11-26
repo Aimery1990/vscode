@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -13,6 +12,15 @@ import { IMainProcessService } from '../../../../platform/ipc/common/mainProcess
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 import { ALIYUN_PROVIDER_ID, getDefaultBaseUrl, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
 import { IVoiceModel, IVoiceModelService, ITranscribeResult } from '../common/voiceModel.js';
+
+/** Subset of the Gemini `generateContent` response that transcription reads. */
+interface IGeminiGenerateContentResponse {
+	candidates?: Array<{
+		content?: {
+			parts?: Array<{ text?: string }>;
+		};
+	}>;
+}
 
 const STORAGE_KEY_MODELS = 'workbench.voiceModels.models';
 const STORAGE_KEY_ACTIVE_ID = 'workbench.voiceModels.activeId';
@@ -349,7 +357,7 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 					try {
 						const parsed = JSON.parse(errorText);
 						detail = parsed.error?.message || detail;
-					} catch {}
+					} catch { }
 					const msg = `Google Gemini Error (${response.res.statusCode}): ${detail}`;
 					await this._updateModelStatus(model.id, 'error', msg);
 					return { success: false, message: msg };
@@ -425,8 +433,8 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 					return { success: false, message: msg };
 				}
 			}
-		} catch (err: any) {
-			const msg = `Connection failed: ${err.message || String(err)}`;
+		} catch (err) {
+			const msg = `Connection failed: ${(err as Error).message || String(err)}`;
 			await this._updateModelStatus(model.id, 'error', msg);
 			return { success: false, message: msg };
 		}
@@ -470,11 +478,11 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 			} else {
 				return await this._transcribeWithCustom(audioBlob, activeModel, apiKey);
 			}
-		} catch (err: any) {
+		} catch (err) {
 			console.error('[VoiceModelService] Transcription error:', err);
 			return {
 				text: '',
-				error: err.message || String(err),
+				error: (err as Error).message || String(err),
 				modelUsed: activeModel.name
 			};
 		}
@@ -526,7 +534,7 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 			try {
 				const json = JSON.parse(errorText);
 				errorMsg = json.error?.message || errorMsg;
-			} catch {}
+			} catch { }
 			return {
 				text: '',
 				error: `Gemini audio transcription failed: ${errorMsg}`,
@@ -534,7 +542,7 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 			};
 		}
 
-		const data = await asJson<any>(response);
+		const data = await asJson<IGeminiGenerateContentResponse>(response);
 		const candidate = data?.candidates?.[0];
 		let transcribed = '';
 		if (candidate?.content?.parts) {
@@ -577,7 +585,7 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 			try {
 				const j = JSON.parse(errText);
 				msg = j.error?.message || msg;
-			} catch {}
+			} catch { }
 			return {
 				text: '',
 				error: `Whisper transcription failed: ${msg}`,

@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Any Agent / Google Deepmind. All rights reserved.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -33,13 +33,13 @@ export class GoogleSignInAction extends Action2 {
 			} else {
 				await commandService.executeCommand('anyagent.google.login');
 			}
-		} catch (err: any) {
+		} catch (err) {
 			try {
 				await commandService.executeCommand('anyagent.google.login');
-			} catch (e: any) {
+			} catch (e) {
 				notificationService.notify({
 					severity: Severity.Error,
-					message: localize('googleSignInError', "Failed to launch Google Sign-In: {0}", err.message || e.message)
+					message: localize('googleSignInError', "Failed to launch Google Sign-In: {0}", (err as Error).message || (e as Error).message)
 				});
 			}
 		}

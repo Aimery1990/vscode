@@ -1,10 +1,10 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import './media/quickNotes.css';
 import { $, addDisposableListener, append, clearNode, EventType } from '../../../../base/browser/dom.js';
+import { mainWindow } from '../../../../base/browser/window.js';
 import { Action, Separator } from '../../../../base/common/actions.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
@@ -27,9 +27,9 @@ import { IQuickNoteAttachment, IQuickNoteItem, IQuickNotesService, QuickNoteStat
 
 interface IActiveVoiceRecording {
 	readonly noteId: string;
-	readonly mediaRecorder: any;
+	readonly mediaRecorder: MediaRecorder;
 	readonly stream: MediaStream;
-	timer?: ReturnType<typeof setInterval>;
+	timer?: number;
 	seconds: number;
 	cancelled: boolean;
 	selectionStart?: number;
@@ -227,7 +227,7 @@ export class QuickNotesPane extends ViewPane {
 		}
 		rec.cancelled = true;
 		if (rec.timer !== undefined) {
-			clearInterval(rec.timer);
+			mainWindow.clearInterval(rec.timer);
 			rec.timer = undefined;
 		}
 		this.activeRecording = undefined;
@@ -252,7 +252,7 @@ export class QuickNotesPane extends ViewPane {
 			return;
 		}
 		if (rec.timer !== undefined) {
-			clearInterval(rec.timer);
+			mainWindow.clearInterval(rec.timer);
 			rec.timer = undefined;
 		}
 		this.activeRecording = undefined;
@@ -297,7 +297,7 @@ export class QuickNotesPane extends ViewPane {
 		try {
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 			const audioChunks: BlobPart[] = [];
-			const mediaRecorder = new (window as any).MediaRecorder(stream);
+			const mediaRecorder = new mainWindow.MediaRecorder(stream);
 
 			const recording: IActiveVoiceRecording = {
 				noteId,
@@ -310,7 +310,7 @@ export class QuickNotesPane extends ViewPane {
 			};
 			this.activeRecording = recording;
 
-			mediaRecorder.ondataavailable = (e: any) => {
+			mediaRecorder.ondataavailable = (e: BlobEvent) => {
 				if (e.data && e.data.size > 0) {
 					audioChunks.push(e.data);
 				}
@@ -318,7 +318,7 @@ export class QuickNotesPane extends ViewPane {
 
 			mediaRecorder.onstop = async () => {
 				if (recording.timer !== undefined) {
-					clearInterval(recording.timer);
+					mainWindow.clearInterval(recording.timer);
 					recording.timer = undefined;
 				}
 				stream.getTracks().forEach(track => track.stop());
@@ -367,8 +367,8 @@ export class QuickNotesPane extends ViewPane {
 					} else if (result.error) {
 						this.notificationService.warn(localize('quickNotes.transcribeWarn', "Voice Transcription: {0}", result.error));
 					}
-				} catch (err: any) {
-					this.notificationService.error(localize('quickNotes.transcribeError', "Voice transcription error: {0}", err?.message || String(err)));
+				} catch (err) {
+					this.notificationService.error(localize('quickNotes.transcribeError', "Voice transcription error: {0}", (err as Error | undefined)?.message || String(err)));
 				} finally {
 					this.transcribingNoteIds.delete(noteId);
 					this.syncVoiceUiState(noteId);
@@ -376,13 +376,13 @@ export class QuickNotesPane extends ViewPane {
 			};
 
 			mediaRecorder.start();
-			recording.timer = setInterval(() => {
+			recording.timer = mainWindow.setInterval(() => {
 				recording.seconds += 1;
 				this.syncVoiceUiState(noteId);
 			}, 1000);
 			this.syncVoiceUiState(noteId);
-		} catch (err: any) {
-			this.notificationService.error(localize('quickNotes.micError', "Unable to access microphone: {0}", err?.message || String(err)));
+		} catch (err) {
+			this.notificationService.error(localize('quickNotes.micError', "Unable to access microphone: {0}", (err as Error | undefined)?.message || String(err)));
 			this.syncVoiceUiState(noteId);
 		}
 	}
@@ -555,8 +555,8 @@ export class QuickNotesPane extends ViewPane {
 				this.notificationService.error(localize('quickNotes.audioPlayErrorDetail', "Voice playback error: {0}", err?.message || String(err)));
 				this.stopActiveAudio();
 			});
-		} catch (err: any) {
-			this.notificationService.error(localize('quickNotes.audioPlayErrorDetail', "Voice playback error: {0}", err?.message || String(err)));
+		} catch (err) {
+			this.notificationService.error(localize('quickNotes.audioPlayErrorDetail', "Voice playback error: {0}", (err as Error | undefined)?.message || String(err)));
 			this.stopActiveAudio();
 		}
 	}
@@ -601,7 +601,7 @@ export class QuickNotesPane extends ViewPane {
 
 		const close = () => {
 			overlay.remove();
-			window.removeEventListener('keydown', onKeyDown, true);
+			mainWindow.removeEventListener('keydown', onKeyDown, true);
 		};
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (e.key === 'Escape') {
@@ -611,8 +611,8 @@ export class QuickNotesPane extends ViewPane {
 			}
 		};
 		overlay.addEventListener('click', close);
-		window.addEventListener('keydown', onKeyDown, true);
-		document.body.appendChild(overlay);
+		mainWindow.addEventListener('keydown', onKeyDown, true);
+		mainWindow.document.body.appendChild(overlay);
 	}
 
 	private renderNoteCard(parent: HTMLElement, note: IQuickNoteItem): void {
@@ -739,7 +739,7 @@ export class QuickNotesPane extends ViewPane {
 			await this.clipboardService.writeText(note.content || '');
 			// Also write first image to OS clipboard if available for pasting into external apps
 			const firstImg = atts.find(a => a.kind === 'image');
-			if (firstImg && typeof (navigator as any).clipboard?.write === 'function' && typeof (window as any).ClipboardItem === 'function') {
+			if (firstImg && typeof navigator.clipboard?.write === 'function' && typeof mainWindow.ClipboardItem === 'function') {
 				try {
 					const imgBlob = this.dataUrlToBlob(firstImg.dataUrl, firstImg.mimeType || 'image/png');
 					const itemPayload: Record<string, Blob> = {};
@@ -750,7 +750,7 @@ export class QuickNotesPane extends ViewPane {
 						itemPayload['text/plain'] = new Blob([note.content], { type: 'text/plain' });
 					}
 					if (Object.keys(itemPayload).length > 0) {
-						await (navigator as any).clipboard.write([new (window as any).ClipboardItem(itemPayload)]);
+						await navigator.clipboard.write([new mainWindow.ClipboardItem(itemPayload)]);
 					}
 				} catch {
 					// Fallback already succeeded via clipboardService.writeText
@@ -799,10 +799,10 @@ export class QuickNotesPane extends ViewPane {
 			const existing = ta ? ta.value : note.content;
 			const savedSel = this.lastSelectionById.get(note.id);
 
-			let start = (ta && document.activeElement === ta && typeof ta.selectionStart === 'number')
+			let start = (ta && ta.ownerDocument.activeElement === ta && typeof ta.selectionStart === 'number')
 				? ta.selectionStart
 				: (savedSel ? savedSel.start : existing.length);
-			let end = (ta && document.activeElement === ta && typeof ta.selectionEnd === 'number')
+			let end = (ta && ta.ownerDocument.activeElement === ta && typeof ta.selectionEnd === 'number')
 				? ta.selectionEnd
 				: (savedSel ? savedSel.end : existing.length);
 
@@ -842,9 +842,9 @@ export class QuickNotesPane extends ViewPane {
 				}
 			} else {
 				// 2. Check OS clipboard for pasted images (e.g. macOS screenshot)
-				if (typeof (navigator as any).clipboard?.read === 'function') {
+				if (typeof navigator.clipboard?.read === 'function') {
 					try {
-						const clipItems = await (navigator as any).clipboard.read();
+						const clipItems = await navigator.clipboard.read();
 						for (const item of clipItems) {
 							const imgType = (item.types || []).find((t: string) => t.startsWith('image/'));
 							if (imgType) {
@@ -1051,7 +1051,7 @@ export class QuickNotesPane extends ViewPane {
 					}));
 					const removeBtn = append(audioChip, $('button.quick-note-att-remove-inline', {
 						type: 'button',
-						title: localize('quickNotes.removeAttachment', "Remove voice clip")
+						title: localize('quickNotes.removeVoiceClip', "Remove voice clip")
 					}));
 					append(removeBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.close)));
 					this.listDisposables.add(addDisposableListener(removeBtn, EventType.CLICK, (e: MouseEvent) => {

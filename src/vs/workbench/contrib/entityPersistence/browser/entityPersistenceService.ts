@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -11,7 +10,7 @@ import { IStorageService, StorageScope } from '../../../../platform/storage/comm
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { INativeEnvironmentService } from '../../../../platform/environment/common/environment.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot } from '../common/entityPersistence.js';
-import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
+import { AuthenticationSession, AuthenticationSessionAccount, IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { dirname } from '../../../../base/common/resources.js';
 
 const SNAPSHOTS_STORAGE_KEY = 'anyagent.entityPersistence.snapshots';
@@ -42,11 +41,11 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			// ignore cleanup error
 		}
 
-		this._register(this.authenticationService.onDidChangeSessions(async (e: any) => {
+		this._register(this.authenticationService.onDidChangeSessions(async () => {
 			await this.updateActiveUser();
 		}));
 
-		this._register(this.authenticationService.onDidRegisterAuthenticationProvider(async (e: any) => {
+		this._register(this.authenticationService.onDidRegisterAuthenticationProvider(async () => {
 			await this.updateActiveUser();
 		}));
 
@@ -59,10 +58,10 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			const uniqueProviders = Array.from(new Set(providers));
 
 			const sessionPromises = uniqueProviders.map(async providerId => {
-				let timeoutId: any;
+				let timeoutId: ReturnType<typeof setTimeout> | undefined;
 				try {
 					const sessionsPromise = this.authenticationService.getSessions(providerId, undefined, undefined, true);
-					const timeoutPromise = new Promise<readonly any[]>(resolve => {
+					const timeoutPromise = new Promise<readonly AuthenticationSession[]>(resolve => {
 						timeoutId = setTimeout(() => resolve([]), 5000);
 					});
 					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
@@ -81,7 +80,9 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			let newUserIdentifier = '';
 
 			if (activeResult) {
-				const label = activeResult.session.account.label || activeResult.session.account.email || '';
+				// Some providers attach an `email` to the account at runtime.
+				const account: AuthenticationSessionAccount & { readonly email?: string } = activeResult.session.account;
+				const label = account.label || account.email || '';
 				const match = label.match(/\(([^)]+)\)/);
 				newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 			}
@@ -150,8 +151,8 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 		const anyagentUri = URI.joinPath(targetUri, '.anyagent');
 		const dunderUri = URI.joinPath(targetUri, '__agent__');
 
-		if (await this.fileService.exists(anyagentUri)) return anyagentUri;
-		if (await this.fileService.exists(dunderUri)) return dunderUri;
+		if (await this.fileService.exists(anyagentUri)) { return anyagentUri; }
+		if (await this.fileService.exists(dunderUri)) { return dunderUri; }
 
 		return agentsUri;
 	}
@@ -214,7 +215,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			const basePath = baseUri.path;
 			if (uriPath.startsWith(basePath)) {
 				let rel = uriPath.substring(basePath.length);
-				if (rel.startsWith('/')) rel = rel.substring(1);
+				if (rel.startsWith('/')) { rel = rel.substring(1); }
 				return rel;
 			}
 			return uriPath;
@@ -255,7 +256,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 						if (this.storageService) {
 							savedPath = this.storageService.get('anyagent.globalEntityTypePath', StorageScope.PROFILE, '~/.anyagent/entity_type');
 						}
-					} catch {}
+					} catch { }
 					const userHome = this.environmentService.userHome.fsPath;
 					const resolvedGlobalDir = (savedPath && savedPath.startsWith('~/')) ? userHome + savedPath.substring(1) : (savedPath === '~' ? userHome : (savedPath || '~/.anyagent/entity_type'));
 					const globalYamlUri = URI.file(`${resolvedGlobalDir}/${filename}`);
@@ -289,9 +290,9 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 					customDefFromYaml = descMatch[1].trim();
 				}
 			}
-		} catch {}
+		} catch { }
 
-		const typeDefRaw = (snapshot as any).typeDefinition;
+		const typeDefRaw = snapshot.typeDefinition;
 		const validTypeDef = (typeof typeDefRaw === 'string' && typeDefRaw.trim() && typeDefRaw !== '[object Object]') ? typeDefRaw.trim() : undefined;
 		const typeDefStr = validTypeDef || customDefFromYaml || builtInTypeDefs[type.toLowerCase()] || `${type.toUpperCase()} module entity definition.`;
 
@@ -315,7 +316,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 							}
 						}
 					}
-				} catch {}
+				} catch { }
 				if (!workspaceId && snapshot.entityCode) {
 					workspaceId = `${snapshot.entityCode}-0000`;
 				}
@@ -435,7 +436,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 					}
 				}
 			}
-		} catch {}
+		} catch { }
 
 		const builtInTypePrompts: Record<string, string> = {
 			workspace: 'A workspace is the root environment container. Manage sub-entities, repository structure, and lifecycle.',
@@ -452,10 +453,10 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			file: 'A standalone document or data asset.'
 		};
 
-		const typePromptRaw = (snapshot as any).typePrompt;
+		const typePromptRaw = snapshot.typePrompt;
 		const validSnapshotPrompt = (typeof typePromptRaw === 'string' && typePromptRaw.trim() && typePromptRaw !== '[object Object]') ? typePromptRaw.trim() : undefined;
 		const typePromptStr = validSnapshotPrompt || customPromptFromYaml || builtInTypePrompts[type.toLowerCase()] || `${type.toUpperCase()} module processing guidelines.`;
-		const ticketPromptRaw = (snapshot as any).ticketPrompt || (snapshot as any).agentRulePrompt;
+		const ticketPromptRaw = snapshot.ticketPrompt || snapshot.agentRulePrompt;
 		const ticketPromptStr = (typeof ticketPromptRaw === 'string' && ticketPromptRaw.trim() && ticketPromptRaw !== '[object Object]') ? ticketPromptRaw.trim() : 'None';
 
 		// 2. instruction.md

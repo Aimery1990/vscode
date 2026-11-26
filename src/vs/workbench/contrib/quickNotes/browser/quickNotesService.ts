@@ -1,13 +1,12 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { generateUuid } from '../../../../base/common/uuid.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
+import { AuthenticationSession, AuthenticationSessionAccount, IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { IQuickNoteAttachment, IQuickNoteItem, IQuickNotesService, QuickNoteStatus } from '../common/quickNotes.js';
 
 const STORAGE_KEY_PREFIX = 'anyagent.quickNotes.items';
@@ -89,7 +88,7 @@ export class QuickNotesService extends Disposable implements IQuickNotesService 
 				let timeoutId: ReturnType<typeof setTimeout> | undefined;
 				try {
 					const sessionsPromise = this.authenticationService.getSessions(providerId, undefined, undefined, true);
-					const timeoutPromise = new Promise<readonly any[]>(resolve => {
+					const timeoutPromise = new Promise<readonly AuthenticationSession[]>(resolve => {
 						timeoutId = setTimeout(() => resolve([]), 5000);
 					});
 					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
@@ -112,7 +111,9 @@ export class QuickNotesService extends Disposable implements IQuickNotesService 
 			let newUserIdentifier = '';
 
 			if (activeResult) {
-				const label = activeResult.session.account.label || activeResult.session.account.email || '';
+				// Some providers attach an `email` to the account at runtime.
+				const account: AuthenticationSessionAccount & { readonly email?: string } = activeResult.session.account;
+				const label = account.label || account.email || '';
 				const match = label.match(/\(([^)]+)\)/);
 				newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 			}

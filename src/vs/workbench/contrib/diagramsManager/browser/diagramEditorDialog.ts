@@ -1,9 +1,9 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { $, append } from '../../../../base/browser/dom.js';
+import { mainWindow } from '../../../../base/browser/window.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
@@ -19,6 +19,9 @@ export interface IDiagramDialogResult {
 	targetFolderUri?: URI;
 }
 
+/** The currently shown "create diagram" overlay, if any (replaces lookup by element id). */
+let activeDiagramDialogOverlay: HTMLElement | undefined;
+
 export async function createDiagramDialog(
 	workspaceContextService: IWorkspaceContextService,
 	fileDialogService: IFileDialogService,
@@ -26,8 +29,8 @@ export async function createDiagramDialog(
 	onConfirm: (result: IDiagramDialogResult) => void
 ): Promise<void> {
 	// Remove any existing dialog
-	const existing = document.getElementById('create-diagram-dialog-overlay');
-	if (existing) {
+	const existing = activeDiagramDialogOverlay;
+	if (existing && existing.isConnected) {
 		existing.remove();
 	}
 
@@ -261,10 +264,11 @@ export async function createDiagramDialog(
 
 	createBtn.onclick = doSubmit;
 	nameInput.onkeydown = (e) => {
-		if (e.key === 'Enter') doSubmit();
-		if (e.key === 'Escape') overlay.remove();
+		if (e.key === 'Enter') { doSubmit(); }
+		if (e.key === 'Escape') { overlay.remove(); }
 	};
 
-	document.body.appendChild(overlay);
+	activeDiagramDialogOverlay = overlay;
+	mainWindow.document.body.appendChild(overlay);
 	setTimeout(() => nameInput.focus(), 50);
 }

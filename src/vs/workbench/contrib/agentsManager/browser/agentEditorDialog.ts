@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { ServicesAccessor, IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
@@ -14,7 +13,8 @@ import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
-import { $, append, clearNode } from '../../../../base/browser/dom.js';
+import { $, append, clearNode, isHTMLInputElement } from '../../../../base/browser/dom.js';
+import { mainWindow } from '../../../../base/browser/window.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { IAgentsManagerService, IAgentItem, AgentScopeType, IAgentCredentialService, IAgentModelReference, IAgentCredential, getGlobalDefaultModel, resolveDefaultModelId } from '../common/agentsManager.js';
@@ -30,6 +30,43 @@ import { isCommentKeybinding, togglePythonComment } from '../../customModules/br
 
 const DEFAULT_AGENTS_DIR = '/Users/aimery/Documents/agents';
 
+interface IPendingFieldAttachment {
+	name: string;
+	size: number;
+	dataUrl?: string;
+}
+
+/** Direct references to one rendered item card of a `dynamic_list` custom field. */
+interface IDynamicItemCardRefs {
+	readonly card: HTMLElement;
+	readonly badge: HTMLElement;
+	readonly titleInput: HTMLInputElement;
+	readonly subInputs: Array<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>;
+}
+
+/**
+ * Direct references to one rendered `.custom-field-input` element plus the
+ * accessors needed to read its value when the agent is created.
+ */
+interface ICustomFieldInputRefs {
+	readonly element: HTMLElement;
+	readonly valueInput?: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+	readonly checkboxes?: HTMLInputElement[];
+	readonly rangeStart?: HTMLInputElement;
+	readonly rangeEnd?: HTMLInputElement;
+	readonly itemCards?: IDynamicItemCardRefs[];
+	readonly getAttachedFiles?: () => IPendingFieldAttachment[];
+	readonly getSelectedAction?: () => string;
+	readonly getSelectedTargetStatus?: () => string;
+	readonly getBrowserData?: () => object;
+	readonly getPromptData?: () => object;
+	readonly getTtsData?: () => object;
+	readonly getPythonData?: () => object;
+}
+
+/** The overlay of the currently open agent dialog (only one is shown at a time). */
+let activeAgentModalOverlay: HTMLElement | undefined;
+
 export async function createOrEditAgentDialog(
 	accessor: ServicesAccessor,
 	existingAgent?: IAgentItem,
@@ -37,19 +74,7 @@ export async function createOrEditAgentDialog(
 	defaultScopeName: string = 'Workspace Global',
 	targetFolderUri?: URI
 ): Promise<IAgentItem | undefined> {
-	// Unify new AI Agent creation into the single unified Ticket creation modal in WorkspacesExplorerPane.
-	if (!existingAgent) {
-		const viewsService = accessor.get(IViewsService);
-		let view = viewsService.getViewWithId(WORKSPACE_PANE_VIEW_ID) as WorkspacesExplorerPane | null;
-		if (!view) {
-			view = await viewsService.openView(WORKSPACE_PANE_VIEW_ID, false) as WorkspacesExplorerPane | null;
-		}
-		if (view && typeof view.showCreateResourceModal === 'function') {
-			view.showCreateResourceModal(targetFolderUri, undefined, undefined, 'agent');
-			return undefined;
-		}
-	}
-
+	// Resolve all services synchronously: the accessor is invalid after the first await.
 	const agentsService = accessor.get(IAgentsManagerService);
 	const credentialService = accessor.get(IAgentCredentialService);
 	const languageModelsService = accessor.get(ILanguageModelsService);
@@ -61,20 +86,34 @@ export async function createOrEditAgentDialog(
 	const editorService = accessor.get(IEditorService);
 	const workspacesExplorerService = accessor.get(IWorkspacesExplorerService);
 	const customModulesService = accessor.get(ICustomModulesService);
+	const viewsService = accessor.get(IViewsService);
+
+	// Unify new AI Agent creation into the single unified Ticket creation modal in WorkspacesExplorerPane.
+	if (!existingAgent) {
+		let view = viewsService.getViewWithId(WORKSPACE_PANE_VIEW_ID) as WorkspacesExplorerPane | null;
+		if (!view) {
+			view = await viewsService.openView(WORKSPACE_PANE_VIEW_ID, false) as WorkspacesExplorerPane | null;
+		}
+		if (view && typeof view.showCreateResourceModal === 'function') {
+			view.showCreateResourceModal(targetFolderUri, undefined, undefined, 'agent');
+			return undefined;
+		}
+	}
 
 	const savedCredentials = await credentialService.getCredentials();
 	const managedWorkspaces = await workspacesExplorerService.getWorkspaces();
 	let workspaces = [...managedWorkspaces].reverse();
 
-	return new Promise<IAgentItem | undefined>(async (resolve) => {
+	return new Promise<IAgentItem | undefined>((resolve) => {
 		// 1. Remove any existing modal
-		const existingModal = document.querySelector('.create-agent-modal-overlay');
-		if (existingModal) {
-			existingModal.remove();
+		if (activeAgentModalOverlay) {
+			activeAgentModalOverlay.remove();
 		}
 
 		// 2. Create Modal Overlay (Blur backdrop)
-		const overlay = append(document.body, $('.create-agent-modal-overlay'));
+		const targetDocument = mainWindow.document;
+		const overlay = append(targetDocument.body, $('.create-agent-modal-overlay'));
+		activeAgentModalOverlay = overlay;
 		overlay.style.position = 'fixed';
 		overlay.style.top = '0';
 		overlay.style.left = '0';
@@ -108,7 +147,11 @@ export async function createOrEditAgentDialog(
 		modal.style.overflowY = 'auto';
 
 		// Close handler
-		let docClickListener: (e: MouseEvent) => void;
+		const docClickListener = (e: MouseEvent) => {
+			if (e.target !== modelInput && !modelDropdown.contains(e.target as Node)) {
+				modelDropdown.style.display = 'none';
+			}
+		};
 		let credsListener: { dispose(): void } | undefined = undefined;
 		let workspacesListener: { dispose(): void } | undefined = undefined;
 		let modulesListener: { dispose(): void } | undefined = undefined;
@@ -124,9 +167,7 @@ export async function createOrEditAgentDialog(
 				modulesListener.dispose();
 				modulesListener = undefined;
 			}
-			if (docClickListener) {
-				document.removeEventListener('click', docClickListener);
-			}
+			targetDocument.removeEventListener('click', docClickListener);
 			overlay.remove();
 			resolve(result);
 		};
@@ -491,7 +532,7 @@ export async function createOrEditAgentDialog(
 		};
 
 		const getSmartDefaultModel = (models: ISearchableModel[], providerId: string): string => {
-			if (models.length === 0) return '';
+			if (models.length === 0) { return ''; }
 
 			const candidates = models.filter(m => {
 				const idLower = m.id.toLowerCase();
@@ -519,7 +560,7 @@ export async function createOrEditAgentDialog(
 
 			for (const p of priorities) {
 				const found = activeList.find(m => m.id.toLowerCase().includes(p));
-				if (found) return found.id;
+				if (found) { return found.id; }
 			}
 
 			const chatKeywords = ['gpt', 'claude', 'gemini', 'chat', 'llama', 'mistral', 'deepseek', 'qwen', 'command-r'];
@@ -528,18 +569,18 @@ export async function createOrEditAgentDialog(
 			const chatModels = activeList.filter(m => {
 				const idLower = m.id.toLowerCase();
 				const isNonChat = nonChatKeywords.some(kw => idLower.includes(kw));
-				if (isNonChat) return false;
+				if (isNonChat) { return false; }
 				return chatKeywords.some(kw => idLower.includes(kw));
 			});
 
-			if (chatModels.length > 0) return chatModels[0].id;
+			if (chatModels.length > 0) { return chatModels[0].id; }
 
 			const generalCandidates = activeList.filter(m => {
 				const idLower = m.id.toLowerCase();
 				return !nonChatKeywords.some(kw => idLower.includes(kw));
 			});
 
-			if (generalCandidates.length > 0) return generalCandidates[0].id;
+			if (generalCandidates.length > 0) { return generalCandidates[0].id; }
 			return activeList[0].id;
 		};
 
@@ -626,12 +667,7 @@ export async function createOrEditAgentDialog(
 			renderFilteredDropdown();
 		};
 
-		docClickListener = (e: MouseEvent) => {
-			if (e.target !== modelInput && !modelDropdown.contains(e.target as Node)) {
-				modelDropdown.style.display = 'none';
-			}
-		};
-		document.addEventListener('click', docClickListener);
+		targetDocument.addEventListener('click', docClickListener);
 
 		credSelect.onchange = () => {
 			isFiltering = false;
@@ -674,7 +710,9 @@ export async function createOrEditAgentDialog(
 			style: 'display: none; flex-direction: column; gap: 10px; margin-top: 4px;'
 		}));
 
-		let activeAgentModule: ICustomModule | undefined = undefined;
+		let activeAgentModule: (ICustomModule & { readonly definitionFile?: string }) | undefined = undefined;
+		// Direct references to the rendered custom field inputs, in DOM order; rebuilt whenever customFieldsBox is cleared.
+		let customFieldInputs: ICustomFieldInputRefs[] = [];
 
 		const resolveTargetWorkspace = (targetLocationUri?: URI) => {
 			if (selectDest.value !== 'independent') {
@@ -724,6 +762,7 @@ export async function createOrEditAgentDialog(
 
 				if (matchingModule && matchingModule.fields && matchingModule.fields.length > 0) {
 					clearNode(customFieldsBox);
+					customFieldInputs = [];
 					let renderedCount = 0;
 
 					for (const field of matchingModule.fields) {
@@ -744,12 +783,13 @@ export async function createOrEditAgentDialog(
 						append(fieldGroup, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; font-weight: 600;' }, `${field.label}:`));
 
 						if (field.type === 'textarea') {
-							append(fieldGroup, $('textarea.monaco-inputbox.custom-field-input', {
+							const textareaEl = append(fieldGroup, $<HTMLTextAreaElement>('textarea.monaco-inputbox.custom-field-input', {
 								'data-field-id': field.id,
 								'data-field-label': field.label,
 								'data-field-type': field.type,
 								style: 'width: 100%; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; min-height: 52px; font-family: inherit;'
 							}));
+							customFieldInputs.push({ element: textareaEl, valueInput: textareaEl });
 						} else if (field.type === 'select') {
 							const select = append(fieldGroup, $('select.monaco-select.custom-field-input', {
 								'data-field-id': field.id,
@@ -760,6 +800,7 @@ export async function createOrEditAgentDialog(
 							(field.options || []).forEach((opt: string) => {
 								append(select, $('option', { value: opt }, opt));
 							});
+							customFieldInputs.push({ element: select, valueInput: select });
 						} else if (field.type === 'multiselect') {
 							const container = append(fieldGroup, $('.multiselect-container.custom-field-input', {
 								'data-field-id': field.id,
@@ -767,30 +808,34 @@ export async function createOrEditAgentDialog(
 								'data-field-type': field.type,
 								style: 'display: flex; flex-direction: column; gap: 4px; border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 8px; background: rgba(0,0,0,0.15);'
 							}));
+							const checkboxes: HTMLInputElement[] = [];
 							(field.options || []).forEach((opt: string) => {
 								const row = append(container, $('label', { style: 'display: flex; align-items: center; gap: 6px; font-size: 11.5px; cursor: pointer;' }));
-								append(row, $('input', { type: 'checkbox', value: opt, style: 'cursor: pointer;' }));
+								checkboxes.push(append(row, $<HTMLInputElement>('input', { type: 'checkbox', value: opt, style: 'cursor: pointer;' })));
 								append(row, $('span', {}, opt));
 							});
+							customFieldInputs.push({ element: container, checkboxes });
 						} else if (field.type === 'switch') {
 							const row = append(fieldGroup, $('label', { style: 'display: flex; align-items: center; gap: 8px; font-size: 11.5px; cursor: pointer; padding: 4px 0;' }));
-							append(row, $('input.custom-field-input', {
+							const switchInput = append(row, $<HTMLInputElement>('input.custom-field-input', {
 								type: 'checkbox',
 								'data-field-id': field.id,
 								'data-field-label': field.label,
 								'data-field-type': field.type,
 								style: 'cursor: pointer;'
 							}));
+							customFieldInputs.push({ element: switchInput, valueInput: switchInput });
 							append(row, $('span', {}, 'Enabled'));
 						} else if (field.type === 'date' || field.type === 'time' || field.type === 'datetime') {
 							const inputType = field.type === 'date' ? 'date' : field.type === 'time' ? 'time' : 'datetime-local';
-							append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
+							const dateInput = append(fieldGroup, $<HTMLInputElement>('input.monaco-inputbox.custom-field-input', {
 								type: inputType,
 								'data-field-id': field.id,
 								'data-field-label': field.label,
 								'data-field-type': field.type,
 								style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 							}));
+							customFieldInputs.push({ element: dateInput, valueInput: dateInput });
 						} else if (field.type === 'date_range' || field.type === 'time_range' || field.type === 'datetime_range') {
 							const rangeContainer = append(fieldGroup, $('.range-container.custom-field-input', {
 								'data-field-id': field.id,
@@ -799,17 +844,18 @@ export async function createOrEditAgentDialog(
 								style: 'display: flex; align-items: center; gap: 8px;'
 							}));
 							const inputType = field.type === 'date_range' ? 'date' : field.type === 'time_range' ? 'time' : 'datetime-local';
-							append(rangeContainer, $('input.monaco-inputbox.range-start', {
+							const rangeStart = append(rangeContainer, $<HTMLInputElement>('input.monaco-inputbox.range-start', {
 								type: inputType,
 								placeholder: 'Start',
 								style: 'flex: 1; padding: 7px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit;'
 							}));
 							append(rangeContainer, $('span', { style: 'opacity: 0.6; font-size: 12px;' }, '->'));
-							append(rangeContainer, $('input.monaco-inputbox.range-end', {
+							const rangeEnd = append(rangeContainer, $<HTMLInputElement>('input.monaco-inputbox.range-end', {
 								type: inputType,
 								placeholder: 'End',
 								style: 'flex: 1; padding: 7px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit;'
 							}));
+							customFieldInputs.push({ element: rangeContainer, rangeStart, rangeEnd });
 						} else if (field.type === 'dynamic_list') {
 							const listContainer = append(fieldGroup, $('.dynamic-list-container.custom-field-input', {
 								'data-field-id': field.id,
@@ -818,16 +864,18 @@ export async function createOrEditAgentDialog(
 								style: 'display: flex; flex-direction: column; gap: 10px; border: 1px solid rgba(56, 189, 248, 0.2); background: rgba(56, 189, 248, 0.03); border-radius: 8px; padding: 12px;'
 							}));
 							const itemsWrapper = append(listContainer, $('.dynamic-items-wrapper', { style: 'display: flex; flex-direction: column; gap: 10px;' }));
-							const renderItemCard = (itemData?: any) => {
-								const currentCount = itemsWrapper.querySelectorAll('.dynamic-item-card').length;
+							const itemCards: IDynamicItemCardRefs[] = [];
+							customFieldInputs.push({ element: listContainer, itemCards });
+							const renderItemCard = (itemData?: { _title?: string }) => {
+								const currentCount = itemCards.length;
 								const idx = currentCount + 1;
 								const itemCard = append(itemsWrapper, $('.dynamic-item-card', {
 									style: 'background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;'
 								}));
 								const itemHeader = append(itemCard, $('.item-card-header', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
 								const headerLeft = append(itemHeader, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex: 1;' }));
-								append(headerLeft, $('span', { style: 'font-size: 10px; font-weight: 700; background: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 2px 6px; border-radius: 4px;' }, `#${idx}`));
-								append(headerLeft, $('input.monaco-inputbox.item-title-input', {
+								const badge = append(headerLeft, $('span', { style: 'font-size: 10px; font-weight: 700; background: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 2px 6px; border-radius: 4px;' }, `#${idx}`));
+								const titleInput = append(headerLeft, $<HTMLInputElement>('input.monaco-inputbox.item-title-input', {
 									placeholder: 'Entry Title...',
 									value: itemData?._title || '',
 									style: 'flex: 1; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.25); color: #fff;'
@@ -835,12 +883,16 @@ export async function createOrEditAgentDialog(
 								const delItemBtn = append(itemHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
 									style: 'color: #ef4444; cursor: pointer; padding: 4px; font-size: 12px; opacity: 0.8;'
 								}));
+								const cardRefs: IDynamicItemCardRefs = { card: itemCard, badge, titleInput, subInputs: [] };
+								itemCards.push(cardRefs);
 								delItemBtn.onclick = () => {
 									itemCard.remove();
-									const remaining = itemsWrapper.querySelectorAll('.dynamic-item-card');
-									remaining.forEach((card, rIdx) => {
-										const badge = card.querySelector('span');
-										if (badge) badge.innerText = `#${rIdx + 1}`;
+									const removedIdx = itemCards.indexOf(cardRefs);
+									if (removedIdx !== -1) {
+										itemCards.splice(removedIdx, 1);
+									}
+									itemCards.forEach((remaining, rIdx) => {
+										remaining.badge.innerText = `#${rIdx + 1}`;
 									});
 								};
 								const subFieldsList = field.itemFields || [];
@@ -850,13 +902,13 @@ export async function createOrEditAgentDialog(
 										const subRow = append(subGrid, $('.subfield-row', { style: 'display: flex; flex-direction: column; gap: 3px;' }));
 										append(subRow, $('label', { style: 'font-size: 10.5px; opacity: 0.75; font-weight: 500;' }, `${subF.label}:`));
 										if (subF.type === 'textarea') {
-											append(subRow, $('textarea.monaco-inputbox.sub-field-input', {
+											cardRefs.subInputs.push(append(subRow, $<HTMLTextAreaElement>('textarea.monaco-inputbox.sub-field-input', {
 												'data-subfield-id': subF.id,
 												'data-subfield-label': subF.label,
 												'data-subfield-type': subF.type,
 												rows: '3',
 												style: 'width: 100%; padding: 6px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff; resize: vertical;'
-											}));
+											})));
 										} else if (subF.type === 'select') {
 											const sSelect = append(subRow, $('select.monaco-select.sub-field-input', {
 												'data-subfield-id': subF.id,
@@ -865,15 +917,16 @@ export async function createOrEditAgentDialog(
 												style: 'width: 100%; padding: 5px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.25); color: #fff;'
 											})) as HTMLSelectElement;
 											(subF.options || []).forEach(o => append(sSelect, $('option', { value: o }, o)));
+											cardRefs.subInputs.push(sSelect);
 										} else {
-											append(subRow, $('input.monaco-inputbox.sub-field-input', {
+											cardRefs.subInputs.push(append(subRow, $<HTMLInputElement>('input.monaco-inputbox.sub-field-input', {
 												type: subF.type === 'number' ? 'number' : 'text',
 												'data-subfield-id': subF.id,
 												'data-subfield-label': subF.label,
 												'data-subfield-type': subF.type,
 												placeholder: `Enter ${subF.label}...`,
 												style: 'width: 100%; padding: 5px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff;'
-											}));
+											})));
 										}
 									}
 								}
@@ -897,7 +950,8 @@ export async function createOrEditAgentDialog(
 							const fileListWrapper = append(attachContainer, $('.attachment-file-list', {
 								style: 'display: flex; flex-wrap: wrap; gap: 8px;'
 							}));
-							const attachedFiles: Array<{ name: string; size: number; dataUrl?: string }> = [];
+							const attachedFiles: IPendingFieldAttachment[] = [];
+							customFieldInputs.push({ element: attachContainer, getAttachedFiles: () => attachedFiles });
 							const fileInput = append(attachContainer, $('input', {
 								type: 'file',
 								multiple: 'multiple',
@@ -932,7 +986,7 @@ export async function createOrEditAgentDialog(
 							append(dropZone, $('span' + ThemeIcon.asCSSSelector(Codicon.cloudUpload), { style: 'font-size: 16px; color: #10b981;' }));
 							append(dropZone, $('span', { style: 'font-size: 11px; opacity: 0.8;' }, 'Click to browse or drop files here'));
 							const handleFiles = (files: FileList | null) => {
-								if (!files) return;
+								if (!files) { return; }
 								for (let i = 0; i < files.length; i++) {
 									const file = files[i];
 									const reader = new FileReader();
@@ -952,7 +1006,6 @@ export async function createOrEditAgentDialog(
 								fileInput.value = '';
 							};
 							dropZone.onclick = () => fileInput.click();
-							(attachContainer as any).__getAttachedFiles = () => attachedFiles;
 						} else if (field.type === 'button_group') {
 							const buttonsList: IActionButton[] = (field.buttons && Array.isArray(field.buttons) && field.buttons.length > 0)
 								? field.buttons
@@ -968,8 +1021,11 @@ export async function createOrEditAgentDialog(
 							}));
 							let selectedActionLabel = '';
 							let selectedTargetStatus = '';
-							(btnGroupContainer as any).__getSelectedAction = () => selectedActionLabel;
-							(btnGroupContainer as any).__getSelectedTargetStatus = () => selectedTargetStatus;
+							customFieldInputs.push({
+								element: btnGroupContainer,
+								getSelectedAction: () => selectedActionLabel,
+								getSelectedTargetStatus: () => selectedTargetStatus
+							});
 							const renderButtons = () => {
 								clearNode(btnGroupContainer);
 								buttonsList.forEach(btn => {
@@ -999,7 +1055,7 @@ export async function createOrEditAgentDialog(
 							const numWrapper = append(fieldGroup, $('div', {
 								style: 'display: flex; align-items: center; gap: 8px;'
 							}));
-							append(numWrapper, $('input.monaco-inputbox.custom-field-input', {
+							const numberInput = append(numWrapper, $<HTMLInputElement>('input.monaco-inputbox.custom-field-input', {
 								type: 'number',
 								'data-field-id': field.id,
 								'data-field-label': field.label,
@@ -1011,6 +1067,7 @@ export async function createOrEditAgentDialog(
 								placeholder: field.precision !== undefined && field.precision > 0 ? (0).toFixed(field.precision) : '0',
 								style: 'flex: 1; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 							}));
+							customFieldInputs.push({ element: numberInput, valueInput: numberInput });
 							if (field.unit) {
 								append(numWrapper, $('span.number-unit-badge', {
 									style: 'font-size: 11px; padding: 5px 8px; border-radius: 4px; background: rgba(234, 179, 8, 0.15); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.3); font-weight: 600;'
@@ -1031,12 +1088,13 @@ export async function createOrEditAgentDialog(
 								style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box;'
 							})) as HTMLInputElement;
 							const creds = field.credentials || [];
-							(browserBox as any).__getBrowserData = () => ({
+							const getBrowserData = () => ({
 								url: urlInput.value.trim(),
 								credentials: creds,
 								content: field.defaultContent || '',
 								lastFetched: field.defaultContent ? 'Initialized from Schema' : ''
 							});
+							customFieldInputs.push({ element: browserBox, getBrowserData });
 						} else if (field.type === 'prompt') {
 							const promptBox = append(fieldGroup, $('.prompt-field-container.custom-field-input', {
 								'data-field-id': field.id,
@@ -1078,7 +1136,7 @@ export async function createOrEditAgentDialog(
 							})) as HTMLTextAreaElement;
 							promptTextarea.value = field.defaultUserPrompt || '';
 
-							(promptBox as any).__getPromptData = () => {
+							const getPromptData = () => {
 								const userPromptVal = promptTextarea.value.trim();
 								const preTrimmed = preInjectedText.trim();
 								const combinedPrompt = (preTrimmed && userPromptVal)
@@ -1097,6 +1155,7 @@ export async function createOrEditAgentDialog(
 									lastExecuted: ''
 								};
 							};
+							customFieldInputs.push({ element: promptBox, getPromptData });
 						} else if (field.type === 'tts') {
 							const ttsBox = append(fieldGroup, $('.tts-field-container.custom-field-input', {
 								'data-field-id': field.id,
@@ -1120,7 +1179,7 @@ export async function createOrEditAgentDialog(
 								style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; line-height: 1.4;'
 							})) as HTMLTextAreaElement;
 							ttsDisplayTextarea.value = field.ttsDisplayText || '';
-							(ttsBox as any).__getTtsData = () => ({
+							const getTtsData = () => ({
 								text: ttsTextarea.value.trim(),
 								displayText: ttsDisplayTextarea.value.trim(),
 								ttsShowSpeechTextInTicket: Boolean(field.ttsShowSpeechTextInTicket),
@@ -1135,6 +1194,7 @@ export async function createOrEditAgentDialog(
 								lastGenerated: '',
 								lastSynthesizedText: ''
 							});
+							customFieldInputs.push({ element: ttsBox, getTtsData });
 						} else if (field.type === 'python') {
 							const pyBox = append(fieldGroup, $('.python-field-container.custom-field-input', {
 								'data-field-id': field.id,
@@ -1155,7 +1215,7 @@ export async function createOrEditAgentDialog(
 									togglePythonComment(pyTextarea);
 								}
 							};
-							(pyBox as any).__getPythonData = () => ({
+							const getPythonData = () => ({
 								code: pyTextarea.value,
 								pythonPath: field.pythonPath || '',
 								externalScripts: field.externalScripts || [],
@@ -1163,20 +1223,23 @@ export async function createOrEditAgentDialog(
 								logs: '',
 								lastExecuted: ''
 							});
+							customFieldInputs.push({ element: pyBox, getPythonData });
 						} else {
-							append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
+							const textInput = append(fieldGroup, $<HTMLInputElement>('input.monaco-inputbox.custom-field-input', {
 								type: 'text',
 								'data-field-id': field.id,
 								'data-field-label': field.label,
 								'data-field-type': field.type,
 								style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
 							}));
+							customFieldInputs.push({ element: textInput, valueInput: textInput });
 						}
 					}
 
 					customFieldsBox.style.display = renderedCount > 0 ? 'flex' : 'none';
 				} else {
 					clearNode(customFieldsBox);
+					customFieldInputs = [];
 					customFieldsBox.style.display = 'none';
 				}
 			} catch {
@@ -1378,13 +1441,13 @@ export async function createOrEditAgentDialog(
 
 			let initialStatusOverride = '';
 			const customMetadata: { [key: string]: string } = {};
-			const allPendingFieldAttachments: Array<{ name: string; size: number; dataUrl?: string }> = [];
-			const customInputs = customFieldsBox.querySelectorAll('.custom-field-input');
+			const allPendingFieldAttachments: IPendingFieldAttachment[] = [];
 			const numberErrors: string[] = [];
-			customInputs.forEach(inputEl => {
+			customFieldInputs.forEach(fieldRefs => {
+				const inputEl = fieldRefs.element;
 				const fieldLabel = inputEl.getAttribute('data-field-label');
 				if (fieldLabel) {
-					if (inputEl instanceof HTMLInputElement && inputEl.getAttribute('data-field-type') === 'number') {
+					if (isHTMLInputElement(inputEl) && inputEl.getAttribute('data-field-type') === 'number') {
 						const numCheck = normalizeNumberFieldValue(numberFieldRulesFromAttributes(n => inputEl.getAttribute(n), fieldLabel), inputEl.value);
 						if (!numCheck.ok) {
 							numberErrors.push(numCheck.error!);
@@ -1393,36 +1456,30 @@ export async function createOrEditAgentDialog(
 						customMetadata[fieldLabel] = numCheck.value;
 						return;
 					}
-					if (inputEl instanceof HTMLInputElement && inputEl.type === 'checkbox') {
+					if (isHTMLInputElement(inputEl) && inputEl.type === 'checkbox') {
 						customMetadata[fieldLabel] = inputEl.checked ? 'true' : 'false';
 					} else if (inputEl.classList.contains('multiselect-container')) {
-						const checked = Array.from(inputEl.querySelectorAll('input[type="checkbox"]:checked')).map((cb: any) => cb.value);
+						const checked = (fieldRefs.checkboxes ?? []).filter(cb => cb.checked).map(cb => cb.value);
 						customMetadata[fieldLabel] = checked.join(', ');
 					} else if (inputEl.classList.contains('range-container')) {
-						const startVal = (inputEl.querySelector('.range-start') as HTMLInputElement)?.value || '';
-						const endVal = (inputEl.querySelector('.range-end') as HTMLInputElement)?.value || '';
+						const startVal = fieldRefs.rangeStart?.value || '';
+						const endVal = fieldRefs.rangeEnd?.value || '';
 						customMetadata[fieldLabel] = (startVal || endVal) ? `${startVal} ~ ${endVal}` : '';
 					} else if (inputEl.classList.contains('dynamic-list-container')) {
-						const itemCards = inputEl.querySelectorAll('.dynamic-item-card');
-						const items: any[] = [];
-						itemCards.forEach((cardEl, idx) => {
-							const itemObj: any = { _index: idx + 1 };
-							const titleInputEl = cardEl.querySelector('.item-title-input') as HTMLInputElement;
+						const items: Array<Record<string, string | number>> = [];
+						(fieldRefs.itemCards ?? []).forEach((cardRefs, idx) => {
+							const itemObj: Record<string, string | number> = { _index: idx + 1 };
+							const titleInputEl = cardRefs.titleInput;
 							if (titleInputEl && titleInputEl.value.trim()) {
 								itemObj._title = titleInputEl.value.trim();
 							}
-							const subInputs = cardEl.querySelectorAll('.sub-field-input');
-							subInputs.forEach(subEl => {
+							cardRefs.subInputs.forEach(subEl => {
 								const subLabel = subEl.getAttribute('data-subfield-label');
 								if (subLabel) {
-									if (subEl instanceof HTMLInputElement && subEl.type === 'checkbox') {
+									if (isHTMLInputElement(subEl) && subEl.type === 'checkbox') {
 										itemObj[subLabel] = subEl.checked ? 'true' : 'false';
-									} else if (subEl.classList.contains('range-container')) {
-										const startVal = (subEl.querySelector('.range-start') as HTMLInputElement)?.value || '';
-										const endVal = (subEl.querySelector('.range-end') as HTMLInputElement)?.value || '';
-										itemObj[subLabel] = (startVal || endVal) ? `${startVal} ~ ${endVal}` : '';
 									} else {
-										itemObj[subLabel] = (subEl as any).value || '';
+										itemObj[subLabel] = subEl.value || '';
 									}
 								}
 							});
@@ -1430,39 +1487,39 @@ export async function createOrEditAgentDialog(
 						});
 						customMetadata[fieldLabel] = JSON.stringify(items);
 					} else if (inputEl.classList.contains('attachment-field-container')) {
-						const getFiles = (inputEl as any).__getAttachedFiles;
-						const filesList: Array<{ name: string; size: number; dataUrl?: string }> = getFiles ? getFiles() : [];
+						const getFiles = fieldRefs.getAttachedFiles;
+						const filesList: IPendingFieldAttachment[] = getFiles ? getFiles() : [];
 						customMetadata[fieldLabel] = filesList.length > 0 ? JSON.stringify(filesList.map(f => ({ name: f.name, size: f.size }))) : '';
 						filesList.forEach(f => {
 							allPendingFieldAttachments.push(f);
 						});
 					} else if (inputEl.classList.contains('action-buttons-group-row')) {
-						const getAction = (inputEl as any).__getSelectedAction;
+						const getAction = fieldRefs.getSelectedAction;
 						const chosenAction = getAction ? getAction() : '';
 						customMetadata[fieldLabel] = chosenAction;
-						const getTargetStatus = (inputEl as any).__getSelectedTargetStatus;
+						const getTargetStatus = fieldRefs.getSelectedTargetStatus;
 						const targetSt = getTargetStatus ? getTargetStatus() : '';
 						if (targetSt) {
 							initialStatusOverride = targetSt;
 						}
 					} else if (inputEl.classList.contains('browser-field-container')) {
-						const getBData = (inputEl as any).__getBrowserData;
+						const getBData = fieldRefs.getBrowserData;
 						const bData = getBData ? getBData() : { url: '', credentials: [] };
 						customMetadata[fieldLabel] = JSON.stringify(bData);
 					} else if (inputEl.classList.contains('prompt-field-container')) {
-						const getPData = (inputEl as any).__getPromptData;
+						const getPData = fieldRefs.getPromptData;
 						const pData = getPData ? getPData() : { prompt: '', targetMode: 'model' };
 						customMetadata[fieldLabel] = JSON.stringify(pData);
 					} else if (inputEl.classList.contains('tts-field-container')) {
-						const getTData = (inputEl as any).__getTtsData;
+						const getTData = fieldRefs.getTtsData;
 						const tData = getTData ? getTData() : { text: '', ttsFormat: 'mp3' };
 						customMetadata[fieldLabel] = JSON.stringify(tData);
 					} else if (inputEl.classList.contains('python-field-container')) {
-						const getPyData = (inputEl as any).__getPythonData;
+						const getPyData = fieldRefs.getPythonData;
 						const pyData = getPyData ? getPyData() : { code: '', pythonPath: '' };
 						customMetadata[fieldLabel] = JSON.stringify(pyData);
 					} else {
-						customMetadata[fieldLabel] = (inputEl as any).value || '';
+						customMetadata[fieldLabel] = fieldRefs.valueInput?.value || '';
 					}
 				}
 			});
@@ -1474,7 +1531,7 @@ export async function createOrEditAgentDialog(
 			const gitRepoUrl = gitRemoteInput.value.trim() || undefined;
 			const gitBranch = gitBranchInput.value.trim() || undefined;
 			const hasCustomSchema = !!(activeAgentModule && activeAgentModule.fields && activeAgentModule.fields.length > 0);
-			const defFile = (activeAgentModule as any)?.definitionFile;
+			const defFile = activeAgentModule?.definitionFile;
 			const modDesc = typeof activeAgentModule?.description === 'string' ? activeAgentModule.description.trim() : '';
 			const resolvedTypeDef = hasCustomSchema ? (defFile || '.agents/entity_type/agent.yaml') : (defFile || modDesc || undefined);
 			const resolvedTypePrompt = (typeof activeAgentModule?.prompt === 'string' && activeAgentModule.prompt.trim())

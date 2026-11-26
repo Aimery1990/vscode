@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
@@ -149,9 +148,35 @@ export const HTTP_REQUEST_CONFIG_KEYS: readonly string[] = [
 	'httpTimeoutMs'
 ];
 
-function parseTicketValueObject(value: unknown): Record<string, any> | undefined {
+/** A parsed (JSON) ticket value object; keys are dynamic. */
+export type TicketValueObject = Record<string, unknown>;
+
+/**
+ * Ticket value of an `http_request` component with canonical (template) property names. Values come from
+ * persisted JSON, so additional / unknown keys may be present.
+ */
+export interface IHttpTicketValue extends Pick<ICustomField,
+	'httpUrl' | 'httpMethod' | 'httpParams' | 'httpHeaders' | 'httpAuthType' | 'httpAuthToken' | 'httpApiKeyName' |
+	'httpApiKeyValue' | 'httpApiKeyLocation' | 'httpAuthUsername' | 'httpAuthPassword' | 'httpBodyType' |
+	'httpBodyContent' | 'httpTimeoutMs' | 'httpResponseStatus' | 'httpResponseStatusText' | 'httpResponseHeaders' |
+	'httpResponseBody' | 'httpResponseData' | 'httpLastExecutionTime' | 'httpLastDurationMs'> {
+	[key: string]: unknown;
+}
+
+/**
+ * Ticket value of an `ssh` component with canonical (template) property names. Values come from persisted JSON,
+ * so additional / unknown keys may be present.
+ */
+export interface ISshTicketValue extends Pick<ICustomField,
+	'sshHost' | 'sshPort' | 'sshUser' | 'sshPassword' | 'sshCwd' | 'sshCommand' | 'sshCommands' | 'sshOutput' |
+	'sshLastOutput' | 'sshLastRawOutput' | 'sshLastRawEntries' | 'sshOutputLines' | 'sshQuickCommands'> {
+	sshLastExecuted?: string;
+	[key: string]: unknown;
+}
+
+function parseTicketValueObject(value: unknown): TicketValueObject | undefined {
 	if (value && typeof value === 'object' && !Array.isArray(value)) {
-		return value as Record<string, any>;
+		return value as TicketValueObject;
 	}
 	if (typeof value === 'string') {
 		const trimmed = value.trim();
@@ -167,8 +192,8 @@ function parseTicketValueObject(value: unknown): Record<string, any> | undefined
 	return undefined;
 }
 
-function renameTicketKeys(src: Record<string, any>, map: Readonly<Record<string, string>>, skip: ReadonlySet<string> = new Set()): Record<string, any> {
-	const out: Record<string, any> = {};
+function renameTicketKeys(src: TicketValueObject, map: Readonly<Record<string, string>>, skip: ReadonlySet<string> = new Set()): TicketValueObject {
+	const out: TicketValueObject = {};
 	for (const [k, v] of Object.entries(src)) {
 		if (map[k] === undefined && !skip.has(k)) {
 			out[k] = v;
@@ -188,7 +213,7 @@ function renameTicketKeys(src: Record<string, any>, map: Readonly<Record<string,
  * (`{url, method, status, statusText, ok, headers, data, body, rawText}`), whose `url` was the resolved URL and
  * whose `headers` / `body` were RESPONSE headers / body.
  */
-export function normalizeHttpTicketValue(value: unknown): Record<string, any> | undefined {
+export function normalizeHttpTicketValue(value: unknown): IHttpTicketValue | undefined {
 	const src = parseTicketValueObject(value);
 	if (!src) {
 		return undefined;
@@ -226,42 +251,42 @@ export function normalizeHttpTicketValue(value: unknown): Record<string, any> | 
 		// The old runtime read `body` as the request body.
 		setIfMissing('httpBodyContent', src.body);
 	}
-	return out;
+	return out as IHttpTicketValue;
 }
 
 /** Returns the ticket value of an `ssh` component with canonical (template) property names, or undefined. */
-export function normalizeSshTicketValue(value: unknown): Record<string, any> | undefined {
+export function normalizeSshTicketValue(value: unknown): ISshTicketValue | undefined {
 	const src = parseTicketValueObject(value);
-	return src ? renameTicketKeys(src, SSH_TICKET_LEGACY_KEYS) : undefined;
+	return src ? renameTicketKeys(src, SSH_TICKET_LEGACY_KEYS) as ISshTicketValue : undefined;
 }
 
 /** True when a parsed ticket value looks like an `http_request` value (canonical or legacy names). */
-export function looksLikeHttpTicketValue(obj: Record<string, any>): boolean {
+export function looksLikeHttpTicketValue(obj: Readonly<TicketValueObject>): boolean {
 	return (obj.httpUrl !== undefined && obj.httpMethod !== undefined)
 		|| (obj.method !== undefined && obj.url !== undefined && (obj.authType !== undefined || obj.headers !== undefined || obj.params !== undefined));
 }
 
 /** True when a parsed ticket value looks like an `ssh` value (canonical or legacy names). */
-export function looksLikeSshTicketValue(obj: Record<string, any>): boolean {
+export function looksLikeSshTicketValue(obj: Readonly<TicketValueObject>): boolean {
 	return obj.sshHost !== undefined
 		|| (obj.host !== undefined && (obj.port !== undefined || obj.quickCommands !== undefined));
 }
 
 /** True when the object is an `http_request` ticket value, including the old post-run record. */
-export function isHttpTicketValue(obj: Record<string, any>): boolean {
+export function isHttpTicketValue(obj: Readonly<TicketValueObject>): boolean {
 	return looksLikeHttpTicketValue(obj) || obj.httpResponseStatus !== undefined
 		|| (obj.status !== undefined && (obj.data !== undefined || obj.body !== undefined || obj.rawText !== undefined));
 }
 
 /** True when the object is an `ssh` ticket value (canonical or legacy names). */
-export function isSshTicketValue(obj: Record<string, any>): boolean {
+export function isSshTicketValue(obj: Readonly<TicketValueObject>): boolean {
 	return looksLikeSshTicketValue(obj)
 		|| Array.isArray(obj.sshLastRawEntries) || obj.sshLastOutput !== undefined
 		|| Array.isArray(obj.lastRawEntries) || obj.lastNOutput !== undefined;
 }
 
 /** Business output (response payload as text) of an `http_request` ticket value; '' before the first run. */
-export function httpTicketValueOutputText(obj: Record<string, any>): string {
+export function httpTicketValueOutputText(obj: Readonly<TicketValueObject>): string {
 	const v = normalizeHttpTicketValue(obj) ?? {};
 	const data = v.httpResponseData;
 	if (data !== undefined && data !== null) {
@@ -271,7 +296,7 @@ export function httpTicketValueOutputText(obj: Record<string, any>): string {
 }
 
 /** Business output (last N lines per command) of an `ssh` ticket value; '' before the first run. */
-export function sshTicketValueOutputText(obj: Record<string, any>): string {
+export function sshTicketValueOutputText(obj: Readonly<TicketValueObject>): string {
 	const v = normalizeSshTicketValue(obj) ?? {};
 	const n = Number(v.sshOutputLines) > 0 ? Number(v.sshOutputLines) : 50;
 	if (Array.isArray(v.sshLastRawEntries) && v.sshLastRawEntries.length > 0) {
@@ -284,7 +309,7 @@ export function sshTicketValueOutputText(obj: Record<string, any>): string {
 }
 
 /** Initial ticket value of an `http_request` component, built from its template config (same property names). */
-export function buildHttpTicketValue(f: ICustomField): Record<string, any> {
+export function buildHttpTicketValue(f: ICustomField): IHttpTicketValue {
 	return {
 		httpMethod: f.httpMethod || 'GET',
 		httpUrl: f.httpUrl || f.defaultUrl || '',
@@ -304,7 +329,7 @@ export function buildHttpTicketValue(f: ICustomField): Record<string, any> {
 }
 
 /** Initial ticket value of an `ssh` component, built from its template config (same property names). */
-export function buildSshTicketValue(f: ICustomField): Record<string, any> {
+export function buildSshTicketValue(f: ICustomField): ISshTicketValue {
 	const cmds = normalizeSshCommandsList(f.sshCommands, f.sshCommand || f.defaultContent || '');
 	return {
 		sshHost: f.sshHost || '',
@@ -429,20 +454,20 @@ export const SSH_DEFAULT_QUICK_COMMANDS: ISshQuickCommand[] = [
 ];
 
 const SSH_LEGACY_CN_LABEL_MAP: Record<string, { label: string; category: string }> = {
-	'查看目录 (ls -la)': { label: 'List Directory (ls -la)', category: 'Files & Dirs' },
-	'当前路径 (pwd)': { label: 'Current Path (pwd)', category: 'Files & Dirs' },
-	'系统信息 (uname -a)': { label: 'System Info (uname -a)', category: 'System' },
-	'运行时间 & 负载 (uptime)': { label: 'Uptime & Load (uptime)', category: 'System' },
-	'内存使用 (free -h)': { label: 'Memory Usage (free -h)', category: 'Resources' },
-	'磁盘空间 (df -h)': { label: 'Disk Space (df -h)', category: 'Resources' },
-	'CPU/内存 Top 10 进程': { label: 'Top 10 Processes (ps)', category: 'Resources' },
-	'监听端口 (ss -tulnp)': { label: 'Listening Ports (ss -tulnp)', category: 'Network' },
-	'公网/网卡 IP (ip a)': { label: 'IP Addresses (ip a)', category: 'Network' },
-	'Docker 运行容器 (docker ps)': { label: 'Docker Containers (docker ps)', category: 'Docker & Services' },
-	'Docker 资源占用 (docker stats)': { label: 'Docker Stats (docker stats)', category: 'Docker & Services' },
-	'运行中 Systemd 服务': { label: 'Running Services (systemctl)', category: 'Docker & Services' },
-	'系统最新日志 (journalctl)': { label: 'System Logs (journalctl)', category: 'Logs' },
-	'大文件扫描 (>100M)': { label: 'Large Files >100M (find)', category: 'Files & Dirs' }
+	'\u67E5\u770B\u76EE\u5F55 (ls -la)': { label: 'List Directory (ls -la)', category: 'Files & Dirs' },
+	'\u5F53\u524D\u8DEF\u5F84 (pwd)': { label: 'Current Path (pwd)', category: 'Files & Dirs' },
+	'\u7CFB\u7EDF\u4FE1\u606F (uname -a)': { label: 'System Info (uname -a)', category: 'System' },
+	'\u8FD0\u884C\u65F6\u95F4 & \u8D1F\u8F7D (uptime)': { label: 'Uptime & Load (uptime)', category: 'System' },
+	'\u5185\u5B58\u4F7F\u7528 (free -h)': { label: 'Memory Usage (free -h)', category: 'Resources' },
+	'\u78C1\u76D8\u7A7A\u95F4 (df -h)': { label: 'Disk Space (df -h)', category: 'Resources' },
+	'CPU/\u5185\u5B58 Top 10 \u8FDB\u7A0B': { label: 'Top 10 Processes (ps)', category: 'Resources' },
+	'\u76D1\u542C\u7AEF\u53E3 (ss -tulnp)': { label: 'Listening Ports (ss -tulnp)', category: 'Network' },
+	'\u516C\u7F51/\u7F51\u5361 IP (ip a)': { label: 'IP Addresses (ip a)', category: 'Network' },
+	'Docker \u8FD0\u884C\u5BB9\u5668 (docker ps)': { label: 'Docker Containers (docker ps)', category: 'Docker & Services' },
+	'Docker \u8D44\u6E90\u5360\u7528 (docker stats)': { label: 'Docker Stats (docker stats)', category: 'Docker & Services' },
+	'\u8FD0\u884C\u4E2D Systemd \u670D\u52A1': { label: 'Running Services (systemctl)', category: 'Docker & Services' },
+	'\u7CFB\u7EDF\u6700\u65B0\u65E5\u5FD7 (journalctl)': { label: 'System Logs (journalctl)', category: 'Logs' },
+	'\u5927\u6587\u4EF6\u626B\u63CF (>100M)': { label: 'Large Files >100M (find)', category: 'Files & Dirs' }
 };
 
 export function normalizeSshQuickCommands(cmds?: ISshQuickCommand[]): ISshQuickCommand[] {
@@ -531,7 +556,7 @@ export function extractSshOutputLastNLines(rawLog: string | undefined, maxLines?
 					const n = typeof maxLines === 'number' && !isNaN(maxLines) && maxLines > 0 ? Math.floor(maxLines) : 50;
 					const slicedObj: Record<string, string[]> = {};
 					for (const [k, v] of Object.entries(parsed)) {
-						slicedObj[k] = (v as any[]).map(line => String(line ?? '')).slice(-n);
+						slicedObj[k] = (v as unknown[]).map(line => String(line ?? '')).slice(-n);
 					}
 					return JSON.stringify(slicedObj, null, 2);
 				}
@@ -642,7 +667,7 @@ export interface ICustomField {
 	pythonEnvMode?: 'existing' | 'create';
 	pythonCode?: string;
 	pythonOutput?: string;
-	pythonResult?: any;
+	pythonResult?: unknown;
 	externalScripts?: string[];
 	ttsFormat?: 'mp3' | 'wav' | 'opus' | 'aac' | string;
 	ttsVoice?: string;
@@ -670,7 +695,7 @@ export interface ICustomField {
 	subWorkflowInputDefs?: Array<{ name: string; label?: string; defaultValue?: string }>;
 	subWorkflowOutputDefs?: Array<{ label: string; varName: string; defaultFormat?: string }>;
 	tableColumns?: ITableColumnDefinition[];
-	tableRows?: Array<Record<string, any>>;
+	tableRows?: Array<Record<string, unknown>>;
 	tableDbEngine?: 'sqlite' | string;
 	tableDbPath?: string;
 	tableDbTableName?: string;
@@ -721,7 +746,7 @@ export interface ICustomField {
 	httpResponseStatusText?: string;
 	httpResponseHeaders?: Record<string, string>;
 	httpResponseBody?: string;
-	httpResponseData?: any;
+	httpResponseData?: unknown;
 	httpLastExecutionTime?: string;
 	httpLastDurationMs?: number;
 }

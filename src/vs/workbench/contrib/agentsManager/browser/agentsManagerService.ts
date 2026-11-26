@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -13,7 +12,7 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IAgentItem, IAgentsManagerService, AgentScopeType, getGlobalDefaultModel, resolveDefaultModelId } from '../common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
-import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
+import { AuthenticationSession, IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 
 const STORAGE_KEY = 'workbench.agentsManager.agents';
 
@@ -68,13 +67,14 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 			const uniqueProviders = Array.from(new Set(providers));
 
 			const sessionPromises = uniqueProviders.map(async providerId => {
-				let timeoutId: any;
+				let timeoutId: ReturnType<typeof setTimeout> | undefined;
 				try {
 					const sessionsPromise = this.authenticationService.getSessions(providerId, undefined, undefined, true);
-					const timeoutPromise = new Promise<readonly any[]>(resolve => {
+					const timeoutPromise = new Promise<readonly AuthenticationSession[]>(resolve => {
 						timeoutId = setTimeout(() => resolve([]), 5000);
 					});
-					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
+					// Some providers also expose the account e-mail at runtime.
+					const sessions: ReadonlyArray<AuthenticationSession & { readonly account: { readonly email?: string } }> = await Promise.race([sessionsPromise, timeoutPromise]);
 					clearTimeout(timeoutId);
 					if (sessions && sessions.length > 0) {
 						return { providerId, session: sessions[0] };
@@ -133,7 +133,7 @@ export class AgentsManagerService extends Disposable implements IAgentsManagerSe
 
 		if (raw) {
 			try {
-				const parsed = JSON.parse(raw) as any[];
+				const parsed = JSON.parse(raw) as Array<IAgentItem & { modelName?: string }>;
 				// Keep only real agents created by user that have a physical folderPath on disk
 				this._agents = parsed.filter(a => !!a.folderPath).map(a => {
 					// Migration of legacy agent model representation

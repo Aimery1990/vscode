@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import './media/diagramsManager.css';
@@ -124,7 +123,7 @@ export class DiagramsManagerPane extends ViewPane {
 	}
 
 	private async renderContent(): Promise<void> {
-		if (!this.containerEl) return;
+		if (!this.containerEl) { return; }
 		clearNode(this.containerEl);
 
 		// 1. Top Action Toolbar: Filter + New Diagram

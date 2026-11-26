@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Any Agent / Google Deepmind. All rights reserved.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../base/common/lifecycle.js';
@@ -8,12 +8,59 @@ import { generateUuid } from '../../../../base/common/uuid.js';
 import { streamToBuffer, decodeBase64 } from '../../../../base/common/buffer.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { ISecretStorageService } from '../../../../platform/secrets/common/secrets.js';
-import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
+import { AuthenticationSession, IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { ALIYUN_PROVIDER_ID, getDefaultBaseUrl, IAgentCredential, IAgentCredentialService, IAgentModelReference, setGlobalDefaultModel } from '../common/agentsManager.js';
 import { IRequestService, asJson, asText } from '../../../../platform/request/common/request.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
+
+/**
+ * Loose shapes of the provider REST payloads this service reads and writes.
+ * Every response field is optional because providers differ; these are
+ * compile-time descriptions only.
+ */
+interface IProviderModelListResponse {
+	models?: Array<{ name: string; model: string; id: string }>;
+	data?: Array<{ id: string }>;
+}
+
+interface IProviderContentPart {
+	type?: string;
+	text?: string;
+	content?: string;
+	thought?: boolean;
+	inlineData?: { data?: string; mimeType?: string };
+}
+
+interface IProviderGenerateResponse {
+	model?: string;
+	status?: string;
+	choices?: Array<{
+		text?: string;
+		finish_reason?: string;
+		message?: { content?: string | Array<string | IProviderContentPart>; refusal?: string };
+	}>;
+	usage?: { completion_tokens?: number; completion_tokens_details?: { reasoning_tokens?: number } };
+	output_text?: string;
+	output?: Array<{ type?: string; text?: string; content?: IProviderContentPart[] }>;
+	incomplete_details?: { reason?: string };
+	candidates?: Array<{ content?: { parts?: IProviderContentPart[] } }>;
+	content?: IProviderContentPart[];
+}
+
+interface IChatMessagePayload {
+	role: string;
+	content: string;
+}
+
+interface IChatCompletionPayload {
+	model: string;
+	messages: IChatMessagePayload[];
+	max_tokens?: number;
+	max_completion_tokens?: number;
+	reasoning_effort?: string;
+}
 
 export class AgentCredentialService extends Disposable implements IAgentCredentialService {
 	declare readonly _serviceBrand: undefined;
@@ -67,13 +114,14 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			const uniqueProviders = Array.from(new Set(providers));
 
 			const sessionPromises = uniqueProviders.map(async providerId => {
-				let timeoutId: any;
+				let timeoutId: ReturnType<typeof setTimeout> | undefined;
 				try {
 					const sessionsPromise = this.authenticationService.getSessions(providerId, undefined, undefined, true);
-					const timeoutPromise = new Promise<readonly any[]>(resolve => {
+					const timeoutPromise = new Promise<readonly AuthenticationSession[]>(resolve => {
 						timeoutId = setTimeout(() => resolve([]), 5000);
 					});
-					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
+					// Some providers also expose the account e-mail at runtime.
+					const sessions: ReadonlyArray<AuthenticationSession & { readonly account: { readonly email?: string } }> = await Promise.race([sessionsPromise, timeoutPromise]);
 					clearTimeout(timeoutId);
 					if (sessions && sessions.length > 0) {
 						return { providerId, session: sessions[0] };
@@ -297,11 +345,11 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					throw new Error(`HTTP Error ${response.res.statusCode}`);
 				}
 
-				const data = await asJson<any>(response);
+				const data = await asJson<IProviderModelListResponse>(response);
 				if (data && Array.isArray(data.models)) {
 					return data.models
-						.filter((m: any) => m.name && m.name.startsWith('models/'))
-						.map((m: any) => m.name.replace(/^models\//, ''));
+						.filter(m => m.name && m.name.startsWith('models/'))
+						.map(m => m.name.replace(/^models\//, ''));
 				}
 			} else if (actualProvider === 'openai') {
 				const response = await this.requestService.request({
@@ -316,9 +364,9 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					throw new Error(`HTTP Error ${response.res.statusCode}`);
 				}
 
-				const data = await asJson<any>(response);
+				const data = await asJson<IProviderModelListResponse>(response);
 				if (data && Array.isArray(data.data)) {
-					return data.data.map((m: any) => m.id);
+					return data.data.map(m => m.id);
 				}
 			} else if (actualProvider === 'custom-openai') {
 				const baseEndpoint = customUrlVal || 'http://localhost:11434/v1';
@@ -335,11 +383,11 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					throw new Error(`HTTP Error ${response.res.statusCode}`);
 				}
 
-				const data = await asJson<any>(response);
+				const data = await asJson<IProviderModelListResponse>(response);
 				if (data && Array.isArray(data.data)) {
-					return data.data.map((m: any) => m.id);
+					return data.data.map(m => m.id);
 				} else if (data && Array.isArray(data.models)) {
-					return data.models.map((m: any) => m.name || m.model || m.id);
+					return data.models.map(m => m.name || m.model || m.id);
 				}
 			} else if (actualProvider === 'anthropic') {
 				const response = await this.requestService.request({
@@ -357,12 +405,12 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					throw new Error(`HTTP Error ${response.res.statusCode}`);
 				}
 
-				const data = await asJson<any>(response);
+				const data = await asJson<IProviderModelListResponse>(response);
 				if (data && Array.isArray(data.data)) {
-					return data.data.map((m: any) => m.id);
+					return data.data.map(m => m.id);
 				}
 			}
-		} catch (e: any) {
+		} catch (e) {
 			console.error(`Failed to fetch models for provider ${providerId}:`, e);
 			throw e;
 		}
@@ -411,7 +459,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 		try {
 			models = await this.fetchModels(cred.providerId, apiKey, cred.customUrl);
 			fetchSuccess = models.length > 0;
-		} catch (err: any) {
+		} catch (err) {
 			fetchErrorMsg = err.message || String(err);
 		}
 
@@ -507,7 +555,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			const lowerModel = cleanModel.toLowerCase();
 			const isReasoningOrNewerModel = /gpt-[5-9]/.test(lowerModel) || /^o[1-9]/.test(lowerModel) || lowerModel.startsWith('codex') || lowerModel.includes('-sol') || lowerModel.includes('-luna');
 			let attemptUrl = `${cleanBase}/chat/completions`;
-			let attemptData: any = {
+			const attemptData: IChatCompletionPayload = {
 				model: cleanModel,
 				messages: [{ role: 'user', content: 'Hello! Respond with "Connection Test Successful" if you receive this.' }],
 				...(isReasoningOrNewerModel ? { max_completion_tokens: 512 } : { max_tokens: 30 })
@@ -530,20 +578,20 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					attemptData.max_tokens = 64;
 				}
 				res = await this._executeRequest(attemptUrl, headers, JSON.stringify(attemptData));
-				if (res.success) return res;
+				if (res.success) { return res; }
 				errText = res.message || '';
 			}
 			if (errText.includes('REASONING_TOKEN_LIMIT_EXCEEDED')) {
 				delete attemptData.max_completion_tokens;
 				delete attemptData.max_tokens;
 				res = await this._executeRequest(attemptUrl, headers, JSON.stringify(attemptData));
-				if (res.success) return res;
+				if (res.success) { return res; }
 				errText = res.message || '';
 			}
 			if (errText.includes('reasoning_effort')) {
 				attemptData.reasoning_effort = 'none';
 				res = await this._executeRequest(attemptUrl, headers, JSON.stringify(attemptData));
-				if (res.success) return res;
+				if (res.success) { return res; }
 				errText = res.message || '';
 			}
 			if (errText.includes('v1/responses') || errText.includes('responses endpoint') || isReasoningOrNewerModel) {
@@ -554,7 +602,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					input: 'Hello! Respond with "Connection Test Successful" if you receive this.'
 				};
 				const respRes = await this._executeRequest(attemptUrl, headers, JSON.stringify(responseData));
-				if (respRes.success) return respRes;
+				if (respRes.success) { return respRes; }
 				if (errText.includes('v1/responses') || errText.includes('responses endpoint')) {
 					res = respRes;
 				}
@@ -568,7 +616,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					max_tokens: 30
 				};
 				res = await this._executeRequest(attemptUrl, headers, JSON.stringify(completionData));
-				if (res.success) return res;
+				if (res.success) { return res; }
 			}
 
 			return res;
@@ -611,11 +659,11 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 								callSite: 'agentCredentialService.testConnection'
 							}, CancellationToken.None);
 							if (listRes.res.statusCode === 200) {
-								const listData = await asJson<any>(listRes);
+								const listData = await asJson<IProviderModelListResponse>(listRes);
 								if (listData && Array.isArray(listData.models)) {
 									const names = listData.models
-										.filter((m: any) => m.name && m.name.startsWith('models/'))
-										.map((m: any) => m.name.replace(/^models\//, ''));
+										.filter(m => m.name && m.name.startsWith('models/'))
+										.map(m => m.name.replace(/^models\//, ''));
 									return {
 										success: false,
 										message: `HTTP Error ${response.res.statusCode}: ${parsedError || ''}\n\nAvailable models for this key: ${names.join(', ')}`
@@ -634,7 +682,8 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				};
 			}
 
-			const data = await asJson<any>(response);
+			// Non-null assertion keeps the original behavior: a null body throws below and is reported as a network error.
+			const data = (await asJson<IProviderGenerateResponse>(response))!;
 			let responseMessage = '';
 
 			if (url.includes('/chat/completions')) {
@@ -644,7 +693,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					responseMessage = msgContent;
 				} else if (Array.isArray(msgContent)) {
 					const parts = msgContent
-						.map((p: any) => (typeof p === 'string' ? p : (p?.text || p?.content || '')))
+						.map(p => (typeof p === 'string' ? p : (p?.text || p?.content || '')))
 						.filter((s: string) => Boolean(s));
 					responseMessage = parts.join('\n');
 				}
@@ -698,8 +747,8 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				const parts = data.candidates?.[0]?.content?.parts;
 				if (Array.isArray(parts)) {
 					const textParts = parts
-						.filter((p: any) => typeof p?.text === 'string' && !p?.thought)
-						.map((p: any) => p.text);
+						.filter(p => typeof p?.text === 'string' && !p?.thought)
+						.map(p => p.text);
 					responseMessage = textParts.length > 0 ? textParts.join('') : (parts[0]?.text || JSON.stringify(data));
 				} else {
 					responseMessage = JSON.stringify(data);
@@ -707,8 +756,8 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			} else if (url.includes('api.anthropic.com')) {
 				if (Array.isArray(data.content)) {
 					const textBlocks = data.content
-						.filter((b: any) => b?.type === 'text' && typeof b?.text === 'string')
-						.map((b: any) => b.text);
+						.filter(b => b?.type === 'text' && typeof b?.text === 'string')
+						.map(b => b.text);
 					responseMessage = textBlocks.length > 0 ? textBlocks.join('\n') : (data.content?.[0]?.text || JSON.stringify(data));
 				} else {
 					responseMessage = JSON.stringify(data);
@@ -721,7 +770,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				success: true,
 				message: responseMessage.trim()
 			};
-		} catch (err: any) {
+		} catch (err) {
 			return {
 				success: false,
 				message: `Network Error: ${err.message || err}`
@@ -736,7 +785,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 			modelId = this._defaultModel.modelId;
 			targetProviderId = targetProviderId || this._defaultModel.providerId;
 		}
-		let sanitizedModel = (modelId || 'gemini-2.5-flash').replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
+		const sanitizedModel = (modelId || 'gemini-2.5-flash').replace(/[\u2013\u2014\u2015\u2212\uFF0D]/g, '-').trim();
 
 		let providerId = targetProviderId || 'gemini';
 		if (!targetProviderId) {
@@ -794,8 +843,8 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 		try {
 			if (cred.providerId === 'gemini') {
 				const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${sanitizedModel}:generateContent?key=${apiKey}`;
-				const contents: any[] = [{ parts: [{ text: prompt }] }];
-				const payload: any = { contents };
+				const contents: Array<{ parts: Array<{ text: string }> }> = [{ parts: [{ text: prompt }] }];
+				const payload: { contents: typeof contents; system_instruction?: { parts: Array<{ text: string }> } } = { contents };
 				if (systemPrompt) {
 					payload.system_instruction = { parts: [{ text: systemPrompt }] };
 				}
@@ -804,7 +853,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				return res.success ? { success: true, text: res.message } : { success: false, error: res.message };
 			} else if (cred.providerId === 'anthropic') {
 				const endpoint = 'https://api.anthropic.com/v1/messages';
-				const payload: any = {
+				const payload: { model: string; max_tokens: number; messages: IChatMessagePayload[]; system?: string } = {
 					model: sanitizedModel,
 					max_tokens: 8192,
 					messages: [{ role: 'user', content: prompt }]
@@ -835,7 +884,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 				const runOpenAiPrompt = async (activeModel: string): Promise<{ success: boolean; message: string }> => {
 					const lowerModel = activeModel.toLowerCase();
 					const isReasoningOrNewer = /gpt-[5-9]/.test(lowerModel) || /^o[1-9]/.test(lowerModel) || lowerModel.startsWith('codex') || lowerModel.includes('-sol') || lowerModel.includes('-luna');
-					const messages: any[] = [];
+					const messages: IChatMessagePayload[] = [];
 					if (systemPrompt) {
 						messages.push({ role: isReasoningOrNewer ? 'developer' : 'system', content: systemPrompt });
 					}
@@ -843,7 +892,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 
 					// Do not artificially cap max_completion_tokens at 4096, because reasoning models (e.g. gpt-6.1-sol, gpt-5.x, o1/o3/o4)
 					// count internal reasoning_tokens against max_completion_tokens and would exhaust 4096 tokens before writing visible output.
-					const payload: any = {
+					const payload: IChatCompletionPayload = {
 						model: activeModel,
 						messages
 					};
@@ -860,18 +909,18 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 						payload.max_completion_tokens = 32768;
 						payload.reasoning_effort = 'low';
 						res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
-						if (res.success) return res;
+						if (res.success) { return res; }
 						errText = res.message || '';
 						if (errText.includes('reasoning_effort') || errText.includes('REASONING_TOKEN_LIMIT_EXCEEDED')) {
 							payload.reasoning_effort = 'none';
 							res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
-							if (res.success) return res;
+							if (res.success) { return res; }
 							errText = res.message || '';
 						}
 						if (errText.includes('max_completion_tokens') || errText.includes('max_tokens')) {
 							payload.max_completion_tokens = 16384;
 							res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
-							if (res.success) return res;
+							if (res.success) { return res; }
 							errText = res.message || '';
 						}
 					}
@@ -886,15 +935,15 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 							payload.max_tokens = 4096;
 						}
 						res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
-						if (res.success) return res;
+						if (res.success) { return res; }
 						errText = res.message || '';
 					}
 
 					// 2. Handle system/developer role restriction (e.g. o1-mini / o1-preview)
-					if (systemPrompt && (errText.includes("'system'") || errText.includes("'developer'") || errText.includes('role') || errText.includes('messages[0]'))) {
+					if (systemPrompt && (errText.includes('\'system\'') || errText.includes('\'developer\'') || errText.includes('role') || errText.includes('messages[0]'))) {
 						payload.messages = [{ role: 'user', content: `${systemPrompt}\n\n${prompt}` }];
 						res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
-						if (res.success) return res;
+						if (res.success) { return res; }
 						errText = res.message || '';
 					}
 
@@ -902,13 +951,13 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					if (errText.includes('reasoning_effort')) {
 						payload.reasoning_effort = 'none';
 						res = await this._executeRequest(`${cleanBase}/chat/completions`, headers, JSON.stringify(payload));
-						if (res.success) return res;
+						if (res.success) { return res; }
 						errText = res.message || '';
 					}
 
 					// 4. Fallback to /v1/responses endpoint for newer OpenAI models (e.g. gpt-6.x, gpt-5-pro, o1-pro, codex, search-api)
 					if (errText.includes('v1/responses') || errText.includes('responses endpoint') || errText.includes('REASONING_TOKEN_LIMIT_EXCEEDED') || isReasoningOrNewer) {
-						const responsesPayload: any = {
+						const responsesPayload: { model: string; input: string; instructions?: string } = {
 							model: activeModel,
 							input: prompt
 						};
@@ -916,7 +965,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 							responsesPayload.instructions = systemPrompt;
 						}
 						const respRes = await this._executeRequest(`${cleanBase}/responses`, headers, JSON.stringify(responsesPayload));
-						if (respRes.success) return respRes;
+						if (respRes.success) { return respRes; }
 						if (errText.includes('v1/responses') || errText.includes('responses endpoint')) {
 							res = respRes;
 							errText = res.message || '';
@@ -931,7 +980,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 							max_tokens: 4096
 						};
 						const compRes = await this._executeRequest(`${cleanBase}/completions`, headers, JSON.stringify(completionPayload));
-						if (compRes.success) return compRes;
+						if (compRes.success) { return compRes; }
 					}
 
 					return res;
@@ -948,7 +997,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 
 				return res.success ? { success: true, text: res.message } : { success: false, error: res.message };
 			}
-		} catch (err: any) {
+		} catch (err) {
 			return { success: false, error: `Prompt execution failed: ${err.message || String(err)}` };
 		}
 	}
@@ -1068,9 +1117,9 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					}, CancellationToken.None);
 
 					if (response.res.statusCode === 200) {
-						const data = await asJson<any>(response);
+						const data = await asJson<IProviderGenerateResponse>(response);
 						const parts = data?.candidates?.[0]?.content?.parts || [];
-						const audioPart = parts.find((p: any) => p.inlineData && p.inlineData.data);
+						const audioPart = parts.find(p => p.inlineData && p.inlineData.data);
 						if (audioPart && audioPart.inlineData?.data) {
 							const rawMime: string = audioPart.inlineData.mimeType || 'audio/pcm';
 							const rawBytes = decodeBase64(audioPart.inlineData.data).buffer;
@@ -1181,7 +1230,7 @@ export class AgentCredentialService extends Disposable implements IAgentCredenti
 					error: `Provider '${cred.providerId}' does not natively support TTS audio synthesis. Please select an OpenAI, Google Gemini, or Custom OpenAI credential.`
 				};
 			}
-		} catch (err: any) {
+		} catch (err) {
 			return {
 				success: false,
 				error: `Speech synthesis failed: ${err.message || String(err)}`
