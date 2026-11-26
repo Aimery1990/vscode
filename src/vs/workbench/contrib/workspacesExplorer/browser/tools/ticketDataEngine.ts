@@ -11,7 +11,8 @@ import { IWorkspaceChildItem, IWorkspacesExplorerService } from '../../common/wo
 import { IAgentsManagerService } from '../../../agentsManager/common/agentsManager.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { ISqliteTableOperationResult, ITicketWorkflowRuntimeService } from '../../../workflowsManager/browser/ticketWorkflowRuntime.js';
-import { parse as parseYaml, YamlNode } from '../../../../../base/common/yaml.js';
+import { findTemplateField, getTemplateFields, parseTemplateYaml } from '../../../customModules/common/templateYaml.js';
+import { escapeRegExpCharacters } from '../../../../../base/common/strings.js';
 import { hasKey } from '../../../../../base/common/types.js';
 import { TicketWorklogStorage } from '../ticketWorklogStorage.js';
 
@@ -29,12 +30,6 @@ interface IParsedTicketMd {
 	parentPath?: string;
 	linkTo?: string;
 	linkedBy?: string;
-}
-
-/** Returns `schema.fields` when it is an array (the template schema is untyped YAML). */
-function getSchemaFields(schema: unknown): ICustomField[] {
-	const fields = (schema as { fields?: unknown } | null | undefined)?.fields;
-	return Array.isArray(fields) ? fields : [];
 }
 
 /** `item.name || item.key || item.title` of a tool-provided JSON object. */
@@ -993,21 +988,8 @@ export class TicketDataEngine {
 		const parsedReadme = this._parseReadmeMd(readmeContent);
 		const parsedInstruction = this._parseInstructionMd(instructionContent);
 
-		// Try load type schema YAML if any
-		let schemaDefinition: YamlNode | undefined | null = null;
-		const typeYamlCandidates = [
-			URI.joinPath(wsUri, '.agents', 'entity_type', `${paths.ticketType}.yaml`),
-			URI.file(`/Users/aimery/.anyagent/entity_type/${paths.ticketType}.yaml`)
-		];
-		for (const typeYamlUri of typeYamlCandidates) {
-			if (await this.fileService.exists(typeYamlUri)) {
-				try {
-					const yamlStr = (await this.fileService.readFile(typeYamlUri)).value.toString();
-					schemaDefinition = parseYaml(yamlStr);
-					if (schemaDefinition) { break; }
-				} catch { }
-			}
-		}
+		// Load the ticket's template (type) definition, if any, as a plain object
+		const schemaDefinition = await this._readTicketSchema(paths.folderUri, wsUri, paths.ticketType);
 
 		// Also merge customMetadata from .agents/entity_snapshot.json if present (e.g. Workflows)
 		const mergedSelfDefinedData: Record<string, unknown> = { ...parsedTicket.selfDefinedData };
@@ -1214,7 +1196,7 @@ export class TicketDataEngine {
 	 * 4. anyagent_update_ticket
 	 */
 	/** Reads the ticket's template (type) YAML: ticket folder, then workspace, then the global template folder. */
-	private async _readTicketSchema(folderUri: URI, wsUri: URI | undefined, ticketType: string): Promise<YamlNode | null> {
+	private async _readTicketSchema(folderUri: URI, wsUri: URI | undefined, ticketType: string): Promise<object | null> {
 		const typeYamlCandidates = [
 			URI.joinPath(folderUri, '.agents', 'entity_type', `${ticketType}.yaml`),
 			...(wsUri ? [URI.joinPath(wsUri, '.agents', 'entity_type', `${ticketType}.yaml`)] : []),
@@ -1223,8 +1205,8 @@ export class TicketDataEngine {
 		for (const typeYamlUri of typeYamlCandidates) {
 			if (await this.fileService.exists(typeYamlUri)) {
 				try {
-					const schema = parseYaml((await this.fileService.readFile(typeYamlUri)).value.toString());
-					if (schema) {
+					const schema = parseTemplateYaml((await this.fileService.readFile(typeYamlUri)).value.toString());
+					if (schema && typeof schema === 'object' && !Array.isArray(schema)) {
 						return schema;
 					}
 				} catch { }
@@ -1264,7 +1246,7 @@ export class TicketDataEngine {
 		let ticketModified = false;
 		let readmeModified = false;
 		let instructionModified = false;
-		let schemaForNumbers: YamlNode | null | undefined = undefined;
+		let schemaFields: ICustomField[] | undefined = undefined;
 
 		for (const [rawPath, rawVal] of Object.entries(options.updates)) {
 			const path = rawPath.trim();
@@ -1329,19 +1311,25 @@ export class TicketDataEngine {
 			}
 			// 7. Dynamic Custom Cards & Attributes (/Custom/...)
 			else if (path.startsWith('/Custom/') || path.startsWith('Custom/')) {
-				const cleanPath = path.replace(/^\/?Custom\//, '');
+				let cleanPath = path.replace(/^\/?Custom\//, '');
 				let customVal = rawVal;
 				if (!cleanPath.includes('/')) {
-					// Enforce a number component's range / precision (same rules as the ticket UI)
-					schemaForNumbers ??= await this._readTicketSchema(paths.folderUri, wsUri, paths.ticketType);
-					const numDef = getSchemaFields(schemaForNumbers)
-						.find((f: ICustomField) => f && f.type === 'number' && (f.label === cleanPath || f.id === cleanPath));
-					if (numDef) {
-						const numCheck = normalizeNumberFieldValue({ label: numDef.label, min: numDef.min, max: numDef.max, precision: numDef.precision }, customVal);
-						if (!numCheck.ok) {
-							throw new Error(numCheck.error);
+					schemaFields ??= getTemplateFields(await this._readTicketSchema(paths.folderUri, wsUri, paths.ticketType));
+					const fieldDef = findTemplateField(schemaFields, cleanPath);
+					if (fieldDef) {
+						// Ticket values are stored under the component's label (what the ticket UI reads), also when addressed by id.
+						// (A label containing '/' cannot be written as a flat key by _applyCustomUpdate, so keep the given key then.)
+						if (typeof fieldDef.label === 'string' && fieldDef.label.trim() && !fieldDef.label.includes('/')) {
+							cleanPath = fieldDef.label;
 						}
-						customVal = numCheck.value;
+						// Enforce a number component's range / precision (same rules as the ticket UI)
+						if (fieldDef.type === 'number') {
+							const numCheck = normalizeNumberFieldValue({ label: fieldDef.label, min: fieldDef.min, max: fieldDef.max, precision: fieldDef.precision }, customVal);
+							if (!numCheck.ok) {
+								throw new Error(numCheck.error);
+							}
+							customVal = numCheck.value;
+						}
 					}
 				}
 				ticketContent = this._applyCustomUpdate(ticketContent, cleanPath, customVal);
@@ -1666,7 +1654,7 @@ export class TicketDataEngine {
 		// 1. /Custom/<key>/add -> Add items to list, table, or dynamic card
 		if (parts.length === 2 && parts[1] === 'add' && val !== undefined && val !== null) {
 			const listKey = parts[0];
-			const propRegex = new RegExp(`^(\\s*-\\s*\\*\\*${listKey}\\*\\*:)(.*)$`, 'm');
+			const propRegex = new RegExp(`^(\\s*-\\s*\\*\\*${escapeRegExpCharacters(listKey)}\\*\\*:)(.*)$`, 'm');
 			const propMatch = content.match(propRegex);
 
 			// Check if listKey is a Data Table JSON object ({ columns, rows, ... })
@@ -1731,7 +1719,7 @@ export class TicketDataEngine {
 			}
 
 			// Find listKey in Self Defined Data Value
-			const listRegex = new RegExp(`(  - \\*\\*${listKey}\\*\\*:\\n?)([\\s\\S]*?)(?=(\\n  - \\*\\*|\\n\\n|\\n###|$))`);
+			const listRegex = new RegExp(`(  - \\*\\*${escapeRegExpCharacters(listKey)}\\*\\*:\\n?)([\\s\\S]*?)(?=(\\n  - \\*\\*|\\n\\n|\\n###|$))`);
 			if (listRegex.test(content)) {
 				content = content.replace(listRegex, (_m, p1, p2) => `${p1}${p2}${newCardBlock}`);
 			} else {
@@ -1747,7 +1735,7 @@ export class TicketDataEngine {
 		// 2. /Custom/<key>/remove or /delete
 		if (parts.length === 2 && (parts[1] === 'remove' || parts[1] === 'delete')) {
 			const listKey = parts[0];
-			const propRegex = new RegExp(`^(\\s*-\\s*\\*\\*${listKey}\\*\\*:)(.*)$`, 'm');
+			const propRegex = new RegExp(`^(\\s*-\\s*\\*\\*${escapeRegExpCharacters(listKey)}\\*\\*:)(.*)$`, 'm');
 			const propMatch = content.match(propRegex);
 			if (propMatch && propMatch[2].trim().startsWith('[')) {
 				try {
@@ -1768,7 +1756,7 @@ export class TicketDataEngine {
 		// 3. /Custom/<key>/<cardKey>/<attr> -> Update specific attribute of card
 		if (parts.length === 3) {
 			const [, cardKey, attr] = parts;
-			const attrRegex = new RegExp(`(  - \\*\\*${cardKey}\\*\\*:[\\s\\S]*?    - \\*\\*${attr}\\*\\*:).*$`, 'm');
+			const attrRegex = new RegExp(`(  - \\*\\*${escapeRegExpCharacters(cardKey)}\\*\\*:[\\s\\S]*?    - \\*\\*${escapeRegExpCharacters(attr)}\\*\\*:).*$`, 'm');
 			if (attrRegex.test(content)) {
 				content = content.replace(attrRegex, (_m, p1) => `${p1} ${val}`);
 			}
@@ -1778,7 +1766,7 @@ export class TicketDataEngine {
 		// 4. /Custom/<key>/<cardKey>: null -> Delete card
 		if (parts.length === 2 && (val === null || val === undefined)) {
 			const [, cardKey] = parts;
-			const cardRegex = new RegExp(`\\n?    - \\*\\*${cardKey}\\*\\*:[\\s\\S]*?(?=(\\n    - \\*\\*|\\n  - \\*\\*|\\n###|$))`, 'g');
+			const cardRegex = new RegExp(`\\n?    - \\*\\*${escapeRegExpCharacters(cardKey)}\\*\\*:[\\s\\S]*?(?=(\\n    - \\*\\*|\\n  - \\*\\*|\\n###|$))`, 'g');
 			content = content.replace(cardRegex, '');
 			return content;
 		}
@@ -1786,7 +1774,7 @@ export class TicketDataEngine {
 		// 5. /Custom/<key>: val -> Flat custom property or full array update
 		if (parts.length === 1) {
 			const key = parts[0];
-			const propRegex = new RegExp(`^\\s*-\\s*\\*\\*${key}\\*\\*:.*$`, 'm');
+			const propRegex = new RegExp(`^\\s*-\\s*\\*\\*${escapeRegExpCharacters(key)}\\*\\*:.*$`, 'm');
 			const valStr = (typeof val === 'object' && val !== null) ? JSON.stringify(val) : String(val ?? '');
 			if (val === null || val === undefined) {
 				content = content.replace(propRegex, '');
@@ -1942,13 +1930,10 @@ export class TicketDataEngine {
 			throw new Error(`'table_field' is required.`);
 		}
 
-		// Match schema field or custom data key case-insensitively
-		const schemaFields: ICustomField[] = getSchemaFields(schema);
-		const matchedSchemaField = schemaFields.find(f =>
-			(f.label && f.label.toLowerCase() === requestedField.toLowerCase()) ||
-			(f.id && f.id.toLowerCase() === requestedField.toLowerCase())
-		);
-		const canonicalKey = matchedSchemaField?.label || matchedSchemaField?.id || requestedField;
+		// Match the template's table component (by label or id, case-insensitively); its value is stored under the label
+		const matchedSchemaField = findTemplateField(getTemplateFields(schema), requestedField, { type: 'table', ignoreCase: true });
+		const matchedLabel = matchedSchemaField?.label && !matchedSchemaField.label.includes('/') ? matchedSchemaField.label : undefined;
+		const canonicalKey = matchedLabel || requestedField;
 
 		let existingRaw: unknown = parsedTicket.selfDefinedData?.[canonicalKey] ?? parsedTicket.selfDefinedData?.[requestedField];
 		if (typeof existingRaw === 'string' && existingRaw.trim().startsWith('{')) {
@@ -1967,7 +1952,7 @@ export class TicketDataEngine {
 			defaultValue?: string;
 		}> = [];
 		let rows: Record<string, unknown>[] = [];
-		let dbEngine: 'sqlite' | 'none' = 'sqlite';
+		let dbEngine: 'sqlite' | 'none' = matchedSchemaField?.tableDbEngine === 'none' ? 'none' : 'sqlite';
 		let dbPath = '';
 		let tableName = canonicalKey.toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'ticket_table';
 		let autoSyncDb = Boolean(matchedSchemaField?.tableAutoSyncDb);

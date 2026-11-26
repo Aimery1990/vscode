@@ -35,7 +35,7 @@ import { IEditorService } from '../../../services/editor/common/editorService.js
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
-import { parseYaml } from '../../customModules/browser/customModulesService.js';
+import { parseYaml } from '../../customModules/common/templateYaml.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { ICustomField, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';

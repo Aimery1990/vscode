@@ -45,7 +45,8 @@ import { IClipboardService } from '../../../../platform/clipboard/common/clipboa
 import { ICustomModule, ICustomField, IParameterDefinition, IActionButton, resolveCustomModuleIcon, getDefaultCustomModuleColor, normalizeNumberFieldValue, numberFieldRulesFromAttributes, buildHttpTicketValue, buildSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
-import { stringifyYaml, parseYaml } from '../../customModules/browser/customModulesService.js';
+import { stringifyYaml } from '../../customModules/browser/customModulesService.js';
+import { parseYaml } from '../../customModules/common/templateYaml.js';
 
 function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
 	const t = (type || 'task').toLowerCase();
