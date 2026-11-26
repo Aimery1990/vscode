@@ -1,19 +1,52 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { normalizeNumberFieldValue } from '../../../entityPersistence/common/entityPersistence.js';
+import { ICustomField, normalizeNumberFieldValue } from '../../../entityPersistence/common/entityPersistence.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { dirname } from '../../../../../base/common/resources.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
 import { IFileService } from '../../../../../platform/files/common/files.js';
-import { IWorkspacesExplorerService } from '../../common/workspacesExplorer.js';
+import { IWorkspaceChildItem, IWorkspacesExplorerService } from '../../common/workspacesExplorer.js';
 import { IAgentsManagerService } from '../../../agentsManager/common/agentsManager.js';
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
-import { ITicketWorkflowRuntimeService } from '../../../workflowsManager/browser/ticketWorkflowRuntime.js';
-import { parse as parseYaml } from '../../../../../base/common/yaml.js';
+import { ISqliteTableOperationResult, ITicketWorkflowRuntimeService } from '../../../workflowsManager/browser/ticketWorkflowRuntime.js';
+import { parse as parseYaml, YamlNode } from '../../../../../base/common/yaml.js';
+import { hasKey } from '../../../../../base/common/types.js';
 import { TicketWorklogStorage } from '../ticketWorklogStorage.js';
+
+/** Loosely-typed JSON object (tool parameters, parsed ticket values). */
+type IJsonObject = { [key: string]: unknown };
+
+/** Parsed `ticket.md` sections. */
+interface IParsedTicketMd {
+	profileData: Record<string, string>;
+	selfDefinedData: Record<string, string>;
+	attachments: string[];
+	status?: string;
+	priority?: string;
+	currentAiAgent?: string;
+	parentPath?: string;
+	linkTo?: string;
+	linkedBy?: string;
+}
+
+/** Returns `schema.fields` when it is an array (the template schema is untyped YAML). */
+function getSchemaFields(schema: unknown): ICustomField[] {
+	const fields = (schema as { fields?: unknown } | null | undefined)?.fields;
+	return Array.isArray(fields) ? fields : [];
+}
+
+/** `item.name || item.key || item.title` of a tool-provided JSON object. */
+function itemIdentity(item: object): unknown {
+	const obj = item as IJsonObject;
+	return obj.name || obj.key || obj.title;
+}
+
+/** Whether a tool-provided object looks like a file/attachment reference (has `name`, `file` or `uri`, own or inherited). */
+function isAttachmentLike(obj: object): obj is { name?: unknown; file?: unknown; uri?: unknown } {
+	return 'name' in obj || 'file' in obj || 'uri' in obj;
+}
 
 export interface IWorklogRecord {
 	user_request: string;
@@ -41,7 +74,7 @@ export interface ICreateTicketToolOptions {
 	assigned_agent?: string;
 	link_to?: string;
 	attachments?: string[];
-	custom_values?: Record<string, any>;
+	custom_values?: Record<string, unknown>;
 	worklog_record: IWorklogRecord;
 }
 
@@ -57,7 +90,7 @@ export interface IUpdateTicketToolOptions {
 	workspace_id: string;
 	ticket_id: string;
 	parent_path?: string;
-	updates: Record<string, any>;
+	updates: Record<string, unknown>;
 	worklog_record: IWorklogRecord;
 }
 
@@ -69,25 +102,32 @@ export interface IManageLinksToolOptions {
 	worklog_record: IWorklogRecord;
 }
 
+export interface IQueryWorkspaceTreeToolOptions {
+	workspace_id: string;
+	parent_ticket_id?: string;
+	query?: string;
+	max_depth?: number;
+}
+
 export interface IOperateTicketTableToolOptions {
 	workspace_id: string;
 	ticket_id: string;
 	parent_path?: string;
 	table_field: string;
 	operation:
-		| 'get_table'
-		| 'define_columns'
-		| 'insert_rows'
-		| 'update_rows'
-		| 'set_rows'
-		| 'delete_rows'
-		| 'clear_rows'
-		| 'bind_sqlite'
-		| 'save_to_sqlite'
-		| 'update_in_sqlite'
-		| 'load_from_sqlite'
-		| 'delete_from_sqlite'
-		| 'sql_query';
+	| 'get_table'
+	| 'define_columns'
+	| 'insert_rows'
+	| 'update_rows'
+	| 'set_rows'
+	| 'delete_rows'
+	| 'clear_rows'
+	| 'bind_sqlite'
+	| 'save_to_sqlite'
+	| 'update_in_sqlite'
+	| 'load_from_sqlite'
+	| 'delete_from_sqlite'
+	| 'sql_query';
 	columns?: Array<{
 		name: string;
 		dataType?: string;
@@ -95,9 +135,9 @@ export interface IOperateTicketTableToolOptions {
 		nullable?: boolean;
 		defaultValue?: string;
 	}>;
-	rows?: Array<Record<string, any>>;
+	rows?: Array<Record<string, unknown>>;
 	match_column?: string;
-	match_value?: any;
+	match_value?: unknown;
 	row_indices?: number[];
 	db_path?: string;
 	db_table_name?: string;
@@ -232,7 +272,7 @@ export class TicketDataEngine {
 				if (ticketPrefixMatch) {
 					const prefix = ticketPrefixMatch[1].toLowerCase();
 					const matchByPrefix = workspaces.find(w => (w.code || '').toLowerCase() === prefix);
-					if (matchByPrefix) return matchByPrefix.uri;
+					if (matchByPrefix) { return matchByPrefix.uri; }
 				}
 			}
 			const current = workspaces.find(w => w.isCurrent) || workspaces[0];
@@ -256,7 +296,7 @@ export class TicketDataEngine {
 				w.uri.fsPath.toLowerCase() === lowerId;
 		});
 
-		if (target) return target.uri;
+		if (target) { return target.uri; }
 
 		// 3. Normalized match (ignoring whitespace, underscores, hyphens)
 		target = workspaces.find(w => {
@@ -270,7 +310,7 @@ export class TicketDataEngine {
 				normCode === cleanCodeFromWsId;
 		});
 
-		if (target) return target.uri;
+		if (target) { return target.uri; }
 
 		// 4. Substring / Prefix match
 		target = workspaces.find(w => {
@@ -282,7 +322,7 @@ export class TicketDataEngine {
 				(normCode.length >= 2 && cleanCodeFromWsId.startsWith(normCode));
 		});
 
-		if (target) return target.uri;
+		if (target) { return target.uri; }
 
 		// 5. If ticketId is provided, try matching by ticket prefix (e.g. NEOWO-0006 -> NEOWO)
 		if (ticketId) {
@@ -294,7 +334,7 @@ export class TicketDataEngine {
 					const n = (w.name || '').toLowerCase().replace(/[\s_\-]+/g, '');
 					return c === prefix || n.startsWith(prefix) || (prefix.length >= 3 && n.startsWith(prefix.slice(0, 3))) || (n.length >= 3 && prefix.startsWith(n.slice(0, 3)));
 				});
-				if (target) return target.uri;
+				if (target) { return target.uri; }
 			}
 		}
 
@@ -303,7 +343,7 @@ export class TicketDataEngine {
 				const n = (w.name || '').toLowerCase().replace(/[\s_\-]+/g, '');
 				return n.startsWith(cleanCodeFromWsId) || (cleanCodeFromWsId.length >= 3 && n.startsWith(cleanCodeFromWsId.slice(0, 3))) || (n.length >= 3 && cleanCodeFromWsId.startsWith(n.slice(0, 3)));
 			});
-			if (target) return target.uri;
+			if (target) { return target.uri; }
 		}
 
 		// 5. STT Acoustic / Phonetic matching (handles speech-to-text confusions like "new" <-> "neo")
@@ -319,14 +359,14 @@ export class TicketDataEngine {
 				const normCode = (w.code || '').toLowerCase().replace(/[\s_\-]+/g, '');
 				return normName === variant || normCode === variant;
 			});
-			if (target) return target.uri;
+			if (target) { return target.uri; }
 		}
 
 		// 6. Fuzzy Levenshtein Distance match (for acoustic / typo tolerance)
 		const levenshtein = (a: string, b: string): number => {
 			const matrix: number[][] = [];
-			for (let i = 0; i <= b.length; i++) matrix[i] = [i];
-			for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+			for (let i = 0; i <= b.length; i++) { matrix[i] = [i]; }
+			for (let j = 0; j <= a.length; j++) { matrix[0][j] = j; }
 			for (let i = 1; i <= b.length; i++) {
 				for (let j = 1; j <= a.length; j++) {
 					if (b.charAt(i - 1) === a.charAt(j - 1)) {
@@ -406,7 +446,7 @@ export class TicketDataEngine {
 			const targetUnderParentUri = URI.joinPath(workspaceUri, parentRel, cleanTicketId);
 			if (await this.fileService.exists(targetUnderParentUri)) {
 				const paths = await this._checkFolderForTicketPaths(targetUnderParentUri);
-				if (paths) return paths;
+				if (paths) { return paths; }
 			}
 		}
 
@@ -416,7 +456,7 @@ export class TicketDataEngine {
 			const directPathUri = URI.joinPath(workspaceUri, cleanPath);
 			if (await this.fileService.exists(directPathUri)) {
 				const paths = await this._checkFolderForTicketPaths(directPathUri);
-				if (paths) return paths;
+				if (paths) { return paths; }
 			}
 		}
 
@@ -431,7 +471,7 @@ export class TicketDataEngine {
 			const directUri = URI.joinPath(workspaceUri, ticketIdOrPath);
 			if (await this.fileService.exists(directUri)) {
 				const paths = await this._checkFolderForTicketPaths(directUri);
-				if (paths) return paths;
+				if (paths) { return paths; }
 			}
 		}
 
@@ -439,14 +479,14 @@ export class TicketDataEngine {
 		const directUri = URI.joinPath(workspaceUri, ticketIdOrPath);
 		if (await this.fileService.exists(directUri)) {
 			const paths = await this._checkFolderForTicketPaths(directUri);
-			if (paths) return paths;
+			if (paths) { return paths; }
 		}
 
 		// 6. Recursive deep search across nested folders
 		const deepUri = await this._findTicketFolderDeep(workspaceUri, ticketIdOrPath);
 		if (deepUri) {
 			const paths = await this._checkFolderForTicketPaths(deepUri);
-			if (paths) return paths;
+			if (paths) { return paths; }
 		}
 
 		// 7. Fallback to explorer children scan
@@ -454,7 +494,7 @@ export class TicketDataEngine {
 		const found = this._findChildRecursively(children, ticketIdOrPath);
 		if (found) {
 			const paths = await this._checkFolderForTicketPaths(found.uri);
-			if (paths) return paths;
+			if (paths) { return paths; }
 		}
 
 		// 8. Direct agents manager check if target matches a registered agent
@@ -470,9 +510,9 @@ export class TicketDataEngine {
 				if (matchedAgent && matchedAgent.folderPath) {
 					const agentFolderUri = URI.file(matchedAgent.folderPath);
 					const paths = await this._checkFolderForTicketPaths(agentFolderUri);
-					if (paths) return paths;
+					if (paths) { return paths; }
 				}
-			} catch {}
+			} catch { }
 		}
 
 		// 9. Intelligent Sequence / Type / Fuzzy matching (e.g. "job 0001", "job 1", "0001", "job-0001", "#1", title match)
@@ -503,14 +543,14 @@ export class TicketDataEngine {
 		const visitedFolders = new Set<string>();
 
 		const scanDir = async (dirUri: URI, depth: number) => {
-			if (depth > 6) return;
+			if (depth > 6) { return; }
 			const fsPath = dirUri.fsPath;
-			if (visitedFolders.has(fsPath)) return;
+			if (visitedFolders.has(fsPath)) { return; }
 			visitedFolders.add(fsPath);
 
 			try {
 				const stat = await this.fileService.resolve(dirUri);
-				if (!stat.children) return;
+				if (!stat.children) { return; }
 
 				for (const child of stat.children) {
 					if (!child.isDirectory || child.name.startsWith('.') || child.name.startsWith('~') || child.name === 'node_modules') {
@@ -522,8 +562,8 @@ export class TicketDataEngine {
 						try {
 							const readme = await this._safeRead(paths.readmeMdUri);
 							const parsed = this._parseReadmeMd(readme);
-							if (parsed.title) title = parsed.title;
-						} catch {}
+							if (parsed.title) { title = parsed.title; }
+						} catch { }
 
 						let seqNumber: number | undefined;
 						let code: string | undefined;
@@ -544,7 +584,7 @@ export class TicketDataEngine {
 					}
 					await scanDir(child.resource, depth + 1);
 				}
-			} catch {}
+			} catch { }
 		};
 
 		await scanDir(workspaceUri, 0);
@@ -553,10 +593,10 @@ export class TicketDataEngine {
 
 	private async _resolveTicketFuzzyOrSequence(workspaceUri: URI, ticketIdOrPath: string): Promise<ITicketResolvedPaths | undefined> {
 		const cleanInput = ticketIdOrPath.trim().replace(/^[/\\]+/, '');
-		if (!cleanInput) return undefined;
+		if (!cleanInput) { return undefined; }
 
 		const allTickets = await this._collectAllWorkspaceTickets(workspaceUri);
-		if (allTickets.length === 0) return undefined;
+		if (allTickets.length === 0) { return undefined; }
 
 		const normInput = cleanInput.toLowerCase().replace(/[\s_\-]+/g, '');
 
@@ -568,11 +608,11 @@ export class TicketDataEngine {
 			const matched = allTickets.find(t =>
 				t.ticketType.toLowerCase() === targetType && t.seqNumber === targetSeq
 			);
-			if (matched) return matched.paths;
+			if (matched) { return matched.paths; }
 
 			// Fallback: If type doesn't strictly match but seqNumber matches and there's only one
 			const seqMatches = allTickets.filter(t => t.seqNumber === targetSeq);
-			if (seqMatches.length === 1) return seqMatches[0].paths;
+			if (seqMatches.length === 1) { return seqMatches[0].paths; }
 		}
 
 		// Case 2: Pure sequence number (e.g. "0001", "1", "-0001", "#1")
@@ -580,11 +620,11 @@ export class TicketDataEngine {
 		if (pureSeqMatch) {
 			const targetSeq = parseInt(pureSeqMatch[1], 10);
 			const seqMatches = allTickets.filter(t => t.seqNumber === targetSeq);
-			if (seqMatches.length === 1) return seqMatches[0].paths;
+			if (seqMatches.length === 1) { return seqMatches[0].paths; }
 			if (seqMatches.length > 1) {
 				// Prefer top-level or job type
 				const jobMatch = seqMatches.find(t => t.ticketType.toLowerCase() === 'job');
-				if (jobMatch) return jobMatch.paths;
+				if (jobMatch) { return jobMatch.paths; }
 				return seqMatches[0].paths;
 			}
 		}
@@ -594,23 +634,23 @@ export class TicketDataEngine {
 			const normTid = t.ticketId.toLowerCase().replace(/[\s_\-]+/g, '');
 			return normTid === normInput;
 		});
-		if (idMatch) return idMatch.paths;
+		if (idMatch) { return idMatch.paths; }
 
 		// Case 4: Title match (exact or substring)
 		const titleMatch = allTickets.find(t =>
 			t.title.toLowerCase() === cleanInput.toLowerCase() ||
 			(cleanInput.length >= 4 && t.title.toLowerCase().includes(cleanInput.toLowerCase()))
 		);
-		if (titleMatch) return titleMatch.paths;
+		if (titleMatch) { return titleMatch.paths; }
 
 		return undefined;
 	}
 
 	private async _findTicketFolderDeep(baseUri: URI, ticketId: string, currentDepth: number = 0, maxDepth: number = 6): Promise<URI | undefined> {
-		if (currentDepth >= maxDepth) return undefined;
+		if (currentDepth >= maxDepth) { return undefined; }
 		try {
 			const stat = await this.fileService.resolve(baseUri);
-			if (!stat.children) return undefined;
+			if (!stat.children) { return undefined; }
 
 			// Check direct subdirectories at this level first
 			for (const child of stat.children) {
@@ -632,20 +672,20 @@ export class TicketDataEngine {
 					continue;
 				}
 				const found = await this._findTicketFolderDeep(child.resource, ticketId, currentDepth + 1, maxDepth);
-				if (found) return found;
+				if (found) { return found; }
 			}
-		} catch {}
+		} catch { }
 		return undefined;
 	}
 
-	private _findChildRecursively(children: any[], ticketId: string): any | undefined {
+	private _findChildRecursively(children: IWorkspaceChildItem[], ticketId: string): IWorkspaceChildItem | undefined {
 		for (const child of children) {
 			if (child.id === ticketId || child.name === ticketId || child.code === ticketId) {
 				return child;
 			}
 			if (child.children && child.children.length > 0) {
 				const nested = this._findChildRecursively(child.children, ticketId);
-				if (nested) return nested;
+				if (nested) { return nested; }
 			}
 		}
 		return undefined;
@@ -676,7 +716,7 @@ export class TicketDataEngine {
 
 		try {
 			const stat = await this.fileService.resolve(folderUri);
-			if (!stat.children) return results;
+			if (!stat.children) { return results; }
 
 			const wsFsPath = workspaceUri.fsPath;
 			const folderFsPath = folderUri.fsPath;
@@ -711,7 +751,7 @@ export class TicketDataEngine {
 					});
 				}
 			}
-		} catch {}
+		} catch { }
 
 		return results;
 	}
@@ -758,13 +798,13 @@ export class TicketDataEngine {
 		const content = (await this.fileService.readFile(ticketMdUri)).value.toString();
 		let wsMatch = content.match(/^-\s*\*\*Workspace ID\*\*:\s*(.+)$/m);
 		let idMatch = content.match(/^-\s*\*\*Ticket ID\*\*:\s*(.+)$/m);
-		let typeMatch = content.match(/^-\s*\*\*(?:Ticket Type|Entity Type)\*\*:\s*(.+)$/m);
+		const typeMatch = content.match(/^-\s*\*\*(?:Ticket Type|Entity Type)\*\*:\s*(.+)$/m);
 
 		// Fallback to instruction.md or README.md if not in ticket.md
 		if ((!wsMatch || !idMatch) && await this.fileService.exists(instructionMdUri)) {
 			const instContent = (await this.fileService.readFile(instructionMdUri)).value.toString();
-			if (!wsMatch) wsMatch = instContent.match(/^-\s*\*\*Workspace ID\*\*:\s*(.+)$/m);
-			if (!idMatch) idMatch = instContent.match(/^-\s*\*\*Ticket ID\*\*:\s*(.+)$/m);
+			if (!wsMatch) { wsMatch = instContent.match(/^-\s*\*\*Workspace ID\*\*:\s*(.+)$/m); }
+			if (!idMatch) { idMatch = instContent.match(/^-\s*\*\*Ticket ID\*\*:\s*(.+)$/m); }
 		}
 
 		const folderName = folderUri.path.split('/').filter(Boolean).pop() || '';
@@ -788,22 +828,22 @@ export class TicketDataEngine {
 	public async buildCompactWorkspaceTree(workspaceUri: URI, activeTicketId?: string, maxDepth: number = 2): Promise<string> {
 		const typeEmoji = (type: string): string => {
 			const t = (type || '').toLowerCase();
-			if (t === 'job') return '🚀';
-			if (t === 'task') return '📋';
-			if (t === 'workflow') return '⚡';
-			if (t === 'case') return '📦';
-			if (t === 'note') return '📝';
-			if (t === 'agent') return '🤖';
-			if (t === 'issue') return '🐞';
-			if (t === 'analysis') return '📊';
-			return '📄';
+			if (t === 'job') { return '\uD83D\uDE80'; }
+			if (t === 'task') { return '\uD83D\uDCCB'; }
+			if (t === 'workflow') { return '\u26A1'; }
+			if (t === 'case') { return '\uD83D\uDCE6'; }
+			if (t === 'note') { return '\uD83D\uDCDD'; }
+			if (t === 'agent') { return '\uD83E\uDD16'; }
+			if (t === 'issue') { return '\uD83D\uDC1E'; }
+			if (t === 'analysis') { return '\uD83D\uDCCA'; }
+			return '\uD83D\uDCC4';
 		};
 
 		const getDirectSubTickets = async (folderUri: URI): Promise<Array<{ paths: ITicketResolvedPaths; title: string; status: string }>> => {
 			const items: Array<{ paths: ITicketResolvedPaths; title: string; status: string }> = [];
 			try {
 				const stat = await this.fileService.resolve(folderUri);
-				if (!stat.children) return items;
+				if (!stat.children) { return items; }
 				for (const child of stat.children) {
 					if (!child.isDirectory || child.name.startsWith('.') || child.name.startsWith('~') || child.name === 'node_modules') {
 						continue;
@@ -815,31 +855,31 @@ export class TicketDataEngine {
 						try {
 							const readme = await this._safeRead(paths.readmeMdUri);
 							const parsedR = this._parseReadmeMd(readme);
-							if (parsedR.title) title = parsedR.title;
-						} catch {}
+							if (parsedR.title) { title = parsedR.title; }
+						} catch { }
 						try {
 							const ticket = await this._safeRead(paths.ticketMdUri);
 							const parsedT = this._parseTicketMd(ticket);
-							if (parsedT.status) status = parsedT.status;
-						} catch {}
+							if (parsedT.status) { status = parsedT.status; }
+						} catch { }
 
 						items.push({ paths, title, status });
 					}
 				}
-			} catch {}
+			} catch { }
 			return items;
 		};
 
 		const renderBranch = async (dirUri: URI, prefix: string, depth: number): Promise<string[]> => {
 			const lines: string[] = [];
 			const subTickets = await getDirectSubTickets(dirUri);
-			if (subTickets.length === 0) return lines;
+			if (subTickets.length === 0) { return lines; }
 
 			for (let i = 0; i < subTickets.length; i++) {
 				const item = subTickets[i];
 				const isLast = (i === subTickets.length - 1);
-				const pointer = isLast ? '└── ' : '├── ';
-				const nextPrefix = prefix + (isLast ? '    ' : '│   ');
+				const pointer = isLast ? '└\u2500\u2500 ' : '├\u2500\u2500 ';
+				const nextPrefix = prefix + (isLast ? '    ' : '\u2502   ');
 
 				const emoji = typeEmoji(item.paths.ticketType);
 				const isFocus = !!(activeTicketId && (item.paths.ticketId === activeTicketId || item.paths.ticketId.toLowerCase() === activeTicketId.toLowerCase()));
@@ -871,12 +911,12 @@ export class TicketDataEngine {
 	/**
 	 * Query workspace tree on-demand
 	 */
-	public async queryWorkspaceTree(options: { workspace_id: string; parent_ticket_id?: string; query?: string; max_depth?: number }): Promise<any> {
+	public async queryWorkspaceTree(options: IQueryWorkspaceTreeToolOptions) {
 		const wsUri = await this.findWorkspaceUri(options.workspace_id, options.parent_ticket_id);
-		if (!wsUri) throw new Error(`Workspace '${options.workspace_id}' not found.`);
+		if (!wsUri) { throw new Error(`Workspace '${options.workspace_id}' not found.`); }
 
 		let baseUri = wsUri;
-		let targetParentId = options.parent_ticket_id;
+		const targetParentId = options.parent_ticket_id;
 		if (targetParentId && targetParentId !== '/' && targetParentId !== 'root' && targetParentId !== '.') {
 			const resolved = await this.resolveTicketPaths(wsUri, targetParentId);
 			if (resolved) {
@@ -919,12 +959,23 @@ export class TicketDataEngine {
 	/**
 	 * 1. anyagent_get_ticket_data
 	 */
-	public async getTicketData(workspaceId: string, ticketId: string, fieldPath?: string, parentPath?: string): Promise<any> {
+	public async getTicketData(workspaceId: string, ticketId: string, fieldPath?: string, parentPath?: string): Promise<unknown> {
+		const fullData = await this._getFullTicketData(workspaceId, ticketId, parentPath);
+
+		if (!fieldPath || fieldPath === '/' || fieldPath === '') {
+			return fullData;
+		}
+
+		// Field-specific query
+		return this._extractFieldByPath(fullData, fieldPath);
+	}
+
+	private async _getFullTicketData(workspaceId: string, ticketId: string, parentPath?: string) {
 		const wsUri = await this.findWorkspaceUri(workspaceId, ticketId);
-		if (!wsUri) throw new Error(`Workspace '${workspaceId}' not found.`);
+		if (!wsUri) { throw new Error(`Workspace '${workspaceId}' not found.`); }
 
 		const paths = await this.resolveTicketPaths(wsUri, ticketId, parentPath);
-		if (!paths) throw new Error(`Ticket '${ticketId}' not found in workspace '${workspaceId}'.`);
+		if (!paths) { throw new Error(`Ticket '${ticketId}' not found in workspace '${workspaceId}'.`); }
 
 		// Read files
 		const ticketContent = (await this.fileService.readFile(paths.ticketMdUri)).value.toString();
@@ -943,7 +994,7 @@ export class TicketDataEngine {
 		const parsedInstruction = this._parseInstructionMd(instructionContent);
 
 		// Try load type schema YAML if any
-		let schemaDefinition: any = null;
+		let schemaDefinition: YamlNode | undefined | null = null;
 		const typeYamlCandidates = [
 			URI.joinPath(wsUri, '.agents', 'entity_type', `${paths.ticketType}.yaml`),
 			URI.file(`/Users/aimery/.anyagent/entity_type/${paths.ticketType}.yaml`)
@@ -953,13 +1004,13 @@ export class TicketDataEngine {
 				try {
 					const yamlStr = (await this.fileService.readFile(typeYamlUri)).value.toString();
 					schemaDefinition = parseYaml(yamlStr);
-					if (schemaDefinition) break;
-				} catch {}
+					if (schemaDefinition) { break; }
+				} catch { }
 			}
 		}
 
 		// Also merge customMetadata from .agents/entity_snapshot.json if present (e.g. Workflows)
-		const mergedSelfDefinedData: Record<string, any> = { ...parsedTicket.selfDefinedData };
+		const mergedSelfDefinedData: Record<string, unknown> = { ...parsedTicket.selfDefinedData };
 		const snapshotUri = URI.joinPath(paths.folderUri, '.agents', 'entity_snapshot.json');
 		if (await this.fileService.exists(snapshotUri)) {
 			try {
@@ -972,7 +1023,7 @@ export class TicketDataEngine {
 						}
 					}
 				}
-			} catch {}
+			} catch { }
 		}
 
 		const fullData = {
@@ -1005,21 +1056,15 @@ export class TicketDataEngine {
 			},
 			schema_definition: schemaDefinition
 		};
-
-		if (!fieldPath || fieldPath === '/' || fieldPath === '') {
-			return fullData;
-		}
-
-		// Field-specific query
-		return this._extractFieldByPath(fullData, fieldPath);
+		return fullData;
 	}
 
 	/**
 	 * 2. anyagent_create_ticket
 	 */
-	public async createTicket(options: ICreateTicketToolOptions): Promise<any> {
+	public async createTicket(options: ICreateTicketToolOptions) {
 		const wsUri = await this.findWorkspaceUri(options.workspace_id);
-		if (!wsUri) throw new Error(`Workspace '${options.workspace_id}' not found.`);
+		if (!wsUri) { throw new Error(`Workspace '${options.workspace_id}' not found.`); }
 
 		// 1. Determine parent folder URI
 		let parentFolderUri = wsUri;
@@ -1085,12 +1130,12 @@ export class TicketDataEngine {
 	/**
 	 * 3. anyagent_delete_ticket
 	 */
-	public async deleteTicket(options: IDeleteTicketToolOptions): Promise<any> {
+	public async deleteTicket(options: IDeleteTicketToolOptions) {
 		const wsUri = await this.findWorkspaceUri(options.workspace_id, options.ticket_id);
-		if (!wsUri) throw new Error(`Workspace '${options.workspace_id}' not found.`);
+		if (!wsUri) { throw new Error(`Workspace '${options.workspace_id}' not found.`); }
 
 		const paths = await this.resolveTicketPaths(wsUri, options.ticket_id, options.parent_path);
-		if (!paths) throw new Error(`Ticket '${options.ticket_id}' not found.`);
+		if (!paths) { throw new Error(`Ticket '${options.ticket_id}' not found.`); }
 
 		const wsStatuses = await this.workspacesExplorerService.getWorkspaceStatuses(paths.folderUri);
 		const removedStatusName = wsStatuses.removedStatus || 'Removed';
@@ -1105,7 +1150,7 @@ export class TicketDataEngine {
 		await this._cascadeMarkRemoved(children, removedStatusName, cascadedIds);
 
 		// 3. Clean up bidirectional links in external tickets
-		const ticketData = await this.getTicketData(options.workspace_id, options.ticket_id, undefined, options.parent_path);
+		const ticketData = await this._getFullTicketData(options.workspace_id, options.ticket_id, options.parent_path);
 		const linkToList = this._splitList(ticketData.links?.link_to);
 		const linkedByList = this._splitList(ticketData.links?.linked_by);
 
@@ -1122,7 +1167,7 @@ export class TicketDataEngine {
 		if (options.worklog_record) {
 			try {
 				await this.appendWorklog(paths.worklogMdUri, options.worklog_record);
-			} catch {}
+			} catch { }
 		}
 
 		// 5. If move_to_trash requested, permanently move folder to OS Trash
@@ -1150,14 +1195,14 @@ export class TicketDataEngine {
 		};
 	}
 
-	private async _cascadeMarkRemoved(children: any[], removedStatus: string, collectedIds: string[]): Promise<void> {
+	private async _cascadeMarkRemoved(children: IWorkspaceChildItem[], removedStatus: string, collectedIds: string[]): Promise<void> {
 		for (const child of children) {
 			if (child.uri && child.type !== 'file' && child.type !== 'folder') {
 				try {
 					await this.workspacesExplorerService.setEntityStatus(child.uri, removedStatus);
 					await this.workspacesExplorerService.removeSnapshot(child.uri);
-					if (child.name) collectedIds.push(child.name);
-				} catch {}
+					if (child.name) { collectedIds.push(child.name); }
+				} catch { }
 			}
 			if (child.children && child.children.length > 0) {
 				await this._cascadeMarkRemoved(child.children, removedStatus, collectedIds);
@@ -1169,7 +1214,7 @@ export class TicketDataEngine {
 	 * 4. anyagent_update_ticket
 	 */
 	/** Reads the ticket's template (type) YAML: ticket folder, then workspace, then the global template folder. */
-	private async _readTicketSchema(folderUri: URI, wsUri: URI | undefined, ticketType: string): Promise<any> {
+	private async _readTicketSchema(folderUri: URI, wsUri: URI | undefined, ticketType: string): Promise<YamlNode | null> {
 		const typeYamlCandidates = [
 			URI.joinPath(folderUri, '.agents', 'entity_type', `${ticketType}.yaml`),
 			...(wsUri ? [URI.joinPath(wsUri, '.agents', 'entity_type', `${ticketType}.yaml`)] : []),
@@ -1188,7 +1233,7 @@ export class TicketDataEngine {
 		return null;
 	}
 
-	public async updateTicket(options: IUpdateTicketToolOptions): Promise<any> {
+	public async updateTicket(options: IUpdateTicketToolOptions) {
 		const wsUri = await this.findWorkspaceUri(options.workspace_id, options.ticket_id);
 		let paths = wsUri ? await this.resolveTicketPaths(wsUri, options.ticket_id, options.parent_path) : undefined;
 
@@ -1204,11 +1249,11 @@ export class TicketDataEngine {
 				if (matchedAgent && matchedAgent.folderPath) {
 					paths = await this._checkFolderForTicketPaths(URI.file(matchedAgent.folderPath));
 				}
-			} catch {}
+			} catch { }
 		}
 
 		if (!paths) {
-			if (!wsUri) throw new Error(`Workspace '${options.workspace_id}' not found.`);
+			if (!wsUri) { throw new Error(`Workspace '${options.workspace_id}' not found.`); }
 			throw new Error(`Ticket '${options.ticket_id}' not found.`);
 		}
 
@@ -1219,7 +1264,7 @@ export class TicketDataEngine {
 		let ticketModified = false;
 		let readmeModified = false;
 		let instructionModified = false;
-		let schemaForNumbers: any = undefined;
+		let schemaForNumbers: YamlNode | null | undefined = undefined;
 
 		for (const [rawPath, rawVal] of Object.entries(options.updates)) {
 			const path = rawPath.trim();
@@ -1243,7 +1288,7 @@ export class TicketDataEngine {
 					ticketContent = ticketContent.replace(/^-\s*\*\*Status\*\*:\s*.*$/m, () => `- **Status**: ${rawVal}`);
 					ticketModified = true;
 					// Synchronize through explorer service as well
-					await this.workspacesExplorerService.setEntityStatus(paths.folderUri, rawVal);
+					await this.workspacesExplorerService.setEntityStatus(paths.folderUri, rawVal as string);
 				}
 			}
 			// 4. Priority
@@ -1289,8 +1334,8 @@ export class TicketDataEngine {
 				if (!cleanPath.includes('/')) {
 					// Enforce a number component's range / precision (same rules as the ticket UI)
 					schemaForNumbers ??= await this._readTicketSchema(paths.folderUri, wsUri, paths.ticketType);
-					const numDef = (Array.isArray(schemaForNumbers?.fields) ? schemaForNumbers.fields : [])
-						.find((f: any) => f && f.type === 'number' && (f.label === cleanPath || f.id === cleanPath));
+					const numDef = getSchemaFields(schemaForNumbers)
+						.find((f: ICustomField) => f && f.type === 'number' && (f.label === cleanPath || f.id === cleanPath));
 					if (numDef) {
 						const numCheck = normalizeNumberFieldValue({ label: numDef.label, min: numDef.min, max: numDef.max, precision: numDef.precision }, customVal);
 						if (!numCheck.ok) {
@@ -1307,11 +1352,11 @@ export class TicketDataEngine {
 		// 8. Auto-sync physical attachment files if any attachment fields or file objects were updated
 		const filesToSync: string[] = [];
 		for (const [k, v] of Object.entries(options.updates)) {
-			if (k.toLowerCase().includes('attachment') || Array.isArray(v) || (typeof v === 'object' && v && ('name' in v))) {
+			if (k.toLowerCase().includes('attachment') || Array.isArray(v) || (typeof v === 'object' && v && hasKey(v, { name: true }))) {
 				const items = Array.isArray(v) ? v : [v];
 				for (const item of items) {
-					if (item && typeof item === 'object' && item.name && typeof item.name === 'string') {
-						filesToSync.push(item.name);
+					if (item && typeof item === 'object' && (item as IJsonObject).name && typeof (item as IJsonObject).name === 'string') {
+						filesToSync.push((item as IJsonObject).name as string);
 					} else if (typeof item === 'string' && /\.[a-zA-Z0-9]{2,5}$/.test(item)) {
 						filesToSync.push(item);
 					}
@@ -1411,7 +1456,7 @@ export class TicketDataEngine {
 						await this.fileService.writeFile(snapshotUri, VSBuffer.fromString(JSON.stringify(snapObj, null, 2)));
 					}
 				}
-			} catch {}
+			} catch { }
 		}
 
 		// Append worklog
@@ -1435,15 +1480,15 @@ export class TicketDataEngine {
 	/**
 	 * 5. anyagent_manage_links
 	 */
-	public async manageLinks(options: IManageLinksToolOptions): Promise<any> {
+	public async manageLinks(options: IManageLinksToolOptions) {
 		const wsUri = await this.findWorkspaceUri(options.workspace_id);
-		if (!wsUri) throw new Error(`Workspace '${options.workspace_id}' not found.`);
+		if (!wsUri) { throw new Error(`Workspace '${options.workspace_id}' not found.`); }
 
 		const involvedTicketPaths: ITicketResolvedPaths[] = [];
 
 		for (const srcId of options.source_ticket_ids) {
 			const srcPaths = await this.resolveTicketPaths(wsUri, srcId);
-			if (!srcPaths) continue;
+			if (!srcPaths) { continue; }
 			involvedTicketPaths.push(srcPaths);
 
 			let srcTicketContent = (await this.fileService.readFile(srcPaths.ticketMdUri)).value.toString();
@@ -1452,7 +1497,7 @@ export class TicketDataEngine {
 
 			if (options.action === 'add_links') {
 				for (const targetId of options.target_ticket_ids) {
-					if (!newLinkToList.includes(targetId)) newLinkToList.push(targetId);
+					if (!newLinkToList.includes(targetId)) { newLinkToList.push(targetId); }
 				}
 			} else if (options.action === 'remove_links') {
 				newLinkToList = newLinkToList.filter(id => !options.target_ticket_ids.includes(id));
@@ -1468,7 +1513,7 @@ export class TicketDataEngine {
 		// Update Linked By on targets
 		for (const targetId of options.target_ticket_ids) {
 			const targetPaths = await this.resolveTicketPaths(wsUri, targetId);
-			if (!targetPaths) continue;
+			if (!targetPaths) { continue; }
 			if (!involvedTicketPaths.some(p => p.ticketId === targetPaths.ticketId)) {
 				involvedTicketPaths.push(targetPaths);
 			}
@@ -1479,7 +1524,7 @@ export class TicketDataEngine {
 
 			if (options.action === 'add_links' || options.action === 'set_links') {
 				for (const srcId of options.source_ticket_ids) {
-					if (!newLinkedByList.includes(srcId)) newLinkedByList.push(srcId);
+					if (!newLinkedByList.includes(srcId)) { newLinkedByList.push(srcId); }
 				}
 			} else if (options.action === 'remove_links') {
 				newLinkedByList = newLinkedByList.filter(id => !options.source_ticket_ids.includes(id));
@@ -1550,8 +1595,8 @@ export class TicketDataEngine {
 		return '';
 	}
 
-	private _parseTicketMd(content: string): any {
-		const result: any = {
+	private _parseTicketMd(content: string): IParsedTicketMd {
+		const result: IParsedTicketMd = {
 			profileData: {},
 			selfDefinedData: {},
 			attachments: []
@@ -1614,9 +1659,9 @@ export class TicketDataEngine {
 		};
 	}
 
-	private _applyCustomUpdate(content: string, path: string, val: any): string {
+	private _applyCustomUpdate(content: string, path: string, val: unknown): string {
 		const parts = path.split('/').filter(Boolean);
-		if (parts.length === 0) return content;
+		if (parts.length === 0) { return content; }
 
 		// 1. /Custom/<key>/add -> Add items to list, table, or dynamic card
 		if (parts.length === 2 && parts[1] === 'add' && val !== undefined && val !== null) {
@@ -1634,26 +1679,26 @@ export class TicketDataEngine {
 						content = content.replace(propRegex, () => `  - **${listKey}**: ${JSON.stringify(parsedObj)}`);
 						return content;
 					}
-				} catch {}
+				} catch { }
 			}
 
 			// Check if listKey is stored as a JSON array / flat line
-			const isArrayOrAttachment = Array.isArray(val) || (typeof val === 'object' && ('name' in val || 'file' in val || 'uri' in val)) || (propMatch && propMatch[2].trim().startsWith('['));
+			const isArrayOrAttachment = Array.isArray(val) || (typeof val === 'object' && isAttachmentLike(val)) || (propMatch && propMatch[2].trim().startsWith('['));
 
 			if (isArrayOrAttachment) {
-				let existingArr: any[] = [];
+				let existingArr: unknown[] = [];
 				if (propMatch && propMatch[2].trim().startsWith('[')) {
 					try { existingArr = JSON.parse(propMatch[2].trim()); } catch { }
-					if (!Array.isArray(existingArr)) existingArr = [];
+					if (!Array.isArray(existingArr)) { existingArr = []; }
 				} else if (propMatch && propMatch[2].trim()) {
 					existingArr = [{ name: propMatch[2].trim() }];
 				}
 
 				const itemsToAdd = Array.isArray(val) ? val : [val];
 				for (const item of itemsToAdd) {
-					const itemName = typeof item === 'object' && item ? (item.name || item.key || item.title || JSON.stringify(item)) : String(item);
+					const itemName = typeof item === 'object' && item ? (itemIdentity(item) || JSON.stringify(item)) : String(item);
 					const exists = existingArr.some(e => {
-						const eName = typeof e === 'object' && e ? (e.name || e.key || e.title || JSON.stringify(e)) : String(e);
+						const eName = typeof e === 'object' && e ? (itemIdentity(e) || JSON.stringify(e)) : String(e);
 						return eName === itemName;
 					});
 					if (!exists) {
@@ -1677,10 +1722,11 @@ export class TicketDataEngine {
 			}
 
 			// Otherwise, handle as markdown sub-card block
-			const cardKey = val.key || val.name || val.title || `Item ${Date.now()}`;
+			const valObj = val as IJsonObject;
+			const cardKey = valObj.key || valObj.name || valObj.title || `Item ${Date.now()}`;
 			let newCardBlock = `  - **${cardKey}**:\n`;
 			for (const [subK, subV] of Object.entries(val)) {
-				if (subK === 'key') continue;
+				if (subK === 'key') { continue; }
 				newCardBlock += `    - **${subK}**: ${subV}\n`;
 			}
 
@@ -1707,7 +1753,7 @@ export class TicketDataEngine {
 				try {
 					let arr = JSON.parse(propMatch[2].trim());
 					if (Array.isArray(arr)) {
-						const targetName = typeof val === 'object' && val ? (val.name || val.key || val.title) : String(val);
+						const targetName = typeof val === 'object' && val ? itemIdentity(val) : String(val);
 						arr = arr.filter(item => {
 							const itemName = typeof item === 'object' && item ? (item.name || item.key || item.title) : String(item);
 							return itemName !== targetName;
@@ -1761,46 +1807,47 @@ export class TicketDataEngine {
 		return content;
 	}
 
-	private _extractFieldByPath(data: any, path: string): any {
+	private _extractFieldByPath(data: unknown, path: string): unknown {
+		const prop = (obj: unknown, key: string): unknown => (obj as IJsonObject)[key];
 		let clean = path.startsWith('/') ? path.slice(1) : path;
 		let curr = data;
 
 		if (clean.startsWith('Custom/')) {
 			clean = clean.slice('Custom/'.length);
-			if (curr && curr.self_defined_data !== undefined) {
-				curr = curr.self_defined_data;
+			if (curr && prop(curr, 'self_defined_data') !== undefined) {
+				curr = prop(curr, 'self_defined_data');
 			}
 		} else if (clean.startsWith('Attributes/')) {
 			clean = clean.slice('Attributes/'.length);
 		} else if (clean.startsWith('Profile/')) {
 			clean = clean.slice('Profile/'.length);
-			if (curr && curr.profile_data !== undefined) {
-				curr = curr.profile_data;
+			if (curr && prop(curr, 'profile_data') !== undefined) {
+				curr = prop(curr, 'profile_data');
 			}
 		} else if (clean.startsWith('Instructions/')) {
 			clean = clean.slice('Instructions/'.length);
-			if (curr && curr.prompts !== undefined) {
-				curr = curr.prompts;
+			if (curr && prop(curr, 'prompts') !== undefined) {
+				curr = prop(curr, 'prompts');
 			}
 		}
 
-		if (!clean) return curr;
+		if (!clean) { return curr; }
 
 		const parts = clean.split('/');
 		for (const p of parts) {
-			if (curr === undefined || curr === null) return undefined;
+			if (curr === undefined || curr === null) { return undefined; }
 			if (typeof curr === 'string' && (curr.trim().startsWith('[') || curr.trim().startsWith('{'))) {
 				try { curr = JSON.parse(curr); } catch { }
 			}
 			if (Array.isArray(curr) && /^\d+$/.test(p)) {
 				const idx = parseInt(p, 10);
 				curr = curr.find(item => item && (item._index === idx || item.id === p)) || curr[idx - 1] || curr[idx];
-			} else if (curr[p] !== undefined) {
-				curr = curr[p];
-			} else if (curr.self_defined_data && curr.self_defined_data[p] !== undefined) {
-				curr = curr.self_defined_data[p];
-			} else if (curr.profile_data && curr.profile_data[p] !== undefined) {
-				curr = curr.profile_data[p];
+			} else if (prop(curr, p) !== undefined) {
+				curr = prop(curr, p);
+			} else if (prop(curr, 'self_defined_data') && prop(prop(curr, 'self_defined_data'), p) !== undefined) {
+				curr = prop(prop(curr, 'self_defined_data'), p);
+			} else if (prop(curr, 'profile_data') && prop(prop(curr, 'profile_data'), p) !== undefined) {
+				curr = prop(prop(curr, 'profile_data'), p);
 			} else {
 				return undefined;
 			}
@@ -1814,21 +1861,21 @@ export class TicketDataEngine {
 	}
 
 	private _splitList(str?: string): string[] {
-		if (!str || str === 'None') return [];
+		if (!str || str === 'None') { return []; }
 		return str.split(',').map(s => s.trim()).filter(Boolean);
 	}
 
 	private async _syncTargetsLinkedBy(wsUri: URI, sourceIds: string[], targetIds: string[], op: 'add' | 'remove'): Promise<void> {
 		for (const tId of targetIds) {
 			const p = await this.resolveTicketPaths(wsUri, tId);
-			if (!p) continue;
+			if (!p) { continue; }
 			let content = (await this.fileService.readFile(p.ticketMdUri)).value.toString();
 			const current = this._extractLinkValue(content, 'Linked By');
 			let list = this._splitList(current);
 
 			if (op === 'add') {
 				for (const sId of sourceIds) {
-					if (!list.includes(sId)) list.push(sId);
+					if (!list.includes(sId)) { list.push(sId); }
 				}
 			} else {
 				list = list.filter(id => !sourceIds.includes(id));
@@ -1843,14 +1890,14 @@ export class TicketDataEngine {
 	private async _syncSourcesLinkTo(wsUri: URI, sourceIds: string[], targetIds: string[], op: 'add' | 'remove'): Promise<void> {
 		for (const sId of sourceIds) {
 			const p = await this.resolveTicketPaths(wsUri, sId);
-			if (!p) continue;
+			if (!p) { continue; }
 			let content = (await this.fileService.readFile(p.ticketMdUri)).value.toString();
 			const current = this._extractLinkValue(content, 'Link To');
 			let list = this._splitList(current);
 
 			if (op === 'add') {
 				for (const tId of targetIds) {
-					if (!list.includes(tId)) list.push(tId);
+					if (!list.includes(tId)) { list.push(tId); }
 				}
 			} else {
 				list = list.filter(id => !targetIds.includes(id));
@@ -1862,7 +1909,7 @@ export class TicketDataEngine {
 		}
 	}
 
-	private _flattenCustomValues(obj: Record<string, any>): Record<string, string> {
+	private _flattenCustomValues(obj: Record<string, unknown>): Record<string, string> {
 		const out: Record<string, string> = {};
 		for (const [k, v] of Object.entries(obj)) {
 			out[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
@@ -1874,7 +1921,7 @@ export class TicketDataEngine {
 	 * 6. anyagent_operate_ticket_table
 	 * Structured AI interface for Data Table primitives & SQLite persistence
 	 */
-	public async operateTicketTable(options: IOperateTicketTableToolOptions): Promise<any> {
+	public async operateTicketTable(options: IOperateTicketTableToolOptions) {
 		const wsUri = await this.findWorkspaceUri(options.workspace_id, options.ticket_id);
 		if (!wsUri) {
 			throw new Error(`Workspace '${options.workspace_id}' not found.`);
@@ -1888,7 +1935,7 @@ export class TicketDataEngine {
 		let ticketContent = (await this.fileService.readFile(paths.ticketMdUri)).value.toString();
 		const parsedTicket = this._parseTicketMd(ticketContent);
 
-		const schema: any = await this._readTicketSchema(paths.folderUri, wsUri, paths.ticketType);
+		const schema = await this._readTicketSchema(paths.folderUri, wsUri, paths.ticketType);
 
 		const requestedField = (options.table_field || '').trim();
 		if (!requestedField) {
@@ -1896,18 +1943,18 @@ export class TicketDataEngine {
 		}
 
 		// Match schema field or custom data key case-insensitively
-		const schemaFields: any[] = Array.isArray(schema?.fields) ? schema.fields : [];
+		const schemaFields: ICustomField[] = getSchemaFields(schema);
 		const matchedSchemaField = schemaFields.find(f =>
 			(f.label && f.label.toLowerCase() === requestedField.toLowerCase()) ||
 			(f.id && f.id.toLowerCase() === requestedField.toLowerCase())
 		);
 		const canonicalKey = matchedSchemaField?.label || matchedSchemaField?.id || requestedField;
 
-		let existingRaw: any = parsedTicket.selfDefinedData?.[canonicalKey] ?? parsedTicket.selfDefinedData?.[requestedField];
+		let existingRaw: unknown = parsedTicket.selfDefinedData?.[canonicalKey] ?? parsedTicket.selfDefinedData?.[requestedField];
 		if (typeof existingRaw === 'string' && existingRaw.trim().startsWith('{')) {
 			try {
 				existingRaw = JSON.parse(existingRaw.trim());
-			} catch {}
+			} catch { }
 		}
 
 		let columns: Array<{
@@ -1919,7 +1966,7 @@ export class TicketDataEngine {
 			nullable?: boolean;
 			defaultValue?: string;
 		}> = [];
-		let rows: Record<string, any>[] = [];
+		let rows: Record<string, unknown>[] = [];
 		let dbEngine: 'sqlite' | 'none' = 'sqlite';
 		let dbPath = '';
 		let tableName = canonicalKey.toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'ticket_table';
@@ -1927,13 +1974,14 @@ export class TicketDataEngine {
 		let lastSynced = '';
 
 		if (existingRaw && typeof existingRaw === 'object' && !Array.isArray(existingRaw)) {
-			if (Array.isArray(existingRaw.columns)) columns = existingRaw.columns;
-			if (Array.isArray(existingRaw.rows)) rows = existingRaw.rows;
-			if (existingRaw.dbEngine) dbEngine = existingRaw.dbEngine === 'none' ? 'none' : 'sqlite';
-			if (existingRaw.dbPath !== undefined) dbPath = String(existingRaw.dbPath);
-			if (existingRaw.tableName !== undefined) tableName = String(existingRaw.tableName);
-			if (existingRaw.autoSyncDb !== undefined) autoSyncDb = Boolean(existingRaw.autoSyncDb);
-			if (existingRaw.lastSynced) lastSynced = String(existingRaw.lastSynced);
+			const existingObj = existingRaw as IJsonObject;
+			if (Array.isArray(existingObj.columns)) { columns = existingObj.columns; }
+			if (Array.isArray(existingObj.rows)) { rows = existingObj.rows; }
+			if (existingObj.dbEngine) { dbEngine = existingObj.dbEngine === 'none' ? 'none' : 'sqlite'; }
+			if (existingObj.dbPath !== undefined) { dbPath = String(existingObj.dbPath); }
+			if (existingObj.tableName !== undefined) { tableName = String(existingObj.tableName); }
+			if (existingObj.autoSyncDb !== undefined) { autoSyncDb = Boolean(existingObj.autoSyncDb); }
+			if (existingObj.lastSynced) { lastSynced = String(existingObj.lastSynced); }
 		} else if (Array.isArray(existingRaw)) {
 			rows = existingRaw;
 		}
@@ -1947,7 +1995,7 @@ export class TicketDataEngine {
 		if (rows.length === 0 && !dbPath && Array.isArray(matchedSchemaField?.tableRows) && matchedSchemaField.tableRows.length > 0 && !existingRaw) {
 			rows = JSON.parse(JSON.stringify(matchedSchemaField.tableRows));
 		}
-		if (matchedSchemaField?.tableDbTableName && (!existingRaw || !existingRaw.tableName)) {
+		if (matchedSchemaField?.tableDbTableName && (!existingRaw || !(existingRaw as IJsonObject).tableName)) {
 			tableName = String(matchedSchemaField.tableDbTableName);
 		}
 		if (columns.length === 0) {
@@ -1983,8 +2031,8 @@ export class TicketDataEngine {
 			};
 		}
 
-		const ensureColumnsForRow = (rowObj: Record<string, any>) => {
-			if (!rowObj || typeof rowObj !== 'object') return;
+		const ensureColumnsForRow = (rowObj: Record<string, unknown>) => {
+			if (!rowObj || typeof rowObj !== 'object') { return; }
 			for (const k of Object.keys(rowObj)) {
 				if (!columns.some(c => c.name.toLowerCase() === k.toLowerCase())) {
 					columns.push({
@@ -2000,7 +2048,7 @@ export class TicketDataEngine {
 		};
 
 		let operationSummary = '';
-		let sqliteResult: any = undefined;
+		let sqliteResult: ISqliteTableOperationResult | undefined = undefined;
 
 		if (op === 'define_columns') {
 			if (!Array.isArray(options.columns) || options.columns.length === 0) {
@@ -2057,7 +2105,7 @@ export class TicketDataEngine {
 				});
 			} else if (pkCols.length > 0 && incoming.length > 0) {
 				for (const item of incoming) {
-					if (!item || typeof item !== 'object') continue;
+					if (!item || typeof item !== 'object') { continue; }
 					ensureColumnsForRow(item);
 					const hasAllPkValues = pkCols.every(pk => item[pk] !== undefined);
 					if (hasAllPkValues) {
@@ -2144,7 +2192,7 @@ export class TicketDataEngine {
 					dbPath,
 					tableName,
 					action: sqliteAction,
-					columns: columns as any,
+					columns,
 					rows: rowsForSqlite,
 					sqlQuery: options.sql_query
 				});
@@ -2156,7 +2204,7 @@ export class TicketDataEngine {
 				if (sqRes.success) {
 					if (op === 'load_from_sqlite') {
 						if (Array.isArray(sqRes.columns) && sqRes.columns.length > 0) {
-							columns = sqRes.columns as any;
+							columns = sqRes.columns;
 						}
 						if (Array.isArray(sqRes.rows)) {
 							rows = sqRes.rows;

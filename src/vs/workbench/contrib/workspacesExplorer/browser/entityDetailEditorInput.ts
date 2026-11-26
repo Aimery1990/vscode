@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { EditorInput } from '../../../common/editor/editorInput.js';
@@ -10,6 +9,18 @@ import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
+import { ICustomModule } from '../../entityPersistence/common/entityPersistence.js';
+
+/** Template module shown in preview mode; workflow-node views also carry `__wfNode`. */
+export interface IEntityPreviewModule extends ICustomModule {
+	__wfNode?: {
+		nodeId?: string;
+		nodeLabel: string;
+		workflowName: string;
+		workflowUri?: string;
+		subWorkflowName?: string;
+	};
+}
 
 const entityDetailEditorIcon = registerIcon('entity-detail-editor-label-icon', Codicon.info, 'Icon of the entity detail editor label.');
 
@@ -23,7 +34,7 @@ export class EntityDetailEditorInput extends EditorInput {
 		public readonly entityUri: URI,
 		public readonly entityName: string,
 		public readonly startInEditMode?: boolean,
-		public previewModule?: any
+		public previewModule?: IEntityPreviewModule
 	) {
 		super();
 		this._resource = URI.from({
@@ -39,7 +50,7 @@ export class EntityDetailEditorInput extends EditorInput {
 				: `${entityName} (Detail)`;
 	}
 
-	public updatePreviewModule(mod: any): void {
+	public updatePreviewModule(mod: IEntityPreviewModule): void {
 		this.previewModule = mod;
 		this._name = mod?.__wfNode ? `Node: ${mod.name || this.entityName}` : `Preview: ${mod.name || this.entityName} (Ticket)`;
 		this._onDidChangeLabel.fire();

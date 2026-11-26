@@ -1,9 +1,10 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { clearNode, Dimension, h } from '../../../../base/browser/dom.js';
+import { clearNode, Dimension, h, isHTMLElement } from '../../../../base/browser/dom.js';
+import { mainWindow } from '../../../../base/browser/window.js';
+import { Mutable } from '../../../../base/common/types.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
@@ -18,7 +19,7 @@ import { IEditorOpenContext } from '../../../common/editor.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
-import { EntityDetailEditorInput } from './entityDetailEditorInput.js';
+import { EntityDetailEditorInput, IEntityPreviewModule } from './entityDetailEditorInput.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { URI } from '../../../../base/common/uri.js';
 import { FileAccess } from '../../../../base/common/network.js';
@@ -27,7 +28,7 @@ import { isWindows } from '../../../../base/common/platform.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { dirname, basename } from '../../../../base/common/resources.js';
-import { IAgentsManagerService, IAgentItem, IAgentCredentialService, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
+import { IAgentsManagerService, IAgentItem, IAgentCredential, IAgentCredentialService, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
@@ -37,7 +38,7 @@ import { IClipboardService } from '../../../../platform/clipboard/common/clipboa
 import { parseYaml } from '../../customModules/browser/customModulesService.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
-import { IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomField, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
@@ -51,8 +52,104 @@ import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
 	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
 
+/*
+ * This editor renders its cards from HTML templates (`innerHTML` through the trusted-types policy above), so there
+ * are no element references to keep: parts of a rendered template are looked up by their class / data attributes.
+ * All such lookups go through these two helpers. A nullish `root` yields `undefined` (like `root?.querySelector(...)`).
+ */
+function templatePart<K extends keyof HTMLElementTagNameMap>(root: ParentNode, selector: K): HTMLElementTagNameMap[K] | null;
+function templatePart<K extends keyof HTMLElementTagNameMap>(root: ParentNode | null | undefined, selector: K): HTMLElementTagNameMap[K] | null | undefined;
+function templatePart<E extends Element = Element>(root: ParentNode, selector: string): E | null;
+function templatePart<E extends Element = Element>(root: ParentNode | null | undefined, selector: string): E | null | undefined;
+function templatePart(root: ParentNode | null | undefined, selector: string): Element | null | undefined {
+	// eslint-disable-next-line no-restricted-syntax -- template-rendered DOM, see above
+	return root?.querySelector(selector);
+}
+
+/** Persisted value of a primitive card (a JSON object in ticket.md / the entity snapshot); every key is optional. */
+interface IStoredPrimitiveValue {
+	url?: string;
+	content?: string;
+	lastFetched?: string;
+	credentials?: ICredentialPair[];
+	prompt?: string;
+	output?: string;
+	result?: unknown;
+	code?: string;
+	ok?: boolean;
+	columns?: ITableColumnDefinition[];
+	rows?: Record<string, unknown>[];
+	dbEngine?: string;
+	dbPath?: string;
+	tableName?: string;
+	autoSyncDb?: boolean;
+	sqlQuery?: string;
+	sqlOutput?: string;
+	debugSqlOutput?: string;
+	pageSize?: number;
+	lastSynced?: string;
+	refTokens?: string[];
+	voiceClips?: IVoiceNoteClip[];
+	voiceTranscript?: string;
+	name?: string;
+}
+
+/** A parsed JSON object whose shape is only known at runtime (its fields are inspected dynamically). */
+type IJsonObject = { [key: string]: unknown };
+
+/** An option of a select component as stored in the template / ticket (a plain value or `{ value, label }`). */
+type ISelectOption = string | { value?: string; label?: string };
+
+/** Runtime state attached to a rendered primitive card (cards are re-created from templates on every render). */
+interface ICardRuntimeState {
+	lastPythonResult?: unknown;
+	externalScripts?: string[];
+	loadTtsBytes?: (buffer: Uint8Array, mimeType: string, autoPlay: boolean) => Promise<void>;
+	resetTtsPlayer?: () => void;
+}
+
+const cardRuntimeStates = new WeakMap<HTMLElement, ICardRuntimeState>();
+
+/** Recording / transcription state of a voice-input (microphone) button. */
+interface IVoiceInputState {
+	isRecording: boolean;
+	isTranscribing: boolean;
+	mediaRecorder?: MediaRecorder;
+	recordingTimer?: number;
+	recordingSeconds: number;
+	stream?: MediaStream;
+	lastSelectionStart?: number;
+	lastSelectionEnd?: number;
+	stopRecording?: () => void;
+}
+
+const voiceInputStates = new WeakMap<HTMLElement, IVoiceInputState>();
+
+function cardRuntimeState(card: HTMLElement): ICardRuntimeState {
+	let state = cardRuntimeStates.get(card);
+	if (!state) {
+		state = {};
+		cardRuntimeStates.set(card, state);
+	}
+	return state;
+}
+
+/** Same as `key in obj` (own or inherited property), for objects whose keys come from data; does not narrow `obj`. */
+function hasProperty(obj: object, key: PropertyKey): boolean {
+	return Reflect.has(obj, key);
+}
+
+function templateParts<K extends keyof HTMLElementTagNameMap>(root: ParentNode, selector: K): NodeListOf<HTMLElementTagNameMap[K]>;
+function templateParts<K extends keyof HTMLElementTagNameMap>(root: ParentNode | null | undefined, selector: K): NodeListOf<HTMLElementTagNameMap[K]> | undefined;
+function templateParts<E extends Element = Element>(root: ParentNode, selector: string): NodeListOf<E>;
+function templateParts<E extends Element = Element>(root: ParentNode | null | undefined, selector: string): NodeListOf<E> | undefined;
+function templateParts(root: ParentNode | null | undefined, selector: string): NodeListOf<Element> | undefined {
+	// eslint-disable-next-line no-restricted-syntax -- template-rendered DOM, see above
+	return root?.querySelectorAll(selector);
+}
+
 function getColorForName(name: string | undefined): string {
-	if (!name) return '#38bdf8';
+	if (!name) { return '#38bdf8'; }
 	const MODERN_PALETTE = [
 		'#38bdf8', // Light Blue
 		'#a78bfa', // Purple/Violet
@@ -92,6 +189,79 @@ function hexToRgba(hex: string | undefined, alpha: number): string {
 	}
 	return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
+
+/** Last-run data of a workflow capsule shown in a workflow-node view. */
+interface IWfStepRuntime {
+	value?: unknown;
+	inputs?: Record<string, unknown>;
+	error?: string;
+}
+
+/** A workflow step shown as a card in a workflow-node view (built by the workflow editor). */
+interface IWfStepInfo {
+	kind?: string;
+	kindLabel?: string;
+	code?: string;
+	targetVariable?: string;
+	disabled?: boolean;
+	subWorkflow?: {
+		id?: string;
+		name?: string;
+		inputs?: Record<string, string>;
+		inputDefs?: Array<{ name: string; label?: string; defaultValue?: string }>;
+		outputDefs?: Array<{ label: string; varName: string; defaultFormat?: string }>;
+	};
+}
+
+/** A template component as rendered here: the schema field plus workflow-node extras and legacy YAML keys. */
+interface ITicketField extends ICustomField {
+	__wfStep?: IWfStepInfo;
+	__wfRuntime?: IWfStepRuntime;
+	key?: string;
+	choices?: string[];
+	pythonLocked?: boolean;
+	pythonExternalScripts?: string[];
+}
+
+/** The ticket template (custom module) rendered by this editor. */
+interface ITicketTemplateModule extends Omit<IEntityPreviewModule, 'fields'> {
+	fields?: ITicketField[];
+}
+
+/** A ticket that can be linked to (see `_loadAllAvailableTickets`). */
+interface ILinkableTicket {
+	id: string;
+	code: string;
+	title: string;
+	summary: string;
+	type: string;
+	workspaceId: string;
+	workspaceName: string;
+	uri: string;
+}
+
+/** A node of the ticket's field hierarchy handed to Agent Central. */
+interface ITicketHierarchyNode {
+	path: string;
+	label: string;
+	fieldType: string;
+	currentValue?: string;
+	options?: unknown[];
+	children?: ITicketHierarchyNode[];
+	preInjectedPrompt?: string;
+	unit?: string;
+	precision?: number;
+}
+
+/** A UI message handled by `_handleMessage`. */
+type IEditorUiMessage =
+	| { type: 'openAgentCentral' | 'aiButtonClicked'; field?: string; source?: string; fieldType?: string; label?: string; currentValue?: string; preInjectedPrompt?: string; options?: unknown[] }
+	| { type: 'saveAllData' | 'saveTitleAndDescription' | 'saveDescription'; title?: string; description?: string; metadata?: Record<string, string>; customMetadata?: Record<string, string> }
+	| { type: 'saveMetadata'; title?: string; description?: string; metadata: Record<string, string>; customMetadata?: Record<string, string> }
+	| { type: 'addWorkLog'; log: string }
+	| { type: 'openTicket'; ticketId: string }
+	| { type: 'uploadAttachment'; name: string; data: number[] }
+	| { type: 'downloadAttachment' | 'deleteAttachment'; name: string };
 
 interface IParsedTicketData {
 	title: string;
@@ -137,7 +307,7 @@ export class EntityDetailEditor extends EditorPane {
 	private _readmeUri: URI | undefined;
 	private _workLogUri: URI | undefined;
 	private _lastParsedData: IParsedTicketData | undefined;
-	private _lastCustomModule: any | undefined;
+	private _lastCustomModule: ITicketTemplateModule | null | undefined;
 	private _workspaceStatuses: IWorkspaceStatusesInfo = {
 		statuses: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'],
 		mapping: {
@@ -150,12 +320,12 @@ export class EntityDetailEditor extends EditorPane {
 		removedStatus: 'Removed',
 		initialStatus: 'Todo',
 		getCategory: (st?: string) => {
-			if (!st) return 'Todo';
+			if (!st) { return 'Todo'; }
 			const lower = st.toLowerCase();
-			if (lower.includes('progress') || lower.includes('dev') || lower.includes('doing') || lower.includes('test') || lower.includes('review') || lower.includes('deploy')) return 'In Progress';
-			if (lower.includes('done') || lower.includes('finish') || lower.includes('complete') || lower.includes('release')) return 'Done';
-			if (lower.includes('block') || lower.includes('fail') || lower.includes('hold')) return 'Blocked';
-			if (lower.includes('remove') || lower.includes('cancel') || lower.includes('archive')) return 'Removed';
+			if (lower.includes('progress') || lower.includes('dev') || lower.includes('doing') || lower.includes('test') || lower.includes('review') || lower.includes('deploy')) { return 'In Progress'; }
+			if (lower.includes('done') || lower.includes('finish') || lower.includes('complete') || lower.includes('release')) { return 'Done'; }
+			if (lower.includes('block') || lower.includes('fail') || lower.includes('hold')) { return 'Blocked'; }
+			if (lower.includes('remove') || lower.includes('cancel') || lower.includes('archive')) { return 'Removed'; }
 			return 'Todo';
 		}
 	};
@@ -168,7 +338,7 @@ export class EntityDetailEditor extends EditorPane {
 	private _isEmbeddedInWorkflow: boolean = false;
 	private _onSwitchToFlowchart?: () => void;
 	private _isPreviewMode: boolean = false;
-	private _previewModule?: any;
+	private _previewModule?: ITicketTemplateModule;
 	private _previewWorkLog: string = '';
 	private _currentScrollKey: string = '';
 	private _isRestoringScroll: boolean = false;
@@ -182,9 +352,15 @@ export class EntityDetailEditor extends EditorPane {
 	})();
 	private static readonly _savedScrollByKey = new Map<string, number>();
 	private static _copiedTicketJsonCache: string = '';
+	/** The open "Paste Ticket JSON" dialog / "View Sent Prompt" inspector (at most one of each at a time). */
+	private static _pasteTicketJsonModalOverlay: HTMLElement | undefined;
+	private static _promptSentInspectorOverlay: HTMLElement | undefined;
 	private readonly _outputPaginationState = new Map<string, { page: number; pageSize: number }>();
 	private readonly _sshPanelExpandedByFieldKey = new Map<string, boolean>();
 	private _isTicketRunning: boolean = false;
+	/** Not assigned anywhere in this editor (always undefined); read by the parameter-token chips and the Python runner. */
+	private readonly _parameterValues?: Record<string, unknown>;
+	private readonly _previewWorkspaceUri?: URI;
 	private _lastExecutionStepResults?: IPrimitiveExecutionStepResult[];
 
 	constructor(
@@ -210,13 +386,13 @@ export class EntityDetailEditor extends EditorPane {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
 
 		this._register(this._customModulesService.onDidChangeModules(() => {
-			if (!this._entityUri || (!this.isVisible() && !this._isEmbeddedInWorkflow)) return;
+			if (!this._entityUri || (!this.isVisible() && !this._isEmbeddedInWorkflow)) { return; }
 			if (this._isPreviewMode && this._previewModule?.id) {
 				this._reloadPreviewModuleFromDisk();
 				return;
 			}
-			if (this._activeSaveCount > 0 || Date.now() < this._suppressAutoReloadUntil) return;
-			const activeEl = document.activeElement as HTMLElement | null;
+			if (this._activeSaveCount > 0 || Date.now() < this._suppressAutoReloadUntil) { return; }
+			const activeEl = mainWindow.document.activeElement as HTMLElement | null;
 			if (activeEl && this._container?.contains(activeEl) && (activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'INPUT')) {
 				return;
 			}
@@ -225,14 +401,14 @@ export class EntityDetailEditor extends EditorPane {
 
 		// Auto-reload data when underlying files are modified on disk (by AI or other tools)
 		this._register(this._fileService.onDidFilesChange(e => {
-			if (!this._entityUri || (!this.isVisible() && !this._isEmbeddedInWorkflow)) return;
-			if (this._activeSaveCount > 0 || Date.now() < this._suppressAutoReloadUntil) return;
+			if (!this._entityUri || (!this.isVisible() && !this._isEmbeddedInWorkflow)) { return; }
+			if (this._activeSaveCount > 0 || Date.now() < this._suppressAutoReloadUntil) { return; }
 			const isTemplateChanged = e.rawUpdated.some(u => u.path.includes('/entity_type/') || u.path.includes('/entity_types/'));
 			if (this._isPreviewMode && isTemplateChanged && this._previewModule?.id) {
 				this._reloadPreviewModuleFromDisk();
 				return;
 			}
-			const activeEl = document.activeElement as HTMLElement | null;
+			const activeEl = mainWindow.document.activeElement as HTMLElement | null;
 			if (activeEl && this._container?.contains(activeEl) && (activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'INPUT')) {
 				return;
 			}
@@ -251,7 +427,7 @@ export class EntityDetailEditor extends EditorPane {
 				'readme.md', 'instruction.md', 'worklog.md', 'work_log.md'
 			]);
 			const isRelevantEntityChange = allChangedUris.some(u => {
-				if (!u.path.startsWith(entityPathPrefix)) return false;
+				if (!u.path.startsWith(entityPathPrefix)) { return false; }
 				const rel = u.path.substring(entityPathPrefix.length);
 				if (!rel || rel.includes('/')) {
 					return rel.startsWith('attachments/') || (rel.startsWith('.agents/') && relevantMdNames.has(rel.substring('.agents/'.length).toLowerCase()));
@@ -272,7 +448,7 @@ export class EntityDetailEditor extends EditorPane {
 		await this._resolvePathsAndLoadData();
 	}
 
-	public async refreshPreviewModule(mod: any): Promise<void> {
+	public async refreshPreviewModule(mod: ITicketTemplateModule): Promise<void> {
 		this._isPreviewMode = true;
 		this._previewModule = mod;
 		this._lastParsedData = this._buildPreviewParsedData(mod);
@@ -289,7 +465,7 @@ export class EntityDetailEditor extends EditorPane {
 		if (this._container) {
 			this._container.style.padding = '54px 32px 24px 32px';
 			this._container.style.userSelect = 'none';
-			(this._container.style as any).webkitUserSelect = 'none';
+			this._container.style.webkitUserSelect = 'none';
 		}
 	}
 
@@ -321,7 +497,7 @@ export class EntityDetailEditor extends EditorPane {
 		this._container.style.boxSizing = 'border-box';
 		this._container.style.padding = '24px 32px';
 		this._container.style.userSelect = 'none';
-		(this._container.style as any).webkitUserSelect = 'none';
+		this._container.style.webkitUserSelect = 'none';
 		parent.appendChild(this._container);
 
 		this._bindContainerEvents();
@@ -389,7 +565,7 @@ export class EntityDetailEditor extends EditorPane {
 		if (targetTop > 0) {
 			this._isRestoringScroll = true;
 			this._container.scrollTop = targetTop;
-			requestAnimationFrame(() => {
+			mainWindow.requestAnimationFrame(() => {
 				if (this._container && !this._userHasScrolledSinceRender && this._currentScrollKey === key) {
 					this._container.scrollTop = targetTop;
 				}
@@ -493,9 +669,9 @@ export class EntityDetailEditor extends EditorPane {
 		}
 	}
 
-	private async _readCustomModule(workspaceUri: URI, typeId: string): Promise<any | null> {
+	private async _readCustomModule(workspaceUri: URI, typeId: string): Promise<ITicketTemplateModule | null> {
 		const targetId = (typeId || '').trim().toLowerCase();
-		if (!targetId) return null;
+		if (!targetId) { return null; }
 
 		// Fast-bail only for non-customizable container/file types
 		const builtInTypes = new Set(['workspace', 'folder', 'file']);
@@ -517,7 +693,7 @@ export class EntityDetailEditor extends EditorPane {
 			checkDirs.push(URI.joinPath(curr, '.agents', 'entity_type'));
 			checkDirs.push(URI.joinPath(curr, '.agents', 'entity_types'));
 			const parent = dirname(curr);
-			if (parent.path === curr.path) break;
+			if (parent.path === curr.path) { break; }
 			curr = parent;
 		}
 
@@ -538,7 +714,7 @@ export class EntityDetailEditor extends EditorPane {
 						if (await this._fileService.exists(directUri)) {
 							const content = await this._fileService.readFile(directUri);
 							const mod = this._parseSimpleYaml(content.value.toString());
-							if (mod) return mod;
+							if (mod) { return mod; }
 						}
 					}
 
@@ -574,8 +750,9 @@ export class EntityDetailEditor extends EditorPane {
 		return null;
 	}
 
-	private _parseSimpleYaml(yaml: string): any {
-		return parseYaml(yaml);
+	/** Parses a template YAML file (the content is trusted to be a template module). */
+	private _parseSimpleYaml(yaml: string): ITicketTemplateModule | null | undefined {
+		return parseYaml(yaml) as ITicketTemplateModule | null | undefined;
 	}
 
 	private async _reloadPreviewModuleFromDisk(): Promise<void> {
@@ -593,10 +770,10 @@ export class EntityDetailEditor extends EditorPane {
 		} catch { }
 	}
 
-	private _buildPreviewParsedData(mod: any): IParsedTicketData {
+	private _buildPreviewParsedData(mod: ITicketTemplateModule): IParsedTicketData {
 		const modId = String(mod?.id || 'preview');
 		const modName = String(mod?.name || modId);
-		const fields: any[] = Array.isArray(mod?.fields) ? mod.fields : [];
+		const fields: ITicketField[] = Array.isArray(mod?.fields) ? mod.fields : [];
 
 		const titleField = fields.find(f => (f.id || '').toLowerCase() === 'title' || (f.label || '').toLowerCase() === 'title');
 		const descField = fields.find(f => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description');
@@ -627,7 +804,8 @@ export class EntityDetailEditor extends EditorPane {
 			if (!fLabel || fKey.toLowerCase() === 'title' || fLabel.toLowerCase() === 'title' || fKey.toLowerCase() === 'description' || fLabel.toLowerCase() === 'description') {
 				continue;
 			}
-			const fType = f.type || 'text';
+			// Older templates may still use legacy type names (boolean, single_select, tags)
+			const fType: string = f.type || 'text';
 			if (fType === 'switch' || fType === 'boolean') {
 				customMetadata[fLabel] = f.defaultContent === 'true' ? 'true' : 'false';
 			} else if (fType === 'select' || fType === 'single_select') {
@@ -808,7 +986,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		if (Array.isArray(mod.statuses) && mod.statuses.length > 0) {
-			const stNames = mod.statuses.map((s: any) => s.label || s.id);
+			const stNames = mod.statuses.map(s => s.label || s.id);
 			const mapping: { [status: string]: 'Todo' | 'In Progress' | 'Done' | 'Blocked' | 'Removed' } = {};
 			for (const s of mod.statuses) {
 				const stLabel = s.label || s.id;
@@ -820,7 +998,7 @@ export class EntityDetailEditor extends EditorPane {
 				removedStatus: stNames.find((st: string) => mapping[st] === 'Removed') || 'Removed',
 				initialStatus: stNames[0] || 'Todo',
 				getCategory: (st?: string) => {
-					if (!st) return 'Todo';
+					if (!st) { return 'Todo'; }
 					return mapping[st] || 'Todo';
 				}
 			};
@@ -828,7 +1006,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		const agents = this._agentsManagerService ? await this._agentsManagerService.getAgents() : [];
 		const allTickets = await this._loadAllAvailableTickets();
-		const workLogContent = this._previewWorkLog || `## ${new Date().toISOString().split('T')[0]} ${new Date().toTimeString().split(' ')[0].substring(0, 5)}\n\n### Template Preview Initialized\n\n- **Template**: \`${mod.name || mod.id}\`\n- **Fields Configured**: ${Array.isArray(mod.fields) ? mod.fields.length : 0}\n- **Status Stages**: ${Array.isArray(mod.statuses) ? mod.statuses.map((s: any) => s.label || s.id).join(' -> ') : 'Default'}\n`;
+		const workLogContent = this._previewWorkLog || `## ${new Date().toISOString().split('T')[0]} ${new Date().toTimeString().split(' ')[0].substring(0, 5)}\n\n### Template Preview Initialized\n\n- **Template**: \`${mod.name || mod.id}\`\n- **Fields Configured**: ${Array.isArray(mod.fields) ? mod.fields.length : 0}\n- **Status Stages**: ${Array.isArray(mod.statuses) ? mod.statuses.map(s => s.label || s.id).join(' -> ') : 'Default'}\n`;
 
 		const scrollKey = this._getScrollStateKey();
 		if (this._currentScrollKey === scrollKey && this._container.clientHeight > 0 && !this._isRestoringScroll) {
@@ -852,9 +1030,9 @@ export class EntityDetailEditor extends EditorPane {
 		this._applySavedScrollPosition(scrollKey);
 		setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
-		const directInfoBtn = this._container.querySelector('#status-lifecycle-info-btn') as HTMLElement | null;
-		const popoverEl = this._container.querySelector('#status-lifecycle-popover') as HTMLElement | null;
-		const closePopoverBtn = this._container.querySelector('#close-status-lifecycle-popover-btn') as HTMLElement | null;
+		const directInfoBtn = templatePart(this._container, '#status-lifecycle-info-btn') as HTMLElement | null;
+		const popoverEl = templatePart(this._container, '#status-lifecycle-popover') as HTMLElement | null;
+		const closePopoverBtn = templatePart(this._container, '#close-status-lifecycle-popover-btn') as HTMLElement | null;
 		if (directInfoBtn && popoverEl) {
 			directInfoBtn.onclick = (e) => {
 				e.preventDefault();
@@ -914,7 +1092,7 @@ export class EntityDetailEditor extends EditorPane {
 						break;
 					}
 					const parent = dirname(curr);
-					if (parent.path === curr.path) break;
+					if (parent.path === curr.path) { break; }
 					curr = parent;
 				}
 
@@ -1006,7 +1184,7 @@ export class EntityDetailEditor extends EditorPane {
 				delete parsed.customMetadata['output_specs'];
 				const internalLifecycleKeys = ['ticket statuses', 'status mapping', 'removed status', 'git remote url', 'git branch'];
 				for (const k of Object.keys(parsed.customMetadata)) {
-					if (internalLifecycleKeys.includes(k.toLowerCase())) continue;
+					if (internalLifecycleKeys.includes(k.toLowerCase())) { continue; }
 					if (!validKeys.has(k.toLowerCase()) && !validKeys.has(k.toLowerCase().replace(/_/g, ' '))) {
 						const val = parsed.customMetadata[k];
 						const isEmpty = val === undefined || val === null || String(val).trim() === '' || String(val).trim() === '[]' || String(val).trim() === '{}';
@@ -1074,9 +1252,9 @@ export class EntityDetailEditor extends EditorPane {
 			setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
 			// 4. Attach direct click handlers for key interactive elements
-			const directInfoBtn = this._container.querySelector('#status-lifecycle-info-btn') as HTMLElement | null;
-			const popoverEl = this._container.querySelector('#status-lifecycle-popover') as HTMLElement | null;
-			const closePopoverBtn = this._container.querySelector('#close-status-lifecycle-popover-btn') as HTMLElement | null;
+			const directInfoBtn = templatePart(this._container, '#status-lifecycle-info-btn') as HTMLElement | null;
+			const popoverEl = templatePart(this._container, '#status-lifecycle-popover') as HTMLElement | null;
+			const closePopoverBtn = templatePart(this._container, '#close-status-lifecycle-popover-btn') as HTMLElement | null;
 			if (directInfoBtn && popoverEl) {
 				directInfoBtn.onclick = (e) => {
 					e.preventDefault();
@@ -1095,8 +1273,9 @@ export class EntityDetailEditor extends EditorPane {
 		} catch (err) {
 			console.error('Failed to resolve and render entity detail:', err);
 			if (this._container) {
-				const errMsg = err && (err as any).message ? (err as any).message : String(err);
-				const errStack = (err as any)?.stack ? String((err as any).stack) : '';
+				const errObj = err as { message?: unknown; stack?: unknown } | undefined;
+				const errMsg = err && errObj?.message ? errObj.message : String(err);
+				const errStack = errObj?.stack ? String(errObj.stack) : '';
 				this._setElementHTML(this._container, `
 					<div style="display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 40px; color: var(--vscode-editor-foreground); text-align: center;">
 						<div style="font-size: 20px; font-weight: 600; margin-bottom: 12px; color: #ef4444;">Error Loading Ticket Detail</div>
@@ -1112,7 +1291,7 @@ export class EntityDetailEditor extends EditorPane {
 						</button>
 					</div>
 				`);
-				const retryBtn = this._container.querySelector('#entity-detail-error-retry-btn') as HTMLElement | null;
+				const retryBtn = templatePart(this._container, '#entity-detail-error-retry-btn') as HTMLElement | null;
 				if (retryBtn) {
 					retryBtn.onclick = () => this._resolvePathsAndLoadData();
 				}
@@ -1121,7 +1300,7 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private _bindContainerEvents(): void {
-		if (!this._container) return;
+		if (!this._container) { return; }
 
 		const markUserManualScroll = () => {
 			this._userHasScrolledSinceRender = true;
@@ -1155,7 +1334,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (chipBtn) {
 				const itemEl = chipBtn.closest('.prompt-user-input-item') as HTMLElement | null;
 				const cardEl = chipBtn.closest('.prompt-primitive-card') as HTMLElement | null;
-				const ta = (itemEl?.querySelector('.prompt-instruction-textarea') || cardEl?.querySelector('.prompt-instruction-textarea')) as HTMLTextAreaElement | null;
+				const ta = (templatePart(itemEl, '.prompt-instruction-textarea') || templatePart(cardEl, '.prompt-instruction-textarea')) as HTMLTextAreaElement | null;
 				if (ta && ta.style.display !== 'none' && typeof ta.selectionStart === 'number') {
 					ta.setAttribute('data-last-selection-start', String(ta.selectionStart));
 					ta.setAttribute('data-last-selection-end', String(typeof ta.selectionEnd === 'number' ? ta.selectionEnd : ta.selectionStart));
@@ -1166,17 +1345,17 @@ export class EntityDetailEditor extends EditorPane {
 		});
 
 		const extractSelectedTextPreservingTokens = (): string => {
-			const sel = window.getSelection();
+			const sel = mainWindow.getSelection();
 			if (!sel || sel.rangeCount === 0) {
 				return '';
 			}
 			const range = sel.getRangeAt(0);
-			const commonEl = (range.commonAncestorContainer instanceof HTMLElement
+			const commonEl = (isHTMLElement(range.commonAncestorContainer)
 				? range.commonAncestorContainer
 				: range.commonAncestorContainer.parentElement) as HTMLElement | null;
 			const displayEl = commonEl?.closest('.prompt-tokenized-display') as HTMLElement | null;
 			if (displayEl && this._container && this._container.contains(displayEl)) {
-				const ta = displayEl.parentElement?.querySelector('textarea') as HTMLTextAreaElement | null;
+				const ta = templatePart(displayEl.parentElement, 'textarea') as HTMLTextAreaElement | null;
 				if (ta && typeof ta.value === 'string' && ta.value.length > 0) {
 					const resolveRawOffset = (container: Node, offset: number, isEnd: boolean): number | undefined => {
 						if (container === displayEl) {
@@ -1187,7 +1366,7 @@ export class EntityDetailEditor extends EditorPane {
 								return ta.value.length;
 							}
 							const child = displayEl.childNodes[isEnd ? offset - 1 : offset] as HTMLElement | undefined;
-							if (child && child instanceof HTMLElement) {
+							if (child && isHTMLElement(child)) {
 								const attr = isEnd ? child.getAttribute('data-raw-end') : child.getAttribute('data-raw-start');
 								if (attr !== null && !isNaN(Number(attr))) {
 									return Number(attr);
@@ -1197,7 +1376,7 @@ export class EntityDetailEditor extends EditorPane {
 						}
 						let node: Node | null = container;
 						while (node && node !== displayEl) {
-							if (node instanceof HTMLElement) {
+							if (isHTMLElement(node)) {
 								if (node.classList.contains('prompt-token-pill')) {
 									const rawPos = Number(node.getAttribute(isEnd ? 'data-raw-end' : 'data-raw-start'));
 									return !isNaN(rawPos) ? rawPos : undefined;
@@ -1226,14 +1405,14 @@ export class EntityDetailEditor extends EditorPane {
 		// Ensure Cmd+C / Ctrl+C and native copy work for selected text inside locked prompt boxes, AI output boxes, and read-only blocks
 		this._container.addEventListener('keydown', (e: KeyboardEvent) => {
 			if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'c') {
-				const activeEl = document.activeElement as HTMLElement | null;
+				const activeEl = mainWindow.document.activeElement as HTMLElement | null;
 				if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
 					const inputEl = activeEl as HTMLInputElement | HTMLTextAreaElement;
 					if (typeof inputEl.selectionStart === 'number' && typeof inputEl.selectionEnd === 'number' && inputEl.selectionStart !== inputEl.selectionEnd) {
 						return;
 					}
 				}
-				const sel = window.getSelection();
+				const sel = mainWindow.getSelection();
 				const selectedText = extractSelectedTextPreservingTokens();
 				if (selectedText && this._container && sel?.anchorNode && this._container.contains(sel.anchorNode)) {
 					e.stopPropagation();
@@ -1243,11 +1422,11 @@ export class EntityDetailEditor extends EditorPane {
 		});
 
 		this._container.addEventListener('copy', (e: ClipboardEvent) => {
-			const activeEl = document.activeElement as HTMLElement | null;
+			const activeEl = mainWindow.document.activeElement as HTMLElement | null;
 			if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
 				return;
 			}
-			const sel = window.getSelection();
+			const sel = mainWindow.getSelection();
 			const selectedText = extractSelectedTextPreservingTokens();
 			if (selectedText && this._container && sel?.anchorNode && this._container.contains(sel.anchorNode)) {
 				if (e.clipboardData) {
@@ -1260,7 +1439,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		this._container.addEventListener('click', async (e: MouseEvent) => {
 			const target = e.target as HTMLElement | null;
-			if (!target) return;
+			if (!target) { return; }
 
 			// 0. Manual Refresh Button click
 			if (target.id === 'entity-detail-refresh-btn' || target.closest('#entity-detail-refresh-btn')) {
@@ -1313,11 +1492,11 @@ export class EntityDetailEditor extends EditorPane {
 					localStorage.setItem('anyagent.ticketDetail.attributesCollapsed', this._isAttributesCollapsed ? 'true' : 'false');
 				} catch { }
 				if (this._container) {
-					const layoutEl = this._container.querySelector('.layout-container') as HTMLElement | null;
+					const layoutEl = templatePart(this._container, '.layout-container') as HTMLElement | null;
 					if (layoutEl) {
 						layoutEl.classList.toggle('attributes-collapsed', this._isAttributesCollapsed);
 					}
-					const headerToggleBtn = this._container.querySelector('#entity-detail-toggle-attributes-btn') as HTMLElement | null;
+					const headerToggleBtn = templatePart(this._container, '#entity-detail-toggle-attributes-btn') as HTMLElement | null;
 					if (headerToggleBtn) {
 						headerToggleBtn.title = this._isAttributesCollapsed ? 'Show Attributes Panel' : 'Hide Attributes Panel';
 						headerToggleBtn.style.background = this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.06)';
@@ -1333,9 +1512,9 @@ export class EntityDetailEditor extends EditorPane {
 			if (valueCopyBtn) {
 				e.preventDefault();
 				e.stopPropagation();
-				const raw = valueCopyBtn.closest('.wf-value-box')?.querySelector('textarea.wf-value-raw') as HTMLTextAreaElement | null;
+				const raw = templatePart(valueCopyBtn.closest('.wf-value-box'), 'textarea.wf-value-raw') as HTMLTextAreaElement | null;
 				await this._clipboardService.writeText(raw?.value ?? '');
-				const labelEl = valueCopyBtn.querySelector('span:last-child');
+				const labelEl = templatePart(valueCopyBtn, 'span:last-child');
 				if (labelEl) {
 					labelEl.textContent = 'Copied';
 					setTimeout(() => { labelEl.textContent = 'Copy'; }, 1200);
@@ -1427,7 +1606,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (infoBtn) {
 				e.preventDefault();
 				e.stopPropagation();
-				const popoverEl = this._container?.querySelector('#status-lifecycle-popover') as HTMLElement | null;
+				const popoverEl = templatePart(this._container, '#status-lifecycle-popover') as HTMLElement | null;
 				if (popoverEl) {
 					const isHidden = popoverEl.style.display === 'none' || !popoverEl.style.display;
 					popoverEl.style.display = isHidden ? 'flex' : 'none';
@@ -1439,7 +1618,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (target.id === 'close-status-lifecycle-popover-btn' || target.closest('#close-status-lifecycle-popover-btn')) {
 				e.preventDefault();
 				e.stopPropagation();
-				const popoverEl = this._container?.querySelector('#status-lifecycle-popover') as HTMLElement | null;
+				const popoverEl = templatePart(this._container, '#status-lifecycle-popover') as HTMLElement | null;
 				if (popoverEl) {
 					popoverEl.style.display = 'none';
 				}
@@ -1447,7 +1626,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// Close popover if clicking outside
-			const popoverEl = this._container?.querySelector('#status-lifecycle-popover') as HTMLElement | null;
+			const popoverEl = templatePart(this._container, '#status-lifecycle-popover') as HTMLElement | null;
 			if (popoverEl && popoverEl.style.display === 'flex') {
 				if (!target.closest('#status-lifecycle-popover') && !target.closest('#status-lifecycle-info-btn')) {
 					popoverEl.style.display = 'none';
@@ -1460,7 +1639,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const item = credEyeBtn.closest('.browser-cred-item');
-				const textSpan = item?.querySelector('.cred-secret-text') as HTMLElement | null;
+				const textSpan = templatePart(item, '.cred-secret-text') as HTMLElement | null;
 				if (textSpan) {
 					const realVal = textSpan.getAttribute('data-real') || '';
 					if (textSpan.textContent === '••••••••') {
@@ -1491,7 +1670,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = copyContentBtn.closest('.browser-primitive-card');
-				const contentEl = card?.querySelector('.browser-content-display');
+				const contentEl = templatePart(card, '.browser-content-display');
 				const text = contentEl?.textContent || '';
 				if (text && !text.includes('No webpage content extracted yet.')) {
 					await this._clipboardService.writeText(text);
@@ -1508,16 +1687,16 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = clearContentBtn.getAttribute('data-field-key') || '';
 				const card = clearContentBtn.closest('.browser-primitive-card') as HTMLElement | null;
 				if (card) {
-					const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
+					const contentEl = templatePart(card, '.browser-content-display') as HTMLElement | null;
 					if (contentEl) {
 						this._setElementHTML(contentEl, '<span style="opacity: 0.4; font-style: italic;">No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to extract page contents.</span>');
 					}
-					const statusEl = card.querySelector('.browser-fetch-status') as HTMLElement | null;
+					const statusEl = templatePart(card, '.browser-fetch-status') as HTMLElement | null;
 					if (statusEl) {
 						statusEl.textContent = 'Cleared';
 						statusEl.style.color = '';
 					}
-					const urlInput = card.querySelector('.browser-url-input') as HTMLInputElement | null;
+					const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
 					const currentUrl = urlInput?.value.trim() || '';
 					await this._saveBrowserPrimitiveData(fieldKey, currentUrl, '', '');
 				}
@@ -1556,7 +1735,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = newTabBtn.closest('.browser-primitive-card') as HTMLElement | null;
-				const urlInput = card?.querySelector('.browser-url-input') as HTMLInputElement | null;
+				const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
 				let url = urlInput?.value.trim() || 'https://www.google.com';
 				url = this._interpolateParameters(url);
 				if (!/^https?:\/\//i.test(url)) {
@@ -1584,7 +1763,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = insertBrowserChip.closest('.browser-primitive-card') as HTMLElement | null;
-				const urlInput = card?.querySelector('.browser-url-input') as HTMLInputElement | null;
+				const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
 				const textToInsert = insertBrowserChip.getAttribute('data-insert') || '';
 				if (urlInput && textToInsert) {
 					const start = urlInput.selectionStart ?? urlInput.value.length;
@@ -1594,8 +1773,8 @@ export class EntityDetailEditor extends EditorPane {
 					urlInput.focus();
 					const fieldKey = insertBrowserChip.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
 					if (fieldKey && card) {
-						const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
-						const statusEl = card.querySelector('.browser-fetch-status') as HTMLElement | null;
+						const contentEl = templatePart(card, '.browser-content-display') as HTMLElement | null;
+						const statusEl = templatePart(card, '.browser-fetch-status') as HTMLElement | null;
 						let existingContent = contentEl?.textContent || '';
 						if (existingContent.includes('No webpage content extracted yet.')) {
 							existingContent = '';
@@ -1612,7 +1791,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const bar = moreBrowserCtxBtn.closest('.browser-ctx-chips-bar') as HTMLElement | null;
-				const hiddenGroup = bar?.querySelector('.browser-ctx-hidden-group') as HTMLElement | null;
+				const hiddenGroup = templatePart(bar, '.browser-ctx-hidden-group') as HTMLElement | null;
 				if (hiddenGroup) {
 					const isHidden = hiddenGroup.style.display === 'none';
 					hiddenGroup.style.display = isHidden ? 'contents' : 'none';
@@ -1630,9 +1809,9 @@ export class EntityDetailEditor extends EditorPane {
 				const gitUrl = copyGitBtn.getAttribute('data-git-url');
 				if (gitUrl) {
 					this._clipboardService.writeText(gitUrl);
-					const span = copyGitBtn.querySelector('span');
-					if (span) span.textContent = 'Copied!';
-					setTimeout(() => { if (span) span.textContent = 'Copy'; }, 1500);
+					const span = templatePart(copyGitBtn, 'span');
+					if (span) { span.textContent = 'Copied!'; }
+					setTimeout(() => { if (span) { span.textContent = 'Copy'; } }, 1500);
 					this._notificationService.info('Copied Git repository URL to clipboard.');
 				}
 				return;
@@ -1745,8 +1924,8 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = copyPromptOutBtn.closest('.prompt-primitive-card') as HTMLElement | null;
-				const rawTa = card?.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
-				const display = card?.querySelector('.prompt-output-display') as HTMLElement | null;
+				const rawTa = templatePart(card, '.prompt-raw-output') as HTMLTextAreaElement | null;
+				const display = templatePart(card, '.prompt-output-display') as HTMLElement | null;
 				const fullOut = rawTa?.value || display?.textContent || '';
 				if (fullOut) {
 					this._clipboardService.writeText(fullOut);
@@ -1763,12 +1942,12 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = clearPromptOutBtn.getAttribute('data-field-key') || '';
 				const card = clearPromptOutBtn.closest('.prompt-primitive-card') as HTMLElement | null;
 				if (card) {
-					const rawTa = card.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
-					if (rawTa) rawTa.value = '';
-					const display = card.querySelector('.prompt-output-display') as HTMLElement | null;
-					if (display) this._setElementHTML(display, '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.</span>');
-					const statusText = card.querySelector('.prompt-status-text') as HTMLElement | null;
-					if (statusText) statusText.textContent = 'Ready';
+					const rawTa = templatePart(card, '.prompt-raw-output') as HTMLTextAreaElement | null;
+					if (rawTa) { rawTa.value = ''; }
+					const display = templatePart(card, '.prompt-output-display') as HTMLElement | null;
+					if (display) { this._setElementHTML(display, '<span style="opacity: 0.4; font-style: italic;">No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.</span>'); }
+					const statusText = templatePart(card, '.prompt-status-text') as HTMLElement | null;
+					if (statusText) { statusText.textContent = 'Ready'; }
 					await this._savePromptDataFromCard(card, fieldKey, '');
 				}
 				return;
@@ -1821,7 +2000,7 @@ export class EntityDetailEditor extends EditorPane {
 			// 0.4644 Prompt Primitive: Click Tokenized Display to Switch to Edit Textarea at Clicked Offset
 			const promptTokenizedDisplay = target.closest('.prompt-tokenized-display') as HTMLElement | null;
 			if (promptTokenizedDisplay) {
-				const currentSelection = window.getSelection()?.toString() || '';
+				const currentSelection = mainWindow.getSelection()?.toString() || '';
 				if (currentSelection.length > 0) {
 					// User dragged to select text (e.g. to copy from a locked or unlocked prompt box); preserve selection
 					return;
@@ -1839,11 +2018,11 @@ export class EntityDetailEditor extends EditorPane {
 				const card = addPromptUserInputBtn.closest('.prompt-primitive-card') as HTMLElement | null;
 				const fieldKey = addPromptUserInputBtn.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
 				if (card) {
-					const listEl = card.querySelector('.prompt-user-inputs-list') as HTMLElement | null;
+					const listEl = templatePart(card, '.prompt-user-inputs-list') as HTMLElement | null;
 					if (listEl) {
-						const existingItems = listEl.querySelectorAll('.prompt-user-input-item');
+						const existingItems = templateParts(listEl, '.prompt-user-input-item');
 						const nextIdx = existingItems.length;
-						const firstItemChips = listEl.querySelector('.prompt-user-input-chips')?.innerHTML || card.getAttribute('data-prompt-chips-html') || '';
+						const firstItemChips = templatePart(listEl, '.prompt-user-input-chips')?.innerHTML || card.getAttribute('data-prompt-chips-html') || '';
 						const newItemHtml = this._buildPromptUserInputItemHtml(fieldKey, nextIdx, nextIdx + 1, '', firstItemChips, false);
 						const tempDiv = document.createElement('div');
 						tempDiv.innerHTML = ttPolicy ? (ttPolicy.createHTML(newItemHtml) as unknown as string) : newItemHtml;
@@ -1851,11 +2030,11 @@ export class EntityDetailEditor extends EditorPane {
 						if (newItemEl) {
 							listEl.appendChild(newItemEl);
 							this._refreshPromptUserInputItemsUi(card);
-							const newDisplay = newItemEl.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+							const newDisplay = templatePart(newItemEl, '.prompt-tokenized-display') as HTMLElement | null;
 							if (newDisplay) {
 								this._switchPromptDisplayToEdit(newDisplay, undefined, 0);
 							} else {
-								const newTa = newItemEl.querySelector('.prompt-user-textarea') as HTMLTextAreaElement | null;
+								const newTa = templatePart(newItemEl, '.prompt-user-textarea') as HTMLTextAreaElement | null;
 								newTa?.focus();
 							}
 							if (fieldKey) {
@@ -1876,11 +2055,11 @@ export class EntityDetailEditor extends EditorPane {
 				const itemEl = removePromptUserInputBtn.closest('.prompt-user-input-item') as HTMLElement | null;
 				const fieldKey = removePromptUserInputBtn.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
 				if (card && itemEl) {
-					const listEl = card.querySelector('.prompt-user-inputs-list') as HTMLElement | null;
-					const allItems = listEl ? Array.from(listEl.querySelectorAll('.prompt-user-input-item')) : [];
+					const listEl = templatePart(card, '.prompt-user-inputs-list') as HTMLElement | null;
+					const allItems = listEl ? Array.from(templateParts(listEl, '.prompt-user-input-item')) : [];
 					const itemIdx = allItems.indexOf(itemEl);
 					const totalCount = allItems.length;
-					const ta = itemEl.querySelector('.prompt-user-textarea') as HTMLTextAreaElement | null;
+					const ta = templatePart(itemEl, '.prompt-user-textarea') as HTMLTextAreaElement | null;
 					const rawContent = (ta?.value || '').trim();
 					const previewSnippet = rawContent
 						? (rawContent.length > 120 ? `${rawContent.slice(0, 120)}...` : rawContent)
@@ -1899,7 +2078,7 @@ export class EntityDetailEditor extends EditorPane {
 						return;
 					}
 
-					const existingChips = itemEl.querySelector('.prompt-user-input-chips')?.innerHTML || '';
+					const existingChips = templatePart(itemEl, '.prompt-user-input-chips')?.innerHTML || '';
 					if (existingChips && !card.getAttribute('data-prompt-chips-html')) {
 						card.setAttribute('data-prompt-chips-html', existingChips);
 					}
@@ -1976,13 +2155,13 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const card = insertPromptChip.closest('.prompt-primitive-card') as HTMLElement | null;
 				const inputItem = insertPromptChip.closest('.prompt-user-input-item') as HTMLElement | null;
-				const wrapper = (inputItem?.querySelector('.voice-input-textarea-wrapper') || card?.querySelector('.voice-input-textarea-wrapper')) as HTMLElement | null;
+				const wrapper = (templatePart(inputItem, '.voice-input-textarea-wrapper') || templatePart(card, '.voice-input-textarea-wrapper')) as HTMLElement | null;
 				if (wrapper && wrapper.getAttribute('data-locked') === 'true') {
 					this._pulsePromptLockBtn(wrapper);
 					this._notificationService.info('This prompt box is locked. Click the lock icon in the top-right to unlock before inserting fields.');
 					return;
 				}
-				const textarea = (inputItem?.querySelector('.prompt-instruction-textarea') || card?.querySelector('.prompt-instruction-textarea')) as HTMLTextAreaElement | null;
+				const textarea = (templatePart(inputItem, '.prompt-instruction-textarea') || templatePart(card, '.prompt-instruction-textarea')) as HTMLTextAreaElement | null;
 				const textToInsert = insertPromptChip.getAttribute('data-insert') || '';
 				if (textarea && textToInsert) {
 					const currentVal = textarea.value || '';
@@ -2016,7 +2195,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const bar = morePromptCtxBtn.closest('.prompt-user-input-chips') as HTMLElement | null;
-				const hiddenGroup = bar?.querySelector('.prompt-ctx-hidden-group') as HTMLElement | null;
+				const hiddenGroup = templatePart(bar, '.prompt-ctx-hidden-group') as HTMLElement | null;
 				if (hiddenGroup) {
 					const isHidden = hiddenGroup.style.display === 'none';
 					hiddenGroup.style.display = isHidden ? 'contents' : 'none';
@@ -2045,7 +2224,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = ttsPlayBtn.closest('.tts-primitive-card') as HTMLElement | null;
-				const audioEl = card?.querySelector('audio') as HTMLAudioElement | null;
+				const audioEl = templatePart(card, 'audio') as HTMLAudioElement | null;
 				if (audioEl && audioEl.src) {
 					if (audioEl.paused) {
 						audioEl.play().catch(err => {
@@ -2109,10 +2288,10 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				e.preventDefault();
 				e.stopPropagation();
-				const textarea = card?.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+				const textarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
 				const code = textarea ? textarea.value : '';
 				await this._clipboardService.writeText(code);
-				const iconEl = copyPyCodeBtn.querySelector('.codicon') as HTMLElement | null;
+				const iconEl = templatePart(copyPyCodeBtn, '.codicon') as HTMLElement | null;
 				if (iconEl) {
 					iconEl.className = 'codicon codicon-check';
 				}
@@ -2200,7 +2379,7 @@ export class EntityDetailEditor extends EditorPane {
 				if (card?.getAttribute('data-python-hydrated') === 'true') {
 					return;
 				}
-				const textarea = card?.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+				const textarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
 				if (textarea) {
 					textarea.focus();
 				}
@@ -2216,7 +2395,7 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				e.preventDefault();
 				e.stopPropagation();
-				const textarea = card?.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+				const textarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
 				const textToInsert = insertPyCtxChip.getAttribute('data-insert') || '';
 				const cursorOffset = parseInt(insertPyCtxChip.getAttribute('data-cursor-offset') || '0', 10);
 				if (textarea && textToInsert) {
@@ -2227,8 +2406,8 @@ export class EntityDetailEditor extends EditorPane {
 					textarea.value = before + textToInsert + after;
 					const newCursor = start + textToInsert.length + cursorOffset;
 					textarea.selectionStart = textarea.selectionEnd = newCursor;
-					const pyDisplayEl = card?.querySelector('.python-code-display') as HTMLElement | null;
-					const pyGutterEl = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+					const pyDisplayEl = templatePart(card, '.python-code-display') as HTMLElement | null;
+					const pyGutterEl = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
 					if (pyGutterEl) {
 						pyGutterEl.textContent = buildPythonLineNumbersText(textarea.value);
 					}
@@ -2254,7 +2433,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const bar = morePyCtxBtn.closest('.python-ctx-chips-bar') as HTMLElement | null;
-				const hiddenGroup = bar?.querySelector('.python-ctx-hidden-group') as HTMLElement | null;
+				const hiddenGroup = templatePart(bar, '.python-ctx-hidden-group') as HTMLElement | null;
 				if (hiddenGroup) {
 					const isHidden = hiddenGroup.style.display === 'none';
 					hiddenGroup.style.display = isHidden ? 'contents' : 'none';
@@ -2270,8 +2449,8 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = copyPyResBtn.closest('.python-primitive-card') as HTMLElement | null;
-				const lastRes = (card as any)?._lastPythonResult;
-				const resDisplay = card?.querySelector('.python-result-display') as HTMLElement | null;
+				const lastRes = card ? cardRuntimeState(card).lastPythonResult : undefined;
+				const resDisplay = templatePart(card, '.python-result-display') as HTMLElement | null;
 				const text = lastRes !== undefined
 					? (typeof lastRes === 'object' ? JSON.stringify(lastRes, null, 2) : String(lastRes))
 					: (resDisplay?.textContent || '');
@@ -2293,7 +2472,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = copyPyOutBtn.closest('.python-primitive-card') as HTMLElement | null;
-				const outputDisplay = card?.querySelector('.python-output-display') as HTMLElement | null;
+				const outputDisplay = templatePart(card, '.python-output-display') as HTMLElement | null;
 				const text = outputDisplay?.textContent || '';
 				if (text && !text.startsWith('No execution')) {
 					await this._clipboardService.writeText(text);
@@ -2315,14 +2494,14 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = clearPyOutBtn.getAttribute('data-field-key') || '';
 				const card = clearPyOutBtn.closest('.python-primitive-card') as HTMLElement | null;
 				if (card) {
-					(card as any)._lastPythonResult = undefined;
-					const resultBlock = card.querySelector('.python-result-block') as HTMLElement | null;
-					if (resultBlock) resultBlock.remove();
-					const outputDisplay = card.querySelector('.python-output-display') as HTMLElement | null;
+					cardRuntimeState(card).lastPythonResult = undefined;
+					const resultBlock = templatePart(card, '.python-result-block') as HTMLElement | null;
+					if (resultBlock) { resultBlock.remove(); }
+					const outputDisplay = templatePart(card, '.python-output-display') as HTMLElement | null;
 					if (outputDisplay) {
 						this._setElementHTML(outputDisplay, '<span style="opacity: 0.4; font-style: italic;">No execution logs yet. Click "Run Script" above to execute the automation code.</span>');
 					}
-					const statusText = card.querySelector('.python-status-text') as HTMLElement | null;
+					const statusText = templatePart(card, '.python-status-text') as HTMLElement | null;
 					if (statusText) {
 						statusText.textContent = 'Logs and output cleared';
 						statusText.style.color = 'inherit';
@@ -2339,8 +2518,8 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const specKey = copyOutputItemBtn.getAttribute('data-spec-key') || '';
 				const card = copyOutputItemBtn.closest('.output-primitive-card, .result-primitive-card') as HTMLElement | null;
-				const item = card?.querySelector(`.output-spec-item[data-spec-key="${specKey}"]`);
-				const rawTa = item?.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+				const item = templatePart(card, `.output-spec-item[data-spec-key="${specKey}"]`);
+				const rawTa = templatePart(item, '.output-item-raw-content') as HTMLTextAreaElement | null;
 				const text = rawTa?.value || '';
 				if (text) {
 					await this._clipboardService.writeText(text);
@@ -2361,8 +2540,8 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const specKey = exportOutputItemCsvBtn.getAttribute('data-spec-key') || '';
 				const card = exportOutputItemCsvBtn.closest('.output-primitive-card, .result-primitive-card') as HTMLElement | null;
-				const item = card?.querySelector(`.output-spec-item[data-spec-key="${specKey}"]`);
-				const rawTa = item?.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+				const item = templatePart(card, `.output-spec-item[data-spec-key="${specKey}"]`);
+				const rawTa = templatePart(item, '.output-item-raw-content') as HTMLTextAreaElement | null;
 				const text = rawTa?.value || '';
 				this._exportResultToCsv(text, specKey);
 				return;
@@ -2407,10 +2586,10 @@ export class EntityDetailEditor extends EditorPane {
 				const card = copyAllOutputBtn.closest('.output-primitive-card, .result-primitive-card') as HTMLElement | null;
 				if (card) {
 					const allOutputs: Record<string, string> = {};
-					const items = card.querySelectorAll('.output-spec-item');
+					const items = templateParts(card, '.output-spec-item');
 					items.forEach(it => {
 						const sKey = it.getAttribute('data-spec-key') || '';
-						const ta = it.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+						const ta = templatePart(it, '.output-item-raw-content') as HTMLTextAreaElement | null;
 						if (sKey) { allOutputs[sKey] = ta?.value || ''; }
 					});
 					const jsonStr = JSON.stringify(allOutputs, null, 2);
@@ -2430,17 +2609,17 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const fieldKey = copyCustomFieldBtn.getAttribute('data-field-key') || '';
 				let textToCopy = '';
-				if (this._lastParsedData?.customMetadata && fieldKey in this._lastParsedData.customMetadata) {
+				if (this._lastParsedData?.customMetadata && hasProperty(this._lastParsedData.customMetadata, fieldKey)) {
 					const rawVal = this._lastParsedData.customMetadata[fieldKey];
 					textToCopy = typeof rawVal === 'object' ? JSON.stringify(rawVal, null, 2) : String(rawVal ?? '');
 				}
 				if (!textToCopy) {
 					const card = copyCustomFieldBtn.closest('.custom-property-card') as HTMLElement | null;
-					const pre = card?.querySelector('.desc-content-box pre, .custom-field-view pre');
+					const pre = templatePart(card, '.desc-content-box pre, .custom-field-view pre');
 					if (pre) {
 						textToCopy = pre.textContent || '';
 					} else {
-						const box = card?.querySelector('.desc-content-box, .custom-field-view');
+						const box = templatePart(card, '.desc-content-box, .custom-field-view');
 						textToCopy = box?.textContent?.trim() || '';
 					}
 				}
@@ -2466,7 +2645,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = copyResultBtn.closest('.result-primitive-card') as HTMLElement | null;
-				const rawTa = card?.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
+				const rawTa = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
 				const text = rawTa?.value || '';
 				if (text) {
 					await this._clipboardService.writeText(text);
@@ -2487,7 +2666,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const fieldKey = exportCsvBtn.getAttribute('data-field-key') || '';
 				const card = exportCsvBtn.closest('.result-primitive-card') as HTMLElement | null;
-				const rawTa = card?.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
+				const rawTa = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
 				const text = rawTa?.value || '';
 				this._exportResultToCsv(text, fieldKey);
 				return;
@@ -2501,8 +2680,8 @@ export class EntityDetailEditor extends EditorPane {
 				const card = syncPromptBtn.closest('.result-primitive-card') as HTMLElement | null;
 				if (card) {
 					const fieldKey = syncPromptBtn.getAttribute('data-field-key') || '';
-					const promptCard = this._container?.querySelector('.prompt-primitive-card');
-					const promptOutputEl = promptCard?.querySelector('.prompt-output-display');
+					const promptCard = templatePart(this._container, '.prompt-primitive-card');
+					const promptOutputEl = templatePart(promptCard, '.prompt-output-display');
 					const text = promptOutputEl?.textContent || '';
 					if (!text || text.includes('No execution output yet.')) {
 						this._notificationService.warn('No AI Prompt output available to sync. Run an AI Prompt first.');
@@ -2533,7 +2712,7 @@ export class EntityDetailEditor extends EditorPane {
 					}
 				}
 				const optionsRaw = aiBtn.getAttribute('data-ai-options') || '';
-				let options: any[] = [];
+				let options: unknown[] = [];
 				if (optionsRaw) {
 					try { options = JSON.parse(optionsRaw); } catch { }
 				}
@@ -2606,7 +2785,7 @@ export class EntityDetailEditor extends EditorPane {
 					const fieldKey = selectView.getAttribute('data-field-key');
 					if (fieldKey) {
 						const optionsRaw = selectView.getAttribute('data-select-options') || '[]';
-						let options: any[] = [];
+						let options: ISelectOption[] = [];
 						try { options = JSON.parse(optionsRaw); } catch { }
 						this._enterSelectInlineEdit(selectView, fieldKey, options);
 						return;
@@ -2668,8 +2847,8 @@ export class EntityDetailEditor extends EditorPane {
 
 			// 3. Add Work Log toggle button
 			if (target.id === 'add-log-btn' || target.closest('#add-log-btn')) {
-				const addLogBox = this._container?.querySelector('#add-log-box') as HTMLElement | null;
-				const textarea = this._container?.querySelector('#log-textarea') as HTMLTextAreaElement | null;
+				const addLogBox = templatePart(this._container, '#add-log-box') as HTMLElement | null;
+				const textarea = templatePart(this._container, '#log-textarea') as HTMLTextAreaElement | null;
 				if (addLogBox) {
 					addLogBox.style.display = 'block';
 					textarea?.focus();
@@ -2679,18 +2858,18 @@ export class EntityDetailEditor extends EditorPane {
 
 			// 4. Cancel Add Log
 			if (target.id === 'cancel-log-btn' || target.closest('#cancel-log-btn')) {
-				const addLogBox = this._container?.querySelector('#add-log-box') as HTMLElement | null;
-				const textarea = this._container?.querySelector('#log-textarea') as HTMLTextAreaElement | null;
+				const addLogBox = templatePart(this._container, '#add-log-box') as HTMLElement | null;
+				const textarea = templatePart(this._container, '#log-textarea') as HTMLTextAreaElement | null;
 				if (addLogBox) {
 					addLogBox.style.display = 'none';
-					if (textarea) textarea.value = '';
+					if (textarea) { textarea.value = ''; }
 				}
 				return;
 			}
 
 			// 5. Submit Work Log
 			if (target.id === 'submit-log-btn' || target.closest('#submit-log-btn')) {
-				const textarea = this._container?.querySelector('#log-textarea') as HTMLTextAreaElement | null;
+				const textarea = templatePart(this._container, '#log-textarea') as HTMLTextAreaElement | null;
 				const val = textarea?.value?.trim();
 				if (val) {
 					await this._handleMessage({ type: 'addWorkLog', log: val });
@@ -2705,8 +2884,8 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const itemEl = worklogToggleBtn.closest('.timeline-item') as HTMLElement | null;
 				if (itemEl) {
-					const previewEl = itemEl.querySelector('.worklog-preview-content') as HTMLElement | null;
-					const fullEl = itemEl.querySelector('.worklog-full-content') as HTMLElement | null;
+					const previewEl = templatePart(itemEl, '.worklog-preview-content') as HTMLElement | null;
+					const fullEl = templatePart(itemEl, '.worklog-full-content') as HTMLElement | null;
 					const isExpanded = worklogToggleBtn.getAttribute('data-expanded') === 'true';
 					const charCount = worklogToggleBtn.getAttribute('data-char-count') || '';
 					if (isExpanded) {
@@ -2753,7 +2932,7 @@ export class EntityDetailEditor extends EditorPane {
 			// 8. Trigger File Upload Dropzone (if present)
 			if (target.id === 'attachment-dropzone' || target.closest('#attachment-dropzone')) {
 				if (!target.classList.contains('delete-attachment') && !target.closest('.delete-attachment')) {
-					const fileInput = this._container?.querySelector('#file-input') as HTMLInputElement | null;
+					const fileInput = templatePart(this._container, '#file-input') as HTMLInputElement | null;
 					fileInput?.click();
 				}
 				return;
@@ -2850,8 +3029,8 @@ export class EntityDetailEditor extends EditorPane {
 				if (card && fieldKey) {
 					const providerId = promptProviderSelect.value;
 					card.setAttribute('data-target-provider', providerId);
-					const modelSelect = card.querySelector('.prompt-model-select') as HTMLSelectElement | null;
-					const customModelInput = card.querySelector('.prompt-custom-model-input') as HTMLInputElement | null;
+					const modelSelect = templatePart(card, '.prompt-model-select') as HTMLSelectElement | null;
+					const customModelInput = templatePart(card, '.prompt-custom-model-input') as HTMLInputElement | null;
 					const providerModelsMap = this._getPromptProviderModelsMap();
 					const models = providerModelsMap[providerId] || providerModelsMap['openai'];
 					if (modelSelect) {
@@ -2875,7 +3054,7 @@ export class EntityDetailEditor extends EditorPane {
 						customModelInput.style.display = modelSelect?.value === 'custom' ? 'block' : 'none';
 					}
 					const effectiveModel = (modelSelect?.value === 'custom' ? customModelInput?.value.trim() : modelSelect?.value) || 'gpt-4o';
-					const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
+					const targetBadge = templatePart(card, '.prompt-target-badge') as HTMLElement | null;
 					if (targetBadge) {
 						targetBadge.textContent = `Model: ${effectiveModel}`;
 					}
@@ -2890,7 +3069,7 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = promptModelSelect.getAttribute('data-field-key') || '';
 				const card = promptModelSelect.closest('.prompt-primitive-card') as HTMLElement | null;
 				if (card && fieldKey) {
-					const customModelInput = card.querySelector('.prompt-custom-model-input') as HTMLInputElement | null;
+					const customModelInput = templatePart(card, '.prompt-custom-model-input') as HTMLInputElement | null;
 					if (customModelInput) {
 						if (promptModelSelect.value === 'custom') {
 							customModelInput.style.display = 'block';
@@ -2899,8 +3078,8 @@ export class EntityDetailEditor extends EditorPane {
 							customModelInput.style.display = 'none';
 						}
 					}
-					const effectiveModel = (promptModelSelect.value === 'custom' ? customModelInput?.value.trim() : promptModelSelect.value) || resolveDefaultModelId(card.getAttribute('data-target-provider') || (card.querySelector('.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || 'openai', 'gemini-2.5-flash');
-					const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
+					const effectiveModel = (promptModelSelect.value === 'custom' ? customModelInput?.value.trim() : promptModelSelect.value) || resolveDefaultModelId(card.getAttribute('data-target-provider') || (templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || 'openai', 'gemini-2.5-flash');
+					const targetBadge = templatePart(card, '.prompt-target-badge') as HTMLElement | null;
 					if (targetBadge) {
 						targetBadge.textContent = `Model: ${effectiveModel}`;
 					}
@@ -2916,7 +3095,7 @@ export class EntityDetailEditor extends EditorPane {
 				const card = promptAgentSelect.closest('.prompt-primitive-card') as HTMLElement | null;
 				if (card && fieldKey) {
 					const agName = promptAgentSelect.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || '';
-					const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
+					const targetBadge = templatePart(card, '.prompt-target-badge') as HTMLElement | null;
 					if (targetBadge) {
 						targetBadge.textContent = `Agent: ${promptAgentSelect.value ? (agName || promptAgentSelect.value) : 'Unassigned'}`;
 					}
@@ -2955,8 +3134,8 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = promptCustomModelInput.getAttribute('data-field-key') || '';
 				const card = promptCustomModelInput.closest('.prompt-primitive-card') as HTMLElement | null;
 				if (card && fieldKey) {
-					const effectiveModel = promptCustomModelInput.value.trim() || resolveDefaultModelId(card.getAttribute('data-target-provider') || (card.querySelector('.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || 'openai', 'gpt-4o');
-					const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
+					const effectiveModel = promptCustomModelInput.value.trim() || resolveDefaultModelId(card.getAttribute('data-target-provider') || (templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || 'openai', 'gpt-4o');
+					const targetBadge = templatePart(card, '.prompt-target-badge') as HTMLElement | null;
 					if (targetBadge) {
 						targetBadge.textContent = `Model: ${effectiveModel}`;
 					}
@@ -3018,8 +3197,8 @@ export class EntityDetailEditor extends EditorPane {
 				if (card?.getAttribute('data-python-hydrated') === 'true') {
 					return;
 				}
-				const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
-				const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+				const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
+				const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
 				if (pyGutter) {
 					pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
 					pyGutter.scrollTop = 0;
@@ -3050,8 +3229,8 @@ export class EntityDetailEditor extends EditorPane {
 				if (card?.getAttribute('data-python-hydrated') === 'true') {
 					return;
 				}
-				const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
-				const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+				const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
+				const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
 				if (pyTextarea.scrollTop !== 0) {
 					pyTextarea.scrollTop = 0;
 				}
@@ -3070,18 +3249,18 @@ export class EntityDetailEditor extends EditorPane {
 
 		this._container.addEventListener('dragover', (e: DragEvent) => {
 			e.preventDefault();
-			const dropzone = this._container?.querySelector('#attachment-dropzone') as HTMLElement | null;
+			const dropzone = templatePart(this._container, '#attachment-dropzone') as HTMLElement | null;
 			dropzone?.classList.add('dragover');
 		});
 
 		this._container.addEventListener('dragleave', (e: DragEvent) => {
-			const dropzone = this._container?.querySelector('#attachment-dropzone') as HTMLElement | null;
+			const dropzone = templatePart(this._container, '#attachment-dropzone') as HTMLElement | null;
 			dropzone?.classList.remove('dragover');
 		});
 
 		this._container.addEventListener('drop', async (e: DragEvent) => {
 			e.preventDefault();
-			const dropzone = this._container?.querySelector('#attachment-dropzone') as HTMLElement | null;
+			const dropzone = templatePart(this._container, '#attachment-dropzone') as HTMLElement | null;
 			dropzone?.classList.remove('dragover');
 			if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
 				const file = e.dataTransfer.files[0];
@@ -3105,8 +3284,8 @@ export class EntityDetailEditor extends EditorPane {
 					e.preventDefault();
 					e.stopPropagation();
 					togglePythonComment(pyTextarea);
-					const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
-					const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+					const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
+					const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
 					if (pyGutter) {
 						pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
 						pyGutter.scrollTop = pyTextarea.scrollTop;
@@ -3134,8 +3313,8 @@ export class EntityDetailEditor extends EditorPane {
 					const end = pyTextarea.selectionEnd;
 					pyTextarea.value = pyTextarea.value.substring(0, start) + '    ' + pyTextarea.value.substring(end);
 					pyTextarea.selectionStart = pyTextarea.selectionEnd = start + 4;
-					const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
-					const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+					const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
+					const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
 					if (pyGutter) {
 						pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
 					}
@@ -3192,8 +3371,8 @@ export class EntityDetailEditor extends EditorPane {
 						const insertStr = '\n' + indent;
 						pyTextarea.value = before + insertStr + pyTextarea.value.substring(end);
 						pyTextarea.selectionStart = pyTextarea.selectionEnd = start + insertStr.length;
-						const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
-						const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
+						const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
+						const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
 						if (pyGutter) {
 							pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
 							pyGutter.scrollTop = pyTextarea.scrollTop;
@@ -3214,7 +3393,7 @@ export class EntityDetailEditor extends EditorPane {
 					e.preventDefault();
 					e.stopPropagation();
 					const card = urlInput.closest('.browser-primitive-card') as HTMLElement | null;
-					const fetchBtn = card?.querySelector('.browser-silent-fetch-btn') as HTMLElement | null;
+					const fetchBtn = templatePart(card, '.browser-silent-fetch-btn') as HTMLElement | null;
 					const fieldKey = fetchBtn?.getAttribute('data-field-key') || '';
 					if (card && fieldKey) {
 						await this._executeBrowserFetch(card, fieldKey, false);
@@ -3230,7 +3409,7 @@ export class EntityDetailEditor extends EditorPane {
 				if (card?.getAttribute('data-python-hydrated') === 'true') {
 					return;
 				}
-				const wrapper = card?.querySelector('.python-code-wrapper') as HTMLElement | null;
+				const wrapper = templatePart(card, '.python-code-wrapper') as HTMLElement | null;
 				if (wrapper) {
 					wrapper.style.borderColor = 'rgba(56, 189, 248, 0.55)';
 				}
@@ -3244,9 +3423,9 @@ export class EntityDetailEditor extends EditorPane {
 				if (card?.getAttribute('data-python-hydrated') === 'true') {
 					return;
 				}
-				const pyDisplay = card?.querySelector('.python-code-display') as HTMLElement | null;
-				const pyGutter = card?.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
-				const wrapper = card?.querySelector('.python-code-wrapper') as HTMLElement | null;
+				const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
+				const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
+				const wrapper = templatePart(card, '.python-code-wrapper') as HTMLElement | null;
 				if (wrapper) {
 					wrapper.style.borderColor = 'rgba(255, 255, 255, 0.15)';
 				}
@@ -3269,9 +3448,9 @@ export class EntityDetailEditor extends EditorPane {
 		const candidates = ['workspace.md', 'job.md', 'project.md', 'task.md', 'ticket.md', 'agent.md', 'workflow.md', 'case.md', 'issue.md', 'analysis.md'];
 		for (const name of candidates) {
 			const p1 = URI.joinPath(baseUri, '.agents', name);
-			if (await this._fileService.exists(p1)) return p1;
+			if (await this._fileService.exists(p1)) { return p1; }
 			const p2 = URI.joinPath(baseUri, name);
-			if (await this._fileService.exists(p2)) return p2;
+			if (await this._fileService.exists(p2)) { return p2; }
 		}
 		return URI.joinPath(baseUri, '.agents', 'ticket.md');
 	}
@@ -3294,9 +3473,9 @@ export class EntityDetailEditor extends EditorPane {
 		const names = ['worklog.md', 'work_log.md'];
 		for (const name of names) {
 			const p1 = URI.joinPath(baseUri, '.agents', name);
-			if (await this._fileService.exists(p1)) return p1;
+			if (await this._fileService.exists(p1)) { return p1; }
 			const p2 = URI.joinPath(baseUri, name);
-			if (await this._fileService.exists(p2)) return p2;
+			if (await this._fileService.exists(p2)) { return p2; }
 		}
 		return URI.joinPath(baseUri, '.agents', 'worklog.md');
 	}
@@ -3454,17 +3633,17 @@ export class EntityDetailEditor extends EditorPane {
 				ticketPrompt = tickpMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
 				continue;
 			}
-			const gitRepoMatch = line.match(/^\s*-\s*(?:\*\*)?(?:Git\s+Repository(?:\s+URL)?|Git\s+Remote\s+URL|Git\s+Repo)(?:\*\*)?\s*[:：]\s*(.*)$/i);
+			const gitRepoMatch = line.match(/^\s*-\s*(?:\*\*)?(?:Git\s+Repository(?:\s+URL)?|Git\s+Remote\s+URL|Git\s+Repo)(?:\*\*)?\s*[:\uFF1A]\s*(.*)$/i);
 			if (gitRepoMatch) {
 				instGitRemote = gitRepoMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
 				continue;
 			}
-			const gitBranchMatch = line.match(/^\s*-\s*(?:\*\*)?(?:Git\s+Branch)(?:\*\*)?\s*[:：]\s*(.*)$/i);
+			const gitBranchMatch = line.match(/^\s*-\s*(?:\*\*)?(?:Git\s+Branch)(?:\*\*)?\s*[:\uFF1A]\s*(.*)$/i);
 			if (gitBranchMatch) {
 				instGitBranch = gitBranchMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
 				continue;
 			}
-			const localPathMatch = line.match(/^\s*-\s*(?:\*\*)?(?:Local\s+Path|Target\s+Project(?:\s+Path)?)(?:\*\*)?\s*[:：]\s*(.*)$/i);
+			const localPathMatch = line.match(/^\s*-\s*(?:\*\*)?(?:Local\s+Path|Target\s+Project(?:\s+Path)?)(?:\*\*)?\s*[:\uFF1A]\s*(.*)$/i);
 			if (localPathMatch) {
 				instLocalPath = localPathMatch[1].trim().replace(/^[`'"]+|[`'"]+$/g, '');
 				continue;
@@ -3531,12 +3710,12 @@ export class EntityDetailEditor extends EditorPane {
 		};
 	}
 
-	private _escapeHtmlAttr(str: any): string {
-		if (str === undefined || str === null) return '';
+	private _escapeHtmlAttr(str: unknown): string {
+		if (str === undefined || str === null) { return ''; }
 		return String(str).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 	}
 
-	private _escapeHtml(str: any): string {
+	private _escapeHtml(str: unknown): string {
 		return this._escapeHtmlAttr(str);
 	}
 
@@ -3659,20 +3838,20 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		try {
 			// 1. Sync parameter inputs
-			const paramInputs = Array.from(this._container.querySelectorAll('.ticket-parameter-input')) as Array<HTMLInputElement | HTMLSelectElement>;
+			const paramInputs = Array.from(templateParts(this._container, '.ticket-parameter-input')) as Array<HTMLInputElement | HTMLSelectElement>;
 			if (paramInputs.length > 0) {
 				const byField = new Map<string, Record<string, string>>();
 				for (const inp of paramInputs) {
 					const fk = inp.getAttribute('data-field-key') || '';
 					const pn = inp.getAttribute('data-param-name') || '';
-					if (!fk || !pn) continue;
+					if (!fk || !pn) { continue; }
 					if (!byField.has(fk)) {
 						let existing: Record<string, string> = {};
 						const rawVal = this._lastParsedData.customMetadata?.[fk];
 						if (rawVal) {
 							try {
 								const p = JSON.parse(rawVal);
-								if (p && typeof p === 'object' && !Array.isArray(p)) existing = { ...p };
+								if (p && typeof p === 'object' && !Array.isArray(p)) { existing = { ...p }; }
 							} catch { }
 						}
 						byField.set(fk, existing);
@@ -3689,13 +3868,13 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 2. Sync browser cards
-			const browserCards = Array.from(this._container.querySelectorAll('.browser-primitive-card')) as HTMLElement[];
+			const browserCards = Array.from(templateParts(this._container, '.browser-primitive-card')) as HTMLElement[];
 			for (const card of browserCards) {
-				const fetchBtn = card.querySelector('.browser-silent-fetch-btn') as HTMLElement | null;
+				const fetchBtn = templatePart(card, '.browser-silent-fetch-btn') as HTMLElement | null;
 				const fk = fetchBtn?.getAttribute('data-field-key') || card.getAttribute('data-field-key') || '';
-				const urlInput = card.querySelector('.browser-url-input') as HTMLInputElement | null;
+				const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
 				if (fk && urlInput) {
-					let bObj: any = {};
+					let bObj: Record<string, unknown> = {};
 					const rawVal = this._lastParsedData.customMetadata?.[fk];
 					if (rawVal) {
 						try { bObj = JSON.parse(rawVal); } catch { }
@@ -3706,7 +3885,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 3. Sync prompt cards
-			const promptCards = Array.from(this._container.querySelectorAll('.prompt-primitive-card')) as HTMLElement[];
+			const promptCards = Array.from(templateParts(this._container, '.prompt-primitive-card')) as HTMLElement[];
 			for (const card of promptCards) {
 				const fk = card.getAttribute('data-field-key') || '';
 				if (fk) {
@@ -3715,7 +3894,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 4. Sync python cards
-			const pythonCards = Array.from(this._container.querySelectorAll('.python-primitive-card')) as HTMLElement[];
+			const pythonCards = Array.from(templateParts(this._container, '.python-primitive-card')) as HTMLElement[];
 			for (const card of pythonCards) {
 				const fk = card.getAttribute('data-field-key') || '';
 				if (fk) {
@@ -3724,7 +3903,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 5. Sync TTS cards
-			const ttsCards = Array.from(this._container.querySelectorAll('.tts-primitive-card')) as HTMLElement[];
+			const ttsCards = Array.from(templateParts(this._container, '.tts-primitive-card')) as HTMLElement[];
 			for (const card of ttsCards) {
 				const fk = card.getAttribute('data-field-key') || '';
 				if (fk) {
@@ -3733,7 +3912,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 6. Sync media player cards
-			const mediaCards = Array.from(this._container.querySelectorAll('.media-player-primitive-card')) as HTMLElement[];
+			const mediaCards = Array.from(templateParts(this._container, '.media-player-primitive-card')) as HTMLElement[];
 			for (const card of mediaCards) {
 				const fk = card.getAttribute('data-field-key') || '';
 				if (fk) {
@@ -3742,7 +3921,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 7. Sync SSH cards
-			const sshCards = Array.from(this._container.querySelectorAll('.ssh-primitive-card')) as HTMLElement[];
+			const sshCards = Array.from(templateParts(this._container, '.ssh-primitive-card')) as HTMLElement[];
 			for (const card of sshCards) {
 				const fk = card.getAttribute('data-field-key') || '';
 				const rawSshJson = card.getAttribute('data-ssh-json') || '';
@@ -3755,9 +3934,9 @@ export class EntityDetailEditor extends EditorPane {
 		}
 	}
 
-	private static _buildTicketJsonObject(data: IParsedTicketData): Record<string, any> {
+	private static _buildTicketJsonObject(data: IParsedTicketData): Record<string, unknown> {
 		const internalKeys = new Set(['ticket statuses', 'status mapping', 'removed status']);
-		const fields: Record<string, any> = {};
+		const fields: Record<string, unknown> = {};
 		for (const [k, rawVal] of Object.entries(data.customMetadata || {})) {
 			if (internalKeys.has(k.toLowerCase())) {
 				continue;
@@ -3801,7 +3980,7 @@ export class EntityDetailEditor extends EditorPane {
 		};
 	}
 
-	private static _parseClipboardJsonString(rawText: string): Record<string, any> | null {
+	private static _parseClipboardJsonString(rawText: string): Record<string, unknown> | null {
 		let cleaned = (rawText || '').trim();
 		if (!cleaned) {
 			return null;
@@ -3813,19 +3992,19 @@ export class EntityDetailEditor extends EditorPane {
 		try {
 			const parsed = JSON.parse(cleaned);
 			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-				return parsed as Record<string, any>;
+				return parsed as Record<string, unknown>;
 			}
 		} catch { }
 		return null;
 	}
 
 	private _findCardElementForStep(fieldId?: string, fieldLabel?: string, fieldType?: string): HTMLElement | null {
-		if (!this._container) return null;
+		if (!this._container) { return null; }
 		const clean = (s?: string) => (s || '').toLowerCase().trim().replace(/[\s_\-]+/g, '');
 		const cleanId = clean(fieldId);
 		const cleanLabel = clean(fieldLabel);
 
-		const cards = Array.from(this._container.querySelectorAll<HTMLElement>('.section-card'));
+		const cards = Array.from(templateParts<HTMLElement>(this._container, '.section-card'));
 
 		// 1. Exact or normalized attribute matching
 		for (const card of cards) {
@@ -3833,14 +4012,14 @@ export class EntityDetailEditor extends EditorPane {
 			const cId = clean(card.getAttribute('data-field-id') || '');
 			const cLabel = clean(card.getAttribute('data-field-label') || '');
 
-			if (cleanId && (cId === cleanId || cKey === cleanId || cLabel === cleanId)) return card;
-			if (cleanLabel && (cLabel === cleanLabel || cKey === cleanLabel || cId === cleanLabel)) return card;
+			if (cleanId && (cId === cleanId || cKey === cleanId || cLabel === cleanId)) { return card; }
+			if (cleanLabel && (cLabel === cleanLabel || cKey === cleanLabel || cId === cleanLabel)) { return card; }
 		}
 
 		// 2. Title text matching
 		if (cleanLabel) {
 			for (const card of cards) {
-				const titleEl = card.querySelector('.section-title');
+				const titleEl = templatePart(card, '.section-title');
 				if (titleEl && clean(titleEl.textContent || '').includes(cleanLabel)) {
 					return card;
 				}
@@ -3848,7 +4027,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		if (cleanId) {
 			for (const card of cards) {
-				const titleEl = card.querySelector('.section-title');
+				const titleEl = templatePart(card, '.section-title');
 				if (titleEl && clean(titleEl.textContent || '').includes(cleanId)) {
 					return card;
 				}
@@ -3859,17 +4038,17 @@ export class EntityDetailEditor extends EditorPane {
 		if (fieldType) {
 			const cType = clean(fieldType);
 			if (cType === 'parameters') {
-				const paramCard = this._container.querySelector<HTMLElement>('.ticket-parameters-card');
-				if (paramCard) return paramCard;
+				const paramCard = templatePart<HTMLElement>(this._container, '.ticket-parameters-card');
+				if (paramCard) { return paramCard; }
 			} else if (cType === 'python') {
-				const pyCard = this._container.querySelector<HTMLElement>('.python-primitive-card');
-				if (pyCard) return pyCard;
+				const pyCard = templatePart<HTMLElement>(this._container, '.python-primitive-card');
+				if (pyCard) { return pyCard; }
 			} else if (cType === 'output') {
-				const outCard = this._container.querySelector<HTMLElement>('.output-primitive-card');
-				if (outCard) return outCard;
+				const outCard = templatePart<HTMLElement>(this._container, '.output-primitive-card');
+				if (outCard) { return outCard; }
 			} else if (cType === 'browser') {
-				const brCard = this._container.querySelector<HTMLElement>('.browser-primitive-card');
-				if (brCard) return brCard;
+				const brCard = templatePart<HTMLElement>(this._container, '.browser-primitive-card');
+				if (brCard) { return brCard; }
 			}
 		}
 
@@ -3877,10 +4056,10 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private _updateCardStatusBadge(cardEl: HTMLElement, status: 'running' | 'success' | 'failed', text: string, tooltip?: string): void {
-		const titleEl = cardEl.querySelector('.section-title');
-		if (!titleEl) return;
+		const titleEl = templatePart(cardEl, '.section-title');
+		if (!titleEl) { return; }
 
-		let badgeContainer = titleEl.querySelector<HTMLElement>('.ticket-step-badge-container');
+		let badgeContainer = templatePart<HTMLElement>(titleEl, '.ticket-step-badge-container');
 		if (!badgeContainer) {
 			badgeContainer = document.createElement('div');
 			badgeContainer.className = 'ticket-step-badge-container';
@@ -3918,13 +4097,13 @@ export class EntityDetailEditor extends EditorPane {
 
 		// 1. Python Card Feedback
 		if (fieldType === 'python' || cardEl.classList.contains('python-primitive-card')) {
-			const statusTextEl = cardEl.querySelector<HTMLElement>('.python-status-text');
+			const statusTextEl = templatePart<HTMLElement>(cardEl, '.python-status-text');
 			if (statusTextEl) {
 				statusTextEl.textContent = stepRes.status === 'success' ? `Done (${stepRes.durationMs}ms)` : 'Failed';
 				statusTextEl.style.color = stepRes.status === 'success' ? '#4ade80' : '#f87171';
 			}
 
-			const outputDisplayEl = cardEl.querySelector<HTMLElement>('.python-output-display');
+			const outputDisplayEl = templatePart<HTMLElement>(cardEl, '.python-output-display');
 			const logs = stepRes.details?.commandLogs || stepRes.details?.logs || (typeof stepRes.output === 'string' ? stepRes.output : '');
 			if (outputDisplayEl && logs) {
 				outputDisplayEl.textContent = logs;
@@ -3932,12 +4111,12 @@ export class EntityDetailEditor extends EditorPane {
 
 			const resultVal = stepRes.details?.result !== undefined ? stepRes.details.result : stepRes.output;
 			if (resultVal !== undefined) {
-				(cardEl as any)._lastPythonResult = resultVal;
-				let resultPre = cardEl.querySelector<HTMLElement>('.python-result-display');
+				cardRuntimeState(cardEl).lastPythonResult = resultVal;
+				const resultPre = templatePart<HTMLElement>(cardEl, '.python-result-display');
 				if (resultPre) {
 					resultPre.textContent = typeof resultVal === 'object' ? JSON.stringify(resultVal, null, 2) : String(resultVal);
 				} else {
-					const outputSection = cardEl.querySelector<HTMLElement>('.python-output-section');
+					const outputSection = templatePart<HTMLElement>(cardEl, '.python-output-section');
 					if (outputSection) {
 						const resultBlock = document.createElement('div');
 						resultBlock.className = 'python-result-block';
@@ -3969,15 +4148,19 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		// 2. HTTP Request / HTTP Response Card Feedback
-		else if (fieldType === 'http_request' || cardEl.querySelector('.desc-content-box pre') || cardEl.classList.contains('custom-property-card')) {
-			const pre = cardEl.querySelector<HTMLElement>('.desc-content-box pre') || cardEl.querySelector<HTMLElement>('.custom-field-view pre');
+		else if (fieldType === 'http_request' || templatePart(cardEl, '.desc-content-box pre') || cardEl.classList.contains('custom-property-card')) {
+			const pre = templatePart<HTMLElement>(cardEl, '.desc-content-box pre') || templatePart<HTMLElement>(cardEl, '.custom-field-view pre');
 			if (pre && stepRes.output) {
-				const displayData = stepRes.output?.data !== undefined ? stepRes.output.data : (stepRes.output?.body !== undefined ? stepRes.output.body : stepRes.output);
+				const out = stepRes.output;
+				const outRec = (out && typeof out === 'object') ? out as { data?: unknown; body?: unknown } : undefined;
+				const displayData = outRec?.data !== undefined ? outRec.data : (outRec?.body !== undefined ? outRec.body : out);
 				pre.textContent = typeof displayData === 'object' ? JSON.stringify(displayData, null, 2) : String(displayData);
 			} else {
-				const contentBox = cardEl.querySelector<HTMLElement>('.desc-content-box') || cardEl.querySelector<HTMLElement>('.custom-field-view');
+				const contentBox = templatePart<HTMLElement>(cardEl, '.desc-content-box') || templatePart<HTMLElement>(cardEl, '.custom-field-view');
 				if (contentBox && stepRes.output && !cardEl.classList.contains('ticket-parameters-card')) {
-					const displayData = stepRes.output?.data !== undefined ? stepRes.output.data : stepRes.output;
+					const out = stepRes.output;
+					const outRec = (out && typeof out === 'object') ? out as { data?: unknown } : undefined;
+					const displayData = outRec?.data !== undefined ? outRec.data : out;
 					const formatted = typeof displayData === 'object' ? JSON.stringify(displayData, null, 2) : String(displayData);
 					contentBox.innerHTML = `<pre style="margin: 0; padding: 2px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; background: transparent; border: none; font-weight: 400;">${this._escapeHtml(formatted)}</pre>`;
 				}
@@ -3986,7 +4169,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		// 3. Output Card Feedback
 		if (fieldType === 'output' || cardEl.classList.contains('output-primitive-card')) {
-			const outPre = cardEl.querySelector<HTMLElement>('pre');
+			const outPre = templatePart<HTMLElement>(cardEl, 'pre');
 			if (outPre && stepRes.output !== undefined) {
 				outPre.textContent = typeof stepRes.output === 'object' ? JSON.stringify(stepRes.output, null, 2) : String(stepRes.output);
 			}
@@ -4033,10 +4216,10 @@ export class EntityDetailEditor extends EditorPane {
 
 		// Clear previous execution state from all component cards
 		if (this._container) {
-			this._container.querySelectorAll('.section-card').forEach(card => {
+			templateParts(this._container, '.section-card').forEach(card => {
 				card.classList.remove('ticket-step-running', 'ticket-step-success', 'ticket-step-failed');
-				const badgeContainer = card.querySelector('.ticket-step-badge-container');
-				if (badgeContainer) badgeContainer.remove();
+				const badgeContainer = templatePart(card, '.ticket-step-badge-container');
+				if (badgeContainer) { badgeContainer.remove(); }
 			});
 		}
 
@@ -4065,14 +4248,14 @@ export class EntityDetailEditor extends EditorPane {
 					path: (this._ticketFileUri || this._entityUri)?.toString()
 				},
 				onStepStart: (info) => {
-					const liveBtn = (this._container?.querySelector('#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+					const liveBtn = (templatePart(this._container, '#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
 					if (liveBtn) {
-						const labelEl = liveBtn.querySelector('.run-ticket-btn-label');
-						if (labelEl) labelEl.textContent = `Running (${info.stepIndex}/${info.totalSteps})...`;
+						const labelEl = templatePart(liveBtn, '.run-ticket-btn-label');
+						if (labelEl) { labelEl.textContent = `Running (${info.stepIndex}/${info.totalSteps})...`; }
 					}
 					const cardEl = this._findCardElementForStep(info.fieldId, info.fieldLabel, info.fieldType);
 					if (cardEl) {
-						this._container?.querySelectorAll('.section-card.ticket-step-running').forEach(el => el.classList.remove('ticket-step-running'));
+						templateParts(this._container, '.section-card.ticket-step-running')?.forEach(el => el.classList.remove('ticket-step-running'));
 						cardEl.classList.add('ticket-step-running');
 						cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 						this._updateCardStatusBadge(cardEl, 'running', `Running #${info.stepIndex}...`);
@@ -4104,7 +4287,7 @@ export class EntityDetailEditor extends EditorPane {
 			// Reload ticket data to synchronize in-memory and disk representation
 			await this._resolvePathsAndLoadData();
 
-			const liveBtn = (this._container?.querySelector('#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+			const liveBtn = (templatePart(this._container, '#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
 			if (result.success && failedStepsCount === 0) {
 				this._notificationService.info(`Ticket '${ticketId}' executed successfully (${result.stepResults?.length || 0} step(s)).`);
 				if (liveBtn) {
@@ -4122,10 +4305,10 @@ export class EntityDetailEditor extends EditorPane {
 					`;
 				}
 			}
-		} catch (err: any) {
+		} catch (err) {
 			await this._resolvePathsAndLoadData();
-			this._notificationService.warn(`Ticket '${ticketId}' execution completed with errors: ${err?.message || err}`);
-			const liveBtn = (this._container?.querySelector('#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+			this._notificationService.warn(`Ticket '${ticketId}' execution completed with errors: ${(err as Error | undefined)?.message || err}`);
+			const liveBtn = (templatePart(this._container, '#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
 			if (liveBtn) {
 				liveBtn.innerHTML = `
 					<span class="${ThemeIcon.asClassName(Codicon.error)}" style="font-size: 12px; color: #f87171;"></span>
@@ -4135,7 +4318,7 @@ export class EntityDetailEditor extends EditorPane {
 		} finally {
 			this._isTicketRunning = false;
 			setTimeout(() => {
-				const liveBtn = (this._container?.querySelector('#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+				const liveBtn = (templatePart(this._container, '#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
 				if (liveBtn) {
 					liveBtn.removeAttribute('disabled');
 					liveBtn.style.opacity = '1';
@@ -4163,16 +4346,16 @@ export class EntityDetailEditor extends EditorPane {
 			await this._clipboardService.writeText(jsonStr);
 
 			if (btnEl) {
-				const iconEl = btnEl.querySelector('.codicon') as HTMLElement | null;
-				const labelEl = btnEl.querySelector('.copy-json-btn-label') as HTMLElement | null;
-				if (iconEl) iconEl.className = 'codicon codicon-check';
-				if (labelEl) labelEl.textContent = 'Copied JSON!';
+				const iconEl = templatePart(btnEl, '.codicon') as HTMLElement | null;
+				const labelEl = templatePart(btnEl, '.copy-json-btn-label') as HTMLElement | null;
+				if (iconEl) { iconEl.className = 'codicon codicon-check'; }
+				if (labelEl) { labelEl.textContent = 'Copied JSON!'; }
 				btnEl.style.color = '#34d399';
 				btnEl.style.borderColor = 'rgba(52, 211, 153, 0.5)';
 				btnEl.style.background = 'rgba(52, 211, 153, 0.16)';
 				setTimeout(() => {
-					if (iconEl) iconEl.className = 'codicon codicon-copy';
-					if (labelEl) labelEl.textContent = 'Copy JSON';
+					if (iconEl) { iconEl.className = 'codicon codicon-copy'; }
+					if (labelEl) { labelEl.textContent = 'Copy JSON'; }
 					btnEl.style.color = '#38bdf8';
 					btnEl.style.borderColor = 'rgba(56, 189, 248, 0.35)';
 					btnEl.style.background = 'rgba(56, 189, 248, 0.14)';
@@ -4209,13 +4392,11 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private _showPasteTicketJsonModal(initialText: string, btnEl?: HTMLElement | null): void {
-		const existing = document.getElementById('anyagent-paste-ticket-json-modal');
-		if (existing) {
-			existing.remove();
-		}
+		EntityDetailEditor._pasteTicketJsonModalOverlay?.remove();
 
 		const overlay = document.createElement('div');
 		overlay.id = 'anyagent-paste-ticket-json-modal';
+		EntityDetailEditor._pasteTicketJsonModalOverlay = overlay;
 		overlay.style.cssText = 'position: fixed; inset: 0; z-index: 100000; background: rgba(0, 0, 0, 0.65); display: flex; align-items: center; justify-content: center; padding: 24px; backdrop-filter: blur(2px);';
 
 		const dialog = document.createElement('div');
@@ -4239,7 +4420,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		const closeBtn = document.createElement('button');
 		closeBtn.type = 'button';
-		closeBtn.textContent = '✕';
+		closeBtn.textContent = '\u2715';
 		closeBtn.style.cssText = 'background: transparent; border: none; color: inherit; opacity: 0.7; cursor: pointer; font-size: 14px; padding: 2px 6px; border-radius: 4px;';
 		header.appendChild(closeBtn);
 
@@ -4280,7 +4461,7 @@ export class EntityDetailEditor extends EditorPane {
 		footer.appendChild(applyBtn);
 
 		const cleanup = () => {
-			document.removeEventListener('keydown', onKeyDown);
+			mainWindow.document.removeEventListener('keydown', onKeyDown);
 			overlay.remove();
 		};
 		const onKeyDown = (ev: KeyboardEvent) => {
@@ -4288,7 +4469,7 @@ export class EntityDetailEditor extends EditorPane {
 				cleanup();
 			}
 		};
-		document.addEventListener('keydown', onKeyDown);
+		mainWindow.document.addEventListener('keydown', onKeyDown);
 		closeBtn.onclick = cleanup;
 		cancelBtn.onclick = cleanup;
 		overlay.onclick = (ev) => {
@@ -4308,14 +4489,14 @@ export class EntityDetailEditor extends EditorPane {
 			await this._applyTicketJsonPayload(parsed, btnEl);
 		};
 
-		document.body.appendChild(overlay);
+		mainWindow.document.body.appendChild(overlay);
 		setTimeout(() => {
 			textarea.focus();
 			textarea.select();
 		}, 20);
 	}
 
-	private async _applyTicketJsonPayload(parsedObj: Record<string, any>, btnEl?: HTMLElement | null): Promise<void> {
+	private async _applyTicketJsonPayload(parsedObj: Record<string, unknown>, btnEl?: HTMLElement | null): Promise<void> {
 		try {
 			if (!this._lastParsedData) {
 				await this._resolvePathsAndLoadData();
@@ -4327,7 +4508,7 @@ export class EntityDetailEditor extends EditorPane {
 
 			// 1. Strict Ticket Type Verification: Only allow pasting between tickets of the same type
 			const normType = (t: string) => (t || '').trim().toLowerCase().replace(/[-_\s]+/g, '_');
-			const sourceTicketType = normType(parsedObj.ticketType || parsedObj.type || parsedObj.ticket_type || '');
+			const sourceTicketType = normType((parsedObj.ticketType || parsedObj.type || parsedObj.ticket_type || '') as string);
 			const targetTicketType = normType(this._lastParsedData.ticketType || this._entityType || '');
 
 			if (!sourceTicketType) {
@@ -4373,8 +4554,8 @@ export class EntityDetailEditor extends EditorPane {
 				: (newTitle || curTitle);
 
 			const metadataUpdates: Record<string, string> = {};
-			if (finalTitle !== undefined) metadataUpdates['Title'] = finalTitle;
-			if (newDesc !== undefined) metadataUpdates['Description'] = newDesc;
+			if (finalTitle !== undefined) { metadataUpdates['Title'] = finalTitle; }
+			if (newDesc !== undefined) { metadataUpdates['Description'] = newDesc; }
 			if (typeof parsedObj.status === 'string' && parsedObj.status.trim()) {
 				metadataUpdates['Status'] = parsedObj.status.trim();
 			}
@@ -4442,9 +4623,9 @@ export class EntityDetailEditor extends EditorPane {
 				return incomingKey;
 			};
 
-			const applyCustomSourceMap = (sourceMap: Record<string, any>) => {
+			const applyCustomSourceMap = (sourceMap: Record<string, unknown>) => {
 				for (const [rawK, rawV] of Object.entries(sourceMap)) {
-					if (rawV === undefined || internalKeys.has(rawK.toLowerCase())) continue;
+					if (rawV === undefined || internalKeys.has(rawK.toLowerCase())) { continue; }
 					const canonicalKey = resolveCanonicalFieldKey(rawK);
 					if (typeof rawV === 'object' && rawV !== null) {
 						overwrittenCustom[canonicalKey] = JSON.stringify(rawV);
@@ -4455,16 +4636,16 @@ export class EntityDetailEditor extends EditorPane {
 			};
 
 			if (parsedObj.customMetadata && typeof parsedObj.customMetadata === 'object' && !Array.isArray(parsedObj.customMetadata)) {
-				applyCustomSourceMap(parsedObj.customMetadata);
+				applyCustomSourceMap(parsedObj.customMetadata as Record<string, unknown>);
 			}
 			if (parsedObj.selfDefinedData && typeof parsedObj.selfDefinedData === 'object' && !Array.isArray(parsedObj.selfDefinedData)) {
-				applyCustomSourceMap(parsedObj.selfDefinedData);
+				applyCustomSourceMap(parsedObj.selfDefinedData as Record<string, unknown>);
 			}
 			if (parsedObj.self_defined_data && typeof parsedObj.self_defined_data === 'object' && !Array.isArray(parsedObj.self_defined_data)) {
-				applyCustomSourceMap(parsedObj.self_defined_data);
+				applyCustomSourceMap(parsedObj.self_defined_data as Record<string, unknown>);
 			}
 			if (parsedObj.fields && typeof parsedObj.fields === 'object' && !Array.isArray(parsedObj.fields)) {
-				applyCustomSourceMap(parsedObj.fields);
+				applyCustomSourceMap(parsedObj.fields as Record<string, unknown>);
 			}
 
 			// Also support pasting a flat JSON object whose keys directly represent custom fields or parameters
@@ -4482,7 +4663,7 @@ export class EntityDetailEditor extends EditorPane {
 					'typedefinition', 'typeprompt', 'ticketprompt', 'linkto', 'linkedby',
 					'gitremoteurl', 'gitbranch', 'localpath', 'readmenotes', 'instructionnotes', 'worklog'
 				]);
-				const flatFields: Record<string, any> = {};
+				const flatFields: Record<string, unknown> = {};
 				for (const [k, v] of Object.entries(parsedObj)) {
 					if (!reservedRootKeys.has(k.toLowerCase())) {
 						flatFields[k] = v;
@@ -4495,13 +4676,13 @@ export class EntityDetailEditor extends EditorPane {
 
 			// Preview mode handling
 			if (this._isPreviewMode && this._lastParsedData) {
-				if (finalTitle !== undefined) this._lastParsedData.title = finalTitle;
-				if (newDesc !== undefined) this._lastParsedData.description = newDesc;
-				if (metadataUpdates['Status']) this._lastParsedData.status = metadataUpdates['Status'];
-				if (metadataUpdates['Priority']) this._lastParsedData.priority = metadataUpdates['Priority'];
-				if (metadataUpdates['Current AI Agent']) this._lastParsedData.assignedAgentName = metadataUpdates['Current AI Agent'];
-				if (metadataUpdates['Ticket Prompt'] !== undefined) this._lastParsedData.ticketPrompt = metadataUpdates['Ticket Prompt'];
-				if (metadataUpdates['Ticket Type Prompt'] !== undefined) this._lastParsedData.typePrompt = metadataUpdates['Ticket Type Prompt'];
+				if (finalTitle !== undefined) { this._lastParsedData.title = finalTitle; }
+				if (newDesc !== undefined) { this._lastParsedData.description = newDesc; }
+				if (metadataUpdates['Status']) { this._lastParsedData.status = metadataUpdates['Status']; }
+				if (metadataUpdates['Priority']) { this._lastParsedData.priority = metadataUpdates['Priority']; }
+				if (metadataUpdates['Current AI Agent']) { this._lastParsedData.assignedAgentName = metadataUpdates['Current AI Agent']; }
+				if (metadataUpdates['Ticket Prompt'] !== undefined) { this._lastParsedData.ticketPrompt = metadataUpdates['Ticket Prompt']; }
+				if (metadataUpdates['Ticket Type Prompt'] !== undefined) { this._lastParsedData.typePrompt = metadataUpdates['Ticket Type Prompt']; }
 				this._lastParsedData.customMetadata = overwrittenCustom;
 				if (typeof parsedObj.workLog === 'string' && parsedObj.workLog.trim()) {
 					this._previewWorkLog = parsedObj.workLog;
@@ -4519,16 +4700,16 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			if (btnEl) {
-				const iconEl = btnEl.querySelector('.codicon') as HTMLElement | null;
-				const labelEl = btnEl.querySelector('.paste-json-btn-label') as HTMLElement | null;
-				if (iconEl) iconEl.className = 'codicon codicon-check';
-				if (labelEl) labelEl.textContent = 'Pasted JSON!';
+				const iconEl = templatePart(btnEl, '.codicon') as HTMLElement | null;
+				const labelEl = templatePart(btnEl, '.paste-json-btn-label') as HTMLElement | null;
+				if (iconEl) { iconEl.className = 'codicon codicon-check'; }
+				if (labelEl) { labelEl.textContent = 'Pasted JSON!'; }
 				btnEl.style.color = '#34d399';
 				btnEl.style.borderColor = 'rgba(52, 211, 153, 0.5)';
 				btnEl.style.background = 'rgba(52, 211, 153, 0.16)';
 				setTimeout(() => {
-					if (iconEl) iconEl.className = 'codicon codicon-clippy';
-					if (labelEl) labelEl.textContent = 'Paste JSON';
+					if (iconEl) { iconEl.className = 'codicon codicon-clippy'; }
+					if (labelEl) { labelEl.textContent = 'Paste JSON'; }
 					btnEl.style.color = '#c084fc';
 					btnEl.style.borderColor = 'rgba(168, 85, 247, 0.35)';
 					btnEl.style.background = 'rgba(168, 85, 247, 0.14)';
@@ -4545,7 +4726,7 @@ export class EntityDetailEditor extends EditorPane {
 
 	/** Range / precision check for a `number` component of the current ticket; undefined when the field is not a number. */
 	private _checkNumberFieldValue(fieldKey: string, value: string): INumberFieldCheck | undefined {
-		const fields: any[] = Array.isArray(this._lastCustomModule?.fields) ? this._lastCustomModule.fields : [];
+		const fields: ITicketField[] = Array.isArray(this._lastCustomModule?.fields) ? this._lastCustomModule.fields : [];
 		const def = fields.find(f => f && f.type === 'number' && (f.label === fieldKey || f.id === fieldKey));
 		return def ? normalizeNumberFieldValue({ label: def.label, min: def.min, max: def.max, precision: def.precision }, value) : undefined;
 	}
@@ -4572,7 +4753,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		// Keep AI edit button's data attribute in sync
 		if (this._container) {
-			const aiBtn = this._container.querySelector(`.ai-edit-btn[data-ai-field="/Custom/${fieldKey}"]`) as HTMLElement | null;
+			const aiBtn = templatePart(this._container, `.ai-edit-btn[data-ai-field="/Custom/${fieldKey}"]`) as HTMLElement | null;
 			if (aiBtn) {
 				aiBtn.setAttribute('data-ai-current-value', newValue);
 			}
@@ -4601,7 +4782,7 @@ export class EntityDetailEditor extends EditorPane {
 		this._lastParsedData.title = trimmedTitle;
 
 		if (this._container) {
-			const aiBtn = this._container.querySelector('.ai-edit-btn[data-ai-field="/Title"]') as HTMLElement | null;
+			const aiBtn = templatePart(this._container, '.ai-edit-btn[data-ai-field="/Title"]') as HTMLElement | null;
 			if (aiBtn) {
 				aiBtn.setAttribute('data-ai-current-value', trimmedTitle);
 			}
@@ -4626,7 +4807,7 @@ export class EntityDetailEditor extends EditorPane {
 		this._lastParsedData.description = newDescription;
 
 		if (this._container) {
-			const aiBtn = this._container.querySelector('.ai-edit-btn[data-ai-field="/Description"]') as HTMLElement | null;
+			const aiBtn = templatePart(this._container, '.ai-edit-btn[data-ai-field="/Description"]') as HTMLElement | null;
 			if (aiBtn) {
 				aiBtn.setAttribute('data-ai-current-value', newDescription);
 			}
@@ -4655,7 +4836,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		if (this._container) {
-			const aiBtn = this._container.querySelector(`.ai-edit-btn[data-ai-field="/Instructions/${promptKey}"]`) as HTMLElement | null;
+			const aiBtn = templatePart(this._container, `.ai-edit-btn[data-ai-field="/Instructions/${promptKey}"]`) as HTMLElement | null;
 			if (aiBtn) {
 				aiBtn.setAttribute('data-ai-current-value', newPrompt);
 			}
@@ -4723,7 +4904,7 @@ export class EntityDetailEditor extends EditorPane {
 
 			let isCommitted = false;
 			const commitSave = async () => {
-				if (isCommitted) return;
+				if (isCommitted) { return; }
 				isCommitted = true;
 				viewEl.removeAttribute('data-inline-editing');
 				const newVal = textarea.value;
@@ -4737,7 +4918,7 @@ export class EntityDetailEditor extends EditorPane {
 			};
 
 			const cancelEdit = () => {
-				if (isCommitted) return;
+				if (isCommitted) { return; }
 				isCommitted = true;
 				viewEl.removeAttribute('data-inline-editing');
 				this._setElementHTML(viewEl, originalHtml);
@@ -4790,7 +4971,7 @@ export class EntityDetailEditor extends EditorPane {
 
 			let isCommitted = false;
 			const commitSave = async () => {
-				if (isCommitted) return;
+				if (isCommitted) { return; }
 				isCommitted = true;
 				viewEl.removeAttribute('data-inline-editing');
 				const newVal = input.value;
@@ -4804,7 +4985,7 @@ export class EntityDetailEditor extends EditorPane {
 			};
 
 			const cancelEdit = () => {
-				if (isCommitted) return;
+				if (isCommitted) { return; }
 				isCommitted = true;
 				viewEl.removeAttribute('data-inline-editing');
 				this._setElementHTML(viewEl, originalHtml);
@@ -4881,7 +5062,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		let committed = false;
 		const commit = async () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 			titleEl.removeAttribute('data-inline-editing');
 			const newVal = input.value.trim();
@@ -4893,7 +5074,7 @@ export class EntityDetailEditor extends EditorPane {
 		};
 
 		const cancel = () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 			titleEl.removeAttribute('data-inline-editing');
 			this._setElementHTML(titleEl, originalHtml);
@@ -4978,7 +5159,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		let committed = false;
 		const commit = async () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 			descEl.removeAttribute('data-inline-editing');
 			const newVal = textarea.value;
@@ -4986,7 +5167,7 @@ export class EntityDetailEditor extends EditorPane {
 		};
 
 		const cancel = () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 			descEl.removeAttribute('data-inline-editing');
 			this._setElementHTML(descEl, originalHtml);
@@ -5060,7 +5241,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		let committed = false;
 		const commit = async () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 			promptEl.removeAttribute('data-inline-editing');
 			const newVal = textarea.value;
@@ -5068,7 +5249,7 @@ export class EntityDetailEditor extends EditorPane {
 		};
 
 		const cancel = () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 			promptEl.removeAttribute('data-inline-editing');
 			this._setElementHTML(promptEl, originalHtml);
@@ -5093,7 +5274,7 @@ export class EntityDetailEditor extends EditorPane {
 		}, 10);
 	}
 
-	private _enterSelectInlineEdit(selectViewEl: HTMLElement, fieldKey: string, options: any[]): void {
+	private _enterSelectInlineEdit(selectViewEl: HTMLElement, fieldKey: string, options: ISelectOption[]): void {
 		if (selectViewEl.getAttribute('data-inline-editing') === 'true') {
 			return;
 		}
@@ -5148,7 +5329,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		let committed = false;
 		const commit = async () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 			selectViewEl.removeAttribute('data-inline-editing');
 			const newVal = select.value;
@@ -5156,7 +5337,7 @@ export class EntityDetailEditor extends EditorPane {
 		};
 
 		const cancel = () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 			selectViewEl.removeAttribute('data-inline-editing');
 			this._setElementHTML(selectViewEl, originalHtml);
@@ -5187,12 +5368,12 @@ export class EntityDetailEditor extends EditorPane {
 		subfieldValEl.setAttribute('data-inline-editing', 'true');
 
 		const originalHtml = subfieldValEl.innerHTML;
-		let arr: any[] = [];
+		let arr: IJsonObject[] = [];
 		const raw = this._lastParsedData?.customMetadata?.[fieldKey];
 		if (raw) {
 			try {
 				const p = typeof raw === 'string' ? JSON.parse(raw) : raw;
-				if (Array.isArray(p)) arr = p;
+				if (Array.isArray(p)) { arr = p; }
 			} catch { }
 		}
 
@@ -5234,7 +5415,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		let committed = false;
 		const commit = async () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 			subfieldValEl.removeAttribute('data-inline-editing');
 			const newVal = input.value;
@@ -5247,7 +5428,7 @@ export class EntityDetailEditor extends EditorPane {
 		};
 
 		const cancel = () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 			subfieldValEl.removeAttribute('data-inline-editing');
 			this._setElementHTML(subfieldValEl, originalHtml);
@@ -5293,9 +5474,9 @@ export class EntityDetailEditor extends EditorPane {
 			const resolveCandidate = async (names: string[]): Promise<URI> => {
 				for (const name of names) {
 					const p1 = URI.joinPath(entityUri, '.agents', name);
-					if (await fileService.exists(p1)) return p1;
+					if (await fileService.exists(p1)) { return p1; }
 					const p2 = URI.joinPath(entityUri, name);
-					if (await fileService.exists(p2)) return p2;
+					if (await fileService.exists(p2)) { return p2; }
 				}
 				return URI.joinPath(entityUri, '.agents', names[0]);
 			};
@@ -5317,9 +5498,9 @@ export class EntityDetailEditor extends EditorPane {
 			]);
 
 			const tempInstance = Object.create(EntityDetailEditor.prototype) as EntityDetailEditor;
-			(tempInstance as any)._entityUri = entityUri;
-			(tempInstance as any)._entityName = entityName;
-			(tempInstance as any)._entityType = 'task';
+			tempInstance._entityUri = entityUri;
+			tempInstance._entityName = entityName;
+			tempInstance._entityType = 'task';
 			const parsed = tempInstance._parseAllEntityData(ticketContent, readmeContent, instructionContent);
 			const payload = EntityDetailEditor._buildTicketJsonObject(parsed);
 			const jsonStr = JSON.stringify(payload, null, 2);
@@ -5358,9 +5539,9 @@ export class EntityDetailEditor extends EditorPane {
 			const resolveCandidate = async (names: string[]): Promise<URI> => {
 				for (const name of names) {
 					const p1 = URI.joinPath(entityUri, '.agents', name);
-					if (await fileService.exists(p1)) return p1;
+					if (await fileService.exists(p1)) { return p1; }
 					const p2 = URI.joinPath(entityUri, name);
-					if (await fileService.exists(p2)) return p2;
+					if (await fileService.exists(p2)) { return p2; }
 				}
 				return URI.joinPath(entityUri, '.agents', names[0]);
 			};
@@ -5382,14 +5563,14 @@ export class EntityDetailEditor extends EditorPane {
 			]);
 
 			const tempInstance = Object.create(EntityDetailEditor.prototype) as EntityDetailEditor;
-			(tempInstance as any)._entityUri = entityUri;
-			(tempInstance as any)._entityName = entityName;
-			(tempInstance as any)._entityType = 'task';
+			tempInstance._entityUri = entityUri;
+			tempInstance._entityName = entityName;
+			tempInstance._entityType = 'task';
 			const existingParsed = tempInstance._parseAllEntityData(ticketContent, readmeContent, instructionContent);
 
 			// Validate ticket type
 			const normType = (t: string) => (t || '').trim().toLowerCase().replace(/[-_\s]+/g, '_');
-			const sourceTicketType = normType(parsedObj.ticketType || parsedObj.type || parsedObj.ticket_type || '');
+			const sourceTicketType = normType((parsedObj.ticketType || parsedObj.type || parsedObj.ticket_type || '') as string);
 			const targetTicketType = normType(existingParsed.ticketType || tempInstance._entityType || '');
 
 			if (!sourceTicketType) {
@@ -5420,18 +5601,18 @@ export class EntityDetailEditor extends EditorPane {
 				: (newTitle || curTitle);
 
 			const metadataUpdates: Record<string, string> = {};
-			if (finalTitle !== undefined) metadataUpdates['Title'] = finalTitle;
-			if (newDesc !== undefined) metadataUpdates['Description'] = newDesc;
-			if (typeof parsedObj.status === 'string' && parsedObj.status.trim()) metadataUpdates['Status'] = parsedObj.status.trim();
-			if (typeof parsedObj.priority === 'string' && parsedObj.priority.trim()) metadataUpdates['Priority'] = parsedObj.priority.trim();
-			if (typeof parsedObj.assignedAgentName === 'string' && parsedObj.assignedAgentName.trim()) metadataUpdates['Current AI Agent'] = parsedObj.assignedAgentName.trim();
-			if (typeof parsedObj.ticketPrompt === 'string') metadataUpdates['Ticket Prompt'] = parsedObj.ticketPrompt;
-			if (typeof parsedObj.typePrompt === 'string') metadataUpdates['Ticket Type Prompt'] = parsedObj.typePrompt;
-			if (typeof parsedObj.linkTo === 'string') metadataUpdates['Link To'] = parsedObj.linkTo;
-			if (typeof parsedObj.gitRemoteUrl === 'string') metadataUpdates['Git Remote URL'] = parsedObj.gitRemoteUrl;
-			if (typeof parsedObj.gitBranch === 'string') metadataUpdates['Git Branch'] = parsedObj.gitBranch;
-			if (typeof parsedObj.localPath === 'string') metadataUpdates['Local Path'] = parsedObj.localPath;
-			if (typeof parsedObj.instructionNotes === 'string' && parsedObj.instructionNotes.trim()) metadataUpdates['Instruction Notes'] = parsedObj.instructionNotes;
+			if (finalTitle !== undefined) { metadataUpdates['Title'] = finalTitle; }
+			if (newDesc !== undefined) { metadataUpdates['Description'] = newDesc; }
+			if (typeof parsedObj.status === 'string' && parsedObj.status.trim()) { metadataUpdates['Status'] = parsedObj.status.trim(); }
+			if (typeof parsedObj.priority === 'string' && parsedObj.priority.trim()) { metadataUpdates['Priority'] = parsedObj.priority.trim(); }
+			if (typeof parsedObj.assignedAgentName === 'string' && parsedObj.assignedAgentName.trim()) { metadataUpdates['Current AI Agent'] = parsedObj.assignedAgentName.trim(); }
+			if (typeof parsedObj.ticketPrompt === 'string') { metadataUpdates['Ticket Prompt'] = parsedObj.ticketPrompt; }
+			if (typeof parsedObj.typePrompt === 'string') { metadataUpdates['Ticket Type Prompt'] = parsedObj.typePrompt; }
+			if (typeof parsedObj.linkTo === 'string') { metadataUpdates['Link To'] = parsedObj.linkTo; }
+			if (typeof parsedObj.gitRemoteUrl === 'string') { metadataUpdates['Git Remote URL'] = parsedObj.gitRemoteUrl; }
+			if (typeof parsedObj.gitBranch === 'string') { metadataUpdates['Git Branch'] = parsedObj.gitBranch; }
+			if (typeof parsedObj.localPath === 'string') { metadataUpdates['Local Path'] = parsedObj.localPath; }
+			if (typeof parsedObj.instructionNotes === 'string' && parsedObj.instructionNotes.trim()) { metadataUpdates['Instruction Notes'] = parsedObj.instructionNotes; }
 
 			const internalKeys = new Set(['ticket statuses', 'status mapping', 'removed status']);
 			const overwrittenCustom: Record<string, string> = {};
@@ -5440,17 +5621,17 @@ export class EntityDetailEditor extends EditorPane {
 					overwrittenCustom[k] = v;
 				}
 			}
-			const applyCustomMap = (src: Record<string, any>) => {
+			const applyCustomMap = (src: Record<string, unknown>) => {
 				for (const [k, v] of Object.entries(src)) {
-					if (v === undefined || internalKeys.has(k.toLowerCase())) continue;
+					if (v === undefined || internalKeys.has(k.toLowerCase())) { continue; }
 					overwrittenCustom[k] = (typeof v === 'object' && v !== null) ? JSON.stringify(v) : String(v ?? '');
 				}
 			};
 			if (parsedObj.customMetadata && typeof parsedObj.customMetadata === 'object' && !Array.isArray(parsedObj.customMetadata)) {
-				applyCustomMap(parsedObj.customMetadata);
+				applyCustomMap(parsedObj.customMetadata as Record<string, unknown>);
 			}
 			if (parsedObj.fields && typeof parsedObj.fields === 'object' && !Array.isArray(parsedObj.fields)) {
-				applyCustomMap(parsedObj.fields);
+				applyCustomMap(parsedObj.fields as Record<string, unknown>);
 			}
 
 			if (finalTitle !== undefined || newDesc !== undefined) {
@@ -5591,8 +5772,8 @@ export class EntityDetailEditor extends EditorPane {
 		return { title, summary };
 	}
 
-	private async _loadAllAvailableTickets(): Promise<Array<{ id: string; code: string; title: string; summary: string; type: string; workspaceId: string; workspaceName: string; uri: string }>> {
-		if (!this._workspacesExplorerService) return [];
+	private async _loadAllAvailableTickets(): Promise<ILinkableTicket[]> {
+		if (!this._workspacesExplorerService) { return []; }
 		const result: Array<{ id: string; code: string; title: string; summary: string; type: string; workspaceId: string; workspaceName: string; uri: string }> = [];
 		try {
 			const workspaces = await this._workspacesExplorerService.getWorkspaces();
@@ -5631,7 +5812,7 @@ export class EntityDetailEditor extends EditorPane {
 				// 2. Scan children of workspace
 				const children = await this._workspacesExplorerService.scanWorkspaceChildren(ws.uri);
 				for (const child of children) {
-					if (child.type === 'file') continue;
+					if (child.type === 'file') { continue; }
 					const childTicketUri = await this._resolveFileUri(child.uri, 'ticket.md');
 					const childReadmeUri = await this._resolveFileUri(child.uri, 'README.md');
 					if (childTicketUri && (await this._fileService.exists(childTicketUri))) {
@@ -5665,7 +5846,7 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private async _findTicketUriById(targetId: string): Promise<URI | undefined> {
-		if (!this._workspacesExplorerService || !targetId) return undefined;
+		if (!this._workspacesExplorerService || !targetId) { return undefined; }
 		const query = targetId.trim();
 		try {
 			const workspaces = await this._workspacesExplorerService.getWorkspaces();
@@ -5684,7 +5865,7 @@ export class EntityDetailEditor extends EditorPane {
 
 				const children = await this._workspacesExplorerService.scanWorkspaceChildren(ws.uri);
 				for (const child of children) {
-					if (child.type === 'file') continue;
+					if (child.type === 'file') { continue; }
 					const childTicketUri = await this._resolveFileUri(child.uri, 'ticket.md');
 					if (childTicketUri && (await this._fileService.exists(childTicketUri))) {
 						const content = await this._safeReadFile(childTicketUri);
@@ -5704,10 +5885,10 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private async _syncBidirectionalLinks(sourceTicketId: string, oldLinkToRaw: string, newLinkToRaw: string): Promise<void> {
-		if (!sourceTicketId) return;
+		if (!sourceTicketId) { return; }
 
 		const parseList = (raw: string | undefined): string[] => {
-			if (!raw) return [];
+			if (!raw) { return []; }
 			return raw.split(/[,;\n]+/)
 				.map(s => s.trim())
 				.filter(s => s && s !== 'None' && s !== 'null' && s !== 'undefined' && s !== 'Unassigned');
@@ -5790,7 +5971,7 @@ export class EntityDetailEditor extends EditorPane {
 		};
 	}
 
-	private _renderTicketChipsHtml(raw: string | undefined, allTickets: any[] = []): string {
+	private _renderTicketChipsHtml(raw: string | undefined, allTickets: ILinkableTicket[] = []): string {
 		if (!raw || raw === 'None' || raw === 'Unassigned') {
 			return '<span style="opacity:0.4; font-size: 0.88em;">None</span>';
 		}
@@ -5814,10 +5995,10 @@ export class EntityDetailEditor extends EditorPane {
 		}).join('');
 	}
 
-	private _buildHierarchyTree(data: IParsedTicketData | undefined, agents: any[], allTickets: any[] = [], customModule?: any): any[] {
-		if (!data) return [];
-		if (!customModule) customModule = this._lastCustomModule;
-		const rootNodes: any[] = [];
+	private _buildHierarchyTree(data: IParsedTicketData | undefined, agents: IAgentItem[], allTickets: ILinkableTicket[] = [], customModule?: ITicketTemplateModule | null): ITicketHierarchyNode[] {
+		if (!data) { return []; }
+		if (!customModule) { customModule = this._lastCustomModule; }
+		const rootNodes: ITicketHierarchyNode[] = [];
 
 		// 1. Title
 		rootNodes.push({
@@ -5848,7 +6029,7 @@ export class EntityDetailEditor extends EditorPane {
 		const agentPrompt = matchingAgent?.systemPrompt || data.metadata['System Prompt'] || data.instructionNotes || data.ticketPrompt || '';
 		const agentRole = matchingAgent?.role || data.metadata['Role'] || data.description || 'AI Agent';
 
-		const instructionChildren: any[] = [];
+		const instructionChildren: ITicketHierarchyNode[] = [];
 		if (isAgent) {
 			instructionChildren.push({
 				path: '/Instructions/System Prompt',
@@ -5880,7 +6061,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		// 4. Attributes
 		const isAgentAssigned = !!(data.assignedAgentName && data.assignedAgentName !== 'None' && data.assignedAgentName !== 'Unassigned');
-		const attrChildren: any[] = [
+		const attrChildren: ITicketHierarchyNode[] = [
 			{
 				path: '/Attributes/Status',
 				label: 'Status',
@@ -5946,7 +6127,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		// 5. Custom Metadata
 		if (data.customMetadata) {
-			const customChildren: any[] = [];
+			const customChildren: ITicketHierarchyNode[] = [];
 			const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Git Remote URL', 'Git Branch', 'Title', 'title', 'Description', 'description'];
 			for (const [k, v] of Object.entries(data.customMetadata)) {
 				if (internalLifecycleKeys.includes(k)) {
@@ -5954,7 +6135,7 @@ export class EntityDetailEditor extends EditorPane {
 				}
 
 				const modField = customModule?.fields && Array.isArray(customModule.fields)
-					? customModule.fields.find((f: any) =>
+					? customModule.fields.find(f =>
 						(f.label && f.label.toLowerCase() === k.toLowerCase()) ||
 						(f.id && f.id.toLowerCase() === k.toLowerCase()) ||
 						(f.id && f.id.toLowerCase().replace(/_/g, ' ') === k.toLowerCase()) ||
@@ -5965,8 +6146,8 @@ export class EntityDetailEditor extends EditorPane {
 				const isAttachment = (modField && modField.type === 'attachment') ||
 					k.toLowerCase().includes('attachment') ||
 					(typeof v === 'string' && (v.trim().startsWith('[{"name":') || v.trim().startsWith('{"name":'))) ||
-					(Array.isArray(v) && v.length > 0 && typeof v[0] === 'object' && v[0] && 'name' in v[0]) ||
-					(v && typeof v === 'object' && 'name' in v);
+					(Array.isArray(v) && v.length > 0 && typeof v[0] === 'object' && v[0] && hasProperty(v[0], 'name')) ||
+					(v && typeof v === 'object' && hasProperty(v, 'name'));
 
 				if (isAttachment) {
 					const rawVal = v !== undefined && v !== null ? String(v).trim() : '';
@@ -5982,9 +6163,9 @@ export class EntityDetailEditor extends EditorPane {
 					continue;
 				}
 
-				const isDeclaredNonList = modField && modField.type && modField.type !== 'dynamic_list' && modField.type !== 'container';
+				const isDeclaredNonList = modField && modField.type && modField.type !== 'dynamic_list' && (modField.type as string) !== 'container';
 
-				let parsedItems: any[] | null = null;
+				let parsedItems: Array<Record<string, unknown>> | null = null;
 				if (!isDeclaredNonList) {
 					if (typeof v === 'string' && v.trim().startsWith('[')) {
 						try {
@@ -5996,13 +6177,13 @@ export class EntityDetailEditor extends EditorPane {
 				}
 
 				if (parsedItems && Array.isArray(parsedItems) && !isDeclaredNonList) {
-					const listItems: any[] = [];
+					const listItems: ITicketHierarchyNode[] = [];
 					parsedItems.forEach((item, idx) => {
 						const idxNum = item._index || (idx + 1);
-						const itemTitle = item._title || `${k} #${idxNum}`;
-						const itemFields: any[] = [];
+						const itemTitle = (item._title || `${k} #${idxNum}`) as string;
+						const itemFields: ITicketHierarchyNode[] = [];
 						for (const [subK, subValRaw] of Object.entries(item)) {
-							if (subK.startsWith('_')) continue;
+							if (subK.startsWith('_')) { continue; }
 							const rawStr = subValRaw !== undefined && subValRaw !== null ? String(subValRaw).trim() : '';
 							const isSubEmpty = !rawStr || rawStr === 'None' || rawStr === 'null' || rawStr === 'undefined' || rawStr === 'N/A';
 							const subVal = isSubEmpty ? 'None' : rawStr;
@@ -6041,12 +6222,12 @@ export class EntityDetailEditor extends EditorPane {
 
 					let resolvedType = modField?.type;
 					if (!resolvedType) {
-						if (isAttachment) resolvedType = 'attachment';
-						else if (isPromptJson) resolvedType = 'prompt';
-						else if (isRange) resolvedType = 'date_range';
-						else if (strVal.toLowerCase() === 'true' || strVal.toLowerCase() === 'false') resolvedType = 'switch';
-						else if (isMultiline) resolvedType = 'textarea';
-						else resolvedType = 'text';
+						if (isAttachment) { resolvedType = 'attachment'; }
+						else if (isPromptJson) { resolvedType = 'prompt'; }
+						else if (isRange) { resolvedType = 'date_range'; }
+						else if (strVal.toLowerCase() === 'true' || strVal.toLowerCase() === 'false') { resolvedType = 'switch'; }
+						else if (isMultiline) { resolvedType = 'textarea'; }
+						else { resolvedType = 'text'; }
 					}
 
 					let nodePreInjectedPrompt: string | undefined = undefined;
@@ -6055,7 +6236,7 @@ export class EntityDetailEditor extends EditorPane {
 						let extractedUserPrompt = modField?.defaultUserPrompt || '';
 						let extractedPreInjected = templatePreInjected;
 						if (typeof v === 'object' && v !== null) {
-							const obj = v as Record<string, any>;
+							const obj = v as Record<string, unknown>;
 							if (obj.userPrompt !== undefined) {
 								extractedUserPrompt = String(obj.userPrompt);
 							} else if (obj.prompt !== undefined && !templatePreInjected) {
@@ -6114,8 +6295,10 @@ export class EntityDetailEditor extends EditorPane {
 		return rootNodes;
 	}
 
-	private async _handleMessage(eventData: any): Promise<void> {
-		const e = (eventData && eventData.message) ? eventData.message : eventData;
+	private async _handleMessage(eventData: IEditorUiMessage): Promise<void> {
+		// Messages may also arrive wrapped as `{ message }`
+		const wrapped = (eventData as { message?: IEditorUiMessage }).message;
+		const e = (eventData && wrapped) ? wrapped : eventData;
 		if (!e || !this._entityUri) {
 			return;
 		}
@@ -6176,7 +6359,7 @@ export class EntityDetailEditor extends EditorPane {
 				const rawFolderId = this._entityUri ? basename(this._entityUri) : '';
 				const ticketId = this._lastParsedData?.ticketId || (rawFolderId && !rawFolderId.includes(' ') ? rawFolderId : '') || this._entityName || '';
 				const workspaceId = this._lastParsedData?.workspaceId || '';
-				const field = (e as any).field || '';
+				const field = e.field || '';
 
 				const locators: string[] = [];
 				if (workspaceId) {
@@ -6245,9 +6428,9 @@ export class EntityDetailEditor extends EditorPane {
 						}
 						const content = await this._safeReadFile(this._ticketFileUri);
 						const updates: { [key: string]: string } = {};
-						if (e.title) updates['Title'] = e.title;
-						if (e.description) updates['Description'] = e.description;
-						if (e.metadata) Object.assign(updates, e.metadata);
+						if (e.title) { updates['Title'] = e.title; }
+						if (e.description) { updates['Description'] = e.description; }
+						if (e.metadata) { Object.assign(updates, e.metadata); }
 						const updated = this._updateTicketMdContent(content, updates, e.customMetadata);
 						await this._fileService.writeFile(this._ticketFileUri, VSBuffer.fromString(updated));
 					}
@@ -6270,7 +6453,7 @@ export class EntityDetailEditor extends EditorPane {
 								role: e.description || e.metadata?.['Description'] || e.metadata?.['Role'] || e.metadata?.['Agent Role'] || matchingAgent.role,
 								description: e.description || e.metadata?.['Description'] || matchingAgent.description,
 								systemPrompt: e.metadata?.['System Prompt'] || e.metadata?.['Instruction Notes'] || matchingAgent.systemPrompt,
-								status: (e.metadata?.['Status'] ? (e.metadata['Status'].toLowerCase() as any) : matchingAgent.status)
+								status: (e.metadata?.['Status'] ? (e.metadata['Status'].toLowerCase() as IAgentItem['status']) : matchingAgent.status)
 							};
 							if (e.metadata?.['AI Model'] || e.metadata?.['Model'] || e.metadata?.['Model Name']) {
 								const mId = e.metadata['AI Model'] || e.metadata['Model'] || e.metadata['Model Name'];
@@ -6328,7 +6511,7 @@ export class EntityDetailEditor extends EditorPane {
 								role: e.metadata?.['Description'] || e.metadata?.['Role'] || e.metadata?.['Agent Role'] || matchingAgent.role,
 								description: e.metadata?.['Description'] || matchingAgent.description,
 								systemPrompt: e.metadata?.['System Prompt'] || e.metadata?.['Instruction Notes'] || matchingAgent.systemPrompt,
-								status: (e.metadata?.['Status'] ? (e.metadata['Status'].toLowerCase() as any) : matchingAgent.status)
+								status: (e.metadata?.['Status'] ? (e.metadata['Status'].toLowerCase() as IAgentItem['status']) : matchingAgent.status)
 							};
 							if (e.metadata?.['AI Model'] || e.metadata?.['Model'] || e.metadata?.['Model Name']) {
 								const mId = e.metadata['AI Model'] || e.metadata['Model'] || e.metadata['Model Name'];
@@ -6589,8 +6772,8 @@ export class EntityDetailEditor extends EditorPane {
 			statusCode = context.res.statusCode || 200;
 			const text = await asText(context);
 			html = text || '';
-		} catch (err: any) {
-			const rawErr = err?.message || String(err);
+		} catch (err) {
+			const rawErr = (err as Error | undefined)?.message || String(err);
 			return {
 				title: targetUrl,
 				content: `Failed to fetch URL (${targetUrl}): ${rawErr}`,
@@ -6631,7 +6814,7 @@ export class EntityDetailEditor extends EditorPane {
 
 			const formatted = `# ${title}\nURL: ${targetUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${displayContent}`;
 			return { title, content: formatted };
-		} catch (parseErr: any) {
+		} catch (parseErr) {
 			const cleaned = this._cleanHtmlToText(html);
 			return { title: targetUrl, content: cleaned };
 		}
@@ -6731,7 +6914,7 @@ export class EntityDetailEditor extends EditorPane {
 				.replace(/&lt;/gi, '<')
 				.replace(/&gt;/gi, '>')
 				.replace(/&quot;/gi, '"')
-				.replace(/&#39;/gi, "'")
+				.replace(/&#39;/gi, '\'')
 				.replace(/&middot;/gi, '·');
 			// 5. Clean up multiple spaces and empty lines
 			const lines = clean.split('\n')
@@ -6746,7 +6929,7 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private async _executeBrowserFetch(card: HTMLElement, fieldKey: string, openTab: boolean): Promise<void> {
-		const urlInput = card.querySelector('.browser-url-input') as HTMLInputElement | null;
+		const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
 		let url = urlInput?.value.trim() || '';
 		if (!url) {
 			this._notificationService.warn('Please enter a target URL before fetching.');
@@ -6756,7 +6939,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		if (!url.startsWith('{') && !url.startsWith('@') && !/^https?:\/\//i.test(url)) {
 			url = 'https://' + url;
-			if (urlInput) urlInput.value = url;
+			if (urlInput) { urlInput.value = url; }
 		}
 
 		let finalUrl = this._interpolateParameters(url);
@@ -6764,8 +6947,8 @@ export class EntityDetailEditor extends EditorPane {
 			finalUrl = 'https://' + finalUrl;
 		}
 
-		const statusEl = card.querySelector('.browser-fetch-status') as HTMLElement | null;
-		const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
+		const statusEl = templatePart(card, '.browser-fetch-status') as HTMLElement | null;
+		const contentEl = templatePart(card, '.browser-content-display') as HTMLElement | null;
 
 		if (openTab) {
 			try {
@@ -6789,10 +6972,12 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		let creds: Array<{ key: string; value: string }> | undefined;
-		const rawVal = this._lastParsedData ? ((this._lastParsedData as any)[fieldKey] || (this._lastParsedData as any).data?.[fieldKey]) : undefined;
+		// Looked up by field key on the parsed data itself (and a legacy `data` map, if present)
+		const parsedRecord = this._lastParsedData as (IParsedTicketData & Record<string, unknown> & { data?: Record<string, unknown> }) | undefined;
+		const rawVal = parsedRecord ? (parsedRecord[fieldKey] || parsedRecord.data?.[fieldKey]) : undefined;
 		if (rawVal) {
-			if (typeof rawVal === 'object' && Array.isArray(rawVal.credentials)) {
-				creds = rawVal.credentials;
+			if (typeof rawVal === 'object' && Array.isArray((rawVal as IStoredPrimitiveValue).credentials)) {
+				creds = (rawVal as IStoredPrimitiveValue).credentials;
 			} else if (typeof rawVal === 'string') {
 				try {
 					const parsed = JSON.parse(rawVal);
@@ -6803,7 +6988,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 		}
 		if (!creds && this._lastCustomModule?.fields) {
-			const matchingF = this._lastCustomModule.fields.find((f: any) => f.label?.toLowerCase() === fieldKey.toLowerCase() || f.id?.toLowerCase() === fieldKey.toLowerCase() || f.key?.toLowerCase() === fieldKey.toLowerCase());
+			const matchingF = this._lastCustomModule.fields.find(f => f.label?.toLowerCase() === fieldKey.toLowerCase() || f.id?.toLowerCase() === fieldKey.toLowerCase() || f.key?.toLowerCase() === fieldKey.toLowerCase());
 			if (matchingF?.credentials) {
 				creds = matchingF.credentials;
 			}
@@ -6828,8 +7013,8 @@ export class EntityDetailEditor extends EditorPane {
 			}
 			await this._saveBrowserPrimitiveData(fieldKey, url, result.content, `${new Date().toLocaleDateString()} ${timestamp}`);
 			// Suppress notificationService.info toast to prevent webview "Paused due to Notification" overlay
-		} catch (err: any) {
-			const rawErr = err?.message || String(err);
+		} catch (err) {
+			const rawErr = (err as Error | undefined)?.message || String(err);
 			const isAuthOrCors = /auth|401|403|login|session|verification/i.test(rawErr);
 			const timestamp = new Date().toLocaleString();
 			if (isAuthOrCors) {
@@ -6887,7 +7072,7 @@ ${rawErr}
 
 	private async _saveBrowserPrimitiveData(fieldKey: string, url: string, content: string, lastFetched: string): Promise<void> {
 		const rawVal = this._lastParsedData?.customMetadata?.[fieldKey];
-		let creds: any[] = [];
+		let creds: ICredentialPair[] = [];
 		if (rawVal) {
 			try {
 				const parsed = JSON.parse(rawVal);
@@ -6897,7 +7082,7 @@ ${rawErr}
 			} catch { }
 		}
 		if (creds.length === 0 && this._lastCustomModule?.fields) {
-			const matchingF = this._lastCustomModule.fields.find((f: any) => f.label?.toLowerCase() === fieldKey.toLowerCase() || f.id?.toLowerCase() === fieldKey.toLowerCase());
+			const matchingF = this._lastCustomModule.fields.find(f => f.label?.toLowerCase() === fieldKey.toLowerCase() || f.id?.toLowerCase() === fieldKey.toLowerCase());
 			if (matchingF?.credentials) {
 				creds = matchingF.credentials;
 			}
@@ -6998,7 +7183,7 @@ ${rawErr}
 
 		// 3. Live DOM inputs if currently typed
 		if (this._container) {
-			const inputs = this._container.querySelectorAll('.ticket-parameter-input') as NodeListOf<HTMLInputElement | HTMLSelectElement>;
+			const inputs = templateParts(this._container, '.ticket-parameter-input') as NodeListOf<HTMLInputElement | HTMLSelectElement>;
 			inputs.forEach(input => {
 				const pName = input.getAttribute('data-param-name');
 				if (pName) {
@@ -7019,7 +7204,7 @@ ${rawErr}
 
 				// Look up saved metadata (also matching legacy ID-based keys like "AI Prompt 5" when field was renamed)
 				const rawSaved = this._lookupCustomMetadataByField(fKey, f);
-				let savedObj: any = null;
+				let savedObj: IStoredPrimitiveValue | string | null = null;
 				if (typeof rawSaved === 'string') {
 					try { savedObj = JSON.parse(rawSaved); } catch { savedObj = rawSaved; }
 				} else if (rawSaved) {
@@ -7030,10 +7215,10 @@ ${rawErr}
 					if (!this._container) {
 						return null;
 					}
-					return (this._container.querySelector(`.custom-property-card[data-field-key="${fKey}"]`) ||
-						this._container.querySelector(`.custom-property-card[data-field-id="${f.id}"]`) ||
-						this._container.querySelector(`.custom-primitive-card[data-field-key="${fKey}"]`) ||
-						this._container.querySelector(`.custom-primitive-card[data-field-id="${f.id}"]`)) as HTMLElement | null;
+					return (templatePart(this._container, `.custom-property-card[data-field-key="${fKey}"]`) ||
+						templatePart(this._container, `.custom-property-card[data-field-id="${f.id}"]`) ||
+						templatePart(this._container, `.custom-primitive-card[data-field-key="${fKey}"]`) ||
+						templatePart(this._container, `.custom-primitive-card[data-field-id="${f.id}"]`)) as HTMLElement | null;
 				};
 
 				if (f.type === 'browser') {
@@ -7041,10 +7226,10 @@ ${rawErr}
 					let content = '';
 					const card = findLiveCard();
 					if (card) {
-						const urlInput = card.querySelector('.browser-url-input') as HTMLInputElement | null;
-						const contentEl = card.querySelector('.browser-content-display') as HTMLElement | null;
-						if (urlInput) url = urlInput.value.trim();
-						if (contentEl) content = contentEl.textContent || '';
+						const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
+						const contentEl = templatePart(card, '.browser-content-display') as HTMLElement | null;
+						if (urlInput) { url = urlInput.value.trim(); }
+						if (contentEl) { content = contentEl.textContent || ''; }
 					}
 					if (!url && savedObj && typeof savedObj === 'object') {
 						url = savedObj.url || '';
@@ -7052,8 +7237,8 @@ ${rawErr}
 					if (!content && savedObj && typeof savedObj === 'object') {
 						content = savedObj.content || '';
 					}
-					if (!url) url = f.defaultUrl || '';
-					if (!content) content = f.defaultContent || '';
+					if (!url) { url = f.defaultUrl || ''; }
+					if (!content) { content = f.defaultContent || ''; }
 
 					if (content.includes('No webpage content extracted yet.')) {
 						content = '';
@@ -7068,13 +7253,13 @@ ${rawErr}
 					let pyCodeStr = '';
 					const card = findLiveCard();
 					if (card) {
-						const resEl = card.querySelector('.python-result-display') as HTMLElement | null;
-						const outEl = card.querySelector('.python-output-display') as HTMLElement | null;
-						const codeEl = card.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
+						const resEl = templatePart(card, '.python-result-display') as HTMLElement | null;
+						const outEl = templatePart(card, '.python-output-display') as HTMLElement | null;
+						const codeEl = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
 						if (resEl && resEl.textContent) {
 							pyResultStr = resEl.textContent.trim();
-						} else if ((card as any)._lastPythonResult !== undefined && (card as any)._lastPythonResult !== null) {
-							const lr = (card as any)._lastPythonResult;
+						} else if (cardRuntimeState(card).lastPythonResult !== undefined && cardRuntimeState(card).lastPythonResult !== null) {
+							const lr = cardRuntimeState(card).lastPythonResult;
 							pyResultStr = typeof lr === 'object' ? JSON.stringify(lr) : String(lr).trim();
 						}
 						if (outEl && outEl.textContent) {
@@ -7112,17 +7297,17 @@ ${rawErr}
 					let output = '';
 					const card = findLiveCard();
 					if (card) {
-						const userTas = Array.from(card.querySelectorAll('.prompt-user-textarea')) as HTMLTextAreaElement[];
-						const preTa = card.querySelector('.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
+						const userTas = Array.from(templateParts(card, '.prompt-user-textarea')) as HTMLTextAreaElement[];
+						const preTa = templatePart(card, '.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
 						const preTxt = preTa ? preTa.value : (card.getAttribute('data-pre-injected-prompt') || '');
 						if (userTas.length > 0) {
 							prompt = this._formatCombinedPromptForLlm(preTxt, userTas.map(t => t.value || '')).combinedRawPrompt;
 						} else {
-							const ta = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
-							if (ta) prompt = ta.value;
+							const ta = templatePart(card, '.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+							if (ta) { prompt = ta.value; }
 						}
-						const out = card.querySelector('.prompt-output-display') as HTMLElement | null;
-						if (out) output = out.textContent || '';
+						const out = templatePart(card, '.prompt-output-display') as HTMLElement | null;
+						if (out) { output = out.textContent || ''; }
 					}
 					if (!prompt && savedObj && typeof savedObj === 'object') {
 						prompt = savedObj.prompt || '';
@@ -7130,8 +7315,8 @@ ${rawErr}
 					if (!output && savedObj && typeof savedObj === 'object') {
 						output = savedObj.output || '';
 					}
-					if (!prompt) prompt = f.defaultUserPrompt || f.defaultContent || '';
-					if (!output) output = f.debugPromptOutput || '';
+					if (!prompt) { prompt = f.defaultUserPrompt || f.defaultContent || ''; }
+					if (!output) { output = f.debugPromptOutput || ''; }
 
 					if (output.includes('No execution output yet.') || output.startsWith('Processing prompt with ')) {
 						output = (savedObj && typeof savedObj === 'object' && savedObj.output && !String(savedObj.output).includes('No execution output yet.'))
@@ -7146,12 +7331,12 @@ ${rawErr}
 					let resText = '';
 					const card = findLiveCard();
 					if (card) {
-						const contentEl = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
+						const contentEl = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
 						if (contentEl) { resText = contentEl.value || ''; }
-						const specItems = card.querySelectorAll('.output-spec-item');
+						const specItems = templateParts(card, '.output-spec-item');
 						specItems.forEach(it => {
 							const sKey = it.getAttribute('data-spec-key') || '';
-							const ta = it.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+							const ta = templatePart(it, '.output-item-raw-content') as HTMLTextAreaElement | null;
 							if (sKey && ta?.value) {
 								subProps[sKey] = ta.value;
 							}
@@ -7159,7 +7344,7 @@ ${rawErr}
 					}
 					if (!resText && savedObj) {
 						if (typeof savedObj === 'object' && savedObj !== null) {
-							resText = savedObj.result || savedObj.output || JSON.stringify(savedObj, null, 2);
+							resText = (savedObj.result || savedObj.output || JSON.stringify(savedObj, null, 2)) as string;
 							for (const [sK, sV] of Object.entries(savedObj)) {
 								if (typeof sV === 'object' && sV !== null && (sV as Record<string, unknown>).text !== undefined) {
 									subProps[sK] = String((sV as Record<string, unknown>).text);
@@ -7185,16 +7370,16 @@ ${rawErr}
 					}
 					primitiveVal = lines.join('\n');
 				} else if (f.type === 'table') {
-					let cols: any[] = Array.isArray(f.tableColumns) ? f.tableColumns : [];
-					let rows: any[] = Array.isArray(f.tableRows) ? f.tableRows : [];
+					let cols: ITableColumnDefinition[] = Array.isArray(f.tableColumns) ? f.tableColumns : [];
+					let rows: Record<string, unknown>[] = Array.isArray(f.tableRows) ? f.tableRows : [];
 					let dbPath = f.tableDbPath || '';
 					let tableName = f.tableDbTableName || '';
 					let sqlOut = (f.debugSqlOutput || '').trim();
 					if (savedObj && typeof savedObj === 'object') {
-						if (Array.isArray(savedObj.columns)) cols = savedObj.columns;
-						if (Array.isArray(savedObj.rows)) rows = savedObj.rows;
-						if (savedObj.dbPath !== undefined) dbPath = String(savedObj.dbPath);
-						if (savedObj.tableName !== undefined) tableName = String(savedObj.tableName);
+						if (Array.isArray(savedObj.columns)) { cols = savedObj.columns; }
+						if (Array.isArray(savedObj.rows)) { rows = savedObj.rows; }
+						if (savedObj.dbPath !== undefined) { dbPath = String(savedObj.dbPath); }
+						if (savedObj.tableName !== undefined) { tableName = String(savedObj.tableName); }
 						if (savedObj.sqlOutput !== undefined || savedObj.debugSqlOutput !== undefined) {
 							sqlOut = String(savedObj.sqlOutput ?? savedObj.debugSqlOutput ?? '').trim();
 						}
@@ -7205,14 +7390,14 @@ ${rawErr}
 						if (liveJsonStr) {
 							try {
 								const liveParsed = JSON.parse(liveJsonStr);
-								if (Array.isArray(liveParsed.columns)) cols = liveParsed.columns;
-								if (Array.isArray(liveParsed.rows)) rows = liveParsed.rows;
-								if (liveParsed.dbPath !== undefined) dbPath = String(liveParsed.dbPath);
-								if (liveParsed.tableName !== undefined) tableName = String(liveParsed.tableName);
-								if (liveParsed.sqlOutput !== undefined) sqlOut = String(liveParsed.sqlOutput).trim();
+								if (Array.isArray(liveParsed.columns)) { cols = liveParsed.columns; }
+								if (Array.isArray(liveParsed.rows)) { rows = liveParsed.rows; }
+								if (liveParsed.dbPath !== undefined) { dbPath = String(liveParsed.dbPath); }
+								if (liveParsed.tableName !== undefined) { tableName = String(liveParsed.tableName); }
+								if (liveParsed.sqlOutput !== undefined) { sqlOut = String(liveParsed.sqlOutput).trim(); }
 							} catch { }
 						}
-						const liveSqlBox = card.querySelector('.sql-output-box') as HTMLElement | null;
+						const liveSqlBox = templatePart(card, '.sql-output-box') as HTMLElement | null;
 						if (liveSqlBox && liveSqlBox.style.fontStyle !== 'italic' && liveSqlBox.textContent) {
 							const boxTxt = liveSqlBox.textContent.trim();
 							if (boxTxt && !boxTxt.startsWith('No SQL execution output yet.')) {
@@ -7221,13 +7406,13 @@ ${rawErr}
 						}
 					}
 					const colNames = cols.length > 0
-						? cols.map((c: any) => c.name || c.id)
+						? cols.map(c => c.name || c.id)
 						: (rows.length > 0 && typeof rows[0] === 'object' && rows[0] !== null ? Object.keys(rows[0]) : []);
 					const mdTable = colNames.length > 0
 						? [
 							`| ${colNames.join(' | ')} |`,
 							`| ${colNames.map(() => '---').join(' | ')} |`,
-							...rows.map((r: any) => `| ${colNames.map((cn: string) => String(r?.[cn] ?? '').replace(/\|/g, '\\|')).join(' | ')} |`)
+							...rows.map(r => `| ${colNames.map((cn: string) => String(r?.[cn] ?? '').replace(/\|/g, '\\|')).join(' | ')} |`)
 						].join('\n')
 						: JSON.stringify(rows);
 					primitiveVal = sqlOut || mdTable;
@@ -7239,14 +7424,14 @@ ${rawErr}
 					subProps['dbPath'] = dbPath;
 					subProps['tableName'] = tableName;
 				} else if (f.type === 'ssh') {
-					let sshOut = (f as any).sshOutput || '';
-					let sshLastRaw: string | undefined = (f as any).sshLastRawOutput !== undefined ? String((f as any).sshLastRawOutput) : undefined;
-					let sshLastRawEntries: ISshRawCommandEntry[] | undefined = Array.isArray((f as any).sshLastRawEntries) ? (f as any).sshLastRawEntries : undefined;
-					let sshLastN: string | undefined = (f as any).sshLastOutput !== undefined ? String((f as any).sshLastOutput) : undefined;
-					let sshOutLines: number = typeof (f as any).sshOutputLines === 'number' && (f as any).sshOutputLines > 0 ? (f as any).sshOutputLines : 50;
-					let sshHost = (f as any).sshHost || '';
-					let sshCwd = (f as any).sshCwd || '~';
-					let sshCmd = (f as any).sshCommand || '';
+					let sshOut = f.sshOutput || '';
+					let sshLastRaw: string | undefined = f.sshLastRawOutput !== undefined ? String(f.sshLastRawOutput) : undefined;
+					let sshLastRawEntries: ISshRawCommandEntry[] | undefined = Array.isArray(f.sshLastRawEntries) ? f.sshLastRawEntries : undefined;
+					let sshLastN: string | undefined = f.sshLastOutput !== undefined ? String(f.sshLastOutput) : undefined;
+					let sshOutLines: number = typeof f.sshOutputLines === 'number' && f.sshOutputLines > 0 ? f.sshOutputLines : 50;
+					let sshHost = f.sshHost || '';
+					let sshCwd = f.sshCwd || '~';
+					let sshCmd = f.sshCommand || '';
 					// Saved ticket value first, then the live card state; both use the template config names.
 					const liveCard = findLiveCard();
 					for (const source of [savedObj, liveCard?.getAttribute('data-ssh-json')]) {
@@ -7254,17 +7439,17 @@ ${rawErr}
 						if (!sv) {
 							continue;
 						}
-						if (sv.sshOutput !== undefined) sshOut = String(sv.sshOutput ?? '');
-						if (sv.sshLastRawOutput !== undefined) sshLastRaw = String(sv.sshLastRawOutput ?? '');
-						if (Array.isArray(sv.sshLastRawEntries)) sshLastRawEntries = sv.sshLastRawEntries;
-						if (sv.sshLastOutput !== undefined) sshLastN = String(sv.sshLastOutput ?? '');
+						if (sv.sshOutput !== undefined) { sshOut = String(sv.sshOutput ?? ''); }
+						if (sv.sshLastRawOutput !== undefined) { sshLastRaw = String(sv.sshLastRawOutput ?? ''); }
+						if (Array.isArray(sv.sshLastRawEntries)) { sshLastRawEntries = sv.sshLastRawEntries; }
+						if (sv.sshLastOutput !== undefined) { sshLastN = String(sv.sshLastOutput ?? ''); }
 						if (sv.sshOutputLines !== undefined) {
 							const parsedN = Number(sv.sshOutputLines);
-							if (!isNaN(parsedN) && parsedN > 0) sshOutLines = parsedN;
+							if (!isNaN(parsedN) && parsedN > 0) { sshOutLines = parsedN; }
 						}
-						if (sv.sshHost !== undefined) sshHost = String(sv.sshHost ?? '');
-						if (sv.sshCwd !== undefined) sshCwd = String(sv.sshCwd ?? '~');
-						if (sv.sshCommand !== undefined) sshCmd = String(sv.sshCommand ?? '');
+						if (sv.sshHost !== undefined) { sshHost = String(sv.sshHost ?? ''); }
+						if (sv.sshCwd !== undefined) { sshCwd = String(sv.sshCwd ?? '~'); }
+						if (sv.sshCommand !== undefined) { sshCmd = String(sv.sshCommand ?? ''); }
 					}
 					const lastNOut = (sshLastRawEntries && sshLastRawEntries.length > 0)
 						? formatSshCommandsJsonOutput(sshLastRawEntries, sshOutLines)
@@ -7279,27 +7464,27 @@ ${rawErr}
 					subProps['command'] = sshCmd;
 				} else if (f.type === 'http_request') {
 					let resBody = '';
-					let resData: any = undefined;
+					let resData: unknown = undefined;
 					let resStatus = 0;
 					let resStatusText = '';
 					let isOk = false;
 					const httpSaved = normalizeHttpTicketValue(savedObj);
 					if (httpSaved) {
-						if (httpSaved.httpResponseBody !== undefined) resBody = String(httpSaved.httpResponseBody);
-						if (httpSaved.httpResponseData !== undefined) resData = httpSaved.httpResponseData;
-						if (httpSaved.httpResponseStatus !== undefined) resStatus = Number(httpSaved.httpResponseStatus);
-						if (httpSaved.httpResponseStatusText !== undefined) resStatusText = String(httpSaved.httpResponseStatusText);
-						if (savedObj.ok !== undefined) isOk = Boolean(savedObj.ok);
+						if (httpSaved.httpResponseBody !== undefined) { resBody = String(httpSaved.httpResponseBody); }
+						if (httpSaved.httpResponseData !== undefined) { resData = httpSaved.httpResponseData; }
+						if (httpSaved.httpResponseStatus !== undefined) { resStatus = Number(httpSaved.httpResponseStatus); }
+						if (httpSaved.httpResponseStatusText !== undefined) { resStatusText = String(httpSaved.httpResponseStatusText); }
+						if ((savedObj as IStoredPrimitiveValue).ok !== undefined) { isOk = Boolean((savedObj as IStoredPrimitiveValue).ok); }
 					}
-					if (!resBody && f.httpResponseBody) resBody = f.httpResponseBody;
-					if (!resData && f.httpResponseData) resData = f.httpResponseData;
-					if (!resStatus && f.httpResponseStatus) resStatus = f.httpResponseStatus;
-					if (!resStatusText && f.httpResponseStatusText) resStatusText = f.httpResponseStatusText;
-					if (!isOk && resStatus >= 200 && resStatus < 300) isOk = true;
+					if (!resBody && f.httpResponseBody) { resBody = f.httpResponseBody; }
+					if (!resData && f.httpResponseData) { resData = f.httpResponseData; }
+					if (!resStatus && f.httpResponseStatus) { resStatus = f.httpResponseStatus; }
+					if (!resStatusText && f.httpResponseStatusText) { resStatusText = f.httpResponseStatusText; }
+					if (!isOk && resStatus >= 200 && resStatus < 300) { isOk = true; }
 
 					const card = findLiveCard();
 					if (card) {
-						const bodyDisplay = card.querySelector('.http-response-body-display') as HTMLElement | null;
+						const bodyDisplay = templatePart(card, '.http-response-body-display') as HTMLElement | null;
 						if (bodyDisplay && bodyDisplay.textContent && !bodyDisplay.textContent.includes('No response received yet.')) {
 							resBody = bodyDisplay.textContent.trim();
 						}
@@ -7362,7 +7547,7 @@ ${rawErr}
 	}
 
 	private _interpolateParameters(text: string): string {
-		if (!text) return text;
+		if (!text) { return text; }
 		const paramMap = this._buildInterpolationParamMap();
 
 		// Interpolate {{param}}, {param}, and @param
@@ -7379,7 +7564,7 @@ ${rawErr}
 		return result;
 	}
 
-	private _lookupCustomMetadataByField(labelOrKey: string, matchingField?: any): any {
+	private _lookupCustomMetadataByField(labelOrKey: string, matchingField?: { label?: string; id?: string }): string | undefined {
 		const meta = this._lastParsedData?.customMetadata;
 		if (!meta) { return undefined; }
 
@@ -7399,7 +7584,7 @@ ${rawErr}
 			addCandidate(matchingField.label);
 			addCandidate(matchingField.id);
 		} else if (this._lastCustomModule?.fields) {
-			const found = this._lastCustomModule.fields.find((f: any) =>
+			const found = this._lastCustomModule.fields.find(f =>
 				(f.label && f.label.toLowerCase() === labelOrKey.toLowerCase()) ||
 				(f.id && f.id.toLowerCase() === labelOrKey.toLowerCase()) ||
 				(f.id && f.id.toLowerCase().replace(/_/g, ' ') === labelOrKey.toLowerCase().replace(/_/g, ' '))
@@ -7424,7 +7609,7 @@ ${rawErr}
 		return undefined;
 	}
 
-	private async _savePromptPrimitiveData(fieldKey: string, promptData: any): Promise<void> {
+	private async _savePromptPrimitiveData(fieldKey: string, promptData: unknown): Promise<void> {
 		await this._persistCustomFieldQuietly(fieldKey, JSON.stringify(promptData));
 	}
 
@@ -7437,7 +7622,7 @@ ${rawErr}
 		};
 		// Also sync under the current schema field label if fieldKey was a legacy ID-based key (e.g. "AI Prompt 5" -> "Skills and Features")
 		if (this._lastCustomModule?.fields) {
-			const matchedSchemaField = this._lastCustomModule.fields.find((f: any) =>
+			const matchedSchemaField = this._lastCustomModule.fields.find(f =>
 				(f.label && f.label.toLowerCase() === fieldKey.toLowerCase()) ||
 				(f.id && f.id.toLowerCase() === fieldKey.toLowerCase()) ||
 				(f.id && f.id.toLowerCase().replace(/_/g, ' ') === fieldKey.toLowerCase().replace(/_/g, ' '))
@@ -7474,25 +7659,15 @@ ${rawErr}
 	private async _togglePromptVoiceInput(micBtn: HTMLButtonElement): Promise<void> {
 		const wrapper = micBtn.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
 		const card = micBtn.closest('.prompt-primitive-card') as HTMLElement | null;
-		const textarea = wrapper?.querySelector('textarea') as HTMLTextAreaElement | null;
-		const recordingIndicator = wrapper?.querySelector('.prompt-voice-recording-indicator') as HTMLElement | null;
-		const recordingTimeSpan = recordingIndicator?.querySelector('.prompt-voice-recording-time') as HTMLElement | null;
+		const textarea = templatePart(wrapper, 'textarea') as HTMLTextAreaElement | null;
+		const recordingIndicator = templatePart(wrapper, '.prompt-voice-recording-indicator') as HTMLElement | null;
+		const recordingTimeSpan = templatePart(recordingIndicator, '.prompt-voice-recording-time') as HTMLElement | null;
 		const fieldKey = micBtn.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
 		if (!textarea) {
 			return;
 		}
 
-		const btnState = (micBtn as any)._voiceInputState as {
-			isRecording: boolean;
-			isTranscribing: boolean;
-			mediaRecorder?: any;
-			recordingTimer?: any;
-			recordingSeconds: number;
-			stream?: MediaStream;
-			lastSelectionStart?: number;
-			lastSelectionEnd?: number;
-			stopRecording?: () => void;
-		} | undefined;
+		const btnState = voiceInputStates.get(micBtn);
 
 		if (btnState?.isRecording && btnState.stopRecording) {
 			btnState.stopRecording();
@@ -7505,15 +7680,15 @@ ${rawErr}
 		const state = {
 			isRecording: false,
 			isTranscribing: false,
-			mediaRecorder: undefined as any,
-			recordingTimer: undefined as any,
+			mediaRecorder: undefined as MediaRecorder | undefined,
+			recordingTimer: undefined as number | undefined,
 			recordingSeconds: 0,
 			stream: undefined as MediaStream | undefined,
 			lastSelectionStart: typeof textarea.selectionStart === 'number' ? textarea.selectionStart : textarea.value.length,
 			lastSelectionEnd: typeof textarea.selectionEnd === 'number' ? textarea.selectionEnd : textarea.value.length,
 			stopRecording: () => { }
 		};
-		(micBtn as any)._voiceInputState = state;
+		voiceInputStates.set(micBtn, state);
 
 		const applyVisualState = () => {
 			if (state.isRecording) {
@@ -7537,7 +7712,7 @@ ${rawErr}
 
 		state.stopRecording = () => {
 			if (state.recordingTimer) {
-				clearInterval(state.recordingTimer);
+				mainWindow.clearInterval(state.recordingTimer);
 				state.recordingTimer = undefined;
 			}
 			if (state.mediaRecorder && state.isRecording) {
@@ -7558,10 +7733,10 @@ ${rawErr}
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 			state.stream = stream;
 			const audioChunks: BlobPart[] = [];
-			const mediaRecorder = new (window as any).MediaRecorder(stream);
+			const mediaRecorder = new mainWindow.MediaRecorder(stream);
 			state.mediaRecorder = mediaRecorder;
 
-			mediaRecorder.ondataavailable = (e: any) => {
+			mediaRecorder.ondataavailable = (e: BlobEvent) => {
 				if (e.data && e.data.size > 0) {
 					audioChunks.push(e.data);
 				}
@@ -7628,9 +7803,9 @@ ${rawErr}
 					} else if (result.error) {
 						this._notificationService.warn(`Voice Transcription: ${result.error}`);
 					}
-				} catch (err: any) {
+				} catch (err) {
 					console.error('Failed to transcribe voice input:', err);
-					this._notificationService.error(`Voice transcription error: ${err?.message || err}`);
+					this._notificationService.error(`Voice transcription error: ${(err as Error | undefined)?.message || err}`);
 				} finally {
 					state.isTranscribing = false;
 					if (recordingIndicator) {
@@ -7651,7 +7826,7 @@ ${rawErr}
 			}
 			applyVisualState();
 
-			state.recordingTimer = setInterval(() => {
+			state.recordingTimer = mainWindow.setInterval(() => {
 				state.recordingSeconds++;
 				if (recordingTimeSpan) {
 					const mins = Math.floor(state.recordingSeconds / 60);
@@ -7662,9 +7837,9 @@ ${rawErr}
 					state.stopRecording();
 				}
 			}, 1000);
-		} catch (err: any) {
+		} catch (err) {
 			console.error('Error accessing microphone:', err);
-			this._notificationService.error(`Microphone access error: ${err?.message || err}`);
+			this._notificationService.error(`Microphone access error: ${(err as Error | undefined)?.message || err}`);
 		}
 	}
 
@@ -7734,10 +7909,10 @@ ${rawErr}
 
 	private _syncPromptBoxExpandUi(wrapper: HTMLElement): void {
 		const isExpanded = wrapper.getAttribute('data-expanded') === 'true';
-		const displayEl = wrapper.querySelector('.prompt-tokenized-display') as HTMLElement | null;
-		const textareaEl = wrapper.querySelector('textarea') as HTMLTextAreaElement | null;
-		const topExpandBtn = wrapper.querySelector('.prompt-expand-box-btn') as HTMLElement | null;
-		const bottomExpandPill = wrapper.querySelector('.prompt-expand-bottom-pill') as HTMLElement | null;
+		const displayEl = templatePart(wrapper, '.prompt-tokenized-display') as HTMLElement | null;
+		const textareaEl = templatePart(wrapper, 'textarea') as HTMLTextAreaElement | null;
+		const topExpandBtn = templatePart(wrapper, '.prompt-expand-box-btn') as HTMLElement | null;
+		const bottomExpandPill = templatePart(wrapper, '.prompt-expand-bottom-pill') as HTMLElement | null;
 		const rawVal = textareaEl?.value || '';
 		const isLong = isExpanded || this._isPromptBoxContentLong(rawVal, displayEl, textareaEl);
 		const defaultMaxPx = `${EntityDetailEditor._PROMPT_BOX_DEFAULT_MAX_HEIGHT}px`;
@@ -7772,7 +7947,7 @@ ${rawErr}
 				: 'Expand input box to show full content';
 			topExpandBtn.style.background = 'transparent';
 			topExpandBtn.style.border = 'none';
-			const iconEl = topExpandBtn.querySelector('.codicon') as HTMLElement | null;
+			const iconEl = templatePart(topExpandBtn, '.codicon') as HTMLElement | null;
 			if (iconEl) {
 				iconEl.className = isExpanded ? 'codicon codicon-chevron-up' : 'codicon codicon-chevron-down';
 			}
@@ -7791,7 +7966,7 @@ ${rawErr}
 
 	private _syncPromptTokenizedDisplay(textarea: HTMLTextAreaElement, switchToDisplayMode: boolean): void {
 		const wrapper = textarea.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
-		const displayEl = wrapper?.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+		const displayEl = templatePart(wrapper, '.prompt-tokenized-display') as HTMLElement | null;
 		if (!displayEl || !wrapper) {
 			return;
 		}
@@ -7837,7 +8012,7 @@ ${rawErr}
 				let node: Node | null = range.startContainer;
 				const offsetInNode = range.startOffset;
 				while (node && node !== displayEl) {
-					if (node instanceof HTMLElement) {
+					if (isHTMLElement(node)) {
 						if (node.classList.contains('prompt-raw-segment')) {
 							const segStart = Number(node.getAttribute('data-raw-start'));
 							if (!isNaN(segStart)) {
@@ -7862,11 +8037,11 @@ ${rawErr}
 
 	private _syncPromptBoxLockUi(wrapper: HTMLElement): void {
 		const isLocked = wrapper.getAttribute('data-locked') === 'true';
-		const lockBtn = wrapper.querySelector('.prompt-lock-box-btn') as HTMLElement | null;
-		const displayEl = wrapper.querySelector('.prompt-tokenized-display') as HTMLElement | null;
-		const micBtn = wrapper.querySelector('.prompt-voice-mic-btn') as HTMLElement | null;
+		const lockBtn = templatePart(wrapper, '.prompt-lock-box-btn') as HTMLElement | null;
+		const displayEl = templatePart(wrapper, '.prompt-tokenized-display') as HTMLElement | null;
+		const micBtn = templatePart(wrapper, '.prompt-voice-mic-btn') as HTMLElement | null;
 		const itemEl = wrapper.closest('.prompt-user-input-item') as HTMLElement | null;
-		const chipsContainer = itemEl?.querySelector('.prompt-user-input-chips') as HTMLElement | null;
+		const chipsContainer = templatePart(itemEl, '.prompt-user-input-chips') as HTMLElement | null;
 
 		if (lockBtn) {
 			lockBtn.style.color = isLocked ? '#fbbf24' : '#34d399';
@@ -7875,7 +8050,7 @@ ${rawErr}
 			lockBtn.title = isLocked
 				? 'Locked (Read-Only) — Click to Unlock for editing'
 				: 'Unlocked (Editable) — Click to Lock and protect from accidental edits';
-			const iconEl = lockBtn.querySelector('.codicon') as HTMLElement | null;
+			const iconEl = templatePart(lockBtn, '.codicon') as HTMLElement | null;
 			if (iconEl) {
 				iconEl.className = isLocked ? 'codicon codicon-lock' : 'codicon codicon-unlock';
 			}
@@ -7904,7 +8079,7 @@ ${rawErr}
 		const currentlyLocked = wrapper.getAttribute('data-locked') === 'true';
 		const nextLocked = !currentlyLocked;
 		wrapper.setAttribute('data-locked', nextLocked ? 'true' : 'false');
-		const textarea = wrapper.querySelector('textarea') as HTMLTextAreaElement | null;
+		const textarea = templatePart(wrapper, 'textarea') as HTMLTextAreaElement | null;
 		if (nextLocked && textarea && textarea.style.display !== 'none') {
 			if (typeof textarea.selectionStart === 'number') {
 				textarea.setAttribute('data-last-selection-start', String(textarea.selectionStart));
@@ -7917,8 +8092,8 @@ ${rawErr}
 	}
 
 	private _pulsePromptLockBtn(wrapper: HTMLElement): void {
-		const lockBtn = wrapper.querySelector('.prompt-lock-box-btn') as HTMLElement | null;
-		const displayEl = wrapper.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+		const lockBtn = templatePart(wrapper, '.prompt-lock-box-btn') as HTMLElement | null;
+		const displayEl = templatePart(wrapper, '.prompt-tokenized-display') as HTMLElement | null;
 		if (lockBtn) {
 			const prevShadow = lockBtn.style.boxShadow;
 			const prevTransform = lockBtn.style.transform;
@@ -7940,7 +8115,7 @@ ${rawErr}
 
 	private _switchPromptDisplayToEdit(displayEl: HTMLElement, ev?: MouseEvent, explicitCaretOffset?: number): void {
 		const wrapper = displayEl.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
-		const textarea = wrapper?.querySelector('textarea') as HTMLTextAreaElement | null;
+		const textarea = templatePart(wrapper, 'textarea') as HTMLTextAreaElement | null;
 		if (!textarea || !wrapper) {
 			return;
 		}
@@ -7995,11 +8170,11 @@ ${rawErr}
 				return Boolean(res.confirmed);
 			}
 		} catch { }
-		return window.confirm(detail ? `${message}\n\n${detail}` : message);
+		return mainWindow.confirm(detail ? `${message}\n\n${detail}` : message);
 	}
 
 	private _flashMovedPromptBox(itemEl: HTMLElement): void {
-		const displayEl = itemEl.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+		const displayEl = templatePart(itemEl, '.prompt-tokenized-display') as HTMLElement | null;
 		const targetEl = displayEl || itemEl;
 		try {
 			itemEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -8015,11 +8190,11 @@ ${rawErr}
 	}
 
 	private async _promptJumpUserInputPosition(card: HTMLElement, itemEl: HTMLElement, fieldKey: string): Promise<void> {
-		const listEl = card.querySelector('.prompt-user-inputs-list') as HTMLElement | null;
+		const listEl = templatePart(card, '.prompt-user-inputs-list') as HTMLElement | null;
 		if (!listEl) {
 			return;
 		}
-		const items = Array.from(listEl.querySelectorAll('.prompt-user-input-item')) as HTMLElement[];
+		const items = Array.from(templateParts(listEl, '.prompt-user-input-item')) as HTMLElement[];
 		const total = items.length;
 		const currentIdx = items.indexOf(itemEl);
 		if (total <= 1 || currentIdx < 0) {
@@ -8027,7 +8202,7 @@ ${rawErr}
 		}
 
 		const picks = items.map((it, idx) => {
-			const ta = it.querySelector('.prompt-user-textarea') as HTMLTextAreaElement | null;
+			const ta = templatePart(it, '.prompt-user-textarea') as HTMLTextAreaElement | null;
 			const firstLine = (ta?.value || '').trim().split(/\r?\n/)[0] || '(Empty)';
 			const snippet = firstLine.length > 56 ? `${firstLine.slice(0, 56)}...` : firstLine;
 			const isCurrent = idx === currentIdx;
@@ -8145,12 +8320,12 @@ ${rawErr}
 	}
 
 	private _refreshPromptUserInputItemsUi(card: HTMLElement): void {
-		const listEl = card.querySelector('.prompt-user-inputs-list') as HTMLElement | null;
-		const countBadge = card.querySelector('.prompt-user-inputs-count-badge') as HTMLElement | null;
+		const listEl = templatePart(card, '.prompt-user-inputs-list') as HTMLElement | null;
+		const countBadge = templatePart(card, '.prompt-user-inputs-count-badge') as HTMLElement | null;
 		if (!listEl) {
 			return;
 		}
-		const items = Array.from(listEl.querySelectorAll('.prompt-user-input-item')) as HTMLElement[];
+		const items = Array.from(templateParts(listEl, '.prompt-user-input-item')) as HTMLElement[];
 		const total = items.length;
 		const isMulti = total > 1;
 		const rightPadPx = isMulti ? 106 : 48;
@@ -8166,13 +8341,13 @@ ${rawErr}
 		items.forEach((item, idx) => {
 			item.setAttribute('data-input-index', String(idx));
 			item.style.cssText = 'display: flex; flex-direction: column; gap: 6px;';
-			const badge = item.querySelector('.prompt-user-input-badge') as HTMLElement | null;
+			const badge = templatePart(item, '.prompt-user-input-badge') as HTMLElement | null;
 			if (badge) {
 				badge.textContent = `#${idx + 1}`;
 				badge.style.display = isMulti ? 'inline-flex' : 'none';
 				badge.title = `Click to jump / move User Input #${idx + 1} to any position (1 ~ ${total})`;
 			}
-			const moveUpBtn = item.querySelector('.prompt-move-up-user-input-btn') as HTMLElement | null;
+			const moveUpBtn = templatePart(item, '.prompt-move-up-user-input-btn') as HTMLElement | null;
 			if (moveUpBtn) {
 				const canUp = isMulti && idx > 0;
 				moveUpBtn.style.display = isMulti ? 'inline-flex' : 'none';
@@ -8181,7 +8356,7 @@ ${rawErr}
 				moveUpBtn.style.cursor = canUp ? 'pointer' : 'default';
 				moveUpBtn.title = canUp ? `Move User Input #${idx + 1} Up (to #${idx})` : 'Already at the top (#1)';
 			}
-			const moveDownBtn = item.querySelector('.prompt-move-down-user-input-btn') as HTMLElement | null;
+			const moveDownBtn = templatePart(item, '.prompt-move-down-user-input-btn') as HTMLElement | null;
 			if (moveDownBtn) {
 				const canDown = isMulti && idx < total - 1;
 				moveDownBtn.style.display = isMulti ? 'inline-flex' : 'none';
@@ -8190,15 +8365,15 @@ ${rawErr}
 				moveDownBtn.style.cursor = canDown ? 'pointer' : 'default';
 				moveDownBtn.title = canDown ? `Move User Input #${idx + 1} Down (to #${idx + 2})` : `Already at the bottom (#${total})`;
 			}
-			const removeBtn = item.querySelector('.prompt-remove-user-input-btn') as HTMLElement | null;
+			const removeBtn = templatePart(item, '.prompt-remove-user-input-btn') as HTMLElement | null;
 			if (removeBtn) {
 				removeBtn.title = isMulti ? `Delete User Input #${idx + 1} (Requires Confirmation)` : 'Delete User Prompt Input Box (Requires Confirmation)';
 			}
-			const displayEl = item.querySelector('.prompt-tokenized-display') as HTMLElement | null;
+			const displayEl = templatePart(item, '.prompt-tokenized-display') as HTMLElement | null;
 			if (displayEl) {
 				displayEl.style.paddingRight = `${rightPadPx}px`;
 			}
-			const ta = item.querySelector('.prompt-user-textarea') as HTMLTextAreaElement | null;
+			const ta = templatePart(item, '.prompt-user-textarea') as HTMLTextAreaElement | null;
 			if (ta) {
 				ta.style.paddingRight = `${rightPadPx}px`;
 				ta.setAttribute('data-input-index', String(idx));
@@ -8207,7 +8382,7 @@ ${rawErr}
 					: 'Enter your prompt or custom instructions here...';
 				this._syncPromptTokenizedDisplay(ta, false);
 			}
-			const wrapper = item.querySelector('.voice-input-textarea-wrapper') as HTMLElement | null;
+			const wrapper = templatePart(item, '.voice-input-textarea-wrapper') as HTMLElement | null;
 			if (wrapper) {
 				this._syncPromptBoxLockUi(wrapper);
 			}
@@ -8255,9 +8430,9 @@ ${rawErr}
 		combinedRawPrompt: string;
 		interpolatedPrompt: string;
 	} {
-		const preInjectedTa = card.querySelector('.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
-		const userInputsListEl = card.querySelector('.prompt-user-inputs-list') as HTMLElement | null;
-		const userTextareas = Array.from(card.querySelectorAll('.prompt-user-textarea')) as HTMLTextAreaElement[];
+		const preInjectedTa = templatePart(card, '.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
+		const userInputsListEl = templatePart(card, '.prompt-user-inputs-list') as HTMLElement | null;
+		const userTextareas = Array.from(templateParts(card, '.prompt-user-textarea')) as HTMLTextAreaElement[];
 		const preInjectedPrompt = (preInjectedTa ? preInjectedTa.value : (card.getAttribute('data-pre-injected-prompt') || '')).trim();
 		if (preInjectedTa) {
 			card.setAttribute('data-pre-injected-prompt', preInjectedTa.value);
@@ -8271,7 +8446,7 @@ ${rawErr}
 		} else {
 			userPrompts = userTextareas.length > 0
 				? userTextareas.map(ta => ta.value || '')
-				: [((card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null)?.value || '')];
+				: [((templatePart(card, '.prompt-instruction-textarea') as HTMLTextAreaElement | null)?.value || '')];
 		}
 		const { formattedUserPrompt, combinedRawPrompt } = this._formatCombinedPromptForLlm(preInjectedPrompt, userPrompts);
 		const interpolatedPrompt = this._interpolateParameters(combinedRawPrompt);
@@ -8377,11 +8552,11 @@ ${rawErr}
 		fullInterpolatedPrompt: string;
 		isFromSavedRun: boolean;
 	} {
-		const providerSelect = card.querySelector('.prompt-provider-select') as HTMLSelectElement | null;
-		const modelSelect = card.querySelector('.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
-		const selectedModelText = card.querySelector('.prompt-selected-model-text') as HTMLElement | null;
-		const customModelInput = card.querySelector('.prompt-custom-model-input') as HTMLInputElement | null;
-		const agentSelect = card.querySelector('.prompt-agent-select') as HTMLSelectElement | null;
+		const providerSelect = templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null;
+		const modelSelect = templatePart(card, '.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
+		const selectedModelText = templatePart(card, '.prompt-selected-model-text') as HTMLElement | null;
+		const customModelInput = templatePart(card, '.prompt-custom-model-input') as HTMLInputElement | null;
+		const agentSelect = templatePart(card, '.prompt-agent-select') as HTMLSelectElement | null;
 
 		const lockedMode = card.getAttribute('data-target-mode') as 'model' | 'agent' | null;
 		const targetMode: 'model' | 'agent' = lockedMode === 'agent' ? 'agent' : 'model';
@@ -8471,7 +8646,7 @@ ${rawErr}
 			scanTokensInText(seg, nonEmptyRawSegments.length > 1 ? `User Input #${idx + 1}` : 'User Prompt');
 		});
 
-		const statusEl = card.querySelector('.prompt-status-text') as HTMLElement | null;
+		const statusEl = templatePart(card, '.prompt-status-text') as HTMLElement | null;
 		const statusStr = (statusEl?.textContent || '').trim();
 		const executedAt = markAsExecutedNow
 			? `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`
@@ -8580,7 +8755,7 @@ ${rawErr}
 		return lines.join('\n');
 	}
 
-	private async _openSentPromptInEditorTab(snapshot: any, fieldKey: string): Promise<void> {
+	private async _openSentPromptInEditorTab(snapshot: Parameters<EntityDetailEditor['_formatSentPromptSnapshotAsMarkdown']>[0], fieldKey: string): Promise<void> {
 		try {
 			const mdContent = this._formatSentPromptSnapshotAsMarkdown(snapshot);
 			await this._editorService.openEditor({
@@ -8589,14 +8764,14 @@ ${rawErr}
 				languageId: 'markdown',
 				options: { pinned: true }
 			});
-		} catch (err: any) {
-			this._notificationService.error(`Failed to open prompt in new tab: ${err?.message || String(err)}`);
+		} catch (err) {
+			this._notificationService.error(`Failed to open prompt in new tab: ${(err as Error | undefined)?.message || String(err)}`);
 		}
 	}
 
 	private _openSentPromptInspectorModal(card: HTMLElement, fieldKey: string): void {
 		const liveSnapshot = this._buildSentPromptSnapshot(card, fieldKey, false);
-		let savedSnapshot: any = null;
+		let savedSnapshot: (ReturnType<EntityDetailEditor['_buildSentPromptSnapshot']> & { isFromSavedRun?: boolean }) | null = null;
 		const rawSaved = card.getAttribute('data-last-sent-payload');
 		if (rawSaved) {
 			try {
@@ -8610,13 +8785,11 @@ ${rawErr}
 		let activeSnapshot = savedSnapshot || liveSnapshot;
 		let activeTab: 'structured' | 'raw' = 'structured';
 
-		const existingOverlay = document.querySelector('.prompt-sent-inspector-modal-overlay');
-		if (existingOverlay) {
-			existingOverlay.remove();
-		}
+		EntityDetailEditor._promptSentInspectorOverlay?.remove();
 
 		const overlay = document.createElement('div');
 		overlay.className = 'prompt-sent-inspector-modal-overlay';
+		EntityDetailEditor._promptSentInspectorOverlay = overlay;
 		overlay.style.cssText = 'position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); z-index: 10000; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(3px); padding: 24px; box-sizing: border-box;';
 
 		const dialog = document.createElement('div');
@@ -8819,12 +8992,12 @@ ${rawErr}
 			}
 
 			// Wire interactive buttons inside the dialog
-			const closeBtn = dialog.querySelector('.inspector-close-btn') as HTMLElement | null;
+			const closeBtn = templatePart(dialog, '.inspector-close-btn') as HTMLElement | null;
 			if (closeBtn) {
 				closeBtn.onclick = () => closeDialog();
 			}
 
-			const openTabBtn = dialog.querySelector('.inspector-open-tab-btn') as HTMLElement | null;
+			const openTabBtn = templatePart(dialog, '.inspector-open-tab-btn') as HTMLElement | null;
 			if (openTabBtn) {
 				openTabBtn.onclick = () => {
 					this._openSentPromptInEditorTab(activeSnapshot, fieldKey);
@@ -8832,7 +9005,7 @@ ${rawErr}
 				};
 			}
 
-			const tabBtns = Array.from(dialog.querySelectorAll('.inspector-tab-btn')) as HTMLElement[];
+			const tabBtns = Array.from(templateParts(dialog, '.inspector-tab-btn')) as HTMLElement[];
 			tabBtns.forEach(btn => {
 				btn.onclick = () => {
 					const t = btn.getAttribute('data-tab') as 'structured' | 'raw';
@@ -8843,7 +9016,7 @@ ${rawErr}
 				};
 			});
 
-			const sourceBtns = Array.from(dialog.querySelectorAll('.inspector-source-btn')) as HTMLElement[];
+			const sourceBtns = Array.from(templateParts(dialog, '.inspector-source-btn')) as HTMLElement[];
 			sourceBtns.forEach(btn => {
 				btn.onclick = () => {
 					const src = btn.getAttribute('data-source');
@@ -8857,7 +9030,7 @@ ${rawErr}
 				};
 			});
 
-			const copyBtns = Array.from(dialog.querySelectorAll('.inspector-copy-chunk-btn')) as HTMLElement[];
+			const copyBtns = Array.from(templateParts(dialog, '.inspector-copy-chunk-btn')) as HTMLElement[];
 			copyBtns.forEach(btn => {
 				btn.onclick = () => {
 					const kind = btn.getAttribute('data-copy-kind');
@@ -8892,23 +9065,23 @@ ${rawErr}
 		});
 		const onKeyDown = (ev: KeyboardEvent) => {
 			if (ev.key === 'Escape') {
-				document.removeEventListener('keydown', onKeyDown);
+				mainWindow.document.removeEventListener('keydown', onKeyDown);
 				closeDialog();
 			}
 		};
-		document.addEventListener('keydown', onKeyDown);
-		document.body.appendChild(overlay);
+		mainWindow.document.addEventListener('keydown', onKeyDown);
+		mainWindow.document.body.appendChild(overlay);
 	}
 
-	private async _savePromptDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string): Promise<any> {
-		const textarea = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
-		const providerSelect = card.querySelector('.prompt-provider-select') as HTMLSelectElement | null;
-		const modelSelect = card.querySelector('.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
-		const selectedModelText = card.querySelector('.prompt-selected-model-text') as HTMLElement | null;
-		const customModelInput = card.querySelector('.prompt-custom-model-input') as HTMLInputElement | null;
-		const agentSelect = card.querySelector('.prompt-agent-select') as HTMLSelectElement | null;
-		const rawOutputTa = card.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
-		const outputDisplay = card.querySelector('.prompt-output-display') as HTMLElement | null;
+	private async _savePromptDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string): Promise<Record<string, unknown>> {
+		const textarea = templatePart(card, '.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+		const providerSelect = templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null;
+		const modelSelect = templatePart(card, '.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
+		const selectedModelText = templatePart(card, '.prompt-selected-model-text') as HTMLElement | null;
+		const customModelInput = templatePart(card, '.prompt-custom-model-input') as HTMLInputElement | null;
+		const agentSelect = templatePart(card, '.prompt-agent-select') as HTMLSelectElement | null;
+		const rawOutputTa = templatePart(card, '.prompt-raw-output') as HTMLTextAreaElement | null;
+		const outputDisplay = templatePart(card, '.prompt-output-display') as HTMLElement | null;
 
 		const lockedMode = card.getAttribute('data-target-mode') as 'model' | 'agent' | null;
 		const targetMode: 'model' | 'agent' = lockedMode === 'agent' ? 'agent' : 'model';
@@ -8922,14 +9095,14 @@ ${rawErr}
 			? (agentSelect?.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || '')
 			: '';
 		const userCustomizedTarget = card.getAttribute('data-user-customized-target') === 'true';
-		const userTextareas = Array.from(card.querySelectorAll('.prompt-user-textarea')) as HTMLTextAreaElement[];
+		const userTextareas = Array.from(templateParts(card, '.prompt-user-textarea')) as HTMLTextAreaElement[];
 		const userPrompts = userTextareas.length > 0
 			? userTextareas.map(ta => ta.value || '')
 			: [textarea?.value || ''];
 		const userPromptsLocked = userTextareas.length > 0
 			? userTextareas.map(ta => ta.closest('.voice-input-textarea-wrapper')?.getAttribute('data-locked') === 'true')
 			: [textarea?.closest('.voice-input-textarea-wrapper')?.getAttribute('data-locked') === 'true'];
-		const preInjectedTa = card.querySelector('.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
+		const preInjectedTa = templatePart(card, '.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
 		const preInjectedPrompt = preInjectedTa ? preInjectedTa.value : (card.getAttribute('data-pre-injected-prompt') || '');
 		const preInjectedWrapper = preInjectedTa?.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
 		const preInjectedLocked = preInjectedWrapper ? preInjectedWrapper.getAttribute('data-locked') === 'true' : undefined;
@@ -8946,7 +9119,7 @@ ${rawErr}
 		}
 		const lastExecuted = outputOverride !== undefined && outputOverride === '' ? '' : `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
 
-		const promptData: Record<string, any> = {
+		const promptData: Record<string, unknown> = {
 			userPrompt,
 			userPrompts,
 			userPromptsLocked,
@@ -8984,7 +9157,7 @@ ${rawErr}
 
 	private _findLivePromptCard(fieldKey: string, fallbackCard: HTMLElement): HTMLElement {
 		if (this._container) {
-			const cards = Array.from(this._container.querySelectorAll('.prompt-primitive-card')) as HTMLElement[];
+			const cards = Array.from(templateParts(this._container, '.prompt-primitive-card')) as HTMLElement[];
 			const match = cards.find(c => c.getAttribute('data-field-key') === fieldKey);
 			if (match) {
 				return match;
@@ -8993,7 +9166,7 @@ ${rawErr}
 		return fallbackCard;
 	}
 
-	private _parseJsonOrPythonListVal(val: any): any[] {
+	private _parseJsonOrPythonListVal(val: unknown): string[] {
 		if (Array.isArray(val)) {
 			return val.map(v => String(v ?? '').trim()).filter(Boolean);
 		}
@@ -9021,7 +9194,7 @@ ${rawErr}
 			while ((m = itemRegex.exec(inner)) !== null) {
 				const rawItem = m[1] !== undefined ? m[1] : m[2];
 				const unescaped = rawItem
-					.replace(/\\'/g, "'")
+					.replace(/\\'/g, '\'')
 					.replace(/\\"/g, '"')
 					.replace(/\\n/g, '\n')
 					.replace(/\\t/g, '\t')
@@ -9069,9 +9242,9 @@ ${rawErr}
 			}
 		}
 
-		let sourceRows: any[] | undefined;
+		let sourceRows: unknown[] | undefined;
 		for (const refName of referencedNames) {
-			const matchingField = this._lastCustomModule?.fields?.find((f: any) =>
+			const matchingField = this._lastCustomModule?.fields?.find(f =>
 				(f.label && f.label.toLowerCase() === refName.toLowerCase()) ||
 				(f.id && f.id.toLowerCase() === refName.toLowerCase()) ||
 				(f.id && f.id.toLowerCase().replace(/_/g, ' ') === refName.toLowerCase().replace(/_/g, ' '))
@@ -9083,8 +9256,8 @@ ${rawErr}
 					if (Array.isArray(parsed) && parsed.length > 0) {
 						sourceRows = parsed;
 						break;
-					} else if (parsed && typeof parsed === 'object' && Array.isArray((parsed as any).rows) && (parsed as any).rows.length > 0) {
-						sourceRows = (parsed as any).rows;
+					} else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.rows) && parsed.rows.length > 0) {
+						sourceRows = parsed.rows;
 						break;
 					}
 				} catch { }
@@ -9103,7 +9276,7 @@ ${rawErr}
 			if (!row || typeof row !== 'object' || Array.isArray(row)) {
 				return row;
 			}
-			const out: Record<string, any> = {};
+			const out: Record<string, unknown> = {};
 			for (const [k, v] of Object.entries(row)) {
 				if (listColumns.has(k.toLowerCase())) {
 					out[k] = this._parseJsonOrPythonListVal(v);
@@ -9140,7 +9313,7 @@ ${rawErr}
 	}
 
 	private async _executePromptWithModel(card: HTMLElement, fieldKey: string): Promise<void> {
-		const textarea = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+		const textarea = templatePart(card, '.prompt-instruction-textarea') as HTMLTextAreaElement | null;
 		const { combinedRawPrompt, interpolatedPrompt } = this._resolveCombinedPromptFromCard(card);
 		if (!combinedRawPrompt) {
 			this._notificationService.warn('Please enter a prompt instruction before running.');
@@ -9152,10 +9325,10 @@ ${rawErr}
 		const sentSnapshotJson = JSON.stringify(sentSnapshot);
 		card.setAttribute('data-last-sent-payload', sentSnapshotJson);
 
-		const modelSelect = card.querySelector('.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
-		const selectedModelText = card.querySelector('.prompt-selected-model-text') as HTMLElement | null;
-		const customModelInput = card.querySelector('.prompt-custom-model-input') as HTMLInputElement | null;
-		const modelCardProvider = card.getAttribute('data-target-provider') || (card.querySelector('.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || undefined;
+		const modelSelect = templatePart(card, '.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
+		const selectedModelText = templatePart(card, '.prompt-selected-model-text') as HTMLElement | null;
+		const customModelInput = templatePart(card, '.prompt-custom-model-input') as HTMLInputElement | null;
+		const modelCardProvider = card.getAttribute('data-target-provider') || (templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || undefined;
 		let modelId = card.getAttribute('data-target-model') || modelSelect?.value.trim() || selectedModelText?.textContent?.trim() || resolveDefaultModelId(modelCardProvider, 'gemini-2.5-flash');
 		if (modelId === 'custom' && customModelInput) {
 			modelId = customModelInput.value.trim() || resolveDefaultModelId(modelCardProvider, 'gpt-4o');
@@ -9166,9 +9339,9 @@ ${rawErr}
 		if (directTableJson) {
 			const liveCard = this._findLivePromptCard(fieldKey, card);
 			liveCard.setAttribute('data-last-sent-payload', sentSnapshotJson);
-			const liveStatus = liveCard.querySelector('.prompt-status-text') as HTMLElement | null;
-			const liveRawTa = liveCard.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
-			const liveOutput = liveCard.querySelector('.prompt-output-display') as HTMLElement | null;
+			const liveStatus = templatePart(liveCard, '.prompt-status-text') as HTMLElement | null;
+			const liveRawTa = templatePart(liveCard, '.prompt-raw-output') as HTMLTextAreaElement | null;
+			const liveOutput = templatePart(liveCard, '.prompt-output-display') as HTMLElement | null;
 			if (liveRawTa) {
 				liveRawTa.value = directTableJson;
 			}
@@ -9190,10 +9363,10 @@ ${rawErr}
 		const updateRunningUi = () => {
 			const liveCard = this._findLivePromptCard(fieldKey, card);
 			const elapsedSec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-			const liveStatus = liveCard.querySelector('.prompt-status-text') as HTMLElement | null;
-			const liveOutput = liveCard.querySelector('.prompt-output-display') as HTMLElement | null;
+			const liveStatus = templatePart(liveCard, '.prompt-status-text') as HTMLElement | null;
+			const liveOutput = templatePart(liveCard, '.prompt-output-display') as HTMLElement | null;
 			if (liveStatus) {
-				liveStatus.textContent = `Running with ${modelId}... ⏳ (${elapsedSec}s)`;
+				liveStatus.textContent = `Running with ${modelId}... \u23F3 (${elapsedSec}s)`;
 				liveStatus.style.color = '#f472b6';
 			}
 			if (liveOutput && (liveOutput.textContent || '').startsWith('Processing prompt with')) {
@@ -9201,17 +9374,17 @@ ${rawErr}
 			}
 		};
 
-		const initialStatus = card.querySelector('.prompt-status-text') as HTMLElement | null;
-		const initialOutput = card.querySelector('.prompt-output-display') as HTMLElement | null;
+		const initialStatus = templatePart(card, '.prompt-status-text') as HTMLElement | null;
+		const initialOutput = templatePart(card, '.prompt-output-display') as HTMLElement | null;
 		if (initialStatus) {
-			initialStatus.textContent = `Running with ${modelId}... ⏳ (0s)`;
+			initialStatus.textContent = `Running with ${modelId}... \u23F3 (0s)`;
 			initialStatus.style.color = '#f472b6';
 		}
 		if (initialOutput) {
 			initialOutput.textContent = `Processing prompt with ${modelId}... (0s elapsed — reasoning models may take 20~90s for long inputs)`;
 		}
 
-		const elapsedTimer = setInterval(updateRunningUi, 1000);
+		const elapsedTimer = mainWindow.setInterval(updateRunningUi, 1000);
 
 		try {
 			const credService = this._instantiationService.invokeFunction(accessor => {
@@ -9222,19 +9395,19 @@ ${rawErr}
 				throw new Error('AI Credential service not available.');
 			}
 
-			const providerSelect = card.querySelector('.prompt-provider-select') as HTMLSelectElement | null;
+			const providerSelect = templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null;
 			const promptDefaultModel = getGlobalDefaultModel();
 			const targetProviderId = card.getAttribute('data-target-provider') || providerSelect?.value.trim() || (promptDefaultModel && modelId === promptDefaultModel.modelId ? promptDefaultModel.providerId : undefined);
 			const res = await credService.executePrompt(modelId, interpolatedPrompt, undefined, targetProviderId);
 
 			this._inFlightPromptRuns.delete(fieldKey);
-			clearInterval(elapsedTimer);
+			mainWindow.clearInterval(elapsedTimer);
 
 			const liveCard = this._findLivePromptCard(fieldKey, card);
 			liveCard.setAttribute('data-last-sent-payload', sentSnapshotJson);
-			const liveStatus = liveCard.querySelector('.prompt-status-text') as HTMLElement | null;
-			const liveRawTa = liveCard.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
-			const liveOutput = liveCard.querySelector('.prompt-output-display') as HTMLElement | null;
+			const liveStatus = templatePart(liveCard, '.prompt-status-text') as HTMLElement | null;
+			const liveRawTa = templatePart(liveCard, '.prompt-raw-output') as HTMLTextAreaElement | null;
+			const liveOutput = templatePart(liveCard, '.prompt-output-display') as HTMLElement | null;
 
 			if (res.success && res.text) {
 				let finalOutText = res.text;
@@ -9275,15 +9448,15 @@ ${rawErr}
 				}
 				throw new Error(res.error || 'Execution failed');
 			}
-		} catch (err: any) {
+		} catch (err) {
 			this._inFlightPromptRuns.delete(fieldKey);
-			clearInterval(elapsedTimer);
+			mainWindow.clearInterval(elapsedTimer);
 
-			const errMsg = err?.message || String(err);
+			const errMsg = (err as Error | undefined)?.message || String(err);
 			const liveCard = this._findLivePromptCard(fieldKey, card);
 			liveCard.setAttribute('data-last-sent-payload', sentSnapshotJson);
-			const liveStatus = liveCard.querySelector('.prompt-status-text') as HTMLElement | null;
-			const liveOutput = liveCard.querySelector('.prompt-output-display') as HTMLElement | null;
+			const liveStatus = templatePart(liveCard, '.prompt-status-text') as HTMLElement | null;
+			const liveOutput = templatePart(liveCard, '.prompt-output-display') as HTMLElement | null;
 			if (liveOutput) {
 				liveOutput.textContent = `[Execution Error]\n${errMsg}`;
 			}
@@ -9296,11 +9469,12 @@ ${rawErr}
 	}
 
 	private async _hydratePromptPrimitiveCards(): Promise<void> {
-		if (!this._container) return;
-		const cards = Array.from(this._container.querySelectorAll('.prompt-primitive-card')) as HTMLElement[];
-		if (cards.length === 0) return;
+		if (!this._container) { return; }
+		const cards = Array.from(templateParts(this._container, '.prompt-primitive-card')) as HTMLElement[];
+		if (cards.length === 0) { return; }
 
-		let loadedCredentials: any[] = [];
+		// Cached model lists are refreshed in place below
+		let loadedCredentials: Mutable<IAgentCredential>[] = [];
 		let credServiceRef: IAgentCredentialService | undefined;
 		try {
 			credServiceRef = this._instantiationService.invokeFunction(accessor => {
@@ -9336,16 +9510,16 @@ ${rawErr}
 		const providerModelsMap = this._getPromptProviderModelsMap();
 
 		for (const card of cards) {
-			const wrappers = Array.from(card.querySelectorAll('.voice-input-textarea-wrapper')) as HTMLElement[];
+			const wrappers = Array.from(templateParts(card, '.voice-input-textarea-wrapper')) as HTMLElement[];
 			wrappers.forEach(w => this._syncPromptBoxExpandUi(w));
 			const cardFieldKey = card.getAttribute('data-field-key') || '';
 			const inFlight = cardFieldKey ? this._inFlightPromptRuns.get(cardFieldKey) : undefined;
 			if (inFlight) {
 				const elapsedSec = Math.max(0, Math.floor((Date.now() - inFlight.startedAt) / 1000));
-				const liveStatus = card.querySelector('.prompt-status-text') as HTMLElement | null;
-				const liveOutput = card.querySelector('.prompt-output-display') as HTMLElement | null;
+				const liveStatus = templatePart(card, '.prompt-status-text') as HTMLElement | null;
+				const liveOutput = templatePart(card, '.prompt-output-display') as HTMLElement | null;
 				if (liveStatus) {
-					liveStatus.textContent = `Running with ${inFlight.modelId}... ⏳ (${elapsedSec}s)`;
+					liveStatus.textContent = `Running with ${inFlight.modelId}... \u23F3 (${elapsedSec}s)`;
 					liveStatus.style.color = '#f472b6';
 				}
 				if (liveOutput) {
@@ -9358,15 +9532,15 @@ ${rawErr}
 			}
 			card.setAttribute('data-prompt-hydrated', 'true');
 			const fieldKey = card.getAttribute('data-field-key') || '';
-			const providerSelect = card.querySelector('.prompt-provider-select') as HTMLSelectElement | null;
-			const modelHiddenInput = card.querySelector('.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
-			const modelPickerBtn = card.querySelector('.prompt-model-picker-btn') as HTMLButtonElement | null;
-			const selectedModelText = card.querySelector('.prompt-selected-model-text') as HTMLElement | null;
-			const modelDropdown = card.querySelector('.prompt-model-dropdown') as HTMLElement | null;
-			const modelSearchInput = card.querySelector('.prompt-model-search-input') as HTMLInputElement | null;
-			const dropdownProviderBadge = card.querySelector('.prompt-dropdown-provider-badge') as HTMLElement | null;
-			const modelListEl = card.querySelector('.prompt-model-list') as HTMLElement | null;
-			const targetBadge = card.querySelector('.prompt-target-badge') as HTMLElement | null;
+			const providerSelect = templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null;
+			const modelHiddenInput = templatePart(card, '.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
+			const modelPickerBtn = templatePart(card, '.prompt-model-picker-btn') as HTMLButtonElement | null;
+			const selectedModelText = templatePart(card, '.prompt-selected-model-text') as HTMLElement | null;
+			const modelDropdown = templatePart(card, '.prompt-model-dropdown') as HTMLElement | null;
+			const modelSearchInput = templatePart(card, '.prompt-model-search-input') as HTMLInputElement | null;
+			const dropdownProviderBadge = templatePart(card, '.prompt-dropdown-provider-badge') as HTMLElement | null;
+			const modelListEl = templatePart(card, '.prompt-model-list') as HTMLElement | null;
+			const targetBadge = templatePart(card, '.prompt-target-badge') as HTMLElement | null;
 
 			let activeProvider = card.getAttribute('data-target-provider') || 'openai';
 			let activeModel = card.getAttribute('data-target-model') || modelHiddenInput?.value || selectedModelText?.textContent?.trim() || resolveDefaultModelId(activeProvider, 'gpt-4o');
@@ -9473,7 +9647,7 @@ ${rawErr}
 			}
 
 			const renderModelOptions = (filterQuery: string = '') => {
-				if (!modelListEl) return;
+				if (!modelListEl) { return; }
 				clearNode(modelListEl);
 				if (dropdownProviderBadge) {
 					dropdownProviderBadge.textContent = activeProvider.toUpperCase();
@@ -9501,7 +9675,7 @@ ${rawErr}
 					const item = document.createElement('div');
 					const isSelected = activeModel === m.id;
 					item.style.cssText = `padding: 6px 8px; font-size: 11.5px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; background: ${isSelected ? 'rgba(59, 130, 246, 0.22)' : 'transparent'}; color: ${isSelected ? '#60a5fa' : 'inherit'};`;
-					item.onmouseenter = () => { if (activeModel !== m.id) item.style.background = 'rgba(255,255,255,0.06)'; };
+					item.onmouseenter = () => { if (activeModel !== m.id) { item.style.background = 'rgba(255,255,255,0.06)'; } };
 					item.onmouseleave = () => { item.style.background = activeModel === m.id ? 'rgba(59, 130, 246, 0.22)' : 'transparent'; };
 
 					const leftWrap = document.createElement('div');
@@ -9524,7 +9698,7 @@ ${rawErr}
 						ev.preventDefault();
 						ev.stopPropagation();
 						syncCardModelUi(m.id, activeProvider);
-						if (modelDropdown) modelDropdown.style.display = 'none';
+						if (modelDropdown) { modelDropdown.style.display = 'none'; }
 						card.setAttribute('data-user-customized-target', 'true');
 						this._savePromptDataFromCard(card, fieldKey).catch(() => { });
 					};
@@ -9579,11 +9753,11 @@ ${rawErr}
 	}
 
 	private async _hydrateTtsPrimitiveCards(): Promise<void> {
-		if (!this._container) return;
-		const cards = Array.from(this._container.querySelectorAll('.tts-primitive-card')) as HTMLElement[];
-		if (cards.length === 0) return;
+		if (!this._container) { return; }
+		const cards = Array.from(templateParts(this._container, '.tts-primitive-card')) as HTMLElement[];
+		if (cards.length === 0) { return; }
 
-		let loadedCredentials: any[] = [];
+		let loadedCredentials: IAgentCredential[] = [];
 		try {
 			const credService = this._instantiationService.invokeFunction(accessor => {
 				try { return accessor.get(IAgentCredentialService); } catch { return undefined; }
@@ -9621,29 +9795,29 @@ ${rawErr}
 
 		for (const card of cards) {
 			const fieldKey = card.getAttribute('data-field-key') || '';
-			const credSelect = card.querySelector('.tts-cred-select') as HTMLSelectElement | null;
-			const modelPickerBtn = card.querySelector('.tts-model-picker-btn') as HTMLButtonElement | null;
-			const selectedModelText = card.querySelector('.tts-selected-model-text') as HTMLElement | null;
-			const modelDropdown = card.querySelector('.tts-model-dropdown') as HTMLElement | null;
-			const modelSearchInput = card.querySelector('.tts-model-search-input') as HTMLInputElement | null;
-			const dropdownProviderBadge = card.querySelector('.tts-dropdown-provider-badge') as HTMLElement | null;
-			const modelListEl = card.querySelector('.tts-model-list') as HTMLElement | null;
-			const formatSelect = card.querySelector('.tts-format-select') as HTMLSelectElement | null;
-			const voiceSelect = card.querySelector('.tts-voice-select') as HTMLSelectElement | null;
-			const autoPlayCheckbox = card.querySelector('.tts-autoplay-checkbox') as HTMLInputElement | null;
-			const headerModelBadge = card.querySelector('.tts-header-model-badge') as HTMLElement | null;
-			const llmTextInput = card.querySelector('.tts-llm-text-input') as HTMLTextAreaElement | null;
-			const speechTextBody = card.querySelector('.tts-speech-text-body') as HTMLElement | null;
-			const toggleSpeechTextBtn = card.querySelector('.tts-toggle-speech-text-btn') as HTMLButtonElement | null;
-			const textInput = card.querySelector('.tts-text-input') as HTMLTextAreaElement | null;
-			const copyTextBtn = card.querySelector('.tts-copy-text-btn') as HTMLButtonElement | null;
-			const editTextBtn = card.querySelector('.tts-edit-text-btn') as HTMLButtonElement | null;
-			const clearTextBtn = card.querySelector('.tts-clear-text-btn') as HTMLButtonElement | null;
-			const playerMount = card.querySelector('.tts-audio-player-mount') as HTMLElement | null;
-			const playBtn = card.querySelector('.tts-play-btn') as HTMLButtonElement | null;
-			const deleteAudioBtn = card.querySelector('.tts-delete-audio-btn') as HTMLButtonElement | null;
-			const cachedBadge = card.querySelector('.tts-cached-badge') as HTMLElement | null;
-			const statusText = card.querySelector('.tts-status-text') as HTMLElement | null;
+			const credSelect = templatePart(card, '.tts-cred-select') as HTMLSelectElement | null;
+			const modelPickerBtn = templatePart(card, '.tts-model-picker-btn') as HTMLButtonElement | null;
+			const selectedModelText = templatePart(card, '.tts-selected-model-text') as HTMLElement | null;
+			const modelDropdown = templatePart(card, '.tts-model-dropdown') as HTMLElement | null;
+			const modelSearchInput = templatePart(card, '.tts-model-search-input') as HTMLInputElement | null;
+			const dropdownProviderBadge = templatePart(card, '.tts-dropdown-provider-badge') as HTMLElement | null;
+			const modelListEl = templatePart(card, '.tts-model-list') as HTMLElement | null;
+			const formatSelect = templatePart(card, '.tts-format-select') as HTMLSelectElement | null;
+			const voiceSelect = templatePart(card, '.tts-voice-select') as HTMLSelectElement | null;
+			const autoPlayCheckbox = templatePart(card, '.tts-autoplay-checkbox') as HTMLInputElement | null;
+			const headerModelBadge = templatePart(card, '.tts-header-model-badge') as HTMLElement | null;
+			const llmTextInput = templatePart(card, '.tts-llm-text-input') as HTMLTextAreaElement | null;
+			const speechTextBody = templatePart(card, '.tts-speech-text-body') as HTMLElement | null;
+			const toggleSpeechTextBtn = templatePart(card, '.tts-toggle-speech-text-btn') as HTMLButtonElement | null;
+			const textInput = templatePart(card, '.tts-text-input') as HTMLTextAreaElement | null;
+			const copyTextBtn = templatePart(card, '.tts-copy-text-btn') as HTMLButtonElement | null;
+			const editTextBtn = templatePart(card, '.tts-edit-text-btn') as HTMLButtonElement | null;
+			const clearTextBtn = templatePart(card, '.tts-clear-text-btn') as HTMLButtonElement | null;
+			const playerMount = templatePart(card, '.tts-audio-player-mount') as HTMLElement | null;
+			const playBtn = templatePart(card, '.tts-play-btn') as HTMLButtonElement | null;
+			const deleteAudioBtn = templatePart(card, '.tts-delete-audio-btn') as HTMLButtonElement | null;
+			const cachedBadge = templatePart(card, '.tts-cached-badge') as HTMLElement | null;
+			const statusText = templatePart(card, '.tts-status-text') as HTMLElement | null;
 
 			let activeCredId = card.getAttribute('data-cred-id') || '';
 			let activeProvider = card.getAttribute('data-provider') || 'gemini';
@@ -9658,7 +9832,7 @@ ${rawErr}
 			};
 
 			const populateVoices = (provId: string) => {
-				if (!voiceSelect) return;
+				if (!voiceSelect) { return; }
 				clearNode(voiceSelect);
 				const voices = providerVoices[provId] || providerVoices.gemini;
 				if (!activeVoice || !voices.includes(activeVoice)) {
@@ -9669,13 +9843,13 @@ ${rawErr}
 					const opt = document.createElement('option');
 					opt.value = v;
 					opt.textContent = v;
-					if (v === activeVoice) opt.selected = true;
+					if (v === activeVoice) { opt.selected = true; }
 					voiceSelect.appendChild(opt);
 				});
 			};
 
 			const renderModelOptions = (filterQuery: string = '') => {
-				if (!modelListEl) return;
+				if (!modelListEl) { return; }
 				clearNode(modelListEl);
 				const selCred = loadedCredentials.find(c => c.id === activeCredId);
 				const provId = selCred ? selCred.providerId : (activeProvider || 'gemini');
@@ -9701,7 +9875,7 @@ ${rawErr}
 				filtered.forEach(m => {
 					const item = document.createElement('div');
 					item.style.cssText = `padding: 6px 8px; font-size: 11.5px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; background: ${activeModel === m.id ? 'rgba(236,72,153,0.2)' : 'transparent'}; color: ${activeModel === m.id ? '#f472b6' : 'inherit'};`;
-					item.onmouseenter = () => { if (activeModel !== m.id) item.style.background = 'rgba(255,255,255,0.06)'; };
+					item.onmouseenter = () => { if (activeModel !== m.id) { item.style.background = 'rgba(255,255,255,0.06)'; } };
 					item.onmouseleave = () => { item.style.background = activeModel === m.id ? 'rgba(236,72,153,0.2)' : 'transparent'; };
 
 					const nameSpan = document.createElement('span');
@@ -9721,8 +9895,8 @@ ${rawErr}
 						ev.stopPropagation();
 						activeModel = m.id;
 						card.setAttribute('data-model', activeModel);
-						if (selectedModelText) selectedModelText.textContent = activeModel;
-						if (modelDropdown) modelDropdown.style.display = 'none';
+						if (selectedModelText) { selectedModelText.textContent = activeModel; }
+						if (modelDropdown) { modelDropdown.style.display = 'none'; }
 						updateHeaderBadge();
 						this._saveTtsDataFromCard(card, fieldKey).catch(() => { });
 					};
@@ -9761,7 +9935,7 @@ ${rawErr}
 						const opt = document.createElement('option');
 						opt.value = p.id;
 						opt.textContent = p.label;
-						if (p.id === activeProvider) opt.selected = true;
+						if (p.id === activeProvider) { opt.selected = true; }
 						credSelect.appendChild(opt);
 					});
 				}
@@ -9780,7 +9954,7 @@ ${rawErr}
 					const rec = builtInTtsModels[activeProvider] || builtInTtsModels.gemini;
 					activeModel = rec[0].id;
 					card.setAttribute('data-model', activeModel);
-					if (selectedModelText) selectedModelText.textContent = activeModel;
+					if (selectedModelText) { selectedModelText.textContent = activeModel; }
 					populateVoices(activeProvider);
 					renderModelOptions(modelSearchInput?.value || '');
 					updateHeaderBadge();
@@ -9850,7 +10024,7 @@ ${rawErr}
 				};
 			}
 
-			let autoSaveTimer: any = undefined;
+			let autoSaveTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 			const scheduleAutoSave = () => {
 				if (autoSaveTimer) {
 					clearTimeout(autoSaveTimer);
@@ -9911,15 +10085,15 @@ ${rawErr}
 					e.stopPropagation();
 					const valToCopy = textInput.value || '';
 					await this._clipboardService.writeText(valToCopy);
-					const labelSpan = copyTextBtn.querySelector('.tts-copy-btn-label') as HTMLElement | null;
-					const iconSpan = copyTextBtn.querySelector('.codicon') as HTMLElement | null;
-					if (labelSpan) labelSpan.textContent = 'Copied!';
-					if (iconSpan) iconSpan.className = 'codicon codicon-check';
+					const labelSpan = templatePart(copyTextBtn, '.tts-copy-btn-label') as HTMLElement | null;
+					const iconSpan = templatePart(copyTextBtn, '.codicon') as HTMLElement | null;
+					if (labelSpan) { labelSpan.textContent = 'Copied!'; }
+					if (iconSpan) { iconSpan.className = 'codicon codicon-check'; }
 					copyTextBtn.style.color = '#4ade80';
 					copyTextBtn.style.borderColor = 'rgba(74, 222, 128, 0.5)';
 					setTimeout(() => {
-						if (labelSpan) labelSpan.textContent = 'Copy';
-						if (iconSpan) iconSpan.className = 'codicon codicon-copy';
+						if (labelSpan) { labelSpan.textContent = 'Copy'; }
+						if (iconSpan) { iconSpan.className = 'codicon codicon-copy'; }
 						copyTextBtn.style.color = '#7dd3fc';
 						copyTextBtn.style.borderColor = 'rgba(56, 189, 248, 0.35)';
 					}, 1500);
@@ -9932,14 +10106,14 @@ ${rawErr}
 					e.stopPropagation();
 					isDisplayTextUnlocked = !isDisplayTextUnlocked;
 					textInput.readOnly = !isDisplayTextUnlocked;
-					const editIcon = editTextBtn.querySelector('.tts-edit-btn-icon') as HTMLElement | null;
-					const editLabel = editTextBtn.querySelector('.tts-edit-btn-label') as HTMLElement | null;
+					const editIcon = templatePart(editTextBtn, '.tts-edit-btn-icon') as HTMLElement | null;
+					const editLabel = templatePart(editTextBtn, '.tts-edit-btn-label') as HTMLElement | null;
 					if (isDisplayTextUnlocked) {
 						textInput.style.borderColor = 'rgba(56, 189, 248, 0.75)';
 						textInput.style.background = 'rgba(0, 0, 0, 0.4)';
-						if (clearTextBtn) clearTextBtn.style.display = 'inline-flex';
-						if (editIcon) editIcon.className = 'tts-edit-btn-icon codicon codicon-lock';
-						if (editLabel) editLabel.textContent = 'Lock';
+						if (clearTextBtn) { clearTextBtn.style.display = 'inline-flex'; }
+						if (editIcon) { editIcon.className = 'tts-edit-btn-icon codicon codicon-lock'; }
+						if (editLabel) { editLabel.textContent = 'Lock'; }
 						editTextBtn.style.background = 'rgba(0, 122, 204, 0.25)';
 						editTextBtn.style.borderColor = 'rgba(56, 189, 248, 0.5)';
 						editTextBtn.style.color = '#7dd3fc';
@@ -9947,9 +10121,9 @@ ${rawErr}
 					} else {
 						textInput.style.borderColor = 'rgba(59, 130, 246, 0.28)';
 						textInput.style.background = 'rgba(0, 0, 0, 0.25)';
-						if (clearTextBtn) clearTextBtn.style.display = 'none';
-						if (editIcon) editIcon.className = 'tts-edit-btn-icon codicon codicon-edit';
-						if (editLabel) editLabel.textContent = 'Edit';
+						if (clearTextBtn) { clearTextBtn.style.display = 'none'; }
+						if (editIcon) { editIcon.className = 'tts-edit-btn-icon codicon codicon-edit'; }
+						if (editLabel) { editLabel.textContent = 'Edit'; }
 						editTextBtn.style.background = 'rgba(255, 255, 255, 0.06)';
 						editTextBtn.style.borderColor = 'rgba(255, 255, 255, 0.18)';
 						editTextBtn.style.color = 'inherit';
@@ -10064,7 +10238,7 @@ ${rawErr}
 				let cardKnownDuration = 0;
 
 				const fmtSec = (sec: number): string => {
-					if (!Number.isFinite(sec) || sec < 0) return '0:00';
+					if (!Number.isFinite(sec) || sec < 0) { return '0:00'; }
 					const s = Math.round(sec);
 					const m = Math.floor(s / 60);
 					const r = s % 60;
@@ -10096,16 +10270,17 @@ ${rawErr}
 					audioEl.defaultPlaybackRate = cardPlaybackRate;
 					audioEl.playbackRate = cardPlaybackRate;
 					customPlayerBar.style.display = 'flex';
-					if (playBtn) playBtn.style.display = 'inline-flex';
-					if (deleteAudioBtn) deleteAudioBtn.style.display = 'inline-flex';
-					if (cachedBadge) cachedBadge.style.display = 'inline-block';
+					if (playBtn) { playBtn.style.display = 'inline-flex'; }
+					if (deleteAudioBtn) { deleteAudioBtn.style.display = 'inline-flex'; }
+					if (cachedBadge) { cachedBadge.style.display = 'inline-block'; }
 
 					try {
-						const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+						const audioWindow: typeof mainWindow & { webkitAudioContext?: typeof AudioContext } = mainWindow;
+						const AudioCtx = audioWindow.AudioContext || audioWindow.webkitAudioContext;
 						if (AudioCtx) {
 							const actx = new AudioCtx();
 							const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-							const decoded = await actx.decodeAudioData(arrayBuf);
+							const decoded = await actx.decodeAudioData(arrayBuf as ArrayBuffer);
 							if (decoded && Number.isFinite(decoded.duration) && decoded.duration > 0) {
 								cardKnownDuration = decoded.duration;
 								syncTimeUi();
@@ -10142,11 +10317,11 @@ ${rawErr}
 					timeBadge.textContent = '0:00 / 0:00';
 				};
 
-				(card as any)._loadTtsBytes = loadBytesIntoCardPlayer;
-				(card as any)._resetTtsPlayer = resetCardPlayer;
+				cardRuntimeState(card).loadTtsBytes = loadBytesIntoCardPlayer;
+				cardRuntimeState(card).resetTtsPlayer = resetCardPlayer;
 
 				roundPlayBtn.onclick = () => {
-					if (!audioEl.src) return;
+					if (!audioEl.src) { return; }
 					if (audioEl.paused) {
 						audioEl.playbackRate = cardPlaybackRate;
 						audioEl.play().catch(() => { });
@@ -10169,7 +10344,7 @@ ${rawErr}
 
 				progressTrack.onclick = (e: MouseEvent) => {
 					const dur = (Number.isFinite(audioEl.duration) && audioEl.duration > 0) ? audioEl.duration : cardKnownDuration;
-					if (dur <= 0) return;
+					if (dur <= 0) { return; }
 					const rect = progressTrack.getBoundingClientRect();
 					const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
 					audioEl.currentTime = ratio * dur;
@@ -10230,26 +10405,26 @@ ${rawErr}
 							const a = document.createElement('a');
 							a.href = cardBlobUrl;
 							a.download = defaultFileName;
-							document.body.appendChild(a);
+							mainWindow.document.body.appendChild(a);
 							a.click();
-							document.body.removeChild(a);
+							mainWindow.document.body.removeChild(a);
 						}
 					}
 				};
 
 				audioEl.onplay = () => {
 					audioEl.playbackRate = cardPlaybackRate;
-					if (playBtn) playBtn.textContent = 'Pause Audio';
+					if (playBtn) { playBtn.textContent = 'Pause Audio'; }
 					roundPlayIcon.className = 'codicon codicon-debug-pause';
 					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.52)';
 				};
 				audioEl.onpause = () => {
-					if (playBtn) playBtn.textContent = 'Play Audio';
+					if (playBtn) { playBtn.textContent = 'Play Audio'; }
 					roundPlayIcon.className = 'codicon codicon-play';
 					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.28)';
 				};
 				audioEl.onended = () => {
-					if (playBtn) playBtn.textContent = 'Play Audio';
+					if (playBtn) { playBtn.textContent = 'Play Audio'; }
 					roundPlayIcon.className = 'codicon codicon-play';
 					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.28)';
 					progressFill.style.width = '100%';
@@ -10313,10 +10488,10 @@ ${rawErr}
 							card.setAttribute('data-audio-path', '');
 							card.setAttribute('data-audio-file', '');
 							resetCardPlayer();
-							if (playBtn) playBtn.style.display = 'none';
-							if (deleteAudioBtn) deleteAudioBtn.style.display = 'none';
-							if (cachedBadge) cachedBadge.style.display = 'none';
-							if (statusText) statusText.textContent = 'No audio file saved yet';
+							if (playBtn) { playBtn.style.display = 'none'; }
+							if (deleteAudioBtn) { deleteAudioBtn.style.display = 'none'; }
+							if (cachedBadge) { cachedBadge.style.display = 'none'; }
+							if (statusText) { statusText.textContent = 'No audio file saved yet'; }
 						}
 					} catch (e) {
 						console.error('Failed to load saved TTS audio file:', e);
@@ -10353,12 +10528,12 @@ ${rawErr}
 		audioRelativePath: string;
 		lastGenerated: string;
 		lastSynthesizedText: string;
-	}>): Promise<any> {
-		const llmTextInput = card.querySelector('.tts-llm-text-input') as HTMLTextAreaElement | null;
-		const textInput = card.querySelector('.tts-text-input') as HTMLTextAreaElement | null;
-		const formatSelect = card.querySelector('.tts-format-select') as HTMLSelectElement | null;
-		const voiceSelect = card.querySelector('.tts-voice-select') as HTMLSelectElement | null;
-		const autoPlayCheckbox = card.querySelector('.tts-autoplay-checkbox') as HTMLInputElement | null;
+	}>): Promise<Record<string, unknown>> {
+		const llmTextInput = templatePart(card, '.tts-llm-text-input') as HTMLTextAreaElement | null;
+		const textInput = templatePart(card, '.tts-text-input') as HTMLTextAreaElement | null;
+		const formatSelect = templatePart(card, '.tts-format-select') as HTMLSelectElement | null;
+		const voiceSelect = templatePart(card, '.tts-voice-select') as HTMLSelectElement | null;
+		const autoPlayCheckbox = templatePart(card, '.tts-autoplay-checkbox') as HTMLInputElement | null;
 		const storedLlmText = overrides?.llmText !== undefined
 			? overrides.llmText
 			: (llmTextInput ? llmTextInput.value : (card.getAttribute('data-llm-text') || ''));
@@ -10432,15 +10607,15 @@ ${rawErr}
 	}
 
 	private async _hydrateMediaPlayerPrimitiveCards(): Promise<void> {
-		if (!this._container) return;
-		const cards = Array.from(this._container.querySelectorAll('.media-player-primitive-card')) as HTMLElement[];
-		if (cards.length === 0) return;
+		if (!this._container) { return; }
+		const cards = Array.from(templateParts(this._container, '.media-player-primitive-card')) as HTMLElement[];
+		if (cards.length === 0) { return; }
 
 		for (const card of cards) {
 			const fieldKey = card.getAttribute('data-field-key') || '';
-			const mountEl = card.querySelector('.media-player-card-mount') as HTMLElement | null;
-			const headerBadgeEl = card.querySelector('.media-player-header-badge') as HTMLElement | null;
-			if (!mountEl) continue;
+			const mountEl = templatePart(card, '.media-player-card-mount') as HTMLElement | null;
+			const headerBadgeEl = templatePart(card, '.media-player-header-badge') as HTMLElement | null;
+			if (!mountEl) { continue; }
 
 			clearNode(mountEl);
 
@@ -10626,7 +10801,7 @@ ${rawErr}
 			let cardFullscreenOverlayEl: HTMLElement | undefined;
 
 			const onCardFsKeyDown = (ev: KeyboardEvent) => {
-				if (!isCardVideoFullscreen) return;
+				if (!isCardVideoFullscreen) { return; }
 				if (ev.key === 'Escape') {
 					ev.stopPropagation();
 					ev.preventDefault();
@@ -10635,11 +10810,11 @@ ${rawErr}
 			};
 
 			const exitCardVideoFullscreen = () => {
-				if (!isCardVideoFullscreen) return;
+				if (!isCardVideoFullscreen) { return; }
 				isCardVideoFullscreen = false;
-				window.removeEventListener('keydown', onCardFsKeyDown, true);
-				if (document.fullscreenElement) {
-					document.exitFullscreen().catch(() => { });
+				mainWindow.removeEventListener('keydown', onCardFsKeyDown, true);
+				if (mainWindow.document.fullscreenElement) {
+					mainWindow.document.exitFullscreen().catch(() => { });
 				}
 				const wasPlaying = !videoEl.paused && !videoEl.ended;
 				videoStageWrap.style.flex = '';
@@ -10665,10 +10840,10 @@ ${rawErr}
 			};
 
 			const enterCardVideoFullscreen = () => {
-				if (isCardVideoFullscreen || activeKind !== 'video') return;
+				if (isCardVideoFullscreen || activeKind !== 'video') { return; }
 				isCardVideoFullscreen = true;
 				const wasPlaying = !videoEl.paused && !videoEl.ended;
-				const hostRoot = (document.querySelector('.monaco-workbench') as HTMLElement) || document.body;
+				const hostRoot = (templatePart(mainWindow.document, '.monaco-workbench') as HTMLElement) || mainWindow.document.body;
 				const overlay = document.createElement('div');
 				overlay.className = 'media-player-fullscreen-overlay';
 				overlay.style.cssText = 'position: fixed; inset: 0; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 2147483647; background: rgba(5, 8, 15, 0.96); backdrop-filter: blur(8px); display: flex; flex-direction: column; justify-content: space-between; padding: 16px 24px 20px 24px; box-sizing: border-box; gap: 12px;';
@@ -10722,7 +10897,7 @@ ${rawErr}
 				fullscreenBtn.title = 'Exit Fullscreen (Esc)';
 				fullscreenBtn.style.color = '#38bdf8';
 
-				window.addEventListener('keydown', onCardFsKeyDown, true);
+				mainWindow.addEventListener('keydown', onCardFsKeyDown, true);
 				if (wasPlaying && videoEl.paused) {
 					videoEl.play().catch(() => { });
 				}
@@ -10739,7 +10914,7 @@ ${rawErr}
 			const getActiveEl = (): HTMLMediaElement => activeKind === 'video' ? videoEl : audioEl;
 
 			const fmtSec = (sec: number): string => {
-				if (!Number.isFinite(sec) || sec < 0) return '0:00';
+				if (!Number.isFinite(sec) || sec < 0) { return '0:00'; }
 				const total = Math.floor(sec);
 				const hrs = Math.floor(total / 3600);
 				const mins = Math.floor((total % 3600) / 60);
@@ -10875,7 +11050,7 @@ ${rawErr}
 
 			const loadCardFromLocalPath = async (localPath: string, displayFileName?: string, persistToTicket: boolean = true) => {
 				const cleanPath = (localPath || '').trim();
-				if (!cleanPath) return;
+				if (!cleanPath) { return; }
 				const resolvedName = displayFileName || cleanPath.split(/[\\/]/).pop() || cleanPath;
 				const info = detectMediaFileInfo(resolvedName || cleanPath, card.getAttribute('data-media-mime') || '');
 				updateBadges(resolvedName, cleanPath, info.kind, info.ext);
@@ -10902,17 +11077,17 @@ ${rawErr}
 					if (persistToTicket) {
 						await this._saveMediaPlayerDataFromCard(card, fieldKey);
 					}
-				} catch (err: any) {
-					showErr(`Failed to read local media file "${resolvedName}": ${err?.message || err}`);
+				} catch (err) {
+					showErr(`Failed to read local media file "${resolvedName}": ${(err as Error | undefined)?.message || err}`);
 				}
 			};
 
 			const handleDroppedOrPickedFile = async (file: File) => {
 				let localPath = '';
 				try {
-					localPath = getPathForFile(file) || (file as any).path || '';
+					localPath = getPathForFile(file) || (file as File & { path?: string }).path || '';
 				} catch {
-					localPath = (file as any).path || '';
+					localPath = (file as File & { path?: string }).path || '';
 				}
 				mountBlob(file, file.name, localPath, file.type);
 				await this._saveMediaPlayerDataFromCard(card, fieldKey);
@@ -10920,18 +11095,18 @@ ${rawErr}
 
 			const wireMediaEvents = (el: HTMLMediaElement, kind: 'audio' | 'video') => {
 				el.onplay = () => {
-					if (activeKind !== kind) return;
+					if (activeKind !== kind) { return; }
 					el.playbackRate = cardPlaybackRate;
 					roundPlayIcon.className = 'codicon codicon-debug-pause';
 					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.52)';
 				};
 				el.onpause = () => {
-					if (activeKind !== kind) return;
+					if (activeKind !== kind) { return; }
 					roundPlayIcon.className = 'codicon codicon-play';
 					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.28)';
 				};
 				el.onended = () => {
-					if (activeKind !== kind) return;
+					if (activeKind !== kind) { return; }
 					roundPlayIcon.className = 'codicon codicon-play';
 					roundPlayBtn.style.background = 'rgba(0, 122, 204, 0.28)';
 					progressFill.style.width = '100%';
@@ -10939,7 +11114,7 @@ ${rawErr}
 					syncTimeUi();
 				};
 				el.onloadedmetadata = () => {
-					if (activeKind !== kind) return;
+					if (activeKind !== kind) { return; }
 					hideErr();
 					el.defaultPlaybackRate = cardPlaybackRate;
 					el.playbackRate = cardPlaybackRate;
@@ -10949,18 +11124,18 @@ ${rawErr}
 					syncTimeUi();
 				};
 				el.ondurationchange = () => {
-					if (activeKind !== kind) return;
+					if (activeKind !== kind) { return; }
 					if (Number.isFinite(el.duration) && el.duration > 0) {
 						cardKnownDuration = el.duration;
 					}
 					syncTimeUi();
 				};
 				el.ontimeupdate = () => {
-					if (activeKind !== kind || isScrubbing) return;
+					if (activeKind !== kind || isScrubbing) { return; }
 					syncTimeUi();
 				};
 				el.onerror = () => {
-					if (activeKind !== kind || !el.getAttribute('src')) return;
+					if (activeKind !== kind || !el.getAttribute('src')) { return; }
 					if (!cardTriedProtocolFallback && cardLocalFileUri) {
 						cardTriedProtocolFallback = true;
 						try {
@@ -10981,9 +11156,9 @@ ${rawErr}
 
 			const togglePlay = () => {
 				const el = getActiveEl();
-				if (!el.src) return;
+				if (!el.src) { return; }
 				if (el.paused || el.ended) {
-					if (el.ended) el.currentTime = 0;
+					if (el.ended) { el.currentTime = 0; }
 					el.playbackRate = cardPlaybackRate;
 					el.play().catch(err => showErr(`Playback error: ${err?.message || err}`));
 				} else {
@@ -11011,9 +11186,9 @@ ${rawErr}
 			const seekToX = (clientX: number) => {
 				const el = getActiveEl();
 				const dur = (Number.isFinite(el.duration) && el.duration > 0) ? el.duration : cardKnownDuration;
-				if (dur <= 0) return;
+				if (dur <= 0) { return; }
 				const rect = progressTrack.getBoundingClientRect();
-				if (rect.width <= 0) return;
+				if (rect.width <= 0) { return; }
 				const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
 				el.currentTime = ratio * dur;
 				const pct = ratio * 100;
@@ -11029,7 +11204,7 @@ ${rawErr}
 				seekToX(e.clientX);
 
 				const onMove = (me: MouseEvent) => {
-					if (!isScrubbing) return;
+					if (!isScrubbing) { return; }
 					seekToX(me.clientX);
 				};
 				const onUp = (ue: MouseEvent) => {
@@ -11037,11 +11212,11 @@ ${rawErr}
 						seekToX(ue.clientX);
 						isScrubbing = false;
 					}
-					window.removeEventListener('mousemove', onMove, true);
-					window.removeEventListener('mouseup', onUp, true);
+					mainWindow.removeEventListener('mousemove', onMove, true);
+					mainWindow.removeEventListener('mouseup', onUp, true);
 				};
-				window.addEventListener('mousemove', onMove, true);
-				window.addEventListener('mouseup', onUp, true);
+				mainWindow.addEventListener('mousemove', onMove, true);
+				mainWindow.addEventListener('mouseup', onUp, true);
 			};
 
 			speedSelect.onclick = (e: MouseEvent) => e.stopPropagation();
@@ -11173,8 +11348,8 @@ ${rawErr}
 	}
 
 	private async _executeTtsSynthesisInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
-		const llmTextInput = card.querySelector('.tts-llm-text-input') as HTMLTextAreaElement | null;
-		const textInput = card.querySelector('.tts-text-input') as HTMLTextAreaElement | null;
+		const llmTextInput = templatePart(card, '.tts-llm-text-input') as HTMLTextAreaElement | null;
+		const textInput = templatePart(card, '.tts-text-input') as HTMLTextAreaElement | null;
 		const llmText = (llmTextInput ? llmTextInput.value : (card.getAttribute('data-llm-text') || '')).trim();
 		const displayTextVal = textInput?.value.trim() || '';
 		// Use the AI Speech Synthesis Text first; fall back to display text only if speech text is empty
@@ -11189,17 +11364,17 @@ ${rawErr}
 		const credId = card.getAttribute('data-cred-id') || '';
 		const providerId = card.getAttribute('data-provider') || 'gemini';
 		const modelId = card.getAttribute('data-model') || (providerId === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
-		const formatSelect = card.querySelector('.tts-format-select') as HTMLSelectElement | null;
-		const voiceSelect = card.querySelector('.tts-voice-select') as HTMLSelectElement | null;
+		const formatSelect = templatePart(card, '.tts-format-select') as HTMLSelectElement | null;
+		const voiceSelect = templatePart(card, '.tts-voice-select') as HTMLSelectElement | null;
 		const format = (formatSelect?.value || card.getAttribute('data-format') || 'mp3').toLowerCase();
 		const voice = voiceSelect?.value || card.getAttribute('data-voice') || '';
 
-		const sendBtn = card.querySelector('.tts-send-btn') as HTMLButtonElement | null;
-		const playBtn = card.querySelector('.tts-play-btn') as HTMLButtonElement | null;
-		const deleteAudioBtn = card.querySelector('.tts-delete-audio-btn') as HTMLButtonElement | null;
-		const cachedBadge = card.querySelector('.tts-cached-badge') as HTMLElement | null;
-		const statusText = card.querySelector('.tts-status-text') as HTMLElement | null;
-		const audioEl = card.querySelector('audio') as HTMLAudioElement | null;
+		const sendBtn = templatePart(card, '.tts-send-btn') as HTMLButtonElement | null;
+		const playBtn = templatePart(card, '.tts-play-btn') as HTMLButtonElement | null;
+		const deleteAudioBtn = templatePart(card, '.tts-delete-audio-btn') as HTMLButtonElement | null;
+		const cachedBadge = templatePart(card, '.tts-cached-badge') as HTMLElement | null;
+		const statusText = templatePart(card, '.tts-status-text') as HTMLElement | null;
+		const audioEl = templatePart(card, 'audio') as HTMLAudioElement | null;
 
 		if (sendBtn) {
 			sendBtn.disabled = true;
@@ -11262,8 +11437,9 @@ ${rawErr}
 				lastSynthesizedText: rawText
 			});
 
-			if (typeof (card as any)._loadTtsBytes === 'function') {
-				await (card as any)._loadTtsBytes(res.audioBuffer, res.mimeType || 'audio/mpeg', true);
+			const loadTtsBytes = cardRuntimeState(card).loadTtsBytes;
+			if (typeof loadTtsBytes === 'function') {
+				await loadTtsBytes(res.audioBuffer, res.mimeType || 'audio/mpeg', true);
 			} else if (audioEl) {
 				const blob = new Blob([res.audioBuffer.slice(0)], { type: res.mimeType || 'audio/mpeg' });
 				const blobUrl = URL.createObjectURL(blob);
@@ -11285,8 +11461,8 @@ ${rawErr}
 				statusText.style.color = '#4ade80';
 			}
 			this._notificationService.info(`Generated and saved audio file '${audioFileName}' in ticket.`);
-		} catch (err: any) {
-			const errMsg = err?.message || String(err);
+		} catch (err) {
+			const errMsg = (err as Error | undefined)?.message || String(err);
 			if (statusText) {
 				statusText.textContent = `Error: ${errMsg.slice(0, 60)}`;
 				statusText.style.color = '#ef4444';
@@ -11313,15 +11489,16 @@ ${rawErr}
 			}
 		}
 
-		const textInput = card.querySelector('.tts-text-input') as HTMLTextAreaElement | null;
+		const textInput = templatePart(card, '.tts-text-input') as HTMLTextAreaElement | null;
 		if (alsoClearText && textInput) {
 			textInput.value = '';
 		}
 
-		if (typeof (card as any)._resetTtsPlayer === 'function') {
-			(card as any)._resetTtsPlayer();
+		const resetTtsPlayer = cardRuntimeState(card).resetTtsPlayer;
+		if (typeof resetTtsPlayer === 'function') {
+			resetTtsPlayer();
 		} else {
-			const audioEl = card.querySelector('audio') as HTMLAudioElement | null;
+			const audioEl = templatePart(card, 'audio') as HTMLAudioElement | null;
 			if (audioEl) {
 				audioEl.pause();
 				audioEl.removeAttribute('src');
@@ -11329,10 +11506,10 @@ ${rawErr}
 			}
 		}
 
-		const playBtn = card.querySelector('.tts-play-btn') as HTMLButtonElement | null;
-		const deleteAudioBtn = card.querySelector('.tts-delete-audio-btn') as HTMLButtonElement | null;
-		const cachedBadge = card.querySelector('.tts-cached-badge') as HTMLElement | null;
-		const statusText = card.querySelector('.tts-status-text') as HTMLElement | null;
+		const playBtn = templatePart(card, '.tts-play-btn') as HTMLButtonElement | null;
+		const deleteAudioBtn = templatePart(card, '.tts-delete-audio-btn') as HTMLButtonElement | null;
+		const cachedBadge = templatePart(card, '.tts-cached-badge') as HTMLElement | null;
+		const statusText = templatePart(card, '.tts-status-text') as HTMLElement | null;
 
 		if (playBtn) {
 			playBtn.style.display = 'none';
@@ -11364,8 +11541,8 @@ ${rawErr}
 	}
 
 	private async _saveTableDataFromCard(card: HTMLElement, fieldKey: string, payload: {
-		columns: any[];
-		rows: Record<string, any>[];
+		columns: ITableColumnDefinition[];
+		rows: Record<string, unknown>[];
 		dbEngine: 'sqlite' | 'none';
 		dbPath: string;
 		tableName: string;
@@ -11378,7 +11555,7 @@ ${rawErr}
 	}): Promise<void> {
 		const serialized = JSON.stringify(payload);
 		card.setAttribute('data-table-json', serialized);
-		const aiBtn = card.querySelector('.ai-edit-btn') as HTMLElement | null;
+		const aiBtn = templatePart(card, '.ai-edit-btn') as HTMLElement | null;
 		if (aiBtn) {
 			aiBtn.setAttribute('data-ai-current-value', serialized);
 		}
@@ -11407,9 +11584,9 @@ ${rawErr}
 	}
 
 	private async _hydrateTablePrimitiveCards(): Promise<void> {
-		if (!this._container) return;
-		const cards = Array.from(this._container.querySelectorAll('.table-primitive-card')) as HTMLElement[];
-		if (cards.length === 0) return;
+		if (!this._container) { return; }
+		const cards = Array.from(templateParts(this._container, '.table-primitive-card')) as HTMLElement[];
+		if (cards.length === 0) { return; }
 
 		const sqliteDataTypes = [
 			'TEXT',
@@ -11427,7 +11604,7 @@ ${rawErr}
 		for (const card of cards) {
 			const fieldKey = card.getAttribute('data-field-key') || 'Data Table';
 			const rawJson = card.getAttribute('data-table-json') || '{}';
-			let parsed: any = {};
+			let parsed: IStoredPrimitiveValue = {};
 			try {
 				parsed = JSON.parse(rawJson);
 			} catch { }
@@ -11448,7 +11625,7 @@ ${rawErr}
 						{ id: 'col_3', name: 'status', label: 'status', dataType: 'TEXT', primaryKey: false, nullable: true },
 						{ id: 'col_4', name: 'created_at', label: 'created_at', dataType: 'DATETIME', primaryKey: false, nullable: true }
 					];
-			let rows: Record<string, any>[] = Array.isArray(parsed.rows) ? parsed.rows : [];
+			let rows: Record<string, unknown>[] = Array.isArray(parsed.rows) ? parsed.rows : [];
 			let dbEngine: 'sqlite' | 'none' = parsed.dbEngine === 'none' ? 'none' : 'sqlite';
 			let dbPath: string = String(parsed.dbPath || '');
 			let tableName: string = String(parsed.tableName || fieldKey.toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'ticket_table');
@@ -11460,9 +11637,9 @@ ${rawErr}
 			let totalDbRowCount: number | undefined = undefined;
 			let lastSynced: string = String(parsed.lastSynced || '');
 
-			const mountEl = card.querySelector('.table-card-mount') as HTMLElement | null;
-			const headerStatsBadge = card.querySelector('.table-header-stats-badge') as HTMLElement | null;
-			if (!mountEl) continue;
+			const mountEl = templatePart(card, '.table-card-mount') as HTMLElement | null;
+			const headerStatsBadge = templatePart(card, '.table-header-stats-badge') as HTMLElement | null;
+			if (!mountEl) { continue; }
 			clearNode(mountEl);
 
 			const persistNow = () => {
@@ -11539,7 +11716,8 @@ ${rawErr}
 				let tipEl: HTMLElement | null = null;
 				const hideTooltip = () => {
 					if (tipEl) { tipEl.remove(); tipEl = null; }
-					document.querySelectorAll('.anyagent-instant-tooltip').forEach(el => el.remove());
+					// Tooltips of this kind are also created by the template schema editor; remove all of them
+					templateParts(mainWindow.document, '.anyagent-instant-tooltip').forEach(el => el.remove());
 				};
 				const showTooltip = () => {
 					hideTooltip();
@@ -11559,15 +11737,15 @@ ${rawErr}
 					} else {
 						tipEl.textContent = text;
 					}
-					document.body.appendChild(tipEl);
+					mainWindow.document.body.appendChild(tipEl);
 					const rect = targetEl.getBoundingClientRect();
 					const tipRect = tipEl.getBoundingClientRect();
 					let left = rect.left + (rect.width / 2) - (tipRect.width / 2);
-					const maxLeft = window.innerWidth - tipRect.width - 10;
+					const maxLeft = mainWindow.innerWidth - tipRect.width - 10;
 					if (left > maxLeft) { left = maxLeft; }
 					if (left < 10) { left = 10; }
 					let top = rect.bottom + 7;
-					if (top + tipRect.height > window.innerHeight - 8) {
+					if (top + tipRect.height > mainWindow.innerHeight - 8) {
 						top = rect.top - tipRect.height - 7;
 					}
 					tipEl.style.left = `${Math.round(left)}px`;
@@ -11825,8 +12003,8 @@ ${rawErr}
 
 			const parseAndImportText = (rawText: string, firstRowIsHeader: boolean, replaceExisting: boolean) => {
 				const trimmed = rawText.trim();
-				if (!trimmed) return;
-				const importedRows: Record<string, any>[] = [];
+				if (!trimmed) { return; }
+				const importedRows: Record<string, unknown>[] = [];
 
 				if (trimmed.startsWith('[')) {
 					try {
@@ -11855,7 +12033,7 @@ ${rawErr}
 
 				if (importedRows.length === 0) {
 					const lines = trimmed.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
-					if (lines.length === 0) return;
+					if (lines.length === 0) { return; }
 
 					const isMarkdown = lines[0].includes('|') && lines.length >= 2 && /^\|?[\s:-]+\|/.test(lines[1]);
 					let matrix: string[][] = [];
@@ -11894,7 +12072,7 @@ ${rawErr}
 
 						for (let r = startIdx; r < matrix.length; r++) {
 							const cells = matrix[r];
-							const rowObj: Record<string, any> = {};
+							const rowObj: Record<string, unknown> = {};
 							for (let c = 0; c < headerNames.length; c++) {
 								const h = headerNames[c];
 								const matchCol = columns.find(col => col.name.toLowerCase() === h.toLowerCase());
@@ -12053,7 +12231,7 @@ ${rawErr}
 						const delBtn = document.createElement('button');
 						delBtn.type = 'button';
 						delBtn.style.cssText = 'background: transparent; border: none; color: #f87171; cursor: pointer; font-size: 12px; opacity: 0.8;';
-						delBtn.textContent = '✕';
+						delBtn.textContent = '\u2715';
 						delBtn.title = 'Delete Row';
 						delBtn.onclick = () => {
 							rows.splice(actualRowIdx, 1);
@@ -12076,21 +12254,21 @@ ${rawErr}
 
 			const normalizeColDataType = (dt?: string): string => {
 				const raw = (dt || 'TEXT').trim().toUpperCase();
-				if (raw.includes('INT')) return 'INTEGER';
+				if (raw.includes('INT')) { return 'INTEGER'; }
 				if (raw.includes('CHAR') || raw.includes('CLOB') || raw.includes('TEXT')) {
 					return raw.startsWith('VARCHAR') ? 'VARCHAR(255)' : 'TEXT';
 				}
-				if (raw.includes('BLOB')) return 'BLOB';
-				if (raw.includes('REAL') || raw.includes('FLOA') || raw.includes('DOUB')) return 'REAL';
-				if (raw.includes('BOOL')) return 'BOOLEAN';
-				if (raw.includes('DATETIME') || raw.includes('TIMESTAMP')) return 'DATETIME';
-				if (raw.includes('DATE')) return 'DATE';
-				if (raw.includes('JSON')) return 'JSON';
-				if (raw.includes('NUM') || raw.includes('DEC')) return 'NUMERIC';
+				if (raw.includes('BLOB')) { return 'BLOB'; }
+				if (raw.includes('REAL') || raw.includes('FLOA') || raw.includes('DOUB')) { return 'REAL'; }
+				if (raw.includes('BOOL')) { return 'BOOLEAN'; }
+				if (raw.includes('DATETIME') || raw.includes('TIMESTAMP')) { return 'DATETIME'; }
+				if (raw.includes('DATE')) { return 'DATE'; }
+				if (raw.includes('JSON')) { return 'JSON'; }
+				if (raw.includes('NUM') || raw.includes('DEC')) { return 'NUMERIC'; }
 				return 'TEXT';
 			};
 
-			const cloneColumnDef = (c: any, idx: number) => ({
+			const cloneColumnDef = (c: Partial<ITableColumnDefinition> | undefined, idx: number) => ({
 				id: c?.id || `col_${Date.now()}_${idx + 1}`,
 				name: String(c?.name || c?.label || `col_${idx + 1}`).trim(),
 				label: String(c?.label || c?.name || `col_${idx + 1}`).trim(),
@@ -12100,10 +12278,10 @@ ${rawErr}
 				defaultValue: c?.defaultValue !== undefined && c?.defaultValue !== null ? String(c.defaultValue) : ''
 			});
 
-			const cloneColumnsList = (cols: any[] | undefined) =>
+			const cloneColumnsList = (cols: Partial<ITableColumnDefinition>[] | undefined) =>
 				Array.isArray(cols) ? cols.map((c, idx) => cloneColumnDef(c, idx)) : [];
 
-			const areSchemasEqual = (colsA: any[] | undefined, colsB: any[] | undefined): boolean => {
+			const areSchemasEqual = (colsA: Partial<ITableColumnDefinition>[] | undefined, colsB: Partial<ITableColumnDefinition>[] | undefined): boolean => {
 				const a = colsA || [];
 				const b = colsB || [];
 				if (a.length !== b.length) {
@@ -12252,7 +12430,7 @@ ${rawErr}
 
 					const delColBtn = document.createElement('button');
 					delColBtn.type = 'button';
-					delColBtn.textContent = '✕';
+					delColBtn.textContent = '\u2715';
 					delColBtn.title = 'Delete Column';
 					delColBtn.style.cssText = 'background: transparent; border: none; color: #ef4444; cursor: pointer; font-size: 12px; opacity: 0.8;';
 					delColBtn.onclick = () => {
@@ -12263,7 +12441,7 @@ ${rawErr}
 						const removed = columns.splice(cIdx, 1)[0];
 						hasLocalColumnEdits = true;
 						if (removed) {
-							rows.forEach(r => { if (r) delete r[removed.name]; });
+							rows.forEach(r => { if (r) { delete r[removed.name]; } });
 						}
 						renderCols();
 						renderGrid();
@@ -12299,7 +12477,7 @@ ${rawErr}
 			};
 
 			addRowBtn.onclick = () => {
-				const newRow: Record<string, any> = {};
+				const newRow: Record<string, unknown> = {};
 				columns.forEach(c => {
 					if (c.primaryKey && (c.dataType || '').toUpperCase() === 'INTEGER') {
 						newRow[c.name] = rows.length + 1;
@@ -12375,7 +12553,7 @@ ${rawErr}
 			autoSyncWrap.appendChild(autoSyncInput);
 			const autoSyncText = document.createElement('span');
 			autoSyncText.textContent = 'Create empty table if missing';
-			autoSyncWrap.title = "When the workflow runs and the target table does not exist yet, create it (empty) from this card's columns. Never writes any rows.";
+			autoSyncWrap.title = 'When the workflow runs and the target table does not exist yet, create it (empty) from this card\'s columns. Never writes any rows.';
 			autoSyncWrap.appendChild(autoSyncText);
 			dbTopRow.appendChild(autoSyncWrap);
 
@@ -12398,7 +12576,7 @@ ${rawErr}
 				const opt = document.createElement('option');
 				opt.value = item.value;
 				opt.textContent = item.label;
-				if (dbEngine === item.value) opt.selected = true;
+				if (dbEngine === item.value) { opt.selected = true; }
 				engSelect.appendChild(opt);
 			});
 			engSelect.onchange = () => {
@@ -12542,7 +12720,7 @@ ${rawErr}
 			const refreshTablesBtn = document.createElement('button');
 			refreshTablesBtn.type = 'button';
 			refreshTablesBtn.style.cssText = 'padding: 4px 8px; font-size: 11px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15); cursor: pointer;';
-			refreshTablesBtn.textContent = '↻';
+			refreshTablesBtn.textContent = '\u21BB';
 			refreshTablesBtn.title = 'Refresh list of tables in the SQLite database';
 			dbTableRow.appendChild(refreshTablesBtn);
 
@@ -12567,7 +12745,7 @@ ${rawErr}
 				tblParamChipsRow.appendChild(chipLabel);
 
 				const paramTokens: string[] = [];
-				for (const pKey of Object.keys((this as any)._parameterValues || {})) {
+				for (const pKey of Object.keys(this._parameterValues || {})) {
 					const trimmed = pKey.trim();
 					if (trimmed && !paramTokens.includes(trimmed)) {
 						paramTokens.push(trimmed);
@@ -12710,9 +12888,9 @@ ${rawErr}
 				}
 				schemaDiffBanner.style.display = 'flex';
 				const parts: string[] = [];
-				if (diff.added.length > 0) parts.push(`Added (+): ${diff.added.join(', ')}`);
-				if (diff.removed.length > 0) parts.push(`Removed (-): ${diff.removed.join(', ')}`);
-				if (diff.modified.length > 0) parts.push(`Modified (~): ${diff.modified.join(', ')}`);
+				if (diff.added.length > 0) { parts.push(`Added (+): ${diff.added.join(', ')}`); }
+				if (diff.removed.length > 0) { parts.push(`Removed (-): ${diff.removed.join(', ')}`); }
+				if (diff.modified.length > 0) { parts.push(`Modified (~): ${diff.modified.join(', ')}`); }
 				if (parts.length === 0 && !exactEqual) {
 					parts.push('Column order or attribute changed');
 				}
@@ -12723,11 +12901,11 @@ ${rawErr}
 
 			const reconcileSchemaChanges = async (
 				tblLabel: string,
-				prevDbCols: any[],
-				localCols: any[],
-				newDbCols: any[],
+				prevDbCols: ITableColumnDefinition[],
+				localCols: ITableColumnDefinition[],
+				newDbCols: ITableColumnDefinition[],
 				newTableExists: boolean
-			): Promise<{ nextCols: any[]; nextDirty: boolean }> => {
+			): Promise<{ nextCols: ITableColumnDefinition[]; nextDirty: boolean }> => {
 				if (!newTableExists) {
 					const confirmRes = await this._dialogService.confirm({
 						type: 'warning',
@@ -12742,11 +12920,11 @@ ${rawErr}
 					return { nextCols: cloneColumnsList(localCols), nextDirty: true };
 				}
 
-				const prevMap = new Map<string, any>();
+				const prevMap = new Map<string, ITableColumnDefinition>();
 				prevDbCols.forEach(c => prevMap.set(c.name.toLowerCase(), c));
-				const localMap = new Map<string, any>();
+				const localMap = new Map<string, ITableColumnDefinition>();
 				localCols.forEach(c => localMap.set(c.name.toLowerCase(), c));
-				const newDbMap = new Map<string, any>();
+				const newDbMap = new Map<string, ITableColumnDefinition>();
 				newDbCols.forEach(c => newDbMap.set(c.name.toLowerCase(), c));
 
 				const localAdded = localCols.filter(c => !prevMap.has(c.name.toLowerCase()));
@@ -12756,7 +12934,7 @@ ${rawErr}
 						localRemovedKeys.add(c.name.toLowerCase());
 					}
 				});
-				const localModifiedMap = new Map<string, any>();
+				const localModifiedMap = new Map<string, ITableColumnDefinition>();
 				localCols.forEach(c => {
 					const p = prevMap.get(c.name.toLowerCase());
 					if (p && !areSchemasEqual([p], [c])) {
@@ -12779,7 +12957,7 @@ ${rawErr}
 					}
 				});
 
-				const mergedCols: any[] = [];
+				const mergedCols: ITableColumnDefinition[] = [];
 				for (const dbCol of newDbCols) {
 					const key = dbCol.name.toLowerCase();
 					const prevCol = prevMap.get(key);
@@ -12976,7 +13154,7 @@ ${rawErr}
 					const currentVal = tblInput.value.trim();
 					if (!currentVal || knownDbTables.some(t => t.toLowerCase() === currentVal.toLowerCase())) {
 						let defaultParamToken = 'table name';
-						const paramKeys = Object.keys((this as any)._parameterValues || {});
+						const paramKeys = Object.keys(this._parameterValues || {});
 						if (paramKeys.length > 0 && paramKeys[0].trim()) {
 							defaultParamToken = paramKeys[0].trim();
 						} else if (this._lastCustomModule?.fields) {
@@ -13059,7 +13237,7 @@ ${rawErr}
 				const runtime = this._instantiationService.invokeFunction(accessor => {
 					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
 				});
-				if (!runtime) return;
+				if (!runtime) { return; }
 				const wsRoot = this._entityUri ? await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri) : undefined;
 				const { resolvedTable } = resolveTargetTableName();
 				const res = await runtime.executeSqliteTableOperation({
@@ -13139,7 +13317,7 @@ ${rawErr}
 				const runtime = this._instantiationService.invokeFunction(accessor => {
 					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
 				});
-				if (!runtime) return;
+				if (!runtime) { return; }
 				const reqSeq = ++schemaLoadSeq;
 				const wsRoot = this._entityUri ? await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri) : undefined;
 
@@ -13197,7 +13375,7 @@ ${rawErr}
 						dbPath: curDbPath,
 						tableName: resolvedTable,
 						action: 'update_header',
-						columns: columns as any,
+						columns: columns,
 						rows
 					});
 					if (reqSeq !== schemaLoadSeq) {
@@ -13292,7 +13470,7 @@ ${rawErr}
 						dbPath: curDbPath,
 						tableName: curTableName,
 						action: 'load_schema',
-						columns: columns as any
+						columns: columns
 					});
 					if (reqSeq !== schemaLoadSeq) {
 						return;
@@ -13309,9 +13487,9 @@ ${rawErr}
 						const diff = computeColumnDiff(prevUiCols, loadedCols);
 						if (diff.hasDiff || !areSchemasEqual(prevUiCols, loadedCols)) {
 							const diffNotes: string[] = [];
-							if (diff.removed.length > 0) diffNotes.push(`In DB (+loaded): ${diff.removed.join(', ')}`);
-							if (diff.added.length > 0) diffNotes.push(`Local only (-replaced): ${diff.added.join(', ')}`);
-							if (diff.modified.length > 0) diffNotes.push(`Type/PK changes: ${diff.modified.join(', ')}`);
+							if (diff.removed.length > 0) { diffNotes.push(`In DB (+loaded): ${diff.removed.join(', ')}`); }
+							if (diff.added.length > 0) { diffNotes.push(`Local only (-replaced): ${diff.added.join(', ')}`); }
+							if (diff.modified.length > 0) { diffNotes.push(`Type/PK changes: ${diff.modified.join(', ')}`); }
 							this._notificationService.info(`Synced ${loadedCols.length} column(s) from '${curTableName}'${diffNotes.length > 0 ? ` — ${diffNotes.join(' | ')}` : ''}.`);
 						} else {
 							this._notificationService.info(res.message || `Queried ${loadedCols.length} column(s) from '${curTableName}' (matches current header).`);
@@ -13342,7 +13520,7 @@ ${rawErr}
 					dbPath: curDbPath,
 					tableName: curTableName,
 					action,
-					columns: columns as any,
+					columns: columns,
 					rows,
 					limit: reqSize,
 					offset: (reqPage - 1) * reqSize
@@ -13426,7 +13604,7 @@ ${rawErr}
 				const runtime = this._instantiationService.invokeFunction(accessor => {
 					try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
 				});
-				if (!runtime) return;
+				if (!runtime) { return; }
 				const wsRoot = this._entityUri ? await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri) : undefined;
 
 				const inspectRes = await runtime.executeSqliteTableOperation({
@@ -13491,7 +13669,7 @@ ${rawErr}
 					dbPath: curDbPath,
 					tableName: curTableName,
 					action: 'update_header',
-					columns: columns as any,
+					columns: columns,
 					rows,
 					limit: pageSize,
 					offset: (currentPage - 1) * pageSize
@@ -13748,7 +13926,7 @@ ${rawErr}
 			const sqlTextarea = document.createElement('textarea');
 			sqlTextarea.rows = 4;
 			sqlTextarea.value = sqlQuery;
-			sqlTextarea.placeholder = "Write SQL statements to query or modify this table. Use {Field Label} to reference outputs from other primitives (e.g. {SQL Generation} or INSERT INTO table_name (job_title) VALUES ('{JD_Data}');)...";
+			sqlTextarea.placeholder = 'Write SQL statements to query or modify this table. Use {Field Label} to reference outputs from other primitives (e.g. {SQL Generation} or INSERT INTO table_name (job_title) VALUES (\'{JD_Data}\');)...';
 			sqlTextarea.style.cssText = 'display: none; width: 100%; min-height: 84px; padding: 8px 10px; font-size: 11.5px; line-height: 1.6; font-family: var(--vscode-editor-font-family, monospace); border-radius: 5px; border: 1px solid rgba(56,189,248,0.65); background: rgba(0,0,0,0.45); color: #e2e8f0; box-sizing: border-box; resize: vertical; outline: none;';
 			sqlEditorWrapper.appendChild(sqlTextarea);
 
@@ -13974,7 +14152,7 @@ ${rawErr}
 			const testSqlBtn = document.createElement('button');
 			testSqlBtn.type = 'button';
 			testSqlBtn.style.cssText = 'padding: 3px 10px; width: auto; font-size: 11px; font-weight: 600; border-radius: 4px; background: rgba(14, 99, 156, 0.25); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); cursor: pointer;';
-			testSqlBtn.textContent = '▷ Test';
+			testSqlBtn.textContent = '\u25B7 Test';
 			testSqlBtn.title = 'Interpolate {Field Label} references and execute this SQL statement against SQLite';
 			sqlOutputActions.appendChild(testSqlBtn);
 
@@ -14002,7 +14180,7 @@ ${rawErr}
 					sqlOutputDisplay.style.opacity = '1';
 					sqlOutputDisplay.style.fontStyle = 'normal';
 				} else {
-					sqlOutputDisplay.textContent = 'No SQL execution output yet. Click "▷ Test" or "▷ Run SQL" to execute the SQL statement and inspect the resolved SQL & query result here.';
+					sqlOutputDisplay.textContent = 'No SQL execution output yet. Click "\u25B7 Test" or "\u25B7 Run SQL" to execute the SQL statement and inspect the resolved SQL & query result here.';
 					sqlOutputDisplay.style.opacity = '0.5';
 					sqlOutputDisplay.style.fontStyle = 'italic';
 				}
@@ -14103,7 +14281,7 @@ ${rawErr}
 						dbPath: curDbPath,
 						tableName: curTableName,
 						action: 'query',
-						columns: columns as any,
+						columns: columns,
 						rows,
 						sqlQuery: cleanedInterpolatedSql || interpolatedSql
 					});
@@ -14214,7 +14392,7 @@ ${rawErr}
 								const qCountSpan = document.createElement('span');
 								qCountSpan.style.cssText = 'font-size: 10.5px; font-weight: 600; color: #7dd3fc;';
 								qCountSpan.textContent = qTotalRows > 0
-									? `Query Result (Showing ${qStartIdx + 1}–${qEndIdx} of ${qTotalRows} row(s) — Full ${qTotalRows} rows preserved)`
+									? `Query Result (Showing ${qStartIdx + 1}\u2013${qEndIdx} of ${qTotalRows} row(s) — Full ${qTotalRows} rows preserved)`
 									: `Query Result (0 row(s))`;
 								qTopBar.appendChild(qCountSpan);
 
@@ -14227,7 +14405,7 @@ ${rawErr}
 									prevBtn.type = 'button';
 									prevBtn.disabled = qCurPage <= 1;
 									prevBtn.style.cssText = `padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15); cursor: ${qCurPage <= 1 ? 'default' : 'pointer'}; opacity: ${qCurPage <= 1 ? '0.4' : '1'};`;
-									prevBtn.textContent = '‹ Prev';
+									prevBtn.textContent = '\u2039 Prev';
 									prevBtn.onclick = () => {
 										if (qCurPage > 1) {
 											qCurPage--;
@@ -14245,7 +14423,7 @@ ${rawErr}
 									nextBtn.type = 'button';
 									nextBtn.disabled = qCurPage >= qTotalPages;
 									nextBtn.style.cssText = `padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.15); cursor: ${qCurPage >= qTotalPages ? 'default' : 'pointer'}; opacity: ${qCurPage >= qTotalPages ? '0.4' : '1'};`;
-									nextBtn.textContent = 'Next ›';
+									nextBtn.textContent = 'Next \u203A';
 									nextBtn.onclick = () => {
 										if (qCurPage < qTotalPages) {
 											qCurPage++;
@@ -14343,9 +14521,9 @@ ${rawErr}
 					}
 				} finally {
 					runSqlBtn.disabled = false;
-					runSqlBtn.textContent = '▷ Run SQL';
+					runSqlBtn.textContent = '\u25B7 Run SQL';
 					testSqlBtn.disabled = false;
-					testSqlBtn.textContent = '▷ Test';
+					testSqlBtn.textContent = '\u25B7 Test';
 				}
 			};
 
@@ -14358,17 +14536,17 @@ ${rawErr}
 	}
 
 	private async _hydrateSshPrimitiveCards(): Promise<void> {
-		if (!this._container) return;
-		const cards = Array.from(this._container.querySelectorAll('.ssh-primitive-card')) as HTMLElement[];
+		if (!this._container) { return; }
+		const cards = Array.from(templateParts(this._container, '.ssh-primitive-card')) as HTMLElement[];
 		for (const card of cards) {
 			const fieldKey = card.getAttribute('data-field-key') || '';
 			const rawJson = card.getAttribute('data-ssh-json') || '{}';
-			const mount = card.querySelector('.ssh-card-mount') as HTMLElement | null;
-			if (!mount || !fieldKey) continue;
+			const mount = templatePart(card, '.ssh-card-mount') as HTMLElement | null;
+			if (!mount || !fieldKey) { continue; }
 			clearNode(mount);
 
 			// Ticket value uses the template config names (sshHost, sshPort, ...); older short names are migrated here.
-			const parsed: any = normalizeSshTicketValue(rawJson) ?? {};
+			const parsed = normalizeSshTicketValue(rawJson) ?? {};
 
 			let sshHost: string = String(parsed.sshHost ?? '');
 			let sshPort: number | string = parsed.sshPort !== undefined && String(parsed.sshPort).trim() !== ''
@@ -14391,7 +14569,7 @@ ${rawErr}
 				: undefined;
 			let hasCompletedCmdRun = Boolean(lastExecuted) || Boolean(sshLastOutput) || sshLastRawEntries.length > 0;
 
-			const headerBadgeEl = card.querySelector('.ssh-header-target-badge') as HTMLElement | null;
+			const headerBadgeEl = templatePart(card, '.ssh-header-target-badge') as HTMLElement | null;
 
 			let activeTargetInput: HTMLInputElement | undefined;
 			let activeCmdRowIdx = 0;
@@ -14411,7 +14589,7 @@ ${rawErr}
 				sshCommand = sshCommands[0] || '';
 			};
 
-			let saveDebounce: any;
+			let saveDebounce: ReturnType<typeof setTimeout> | undefined;
 			const persistState = (immediate = false) => {
 				syncCommandsState();
 				const computedLastN = sshLastRawEntries.length > 0
@@ -14442,11 +14620,11 @@ ${rawErr}
 				if (headerBadgeEl) {
 					headerBadgeEl.textContent = sshHost ? `${sshUser || 'root'}@${sshHost}:${sshPort || 22}` : 'Not Connected';
 				}
-				const aiBtn = card.querySelector('.ai-edit-btn') as HTMLElement | null;
+				const aiBtn = templatePart(card, '.ai-edit-btn') as HTMLElement | null;
 				if (aiBtn) {
 					aiBtn.setAttribute('data-ai-current-value', sshCommand || '');
 				}
-				if (saveDebounce) clearTimeout(saveDebounce);
+				if (saveDebounce) { clearTimeout(saveDebounce); }
 				if (immediate) {
 					this._persistCustomFieldQuietly(fieldKey, str);
 				} else {
@@ -14884,7 +15062,7 @@ ${rawErr}
 					ev.preventDefault();
 					ev.stopPropagation();
 					const targetInp = activeTargetInput || cmdInputElements[activeCmdRowIdx] || cmdInputElements[0];
-					if (!targetInp) return;
+					if (!targetInp) { return; }
 					const start = targetInp.selectionStart ?? targetInp.value.length;
 					const end = targetInp.selectionEnd ?? targetInp.value.length;
 					const tokenStr = `{${tok}}`;
@@ -14900,13 +15078,14 @@ ${rawErr}
 			cmdRowsContainer.style.cssText = 'display: flex; flex-direction: column; gap: 6px; width: 100%;';
 			multiCmdBody.appendChild(cmdRowsContainer);
 
-			let refreshQuickCommandsOnExpand: (() => void) | undefined;
+			// Set once the quick-commands list exists (further below); expanding before that only toggles visibility
+			const quickCommandsOnExpand: { refresh?: () => void } = {};
 			const applyCmdBarsExpandedState = () => {
 				this._sshPanelExpandedByFieldKey.set(sshCmdBarsStateKey, isCmdBarsExpanded);
 				if (isCmdBarsExpanded) {
 					multiCmdBody.style.display = 'flex';
 					cmdBarsChevronIcon.className = 'codicon codicon-chevron-down';
-					refreshQuickCommandsOnExpand?.();
+					quickCommandsOnExpand.refresh?.();
 				} else {
 					multiCmdBody.style.display = 'none';
 					cmdBarsChevronIcon.className = 'codicon codicon-chevron-right';
@@ -15032,7 +15211,7 @@ ${rawErr}
 			}
 
 			const refreshSshOutputByLineLimit = () => {
-				if (!hasCompletedCmdRun) return;
+				if (!hasCompletedCmdRun) { return; }
 				if (sshLastRawEntries.length > 0) {
 					sshLastOutput = formatSshCommandsJsonOutput(sshLastRawEntries, sshOutputLines);
 				} else if (sshLastOutput !== undefined && sshLastOutput !== '') {
@@ -15074,7 +15253,7 @@ ${rawErr}
 				const resolved: string[] = [];
 				for (const rawItem of (rawList || [])) {
 					const trimmedRaw = String(rawItem ?? '').trim();
-					if (!trimmedRaw) continue;
+					if (!trimmedRaw) { continue; }
 					const pureToken = trimmedRaw.match(/^@?\{\{?([^{}]+)\}?\}/);
 					const interpolated = this._interpolateParameters(trimmedRaw).trim();
 					if (pureToken && pureToken[0] === trimmedRaw && interpolated.startsWith('[') && interpolated.endsWith(']')) {
@@ -15083,7 +15262,7 @@ ${rawErr}
 							if (Array.isArray(parsedArr)) {
 								for (const item of parsedArr) {
 									const cleaned = cleanInterpolatedSshCommand(String(item ?? ''));
-									if (cleaned) resolved.push(cleaned);
+									if (cleaned) { resolved.push(cleaned); }
 								}
 								continue;
 							}
@@ -15106,12 +15285,12 @@ ${rawErr}
 				runAllCmdsBtnLabel.textContent = (running && mode === 'all') ? 'Running...' : 'Run All';
 				cmdRowRunButtons.forEach((item, idx) => {
 					item.btn.disabled = running;
-					item.label.textContent = (running && mode === 'single' && activeRowIdx === idx) ? 'Sending...' : '▷ Send';
+					item.label.textContent = (running && mode === 'single' && activeRowIdx === idx) ? 'Sending...' : '\u25B7 Send';
 				});
 			};
 
 			const executeConnectCheck = async () => {
-				if (isRunningCmd) return;
+				if (isRunningCmd) { return; }
 				const interpolatedHost = this._interpolateParameters(sshHost).trim();
 				const interpolatedPort = Number(this._interpolateParameters(String(sshPort || 22)).trim()) || 22;
 				const interpolatedUser = this._interpolateParameters(sshUser).trim() || 'root';
@@ -15167,8 +15346,8 @@ ${rawErr}
 						connStatusPill.style.color = '#34d399';
 					}
 					persistState(true);
-				} catch (err: any) {
-					const errMsg = err?.message || String(err);
+				} catch (err) {
+					const errMsg = (err as Error | undefined)?.message || String(err);
 					connStatusPill.textContent = 'Connection Failed';
 					connStatusPill.style.color = '#f87171';
 					this._notificationService.error(`SSH Connection Failed: ${errMsg}`);
@@ -15178,7 +15357,7 @@ ${rawErr}
 			};
 
 			const executeCommandSequence = async (mode: 'single' | 'all', targetRowIdx?: number) => {
-				if (isRunningCmd) return;
+				if (isRunningCmd) { return; }
 				syncCommandsState();
 
 				const interpolatedHost = this._interpolateParameters(sshHost).trim();
@@ -15309,8 +15488,8 @@ ${rawErr}
 						connStatusPill.style.color = '#34d399';
 					}
 					persistState(true);
-				} catch (err: any) {
-					const errMsg = err?.message || String(err);
+				} catch (err) {
+					const errMsg = (err as Error | undefined)?.message || String(err);
 					hasCompletedCmdRun = true;
 					sshLastRawEntries = [];
 					sshLastRawOutput = `[SSH Exception] ${errMsg}`;
@@ -15396,7 +15575,7 @@ ${rawErr}
 					rowRunBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; font-size: 11px; font-weight: 700; border-radius: 4px; background: rgba(16, 185, 129, 0.25); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.55); cursor: pointer; flex-shrink: 0; white-space: nowrap;';
 					rowRunBtn.title = `Send & Execute Command #${rowIdx + 1}`;
 					const rowRunLbl = document.createElement('span');
-					rowRunLbl.textContent = '▷ Send';
+					rowRunLbl.textContent = '\u25B7 Send';
 					rowRunBtn.appendChild(rowRunLbl);
 					rowBar.appendChild(rowRunBtn);
 					cmdRowRunButtons.push({ btn: rowRunBtn, label: rowRunLbl });
@@ -15420,7 +15599,7 @@ ${rawErr}
 					rowDelBtn.onclick = (ev) => {
 						ev.preventDefault();
 						ev.stopPropagation();
-						if (isRunningCmd) return;
+						if (isRunningCmd) { return; }
 						syncCommandsState();
 						if (sshCommands.length > 1) {
 							sshCommands.splice(rowIdx, 1);
@@ -15444,7 +15623,7 @@ ${rawErr}
 			addCmdRowBtn.onclick = (ev) => {
 				ev.preventDefault();
 				ev.stopPropagation();
-				if (isRunningCmd) return;
+				if (isRunningCmd) { return; }
 				syncCommandsState();
 				sshCommands.push('');
 				activeCmdRowIdx = sshCommands.length - 1;
@@ -15477,7 +15656,7 @@ ${rawErr}
 				const categories = ['All'];
 				quickCommands.forEach(qc => {
 					const c = qc.category || 'Custom';
-					if (!categories.includes(c)) categories.push(c);
+					if (!categories.includes(c)) { categories.push(c); }
 				});
 
 				categories.forEach(cat => {
@@ -15637,7 +15816,7 @@ ${rawErr}
 
 				applyTwoRowClamp();
 				if (isCmdBarsExpanded && chipsWrap.clientWidth === 0) {
-					requestAnimationFrame(() => applyTwoRowClamp());
+					mainWindow.requestAnimationFrame(() => applyTwoRowClamp());
 				}
 			};
 
@@ -15663,7 +15842,7 @@ ${rawErr}
 				ev.stopPropagation();
 			};
 
-			refreshQuickCommandsOnExpand = renderQuickCommands;
+			quickCommandsOnExpand.refresh = renderQuickCommands;
 			renderCommandRows();
 			renderQuickCommands();
 			applyOperationPanelExpandedState();
@@ -15673,7 +15852,7 @@ ${rawErr}
 				ev.stopPropagation();
 				const isHidden = addQuickForm.style.display === 'none';
 				addQuickForm.style.display = isHidden ? 'flex' : 'none';
-				if (isHidden) newQuickLabelInp.focus();
+				if (isHidden) { newQuickLabelInp.focus(); }
 			};
 
 			saveQuickBtn.onclick = (ev) => {
@@ -15785,22 +15964,22 @@ ${rawErr}
 	}
 
 	private _hydratePythonPrimitiveCards(): void {
-		if (!this._container) return;
-		const cards = Array.from(this._container.querySelectorAll('.python-primitive-card')) as HTMLElement[];
+		if (!this._container) { return; }
+		const cards = Array.from(templateParts(this._container, '.python-primitive-card')) as HTMLElement[];
 		for (const card of cards) {
 			card.setAttribute('data-python-hydrated', 'true');
 			const fieldKey = card.getAttribute('data-field-key') || '';
 			const initialCode = (card.getAttribute('data-python-code') ?? '').replace(/\r\n?/g, '\n');
 			let isLocked = card.getAttribute('data-python-locked') === 'true';
 
-			const codeWrapper = card.querySelector('.python-code-wrapper') as HTMLElement | null;
-			const lineNumbersGutter = card.querySelector('.python-line-numbers-gutter') as HTMLElement | null;
-			const codeDisplay = card.querySelector('.python-code-display') as HTMLElement | null;
-			const codeTextarea = card.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
-			const copyCodeBtn = card.querySelector('.python-copy-code-btn') as HTMLButtonElement | null;
-			const pasteCodeBtn = card.querySelector('.python-paste-code-btn') as HTMLButtonElement | null;
-			const lockCodeBtn = card.querySelector('.python-lock-code-btn') as HTMLButtonElement | null;
-			const chipsBar = card.querySelector('.python-ctx-chips-bar') as HTMLElement | null;
+			const codeWrapper = templatePart(card, '.python-code-wrapper') as HTMLElement | null;
+			const lineNumbersGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
+			const codeDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
+			const codeTextarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
+			const copyCodeBtn = templatePart(card, '.python-copy-code-btn') as HTMLButtonElement | null;
+			const pasteCodeBtn = templatePart(card, '.python-paste-code-btn') as HTMLButtonElement | null;
+			const lockCodeBtn = templatePart(card, '.python-lock-code-btn') as HTMLButtonElement | null;
+			const chipsBar = templatePart(card, '.python-ctx-chips-bar') as HTMLElement | null;
 
 			if (!codeWrapper || !lineNumbersGutter || !codeDisplay || !codeTextarea) {
 				continue;
@@ -15811,7 +15990,7 @@ ${rawErr}
 			let isCodeEditing = false;
 			let lastCodeSelectionStart: number | undefined = undefined;
 			let lastCodeSelectionEnd: number | undefined = undefined;
-			let saveDebounceTimer: any = undefined;
+			let saveDebounceTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 
 			const syncScrollPositions = () => {
 				if (codeTextarea.scrollTop !== 0) {
@@ -15828,7 +16007,7 @@ ${rawErr}
 			const renderHighlightedCode = () => {
 				const val = codeTextarea.value || '';
 				card.setAttribute('data-python-code', val);
-				const aiBtn = card.querySelector('.ai-edit-btn') as HTMLElement | null;
+				const aiBtn = templatePart(card, '.ai-edit-btn') as HTMLElement | null;
 				if (aiBtn) {
 					aiBtn.setAttribute('data-ai-current-value', val);
 				}
@@ -15855,7 +16034,7 @@ ${rawErr}
 				codeTextarea.readOnly = isLocked;
 				codeTextarea.style.cursor = isLocked ? 'default' : 'text';
 				if (lockCodeBtn) {
-					const iconEl = lockCodeBtn.querySelector('.codicon') as HTMLElement | null;
+					const iconEl = templatePart(lockCodeBtn, '.codicon') as HTMLElement | null;
 					if (iconEl) {
 						iconEl.className = isLocked ? 'codicon codicon-lock' : 'codicon codicon-unlock';
 					}
@@ -15964,9 +16143,9 @@ ${rawErr}
 					codeTextarea.selectionStart = codeTextarea.selectionEnd = start + 4;
 					recordCodeSelection();
 					renderHighlightedCode();
-					if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+					if (saveDebounceTimer) { clearTimeout(saveDebounceTimer); }
 					saveDebounceTimer = setTimeout(() => {
-						if (fieldKey) this._savePythonDataFromCard(card, fieldKey);
+						if (fieldKey) { this._savePythonDataFromCard(card, fieldKey); }
 					}, 400);
 				} else if (e.key === 'Enter') {
 					const start = codeTextarea.selectionStart;
@@ -15987,9 +16166,9 @@ ${rawErr}
 						codeTextarea.selectionStart = codeTextarea.selectionEnd = start + insertStr.length;
 						recordCodeSelection();
 						renderHighlightedCode();
-						if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+						if (saveDebounceTimer) { clearTimeout(saveDebounceTimer); }
 						saveDebounceTimer = setTimeout(() => {
-							if (fieldKey) this._savePythonDataFromCard(card, fieldKey);
+							if (fieldKey) { this._savePythonDataFromCard(card, fieldKey); }
 						}, 400);
 					}
 				}
@@ -15998,9 +16177,9 @@ ${rawErr}
 			codeTextarea.oninput = () => {
 				recordCodeSelection();
 				renderHighlightedCode();
-				if (saveDebounceTimer) clearTimeout(saveDebounceTimer);
+				if (saveDebounceTimer) { clearTimeout(saveDebounceTimer); }
 				saveDebounceTimer = setTimeout(() => {
-					if (fieldKey) this._savePythonDataFromCard(card, fieldKey);
+					if (fieldKey) { this._savePythonDataFromCard(card, fieldKey); }
 				}, 400);
 			};
 
@@ -16015,7 +16194,7 @@ ${rawErr}
 					e.stopPropagation();
 					const rawCode = codeTextarea.value ?? '';
 					await this._clipboardService.writeText(rawCode);
-					const iconEl = copyCodeBtn.querySelector('.codicon') as HTMLElement | null;
+					const iconEl = templatePart(copyCodeBtn, '.codicon') as HTMLElement | null;
 					if (iconEl) {
 						iconEl.className = 'codicon codicon-check';
 					}
@@ -16076,7 +16255,7 @@ ${rawErr}
 					if (fieldKey) {
 						await this._savePythonDataFromCard(card, fieldKey);
 					}
-					const iconEl = pasteCodeBtn.querySelector('.codicon') as HTMLElement | null;
+					const iconEl = templatePart(pasteCodeBtn, '.codicon') as HTMLElement | null;
 					if (iconEl) {
 						iconEl.className = 'codicon codicon-check';
 					}
@@ -16105,7 +16284,7 @@ ${rawErr}
 					e.stopPropagation();
 					isLocked = !isLocked;
 					applyLockUi();
-					if (isLocked && document.activeElement === codeTextarea) {
+					if (isLocked && mainWindow.document.activeElement === codeTextarea) {
 						codeTextarea.blur();
 					}
 					if (fieldKey) {
@@ -16114,7 +16293,7 @@ ${rawErr}
 				};
 			}
 
-			const chipBtns = Array.from(card.querySelectorAll('.python-insert-ctx-chip')) as HTMLButtonElement[];
+			const chipBtns = Array.from(templateParts(card, '.python-insert-ctx-chip')) as HTMLButtonElement[];
 			for (const chipBtn of chipBtns) {
 				chipBtn.onmousedown = (e) => {
 					e.preventDefault();
@@ -16159,41 +16338,44 @@ ${rawErr}
 		}
 	}
 
-	private async _savePythonPrimitiveData(fieldKey: string, pythonData: any): Promise<void> {
+	private async _savePythonPrimitiveData(fieldKey: string, pythonData: unknown): Promise<void> {
 		const serialized = typeof pythonData === 'string' ? pythonData : JSON.stringify(pythonData);
 		await this._persistCustomFieldQuietly(fieldKey, serialized);
 	}
 
 	private _getCardExternalScripts(card: HTMLElement): string[] {
-		if ((card as any)._externalScripts) return (card as any)._externalScripts;
+		const state = cardRuntimeState(card);
+		if (state.externalScripts) { return state.externalScripts; }
 		const raw = card.getAttribute('data-external-scripts') || '[]';
+		let scripts: string[];
 		try {
 			const parsed = JSON.parse(raw);
-			(card as any)._externalScripts = Array.isArray(parsed) ? parsed : [];
+			scripts = Array.isArray(parsed) ? parsed : [];
 		} catch {
-			(card as any)._externalScripts = [];
+			scripts = [];
 		}
-		return (card as any)._externalScripts;
+		state.externalScripts = scripts;
+		return scripts;
 	}
 
-	private async _savePythonDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string, exitCodeOverride?: number, durationMsOverride?: number, resultOverride?: any): Promise<any> {
-		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
-		const codeTextarea = card.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
-		const outputDisplay = card.querySelector('.python-output-display') as HTMLElement | null;
+	private async _savePythonDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string, exitCodeOverride?: number, durationMsOverride?: number, resultOverride?: unknown): Promise<Record<string, unknown>> {
+		const interpInput = templatePart(card, '.python-interpreter-input') as HTMLInputElement | null;
+		const codeTextarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
+		const outputDisplay = templatePart(card, '.python-output-display') as HTMLElement | null;
 
 		const pythonPath = interpInput?.value.trim() || '';
 		const externalScripts = this._getCardExternalScripts(card);
 		const code = codeTextarea?.value || '';
 		const locked = card.getAttribute('data-python-locked') === 'true';
 		let output = outputOverride !== undefined ? outputOverride : (outputDisplay?.textContent || '');
-		if (output.startsWith('No execution output yet') || output.startsWith('No execution logs yet')) output = '';
+		if (output.startsWith('No execution output yet') || output.startsWith('No execution logs yet')) { output = ''; }
 
 		let result = resultOverride;
-		if (result === undefined && (card as any)._lastPythonResult !== undefined) {
-			result = (card as any)._lastPythonResult;
+		if (result === undefined && cardRuntimeState(card).lastPythonResult !== undefined) {
+			result = cardRuntimeState(card).lastPythonResult;
 		}
 
-		const pythonData: any = {
+		const pythonData: Record<string, unknown> = {
 			pythonPath,
 			externalScripts,
 			code,
@@ -16210,11 +16392,11 @@ ${rawErr}
 	}
 
 	private async _executePythonScriptInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
-		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
-		const codeTextarea = card.querySelector('.python-code-textarea') as HTMLTextAreaElement | null;
-		const statusText = card.querySelector('.python-status-text') as HTMLElement | null;
-		const outputDisplay = card.querySelector('.python-output-display') as HTMLElement | null;
-		const runBtn = card.querySelector('.python-run-script-btn') as HTMLElement | null;
+		const interpInput = templatePart(card, '.python-interpreter-input') as HTMLInputElement | null;
+		const codeTextarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
+		const statusText = templatePart(card, '.python-status-text') as HTMLElement | null;
+		const outputDisplay = templatePart(card, '.python-output-display') as HTMLElement | null;
+		const runBtn = templatePart(card, '.python-run-script-btn') as HTMLElement | null;
 
 		const pythonPath = interpInput?.value.trim() || '';
 		const rawCode = codeTextarea?.value || '';
@@ -16230,7 +16412,7 @@ ${rawErr}
 			runBtn.style.opacity = '0.6';
 		}
 		if (statusText) {
-			statusText.textContent = 'Running script... ⏳';
+			statusText.textContent = 'Running script... \u23F3';
 			statusText.style.color = '#facc15';
 		}
 		if (outputDisplay) {
@@ -16254,20 +16436,20 @@ ${rawErr}
 					resolvedWsRoot = await this._workspacesExplorerService.findWorkspaceRootUri(this._entityUri);
 				} catch { }
 			}
-			const workspaceUri = (this as any)._previewWorkspaceUri || resolvedWsRoot || this._entityUri;
+			const workspaceUri = this._previewWorkspaceUri || resolvedWsRoot || this._entityUri;
 			const effectiveEntityUri = this._isPreviewMode ? (workspaceUri || this._entityUri) : this._entityUri;
 			if (!workspaceUri || !effectiveEntityUri) {
 				throw new Error('No active ticket or workspace selected.');
 			}
 
-			const ticketContext: { [key: string]: any } = {
+			const ticketContext: { [key: string]: unknown } = {
 				title: this._lastParsedData?.title || '',
 				Title: this._lastParsedData?.title || '',
 				description: this._lastParsedData?.description || '',
 				Description: this._lastParsedData?.description || '',
 				ticketId: this._lastParsedData?.ticketId || '',
 				status: this._lastParsedData?.status || '',
-				...((this._lastParsedData as any)?.data || {}),
+				...((this._lastParsedData as (IParsedTicketData & { data?: Record<string, unknown> }) | undefined)?.data || {}),
 				...(this._lastParsedData?.customMetadata || {})
 			};
 
@@ -16285,7 +16467,7 @@ ${rawErr}
 				for (const f of this._lastCustomModule.fields) {
 					if (f.type === 'parameters' && Array.isArray(f.parameters)) {
 						const pKey = f.label || f.id || 'Parameters';
-						const pMap: Record<string, any> = {};
+						const pMap: Record<string, unknown> = {};
 						for (const p of f.parameters) {
 							if (p.name) {
 								pMap[p.name] = p.defaultValue ?? '';
@@ -16305,7 +16487,7 @@ ${rawErr}
 							} catch { }
 						}
 						if (this._container) {
-							const pInputs = this._container.querySelectorAll('.ticket-parameter-input') as NodeListOf<HTMLInputElement | HTMLSelectElement>;
+							const pInputs = templateParts(this._container, '.ticket-parameter-input') as NodeListOf<HTMLInputElement | HTMLSelectElement>;
 							pInputs.forEach(inp => {
 								const pName = inp.getAttribute('data-param-name');
 								if (pName && Object.prototype.hasOwnProperty.call(pMap, pName)) {
@@ -16348,13 +16530,13 @@ ${rawErr}
 				externalScripts
 			);
 
-			(card as any)._lastPythonResult = res.result;
+			cardRuntimeState(card).lastPythonResult = res.result;
 
-			let resultBlock = card.querySelector('.python-result-block') as HTMLElement | null;
+			let resultBlock = templatePart(card, '.python-result-block') as HTMLElement | null;
 			if (res.result !== undefined) {
 				const formattedResult = typeof res.result === 'object' ? JSON.stringify(res.result, null, 2) : String(res.result);
 				if (!resultBlock) {
-					const outSection = card.querySelector('.python-output-section') as HTMLElement | null;
+					const outSection = templatePart(card, '.python-output-section') as HTMLElement | null;
 					if (outSection) {
 						resultBlock = document.createElement('div');
 						resultBlock.className = 'python-result-block';
@@ -16375,8 +16557,8 @@ ${rawErr}
 						outSection.insertBefore(resultBlock, outSection.firstChild);
 					}
 				}
-				const pre = resultBlock?.querySelector('.python-result-display') as HTMLElement | null;
-				if (pre) pre.textContent = formattedResult;
+				const pre = templatePart(resultBlock, '.python-result-display') as HTMLElement | null;
+				if (pre) { pre.textContent = formattedResult; }
 			} else if (resultBlock) {
 				resultBlock.remove();
 			}
@@ -16407,15 +16589,15 @@ ${rawErr}
 			if (interpInput && !pythonPath && res.pythonPath) {
 				interpInput.value = res.pythonPath;
 			}
-		} catch (err: any) {
+		} catch (err) {
 			if (outputDisplay) {
-				outputDisplay.textContent = `Execution Error: ${err.message || String(err)}`;
+				outputDisplay.textContent = `Execution Error: ${(err as Error).message || String(err)}`;
 			}
 			if (statusText) {
 				statusText.textContent = 'Execution failed';
 				statusText.style.color = '#f87171';
 			}
-			this._notificationService.error(`Python execution error: ${err.message || String(err)}`);
+			this._notificationService.error(`Python execution error: ${(err as Error).message || String(err)}`);
 		} finally {
 			if (runBtn) {
 				runBtn.removeAttribute('disabled');
@@ -16425,10 +16607,10 @@ ${rawErr}
 	}
 
 	private async _createVenvInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
-		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
-		const statusEl = card.querySelector('.python-test-status') as HTMLElement | null;
-		const createBtn = card.querySelector('.python-create-venv-btn') as HTMLElement | null;
-		const envBadge = card.querySelector('.python-env-badge') as HTMLElement | null;
+		const interpInput = templatePart(card, '.python-interpreter-input') as HTMLInputElement | null;
+		const statusEl = templatePart(card, '.python-test-status') as HTMLElement | null;
+		const createBtn = templatePart(card, '.python-create-venv-btn') as HTMLElement | null;
+		const envBadge = templatePart(card, '.python-env-badge') as HTMLElement | null;
 
 		const currentPath = interpInput?.value.trim() || '.venv';
 		const venvName = currentPath.endsWith('/bin/python') || currentPath.endsWith('\\Scripts\\python.exe')
@@ -16440,7 +16622,7 @@ ${rawErr}
 			createBtn.textContent = 'Creating...';
 		}
 		if (statusEl) {
-			statusEl.textContent = `Creating virtualenv at '${venvName}'... ⏳`;
+			statusEl.textContent = `Creating virtualenv at '${venvName}'... \u23F3`;
 			statusEl.style.color = '#facc15';
 		}
 
@@ -16476,17 +16658,17 @@ ${rawErr}
 				await this._savePythonDataFromCard(card, fieldKey);
 			} else {
 				if (statusEl) {
-					statusEl.textContent = `Venv creation failed ✗`;
+					statusEl.textContent = `Venv creation failed \u2717`;
 					statusEl.style.color = '#f87171';
 				}
 				this._notificationService.error(`Failed to create venv: ${res.error || res.output}`);
 			}
-		} catch (err: any) {
+		} catch (err) {
 			if (statusEl) {
-				statusEl.textContent = `Error: ${err.message}`;
+				statusEl.textContent = `Error: ${(err as Error).message}`;
 				statusEl.style.color = '#f87171';
 			}
-			this._notificationService.error(`Failed to create venv: ${err.message || String(err)}`);
+			this._notificationService.error(`Failed to create venv: ${(err as Error).message || String(err)}`);
 		} finally {
 			if (createBtn) {
 				createBtn.removeAttribute('disabled');
@@ -16519,13 +16701,13 @@ ${rawErr}
 						currentScripts.push(p);
 					}
 				}
-				(card as any)._externalScripts = currentScripts;
+				cardRuntimeState(card).externalScripts = currentScripts;
 				card.setAttribute('data-external-scripts', JSON.stringify(currentScripts));
 				this._renderExternalScriptsInCard(card, fieldKey, currentScripts);
 				await this._savePythonDataFromCard(card, fieldKey);
 			}
-		} catch (err: any) {
-			this._notificationService.error(`Failed to add script: ${err.message || err}`);
+		} catch (err) {
+			this._notificationService.error(`Failed to add script: ${(err as Error).message || err}`);
 		}
 	}
 
@@ -16533,7 +16715,7 @@ ${rawErr}
 		const currentScripts = this._getCardExternalScripts(card);
 		if (index >= 0 && index < currentScripts.length) {
 			currentScripts.splice(index, 1);
-			(card as any)._externalScripts = currentScripts;
+			cardRuntimeState(card).externalScripts = currentScripts;
 			card.setAttribute('data-external-scripts', JSON.stringify(currentScripts));
 			this._renderExternalScriptsInCard(card, fieldKey, currentScripts);
 			await this._savePythonDataFromCard(card, fieldKey);
@@ -16541,8 +16723,8 @@ ${rawErr}
 	}
 
 	private _renderExternalScriptsInCard(card: HTMLElement, fieldKey: string, scripts: string[]): void {
-		const listEl = card.querySelector('.python-scripts-list') as HTMLElement | null;
-		if (!listEl) return;
+		const listEl = templatePart(card, '.python-scripts-list') as HTMLElement | null;
+		if (!listEl) { return; }
 		if (scripts.length === 0) {
 			this._setElementHTML(listEl, `<div class="python-scripts-empty" style="font-size: 10.5px; opacity: 0.5; padding: 3px 4px; font-style: italic;">No external scripts configured. Executes inline source code only.</div>`);
 			return;
@@ -16560,7 +16742,7 @@ ${rawErr}
 	}
 
 	private async _browsePythonInterpreterInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
-		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
+		const interpInput = templatePart(card, '.python-interpreter-input') as HTMLInputElement | null;
 		try {
 			const uris = await this._fileDialogService.showOpenDialog({
 				canSelectFiles: true,
@@ -16584,15 +16766,15 @@ ${rawErr}
 				await this._savePythonDataFromCard(card, fieldKey);
 				await this._testPythonInterpreterInEditor(card, fieldKey);
 			}
-		} catch (err: any) {
-			this._notificationService.error(`Failed to pick folder: ${err.message || err}`);
+		} catch (err) {
+			this._notificationService.error(`Failed to pick folder: ${(err as Error).message || err}`);
 		}
 	}
 
 	private async _testPythonInterpreterInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
-		const interpInput = card.querySelector('.python-interpreter-input') as HTMLInputElement | null;
-		const statusEl = card.querySelector('.python-test-status') as HTMLElement | null;
-		const testBtn = card.querySelector('.python-test-interpreter-btn') as HTMLElement | null;
+		const interpInput = templatePart(card, '.python-interpreter-input') as HTMLInputElement | null;
+		const statusEl = templatePart(card, '.python-test-status') as HTMLElement | null;
+		const testBtn = templatePart(card, '.python-test-interpreter-btn') as HTMLElement | null;
 		const pythonPath = interpInput?.value.trim() || '';
 
 		if (testBtn) {
@@ -16600,7 +16782,7 @@ ${rawErr}
 			testBtn.textContent = 'Testing...';
 		}
 		if (statusEl) {
-			statusEl.textContent = 'Testing interpreter... ⏳';
+			statusEl.textContent = 'Testing interpreter... \u23F3';
 			statusEl.style.color = '#facc15';
 		}
 
@@ -16629,14 +16811,14 @@ ${rawErr}
 				this._notificationService.info(`Python interpreter verified: ${res.version}`);
 			} else {
 				if (statusEl) {
-					statusEl.textContent = 'Interpreter not found / failed ✗';
+					statusEl.textContent = 'Interpreter not found / failed \u2717';
 					statusEl.style.color = '#f87171';
 				}
 				this._notificationService.warn(`Python interpreter test failed: ${res.error}`);
 			}
-		} catch (err: any) {
+		} catch (err) {
 			if (statusEl) {
-				statusEl.textContent = `Error: ${err.message}`;
+				statusEl.textContent = `Error: ${(err as Error).message}`;
 				statusEl.style.color = '#f87171';
 			}
 		} finally {
@@ -16649,16 +16831,16 @@ ${rawErr}
 
 	private async _autoUpdateOutputPrimitives(output: string, sourceFieldKey?: string): Promise<void> {
 		if (!this._container) { return; }
-		const outputCards = this._container.querySelectorAll('.output-primitive-card, .result-primitive-card') as NodeListOf<HTMLElement>;
+		const outputCards = templateParts(this._container, '.output-primitive-card, .result-primitive-card') as NodeListOf<HTMLElement>;
 		if (outputCards.length === 0) { return; }
 
 		for (const card of Array.from(outputCards)) {
 			const fieldKey = card.getAttribute('data-field-key') || '';
-			const subItems = card.querySelectorAll('.output-spec-item') as NodeListOf<HTMLElement>;
+			const subItems = templateParts(card, '.output-spec-item') as NodeListOf<HTMLElement>;
 			if (subItems.length > 0) {
 				let targetItem: HTMLElement | null = null;
 				if (sourceFieldKey) {
-					const sourceSchemaField = this._lastCustomModule?.fields?.find((f: any) =>
+					const sourceSchemaField = this._lastCustomModule?.fields?.find(f =>
 						(f.label && f.label.toLowerCase() === sourceFieldKey.toLowerCase()) ||
 						(f.id && f.id.toLowerCase() === sourceFieldKey.toLowerCase()) ||
 						(f.id && f.id.toLowerCase().replace(/_/g, ' ') === sourceFieldKey.toLowerCase().replace(/_/g, ' '))
@@ -16728,15 +16910,15 @@ ${rawErr}
 		return `
 			<div class="output-pagination-toolbar" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; padding: 6px 10px; margin-bottom: 6px; border-radius: 6px; background: rgba(15, 23, 42, 0.65); border: 1px solid rgba(99, 102, 241, 0.25); font-size: 11px;">
 				<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-					<span style="color: #a5b4fc; font-weight: 600;">Showing ${startIdx}–${endIdx} of ${totalRows} ${this._escapeHtml(unitLabel)}</span>
+					<span style="color: #a5b4fc; font-weight: 600;">Showing ${startIdx}\u2013${endIdx} of ${totalRows} ${this._escapeHtml(unitLabel)}</span>
 					<span style="font-size: 10px; padding: 1px 6px; border-radius: 10px; background: rgba(16, 185, 129, 0.14); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.3);" title="Programmatic runtime receives all ${totalRows} complete records">Full ${totalRows} preserved in runtime</span>
 				</div>
 				<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="1" data-disabled="${!canPrev}" ${!canPrev ? 'disabled' : ''} style="${prevStyle}" title="First Page">«</button>
-					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${safePage - 1}" data-disabled="${!canPrev}" ${!canPrev ? 'disabled' : ''} style="${prevStyle}" title="Previous Page">‹ Prev</button>
+					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="1" data-disabled="${!canPrev}" ${!canPrev ? 'disabled' : ''} style="${prevStyle}" title="First Page">\u00AB</button>
+					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${safePage - 1}" data-disabled="${!canPrev}" ${!canPrev ? 'disabled' : ''} style="${prevStyle}" title="Previous Page">\u2039 Prev</button>
 					<span style="font-family: var(--vscode-editor-font-family, monospace); font-size: 10.5px; padding: 0 4px; opacity: 0.9;">Page <strong>${safePage}</strong> / ${totalPages}</span>
-					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${safePage + 1}" data-disabled="${!canNext}" ${!canNext ? 'disabled' : ''} style="${nextStyle}" title="Next Page">Next ›</button>
-					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${totalPages}" data-disabled="${!canNext}" ${!canNext ? 'disabled' : ''} style="${nextStyle}" title="Last Page">»</button>
+					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${safePage + 1}" data-disabled="${!canNext}" ${!canNext ? 'disabled' : ''} style="${nextStyle}" title="Next Page">Next \u203A</button>
+					<button type="button" class="output-page-btn" data-state-key="${escKey}" data-target-page="${totalPages}" data-disabled="${!canNext}" ${!canNext ? 'disabled' : ''} style="${nextStyle}" title="Last Page">\u00BB</button>
 					<select class="output-page-size-select" data-state-key="${escKey}" style="padding: 2px 6px; font-size: 10.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.16); background: rgba(0,0,0,0.35); color: inherit; cursor: pointer;" title="Records per page">
 						${sizeOptsHtml}
 					</select>
@@ -16761,9 +16943,9 @@ ${rawErr}
 	private _rerenderOutputViewportByStateKey(triggerEl: HTMLElement, stateKey: string): void {
 		const specItem = triggerEl.closest('.output-spec-item') as HTMLElement | null;
 		if (specItem) {
-			const rawTa = specItem.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
-			const formatSelector = specItem.querySelector('.output-item-format-selector') as HTMLSelectElement | null;
-			const viewport = specItem.querySelector('.output-item-viewport') as HTMLElement | null;
+			const rawTa = templatePart(specItem, '.output-item-raw-content') as HTMLTextAreaElement | null;
+			const formatSelector = templatePart(specItem, '.output-item-format-selector') as HTMLSelectElement | null;
+			const viewport = templatePart(specItem, '.output-item-viewport') as HTMLElement | null;
 			if (viewport) {
 				const text = rawTa?.value || '';
 				const format = formatSelector?.value || 'table';
@@ -16773,9 +16955,9 @@ ${rawErr}
 		}
 		const card = triggerEl.closest('.result-primitive-card, .output-primitive-card') as HTMLElement | null;
 		if (card) {
-			const rawTa = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
-			const formatSelector = card.querySelector('.result-format-selector') as HTMLSelectElement | null;
-			const viewport = card.querySelector('.result-viewport-container') as HTMLElement | null;
+			const rawTa = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
+			const formatSelector = templatePart(card, '.result-format-selector') as HTMLSelectElement | null;
+			const viewport = templatePart(card, '.result-viewport-container') as HTMLElement | null;
 			if (viewport) {
 				const text = rawTa?.value || '';
 				const format = formatSelector?.value || 'table';
@@ -16785,17 +16967,17 @@ ${rawErr}
 	}
 
 	private async _setOutputItemContent(card: HTMLElement, fieldKey: string, specKey: string, content: string): Promise<void> {
-		const itemContainer = card.querySelector(`.output-spec-item[data-spec-key="${specKey}"]`) as HTMLElement | null;
+		const itemContainer = templatePart(card, `.output-spec-item[data-spec-key="${specKey}"]`) as HTMLElement | null;
 		if (!itemContainer) { return; }
 
-		const rawTa = itemContainer.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+		const rawTa = templatePart(itemContainer, '.output-item-raw-content') as HTMLTextAreaElement | null;
 		if (rawTa) { rawTa.value = content; }
 
-		const formatSelector = itemContainer.querySelector('.output-item-format-selector') as HTMLSelectElement | null;
+		const formatSelector = templatePart(itemContainer, '.output-item-format-selector') as HTMLSelectElement | null;
 		const format = formatSelector?.value || 'table';
 		const stateKey = `${fieldKey}::${specKey}`;
 
-		const viewport = itemContainer.querySelector('.output-item-viewport') as HTMLElement | null;
+		const viewport = templatePart(itemContainer, '.output-item-viewport') as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
 			this._setElementHTML(viewport, this._renderOutputViewportByFormat(content, format, stateKey));
@@ -16824,14 +17006,14 @@ ${rawErr}
 	}
 
 	private async _updateOutputItemFormat(card: HTMLElement, fieldKey: string, specKey: string, format: string): Promise<void> {
-		const itemContainer = card.querySelector(`.output-spec-item[data-spec-key="${specKey}"]`) as HTMLElement | null;
+		const itemContainer = templatePart(card, `.output-spec-item[data-spec-key="${specKey}"]`) as HTMLElement | null;
 		if (!itemContainer) { return; }
 
-		const rawTa = itemContainer.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+		const rawTa = templatePart(itemContainer, '.output-item-raw-content') as HTMLTextAreaElement | null;
 		const text = rawTa?.value || '';
 		const stateKey = `${fieldKey}::${specKey}`;
 
-		const viewport = itemContainer.querySelector('.output-item-viewport') as HTMLElement | null;
+		const viewport = templatePart(itemContainer, '.output-item-viewport') as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
 			this._setElementHTML(viewport, this._renderOutputViewportByFormat(text, format, stateKey));
@@ -16860,11 +17042,11 @@ ${rawErr}
 	}
 
 	private async _syncAllOutputItems(card: HTMLElement, fieldKey: string): Promise<void> {
-		const items = card.querySelectorAll('.output-spec-item') as NodeListOf<HTMLElement>;
+		const items = templateParts(card, '.output-spec-item') as NodeListOf<HTMLElement>;
 		if (items.length === 0) {
-			const promptCard = this._container?.querySelector('.prompt-primitive-card');
-			const rawPromptTa = promptCard?.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
-			const promptOut = promptCard?.querySelector('.prompt-output-display');
+			const promptCard = templatePart(this._container, '.prompt-primitive-card');
+			const rawPromptTa = templatePart(promptCard, '.prompt-raw-output') as HTMLTextAreaElement | null;
+			const promptOut = templatePart(promptCard, '.prompt-output-display');
 			const text = rawPromptTa?.value || promptOut?.textContent || '';
 			if (text && !text.includes('No execution output yet.')) {
 				await this._setResultCardContent(card, fieldKey, text);
@@ -16889,7 +17071,7 @@ ${rawErr}
 
 			let resolvedText = '';
 
-			const matchingField = this._lastCustomModule?.fields?.find((f: any) =>
+			const matchingField = this._lastCustomModule?.fields?.find(f =>
 				(f.label && f.label.toLowerCase() === specKey.toLowerCase()) ||
 				(f.id && f.id.toLowerCase() === specKey.toLowerCase()) ||
 				(f.id && f.id.toLowerCase().replace(/_/g, ' ') === specKey.toLowerCase().replace(/_/g, ' '))
@@ -16907,22 +17089,22 @@ ${rawErr}
 				}
 				let matchedCard: Element | null = null;
 				for (const sel of candidateSelectors) {
-					matchedCard = this._container.querySelector(sel);
+					matchedCard = templatePart(this._container, sel);
 					if (matchedCard) { break; }
 				}
 				if (!matchedCard && matchingField?.id) {
-					const allCards = Array.from(this._container.querySelectorAll('.section-card[data-field-key]'));
+					const allCards = Array.from(templateParts(this._container, '.section-card[data-field-key]'));
 					matchedCard = allCards.find(c => {
 						const fk = (c.getAttribute('data-field-key') || '').toLowerCase();
 						return fk === specKey.toLowerCase() || fk === matchingField.id.toLowerCase().replace(/_/g, ' ');
 					}) || null;
 				}
 				if (matchedCard) {
-					const browserContent = matchedCard.querySelector('.browser-content-display') as HTMLElement | null;
-					const promptRawTa = matchedCard.querySelector('.prompt-raw-output') as HTMLTextAreaElement | null;
-					const promptContent = matchedCard.querySelector('.prompt-output-display') as HTMLElement | null;
+					const browserContent = templatePart(matchedCard, '.browser-content-display') as HTMLElement | null;
+					const promptRawTa = templatePart(matchedCard, '.prompt-raw-output') as HTMLTextAreaElement | null;
+					const promptContent = templatePart(matchedCard, '.prompt-output-display') as HTMLElement | null;
 					const tableJsonAttr = matchedCard.getAttribute('data-table-json');
-					const sqlContent = matchedCard.querySelector('.sql-output-box') as HTMLElement | null;
+					const sqlContent = templatePart(matchedCard, '.sql-output-box') as HTMLElement | null;
 					if (browserContent && !browserContent.textContent?.startsWith('No webpage content')) {
 						resolvedText = browserContent.textContent || '';
 					} else if (promptRawTa && promptRawTa.value.trim() !== '') {
@@ -17011,14 +17193,14 @@ ${rawErr}
 			}
 
 			if (resolvedText) {
-				const rawTa = item.querySelector('.output-item-raw-content') as HTMLTextAreaElement | null;
+				const rawTa = templatePart(item, '.output-item-raw-content') as HTMLTextAreaElement | null;
 				if (rawTa) { rawTa.value = resolvedText; }
 
-				const formatSelector = item.querySelector('.output-item-format-selector') as HTMLSelectElement | null;
+				const formatSelector = templatePart(item, '.output-item-format-selector') as HTMLSelectElement | null;
 				const format = formatSelector?.value || 'table';
 				const stateKey = `${fieldKey}::${specKey}`;
 
-				const viewport = item.querySelector('.output-item-viewport') as HTMLElement | null;
+				const viewport = templatePart(item, '.output-item-viewport') as HTMLElement | null;
 				if (viewport) {
 					viewport.setAttribute('data-state-key', stateKey);
 					this._setElementHTML(viewport, this._renderOutputViewportByFormat(resolvedText, format, stateKey));
@@ -17037,19 +17219,19 @@ ${rawErr}
 	}
 
 	private async _setResultCardContent(card: HTMLElement, fieldKey: string, output: string): Promise<void> {
-		const formatSelector = card.querySelector('.result-format-selector') as HTMLSelectElement | null;
+		const formatSelector = templatePart(card, '.result-format-selector') as HTMLSelectElement | null;
 		const format = formatSelector?.value || 'table';
-		const rawTa = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
-		if (rawTa) rawTa.value = output;
+		const rawTa = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
+		if (rawTa) { rawTa.value = output; }
 		const stateKey = `${fieldKey}::__single__`;
 
-		const viewport = card.querySelector('.result-viewport-container') as HTMLElement | null;
+		const viewport = templatePart(card, '.result-viewport-container') as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
 			this._setElementHTML(viewport, this._renderOutputViewportByFormat(output, format, stateKey));
 		}
 
-		const statusEl = card.querySelector('.result-status-text') as HTMLElement | null;
+		const statusEl = templatePart(card, '.result-status-text') as HTMLElement | null;
 		const timeStr = `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
 		if (statusEl) {
 			statusEl.textContent = `Updated: ${new Date().toLocaleTimeString()} (${output.length} chars)`;
@@ -17065,17 +17247,17 @@ ${rawErr}
 	}
 
 	private async _updateResultCardFormat(card: HTMLElement, fieldKey: string, format: string): Promise<void> {
-		const rawTa = card.querySelector('.result-raw-content') as HTMLTextAreaElement | null;
+		const rawTa = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
 		const text = rawTa?.value || '';
 		const stateKey = `${fieldKey}::__single__`;
 
-		const viewport = card.querySelector('.result-viewport-container') as HTMLElement | null;
+		const viewport = templatePart(card, '.result-viewport-container') as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
 			this._setElementHTML(viewport, this._renderOutputViewportByFormat(text, format, stateKey));
 		}
 
-		const statusEl = card.querySelector('.result-status-text') as HTMLElement | null;
+		const statusEl = templatePart(card, '.result-status-text') as HTMLElement | null;
 		const rawStatus = statusEl?.textContent || '';
 		const resultData = {
 			result: text,
@@ -17099,7 +17281,7 @@ ${rawErr}
 		}
 
 		// 1. Try parsing JSON array of objects (or wrapper object containing an array of objects)
-		let jsonObj: any = null;
+		let jsonObj: unknown = null;
 		if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
 			try {
 				jsonObj = JSON.parse(trimmed);
@@ -17113,27 +17295,32 @@ ${rawErr}
 
 		if (jsonObj) {
 			// If jsonObj is an internal Data Table state object ({ columns, rows, dbEngine, sqlOutput }), prefer rows if non-empty, else sqlOutput
-			if (!Array.isArray(jsonObj) && typeof jsonObj === 'object' && ('sqlOutput' in jsonObj || ('columns' in jsonObj && 'rows' in jsonObj) || 'dbEngine' in jsonObj)) {
-				if (Array.isArray(jsonObj.rows) && jsonObj.rows.length > 0) {
-					jsonObj = jsonObj.rows;
-				} else if (typeof jsonObj.sqlOutput === 'string' && jsonObj.sqlOutput.trim() !== '') {
-					return `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(jsonObj.sqlOutput.trim())}</pre>`;
-				} else if (Array.isArray(jsonObj.rows)) {
-					jsonObj = jsonObj.rows;
+			if (!Array.isArray(jsonObj) && typeof jsonObj === 'object' && (hasProperty(jsonObj, 'sqlOutput') || (hasProperty(jsonObj, 'columns') && hasProperty(jsonObj, 'rows')) || hasProperty(jsonObj, 'dbEngine'))) {
+				const tableState = jsonObj as IStoredPrimitiveValue;
+				if (Array.isArray(tableState.rows) && tableState.rows.length > 0) {
+					jsonObj = tableState.rows;
+				} else if (typeof tableState.sqlOutput === 'string' && tableState.sqlOutput.trim() !== '') {
+					return `<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(tableState.sqlOutput.trim())}</pre>`;
+				} else if (Array.isArray(tableState.rows)) {
+					jsonObj = tableState.rows;
 				}
 			}
-			let rows: any[] | null = Array.isArray(jsonObj)
+			const jsonRec = jsonObj as IJsonObject;
+			let rows: IJsonObject[] | null = (Array.isArray(jsonObj)
 				? jsonObj
-				: (Array.isArray(jsonObj.data) ? jsonObj.data
-					: (Array.isArray(jsonObj.items) ? jsonObj.items
-						: (Array.isArray(jsonObj.results) ? jsonObj.results
-							: (Array.isArray(jsonObj.jobs) ? jsonObj.jobs
-								: (Array.isArray(jsonObj.rows) ? jsonObj.rows
-									: (Array.isArray(jsonObj.records) ? jsonObj.records : null))))));
+				: (Array.isArray(jsonRec.data) ? jsonRec.data
+					: (Array.isArray(jsonRec.items) ? jsonRec.items
+						: (Array.isArray(jsonRec.results) ? jsonRec.results
+							: (Array.isArray(jsonRec.jobs) ? jsonRec.jobs
+								: (Array.isArray(jsonRec.rows) ? jsonRec.rows
+									: (Array.isArray(jsonRec.records) ? jsonRec.records : null)))))));
 			if (!rows && typeof jsonObj === 'object' && jsonObj !== null && !Array.isArray(jsonObj)) {
-				const arrayKeys = Object.keys(jsonObj).filter(k => k !== 'columns' && Array.isArray(jsonObj[k]) && jsonObj[k].length > 0 && typeof jsonObj[k][0] === 'object' && jsonObj[k][0] !== null);
+				const arrayKeys = Object.keys(jsonRec).filter(k => {
+					const entry = jsonRec[k];
+					return k !== 'columns' && Array.isArray(entry) && entry.length > 0 && typeof entry[0] === 'object' && entry[0] !== null;
+				});
 				if (arrayKeys.length === 1) {
-					rows = jsonObj[arrayKeys[0]];
+					rows = jsonRec[arrayKeys[0]] as IJsonObject[];
 				}
 			}
 			if (rows && rows.length > 0 && typeof rows[0] === 'object' && rows[0] !== null) {
@@ -17261,7 +17448,7 @@ ${rawErr}
 		}
 		const trimmed = text.trim();
 		const safePageSize = Math.max(1, pageSize || 10);
-		let parsed: any = null;
+		let parsed: unknown = null;
 		try {
 			parsed = JSON.parse(trimmed);
 		} catch {
@@ -17272,9 +17459,9 @@ ${rawErr}
 		}
 
 		if (parsed !== null) {
-			const arr = Array.isArray(parsed)
+			const arr: unknown[] | null = Array.isArray(parsed)
 				? parsed
-				: (parsed && typeof parsed === 'object' && Array.isArray(parsed.rows) ? parsed.rows : null);
+				: (parsed && typeof parsed === 'object' && Array.isArray((parsed as IJsonObject).rows) ? (parsed as IJsonObject).rows as unknown[] : null);
 			if (arr && (arr.length > 10 || safePageSize !== 10)) {
 				const totalRows = arr.length;
 				const totalPages = Math.max(1, Math.ceil(totalRows / safePageSize));
@@ -17285,7 +17472,7 @@ ${rawErr}
 				const paginationBar = this._renderOutputPaginationBarHtml(stateKey, totalRows, safePage, safePageSize, 'records');
 				const formatted = JSON.stringify(pageSlice, null, 2);
 				const noteFooter = totalRows > safePageSize
-					? `\n// ... Showing records ${startIdx + 1}–${endIdx} of ${totalRows} (Page ${safePage}/${totalPages}). Complete ${totalRows} records are preserved in runtime data.`
+					? `\n// ... Showing records ${startIdx + 1}\u2013${endIdx} of ${totalRows} (Page ${safePage}/${totalPages}). Complete ${totalRows} records are preserved in runtime data.`
 					: '';
 				return `${paginationBar}<pre style="font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);">${this._escapeHtml(formatted + noteFooter)}</pre>`;
 			}
@@ -17315,7 +17502,7 @@ ${rawErr}
 					const paginationBar = this._renderOutputPaginationBarHtml(stateKey, totalRows, safePage, safePageSize, 'records');
 					const formatted = JSON.stringify(pageSlice, null, 2);
 					const noteFooter = totalRows > safePageSize
-						? `\n\n... [Showing records ${startIdx + 1}–${endIdx} of ${totalRows} (Page ${safePage}/${totalPages}). Complete ${totalRows} records are preserved in runtime data.]`
+						? `\n\n... [Showing records ${startIdx + 1}\u2013${endIdx} of ${totalRows} (Page ${safePage}/${totalPages}). Complete ${totalRows} records are preserved in runtime data.]`
 						: '';
 					return `${paginationBar}<pre style="white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;">${this._escapeHtml(formatted + noteFooter)}</pre>`;
 				}
@@ -17334,7 +17521,7 @@ ${rawErr}
 		const trimmed = rawText.trim();
 
 		// Check JSON
-		let jsonObj: any = null;
+		let jsonObj: unknown = null;
 		if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
 			try {
 				jsonObj = JSON.parse(trimmed);
@@ -17347,10 +17534,11 @@ ${rawErr}
 		}
 
 		if (jsonObj) {
-			const rows = Array.isArray(jsonObj) ? jsonObj : (Array.isArray(jsonObj.data) ? jsonObj.data : (Array.isArray(jsonObj.items) ? jsonObj.items : (Array.isArray(jsonObj.results) ? jsonObj.results : null)));
+			const jsonRec = jsonObj as IJsonObject;
+			const rows: IJsonObject[] | null = Array.isArray(jsonObj) ? jsonObj : (Array.isArray(jsonRec.data) ? jsonRec.data : (Array.isArray(jsonRec.items) ? jsonRec.items : (Array.isArray(jsonRec.results) ? jsonRec.results : null)));
 			if (rows && rows.length > 0 && typeof rows[0] === 'object' && rows[0] !== null) {
-				const headers = Array.from(new Set(rows.flatMap((r: any) => typeof r === 'object' && r !== null ? Object.keys(r) : [])));
-				const escapeCsv = (val: any) => {
+				const headers = Array.from(new Set(rows.flatMap(r => typeof r === 'object' && r !== null ? Object.keys(r) : [])));
+				const escapeCsv = (val: unknown) => {
 					const str = val !== undefined && val !== null ? String(val) : '';
 					if (str.includes(',') || str.includes('"') || str.includes('\n')) {
 						return `"${str.replace(/"/g, '""')}"`;
@@ -17358,8 +17546,8 @@ ${rawErr}
 					return str;
 				};
 				csv += headers.map(escapeCsv).join(',') + '\n';
-				rows.forEach((r: any) => {
-					csv += headers.map((h: any) => escapeCsv((r as any)[h])).join(',') + '\n';
+				rows.forEach(r => {
+					csv += headers.map(h => escapeCsv(r[h])).join(',') + '\n';
 				});
 			}
 		}
@@ -17408,7 +17596,7 @@ ${rawErr}
 	}
 
 	private async _dispatchPromptToAgent(card: HTMLElement, fieldKey: string): Promise<void> {
-		const textarea = card.querySelector('.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+		const textarea = templatePart(card, '.prompt-instruction-textarea') as HTMLTextAreaElement | null;
 		const { combinedRawPrompt, interpolatedPrompt } = this._resolveCombinedPromptFromCard(card);
 		if (!combinedRawPrompt) {
 			this._notificationService.warn('Please enter a prompt instruction before dispatching.');
@@ -17416,7 +17604,7 @@ ${rawErr}
 			return;
 		}
 
-		const agentSelect = card.querySelector('.prompt-agent-select') as HTMLSelectElement | null;
+		const agentSelect = templatePart(card, '.prompt-agent-select') as HTMLSelectElement | null;
 		const agentId = agentSelect?.value.trim();
 		if (!agentId) {
 			this._notificationService.warn('Please select a target AI Agent.');
@@ -17429,11 +17617,11 @@ ${rawErr}
 		const sentSnapshot = this._buildSentPromptSnapshot(card, fieldKey, true);
 		card.setAttribute('data-last-sent-payload', JSON.stringify(sentSnapshot));
 
-		const statusText = card.querySelector('.prompt-status-text') as HTMLElement | null;
-		const outputDisplay = card.querySelector('.prompt-output-display') as HTMLElement | null;
+		const statusText = templatePart(card, '.prompt-status-text') as HTMLElement | null;
+		const outputDisplay = templatePart(card, '.prompt-output-display') as HTMLElement | null;
 
 		if (statusText) {
-			statusText.textContent = `Dispatching to ${agentName}... ⏳`;
+			statusText.textContent = `Dispatching to ${agentName}... \u23F3`;
 			statusText.style.color = '#38bdf8';
 		}
 
@@ -17459,8 +17647,8 @@ ${interpolatedPrompt}`;
 
 			await this._savePromptDataFromCard(card, fieldKey, dispatchOutput);
 			this._notificationService.info(`Task successfully assigned to Agent '${agentName}'.`);
-		} catch (err: any) {
-			const errMsg = err?.message || String(err);
+		} catch (err) {
+			const errMsg = (err as Error | undefined)?.message || String(err);
 			if (outputDisplay) {
 				outputDisplay.textContent = `[Dispatch Error]\n${errMsg}`;
 			}
@@ -17520,7 +17708,7 @@ ${interpolatedPrompt}`;
 
 	/** Read-only card for a workflow capsule that has no ticket component card (node view from the Workflow Outline). */
 	/** Node view: adds each capsule's last-run value under its regular component card (step cards render their own). */
-	private _appendWorkflowRuntimeBlocks(mod: any): void {
+	private _appendWorkflowRuntimeBlocks(mod: ITicketTemplateModule): void {
 		if (!this._container || !mod?.__wfNode || !Array.isArray(mod.fields)) {
 			return;
 		}
@@ -17528,9 +17716,9 @@ ${interpolatedPrompt}`;
 			if (!f?.__wfRuntime || f.__wfStep || !f.id) {
 				continue;
 			}
-			const card = this._container.querySelector(`[data-field-id="${CSS.escape(String(f.id))}"]`) as HTMLElement | null;
+			const card = templatePart(this._container, `[data-field-id="${CSS.escape(String(f.id))}"]`) as HTMLElement | null;
 			const html = this._renderWorkflowRuntimeBlockHtml(f.__wfRuntime);
-			if (card && html && !card.querySelector(':scope > .wf-runtime-block')) {
+			if (card && html && !templatePart(card, ':scope > .wf-runtime-block')) {
 				const holder = document.createElement('div');
 				this._setElementHTML(holder, html);
 				while (holder.firstElementChild) {
@@ -17575,16 +17763,16 @@ ${interpolatedPrompt}`;
 	}
 
 	/** "Last run" block appended to a node-view card (value + error), or '' when the capsule has not run. */
-	private _renderWorkflowRuntimeBlockHtml(runtime: any): string {
+	private _renderWorkflowRuntimeBlockHtml(runtime: IWfStepRuntime | undefined): string {
 		if (!runtime || (runtime.value === undefined && !runtime.error)) {
 			return '';
 		}
-		const err = runtime.error ? `<div style="margin-top: 6px; padding: 6px 10px; border-radius: 6px; background: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.35); color: #fda4af; font-size: 11.5px; white-space: pre-wrap; word-break: break-word;">✗ ${this._escapeHtml(String(runtime.error))}</div>` : '';
+		const err = runtime.error ? `<div style="margin-top: 6px; padding: 6px 10px; border-radius: 6px; background: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.35); color: #fda4af; font-size: 11.5px; white-space: pre-wrap; word-break: break-word;">\u2717 ${this._escapeHtml(String(runtime.error))}</div>` : '';
 		const val = runtime.value !== undefined ? this._renderWorkflowValueBoxHtml('Last Run Value', runtime.value) : '';
 		return `<div class="wf-runtime-block" style="margin-top: 12px;">${val}${err}</div>`;
 	}
 
-	private _renderWorkflowStepCardHtml(step: any, label: string, rawKey: string, fieldId: string, stepCardClass: string, stepBadgeHtml: string, runtime?: any): string {
+	private _renderWorkflowStepCardHtml(step: IWfStepInfo, label: string, rawKey: string, fieldId: string, stepCardClass: string, stepBadgeHtml: string, runtime?: IWfStepRuntime): string {
 		const esc = (v: unknown) => this._escapeHtml(String(v ?? ''));
 		const kindLabel = String(step?.kindLabel || step?.kind || 'Step');
 		const target = step?.targetVariable ? `<span style="font-size: 0.78em; opacity: 0.75; font-family: var(--vscode-editor-font-family, monospace);">→ ${esc(step.targetVariable)}</span>` : '';
@@ -17616,7 +17804,7 @@ ${interpolatedPrompt}`;
 			const outputDefs: Array<{ label: string; varName: string }> = Array.isArray(sw.outputDefs) ? sw.outputDefs : [];
 			const outValue = runtime?.value;
 			const outputValueOf = (varName: string): unknown => {
-				if (outValue && typeof outValue === 'object' && !Array.isArray(outValue) && varName in (outValue as Record<string, unknown>)) {
+				if (outValue && typeof outValue === 'object' && !Array.isArray(outValue) && hasProperty(outValue, varName)) {
 					return (outValue as Record<string, unknown>)[varName];
 				}
 				return outputDefs.length === 1 ? outValue : undefined;
@@ -17657,9 +17845,9 @@ ${interpolatedPrompt}`;
 		data: IParsedTicketData,
 		workLog: string,
 		attachments: string[],
-		customModule?: any,
+		customModule?: ITicketTemplateModule | null,
 		agents: IAgentItem[] = [],
-		allTickets: any[] = []
+		allTickets: ILinkableTicket[] = []
 	): string {
 		const typeUpper = (data.ticketType || 'task').toUpperCase();
 		// A workflow node shown like a ticket (from the Workflow Outline): read-only, no template / ticket actions
@@ -17692,7 +17880,7 @@ ${interpolatedPrompt}`;
 		}
 
 		if (customModule && Array.isArray(customModule.statuses)) {
-			const customDef = customModule.statuses.find((s: any) =>
+			const customDef = customModule.statuses.find(s =>
 				(s.label && s.label.toLowerCase() === status.toLowerCase()) ||
 				(s.id && s.id.toLowerCase() === status.toLowerCase())
 			);
@@ -17733,7 +17921,7 @@ ${interpolatedPrompt}`;
 						<div class="attachment-card-download" data-file-name="${this._escapeHtmlAttr(file)}" style="display: flex; align-items: center; gap: 8px; overflow: hidden; cursor: pointer; flex: 1;" title="Download attachment">
 							<span style="font-size: 0.88em; font-weight: 500; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${this._escapeHtmlAttr(file)}</span>
 						</div>
-						<span class="delete-attachment" data-file-name="${this._escapeHtmlAttr(file)}" style="opacity: 0.4; cursor: pointer; padding: 2px 4px; font-size: 0.85em;" title="Delete Attachment">✕</span>
+						<span class="delete-attachment" data-file-name="${this._escapeHtmlAttr(file)}" style="opacity: 0.4; cursor: pointer; padding: 2px 4px; font-size: 0.85em;" title="Delete Attachment">\u2715</span>
 					</div>
 				`;
 			}
@@ -17749,7 +17937,7 @@ ${interpolatedPrompt}`;
 			workLogHtml = '<div class="timeline" style="border-left: 2px solid rgba(255,255,255,0.08); margin-left: 10px; padding-left: 20px; display: flex; flex-direction: column; gap: 16px; margin-top: 15px; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;">';
 			for (let entry of logsList) {
 				entry = entry.trim();
-				if (!entry) continue;
+				if (!entry) { continue; }
 				if (entry.startsWith('#')) {
 					const subParts = entry.split(/\r?\n##\s+/);
 					if (subParts.length > 1) {
@@ -17805,7 +17993,7 @@ ${interpolatedPrompt}`;
 		// 6. Custom Fields Section
 		let customFieldsHtml = '';
 		const internalLifecycleKeys = ['Ticket Statuses', 'Status Mapping', 'Removed Status', 'Git Remote URL', 'Git Branch', 'Title', 'title', 'Description', 'description'];
-		const rawCustomMap = new Map<string, any>(Object.entries(data.customMetadata || {}));
+		const rawCustomMap = new Map<string, unknown>(Object.entries(data.customMetadata || {}));
 		for (const k of internalLifecycleKeys) {
 			rawCustomMap.delete(k);
 		}
@@ -17814,8 +18002,9 @@ ${interpolatedPrompt}`;
 			key: string;
 			label: string;
 			type: string;
-			val: any;
-			options?: any[];
+			/** Stored value (normally a string; parsed snapshot data may hold objects). */
+			val: unknown;
+			options?: unknown[];
 			buttons?: IActionButton[];
 			unit?: string;
 			precision?: number;
@@ -17824,7 +18013,7 @@ ${interpolatedPrompt}`;
 			gitRemoteUrl?: string;
 			gitBranch?: string;
 			parameters?: IParameterDefinition[];
-			outputSpecs?: any[];
+			outputSpecs?: IOutputSpec[];
 			defaultFormat?: string;
 			defaultContent?: string;
 			promptPreInjectedVisible?: boolean;
@@ -17853,14 +18042,14 @@ ${interpolatedPrompt}`;
 			debugSqlOutput?: boolean;
 			id?: string;
 			/** Workflow capsule without a ticket component card (Sub-Workflow call, Display, ticket operations, Python step). */
-			wfStep?: any;
+			wfStep?: IWfStepInfo;
 			/** Last-run data of a workflow capsule (node view): value, Sub-Workflow inputs, error. */
-			wfRuntime?: any;
+			wfRuntime?: IWfStepRuntime;
 			pythonPath?: string;
 			pythonCode?: string;
-			tableColumns?: any[];
-			tableRows?: Record<string, any>[];
-			tableDbEngine?: 'sqlite' | 'none';
+			tableColumns?: ITableColumnDefinition[];
+			tableRows?: Record<string, unknown>[];
+			tableDbEngine?: string;
 			tableDbPath?: string;
 			tableDbTableName?: string;
 			tableAutoSyncDb?: boolean;
@@ -17879,6 +18068,11 @@ ${interpolatedPrompt}`;
 			sshLastOutput?: string;
 			sshOutputLines?: number;
 			sshQuickCommands?: ISshQuickCommand[];
+			// Not copied from the schema field (always undefined); read with fallbacks below
+			pythonLocked?: boolean;
+			externalScripts?: string[];
+			voiceClips?: IVoiceNoteClip[];
+			voiceTranscript?: string;
 		}
 
 		const fieldsToRender: IRenderField[] = [];
@@ -17897,14 +18091,14 @@ ${interpolatedPrompt}`;
 				// If this field is a parameters primitive, mark all its child param names/labels as handled so they are not rendered as orphan cards
 				if (f.type === 'parameters' && Array.isArray(f.parameters)) {
 					for (const p of f.parameters) {
-						if (p.name) handledKeys.add(p.name);
-						if (p.id) handledKeys.add(p.id);
-						if (p.label) handledKeys.add(p.label);
+						if (p.name) { handledKeys.add(p.name); }
+						if (p.id) { handledKeys.add(p.id); }
+						if (p.label) { handledKeys.add(p.label); }
 					}
 				}
 
 				let matchedKey = '';
-				let val: any = '';
+				let val: unknown = '';
 				for (const [k, v] of rawCustomMap.entries()) {
 					if (handledKeys.has(k)) {
 						continue;
@@ -17941,7 +18135,7 @@ ${interpolatedPrompt}`;
 						handledKeys.add(k);
 						if (fLabel && k !== fLabel && this._lastParsedData?.customMetadata) {
 							if (this._lastParsedData.customMetadata[fLabel] === undefined) {
-								this._lastParsedData.customMetadata[fLabel] = rawCustomMap.get(k);
+								this._lastParsedData.customMetadata[fLabel] = rawCustomMap.get(k) as string;
 							}
 							delete this._lastParsedData.customMetadata[k];
 						}
@@ -17953,7 +18147,7 @@ ${interpolatedPrompt}`;
 
 				// If f is parameters, construct/hydrate paramObj from rawCustomMap if individual parameters were stored
 				if (f.type === 'parameters' && Array.isArray(f.parameters)) {
-					let paramObj: Record<string, any> = {};
+					let paramObj: Record<string, unknown> = {};
 					if (val) {
 						if (typeof val === 'string') {
 							try { paramObj = JSON.parse(val); } catch { }
@@ -17980,66 +18174,66 @@ ${interpolatedPrompt}`;
 					key: fLabel || matchedKey,
 					label: fLabel,
 					type: f.type || 'text',
-					wfStep: (f as any).__wfStep,
-					wfRuntime: (f as any).__wfRuntime,
+					wfStep: f.__wfStep,
+					wfRuntime: f.__wfRuntime,
 					val: val,
 					options: f.options || f.choices || [],
-					buttons: (f as any).buttons || [],
+					buttons: f.buttons || [],
 					unit: f.unit,
 					precision: f.precision !== undefined ? f.precision : 2,
-					defaultUrl: (f as any).defaultUrl,
-					credentials: (f as any).credentials,
-					gitRemoteUrl: (f as any).gitRemoteUrl,
-					gitBranch: (f as any).gitBranch,
-					parameters: (f as any).parameters,
-					outputSpecs: (f as any).outputSpecs,
-					defaultFormat: (f as any).defaultFormat,
-					defaultContent: (f as any).defaultContent,
-					promptPreInjectedVisible: (f as any).promptPreInjectedVisible,
-					defaultUserPrompt: (f as any).defaultUserPrompt,
-					targetMode: (f as any).targetMode,
-					targetModel: (f as any).targetModel,
-					targetProvider: (f as any).targetProvider,
-					targetCredentialId: (f as any).targetCredentialId,
-					targetAgentId: (f as any).targetAgentId,
-					targetAgentName: (f as any).targetAgentName,
-					ttsFormat: (f as any).ttsFormat,
-					ttsVoice: (f as any).ttsVoice,
-					ttsAutoPlay: (f as any).ttsAutoPlay,
-					ttsDisplayText: (f as any).ttsDisplayText,
-					ttsShowSpeechTextInTicket: (f as any).ttsShowSpeechTextInTicket,
-					ttsAudioDataUrl: (f as any).ttsAudioDataUrl,
-					ttsPlaybackRate: (f as any).ttsPlaybackRate,
-					mediaFilePath: (f as any).mediaFilePath,
-					mediaFileName: (f as any).mediaFileName,
-					mediaKind: (f as any).mediaKind,
-					mediaMimeType: (f as any).mediaMimeType,
-					mediaPlaybackRate: (f as any).mediaPlaybackRate,
-					mediaAutoPlay: (f as any).mediaAutoPlay,
+					defaultUrl: f.defaultUrl,
+					credentials: f.credentials,
+					gitRemoteUrl: f.gitRemoteUrl,
+					gitBranch: f.gitBranch,
+					parameters: f.parameters,
+					outputSpecs: f.outputSpecs,
+					defaultFormat: f.defaultFormat,
+					defaultContent: f.defaultContent,
+					promptPreInjectedVisible: f.promptPreInjectedVisible,
+					defaultUserPrompt: f.defaultUserPrompt,
+					targetMode: f.targetMode,
+					targetModel: f.targetModel,
+					targetProvider: f.targetProvider,
+					targetCredentialId: f.targetCredentialId,
+					targetAgentId: f.targetAgentId,
+					targetAgentName: f.targetAgentName,
+					ttsFormat: f.ttsFormat,
+					ttsVoice: f.ttsVoice,
+					ttsAutoPlay: f.ttsAutoPlay,
+					ttsDisplayText: f.ttsDisplayText,
+					ttsShowSpeechTextInTicket: f.ttsShowSpeechTextInTicket,
+					ttsAudioDataUrl: f.ttsAudioDataUrl,
+					ttsPlaybackRate: f.ttsPlaybackRate,
+					mediaFilePath: f.mediaFilePath,
+					mediaFileName: f.mediaFileName,
+					mediaKind: f.mediaKind,
+					mediaMimeType: f.mediaMimeType,
+					mediaPlaybackRate: f.mediaPlaybackRate,
+					mediaAutoPlay: f.mediaAutoPlay,
 					id: f.id,
-					pythonPath: (f as any).pythonPath,
-					pythonCode: (f as any).pythonCode,
-					tableColumns: (f as any).tableColumns,
-					tableRows: (f as any).tableRows,
-					tableDbEngine: (f as any).tableDbEngine,
-					tableDbPath: (f as any).tableDbPath,
-					tableDbTableName: (f as any).tableDbTableName,
-					tableAutoSyncDb: (f as any).tableAutoSyncDb,
-					tableSqlQuery: (f as any).tableSqlQuery,
-					tablePageSize: (f as any).tablePageSize,
-					sshHost: (f as any).sshHost,
-					sshPort: (f as any).sshPort,
-					sshUser: (f as any).sshUser,
-					sshPassword: (f as any).sshPassword,
-					sshCwd: (f as any).sshCwd,
-					sshCommand: (f as any).sshCommand,
-					sshCommands: (f as any).sshCommands,
-					sshOutput: (f as any).sshOutput,
-					sshLastRawOutput: (f as any).sshLastRawOutput,
-					sshLastRawEntries: (f as any).sshLastRawEntries,
-					sshLastOutput: (f as any).sshLastOutput,
-					sshOutputLines: (f as any).sshOutputLines,
-					sshQuickCommands: (f as any).sshQuickCommands
+					pythonPath: f.pythonPath,
+					pythonCode: f.pythonCode,
+					tableColumns: f.tableColumns,
+					tableRows: f.tableRows,
+					tableDbEngine: f.tableDbEngine,
+					tableDbPath: f.tableDbPath,
+					tableDbTableName: f.tableDbTableName,
+					tableAutoSyncDb: f.tableAutoSyncDb,
+					tableSqlQuery: f.tableSqlQuery,
+					tablePageSize: f.tablePageSize,
+					sshHost: f.sshHost,
+					sshPort: f.sshPort,
+					sshUser: f.sshUser,
+					sshPassword: f.sshPassword,
+					sshCwd: f.sshCwd,
+					sshCommand: f.sshCommand,
+					sshCommands: f.sshCommands,
+					sshOutput: f.sshOutput,
+					sshLastRawOutput: f.sshLastRawOutput,
+					sshLastRawEntries: f.sshLastRawEntries,
+					sshLastOutput: f.sshLastOutput,
+					sshOutputLines: f.sshOutputLines,
+					sshQuickCommands: f.sshQuickCommands
 				});
 			}
 		} else {
@@ -18107,7 +18301,7 @@ ${interpolatedPrompt}`;
 
 				// 1:1 DEDICATED ATTACHMENT COMPONENT - ATOMIC, NEVER TREATED AS DYNAMIC LIST OR CONTAINER
 				const isAttachmentField = fType === 'attachment' ||
-					(customModule?.fields && Array.isArray(customModule.fields) && customModule.fields.some((f: any) => (f.label?.toLowerCase() === k.toLowerCase() || f.id?.toLowerCase() === k.toLowerCase()) && f.type === 'attachment')) ||
+					(customModule?.fields && Array.isArray(customModule.fields) && customModule.fields.some(f => (f.label?.toLowerCase() === k.toLowerCase() || f.id?.toLowerCase() === k.toLowerCase()) && f.type === 'attachment')) ||
 					((fType === 'text' || !fType) && (k.toLowerCase().includes('attachment') || (typeof v === 'string' && (v.trim().startsWith('[{"name":') || v.trim().startsWith('{"name":')))));
 
 				if (isAttachmentField) {
@@ -18126,8 +18320,8 @@ ${interpolatedPrompt}`;
 						}
 					} else if (Array.isArray(v)) {
 						parsedAttachmentList = v;
-					} else if (v && typeof v === 'object' && (v as any).name) {
-						parsedAttachmentList = [v as any];
+					} else if (v && typeof v === 'object' && (v as IStoredPrimitiveValue).name) {
+						parsedAttachmentList = [v as { name: string; size?: number }];
 					}
 
 					let fileItemsHtml = '';
@@ -18175,7 +18369,7 @@ ${interpolatedPrompt}`;
 						</div>
 					`;
 				} else if (fType === 'dynamic_list' || ((fType === 'text' || !fType) && typeof v === 'string' && v.trim().startsWith('[') && v.trim().endsWith(']'))) {
-					let parsedArray: any[] | null = null;
+					let parsedArray: IJsonObject[] | null = null;
 					if (typeof v === 'string' && v.trim().startsWith('[')) {
 						try {
 							const parsed = JSON.parse(v.trim());
@@ -18195,7 +18389,7 @@ ${interpolatedPrompt}`;
 					if (!parsedArray || parsedArray.length === 0) {
 						subCardsViewHtml = '<div style="opacity: 0.45; font-style: italic; padding: 6px 0;">No entries in this list.</div>';
 					} else {
-						parsedArray.forEach((item: any, idx: number) => {
+						parsedArray.forEach((item, idx: number) => {
 							const idxNum = item._index || (idx + 1);
 							const itemTitle = item._title || item.title || item.name || item.company || `Entry #${idxNum}`;
 
@@ -18364,7 +18558,7 @@ ${interpolatedPrompt}`;
 							<div class="custom-field-view" style="padding: 4px 0;">
 								${v ? `
 									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #60a5fa; border: 1px solid rgba(59,130,246,0.25); font-size: 0.9em; font-weight: 500;">
-										📅 ${v}
+										\uD83D\uDCC5 ${v}
 									</span>
 								` : '<span style="opacity: 0.45; font-style: italic;">No date set.</span>'}
 							</div>
@@ -18385,7 +18579,7 @@ ${interpolatedPrompt}`;
 							<div class="custom-field-view" style="padding: 4px 0;">
 								${v ? `
 									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(234,179,8,0.12); color: #facc15; border: 1px solid rgba(234,179,8,0.25); font-size: 0.9em; font-weight: 500;">
-										🕒 ${v}
+										\uD83D\uDD52 ${v}
 									</span>
 								` : '<span style="opacity: 0.45; font-style: italic;">No time set.</span>'}
 							</div>
@@ -18406,7 +18600,7 @@ ${interpolatedPrompt}`;
 							<div class="custom-field-view" style="padding: 4px 0;">
 								${v ? `
 									<span style="display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(168,85,247,0.12); color: #c084fc; border: 1px solid rgba(168,85,247,0.25); font-size: 0.9em; font-weight: 500;">
-										📅 🕒 ${v}
+										\uD83D\uDCC5 \uD83D\uDD52 ${v}
 									</span>
 								` : '<span style="opacity: 0.45; font-style: italic;">No datetime set.</span>'}
 							</div>
@@ -18489,7 +18683,7 @@ ${interpolatedPrompt}`;
 						});
 						const unit = (fieldItem.unit || '').trim();
 						if (unit) {
-							if (/^[$€¥£₹₽₿]/.test(unit)) {
+							if (/^[$\u20AC\u00A5\u00A3\u20B9\u20BD\u20BF]/.test(unit)) {
 								formattedVal = `${unit}${formattedNum}`;
 							} else {
 								formattedVal = `${formattedNum} ${unit}`;
@@ -18609,9 +18803,9 @@ ${interpolatedPrompt}`;
 				} else if (fType === 'python') {
 					let pythonPath = fieldItem.pythonPath || '';
 					let pythonCode = fieldItem.pythonCode || '';
-					let pythonLocked = Boolean((fieldItem as any).pythonLocked);
+					let pythonLocked = Boolean(fieldItem.pythonLocked);
 					let pythonOutput = '';
-					let pythonResult: any = undefined;
+					let pythonResult: unknown = undefined;
 					let exitCode: number | undefined;
 					let durationMs: number | undefined;
 					let lastExecutedText = '';
@@ -18632,15 +18826,15 @@ ${interpolatedPrompt}`;
 											pythonPath = s === '[object Object]' ? '' : s;
 										}
 									}
-									if (pObj.code !== undefined) pythonCode = pObj.code;
-									if (pObj.pythonCode !== undefined && !pythonCode) pythonCode = pObj.pythonCode;
-									if (pObj.locked !== undefined) pythonLocked = Boolean(pObj.locked);
-									if (pObj.result !== undefined) pythonResult = pObj.result;
-									if (pObj.output !== undefined) pythonOutput = pObj.output;
-									if (pObj.exitCode !== undefined) exitCode = pObj.exitCode;
-									if (pObj.durationMs !== undefined) durationMs = pObj.durationMs;
-									if (pObj.lastExecuted) lastExecutedText = pObj.lastExecuted;
-									if (Array.isArray(pObj.externalScripts)) externalScripts = pObj.externalScripts;
+									if (pObj.code !== undefined) { pythonCode = pObj.code; }
+									if (pObj.pythonCode !== undefined && !pythonCode) { pythonCode = pObj.pythonCode; }
+									if (pObj.locked !== undefined) { pythonLocked = Boolean(pObj.locked); }
+									if (pObj.result !== undefined) { pythonResult = pObj.result; }
+									if (pObj.output !== undefined) { pythonOutput = pObj.output; }
+									if (pObj.exitCode !== undefined) { exitCode = pObj.exitCode; }
+									if (pObj.durationMs !== undefined) { durationMs = pObj.durationMs; }
+									if (pObj.lastExecuted) { lastExecutedText = pObj.lastExecuted; }
+									if (Array.isArray(pObj.externalScripts)) { externalScripts = pObj.externalScripts; }
 								} catch {
 									pythonCode = trimmed;
 								}
@@ -18652,30 +18846,32 @@ ${interpolatedPrompt}`;
 							if (obj.pythonPath !== undefined) {
 								const p = obj.pythonPath;
 								if (typeof p === 'object' && p !== null) {
-									pythonPath = String((p as any).interpreterPath || (p as any).pythonPath || '');
+									pythonPath = String((p as { interpreterPath?: unknown; pythonPath?: unknown }).interpreterPath || (p as { interpreterPath?: unknown; pythonPath?: unknown }).pythonPath || '');
 								} else {
 									const s = String(p);
 									pythonPath = s === '[object Object]' ? '' : s;
 								}
 							}
-							if (obj.code !== undefined) pythonCode = String(obj.code);
-							if (obj.pythonCode !== undefined && !pythonCode) pythonCode = String(obj.pythonCode);
-							if (obj.locked !== undefined) pythonLocked = Boolean(obj.locked);
-							if (obj.result !== undefined) pythonResult = obj.result;
-							if (obj.output !== undefined) pythonOutput = String(obj.output);
-							if (obj.exitCode !== undefined) exitCode = Number(obj.exitCode);
-							if (obj.durationMs !== undefined) durationMs = Number(obj.durationMs);
-							if (obj.lastExecuted) lastExecutedText = String(obj.lastExecuted);
-							if (Array.isArray(obj.externalScripts)) externalScripts = obj.externalScripts as string[];
+							if (obj.code !== undefined) { pythonCode = String(obj.code); }
+							if (obj.pythonCode !== undefined && !pythonCode) { pythonCode = String(obj.pythonCode); }
+							if (obj.locked !== undefined) { pythonLocked = Boolean(obj.locked); }
+							if (obj.result !== undefined) { pythonResult = obj.result; }
+							if (obj.output !== undefined) { pythonOutput = String(obj.output); }
+							if (obj.exitCode !== undefined) { exitCode = Number(obj.exitCode); }
+							if (obj.durationMs !== undefined) { durationMs = Number(obj.durationMs); }
+							if (obj.lastExecuted) { lastExecutedText = String(obj.lastExecuted); }
+							if (Array.isArray(obj.externalScripts)) { externalScripts = obj.externalScripts as string[]; }
 						}
 					}
 
-					if (externalScripts.length === 0 && fieldItem && Array.isArray((fieldItem as any).externalScripts)) {
-						externalScripts = [...(fieldItem as any).externalScripts];
+					if (externalScripts.length === 0 && fieldItem && Array.isArray(fieldItem.externalScripts)) {
+						externalScripts = [...fieldItem.externalScripts];
 					}
 
+					// Legacy data may hold an object here ({ interpreterPath | pythonPath })
 					if (typeof pythonPath === 'object' && pythonPath !== null) {
-						pythonPath = String((pythonPath as any).interpreterPath || (pythonPath as any).pythonPath || '');
+						const legacyPath = pythonPath as { interpreterPath?: unknown; pythonPath?: unknown };
+						pythonPath = String(legacyPath.interpreterPath || legacyPath.pythonPath || '');
 					}
 					if (pythonPath === '[object Object]' || pythonPath === 'undefined' || pythonPath === 'null') {
 						pythonPath = '';
@@ -18689,7 +18885,7 @@ ${interpolatedPrompt}`;
 						? `Executed: ${lastExecutedText.substring(0, 16)} (${durationMs !== undefined ? `${durationMs}ms` : 'ok'})`
 						: 'Ready to execute';
 
-					const otherFields = (customModule?.fields || []).filter((f: any) => f && f.id !== rawKey && (f.label || f.id) !== k && f.type !== 'output' && (f.label || f.id || '').toLowerCase() !== 'output' && (f.label || f.id || '').toLowerCase() !== 'result');
+					const otherFields = (customModule?.fields || []).filter(f => f && f.id !== rawKey && (f.label || f.id) !== k && f.type !== 'output' && (f.label || f.id || '').toLowerCase() !== 'output' && (f.label || f.id || '').toLowerCase() !== 'result');
 					const baseChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['']" data-cursor-offset="-2" style="padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert TICKET_CONTEXT[''] into script">+ TICKET_CONTEXT['']</button>`;
 					const outputChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="&#10;OUTPUT = " data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.1); color: #34d399; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert return value assignment OUTPUT = ... (consumed by downstream primitives & Output Manifest)">+ OUTPUT =</button>`;
 
@@ -18899,10 +19095,10 @@ ${interpolatedPrompt}`;
 							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 								try {
 									const parsedObj = JSON.parse(trimmed);
-									if (parsedObj.url !== undefined) browserUrl = parsedObj.url;
-									if (Array.isArray(parsedObj.credentials) && parsedObj.credentials.length > 0) browserCreds = parsedObj.credentials;
-									if (parsedObj.content) browserContent = parsedObj.content;
-									if (parsedObj.lastFetched) lastFetchedText = parsedObj.lastFetched;
+									if (parsedObj.url !== undefined) { browserUrl = parsedObj.url; }
+									if (Array.isArray(parsedObj.credentials) && parsedObj.credentials.length > 0) { browserCreds = parsedObj.credentials; }
+									if (parsedObj.content) { browserContent = parsedObj.content; }
+									if (parsedObj.lastFetched) { lastFetchedText = parsedObj.lastFetched; }
 								} catch {
 									browserUrl = trimmed;
 								}
@@ -18910,10 +19106,11 @@ ${interpolatedPrompt}`;
 								browserUrl = trimmed;
 							}
 						} else if (typeof v === 'object' && v !== null) {
-							if ((v as any).url) browserUrl = (v as any).url;
-							if (Array.isArray((v as any).credentials)) browserCreds = (v as any).credentials;
-							if ((v as any).content) browserContent = (v as any).content;
-							if ((v as any).lastFetched) lastFetchedText = (v as any).lastFetched;
+							const stored = v as IStoredPrimitiveValue;
+							if (stored.url) { browserUrl = stored.url; }
+							if (Array.isArray(stored.credentials)) { browserCreds = stored.credentials; }
+							if (stored.content) { browserContent = stored.content; }
+							if (stored.lastFetched) { lastFetchedText = stored.lastFetched; }
 						}
 					}
 
@@ -18962,7 +19159,7 @@ ${interpolatedPrompt}`;
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
 									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.18); color: #38bdf8; font-weight: 700; text-transform: uppercase;">Browser</span>
-									${browserCreds.length > 0 ? `<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(167,139,250,0.15); color: #c084fc; font-weight: 600;">🔑 ${browserCreds.length} Credentials</span>` : ''}
+									${browserCreds.length > 0 ? `<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(167,139,250,0.15); color: #c084fc; font-weight: 600;">\uD83D\uDD11 ${browserCreds.length} Credentials</span>` : ''}
 								</div>
 								<div style="display: flex; align-items: center; gap: 6px;">
 									${stepBadgeHtml}
@@ -19001,7 +19198,7 @@ ${interpolatedPrompt}`;
 							${browserCreds.length > 0 ? `
 								<div style="background: rgba(0,0,0,0.18); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 8px 12px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 6px;">
 									<div style="font-size: 10.5px; font-weight: 700; color: #a78bfa; text-transform: uppercase; letter-spacing: 0.05em; display: flex; align-items: center; gap: 6px;">
-										<span>🔑 Credentials / Authentication</span>
+										<span>\uD83D\uDD11 Credentials / Authentication</span>
 										<span style="font-size: 9.5px; opacity: 0.5; font-weight: normal; text-transform: none;">(Available for AI automated navigation)</span>
 									</div>
 									<div style="display: flex; flex-wrap: wrap; gap: 8px;">
@@ -19009,7 +19206,7 @@ ${interpolatedPrompt}`;
 											<div class="browser-cred-item" style="background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; padding: 3px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 6px;">
 												<span style="opacity: 0.7; font-weight: 600;">${this._escapeHtmlAttr(c.key)}:</span>
 												<span class="cred-secret-text" data-real="${this._escapeHtmlAttr(c.value)}" style="font-family: monospace;">••••••••</span>
-												<span class="cred-toggle-eye" style="cursor: pointer; opacity: 0.6; font-size: 11px;" title="Click to show/hide">👁️</span>
+												<span class="cred-toggle-eye" style="cursor: pointer; opacity: 0.6; font-size: 11px;" title="Click to show/hide">\uD83D\uDC41️</span>
 											</div>
 										`).join('')}
 									</div>
@@ -19063,10 +19260,10 @@ ${interpolatedPrompt}`;
 									const pObj = JSON.parse(trimmed);
 									if (Array.isArray(pObj.userPrompts)) {
 										hasSavedUserPromptsArray = true;
-										userPromptsList = pObj.userPrompts.map((item: any) => String(item ?? ''));
+										userPromptsList = pObj.userPrompts.map((item: unknown) => String(item ?? ''));
 									}
 									if (Array.isArray(pObj.userPromptsLocked)) {
-										userPromptsLockedList = pObj.userPromptsLocked.map((item: any) => typeof item === 'boolean' ? item : undefined);
+										userPromptsLockedList = pObj.userPromptsLocked.map((item: unknown) => typeof item === 'boolean' ? item : undefined);
 									}
 									if (typeof pObj.preInjectedLocked === 'boolean') {
 										preInjectedLockedState = pObj.preInjectedLocked;
@@ -19081,18 +19278,18 @@ ${interpolatedPrompt}`;
 									}
 									if (pObj.userCustomizedTarget) {
 										userCustomizedTarget = true;
-										if (pObj.targetProvider) promptProvider = String(pObj.targetProvider);
-										if (pObj.targetModel) promptModel = String(pObj.targetModel);
-										if (pObj.targetAgentId !== undefined) promptAgentId = typeof pObj.targetAgentId === 'string' ? pObj.targetAgentId : String((pObj.targetAgentId as any)?.id || '');
-										if (pObj.targetAgentName !== undefined) promptAgentName = typeof pObj.targetAgentName === 'string' ? pObj.targetAgentName : String((pObj.targetAgentName as any)?.name || '');
+										if (pObj.targetProvider) { promptProvider = String(pObj.targetProvider); }
+										if (pObj.targetModel) { promptModel = String(pObj.targetModel); }
+										if (pObj.targetAgentId !== undefined) { promptAgentId = typeof pObj.targetAgentId === 'string' ? pObj.targetAgentId : String((pObj.targetAgentId as { id?: unknown } | undefined)?.id || ''); }
+										if (pObj.targetAgentName !== undefined) { promptAgentName = typeof pObj.targetAgentName === 'string' ? pObj.targetAgentName : String((pObj.targetAgentName as { name?: unknown } | undefined)?.name || ''); }
 									} else {
-										if (!fieldItem.targetProvider && pObj.targetProvider) promptProvider = String(pObj.targetProvider);
-										if (!fieldItem.targetModel && pObj.targetModel) promptModel = String(pObj.targetModel);
-										if (!fieldItem.targetAgentId && pObj.targetAgentId) promptAgentId = typeof pObj.targetAgentId === 'string' ? pObj.targetAgentId : String((pObj.targetAgentId as any)?.id || '');
-										if (!fieldItem.targetAgentName && pObj.targetAgentName) promptAgentName = typeof pObj.targetAgentName === 'string' ? pObj.targetAgentName : String((pObj.targetAgentName as any)?.name || '');
+										if (!fieldItem.targetProvider && pObj.targetProvider) { promptProvider = String(pObj.targetProvider); }
+										if (!fieldItem.targetModel && pObj.targetModel) { promptModel = String(pObj.targetModel); }
+										if (!fieldItem.targetAgentId && pObj.targetAgentId) { promptAgentId = typeof pObj.targetAgentId === 'string' ? pObj.targetAgentId : String((pObj.targetAgentId as { id?: unknown } | undefined)?.id || ''); }
+										if (!fieldItem.targetAgentName && pObj.targetAgentName) { promptAgentName = typeof pObj.targetAgentName === 'string' ? pObj.targetAgentName : String((pObj.targetAgentName as { name?: unknown } | undefined)?.name || ''); }
 									}
-									if (pObj.output) promptOutput = typeof pObj.output === 'string' ? pObj.output : JSON.stringify(pObj.output);
-									if (pObj.lastExecuted) lastExecutedText = String(pObj.lastExecuted);
+									if (pObj.output) { promptOutput = typeof pObj.output === 'string' ? pObj.output : JSON.stringify(pObj.output); }
+									if (pObj.lastExecuted) { lastExecutedText = String(pObj.lastExecuted); }
 									if (pObj.lastSentPayload && typeof pObj.lastSentPayload === 'object') {
 										try { lastSentPayloadJson = JSON.stringify(pObj.lastSentPayload); } catch { }
 									}
@@ -19108,10 +19305,10 @@ ${interpolatedPrompt}`;
 							const obj = v as Record<string, unknown>;
 							if (Array.isArray(obj.userPrompts)) {
 								hasSavedUserPromptsArray = true;
-								userPromptsList = obj.userPrompts.map((item: any) => String(item ?? ''));
+								userPromptsList = obj.userPrompts.map((item: unknown) => String(item ?? ''));
 							}
 							if (Array.isArray(obj.userPromptsLocked)) {
-								userPromptsLockedList = (obj.userPromptsLocked as any[]).map(item => typeof item === 'boolean' ? item : undefined);
+								userPromptsLockedList = (obj.userPromptsLocked as unknown[]).map(item => typeof item === 'boolean' ? item : undefined);
 							}
 							if (typeof obj.preInjectedLocked === 'boolean') {
 								preInjectedLockedState = obj.preInjectedLocked;
@@ -19126,13 +19323,13 @@ ${interpolatedPrompt}`;
 								userCustomizedTarget = true;
 								if (obj.targetProvider) { promptProvider = String(obj.targetProvider); }
 								if (obj.targetModel) { promptModel = String(obj.targetModel); }
-								if (obj.targetAgentId !== undefined) { promptAgentId = typeof obj.targetAgentId === 'string' ? obj.targetAgentId : String((obj.targetAgentId as any)?.id || ''); }
-								if (obj.targetAgentName !== undefined) { promptAgentName = typeof obj.targetAgentName === 'string' ? obj.targetAgentName : String((obj.targetAgentName as any)?.name || ''); }
+								if (obj.targetAgentId !== undefined) { promptAgentId = typeof obj.targetAgentId === 'string' ? obj.targetAgentId : String((obj.targetAgentId as { id?: unknown } | undefined)?.id || ''); }
+								if (obj.targetAgentName !== undefined) { promptAgentName = typeof obj.targetAgentName === 'string' ? obj.targetAgentName : String((obj.targetAgentName as { name?: unknown } | undefined)?.name || ''); }
 							} else {
 								if (!fieldItem.targetProvider && obj.targetProvider) { promptProvider = String(obj.targetProvider); }
 								if (!fieldItem.targetModel && obj.targetModel) { promptModel = String(obj.targetModel); }
-								if (!fieldItem.targetAgentId && obj.targetAgentId) { promptAgentId = typeof obj.targetAgentId === 'string' ? obj.targetAgentId : String((obj.targetAgentId as any)?.id || ''); }
-								if (!fieldItem.targetAgentName && obj.targetAgentName) { promptAgentName = typeof obj.targetAgentName === 'string' ? obj.targetAgentName : String((obj.targetAgentName as any)?.name || ''); }
+								if (!fieldItem.targetAgentId && obj.targetAgentId) { promptAgentId = typeof obj.targetAgentId === 'string' ? obj.targetAgentId : String((obj.targetAgentId as { id?: unknown } | undefined)?.id || ''); }
+								if (!fieldItem.targetAgentName && obj.targetAgentName) { promptAgentName = typeof obj.targetAgentName === 'string' ? obj.targetAgentName : String((obj.targetAgentName as { name?: unknown } | undefined)?.name || ''); }
 							}
 							if (obj.output) { promptOutput = typeof obj.output === 'string' ? obj.output : JSON.stringify(obj.output); }
 							if (obj.lastExecuted) { lastExecutedText = String(obj.lastExecuted); }
@@ -19443,7 +19640,7 @@ ${userPromptSectionHtml}
 							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 								try {
 									const tObj = JSON.parse(trimmed);
-									if (tObj.text !== undefined) ttsText = String(tObj.text);
+									if (tObj.text !== undefined) { ttsText = String(tObj.text); }
 									if (tObj.displayText !== undefined) {
 										ttsDisplayText = String(tObj.displayText);
 										hasExplicitDisplayText = true;
@@ -19454,19 +19651,19 @@ ${userPromptSectionHtml}
 									if (tObj.ttsShowSpeechTextInTicket !== undefined) {
 										ttsShowSpeechTextInTicket = Boolean(tObj.ttsShowSpeechTextInTicket);
 									}
-									if (tObj.targetCredentialId !== undefined) ttsCredentialId = String(tObj.targetCredentialId || '');
-									if (tObj.targetProvider) ttsProvider = String(tObj.targetProvider);
-									if (tObj.targetModel) ttsModel = String(tObj.targetModel);
-									if (tObj.ttsFormat) ttsFormat = String(tObj.ttsFormat);
-									if (tObj.ttsVoice) ttsVoice = String(tObj.ttsVoice);
-									if (tObj.ttsAutoPlay !== undefined) ttsAutoPlay = Boolean(tObj.ttsAutoPlay);
+									if (tObj.targetCredentialId !== undefined) { ttsCredentialId = String(tObj.targetCredentialId || ''); }
+									if (tObj.targetProvider) { ttsProvider = String(tObj.targetProvider); }
+									if (tObj.targetModel) { ttsModel = String(tObj.targetModel); }
+									if (tObj.ttsFormat) { ttsFormat = String(tObj.ttsFormat); }
+									if (tObj.ttsVoice) { ttsVoice = String(tObj.ttsVoice); }
+									if (tObj.ttsAutoPlay !== undefined) { ttsAutoPlay = Boolean(tObj.ttsAutoPlay); }
 									if (tObj.ttsPlaybackRate !== undefined && Number.isFinite(Number(tObj.ttsPlaybackRate))) {
 										ttsPlaybackRate = Math.min(2.5, Math.max(0.25, Number(tObj.ttsPlaybackRate)));
 									}
-									if (tObj.audioFileName) audioFileName = String(tObj.audioFileName);
-									if (tObj.audioRelativePath) audioRelativePath = String(tObj.audioRelativePath);
-									if (tObj.lastGenerated) lastGenerated = String(tObj.lastGenerated);
-									if (tObj.lastSynthesizedText !== undefined) lastSynthesizedText = String(tObj.lastSynthesizedText);
+									if (tObj.audioFileName) { audioFileName = String(tObj.audioFileName); }
+									if (tObj.audioRelativePath) { audioRelativePath = String(tObj.audioRelativePath); }
+									if (tObj.lastGenerated) { lastGenerated = String(tObj.lastGenerated); }
+									if (tObj.lastSynthesizedText !== undefined) { lastSynthesizedText = String(tObj.lastSynthesizedText); }
 								} catch {
 									ttsDisplayText = trimmed;
 									hasExplicitDisplayText = true;
@@ -19476,8 +19673,8 @@ ${userPromptSectionHtml}
 								hasExplicitDisplayText = true;
 							}
 						} else if (typeof v === 'object' && v !== null) {
-							const tObj = v as Record<string, any>;
-							if (tObj.text !== undefined) ttsText = String(tObj.text);
+							const tObj = v as Record<string, unknown>;
+							if (tObj.text !== undefined) { ttsText = String(tObj.text); }
 							if (tObj.displayText !== undefined) {
 								ttsDisplayText = String(tObj.displayText);
 								hasExplicitDisplayText = true;
@@ -19488,19 +19685,19 @@ ${userPromptSectionHtml}
 							if (tObj.ttsShowSpeechTextInTicket !== undefined) {
 								ttsShowSpeechTextInTicket = Boolean(tObj.ttsShowSpeechTextInTicket);
 							}
-							if (tObj.targetCredentialId !== undefined) ttsCredentialId = String(tObj.targetCredentialId || '');
-							if (tObj.targetProvider) ttsProvider = String(tObj.targetProvider);
-							if (tObj.targetModel) ttsModel = String(tObj.targetModel);
-							if (tObj.ttsFormat) ttsFormat = String(tObj.ttsFormat);
-							if (tObj.ttsVoice) ttsVoice = String(tObj.ttsVoice);
-							if (tObj.ttsAutoPlay !== undefined) ttsAutoPlay = Boolean(tObj.ttsAutoPlay);
+							if (tObj.targetCredentialId !== undefined) { ttsCredentialId = String(tObj.targetCredentialId || ''); }
+							if (tObj.targetProvider) { ttsProvider = String(tObj.targetProvider); }
+							if (tObj.targetModel) { ttsModel = String(tObj.targetModel); }
+							if (tObj.ttsFormat) { ttsFormat = String(tObj.ttsFormat); }
+							if (tObj.ttsVoice) { ttsVoice = String(tObj.ttsVoice); }
+							if (tObj.ttsAutoPlay !== undefined) { ttsAutoPlay = Boolean(tObj.ttsAutoPlay); }
 							if (tObj.ttsPlaybackRate !== undefined && Number.isFinite(Number(tObj.ttsPlaybackRate))) {
 								ttsPlaybackRate = Math.min(2.5, Math.max(0.25, Number(tObj.ttsPlaybackRate)));
 							}
-							if (tObj.audioFileName) audioFileName = String(tObj.audioFileName);
-							if (tObj.audioRelativePath) audioRelativePath = String(tObj.audioRelativePath);
-							if (tObj.lastGenerated) lastGenerated = String(tObj.lastGenerated);
-							if (tObj.lastSynthesizedText !== undefined) lastSynthesizedText = String(tObj.lastSynthesizedText);
+							if (tObj.audioFileName) { audioFileName = String(tObj.audioFileName); }
+							if (tObj.audioRelativePath) { audioRelativePath = String(tObj.audioRelativePath); }
+							if (tObj.lastGenerated) { lastGenerated = String(tObj.lastGenerated); }
+							if (tObj.lastSynthesizedText !== undefined) { lastSynthesizedText = String(tObj.lastSynthesizedText); }
 						}
 					}
 
@@ -19658,16 +19855,16 @@ ${userPromptSectionHtml}
 							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 								try {
 									const mObj = JSON.parse(trimmed);
-									if (mObj.mediaFilePath !== undefined) mediaFilePath = String(mObj.mediaFilePath);
-									else if (mObj.filePath !== undefined) mediaFilePath = String(mObj.filePath);
-									if (mObj.mediaFileName !== undefined) mediaFileName = String(mObj.mediaFileName);
-									else if (mObj.fileName !== undefined) mediaFileName = String(mObj.fileName);
-									if (mObj.mediaKind) mediaKind = String(mObj.mediaKind);
-									if (mObj.mediaMimeType) mediaMimeType = String(mObj.mediaMimeType);
+									if (mObj.mediaFilePath !== undefined) { mediaFilePath = String(mObj.mediaFilePath); }
+									else if (mObj.filePath !== undefined) { mediaFilePath = String(mObj.filePath); }
+									if (mObj.mediaFileName !== undefined) { mediaFileName = String(mObj.mediaFileName); }
+									else if (mObj.fileName !== undefined) { mediaFileName = String(mObj.fileName); }
+									if (mObj.mediaKind) { mediaKind = String(mObj.mediaKind); }
+									if (mObj.mediaMimeType) { mediaMimeType = String(mObj.mediaMimeType); }
 									if (mObj.mediaPlaybackRate !== undefined && Number.isFinite(Number(mObj.mediaPlaybackRate))) {
 										mediaPlaybackRate = Math.min(2.0, Math.max(0.25, Number(mObj.mediaPlaybackRate)));
 									}
-									if (mObj.mediaAutoPlay !== undefined) mediaAutoPlay = Boolean(mObj.mediaAutoPlay);
+									if (mObj.mediaAutoPlay !== undefined) { mediaAutoPlay = Boolean(mObj.mediaAutoPlay); }
 								} catch {
 									mediaFilePath = trimmed;
 								}
@@ -19675,17 +19872,17 @@ ${userPromptSectionHtml}
 								mediaFilePath = trimmed;
 							}
 						} else if (typeof v === 'object' && v !== null) {
-							const mObj = v as Record<string, any>;
-							if (mObj.mediaFilePath !== undefined) mediaFilePath = String(mObj.mediaFilePath);
-							else if (mObj.filePath !== undefined) mediaFilePath = String(mObj.filePath);
-							if (mObj.mediaFileName !== undefined) mediaFileName = String(mObj.mediaFileName);
-							else if (mObj.fileName !== undefined) mediaFileName = String(mObj.fileName);
-							if (mObj.mediaKind) mediaKind = String(mObj.mediaKind);
-							if (mObj.mediaMimeType) mediaMimeType = String(mObj.mediaMimeType);
+							const mObj = v as Record<string, unknown>;
+							if (mObj.mediaFilePath !== undefined) { mediaFilePath = String(mObj.mediaFilePath); }
+							else if (mObj.filePath !== undefined) { mediaFilePath = String(mObj.filePath); }
+							if (mObj.mediaFileName !== undefined) { mediaFileName = String(mObj.mediaFileName); }
+							else if (mObj.fileName !== undefined) { mediaFileName = String(mObj.fileName); }
+							if (mObj.mediaKind) { mediaKind = String(mObj.mediaKind); }
+							if (mObj.mediaMimeType) { mediaMimeType = String(mObj.mediaMimeType); }
 							if (mObj.mediaPlaybackRate !== undefined && Number.isFinite(Number(mObj.mediaPlaybackRate))) {
 								mediaPlaybackRate = Math.min(2.0, Math.max(0.25, Number(mObj.mediaPlaybackRate)));
 							}
-							if (mObj.mediaAutoPlay !== undefined) mediaAutoPlay = Boolean(mObj.mediaAutoPlay);
+							if (mObj.mediaAutoPlay !== undefined) { mediaAutoPlay = Boolean(mObj.mediaAutoPlay); }
 						}
 					}
 
@@ -19718,26 +19915,27 @@ ${userPromptSectionHtml}
 						</div>
 					`;
 				} else if (fType === 'voice_note') {
-					let voiceClips: any[] = Array.isArray((fieldItem as any).voiceClips) ? (fieldItem as any).voiceClips : [];
-					let voiceTranscript: string = (fieldItem as any).voiceTranscript || '';
+					let voiceClips: IVoiceNoteClip[] = Array.isArray(fieldItem.voiceClips) ? fieldItem.voiceClips : [];
+					let voiceTranscript: string = fieldItem.voiceTranscript || '';
 					if (v) {
 						if (typeof v === 'string') {
 							const trimmed = v.trim();
 							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 								try {
 									const vObj = JSON.parse(trimmed);
-									if (Array.isArray(vObj.voiceClips)) voiceClips = vObj.voiceClips;
-									if (typeof vObj.voiceTranscript === 'string') voiceTranscript = vObj.voiceTranscript;
+									if (Array.isArray(vObj.voiceClips)) { voiceClips = vObj.voiceClips; }
+									if (typeof vObj.voiceTranscript === 'string') { voiceTranscript = vObj.voiceTranscript; }
 								} catch { }
 							}
 						} else if (typeof v === 'object' && v !== null) {
-							if (Array.isArray((v as any).voiceClips)) voiceClips = (v as any).voiceClips;
-							if (typeof (v as any).voiceTranscript === 'string') voiceTranscript = (v as any).voiceTranscript;
+							const stored = v as IStoredPrimitiveValue;
+							if (Array.isArray(stored.voiceClips)) { voiceClips = stored.voiceClips; }
+							if (typeof stored.voiceTranscript === 'string') { voiceTranscript = stored.voiceTranscript; }
 						}
 					}
 					const clipsHtml = voiceClips.length === 0
 						? `<div style="font-size: 11.5px; color: rgba(255,255,255,0.5); padding: 8px 10px; border: 1px dashed rgba(148,163,184,0.3); border-radius: 6px;">No voice recordings yet.</div>`
-						: voiceClips.map((c: any, ci: number) => `
+						: voiceClips.map((c, ci: number) => `
 							<div style="display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 6px; background: rgba(0,0,0,0.24); border: 1px solid rgba(148,163,184,0.22);">
 								<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
 									<span style="font-size: 10.5px; font-weight: 700; color: #cbd5e1; background: rgba(148,163,184,0.16); padding: 1px 6px; border-radius: 4px;">#${ci + 1}</span>
@@ -19760,7 +19958,7 @@ ${userPromptSectionHtml}
 						</div>
 					`;
 				} else if (fType === 'table') {
-					let tableColumns: any[] = Array.isArray(fieldItem.tableColumns) && fieldItem.tableColumns.length > 0
+					let tableColumns: ITableColumnDefinition[] = Array.isArray(fieldItem.tableColumns) && fieldItem.tableColumns.length > 0
 						? fieldItem.tableColumns
 						: [
 							{ id: 'col_1', name: 'id', label: 'id', dataType: 'INTEGER', primaryKey: true, nullable: false },
@@ -19768,7 +19966,7 @@ ${userPromptSectionHtml}
 							{ id: 'col_3', name: 'status', label: 'status', dataType: 'TEXT', primaryKey: false, nullable: true },
 							{ id: 'col_4', name: 'created_at', label: 'created_at', dataType: 'DATETIME', primaryKey: false, nullable: true }
 						];
-					let tableRows: Record<string, any>[] = Array.isArray(fieldItem.tableRows) ? fieldItem.tableRows : [];
+					let tableRows: Record<string, unknown>[] = Array.isArray(fieldItem.tableRows) ? fieldItem.tableRows : [];
 					let dbEngine: 'sqlite' | 'none' = fieldItem.tableDbEngine === 'none' ? 'none' : 'sqlite';
 					let dbPath: string = fieldItem.tableDbPath || '';
 					let tableName: string = fieldItem.tableDbTableName || rawKey.toLowerCase().replace(/[^a-z0-9_]/g, '_') || 'ticket_table';
@@ -19784,34 +19982,35 @@ ${userPromptSectionHtml}
 							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 								try {
 									const pObj = JSON.parse(trimmed);
-									if (Array.isArray(pObj.columns) && pObj.columns.length > 0) tableColumns = pObj.columns;
-									if (Array.isArray(pObj.rows)) tableRows = pObj.rows;
-									if (pObj.dbEngine) dbEngine = pObj.dbEngine === 'none' ? 'none' : 'sqlite';
-									if (pObj.dbPath !== undefined) dbPath = String(pObj.dbPath);
-									if (pObj.tableName !== undefined) tableName = String(pObj.tableName);
-									if (pObj.autoSyncDb !== undefined) autoSyncDb = Boolean(pObj.autoSyncDb);
-									if (pObj.sqlQuery !== undefined) sqlQuery = String(pObj.sqlQuery);
-									if (pObj.sqlOutput !== undefined) sqlOutput = String(pObj.sqlOutput);
-									if (Number(pObj.pageSize) > 0) pageSize = Number(pObj.pageSize);
-									if (pObj.lastSynced) lastSynced = String(pObj.lastSynced);
+									if (Array.isArray(pObj.columns) && pObj.columns.length > 0) { tableColumns = pObj.columns; }
+									if (Array.isArray(pObj.rows)) { tableRows = pObj.rows; }
+									if (pObj.dbEngine) { dbEngine = pObj.dbEngine === 'none' ? 'none' : 'sqlite'; }
+									if (pObj.dbPath !== undefined) { dbPath = String(pObj.dbPath); }
+									if (pObj.tableName !== undefined) { tableName = String(pObj.tableName); }
+									if (pObj.autoSyncDb !== undefined) { autoSyncDb = Boolean(pObj.autoSyncDb); }
+									if (pObj.sqlQuery !== undefined) { sqlQuery = String(pObj.sqlQuery); }
+									if (pObj.sqlOutput !== undefined) { sqlOutput = String(pObj.sqlOutput); }
+									if (Number(pObj.pageSize) > 0) { pageSize = Number(pObj.pageSize); }
+									if (pObj.lastSynced) { lastSynced = String(pObj.lastSynced); }
 								} catch { }
 							} else if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
 								try {
 									const arr = JSON.parse(trimmed);
-									if (Array.isArray(arr)) tableRows = arr;
+									if (Array.isArray(arr)) { tableRows = arr; }
 								} catch { }
 							}
 						} else if (typeof v === 'object' && v !== null) {
-							if (Array.isArray((v as any).columns) && (v as any).columns.length > 0) tableColumns = (v as any).columns;
-							if (Array.isArray((v as any).rows)) tableRows = (v as any).rows;
-							if ((v as any).dbEngine) dbEngine = (v as any).dbEngine === 'none' ? 'none' : 'sqlite';
-							if ((v as any).dbPath !== undefined) dbPath = String((v as any).dbPath);
-							if ((v as any).tableName !== undefined) tableName = String((v as any).tableName);
-							if ((v as any).autoSyncDb !== undefined) autoSyncDb = Boolean((v as any).autoSyncDb);
-							if ((v as any).sqlQuery !== undefined) sqlQuery = String((v as any).sqlQuery);
-							if ((v as any).sqlOutput !== undefined) sqlOutput = String((v as any).sqlOutput);
-							if (Number((v as any).pageSize) > 0) pageSize = Number((v as any).pageSize);
-							if ((v as any).lastSynced) lastSynced = String((v as any).lastSynced);
+							const stored = v as IStoredPrimitiveValue;
+							if (Array.isArray(stored.columns) && stored.columns.length > 0) { tableColumns = stored.columns; }
+							if (Array.isArray(stored.rows)) { tableRows = stored.rows; }
+							if (stored.dbEngine) { dbEngine = stored.dbEngine === 'none' ? 'none' : 'sqlite'; }
+							if (stored.dbPath !== undefined) { dbPath = String(stored.dbPath); }
+							if (stored.tableName !== undefined) { tableName = String(stored.tableName); }
+							if (stored.autoSyncDb !== undefined) { autoSyncDb = Boolean(stored.autoSyncDb); }
+							if (stored.sqlQuery !== undefined) { sqlQuery = String(stored.sqlQuery); }
+							if (stored.sqlOutput !== undefined) { sqlOutput = String(stored.sqlOutput); }
+							if (Number(stored.pageSize) > 0) { pageSize = Number(stored.pageSize); }
+							if (stored.lastSynced) { lastSynced = String(stored.lastSynced); }
 						}
 					}
 
@@ -19819,7 +20018,7 @@ ${userPromptSectionHtml}
 					fieldsToRender.forEach(otherF => {
 						if (otherF.type === 'parameters') {
 							if (Array.isArray(otherF.parameters)) {
-								otherF.parameters.forEach((p: any) => {
+								otherF.parameters.forEach((p: IParameterDefinition & { key?: string }) => {
 									const pk = (p?.name || p?.key || '').trim();
 									if (pk && !tableRefTokens.includes(pk)) {
 										tableRefTokens.push(pk);
@@ -19830,7 +20029,7 @@ ${userPromptSectionHtml}
 								try {
 									const parsedP = typeof otherF.val === 'string' ? JSON.parse(otherF.val) : otherF.val;
 									if (Array.isArray(parsedP)) {
-										parsedP.forEach((p: any) => {
+										parsedP.forEach((p: { name?: string; key?: string } | null) => {
 											const pk = (p?.name || p?.key || '').trim();
 											if (pk && !tableRefTokens.includes(pk)) {
 												tableRefTokens.push(pk);
@@ -19909,28 +20108,28 @@ ${userPromptSectionHtml}
 					// Ticket value uses the template config names (sshHost, sshPort, ...); older short names are migrated.
 					const sshVal = normalizeSshTicketValue(v);
 					if (sshVal) {
-						if (sshVal.sshHost !== undefined) sshHost = String(sshVal.sshHost ?? '');
-						if (sshVal.sshPort !== undefined) sshPort = sshVal.sshPort ?? 22;
-						if (sshVal.sshUser !== undefined) sshUser = String(sshVal.sshUser ?? 'root');
-						if (sshVal.sshPassword !== undefined) sshPassword = String(sshVal.sshPassword ?? '');
-						if (sshVal.sshCwd !== undefined) sshCwd = String(sshVal.sshCwd ?? '~');
+						if (sshVal.sshHost !== undefined) { sshHost = String(sshVal.sshHost ?? ''); }
+						if (sshVal.sshPort !== undefined) { sshPort = sshVal.sshPort ?? 22; }
+						if (sshVal.sshUser !== undefined) { sshUser = String(sshVal.sshUser ?? 'root'); }
+						if (sshVal.sshPassword !== undefined) { sshPassword = String(sshVal.sshPassword ?? ''); }
+						if (sshVal.sshCwd !== undefined) { sshCwd = String(sshVal.sshCwd ?? '~'); }
 						if (Array.isArray(sshVal.sshCommands)) {
 							sshCommands = normalizeSshCommandsList(sshVal.sshCommands);
 						} else if (sshVal.sshCommand !== undefined) {
 							sshCommands = normalizeSshCommandsList(undefined, String(sshVal.sshCommand ?? ''));
 						}
-						if (sshVal.sshOutput !== undefined) sshOutput = String(sshVal.sshOutput ?? '');
-						if (sshVal.sshLastRawOutput !== undefined) sshLastRawOutput = String(sshVal.sshLastRawOutput ?? '');
-						if (Array.isArray(sshVal.sshLastRawEntries)) sshLastRawEntries = sshVal.sshLastRawEntries;
-						if (sshVal.sshLastOutput !== undefined) sshLastOutput = String(sshVal.sshLastOutput ?? '');
+						if (sshVal.sshOutput !== undefined) { sshOutput = String(sshVal.sshOutput ?? ''); }
+						if (sshVal.sshLastRawOutput !== undefined) { sshLastRawOutput = String(sshVal.sshLastRawOutput ?? ''); }
+						if (Array.isArray(sshVal.sshLastRawEntries)) { sshLastRawEntries = sshVal.sshLastRawEntries; }
+						if (sshVal.sshLastOutput !== undefined) { sshLastOutput = String(sshVal.sshLastOutput ?? ''); }
 						if (sshVal.sshOutputLines !== undefined) {
 							const parsedN = Number(sshVal.sshOutputLines);
-							if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+							if (!isNaN(parsedN) && parsedN > 0) { sshOutputLines = Math.floor(parsedN); }
 						}
 						if (Array.isArray(sshVal.sshQuickCommands) && sshVal.sshQuickCommands.length > 0) {
 							sshQuickCommands = normalizeSshQuickCommands(sshVal.sshQuickCommands);
 						}
-						if (sshVal.sshLastExecuted) lastExecuted = String(sshVal.sshLastExecuted);
+						if (sshVal.sshLastExecuted) { lastExecuted = String(sshVal.sshLastExecuted); }
 					} else if (typeof v === 'string' && v.trim() && !v.trim().startsWith('{')) {
 						sshCommands = [v.trim()];
 					} else if (Array.isArray(v)) {
@@ -20028,7 +20227,7 @@ ${userPromptSectionHtml}
 							const specData = savedMap[spec.fieldKey] || savedMap[spec.label];
 
 							// Find matching schema field to determine its primitive type
-							const matchingField = customModule?.fields?.find((f: any) =>
+							const matchingField = customModule?.fields?.find(f =>
 								(f.label && f.label.toLowerCase() === spec.fieldKey.toLowerCase()) ||
 								(f.id && f.id.toLowerCase() === spec.fieldKey.toLowerCase()) ||
 								(f.label && f.label.toLowerCase() === spec.label.toLowerCase()) ||
@@ -20097,7 +20296,7 @@ ${userPromptSectionHtml}
 									savedSpecText = JSON.stringify(specData, null, 2);
 								} else if (typeof specData === 'object') {
 									const sRec = specData as Record<string, unknown>;
-									const isTableStateObj = isTableField || 'sqlOutput' in sRec || ('columns' in sRec && 'rows' in sRec) || 'dbEngine' in sRec;
+									const isTableStateObj = isTableField || hasProperty(sRec, 'sqlOutput') || (hasProperty(sRec, 'columns') && hasProperty(sRec, 'rows')) || hasProperty(sRec, 'dbEngine');
 									if (isTableStateObj) {
 										if (Array.isArray(sRec.rows) && sRec.rows.length > 0) {
 											savedSpecText = JSON.stringify(sRec.rows, null, 2);
@@ -20109,7 +20308,7 @@ ${userPromptSectionHtml}
 											savedSpecText = sRec.text.trim();
 										}
 									} else {
-										const hasWrapperKey = 'text' in sRec || 'content' in sRec || 'result' in sRec || 'output' in sRec;
+										const hasWrapperKey = hasProperty(sRec, 'text') || hasProperty(sRec, 'content') || hasProperty(sRec, 'result') || hasProperty(sRec, 'output');
 										if (hasWrapperKey) {
 											let rawV: unknown;
 											if (isBrowserField) {
@@ -20172,9 +20371,9 @@ ${userPromptSectionHtml}
 							if (livePrimText && livePrimText.trim() !== '') {
 								itemText = livePrimText;
 								if (livePrimText.trim() !== (savedSpecText || '').trim()) {
-									const targetKey = (spec.fieldKey in savedMap) ? spec.fieldKey : ((spec.label in savedMap) ? spec.label : spec.fieldKey);
+									const targetKey = hasProperty(savedMap, spec.fieldKey) ? spec.fieldKey : (hasProperty(savedMap, spec.label) ? spec.label : spec.fieldKey);
 									const existingEntry = savedMap[targetKey];
-									if (existingEntry && typeof existingEntry === 'object' && !Array.isArray(existingEntry) && ('text' in (existingEntry as Record<string, unknown>) || 'format' in (existingEntry as Record<string, unknown>))) {
+									if (existingEntry && typeof existingEntry === 'object' && !Array.isArray(existingEntry) && (hasProperty(existingEntry, 'text') || hasProperty(existingEntry, 'format'))) {
 										savedMap[targetKey] = {
 											...(existingEntry as Record<string, unknown>),
 											text: livePrimText,
@@ -20992,7 +21191,7 @@ ${userPromptSectionHtml}
 				<!-- Left Column: Main Stream -->
 				<div class="main-content">
 					<!-- 1. Description / Role Card -->
-					${(isAgent || !customModule || !Array.isArray(customModule.fields) || customModule.fields.some((f: any) => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description')) ? `
+					${(isAgent || !customModule || !Array.isArray(customModule.fields) || customModule.fields.some(f => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description')) ? `
 					<div class="section-card">
 						<div class="section-title">
 							<div style="display: flex; align-items: center; gap: 8px;">
@@ -21159,7 +21358,7 @@ ${userPromptSectionHtml}
 									</svg>
 								</button>
 							</div>
-							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map((s: any) => s.label || s.id) : this._workspaceStatuses.statuses)))}" title="Edit Status with AI">
+							<button type="button" class="ai-edit-btn" data-ai-field="/Attributes/Status" data-ai-field-type="status" data-ai-field-label="Status" data-ai-current-value="${this._escapeHtmlAttr(status)}" data-ai-options="${this._escapeHtmlAttr(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map(s => s.label || s.id) : this._workspaceStatuses.statuses)))}" title="Edit Status with AI">
 								<svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor"><path d="M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z"/></svg>
 							</button>
 						</div>
@@ -21181,7 +21380,7 @@ ${userPromptSectionHtml}
 									</span>
 									<span>Status Lifecycle & Mapping</span>
 								</div>
-								<button type="button" id="close-status-lifecycle-popover-btn" style="background: transparent; border: none; cursor: pointer; color: var(--vscode-descriptionForeground); font-size: 14px; padding: 0 4px; border-radius: 4px; line-height: 1;" title="Close">✕</button>
+								<button type="button" id="close-status-lifecycle-popover-btn" style="background: transparent; border: none; cursor: pointer; color: var(--vscode-descriptionForeground); font-size: 14px; padding: 0 4px; border-radius: 4px; line-height: 1;" title="Close">\u2715</button>
 							</div>
 
 							<!-- Current Status Indicator -->
@@ -21282,7 +21481,7 @@ ${userPromptSectionHtml}
 										</div>
 									` : `
 										<div style="font-size: 10.5px; color: var(--vscode-descriptionForeground); background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); padding: 5px 8px; border-radius: 5px; line-height: 1.3;">
-											ℹ️ No custom mapping configured (using default 1:1 lifecycle mapping for standard stages).
+											\u2139️ No custom mapping configured (using default 1:1 lifecycle mapping for standard stages).
 										</div>
 									`;
 
@@ -21413,13 +21612,13 @@ ${userPromptSectionHtml}
 						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.createdAt}</span>
 					</div>
 
-					<div class="sidebar-row" style="${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some((f: any) => f.type === 'git'))) ? '' : 'border-bottom: none; margin-bottom: 0;'}">
+					<div class="sidebar-row" style="${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some(f => f.type === 'git'))) ? '' : 'border-bottom: none; margin-bottom: 0;'}">
 						<span class="sidebar-label">LAST UPDATED AT</span>
 						<span class="sidebar-value" style="font-size: 0.85em; opacity: 0.85;">${data.lastUpdatedAt}</span>
 					</div>
 
 					<!-- Git Configuration (Repository & Branch) -->
-					${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some((f: any) => f.type === 'git'))) ? `
+					${(data.gitRemoteUrl || data.gitBranch || this._entityType === 'workspace' || (customModule && Array.isArray(customModule.fields) && customModule.fields.some(f => f.type === 'git'))) ? `
 						<div class="sidebar-row" style="margin-top: 14px; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);">
 							<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
 								<span class="sidebar-label" style="display: flex; align-items: center; gap: 5px;">

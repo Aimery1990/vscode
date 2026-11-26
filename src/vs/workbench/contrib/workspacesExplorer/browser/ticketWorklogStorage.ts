@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { URI } from '../../../../base/common/uri.js';
@@ -155,7 +154,7 @@ export class TicketWorklogStorage {
 				if (typeMatch && typeMatch[1].trim()) {
 					ticketType = typeMatch[1].trim();
 				}
-			} catch {}
+			} catch { }
 		}
 
 		// Ensure tickets.md exists (Preserve all 5 required Markdown files)
@@ -472,14 +471,14 @@ export class TicketWorklogStorage {
 				if (partsMatch) {
 					totalParts = parseInt(partsMatch[1], 10);
 				}
-			} catch {}
+			} catch { }
 
 			// Tally bytes for remaining parts
 			for (let i = 1; i < grp.files.length; i++) {
 				try {
 					const c = await this.fileService.readFile(grp.files[i].uri);
 					totalBytes += c.value.byteLength;
-				} catch {}
+				} catch { }
 			}
 
 			metas.push({
@@ -627,7 +626,7 @@ export class TicketWorklogStorage {
 			let migratedCount = 0;
 			for (let i = 1; i < sections.length; i++) {
 				const section = sections[i].trim();
-				if (!section) continue;
+				if (!section) { continue; }
 
 				const lines = section.split('\n');
 				const header = lines[0].trim();

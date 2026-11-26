@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Emitter, Event } from '../../../../base/common/event.js';
@@ -13,9 +12,9 @@ import { IFileService } from '../../../../platform/files/common/files.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
-import { IAgentsManagerService, getGlobalDefaultModel } from '../../agentsManager/common/agentsManager.js';
+import { AgentScopeType, IAgentsManagerService, getGlobalDefaultModel } from '../../agentsManager/common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
-import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
+import { AuthenticationSession, AuthenticationSessionAccount, IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { EditorsOrder } from '../../../common/editor.js';
 import { ITerminalService } from '../../terminal/browser/terminal.js';
@@ -119,11 +118,11 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			}
 		}));
 
-		this._register(this.authenticationService.onDidChangeSessions(async (e: any) => {
+		this._register(this.authenticationService.onDidChangeSessions(async () => {
 			await this.updateActiveUser();
 		}));
 
-		this._register(this.authenticationService.onDidRegisterAuthenticationProvider(async (e: any) => {
+		this._register(this.authenticationService.onDidRegisterAuthenticationProvider(async () => {
 			await this.updateActiveUser();
 		}));
 
@@ -141,10 +140,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			const uniqueProviders = Array.from(new Set(providers));
 
 			const sessionPromises = uniqueProviders.map(async providerId => {
-				let timeoutId: any;
+				let timeoutId: ReturnType<typeof setTimeout> | undefined;
 				try {
 					const sessionsPromise = this.authenticationService.getSessions(providerId, undefined, undefined, true);
-					const timeoutPromise = new Promise<readonly any[]>(resolve => {
+					const timeoutPromise = new Promise<readonly AuthenticationSession[]>(resolve => {
 						timeoutId = setTimeout(() => resolve([]), 5000);
 					});
 					const sessions = await Promise.race([sessionsPromise, timeoutPromise]);
@@ -163,7 +162,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			let newUserIdentifier = '';
 
 			if (activeResult) {
-				const label = activeResult.session.account.label || activeResult.session.account.email || '';
+				const account: AuthenticationSessionAccount & { email?: string } = activeResult.session.account;
+				const label = account.label || account.email || '';
 				const match = label.match(/\(([^)]+)\)/);
 				newUserIdentifier = (match ? match[1] : label).trim().toLowerCase();
 			}
@@ -274,7 +274,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		}
 		await this.entityPersistenceService.saveSnapshot({
 			...snapshot,
-			entityType: snapshot.entityType as any
+			entityType: snapshot.entityType
 		});
 	}
 
@@ -614,7 +614,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			await this._configureExistingGitRepo(dotGitUri, gitRepoUrl, gitBranch);
 			try {
 				await this.commandService.executeCommand('git.openRepository', targetPath);
-			} catch {}
+			} catch { }
 			return;
 		}
 
@@ -628,13 +628,13 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				await this._initGitInExistingFolder(targetFolderUri, gitRepoUrl, gitBranch);
 				try {
 					await this.commandService.executeCommand('git.openRepository', targetPath);
-				} catch {}
+				} catch { }
 				return;
 			} else {
 				// Empty folder: remove it so git clone can create it cleanly without collision
 				try {
 					await this.fileService.del(targetFolderUri, { recursive: true });
-				} catch {}
+				} catch { }
 			}
 		}
 
@@ -645,7 +645,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		}
 
 		// 4. Execute clone via VS Code's git extension command
-		let cloneError: any = null;
+		let cloneError: unknown = null;
 		try {
 			await this.commandService.executeCommand('_git.cloneRepository', gitRepoUrl, targetPath);
 		} catch (err) {
@@ -658,8 +658,8 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			// If clone command was unavailable or failed, attempt direct repo init fallback
 			try {
 				await this._initGitInExistingFolder(targetFolderUri, gitRepoUrl, gitBranch);
-			} catch (fallbackErr: any) {
-				const errMsg = cloneError ? (cloneError.message || cloneError) : (fallbackErr.message || fallbackErr);
+			} catch (fallbackErr) {
+				const errMsg = cloneError ? ((cloneError as { message?: unknown }).message || cloneError) : ((fallbackErr as { message?: unknown }).message || fallbackErr);
 				throw new Error(`Git clone failed for '${gitRepoUrl}': ${errMsg}`);
 			}
 		} else {
@@ -671,7 +671,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 		// 6. Tell VS Code Git extension to immediately open and manage this repository
 		try {
 			await this.commandService.executeCommand('git.openRepository', targetPath);
-		} catch {}
+		} catch { }
 	}
 
 	private async _initGitInExistingFolder(folderUri: URI, gitRepoUrl: string, gitBranch?: string): Promise<void> {
@@ -1062,10 +1062,10 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				removedStatus: rem || 'Removed',
 				initialStatus: initial,
 				getCategory: (statusName?: string): CanonicalStatusCategory => {
-					if (!statusName) return 'Todo';
-					if (safeMapping[statusName]) return safeMapping[statusName];
+					if (!statusName) { return 'Todo'; }
+					if (safeMapping[statusName]) { return safeMapping[statusName]; }
 					const matchedKey = Object.keys(safeMapping).find(k => k.toLowerCase() === statusName.toLowerCase());
-					if (matchedKey) return safeMapping[matchedKey];
+					if (matchedKey) { return safeMapping[matchedKey]; }
 					return inferCategory(statusName);
 				}
 			};
@@ -1207,7 +1207,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	async resolveEntityCode(targetParentUri: URI, customCode?: string): Promise<string> {
 		if (customCode && customCode.trim()) {
 			const sanitized = customCode.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-			if (sanitized) return sanitized;
+			if (sanitized) { return sanitized; }
 		}
 
 		const pathLower = targetParentUri.path.toLowerCase();
@@ -1256,7 +1256,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 						}
 					}
 				}
-			} catch {}
+			} catch { }
 
 			if (foundMdUri) {
 				try {
@@ -1264,18 +1264,18 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 					const codeMatch = content.match(/-\s*\*\*(?:Entity|Ticket) Code\*\*:\s*`?([A-Za-z0-9_-]+)`?/i);
 					if (codeMatch && codeMatch[1]) {
 						const code = codeMatch[1].replace(/-0000$/i, '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-						if (code && code !== 'NONE') return code;
+						if (code && code !== 'NONE') { return code; }
 					}
 					const wsIdMatch = content.match(/-\s*\*\*Workspace ID\*\*:\s*`?([A-Za-z0-9_-]+)`?/i);
 					if (wsIdMatch && wsIdMatch[1]) {
 						const code = wsIdMatch[1].replace(/-0000$/i, '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
-						if (code && code !== 'NONE') return code;
+						if (code && code !== 'NONE') { return code; }
 					}
-				} catch {}
+				} catch { }
 			}
 
 			const parentPath = dirname(curr);
-			if (!parentPath || parentPath.path === curr.path) break;
+			if (!parentPath || parentPath.path === curr.path) { break; }
 			curr = parentPath;
 		}
 
@@ -1306,17 +1306,17 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				if (await this.fileService.exists(wsMd)) {
 					return curr;
 				}
-			} catch {}
+			} catch { }
 
 			const ticketMd = URI.joinPath(configDir, 'ticket.md');
 			try {
 				if (await this.fileService.exists(ticketMd)) {
 					highestWorkspaceUri = curr;
 				}
-			} catch {}
+			} catch { }
 
 			const parent = dirname(curr);
-			if (!parent || parent.path === curr.path) break;
+			if (!parent || parent.path === curr.path) { break; }
 			curr = parent;
 		}
 
@@ -1346,7 +1346,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 	}
 
 	public async updateWorkspaceSequence(workspaceRootUri: URI, code: string, usedNumber: number): Promise<void> {
-		if (!code || isNaN(usedNumber) || usedNumber <= 0) return;
+		if (!code || isNaN(usedNumber) || usedNumber <= 0) { return; }
 		try {
 			const configDir = URI.joinPath(workspaceRootUri, '.agents');
 			if (!await this.fileService.exists(configDir)) {
@@ -1420,7 +1420,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			while (queue.length > 0) {
 				const currentUri = queue.shift()!;
 				const uriKey = currentUri.toString();
-				if (visited.has(uriKey)) continue;
+				if (visited.has(uriKey)) { continue; }
 				visited.add(uriKey);
 
 				try {
@@ -1618,7 +1618,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			entityUri: entityFolderUri.toString(),
 			entityName: name,
 			title: options.title || name,
-			entityType: type as any,
+			entityType: type,
 			entityCode: activeCode,
 			status: options.status || 'Todo',
 			priority: options.priority || 'Medium',
@@ -1631,7 +1631,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 			role: description || `${parentType} Agent`,
 			modelName: finalModel.modelId,
 			systemPrompt: finalSystemPrompt,
-			scopeType: (isIndependentAgent ? 'none' : parentType) as any,
+			scopeType: isIndependentAgent ? 'none' : parentType,
 			scopeId: isIndependentAgent ? 'none' : targetFolderUri.toString(),
 			scopeName: (isIndependentAgent || isIndependentWorkflow) ? 'Independent' : parentName,
 			typeDefinition: (options.typeDefinition && options.typeDefinition !== 'Built-in (System)' && options.typeDefinition !== 'None') ? options.typeDefinition : undefined,
@@ -1654,7 +1654,7 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				systemPrompt: finalSystemPrompt,
 				model: finalModel,
 				avatarIcon: 'robot',
-				scopeType: (isIndependentAgent ? 'none' : parentType) as any,
+				scopeType: (isIndependentAgent ? 'none' : parentType) as AgentScopeType,
 				scopeId: isIndependentAgent ? 'none' : targetFolderUri.toString(),
 				scopeName: isIndependentAgent ? 'Independent' : parentName,
 				folderPath: entityFolderUri.fsPath,

@@ -1,13 +1,12 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
 import { Codicon } from '../../../../../base/common/codicons.js';
 import { localize } from '../../../../../nls.js';
 import { CountTokensCallback, IPreparedToolInvocation, IToolData, IToolImpl, IToolInvocation, IToolInvocationPreparationContext, IToolResult, ToolDataSource, ToolProgress } from '../../../chat/common/tools/languageModelToolsService.js';
-import { TicketDataEngine } from './ticketDataEngine.js';
+import { ICreateTicketToolOptions, IDeleteTicketToolOptions, IManageLinksToolOptions, IOperateTicketTableToolOptions, IQueryWorkspaceTreeToolOptions, IUpdateTicketToolOptions, TicketDataEngine } from './ticketDataEngine.js';
 
 export const GetTicketDataToolId = 'anyagent_get_ticket_data';
 export const CreateTicketToolId = 'anyagent_create_ticket';
@@ -17,7 +16,7 @@ export const ManageLinksToolId = 'anyagent_manage_links';
 export const QueryWorkspaceTreeToolId = 'anyagent_query_workspace_tree';
 export const OperateTicketTableToolId = 'anyagent_operate_ticket_table';
 
-function toolResult(data: any, message?: string): IToolResult {
+function toolResult(data: unknown, message?: string): IToolResult {
 	return {
 		content: [{
 			kind: 'text',
@@ -25,6 +24,11 @@ function toolResult(data: any, message?: string): IToolResult {
 		}],
 		toolResultMessage: message
 	};
+}
+
+function errorText(err: unknown): string {
+	const message = (err as { message?: unknown } | undefined)?.message;
+	return message ? String(message) : String(err);
 }
 
 function toolError(errorMessage: string): IToolResult {
@@ -62,19 +66,19 @@ export class GetTicketDataTool implements IToolImpl {
 				properties: {
 					workspace_id: {
 						type: 'string',
-						description: "The root workspace ID (e.g. 'FNDJ1-0000')."
+						description: 'The root workspace ID (e.g. \'FNDJ1-0000\').'
 					},
 					ticket_id: {
 						type: 'string',
-						description: "The target ticket ID (e.g. 'FNDJ1-0001'), relative path (e.g. '/FNDJ1-0006/FNDJ1-0001'), or root 'FNDJ1-0000'."
+						description: 'The target ticket ID (e.g. \'FNDJ1-0001\'), relative path (e.g. \'/FNDJ1-0006/FNDJ1-0001\'), or root \'FNDJ1-0000\'.'
 					},
 					parent_path: {
 						type: 'string',
-						description: "Optional parent path (e.g. '/FNDJ1-0006' or '/') to explicitly disambiguate sub-tickets with identical or relative IDs."
+						description: 'Optional parent path (e.g. \'/FNDJ1-0006\' or \'/\') to explicitly disambiguate sub-tickets with identical or relative IDs.'
 					},
 					field_path: {
 						type: 'string',
-						description: "Optional target path (e.g. '/Status', '/Attributes/Priority', '/Custom/education/LU Edu/degree', '/Custom/education')."
+						description: 'Optional target path (e.g. \'/Status\', \'/Attributes/Priority\', \'/Custom/education/LU Edu/degree\', \'/Custom/education\').'
 					}
 				},
 				required: ['workspace_id', 'ticket_id']
@@ -94,12 +98,12 @@ export class GetTicketDataTool implements IToolImpl {
 		try {
 			const { workspace_id, ticket_id, field_path, parent_path } = invocation.parameters;
 			if (!workspace_id || !ticket_id) {
-				return toolError("'workspace_id' and 'ticket_id' are required.");
+				return toolError('\'workspace_id\' and \'ticket_id\' are required.');
 			}
 			const data = await this.ticketEngine.getTicketData(workspace_id, ticket_id, field_path, parent_path);
 			return toolResult(data, `Retrieved data for ticket ${ticket_id}`);
-		} catch (err: any) {
-			return toolError(err.message || String(err));
+		} catch (err) {
+			return toolError(errorText(err));
 		}
 	}
 }
@@ -128,66 +132,66 @@ export class CreateTicketTool implements IToolImpl {
 				properties: {
 					workspace_id: {
 						type: 'string',
-						description: "The root workspace ID (e.g. 'FNDJ1-0000')."
+						description: 'The root workspace ID (e.g. \'FNDJ1-0000\').'
 					},
 					parent_path: {
 						type: 'string',
-						description: "Relative parent path from workspace root: '/' for top-level child, or '/FNDJ1-0001' for sub-tickets."
+						description: 'Relative parent path from workspace root: \'/\' for top-level child, or \'/FNDJ1-0001\' for sub-tickets.'
 					},
 					ticket_type: {
 						type: 'string',
-						description: "Entity type matching an existing type definition (e.g. 'job', 'task', 'note', 'resume', 'education')."
+						description: 'Entity type matching an existing type definition (e.g. \'job\', \'task\', \'note\', \'resume\', \'education\').'
 					},
 					title: {
 						type: 'string',
-						description: "Mandatory business title for README.md."
+						description: 'Mandatory business title for README.md.'
 					},
 					description: {
 						type: 'string',
-						description: "Optional detailed description text."
+						description: 'Optional detailed description text.'
 					},
 					status: {
 						type: 'string',
-						description: "Initial status name. If omitted, defaults to the status mapped to 'INITIAL' in the current workspace."
+						description: 'Initial status name. If omitted, defaults to the status mapped to \'INITIAL\' in the current workspace.'
 					},
 					priority: {
 						type: 'string',
 						enum: ['Very High', 'High', 'Medium', 'Low', 'Very Low'],
 						default: 'Medium',
-						description: "Priority level. Defaults to 'Medium'."
+						description: 'Priority level. Defaults to \'Medium\'.'
 					},
 					ticket_prompt: {
 						type: 'string',
-						description: "Optional custom prompt tailored specifically for this ticket instance."
+						description: 'Optional custom prompt tailored specifically for this ticket instance.'
 					},
 					assigned_agent: {
 						type: 'string',
-						description: "Optional AI Agent ID/Name to assign, or 'None'."
+						description: 'Optional AI Agent ID/Name to assign, or \'None\'.'
 					},
 					link_to: {
 						type: 'string',
-						description: "Optional comma-separated Ticket IDs to link to (e.g. 'FNDJ1-0002')."
+						description: 'Optional comma-separated Ticket IDs to link to (e.g. \'FNDJ1-0002\').'
 					},
 					attachments: {
 						type: 'array',
 						items: { type: 'string' },
-						description: "Optional array of attachment file paths or URLs."
+						description: 'Optional array of attachment file paths or URLs.'
 					},
 					custom_values: {
 						type: 'object',
-						description: "Initial key-value map for self-defined fields defined in the type YAML schema."
+						description: 'Initial key-value map for self-defined fields defined in the type YAML schema.'
 					},
 					worklog_record: {
 						type: 'object',
-						description: "Mandatory initial execution log written to worklog.md.",
+						description: 'Mandatory initial execution log written to worklog.md.',
 						properties: {
-							user_request: { type: 'string', description: "Polished and clear user requirement in fluent language." },
-							update_summary: { type: 'string', description: "1-sentence summary of ticket creation." },
-							update_details: { type: 'string', description: "Detailed bullet points of initial parameters and assigned values." },
-							update_conclusion: { type: 'string', description: "Evaluation confirming successful ticket initialization." },
+							user_request: { type: 'string', description: 'Polished and clear user requirement in fluent language.' },
+							update_summary: { type: 'string', description: '1-sentence summary of ticket creation.' },
+							update_details: { type: 'string', description: 'Detailed bullet points of initial parameters and assigned values.' },
+							update_conclusion: { type: 'string', description: 'Evaluation confirming successful ticket initialization.' },
 							commit: {
 								type: 'object',
-								description: "Explicit git commit info if code was committed during this task, or omitted/null if no commit was performed.",
+								description: 'Explicit git commit info if code was committed during this task, or omitted/null if no commit was performed.',
 								properties: {
 									repo: { type: 'string' },
 									branch: { type: 'string' },
@@ -215,10 +219,10 @@ export class CreateTicketTool implements IToolImpl {
 
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
 		try {
-			const res = await this.ticketEngine.createTicket(invocation.parameters as any);
+			const res = await this.ticketEngine.createTicket(invocation.parameters as ICreateTicketToolOptions);
 			return toolResult(res, `Ticket '${res.ticket_id}' (${res.title}) created successfully.`);
-		} catch (err: any) {
-			return toolError(err.message || String(err));
+		} catch (err) {
+			return toolError(errorText(err));
 		}
 	}
 }
@@ -247,31 +251,31 @@ export class DeleteTicketTool implements IToolImpl {
 				properties: {
 					workspace_id: {
 						type: 'string',
-						description: "The root workspace ID (e.g. 'FNDJ1-0000')."
+						description: 'The root workspace ID (e.g. \'FNDJ1-0000\').'
 					},
 					ticket_id: {
 						type: 'string',
-						description: "The target ticket ID to remove (e.g. 'FNDJ1-0004'), or relative path (e.g. '/FNDJ1-0006/FNDJ1-0001')."
+						description: 'The target ticket ID to remove (e.g. \'FNDJ1-0004\'), or relative path (e.g. \'/FNDJ1-0006/FNDJ1-0001\').'
 					},
 					parent_path: {
 						type: 'string',
-						description: "Optional parent path (e.g. '/FNDJ1-0006' or '/') to explicitly disambiguate sub-tickets with identical or relative IDs."
+						description: 'Optional parent path (e.g. \'/FNDJ1-0006\' or \'/\') to explicitly disambiguate sub-tickets with identical or relative IDs.'
 					},
 					move_to_trash: {
 						type: 'boolean',
-						description: "Optional flag. When true, permanently moves the ticket directory to OS Trash (Recycle Bin) in addition to workspace reference cleanup. Defaults to false."
+						description: 'Optional flag. When true, permanently moves the ticket directory to OS Trash (Recycle Bin) in addition to workspace reference cleanup. Defaults to false.'
 					},
 					worklog_record: {
 						type: 'object',
-						description: "Mandatory execution log recorded in worklog.md of the removed ticket (and cascaded children).",
+						description: 'Mandatory execution log recorded in worklog.md of the removed ticket (and cascaded children).',
 						properties: {
-							user_request: { type: 'string', description: "User requirement explaining why the ticket is being removed." },
-							update_summary: { type: 'string', description: "1-sentence summary of removal." },
-							update_details: { type: 'string', description: "Details of removed entity, cascaded child tickets, and unlinked references." },
-							update_conclusion: { type: 'string', description: "Confirmation of safe removal and link cleanup." },
+							user_request: { type: 'string', description: 'User requirement explaining why the ticket is being removed.' },
+							update_summary: { type: 'string', description: '1-sentence summary of removal.' },
+							update_details: { type: 'string', description: 'Details of removed entity, cascaded child tickets, and unlinked references.' },
+							update_conclusion: { type: 'string', description: 'Confirmation of safe removal and link cleanup.' },
 							commit: {
 								type: 'object',
-								description: "Explicit git commit info if code was committed during this task, or omitted/null if no commit was performed.",
+								description: 'Explicit git commit info if code was committed during this task, or omitted/null if no commit was performed.',
 								properties: {
 									repo: { type: 'string' },
 									branch: { type: 'string' },
@@ -299,13 +303,13 @@ export class DeleteTicketTool implements IToolImpl {
 
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
 		try {
-			const res = await this.ticketEngine.deleteTicket(invocation.parameters as any);
+			const res = await this.ticketEngine.deleteTicket(invocation.parameters as IDeleteTicketToolOptions);
 			const msg = res.moved_to_os_trash
 				? `Ticket '${res.removed_ticket_id}' moved to OS Trash and references cleaned up.`
 				: `Ticket '${res.removed_ticket_id}' marked as '${res.status_set_to}' and links cleaned up.`;
 			return toolResult(res, msg);
-		} catch (err: any) {
-			return toolError(err.message || String(err));
+		} catch (err) {
+			return toolError(errorText(err));
 		}
 	}
 }
@@ -334,31 +338,31 @@ export class UpdateTicketTool implements IToolImpl {
 				properties: {
 					workspace_id: {
 						type: 'string',
-						description: "The root workspace ID (e.g. 'FNDJ1-0000')."
+						description: 'The root workspace ID (e.g. \'FNDJ1-0000\').'
 					},
 					ticket_id: {
 						type: 'string',
-						description: "The target ticket ID to update (e.g. 'FNDJ1-0001'), or relative path (e.g. '/FNDJ1-0006/FNDJ1-0001')."
+						description: 'The target ticket ID to update (e.g. \'FNDJ1-0001\'), or relative path (e.g. \'/FNDJ1-0006/FNDJ1-0001\').'
 					},
 					parent_path: {
 						type: 'string',
-						description: "Optional parent path (e.g. '/FNDJ1-0006' or '/') to explicitly disambiguate sub-tickets with identical or relative IDs."
+						description: 'Optional parent path (e.g. \'/FNDJ1-0006\' or \'/\') to explicitly disambiguate sub-tickets with identical or relative IDs.'
 					},
 					updates: {
 						type: 'object',
-						description: "Path-to-value map. Set value to null to clear a field or delete a dynamic list card. Path rules:\n- Standard fields: '/Title': 'New Title', '/Status': 'In Dev', '/Priority': 'High'\n- Instruction prompt: '/Instructions/Ticket Prompt': 'Specific rules...'\n- Clear field: '/Custom/expected_salary': null\n- Dynamic list update item: '/Custom/education/LU Edu/degree': 'Master of Computer Science'\n- Dynamic list delete card: '/Custom/education/HNU Edu': null\n- Dynamic list add new card: '/Custom/education/add': { 'key': 'Stanford Edu', 'school': 'Stanford University', 'degree': 'PhD', 'period': '2026-09 ~ 2030-06' }"
+						description: 'Path-to-value map. Set value to null to clear a field or delete a dynamic list card. Path rules:\n- Standard fields: \'/Title\': \'New Title\', \'/Status\': \'In Dev\', \'/Priority\': \'High\'\n- Instruction prompt: \'/Instructions/Ticket Prompt\': \'Specific rules...\'\n- Clear field: \'/Custom/expected_salary\': null\n- Dynamic list update item: \'/Custom/education/LU Edu/degree\': \'Master of Computer Science\'\n- Dynamic list delete card: \'/Custom/education/HNU Edu\': null\n- Dynamic list add new card: \'/Custom/education/add\': { \'key\': \'Stanford Edu\', \'school\': \'Stanford University\', \'degree\': \'PhD\', \'period\': \'2026-09 ~ 2030-06\' }'
 					},
 					worklog_record: {
 						type: 'object',
-						description: "Mandatory execution log to append to worklog.md.",
+						description: 'Mandatory execution log to append to worklog.md.',
 						properties: {
-							user_request: { type: 'string', description: "Polished, fluent user requirement in clean language." },
-							update_summary: { type: 'string', description: "1-sentence concise summary of modifications." },
-							update_details: { type: 'string', description: "Detailed bullet points of modified fields and files." },
-							update_conclusion: { type: 'string', description: "Evaluation comparing user request vs actual outcome." },
+							user_request: { type: 'string', description: 'Polished, fluent user requirement in clean language.' },
+							update_summary: { type: 'string', description: '1-sentence concise summary of modifications.' },
+							update_details: { type: 'string', description: 'Detailed bullet points of modified fields and files.' },
+							update_conclusion: { type: 'string', description: 'Evaluation comparing user request vs actual outcome.' },
 							commit: {
 								type: 'object',
-								description: "Explicit git commit info if code was committed during this task, or omitted/null if no commit was performed.",
+								description: 'Explicit git commit info if code was committed during this task, or omitted/null if no commit was performed.',
 								properties: {
 									repo: { type: 'string' },
 									branch: { type: 'string' },
@@ -386,10 +390,10 @@ export class UpdateTicketTool implements IToolImpl {
 
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
 		try {
-			const res = await this.ticketEngine.updateTicket(invocation.parameters as any);
+			const res = await this.ticketEngine.updateTicket(invocation.parameters as IUpdateTicketToolOptions);
 			return toolResult(res, `Ticket '${res.ticket_id}' updated successfully.`);
-		} catch (err: any) {
-			return toolError(err.message || String(err));
+		} catch (err) {
+			return toolError(errorText(err));
 		}
 	}
 }
@@ -418,34 +422,34 @@ export class ManageLinksTool implements IToolImpl {
 				properties: {
 					workspace_id: {
 						type: 'string',
-						description: "The root workspace ID (e.g. 'FNDJ1-0000')."
+						description: 'The root workspace ID (e.g. \'FNDJ1-0000\').'
 					},
 					source_ticket_ids: {
 						type: 'array',
 						items: { type: 'string' },
-						description: "List of source ticket IDs initiating or modifying the links (e.g. ['FNDJ1-0001'])."
+						description: 'List of source ticket IDs initiating or modifying the links (e.g. [\'FNDJ1-0001\']).'
 					},
 					action: {
 						type: 'string',
 						enum: ['add_links', 'remove_links', 'set_links'],
-						description: "'add_links': append targets to existing links; 'remove_links': unlink specific targets; 'set_links': overwrite full Link To list."
+						description: '\'add_links\': append targets to existing links; \'remove_links\': unlink specific targets; \'set_links\': overwrite full Link To list.'
 					},
 					target_ticket_ids: {
 						type: 'array',
 						items: { type: 'string' },
-						description: "List of target ticket IDs to link/unlink (e.g. ['FNDJ1-0002', 'FNDJ1-0003'])."
+						description: 'List of target ticket IDs to link/unlink (e.g. [\'FNDJ1-0002\', \'FNDJ1-0003\']).'
 					},
 					worklog_record: {
 						type: 'object',
-						description: "Mandatory transaction execution log broadcasted to worklog.md of all involved tickets.",
+						description: 'Mandatory transaction execution log broadcasted to worklog.md of all involved tickets.',
 						properties: {
-							user_request: { type: 'string', description: "Polished, clear user requirement explaining why links are being modified." },
-							update_summary: { type: 'string', description: "1-sentence concise summary of link additions/removals." },
-							update_details: { type: 'string', description: "Detailed bullet points of source tickets, target tickets, and action performed." },
-							update_conclusion: { type: 'string', description: "Evaluation confirming successful link synchronization across all parties." },
+							user_request: { type: 'string', description: 'Polished, clear user requirement explaining why links are being modified.' },
+							update_summary: { type: 'string', description: '1-sentence concise summary of link additions/removals.' },
+							update_details: { type: 'string', description: 'Detailed bullet points of source tickets, target tickets, and action performed.' },
+							update_conclusion: { type: 'string', description: 'Evaluation confirming successful link synchronization across all parties.' },
 							commit: {
 								type: 'object',
-								description: "Explicit git commit info if code was committed during this task, or omitted/null if no commit was performed.",
+								description: 'Explicit git commit info if code was committed during this task, or omitted/null if no commit was performed.',
 								properties: {
 									repo: { type: 'string' },
 									branch: { type: 'string' },
@@ -473,10 +477,10 @@ export class ManageLinksTool implements IToolImpl {
 
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
 		try {
-			const res = await this.ticketEngine.manageLinks(invocation.parameters as any);
+			const res = await this.ticketEngine.manageLinks(invocation.parameters as IManageLinksToolOptions);
 			return toolResult(res, `Bi-directional links updated: action '${res.action}' synchronized across ${res.synchronized_tickets_count} ticket(s).`);
-		} catch (err: any) {
-			return toolError(err.message || String(err));
+		} catch (err) {
+			return toolError(errorText(err));
 		}
 	}
 }
@@ -496,7 +500,7 @@ export class QueryWorkspaceTreeTool implements IToolImpl {
 			toolReferenceName: 'queryWorkspaceTree',
 			displayName: localize('ticket.tool.tree.displayName', "Query Workspace Tree"),
 			userDescription: localize('ticket.tool.tree.userDescription', "Explore and search hierarchical tickets and jobs under a workspace"),
-			modelDescription: "Explore and search the hierarchical ticket/job tree under a workspace. Use this tool when you need to inspect deep sub-tickets, find a ticket by keyword/type, or get an updated tree representation under a specific job or workspace.",
+			modelDescription: 'Explore and search the hierarchical ticket/job tree under a workspace. Use this tool when you need to inspect deep sub-tickets, find a ticket by keyword/type, or get an updated tree representation under a specific job or workspace.',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.listTree,
@@ -505,19 +509,19 @@ export class QueryWorkspaceTreeTool implements IToolImpl {
 				properties: {
 					workspace_id: {
 						type: 'string',
-						description: "The target workspace ID or name (e.g. 'neoWorkspace', 'NEOWO')."
+						description: 'The target workspace ID or name (e.g. \'neoWorkspace\', \'NEOWO\').'
 					},
 					parent_ticket_id: {
 						type: 'string',
-						description: "Optional parent ticket ID (e.g. 'NEOWO-0001') to inspect a specific sub-tree, or '/' for workspace root."
+						description: 'Optional parent ticket ID (e.g. \'NEOWO-0001\') to inspect a specific sub-tree, or \'/\' for workspace root.'
 					},
 					query: {
 						type: 'string',
-						description: "Optional keyword to search across ticket IDs, titles, or types (e.g. 'demo', 'job', '0001')."
+						description: 'Optional keyword to search across ticket IDs, titles, or types (e.g. \'demo\', \'job\', \'0001\').'
 					},
 					max_depth: {
 						type: 'number',
-						description: "Maximum depth to inspect (default: 3)."
+						description: 'Maximum depth to inspect (default: 3).'
 					}
 				},
 				required: ['workspace_id']
@@ -535,10 +539,10 @@ export class QueryWorkspaceTreeTool implements IToolImpl {
 
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
 		try {
-			const res = await this.ticketEngine.queryWorkspaceTree(invocation.parameters as any);
+			const res = await this.ticketEngine.queryWorkspaceTree(invocation.parameters as IQueryWorkspaceTreeToolOptions);
 			return toolResult(res, `Workspace tree retrieved for ${invocation.parameters?.workspace_id}`);
-		} catch (err: any) {
-			return toolError(err.message || String(err));
+		} catch (err) {
+			return toolError(errorText(err));
 		}
 	}
 }
@@ -558,7 +562,7 @@ export class OperateTicketTableTool implements IToolImpl {
 			toolReferenceName: 'operateTicketTable',
 			displayName: localize('ticket.tool.table.displayName', "Operate Ticket Data Table & SQLite"),
 			userDescription: localize('ticket.tool.table.userDescription', "Inspect, define columns, insert/update/delete rows, and sync or query SQLite for a ticket's Data Table primitive"),
-			modelDescription: "Perform structured data and SQLite database operations on a ticket's Data Table ('table') primitive. Supports reading table schema & rows ('get_table'), defining column headers & SQLite data types ('define_columns' with TEXT, VARCHAR(255), INTEGER, REAL, NUMERIC, BOOLEAN, DATE, DATETIME, JSON, BLOB), inserting rows ('insert_rows'), updating/upserting rows ('update_rows'), replacing all rows ('set_rows'), deleting rows ('delete_rows', 'clear_rows'), binding a new or existing SQLite file ('bind_sqlite'), storing/updating/loading/deleting table data in SQLite ('save_to_sqlite', 'update_in_sqlite', 'load_from_sqlite', 'delete_from_sqlite'), and running custom SQL queries ('sql_query').",
+			modelDescription: 'Perform structured data and SQLite database operations on a ticket\'s Data Table (\'table\') primitive. Supports reading table schema & rows (\'get_table\'), defining column headers & SQLite data types (\'define_columns\' with TEXT, VARCHAR(255), INTEGER, REAL, NUMERIC, BOOLEAN, DATE, DATETIME, JSON, BLOB), inserting rows (\'insert_rows\'), updating/upserting rows (\'update_rows\'), replacing all rows (\'set_rows\'), deleting rows (\'delete_rows\', \'clear_rows\'), binding a new or existing SQLite file (\'bind_sqlite\'), storing/updating/loading/deleting table data in SQLite (\'save_to_sqlite\', \'update_in_sqlite\', \'load_from_sqlite\', \'delete_from_sqlite\'), and running custom SQL queries (\'sql_query\').',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.table,
@@ -567,19 +571,19 @@ export class OperateTicketTableTool implements IToolImpl {
 				properties: {
 					workspace_id: {
 						type: 'string',
-						description: "The root workspace ID (e.g. 'FNDJ1-0000' or 'GFLOW-0000')."
+						description: 'The root workspace ID (e.g. \'FNDJ1-0000\' or \'GFLOW-0000\').'
 					},
 					ticket_id: {
 						type: 'string',
-						description: "The target ticket ID (e.g. 'FNDJ1-0001')."
+						description: 'The target ticket ID (e.g. \'FNDJ1-0001\').'
 					},
 					parent_path: {
 						type: 'string',
-						description: "Optional parent path (e.g. '/FNDJ1-0006' or '/')."
+						description: 'Optional parent path (e.g. \'/FNDJ1-0006\' or \'/\').'
 					},
 					table_field: {
 						type: 'string',
-						description: "The label or ID of the Data Table primitive field in the ticket (e.g. 'Data Table 1' or 'Job Postings')."
+						description: 'The label or ID of the Data Table primitive field in the ticket (e.g. \'Data Table 1\' or \'Job Postings\').'
 					},
 					operation: {
 						type: 'string',
@@ -598,66 +602,66 @@ export class OperateTicketTableTool implements IToolImpl {
 							'delete_from_sqlite',
 							'sql_query'
 						],
-						description: "Operation to perform on the table and/or bound SQLite database."
+						description: 'Operation to perform on the table and/or bound SQLite database.'
 					},
 					columns: {
 						type: 'array',
-						description: "Column header definitions when operation is 'define_columns' or 'set_rows'.",
+						description: 'Column header definitions when operation is \'define_columns\' or \'set_rows\'.',
 						items: {
 							type: 'object',
 							properties: {
-								name: { type: 'string', description: "Column header name (e.g. 'job_id', 'company', 'salary')." },
+								name: { type: 'string', description: 'Column header name (e.g. \'job_id\', \'company\', \'salary\').' },
 								dataType: {
 									type: 'string',
 									enum: ['TEXT', 'VARCHAR(255)', 'INTEGER', 'REAL', 'NUMERIC', 'BOOLEAN', 'DATE', 'DATETIME', 'JSON', 'BLOB'],
-									description: "SQLite / SQL column data type."
+									description: 'SQLite / SQL column data type.'
 								},
-								primaryKey: { type: 'boolean', description: "Whether this column is the Primary Key." },
-								nullable: { type: 'boolean', description: "Whether NULL values are allowed." },
-								defaultValue: { type: 'string', description: "Optional default value." }
+								primaryKey: { type: 'boolean', description: 'Whether this column is the Primary Key.' },
+								nullable: { type: 'boolean', description: 'Whether NULL values are allowed.' },
+								defaultValue: { type: 'string', description: 'Optional default value.' }
 							},
 							required: ['name']
 						}
 					},
 					rows: {
 						type: 'array',
-						description: "Array of row objects (keyed by column name) for 'insert_rows', 'update_rows', or 'set_rows'.",
+						description: 'Array of row objects (keyed by column name) for \'insert_rows\', \'update_rows\', or \'set_rows\'.',
 						items: {
 							type: 'object'
 						}
 					},
 					match_column: {
 						type: 'string',
-						description: "Optional column name to match when updating or deleting specific rows (e.g. 'id')."
+						description: 'Optional column name to match when updating or deleting specific rows (e.g. \'id\').'
 					},
 					match_value: {
 						type: ['string', 'number', 'boolean'],
-						description: "Optional cell value to match against match_column when updating or deleting rows."
+						description: 'Optional cell value to match against match_column when updating or deleting rows.'
 					},
 					row_indices: {
 						type: 'array',
 						items: { type: 'number' },
-						description: "Optional zero-based row indices for 'update_rows' or 'delete_rows'."
+						description: 'Optional zero-based row indices for \'update_rows\' or \'delete_rows\'.'
 					},
 					db_path: {
 						type: 'string',
-						description: "Optional SQLite database file path (.sqlite / .db) to create or bind (relative to workspace/ticket or absolute path)."
+						description: 'Optional SQLite database file path (.sqlite / .db) to create or bind (relative to workspace/ticket or absolute path).'
 					},
 					db_table_name: {
 						type: 'string',
-						description: "Optional target table name inside the SQLite database."
+						description: 'Optional target table name inside the SQLite database.'
 					},
 					sync_sqlite: {
 						type: 'boolean',
-						description: "When true, immediately syncs the modified table to the bound SQLite database."
+						description: 'When true, immediately syncs the modified table to the bound SQLite database.'
 					},
 					sql_query: {
 						type: 'string',
-						description: "Raw SQL query to execute when operation is 'sql_query'."
+						description: 'Raw SQL query to execute when operation is \'sql_query\'.'
 					},
 					worklog_record: {
 						type: 'object',
-						description: "Optional worklog entry to record in the ticket's worklog.md.",
+						description: 'Optional worklog entry to record in the ticket\'s worklog.md.',
 						properties: {
 							user_request: { type: 'string' },
 							update_summary: { type: 'string' },
@@ -684,10 +688,10 @@ export class OperateTicketTableTool implements IToolImpl {
 
 	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
 		try {
-			const res = await this.ticketEngine.operateTicketTable(invocation.parameters as any);
+			const res = await this.ticketEngine.operateTicketTable(invocation.parameters as IOperateTicketTableToolOptions);
 			return toolResult(res, res.summary || `Table '${res.table_field}' operation '${res.operation}' completed.`);
-		} catch (err: any) {
-			return toolError(err.message || String(err));
+		} catch (err) {
+			return toolError(errorText(err));
 		}
 	}
 }
