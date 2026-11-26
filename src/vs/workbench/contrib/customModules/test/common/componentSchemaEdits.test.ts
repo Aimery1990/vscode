@@ -12,6 +12,7 @@ function structure(...ids: string[]): ICustomModule {
 	return {
 		id: 'freestyle',
 		name: 'Freestyle',
+		color: '#2dd4bf',
 		fields: [
 			{ id: 'title', label: 'Title', type: 'text', required: true },
 			...ids.map((id): ICustomField => id === 'description'
