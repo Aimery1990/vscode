@@ -73,9 +73,8 @@ registerAction2(OpenAccountPanelAction);
 registerAction2(SignInOrLogInAction);
 registerAction2(AccountPreferencesAction);
 
-// The plain `anyagent.signInOrLogIn` / `anyagent.accountPreferences` commands are registered
-// next to the dialogs in accountManagementDialog.ts so that they also exist in windows that do
-// not load this contribution (the global composite bar invokes them by id).
+// In the Agents (sessions) window, which does not load this contribution, the same command ids
+// are registered by accountManagementSessionsCommands.ts (imported only from sessions.common.main.ts).
 
 export class AccountManagementContribution extends Disposable implements IWorkbenchContribution {
 	static readonly ID = 'workbench.contrib.accountManagement';

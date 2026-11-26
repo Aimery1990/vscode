@@ -5,10 +5,10 @@
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { getActiveDocument } from '../../../../base/browser/dom.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
-import { CommandsRegistry, ICommandService } from '../../../../platform/commands/common/commands.js';
+import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IAuthenticationService } from '../../../services/authentication/common/authentication.js';
-import { IInstantiationService, ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
+import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { AccountSignInModal } from './accountSignInModal.js';
 import { ALIYUN_MODEL_STUDIO_REGIONS, ALIYUN_PROVIDER_ID, IAgentCredentialService, IAgentModelReference, isNonChatModelId, isOpenAICompatibleProvider } from '../../agentsManager/common/agentsManager.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
@@ -2536,16 +2536,3 @@ export class AccountManagementDialog extends Disposable {
 	}
 }
 
-// Commands used by the account menu of the global composite bar (vs/workbench/browser), which
-// cannot import this contrib directly. Registered here so they exist wherever the dialogs are loaded.
-CommandsRegistry.registerCommand('anyagent.signInOrLogIn', (accessor: ServicesAccessor) => {
-	const instantiationService = accessor.get(IInstantiationService);
-	const modal = instantiationService.createInstance(AccountSignInModal);
-	modal.show();
-});
-
-CommandsRegistry.registerCommand('anyagent.accountPreferences', (accessor: ServicesAccessor) => {
-	const instantiationService = accessor.get(IInstantiationService);
-	const dialog = instantiationService.createInstance(AccountManagementDialog);
-	dialog.show('Account');
-});
