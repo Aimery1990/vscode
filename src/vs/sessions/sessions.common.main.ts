@@ -495,7 +495,9 @@ import './contrib/automations/browser/automations.contribution.js';
 // the Agents window scenario data.
 import '../workbench/contrib/onboarding/browser/onboarding.contribution.js';
 import './contrib/onboardingTours/browser/onboardingTours.contribution.js';
-import './contrib/centeredChat/browser/centeredChat.contribution.js';
+// Account commands (`anyagent.signInOrLogIn` / `anyagent.accountPreferences`) used by the global composite bar
+import '../workbench/contrib/accountManagement/browser/accountManagementDialog.js';
+import '../workbench/contrib/centeredChat/browser/centeredChat.contribution.js';
 
 import './services/sessions/browser/sessionsManagementService.js';
 //#endregion

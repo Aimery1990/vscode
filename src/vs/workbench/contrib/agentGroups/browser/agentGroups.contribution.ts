@@ -1,21 +1,20 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { SyncDescriptor } from '../../../../platform/instantiation/common/descriptors.js';
 import { Registry } from '../../../../platform/registry/common/platform.js';
-import { IViewDescriptor, IViewsRegistry, Extensions as ViewContainerExtensions, WindowEnablement, ViewContainer, IViewContainersRegistry, ViewContainerLocation } from '../../../../workbench/common/views.js';
+import { IViewDescriptor, IViewsRegistry, Extensions as ViewContainerExtensions, WindowEnablement, ViewContainer, IViewContainersRegistry, ViewContainerLocation } from '../../../common/views.js';
 import { localize, localize2 } from '../../../../nls.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js';
-import { ViewPaneContainer } from '../../../../workbench/browser/parts/views/viewPaneContainer.js';
+import { ViewPaneContainer } from '../../../browser/parts/views/viewPaneContainer.js';
 import { AgentGroupsView, AgentGroupsViewId } from './agentGroupsView.js';
 import { KeyCode, KeyMod } from '../../../../base/common/keyCodes.js';
 import { Action2, MenuId, registerAction2 } from '../../../../platform/actions/common/actions.js';
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
 import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
-import { createOrEditAgentDialog } from '../../../../workbench/contrib/agentsManager/browser/agentEditorDialog.js';
+import { createOrEditAgentDialog } from '../../../contrib/agentsManager/browser/agentEditorDialog.js';
 
 const agentGroupsViewIcon = registerIcon('agent-groups-icon', Codicon.organization, localize('agentGroupsViewIcon', 'Icon for Agent Groups View'));
 const AGENT_GROUPS_VIEW_TITLE = localize2('agentGroups.view.label', "Agent Groups");

@@ -1,32 +1,33 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import './media/centeredChat.css';
-import { $, append, addDisposableListener } from '../../../../base/browser/dom.js';
+import { $, append, addDisposableListener, getWindow, isHTMLInputElement, isHTMLTextAreaElement } from '../../../../base/browser/dom.js';
+import { mainWindow } from '../../../../base/browser/window.js';
 import { Disposable, DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
-import { IWorkbenchLayoutService } from '../../../../workbench/services/layout/browser/layoutService.js';
-import { IAgentCredentialService, IAgentCredential, resolveDefaultModelId } from '../../../../workbench/contrib/agentsManager/common/agentsManager.js';
+import { IWorkbenchLayoutService } from '../../../services/layout/browser/layoutService.js';
+import { IAgentCredentialService, IAgentCredential, resolveDefaultModelId } from '../../../contrib/agentsManager/common/agentsManager.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
-import { AccountManagementDialog } from '../../../../workbench/contrib/accountManagement/browser/accountManagementDialog.js';
+import { AccountManagementDialog } from '../../../contrib/accountManagement/browser/accountManagementDialog.js';
 import { renderMarkdown } from '../../../../base/browser/markdownRenderer.js';
 import { MarkdownString } from '../../../../base/common/htmlContent.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { IRequestService } from '../../../../platform/request/common/request.js';
+import { IRequestContext } from '../../../../base/parts/request/common/request.js';
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 import { CancellationTokenSource } from '../../../../base/common/cancellation.js';
 import { listenStream } from '../../../../base/common/stream.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
-import { ILanguageModelToolsService } from '../../../../workbench/contrib/chat/common/tools/languageModelToolsService.js';
+import { ILanguageModelToolsService } from '../../../contrib/chat/common/tools/languageModelToolsService.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
-import { IVoiceModelService } from '../../../../workbench/contrib/voiceModels/common/voiceModel.js';
-import { IWorkspacesExplorerService } from '../../../../workbench/contrib/workspacesExplorer/common/workspacesExplorer.js';
-import { TicketDataEngine } from '../../../../workbench/contrib/workspacesExplorer/browser/tools/ticketDataEngine.js';
+import { IVoiceModelService } from '../../../contrib/voiceModels/common/voiceModel.js';
+import { IWorkspacesExplorerService } from '../../../contrib/workspacesExplorer/common/workspacesExplorer.js';
+import { TicketDataEngine } from '../../../contrib/workspacesExplorer/browser/tools/ticketDataEngine.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { URI } from '../../../../base/common/uri.js';
@@ -40,8 +41,23 @@ interface IAttachment {
 	duration?: number;
 }
 
+/** Returns the descendants of `root` (in document order) that satisfy `predicate`. */
+function findDescendants(root: Element, predicate: (el: Element) => boolean): Element[] {
+	const result: Element[] = [];
+	const visit = (parent: Element) => {
+		for (const child of Array.from(parent.children)) {
+			if (predicate(child)) {
+				result.push(child);
+			}
+			visit(child);
+		}
+	};
+	visit(root);
+	return result;
+}
+
 function getColorForName(name: string | undefined): string {
-	if (!name) return '#38bdf8';
+	if (!name) { return '#38bdf8'; }
 	const MODERN_PALETTE = [
 		'#38bdf8', // Light Blue
 		'#a78bfa', // Purple/Violet
@@ -133,6 +149,91 @@ export interface IChatSessionRecord {
 	messages: IChatMessageRecord[];
 }
 
+/** An object entry of a generic field option list. */
+interface IContextOptionObject {
+	value?: string;
+	id?: string;
+	name?: string;
+	label?: string;
+	title?: string;
+}
+
+/** An entry of a generic field option list: a plain value or an option object. */
+type ContextOption = IContextOptionObject | string | number | boolean | null | undefined;
+
+/** A node of the field hierarchy tree passed in by the entity / template editors. */
+export interface IContextHierarchyNode {
+	path: string;
+	label: string;
+	fieldType?: string;
+	currentValue?: string;
+	preInjectedPrompt?: string;
+	/** Field-type specific: status/priority names, agent objects, ticket objects or generic {@link ContextOption}s. */
+	options?: unknown[];
+	children?: IContextHierarchyNode[];
+}
+
+/** Context passed to {@link CenteredChatWidget.show} / {@link CenteredChatWidget.toggle}. */
+export interface ICenteredChatOpenContext {
+	prompt?: string;
+	workspaceId?: string;
+	ticketId?: string;
+	parentPath?: string;
+	field?: string;
+	label?: string;
+	fieldType?: string;
+	currentValue?: string;
+	preInjectedPrompt?: string;
+	options?: unknown[];
+	hierarchyTree?: IContextHierarchyNode[];
+	companionMode?: boolean;
+	companionPosition?: { left: number; top?: string; width: number; height: number };
+	entityUri?: string;
+	autoSend?: boolean;
+}
+
+interface IAnthropicTool {
+	name: string;
+	description: string;
+	input_schema: object;
+}
+
+interface IFunctionDeclaration {
+	name: string;
+	description: string;
+	parameters: object;
+}
+
+interface IOpenAITool {
+	type: 'function';
+	function: IFunctionDeclaration;
+}
+
+interface IGeminiToolGroup {
+	function_declarations: IFunctionDeclaration[];
+}
+
+interface ILlmChatMessage {
+	role: string;
+	content: unknown;
+	tool_calls?: unknown[];
+	tool_call_id?: string;
+}
+
+interface IOpenAIResponsesOutputItem {
+	type?: string;
+	content?: Array<{ text?: unknown }>;
+	call_id?: string;
+	id?: string;
+	name?: string;
+	arguments?: string;
+}
+
+interface IOpenAIResponsesResult {
+	output?: IOpenAIResponsesOutputItem[];
+	output_text?: unknown;
+}
+
 export interface IContextLocator {
 	workspaceId?: string;
 	ticketId?: string;
@@ -142,9 +243,10 @@ export interface IContextLocator {
 	fieldType?: string;
 	currentValue?: string;
 	preInjectedPrompt?: string;
-	options?: any[];
+	/** Field-type specific, see {@link IContextHierarchyNode.options}. */
+	options?: unknown[];
 	interactiveModifiedValue?: string;
-	hierarchyTree?: any[];
+	hierarchyTree?: IContextHierarchyNode[];
 	entityUri?: string;
 }
 
@@ -215,9 +317,9 @@ export class CenteredChatWidget extends Disposable {
 	private elementStartY = 0;
 
 	// Media recording fields
-	private mediaRecorder: any = undefined;
+	private mediaRecorder: MediaRecorder | undefined = undefined;
 	private audioChunks: Blob[] = [];
-	private recordingTimer: any = undefined;
+	private recordingTimer: number | undefined = undefined;
 	private recordingSeconds = 0;
 	private isRecording = false;
 	private isTranscribing = false;
@@ -261,22 +363,22 @@ export class CenteredChatWidget extends Disposable {
 
 	private activeBreadcrumbDropdown: HTMLElement | undefined;
 
-	private _findNodeByPath(nodes: any[] | undefined, targetPath: string): any {
-		if (!nodes || !targetPath) return undefined;
+	private _findNodeByPath(nodes: IContextHierarchyNode[] | undefined, targetPath: string): IContextHierarchyNode | undefined {
+		if (!nodes || !targetPath) { return undefined; }
 		for (const node of nodes) {
 			if (node.path === targetPath) {
 				return node;
 			}
 			if (node.children && node.children.length > 0) {
 				const found = this._findNodeByPath(node.children, targetPath);
-				if (found) return found;
+				if (found) { return found; }
 			}
 		}
 		return undefined;
 	}
 
-	private _getAncestors(nodes: any[] | undefined, targetPath: string, currentTrail: any[] = []): any[] | undefined {
-		if (!nodes || !targetPath) return undefined;
+	private _getAncestors(nodes: IContextHierarchyNode[] | undefined, targetPath: string, currentTrail: IContextHierarchyNode[] = []): IContextHierarchyNode[] | undefined {
+		if (!nodes || !targetPath) { return undefined; }
 		for (const node of nodes) {
 			const trail = [...currentTrail, node];
 			if (node.path === targetPath) {
@@ -284,7 +386,7 @@ export class CenteredChatWidget extends Disposable {
 			}
 			if (node.children && node.children.length > 0) {
 				const found = this._getAncestors(node.children, targetPath, trail);
-				if (found) return found;
+				if (found) { return found; }
 			}
 		}
 		return undefined;
@@ -296,8 +398,10 @@ export class CenteredChatWidget extends Disposable {
 		const trimmed = val.trim();
 		if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 			try {
-				const parsed = JSON.parse(trimmed);
-				if (parsed && typeof parsed === 'object' && ('userPrompt' in parsed || 'preInjectedPrompt' in parsed || 'targetMode' in parsed)) {
+				const parsed: { userPrompt?: unknown; preInjectedPrompt?: unknown; targetMode?: unknown } | null = JSON.parse(trimmed);
+				// JSON.parse never yields `undefined` values or these keys on the prototype chain, so
+				// `!== undefined` is equivalent to an `in` check here.
+				if (parsed && typeof parsed === 'object' && (parsed.userPrompt !== undefined || parsed.preInjectedPrompt !== undefined || parsed.targetMode !== undefined)) {
 					if (typeof parsed.preInjectedPrompt === 'string' && parsed.preInjectedPrompt && !pre) {
 						pre = parsed.preInjectedPrompt;
 					}
@@ -315,7 +419,7 @@ export class CenteredChatWidget extends Disposable {
 		return { cleanValue: val, preInjectedPrompt: pre };
 	}
 
-	private _sanitizeHierarchyNodes(nodes: any[] | undefined): void {
+	private _sanitizeHierarchyNodes(nodes: IContextHierarchyNode[] | undefined): void {
 		if (!Array.isArray(nodes)) {
 			return;
 		}
@@ -337,7 +441,7 @@ export class CenteredChatWidget extends Disposable {
 	}
 
 	public drillDownTo(targetPath: string): void {
-		if (!this.activeContextLocator) return;
+		if (!this.activeContextLocator) { return; }
 		const tree = this.activeContextLocator.hierarchyTree;
 		const node = this._findNodeByPath(tree, targetPath);
 		if (node) {
@@ -354,7 +458,7 @@ export class CenteredChatWidget extends Disposable {
 		this.setContextLocator(this.activeContextLocator);
 	}
 
-	private toggleBreadcrumbDropdown(ancNode: any, anchorEl: HTMLElement): void {
+	private toggleBreadcrumbDropdown(ancNode: IContextHierarchyNode, anchorEl: HTMLElement): void {
 		if (this.activeBreadcrumbDropdown) {
 			try {
 				this.activeBreadcrumbDropdown.remove();
@@ -363,9 +467,10 @@ export class CenteredChatWidget extends Disposable {
 			return;
 		}
 
-		if (!ancNode || !ancNode.children || ancNode.children.length === 0) return;
+		if (!ancNode || !ancNode.children || ancNode.children.length === 0) { return; }
 
-		const menu = append(document.body, $('.context-breadcrumb-dropdown'));
+		const targetDocument = anchorEl.ownerDocument;
+		const menu = append(targetDocument.body, $('.context-breadcrumb-dropdown'));
 		menu.style.position = 'fixed';
 		menu.style.zIndex = '100002';
 		menu.style.background = '#1e1e1e';
@@ -382,7 +487,7 @@ export class CenteredChatWidget extends Disposable {
 		menu.style.top = `${rect.bottom + 4}px`;
 		menu.style.left = `${rect.left}px`;
 
-		ancNode.children.forEach((child: any) => {
+		ancNode.children.forEach(child => {
 			const item = append(menu, $('.dropdown-item'));
 			item.style.padding = '5px 8px';
 			item.style.borderRadius = '3px';
@@ -445,11 +550,11 @@ export class CenteredChatWidget extends Disposable {
 					menu.remove();
 				} catch { }
 				this.activeBreadcrumbDropdown = undefined;
-				document.removeEventListener('click', closeListener);
+				targetDocument.removeEventListener('click', closeListener);
 			}
 		};
 		setTimeout(() => {
-			document.addEventListener('click', closeListener);
+			targetDocument.addEventListener('click', closeListener);
 		}, 10);
 		this.activeBreadcrumbDropdown = menu;
 	}
@@ -514,7 +619,7 @@ export class CenteredChatWidget extends Disposable {
 
 		if (locator.ticketId) {
 			if (locator.workspaceId) {
-				append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '›'));
+				append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '\u203A'));
 			}
 			const tChip = append(chipsRow, $('.context-chip'));
 			tChip.style.display = 'inline-flex';
@@ -531,7 +636,7 @@ export class CenteredChatWidget extends Disposable {
 		}
 
 		if (locator.field && (locator.field.startsWith('/Action') || locator.field.startsWith('/Trash') || locator.field.startsWith('/Remove'))) {
-			append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '›'));
+			append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '\u203A'));
 			const actChip = append(chipsRow, $('.context-chip'));
 			actChip.style.display = 'inline-flex';
 			actChip.style.alignItems = 'center';
@@ -554,7 +659,7 @@ export class CenteredChatWidget extends Disposable {
 
 		if (ancestors.length > 0) {
 			ancestors.forEach((ancNode, idx) => {
-				append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '›'));
+				append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '\u203A'));
 
 				const isLeaf = (idx === ancestors.length - 1);
 				const chip = append(chipsRow, $('.context-chip'));
@@ -594,7 +699,7 @@ export class CenteredChatWidget extends Disposable {
 			});
 		} else if (locator.field) {
 			if (locator.ticketId || locator.workspaceId) {
-				append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '›'));
+				append(chipsRow, $('span', { style: 'font-size: 10px; opacity: 0.4;' }, '\u203A'));
 			}
 			const fChip = append(chipsRow, $('.context-chip'));
 			fChip.style.display = 'inline-flex';
@@ -653,7 +758,7 @@ export class CenteredChatWidget extends Disposable {
 			labelEl.style.color = '#a78bfa';
 			labelEl.textContent = `EXPLORE ${activeNode.label || 'PROPERTIES'} (CLICK TO DRILL DOWN):`;
 
-			const firstChildWithChildren = activeNode.children.find((c: any) => c.children && c.children.length > 0);
+			const firstChildWithChildren = activeNode.children.find(c => c.children && c.children.length > 0);
 			if (firstChildWithChildren && firstChildWithChildren.children) {
 				const schemaBar = append(containerBox, $('div'));
 				schemaBar.style.display = 'flex';
@@ -667,7 +772,7 @@ export class CenteredChatWidget extends Disposable {
 				schemaBar.style.marginTop = '2px';
 
 				append(schemaBar, $('span', { style: 'font-size: 9px; font-weight: 700; color: #a78bfa; text-transform: uppercase;' }, 'UNDERLYING SCHEMA:'));
-				firstChildWithChildren.children.forEach((sf: any) => {
+				firstChildWithChildren.children.forEach(sf => {
 					append(schemaBar, $('span', {
 						style: 'font-size: 9.5px; padding: 1px 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.06); color: #e2e8f0; font-family: monospace;'
 					}, `${sf.label}${sf.fieldType ? ` (${sf.fieldType})` : ''}`));
@@ -680,7 +785,7 @@ export class CenteredChatWidget extends Disposable {
 			grid.style.gap = '6px';
 			grid.style.marginTop = '2px';
 
-			activeNode.children.forEach((child: any) => {
+			activeNode.children.forEach(child => {
 				const card = append(grid, $('.sub-property-pill'));
 				card.style.display = 'inline-flex';
 				card.style.alignItems = 'center';
@@ -724,7 +829,7 @@ export class CenteredChatWidget extends Disposable {
 					const countBadge = append(card, $('span'));
 					countBadge.style.fontSize = '9.5px';
 					countBadge.style.opacity = '0.6';
-					countBadge.textContent = `${child.children.length} items ›`;
+					countBadge.textContent = `${child.children.length} items \u203A`;
 				}
 
 				card.onmouseenter = () => {
@@ -746,7 +851,7 @@ export class CenteredChatWidget extends Disposable {
 			hintEl.style.fontSize = '9.5px';
 			hintEl.style.opacity = '0.55';
 			hintEl.style.marginTop = '4px';
-			hintEl.textContent = '✦ Click an item above to drill down into specific fields, or type/speak below to instruct the AI agent to modify or add items.';
+			hintEl.textContent = '\u2726 Click an item above to drill down into specific fields, or type/speak below to instruct the AI agent to modify or add items.';
 		} else if (locator.field && !locator.field.startsWith('/Create') && !locator.field.startsWith('/Action') && !locator.field.startsWith('/Trash') && !locator.field.startsWith('/Remove')) {
 			// Leaf Field Editor Mode
 			const editorBox = append(this.contextLocatorContainer, $('.context-interactive-editor-box'));
@@ -972,14 +1077,14 @@ export class CenteredChatWidget extends Disposable {
 				const select = append(editorBox, $('select.monaco-select-box', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
 				})) as HTMLSelectElement;
-				const statuses = (locator.options && Array.isArray(locator.options) && locator.options.length > 0)
+				const statuses = ((locator.options && Array.isArray(locator.options) && locator.options.length > 0)
 					? locator.options
 					: ((activeNode && activeNode.options && activeNode.options.length > 0)
 						? activeNode.options
-						: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed']);
+						: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'])) as string[];
 				statuses.forEach((st: string) => {
 					const opt = append(select, $('option', { value: st }, st)) as HTMLOptionElement;
-					if (st.toLowerCase() === currentVal.toLowerCase()) opt.selected = true;
+					if (st.toLowerCase() === currentVal.toLowerCase()) { opt.selected = true; }
 				});
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
 				select.onkeydown = (e) => {
@@ -993,14 +1098,14 @@ export class CenteredChatWidget extends Disposable {
 				const select = append(editorBox, $('select.monaco-select-box', {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
 				})) as HTMLSelectElement;
-				const priorities = (locator.options && Array.isArray(locator.options) && locator.options.length > 0)
+				const priorities = ((locator.options && Array.isArray(locator.options) && locator.options.length > 0)
 					? locator.options
 					: ((activeNode && activeNode.options && activeNode.options.length > 0)
 						? activeNode.options
-						: ['Very High', 'High', 'Medium', 'Low', 'Very Low']);
+						: ['Very High', 'High', 'Medium', 'Low', 'Very Low'])) as string[];
 				priorities.forEach((pr: string) => {
 					const opt = append(select, $('option', { value: pr }, pr)) as HTMLOptionElement;
-					if (pr.toLowerCase() === currentVal.toLowerCase()) opt.selected = true;
+					if (pr.toLowerCase() === currentVal.toLowerCase()) { opt.selected = true; }
 				});
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
 				select.onkeydown = (e) => {
@@ -1015,11 +1120,11 @@ export class CenteredChatWidget extends Disposable {
 					style: 'width: 100%; padding: 4px 8px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.35); color: #fff; cursor: pointer; box-sizing: border-box;'
 				})) as HTMLSelectElement;
 				append(select, $('option', { value: '' }, 'None (Unassigned)'));
-				const optionsList = locator.options || (activeNode ? activeNode.options : []);
+				const optionsList = (locator.options || (activeNode ? activeNode.options : [])) as Array<{ id: string; name?: string }> | undefined;
 				if (optionsList && Array.isArray(optionsList)) {
 					optionsList.forEach(ag => {
 						const opt = append(select, $('option', { value: ag.id || ag.name }, ag.name || ag.id)) as HTMLOptionElement;
-						if (!isNoneOrUnassigned && (ag.id === currentVal || ag.name === currentVal)) opt.selected = true;
+						if (!isNoneOrUnassigned && (ag.id === currentVal || ag.name === currentVal)) { opt.selected = true; }
 					});
 				}
 				select.onchange = () => { locator.interactiveModifiedValue = select.value; };
@@ -1042,7 +1147,7 @@ export class CenteredChatWidget extends Disposable {
 				const selectedSet = new Set<string>(rawVals);
 
 				const allTickets: Array<{ id: string; code?: string; title?: string; summary?: string; type?: string; workspaceName?: string }> =
-					(locator.options && Array.isArray(locator.options)) ? locator.options : (activeNode && activeNode.options ? activeNode.options : []);
+					((locator.options && Array.isArray(locator.options)) ? locator.options : (activeNode && activeNode.options ? activeNode.options : [])) as Array<{ id: string; code?: string; title?: string; summary?: string; type?: string; workspaceName?: string }>;
 
 				let isChecklistExpanded = true;
 
@@ -1213,7 +1318,7 @@ export class CenteredChatWidget extends Disposable {
 					checklistContainer.textContent = '';
 					const q = query.trim().toLowerCase();
 					const filtered = allTickets.filter(t => {
-						if (!q) return true;
+						if (!q) { return true; }
 						return (t.id && t.id.toLowerCase().includes(q)) ||
 							(t.code && t.code.toLowerCase().includes(q)) ||
 							(t.title && t.title.toLowerCase().includes(q)) ||
@@ -1292,17 +1397,17 @@ export class CenteredChatWidget extends Disposable {
 						}
 
 						row.onmouseenter = () => {
-							if (!isSelected) row.style.background = 'rgba(255, 255, 255, 0.05)';
+							if (!isSelected) { row.style.background = 'rgba(255, 255, 255, 0.05)'; }
 						};
 						row.onmouseleave = () => {
-							if (!isSelected) row.style.background = 'transparent';
+							if (!isSelected) { row.style.background = 'transparent'; }
 						};
 
 						const toggle = () => {
 							const key = ticket.id;
 							if (selectedSet.has(key)) {
 								selectedSet.delete(key);
-								if (ticket.code) selectedSet.delete(ticket.code);
+								if (ticket.code) { selectedSet.delete(ticket.code); }
 							} else {
 								selectedSet.add(key);
 							}
@@ -1311,7 +1416,7 @@ export class CenteredChatWidget extends Disposable {
 
 						checkbox.onchange = toggle;
 						row.onclick = (e) => {
-							if (e.target !== checkbox) toggle();
+							if (e.target !== checkbox) { toggle(); }
 						};
 					});
 				};
@@ -1330,7 +1435,7 @@ export class CenteredChatWidget extends Disposable {
 				append(roBox, $('span', { style: 'font-family: monospace;' }, currentVal));
 				append(roBox, $('span', { style: 'font-size: 10px; opacity: 0.5; font-style: italic;' }, 'Read-only (Managed by linking tickets)'));
 			} else if (fType === 'switch' || fType === 'boolean') {
-				let isChecked = String(currentVal).toLowerCase() === 'true' || currentVal === true || String(currentVal).toLowerCase() === 'yes' || String(currentVal).toLowerCase() === '1';
+				let isChecked = String(currentVal).toLowerCase() === 'true' || (currentVal as string | boolean) === true || String(currentVal).toLowerCase() === 'yes' || String(currentVal).toLowerCase() === '1';
 				locator.interactiveModifiedValue = isChecked ? 'true' : 'false';
 
 				const switchWrapper = append(editorBox, $('div.switch-interactive-control', {
@@ -1382,11 +1487,11 @@ export class CenteredChatWidget extends Disposable {
 					style: 'width: 100%; padding: 6px 10px; font-size: 12px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.45); color: #fff; cursor: pointer; box-sizing: border-box; outline: none;'
 				})) as HTMLSelectElement;
 
-				const optionsList = (locator.options && Array.isArray(locator.options) && locator.options.length > 0)
+				const optionsList = ((locator.options && Array.isArray(locator.options) && locator.options.length > 0)
 					? locator.options
 					: ((activeNode && activeNode.options && activeNode.options.length > 0)
 						? activeNode.options
-						: []);
+						: [])) as ContextOption[];
 
 				if (!currentVal || currentVal === 'None' || currentVal === 'Unassigned') {
 					const defOpt = append(select, $('option', { value: '' }, '-- Select an option --')) as HTMLOptionElement;
@@ -1431,7 +1536,7 @@ export class CenteredChatWidget extends Disposable {
 					if (tr.startsWith('[')) {
 						try {
 							const parsed = JSON.parse(tr);
-							if (Array.isArray(parsed)) initialArr = parsed.map((s: any) => String(s).trim());
+							if (Array.isArray(parsed)) { initialArr = parsed.map((s: unknown) => String(s).trim()); }
 						} catch { }
 					} else if (tr && tr !== 'None' && tr !== 'null' && tr !== 'undefined') {
 						initialArr = tr.split(/[,;\n]+/).map(s => s.trim()).filter(Boolean);
@@ -1439,13 +1544,13 @@ export class CenteredChatWidget extends Disposable {
 				}
 				const selectedSet = new Set<string>(initialArr);
 
-				const rawOptions = (locator.options && Array.isArray(locator.options) && locator.options.length > 0)
+				const rawOptions = ((locator.options && Array.isArray(locator.options) && locator.options.length > 0)
 					? locator.options
 					: ((activeNode && activeNode.options && activeNode.options.length > 0)
 						? activeNode.options
-						: []);
+						: [])) as ContextOption[];
 
-				const optionStrings: string[] = rawOptions.map((o: any) => typeof o === 'object' && o ? (o.value || o.name || o.label || String(o)) : String(o));
+				const optionStrings: string[] = rawOptions.map(o => typeof o === 'object' && o ? (o.value || o.name || o.label || String(o)) : String(o));
 				selectedSet.forEach(item => {
 					if (!optionStrings.includes(item)) {
 						optionStrings.push(item);
@@ -1492,10 +1597,10 @@ export class CenteredChatWidget extends Disposable {
 
 						chip.onmouseenter = () => {
 							chip.style.opacity = '1';
-							if (!isSelected) chip.style.background = 'rgba(255, 255, 255, 0.09)';
+							if (!isSelected) { chip.style.background = 'rgba(255, 255, 255, 0.09)'; }
 						};
 						chip.onmouseleave = () => {
-							if (!isSelected) chip.style.background = 'rgba(255, 255, 255, 0.05)';
+							if (!isSelected) { chip.style.background = 'rgba(255, 255, 255, 0.05)'; }
 						};
 						chip.onclick = (e) => {
 							e.preventDefault();
@@ -1522,7 +1627,7 @@ export class CenteredChatWidget extends Disposable {
 						try {
 							const parsed = JSON.parse(currentVal);
 							if (Array.isArray(parsed)) {
-								existingFiles = parsed.map((item: any) => ({
+								existingFiles = parsed.map((item: { name?: string; size?: unknown }) => ({
 									name: item.name || String(item),
 									size: typeof item.size === 'number' ? item.size : undefined
 								}));
@@ -1537,9 +1642,9 @@ export class CenteredChatWidget extends Disposable {
 				const stagedNewFiles: Array<{ name: string; size?: number; sourceUri?: URI }> = [];
 
 				const formatSize = (size?: number): string => {
-					if (!size || size <= 0) return '';
-					if (size < 1024) return `${size} B`;
-					if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+					if (!size || size <= 0) { return ''; }
+					if (size < 1024) { return `${size} B`; }
+					if (size < 1024 * 1024) { return `${(size / 1024).toFixed(1)} KB`; }
 					return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 				};
 
@@ -1716,7 +1821,7 @@ export class CenteredChatWidget extends Disposable {
 							undoBtn.style.borderRadius = '2px';
 							undoBtn.style.background = 'rgba(56, 189, 248, 0.1)';
 							undoBtn.style.marginLeft = '2px';
-							undoBtn.textContent = '↺ Undo';
+							undoBtn.textContent = '\u21BA Undo';
 							undoBtn.title = 'Restore attachment';
 							undoBtn.onclick = (e) => {
 								e.stopPropagation();
@@ -1756,7 +1861,7 @@ export class CenteredChatWidget extends Disposable {
 							removeBtn.style.background = 'rgba(239, 68, 68, 0.1)';
 							removeBtn.style.border = '1px solid rgba(239, 68, 68, 0.25)';
 							removeBtn.style.marginLeft = '4px';
-							removeBtn.textContent = '✕ Remove';
+							removeBtn.textContent = '\u2715 Remove';
 							removeBtn.title = 'Mark for deletion with AI';
 							removeBtn.onclick = (e) => {
 								e.stopPropagation();
@@ -1820,7 +1925,7 @@ export class CenteredChatWidget extends Disposable {
 						cancelBtn.style.cursor = 'pointer';
 						cancelBtn.style.opacity = '0.7';
 						cancelBtn.style.marginLeft = '3px';
-						cancelBtn.textContent = '✕';
+						cancelBtn.textContent = '\u2715';
 						cancelBtn.title = 'Cancel staged addition';
 						cancelBtn.onclick = (e) => {
 							e.stopPropagation();
@@ -1868,11 +1973,11 @@ export class CenteredChatWidget extends Disposable {
 					const hint = append(diffBanner, $('div'));
 					hint.style.fontSize = '9px';
 					hint.style.opacity = '0.6';
-					hint.textContent = '✦ Press Enter or Send below to instruct the AI agent to apply these changes.';
+					hint.textContent = '\u2726 Press Enter or Send below to instruct the AI agent to apply these changes.';
 				};
 
 				const processIncomingFiles = async (items: Array<{ uri: URI; name: string }>) => {
-					if (!items || items.length === 0) return;
+					if (!items || items.length === 0) { return; }
 					try {
 						let targetAttachmentsDir: URI | undefined = undefined;
 						if (!locator.entityUri && (locator.workspaceId || locator.ticketId)) {
@@ -1966,7 +2071,7 @@ export class CenteredChatWidget extends Disposable {
 						const items: Array<{ uri: URI; name: string }> = [];
 						for (let i = 0; i < e.dataTransfer.files.length; i++) {
 							const f = e.dataTransfer.files[i];
-							const filePath = (f as any).path;
+							const filePath = (f as File & { path?: string }).path;
 							if (filePath) {
 								items.push({
 									uri: URI.file(filePath),
@@ -2019,7 +2124,7 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public show(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; parentPath?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; preInjectedPrompt?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string; autoSend?: boolean }): void {
+	public show(initialContext?: ICenteredChatOpenContext): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
@@ -2143,7 +2248,7 @@ export class CenteredChatWidget extends Disposable {
 		// Track active editable element & caret position for speech-to-text dictation
 		const updateActiveEditable = (e: Event) => {
 			const target = e.target;
-			if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) {
+			if (isHTMLInputElement(target) || isHTMLTextAreaElement(target)) {
 				this.recordLastActiveEditable(target);
 			}
 		};
@@ -2237,7 +2342,7 @@ export class CenteredChatWidget extends Disposable {
 		this.modelListContainer = append(this.modelDropdown, $('.centered-chat-model-list-container'));
 
 		// Close dropdown on click outside
-		this.viewDisposables.add(addDisposableListener(document, 'click', (e: MouseEvent) => {
+		this.viewDisposables.add(addDisposableListener(this.element.ownerDocument, 'click', (e: MouseEvent) => {
 			if (this.isModelDropdownOpen && !modelPickerWrapper.contains(e.target as Node)) {
 				this.closeModelDropdown();
 			}
@@ -2379,7 +2484,7 @@ export class CenteredChatWidget extends Disposable {
 		}
 	}
 
-	public toggle(initialContext?: { prompt?: string; workspaceId?: string; ticketId?: string; parentPath?: string; field?: string; label?: string; fieldType?: string; currentValue?: string; preInjectedPrompt?: string; options?: any[]; hierarchyTree?: any[]; companionMode?: boolean; companionPosition?: { left: number; top?: string; width: number; height: number }; entityUri?: string; autoSend?: boolean }): void {
+	public toggle(initialContext?: ICenteredChatOpenContext): void {
 		if (this.element) {
 			if (initialContext) {
 				if (initialContext.workspaceId || initialContext.ticketId || initialContext.field) {
@@ -2565,7 +2670,7 @@ export class CenteredChatWidget extends Disposable {
 			}
 		};
 		doScroll();
-		requestAnimationFrame(() => {
+		getWindow(this.messagesContainer).requestAnimationFrame(() => {
 			doScroll();
 			setTimeout(doScroll, 50);
 			setTimeout(doScroll, 150);
@@ -2690,14 +2795,15 @@ export class CenteredChatWidget extends Disposable {
 			this.notificationService.info('Copied to clipboard');
 		} catch (err) {
 			try {
-				const ta = document.createElement('textarea');
+				const targetDocument = mainWindow.document;
+				const ta = targetDocument.createElement('textarea');
 				ta.value = text;
 				ta.style.position = 'fixed';
 				ta.style.opacity = '0';
-				document.body.appendChild(ta);
+				targetDocument.body.appendChild(ta);
 				ta.focus();
 				ta.select();
-				document.execCommand('copy');
+				targetDocument.execCommand('copy');
 				ta.remove();
 				if (labelSpan) {
 					labelSpan.textContent = '✓ Copied!';
@@ -2723,8 +2829,9 @@ export class CenteredChatWidget extends Disposable {
 		}
 
 		if (companionMode) {
-			const vw = window.innerWidth;
-			const vh = window.innerHeight;
+			const targetWindow = getWindow(this.element);
+			const vw = targetWindow.innerWidth;
+			const vh = targetWindow.innerHeight;
 			const gap = 12;
 			const maxPairWidth = Math.min(1340, vw - 32);
 			const leftW = Math.floor((maxPairWidth - gap) * 0.52);
@@ -2990,7 +3097,7 @@ export class CenteredChatWidget extends Disposable {
 		bold1.textContent = 'Agent Central';
 		content.appendChild(document.createTextNode('!'));
 		append(content, $('br'));
-		content.appendChild(document.createTextNode("I'm your workspace AI assistant. Select any configured Provider and Model from the toolbar below to start real streaming chat and code operations."));
+		content.appendChild(document.createTextNode('I\'m your workspace AI assistant. Select any configured Provider and Model from the toolbar below to start real streaming chat and code operations.'));
 
 		const time = append(welcomeMsg, $('.centered-chat-msg-time'));
 		time.textContent = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -2998,7 +3105,8 @@ export class CenteredChatWidget extends Disposable {
 
 	private setupDragging(header: HTMLElement): void {
 		this.viewDisposables.add(addDisposableListener(header, 'mousedown', (e: MouseEvent) => {
-			if (e.target instanceof HTMLSelectElement || e.target instanceof HTMLOptionElement || (e.target as HTMLElement).closest('.centered-chat-model-picker-wrapper')) {
+			const targetWindow = getWindow(header);
+			if (e.target instanceof targetWindow.HTMLSelectElement || e.target instanceof targetWindow.HTMLOptionElement || (e.target as HTMLElement).closest('.centered-chat-model-picker-wrapper')) {
 				return;
 			}
 			this.isDragging = true;
@@ -3028,12 +3136,12 @@ export class CenteredChatWidget extends Disposable {
 
 			const onMouseUp = () => {
 				this.isDragging = false;
-				window.removeEventListener('mousemove', onMouseMove);
-				window.removeEventListener('mouseup', onMouseUp);
+				targetWindow.removeEventListener('mousemove', onMouseMove);
+				targetWindow.removeEventListener('mouseup', onMouseUp);
 			};
 
-			window.addEventListener('mousemove', onMouseMove);
-			window.addEventListener('mouseup', onMouseUp);
+			targetWindow.addEventListener('mousemove', onMouseMove);
+			targetWindow.addEventListener('mouseup', onMouseUp);
 		}));
 	}
 
@@ -3193,7 +3301,7 @@ Always explain the result clearly to the user once tool execution completes.`;
 			for (const w of workspaces) {
 				const codeStr = w.code ? ` (Code: ${w.code})` : '';
 				const activeStr = w.isCurrent ? ' [CURRENT ACTIVE WORKSPACE]' : '';
-				let block = `📁 Workspace "${w.name}"${codeStr}${activeStr}`;
+				let block = `\uD83D\uDCC1 Workspace "${w.name}"${codeStr}${activeStr}`;
 
 				try {
 					// Render ultra-compact ASCII skeleton tree
@@ -3218,12 +3326,12 @@ Always explain the result clearly to the user once tool execution completes.`;
 							activeWorkspaceId.toUpperCase() === gw.code.replace('-0000', '') ||
 							(activeTicketId && activeTicketId.toUpperCase().startsWith(gw.code.replace('-0000', '') + '-'));
 						const activeStr = isFocusWs ? ' [CURRENT ACTIVE GLOBAL WORKSPACE]' : '';
-						let block = `🌐 Global Workspace "${gw.name}" (Code: ${gw.code}, Path: ${gw.uri.fsPath})${activeStr}`;
+						let block = `\uD83C\uDF10 Global Workspace "${gw.name}" (Code: ${gw.code}, Path: ${gw.uri.fsPath})${activeStr}`;
 						const treeView = await this.ticketDataEngine.buildCompactWorkspaceTree(gw.uri, activeTicketId, 2);
 						block += `\n${treeView}`;
 						wsBlocks.push(block);
 					}
-				} catch {}
+				} catch { }
 			}
 
 			if (wsBlocks.length > 0) {
@@ -3270,7 +3378,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 
 		const apiKey = await this.agentCredentialService.getApiKey(cred.id);
 		if (!apiKey && cred.providerId !== 'ollama' && cred.providerId !== 'custom') {
-			this.notificationService.error(`No API Key configured for ${cred.providerId}. Please open Settings (⚙️) to set API key.`);
+			this.notificationService.error(`No API Key configured for ${cred.providerId}. Please open Settings (\u2699️) to set API key.`);
 			return;
 		}
 
@@ -3290,10 +3398,10 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			displayText = this.activeContextLocator?.label || text;
 			if (this.activeContextLocator) {
 				const parts: string[] = [];
-				if (this.activeContextLocator.workspaceId) parts.push(this.activeContextLocator.workspaceId);
-				if (this.activeContextLocator.ticketId) parts.push(this.activeContextLocator.ticketId);
-				if (this.activeContextLocator.label) parts.push(this.activeContextLocator.label);
-				locatorSummary = parts.join(' › ');
+				if (this.activeContextLocator.workspaceId) { parts.push(this.activeContextLocator.workspaceId); }
+				if (this.activeContextLocator.ticketId) { parts.push(this.activeContextLocator.ticketId); }
+				if (this.activeContextLocator.label) { parts.push(this.activeContextLocator.label); }
+				locatorSummary = parts.join(' \u203A ');
 				const ctxTag = append(userMsg, $('.centered-chat-msg-context-tag'));
 				ctxTag.style.display = 'inline-flex';
 				ctxTag.style.alignItems = 'center';
@@ -3320,7 +3428,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 					if (typeof loc.currentValue === 'string' && loc.currentValue.trim().startsWith('[')) {
 						try {
 							const parsed = JSON.parse(loc.currentValue);
-							if (Array.isArray(parsed)) origNames = parsed.map((p: any) => p.name || String(p));
+							if (Array.isArray(parsed)) { origNames = parsed.map((p: unknown) => (p as { name?: string }).name || String(p)); }
 						} catch { }
 					} else {
 						origNames = [String(loc.currentValue).trim()];
@@ -3330,14 +3438,14 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 				if (loc.interactiveModifiedValue) {
 					try {
 						const parsed = JSON.parse(loc.interactiveModifiedValue);
-						if (Array.isArray(parsed)) propNames = parsed.map((p: any) => p.name || String(p));
+						if (Array.isArray(parsed)) { propNames = parsed.map((p: unknown) => (p as { name?: string }).name || String(p)); }
 					} catch { }
 				}
 				const added = propNames.filter(n => !origNames.includes(n));
 				const removed = origNames.filter(n => !propNames.includes(n));
 				const diffParts: string[] = [];
-				if (added.length > 0) diffParts.push(`+Added: [${added.join(', ')}]`);
-				if (removed.length > 0) diffParts.push(`-Removed: [${removed.join(', ')}]`);
+				if (added.length > 0) { diffParts.push(`+Added: [${added.join(', ')}]`); }
+				if (removed.length > 0) { diffParts.push(`-Removed: [${removed.join(', ')}]`); }
 				const diffActionStr = diffParts.join(', ');
 
 				if (diffActionStr) {
@@ -3370,7 +3478,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 				if (diffActionStr) {
 					parts.push(diffActionStr);
 				}
-				locatorSummary = parts.join(' › ');
+				locatorSummary = parts.join(' \u203A ');
 				ctxTag.textContent = locatorSummary;
 
 				this.setContextLocator(null);
@@ -3380,12 +3488,12 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 					hiddenPreInjected = String(targetNode.preInjectedPrompt).trim();
 				}
 				if (targetNode && targetNode.children && targetNode.children.length > 0) {
-					const firstWithSub = targetNode.children.find((c: any) => c.children && c.children.length > 0);
+					const firstWithSub = targetNode.children.find(c => c.children && c.children.length > 0);
 					if (firstWithSub && firstWithSub.children) {
-						const subFieldSpecs = firstWithSub.children.map((f: any) => `${f.label} (${f.fieldType || 'text'})`);
+						const subFieldSpecs = firstWithSub.children.map(f => `${f.label} (${f.fieldType || 'text'})`);
 						locators.push(`Schema: [${subFieldSpecs.join(', ')}]`);
 					} else if (targetNode.fieldType === 'composite') {
-						const subFieldSpecs = targetNode.children.map((f: any) => `${f.label} (${f.fieldType || 'text'})`);
+						const subFieldSpecs = targetNode.children.map(f => `${f.label} (${f.fieldType || 'text'})`);
 						locators.push(`Item Fields: [${subFieldSpecs.join(', ')}]`);
 					}
 				}
@@ -3425,7 +3533,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 				if (formattedDisplayVal.startsWith('[') && formattedDisplayVal.endsWith(']')) {
 					try {
 						const parsed = JSON.parse(formattedDisplayVal);
-						if (Array.isArray(parsed)) formattedDisplayVal = parsed.join(', ');
+						if (Array.isArray(parsed)) { formattedDisplayVal = parsed.join(', '); }
 					} catch { }
 				}
 
@@ -3468,12 +3576,12 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 					if (tagVal.startsWith('[') && tagVal.endsWith(']')) {
 						try {
 							const parsed = JSON.parse(tagVal);
-							if (Array.isArray(parsed)) tagVal = parsed.join(', ');
+							if (Array.isArray(parsed)) { tagVal = parsed.join(', '); }
 						} catch { }
 					}
 					parts.push(`-> ${tagVal}`);
 				}
-				locatorSummary = parts.join(' › ');
+				locatorSummary = parts.join(' \u203A ');
 				ctxTag.textContent = locatorSummary;
 
 				// Clear locator for subsequent messages
@@ -3507,7 +3615,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 
 		const summary = append(promptInspector, document.createElement('summary'));
 		summary.className = 'centered-chat-prompt-summary';
-		summary.textContent = '🔍 View Injected System Prompt & Tools (Full Trace)';
+		summary.textContent = '\uD83D\uDD0D View Injected System Prompt & Tools (Full Trace)';
 
 		const promptBody = append(promptInspector, $('.centered-chat-prompt-body'));
 
@@ -3523,7 +3631,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		payloadPre.textContent = llmPayloadPrompt;
 
 		const copyFullPromptBtn = append(promptBody, $('button.centered-chat-copy-full-prompt-btn'));
-		copyFullPromptBtn.textContent = '📋 Copy Complete Prompt & System Context';
+		copyFullPromptBtn.textContent = '\uD83D\uDCCB Copy Complete Prompt & System Context';
 		copyFullPromptBtn.onclick = (e) => {
 			e.stopPropagation();
 			const fullTraceText = `=== SYSTEM PROMPT ===\n${dynamicSystemPrompt}\n\n=== USER PAYLOAD ===\n${llmPayloadPrompt}`;
@@ -3592,12 +3700,12 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 
 		const aiContent = append(aiMsg, $('.centered-chat-ai-markdown-content'));
 		const typingCursor = append(aiContent, $('span.centered-chat-typing-cursor'));
-		typingCursor.textContent = '▊';
+		typingCursor.textContent = '\u258A';
 
 		let fullResponseText = '';
 		let animationFrameId: number | null = null;
 		let isUserScrolledUp = false;
-		let streamRenderDisposable: IDisposable | null = null;
+		let streamRenderDisposable = null as IDisposable | null;
 
 		const scrollHandler = () => {
 			if (!this.messagesContainer) { return; }
@@ -3638,7 +3746,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		const onToken = (delta: string) => {
 			fullResponseText += delta;
 			if (!animationFrameId) {
-				animationFrameId = requestAnimationFrame(() => flushRender(false));
+				animationFrameId = mainWindow.requestAnimationFrame(() => flushRender(false));
 			}
 		};
 
@@ -3652,7 +3760,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 				cancellationTokenSource: this.activeCts,
 				onToken
 			});
-		} catch (err: any) {
+		} catch (err) {
 			if (this.activeCts.token.isCancellationRequested) {
 				fullResponseText += '\n\n*(Generation stopped by user)*';
 			} else {
@@ -3661,11 +3769,11 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			}
 		} finally {
 			if (animationFrameId) {
-				cancelAnimationFrame(animationFrameId);
+				mainWindow.cancelAnimationFrame(animationFrameId);
 				animationFrameId = null;
 			}
 			if (streamRenderDisposable) {
-				(streamRenderDisposable as any).dispose();
+				streamRenderDisposable.dispose();
 				streamRenderDisposable = null;
 			}
 			streamSessionDisposables.dispose();
@@ -3718,7 +3826,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		}
 	}
 
-	private getAnthropicTools(): any[] {
+	private getAnthropicTools(): IAnthropicTool[] {
 		const toolIds = [
 			'anyagent_get_ticket_data',
 			'anyagent_query_workspace_tree',
@@ -3731,7 +3839,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			'anyagent_toggle_custom_module_status',
 			'anyagent_delete_custom_module'
 		];
-		const tools: any[] = [];
+		const tools: IAnthropicTool[] = [];
 		for (const id of toolIds) {
 			const tool = this.languageModelToolsService.getTool(id);
 			if (tool) {
@@ -3745,7 +3853,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		return tools;
 	}
 
-	private getOpenAITools(): any[] {
+	private getOpenAITools(): IOpenAITool[] {
 		const toolIds = [
 			'anyagent_get_ticket_data',
 			'anyagent_query_workspace_tree',
@@ -3758,7 +3866,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			'anyagent_toggle_custom_module_status',
 			'anyagent_delete_custom_module'
 		];
-		const tools: any[] = [];
+		const tools: IOpenAITool[] = [];
 		for (const id of toolIds) {
 			const tool = this.languageModelToolsService.getTool(id);
 			if (tool) {
@@ -3775,7 +3883,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		return tools;
 	}
 
-	private getGeminiTools(): any[] {
+	private getGeminiTools(): IGeminiToolGroup[] {
 		const toolIds = [
 			'anyagent_get_ticket_data',
 			'anyagent_query_workspace_tree',
@@ -3788,7 +3896,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			'anyagent_toggle_custom_module_status',
 			'anyagent_delete_custom_module'
 		];
-		const declarations: any[] = [];
+		const declarations: IFunctionDeclaration[] = [];
 		for (const id of toolIds) {
 			const tool = this.languageModelToolsService.getTool(id);
 			if (tool) {
@@ -3802,7 +3910,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		return declarations.length > 0 ? [{ function_declarations: declarations }] : [];
 	}
 
-	private async extractResponseErrorMessage(response: any, providerName: string): Promise<string> {
+	private async extractResponseErrorMessage(response: IRequestContext, providerName: string): Promise<string> {
 		let rawBody = '';
 		try {
 			await new Promise<void>((resolve) => {
@@ -3851,7 +3959,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		const maxTurns = 5;
 
 		if (providerId === 'anthropic') {
-			let messages: any[] = [{ role: 'user', content: prompt }];
+			const messages: ILlmChatMessage[] = [{ role: 'user', content: prompt }];
 			const tools = this.getAnthropicTools();
 			const cleanModel = sanitizedModel || resolveDefaultModelId(providerId, 'claude-3-5-sonnet-20241022');
 			const url = 'https://api.anthropic.com/v1/messages';
@@ -3862,7 +3970,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			};
 
 			for (let turn = 0; turn < maxTurns; turn++) {
-				if (cancellationTokenSource.token.isCancellationRequested) break;
+				if (cancellationTokenSource.token.isCancellationRequested) { break; }
 
 				const data = JSON.stringify({
 					model: cleanModel,
@@ -3908,7 +4016,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 								const trimmed = line.trim();
 								if (trimmed.startsWith('data: ')) {
 									const dataStr = trimmed.slice(6).trim();
-									if (dataStr === '[DONE]') continue;
+									if (dataStr === '[DONE]') { continue; }
 									try {
 										const json = JSON.parse(dataStr);
 										if (json.type === 'content_block_start') {
@@ -3947,12 +4055,12 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 					break;
 				}
 
-				const assistantBlocks: any[] = [];
+				const assistantBlocks: object[] = [];
 				if (currentText) {
 					assistantBlocks.push({ type: 'text', text: currentText });
 				}
 				for (const tu of pendingToolUses) {
-					let parsedInput: any = {};
+					let parsedInput: Record<string, unknown> = {};
 					try { parsedInput = JSON.parse(tu.inputJson || '{}'); } catch { }
 					assistantBlocks.push({
 						type: 'tool_use',
@@ -3963,13 +4071,13 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 				}
 				messages.push({ role: 'assistant', content: assistantBlocks });
 
-				const toolResultBlocks: any[] = [];
+				const toolResultBlocks: object[] = [];
 				for (const tu of pendingToolUses) {
-					let parsedInput: any = {};
+					let parsedInput: Record<string, unknown> = {};
 					try { parsedInput = JSON.parse(tu.inputJson || '{}'); } catch { }
 
 					const formattedArgs = JSON.stringify(parsedInput, null, 2);
-					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${tu.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
+					onToken(`\n\n> \u2699️ **AI Invoking Tool:** \`${tu.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
 					let resultContent = '';
 					try {
 						const result = await this.languageModelToolsService.invokeTool(
@@ -3978,17 +4086,17 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 							cancellationTokenSource.token
 						);
 						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
-						resultContent = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
+						resultContent = result.content?.map(c => c.value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
 
 						let prettyResult = resultContent;
 						try {
 							const parsed = JSON.parse(resultContent);
 							prettyResult = JSON.stringify(parsed, null, 2);
 						} catch { }
-						onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> ✅ **Tool Completed Successfully**\n\n`);
-					} catch (err: any) {
+						onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> \u2705 **Tool Completed Successfully**\n\n`);
+					} catch (err) {
 						resultContent = `Tool execution error: ${err.message || String(err)}`;
-						onToken(`>\n> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
+						onToken(`>\n> \u274C **Tool Error:** ${err.message || String(err)}\n\n`);
 					}
 
 					toolResultBlocks.push({
@@ -4000,14 +4108,14 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 				messages.push({ role: 'user', content: toolResultBlocks });
 			}
 		} else if (providerId === 'gemini') {
-			let contents: any[] = [{ role: 'user', parts: [{ text: prompt }] }];
+			const contents: Array<{ role: string; parts: object[] }> = [{ role: 'user', parts: [{ text: prompt }] }];
 			const tools = this.getGeminiTools();
 			const cleanModel = sanitizedModel || resolveDefaultModelId(providerId, 'gemini-2.5-flash');
 			const url = `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:streamGenerateContent?key=${apiKey}&alt=sse`;
 			const headers = { 'Content-Type': 'application/json' };
 
 			for (let turn = 0; turn < maxTurns; turn++) {
-				if (cancellationTokenSource.token.isCancellationRequested) break;
+				if (cancellationTokenSource.token.isCancellationRequested) { break; }
 
 				const data = JSON.stringify({
 					contents,
@@ -4015,7 +4123,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 					tools: tools.length > 0 ? tools : undefined
 				});
 
-				const functionCalls: { name: string; args: any }[] = [];
+				const functionCalls: { name: string; args: Record<string, unknown> }[] = [];
 				let currentText = '';
 
 				const response = await this.requestService.request({
@@ -4049,7 +4157,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 								const trimmed = line.trim();
 								if (trimmed.startsWith('data: ')) {
 									const dataStr = trimmed.slice(6).trim();
-									if (dataStr === '[DONE]') continue;
+									if (dataStr === '[DONE]') { continue; }
 									try {
 										const json = JSON.parse(dataStr);
 										const candidate = json.candidates?.[0];
@@ -4089,11 +4197,11 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 					]
 				});
 
-				const responseParts: any[] = [];
+				const responseParts: object[] = [];
 				for (const fc of functionCalls) {
 					const formattedArgs = JSON.stringify(fc.args || {}, null, 2);
-					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${fc.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
-					let resultContent: any = {};
+					onToken(`\n\n> \u2699️ **AI Invoking Tool:** \`${fc.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
+					let resultContent: unknown = {};
 					try {
 						const result = await this.languageModelToolsService.invokeTool(
 							{ callId: `gemini_${Date.now()}`, toolId: fc.name, parameters: fc.args, context: undefined },
@@ -4101,14 +4209,14 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 							cancellationTokenSource.token
 						);
 						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
-						const textVal = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
+						const textVal = result.content?.map(c => c.value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
 						try { resultContent = JSON.parse(textVal); } catch { resultContent = { response: textVal }; }
 
 						const prettyResult = JSON.stringify(resultContent, null, 2);
-						onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> ✅ **Tool Completed Successfully**\n\n`);
-					} catch (err: any) {
+						onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> \u2705 **Tool Completed Successfully**\n\n`);
+					} catch (err) {
 						resultContent = { error: err.message || String(err) };
-						onToken(`>\n> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
+						onToken(`>\n> \u274C **Tool Error:** ${err.message || String(err)}\n\n`);
 					}
 
 					responseParts.push({
@@ -4126,7 +4234,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			}
 		} else {
 			// OpenAI & Custom-OpenAI
-			let messages: any[] = [
+			let messages: ILlmChatMessage[] = [
 				{ role: 'system', content: systemPrompt },
 				{ role: 'user', content: prompt }
 			];
@@ -4145,20 +4253,20 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 
 			const runViaResponsesEndpoint = async (): Promise<void> => {
 				const responsesUrl = `${cleanBase}/responses`;
-				const responsesTools = tools.map((t: any) => ({
+				const responsesTools = tools.map(t => ({
 					type: 'function',
 					name: t.function?.name,
 					description: t.function?.description,
 					parameters: t.function?.parameters
-				})).filter((t: any) => Boolean(t.name));
+				})).filter(t => Boolean(t.name));
 
-				const inputItems: any[] = [
+				const inputItems: unknown[] = [
 					{ role: 'user', content: prompt }
 				];
 				let disableResponsesTools = false;
 
 				for (let rTurn = 0; rTurn < maxTurns; rTurn++) {
-					if (cancellationTokenSource.token.isCancellationRequested) break;
+					if (cancellationTokenSource.token.isCancellationRequested) { break; }
 
 					const buildResponsesPayload = () => JSON.stringify({
 						model: sanitizedModel || resolveDefaultModelId(providerId, 'gpt-4o'),
@@ -4209,7 +4317,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 						}, cancellationTokenSource.token);
 					});
 
-					let parsedResp: any;
+					let parsedResp: IOpenAIResponsesResult | undefined;
 					try {
 						parsedResp = JSON.parse(rawBody);
 					} catch {
@@ -4219,7 +4327,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 						break;
 					}
 
-					const functionCallItems: Array<{ call_id: string; name: string; arguments: string; rawItem: any }> = [];
+					const functionCallItems: Array<{ call_id: string; name: string; arguments: string; rawItem: object }> = [];
 					let emittedAnyText = false;
 
 					if (Array.isArray(parsedResp?.output)) {
@@ -4258,11 +4366,11 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 
 					for (const fc of functionCallItems) {
 						inputItems.push(fc.rawItem);
-						let parsedArgs: any = {};
+						let parsedArgs: Record<string, unknown> = {};
 						try { parsedArgs = JSON.parse(fc.arguments || '{}'); } catch { }
 
 						const formattedArgs = JSON.stringify(parsedArgs, null, 2);
-						onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${fc.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
+						onToken(`\n\n> \u2699️ **AI Invoking Tool:** \`${fc.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
 						let resultContent = '';
 						try {
 							const result = await this.languageModelToolsService.invokeTool(
@@ -4271,17 +4379,17 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 								cancellationTokenSource.token
 							);
 							const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
-							resultContent = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
+							resultContent = result.content?.map(c => c.value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
 
 							let prettyResult = resultContent;
 							try {
 								const parsed = JSON.parse(resultContent);
 								prettyResult = JSON.stringify(parsed, null, 2);
 							} catch { }
-							onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> ✅ **Tool Completed Successfully**\n\n`);
-						} catch (err: any) {
+							onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> \u2705 **Tool Completed Successfully**\n\n`);
+						} catch (err) {
 							resultContent = `Tool execution error: ${err.message || String(err)}`;
-							onToken(`>\n> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
+							onToken(`>\n> \u274C **Tool Error:** ${err.message || String(err)}\n\n`);
 						}
 
 						inputItems.push({
@@ -4294,7 +4402,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			};
 
 			for (let turn = 0; turn < maxTurns; turn++) {
-				if (cancellationTokenSource.token.isCancellationRequested) break;
+				if (cancellationTokenSource.token.isCancellationRequested) { break; }
 				if (useResponsesEndpoint) {
 					await runViaResponsesEndpoint();
 					break;
@@ -4341,7 +4449,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 					// Fallback B: System role rejected by reasoning models (e.g. o1-mini / o1-preview)
 					if (response.res.statusCode && (response.res.statusCode < 200 || response.res.statusCode >= 300)) {
 						const latestLower = errMsg.toLowerCase();
-						if (latestLower.includes("'system'") || (latestLower.includes('role') && latestLower.includes('messages[0]'))) {
+						if (latestLower.includes('\'system\'') || (latestLower.includes('role') && latestLower.includes('messages[0]'))) {
 							if (messages.length > 0 && messages[0].role === 'system') {
 								const sysText = messages[0].content;
 								messages = messages.slice(1);
@@ -4413,7 +4521,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 								const trimmed = line.trim();
 								if (trimmed.startsWith('data: ')) {
 									const dataStr = trimmed.slice(6).trim();
-									if (dataStr === '[DONE]') continue;
+									if (dataStr === '[DONE]') { continue; }
 									try {
 										const json = JSON.parse(dataStr);
 										const delta = json.choices?.[0]?.delta;
@@ -4425,9 +4533,9 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 											for (const tc of delta.tool_calls) {
 												const idx = tc.index ?? 0;
 												const entry = toolCallsMap.get(idx) || { id: '', name: '', arguments: '' };
-												if (tc.id) entry.id = tc.id;
-												if (tc.function?.name) entry.name += tc.function.name;
-												if (tc.function?.arguments) entry.arguments += tc.function.arguments;
+												if (tc.id) { entry.id = tc.id; }
+												if (tc.function?.name) { entry.name += tc.function.name; }
+												if (tc.function?.arguments) { entry.arguments += tc.function.arguments; }
 												toolCallsMap.set(idx, entry);
 											}
 										}
@@ -4457,11 +4565,11 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 				});
 
 				for (const tc of toolCalls) {
-					let parsedArgs: any = {};
+					let parsedArgs: Record<string, unknown> = {};
 					try { parsedArgs = JSON.parse(tc.function.arguments || '{}'); } catch { }
 
 					const formattedArgs = JSON.stringify(parsedArgs, null, 2);
-					onToken(`\n\n> ⚙️ **AI Invoking Tool:** \`${tc.function.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
+					onToken(`\n\n> \u2699️ **AI Invoking Tool:** \`${tc.function.name}\`\n>\n> **Parameters:**\n> \`\`\`json\n> ${formattedArgs.split('\n').join('\n> ')}\n> \`\`\`\n`);
 					let resultContent = '';
 					try {
 						const result = await this.languageModelToolsService.invokeTool(
@@ -4470,17 +4578,17 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 							cancellationTokenSource.token
 						);
 						const toolMsg = typeof result.toolResultMessage === 'string' ? result.toolResultMessage : result.toolResultMessage?.value;
-						resultContent = result.content?.map(c => (c as any).value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
+						resultContent = result.content?.map(c => c.value).join('\n') || toolMsg || (result.toolResultError ? `Error: ${result.toolResultError}` : 'Success');
 
 						let prettyResult = resultContent;
 						try {
 							const parsed = JSON.parse(resultContent);
 							prettyResult = JSON.stringify(parsed, null, 2);
 						} catch { }
-						onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> ✅ **Tool Completed Successfully**\n\n`);
-					} catch (err: any) {
+						onToken(`>\n> **Result:**\n> \`\`\`json\n> ${prettyResult.split('\n').join('\n> ')}\n> \`\`\`\n> \u2705 **Tool Completed Successfully**\n\n`);
+					} catch (err) {
 						resultContent = `Tool execution error: ${err.message || String(err)}`;
-						onToken(`>\n> ❌ **Tool Error:** ${err.message || String(err)}\n\n`);
+						onToken(`>\n> \u274C **Tool Error:** ${err.message || String(err)}\n\n`);
 					}
 
 					messages.push({
@@ -4534,9 +4642,11 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 	}
 
 	private injectCopyButtons(container: HTMLElement): void {
-		const codeBlocks = container.querySelectorAll('pre');
+		// The code blocks are produced by the markdown renderer, so there is no element
+		// reference to hold on to: walk the rendered subtree instead.
+		const codeBlocks = findDescendants(container, el => el.tagName === 'PRE') as HTMLElement[];
 		codeBlocks.forEach(pre => {
-			if (pre.querySelector('.centered-chat-copy-code-btn')) {
+			if (findDescendants(pre, el => el.classList.contains('centered-chat-copy-code-btn')).length > 0) {
 				return;
 			}
 			const copyBtn = document.createElement('button');
@@ -4545,7 +4655,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 			copyBtn.title = 'Copy code to clipboard';
 			copyBtn.onclick = (e) => {
 				e.stopPropagation();
-				const code = pre.querySelector('code')?.innerText || pre.innerText;
+				const code = (findDescendants(pre, el => el.tagName === 'CODE')[0] as HTMLElement | undefined)?.innerText || pre.innerText;
 				navigator.clipboard.writeText(code).then(() => {
 					copyBtn.textContent = 'Copied!';
 					setTimeout(() => { copyBtn.textContent = 'Copy'; }, 2000);
@@ -4560,8 +4670,8 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 		if (this.isRecording) {
 			this.stopRecording();
 		} else {
-			const activeEl = document.activeElement;
-			if (activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement) {
+			const activeEl = mainWindow.document.activeElement;
+			if (isHTMLInputElement(activeEl) || isHTMLTextAreaElement(activeEl)) {
 				this.recordLastActiveEditable(activeEl);
 			}
 			this.startRecording();
@@ -4569,17 +4679,17 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 	}
 
 	private async startRecording(): Promise<void> {
-		const activeEl = document.activeElement;
-		if (activeEl instanceof HTMLInputElement || activeEl instanceof HTMLTextAreaElement) {
+		const activeEl = mainWindow.document.activeElement;
+		if (isHTMLInputElement(activeEl) || isHTMLTextAreaElement(activeEl)) {
 			this.recordLastActiveEditable(activeEl);
 		}
 
 		try {
 			const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 			this.audioChunks = [];
-			this.mediaRecorder = new (window as any).MediaRecorder(stream);
+			this.mediaRecorder = new mainWindow.MediaRecorder(stream);
 
-			this.mediaRecorder.ondataavailable = (e: any) => {
+			this.mediaRecorder.ondataavailable = (e: BlobEvent) => {
 				if (e.data && e.data.size > 0) {
 					this.audioChunks.push(e.data);
 				}
@@ -4595,9 +4705,10 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 
 				// Determine target input element: last active focused input (e.g. locator textarea/input) or main chat inputField
 				let targetEl: HTMLInputElement | HTMLTextAreaElement | undefined = undefined;
-				if (this.lastActiveEditableElement && document.body.contains(this.lastActiveEditableElement)) {
+				const targetBody = mainWindow.document.body;
+				if (this.lastActiveEditableElement && targetBody.contains(this.lastActiveEditableElement)) {
 					targetEl = this.lastActiveEditableElement;
-				} else if (this.inputField && document.body.contains(this.inputField)) {
+				} else if (this.inputField && targetBody.contains(this.inputField)) {
 					targetEl = this.inputField;
 				}
 
@@ -4671,7 +4782,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 					} else if (result.error) {
 						this.notificationService.warn(`Voice Transcription: ${result.error}`);
 					}
-				} catch (err: any) {
+				} catch (err) {
 					console.error('Failed to transcribe voice input:', err);
 					this.notificationService.error(`Voice transcription error: ${err.message || err}`);
 				} finally {
@@ -4698,7 +4809,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 				this.micBtn.classList.add('recording');
 			}
 
-			this.recordingTimer = setInterval(() => {
+			this.recordingTimer = mainWindow.setInterval(() => {
 				this.recordingSeconds++;
 				if (this.recordingTimeSpan) {
 					const mins = Math.floor(this.recordingSeconds / 60);
@@ -4717,7 +4828,7 @@ CRITICAL WORKSPACE & HIERARCHICAL ENTITY MATCHING RULES:
 
 	private stopRecording(): void {
 		if (this.recordingTimer) {
-			clearInterval(this.recordingTimer);
+			mainWindow.clearInterval(this.recordingTimer);
 			this.recordingTimer = undefined;
 		}
 

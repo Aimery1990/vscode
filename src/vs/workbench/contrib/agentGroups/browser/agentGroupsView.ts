@@ -1,16 +1,15 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All implementation rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import './media/agentGroups.css';
 import { $, append, clearNode } from '../../../../base/browser/dom.js';
-import { ViewPane, IViewPaneOptions } from '../../../../workbench/browser/parts/views/viewPane.js';
+import { ViewPane, IViewPaneOptions } from '../../../browser/parts/views/viewPane.js';
 import { IKeybindingService } from '../../../../platform/keybinding/common/keybinding.js';
 import { IContextMenuService } from '../../../../platform/contextview/browser/contextView.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
-import { IViewDescriptorService } from '../../../../workbench/common/views.js';
+import { IViewDescriptorService } from '../../../common/views.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
@@ -22,8 +21,8 @@ import { URI } from '../../../../base/common/uri.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 
-import { IAgentsManagerService, IAgentItem, AgentScopeType } from '../../../../workbench/contrib/agentsManager/common/agentsManager.js';
-import { createOrEditAgentDialog } from '../../../../workbench/contrib/agentsManager/browser/agentEditorDialog.js';
+import { IAgentsManagerService, IAgentItem, AgentScopeType } from '../../../contrib/agentsManager/common/agentsManager.js';
+import { createOrEditAgentDialog } from '../../../contrib/agentsManager/browser/agentEditorDialog.js';
 
 export const AgentGroupsViewId = 'agentic.workbench.view.agentGroups';
 

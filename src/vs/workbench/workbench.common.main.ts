@@ -240,8 +240,8 @@ import './contrib/chat/browser/contextContrib/chatContext.contribution.js';
 import './contrib/imageCarousel/browser/imageCarousel.contribution.js';
 
 // Centered Chat Popup Widget
-import '../sessions/contrib/centeredChat/browser/centeredChat.contribution.js';
-import '../sessions/contrib/agentGroups/browser/agentGroups.contribution.js';
+import './contrib/centeredChat/browser/centeredChat.contribution.js';
+import './contrib/agentGroups/browser/agentGroups.contribution.js';
 
 // Custom Modules & Data Types
 import './contrib/customModules/browser/customModules.contribution.js';
