@@ -19245,10 +19245,9 @@ export class WorkflowEditor extends EditorPane {
 		if (this._workflowUri) {
 			try {
 				const rtTicket = await this._ticketRuntimeService.getTicket(this._workflowUri, cleanName);
-				// `folderUri` is not part of ITicketGetResult; read it reflectively exactly as before (normally absent).
-				const rtFolderUri: unknown = rtTicket ? Reflect.get(rtTicket, 'folderUri') : undefined;
-				if (rtFolderUri) {
-					const rtUri = URI.parse(String(rtFolderUri));
+				// `entityUri` is the ticket's folder URI (same kind of value as a snapshot's `entityUri` in step 2).
+				if (rtTicket.success && rtTicket.entityUri) {
+					const rtUri = URI.parse(rtTicket.entityUri);
 					if (await this._fileService.exists(rtUri)) {
 						return rtUri;
 					}
