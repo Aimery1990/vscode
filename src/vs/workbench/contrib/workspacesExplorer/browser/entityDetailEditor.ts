@@ -2,7 +2,7 @@
  *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, clearNode, Dimension, h, isHTMLElement, reset } from '../../../../base/browser/dom.js';
+import { $, clearNode, Dimension, h, isHTMLElement, isSVGElement, reset } from '../../../../base/browser/dom.js';
 import { mainWindow } from '../../../../base/browser/window.js';
 import { Mutable } from '../../../../base/common/types.js';
 import { createTrustedTypesPolicy } from '../../../../base/browser/trustedTypes.js';
@@ -32,6 +32,7 @@ import { IAgentsManagerService, IAgentItem, IAgentCredential, IAgentCredentialSe
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
+import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 
@@ -53,23 +54,297 @@ import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
 const ttPolicy = createTrustedTypesPolicy('entityDetailEditor', { createHTML: (value: string) => value })
 	|| createTrustedTypesPolicy('htmlToMarkdown', { createHTML: (value: string) => value });
 
-/*
- * This editor renders its cards from HTML templates (`innerHTML` through the trusted-types policy above), so there
- * are no element references to keep: parts of a rendered template are looked up by their class / data attributes.
- * All such lookups go through these two helpers. A nullish `root` yields `undefined` (like `root?.querySelector(...)`).
- */
-function templatePart<K extends keyof HTMLElementTagNameMap>(root: ParentNode, selector: K): HTMLElementTagNameMap[K] | null;
-function templatePart<K extends keyof HTMLElementTagNameMap>(root: ParentNode | null | undefined, selector: K): HTMLElementTagNameMap[K] | null | undefined;
-function templatePart<E extends Element = Element>(root: ParentNode, selector: string): E | null;
-function templatePart<E extends Element = Element>(root: ParentNode | null | undefined, selector: string): E | null | undefined;
-function templatePart(root: ParentNode | null | undefined, selector: string): Element | null | undefined {
-	// eslint-disable-next-line no-restricted-syntax -- template-rendered DOM, see above
-	return root?.querySelector(selector);
-}
-
 /** Text for a DOM text node / attribute value: `undefined` / `null` become an empty string. */
 function textOf(value: unknown): string {
 	return value === undefined || value === null ? '' : String(value);
+}
+
+/**
+ * Elements of the editor that are reached again after they were built, by role (named after the class / id the element
+ * carries). Builders tag such elements with `part()` when they create them; a box (the page, a card, an input box, ...)
+ * built with `withParts()` records the tagged elements inside it, and `partsOf(box)` returns them. For a single role the
+ * first one in document order wins, `...s` roles keep all of them. Code that later adds or removes tagged elements in a
+ * box calls `refreshParts(box)`.
+ */
+interface IEditorParts {
+	// Roles that older templates had but no current builder creates: lookups of them find nothing (as before).
+	attachmentDropzone?: HTMLElement;
+	fileInput?: HTMLElement;
+	httpResponseBodyDisplay?: HTMLElement;
+	promptCustomModelInput?: HTMLElement;
+	resultStatusText?: HTMLElement;
+	ttsPlayBtn?: HTMLElement;
+
+	addLogBox?: HTMLElement;
+	aiEditBtn?: HTMLButtonElement;
+	browserContentDisplay?: HTMLElement;
+	browserCtxHiddenGroup?: HTMLElement;
+	browserFetchStatus?: HTMLElement;
+	browserPrimitiveCard?: HTMLElement;
+	browserPrimitiveCards?: HTMLElement[];
+	browserSilentFetchBtn?: HTMLButtonElement;
+	browserUrlInput?: HTMLInputElement;
+	closeStatusLifecyclePopoverBtn?: HTMLButtonElement;
+	codicon?: HTMLElement;
+	copyJsonBtnLabel?: HTMLElement;
+	credSecretText?: HTMLElement;
+	customFieldView?: HTMLElement;
+	descContentBox?: HTMLElement;
+	entityDetailRunTicketBtn?: HTMLButtonElement;
+	entityDetailToggleAttributesBtn?: HTMLButtonElement;
+	inspectorCloseBtn?: HTMLButtonElement;
+	inspectorCopyChunkBtns?: HTMLButtonElement[];
+	inspectorOpenTabBtn?: HTMLButtonElement;
+	inspectorSourceBtns?: HTMLButtonElement[];
+	inspectorTabBtns?: HTMLButtonElement[];
+	layoutContainer?: HTMLElement;
+	logTextarea?: HTMLTextAreaElement;
+	mediaPlayerCardMount?: HTMLElement;
+	mediaPlayerHeaderBadge?: HTMLElement;
+	mediaPlayerPrimitiveCards?: HTMLElement[];
+	outputItemFormatSelector?: HTMLSelectElement;
+	outputItemRawContent?: HTMLTextAreaElement;
+	outputItemViewport?: HTMLElement;
+	outputPrimitiveCard?: HTMLElement;
+	outputSpecItems?: HTMLElement[];
+	pasteJsonBtnLabel?: HTMLElement;
+	promptAgentSelect?: HTMLSelectElement;
+	promptCtxHiddenGroup?: HTMLElement;
+	promptDropdownProviderBadge?: HTMLElement;
+	promptExpandBottomPill?: HTMLButtonElement;
+	promptExpandBoxBtn?: HTMLButtonElement;
+	promptInstructionTextarea?: HTMLTextAreaElement;
+	promptLockBoxBtn?: HTMLButtonElement;
+	promptModelDropdown?: HTMLElement;
+	promptModelList?: HTMLElement;
+	promptModelPickerBtn?: HTMLButtonElement;
+	promptModelSearchInput?: HTMLInputElement;
+	promptModelSelect?: HTMLInputElement | HTMLSelectElement;
+	promptMoveDownUserInputBtn?: HTMLButtonElement;
+	promptMoveUpUserInputBtn?: HTMLButtonElement;
+	promptOutputDisplay?: HTMLElement;
+	promptPreinjectedTextarea?: HTMLTextAreaElement;
+	copyGitUrlLabel?: HTMLElement;
+	wfValueCopyLabel?: HTMLElement;
+	wfValueRaw?: HTMLTextAreaElement;
+	/** The textarea of a prompt input box (user input or pre-injected prompt). */
+	promptBoxTextarea?: HTMLTextAreaElement;
+	promptPrimitiveCard?: HTMLElement;
+	promptPrimitiveCards?: HTMLElement[];
+	promptProviderSelect?: HTMLSelectElement;
+	promptRawOutput?: HTMLTextAreaElement;
+	promptRemoveUserInputBtn?: HTMLButtonElement;
+	promptSelectedModelText?: HTMLElement;
+	promptStatusText?: HTMLElement;
+	promptTargetBadge?: HTMLElement;
+	promptTokenizedDisplay?: HTMLElement;
+	promptUserInputBadge?: HTMLElement;
+	promptUserInputChips?: HTMLElement;
+	promptUserInputItems?: HTMLElement[];
+	promptUserInputsCountBadge?: HTMLElement;
+	promptUserInputsList?: HTMLElement;
+	promptUserTextarea?: HTMLTextAreaElement;
+	promptUserTextareas?: HTMLTextAreaElement[];
+	promptVoiceMicBtn?: HTMLButtonElement;
+	promptVoiceRecordingIndicator?: HTMLElement;
+	promptVoiceRecordingTime?: HTMLElement;
+	pythonCodeDisplay?: HTMLElement;
+	pythonCodeTextarea?: HTMLTextAreaElement;
+	pythonCodeWrapper?: HTMLElement;
+	pythonCopyCodeBtn?: HTMLButtonElement;
+	pythonCreateVenvBtn?: HTMLButtonElement;
+	pythonCtxChipsBar?: HTMLElement;
+	pythonCtxHiddenGroup?: HTMLElement;
+	pythonEnvBadge?: HTMLElement;
+	pythonInsertCtxChips?: HTMLButtonElement[];
+	pythonInterpreterInput?: HTMLInputElement;
+	pythonLineNumbersGutter?: HTMLElement;
+	pythonLockCodeBtn?: HTMLButtonElement;
+	pythonOutputDisplay?: HTMLElement;
+	pythonOutputSection?: HTMLElement;
+	pythonPasteCodeBtn?: HTMLButtonElement;
+	pythonPrimitiveCard?: HTMLElement;
+	pythonPrimitiveCards?: HTMLElement[];
+	pythonResultBlock?: HTMLElement;
+	pythonResultDisplay?: HTMLPreElement;
+	pythonRunScriptBtn?: HTMLButtonElement;
+	pythonScriptsList?: HTMLElement;
+	pythonStatusText?: HTMLElement;
+	pythonTestInterpreterBtn?: HTMLButtonElement;
+	pythonTestStatus?: HTMLElement;
+	resultFormatSelector?: HTMLSelectElement;
+	resultRawContent?: HTMLTextAreaElement;
+	resultViewportContainer?: HTMLElement;
+	runTicketBtnLabel?: HTMLElement;
+	sectionCards?: HTMLElement[];
+	resultPrimitiveCards?: HTMLElement[];
+	aiEditBtns?: HTMLButtonElement[];
+	wfRuntimeBlock?: HTMLElement;
+	/** All `pre` blocks, and all description / custom field boxes (to find the `pre` shown inside such a box). */
+	pres?: HTMLElement[];
+	descContentBoxes?: HTMLElement[];
+	customFieldViews?: HTMLElement[];
+	customFieldCards?: HTMLElement[];
+	sectionTitle?: HTMLElement;
+	sshCardMount?: HTMLElement;
+	sshHeaderTargetBadge?: HTMLElement;
+	sshPrimitiveCards?: HTMLElement[];
+	statusLifecycleInfoBtn?: HTMLButtonElement;
+	statusLifecyclePopover?: HTMLElement;
+	tableCardMount?: HTMLElement;
+	tableHeaderStatsBadge?: HTMLElement;
+	tablePrimitiveCards?: HTMLElement[];
+	ticketParameterInputs?: Array<HTMLInputElement | HTMLSelectElement>;
+	ticketParametersCard?: HTMLElement;
+	ticketStepBadgeContainer?: HTMLElement;
+	ttsAudioPlayerMount?: HTMLElement;
+	ttsAutoplayCheckbox?: HTMLInputElement;
+	ttsCachedBadge?: HTMLElement;
+	ttsClearTextBtn?: HTMLButtonElement;
+	ttsCopyBtnLabel?: HTMLElement;
+	ttsCopyTextBtn?: HTMLButtonElement;
+	ttsCredSelect?: HTMLSelectElement;
+	ttsDeleteAudioBtn?: HTMLButtonElement;
+	ttsDropdownProviderBadge?: HTMLElement;
+	ttsEditBtnIcon?: HTMLElement;
+	ttsEditBtnLabel?: HTMLElement;
+	ttsEditTextBtn?: HTMLButtonElement;
+	ttsFormatSelect?: HTMLSelectElement;
+	ttsHeaderModelBadge?: HTMLElement;
+	ttsLlmTextInput?: HTMLTextAreaElement;
+	ttsModelDropdown?: HTMLElement;
+	ttsModelList?: HTMLElement;
+	ttsModelPickerBtn?: HTMLButtonElement;
+	ttsModelSearchInput?: HTMLInputElement;
+	ttsPrimitiveCards?: HTMLElement[];
+	ttsSelectedModelText?: HTMLElement;
+	ttsSendBtn?: HTMLButtonElement;
+	ttsSpeechTextBody?: HTMLElement;
+	ttsStatusText?: HTMLElement;
+	ttsTextInput?: HTMLTextAreaElement;
+	ttsToggleSpeechTextBtn?: HTMLButtonElement;
+	ttsVoiceSelect?: HTMLSelectElement;
+	voiceInputTextareaWrapper?: HTMLElement;
+	voiceInputTextareaWrappers?: HTMLElement[];
+	worklogFullContent?: HTMLElement;
+	worklogPreviewContent?: HTMLElement;
+}
+
+type EditorPartRole = keyof IEditorParts;
+
+/** Roles that keep every element built for them (in build order). */
+const LIST_PART_ROLES: ReadonlySet<string> = new Set<EditorPartRole>(['browserPrimitiveCards', 'inspectorCopyChunkBtns', 'inspectorSourceBtns', 'inspectorTabBtns', 'mediaPlayerPrimitiveCards', 'outputSpecItems', 'promptPrimitiveCards', 'promptUserInputItems', 'promptUserTextareas', 'pythonInsertCtxChips', 'pythonPrimitiveCards', 'sectionCards', 'resultPrimitiveCards', 'aiEditBtns', 'customFieldCards', 'pres', 'descContentBoxes', 'customFieldViews', 'sshPrimitiveCards', 'tablePrimitiveCards', 'ticketParameterInputs', 'ttsPrimitiveCards', 'voiceInputTextareaWrappers']);
+
+const partRolesOf = new WeakMap<Element, readonly EditorPartRole[]>();
+const builtParts = new WeakMap<Element, IEditorParts>();
+
+/** Instant tooltips (column header buttons of Data Table cards) that are currently attached to the document. */
+const instantTooltips = new Set<HTMLElement>();
+
+/** Tags a newly built `element` with its part role(s), see `IEditorParts`. */
+function part<T extends Element>(roles: EditorPartRole | EditorPartRole[], element: T): T {
+	partRolesOf.set(element, Array.isArray(roles) ? roles : [roles]);
+	return element;
+}
+
+/** Collects the tagged elements in `nodes` and their descendants, in document order. */
+function collectTaggedParts(nodes: Iterable<Node>): IEditorParts {
+	const parts: IEditorParts = {};
+	const record = parts as Record<string, Element | Element[] | undefined>;
+	const visit = (node: Node) => {
+		if (!isHTMLElement(node) && !isSVGElement(node)) {
+			return;
+		}
+		for (const role of partRolesOf.get(node) ?? []) {
+			const current = record[role];
+			if (Array.isArray(current)) {
+				current.push(node);
+			} else if (LIST_PART_ROLES.has(role)) {
+				record[role] = [node];
+			} else if (!current) {
+				record[role] = node;
+			}
+		}
+		for (const child of Array.from(node.children)) {
+			visit(child);
+		}
+	};
+	for (const node of nodes) {
+		visit(node);
+	}
+	return parts;
+}
+
+/** Runs `build` and returns the built nodes together with the parts tagged inside them (for the page content). */
+function collectParts<T extends Iterable<Node | string>>(build: () => T): { result: T; parts: IEditorParts } {
+	const result = build();
+	const nodes: Node[] = [];
+	for (const item of result) {
+		if (typeof item !== 'string') {
+			nodes.push(item);
+		}
+	}
+	return { result, parts: collectTaggedParts(nodes) };
+}
+
+/** Builds a box with `build` and records the tagged elements inside it for `partsOf(box)`. */
+function withParts<T extends Element>(build: () => T): T {
+	const box = build();
+	refreshParts(box);
+	return box;
+}
+
+/** Deep-clones `node`, keeping the part roles of the cloned elements. */
+function cloneWithParts<T extends Node>(node: T): T {
+	const clone = node.cloneNode(true) as T;
+	const copyRoles = (from: Node, to: Node) => {
+		if ((isHTMLElement(from) || isSVGElement(from)) && (isHTMLElement(to) || isSVGElement(to))) {
+			const roles = partRolesOf.get(from);
+			if (roles) {
+				partRolesOf.set(to, roles);
+			}
+			for (let i = 0; i < from.children.length; i++) {
+				copyRoles(from.children[i], to.children[i]);
+			}
+		}
+	};
+	copyRoles(node, clone);
+	return clone;
+}
+
+/** Records again the tagged elements inside `box`, after elements were added to or removed from it. */
+function refreshParts(box: Element): void {
+	builtParts.set(box, collectTaggedParts(Array.from(box.children)));
+}
+
+/** Records again the parts of every box that contains `element` (after the content of `element` was replaced). */
+function refreshPartsAround(element: Element): void {
+	for (let node: Element | null = element; node; node = node.parentElement) {
+		if (builtParts.has(node)) {
+			refreshParts(node);
+		}
+	}
+}
+
+/** The first of `elements` in document order. */
+function firstInDocument<T extends Node>(...elements: Array<T | undefined>): T | undefined {
+	let first: T | undefined;
+	for (const element of elements) {
+		if (element && (!first || first.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_PRECEDING)) {
+			first = element;
+		}
+	}
+	return first;
+}
+
+/** The first `pre` of `parts` that is inside one of `boxes`. */
+function firstPreInside(parts: IEditorParts, boxes: HTMLElement[]): HTMLElement | undefined {
+	return parts.pres?.find(pre => boxes.some(box => box.contains(pre)));
+}
+
+/** The parts recorded for a box built with `withParts()` (empty for anything else). */
+function partsOf(box: Element | null | undefined): IEditorParts {
+	return (box && builtParts.get(box)) || {};
 }
 
 /** Persisted value of a primitive card (a JSON object in ticket.md / the entity snapshot); every key is optional. */
@@ -112,6 +387,10 @@ interface ICardRuntimeState {
 	externalScripts?: string[];
 	loadTtsBytes?: (buffer: Uint8Array, mimeType: string, autoPlay: boolean) => Promise<void>;
 	resetTtsPlayer?: () => void;
+	/** Hidden audio element of a TTS card's player (built when the card is hydrated). */
+	ttsAudio?: HTMLAudioElement;
+	/** SQL output box of a Data Table card (built when the card is hydrated). */
+	sqlOutputBox?: HTMLElement;
 	/** Creates fresh nodes for the "Insert Output" chips row of a new User Prompt Input box. */
 	promptChips?: () => Node[];
 }
@@ -146,15 +425,6 @@ function cardRuntimeState(card: HTMLElement): ICardRuntimeState {
 /** Same as `key in obj` (own or inherited property), for objects whose keys come from data; does not narrow `obj`. */
 function hasProperty(obj: object, key: PropertyKey): boolean {
 	return Reflect.has(obj, key);
-}
-
-function templateParts<K extends keyof HTMLElementTagNameMap>(root: ParentNode, selector: K): NodeListOf<HTMLElementTagNameMap[K]>;
-function templateParts<K extends keyof HTMLElementTagNameMap>(root: ParentNode | null | undefined, selector: K): NodeListOf<HTMLElementTagNameMap[K]> | undefined;
-function templateParts<E extends Element = Element>(root: ParentNode, selector: string): NodeListOf<E>;
-function templateParts<E extends Element = Element>(root: ParentNode | null | undefined, selector: string): NodeListOf<E> | undefined;
-function templateParts(root: ParentNode | null | undefined, selector: string): NodeListOf<Element> | undefined {
-	// eslint-disable-next-line no-restricted-syntax -- template-rendered DOM, see above
-	return root?.querySelectorAll(selector);
 }
 
 function getColorForName(name: string | undefined): string {
@@ -306,6 +576,8 @@ export class EntityDetailEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.entityDetail';
 
 	private _container: HTMLElement | undefined;
+	/** Parts of the content currently rendered into `_container`. */
+	private _pageParts: IEditorParts = {};
 
 	private _entityUri: URI | undefined;
 	private _entityName: string = '';
@@ -391,7 +663,8 @@ export class EntityDetailEditor extends EditorPane {
 		@IQuickInputService private readonly _quickInputService: IQuickInputService,
 		@IRequestService private readonly _requestService: IRequestService,
 		@ICustomModulesService private readonly _customModulesService: ICustomModulesService,
-		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService
+		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService,
+		@ILayoutService private readonly _layoutService: ILayoutService
 	) {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
 
@@ -615,6 +888,7 @@ export class EntityDetailEditor extends EditorPane {
 		if (this._container) {
 			clearNode(this._container);
 		}
+		this._pageParts = {};
 		this._entityUri = undefined;
 		this._isPreviewMode = false;
 		this._previewModule = undefined;
@@ -632,6 +906,7 @@ export class EntityDetailEditor extends EditorPane {
 			clearNode(this._container);
 			this._container = undefined;
 		}
+		this._pageParts = {};
 		super.dispose();
 	}
 
@@ -1003,8 +1278,9 @@ export class EntityDetailEditor extends EditorPane {
 		this._userHasScrolledSinceRender = false;
 		this._isRestoringScroll = true;
 
-		const content = this._buildContent(this._lastParsedData, workLogContent, [], mod, agents, allTickets);
+		const { result: content, parts } = collectParts(() => this._buildContent(this._lastParsedData!, workLogContent, [], mod, agents, allTickets));
 		this._disposeMediaCleanupFns();
+		this._pageParts = parts;
 		reset(this._container, ...content);
 		this._applySavedScrollPosition(scrollKey);
 		this._hydratePythonPrimitiveCards();
@@ -1017,9 +1293,9 @@ export class EntityDetailEditor extends EditorPane {
 		this._applySavedScrollPosition(scrollKey);
 		setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
-		const directInfoBtn = templatePart(this._container, '#status-lifecycle-info-btn') as HTMLElement | null;
-		const popoverEl = templatePart(this._container, '#status-lifecycle-popover') as HTMLElement | null;
-		const closePopoverBtn = templatePart(this._container, '#close-status-lifecycle-popover-btn') as HTMLElement | null;
+		const directInfoBtn = this._pageParts.statusLifecycleInfoBtn as HTMLElement | null;
+		const popoverEl = this._pageParts.statusLifecyclePopover as HTMLElement | null;
+		const closePopoverBtn = this._pageParts.closeStatusLifecyclePopoverBtn as HTMLElement | null;
 		if (directInfoBtn && popoverEl) {
 			directInfoBtn.onclick = (e) => {
 				e.preventDefault();
@@ -1225,8 +1501,9 @@ export class EntityDetailEditor extends EditorPane {
 			this._userHasScrolledSinceRender = false;
 			this._isRestoringScroll = true;
 
-			const content = this._buildContent(parsed, workLogContent, attachments, customModule, agents, allTickets);
+			const { result: content, parts } = collectParts(() => this._buildContent(parsed, workLogContent, attachments, customModule, agents, allTickets));
 			this._disposeMediaCleanupFns();
+			this._pageParts = parts;
 			reset(this._container, ...content);
 			this._applySavedScrollPosition(scrollKey);
 			this._hydratePythonPrimitiveCards();
@@ -1239,9 +1516,9 @@ export class EntityDetailEditor extends EditorPane {
 			setTimeout(() => this._applySavedScrollPosition(scrollKey), 80);
 
 			// 4. Attach direct click handlers for key interactive elements
-			const directInfoBtn = templatePart(this._container, '#status-lifecycle-info-btn') as HTMLElement | null;
-			const popoverEl = templatePart(this._container, '#status-lifecycle-popover') as HTMLElement | null;
-			const closePopoverBtn = templatePart(this._container, '#close-status-lifecycle-popover-btn') as HTMLElement | null;
+			const directInfoBtn = this._pageParts.statusLifecycleInfoBtn as HTMLElement | null;
+			const popoverEl = this._pageParts.statusLifecyclePopover as HTMLElement | null;
+			const closePopoverBtn = this._pageParts.closeStatusLifecyclePopoverBtn as HTMLElement | null;
 			if (directInfoBtn && popoverEl) {
 				directInfoBtn.onclick = (e) => {
 					e.preventDefault();
@@ -1263,6 +1540,10 @@ export class EntityDetailEditor extends EditorPane {
 				const errObj = err as { message?: unknown; stack?: unknown } | undefined;
 				const errMsg = err && errObj?.message ? errObj.message : String(err);
 				const errStack = errObj?.stack ? String(errObj.stack) : '';
+				const retryBtn = $<HTMLButtonElement>('button#entity-detail-error-retry-btn', { style: 'padding: 6px 18px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500;' },
+					'Retry'
+				);
+				this._pageParts = {};
 				reset(this._container,
 					$('div', { style: 'display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; padding: 40px; color: var(--vscode-editor-foreground); text-align: center;' },
 						$('div', { style: 'font-size: 20px; font-weight: 600; margin-bottom: 12px; color: #ef4444;' }, 'Error Loading Ticket Detail'),
@@ -1274,15 +1555,10 @@ export class EntityDetailEditor extends EditorPane {
 								'\n\t\t\t\t\t\t'
 							)
 						] : []),
-						$<HTMLButtonElement>('button#entity-detail-error-retry-btn', { style: 'padding: 6px 18px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 500;' },
-							'Retry'
-						)
+						retryBtn
 					)
 				);
-				const retryBtn = templatePart(this._container, '#entity-detail-error-retry-btn') as HTMLElement | null;
-				if (retryBtn) {
-					retryBtn.onclick = () => this._resolvePathsAndLoadData();
-				}
+				retryBtn.onclick = () => this._resolvePathsAndLoadData();
 			}
 		}
 	}
@@ -1322,7 +1598,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (chipBtn) {
 				const itemEl = chipBtn.closest('.prompt-user-input-item') as HTMLElement | null;
 				const cardEl = chipBtn.closest('.prompt-primitive-card') as HTMLElement | null;
-				const ta = (templatePart(itemEl, '.prompt-instruction-textarea') || templatePart(cardEl, '.prompt-instruction-textarea')) as HTMLTextAreaElement | null;
+				const ta = (partsOf(itemEl).promptInstructionTextarea || partsOf(cardEl).promptInstructionTextarea) as HTMLTextAreaElement | null;
 				if (ta && ta.style.display !== 'none' && typeof ta.selectionStart === 'number') {
 					ta.setAttribute('data-last-selection-start', String(ta.selectionStart));
 					ta.setAttribute('data-last-selection-end', String(typeof ta.selectionEnd === 'number' ? ta.selectionEnd : ta.selectionStart));
@@ -1343,7 +1619,7 @@ export class EntityDetailEditor extends EditorPane {
 				: range.commonAncestorContainer.parentElement) as HTMLElement | null;
 			const displayEl = commonEl?.closest('.prompt-tokenized-display') as HTMLElement | null;
 			if (displayEl && this._container && this._container.contains(displayEl)) {
-				const ta = templatePart(displayEl.parentElement, 'textarea') as HTMLTextAreaElement | null;
+				const ta = partsOf(displayEl.parentElement).promptBoxTextarea;
 				if (ta && typeof ta.value === 'string' && ta.value.length > 0) {
 					const resolveRawOffset = (container: Node, offset: number, isEnd: boolean): number | undefined => {
 						if (container === displayEl) {
@@ -1480,11 +1756,11 @@ export class EntityDetailEditor extends EditorPane {
 					localStorage.setItem('anyagent.ticketDetail.attributesCollapsed', this._isAttributesCollapsed ? 'true' : 'false');
 				} catch { }
 				if (this._container) {
-					const layoutEl = templatePart(this._container, '.layout-container') as HTMLElement | null;
+					const layoutEl = this._pageParts.layoutContainer as HTMLElement | null;
 					if (layoutEl) {
 						layoutEl.classList.toggle('attributes-collapsed', this._isAttributesCollapsed);
 					}
-					const headerToggleBtn = templatePart(this._container, '#entity-detail-toggle-attributes-btn') as HTMLElement | null;
+					const headerToggleBtn = this._pageParts.entityDetailToggleAttributesBtn as HTMLElement | null;
 					if (headerToggleBtn) {
 						headerToggleBtn.title = this._isAttributesCollapsed ? 'Show Attributes Panel' : 'Hide Attributes Panel';
 						headerToggleBtn.style.background = this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.06)';
@@ -1500,9 +1776,10 @@ export class EntityDetailEditor extends EditorPane {
 			if (valueCopyBtn) {
 				e.preventDefault();
 				e.stopPropagation();
-				const raw = templatePart(valueCopyBtn.closest('.wf-value-box'), 'textarea.wf-value-raw') as HTMLTextAreaElement | null;
+				const valueBoxParts = partsOf(valueCopyBtn.closest('.wf-value-box'));
+				const raw = valueBoxParts.wfValueRaw;
 				await this._clipboardService.writeText(raw?.value ?? '');
-				const labelEl = templatePart(valueCopyBtn, 'span:last-child');
+				const labelEl = valueBoxParts.wfValueCopyLabel;
 				if (labelEl) {
 					labelEl.textContent = 'Copied';
 					setTimeout(() => { labelEl.textContent = 'Copy'; }, 1200);
@@ -1594,7 +1871,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (infoBtn) {
 				e.preventDefault();
 				e.stopPropagation();
-				const popoverEl = templatePart(this._container, '#status-lifecycle-popover') as HTMLElement | null;
+				const popoverEl = this._pageParts.statusLifecyclePopover as HTMLElement | null;
 				if (popoverEl) {
 					const isHidden = popoverEl.style.display === 'none' || !popoverEl.style.display;
 					popoverEl.style.display = isHidden ? 'flex' : 'none';
@@ -1606,7 +1883,7 @@ export class EntityDetailEditor extends EditorPane {
 			if (target.id === 'close-status-lifecycle-popover-btn' || target.closest('#close-status-lifecycle-popover-btn')) {
 				e.preventDefault();
 				e.stopPropagation();
-				const popoverEl = templatePart(this._container, '#status-lifecycle-popover') as HTMLElement | null;
+				const popoverEl = this._pageParts.statusLifecyclePopover as HTMLElement | null;
 				if (popoverEl) {
 					popoverEl.style.display = 'none';
 				}
@@ -1614,7 +1891,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// Close popover if clicking outside
-			const popoverEl = templatePart(this._container, '#status-lifecycle-popover') as HTMLElement | null;
+			const popoverEl = this._pageParts.statusLifecyclePopover as HTMLElement | null;
 			if (popoverEl && popoverEl.style.display === 'flex') {
 				if (!target.closest('#status-lifecycle-popover') && !target.closest('#status-lifecycle-info-btn')) {
 					popoverEl.style.display = 'none';
@@ -1627,7 +1904,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const item = credEyeBtn.closest('.browser-cred-item');
-				const textSpan = templatePart(item, '.cred-secret-text') as HTMLElement | null;
+				const textSpan = partsOf(item).credSecretText as HTMLElement | null;
 				if (textSpan) {
 					const realVal = textSpan.getAttribute('data-real') || '';
 					if (textSpan.textContent === '••••••••') {
@@ -1658,7 +1935,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = copyContentBtn.closest('.browser-primitive-card');
-				const contentEl = templatePart(card, '.browser-content-display');
+				const contentEl = partsOf(card).browserContentDisplay;
 				const text = contentEl?.textContent || '';
 				if (text && !text.includes('No webpage content extracted yet.')) {
 					await this._clipboardService.writeText(text);
@@ -1675,7 +1952,7 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = clearContentBtn.getAttribute('data-field-key') || '';
 				const card = clearContentBtn.closest('.browser-primitive-card') as HTMLElement | null;
 				if (card) {
-					const contentEl = templatePart(card, '.browser-content-display') as HTMLElement | null;
+					const contentEl = partsOf(card).browserContentDisplay as HTMLElement | null;
 					if (contentEl) {
 						reset(contentEl,
 							$('span', { style: 'opacity: 0.4; font-style: italic;' },
@@ -1683,12 +1960,12 @@ export class EntityDetailEditor extends EditorPane {
 							)
 						);
 					}
-					const statusEl = templatePart(card, '.browser-fetch-status') as HTMLElement | null;
+					const statusEl = partsOf(card).browserFetchStatus as HTMLElement | null;
 					if (statusEl) {
 						statusEl.textContent = 'Cleared';
 						statusEl.style.color = '';
 					}
-					const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
+					const urlInput = partsOf(card).browserUrlInput as HTMLInputElement | null;
 					const currentUrl = urlInput?.value.trim() || '';
 					await this._saveBrowserPrimitiveData(fieldKey, currentUrl, '', '');
 				}
@@ -1727,7 +2004,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = newTabBtn.closest('.browser-primitive-card') as HTMLElement | null;
-				const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
+				const urlInput = partsOf(card).browserUrlInput as HTMLInputElement | null;
 				let url = urlInput?.value.trim() || 'https://www.google.com';
 				url = this._interpolateParameters(url);
 				if (!/^https?:\/\//i.test(url)) {
@@ -1755,7 +2032,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = insertBrowserChip.closest('.browser-primitive-card') as HTMLElement | null;
-				const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
+				const urlInput = partsOf(card).browserUrlInput as HTMLInputElement | null;
 				const textToInsert = insertBrowserChip.getAttribute('data-insert') || '';
 				if (urlInput && textToInsert) {
 					const start = urlInput.selectionStart ?? urlInput.value.length;
@@ -1765,8 +2042,8 @@ export class EntityDetailEditor extends EditorPane {
 					urlInput.focus();
 					const fieldKey = insertBrowserChip.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
 					if (fieldKey && card) {
-						const contentEl = templatePart(card, '.browser-content-display') as HTMLElement | null;
-						const statusEl = templatePart(card, '.browser-fetch-status') as HTMLElement | null;
+						const contentEl = partsOf(card).browserContentDisplay as HTMLElement | null;
+						const statusEl = partsOf(card).browserFetchStatus as HTMLElement | null;
 						let existingContent = contentEl?.textContent || '';
 						if (existingContent.includes('No webpage content extracted yet.')) {
 							existingContent = '';
@@ -1783,7 +2060,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const bar = moreBrowserCtxBtn.closest('.browser-ctx-chips-bar') as HTMLElement | null;
-				const hiddenGroup = templatePart(bar, '.browser-ctx-hidden-group') as HTMLElement | null;
+				const hiddenGroup = partsOf(bar).browserCtxHiddenGroup as HTMLElement | null;
 				if (hiddenGroup) {
 					const isHidden = hiddenGroup.style.display === 'none';
 					hiddenGroup.style.display = isHidden ? 'contents' : 'none';
@@ -1801,7 +2078,7 @@ export class EntityDetailEditor extends EditorPane {
 				const gitUrl = copyGitBtn.getAttribute('data-git-url');
 				if (gitUrl) {
 					this._clipboardService.writeText(gitUrl);
-					const span = templatePart(copyGitBtn, 'span');
+					const span = partsOf(copyGitBtn).copyGitUrlLabel;
 					if (span) { span.textContent = 'Copied!'; }
 					setTimeout(() => { if (span) { span.textContent = 'Copy'; } }, 1500);
 					this._notificationService.info('Copied Git repository URL to clipboard.');
@@ -1916,8 +2193,8 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = copyPromptOutBtn.closest('.prompt-primitive-card') as HTMLElement | null;
-				const rawTa = templatePart(card, '.prompt-raw-output') as HTMLTextAreaElement | null;
-				const display = templatePart(card, '.prompt-output-display') as HTMLElement | null;
+				const rawTa = partsOf(card).promptRawOutput as HTMLTextAreaElement | null;
+				const display = partsOf(card).promptOutputDisplay as HTMLElement | null;
 				const fullOut = rawTa?.value || display?.textContent || '';
 				if (fullOut) {
 					this._clipboardService.writeText(fullOut);
@@ -1934,9 +2211,9 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = clearPromptOutBtn.getAttribute('data-field-key') || '';
 				const card = clearPromptOutBtn.closest('.prompt-primitive-card') as HTMLElement | null;
 				if (card) {
-					const rawTa = templatePart(card, '.prompt-raw-output') as HTMLTextAreaElement | null;
+					const rawTa = partsOf(card).promptRawOutput as HTMLTextAreaElement | null;
 					if (rawTa) { rawTa.value = ''; }
-					const display = templatePart(card, '.prompt-output-display') as HTMLElement | null;
+					const display = partsOf(card).promptOutputDisplay as HTMLElement | null;
 					if (display) {
 						reset(display,
 							$('span', { style: 'opacity: 0.4; font-style: italic;' },
@@ -1944,7 +2221,7 @@ export class EntityDetailEditor extends EditorPane {
 							)
 						);
 					}
-					const statusText = templatePart(card, '.prompt-status-text') as HTMLElement | null;
+					const statusText = partsOf(card).promptStatusText as HTMLElement | null;
 					if (statusText) { statusText.textContent = 'Ready'; }
 					await this._savePromptDataFromCard(card, fieldKey, '');
 				}
@@ -2016,22 +2293,22 @@ export class EntityDetailEditor extends EditorPane {
 				const card = addPromptUserInputBtn.closest('.prompt-primitive-card') as HTMLElement | null;
 				const fieldKey = addPromptUserInputBtn.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
 				if (card) {
-					const listEl = templatePart(card, '.prompt-user-inputs-list') as HTMLElement | null;
+					const listEl = partsOf(card).promptUserInputsList as HTMLElement | null;
 					if (listEl) {
-						const existingItems = templateParts(listEl, '.prompt-user-input-item');
+						const existingItems = (partsOf(listEl).promptUserInputItems ?? []);
 						const nextIdx = existingItems.length;
-						const firstItemChipsEl = templatePart(listEl, '.prompt-user-input-chips');
+						const firstItemChipsEl = partsOf(listEl).promptUserInputChips;
 						const firstItemChips = firstItemChipsEl && firstItemChipsEl.childNodes.length > 0
-							? Array.from(firstItemChipsEl.childNodes, node => node.cloneNode(true))
+							? Array.from(firstItemChipsEl.childNodes, node => cloneWithParts(node))
 							: cardRuntimeState(card).promptChips?.() ?? [];
 						const newItemEl = this._buildPromptUserInputItem(fieldKey, nextIdx, nextIdx + 1, '', firstItemChips, false);
 						listEl.appendChild(newItemEl);
 						this._refreshPromptUserInputItemsUi(card);
-						const newDisplay = templatePart(newItemEl, '.prompt-tokenized-display') as HTMLElement | null;
+						const newDisplay = partsOf(newItemEl).promptTokenizedDisplay as HTMLElement | null;
 						if (newDisplay) {
 							this._switchPromptDisplayToEdit(newDisplay, undefined, 0);
 						} else {
-							const newTa = templatePart(newItemEl, '.prompt-user-textarea') as HTMLTextAreaElement | null;
+							const newTa = partsOf(newItemEl).promptUserTextarea as HTMLTextAreaElement | null;
 							newTa?.focus();
 						}
 						if (fieldKey) {
@@ -2051,11 +2328,11 @@ export class EntityDetailEditor extends EditorPane {
 				const itemEl = removePromptUserInputBtn.closest('.prompt-user-input-item') as HTMLElement | null;
 				const fieldKey = removePromptUserInputBtn.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
 				if (card && itemEl) {
-					const listEl = templatePart(card, '.prompt-user-inputs-list') as HTMLElement | null;
-					const allItems = listEl ? Array.from(templateParts(listEl, '.prompt-user-input-item')) : [];
+					const listEl = partsOf(card).promptUserInputsList as HTMLElement | null;
+					const allItems = listEl ? Array.from((partsOf(listEl).promptUserInputItems ?? [])) : [];
 					const itemIdx = allItems.indexOf(itemEl);
 					const totalCount = allItems.length;
-					const ta = templatePart(itemEl, '.prompt-user-textarea') as HTMLTextAreaElement | null;
+					const ta = partsOf(itemEl).promptUserTextarea as HTMLTextAreaElement | null;
 					const rawContent = (ta?.value || '').trim();
 					const previewSnippet = rawContent
 						? (rawContent.length > 120 ? `${rawContent.slice(0, 120)}...` : rawContent)
@@ -2074,11 +2351,11 @@ export class EntityDetailEditor extends EditorPane {
 						return;
 					}
 
-					const existingChipsEl = templatePart(itemEl, '.prompt-user-input-chips');
+					const existingChipsEl = partsOf(itemEl).promptUserInputChips;
 					const runtimeState = cardRuntimeState(card);
 					if (existingChipsEl && existingChipsEl.childNodes.length > 0 && !runtimeState.promptChips) {
-						const existingChips = Array.from(existingChipsEl.childNodes, node => node.cloneNode(true));
-						runtimeState.promptChips = () => existingChips.map(node => node.cloneNode(true));
+						const existingChips = Array.from(existingChipsEl.childNodes, node => cloneWithParts(node));
+						runtimeState.promptChips = () => existingChips.map(node => cloneWithParts(node));
 					}
 					itemEl.remove();
 					this._refreshPromptUserInputItemsUi(card);
@@ -2153,13 +2430,13 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const card = insertPromptChip.closest('.prompt-primitive-card') as HTMLElement | null;
 				const inputItem = insertPromptChip.closest('.prompt-user-input-item') as HTMLElement | null;
-				const wrapper = (templatePart(inputItem, '.voice-input-textarea-wrapper') || templatePart(card, '.voice-input-textarea-wrapper')) as HTMLElement | null;
+				const wrapper = (partsOf(inputItem).voiceInputTextareaWrapper || partsOf(card).voiceInputTextareaWrapper) as HTMLElement | null;
 				if (wrapper && wrapper.getAttribute('data-locked') === 'true') {
 					this._pulsePromptLockBtn(wrapper);
 					this._notificationService.info('This prompt box is locked. Click the lock icon in the top-right to unlock before inserting fields.');
 					return;
 				}
-				const textarea = (templatePart(inputItem, '.prompt-instruction-textarea') || templatePart(card, '.prompt-instruction-textarea')) as HTMLTextAreaElement | null;
+				const textarea = (partsOf(inputItem).promptInstructionTextarea || partsOf(card).promptInstructionTextarea) as HTMLTextAreaElement | null;
 				const textToInsert = insertPromptChip.getAttribute('data-insert') || '';
 				if (textarea && textToInsert) {
 					const currentVal = textarea.value || '';
@@ -2193,7 +2470,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const bar = morePromptCtxBtn.closest('.prompt-user-input-chips') as HTMLElement | null;
-				const hiddenGroup = templatePart(bar, '.prompt-ctx-hidden-group') as HTMLElement | null;
+				const hiddenGroup = partsOf(bar).promptCtxHiddenGroup as HTMLElement | null;
 				if (hiddenGroup) {
 					const isHidden = hiddenGroup.style.display === 'none';
 					hiddenGroup.style.display = isHidden ? 'contents' : 'none';
@@ -2222,7 +2499,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = ttsPlayBtn.closest('.tts-primitive-card') as HTMLElement | null;
-				const audioEl = templatePart(card, 'audio') as HTMLAudioElement | null;
+				const audioEl = (card ? cardRuntimeState(card).ttsAudio : undefined);
 				if (audioEl && audioEl.src) {
 					if (audioEl.paused) {
 						audioEl.play().catch(err => {
@@ -2286,10 +2563,10 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				e.preventDefault();
 				e.stopPropagation();
-				const textarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
+				const textarea = partsOf(card).pythonCodeTextarea as HTMLTextAreaElement | null;
 				const code = textarea ? textarea.value : '';
 				await this._clipboardService.writeText(code);
-				const iconEl = templatePart(copyPyCodeBtn, '.codicon') as HTMLElement | null;
+				const iconEl = partsOf(copyPyCodeBtn).codicon as HTMLElement | null;
 				if (iconEl) {
 					iconEl.className = 'codicon codicon-check';
 				}
@@ -2377,7 +2654,7 @@ export class EntityDetailEditor extends EditorPane {
 				if (card?.getAttribute('data-python-hydrated') === 'true') {
 					return;
 				}
-				const textarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
+				const textarea = partsOf(card).pythonCodeTextarea as HTMLTextAreaElement | null;
 				if (textarea) {
 					textarea.focus();
 				}
@@ -2393,7 +2670,7 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				e.preventDefault();
 				e.stopPropagation();
-				const textarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
+				const textarea = partsOf(card).pythonCodeTextarea as HTMLTextAreaElement | null;
 				const textToInsert = insertPyCtxChip.getAttribute('data-insert') || '';
 				const cursorOffset = parseInt(insertPyCtxChip.getAttribute('data-cursor-offset') || '0', 10);
 				if (textarea && textToInsert) {
@@ -2404,8 +2681,8 @@ export class EntityDetailEditor extends EditorPane {
 					textarea.value = before + textToInsert + after;
 					const newCursor = start + textToInsert.length + cursorOffset;
 					textarea.selectionStart = textarea.selectionEnd = newCursor;
-					const pyDisplayEl = templatePart(card, '.python-code-display') as HTMLElement | null;
-					const pyGutterEl = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
+					const pyDisplayEl = partsOf(card).pythonCodeDisplay as HTMLElement | null;
+					const pyGutterEl = partsOf(card).pythonLineNumbersGutter as HTMLElement | null;
 					if (pyGutterEl) {
 						pyGutterEl.textContent = buildPythonLineNumbersText(textarea.value);
 					}
@@ -2431,7 +2708,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const bar = morePyCtxBtn.closest('.python-ctx-chips-bar') as HTMLElement | null;
-				const hiddenGroup = templatePart(bar, '.python-ctx-hidden-group') as HTMLElement | null;
+				const hiddenGroup = partsOf(bar).pythonCtxHiddenGroup as HTMLElement | null;
 				if (hiddenGroup) {
 					const isHidden = hiddenGroup.style.display === 'none';
 					hiddenGroup.style.display = isHidden ? 'contents' : 'none';
@@ -2448,7 +2725,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const card = copyPyResBtn.closest('.python-primitive-card') as HTMLElement | null;
 				const lastRes = card ? cardRuntimeState(card).lastPythonResult : undefined;
-				const resDisplay = templatePart(card, '.python-result-display') as HTMLElement | null;
+				const resDisplay = partsOf(card).pythonResultDisplay as HTMLElement | null;
 				const text = lastRes !== undefined
 					? (typeof lastRes === 'object' ? JSON.stringify(lastRes, null, 2) : String(lastRes))
 					: (resDisplay?.textContent || '');
@@ -2456,7 +2733,7 @@ export class EntityDetailEditor extends EditorPane {
 					await this._clipboardService.writeText(text);
 					const prevContent = Array.from(copyPyResBtn.childNodes);
 					reset(copyPyResBtn,
-						$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+						part('codicon', $('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' })),
 						$('span', { style: 'color: #4ade80;' }, 'Copied!')
 					);
 					setTimeout(() => { if (copyPyResBtn.isConnected) { reset(copyPyResBtn, ...prevContent); } }, 1500);
@@ -2473,13 +2750,13 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = copyPyOutBtn.closest('.python-primitive-card') as HTMLElement | null;
-				const outputDisplay = templatePart(card, '.python-output-display') as HTMLElement | null;
+				const outputDisplay = partsOf(card).pythonOutputDisplay as HTMLElement | null;
 				const text = outputDisplay?.textContent || '';
 				if (text && !text.startsWith('No execution')) {
 					await this._clipboardService.writeText(text);
 					const prevContent = Array.from(copyPyOutBtn.childNodes);
 					reset(copyPyOutBtn,
-						$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+						part('codicon', $('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' })),
 						$('span', { style: 'color: #4ade80;' }, 'Copied!')
 					);
 					setTimeout(() => { if (copyPyOutBtn.isConnected) { reset(copyPyOutBtn, ...prevContent); } }, 1500);
@@ -2499,9 +2776,12 @@ export class EntityDetailEditor extends EditorPane {
 				const card = clearPyOutBtn.closest('.python-primitive-card') as HTMLElement | null;
 				if (card) {
 					cardRuntimeState(card).lastPythonResult = undefined;
-					const resultBlock = templatePart(card, '.python-result-block') as HTMLElement | null;
-					if (resultBlock) { resultBlock.remove(); }
-					const outputDisplay = templatePart(card, '.python-output-display') as HTMLElement | null;
+					const resultBlock = partsOf(card).pythonResultBlock as HTMLElement | null;
+					if (resultBlock) {
+						resultBlock.remove();
+						refreshParts(card);
+					}
+					const outputDisplay = partsOf(card).pythonOutputDisplay as HTMLElement | null;
 					if (outputDisplay) {
 						reset(outputDisplay,
 							$('span', { style: 'opacity: 0.4; font-style: italic;' },
@@ -2509,7 +2789,7 @@ export class EntityDetailEditor extends EditorPane {
 							)
 						);
 					}
-					const statusText = templatePart(card, '.python-status-text') as HTMLElement | null;
+					const statusText = partsOf(card).pythonStatusText as HTMLElement | null;
 					if (statusText) {
 						statusText.textContent = 'Logs and output cleared';
 						statusText.style.color = 'inherit';
@@ -2526,14 +2806,14 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const specKey = copyOutputItemBtn.getAttribute('data-spec-key') || '';
 				const card = copyOutputItemBtn.closest('.output-primitive-card, .result-primitive-card') as HTMLElement | null;
-				const item = templatePart(card, `.output-spec-item[data-spec-key="${specKey}"]`);
-				const rawTa = templatePart(item, '.output-item-raw-content') as HTMLTextAreaElement | null;
+				const item = (partsOf(card).outputSpecItems ?? []).find(specItem => specItem.getAttribute('data-spec-key') === specKey);
+				const rawTa = partsOf(item).outputItemRawContent as HTMLTextAreaElement | null;
 				const text = rawTa?.value || '';
 				if (text) {
 					await this._clipboardService.writeText(text);
 					const prevContent = Array.from(copyOutputItemBtn.childNodes);
 					reset(copyOutputItemBtn,
-						$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+						part('codicon', $('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' })),
 						' ',
 						$('span', { style: 'color: #4ade80;' }, 'Copied!')
 					);
@@ -2552,8 +2832,8 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const specKey = exportOutputItemCsvBtn.getAttribute('data-spec-key') || '';
 				const card = exportOutputItemCsvBtn.closest('.output-primitive-card, .result-primitive-card') as HTMLElement | null;
-				const item = templatePart(card, `.output-spec-item[data-spec-key="${specKey}"]`);
-				const rawTa = templatePart(item, '.output-item-raw-content') as HTMLTextAreaElement | null;
+				const item = (partsOf(card).outputSpecItems ?? []).find(specItem => specItem.getAttribute('data-spec-key') === specKey);
+				const rawTa = partsOf(item).outputItemRawContent as HTMLTextAreaElement | null;
 				const text = rawTa?.value || '';
 				this._exportResultToCsv(text, specKey);
 				return;
@@ -2598,17 +2878,17 @@ export class EntityDetailEditor extends EditorPane {
 				const card = copyAllOutputBtn.closest('.output-primitive-card, .result-primitive-card') as HTMLElement | null;
 				if (card) {
 					const allOutputs: Record<string, string> = {};
-					const items = templateParts(card, '.output-spec-item');
+					const items = (partsOf(card).outputSpecItems ?? []);
 					items.forEach(it => {
 						const sKey = it.getAttribute('data-spec-key') || '';
-						const ta = templatePart(it, '.output-item-raw-content') as HTMLTextAreaElement | null;
+						const ta = partsOf(it).outputItemRawContent as HTMLTextAreaElement | null;
 						if (sKey) { allOutputs[sKey] = ta?.value || ''; }
 					});
 					const jsonStr = JSON.stringify(allOutputs, null, 2);
 					await this._clipboardService.writeText(jsonStr);
 					const prevContent = Array.from(copyAllOutputBtn.childNodes);
 					reset(copyAllOutputBtn,
-						$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+						part('codicon', $('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' })),
 						' ',
 						$('span', { style: 'color: #4ade80;' }, 'Copied!')
 					);
@@ -2631,11 +2911,12 @@ export class EntityDetailEditor extends EditorPane {
 				}
 				if (!textToCopy) {
 					const card = copyCustomFieldBtn.closest('.custom-property-card') as HTMLElement | null;
-					const pre = templatePart(card, '.desc-content-box pre, .custom-field-view pre');
+					const cardParts = partsOf(card);
+					const pre = firstPreInside(cardParts, [...(cardParts.descContentBoxes ?? []), ...(cardParts.customFieldViews ?? [])]);
 					if (pre) {
 						textToCopy = pre.textContent || '';
 					} else {
-						const box = templatePart(card, '.desc-content-box, .custom-field-view');
+						const box = firstInDocument(cardParts.descContentBox, cardParts.customFieldView);
 						textToCopy = box?.textContent?.trim() || '';
 					}
 				}
@@ -2643,7 +2924,7 @@ export class EntityDetailEditor extends EditorPane {
 					await this._clipboardService.writeText(textToCopy);
 					const originalContent = Array.from(copyCustomFieldBtn.childNodes);
 					reset(copyCustomFieldBtn,
-						$('span.codicon.codicon-check', { style: 'font-size: 11px; color: #4ade80;' }),
+						part('codicon', $('span.codicon.codicon-check', { style: 'font-size: 11px; color: #4ade80;' })),
 						$('span', { style: 'color: #4ade80;' }, 'Copied!')
 					);
 					setTimeout(() => {
@@ -2664,13 +2945,13 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const card = copyResultBtn.closest('.result-primitive-card') as HTMLElement | null;
-				const rawTa = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
+				const rawTa = partsOf(card).resultRawContent as HTMLTextAreaElement | null;
 				const text = rawTa?.value || '';
 				if (text) {
 					await this._clipboardService.writeText(text);
 					const prevContent = Array.from(copyResultBtn.childNodes);
 					reset(copyResultBtn,
-						$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+						part('codicon', $('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' })),
 						' ',
 						$('span', { style: 'color: #4ade80;' }, 'Copied!')
 					);
@@ -2689,7 +2970,7 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const fieldKey = exportCsvBtn.getAttribute('data-field-key') || '';
 				const card = exportCsvBtn.closest('.result-primitive-card') as HTMLElement | null;
-				const rawTa = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
+				const rawTa = partsOf(card).resultRawContent as HTMLTextAreaElement | null;
 				const text = rawTa?.value || '';
 				this._exportResultToCsv(text, fieldKey);
 				return;
@@ -2703,8 +2984,8 @@ export class EntityDetailEditor extends EditorPane {
 				const card = syncPromptBtn.closest('.result-primitive-card') as HTMLElement | null;
 				if (card) {
 					const fieldKey = syncPromptBtn.getAttribute('data-field-key') || '';
-					const promptCard = templatePart(this._container, '.prompt-primitive-card');
-					const promptOutputEl = templatePart(promptCard, '.prompt-output-display');
+					const promptCard = this._pageParts.promptPrimitiveCard;
+					const promptOutputEl = partsOf(promptCard).promptOutputDisplay;
 					const text = promptOutputEl?.textContent || '';
 					if (!text || text.includes('No execution output yet.')) {
 						this._notificationService.warn('No AI Prompt output available to sync. Run an AI Prompt first.');
@@ -2870,8 +3151,8 @@ export class EntityDetailEditor extends EditorPane {
 
 			// 3. Add Work Log toggle button
 			if (target.id === 'add-log-btn' || target.closest('#add-log-btn')) {
-				const addLogBox = templatePart(this._container, '#add-log-box') as HTMLElement | null;
-				const textarea = templatePart(this._container, '#log-textarea') as HTMLTextAreaElement | null;
+				const addLogBox = this._pageParts.addLogBox as HTMLElement | null;
+				const textarea = this._pageParts.logTextarea as HTMLTextAreaElement | null;
 				if (addLogBox) {
 					addLogBox.style.display = 'block';
 					textarea?.focus();
@@ -2881,8 +3162,8 @@ export class EntityDetailEditor extends EditorPane {
 
 			// 4. Cancel Add Log
 			if (target.id === 'cancel-log-btn' || target.closest('#cancel-log-btn')) {
-				const addLogBox = templatePart(this._container, '#add-log-box') as HTMLElement | null;
-				const textarea = templatePart(this._container, '#log-textarea') as HTMLTextAreaElement | null;
+				const addLogBox = this._pageParts.addLogBox as HTMLElement | null;
+				const textarea = this._pageParts.logTextarea as HTMLTextAreaElement | null;
 				if (addLogBox) {
 					addLogBox.style.display = 'none';
 					if (textarea) { textarea.value = ''; }
@@ -2892,7 +3173,7 @@ export class EntityDetailEditor extends EditorPane {
 
 			// 5. Submit Work Log
 			if (target.id === 'submit-log-btn' || target.closest('#submit-log-btn')) {
-				const textarea = templatePart(this._container, '#log-textarea') as HTMLTextAreaElement | null;
+				const textarea = this._pageParts.logTextarea as HTMLTextAreaElement | null;
 				const val = textarea?.value?.trim();
 				if (val) {
 					await this._handleMessage({ type: 'addWorkLog', log: val });
@@ -2907,8 +3188,8 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const itemEl = worklogToggleBtn.closest('.timeline-item') as HTMLElement | null;
 				if (itemEl) {
-					const previewEl = templatePart(itemEl, '.worklog-preview-content') as HTMLElement | null;
-					const fullEl = templatePart(itemEl, '.worklog-full-content') as HTMLElement | null;
+					const previewEl = partsOf(itemEl).worklogPreviewContent as HTMLElement | null;
+					const fullEl = partsOf(itemEl).worklogFullContent as HTMLElement | null;
 					const isExpanded = worklogToggleBtn.getAttribute('data-expanded') === 'true';
 					const charCount = worklogToggleBtn.getAttribute('data-char-count') || '';
 					if (isExpanded) {
@@ -2955,7 +3236,7 @@ export class EntityDetailEditor extends EditorPane {
 			// 8. Trigger File Upload Dropzone (if present)
 			if (target.id === 'attachment-dropzone' || target.closest('#attachment-dropzone')) {
 				if (!target.classList.contains('delete-attachment') && !target.closest('.delete-attachment')) {
-					const fileInput = templatePart(this._container, '#file-input') as HTMLInputElement | null;
+					const fileInput = this._pageParts.fileInput as HTMLInputElement | null;
 					fileInput?.click();
 				}
 				return;
@@ -3052,8 +3333,8 @@ export class EntityDetailEditor extends EditorPane {
 				if (card && fieldKey) {
 					const providerId = promptProviderSelect.value;
 					card.setAttribute('data-target-provider', providerId);
-					const modelSelect = templatePart(card, '.prompt-model-select') as HTMLSelectElement | null;
-					const customModelInput = templatePart(card, '.prompt-custom-model-input') as HTMLInputElement | null;
+					const modelSelect = partsOf(card).promptModelSelect as HTMLSelectElement | null;
+					const customModelInput = partsOf(card).promptCustomModelInput as HTMLInputElement | null;
 					const providerModelsMap = this._getPromptProviderModelsMap();
 					const models = providerModelsMap[providerId] || providerModelsMap['openai'];
 					if (modelSelect) {
@@ -3077,7 +3358,7 @@ export class EntityDetailEditor extends EditorPane {
 						customModelInput.style.display = modelSelect?.value === 'custom' ? 'block' : 'none';
 					}
 					const effectiveModel = (modelSelect?.value === 'custom' ? customModelInput?.value.trim() : modelSelect?.value) || 'gpt-4o';
-					const targetBadge = templatePart(card, '.prompt-target-badge') as HTMLElement | null;
+					const targetBadge = partsOf(card).promptTargetBadge as HTMLElement | null;
 					if (targetBadge) {
 						targetBadge.textContent = `Model: ${effectiveModel}`;
 					}
@@ -3092,7 +3373,7 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = promptModelSelect.getAttribute('data-field-key') || '';
 				const card = promptModelSelect.closest('.prompt-primitive-card') as HTMLElement | null;
 				if (card && fieldKey) {
-					const customModelInput = templatePart(card, '.prompt-custom-model-input') as HTMLInputElement | null;
+					const customModelInput = partsOf(card).promptCustomModelInput as HTMLInputElement | null;
 					if (customModelInput) {
 						if (promptModelSelect.value === 'custom') {
 							customModelInput.style.display = 'block';
@@ -3101,8 +3382,8 @@ export class EntityDetailEditor extends EditorPane {
 							customModelInput.style.display = 'none';
 						}
 					}
-					const effectiveModel = (promptModelSelect.value === 'custom' ? customModelInput?.value.trim() : promptModelSelect.value) || resolveDefaultModelId(card.getAttribute('data-target-provider') || (templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || 'openai', 'gemini-2.5-flash');
-					const targetBadge = templatePart(card, '.prompt-target-badge') as HTMLElement | null;
+					const effectiveModel = (promptModelSelect.value === 'custom' ? customModelInput?.value.trim() : promptModelSelect.value) || resolveDefaultModelId(card.getAttribute('data-target-provider') || (partsOf(card).promptProviderSelect as HTMLSelectElement | null)?.value.trim() || 'openai', 'gemini-2.5-flash');
+					const targetBadge = partsOf(card).promptTargetBadge as HTMLElement | null;
 					if (targetBadge) {
 						targetBadge.textContent = `Model: ${effectiveModel}`;
 					}
@@ -3118,7 +3399,7 @@ export class EntityDetailEditor extends EditorPane {
 				const card = promptAgentSelect.closest('.prompt-primitive-card') as HTMLElement | null;
 				if (card && fieldKey) {
 					const agName = promptAgentSelect.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || '';
-					const targetBadge = templatePart(card, '.prompt-target-badge') as HTMLElement | null;
+					const targetBadge = partsOf(card).promptTargetBadge as HTMLElement | null;
 					if (targetBadge) {
 						targetBadge.textContent = `Agent: ${promptAgentSelect.value ? (agName || promptAgentSelect.value) : 'Unassigned'}`;
 					}
@@ -3157,8 +3438,8 @@ export class EntityDetailEditor extends EditorPane {
 				const fieldKey = promptCustomModelInput.getAttribute('data-field-key') || '';
 				const card = promptCustomModelInput.closest('.prompt-primitive-card') as HTMLElement | null;
 				if (card && fieldKey) {
-					const effectiveModel = promptCustomModelInput.value.trim() || resolveDefaultModelId(card.getAttribute('data-target-provider') || (templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || 'openai', 'gpt-4o');
-					const targetBadge = templatePart(card, '.prompt-target-badge') as HTMLElement | null;
+					const effectiveModel = promptCustomModelInput.value.trim() || resolveDefaultModelId(card.getAttribute('data-target-provider') || (partsOf(card).promptProviderSelect as HTMLSelectElement | null)?.value.trim() || 'openai', 'gpt-4o');
+					const targetBadge = partsOf(card).promptTargetBadge as HTMLElement | null;
 					if (targetBadge) {
 						targetBadge.textContent = `Model: ${effectiveModel}`;
 					}
@@ -3220,8 +3501,8 @@ export class EntityDetailEditor extends EditorPane {
 				if (card?.getAttribute('data-python-hydrated') === 'true') {
 					return;
 				}
-				const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
-				const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
+				const pyDisplay = partsOf(card).pythonCodeDisplay as HTMLElement | null;
+				const pyGutter = partsOf(card).pythonLineNumbersGutter as HTMLElement | null;
 				if (pyGutter) {
 					pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
 					pyGutter.scrollTop = 0;
@@ -3252,8 +3533,8 @@ export class EntityDetailEditor extends EditorPane {
 				if (card?.getAttribute('data-python-hydrated') === 'true') {
 					return;
 				}
-				const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
-				const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
+				const pyDisplay = partsOf(card).pythonCodeDisplay as HTMLElement | null;
+				const pyGutter = partsOf(card).pythonLineNumbersGutter as HTMLElement | null;
 				if (pyTextarea.scrollTop !== 0) {
 					pyTextarea.scrollTop = 0;
 				}
@@ -3272,18 +3553,18 @@ export class EntityDetailEditor extends EditorPane {
 
 		this._container.addEventListener('dragover', (e: DragEvent) => {
 			e.preventDefault();
-			const dropzone = templatePart(this._container, '#attachment-dropzone') as HTMLElement | null;
+			const dropzone = this._pageParts.attachmentDropzone as HTMLElement | null;
 			dropzone?.classList.add('dragover');
 		});
 
 		this._container.addEventListener('dragleave', (e: DragEvent) => {
-			const dropzone = templatePart(this._container, '#attachment-dropzone') as HTMLElement | null;
+			const dropzone = this._pageParts.attachmentDropzone as HTMLElement | null;
 			dropzone?.classList.remove('dragover');
 		});
 
 		this._container.addEventListener('drop', async (e: DragEvent) => {
 			e.preventDefault();
-			const dropzone = templatePart(this._container, '#attachment-dropzone') as HTMLElement | null;
+			const dropzone = this._pageParts.attachmentDropzone as HTMLElement | null;
 			dropzone?.classList.remove('dragover');
 			if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
 				const file = e.dataTransfer.files[0];
@@ -3307,8 +3588,8 @@ export class EntityDetailEditor extends EditorPane {
 					e.preventDefault();
 					e.stopPropagation();
 					togglePythonComment(pyTextarea);
-					const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
-					const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
+					const pyDisplay = partsOf(card).pythonCodeDisplay as HTMLElement | null;
+					const pyGutter = partsOf(card).pythonLineNumbersGutter as HTMLElement | null;
 					if (pyGutter) {
 						pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
 						pyGutter.scrollTop = pyTextarea.scrollTop;
@@ -3336,8 +3617,8 @@ export class EntityDetailEditor extends EditorPane {
 					const end = pyTextarea.selectionEnd;
 					pyTextarea.value = pyTextarea.value.substring(0, start) + '    ' + pyTextarea.value.substring(end);
 					pyTextarea.selectionStart = pyTextarea.selectionEnd = start + 4;
-					const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
-					const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
+					const pyDisplay = partsOf(card).pythonCodeDisplay as HTMLElement | null;
+					const pyGutter = partsOf(card).pythonLineNumbersGutter as HTMLElement | null;
 					if (pyGutter) {
 						pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
 					}
@@ -3394,8 +3675,8 @@ export class EntityDetailEditor extends EditorPane {
 						const insertStr = '\n' + indent;
 						pyTextarea.value = before + insertStr + pyTextarea.value.substring(end);
 						pyTextarea.selectionStart = pyTextarea.selectionEnd = start + insertStr.length;
-						const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
-						const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
+						const pyDisplay = partsOf(card).pythonCodeDisplay as HTMLElement | null;
+						const pyGutter = partsOf(card).pythonLineNumbersGutter as HTMLElement | null;
 						if (pyGutter) {
 							pyGutter.textContent = buildPythonLineNumbersText(pyTextarea.value);
 							pyGutter.scrollTop = pyTextarea.scrollTop;
@@ -3416,7 +3697,7 @@ export class EntityDetailEditor extends EditorPane {
 					e.preventDefault();
 					e.stopPropagation();
 					const card = urlInput.closest('.browser-primitive-card') as HTMLElement | null;
-					const fetchBtn = templatePart(card, '.browser-silent-fetch-btn') as HTMLElement | null;
+					const fetchBtn = partsOf(card).browserSilentFetchBtn as HTMLElement | null;
 					const fieldKey = fetchBtn?.getAttribute('data-field-key') || '';
 					if (card && fieldKey) {
 						await this._executeBrowserFetch(card, fieldKey, false);
@@ -3432,7 +3713,7 @@ export class EntityDetailEditor extends EditorPane {
 				if (card?.getAttribute('data-python-hydrated') === 'true') {
 					return;
 				}
-				const wrapper = templatePart(card, '.python-code-wrapper') as HTMLElement | null;
+				const wrapper = partsOf(card).pythonCodeWrapper as HTMLElement | null;
 				if (wrapper) {
 					wrapper.style.borderColor = 'rgba(56, 189, 248, 0.55)';
 				}
@@ -3446,9 +3727,9 @@ export class EntityDetailEditor extends EditorPane {
 				if (card?.getAttribute('data-python-hydrated') === 'true') {
 					return;
 				}
-				const pyDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
-				const pyGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
-				const wrapper = templatePart(card, '.python-code-wrapper') as HTMLElement | null;
+				const pyDisplay = partsOf(card).pythonCodeDisplay as HTMLElement | null;
+				const pyGutter = partsOf(card).pythonLineNumbersGutter as HTMLElement | null;
+				const wrapper = partsOf(card).pythonCodeWrapper as HTMLElement | null;
 				if (wrapper) {
 					wrapper.style.borderColor = 'rgba(255, 255, 255, 0.15)';
 				}
@@ -3852,7 +4133,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		try {
 			// 1. Sync parameter inputs
-			const paramInputs = Array.from(templateParts(this._container, '.ticket-parameter-input')) as Array<HTMLInputElement | HTMLSelectElement>;
+			const paramInputs = Array.from((this._pageParts.ticketParameterInputs ?? [])) as Array<HTMLInputElement | HTMLSelectElement>;
 			if (paramInputs.length > 0) {
 				const byField = new Map<string, Record<string, string>>();
 				for (const inp of paramInputs) {
@@ -3882,11 +4163,11 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 2. Sync browser cards
-			const browserCards = Array.from(templateParts(this._container, '.browser-primitive-card')) as HTMLElement[];
+			const browserCards = Array.from((this._pageParts.browserPrimitiveCards ?? [])) as HTMLElement[];
 			for (const card of browserCards) {
-				const fetchBtn = templatePart(card, '.browser-silent-fetch-btn') as HTMLElement | null;
+				const fetchBtn = partsOf(card).browserSilentFetchBtn as HTMLElement | null;
 				const fk = fetchBtn?.getAttribute('data-field-key') || card.getAttribute('data-field-key') || '';
-				const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
+				const urlInput = partsOf(card).browserUrlInput as HTMLInputElement | null;
 				if (fk && urlInput) {
 					let bObj: Record<string, unknown> = {};
 					const rawVal = this._lastParsedData.customMetadata?.[fk];
@@ -3899,7 +4180,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 3. Sync prompt cards
-			const promptCards = Array.from(templateParts(this._container, '.prompt-primitive-card')) as HTMLElement[];
+			const promptCards = Array.from((this._pageParts.promptPrimitiveCards ?? [])) as HTMLElement[];
 			for (const card of promptCards) {
 				const fk = card.getAttribute('data-field-key') || '';
 				if (fk) {
@@ -3908,7 +4189,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 4. Sync python cards
-			const pythonCards = Array.from(templateParts(this._container, '.python-primitive-card')) as HTMLElement[];
+			const pythonCards = Array.from((this._pageParts.pythonPrimitiveCards ?? [])) as HTMLElement[];
 			for (const card of pythonCards) {
 				const fk = card.getAttribute('data-field-key') || '';
 				if (fk) {
@@ -3917,7 +4198,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 5. Sync TTS cards
-			const ttsCards = Array.from(templateParts(this._container, '.tts-primitive-card')) as HTMLElement[];
+			const ttsCards = Array.from((this._pageParts.ttsPrimitiveCards ?? [])) as HTMLElement[];
 			for (const card of ttsCards) {
 				const fk = card.getAttribute('data-field-key') || '';
 				if (fk) {
@@ -3926,7 +4207,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 6. Sync media player cards
-			const mediaCards = Array.from(templateParts(this._container, '.media-player-primitive-card')) as HTMLElement[];
+			const mediaCards = Array.from((this._pageParts.mediaPlayerPrimitiveCards ?? [])) as HTMLElement[];
 			for (const card of mediaCards) {
 				const fk = card.getAttribute('data-field-key') || '';
 				if (fk) {
@@ -3935,7 +4216,7 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			// 7. Sync SSH cards
-			const sshCards = Array.from(templateParts(this._container, '.ssh-primitive-card')) as HTMLElement[];
+			const sshCards = Array.from((this._pageParts.sshPrimitiveCards ?? [])) as HTMLElement[];
 			for (const card of sshCards) {
 				const fk = card.getAttribute('data-field-key') || '';
 				const rawSshJson = card.getAttribute('data-ssh-json') || '';
@@ -4018,7 +4299,7 @@ export class EntityDetailEditor extends EditorPane {
 		const cleanId = clean(fieldId);
 		const cleanLabel = clean(fieldLabel);
 
-		const cards = Array.from(templateParts<HTMLElement>(this._container, '.section-card'));
+		const cards = Array.from((this._pageParts.sectionCards ?? []));
 
 		// 1. Exact or normalized attribute matching
 		for (const card of cards) {
@@ -4033,7 +4314,7 @@ export class EntityDetailEditor extends EditorPane {
 		// 2. Title text matching
 		if (cleanLabel) {
 			for (const card of cards) {
-				const titleEl = templatePart(card, '.section-title');
+				const titleEl = partsOf(card).sectionTitle;
 				if (titleEl && clean(titleEl.textContent || '').includes(cleanLabel)) {
 					return card;
 				}
@@ -4041,7 +4322,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 		if (cleanId) {
 			for (const card of cards) {
-				const titleEl = templatePart(card, '.section-title');
+				const titleEl = partsOf(card).sectionTitle;
 				if (titleEl && clean(titleEl.textContent || '').includes(cleanId)) {
 					return card;
 				}
@@ -4052,16 +4333,16 @@ export class EntityDetailEditor extends EditorPane {
 		if (fieldType) {
 			const cType = clean(fieldType);
 			if (cType === 'parameters') {
-				const paramCard = templatePart<HTMLElement>(this._container, '.ticket-parameters-card');
+				const paramCard = this._pageParts.ticketParametersCard;
 				if (paramCard) { return paramCard; }
 			} else if (cType === 'python') {
-				const pyCard = templatePart<HTMLElement>(this._container, '.python-primitive-card');
+				const pyCard = this._pageParts.pythonPrimitiveCard;
 				if (pyCard) { return pyCard; }
 			} else if (cType === 'output') {
-				const outCard = templatePart<HTMLElement>(this._container, '.output-primitive-card');
+				const outCard = this._pageParts.outputPrimitiveCard;
 				if (outCard) { return outCard; }
 			} else if (cType === 'browser') {
-				const brCard = templatePart<HTMLElement>(this._container, '.browser-primitive-card');
+				const brCard = this._pageParts.browserPrimitiveCard;
 				if (brCard) { return brCard; }
 			}
 		}
@@ -4069,11 +4350,31 @@ export class EntityDetailEditor extends EditorPane {
 		return null;
 	}
 
+	/**
+	 * The first card of the page (in page order) that satisfies `predicate`. Cards are the section cards plus the voice
+	 * note cards; this replaces attribute-selector lookups like `[data-field-key="..."]` (which in the rendered page
+	 * always hit a card before any of its descendants).
+	 */
+	private _findCard(predicate: (card: HTMLElement) => boolean): HTMLElement | undefined {
+		const cards = [...(this._pageParts.sectionCards ?? []), ...(this._pageParts.customFieldCards ?? [])];
+		cards.sort((a, b) => a === b ? 0 : (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1));
+		return cards.find(predicate);
+	}
+
+	/** Records again the parts of a card and of its title row after a status badge was added or removed. */
+	private _refreshCardTitleParts(card: HTMLElement): void {
+		const titleEl = partsOf(card).sectionTitle;
+		if (titleEl) {
+			refreshParts(titleEl);
+		}
+		refreshParts(card);
+	}
+
 	private _updateCardStatusBadge(cardEl: HTMLElement, status: 'running' | 'success' | 'failed', text: string, tooltip?: string): void {
-		const titleEl = templatePart(cardEl, '.section-title');
+		const titleEl = partsOf(cardEl).sectionTitle;
 		if (!titleEl) { return; }
 
-		let badgeContainer = templatePart<HTMLElement>(titleEl, '.ticket-step-badge-container');
+		let badgeContainer = partsOf(titleEl).ticketStepBadgeContainer;
 		if (!badgeContainer) {
 			badgeContainer = document.createElement('div');
 			badgeContainer.className = 'ticket-step-badge-container';
@@ -4081,12 +4382,14 @@ export class EntityDetailEditor extends EditorPane {
 			badgeContainer.style.alignItems = 'center';
 			badgeContainer.style.marginLeft = 'auto';
 			badgeContainer.style.marginRight = '8px';
+			part('ticketStepBadgeContainer', badgeContainer);
 			const lastChild = titleEl.lastElementChild;
 			if (lastChild && lastChild !== titleEl.firstElementChild) {
 				titleEl.insertBefore(badgeContainer, lastChild);
 			} else {
 				titleEl.appendChild(badgeContainer);
 			}
+			this._refreshCardTitleParts(cardEl);
 		}
 
 		let icon: HTMLElement;
@@ -4112,13 +4415,13 @@ export class EntityDetailEditor extends EditorPane {
 
 		// 1. Python Card Feedback
 		if (fieldType === 'python' || cardEl.classList.contains('python-primitive-card')) {
-			const statusTextEl = templatePart<HTMLElement>(cardEl, '.python-status-text');
+			const statusTextEl = partsOf(cardEl).pythonStatusText;
 			if (statusTextEl) {
 				statusTextEl.textContent = stepRes.status === 'success' ? `Done (${stepRes.durationMs}ms)` : 'Failed';
 				statusTextEl.style.color = stepRes.status === 'success' ? '#4ade80' : '#f87171';
 			}
 
-			const outputDisplayEl = templatePart<HTMLElement>(cardEl, '.python-output-display');
+			const outputDisplayEl = partsOf(cardEl).pythonOutputDisplay;
 			const logs = stepRes.details?.commandLogs || stepRes.details?.logs || (typeof stepRes.output === 'string' ? stepRes.output : '');
 			if (outputDisplayEl && logs) {
 				outputDisplayEl.textContent = logs;
@@ -4127,11 +4430,11 @@ export class EntityDetailEditor extends EditorPane {
 			const resultVal = stepRes.details?.result !== undefined ? stepRes.details.result : stepRes.output;
 			if (resultVal !== undefined) {
 				cardRuntimeState(cardEl).lastPythonResult = resultVal;
-				const resultPre = templatePart<HTMLElement>(cardEl, '.python-result-display');
+				const resultPre = partsOf(cardEl).pythonResultDisplay;
 				if (resultPre) {
 					resultPre.textContent = typeof resultVal === 'object' ? JSON.stringify(resultVal, null, 2) : String(resultVal);
 				} else {
-					const outputSection = templatePart<HTMLElement>(cardEl, '.python-output-section');
+					const outputSection = partsOf(cardEl).pythonOutputSection;
 					if (outputSection) {
 						const resultBlock = document.createElement('div');
 						resultBlock.className = 'python-result-block';
@@ -4151,46 +4454,48 @@ export class EntityDetailEditor extends EditorPane {
 								$('div', { style: 'display: flex; align-items: center; gap: 8px; margin-left: auto;' },
 									$('span', { style: 'font-size: 9.5px; opacity: 0.65; color: #38bdf8;' }, 'Consumed by Output Manifest & Downstream Primitives'),
 									$<HTMLButtonElement>('button.python-copy-result-btn', { type: 'button', title: 'Copy complete Return Value (Output)', style: 'display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;' },
-										$('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' }),
+										part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' })),
 										$('span', undefined, 'Copy')
 									)
 								)
 							),
-							$('pre.python-result-display', { style: 'margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;' },
+							part(['pythonResultDisplay', 'pres'], $('pre.python-result-display', { style: 'margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;' },
 								textOf(typeof resultVal === 'object' ? JSON.stringify(resultVal, null, 2) : String(resultVal))
-							)
+							))
 						);
-						outputSection.insertBefore(resultBlock, outputSection.firstChild);
+						outputSection.insertBefore(withParts(() => part('pythonResultBlock', resultBlock)), outputSection.firstChild);
+						refreshParts(cardEl);
 					}
 				}
 			}
 		}
 
 		// 2. HTTP Request / HTTP Response Card Feedback
-		else if (fieldType === 'http_request' || templatePart(cardEl, '.desc-content-box pre') || cardEl.classList.contains('custom-property-card')) {
-			const pre = templatePart<HTMLElement>(cardEl, '.desc-content-box pre') || templatePart<HTMLElement>(cardEl, '.custom-field-view pre');
+		else if (fieldType === 'http_request' || firstPreInside(partsOf(cardEl), partsOf(cardEl).descContentBoxes ?? []) || cardEl.classList.contains('custom-property-card')) {
+			const pre = firstPreInside(partsOf(cardEl), partsOf(cardEl).descContentBoxes ?? []) || firstPreInside(partsOf(cardEl), partsOf(cardEl).customFieldViews ?? []);
 			if (pre && stepRes.output) {
 				const out = stepRes.output;
 				const outRec = (out && typeof out === 'object') ? out as { data?: unknown; body?: unknown } : undefined;
 				const displayData = outRec?.data !== undefined ? outRec.data : (outRec?.body !== undefined ? outRec.body : out);
 				pre.textContent = typeof displayData === 'object' ? JSON.stringify(displayData, null, 2) : String(displayData);
 			} else {
-				const contentBox = templatePart<HTMLElement>(cardEl, '.desc-content-box') || templatePart<HTMLElement>(cardEl, '.custom-field-view');
+				const contentBox = partsOf(cardEl).descContentBox || partsOf(cardEl).customFieldView;
 				if (contentBox && stepRes.output && !cardEl.classList.contains('ticket-parameters-card')) {
 					const out = stepRes.output;
 					const outRec = (out && typeof out === 'object') ? out as { data?: unknown } : undefined;
 					const displayData = outRec?.data !== undefined ? outRec.data : out;
 					const formatted = typeof displayData === 'object' ? JSON.stringify(displayData, null, 2) : String(displayData);
-					reset(contentBox, $('pre', { style: 'margin: 0; padding: 2px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; background: transparent; border: none; font-weight: 400;' },
+					reset(contentBox, part('pres', $('pre', { style: 'margin: 0; padding: 2px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; background: transparent; border: none; font-weight: 400;' },
 						textOf(formatted)
-					));
+					)));
+					refreshPartsAround(contentBox);
 				}
 			}
 		}
 
 		// 3. Output Card Feedback
 		if (fieldType === 'output' || cardEl.classList.contains('output-primitive-card')) {
-			const outPre = templatePart<HTMLElement>(cardEl, 'pre');
+			const outPre = partsOf(cardEl).pres?.[0];
 			if (outPre && stepRes.output !== undefined) {
 				outPre.textContent = typeof stepRes.output === 'object' ? JSON.stringify(stepRes.output, null, 2) : String(stepRes.output);
 			}
@@ -4237,10 +4542,13 @@ export class EntityDetailEditor extends EditorPane {
 
 		// Clear previous execution state from all component cards
 		if (this._container) {
-			templateParts(this._container, '.section-card').forEach(card => {
+			(this._pageParts.sectionCards ?? []).forEach(card => {
 				card.classList.remove('ticket-step-running', 'ticket-step-success', 'ticket-step-failed');
-				const badgeContainer = templatePart(card, '.ticket-step-badge-container');
-				if (badgeContainer) { badgeContainer.remove(); }
+				const badgeContainer = partsOf(card).ticketStepBadgeContainer;
+				if (badgeContainer) {
+					badgeContainer.remove();
+					this._refreshCardTitleParts(card);
+				}
 			});
 		}
 
@@ -4252,8 +4560,9 @@ export class EntityDetailEditor extends EditorPane {
 			reset(btnEl, ...[
 				$('span', { class: `${ThemeIcon.asClassName(Codicon.loading)} codicon-modifier-spin`, style: 'font-size: 12px;' }),
 				' ',
-				$('span.run-ticket-btn-label', undefined, 'Running...')
+				part('runTicketBtnLabel', part('runTicketBtnLabel', $('span.run-ticket-btn-label', undefined, 'Running...')))
 			]);
+			refreshParts(btnEl);
 		}
 
 		let completedStepsCount = 0;
@@ -4270,14 +4579,14 @@ export class EntityDetailEditor extends EditorPane {
 					path: (this._ticketFileUri || this._entityUri)?.toString()
 				},
 				onStepStart: (info) => {
-					const liveBtn = (templatePart(this._container, '#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+					const liveBtn = (this._pageParts.entityDetailRunTicketBtn as HTMLElement | null) || btnEl;
 					if (liveBtn) {
-						const labelEl = templatePart(liveBtn, '.run-ticket-btn-label');
+						const labelEl = partsOf(liveBtn).runTicketBtnLabel;
 						if (labelEl) { labelEl.textContent = `Running (${info.stepIndex}/${info.totalSteps})...`; }
 					}
 					const cardEl = this._findCardElementForStep(info.fieldId, info.fieldLabel, info.fieldType);
 					if (cardEl) {
-						templateParts(this._container, '.section-card.ticket-step-running')?.forEach(el => el.classList.remove('ticket-step-running'));
+						(this._pageParts.sectionCards ?? []).filter(el => el.classList.contains('ticket-step-running')).forEach(el => el.classList.remove('ticket-step-running'));
 						cardEl.classList.add('ticket-step-running');
 						cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 						this._updateCardStatusBadge(cardEl, 'running', `Running #${info.stepIndex}...`);
@@ -4309,15 +4618,16 @@ export class EntityDetailEditor extends EditorPane {
 			// Reload ticket data to synchronize in-memory and disk representation
 			await this._resolvePathsAndLoadData();
 
-			const liveBtn = (templatePart(this._container, '#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+			const liveBtn = (this._pageParts.entityDetailRunTicketBtn as HTMLElement | null) || btnEl;
 			if (result.success && failedStepsCount === 0) {
 				this._notificationService.info(`Ticket '${ticketId}' executed successfully (${result.stepResults?.length || 0} step(s)).`);
 				if (liveBtn) {
 					reset(liveBtn, ...[
 						$('span', { class: ThemeIcon.asClassName(Codicon.check), style: 'font-size: 12px; color: #4ade80;' }),
 						' ',
-						$('span.run-ticket-btn-label', undefined, 'Done')
+						part('runTicketBtnLabel', part('runTicketBtnLabel', $('span.run-ticket-btn-label', undefined, 'Done')))
 					]);
+					refreshParts(liveBtn);
 				}
 			} else {
 				this._notificationService.warn(`Ticket '${ticketId}' execution completed with ${failedStepsCount} issue(s). Check components for details.`);
@@ -4325,30 +4635,33 @@ export class EntityDetailEditor extends EditorPane {
 					reset(liveBtn, ...[
 						$('span', { class: ThemeIcon.asClassName(Codicon.warning), style: 'font-size: 12px; color: #f87171;' }),
 						' ',
-						$('span.run-ticket-btn-label', undefined, 'Finished with Warnings')
+						part('runTicketBtnLabel', part('runTicketBtnLabel', $('span.run-ticket-btn-label', undefined, 'Finished with Warnings')))
 					]);
+					refreshParts(liveBtn);
 				}
 			}
 		} catch (err) {
 			await this._resolvePathsAndLoadData();
 			this._notificationService.warn(`Ticket '${ticketId}' execution completed with errors: ${(err as Error | undefined)?.message || err}`);
-			const liveBtn = (templatePart(this._container, '#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+			const liveBtn = (this._pageParts.entityDetailRunTicketBtn as HTMLElement | null) || btnEl;
 			if (liveBtn) {
 				reset(liveBtn, ...[
 					$('span', { class: ThemeIcon.asClassName(Codicon.error), style: 'font-size: 12px; color: #f87171;' }),
 					' ',
-					$('span.run-ticket-btn-label', undefined, 'Failed')
+					part('runTicketBtnLabel', part('runTicketBtnLabel', $('span.run-ticket-btn-label', undefined, 'Failed')))
 				]);
+				refreshParts(liveBtn);
 			}
 		} finally {
 			this._isTicketRunning = false;
 			setTimeout(() => {
-				const liveBtn = (templatePart(this._container, '#entity-detail-run-ticket-btn') as HTMLElement | null) || btnEl;
+				const liveBtn = (this._pageParts.entityDetailRunTicketBtn as HTMLElement | null) || btnEl;
 				if (liveBtn) {
 					liveBtn.removeAttribute('disabled');
 					liveBtn.style.opacity = '1';
 					liveBtn.style.pointerEvents = '';
-					reset(liveBtn, ...originalContent.map(node => node.cloneNode(true)));
+					reset(liveBtn, ...originalContent);
+					refreshParts(liveBtn);
 
 				}
 			}, 3500);
@@ -4372,8 +4685,8 @@ export class EntityDetailEditor extends EditorPane {
 			await this._clipboardService.writeText(jsonStr);
 
 			if (btnEl) {
-				const iconEl = templatePart(btnEl, '.codicon') as HTMLElement | null;
-				const labelEl = templatePart(btnEl, '.copy-json-btn-label') as HTMLElement | null;
+				const iconEl = partsOf(btnEl).codicon as HTMLElement | null;
+				const labelEl = partsOf(btnEl).copyJsonBtnLabel as HTMLElement | null;
 				if (iconEl) { iconEl.className = 'codicon codicon-check'; }
 				if (labelEl) { labelEl.textContent = 'Copied JSON!'; }
 				btnEl.style.color = '#34d399';
@@ -4726,8 +5039,8 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			if (btnEl) {
-				const iconEl = templatePart(btnEl, '.codicon') as HTMLElement | null;
-				const labelEl = templatePart(btnEl, '.paste-json-btn-label') as HTMLElement | null;
+				const iconEl = partsOf(btnEl).codicon as HTMLElement | null;
+				const labelEl = partsOf(btnEl).pasteJsonBtnLabel as HTMLElement | null;
 				if (iconEl) { iconEl.className = 'codicon codicon-check'; }
 				if (labelEl) { labelEl.textContent = 'Pasted JSON!'; }
 				btnEl.style.color = '#34d399';
@@ -4779,7 +5092,7 @@ export class EntityDetailEditor extends EditorPane {
 
 		// Keep AI edit button's data attribute in sync
 		if (this._container) {
-			const aiBtn = templatePart(this._container, `.ai-edit-btn[data-ai-field="/Custom/${fieldKey}"]`) as HTMLElement | null;
+			const aiBtn = (this._pageParts.aiEditBtns ?? []).find(btn => btn.getAttribute('data-ai-field') === `/Custom/${fieldKey}`);
 			if (aiBtn) {
 				aiBtn.setAttribute('data-ai-current-value', newValue);
 			}
@@ -4808,7 +5121,7 @@ export class EntityDetailEditor extends EditorPane {
 		this._lastParsedData.title = trimmedTitle;
 
 		if (this._container) {
-			const aiBtn = templatePart(this._container, '.ai-edit-btn[data-ai-field="/Title"]') as HTMLElement | null;
+			const aiBtn = (this._pageParts.aiEditBtns ?? []).find(btn => btn.getAttribute('data-ai-field') === '/Title');
 			if (aiBtn) {
 				aiBtn.setAttribute('data-ai-current-value', trimmedTitle);
 			}
@@ -4833,7 +5146,7 @@ export class EntityDetailEditor extends EditorPane {
 		this._lastParsedData.description = newDescription;
 
 		if (this._container) {
-			const aiBtn = templatePart(this._container, '.ai-edit-btn[data-ai-field="/Description"]') as HTMLElement | null;
+			const aiBtn = (this._pageParts.aiEditBtns ?? []).find(btn => btn.getAttribute('data-ai-field') === '/Description');
 			if (aiBtn) {
 				aiBtn.setAttribute('data-ai-current-value', newDescription);
 			}
@@ -4862,7 +5175,7 @@ export class EntityDetailEditor extends EditorPane {
 		}
 
 		if (this._container) {
-			const aiBtn = templatePart(this._container, `.ai-edit-btn[data-ai-field="/Instructions/${promptKey}"]`) as HTMLElement | null;
+			const aiBtn = (this._pageParts.aiEditBtns ?? []).find(btn => btn.getAttribute('data-ai-field') === `/Instructions/${promptKey}`);
 			if (aiBtn) {
 				aiBtn.setAttribute('data-ai-current-value', newPrompt);
 			}
@@ -6955,7 +7268,7 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	private async _executeBrowserFetch(card: HTMLElement, fieldKey: string, openTab: boolean): Promise<void> {
-		const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
+		const urlInput = partsOf(card).browserUrlInput as HTMLInputElement | null;
 		let url = urlInput?.value.trim() || '';
 		if (!url) {
 			this._notificationService.warn('Please enter a target URL before fetching.');
@@ -6973,8 +7286,8 @@ export class EntityDetailEditor extends EditorPane {
 			finalUrl = 'https://' + finalUrl;
 		}
 
-		const statusEl = templatePart(card, '.browser-fetch-status') as HTMLElement | null;
-		const contentEl = templatePart(card, '.browser-content-display') as HTMLElement | null;
+		const statusEl = partsOf(card).browserFetchStatus as HTMLElement | null;
+		const contentEl = partsOf(card).browserContentDisplay as HTMLElement | null;
 
 		if (openTab) {
 			try {
@@ -7209,7 +7522,7 @@ ${rawErr}
 
 		// 3. Live DOM inputs if currently typed
 		if (this._container) {
-			const inputs = templateParts(this._container, '.ticket-parameter-input') as NodeListOf<HTMLInputElement | HTMLSelectElement>;
+			const inputs = (this._pageParts.ticketParameterInputs ?? []);
 			inputs.forEach(input => {
 				const pName = input.getAttribute('data-param-name');
 				if (pName) {
@@ -7241,10 +7554,11 @@ ${rawErr}
 					if (!this._container) {
 						return null;
 					}
-					return (templatePart(this._container, `.custom-property-card[data-field-key="${fKey}"]`) ||
-						templatePart(this._container, `.custom-property-card[data-field-id="${f.id}"]`) ||
-						templatePart(this._container, `.custom-primitive-card[data-field-key="${fKey}"]`) ||
-						templatePart(this._container, `.custom-primitive-card[data-field-id="${f.id}"]`)) as HTMLElement | null;
+					return this._findCard(card => card.classList.contains('custom-property-card') && card.getAttribute('data-field-key') === fKey)
+						|| this._findCard(card => card.classList.contains('custom-property-card') && card.getAttribute('data-field-id') === f.id)
+						|| this._findCard(card => card.classList.contains('custom-primitive-card') && card.getAttribute('data-field-key') === fKey)
+						|| this._findCard(card => card.classList.contains('custom-primitive-card') && card.getAttribute('data-field-id') === f.id)
+						|| null;
 				};
 
 				if (f.type === 'browser') {
@@ -7252,8 +7566,8 @@ ${rawErr}
 					let content = '';
 					const card = findLiveCard();
 					if (card) {
-						const urlInput = templatePart(card, '.browser-url-input') as HTMLInputElement | null;
-						const contentEl = templatePart(card, '.browser-content-display') as HTMLElement | null;
+						const urlInput = partsOf(card).browserUrlInput as HTMLInputElement | null;
+						const contentEl = partsOf(card).browserContentDisplay as HTMLElement | null;
 						if (urlInput) { url = urlInput.value.trim(); }
 						if (contentEl) { content = contentEl.textContent || ''; }
 					}
@@ -7279,9 +7593,9 @@ ${rawErr}
 					let pyCodeStr = '';
 					const card = findLiveCard();
 					if (card) {
-						const resEl = templatePart(card, '.python-result-display') as HTMLElement | null;
-						const outEl = templatePart(card, '.python-output-display') as HTMLElement | null;
-						const codeEl = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
+						const resEl = partsOf(card).pythonResultDisplay as HTMLElement | null;
+						const outEl = partsOf(card).pythonOutputDisplay as HTMLElement | null;
+						const codeEl = partsOf(card).pythonCodeTextarea as HTMLTextAreaElement | null;
 						if (resEl && resEl.textContent) {
 							pyResultStr = resEl.textContent.trim();
 						} else if (cardRuntimeState(card).lastPythonResult !== undefined && cardRuntimeState(card).lastPythonResult !== null) {
@@ -7323,16 +7637,16 @@ ${rawErr}
 					let output = '';
 					const card = findLiveCard();
 					if (card) {
-						const userTas = Array.from(templateParts(card, '.prompt-user-textarea')) as HTMLTextAreaElement[];
-						const preTa = templatePart(card, '.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
+						const userTas = Array.from((partsOf(card).promptUserTextareas ?? [])) as HTMLTextAreaElement[];
+						const preTa = partsOf(card).promptPreinjectedTextarea as HTMLTextAreaElement | null;
 						const preTxt = preTa ? preTa.value : (card.getAttribute('data-pre-injected-prompt') || '');
 						if (userTas.length > 0) {
 							prompt = this._formatCombinedPromptForLlm(preTxt, userTas.map(t => t.value || '')).combinedRawPrompt;
 						} else {
-							const ta = templatePart(card, '.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+							const ta = partsOf(card).promptInstructionTextarea as HTMLTextAreaElement | null;
 							if (ta) { prompt = ta.value; }
 						}
-						const out = templatePart(card, '.prompt-output-display') as HTMLElement | null;
+						const out = partsOf(card).promptOutputDisplay as HTMLElement | null;
 						if (out) { output = out.textContent || ''; }
 					}
 					if (!prompt && savedObj && typeof savedObj === 'object') {
@@ -7357,12 +7671,12 @@ ${rawErr}
 					let resText = '';
 					const card = findLiveCard();
 					if (card) {
-						const contentEl = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
+						const contentEl = partsOf(card).resultRawContent as HTMLTextAreaElement | null;
 						if (contentEl) { resText = contentEl.value || ''; }
-						const specItems = templateParts(card, '.output-spec-item');
+						const specItems = (partsOf(card).outputSpecItems ?? []);
 						specItems.forEach(it => {
 							const sKey = it.getAttribute('data-spec-key') || '';
-							const ta = templatePart(it, '.output-item-raw-content') as HTMLTextAreaElement | null;
+							const ta = partsOf(it).outputItemRawContent as HTMLTextAreaElement | null;
 							if (sKey && ta?.value) {
 								subProps[sKey] = ta.value;
 							}
@@ -7423,7 +7737,7 @@ ${rawErr}
 								if (liveParsed.sqlOutput !== undefined) { sqlOut = String(liveParsed.sqlOutput).trim(); }
 							} catch { }
 						}
-						const liveSqlBox = templatePart(card, '.sql-output-box') as HTMLElement | null;
+						const liveSqlBox = cardRuntimeState(card).sqlOutputBox;
 						if (liveSqlBox && liveSqlBox.style.fontStyle !== 'italic' && liveSqlBox.textContent) {
 							const boxTxt = liveSqlBox.textContent.trim();
 							if (boxTxt && !boxTxt.startsWith('No SQL execution output yet.')) {
@@ -7510,7 +7824,7 @@ ${rawErr}
 
 					const card = findLiveCard();
 					if (card) {
-						const bodyDisplay = templatePart(card, '.http-response-body-display') as HTMLElement | null;
+						const bodyDisplay = partsOf(card).httpResponseBodyDisplay as HTMLElement | null;
 						if (bodyDisplay && bodyDisplay.textContent && !bodyDisplay.textContent.includes('No response received yet.')) {
 							resBody = bodyDisplay.textContent.trim();
 						}
@@ -7685,9 +7999,9 @@ ${rawErr}
 	private async _togglePromptVoiceInput(micBtn: HTMLButtonElement): Promise<void> {
 		const wrapper = micBtn.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
 		const card = micBtn.closest('.prompt-primitive-card') as HTMLElement | null;
-		const textarea = templatePart(wrapper, 'textarea') as HTMLTextAreaElement | null;
-		const recordingIndicator = templatePart(wrapper, '.prompt-voice-recording-indicator') as HTMLElement | null;
-		const recordingTimeSpan = templatePart(recordingIndicator, '.prompt-voice-recording-time') as HTMLElement | null;
+		const textarea = partsOf(wrapper).promptBoxTextarea;
+		const recordingIndicator = partsOf(wrapper).promptVoiceRecordingIndicator as HTMLElement | null;
+		const recordingTimeSpan = partsOf(recordingIndicator).promptVoiceRecordingTime as HTMLElement | null;
 		const fieldKey = micBtn.getAttribute('data-field-key') || card?.getAttribute('data-field-key') || '';
 		if (!textarea) {
 			return;
@@ -7897,7 +8211,7 @@ ${rawErr}
 				const openBrace = rawToken.startsWith('{{') ? '{{' : '{';
 				const closeBrace = rawToken.endsWith('}}') ? '}}' : '}';
 				out.push($('span.prompt-token-pill', { 'data-raw-start': `${matchStart}`, 'data-raw-end': `${matchEnd}`, 'data-raw-token': textOf(rawToken), style: 'display: inline; white-space: nowrap; padding: 1px 6px; font-size: 11px; font-weight: 500; border-radius: 3.5px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.28); vertical-align: baseline; font-family: var(--vscode-editor-font-family, monospace); user-select: text; -webkit-user-select: text; margin: 0 1.5px; line-height: 1.35; cursor: text; transition: all 0.15s ease;', title: `Referenced Field: ${textOf(varLabel)} (Click to edit)` },
-					$('span.codicon.codicon-link', { style: 'font-size: 10px; opacity: 0.85; margin-right: 3.5px; vertical-align: -1px; user-select: none; -webkit-user-select: none;' }),
+					part('codicon', $('span.codicon.codicon-link', { style: 'font-size: 10px; opacity: 0.85; margin-right: 3.5px; vertical-align: -1px; user-select: none; -webkit-user-select: none;' })),
 					$('span', { style: 'font-size: 0; line-height: 0; opacity: 0;' }, openBrace),
 					$('span', { style: 'font-weight: 600;' }, textOf(varLabel)),
 					$('span', { style: 'font-size: 0; line-height: 0; opacity: 0;' }, closeBrace)
@@ -7940,10 +8254,10 @@ ${rawErr}
 
 	private _syncPromptBoxExpandUi(wrapper: HTMLElement): void {
 		const isExpanded = wrapper.getAttribute('data-expanded') === 'true';
-		const displayEl = templatePart(wrapper, '.prompt-tokenized-display') as HTMLElement | null;
-		const textareaEl = templatePart(wrapper, 'textarea') as HTMLTextAreaElement | null;
-		const topExpandBtn = templatePart(wrapper, '.prompt-expand-box-btn') as HTMLElement | null;
-		const bottomExpandPill = templatePart(wrapper, '.prompt-expand-bottom-pill') as HTMLElement | null;
+		const displayEl = partsOf(wrapper).promptTokenizedDisplay as HTMLElement | null;
+		const textareaEl = partsOf(wrapper).promptBoxTextarea;
+		const topExpandBtn = partsOf(wrapper).promptExpandBoxBtn as HTMLElement | null;
+		const bottomExpandPill = partsOf(wrapper).promptExpandBottomPill as HTMLElement | null;
 		const rawVal = textareaEl?.value || '';
 		const isLong = isExpanded || this._isPromptBoxContentLong(rawVal, displayEl, textareaEl);
 		const defaultMaxPx = `${EntityDetailEditor._PROMPT_BOX_DEFAULT_MAX_HEIGHT}px`;
@@ -7978,7 +8292,7 @@ ${rawErr}
 				: 'Expand input box to show full content';
 			topExpandBtn.style.background = 'transparent';
 			topExpandBtn.style.border = 'none';
-			const iconEl = templatePart(topExpandBtn, '.codicon') as HTMLElement | null;
+			const iconEl = partsOf(topExpandBtn).codicon as HTMLElement | null;
 			if (iconEl) {
 				iconEl.className = isExpanded ? 'codicon codicon-chevron-up' : 'codicon codicon-chevron-down';
 			}
@@ -7997,7 +8311,7 @@ ${rawErr}
 
 	private _syncPromptTokenizedDisplay(textarea: HTMLTextAreaElement, switchToDisplayMode: boolean): void {
 		const wrapper = textarea.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
-		const displayEl = templatePart(wrapper, '.prompt-tokenized-display') as HTMLElement | null;
+		const displayEl = partsOf(wrapper).promptTokenizedDisplay as HTMLElement | null;
 		if (!displayEl || !wrapper) {
 			return;
 		}
@@ -8067,11 +8381,11 @@ ${rawErr}
 
 	private _syncPromptBoxLockUi(wrapper: HTMLElement): void {
 		const isLocked = wrapper.getAttribute('data-locked') === 'true';
-		const lockBtn = templatePart(wrapper, '.prompt-lock-box-btn') as HTMLElement | null;
-		const displayEl = templatePart(wrapper, '.prompt-tokenized-display') as HTMLElement | null;
-		const micBtn = templatePart(wrapper, '.prompt-voice-mic-btn') as HTMLElement | null;
+		const lockBtn = partsOf(wrapper).promptLockBoxBtn as HTMLElement | null;
+		const displayEl = partsOf(wrapper).promptTokenizedDisplay as HTMLElement | null;
+		const micBtn = partsOf(wrapper).promptVoiceMicBtn as HTMLElement | null;
 		const itemEl = wrapper.closest('.prompt-user-input-item') as HTMLElement | null;
-		const chipsContainer = templatePart(itemEl, '.prompt-user-input-chips') as HTMLElement | null;
+		const chipsContainer = partsOf(itemEl).promptUserInputChips as HTMLElement | null;
 
 		if (lockBtn) {
 			lockBtn.style.color = isLocked ? '#fbbf24' : '#34d399';
@@ -8080,7 +8394,7 @@ ${rawErr}
 			lockBtn.title = isLocked
 				? 'Locked (Read-Only) — Click to Unlock for editing'
 				: 'Unlocked (Editable) — Click to Lock and protect from accidental edits';
-			const iconEl = templatePart(lockBtn, '.codicon') as HTMLElement | null;
+			const iconEl = partsOf(lockBtn).codicon as HTMLElement | null;
 			if (iconEl) {
 				iconEl.className = isLocked ? 'codicon codicon-lock' : 'codicon codicon-unlock';
 			}
@@ -8109,7 +8423,7 @@ ${rawErr}
 		const currentlyLocked = wrapper.getAttribute('data-locked') === 'true';
 		const nextLocked = !currentlyLocked;
 		wrapper.setAttribute('data-locked', nextLocked ? 'true' : 'false');
-		const textarea = templatePart(wrapper, 'textarea') as HTMLTextAreaElement | null;
+		const textarea = partsOf(wrapper).promptBoxTextarea;
 		if (nextLocked && textarea && textarea.style.display !== 'none') {
 			if (typeof textarea.selectionStart === 'number') {
 				textarea.setAttribute('data-last-selection-start', String(textarea.selectionStart));
@@ -8122,8 +8436,8 @@ ${rawErr}
 	}
 
 	private _pulsePromptLockBtn(wrapper: HTMLElement): void {
-		const lockBtn = templatePart(wrapper, '.prompt-lock-box-btn') as HTMLElement | null;
-		const displayEl = templatePart(wrapper, '.prompt-tokenized-display') as HTMLElement | null;
+		const lockBtn = partsOf(wrapper).promptLockBoxBtn as HTMLElement | null;
+		const displayEl = partsOf(wrapper).promptTokenizedDisplay as HTMLElement | null;
 		if (lockBtn) {
 			const prevShadow = lockBtn.style.boxShadow;
 			const prevTransform = lockBtn.style.transform;
@@ -8145,7 +8459,7 @@ ${rawErr}
 
 	private _switchPromptDisplayToEdit(displayEl: HTMLElement, ev?: MouseEvent, explicitCaretOffset?: number): void {
 		const wrapper = displayEl.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
-		const textarea = templatePart(wrapper, 'textarea') as HTMLTextAreaElement | null;
+		const textarea = partsOf(wrapper).promptBoxTextarea;
 		if (!textarea || !wrapper) {
 			return;
 		}
@@ -8204,7 +8518,7 @@ ${rawErr}
 	}
 
 	private _flashMovedPromptBox(itemEl: HTMLElement): void {
-		const displayEl = templatePart(itemEl, '.prompt-tokenized-display') as HTMLElement | null;
+		const displayEl = partsOf(itemEl).promptTokenizedDisplay as HTMLElement | null;
 		const targetEl = displayEl || itemEl;
 		try {
 			itemEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
@@ -8220,11 +8534,11 @@ ${rawErr}
 	}
 
 	private async _promptJumpUserInputPosition(card: HTMLElement, itemEl: HTMLElement, fieldKey: string): Promise<void> {
-		const listEl = templatePart(card, '.prompt-user-inputs-list') as HTMLElement | null;
+		const listEl = partsOf(card).promptUserInputsList as HTMLElement | null;
 		if (!listEl) {
 			return;
 		}
-		const items = Array.from(templateParts(listEl, '.prompt-user-input-item')) as HTMLElement[];
+		const items = Array.from((partsOf(listEl).promptUserInputItems ?? [])) as HTMLElement[];
 		const total = items.length;
 		const currentIdx = items.indexOf(itemEl);
 		if (total <= 1 || currentIdx < 0) {
@@ -8232,7 +8546,7 @@ ${rawErr}
 		}
 
 		const picks = items.map((it, idx) => {
-			const ta = templatePart(it, '.prompt-user-textarea') as HTMLTextAreaElement | null;
+			const ta = partsOf(it).promptUserTextarea as HTMLTextAreaElement | null;
 			const firstLine = (ta?.value || '').trim().split(/\r?\n/)[0] || '(Empty)';
 			const snippet = firstLine.length > 56 ? `${firstLine.slice(0, 56)}...` : firstLine;
 			const isCurrent = idx === currentIdx;
@@ -8314,61 +8628,64 @@ ${rawErr}
 			? 'Locked — Unlock this prompt box first to record voice input'
 			: 'Record voice input (Speech-to-Text)';
 		const chipsOpacity = effectiveLocked ? '0.5' : '1';
-		return $('div.prompt-user-input-item', { 'data-input-index': `${boxIdx}`, style: 'display: flex; flex-direction: column; gap: 6px;' },
-			$('div.voice-input-textarea-wrapper', { 'data-expanded': 'false', 'data-locked': (effectiveLocked ? 'true' : 'false'), style: 'position: relative; width: 100%;' },
+		return part('promptUserInputItems', withParts(() => $('div.prompt-user-input-item', { 'data-input-index': `${boxIdx}`, style: 'display: flex; flex-direction: column; gap: 6px;' },
+			part(['voiceInputTextareaWrapper', 'voiceInputTextareaWrappers'], withParts(() => $('div.voice-input-textarea-wrapper', { 'data-expanded': 'false', 'data-locked': (effectiveLocked ? 'true' : 'false'), style: 'position: relative; width: 100%;' },
 				$('div.prompt-user-input-top-actions', { style: 'position: absolute; top: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 2px;' },
-					$('span.prompt-user-input-badge', { title: `Click to jump / move User Input #${boxIdx + 1} to any position (1 ~ ${totalBoxes})`, style: `font-size: 9.5px; font-weight: 700; color: #38bdf8; background: transparent; border: none; padding: 0 3px; line-height: 1; user-select: none; cursor: pointer; display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; opacity: 0.85;` },
+					part('promptUserInputBadge', $('span.prompt-user-input-badge', { title: `Click to jump / move User Input #${boxIdx + 1} to any position (1 ~ ${totalBoxes})`, style: `font-size: 9.5px; font-weight: 700; color: #38bdf8; background: transparent; border: none; padding: 0 3px; line-height: 1; user-select: none; cursor: pointer; display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; opacity: 0.85;` },
 						'#',
 						String(boxIdx + 1)
-					),
-					$<HTMLButtonElement>('button.prompt-lock-box-btn', { type: 'button', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: ${lockColor}; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: lockTitle },
-						$('span', { class: `codicon ${lockIcon}`, style: 'font-size: 12px;' })
-					),
-					$<HTMLButtonElement>('button.prompt-move-up-user-input-btn', { type: 'button', style: `display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: ${canMoveUp ? 'pointer' : 'default'}; color: #cbd5e1; background: transparent; border: none; opacity: ${canMoveUp ? '0.8' : '0.22'}; pointer-events: ${canMoveUp ? 'auto' : 'none'}; padding: 0; transition: all 120ms ease;`, title: (canMoveUp ? `Move User Input #${boxIdx + 1} Up (to #${boxIdx})` : 'Already at the top (#1)') },
-						$('span.codicon.codicon-arrow-up', { style: 'font-size: 12px;' })
-					),
-					$<HTMLButtonElement>('button.prompt-move-down-user-input-btn', { type: 'button', style: `display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: ${canMoveDown ? 'pointer' : 'default'}; color: #cbd5e1; background: transparent; border: none; opacity: ${canMoveDown ? '0.8' : '0.22'}; pointer-events: ${canMoveDown ? 'auto' : 'none'}; padding: 0; transition: all 120ms ease;`, title: (canMoveDown ? `Move User Input #${boxIdx + 1} Down (to #${boxIdx + 2})` : `Already at the bottom (#${totalBoxes})`) },
-						$('span.codicon.codicon-arrow-down', { style: 'font-size: 12px;' })
-					),
-					$<HTMLButtonElement>('button.prompt-expand-box-btn', { type: 'button', style: `display: ${isLong ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #38bdf8; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: 'Expand input box to show full content' },
-						$('span.codicon.codicon-chevron-down', { style: 'font-size: 13px;' })
-					),
-					$<HTMLButtonElement>('button.prompt-remove-user-input-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #f87171; background: transparent; border: none; opacity: 0.72; padding: 0; transition: all 120ms ease;', title: (isMulti ? `Delete User Input #${boxIdx + 1} (Requires Confirmation)` : 'Delete User Prompt Input Box (Requires Confirmation)') },
-						$('span.codicon.codicon-trash', { style: 'font-size: 12px;' })
-					)
+					)),
+					part('promptLockBoxBtn', withParts(() => $<HTMLButtonElement>('button.prompt-lock-box-btn', { type: 'button', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: ${lockColor}; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: lockTitle },
+						part('codicon', $('span', { class: `codicon ${lockIcon}`, style: 'font-size: 12px;' }))
+					))),
+					part('promptMoveUpUserInputBtn', $<HTMLButtonElement>('button.prompt-move-up-user-input-btn', { type: 'button', style: `display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: ${canMoveUp ? 'pointer' : 'default'}; color: #cbd5e1; background: transparent; border: none; opacity: ${canMoveUp ? '0.8' : '0.22'}; pointer-events: ${canMoveUp ? 'auto' : 'none'}; padding: 0; transition: all 120ms ease;`, title: (canMoveUp ? `Move User Input #${boxIdx + 1} Up (to #${boxIdx})` : 'Already at the top (#1)') },
+						part('codicon', $('span.codicon.codicon-arrow-up', { style: 'font-size: 12px;' }))
+					)),
+					part('promptMoveDownUserInputBtn', $<HTMLButtonElement>('button.prompt-move-down-user-input-btn', { type: 'button', style: `display: ${isMulti ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: ${canMoveDown ? 'pointer' : 'default'}; color: #cbd5e1; background: transparent; border: none; opacity: ${canMoveDown ? '0.8' : '0.22'}; pointer-events: ${canMoveDown ? 'auto' : 'none'}; padding: 0; transition: all 120ms ease;`, title: (canMoveDown ? `Move User Input #${boxIdx + 1} Down (to #${boxIdx + 2})` : `Already at the bottom (#${totalBoxes})`) },
+						part('codicon', $('span.codicon.codicon-arrow-down', { style: 'font-size: 12px;' }))
+					)),
+					part('promptExpandBoxBtn', withParts(() => $<HTMLButtonElement>('button.prompt-expand-box-btn', { type: 'button', style: `display: ${isLong ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #38bdf8; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: 'Expand input box to show full content' },
+						part('codicon', $('span.codicon.codicon-chevron-down', { style: 'font-size: 13px;' }))
+					))),
+					part('promptRemoveUserInputBtn', $<HTMLButtonElement>('button.prompt-remove-user-input-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #f87171; background: transparent; border: none; opacity: 0.72; padding: 0; transition: all 120ms ease;', title: (isMulti ? `Delete User Input #${boxIdx + 1} (Requires Confirmation)` : 'Delete User Prompt Input Box (Requires Confirmation)') },
+						part('codicon', $('span.codicon.codicon-trash', { style: 'font-size: 12px;' }))
+					))
 				),
-				$('div.prompt-tokenized-display', { 'data-placeholder': textOf(placeholderText), title: displayTitle, style: `width: 100%; min-height: 118px; max-height: ${maxH}px; padding: 8px ${rightPadPx}px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; cursor: text; user-select: text; -webkit-user-select: text; resize: vertical; overflow-y: auto;` },
+				part('promptTokenizedDisplay', $('div.prompt-tokenized-display', { 'data-placeholder': textOf(placeholderText), title: displayTitle, style: `width: 100%; min-height: 118px; max-height: ${maxH}px; padding: 8px ${rightPadPx}px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; cursor: text; user-select: text; -webkit-user-select: text; resize: vertical; overflow-y: auto;` },
 					...this._renderPromptTokenized(boxVal || '', placeholderText)
-				),
-				$<HTMLTextAreaElement>('textarea.prompt-instruction-textarea.prompt-user-textarea.monaco-inputbox', { 'data-field-key': textOf(rawKey), 'data-input-index': `${boxIdx}`, rows: '5', placeholder: textOf(placeholderText), style: `width: 100%; min-height: 118px; max-height: ${maxH}px; height: 140px; padding: 8px ${rightPadPx}px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid #38bdf8; background: rgba(0,0,0,0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; overflow-y: auto; display: none; outline: none;` },
+				)),
+				part(['promptInstructionTextarea', 'promptUserTextarea', 'promptUserTextareas', 'promptBoxTextarea'], $<HTMLTextAreaElement>('textarea.prompt-instruction-textarea.prompt-user-textarea.monaco-inputbox', { 'data-field-key': textOf(rawKey), 'data-input-index': `${boxIdx}`, rows: '5', placeholder: textOf(placeholderText), style: `width: 100%; min-height: 118px; max-height: ${maxH}px; height: 140px; padding: 8px ${rightPadPx}px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid #38bdf8; background: rgba(0,0,0,0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; overflow-y: auto; display: none; outline: none;` },
 					textOf(boxVal)
-				),
-				$<HTMLButtonElement>('button.prompt-expand-bottom-pill', { type: 'button', style: 'display: none;' }),
+				)),
+				part('promptExpandBottomPill', $<HTMLButtonElement>('button.prompt-expand-bottom-pill', { type: 'button', style: 'display: none;' })),
 				$('div.prompt-voice-input-controls', { style: 'position: absolute; bottom: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 4px;' },
-					$('div.prompt-voice-recording-indicator', { style: 'display: none; align-items: center; gap: 6px; font-size: 11px; color: #ff3b30; font-weight: 500; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(255, 59, 48, 0.35); padding: 2px 8px; border-radius: 12px; user-select: none;' },
+					part('promptVoiceRecordingIndicator', withParts(() => $('div.prompt-voice-recording-indicator', { style: 'display: none; align-items: center; gap: 6px; font-size: 11px; color: #ff3b30; font-weight: 500; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(255, 59, 48, 0.35); padding: 2px 8px; border-radius: 12px; user-select: none;' },
 						$('span.prompt-voice-recording-dot', { style: 'width: 8px; height: 8px; border-radius: 50%; background-color: #ff3b30; display: inline-block;' }),
 						' ',
-						$('span.prompt-voice-recording-time', undefined, '0:00 / 5:00')
-					),
-					$<HTMLButtonElement>('button.prompt-voice-mic-btn', { type: 'button', 'data-field-key': textOf(rawKey), 'data-voice-target': 'user', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: var(--vscode-foreground); background: transparent; border: none; opacity: ${micOpacity}; padding: 0; transition: all 120ms ease;`, title: micTitle },
-						$('span.codicon.codicon-mic', { style: 'font-size: 12.5px;' })
-					)
+						part('promptVoiceRecordingTime', $('span.prompt-voice-recording-time', undefined, '0:00 / 5:00'))
+					))),
+					part('promptVoiceMicBtn', $<HTMLButtonElement>('button.prompt-voice-mic-btn', { type: 'button', 'data-field-key': textOf(rawKey), 'data-voice-target': 'user', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: var(--vscode-foreground); background: transparent; border: none; opacity: ${micOpacity}; padding: 0; transition: all 120ms ease;`, title: micTitle },
+						part('codicon', $('span.codicon.codicon-mic', { style: 'font-size: 12.5px;' }))
+					))
 				)
-			),
-			$('div.prompt-user-input-chips', { style: `display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 2px; opacity: ${chipsOpacity};` },
+			))),
+			part('promptUserInputChips', withParts(() => $('div.prompt-user-input-chips', { style: `display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 2px; opacity: ${chipsOpacity};` },
 				...chipsInner
 
-			)
-		);
+			)))
+		)));
 	}
 
 	private _refreshPromptUserInputItemsUi(card: HTMLElement): void {
-		const listEl = templatePart(card, '.prompt-user-inputs-list') as HTMLElement | null;
-		const countBadge = templatePart(card, '.prompt-user-inputs-count-badge') as HTMLElement | null;
+		const listEl = partsOf(card).promptUserInputsList as HTMLElement | null;
+		const countBadge = partsOf(card).promptUserInputsCountBadge as HTMLElement | null;
 		if (!listEl) {
 			return;
 		}
-		const items = Array.from(templateParts(listEl, '.prompt-user-input-item')) as HTMLElement[];
+		// Called after User Input boxes were added, removed or moved: record the boxes (and their parts) again
+		refreshParts(listEl);
+		refreshParts(card);
+		const items = partsOf(listEl).promptUserInputItems ?? [];
 		const total = items.length;
 		const isMulti = total > 1;
 		const rightPadPx = isMulti ? 106 : 48;
@@ -8384,13 +8701,13 @@ ${rawErr}
 		items.forEach((item, idx) => {
 			item.setAttribute('data-input-index', String(idx));
 			item.style.cssText = 'display: flex; flex-direction: column; gap: 6px;';
-			const badge = templatePart(item, '.prompt-user-input-badge') as HTMLElement | null;
+			const badge = partsOf(item).promptUserInputBadge as HTMLElement | null;
 			if (badge) {
 				badge.textContent = `#${idx + 1}`;
 				badge.style.display = isMulti ? 'inline-flex' : 'none';
 				badge.title = `Click to jump / move User Input #${idx + 1} to any position (1 ~ ${total})`;
 			}
-			const moveUpBtn = templatePart(item, '.prompt-move-up-user-input-btn') as HTMLElement | null;
+			const moveUpBtn = partsOf(item).promptMoveUpUserInputBtn as HTMLElement | null;
 			if (moveUpBtn) {
 				const canUp = isMulti && idx > 0;
 				moveUpBtn.style.display = isMulti ? 'inline-flex' : 'none';
@@ -8399,7 +8716,7 @@ ${rawErr}
 				moveUpBtn.style.cursor = canUp ? 'pointer' : 'default';
 				moveUpBtn.title = canUp ? `Move User Input #${idx + 1} Up (to #${idx})` : 'Already at the top (#1)';
 			}
-			const moveDownBtn = templatePart(item, '.prompt-move-down-user-input-btn') as HTMLElement | null;
+			const moveDownBtn = partsOf(item).promptMoveDownUserInputBtn as HTMLElement | null;
 			if (moveDownBtn) {
 				const canDown = isMulti && idx < total - 1;
 				moveDownBtn.style.display = isMulti ? 'inline-flex' : 'none';
@@ -8408,15 +8725,15 @@ ${rawErr}
 				moveDownBtn.style.cursor = canDown ? 'pointer' : 'default';
 				moveDownBtn.title = canDown ? `Move User Input #${idx + 1} Down (to #${idx + 2})` : `Already at the bottom (#${total})`;
 			}
-			const removeBtn = templatePart(item, '.prompt-remove-user-input-btn') as HTMLElement | null;
+			const removeBtn = partsOf(item).promptRemoveUserInputBtn as HTMLElement | null;
 			if (removeBtn) {
 				removeBtn.title = isMulti ? `Delete User Input #${idx + 1} (Requires Confirmation)` : 'Delete User Prompt Input Box (Requires Confirmation)';
 			}
-			const displayEl = templatePart(item, '.prompt-tokenized-display') as HTMLElement | null;
+			const displayEl = partsOf(item).promptTokenizedDisplay as HTMLElement | null;
 			if (displayEl) {
 				displayEl.style.paddingRight = `${rightPadPx}px`;
 			}
-			const ta = templatePart(item, '.prompt-user-textarea') as HTMLTextAreaElement | null;
+			const ta = partsOf(item).promptUserTextarea as HTMLTextAreaElement | null;
 			if (ta) {
 				ta.style.paddingRight = `${rightPadPx}px`;
 				ta.setAttribute('data-input-index', String(idx));
@@ -8425,7 +8742,7 @@ ${rawErr}
 					: 'Enter your prompt or custom instructions here...';
 				this._syncPromptTokenizedDisplay(ta, false);
 			}
-			const wrapper = templatePart(item, '.voice-input-textarea-wrapper') as HTMLElement | null;
+			const wrapper = partsOf(item).voiceInputTextareaWrapper as HTMLElement | null;
 			if (wrapper) {
 				this._syncPromptBoxLockUi(wrapper);
 			}
@@ -8473,9 +8790,9 @@ ${rawErr}
 		combinedRawPrompt: string;
 		interpolatedPrompt: string;
 	} {
-		const preInjectedTa = templatePart(card, '.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
-		const userInputsListEl = templatePart(card, '.prompt-user-inputs-list') as HTMLElement | null;
-		const userTextareas = Array.from(templateParts(card, '.prompt-user-textarea')) as HTMLTextAreaElement[];
+		const preInjectedTa = partsOf(card).promptPreinjectedTextarea as HTMLTextAreaElement | null;
+		const userInputsListEl = partsOf(card).promptUserInputsList as HTMLElement | null;
+		const userTextareas = Array.from((partsOf(card).promptUserTextareas ?? [])) as HTMLTextAreaElement[];
 		const preInjectedPrompt = (preInjectedTa ? preInjectedTa.value : (card.getAttribute('data-pre-injected-prompt') || '')).trim();
 		if (preInjectedTa) {
 			card.setAttribute('data-pre-injected-prompt', preInjectedTa.value);
@@ -8489,7 +8806,7 @@ ${rawErr}
 		} else {
 			userPrompts = userTextareas.length > 0
 				? userTextareas.map(ta => ta.value || '')
-				: [((templatePart(card, '.prompt-instruction-textarea') as HTMLTextAreaElement | null)?.value || '')];
+				: [((partsOf(card).promptInstructionTextarea as HTMLTextAreaElement | null)?.value || '')];
 		}
 		const { formattedUserPrompt, combinedRawPrompt } = this._formatCombinedPromptForLlm(preInjectedPrompt, userPrompts);
 		const interpolatedPrompt = this._interpolateParameters(combinedRawPrompt);
@@ -8595,11 +8912,11 @@ ${rawErr}
 		fullInterpolatedPrompt: string;
 		isFromSavedRun: boolean;
 	} {
-		const providerSelect = templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null;
-		const modelSelect = templatePart(card, '.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
-		const selectedModelText = templatePart(card, '.prompt-selected-model-text') as HTMLElement | null;
-		const customModelInput = templatePart(card, '.prompt-custom-model-input') as HTMLInputElement | null;
-		const agentSelect = templatePart(card, '.prompt-agent-select') as HTMLSelectElement | null;
+		const providerSelect = partsOf(card).promptProviderSelect as HTMLSelectElement | null;
+		const modelSelect = partsOf(card).promptModelSelect as HTMLInputElement | HTMLSelectElement | null;
+		const selectedModelText = partsOf(card).promptSelectedModelText as HTMLElement | null;
+		const customModelInput = partsOf(card).promptCustomModelInput as HTMLInputElement | null;
+		const agentSelect = partsOf(card).promptAgentSelect as HTMLSelectElement | null;
 
 		const lockedMode = card.getAttribute('data-target-mode') as 'model' | 'agent' | null;
 		const targetMode: 'model' | 'agent' = lockedMode === 'agent' ? 'agent' : 'model';
@@ -8689,7 +9006,7 @@ ${rawErr}
 			scanTokensInText(seg, nonEmptyRawSegments.length > 1 ? `User Input #${idx + 1}` : 'User Prompt');
 		});
 
-		const statusEl = templatePart(card, '.prompt-status-text') as HTMLElement | null;
+		const statusEl = partsOf(card).promptStatusText as HTMLElement | null;
 		const statusStr = (statusEl?.textContent || '').trim();
 		const executedAt = markAsExecutedNow
 			? `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`
@@ -8874,13 +9191,13 @@ ${rawErr}
 								' chars'
 							)
 						),
-						$<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'ref', 'data-copy-index': `${idx}`, style: 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 10px; color: inherit; cursor: pointer;' },
+						part('inspectorCopyChunkBtns', $<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'ref', 'data-copy-index': `${idx}`, style: 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 10px; color: inherit; cursor: pointer;' },
 							'Copy Value'
-						)
+						))
 					),
-					$('pre', { style: 'margin: 0; padding: 10px 12px; max-height: 220px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;' },
+					part('pres', $('pre', { style: 'margin: 0; padding: 10px 12px; max-height: 220px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;' },
 						rv.resolvedValue ? textOf(rv.resolvedValue) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, '(Empty value)')
-					)
+					))
 				))
 				: [$('div', { style: 'padding: 10px 12px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.12); font-size: 11.5px; opacity: 0.65;' },
 					'No ',
@@ -8910,14 +9227,14 @@ ${rawErr}
 									)
 								] : [])
 							),
-							$<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'user', 'data-copy-index': `${idx}`, style: 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 10px; color: inherit; cursor: pointer;' },
+							part('inspectorCopyChunkBtns', $<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'user', 'data-copy-index': `${idx}`, style: 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 10px; color: inherit; cursor: pointer;' },
 								'Copy #',
 								String(idx + 1)
-							)
+							))
 						),
-						$('pre', { style: 'margin: 0; padding: 10px 12px; max-height: 210px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;' },
+						part('pres', $('pre', { style: 'margin: 0; padding: 10px 12px; max-height: 210px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;' },
 							textOf(segInterp)
-						)
+						))
 					);
 				})
 				: [$('div', { style: 'padding: 10px 12px; border-radius: 6px; background: rgba(255,255,255,0.03); border: 1px dashed rgba(255,255,255,0.12); font-size: 11.5px; opacity: 0.65;' },
@@ -8934,14 +9251,14 @@ ${rawErr}
 							$('span', { style: 'font-size: 12px; font-weight: 600; color: #93c5fd;' }, 'Pre-Injected Prompt (Template Instruction)'),
 							$('span', { style: 'font-size: 10.5px; opacity: 0.72;' }, '(', preInterp.length.toLocaleString(), ' chars)')
 						),
-						$<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'pre', style: 'background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.16); border-radius: 4px; padding: 3px 9px; font-size: 10.5px; color: inherit; cursor: pointer;' },
+						part('inspectorCopyChunkBtns', $<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'pre', style: 'background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.16); border-radius: 4px; padding: 3px 9px; font-size: 10.5px; color: inherit; cursor: pointer;' },
 							'Copy System Instruction'
-						)
+						))
 					),
 					$('div', { style: 'padding: 12px 14px;' },
-						preInterp.trim() ? $('pre', { style: 'margin: 0; max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;' },
+						preInterp.trim() ? part('pres', $('pre', { style: 'margin: 0; max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #e2e8f0;' },
 							textOf(preInterp)
-						) : $('div', { style: 'font-size: 11.5px; opacity: 0.55; font-style: italic;' }, 'No Pre-Injected Prompt configured in this template.')
+						)) : $('div', { style: 'font-size: 11.5px; opacity: 0.55; font-style: italic;' }, 'No Pre-Injected Prompt configured in this template.')
 					)
 				),
 				$('div', { style: 'border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 8px; background: rgba(30, 41, 59, 0.35); overflow: hidden;' },
@@ -8989,14 +9306,14 @@ ${rawErr}
 								' tokens)'
 							)
 						),
-						$<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'full', style: 'background: rgba(168, 85, 247, 0.22); border: 1px solid rgba(192, 132, 252, 0.4); border-radius: 4px; padding: 3px 10px; font-size: 10.5px; font-weight: 600; color: #e9d5ff; cursor: pointer;' },
+						part('inspectorCopyChunkBtns', $<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'full', style: 'background: rgba(168, 85, 247, 0.22); border: 1px solid rgba(192, 132, 252, 0.4); border-radius: 4px; padding: 3px 10px; font-size: 10.5px; font-weight: 600; color: #e9d5ff; cursor: pointer;' },
 							'Copy Full Prompt'
-						)
+						))
 					),
 					$('div', { style: 'padding: 12px 14px;' },
-						$('pre', { style: 'margin: 0; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #f1f5f9; background: rgba(0, 0, 0, 0.3); padding: 12px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);' },
+						part('pres', $('pre', { style: 'margin: 0; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; color: #f1f5f9; background: rgba(0, 0, 0, 0.3); padding: 12px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);' },
 							activeSnapshot.fullInterpolatedPrompt ? textOf(activeSnapshot.fullInterpolatedPrompt) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, '(Empty prompt)')
-						)
+						))
 					)
 				)
 			) : $('div', { style: 'display: flex; flex-direction: column; height: 100%; gap: 8px;' },
@@ -9010,9 +9327,9 @@ ${rawErr}
 					),
 					$('span', undefined, totalChars.toLocaleString(), ' chars (~', approxTokens.toLocaleString(), ' est. tokens)')
 				),
-				$('pre', { style: 'flex: 1; margin: 0; padding: 14px 16px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; background: rgba(0, 0, 0, 0.38); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; color: #f1f5f9;' },
+				part('pres', $('pre', { style: 'flex: 1; margin: 0; padding: 14px 16px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; background: rgba(0, 0, 0, 0.38); border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; color: #f1f5f9;' },
 					activeSnapshot.fullInterpolatedPrompt ? textOf(activeSnapshot.fullInterpolatedPrompt) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, '(Empty prompt)')
-				)
+				))
 			);
 
 			reset(dialog,
@@ -9020,7 +9337,7 @@ ${rawErr}
 				$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; background: rgba(15, 23, 42, 0.75); border-bottom: 1px solid rgba(255, 255, 255, 0.1); flex-wrap: wrap;' },
 					$('div', { style: 'display: flex; flex-direction: column; gap: 4px;' },
 						$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
-							$('span.codicon.codicon-eye', { style: 'font-size: 15px; color: #38bdf8;' }),
+							part('codicon', $('span.codicon.codicon-eye', { style: 'font-size: 15px; color: #38bdf8;' })),
 							$('span', { style: 'font-size: 14px; font-weight: 700; color: #f8fafc;' }, 'Sent Prompt Inspector \u2014 ', textOf(fieldKey)),
 							$('span', { style: 'font-size: 10.5px; padding: 2px 8px; border-radius: 12px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600;' },
 								textOf(targetLabel)
@@ -9052,39 +9369,39 @@ ${rawErr}
 						)
 					),
 					$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
-						$<HTMLButtonElement>('button.inspector-open-tab-btn', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.14); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35);', title: 'Open the structured breakdown and full prompt in a new Markdown editor tab' },
-							$('span.codicon.codicon-go-to-file', { style: 'font-size: 12px;' }),
+						part('inspectorOpenTabBtn', $<HTMLButtonElement>('button.inspector-open-tab-btn', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.14); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35);', title: 'Open the structured breakdown and full prompt in a new Markdown editor tab' },
+							part('codicon', $('span.codicon.codicon-go-to-file', { style: 'font-size: 12px;' })),
 							$('span', undefined, 'Open in Editor Tab')
-						),
-						$<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'full', style: 'display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4);', title: 'Copy the complete final prompt sent to AI' },
-							$('span.codicon.codicon-copy', { style: 'font-size: 12px;' }),
+						)),
+						part('inspectorCopyChunkBtns', $<HTMLButtonElement>('button.inspector-copy-chunk-btn', { type: 'button', 'data-copy-kind': 'full', style: 'display: inline-flex; align-items: center; gap: 5px; padding: 5px 11px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.4);', title: 'Copy the complete final prompt sent to AI' },
+							part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 12px;' })),
 							$('span', undefined, 'Copy Full Prompt')
-						),
-						$<HTMLButtonElement>('button.inspector-close-btn', { type: 'button', style: 'display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; background: rgba(255, 255, 255, 0.06); color: inherit; border: 1px solid rgba(255, 255, 255, 0.14);', title: 'Close (Esc)' },
-							$('span.codicon.codicon-close', { style: 'font-size: 14px;' })
-						)
+						)),
+						part('inspectorCloseBtn', $<HTMLButtonElement>('button.inspector-close-btn', { type: 'button', style: 'display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; border-radius: 6px; cursor: pointer; background: rgba(255, 255, 255, 0.06); color: inherit; border: 1px solid rgba(255, 255, 255, 0.14);', title: 'Close (Esc)' },
+							part('codicon', $('span.codicon.codicon-close', { style: 'font-size: 14px;' }))
+						))
 					)
 				),
 				$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 18px; background: rgba(0, 0, 0, 0.28); border-bottom: 1px solid rgba(255, 255, 255, 0.08); flex-wrap: wrap;' },
 					$('div', { style: 'display: inline-flex; align-items: center; gap: 6px; background: rgba(255, 255, 255, 0.04); padding: 3px; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.08);' },
-						$<HTMLButtonElement>('button.inspector-tab-btn', { type: 'button', 'data-tab': 'structured', style: `padding: 4px 12px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer; border: none; background: ${activeTab === 'structured' ? 'rgba(56, 189, 248, 0.22)' : 'transparent'}; color: ${activeTab === 'structured' ? '#38bdf8' : 'inherit'};` },
+						part('inspectorTabBtns', $<HTMLButtonElement>('button.inspector-tab-btn', { type: 'button', 'data-tab': 'structured', style: `padding: 4px 12px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer; border: none; background: ${activeTab === 'structured' ? 'rgba(56, 189, 248, 0.22)' : 'transparent'}; color: ${activeTab === 'structured' ? '#38bdf8' : 'inherit'};` },
 							'Structured Breakdown'
-						),
-						$<HTMLButtonElement>('button.inspector-tab-btn', { type: 'button', 'data-tab': 'raw', style: `padding: 4px 12px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer; border: none; background: ${activeTab === 'raw' ? 'rgba(56, 189, 248, 0.22)' : 'transparent'}; color: ${activeTab === 'raw' ? '#38bdf8' : 'inherit'};` },
+						)),
+						part('inspectorTabBtns', $<HTMLButtonElement>('button.inspector-tab-btn', { type: 'button', 'data-tab': 'raw', style: `padding: 4px 12px; font-size: 11.5px; font-weight: 600; border-radius: 4px; cursor: pointer; border: none; background: ${activeTab === 'raw' ? 'rgba(56, 189, 248, 0.22)' : 'transparent'}; color: ${activeTab === 'raw' ? '#38bdf8' : 'inherit'};` },
 							'Full Verbatim Prompt'
-						)
+						))
 					),
 					$('div', { style: 'display: flex; align-items: center; gap: 8px; font-size: 11px;' },
 						...(savedSnapshot ? [
 							$('span', { style: 'opacity: 0.7;' }, 'Snapshot Source:'),
 							' ',
-							$<HTMLButtonElement>('button.inspector-source-btn', { type: 'button', 'data-source': 'saved', style: `padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; border: 1px solid ${activeSnapshot === savedSnapshot ? 'rgba(52, 211, 153, 0.45)' : 'rgba(255,255,255,0.14)'}; background: ${activeSnapshot === savedSnapshot ? 'rgba(16, 185, 129, 0.18)' : 'transparent'}; color: ${activeSnapshot === savedSnapshot ? '#34d399' : 'inherit'};` },
+							part('inspectorSourceBtns', $<HTMLButtonElement>('button.inspector-source-btn', { type: 'button', 'data-source': 'saved', style: `padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; border: 1px solid ${activeSnapshot === savedSnapshot ? 'rgba(52, 211, 153, 0.45)' : 'rgba(255,255,255,0.14)'}; background: ${activeSnapshot === savedSnapshot ? 'rgba(16, 185, 129, 0.18)' : 'transparent'}; color: ${activeSnapshot === savedSnapshot ? '#34d399' : 'inherit'};` },
 								'Last Execution Snapshot'
-							),
+							)),
 							' ',
-							$<HTMLButtonElement>('button.inspector-source-btn', { type: 'button', 'data-source': 'live', style: `padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; border: 1px solid ${activeSnapshot === liveSnapshot ? 'rgba(56, 189, 248, 0.45)' : 'rgba(255,255,255,0.14)'}; background: ${activeSnapshot === liveSnapshot ? 'rgba(56, 189, 248, 0.18)' : 'transparent'}; color: ${activeSnapshot === liveSnapshot ? '#38bdf8' : 'inherit'};` },
+							part('inspectorSourceBtns', $<HTMLButtonElement>('button.inspector-source-btn', { type: 'button', 'data-source': 'live', style: `padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; border: 1px solid ${activeSnapshot === liveSnapshot ? 'rgba(56, 189, 248, 0.45)' : 'rgba(255,255,255,0.14)'}; background: ${activeSnapshot === liveSnapshot ? 'rgba(56, 189, 248, 0.18)' : 'transparent'}; color: ${activeSnapshot === liveSnapshot ? '#38bdf8' : 'inherit'};` },
 								'Live Current Inputs'
-							)
+							))
 						] : [
 							$('span', { style: 'opacity: 0.65; font-style: italic;' }, 'Showing full resolved prompt from current ticket fields & segments')
 						])
@@ -9092,14 +9409,15 @@ ${rawErr}
 				),
 				$('div', { style: 'flex: 1; padding: 16px 18px; overflow-y: auto; box-sizing: border-box;' }, bodyContent)
 			);
+			refreshParts(dialog);
 
 			// Wire interactive buttons inside the dialog
-			const closeBtn = templatePart(dialog, '.inspector-close-btn') as HTMLElement | null;
+			const closeBtn = partsOf(dialog).inspectorCloseBtn as HTMLElement | null;
 			if (closeBtn) {
 				closeBtn.onclick = () => closeDialog();
 			}
 
-			const openTabBtn = templatePart(dialog, '.inspector-open-tab-btn') as HTMLElement | null;
+			const openTabBtn = partsOf(dialog).inspectorOpenTabBtn as HTMLElement | null;
 			if (openTabBtn) {
 				openTabBtn.onclick = () => {
 					this._openSentPromptInEditorTab(activeSnapshot, fieldKey);
@@ -9107,7 +9425,7 @@ ${rawErr}
 				};
 			}
 
-			const tabBtns = Array.from(templateParts(dialog, '.inspector-tab-btn')) as HTMLElement[];
+			const tabBtns = Array.from((partsOf(dialog).inspectorTabBtns ?? [])) as HTMLElement[];
 			tabBtns.forEach(btn => {
 				btn.onclick = () => {
 					const t = btn.getAttribute('data-tab') as 'structured' | 'raw';
@@ -9118,7 +9436,7 @@ ${rawErr}
 				};
 			});
 
-			const sourceBtns = Array.from(templateParts(dialog, '.inspector-source-btn')) as HTMLElement[];
+			const sourceBtns = Array.from((partsOf(dialog).inspectorSourceBtns ?? [])) as HTMLElement[];
 			sourceBtns.forEach(btn => {
 				btn.onclick = () => {
 					const src = btn.getAttribute('data-source');
@@ -9132,7 +9450,7 @@ ${rawErr}
 				};
 			});
 
-			const copyBtns = Array.from(templateParts(dialog, '.inspector-copy-chunk-btn')) as HTMLElement[];
+			const copyBtns = Array.from((partsOf(dialog).inspectorCopyChunkBtns ?? [])) as HTMLElement[];
 			copyBtns.forEach(btn => {
 				btn.onclick = () => {
 					const kind = btn.getAttribute('data-copy-kind');
@@ -9176,14 +9494,14 @@ ${rawErr}
 	}
 
 	private async _savePromptDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string): Promise<Record<string, unknown>> {
-		const textarea = templatePart(card, '.prompt-instruction-textarea') as HTMLTextAreaElement | null;
-		const providerSelect = templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null;
-		const modelSelect = templatePart(card, '.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
-		const selectedModelText = templatePart(card, '.prompt-selected-model-text') as HTMLElement | null;
-		const customModelInput = templatePart(card, '.prompt-custom-model-input') as HTMLInputElement | null;
-		const agentSelect = templatePart(card, '.prompt-agent-select') as HTMLSelectElement | null;
-		const rawOutputTa = templatePart(card, '.prompt-raw-output') as HTMLTextAreaElement | null;
-		const outputDisplay = templatePart(card, '.prompt-output-display') as HTMLElement | null;
+		const textarea = partsOf(card).promptInstructionTextarea as HTMLTextAreaElement | null;
+		const providerSelect = partsOf(card).promptProviderSelect as HTMLSelectElement | null;
+		const modelSelect = partsOf(card).promptModelSelect as HTMLInputElement | HTMLSelectElement | null;
+		const selectedModelText = partsOf(card).promptSelectedModelText as HTMLElement | null;
+		const customModelInput = partsOf(card).promptCustomModelInput as HTMLInputElement | null;
+		const agentSelect = partsOf(card).promptAgentSelect as HTMLSelectElement | null;
+		const rawOutputTa = partsOf(card).promptRawOutput as HTMLTextAreaElement | null;
+		const outputDisplay = partsOf(card).promptOutputDisplay as HTMLElement | null;
 
 		const lockedMode = card.getAttribute('data-target-mode') as 'model' | 'agent' | null;
 		const targetMode: 'model' | 'agent' = lockedMode === 'agent' ? 'agent' : 'model';
@@ -9197,14 +9515,14 @@ ${rawErr}
 			? (agentSelect?.selectedOptions[0]?.textContent?.split('(')[0]?.trim() || '')
 			: '';
 		const userCustomizedTarget = card.getAttribute('data-user-customized-target') === 'true';
-		const userTextareas = Array.from(templateParts(card, '.prompt-user-textarea')) as HTMLTextAreaElement[];
+		const userTextareas = Array.from((partsOf(card).promptUserTextareas ?? [])) as HTMLTextAreaElement[];
 		const userPrompts = userTextareas.length > 0
 			? userTextareas.map(ta => ta.value || '')
 			: [textarea?.value || ''];
 		const userPromptsLocked = userTextareas.length > 0
 			? userTextareas.map(ta => ta.closest('.voice-input-textarea-wrapper')?.getAttribute('data-locked') === 'true')
 			: [textarea?.closest('.voice-input-textarea-wrapper')?.getAttribute('data-locked') === 'true'];
-		const preInjectedTa = templatePart(card, '.prompt-preinjected-textarea') as HTMLTextAreaElement | null;
+		const preInjectedTa = partsOf(card).promptPreinjectedTextarea as HTMLTextAreaElement | null;
 		const preInjectedPrompt = preInjectedTa ? preInjectedTa.value : (card.getAttribute('data-pre-injected-prompt') || '');
 		const preInjectedWrapper = preInjectedTa?.closest('.voice-input-textarea-wrapper') as HTMLElement | null;
 		const preInjectedLocked = preInjectedWrapper ? preInjectedWrapper.getAttribute('data-locked') === 'true' : undefined;
@@ -9259,7 +9577,7 @@ ${rawErr}
 
 	private _findLivePromptCard(fieldKey: string, fallbackCard: HTMLElement): HTMLElement {
 		if (this._container) {
-			const cards = Array.from(templateParts(this._container, '.prompt-primitive-card')) as HTMLElement[];
+			const cards = Array.from((this._pageParts.promptPrimitiveCards ?? [])) as HTMLElement[];
 			const match = cards.find(c => c.getAttribute('data-field-key') === fieldKey);
 			if (match) {
 				return match;
@@ -9415,7 +9733,7 @@ ${rawErr}
 	}
 
 	private async _executePromptWithModel(card: HTMLElement, fieldKey: string): Promise<void> {
-		const textarea = templatePart(card, '.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+		const textarea = partsOf(card).promptInstructionTextarea as HTMLTextAreaElement | null;
 		const { combinedRawPrompt, interpolatedPrompt } = this._resolveCombinedPromptFromCard(card);
 		if (!combinedRawPrompt) {
 			this._notificationService.warn('Please enter a prompt instruction before running.');
@@ -9427,10 +9745,10 @@ ${rawErr}
 		const sentSnapshotJson = JSON.stringify(sentSnapshot);
 		card.setAttribute('data-last-sent-payload', sentSnapshotJson);
 
-		const modelSelect = templatePart(card, '.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
-		const selectedModelText = templatePart(card, '.prompt-selected-model-text') as HTMLElement | null;
-		const customModelInput = templatePart(card, '.prompt-custom-model-input') as HTMLInputElement | null;
-		const modelCardProvider = card.getAttribute('data-target-provider') || (templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null)?.value.trim() || undefined;
+		const modelSelect = partsOf(card).promptModelSelect as HTMLInputElement | HTMLSelectElement | null;
+		const selectedModelText = partsOf(card).promptSelectedModelText as HTMLElement | null;
+		const customModelInput = partsOf(card).promptCustomModelInput as HTMLInputElement | null;
+		const modelCardProvider = card.getAttribute('data-target-provider') || (partsOf(card).promptProviderSelect as HTMLSelectElement | null)?.value.trim() || undefined;
 		let modelId = card.getAttribute('data-target-model') || modelSelect?.value.trim() || selectedModelText?.textContent?.trim() || resolveDefaultModelId(modelCardProvider, 'gemini-2.5-flash');
 		if (modelId === 'custom' && customModelInput) {
 			modelId = customModelInput.value.trim() || resolveDefaultModelId(modelCardProvider, 'gpt-4o');
@@ -9441,9 +9759,9 @@ ${rawErr}
 		if (directTableJson) {
 			const liveCard = this._findLivePromptCard(fieldKey, card);
 			liveCard.setAttribute('data-last-sent-payload', sentSnapshotJson);
-			const liveStatus = templatePart(liveCard, '.prompt-status-text') as HTMLElement | null;
-			const liveRawTa = templatePart(liveCard, '.prompt-raw-output') as HTMLTextAreaElement | null;
-			const liveOutput = templatePart(liveCard, '.prompt-output-display') as HTMLElement | null;
+			const liveStatus = partsOf(liveCard).promptStatusText as HTMLElement | null;
+			const liveRawTa = partsOf(liveCard).promptRawOutput as HTMLTextAreaElement | null;
+			const liveOutput = partsOf(liveCard).promptOutputDisplay as HTMLElement | null;
 			if (liveRawTa) {
 				liveRawTa.value = directTableJson;
 			}
@@ -9465,8 +9783,8 @@ ${rawErr}
 		const updateRunningUi = () => {
 			const liveCard = this._findLivePromptCard(fieldKey, card);
 			const elapsedSec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-			const liveStatus = templatePart(liveCard, '.prompt-status-text') as HTMLElement | null;
-			const liveOutput = templatePart(liveCard, '.prompt-output-display') as HTMLElement | null;
+			const liveStatus = partsOf(liveCard).promptStatusText as HTMLElement | null;
+			const liveOutput = partsOf(liveCard).promptOutputDisplay as HTMLElement | null;
 			if (liveStatus) {
 				liveStatus.textContent = `Running with ${modelId}... \u23F3 (${elapsedSec}s)`;
 				liveStatus.style.color = '#f472b6';
@@ -9476,8 +9794,8 @@ ${rawErr}
 			}
 		};
 
-		const initialStatus = templatePart(card, '.prompt-status-text') as HTMLElement | null;
-		const initialOutput = templatePart(card, '.prompt-output-display') as HTMLElement | null;
+		const initialStatus = partsOf(card).promptStatusText as HTMLElement | null;
+		const initialOutput = partsOf(card).promptOutputDisplay as HTMLElement | null;
 		if (initialStatus) {
 			initialStatus.textContent = `Running with ${modelId}... \u23F3 (0s)`;
 			initialStatus.style.color = '#f472b6';
@@ -9497,7 +9815,7 @@ ${rawErr}
 				throw new Error('AI Credential service not available.');
 			}
 
-			const providerSelect = templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null;
+			const providerSelect = partsOf(card).promptProviderSelect as HTMLSelectElement | null;
 			const promptDefaultModel = getGlobalDefaultModel();
 			const targetProviderId = card.getAttribute('data-target-provider') || providerSelect?.value.trim() || (promptDefaultModel && modelId === promptDefaultModel.modelId ? promptDefaultModel.providerId : undefined);
 			const res = await credService.executePrompt(modelId, interpolatedPrompt, undefined, targetProviderId);
@@ -9507,9 +9825,9 @@ ${rawErr}
 
 			const liveCard = this._findLivePromptCard(fieldKey, card);
 			liveCard.setAttribute('data-last-sent-payload', sentSnapshotJson);
-			const liveStatus = templatePart(liveCard, '.prompt-status-text') as HTMLElement | null;
-			const liveRawTa = templatePart(liveCard, '.prompt-raw-output') as HTMLTextAreaElement | null;
-			const liveOutput = templatePart(liveCard, '.prompt-output-display') as HTMLElement | null;
+			const liveStatus = partsOf(liveCard).promptStatusText as HTMLElement | null;
+			const liveRawTa = partsOf(liveCard).promptRawOutput as HTMLTextAreaElement | null;
+			const liveOutput = partsOf(liveCard).promptOutputDisplay as HTMLElement | null;
 
 			if (res.success && res.text) {
 				let finalOutText = res.text;
@@ -9557,8 +9875,8 @@ ${rawErr}
 			const errMsg = (err as Error | undefined)?.message || String(err);
 			const liveCard = this._findLivePromptCard(fieldKey, card);
 			liveCard.setAttribute('data-last-sent-payload', sentSnapshotJson);
-			const liveStatus = templatePart(liveCard, '.prompt-status-text') as HTMLElement | null;
-			const liveOutput = templatePart(liveCard, '.prompt-output-display') as HTMLElement | null;
+			const liveStatus = partsOf(liveCard).promptStatusText as HTMLElement | null;
+			const liveOutput = partsOf(liveCard).promptOutputDisplay as HTMLElement | null;
 			if (liveOutput) {
 				liveOutput.textContent = `[Execution Error]\n${errMsg}`;
 			}
@@ -9572,7 +9890,7 @@ ${rawErr}
 
 	private async _hydratePromptPrimitiveCards(): Promise<void> {
 		if (!this._container) { return; }
-		const cards = Array.from(templateParts(this._container, '.prompt-primitive-card')) as HTMLElement[];
+		const cards = Array.from((this._pageParts.promptPrimitiveCards ?? [])) as HTMLElement[];
 		if (cards.length === 0) { return; }
 
 		// Cached model lists are refreshed in place below
@@ -9612,14 +9930,14 @@ ${rawErr}
 		const providerModelsMap = this._getPromptProviderModelsMap();
 
 		for (const card of cards) {
-			const wrappers = Array.from(templateParts(card, '.voice-input-textarea-wrapper')) as HTMLElement[];
+			const wrappers = Array.from((partsOf(card).voiceInputTextareaWrappers ?? [])) as HTMLElement[];
 			wrappers.forEach(w => this._syncPromptBoxExpandUi(w));
 			const cardFieldKey = card.getAttribute('data-field-key') || '';
 			const inFlight = cardFieldKey ? this._inFlightPromptRuns.get(cardFieldKey) : undefined;
 			if (inFlight) {
 				const elapsedSec = Math.max(0, Math.floor((Date.now() - inFlight.startedAt) / 1000));
-				const liveStatus = templatePart(card, '.prompt-status-text') as HTMLElement | null;
-				const liveOutput = templatePart(card, '.prompt-output-display') as HTMLElement | null;
+				const liveStatus = partsOf(card).promptStatusText as HTMLElement | null;
+				const liveOutput = partsOf(card).promptOutputDisplay as HTMLElement | null;
 				if (liveStatus) {
 					liveStatus.textContent = `Running with ${inFlight.modelId}... \u23F3 (${elapsedSec}s)`;
 					liveStatus.style.color = '#f472b6';
@@ -9634,15 +9952,15 @@ ${rawErr}
 			}
 			card.setAttribute('data-prompt-hydrated', 'true');
 			const fieldKey = card.getAttribute('data-field-key') || '';
-			const providerSelect = templatePart(card, '.prompt-provider-select') as HTMLSelectElement | null;
-			const modelHiddenInput = templatePart(card, '.prompt-model-select') as HTMLInputElement | HTMLSelectElement | null;
-			const modelPickerBtn = templatePart(card, '.prompt-model-picker-btn') as HTMLButtonElement | null;
-			const selectedModelText = templatePart(card, '.prompt-selected-model-text') as HTMLElement | null;
-			const modelDropdown = templatePart(card, '.prompt-model-dropdown') as HTMLElement | null;
-			const modelSearchInput = templatePart(card, '.prompt-model-search-input') as HTMLInputElement | null;
-			const dropdownProviderBadge = templatePart(card, '.prompt-dropdown-provider-badge') as HTMLElement | null;
-			const modelListEl = templatePart(card, '.prompt-model-list') as HTMLElement | null;
-			const targetBadge = templatePart(card, '.prompt-target-badge') as HTMLElement | null;
+			const providerSelect = partsOf(card).promptProviderSelect as HTMLSelectElement | null;
+			const modelHiddenInput = partsOf(card).promptModelSelect as HTMLInputElement | HTMLSelectElement | null;
+			const modelPickerBtn = partsOf(card).promptModelPickerBtn as HTMLButtonElement | null;
+			const selectedModelText = partsOf(card).promptSelectedModelText as HTMLElement | null;
+			const modelDropdown = partsOf(card).promptModelDropdown as HTMLElement | null;
+			const modelSearchInput = partsOf(card).promptModelSearchInput as HTMLInputElement | null;
+			const dropdownProviderBadge = partsOf(card).promptDropdownProviderBadge as HTMLElement | null;
+			const modelListEl = partsOf(card).promptModelList as HTMLElement | null;
+			const targetBadge = partsOf(card).promptTargetBadge as HTMLElement | null;
 
 			let activeProvider = card.getAttribute('data-target-provider') || 'openai';
 			let activeModel = card.getAttribute('data-target-model') || modelHiddenInput?.value || selectedModelText?.textContent?.trim() || resolveDefaultModelId(activeProvider, 'gpt-4o');
@@ -9856,7 +10174,7 @@ ${rawErr}
 
 	private async _hydrateTtsPrimitiveCards(): Promise<void> {
 		if (!this._container) { return; }
-		const cards = Array.from(templateParts(this._container, '.tts-primitive-card')) as HTMLElement[];
+		const cards = Array.from((this._pageParts.ttsPrimitiveCards ?? [])) as HTMLElement[];
 		if (cards.length === 0) { return; }
 
 		let loadedCredentials: IAgentCredential[] = [];
@@ -9897,29 +10215,29 @@ ${rawErr}
 
 		for (const card of cards) {
 			const fieldKey = card.getAttribute('data-field-key') || '';
-			const credSelect = templatePart(card, '.tts-cred-select') as HTMLSelectElement | null;
-			const modelPickerBtn = templatePart(card, '.tts-model-picker-btn') as HTMLButtonElement | null;
-			const selectedModelText = templatePart(card, '.tts-selected-model-text') as HTMLElement | null;
-			const modelDropdown = templatePart(card, '.tts-model-dropdown') as HTMLElement | null;
-			const modelSearchInput = templatePart(card, '.tts-model-search-input') as HTMLInputElement | null;
-			const dropdownProviderBadge = templatePart(card, '.tts-dropdown-provider-badge') as HTMLElement | null;
-			const modelListEl = templatePart(card, '.tts-model-list') as HTMLElement | null;
-			const formatSelect = templatePart(card, '.tts-format-select') as HTMLSelectElement | null;
-			const voiceSelect = templatePart(card, '.tts-voice-select') as HTMLSelectElement | null;
-			const autoPlayCheckbox = templatePart(card, '.tts-autoplay-checkbox') as HTMLInputElement | null;
-			const headerModelBadge = templatePart(card, '.tts-header-model-badge') as HTMLElement | null;
-			const llmTextInput = templatePart(card, '.tts-llm-text-input') as HTMLTextAreaElement | null;
-			const speechTextBody = templatePart(card, '.tts-speech-text-body') as HTMLElement | null;
-			const toggleSpeechTextBtn = templatePart(card, '.tts-toggle-speech-text-btn') as HTMLButtonElement | null;
-			const textInput = templatePart(card, '.tts-text-input') as HTMLTextAreaElement | null;
-			const copyTextBtn = templatePart(card, '.tts-copy-text-btn') as HTMLButtonElement | null;
-			const editTextBtn = templatePart(card, '.tts-edit-text-btn') as HTMLButtonElement | null;
-			const clearTextBtn = templatePart(card, '.tts-clear-text-btn') as HTMLButtonElement | null;
-			const playerMount = templatePart(card, '.tts-audio-player-mount') as HTMLElement | null;
-			const playBtn = templatePart(card, '.tts-play-btn') as HTMLButtonElement | null;
-			const deleteAudioBtn = templatePart(card, '.tts-delete-audio-btn') as HTMLButtonElement | null;
-			const cachedBadge = templatePart(card, '.tts-cached-badge') as HTMLElement | null;
-			const statusText = templatePart(card, '.tts-status-text') as HTMLElement | null;
+			const credSelect = partsOf(card).ttsCredSelect as HTMLSelectElement | null;
+			const modelPickerBtn = partsOf(card).ttsModelPickerBtn as HTMLButtonElement | null;
+			const selectedModelText = partsOf(card).ttsSelectedModelText as HTMLElement | null;
+			const modelDropdown = partsOf(card).ttsModelDropdown as HTMLElement | null;
+			const modelSearchInput = partsOf(card).ttsModelSearchInput as HTMLInputElement | null;
+			const dropdownProviderBadge = partsOf(card).ttsDropdownProviderBadge as HTMLElement | null;
+			const modelListEl = partsOf(card).ttsModelList as HTMLElement | null;
+			const formatSelect = partsOf(card).ttsFormatSelect as HTMLSelectElement | null;
+			const voiceSelect = partsOf(card).ttsVoiceSelect as HTMLSelectElement | null;
+			const autoPlayCheckbox = partsOf(card).ttsAutoplayCheckbox as HTMLInputElement | null;
+			const headerModelBadge = partsOf(card).ttsHeaderModelBadge as HTMLElement | null;
+			const llmTextInput = partsOf(card).ttsLlmTextInput as HTMLTextAreaElement | null;
+			const speechTextBody = partsOf(card).ttsSpeechTextBody as HTMLElement | null;
+			const toggleSpeechTextBtn = partsOf(card).ttsToggleSpeechTextBtn as HTMLButtonElement | null;
+			const textInput = partsOf(card).ttsTextInput as HTMLTextAreaElement | null;
+			const copyTextBtn = partsOf(card).ttsCopyTextBtn as HTMLButtonElement | null;
+			const editTextBtn = partsOf(card).ttsEditTextBtn as HTMLButtonElement | null;
+			const clearTextBtn = partsOf(card).ttsClearTextBtn as HTMLButtonElement | null;
+			const playerMount = partsOf(card).ttsAudioPlayerMount as HTMLElement | null;
+			const playBtn = partsOf(card).ttsPlayBtn as HTMLButtonElement | null;
+			const deleteAudioBtn = partsOf(card).ttsDeleteAudioBtn as HTMLButtonElement | null;
+			const cachedBadge = partsOf(card).ttsCachedBadge as HTMLElement | null;
+			const statusText = partsOf(card).ttsStatusText as HTMLElement | null;
 
 			let activeCredId = card.getAttribute('data-cred-id') || '';
 			let activeProvider = card.getAttribute('data-provider') || 'gemini';
@@ -10187,8 +10505,8 @@ ${rawErr}
 					e.stopPropagation();
 					const valToCopy = textInput.value || '';
 					await this._clipboardService.writeText(valToCopy);
-					const labelSpan = templatePart(copyTextBtn, '.tts-copy-btn-label') as HTMLElement | null;
-					const iconSpan = templatePart(copyTextBtn, '.codicon') as HTMLElement | null;
+					const labelSpan = partsOf(copyTextBtn).ttsCopyBtnLabel as HTMLElement | null;
+					const iconSpan = partsOf(copyTextBtn).codicon as HTMLElement | null;
 					if (labelSpan) { labelSpan.textContent = 'Copied!'; }
 					if (iconSpan) { iconSpan.className = 'codicon codicon-check'; }
 					copyTextBtn.style.color = '#4ade80';
@@ -10208,8 +10526,8 @@ ${rawErr}
 					e.stopPropagation();
 					isDisplayTextUnlocked = !isDisplayTextUnlocked;
 					textInput.readOnly = !isDisplayTextUnlocked;
-					const editIcon = templatePart(editTextBtn, '.tts-edit-btn-icon') as HTMLElement | null;
-					const editLabel = templatePart(editTextBtn, '.tts-edit-btn-label') as HTMLElement | null;
+					const editIcon = partsOf(editTextBtn).ttsEditBtnIcon as HTMLElement | null;
+					const editLabel = partsOf(editTextBtn).ttsEditBtnLabel as HTMLElement | null;
 					if (isDisplayTextUnlocked) {
 						textInput.style.borderColor = 'rgba(56, 189, 248, 0.75)';
 						textInput.style.background = 'rgba(0, 0, 0, 0.4)';
@@ -10263,6 +10581,7 @@ ${rawErr}
 				audioEl.preload = 'metadata';
 				audioEl.style.display = 'none';
 				playerMount.appendChild(audioEl);
+				cardRuntimeState(card).ttsAudio = audioEl;
 
 				const customPlayerBar = document.createElement('div');
 				customPlayerBar.className = 'tts-custom-dark-player';
@@ -10631,11 +10950,11 @@ ${rawErr}
 		lastGenerated: string;
 		lastSynthesizedText: string;
 	}>): Promise<Record<string, unknown>> {
-		const llmTextInput = templatePart(card, '.tts-llm-text-input') as HTMLTextAreaElement | null;
-		const textInput = templatePart(card, '.tts-text-input') as HTMLTextAreaElement | null;
-		const formatSelect = templatePart(card, '.tts-format-select') as HTMLSelectElement | null;
-		const voiceSelect = templatePart(card, '.tts-voice-select') as HTMLSelectElement | null;
-		const autoPlayCheckbox = templatePart(card, '.tts-autoplay-checkbox') as HTMLInputElement | null;
+		const llmTextInput = partsOf(card).ttsLlmTextInput as HTMLTextAreaElement | null;
+		const textInput = partsOf(card).ttsTextInput as HTMLTextAreaElement | null;
+		const formatSelect = partsOf(card).ttsFormatSelect as HTMLSelectElement | null;
+		const voiceSelect = partsOf(card).ttsVoiceSelect as HTMLSelectElement | null;
+		const autoPlayCheckbox = partsOf(card).ttsAutoplayCheckbox as HTMLInputElement | null;
 		const storedLlmText = overrides?.llmText !== undefined
 			? overrides.llmText
 			: (llmTextInput ? llmTextInput.value : (card.getAttribute('data-llm-text') || ''));
@@ -10710,13 +11029,13 @@ ${rawErr}
 
 	private async _hydrateMediaPlayerPrimitiveCards(): Promise<void> {
 		if (!this._container) { return; }
-		const cards = Array.from(templateParts(this._container, '.media-player-primitive-card')) as HTMLElement[];
+		const cards = Array.from((this._pageParts.mediaPlayerPrimitiveCards ?? [])) as HTMLElement[];
 		if (cards.length === 0) { return; }
 
 		for (const card of cards) {
 			const fieldKey = card.getAttribute('data-field-key') || '';
-			const mountEl = templatePart(card, '.media-player-card-mount') as HTMLElement | null;
-			const headerBadgeEl = templatePart(card, '.media-player-header-badge') as HTMLElement | null;
+			const mountEl = partsOf(card).mediaPlayerCardMount as HTMLElement | null;
+			const headerBadgeEl = partsOf(card).mediaPlayerHeaderBadge as HTMLElement | null;
 			if (!mountEl) { continue; }
 
 			clearNode(mountEl);
@@ -10945,7 +11264,7 @@ ${rawErr}
 				if (isCardVideoFullscreen || activeKind !== 'video') { return; }
 				isCardVideoFullscreen = true;
 				const wasPlaying = !videoEl.paused && !videoEl.ended;
-				const hostRoot = (templatePart(mainWindow.document, '.monaco-workbench') as HTMLElement) || mainWindow.document.body;
+				const hostRoot = this._layoutService.mainContainer || mainWindow.document.body;
 				const overlay = document.createElement('div');
 				overlay.className = 'media-player-fullscreen-overlay';
 				overlay.style.cssText = 'position: fixed; inset: 0; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 2147483647; background: rgba(5, 8, 15, 0.96); backdrop-filter: blur(8px); display: flex; flex-direction: column; justify-content: space-between; padding: 16px 24px 20px 24px; box-sizing: border-box; gap: 12px;';
@@ -11450,8 +11769,8 @@ ${rawErr}
 	}
 
 	private async _executeTtsSynthesisInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
-		const llmTextInput = templatePart(card, '.tts-llm-text-input') as HTMLTextAreaElement | null;
-		const textInput = templatePart(card, '.tts-text-input') as HTMLTextAreaElement | null;
+		const llmTextInput = partsOf(card).ttsLlmTextInput as HTMLTextAreaElement | null;
+		const textInput = partsOf(card).ttsTextInput as HTMLTextAreaElement | null;
 		const llmText = (llmTextInput ? llmTextInput.value : (card.getAttribute('data-llm-text') || '')).trim();
 		const displayTextVal = textInput?.value.trim() || '';
 		// Use the AI Speech Synthesis Text first; fall back to display text only if speech text is empty
@@ -11466,17 +11785,17 @@ ${rawErr}
 		const credId = card.getAttribute('data-cred-id') || '';
 		const providerId = card.getAttribute('data-provider') || 'gemini';
 		const modelId = card.getAttribute('data-model') || (providerId === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
-		const formatSelect = templatePart(card, '.tts-format-select') as HTMLSelectElement | null;
-		const voiceSelect = templatePart(card, '.tts-voice-select') as HTMLSelectElement | null;
+		const formatSelect = partsOf(card).ttsFormatSelect as HTMLSelectElement | null;
+		const voiceSelect = partsOf(card).ttsVoiceSelect as HTMLSelectElement | null;
 		const format = (formatSelect?.value || card.getAttribute('data-format') || 'mp3').toLowerCase();
 		const voice = voiceSelect?.value || card.getAttribute('data-voice') || '';
 
-		const sendBtn = templatePart(card, '.tts-send-btn') as HTMLButtonElement | null;
-		const playBtn = templatePart(card, '.tts-play-btn') as HTMLButtonElement | null;
-		const deleteAudioBtn = templatePart(card, '.tts-delete-audio-btn') as HTMLButtonElement | null;
-		const cachedBadge = templatePart(card, '.tts-cached-badge') as HTMLElement | null;
-		const statusText = templatePart(card, '.tts-status-text') as HTMLElement | null;
-		const audioEl = templatePart(card, 'audio') as HTMLAudioElement | null;
+		const sendBtn = partsOf(card).ttsSendBtn as HTMLButtonElement | null;
+		const playBtn = partsOf(card).ttsPlayBtn as HTMLButtonElement | null;
+		const deleteAudioBtn = partsOf(card).ttsDeleteAudioBtn as HTMLButtonElement | null;
+		const cachedBadge = partsOf(card).ttsCachedBadge as HTMLElement | null;
+		const statusText = partsOf(card).ttsStatusText as HTMLElement | null;
+		const audioEl = (card ? cardRuntimeState(card).ttsAudio : undefined);
 
 		if (sendBtn) {
 			sendBtn.disabled = true;
@@ -11591,7 +11910,7 @@ ${rawErr}
 			}
 		}
 
-		const textInput = templatePart(card, '.tts-text-input') as HTMLTextAreaElement | null;
+		const textInput = partsOf(card).ttsTextInput as HTMLTextAreaElement | null;
 		if (alsoClearText && textInput) {
 			textInput.value = '';
 		}
@@ -11600,7 +11919,7 @@ ${rawErr}
 		if (typeof resetTtsPlayer === 'function') {
 			resetTtsPlayer();
 		} else {
-			const audioEl = templatePart(card, 'audio') as HTMLAudioElement | null;
+			const audioEl = (card ? cardRuntimeState(card).ttsAudio : undefined);
 			if (audioEl) {
 				audioEl.pause();
 				audioEl.removeAttribute('src');
@@ -11608,10 +11927,10 @@ ${rawErr}
 			}
 		}
 
-		const playBtn = templatePart(card, '.tts-play-btn') as HTMLButtonElement | null;
-		const deleteAudioBtn = templatePart(card, '.tts-delete-audio-btn') as HTMLButtonElement | null;
-		const cachedBadge = templatePart(card, '.tts-cached-badge') as HTMLElement | null;
-		const statusText = templatePart(card, '.tts-status-text') as HTMLElement | null;
+		const playBtn = partsOf(card).ttsPlayBtn as HTMLButtonElement | null;
+		const deleteAudioBtn = partsOf(card).ttsDeleteAudioBtn as HTMLButtonElement | null;
+		const cachedBadge = partsOf(card).ttsCachedBadge as HTMLElement | null;
+		const statusText = partsOf(card).ttsStatusText as HTMLElement | null;
 
 		if (playBtn) {
 			playBtn.style.display = 'none';
@@ -11657,7 +11976,7 @@ ${rawErr}
 	}): Promise<void> {
 		const serialized = JSON.stringify(payload);
 		card.setAttribute('data-table-json', serialized);
-		const aiBtn = templatePart(card, '.ai-edit-btn') as HTMLElement | null;
+		const aiBtn = partsOf(card).aiEditBtn as HTMLElement | null;
 		if (aiBtn) {
 			aiBtn.setAttribute('data-ai-current-value', serialized);
 		}
@@ -11687,7 +12006,7 @@ ${rawErr}
 
 	private async _hydrateTablePrimitiveCards(): Promise<void> {
 		if (!this._container) { return; }
-		const cards = Array.from(templateParts(this._container, '.table-primitive-card')) as HTMLElement[];
+		const cards = Array.from((this._pageParts.tablePrimitiveCards ?? [])) as HTMLElement[];
 		if (cards.length === 0) { return; }
 
 		const sqliteDataTypes = [
@@ -11739,8 +12058,8 @@ ${rawErr}
 			let totalDbRowCount: number | undefined = undefined;
 			let lastSynced: string = String(parsed.lastSynced || '');
 
-			const mountEl = templatePart(card, '.table-card-mount') as HTMLElement | null;
-			const headerStatsBadge = templatePart(card, '.table-header-stats-badge') as HTMLElement | null;
+			const mountEl = partsOf(card).tableCardMount as HTMLElement | null;
+			const headerStatsBadge = partsOf(card).tableHeaderStatsBadge as HTMLElement | null;
 			if (!mountEl) { continue; }
 			clearNode(mountEl);
 
@@ -11818,14 +12137,16 @@ ${rawErr}
 				let tipEl: HTMLElement | null = null;
 				const hideTooltip = () => {
 					if (tipEl) { tipEl.remove(); tipEl = null; }
-					// Tooltips of this kind are also created by the template schema editor; remove all of them
-					templateParts(mainWindow.document, '.anyagent-instant-tooltip').forEach(el => el.remove());
+					// Remove any other instant tooltip of this editor that is still showing
+					instantTooltips.forEach(el => el.remove());
+					instantTooltips.clear();
 				};
 				const showTooltip = () => {
 					hideTooltip();
 					if (!targetEl.isConnected) { return; }
 					tipEl = document.createElement('div');
 					tipEl.className = 'anyagent-instant-tooltip';
+					instantTooltips.add(tipEl);
 					tipEl.style.cssText = `position: fixed; z-index: 100000; pointer-events: none; background: #141417; color: #f4f4f5; border: 1px solid ${accentColor}; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.65); padding: 5px 10px; border-radius: 6px; font-size: 11px; font-weight: 500; white-space: nowrap; line-height: 1.35; letter-spacing: 0.01em;`;
 					const colonIdx = text.indexOf(':');
 					if (colonIdx > 0 && colonIdx < 28) {
@@ -14262,7 +14583,7 @@ ${rawErr}
 			copySqlOutBtn.type = 'button';
 			copySqlOutBtn.title = 'Copy complete SQL execution output';
 			copySqlOutBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; width: auto; font-size: 11px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.12); cursor: pointer;';
-			reset(copySqlOutBtn, $('span.codicon.codicon-copy', { style: 'font-size: 11px;' }), $('span', undefined, 'Copy'));
+			reset(copySqlOutBtn, part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 11px;' })), $('span', undefined, 'Copy'));
 			sqlOutputActions.appendChild(copySqlOutBtn);
 
 			const clearSqlOutBtn = document.createElement('button');
@@ -14273,6 +14594,7 @@ ${rawErr}
 
 			const sqlOutputDisplay = document.createElement('div');
 			sqlOutputDisplay.className = 'sql-output-box';
+			cardRuntimeState(card).sqlOutputBox = sqlOutputDisplay;
 			sqlOutputDisplay.style.cssText = 'min-height: 88px; max-height: 220px; overflow-y: auto; padding: 10px 12px; font-size: 12px; line-height: 1.55; border-radius: 5px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.25); color: var(--vscode-editor-foreground); white-space: pre-wrap; word-break: break-word; font-family: var(--vscode-editor-font-family, monospace); user-select: text;';
 			sqlOutputSection.appendChild(sqlOutputDisplay);
 
@@ -14307,7 +14629,7 @@ ${rawErr}
 				await this._clipboardService.writeText(out);
 				const prevContent = Array.from(copySqlOutBtn.childNodes);
 				reset(copySqlOutBtn,
-					$('span.codicon.codicon-check', { style: 'font-size: 11px; color: #4ade80;' }),
+					part('codicon', $('span.codicon.codicon-check', { style: 'font-size: 11px; color: #4ade80;' })),
 					$('span', { style: 'color: #4ade80;' }, 'Copied!')
 				);
 				setTimeout(() => { if (copySqlOutBtn.isConnected) { reset(copySqlOutBtn, ...prevContent); } }, 1500);
@@ -14542,14 +14864,14 @@ ${rawErr}
 								copyQueryJsonBtn.type = 'button';
 								copyQueryJsonBtn.title = 'Copy all query result rows as JSON';
 								copyQueryJsonBtn.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10px; font-weight: 500; border-radius: 4px; background: rgba(56,189,248,0.14); color: #7dd3fc; border: 1px solid rgba(56,189,248,0.35); cursor: pointer;';
-								reset(copyQueryJsonBtn, $('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' }), $('span', undefined, 'Copy JSON'));
+								reset(copyQueryJsonBtn, part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' })), $('span', undefined, 'Copy JSON'));
 								copyQueryJsonBtn.onclick = async (e) => {
 									e.preventDefault();
 									e.stopPropagation();
 									await this._clipboardService.writeText(JSON.stringify(allQueryRows || [], null, 2));
 									const prevContent = Array.from(copyQueryJsonBtn.childNodes);
 									reset(copyQueryJsonBtn,
-										$('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' }),
+										part('codicon', $('span.codicon.codicon-check', { style: 'font-size: 10.5px; color: #4ade80;' })),
 										$('span', { style: 'color: #4ade80;' }, 'Copied!')
 									);
 									setTimeout(() => { if (copyQueryJsonBtn.isConnected) { reset(copyQueryJsonBtn, ...prevContent); } }, 1500);
@@ -14645,11 +14967,11 @@ ${rawErr}
 
 	private async _hydrateSshPrimitiveCards(): Promise<void> {
 		if (!this._container) { return; }
-		const cards = Array.from(templateParts(this._container, '.ssh-primitive-card')) as HTMLElement[];
+		const cards = Array.from((this._pageParts.sshPrimitiveCards ?? [])) as HTMLElement[];
 		for (const card of cards) {
 			const fieldKey = card.getAttribute('data-field-key') || '';
 			const rawJson = card.getAttribute('data-ssh-json') || '{}';
-			const mount = templatePart(card, '.ssh-card-mount') as HTMLElement | null;
+			const mount = partsOf(card).sshCardMount as HTMLElement | null;
 			if (!mount || !fieldKey) { continue; }
 			clearNode(mount);
 
@@ -14677,7 +14999,7 @@ ${rawErr}
 				: undefined;
 			let hasCompletedCmdRun = Boolean(lastExecuted) || Boolean(sshLastOutput) || sshLastRawEntries.length > 0;
 
-			const headerBadgeEl = templatePart(card, '.ssh-header-target-badge') as HTMLElement | null;
+			const headerBadgeEl = partsOf(card).sshHeaderTargetBadge as HTMLElement | null;
 
 			let activeTargetInput: HTMLInputElement | undefined;
 			let activeCmdRowIdx = 0;
@@ -14728,7 +15050,7 @@ ${rawErr}
 				if (headerBadgeEl) {
 					headerBadgeEl.textContent = sshHost ? `${sshUser || 'root'}@${sshHost}:${sshPort || 22}` : 'Not Connected';
 				}
-				const aiBtn = templatePart(card, '.ai-edit-btn') as HTMLElement | null;
+				const aiBtn = partsOf(card).aiEditBtn as HTMLElement | null;
 				if (aiBtn) {
 					aiBtn.setAttribute('data-ai-current-value', sshCommand || '');
 				}
@@ -14983,7 +15305,7 @@ ${rawErr}
 			termHeaderRight.appendChild(clearTermBtn);
 
 			const termInitialPlaceholder = `# SSH Terminal ready. Configure IP, Port, Username, and Password above, then click a Quick Command or send Linux commands below.`;
-			const termViewport = document.createElement('pre');
+			const termViewport = part('pres', document.createElement('pre'));
 			termViewport.style.cssText = 'margin: 0; padding: 10px 14px; min-height: 140px; max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace); font-size: 11.5px; line-height: 1.55; color: #d1fae5; white-space: pre-wrap; word-break: break-word; user-select: text; -webkit-user-select: text; cursor: text;';
 			termViewport.textContent = sshOutput || termInitialPlaceholder;
 			termContainer.appendChild(termViewport);
@@ -15223,6 +15545,7 @@ ${rawErr}
 			sshOutputSection.className = 'ssh-output-result-section';
 			sshOutputSection.style.cssText = 'display: flex; flex-direction: column; gap: 6px; margin-top: 2px; padding-top: 10px; border-top: 1px dashed rgba(255,255,255,0.12);';
 			mount.appendChild(sshOutputSection);
+			refreshPartsAround(mount);
 
 			const sshOutputHeader = document.createElement('div');
 			sshOutputHeader.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;';
@@ -16073,21 +16396,21 @@ ${rawErr}
 
 	private _hydratePythonPrimitiveCards(): void {
 		if (!this._container) { return; }
-		const cards = Array.from(templateParts(this._container, '.python-primitive-card')) as HTMLElement[];
+		const cards = Array.from((this._pageParts.pythonPrimitiveCards ?? [])) as HTMLElement[];
 		for (const card of cards) {
 			card.setAttribute('data-python-hydrated', 'true');
 			const fieldKey = card.getAttribute('data-field-key') || '';
 			const initialCode = (card.getAttribute('data-python-code') ?? '').replace(/\r\n?/g, '\n');
 			let isLocked = card.getAttribute('data-python-locked') === 'true';
 
-			const codeWrapper = templatePart(card, '.python-code-wrapper') as HTMLElement | null;
-			const lineNumbersGutter = templatePart(card, '.python-line-numbers-gutter') as HTMLElement | null;
-			const codeDisplay = templatePart(card, '.python-code-display') as HTMLElement | null;
-			const codeTextarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
-			const copyCodeBtn = templatePart(card, '.python-copy-code-btn') as HTMLButtonElement | null;
-			const pasteCodeBtn = templatePart(card, '.python-paste-code-btn') as HTMLButtonElement | null;
-			const lockCodeBtn = templatePart(card, '.python-lock-code-btn') as HTMLButtonElement | null;
-			const chipsBar = templatePart(card, '.python-ctx-chips-bar') as HTMLElement | null;
+			const codeWrapper = partsOf(card).pythonCodeWrapper as HTMLElement | null;
+			const lineNumbersGutter = partsOf(card).pythonLineNumbersGutter as HTMLElement | null;
+			const codeDisplay = partsOf(card).pythonCodeDisplay as HTMLElement | null;
+			const codeTextarea = partsOf(card).pythonCodeTextarea as HTMLTextAreaElement | null;
+			const copyCodeBtn = partsOf(card).pythonCopyCodeBtn as HTMLButtonElement | null;
+			const pasteCodeBtn = partsOf(card).pythonPasteCodeBtn as HTMLButtonElement | null;
+			const lockCodeBtn = partsOf(card).pythonLockCodeBtn as HTMLButtonElement | null;
+			const chipsBar = partsOf(card).pythonCtxChipsBar as HTMLElement | null;
 
 			if (!codeWrapper || !lineNumbersGutter || !codeDisplay || !codeTextarea) {
 				continue;
@@ -16115,7 +16438,7 @@ ${rawErr}
 			const renderHighlightedCode = () => {
 				const val = codeTextarea.value || '';
 				card.setAttribute('data-python-code', val);
-				const aiBtn = templatePart(card, '.ai-edit-btn') as HTMLElement | null;
+				const aiBtn = partsOf(card).aiEditBtn as HTMLElement | null;
 				if (aiBtn) {
 					aiBtn.setAttribute('data-ai-current-value', val);
 				}
@@ -16142,7 +16465,7 @@ ${rawErr}
 				codeTextarea.readOnly = isLocked;
 				codeTextarea.style.cursor = isLocked ? 'default' : 'text';
 				if (lockCodeBtn) {
-					const iconEl = templatePart(lockCodeBtn, '.codicon') as HTMLElement | null;
+					const iconEl = partsOf(lockCodeBtn).codicon as HTMLElement | null;
 					if (iconEl) {
 						iconEl.className = isLocked ? 'codicon codicon-lock' : 'codicon codicon-unlock';
 					}
@@ -16302,7 +16625,7 @@ ${rawErr}
 					e.stopPropagation();
 					const rawCode = codeTextarea.value ?? '';
 					await this._clipboardService.writeText(rawCode);
-					const iconEl = templatePart(copyCodeBtn, '.codicon') as HTMLElement | null;
+					const iconEl = partsOf(copyCodeBtn).codicon as HTMLElement | null;
 					if (iconEl) {
 						iconEl.className = 'codicon codicon-check';
 					}
@@ -16363,7 +16686,7 @@ ${rawErr}
 					if (fieldKey) {
 						await this._savePythonDataFromCard(card, fieldKey);
 					}
-					const iconEl = templatePart(pasteCodeBtn, '.codicon') as HTMLElement | null;
+					const iconEl = partsOf(pasteCodeBtn).codicon as HTMLElement | null;
 					if (iconEl) {
 						iconEl.className = 'codicon codicon-check';
 					}
@@ -16401,7 +16724,7 @@ ${rawErr}
 				};
 			}
 
-			const chipBtns = Array.from(templateParts(card, '.python-insert-ctx-chip')) as HTMLButtonElement[];
+			const chipBtns = Array.from((partsOf(card).pythonInsertCtxChips ?? [])) as HTMLButtonElement[];
 			for (const chipBtn of chipBtns) {
 				chipBtn.onmousedown = (e) => {
 					e.preventDefault();
@@ -16467,9 +16790,9 @@ ${rawErr}
 	}
 
 	private async _savePythonDataFromCard(card: HTMLElement, fieldKey: string, outputOverride?: string, exitCodeOverride?: number, durationMsOverride?: number, resultOverride?: unknown): Promise<Record<string, unknown>> {
-		const interpInput = templatePart(card, '.python-interpreter-input') as HTMLInputElement | null;
-		const codeTextarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
-		const outputDisplay = templatePart(card, '.python-output-display') as HTMLElement | null;
+		const interpInput = partsOf(card).pythonInterpreterInput as HTMLInputElement | null;
+		const codeTextarea = partsOf(card).pythonCodeTextarea as HTMLTextAreaElement | null;
+		const outputDisplay = partsOf(card).pythonOutputDisplay as HTMLElement | null;
 
 		const pythonPath = interpInput?.value.trim() || '';
 		const externalScripts = this._getCardExternalScripts(card);
@@ -16500,11 +16823,11 @@ ${rawErr}
 	}
 
 	private async _executePythonScriptInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
-		const interpInput = templatePart(card, '.python-interpreter-input') as HTMLInputElement | null;
-		const codeTextarea = templatePart(card, '.python-code-textarea') as HTMLTextAreaElement | null;
-		const statusText = templatePart(card, '.python-status-text') as HTMLElement | null;
-		const outputDisplay = templatePart(card, '.python-output-display') as HTMLElement | null;
-		const runBtn = templatePart(card, '.python-run-script-btn') as HTMLElement | null;
+		const interpInput = partsOf(card).pythonInterpreterInput as HTMLInputElement | null;
+		const codeTextarea = partsOf(card).pythonCodeTextarea as HTMLTextAreaElement | null;
+		const statusText = partsOf(card).pythonStatusText as HTMLElement | null;
+		const outputDisplay = partsOf(card).pythonOutputDisplay as HTMLElement | null;
+		const runBtn = partsOf(card).pythonRunScriptBtn as HTMLElement | null;
 
 		const pythonPath = interpInput?.value.trim() || '';
 		const rawCode = codeTextarea?.value || '';
@@ -16595,7 +16918,7 @@ ${rawErr}
 							} catch { }
 						}
 						if (this._container) {
-							const pInputs = templateParts(this._container, '.ticket-parameter-input') as NodeListOf<HTMLInputElement | HTMLSelectElement>;
+							const pInputs = (this._pageParts.ticketParameterInputs ?? []);
 							pInputs.forEach(inp => {
 								const pName = inp.getAttribute('data-param-name');
 								if (pName && Object.prototype.hasOwnProperty.call(pMap, pName)) {
@@ -16640,11 +16963,11 @@ ${rawErr}
 
 			cardRuntimeState(card).lastPythonResult = res.result;
 
-			let resultBlock = templatePart(card, '.python-result-block') as HTMLElement | null;
+			let resultBlock = partsOf(card).pythonResultBlock as HTMLElement | null;
 			if (res.result !== undefined) {
 				const formattedResult = typeof res.result === 'object' ? JSON.stringify(res.result, null, 2) : String(res.result);
 				if (!resultBlock) {
-					const outSection = templatePart(card, '.python-output-section') as HTMLElement | null;
+					const outSection = partsOf(card).pythonOutputSection as HTMLElement | null;
 					if (outSection) {
 						resultBlock = document.createElement('div');
 						resultBlock.className = 'python-result-block';
@@ -16657,20 +16980,22 @@ ${rawErr}
 								$('div', { style: 'display: flex; align-items: center; gap: 8px; margin-left: auto;' },
 									$('span', { style: 'font-size: 9.5px; opacity: 0.65; color: #38bdf8;' }, 'Consumed by Output Manifest & Downstream Primitives'),
 									$<HTMLButtonElement>('button.python-copy-result-btn', { type: 'button', title: 'Copy complete Return Value (Output)', style: 'display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;' },
-										$('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' }),
+										part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' })),
 										$('span', undefined, 'Copy')
 									)
 								)
 							),
-							$('pre.python-result-display', { style: 'margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;' })
+							part(['pythonResultDisplay', 'pres'], $('pre.python-result-display', { style: 'margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;' }))
 						);
-						outSection.insertBefore(resultBlock, outSection.firstChild);
+						outSection.insertBefore(withParts(() => part('pythonResultBlock', resultBlock!)), outSection.firstChild);
+						refreshParts(card);
 					}
 				}
-				const pre = templatePart(resultBlock, '.python-result-display') as HTMLElement | null;
+				const pre = partsOf(resultBlock).pythonResultDisplay as HTMLElement | null;
 				if (pre) { pre.textContent = formattedResult; }
 			} else if (resultBlock) {
 				resultBlock.remove();
+				refreshParts(card);
 			}
 
 			if (outputDisplay) {
@@ -16717,10 +17042,10 @@ ${rawErr}
 	}
 
 	private async _createVenvInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
-		const interpInput = templatePart(card, '.python-interpreter-input') as HTMLInputElement | null;
-		const statusEl = templatePart(card, '.python-test-status') as HTMLElement | null;
-		const createBtn = templatePart(card, '.python-create-venv-btn') as HTMLElement | null;
-		const envBadge = templatePart(card, '.python-env-badge') as HTMLElement | null;
+		const interpInput = partsOf(card).pythonInterpreterInput as HTMLInputElement | null;
+		const statusEl = partsOf(card).pythonTestStatus as HTMLElement | null;
+		const createBtn = partsOf(card).pythonCreateVenvBtn as HTMLElement | null;
+		const envBadge = partsOf(card).pythonEnvBadge as HTMLElement | null;
 
 		const currentPath = interpInput?.value.trim() || '.venv';
 		const venvName = currentPath.endsWith('/bin/python') || currentPath.endsWith('\\Scripts\\python.exe')
@@ -16833,7 +17158,7 @@ ${rawErr}
 	}
 
 	private _renderExternalScriptsInCard(card: HTMLElement, fieldKey: string, scripts: string[]): void {
-		const listEl = templatePart(card, '.python-scripts-list') as HTMLElement | null;
+		const listEl = partsOf(card).pythonScriptsList as HTMLElement | null;
 		if (!listEl) { return; }
 		if (scripts.length === 0) {
 			reset(listEl,
@@ -16861,7 +17186,7 @@ ${rawErr}
 
 
 	private async _browsePythonInterpreterInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
-		const interpInput = templatePart(card, '.python-interpreter-input') as HTMLInputElement | null;
+		const interpInput = partsOf(card).pythonInterpreterInput as HTMLInputElement | null;
 		try {
 			const uris = await this._fileDialogService.showOpenDialog({
 				canSelectFiles: true,
@@ -16891,9 +17216,9 @@ ${rawErr}
 	}
 
 	private async _testPythonInterpreterInEditor(card: HTMLElement, fieldKey: string): Promise<void> {
-		const interpInput = templatePart(card, '.python-interpreter-input') as HTMLInputElement | null;
-		const statusEl = templatePart(card, '.python-test-status') as HTMLElement | null;
-		const testBtn = templatePart(card, '.python-test-interpreter-btn') as HTMLElement | null;
+		const interpInput = partsOf(card).pythonInterpreterInput as HTMLInputElement | null;
+		const statusEl = partsOf(card).pythonTestStatus as HTMLElement | null;
+		const testBtn = partsOf(card).pythonTestInterpreterBtn as HTMLElement | null;
 		const pythonPath = interpInput?.value.trim() || '';
 
 		if (testBtn) {
@@ -16950,12 +17275,12 @@ ${rawErr}
 
 	private async _autoUpdateOutputPrimitives(output: string, sourceFieldKey?: string): Promise<void> {
 		if (!this._container) { return; }
-		const outputCards = templateParts(this._container, '.output-primitive-card, .result-primitive-card') as NodeListOf<HTMLElement>;
+		const outputCards = this._pageParts.resultPrimitiveCards ?? [];
 		if (outputCards.length === 0) { return; }
 
 		for (const card of Array.from(outputCards)) {
 			const fieldKey = card.getAttribute('data-field-key') || '';
-			const subItems = templateParts(card, '.output-spec-item') as NodeListOf<HTMLElement>;
+			const subItems = (partsOf(card).outputSpecItems ?? []);
 			if (subItems.length > 0) {
 				let targetItem: HTMLElement | null = null;
 				if (sourceFieldKey) {
@@ -17085,44 +17410,47 @@ ${rawErr}
 	private _rerenderOutputViewportByStateKey(triggerEl: HTMLElement, stateKey: string): void {
 		const specItem = triggerEl.closest('.output-spec-item') as HTMLElement | null;
 		if (specItem) {
-			const rawTa = templatePart(specItem, '.output-item-raw-content') as HTMLTextAreaElement | null;
-			const formatSelector = templatePart(specItem, '.output-item-format-selector') as HTMLSelectElement | null;
-			const viewport = templatePart(specItem, '.output-item-viewport') as HTMLElement | null;
+			const rawTa = partsOf(specItem).outputItemRawContent as HTMLTextAreaElement | null;
+			const formatSelector = partsOf(specItem).outputItemFormatSelector as HTMLSelectElement | null;
+			const viewport = partsOf(specItem).outputItemViewport as HTMLElement | null;
 			if (viewport) {
 				const text = rawTa?.value || '';
 				const format = formatSelector?.value || 'table';
 				reset(viewport, ...this._renderOutputViewportByFormat(text, format, stateKey));
+				refreshPartsAround(viewport);
 			}
 			return;
 		}
 		const card = triggerEl.closest('.result-primitive-card, .output-primitive-card') as HTMLElement | null;
 		if (card) {
-			const rawTa = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
-			const formatSelector = templatePart(card, '.result-format-selector') as HTMLSelectElement | null;
-			const viewport = templatePart(card, '.result-viewport-container') as HTMLElement | null;
+			const rawTa = partsOf(card).resultRawContent as HTMLTextAreaElement | null;
+			const formatSelector = partsOf(card).resultFormatSelector as HTMLSelectElement | null;
+			const viewport = partsOf(card).resultViewportContainer as HTMLElement | null;
 			if (viewport) {
 				const text = rawTa?.value || '';
 				const format = formatSelector?.value || 'table';
 				reset(viewport, ...this._renderOutputViewportByFormat(text, format, stateKey));
+				refreshPartsAround(viewport);
 			}
 		}
 	}
 
 	private async _setOutputItemContent(card: HTMLElement, fieldKey: string, specKey: string, content: string): Promise<void> {
-		const itemContainer = templatePart(card, `.output-spec-item[data-spec-key="${specKey}"]`) as HTMLElement | null;
+		const itemContainer = (partsOf(card).outputSpecItems ?? []).find(specItem => specItem.getAttribute('data-spec-key') === specKey) as HTMLElement | null;
 		if (!itemContainer) { return; }
 
-		const rawTa = templatePart(itemContainer, '.output-item-raw-content') as HTMLTextAreaElement | null;
+		const rawTa = partsOf(itemContainer).outputItemRawContent as HTMLTextAreaElement | null;
 		if (rawTa) { rawTa.value = content; }
 
-		const formatSelector = templatePart(itemContainer, '.output-item-format-selector') as HTMLSelectElement | null;
+		const formatSelector = partsOf(itemContainer).outputItemFormatSelector as HTMLSelectElement | null;
 		const format = formatSelector?.value || 'table';
 		const stateKey = `${fieldKey}::${specKey}`;
 
-		const viewport = templatePart(itemContainer, '.output-item-viewport') as HTMLElement | null;
+		const viewport = partsOf(itemContainer).outputItemViewport as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
 			reset(viewport, ...this._renderOutputViewportByFormat(content, format, stateKey));
+			refreshPartsAround(viewport);
 		}
 
 		let currentData: Record<string, unknown> = {};
@@ -17148,17 +17476,18 @@ ${rawErr}
 	}
 
 	private async _updateOutputItemFormat(card: HTMLElement, fieldKey: string, specKey: string, format: string): Promise<void> {
-		const itemContainer = templatePart(card, `.output-spec-item[data-spec-key="${specKey}"]`) as HTMLElement | null;
+		const itemContainer = (partsOf(card).outputSpecItems ?? []).find(specItem => specItem.getAttribute('data-spec-key') === specKey) as HTMLElement | null;
 		if (!itemContainer) { return; }
 
-		const rawTa = templatePart(itemContainer, '.output-item-raw-content') as HTMLTextAreaElement | null;
+		const rawTa = partsOf(itemContainer).outputItemRawContent as HTMLTextAreaElement | null;
 		const text = rawTa?.value || '';
 		const stateKey = `${fieldKey}::${specKey}`;
 
-		const viewport = templatePart(itemContainer, '.output-item-viewport') as HTMLElement | null;
+		const viewport = partsOf(itemContainer).outputItemViewport as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
 			reset(viewport, ...this._renderOutputViewportByFormat(text, format, stateKey));
+			refreshPartsAround(viewport);
 		}
 
 		let currentData: Record<string, unknown> = {};
@@ -17184,11 +17513,11 @@ ${rawErr}
 	}
 
 	private async _syncAllOutputItems(card: HTMLElement, fieldKey: string): Promise<void> {
-		const items = templateParts(card, '.output-spec-item') as NodeListOf<HTMLElement>;
+		const items = (partsOf(card).outputSpecItems ?? []);
 		if (items.length === 0) {
-			const promptCard = templatePart(this._container, '.prompt-primitive-card');
-			const rawPromptTa = templatePart(promptCard, '.prompt-raw-output') as HTMLTextAreaElement | null;
-			const promptOut = templatePart(promptCard, '.prompt-output-display');
+			const promptCard = this._pageParts.promptPrimitiveCard;
+			const rawPromptTa = partsOf(promptCard).promptRawOutput as HTMLTextAreaElement | null;
+			const promptOut = partsOf(promptCard).promptOutputDisplay;
 			const text = rawPromptTa?.value || promptOut?.textContent || '';
 			if (text && !text.includes('No execution output yet.')) {
 				await this._setResultCardContent(card, fieldKey, text);
@@ -17220,33 +17549,32 @@ ${rawErr}
 			);
 
 			if (this._container) {
-				const candidateSelectors = [
-					`.section-card[data-field-key="${specKey}"]`,
-					`[data-field-key="${specKey}"]`
+				const candidates: Array<(card: HTMLElement) => boolean> = [
+					card => card.getAttribute('data-field-key') === specKey
 				];
 				if (matchingField?.id) {
-					candidateSelectors.push(`[data-field-id="${matchingField.id}"]`);
+					candidates.push(card => card.getAttribute('data-field-id') === matchingField.id);
 					const idSpaced = matchingField.id.replace(/_/g, ' ');
-					candidateSelectors.push(`[data-field-key="${idSpaced}"]`);
+					candidates.push(card => card.getAttribute('data-field-key') === idSpaced);
 				}
-				let matchedCard: Element | null = null;
-				for (const sel of candidateSelectors) {
-					matchedCard = templatePart(this._container, sel);
+				let matchedCard: HTMLElement | null = null;
+				for (const candidate of candidates) {
+					matchedCard = this._findCard(candidate) || null;
 					if (matchedCard) { break; }
 				}
 				if (!matchedCard && matchingField?.id) {
-					const allCards = Array.from(templateParts(this._container, '.section-card[data-field-key]'));
+					const allCards = (this._pageParts.sectionCards ?? []).filter(c => c.hasAttribute('data-field-key'));
 					matchedCard = allCards.find(c => {
 						const fk = (c.getAttribute('data-field-key') || '').toLowerCase();
 						return fk === specKey.toLowerCase() || fk === matchingField.id.toLowerCase().replace(/_/g, ' ');
 					}) || null;
 				}
 				if (matchedCard) {
-					const browserContent = templatePart(matchedCard, '.browser-content-display') as HTMLElement | null;
-					const promptRawTa = templatePart(matchedCard, '.prompt-raw-output') as HTMLTextAreaElement | null;
-					const promptContent = templatePart(matchedCard, '.prompt-output-display') as HTMLElement | null;
+					const browserContent = partsOf(matchedCard).browserContentDisplay as HTMLElement | null;
+					const promptRawTa = partsOf(matchedCard).promptRawOutput as HTMLTextAreaElement | null;
+					const promptContent = partsOf(matchedCard).promptOutputDisplay as HTMLElement | null;
 					const tableJsonAttr = matchedCard.getAttribute('data-table-json');
-					const sqlContent = templatePart(matchedCard, '.sql-output-box') as HTMLElement | null;
+					const sqlContent = cardRuntimeState(matchedCard).sqlOutputBox;
 					if (browserContent && !browserContent.textContent?.startsWith('No webpage content')) {
 						resolvedText = browserContent.textContent || '';
 					} else if (promptRawTa && promptRawTa.value.trim() !== '') {
@@ -17335,17 +17663,18 @@ ${rawErr}
 			}
 
 			if (resolvedText) {
-				const rawTa = templatePart(item, '.output-item-raw-content') as HTMLTextAreaElement | null;
+				const rawTa = partsOf(item).outputItemRawContent as HTMLTextAreaElement | null;
 				if (rawTa) { rawTa.value = resolvedText; }
 
-				const formatSelector = templatePart(item, '.output-item-format-selector') as HTMLSelectElement | null;
+				const formatSelector = partsOf(item).outputItemFormatSelector as HTMLSelectElement | null;
 				const format = formatSelector?.value || 'table';
 				const stateKey = `${fieldKey}::${specKey}`;
 
-				const viewport = templatePart(item, '.output-item-viewport') as HTMLElement | null;
+				const viewport = partsOf(item).outputItemViewport as HTMLElement | null;
 				if (viewport) {
 					viewport.setAttribute('data-state-key', stateKey);
 					reset(viewport, ...this._renderOutputViewportByFormat(resolvedText, format, stateKey));
+					refreshPartsAround(viewport);
 				}
 
 				currentData[specKey] = {
@@ -17361,19 +17690,20 @@ ${rawErr}
 	}
 
 	private async _setResultCardContent(card: HTMLElement, fieldKey: string, output: string): Promise<void> {
-		const formatSelector = templatePart(card, '.result-format-selector') as HTMLSelectElement | null;
+		const formatSelector = partsOf(card).resultFormatSelector as HTMLSelectElement | null;
 		const format = formatSelector?.value || 'table';
-		const rawTa = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
+		const rawTa = partsOf(card).resultRawContent as HTMLTextAreaElement | null;
 		if (rawTa) { rawTa.value = output; }
 		const stateKey = `${fieldKey}::__single__`;
 
-		const viewport = templatePart(card, '.result-viewport-container') as HTMLElement | null;
+		const viewport = partsOf(card).resultViewportContainer as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
 			reset(viewport, ...this._renderOutputViewportByFormat(output, format, stateKey));
+			refreshPartsAround(viewport);
 		}
 
-		const statusEl = templatePart(card, '.result-status-text') as HTMLElement | null;
+		const statusEl = partsOf(card).resultStatusText as HTMLElement | null;
 		const timeStr = `${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString()}`;
 		if (statusEl) {
 			statusEl.textContent = `Updated: ${new Date().toLocaleTimeString()} (${output.length} chars)`;
@@ -17389,17 +17719,18 @@ ${rawErr}
 	}
 
 	private async _updateResultCardFormat(card: HTMLElement, fieldKey: string, format: string): Promise<void> {
-		const rawTa = templatePart(card, '.result-raw-content') as HTMLTextAreaElement | null;
+		const rawTa = partsOf(card).resultRawContent as HTMLTextAreaElement | null;
 		const text = rawTa?.value || '';
 		const stateKey = `${fieldKey}::__single__`;
 
-		const viewport = templatePart(card, '.result-viewport-container') as HTMLElement | null;
+		const viewport = partsOf(card).resultViewportContainer as HTMLElement | null;
 		if (viewport) {
 			viewport.setAttribute('data-state-key', stateKey);
 			reset(viewport, ...this._renderOutputViewportByFormat(text, format, stateKey));
+			refreshPartsAround(viewport);
 		}
 
-		const statusEl = templatePart(card, '.result-status-text') as HTMLElement | null;
+		const statusEl = partsOf(card).resultStatusText as HTMLElement | null;
 		const rawStatus = statusEl?.textContent || '';
 		const resultData = {
 			result: text,
@@ -17429,9 +17760,9 @@ ${rawErr}
 
 		// 0. If content is a SQL Execution Output log, preserve the full log & query preview as clean pre-formatted text
 		if (/^Status:\s*(SUCCESS|FAILED)\b/i.test(trimmed) || trimmed.includes('--- [Resolved SQL Statement] ---')) {
-			return [$('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
+			return [part('pres', $('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
 				textOf(trimmed)
-			)];
+			))];
 		}
 
 		// 1. Try parsing JSON array of objects (or wrapper object containing an array of objects)
@@ -17454,9 +17785,9 @@ ${rawErr}
 				if (Array.isArray(tableState.rows) && tableState.rows.length > 0) {
 					jsonObj = tableState.rows;
 				} else if (typeof tableState.sqlOutput === 'string' && tableState.sqlOutput.trim() !== '') {
-					return [$('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
+					return [part('pres', $('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
 						textOf(tableState.sqlOutput.trim())
-					)];
+					))];
 				} else if (Array.isArray(tableState.rows)) {
 					jsonObj = tableState.rows;
 				}
@@ -17642,15 +17973,15 @@ ${rawErr}
 					: '';
 				return [
 					...(paginationBar ? [paginationBar] : []),
-					$('pre', { style: 'font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);' },
+					part('pres', $('pre', { style: 'font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);' },
 						textOf(formatted + noteFooter)
-					)
+					))
 				];
 			}
 			const formatted = JSON.stringify(parsed, null, 2);
-			return [$('pre', { style: 'font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);' },
+			return [part('pres', $('pre', { style: 'font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: #818cf8; background: rgba(0,0,0,0.3); padding: 10px 12px; border-radius: 6px; overflow-x: auto; margin: 0; border: 1px solid rgba(129, 140, 248, 0.2);' },
 				textOf(formatted)
-			)];
+			))];
 		}
 
 		return this._renderResultText(trimmed, page, pageSize, stateKey);
@@ -17679,16 +18010,16 @@ ${rawErr}
 						: '';
 					return [
 						...(paginationBar ? [paginationBar] : []),
-						$('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
+						part('pres', $('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
 							textOf(formatted + noteFooter)
-						)
+						))
 					];
 				}
 			} catch { }
 		}
-		return [$('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
+		return [part('pres', $('pre', { style: 'white-space: pre-wrap; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; color: inherit; margin: 0;' },
 			textOf(trimmed)
-		)];
+		))];
 	}
 
 	private _exportResultToCsv(rawText: string, fieldKey: string): void {
@@ -17776,7 +18107,7 @@ ${rawErr}
 	}
 
 	private async _dispatchPromptToAgent(card: HTMLElement, fieldKey: string): Promise<void> {
-		const textarea = templatePart(card, '.prompt-instruction-textarea') as HTMLTextAreaElement | null;
+		const textarea = partsOf(card).promptInstructionTextarea as HTMLTextAreaElement | null;
 		const { combinedRawPrompt, interpolatedPrompt } = this._resolveCombinedPromptFromCard(card);
 		if (!combinedRawPrompt) {
 			this._notificationService.warn('Please enter a prompt instruction before dispatching.');
@@ -17784,7 +18115,7 @@ ${rawErr}
 			return;
 		}
 
-		const agentSelect = templatePart(card, '.prompt-agent-select') as HTMLSelectElement | null;
+		const agentSelect = partsOf(card).promptAgentSelect as HTMLSelectElement | null;
 		const agentId = agentSelect?.value.trim();
 		if (!agentId) {
 			this._notificationService.warn('Please select a target AI Agent.');
@@ -17797,8 +18128,8 @@ ${rawErr}
 		const sentSnapshot = this._buildSentPromptSnapshot(card, fieldKey, true);
 		card.setAttribute('data-last-sent-payload', JSON.stringify(sentSnapshot));
 
-		const statusText = templatePart(card, '.prompt-status-text') as HTMLElement | null;
-		const outputDisplay = templatePart(card, '.prompt-output-display') as HTMLElement | null;
+		const statusText = partsOf(card).promptStatusText as HTMLElement | null;
+		const outputDisplay = partsOf(card).promptOutputDisplay as HTMLElement | null;
 
 		if (statusText) {
 			statusText.textContent = `Dispatching to ${agentName}... \u23F3`;
@@ -17908,10 +18239,11 @@ ${interpolatedPrompt}`;
 			if (!f?.__wfRuntime || f.__wfStep || !f.id) {
 				continue;
 			}
-			const card = templatePart(this._container, `[data-field-id="${CSS.escape(String(f.id))}"]`) as HTMLElement | null;
+			const card = this._findCard(c => c.getAttribute('data-field-id') === String(f.id)) || null;
 			const runtimeBlock = this._renderWorkflowRuntimeBlock(f.__wfRuntime);
-			if (card && runtimeBlock && !templatePart(card, ':scope > .wf-runtime-block')) {
+			if (card && runtimeBlock && partsOf(card).wfRuntimeBlock?.parentElement !== card) {
 				card.appendChild(runtimeBlock);
+				refreshParts(card);
 			}
 
 		}
@@ -17941,20 +18273,20 @@ ${interpolatedPrompt}`;
 			? [$('div.wf-value-empty', undefined, 'Not run yet')]
 			: [
 				$('pre.wf-step-code.wf-value-pre', undefined, textOf(this._formatWorkflowRuntimeValue(value, 6000))),
-				$<HTMLTextAreaElement>('textarea.wf-value-raw', { hidden: '' }, textOf(full))
+				part('wfValueRaw', $<HTMLTextAreaElement>('textarea.wf-value-raw', { hidden: '' }, textOf(full)))
 			];
-		return $('div.wf-value-box', undefined,
+		return withParts(() => $('div.wf-value-box', undefined,
 			$('div.wf-value-head', undefined,
 				$('span', undefined, textOf(caption)),
 				...(value === undefined ? [] : [
 					$<HTMLButtonElement>('button.wf-value-copy-btn', { type: 'button', title: 'Copy the full value' },
-						$('span.codicon.codicon-copy'),
-						$('span', undefined, 'Copy')
+						part('codicon', $('span.codicon.codicon-copy')),
+						part('wfValueCopyLabel', $('span', undefined, 'Copy'))
 					)
 				])
 			),
 			...body
-		);
+		));
 	}
 
 	/** "Last run" block appended to a node-view card (value + error), or `undefined` when the capsule has not run. */
@@ -17967,7 +18299,7 @@ ${interpolatedPrompt}`;
 			textOf(String(runtime.error))
 		) : undefined;
 		const val = runtime.value !== undefined ? this._renderWorkflowValueBox('Last Run Value', runtime.value) : undefined;
-		return $('div.wf-runtime-block', { style: 'margin-top: 12px;' }, ...(val ? [val] : []), ...(err ? [err] : []));
+		return part('wfRuntimeBlock', $('div.wf-runtime-block', { style: 'margin-top: 12px;' }, ...(val ? [val] : []), ...(err ? [err] : [])));
 	}
 
 	private _renderWorkflowStepCard(step: IWfStepInfo, label: string, rawKey: string, fieldId: string, stepCardClass: string, stepBadge: Node[], runtime?: IWfStepRuntime): HTMLElement {
@@ -18021,7 +18353,7 @@ ${interpolatedPrompt}`;
 					),
 					...(sw.id ? [
 						$<HTMLButtonElement>('button.btn-secondary.wf-step-open-subworkflow', { type: 'button', 'data-sub-workflow-id': textOf(String(sw.id)), style: 'display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; font-size: 11px; border-radius: 5px; cursor: pointer;' },
-							$('span.codicon.codicon-type-hierarchy-sub', { style: 'font-size: 12px;' }),
+							part('codicon', $('span.codicon.codicon-type-hierarchy-sub', { style: 'font-size: 12px;' })),
 							$('span', undefined, 'Show flowchart')
 						)
 					] : [])
@@ -18040,8 +18372,8 @@ ${interpolatedPrompt}`;
 				...(runtimeBlock ? [runtimeBlock] : [])
 			];
 		}
-		return $('div', { class: `section-card custom-property-card wf-step-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldId), 'data-field-label': textOf(label), 'data-field-type': textOf(String(step?.kind || 'step')), style: step?.disabled ? 'opacity: 0.6;' : undefined },
-			$('div.section-title', { style: 'flex-wrap: wrap; gap: 8px;' },
+		return part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card wf-step-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldId), 'data-field-label': textOf(label), 'data-field-type': textOf(String(step?.kind || 'step')), style: step?.disabled ? 'opacity: 0.6;' : undefined },
+			part('sectionTitle', withParts(() => $('div.section-title', { style: 'flex-wrap: wrap; gap: 8px;' },
 				$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0;' },
 					$('span', undefined, textOf(label)),
 					$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(45, 212, 191, 0.16); color: #5eead4; font-weight: 700; text-transform: uppercase;' },
@@ -18056,9 +18388,9 @@ ${interpolatedPrompt}`;
 					...(target ? [target] : [])
 				),
 				$('div', { style: 'display: flex; align-items: center; gap: 6px;' }, ...stepBadge)
-			),
+			))),
 			...body
-		);
+		)));
 	}
 
 
@@ -18168,17 +18500,17 @@ ${interpolatedPrompt}`;
 						previewRaw += '`';
 					}
 					const renderedPreview = this._renderMarkdown(previewRaw + ' ...');
-					timeline.append($('div.timeline-item', { style: 'position: relative; max-width: 100%; min-width: 0; box-sizing: border-box;' },
+					timeline.append(withParts(() => $('div.timeline-item', { style: 'position: relative; max-width: 100%; min-width: 0; box-sizing: border-box;' },
 						$('div.timeline-dot', { style: 'position: absolute; left: -27px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-button-background); border: 2px solid var(--vscode-editor-background);' }),
 						$('div', { style: 'font-weight: 600; font-size: 0.92em; color: var(--vscode-editor-foreground); margin-bottom: 4px; max-width: 100%; overflow-wrap: anywhere; word-break: break-word;' },
 							header
 						),
-						$('div.timeline-body.worklog-preview-content', { style: 'font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;' },
+						part('worklogPreviewContent', $('div.timeline-body.worklog-preview-content', { style: 'font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;' },
 							...renderedPreview
-						),
-						$('div.timeline-body.worklog-full-content', { style: 'display: none; font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;' },
+						)),
+						part('worklogFullContent', $('div.timeline-body.worklog-full-content', { style: 'display: none; font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;' },
 							...renderedBody
-						),
+						)),
 						$('div', { style: 'margin-top: 6px;' },
 							$<HTMLButtonElement>('button.worklog-expand-toggle-btn', { type: 'button', 'data-expanded': 'false', 'data-char-count': `${body.length}`, style: 'font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 4px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); cursor: pointer;' },
 								'Show Full Log (',
@@ -18186,9 +18518,9 @@ ${interpolatedPrompt}`;
 								' chars)'
 							)
 						)
-					));
+					)));
 				} else {
-					timeline.append($('div.timeline-item', { style: 'position: relative; max-width: 100%; min-width: 0; box-sizing: border-box;' },
+					timeline.append(withParts(() => $('div.timeline-item', { style: 'position: relative; max-width: 100%; min-width: 0; box-sizing: border-box;' },
 						$('div.timeline-dot', { style: 'position: absolute; left: -27px; top: 4px; width: 10px; height: 10px; border-radius: 50%; background: var(--vscode-button-background); border: 2px solid var(--vscode-editor-background);' }),
 						$('div', { style: 'font-weight: 600; font-size: 0.92em; color: var(--vscode-editor-foreground); margin-bottom: 4px; max-width: 100%; overflow-wrap: anywhere; word-break: break-word;' },
 							header
@@ -18196,7 +18528,7 @@ ${interpolatedPrompt}`;
 						$('div.timeline-body', { style: 'font-size: 0.88em; opacity: 0.88; line-height: 1.5; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;' },
 							...renderedBody
 						)
-					));
+					)));
 				}
 			}
 		}
@@ -18502,17 +18834,17 @@ ${interpolatedPrompt}`;
 					(r.fieldId && rawKey && r.fieldId.toLowerCase() === rawKey.toLowerCase())
 				);
 				const stepCardClass = lastStepRes ? (lastStepRes.status === 'success' ? ' ticket-step-success' : ' ticket-step-failed') : '';
-				const stepBadge = (): HTMLElement[] => lastStepRes ? [$('div.ticket-step-badge-container', { style: 'display: inline-flex; align-items: center; margin-left: auto; margin-right: 8px;' },
+				const stepBadge = (): HTMLElement[] => lastStepRes ? [part('ticketStepBadgeContainer', $('div.ticket-step-badge-container', { style: 'display: inline-flex; align-items: center; margin-left: auto; margin-right: 8px;' },
 					$('span', { class: `ticket-step-badge ${lastStepRes.status}`, title: lastStepRes.error ? textOf(lastStepRes.error) : undefined },
 						' ',
-						$('span', { class: `codicon codicon-${lastStepRes.status === 'success' ? 'check' : 'error'}`, style: 'font-size: 11px;' }),
+						part('codicon', $('span', { class: `codicon codicon-${lastStepRes.status === 'success' ? 'check' : 'error'}`, style: 'font-size: 11px;' })),
 						' ',
 						$('span', undefined,
 							...(lastStepRes.status === 'success' ? ['Done (', String(lastStepRes.durationMs), 'ms)'] : ['Failed (', String(lastStepRes.durationMs), 'ms)'])
 						),
 						' '
 					)
-				)] : [];
+				))] : [];
 
 				// 1:1 DEDICATED ATTACHMENT COMPONENT - ATOMIC, NEVER TREATED AS DYNAMIC LIST OR CONTAINER
 				const isAttachmentField = fType === 'attachment' ||
@@ -18572,8 +18904,8 @@ ${interpolatedPrompt}`;
 						}
 					}
 
-					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; font-weight: 700; text-transform: uppercase;' },
@@ -18581,16 +18913,16 @@ ${interpolatedPrompt}`;
 								)
 							),
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'attachment', 'data-ai-field-label': k, 'data-ai-current-value': textOf(parsedAttachmentList ? JSON.stringify(parsedAttachmentList) : String(v || '')), title: `Edit ${k} with AI` },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'attachment', 'data-ai-field-label': k, 'data-ai-current-value': textOf(parsedAttachmentList ? JSON.stringify(parsedAttachmentList) : String(v || '')), title: `Edit ${k} with AI` },
 									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							)
-						),
-						$('div.custom-field-view', undefined, fileItemsContent)
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', undefined, fileItemsContent))
 
-					));
+					))));
 				} else if (fType === 'dynamic_list' || ((fType === 'text' || !fType) && typeof v === 'string' && v.trim().startsWith('[') && v.trim().endsWith(']'))) {
 					let parsedArray: IJsonObject[] | null = null;
 					if (typeof v === 'string' && v.trim().startsWith('[')) {
@@ -18639,16 +18971,16 @@ ${interpolatedPrompt}`;
 													)
 												)
 											),
-											$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}/${idxNum}/${subK}`, 'data-ai-field-type': (isDateOrRange ? 'date_range' : (isLong ? 'textarea' : 'text')), 'data-ai-field-label': subK, 'data-ai-current-value': textOf(subVal), title: `Edit ${subK} with AI`, style: 'padding: 2px 5px; font-size: 0.75em;' },
+											part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}/${idxNum}/${subK}`, 'data-ai-field-type': (isDateOrRange ? 'date_range' : (isLong ? 'textarea' : 'text')), 'data-ai-field-label': subK, 'data-ai-current-value': textOf(subVal), title: `Edit ${subK} with AI`, style: 'padding: 2px 5px; font-size: 0.75em;' },
 												$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 													$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 												)
-											)
+											))
 										),
 										...(isLong ? [
-											$('div.dynamic-subfield-val.desc-content-box', { 'data-field-key': textOf(rawKey), 'data-item-idx': `${idx}`, 'data-sub-key': textOf(subK), 'data-multiline': 'true', style: 'margin-top: 2px; margin-bottom: 8px; font-size: 0.88em; padding: 8px 12px; cursor: text;', title: `Click to edit ${textOf(subK)} manually` },
+											part(['descContentBox', 'descContentBoxes'], $('div.dynamic-subfield-val.desc-content-box', { 'data-field-key': textOf(rawKey), 'data-item-idx': `${idx}`, 'data-sub-key': textOf(subK), 'data-multiline': 'true', style: 'margin-top: 2px; margin-bottom: 8px; font-size: 0.88em; padding: 8px 12px; cursor: text;', title: `Click to edit ${textOf(subK)} manually` },
 												...this._renderMarkdown(subVal)
-											)
+											))
 										] : [])
 									);
 								}
@@ -18663,51 +18995,51 @@ ${interpolatedPrompt}`;
 										),
 										$('span', { style: 'font-size: 0.95em; font-weight: 600; color: var(--vscode-editor-foreground);' }, String(itemTitle))
 									),
-									$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}/${idxNum}`, 'data-ai-field-type': 'composite', 'data-ai-field-label': `${itemTitle}`, 'data-ai-current-value': textOf(itemTitle), title: `Edit ${itemTitle} with AI` },
+									part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}/${idxNum}`, 'data-ai-field-type': 'composite', 'data-ai-field-label': `${itemTitle}`, 'data-ai-current-value': textOf(itemTitle), title: `Edit ${itemTitle} with AI` },
 										$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
 											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 										)
-									)
+									))
 								),
 								$('div.subcard-body', undefined, ...itemSubFieldsView)
 							));
 						});
 					}
 
-					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(6,182,212,0.15); color: #06b6d4; font-weight: 700; text-transform: uppercase;' },
 									'Dynamic List'
 								)
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'dynamic_list', 'data-ai-field-label': k, 'data-ai-current-value': textOf(typeof v === 'string' ? v : JSON.stringify(v)), title: `Edit ${k} with AI` },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'dynamic_list', 'data-ai-field-label': k, 'data-ai-current-value': textOf(typeof v === 'string' ? v : JSON.stringify(v)), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
-						),
-						$('div.custom-field-view', undefined, ...subCardsView)
+							))
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', undefined, ...subCardsView))
 
-					));
+					))));
 				} else if (fType === 'switch' || fType === 'boolean' || k.toLowerCase().includes('flag')) {
 					const isChecked = String(v).trim().toLowerCase() === 'true';
-					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: `font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: ${isChecked ? 'rgba(16,185,129,0.15)' : 'rgba(148,163,184,0.15)'}; color: ${isChecked ? '#10b981' : '#94a3b8'}; font-weight: 700; text-transform: uppercase;` },
 									'Switch'
 								)
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'switch', 'data-ai-field-label': k, 'data-ai-current-value': (isChecked ? 'true' : 'false'), title: `Edit ${k} with AI` },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'switch', 'data-ai-field-label': k, 'data-ai-current-value': (isChecked ? 'true' : 'false'), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
-						),
-						$('div.custom-field-view.custom-switch-view', { 'data-field-key': textOf(rawKey), 'data-current-val': (isChecked ? 'true' : 'false'), style: 'display: flex; align-items: center; gap: 10px; padding: 6px 0; cursor: pointer;', title: `Click to toggle ${textOf(k)}` },
+							))
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view.custom-switch-view', { 'data-field-key': textOf(rawKey), 'data-current-val': (isChecked ? 'true' : 'false'), style: 'display: flex; align-items: center; gap: 10px; padding: 6px 0; cursor: pointer;', title: `Click to toggle ${textOf(k)}` },
 							$('div', { style: `width: 36px; height: 20px; border-radius: 10px; background: ${isChecked ? '#10b981' : 'rgba(255,255,255,0.14)'}; position: relative; border: 1px solid ${isChecked ? '#059669' : 'rgba(255,255,255,0.2)'};` },
 								$('div', { style: `width: 14px; height: 14px; border-radius: 50%; background: #fff; position: absolute; top: 2px; left: ${isChecked ? '18px' : '2px'}; box-shadow: 0 1px 3px rgba(0,0,0,0.4);` })
 							),
@@ -18716,32 +19048,32 @@ ${interpolatedPrompt}`;
 								isChecked ? 'ON (true)' : 'OFF (false)',
 								' '
 							)
-						)
-					));
+						))
+					))));
 				} else if (fType === 'select' || fType === 'single_select') {
-					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;' },
 									'Select'
 								)
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'select', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), 'data-ai-options': textOf(JSON.stringify(fieldItem.options || [])), title: `Edit ${k} with AI` },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'select', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), 'data-ai-options': textOf(JSON.stringify(fieldItem.options || [])), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
-						),
-						$('div.custom-field-view.custom-select-view', { 'data-field-key': textOf(rawKey), 'data-select-options': textOf(JSON.stringify(fieldItem.options || [])), 'data-current-val': textOf(String(v || '')), style: 'padding: 4px 0; cursor: pointer;', title: `Click to change ${textOf(k)}` },
+							))
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view.custom-select-view', { 'data-field-key': textOf(rawKey), 'data-select-options': textOf(JSON.stringify(fieldItem.options || [])), 'data-current-val': textOf(String(v || '')), style: 'padding: 4px 0; cursor: pointer;', title: `Click to change ${textOf(k)}` },
 							v ? $('span', { style: 'display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #93c5fd; border: 1px solid rgba(59,130,246,0.25); font-size: 0.9em; font-weight: 500;' },
 								$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M3 9.5a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zm5 0a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3z' })
 								),
 								String(v)
 							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No option selected. Click to select.')
-						)
-					));
+						))
+					))));
 				} else if (fType === 'multiselect' || fType === 'tags') {
 					let selectedArr: string[] = [];
 					if (Array.isArray(v)) {
@@ -18754,95 +19086,95 @@ ${interpolatedPrompt}`;
 							selectedArr = tr.split(',').map(s => s.trim()).filter(Boolean);
 						}
 					}
-					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(99,102,241,0.15); color: #818cf8; font-weight: 700; text-transform: uppercase;' },
 									'Multiselect'
 								)
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'multiselect', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), 'data-ai-options': textOf(JSON.stringify(fieldItem.options || [])), title: `Edit ${k} with AI` },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'multiselect', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), 'data-ai-options': textOf(JSON.stringify(fieldItem.options || [])), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
-						),
-						$('div.custom-field-view', { style: 'display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0;' },
+							))
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 0;' },
 							...(selectedArr.length > 0 ? [
 								...selectedArr.map(item => $('span', { style: 'display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 12px; background: rgba(99,102,241,0.15); color: #818cf8; border: 1px solid rgba(99,102,241,0.3); font-size: 0.85em; font-weight: 500;' },
-									$('span.codicon.codicon-tag', { style: 'font-size: 11px; margin-right: 4px;' }),
+									part('codicon', $('span.codicon.codicon-tag', { style: 'font-size: 11px; margin-right: 4px;' })),
 									textOf(String(item))
 								))
 							] : [$('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No options selected.')])
-						)
-					));
+						))
+					))));
 				} else if (fType === 'date') {
-					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;' },
 									'Date'
 								)
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'date', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'date', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
-						),
-						$('div.custom-field-view', { style: 'padding: 4px 0;' },
+							))
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'padding: 4px 0;' },
 							v ? $('span', { style: 'display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(59,130,246,0.12); color: #60a5fa; border: 1px solid rgba(59,130,246,0.25); font-size: 0.9em; font-weight: 500;' },
 								'\uD83D\uDCC5 ',
 								String(v)
 							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No date set.')
-						)
-					));
+						))
+					))));
 				} else if (fType === 'time') {
-					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(234,179,8,0.15); color: #facc15; font-weight: 700; text-transform: uppercase;' },
 									'Time'
 								)
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'time', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'time', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
-						),
-						$('div.custom-field-view', { style: 'padding: 4px 0;' },
+							))
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'padding: 4px 0;' },
 							v ? $('span', { style: 'display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(234,179,8,0.12); color: #facc15; border: 1px solid rgba(234,179,8,0.25); font-size: 0.9em; font-weight: 500;' },
 								'\uD83D\uDD52 ',
 								String(v)
 							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No time set.')
-						)
-					));
+						))
+					))));
 				} else if (fType === 'datetime') {
-					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(168,85,247,0.15); color: #c084fc; font-weight: 700; text-transform: uppercase;' },
 									'DateTime'
 								)
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'datetime', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'datetime', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
-						),
-						$('div.custom-field-view', { style: 'padding: 4px 0;' },
+							))
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'padding: 4px 0;' },
 							v ? $('span', { style: 'display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 4px; background: rgba(168,85,247,0.12); color: #c084fc; border: 1px solid rgba(168,85,247,0.25); font-size: 0.9em; font-weight: 500;' },
 								'\uD83D\uDCC5 \uD83D\uDD52 ',
 								String(v)
 							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No datetime set.')
-						)
-					));
+						))
+					))));
 				} else if (
 					fType === 'date_range' ||
 					fType === 'time_range' ||
@@ -18850,26 +19182,26 @@ ${interpolatedPrompt}`;
 					((fType === 'text' || !fType) && typeof v === 'string' && !v.trim().startsWith('{') && !v.trim().startsWith('[') && v.length < 64 && /^\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}/.test(v.trim()) && (v.includes('~') || /^\d{4}-\d{2}-\d{2}$/.test(v.trim())))
 				) {
 					const rangeType = fType || 'date_range';
-					customFieldsContent.push($('div.section-card.custom-property-card', undefined,
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card', undefined,
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; font-weight: 700; text-transform: uppercase;' },
 									'Range'
 								)
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': rangeType, 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': rangeType, 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
-						),
-						$('div.custom-field-view', { style: 'padding: 4px 0;' },
+							))
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'padding: 4px 0;' },
 							v ? $('span.range-badge', { style: 'font-size: 0.9em; font-weight: 600; padding: 3px 10px; border-radius: 4px; background: rgba(16,185,129,0.15); color: #10b981; border: 1px solid rgba(16,185,129,0.3); display: inline-flex; align-items: center; gap: 6px;' },
 								String(v)
 							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No range set.')
-						)
-					));
+						))
+					))));
 				} else if (fType === 'button_group') {
 					const buttonsList: IActionButton[] = (fieldItem.buttons && fieldItem.buttons.length > 0)
 						? fieldItem.buttons
@@ -18886,19 +19218,19 @@ ${interpolatedPrompt}`;
 						);
 					});
 
-					customFieldsContent.push($('div.section-card.custom-property-card.action-button-group-card', undefined,
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card.action-button-group-card', undefined,
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(59,130,246,0.15); color: #60a5fa; font-weight: 700; text-transform: uppercase;' },
 									'Actions'
 								)
 							)
-						),
-						$('div.custom-field-view', { style: 'padding: 6px 0;' },
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'padding: 6px 0;' },
 							$('div.action-buttons-group-row', undefined, ...buttonsNodes)
-						)
-					));
+						))
+					))));
 				} else if (fType === 'number') {
 					let formattedVal = '';
 					const numVal = (v !== undefined && v !== null && String(v).trim() !== '') ? Number(v) : NaN;
@@ -18919,8 +19251,8 @@ ${interpolatedPrompt}`;
 							formattedVal = formattedNum;
 						}
 					}
-					customFieldsContent.push($('div.section-card.custom-property-card.number-field-card', undefined,
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div.section-card.custom-property-card.number-field-card', undefined,
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 6px; border-radius: 4px; background: rgba(234, 179, 8, 0.18); color: #facc15; font-weight: 700; text-transform: uppercase;' },
@@ -18932,18 +19264,18 @@ ${interpolatedPrompt}`;
 									)
 								] : [])
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'number', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v ?? '')), title: `Edit ${k} with AI` },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'number', 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v ?? '')), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
-						),
-						$('div.custom-field-view.number-field-view', { 'data-field-key': textOf(rawKey), 'data-multiline': 'false', style: 'padding: 4px 0; cursor: text;', title: `Click to edit ${textOf(k)} manually` },
+							))
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view.number-field-view', { 'data-field-key': textOf(rawKey), 'data-multiline': 'false', style: 'padding: 4px 0; cursor: text;', title: `Click to edit ${textOf(k)} manually` },
 							formattedVal ? $('div', { style: 'display: inline-flex; align-items: baseline; gap: 6px; background: rgba(234, 179, 8, 0.08); border: 1px solid rgba(234, 179, 8, 0.25); border-radius: 6px; padding: 6px 14px;' },
 								$('span', { style: 'font-size: 1.25em; font-weight: 700; color: #facc15; font-variant-numeric: tabular-nums;' }, formattedVal)
 							) : $('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No number set. Click to edit.')
-						)
-					));
+						))
+					))));
 				} else if (fType === 'git') {
 					// Git primitive is integrated into the dedicated sidebar Git repository binding
 					continue;
@@ -18979,11 +19311,11 @@ ${interpolatedPrompt}`;
 								const selected = String(opt) === String(currentVal);
 								return $<HTMLOptionElement>('option', { value: textOf(opt), selected: selected ? true : undefined }, textOf(opt));
 							});
-							control = $<HTMLSelectElement>('select.ticket-parameter-input.monaco-select-box', { 'data-field-key': textOf(rawKey), 'data-param-name': textOf(param.name), style: 'flex: 1; min-width: 140px; padding: 5px 8px; font-size: 12px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit;' },
+							control = part('ticketParameterInputs', $<HTMLSelectElement>('select.ticket-parameter-input.monaco-select-box', { 'data-field-key': textOf(rawKey), 'data-param-name': textOf(param.name), style: 'flex: 1; min-width: 140px; padding: 5px 8px; font-size: 12px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit;' },
 								...optionsNodes
-							);
+							));
 						} else {
-							control = $<HTMLInputElement>('input.ticket-parameter-input.monaco-inputbox', { type: 'text', 'data-field-key': textOf(rawKey), 'data-param-name': textOf(param.name), value: textOf(currentVal), placeholder: textOf(param.defaultValue || ''), style: 'flex: 1; min-width: 140px; padding: 5px 10px; font-size: 12px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit; font-family: var(--vscode-editor-font-family, monospace);' });
+							control = part('ticketParameterInputs', $<HTMLInputElement>('input.ticket-parameter-input.monaco-inputbox', { type: 'text', 'data-field-key': textOf(rawKey), 'data-param-name': textOf(param.name), value: textOf(currentVal), placeholder: textOf(param.defaultValue || ''), style: 'flex: 1; min-width: 140px; padding: 5px 10px; font-size: 12px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.3); color: inherit; font-family: var(--vscode-editor-font-family, monospace);' }));
 						}
 
 						return $('div.ticket-parameter-row', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 12px; border-radius: 6px; background: rgba(255, 255, 255, 0.025); border: 1px solid rgba(255, 255, 255, 0.06);' },
@@ -19000,8 +19332,8 @@ ${interpolatedPrompt}`;
 						);
 					});
 
-					customFieldsContent.push($('div', { class: `section-card custom-property-card ticket-parameters-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'parameters' },
-						$('div.section-title', undefined,
+					customFieldsContent.push(part(['sectionCards', 'ticketParametersCard'], withParts(() => $('div', { class: `section-card custom-property-card ticket-parameters-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'parameters' },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(168, 85, 247, 0.18); color: #c084fc; font-weight: 700; text-transform: uppercase;' },
@@ -19014,13 +19346,13 @@ ${interpolatedPrompt}`;
 							),
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								...stepBadge(),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'parameters', 'data-ai-field-label': k, 'data-ai-current-value': textOf(typeof v === 'string' ? v : JSON.stringify(paramValues)), title: `Edit ${k} with AI` },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'parameters', 'data-ai-field-label': k, 'data-ai-current-value': textOf(typeof v === 'string' ? v : JSON.stringify(paramValues)), title: `Edit ${k} with AI` },
 									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							)
-						),
+						))),
 						$('div', { style: 'font-size: 11px; opacity: 0.65; margin-bottom: 8px;' },
 							'Runtime parameters can be referenced across URLs, prompts, and actions using ',
 							$('code', undefined, '{{variable_name}}'),
@@ -19030,7 +19362,7 @@ ${interpolatedPrompt}`;
 							...(rowsNodes.length ? rowsNodes : [$('span', { style: 'opacity: 0.4; font-style: italic;' }, 'No parameters defined in schema.')])
 
 						)
-					));
+					))));
 				} else if (fType === 'python') {
 					let pythonPath = fieldItem.pythonPath || '';
 					let pythonCode = fieldItem.pythonCode || '';
@@ -19117,12 +19449,12 @@ ${interpolatedPrompt}`;
 						: 'Ready to execute';
 
 					const otherFields = (customModule?.fields || []).filter(f => f && f.id !== rawKey && (f.label || f.id) !== k && f.type !== 'output' && (f.label || f.id || '').toLowerCase() !== 'output' && (f.label || f.id || '').toLowerCase() !== 'result');
-					const baseChipHtml = $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': 'TICKET_CONTEXT[\'\']', 'data-cursor-offset': '-2', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: 'Insert TICKET_CONTEXT[\'\'] into script' },
+					const baseChipHtml = part('pythonInsertCtxChips', $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': 'TICKET_CONTEXT[\'\']', 'data-cursor-offset': '-2', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: 'Insert TICKET_CONTEXT[\'\'] into script' },
 						'+ TICKET_CONTEXT[\'\']'
-					);
-					const outputChipHtml = $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': '\nOUTPUT = ', 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.1); color: #34d399; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: 'Insert return value assignment OUTPUT = ... (consumed by downstream primitives & Output Manifest)' },
+					));
+					const outputChipHtml = part('pythonInsertCtxChips', $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': '\nOUTPUT = ', 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.1); color: #34d399; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: 'Insert return value assignment OUTPUT = ... (consumed by downstream primitives & Output Manifest)' },
 						'+ OUTPUT ='
-					);
+					));
 
 					const pythonContextExprs: string[] = [];
 					for (const ofField of otherFields) {
@@ -19152,24 +19484,24 @@ ${interpolatedPrompt}`;
 					const hiddenExprs = pythonContextExprs.slice(maxInitialVisible);
 
 					const visibleChipsNodes = visibleExprs.map(expr => {
-						return $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(expr), 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: `Insert ${textOf(expr)}` },
+						return part('pythonInsertCtxChips', $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(expr), 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: `Insert ${textOf(expr)}` },
 							'+ ',
 							textOf(expr)
-						);
+						));
 					});
 
 					const hiddenChipsNodes: HTMLElement[] = [];
 					if (hiddenExprs.length > 0) {
-						hiddenChipsNodes.push($('span.python-ctx-hidden-group', { style: 'display: none;' },
+						hiddenChipsNodes.push(part('pythonCtxHiddenGroup', $('span.python-ctx-hidden-group', { style: 'display: none;' },
 							...hiddenExprs.flatMap(expr => {
 								return [
-									$<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(expr), 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: `Insert ${textOf(expr)}` },
+									part('pythonInsertCtxChips', $<HTMLButtonElement>('button.python-insert-ctx-chip', { type: 'button', 'data-field-key': textOf(rawKey), 'data-insert': textOf(expr), 'data-cursor-offset': '0', style: 'padding: 2px 7px; font-size: 10.5px; font-weight: 500; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;', title: `Insert ${textOf(expr)}` },
 										'+ ',
 										textOf(expr)
-									)
+									))
 								];
 							})
-						), $<HTMLButtonElement>('button.python-ctx-more-btn', { type: 'button', 'data-count': `${hiddenExprs.length}`, style: 'padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;', title: 'Toggle more context fields' },
+						)), $<HTMLButtonElement>('button.python-ctx-more-btn', { type: 'button', 'data-count': `${hiddenExprs.length}`, style: 'padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;', title: 'Toggle more context fields' },
 							'+',
 							String(hiddenExprs.length),
 							' More...'
@@ -19195,39 +19527,39 @@ ${interpolatedPrompt}`;
 							)
 						));
 
-					const pythonCodeDisplay = $('div.python-code-display', { style: 'position: relative; width: 100%; min-height: 140px; pointer-events: none !important; user-select: none !important; -webkit-user-select: none !important; overflow: hidden; padding: 8px 10px 26px 10px; margin: 0; border: none; font-size: 12px; font-family: var(--monaco-monospace-font, \'SF Mono\', Menlo, Monaco, Consolas, \'Courier New\', monospace); font-weight: 400; font-style: normal; font-variant-ligatures: none; letter-spacing: 0px; word-spacing: 0px; line-height: 18px; tab-size: 4; white-space: pre-wrap; word-break: break-all; overflow-wrap: break-word; color: #d4d4d4; box-sizing: border-box; z-index: 1;' });
+					const pythonCodeDisplay = part('pythonCodeDisplay', $('div.python-code-display', { style: 'position: relative; width: 100%; min-height: 140px; pointer-events: none !important; user-select: none !important; -webkit-user-select: none !important; overflow: hidden; padding: 8px 10px 26px 10px; margin: 0; border: none; font-size: 12px; font-family: var(--monaco-monospace-font, \'SF Mono\', Menlo, Monaco, Consolas, \'Courier New\', monospace); font-weight: 400; font-style: normal; font-variant-ligatures: none; letter-spacing: 0px; word-spacing: 0px; line-height: 18px; tab-size: 4; white-space: pre-wrap; word-break: break-all; overflow-wrap: break-word; color: #d4d4d4; box-sizing: border-box; z-index: 1;' }));
 					renderHighlightedPythonToDOM(pythonCodeDisplay, pythonCode, { showLineNumbers: false, isLiveBackdrop: true, placeholder: 'Enter Python script to execute...' });
 
-					customFieldsContent.push($('div', { class: `section-card custom-property-card python-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'python', 'data-external-scripts': textOf(JSON.stringify(externalScripts)), 'data-python-code': textOf(pythonCode), 'data-python-locked': (pythonLocked ? 'true' : 'false') },
-						$('div.section-title', undefined,
+					customFieldsContent.push(part(['sectionCards', 'pythonPrimitiveCard', 'pythonPrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card python-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'python', 'data-external-scripts': textOf(JSON.stringify(externalScripts)), 'data-python-code': textOf(pythonCode), 'data-python-locked': (pythonLocked ? 'true' : 'false') },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.12); color: #38bdf8; font-weight: 700; text-transform: uppercase;' },
 									'Python'
 								),
-								$('span.python-env-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.7); font-family: monospace;' },
+								part('pythonEnvBadge', $('span.python-env-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.7); font-family: monospace;' },
 									textOf(pythonPath || '.venv / python3')
-								)
+								))
 							),
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								...stepBadge(),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'python', 'data-ai-field-label': k, 'data-ai-current-value': textOf(pythonCode), title: `Edit ${k} with AI` },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'python', 'data-ai-field-label': k, 'data-ai-current-value': textOf(pythonCode), title: `Edit ${k} with AI` },
 									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							)
-						),
-						$('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
 							$('div', { style: 'background: rgba(0,0,0,0.22); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;' },
 								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
 									$('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85; color: inherit; display: flex; align-items: center; gap: 6px;' },
 										$('span', undefined, 'Virtual Environment / Interpreter:')
 									),
-									$('span.python-test-status', { style: 'font-size: 10px; opacity: 0.65;' })
+									part('pythonTestStatus', $('span.python-test-status', { style: 'font-size: 10px; opacity: 0.65;' }))
 								),
 								$('div', { style: 'display: flex; gap: 6px; align-items: center; flex-wrap: wrap;' },
-									$<HTMLInputElement>('input.python-interpreter-input.monaco-inputbox', { type: 'text', 'data-field-key': textOf(rawKey), value: textOf(pythonPath), placeholder: 'Auto-detect (.venv or system python3) \u2014 or click Browse to select', style: 'flex: 1; min-width: 160px; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);' }),
+									part('pythonInterpreterInput', $<HTMLInputElement>('input.python-interpreter-input.monaco-inputbox', { type: 'text', 'data-field-key': textOf(rawKey), value: textOf(pythonPath), placeholder: 'Auto-detect (.venv or system python3) \u2014 or click Browse to select', style: 'flex: 1; min-width: 160px; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);' })),
 									$<HTMLButtonElement>('button.python-browse-interpreter-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Select Python Interpreter or Virtualenv Folder', style: 'padding: 5px 12px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;' },
 										$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
 											$.SVG('path', { d: 'M14.5 3H7.71l-.85-.85L6.51 2h-5l-.5.5v11l.5.5h13l.5-.5v-10l-.5-.5zm-.5 10H2V3h4.29l.85.85.35.15H14v9z' })
@@ -19236,16 +19568,16 @@ ${interpolatedPrompt}`;
 									)
 								),
 								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 3px;' },
-									$('div.python-env-badge', { style: 'font-size: 10.5px; display: inline-flex; align-items: center; gap: 6px; padding: 2.5px 8px; border-radius: 4px; background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.7); word-break: break-all;' },
+									part('pythonEnvBadge', $('div.python-env-badge', { style: 'font-size: 10.5px; display: inline-flex; align-items: center; gap: 6px; padding: 2.5px 8px; border-radius: 4px; background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.7); word-break: break-all;' },
 										textOf(pythonPath ? `Path: ${pythonPath}` : 'Auto-detect: System / Active .venv')
-									),
+									)),
 									$('div', { style: 'display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-left: auto;' },
-										$<HTMLButtonElement>('button.python-test-interpreter-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Test Python binary and check version', style: 'padding: 3.5px 12px; font-size: 11px; font-weight: 500; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); white-space: nowrap;' },
+										part('pythonTestInterpreterBtn', $<HTMLButtonElement>('button.python-test-interpreter-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Test Python binary and check version', style: 'padding: 3.5px 12px; font-size: 11px; font-weight: 500; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15); white-space: nowrap;' },
 											'Test'
-										),
-										$<HTMLButtonElement>('button.python-create-venv-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Initialize a local virtual environment (.venv) via python3 -m venv', style: 'padding: 3.5px 12px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(0,122,204,0.15); color: #38bdf8; border: 1px solid rgba(0,122,204,0.4); white-space: nowrap;' },
+										)),
+										part('pythonCreateVenvBtn', $<HTMLButtonElement>('button.python-create-venv-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Initialize a local virtual environment (.venv) via python3 -m venv', style: 'padding: 3.5px 12px; font-size: 11px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(0,122,204,0.15); color: #38bdf8; border: 1px solid rgba(0,122,204,0.4); white-space: nowrap;' },
 											'+ Create Virtualenv'
-										)
+										))
 									)
 								)
 							),
@@ -19261,36 +19593,36 @@ ${interpolatedPrompt}`;
 										$('span', undefined, 'Add Script File...')
 									)
 								),
-								$('div.python-scripts-list', { style: 'display: flex; flex-direction: column; gap: 4px;' }, ...externalScriptsList)
+								part('pythonScriptsList', $('div.python-scripts-list', { style: 'display: flex; flex-direction: column; gap: 4px;' }, ...externalScriptsList))
 							),
 							$('div', { style: 'display: flex; flex-direction: column; gap: 4px;' },
 								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
 									$('label', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'Source Code:'),
 									$('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap;' },
 										$('span', { style: 'font-size: 10px; opacity: 0.55; margin-right: 2px;' }, 'Supports TICKET_CONTEXT, {{variables}}, and ANY_AGENT_CONTEXT'),
-										$<HTMLButtonElement>('button.python-copy-code-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: rgba(255, 255, 255, 0.07); color: inherit; border: 1px solid rgba(255, 255, 255, 0.16); user-select: none; -webkit-user-select: none;', title: 'Copy complete Python source code to clipboard' },
-											$('span.codicon.codicon-copy', { style: 'font-size: 12.5px;' })
-										),
-										$<HTMLButtonElement>('button.python-paste-code-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: `display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: rgba(255, 255, 255, 0.07); color: inherit; border: 1px solid rgba(255, 255, 255, 0.16); opacity: ${pythonLocked ? '0.4' : '1'}; user-select: none; -webkit-user-select: none;`, title: (pythonLocked ? 'Locked — Click the lock icon to unlock before pasting' : 'Paste clipboard content into Python source code') },
-											$('span.codicon.codicon-clippy', { style: 'font-size: 12.5px;' })
-										),
-										$<HTMLButtonElement>('button.python-lock-code-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: `display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: ${pythonLocked ? 'rgba(251, 191, 36, 0.12)' : 'rgba(52, 211, 153, 0.1)'}; color: ${pythonLocked ? '#fbbf24' : '#34d399'}; border: 1px solid ${pythonLocked ? 'rgba(251, 191, 36, 0.45)' : 'rgba(52, 211, 153, 0.4)'}; user-select: none; -webkit-user-select: none;`, title: (pythonLocked ? 'Locked (Read-Only) — Click to Unlock for editing' : 'Unlocked (Editable) — Click to Lock and protect from accidental edits') },
-											$('span', { class: `codicon ${pythonLocked ? 'codicon-lock' : 'codicon-unlock'}`, style: 'font-size: 12.5px;' })
-										)
+										part('pythonCopyCodeBtn', withParts(() => $<HTMLButtonElement>('button.python-copy-code-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: rgba(255, 255, 255, 0.07); color: inherit; border: 1px solid rgba(255, 255, 255, 0.16); user-select: none; -webkit-user-select: none;', title: 'Copy complete Python source code to clipboard' },
+											part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 12.5px;' }))
+										))),
+										part('pythonPasteCodeBtn', withParts(() => $<HTMLButtonElement>('button.python-paste-code-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: `display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: rgba(255, 255, 255, 0.07); color: inherit; border: 1px solid rgba(255, 255, 255, 0.16); opacity: ${pythonLocked ? '0.4' : '1'}; user-select: none; -webkit-user-select: none;`, title: (pythonLocked ? 'Locked — Click the lock icon to unlock before pasting' : 'Paste clipboard content into Python source code') },
+											part('codicon', $('span.codicon.codicon-clippy', { style: 'font-size: 12.5px;' }))
+										))),
+										part('pythonLockCodeBtn', withParts(() => $<HTMLButtonElement>('button.python-lock-code-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: `display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 22px; padding: 0; border-radius: 4px; cursor: pointer; background: ${pythonLocked ? 'rgba(251, 191, 36, 0.12)' : 'rgba(52, 211, 153, 0.1)'}; color: ${pythonLocked ? '#fbbf24' : '#34d399'}; border: 1px solid ${pythonLocked ? 'rgba(251, 191, 36, 0.45)' : 'rgba(52, 211, 153, 0.4)'}; user-select: none; -webkit-user-select: none;`, title: (pythonLocked ? 'Locked (Read-Only) — Click to Unlock for editing' : 'Unlocked (Editable) — Click to Lock and protect from accidental edits') },
+											part('codicon', $('span', { class: `codicon ${pythonLocked ? 'codicon-lock' : 'codicon-unlock'}`, style: 'font-size: 12.5px;' }))
+										)))
 									)
 								),
-								$('div.python-code-wrapper', { style: `display: flex; align-items: stretch; position: relative; width: 100%; border-radius: 6px; border: 1px solid ${pythonLocked ? 'rgba(251, 191, 36, 0.28)' : 'rgba(255,255,255,0.15)'}; background: rgba(0,0,0,0.3); box-sizing: border-box; overflow: hidden; user-select: none; -webkit-user-select: none;` },
-									$('div.python-line-numbers-gutter', { style: 'user-select: none !important; -webkit-user-select: none !important; pointer-events: none !important; color: rgba(255, 255, 255, 0.28); text-align: right; padding: 8px 8px 26px 6px; border-right: 1px solid rgba(255, 255, 255, 0.08); background: rgba(0, 0, 0, 0.18); font-size: 11px; font-family: var(--monaco-monospace-font, \'SF Mono\', Menlo, Monaco, Consolas, \'Courier New\', monospace); line-height: 18px; flex-shrink: 0; min-width: 32px; white-space: pre; overflow: hidden; box-sizing: border-box;' },
+								part('pythonCodeWrapper', $('div.python-code-wrapper', { style: `display: flex; align-items: stretch; position: relative; width: 100%; border-radius: 6px; border: 1px solid ${pythonLocked ? 'rgba(251, 191, 36, 0.28)' : 'rgba(255,255,255,0.15)'}; background: rgba(0,0,0,0.3); box-sizing: border-box; overflow: hidden; user-select: none; -webkit-user-select: none;` },
+									part('pythonLineNumbersGutter', $('div.python-line-numbers-gutter', { style: 'user-select: none !important; -webkit-user-select: none !important; pointer-events: none !important; color: rgba(255, 255, 255, 0.28); text-align: right; padding: 8px 8px 26px 6px; border-right: 1px solid rgba(255, 255, 255, 0.08); background: rgba(0, 0, 0, 0.18); font-size: 11px; font-family: var(--monaco-monospace-font, \'SF Mono\', Menlo, Monaco, Consolas, \'Courier New\', monospace); line-height: 18px; flex-shrink: 0; min-width: 32px; white-space: pre; overflow: hidden; box-sizing: border-box;' },
 										textOf(buildPythonLineNumbersText(pythonCode))
-									),
+									)),
 									$('div.python-code-stage', { style: 'position: relative; flex: 1; min-width: 0; min-height: 140px; display: block;' },
 										pythonCodeDisplay,
-										$<HTMLTextAreaElement>('textarea.python-code-textarea', { 'data-field-key': textOf(rawKey), rows: '6', readonly: pythonLocked ? '' : undefined, spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', style: `position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; display: block; width: 100%; height: 100%; min-height: 140px; max-height: none !important; overflow: hidden !important; padding: 8px 10px 26px 10px; margin: 0; font-size: 12px; border: none; outline: none; background: transparent !important; color: transparent !important; -webkit-text-fill-color: transparent !important; caret-color: #38bdf8 !important; box-sizing: border-box; font-family: var(--monaco-monospace-font, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace); font-weight: 400; font-style: normal; font-variant-ligatures: none; letter-spacing: 0px; word-spacing: 0px; line-height: 18px; white-space: pre-wrap; word-break: break-all; overflow-wrap: break-word; resize: none !important; tab-size: 4; user-select: text !important; -webkit-user-select: text !important; pointer-events: auto !important; cursor: ${pythonLocked ? 'default' : 'text'};` },
+										part('pythonCodeTextarea', $<HTMLTextAreaElement>('textarea.python-code-textarea', { 'data-field-key': textOf(rawKey), rows: '6', readonly: pythonLocked ? '' : undefined, spellcheck: 'false', autocapitalize: 'off', autocomplete: 'off', style: `position: absolute; top: 0; left: 0; right: 0; bottom: 0; z-index: 2; display: block; width: 100%; height: 100%; min-height: 140px; max-height: none !important; overflow: hidden !important; padding: 8px 10px 26px 10px; margin: 0; font-size: 12px; border: none; outline: none; background: transparent !important; color: transparent !important; -webkit-text-fill-color: transparent !important; caret-color: #38bdf8 !important; box-sizing: border-box; font-family: var(--monaco-monospace-font, 'SF Mono', Menlo, Monaco, Consolas, 'Courier New', monospace); font-weight: 400; font-style: normal; font-variant-ligatures: none; letter-spacing: 0px; word-spacing: 0px; line-height: 18px; white-space: pre-wrap; word-break: break-all; overflow-wrap: break-word; resize: none !important; tab-size: 4; user-select: text !important; -webkit-user-select: text !important; pointer-events: auto !important; cursor: ${pythonLocked ? 'default' : 'text'};` },
 											textOf((pythonCode || '').replace(/\r\n?/g, '\n'))
-										)
+										))
 									)
-								),
-								$('div.python-ctx-chips-bar', { style: `display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0; opacity: ${pythonLocked ? '0.45' : '1'};` },
+								)),
+								part('pythonCtxChipsBar', withParts(() => $('div.python-ctx-chips-bar', { style: `display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 2px 0; opacity: ${pythonLocked ? '0.45' : '1'};` },
 									$('span', { style: 'font-size: 10.5px; opacity: 0.65;' }, 'Insert Context:'),
 									baseChipHtml,
 									' ',
@@ -19299,27 +19631,27 @@ ${interpolatedPrompt}`;
 									...visibleChipsNodes,
 									' ',
 									...hiddenChipsNodes
-								)
+								)))
 							),
 							$('div', { style: 'display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;' },
 								$('div', { style: 'display: flex; gap: 8px; align-items: center;' },
-									$<HTMLButtonElement>('button.python-run-script-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 6px; padding: 6px 16px; font-size: 11.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45); transition: all 0.15s ease;', title: 'Run Python script in virtualenv or interpreter' },
+									part('pythonRunScriptBtn', $<HTMLButtonElement>('button.python-run-script-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 6px; padding: 6px 16px; font-size: 11.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.45); transition: all 0.15s ease;', title: 'Run Python script in virtualenv or interpreter' },
 										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 											$.SVG('path', { d: 'M4 2.5l9 5.5-9 5.5v-11z' })
 										),
 										$('span', undefined, 'Run Script')
-									),
+									)),
 									$<HTMLButtonElement>('button.python-save-code-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(255,255,255,0.08); color: inherit; border: 1px solid rgba(255,255,255,0.15);', title: 'Save code without running' },
 										$('span', undefined, 'Save Code')
 									)
 								),
-								$('span.python-status-text', { style: 'font-size: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(255,255,255,0.06); opacity: 0.7;' },
+								part('pythonStatusText', $('span.python-status-text', { style: 'font-size: 10px; padding: 2px 8px; border-radius: 4px; background: rgba(255,255,255,0.06); opacity: 0.7;' },
 									statusTag
-								)
+								))
 							),
-							$('div.python-output-section', { style: 'background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;' },
+							part('pythonOutputSection', $('div.python-output-section', { style: 'background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;' },
 								...(pythonResult !== undefined ? [
-									$('div.python-result-block', { style: 'background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;' },
+									part('pythonResultBlock', withParts(() => $('div.python-result-block', { style: 'background: rgba(56, 189, 248, 0.05); border: 1px solid rgba(56, 189, 248, 0.25); border-radius: 5px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px;' },
 										$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
 											$('span', { style: 'font-size: 11px; font-weight: 700; color: #38bdf8; text-transform: uppercase; letter-spacing: 0.5px;' },
 												'Return Value (Output):'
@@ -19327,15 +19659,15 @@ ${interpolatedPrompt}`;
 											$('div', { style: 'display: flex; align-items: center; gap: 8px; margin-left: auto;' },
 												$('span', { style: 'font-size: 9.5px; opacity: 0.65; color: #38bdf8;' }, 'Consumed by Output Manifest & Downstream Primitives'),
 												$<HTMLButtonElement>('button.python-copy-result-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Copy complete Return Value (Output)', style: 'display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; cursor: pointer; color: #7dd3fc;' },
-													$('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' }),
+													part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' })),
 													$('span', undefined, 'Copy')
 												)
 											)
 										),
-										$('pre.python-result-display', { style: 'margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;' },
+										part(['pythonResultDisplay', 'pres'], $('pre.python-result-display', { style: 'margin: 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; color: #e0f2fe; max-height: 180px; overflow-y: auto;' },
 											textOf(typeof pythonResult === 'object' ? JSON.stringify(pythonResult, null, 2) : String(pythonResult))
-										)
-									)
+										))
+									)))
 								] : []),
 								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px;' },
 									$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
@@ -19349,7 +19681,7 @@ ${interpolatedPrompt}`;
 									),
 									$('div', { style: 'display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto;' },
 										$<HTMLButtonElement>('button.python-copy-output-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Copy complete Console Logs', style: 'display: inline-flex; align-items: center; gap: 4px; background: transparent; border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.85; cursor: pointer; color: inherit;' },
-											$('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' }),
+											part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 10.5px;' })),
 											$('span', undefined, 'Copy Logs')
 										),
 										$<HTMLButtonElement>('button.python-clear-output-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;' },
@@ -19357,14 +19689,14 @@ ${interpolatedPrompt}`;
 										)
 									)
 								),
-								$('div.python-output-display.desc-content-box', { style: 'max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;' },
+								part(['pythonOutputDisplay', 'descContentBox', 'descContentBoxes'], $('div.python-output-display.desc-content-box', { style: 'max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;' },
 									pythonOutput ? textOf(pythonOutput) : $('span', { style: 'opacity: 0.4; font-style: italic;' },
 										'No execution logs yet. Click "Run Script" above to execute the automation code.'
 									)
-								)
-							)
-						)
-					));
+								))
+							))
+						))
+					))));
 				} else if (fType === 'browser') {
 					let browserUrl = fieldItem.defaultUrl || '';
 					let browserCreds: ICredentialPair[] = fieldItem.credentials || [];
@@ -19435,7 +19767,7 @@ ${interpolatedPrompt}`;
 					const visibleBrowserChipsNodes = visibleBrowserRefs.map(renderBrowserChipBtn);
 					const hiddenBrowserChipsNodes = hiddenBrowserRefs.length > 0
 						? [
-							$('span.browser-ctx-hidden-group', { style: 'display: none;' }, ...hiddenBrowserRefs.map(renderBrowserChipBtn)),
+							part('browserCtxHiddenGroup', $('span.browser-ctx-hidden-group', { style: 'display: none;' }, ...hiddenBrowserRefs.map(renderBrowserChipBtn))),
 							$<HTMLButtonElement>('button.browser-ctx-more-btn', { type: 'button', 'data-count': `${hiddenBrowserRefs.length}`, style: 'padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;', title: 'Show / hide more referenceable outputs' },
 								'+',
 								String(hiddenBrowserRefs.length),
@@ -19445,8 +19777,8 @@ ${interpolatedPrompt}`;
 						: [];
 					const browserChipsNodes = [...visibleBrowserChipsNodes, ...hiddenBrowserChipsNodes];
 
-					customFieldsContent.push($('div', { class: `section-card custom-property-card browser-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'browser' },
-						$('div.section-title', undefined,
+					customFieldsContent.push(part(['sectionCards', 'browserPrimitiveCard', 'browserPrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card browser-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'browser' },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56,189,248,0.18); color: #38bdf8; font-weight: 700; text-transform: uppercase;' },
@@ -19462,30 +19794,30 @@ ${interpolatedPrompt}`;
 							),
 							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 								...stepBadge(),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'browser', 'data-ai-field-label': k, 'data-ai-current-value': textOf(browserUrl), title: `Edit ${k} with AI` },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'browser', 'data-ai-field-label': k, 'data-ai-current-value': textOf(browserUrl), title: `Edit ${k} with AI` },
 									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							)
-						),
+						))),
 						$('div', { style: 'width: 100%; margin-bottom: 8px; display: flex; flex-direction: column; gap: 6px;' },
-							$<HTMLInputElement>('input.browser-url-input', { type: 'text', value: textOf(browserUrl), placeholder: 'https://example.com... (Supports {Field Label} or {param} references)', style: 'width: 100%; padding: 7px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);' }),
+							part('browserUrlInput', $<HTMLInputElement>('input.browser-url-input', { type: 'text', value: textOf(browserUrl), placeholder: 'https://example.com... (Supports {Field Label} or {param} references)', style: 'width: 100%; padding: 7px 12px; font-size: 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.28); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace);' })),
 							...(browserChipsNodes.length ? [
-								$('div.browser-ctx-chips-bar', { style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center;' },
+								withParts(() => $('div.browser-ctx-chips-bar', { style: 'display: flex; flex-wrap: wrap; gap: 5px; align-items: center;' },
 									$('span', { style: 'font-size: 10.5px; opacity: 0.65;' }, 'Insert Output:'),
 									...browserChipsNodes
 
-								)
+								))
 							] : [])
 						),
 						$('div', { style: 'display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap;' },
-							$<HTMLButtonElement>('button.browser-silent-fetch-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Fetch webpage in background and extract text/HTML for AI', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); transition: all 0.15s ease;' },
+							part('browserSilentFetchBtn', $<HTMLButtonElement>('button.browser-silent-fetch-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Fetch webpage in background and extract text/HTML for AI', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); transition: all 0.15s ease;' },
 								$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M8 12l-4-4h2.5V3h3v5H12l-4 4zm-7 2h14v1.5H1V14z' })
 								),
 								$('span', undefined, 'Fetch (Silent)')
-							),
+							)),
 							$<HTMLButtonElement>('button.browser-open-tab-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Open webpage in a new VS Code browser tab', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; font-size: 11.5px; font-weight: 600; border-radius: 6px; cursor: pointer; background: rgba(167, 139, 250, 0.15); color: #a78bfa; border: 1px solid rgba(167, 139, 250, 0.35); transition: all 0.15s ease;' },
 								$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M1.5 2.5A1.5 1.5 0 0 1 3 1h10a1.5 1.5 0 0 1 1.5 1.5v11a1.5 1.5 0 0 1-1.5 1.5H3a1.5 1.5 0 0 1-1.5-1.5v-11zM3 2a.5.5 0 0 0-.5.5V4h11V2.5a.5.5 0 0 0-.5-.5H3zm11 3H2v8.5a.5.5 0 0 0 .5.5h10a.5.5 0 0 0 .5-.5V5z' })
@@ -19509,13 +19841,13 @@ ${interpolatedPrompt}`;
 									)
 								),
 								$('div', { style: 'display: flex; flex-wrap: wrap; gap: 8px;' },
-									...browserCreds.map(c => $('div.browser-cred-item', { style: 'background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; padding: 3px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 6px;' },
+									...browserCreds.map(c => withParts(() => $('div.browser-cred-item', { style: 'background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; padding: 3px 8px; font-size: 11px; display: inline-flex; align-items: center; gap: 6px;' },
 										$('span', { style: 'opacity: 0.7; font-weight: 600;' }, textOf(c.key), ':'),
-										$('span.cred-secret-text', { 'data-real': textOf(c.value), style: 'font-family: monospace;' },
+										part('credSecretText', $('span.cred-secret-text', { 'data-real': textOf(c.value), style: 'font-family: monospace;' },
 											'\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022'
-										),
+										)),
 										$('span.cred-toggle-eye', { style: 'cursor: pointer; opacity: 0.6; font-size: 11px;', title: 'Click to show/hide' }, '\uD83D\uDC41\uFE0F')
-									))
+									)))
 								)
 							)
 						] : []),
@@ -19524,9 +19856,9 @@ ${interpolatedPrompt}`;
 							$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
 								$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
 									$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.75; text-transform: uppercase;' }, 'Extracted Web Content (AI-Ready):'),
-									$('span.browser-fetch-status', { style: 'font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;' },
+									part('browserFetchStatus', $('span.browser-fetch-status', { style: 'font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;' },
 										...(lastFetchedText ? ['Last fetched: ', textOf(lastFetchedText)] : ['Not fetched yet'])
-									)
+									))
 								),
 								$('div', { style: 'display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto;' },
 									$<HTMLButtonElement>('button.browser-copy-content-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;' },
@@ -19537,13 +19869,13 @@ ${interpolatedPrompt}`;
 									)
 								)
 							),
-							$('div.browser-content-display.desc-content-box', { style: 'max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;' },
+							part(['browserContentDisplay', 'descContentBox', 'descContentBoxes'], $('div.browser-content-display.desc-content-box', { style: 'max-height: 240px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;' },
 								browserContent ? textOf(browserContent) : $('span', { style: 'opacity: 0.4; font-style: italic;' },
 									'No webpage content extracted yet. Enter a URL above and click "Fetch (Silent)" or "Open in Tab" to extract page contents.'
 								)
-							)
+							))
 						)
-					));
+					))));
 				} else if (fType === 'prompt') {
 					const preInjectedPrompt = fieldItem.defaultContent || '';
 					const isPreInjectedVisible = Boolean(fieldItem.promptPreInjectedVisible);
@@ -19756,7 +20088,7 @@ ${interpolatedPrompt}`;
 					const promptChips = (): HTMLElement[] => [
 						...visiblePromptRefs.map(renderPromptChipBtn),
 						...(hiddenPromptRefs.length > 0 ? [
-							$('span.prompt-ctx-hidden-group', { style: 'display: none;' }, ...hiddenPromptRefs.map(renderPromptChipBtn)),
+							part('promptCtxHiddenGroup', $('span.prompt-ctx-hidden-group', { style: 'display: none;' }, ...hiddenPromptRefs.map(renderPromptChipBtn))),
 							$<HTMLButtonElement>('button.prompt-ctx-more-btn', { type: 'button', 'data-count': `${hiddenPromptRefs.length}`, style: 'padding: 2px 8px; font-size: 10px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.4); background: rgba(56, 189, 248, 0.06); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap;', title: 'Show / hide more referenceable fields' },
 								'+',
 								String(hiddenPromptRefs.length),
@@ -19790,71 +20122,71 @@ ${interpolatedPrompt}`;
 							),
 							$('span', { style: 'font-size: 10px; color: #38bdf8;' }, 'Pre-configured in module template')
 						),
-						$('div.voice-input-textarea-wrapper', { 'data-expanded': 'false', 'data-locked': (effectivePreInjectedLocked ? 'true' : 'false'), style: 'position: relative; width: 100%;' },
+						part(['voiceInputTextareaWrapper', 'voiceInputTextareaWrappers'], withParts(() => $('div.voice-input-textarea-wrapper', { 'data-expanded': 'false', 'data-locked': (effectivePreInjectedLocked ? 'true' : 'false'), style: 'position: relative; width: 100%;' },
 							$('div.prompt-user-input-top-actions', { style: 'position: absolute; top: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 2px;' },
-								$<HTMLButtonElement>('button.prompt-lock-box-btn', { type: 'button', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: ${preLockColor}; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: preLockTitle },
-									$('span', { class: `codicon ${preLockIcon}`, style: 'font-size: 12px;' })
-								),
-								$<HTMLButtonElement>('button.prompt-expand-box-btn', { type: 'button', style: `display: ${isPreInjectedLong ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #38bdf8; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: 'Expand input box to show full content' },
-									$('span.codicon.codicon-chevron-down', { style: 'font-size: 13px;' })
-								)
+								part('promptLockBoxBtn', withParts(() => $<HTMLButtonElement>('button.prompt-lock-box-btn', { type: 'button', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: ${preLockColor}; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: preLockTitle },
+									part('codicon', $('span', { class: `codicon ${preLockIcon}`, style: 'font-size: 12px;' }))
+								))),
+								part('promptExpandBoxBtn', withParts(() => $<HTMLButtonElement>('button.prompt-expand-box-btn', { type: 'button', style: `display: ${isPreInjectedLong ? 'inline-flex' : 'none'}; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: #38bdf8; background: transparent; border: none; opacity: 0.9; padding: 0; transition: all 120ms ease;`, title: 'Expand input box to show full content' },
+									part('codicon', $('span.codicon.codicon-chevron-down', { style: 'font-size: 13px;' }))
+								)))
 							),
-							$('div.prompt-tokenized-display', { 'data-placeholder': textOf(preInjectedPlaceholder), title: preDisplayTitle, style: `width: 100%; min-height: 118px; max-height: ${maxPromptBoxH}px; padding: 8px 48px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; cursor: text; user-select: text; -webkit-user-select: text; resize: vertical; overflow-y: auto;` },
+							part('promptTokenizedDisplay', $('div.prompt-tokenized-display', { 'data-placeholder': textOf(preInjectedPlaceholder), title: preDisplayTitle, style: `width: 100%; min-height: 118px; max-height: ${maxPromptBoxH}px; padding: 8px 48px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.55; white-space: pre-wrap; word-break: break-word; cursor: text; user-select: text; -webkit-user-select: text; resize: vertical; overflow-y: auto;` },
 								...this._renderPromptTokenized(preInjectedPrompt || '', preInjectedPlaceholder)
-							),
-							$<HTMLTextAreaElement>('textarea.prompt-preinjected-textarea.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '5', placeholder: textOf(preInjectedPlaceholder), style: `width: 100%; min-height: 118px; max-height: ${maxPromptBoxH}px; height: 140px; padding: 8px 48px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid #38bdf8; background: rgba(0, 0, 0, 0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; overflow-y: auto; display: none; outline: none;` },
+							)),
+							part(['promptPreinjectedTextarea', 'promptBoxTextarea'], $<HTMLTextAreaElement>('textarea.prompt-preinjected-textarea.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '5', placeholder: textOf(preInjectedPlaceholder), style: `width: 100%; min-height: 118px; max-height: ${maxPromptBoxH}px; height: 140px; padding: 8px 48px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid #38bdf8; background: rgba(0, 0, 0, 0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.45; resize: vertical; overflow-y: auto; display: none; outline: none;` },
 								textOf(preInjectedPrompt)
-							),
-							$<HTMLButtonElement>('button.prompt-expand-bottom-pill', { type: 'button', style: 'display: none;' }),
+							)),
+							part('promptExpandBottomPill', $<HTMLButtonElement>('button.prompt-expand-bottom-pill', { type: 'button', style: 'display: none;' })),
 							$('div.prompt-voice-input-controls', { style: 'position: absolute; bottom: 4px; right: 6px; z-index: 15; display: inline-flex; align-items: center; gap: 4px;' },
-								$('div.prompt-voice-recording-indicator', { style: 'display: none; align-items: center; gap: 6px; font-size: 11px; color: #ff3b30; font-weight: 500; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(255, 59, 48, 0.35); padding: 2px 8px; border-radius: 12px; user-select: none;' },
+								part('promptVoiceRecordingIndicator', withParts(() => $('div.prompt-voice-recording-indicator', { style: 'display: none; align-items: center; gap: 6px; font-size: 11px; color: #ff3b30; font-weight: 500; background: rgba(15, 23, 42, 0.92); border: 1px solid rgba(255, 59, 48, 0.35); padding: 2px 8px; border-radius: 12px; user-select: none;' },
 									$('span.prompt-voice-recording-dot', { style: 'width: 8px; height: 8px; border-radius: 50%; background-color: #ff3b30; display: inline-block;' }),
 									' ',
-									$('span.prompt-voice-recording-time', undefined, '0:00 / 5:00')
-								),
-								$<HTMLButtonElement>('button.prompt-voice-mic-btn', { type: 'button', 'data-field-key': textOf(rawKey), 'data-voice-target': 'preinjected', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: var(--vscode-foreground); background: transparent; border: none; opacity: ${preMicOpacity}; padding: 0; transition: all 120ms ease;`, title: preMicTitle },
-									$('span.codicon.codicon-mic', { style: 'font-size: 12.5px;' })
-								)
+									part('promptVoiceRecordingTime', $('span.prompt-voice-recording-time', undefined, '0:00 / 5:00'))
+								))),
+								part('promptVoiceMicBtn', $<HTMLButtonElement>('button.prompt-voice-mic-btn', { type: 'button', 'data-field-key': textOf(rawKey), 'data-voice-target': 'preinjected', style: `display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 3px; cursor: pointer; color: var(--vscode-foreground); background: transparent; border: none; opacity: ${preMicOpacity}; padding: 0; transition: all 120ms ease;`, title: preMicTitle },
+									part('codicon', $('span.codicon.codicon-mic', { style: 'font-size: 12.5px;' }))
+								))
 							)
-						)
+						)))
 					) : undefined;
 
 					const targetSelectorRow = isAgentMode ? $('div', { style: 'display: flex; flex-direction: column; gap: 6px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(56, 189, 248, 0.22);' },
 						$('label', { style: 'font-size: 11px; font-weight: 600; color: #38bdf8;' }, 'Target AI Agent:'),
-						$<HTMLSelectElement>('select.prompt-agent-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(56,189,248,0.35); background: rgba(0,0,0,0.25); color: inherit;' },
+						part('promptAgentSelect', $<HTMLSelectElement>('select.prompt-agent-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(56,189,248,0.35); background: rgba(0,0,0,0.25); color: inherit;' },
 							...agentOptionsNodes
-						)
+						))
 					) : $('div', { style: 'display: flex; flex-direction: column; gap: 6px; background: rgba(0,0,0,0.2); padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(59, 130, 246, 0.22);' },
 						$('label', { style: 'font-size: 11px; font-weight: 600; color: #60a5fa;' }, 'Target AI Model:'),
 						$('div', { style: 'display: flex; gap: 8px; align-items: center; flex-wrap: wrap;' },
-							$<HTMLSelectElement>('select.prompt-provider-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'min-width: 170px; padding: 6px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; cursor: pointer;', title: 'Select AI Provider / Configured Credential' },
+							part('promptProviderSelect', $<HTMLSelectElement>('select.prompt-provider-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'min-width: 170px; padding: 6px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; cursor: pointer;', title: 'Select AI Provider / Configured Credential' },
 								...providerOptionsNodes
-							),
-							$<HTMLInputElement>('input.prompt-model-select', { type: 'hidden', 'data-field-key': textOf(rawKey), value: textOf(promptModel) }),
+							)),
+							part('promptModelSelect', $<HTMLInputElement>('input.prompt-model-select', { type: 'hidden', 'data-field-key': textOf(rawKey), value: textOf(promptModel) })),
 							$('div.prompt-model-picker-container', { style: 'flex: 1; min-width: 220px; position: relative;' },
-								$<HTMLButtonElement>('button.prompt-model-picker-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;', title: 'Select or search AI model from your configured provider credentials (consistent with Agent Central)' },
+								part('promptModelPickerBtn', $<HTMLButtonElement>('button.prompt-model-picker-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(59,130,246,0.35); background: #1a1a1a; color: inherit; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;', title: 'Select or search AI model from your configured provider credentials (consistent with Agent Central)' },
 									$('span', { style: 'display: inline-flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' },
 										$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: '#60a5fa' },
 											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 										),
-										$('span.prompt-selected-model-text', { style: 'font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);' },
+										part('promptSelectedModelText', $('span.prompt-selected-model-text', { style: 'font-weight: 600; font-family: var(--vscode-editor-font-family, monospace);' },
 											textOf(promptModel)
-										)
+										))
 									),
 									$.SVG('svg', { width: '10', height: '10', viewBox: '0 0 16 16', fill: 'currentColor', style: 'opacity: 0.7;' },
 										$.SVG('path', { d: 'M4 6l4 4 4-4H4z' })
 									)
-								),
-								$('div.prompt-model-dropdown', { style: 'display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1200; background: #1e1e1e; border: 1px solid rgba(59,130,246,0.45); border-radius: 6px; box-shadow: 0 10px 28px rgba(0,0,0,0.7); padding: 6px; flex-direction: column; gap: 6px;' },
+								)),
+								part('promptModelDropdown', $('div.prompt-model-dropdown', { style: 'display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1200; background: #1e1e1e; border: 1px solid rgba(59,130,246,0.45); border-radius: 6px; box-shadow: 0 10px 28px rgba(0,0,0,0.7); padding: 6px; flex-direction: column; gap: 6px;' },
 									$('div', { style: 'display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-bottom: 1px solid rgba(255,255,255,0.08);' },
-										$('span.codicon.codicon-search', { style: 'font-size: 12px; opacity: 0.65;' }),
-										$<HTMLInputElement>('input.prompt-model-search-input', { type: 'text', placeholder: 'Search models (e.g. flash, sonnet, 4o, gpt-5) or enter ID...', style: 'flex: 1; background: transparent; border: none; outline: none; color: inherit; font-size: 11.5px; padding: 4px 2px;' }),
-										$('span.prompt-dropdown-provider-badge', { style: 'font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(59,130,246,0.2); color: #60a5fa; text-transform: uppercase;' },
+										part('codicon', $('span.codicon.codicon-search', { style: 'font-size: 12px; opacity: 0.65;' })),
+										part('promptModelSearchInput', $<HTMLInputElement>('input.prompt-model-search-input', { type: 'text', placeholder: 'Search models (e.g. flash, sonnet, 4o, gpt-5) or enter ID...', style: 'flex: 1; background: transparent; border: none; outline: none; color: inherit; font-size: 11.5px; padding: 4px 2px;' })),
+										part('promptDropdownProviderBadge', $('span.prompt-dropdown-provider-badge', { style: 'font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(59,130,246,0.2); color: #60a5fa; text-transform: uppercase;' },
 											textOf((promptProvider || 'openai').toUpperCase())
-										)
+										))
 									),
-									$('div.prompt-model-list', { style: 'max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;' })
-								)
+									part('promptModelList', $('div.prompt-model-list', { style: 'max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;' }))
+								))
 							)
 						)
 					);
@@ -19866,47 +20198,47 @@ ${interpolatedPrompt}`;
 						$('div', { style: 'display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;' },
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('label', { style: 'font-size: 11px; font-weight: 600; color: #60a5fa;' }, 'User Prompt / Instructions:'),
-								$('span.prompt-user-inputs-count-badge', { style: `font-size: 9.5px; padding: 1px 6px; border-radius: 10px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600; display: ${userPromptsList.length > 1 ? 'inline-block' : 'none'};` },
+								part('promptUserInputsCountBadge', $('span.prompt-user-inputs-count-badge', { style: `font-size: 9.5px; padding: 1px 6px; border-radius: 10px; background: rgba(56, 189, 248, 0.16); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.35); font-weight: 600; display: ${userPromptsList.length > 1 ? 'inline-block' : 'none'};` },
 									String(userPromptsList.length),
 									' Inputs'
-								)
+								))
 							),
 							$('span', { style: 'font-size: 10px; color: #38bdf8;' },
 								'Combined in order when sent to AI \u00B7 Supports {{param_name}} or {Field Label}'
 							)
 						),
-						$('div.prompt-user-inputs-list', { style: `display: ${userPromptsList.length > 0 ? 'flex' : 'none'}; flex-direction: column; gap: 10px;` },
+						part('promptUserInputsList', withParts(() => $('div.prompt-user-inputs-list', { style: `display: ${userPromptsList.length > 0 ? 'flex' : 'none'}; flex-direction: column; gap: 10px;` },
 							...userInputsItemsNodes
-						),
+						))),
 						$('div', { style: 'display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 4px;' },
 							$<HTMLButtonElement>('button.prompt-add-user-input-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 11px; font-weight: 600; border-radius: 6px; cursor: pointer; background: linear-gradient(135deg, #059669, #10b981); color: #ffffff; border: 1px solid #34d399; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3); transition: all 0.15s ease;', title: 'Add a user prompt input box below to enter or voice-dictate an input segment' },
-								$('span.codicon.codicon-add', { style: 'font-size: 12px;' }),
+								part('codicon', $('span.codicon.codicon-add', { style: 'font-size: 12px;' })),
 								$('span', undefined, 'Add User Prompt Input Box')
 							)
 						)
 					) : undefined;
 
-					const promptCard = $('div', { class: `section-card custom-property-card prompt-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'prompt', 'data-target-mode': textOf(promptMode), 'data-target-provider': textOf(promptProvider), 'data-target-model': textOf(promptModel), 'data-user-customized-target': (userCustomizedTarget ? 'true' : 'false'), 'data-pre-injected-prompt': textOf(preInjectedPrompt), 'data-pre-injected-visible': (isPreInjectedVisible ? 'true' : 'false'), 'data-user-input-visible': (isUserInputVisible ? 'true' : 'false'), 'data-last-sent-payload': textOf(lastSentPayloadJson) },
-						$('div.section-title', undefined,
+					const promptCard = part(['sectionCards', 'promptPrimitiveCard', 'promptPrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card prompt-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'prompt', 'data-target-mode': textOf(promptMode), 'data-target-provider': textOf(promptProvider), 'data-target-model': textOf(promptModel), 'data-user-customized-target': (userCustomizedTarget ? 'true' : 'false'), 'data-pre-injected-prompt': textOf(preInjectedPrompt), 'data-pre-injected-visible': (isPreInjectedVisible ? 'true' : 'false'), 'data-user-input-visible': (isUserInputVisible ? 'true' : 'false'), 'data-last-sent-payload': textOf(lastSentPayloadJson) },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(59,130,246,0.18); color: #60a5fa; font-weight: 700; text-transform: uppercase;' },
 									'Prompt'
 								),
-								$('span.prompt-target-badge', { style: `font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: ${targetBadgeBg}; color: ${targetBadgeColor}; font-weight: 600;` },
+								part('promptTargetBadge', $('span.prompt-target-badge', { style: `font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: ${targetBadgeBg}; color: ${targetBadgeColor}; font-weight: 600;` },
 									textOf(targetBadgeText)
-								)
+								))
 							),
 							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 								...stepBadge(),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'prompt', 'data-ai-field-label': k, 'data-ai-current-value': textOf(userPromptText), title: `Edit ${k} with AI` },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'prompt', 'data-ai-field-label': k, 'data-ai-current-value': textOf(userPromptText), title: `Edit ${k} with AI` },
 									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							)
-						),
-						$('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
 							targetSelectorRow,
 							...(preInjectedBlock ? [preInjectedBlock] : []),
 							...(userPromptSection ? [userPromptSection] : []),
@@ -19939,13 +20271,13 @@ ${interpolatedPrompt}`;
 								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.06); padding-bottom: 6px; gap: 8px; flex-wrap: wrap;' },
 									$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
 										$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.85;' }, 'AI Execution Output:'),
-										$('span.prompt-status-text', { style: 'font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;' },
+										part('promptStatusText', $('span.prompt-status-text', { style: 'font-size: 10px; padding: 1px 6px; border-radius: 3px; background: rgba(255,255,255,0.06); opacity: 0.65;' },
 											...(lastExecutedText ? ['Executed: ', textOf(lastExecutedText)] : ['Ready'])
-										)
+										))
 									),
 									$('div', { style: 'display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto;' },
 										$<HTMLButtonElement>('button.prompt-inspect-sent-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 4px; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); border-radius: 4px; padding: 2px 8px; font-size: 10.5px; font-weight: 600; cursor: pointer; color: #38bdf8;', title: 'Inspect the complete prompt sent to AI (Structured breakdown + Full verbatim prompt)' },
-											$('span.codicon.codicon-eye', { style: 'font-size: 11.5px;' }),
+											part('codicon', $('span.codicon.codicon-eye', { style: 'font-size: 11.5px;' })),
 											$('span', undefined, 'View Sent Prompt')
 										),
 										$<HTMLButtonElement>('button.prompt-copy-output-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'background: transparent; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; padding: 2px 7px; font-size: 10.5px; opacity: 0.75; cursor: pointer; color: inherit;' },
@@ -19956,15 +20288,15 @@ ${interpolatedPrompt}`;
 										)
 									)
 								),
-								$<HTMLTextAreaElement>('textarea.prompt-raw-output', { 'data-field-key': textOf(rawKey), style: 'display: none;' }, textOf(promptOutput)),
-								$('div.prompt-output-display.desc-content-box', { style: 'max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;' },
+								part('promptRawOutput', $<HTMLTextAreaElement>('textarea.prompt-raw-output', { 'data-field-key': textOf(rawKey), style: 'display: none;' }, textOf(promptOutput))),
+								part(['promptOutputDisplay', 'descContentBox', 'descContentBoxes'], $('div.prompt-output-display.desc-content-box', { style: 'max-height: 280px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word;' },
 									promptOutput ? textOf(this._formatPromptOutputPreviewText(promptOutput)) : $('span', { style: 'opacity: 0.4; font-style: italic;' },
 										'No execution output yet. Click "Run with Model" or "Dispatch to Agent" above to run instructions.'
 									)
-								)
+								))
 							)
-						)
-					);
+						))
+					)));
 					cardRuntimeState(promptCard).promptChips = promptChips;
 					customFieldsContent.push(promptCard);
 				} else if (fType === 'tts') {
@@ -20058,33 +20390,33 @@ ${interpolatedPrompt}`;
 					const interpolatedSpeechText = this._interpolateParameters(ttsText);
 					const interpolatedDisplayText = this._interpolateParameters(ttsDisplayText);
 
-					customFieldsContent.push($('div.section-card.custom-property-card.tts-primitive-card', { 'data-field-key': textOf(rawKey), 'data-llm-text': textOf(ttsText), 'data-show-speech-text': (ttsShowSpeechTextInTicket ? 'true' : 'false'), 'data-template-audio': textOf(fieldItem.ttsAudioDataUrl || ''), 'data-cred-id': textOf(ttsCredentialId), 'data-provider': textOf(ttsProvider), 'data-model': textOf(ttsModel), 'data-format': textOf(ttsFormat), 'data-voice': textOf(ttsVoice), 'data-autoplay': (ttsAutoPlay ? 'true' : 'false'), 'data-playback-rate': textOf(String(ttsPlaybackRate)), 'data-audio-file': textOf(audioFileName), 'data-audio-path': textOf(audioRelativePath), 'data-last-synthesized': textOf(lastSynthesizedText), 'data-last-generated': textOf(lastGenerated) },
-						$('div.section-title', undefined,
+					customFieldsContent.push(part(['sectionCards', 'ttsPrimitiveCards'], withParts(() => $('div.section-card.custom-property-card.tts-primitive-card', { 'data-field-key': textOf(rawKey), 'data-llm-text': textOf(ttsText), 'data-show-speech-text': (ttsShowSpeechTextInTicket ? 'true' : 'false'), 'data-template-audio': textOf(fieldItem.ttsAudioDataUrl || ''), 'data-cred-id': textOf(ttsCredentialId), 'data-provider': textOf(ttsProvider), 'data-model': textOf(ttsModel), 'data-format': textOf(ttsFormat), 'data-voice': textOf(ttsVoice), 'data-autoplay': (ttsAutoPlay ? 'true' : 'false'), 'data-playback-rate': textOf(String(ttsPlaybackRate)), 'data-audio-file': textOf(audioFileName), 'data-audio-path': textOf(audioRelativePath), 'data-last-synthesized': textOf(lastSynthesizedText), 'data-last-generated': textOf(lastGenerated) },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(236,72,153,0.18); color: #f472b6; font-weight: 700; text-transform: uppercase;' },
 									'Audio / TTS'
 								),
-								$('span.tts-header-model-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(236,72,153,0.12); color: #f9a8d4; font-weight: 600;' },
+								part('ttsHeaderModelBadge', $('span.tts-header-model-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(236,72,153,0.12); color: #f9a8d4; font-weight: 600;' },
 									'Model: ',
 									textOf(ttsModel),
 									' (',
 									textOf(ttsFormat.toUpperCase()),
 									')'
-								),
-								$('span.tts-cached-badge', { style: `font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(34,197,94,0.15); color: #4ade80; font-weight: 600; display: ${audioRelativePath ? 'inline-block' : 'none'};` },
+								)),
+								part('ttsCachedBadge', $('span.tts-cached-badge', { style: `font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(34,197,94,0.15); color: #4ade80; font-weight: 600; display: ${audioRelativePath ? 'inline-block' : 'none'};` },
 									'Saved Locally (',
 									textOf(audioFileName || ttsFormat.toUpperCase()),
 									')'
-								)
+								))
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'tts', 'data-ai-field-label': k, 'data-ai-current-value': textOf(ttsDisplayText), title: `Edit ${k} with AI` },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'tts', 'data-ai-field-label': k, 'data-ai-current-value': textOf(ttsDisplayText), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
-						),
-						$('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
+							))
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
 							$('div', { style: 'display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(236, 72, 153, 0.05); border: 1px solid rgba(236, 72, 153, 0.22);' },
 								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;' },
 									$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
@@ -20093,86 +20425,86 @@ ${interpolatedPrompt}`;
 											'Model Config & Speech Source'
 										)
 									),
-									$<HTMLButtonElement>('button.tts-toggle-speech-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'padding: 2px 9px; font-size: 10.5px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(236, 72, 153, 0.15); border: 1px solid rgba(236, 72, 153, 0.35); color: #f9a8d4;', title: 'Expand or collapse AI model settings, speech synthesis text, and generation buttons' },
+									part('ttsToggleSpeechTextBtn', $<HTMLButtonElement>('button.tts-toggle-speech-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'padding: 2px 9px; font-size: 10.5px; font-weight: 600; border-radius: 4px; cursor: pointer; background: rgba(236, 72, 153, 0.15); border: 1px solid rgba(236, 72, 153, 0.35); color: #f9a8d4;', title: 'Expand or collapse AI model settings, speech synthesis text, and generation buttons' },
 										ttsShowSpeechTextInTicket ? 'Collapse AI Section' : 'Show AI Section'
-									)
+									))
 								),
-								$('div.tts-speech-text-body', { style: `display: ${ttsShowSpeechTextInTicket ? 'flex' : 'none'}; flex-direction: column; gap: 8px;` },
+								part('ttsSpeechTextBody', $('div.tts-speech-text-body', { style: `display: ${ttsShowSpeechTextInTicket ? 'flex' : 'none'}; flex-direction: column; gap: 8px;` },
 									$('div', { style: 'display: flex; flex-direction: column; gap: 8px; background: rgba(0,0,0,0.22); padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(236,72,153,0.2);' },
 										$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
 											$('span', { style: 'font-size: 11px; font-weight: 600; color: #f472b6; min-width: 65px;' }, 'AI Model:'),
-											$<HTMLSelectElement>('select.tts-cred-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'min-width: 170px; padding: 5px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(236,72,153,0.35); background: #1a1a1a; color: inherit; cursor: pointer;', title: 'Select AI Provider / Credential (Agent Central)' },
+											part('ttsCredSelect', $<HTMLSelectElement>('select.tts-cred-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'min-width: 170px; padding: 5px 8px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(236,72,153,0.35); background: #1a1a1a; color: inherit; cursor: pointer;', title: 'Select AI Provider / Credential (Agent Central)' },
 												$<HTMLOptionElement>('option', { value: textOf(ttsProvider) }, textOf(ttsProvider.toUpperCase()))
-											),
+											)),
 											$('div.tts-model-picker-container', { style: 'flex: 1; min-width: 210px; position: relative;' },
-												$<HTMLButtonElement>('button.tts-model-picker-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'width: 100%; padding: 5px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(236,72,153,0.35); background: #1a1a1a; color: inherit; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;', title: 'Select or search voice / TTS model (consistent with Agent Central)' },
+												part('ttsModelPickerBtn', $<HTMLButtonElement>('button.tts-model-picker-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'width: 100%; padding: 5px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(236,72,153,0.35); background: #1a1a1a; color: inherit; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 6px; text-align: left;', title: 'Select or search voice / TTS model (consistent with Agent Central)' },
 													$('span', { style: 'display: inline-flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;' },
 														$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: '#f472b6' },
 															$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 														),
-														$('span.tts-selected-model-text', { style: 'font-weight: 600;' }, textOf(ttsModel))
+														part('ttsSelectedModelText', $('span.tts-selected-model-text', { style: 'font-weight: 600;' }, textOf(ttsModel)))
 													),
 													$.SVG('svg', { width: '10', height: '10', viewBox: '0 0 16 16', fill: 'currentColor', style: 'opacity: 0.7;' },
 														$.SVG('path', { d: 'M4 6l4 4 4-4H4z' })
 													)
-												),
-												$('div.tts-model-dropdown', { style: 'display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1200; background: #1e1e1e; border: 1px solid rgba(236,72,153,0.45); border-radius: 6px; box-shadow: 0 10px 28px rgba(0,0,0,0.7); padding: 6px; flex-direction: column; gap: 6px;' },
+												)),
+												part('ttsModelDropdown', $('div.tts-model-dropdown', { style: 'display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 1200; background: #1e1e1e; border: 1px solid rgba(236,72,153,0.45); border-radius: 6px; box-shadow: 0 10px 28px rgba(0,0,0,0.7); padding: 6px; flex-direction: column; gap: 6px;' },
 													$('div', { style: 'display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-bottom: 1px solid rgba(255,255,255,0.08);' },
-														$<HTMLInputElement>('input.tts-model-search-input', { type: 'text', placeholder: 'Search or enter model ID...', style: 'flex: 1; background: transparent; border: none; outline: none; color: inherit; font-size: 11.5px; padding: 4px 2px;' }),
-														$('span.tts-dropdown-provider-badge', { style: 'font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(236,72,153,0.2); color: #f472b6; text-transform: uppercase;' },
+														part('ttsModelSearchInput', $<HTMLInputElement>('input.tts-model-search-input', { type: 'text', placeholder: 'Search or enter model ID...', style: 'flex: 1; background: transparent; border: none; outline: none; color: inherit; font-size: 11.5px; padding: 4px 2px;' })),
+														part('ttsDropdownProviderBadge', $('span.tts-dropdown-provider-badge', { style: 'font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 3px; background: rgba(236,72,153,0.2); color: #f472b6; text-transform: uppercase;' },
 															textOf(ttsProvider.toUpperCase())
-														)
+														))
 													),
-													$('div.tts-model-list', { style: 'max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;' })
-												)
+													part('ttsModelList', $('div.tts-model-list', { style: 'max-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;' }))
+												))
 											)
 										),
 										$('div', { style: 'display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding-top: 4px; border-top: 1px solid rgba(255,255,255,0.05);' },
 											$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 												$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.8;' }, 'Format:'),
-												$<HTMLSelectElement>('select.tts-format-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #1a1a1a; color: inherit;' },
+												part('ttsFormatSelect', $<HTMLSelectElement>('select.tts-format-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #1a1a1a; color: inherit;' },
 													$<HTMLOptionElement>('option', { value: 'mp3', selected: ttsFormat === 'mp3' ? true : undefined }, 'MP3 (Default)'),
 													$<HTMLOptionElement>('option', { value: 'wav', selected: ttsFormat === 'wav' ? true : undefined }, 'WAV'),
 													$<HTMLOptionElement>('option', { value: 'opus', selected: ttsFormat === 'opus' ? true : undefined }, 'OPUS'),
 													$<HTMLOptionElement>('option', { value: 'aac', selected: ttsFormat === 'aac' ? true : undefined }, 'AAC')
-												)
+												))
 											),
 											$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 												$('span', { style: 'font-size: 11px; font-weight: 600; opacity: 0.8;' }, 'Voice:'),
-												$<HTMLSelectElement>('select.tts-voice-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #1a1a1a; color: inherit;' },
+												part('ttsVoiceSelect', $<HTMLSelectElement>('select.tts-voice-select.monaco-select', { 'data-field-key': textOf(rawKey), style: 'padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: #1a1a1a; color: inherit;' },
 													$<HTMLOptionElement>('option', { value: textOf(ttsVoice) }, textOf(ttsVoice))
-												)
+												))
 											),
 											$('label', { style: 'display: inline-flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer; user-select: none; margin-left: auto; padding: 3px 8px; border-radius: 4px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.1);', title: 'Automatically play this MP3 audio when viewing this module' },
-												$<HTMLInputElement>('input.tts-autoplay-checkbox', { type: 'checkbox', 'data-field-key': textOf(rawKey), checked: ttsAutoPlay ? '' : undefined, style: 'cursor: pointer; margin: 0;' }),
+												part('ttsAutoplayCheckbox', $<HTMLInputElement>('input.tts-autoplay-checkbox', { type: 'checkbox', 'data-field-key': textOf(rawKey), checked: ttsAutoPlay ? '' : undefined, style: 'cursor: pointer; margin: 0;' })),
 												$('span', undefined, 'Auto-Play Audio')
 											)
 										)
 									),
-									$<HTMLTextAreaElement>('textarea.tts-llm-text-input.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '3', placeholder: 'Pure listening text sent to AI model for speech synthesis...', style: 'width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(236,72,153,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;' },
+									part('ttsLlmTextInput', $<HTMLTextAreaElement>('textarea.tts-llm-text-input.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '3', placeholder: 'Pure listening text sent to AI model for speech synthesis...', style: 'width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(236,72,153,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;' },
 										textOf(interpolatedSpeechText)
-									),
+									)),
 									$('div', { style: 'display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;' },
-										$('span.tts-status-text', { style: 'font-size: 10.5px; opacity: 0.78;' },
+										part('ttsStatusText', $('span.tts-status-text', { style: 'font-size: 10.5px; opacity: 0.78;' },
 											...(audioRelativePath ? [
 												'Saved: ',
 												textOf(audioFileName || audioRelativePath),
 												...(lastGenerated ? [' (', textOf(lastGenerated), ')'] : [])
 											] : ['No audio file saved yet'])
-										),
+										)),
 										$('div', { style: 'display: flex; align-items: center; gap: 8px; margin-left: auto;' },
-											$<HTMLButtonElement>('button.tts-send-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(236,72,153,0.22); color: #f472b6; border: 1px solid rgba(236,72,153,0.5); transition: all 0.15s ease;', title: 'Send Speech Synthesis Text to AI model API to generate MP3 audio (consumes model tokens)' },
-												$('span.codicon.codicon-send', { style: 'font-size: 11px;' }),
+											part('ttsSendBtn', $<HTMLButtonElement>('button.tts-send-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; font-size: 11px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(236,72,153,0.22); color: #f472b6; border: 1px solid rgba(236,72,153,0.5); transition: all 0.15s ease;', title: 'Send Speech Synthesis Text to AI model API to generate MP3 audio (consumes model tokens)' },
+												part('codicon', $('span.codicon.codicon-send', { style: 'font-size: 11px;' })),
 												$('span', undefined, 'Send & Generate Audio')
-											),
-											$<HTMLButtonElement>('button.tts-delete-audio-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: `display: ${audioRelativePath ? 'inline-flex' : 'none'}; align-items: center; gap: 4px; padding: 4px 9px; font-size: 10.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.4);`, title: 'Delete saved MP3 audio file from this component' },
-												$('span.codicon.codicon-trash', { style: 'font-size: 11px;' }),
+											)),
+											part('ttsDeleteAudioBtn', $<HTMLButtonElement>('button.tts-delete-audio-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: `display: ${audioRelativePath ? 'inline-flex' : 'none'}; align-items: center; gap: 4px; padding: 4px 9px; font-size: 10.5px; font-weight: 600; border-radius: 5px; cursor: pointer; background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.4);`, title: 'Delete saved MP3 audio file from this component' },
+												part('codicon', $('span.codicon.codicon-trash', { style: 'font-size: 11px;' })),
 												' ',
 												$('span', undefined, 'Delete Audio')
-											)
+											))
 										)
 									)
-								)
+								))
 							),
 							$('div', { style: 'display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 6px; background: rgba(56, 189, 248, 0.04); border: 1px solid rgba(56, 189, 248, 0.22);' },
 								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;' },
@@ -20183,28 +20515,28 @@ ${interpolatedPrompt}`;
 										)
 									),
 									$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
-										$<HTMLButtonElement>('button.tts-copy-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(0, 122, 204, 0.16); border: 1px solid rgba(56, 189, 248, 0.35); color: #7dd3fc;', title: 'Copy all reading content to clipboard' },
-											$('span.codicon.codicon-copy', { style: 'font-size: 11px;' }),
-											$('span.tts-copy-btn-label', undefined, 'Copy')
-										),
-										$<HTMLButtonElement>('button.tts-edit-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.18); color: inherit;', title: 'Click Edit to unlock and modify or clear reading content (auto-saves changes)' },
-											$('span.tts-edit-btn-icon.codicon.codicon-edit', { style: 'font-size: 11px;' }),
-											$('span.tts-edit-btn-label', undefined, 'Edit')
-										),
-										$<HTMLButtonElement>('button.tts-clear-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: none; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: #f87171;', title: 'Clear reading content' },
-											$('span.codicon.codicon-clear-all', { style: 'font-size: 11px;' }),
+										part('ttsCopyTextBtn', withParts(() => $<HTMLButtonElement>('button.tts-copy-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(0, 122, 204, 0.16); border: 1px solid rgba(56, 189, 248, 0.35); color: #7dd3fc;', title: 'Copy all reading content to clipboard' },
+											part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 11px;' })),
+											part('ttsCopyBtnLabel', $('span.tts-copy-btn-label', undefined, 'Copy'))
+										))),
+										part('ttsEditTextBtn', withParts(() => $<HTMLButtonElement>('button.tts-edit-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.18); color: inherit;', title: 'Click Edit to unlock and modify or clear reading content (auto-saves changes)' },
+											part(['ttsEditBtnIcon', 'codicon'], $('span.tts-edit-btn-icon.codicon.codicon-edit', { style: 'font-size: 11px;' })),
+											part('ttsEditBtnLabel', $('span.tts-edit-btn-label', undefined, 'Edit'))
+										))),
+										part('ttsClearTextBtn', $<HTMLButtonElement>('button.tts-clear-text-btn', { type: 'button', 'data-field-key': textOf(rawKey), style: 'display: none; align-items: center; gap: 4px; padding: 2px 8px; font-size: 10.5px; border-radius: 4px; cursor: pointer; background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.35); color: #f87171;', title: 'Clear reading content' },
+											part('codicon', $('span.codicon.codicon-clear-all', { style: 'font-size: 11px;' })),
 											' ',
 											$('span', undefined, 'Clear')
-										)
+										))
 									)
 								),
-								$<HTMLTextAreaElement>('textarea.tts-text-input.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '4', readonly: '', placeholder: 'Reading passage with vocabulary notes and translations...', style: 'width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(59,130,246,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;' },
+								part('ttsTextInput', $<HTMLTextAreaElement>('textarea.tts-text-input.monaco-inputbox', { 'data-field-key': textOf(rawKey), rows: '4', readonly: '', placeholder: 'Reading passage with vocabulary notes and translations...', style: 'width: 100%; padding: 8px 10px; font-size: 12px; line-height: 1.5; border-radius: 6px; border: 1px solid rgba(59,130,246,0.28); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical;' },
 									textOf(interpolatedDisplayText)
-								),
-								$('div.tts-audio-player-mount', { style: 'width: 100%; display: flex; align-items: center;' })
+								)),
+								part('ttsAudioPlayerMount', $('div.tts-audio-player-mount', { style: 'width: 100%; display: flex; align-items: center;' }))
 							)
-						)
-					));
+						))
+					))));
 				} else if (fType === 'media_player') {
 					let mediaFilePath = fieldItem.mediaFilePath || '';
 					let mediaFileName = fieldItem.mediaFileName || '';
@@ -20254,29 +20586,29 @@ ${interpolatedPrompt}`;
 					const resolvedFileName = mediaFileName || (interpolatedMediaPath ? (interpolatedMediaPath.split(/[\\/]/).pop() || interpolatedMediaPath) : '');
 					const detected = detectMediaFileInfo(resolvedFileName || interpolatedMediaPath, mediaMimeType);
 
-					customFieldsContent.push($('div.section-card.custom-property-card.media-player-primitive-card', { 'data-field-key': textOf(rawKey), 'data-media-path': textOf(interpolatedMediaPath), 'data-media-name': textOf(resolvedFileName), 'data-media-kind': textOf(detected.kind || mediaKind), 'data-media-mime': textOf(detected.mimeType || mediaMimeType), 'data-playback-rate': textOf(String(mediaPlaybackRate)), 'data-autoplay': (mediaAutoPlay ? 'true' : 'false') },
-						$('div.section-title', undefined,
+					customFieldsContent.push(part(['sectionCards', 'mediaPlayerPrimitiveCards'], withParts(() => $('div.section-card.custom-property-card.media-player-primitive-card', { 'data-field-key': textOf(rawKey), 'data-media-path': textOf(interpolatedMediaPath), 'data-media-name': textOf(resolvedFileName), 'data-media-kind': textOf(detected.kind || mediaKind), 'data-media-mime': textOf(detected.mimeType || mediaMimeType), 'data-playback-rate': textOf(String(mediaPlaybackRate)), 'data-autoplay': (mediaAutoPlay ? 'true' : 'false') },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(245, 158, 11, 0.18); color: #fbbf24; font-weight: 700; text-transform: uppercase;' },
 									'MP3 / MP4 Player'
 								),
-								$('span.media-player-header-badge', { style: `font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.14); color: #38bdf8; font-weight: 600; display: ${resolvedFileName ? 'inline-block' : 'none'};` },
+								part('mediaPlayerHeaderBadge', $('span.media-player-header-badge', { style: `font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.14); color: #38bdf8; font-weight: 600; display: ${resolvedFileName ? 'inline-block' : 'none'};` },
 									textOf(detected.kind.toUpperCase()),
 									' \u00B7 ',
 									textOf((detected.ext || 'MEDIA').toUpperCase())
-								)
+								))
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'media_player', 'data-ai-field-label': k, 'data-ai-current-value': textOf(interpolatedMediaPath), title: `Edit ${k} with AI` },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'media_player', 'data-ai-field-label': k, 'data-ai-current-value': textOf(interpolatedMediaPath), title: `Edit ${k} with AI` },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
-						),
-						$('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
-							$('div.media-player-card-mount', { style: 'width: 100%; display: flex; flex-direction: column; gap: 10px;' })
-						)
-					));
+							))
+						))),
+						part(['customFieldView', 'customFieldViews'], $('div.custom-field-view', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' },
+							part('mediaPlayerCardMount', $('div.media-player-card-mount', { style: 'width: 100%; display: flex; flex-direction: column; gap: 10px;' }))
+						))
+					))));
 				} else if (fType === 'voice_note') {
 					let voiceClips: IVoiceNoteClip[] = Array.isArray(fieldItem.voiceClips) ? fieldItem.voiceClips : [];
 					let voiceTranscript: string = fieldItem.voiceTranscript || '';
@@ -20316,10 +20648,10 @@ ${interpolatedPrompt}`;
 								)
 							] : [])
 						));
-					customFieldsContent.push($('div.custom-field-card', { 'data-field-key': textOf(rawKey), 'data-field-type': 'voice_note', style: 'background: rgba(148, 163, 184, 0.05); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;' },
+					customFieldsContent.push(part('customFieldCards', withParts(() => $('div.custom-field-card', { 'data-field-key': textOf(rawKey), 'data-field-type': 'voice_note', style: 'background: rgba(148, 163, 184, 0.05); border: 1px solid rgba(148, 163, 184, 0.24); border-radius: 8px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;' },
 						$('div', { style: 'display: flex; align-items: center; justify-content: space-between; gap: 8px;' },
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
-								$('span.codicon.codicon-mic', { style: 'color: #94a3b8;' }),
+								part('codicon', $('span.codicon.codicon-mic', { style: 'color: #94a3b8;' })),
 								$('span', { style: 'font-weight: 600; font-size: 13px;' }, textOf(k)),
 								$('span', { style: 'font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(148, 163, 184, 0.16); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.32);' },
 									'VOICE NOTE (',
@@ -20333,7 +20665,7 @@ ${interpolatedPrompt}`;
 						...(voiceTranscript && voiceClips.length === 0 ? [
 							$('div', { style: 'font-size: 11.5px; color: var(--vscode-foreground); white-space: pre-wrap;' }, textOf(voiceTranscript))
 						] : [])
-					));
+					))));
 				} else if (fType === 'table') {
 					let tableColumns: ITableColumnDefinition[] = Array.isArray(fieldItem.tableColumns) && fieldItem.tableColumns.length > 0
 						? fieldItem.tableColumns
@@ -20449,28 +20781,28 @@ ${interpolatedPrompt}`;
 					const dbShort = dbPath ? ` · SQLite: ${dbPath.split(/[/\\]/).pop()}` : '';
 					const statsText = `${tableColumns.length} cols · ${tableRows.length} rows${dbShort}`;
 
-					customFieldsContent.push($('div', { class: `section-card custom-property-card table-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'table', 'data-table-json': textOf(tablePayloadStr) },
-						$('div.section-title', undefined,
+					customFieldsContent.push(part(['sectionCards', 'tablePrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card table-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'table', 'data-table-json': textOf(tablePayloadStr) },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(20, 184, 166, 0.18); color: #2dd4bf; font-weight: 700; text-transform: uppercase;' },
 									'Data Table'
 								),
-								$('span.table-header-stats-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #5eead4; font-family: monospace;' },
+								part('tableHeaderStatsBadge', $('span.table-header-stats-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #5eead4; font-family: monospace;' },
 									textOf(statsText)
-								)
+								))
 							),
 							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 								...stepBadge(),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'table', 'data-ai-field-label': k, 'data-ai-current-value': textOf(tablePayloadStr), title: `Operate ${k} table & SQLite with AI` },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'table', 'data-ai-field-label': k, 'data-ai-current-value': textOf(tablePayloadStr), title: `Operate ${k} table & SQLite with AI` },
 									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							)
-						),
-						$('div.custom-field-view.table-card-mount', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' })
-					));
+						))),
+						part(['customFieldView', 'customFieldViews', 'tableCardMount'], $('div.custom-field-view.table-card-mount', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' }))
+					))));
 				} else if (fType === 'ssh') {
 					let sshHost: string = fieldItem.sshHost || '';
 					let sshPort: number | string = fieldItem.sshPort || 22;
@@ -20542,28 +20874,28 @@ ${interpolatedPrompt}`;
 					});
 					const connTargetLabel = sshHost ? `${sshUser || 'root'}@${sshHost}:${sshPort}` : 'Not Connected';
 
-					customFieldsContent.push($('div', { class: `section-card custom-property-card ssh-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'ssh', 'data-ssh-json': textOf(sshPayloadStr) },
-						$('div.section-title', undefined,
+					customFieldsContent.push(part(['sectionCards', 'sshPrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card ssh-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'ssh', 'data-ssh-json': textOf(sshPayloadStr) },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap;' },
 								$('span', undefined, k),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(16, 185, 129, 0.18); color: #34d399; font-weight: 700; text-transform: uppercase;' },
 									'SSH Terminal'
 								),
-								$('span.ssh-header-target-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #6ee7b7; font-family: monospace;' },
+								part('sshHeaderTargetBadge', $('span.ssh-header-target-badge', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #6ee7b7; font-family: monospace;' },
 									textOf(connTargetLabel)
-								)
+								))
 							),
 							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 								...stepBadge(),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'ssh', 'data-ai-field-label': k, 'data-ai-current-value': textOf(sshCommand), title: `Edit ${k} SSH command with AI` },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': 'ssh', 'data-ai-field-label': k, 'data-ai-current-value': textOf(sshCommand), title: `Edit ${k} SSH command with AI` },
 									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							)
-						),
-						$('div.custom-field-view.ssh-card-mount', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' })
-					));
+						))),
+						part(['customFieldView', 'customFieldViews', 'sshCardMount'], $('div.custom-field-view.ssh-card-mount', { style: 'display: flex; flex-direction: column; gap: 10px; padding: 4px 0;' }))
+					))));
 				} else if (fType === 'output') {
 					const enabledSpecs = (fieldItem.outputSpecs || []).filter(s => s.enabled);
 					let savedMap: Record<string, unknown> = {};
@@ -20787,31 +21119,31 @@ ${interpolatedPrompt}`;
 								itemViewport = this._renderOutputViewportByFormat(itemText, itemFormat, specStateKey);
 							}
 
-							itemNodes.push($('div.output-spec-item', { 'data-field-key': textOf(rawKey), 'data-spec-key': textOf(spec.fieldKey), style: 'display: flex; flex-direction: column; gap: 4px;' },
+							itemNodes.push(part('outputSpecItems', withParts(() => $('div.output-spec-item', { 'data-field-key': textOf(rawKey), 'data-spec-key': textOf(spec.fieldKey), style: 'display: flex; flex-direction: column; gap: 4px;' },
 								$('div', { style: 'display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px;' },
 									$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 										$('span', { style: 'font-weight: 600; font-size: 12px; color: #a5b4fc;' }, textOf(spec.label))
 									),
 									$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 										$('span', { style: 'font-size: 10.5px; opacity: 0.65;' }, 'Format:'),
-										$<HTMLSelectElement>('select.output-item-format-selector', { 'data-field-key': textOf(rawKey), 'data-spec-key': textOf(spec.fieldKey), style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;' },
+										part('outputItemFormatSelector', $<HTMLSelectElement>('select.output-item-format-selector', { 'data-field-key': textOf(rawKey), 'data-spec-key': textOf(spec.fieldKey), style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;' },
 											$<HTMLOptionElement>('option', { value: 'text', selected: itemFormat === 'text' ? true : undefined }, 'Text'),
 											$<HTMLOptionElement>('option', { value: 'markdown', selected: itemFormat === 'markdown' ? true : undefined }, 'Markdown'),
 											$<HTMLOptionElement>('option', { value: 'table', selected: itemFormat === 'table' ? true : undefined }, 'Table'),
 											$<HTMLOptionElement>('option', { value: 'json', selected: itemFormat === 'json' ? true : undefined }, 'JSON')
-										),
+										)),
 										$<HTMLButtonElement>('button.output-item-copy-btn', { type: 'button', 'data-field-key': textOf(rawKey), 'data-spec-key': textOf(spec.fieldKey), title: 'Copy output content', style: 'background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;' },
 											'Copy'
 										)
 									)
 								),
-								$<HTMLTextAreaElement>('textarea.output-item-raw-content', { 'data-field-key': textOf(rawKey), 'data-spec-key': textOf(spec.fieldKey), style: 'display: none;' },
+								part('outputItemRawContent', $<HTMLTextAreaElement>('textarea.output-item-raw-content', { 'data-field-key': textOf(rawKey), 'data-spec-key': textOf(spec.fieldKey), style: 'display: none;' },
 									textOf(itemText)
-								),
-								$('div.output-item-viewport.desc-content-box', { 'data-spec-key': textOf(spec.fieldKey), 'data-state-key': textOf(specStateKey), style: 'padding: 8px 12px; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; word-break: break-word;' },
+								)),
+								part(['outputItemViewport', 'descContentBox', 'descContentBoxes'], $('div.output-item-viewport.desc-content-box', { 'data-spec-key': textOf(spec.fieldKey), 'data-state-key': textOf(specStateKey), style: 'padding: 8px 12px; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; word-break: break-word;' },
 									...itemViewport
-								)
-							));
+								))
+							))));
 						}
 						if (savedMapNeedsSync && !this._isPreviewMode && this._lastParsedData?.customMetadata) {
 							this._lastParsedData.customMetadata[rawKey] = JSON.stringify(savedMap);
@@ -20824,12 +21156,12 @@ ${interpolatedPrompt}`;
 							$('div', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;' },
 								$('div', { style: 'display: flex; align-items: center; gap: 4px; font-size: 11px;' },
 									$('span', { style: 'opacity: 0.65; font-weight: 500;' }, 'Format:'),
-									$<HTMLSelectElement>('select.result-format-selector', { 'data-field-key': textOf(rawKey), style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;' },
+									part('resultFormatSelector', $<HTMLSelectElement>('select.result-format-selector', { 'data-field-key': textOf(rawKey), style: 'padding: 2px 6px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;' },
 										$<HTMLOptionElement>('option', { value: 'text', selected: singleResultFormat === 'text' ? true : undefined }, 'Text'),
 										$<HTMLOptionElement>('option', { value: 'markdown', selected: singleResultFormat === 'markdown' ? true : undefined }, 'Markdown'),
 										$<HTMLOptionElement>('option', { value: 'table', selected: singleResultFormat === 'table' ? true : undefined }, 'Table'),
 										$<HTMLOptionElement>('option', { value: 'json', selected: singleResultFormat === 'json' ? true : undefined }, 'JSON')
-									)
+									))
 								),
 								$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 									$<HTMLButtonElement>('button.result-copy-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Copy Result Text to Clipboard', style: 'background: transparent; border: 1px solid rgba(255,255,255,0.12); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit;' },
@@ -20840,17 +21172,17 @@ ${interpolatedPrompt}`;
 									)
 								)
 							),
-							$<HTMLTextAreaElement>('textarea.result-raw-content', { 'data-field-key': textOf(rawKey), style: 'display: none;' },
+							part('resultRawContent', $<HTMLTextAreaElement>('textarea.result-raw-content', { 'data-field-key': textOf(rawKey), style: 'display: none;' },
 								textOf(singleResultText)
-							),
-							$('div.result-viewport-container.desc-content-box', { 'data-state-key': textOf(singleStateKey), style: 'padding: 8px 12px; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; word-break: break-word;' },
+							)),
+							part(['resultViewportContainer', 'descContentBox', 'descContentBoxes'], $('div.result-viewport-container.desc-content-box', { 'data-state-key': textOf(singleStateKey), style: 'padding: 8px 12px; max-height: 360px; overflow-y: auto; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; word-break: break-word;' },
 								...initialViewport
-							)
+							))
 						);
 					}
 
-					customFieldsContent.push($('div', { class: `section-card custom-property-card output-primitive-card result-primitive-card custom-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'output' },
-						$('div.section-title', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;' },
+					customFieldsContent.push(part(['sectionCards', 'outputPrimitiveCard', 'resultPrimitiveCards'], withParts(() => $('div', { class: `section-card custom-property-card output-primitive-card result-primitive-card custom-primitive-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': 'output' },
+						part('sectionTitle', withParts(() => $('div.section-title', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;' },
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, textOf(k)),
 								$('span', { style: 'font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(129, 140, 248, 0.18); color: #818cf8; font-weight: 700; text-transform: uppercase;' },
@@ -20866,10 +21198,10 @@ ${interpolatedPrompt}`;
 									'Copy All'
 								)
 							)
-						),
+						))),
 						$('div.output-items-container', { style: 'display: flex; flex-direction: column; gap: 12px;' }, ...itemNodes)
 
-					));
+					))));
 				} else if (fieldItem.wfStep) {
 					customFieldsContent.push(this._renderWorkflowStepCard(fieldItem.wfStep, k, rawKey, fieldItem.id || '', stepCardClass, stepBadge(), fieldItem.wfRuntime));
 				} else {
@@ -20892,13 +21224,13 @@ ${interpolatedPrompt}`;
 					}
 
 					const displayContent = isJson
-						? [$('pre', { style: 'margin: 0; padding: 2px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; background: transparent; border: none; font-weight: 400;' },
+						? [part('pres', $('pre', { style: 'margin: 0; padding: 2px 0; font-family: var(--vscode-editor-font-family, monospace); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; color: #a5f3fc; background: transparent; border: none; font-weight: 400;' },
 							textOf(formattedJson)
-						)]
+						))]
 						: (v ? this._renderMarkdown(String(v)) : [$('span', { style: 'opacity: 0.45; font-style: italic;' }, 'No content provided. Click to edit.')]);
 
-					customFieldsContent.push($('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': fType },
-						$('div.section-title', undefined,
+					customFieldsContent.push(part('sectionCards', withParts(() => $('div', { class: `section-card custom-property-card${stepCardClass}`, 'data-field-key': textOf(rawKey), 'data-field-id': textOf(fieldItem.id || ''), 'data-field-label': textOf(k), 'data-field-type': fType },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, k),
 								...(isMultiline ? [
@@ -20912,22 +21244,22 @@ ${interpolatedPrompt}`;
 								' ',
 								...((isMultiline || isJson || fType === 'http_request' || (typeof v === 'string' && v.length > 40)) ? [
 									$<HTMLButtonElement>('button.btn-secondary.custom-field-copy-btn', { type: 'button', 'data-field-key': textOf(rawKey), title: 'Copy full content to clipboard', style: 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: inherit; display: inline-flex; align-items: center; gap: 4px;' },
-										$('span.codicon.codicon-copy', { style: 'font-size: 11px;' }),
+										part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 11px;' })),
 										$('span', undefined, 'Copy')
 									)
 								] : []),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': (isMultiline ? 'textarea' : 'text'), 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': `/Custom/${rawKey}`, 'data-ai-field-type': (isMultiline ? 'textarea' : 'text'), 'data-ai-field-label': k, 'data-ai-current-value': textOf(String(v || '')), title: `Edit ${k} with AI` },
 									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							)
-						),
-						$('div.custom-field-view.desc-content-box', { 'data-field-key': textOf(rawKey), 'data-multiline': (isMultiline ? 'true' : 'false'), style: 'cursor: text; max-height: 240px; overflow-y: auto; overflow-x: hidden; word-break: break-word;', title: 'Click to edit manually' },
+						))),
+						part(['customFieldView', 'customFieldViews', 'descContentBox', 'descContentBoxes'], $('div.custom-field-view.desc-content-box', { 'data-field-key': textOf(rawKey), 'data-multiline': (isMultiline ? 'true' : 'false'), style: 'cursor: text; max-height: 240px; overflow-y: auto; overflow-x: hidden; word-break: break-word;', title: 'Click to edit manually' },
 							...displayContent
 
-						)
-					));
+						))
+					))));
 				}
 			}
 		}
@@ -20975,7 +21307,7 @@ ${interpolatedPrompt}`;
 			),
 			...(wfNode ? [
 				$('div', { style: 'display: flex; align-items: center; gap: 10px; padding: 10px 16px; margin-bottom: 18px; border-radius: 8px; background: linear-gradient(90deg, rgba(45, 212, 191, 0.14) 0%, rgba(56, 189, 248, 0.08) 100%); border: 1px solid rgba(45, 212, 191, 0.35);' },
-					$('span.codicon.codicon-type-hierarchy-sub', { style: 'font-size: 16px; color: #2dd4bf;' }),
+					part('codicon', $('span.codicon.codicon-type-hierarchy-sub', { style: 'font-size: 16px; color: #2dd4bf;' })),
 					$('div', { style: 'display: flex; flex-direction: column; gap: 2px; min-width: 0;' },
 						$('span', { style: 'font-size: 11.5px; font-weight: 700; color: #2dd4bf; letter-spacing: 0.04em; text-transform: uppercase;' },
 							'Workflow Node'
@@ -20989,7 +21321,7 @@ ${interpolatedPrompt}`;
 				...(this._isPreviewMode ? [
 					$('div', { style: 'display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 8px 14px; margin-bottom: 18px; border-radius: 8px; background: linear-gradient(90deg, rgba(56, 189, 248, 0.14) 0%, rgba(129, 140, 248, 0.10) 100%); border: 1px solid rgba(56, 189, 248, 0.35);' },
 						$('div', { style: 'display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; min-width: 0;' },
-							$('span.codicon.codicon-symbol-class', { style: 'font-size: 14px; color: #38bdf8;' }),
+							part('codicon', $('span.codicon.codicon-symbol-class', { style: 'font-size: 14px; color: #38bdf8;' })),
 							$('span', { style: 'font-size: 11.5px; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase; white-space: nowrap;' },
 								'Ticket Template'
 							),
@@ -20998,7 +21330,7 @@ ${interpolatedPrompt}`;
 							)
 						),
 						$<HTMLButtonElement>('button#preview-edit-schema-btn.btn-primary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 5px; padding: 4px 12px; font-size: 11px; border-radius: 5px; cursor: pointer; background: rgba(56, 189, 248, 0.2); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.45);', title: 'Open the template\'s schema designer to change its fields and layout (existing tickets keep their values)' },
-							$('span.codicon.codicon-tools', { style: 'font-size: 12px;' }),
+							part('codicon', $('span.codicon.codicon-tools', { style: 'font-size: 12px;' })),
 							$('span', undefined, 'Edit Template Schema')
 						)
 					)
@@ -21031,42 +21363,42 @@ ${interpolatedPrompt}`;
 					),
 					$('div.header-title-row', undefined,
 						$('h1#title-heading.ticket-title', { style: 'cursor: pointer;', title: 'Click to edit Title manually' }, data.title),
-						$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Title', 'data-ai-field-type': 'text', 'data-ai-field-label': 'Title', 'data-ai-current-value': textOf(data.title), title: 'Edit Title with AI' },
+						part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Title', 'data-ai-field-type': 'text', 'data-ai-field-label': 'Title', 'data-ai-current-value': textOf(data.title), title: 'Edit Title with AI' },
 							$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 								$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 							)
-						)
+						))
 					)
 				),
 				$('div', { style: `display: ${wfNode ? 'none' : 'flex'}; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 4px;` },
 					...(this._isPreviewMode ? [
 						$<HTMLButtonElement>('button.btn-primary.preview-edit-schema-trigger', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.22); border: 1px solid rgba(192, 132, 252, 0.45); color: #e9d5ff;', title: 'Switch to Edit Template Schema Mode' },
-							$('span.codicon.codicon-edit', { style: 'font-size: 12px;' }),
+							part('codicon', $('span.codicon.codicon-edit', { style: 'font-size: 12px;' })),
 							$('span', undefined, 'Edit Template')
 						)
 					] : []),
 					' ',
 					...((this._isEmbeddedInWorkflow || (data.ticketType && data.ticketType.toLowerCase() === 'workflow')) ? [
 						$<HTMLButtonElement>('button#entity-detail-switch-flowchart-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(13, 148, 136, 0.16); border: 1px solid rgba(45, 212, 191, 0.35); color: #2dd4bf;', title: 'Switch back to Workflow Flowchart View' },
-							$('span.codicon.codicon-type-hierarchy-sub', { style: 'font-size: 12px;' }),
+							part('codicon', $('span.codicon.codicon-type-hierarchy-sub', { style: 'font-size: 12px;' })),
 							$('span', undefined, 'Flowchart')
 						)
 					] : []),
 					' ',
-					$<HTMLButtonElement>('button#entity-detail-run-ticket-btn.btn-primary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(34, 197, 94, 0.2); border: 1px solid rgba(34, 197, 94, 0.45); color: #4ade80; font-weight: 600; transition: all 0.15s ease;', title: 'Run Ticket (Execute current ticket with default parameters)' },
-						$('span.codicon.codicon-play', { style: 'font-size: 12px;' }),
-						$('span.run-ticket-btn-label', undefined, 'Run')
-					),
+					part('entityDetailRunTicketBtn', withParts(() => $<HTMLButtonElement>('button#entity-detail-run-ticket-btn.btn-primary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(34, 197, 94, 0.2); border: 1px solid rgba(34, 197, 94, 0.45); color: #4ade80; font-weight: 600; transition: all 0.15s ease;', title: 'Run Ticket (Execute current ticket with default parameters)' },
+						part('codicon', $('span.codicon.codicon-play', { style: 'font-size: 12px;' })),
+						part('runTicketBtnLabel', $('span.run-ticket-btn-label', undefined, 'Run'))
+					))),
 					' ',
-					$<HTMLButtonElement>('button#entity-detail-copy-json-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8;', title: 'Copy Ticket JSON (One-click copy all existing content of this ticket as JSON to clipboard)' },
-						$('span.codicon.codicon-copy', { style: 'font-size: 12px;' }),
-						$('span.copy-json-btn-label', undefined, 'Copy JSON')
-					),
+					withParts(() => $<HTMLButtonElement>('button#entity-detail-copy-json-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(56, 189, 248, 0.14); border: 1px solid rgba(56, 189, 248, 0.35); color: #38bdf8;', title: 'Copy Ticket JSON (One-click copy all existing content of this ticket as JSON to clipboard)' },
+						part('codicon', $('span.codicon.codicon-copy', { style: 'font-size: 12px;' })),
+						part('copyJsonBtnLabel', $('span.copy-json-btn-label', undefined, 'Copy JSON'))
+					)),
 					' ',
-					$<HTMLButtonElement>('button#entity-detail-paste-json-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.14); border: 1px solid rgba(168, 85, 247, 0.35); color: #c084fc;', title: 'Paste Ticket JSON (Paste and overwrite fields from a copied ticket of the same type)' },
-						$('span.codicon.codicon-clippy', { style: 'font-size: 12px;' }),
-						$('span.paste-json-btn-label', undefined, 'Paste JSON')
-					),
+					withParts(() => $<HTMLButtonElement>('button#entity-detail-paste-json-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(168, 85, 247, 0.14); border: 1px solid rgba(168, 85, 247, 0.35); color: #c084fc;', title: 'Paste Ticket JSON (Paste and overwrite fields from a copied ticket of the same type)' },
+						part('codicon', $('span.codicon.codicon-clippy', { style: 'font-size: 12px;' })),
+						part('pasteJsonBtnLabel', $('span.paste-json-btn-label', undefined, 'Paste JSON'))
+					)),
 					' ',
 					$<HTMLButtonElement>('button#entity-detail-refresh-btn.btn-secondary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; font-size: 0.84em; border-radius: 6px; cursor: pointer;', title: 'Refresh Ticket (Reload latest data from disk)' },
 						$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'currentColor', style: 'display:inline-block;' },
@@ -21075,16 +21407,16 @@ ${interpolatedPrompt}`;
 						$('span', undefined, 'Refresh')
 					),
 					' ',
-					$<HTMLButtonElement>('button#entity-detail-toggle-attributes-btn.btn-secondary.toggle-attributes-panel-btn', { type: 'button', style: `display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 5px 9px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.06)'}; border: 1px solid ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.4)' : 'rgba(255, 255, 255, 0.1)'}; color: ${this._isAttributesCollapsed ? '#38bdf8' : 'var(--vscode-foreground)'};`, title: (this._isAttributesCollapsed ? 'Show Attributes Panel' : 'Hide Attributes Panel') },
+					part('entityDetailToggleAttributesBtn', $<HTMLButtonElement>('button#entity-detail-toggle-attributes-btn.btn-secondary.toggle-attributes-panel-btn', { type: 'button', style: `display: inline-flex; align-items: center; justify-content: center; gap: 5px; padding: 5px 9px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.16)' : 'rgba(255, 255, 255, 0.06)'}; border: 1px solid ${this._isAttributesCollapsed ? 'rgba(56, 189, 248, 0.4)' : 'rgba(255, 255, 255, 0.1)'}; color: ${this._isAttributesCollapsed ? '#38bdf8' : 'var(--vscode-foreground)'};`, title: (this._isAttributesCollapsed ? 'Show Attributes Panel' : 'Hide Attributes Panel') },
 						$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.4', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', style: 'display:inline-block;' },
 							$.SVG('rect', { x: '1.5', y: '2.5', width: '13', height: '11', rx: '1.5' }),
 							' ',
 							$.SVG('line', { x1: '10', y1: '2.5', x2: '10', y2: '13.5' })
 						)
-					)
+					))
 				)
 			),
-			$('div', { class: `layout-container ${this._isAttributesCollapsed || wfNode ? 'attributes-collapsed' : ''}${wfNode ? ' wf-node-view' : ''}` },
+			part('layoutContainer', $('div', { class: `layout-container ${this._isAttributesCollapsed || wfNode ? 'attributes-collapsed' : ''}${wfNode ? ' wf-node-view' : ''}` },
 				$<HTMLButtonElement>('button.attributes-collapsed-drawer-btn.toggle-attributes-panel-btn', { type: 'button', title: 'Expand Attributes Panel' },
 					$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
 						$.SVG('polyline', { points: '10 4 6 8 10 12' }),
@@ -21096,18 +21428,18 @@ ${interpolatedPrompt}`;
 				),
 				$('div.main-content', undefined,
 					...((isAgent || !customModule || !Array.isArray(customModule.fields) || customModule.fields.some(f => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description')) ? [
-						$('div.section-card', undefined,
-							$('div.section-title', undefined,
+						part('sectionCards', withParts(() => $('div.section-card', undefined,
+							part('sectionTitle', withParts(() => $('div.section-title', undefined,
 								$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 									$('span', undefined, isAgent ? 'Role & Purpose' : 'Description')
 								),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Description', 'data-ai-field-type': 'textarea', 'data-ai-field-label': (isAgent ? 'Role & Purpose' : 'Description'), 'data-ai-current-value': textOf(data.description), title: 'Edit Description with AI' },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Description', 'data-ai-field-type': 'textarea', 'data-ai-field-label': (isAgent ? 'Role & Purpose' : 'Description'), 'data-ai-current-value': textOf(data.description), title: 'Edit Description with AI' },
 									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
-							),
-							$('div#desc-view-mode.desc-content-box', { style: 'cursor: text;', title: 'Click to edit Description manually' },
+								))
+							))),
+							part(['descContentBox', 'descContentBoxes'], $('div#desc-view-mode.desc-content-box', { style: 'cursor: text;', title: 'Click to edit Description manually' },
 								...(data.description ? [...this._renderMarkdown(data.description)] : [
 									$('span', { style: 'opacity: 0.45; font-style: italic;' },
 										'No ',
@@ -21115,13 +21447,13 @@ ${interpolatedPrompt}`;
 										' provided. Click to edit manually.'
 									)
 								])
-							)
-						)
+							))
+						)))
 					] : []),
 					' ',
 					...(isAgent ? [
-						$('div.section-card', undefined,
-							$('div.section-title', undefined,
+						part('sectionCards', withParts(() => $('div.section-card', undefined,
+							part('sectionTitle', withParts(() => $('div.section-title', undefined,
 								$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 									$('span', undefined, 'AI Model & Execution Engine')
 								),
@@ -21131,13 +21463,13 @@ ${interpolatedPrompt}`;
 											'+ Assign Task'
 										)
 									] : []),
-									$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/AI Model', 'data-ai-field-type': 'text', 'data-ai-field-label': 'AI Model', 'data-ai-current-value': textOf(agentModel), title: 'Edit AI Model with AI' },
+									part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/AI Model', 'data-ai-field-type': 'text', 'data-ai-field-label': 'AI Model', 'data-ai-current-value': textOf(agentModel), title: 'Edit AI Model with AI' },
 										$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 										)
-									)
+									))
 								)
-							),
+							))),
 							$('div', { style: 'display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px;' },
 								$('div', { style: 'background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.06); border-radius: 6px; padding: 12px 14px;' },
 									$('div', { style: 'font-size: 0.75em; opacity: 0.6; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;' }, 'Active Model'),
@@ -21160,10 +21492,10 @@ ${interpolatedPrompt}`;
 									$('div', { style: 'font-size: 0.88em; font-weight: 600; color: #34d399;' }, agentScopeName)
 								)
 							)
-						)
+						)))
 					] : []),
-					$('div.section-card', { style: wfNode ? 'display: none;' : undefined },
-						$('div.section-title', undefined,
+					part('sectionCards', withParts(() => $('div.section-card', { style: wfNode ? 'display: none;' : undefined },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 								$('span', undefined, isAgent ? 'System Prompt & Persona Instructions' : 'Instructions')
 							),
@@ -21173,13 +21505,13 @@ ${interpolatedPrompt}`;
 										$('span', undefined, 'Copy Prompt')
 									)
 								] : []),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': (isAgent ? '/Instructions/System Prompt' : '/Instructions'), 'data-ai-field-type': (isAgent ? 'textarea' : 'container'), 'data-ai-field-label': (isAgent ? 'System Prompt' : 'Instructions'), 'data-ai-current-value': textOf(agentSystemPrompt || data.ticketPrompt || ''), title: 'Edit with AI' },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': (isAgent ? '/Instructions/System Prompt' : '/Instructions'), 'data-ai-field-type': (isAgent ? 'textarea' : 'container'), 'data-ai-field-label': (isAgent ? 'System Prompt' : 'Instructions'), 'data-ai-current-value': textOf(agentSystemPrompt || data.ticketPrompt || ''), title: 'Edit with AI' },
 									$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							)
-						),
+						))),
 						$('div', { style: 'display: flex; flex-direction: column; gap: 12px;' },
 							...(isAgent && agentSystemPrompt ? [
 								$('div.instruction-item', { style: 'border-left: 3px solid #f472b6; background: rgba(244, 114, 182, 0.04); padding: 14px 18px; border-radius: 0 6px 6px 0; border: 1px solid rgba(244, 114, 182, 0.18); border-left-width: 3px;' },
@@ -21187,11 +21519,11 @@ ${interpolatedPrompt}`;
 										$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #f472b6; letter-spacing: 0.04em; text-transform: uppercase;' },
 											'Core System Prompt / Persona'
 										),
-										$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/System Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'System Prompt', 'data-ai-current-value': textOf(agentSystemPrompt), title: 'Edit System Prompt with AI' },
+										part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/System Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'System Prompt', 'data-ai-current-value': textOf(agentSystemPrompt), title: 'Edit System Prompt with AI' },
 											$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 												$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 											)
-										)
+										))
 									),
 									$('div', { style: 'font-size: 0.9em; opacity: 0.95; line-height: 1.6; font-family: var(--vscode-editor-font-family, monospace); white-space: pre-wrap; word-break: break-word;' },
 										...this._renderMarkdown(agentSystemPrompt)
@@ -21203,11 +21535,11 @@ ${interpolatedPrompt}`;
 									$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #38bdf8; letter-spacing: 0.04em; text-transform: uppercase;' },
 										isAgent ? 'Instance Rules / Ticket Prompt' : 'Ticket Prompt'
 									),
-									$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/Ticket Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'Ticket Prompt', 'data-ai-current-value': textOf(data.ticketPrompt || ''), title: 'Edit Ticket Prompt with AI' },
+									part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/Ticket Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'Ticket Prompt', 'data-ai-current-value': textOf(data.ticketPrompt || ''), title: 'Edit Ticket Prompt with AI' },
 										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 										)
-									)
+									))
 								),
 								$('div.instruction-prompt-content', { 'data-prompt-key': 'Ticket Prompt', style: 'font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;', title: 'Click to edit Ticket Prompt manually' },
 									...(ticketPromptDisplay ? [...this._renderMarkdown(ticketPromptDisplay)] : [
@@ -21220,11 +21552,11 @@ ${interpolatedPrompt}`;
 									$('div', { style: 'font-size: 0.78em; font-weight: 700; color: #a78bfa; letter-spacing: 0.04em; text-transform: uppercase;' },
 										isAgent ? 'System Type Prompt' : 'Ticket Type Prompt'
 									),
-									$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/Ticket Type Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'Ticket Type Prompt', 'data-ai-current-value': textOf(typePromptDisplay || ''), title: 'Edit Ticket Type Prompt with AI' },
+									part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Instructions/Ticket Type Prompt', 'data-ai-field-type': 'textarea', 'data-ai-field-label': 'Ticket Type Prompt', 'data-ai-current-value': textOf(typePromptDisplay || ''), title: 'Edit Ticket Type Prompt with AI' },
 										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 											$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 										)
-									)
+									))
 								),
 								$('div.instruction-prompt-content', { 'data-prompt-key': 'Ticket Type Prompt', style: 'font-size: 0.9em; opacity: 0.9; line-height: 1.5; cursor: pointer;', title: 'Click to edit Ticket Type Prompt manually' },
 									...(typePromptDisplay ? [...this._renderMarkdown(typePromptDisplay)] : [
@@ -21233,24 +21565,24 @@ ${interpolatedPrompt}`;
 								)
 							)
 						)
-					),
+					))),
 					...customFieldsContent,
-					$('div.section-card', { style: `max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;${this._isPreviewMode ? ' display: none;' : ''}` },
-						$('div.section-title', undefined,
+					part('sectionCards', withParts(() => $('div.section-card', { style: `max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;${this._isPreviewMode ? ' display: none;' : ''}` },
+						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('span', undefined, isAgent ? 'Task History & Work Logs' : 'Work Logs'),
 							$<HTMLButtonElement>('button#add-log-btn.btn-primary', { style: 'font-size: 0.8em; padding: 4px 10px;' }, '+ Add Log')
-						),
-						$('div#add-log-box', { style: 'display: none; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 15px;' },
-							$<HTMLTextAreaElement>('textarea#log-textarea.input-field', { rows: '3', placeholder: 'Enter work log description...' }),
+						))),
+						part('addLogBox', $('div#add-log-box', { style: 'display: none; margin-bottom: 20px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 15px;' },
+							part('logTextarea', $<HTMLTextAreaElement>('textarea#log-textarea.input-field', { rows: '3', placeholder: 'Enter work log description...' })),
 							$('div', { style: 'display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end;' },
 								$<HTMLButtonElement>('button#cancel-log-btn.btn-secondary', undefined, 'Cancel'),
 								$<HTMLButtonElement>('button#submit-log-btn.btn-primary', undefined, 'Record Log')
 							)
-						),
+						)),
 						$('div#work-logs-container', { style: 'max-width: 100%; min-width: 0; width: 100%; box-sizing: border-box; overflow-x: hidden; overflow-wrap: anywhere; word-break: break-word;' },
 							workLogContent
 						)
-					)
+					)))
 				),
 				$('div.sidebar', undefined,
 					$('div.sidebar-header', { style: 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 10px;' },
@@ -21258,11 +21590,11 @@ ${interpolatedPrompt}`;
 							isAgent ? 'Agent Attributes' : 'Attributes'
 						),
 						$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes', 'data-ai-field-type': 'attributes', 'data-ai-field-label': 'Attributes', title: 'Edit Attributes with AI' },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes', 'data-ai-field-type': 'attributes', 'data-ai-field-label': 'Attributes', title: 'Edit Attributes with AI' },
 								$.SVG('svg', { width: '13', height: '13', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							),
+							)),
 							$<HTMLButtonElement>('button.sidebar-collapse-icon-btn.toggle-attributes-panel-btn', { type: 'button', title: 'Collapse / Hide Attributes Panel' },
 								$.SVG('svg', { width: '12', height: '12', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round', 'stroke-linejoin': 'round' },
 									$.SVG('polyline', { points: '6 4 10 8 6 12' }),
@@ -21276,7 +21608,7 @@ ${interpolatedPrompt}`;
 						$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
 							$('div', { style: 'display: flex; align-items: center; gap: 6px;' },
 								$('span.sidebar-label', undefined, 'STATUS'),
-								$<HTMLButtonElement>('button#status-lifecycle-info-btn.status-lifecycle-info-btn', { type: 'button', title: 'View Workspace Status Lifecycle & Mapping', style: 'background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.15); cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 50%; padding: 0; transition: all 0.15s ease;' },
+								part('statusLifecycleInfoBtn', $<HTMLButtonElement>('button#status-lifecycle-info-btn.status-lifecycle-info-btn', { type: 'button', title: 'View Workspace Status Lifecycle & Mapping', style: 'background: rgba(255, 255, 255, 0.06); border: 1px solid rgba(255, 255, 255, 0.15); cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; justify-content: center; width: 17px; height: 17px; border-radius: 50%; padding: 0; transition: all 0.15s ease;' },
 									$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.6', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', style: 'pointer-events: none; display: block;' },
 										$.SVG('circle', { cx: '8', cy: '8', r: '6.75' }),
 										' ',
@@ -21284,20 +21616,20 @@ ${interpolatedPrompt}`;
 										' ',
 										$.SVG('circle', { cx: '8', cy: '4.75', r: '0.75', fill: 'currentColor', stroke: 'none' })
 									)
-								)
+								))
 							),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Status', 'data-ai-field-type': 'status', 'data-ai-field-label': 'Status', 'data-ai-current-value': textOf(status), 'data-ai-options': textOf(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map(s => s.label || s.id) : this._workspaceStatuses.statuses))), title: 'Edit Status with AI' },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Status', 'data-ai-field-type': 'status', 'data-ai-field-label': 'Status', 'data-ai-current-value': textOf(status), 'data-ai-options': textOf(JSON.stringify(isAgent ? ['idle', 'busy', 'offline'] : (customModule?.statuses && customModule.statuses.length > 0 ? customModule.statuses.map(s => s.label || s.id) : this._workspaceStatuses.statuses))), title: 'Edit Status with AI' },
 								$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
+							))
 						),
 						$('div', { style: 'padding: 2px 0;' },
 							$('span#status-view-val', { style: `display: inline-block; font-size: 0.88em; font-weight: 700; color: ${statusColor}; background: ${statusBg}; border: 1px solid ${statusBorder}; padding: 3px 10px; border-radius: 5px; text-transform: uppercase;` },
 								status
 							)
 						),
-						$('div#status-lifecycle-popover.status-lifecycle-popover', { style: 'display: none; position: absolute; top: calc(100% + 6px); right: 0; width: 330px; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.06); z-index: 1000; padding: 14px; box-sizing: border-box; flex-direction: column; gap: 10px;' },
+						part('statusLifecyclePopover', $('div#status-lifecycle-popover.status-lifecycle-popover', { style: 'display: none; position: absolute; top: calc(100% + 6px); right: 0; width: 330px; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 10px; box-shadow: 0 16px 40px rgba(0,0,0,0.7), 0 0 0 1px rgba(255,255,255,0.06); z-index: 1000; padding: 14px; box-sizing: border-box; flex-direction: column; gap: 10px;' },
 							$('div', { style: 'display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 8px;' },
 								$('div', { style: 'display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--vscode-editor-foreground);' },
 									$('span', { style: 'color: #38bdf8; display: inline-flex; align-items: center;' },
@@ -21311,9 +21643,9 @@ ${interpolatedPrompt}`;
 									),
 									$('span', undefined, 'Status Lifecycle & Mapping')
 								),
-								$<HTMLButtonElement>('button#close-status-lifecycle-popover-btn', { type: 'button', style: 'background: transparent; border: none; cursor: pointer; color: var(--vscode-descriptionForeground); font-size: 14px; padding: 0 4px; border-radius: 4px; line-height: 1;', title: 'Close' },
+								part('closeStatusLifecyclePopoverBtn', $<HTMLButtonElement>('button#close-status-lifecycle-popover-btn', { type: 'button', style: 'background: transparent; border: none; cursor: pointer; color: var(--vscode-descriptionForeground); font-size: 14px; padding: 0 4px; border-radius: 4px; line-height: 1;', title: 'Close' },
 									'\u2715'
-								)
+								))
 							),
 							$('div', { style: 'font-size: 11px; display: flex; align-items: center; justify-content: space-between; background: rgba(255,255,255,0.03); padding: 5px 8px; border-radius: 5px; border: 1px solid rgba(255,255,255,0.06);' },
 								$('span', { style: 'opacity: 0.7;' }, 'Current Status:'),
@@ -21404,16 +21736,16 @@ ${interpolatedPrompt}`;
 									return [...rows, notice];
 								})()
 							)
-						)
+						))
 					),
 					$('div.sidebar-row', undefined,
 						$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
 							$('span.sidebar-label', undefined, 'PRIORITY'),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Priority', 'data-ai-field-type': 'priority', 'data-ai-field-label': 'Priority', 'data-ai-current-value': textOf(data.priority), title: 'Edit Priority with AI' },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Priority', 'data-ai-field-type': 'priority', 'data-ai-field-label': 'Priority', 'data-ai-current-value': textOf(data.priority), title: 'Edit Priority with AI' },
 								$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
+							))
 						),
 						$('div', { style: 'display: flex; align-items: center; gap: 6px; padding: 2px 0;' },
 							$('span', { style: `display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${pColor}; box-shadow: 0 0 6px ${pColor}80;` }),
@@ -21424,11 +21756,11 @@ ${interpolatedPrompt}`;
 						$('div.sidebar-row', undefined,
 							$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
 								$('span.sidebar-label', undefined, 'AI MODEL'),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/AI Model', 'data-ai-field-type': 'text', 'data-ai-field-label': 'AI Model', 'data-ai-current-value': textOf(agentModel), title: 'Edit AI Model with AI' },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/AI Model', 'data-ai-field-type': 'text', 'data-ai-field-label': 'AI Model', 'data-ai-current-value': textOf(agentModel), title: 'Edit AI Model with AI' },
 									$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							),
 							$('span.sidebar-value', { style: 'color: #38bdf8; font-weight: 700; font-family: monospace;' }, agentModel)
 						),
@@ -21439,11 +21771,11 @@ ${interpolatedPrompt}`;
 						$('div.sidebar-row', undefined,
 							$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
 								$('span.sidebar-label', undefined, 'AGENT ROLE'),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Agent Role', 'data-ai-field-type': 'text', 'data-ai-field-label': 'Agent Role', 'data-ai-current-value': textOf(agentRole), title: 'Edit Agent Role with AI' },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Agent Role', 'data-ai-field-type': 'text', 'data-ai-field-label': 'Agent Role', 'data-ai-current-value': textOf(agentRole), title: 'Edit Agent Role with AI' },
 									$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							),
 							$('span.sidebar-value', { style: 'font-size: 0.88em;' }, agentRole)
 						),
@@ -21455,11 +21787,11 @@ ${interpolatedPrompt}`;
 						$('div.sidebar-row', undefined,
 							$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
 								$('span.sidebar-label', undefined, 'CURRENT AI AGENT'),
-								$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Current AI Agent', 'data-ai-field-type': 'agent', 'data-ai-field-label': 'Current AI Agent', 'data-ai-current-value': textOf(data.assignedAgentName || ''), 'data-ai-options': textOf(JSON.stringify(agents.map(a => ({ id: a.id, name: a.name })))), title: 'Edit Current AI Agent with AI' },
+								part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Current AI Agent', 'data-ai-field-type': 'agent', 'data-ai-field-label': 'Current AI Agent', 'data-ai-current-value': textOf(data.assignedAgentName || ''), 'data-ai-options': textOf(JSON.stringify(agents.map(a => ({ id: a.id, name: a.name })))), title: 'Edit Current AI Agent with AI' },
 									$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 										$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 									)
-								)
+								))
 							),
 							$('span.meta-view-val.sidebar-value', undefined,
 								data.assignedAgentName && data.assignedAgentName !== 'None' ? data.assignedAgentName : $('span', { style: 'opacity:0.4;' }, 'Unassigned')
@@ -21486,11 +21818,11 @@ ${interpolatedPrompt}`;
 					$('div.sidebar-row', undefined,
 						$('div', { style: 'display: flex; justify-content: space-between; align-items: center;' },
 							$('span.sidebar-label', undefined, 'LINK TO'),
-							$<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Link To', 'data-ai-field-type': 'link_to', 'data-ai-field-label': 'Link To', 'data-ai-current-value': `${data.linkTo !== 'None' ? textOf(data.linkTo) : ''}`, 'data-ai-options': textOf(JSON.stringify(allTickets)), title: 'Edit Link To with AI' },
+							part(['aiEditBtn', 'aiEditBtns'], $<HTMLButtonElement>('button.ai-edit-btn', { type: 'button', 'data-ai-field': '/Attributes/Link To', 'data-ai-field-type': 'link_to', 'data-ai-field-label': 'Link To', 'data-ai-current-value': `${data.linkTo !== 'None' ? textOf(data.linkTo) : ''}`, 'data-ai-options': textOf(JSON.stringify(allTickets)), title: 'Edit Link To with AI' },
 								$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 									$.SVG('path', { d: 'M7.5 0.5L9.2 5.5L14.2 7.2L9.2 8.9L7.5 13.9L5.8 8.9L0.8 7.2L5.8 5.5L7.5 0.5Z' })
 								)
-							)
+							))
 						),
 						$('div.sidebar-value', { style: 'display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;' },
 							...this._renderTicketChips(data.linkTo, allTickets)
@@ -21532,12 +21864,12 @@ ${interpolatedPrompt}`;
 									'GIT REPOSITORY'
 								),
 								...(data.gitRemoteUrl ? [
-									$<HTMLButtonElement>('button.copy-git-url-btn', { type: 'button', 'data-git-url': textOf(data.gitRemoteUrl), title: 'Copy Git URL to clipboard', style: 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; font-size: 10.5px; transition: all 0.15s ease;' },
+									withParts(() => $<HTMLButtonElement>('button.copy-git-url-btn', { type: 'button', 'data-git-url': textOf(data.gitRemoteUrl), title: 'Copy Git URL to clipboard', style: 'background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); cursor: pointer; color: var(--vscode-descriptionForeground); display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px; border-radius: 4px; font-size: 10.5px; transition: all 0.15s ease;' },
 										$.SVG('svg', { width: '11', height: '11', viewBox: '0 0 16 16', fill: 'currentColor' },
 											$.SVG('path', { 'fill-rule': 'evenodd', 'clip-rule': 'evenodd', d: 'M4 4h5v2H4V4zm0 3h5v1H4V7zm0 2h3v1H4V9zm7.5-6H11V2H4v1H2.5A1.5 1.5 0 0 0 1 4.5v9A1.5 1.5 0 0 0 2.5 15h9a1.5 1.5 0 0 0 1.5-1.5V11h1a1 1 0 0 0 1-1V4a1 1 0 0 0-1-1h-2.5zM12 4.5V10h-1V4.5a.5.5 0 0 1 .5-.5h.5zm-9.5 0a.5.5 0 0 1 .5-.5H10a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5H2.5a.5.5 0 0 1-.5-.5v-9zm12-.5h-.5v6h.5V4z' })
 										),
-										$('span', undefined, 'Copy')
-									)
+										part('copyGitUrlLabel', $('span', undefined, 'Copy'))
+									))
 								] : [])
 							),
 							$('div.git-url-box', { title: textOf(data.gitRemoteUrl || 'Inherited'), style: 'background: rgba(0,0,0,0.25); border: 1px solid rgba(255,255,255,0.08); border-radius: 5px; padding: 5px 8px; font-size: 11px; font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-editor-foreground); display: flex; align-items: center; overflow: hidden;' },
@@ -21562,7 +21894,7 @@ ${interpolatedPrompt}`;
 						)
 					] : [])
 				)
-			)
+			))
 		];
 	}
 }
