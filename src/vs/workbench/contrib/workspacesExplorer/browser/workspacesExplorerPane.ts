@@ -5247,7 +5247,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 					if (selectedType === 'workflow') {
 						await this.editorService.openEditor(new WorkflowEditorInput(createdUri, name), { pinned: true });
 					} else {
-						await this.editorService.openEditor(new EntityDetailEditorInput(createdUri, name), { pinned: true });
+						const detailInput = new EntityDetailEditorInput(createdUri, name);
+						// A new Freestyle ticket has no components yet: open it with the component toolbox shown
+						detailInput.openComponentToolbox = isFreestyleTicketType(selectedType) && !createResult.alreadyExists;
+						await this.editorService.openEditor(detailInput, { pinned: true });
 					}
 				} else if (createdUri.path.toLowerCase().endsWith('.md')) {
 					await this.commandService.executeCommand('markdown.showPreview', createdUri);

@@ -20,8 +20,8 @@ export const FREESTYLE_SCHEMA_FILE_NAME = 'freestyle_schema.json';
 export const FREESTYLE_TYPE_DEFINITION = 'A Freestyle ticket has no template: its own component structure is stored in .agents/freestyle_schema.json inside the ticket folder.';
 export const FREESTYLE_TYPE_PROMPT = 'A Freestyle ticket defines its own components (see .agents/freestyle_schema.json). Work with the components it has.';
 
-/** Editor `moduleId` prefix used when the schema designer edits a Freestyle ticket's structure. */
-const FREESTYLE_DESIGNER_MODULE_ID_PREFIX = 'freestyle-ticket::';
+/** `moduleId` prefix of the former "Ticket Structure" designer tabs (UI-01); such tabs are no longer restored. */
+const LEGACY_FREESTYLE_DESIGNER_MODULE_ID_PREFIX = 'freestyle-ticket::';
 
 /**
  * Normalizes a template / ticket type name for the reserved-name check: lowercase, without whitespace,
@@ -90,8 +90,9 @@ export function getFreestyleSchemaUri(ticketFolderUri: URI): URI {
 	return URI.joinPath(ticketFolderUri, '.agents', FREESTYLE_SCHEMA_FILE_NAME);
 }
 
-export function getFreestyleDesignerModuleId(ticketFolderUri: URI): string {
-	return `${FREESTYLE_DESIGNER_MODULE_ID_PREFIX}${ticketFolderUri.toString()}`;
+/** True for the `moduleId` of a former "Ticket Structure" designer tab (restored from an older session). */
+export function isLegacyFreestyleDesignerModuleId(moduleId: string): boolean {
+	return moduleId.startsWith(LEGACY_FREESTYLE_DESIGNER_MODULE_ID_PREFIX);
 }
 
 /** The structure a new Freestyle ticket starts with: a Title and a (removable) Description. */

@@ -10,7 +10,7 @@ import {
 	FREESTYLE_PROGRAMMATIC_CREATE_ERROR,
 	FREESTYLE_TICKET_TYPE,
 	createDefaultFreestyleSchema,
-	getFreestyleDesignerModuleId,
+	isLegacyFreestyleDesignerModuleId,
 	getFreestyleSchemaUri,
 	getProgrammaticTicketTypeError,
 	getReservedTemplateNameError,
@@ -36,7 +36,8 @@ suite('freestyleTicket', () => {
 	test('stores the structure inside the ticket folder', () => {
 		const ticketUri = URI.file('/ws/NEOWO-0007');
 		assert.strictEqual(getFreestyleSchemaUri(ticketUri).path, '/ws/NEOWO-0007/.agents/freestyle_schema.json');
-		assert.ok(getFreestyleDesignerModuleId(ticketUri).endsWith(ticketUri.toString()));
+		assert.strictEqual(isLegacyFreestyleDesignerModuleId(`freestyle-ticket::${ticketUri.toString()}`), true);
+		assert.strictEqual(isLegacyFreestyleDesignerModuleId('bug'), false);
 	});
 
 	test('default structure has a Title and a Description', () => {

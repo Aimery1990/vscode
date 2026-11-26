@@ -17,7 +17,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
-import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IVoiceNoteClip, ICompositeComponent, IStatusDefinition, IActionButton, DEFAULT_STATUS_DEFINITIONS, IOutputSpec, TableColumnDataType, ITableColumnDefinition, generateSmartPythonVarName, sanitizePythonVarName, CUSTOM_MODULE_ICON_LIBRARY, CUSTOM_MODULE_COLOR_PALETTE, getDefaultCustomModuleIconId, getDefaultCustomModuleColor, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IVoiceNoteClip, ICompositeComponent, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS, IOutputSpec, TableColumnDataType, ITableColumnDefinition, generateSmartPythonVarName, sanitizePythonVarName, CUSTOM_MODULE_ICON_LIBRARY, CUSTOM_MODULE_COLOR_PALETTE, getDefaultCustomModuleIconId, getDefaultCustomModuleColor, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IDialogService, IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { ICustomModulesService } from '../common/customModules.js';
@@ -42,7 +42,9 @@ import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeyb
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { CodeWindow } from '../../../../base/browser/window.js';
-import { createDefaultFreestyleSchema, isReservedFreestyleTemplate, readFreestyleSchema, writeFreestyleSchema } from '../common/freestyleTicket.js';
+import { isReservedFreestyleTemplate } from '../common/freestyleTicket.js';
+import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField } from '../common/componentPalette.js';
+import { propagateComponentLabelRename } from '../common/componentSchemaEdits.js';
 
 
 /**
@@ -172,7 +174,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			if (this._isSelfPersisting || !this._activeModule || !this._container) {
 				return;
 			}
-			if (this.input instanceof CustomModuleSchemaEditorInput && (this.input.isFlowchartNodeMode || this.input.freestyleTicketUri)) {
+			if (this.input instanceof CustomModuleSchemaEditorInput && (this.input.isFlowchartNodeMode || this.input.embeddedFieldId)) {
 				return;
 			}
 			try {
@@ -332,6 +334,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 	private _getScrollStateKey(input?: CustomModuleSchemaEditorInput): string {
 		const targetInput = input || (this.input instanceof CustomModuleSchemaEditorInput ? this.input : undefined);
+		if (targetInput?.embeddedFieldId) {
+			// An embedded component editor is short-lived: its scroll position is not remembered
+			return '';
+		}
 		const modId = (targetInput?.moduleId || this._activeModule?.id || '').trim().toLowerCase();
 		const wsKey = targetInput?.workspaceUri?.toString() || this._workspaceUri?.toString() || 'global';
 		return modId ? `${wsKey}::${modId}` : '';
@@ -459,18 +465,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			return;
 		}
 		this._syncDraft();
-		if (this.input instanceof CustomModuleSchemaEditorInput && this.input.isFlowchartNodeMode) {
-			return;
-		}
-		const freestyleTicketUri = this.input instanceof CustomModuleSchemaEditorInput ? this.input.freestyleTicketUri : undefined;
-		if (freestyleTicketUri) {
-			// A Freestyle ticket's structure is saved into that ticket's folder only (never as a template)
-			try {
-				const fileService = this._instantiationService.invokeFunction(accessor => accessor.get(IFileService));
-				await writeFreestyleSchema(fileService, freestyleTicketUri, this._activeModule);
-			} catch (e) {
-				this.notificationService.error(`Failed to save the ticket structure: ${e}`);
-			}
+		if (this.input instanceof CustomModuleSchemaEditorInput && (this.input.isFlowchartNodeMode || this.input.embeddedFieldId)) {
+			// Node components are written back by the workflow; an embedded component editor's host saves `draftModule`
 			return;
 		}
 		const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
@@ -560,14 +556,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			return;
 		}
 		const isFlowchartNodeMode = Boolean(input.isFlowchartNodeMode);
-		const isFreestyleTicketMode = Boolean(input.freestyleTicketUri);
+		// Embedded single-component mode: only this component's configuration is shown (see `embeddedFieldId`)
+		const embeddedFieldId = input.embeddedFieldId?.toLowerCase();
+		const isEmbeddedFieldMode = Boolean(embeddedFieldId);
 		this._saveCurrentScrollPosition();
 		this._workspaceUri = input.workspaceUri;
 		const allWorkspaceModules = await this.customModulesService.getCustomModules(input.workspaceUri);
-		if (input.freestyleTicketUri && !input.draftModule) {
-			const fileService = this._instantiationService.invokeFunction(accessor => accessor.get(IFileService));
-			input.draftModule = await readFreestyleSchema(fileService, input.freestyleTicketUri) ?? createDefaultFreestyleSchema();
-		}
 		if (seq !== this._renderSeq || !this._container) {
 			return;
 		}
@@ -668,12 +662,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 		// 1. Left Dedicated Toolbox Sidebar (Full-height, pinned, independent scroll, like Workflow Toolbox)
 		const leftLibrary = this._toolboxEl = append(this._container, $('.schema-editor-toolbox', {
-			style: `width: ${this._isToolboxCompact ? '56px' : '260px'}; min-width: ${this._isToolboxCompact ? '56px' : '260px'}; height: 100%; border-right: 1px solid var(--vscode-sideBar-border, rgba(255, 255, 255, 0.08)); background: var(--vscode-sideBar-background, #181818); display: ${isFlowchartNodeMode ? 'none' : 'flex'}; flex-direction: column; padding: ${this._isToolboxCompact ? '12px 6px' : '16px 14px'}; gap: 14px; box-sizing: border-box; flex-shrink: 0; overflow-y: auto; overflow-x: hidden; transition: width 0.2s cubic-bezier(0.16, 1, 0.3, 1), min-width 0.2s cubic-bezier(0.16, 1, 0.3, 1);`
+			style: `width: ${this._isToolboxCompact ? '56px' : '260px'}; min-width: ${this._isToolboxCompact ? '56px' : '260px'}; height: 100%; border-right: 1px solid var(--vscode-sideBar-border, rgba(255, 255, 255, 0.08)); background: var(--vscode-sideBar-background, #181818); display: ${isFlowchartNodeMode || isEmbeddedFieldMode ? 'none' : 'flex'}; flex-direction: column; padding: ${this._isToolboxCompact ? '12px 6px' : '16px 14px'}; gap: 14px; box-sizing: border-box; flex-shrink: 0; overflow-y: auto; overflow-x: hidden; transition: width 0.2s cubic-bezier(0.16, 1, 0.3, 1), min-width 0.2s cubic-bezier(0.16, 1, 0.3, 1);`
 		}));
 
 		// 2. Right Main Scrollable Viewport (Contains Header, Config Card, Canvas & Footer. Scrolls smoothly as a unified document!)
 		const mainViewport = this._mainViewportEl = append(this._container, $('.schema-editor-main-viewport', {
-			style: 'flex: 1; height: 100%; min-width: 0; overflow-y: auto; overflow-x: hidden; padding: 24px 36px; box-sizing: border-box;'
+			style: `flex: 1; height: 100%; min-width: 0; overflow-y: auto; overflow-x: hidden; padding: ${isEmbeddedFieldMode ? '16px 20px' : '24px 36px'}; box-sizing: border-box;`
 		}));
 
 		const targetScrollState = this._getSavedScrollState(scrollKey);
@@ -753,9 +747,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		const headerModuleIconEl = append(titleEl, $('span' + ThemeIcon.asCSSSelector(resolveCustomModuleIcon(activeMod.icon, activeMod.id)), {
 			style: `font-size: 18px; color: ${activeMod.color || '#38bdf8'};`
 		}));
-		append(titleEl, $('span', {}, isFreestyleTicketMode
-			? `Ticket Structure: ${input.moduleName}`
-			: isFlowchartNodeMode ? `Flowchart Node: ${activeMod.name}` : `Edit Module Schema: ${activeMod.name}`));
+		append(titleEl, $('span', {}, isFlowchartNodeMode ? `Flowchart Node: ${activeMod.name}` : `Edit Module Schema: ${activeMod.name}`));
+		if (isEmbeddedFieldMode) {
+			// The host (e.g. a ticket page dialog) shows its own title and actions
+			header.style.display = 'none';
+		}
 
 		// Header Right Actions (Status Pill + Compact Icon Buttons: Preview, Copy Template, Toggle Status, Delete)
 		const headerActions = append(header, $('.schema-editor-header-actions', {
@@ -819,9 +815,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 		// Top Configuration Card (Scope, Type Definition, Color, Status)
 		const configCard = append(wrapper, $('.config-meta-container', {
-			style: `display: ${isFlowchartNodeMode || isFreestyleTicketMode ? 'none' : 'flex'}; flex-direction: column; gap: 8px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); padding: 10px 14px; border-radius: 8px; flex-shrink: 0;`
+			style: `display: ${isFlowchartNodeMode || isEmbeddedFieldMode ? 'none' : 'flex'}; flex-direction: column; gap: 8px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); padding: 10px 14px; border-radius: 8px; flex-shrink: 0;`
 		}));
-		if (isFlowchartNodeMode || isFreestyleTicketMode) {
+		if (isFlowchartNodeMode) {
 			statusBadge.style.display = 'none';
 			previewHeaderBtn.style.display = 'none';
 			toggleStatusBtn.style.display = 'none';
@@ -1236,136 +1232,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			style: `display: flex; flex-direction: column; gap: 6px; ${this._isToolboxCompact ? 'align-items: center;' : ''}`
 		}));
 
-		const baseComponents: Array<{ label: string; icon: ThemeIcon; type: CustomFieldType; defaultName: string; defaultChoices?: string[]; itemFields?: ICustomField[]; buttons?: IActionButton[] }> = [
-			{
-				label: 'Inputs (Runtime Variables)',
-				icon: Codicon.symbolVariable,
-				type: 'parameters',
-				defaultName: 'Inputs'
-			},
-			{
-				label: 'AI Prompt (Model / Agent)',
-				icon: Codicon.sparkle,
-				type: 'prompt',
-				defaultName: 'AI Prompt'
-			},
-			{
-				label: 'Audio / TTS (Text-to-Speech)',
-				icon: Codicon.unmute,
-				type: 'tts',
-				defaultName: 'TTS Audio'
-			},
-			{
-				label: 'MP3 / MP4 Player',
-				icon: Codicon.deviceCameraVideo,
-				type: 'media_player',
-				defaultName: 'MP3 / MP4 Player'
-			},
-			{
-				label: 'Voice Note (Recorder & Transcript)',
-				icon: Codicon.mic,
-				type: 'voice_note',
-				defaultName: 'Voice Note'
-			},
-			{
-				label: 'Browser (Web Application)',
-				icon: Codicon.globe,
-				type: 'browser',
-				defaultName: 'Browser'
-			},
-			{
-				label: 'Git Repository & Branch Binding',
-				icon: Codicon.sourceControl,
-				type: 'git',
-				defaultName: 'Git Repository'
-			},
-			{
-				label: 'Python (Code Automation)',
-				icon: Codicon.code,
-				type: 'python',
-				defaultName: 'Python Script'
-			},
-			{
-				label: 'HTTP Request (API / REST Client)',
-				icon: Codicon.cloudUpload,
-				type: 'http_request',
-				defaultName: 'API Request'
-			},
-			{
-				label: 'Data Table (SQLite / Grid)',
-				icon: Codicon.table,
-				type: 'table',
-				defaultName: 'Data Table'
-			},
-			{
-				label: 'Output',
-				icon: Codicon.output,
-				type: 'output',
-				defaultName: 'Output'
-			},
-			{
-				label: 'Create Tickets (CREATE_TICKETS)',
-				icon: Codicon.newFile,
-				type: 'create_tickets',
-				defaultName: 'created_ticket'
-			},
-			{
-				label: 'Run Tickets (RUN_TICKETS)',
-				icon: Codicon.playCircle,
-				type: 'run_tickets',
-				defaultName: 'run_res'
-			},
-			{
-				label: 'Get Outputs (GET_OUTPUTS)',
-				icon: Codicon.cloudDownload,
-				type: 'get_outputs',
-				defaultName: 'ticket_output'
-			},
-			{
-				label: 'Display (DISPLAY)',
-				icon: Codicon.eye,
-				type: 'display',
-				defaultName: 'Display'
-			},
-			{ label: 'Single-line Input (Text)', icon: Codicon.symbolString, type: 'text', defaultName: 'Text Field' },
-			{ label: 'Textarea (Multiline)', icon: Codicon.listFlat, type: 'textarea', defaultName: 'Description' },
-			{ label: 'Number Input (Numeric)', icon: Codicon.symbolNumber, type: 'number', defaultName: 'Amount' },
-			{ label: 'Dropdown (Select)', icon: Codicon.chevronDown, type: 'select', defaultName: 'Select Option', defaultChoices: ['Option 1', 'Option 2', 'Option 3'] },
-			{ label: 'Checkboxes (Multiselect)', icon: Codicon.checklist, type: 'multiselect', defaultName: 'Tags', defaultChoices: ['Tag A', 'Tag B', 'Tag C'] },
-			{ label: 'Switch (Toggle)', icon: Codicon.circleFilled, type: 'switch', defaultName: 'Enabled Flag' },
-			{ label: 'Single Date Picker', icon: Codicon.calendar, type: 'date', defaultName: 'Due Date' },
-			{ label: 'Single Time Picker', icon: Codicon.watch, type: 'time', defaultName: 'Time' },
-			{ label: 'Single DateTime Picker', icon: Codicon.history, type: 'datetime', defaultName: 'Timestamp' },
-			{ label: 'Date Range (Start ~ End)', icon: Codicon.calendar, type: 'date_range', defaultName: 'Date Range' },
-			{ label: 'Time Range (Start ~ End)', icon: Codicon.watch, type: 'time_range', defaultName: 'Time Range' },
-			{ label: 'DateTime Range (Start ~ End)', icon: Codicon.history, type: 'datetime_range', defaultName: 'Duration Range' },
-			{
-				label: 'Container (Nested Subfields)',
-				icon: Codicon.layers,
-				type: 'dynamic_list',
-				defaultName: 'Container',
-				itemFields: [
-					{ id: `sub_${Date.now()}_1`, label: 'Item Name', type: 'text' },
-					{ id: `sub_${Date.now()}_2`, label: 'Description', type: 'textarea' }
-				]
-			},
-			{
-				label: 'Attachment (Files)',
-				icon: Codicon.files,
-				type: 'attachment',
-				defaultName: 'Attachment'
-			},
-			{
-				label: 'Action Buttons (Horizontal)',
-				icon: Codicon.run,
-				type: 'button_group',
-				defaultName: 'Action Buttons',
-				buttons: [
-					{ id: `btn_${Date.now()}_1`, label: 'Approve', color: '#22c55e', targetStatus: 'Done' },
-					{ id: `btn_${Date.now()}_2`, label: 'Reject', color: '#ef4444', targetStatus: 'Blocked' }
-				]
-			}
-		];
+		const baseComponents = BASE_COMPONENT_PALETTE;
 
 		// Right Main Area: Canvas appended inside scrollable wrapper
 		const rightCanvas = append(wrapper, $('.designer-canvas', {
@@ -1381,151 +1248,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			fromIndex?: number;
 		} | null = null;
 
-		const addFieldFromDef = (bc: typeof baseComponents[0], insertIndex?: number) => {
-			let count = 1;
-			let candidate = `${bc.defaultName} ${count}`;
-			let candidateId = candidate.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
-			while (
-				candidate.toLowerCase() === 'title' ||
-				candidate.toLowerCase() === 'description' ||
-				fields.some(f =>
-					(f.label || '').toLowerCase() === candidate.toLowerCase() ||
-					(f.id || '').toLowerCase() === candidateId
-				)
-			) {
-				count++;
-				candidate = `${bc.defaultName} ${count}`;
-				candidateId = candidate.toLowerCase().replace(/[^a-z0-9_-]/g, '_');
-			}
-
-			const newField: ICustomField = {
-				id: candidateId,
-				label: candidate,
-				type: bc.type
-			};
-			if (bc.type === 'number') {
-				newField.unit = '';
-				newField.precision = 2;
-			}
-			if (bc.defaultChoices) {
-				newField.options = [...bc.defaultChoices];
-			}
-			if (bc.itemFields) {
-				newField.itemFields = JSON.parse(JSON.stringify(bc.itemFields));
-			}
-			if (bc.buttons) {
-				newField.buttons = JSON.parse(JSON.stringify(bc.buttons));
-			}
-			if (bc.type === 'browser') {
-				newField.defaultUrl = '';
-				newField.credentials = [];
-			}
-			if (bc.type === 'git') {
-				newField.gitRemoteUrl = '';
-				newField.gitBranch = 'main';
-			}
-			if (bc.type === 'python') {
-				newField.pythonPath = '';
-				newField.pythonEnvMode = 'existing';
-				newField.pythonCode = '# Write Python automation script here\nimport sys, os, json\n\n# Access upstream context via TICKET_CONTEXT (e.g. TICKET_CONTEXT.get("Field Name"))\n# Define the return value for Output Manifest and downstream steps:\nOUTPUT = {"status": "success", "message": "Hello from Python primitive"}\n';
-				newField.pythonOutput = '';
-			}
-			if (bc.type === 'parameters') {
-				newField.parameters = [
-					{ id: `param_${Date.now()}_1`, name: 'param_1' }
-				];
-			}
-			if (bc.type === 'prompt') {
-				newField.defaultContent = 'Please analyze the ticket details and execute instructions:';
-				newField.targetMode = 'model';
-				const newFieldModel = resolveDefaultModel({ providerId: 'gemini', modelId: 'gemini-2.5-flash' });
-				newField.targetProvider = newFieldModel.providerId;
-				newField.targetModel = newFieldModel.modelId;
-				newField.targetAgentId = '';
-			}
-			if (bc.type === 'tts') {
-				newField.defaultContent = '';
-				newField.ttsDisplayText = '';
-				newField.ttsShowSpeechTextInTicket = false;
-				newField.targetProvider = 'gemini';
-				newField.targetModel = 'gemini-2.5-flash-preview-tts';
-				newField.ttsFormat = 'mp3';
-				newField.ttsVoice = 'Kore';
-				newField.ttsAutoPlay = false;
-			}
-			if (bc.type === 'media_player') {
-				newField.mediaFilePath = '';
-				newField.mediaFileName = '';
-				newField.mediaKind = 'audio';
-				newField.mediaPlaybackRate = 1.0;
-				newField.mediaAutoPlay = false;
-			}
-			if (bc.type === 'voice_note') {
-				newField.voiceClips = [];
-				newField.voiceTranscript = '';
-				newField.voiceAutoTranscribe = true;
-				newField.voicePlaybackRate = 1.0;
-				newField.voiceRunInFlow = false;
-			}
-			if (bc.type === 'http_request') {
-				newField.httpUrl = '';
-				newField.httpMethod = 'GET';
-				newField.httpAuthType = 'none';
-				newField.httpBodyType = 'none';
-				newField.httpBodyContent = '';
-				newField.httpHeaders = [{ key: 'Accept', value: 'application/json', enabled: true }];
-				newField.httpParams = [];
-				newField.httpTimeoutMs = 30000;
-			}
-			if (bc.type === 'table') {
-				const ts = Date.now();
-				newField.tableColumns = [
-					{ id: `col_${ts}_1`, name: 'id', label: 'id', dataType: 'INTEGER', primaryKey: true, nullable: false },
-					{ id: `col_${ts}_2`, name: 'name', label: 'name', dataType: 'TEXT', primaryKey: false, nullable: true },
-					{ id: `col_${ts}_3`, name: 'status', label: 'status', dataType: 'TEXT', primaryKey: false, nullable: true },
-					{ id: `col_${ts}_4`, name: 'created_at', label: 'created_at', dataType: 'DATETIME', primaryKey: false, nullable: true }
-				];
-				newField.tableRows = [];
-				newField.tableDbEngine = 'sqlite';
-				newField.tableDbPath = '';
-				newField.tableDbTableName = candidate.toLowerCase().replace(/[^a-z0-9_]/g, '_');
-				newField.tableAutoSyncDb = false;
-			}
-			if (bc.type === 'output') {
-				const candidatePrimitives = fields.filter(f =>
-					f &&
-					f.type !== 'output' &&
-					f.type !== 'display' &&
-					f.id !== 'title' &&
-					f.id !== 'description' &&
-					f.label?.toLowerCase() !== 'title' &&
-					f.label?.toLowerCase() !== 'description'
-				);
-				newField.outputSpecs = candidatePrimitives.map(cp => ({
-					fieldKey: cp.label || cp.id,
-					label: cp.label || cp.id,
-					enabled: true,
-					defaultFormat: 'table'
-				}));
-			}
-			if (bc.type === 'create_tickets') {
+		const addFieldFromDef = (bc: IComponentPaletteItem, insertIndex?: number) => {
+			const newField = createComponentField(bc, fields, {
+				defaultModel: resolveDefaultModel({ providerId: 'gemini', modelId: 'gemini-2.5-flash' }),
 				// Freestyle tickets can only be created manually in the UI: never default to a reserved-name template
-				newField.wfTicketType = allWorkspaceModules.find(m => !isReservedFreestyleTemplate(m))?.name || '';
-				newField.wfTicketTitle = 'New Ticket {Title}';
-				newField.wfTicketPath = '.';
-				newField.wfTicketParams = {};
-			}
-			if (bc.type === 'run_tickets') {
-				newField.wfTicketTarget = '';
-				newField.wfTicketType = '';
-				newField.wfTicketParams = {};
-			}
-			if (bc.type === 'get_outputs') {
-				newField.wfTicketTarget = '';
-			}
-			if (bc.type === 'display') {
-				newField.wfDisplayValue = '';
-			}
+				defaultTicketType: allWorkspaceModules.find(m => !isReservedFreestyleTemplate(m))?.name || ''
+			});
 			if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= fields.length) {
 				const safeInsertIndex = Math.max(1, insertIndex);
 				fields.splice(safeInsertIndex, 0, newField);
@@ -1551,23 +1279,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		};
 
 		const addCompositeClass = (cc: ICompositeComponent, insertIndex?: number) => {
-			let count = 1;
-			let candidate = `${cc.name} ${count}`;
-			while (
-				candidate.toLowerCase() === 'title' ||
-				fields.some(f => f.label.toLowerCase() === candidate.toLowerCase())
-			) {
-				count++;
-				candidate = `${cc.name} ${count}`;
-			}
-
-			const newField: ICustomField = {
-				id: `${cc.name.toLowerCase().replace(/[^a-z0-9_-]/g, '_')}_${Date.now()}`,
-				label: candidate,
-				type: 'dynamic_list',
-				componentRef: cc.id,
-				itemFields: JSON.parse(JSON.stringify(cc.itemFields || []))
-			};
+			const newField = createCompositeComponentField(cc, fields);
 			if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= fields.length) {
 				const safeInsertIndex = Math.max(1, insertIndex);
 				fields.splice(safeInsertIndex, 0, newField);
@@ -2125,6 +1837,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				if (isFlowchartNodeMode && (fIdx === 0 || field.id === 'title')) {
 					return;
 				}
+				if (isEmbeddedFieldMode && (field.id || '').toLowerCase() !== embeddedFieldId) {
+					return;
+				}
 				const isContainer = field.type === 'dynamic_list';
 				const isAttachment = field.type === 'attachment';
 				const isNumber = field.type === 'number';
@@ -2254,6 +1969,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'font-size: 13px; opacity: 0.55; cursor: grab; user-select: none; padding: 2px 4px;'
 					}));
 					gripper.title = 'Drag to reorder field';
+					if (isEmbeddedFieldMode) {
+						gripper.style.display = 'none';
+					}
 					gripper.onmousedown = () => { fieldCard.setAttribute('draggable', 'true'); };
 					gripper.onmouseup = () => {
 						if (!currentDraggingItem) { fieldCard.setAttribute('draggable', 'false'); }
@@ -2584,6 +2302,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}));
 					append(delBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.trash)));
 					delBtn.title = isFlowchartNodeMode ? 'Remove Component from Node' : 'Remove Component (Requires Confirmation)';
+					if (isEmbeddedFieldMode) {
+						// Only this component is shown: moving, duplicating and removing it is done by the host page
+						for (const structureBtn of [upBtn, downBtn, copyFieldBtn, delBtn]) {
+							structureBtn.style.display = 'none';
+						}
+					}
 					delBtn.onmouseenter = () => {
 						delBtn.style.opacity = '1';
 						delBtn.style.background = 'rgba(239, 68, 68, 0.18)';
@@ -2658,44 +2382,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					let lastCommittedLabel = (field.label || field.id || '').trim();
 					let lastCommittedOutVar = (field.outputVariableName || '').trim();
 					propagateLabelRenameInModule = (oldLbl: string, newLbl: string) => {
-						if (!oldLbl || !newLbl || oldLbl === newLbl || !this._activeModule) {
-							return;
-						}
-						const runtimeField: IRuntimeCustomField = field;
-						if (!Array.isArray(runtimeField.previousLabels)) {
-							runtimeField.previousLabels = [];
-						}
-						if (!runtimeField.previousLabels.includes(oldLbl)) {
-							runtimeField.previousLabels.push(oldLbl);
-						}
-						const escOld = oldLbl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-						const tokenRe = new RegExp(`(@?\\{\\{?)${escOld}(\\}?\\})`, 'g');
-						const sqBracketRe = new RegExp(`(\\[')${escOld}('\\])`, 'g');
-						const dqBracketRe = new RegExp(`(\\[")${escOld}("\\])`, 'g');
-						const replaceRefs = (s?: string): string | undefined => {
-							if (!s || typeof s !== 'string') { return s; }
-							return s
-								.replace(tokenRe, `$1${newLbl}$2`)
-								.replace(sqBracketRe, `$1${newLbl}$2`)
-								.replace(dqBracketRe, `$1${newLbl}$2`);
-						};
-						for (const otherField of this._activeModule.fields || []) {
-							if (otherField === field) { continue; }
-							if (Array.isArray(otherField.outputSpecs)) {
-								for (const spec of otherField.outputSpecs) {
-									if (spec.fieldKey === oldLbl) { spec.fieldKey = newLbl; }
-									if (spec.label === oldLbl) { spec.label = newLbl; }
-								}
-							}
-							if (otherField.defaultContent) { otherField.defaultContent = replaceRefs(otherField.defaultContent); }
-							if (otherField.defaultUserPrompt) { otherField.defaultUserPrompt = replaceRefs(otherField.defaultUserPrompt); }
-							if (Array.isArray(otherField.defaultUserPrompts)) {
-								otherField.defaultUserPrompts = otherField.defaultUserPrompts.map((p: string) => replaceRefs(p) || p);
-							}
-							if (otherField.pythonCode) { otherField.pythonCode = replaceRefs(otherField.pythonCode); }
-							if (otherField.tableSqlQuery) { otherField.tableSqlQuery = replaceRefs(otherField.tableSqlQuery); }
-							if (otherField.defaultUrl) { otherField.defaultUrl = replaceRefs(otherField.defaultUrl); }
-							if (otherField.wfDisplayValue) { otherField.wfDisplayValue = replaceRefs(otherField.wfDisplayValue); }
+						if (this._activeModule) {
+							propagateComponentLabelRename(this._activeModule.fields || [], field, oldLbl, newLbl);
 						}
 					};
 					labelInput.oninput = () => {
@@ -16067,6 +15755,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			const bottomDropZone = append(rightCanvas, $('.canvas-drop-zone', {
 				style: 'flex: 1; min-height: 120px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; border: 2px dashed rgba(255, 255, 255, 0.12); border-radius: 8px; background: rgba(255, 255, 255, 0.015); color: rgba(255, 255, 255, 0.45); font-size: 11.5px; transition: all 0.2s ease;'
 			}));
+			if (isEmbeddedFieldMode) {
+				bottomDropZone.style.display = 'none';
+			}
 			bottomDropZone.ondragover = (e) => {
 				e.preventDefault();
 				e.stopPropagation();
@@ -16615,9 +16306,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		const saveBtn = append(footerRight, $('button.monaco-button', {
 			style: 'padding: 6px 20px; font-size: 12px; border-radius: 6px; cursor: pointer; background: #007acc; color: #ffffff; border: none; font-weight: 600;'
 		}));
-		const saveBtnLabel = isFreestyleTicketMode ? 'Save Ticket Structure' : isFlowchartNodeMode ? 'Save Node Components' : 'Save Module Schema';
+		const saveBtnLabel = isFlowchartNodeMode ? 'Save Node Components' : 'Save Module Schema';
 		saveBtn.innerText = saveBtnLabel;
-		if (isFlowchartNodeMode || isFreestyleTicketMode) {
+		if (isEmbeddedFieldMode) {
+			footer.style.display = 'none';
+		}
+		if (isFlowchartNodeMode) {
 			footerDelBtn.style.display = 'none';
 			previewFooterBtn.style.display = 'none';
 		}
@@ -16643,7 +16337,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				activeMod.statuses = currentStatuses;
 				activeMod.updatedAt = Date.now();
 				await this._persistCurrentModule();
-				saveBtn.innerText = isFreestyleTicketMode ? '✓ Structure Saved' : '✓ Schema Saved';
+				saveBtn.innerText = '✓ Schema Saved';
 				saveBtn.style.background = '#10b981';
 				setTimeout(() => {
 					if (saveBtn.isConnected) {
@@ -16651,9 +16345,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						saveBtn.style.background = '#007acc';
 					}
 				}, 1800);
-				this.notificationService.info(isFreestyleTicketMode
-					? `Saved the structure of ticket "${input.moduleName}"`
-					: `Successfully saved schema for module "${activeMod.name}"`);
+				this.notificationService.info(`Successfully saved schema for module "${activeMod.name}"`);
 			} catch (e) {
 				this.notificationService.error(`Failed to save schema: ${e}`);
 			}

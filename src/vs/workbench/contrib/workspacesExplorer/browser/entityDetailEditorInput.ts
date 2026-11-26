@@ -29,6 +29,11 @@ export class EntityDetailEditorInput extends EditorInput {
 
 	private _resource: URI;
 	private _name: string;
+	/**
+	 * One-shot request to show the component toolbox when the page opens (set for a Freestyle ticket that was just
+	 * created, so components can be added right away). The page clears it once handled.
+	 */
+	public openComponentToolbox?: boolean;
 
 	constructor(
 		public readonly entityUri: URI,

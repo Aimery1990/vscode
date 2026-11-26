@@ -33,15 +33,19 @@ import { ICommandService } from '../../../../platform/commands/common/commands.j
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
-import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
+import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { parseYaml } from '../../customModules/common/templateYaml.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
-import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, getFreestyleDesignerModuleId, isFreestyleTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
+import { CustomModuleSchemaEditor } from '../../customModules/browser/customModuleSchemaEditor.js';
+import { showPrimitiveHelpModal } from '../../customModules/browser/primitiveHelpGuide.js';
+import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, isFreestyleTicketType, isReservedFreestyleTemplate, normalizeFreestyleSchema, readFreestyleSchema, writeFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
+import { BASE_COMPONENT_PALETTE, IComponentPaletteItem, createComponentField, createCompositeComponentField, findPaletteItem } from '../../customModules/common/componentPalette.js';
+import { insertComponent, isDescriptionComponent, isTitleComponent, moveComponent, removeComponent, renameComponent, renameComponentValueKey } from '../../customModules/common/componentSchemaEdits.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
-import { ICustomField, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomField, ICustomModule, ICompositeComponent, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
@@ -93,6 +97,8 @@ interface IEditorParts {
 	descContentBox?: HTMLElement;
 	entityDetailRunTicketBtn?: HTMLButtonElement;
 	entityDetailToggleAttributesBtn?: HTMLButtonElement;
+	/** Header button of a Freestyle ticket that shows / hides the component toolbox. */
+	componentToolboxToggleBtn?: HTMLButtonElement;
 	inspectorCloseBtn?: HTMLButtonElement;
 	inspectorCopyChunkBtns?: HTMLButtonElement[];
 	inspectorOpenTabBtn?: HTMLButtonElement;
@@ -508,6 +514,286 @@ interface ITicketTemplateModule extends Omit<IEntityPreviewModule, 'fields'> {
 	fields?: ITicketField[];
 }
 
+/** A component dragged from the Freestyle component toolbox (`base` / `class`), or a component card being moved. */
+type ComponentDragSource =
+	| { readonly kind: 'base'; readonly type: string }
+	| { readonly kind: 'class'; readonly id: string }
+	| { readonly kind: 'move'; readonly id: string };
+
+/** Drag data type of {@link ComponentDragSource} (other drop targets of the page ignore it). */
+const COMPONENT_DRAG_MIME = 'application/vnd.anyagent.ticket-component';
+
+/** Icon of the component toolbox (also used by "Edit Template Schema"): the tools of a toolbox. */
+const COMPONENT_TOOLBOX_ICON = Codicon.tools;
+
+/** A change of a Freestyle ticket's structure, applied by `_applyFreestyleStructure`. */
+interface IFreestyleStructureEdit {
+	readonly next: ICustomModule;
+	/** A component was renamed: its stored ticket value moves to the new label. */
+	readonly rename?: { readonly oldLabel: string; readonly newLabel: string };
+	/** Component to scroll to and highlight after the page re-rendered. */
+	readonly revealFieldId?: string;
+}
+
+/** Styles of the docked component toolbox, the component card frames and the component settings dialog. */
+const COMPONENT_STRUCTURE_CSS = `
+.entity-detail-root .component-toolbox {
+	flex: 0 0 264px;
+	width: 264px;
+	height: 100%;
+	box-sizing: border-box;
+	flex-direction: column;
+	gap: 10px;
+	padding: 14px 12px;
+	overflow-y: auto;
+	overflow-x: hidden;
+	background: var(--vscode-sideBar-background, #181818);
+	border-left: 1px solid var(--vscode-sideBar-border, rgba(255, 255, 255, 0.08));
+	color: var(--vscode-foreground);
+	user-select: none;
+}
+.entity-detail-root .component-toolbox-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: #2dd4bf;
+}
+.entity-detail-root .component-toolbox-title {
+	flex: 1;
+}
+.entity-detail-root .component-toolbox-hint {
+	font-size: 11px;
+	line-height: 1.4;
+	color: var(--vscode-descriptionForeground);
+}
+.entity-detail-root .component-toolbox-section {
+	margin-top: 4px;
+	font-size: 10.5px;
+	font-weight: 700;
+	text-transform: uppercase;
+	color: #38bdf8;
+}
+.entity-detail-root .component-toolbox-list {
+	display: flex;
+	flex-direction: column;
+	gap: 5px;
+}
+.entity-detail-root .component-toolbox-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 6px 8px;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.04);
+	border: 1px solid rgba(255, 255, 255, 0.08);
+	font-size: 11.5px;
+	cursor: grab;
+	transition: background 0.15s ease, border-color 0.15s ease;
+}
+.entity-detail-root .component-toolbox-item:hover,
+.entity-detail-root .component-toolbox-item:focus-visible {
+	background: rgba(56, 189, 248, 0.12);
+	border-color: rgba(56, 189, 248, 0.3);
+	outline: none;
+}
+.entity-detail-root .component-toolbox-item > .codicon {
+	font-size: 14px;
+	min-width: 16px;
+	text-align: center;
+	opacity: 0.85;
+}
+.entity-detail-root .component-toolbox-item-label {
+	flex: 1;
+	min-width: 0;
+}
+.entity-detail-root .component-toolbox-icon-btn,
+.entity-detail-root .component-toolbox-info-btn,
+.entity-detail-root .freestyle-component-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 22px;
+	height: 22px;
+	padding: 0;
+	border-radius: 4px;
+	border: 1px solid transparent;
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+	opacity: 0.75;
+}
+.entity-detail-root .component-toolbox-info-btn {
+	width: 18px;
+	height: 18px;
+	border-radius: 50%;
+	color: #38bdf8;
+}
+.entity-detail-root .component-toolbox-icon-btn:hover,
+.entity-detail-root .component-toolbox-info-btn:hover,
+.entity-detail-root .freestyle-component-btn:hover:not(:disabled) {
+	opacity: 1;
+	background: rgba(255, 255, 255, 0.1);
+}
+.entity-detail-root .freestyle-component-btn.danger:hover:not(:disabled) {
+	color: #f87171;
+	background: rgba(239, 68, 68, 0.16);
+}
+.entity-detail-root .freestyle-component-btn:disabled {
+	opacity: 0.25;
+	cursor: default;
+}
+.entity-detail-root .component-toolbox-toggle-btn.active {
+	background: rgba(45, 212, 191, 0.3) !important;
+	border-color: #2dd4bf !important;
+}
+.entity-detail-root .freestyle-component-frame {
+	position: relative;
+	border-radius: 10px;
+}
+.entity-detail-root .freestyle-component-toolbar {
+	display: none;
+}
+.entity-detail-root.component-toolbox-open .freestyle-component-frame {
+	padding: 6px;
+	outline: 1px dashed rgba(45, 212, 191, 0.35);
+}
+.entity-detail-root.component-toolbox-open .freestyle-component-toolbar {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 2px 4px 6px 4px;
+	font-size: 11.5px;
+	color: var(--vscode-foreground);
+	user-select: none;
+}
+.entity-detail-root .freestyle-component-grip {
+	cursor: grab;
+	opacity: 0.6;
+}
+.entity-detail-root .freestyle-component-type-icon {
+	color: #2dd4bf;
+}
+.entity-detail-root .freestyle-component-label {
+	font-weight: 600;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.entity-detail-root .freestyle-component-type {
+	font-size: 10px;
+	color: var(--vscode-descriptionForeground);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.entity-detail-root .freestyle-component-spacer {
+	flex: 1;
+}
+.entity-detail-root .freestyle-component-rename-input {
+	flex: 0 1 240px;
+	min-width: 80px;
+	padding: 2px 6px;
+	font-size: 11.5px;
+	border-radius: 4px;
+	border: 1px solid var(--vscode-focusBorder, #007acc);
+	background: var(--vscode-input-background, #1e1e1e);
+	color: var(--vscode-input-foreground, #eeeeee);
+}
+.entity-detail-root .freestyle-component-placeholder {
+	padding: 10px 14px;
+	border-radius: 8px;
+	font-size: 11.5px;
+	font-style: italic;
+	color: var(--vscode-descriptionForeground);
+	background: rgba(255, 255, 255, 0.02);
+	border: 1px solid rgba(255, 255, 255, 0.05);
+}
+.entity-detail-root .freestyle-component-frame.dragging {
+	opacity: 0.45;
+}
+.entity-detail-root .freestyle-component-frame.drop-before {
+	box-shadow: 0 -3px 0 0 #2dd4bf;
+}
+.entity-detail-root .freestyle-component-frame.drop-after,
+.entity-detail-root .freestyle-add-components-card.drop-after {
+	box-shadow: 0 3px 0 0 #2dd4bf;
+}
+.entity-detail-root .component-settings-overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 1000;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: rgba(0, 0, 0, 0.55);
+}
+.entity-detail-root .component-settings-dialog {
+	display: flex;
+	flex-direction: column;
+	width: min(980px, calc(100% - 32px));
+	height: calc(100% - 48px);
+	border-radius: 10px;
+	overflow: hidden;
+	background: var(--vscode-editor-background, #181818);
+	border: 1px solid rgba(45, 212, 191, 0.4);
+	box-shadow: 0 18px 48px rgba(0, 0, 0, 0.6);
+}
+.entity-detail-root .component-settings-header,
+.entity-detail-root .component-settings-footer {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 14px;
+	flex-shrink: 0;
+}
+.entity-detail-root .component-settings-header {
+	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+	font-size: 13px;
+	font-weight: 600;
+	color: #2dd4bf;
+}
+.entity-detail-root .component-settings-title {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.entity-detail-root .component-settings-body {
+	position: relative;
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow: hidden;
+}
+.entity-detail-root .component-settings-footer {
+	justify-content: flex-end;
+	border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.entity-detail-root .component-settings-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 5px 14px;
+	font-size: 12px;
+	border-radius: 5px;
+	cursor: pointer;
+	color: var(--vscode-foreground);
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.14);
+}
+.entity-detail-root .component-settings-btn.primary {
+	color: var(--vscode-button-foreground);
+	background: var(--vscode-button-background);
+	border-color: transparent;
+	font-weight: 600;
+}
+`;
+
 /** A ticket that can be linked to (see `_loadAllAvailableTickets`). */
 interface ILinkableTicket {
 	id: string;
@@ -645,6 +931,20 @@ export class EntityDetailEditor extends EditorPane {
 	private readonly _previewWorkspaceUri?: URI;
 	private _lastExecutionStepResults?: IPrimitiveExecutionStepResult[];
 
+	/** Holds the scrolling page (`_container`) and, beside it, the docked component toolbox of a Freestyle ticket. */
+	private _rootEl: HTMLElement | undefined;
+	private _componentToolboxEl: HTMLElement | undefined;
+	private _isComponentToolboxOpen: boolean = false;
+	/** The Freestyle ticket's own structure as stored on disk (`undefined` for every other page). */
+	private _freestyleSchema: ICustomModule | undefined;
+	/** Component card frames of the rendered Freestyle structure, by component id (lowercase). */
+	private _freestyleComponentFrames = new Map<string, HTMLElement>();
+	/** What is being dragged from the toolbox or between component cards. */
+	private _componentDrag: ComponentDragSource | undefined;
+	private _componentSettingsDialog: { overlay: HTMLElement; pane: CustomModuleSchemaEditor } | undefined;
+	private _freestyleAddComponentsCard: HTMLElement | undefined;
+	private _structureEditChain: Promise<void> = Promise.resolve();
+
 	constructor(
 		group: IEditorGroup,
 		@ITelemetryService telemetryService: ITelemetryService,
@@ -771,7 +1071,11 @@ export class EntityDetailEditor extends EditorPane {
 	}
 
 	protected override createEditor(parent: HTMLElement): void {
+		this._rootEl = h('div.entity-detail-root').root;
+		this._rootEl.style.cssText = 'position: relative; display: flex; flex-direction: row; width: 100%; height: 100%; overflow: hidden;';
 		this._container = h('div.entity-detail-editor').root;
+		this._container.style.flex = '1 1 auto';
+		this._container.style.minWidth = '0';
 		this._container.style.width = '100%';
 		this._container.style.height = '100%';
 		this._container.style.overflowY = 'auto';
@@ -782,7 +1086,10 @@ export class EntityDetailEditor extends EditorPane {
 		this._container.style.padding = '24px 32px';
 		this._container.style.userSelect = 'none';
 		this._container.style.webkitUserSelect = 'none';
-		parent.appendChild(this._container);
+		this._componentToolboxEl = h('div.component-toolbox').root;
+		this._componentToolboxEl.style.display = 'none';
+		this._rootEl.append($('style', undefined, COMPONENT_STRUCTURE_CSS), this._container, this._componentToolboxEl);
+		parent.appendChild(this._rootEl);
 
 		this._bindContainerEvents();
 
@@ -866,6 +1173,16 @@ export class EntityDetailEditor extends EditorPane {
 
 		if (this._entityUri?.toString() !== input.entityUri?.toString()) {
 			this._lastExecutionStepResults = undefined;
+			this._closeComponentSettingsDialog();
+			this._isComponentToolboxOpen = false;
+			if (this._componentToolboxEl) {
+				clearNode(this._componentToolboxEl);
+			}
+		}
+		if (input.openComponentToolbox) {
+			// Handled once: reopening the ticket later starts with the toolbox closed
+			input.openComponentToolbox = false;
+			this._isComponentToolboxOpen = true;
 		}
 		this._entityUri = input.entityUri;
 		this._entityName = input.entityName;
@@ -898,14 +1215,25 @@ export class EntityDetailEditor extends EditorPane {
 		this._lastCustomModule = undefined;
 		this._lastExecutionStepResults = undefined;
 		this._isTicketRunning = false;
+		this._closeComponentSettingsDialog();
+		this._isComponentToolboxOpen = false;
+		this._freestyleSchema = undefined;
+		this._freestyleComponentFrames.clear();
+		this._syncComponentToolbox();
 		super.clearInput();
 	}
 
 	override dispose(): void {
 		this._disposeMediaCleanupFns();
+		this._closeComponentSettingsDialog();
 		if (this._container) {
 			clearNode(this._container);
 			this._container = undefined;
+		}
+		if (this._rootEl) {
+			clearNode(this._rootEl);
+			this._rootEl = undefined;
+			this._componentToolboxEl = undefined;
 		}
 		this._pageParts = {};
 		super.dispose();
@@ -927,29 +1255,623 @@ export class EntityDetailEditor extends EditorPane {
 			this._saveCurrentScrollPosition();
 		}
 		super.setEditorVisible(visible);
-		// A Freestyle ticket's structure may have been edited in the designer while this page was hidden
-		if (visible && this._entityUri && this._container && (this._container.childElementCount === 0 || (!this._isPreviewMode && isFreestyleTicketType(this._entityType)))) {
+		if (visible && this._entityUri && this._container && this._container.childElementCount === 0) {
 			this._resolvePathsAndLoadData();
 		}
 	}
 
-	/**
-	 * Opens the schema designer (beside this ticket) on the Freestyle ticket's own structure. Changes are saved into
-	 * the ticket folder only; this page reloads automatically when the structure file changes.
-	 */
-	private async _openFreestyleStructureDesigner(): Promise<void> {
-		const ticketUri = this._entityUri;
-		if (!ticketUri || this._isPreviewMode) {
+	/** True when this page shows a Freestyle ticket whose structure can be edited in place. */
+	private _isFreestyleStructureEditable(): boolean {
+		return !!this._freestyleSchema && !this._isPreviewMode && !this._isEmbeddedInWorkflow && isFreestyleTicketType(this._entityType);
+	}
+
+	/** Shows / hides the docked component toolbox (Freestyle tickets only). Card structure controls show with it. */
+	private _toggleComponentToolbox(open: boolean = !this._isComponentToolboxOpen): void {
+		if (!this._isFreestyleStructureEditable()) {
 			return;
 		}
-		const ticketLabel = this._lastParsedData?.ticketId || this._entityName || basename(ticketUri);
-		let workspaceUri: URI | undefined;
+		this._isComponentToolboxOpen = open;
+		if (open && this._componentToolboxEl) {
+			// Rebuilt on every open, so new reusable classes show up
+			clearNode(this._componentToolboxEl);
+		}
+		this._syncComponentToolbox();
+	}
+
+	/** Applies the toolbox state to the page (after each render and on toggle). */
+	private _syncComponentToolbox(): void {
+		const visible = this._isComponentToolboxOpen && this._isFreestyleStructureEditable();
+		this._rootEl?.classList.toggle('component-toolbox-open', visible);
+		const toolbox = this._componentToolboxEl;
+		if (toolbox) {
+			toolbox.style.display = visible ? 'flex' : 'none';
+			if (visible && toolbox.childElementCount === 0) {
+				this._renderComponentToolbox();
+			}
+		}
+		const toggleBtn = this._pageParts.componentToolboxToggleBtn;
+		if (toggleBtn) {
+			toggleBtn.classList.toggle('active', visible);
+			toggleBtn.setAttribute('aria-pressed', String(visible));
+			toggleBtn.title = visible ? 'Close Component Toolbox' : 'Component Toolbox: add, remove and arrange this ticket\'s components';
+		}
+	}
+
+	private async _findWorkspaceRootForTicket(ticketUri: URI): Promise<URI | undefined> {
 		try {
-			workspaceUri = await this._workspacesExplorerService.findWorkspaceRootUri(ticketUri);
+			return await this._workspacesExplorerService.findWorkspaceRootUri(ticketUri);
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async _getCompositeComponentsForTicket(ticketUri: URI): Promise<ICompositeComponent[]> {
+		try {
+			return await this._customModulesService.getCompositeComponents(await this._findWorkspaceRootForTicket(ticketUri));
+		} catch {
+			return [];
+		}
+	}
+
+	/** Fills the component toolbox: the designer's Base Primitives and the workspace's Reusable Classes. */
+	private async _renderComponentToolbox(): Promise<void> {
+		const toolbox = this._componentToolboxEl;
+		const ticketUri = this._entityUri;
+		if (!toolbox || !ticketUri) {
+			return;
+		}
+		const closeBtn = $<HTMLButtonElement>('button.component-toolbox-icon-btn', { type: 'button', title: 'Close Component Toolbox', 'aria-label': 'Close Component Toolbox' },
+			$(`span${ThemeIcon.asCSSSelector(Codicon.close)}`)
+		);
+		closeBtn.onclick = () => this._toggleComponentToolbox(false);
+		const classesList = $('div.component-toolbox-list');
+		const classesSection = $('div.component-toolbox-section', { style: 'display: none;' });
+		reset(toolbox,
+			$('div.component-toolbox-header', undefined,
+				$(`span${ThemeIcon.asCSSSelector(COMPONENT_TOOLBOX_ICON)}`),
+				$('span.component-toolbox-title', undefined, 'Components'),
+				closeBtn
+			),
+			$('div.component-toolbox-hint', undefined, 'Click a component to append it, or drag it onto the ticket to insert it at that position.'),
+			$('div.component-toolbox-section', undefined, 'Base Primitives'),
+			$('div.component-toolbox-list', undefined,
+				...BASE_COMPONENT_PALETTE.map(item => this._buildComponentToolboxItem(item.label, item.icon, { kind: 'base', type: item.type }, item))
+			),
+			classesSection,
+			classesList
+		);
+		const classes = await this._getCompositeComponentsForTicket(ticketUri);
+		if (classes.length === 0 || this._componentToolboxEl !== toolbox || this._entityUri !== ticketUri) {
+			return;
+		}
+		classesSection.textContent = `Reusable Classes (${classes.length})`;
+		classesSection.style.display = '';
+		reset(classesList, ...classes.map(cc => this._buildComponentToolboxItem(cc.name, Codicon.symbolClass, { kind: 'class', id: cc.id }, undefined, cc)));
+	}
+
+	private _buildComponentToolboxItem(label: string, icon: ThemeIcon, source: ComponentDragSource, paletteItem?: IComponentPaletteItem, composite?: ICompositeComponent): HTMLElement {
+		const infoTitle = composite ? `View the ${label} class guide` : `View ${label} documentation & RUN_TICKETS guide`;
+		const infoBtn = $<HTMLButtonElement>('button.component-toolbox-info-btn', { type: 'button', title: infoTitle, 'aria-label': infoTitle },
+			$(`span${ThemeIcon.asCSSSelector(Codicon.info)}`)
+		);
+		infoBtn.onclick = e => {
+			e.preventDefault();
+			e.stopPropagation();
+			if (this._rootEl) {
+				showPrimitiveHelpModal(this._rootEl, composite ? 'reusable_class' : (paletteItem?.type ?? 'text'), label, composite?.id);
+			}
+		};
+		const item = $('div.component-toolbox-item', { draggable: 'true', role: 'button', tabindex: '0', title: `${label}: click to append, or drag onto the ticket` },
+			$(`span${ThemeIcon.asCSSSelector(icon)}`),
+			$('span.component-toolbox-item-label', undefined, label),
+			infoBtn
+		);
+		item.onclick = () => this._queueAddFreestyleComponent(source);
+		item.onkeydown = e => {
+			if (e.key === 'Enter' || e.key === ' ') {
+				e.preventDefault();
+				this._queueAddFreestyleComponent(source);
+			}
+		};
+		item.ondragstart = e => {
+			this._componentDrag = source;
+			if (e.dataTransfer) {
+				e.dataTransfer.setData(COMPONENT_DRAG_MIME, JSON.stringify(source));
+				e.dataTransfer.effectAllowed = 'copy';
+			}
+		};
+		item.ondragend = () => {
+			this._componentDrag = undefined;
+			this._clearComponentDropIndicators();
+		};
+		return item;
+	}
+
+	/**
+	 * Runs one structure edit of the Freestyle ticket after the previous ones (edits read the structure when they
+	 * run, so quick successive clicks never overwrite each other).
+	 */
+	private _queueFreestyleStructureEdit(edit: (schema: ICustomModule, ticketUri: URI) => Promise<IFreestyleStructureEdit | undefined> | IFreestyleStructureEdit | undefined): Promise<void> {
+		const run = async () => {
+			const schema = this._freestyleSchema;
+			const ticketUri = this._entityUri;
+			if (!schema || !ticketUri || !this._isFreestyleStructureEditable()) {
+				return;
+			}
+			try {
+				const result = await edit(schema, ticketUri);
+				if (result && this._entityUri?.toString() === ticketUri.toString()) {
+					await this._applyFreestyleStructure(ticketUri, result);
+				}
+			} catch (err) {
+				this._notificationService.error(`Failed to change the ticket structure: ${err}`);
+			}
+		};
+		this._structureEditChain = this._structureEditChain.then(run, run);
+		return this._structureEditChain;
+	}
+
+	/**
+	 * Saves a new structure to `.agents/freestyle_schema.json` and re-renders the page in place (scroll position and
+	 * entered values are kept; a renamed component's value moves to its new label).
+	 */
+	private async _applyFreestyleStructure(ticketUri: URI, edit: IFreestyleStructureEdit): Promise<void> {
+		try {
+			// Let value edits that are still being written (e.g. committed by the click that started this edit) finish first
+			await this._saveChain;
 		} catch { }
-		const input = new CustomModuleSchemaEditorInput(getFreestyleDesignerModuleId(ticketUri), ticketLabel, workspaceUri);
-		input.freestyleTicketUri = ticketUri;
-		await this._editorService.openEditor(input, { pinned: true }, SIDE_GROUP);
+		if (edit.rename && this._lastParsedData) {
+			const values = renameComponentValueKey(this._lastParsedData.customMetadata || {}, edit.rename.oldLabel, edit.rename.newLabel);
+			this._lastParsedData.customMetadata = values;
+			await this._writeCustomValues(values);
+		}
+		this._suppressAutoReloadUntil = Date.now() + 1500;
+		await writeFreestyleSchema(this._fileService, ticketUri, edit.next);
+		await this._resolvePathsAndLoadData();
+		const frame = edit.revealFieldId ? this._freestyleComponentFrames.get(edit.revealFieldId.toLowerCase()) : undefined;
+		if (frame) {
+			setTimeout(() => {
+				if (!frame.isConnected) {
+					return;
+				}
+				frame.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+				frame.classList.add('wf-outline-reveal-flash');
+				setTimeout(() => frame.classList.remove('wf-outline-reveal-flash'), 1200);
+			}, 160);
+		}
+	}
+
+	/** Writes all custom values (the "Self Defined Data" of the ticket file), after pending value saves. */
+	private async _writeCustomValues(values: Record<string, string>): Promise<void> {
+		const targetUri = this._ticketFileUri;
+		if (!targetUri || this._isPreviewMode) {
+			return;
+		}
+		this._saveEpoch++;
+		this._activeSaveCount++;
+		const write = async () => {
+			try {
+				const content = await this._safeReadFile(targetUri);
+				await this._fileService.writeFile(targetUri, VSBuffer.fromString(this._updateTicketMdContent(content, {}, values)));
+			} finally {
+				this._activeSaveCount = Math.max(0, this._activeSaveCount - 1);
+			}
+		};
+		this._saveChain = this._saveChain.then(write, write);
+		await this._saveChain;
+	}
+
+	private async _getDefaultCreateTicketsType(ticketUri: URI): Promise<string> {
+		try {
+			const modules = await this._customModulesService.getCustomModules(await this._findWorkspaceRootForTicket(ticketUri));
+			// Freestyle tickets can only be created manually in the UI: never default to a reserved-name template
+			return modules.find(m => !isReservedFreestyleTemplate(m))?.name || '';
+		} catch {
+			return '';
+		}
+	}
+
+	/** Adds a toolbox component (base primitive or reusable class) at `index` of the structure, or at the end. */
+	private _queueAddFreestyleComponent(source: ComponentDragSource, index?: number): void {
+		this._queueFreestyleStructureEdit(async (schema, ticketUri) => {
+			let field: ICustomField | undefined;
+			if (source.kind === 'base') {
+				const item = findPaletteItem(source.type);
+				if (!item) {
+					return undefined;
+				}
+				const defaultTicketType = item.type === 'create_tickets' ? await this._getDefaultCreateTicketsType(ticketUri) : '';
+				const latest = this._freestyleSchema ?? schema;
+				field = createComponentField(item, latest.fields ?? [], {
+					defaultModel: resolveDefaultModel({ providerId: 'gemini', modelId: 'gemini-2.5-flash' }),
+					defaultTicketType
+				});
+				return { next: insertComponent(latest, field, index), revealFieldId: field.id };
+			}
+			if (source.kind === 'class') {
+				const component = (await this._getCompositeComponentsForTicket(ticketUri)).find(c => c.id === source.id);
+				if (!component) {
+					return undefined;
+				}
+				const latest = this._freestyleSchema ?? schema;
+				field = createCompositeComponentField(component, latest.fields ?? []);
+				return { next: insertComponent(latest, field, index), revealFieldId: field.id };
+			}
+			return undefined;
+		});
+	}
+
+	/** Index of a component in the structure (case-insensitive id), or -1. */
+	private static _indexOfComponent(schema: ICustomModule, fieldId: string): number {
+		const id = fieldId.toLowerCase();
+		return (schema.fields ?? []).findIndex(f => (f.id || '').toLowerCase() === id);
+	}
+
+	/**
+	 * Drops the dragged toolbox component / card before or after the card of `targetFieldId`
+	 * (`undefined`: at the end of the structure).
+	 */
+	private _dropComponent(targetFieldId: string | undefined, after: boolean): void {
+		const drag = this._componentDrag;
+		this._componentDrag = undefined;
+		this._clearComponentDropIndicators();
+		if (!drag) {
+			return;
+		}
+		const targetIndexIn = (schema: ICustomModule): number => {
+			const fields = schema.fields ?? [];
+			if (!targetFieldId) {
+				return fields.length;
+			}
+			const idx = EntityDetailEditor._indexOfComponent(schema, targetFieldId);
+			return idx < 0 ? fields.length : idx + (after ? 1 : 0);
+		};
+		if (drag.kind === 'move') {
+			this._queueFreestyleStructureEdit(schema => {
+				const from = EntityDetailEditor._indexOfComponent(schema, drag.id);
+				const target = targetIndexIn(schema);
+				const to = from < target ? target - 1 : target;
+				return from < 0 || to === from ? undefined : { next: moveComponent(schema, drag.id, to), revealFieldId: drag.id };
+			});
+			return;
+		}
+		const schema = this._freestyleSchema;
+		this._queueAddFreestyleComponent(drag, schema ? targetIndexIn(schema) : undefined);
+	}
+
+	private _clearComponentDropIndicators(): void {
+		for (const frame of this._freestyleComponentFrames.values()) {
+			frame.classList.remove('drop-before', 'drop-after');
+		}
+		this._freestyleAddComponentsCard?.classList.remove('drop-after');
+	}
+
+	/** Moves a component one card up (`-1`) or down (`1`) among the cards of the page (Title / Description stay). */
+	private _moveFreestyleComponentStep(fieldId: string, delta: number): void {
+		this._queueFreestyleStructureEdit(schema => {
+			const fields = schema.fields ?? [];
+			const cards = fields.filter(f => !isTitleComponent(f) && !isDescriptionComponent(f));
+			const pos = cards.findIndex(f => (f.id || '').toLowerCase() === fieldId.toLowerCase());
+			const neighbor = pos < 0 ? undefined : cards[pos + delta];
+			return neighbor ? { next: moveComponent(schema, fieldId, fields.indexOf(neighbor)), revealFieldId: fieldId } : undefined;
+		});
+	}
+
+	private async _removeFreestyleComponent(fieldId: string, label: string): Promise<void> {
+		const { confirmed } = await this._dialogService.confirm({
+			type: 'warning',
+			message: `Remove the component "${label}" from this ticket?`,
+			detail: 'Only this ticket\'s structure changes. A value already entered stays in the ticket file.',
+			primaryButton: 'Remove'
+		});
+		if (confirmed) {
+			await this._queueFreestyleStructureEdit(schema => ({ next: removeComponent(schema, fieldId) }));
+		}
+	}
+
+	private _renameFreestyleComponent(fieldId: string, newLabel: string): void {
+		this._queueFreestyleStructureEdit(schema => {
+			const result = renameComponent(schema, fieldId, newLabel);
+			if (result.error) {
+				this._notificationService.warn(result.error);
+				return undefined;
+			}
+			return result.oldLabel ? { next: result.module, rename: { oldLabel: result.oldLabel, newLabel: newLabel.trim() } } : undefined;
+		});
+	}
+
+	/** Replaces the label of a card's structure toolbar with an input; Enter / blur renames, Escape cancels. */
+	private _startFreestyleComponentRename(labelEl: HTMLElement, fieldId: string, currentLabel: string): void {
+		const input = $<HTMLInputElement>('input.freestyle-component-rename-input', { type: 'text', 'aria-label': 'Component name' });
+		input.value = currentLabel;
+		labelEl.replaceWith(input);
+		input.focus();
+		input.select();
+		let finished = false;
+		const finish = (commit: boolean) => {
+			if (finished) {
+				return;
+			}
+			finished = true;
+			const value = input.value.trim();
+			input.replaceWith(labelEl);
+			if (commit && value && value !== currentLabel) {
+				this._renameFreestyleComponent(fieldId, value);
+			}
+		};
+		input.onkeydown = e => {
+			e.stopPropagation();
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				finish(true);
+			} else if (e.key === 'Escape') {
+				e.preventDefault();
+				finish(false);
+			}
+		};
+		input.onblur = () => finish(true);
+		input.onclick = e => e.stopPropagation();
+	}
+
+	/**
+	 * Opens the template designer's configuration of one component in a dialog on this page (the designer runs in
+	 * its embedded single-component mode). Save applies the edited structure; Cancel / Escape discards it.
+	 */
+	private async _openComponentSettings(fieldId: string): Promise<void> {
+		const schema = this._freestyleSchema;
+		const ticketUri = this._entityUri;
+		const root = this._rootEl;
+		const field = schema?.fields?.find(f => (f.id || '').toLowerCase() === fieldId.toLowerCase());
+		if (!schema || !ticketUri || !root || !field || !this._isFreestyleStructureEditable()) {
+			return;
+		}
+		this._closeComponentSettingsDialog();
+		const workspaceUri = await this._findWorkspaceRootForTicket(ticketUri);
+		if (this._entityUri?.toString() !== ticketUri.toString() || this._rootEl !== root) {
+			return;
+		}
+		const label = field.label || field.id;
+		const input = new CustomModuleSchemaEditorInput(`freestyle-component::${ticketUri.toString()}::${field.id}`, label, workspaceUri);
+		input.embeddedFieldId = field.id;
+		input.draftModule = JSON.parse(JSON.stringify(schema));
+
+		const closeBtn = $<HTMLButtonElement>('button.component-toolbox-icon-btn', { type: 'button', title: 'Cancel (Escape)', 'aria-label': 'Cancel' },
+			$(`span${ThemeIcon.asCSSSelector(Codicon.close)}`)
+		);
+		const cancelBtn = $<HTMLButtonElement>('button.component-settings-btn', { type: 'button', title: 'Discard the changes (Escape)' }, 'Cancel');
+		const saveBtn = $<HTMLButtonElement>('button.component-settings-btn.primary', { type: 'button', title: 'Save the component configuration to this ticket' },
+			$(`span${ThemeIcon.asCSSSelector(Codicon.check)}`),
+			'Save'
+		);
+		const body = $('div.component-settings-body');
+		const overlay = $('div.component-settings-overlay', undefined,
+			$('div.component-settings-dialog', { role: 'dialog', 'aria-modal': 'true', 'aria-label': `Configure ${label}` },
+				$('div.component-settings-header', undefined,
+					$(`span${ThemeIcon.asCSSSelector(Codicon.settingsGear)}`),
+					$('span.component-settings-title', undefined, `Configure Component: ${label}`),
+					closeBtn
+				),
+				body,
+				$('div.component-settings-footer', undefined, cancelBtn, saveBtn)
+			)
+		);
+		root.append(overlay);
+		const pane = this._instantiationService.createInstance(CustomModuleSchemaEditor, this.group);
+		this._componentSettingsDialog = { overlay, pane };
+
+		const close = () => {
+			if (this._componentSettingsDialog?.overlay === overlay) {
+				this._closeComponentSettingsDialog();
+			}
+		};
+		closeBtn.onclick = close;
+		cancelBtn.onclick = close;
+		overlay.onmousedown = e => {
+			if (e.target === overlay) {
+				close();
+			}
+		};
+		overlay.onkeydown = e => {
+			if (e.key === 'Escape') {
+				e.preventDefault();
+				e.stopPropagation();
+				close();
+			}
+		};
+		saveBtn.onclick = () => {
+			const edited = input.draftModule ? normalizeFreestyleSchema(input.draftModule) : undefined;
+			if (!edited) {
+				close();
+				return;
+			}
+			const editedField = edited.fields?.find(f => (f.id || '').toLowerCase() === fieldId.toLowerCase());
+			const newLabel = (editedField?.label || '').trim();
+			let rename: { oldLabel: string; newLabel: string } | undefined;
+			if (editedField && newLabel && newLabel !== label) {
+				const clash = isTitleComponent({ id: '', label: newLabel }) || isDescriptionComponent({ id: '', label: newLabel })
+					|| (edited.fields ?? []).some(f => f !== editedField && ((f.label || '').toLowerCase() === newLabel.toLowerCase() || (f.id || '').toLowerCase() === newLabel.toLowerCase()));
+				if (clash) {
+					// Ticket values are stored by component name: keep the dialog open so the name can be changed
+					this._notificationService.warn(`Another component is already named "${newLabel}" (or the name is reserved). Please choose a different name.`);
+					return;
+				}
+				rename = { oldLabel: label, newLabel };
+			}
+			close();
+			this._queueFreestyleStructureEdit(() => ({ next: edited, rename, revealFieldId: fieldId }));
+		};
+
+		try {
+			pane.create(body);
+			pane.setVisible(true);
+			await pane.setInput(input, undefined, {}, CancellationToken.None);
+		} catch (err) {
+			close();
+			this._notificationService.error(`Failed to open the component configuration: ${err}`);
+		}
+	}
+
+	private _closeComponentSettingsDialog(): void {
+		const dialog = this._componentSettingsDialog;
+		if (!dialog) {
+			return;
+		}
+		this._componentSettingsDialog = undefined;
+		try {
+			dialog.pane.clearInput();
+		} catch { }
+		dialog.pane.dispose();
+		dialog.overlay.remove();
+	}
+
+	/**
+	 * Wraps the card(s) of one Freestyle component in a frame with its structure toolbar (shown while the component
+	 * toolbox is open): drag handle, rename, configure, move up / down and remove. The frame is also a drop target
+	 * for toolbox components and moved cards.
+	 */
+	private _buildFreestyleComponentFrame(field: ICustomField, cardNodes: Node[], options: { movable: boolean; canMoveUp: boolean; canMoveDown: boolean; renamable: boolean; configurable: boolean }): HTMLElement {
+		const label = field.label || field.id;
+		const paletteItem = findPaletteItem(field.type);
+		const typeLabel = field.componentRef ? 'Reusable Class' : (paletteItem?.label ?? field.type);
+		const labelEl = $('span.freestyle-component-label', { title: label }, label);
+		const iconBtn = (icon: ThemeIcon, title: string, onClick: () => void, extraClass: string = '', disabled: boolean = false): HTMLButtonElement => {
+			const btn = $<HTMLButtonElement>(`button.freestyle-component-btn${extraClass}`, { type: 'button', title, 'aria-label': title },
+				$(`span${ThemeIcon.asCSSSelector(icon)}`)
+			);
+			btn.disabled = disabled;
+			btn.onclick = e => {
+				e.preventDefault();
+				e.stopPropagation();
+				onClick();
+			};
+			return btn;
+		};
+		const grip = options.movable ? $('span.freestyle-component-grip', { title: 'Drag to reorder' }, $(`span${ThemeIcon.asCSSSelector(Codicon.gripper)}`)) : undefined;
+		const toolbar = $('div.freestyle-component-toolbar', undefined,
+			...(grip ? [grip] : []),
+			$(`span.freestyle-component-type-icon${ThemeIcon.asCSSSelector(field.componentRef ? Codicon.symbolClass : (paletteItem?.icon ?? Codicon.symbolField))}`, { title: typeLabel }),
+			labelEl,
+			$('span.freestyle-component-type', undefined, typeLabel),
+			$('span.freestyle-component-spacer'),
+			...(options.renamable ? [iconBtn(Codicon.edit, 'Rename Component', () => this._startFreestyleComponentRename(labelEl, field.id, label))] : []),
+			...(options.configurable ? [iconBtn(Codicon.settingsGear, 'Configure Component…', () => this._openComponentSettings(field.id))] : []),
+			...(options.movable ? [
+				iconBtn(Codicon.arrowUp, 'Move Up', () => this._moveFreestyleComponentStep(field.id, -1), '', !options.canMoveUp),
+				iconBtn(Codicon.arrowDown, 'Move Down', () => this._moveFreestyleComponentStep(field.id, 1), '', !options.canMoveDown)
+			] : []),
+			iconBtn(Codicon.trash, 'Remove Component', () => this._removeFreestyleComponent(field.id, label), '.danger')
+		);
+		const content = cardNodes.length > 0
+			? cardNodes
+			: [$('div.freestyle-component-placeholder', undefined, field.type === 'git' ? 'Git repository binding: shown in the Attributes panel.' : 'This component has no card on the ticket page.')];
+		const frame = $('div.freestyle-component-frame', { 'data-component-id': field.id }, toolbar, ...content);
+		this._freestyleComponentFrames.set(field.id.toLowerCase(), frame);
+		if (!options.movable || !grip) {
+			return frame;
+		}
+
+		// Reorder by dragging the handle; the frame also accepts toolbox components and other cards
+		grip.onmousedown = () => frame.setAttribute('draggable', 'true');
+		grip.onmouseup = () => frame.removeAttribute('draggable');
+		frame.ondragstart = e => {
+			if (e.target !== frame) {
+				return;
+			}
+			this._componentDrag = { kind: 'move', id: field.id };
+			if (e.dataTransfer) {
+				e.dataTransfer.setData(COMPONENT_DRAG_MIME, JSON.stringify(this._componentDrag));
+				e.dataTransfer.effectAllowed = 'move';
+			}
+			frame.classList.add('dragging');
+		};
+		frame.ondragend = () => {
+			frame.removeAttribute('draggable');
+			frame.classList.remove('dragging');
+			this._componentDrag = undefined;
+			this._clearComponentDropIndicators();
+		};
+		frame.ondragover = e => {
+			if (!this._componentDrag) {
+				return;
+			}
+			e.preventDefault();
+			e.stopPropagation();
+			if (e.dataTransfer) {
+				e.dataTransfer.dropEffect = this._componentDrag.kind === 'move' ? 'move' : 'copy';
+			}
+			const rect = frame.getBoundingClientRect();
+			const after = e.clientY > rect.top + rect.height / 2;
+			this._clearComponentDropIndicators();
+			frame.classList.add(after ? 'drop-after' : 'drop-before');
+		};
+		frame.ondragleave = e => {
+			if (!isHTMLElement(e.relatedTarget) || !frame.contains(e.relatedTarget)) {
+				frame.classList.remove('drop-before', 'drop-after');
+			}
+		};
+		frame.ondrop = e => {
+			if (!this._componentDrag) {
+				return;
+			}
+			e.preventDefault();
+			e.stopPropagation();
+			const rect = frame.getBoundingClientRect();
+			this._dropComponent(field.id, e.clientY > rect.top + rect.height / 2);
+		};
+		return frame;
+	}
+
+	/** Header icon button of a Freestyle ticket that shows / hides the component toolbox. */
+	private _buildComponentToolboxToggleButton(): HTMLButtonElement {
+		const visible = this._isComponentToolboxOpen;
+		const btn = $<HTMLButtonElement>(`button.btn-secondary.component-toolbox-toggle-btn${visible ? '.active' : ''}`, {
+			type: 'button',
+			style: 'display: inline-flex; align-items: center; justify-content: center; padding: 5px 9px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(45, 212, 191, 0.14); border: 1px solid rgba(45, 212, 191, 0.4); color: #2dd4bf;',
+			title: visible ? 'Close Component Toolbox' : 'Component Toolbox: add, remove and arrange this ticket\'s components',
+			'aria-label': 'Component Toolbox',
+			'aria-pressed': String(visible)
+		},
+			$(`span${ThemeIcon.asCSSSelector(COMPONENT_TOOLBOX_ICON)}`, { style: 'font-size: 13px;' })
+		);
+		btn.onclick = e => {
+			e.preventDefault();
+			e.stopPropagation();
+			this._toggleComponentToolbox();
+		};
+		return btn;
+	}
+
+	/** The dashed "Add Components" card below the components: opens the toolbox; drop target for the end. */
+	private _buildFreestyleAddComponentsCard(): HTMLButtonElement {
+		const card = $<HTMLButtonElement>('button.freestyle-add-components-card', { type: 'button', title: 'Open the component toolbox to add components (or drop a component here to append it)', style: 'display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 14px; border-radius: 8px; border: 1px dashed rgba(45, 212, 191, 0.45); background: rgba(45, 212, 191, 0.05); color: #2dd4bf; cursor: pointer; font-size: 0.88em; font-weight: 600;' },
+			$('span.codicon.codicon-add', { style: 'font-size: 14px;' }),
+			$('span', undefined, 'Add Components')
+		);
+		card.onclick = e => {
+			e.preventDefault();
+			e.stopPropagation();
+			this._toggleComponentToolbox(true);
+		};
+		card.ondragover = e => {
+			if (!this._componentDrag) {
+				return;
+			}
+			e.preventDefault();
+			e.stopPropagation();
+			this._clearComponentDropIndicators();
+			card.classList.add('drop-after');
+		};
+		card.ondragleave = () => card.classList.remove('drop-after');
+		card.ondrop = e => {
+			if (!this._componentDrag) {
+				return;
+			}
+			e.preventDefault();
+			e.stopPropagation();
+			this._dropComponent(undefined, true);
+		};
+		this._freestyleAddComponentsCard = card;
+		return card;
 	}
 
 	private async _readCustomModule(workspaceUri: URI, typeId: string): Promise<ITicketTemplateModule | null> {
@@ -1299,10 +2221,12 @@ export class EntityDetailEditor extends EditorPane {
 		this._userHasScrolledSinceRender = false;
 		this._isRestoringScroll = true;
 
+		this._freestyleSchema = undefined;
 		const { result: content, parts } = collectParts(() => this._buildContent(this._lastParsedData!, workLogContent, [], mod, agents, allTickets));
 		this._disposeMediaCleanupFns();
 		this._pageParts = parts;
 		reset(this._container, ...content);
+		this._syncComponentToolbox();
 		this._applySavedScrollPosition(scrollKey);
 		this._hydratePythonPrimitiveCards();
 		await this._hydratePromptPrimitiveCards();
@@ -1439,10 +2363,13 @@ export class EntityDetailEditor extends EditorPane {
 
 			const attachments = await this._getAttachments(this._entityUri);
 			// A Freestyle ticket has no template: its own structure is stored in its folder
-			const customModule = isFreestyleTicketType(this._entityType)
+			const freestyleSchema = isFreestyleTicketType(this._entityType)
 				? (await readFreestyleSchema(this._fileService, this._entityUri) ?? createDefaultFreestyleSchema())
-				: await this._readCustomModule(this._entityUri, this._entityType);
+				: undefined;
+			const customModule = freestyleSchema ?? await this._readCustomModule(this._entityUri, this._entityType);
 			this._lastCustomModule = customModule;
+			// Kept apart from `customModule` (which rendering may adjust): structure edits start from what is stored
+			this._freestyleSchema = freestyleSchema ? JSON.parse(JSON.stringify(freestyleSchema)) : undefined;
 
 			// If customModule exists, migrate/prune legacy ID keys (e.g. "Output 1" -> "Output") and empty deleted fields from customMetadata
 			if (customModule && Array.isArray(customModule.fields) && parsed.customMetadata) {
@@ -1529,6 +2456,7 @@ export class EntityDetailEditor extends EditorPane {
 			this._disposeMediaCleanupFns();
 			this._pageParts = parts;
 			reset(this._container, ...content);
+			this._syncComponentToolbox();
 			this._applySavedScrollPosition(scrollKey);
 			this._hydratePythonPrimitiveCards();
 			await this._hydratePromptPrimitiveCards();
@@ -1885,18 +2813,11 @@ export class EntityDetailEditor extends EditorPane {
 				e.stopPropagation();
 				const ticketType = typeBadge.getAttribute('data-ticket-type');
 				if (isFreestyleTicketType(ticketType || undefined)) {
-					await this._openFreestyleStructureDesigner();
+					// A Freestyle ticket has no template to preview: the badge shows / hides the component toolbox
+					this._toggleComponentToolbox();
 				} else if (ticketType) {
 					await this._customModulesService.openModuleTicketPreview(ticketType, this._entityUri);
 				}
-				return;
-			}
-
-			// 0.065 Freestyle ticket: edit this ticket's own components in the schema designer
-			if (target.closest('.freestyle-edit-structure-trigger')) {
-				e.preventDefault();
-				e.stopPropagation();
-				await this._openFreestyleStructureDesigner();
 				return;
 			}
 
@@ -18439,6 +19360,10 @@ ${interpolatedPrompt}`;
 		const typeUpper = (data.ticketType || 'task').toUpperCase();
 		// A workflow node shown like a ticket (from the Workflow Outline): read-only, no template / ticket actions
 		const wfNode = this._isPreviewMode ? (customModule?.__wfNode as { nodeLabel: string; workflowName: string } | undefined) : undefined;
+		// A Freestyle ticket edits its own structure on this page: its component cards get structure controls
+		const freestyleSchema = (!this._isPreviewMode && !wfNode && !this._isEmbeddedInWorkflow && isFreestyleTicketType(data.ticketType)) ? this._freestyleSchema : undefined;
+		this._freestyleComponentFrames.clear();
+		this._freestyleAddComponentsCard = undefined;
 
 		// 1. Status Colors
 		let status = data.status || 'Todo';
@@ -18830,8 +19755,11 @@ ${interpolatedPrompt}`;
 			}
 		}
 
+		/** Where the cards of each rendered component start in `customFieldsContent` (to frame them for Freestyle). */
+		const componentCardStarts: Array<{ fieldId: string; start: number }> = [];
 		if (fieldsToRender.length > 0) {
 			for (const fieldItem of fieldsToRender) {
+				componentCardStarts.push({ fieldId: fieldItem.id || fieldItem.key, start: customFieldsContent.length });
 				const k = fieldItem.label;
 				const rawKey = fieldItem.key;
 				const v = fieldItem.val;
@@ -21298,12 +22226,40 @@ ${interpolatedPrompt}`;
 			}
 		}
 
+		if (freestyleSchema) {
+			// Frame each component's card(s) with its structure toolbar, in structure order (Title / Description excluded)
+			const schemaFields = freestyleSchema.fields ?? [];
+			const cardFields = schemaFields.filter(f => !isTitleComponent(f) && !isDescriptionComponent(f));
+			const framed = componentCardStarts.flatMap((entry, i) => {
+				const end = i + 1 < componentCardStarts.length ? componentCardStarts[i + 1].start : customFieldsContent.length;
+				const nodes = customFieldsContent.slice(entry.start, end);
+				const field = schemaFields.find(f => (f.id || '').toLowerCase() === entry.fieldId.toLowerCase());
+				if (!field) {
+					return nodes;
+				}
+				const pos = cardFields.indexOf(field);
+				return [this._buildFreestyleComponentFrame(field, nodes, {
+					movable: true,
+					canMoveUp: pos > 0,
+					canMoveDown: pos >= 0 && pos < cardFields.length - 1,
+					renamable: true,
+					configurable: true
+				})];
+			});
+			customFieldsContent.splice(0, customFieldsContent.length, ...framed);
+		}
+
 		// 7. Instructions Card Section
 		const ticketPromptDisplay = (data.ticketPrompt && data.ticketPrompt !== 'None') ? data.ticketPrompt : '';
 		const typePromptDisplay = (data.typePrompt && data.typePrompt !== 'None') ? data.typePrompt : '';
 
 		const isAgent = (data.ticketType || '').toLowerCase() === 'agent';
-		const isFreestyleTicket = !this._isPreviewMode && !wfNode && isFreestyleTicketType(data.ticketType);
+		const isFreestyleTicket = !!freestyleSchema;
+		const freestyleDescriptionField = freestyleSchema?.fields?.find(f => isDescriptionComponent(f));
+		/** The Description card of a Freestyle ticket gets a structure toolbar too (it can be removed). */
+		const frameDescriptionCard = (card: HTMLElement): HTMLElement => freestyleDescriptionField
+			? this._buildFreestyleComponentFrame(freestyleDescriptionField, [card], { movable: false, canMoveUp: false, canMoveDown: false, renamable: false, configurable: false })
+			: card;
 		const matchingAgent = agents.find(a =>
 			(this._entityUri && a.folderPath && (a.folderPath === this._entityUri.fsPath || a.folderPath.toLowerCase() === this._entityUri.fsPath.toLowerCase())) ||
 			(a.name.toLowerCase() === (data.title || '').toLowerCase()) ||
@@ -21390,7 +22346,7 @@ ${interpolatedPrompt}`;
 						]),
 						' ',
 						...(wfNode ? [] : [
-							$('span.ticket-type-badge-trigger', { 'data-ticket-type': textOf(data.ticketType || ''), style: `font-size: 8.5px; padding: 2px 7px; border-radius: 4px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; cursor: pointer; transition: all 0.15s ease;`, title: `Click to view '${typeUpper}' template preview and edit schema` },
+							$('span.ticket-type-badge-trigger', { 'data-ticket-type': textOf(data.ticketType || ''), style: `font-size: 8.5px; padding: 2px 7px; border-radius: 4px; background: ${colorSetting.bg}; color: ${colorSetting.text}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; cursor: pointer; transition: all 0.15s ease;`, title: isFreestyleTicket ? 'Freestyle ticket (no template): click to show or hide the component toolbox' : `Click to view '${typeUpper}' template preview and edit schema` },
 								$('span', { class: ThemeIcon.asClassName(resolveCustomModuleIcon(customModule?.icon, data.ticketType)), style: `font-size: 9.5px; color: ${colorSetting.text};` }),
 								$('span', undefined, typeUpper)
 							)
@@ -21421,9 +22377,7 @@ ${interpolatedPrompt}`;
 					] : []),
 					' ',
 					...(isFreestyleTicket ? [
-						$<HTMLButtonElement>('button.btn-secondary.freestyle-edit-structure-trigger', { type: 'button', style: 'display: inline-flex; align-items: center; justify-content: center; padding: 5px 9px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(45, 212, 191, 0.14); border: 1px solid rgba(45, 212, 191, 0.4); color: #2dd4bf;', title: 'Edit Ticket Structure (add, remove and reorder this ticket\'s components)', 'aria-label': 'Edit Ticket Structure' },
-							$('span.codicon.codicon-symbol-structure', { style: 'font-size: 13px;' })
-						),
+						part('componentToolboxToggleBtn', this._buildComponentToolboxToggleButton()),
 						' '
 					] : []),
 					part('entityDetailRunTicketBtn', withParts(() => $<HTMLButtonElement>('button#entity-detail-run-ticket-btn.btn-primary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(34, 197, 94, 0.2); border: 1px solid rgba(34, 197, 94, 0.45); color: #4ade80; font-weight: 600; transition: all 0.15s ease;', title: 'Run Ticket (Execute current ticket with default parameters)' },
@@ -21469,7 +22423,7 @@ ${interpolatedPrompt}`;
 				),
 				$('div.main-content', undefined,
 					...((isAgent || !customModule || !Array.isArray(customModule.fields) || customModule.fields.some(f => (f.id || '').toLowerCase() === 'description' || (f.label || '').toLowerCase() === 'description')) ? [
-						part('sectionCards', withParts(() => $('div.section-card', undefined,
+						frameDescriptionCard(part('sectionCards', withParts(() => $('div.section-card', undefined,
 							part('sectionTitle', withParts(() => $('div.section-title', undefined,
 								$('div', { style: 'display: flex; align-items: center; gap: 8px;' },
 									$('span', undefined, isAgent ? 'Role & Purpose' : 'Description')
@@ -21489,7 +22443,7 @@ ${interpolatedPrompt}`;
 									)
 								])
 							))
-						)))
+						))))
 					] : []),
 					' ',
 					...(isAgent ? [
@@ -21608,12 +22562,7 @@ ${interpolatedPrompt}`;
 						)
 					))),
 					...customFieldsContent,
-					...(isFreestyleTicket ? [
-						$<HTMLButtonElement>('button.freestyle-edit-structure-trigger', { type: 'button', title: 'Open the component palette to add, remove and reorder this ticket\'s components', style: 'display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 14px; border-radius: 8px; border: 1px dashed rgba(45, 212, 191, 0.45); background: rgba(45, 212, 191, 0.05); color: #2dd4bf; cursor: pointer; font-size: 0.88em; font-weight: 600;' },
-							$('span.codicon.codicon-add', { style: 'font-size: 14px;' }),
-							$('span', undefined, 'Add Components')
-						)
-					] : []),
+					...(isFreestyleTicket ? [this._buildFreestyleAddComponentsCard()] : []),
 					part('sectionCards', withParts(() => $('div.section-card', { style: `max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;${this._isPreviewMode ? ' display: none;' : ''}` },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('span', undefined, isAgent ? 'Task History & Work Logs' : 'Work Logs'),

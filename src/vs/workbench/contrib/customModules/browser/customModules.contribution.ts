@@ -25,6 +25,7 @@ import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../
 import { CustomModuleSchemaEditor } from './customModuleSchemaEditor.js';
 import { CustomModuleSchemaEditorInput, customModulesViewIcon } from './customModuleSchemaEditorInput.js';
 import './tools/customModuleTools.contribution.js';
+import { isLegacyFreestyleDesignerModuleId } from '../common/freestyleTicket.js';
 
 // 1. Register Singleton Service
 registerSingleton(ICustomModulesService, CustomModulesService, InstantiationType.Delayed);
@@ -176,7 +177,8 @@ Registry.as<IEditorPaneRegistry>(EditorExtensions.EditorPane).registerEditorPane
  */
 class CustomModuleSchemaEditorInputSerializer implements IEditorSerializer {
 	canSerialize(input: EditorInput): boolean {
-		return input instanceof CustomModuleSchemaEditorInput && !!input.moduleId;
+		// An embedded component editor lives inside its host page and is never restored as a tab
+		return input instanceof CustomModuleSchemaEditorInput && !!input.moduleId && !input.embeddedFieldId;
 	}
 
 	serialize(input: EditorInput): string | undefined {
@@ -187,23 +189,20 @@ class CustomModuleSchemaEditorInputSerializer implements IEditorSerializer {
 			moduleId: input.moduleId,
 			moduleName: input.moduleName,
 			workspaceUri: input.workspaceUri?.toString(),
-			nodeId: input.nodeId,
-			freestyleTicketUri: input.freestyleTicketUri?.toString()
+			nodeId: input.nodeId
 		});
 	}
 
 	deserialize(_instantiationService: IInstantiationService, raw: string): CustomModuleSchemaEditorInput | undefined {
 		try {
 			const data = JSON.parse(raw);
-			if (typeof data?.moduleId !== 'string' || !data.moduleId) {
+			// Freestyle ticket structures are no longer edited in a designer tab (they are edited on the ticket page)
+			if (typeof data?.moduleId !== 'string' || !data.moduleId || isLegacyFreestyleDesignerModuleId(data.moduleId)) {
 				return undefined;
 			}
 			const input = new CustomModuleSchemaEditorInput(data.moduleId, data.moduleName || data.moduleId, typeof data.workspaceUri === 'string' ? URI.parse(data.workspaceUri) : undefined);
 			if (typeof data.nodeId === 'string') {
 				input.nodeId = data.nodeId;
-			}
-			if (typeof data.freestyleTicketUri === 'string' && data.freestyleTicketUri) {
-				input.freestyleTicketUri = URI.parse(data.freestyleTicketUri);
 			}
 			return input;
 		} catch {
