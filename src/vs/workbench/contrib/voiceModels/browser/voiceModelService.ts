@@ -11,7 +11,9 @@ import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { IMainProcessService } from '../../../../platform/ipc/common/mainProcessService.js';
 import { RequestChannelClient } from '../../../../platform/request/common/requestIpc.js';
 import { ALIYUN_PROVIDER_ID, getDefaultBaseUrl, IAgentCredentialService } from '../../agentsManager/common/agentsManager.js';
-import { IVoiceModel, IVoiceModelService, ITranscribeResult } from '../common/voiceModel.js';
+import { getVoiceProviderOption, IResolvedTimedModel, ITimedTranscribeOptions, ITimedTranscribeResult, IVoiceModel, IVoiceModelService, ITranscribeResult, VOICE_PROVIDER_CATALOG, VoiceModelProvider } from '../common/voiceModel.js';
+import { buildTimedTranscriptionPrompt, getTimedTranscriptionPlan, ISubtitleSegment, normalizeSegments, parseSubtitleJson } from '../common/subtitles.js';
+import { CancellationError } from '../../../../base/common/errors.js';
 
 /** Subset of the Gemini `generateContent` response that transcription reads. */
 interface IGeminiGenerateContentResponse {
@@ -20,6 +22,19 @@ interface IGeminiGenerateContentResponse {
 			parts?: Array<{ text?: string }>;
 		};
 	}>;
+}
+
+/** Upload file name matching the blob type (OpenAI infers the format from the extension). */
+function audioFileNameFor(blob: Blob): string {
+	const type = (blob.type || '').toLowerCase();
+	const ext = type.includes('wav') ? 'wav' : type.includes('mpeg') || type.includes('mp3') ? 'mp3' : type.includes('mp4') || type.includes('m4a') || type.includes('aac') ? 'm4a' : type.includes('ogg') ? 'ogg' : 'webm';
+	return `audio.${ext}`;
+}
+
+/** Subset of an OpenAI-compatible `verbose_json` / `diarized_json` transcription response. */
+interface IOpenAITimedTranscriptionResponse {
+	text?: string;
+	segments?: Array<{ start?: number; end?: number; text?: string }>;
 }
 
 const STORAGE_KEY_MODELS = 'workbench.voiceModels.models';
@@ -563,7 +578,7 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 		const endpoint = (model.customUrl || 'https://api.openai.com/v1').replace(/\/$/, '') + '/audio/transcriptions';
 
 		const formData = new FormData();
-		formData.append('file', audioBlob, 'audio.webm');
+		formData.append('file', audioBlob, audioFileNameFor(audioBlob));
 		formData.append('model', model.modelId || 'whisper-1');
 		if (model.language && model.language !== 'auto') {
 			formData.append('language', model.language);
@@ -601,7 +616,7 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 	}
 
 	/** Qwen ASR via Model Studio's OpenAI-compatible chat completions (audio passed as a data URI). */
-	private async _transcribeWithAliyun(audioBlob: Blob, model: IVoiceModel, apiKey: string): Promise<ITranscribeResult> {
+	private async _transcribeWithAliyun(audioBlob: Blob, model: IVoiceModel, apiKey: string, token: CancellationToken = CancellationToken.None): Promise<ITranscribeResult> {
 		const baseUrl = await this._resolveAliyunBaseUrl(model);
 		const mimeType = audioBlob.type || 'audio/webm';
 		const base64Audio = this._arrayBufferToBase64(await audioBlob.arrayBuffer());
@@ -625,7 +640,7 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 			data: JSON.stringify(payload),
 			timeout: 60000,
 			callSite: 'voiceModelService.transcribeWithAliyun'
-		}, CancellationToken.None);
+		}, token);
 
 		if (response.res.statusCode !== 200) {
 			const errorText = await asText(response) || '';
@@ -644,7 +659,7 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 		const endpoint = model.customUrl || 'http://localhost:8000/v1/audio/transcriptions';
 
 		const formData = new FormData();
-		formData.append('file', audioBlob, 'audio.webm');
+		formData.append('file', audioBlob, audioFileNameFor(audioBlob));
 		formData.append('model', model.modelId || 'whisper-1');
 
 		const headers: Record<string, string> = {};
@@ -672,6 +687,226 @@ export class VoiceModelService extends Disposable implements IVoiceModelService 
 			text: (resultJson.text || resultJson.transcription || '').trim(),
 			modelUsed: model.name
 		};
+	}
+
+	async resolveTimedTranscriptionModel(options: ITimedTranscribeOptions): Promise<IResolvedTimedModel | undefined> {
+		const model = await this._resolveTimedModel(options);
+		return model ? { provider: model.provider, modelId: model.modelId, name: model.name } : undefined;
+	}
+
+	/**
+	 * The voice model used for subtitles: the active voice model when no provider is given; else a registered model with
+	 * the same provider + model id; else an ad-hoc model reusing the credential / endpoint of a registered model of that provider.
+	 */
+	private async _resolveTimedModel(options: ITimedTranscribeOptions): Promise<IVoiceModel | undefined> {
+		const provider = (options.provider || '').trim();
+		const modelId = (options.modelId || '').trim();
+		const language = options.language?.trim() || undefined;
+		if (!provider) {
+			const active = await this.getActiveVoiceModel();
+			return active ? { ...active, language: language ?? active.language } : undefined;
+		}
+		if (!VOICE_PROVIDER_CATALOG.some(p => p.id === provider)) {
+			return undefined;
+		}
+		const sameProvider = this._models.filter(m => m.provider === provider);
+		const exact = sameProvider.find(m => m.modelId === modelId);
+		if (exact) {
+			return { ...exact, language: language ?? exact.language };
+		}
+		const donor = sameProvider.find(m => m.isDefault) ?? sameProvider.find(m => !!(m.apiKey || m.credentialId || m.customUrl)) ?? sameProvider[0];
+		const fallbackModelId = modelId || donor?.modelId || getVoiceProviderOption(provider)?.models[0]?.id || '';
+		return {
+			id: `subtitles:${provider}:${fallbackModelId}`,
+			name: `${getVoiceProviderOption(provider)?.label ?? provider} ${fallbackModelId}`,
+			provider: provider as VoiceModelProvider,
+			modelId: fallbackModelId,
+			apiKey: donor?.apiKey,
+			credentialId: donor?.credentialId,
+			customUrl: donor?.customUrl,
+			language: language ?? donor?.language,
+			createdAt: 0
+		};
+	}
+
+	async transcribeTimed(audio: Blob, clipSeconds: number, options: ITimedTranscribeOptions, token: CancellationToken): Promise<ITimedTranscribeResult> {
+		const model = await this._resolveTimedModel(options);
+		if (!model) {
+			return { segments: [], text: '', error: options.provider ? `Unknown subtitle provider "${options.provider}".` : 'No voice model configured. Add one under Settings -> Voice & Audio Models, or choose a provider in the component settings.' };
+		}
+		const apiKey = await this.resolveApiKey(model);
+		if (!apiKey && model.provider !== 'custom') {
+			return { segments: [], text: '', error: `Missing API key for ${model.name}. Add a ${getVoiceProviderOption(model.provider)?.label ?? model.provider} key under AI LLM Providers or link one in Voice & Audio Models.`, modelUsed: model.name };
+		}
+		if (token.isCancellationRequested) {
+			throw new CancellationError();
+		}
+		const plan = getTimedTranscriptionPlan(model.provider, model.modelId);
+		try {
+			if (plan.strategy === 'utterances') {
+				let res: ITranscribeResult;
+				if (model.provider === 'aliyun') {
+					res = await this._transcribeWithAliyun(audio, model, apiKey || '', token);
+				} else if (model.provider === 'gemini') {
+					res = await this._transcribeWithGemini(audio, model, apiKey || '');
+				} else {
+					res = await this._transcribeWithWhisper(audio, model, apiKey || '');
+				}
+				const text = (res.text || '').trim();
+				return { segments: text ? [{ start: 0, end: clipSeconds, text }] : [], text, error: res.error, modelUsed: model.name };
+			}
+			if (plan.strategy === 'native') {
+				return await this._transcribeTimedOpenAICompatible(audio, clipSeconds, model, apiKey, token);
+			}
+			if (model.provider === 'gemini') {
+				return await this._transcribeTimedGemini(audio, clipSeconds, model, apiKey || '', token);
+			}
+			return await this._transcribeTimedAliyunLlm(audio, clipSeconds, model, apiKey || '', token);
+		} catch (err) {
+			if (err instanceof CancellationError || token.isCancellationRequested) {
+				throw new CancellationError();
+			}
+			return { segments: [], text: '', error: (err as Error).message || String(err), modelUsed: model.name };
+		}
+	}
+
+	/** OpenAI `whisper-1` (verbose_json + segment granularity), `*-diarize` (diarized_json) or any OpenAI-compatible endpoint. */
+	private async _transcribeTimedOpenAICompatible(audio: Blob, clipSeconds: number, model: IVoiceModel, apiKey: string | undefined, token: CancellationToken): Promise<ITimedTranscribeResult> {
+		const endpoint = model.provider === 'custom'
+			? (model.customUrl || 'http://localhost:8000/v1/audio/transcriptions')
+			: (model.customUrl || 'https://api.openai.com/v1').replace(/\/$/, '') + '/audio/transcriptions';
+		const diarize = model.modelId.toLowerCase().includes('diarize');
+		const formData = new FormData();
+		formData.append('file', audio, audioFileNameFor(audio));
+		formData.append('model', model.modelId || 'whisper-1');
+		if (model.language && model.language !== 'auto') {
+			formData.append('language', model.language);
+		}
+		if (diarize) {
+			formData.append('response_format', 'diarized_json');
+			formData.append('chunking_strategy', 'auto');
+		} else {
+			formData.append('response_format', 'verbose_json');
+			formData.append('timestamp_granularities[]', 'segment');
+			formData.append('temperature', '0');
+		}
+		const headers: Record<string, string> = {};
+		if (apiKey) {
+			headers['Authorization'] = `Bearer ${apiKey}`;
+		}
+		const abort = new AbortController();
+		const listener = token.onCancellationRequested(() => abort.abort());
+		try {
+			const res = await fetch(endpoint, { method: 'POST', headers, body: formData, signal: abort.signal });
+			if (!res.ok) {
+				const errText = await res.text();
+				let msg = `HTTP ${res.status}`;
+				try {
+					msg = JSON.parse(errText).error?.message || msg;
+				} catch { }
+				return { segments: [], text: '', error: `Transcription failed: ${msg}`, modelUsed: model.name };
+			}
+			const json = await res.json() as IOpenAITimedTranscriptionResponse;
+			const text = (json.text || '').trim();
+			let segments: ISubtitleSegment[] = normalizeSegments(json.segments ?? [], clipSeconds);
+			if (segments.length === 0 && text) {
+				segments = [{ start: 0, end: clipSeconds, text }];
+			}
+			return { segments, text, modelUsed: model.name };
+		} finally {
+			listener.dispose();
+		}
+	}
+
+	/** Gemini: audio + JSON-mode prompt with a response schema of `[{start, end, text}]`. */
+	private async _transcribeTimedGemini(audio: Blob, clipSeconds: number, model: IVoiceModel, apiKey: string, token: CancellationToken): Promise<ITimedTranscribeResult> {
+		const base64Audio = this._arrayBufferToBase64(await audio.arrayBuffer());
+		const cleanModel = model.modelId || 'gemini-2.5-flash';
+		const payload = {
+			contents: [{
+				role: 'user',
+				parts: [
+					{ inline_data: { mime_type: audio.type || 'audio/wav', data: base64Audio } },
+					{ text: buildTimedTranscriptionPrompt(model.language) }
+				]
+			}],
+			generationConfig: {
+				temperature: 0,
+				responseMimeType: 'application/json',
+				responseSchema: {
+					type: 'ARRAY',
+					items: {
+						type: 'OBJECT',
+						properties: { start: { type: 'NUMBER' }, end: { type: 'NUMBER' }, text: { type: 'STRING' } },
+						required: ['start', 'end', 'text']
+					}
+				}
+			}
+		};
+		const response = await this.requestService.request({
+			type: 'POST',
+			url: `https://generativelanguage.googleapis.com/v1beta/models/${cleanModel}:generateContent?key=${apiKey}`,
+			headers: { 'Content-Type': 'application/json' },
+			data: JSON.stringify(payload),
+			timeout: 180000,
+			callSite: 'voiceModelService.transcribeTimedGemini'
+		}, token);
+		if (response.res.statusCode !== 200) {
+			const errorText = await asText(response) || '';
+			let errorMsg = `HTTP ${response.res.statusCode}`;
+			try {
+				errorMsg = JSON.parse(errorText).error?.message || errorMsg;
+			} catch { }
+			return { segments: [], text: '', error: `Gemini subtitle transcription failed: ${errorMsg}`, modelUsed: model.name };
+		}
+		const data = await asJson<IGeminiGenerateContentResponse>(response);
+		const raw = (data?.candidates?.[0]?.content?.parts ?? []).map(p => p.text || '').join('');
+		return this._timedResultFromLlmText(raw, clipSeconds, model);
+	}
+
+	/** Alibaba audio LLMs (e.g. qwen3.8-omni-flash) through the OpenAI-compatible chat API, asked for JSON timestamps. */
+	private async _transcribeTimedAliyunLlm(audio: Blob, clipSeconds: number, model: IVoiceModel, apiKey: string, token: CancellationToken): Promise<ITimedTranscribeResult> {
+		const baseUrl = await this._resolveAliyunBaseUrl(model);
+		const base64Audio = this._arrayBufferToBase64(await audio.arrayBuffer());
+		const payload = {
+			model: model.modelId,
+			messages: [{
+				role: 'user',
+				content: [
+					{ type: 'input_audio', input_audio: { data: `data:${audio.type || 'audio/wav'};base64,${base64Audio}`, format: 'wav' } },
+					{ type: 'text', text: buildTimedTranscriptionPrompt(model.language) }
+				]
+			}],
+			stream: false
+		};
+		const response = await this.requestService.request({
+			type: 'POST',
+			url: `${baseUrl}/chat/completions`,
+			headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+			data: JSON.stringify(payload),
+			timeout: 180000,
+			callSite: 'voiceModelService.transcribeTimedAliyunLlm'
+		}, token);
+		if (response.res.statusCode !== 200) {
+			const errorText = await asText(response) || '';
+			let errorMsg = `HTTP ${response.res.statusCode}`;
+			try {
+				errorMsg = JSON.parse(errorText).error?.message || errorMsg;
+			} catch { }
+			return { segments: [], text: '', error: `Alibaba Cloud subtitle transcription failed: ${errorMsg}`, modelUsed: model.name };
+		}
+		const data = await asJson<{ choices?: { message?: { content?: string } }[] }>(response);
+		return this._timedResultFromLlmText(data?.choices?.[0]?.message?.content || '', clipSeconds, model);
+	}
+
+	private _timedResultFromLlmText(raw: string, clipSeconds: number, model: IVoiceModel): ITimedTranscribeResult {
+		const segments = parseSubtitleJson(raw, clipSeconds);
+		if (!segments) {
+			return raw.trim()
+				? { segments: [], text: raw.trim(), error: `${model.name} did not return valid subtitle JSON: ${raw.trim().slice(0, 160)}`, modelUsed: model.name }
+				: { segments: [], text: '', modelUsed: model.name };
+		}
+		return { segments, text: segments.map(s => s.text).join(' '), modelUsed: model.name };
 	}
 
 	private _arrayBufferToBase64(buffer: ArrayBuffer): string {
