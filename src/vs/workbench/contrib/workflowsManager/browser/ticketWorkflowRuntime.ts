@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { URI } from '../../../../base/common/uri.js';
@@ -8,13 +7,15 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IInstantiationService, createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
-import { IEntityPersistenceService, IBaseEntitySnapshot, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, IBaseEntitySnapshot, CustomFieldType, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
-import { ITerminalService } from '../../terminal/browser/terminal.js';
+import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
+import { hasWorkflowProperty, isWorkflowRecord } from '../common/workflowExecutionModel.js';
+import { mainWindow } from '../../../../base/browser/window.js';
 
 export const ITicketWorkflowRuntimeService = createDecorator<ITicketWorkflowRuntimeService>('ticketWorkflowRuntimeService');
 
@@ -34,7 +35,11 @@ export function findUnresolvedTemplateVariables(template: string, rendered: stri
 	// Same brace syntax as the interpolators; only identifier-like names are reportable
 	const tokenRe = /@?\{\{?([^{}]+)\}?\}/g;
 	const reportableRe = /^\s*[A-Za-z_]\w*(?:\s*(?:\[[^\]\n{}]*\]|\.[A-Za-z_]\w*))*\s*$/;
-	type Token = { lit: string } | { ph: string; name: string };
+	type LiteralToken = { lit: string };
+	type PlaceholderToken = { ph: string; name: string };
+	type Token = LiteralToken | PlaceholderToken;
+	const isPlaceholder = (t: Token): t is PlaceholderToken => 'ph' in t;
+	const isLiteral = (t: Token): t is LiteralToken => 'lit' in t;
 	const tokens: Token[] = [];
 	let last = 0;
 	let m: RegExpExecArray | null;
@@ -45,7 +50,7 @@ export function findUnresolvedTemplateVariables(template: string, rendered: stri
 	}
 	tokens.push({ lit: template.slice(last) });
 	const reportable = (t: { name: string }) => reportableRe.test(t.name);
-	if (!tokens.some(t => 'ph' in t && reportable(t) && rendered.includes(t.ph))) {
+	if (!tokens.some(t => isPlaceholder(t) && reportable(t) && rendered.includes(t.ph))) {
 		return [];
 	}
 
@@ -56,7 +61,7 @@ export function findUnresolvedTemplateVariables(template: string, rendered: stri
 			return null;
 		}
 		const tok = tokens[ti];
-		if ('lit' in tok) {
+		if (isLiteral(tok)) {
 			if (!rendered.startsWith(tok.lit, pos)) {
 				return null;
 			}
@@ -109,7 +114,7 @@ export function findUnresolvedTemplateVariables(template: string, rendered: stri
 	const count = (text: string, needle: string) => text.split(needle).length - 1;
 	const missing = new Set<string>();
 	for (const t of tokens) {
-		if ('ph' in t && reportable(t) && count(rendered, t.ph) >= count(template, t.ph)) {
+		if (isPlaceholder(t) && reportable(t) && count(rendered, t.ph) >= count(template, t.ph)) {
 			missing.add(t.name);
 		}
 	}
@@ -126,8 +131,8 @@ export interface ITicketCreateOptions {
 	description?: string;
 	status?: string;
 	priority?: string;
-	parameters?: Record<string, any>;
-	fieldValues?: Record<string, any>;
+	parameters?: Record<string, unknown>;
+	fieldValues?: Record<string, unknown>;
 	autoRun?: boolean;
 }
 
@@ -141,9 +146,9 @@ export interface ITicketCreateResult {
 	createdAt?: string;
 	entityUri: string;
 	targetFolder: string;
-	parameters?: Record<string, any>;
-	fields: Record<string, any>;
-	outputs?: Record<string, any>;
+	parameters?: Record<string, unknown>;
+	fields: Record<string, unknown>;
+	outputs?: Record<string, unknown>;
 	isHandle?: boolean;
 	error?: string;
 }
@@ -159,8 +164,8 @@ export interface ITicketGetResult {
 	status: string;
 	priority: string;
 	customMetadata: Record<string, string>;
-	output?: any;
-	outputs?: Record<string, any>;
+	output?: unknown;
+	outputs?: Record<string, unknown>;
 	schema?: ICustomModule;
 	error?: string;
 }
@@ -168,7 +173,7 @@ export interface ITicketGetResult {
 export interface ITicketRunOptions {
 	workspaceUri: string | URI;
 	ticketIdOrPath: string;
-	inputParams?: Record<string, any>;
+	inputParams?: Record<string, unknown>;
 	isCancelled?: () => boolean;
 	onStepStart?: (info: { fieldId: string; fieldLabel: string; fieldType: string; stepIndex: number; totalSteps: number }) => void;
 	onStepProgress?: (stepResult: IPrimitiveExecutionStepResult, index: number, total: number) => void;
@@ -178,11 +183,42 @@ export interface IPrimitiveExecutionStepResult {
 	fieldId: string;
 	fieldLabel: string;
 	fieldType: string;
-	output?: any;
+	output?: unknown;
 	status: 'success' | 'skipped' | 'failed';
 	durationMs: number;
 	error?: string;
-	details?: Record<string, any>;
+	details?: IPrimitiveExecutionStepDetails;
+}
+
+/** Free-form execution details of a primitive step; `commandLogs` / `logs` hold captured textual logs. */
+export interface IPrimitiveExecutionStepDetails {
+	commandLogs?: string;
+	logs?: string;
+	[key: string]: unknown;
+}
+
+/**
+ * A component (`ICustomField`) together with the runtime-only execution state that the runtime records on the
+ * component object while running it (shown by the editors, never part of the saved template schema).
+ */
+export interface IRuntimeCustomField extends ICustomField {
+	previousLabels?: string[];
+	lastExecutionStatus?: string;
+	lastExecutionLog?: string;
+	lastExecutionOutput?: unknown;
+	lastExecutionDurationMs?: number;
+	lastExecutionExitCode?: number;
+	lastExecutedUrl?: string;
+	lastExecutedAt?: string;
+	lastQueryRows?: unknown;
+	lastSentPrompt?: unknown;
+	ttsLastAudioPath?: string;
+	ttsLastCacheKey?: string;
+}
+
+/** The labels a component was previously known by (`previousLabels`), or `[]`. */
+function getPreviousLabels(field: IRuntimeCustomField): string[] {
+	return Array.isArray(field.previousLabels) ? field.previousLabels : [];
 }
 
 export interface IHttpRequestExecutionResult {
@@ -190,8 +226,8 @@ export interface IHttpRequestExecutionResult {
 	statusText: string;
 	ok: boolean;
 	headers: Record<string, string>;
-	body: any;
-	data: any;
+	body: unknown;
+	data: unknown;
 	rawText: string;
 	url: string;
 	method: string;
@@ -207,9 +243,9 @@ export interface ITicketRunResult {
 	ticketType: string;
 	entityUri: string;
 	status: 'success' | 'failed';
-	output: any;
+	output: unknown;
 	stepResults: IPrimitiveExecutionStepResult[];
-	contextVariables: Record<string, any>;
+	contextVariables: Record<string, unknown>;
 	durationMs: number;
 	error?: string;
 }
@@ -230,7 +266,7 @@ export interface IPrimitiveCatalogItem {
 export interface IPythonExecutionResult {
 	success: boolean;
 	output: string;
-	result?: any;
+	result?: unknown;
 	exitCode: number;
 	durationMs: number;
 	pythonPath: string;
@@ -268,7 +304,7 @@ export interface ISqliteTableOperationOptions {
 	tableName: string;
 	action: 'init_db' | 'save' | 'update' | 'insert' | 'update_header' | 'inspect_schema' | 'load' | 'load_schema' | 'delete_data' | 'drop_table' | 'list_tables' | 'query';
 	columns?: ITableColumnDefinition[];
-	rows?: Array<Record<string, any>>;
+	rows?: Array<Record<string, unknown>>;
 	whereClause?: string;
 	sqlQuery?: string;
 	limit?: number;
@@ -284,11 +320,11 @@ export interface ISqliteTableOperationResult {
 	addedColumns?: string[];
 	removedColumns?: string[];
 	columns?: ITableColumnDefinition[];
-	rows?: Array<Record<string, any>>;
+	rows?: Array<Record<string, unknown>>;
 	isSelectQuery?: boolean;
 	isPragmaQuery?: boolean;
 	queryColumns?: ITableColumnDefinition[];
-	queryRows?: Array<Record<string, any>>;
+	queryRows?: Array<Record<string, unknown>>;
 	tables?: string[];
 	rowCount?: number;
 	affectedRows?: number;
@@ -344,7 +380,7 @@ export interface ISshBatchExecutionOptions {
 	commands: ReadonlyArray<string>;
 	outputLines?: number;
 	existingTerminalLog?: string;
-	contextVariables?: Record<string, any>;
+	contextVariables?: Record<string, unknown>;
 	isCancelled?: () => boolean;
 	onCommandProgress?: (progress: ISshBatchCommandProgress) => void;
 }
@@ -374,13 +410,25 @@ export interface ITicketWorkflowRuntimeService {
 	createTicket(options: ITicketCreateOptions): Promise<ITicketCreateResult>;
 	CREATE_TICKETS(options: ITicketCreateOptions): Promise<ITicketCreateResult>;
 
-	getTickets(workspaceUri: string | URI, ticketIdOrPath: string | any, field?: string): Promise<any>;
-	getTicket(workspaceUri: string | URI, ticketIdOrPath: string | any, field?: string): Promise<any>;
-	GET_TICKETS(workspaceUri: string | URI, ticketIdOrPath: string | any, field?: string): Promise<any>;
-	GET_TICKET(workspaceUri: string | URI, ticketIdOrPath: string | any, field?: string): Promise<any>;
+	/**
+	 * Without `field`: a single ticket (`ITicketGetResult`), or an array of matching ticket summaries for a query object.
+	 * With `field`: the value (or array of values) of that field.
+	 */
+	getTickets(workspaceUri: string | URI, querySpecOrTarget: unknown, field?: string): Promise<unknown>;
+	/** Returns the ticket (`ticketIdOrPath` is an id / name / path string or a ticket handle object). */
+	getTicket(workspaceUri: string | URI, ticketIdOrPath: unknown): Promise<ITicketGetResult>;
+	/** Returns the value of `field` of the ticket, or the ticket itself when `field` is empty. */
+	getTicket(workspaceUri: string | URI, ticketIdOrPath: unknown, field: string | undefined): Promise<unknown>;
+	GET_TICKETS(workspaceUri: string | URI, querySpecOrTarget: unknown, field?: string): Promise<unknown>;
+	GET_TICKET(workspaceUri: string | URI, ticketIdOrPath: unknown): Promise<ITicketGetResult>;
+	GET_TICKET(workspaceUri: string | URI, ticketIdOrPath: unknown, field: string | undefined): Promise<unknown>;
 
-	getOutputs(workspaceUri: string | URI, ticketOrId: any, field?: string): Promise<Record<string, any> | any | null>;
-	GET_OUTPUTS(workspaceUri: string | URI, ticketOrId: any, field?: string): Promise<Record<string, any> | any | null>;
+	/** Returns the ticket's OUTPUT component values, or `null` when the ticket has none. */
+	getOutputs(workspaceUri: string | URI, ticketOrId: unknown): Promise<Record<string, unknown> | null>;
+	/** Returns the value of one output field (or all outputs when `field` is empty), or `null`. */
+	getOutputs(workspaceUri: string | URI, ticketOrId: unknown, field: string | undefined): Promise<unknown>;
+	GET_OUTPUTS(workspaceUri: string | URI, ticketOrId: unknown): Promise<Record<string, unknown> | null>;
+	GET_OUTPUTS(workspaceUri: string | URI, ticketOrId: unknown, field: string | undefined): Promise<unknown>;
 
 	runTickets(options: ITicketRunOptions): Promise<ITicketRunResult>;
 	runTicket(options: ITicketRunOptions): Promise<ITicketRunResult>;
@@ -394,7 +442,7 @@ export interface ITicketWorkflowRuntimeService {
 		ticketUri: string | URI,
 		pythonPath: string,
 		code: string,
-		contextVariables?: Record<string, any>,
+		contextVariables?: Record<string, unknown>,
 		externalScripts?: string[]
 	): Promise<IPythonExecutionResult>;
 
@@ -430,22 +478,22 @@ export interface ITicketWorkflowRuntimeService {
 	): Promise<void>;
 
 	executeHttpRequest(
-		field: ICustomField,
-		contextVariables: Record<string, any>
+		field: IRuntimeCustomField,
+		contextVariables: Record<string, unknown>
 	): Promise<IHttpRequestExecutionResult>;
 
 	executeNodeComponent(
 		workspaceUri: string | URI,
 		workingDirUri: string | URI,
-		field: ICustomField,
-		contextVariables: Record<string, any>
+		field: IRuntimeCustomField,
+		contextVariables: Record<string, unknown>
 	): Promise<IPrimitiveExecutionStepResult>;
 
 	validateAndSanitizeComponentOutput(
 		fieldType: CustomFieldType | string,
 		field: ICustomField | undefined,
-		rawVal: any
-	): any;
+		rawVal: unknown
+	): unknown;
 
 	cancelAllActiveOperations(reason?: string): Promise<number>;
 	resetCancellation(): void;
@@ -466,7 +514,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 	declare readonly _serviceBrand: undefined;
 
 	private _cancelEpoch = 0;
-	private readonly _activeTerminals = new Set<{ terminal: any; abort: () => void; label: string }>();
+	private readonly _activeTerminals = new Set<{ terminal: ITerminalInstance; abort: () => void; label: string }>();
 	private readonly _activeAbortControllers = new Set<AbortController>();
 
 	constructor(
@@ -539,7 +587,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const rootWsUri = await this.workspacesExplorerService.findWorkspaceRootUri(parentFolderUri);
 
 			// 3. Generate sequential ticket ID and code matching workspace convention (e.g. NEOWO-0011)
-			const { name: seqCode, code: activeCode } = await this.workspacesExplorerService.generateNextSequentialName(parentFolderUri, ticketType as any);
+			const { name: seqCode, code: activeCode } = await this.workspacesExplorerService.generateNextSequentialName(parentFolderUri, ticketType);
 			const ticketCode = seqCode; // e.g. "NEOWO-0011"
 			const ticketEntityCode = activeCode; // e.g. "NEOWO"
 
@@ -577,9 +625,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const customMetadata: Record<string, string> = {};
 			const initialFields = { ...(options.parameters || {}), ...(options.fieldValues || {}) };
 			const normalizeKeyForLookup = (s: string) => s.trim().toLowerCase().replace(/[-_\s]+/g, '_');
-			const lookupInitialField = (key?: string): any => {
-				if (!key) return undefined;
-				if (initialFields[key] !== undefined) return initialFields[key];
+			const lookupInitialField = (key?: string): unknown => {
+				if (!key) { return undefined; }
+				if (initialFields[key] !== undefined) { return initialFields[key]; }
 				const norm = normalizeKeyForLookup(key);
 				for (const [ik, iv] of Object.entries(initialFields)) {
 					if (normalizeKeyForLookup(ik) === norm) {
@@ -593,7 +641,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				for (const f of matchedModule.fields) {
 					const fKey = f.label || f.id;
 					if (f.type === 'parameters' && f.parameters) {
-						const paramObj: Record<string, any> = {};
+						const paramObj: Record<string, unknown> = {};
 						for (const p of f.parameters) {
 							const pKey = p.name || p.id;
 							const matchedVal = lookupInitialField(pKey) ?? lookupInitialField(p.label);
@@ -605,7 +653,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						customMetadata[fKey] = JSON.stringify(paramObj);
 					} else if (f.type === 'browser') {
 						const urlVal = initialFields[fKey] || f.defaultUrl || '';
-						const contentVal = (initialFields[fKey] && typeof initialFields[fKey] === 'object' && initialFields[fKey].content)
+						const contentVal = (isWorkflowRecord(initialFields[fKey]) && initialFields[fKey].content)
 							? initialFields[fKey].content
 							: (typeof initialFields[fKey] === 'string' && initialFields[fKey].trim() ? initialFields[fKey] : '');
 						customMetadata[fKey] = JSON.stringify({
@@ -635,11 +683,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							userPrompts = passedVal.map(item => String(item ?? ''));
 						} else if (typeof passedVal === 'string' && passedVal.trim()) {
 							userPrompts = [passedVal];
-						} else if (passedVal && typeof passedVal === 'object') {
-							if (Array.isArray((passedVal as any).userPrompts)) {
-								userPrompts = (passedVal as any).userPrompts.map((item: any) => String(item ?? ''));
-							} else if ((passedVal as any).userPrompt !== undefined) {
-								userPrompts = [String((passedVal as any).userPrompt)];
+						} else if (isWorkflowRecord(passedVal)) {
+							if (Array.isArray(passedVal.userPrompts)) {
+								userPrompts = passedVal.userPrompts.map((item: unknown) => String(item ?? ''));
+							} else if (passedVal.userPrompt !== undefined) {
+								userPrompts = [String(passedVal.userPrompt)];
 							}
 						}
 						const nonEmpty = userPrompts.map(s => (s || '').trim()).filter(s => s.length > 0);
@@ -660,19 +708,19 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						});
 					} else if (f.type === 'tts') {
 						let ttsVal = f.defaultContent || '';
-						let ttsDisplayVal = (f as any).ttsDisplayText || '';
+						let ttsDisplayVal = f.ttsDisplayText || '';
 						const passedVal = initialFields[fKey] ?? initialFields[f.id];
 						if (typeof passedVal === 'string' && passedVal.trim()) {
 							ttsVal = passedVal;
-						} else if (passedVal && typeof passedVal === 'object') {
-							if ((passedVal as any).text !== undefined) ttsVal = String((passedVal as any).text);
-							if ((passedVal as any).displayText !== undefined) ttsDisplayVal = String((passedVal as any).displayText);
-							else if ((passedVal as any).ttsDisplayText !== undefined) ttsDisplayVal = String((passedVal as any).ttsDisplayText);
+						} else if (isWorkflowRecord(passedVal)) {
+							if (passedVal.text !== undefined) { ttsVal = String(passedVal.text); }
+							if (passedVal.displayText !== undefined) { ttsDisplayVal = String(passedVal.displayText); }
+							else if (passedVal.ttsDisplayText !== undefined) { ttsDisplayVal = String(passedVal.ttsDisplayText); }
 						}
 						customMetadata[fKey] = JSON.stringify({
 							text: String(ttsVal),
 							displayText: String(ttsDisplayVal),
-							ttsShowSpeechTextInTicket: Boolean((f as any).ttsShowSpeechTextInTicket),
+							ttsShowSpeechTextInTicket: Boolean(f.ttsShowSpeechTextInTicket),
 							targetCredentialId: f.targetCredentialId || '',
 							targetProvider: f.targetProvider || 'gemini',
 							targetModel: f.targetModel || 'gemini-2.5-flash-preview-tts',
@@ -692,12 +740,12 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						if (typeof passedVal === 'string' && passedVal.trim()) {
 							mediaPath = passedVal.trim();
 							mediaName = mediaPath.split(/[\\/]/).pop() || mediaPath;
-						} else if (passedVal && typeof passedVal === 'object') {
-							if ((passedVal as any).mediaFilePath !== undefined) mediaPath = String((passedVal as any).mediaFilePath);
-							else if ((passedVal as any).filePath !== undefined) mediaPath = String((passedVal as any).filePath);
-							if ((passedVal as any).mediaFileName !== undefined) mediaName = String((passedVal as any).mediaFileName);
-							else if ((passedVal as any).fileName !== undefined) mediaName = String((passedVal as any).fileName);
-							if (typeof (passedVal as any).mediaPlaybackRate === 'number') mediaRate = (passedVal as any).mediaPlaybackRate;
+						} else if (isWorkflowRecord(passedVal)) {
+							if (passedVal.mediaFilePath !== undefined) { mediaPath = String(passedVal.mediaFilePath); }
+							else if (passedVal.filePath !== undefined) { mediaPath = String(passedVal.filePath); }
+							if (passedVal.mediaFileName !== undefined) { mediaName = String(passedVal.mediaFileName); }
+							else if (passedVal.fileName !== undefined) { mediaName = String(passedVal.fileName); }
+							if (typeof passedVal.mediaPlaybackRate === 'number') { mediaRate = passedVal.mediaPlaybackRate; }
 						}
 						const detected = detectMediaFileInfo(mediaName || mediaPath, f.mediaMimeType);
 						customMetadata[fKey] = JSON.stringify({
@@ -730,13 +778,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							sshCommands = [passedVal.trim()];
 						} else if (Array.isArray(passedVal)) {
 							sshCommands = normalizeSshCommandsList(passedVal);
-						} else if (passedVal && typeof passedVal === 'object') {
+						} else if (isWorkflowRecord(passedVal)) {
 							const pv = normalizeSshTicketValue(passedVal) ?? {};
-							if (pv.sshHost !== undefined) sshHost = String(pv.sshHost ?? '');
-							if (pv.sshPort !== undefined) sshPort = pv.sshPort ?? 22;
-							if (pv.sshUser !== undefined) sshUser = String(pv.sshUser ?? 'root');
-							if (pv.sshPassword !== undefined) sshPassword = String(pv.sshPassword ?? '');
-							if (pv.sshCwd !== undefined) sshCwd = String(pv.sshCwd ?? '');
+							if (pv.sshHost !== undefined) { sshHost = String(pv.sshHost ?? ''); }
+							if (pv.sshPort !== undefined) { sshPort = pv.sshPort ?? 22; }
+							if (pv.sshUser !== undefined) { sshUser = String(pv.sshUser ?? 'root'); }
+							if (pv.sshPassword !== undefined) { sshPassword = String(pv.sshPassword ?? ''); }
+							if (pv.sshCwd !== undefined) { sshCwd = String(pv.sshCwd ?? ''); }
 							if (Array.isArray(pv.sshCommands)) {
 								sshCommands = normalizeSshCommandsList(pv.sshCommands);
 							} else if (pv.sshCommand !== undefined) {
@@ -744,7 +792,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							}
 							if (pv.sshOutputLines !== undefined) {
 								const parsedN = Number(pv.sshOutputLines);
-								if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+								if (!isNaN(parsedN) && parsedN > 0) { sshOutputLines = Math.floor(parsedN); }
 							}
 						}
 						customMetadata[fKey] = JSON.stringify({
@@ -765,10 +813,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						});
 					} else if (f.type === 'http_request') {
 						// Same property names as the template config; start from the template, then apply the passed value.
-						const httpValue: Record<string, any> = {};
+						const httpValue: Record<string, unknown> = {};
 						for (const key of HTTP_REQUEST_CONFIG_KEYS) {
-							if ((f as any)[key] !== undefined) {
-								httpValue[key] = (f as any)[key];
+							const templateVal: unknown = Reflect.get(f, key);
+							if (templateVal !== undefined) {
+								httpValue[key] = templateVal;
 							}
 						}
 						if (!httpValue.httpUrl && f.defaultUrl) {
@@ -777,15 +826,15 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						const passedVal = initialFields[fKey] ?? initialFields[f.id];
 						if (typeof passedVal === 'string' && /^https?:\/\//i.test(passedVal.trim())) {
 							httpValue.httpUrl = passedVal.trim();
-						} else if (passedVal && typeof passedVal === 'object') {
+						} else if (isWorkflowRecord(passedVal)) {
 							const pv = normalizeHttpTicketValue(passedVal) ?? {};
 							for (const key of HTTP_REQUEST_CONFIG_KEYS) {
 								if (pv[key] !== undefined) {
 									httpValue[key] = key === 'httpBodyContent' && typeof pv[key] !== 'string' ? JSON.stringify(pv[key]) : pv[key];
 								}
 							}
-							if ((passedVal as any).body !== undefined && typeof (passedVal as any).body !== 'string' && httpValue.httpBodyContent === undefined) {
-								httpValue.httpBodyContent = JSON.stringify((passedVal as any).body);
+							if (passedVal.body !== undefined && typeof passedVal.body !== 'string' && httpValue.httpBodyContent === undefined) {
+								httpValue.httpBodyContent = JSON.stringify(passedVal.body);
 							}
 						}
 						httpValue.httpMethod = String(httpValue.httpMethod || 'GET').toUpperCase();
@@ -794,11 +843,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					} else if (f.type === 'table') {
 						const passedVal = lookupInitialField(fKey) ?? lookupInitialField(f.id) ?? lookupInitialField(f.outputVariableName);
 						const isBoundSqlite = (f.tableDbEngine || 'sqlite') === 'sqlite' && Boolean(f.tableDbPath && f.tableDbPath.trim());
-						let rowsVal: any[] = !isBoundSqlite && Array.isArray(f.tableRows) ? f.tableRows : [];
+						let rowsVal: unknown[] = !isBoundSqlite && Array.isArray(f.tableRows) ? f.tableRows : [];
 						if (Array.isArray(passedVal)) {
 							rowsVal = passedVal;
-						} else if (passedVal && typeof passedVal === 'object' && Array.isArray((passedVal as any).rows)) {
-							rowsVal = (passedVal as any).rows;
+						} else if (isWorkflowRecord(passedVal) && Array.isArray(passedVal.rows)) {
+							rowsVal = passedVal.rows;
 						}
 						customMetadata[fKey] = JSON.stringify({
 							columns: Array.isArray(f.tableColumns) ? f.tableColumns : [],
@@ -894,13 +943,14 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						...ticketResult,
 						status: 'Success',
 						fields: runRes.fields || customMetadata,
-						outputs: (runRes.output !== undefined && typeof runRes.output === 'object') ? runRes.output : this._extractTicketOutputs(runRes.fields || customMetadata, matchedModule)
+						// (a `null` output is passed through unchanged, as before)
+						outputs: (runRes.output !== undefined && typeof runRes.output === 'object') ? runRes.output as Record<string, unknown> : this._extractTicketOutputs(runRes.fields || customMetadata, matchedModule)
 					};
 				}
 			}
 
 			return ticketResult;
-		} catch (err: any) {
+		} catch (err) {
 			this.logService.error(`[TicketWorkflowRuntime] Failed to create ticket:`, err);
 			return {
 				success: false,
@@ -919,13 +969,15 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 	 * 2. getTicket:
 	 * Fetches detailed ticket data, custom metadata, and execution outputs by ticketId, name, path, or ticket handle.
 	 */
-	async getTicket(workspaceUri: string | URI, ticketIdOrPath: string | any, field?: string): Promise<any> {
+	async getTicket(workspaceUri: string | URI, ticketIdOrPath: unknown): Promise<ITicketGetResult>;
+	async getTicket(workspaceUri: string | URI, ticketIdOrPath: unknown, field: string | undefined): Promise<unknown>;
+	async getTicket(workspaceUri: string | URI, ticketIdOrPath: unknown, field?: string): Promise<unknown> {
 		let rawIdentifier = '';
 		try {
 			const wsUri = this._toUri(workspaceUri);
 			let directEntityUri: URI | undefined;
 
-			if (ticketIdOrPath && typeof ticketIdOrPath === 'object') {
+			if (isWorkflowRecord(ticketIdOrPath)) {
 				rawIdentifier = String(
 					ticketIdOrPath.ticketId ||
 					ticketIdOrPath.ticketName ||
@@ -952,7 +1004,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const searchRoots: URI[] = [];
 			const seenRoots = new Set<string>();
 			const addRoot = (u?: URI) => {
-				if (!u) return;
+				if (!u) { return; }
 				const cleanU = u.path.endsWith('/.agents') ? URI.joinPath(u, '..') : u;
 				const key = cleanU.toString().toLowerCase();
 				if (!seenRoots.has(key)) {
@@ -969,14 +1021,14 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			let curParent = wsUri.path.endsWith('/.agents') ? URI.joinPath(wsUri, '..') : wsUri;
 			for (let depth = 0; depth < 3; depth++) {
 				const nextParent = URI.joinPath(curParent, '..');
-				if (nextParent.toString() === curParent.toString()) break;
+				if (nextParent.toString() === curParent.toString()) { break; }
 				addRoot(nextParent);
 				curParent = nextParent;
 			}
 			try {
 				const allWs = await this.workspacesExplorerService.getWorkspaces();
 				for (const w of allWs) {
-					if (w.uri) addRoot(w.uri);
+					if (w.uri) { addRoot(w.uri); }
 				}
 			} catch { }
 
@@ -1068,7 +1120,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							const wsChildren = await this.workspacesExplorerService.scanWorkspaceChildren(rootUri, true);
 							const matchingChildren: { id: string; name: string; uri: URI }[] = [];
 							for (const child of wsChildren) {
-								if (child.type === 'file' || child.type === 'folder') continue;
+								if (child.type === 'file' || child.type === 'folder') { continue; }
 								const snap = this.workspacesExplorerService.getMetadataSnapshot(child.uri);
 								const titleMatch = snap?.title?.toLowerCase() === needle;
 								const idMatch = child.name.toLowerCase() === needle || snap?.ticketId?.toLowerCase() === needle;
@@ -1134,7 +1186,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				if (typeof v === 'string' && v.length > 2000 && v.includes('"lastSentPayload"')) {
 					try {
 						const parsed = JSON.parse(v);
-						if (parsed && typeof parsed === 'object' && 'lastSentPayload' in parsed) {
+						if (isWorkflowRecord(parsed) && Reflect.has(parsed, 'lastSentPayload')) {
 							delete parsed.lastSentPayload;
 							sanitizedCustomMetadata[k] = JSON.stringify(parsed);
 							continue;
@@ -1174,27 +1226,27 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			if (field && typeof field === 'string' && field.trim()) {
 				const fKey = field.trim();
-				if (fKey in ticketResult) {
-					return (ticketResult as any)[fKey];
+				if (hasWorkflowProperty(ticketResult, fKey)) {
+					return ticketResult[fKey];
 				}
-				if (ticketOutputs && typeof ticketOutputs === 'object' && fKey in ticketOutputs) {
+				if (isWorkflowRecord(ticketOutputs) && Reflect.has(ticketOutputs, fKey)) {
 					return ticketOutputs[fKey];
 				}
-				if (ticketData.customMetadata && fKey in ticketData.customMetadata) {
+				if (ticketData.customMetadata && Reflect.has(ticketData.customMetadata, fKey)) {
 					return ticketData.customMetadata[fKey];
 				}
 				const lowerKey = fKey.toLowerCase();
 				for (const [k, v] of Object.entries(ticketOutputs || {})) {
-					if (k.toLowerCase() === lowerKey) return v;
+					if (k.toLowerCase() === lowerKey) { return v; }
 				}
 				for (const [k, v] of Object.entries(ticketData.customMetadata || {})) {
-					if (k.toLowerCase() === lowerKey) return v;
+					if (k.toLowerCase() === lowerKey) { return v; }
 				}
 				return undefined;
 			}
 
 			return ticketResult;
-		} catch (err: any) {
+		} catch (err) {
 			return {
 				success: false,
 				ticketId: rawIdentifier || String(ticketIdOrPath ?? ''),
@@ -1218,19 +1270,21 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 	 * - If the ticket's template HAS an OUTPUT component, returns an object mapping each output field label
 	 *   to its parsed value (JSON object/array if valid JSON, string if text, or null/None if empty/missing).
 	 */
-	async getOutputs(workspaceUri: string | URI, ticketOrId: any, field?: string): Promise<Record<string, any> | any | null> {
+	async getOutputs(workspaceUri: string | URI, ticketOrId: unknown): Promise<Record<string, unknown> | null>;
+	async getOutputs(workspaceUri: string | URI, ticketOrId: unknown, field: string | undefined): Promise<unknown>;
+	async getOutputs(workspaceUri: string | URI, ticketOrId: unknown, field?: string): Promise<unknown> {
 		try {
 			if (ticketOrId === undefined || ticketOrId === null || ticketOrId === '') {
 				return null;
 			}
-			let outDict: Record<string, any> | null = null;
+			let outDict: Record<string, unknown> | null = null;
 			const ticketRes = await this.getTicket(workspaceUri, ticketOrId);
-			const targetSchema: ICustomModule | undefined = ticketRes?.schema || (ticketOrId && typeof ticketOrId === 'object' ? ticketOrId.schema : undefined);
+			const targetSchema: ICustomModule | undefined = ticketRes?.schema || (isWorkflowRecord(ticketOrId) ? ticketOrId.schema as ICustomModule | undefined : undefined);
 			if (!ticketRes.success) {
 				// Fallback if ticketOrId is an in-memory ticket handle with customMetadata/fields and schema
-				if (ticketOrId && typeof ticketOrId === 'object' && (ticketOrId.customMetadata || ticketOrId.fields)) {
-					const meta = ticketOrId.customMetadata || ticketOrId.fields || {};
-					outDict = this._extractStrictOutputsComponent(meta, ticketOrId.schema);
+				if (isWorkflowRecord(ticketOrId) && (ticketOrId.customMetadata || ticketOrId.fields)) {
+					const meta = (ticketOrId.customMetadata || ticketOrId.fields || {}) as Record<string, string>;
+					outDict = this._extractStrictOutputsComponent(meta, ticketOrId.schema as ICustomModule | undefined);
 				}
 			} else {
 				outDict = this._extractStrictOutputsComponent(ticketRes.customMetadata, ticketRes.schema);
@@ -1258,21 +1312,22 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					return outDict[normKey];
 				}
 				// 4. Aliases dictionary
-				if (outDict['__field_aliases__'] && typeof outDict['__field_aliases__'] === 'object') {
+				if (isWorkflowRecord(outDict['__field_aliases__'])) {
 					const aliases = outDict['__field_aliases__'];
-					if (aliases[trimmedField] && outDict[aliases[trimmedField]] !== undefined) {
-						return outDict[aliases[trimmedField]];
+					// Alias values are output keys (property-key coercion == String() for JSON values)
+					if (aliases[trimmedField] && outDict[String(aliases[trimmedField])] !== undefined) {
+						return outDict[String(aliases[trimmedField])];
 					}
 					const aliasKey = Object.keys(aliases).find(k => k.toLowerCase() === trimmedField.toLowerCase() || norm(k) === normField);
-					if (aliasKey && aliases[aliasKey] && outDict[aliases[aliasKey]] !== undefined) {
-						return outDict[aliases[aliasKey]];
+					if (aliasKey && aliases[aliasKey] && outDict[String(aliases[aliasKey])] !== undefined) {
+						return outDict[String(aliases[aliasKey])];
 					}
 				}
 				// 5. Schema fields matching (by outputVariableName, id, label, previousLabels)
 				if (targetSchema?.fields && Array.isArray(targetSchema.fields)) {
 					const matchedField = targetSchema.fields.find(f => {
-						if (f.type === 'output') return false;
-						const prevs: string[] = Array.isArray((f as any).previousLabels) ? (f as any).previousLabels : [];
+						if (f.type === 'output') { return false; }
+						const prevs: string[] = getPreviousLabels(f);
 						return (
 							f.label === trimmedField ||
 							f.id === trimmedField ||
@@ -1286,11 +1341,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					if (matchedField) {
 						const candKeys = [matchedField.label, matchedField.id, matchedField.outputVariableName].filter(Boolean) as string[];
 						for (const ck of candKeys) {
-							if (outDict[ck] !== undefined) return outDict[ck];
+							if (outDict[ck] !== undefined) { return outDict[ck]; }
 							const mk = Object.keys(outDict).find(k => !k.startsWith('__') && (k.toLowerCase() === ck.toLowerCase() || norm(k) === norm(ck)));
-							if (mk && outDict[mk] !== undefined) return outDict[mk];
+							if (mk && outDict[mk] !== undefined) { return outDict[mk]; }
 						}
-						const customMeta = ticketRes?.customMetadata || (ticketOrId && typeof ticketOrId === 'object' ? (ticketOrId.customMetadata || ticketOrId.fields) : undefined);
+						const customMeta = ticketRes?.customMetadata || (isWorkflowRecord(ticketOrId) ? (ticketOrId.customMetadata || ticketOrId.fields) : undefined);
 						if (customMeta) {
 							for (const ck of candKeys) {
 								if (customMeta[ck] !== undefined) {
@@ -1309,7 +1364,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				}
 				return null;
 			}
-			const cleanOut: Record<string, any> = {};
+			const cleanOut: Record<string, unknown> = {};
 			for (const [k, v] of Object.entries(outDict)) {
 				if (!k.startsWith('__')) {
 					cleanOut[k] = v;
@@ -1322,7 +1377,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		}
 	}
 
-	async GET_OUTPUTS(workspaceUri: string | URI, ticketOrId: any, field?: string): Promise<Record<string, any> | any | null> {
+	async GET_OUTPUTS(workspaceUri: string | URI, ticketOrId: unknown): Promise<Record<string, unknown> | null>;
+	async GET_OUTPUTS(workspaceUri: string | URI, ticketOrId: unknown, field: string | undefined): Promise<unknown>;
+	async GET_OUTPUTS(workspaceUri: string | URI, ticketOrId: unknown, field?: string): Promise<unknown> {
 		return this.getOutputs(workspaceUri, ticketOrId, field);
 	}
 
@@ -1336,7 +1393,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		const startEpoch = this._cancelEpoch;
 		const isCancelled = () => this._cancelEpoch !== startEpoch || Boolean(options.isCancelled?.());
 		const stepResults: IPrimitiveExecutionStepResult[] = [];
-		const contextVariables: Record<string, any> = {};
+		const contextVariables: Record<string, unknown> = {};
 
 		try {
 			if (isCancelled()) {
@@ -1374,7 +1431,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 
 			// Determine execution sequence from schema fields, or fallback to known metadata keys
-			const fieldsToRun: ICustomField[] = (schema?.fields && Array.isArray(schema.fields) && schema.fields.length > 0)
+			const fieldsToRun: IRuntimeCustomField[] = (schema?.fields && Array.isArray(schema.fields) && schema.fields.length > 0)
 				? schema.fields
 				: this._synthesizeFieldsFromMetadata(customMetadata);
 
@@ -1382,9 +1439,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			for (const f of fieldsToRun) {
 				const fKey = f.label || f.id;
 				if (contextVariables[fKey] === undefined) {
-					let defaultVal: any = f.defaultContent ?? f.defaultValue ?? '';
+					let defaultVal: unknown = f.defaultContent ?? f.defaultValue ?? '';
 					if (f.type === 'parameters' && f.parameters) {
-						const pMap: Record<string, any> = {};
+						const pMap: Record<string, unknown> = {};
 						f.parameters.forEach(p => {
 							if (p.name) {
 								const dVal = p.defaultValue;
@@ -1408,7 +1465,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			this.logService.info(`[TicketWorkflowRuntime] Running ticket '${ticketResult.ticketId}' with ${fieldsToRun.length} primitive(s)...`);
 
-			let finalOutput: any = undefined;
+			let finalOutput: unknown = undefined;
 			let fieldIndex = 0;
 			const totalFieldsCount = fieldsToRun.length;
 
@@ -1456,7 +1513,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					continue;
 				}
 				if (field.id === 'description') {
-					const descVal = inputOverrides['description'] || customMetadata['description'] || (field as any).defaultContent || '';
+					const descVal = inputOverrides['description'] || customMetadata['description'] || field.defaultContent || '';
 					const descStepRes: IPrimitiveExecutionStepResult = {
 						fieldId: field.id,
 						fieldLabel: field.label || 'Description',
@@ -1480,8 +1537,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 				if (field.disabled) {
 					const skipMsg = `>>> Component [${fieldType}] "${fieldLabel}" is DISABLED (skipped execution).`;
-					(field as any).lastExecutionStatus = 'skipped';
-					(field as any).lastExecutionLog = skipMsg;
+					field.lastExecutionStatus = 'skipped';
+					field.lastExecutionLog = skipMsg;
 					const skipStepRes: IPrimitiveExecutionStepResult = {
 						fieldId: field.id,
 						fieldLabel: fieldLabel,
@@ -1503,30 +1560,30 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					continue;
 				}
 
-				let stepOutput: any = undefined;
-				let stepDetails: Record<string, any> = {};
+				let stepOutput: unknown = undefined;
+				let stepDetails: Record<string, unknown> = {};
 
 				try {
 					switch (fieldType) {
 						case 'parameters': {
 							// 1. Parameters Primitive: resolve runtime arguments, saved ticket parameters, and defaults
-							const resolvedParams: Record<string, any> = {};
-							let savedParamObj: Record<string, any> = {};
+							const resolvedParams: Record<string, unknown> = {};
+							let savedParamObj: Record<string, unknown> = {};
 							const rawSavedParams = customMetadata[fieldLabel] ?? customMetadata[field.id];
 							if (typeof rawSavedParams === 'string' && rawSavedParams.trim().startsWith('{')) {
 								try {
 									const parsed = JSON.parse(rawSavedParams.trim());
-									if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+									if (isWorkflowRecord(parsed) && !Array.isArray(parsed)) {
 										savedParamObj = parsed;
 									}
 								} catch { }
-							} else if (rawSavedParams && typeof rawSavedParams === 'object' && !Array.isArray(rawSavedParams)) {
-								savedParamObj = rawSavedParams as Record<string, any>;
+							} else if (isWorkflowRecord(rawSavedParams) && !Array.isArray(rawSavedParams)) {
+								savedParamObj = rawSavedParams as Record<string, unknown>;
 							}
 
-							const lookupFromMap = (map: Record<string, any>, key?: string): any => {
-								if (!key) return undefined;
-								if (map[key] !== undefined) return map[key];
+							const lookupFromMap = (map: Record<string, unknown>, key?: string): unknown => {
+								if (!key) { return undefined; }
+								if (map[key] !== undefined) { return map[key]; }
 								const norm = key.trim().toLowerCase().replace(/[-_\s]+/g, '_');
 								for (const [mk, mv] of Object.entries(map)) {
 									if (mk.trim().toLowerCase().replace(/[-_\s]+/g, '_') === norm) {
@@ -1536,9 +1593,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								return undefined;
 							};
 
-							const isNonEmptyParam = (val: any): boolean => {
-								if (val === undefined || val === null) return false;
-								if (typeof val === 'string' && val.trim() === '') return false;
+							const isNonEmptyParam = (val: unknown): boolean => {
+								if (val === undefined || val === null) { return false; }
+								if (typeof val === 'string' && val.trim() === '') { return false; }
 								return true;
 							};
 
@@ -1552,7 +1609,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 										?? lookupFromMap(customMetadata, p.label);
 									const ctxVal = contextVariables[pKey];
 
-									let val: any;
+									let val: unknown;
 									if (isNonEmptyParam(overrideVal)) {
 										val = overrideVal;
 									} else if (isNonEmptyParam(savedVal)) {
@@ -1610,25 +1667,25 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							if (inputOverrides[fieldLabel]) {
 								targetUrl = String(inputOverrides[fieldLabel]).trim();
 							} else if (customMetadata[fieldLabel]) {
-								const metaVal = customMetadata[fieldLabel];
+								const metaVal: unknown = customMetadata[fieldLabel];
 								if (typeof metaVal === 'string') {
 									const trimmed = metaVal.trim();
 									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 										try {
 											const parsed = JSON.parse(trimmed);
-											if (parsed.url) targetUrl = String(parsed.url).trim();
-											if (parsed.content) existingContent = String(parsed.content);
-											if (parsed.credentials && Array.isArray(parsed.credentials)) browserCreds = parsed.credentials;
+											if (parsed.url) { targetUrl = String(parsed.url).trim(); }
+											if (parsed.content) { existingContent = String(parsed.content); }
+											if (parsed.credentials && Array.isArray(parsed.credentials)) { browserCreds = parsed.credentials; }
 										} catch {
 											targetUrl = trimmed;
 										}
 									} else {
 										targetUrl = trimmed;
 									}
-								} else if (typeof metaVal === 'object' && metaVal !== null) {
-									if ((metaVal as any).url) targetUrl = String((metaVal as any).url).trim();
-									if ((metaVal as any).content) existingContent = String((metaVal as any).content);
-									if ((metaVal as any).credentials) browserCreds = (metaVal as any).credentials;
+								} else if (isWorkflowRecord(metaVal)) {
+									if (metaVal.url) { targetUrl = String(metaVal.url).trim(); }
+									if (metaVal.content) { existingContent = String(metaVal.content); }
+									if (metaVal.credentials) { browserCreds = metaVal.credentials as typeof browserCreds; }
 								}
 							}
 
@@ -1639,9 +1696,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							const interpolatedUrl = this._interpolateVariables(targetUrl, contextVariables);
 							if (interpolatedUrl) {
 								field.lastResolvedUrl = interpolatedUrl;
-								(field as any).lastExecutedUrl = interpolatedUrl;
-								(field as any).lastExecutedAt = new Date().toLocaleTimeString();
-								(field as any).lastExecutionStatus = 'success';
+								field.lastExecutedUrl = interpolatedUrl;
+								field.lastExecutedAt = new Date().toLocaleTimeString();
+								field.lastExecutionStatus = 'success';
 							}
 
 							let retryLogs: string[] = [];
@@ -1731,9 +1788,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							};
 
 							if (finalFetchError || (typeof stepOutput === 'string' && (stepOutput.startsWith('[Fetch Failed') || stepOutput.startsWith('HTTP Error') || stepOutput.startsWith('[Browser: Skipped - Invalid or empty URL')))) {
-								(field as any).lastExecutionStatus = 'failed';
+								field.lastExecutionStatus = 'failed';
 								const errSummary = finalFetchError || String(stepOutput);
-								(field as any).lastExecutionLog = [
+								field.lastExecutionLog = [
 									`>>> Browser Fetch Failed: ${interpolatedUrl || targetUrl}`,
 									...retryLogs,
 									`Final Error: ${errSummary}`
@@ -1741,7 +1798,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								throw new Error(errSummary);
 							}
 							if (retryLogs.length > 0) {
-								(field as any).lastExecutionLog = [
+								field.lastExecutionLog = [
 									`>>> Visited Target URL: ${interpolatedUrl || targetUrl}`,
 									...retryLogs,
 									`Extracted Length: ${typeof stepOutput === 'string' ? stepOutput.length : 0} chars`
@@ -1764,7 +1821,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							let existingPromptOutput = '';
 
 							if (customMetadata[fieldLabel]) {
-								const metaVal = customMetadata[fieldLabel];
+								const metaVal: unknown = customMetadata[fieldLabel];
 								if (typeof metaVal === 'string') {
 									const trimmed = metaVal.trim();
 									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
@@ -1775,34 +1832,34 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 											}
 											if (isUserInputVisible) {
 												if (Array.isArray(parsed.userPrompts)) {
-													userPrompts = parsed.userPrompts.map((item: any) => String(item ?? ''));
+													userPrompts = parsed.userPrompts.map((item: unknown) => String(item ?? ''));
 												}
-												if (parsed.userPrompt !== undefined) userPrompt = String(parsed.userPrompt).trim();
+												if (parsed.userPrompt !== undefined) { userPrompt = String(parsed.userPrompt).trim(); }
 											}
-											if (parsed.prompt !== undefined) legacySavedPrompt = String(parsed.prompt).trim();
-											if (parsed.targetModel) promptModel = String(parsed.targetModel);
-											if (parsed.targetProvider) promptProvider = String(parsed.targetProvider);
-											if (parsed.output) existingPromptOutput = String(parsed.output);
+											if (parsed.prompt !== undefined) { legacySavedPrompt = String(parsed.prompt).trim(); }
+											if (parsed.targetModel) { promptModel = String(parsed.targetModel); }
+											if (parsed.targetProvider) { promptProvider = String(parsed.targetProvider); }
+											if (parsed.output) { existingPromptOutput = String(parsed.output); }
 										} catch {
 											legacySavedPrompt = trimmed;
 										}
 									} else {
 										legacySavedPrompt = trimmed;
 									}
-								} else if (typeof metaVal === 'object' && metaVal !== null) {
-									if ((metaVal as any).preInjectedPrompt !== undefined && String((metaVal as any).preInjectedPrompt).trim()) {
-										preInjectedPrompt = String((metaVal as any).preInjectedPrompt).trim();
+								} else if (isWorkflowRecord(metaVal)) {
+									if (metaVal.preInjectedPrompt !== undefined && String(metaVal.preInjectedPrompt).trim()) {
+										preInjectedPrompt = String(metaVal.preInjectedPrompt).trim();
 									}
 									if (isUserInputVisible) {
-										if (Array.isArray((metaVal as any).userPrompts)) {
-											userPrompts = (metaVal as any).userPrompts.map((item: any) => String(item ?? ''));
+										if (Array.isArray(metaVal.userPrompts)) {
+											userPrompts = metaVal.userPrompts.map((item: unknown) => String(item ?? ''));
 										}
-										if ((metaVal as any).userPrompt !== undefined) userPrompt = String((metaVal as any).userPrompt).trim();
+										if (metaVal.userPrompt !== undefined) { userPrompt = String(metaVal.userPrompt).trim(); }
 									}
-									if ((metaVal as any).prompt !== undefined) legacySavedPrompt = String((metaVal as any).prompt).trim();
-									if ((metaVal as any).targetModel) promptModel = String((metaVal as any).targetModel);
-									if ((metaVal as any).targetProvider) promptProvider = String((metaVal as any).targetProvider);
-									if ((metaVal as any).output) existingPromptOutput = String((metaVal as any).output);
+									if (metaVal.prompt !== undefined) { legacySavedPrompt = String(metaVal.prompt).trim(); }
+									if (metaVal.targetModel) { promptModel = String(metaVal.targetModel); }
+									if (metaVal.targetProvider) { promptProvider = String(metaVal.targetProvider); }
+									if (metaVal.output) { existingPromptOutput = String(metaVal.output); }
 								}
 							}
 							const promptDefaultModel = getGlobalDefaultModel();
@@ -1898,7 +1955,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						case 'tts': {
 							// 3.5 Audio / TTS Primitive: check cached local MP3 file or synthesize speech via LLM API
 							let rawText = field.defaultContent || '';
-							let displayText = (field as any).ttsDisplayText || '';
+							let displayText = field.ttsDisplayText || '';
 							let targetCredId = field.targetCredentialId || '';
 							let targetProvider = field.targetProvider || 'gemini';
 							let targetModel = field.targetModel || (targetProvider === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
@@ -1917,19 +1974,19 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 										try {
 											const parsed = JSON.parse(trimmed);
-											if (parsed.text !== undefined) rawText = String(parsed.text);
-											if (parsed.displayText !== undefined) displayText = String(parsed.displayText);
-											else if (parsed.ttsDisplayText !== undefined) displayText = String(parsed.ttsDisplayText);
-											if (parsed.targetCredentialId) targetCredId = String(parsed.targetCredentialId);
-											if (parsed.targetProvider) targetProvider = String(parsed.targetProvider);
-											if (parsed.targetModel) targetModel = String(parsed.targetModel);
-											if (parsed.ttsFormat) ttsFormat = String(parsed.ttsFormat).toLowerCase();
-											if (parsed.ttsVoice) ttsVoice = String(parsed.ttsVoice);
-											if (parsed.ttsAutoPlay !== undefined) ttsAutoPlay = Boolean(parsed.ttsAutoPlay);
-											if (parsed.audioFileName) audioFileName = String(parsed.audioFileName);
-											if (parsed.audioRelativePath) audioRelativePath = String(parsed.audioRelativePath);
-											if (parsed.lastGenerated) lastGenerated = String(parsed.lastGenerated);
-											if (parsed.lastSynthesizedText !== undefined) lastSynthesizedText = String(parsed.lastSynthesizedText);
+											if (parsed.text !== undefined) { rawText = String(parsed.text); }
+											if (parsed.displayText !== undefined) { displayText = String(parsed.displayText); }
+											else if (parsed.ttsDisplayText !== undefined) { displayText = String(parsed.ttsDisplayText); }
+											if (parsed.targetCredentialId) { targetCredId = String(parsed.targetCredentialId); }
+											if (parsed.targetProvider) { targetProvider = String(parsed.targetProvider); }
+											if (parsed.targetModel) { targetModel = String(parsed.targetModel); }
+											if (parsed.ttsFormat) { ttsFormat = String(parsed.ttsFormat).toLowerCase(); }
+											if (parsed.ttsVoice) { ttsVoice = String(parsed.ttsVoice); }
+											if (parsed.ttsAutoPlay !== undefined) { ttsAutoPlay = Boolean(parsed.ttsAutoPlay); }
+											if (parsed.audioFileName) { audioFileName = String(parsed.audioFileName); }
+											if (parsed.audioRelativePath) { audioRelativePath = String(parsed.audioRelativePath); }
+											if (parsed.lastGenerated) { lastGenerated = String(parsed.lastGenerated); }
+											if (parsed.lastSynthesizedText !== undefined) { lastSynthesizedText = String(parsed.lastSynthesizedText); }
 										} catch {
 											rawText = trimmed;
 										}
@@ -1993,7 +2050,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							customMetadata[fieldLabel] = JSON.stringify({
 								text: rawText,
 								displayText: displayText,
-								ttsShowSpeechTextInTicket: Boolean((field as any).ttsShowSpeechTextInTicket),
+								ttsShowSpeechTextInTicket: Boolean(field.ttsShowSpeechTextInTicket),
 								targetCredentialId: targetCredId,
 								targetProvider,
 								targetModel,
@@ -2033,13 +2090,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 										try {
 											const parsed = JSON.parse(trimmed);
-											if (parsed.mediaFilePath !== undefined) mediaFilePath = String(parsed.mediaFilePath);
-											else if (parsed.filePath !== undefined) mediaFilePath = String(parsed.filePath);
-											if (parsed.mediaFileName !== undefined) mediaFileName = String(parsed.mediaFileName);
-											else if (parsed.fileName !== undefined) mediaFileName = String(parsed.fileName);
-											if (parsed.mediaMimeType !== undefined) mediaMimeType = String(parsed.mediaMimeType);
-											if (typeof parsed.mediaPlaybackRate === 'number') mediaPlaybackRate = parsed.mediaPlaybackRate;
-											if (parsed.mediaAutoPlay !== undefined) mediaAutoPlay = Boolean(parsed.mediaAutoPlay);
+											if (parsed.mediaFilePath !== undefined) { mediaFilePath = String(parsed.mediaFilePath); }
+											else if (parsed.filePath !== undefined) { mediaFilePath = String(parsed.filePath); }
+											if (parsed.mediaFileName !== undefined) { mediaFileName = String(parsed.mediaFileName); }
+											else if (parsed.fileName !== undefined) { mediaFileName = String(parsed.fileName); }
+											if (parsed.mediaMimeType !== undefined) { mediaMimeType = String(parsed.mediaMimeType); }
+											if (typeof parsed.mediaPlaybackRate === 'number') { mediaPlaybackRate = parsed.mediaPlaybackRate; }
+											if (parsed.mediaAutoPlay !== undefined) { mediaAutoPlay = Boolean(parsed.mediaAutoPlay); }
 										} catch {
 											mediaFilePath = trimmed;
 										}
@@ -2102,39 +2159,39 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							let existingOutput = '';
 							let externalScripts: string[] = Array.isArray(field.externalScripts) ? [...field.externalScripts] : [];
 
-							const rawMetaVal = customMetadata[fieldLabel];
+							const rawMetaVal: unknown = customMetadata[fieldLabel];
 							if (rawMetaVal) {
 								if (typeof rawMetaVal === 'string') {
 									const trimmed = rawMetaVal.trim();
 									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 										try {
 											const parsed = JSON.parse(trimmed);
-											if (parsed.code !== undefined) rawCode = String(parsed.code);
-											if (parsed.pythonCode !== undefined) rawCode = String(parsed.pythonCode);
-											if (parsed.pythonPath !== undefined) pythonPath = String(parsed.pythonPath);
-											if (parsed.output !== undefined) existingOutput = String(parsed.output);
-											if (Array.isArray(parsed.externalScripts)) externalScripts = parsed.externalScripts;
+											if (parsed.code !== undefined) { rawCode = String(parsed.code); }
+											if (parsed.pythonCode !== undefined) { rawCode = String(parsed.pythonCode); }
+											if (parsed.pythonPath !== undefined) { pythonPath = String(parsed.pythonPath); }
+											if (parsed.output !== undefined) { existingOutput = String(parsed.output); }
+											if (Array.isArray(parsed.externalScripts)) { externalScripts = parsed.externalScripts; }
 										} catch {
 											rawCode = trimmed;
 										}
 									} else {
 										rawCode = trimmed;
 									}
-								} else if (typeof rawMetaVal === 'object' && rawMetaVal !== null) {
-									if ((rawMetaVal as any).code !== undefined) rawCode = String((rawMetaVal as any).code);
-									if ((rawMetaVal as any).pythonCode !== undefined) rawCode = String((rawMetaVal as any).pythonCode);
-									if ((rawMetaVal as any).pythonPath !== undefined) {
-										const p = (rawMetaVal as any).pythonPath;
-										if (typeof p === 'object' && p !== null) {
+								} else if (isWorkflowRecord(rawMetaVal)) {
+									if (rawMetaVal.code !== undefined) { rawCode = String(rawMetaVal.code); }
+									if (rawMetaVal.pythonCode !== undefined) { rawCode = String(rawMetaVal.pythonCode); }
+									if (rawMetaVal.pythonPath !== undefined) {
+										const p = rawMetaVal.pythonPath;
+										if (isWorkflowRecord(p)) {
 											pythonPath = String(p.interpreterPath || p.pythonPath || '');
 										} else {
 											const s = String(p);
 											pythonPath = s === '[object Object]' ? '' : s;
 										}
 									}
-									if ((rawMetaVal as any).output !== undefined) existingOutput = String((rawMetaVal as any).output);
-									if (Array.isArray((rawMetaVal as any).externalScripts)) {
-										externalScripts = (rawMetaVal as any).externalScripts;
+									if (rawMetaVal.output !== undefined) { existingOutput = String(rawMetaVal.output); }
+									if (Array.isArray(rawMetaVal.externalScripts)) {
+										externalScripts = rawMetaVal.externalScripts;
 									}
 								}
 							}
@@ -2195,28 +2252,28 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							let rawCommandsList: string[] = normalizeSshCommandsList(field.sshCommands, field.sshCommand || field.defaultContent || '');
 							let existingOutput = field.sshOutput || '';
 							let sshOutputLines: number = typeof field.sshOutputLines === 'number' && field.sshOutputLines > 0 ? field.sshOutputLines : 50;
-							let history: any[] = [];
+							let history: unknown[] = [];
 
 							const rawSshMeta = customMetadata[fieldLabel];
 							const sshVal = normalizeSshTicketValue(rawSshMeta);
 							if (sshVal) {
 								// Ticket value uses the same names as the template config (sshHost, sshPort, ...).
-								if (sshVal.sshHost !== undefined) sshHost = String(sshVal.sshHost ?? '');
-								if (sshVal.sshPort !== undefined) sshPort = sshVal.sshPort ?? 22;
-								if (sshVal.sshUser !== undefined) sshUser = String(sshVal.sshUser ?? 'root');
-								if (sshVal.sshPassword !== undefined) sshPassword = String(sshVal.sshPassword ?? '');
-								if (sshVal.sshCwd !== undefined) sshCwd = String(sshVal.sshCwd ?? '');
+								if (sshVal.sshHost !== undefined) { sshHost = String(sshVal.sshHost ?? ''); }
+								if (sshVal.sshPort !== undefined) { sshPort = sshVal.sshPort ?? 22; }
+								if (sshVal.sshUser !== undefined) { sshUser = String(sshVal.sshUser ?? 'root'); }
+								if (sshVal.sshPassword !== undefined) { sshPassword = String(sshVal.sshPassword ?? ''); }
+								if (sshVal.sshCwd !== undefined) { sshCwd = String(sshVal.sshCwd ?? ''); }
 								if (Array.isArray(sshVal.sshCommands)) {
 									rawCommandsList = normalizeSshCommandsList(sshVal.sshCommands);
 								} else if (sshVal.sshCommand !== undefined) {
 									rawCommandsList = normalizeSshCommandsList(undefined, String(sshVal.sshCommand ?? ''));
 								}
-								if (sshVal.sshOutput !== undefined) existingOutput = String(sshVal.sshOutput);
+								if (sshVal.sshOutput !== undefined) { existingOutput = String(sshVal.sshOutput); }
 								if (sshVal.sshOutputLines !== undefined) {
 									const parsedN = Number(sshVal.sshOutputLines);
-									if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+									if (!isNaN(parsedN) && parsedN > 0) { sshOutputLines = Math.floor(parsedN); }
 								}
-								if (Array.isArray(sshVal.history)) history = sshVal.history;
+								if (Array.isArray(sshVal.history)) { history = sshVal.history; }
 							} else if (typeof rawSshMeta === 'string' && rawSshMeta.trim()) {
 								rawCommandsList = [rawSshMeta.trim()];
 							} else if (Array.isArray(rawSshMeta)) {
@@ -2229,13 +2286,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 									rawCommandsList = [ovVal];
 								} else if (Array.isArray(ovVal)) {
 									rawCommandsList = normalizeSshCommandsList(ovVal);
-								} else if (typeof ovVal === 'object' && ovVal !== null) {
+								} else if (isWorkflowRecord(ovVal)) {
 									const ov = normalizeSshTicketValue(ovVal) ?? {};
-									if (ov.sshHost) sshHost = String(ov.sshHost);
-									if (ov.sshPort) sshPort = ov.sshPort;
-									if (ov.sshUser) sshUser = String(ov.sshUser);
-									if (ov.sshPassword) sshPassword = String(ov.sshPassword);
-									if (ov.sshCwd) sshCwd = String(ov.sshCwd);
+									if (ov.sshHost) { sshHost = String(ov.sshHost); }
+									if (ov.sshPort) { sshPort = ov.sshPort; }
+									if (ov.sshUser) { sshUser = String(ov.sshUser); }
+									if (ov.sshPassword) { sshPassword = String(ov.sshPassword); }
+									if (ov.sshCwd) { sshCwd = String(ov.sshCwd); }
 									if (Array.isArray(ov.sshCommands)) {
 										rawCommandsList = normalizeSshCommandsList(ov.sshCommands);
 									} else if (ov.sshCommand) {
@@ -2243,7 +2300,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 									}
 									if (ov.sshOutputLines) {
 										const parsedN = Number(ov.sshOutputLines);
-										if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+										if (!isNaN(parsedN) && parsedN > 0) { sshOutputLines = Math.floor(parsedN); }
 									}
 								}
 							}
@@ -2331,7 +2388,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						}
 
 						case 'http_request': {
-							const effectiveField: ICustomField = { ...field };
+							const effectiveField: IRuntimeCustomField = { ...field };
 							const rawHttpMeta = customMetadata[fieldLabel] ?? customMetadata[field.id];
 							const httpVal = normalizeHttpTicketValue(rawHttpMeta);
 							if (httpVal) {
@@ -2354,7 +2411,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 									if (key === 'httpUrl' && String(v).trim() === '') {
 										continue;
 									}
-									(effectiveField as any)[key] = v;
+									Reflect.set(effectiveField, key, v);
 								}
 							}
 							const httpRes = await this.executeHttpRequest(effectiveField, contextVariables);
@@ -2375,10 +2432,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 							// Keep the request settings (template config names) and add the response next to them, instead of
 							// replacing the whole ticket value with the response.
-							const savedHttp: Record<string, any> = { ...(httpVal ?? {}) };
+							const savedHttp: Record<string, unknown> = { ...(httpVal ?? {}) };
 							for (const key of HTTP_REQUEST_CONFIG_KEYS) {
-								if (savedHttp[key] === undefined && (effectiveField as any)[key] !== undefined) {
-									savedHttp[key] = (effectiveField as any)[key];
+								const effectiveVal: unknown = Reflect.get(effectiveField, key);
+								if (savedHttp[key] === undefined && effectiveVal !== undefined) {
+									savedHttp[key] = effectiveVal;
 								}
 							}
 							Object.assign(savedHttp, {
@@ -2403,7 +2461,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							if (field.id) {
 								contextVariables[field.id] = cleanHttpData;
 							}
-							const prevLabels = Array.isArray((field as any).previousLabels) ? (field as any).previousLabels : [];
+							const prevLabels = getPreviousLabels(field);
 							for (const pl of prevLabels) {
 								if (pl && typeof pl === 'string') {
 									contextVariables[pl] = cleanHttpData;
@@ -2445,7 +2503,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							// 4.5 Data Table (SQLite / Structured Grid) Primitive
 							const defaultTableSlug = this._cleanKey(fieldLabel) || 'ticket_table';
 							let tableColumns: ITableColumnDefinition[] = Array.isArray(field.tableColumns) ? [...field.tableColumns] : [];
-							let tableRows: Record<string, any>[] = Array.isArray(field.tableRows) ? [...field.tableRows] : [];
+							let tableRows: Record<string, unknown>[] = Array.isArray(field.tableRows) ? [...field.tableRows] : [];
 							let dbEngine: 'sqlite' | 'none' = (field.tableDbEngine as 'sqlite' | 'none') || 'sqlite';
 							let dbPath = field.tableDbPath || '';
 							let dbTableName = field.tableDbTableName || defaultTableSlug;
@@ -2454,7 +2512,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 							const rawTableMeta = customMetadata[fieldLabel];
 							if (rawTableMeta) {
-								let parsedObj: any = undefined;
+								let parsedObj: unknown = undefined;
 								if (typeof rawTableMeta === 'string') {
 									const trimmed = rawTableMeta.trim();
 									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
@@ -2462,21 +2520,21 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 											parsedObj = JSON.parse(trimmed);
 										} catch { }
 									}
-								} else if (typeof rawTableMeta === 'object' && rawTableMeta !== null) {
+								} else if (isWorkflowRecord(rawTableMeta)) {
 									parsedObj = rawTableMeta;
 								}
-								if (parsedObj && typeof parsedObj === 'object') {
-									if (Array.isArray(parsedObj.columns) && parsedObj.columns.length > 0) tableColumns = parsedObj.columns;
-									if (Array.isArray(parsedObj.rows) && parsedObj.rows.length > 0) tableRows = parsedObj.rows;
-									if (parsedObj.dbEngine) dbEngine = parsedObj.dbEngine;
-									if (typeof parsedObj.dbPath === 'string' && parsedObj.dbPath.trim() !== '') dbPath = parsedObj.dbPath;
+								if (isWorkflowRecord(parsedObj)) {
+									if (Array.isArray(parsedObj.columns) && parsedObj.columns.length > 0) { tableColumns = parsedObj.columns; }
+									if (Array.isArray(parsedObj.rows) && parsedObj.rows.length > 0) { tableRows = parsedObj.rows; }
+									if (parsedObj.dbEngine) { dbEngine = parsedObj.dbEngine as typeof dbEngine; }
+									if (typeof parsedObj.dbPath === 'string' && parsedObj.dbPath.trim() !== '') { dbPath = parsedObj.dbPath; }
 									if (typeof parsedObj.tableName === 'string' && parsedObj.tableName.trim() !== '') {
 										if (!(field.tableDbTableName && parsedObj.tableName.trim() === defaultTableSlug && field.tableDbTableName !== defaultTableSlug)) {
 											dbTableName = parsedObj.tableName;
 										}
 									}
-									if (parsedObj.autoSyncDb !== undefined) autoSyncDb = Boolean(parsedObj.autoSyncDb);
-									if (typeof parsedObj.sqlQuery === 'string' && parsedObj.sqlQuery.trim() !== '') sqlQuery = parsedObj.sqlQuery;
+									if (parsedObj.autoSyncDb !== undefined) { autoSyncDb = Boolean(parsedObj.autoSyncDb); }
+									if (typeof parsedObj.sqlQuery === 'string' && parsedObj.sqlQuery.trim() !== '') { sqlQuery = parsedObj.sqlQuery; }
 								}
 							}
 
@@ -2568,7 +2626,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							let sqlOutputText = '';
 							let interpolatedSql = '';
 							let cleanedInterpolatedSql = '';
-							let sqlRes: any = undefined;
+							let sqlRes: ISqliteTableOperationResult | undefined = undefined;
 							if (sqlQuery.trim()) {
 								interpolatedSql = this._interpolateVariables(sqlQuery.trim(), contextVariables);
 								if (isParamTableExpr && rawDbTableName && interpolatedSql.includes(rawDbTableName)) {
@@ -2735,7 +2793,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 						case 'output': {
 							// 4. Output Manifest Primitive: aggregate enabled primitive outputs
-							const aggregatedMap: Record<string, any> = {};
+							const aggregatedMap: Record<string, unknown> = {};
 							const specs: IOutputSpec[] = field.outputSpecs || [];
 							const enabledSpecs = specs.filter(s => s.enabled !== false);
 
@@ -2745,7 +2803,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 									if (!specKey) {
 										continue;
 									}
-									let rawVal: any;
+									let rawVal: unknown;
 									if (spec.isCustom || (spec.sourceExpression && spec.sourceExpression.trim().length > 0)) {
 										rawVal = this._resolveOutputSpecValue(spec, contextVariables);
 									} else {
@@ -2803,7 +2861,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							}
 							delete customMetadata['outputSpecs'];
 							delete customMetadata['output_specs'];
-							const outputPayloadToPersist = (typeof stepOutput === 'object' && stepOutput !== null && !Array.isArray(stepOutput))
+							const outputPayloadToPersist = (isWorkflowRecord(stepOutput) && !Array.isArray(stepOutput))
 								? { ...stepOutput, lastUpdated: new Date().toISOString() }
 								: stepOutput;
 							customMetadata[fieldLabel] = typeof outputPayloadToPersist === 'object' ? JSON.stringify(outputPayloadToPersist) : String(outputPayloadToPersist);
@@ -2821,10 +2879,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							const tType = this._interpolateVariables(field.wfTicketType || 'Task', contextVariables).trim();
 							const tTitle = this._interpolateVariables(field.wfTicketTitle || `Ticket ${fieldLabel}`, contextVariables).trim();
 							const tPath = this._interpolateVariables(field.wfTicketPath || '.', contextVariables).trim();
-							const resolvedParams: Record<string, any> = {};
-							if (field.wfTicketParams && typeof field.wfTicketParams === 'object') {
+							const resolvedParams: Record<string, unknown> = {};
+							if (isWorkflowRecord(field.wfTicketParams)) {
 								for (const [pk, pv] of Object.entries(field.wfTicketParams)) {
-									if (pv === undefined || pv === '') continue;
+									if (pv === undefined || pv === '') { continue; }
 									const singleVar = String(pv).trim().match(/^\{([^{}]+)\}$/);
 									resolvedParams[pk] = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
 										? contextVariables[singleVar[1].trim()]
@@ -2854,16 +2912,16 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						case 'run_tickets': {
 							const rawTarget = (field.wfTicketTarget || '').trim();
 							const singleVar = rawTarget.match(/^\{([^{}]+)\}$/);
-							let resolvedTarget: any = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
+							let resolvedTarget: unknown = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
 								? contextVariables[singleVar[1].trim()]
 								: this._interpolateVariables(rawTarget, contextVariables).trim();
-							if (resolvedTarget && typeof resolvedTarget === 'object') {
+							if (isWorkflowRecord(resolvedTarget)) {
 								resolvedTarget = resolvedTarget.ticketId || resolvedTarget.entityUri || resolvedTarget.ticketName || '';
 							}
-							const resolvedParams: Record<string, any> = {};
-							if (field.wfTicketParams && typeof field.wfTicketParams === 'object') {
+							const resolvedParams: Record<string, unknown> = {};
+							if (isWorkflowRecord(field.wfTicketParams)) {
 								for (const [pk, pv] of Object.entries(field.wfTicketParams)) {
-									if (pv === undefined || pv === '') continue;
+									if (pv === undefined || pv === '') { continue; }
 									const pVar = String(pv).trim().match(/^\{([^{}]+)\}$/);
 									resolvedParams[pk] = (pVar && contextVariables[pVar[1].trim()] !== undefined)
 										? contextVariables[pVar[1].trim()]
@@ -2891,7 +2949,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						case 'get_outputs': {
 							const rawTarget = (field.wfTicketTarget || '').trim();
 							const singleVar = rawTarget.match(/^\{([^{}]+)\}$/);
-							const resolvedTarget: any = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
+							const resolvedTarget: unknown = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
 								? contextVariables[singleVar[1].trim()]
 								: this._interpolateVariables(rawTarget, contextVariables).trim();
 							const targetField = (field.wfTicketField || '').trim() || undefined;
@@ -2909,7 +2967,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							const targetVar = field.wfTicketVariable ? this._interpolateVariables(field.wfTicketVariable, contextVariables).trim() : '';
 							const rawTarget = (field.wfTicketTarget ? this._interpolateVariables(field.wfTicketTarget, contextVariables).trim() : '') || targetId || targetVar;
 							const singleVar = rawTarget.match(/^\{([^{}]+)\}$/);
-							const resolvedTarget: any = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
+							const resolvedTarget: unknown = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
 								? contextVariables[singleVar[1].trim()]
 								: (contextVariables[rawTarget] !== undefined ? contextVariables[rawTarget] : rawTarget);
 							const fieldName = field.wfTicketField ? this._interpolateVariables(field.wfTicketField, contextVariables).trim() : undefined;
@@ -2973,7 +3031,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								initialValue: rawVal,
 								runtimeValue: resolvedVal,
 								value: resolvedVal,
-								options: (field as any).options,
+								options: field.options,
 								defaultValue: field.defaultValue
 							};
 							break;
@@ -2991,7 +3049,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						if (field.id) {
 							contextVariables[field.id] = sanitizedStepOut;
 						}
-						const prevLabels = Array.isArray((field as any).previousLabels) ? (field as any).previousLabels : [];
+						const prevLabels = getPreviousLabels(field);
 						for (const pl of prevLabels) {
 							if (pl && typeof pl === 'string') {
 								contextVariables[pl] = sanitizedStepOut;
@@ -3011,7 +3069,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					};
 					stepResults.push(successStepRes);
 					try { options.onStepProgress?.(successStepRes, fieldIndex, totalFieldsCount); } catch { }
-				} catch (stepErr: any) {
+				} catch (stepErr) {
 					if (isCancelled()) {
 						throw stepErr;
 					}
@@ -3086,7 +3144,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				contextVariables: contextVariables,
 				durationMs: totalDuration
 			};
-		} catch (err: any) {
+		} catch (err) {
 			this.logService.error(`[TicketWorkflowRuntime] Execution failed:`, err);
 			return {
 				success: false,
@@ -3104,7 +3162,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		}
 	}
 
-	private _parseInputStringLiteral(val: any): any {
+	private _parseInputStringLiteral(val: unknown): unknown {
 		if (typeof val !== 'string') {
 			return val;
 		}
@@ -3123,10 +3181,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				// Keep original if not a valid single quoted string literal
 			}
 		}
-		if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) {
+		if (trimmed.length >= 2 && trimmed.startsWith('\'') && trimmed.endsWith('\'')) {
 			const inner = trimmed.slice(1, -1);
 			if (!/(^|[^\\])'/.test(inner)) {
-				return inner.replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+				return inner.replace(/\\'/g, '\'').replace(/\\\\/g, '\\');
 			}
 		}
 		// 2. Unquoted numeric literal (int / float) -> number (e.g. 2 -> 2, 3.14 -> 3.14)
@@ -3160,8 +3218,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 	async executeNodeComponent(
 		workspaceUri: string | URI,
 		workingDirUri: string | URI,
-		field: ICustomField,
-		contextVariables: Record<string, any>
+		field: IRuntimeCustomField,
+		contextVariables: Record<string, unknown>
 	): Promise<IPrimitiveExecutionStepResult> {
 		const stepStart = Date.now();
 		const executedAt = new Date().toLocaleTimeString();
@@ -3169,10 +3227,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		const workUri = typeof workingDirUri === 'string' ? URI.parse(workingDirUri) : workingDirUri;
 		const fieldLabel = (field.label || field.id || field.type || 'Component').trim();
 		const fieldType = field.type;
-		let stepOutput: any = undefined;
-		let stepDetails: Record<string, any> | undefined = undefined;
+		let stepOutput: unknown = undefined;
+		let stepDetails: Record<string, unknown> | undefined = undefined;
 
-		const describeRuntimeValue = (val: any): { typeTag: string; preview: string } => {
+		const describeRuntimeValue = (val: unknown): { typeTag: string; preview: string } => {
 			if (val === null || val === undefined) {
 				return { typeTag: 'None', preview: 'None' };
 			}
@@ -3201,8 +3259,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		if (field.disabled) {
 			const durationMs = Date.now() - stepStart;
 			const skipMsg = `>>> Component [${fieldType}] "${fieldLabel}" is DISABLED (skipped execution).`;
-			(field as any).lastExecutionStatus = 'skipped';
-			(field as any).lastExecutionLog = skipMsg;
+			field.lastExecutionStatus = 'skipped';
+			field.lastExecutionLog = skipMsg;
 			this.logService.info(`[TicketWorkflowRuntime] Node Component '${fieldLabel}' is disabled, skipping execution.`);
 			return {
 				fieldId: field.id,
@@ -3225,7 +3283,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			ensureNotCancelled();
 			switch (fieldType) {
 				case 'parameters': {
-					const resolvedParams: Record<string, any> = {};
+					const resolvedParams: Record<string, unknown> = {};
 					const traceLines: string[] = [
 						`>>> Executing Component [INPUTS]: "${fieldLabel}"`,
 						`Timestamp: ${executedAt}`
@@ -3234,12 +3292,12 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						const callerKeys: string[] = Array.isArray(contextVariables['__callerInputKeys__']) ? contextVariables['__callerInputKeys__'] : [];
 						for (const p of field.parameters) {
 							const pKey = (p.name || p.id || '').trim();
-							if (!pKey) continue;
+							if (!pKey) { continue; }
 							const rawDef = p.defaultValue ?? '';
 							const singleVar = typeof rawDef === 'string' ? rawDef.trim().match(/^\{([^{}]+)\}$/) : null;
-							const isNonEmpty = (v: any) => v !== undefined && v !== null && (typeof v !== 'string' || v.trim() !== '');
+							const isNonEmpty = (v: unknown) => v !== undefined && v !== null && (typeof v !== 'string' || v.trim() !== '');
 							const isCallerOverride = callerKeys.includes(pKey) && isNonEmpty(contextVariables[pKey]);
-							let val: any;
+							let val: unknown;
 							let sourceNote = '';
 							if (isCallerOverride) {
 								// Explicitly passed by Sub-Workflow caller: takes priority over default value
@@ -3280,14 +3338,14 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					contextVariables[fieldLabel] = resolvedParams;
 					contextVariables[this._cleanKey(fieldLabel)] = resolvedParams;
 					stepDetails = { parameters: resolvedParams };
-					(field as any).lastExecutionLog = traceLines.join('\n');
-					(field as any).lastExecutionOutput = resolvedParams;
+					field.lastExecutionLog = traceLines.join('\n');
+					field.lastExecutionOutput = resolvedParams;
 					break;
 				}
 				case 'prompt': {
 					const preInjected = (field.defaultContent || '').trim();
-					const userPromptList = Array.isArray((field as any).defaultUserPrompts) && (field as any).defaultUserPrompts.length > 0
-						? (field as any).defaultUserPrompts.map((s: string) => (s || '').trim()).filter(Boolean)
+					const userPromptList = Array.isArray(field.defaultUserPrompts) && field.defaultUserPrompts.length > 0
+						? field.defaultUserPrompts.map((s: string) => (s || '').trim()).filter(Boolean)
 						: ((field.defaultUserPrompt || '').trim() ? [(field.defaultUserPrompt || '').trim()] : []);
 					const userPrompt = userPromptList.join('\n\n');
 					const rawPrompt = (preInjected && userPrompt)
@@ -3310,7 +3368,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							}
 						}
 					}
-					let parsedOutput: any = rawAiResp;
+					let parsedOutput: unknown = rawAiResp;
 					if (typeof rawAiResp === 'string') {
 						let candidateJson = rawAiResp.trim();
 						if (candidateJson.startsWith('```')) {
@@ -3330,9 +3388,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					const formattedResp = typeof rawAiResp === 'string' ? rawAiResp : JSON.stringify(stepOutput, null, 2);
 					const cappedResp = formattedResp.length > 3000 ? formattedResp.substring(0, 3000) + ' ... [truncated]' : formattedResp;
 					field.debugPromptOutput = cappedResp;
-					delete (field as any).lastSentPrompt;
-					(field as any).lastExecutionLog = cappedResp;
-					(field as any).lastExecutionOutput = stepOutput;
+					delete field.lastSentPrompt;
+					field.lastExecutionLog = cappedResp;
+					field.lastExecutionOutput = stepOutput;
 					stepDetails = { model: promptModel, provider: promptProvider, prompt: (interpolatedPrompt.length > 3000 ? interpolatedPrompt.substring(0, 3000) + ' ... [truncated]' : interpolatedPrompt), response: stepOutput };
 					if (typeof rawAiResp === 'string' && (rawAiResp.startsWith('[AI Execution Error') || rawAiResp.startsWith('[AI Service Error'))) {
 						stepDetails.error = rawAiResp;
@@ -3346,7 +3404,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					const pyRes = await this.executePythonScript(wsUri, workUri, field.pythonPath || '', interpolatedCode, contextVariables, field.externalScripts);
 					const cappedPyOutput = (pyRes.output || '').length > 3000 ? (pyRes.output || '').substring(0, 3000) + ' ... [truncated]' : (pyRes.output || '(Script pipeline completed with no stdout/stderr output)');
 					field.pythonOutput = cappedPyOutput;
-					(field as any).lastExecutionLog = cappedPyOutput;
+					field.lastExecutionLog = cappedPyOutput;
 					stepDetails = {
 						exitCode: pyRes.exitCode,
 						output: pyRes.output,
@@ -3363,7 +3421,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					contextVariables[fieldLabel] = stepOutput;
 					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 					field.pythonResult = pyRes.result;
-					(field as any).lastExecutionOutput = stepOutput;
+					field.lastExecutionOutput = stepOutput;
 					break;
 				}
 				case 'table': {
@@ -3382,7 +3440,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					});
 					stepOutput = sqlRes.isSelectQuery && Array.isArray(sqlRes.queryRows) ? sqlRes.queryRows : (sqlRes.rows || []);
 					if (sqlRes.isSelectQuery && Array.isArray(sqlRes.queryRows)) {
-						(field as any).lastQueryRows = sqlRes.queryRows;
+						field.lastQueryRows = sqlRes.queryRows;
 					}
 					if (!dbPath || (field.tableDbEngine || 'sqlite') === 'none') {
 						if (sqlRes.isSelectQuery && Array.isArray(sqlRes.queryRows)) {
@@ -3414,8 +3472,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						}
 					}
 					field.debugSqlOutput = sqlSummaryLines.join('\n');
-					(field as any).lastExecutionLog = field.debugSqlOutput;
-					(field as any).lastExecutionOutput = stepOutput;
+					field.lastExecutionLog = field.debugSqlOutput;
+					field.lastExecutionOutput = stepOutput;
 					const nodeTablePayload = {
 						columns: field.tableColumns || [],
 						rows: Array.isArray(stepOutput) ? stepOutput : (field.tableRows || []),
@@ -3437,9 +3495,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					contextVariables[`${this._cleanKey(fieldLabel)}_payload`] = nodeTablePayload;
 					stepDetails = { dbPath, tableName: tblName, sqlQuery, rowCount: Array.isArray(stepOutput) ? stepOutput.length : 0 };
 					if (!sqlRes.success) {
-						(field as any).lastExecutionStatus = 'failed';
-						(field as any).lastExecutionDurationMs = Date.now() - stepStart;
-						(field as any).lastExecutedAt = executedAt;
+						field.lastExecutionStatus = 'failed';
+						field.lastExecutionDurationMs = Date.now() - stepStart;
+						field.lastExecutedAt = executedAt;
 						return {
 							fieldId: field.id,
 							fieldLabel,
@@ -3457,8 +3515,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					const interpolatedUrl = this._interpolateVariables(field.defaultUrl || '', contextVariables).trim();
 					if (interpolatedUrl) {
 						field.lastResolvedUrl = interpolatedUrl;
-						(field as any).lastExecutedUrl = interpolatedUrl;
-						(field as any).lastExecutedAt = executedAt;
+						field.lastExecutedUrl = interpolatedUrl;
+						field.lastExecutedAt = executedAt;
 					}
 					const maxRetries = (typeof field.browserMaxRetries === 'number' && Number.isFinite(field.browserMaxRetries))
 						? Math.max(0, Math.min(10, Math.floor(field.browserMaxRetries)))
@@ -3475,32 +3533,33 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							checkCancelled: ensureNotCancelled
 						})
 						: { title: '', content: '', attempts: 0, retryLogs: [] as string[], lastError: 'Invalid or empty URL' };
-					stepOutput = extracted.content || '';
+					const extractedText = extracted.content || '';
+					stepOutput = extractedText;
 					stepDetails = {
 						rawUrl: field.defaultUrl,
 						url: interpolatedUrl,
 						resolvedUrl: interpolatedUrl,
-						contentLength: stepOutput.length,
+						contentLength: extractedText.length,
 						attempts: extracted.attempts,
 						retryLogs: extracted.retryLogs
 					};
-					if (extracted.lastError || (typeof stepOutput === 'string' && (stepOutput.startsWith('[Fetch Failed') || stepOutput.startsWith('HTTP Error')))) {
-						const errMsg = extracted.lastError || stepOutput;
-						(field as any).lastExecutionStatus = 'failed';
-						(field as any).lastExecutionLog = [
+					if (extracted.lastError || (typeof extractedText === 'string' && (extractedText.startsWith('[Fetch Failed') || extractedText.startsWith('HTTP Error')))) {
+						const errMsg = extracted.lastError || extractedText;
+						field.lastExecutionStatus = 'failed';
+						field.lastExecutionLog = [
 							`>>> Browser Fetch Failed: ${interpolatedUrl || '(empty)'}`,
 							...extracted.retryLogs,
 							`Final Error: ${errMsg}`
 						].join('\n');
 						throw new Error(errMsg);
 					}
-					(field as any).lastExecutionStatus = 'success';
-					const previewText = stepOutput.length > 2000 ? stepOutput.substring(0, 2000) + '\n... [truncated]' : stepOutput;
+					field.lastExecutionStatus = 'success';
+					const previewText = extractedText.length > 2000 ? extractedText.substring(0, 2000) + '\n... [truncated]' : extractedText;
 					const retryHeader = extracted.retryLogs.length > 0 ? `${extracted.retryLogs.join('\n')}\n` : '';
-					(field as any).lastExecutionLog = `>>> Visited Target URL: ${interpolatedUrl || '(empty)'}\n${retryHeader}Extracted Length: ${stepOutput.length} chars\n\n${previewText}`;
-					(field as any).lastExecutionOutput = stepOutput;
-					contextVariables[fieldLabel] = stepOutput;
-					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+					field.lastExecutionLog = `>>> Visited Target URL: ${interpolatedUrl || '(empty)'}\n${retryHeader}Extracted Length: ${extractedText.length} chars\n\n${previewText}`;
+					field.lastExecutionOutput = extractedText;
+					contextVariables[fieldLabel] = extractedText;
+					contextVariables[this._cleanKey(fieldLabel)] = extractedText;
 					contextVariables[`${fieldLabel}_url`] = interpolatedUrl;
 					contextVariables[`${this._cleanKey(fieldLabel)}_url`] = interpolatedUrl;
 					contextVariables[`${fieldLabel}_resolved_url`] = interpolatedUrl;
@@ -3514,16 +3573,16 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					const ttsModel = field.targetModel || (ttsProvider === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
 					const ttsFormat = (field.ttsFormat || 'mp3').toLowerCase();
 					const ttsVoice = field.ttsVoice || (ttsProvider === 'openai' ? 'alloy' : 'Kore');
-					const sourceText = (field.defaultContent || '').trim() ? (field.defaultContent || '') : ((field as any).ttsDisplayText || '');
+					const sourceText = (field.defaultContent || '').trim() ? (field.defaultContent || '') : (field.ttsDisplayText || '');
 					const ttsText = this._interpolateVariables(sourceText, contextVariables).trim();
 					if (!ttsText) {
 						throw new Error(`Text to Speech '${fieldLabel}': the text is empty.`);
 					}
 					const cacheKey = JSON.stringify([ttsText, ttsProvider, ttsModel, ttsVoice, ttsFormat]);
-					const prevPath: string = (field as any).ttsLastAudioPath || '';
+					const prevPath: string = field.ttsLastAudioPath || '';
 					let audioPath = '';
 					let cached = false;
-					if (prevPath && (field as any).ttsLastCacheKey === cacheKey && await this.fileService.exists(URI.file(prevPath))) {
+					if (prevPath && field.ttsLastCacheKey === cacheKey && await this.fileService.exists(URI.file(prevPath))) {
 						audioPath = prevPath;
 						cached = true;
 					} else {
@@ -3551,8 +3610,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						const audioUri = URI.joinPath(attachDir, `tts_${this._cleanKey(fieldLabel) || 'audio'}_${Date.now()}.${ttsFormat}`);
 						await this.fileService.writeFile(audioUri, VSBuffer.wrap(ttsRes.audioBuffer));
 						audioPath = audioUri.fsPath;
-						(field as any).ttsLastAudioPath = audioPath;
-						(field as any).ttsLastCacheKey = cacheKey;
+						field.ttsLastAudioPath = audioPath;
+						field.ttsLastCacheKey = cacheKey;
 					}
 					field.ttsAudioFile = audioPath;
 					stepOutput = audioPath;
@@ -3562,8 +3621,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						contextVariables[field.outputVariableName] = stepOutput;
 					}
 					stepDetails = { text: ttsText, provider: ttsProvider, model: ttsModel, voice: ttsVoice, format: ttsFormat, audioFile: audioPath, cached };
-					(field as any).lastExecutionLog = `>>> TEXT TO SPEECH (${ttsProvider}/${ttsModel}, voice ${ttsVoice})${cached ? ' [reused cached audio]' : ''}\n${audioPath}`;
-					(field as any).lastExecutionOutput = stepOutput;
+					field.lastExecutionLog = `>>> TEXT TO SPEECH (${ttsProvider}/${ttsModel}, voice ${ttsVoice})${cached ? ' [reused cached audio]' : ''}\n${audioPath}`;
+					field.lastExecutionOutput = stepOutput;
 					break;
 				}
 				case 'media_player': {
@@ -3579,8 +3638,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					}
 					field.mediaKind = detected.kind;
 					field.mediaMimeType = detected.mimeType;
-					(field as any).lastExecutionLog = `>>> MP3 / MP4 Player [${detected.kind.toUpperCase()}]: ${resolvedName || '(no file selected)'}\nPath: ${interpolatedPath || '(none)'}\nFormat: ${detected.ext.toUpperCase()} (${detected.mimeType})\nPlayback Speed: ${rate}x`;
-					(field as any).lastExecutionOutput = stepOutput;
+					field.lastExecutionLog = `>>> MP3 / MP4 Player [${detected.kind.toUpperCase()}]: ${resolvedName || '(no file selected)'}\nPath: ${interpolatedPath || '(none)'}\nFormat: ${detected.ext.toUpperCase()} (${detected.mimeType})\nPlayback Speed: ${rate}x`;
+					field.lastExecutionOutput = stepOutput;
 					contextVariables[fieldLabel] = stepOutput;
 					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 					stepDetails = {
@@ -3604,8 +3663,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					const playedCount = await this._playVoiceNoteClipsSequentially(clips, rate);
 					const transcript = (field.voiceTranscript || clips.map(c => (c.transcript || '').trim()).filter(Boolean).join('\n\n')).trim();
 					stepOutput = transcript;
-					(field as any).lastExecutionLog = `>>> Voice Note Playback: played ${playedCount}/${clips.length} clip(s) at ${rate}x\n${transcript || '(no transcript text)'}`;
-					(field as any).lastExecutionOutput = stepOutput;
+					field.lastExecutionLog = `>>> Voice Note Playback: played ${playedCount}/${clips.length} clip(s) at ${rate}x\n${transcript || '(no transcript text)'}`;
+					field.lastExecutionOutput = stepOutput;
 					contextVariables[fieldLabel] = stepOutput;
 					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 					stepDetails = {
@@ -3643,12 +3702,12 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 					if (!batchRes.success) {
 						const connErrMsg = batchRes.error || `SSH Connection Failed (${batchRes.user}@${batchRes.host}:${batchRes.port})`;
-						(field as any).lastExecutionLog = `>>> SSH [${batchRes.user}@${batchRes.host || '(no host)'}:${batchRes.port}] Connection Error:\n${connErrMsg}`;
-						(field as any).lastExecutionOutput = batchRes.jsonOutput;
-						(field as any).lastExecutionExitCode = batchRes.exitCode;
-						(field as any).lastExecutionStatus = 'failed';
-						(field as any).lastExecutionDurationMs = batchRes.durationMs || (Date.now() - stepStart);
-						(field as any).lastExecutedAt = executedAt;
+						field.lastExecutionLog = `>>> SSH [${batchRes.user}@${batchRes.host || '(no host)'}:${batchRes.port}] Connection Error:\n${connErrMsg}`;
+						field.lastExecutionOutput = batchRes.jsonOutput;
+						field.lastExecutionExitCode = batchRes.exitCode;
+						field.lastExecutionStatus = 'failed';
+						field.lastExecutionDurationMs = batchRes.durationMs || (Date.now() - stepStart);
+						field.lastExecutedAt = executedAt;
 						return {
 							fieldId: field.id,
 							fieldLabel,
@@ -3675,12 +3734,12 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					}
 
 					stepOutput = batchRes.jsonOutput;
-					(field as any).lastExecutionLog = `>>> SSH [${batchRes.user}@${batchRes.host}:${batchRes.port}] (${batchRes.cwd || '~'}) [${batchRes.resolvedCommands.length} command(s), Output: Last ${sshOutLines} lines/cmd]\n${stepOutput}`;
-					(field as any).lastExecutionOutput = stepOutput;
-					(field as any).lastExecutionExitCode = batchRes.exitCode;
-					(field as any).lastExecutionStatus = 'success';
-					(field as any).lastExecutionDurationMs = batchRes.durationMs || (Date.now() - stepStart);
-					(field as any).lastExecutedAt = executedAt;
+					field.lastExecutionLog = `>>> SSH [${batchRes.user}@${batchRes.host}:${batchRes.port}] (${batchRes.cwd || '~'}) [${batchRes.resolvedCommands.length} command(s), Output: Last ${sshOutLines} lines/cmd]\n${stepOutput}`;
+					field.lastExecutionOutput = stepOutput;
+					field.lastExecutionExitCode = batchRes.exitCode;
+					field.lastExecutionStatus = 'success';
+					field.lastExecutionDurationMs = batchRes.durationMs || (Date.now() - stepStart);
+					field.lastExecutedAt = executedAt;
 					stepDetails = {
 						host: batchRes.host,
 						port: batchRes.port,
@@ -3737,8 +3796,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						contextVariables[field.id] = cleanHttpData;
 					}
 
-					(field as any).lastExecutionLog = `>>> HTTP Request [${httpRes.method} ${httpRes.url}]\nStatus: ${httpRes.status} ${httpRes.statusText} (${httpRes.durationMs}ms)\n${httpRes.error ? `Error: ${httpRes.error}\n` : ''}Response Body Preview:\n${httpRes.rawText ? (httpRes.rawText.length > 2000 ? httpRes.rawText.substring(0, 2000) + '... [truncated]' : httpRes.rawText) : '(empty response)'}`;
-					(field as any).lastExecutionOutput = cleanHttpData;
+					field.lastExecutionLog = `>>> HTTP Request [${httpRes.method} ${httpRes.url}]\nStatus: ${httpRes.status} ${httpRes.statusText} (${httpRes.durationMs}ms)\n${httpRes.error ? `Error: ${httpRes.error}\n` : ''}Response Body Preview:\n${httpRes.rawText ? (httpRes.rawText.length > 2000 ? httpRes.rawText.substring(0, 2000) + '... [truncated]' : httpRes.rawText) : '(empty response)'}`;
+					field.lastExecutionOutput = cleanHttpData;
 
 					stepDetails = {
 						method: httpRes.method,
@@ -3762,30 +3821,31 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					const tType = this._interpolateVariables(field.wfTicketType || 'Task', contextVariables).trim();
 					const tTitle = this._interpolateVariables(field.wfTicketTitle || `Ticket ${fieldLabel}`, contextVariables).trim();
 					const tPath = this._interpolateVariables(field.wfTicketPath || '.', contextVariables).trim();
-					const resolvedParams: Record<string, any> = {};
-					if (field.wfTicketParams && typeof field.wfTicketParams === 'object') {
+					const resolvedParams: Record<string, unknown> = {};
+					if (isWorkflowRecord(field.wfTicketParams)) {
 						for (const [pk, pv] of Object.entries(field.wfTicketParams)) {
-							if (pv === undefined || pv === '') continue;
+							if (pv === undefined || pv === '') { continue; }
 							const singleVar = String(pv).trim().match(/^\{([^{}]+)\}$/);
 							resolvedParams[pk] = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
 								? contextVariables[singleVar[1].trim()]
 								: this._interpolateVariables(String(pv), contextVariables);
 						}
 					}
-					stepOutput = await this.createTicket({
+					const createdTicketRes = await this.createTicket({
 						workspaceUri: wsUri,
 						targetPath: tPath,
 						ticketType: tType,
 						title: tTitle,
 						parameters: resolvedParams
 					});
-					contextVariables[fieldLabel] = stepOutput;
-					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
-					stepDetails = { ticketType: tType, title: tTitle, path: tPath, parameters: resolvedParams, createdTicket: stepOutput };
-					(field as any).lastExecutionLog = `>>> CREATE_TICKETS -> ${fieldLabel}\nTicket Type: ${tType}\nTitle: ${tTitle}\nResult:\n${JSON.stringify(stepOutput, null, 2)}`;
-					(field as any).lastExecutionOutput = stepOutput;
-					if (!stepOutput || !stepOutput.success) {
-						const errMsg = stepOutput?.error || `Failed to create ticket '${tTitle}'`;
+					stepOutput = createdTicketRes;
+					contextVariables[fieldLabel] = createdTicketRes;
+					contextVariables[this._cleanKey(fieldLabel)] = createdTicketRes;
+					stepDetails = { ticketType: tType, title: tTitle, path: tPath, parameters: resolvedParams, createdTicket: createdTicketRes };
+					field.lastExecutionLog = `>>> CREATE_TICKETS -> ${fieldLabel}\nTicket Type: ${tType}\nTitle: ${tTitle}\nResult:\n${JSON.stringify(createdTicketRes, null, 2)}`;
+					field.lastExecutionOutput = createdTicketRes;
+					if (!createdTicketRes || !createdTicketRes.success) {
+						const errMsg = createdTicketRes?.error || `Failed to create ticket '${tTitle}'`;
 						stepDetails.error = errMsg;
 						throw new Error(errMsg);
 					}
@@ -3794,34 +3854,35 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				case 'run_tickets': {
 					const rawTarget = (field.wfTicketTarget || '').trim();
 					const singleVar = rawTarget.match(/^\{([^{}]+)\}$/);
-					let resolvedTarget: any = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
+					let resolvedTarget: unknown = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
 						? contextVariables[singleVar[1].trim()]
 						: this._interpolateVariables(rawTarget, contextVariables).trim();
-					if (resolvedTarget && typeof resolvedTarget === 'object') {
+					if (isWorkflowRecord(resolvedTarget)) {
 						resolvedTarget = resolvedTarget.ticketId || resolvedTarget.entityUri || resolvedTarget.ticketName || '';
 					}
-					const resolvedParams: Record<string, any> = {};
-					if (field.wfTicketParams && typeof field.wfTicketParams === 'object') {
+					const resolvedParams: Record<string, unknown> = {};
+					if (isWorkflowRecord(field.wfTicketParams)) {
 						for (const [pk, pv] of Object.entries(field.wfTicketParams)) {
-							if (pv === undefined || pv === '') continue;
+							if (pv === undefined || pv === '') { continue; }
 							const pVar = String(pv).trim().match(/^\{([^{}]+)\}$/);
 							resolvedParams[pk] = (pVar && contextVariables[pVar[1].trim()] !== undefined)
 								? contextVariables[pVar[1].trim()]
 								: this._interpolateVariables(String(pv), contextVariables);
 						}
 					}
-					stepOutput = await this.runTicket({
+					const runTicketRes = await this.runTicket({
 						workspaceUri: wsUri,
 						ticketIdOrPath: String(resolvedTarget || ''),
 						inputParams: resolvedParams
 					});
-					contextVariables[fieldLabel] = stepOutput;
-					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
-					stepDetails = { targetTicket: resolvedTarget, parameters: resolvedParams, result: stepOutput };
-					(field as any).lastExecutionLog = `>>> RUN_TICKETS (${resolvedTarget})\nResult:\n${JSON.stringify(stepOutput, null, 2)}`;
-					(field as any).lastExecutionOutput = stepOutput;
-					if (!stepOutput || !stepOutput.success || stepOutput.status === 'failed') {
-						const errMsg = stepOutput?.error || `Run tickets failed for target '${resolvedTarget}'`;
+					stepOutput = runTicketRes;
+					contextVariables[fieldLabel] = runTicketRes;
+					contextVariables[this._cleanKey(fieldLabel)] = runTicketRes;
+					stepDetails = { targetTicket: resolvedTarget, parameters: resolvedParams, result: runTicketRes };
+					field.lastExecutionLog = `>>> RUN_TICKETS (${resolvedTarget})\nResult:\n${JSON.stringify(runTicketRes, null, 2)}`;
+					field.lastExecutionOutput = runTicketRes;
+					if (!runTicketRes || !runTicketRes.success || runTicketRes.status === 'failed') {
+						const errMsg = runTicketRes?.error || `Run tickets failed for target '${resolvedTarget}'`;
 						stepDetails.error = errMsg;
 						throw new Error(errMsg);
 					}
@@ -3830,7 +3891,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				case 'get_outputs': {
 					const rawTarget = (field.wfTicketTarget || '').trim();
 					const singleVar = rawTarget.match(/^\{([^{}]+)\}$/);
-					const resolvedTarget: any = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
+					const resolvedTarget: unknown = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
 						? contextVariables[singleVar[1].trim()]
 						: this._interpolateVariables(rawTarget, contextVariables).trim();
 					const targetField = (field.wfTicketField || '').trim() || undefined;
@@ -3838,8 +3899,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					contextVariables[fieldLabel] = stepOutput;
 					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 					stepDetails = { targetTicket: resolvedTarget, field: targetField, outputs: stepOutput };
-					(field as any).lastExecutionLog = `>>> GET_OUTPUTS (${typeof resolvedTarget === 'object' ? JSON.stringify(resolvedTarget) : resolvedTarget}${targetField ? `, field="${targetField}"` : ''}) -> ${fieldLabel}\n${JSON.stringify(stepOutput, null, 2)}`;
-					(field as any).lastExecutionOutput = stepOutput;
+					field.lastExecutionLog = `>>> GET_OUTPUTS (${typeof resolvedTarget === 'object' ? JSON.stringify(resolvedTarget) : resolvedTarget}${targetField ? `, field="${targetField}"` : ''}) -> ${fieldLabel}\n${JSON.stringify(stepOutput, null, 2)}`;
+					field.lastExecutionOutput = stepOutput;
 					break;
 				}
 				case 'get_ticket': {
@@ -3847,7 +3908,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					const targetVar = field.wfTicketVariable ? this._interpolateVariables(field.wfTicketVariable, contextVariables).trim() : '';
 					const rawTarget = (field.wfTicketTarget ? this._interpolateVariables(field.wfTicketTarget, contextVariables).trim() : '') || targetId || targetVar;
 					const singleVar = rawTarget.match(/^\{([^{}]+)\}$/);
-					const resolvedTarget: any = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
+					const resolvedTarget: unknown = (singleVar && contextVariables[singleVar[1].trim()] !== undefined)
 						? contextVariables[singleVar[1].trim()]
 						: (contextVariables[rawTarget] !== undefined ? contextVariables[rawTarget] : rawTarget);
 					const fieldName = field.wfTicketField ? this._interpolateVariables(field.wfTicketField, contextVariables).trim() : undefined;
@@ -3858,8 +3919,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						contextVariables[field.outputVariableName] = stepOutput;
 					}
 					stepDetails = { target: resolvedTarget, field: fieldName, result: stepOutput };
-					(field as any).lastExecutionLog = `>>> get_ticket(${JSON.stringify(resolvedTarget)}${fieldName ? `, field="${fieldName}"` : ''}) -> ${field.outputVariableName || fieldLabel}\n${JSON.stringify(stepOutput, null, 2)}`;
-					(field as any).lastExecutionOutput = stepOutput;
+					field.lastExecutionLog = `>>> get_ticket(${JSON.stringify(resolvedTarget)}${fieldName ? `, field="${fieldName}"` : ''}) -> ${field.outputVariableName || fieldLabel}\n${JSON.stringify(stepOutput, null, 2)}`;
+					field.lastExecutionOutput = stepOutput;
 					break;
 				}
 				case 'get_tickets': {
@@ -3871,8 +3932,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						contextVariables[field.outputVariableName] = stepOutput;
 					}
 					stepDetails = { query, count: Array.isArray(stepOutput) ? stepOutput.length : 0, result: stepOutput };
-					(field as any).lastExecutionLog = `>>> GET_TICKETS(${JSON.stringify(query)}) -> ${field.outputVariableName || fieldLabel} [${Array.isArray(stepOutput) ? stepOutput.length : 0} ticket(s)]\n${JSON.stringify(stepOutput, null, 2)}`;
-					(field as any).lastExecutionOutput = stepOutput;
+					field.lastExecutionLog = `>>> GET_TICKETS(${JSON.stringify(query)}) -> ${field.outputVariableName || fieldLabel} [${Array.isArray(stepOutput) ? stepOutput.length : 0} ticket(s)]\n${JSON.stringify(stepOutput, null, 2)}`;
+					field.lastExecutionOutput = stepOutput;
 					break;
 				}
 				case 'display': {
@@ -3880,12 +3941,12 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					stepOutput = await this._evaluateDisplayExpression(wsUri, workUri, rawDisp, contextVariables);
 					stepDetails = { displayExpr: rawDisp, value: stepOutput };
 					const desc = describeRuntimeValue(stepOutput);
-					(field as any).lastExecutionLog = `>>> DISPLAY (${rawDisp}) [Type: ${desc.typeTag}]\n${desc.preview}`;
-					(field as any).lastExecutionOutput = stepOutput;
+					field.lastExecutionLog = `>>> DISPLAY (${rawDisp}) [Type: ${desc.typeTag}]\n${desc.preview}`;
+					field.lastExecutionOutput = stepOutput;
 					break;
 				}
 				case 'output': {
-					const outMap: Record<string, any> = {};
+					const outMap: Record<string, unknown> = {};
 					const enabledSpecs = (field.outputSpecs || []).filter(s => s && s.enabled !== false);
 					const traceLines: string[] = [
 						`>>> Executing Component [OUTPUT]: "${fieldLabel}" (${enabledSpecs.length} exported field(s))`,
@@ -3913,8 +3974,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					contextVariables[fieldLabel] = outMap;
 					contextVariables['OUTPUT'] = outMap;
 					stepDetails = { outputs: outMap };
-					(field as any).lastExecutionLog = traceLines.join('\n');
-					(field as any).lastExecutionOutput = outMap;
+					field.lastExecutionLog = traceLines.join('\n');
+					field.lastExecutionOutput = outMap;
 					break;
 				}
 				default: {
@@ -3924,8 +3985,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
 					stepDetails = { value: stepOutput };
 					const desc = describeRuntimeValue(stepOutput);
-					(field as any).lastExecutionLog = `>>> Component [${fieldType}] "${fieldLabel}" [Type: ${desc.typeTag}]\n${desc.preview}`;
-					(field as any).lastExecutionOutput = stepOutput;
+					field.lastExecutionLog = `>>> Component [${fieldType}] "${fieldLabel}" [Type: ${desc.typeTag}]\n${desc.preview}`;
+					field.lastExecutionOutput = stepOutput;
 					break;
 				}
 			}
@@ -3941,7 +4002,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				if (field.id) {
 					contextVariables[field.id] = sanitizedStepOut;
 				}
-				const prevLabels = Array.isArray((field as any).previousLabels) ? (field as any).previousLabels : [];
+				const prevLabels = getPreviousLabels(field);
 				for (const pl of prevLabels) {
 					if (pl && typeof pl === 'string') {
 						contextVariables[pl] = sanitizedStepOut;
@@ -3951,9 +4012,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 
 			const durationMs = Date.now() - stepStart;
-			(field as any).lastExecutionStatus = 'success';
-			(field as any).lastExecutionDurationMs = durationMs;
-			(field as any).lastExecutedAt = executedAt;
+			field.lastExecutionStatus = 'success';
+			field.lastExecutionDurationMs = durationMs;
+			field.lastExecutedAt = executedAt;
 
 			return {
 				fieldId: field.id,
@@ -3964,13 +4025,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				durationMs,
 				details: stepDetails
 			};
-		} catch (err: any) {
+		} catch (err) {
 			const durationMs = Date.now() - stepStart;
 			const errMsg = err?.message || String(err);
-			(field as any).lastExecutionStatus = 'failed';
-			(field as any).lastExecutionDurationMs = durationMs;
-			(field as any).lastExecutedAt = executedAt;
-			(field as any).lastExecutionLog = `[Execution Error]: ${errMsg}`;
+			field.lastExecutionStatus = 'failed';
+			field.lastExecutionDurationMs = durationMs;
+			field.lastExecutedAt = executedAt;
+			field.lastExecutionLog = `[Execution Error]: ${errMsg}`;
 			if (fieldType === 'python') {
 				field.pythonOutput = `[Execution Error]: ${errMsg}`;
 			}
@@ -4013,7 +4074,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				i++;
 				continue;
 			}
-			if (ch === '"' || ch === "'") {
+			if (ch === '"' || ch === '\'') {
 				inQuote = ch;
 				out += ch;
 				i++;
@@ -4041,8 +4102,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		workspaceUri: URI,
 		workingDirUri: URI,
 		rawDisp: string,
-		contextVariables: Record<string, any>
-	): Promise<any> {
+		contextVariables: Record<string, unknown>
+	): Promise<unknown> {
 		const pyExpr = this._normalizeDisplayPythonExpr(rawDisp);
 		if (!pyExpr) {
 			return null;
@@ -4439,21 +4500,24 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return this.createTicket(options);
 	}
 
-	async GET_TICKET(workspaceUri: string | URI, ticketIdOrPath: string | any, field?: string): Promise<any> {
+	async GET_TICKET(workspaceUri: string | URI, ticketIdOrPath: unknown): Promise<ITicketGetResult>;
+	async GET_TICKET(workspaceUri: string | URI, ticketIdOrPath: unknown, field: string | undefined): Promise<unknown>;
+	async GET_TICKET(workspaceUri: string | URI, ticketIdOrPath: unknown, field?: string): Promise<unknown> {
 		return this.getTicket(workspaceUri, ticketIdOrPath, field);
 	}
 
-	async getTickets(workspaceUri: string | URI, querySpecOrTarget: string | any, field?: string): Promise<any> {
+	async getTickets(workspaceUri: string | URI, querySpecOrTarget: unknown, field?: string): Promise<unknown> {
 		if (typeof querySpecOrTarget === 'string') {
 			return this.getTicket(workspaceUri, querySpecOrTarget, field);
 		}
-		const spec = querySpecOrTarget || {};
+		// Non-object targets carry no query fields (their property reads were all `undefined`)
+		const spec: Record<string, unknown> = isWorkflowRecord(querySpecOrTarget) ? querySpecOrTarget : {};
 		const hasQueryFilters = spec.ticket_type !== undefined || spec.ticketType !== undefined ||
 			spec.status !== undefined || spec.title !== undefined || spec.field !== undefined ||
 			spec.path !== undefined || spec.limit !== undefined ||
 			spec.wfTicketType !== undefined || spec.wfTicketStatus !== undefined || spec.wfTicketTitle !== undefined || spec.wfTicketPath !== undefined;
 		if (!hasQueryFilters && (spec.ticketId || spec.ticket_id || spec.id || spec.ticketName || spec.ticket_name)) {
-			return this.getTicket(workspaceUri, spec, field || spec.field);
+			return this.getTicket(workspaceUri, spec, field || spec.field as string | undefined);
 		}
 
 		const targetType = String(spec.ticket_type || spec.ticketType || spec.wfTicketType || '').trim().toLowerCase();
@@ -4474,27 +4538,28 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			if (pathRoot) {
 				let sPath = '';
 				try { sPath = URI.parse(s.entityUri).path; } catch { sPath = String(s.entityUri || ''); }
-				if (sPath !== pathRoot && !sPath.startsWith(pathRoot + '/')) return false;
+				if (sPath !== pathRoot && !sPath.startsWith(pathRoot + '/')) { return false; }
 			}
 			if (targetType) {
 				const sType = String(s.entityType || '').trim().toLowerCase();
-				if (sType !== targetType) return false;
+				if (sType !== targetType) { return false; }
 			}
 			if (targetStatus) {
 				const sStatus = String(s.status || '').trim().toLowerCase();
-				if (sStatus !== targetStatus) return false;
+				if (sStatus !== targetStatus) { return false; }
 			}
 			if (targetTitle) {
 				const sTitle = String(s.title || '').trim().toLowerCase();
 				const sName = String(s.entityName || '').trim().toLowerCase();
-				if (!sTitle.includes(targetTitle) && !sName.includes(targetTitle)) return false;
+				if (!sTitle.includes(targetTitle) && !sName.includes(targetTitle)) { return false; }
 			}
 			return true;
 		});
 
-		const results: any[] = [];
+		const results: unknown[] = [];
 		for (const s of (limit ? matchedSnapshots.slice(0, limit) : matchedSnapshots)) {
-			const item: Record<string, any> = {
+			const itemCustomMetadata = s.customMetadata || {};
+			const item: Record<string, unknown> = {
 				success: true,
 				ticketId: s.ticketId || s.entityCode || s.entityName,
 				ticketName: s.entityName,
@@ -4503,17 +4568,17 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				status: s.status || '',
 				priority: s.priority || '',
 				entityUri: s.entityUri,
-				customMetadata: s.customMetadata || {}
+				customMetadata: itemCustomMetadata
 			};
 			if (targetField) {
-				if (targetField in item) {
+				if (hasWorkflowProperty(item, targetField)) {
 					results.push(item[targetField]);
-				} else if (item.customMetadata && targetField in item.customMetadata) {
-					results.push(item.customMetadata[targetField]);
+				} else if (itemCustomMetadata && hasWorkflowProperty(itemCustomMetadata, targetField)) {
+					results.push(itemCustomMetadata[targetField]);
 				} else {
 					const lowerField = targetField.toLowerCase();
-					let foundVal: any = undefined;
-					for (const [k, v] of Object.entries(item.customMetadata || {})) {
+					let foundVal: unknown = undefined;
+					for (const [k, v] of Object.entries(itemCustomMetadata || {})) {
 						if (k.toLowerCase() === lowerField) {
 							foundVal = v;
 							break;
@@ -4529,7 +4594,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 	}
 
 	/** Builds the GET_TICKETS filter object from a `get_tickets` component, interpolating `{var}` placeholders. */
-	private _buildGetTicketsQuery(field: ICustomField, contextVariables: Record<string, any>): Record<string, string> {
+	private _buildGetTicketsQuery(field: ICustomField, contextVariables: Record<string, unknown>): Record<string, string> {
 		const query: Record<string, string> = {};
 		const put = (key: string, raw: string | undefined) => {
 			const v = raw ? this._interpolateVariables(raw, contextVariables).trim() : '';
@@ -4543,7 +4608,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return query;
 	}
 
-	async GET_TICKETS(workspaceUri: string | URI, querySpecOrTarget: string | any, field?: string): Promise<any> {
+	async GET_TICKETS(workspaceUri: string | URI, querySpecOrTarget: unknown, field?: string): Promise<unknown> {
 		return this.getTickets(workspaceUri, querySpecOrTarget, field);
 	}
 
@@ -4595,10 +4660,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		);
 	}
 
-	private _formatTablePayloadAsMarkdown(columns: ITableColumnDefinition[] | undefined, rows: Record<string, any>[]): string {
+	private _formatTablePayloadAsMarkdown(columns: ITableColumnDefinition[] | undefined, rows: Record<string, unknown>[]): string {
 		const colNames = (Array.isArray(columns) && columns.length > 0)
 			? columns.map(c => c.name || c.id)
-			: (rows.length > 0 && typeof rows[0] === 'object' && rows[0] !== null ? Object.keys(rows[0]) : []);
+			: (rows.length > 0 && isWorkflowRecord(rows[0]) ? Object.keys(rows[0]) : []);
 		if (colNames.length === 0) {
 			return JSON.stringify(rows, null, 2);
 		}
@@ -4606,7 +4671,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		const dividerLine = `| ${colNames.map(() => '---').join(' | ')} |`;
 		const bodyLines = rows.map(row => {
 			const cells = colNames.map(col => {
-				const val = row && typeof row === 'object' ? row[col] : '';
+				const val = isWorkflowRecord(row) ? row[col] : '';
 				return val === undefined || val === null ? '' : String(val).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 			});
 			return `| ${cells.join(' | ')} |`;
@@ -4614,15 +4679,16 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return [headerLine, dividerLine, ...bodyLines].join('\n');
 	}
 
-	private _getCleanPrimitiveContent(rawVal: any): string {
-		if (rawVal === undefined || rawVal === null) return '';
-		if (typeof rawVal === 'boolean' || typeof rawVal === 'number') return String(rawVal);
+	private _getCleanPrimitiveContent(rawVal: unknown): string {
+		if (rawVal === undefined || rawVal === null) { return ''; }
+		if (typeof rawVal === 'boolean' || typeof rawVal === 'number') { return String(rawVal); }
 		if (Array.isArray(rawVal)) {
 			if (rawVal.length > 0) {
 				return JSON.stringify(rawVal, null, 2);
 			}
-			if ((rawVal as any).sqlOutput && typeof (rawVal as any).sqlOutput === 'string' && (rawVal as any).sqlOutput.trim() !== '') {
-				return (rawVal as any).sqlOutput.trim();
+			const arraySqlOutput: unknown = Reflect.get(rawVal, 'sqlOutput');
+			if (arraySqlOutput && typeof arraySqlOutput === 'string' && arraySqlOutput.trim() !== '') {
+				return arraySqlOutput.trim();
 			}
 			return JSON.stringify(rawVal, null, 2);
 		}
@@ -4640,7 +4706,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						}
 						return this._formatTablePayloadAsMarkdown(parsed.columns, parsed.rows || []);
 					}
-					if (parsed.content !== undefined && String(parsed.content).trim() !== '') return String(parsed.content);
+					if (parsed.content !== undefined && String(parsed.content).trim() !== '') { return String(parsed.content); }
 					if (parsed.result !== undefined && parsed.result !== null && (typeof parsed.result !== 'string' || parsed.result.trim() !== '')) {
 						return typeof parsed.result === 'object' ? JSON.stringify(parsed.result) : String(parsed.result).trim();
 					}
@@ -4650,13 +4716,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					if (isSshTicketValue(parsed)) {
 						return sshTicketValueOutputText(parsed);
 					}
-					if (parsed.output !== undefined && !Array.isArray(parsed.output)) return String(parsed.output);
-					if (parsed.url !== undefined && parsed.content === undefined) return String(parsed.url);
+					if (parsed.output !== undefined && !Array.isArray(parsed.output)) { return String(parsed.output); }
+					if (parsed.url !== undefined && parsed.content === undefined) { return String(parsed.url); }
 				} catch { }
 			}
 			return rawVal;
 		}
-		if (typeof rawVal === 'object') {
+		if (isWorkflowRecord(rawVal)) { // (null was handled above)
 			if (Array.isArray(rawVal.rows) || typeof rawVal.sqlOutput === 'string') {
 				if (Array.isArray(rawVal.rows) && rawVal.rows.length > 0) {
 					return JSON.stringify(rawVal.rows, null, 2);
@@ -4664,9 +4730,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				if (typeof rawVal.sqlOutput === 'string' && rawVal.sqlOutput.trim() !== '') {
 					return rawVal.sqlOutput.trim();
 				}
-				return this._formatTablePayloadAsMarkdown(rawVal.columns, rawVal.rows || []);
+				return this._formatTablePayloadAsMarkdown(rawVal.columns as ITableColumnDefinition[] | undefined, (rawVal.rows || []) as Record<string, unknown>[]);
 			}
-			if (rawVal.content !== undefined && String(rawVal.content).trim() !== '') return String(rawVal.content);
+			if (rawVal.content !== undefined && String(rawVal.content).trim() !== '') { return String(rawVal.content); }
 			if (rawVal.result !== undefined && rawVal.result !== null && (typeof rawVal.result !== 'string' || rawVal.result.trim() !== '')) {
 				return typeof rawVal.result === 'object' ? JSON.stringify(rawVal.result) : String(rawVal.result).trim();
 			}
@@ -4676,19 +4742,19 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			if (isSshTicketValue(rawVal)) {
 				return sshTicketValueOutputText(rawVal);
 			}
-			if (rawVal.output !== undefined && !Array.isArray(rawVal.output)) return String(rawVal.output);
+			if (rawVal.output !== undefined && !Array.isArray(rawVal.output)) { return String(rawVal.output); }
 			return JSON.stringify(rawVal, null, 2);
 		}
 		return String(rawVal);
 	}
 
-	private _resolveSshCommandsForExecution(rawCommands: ReadonlyArray<string>, context: Record<string, any>): string[] {
+	private _resolveSshCommandsForExecution(rawCommands: ReadonlyArray<string>, context: Record<string, unknown>): string[] {
 		const resolvedList: string[] = [];
-		const lookupContextRaw = (key: string): any => {
+		const lookupContextRaw = (key: string): unknown => {
 			const trimmed = key.trim();
-			if (context[trimmed] !== undefined) return context[trimmed];
+			if (context[trimmed] !== undefined) { return context[trimmed]; }
 			const clean = this._cleanKey(trimmed);
-			if (context[clean] !== undefined) return context[clean];
+			if (context[clean] !== undefined) { return context[clean]; }
 			const lower = trimmed.toLowerCase();
 			for (const [ck, cv] of Object.entries(context)) {
 				if (ck.toLowerCase() === lower && cv !== undefined) {
@@ -4746,22 +4812,22 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		}
 	}
 
-	private _interpolateVariables(text: string, context: Record<string, any>): string {
-		if (!text) return '';
+	private _interpolateVariables(text: string, context: Record<string, unknown>): string {
+		if (!text) { return ''; }
 
 		// A large-variable reference that was never loaded back is not the variable's value: treat it as missing
 		// so the placeholder stays visible (and is reported) instead of sending the reference JSON as content.
-		const usable = (v: any): any => (v && typeof v === 'object' && v.__anyagentVarRef__ === true) ? undefined : v;
-		const findInContext = (k: string): any => {
-			if (!k) return undefined;
+		const usable = (v: unknown): unknown => (isWorkflowRecord(v) && v.__anyagentVarRef__ === true) ? undefined : v;
+		const findInContext = (k: string): unknown => {
+			if (!k) { return undefined; }
 			const tk = k.trim();
-			if (usable(context[tk]) !== undefined) return context[tk];
+			if (usable(context[tk]) !== undefined) { return context[tk]; }
 			const clean = this._cleanKey(tk);
-			if (usable(context[clean]) !== undefined) return context[clean];
+			if (usable(context[clean]) !== undefined) { return context[clean]; }
 			const lower = tk.toLowerCase();
 			for (const [ck, cv] of Object.entries(context)) {
 				if (ck.toLowerCase() === lower || this._cleanKey(ck) === clean) {
-					if (usable(cv) !== undefined) return cv;
+					if (usable(cv) !== undefined) { return cv; }
 				}
 			}
 			return undefined;
@@ -4769,7 +4835,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 		const resolveVal = (key: string): string | undefined => {
 			const trimmedKey = key.trim();
-			if (!trimmedKey) return undefined;
+			if (!trimmedKey) { return undefined; }
 
 			// 1. Direct match on full key (e.g. {job_id} or {Title})
 			const directVal = findInContext(trimmedKey);
@@ -4778,7 +4844,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 
 			// 2. Property / Bracket / Dot access (e.g. api_json["job_id"], API/JSON["job_id"], api_json.job_id, api_json['job_id'], api_json.data["job_id"], etc.)
-			const normalizedKey = trimmedKey.replace(/\\"/g, '"').replace(/\\'/g, "'");
+			const normalizedKey = trimmedKey.replace(/\\"/g, '"').replace(/\\'/g, '\'');
 			const hasBracket = normalizedKey.includes('[');
 			const hasDot = normalizedKey.includes('.');
 
@@ -4836,9 +4902,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				}
 
 				if (rootObj !== undefined && segments.length > 0) {
-					let cur: any = rootObj;
+					let cur: unknown = rootObj;
 					for (const seg of segments) {
-						if (cur === undefined || cur === null) break;
+						if (cur === undefined || cur === null) { break; }
 
 						// If cur is a string (e.g. JSON string output from AI prompt, python or http), try parsing as JSON
 						if (typeof cur === 'string') {
@@ -4853,7 +4919,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							}
 						}
 
-						if (typeof cur !== 'object') {
+						// (`cur` is never null here: null is handled at the top of the loop and JSON.parse only ran on '{...}' / '[...]')
+						if (!isWorkflowRecord(cur)) {
 							cur = undefined;
 							break;
 						}
@@ -4867,9 +4934,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								break;
 							}
 						} else {
-							if (seg in cur) {
+							if (hasWorkflowProperty(cur, seg)) {
 								cur = cur[seg];
-							} else if (this._cleanKey(seg) in cur) {
+							} else if (hasWorkflowProperty(cur, this._cleanKey(seg))) {
 								cur = cur[this._cleanKey(seg)];
 							} else {
 								const lowerSeg = seg.toLowerCase();
@@ -4906,7 +4973,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 		// 2. Replace @Field_Name or @FieldName when matching existing context keys
 		for (const k of Object.keys(context)) {
-			if (!k || k.length < 2) continue;
+			if (!k || k.length < 2) { continue; }
 			const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 			const atPattern = new RegExp(`@${escaped}\\b`, 'g');
 			if (atPattern.test(result)) {
@@ -4961,7 +5028,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					};
 				}
 				lastError = content || '[Fetch Failed: Empty response]';
-			} catch (err: any) {
+			} catch (err) {
 				lastError = err?.message || String(err);
 				lastResult = { title: '', content: `[Fetch Failed: ${lastError}]` };
 			}
@@ -5025,7 +5092,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						};
 					}
 				}
-			} catch (e: any) {
+			} catch (e) {
 				if (this._cancelEpoch !== startEpoch || controller.signal.aborted) {
 					throw new Error('Web extraction cancelled by Stop request');
 				}
@@ -5061,7 +5128,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					title: targetUrl,
 					content: cleanText.substring(0, 50000)
 				};
-			} catch (err: any) {
+			} catch (err) {
 				if (this._cancelEpoch !== startEpoch || controller.signal.aborted) {
 					throw new Error('Web extraction cancelled by Stop request');
 				}
@@ -5106,7 +5173,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					return `[AI Execution Error: ${res.error}]`;
 				}
 			}
-		} catch (e: any) {
+		} catch (e) {
 			if (this._cancelEpoch !== startEpoch || controller.signal.aborted) {
 				throw new Error('AI Prompt execution cancelled by Stop request');
 			}
@@ -5119,25 +5186,25 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return `[AI Execution Notice: Credential not configured for ${modelId}]`;
 	}
 
-	private _parseJsonOrPythonListField(val: any): any[] {
-		if (Array.isArray(val)) return val;
-		if (val === null || val === undefined) return [];
+	private _parseJsonOrPythonListField(val: unknown): unknown[] {
+		if (Array.isArray(val)) { return val; }
+		if (val === null || val === undefined) { return []; }
 		const s = String(val).trim();
-		if (!s || s === '[]' || s.toLowerCase() === 'null' || s.toLowerCase() === 'none') return [];
+		if (!s || s === '[]' || s.toLowerCase() === 'null' || s.toLowerCase() === 'none') { return []; }
 		try {
 			const parsed = JSON.parse(s);
-			if (Array.isArray(parsed)) return parsed;
+			if (Array.isArray(parsed)) { return parsed; }
 		} catch { }
 		if (s.startsWith('[') && s.endsWith(']')) {
 			const inner = s.slice(1, -1).trim();
-			if (!inner) return [];
+			if (!inner) { return []; }
 			const items: string[] = [];
 			let i = 0;
 			while (i < inner.length) {
 				while (i < inner.length && (inner[i] === ' ' || inner[i] === '\t' || inner[i] === '\n' || inner[i] === '\r' || inner[i] === ',')) {
 					i++;
 				}
-				if (i >= inner.length) break;
+				if (i >= inner.length) { break; }
 				const quote = inner[i];
 				if (quote === '\'' || quote === '"') {
 					i++;
@@ -5145,10 +5212,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					while (i < inner.length) {
 						if (inner[i] === '\\' && i + 1 < inner.length) {
 							const nextCh = inner[i + 1];
-							if (nextCh === 'n') buf += '\n';
-							else if (nextCh === 't') buf += '\t';
-							else if (nextCh === 'r') buf += '\r';
-							else buf += nextCh;
+							if (nextCh === 'n') { buf += '\n'; }
+							else if (nextCh === 't') { buf += '\t'; }
+							else if (nextCh === 'r') { buf += '\r'; }
+							else { buf += nextCh; }
 							i += 2;
 						} else if (inner[i] === quote) {
 							i++;
@@ -5161,9 +5228,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					items.push(buf);
 				} else {
 					let end = i;
-					while (end < inner.length && inner[end] !== ',') end++;
+					while (end < inner.length && inner[end] !== ',') { end++; }
 					const token = inner.slice(i, end).trim();
-					if (token) items.push(token);
+					if (token) { items.push(token); }
 					i = end + 1;
 				}
 			}
@@ -5174,11 +5241,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 	private _tryExtractJsonRecordsFromTablePrompt(
 		rawPrompt: string,
-		contextVariables: Record<string, any>,
+		contextVariables: Record<string, unknown>,
 		customMetadata?: Record<string, string>,
 		forceFallback: boolean = false
 	): string | undefined {
-		if (!rawPrompt) return undefined;
+		if (!rawPrompt) { return undefined; }
 		const isDbResultJsonArrayParser =
 			/(?:parse|extract)[\s\S]*?(?:database\s+query\s+result|query\s+result|returned\s+[\w\s]*records?|table\s+rows?)[\s\S]*?json\s+array/i.test(rawPrompt) ||
 			(/(?:extract\s+all\s+returned|into\s+a\s+json\s+array)/i.test(rawPrompt) && /(?:do\s+not\s+omit\s+records|output\s+only\s+valid\s+json)/i.test(rawPrompt));
@@ -5188,7 +5255,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 		const tokenRegex = /@?\{\{?([^{}]+)\}?\}/g;
 		let match: RegExpExecArray | null;
-		let foundTableRows: any[] | undefined;
+		let foundTableRows: unknown[] | undefined;
 		let foundTableSuccess = true;
 		let foundTableRef = false;
 
@@ -5208,7 +5275,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					}
 				}
 			}
-			if (candidate === undefined) continue;
+			if (candidate === undefined) { continue; }
 
 			let parsedCand = candidate;
 			if (typeof candidate === 'string') {
@@ -5223,7 +5290,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				foundTableRows = parsedCand;
 				foundTableSuccess = true;
 				break;
-			} else if (parsedCand && typeof parsedCand === 'object' && ('rows' in parsedCand || 'sqlOutput' in parsedCand || 'dbEngine' in parsedCand)) {
+			} else if (isWorkflowRecord(parsedCand) && (Reflect.has(parsedCand, 'rows') || Reflect.has(parsedCand, 'sqlOutput') || Reflect.has(parsedCand, 'dbEngine'))) {
 				foundTableRef = true;
 				const sqlOut = String(parsedCand.sqlOutput || parsedCand.output || '').trim();
 				foundTableSuccess = !/^Status:\s*FAILED\b/i.test(sqlOut);
@@ -5241,17 +5308,17 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 		}
 
-		if (!foundTableRef) return undefined;
+		if (!foundTableRef) { return undefined; }
 		if (!foundTableSuccess || !Array.isArray(foundTableRows) || foundTableRows.length === 0) {
 			return '[]';
 		}
 
-		let templateObj: Record<string, any> | undefined;
+		let templateObj: Record<string, unknown> | undefined;
 		const structMatch = rawPrompt.match(/\[\s*(\{\s*"[^"]+"\s*:[\s\S]*?\})\s*\]/);
 		if (structMatch && structMatch[1]) {
 			try {
 				const parsed = JSON.parse(structMatch[1]);
-				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+				if (isWorkflowRecord(parsed) && !Array.isArray(parsed)) {
 					templateObj = parsed;
 				}
 			} catch { }
@@ -5274,14 +5341,14 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 		}
 
-		const sampleRow = foundTableRows[0] && typeof foundTableRows[0] === 'object' ? foundTableRows[0] : {};
+		const sampleRow = isWorkflowRecord(foundTableRows[0]) ? foundTableRows[0] : {};
 		const templateKeys = templateObj ? Object.keys(templateObj) : [];
-		const matchingTemplateKeys = templateKeys.filter(k => k in sampleRow);
+		const matchingTemplateKeys = templateKeys.filter(k => hasWorkflowProperty(sampleRow, k));
 		const useTemplateKeys = templateKeys.length >= 2 && matchingTemplateKeys.length >= 2;
 
 		const normalizedRows = foundTableRows.map(row => {
-			if (!row || typeof row !== 'object') return row;
-			const outRow: Record<string, any> = {};
+			if (!isWorkflowRecord(row)) { return row; }
+			const outRow: Record<string, unknown> = {};
 			const keysToCopy = useTemplateKeys ? templateKeys : Object.keys(row).filter(k => !(k === 'id' && row.id === null));
 			for (const k of keysToCopy) {
 				const rawV = row[k];
@@ -5302,18 +5369,18 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 	 * Strips away transport and diagnostic envelopes (status, statusText, ok, headers, durationMs, exitCode)
 	 * so that only pure business payload is returned as output and passed downstream.
 	 */
-	public validateAndSanitizeComponentOutput(fieldType: CustomFieldType | string | undefined, field: ICustomField | undefined, rawVal: any): any {
+	public validateAndSanitizeComponentOutput(fieldType: CustomFieldType | string | undefined, field: ICustomField | undefined, rawVal: unknown): unknown {
 		if (rawVal === undefined || rawVal === null) {
 			return rawVal;
 		}
 
 		// 1. HTTP Request Component:
 		// Ensure output NEVER contains the transport metadata envelope { status: 200, ok: true, headers, ... }
-		const isHttpEnvelope = typeof rawVal === 'object' && rawVal !== null && !Array.isArray(rawVal) &&
-			(('status' in rawVal || 'statusText' in rawVal || 'ok' in rawVal) && ('data' in rawVal || 'body' in rawVal || 'rawText' in rawVal || 'headers' in rawVal));
+		const isHttpEnvelope = isWorkflowRecord(rawVal) && !Array.isArray(rawVal) &&
+			((Reflect.has(rawVal, 'status') || Reflect.has(rawVal, 'statusText') || Reflect.has(rawVal, 'ok')) && (Reflect.has(rawVal, 'data') || Reflect.has(rawVal, 'body') || Reflect.has(rawVal, 'rawText') || Reflect.has(rawVal, 'headers')));
 
 		if (fieldType === 'http_request' || isHttpEnvelope) {
-			if (typeof rawVal === 'object' && rawVal !== null && !Array.isArray(rawVal)) {
+			if (isWorkflowRecord(rawVal) && !Array.isArray(rawVal)) {
 				if (rawVal.data !== undefined && rawVal.data !== null) {
 					return rawVal.data;
 				}
@@ -5334,36 +5401,36 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		}
 
 		// 2. Python Script Component:
-		if ((fieldType === 'python' || !fieldType) && typeof rawVal === 'object' && rawVal !== null && !Array.isArray(rawVal)) {
-			if ('result' in rawVal && ('pythonCode' in rawVal || 'code' in rawVal || 'exitCode' in rawVal || 'output' in rawVal || 'externalScripts' in rawVal)) {
+		if ((fieldType === 'python' || !fieldType) && isWorkflowRecord(rawVal) && !Array.isArray(rawVal)) {
+			if (Reflect.has(rawVal, 'result') && (Reflect.has(rawVal, 'pythonCode') || Reflect.has(rawVal, 'code') || Reflect.has(rawVal, 'exitCode') || Reflect.has(rawVal, 'output') || Reflect.has(rawVal, 'externalScripts'))) {
 				return rawVal.result !== undefined ? rawVal.result : (rawVal.output || '');
 			}
 		}
 
 		// 3. Table / SQL Component:
-		if ((fieldType === 'table' || !fieldType) && typeof rawVal === 'object' && rawVal !== null && !Array.isArray(rawVal)) {
-			if (Array.isArray(rawVal.rows) && ('columns' in rawVal || 'dbEngine' in rawVal || 'sqlOutput' in rawVal)) {
+		if ((fieldType === 'table' || !fieldType) && isWorkflowRecord(rawVal) && !Array.isArray(rawVal)) {
+			if (Array.isArray(rawVal.rows) && (Reflect.has(rawVal, 'columns') || Reflect.has(rawVal, 'dbEngine') || Reflect.has(rawVal, 'sqlOutput'))) {
 				return rawVal.rows;
 			}
 		}
 
 		// 4. Browser Component:
-		if ((fieldType === 'browser' || !fieldType) && typeof rawVal === 'object' && rawVal !== null && !Array.isArray(rawVal)) {
-			if ('content' in rawVal && ('url' in rawVal || 'defaultUrl' in rawVal)) {
+		if ((fieldType === 'browser' || !fieldType) && isWorkflowRecord(rawVal) && !Array.isArray(rawVal)) {
+			if (Reflect.has(rawVal, 'content') && (Reflect.has(rawVal, 'url') || Reflect.has(rawVal, 'defaultUrl'))) {
 				return rawVal.content;
 			}
 		}
 
 		// 5. Prompt Component:
-		if ((fieldType === 'prompt' || !fieldType) && typeof rawVal === 'object' && rawVal !== null && !Array.isArray(rawVal)) {
-			if ('output' in rawVal && ('prompt' in rawVal || 'preInjectedPrompt' in rawVal || 'userPrompt' in rawVal || 'userPrompts' in rawVal)) {
+		if ((fieldType === 'prompt' || !fieldType) && isWorkflowRecord(rawVal) && !Array.isArray(rawVal)) {
+			if (Reflect.has(rawVal, 'output') && (Reflect.has(rawVal, 'prompt') || Reflect.has(rawVal, 'preInjectedPrompt') || Reflect.has(rawVal, 'userPrompt') || Reflect.has(rawVal, 'userPrompts'))) {
 				return rawVal.output;
 			}
 		}
 
 		// 6. SSH Component:
-		if ((fieldType === 'ssh' || !fieldType) && typeof rawVal === 'object' && rawVal !== null && !Array.isArray(rawVal)) {
-			if ('jsonOutput' in rawVal && ('host' in rawVal || 'commands' in rawVal || 'resolvedCommands' in rawVal)) {
+		if ((fieldType === 'ssh' || !fieldType) && isWorkflowRecord(rawVal) && !Array.isArray(rawVal)) {
+			if (Reflect.has(rawVal, 'jsonOutput') && (Reflect.has(rawVal, 'host') || Reflect.has(rawVal, 'commands') || Reflect.has(rawVal, 'resolvedCommands'))) {
 				return rawVal.jsonOutput;
 			}
 		}
@@ -5371,11 +5438,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return rawVal;
 	}
 
-	private _formatOutputValue(rawVal: any, format: string): any {
-		if (rawVal === undefined || rawVal === null) return '';
+	private _formatOutputValue(rawVal: unknown, format: string): unknown {
+		if (rawVal === undefined || rawVal === null) { return ''; }
 		const sanitizedVal = this.validateAndSanitizeComponentOutput(undefined, undefined, rawVal);
-		if (typeof sanitizedVal === 'object' && sanitizedVal !== null) {
-			if (!Array.isArray(sanitizedVal) && ('sqlOutput' in sanitizedVal || ('columns' in sanitizedVal && 'rows' in sanitizedVal) || 'dbEngine' in sanitizedVal)) {
+		if (isWorkflowRecord(sanitizedVal)) {
+			if (!Array.isArray(sanitizedVal) && (Reflect.has(sanitizedVal, 'sqlOutput') || (Reflect.has(sanitizedVal, 'columns') && Reflect.has(sanitizedVal, 'rows')) || Reflect.has(sanitizedVal, 'dbEngine'))) {
 				const sqlOutStr = typeof sanitizedVal.sqlOutput === 'string' ? sanitizedVal.sqlOutput.trim() : '';
 				if (Array.isArray(sanitizedVal.rows) && sanitizedVal.rows.length > 0) {
 					return sanitizedVal.rows;
@@ -5427,9 +5494,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return str;
 	}
 
-	private _parseOutputFieldValue(rawVal: any): any {
-		if (rawVal === undefined || rawVal === null) return null;
-		if (typeof rawVal === 'object') return rawVal;
+	private _parseOutputFieldValue(rawVal: unknown): unknown {
+		if (rawVal === undefined || rawVal === null) { return null; }
+		if (typeof rawVal === 'object') { return rawVal; }
 		const str = String(rawVal).trim();
 		if (!str || str.startsWith('(Pending AI Execution') || str === '(Python script ready)') {
 			return null;
@@ -5454,11 +5521,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return str;
 	}
 
-	private _extractCleanRealizedValueFromMeta(rawMeta: any): any {
-		if (rawMeta === undefined || rawMeta === null) return null;
-		if (typeof rawMeta === 'object') {
-			if (Array.isArray(rawMeta)) return rawMeta;
-			if (Array.isArray(rawMeta.rows) || 'sqlOutput' in rawMeta || ('columns' in rawMeta && 'dbEngine' in rawMeta)) {
+	private _extractCleanRealizedValueFromMeta(rawMeta: unknown): unknown {
+		if (rawMeta === undefined || rawMeta === null) { return null; }
+		if (isWorkflowRecord(rawMeta)) { // (null was handled above)
+			if (Array.isArray(rawMeta)) { return rawMeta; }
+			if (Array.isArray(rawMeta.rows) || Reflect.has(rawMeta, 'sqlOutput') || (Reflect.has(rawMeta, 'columns') && Reflect.has(rawMeta, 'dbEngine'))) {
 				const sqlOutStr = typeof rawMeta.sqlOutput === 'string' ? rawMeta.sqlOutput.trim() : '';
 				if (Array.isArray(rawMeta.rows) && rawMeta.rows.length > 0) {
 					return rawMeta.rows;
@@ -5512,7 +5579,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		}
 		if (typeof rawMeta === 'string') {
 			const trimmed = rawMeta.trim();
-			if (!trimmed) return null;
+			if (!trimmed) { return null; }
 			if ((trimmed.startsWith('{') && trimmed.endsWith('}')) || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
 				try {
 					const parsed = JSON.parse(trimmed);
@@ -5529,14 +5596,14 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 	 * - Returns null (None) if the ticket's template has NO 'output' component.
 	 * - Returns a dictionary mapping each output field label to its value (or null/None if that field's value is missing/empty).
 	 */
-	private _extractStrictOutputsComponent(metadata: Record<string, string>, schema?: ICustomModule): Record<string, any> | null {
+	private _extractStrictOutputsComponent(metadata: Record<string, string>, schema?: ICustomModule): Record<string, unknown> | null {
 		const outputFields = schema?.fields?.filter(f => f.type === 'output') || [];
 
 		// Collect any saved Output JSON maps in customMetadata (e.g. "Output", "Output 1", "output_1")
-		const savedOutputRecords: Record<string, any> = {};
+		const savedOutputRecords: Record<string, unknown> = {};
 		const candidateOutKeys = new Set<string>(['Output', 'Output 1', 'output', 'output_1', 'Result', 'result']);
 		for (const ofield of outputFields) {
-			if (ofield.label) candidateOutKeys.add(ofield.label);
+			if (ofield.label) { candidateOutKeys.add(ofield.label); }
 			if (ofield.id) {
 				candidateOutKeys.add(ofield.id);
 				candidateOutKeys.add(ofield.id.replace(/_/g, ' '));
@@ -5547,9 +5614,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			if (isOutKey && typeof mv === 'string' && mv.trim().startsWith('{')) {
 				try {
 					const parsed = JSON.parse(mv.trim());
-					if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+					if (isWorkflowRecord(parsed) && !Array.isArray(parsed)) {
 						for (const [k, v] of Object.entries(parsed)) {
-							if (k === 'outputSpecs' || k === 'output_specs') continue;
+							if (k === 'outputSpecs' || k === 'output_specs') { continue; }
 							savedOutputRecords[k] = v;
 						}
 					}
@@ -5564,8 +5631,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				return savedOutputRecords;
 			}
 			// 2. Otherwise return all non-system metadata fields of the ticket as the outputs dictionary
-			if (metadata && typeof metadata === 'object' && Object.keys(metadata).length > 0) {
-				const fallbackRes: Record<string, any> = {};
+			if (isWorkflowRecord(metadata) && Object.keys(metadata).length > 0) {
+				const fallbackRes: Record<string, unknown> = {};
 				for (const [k, v] of Object.entries(metadata)) {
 					if (k && !k.startsWith('__') && k !== 'outputSpecs' && k !== 'output_specs') {
 						fallbackRes[k] = this._extractCleanRealizedValueFromMeta(v);
@@ -5578,20 +5645,20 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			return null;
 		}
 
-		const result: Record<string, any> = {};
+		const result: Record<string, unknown> = {};
 		const lookupFieldMeta = (fieldKey: string, label: string): string | undefined => {
 			const candidates: string[] = [];
 			const pushCand = (c?: string) => {
 				const t = (c || '').trim();
-				if (t && !candidates.includes(t)) candidates.push(t);
+				if (t && !candidates.includes(t)) { candidates.push(t); }
 			};
 			pushCand(label);
 			pushCand(fieldKey);
 
 			if (schema?.fields) {
 				const matchedField = schema.fields.find(f => {
-					if (f.type === 'output') return false;
-					const prevs: string[] = Array.isArray((f as any).previousLabels) ? (f as any).previousLabels : [];
+					if (f.type === 'output') { return false; }
+					const prevs: string[] = getPreviousLabels(f);
 					return (
 						f.label === label ||
 						f.label === fieldKey ||
@@ -5607,7 +5674,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					pushCand(matchedField.label);
 					pushCand(matchedField.id);
 					pushCand(matchedField.id.replace(/_/g, ' '));
-					const prevs: string[] = Array.isArray((matchedField as any).previousLabels) ? (matchedField as any).previousLabels : [];
+					const prevs: string[] = getPreviousLabels(matchedField);
 					for (const pl of prevs) {
 						pushCand(pl);
 					}
@@ -5633,7 +5700,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			return undefined;
 		};
 
-		const lookupSavedRecord = (fieldKey: string, label: string): any => {
+		const lookupSavedRecord = (fieldKey: string, label: string): unknown => {
 			const candidates = [label, fieldKey];
 			if (schema?.fields) {
 				const mf = schema.fields.find(f =>
@@ -5642,7 +5709,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					)
 				);
 				if (mf) {
-					if (mf.label) candidates.push(mf.label);
+					if (mf.label) { candidates.push(mf.label); }
 					if (mf.id) {
 						candidates.push(mf.id);
 						candidates.push(mf.id.replace(/_/g, ' '));
@@ -5650,7 +5717,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				}
 			}
 			for (const c of candidates) {
-				if (c && savedOutputRecords[c] !== undefined) return savedOutputRecords[c];
+				if (c && savedOutputRecords[c] !== undefined) { return savedOutputRecords[c]; }
 			}
 			const lowerSet = new Set(candidates.filter(Boolean).map(c => c.toLowerCase()));
 			for (const [sk, sv] of Object.entries(savedOutputRecords)) {
@@ -5689,11 +5756,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const fieldAliases: Record<string, string> = {};
 			for (const spec of specsToProcess) {
 				let outKey = spec.label || spec.fieldKey;
-				let matchedField: ICustomField | undefined = undefined;
+				let matchedField: IRuntimeCustomField | undefined = undefined;
 				if (schema?.fields) {
 					matchedField = schema.fields.find(f => {
-						if (f.type === 'output') return false;
-						const prevs: string[] = Array.isArray((f as any).previousLabels) ? (f as any).previousLabels : [];
+						if (f.type === 'output') { return false; }
+						const prevs: string[] = getPreviousLabels(f);
 						return (
 							f.label === outKey ||
 							f.label === spec.fieldKey ||
@@ -5717,7 +5784,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						if (matchedField.outputVariableName && matchedField.outputVariableName !== canonicalLabel) {
 							fieldAliases[matchedField.outputVariableName] = canonicalLabel;
 						}
-						const prevs: string[] = Array.isArray((matchedField as any).previousLabels) ? (matchedField as any).previousLabels : [];
+						const prevs: string[] = getPreviousLabels(matchedField);
 						for (const pl of prevs) {
 							if (pl && pl !== canonicalLabel) {
 								fieldAliases[pl] = canonicalLabel;
@@ -5726,7 +5793,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						outKey = canonicalLabel;
 					}
 				}
-				let resolvedVal: any = null;
+				let resolvedVal: unknown = null;
 
 				// 1. Check live primitive field metadata first so manual runs in the ticket UI are always reflected
 				const rawMeta = lookupFieldMeta(spec.fieldKey, outKey);
@@ -5769,17 +5836,17 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return null;
 	}
 
-	private _extractTicketOutputs(metadata: Record<string, string>, schema?: ICustomModule): Record<string, any> {
+	private _extractTicketOutputs(metadata: Record<string, string>, schema?: ICustomModule): Record<string, unknown> {
 		const strict = this._extractStrictOutputsComponent(metadata, schema);
 		if (strict !== null) {
 			return strict;
 		}
 
-		const outputs: Record<string, any> = {};
+		const outputs: Record<string, unknown> = {};
 
 		// Fallback: extract output from any browser, prompt, or output fields in metadata
 		for (const [k, v] of Object.entries(metadata)) {
-			if (k.toLowerCase().startsWith('param') || k === 'parameters') continue;
+			if (k.toLowerCase().startsWith('param') || k === 'parameters') { continue; }
 			const extracted = this._extractPrimitiveCleanValue(v);
 			if (extracted !== undefined) {
 				outputs[k] = extracted;
@@ -5789,8 +5856,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return outputs;
 	}
 
-	private _extractPrimitiveCleanValue(rawMeta: any, defaultFormat?: string): any {
-		if (rawMeta === undefined || rawMeta === null) return undefined;
+	private _extractPrimitiveCleanValue(rawMeta: unknown, defaultFormat?: string): unknown {
+		if (rawMeta === undefined || rawMeta === null) { return undefined; }
 		if (typeof rawMeta === 'object') {
 			return this._extractCleanRealizedValueFromMeta(rawMeta);
 		}
@@ -5800,7 +5867,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				try {
 					const parsed = JSON.parse(trimmed);
 					// Data Table primitive
-					if (Array.isArray(parsed.rows) || 'sqlOutput' in parsed || ('columns' in parsed && 'dbEngine' in parsed)) {
+					if (Array.isArray(parsed.rows) || Reflect.has(parsed, 'sqlOutput') || (Reflect.has(parsed, 'columns') && Reflect.has(parsed, 'dbEngine'))) {
 						if (Array.isArray(parsed.rows) && (parsed.rows.length > 0 || !/^Status:\s*FAILED\b/i.test(String(parsed.sqlOutput || '').trim()))) {
 							return parsed.rows;
 						}
@@ -5838,9 +5905,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						return parsed.audioRelativePath || parsed.text || '';
 					}
 					// HTTP Request primitive
-					if (('status' in parsed && ('data' in parsed || 'body' in parsed || 'headers' in parsed || 'statusText' in parsed || 'ok' in parsed || 'rawText' in parsed)) ||
+					if ((Reflect.has(parsed, 'status') && (Reflect.has(parsed, 'data') || Reflect.has(parsed, 'body') || Reflect.has(parsed, 'headers') || Reflect.has(parsed, 'statusText') || Reflect.has(parsed, 'ok') || Reflect.has(parsed, 'rawText'))) ||
 						(parsed.url !== undefined && (parsed.data !== undefined || parsed.body !== undefined || parsed.rawText !== undefined || parsed.status !== undefined)) ||
-						'httpResponseData' in parsed || 'httpResponseBody' in parsed) {
+						Reflect.has(parsed, 'httpResponseData') || Reflect.has(parsed, 'httpResponseBody')) {
 						const httpPayload = parsed.data !== undefined ? parsed.data : (parsed.body !== undefined ? parsed.body : (parsed.rawText !== undefined ? parsed.rawText : (parsed.httpResponseData !== undefined ? parsed.httpResponseData : parsed.httpResponseBody)));
 						return (httpPayload !== undefined && httpPayload !== null) ? httpPayload : parsed;
 					}
@@ -5901,17 +5968,17 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							if (inSelfDefined && line.startsWith('  -')) {
 								customMetadata[key] = val;
 							} else if (key === 'Ticket ID') {
-								if (val) ticketId = val;
+								if (val) { ticketId = val; }
 							} else if (key === 'Ticket Type') {
-								if (val) ticketType = val;
+								if (val) { ticketType = val; }
 							} else if (key === 'Title') {
-								if (val) title = val;
+								if (val) { title = val; }
 							} else if (key === 'Description') {
-								if (val) description = val;
+								if (val) { description = val; }
 							} else if (key === 'Status') {
-								if (val) status = val;
+								if (val) { status = val; }
 							} else if (key === 'Priority') {
-								if (val) priority = val;
+								if (val) { priority = val; }
 							}
 						}
 					}
@@ -5933,13 +6000,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					const content = (await this.fileService.readFile(uri)).value.toString();
 					for (const line of content.split(/\r?\n/)) {
 						const tMatch = line.match(/^\s*-\s*\*\*Title\*\*:\s*(.*)$/i);
-						if (tMatch && tMatch[1].trim()) title = tMatch[1].trim();
+						if (tMatch && tMatch[1].trim()) { title = tMatch[1].trim(); }
 						const dMatch = line.match(/^\s*-\s*\*\*Description\*\*:\s*(.*)$/i);
-						if (dMatch && dMatch[1].trim()) description = dMatch[1].trim();
+						if (dMatch && dMatch[1].trim()) { description = dMatch[1].trim(); }
 						const idMatch = line.match(/^\s*-\s*\*\*Ticket ID\*\*:\s*(.*)$/i);
-						if (idMatch && idMatch[1].trim() && !ticketId) ticketId = idMatch[1].trim();
+						if (idMatch && idMatch[1].trim() && !ticketId) { ticketId = idMatch[1].trim(); }
 						const typeMatch = line.match(/^\s*-\s*\*\*Ticket Type\*\*:\s*(.*)$/i);
-						if (typeMatch && typeMatch[1].trim() && !ticketType) ticketType = typeMatch[1].trim();
+						if (typeMatch && typeMatch[1].trim() && !ticketType) { ticketType = typeMatch[1].trim(); }
 					}
 				} catch {
 					// ignore
@@ -5972,7 +6039,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 	private _synthesizeFieldsFromMetadata(meta: Record<string, string>): ICustomField[] {
 		const fields: ICustomField[] = [];
 		for (const [k, v] of Object.entries(meta)) {
-			let type: any = 'text';
+			let type: CustomFieldType = 'text';
 			if (k.toLowerCase().includes('browser') || /^https?:\/\//i.test(v)) {
 				type = 'browser';
 			} else if (k.toLowerCase().includes('python') || k.toLowerCase().includes('script')) {
@@ -5992,11 +6059,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		return fields;
 	}
 
-	private async _persistExecutionState(ticketUri: URI, ticket: ITicketGetResult, customMetadata: Record<string, string>, finalOutput: any, executionStatus: 'Completed' | 'Failed' = 'Completed'): Promise<void> {
+	private async _persistExecutionState(ticketUri: URI, ticket: ITicketGetResult, customMetadata: Record<string, string>, finalOutput: unknown, executionStatus: 'Completed' | 'Failed' = 'Completed'): Promise<void> {
 		try {
 			// Ensure Output field is populated in customMetadata even if schema didn't explicitly run an output step
 			if (finalOutput !== undefined && customMetadata['Output'] === undefined && customMetadata['output'] === undefined) {
-				const outPayload = (typeof finalOutput === 'object' && finalOutput !== null && !Array.isArray(finalOutput))
+				const outPayload = (isWorkflowRecord(finalOutput) && !Array.isArray(finalOutput))
 					? { ...finalOutput, lastUpdated: new Date().toISOString() }
 					: finalOutput;
 				customMetadata['Output'] = typeof outPayload === 'object' ? JSON.stringify(outPayload) : String(outPayload);
@@ -6122,7 +6189,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		ticketUri: string | URI,
 		pythonPath: string,
 		code: string,
-		contextVariables?: Record<string, any>,
+		contextVariables?: Record<string, unknown>,
 		externalScripts?: string[]
 	): Promise<IPythonExecutionResult> {
 		const startTime = Date.now();
@@ -6156,26 +6223,26 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			// 2. Prepare script with injected context variables, return value capture, and TICKET_CONTEXT dictionary
 			// Pre-resolve only ticket IDs explicitly referenced in code
-			const preResolvedOutputs: Record<string, any> = {};
-			const preResolvedTickets: Record<string, any> = {};
+			const preResolvedOutputs: Record<string, unknown> = {};
+			const preResolvedTickets: Record<string, unknown> = {};
 			try {
 				const candidateTicketIds = new Set<string>();
 				const idMatches = (code || '').matchAll(/["']([A-Za-z0-9_]+-\d+)["']/g);
 				for (const m of idMatches) {
-					if (m[1]) candidateTicketIds.add(m[1].trim());
+					if (m[1]) { candidateTicketIds.add(m[1].trim()); }
 				}
 				const fnCallMatches = (code || '').matchAll(/\b(?:GET_OUTPUTS|get_outputs|GET_TICKETS|get_tickets|GET_TICKET|get_ticket)\s*\(\s*(?:(?:ticket_id|ticket|tickets|ticket_name)\s*=\s*)?["']([^"']+)["']/g);
 				for (const m of fnCallMatches) {
-					if (m[1]) candidateTicketIds.add(m[1].trim());
+					if (m[1]) { candidateTicketIds.add(m[1].trim()); }
 				}
 				// ONLY check contextVariables if the code actually invokes ticket getter primitives and names that variable
 				const hasTicketCall = /\b(?:GET_OUTPUTS|get_outputs|GET_TICKETS|get_tickets|GET_TICKET|get_ticket)\b/.test(code || '');
-				if (hasTicketCall && contextVariables && typeof contextVariables === 'object') {
+				if (hasTicketCall && isWorkflowRecord(contextVariables)) {
 					for (const [k, val] of Object.entries(contextVariables)) {
 						if (!(code || '').includes(k)) {
 							continue;
 						}
-						if (val && typeof val === 'object') {
+						if (isWorkflowRecord(val)) {
 							const tid = val.ticketId || val.entityUri || val.ticketName;
 							if (tid) {
 								candidateTicketIds.add(String(tid).trim());
@@ -6186,7 +6253,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					}
 				}
 				for (const tid of candidateTicketIds) {
-					if (!tid) continue;
+					if (!tid) { continue; }
 					const tRes = await this.getTicket(wsUri, tid);
 					if (tRes.success) {
 						const outDict = await this.getOutputs(wsUri, tRes);
@@ -6220,15 +6287,15 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			} catch { }
 
 			// Strip nested contextVariables / stepResults, duplicate @-prefixed keys, and stale historical ticket dot-notation keys
-			const sanitizedCtx: Record<string, any> = {};
-			if (contextVariables && typeof contextVariables === 'object') {
+			const sanitizedCtx: Record<string, unknown> = {};
+			if (isWorkflowRecord(contextVariables)) {
 				for (const [k, v] of Object.entries(contextVariables)) {
-					if (k === 'contextVariables' || k === 'stepResults') continue;
+					if (k === 'contextVariables' || k === 'stepResults') { continue; }
 					// If k is a ticket dot-notation key (e.g. 'FINDJ-2754.Job Info Page' or 'Job Info https:...'), only include if code explicitly references it
 					if ((k.includes('.') || k.startsWith('FINDJ-') || k.startsWith('Job Info')) && !(code || '').includes(k)) {
 						continue;
 					}
-					if (v && typeof v === 'object' && !Array.isArray(v) && ('contextVariables' in v || 'stepResults' in v)) {
+					if (isWorkflowRecord(v) && !Array.isArray(v) && (Reflect.has(v, 'contextVariables') || Reflect.has(v, 'stepResults'))) {
 						const { contextVariables: _cv, stepResults: _sr, ...rest } = v;
 						sanitizedCtx[k] = rest;
 					} else {
@@ -6878,10 +6945,12 @@ atexit.register(_anyagent_capture_exit_output)
 
 			// 3. Resolve Python interpreter and virtualenv environment variables
 			let cleanPyPath = '';
-			if (typeof pythonPath === 'string') {
-				cleanPyPath = pythonPath.trim();
-			} else if (pythonPath && typeof pythonPath === 'object') {
-				cleanPyPath = String((pythonPath as any).interpreterPath || (pythonPath as any).pythonPath || '').trim();
+			// Callers may (despite the signature) pass an interpreter descriptor object instead of a path string
+			const pythonPathArg: unknown = pythonPath;
+			if (typeof pythonPathArg === 'string') {
+				cleanPyPath = pythonPathArg.trim();
+			} else if (isWorkflowRecord(pythonPathArg)) {
+				cleanPyPath = String(pythonPathArg.interpreterPath || pythonPathArg.pythonPath || '').trim();
 			}
 			if (cleanPyPath === '[object Object]' || cleanPyPath === 'undefined' || cleanPyPath === 'null') {
 				cleanPyPath = '';
@@ -6954,12 +7023,12 @@ atexit.register(_anyagent_capture_exit_output)
 
 			let exitCode = 0;
 			let finished = false;
-			let activeEntry: { terminal: any; abort: () => void; label: string } | undefined;
+			let activeEntry: { terminal: ITerminalInstance; abort: () => void; label: string } | undefined;
 
-			let rpcPollTimer: any = null;
+			let rpcPollTimer: number | null = null;
 			let rpcInFlight = false;
 			if (needsHostRpc) {
-				rpcPollTimer = setInterval(async () => {
+				rpcPollTimer = mainWindow.setInterval(async () => {
 					if (rpcInFlight || finished) {
 						return;
 					}
@@ -6976,46 +7045,47 @@ atexit.register(_anyagent_capture_exit_output)
 						const reqId = req?.id;
 						const fn = String(req?.fn || '').toUpperCase();
 						const payload = req?.payload || {};
-						let rpcResult: any = null;
+						let rpcResult: unknown = null;
 						let rpcError: string | undefined;
 						try {
 							if (fn === 'CREATE_TICKETS') {
-								rpcResult = await this.createTicket({
+								const createdTicketRes = await this.createTicket({
 									workspaceUri: wsUri,
 									targetPath: payload.targetPath || '.',
 									ticketType: payload.ticketType || 'Task',
 									title: payload.title || 'New Ticket',
 									folderName: payload.folderName || undefined,
-									parameters: payload.parameters && typeof payload.parameters === 'object' ? payload.parameters : {}
+									parameters: isWorkflowRecord(payload.parameters) ? payload.parameters : {}
 								});
-								if (rpcResult?.success && payload.autoRun) {
+								rpcResult = createdTicketRes;
+								if (createdTicketRes?.success && payload.autoRun) {
 									await this.runTicket({
 										workspaceUri: wsUri,
-										ticketIdOrPath: rpcResult.entityUri || rpcResult.ticketId || rpcResult.ticketName || '',
-										inputParams: payload.parameters && typeof payload.parameters === 'object' ? payload.parameters : {}
+										ticketIdOrPath: createdTicketRes.entityUri || createdTicketRes.ticketId || createdTicketRes.ticketName || '',
+										inputParams: isWorkflowRecord(payload.parameters) ? payload.parameters : {}
 									});
 								}
 							} else if (fn === 'RUN_TICKETS') {
 								let target = payload.target;
-								if (target && typeof target === 'object') {
+								if (isWorkflowRecord(target)) {
 									target = target.entityUri || target.ticketId || target.ticketName || '';
 								}
 								rpcResult = await this.runTicket({
 									workspaceUri: wsUri,
 									ticketIdOrPath: String(target || ''),
-									inputParams: payload.parameters && typeof payload.parameters === 'object' ? payload.parameters : {}
+									inputParams: isWorkflowRecord(payload.parameters) ? payload.parameters : {}
 								});
 							} else if (fn === 'GET_OUTPUTS') {
 								rpcResult = await this.getOutputs(wsUri, payload.target, payload.field || undefined);
 							} else if (fn === 'GET_TICKET') {
 								rpcResult = await this.getTicket(wsUri, payload.target, payload.field || undefined);
 							} else if (fn === 'GET_TICKETS') {
-								const q = (payload && typeof payload === 'object') ? payload : {};
-								rpcResult = await this.getTickets(wsUri, { ticket_type: q.ticket_type, status: q.status, title: q.title, path: q.path, limit: q.limit }, q.field || undefined);
+								const q: Record<string, unknown> = isWorkflowRecord(payload) ? payload : {};
+								rpcResult = await this.getTickets(wsUri, { ticket_type: q.ticket_type, status: q.status, title: q.title, path: q.path, limit: q.limit }, (q.field || undefined) as string | undefined);
 							} else {
 								rpcError = `Unknown host RPC function: ${fn}`;
 							}
-						} catch (callErr: any) {
+						} catch (callErr) {
 							rpcError = callErr?.message || String(callErr);
 						}
 						const respPayload = rpcError
@@ -7031,8 +7101,8 @@ atexit.register(_anyagent_capture_exit_output)
 			}
 
 			const waitPromise = new Promise<void>((resolve) => {
-				let dataListener: { dispose(): void } | undefined;
-				let exitListener: { dispose(): void } | undefined;
+				// Assigned below, once the listeners are registered (finishOnce may run before that)
+				const terminalListeners: { data?: { dispose(): void }; exit?: { dispose(): void } } = {};
 				const finishOnce = (codeOverride?: number) => {
 					if (!finished) {
 						if (typeof codeOverride === 'number') {
@@ -7040,11 +7110,11 @@ atexit.register(_anyagent_capture_exit_output)
 						}
 						finished = true;
 						if (rpcPollTimer) {
-							clearInterval(rpcPollTimer);
+							mainWindow.clearInterval(rpcPollTimer);
 							rpcPollTimer = null;
 						}
-						dataListener?.dispose();
-						exitListener?.dispose();
+						terminalListeners.data?.dispose();
+						terminalListeners.exit?.dispose();
 						resolve();
 					}
 				};
@@ -7056,14 +7126,14 @@ atexit.register(_anyagent_capture_exit_output)
 				this._activeTerminals.add(activeEntry);
 
 				const regex = new RegExp(`${sentinel}:(\\d+)`);
-				dataListener = terminal.onData(data => {
+				terminalListeners.data = terminal.onData(data => {
 					const match = regex.exec(data);
 					if (match) {
 						finishOnce(parseInt(match[1], 10));
 					}
 				});
 
-				exitListener = terminal.onExit(code => {
+				terminalListeners.exit = terminal.onExit(code => {
 					finishOnce(typeof code === 'number' ? code : exitCode);
 				});
 
@@ -7081,7 +7151,7 @@ atexit.register(_anyagent_capture_exit_output)
 				}
 			} finally {
 				if (rpcPollTimer) {
-					clearInterval(rpcPollTimer);
+					mainWindow.clearInterval(rpcPollTimer);
 					rpcPollTimer = null;
 				}
 				try { await this.fileService.del(rpcReqUri); } catch { }
@@ -7099,7 +7169,7 @@ atexit.register(_anyagent_capture_exit_output)
 				} catch { }
 			}
 
-			let scriptResult: any = undefined;
+			let scriptResult: unknown = undefined;
 			if (await this.fileService.exists(resultUri)) {
 				try {
 					const resultRaw = (await this.fileService.readFile(resultUri)).value.toString();
@@ -7158,7 +7228,7 @@ atexit.register(_anyagent_capture_exit_output)
 				durationMs: Date.now() - startTime,
 				pythonPath: resolvedPython
 			};
-		} catch (err: any) {
+		} catch (err) {
 			for (const tmpUri of [scriptUri, logUri, resultUri]) {
 				try {
 					if (await this.fileService.exists(tmpUri)) {
@@ -7211,26 +7281,26 @@ atexit.register(_anyagent_capture_exit_output)
 			let finished = false;
 
 			const waitPromise = new Promise<void>((resolve) => {
-				let dataListener: { dispose(): void } | undefined;
-				let exitListener: { dispose(): void } | undefined;
+				// Assigned below, once the listeners are registered (finishOnce may run before that)
+				const terminalListeners: { data?: { dispose(): void }; exit?: { dispose(): void } } = {};
 				const finishOnce = (codeOverride?: number) => {
 					if (!finished) {
-						if (typeof codeOverride === 'number') exitCode = codeOverride;
+						if (typeof codeOverride === 'number') { exitCode = codeOverride; }
 						finished = true;
-						dataListener?.dispose();
-						exitListener?.dispose();
+						terminalListeners.data?.dispose();
+						terminalListeners.exit?.dispose();
 						resolve();
 					}
 				};
 				const regex = new RegExp(`${sentinel}:(\\d+)`);
-				dataListener = terminal.onData(data => {
+				terminalListeners.data = terminal.onData(data => {
 					const match = regex.exec(data);
 					if (match) {
 						finishOnce(parseInt(match[1], 10));
 					}
 				});
 
-				exitListener = terminal.onExit(code => {
+				terminalListeners.exit = terminal.onExit(code => {
 					finishOnce(typeof code === 'number' ? code : undefined);
 				});
 
@@ -7270,7 +7340,7 @@ atexit.register(_anyagent_capture_exit_output)
 					error: `Virtual environment creation exited with code ${exitCode}. ${logOutput}`
 				};
 			}
-		} catch (err: any) {
+		} catch (err) {
 			return {
 				success: false,
 				venvPath: targetVenvUri.fsPath,
@@ -7328,26 +7398,26 @@ atexit.register(_anyagent_capture_exit_output)
 			let finished = false;
 
 			const waitPromise = new Promise<void>((resolve) => {
-				let dataListener: { dispose(): void } | undefined;
-				let exitListener: { dispose(): void } | undefined;
+				// Assigned below, once the listeners are registered (finishOnce may run before that)
+				const terminalListeners: { data?: { dispose(): void }; exit?: { dispose(): void } } = {};
 				const finishOnce = (codeOverride?: number) => {
 					if (!finished) {
-						if (typeof codeOverride === 'number') exitCode = codeOverride;
+						if (typeof codeOverride === 'number') { exitCode = codeOverride; }
 						finished = true;
-						dataListener?.dispose();
-						exitListener?.dispose();
+						terminalListeners.data?.dispose();
+						terminalListeners.exit?.dispose();
 						resolve();
 					}
 				};
 				const regex = new RegExp(`${sentinel}:(\\d+)`);
-				dataListener = terminal.onData(data => {
+				terminalListeners.data = terminal.onData(data => {
 					const match = regex.exec(data);
 					if (match) {
 						finishOnce(parseInt(match[1], 10));
 					}
 				});
 
-				exitListener = terminal.onExit(code => {
+				terminalListeners.exit = terminal.onExit(code => {
 					finishOnce(typeof code === 'number' ? code : undefined);
 				});
 
@@ -7375,7 +7445,7 @@ atexit.register(_anyagent_capture_exit_output)
 			} else {
 				return { success: false, version: '', error: output || `Interpreter test exited with code ${exitCode}` };
 			}
-		} catch (err: any) {
+		} catch (err) {
 			return { success: false, version: '', error: err.message || String(err) };
 		}
 	}
@@ -7450,23 +7520,23 @@ atexit.register(_anyagent_capture_exit_output)
 
 			let finished = false;
 			const waitPromise = new Promise<void>((resolve) => {
-				let dataListener: { dispose(): void } | undefined;
-				let exitListener: { dispose(): void } | undefined;
+				// Assigned below, once the listeners are registered (finishOnce may run before that)
+				const terminalListeners: { data?: { dispose(): void }; exit?: { dispose(): void } } = {};
 				const finishOnce = () => {
 					if (!finished) {
 						finished = true;
-						dataListener?.dispose();
-						exitListener?.dispose();
+						terminalListeners.data?.dispose();
+						terminalListeners.exit?.dispose();
 						resolve();
 					}
 				};
 				const regex = new RegExp(`${sentinel}:(\\d+)`);
-				dataListener = terminal.onData(data => {
+				terminalListeners.data = terminal.onData(data => {
 					if (regex.test(data)) {
 						finishOnce();
 					}
 				});
-				exitListener = terminal.onExit(() => {
+				terminalListeners.exit = terminal.onExit(() => {
 					finishOnce();
 				});
 				setTimeout(() => {
@@ -7510,12 +7580,12 @@ atexit.register(_anyagent_capture_exit_output)
 		}
 	}
 
-	async detectPythonEnvironment(workspaceUri: string | URI, candidatePath?: string | any): Promise<IPythonEnvironmentDetectionResult> {
+	async detectPythonEnvironment(workspaceUri: string | URI, candidatePath?: string | unknown): Promise<IPythonEnvironmentDetectionResult> {
 		const wsUri = this._toUri(workspaceUri);
 		let rawPath = '';
 		if (typeof candidatePath === 'string') {
 			rawPath = candidatePath.trim();
-		} else if (candidatePath && typeof candidatePath === 'object') {
+		} else if (isWorkflowRecord(candidatePath)) {
 			rawPath = String(candidatePath.interpreterPath || candidatePath.pythonPath || '').trim();
 		}
 		if (rawPath === '[object Object]' || rawPath === 'undefined' || rawPath === 'null') {
@@ -8255,15 +8325,15 @@ atexit.register(_anyagent_capture_exit_output)
 			const cmd = `${escapedPython} "${runnerPyUri.fsPath}" > "${logUri.fsPath}" 2>&1; echo "${sentinel}:$?"`;
 
 			let finished = false;
-			let activeEntry: { terminal: any; abort: () => void; label: string } | undefined;
+			let activeEntry: { terminal: ITerminalInstance; abort: () => void; label: string } | undefined;
 			const waitPromise = new Promise<void>((resolve) => {
-				let dataListener: { dispose(): void } | undefined;
-				let exitListener: { dispose(): void } | undefined;
+				// Assigned below, once the listeners are registered (finishOnce may run before that)
+				const terminalListeners: { data?: { dispose(): void }; exit?: { dispose(): void } } = {};
 				const finishOnce = () => {
 					if (!finished) {
 						finished = true;
-						dataListener?.dispose();
-						exitListener?.dispose();
+						terminalListeners.data?.dispose();
+						terminalListeners.exit?.dispose();
 						resolve();
 					}
 				};
@@ -8274,13 +8344,13 @@ atexit.register(_anyagent_capture_exit_output)
 				};
 				this._activeTerminals.add(activeEntry);
 				const regex = new RegExp(`${sentinel}:(\\d+)`);
-				dataListener = terminal.onData(data => {
+				terminalListeners.data = terminal.onData(data => {
 					const match = regex.exec(data);
 					if (match) {
 						finishOnce();
 					}
 				});
-				exitListener = terminal.onExit(() => {
+				terminalListeners.exit = terminal.onExit(() => {
 					finishOnce();
 				});
 				setTimeout(() => {
@@ -8332,7 +8402,7 @@ atexit.register(_anyagent_capture_exit_output)
 				action,
 				error: logText || 'SQLite operation failed to produce an output payload.'
 			};
-		} catch (err: any) {
+		} catch (err) {
 			for (const tmpUri of [inJsonUri, outJsonUri, runnerPyUri, logUri]) {
 				try {
 					if (await this.fileService.exists(tmpUri)) {
@@ -8351,8 +8421,8 @@ atexit.register(_anyagent_capture_exit_output)
 	}
 
 	async executeHttpRequest(
-		field: ICustomField,
-		contextVariables: Record<string, any>
+		field: IRuntimeCustomField,
+		contextVariables: Record<string, unknown>
 	): Promise<IHttpRequestExecutionResult> {
 		const start = Date.now();
 		const startEpoch = this._cancelEpoch;
@@ -8428,7 +8498,7 @@ atexit.register(_anyagent_capture_exit_output)
 		}
 
 		// 6. Request Body
-		let bodyData: any = undefined;
+		let bodyData: string | undefined = undefined;
 		const bodyType = (field.httpBodyType || 'none').toLowerCase();
 		if (method !== 'GET' && method !== 'HEAD' && bodyType !== 'none') {
 			const rawBodyContent = field.httpBodyContent || '';
@@ -8501,7 +8571,7 @@ atexit.register(_anyagent_capture_exit_output)
 			const rawText = await resp.text();
 
 			// Attempt JSON parse
-			let parsedJson: any = undefined;
+			let parsedJson: unknown = undefined;
 			if (rawText && (rawText.trim().startsWith('{') || rawText.trim().startsWith('['))) {
 				try {
 					parsedJson = JSON.parse(rawText.trim());
@@ -8522,8 +8592,8 @@ atexit.register(_anyagent_capture_exit_output)
 				error: !resp.ok ? (() => {
 					const statusHead = `HTTP ${resp.status}${resp.statusText ? ' ' + resp.statusText : ''}`;
 					let detail = '';
-					if (parsedJson && typeof parsedJson === 'object') {
-						const msg = (parsedJson as any).message || (parsedJson as any).detail || (parsedJson as any).error;
+					if (isWorkflowRecord(parsedJson)) {
+						const msg = parsedJson.message || parsedJson.detail || parsedJson.error;
 						if (typeof msg === 'string' && msg.trim()) {
 							detail = msg.trim();
 						} else if (msg !== undefined) {
@@ -8539,7 +8609,7 @@ atexit.register(_anyagent_capture_exit_output)
 					return detail ? `${statusHead}: ${detail}` : statusHead;
 				})() : undefined
 			};
-		} catch (err: any) {
+		} catch (err) {
 			clearTimeout(timeoutId);
 			this._activeAbortControllers.delete(controller);
 			const durationMs = Date.now() - start;
@@ -9009,15 +9079,15 @@ atexit.register(_anyagent_capture_exit_output)
 			const cmd = `${escapedPython} "${runnerPyUri.fsPath}" > "${logUri.fsPath}" 2>&1; echo "${sentinel}:$?"`;
 
 			let finished = false;
-			let activeEntry: { terminal: any; abort: () => void; label: string } | undefined;
+			let activeEntry: { terminal: ITerminalInstance; abort: () => void; label: string } | undefined;
 			const waitPromise = new Promise<void>((resolve) => {
-				let dataListener: { dispose(): void } | undefined;
-				let exitListener: { dispose(): void } | undefined;
+				// Assigned below, once the listeners are registered (finishOnce may run before that)
+				const terminalListeners: { data?: { dispose(): void }; exit?: { dispose(): void } } = {};
 				const finishOnce = () => {
 					if (!finished) {
 						finished = true;
-						dataListener?.dispose();
-						exitListener?.dispose();
+						terminalListeners.data?.dispose();
+						terminalListeners.exit?.dispose();
 						resolve();
 					}
 				};
@@ -9028,12 +9098,12 @@ atexit.register(_anyagent_capture_exit_output)
 				};
 				this._activeTerminals.add(activeEntry);
 				const regex = new RegExp(`${sentinel}:(\\d+)`);
-				dataListener = terminal.onData(data => {
+				terminalListeners.data = terminal.onData(data => {
 					if (regex.test(data)) {
 						finishOnce();
 					}
 				});
-				exitListener = terminal.onExit(() => {
+				terminalListeners.exit = terminal.onExit(() => {
 					finishOnce();
 				});
 				setTimeout(() => {
@@ -9090,7 +9160,7 @@ atexit.register(_anyagent_capture_exit_output)
 				durationMs: Date.now() - startTime,
 				error: logText || 'SSH runner failed to produce a response.'
 			};
-		} catch (err: any) {
+		} catch (err) {
 			for (const tmpUri of [inJsonUri, outJsonUri, runnerPyUri, logUri]) {
 				try {
 					if (await this.fileService.exists(tmpUri)) {
@@ -9114,7 +9184,7 @@ atexit.register(_anyagent_capture_exit_output)
 		}
 	}
 
-	private _resolveOutputSpecValue(spec: IOutputSpec, contextVariables: Record<string, any>): any {
+	private _resolveOutputSpecValue(spec: IOutputSpec, contextVariables: Record<string, unknown>): unknown {
 		const rawExpr = (spec.sourceExpression || '').trim();
 		const outputLabel = spec.label || spec.varName || spec.fieldKey || 'Output';
 		const formatAvailableVars = (): string => {
@@ -9125,10 +9195,10 @@ atexit.register(_anyagent_capture_exit_output)
 		};
 		if (rawExpr) {
 			// Exact Python/JSON primitive literals (never treat as undefined variable)
-			if (rawExpr === 'None' || rawExpr === 'null') return null;
-			if (rawExpr === 'True' || rawExpr === 'true') return true;
-			if (rawExpr === 'False' || rawExpr === 'false') return false;
-			if (/^-?\d+(\.\d+)?$/.test(rawExpr)) return Number(rawExpr);
+			if (rawExpr === 'None' || rawExpr === 'null') { return null; }
+			if (rawExpr === 'True' || rawExpr === 'true') { return true; }
+			if (rawExpr === 'False' || rawExpr === 'false') { return false; }
+			if (/^-?\d+(\.\d+)?$/.test(rawExpr)) { return Number(rawExpr); }
 
 			// Direct single-variable reference: {var}, {{var}}, @var, or bare identifier var
 			const directMatch = rawExpr.match(/^(?:\{\{\s*([^{}]+?)\s*\}\}|\{\s*([^{}]+?)\s*\}|@?([a-zA-Z_][a-zA-Z0-9_]*))$/);
@@ -9151,7 +9221,7 @@ atexit.register(_anyagent_capture_exit_output)
 			let m: RegExpExecArray | null;
 			while ((m = refScanRe.exec(rawExpr)) !== null) {
 				const rk = (m[1] || m[2] || '').trim();
-				if (!rk) continue;
+				if (!rk) { continue; }
 				const cleanRk = this._cleanKey(rk);
 				const found = (Object.prototype.hasOwnProperty.call(contextVariables, rk) && contextVariables[rk] !== undefined)
 					|| (Object.prototype.hasOwnProperty.call(contextVariables, cleanRk) && contextVariables[cleanRk] !== undefined);

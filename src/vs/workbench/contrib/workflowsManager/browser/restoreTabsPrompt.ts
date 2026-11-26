@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 /**
@@ -70,8 +69,8 @@ class RestoreTabsPromptContribution extends Disposable implements IWorkbenchCont
 			type: Severity.Info,
 			message: localize('restoreTabsPrompt.message', "Reopen your tabs the next time Any Agent starts?"),
 			detail: tabCount === 1
-				? localize('restoreTabsPrompt.detailOne', "1 open tab (workflow, sub-workflow or ticket) will be restored with the same layout. You can change this later in Settings under 'Workbench › Editor: Restore Editors'.")
-				: localize('restoreTabsPrompt.detailMany', "{0} open tabs (workflows, sub-workflows and tickets) will be restored with the same layout. You can change this later in Settings under 'Workbench › Editor: Restore Editors'.", tabCount),
+				? localize('restoreTabsPrompt.detailOne', "1 open tab (workflow, sub-workflow or ticket) will be restored with the same layout. You can change this later in Settings under 'Workbench \u203A Editor: Restore Editors'.")
+				: localize('restoreTabsPrompt.detailMany', "{0} open tabs (workflows, sub-workflows and tickets) will be restored with the same layout. You can change this later in Settings under 'Workbench \u203A Editor: Restore Editors'.", tabCount),
 			buttons: [
 				{ label: localize({ key: 'restoreTabsPrompt.reopen', comment: ['&& denotes a mnemonic'] }, "&&Reopen Next Time"), run: () => true },
 				{ label: localize({ key: 'restoreTabsPrompt.dontReopen', comment: ['&& denotes a mnemonic'] }, "Do&&n't Reopen"), run: () => false }

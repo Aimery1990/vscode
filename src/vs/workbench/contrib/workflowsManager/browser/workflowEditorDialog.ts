@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { ServicesAccessor } from '../../../../platform/instantiation/common/instantiation.js';
@@ -8,14 +7,14 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IEntityPersistenceService, ICustomModule, IActionButton, normalizeNumberFieldValue, numberFieldRulesFromAttributes } from '../../entityPersistence/common/entityPersistence.js';
-import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
+import { IWorkspacesExplorerService, WORKSPACE_PANE_VIEW_ID } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { IWorkflowsManagerService } from '../common/workflowsManager.js';
+import { IWorkflowRecord } from '../common/workflowExecutionModel.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { stringifyYaml } from '../../customModules/browser/customModulesService.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IViewsService } from '../../../services/views/common/viewsService.js';
-import { WORKSPACE_PANE_VIEW_ID } from '../../workspacesExplorer/common/workspacesExplorer.js';
-import { WorkspacesExplorerPane } from '../../workspacesExplorer/browser/workspacesExplorerPane.js';
+import { MainWorkspaceViewPane } from '../../workspacesExplorer/browser/workspacesExplorerPane.js';
 import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { $, append, clearNode } from '../../../../base/browser/dom.js';
@@ -85,27 +84,36 @@ async function probeWorkflowDirectory(fileService: IFileService, dirUri: URI): P
 
 let activeWorkflowModalOverlay: HTMLElement | undefined = undefined;
 
+/** A workflow module as loaded from its YAML definition, which may also carry the path of that definition. */
+interface ICustomModuleWithDefinitionFile extends ICustomModule {
+	definitionFile?: string;
+}
+
+interface ICustomFieldCollectContext {
+	readonly customMetadata: { [key: string]: string };
+	readonly numberErrors: string[];
+	readonly attachments: Array<{ name: string; size: number; dataUrl?: string }>;
+	setInitialStatusOverride(status: string): void;
+}
+
+/** A rendered custom field input of the create-workflow dialog and how to read its value. */
+interface ICustomFieldInputHandle {
+	readonly label: string;
+	collect(label: string, ctx: ICustomFieldCollectContext): void;
+}
+
+interface IDynamicItemCardHandle {
+	readonly indexBadge: HTMLElement;
+	readonly titleInput: HTMLInputElement;
+	readonly subInputs: { label: string; input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement }[];
+}
+
 export async function createWorkflowDialog(
 	accessor: ServicesAccessor,
 	defaultTargetFolderUri?: URI
 ): Promise<void> {
 	const fileService = accessor.get(IFileService);
 	const viewsService = accessor.get(IViewsService);
-
-	// Unify new Workflow creation into the single unified Ticket creation modal in WorkspacesExplorerPane.
-	// Only use legacy import flow when defaultTargetFolderUri points to an existing workflow folder on disk.
-	const isImportingExisting = defaultTargetFolderUri ? (await probeWorkflowDirectory(fileService, defaultTargetFolderUri)).isExisting : false;
-	if (!isImportingExisting) {
-		let view = viewsService.getViewWithId(WORKSPACE_PANE_VIEW_ID) as WorkspacesExplorerPane | null;
-		if (!view) {
-			view = await viewsService.openView(WORKSPACE_PANE_VIEW_ID, false) as WorkspacesExplorerPane | null;
-		}
-		if (view && typeof view.showCreateResourceModal === 'function') {
-			view.showCreateResourceModal(defaultTargetFolderUri, undefined, undefined, 'workflow');
-			return;
-		}
-	}
-
 	const notificationService = accessor.get(INotificationService);
 	const workspacesExplorerService = accessor.get(IWorkspacesExplorerService);
 	const editorService = accessor.get(IEditorService);
@@ -113,6 +121,20 @@ export async function createWorkflowDialog(
 	const entityPersistenceService = accessor.get(IEntityPersistenceService);
 	const workflowsManagerService = accessor.get(IWorkflowsManagerService);
 	const customModulesService = accessor.get(ICustomModulesService);
+
+	// Unify new Workflow creation into the single unified Ticket creation modal in WorkspacesExplorerPane.
+	// Only use legacy import flow when defaultTargetFolderUri points to an existing workflow folder on disk.
+	const isImportingExisting = defaultTargetFolderUri ? (await probeWorkflowDirectory(fileService, defaultTargetFolderUri)).isExisting : false;
+	if (!isImportingExisting) {
+		let view = viewsService.getViewWithId(WORKSPACE_PANE_VIEW_ID) as MainWorkspaceViewPane | null;
+		if (!view) {
+			view = await viewsService.openView(WORKSPACE_PANE_VIEW_ID, false) as MainWorkspaceViewPane | null;
+		}
+		if (view && typeof view.showCreateResourceModal === 'function') {
+			view.showCreateResourceModal(defaultTargetFolderUri, undefined, undefined, 'workflow');
+			return;
+		}
+	}
 
 	const managedWorkspaces = await workspacesExplorerService.getWorkspaces();
 	let workspaces = [...managedWorkspaces].reverse();
@@ -161,13 +183,10 @@ export async function createWorkflowDialog(
 		modal.style.position = 'relative';
 		modal.style.overflowY = 'auto';
 
-		let keydownListener: ((e: KeyboardEvent) => void) | undefined;
 		let workspacesListener: { dispose(): void } | undefined;
 		let modulesListener: { dispose(): void } | undefined;
 		const closeModal = () => {
-			if (keydownListener) {
-				mainWindow.document.removeEventListener('keydown', keydownListener);
-			}
+			mainWindow.document.removeEventListener('keydown', keydownListener);
 			if (workspacesListener) {
 				workspacesListener.dispose();
 				workspacesListener = undefined;
@@ -180,7 +199,7 @@ export async function createWorkflowDialog(
 			resolve();
 		};
 
-		keydownListener = (e: KeyboardEvent) => {
+		const keydownListener = (e: KeyboardEvent) => {
 			if (e.key === 'Escape') {
 				closeModal();
 			}
@@ -397,7 +416,9 @@ export async function createWorkflowDialog(
 		submitBtn.onmouseleave = () => submitBtn.style.filter = 'none';
 
 		let isExistingWorkflowDetected = false;
-		let activeWorkflowModule: ICustomModule | undefined = undefined;
+		let activeWorkflowModule: ICustomModuleWithDefinitionFile | undefined = undefined;
+		// Handles of the inputs currently rendered in `customFieldsBox` (document order), refreshed whenever it is rebuilt.
+		let customFieldInputs: ICustomFieldInputHandle[] = [];
 
 		const resolveTargetWorkspace = (targetLocationUri?: URI) => {
 			if (selectDest.value !== 'independent') {
@@ -455,6 +476,7 @@ export async function createWorkflowDialog(
 
 				if (matchingModule && matchingModule.fields && matchingModule.fields.length > 0) {
 					clearNode(customFieldsBox);
+					customFieldInputs = [];
 					let renderedCount = 0;
 
 					for (const field of matchingModule.fields) {
@@ -466,12 +488,13 @@ export async function createWorkflowDialog(
 						append(fieldGroup, $('label', { style: 'display: block; font-size: 11.5px; opacity: 0.85; font-weight: 600;' }, `${field.label}:`));
 
 						if (field.type === 'textarea') {
-							append(fieldGroup, $('textarea.monaco-inputbox.custom-field-input', {
+							const textareaEl = append(fieldGroup, $('textarea.monaco-inputbox.custom-field-input', {
 								'data-field-id': field.id,
 								'data-field-label': field.label,
 								'data-field-type': field.type,
 								style: 'width: 100%; padding: 8px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box; resize: vertical; min-height: 52px; font-family: inherit;'
-							}));
+							})) as HTMLTextAreaElement;
+							customFieldInputs.push({ label: field.label, collect: (label, ctx) => { ctx.customMetadata[label] = textareaEl.value || ''; } });
 						} else if (field.type === 'select') {
 							const select = append(fieldGroup, $('select.monaco-select.custom-field-input', {
 								'data-field-id': field.id,
@@ -479,6 +502,7 @@ export async function createWorkflowDialog(
 								'data-field-type': field.type,
 								style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.3); color: inherit; cursor: pointer;'
 							})) as HTMLSelectElement;
+							customFieldInputs.push({ label: field.label, collect: (label, ctx) => { ctx.customMetadata[label] = select.value || ''; } });
 							(field.options || []).forEach((opt: string) => {
 								append(select, $('option', { value: opt }, opt));
 							});
@@ -489,30 +513,39 @@ export async function createWorkflowDialog(
 								'data-field-type': field.type,
 								style: 'display: flex; flex-direction: column; gap: 4px; border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 8px; background: rgba(0,0,0,0.15);'
 							}));
+							const optionCheckboxes: HTMLInputElement[] = [];
+							customFieldInputs.push({
+								label: field.label, collect: (label, ctx) => {
+									const checked = optionCheckboxes.filter(cb => cb.checked).map(cb => cb.value);
+									ctx.customMetadata[label] = checked.join(', ');
+								}
+							});
 							(field.options || []).forEach((opt: string) => {
 								const row = append(container, $('label', { style: 'display: flex; align-items: center; gap: 6px; font-size: 11.5px; cursor: pointer;' }));
-								append(row, $('input', { type: 'checkbox', value: opt, style: 'cursor: pointer;' }));
+								optionCheckboxes.push(append(row, $('input', { type: 'checkbox', value: opt, style: 'cursor: pointer;' })) as HTMLInputElement);
 								append(row, $('span', {}, opt));
 							});
 						} else if (field.type === 'switch') {
 							const row = append(fieldGroup, $('label', { style: 'display: flex; align-items: center; gap: 8px; font-size: 11.5px; cursor: pointer; padding: 4px 0;' }));
-							append(row, $('input.custom-field-input', {
+							const switchInput = append(row, $('input.custom-field-input', {
 								type: 'checkbox',
 								'data-field-id': field.id,
 								'data-field-label': field.label,
 								'data-field-type': field.type,
 								style: 'cursor: pointer;'
-							}));
+							})) as HTMLInputElement;
+							customFieldInputs.push({ label: field.label, collect: (label, ctx) => { ctx.customMetadata[label] = switchInput.checked ? 'true' : 'false'; } });
 							append(row, $('span', {}, 'Enabled'));
 						} else if (field.type === 'date' || field.type === 'time' || field.type === 'datetime') {
 							const inputType = field.type === 'date' ? 'date' : field.type === 'time' ? 'time' : 'datetime-local';
-							append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
+							const dateInput = append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
 								type: inputType,
 								'data-field-id': field.id,
 								'data-field-label': field.label,
 								'data-field-type': field.type,
 								style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
-							}));
+							})) as HTMLInputElement;
+							customFieldInputs.push({ label: field.label, collect: (label, ctx) => { ctx.customMetadata[label] = dateInput.value || ''; } });
 						} else if (field.type === 'date_range' || field.type === 'time_range' || field.type === 'datetime_range') {
 							const rangeContainer = append(fieldGroup, $('.range-container.custom-field-input', {
 								'data-field-id': field.id,
@@ -521,17 +554,24 @@ export async function createWorkflowDialog(
 								style: 'display: flex; align-items: center; gap: 8px;'
 							}));
 							const inputType = field.type === 'date_range' ? 'date' : field.type === 'time_range' ? 'time' : 'datetime-local';
-							append(rangeContainer, $('input.monaco-inputbox.range-start', {
+							const rangeStartInput = append(rangeContainer, $('input.monaco-inputbox.range-start', {
 								type: inputType,
 								placeholder: 'Start',
 								style: 'flex: 1; padding: 7px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit;'
-							}));
+							})) as HTMLInputElement;
 							append(rangeContainer, $('span', { style: 'opacity: 0.6; font-size: 12px;' }, '->'));
-							append(rangeContainer, $('input.monaco-inputbox.range-end', {
+							const rangeEndInput = append(rangeContainer, $('input.monaco-inputbox.range-end', {
 								type: inputType,
 								placeholder: 'End',
 								style: 'flex: 1; padding: 7px 10px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit;'
-							}));
+							})) as HTMLInputElement;
+							customFieldInputs.push({
+								label: field.label, collect: (label, ctx) => {
+									const startVal = rangeStartInput.value || '';
+									const endVal = rangeEndInput.value || '';
+									ctx.customMetadata[label] = (startVal || endVal) ? `${startVal} ~ ${endVal}` : '';
+								}
+							});
 						} else if (field.type === 'dynamic_list') {
 							const listContainer = append(fieldGroup, $('.dynamic-list-container.custom-field-input', {
 								'data-field-id': field.id,
@@ -540,29 +580,53 @@ export async function createWorkflowDialog(
 								style: 'display: flex; flex-direction: column; gap: 10px; border: 1px solid rgba(56, 189, 248, 0.2); background: rgba(56, 189, 248, 0.03); border-radius: 8px; padding: 12px;'
 							}));
 							const itemsWrapper = append(listContainer, $('.dynamic-items-wrapper', { style: 'display: flex; flex-direction: column; gap: 10px;' }));
-							const renderItemCard = (itemData?: any) => {
-								const currentCount = itemsWrapper.querySelectorAll('.dynamic-item-card').length;
+							// Cards currently inside `itemsWrapper`, in document order.
+							const itemCards: IDynamicItemCardHandle[] = [];
+							customFieldInputs.push({
+								label: field.label, collect: (label, ctx) => {
+									const items: IWorkflowRecord[] = [];
+									itemCards.forEach((card, idx) => {
+										const itemObj: IWorkflowRecord = { _index: idx + 1 };
+										if (card.titleInput.value.trim()) {
+											itemObj._title = card.titleInput.value.trim();
+										}
+										for (const sub of card.subInputs) {
+											if (sub.label) {
+												itemObj[sub.label] = sub.input.value || '';
+											}
+										}
+										items.push(itemObj);
+									});
+									ctx.customMetadata[label] = JSON.stringify(items);
+								}
+							});
+							const renderItemCard = (itemData?: { _title?: string }) => {
+								const currentCount = itemCards.length;
 								const idx = currentCount + 1;
 								const itemCard = append(itemsWrapper, $('.dynamic-item-card', {
 									style: 'background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px;'
 								}));
 								const itemHeader = append(itemCard, $('.item-card-header', { style: 'display: flex; justify-content: space-between; align-items: center;' }));
 								const headerLeft = append(itemHeader, $('div', { style: 'display: flex; align-items: center; gap: 8px; flex: 1;' }));
-								append(headerLeft, $('span', { style: 'font-size: 10px; font-weight: 700; background: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 2px 6px; border-radius: 4px;' }, `#${idx}`));
-								append(headerLeft, $('input.monaco-inputbox.item-title-input', {
+								const indexBadge = append(headerLeft, $('span', { style: 'font-size: 10px; font-weight: 700; background: rgba(56, 189, 248, 0.2); color: #38bdf8; padding: 2px 6px; border-radius: 4px;' }, `#${idx}`));
+								const titleInput = append(headerLeft, $('input.monaco-inputbox.item-title-input', {
 									placeholder: 'Entry Title...',
 									value: itemData?._title || '',
 									style: 'flex: 1; padding: 4px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.25); color: #fff;'
-								}));
+								})) as HTMLInputElement;
+								const cardHandle: IDynamicItemCardHandle = { indexBadge, titleInput, subInputs: [] };
+								itemCards.push(cardHandle);
 								const delItemBtn = append(itemHeader, $('span' + ThemeIcon.asCSSSelector(Codicon.trash), {
 									style: 'color: #ef4444; cursor: pointer; padding: 4px; font-size: 12px; opacity: 0.8;'
 								}));
 								delItemBtn.onclick = () => {
 									itemCard.remove();
-									const remaining = itemsWrapper.querySelectorAll('.dynamic-item-card');
-									remaining.forEach((card, rIdx) => {
-										const badge = card.querySelector('span');
-										if (badge) badge.innerText = `#${rIdx + 1}`;
+									const cardIdx = itemCards.indexOf(cardHandle);
+									if (cardIdx !== -1) {
+										itemCards.splice(cardIdx, 1);
+									}
+									itemCards.forEach((card, rIdx) => {
+										card.indexBadge.innerText = `#${rIdx + 1}`;
 									});
 								};
 								const subFieldsList = field.itemFields || [];
@@ -572,13 +636,14 @@ export async function createWorkflowDialog(
 										const subRow = append(subGrid, $('.subfield-row', { style: 'display: flex; flex-direction: column; gap: 3px;' }));
 										append(subRow, $('label', { style: 'font-size: 10.5px; opacity: 0.75; font-weight: 500;' }, `${subF.label}:`));
 										if (subF.type === 'textarea') {
-											append(subRow, $('textarea.monaco-inputbox.sub-field-input', {
+											const subTextarea = append(subRow, $('textarea.monaco-inputbox.sub-field-input', {
 												'data-subfield-id': subF.id,
 												'data-subfield-label': subF.label,
 												'data-subfield-type': subF.type,
 												rows: '3',
 												style: 'width: 100%; padding: 6px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff; resize: vertical;'
-											}));
+											})) as HTMLTextAreaElement;
+											cardHandle.subInputs.push({ label: subF.label, input: subTextarea });
 										} else if (subF.type === 'select') {
 											const sSelect = append(subRow, $('select.monaco-select.sub-field-input', {
 												'data-subfield-id': subF.id,
@@ -586,16 +651,18 @@ export async function createWorkflowDialog(
 												'data-subfield-type': subF.type,
 												style: 'width: 100%; padding: 5px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.25); color: #fff;'
 											})) as HTMLSelectElement;
+											cardHandle.subInputs.push({ label: subF.label, input: sSelect });
 											(subF.options || []).forEach(o => append(sSelect, $('option', { value: o }, o)));
 										} else {
-											append(subRow, $('input.monaco-inputbox.sub-field-input', {
+											const subInput = append(subRow, $('input.monaco-inputbox.sub-field-input', {
 												type: subF.type === 'number' ? 'number' : 'text',
 												'data-subfield-id': subF.id,
 												'data-subfield-label': subF.label,
 												'data-subfield-type': subF.type,
 												placeholder: `Enter ${subF.label}...`,
 												style: 'width: 100%; padding: 5px 8px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.1); background: rgba(0,0,0,0.2); color: #fff;'
-											}));
+											})) as HTMLInputElement;
+											cardHandle.subInputs.push({ label: subF.label, input: subInput });
 										}
 									}
 								}
@@ -654,7 +721,7 @@ export async function createWorkflowDialog(
 							append(dropZone, $('span' + ThemeIcon.asCSSSelector(Codicon.cloudUpload), { style: 'font-size: 16px; color: #10b981;' }));
 							append(dropZone, $('span', { style: 'font-size: 11px; opacity: 0.8;' }, 'Click to browse or drop files here'));
 							const handleFiles = (files: FileList | null) => {
-								if (!files) return;
+								if (!files) { return; }
 								for (let i = 0; i < files.length; i++) {
 									const file = files[i];
 									const reader = new FileReader();
@@ -674,7 +741,15 @@ export async function createWorkflowDialog(
 								fileInput.value = '';
 							};
 							dropZone.onclick = () => fileInput.click();
-							(attachContainer as any).__getAttachedFiles = () => attachedFiles;
+							customFieldInputs.push({
+								label: field.label, collect: (label, ctx) => {
+									const filesList = attachedFiles;
+									ctx.customMetadata[label] = filesList.length > 0 ? JSON.stringify(filesList.map(f => ({ name: f.name, size: f.size }))) : '';
+									filesList.forEach(f => {
+										ctx.attachments.push(f);
+									});
+								}
+							});
 						} else if (field.type === 'button_group') {
 							const buttonsList: IActionButton[] = (field.buttons && Array.isArray(field.buttons) && field.buttons.length > 0)
 								? field.buttons
@@ -690,8 +765,14 @@ export async function createWorkflowDialog(
 							}));
 							let selectedActionLabel = '';
 							let selectedTargetStatus = '';
-							(btnGroupContainer as any).__getSelectedAction = () => selectedActionLabel;
-							(btnGroupContainer as any).__getSelectedTargetStatus = () => selectedTargetStatus;
+							customFieldInputs.push({
+								label: field.label, collect: (label, ctx) => {
+									ctx.customMetadata[label] = selectedActionLabel;
+									if (selectedTargetStatus) {
+										ctx.setInitialStatusOverride(selectedTargetStatus);
+									}
+								}
+							});
 							const renderButtons = () => {
 								clearNode(btnGroupContainer);
 								buttonsList.forEach(btn => {
@@ -721,7 +802,7 @@ export async function createWorkflowDialog(
 							const numWrapper = append(fieldGroup, $('div', {
 								style: 'display: flex; align-items: center; gap: 8px;'
 							}));
-							append(numWrapper, $('input.monaco-inputbox.custom-field-input', {
+							const numberInput = append(numWrapper, $('input.monaco-inputbox.custom-field-input', {
 								type: 'number',
 								'data-field-id': field.id,
 								'data-field-label': field.label,
@@ -732,7 +813,17 @@ export async function createWorkflowDialog(
 								step: (field.precision !== undefined && field.precision > 0) ? (1 / Math.pow(10, field.precision)).toString() : 'any',
 								placeholder: field.precision !== undefined && field.precision > 0 ? (0).toFixed(field.precision) : '0',
 								style: 'flex: 1; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
-							}));
+							})) as HTMLInputElement;
+							customFieldInputs.push({
+								label: field.label, collect: (label, ctx) => {
+									const numCheck = normalizeNumberFieldValue(numberFieldRulesFromAttributes(n => numberInput.getAttribute(n), label), numberInput.value);
+									if (!numCheck.ok) {
+										ctx.numberErrors.push(numCheck.error!);
+										return;
+									}
+									ctx.customMetadata[label] = numCheck.value;
+								}
+							});
 							if (field.unit) {
 								append(numWrapper, $('span.number-unit-badge', {
 									style: 'font-size: 11px; padding: 5px 8px; border-radius: 4px; background: rgba(234, 179, 8, 0.15); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.3); font-weight: 600;'
@@ -753,11 +844,15 @@ export async function createWorkflowDialog(
 								style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.12); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box;'
 							})) as HTMLInputElement;
 							const creds = field.credentials || [];
-							(browserBox as any).__getBrowserData = () => ({
-								url: urlInput.value.trim(),
-								credentials: creds,
-								content: field.defaultContent || '',
-								lastFetched: field.defaultContent ? 'Initialized from Schema' : ''
+							customFieldInputs.push({
+								label: field.label, collect: (label, ctx) => {
+									ctx.customMetadata[label] = JSON.stringify({
+										url: urlInput.value.trim(),
+										credentials: creds,
+										content: field.defaultContent || '',
+										lastFetched: field.defaultContent ? 'Initialized from Schema' : ''
+									});
+								}
 							});
 						} else if (field.type === 'prompt') {
 							const promptBox = append(fieldGroup, $('.prompt-field-container.custom-field-input', {
@@ -800,7 +895,7 @@ export async function createWorkflowDialog(
 							})) as HTMLTextAreaElement;
 							promptTextarea.value = field.defaultUserPrompt || '';
 
-							(promptBox as any).__getPromptData = () => {
+							const getPromptData = () => {
 								const userPromptVal = promptTextarea.value.trim();
 								const preTrimmed = preInjectedText.trim();
 								const combinedPrompt = (preTrimmed && userPromptVal)
@@ -819,6 +914,7 @@ export async function createWorkflowDialog(
 									lastExecuted: ''
 								};
 							};
+							customFieldInputs.push({ label: field.label, collect: (label, ctx) => { ctx.customMetadata[label] = JSON.stringify(getPromptData()); } });
 						} else if (field.type === 'tts') {
 							const ttsBox = append(fieldGroup, $('.tts-field-container.custom-field-input', {
 								'data-field-id': field.id,
@@ -842,7 +938,7 @@ export async function createWorkflowDialog(
 								style: 'width: 100%; padding: 6px 10px; font-size: 11px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(0,0,0,0.25); color: #fff; box-sizing: border-box; line-height: 1.4;'
 							})) as HTMLTextAreaElement;
 							ttsDisplayTextarea.value = field.ttsDisplayText || '';
-							(ttsBox as any).__getTtsData = () => ({
+							const getTtsData = () => ({
 								text: ttsTextarea.value.trim(),
 								displayText: ttsDisplayTextarea.value.trim(),
 								ttsShowSpeechTextInTicket: Boolean(field.ttsShowSpeechTextInTicket),
@@ -857,6 +953,7 @@ export async function createWorkflowDialog(
 								lastGenerated: '',
 								lastSynthesizedText: ''
 							});
+							customFieldInputs.push({ label: field.label, collect: (label, ctx) => { ctx.customMetadata[label] = JSON.stringify(getTtsData()); } });
 						} else if (field.type === 'python') {
 							const pyBox = append(fieldGroup, $('.python-field-container.custom-field-input', {
 								'data-field-id': field.id,
@@ -877,28 +974,34 @@ export async function createWorkflowDialog(
 									togglePythonComment(pyTextarea);
 								}
 							};
-							(pyBox as any).__getPythonData = () => ({
-								code: pyTextarea.value,
-								pythonPath: field.pythonPath || '',
-								externalScripts: field.externalScripts || [],
-								output: '',
-								logs: '',
-								lastExecuted: ''
+							customFieldInputs.push({
+								label: field.label, collect: (label, ctx) => {
+									ctx.customMetadata[label] = JSON.stringify({
+										code: pyTextarea.value,
+										pythonPath: field.pythonPath || '',
+										externalScripts: field.externalScripts || [],
+										output: '',
+										logs: '',
+										lastExecuted: ''
+									});
+								}
 							});
 						} else {
-							append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
+							const textInput = append(fieldGroup, $('input.monaco-inputbox.custom-field-input', {
 								type: 'text',
 								'data-field-id': field.id,
 								'data-field-label': field.label,
 								'data-field-type': field.type,
 								style: 'width: 100%; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
-							}));
+							})) as HTMLInputElement;
+							customFieldInputs.push({ label: field.label, collect: (label, ctx) => { ctx.customMetadata[label] = textInput.value || ''; } });
 						}
 					}
 
 					customFieldsBox.style.display = renderedCount > 0 ? 'flex' : 'none';
 				} else {
 					clearNode(customFieldsBox);
+					customFieldInputs = [];
 					customFieldsBox.style.display = 'none';
 				}
 			} catch {
@@ -1067,93 +1170,18 @@ export async function createWorkflowDialog(
 			let initialStatusOverride = '';
 			const customMetadata: { [key: string]: string } = {};
 			const allPendingFieldAttachments: Array<{ name: string; size: number; dataUrl?: string }> = [];
-			const customInputs = customFieldsBox.querySelectorAll('.custom-field-input');
 			const numberErrors: string[] = [];
-			customInputs.forEach(inputEl => {
-				const fieldLabel = inputEl.getAttribute('data-field-label');
-				if (fieldLabel) {
-					if (inputEl instanceof HTMLInputElement && inputEl.getAttribute('data-field-type') === 'number') {
-						const numCheck = normalizeNumberFieldValue(numberFieldRulesFromAttributes(n => inputEl.getAttribute(n), fieldLabel), inputEl.value);
-						if (!numCheck.ok) {
-							numberErrors.push(numCheck.error!);
-							return;
-						}
-						customMetadata[fieldLabel] = numCheck.value;
-						return;
-					}
-					if (inputEl instanceof HTMLInputElement && inputEl.type === 'checkbox') {
-						customMetadata[fieldLabel] = inputEl.checked ? 'true' : 'false';
-					} else if (inputEl.classList.contains('multiselect-container')) {
-						const checked = Array.from(inputEl.querySelectorAll('input[type="checkbox"]:checked')).map((cb: any) => cb.value);
-						customMetadata[fieldLabel] = checked.join(', ');
-					} else if (inputEl.classList.contains('range-container')) {
-						const startVal = (inputEl.querySelector('.range-start') as HTMLInputElement)?.value || '';
-						const endVal = (inputEl.querySelector('.range-end') as HTMLInputElement)?.value || '';
-						customMetadata[fieldLabel] = (startVal || endVal) ? `${startVal} ~ ${endVal}` : '';
-					} else if (inputEl.classList.contains('dynamic-list-container')) {
-						const itemCards = inputEl.querySelectorAll('.dynamic-item-card');
-						const items: any[] = [];
-						itemCards.forEach((cardEl, idx) => {
-							const itemObj: any = { _index: idx + 1 };
-							const titleInputEl = cardEl.querySelector('.item-title-input') as HTMLInputElement;
-							if (titleInputEl && titleInputEl.value.trim()) {
-								itemObj._title = titleInputEl.value.trim();
-							}
-							const subInputs = cardEl.querySelectorAll('.sub-field-input');
-							subInputs.forEach(subEl => {
-								const subLabel = subEl.getAttribute('data-subfield-label');
-								if (subLabel) {
-									if (subEl instanceof HTMLInputElement && subEl.type === 'checkbox') {
-										itemObj[subLabel] = subEl.checked ? 'true' : 'false';
-									} else if (subEl.classList.contains('range-container')) {
-										const startVal = (subEl.querySelector('.range-start') as HTMLInputElement)?.value || '';
-										const endVal = (subEl.querySelector('.range-end') as HTMLInputElement)?.value || '';
-										itemObj[subLabel] = (startVal || endVal) ? `${startVal} ~ ${endVal}` : '';
-									} else {
-										itemObj[subLabel] = (subEl as any).value || '';
-									}
-								}
-							});
-							items.push(itemObj);
-						});
-						customMetadata[fieldLabel] = JSON.stringify(items);
-					} else if (inputEl.classList.contains('attachment-field-container')) {
-						const getFiles = (inputEl as any).__getAttachedFiles;
-						const filesList: Array<{ name: string; size: number; dataUrl?: string }> = getFiles ? getFiles() : [];
-						customMetadata[fieldLabel] = filesList.length > 0 ? JSON.stringify(filesList.map(f => ({ name: f.name, size: f.size }))) : '';
-						filesList.forEach(f => {
-							allPendingFieldAttachments.push(f);
-						});
-					} else if (inputEl.classList.contains('action-buttons-group-row')) {
-						const getAction = (inputEl as any).__getSelectedAction;
-						const chosenAction = getAction ? getAction() : '';
-						customMetadata[fieldLabel] = chosenAction;
-						const getTargetStatus = (inputEl as any).__getSelectedTargetStatus;
-						const targetSt = getTargetStatus ? getTargetStatus() : '';
-						if (targetSt) {
-							initialStatusOverride = targetSt;
-						}
-					} else if (inputEl.classList.contains('browser-field-container')) {
-						const getBData = (inputEl as any).__getBrowserData;
-						const bData = getBData ? getBData() : { url: '', credentials: [] };
-						customMetadata[fieldLabel] = JSON.stringify(bData);
-					} else if (inputEl.classList.contains('prompt-field-container')) {
-						const getPData = (inputEl as any).__getPromptData;
-						const pData = getPData ? getPData() : { prompt: '', targetMode: 'model' };
-						customMetadata[fieldLabel] = JSON.stringify(pData);
-					} else if (inputEl.classList.contains('tts-field-container')) {
-						const getTData = (inputEl as any).__getTtsData;
-						const tData = getTData ? getTData() : { text: '', ttsFormat: 'mp3' };
-						customMetadata[fieldLabel] = JSON.stringify(tData);
-					} else if (inputEl.classList.contains('python-field-container')) {
-						const getPyData = (inputEl as any).__getPythonData;
-						const pyData = getPyData ? getPyData() : { code: '', pythonPath: '' };
-						customMetadata[fieldLabel] = JSON.stringify(pyData);
-					} else {
-						customMetadata[fieldLabel] = (inputEl as any).value || '';
-					}
+			const collectCtx: ICustomFieldCollectContext = {
+				customMetadata,
+				numberErrors,
+				attachments: allPendingFieldAttachments,
+				setInitialStatusOverride: status => { initialStatusOverride = status; }
+			};
+			for (const input of customFieldInputs) {
+				if (input.label) {
+					input.collect(input.label, collectCtx);
 				}
-			});
+			}
 			if (numberErrors.length > 0) {
 				notificationService.warn(numberErrors.join(' '));
 				return;
@@ -1162,7 +1190,7 @@ export async function createWorkflowDialog(
 			const gitRepoUrl = gitRemoteInput.value.trim() || undefined;
 			const gitBranch = gitBranchInput.value.trim() || undefined;
 			const hasCustomSchema = !!(activeWorkflowModule && activeWorkflowModule.fields && activeWorkflowModule.fields.length > 0);
-			const defFile = (activeWorkflowModule as any)?.definitionFile;
+			const defFile = activeWorkflowModule?.definitionFile;
 			const modDesc = typeof activeWorkflowModule?.description === 'string' ? activeWorkflowModule.description.trim() : '';
 			const resolvedTypeDef = hasCustomSchema ? (defFile || '.agents/entity_type/workflow.yaml') : (defFile || modDesc || undefined);
 			const resolvedTypePrompt = (typeof activeWorkflowModule?.prompt === 'string' && activeWorkflowModule.prompt.trim())

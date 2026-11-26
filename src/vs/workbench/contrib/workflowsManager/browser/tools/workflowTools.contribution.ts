@@ -1,11 +1,10 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Disposable } from '../../../../../base/common/lifecycle.js';
 import { IWorkbenchContribution, registerWorkbenchContribution2, WorkbenchPhase } from '../../../../common/contributions.js';
-import { ILanguageModelToolsService } from '../../../chat/common/tools/languageModelToolsService.js';
+import { ILanguageModelToolsService, IToolData, IToolImpl } from '../../../chat/common/tools/languageModelToolsService.js';
 import { IWorkflowExecutionService } from '../../common/workflowExecutionService.js';
 import { ITicketWorkflowRuntimeService } from '../ticketWorkflowRuntime.js';
 import {
@@ -44,7 +43,7 @@ export class WorkflowToolsContribution extends Disposable implements IWorkbenchC
 		const getCatalogTool = new GetPrimitivesCatalogTool(ticketRuntimeService);
 		const getTicketsTool = new GetTicketsTool(ticketRuntimeService);
 
-		const registerSafe = (data: any, impl: any) => {
+		const registerSafe = (data: IToolData, impl: IToolImpl) => {
 			if (!toolsService.getTool(data.id)) {
 				this._register(toolsService.registerTool(data, impl));
 			}

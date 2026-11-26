@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Emitter, Event } from '../../../../base/common/event.js';
@@ -11,10 +10,10 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IEntityPersistenceService, generateSmartPythonVarName, normalizeLegacyFieldTypes, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomField, IEntityPersistenceService, generateSmartPythonVarName, normalizeLegacyFieldTypes, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
 import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutputItem, ITicketHandleInfo, INotebookCellExecutionResult } from '../common/workflowExecutionService.js';
-import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
-import { ITerminalService } from '../../terminal/browser/terminal.js';
+import { ITicketCreateOptions, ITicketGetResult, ITicketRunResult, ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
+import { ITerminalInstance, ITerminalService } from '../../terminal/browser/terminal.js';
 import {
 	ISubWorkflowDefinition,
 	SUB_WORKFLOWS_STORAGE_KEY,
@@ -28,12 +27,83 @@ import {
 	IWorkflowPathStep,
 	IWorkflowNodeOperation,
 	IWorkflowStepTransition,
-	IPrimitiveExecutionStepResult
+	IPrimitiveExecutionStepResult,
+	IExecutedTicketRecord,
+	IWorkflowLinkExecutionState,
+	IWorkflowRecord,
+	isWorkflowRecord,
+	hasWorkflowProperty
 } from '../common/workflowExecutionModel.js';
+
+/** A component step of a node pipeline, plus runtime-only bookkeeping the engine writes onto it. */
+type IWorkflowStepComponent = ICustomField & {
+	lastExecutionOutput?: unknown;
+	lastExecutionInputs?: unknown;
+	lastExecutionLog?: string;
+};
+
+/**
+ * Engine-internal bookkeeping stored on a run object next to the serializable {@link IWorkflowExecutionRun} fields.
+ */
+interface IInternalWorkflowRun extends IWorkflowExecutionRun {
+	_liveFlowchartData?: IFlowchartData;
+	_displayRunId?: string;
+	_displayWorkflowUri?: string;
+	_totalStepsCounter?: number;
+	_executedTicketIdsWindow?: string[];
+}
+
+/** Callers (the Workflow editor, Sub-Workflow runs) pass the in-memory flowchart as `initialData`. */
+function initialFlowchartData(options: IWorkflowEngineOptions | undefined): Partial<IFlowchartData> | undefined {
+	return options?.initialData as Partial<IFlowchartData> | undefined;
+}
+
+/** A command response written by the embedded Python kernel (`cmd_res.json`). */
+interface IPythonKernelResponse {
+	id?: string;
+	ok?: boolean;
+	error?: string;
+	stdout?: unknown;
+	variables?: unknown;
+	value?: unknown;
+}
+
+/** An RPC request written by the embedded Python kernel (`rpc_req_*.json`). */
+interface IPythonRpcRequest {
+	id: string;
+	fn: string;
+	args: unknown[];
+	kwargs: Record<string, unknown>;
+	cmd_id?: string;
+	/** Source text of the Python call (used as the Live Display expression). */
+	call_expr?: unknown;
+}
+
+/**
+ * CREATE_TICKETS options assembled from Python call arguments. They are passed through to the ticket runtime,
+ * which validates them; unknown extra keys (e.g. `auto_run`) are tolerated.
+ */
+type IRpcTicketCreateOptions = Partial<ITicketCreateOptions> & IWorkflowRecord;
+
+/** Non-enumerable `__ticketMetadata` that GET_OUTPUTS attaches to its result object (see `_handlePythonRpcCall`). */
+interface ITicketDisplayMetadata {
+	ticketId?: string;
+	ticketName?: string;
+	title?: string;
+	ticketType?: string;
+}
+
+/** Extra result fields some ticket runs report in addition to {@link ITicketRunResult}. */
+interface ITicketRunResultExtras {
+	outputSpecs?: unknown[];
+}
+
+/** In-flight marker for a ticket record that is still running (replaced once the ticket finishes). */
+const RUNNING_TICKET_RECORD_STATUS: IExecutedTicketRecord['status'] = 'running';
 
 interface INodePipelineStep {
 	id: string;
-	type: 'run_ticket' | 'set_variable' | 'custom_code' | 'call_function';
+	type: 'run_ticket' | 'set_variable' | 'custom_code' | 'call_function' | 'component';
 	ticketName?: string;
 	ticketType?: string;
 	ticketUri?: string;
@@ -43,6 +113,7 @@ interface INodePipelineStep {
 	label?: string;
 	parameters?: string;
 	disabled?: boolean;
+	component?: IWorkflowStepComponent;
 }
 
 interface IFlowchartNode {
@@ -55,9 +126,11 @@ interface IFlowchartNode {
 	height: number;
 	label: string;
 	imports?: { type: string; name: string; uri?: string }[];
-	outputVariable?: { name: string; initialValue?: string; expression?: string; currentValue?: any };
-	outputVariables?: { name: string; initialValue?: string; expression?: string; currentValue?: any }[];
+	outputVariable?: { name: string; initialValue?: string; expression?: string; currentValue?: unknown };
+	outputVariables?: { name: string; initialValue?: string; expression?: string; currentValue?: unknown }[];
 	pipeline?: INodePipelineStep[];
+	/** UI-only: last time the node was clicked in the editor (used to pick a default entry node). */
+	_lastClickTime?: number;
 }
 
 interface IFlowchartLink {
@@ -77,28 +150,47 @@ interface IFlowchartData {
 	pythonPath?: string;
 }
 
+/** `value[key]` with plain JS property-access semantics (primitives are auto-boxed, the key is coerced). */
+function getPyAttr(value: NonNullable<unknown>, key: PropertyKey): unknown {
+	return (value as Record<PropertyKey, unknown>)[key];
+}
+
+/**
+ * `typeof target[name] === 'function' ? target[name](...args) : fallback`, i.e. calls a native method of a
+ * runtime value (with `this === target`) when it exists.
+ */
+function invokePyMethod(target: NonNullable<unknown>, name: string, args: unknown[], fallback: unknown): unknown {
+	const method = getPyAttr(target, name);
+	return typeof method === 'function' ? method.apply(target, args) : fallback;
+}
+
+/** `value?.[key]`: `undefined` for `null` / `undefined`, otherwise plain JS property access. */
+function optionalProp(value: unknown, key: PropertyKey): unknown {
+	return value === null || value === undefined ? undefined : getPyAttr(value, key);
+}
+
 class PythonExpressionEvaluator {
 	private pos = 0;
 	private tokens: string[] = [];
-	private context: Record<string, any>;
+	private context: Record<string, unknown>;
 	private rawExpr: string;
 
-	constructor(expr: string, context: Record<string, any>) {
+	constructor(expr: string, context: Record<string, unknown>) {
 		this.rawExpr = expr || '';
 		this.context = context || {};
 		this.tokens = this.tokenize(expr);
 		this.pos = 0;
 	}
 
-	public static interpolateString(raw: string, context: Record<string, any>): string {
-		if (!raw || !context) return raw;
+	public static interpolateString(raw: string, context: Record<string, unknown>): string {
+		if (!raw || !context) { return raw; }
 		let result = raw;
 
 		// 1. Interpolate {{expr}}, ${expr}, or {expr}
 		if (result.includes('{')) {
 			result = result.replace(/\{\{([^{}]+)\}\}|\$\{([^{}]+)\}|\{([^{}]+)\}/g, (match, g1, g2, g3) => {
 				const expr = (g1 ?? g2 ?? g3 ?? '').trim();
-				if (!expr) return match;
+				if (!expr) { return match; }
 				const cleanVar = expr.replace(/^@/, '').trim();
 				if (Object.prototype.hasOwnProperty.call(context, cleanVar) && context[cleanVar] !== undefined) {
 					const v = context[cleanVar];
@@ -154,11 +246,11 @@ class PythonExpressionEvaluator {
 				continue;
 			}
 			// Python f-strings: f'...' or f"..."
-			if ((ch === 'f' || ch === 'F') && i + 1 < s.length && (s[i + 1] === "'" || s[i + 1] === '"')) {
+			if ((ch === 'f' || ch === 'F') && i + 1 < s.length && (s[i + 1] === '\'' || s[i + 1] === '"')) {
 				i++; // consume 'f' prefix and fall through to quoted string
 			}
 			// Quoted strings: '...' or "..."
-			if (s[i] === "'" || s[i] === '"') {
+			if (s[i] === '\'' || s[i] === '"') {
 				const quote = s[i];
 				let str = '';
 				i++;
@@ -171,7 +263,7 @@ class PythonExpressionEvaluator {
 					}
 					i++;
 				}
-				if (i < s.length) i++; // consume closing quote
+				if (i < s.length) { i++; } // consume closing quote
 				tokens.push(quote + str + quote);
 				continue;
 			}
@@ -239,8 +331,8 @@ class PythonExpressionEvaluator {
 		return tokens;
 	}
 
-	public evaluate(): any {
-		if (this.tokens.length === 0) return undefined;
+	public evaluate(): unknown {
+		if (this.tokens.length === 0) { return undefined; }
 		const res = this.parseOr();
 		if (this.pos < this.tokens.length) {
 			throw new Error(`SyntaxError: invalid syntax near '${this.tokens[this.pos]}'`);
@@ -262,7 +354,7 @@ class PythonExpressionEvaluator {
 	}
 
 	// Level 1: or
-	private parseOr(): any {
+	private parseOr(): unknown {
 		let left = this.parseAnd();
 		while (this.peek() === 'or') {
 			this.consume('or');
@@ -273,7 +365,7 @@ class PythonExpressionEvaluator {
 	}
 
 	// Level 2: and
-	private parseAnd(): any {
+	private parseAnd(): unknown {
 		let left = this.parseNot();
 		while (this.peek() === 'and') {
 			this.consume('and');
@@ -284,7 +376,7 @@ class PythonExpressionEvaluator {
 	}
 
 	// Level 3: not
-	private parseNot(): any {
+	private parseNot(): unknown {
 		if (this.peek() === 'not') {
 			this.consume('not');
 			return !this.parseNot();
@@ -293,19 +385,20 @@ class PythonExpressionEvaluator {
 	}
 
 	// Level 4: comparisons (==, !=, <, <=, >, >=, is, is not, in)
-	private parseComparison(): any {
-		let left = this.parseAddSub();
+	private parseComparison(): unknown {
+		const left = this.parseAddSub();
 
 		const op = this.peek();
 		if (op === '==' || op === '!=' || op === '<' || op === '<=' || op === '>' || op === '>=') {
 			this.consume();
 			const right = this.parseAddSub();
-			if (op === '==') return left === right;
-			if (op === '!=') return left !== right;
-			if (op === '<') return left < right;
-			if (op === '<=') return left <= right;
-			if (op === '>') return left > right;
-			if (op === '>=') return left >= right;
+			if (op === '==') { return left === right; }
+			if (op === '!=') { return left !== right; }
+			// Relational operators keep plain JS semantics (incl. coercion of mixed operand types); the casts are type-only
+			if (op === '<') { return (left as number) < (right as number); }
+			if (op === '<=') { return (left as number) <= (right as number); }
+			if (op === '>') { return (left as number) > (right as number); }
+			if (op === '>=') { return (left as number) >= (right as number); }
 		} else if (op === 'is') {
 			this.consume('is');
 			if (this.peek() === 'not') {
@@ -319,11 +412,14 @@ class PythonExpressionEvaluator {
 		} else if (op === 'in') {
 			this.consume('in');
 			const right = this.parseAddSub();
-			if (typeof right === 'string' || Array.isArray(right)) {
+			if (typeof right === 'string') {
+				return right.includes(left as string); // String.prototype.includes coerces its argument to string
+			}
+			if (Array.isArray(right)) {
 				return right.includes(left);
 			}
 			if (right && typeof right === 'object') {
-				return left in right;
+				return hasWorkflowProperty(right, left as PropertyKey); // `left in right`: the key is coerced to a property key
 			}
 			return false;
 		}
@@ -332,7 +428,7 @@ class PythonExpressionEvaluator {
 	}
 
 	// Level 5: +, -
-	private parseAddSub(): any {
+	private parseAddSub(): unknown {
 		let left = this.parseMulDiv();
 		while (this.peek() === '+' || this.peek() === '-') {
 			const op = this.consume();
@@ -346,7 +442,8 @@ class PythonExpressionEvaluator {
 				} else if (typeof left === 'string' || typeof right === 'string') {
 					left = String(left ?? '') + String(right ?? '');
 				} else {
-					left = (left as any) + (right as any);
+					// Any other operand mix keeps plain JS `+` semantics; the casts are type-only
+					left = (left as number) + (right as number);
 				}
 			} else if (op === '-') {
 				if (typeof left === 'number' && typeof right === 'number') {
@@ -360,7 +457,7 @@ class PythonExpressionEvaluator {
 	}
 
 	// Level 6: *, /, //, %
-	private parseMulDiv(): any {
+	private parseMulDiv(): unknown {
 		let left = this.parsePower();
 		while (this.peek() === '*' || this.peek() === '/' || this.peek() === '//' || this.peek() === '%') {
 			const op = this.consume();
@@ -375,34 +472,34 @@ class PythonExpressionEvaluator {
 					left = right.repeat(Math.max(0, Math.floor(left)));
 				} else if (Array.isArray(left) && typeof right === 'number') {
 					const count = Math.max(0, Math.floor(right));
-					const repeated: any[] = [];
-					for (let c = 0; c < count; c++) repeated.push(...left);
+					const repeated: unknown[] = [];
+					for (let c = 0; c < count; c++) { repeated.push(...left); }
 					left = repeated;
 				} else if (typeof left === 'number' && Array.isArray(right)) {
 					const count = Math.max(0, Math.floor(left));
-					const repeated: any[] = [];
-					for (let c = 0; c < count; c++) repeated.push(...right);
+					const repeated: unknown[] = [];
+					for (let c = 0; c < count; c++) { repeated.push(...right); }
 					left = repeated;
 				} else {
 					throw new Error(`TypeError: unsupported operand type(s) for *: '${typeof left}' and '${typeof right}'`);
 				}
 			} else if (op === '/') {
 				if (typeof left === 'number' && typeof right === 'number') {
-					if (right === 0) throw new Error('ZeroDivisionError: division by zero');
+					if (right === 0) { throw new Error('ZeroDivisionError: division by zero'); }
 					left = left / right;
 				} else {
 					throw new Error(`TypeError: unsupported operand type(s) for /: '${typeof left}' and '${typeof right}'`);
 				}
 			} else if (op === '//') {
 				if (typeof left === 'number' && typeof right === 'number') {
-					if (right === 0) throw new Error('ZeroDivisionError: integer division by zero');
+					if (right === 0) { throw new Error('ZeroDivisionError: integer division by zero'); }
 					left = Math.floor(left / right);
 				} else {
 					throw new Error(`TypeError: unsupported operand type(s) for //: '${typeof left}' and '${typeof right}'`);
 				}
 			} else if (op === '%') {
 				if (typeof left === 'number' && typeof right === 'number') {
-					if (right === 0) throw new Error('ZeroDivisionError: integer modulo by zero');
+					if (right === 0) { throw new Error('ZeroDivisionError: integer modulo by zero'); }
 					left = left % right;
 				} else {
 					throw new Error(`TypeError: unsupported operand type(s) for %: '${typeof left}' and '${typeof right}'`);
@@ -413,8 +510,8 @@ class PythonExpressionEvaluator {
 	}
 
 	// Level 7: **
-	private parsePower(): any {
-		let left = this.parseUnary();
+	private parsePower(): unknown {
+		const left = this.parseUnary();
 		if (this.peek() === '**') {
 			this.consume('**');
 			const right = this.parsePower(); // right-associative in Python!
@@ -427,22 +524,22 @@ class PythonExpressionEvaluator {
 	}
 
 	// Level 8: Unary +, -
-	private parseUnary(): any {
+	private parseUnary(): unknown {
 		if (this.peek() === '+') {
 			this.consume('+');
 			const val = this.parseUnary();
-			return +val;
+			return +(val as number); // unary plus: JS ToNumber of any value
 		}
 		if (this.peek() === '-') {
 			this.consume('-');
 			const val = this.parseUnary();
-			return -val;
+			return -(val as number); // unary minus: JS numeric negation of any value
 		}
 		return this.parsePostfix();
 	}
 
 	// Level 8.5: Postfix subscript a["b"] / a[0] / a[1:3] and dot access / method call a.b / a.get("b")
-	private parsePostfix(): any {
+	private parsePostfix(): unknown {
 		let val = this.parsePrimary();
 		while (this.peek() === '[' || this.peek() === '.') {
 			if (this.peek() === '[') {
@@ -474,26 +571,27 @@ class PythonExpressionEvaluator {
 							if ((Array.isArray(val) || typeof val === 'string') && typeof idxKey === 'number' && idxKey < 0) {
 								val = val[val.length + idxKey];
 							} else if (typeof val === 'object' && !Array.isArray(val) && typeof idxKey === 'string') {
-								if (idxKey in val) {
-									val = val[idxKey];
+								const obj = val as IWorkflowRecord;
+								if (hasWorkflowProperty(obj, idxKey)) {
+									val = obj[idxKey];
 								} else {
 									const normKey = idxKey.trim().toLowerCase().replace(/_/g, ' ');
-									const keys = Object.keys(val);
+									const keys = Object.keys(obj);
 									const exactNorm = keys.find(k => k.trim().toLowerCase().replace(/_/g, ' ') === normKey);
 									if (exactNorm !== undefined) {
-										val = val[exactNorm];
+										val = obj[exactNorm];
 									} else if (normKey.length >= 4) {
 										const prefixMatches = keys.filter(k => {
 											const kn = k.trim().toLowerCase().replace(/_/g, ' ');
 											return kn.startsWith(normKey) || normKey.startsWith(kn);
 										});
-										val = prefixMatches.length === 1 ? val[prefixMatches[0]] : undefined;
+										val = prefixMatches.length === 1 ? obj[prefixMatches[0]] : undefined;
 									} else {
 										val = undefined;
 									}
 								}
 							} else {
-								val = val[idxKey];
+								val = getPyAttr(val, idxKey as PropertyKey);
 							}
 						} else {
 							val = undefined;
@@ -505,12 +603,12 @@ class PythonExpressionEvaluator {
 				const prop = this.consume();
 				if (this.peek() === '(') {
 					this.consume('(');
-					const mArgs: any[] = [];
+					const mArgs: unknown[] = [];
 					if (this.peek() !== ')') {
 						mArgs.push(this.parseOr());
 						while (this.peek() === ',') {
 							this.consume(',');
-							if (this.peek() === ')') break;
+							if (this.peek() === ')') { break; }
 							mArgs.push(this.parseOr());
 						}
 					}
@@ -518,13 +616,13 @@ class PythonExpressionEvaluator {
 					if (val !== undefined && val !== null && prop) {
 						if (Array.isArray(val)) {
 							if (prop === 'append') { val.push(mArgs[0]); }
-							else if (prop === 'extend') { if (Array.isArray(mArgs[0])) val.push(...mArgs[0]); else if (mArgs[0] !== undefined) val.push(mArgs[0]); }
+							else if (prop === 'extend') { if (Array.isArray(mArgs[0])) { val.push(...mArgs[0]); } else if (mArgs[0] !== undefined) { val.push(mArgs[0]); } }
 							else if (prop === 'pop') { val = mArgs.length > 0 ? val.splice(Number(mArgs[0]), 1)[0] : val.pop(); }
 							else if (prop === 'index') { val = val.indexOf(mArgs[0]); }
 							else if (prop === 'count') { val = val.filter(x => x === mArgs[0]).length; }
 							else if (prop === 'copy') { val = [...val]; }
 							else if (prop === 'clear') { val.length = 0; }
-							else if (typeof (val as any)[prop] === 'function') { val = (val as any)[prop](...mArgs); }
+							else { val = invokePyMethod(val, prop, mArgs, val); }
 						} else if (typeof val === 'string') {
 							if (prop === 'strip') { val = val.trim(); }
 							else if (prop === 'lstrip') { val = val.trimStart(); }
@@ -536,31 +634,32 @@ class PythonExpressionEvaluator {
 							else if (prop === 'startswith') { val = val.startsWith(String(mArgs[0] ?? '')); }
 							else if (prop === 'endswith') { val = val.endsWith(String(mArgs[0] ?? '')); }
 							else if (prop === 'join') { val = Array.isArray(mArgs[0]) ? mArgs[0].join(val) : String(mArgs[0] ?? ''); }
-							else if (typeof (val as any)[prop] === 'function') { val = (val as any)[prop](...mArgs); }
+							else { val = invokePyMethod(val, prop, mArgs, val); }
 						} else if (typeof val === 'object') {
+							const obj = val as IWorkflowRecord;
 							if (prop === 'get') {
 								const k = String(mArgs[0] ?? '');
-								val = Object.prototype.hasOwnProperty.call(val, k) ? val[k] : (mArgs.length > 1 ? mArgs[1] : null);
+								val = Object.prototype.hasOwnProperty.call(obj, k) ? obj[k] : (mArgs.length > 1 ? mArgs[1] : null);
 							}
 							else if (prop === 'keys') { val = Object.keys(val); }
 							else if (prop === 'values') { val = Object.values(val); }
 							else if (prop === 'items') { val = Object.entries(val); }
-							else if (prop === 'update') { if (mArgs[0] && typeof mArgs[0] === 'object') Object.assign(val, mArgs[0]); }
+							else if (prop === 'update') { if (mArgs[0] && typeof mArgs[0] === 'object') { Object.assign(val, mArgs[0]); } }
 							else if (prop === 'pop') {
 								const k = String(mArgs[0] ?? '');
-								const out = Object.prototype.hasOwnProperty.call(val, k) ? val[k] : (mArgs.length > 1 ? mArgs[1] : null);
-								delete val[k];
+								const out = Object.prototype.hasOwnProperty.call(obj, k) ? obj[k] : (mArgs.length > 1 ? mArgs[1] : null);
+								delete obj[k];
 								val = out;
 							}
 							else if (prop === 'copy') { val = { ...val }; }
-							else if (prop === 'clear') { for (const k of Object.keys(val)) delete val[k]; }
-							else if (typeof (val as any)[prop] === 'function') { val = (val as any)[prop](...mArgs); }
+							else if (prop === 'clear') { for (const k of Object.keys(obj)) { delete obj[k]; } }
+							else { val = invokePyMethod(val, prop, mArgs, val); }
 						}
 					} else {
 						val = undefined;
 					}
 				} else if (val !== undefined && val !== null && prop) {
-					val = val[prop];
+					val = getPyAttr(val, prop);
 				} else {
 					val = undefined;
 				}
@@ -570,7 +669,7 @@ class PythonExpressionEvaluator {
 	}
 
 	// Level 9: Primary (literal, list, dict, tuple, variable lookup, parentheses)
-	private parsePrimary(): any {
+	private parsePrimary(): unknown {
 		const token = this.peek();
 		if (!token) {
 			throw new Error('SyntaxError: unexpected end of expression');
@@ -585,10 +684,10 @@ class PythonExpressionEvaluator {
 			}
 			const first = this.parseOr();
 			if (this.peek() === ',') {
-				const tuple: any[] = [first];
+				const tuple: unknown[] = [first];
 				while (this.peek() === ',') {
 					this.consume(',');
-					if (this.peek() === ')') break;
+					if (this.peek() === ')') { break; }
 					tuple.push(this.parseOr());
 				}
 				this.consume(')');
@@ -601,12 +700,12 @@ class PythonExpressionEvaluator {
 		// List literal: [] or [a, b, ...]
 		if (token === '[') {
 			this.consume('[');
-			const arr: any[] = [];
+			const arr: unknown[] = [];
 			if (this.peek() !== ']') {
 				arr.push(this.parseOr());
 				while (this.peek() === ',') {
 					this.consume(',');
-					if (this.peek() === ']') break; // support trailing comma
+					if (this.peek() === ']') { break; } // support trailing comma
 					arr.push(this.parseOr());
 				}
 			}
@@ -621,11 +720,11 @@ class PythonExpressionEvaluator {
 				this.consume('}');
 				return {};
 			}
-			const obj: Record<string, any> = {};
-			const setItems: any[] = [];
+			const obj: Record<string, unknown> = {};
+			const setItems: unknown[] = [];
 			let isDict: boolean | null = null;
 			while (this.peek() && this.peek() !== '}') {
-				let firstKeyOrVal: any;
+				let firstKeyOrVal: unknown;
 				const nextTok = this.peek()!;
 				if (
 					this.tokens[this.pos + 1] === ':' &&
@@ -653,7 +752,7 @@ class PythonExpressionEvaluator {
 
 				if (this.peek() === ',') {
 					this.consume(',');
-					if (this.peek() === '}') break; // support trailing comma
+					if (this.peek() === '}') { break; } // support trailing comma
 				} else {
 					break;
 				}
@@ -671,9 +770,9 @@ class PythonExpressionEvaluator {
 		}
 
 		// Python literals
-		if (token === 'None' || token === 'null') return null;
-		if (token === 'True' || token === 'true') return true;
-		if (token === 'False' || token === 'false') return false;
+		if (token === 'None' || token === 'null') { return null; }
+		if (token === 'True' || token === 'true') { return true; }
+		if (token === 'False' || token === 'false') { return false; }
 
 		// Number literal
 		if (/^-?\d+(\.\d+)?$/.test(token)) {
@@ -681,7 +780,7 @@ class PythonExpressionEvaluator {
 		}
 
 		// Quoted string literal (with automatic variable/expression interpolation)
-		if ((token.startsWith("'") && token.endsWith("'")) || (token.startsWith('"') && token.endsWith('"'))) {
+		if ((token.startsWith('\'') && token.endsWith('\'')) || (token.startsWith('"') && token.endsWith('"'))) {
 			const rawContent = token.substring(1, token.length - 1);
 			return PythonExpressionEvaluator.interpolateString(rawContent, this.context);
 		}
@@ -697,33 +796,33 @@ class PythonExpressionEvaluator {
 			'date', 'today', 'time', 'now', 'datetime', 'timestamp'
 		].includes(lowerFnName)) {
 			this.consume('(');
-			const fnArgs: any[] = [];
+			const fnArgs: unknown[] = [];
 			if (this.peek() !== ')') {
 				fnArgs.push(this.parseOr());
 				while (this.peek() === ',') {
 					this.consume(',');
-					if (this.peek() === ')') break;
+					if (this.peek() === ')') { break; }
 					fnArgs.push(this.parseOr());
 				}
 			}
 			this.consume(')');
 			const a0 = fnArgs[0];
 			if (lowerFnName === 'list' || lowerFnName === 'tuple') {
-				if (fnArgs.length === 0) return [];
-				if (Array.isArray(a0)) return [...a0];
-				if (typeof a0 === 'string') return Array.from(a0);
-				if (a0 && typeof a0 === 'object') return Object.keys(a0);
+				if (fnArgs.length === 0) { return []; }
+				if (Array.isArray(a0)) { return [...a0]; }
+				if (typeof a0 === 'string') { return Array.from(a0); }
+				if (a0 && typeof a0 === 'object') { return Object.keys(a0); }
 				return [a0];
 			}
 			if (lowerFnName === 'dict') {
-				if (fnArgs.length === 0) return {};
-				if (a0 && typeof a0 === 'object' && !Array.isArray(a0)) return { ...a0 };
+				if (fnArgs.length === 0) { return {}; }
+				if (a0 && typeof a0 === 'object' && !Array.isArray(a0)) { return { ...a0 }; }
 				return {};
 			}
 			if (lowerFnName === 'set') {
-				if (fnArgs.length === 0) return [];
-				if (Array.isArray(a0)) return Array.from(new Set(a0));
-				if (typeof a0 === 'string') return Array.from(new Set(Array.from(a0)));
+				if (fnArgs.length === 0) { return []; }
+				if (Array.isArray(a0)) { return Array.from(new Set(a0)); }
+				if (typeof a0 === 'string') { return Array.from(new Set(Array.from(a0))); }
 				return [a0];
 			}
 			if (lowerFnName === 'date' || lowerFnName === 'today') {
@@ -738,19 +837,19 @@ class PythonExpressionEvaluator {
 			if (lowerFnName === 'timestamp') {
 				return PythonExpressionEvaluator.formatDateTime('timestamp', typeof a0 === 'string' ? a0 : undefined);
 			}
-			if (lowerFnName === 'str') return a0 === undefined || a0 === null ? '' : (typeof a0 === 'object' ? JSON.stringify(a0) : String(a0));
-			if (lowerFnName === 'int') return parseInt(String(a0 ?? 0), 10) || 0;
-			if (lowerFnName === 'float') return parseFloat(String(a0 ?? 0)) || 0;
-			if (lowerFnName === 'bool') return Boolean(a0);
+			if (lowerFnName === 'str') { return a0 === undefined || a0 === null ? '' : (typeof a0 === 'object' ? JSON.stringify(a0) : String(a0)); }
+			if (lowerFnName === 'int') { return parseInt(String(a0 ?? 0), 10) || 0; }
+			if (lowerFnName === 'float') { return parseFloat(String(a0 ?? 0)) || 0; }
+			if (lowerFnName === 'bool') { return Boolean(a0); }
 			if (lowerFnName === 'len') {
-				if (typeof a0 === 'string' || Array.isArray(a0)) return a0.length;
-				if (a0 && typeof a0 === 'object') return Object.keys(a0).length;
+				if (typeof a0 === 'string' || Array.isArray(a0)) { return a0.length; }
+				if (a0 && typeof a0 === 'object') { return Object.keys(a0).length; }
 				return 0;
 			}
-			if (lowerFnName === 'abs') return Math.abs(Number(a0 ?? 0));
-			if (lowerFnName === 'min') return Math.min(...fnArgs.map(Number));
-			if (lowerFnName === 'max') return Math.max(...fnArgs.map(Number));
-			if (lowerFnName === 'round') return Math.round(Number(a0 ?? 0));
+			if (lowerFnName === 'abs') { return Math.abs(Number(a0 ?? 0)); }
+			if (lowerFnName === 'min') { return Math.min(...fnArgs.map(Number)); }
+			if (lowerFnName === 'max') { return Math.max(...fnArgs.map(Number)); }
+			if (lowerFnName === 'round') { return Math.round(Number(a0 ?? 0)); }
 		}
 
 		// Identifier lookup in context (including ticket identifiers like FNDJ1-0008)
@@ -859,10 +958,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	private readonly _runs = new Map<string, IWorkflowExecutionRun>();
 	private readonly _activeRunsByWorkflow = new Map<string, string>();
-	private readonly _humanWaiters = new Map<string, (input: any) => void>();
+	private readonly _humanWaiters = new Map<string, (input: unknown) => void>();
 	private readonly _stepWaiters = new Map<string, () => void>();
 	private readonly _cancelledRuns = new Set<string>();
-	private readonly _persistDebounceMap = new Map<string, any>();
+	private readonly _persistDebounceMap = new Map<string, ReturnType<typeof setTimeout>>();
 
 	private readonly _onDidChangeRunState = new Emitter<IWorkflowExecutionRun>();
 	readonly onDidChangeRunState: Event<IWorkflowExecutionRun> = this._onDidChangeRunState.event;
@@ -905,7 +1004,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		this._cleanupStaleKernelDirsOnStartup().catch(() => { });
 	}
 
-	private _coerceInputLiteral(val: any): any {
+	private _coerceInputLiteral(val: unknown): unknown {
 		if (typeof val !== 'string') {
 			return val;
 		}
@@ -924,10 +1023,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				// Keep original if not a valid single quoted string literal
 			}
 		}
-		if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) {
+		if (trimmed.length >= 2 && trimmed.startsWith('\'') && trimmed.endsWith('\'')) {
 			const inner = trimmed.slice(1, -1);
 			if (!/(^|[^\\])'/.test(inner)) {
-				return inner.replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+				return inner.replace(/\\'/g, '\'').replace(/\\\\/g, '\\');
 			}
 		}
 		// 2. Unquoted numeric literal (int / float) -> number (e.g. 2 -> 2, 3.14 -> 3.14)
@@ -961,18 +1060,18 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	private async _executeSubWorkflow(
 		parentRun: IWorkflowExecutionRun,
 		subDef: ISubWorkflowDefinition,
-		resolvedInputs: Record<string, any>,
+		resolvedInputs: Record<string, unknown>,
 		callerNode?: { id: string; label?: string }
 	): Promise<IWorkflowExecutionRun> {
 		// Always refresh Sub-Workflow nodes/links from the live source workflow_flowchart.json if available,
 		// so any edits the user saved on the canvas (e.g. changing Output variable names) ALWAYS take effect immediately
 		// instead of running a stale snapshot from subWorkflows.library!
 		let liveNodes: IFlowchartNode[] = JSON.parse(JSON.stringify(subDef.nodes || []));
-		let liveLinks: any[] = JSON.parse(JSON.stringify(subDef.links || []));
+		let liveLinks: IFlowchartLink[] = JSON.parse(JSON.stringify(subDef.links || []));
 		if (subDef.sourceWorkflowUri && Array.isArray(subDef.nodeIds) && subDef.nodeIds.length > 0) {
 			try {
-				const parentLiveData = (subDef.sourceWorkflowUri === parentRun.workflowUri && (parentRun as any)._liveFlowchartData)
-					? ((parentRun as any)._liveFlowchartData as IFlowchartData)
+				const parentLiveData = (subDef.sourceWorkflowUri === parentRun.workflowUri && (parentRun as IInternalWorkflowRun)._liveFlowchartData)
+					? (parentRun as IInternalWorkflowRun)._liveFlowchartData
 					: undefined;
 				const sourceFlowchart = (parentLiveData && Array.isArray(parentLiveData.nodes) && parentLiveData.nodes.length > 0)
 					? parentLiveData
@@ -1034,8 +1133,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			callerNodeLabel: callerNode?.label,
 			logs: []
 		};
-		(childRun as any)._displayRunId = (parentRun as any)._displayRunId || parentRun.runId;
-		(childRun as any)._displayWorkflowUri = (parentRun as any)._displayWorkflowUri || parentRun.workflowUri;
+		(childRun as IInternalWorkflowRun)._displayRunId = (parentRun as IInternalWorkflowRun)._displayRunId || parentRun.runId;
+		(childRun as IInternalWorkflowRun)._displayWorkflowUri = (parentRun as IInternalWorkflowRun)._displayWorkflowUri || parentRun.workflowUri;
 
 		for (const n of childFlowchartData.nodes) {
 			childRun.nodeStates[n.id] = {
@@ -1116,7 +1215,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	private _saveLatestSubWorkflowRun(subDef: ISubWorkflowDefinition, childRun: IWorkflowExecutionRun): void {
 		this._ensureLatestSubWorkflowRunsLoaded();
-		const cleanContext: Record<string, any> = {};
+		const cleanContext: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(childRun.contextVariables || {})) {
 			if (k === '__callerInputKeys__') {
 				continue;
@@ -1156,9 +1255,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 		// Persist compact snapshots so expanding the Sub-Workflow after Cmd+R still shows its latest invoked state
 		try {
-			const persistObj: Record<string, any> = {};
+			const persistObj: Record<string, unknown> = {};
 			for (const [sid, snap] of this._latestSubWorkflowRuns.entries()) {
-				const compactCtx: Record<string, any> = {};
+				const compactCtx: Record<string, unknown> = {};
 				for (const [k, v] of Object.entries(snap.contextVariables || {})) {
 					try {
 						const s = typeof v === 'string' ? v : JSON.stringify(v);
@@ -1171,15 +1270,15 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						compactCtx[k] = String(v);
 					}
 				}
-				const compactNodeStates: Record<string, any> = {};
+				const compactNodeStates: Record<string, unknown> = {};
 				for (const [nid, nState] of Object.entries(snap.nodeStates || {})) {
-					if (!nState || typeof nState !== 'object') continue;
-					const { output: rawNodeOut, executedTickets: rawTkts, ...restState } = nState as any;
+					if (!nState || typeof nState !== 'object') { continue; }
+					const { output: rawNodeOut, executedTickets: rawTkts, ...restState } = nState;
 					compactNodeStates[nid] = {
 						...restState,
 						...(rawNodeOut !== undefined ? { output: this._safeCompactNodeOutput(rawNodeOut) } : {}),
 						...(Array.isArray(rawTkts) ? {
-							executedTickets: rawTkts.slice(-20).map((t: any) => ({
+							executedTickets: rawTkts.slice(-20).map((t: IExecutedTicketRecord) => ({
 								ticketId: t?.ticketId,
 								ticketName: t?.ticketName,
 								ticketType: t?.ticketType,
@@ -1223,7 +1322,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			this._subWorkflowByIdCache.set(sw.id, sw);
 			if (Array.isArray(sw.nodeIds)) {
 				for (const nid of sw.nodeIds) {
-					if (!nid) continue;
+					if (!nid) { continue; }
 					let arr = this._subWorkflowsByNodeIdCache.get(nid);
 					if (!arr) {
 						arr = [];
@@ -1239,16 +1338,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		let changed = false;
 		const cloned: ISubWorkflowDefinition = JSON.parse(JSON.stringify(def));
 		if (Array.isArray(cloned.nodes)) {
-			for (const n of cloned.nodes) {
-				if (!Array.isArray(n?.pipeline)) continue;
+			for (const n of cloned.nodes as IFlowchartNode[]) {
+				if (!Array.isArray(n?.pipeline)) { continue; }
 				for (const st of n.pipeline) {
-					const comp = (st as any)?.component;
-					if (!comp) continue;
+					const comp = st?.component;
+					if (!comp) { continue; }
 					// voice_note is commentary-only and skipped during execution; never duplicate multi-MB base64 audio in Sub-Workflow storage
 					if (Array.isArray(comp.voiceClips)) {
 						for (const clip of comp.voiceClips) {
 							if (clip && typeof clip.audioDataUrl === 'string' && clip.audioDataUrl.length > 0) {
-								delete clip.audioDataUrl;
+								Reflect.deleteProperty(clip, 'audioDataUrl');
 								changed = true;
 							}
 						}
@@ -1379,7 +1478,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				try {
 					const rootUri = URI.file(rootPath);
 					const stat = await this.fileService.resolve(rootUri);
-					if (!stat.children) continue;
+					if (!stat.children) { continue; }
 					for (const child of stat.children) {
 						if (child.isDirectory && child.name.startsWith('anyagent_wf_kernel_')) {
 							const activeMatch = Array.from(this._pythonKernels.values()).some(
@@ -1407,11 +1506,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	private readonly _pythonKernels = new Map<string, {
 		kernelDir: URI;
 		pythonPath: string;
-		terminal?: any;
+		terminal?: ITerminalInstance;
 		reqCounter: number;
 		stopped: boolean;
 		handledRpcIds: Set<string>;
-		lastSyncedVars: Map<string, any>;
+		lastSyncedVars: Map<string, unknown>;
 	}>();
 
 	private readonly _displayCardsByWorkflow = new Map<string, IWorkflowDisplayCard[]>();
@@ -1493,7 +1592,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 					if (r.contextVariables && typeof r.contextVariables === 'object') {
 						for (const rk of WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS) {
-							if (rk in r.contextVariables) {
+							if (hasWorkflowProperty(r.contextVariables, rk)) {
 								delete r.contextVariables[rk];
 								needsPersistCleanup = true;
 							}
@@ -1567,7 +1666,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		return this.getRunsForWorkflow(uriStr);
 	}
 
-	private _summarizeValueForHistory(val: any, depth: number = 0, seen: WeakSet<object> = new WeakSet()): any {
+	private _summarizeValueForHistory(val: unknown, depth: number = 0, seen: WeakSet<object> = new WeakSet()): unknown {
 		if (val === null || val === undefined || typeof val === 'number' || typeof val === 'boolean' || typeof val === 'string') {
 			return val;
 		}
@@ -1579,7 +1678,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			if (Array.isArray(val)) {
 				return val.map(item => this._summarizeValueForHistory(item, depth + 1, seen));
 			}
-			const out: Record<string, any> = {};
+			const out: Record<string, unknown> = {};
 			for (const [k, v] of Object.entries(val)) {
 				if (k === 'lastSentPayload' || k === 'pythonOutput' || k === 'lastExecutionLog' || k === 'debugSqlOutput' || k === '__omittedKeys__') {
 					continue;
@@ -1596,16 +1695,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return [];
 		}
 		return stepResults.map(s => {
-			let cleanDetails: Record<string, any> | undefined = undefined;
+			let cleanDetails: Record<string, unknown> | undefined = undefined;
 			if (s.details && typeof s.details === 'object') {
 				cleanDetails = {};
 				for (const [dk, dv] of Object.entries(s.details)) {
 					if (dk === 'sqliteSync' && dv && typeof dv === 'object') {
 						cleanDetails[dk] = {
-							success: (dv as any).success,
-							message: (dv as any).message,
-							rowsAffected: (dv as any).rowsAffected,
-							error: (dv as any).error
+							success: (dv as IWorkflowRecord).success,
+							message: (dv as IWorkflowRecord).message,
+							rowsAffected: (dv as IWorkflowRecord).rowsAffected,
+							error: (dv as IWorkflowRecord).error
 						};
 					} else if (typeof dv === 'object' && dv !== null) {
 						cleanDetails[dk] = this._summarizeValueForHistory(dv, 0);
@@ -1627,14 +1726,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		});
 	}
 
-	private _safeCompactNodeOutput(val: any): any {
+	private _safeCompactNodeOutput(val: unknown): unknown {
 		if (val === undefined || val === null || typeof val !== 'object') {
 			return val;
 		}
 		if (Array.isArray(val)) {
 			return val.map(item => this._safeCompactNodeOutput(item));
 		}
-		const out: Record<string, any> = {};
+		const out: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(val)) {
 			if (k === '__omittedKeys__') {
 				continue;
@@ -1664,8 +1763,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		return URI.joinPath(dirname(runsFileUri), 'workflow_vars');
 	}
 
-	private _isSpilledVarRef(val: any): val is { __anyagentVarRef__: true; file: string; varName: string; type: string; sizeBytes: number } {
-		return Boolean(val && typeof val === 'object' && !Array.isArray(val) && val.__anyagentVarRef__ === true && typeof val.file === 'string');
+	private _isSpilledVarRef(val: unknown): val is { __anyagentVarRef__: true; file: string; varName: string; type: string; sizeBytes: number } {
+		return isWorkflowRecord(val) && !Array.isArray(val) && val.__anyagentVarRef__ === true && typeof val.file === 'string';
 	}
 
 	private _makeSafeVarArchiveFileName(runId: string, varName: string): string {
@@ -1685,9 +1784,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		varsDirUri: URI,
 		runId: string,
 		varName: string,
-		val: any,
+		val: unknown,
 		referencedFiles: Set<string>
-	): Promise<any> {
+	): Promise<unknown> {
 		if (val === null || val === undefined || typeof val === 'boolean' || typeof val === 'number') {
 			return val;
 		}
@@ -1735,14 +1834,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		};
 	}
 
-	async hydrateContextVariables(workflowUri: URI | string, vars: Record<string, any>): Promise<Record<string, any>> {
+	async hydrateContextVariables(workflowUri: URI | string, vars: Record<string, unknown>): Promise<Record<string, unknown>> {
 		const uriStr = typeof workflowUri === 'string' ? workflowUri : workflowUri.toString();
-		const copy: Record<string, any> = { ...(vars || {}) };
+		const copy: Record<string, unknown> = { ...(vars || {}) };
 		await this._hydrateContextVariables(uriStr, copy);
 		return copy;
 	}
 
-	private async _hydrateContextVariables(workflowUriStr: string, vars: Record<string, any> | undefined): Promise<void> {
+	private async _hydrateContextVariables(workflowUriStr: string, vars: Record<string, unknown> | undefined): Promise<void> {
 		if (!vars || typeof vars !== 'object') {
 			return;
 		}
@@ -1813,13 +1912,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const referencedVarFiles = new Set<string>();
 
 		const runs = await Promise.all(allRuns.slice(0, 8).map(async (r, runIdx) => {
-			const cleanVars: Record<string, any> = {};
+			const cleanVars: Record<string, unknown> = {};
 			if (r.contextVariables) {
 				for (const [k, v] of Object.entries(r.contextVariables)) {
 					if (WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(k)) {
 						continue;
 					}
-					if (k.startsWith('@') && k.substring(1) in r.contextVariables) {
+					if (k.startsWith('@') && hasWorkflowProperty(r.contextVariables, k.substring(1))) {
 						continue;
 					}
 					// Spill large variables (> 16 KB) to dedicated typed JSON files in .agents/workflow_vars/
@@ -1831,10 +1930,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 				}
 			}
-			const cleanNodeStates: Record<string, any> = {};
+			const cleanNodeStates: Record<string, unknown> = {};
 			if (r.nodeStates && typeof r.nodeStates === 'object') {
 				for (const [nId, nState] of Object.entries(r.nodeStates)) {
-					if (!nState) continue;
+					if (!nState) { continue; }
 					cleanNodeStates[nId] = {
 						nodeId: nState.nodeId,
 						nodeLabel: nState.nodeLabel,
@@ -1871,8 +1970,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				? r.executionPath.slice(-50).map(step => ({
 					...step,
 					operations: Array.isArray(step.operations) ? step.operations.map(op => {
-						if (op && (op as any).executedTicket) {
-							const et = (op as any).executedTicket;
+						if (op && op.executedTicket) {
+							const et = op.executedTicket;
 							return {
 								...op,
 								executedTicket: {
@@ -1983,9 +2082,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 	}
 
-	private _fastPreviewString(val: any, maxLen: number = 180): string {
-		if (val === undefined) return 'undefined';
-		if (val === null) return 'null';
+	private _fastPreviewString(val: unknown, maxLen: number = 180): string {
+		if (val === undefined) { return 'undefined'; }
+		if (val === null) { return 'null'; }
 		if (typeof val === 'string') {
 			return val.length > maxLen ? val.substring(0, maxLen) + '...' : val;
 		}
@@ -1993,7 +2092,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return String(val);
 		}
 		if (Array.isArray(val)) {
-			if (val.length === 0) return '[]';
+			if (val.length === 0) { return '[]'; }
 			try {
 				const firstStr = JSON.stringify(this._summarizeValueForHistory(val[0], 2));
 				const preview = val.length === 1 ? `[${firstStr}]` : `[${firstStr}, ... (${val.length} items)]`;
@@ -2210,7 +2309,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		if (targetRun.contextVariables && Array.isArray(variableNamesToClear)) {
 			for (const rawName of variableNamesToClear) {
 				const clean = (rawName || '').trim().replace(/^@/, '');
-				if (!clean) continue;
+				if (!clean) { continue; }
 				delete targetRun.contextVariables[clean];
 				delete targetRun.contextVariables[`@${clean}`];
 			}
@@ -2230,7 +2329,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 		const isPartialRun = Boolean((options?.selectedNodeIds && options.selectedNodeIds.length > 0) || options?.entryNodeId);
 		const existingRunId = this._activeRunsByWorkflow.get(uriStr);
-		const inheritedContextVariables: Record<string, any> = {};
+		const inheritedContextVariables: Record<string, unknown> = {};
 		let priorStateSource: IWorkflowExecutionRun | undefined;
 		if (existingRunId) {
 			const existing = this._runs.get(existingRunId);
@@ -2327,7 +2426,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				for (const sw of allSubs) {
 					if (sw && sw.sourceWorkflowUri === uriStr && Array.isArray(sw.nodeIds)) {
 						for (const nid of sw.nodeIds) {
-							if (nid) hiddenSubNodeIds.add(nid);
+							if (nid) { hiddenSubNodeIds.add(nid); }
 						}
 					}
 				}
@@ -2338,7 +2437,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					continue;
 				}
 				for (const st of (n.pipeline || [])) {
-					const comp = (st as any)?.component;
+					const comp = st?.component;
 					if (!comp || comp.type === 'parameters' || comp.type === 'output' || comp.type === 'display') {
 						continue;
 					}
@@ -2364,7 +2463,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const runNumber = maxRunNumber + 1;
 
 		const isFullSpeed = Boolean(options?.fullSpeed);
-		const preservedLinkStates: Record<string, any> = (isPartialRun && priorStateSource?.linkStates)
+		const preservedLinkStates: Record<string, IWorkflowLinkExecutionState> = (isPartialRun && priorStateSource?.linkStates)
 			? JSON.parse(JSON.stringify(priorStateSource.linkStates))
 			: {};
 		const preservedVisited: string[] = (isPartialRun && Array.isArray(priorStateSource?.visitedNodeIds))
@@ -2472,9 +2571,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			options?.entryNodeId &&
 			options.entryNodeId !== targetRun.currentNodeId &&
 			!targetRun.visitedNodeIds.includes(options.entryNodeId) &&
-			options?.initialData?.links
+			initialFlowchartData(options)?.links
 		) {
-			const incomingLinks = (options.initialData.links as IFlowchartLink[]).filter(l => l.to === options.entryNodeId);
+			const incomingLinks = (initialFlowchartData(options)?.links || []).filter(l => l.to === options.entryNodeId);
 			if (incomingLinks.length === 0) {
 				this._cancelledRuns.add(targetRun.runId);
 				const oldWaiter = this._stepWaiters.get(targetRun.runId);
@@ -2515,7 +2614,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		this._notifyRunChanged(run);
 	}
 
-	async resumeWorkflow(runId: string, userInput?: any): Promise<void> {
+	async resumeWorkflow(runId: string, userInput?: unknown): Promise<void> {
 		const run = this._runs.get(runId);
 		if (!run) {
 			return;
@@ -2617,7 +2716,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		data: IFlowchartData,
 		options?: IWorkflowEngineOptions
 	): Promise<void> {
-		(run as any)._liveFlowchartData = data;
+		(run as IInternalWorkflowRun)._liveFlowchartData = data;
 		let isDaemonLoop = run.mode === 'daemon';
 		await this._startPythonKernel(run, data.pythonPath);
 
@@ -2642,7 +2741,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					this._emitLog(run, 'error', `[Workflow I/O Contract Error] ${errMsg}`);
 				}
 				const hasAnyIOComp = data.nodes.some(n => (n.pipeline || []).some(s => {
-					const t = (s as any)?.component?.type;
+					const t = s?.component?.type;
 					return t === 'parameters' || t === 'output';
 				}));
 				if (hasAnyIOComp) {
@@ -2719,8 +2818,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						const nextNodesNested = await Promise.all(
 							currentNodes.map(async (node) => {
 								const nodeState = run.nodeStates[node.id];
-								const nextStepSeq = ((run as any)._totalStepsCounter || (run.executionPath?.length || 0)) + 1;
-								(run as any)._totalStepsCounter = nextStepSeq;
+								const nextStepSeq = ((run as IInternalWorkflowRun)._totalStepsCounter || (run.executionPath?.length || 0)) + 1;
+								(run as IInternalWorkflowRun)._totalStepsCounter = nextStepSeq;
 								const pathStep: IWorkflowPathStep = {
 									stepIndex: nextStepSeq,
 									nodeId: node.id,
@@ -2756,7 +2855,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 									pathStep.durationMs = nodeState.durationMs;
 									this._emitLog(run, 'info', `Completed node: '${node.label}' in ${nodeState.durationMs}ms`, { nodeId: node.id });
 									this._syncNodeVariablesAfterExecution(run, node, nodeState);
-								} catch (err: any) {
+								} catch (err) {
 									if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
 										nodeState.status = 'pending';
 										pathStep.status = 'failed';
@@ -3016,8 +3115,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 					const executeSingleNode = async (node: IFlowchartNode) => {
 						const nodeState = run.nodeStates[node.id];
-						const nextStepSeq = ((run as any)._totalStepsCounter || (run.executionPath?.length || 0)) + 1;
-						(run as any)._totalStepsCounter = nextStepSeq;
+						const nextStepSeq = ((run as IInternalWorkflowRun)._totalStepsCounter || (run.executionPath?.length || 0)) + 1;
+						(run as IInternalWorkflowRun)._totalStepsCounter = nextStepSeq;
 						const pathStep: IWorkflowPathStep = {
 							stepIndex: nextStepSeq,
 							nodeId: node.id,
@@ -3054,7 +3153,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							pathStep.durationMs = nodeState.durationMs;
 							this._emitLog(run, 'info', `Completed node: '${node.label}' in ${nodeState.durationMs}ms`, { nodeId: node.id });
 							this._syncNodeVariablesAfterExecution(run, node, nodeState);
-						} catch (err: any) {
+						} catch (err) {
 							if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
 								nodeState.status = 'pending';
 								pathStep.status = 'failed';
@@ -3227,7 +3326,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								continue;
 							}
 							const node = data.nodes.find(n => n.id === nextId);
-							if (!node) continue;
+							if (!node) { continue; }
 
 							if (!run.visitedNodeIds.includes(node.id)) {
 								run.visitedNodeIds.push(node.id);
@@ -3312,8 +3411,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				if (run.status !== 'failed') {
 					// Aggregate all outputs from the unique Workflow Output Node (across all output components in order)
 					if (run.ioContract?.outputNodeId && run.ioContract.outputs.length > 0) {
-						const aggregatedOutputs: Record<string, any> = {};
-						const aggregatedByVar: Record<string, any> = {};
+						const aggregatedOutputs: Record<string, unknown> = {};
+						const aggregatedByVar: Record<string, unknown> = {};
 						for (const outDef of run.ioContract.outputs) {
 							const outVal = run.contextVariables[outDef.label]
 								?? run.contextVariables[outDef.varName]
@@ -3386,7 +3485,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					if (step.expression) {
 						const assignMatches = step.expression.matchAll(/(?:^|\n)\s*@?([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\+|-|\*|\/)?=(?!=)/g);
 						for (const m of assignMatches) {
-							if (m[1]) pipelineAssignedVars.add(m[1]);
+							if (m[1]) { pipelineAssignedVars.add(m[1]); }
 						}
 					}
 				}
@@ -3401,7 +3500,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						continue;
 					}
 
-					let assignedVal: any;
+					let assignedVal: unknown;
 					const oldVal = run.contextVariables[cleanVarName];
 
 					if (v.expression) {
@@ -3464,7 +3563,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								}
 							} else if (expr === 'ticket.output' || expr === 'ticket' || expr === '@ticket') {
 								const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
-								assignedVal = lastTicket?.output ?? nodeState.output?.result ?? nodeState.output?.output ?? 'success';
+								assignedVal = lastTicket?.output ?? optionalProp(nodeState.output, 'result') ?? optionalProp(nodeState.output, 'output') ?? 'success';
 							} else if (expr === 'ticket.status' || expr === '@ticket.status') {
 								const lastTicket = nodeState.executedTickets?.[nodeState.executedTickets.length - 1];
 								assignedVal = lastTicket?.status ?? nodeState.status ?? 'success';
@@ -3506,7 +3605,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 									} else {
 										assignedVal = (Number(oldVal) || 0) + (Number(rhsVal) || 0);
 									}
-								} catch (evalErr: any) {
+								} catch (evalErr) {
 									this._emitLog(run, 'error', `[Expression Error] '${v.name}' in '${node.label}': ${evalErr.message}`, { nodeId: node.id });
 									throw evalErr;
 								}
@@ -3515,7 +3614,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							} else {
 								try {
 									assignedVal = this._evaluateExpressionOrLiteral(expr, run.contextVariables);
-								} catch (evalErr: any) {
+								} catch (evalErr) {
 									this._emitLog(run, 'error', `[Expression Error] '${v.name}' in '${node.label}': ${evalErr.message}`, { nodeId: node.id });
 									throw evalErr;
 								}
@@ -3536,7 +3635,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							assignedVal = lastTicket?.output ?? 'success';
 						}
 					} else {
-						assignedVal = nodeState.output?.[v.name] ?? (nodeVars.length === 1 ? (nodeState.output?.value ?? nodeState.output?.returnValue) : undefined);
+						assignedVal = optionalProp(nodeState.output, v.name) ?? (nodeVars.length === 1 ? (optionalProp(nodeState.output, 'value') ?? optionalProp(nodeState.output, 'returnValue')) : undefined);
 						if (assignedVal === undefined) {
 							if (oldVal !== undefined) {
 								assignedVal = oldVal;
@@ -3593,7 +3692,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			this._emitLog(run, 'warn', `[Human-in-the-Loop] Waiting for human interaction on node '${node.label}'`);
 			this.notificationService.info(`Workflow requires human interaction: ${node.label}`);
 
-			const userInput = await new Promise<any>(resolve => {
+			const userInput = await new Promise<unknown>(resolve => {
 				this._humanWaiters.set(run.runId, resolve);
 			});
 
@@ -3631,7 +3730,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				this._emitLog(run, 'info', `Running Ticket: [${ticketType || 'task'}] '${ticketName}'${parameters ? ` (PARAM: ${parameters})` : ''}`);
 
 				// Parse parameters string if provided (e.g. key1=val1, key2=val2 or JSON or variable references)
-				const inputParams: Record<string, any> = {};
+				const inputParams: Record<string, unknown> = {};
 				if (parameters) {
 					const trimmed = parameters.trim();
 					if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
@@ -3661,12 +3760,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketId: ticketUri || ticketName,
 					ticketName: ticketName,
 					ticketType: ticketType || 'task',
-					status: 'running' as any,
+					status: RUNNING_TICKET_RECORD_STATUS,
 					durationMs: 0,
 					stepResults: []
 				};
-				const inFlightOp = {
-					type: 'run_ticket' as const,
+				const inFlightOp: IWorkflowNodeOperation = {
+					type: 'run_ticket',
 					label: `Run Ticket: '${ticketName}' [${ticketType || 'task'}]`,
 					executedTicket: inFlightTicketRecord,
 					durationMs: 0
@@ -3680,7 +3779,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					inputParams: { ...run.contextVariables, ...inputParams },
 					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
 					onStepStart: (info) => {
-						this._emitLog(run, 'info', `  ▶ [${ticketName}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
+						this._emitLog(run, 'info', `  \u25B6 [${ticketName}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
 						this._notifyRunChanged(run);
 					},
 					onStepProgress: (stepRes, idx, total) => {
@@ -3711,7 +3810,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					status: (execResult.success ? 'success' : 'failed') as 'success' | 'failed',
 					output: this._summarizeValueForHistory(execResult.output),
 					stepResults: this._sanitizeStepResultsForHistory(execResult.stepResults),
-					outputSpecs: (execResult as any).outputSpecs,
+					outputSpecs: (execResult as ITicketRunResult & ITicketRunResultExtras).outputSpecs,
 					durationMs: Date.now() - ticketStart
 				};
 				// Update in-flight references
@@ -3730,7 +3829,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 				// Keep a bounded sliding window of executed ticket IDs in contextVariables (max 10)
 				// Pruning old tickets avoids multi-hundred-megabyte context variable bloat in long loops
-				const ticketHistoryWindow: string[] = (run as any)._executedTicketIdsWindow || ((run as any)._executedTicketIdsWindow = []);
+				const ticketHistoryWindow: string[] = (run as IInternalWorkflowRun)._executedTicketIdsWindow || ((run as IInternalWorkflowRun)._executedTicketIdsWindow = []);
 				if (ticketRecord.ticketId) {
 					ticketHistoryWindow.push(ticketRecord.ticketId);
 					if (ticketHistoryWindow.length > 10) {
@@ -3774,7 +3873,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					throw new Error('Workflow execution was stopped');
 				}
 				const step = node.pipeline[i];
-				const stepComp = (step as any).component;
+				const stepComp = step.component;
 				if (step.disabled || (stepComp && stepComp.disabled)) {
 					const stepTitle = stepComp?.label || step.label || step.expression || 'Step';
 					this._emitLog(run, 'info', `[Step #${i + 1} Skipped] Step '${stepTitle}' is disabled / commented out, skipping execution.`, { nodeId: node.id });
@@ -3807,7 +3906,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							if (!subDef) {
 								throw new Error(`Sub-Workflow '${stepComp.subWorkflowName || stepComp.subWorkflowId || stepComp.label}' not found in Sub-Workflow library.`);
 							}
-							const resolvedInputs: Record<string, any> = {};
+							const resolvedInputs: Record<string, unknown> = {};
 							for (const inpDef of (subDef.inputs || [])) {
 								resolvedInputs[inpDef.name] = this._coerceInputLiteral(inpDef.defaultValue ?? '');
 							}
@@ -3854,9 +3953,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							}
 
 							try {
-								(stepComp as any).lastExecutionInputs = JSON.parse(JSON.stringify(resolvedInputs));
+								stepComp.lastExecutionInputs = JSON.parse(JSON.stringify(resolvedInputs));
 							} catch {
-								(stepComp as any).lastExecutionInputs = { ...resolvedInputs };
+								stepComp.lastExecutionInputs = { ...resolvedInputs };
 							}
 							this._emitLog(run, 'info', `[Step #${i + 1}] Invoking Sub-Workflow '${subDef.name}' (${subDef.nodes.length} nodes) with inputs: ${JSON.stringify(resolvedInputs)}`, { nodeId: node.id });
 							const childRun = await this._executeSubWorkflow(run, subDef, resolvedInputs, { id: node.id, label: node.label });
@@ -3874,8 +3973,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							}
 
 							const rawWorkflowOutputs = childRun.workflowOutputs ?? childRun.contextVariables['WORKFLOW_OUTPUTS'];
-							let childOutput: any;
-							if (rawWorkflowOutputs && typeof rawWorkflowOutputs === 'object' && !Array.isArray(rawWorkflowOutputs)) {
+							let childOutput: unknown;
+							if (isWorkflowRecord(rawWorkflowOutputs) && !Array.isArray(rawWorkflowOutputs)) {
 								const outputKeys = Object.keys(rawWorkflowOutputs);
 								if (outputKeys.length === 1) {
 									// Single exported output: pass through the raw value directly (list, string, number, object, etc.) without extra dict wrapping
@@ -4012,7 +4111,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							await this._executeFunctionStep(run, node, step, i, state, pathStep);
 						} else if (step.type === 'set_variable' && step.targetVariable) {
 							const varKey = step.targetVariable.trim().replace(/^@/, '');
-							let val: any = undefined;
+							let val: unknown = undefined;
 							let expr = (step.expression || '').trim();
 
 							// Strip self-assignment prefix if present (e.g. "monitor = monitor + 1" or "monitor += 1")
@@ -4066,7 +4165,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 									} else {
 										val = (Number(oldVal) || 0) + (Number(rhsVal) || 0);
 									}
-								} catch (evalErr: any) {
+								} catch (evalErr) {
 									this._emitLog(run, 'error', `[Syntax Error] Step #${i + 1} variable '${varKey}' failed to evaluate '${expr}': ${evalErr.message}`, { nodeId: node.id });
 									throw new Error(`[Syntax Error] Step #${i + 1} ('${expr}'): ${evalErr.message}`);
 								}
@@ -4074,7 +4173,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								try {
 									const evaluator = new PythonExpressionEvaluator(expr, run.contextVariables);
 									val = evaluator.evaluate();
-								} catch (evalErr: any) {
+								} catch (evalErr) {
 									this._emitLog(run, 'error', `[Syntax Error] Step #${i + 1} variable '${varKey}' failed to evaluate '${expr}': ${evalErr.message}`, { nodeId: node.id });
 									throw new Error(`[Syntax Error] Step #${i + 1} ('${expr}'): ${evalErr.message}`);
 								}
@@ -4097,7 +4196,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						if (!isDirectComponentStep && stepComp) {
 							const dur = Date.now() - stepStartMs;
 							const ts = new Date().toLocaleTimeString();
-							let outVal: any = undefined;
+							let outVal: unknown = undefined;
 							let formattedDisplayLog: string | undefined = undefined;
 							if (stepComp.type === 'display') {
 								const wfCards = this._displayCardsByWorkflow.get(run.workflowUri) || [];
@@ -4153,7 +4252,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							}
 						}
 						break;
-					} catch (stepErr: any) {
+					} catch (stepErr) {
 						if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
 							throw stepErr;
 						}
@@ -4239,11 +4338,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 			// Helper to find imported ticket matching a variable reference
 			const findMatchingImport = (ref?: string) => {
-				if (!ref) return undefined;
+				if (!ref) { return undefined; }
 				let clean = ref.trim().replace(/^@/, '');
-				if (clean.startsWith('=')) clean = clean.substring(1).trim();
+				if (clean.startsWith('=')) { clean = clean.substring(1).trim(); }
 				const eqIdx = clean.indexOf('=');
-				if (eqIdx !== -1) clean = clean.substring(eqIdx + 1).trim();
+				if (eqIdx !== -1) { clean = clean.substring(eqIdx + 1).trim(); }
 				clean = clean.replace(/^@/, '').trim();
 				const m = clean.match(/^([a-zA-Z0-9_\-]+)(\[(\d+)\])?$/);
 				const target = m ? m[1] : clean;
@@ -4300,10 +4399,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	}
 
 	private _isFunctionCallExpression(expr?: string): boolean {
-		if (!expr) return false;
+		if (!expr) { return false; }
 		const trimmed = expr.trim();
 		const m = trimmed.match(/^(?:@?[a-zA-Z0-9_\u4e00-\u9fa5]+\s*=\s*)?([a-zA-Z0-9_]+)\s*\([\s\S]*\)$/);
-		if (!m) return false;
+		if (!m) { return false; }
 		const fn = m[1].toLowerCase();
 		const valueOperatorFns = new Set([
 			'list', 'dict', 'set', 'tuple',
@@ -4334,7 +4433,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		let rhsGeneralExpr = '';
 
 		if (match) {
-			if (match[1]) targetVar = match[1].replace(/^@/, '');
+			if (match[1]) { targetVar = match[1].replace(/^@/, ''); }
 			fnName = match[2];
 			rawArgsStr = match[3] || '';
 		} else {
@@ -4358,31 +4457,33 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			? URI.joinPath(rawWsUri, '..')
 			: rawWsUri;
 
-		let result: any = undefined;
+		let result: unknown = undefined;
 		const startMs = Date.now();
 
 		try {
 			if (upperFn === 'RUN_TICKETS' || upperFn === 'RUNTICKETS' || upperFn === 'RUNTICKET') {
 				let ticketIdOrPath = '';
-				let inputParams: Record<string, any> = {};
+				let inputParams: Record<string, unknown> = {};
 
-				if (args.length > 0 && typeof args[0] === 'object' && args[0] !== null && !Array.isArray(args[0])) {
-					ticketIdOrPath = args[0].ticketId || args[0].ticketName || args[0].ticketIdOrPath || args[0].ticket_name || args[0].id || '';
-					inputParams = args[0].parameters || args[0].inputParams || args[0].params || {};
+				const firstArg = args[0];
+				if (args.length > 0 && isWorkflowRecord(firstArg) && !Array.isArray(firstArg)) {
+					// Ticket references coming from Python are strings; the casts are type-only
+					ticketIdOrPath = (firstArg.ticketId || firstArg.ticketName || firstArg.ticketIdOrPath || firstArg.ticket_name || firstArg.id || '') as string;
+					inputParams = (firstArg.parameters || firstArg.inputParams || firstArg.params || {}) as IWorkflowRecord;
 				} else {
 					const rawTicketArg = kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? args[0] ?? '';
 					if (Array.isArray(rawTicketArg) && rawTicketArg.length > 0) {
-						const first = rawTicketArg[0];
-						if (typeof first === 'object' && first !== null) {
-							ticketIdOrPath = first.ticketId || first.ticketName || first.ticketIdOrPath || first.id || '';
+						const first: unknown = rawTicketArg[0];
+						if (isWorkflowRecord(first)) {
+							ticketIdOrPath = (first.ticketId || first.ticketName || first.ticketIdOrPath || first.id || '') as string;
 							if (first.parameters && typeof first.parameters === 'object') {
 								inputParams = { ...first.parameters };
 							}
 						} else {
 							ticketIdOrPath = String(first).trim();
 						}
-					} else if (typeof rawTicketArg === 'object' && rawTicketArg !== null) {
-						ticketIdOrPath = rawTicketArg.ticketId || rawTicketArg.ticketName || rawTicketArg.ticketIdOrPath || rawTicketArg.id || '';
+					} else if (isWorkflowRecord(rawTicketArg)) {
+						ticketIdOrPath = (rawTicketArg.ticketId || rawTicketArg.ticketName || rawTicketArg.ticketIdOrPath || rawTicketArg.id || '') as string;
 						if (rawTicketArg.parameters && typeof rawTicketArg.parameters === 'object') {
 							inputParams = { ...rawTicketArg.parameters };
 						}
@@ -4398,15 +4499,15 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				// If ticketIdOrPath references a context variable name (e.g. RUN_TICKETS(new_ticket) or RUN_TICKETS("new_ticket"))
 				if (ticketIdOrPath && run.contextVariables[ticketIdOrPath]) {
 					const ctxVal = run.contextVariables[ticketIdOrPath];
-					if (typeof ctxVal === 'object' && ctxVal !== null && ctxVal.ticketId) {
-						ticketIdOrPath = ctxVal.ticketId;
+					if (isWorkflowRecord(ctxVal) && ctxVal.ticketId) {
+						ticketIdOrPath = ctxVal.ticketId as string;
 					}
 				}
 				// Also check if any ticket was created in this run whose title or name matches ticketIdOrPath
 				if (ticketIdOrPath) {
 					for (const ctxVal of Object.values(run.contextVariables)) {
-						if (ctxVal && typeof ctxVal === 'object' && ctxVal.ticketId && (ctxVal.title === ticketIdOrPath || ctxVal.ticketName === ticketIdOrPath)) {
-							ticketIdOrPath = ctxVal.ticketId;
+						if (isWorkflowRecord(ctxVal) && ctxVal.ticketId && (ctxVal.title === ticketIdOrPath || ctxVal.ticketName === ticketIdOrPath)) {
+							ticketIdOrPath = ctxVal.ticketId as string;
 							break;
 						}
 					}
@@ -4431,12 +4532,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketId: ticketIdOrPath,
 					ticketName: ticketIdOrPath,
 					ticketType: 'task',
-					status: 'running' as any,
+					status: RUNNING_TICKET_RECORD_STATUS,
 					durationMs: 0,
 					stepResults: []
 				};
-				const inFlightOp = {
-					type: 'run_ticket' as const,
+				const inFlightOp: IWorkflowNodeOperation = {
+					type: 'run_ticket',
 					label: `RUN_TICKETS: '${ticketIdOrPath}'`,
 					executedTicket: inFlightTicketRecord,
 					durationMs: 0
@@ -4450,7 +4551,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					inputParams: inputParams,
 					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
 					onStepStart: (info) => {
-						this._emitLog(run, 'info', `  ▶ [${ticketIdOrPath}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
+						this._emitLog(run, 'info', `  \u25B6 [${ticketIdOrPath}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
 						this._notifyRunChanged(run);
 					},
 					onStepProgress: (stepRes, idx, total) => {
@@ -4484,7 +4585,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 								ticketName: execRes.ticketName || ticketIdOrPath,
 								title: execRes.title,
 								ticketType: execRes.ticketType || 'ticket',
-								outputSpecs: (execRes as any).outputSpecs || []
+								outputSpecs: (execRes as ITicketRunResult & ITicketRunResultExtras).outputSpecs || []
 							},
 							enumerable: false,
 							configurable: true,
@@ -4498,7 +4599,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					ticketType: execRes.ticketType || 'task',
 					status: (execRes.success ? 'success' : 'failed') as 'success' | 'failed',
 					output: this._summarizeValueForHistory(execRes.output),
-					outputSpecs: (execRes as any).outputSpecs,
+					outputSpecs: (execRes as ITicketRunResult & ITicketRunResultExtras).outputSpecs,
 					stepResults: this._sanitizeStepResultsForHistory(execRes.stepResults),
 					durationMs: Date.now() - startMs
 				};
@@ -4511,9 +4612,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					state.executedTickets.splice(0, state.executedTickets.length - 50);
 				}
 			} else if (upperFn === 'CREATE_TICKETS' || upperFn === 'CREATETICKETS' || upperFn === 'CREATETICKET') {
-				let opts: any = {};
-				if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null) {
-					opts = { ...args[0] };
+				let opts: IRpcTicketCreateOptions = {};
+				const createArg = args[0];
+				if (args.length === 1 && isWorkflowRecord(createArg)) {
+					opts = { ...createArg };
 				} else {
 					opts.ticketType = String(kwargs.ticket_type ?? kwargs.type ?? args[0] ?? 'task');
 					opts.title = String(kwargs.title ?? args[1] ?? 'New Ticket');
@@ -4529,7 +4631,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					}
 
 					const rawParams = kwargs.parameters ?? kwargs.params ?? kwargs.fieldValues ?? (typeof args[2] === 'object' ? args[2] : (typeof args[3] === 'object' ? args[3] : {}));
-					const initialFields = typeof rawParams === 'object' && rawParams !== null ? { ...rawParams } : {};
+					const initialFields: IWorkflowRecord = typeof rawParams === 'object' && rawParams !== null ? { ...rawParams } : {};
 
 					// Merge any loose keyword arguments directly into initialFields (e.g. CREATE_TICKETS("xxx", start=0))
 					// Explicit keyword arguments take precedence over dictionary parameters
@@ -4550,10 +4652,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 				const createParamKeys = Object.keys(opts.parameters || {});
 				const createParamSummary = createParamKeys.length > 0
-					? createParamKeys.map(k => `${k}=${this._fastPreviewString(opts.parameters[k], 80)}`).join(', ')
+					? createParamKeys.map(k => `${k}=${this._fastPreviewString(opts.parameters?.[k], 80)}`).join(', ')
 					: 'none';
 				this._emitLog(run, 'info', `[CREATE_TICKETS] Creating ticket '${opts.title}' (type: ${opts.ticketType}) with ${createParamKeys.length} parameter(s): ${createParamSummary}`, { nodeId: node.id });
-				const createRes = await this.ticketRuntimeService.CREATE_TICKETS(opts);
+				const createRes = await this.ticketRuntimeService.CREATE_TICKETS(opts as ITicketCreateOptions);
 				if (!createRes.success) {
 					throw new Error(createRes.error || `Failed to create ticket '${opts.title}'`);
 				}
@@ -4575,7 +4677,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			} else if (upperFn === 'GET_TICKET' || upperFn === 'GETTICKET') {
 				const rawTarget = kwargs.ticket_id ?? kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticketId ?? kwargs.id ?? args[0] ?? '';
 				const field = kwargs.field ?? kwargs.key ?? kwargs.name ?? args[1];
-				const getRes = await this.ticketRuntimeService.getTicket(workflowDir, rawTarget, field);
+				const getRes = await this.ticketRuntimeService.getTicket(workflowDir, rawTarget, field as string | undefined);
 				if (getRes && typeof getRes === 'object') {
 					try {
 						Object.defineProperty(getRes, '__isTicketGetResult', {
@@ -4590,10 +4692,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS') {
 				const hasQueryFilters = kwargs.ticket_type !== undefined || kwargs.status !== undefined || kwargs.title !== undefined || kwargs.field !== undefined || kwargs.ticketType !== undefined || kwargs.path !== undefined || kwargs.limit !== undefined;
 				if (hasQueryFilters) {
-					result = await this.ticketRuntimeService.getTickets(workflowDir, kwargs, kwargs.field);
+					result = await this.ticketRuntimeService.getTickets(workflowDir, kwargs, kwargs.field as string | undefined);
 				} else {
 					const rawTarget = kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.id ?? args[0] ?? '';
-					const getRes = await this.ticketRuntimeService.getTickets(workflowDir, rawTarget, kwargs.field);
+					const getRes = await this.ticketRuntimeService.getTickets(workflowDir, rawTarget, kwargs.field as string | undefined);
 					if (getRes && typeof getRes === 'object') {
 						try {
 							Object.defineProperty(getRes, '__isTicketGetResult', {
@@ -4616,12 +4718,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				} else {
 					if (outRes && typeof outRes === 'object' && !Array.isArray(outRes)) {
 						try {
-							const tRes = await this.ticketRuntimeService.GET_TICKETS(workflowDir, rawTarget);
+							// A ticket target (id / name / handle) resolves to a single ticket; any other result has none of these fields.
+							const tRes = await this.ticketRuntimeService.GET_TICKETS(workflowDir, rawTarget) as Partial<ITicketGetResult> | null | undefined;
 							const outputField = tRes?.schema?.fields?.find(f => f.type === 'output');
 							Object.defineProperty(outRes, '__ticketMetadata', {
 								value: {
-									ticketId: tRes?.ticketId || (typeof rawTarget === 'string' ? rawTarget : rawTarget?.ticketId),
-									ticketName: tRes?.ticketName || (typeof rawTarget === 'string' ? rawTarget : rawTarget?.ticketName),
+									ticketId: tRes?.ticketId || (typeof rawTarget === 'string' ? rawTarget : optionalProp(rawTarget, 'ticketId')),
+									ticketName: tRes?.ticketName || (typeof rawTarget === 'string' ? rawTarget : optionalProp(rawTarget, 'ticketName')),
 									title: tRes?.title,
 									ticketType: tRes?.ticketType || 'ticket',
 									outputSpecs: outputField?.outputSpecs || []
@@ -4638,7 +4741,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				const catalog = await this.ticketRuntimeService.GET_PRIMITIVES_CATALOG(workflowDir);
 				result = catalog;
 			} else if (upperFn === 'DISPLAY' || upperFn === 'PRINT') {
-				let displayVal: any;
+				let displayVal: unknown;
 				if (args.length === 1) {
 					displayVal = args[0];
 				} else if (args.length > 1) {
@@ -4659,8 +4762,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				this._emitLog(run, 'info', `[DISPLAY] [${nodeLabelName}] (${summaryType})\n${logDisplayPreview}`, { nodeId: node.id });
 
 				const exprKey = rawExpr || `DISPLAY(${rawArgsStr})`;
-				const displayWfUri = (run as any)._displayWorkflowUri || run.workflowUri;
-				const displayRunId = (run as any)._displayRunId || run.runId;
+				const displayWfUri = (run as IInternalWorkflowRun)._displayWorkflowUri || run.workflowUri;
+				const displayRunId = (run as IInternalWorkflowRun)._displayRunId || run.runId;
 				let cardList = this._displayCardsByWorkflow.get(displayWfUri);
 				if (!cardList) {
 					cardList = [];
@@ -4712,7 +4815,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				try {
 					const evaluator = new PythonExpressionEvaluator(exprToEval, run.contextVariables);
 					result = evaluator.evaluate();
-				} catch (err: any) {
+				} catch (err) {
 					throw new Error(`Unsupported function or expression '${fnName || exprToEval}': ${err.message}`);
 				}
 			}
@@ -4725,15 +4828,15 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			} else {
 				this._emitLog(run, 'info', `[Step #${stepIndex + 1} FX] Execution completed successfully in ${Date.now() - startMs}ms`, { nodeId: node.id });
 			}
-		} catch (err: any) {
+		} catch (err) {
 			this._emitLog(run, 'error', `[Step #${stepIndex + 1} FX Error] Function call '${fnName}' failed: ${err.message}`, { nodeId: node.id });
 			throw err;
 		}
 	}
 
-	private _parseFunctionArgs(argsStr: string, context: Record<string, any>): { args: any[]; kwargs: Record<string, any> } {
+	private _parseFunctionArgs(argsStr: string, context: Record<string, unknown>): { args: unknown[]; kwargs: Record<string, unknown> } {
 		const trimmed = argsStr.trim();
-		if (!trimmed) return { args: [], kwargs: {} };
+		if (!trimmed) { return { args: [], kwargs: {} }; }
 
 		const rawParts: string[] = [];
 		let current = '';
@@ -4750,7 +4853,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					inQuote = null;
 				}
 			} else {
-				if (ch === '"' || ch === "'") {
+				if (ch === '"' || ch === '\'') {
 					inQuote = ch;
 					current += ch;
 				} else if (ch === '(') {
@@ -4783,8 +4886,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			rawParts.push(current.trim());
 		}
 
-		const args: any[] = [];
-		const kwargs: Record<string, any> = {};
+		const args: unknown[] = [];
+		const kwargs: Record<string, unknown> = {};
 
 		for (const part of rawParts) {
 			const s = part.trim();
@@ -4802,14 +4905,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		return { args, kwargs };
 	}
 
-	private _evaluateArgument(arg: string, context: Record<string, any>): any {
+	private _evaluateArgument(arg: string, context: Record<string, unknown>): unknown {
 		const s = arg.trim();
-		if (!s) return undefined;
+		if (!s) { return undefined; }
 
 		// Single string literals (including Python f-strings like f"Task {start}")
-		const isFStr = (s.startsWith('f"') || s.startsWith('F"') || s.startsWith("f'") || s.startsWith("F'")) && s.length >= 3;
+		const isFStr = (s.startsWith('f"') || s.startsWith('F"') || s.startsWith('f\'') || s.startsWith('F\'')) && s.length >= 3;
 		const strCand = isFStr ? s.substring(1) : s;
-		if ((strCand.startsWith('"') && strCand.endsWith('"')) || (strCand.startsWith("'") && strCand.endsWith("'"))) {
+		if ((strCand.startsWith('"') && strCand.endsWith('"')) || (strCand.startsWith('\'') && strCand.endsWith('\''))) {
 			const quote = strCand[0];
 			let isSingleLiteral = true;
 			for (let i = 1; i < strCand.length - 1; i++) {
@@ -4830,9 +4933,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			return Number(s);
 		}
 		// Booleans & Null
-		if (s === 'true') return true;
-		if (s === 'false') return false;
-		if (s === 'null' || s === 'None') return null;
+		if (s === 'true') { return true; }
+		if (s === 'false') { return false; }
+		if (s === 'null' || s === 'None') { return null; }
 
 		// Direct variable reference (with or without @) or property path
 		const cleanRef = s.startsWith('@') ? s.substring(1).trim() : s;
@@ -4844,10 +4947,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			let val = context[rootVar] !== undefined ? context[rootVar] : context[`@${rootVar}`];
 			if (val !== undefined) {
 				for (let i = 1; i < parts.length; i++) {
-					if (val === undefined || val === null) break;
-					val = val[parts[i]];
+					if (val === undefined || val === null) { break; }
+					val = getPyAttr(val, parts[i]);
 				}
-				if (val !== undefined) return val;
+				if (val !== undefined) { return val; }
 			}
 		}
 
@@ -4884,14 +4987,14 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 	}
 
-	private _stripInternalDisplayMeta(val: any): any {
+	private _stripInternalDisplayMeta(val: unknown): unknown {
 		if (val === null || val === undefined || typeof val !== 'object') {
 			return val;
 		}
 		if (Array.isArray(val)) {
 			return val.map(item => this._stripInternalDisplayMeta(item));
 		}
-		const cleaned: Record<string, any> = {};
+		const cleaned: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(val)) {
 			if (k.startsWith('__') || k === 'outputSpecs' || k === 'output_specs') {
 				continue;
@@ -4901,10 +5004,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		return cleaned;
 	}
 
-	private _formatDisplayOutput(displayVal: any): {
+	private _formatDisplayOutput(displayVal: unknown): {
 		formattedText: string;
 		summaryType: string;
-		cleanValue: any;
+		cleanValue: unknown;
 		ticketTitle?: string;
 		ticketId?: string;
 		ticketType?: string;
@@ -4922,19 +5025,17 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 
 		// 1. Check if displayVal is a newly created Ticket Handle (descriptor from CREATE_TICKETS)
-		const isTicketHandle = typeof displayVal === 'object' && displayVal !== null && !Array.isArray(displayVal) && (
-			displayVal.isHandle === true
-		);
+		const handle = isWorkflowRecord(displayVal) && !Array.isArray(displayVal) && displayVal.isHandle === true ? displayVal : undefined;
 
-		if (isTicketHandle) {
-			const ticketId = String(displayVal.ticketId || '');
-			const ticketName = String(displayVal.ticketName || ticketId);
-			const ticketType = String(displayVal.ticketType || 'ticket');
-			const title = String(displayVal.title || ticketName || ticketId);
-			const status = String(displayVal.status || 'Todo');
-			const createdAt = String(displayVal.createdAt || new Date().toLocaleString());
-			const targetFolder = String(displayVal.targetFolder || '');
-			const parameters = (displayVal.parameters && typeof displayVal.parameters === 'object') ? displayVal.parameters : {};
+		if (handle) {
+			const ticketId = String(handle.ticketId || '');
+			const ticketName = String(handle.ticketName || ticketId);
+			const ticketType = String(handle.ticketType || 'ticket');
+			const title = String(handle.title || ticketName || ticketId);
+			const status = String(handle.status || 'Todo');
+			const createdAt = String(handle.createdAt || new Date().toLocaleString());
+			const targetFolder = String(handle.targetFolder || '');
+			const parameters = (handle.parameters && typeof handle.parameters === 'object') ? handle.parameters as IWorkflowRecord : {};
 
 			const ticketHandle: ITicketHandleInfo = {
 				ticketId,
@@ -4954,7 +5055,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				`Status: ${status}`,
 				`Created: ${createdAt}`
 			];
-			if (targetFolder) lines.push(`Path: ${targetFolder}`);
+			if (targetFolder) { lines.push(`Path: ${targetFolder}`); }
 			if (Object.keys(parameters).length > 0) {
 				lines.push(`Inputs: ${JSON.stringify(parameters, null, 2)}`);
 			}
@@ -5025,9 +5126,10 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 
 		// 3. Python Dictionary / JSON Object or List / Array -> always render as a single complete formatted JSON block
-		const ticketId = displayVal?.__ticketMetadata?.ticketId || '';
-		const ticketTitle = displayVal?.__ticketMetadata?.title || displayVal?.__ticketMetadata?.ticketName || '';
-		const ticketType = displayVal?.__ticketMetadata?.ticketType || '';
+		const ticketMeta = optionalProp(displayVal, '__ticketMetadata') as ITicketDisplayMetadata | null | undefined;
+		const ticketId = ticketMeta?.ticketId || '';
+		const ticketTitle = ticketMeta?.title || ticketMeta?.ticketName || '';
+		const ticketType = ticketMeta?.ticketType || '';
 		const cleanVal = this._stripInternalDisplayMeta(displayVal);
 		const isArray = Array.isArray(cleanVal);
 		const totalArrayLen = isArray ? cleanVal.length : 0;
@@ -5067,15 +5169,15 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		};
 	}
 
-	private _extractPrimitiveCleanValue(rawMeta: any, defaultFormat?: string): any {
-		if (rawMeta === undefined || rawMeta === null) return undefined;
+	private _extractPrimitiveCleanValue(rawMeta: unknown, defaultFormat?: string): unknown {
+		if (rawMeta === undefined || rawMeta === null) { return undefined; }
 		if (typeof rawMeta === 'string') {
 			const trimmed = rawMeta.trim();
 			if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
 				try {
 					const parsed = JSON.parse(trimmed);
 					// Data Table primitive
-					if (Array.isArray(parsed.rows) || 'sqlOutput' in parsed || ('columns' in parsed && 'dbEngine' in parsed)) {
+					if (Array.isArray(parsed.rows) || hasWorkflowProperty(parsed, 'sqlOutput') || (hasWorkflowProperty(parsed, 'columns') && hasWorkflowProperty(parsed, 'dbEngine'))) {
 						if (Array.isArray(parsed.rows) && (parsed.rows.length > 0 || !/^Status:\s*FAILED\b/i.test(String(parsed.sqlOutput || '').trim()))) {
 							return parsed.rows;
 						}
@@ -5138,12 +5240,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			this._emitLog(run, 'info', `Evaluating condition(s) on ${outgoingLinks.length} outgoing branch(es) from '${currentNode.label}'`);
 			const matchedNodes: IFlowchartNode[] = [];
 			let firstConditionError: string | undefined = undefined;
-			if (!run.linkStates) run.linkStates = {};
+			if (!run.linkStates) { run.linkStates = {}; }
 
 			for (const link of outgoingLinks) {
 				const linkKey = link.id || `${link.from}->${link.to}`;
 				const rawLabel = (link.label || '').trim();
-				if (!rawLabel) continue;
+				if (!rawLabel) { continue; }
 
 				let condResult: boolean | null = null;
 				let conditionError: string | undefined = undefined;
@@ -5155,16 +5257,16 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						condResult = true;
 					} else if (negKw.has(lowerLabel)) {
 						const ns = run.nodeStates[currentNode.id];
-						condResult = Boolean(ns && (ns.status === 'failed' || ns.output?.approved === false || ns.output?.action === 'rejected'));
+						condResult = Boolean(ns && (ns.status === 'failed' || optionalProp(ns.output, 'approved') === false || optionalProp(ns.output, 'action') === 'rejected'));
 					} else if (this._pythonKernels.has(run.runId)) {
 						const pyRes = await this._executeInPythonKernel(run, currentNode, -1, run.nodeStates[currentNode.id], pathStep, rawLabel, 'eval');
 						condResult = Boolean(pyRes);
 					} else {
 						condResult = this._evaluateCondition(rawLabel, run.contextVariables, run.nodeStates[currentNode.id], run);
 					}
-				} catch (err: any) {
+				} catch (err) {
 					conditionError = err.message || String(err);
-					if (!firstConditionError) firstConditionError = conditionError;
+					if (!firstConditionError) { firstConditionError = conditionError; }
 				}
 
 				const target = data.nodes.find(n => n.id === link.to);
@@ -5181,7 +5283,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						error: conditionError,
 						explanation: `Syntax/Evaluation Error: ${conditionError}`
 					};
-					if (link.id) run.linkStates[`${link.from}->${link.to}`] = run.linkStates[linkKey];
+					if (link.id) { run.linkStates[`${link.from}->${link.to}`] = run.linkStates[linkKey]; }
 				} else if (condResult === true) {
 					run.linkStates[linkKey] = {
 						linkId: link.id,
@@ -5192,7 +5294,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						evaluationResult: true,
 						explanation: explanation
 					};
-					if (link.id) run.linkStates[`${link.from}->${link.to}`] = run.linkStates[linkKey];
+					if (link.id) { run.linkStates[`${link.from}->${link.to}`] = run.linkStates[linkKey]; }
 
 					if (target) {
 						this._emitLog(run, 'info', `Condition MATCHED: '${link.label}' -> navigating to '${target.label}' (${explanation})`);
@@ -5219,7 +5321,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 						evaluationResult: false,
 						explanation: explanation
 					};
-					if (link.id) run.linkStates[`${link.from}->${link.to}`] = run.linkStates[linkKey];
+					if (link.id) { run.linkStates[`${link.from}->${link.to}`] = run.linkStates[linkKey]; }
 					this._emitLog(run, 'info', `Condition REJECTED: '${link.label}' (${explanation})`);
 				}
 			}
@@ -5277,7 +5379,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					if (!run.linkStates[key].error) {
 						run.linkStates[key].error = `Condition '${l.label}' not satisfied, execution blocked here.`;
 					}
-					if (l.id) run.linkStates[`${l.from}->${l.to}`] = run.linkStates[key];
+					if (l.id) { run.linkStates[`${l.from}->${l.to}`] = run.linkStates[key]; }
 				}
 			}
 
@@ -5298,7 +5400,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					explanation: `Proceed to '${target.label}'`
 				};
 			}
-			if (!run.linkStates) run.linkStates = {};
+			if (!run.linkStates) { run.linkStates = {}; }
 			const lKey = outgoingLinks[0].id || `${outgoingLinks[0].from}->${outgoingLinks[0].to}`;
 			run.linkStates[lKey] = {
 				linkId: outgoingLinks[0].id,
@@ -5307,7 +5409,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				status: 'passed',
 				evaluationResult: true
 			};
-			if (outgoingLinks[0].id) run.linkStates[`${outgoingLinks[0].from}->${outgoingLinks[0].to}`] = run.linkStates[lKey];
+			if (outgoingLinks[0].id) { run.linkStates[`${outgoingLinks[0].from}->${outgoingLinks[0].to}`] = run.linkStates[lKey]; }
 			return target ? [target] : [];
 		}
 
@@ -5327,9 +5429,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		return targetNodes;
 	}
 
-	private _explainCondition(expr: string, context: Record<string, any>, result: boolean): string {
+	private _explainCondition(expr: string, context: Record<string, unknown>, result: boolean): string {
 		const varMatches = expr.match(/@?[a-zA-Z0-9_]+/g);
-		const varVals: Record<string, any> = {};
+		const varVals: Record<string, unknown> = {};
 		if (varMatches) {
 			for (const rawVar of varMatches) {
 				const clean = rawVar.replace(/^@/, '');
@@ -5347,12 +5449,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	private _evaluateCondition(
 		expr: string,
-		context: Record<string, any>,
+		context: Record<string, unknown>,
 		nodeState?: IWorkflowNodeExecutionState,
 		run?: IWorkflowExecutionRun
 	): boolean | null {
 		const raw = expr.trim();
-		if (!raw) return null;
+		if (!raw) { return null; }
 
 		// 1. Check standard boolean and status keywords
 		const lower = raw.toLowerCase();
@@ -5362,7 +5464,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 		const negativeKeywords = new Set(['false', 'no', 'fail', 'reject']);
 		if (negativeKeywords.has(lower)) {
-			if (nodeState && (nodeState.status === 'failed' || nodeState.output?.approved === false || nodeState.output?.action === 'rejected')) {
+			if (nodeState && (nodeState.status === 'failed' || optionalProp(nodeState.output, 'approved') === false || optionalProp(nodeState.output, 'action') === 'rejected')) {
 				return true;
 			}
 			return false;
@@ -5378,7 +5480,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			if (res !== undefined && res !== null) {
 				return Boolean(res);
 			}
-		} catch (err: any) {
+		} catch (err) {
 			if (run) {
 				this._emitLog(run, 'error', `[Condition Syntax Error] Failed to evaluate condition '${raw}': ${err.message}`);
 			}
@@ -5388,15 +5490,15 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		return null;
 	}
 
-	private _evaluateExpressionOrLiteral(expr: string, context: Record<string, any>): any {
+	private _evaluateExpressionOrLiteral(expr: string, context: Record<string, unknown>): unknown {
 		const evaluator = new PythonExpressionEvaluator(expr, context);
 		return evaluator.evaluate();
 	}
 
-	private _resolveValue(token: string, context: Record<string, any>): any {
+	private _resolveValue(token: string, context: Record<string, unknown>): unknown {
 		try {
 			const trimmed = (token || '').trim();
-			if (!trimmed || trimmed === 'None' || trimmed === 'null') return undefined;
+			if (!trimmed || trimmed === 'None' || trimmed === 'null') { return undefined; }
 			if (trimmed.startsWith('+=') || trimmed.startsWith('-=')) {
 				const num = Number(trimmed.substring(2).trim());
 				return isNaN(num) ? 0 : num;
@@ -5408,8 +5510,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 	}
 
-	private _getNodeVars(node: IFlowchartNode): { name: string; initialValue?: string; expression?: string; currentValue?: any }[] {
-		const rawVars: { name: string; initialValue?: string; expression?: string; currentValue?: any }[] = [];
+	private _getNodeVars(node: IFlowchartNode): { name: string; initialValue?: string; expression?: string; currentValue?: unknown }[] {
+		const rawVars: { name: string; initialValue?: string; expression?: string; currentValue?: unknown }[] = [];
 		if (Array.isArray(node.outputVariables) && node.outputVariables.length > 0) {
 			rawVars.push(...node.outputVariables);
 		} else if (node.outputVariable && node.outputVariable.name) {
@@ -5417,7 +5519,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 
 		// Deduplicate by name, preserving valid initialValue and expression
-		const map = new Map<string, { name: string; initialValue?: string; expression?: string; currentValue?: any }>();
+		const map = new Map<string, { name: string; initialValue?: string; expression?: string; currentValue?: unknown }>();
 		for (const v of rawVars) {
 			if (v && v.name) {
 				const clean = v.name.replace(/^@/, '').trim();
@@ -5463,12 +5565,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 
 		const isPureStartCircle = (n: IFlowchartNode): boolean => {
-			const hasParamComp = (n.pipeline || []).some(s => (s as any)?.component?.type === 'parameters');
+			const hasParamComp = (n.pipeline || []).some(s => s?.component?.type === 'parameters');
 			return !hasParamComp && n.type === 'circle' && /^\s*(start|begin|entry)\s*$/i.test(n.label || '');
 		};
 		const isPureEndCircle = (n: IFlowchartNode): boolean => {
 			const hasOutputComp = (n.pipeline || []).some(s => {
-				const t = (s as any)?.component?.type;
+				const t = s?.component?.type;
 				return t === 'output';
 			});
 			return !hasOutputComp && this._isEndNode(n);
@@ -5509,7 +5611,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				if (firstTargets.length === 1) {
 					inputNode = firstTargets[0];
 				} else if (firstTargets.length > 1) {
-					const withInputs = firstTargets.filter(n => (n.pipeline || []).some(s => (s as any)?.component?.type === 'parameters'));
+					const withInputs = firstTargets.filter(n => (n.pipeline || []).some(s => s?.component?.type === 'parameters'));
 					if (withInputs.length === 1) {
 						inputNode = withInputs[0];
 					} else {
@@ -5528,7 +5630,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		// Accumulate ALL parameters from ALL Inputs ('parameters') components inside the unique Input Node in order
 		if (inputNode) {
 			for (const step of (inputNode.pipeline || [])) {
-				const comp = (step as any)?.component;
+				const comp = step?.component;
 				if (comp && comp.type === 'parameters' && Array.isArray(comp.parameters)) {
 					for (const p of comp.parameters) {
 						const pName = (p?.name || '').trim();
@@ -5599,7 +5701,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const pureEndNodes = activeNodes.filter(isPureEndCircle);
 		const terminalNodes = Array.from(terminalSet.values());
 		const nodesWithOutputComp = activeNodes.filter(n => !isPureEndCircle(n) && (n.pipeline || []).some(s => {
-			const t = (s as any)?.component?.type;
+			const t = s?.component?.type;
 			return t === 'output';
 		}));
 
@@ -5607,7 +5709,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			outputNode = terminalNodes[0];
 		} else if (terminalNodes.length > 1) {
 			const terminalsWithOutput = terminalNodes.filter(n => (n.pipeline || []).some(s => {
-				const t = (s as any)?.component?.type;
+				const t = s?.component?.type;
 				return t === 'output';
 			}));
 			if (terminalsWithOutput.length === 1) {
@@ -5639,7 +5741,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		// Accumulate ALL enabled output specs from ALL Output ('output') components inside the unique Output Node in order
 		if (outputNode) {
 			for (const step of (outputNode.pipeline || [])) {
-				const comp = (step as any)?.component;
+				const comp = step?.component;
 				if (comp && (comp.type === 'output') && Array.isArray(comp.outputSpecs)) {
 					for (const spec of comp.outputSpecs) {
 						if (!spec || spec.enabled === false) {
@@ -5699,7 +5801,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	private _findEntryNode(data: IFlowchartData, entryNodeId?: string): IFlowchartNode | undefined {
 		if (entryNodeId) {
 			const node = data.nodes.find(n => n.id === entryNodeId);
-			if (node) return node;
+			if (node) { return node; }
 		}
 
 		// Find all candidate entry nodes (0 incoming links and not an End/diamond node)
@@ -5711,8 +5813,8 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		if (entryCandidates.length > 1) {
 			// If multiple entry nodes exist and one was recently clicked/selected by the user, prefer that one
 			const byClickTime = [...entryCandidates]
-				.filter(n => typeof (n as any)._lastClickTime === 'number' && (n as any)._lastClickTime > 0)
-				.sort((a, b) => ((b as any)._lastClickTime || 0) - ((a as any)._lastClickTime || 0));
+				.filter(n => typeof n._lastClickTime === 'number' && n._lastClickTime > 0)
+				.sort((a, b) => (b._lastClickTime || 0) - (a._lastClickTime || 0));
 			if (byClickTime.length > 0) {
 				return byClickTime[0];
 			}
@@ -5727,7 +5829,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const startCircle = data.nodes.find(n =>
 			n.type === 'circle' && n.label.toLowerCase() === 'start'
 		);
-		if (startCircle) return startCircle;
+		if (startCircle) { return startCircle; }
 
 		return data.nodes[0];
 	}
@@ -5746,8 +5848,9 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 
 	private async _loadFlowchartDataRaw(uriStr: string, options?: IWorkflowEngineOptions): Promise<IFlowchartData | undefined> {
 		// 1. Direct in-memory data passed from options (e.g. from active editor canvas)
-		if (options?.initialData && Array.isArray(options.initialData.nodes) && options.initialData.nodes.length > 0) {
-			return options.initialData;
+		const initialData = initialFlowchartData(options);
+		if (initialData && Array.isArray(initialData.nodes) && initialData.nodes.length > 0) {
+			return initialData as IFlowchartData;
 		}
 
 		// 2. Load directly from authoritative .agents/workflow_flowchart.json (or direct .json/.workflow file) on disk
@@ -5785,7 +5888,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		if (snapshot?.customMetadata?.['flowchartJson']) {
 			try {
 				const parsed = JSON.parse(snapshot.customMetadata['flowchartJson']);
-				if (Array.isArray(parsed.nodes)) return parsed;
+				if (Array.isArray(parsed.nodes)) { return parsed; }
 			} catch (e) {
 				this.logService.error('[WorkflowExecution] Failed to parse flowchartJson from snapshot:', e);
 			}
@@ -5808,19 +5911,20 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		}
 	}
 
-	private _emitLog(run: IWorkflowExecutionRun, level: IWorkflowLogEntry['level'], message: string, data?: any): void {
+	private _emitLog(run: IWorkflowExecutionRun, level: IWorkflowLogEntry['level'], message: string, data?: unknown): void {
 		const safeMessage = typeof message === 'string' && message.length > 1200
 			? message.substring(0, 1200) + ' ... [truncated]'
 			: message;
-		const safeData = data && typeof data === 'object'
-			? (Object.keys(data).length <= 2 && ('nodeId' in data || 'ticketId' in data) ? { nodeId: data.nodeId, ticketId: data.ticketId } : this._summarizeValueForHistory(data, 1))
+		const dataRecord = isWorkflowRecord(data) ? data : undefined;
+		const safeData = dataRecord
+			? (Object.keys(dataRecord).length <= 2 && (Reflect.has(dataRecord, 'nodeId') || Reflect.has(dataRecord, 'ticketId')) ? { nodeId: dataRecord.nodeId, ticketId: dataRecord.ticketId } : this._summarizeValueForHistory(dataRecord, 1))
 			: data;
 		const log: IWorkflowLogEntry = {
 			id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
 			timestamp: Date.now(),
 			level,
-			nodeId: data?.nodeId || run.currentNodeId,
-			ticketId: data?.ticketId,
+			nodeId: (dataRecord?.nodeId || run.currentNodeId) as string | undefined,
+			ticketId: dataRecord?.ticketId as string | undefined,
 			message: safeMessage,
 			data: safeData
 		};
@@ -5843,7 +5947,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		this._schedulePersist(run.workflowUri);
 	}
 
-	private readonly _nodeComponentPersistDebounceMap = new Map<string, any>();
+	private readonly _nodeComponentPersistDebounceMap = new Map<string, ReturnType<typeof setTimeout>>();
 
 	private async _persistAndNotifyNodeComponents(run: IWorkflowExecutionRun, node: IFlowchartNode): Promise<void> {
 		this._onDidUpdateNodeComponents.fire({
@@ -5875,12 +5979,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					const rawContent = await this.fileService.readFile(flowchartFileUri);
 					const parsed = JSON.parse(rawContent.value.toString());
 					if (parsed && Array.isArray(parsed.nodes)) {
-						const targetNode = parsed.nodes.find((n: any) => n && n.id === node.id);
+						const targetNode = parsed.nodes.find((n: IFlowchartNode | null) => n && n.id === node.id);
 						if (targetNode && Array.isArray(targetNode.pipeline) && Array.isArray(node.pipeline)) {
 							for (const srcStep of node.pipeline) {
-								const srcComp = (srcStep as any).component;
-								if (!srcComp) continue;
-								const dstStep = targetNode.pipeline.find((s: any) =>
+								const srcComp = srcStep.component;
+								if (!srcComp) { continue; }
+								const dstStep = targetNode.pipeline.find((s: INodePipelineStep | null) =>
 									(s && s.id && s.id === srcStep.id) ||
 									(s && s.component && s.component.id && s.component.id === srcComp.id)
 								);
@@ -5899,12 +6003,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 										'tableLastExecutionTime', 'tableLastDurationMs', 'tableLastSqlOutput'
 									];
 									for (const rk of runtimeOnlyKeys) {
-										if ((srcComp as any)[rk] !== undefined) {
-											(dstStep.component as any)[rk] = (srcComp as any)[rk];
+										if (Reflect.get(srcComp, rk) !== undefined) {
+											Reflect.set(dstStep.component, rk, Reflect.get(srcComp, rk));
 										}
 									}
 									if (persistedLog !== undefined) {
-										(dstStep.component as any).lastExecutionLog = persistedLog;
+										dstStep.component.lastExecutionLog = persistedLog;
 									}
 								}
 							}
@@ -5942,7 +6046,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 
 			// Prepare initial context variables
-			const initVars: Record<string, any> = {};
+			const initVars: Record<string, unknown> = {};
 			for (const [k, v] of Object.entries(run.contextVariables || {})) {
 				if (!k.startsWith('@') && !WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(k)) {
 					initVars[k] = v;
@@ -6525,7 +6629,7 @@ finally:
 
 			if (isReady) {
 				const prevKernel = this._pythonKernels.get(run.runId);
-				const initialSyncedVars = new Map<string, any>();
+				const initialSyncedVars = new Map<string, unknown>();
 				for (const [ik, iv] of Object.entries(initVars)) {
 					initialSyncedVars.set(ik, iv);
 				}
@@ -6543,14 +6647,14 @@ finally:
 				try { terminal.dispose(); } catch { }
 				this._emitLog(run, 'warn', `[Python Kernel] Timed out waiting for Python interpreter (${pythonPath}), falling back to built-in evaluator.`);
 			}
-		} catch (err: any) {
+		} catch (err) {
 			this.logService.warn('[WorkflowExecution] Failed to start Python kernel:', err);
 		}
 	}
 
 	private async _shutdownPythonKernel(runId: string): Promise<void> {
 		const kernel = this._pythonKernels.get(runId);
-		if (!kernel) return;
+		if (!kernel) { return; }
 		kernel.stopped = true;
 		this._pythonKernels.delete(runId);
 		try {
@@ -6580,14 +6684,14 @@ finally:
 		pathStep: IWorkflowPathStep | undefined,
 		code: string,
 		mode: 'exec' | 'eval' = 'exec'
-	): Promise<any> {
+	): Promise<unknown> {
 		let kernel = this._pythonKernels.get(run.runId);
 		if (!kernel || kernel.stopped) {
 			throw new Error('Python kernel is not running');
 		}
 
 		const trimmedCode = (code || '').trim();
-		if (!trimmedCode) return undefined;
+		if (!trimmedCode) { return undefined; }
 
 		// If the Python kernel process exited prematurely (e.g. ready.flag missing), automatically restart it
 		const initialReadyUri = URI.joinPath(kernel.kernelDir, 'ready.flag');
@@ -6602,7 +6706,7 @@ finally:
 		}
 
 		if (mode === 'exec' && stepIndex >= 0) {
-			const singleLinePreview = trimmedCode.replace(/\r?\n/g, ' ↵ ');
+			const singleLinePreview = trimmedCode.replace(/\r?\n/g, ' \u21B5 ');
 			this._emitLog(run, 'info', `[Step #${stepIndex + 1} PY] Executing Python: ${singleLinePreview}`, { nodeId: node.id });
 		}
 
@@ -6614,7 +6718,7 @@ finally:
 		const legacyRpcResUri = URI.joinPath(kernel.kernelDir, 'rpc_res.json');
 
 		// Sync ONLY externally updated contextVariables (delta-sync) so we do not re-serialize multi-megabyte unchanged variables on every Python step.
-		const syncVars: Record<string, any> = {};
+		const syncVars: Record<string, unknown> = {};
 		for (const [k, v] of Object.entries(run.contextVariables || {})) {
 			if (!k.startsWith('@') && !WorkflowExecutionService.RESERVED_CONTEXT_ALIAS_KEYS.has(k)) {
 				if (!kernel.lastSyncedVars.has(k) || kernel.lastSyncedVars.get(k) !== v) {
@@ -6641,7 +6745,7 @@ finally:
 					sync_vars: syncVars
 				}))
 			);
-		} catch (writeErr: any) {
+		} catch (writeErr) {
 			const writeErrMsg = String(writeErr?.message || writeErr || '');
 			if (!writeErrMsg.includes('Unable to resolve nonexistent file')) {
 				throw writeErr;
@@ -6660,7 +6764,7 @@ finally:
 					for (const child of dirStat.children) {
 						const cName = child.name;
 						if (cName.startsWith('rpc_req_') && cName.endsWith('.json') && !cName.endsWith('.tmp')) {
-							let reqObj: any = undefined;
+							let reqObj: IPythonRpcRequest | undefined = undefined;
 							try {
 								const rawReq = await this.fileService.readFile(child.resource);
 								reqObj = JSON.parse(rawReq.value.toString());
@@ -6673,7 +6777,7 @@ finally:
 								const rpcResUri = URI.joinPath(kernel.kernelDir, `rpc_res_${reqObj.id}.json`);
 								try {
 									await this.fileService.writeFile(rpcResUri, VSBuffer.fromString(JSON.stringify(rpcResponse)));
-								} catch (writeErr: any) {
+								} catch (writeErr) {
 									const writeErrMsg = String(writeErr?.message || writeErr || '');
 									if (!writeErrMsg.includes('Unable to resolve nonexistent file')) {
 										throw writeErr;
@@ -6687,7 +6791,7 @@ finally:
 
 			// Fallback check legacy rpc_req.json
 			if (await this.fileService.exists(legacyRpcReqUri)) {
-				let reqObj: any = undefined;
+				let reqObj: IPythonRpcRequest | undefined = undefined;
 				try {
 					const rawReq = await this.fileService.readFile(legacyRpcReqUri);
 					reqObj = JSON.parse(rawReq.value.toString());
@@ -6704,12 +6808,12 @@ finally:
 
 			// 2. Check if Python command finished
 			if (await this.fileService.exists(cmdResUri)) {
-				let resObj: any = undefined;
+				let resObj: IPythonKernelResponse | undefined = undefined;
 				try {
 					const rawRes = await this.fileService.readFile(cmdResUri);
 					resObj = JSON.parse(rawRes.value.toString());
 					cmdResParseFailures = 0;
-				} catch (parseErr: any) {
+				} catch (parseErr) {
 					cmdResParseFailures++;
 					if (cmdResParseFailures >= maxCmdResParseFailures) {
 						try {
@@ -6797,9 +6901,9 @@ finally:
 		stepIndex: number,
 		state: IWorkflowNodeExecutionState | undefined,
 		pathStep: IWorkflowPathStep | undefined,
-		reqObj: { id: string; fn: string; args: any[]; kwargs: Record<string, any> },
+		reqObj: IPythonRpcRequest,
 		stepExpression?: string
-	): Promise<{ id: string; result?: any; error?: string }> {
+	): Promise<{ id: string; result?: unknown; error?: string }> {
 		const { id, fn, args = [], kwargs = {} } = reqObj;
 		const upperFn = (fn || '').toUpperCase();
 		const rawWsUri = URI.parse(run.workflowUri);
@@ -6809,29 +6913,31 @@ finally:
 		const startMs = Date.now();
 
 		try {
-			let result: any = undefined;
+			let result: unknown = undefined;
 
 			if (upperFn === 'RUN_TICKETS') {
 				let ticketIdOrPath = '';
-				let inputParams: Record<string, any> = {};
+				let inputParams: Record<string, unknown> = {};
 
-				if (args.length > 0 && typeof args[0] === 'object' && args[0] !== null && !Array.isArray(args[0])) {
-					ticketIdOrPath = args[0].ticketId || args[0].ticketName || args[0].ticketIdOrPath || args[0].ticket_name || args[0].id || '';
-					inputParams = args[0].parameters || args[0].inputParams || args[0].params || {};
+				const firstArg = args[0];
+				if (args.length > 0 && isWorkflowRecord(firstArg) && !Array.isArray(firstArg)) {
+					// Ticket references coming from Python are strings; the casts are type-only
+					ticketIdOrPath = (firstArg.ticketId || firstArg.ticketName || firstArg.ticketIdOrPath || firstArg.ticket_name || firstArg.id || '') as string;
+					inputParams = (firstArg.parameters || firstArg.inputParams || firstArg.params || {}) as IWorkflowRecord;
 				} else {
 					const rawTicketArg = kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? args[0] ?? '';
 					if (Array.isArray(rawTicketArg) && rawTicketArg.length > 0) {
-						const first = rawTicketArg[0];
-						if (typeof first === 'object' && first !== null) {
-							ticketIdOrPath = first.ticketId || first.ticketName || first.ticketIdOrPath || first.id || '';
+						const first: unknown = rawTicketArg[0];
+						if (isWorkflowRecord(first)) {
+							ticketIdOrPath = (first.ticketId || first.ticketName || first.ticketIdOrPath || first.id || '') as string;
 							if (first.parameters && typeof first.parameters === 'object') {
 								inputParams = { ...first.parameters };
 							}
 						} else {
 							ticketIdOrPath = String(first).trim();
 						}
-					} else if (typeof rawTicketArg === 'object' && rawTicketArg !== null) {
-						ticketIdOrPath = rawTicketArg.ticketId || rawTicketArg.ticketName || rawTicketArg.ticketIdOrPath || rawTicketArg.id || '';
+					} else if (isWorkflowRecord(rawTicketArg)) {
+						ticketIdOrPath = (rawTicketArg.ticketId || rawTicketArg.ticketName || rawTicketArg.ticketIdOrPath || rawTicketArg.id || '') as string;
 						if (rawTicketArg.parameters && typeof rawTicketArg.parameters === 'object') {
 							inputParams = { ...rawTicketArg.parameters };
 						}
@@ -6850,10 +6956,10 @@ finally:
 					}
 				}
 
-				const cleanCtxParams: Record<string, any> = {};
+				const cleanCtxParams: Record<string, unknown> = {};
 				for (const [ck, cv] of Object.entries(run.contextVariables || {})) {
-					if (ck.startsWith('@')) continue;
-					if (cv && typeof cv === 'object' && ('contextVariables' in cv || 'stepResults' in cv)) continue;
+					if (ck.startsWith('@')) { continue; }
+					if (cv && typeof cv === 'object' && (hasWorkflowProperty(cv, 'contextVariables') || hasWorkflowProperty(cv, 'stepResults'))) { continue; }
 					if (cv !== undefined && cv !== null && (typeof cv !== 'string' || cv.trim() !== '')) {
 						cleanCtxParams[ck] = cv;
 					}
@@ -6864,12 +6970,12 @@ finally:
 					ticketId: ticketIdOrPath,
 					ticketName: ticketIdOrPath,
 					ticketType: 'task',
-					status: 'running' as any,
+					status: RUNNING_TICKET_RECORD_STATUS,
 					durationMs: 0,
 					stepResults: []
 				};
-				const inFlightOp = {
-					type: 'run_ticket' as const,
+				const inFlightOp: IWorkflowNodeOperation = {
+					type: 'run_ticket',
 					label: `RUN_TICKETS: '${ticketIdOrPath}'`,
 					executedTicket: inFlightTicketRecord,
 					durationMs: 0
@@ -6883,7 +6989,7 @@ finally:
 					inputParams: { ...cleanCtxParams, ...inputParams },
 					isCancelled: () => this._cancelledRuns.has(run.runId) || run.status === 'stopped',
 					onStepStart: (info) => {
-						this._emitLog(run, 'info', `  ▶ [${ticketIdOrPath}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
+						this._emitLog(run, 'info', `  \u25B6 [${ticketIdOrPath}] Step ${info.stepIndex}/${info.totalSteps}: [${info.fieldType.toUpperCase()}] '${info.fieldLabel}' started...`, { nodeId: node.id });
 						this._notifyRunChanged(run);
 					},
 					onStepProgress: (stepRes, idx, total) => {
@@ -6915,7 +7021,7 @@ finally:
 					ticketType: execRes.ticketType || 'task',
 					status: 'success' as const,
 					output: this._summarizeValueForHistory(execRes.output),
-					outputSpecs: (execRes as any).outputSpecs,
+					outputSpecs: (execRes as ITicketRunResult & ITicketRunResultExtras).outputSpecs,
 					stepResults: this._sanitizeStepResultsForHistory(execRes.stepResults),
 					durationMs: Date.now() - startMs
 				};
@@ -6932,9 +7038,10 @@ finally:
 				const { contextVariables: _omitCtx, stepResults: _omitSteps, ...lightExecRes } = execRes;
 				result = lightExecRes;
 			} else if (upperFn === 'CREATE_TICKETS') {
-				let opts: any = {};
-				if (args.length === 1 && typeof args[0] === 'object' && args[0] !== null) {
-					opts = { ...args[0] };
+				let opts: IRpcTicketCreateOptions = {};
+				const createArg = args[0];
+				if (args.length === 1 && isWorkflowRecord(createArg)) {
+					opts = { ...createArg };
 				} else {
 					opts.ticketType = String(kwargs.ticket_type ?? kwargs.type ?? args[0] ?? 'task');
 					opts.title = String(kwargs.title ?? args[1] ?? 'New Ticket');
@@ -6947,7 +7054,7 @@ finally:
 						opts.folderName = String(explicitFolderName).trim();
 					}
 					const rawParams = kwargs.parameters ?? kwargs.params ?? kwargs.fieldValues ?? (typeof args[2] === 'object' ? args[2] : (typeof args[3] === 'object' ? args[3] : {}));
-					const initialFields = typeof rawParams === 'object' && rawParams !== null ? { ...rawParams } : {};
+					const initialFields: IWorkflowRecord = typeof rawParams === 'object' && rawParams !== null ? { ...rawParams } : {};
 					const reservedCreateKeys = new Set(['ticket_type', 'type', 'title', 'target_folder', 'target_path', 'folder', 'path', 'folder_name', 'folderName', 'name', 'parameters', 'params', 'fieldValues', 'auto_run', 'autoRun']);
 					for (const [k, v] of Object.entries(kwargs)) {
 						if (!reservedCreateKeys.has(k)) {
@@ -6969,7 +7076,7 @@ finally:
 							const pad = (n: number) => String(n).padStart(2, '0');
 							return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 						}
-						if (varKey === 'job_position' && opts.parameters?.current_job && typeof opts.parameters.current_job === 'object') {
+						if (varKey === 'job_position' && opts.parameters?.current_job && isWorkflowRecord(opts.parameters.current_job)) {
 							const jName = opts.parameters.current_job.job_name || opts.parameters.current_job.title;
 							if (jName) {
 								return String(jName);
@@ -6981,10 +7088,10 @@ finally:
 				opts.workspaceUri = workflowDir;
 				const createParamKeys = Object.keys(opts.parameters || {});
 				const createParamSummary = createParamKeys.length > 0
-					? createParamKeys.map(k => `${k}=${this._fastPreviewString(opts.parameters[k], 80)}`).join(', ')
+					? createParamKeys.map(k => `${k}=${this._fastPreviewString(opts.parameters?.[k], 80)}`).join(', ')
 					: 'none';
 				this._emitLog(run, 'info', `[CREATE_TICKETS] Creating ticket '${opts.title}' (type: ${opts.ticketType}) with ${createParamKeys.length} parameter(s): ${createParamSummary}`, { nodeId: node.id });
-				const createRes = await this.ticketRuntimeService.CREATE_TICKETS(opts);
+				const createRes = await this.ticketRuntimeService.CREATE_TICKETS(opts as ITicketCreateOptions);
 				if (!createRes.success) {
 					throw new Error(createRes.error || `Failed to create ticket '${opts.title}'`);
 				}
@@ -6993,14 +7100,14 @@ finally:
 			} else if (upperFn === 'GET_TICKET' || upperFn === 'GETTICKET') {
 				const rawTarget = kwargs.ticket_id ?? kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticketId ?? kwargs.id ?? args[0] ?? '';
 				const field = kwargs.field ?? kwargs.key ?? kwargs.name ?? args[1];
-				result = await this.ticketRuntimeService.getTicket(workflowDir, rawTarget, field);
+				result = await this.ticketRuntimeService.getTicket(workflowDir, rawTarget, field as string | undefined);
 			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS') {
 				const hasQueryFilters = kwargs.ticket_type !== undefined || kwargs.status !== undefined || kwargs.title !== undefined || kwargs.field !== undefined || kwargs.ticketType !== undefined || kwargs.path !== undefined || kwargs.limit !== undefined;
 				if (hasQueryFilters) {
-					result = await this.ticketRuntimeService.getTickets(workflowDir, kwargs, kwargs.field);
+					result = await this.ticketRuntimeService.getTickets(workflowDir, kwargs, kwargs.field as string | undefined);
 				} else {
 					const rawTarget = kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticket_id ?? kwargs.ticketIdOrPath ?? kwargs.id ?? args[0] ?? '';
-					result = await this.ticketRuntimeService.getTickets(workflowDir, rawTarget, kwargs.field);
+					result = await this.ticketRuntimeService.getTickets(workflowDir, rawTarget, kwargs.field as string | undefined);
 				}
 			} else if (upperFn === 'GET_OUTPUTS') {
 				const rawTarget = kwargs.ticket_id ?? kwargs.ticket ?? kwargs.tickets ?? kwargs.ticket_name ?? kwargs.ticketId ?? kwargs.ticketIdOrPath ?? kwargs.id ?? args[0] ?? '';
@@ -7010,7 +7117,7 @@ finally:
 			} else if (upperFn === 'GET_PRIMITIVES_CATALOG') {
 				result = await this.ticketRuntimeService.GET_PRIMITIVES_CATALOG(workflowDir);
 			} else if (upperFn === 'DISPLAY') {
-				let displayVal: any;
+				let displayVal: unknown;
 				if (args.length === 1) {
 					displayVal = args[0];
 				} else if (args.length > 1) {
@@ -7029,12 +7136,12 @@ finally:
 					: formattedText;
 				this._emitLog(run, 'info', `[DISPLAY] [${nodeLabelName}] (${summaryType})\n${logDisplayPreview}`, { nodeId: node.id });
 
-				const callExprFromPython = typeof (reqObj as any).call_expr === 'string' && (reqObj as any).call_expr.trim()
-					? (reqObj as any).call_expr.trim()
+				const callExprFromPython = typeof reqObj.call_expr === 'string' && reqObj.call_expr.trim()
+					? reqObj.call_expr.trim()
 					: (stepExpression && !stepExpression.includes('\n') ? stepExpression.trim() : 'DISPLAY(...)');
 
-				const displayWfUri = (run as any)._displayWorkflowUri || run.workflowUri;
-				const displayRunId = (run as any)._displayRunId || run.runId;
+				const displayWfUri = (run as IInternalWorkflowRun)._displayWorkflowUri || run.workflowUri;
+				const displayRunId = (run as IInternalWorkflowRun)._displayRunId || run.runId;
 				let cardList = this._displayCardsByWorkflow.get(displayWfUri);
 				if (!cardList) {
 					cardList = [];
@@ -7073,7 +7180,7 @@ finally:
 			}
 
 			return { id, result };
-		} catch (err: any) {
+		} catch (err) {
 			return { id, error: err.message || String(err) };
 		}
 	}
@@ -7175,7 +7282,7 @@ finally:
 				}
 			}
 
-			const cleanVars: Record<string, any> = {};
+			const cleanVars: Record<string, unknown> = {};
 			for (const [k, v] of Object.entries(run.contextVariables)) {
 				if (!k.startsWith('@')) {
 					cleanVars[k] = v;
@@ -7191,8 +7298,8 @@ finally:
 				durationMs: Date.now() - startMs,
 				executionCount
 			};
-		} catch (err: any) {
-			const cleanVars: Record<string, any> = {};
+		} catch (err) {
+			const cleanVars: Record<string, unknown> = {};
 			for (const [k, v] of Object.entries(run.contextVariables)) {
 				if (!k.startsWith('@')) {
 					cleanVars[k] = v;

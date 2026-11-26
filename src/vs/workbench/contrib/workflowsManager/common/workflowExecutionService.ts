@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
@@ -25,7 +24,7 @@ export interface ITicketHandleInfo {
 	status?: string;
 	createdAt?: string;
 	targetFolder?: string;
-	parameters?: Record<string, any>;
+	parameters?: Record<string, unknown>;
 	isCreated?: boolean;
 }
 
@@ -36,7 +35,7 @@ export interface IWorkflowDisplayCard {
 	nodeId: string;
 	nodeTitle: string;
 	expression: string;
-	value: any;
+	value: unknown;
 	formattedText: string;
 	timestamp: string;
 	ticketTitle?: string;
@@ -51,10 +50,10 @@ export interface IWorkflowDisplayCard {
 
 export interface INotebookCellExecutionResult {
 	ok: boolean;
-	value?: any;
+	value?: unknown;
 	stdout?: string;
 	error?: string;
-	variables: Record<string, any>;
+	variables: Record<string, unknown>;
 	displayCards: IWorkflowDisplayCard[];
 	durationMs: number;
 	executionCount: number;
@@ -66,13 +65,13 @@ export interface IWorkflowExecutionService {
 	readonly onDidChangeRunState: Event<IWorkflowExecutionRun>;
 	readonly onDidEmitLog: Event<{ runId: string; log: IWorkflowLogEntry }>;
 	readonly onDidDisplayVariable: Event<IWorkflowDisplayCard>;
-	readonly onDidUpdateNodeComponents: Event<{ workflowUri: string; nodeId: string; node: any }>;
+	readonly onDidUpdateNodeComponents: Event<{ workflowUri: string; nodeId: string; node: { pipeline?: unknown } }>;
 	readonly onDidChangeSubWorkflows: Event<void>;
 	/** Fires whenever a running Sub-Workflow run changes (start, node progress, completion / failure). */
 	readonly onDidChangeSubWorkflowRun: Event<IWorkflowExecutionRun>;
 
 	executeWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions): Promise<IWorkflowExecutionRun>;
-	resolveWorkflowIOContract(data: any): IWorkflowIOContract;
+	resolveWorkflowIOContract(data: unknown): IWorkflowIOContract;
 	getWorkflowIOContract(workflowUri: URI | string): Promise<IWorkflowIOContract>;
 	getSubWorkflows(): ISubWorkflowDefinition[];
 	getSubWorkflowById(id: string): ISubWorkflowDefinition | undefined;
@@ -90,7 +89,7 @@ export interface IWorkflowExecutionService {
 	registerFlowchartOwner(workflowUri: URI | string): { dispose(): void };
 	stepWorkflow(workflowUri: URI | string, options?: IWorkflowEngineOptions, runId?: string): Promise<IWorkflowExecutionRun>;
 	pauseWorkflow(runId: string): Promise<void>;
-	resumeWorkflow(runId: string, userInput?: any): Promise<void>;
+	resumeWorkflow(runId: string, userInput?: unknown): Promise<void>;
 	stopWorkflow(runId: string): Promise<void>;
 
 	getActiveRun(workflowUri: URI | string): IWorkflowExecutionRun | undefined;
@@ -102,7 +101,7 @@ export interface IWorkflowExecutionService {
 	 * Returns a shallow copy of `vars` in which every large-variable reference (`__anyagentVarRef__`, values > 16 KB
 	 * spilled to `<workflow>/.agents/workflow_vars/`) is replaced by its real value. `vars` itself is not modified.
 	 */
-	hydrateContextVariables(workflowUri: URI | string, vars: Record<string, any>): Promise<Record<string, any>>;
+	hydrateContextVariables(workflowUri: URI | string, vars: Record<string, unknown>): Promise<Record<string, unknown>>;
 	deleteRun(runId: string): void;
 	clearRuns(workflowUri?: URI | string): void;
 	resetWorkflow(workflowUri: URI | string): void;

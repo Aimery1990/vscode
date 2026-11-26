@@ -1,22 +1,30 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, append, clearNode } from '../../../../base/browser/dom.js';
+import { $, append, clearNode, getWindow } from '../../../../base/browser/dom.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { Codicon } from '../../../../base/common/codicons.js';
+import { IDisposable } from '../../../../base/common/lifecycle.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { URI } from '../../../../base/common/uri.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
-import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomField, IEntityPersistenceService, IOutputSpec, IParameterDefinition } from '../../entityPersistence/common/entityPersistence.js';
 import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import { WorkflowEditorInput } from './workflowEditorInput.js';
 import { WorkflowNotebookEditorInput } from './workflowNotebookEditor.js';
 import { INodePipelineStep, INodeVariable, WorkflowEditor } from './workflowEditor.js';
+import { IWorkflowDisplayCard } from '../common/workflowExecutionService.js';
+import { ICodeEditor } from '../../../../editor/browser/editorBrowser.js';
+
+/** Flowchart data model of an open {@link WorkflowEditor} (its non-exported `IFlowchartData`). */
+export type IFlowchartData = WorkflowEditor['_data'];
+type WorkflowEditorFlowchartData = IFlowchartData;
+type WorkflowEditorFlowchartNode = WorkflowEditorFlowchartData['nodes'][number];
+type WorkflowEditorFlowchartLink = WorkflowEditorFlowchartData['links'][number];
 
 export interface ISyncFlowchartNode {
 	id: string;
@@ -230,13 +238,58 @@ export function connectionStyleNameToLinkStyle(styleName: string, fallback: ISyn
  * Safely encodes single-line metadata values so newlines or carriage returns cannot break comment headers
  */
 export function encodeMetadataText(raw: string | undefined): string {
-	if (!raw) return '';
+	if (!raw) { return ''; }
 	return String(raw).replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n/g, '\\n');
 }
 
 export function decodeMetadataText(encoded: string | undefined): string {
-	if (!encoded) return '';
+	if (!encoded) { return ''; }
 	return String(encoded).replace(/\\n/g, '\n');
+}
+
+/** Toolbox controller stored on a Monaco code editor by {@link WorkflowPythonEditorBridge.attachWorkflowPythonToolbox}. */
+export interface IWorkflowPyToolboxController {
+	refreshContext(pyUri?: URI, wfId?: string, wfName?: string, wfUri?: URI): void;
+}
+
+/** A code editor that may carry an attached Workflow Python toolbox controller. */
+export interface IWorkflowPyToolboxHost {
+	__wfPyToolboxController?: IWorkflowPyToolboxController;
+}
+
+/** Same check the toolbox always used: any truthy control exposing `getDomNode()` is treated as a code editor. */
+function isToolboxHostCodeEditor(control: unknown): control is ICodeEditor & IWorkflowPyToolboxHost {
+	return !!control && typeof (control as ICodeEditor).getDomNode === 'function';
+}
+
+/** An editor control whose methods are each feature-checked (`typeof ... === 'function'`) before being called. */
+function isTruthyEditorControl(control: unknown): control is Partial<ICodeEditor> {
+	return !!control;
+}
+
+/** A pane (the Workflow notebook editor) that can scroll to a node section. */
+interface INodeSectionFocusablePane {
+	focusNodeSection(nodeId: string): void;
+}
+
+function isNodeSectionFocusable(pane: unknown): pane is INodeSectionFocusablePane {
+	return !!pane && typeof (pane as INodeSectionFocusablePane).focusNodeSection === 'function';
+}
+
+/** UI-only state the Live Display stores on a card object. */
+interface IDisplayCardUiState {
+	_isCollapsed?: boolean;
+}
+
+/** Loosely-typed legacy keys that older saved Output specs may still carry. */
+interface ILegacyOutputSpecFields {
+	name?: string;
+	value?: string;
+}
+
+/** Legacy table-name key that older saved Data Table components may still carry. */
+interface ILegacyTableFields {
+	tableName?: string;
 }
 
 /**
@@ -247,7 +300,7 @@ export function isComponentPipelineStep(step: INodePipelineStep): boolean {
 	if (!step) {
 		return false;
 	}
-	return step.type === 'run_ticket' || step.type === 'component' || Boolean((step as any).component);
+	return step.type === 'run_ticket' || step.type === 'component' || Boolean(step.component);
 }
 
 /**
@@ -255,7 +308,7 @@ export function isComponentPipelineStep(step: INodePipelineStep): boolean {
  * its 1-based step position in the node, component type, component name / output variable, and component ID anchor.
  */
 export function formatComponentStepComment(step: INodePipelineStep, stepNumber: number): string {
-	const comp: any = (step as any).component;
+	const comp = step.component;
 	if (comp) {
 		const rawType = String(comp.type || 'component');
 		const typeLabels: Record<string, string> = {
@@ -286,14 +339,14 @@ export function formatComponentStepComment(step: INodePipelineStep, stepNumber: 
 		let summary = '';
 		if (rawType === 'parameters') {
 			const params = Array.isArray(comp.parameters) ? comp.parameters : [];
-			const pairs = params.map((p: any) => `${p.name}=${p.defaultValue !== undefined && p.defaultValue !== '' ? p.defaultValue : '""'}`);
+			const pairs = params.map((p: IParameterDefinition) => `${p.name}=${p.defaultValue !== undefined && p.defaultValue !== '' ? p.defaultValue : '""'}`);
 			summary = params.length > 0 ? `Inputs (${params.length}): ${pairs.join(', ')}` : 'Inputs';
 		} else if (rawType === 'output') {
 			const specs = Array.isArray(comp.outputSpecs) ? comp.outputSpecs : [];
-			const pairs = specs.map((s: any) => `${s.name || s.label || s.fieldKey}=${s.value || '""'}`);
+			const pairs = specs.map((s: IOutputSpec & ILegacyOutputSpecFields) => `${s.name || s.label || s.fieldKey}=${s.value || '""'}`);
 			summary = specs.length > 0 ? `Output (${specs.length}): ${pairs.join(', ')}` : 'Output';
 		} else if (rawType === 'table') {
-			const tblName = String(comp.tableDbTableName || comp.tableName || comp.label || 'Data Table').replace(/\r?\n/g, ' ').trim() || 'Data Table';
+			const tblName = String(comp.tableDbTableName || (comp as ICustomField & ILegacyTableFields).tableName || comp.label || 'Data Table').replace(/\r?\n/g, ' ').trim() || 'Data Table';
 			const displayName = (rawLabel && rawLabel !== tblName && rawLabel !== 'Data Table')
 				? `${tblName} [Label: ${rawLabel}]`
 				: tblName;
@@ -365,7 +418,7 @@ export function extractNodePythonStepStrings(node: ISyncFlowchartNode): string[]
 			if (step.type === 'set_variable') {
 				const cleanVar = (step.targetVariable || '').replace(/^@/, '').trim();
 				const rawExpr = (step.expression ?? 'None').replace(/(^|[^a-zA-Z0-9_])@([a-zA-Z_][a-zA-Z0-9_]*)/g, '$1$2').trim();
-				if (!cleanVar && !rawExpr) continue;
+				if (!cleanVar && !rawExpr) { continue; }
 				// Skip legacy duplicate set_variable steps that were auto-generated from call_function outputVariables
 				if (rawExpr && callFnExprs.has(rawExpr)) {
 					continue;
@@ -398,7 +451,7 @@ export function extractNodePythonStepStrings(node: ISyncFlowchartNode): string[]
 	for (const v of vars) {
 		const cleanVar = (v.name || '').replace(/^@/, '').trim();
 		const rawExpr = (v.expression || v.initialValue || 'None').replace(/(^|[^a-zA-Z0-9_])@([a-zA-Z_][a-zA-Z0-9_]*)/g, '$1$2').trim();
-		if (!cleanVar) continue;
+		if (!cleanVar) { continue; }
 		const startsWithVarAssign = new RegExp(`^${cleanVar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*(?:\\+|-|\\*|\\/)?=(?!=)`).test(rawExpr);
 		steps.push(startsWithVarAssign ? rawExpr : `${cleanVar} = ${rawExpr}`);
 	}
@@ -439,7 +492,7 @@ export function extractNodeStepAndComponentStrings(node: ISyncFlowchartNode): st
 			if (step.type === 'set_variable') {
 				const cleanVar = (step.targetVariable || '').replace(/^@/, '').trim();
 				const rawExpr = (step.expression ?? 'None').replace(/(^|[^a-zA-Z0-9_])@([a-zA-Z_][a-zA-Z0-9_]*)/g, '$1$2').trim();
-				if (!cleanVar && !rawExpr) continue;
+				if (!cleanVar && !rawExpr) { continue; }
 				if (rawExpr && callFnExprs.has(rawExpr)) {
 					continue;
 				}
@@ -546,10 +599,10 @@ export class WorkflowToPythonConverter {
 		const rootCandidates = [...nodes].sort((a, b) => {
 			const aConn = isConnected(a) ? 0 : 1;
 			const bConn = isConnected(b) ? 0 : 1;
-			if (aConn !== bConn) return aConn - bConn;
+			if (aConn !== bConn) { return aConn - bConn; }
 			const aStart = isStartNode(a) ? 0 : 1;
 			const bStart = isStartNode(b) ? 0 : 1;
-			if (aStart !== bStart) return aStart - bStart;
+			if (aStart !== bStart) { return aStart - bStart; }
 			return visualCompareNodes(a, b);
 		});
 
@@ -746,7 +799,7 @@ export class PythonCodeBlockParser {
 						const idx = line.indexOf(inString.quote, j);
 						if (idx !== -1) {
 							let backslashes = 0;
-							for (let k = idx - 1; k >= j && line[k] === '\\'; k--) backslashes++;
+							for (let k = idx - 1; k >= j && line[k] === '\\'; k--) { backslashes++; }
 							if (backslashes % 2 === 0) {
 								strippedCode += 'S';
 								j = idx + 3;
@@ -798,7 +851,7 @@ export class PythonCodeBlockParser {
 				if (ch === '#') {
 					break;
 				}
-				if (ch === '"' || ch === "'") {
+				if (ch === '"' || ch === '\'') {
 					const isTriple = line.substring(j, j + 3) === ch.repeat(3);
 					inString = {
 						quote: isTriple ? ch.repeat(3) : ch,
@@ -1243,7 +1296,7 @@ export class PythonToWorkflowParser {
 			| null = null;
 
 		const flushActiveSection = () => {
-			if (!activeSection) return;
+			if (!activeSection) { return; }
 			const rawCode = activeSection.codeLines.join('\n');
 			if (activeSection.kind === 'node') {
 				activeSection.section.code = rawCode;
@@ -1277,9 +1330,9 @@ export class PythonToWorkflowParser {
 					}
 
 					if (kvMap.has('WORKFLOW_ID') || kvMap.has('WORKFLOW_URI') || headerLines.some(l => l.includes('WORKFLOW_PYTHON_SYNC'))) {
-						if (kvMap.has('WORKFLOW_ID')) result.workflowId = decodeMetadataText(kvMap.get('WORKFLOW_ID'));
-						if (kvMap.has('WORKFLOW_NAME')) result.workflowName = decodeMetadataText(kvMap.get('WORKFLOW_NAME'));
-						if (kvMap.has('WORKFLOW_URI')) result.workflowUri = decodeMetadataText(kvMap.get('WORKFLOW_URI'));
+						if (kvMap.has('WORKFLOW_ID')) { result.workflowId = decodeMetadataText(kvMap.get('WORKFLOW_ID')); }
+						if (kvMap.has('WORKFLOW_NAME')) { result.workflowName = decodeMetadataText(kvMap.get('WORKFLOW_NAME')); }
+						if (kvMap.has('WORKFLOW_URI')) { result.workflowUri = decodeMetadataText(kvMap.get('WORKFLOW_URI')); }
 						i = j + 1;
 						continue;
 					}
@@ -1493,7 +1546,7 @@ export class WorkflowSyncManager {
 		// Check 1: Duplicate or unknown NODE_IDs
 		const seenNodeIds = new Set<string>();
 		for (const pn of parsed.nodes) {
-			if (!pn.nodeId) continue;
+			if (!pn.nodeId) { continue; }
 			if (seenNodeIds.has(pn.nodeId)) {
 				errors.push({
 					message: `Duplicate NODE_ID '${pn.nodeId}' detected on line ${pn.headerStartLine}.`,
@@ -1516,7 +1569,7 @@ export class WorkflowSyncManager {
 		// Check 2: Duplicate or unknown CONNECTION_IDs
 		const seenConnectionIds = new Set<string>();
 		for (const pc of parsed.connections) {
-			if (!pc.connectionId) continue;
+			if (!pc.connectionId) { continue; }
 			if (seenConnectionIds.has(pc.connectionId)) {
 				errors.push({
 					message: `Duplicate CONNECTION_ID '${pc.connectionId}' detected on line ${pc.headerStartLine}.`,
@@ -1543,7 +1596,7 @@ export class WorkflowSyncManager {
 			parsedNode: IParsedNodeSection;
 		}>();
 		for (const pn of parsed.nodes) {
-			if (!pn.nodeId || !existingNodeById.has(pn.nodeId)) continue;
+			if (!pn.nodeId || !existingNodeById.has(pn.nodeId)) { continue; }
 			const extSpans = externalAstSpansByNodeId?.get(pn.nodeId);
 			const splitRes = PythonCodeBlockParser.splitNodeCodeIntoSteps(pn.code, pn.codeStartLine, extSpans);
 			if (splitRes.syntaxError) {
@@ -1564,7 +1617,7 @@ export class WorkflowSyncManager {
 		// Check 4: Validate Python syntax and extract condition code for every connection BEFORE committing any change
 		const preparedConnectionConditions = new Map<string, { condition: string; parsedConn: IParsedConnectionSection }>();
 		for (const pc of parsed.connections) {
-			if (!pc.connectionId || !existingLinkById.has(pc.connectionId)) continue;
+			if (!pc.connectionId || !existingLinkById.has(pc.connectionId)) { continue; }
 			const connRes = PythonCodeBlockParser.extractAndValidateConnectionCode(pc.code, pc.headerCondition, pc.codeStartLine);
 			if (connRes.syntaxError) {
 				errors.push({
@@ -1675,12 +1728,12 @@ export class WorkflowSyncManager {
 						let matchedCompIdx = -1;
 						if (item.componentId) {
 							matchedCompIdx = existingComponentSteps.findIndex((cs, cIdx) => {
-								const cid = String((cs as any).component?.id || cs.id || '').trim();
+								const cid = String(cs.component?.id || cs.id || '').trim();
 								return cIdx >= currentSlot && cid === item.componentId;
 							});
 							if (matchedCompIdx === -1) {
 								matchedCompIdx = existingComponentSteps.findIndex((cs) => {
-									const cid = String((cs as any).component?.id || cs.id || '').trim();
+									const cid = String(cs.component?.id || cs.id || '').trim();
 									return cid === item.componentId;
 								});
 							}
@@ -1759,7 +1812,7 @@ export class WorkflowSyncManager {
 		let updatedConnectionsCount = 0;
 		for (const [connectionId, { condition: newCond, parsedConn }] of preparedConnectionConditions.entries()) {
 			const link = existingLinkById.get(connectionId);
-			if (!link) continue;
+			if (!link) { continue; }
 
 			const trimmedCond = newCond.trim();
 			if (trimmedCond) {
@@ -1791,6 +1844,11 @@ export class WorkflowSyncManager {
 
 
 export class WorkflowPythonEditorBridge {
+	/** The Python interpreter popover currently shown by {@link showPythonInterpreterMenu}, if any. */
+	private static _activePythonEnvPopover: HTMLElement | undefined;
+	/** The toolbox sidebar last attached into each editor host element (so a re-attach replaces it). */
+	private static readonly _toolboxSidebarByHost = new WeakMap<HTMLElement, HTMLElement>();
+
 	private static readonly _PY_KEYWORDS = new Set([
 		'False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await',
 		'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except',
@@ -1907,7 +1965,7 @@ export class WorkflowPythonEditorBridge {
 	}
 
 	public static attachWorkflowPythonToolbox(
-		codeEditor: any,
+		codeEditorOrControl: unknown,
 		fileService: IFileService,
 		notificationService: INotificationService,
 		entityPersistenceService: IEntityPersistenceService,
@@ -1919,9 +1977,10 @@ export class WorkflowPythonEditorBridge {
 		initialWorkflowName?: string,
 		initialWorkflowUri?: URI
 	): void {
-		if (!codeEditor || typeof codeEditor.getDomNode !== 'function') {
+		if (!isToolboxHostCodeEditor(codeEditorOrControl)) {
 			return;
 		}
+		const codeEditor = codeEditorOrControl;
 
 		// Clean up any legacy top-right overlay widget if present
 		if (typeof codeEditor.removeOverlayWidget === 'function') {
@@ -1943,8 +2002,8 @@ export class WorkflowPythonEditorBridge {
 		}
 
 		// Check if already attached on this codeEditor instance
-		if ((codeEditor as any).__wfPyToolboxController) {
-			(codeEditor as any).__wfPyToolboxController.refreshContext(
+		if (codeEditor.__wfPyToolboxController) {
+			codeEditor.__wfPyToolboxController.refreshContext(
 				initialPyFileUri,
 				initialWorkflowId,
 				initialWorkflowName,
@@ -1973,14 +2032,15 @@ export class WorkflowPythonEditorBridge {
 		};
 
 		// Remove any stale sidebar DOM inside parentEl
-		const oldSidebar = parentEl.querySelector('.workflow-py-toolbox-sidebar');
-		if (oldSidebar) {
+		const oldSidebar = WorkflowPythonEditorBridge._toolboxSidebarByHost.get(parentEl);
+		if (oldSidebar && parentEl.contains(oldSidebar)) {
 			oldSidebar.remove();
 		}
 
 		const sidebarEl = document.createElement('div');
 		sidebarEl.className = 'workflow-py-toolbox-sidebar';
 		parentEl.prepend(sidebarEl);
+		WorkflowPythonEditorBridge._toolboxSidebarByHost.set(parentEl, sidebarEl);
 
 		// Wrap codeEditor.layout so Monaco shifts right and shrinks width by toolbox width
 		const origLayout = codeEditor.layout.bind(codeEditor);
@@ -2356,7 +2416,7 @@ export class WorkflowPythonEditorBridge {
 		};
 
 		// Listen to model content changes and model switches on this codeEditor
-		let contentChangeListener: any = null;
+		let contentChangeListener: IDisposable | null = null;
 		const bindModelListeners = () => {
 			if (contentChangeListener && typeof contentChangeListener.dispose === 'function') {
 				contentChangeListener.dispose();
@@ -2392,7 +2452,7 @@ export class WorkflowPythonEditorBridge {
 			});
 		}
 
-		const controller = {
+		const controller: IWorkflowPyToolboxController = {
 			refreshContext: (
 				pyUri?: URI,
 				wfId?: string,
@@ -2414,20 +2474,21 @@ export class WorkflowPythonEditorBridge {
 				bindModelListeners();
 			}
 		};
-		(codeEditor as any).__wfPyToolboxController = controller;
+		codeEditor.__wfPyToolboxController = controller;
 
 		bindModelListeners();
 	}
 
 	public static async syncPythonEditorToWorkflow(
 		pyFileUri: URI | undefined,
-		activeCodeEditor: any,
+		activeCodeEditorOrControl: unknown,
 		fileService: IFileService,
 		notificationService: INotificationService,
 		entityPersistenceService: IEntityPersistenceService,
 		ticketRuntimeService: ITicketWorkflowRuntimeService
 	): Promise<boolean> {
 		let pythonSource = '';
+		const activeCodeEditor = isTruthyEditorControl(activeCodeEditorOrControl) ? activeCodeEditorOrControl : undefined;
 		if (activeCodeEditor && typeof activeCodeEditor.getModel === 'function') {
 			const model = activeCodeEditor.getModel();
 			if (model && typeof model.getValue === 'function') {
@@ -2442,7 +2503,7 @@ export class WorkflowPythonEditorBridge {
 			try {
 				const rawFile = await fileService.readFile(pyFileUri);
 				pythonSource = rawFile.value.toString();
-			} catch (err: any) {
+			} catch (err) {
 				notificationService.error(`Unable to read Python workflow file: ${err?.message || err}`);
 				return false;
 			}
@@ -2486,7 +2547,7 @@ export class WorkflowPythonEditorBridge {
 
 		// Find matching open WorkflowEditor instance if open, or read workflow_flowchart.json from disk
 		let openEditor: WorkflowEditor | undefined;
-		for (const inst of (WorkflowEditor as any)._openWorkflowEditors) {
+		for (const inst of WorkflowEditor['_openWorkflowEditors']) {
 			const instUri = inst.getWorkflowUri();
 			if (instUri && instUri.fsPath === targetWorkflowUri.fsPath) {
 				openEditor = inst;
@@ -2495,15 +2556,15 @@ export class WorkflowPythonEditorBridge {
 		}
 
 		const flowchartJsonUri = URI.joinPath(targetWorkflowUri, '.agents', 'workflow_flowchart.json');
-		let workingData: IFlowchartData;
+		let workingData: WorkflowEditorFlowchartData;
 
 		if (openEditor) {
-			workingData = JSON.parse(JSON.stringify(openEditor._data));
+			workingData = JSON.parse(JSON.stringify(openEditor['_data']));
 		} else if (await fileService.exists(flowchartJsonUri)) {
 			try {
 				const content = await fileService.readFile(flowchartJsonUri);
 				workingData = JSON.parse(content.value.toString());
-			} catch (err: any) {
+			} catch (err) {
 				notificationService.error(`Failed to parse original workflow_flowchart.json: ${err?.message || err}`);
 				return false;
 			}
@@ -2598,7 +2659,7 @@ export class WorkflowPythonEditorBridge {
 	}
 
 	private static hexToRgba(hex?: string, alpha = 0.12): string {
-		if (!hex || !hex.startsWith('#')) return `rgba(13, 148, 136, ${alpha})`;
+		if (!hex || !hex.startsWith('#')) { return `rgba(13, 148, 136, ${alpha})`; }
 		const clean = hex.replace('#', '');
 		const r = parseInt(clean.length === 3 ? clean[0] + clean[0] : clean.substring(0, 2), 16);
 		const g = parseInt(clean.length === 3 ? clean[1] + clean[1] : clean.substring(2, 4), 16);
@@ -2608,9 +2669,9 @@ export class WorkflowPythonEditorBridge {
 
 	private static getEntityBadgeStyle(rawType: string): { color: string; bg: string } {
 		const t = (rawType || '').toLowerCase();
-		if (t.includes('job') && t.includes('url')) return { color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.16)' };
-		if (t.includes('resume')) return { color: '#ec4899', bg: 'rgba(236, 72, 153, 0.16)' };
-		if (t.includes('workflow')) return { color: '#14b8a6', bg: 'rgba(20, 184, 166, 0.16)' };
+		if (t.includes('job') && t.includes('url')) { return { color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.16)' }; }
+		if (t.includes('resume')) { return { color: '#ec4899', bg: 'rgba(236, 72, 153, 0.16)' }; }
+		if (t.includes('workflow')) { return { color: '#14b8a6', bg: 'rgba(20, 184, 166, 0.16)' }; }
 		return { color: '#38bdf8', bg: 'rgba(56, 189, 248, 0.16)' };
 	}
 
@@ -2694,17 +2755,17 @@ export class WorkflowPythonEditorBridge {
 	}
 
 	public static generateSvgString(
-		editor: any,
-		nodesToExport: any[],
-		linksToExport: any[],
+		editor: WorkflowEditor,
+		nodesToExport: Array<WorkflowEditorFlowchartNode & { fontSize?: number }>,
+		linksToExport: WorkflowEditorFlowchartLink[],
 		bounds: { minX: number; minY: number; width: number; height: number },
 		format: 'png' | 'jpeg' | 'svg' | 'pdf'
 	): string {
 		const { minX, minY, width, height } = bounds;
 
 		const usedColors = new Set<string>(['#0d9488', '#ffffff', '#38bdf8', '#7c3aed', '#facc15', '#f43f5e', '#a78bfa', '#fbbf24', '#f87171', '#34d399']);
-		linksToExport.forEach(l => { if (l.color) usedColors.add(l.color); });
-		nodesToExport.forEach(n => { if (n.color) usedColors.add(n.color); });
+		linksToExport.forEach(l => { if (l.color) { usedColors.add(l.color); } });
+		nodesToExport.forEach(n => { if (n.color) { usedColors.add(n.color); } });
 
 		let defs = '<defs>\n';
 		usedColors.forEach(color => {
@@ -2725,14 +2786,14 @@ export class WorkflowPythonEditorBridge {
 		for (const link of linksToExport) {
 			const fromNode = nodesToExport.find(n => n.id === link.from);
 			const toNode = nodesToExport.find(n => n.id === link.to);
-			if (!fromNode || !toNode) continue;
+			if (!fromNode || !toNode) { continue; }
 
-			const closest = editor._getClosestPorts(fromNode, toNode);
+			const closest = editor['_getClosestPorts'](fromNode, toNode);
 			const fromPort = link.fromPort || closest.fromPort;
 			const toPort = link.toPort || closest.toPort;
 
-			const startCoords = editor._getPortCoords(fromNode, fromPort);
-			const endCoords = editor._getPortCoords(toNode, toPort);
+			const startCoords = editor['_getPortCoords'](fromNode, fromPort);
+			const endCoords = editor['_getPortCoords'](toNode, toPort);
 
 			let x1 = startCoords.x;
 			let y1 = startCoords.y;
@@ -2740,30 +2801,30 @@ export class WorkflowPythonEditorBridge {
 			let y2 = endCoords.y;
 
 			if ((fromPort === 'right' && toPort === 'left') || (fromPort === 'left' && toPort === 'right')) {
-				if (Math.abs(y1 - y2) <= 12) y2 = y1;
+				if (Math.abs(y1 - y2) <= 12) { y2 = y1; }
 			}
 			if ((fromPort === 'top' && toPort === 'bottom') || (fromPort === 'bottom' && toPort === 'top')) {
-				if (Math.abs(x1 - x2) <= 12) x2 = x1;
+				if (Math.abs(x1 - x2) <= 12) { x2 = x1; }
 			}
 
 			const hasEndArrow = link.style === 'arrow-single' || link.style === 'arrow-double';
 			const hasStartArrow = link.style === 'arrow-double';
 
 			if (hasStartArrow) {
-				if (fromPort === 'right') x1 += 8;
-				else if (fromPort === 'left') x1 -= 8;
-				else if (fromPort === 'bottom') y1 += 8;
-				else if (fromPort === 'top') y1 -= 8;
+				if (fromPort === 'right') { x1 += 8; }
+				else if (fromPort === 'left') { x1 -= 8; }
+				else if (fromPort === 'bottom') { y1 += 8; }
+				else if (fromPort === 'top') { y1 -= 8; }
 			}
 			if (hasEndArrow) {
-				if (toPort === 'left') x2 -= 8;
-				else if (toPort === 'right') x2 += 8;
-				else if (toPort === 'top') y2 -= 8;
-				else if (toPort === 'bottom') y2 -= 8;
+				if (toPort === 'left') { x2 -= 8; }
+				else if (toPort === 'right') { x2 += 8; }
+				else if (toPort === 'top') { y2 -= 8; }
+				else if (toPort === 'bottom') { y2 -= 8; }
 			}
 
-			const routingMode = link.routing || editor._activeRoutingMode || 'orthogonal';
-			const d = editor._getLinkPathData(x1, y1, fromPort, x2, y2, toPort, routingMode, link.waypoints);
+			const routingMode = link.routing || editor['_activeRoutingMode'] || 'orthogonal';
+			const d = editor['_getLinkPathData'](x1, y1, fromPort, x2, y2, toPort, routingMode, link.waypoints);
 
 			const linkColor = link.color || '#0d9488';
 			const cleanColor = linkColor.replace('#', '');
@@ -2774,7 +2835,7 @@ export class WorkflowPythonEditorBridge {
 			body += `  <path d="${d}" fill="none" stroke="${linkColor}" stroke-width="2" ${dashAttr} ${markerStart} ${markerEnd} />\n`;
 
 			if (link.label) {
-				const mid = editor._getLinkMidpoint(link);
+				const mid = editor['_getLinkMidpoint'](link);
 				const escapedLabel = WorkflowPythonEditorBridge.escapeXml(link.label);
 				const labelW = Math.max(40, link.label.length * 7 + 16);
 				body += `  <rect x="${mid.x - labelW / 2}" y="${mid.y - 11}" width="${labelW}" height="22" rx="4" fill="#1e1e1e" stroke="${linkColor}" stroke-width="1"/>\n`;
@@ -2877,7 +2938,8 @@ export class WorkflowPythonEditorBridge {
 		return result.length > 0 ? result : [''];
 	}
 
-	public static renderDisplayInspectorCardElement(editor: any, card: any): HTMLElement {
+	public static renderDisplayInspectorCardElement(editor: WorkflowEditor, card: IWorkflowDisplayCard): HTMLElement {
+		const uiCard: IWorkflowDisplayCard & IDisplayCardUiState = card;
 		// Create Card element
 		const cardEl = document.createElement('div');
 		cardEl.className = 'workflow-display-card';
@@ -2890,7 +2952,7 @@ export class WorkflowPythonEditorBridge {
 		const metaBox = append(cardHeader, $('.workflow-display-card-meta'));
 
 		// Collapse/Expand chevron indicator
-		let isCollapsed = Boolean(card._isCollapsed);
+		let isCollapsed = Boolean(uiCard._isCollapsed);
 		const chevronIcon = append(metaBox, $('span.workflow-display-card-chevron' + ThemeIcon.asCSSSelector(isCollapsed ? Codicon.chevronRight : Codicon.chevronDown)));
 		chevronIcon.title = 'Click to toggle collapse / expand';
 
@@ -2910,20 +2972,17 @@ export class WorkflowPythonEditorBridge {
 
 		if (card.expression) {
 			const collapsedTag = append(metaBox, $('span.workflow-display-card-collapsed-tag'));
-			editor._renderExpressionWithTicketBadges(collapsedTag, card.expression, false);
+			editor['_renderExpressionWithTicketBadges'](collapsedTag, card.expression, false);
 		}
 
 		const timeEl = append(metaBox, $('.workflow-display-card-time'));
 		timeEl.textContent = card.timestamp;
 
 		const copyText = async (text: string): Promise<boolean> => {
-			if (typeof (editor as any)._copyToClipboard === 'function') {
-				return await (editor as any)._copyToClipboard(text);
-			}
 			let ok = false;
 			try {
-				if (editor?._clipboardService) {
-					await editor._clipboardService.writeText(text);
+				if (editor?.['_clipboardService']) {
+					await editor['_clipboardService'].writeText(text);
 					ok = true;
 				}
 			} catch { }
@@ -2942,10 +3001,11 @@ export class WorkflowPythonEditorBridge {
 					ta.style.position = 'fixed';
 					ta.style.left = '-9999px';
 					ta.style.top = '-9999px';
-					document.body.appendChild(ta);
+					const targetDocument = getWindow(cardEl).document;
+					targetDocument.body.appendChild(ta);
 					ta.focus();
 					ta.select();
-					ok = document.execCommand('copy');
+					ok = targetDocument.execCommand('copy');
 					ta.remove();
 				} catch { }
 			}
@@ -2956,8 +3016,8 @@ export class WorkflowPythonEditorBridge {
 
 		// Collapse / Expand toggle button
 		const collapseBtn = append(cardActions, $('button.workflow-display-btn-action.workflow-display-btn-card-toggle'));
-		collapseBtn.textContent = isCollapsed ? '+' : '–';
-		collapseBtn.title = isCollapsed ? 'Expand card (展开)' : 'Collapse card (折叠)';
+		collapseBtn.textContent = isCollapsed ? '+' : '\u2013';
+		collapseBtn.title = isCollapsed ? 'Expand card (\u5C55\u5F00)' : 'Collapse card (\u6298\u53E0)';
 
 		const copyBtn = append(cardActions, $('button.workflow-display-btn-action'));
 		copyBtn.textContent = 'Copy';
@@ -2966,37 +3026,38 @@ export class WorkflowPythonEditorBridge {
 			e.stopPropagation();
 			const ok = await copyText(card.formattedText);
 			copyBtn.textContent = ok ? 'Copied!' : 'Failed';
-			setTimeout(() => { if (copyBtn.isConnected) copyBtn.textContent = 'Copy'; }, 1500);
+			setTimeout(() => { if (copyBtn.isConnected) { copyBtn.textContent = 'Copy'; } }, 1500);
 		};
 
 		const dismissBtn = append(cardActions, $('button.workflow-display-btn-action'));
-		dismissBtn.textContent = '✕';
+		dismissBtn.textContent = '\u2715';
 		dismissBtn.title = 'Dismiss card';
 		dismissBtn.onclick = (e) => {
 			e.stopPropagation();
 			cardEl.remove();
-			editor._displayInspectorCards = editor._displayInspectorCards.filter(c => c.id !== card.id);
-			if (editor._workflowUri) {
-				editor._workflowExecutionService.removeDisplayCard(editor._workflowUri, card.id);
+			editor['_displayInspectorCards'] = editor['_displayInspectorCards'].filter(c => c.id !== card.id);
+			if (editor['_workflowUri']) {
+				editor['_workflowExecutionService'].removeDisplayCard(editor['_workflowUri'], card.id);
 			}
-			if (editor._displayInspectorContainer) {
-				const titleText = editor._displayInspectorContainer.querySelector('.inspector-title-text');
+			if (editor['_displayInspectorContainer']) {
+				const titleText = editor['_displayInspectorTitleText'];
 				if (titleText) {
-					titleText.textContent = `Live Display (${editor._displayInspectorCards.length})`;
+					titleText.textContent = `Live Display (${editor['_displayInspectorCards'].length})`;
 				}
-				if (editor._displayInspectorCards.length === 0) {
-					editor._displayInspectorContainer.remove();
-					editor._displayInspectorContainer = null;
-					editor._displayInspectorCardsContainer = null;
+				if (editor['_displayInspectorCards'].length === 0) {
+					editor['_displayInspectorContainer'].remove();
+					editor['_displayInspectorContainer'] = null;
+					editor['_displayInspectorTitleText'] = null;
+					editor['_displayInspectorCardsContainer'] = null;
 				}
 			}
-			editor._updateLiveDisplayToolbarBtn();
+			editor['_updateLiveDisplayToolbarBtn']();
 		};
 
 		const applyCollapseState = (collapsed: boolean) => {
 			cardEl.classList.toggle('collapsed', collapsed);
-			collapseBtn.textContent = collapsed ? '+' : '–';
-			collapseBtn.title = collapsed ? 'Expand card (展开)' : 'Collapse card (折叠)';
+			collapseBtn.textContent = collapsed ? '+' : '\u2013';
+			collapseBtn.title = collapsed ? 'Expand card (\u5C55\u5F00)' : 'Collapse card (\u6298\u53E0)';
 			chevronIcon.className = 'workflow-display-card-chevron ' + ThemeIcon.asCSSSelector(collapsed ? Codicon.chevronRight : Codicon.chevronDown);
 		};
 
@@ -3009,7 +3070,7 @@ export class WorkflowPythonEditorBridge {
 				e.stopPropagation();
 			}
 			isCollapsed = !isCollapsed;
-			card._isCollapsed = isCollapsed;
+			uiCard._isCollapsed = isCollapsed;
 			applyCollapseState(isCollapsed);
 		};
 
@@ -3028,7 +3089,7 @@ export class WorkflowPythonEditorBridge {
 
 		// Expression Pill
 		const exprEl = append(cardEl, $('.workflow-display-card-expr'));
-		editor._renderExpressionWithTicketBadges(exprEl, card.expression, false);
+		editor['_renderExpressionWithTicketBadges'](exprEl, card.expression, false);
 
 		// Card Body / Outputs Sections or Ticket Handle
 		if (card.ticketHandle) {
@@ -3040,7 +3101,7 @@ export class WorkflowPythonEditorBridge {
 			bannerEl.title = 'Double-click to open in Editor Tab';
 			bannerEl.ondblclick = (e) => {
 				e.stopPropagation();
-				editor._openModuleInEditor({ type: th.ticketType, name: th.ticketName || th.ticketId });
+				editor['_openModuleInEditor']({ type: th.ticketType, name: th.ticketName || th.ticketId });
 			};
 
 			const leftGroup = append(bannerEl, $('.workflow-display-ticket-banner-left'));
@@ -3061,11 +3122,11 @@ export class WorkflowPythonEditorBridge {
 
 			// Open in Tab Button
 			const openTabBtn = append(rightGroup, $('button.workflow-display-btn-open-tab'));
-			openTabBtn.textContent = '↗ Tab';
+			openTabBtn.textContent = '\u2197 Tab';
 			openTabBtn.title = 'Open ticket in Editor Tab';
 			openTabBtn.onclick = (e) => {
 				e.stopPropagation();
-				editor._openModuleInEditor({ type: th.ticketType, name: th.ticketName || th.ticketId });
+				editor['_openModuleInEditor']({ type: th.ticketType, name: th.ticketName || th.ticketId });
 			};
 
 			// Metadata Grid
@@ -3159,7 +3220,7 @@ export class WorkflowPythonEditorBridge {
 
 				const leftGroup = append(stripHeader, $('.workflow-output-section-left'));
 				const chevron = append(leftGroup, $('span.workflow-output-chevron'));
-				chevron.textContent = '▶';
+				chevron.textContent = '\u25B6';
 
 				const indexBadge = append(leftGroup, $('span.workflow-output-index-badge'));
 				indexBadge.textContent = `#${idx + 1}`;
@@ -3173,8 +3234,10 @@ export class WorkflowPythonEditorBridge {
 				}
 
 				if (item.status) {
-					const statusBadge = append(leftGroup, $(`span.workflow-output-status-badge.${item.status}`));
-					statusBadge.textContent = item.status === 'ready' ? 'Ready' : (item.status === 'pending' ? 'Pending' : (item.status === 'failed' ? 'Failed' : 'Empty'));
+					// Producers may also report 'failed' although the declared status union does not list it
+					const itemStatus: string = item.status;
+					const statusBadge = append(leftGroup, $(`span.workflow-output-status-badge.${itemStatus}`));
+					statusBadge.textContent = itemStatus === 'ready' ? 'Ready' : (itemStatus === 'pending' ? 'Pending' : (itemStatus === 'failed' ? 'Failed' : 'Empty'));
 				}
 
 				// Right Action: Item Copy
@@ -3186,7 +3249,7 @@ export class WorkflowPythonEditorBridge {
 					e.stopPropagation();
 					const ok = await copyText(item.content);
 					itemCopyBtn.textContent = ok ? 'Copied!' : 'Failed';
-					setTimeout(() => { if (itemCopyBtn.isConnected) itemCopyBtn.textContent = 'Copy'; }, 1500);
+					setTimeout(() => { if (itemCopyBtn.isConnected) { itemCopyBtn.textContent = 'Copy'; } }, 1500);
 				};
 
 				// Strip Content Body
@@ -3200,7 +3263,7 @@ export class WorkflowPythonEditorBridge {
 					isExpanded = expanded;
 					itemStates[idx] = expanded;
 					sectionEl.classList.toggle('expanded', isExpanded);
-					chevron.textContent = isExpanded ? '▼' : '▶';
+					chevron.textContent = isExpanded ? '▼' : '\u25B6';
 					stripBody.style.display = isExpanded ? 'block' : 'none';
 					if (scrollIntoView && isExpanded) {
 						setTimeout(() => {
@@ -3234,7 +3297,7 @@ export class WorkflowPythonEditorBridge {
 			let showingFull = false;
 
 			if (isTruncated) {
-				bodyEl.textContent = card.displayPreviewText;
+				bodyEl.textContent = card.displayPreviewText ?? null;
 
 				const truncBar = append(cardEl, $('.workflow-display-truncation-bar'));
 				const infoBox = append(truncBar, $('.truncation-info'));
@@ -3255,7 +3318,7 @@ export class WorkflowPythonEditorBridge {
 						bodyEl.textContent = card.formattedText;
 						toggleFullBtn.textContent = 'Show Less';
 					} else {
-						bodyEl.textContent = card.displayPreviewText;
+						bodyEl.textContent = card.displayPreviewText ?? null;
 						toggleFullBtn.textContent = 'Show Full';
 					}
 				};
@@ -3267,7 +3330,7 @@ export class WorkflowPythonEditorBridge {
 					e.stopPropagation();
 					const ok = await copyText(card.formattedText);
 					copyFullBtn.textContent = ok ? 'Copied Full!' : 'Failed';
-					setTimeout(() => { if (copyFullBtn.isConnected) copyFullBtn.textContent = 'Copy Full'; }, 1500);
+					setTimeout(() => { if (copyFullBtn.isConnected) { copyFullBtn.textContent = 'Copy Full'; } }, 1500);
 				};
 			} else {
 				bodyEl.textContent = card.formattedText;
@@ -3276,36 +3339,37 @@ export class WorkflowPythonEditorBridge {
 
 		// Card Footer
 		const footerEl = append(cardEl, $('.workflow-display-card-footer'));
-		const valType = typeof card.value;
-		let typeDesc = valType;
-		if (valType === 'object') {
-			if (card.value === null) {
+		const cardValue = card.value;
+		const valType = typeof cardValue;
+		let typeDesc: string = valType;
+		if (typeof cardValue === 'object') {
+			if (cardValue === null) {
 				typeDesc = 'null';
-			} else if (Array.isArray(card.value)) {
-				typeDesc = `array [${card.value.length}]`;
+			} else if (Array.isArray(cardValue)) {
+				typeDesc = `array [${cardValue.length}]`;
 			} else {
-				typeDesc = `object {${Object.keys(card.value).length} keys}`;
+				typeDesc = `object {${Object.keys(cardValue).length} keys}`;
 			}
-		} else if (valType === 'string') {
-			typeDesc = `string (${card.value.length} chars)`;
+		} else if (typeof cardValue === 'string') {
+			typeDesc = `string (${cardValue.length} chars)`;
 		}
 		footerEl.textContent = `Type: ${typeDesc}`;
 
 		return cardEl;
 	}
 
-	public static showPythonInterpreterMenu(editor: any, anchorEl: HTMLElement, onUpdated?: (newPath: string) => void): void {
-		const existing = document.querySelector('.workflow-python-env-popover');
-		if (existing) {
-			existing.remove();
-		}
+	public static showPythonInterpreterMenu(editor: WorkflowEditor, anchorEl: HTMLElement, onUpdated?: (newPath: string) => void): void {
+		// Only one interpreter popover may be open at a time
+		WorkflowPythonEditorBridge._activePythonEnvPopover?.remove();
+		WorkflowPythonEditorBridge._activePythonEnvPopover = undefined;
 
-		const wfDir = editor._workflowUri
-			? (editor._workflowUri.path.endsWith('.json') || editor._workflowUri.path.endsWith('.workflow') ? URI.joinPath(editor._workflowUri, '..') : editor._workflowUri)
+		const wfDir = editor['_workflowUri']
+			? (editor['_workflowUri'].path.endsWith('.json') || editor['_workflowUri'].path.endsWith('.workflow') ? URI.joinPath(editor['_workflowUri'], '..') : editor['_workflowUri'])
 			: URI.file('/');
 
 		const popover = document.createElement('div');
 		popover.className = 'workflow-python-env-popover';
+		WorkflowPythonEditorBridge._activePythonEnvPopover = popover;
 		popover.style.position = 'fixed';
 		popover.style.zIndex = '100000';
 		popover.style.width = '380px';
@@ -3318,9 +3382,10 @@ export class WorkflowPythonEditorBridge {
 		popover.style.fontSize = '12px';
 		popover.style.fontFamily = 'var(--monaco-font-family, -apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", sans-serif)';
 
+		const targetWindow = getWindow(anchorEl);
 		const rect = anchorEl.getBoundingClientRect();
-		popover.style.top = `${Math.min(window.innerHeight - 280, rect.bottom + 6)}px`;
-		popover.style.left = `${Math.max(12, Math.min(window.innerWidth - 380, rect.left - 80))}px`;
+		popover.style.top = `${Math.min(targetWindow.innerHeight - 280, rect.bottom + 6)}px`;
+		popover.style.left = `${Math.max(12, Math.min(targetWindow.innerWidth - 380, rect.left - 80))}px`;
 
 		popover.onmousedown = (e) => e.stopPropagation();
 		popover.onclick = (e) => e.stopPropagation();
@@ -3338,7 +3403,7 @@ export class WorkflowPythonEditorBridge {
 		titleSpan.style.color = '#d8b4fe';
 		append(titleSpan, $('span' + ThemeIcon.asCSSSelector(Codicon.python)));
 		append(titleSpan, $('span', {}, 'Workflow Python Interpreter'));
-		const closeBtn = append(titleRow, $('span', {}, '✕'));
+		const closeBtn = append(titleRow, $('span', {}, '\u2715'));
 		closeBtn.style.cursor = 'pointer';
 		closeBtn.style.opacity = '0.7';
 		closeBtn.onclick = () => popover.remove();
@@ -3356,7 +3421,7 @@ export class WorkflowPythonEditorBridge {
 
 		const pathInput = append(inputRow, $('input')) as HTMLInputElement;
 		pathInput.type = 'text';
-		pathInput.value = editor._data?.pythonPath || editor._detectedPythonPath || 'python3';
+		pathInput.value = editor['_data']?.pythonPath || editor['_detectedPythonPath'] || 'python3';
 		pathInput.placeholder = 'e.g. .venv/bin/python or /usr/bin/python3';
 		pathInput.style.flex = '1';
 		pathInput.style.background = '#09090b';
@@ -3387,22 +3452,22 @@ export class WorkflowPythonEditorBridge {
 		statusBox.style.marginBottom = '10px';
 		statusBox.style.color = '#a1a1aa';
 		statusBox.style.wordBreak = 'break-all';
-		statusBox.textContent = `Current detected: ${editor._detectedPythonPath || 'python3'}`;
+		statusBox.textContent = `Current detected: ${editor['_detectedPythonPath'] || 'python3'}`;
 
 		const applyPath = async (newPath?: string) => {
 			const clean = (newPath || '').trim();
-			if (editor._data) {
-				editor._data.pythonPath = clean || undefined;
-				await editor._saveFlowchartData();
+			if (editor['_data']) {
+				editor['_data'].pythonPath = clean || undefined;
+				await editor['_saveFlowchartData']();
 			}
-			await editor._updatePythonEnvButtonLabel();
-			const active = editor._data?.pythonPath || editor._detectedPythonPath || 'python3';
+			await editor['_updatePythonEnvButtonLabel']();
+			const active = editor['_data']?.pythonPath || editor['_detectedPythonPath'] || 'python3';
 			pathInput.value = active;
-			if (onUpdated) onUpdated(active);
+			if (onUpdated) { onUpdated(active); }
 		};
 
 		browseBtn.onclick = async () => {
-			const uris = await editor._fileDialogService.showOpenDialog({
+			const uris = await editor['_fileDialogService'].showOpenDialog({
 				title: 'Select Python Interpreter Binary',
 				canSelectFiles: true,
 				canSelectFolders: false,
@@ -3441,20 +3506,20 @@ export class WorkflowPythonEditorBridge {
 		autoBtn.onclick = async () => {
 			await applyPath('');
 			statusBox.style.color = '#38bdf8';
-			statusBox.textContent = `✓ Auto-detected: ${editor._detectedPythonPath}`;
+			statusBox.textContent = `✓ Auto-detected: ${editor['_detectedPythonPath']}`;
 		};
 
 		const testBtn = makeBtn('Test Env');
 		testBtn.onclick = async () => {
 			statusBox.style.color = '#facc15';
 			statusBox.textContent = 'Testing Python interpreter...';
-			const res = await editor._ticketRuntimeService.testPythonInterpreter(wfDir, pathInput.value.trim());
+			const res = await editor['_ticketRuntimeService'].testPythonInterpreter(wfDir, pathInput.value.trim());
 			if (res.success) {
 				statusBox.style.color = '#4ade80';
 				statusBox.textContent = `✓ ${res.version}`;
 			} else {
 				statusBox.style.color = '#f87171';
-				statusBox.textContent = `✕ ${res.error || res.version}`;
+				statusBox.textContent = `\u2715 ${res.error || res.version}`;
 			}
 		};
 
@@ -3463,14 +3528,14 @@ export class WorkflowPythonEditorBridge {
 		venvBtn.onclick = async () => {
 			statusBox.style.color = '#facc15';
 			statusBox.textContent = `Creating .venv at ${targetVenvDir} ...`;
-			const res = await editor._ticketRuntimeService.createVirtualEnv(wfDir, '.venv');
+			const res = await editor['_ticketRuntimeService'].createVirtualEnv(wfDir, '.venv');
 			if (res.success && res.pythonPath) {
 				await applyPath(res.pythonPath);
 				statusBox.style.color = '#4ade80';
 				statusBox.textContent = `✓ Created & activated: ${res.pythonPath}`;
 			} else {
 				statusBox.style.color = '#f87171';
-				statusBox.textContent = `✕ ${res.error || res.output || 'Failed to create .venv'}`;
+				statusBox.textContent = `\u2715 ${res.error || res.output || 'Failed to create .venv'}`;
 			}
 		};
 
@@ -3480,29 +3545,31 @@ export class WorkflowPythonEditorBridge {
 			popover.remove();
 		};
 
-		(editor._container || document.body).appendChild(popover);
+		(editor['_container'] || targetWindow.document.body).appendChild(popover);
 
 		const onDocMouseDown = (ev: MouseEvent) => {
 			if (!popover.contains(ev.target as Node) && ev.target !== anchorEl) {
 				popover.remove();
-				document.removeEventListener('mousedown', onDocMouseDown, true);
+				targetWindow.document.removeEventListener('mousedown', onDocMouseDown, true);
 			}
 		};
-		setTimeout(() => document.addEventListener('mousedown', onDocMouseDown, true), 50);
+		setTimeout(() => targetWindow.document.addEventListener('mousedown', onDocMouseDown, true), 50);
 	}
 
-	public static async openWorkflowAsNotebook(editor: any, focusNodeId?: string): Promise<void> {
-		if (!editor._workflowUri) {
-			editor._notificationService?.warn('Cannot open Jupyter Notebook editor: Workflow URI is not available.');
+	public static async openWorkflowAsNotebook(editor: WorkflowEditor, focusNodeId?: string): Promise<void> {
+		if (!editor['_workflowUri']) {
+			editor['_notificationService']?.warn('Cannot open Jupyter Notebook editor: Workflow URI is not available.');
 			return;
 		}
-		await editor._saveFlowchartData?.(true);
-		const snapshot = editor._entityPersistenceService?.getSnapshot(editor._workflowUri);
-		const workflowId = snapshot?.ticketId || editor.input?.workflowName || editor._workflowUri.path.split('/').pop() || 'workflow';
-		const workflowName = snapshot?.entityName || editor.input?.workflowName || workflowId;
-		const nbInput = new WorkflowNotebookEditorInput(editor._workflowUri, workflowName || workflowId, focusNodeId);
-		const pane: any = await editor._editorService.openEditor(nbInput, { pinned: true, preserveFocus: false });
-		if (focusNodeId && pane && typeof pane.focusNodeSection === 'function') {
+		await editor['_saveFlowchartData']?.(true);
+		const snapshot = editor['_entityPersistenceService']?.getSnapshot(editor['_workflowUri']);
+		const input = editor.input;
+		const inputWorkflowName = input instanceof WorkflowEditorInput ? input.workflowName : undefined;
+		const workflowId = snapshot?.ticketId || inputWorkflowName || editor['_workflowUri'].path.split('/').pop() || 'workflow';
+		const workflowName = snapshot?.entityName || inputWorkflowName || workflowId;
+		const nbInput = new WorkflowNotebookEditorInput(editor['_workflowUri'], workflowName || workflowId, focusNodeId);
+		const pane = await editor['_editorService'].openEditor(nbInput, { pinned: true, preserveFocus: false });
+		if (focusNodeId && isNodeSectionFocusable(pane)) {
 			pane.focusNodeSection(focusNodeId);
 		}
 	}

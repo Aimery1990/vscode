@@ -1,10 +1,11 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import './media/workflowEditor.css';
-import { $, append, clearNode, h, addDisposableListener } from '../../../../base/browser/dom.js';
+import { $, append, clearNode, h, addDisposableListener, getWindow, isHTMLElement } from '../../../../base/browser/dom.js';
+import { CodeWindow } from '../../../../base/browser/window.js';
+import { isCodeEditor } from '../../../../editor/browser/editorBrowser.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { DisposableStore, IDisposable } from '../../../../base/common/lifecycle.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
@@ -26,7 +27,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IVoiceNoteClip, IParameterDefinition, generateSmartPythonVarName, sanitizePythonVarName, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshCommandsList, normalizeLegacyFieldTypes } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, ICustomModule, ICustomField, IOutputSpec, CustomFieldType, IVoiceNoteClip, IParameterDefinition, generateSmartPythonVarName, sanitizePythonVarName, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshCommandsList, normalizeLegacyFieldTypes } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
@@ -36,6 +37,7 @@ import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
 import { EntityDetailEditor } from '../../workspacesExplorer/browser/entityDetailEditor.js';
+import { MainWorkspaceViewPane } from '../../workspacesExplorer/browser/workspacesExplorerPane.js';
 import { IWorkflowExecutionService, IWorkflowDisplayCard } from '../common/workflowExecutionService.js';
 import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import { resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
@@ -54,14 +56,17 @@ import {
 	IExecutedTicketRecord,
 	IWorkflowPathStep,
 	IWorkflowNodeOperation,
-	IWorkflowStepTransition
+	IWorkflowStepTransition,
+	hasWorkflowProperty,
+	isWorkflowRecord,
+	IWorkflowRecord
 } from '../common/workflowExecutionModel.js';
 
 export interface INodeVariable {
 	name: string;
 	initialValue: string; // e.g. "None", "True", "False", "0", "'admin'"
 	expression?: string;  // e.g. "+ 1", "ticket.output", "monitor + 5", "'SUCCESS'"
-	currentValue?: any;
+	currentValue?: unknown;
 }
 
 export interface INodePipelineStep {
@@ -103,6 +108,8 @@ interface IFlowchartNode {
 	isItalic?: boolean;
 	isUnderline?: boolean;
 	isStrikethrough?: boolean;
+	/** Time of the last click on the node (double-click detection); not meaningful after reload. */
+	_lastClickTime?: number;
 }
 
 interface IFlowchartLink {
@@ -120,6 +127,10 @@ interface IFlowchartLink {
 	labelWidth?: number;
 	labelHeight?: number;
 	waypoints?: { x: number; y: number }[];
+	/** Time of the last click on the line / a line segment (double-click detection). */
+	_lastLineClickTime?: number;
+	/** Time of the last click on the label (double-click detection). */
+	_lastLabelClickTime?: number;
 }
 
 interface IFlowchartData {
@@ -129,8 +140,223 @@ interface IFlowchartData {
 	pythonPath?: string;
 }
 
+/**
+ * A node as read from `workflow_flowchart.json` before normalization. Older files use alternative keys
+ * (`name`, `position`, `start` / `decision` types), so everything that gets validated is `unknown`.
+ */
+interface IRawFlowchartNode {
+	id?: unknown;
+	groupId?: unknown;
+	type?: unknown;
+	x?: unknown;
+	y?: unknown;
+	position?: { x?: unknown; y?: unknown };
+	width?: unknown;
+	height?: unknown;
+	label?: unknown;
+	name?: unknown;
+	imports?: unknown;
+	outputVariable?: INodeVariable;
+	outputVariables?: unknown;
+	pipeline?: unknown;
+	color?: string;
+	textColor?: string;
+	textAlign?: IFlowchartNode['textAlign'];
+	verticalAlign?: IFlowchartNode['verticalAlign'];
+	isBold?: unknown;
+	isItalic?: unknown;
+	isUnderline?: unknown;
+	isStrikethrough?: unknown;
+}
+
+/** A link as read from `workflow_flowchart.json` (or legacy `connections` / `edges`) before normalization. */
+interface IRawFlowchartLink {
+	id?: unknown;
+	from?: unknown;
+	fromNodeId?: unknown;
+	source?: unknown;
+	fromPort?: IFlowchartLink['fromPort'];
+	to?: unknown;
+	toNodeId?: unknown;
+	target?: unknown;
+	toPort?: IFlowchartLink['toPort'];
+	style?: unknown;
+	routing?: IFlowchartLink['routing'];
+	color?: string;
+	label?: string;
+	condition?: string;
+	labelPosition?: unknown;
+	labelWidth?: unknown;
+	labelHeight?: unknown;
+	waypoints?: unknown;
+}
+
+interface IRawFlowchartFile {
+	nodes?: unknown;
+	links?: unknown;
+	connections?: unknown;
+	edges?: unknown;
+	routingMode?: IFlowchartData['routingMode'];
+	pythonPath?: string;
+}
+
+/**
+ * Properties that are not part of `ICustomField` but may be present on a persisted component: runtime
+ * results written back by the execution service, label history, and legacy property names.
+ */
+interface IWfComponent extends ICustomField {
+	previousLabels?: unknown;
+	lastExecutionInputs?: Record<string, unknown>;
+	lastExecutionLog?: unknown;
+	lastExecutionOutput?: unknown;
+	lastExecutionStatus?: string;
+	lastExecutionDurationMs?: unknown;
+	lastExecutedAt?: unknown;
+	lastExecutionExitCode?: unknown;
+	lastSentPrompt?: unknown;
+	pythonStructuredData?: unknown;
+	structuredData?: unknown;
+	debugOutput?: unknown;
+	/** Legacy name of `tableDbTableName`. */
+	tableName?: string;
+	/** Legacy name of `defaultUrl`. */
+	browserUrl?: string;
+}
+
+/** DOM of one rendered flowchart node, kept so that later updates do not have to query the canvas by selector. */
+interface IWfNodeDom {
+	readonly nodeId: string;
+	readonly nodeEl: HTMLElement;
+	contentWrapper?: HTMLElement;
+	/** Top-right voice note speaker button (`.node-voice-speaker-btn`) with its icon and count badge. */
+	speaker?: { readonly btn: HTMLElement; readonly icon: HTMLElement; readonly countBadge: HTMLElement };
+	/** `.node-function-pill` / `.node-variable-pill` elements, in document order. */
+	readonly pills: HTMLElement[];
+	/** Pipeline capsules (the elements carrying `data-pipeline-step-idx`), in document order. */
+	readonly capsules: HTMLElement[];
+}
+
+/** Rendered node DOM by node element, across all open workflow editors (drag & drop between split editors). */
+const wfNodeDomByElement = new WeakMap<HTMLElement, IWfNodeDom>();
+
+/** Parts of a rendered `.workflow-log-line` (a direct child of the log body), by line element. */
+const wfLogLineParts = new WeakMap<Element, { readonly time: HTMLElement; readonly badge: HTMLElement; readonly node?: HTMLElement; readonly msg: HTMLElement }>();
+
+/** The `.item-label` element of a toolbar button, by button. */
+const wfToolbarItemLabels = new WeakMap<HTMLElement, HTMLElement>();
+/** The Run / Full Speed buttons (`data-role` `workflow-run-btn` / `workflow-full-speed-run-btn`) rendered into a toolbar, by toolbar element. */
+const wfToolbarRunButtons = new WeakMap<HTMLElement, { readonly runBtn: HTMLElement; readonly fullSpeedBtn: HTMLElement }>();
+
+/** The open `.workflow-color-flyout-popover` of each document (at most one at a time). */
+const wfColorFlyoutPopovers = new WeakMap<Document, HTMLElement>();
+/** The open `.workflow-export-floating-menu` of each document (at most one at a time). */
+const wfExportFloatingMenus = new WeakMap<Document, HTMLElement>();
+
+/** Parts of the node pipeline panel last rendered into a panel element, by panel element. */
+const wfPipelinePanelParts = new WeakMap<HTMLElement, { body?: HTMLElement; readonly ticketInputsByStepId: Map<string, HTMLInputElement> }>();
+
+/**
+ * The first element below `root` (document order) whose `data-field-id` attribute equals `fieldId`. Used to find a
+ * component card in another editor (`EntityDetailEditor`), whose markup is produced from HTML strings.
+ */
+function findElementWithFieldId(root: HTMLElement, fieldId: string): HTMLElement | undefined {
+	const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+	for (let current = walker.nextNode(); current; current = walker.nextNode()) {
+		if (isHTMLElement(current) && current.getAttribute('data-field-id') === fieldId) {
+			return current;
+		}
+	}
+	return undefined;
+}
+
+/** The `.draft-drag-grip` inserted into a draft popup's header title, by title element. */
+const wfDraftDragGrips = new WeakMap<HTMLElement, HTMLElement>();
+
+/** Header parts of a Live Display inspector panel, by panel element. */
+const wfDisplayInspectorParts = new WeakMap<HTMLElement, { header?: HTMLElement; titleText?: HTMLElement; minBtn?: HTMLElement }>();
+
+/** When a capsule element was last dragged or resized (suppresses the click that ends the drag), by element. */
+const wfCapsuleJustDraggedAt = new WeakMap<HTMLElement, number>();
+
+/** A `call_function` operation of an execution path step, which may also carry its expression and result. */
+interface IWorkflowNodeOperationWithResult extends IWorkflowNodeOperation {
+	expression?: unknown;
+	value?: unknown;
+}
+
+/** An entry of the `@` autocomplete dropdown of pipeline inputs; `raw` is the entity it was built from. */
+interface IWfAutocompleteItem<TRaw = unknown> {
+	label: string;
+	detail?: string;
+	icon?: ThemeIcon;
+	insertText: string;
+	isVariable?: boolean;
+	raw?: TRaw;
+}
+
+/**
+ * The interpreter path of a `pythonPath` setting. The setting comes from the flowchart JSON, where older files
+ * may hold an interpreter object (`{ interpreterPath }`) instead of a path.
+ */
+function pythonPathSettingToPath(setting: string | { interpreterPath?: unknown } | undefined): string {
+	return typeof setting === 'string' ? setting : String(setting?.interpreterPath || 'python3');
+}
+
+type IWfTicketRef = NonNullable<IFlowchartNode['imports']>[number] | INodePipelineStep;
+
+/** Whether a ticket reference has the pipeline step property `key` (own or inherited, like `in`). */
+function isStepTicketRef(ref: IWfTicketRef, key: 'ticketName' | 'ticketType'): ref is INodePipelineStep {
+	return key in ref;
+}
+
+/** Name and type of a ticket referenced by a node, either as one of its imports or as a `run_ticket` pipeline step. */
+function ticketRefNameAndType(ref: IWfTicketRef): { ticketName: string | undefined; ticketType: string | undefined } {
+	return {
+		ticketName: isStepTicketRef(ref, 'ticketName') ? ref.ticketName : ref.name,
+		ticketType: isStepTicketRef(ref, 'ticketType') ? ref.ticketType : ref.type,
+	};
+}
+
+/** A parameter declared by a ticket type's schema, with its default value (any JSON value). */
+interface IWfSchemaParamSpec {
+	name: string;
+	defaultValue: unknown;
+}
+
+/**
+ * The node snapshot stored with a Sub-Workflow definition. `ISubWorkflowDefinition` lives in `common/` and cannot
+ * name the editor's node type; the snapshot is written from `IFlowchartNode`s by this editor.
+ */
+function subWorkflowSnapshotNodes(def: ISubWorkflowDefinition): (IFlowchartNode | null | undefined)[] {
+	return (def.nodes || []) as (IFlowchartNode | null | undefined)[];
+}
+
+/** Legacy properties that older output specs may still carry. */
+interface IWfOutputSpec extends IOutputSpec {
+	name?: string;
+	value?: string;
+}
+
+/** Views an output spec as `IWfOutputSpec` (type-only, no conversion). */
+function wfOutputSpec(spec: IOutputSpec): IWfOutputSpec {
+	return spec;
+}
+
+/** An editor input that may be a `DiagramEditorInput` (diagramsManager), checked structurally. */
+interface IMaybeDiagramEditorInput extends EditorInput {
+	readonly isPureDiagram?: boolean;
+	readonly diagramUri?: URI;
+}
+
+/** Views a component as `IWfComponent` (type-only, no conversion). */
+function wfComponent(comp: ICustomField): IWfComponent;
+function wfComponent(comp: ICustomField | undefined): IWfComponent | undefined;
+function wfComponent(comp: ICustomField | undefined): IWfComponent | undefined {
+	return comp;
+}
+
 function hexToRgba(hex?: string, alpha = 0.12): string {
-	if (!hex || !hex.startsWith('#')) return `rgba(13, 148, 136, ${alpha})`;
+	if (!hex || !hex.startsWith('#')) { return `rgba(13, 148, 136, ${alpha})`; }
 	const clean = hex.replace('#', '');
 	if (clean.length === 3) {
 		const r = parseInt(clean[0] + clean[0], 16);
@@ -148,7 +374,7 @@ function hexToRgba(hex?: string, alpha = 0.12): string {
 }
 
 function getColorForName(name: string | undefined): string {
-	if (!name) return '#38bdf8';
+	if (!name) { return '#38bdf8'; }
 	const MODERN_PALETTE = [
 		'#38bdf8', // Light Blue
 		'#a78bfa', // Purple/Violet
@@ -214,24 +440,24 @@ function getEntityBadgeStyle(type?: string): { color: string; bg: string; icon: 
 /** Capsule look per component type (icon + colors), shared by node capsules on the canvas and the Workflow Outline menu. */
 interface IWfCapsuleTheme { readonly icon: ThemeIcon; readonly color: string; readonly bg: string; readonly border: string; readonly textColor: string }
 const WF_COMPONENT_CAPSULE_THEMES: Record<string, IWfCapsuleTheme> = {
-		parameters: { icon: Codicon.symbolVariable, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.5)', textColor: '#f3e8ff' },
-		output: { icon: Codicon.output, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.5)', textColor: '#d1fae5' },
-		create_tickets: { icon: Codicon.add, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.5)', textColor: '#f3e8ff' },
-		run_tickets: { icon: Codicon.playCircle, color: '#a855f7', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(168, 85, 247, 0.5)', textColor: '#f3e8ff' },
-		get_outputs: { icon: Codicon.signOut, color: '#818cf8', bg: 'rgba(99, 102, 241, 0.16)', border: 'rgba(129, 140, 248, 0.5)', textColor: '#e0e7ff' },
-		get_ticket: { icon: Codicon.tag, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.5)', textColor: '#dbeafe' },
-		get_tickets: { icon: Codicon.search, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.5)', textColor: '#dbeafe' },
-		display: { icon: Codicon.eye, color: '#f472b6', bg: 'rgba(236, 72, 153, 0.16)', border: 'rgba(244, 114, 182, 0.5)', textColor: '#fce7f3' },
-		prompt: { icon: Codicon.sparkle, color: '#2dd4bf', bg: 'rgba(20, 184, 166, 0.16)', border: 'rgba(45, 212, 191, 0.5)', textColor: '#ccfbf1' },
-		table: { icon: Codicon.table, color: '#fb923c', bg: 'rgba(249, 115, 22, 0.16)', border: 'rgba(251, 146, 60, 0.5)', textColor: '#ffedd5' },
-		browser: { icon: Codicon.globe, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.16)', border: 'rgba(56, 189, 248, 0.5)', textColor: '#e0f2fe' },
-		tts: { icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.5)', textColor: '#fee2e2' },
-		media_player: { icon: Codicon.deviceCameraVideo, color: '#fbbf24', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.5)', textColor: '#fef3c7' },
-		voice_note: { icon: Codicon.mic, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.38)', textColor: '#e2e8f0' },
-		sub_workflow: { icon: Codicon.layers, color: '#22d3ee', bg: 'rgba(6, 182, 212, 0.16)', border: 'rgba(34, 211, 238, 0.5)', textColor: '#cffafe' },
-		ssh: { icon: Codicon.terminal, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.5)', textColor: '#d1fae5' },
-		git: { icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.5)', textColor: '#ecfccb' },
-		python: { icon: Codicon.python, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.14)', border: 'rgba(56, 189, 248, 0.45)', textColor: '#e0f2fe' }
+	parameters: { icon: Codicon.symbolVariable, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.5)', textColor: '#f3e8ff' },
+	output: { icon: Codicon.output, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.5)', textColor: '#d1fae5' },
+	create_tickets: { icon: Codicon.add, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.5)', textColor: '#f3e8ff' },
+	run_tickets: { icon: Codicon.playCircle, color: '#a855f7', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(168, 85, 247, 0.5)', textColor: '#f3e8ff' },
+	get_outputs: { icon: Codicon.signOut, color: '#818cf8', bg: 'rgba(99, 102, 241, 0.16)', border: 'rgba(129, 140, 248, 0.5)', textColor: '#e0e7ff' },
+	get_ticket: { icon: Codicon.tag, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.5)', textColor: '#dbeafe' },
+	get_tickets: { icon: Codicon.search, color: '#60a5fa', bg: 'rgba(59, 130, 246, 0.16)', border: 'rgba(96, 165, 250, 0.5)', textColor: '#dbeafe' },
+	display: { icon: Codicon.eye, color: '#f472b6', bg: 'rgba(236, 72, 153, 0.16)', border: 'rgba(244, 114, 182, 0.5)', textColor: '#fce7f3' },
+	prompt: { icon: Codicon.sparkle, color: '#2dd4bf', bg: 'rgba(20, 184, 166, 0.16)', border: 'rgba(45, 212, 191, 0.5)', textColor: '#ccfbf1' },
+	table: { icon: Codicon.table, color: '#fb923c', bg: 'rgba(249, 115, 22, 0.16)', border: 'rgba(251, 146, 60, 0.5)', textColor: '#ffedd5' },
+	browser: { icon: Codicon.globe, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.16)', border: 'rgba(56, 189, 248, 0.5)', textColor: '#e0f2fe' },
+	tts: { icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.5)', textColor: '#fee2e2' },
+	media_player: { icon: Codicon.deviceCameraVideo, color: '#fbbf24', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.5)', textColor: '#fef3c7' },
+	voice_note: { icon: Codicon.mic, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.38)', textColor: '#e2e8f0' },
+	sub_workflow: { icon: Codicon.layers, color: '#22d3ee', bg: 'rgba(6, 182, 212, 0.16)', border: 'rgba(34, 211, 238, 0.5)', textColor: '#cffafe' },
+	ssh: { icon: Codicon.terminal, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.5)', textColor: '#d1fae5' },
+	git: { icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.5)', textColor: '#ecfccb' },
+	python: { icon: Codicon.python, color: '#38bdf8', bg: 'rgba(14, 165, 233, 0.14)', border: 'rgba(56, 189, 248, 0.45)', textColor: '#e0f2fe' }
 };
 /** Classic inline Python step capsule (no component): default purple function pill. */
 const WF_PYTHON_STEP_CAPSULE_THEME: IWfCapsuleTheme = { icon: Codicon.python, color: '#c084fc', bg: 'rgba(192, 132, 252, 0.15)', border: 'rgba(192, 132, 252, 0.4)', textColor: '#f3e8ff' };
@@ -282,6 +508,8 @@ type WfOutlineTicketRef = { readonly kind: 'type'; readonly name: string } | { r
 export class WorkflowEditor extends EditorPane {
 	static readonly ID = 'workbench.editor.workflowEditor';
 	private static readonly _openWorkflowEditors: Set<WorkflowEditor> = new Set();
+	/** The shared `#workflow-existing-vars-list` datalist of each document (referenced by id from variable name inputs). */
+	private static readonly _existingVarsDatalists = new WeakMap<Document, HTMLDataListElement>();
 	/** Item last located from a Workflow Outline, per workflow: stays highlighted on every canvas until the next one is picked. */
 	private static readonly _outlineLocated = new Map<string, { targets: IWfLocateTarget[]; owner: WorkflowEditor }>();
 	/** Items of each outline column as last rendered (to find the ancestors of a clicked item). */
@@ -290,6 +518,10 @@ export class WorkflowEditor extends EditorPane {
 	private _outlineSelectedKey: string | undefined;
 
 	private _container: HTMLElement | undefined;
+	/** Window that hosts this editor's DOM (the main window before the editor is created). */
+	private get _targetWindow(): CodeWindow {
+		return getWindow(this._container);
+	}
 	private readonly _contentDisposables = this._register(new DisposableStore());
 
 	private _workflowUri: URI | undefined;
@@ -402,7 +634,17 @@ export class WorkflowEditor extends EditorPane {
 	private _canvas: HTMLElement | undefined;
 	private _selectionBoxEl: HTMLElement | undefined;
 	private _svgOverlay: SVGElement | undefined;
+	/** The dashed preview path drawn while a new link is being dragged (`#workflow-temp-line`). */
+	private _tempLinkLine: SVGPathElement | undefined;
+	/** Paths in `_svgOverlay` with class `workflow-connection-line` / `workflow-connection-hit-area` (incl. the temp line). */
+	private readonly _connectionLineEls = new Set<SVGElement>();
+	/** Link labels (`.workflow-link-label`) drawn into `_linkDeletesContainer` by the last `_drawLinks()`, by link id. */
+	private _linkLabelEls = new Map<string, HTMLElement>();
+	/** The inline link label editor (`.workflow-link-label-editor-wrapper`) last opened in `_linkDeletesContainer`. */
+	private _linkLabelEditorWrapper: HTMLElement | undefined;
 	private _nodesContainer: HTMLElement | undefined;
+	/** Nodes rendered into `_nodesContainer` by the last `_renderNodes()`, in document order. */
+	private _nodeDoms: IWfNodeDom[] = [];
 	private _linkDeletesContainer: HTMLElement | undefined;
 	private _zoomLevel: number = 1.0;
 	private _zoomSizerEl?: HTMLElement;
@@ -423,6 +665,8 @@ export class WorkflowEditor extends EditorPane {
 	private _isLogDrawerOpen: boolean = false;
 	private _activeDrawerTab: 'logs' | 'vars' | 'history' = 'logs';
 	private _logDrawerEl?: HTMLElement;
+	/** Elements of the drawer rendered into `_logDrawerEl` (tabs in order: logs, vars, history). */
+	private _logDrawerParts?: { readonly tabs: HTMLElement[]; readonly clearBtn: HTMLElement; readonly copyLogsBtn: HTMLElement; readonly findReplaceToggleBtn: HTMLElement };
 	private _logBodyEl?: HTMLElement;
 	private _varsBodyEl?: HTMLElement;
 	private _historyBodyEl?: HTMLElement;
@@ -450,10 +694,10 @@ export class WorkflowEditor extends EditorPane {
 	private _pipelineDockSide: 'left' | 'right' = 'right';
 	private _activePipelineDropdown: HTMLElement | null = null;
 	private _ticketHoverPopoverEl: HTMLElement | null = null;
-	private _ticketHoverTimeout: any = null;
+	private _ticketHoverTimeout: ReturnType<typeof setTimeout> | null = null;
 	private _pythonStepHoverPopoverEl: HTMLElement | null = null;
-	private _pythonStepHoverShowTimeout: any = null;
-	private _pythonStepHoverHideTimeout: any = null;
+	private _pythonStepHoverShowTimeout: ReturnType<typeof setTimeout> | null = null;
+	private _pythonStepHoverHideTimeout: ReturnType<typeof setTimeout> | null = null;
 	private _isPythonStepPopoverPinned: boolean = false;
 	private _pythonStepPopoverOutsideClickHandler: ((e: MouseEvent) => void) | null = null;
 	private _activePythonPopoverNode: IFlowchartNode | null = null;
@@ -492,6 +736,8 @@ export class WorkflowEditor extends EditorPane {
 
 	// Sub-Workflow Encapsulation & Top-Left Dropdown State
 	private _subWorkflowWidgetEl?: HTMLElement;
+	/** The Workflow Outline panel last rendered into `_subWorkflowWidgetEl`. */
+	private _outlinePanelEl?: HTMLElement;
 	private _isSubWorkflowDropdownOpen = false;
 	private _showEncapsulateForm = false;
 	// Workflow Outline (layers button): keys of the expanded item per menu level, library section state, lit lightbulb
@@ -534,20 +780,20 @@ export class WorkflowEditor extends EditorPane {
 		this._isToolbarCompact = this._storageService.getBoolean('workflowEditor.toolbarCompact', StorageScope.PROFILE, false);
 		this._isInspectorCompact = this._storageService.getBoolean('workflowEditor.inspectorCompact', StorageScope.PROFILE, false);
 		this._isInspectorCollapsed = this._storageService.getBoolean('workflowEditor.inspectorCollapsed', StorageScope.PROFILE, false);
-		this._activeLinkStyle = (this._storageService.get('workflowEditor.linkStyle', StorageScope.PROFILE, 'arrow-single') as any) || 'arrow-single';
-		this._activeRoutingMode = (this._storageService.get('workflowEditor.routingMode', StorageScope.PROFILE, 'orthogonal') as any) || 'orthogonal';
-		this._activeBranchDirection = (this._storageService.get('workflowEditor.branchDirection', StorageScope.PROFILE, 'right') as any) || 'right';
+		this._activeLinkStyle = (this._storageService.get('workflowEditor.linkStyle', StorageScope.PROFILE, 'arrow-single') as IFlowchartLink['style']) || 'arrow-single';
+		this._activeRoutingMode = (this._storageService.get('workflowEditor.routingMode', StorageScope.PROFILE, 'orthogonal') as 'orthogonal' | 'curved') || 'orthogonal';
+		this._activeBranchDirection = (this._storageService.get('workflowEditor.branchDirection', StorageScope.PROFILE, 'right') as 'right' | 'bottom' | 'left' | 'top') || 'right';
 		this._activeNodeColor = this._storageService.get('workflowEditor.nodeColor', StorageScope.PROFILE, '#0d9488');
 		this._activeLineColor = this._storageService.get('workflowEditor.lineColor', StorageScope.PROFILE, '#0d9488');
 		this._activeTextColor = this._storageService.get('workflowEditor.textColor', StorageScope.PROFILE, '#ffffff');
-		this._activeTextAlign = (this._storageService.get('workflowEditor.textAlign', StorageScope.PROFILE, 'center') as any) || 'center';
-		this._activeVerticalAlign = (this._storageService.get('workflowEditor.verticalAlign', StorageScope.PROFILE, 'center') as any) || 'center';
+		this._activeTextAlign = (this._storageService.get('workflowEditor.textAlign', StorageScope.PROFILE, 'center') as 'left' | 'center' | 'right') || 'center';
+		this._activeVerticalAlign = (this._storageService.get('workflowEditor.verticalAlign', StorageScope.PROFILE, 'center') as 'top' | 'center' | 'bottom') || 'center';
 		this._activeIsBold = this._storageService.getBoolean('workflowEditor.isBold', StorageScope.PROFILE, false);
 		this._activeIsItalic = this._storageService.getBoolean('workflowEditor.isItalic', StorageScope.PROFILE, false);
 		this._activeIsUnderline = this._storageService.getBoolean('workflowEditor.isUnderline', StorageScope.PROFILE, false);
 		this._activeIsStrikethrough = this._storageService.getBoolean('workflowEditor.isStrikethrough', StorageScope.PROFILE, false);
 		this._drawerHeight = this._storageService.getNumber('workflowEditor.drawerHeight', StorageScope.PROFILE, 280);
-		this._pipelineDockSide = (this._storageService.get('workflowEditor.pipelineDockSide', StorageScope.PROFILE, 'right') as any) || 'right';
+		this._pipelineDockSide = (this._storageService.get('workflowEditor.pipelineDockSide', StorageScope.PROFILE, 'right') as 'left' | 'right') || 'right';
 		WorkflowEditor._openWorkflowEditors.add(this);
 		this._register({ dispose: () => WorkflowEditor._openWorkflowEditors.delete(this) });
 		this._register(this._customModulesService.onDidChangeModules(async () => {
@@ -558,7 +804,8 @@ export class WorkflowEditor extends EditorPane {
 				for (const mod of modules) {
 					for (const f of mod.fields || []) {
 						const newLbl = (f.label || '').trim();
-						const prevs: string[] = Array.isArray((f as any).previousLabels) ? (f as any).previousLabels : [];
+						const previousLabels = wfComponent(f).previousLabels;
+						const prevs: string[] = Array.isArray(previousLabels) ? previousLabels : [];
 						if (!newLbl || prevs.length === 0) { continue; }
 						for (const oldLbl of prevs) {
 							if (!oldLbl || oldLbl === newLbl) { continue; }
@@ -602,9 +849,10 @@ export class WorkflowEditor extends EditorPane {
 		await super.setInput(input, options, context, token);
 
 		this._viewMode = 'flowchart';
-		this._isPureDiagram = !!(input as any).isPureDiagram || !!(input as any).diagramUri;
+		const maybeDiagramInput: IMaybeDiagramEditorInput = input;
+		this._isPureDiagram = !!maybeDiagramInput.isPureDiagram || !!maybeDiagramInput.diagramUri;
 		if (this._isPureDiagram) {
-			this._workflowUri = (input as any).diagramUri || (input as any).resource || URI.file('');
+			this._workflowUri = maybeDiagramInput.diagramUri || maybeDiagramInput.resource || URI.file('');
 			this._flowchartJsonUri = this._workflowUri;
 		} else {
 			this._workflowUri = (input as WorkflowEditorInput).workflowUri;
@@ -676,7 +924,7 @@ export class WorkflowEditor extends EditorPane {
 				this._cachedCustomModules = await this._customModulesService.getCustomModules(this._workflowUri);
 			} catch { }
 		}
-		if (!this._flowchartJsonUri) return;
+		if (!this._flowchartJsonUri) { return; }
 
 		// Another editor already holds this workflow in memory: share its data instead of reading a second, diverging copy
 		const loadedPeer = this._getPeerEditors().find(peer => Array.isArray(peer._data?.nodes) && peer._data.nodes.length > 0);
@@ -694,7 +942,7 @@ export class WorkflowEditor extends EditorPane {
 			const exists = await this._fileService.exists(this._flowchartJsonUri);
 			if (exists) {
 				const content = await this._fileService.readFile(this._flowchartJsonUri);
-				let parsed: any;
+				let parsed: IRawFlowchartFile | null | undefined;
 				try {
 					parsed = JSON.parse(content.value.toString());
 				} catch {
@@ -703,7 +951,7 @@ export class WorkflowEditor extends EditorPane {
 
 				// Normalize nodes
 				const rawNodes = Array.isArray(parsed?.nodes) ? parsed.nodes : [];
-				const nodes: IFlowchartNode[] = rawNodes.map((n: any, idx: number) => ({
+				const nodes: IFlowchartNode[] = rawNodes.map((n: IRawFlowchartNode, idx: number) => ({
 					id: String(n.id || `node-${idx}`),
 					groupId: n.groupId ? String(n.groupId) : undefined,
 					type: (n.type === 'start' || n.type === 'circle') ? 'circle' : (n.type === 'decision' || n.type === 'diamond') ? 'diamond' : (n.type === 'rect') ? 'rect' : 'round-rect',
@@ -715,10 +963,10 @@ export class WorkflowEditor extends EditorPane {
 					imports: Array.isArray(n.imports) ? n.imports : undefined,
 					outputVariable: n.outputVariable ? { ...n.outputVariable } : undefined,
 					outputVariables: Array.isArray(n.outputVariables)
-						? n.outputVariables.map((ov: any) => ({ ...ov }))
+						? n.outputVariables.map((ov: INodeVariable) => ({ ...ov }))
 						: (n.outputVariable ? [{ ...n.outputVariable }] : undefined),
 					pipeline: Array.isArray(n.pipeline)
-						? n.pipeline.map((p: any) => ({ ...p }))
+						? n.pipeline.map((p: INodePipelineStep) => ({ ...p }))
 						: undefined,
 					color: n.color || undefined,
 					textColor: n.textColor || undefined,
@@ -732,7 +980,7 @@ export class WorkflowEditor extends EditorPane {
 
 				// Normalize links / connections / edges
 				const rawLinks = Array.isArray(parsed?.links) ? parsed.links : Array.isArray(parsed?.connections) ? parsed.connections : Array.isArray(parsed?.edges) ? parsed.edges : [];
-				const links: IFlowchartLink[] = rawLinks.map((l: any, idx: number) => ({
+				const links: IFlowchartLink[] = rawLinks.map((l: IRawFlowchartLink, idx: number) => ({
 					id: String(l.id || `link-${idx}`),
 					from: String(l.from || l.fromNodeId || l.source || ''),
 					fromPort: l.fromPort,
@@ -747,7 +995,7 @@ export class WorkflowEditor extends EditorPane {
 					labelWidth: typeof l.labelWidth === 'number' ? l.labelWidth : undefined,
 					labelHeight: typeof l.labelHeight === 'number' ? l.labelHeight : undefined,
 					waypoints: Array.isArray(l.waypoints)
-						? l.waypoints.filter((p: any) => p && typeof p.x === 'number' && typeof p.y === 'number').map((p: any) => ({ x: p.x, y: p.y }))
+						? l.waypoints.filter((p: { x?: unknown; y?: unknown } | null | undefined) => p && typeof p.x === 'number' && typeof p.y === 'number').map((p: { x: number; y: number }) => ({ x: p.x, y: p.y }))
 						: undefined
 				}));
 
@@ -766,14 +1014,14 @@ export class WorkflowEditor extends EditorPane {
 				for (let i = nodes.length - 1; i >= 0; i--) {
 					const lastNode = nodes[i];
 					if (lastNode.color || lastNode.textColor) {
-						if (lastNode.color) this._activeNodeColor = lastNode.color;
-						if (lastNode.textColor) this._activeTextColor = lastNode.textColor;
-						if (lastNode.textAlign) this._activeTextAlign = lastNode.textAlign;
-						if (lastNode.verticalAlign) this._activeVerticalAlign = lastNode.verticalAlign;
-						if (typeof lastNode.isBold === 'boolean') this._activeIsBold = lastNode.isBold;
-						if (typeof lastNode.isItalic === 'boolean') this._activeIsItalic = lastNode.isItalic;
-						if (typeof lastNode.isUnderline === 'boolean') this._activeIsUnderline = lastNode.isUnderline;
-						if (typeof lastNode.isStrikethrough === 'boolean') this._activeIsStrikethrough = lastNode.isStrikethrough;
+						if (lastNode.color) { this._activeNodeColor = lastNode.color; }
+						if (lastNode.textColor) { this._activeTextColor = lastNode.textColor; }
+						if (lastNode.textAlign) { this._activeTextAlign = lastNode.textAlign; }
+						if (lastNode.verticalAlign) { this._activeVerticalAlign = lastNode.verticalAlign; }
+						if (typeof lastNode.isBold === 'boolean') { this._activeIsBold = lastNode.isBold; }
+						if (typeof lastNode.isItalic === 'boolean') { this._activeIsItalic = lastNode.isItalic; }
+						if (typeof lastNode.isUnderline === 'boolean') { this._activeIsUnderline = lastNode.isUnderline; }
+						if (typeof lastNode.isStrikethrough === 'boolean') { this._activeIsStrikethrough = lastNode.isStrikethrough; }
 						break;
 					}
 				}
@@ -848,13 +1096,13 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
-	private _saveFlowchartTimer: any = null;
+	private _saveFlowchartTimer: ReturnType<typeof setTimeout> | null = null;
 	private _isSyncingOwnSubWorkflows = false;
 	private _saveFlowchartPendingSkipHistory: boolean = true;
 	private _nodeComponentRenderRaf: number | null = null;
 
 	private async _saveFlowchartData(skipHistory: boolean = false, immediate: boolean = false): Promise<void> {
-		if (!this._flowchartJsonUri) return;
+		if (!this._flowchartJsonUri) { return; }
 		if (!skipHistory) {
 			this._saveFlowchartPendingSkipHistory = false;
 		}
@@ -876,7 +1124,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private async _flushSaveFlowchartData(): Promise<void> {
-		if (!this._flowchartJsonUri) return;
+		if (!this._flowchartJsonUri) { return; }
 		const skipHistory = this._saveFlowchartPendingSkipHistory;
 		this._saveFlowchartPendingSkipHistory = true;
 
@@ -912,7 +1160,7 @@ export class WorkflowEditor extends EditorPane {
 						for (const sw of ownedSubs) {
 							const idSet = new Set(sw.nodeIds);
 							const liveSubNodes = (this._data.nodes || []).filter(n => idSet.has(n.id));
-							if (liveSubNodes.length === 0) continue;
+							if (liveSubNodes.length === 0) { continue; }
 							const liveSubLinks = (this._data.links || []).filter(l => idSet.has(l.from) && idSet.has(l.to));
 							const nextNodesJson = JSON.stringify(liveSubNodes);
 							const nextLinksJson = JSON.stringify(liveSubLinks);
@@ -956,12 +1204,13 @@ export class WorkflowEditor extends EditorPane {
 			void this._flushSaveFlowchartData();
 		}
 		if (this._nodeComponentRenderRaf !== null) {
-			cancelAnimationFrame(this._nodeComponentRenderRaf);
+			this._targetWindow.cancelAnimationFrame(this._nodeComponentRenderRaf);
 			this._nodeComponentRenderRaf = null;
 		}
 		if (this._displayInspectorContainer) {
 			this._displayInspectorContainer.remove();
 			this._displayInspectorContainer = null;
+			this._displayInspectorTitleText = null;
 			this._displayInspectorCardsContainer = null;
 		}
 		this._contentDisposables.clear();
@@ -980,7 +1229,7 @@ export class WorkflowEditor extends EditorPane {
 	private static readonly _viewportStateByUri = new Map<string, { scrollLeft: number; scrollTop: number; zoomLevel: number }>();
 
 	private _renderEditor(): void {
-		if (!this._container) return;
+		if (!this._container) { return; }
 
 		// Focused Sub-Workflow canvases remember their own zoom/scroll, separate from the main canvas
 		const wfUriKey = this._getViewportKey();
@@ -1033,7 +1282,7 @@ export class WorkflowEditor extends EditorPane {
 			if (run.isSubWorkflowRun) {
 				return;
 			}
-			if (this._workflowUri && (run.workflowUri === this._workflowUri.toString() || run.workflowName === (this.input as any)?.name)) {
+			if (this._workflowUri && (run.workflowUri === this._workflowUri.toString() || run.workflowName === this._inputNameProperty())) {
 				if (run.status === 'running' && this._activeDisplayRunId !== run.runId) {
 					this._activeDisplayRunId = run.runId;
 					this._clearDisplayInspectorCards();
@@ -1071,7 +1320,7 @@ export class WorkflowEditor extends EditorPane {
 					syncCanvasAndToolbar();
 				} else if (!renderPending) {
 					renderPending = true;
-					requestAnimationFrame(() => {
+					this._targetWindow.requestAnimationFrame(() => {
 						renderPending = false;
 						syncCanvasAndToolbar();
 					});
@@ -1114,11 +1363,11 @@ export class WorkflowEditor extends EditorPane {
 			}
 			const localNode = this._data?.nodes?.find(n => n.id === nodeId);
 			if (localNode && Array.isArray(localNode.pipeline) && Array.isArray(node?.pipeline)) {
-				for (const srcStep of node.pipeline) {
-					const srcComp = (srcStep as any)?.component;
-					if (!srcComp) continue;
+				for (const srcStep of node.pipeline as (INodePipelineStep | undefined)[]) {
+					const srcComp = srcStep?.component;
+					if (!srcComp) { continue; }
 					const dstStep = localNode.pipeline.find(s =>
-						(s.id && s.id === srcStep.id) ||
+						(s.id && s.id === srcStep?.id) ||
 						(s.component?.id && s.component.id === srcComp.id)
 					);
 					if (dstStep) {
@@ -1137,8 +1386,9 @@ export class WorkflowEditor extends EditorPane {
 								'tableLastExecutionTime', 'tableLastDurationMs', 'tableLastSqlOutput', 'debugPromptOutput'
 							];
 							for (const rk of runtimeOnlyKeys) {
-								if ((srcComp as any)[rk] !== undefined) {
-									(dstStep.component as any)[rk] = (srcComp as any)[rk];
+								const runtimeValue: unknown = Reflect.get(srcComp, rk);
+								if (runtimeValue !== undefined) {
+									Object.assign(dstStep.component, { [rk]: runtimeValue });
 								}
 							}
 						} else {
@@ -1151,7 +1401,7 @@ export class WorkflowEditor extends EditorPane {
 				this._syncToNode(localNode, true);
 				this._saveFlowchartData(true);
 				if (this._nodeComponentRenderRaf === null) {
-					this._nodeComponentRenderRaf = requestAnimationFrame(() => {
+					this._nodeComponentRenderRaf = this._targetWindow.requestAnimationFrame(() => {
 						this._nodeComponentRenderRaf = null;
 						if (!this._hasActiveInlineNodeEditor()) {
 							this._renderNodes();
@@ -1245,7 +1495,7 @@ export class WorkflowEditor extends EditorPane {
 		this._contentDisposables.add(addDisposableListener(this._container, 'click', () => setTimeout(persistViewportState, 20)));
 
 		const applyRestoredScroll = () => {
-			if (!canvasWrapper.isConnected) return;
+			if (!canvasWrapper.isConnected) { return; }
 			if (savedViewport) {
 				canvasWrapper.scrollLeft = savedViewport.scrollLeft;
 				canvasWrapper.scrollTop = savedViewport.scrollTop;
@@ -1259,7 +1509,7 @@ export class WorkflowEditor extends EditorPane {
 		};
 		queueMicrotask(() => {
 			applyRestoredScroll();
-			requestAnimationFrame(() => {
+			this._targetWindow.requestAnimationFrame(() => {
 				applyRestoredScroll();
 				isRestoringViewport = false;
 				persistViewportState();
@@ -1277,7 +1527,7 @@ export class WorkflowEditor extends EditorPane {
 		this._updateCanvasDimensions();
 
 		// SVG Overlay
-		this._svgOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg') as any;
+		this._svgOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
 		this._svgOverlay?.classList.add('workflow-svg-overlay');
 		this._canvas.appendChild(this._svgOverlay!);
 
@@ -1315,6 +1565,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// Nodes Container
 		this._nodesContainer = append(this._canvas, $('.nodes-container'));
+		this._nodeDoms = [];
 
 		// Selection Box Overlay element
 		this._selectionBoxEl = append(this._canvas, $('.workflow-selection-box'));
@@ -1341,10 +1592,11 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
+		// allow-any-unicode-next-line
 		// −/+ stay visible in the collapsed capsule too, so zooming does not require expanding the toolbar
 		const fZoomOut = append(floatingZoom, $('.floating-zoom-btn.canvas-only-item'));
-		fZoomOut.textContent = '−';
-		fZoomOut.title = 'Zoom Out (−10%)';
+		fZoomOut.textContent = '\u2212';
+		fZoomOut.title = 'Zoom Out (\u221210%)';
 		fZoomOut.onclick = (e) => { e.stopPropagation(); this._setZoom(this._zoomLevel - 0.1, this._zoomFocusAnchor()); };
 
 		this._floatingZoomBadgeEl = append(floatingZoom, $('.floating-zoom-badge.canvas-only-item'));
@@ -1474,7 +1726,7 @@ export class WorkflowEditor extends EditorPane {
 			this._storageService.store('workflowEditor.inspectorCollapsed', false, StorageScope.PROFILE, StorageTarget.USER);
 			this._inspectorEl?.classList.remove('collapsed');
 			this._inspectorTogglePill?.classList.add('hidden');
-			if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+			if (this._inspectorEl) { this._renderInspector(this._inspectorEl); }
 		};
 
 		// Floating Bottom Execution Log Drawer inside drawing viewport
@@ -1496,7 +1748,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// Wheel zoom with Ctrl/Cmd key
 		this._contentDisposables.add(addDisposableListener(canvasWrapper, 'wheel', (e: WheelEvent) => {
-			if (this._viewMode === 'fields') return;
+			if (this._viewMode === 'fields') { return; }
 			if (e.ctrlKey || e.metaKey) {
 				e.preventDefault();
 				e.stopPropagation();
@@ -1508,8 +1760,8 @@ export class WorkflowEditor extends EditorPane {
 		}, { passive: false }));
 
 		// Mouse dragging handlers on canvas wrapper for dragging coordinates
-		this._contentDisposables.add(addDisposableListener(window, 'mousemove', (e: MouseEvent) => this._onMouseMove(e)));
-		this._contentDisposables.add(addDisposableListener(window, 'mouseup', (e: MouseEvent) => this._onMouseUp(e)));
+		this._contentDisposables.add(addDisposableListener(this._targetWindow, 'mousemove', (e: MouseEvent) => this._onMouseMove(e)));
+		this._contentDisposables.add(addDisposableListener(this._targetWindow, 'mouseup', (e: MouseEvent) => this._onMouseUp(e)));
 
 		// Ensure clicking anywhere on the flowchart canvas (nodes, SVG links, background) moves DOM focus into _container
 		// even when child handlers call e.stopPropagation()
@@ -1535,14 +1787,14 @@ export class WorkflowEditor extends EditorPane {
 		}, true));
 
 		// Global Keydown Delete and Copy/Paste handler
-		this._contentDisposables.add(addDisposableListener(window, 'keydown', (e: KeyboardEvent) => {
-			if (!this.isVisible() || !this._container || this._container.offsetParent === null || !document.hasFocus()) {
+		this._contentDisposables.add(addDisposableListener(this._targetWindow, 'keydown', (e: KeyboardEvent) => {
+			if (!this.isVisible() || !this._container || this._container.offsetParent === null || !this._targetWindow.document.hasFocus()) {
 				return;
 			}
-			if (this._viewMode === 'fields' || document.activeElement?.closest('.workflow-fields-view-container')) {
+			if (this._viewMode === 'fields' || this._targetWindow.document.activeElement?.closest('.workflow-fields-view-container')) {
 				return;
 			}
-			const activeEl = document.activeElement as HTMLElement | null;
+			const activeEl = this._targetWindow.document.activeElement as HTMLElement | null;
 			const activeTag = activeEl?.tagName.toLowerCase();
 			if (
 				activeTag === 'input' ||
@@ -1558,7 +1810,7 @@ export class WorkflowEditor extends EditorPane {
 			) {
 				return;
 			}
-			if (activeEl && activeEl !== document.body && activeEl !== document.documentElement && !this._container.contains(activeEl)) {
+			if (activeEl && activeEl !== this._targetWindow.document.body && activeEl !== this._targetWindow.document.documentElement && !this._container.contains(activeEl)) {
 				return;
 			}
 			const containerHasFocus = Boolean(activeEl && this._container.contains(activeEl));
@@ -1570,12 +1822,12 @@ export class WorkflowEditor extends EditorPane {
 			}
 
 			// Do not intercept native copy / select-all if user is selecting text or focused inside log drawer / inspectors
-			const selection = window.getSelection();
+			const selection = this._targetWindow.getSelection();
 			const hasTextSelection = !!(selection && !selection.isCollapsed && selection.toString().length > 0);
 			const isInsideTextPanel = !!(
-				document.activeElement?.closest('.workflow-log-drawer') ||
-				document.activeElement?.closest('.workflow-display-inspector-panel') ||
-				document.activeElement?.closest('.workflow-editor-inspector')
+				this._targetWindow.document.activeElement?.closest('.workflow-log-drawer') ||
+				this._targetWindow.document.activeElement?.closest('.workflow-display-inspector-panel') ||
+				this._targetWindow.document.activeElement?.closest('.workflow-editor-inspector')
 			);
 
 			if (hasTextSelection || isInsideTextPanel) {
@@ -1750,7 +2002,7 @@ export class WorkflowEditor extends EditorPane {
 							width: 100,
 							height: 50,
 							label: name,
-							imports: [{ type: type as any, name }],
+							imports: [{ type, name }],
 							color: this._activeNodeColor,
 							textColor: this._activeTextColor,
 							textAlign: this._activeTextAlign,
@@ -1812,11 +2064,10 @@ export class WorkflowEditor extends EditorPane {
 							this._saveFlowchartData();
 							this._renderNodes();
 							this._drawLinks();
-							if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+							if (this._inspectorEl) { this._renderInspector(this._inspectorEl); }
 							this._refreshVariablesDrawer(id);
 							setTimeout(() => {
-								const nodeDom = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${id}"]`);
-								const pillEl = nodeDom?.querySelector('.node-function-pill, .node-variable-pill') as HTMLElement | undefined;
+								const pillEl = this._getNodeDom(id)?.pills[0];
 								this._openNodeFunctionInlineEditor(newNode, initialStep, pillEl);
 							}, 40);
 							return;
@@ -1936,9 +2187,10 @@ export class WorkflowEditor extends EditorPane {
 
 	private _switchDrawerTab(tab: 'logs' | 'vars' | 'history', targetNodeId?: string): void {
 		this._activeDrawerTab = tab;
-		if (!this._logDrawerEl) return;
+		if (!this._logDrawerEl) { return; }
 
-		const tabs = this._logDrawerEl.querySelectorAll('.drawer-tab');
+		const logDrawerParts = this._logDrawerParts;
+		const tabs = logDrawerParts?.tabs || [];
 		if (tabs.length >= 3) {
 			tabs[0].classList.toggle('active', tab === 'logs');
 			tabs[1].classList.toggle('active', tab === 'vars');
@@ -1982,17 +2234,17 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Only show clear log and copy logs buttons on Execution Logs tab
-		const clearBtn = this._logDrawerEl.querySelector('.log-clear-btn') as HTMLElement | null;
+		const clearBtn = logDrawerParts?.clearBtn;
 		if (clearBtn) {
 			clearBtn.style.display = tab === 'logs' ? 'inline-flex' : 'none';
 		}
-		const copyLogsBtn = this._logDrawerEl.querySelector('.log-copy-btn') as HTMLElement | null;
+		const copyLogsBtn = logDrawerParts?.copyLogsBtn;
 		if (copyLogsBtn) {
 			copyLogsBtn.style.display = tab === 'logs' ? 'inline-flex' : 'none';
 		}
 
 		// Only show Find & Replace toggle button on Context Variables tab
-		const findReplaceToggleBtn = this._logDrawerEl.querySelector('.vars-find-replace-toggle-btn') as HTMLElement | null;
+		const findReplaceToggleBtn = logDrawerParts?.findReplaceToggleBtn;
 		if (findReplaceToggleBtn) {
 			findReplaceToggleBtn.style.display = tab === 'vars' ? 'inline-flex' : 'none';
 		}
@@ -2020,7 +2272,7 @@ export class WorkflowEditor extends EditorPane {
 		if (this._logCountBadgeEl) {
 			this._logCountBadgeEl.textContent = `${run.logs.length} events`;
 		}
-		if (!this._logBodyEl) return;
+		if (!this._logBodyEl) { return; }
 		clearNode(this._logBodyEl);
 		const recentLogs = run.logs.length > 500 ? run.logs.slice(-500) : run.logs;
 		for (const log of recentLogs) {
@@ -2036,7 +2288,7 @@ export class WorkflowEditor extends EditorPane {
 		const seen = new Set<string>();
 
 		const sanitizeInitVal = (val?: string): string | undefined => {
-			if (!val) return undefined;
+			if (!val) { return undefined; }
 			const trimmed = val.trim();
 			if (/^(\+\=|\-\=|\*\=|\/\=|\+\+|\-\-)/.test(trimmed)) {
 				return undefined;
@@ -2137,16 +2389,18 @@ export class WorkflowEditor extends EditorPane {
 		this._saveFlowchartData();
 		this._renderNodes();
 		this._drawLinks();
-		if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+		if (this._inspectorEl) { this._renderInspector(this._inspectorEl); }
 		this._refreshVariablesDrawer();
 	}
 
 	private _updateExistingVarsDatalist(): void {
-		let dl = document.getElementById('workflow-existing-vars-list') as HTMLDataListElement;
-		if (!dl) {
+		const targetDocument = this._targetWindow.document;
+		let dl = WorkflowEditor._existingVarsDatalists.get(targetDocument);
+		if (!dl || !dl.isConnected) {
 			dl = document.createElement('datalist');
 			dl.id = 'workflow-existing-vars-list';
-			document.body.appendChild(dl);
+			targetDocument.body.appendChild(dl);
+			WorkflowEditor._existingVarsDatalists.set(targetDocument, dl);
 		}
 		clearNode(dl);
 		const seen = new Set<string>();
@@ -2180,7 +2434,7 @@ export class WorkflowEditor extends EditorPane {
 			this._varsCountBadgeEl.textContent = `${allVars.length} vars`;
 		}
 
-		if (!this._varsBodyEl) return;
+		if (!this._varsBodyEl) { return; }
 		clearNode(this._varsBodyEl);
 
 		if (this._isVarsFindReplaceOpen) {
@@ -2217,7 +2471,7 @@ export class WorkflowEditor extends EditorPane {
 		};
 		if (!this._varsColWidths) {
 			try {
-				const raw = window.localStorage.getItem('anyagent.varsTableColWidths');
+				const raw = this._targetWindow.localStorage.getItem('anyagent.varsTableColWidths');
 				if (raw) {
 					const parsed = JSON.parse(raw);
 					if (parsed && typeof parsed === 'object') {
@@ -2238,7 +2492,7 @@ export class WorkflowEditor extends EditorPane {
 		const saveColWidths = () => {
 			try {
 				if (this._varsColWidths) {
-					window.localStorage.setItem('anyagent.varsTableColWidths', JSON.stringify(this._varsColWidths));
+					this._targetWindow.localStorage.setItem('anyagent.varsTableColWidths', JSON.stringify(this._varsColWidths));
 				}
 			} catch { }
 		};
@@ -2324,7 +2578,7 @@ export class WorkflowEditor extends EditorPane {
 					const startW = th.getBoundingClientRect().width || (this._varsColWidths?.[cd.key] ?? defaultColWidths[cd.key]);
 					const limits = colLimits[cd.key];
 					resizer.classList.add('resizing');
-					document.body.style.cursor = 'col-resize';
+					this._targetWindow.document.body.style.cursor = 'col-resize';
 					const onMove = (me: MouseEvent) => {
 						const delta = me.clientX - startX;
 						const nextW = Math.round(Math.max(limits.min, Math.min(limits.max, startW + delta)));
@@ -2335,13 +2589,13 @@ export class WorkflowEditor extends EditorPane {
 					};
 					const onUp = () => {
 						resizer.classList.remove('resizing');
-						document.body.style.cursor = '';
-						window.removeEventListener('mousemove', onMove);
-						window.removeEventListener('mouseup', onUp);
+						this._targetWindow.document.body.style.cursor = '';
+						this._targetWindow.removeEventListener('mousemove', onMove);
+						this._targetWindow.removeEventListener('mouseup', onUp);
 						saveColWidths();
 					};
-					window.addEventListener('mousemove', onMove);
-					window.addEventListener('mouseup', onUp);
+					this._targetWindow.addEventListener('mousemove', onMove);
+					this._targetWindow.addEventListener('mouseup', onUp);
 				};
 			}
 		}
@@ -2421,7 +2675,7 @@ export class WorkflowEditor extends EditorPane {
 					this._selectedNodeIds.clear();
 					this._selectedNodeIds.add(item.node.id);
 					this._renderNodes();
-					if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+					if (this._inspectorEl) { this._renderInspector(this._inspectorEl); }
 					this._centerOnNode(item.node);
 					this._refreshVariablesDrawer(item.node.id);
 				};
@@ -2432,13 +2686,13 @@ export class WorkflowEditor extends EditorPane {
 				initInput.type = 'text';
 				initInput.value = item.variable.initialValue || 'None';
 				initInput.title = item.variable.initialValue || 'None';
-				initInput.placeholder = "None, True, 0";
+				initInput.placeholder = 'None, True, 0';
 				initInput.onchange = () => {
 					item.variable.initialValue = initInput.value.trim() || 'None';
 					this._saveFlowchartData();
 					this._renderNodes();
 					this._drawLinks();
-					if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+					if (this._inspectorEl) { this._renderInspector(this._inspectorEl); }
 				};
 
 				// 4. References Column (Writes and Reads tracing)
@@ -2484,7 +2738,7 @@ export class WorkflowEditor extends EditorPane {
 					this._selectedNodeIds.clear();
 					this._selectedNodeIds.add(item.node.id);
 					this._renderNodes();
-					if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+					if (this._inspectorEl) { this._renderInspector(this._inspectorEl); }
 					this._centerOnNode(item.node);
 					this._notificationService.info(`Variable '${varName}': ${writeNodes.length} write(s), ${readLinks.length} read(s).`);
 				};
@@ -2571,7 +2825,7 @@ export class WorkflowEditor extends EditorPane {
 			description: string;
 		}[] = [];
 
-		if (!this._data || !findName.trim()) return results;
+		if (!this._data || !findName.trim()) { return results; }
 
 		const query = findName.trim();
 		const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -2673,7 +2927,7 @@ export class WorkflowEditor extends EditorPane {
 		this._saveFlowchartData();
 		this._renderNodes();
 		this._drawLinks();
-		if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+		if (this._inspectorEl) { this._renderInspector(this._inspectorEl); }
 		this._refreshVariablesDrawer();
 
 		const remaining = this._collectVariableOccurrences(findName).length;
@@ -2721,7 +2975,7 @@ export class WorkflowEditor extends EditorPane {
 		this._saveFlowchartData();
 		this._renderNodes();
 		this._drawLinks();
-		if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+		if (this._inspectorEl) { this._renderInspector(this._inspectorEl); }
 		this._refreshVariablesDrawer();
 
 		this._notificationService.info(localize('replacedAllInfo', "Replaced all {0} occurrences of variable '{1}' with '{2}'.", count, findName, replaceWith));
@@ -2768,7 +3022,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		const arrowIcon = append(bar, $('.vars-replace-arrow'));
-		arrowIcon.textContent = '➔';
+		arrowIcon.textContent = '\u2794';
 		arrowIcon.style.color = '#38bdf8';
 		arrowIcon.style.fontSize = '12px';
 
@@ -2837,7 +3091,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// Close Button
 		const closeBtn = append(actions, $('button.vars-find-close-btn'));
-		closeBtn.textContent = '✕';
+		closeBtn.textContent = '\u2715';
 		closeBtn.title = 'Close Find & Replace (Esc)';
 		closeBtn.onclick = () => {
 			this._closeVarsFindReplaceBar();
@@ -2876,7 +3130,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _refreshHistoryDrawer(): void {
-		if (!this._historyBodyEl || !this._workflowUri) return;
+		if (!this._historyBodyEl || !this._workflowUri) { return; }
 		clearNode(this._historyBodyEl);
 
 		const runs = this._workflowExecutionService.getRunsForWorkflow(this._workflowUri);
@@ -3145,7 +3399,7 @@ export class WorkflowEditor extends EditorPane {
 
 			const tbody = append(varsTable, $('tbody'));
 			for (const [vName, vVal] of Object.entries(run.contextVariables)) {
-				if (vName.startsWith('@') && vName.substring(1) in run.contextVariables) {
+				if (vName.startsWith('@') && hasWorkflowProperty(run.contextVariables, vName.substring(1))) {
 					continue;
 				}
 				const bRow = append(tbody, $('tr'));
@@ -3222,7 +3476,7 @@ export class WorkflowEditor extends EditorPane {
 					if (d.targetFolder) {
 						const row = append(opBody, $('.history-op-row'));
 						append(row, $('span.history-op-key')).textContent = 'Target Folder:';
-						append(row, $('span.history-op-val')).textContent = d.targetFolder;
+						append(row, $('span.history-op-val')).textContent = String(d.targetFolder);
 					}
 					if (d.parameters && Object.keys(d.parameters).length > 0) {
 						const row = append(opBody, $('.history-op-row'));
@@ -3240,7 +3494,7 @@ export class WorkflowEditor extends EditorPane {
 						const opBody = append(opCard, $('.history-op-body'));
 						const row = append(opBody, $('.history-op-row'));
 						append(row, $('span.history-op-key')).textContent = 'Expression:';
-						append(row, $('span.history-op-val')).textContent = op.details.expression;
+						append(row, $('span.history-op-val')).textContent = String(op.details.expression);
 					}
 				} else if (op.type === 'call_function') {
 					const opCard = append(body, $('.history-op-card.call-function'));
@@ -3255,18 +3509,19 @@ export class WorkflowEditor extends EditorPane {
 					}
 
 					const opBody = append(opCard, $('.history-op-body'));
-					if ((op as any).expression) {
+					const callOp: IWorkflowNodeOperationWithResult = op;
+					if (callOp.expression) {
 						const row = append(opBody, $('.history-op-row'));
 						append(row, $('span.history-op-key')).textContent = 'Target / Expression:';
-						append(row, $('span.history-op-val')).textContent = (op as any).expression;
+						append(row, $('span.history-op-val')).textContent = String(callOp.expression);
 					}
-					if ((op as any).value !== undefined) {
+					if (callOp.value !== undefined) {
 						const row = append(opBody, $('.history-op-row'));
 						append(row, $('span.history-op-key')).textContent = 'Output:';
 						const vPre = append(row, $('pre.workflow-trace-pre'));
-						vPre.textContent = typeof (op as any).value === 'object' && (op as any).value !== null
-							? JSON.stringify((op as any).value, null, 2)
-							: String((op as any).value);
+						vPre.textContent = typeof callOp.value === 'object' && callOp.value !== null
+							? JSON.stringify(callOp.value, null, 2)
+							: String(callOp.value);
 					}
 				} else if (op.type === 'display') {
 					const opCard = append(body, $('.history-op-card.display'));
@@ -3277,7 +3532,7 @@ export class WorkflowEditor extends EditorPane {
 					if (op.details?.formattedText) {
 						const opBody = append(opCard, $('.history-op-body'));
 						const dPre = append(opBody, $('pre.workflow-trace-pre'));
-						dPre.textContent = op.details.formattedText;
+						dPre.textContent = String(op.details.formattedText);
 					}
 				} else {
 					const opCard = append(body, $('.history-op-card.general'));
@@ -3304,7 +3559,7 @@ export class WorkflowEditor extends EditorPane {
 				pill.textContent = t.explanation || t.conditionLabel;
 				if (t.toNodeLabel) {
 					const destSpan = append(transRow, $('span.history-trans-dest'));
-					destSpan.textContent = `──▶ Navigate to '${t.toNodeLabel}'`;
+					destSpan.textContent = `\u2500\u2500\u25B6 Navigate to '${t.toNodeLabel}'`;
 				}
 			} else {
 				pill.classList.add('unconditional');
@@ -3572,7 +3827,7 @@ export class WorkflowEditor extends EditorPane {
 			sPre.textContent = Array.isArray(step.output) ? step.output.join(', ') : String(step.output ?? '(none)');
 			if (d.options && Array.isArray(d.options)) {
 				const optSpan = append(sSec, $('span.trace-sub-title'));
-				optSpan.textContent = `Available Options: ${d.options.map((o: any) => typeof o === 'object' ? (o.label || o.value) : o).join(', ')}`;
+				optSpan.textContent = `Available Options: ${d.options.map((o: string | { label?: string; value?: string }) => typeof o === 'object' ? (o.label || o.value) : o).join(', ')}`;
 			}
 		}
 		// 8. Number
@@ -3649,11 +3904,11 @@ export class WorkflowEditor extends EditorPane {
 					for (const op of pStep.operations) {
 						lines.push(`  • Action: ${op.label}`);
 						if (op.type === 'create_ticket' && op.details) {
-							if (op.details.ticketId) lines.push(`    Created Ticket ID: ${op.details.ticketId}`);
-							if (op.details.targetFolder) lines.push(`    Target Folder: ${op.details.targetFolder}`);
-							if (op.details.parameters) lines.push(`    Inputs: ${JSON.stringify(op.details.parameters)}`);
+							if (op.details.ticketId) { lines.push(`    Created Ticket ID: ${op.details.ticketId}`); }
+							if (op.details.targetFolder) { lines.push(`    Target Folder: ${op.details.targetFolder}`); }
+							if (op.details.parameters) { lines.push(`    Inputs: ${JSON.stringify(op.details.parameters)}`); }
 						} else if (op.type === 'set_variable' && op.details) {
-							if (op.details.expression) lines.push(`    Expression: ${op.details.expression}`);
+							if (op.details.expression) { lines.push(`    Expression: ${op.details.expression}`); }
 						} else if (op.type === 'run_ticket' && op.executedTicket) {
 							const t = op.executedTicket;
 							lines.push(`    Ticket: ${t.ticketName} [${t.ticketType || 'task'}] (${t.status.toUpperCase()})`);
@@ -3661,13 +3916,13 @@ export class WorkflowEditor extends EditorPane {
 								const d = step.details || {};
 								lines.push(`      - Component: ${step.fieldLabel} [${step.fieldType.toUpperCase()}]`);
 								if (step.fieldType === 'python') {
-									if (d.commandLogs) lines.push(`        Python Logs: ${String(d.commandLogs).trim().replace(/\n/g, '\n        ')}`);
-									if (d.result !== undefined) lines.push(`        OUTPUT: ${JSON.stringify(d.result)}`);
+									if (d.commandLogs) { lines.push(`        Python Logs: ${String(d.commandLogs).trim().replace(/\n/g, '\n        ')}`); }
+									if (d.result !== undefined) { lines.push(`        OUTPUT: ${JSON.stringify(d.result)}`); }
 								} else if (step.fieldType === 'prompt') {
-									if (d.sentPrompt) lines.push(`        Prompt: ${String(d.sentPrompt).trim()}`);
-									if (d.response) lines.push(`        Response: ${String(d.response).trim()}`);
+									if (d.sentPrompt) { lines.push(`        Prompt: ${String(d.sentPrompt).trim()}`); }
+									if (d.response) { lines.push(`        Response: ${String(d.response).trim()}`); }
 								} else if (step.fieldType === 'browser') {
-									if (d.requestedUrl) lines.push(`        URL: ${d.requestedUrl}`);
+									if (d.requestedUrl) { lines.push(`        URL: ${d.requestedUrl}`); }
 								} else {
 									lines.push(`        Value: ${typeof step.output === 'object' ? JSON.stringify(step.output) : String(step.output)}`);
 								}
@@ -3676,7 +3931,7 @@ export class WorkflowEditor extends EditorPane {
 					}
 				}
 				if (pStep.transition) {
-					lines.push(`  ──▶ Transition: ${pStep.transition.explanation || pStep.transition.conditionLabel || 'Proceed'}`);
+					lines.push(`  \u2500\u2500\u25B6 Transition: ${pStep.transition.explanation || pStep.transition.conditionLabel || 'Proceed'}`);
 				}
 			}
 			lines.push('');
@@ -3713,8 +3968,8 @@ export class WorkflowEditor extends EditorPane {
 
 						const d = step.details || {};
 						if (step.fieldType === 'python') {
-							if (d.pythonPath) lines.push(`    Interpreter: ${d.pythonPath}`);
-							if (d.exitCode !== undefined) lines.push(`    Exit Code: ${d.exitCode}`);
+							if (d.pythonPath) { lines.push(`    Interpreter: ${d.pythonPath}`); }
+							if (d.exitCode !== undefined) { lines.push(`    Exit Code: ${d.exitCode}`); }
 							if (d.commandLogs) {
 								lines.push(`    --- Python Command Line Logs (stdout & stderr) ---`);
 								const logLines = String(d.commandLogs).trim().split('\n');
@@ -3731,19 +3986,19 @@ export class WorkflowEditor extends EditorPane {
 								lines.push(`    Executed Script:\n      ${String(d.executedCode).trim().replace(/\n/g, '\n      ')}`);
 							}
 						} else if (step.fieldType === 'prompt') {
-							if (d.model) lines.push(`    Model: ${d.model} (${d.provider || 'auto'})`);
-							if (d.sentPrompt || d.rawPrompt) lines.push(`    Sent Prompt:\n      ${String(d.sentPrompt || d.rawPrompt).trim().replace(/\n/g, '\n      ')}`);
-							if (d.response) lines.push(`    AI Response:\n      ${String(d.response).trim().replace(/\n/g, '\n      ')}`);
+							if (d.model) { lines.push(`    Model: ${d.model} (${d.provider || 'auto'})`); }
+							if (d.sentPrompt || d.rawPrompt) { lines.push(`    Sent Prompt:\n      ${String(d.sentPrompt || d.rawPrompt).trim().replace(/\n/g, '\n      ')}`); }
+							if (d.response) { lines.push(`    AI Response:\n      ${String(d.response).trim().replace(/\n/g, '\n      ')}`); }
 						} else if (step.fieldType === 'browser') {
-							if (d.requestedUrl || d.targetUrl) lines.push(`    Requested URL: ${d.requestedUrl || d.targetUrl}`);
+							if (d.requestedUrl || d.targetUrl) { lines.push(`    Requested URL: ${d.requestedUrl || d.targetUrl}`); }
 							if (d.content) {
 								const preview = String(d.content).substring(0, 500);
 								lines.push(`    Fetched Content (${d.contentLength || String(d.content).length} chars):\n      ${preview.replace(/\n/g, '\n      ')}${String(d.content).length > 500 ? '\n      ... (truncated)' : ''}`);
 							}
 						} else if (step.fieldType === 'parameters') {
-							if (d.parameters) lines.push(`    Resolved Inputs: ${JSON.stringify(d.parameters, null, 2).replace(/\n/g, '\n      ')}`);
+							if (d.parameters) { lines.push(`    Resolved Inputs: ${JSON.stringify(d.parameters, null, 2).replace(/\n/g, '\n      ')}`); }
 						} else if (step.fieldType === 'output') {
-							if (d.aggregatedOutputs) lines.push(`    Output Manifest: ${JSON.stringify(d.aggregatedOutputs, null, 2).replace(/\n/g, '\n      ')}`);
+							if (d.aggregatedOutputs) { lines.push(`    Output Manifest: ${JSON.stringify(d.aggregatedOutputs, null, 2).replace(/\n/g, '\n      ')}`); }
 						} else {
 							const valStr = typeof step.output === 'object' && step.output !== null ? JSON.stringify(step.output, null, 2) : String(step.output ?? '(empty)');
 							lines.push(`    Value: ${valStr.replace(/\n/g, '\n      ')}`);
@@ -3794,7 +4049,7 @@ export class WorkflowEditor extends EditorPane {
 
 	private _centerOnNode(node: IFlowchartNode): void {
 		const wrapper = this._canvasScroller();
-		if (!wrapper) return;
+		if (!wrapper) { return; }
 		const targetX = (node.x + node.width / 2) * this._zoomLevel - wrapper.clientWidth / 2;
 		const targetY = (node.y + node.height / 2) * this._zoomLevel - wrapper.clientHeight / 2;
 		wrapper.scrollTo({
@@ -3805,19 +4060,23 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _appendLogEntry(log: IWorkflowLogEntry, shouldScroll = true): void {
-		if (!this._logBodyEl) return;
+		if (!this._logBodyEl) { return; }
 		const line = append(this._logBodyEl, $(`.workflow-log-line.level-${log.level}`));
 		const timeStr = new Date(log.timestamp).toLocaleTimeString();
-		append(line, $('.log-time')).textContent = `[${timeStr}]`;
+		const timeEl = append(line, $('.log-time'));
+		timeEl.textContent = `[${timeStr}]`;
 		const levelBadge = append(line, $(`.log-badge.badge-${log.level}`));
 		levelBadge.textContent = log.level.toUpperCase();
+		let nodeBadge: HTMLElement | undefined;
 		if (log.nodeId) {
 			const node = this._data?.nodes.find(n => n.id === log.nodeId);
-			const nodeBadge = append(line, $('.log-node'));
+			nodeBadge = append(line, $('.log-node'));
 			nodeBadge.textContent = `[${node?.label || log.nodeId}]`;
 		}
 		const rawMsg = log.message || '';
-		append(line, $('.log-msg')).textContent = rawMsg.length > 1200 ? rawMsg.substring(0, 1200) + ' ... [truncated]' : rawMsg;
+		const msgEl = append(line, $('.log-msg'));
+		msgEl.textContent = rawMsg.length > 1200 ? rawMsg.substring(0, 1200) + ' ... [truncated]' : rawMsg;
+		wfLogLineParts.set(line, { time: timeEl, badge: levelBadge, node: nodeBadge, msg: msgEl });
 
 		if (this._logCountBadgeEl) {
 			const count = this._logBodyEl.children.length;
@@ -3832,6 +4091,7 @@ export class WorkflowEditor extends EditorPane {
 	private _renderLogDrawer(parent: HTMLElement): void {
 		const drawer = append(parent, $('.workflow-log-drawer'));
 		this._logDrawerEl = drawer;
+		this._logDrawerParts = undefined;
 		drawer.style.height = `${this._drawerHeight}px`;
 		if (!this._isLogDrawerOpen) {
 			drawer.style.display = 'none';
@@ -3915,18 +4175,21 @@ export class WorkflowEditor extends EditorPane {
 		copyLogsBtn.title = localize('copyLogsTooltip', 'Copy All Execution Logs (Clipboard)');
 		append(copyLogsBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy)));
 		copyLogsBtn.onclick = async () => {
-			if (!this._logBodyEl) return;
-			const lines = Array.from(this._logBodyEl.querySelectorAll('.workflow-log-line'));
+			if (!this._logBodyEl) { return; }
+			const lines = Array.from(this._logBodyEl.children).flatMap(child => {
+				const parts = wfLogLineParts.get(child);
+				return parts ? [parts] : [];
+			});
 			if (lines.length === 0) {
 				this._notificationService.info(localize('noLogsToCopy', 'No execution logs to copy.'));
 				return;
 			}
 			const lineTexts: string[] = [];
 			for (const line of lines) {
-				const time = line.querySelector('.log-time')?.textContent?.trim() || '';
-				const badge = line.querySelector('.log-badge')?.textContent?.trim() || '';
-				const node = line.querySelector('.log-node')?.textContent?.trim() || '';
-				const msg = line.querySelector('.log-msg')?.textContent || '';
+				const time = line.time.textContent?.trim() || '';
+				const badge = line.badge.textContent?.trim() || '';
+				const node = line.node?.textContent?.trim() || '';
+				const msg = line.msg.textContent || '';
 				const parts = [time, badge, node, msg].filter(Boolean);
 				lineTexts.push(parts.join(' '));
 			}
@@ -3952,10 +4215,10 @@ export class WorkflowEditor extends EditorPane {
 					ta.style.position = 'fixed';
 					ta.style.left = '-9999px';
 					ta.style.top = '-9999px';
-					document.body.appendChild(ta);
+					this._targetWindow.document.body.appendChild(ta);
 					ta.focus();
 					ta.select();
-					ok = document.execCommand('copy');
+					ok = this._targetWindow.document.execCommand('copy');
 					ta.remove();
 				} catch { }
 			}
@@ -3979,6 +4242,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// Find & Replace Button (only visible in Context Variables tab)
 		const findReplaceBtn = append(right, $('.log-btn-icon.vars-find-replace-toggle-btn'));
+		this._logDrawerParts = { tabs: [logsTab, varsTab, historyTab], clearBtn, copyLogsBtn, findReplaceToggleBtn: findReplaceBtn };
 		findReplaceBtn.title = localize('findReplaceVarsTooltip', 'Find & Replace Variable Names (Ctrl/Cmd+R)');
 		append(findReplaceBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.replace)));
 		findReplaceBtn.onclick = () => {
@@ -4010,8 +4274,8 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 		for (const step of node.pipeline) {
-			const comp = step?.component as any;
-			if (!comp) continue;
+			const comp = wfComponent(step?.component);
+			if (!comp) { continue; }
 			delete comp.lastExecutionOutput;
 			delete comp.lastExecutionLog;
 			delete comp.lastExecutionStatus;
@@ -4045,7 +4309,7 @@ export class WorkflowEditor extends EditorPane {
 		const vars = new Set<string>();
 		const add = (raw?: string) => {
 			const clean = (raw || '').trim().replace(/^@/, '');
-			if (clean) vars.add(clean);
+			if (clean) { vars.add(clean); }
 		};
 		for (const v of (node.outputVariables || [])) {
 			add(v.name);
@@ -4063,9 +4327,9 @@ export class WorkflowEditor extends EditorPane {
 			}
 			if (st.expression) {
 				for (const rawLine of st.expression.split('\n')) {
-					if (/^\s/.test(rawLine)) continue;
+					if (/^\s/.test(rawLine)) { continue; }
 					const m = rawLine.trim().match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)/);
-					if (m && m[1]) add(m[1]);
+					if (m && m[1]) { add(m[1]); }
 				}
 			}
 		}
@@ -4073,7 +4337,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _handleResetWorkflowExecution(toolbarParent?: HTMLElement): void {
-		if (!this._workflowUri) return;
+		if (!this._workflowUri) { return; }
 		const selectedIds = Array.from(this._selectedNodeIds).filter(id =>
 			(this._data?.nodes || []).some(n => n.id === id)
 		);
@@ -4083,7 +4347,7 @@ export class WorkflowEditor extends EditorPane {
 			const varsToClear = new Set<string>();
 			for (const nid of selectedIds) {
 				const node = this._data.nodes.find(n => n.id === nid);
-				if (!node) continue;
+				if (!node) { continue; }
 				this._clearNodeComponentsExecutionData(node);
 				for (const vn of this._collectNodeProducedVariableNames(node)) {
 					varsToClear.add(vn);
@@ -4132,6 +4396,8 @@ export class WorkflowEditor extends EditorPane {
 
 	private _renderToolbar(parent: HTMLElement): void {
 		clearNode(parent);
+		// Items that get the instant floating tooltip below (`.workflow-toolbar-item` / `.workflow-format-btn`), in document order.
+		const toolbarTooltipItems: HTMLElement[] = [];
 
 		// Header with Title & Mode Toggle Button
 		const header = append(parent, $('.workflow-toolbar-header'));
@@ -4170,11 +4436,14 @@ export class WorkflowEditor extends EditorPane {
 
 		// 1. Run Button (Standard Mode)
 		const runBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+		toolbarTooltipItems.push(runBtn);
 		runBtn.setAttribute('data-role', 'workflow-run-btn');
 		runBtn.title = isRunning ? 'Workflow executing...' : 'Run Workflow (Select 1 node to run from that node onward, or Cmd/Ctrl/Shift+Click multiple nodes to run only selected nodes)';
 		append(runBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
 		if (!this._isToolbarCompact) {
-			append(runBtn, $('.item-label')).textContent = (isRunning && !activeRun?.fullSpeed) ? 'Running' : 'Run';
+			const runLabel = append(runBtn, $('.item-label'));
+			runLabel.textContent = (isRunning && !activeRun?.fullSpeed) ? 'Running' : 'Run';
+			wfToolbarItemLabels.set(runBtn, runLabel);
 		}
 		if (isRunning && !activeRun?.fullSpeed) {
 			runBtn.classList.add('active');
@@ -4183,7 +4452,7 @@ export class WorkflowEditor extends EditorPane {
 			e.stopPropagation();
 		};
 		runBtn.onclick = async () => {
-			if (!this._workflowUri) return;
+			if (!this._workflowUri) { return; }
 			try {
 				const { entryNodeId, selectedNodeIds } = this._resolveExecutionOptionsForRun(false);
 				this._openLogDrawer();
@@ -4197,28 +4466,32 @@ export class WorkflowEditor extends EditorPane {
 				});
 				this._renderToolbar(parent);
 				this._renderNodes();
-			} catch (e: any) {
+			} catch (e) {
 				this._notificationService.error(e.message || String(e));
 			}
 		};
 
 		// 1b. Run at Full Speed Button (Independent Full-Speed Mode)
 		const fullSpeedBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn.full-speed-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+		toolbarTooltipItems.push(fullSpeedBtn);
 		fullSpeedBtn.setAttribute('data-role', 'workflow-full-speed-run-btn');
 		fullSpeedBtn.title = isRunning ? 'Workflow executing...' : 'Run at Full Speed (Execute workflow at maximum speed without artificial delays)';
 		append(fullSpeedBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.zap)));
 		if (!this._isToolbarCompact) {
-			append(fullSpeedBtn, $('.item-label')).textContent = (isRunning && activeRun?.fullSpeed) ? 'Running' : 'Full Speed';
+			const fullSpeedLabel = append(fullSpeedBtn, $('.item-label'));
+			fullSpeedLabel.textContent = (isRunning && activeRun?.fullSpeed) ? 'Running' : 'Full Speed';
+			wfToolbarItemLabels.set(fullSpeedBtn, fullSpeedLabel);
 		}
 		if (isRunning && activeRun?.fullSpeed) {
 			fullSpeedBtn.classList.add('active');
 		}
+		wfToolbarRunButtons.set(parent, { runBtn, fullSpeedBtn });
 		this._updateRunButtonSelectionBadge(runBtn, fullSpeedBtn);
 		fullSpeedBtn.onmousedown = (e) => {
 			e.stopPropagation();
 		};
 		fullSpeedBtn.onclick = async () => {
-			if (!this._workflowUri) return;
+			if (!this._workflowUri) { return; }
 			try {
 				const { entryNodeId, selectedNodeIds } = this._resolveExecutionOptionsForRun(false);
 				this._openLogDrawer();
@@ -4232,13 +4505,14 @@ export class WorkflowEditor extends EditorPane {
 				});
 				this._renderToolbar(parent);
 				this._renderNodes();
-			} catch (e: any) {
+			} catch (e) {
 				this._notificationService.error(e.message || String(e));
 			}
 		};
 
 		// 2. Step Button
 		const stepBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+		toolbarTooltipItems.push(stepBtn);
 		stepBtn.title = 'Step Next Node (starts from selected node when beginning a new run)';
 		append(stepBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.debugStepOver)));
 		if (!this._isToolbarCompact) {
@@ -4248,7 +4522,7 @@ export class WorkflowEditor extends EditorPane {
 			e.stopPropagation();
 		};
 		stepBtn.onclick = async () => {
-			if (!this._workflowUri) return;
+			if (!this._workflowUri) { return; }
 			try {
 				const { entryNodeId, selectedNodeIds } = this._resolveExecutionOptionsForRun(true);
 				this._openLogDrawer();
@@ -4263,7 +4537,7 @@ export class WorkflowEditor extends EditorPane {
 				});
 				this._renderToolbar(parent);
 				this._renderNodes();
-			} catch (e: any) {
+			} catch (e) {
 				this._notificationService.error(e.message || String(e));
 			}
 		};
@@ -4271,6 +4545,7 @@ export class WorkflowEditor extends EditorPane {
 		// 3. Pause / Resume Button
 		if (isRunning) {
 			const pauseBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+			toolbarTooltipItems.push(pauseBtn);
 			pauseBtn.title = activeRun.status === 'paused' ? 'Resume Workflow' : 'Pause Workflow';
 			append(pauseBtn, $('span' + ThemeIcon.asCSSSelector(activeRun.status === 'paused' ? Codicon.debugContinue : Codicon.debugPause)));
 			if (!this._isToolbarCompact) {
@@ -4288,6 +4563,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// 4. Stop Button
 			const stopBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+			toolbarTooltipItems.push(stopBtn);
 			stopBtn.title = 'Stop Workflow';
 			append(stopBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.debugStop)));
 			if (!this._isToolbarCompact) {
@@ -4307,6 +4583,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// 5. Execution Console & Variables Drawer Toggle Button
 		const logsBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+		toolbarTooltipItems.push(logsBtn);
 		logsBtn.title = localize('logsConsoleTitle', 'Execution Console & Variables Drawer');
 		append(logsBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.output)));
 		if (!this._isToolbarCompact) {
@@ -4325,6 +4602,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// 6. Reset Execution Button (Selected Nodes Only when nodes are selected, or Global Reset when none selected)
 		const resetBtn = append(execGrid, $(`.workflow-toolbar-item.exec-btn${this._isToolbarCompact ? '.compact-item' : ''}`));
+		toolbarTooltipItems.push(resetBtn);
 		const selCountForReset = this._selectedNodeIds.size;
 		resetBtn.title = selCountForReset > 0
 			? localize('resetSelectedNodesTitle', 'Reset Execution for {0} Selected Node(s) (keeps all other nodes intact)', selCountForReset)
@@ -4358,6 +4636,7 @@ export class WorkflowEditor extends EditorPane {
 
 		for (const st of shapeTypes) {
 			const item = append(shapesGrid, $(`.workflow-toolbar-item${this._isToolbarCompact ? '.compact-item' : ''}`));
+			toolbarTooltipItems.push(item);
 			item.setAttribute('draggable', 'true');
 			item.title = `${st.label} (Drag or Click to add)`;
 			item.ondragstart = (e: DragEvent) => {
@@ -4385,6 +4664,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 		const pyStepGrid = append(pyStepSec, $('.workflow-shape-grid.compact-1col'));
 		const pyStepItem = append(pyStepGrid, $(`.workflow-toolbar-item.function-toolbar-item${this._isToolbarCompact ? '.compact-item' : ''}`));
+		toolbarTooltipItems.push(pyStepItem);
 		pyStepItem.setAttribute('draggable', 'true');
 		this._attachToolboxInstantTooltip(
 			pyStepItem,
@@ -4426,14 +4706,13 @@ export class WorkflowEditor extends EditorPane {
 					this._saveFlowchartData();
 					this._renderNodes();
 					this._drawLinks();
-					if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+					if (this._inspectorEl) { this._renderInspector(this._inspectorEl); }
 					if (this._pipelinePanelEl && this._activePipelineNodeId === targetNode.id) {
 						this._renderPipelinePanel(this._pipelinePanelEl, targetNode);
 					}
 					setTimeout(() => {
-						const nodeDom = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${targetNode.id}"]`);
-						const pills = nodeDom?.querySelectorAll('.node-function-pill, .node-variable-pill');
-						const lastPill = pills && pills.length > 0 ? (pills[pills.length - 1] as HTMLElement) : undefined;
+						const pills = this._getNodeDom(targetNode.id)?.pills;
+						const lastPill = pills && pills.length > 0 ? pills[pills.length - 1] : undefined;
 						this._openNodeFunctionInlineEditor(targetNode, newStep, lastPill);
 					}, 50);
 				}
@@ -4482,6 +4761,7 @@ export class WorkflowEditor extends EditorPane {
 
 		for (const itemDef of nodeComponentPalette) {
 			const fnItem = append(varGrid, $(`.workflow-toolbar-item.function-toolbar-item.node-component-palette-item${this._isToolbarCompact ? '.compact-item' : ''}`));
+			toolbarTooltipItems.push(fnItem);
 			fnItem.setAttribute('draggable', 'true');
 			this._attachToolboxInstantTooltip(fnItem, itemDef.label, itemDef.desc, itemDef.accent);
 			fnItem.ondragstart = (e: DragEvent) => {
@@ -4541,6 +4821,7 @@ export class WorkflowEditor extends EditorPane {
 		const linkItemBtns: HTMLElement[] = [];
 		for (const ls of linkStyles) {
 			const item = append(linksGrid, $(`.workflow-toolbar-item${this._isToolbarCompact ? '.compact-item' : ''}${ls.style === this._activeLinkStyle ? '.active' : ''}`));
+			toolbarTooltipItems.push(item);
 			item.title = ls.label;
 			const line = append(item, $(`.item-preview.${ls.previewClass}`));
 			if (ls.style === 'arrow-single' || ls.style === 'arrow-double') {
@@ -4580,6 +4861,7 @@ export class WorkflowEditor extends EditorPane {
 		const routingItemBtns: HTMLElement[] = [];
 		for (const rm of routingModes) {
 			const item = append(routingGrid, $(`.workflow-toolbar-item${this._isToolbarCompact ? '.compact-item' : ''}${rm.mode === this._activeRoutingMode ? '.active' : ''}`));
+			toolbarTooltipItems.push(item);
 			item.title = rm.label;
 			append(item, $(`.item-preview.${rm.previewClass}`));
 			if (!this._isToolbarCompact) {
@@ -4610,7 +4892,7 @@ export class WorkflowEditor extends EditorPane {
 			branchTitle.textContent = localize('branchDirection', 'Tab Branch Direction');
 		}
 
-		const directions: { dir: 'right' | 'bottom' | 'left' | 'top'; label: string; icon: any }[] = [
+		const directions: { dir: 'right' | 'bottom' | 'left' | 'top'; label: string; icon: ThemeIcon }[] = [
 			{ dir: 'right', label: 'Right (→)', icon: Codicon.arrowRight },
 			{ dir: 'bottom', label: 'Down (↓)', icon: Codicon.arrowDown },
 			{ dir: 'left', label: 'Left (←)', icon: Codicon.arrowLeft },
@@ -4622,6 +4904,7 @@ export class WorkflowEditor extends EditorPane {
 		if (this._isToolbarCompact) {
 			// Single Cycle Button in Compact Mode
 			const cycleBtn = append(branchSec, $('.workflow-toolbar-item.compact-item.active'));
+			toolbarTooltipItems.push(cycleBtn);
 			cycleBtn.title = `Tab Branch: ${currentDirInfo.label} (Click to cycle: Right → Down → Left → Up)`;
 			append(cycleBtn, $('span' + ThemeIcon.asCSSSelector(currentDirInfo.icon)));
 
@@ -4638,6 +4921,7 @@ export class WorkflowEditor extends EditorPane {
 			const branchRow = append(branchSec, $('.workflow-format-row'));
 			for (const d of directions) {
 				const btn = append(branchRow, $(`.workflow-format-btn${d.dir === this._activeBranchDirection ? '.active' : ''}`));
+				toolbarTooltipItems.push(btn);
 				append(btn, $('span' + ThemeIcon.asCSSSelector(d.icon)));
 				btn.title = `Tab Branch: ${d.label}`;
 				btn.onclick = () => {
@@ -4649,8 +4933,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Upgrade any remaining toolbar items with native `title` to instant floating tooltips
-		parent.querySelectorAll('.workflow-toolbar-item, .workflow-format-btn, .toolbar-toggle-btn').forEach(el => {
-			const htmlEl = el as HTMLElement;
+		toolbarTooltipItems.filter(el => parent.contains(el)).forEach(htmlEl => {
 			const rawTitle = htmlEl.getAttribute('title');
 			if (rawTitle) {
 				htmlEl.removeAttribute('title');
@@ -4665,7 +4948,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _activeToolboxTooltipEl: HTMLElement | null = null;
-	private _activeToolboxTooltipTimer: any = null;
+	private _activeToolboxTooltipTimer: ReturnType<typeof setTimeout> | null = null;
 
 	private _hideToolboxInstantTooltip(): void {
 		if (this._activeToolboxTooltipTimer) {
@@ -4687,7 +4970,7 @@ export class WorkflowEditor extends EditorPane {
 					return;
 				}
 				const rect = targetEl.getBoundingClientRect();
-				const tip = append(document.body, $('div.workflow-toolbox-instant-tooltip', {
+				const tip = append(this._targetWindow.document.body, $('div.workflow-toolbox-instant-tooltip', {
 					style: `position: fixed; z-index: 100000; pointer-events: none; font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif); background: rgba(15, 23, 42, 0.96); border: 1px solid ${accentColor}; border-left: 3px solid ${accentColor}; border-radius: 7px; padding: 7px 11px; box-shadow: 0 10px 28px rgba(0, 0, 0, 0.75); max-width: 260px; display: flex; flex-direction: column; gap: 3px; backdrop-filter: blur(6px);`
 				}));
 				append(tip, $('div', {
@@ -4699,8 +4982,8 @@ export class WorkflowEditor extends EditorPane {
 					}, descText));
 				}
 				const tipRect = tip.getBoundingClientRect();
-				const left = Math.min(window.innerWidth - tipRect.width - 12, rect.right + 10);
-				const top = Math.max(8, Math.min(window.innerHeight - tipRect.height - 8, rect.top + rect.height / 2 - tipRect.height / 2));
+				const left = Math.min(this._targetWindow.innerWidth - tipRect.width - 12, rect.right + 10);
+				const top = Math.max(8, Math.min(this._targetWindow.innerHeight - tipRect.height - 8, rect.top + rect.height / 2 - tipRect.height / 2));
 				tip.style.left = `${left}px`;
 				tip.style.top = `${top}px`;
 				this._activeToolboxTooltipEl = tip;
@@ -4713,15 +4996,17 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _showColorPickerFlyout(anchorEl: HTMLElement, currentColor: string, colors: { name: string; hex: string }[], onSelect: (hex: string) => void): void {
-		const existing = document.querySelector('.workflow-color-flyout-popover');
-		if (existing) existing.remove();
+		const targetDocument = this._targetWindow.document;
+		const existing = wfColorFlyoutPopovers.get(targetDocument);
+		if (existing && targetDocument.contains(existing)) { existing.remove(); }
 
 		const popover = document.createElement('div');
 		popover.className = 'workflow-color-flyout-popover';
+		wfColorFlyoutPopovers.set(targetDocument, popover);
 		const rect = anchorEl.getBoundingClientRect();
 		popover.style.position = 'fixed';
-		popover.style.right = `${window.innerWidth - rect.left + 8}px`;
-		popover.style.top = `${Math.max(10, Math.min(window.innerHeight - 150, rect.top - 20))}px`;
+		popover.style.right = `${this._targetWindow.innerWidth - rect.left + 8}px`;
+		popover.style.top = `${Math.max(10, Math.min(this._targetWindow.innerHeight - 150, rect.top - 20))}px`;
 		popover.style.zIndex = '10000';
 
 		const grid = append(popover, $('.workflow-color-grid'));
@@ -4744,15 +5029,15 @@ export class WorkflowEditor extends EditorPane {
 			};
 		}
 
-		document.body.appendChild(popover);
+		this._targetWindow.document.body.appendChild(popover);
 
 		const dismiss = (e: MouseEvent) => {
 			if (!popover.contains(e.target as Node) && e.target !== anchorEl) {
 				popover.remove();
-				window.removeEventListener('mousedown', dismiss, true);
+				this._targetWindow.removeEventListener('mousedown', dismiss, true);
 			}
 		};
-		setTimeout(() => window.addEventListener('mousedown', dismiss, true), 50);
+		setTimeout(() => this._targetWindow.addEventListener('mousedown', dismiss, true), 50);
 	}
 
 	private _openNodePipelinePanel(nodeId: string, highlightTicketName?: string): void {
@@ -4854,7 +5139,7 @@ export class WorkflowEditor extends EditorPane {
 		if (!this._ticketHoverPopoverEl) {
 			this._ticketHoverPopoverEl = document.createElement('div');
 			this._ticketHoverPopoverEl.className = 'workflow-ticket-popover';
-			document.body.appendChild(this._ticketHoverPopoverEl);
+			this._targetWindow.document.body.appendChild(this._ticketHoverPopoverEl);
 
 			this._ticketHoverPopoverEl.addEventListener('mouseenter', () => {
 				if (this._ticketHoverTimeout) {
@@ -4948,7 +5233,7 @@ export class WorkflowEditor extends EditorPane {
 					const expr = (s.expression || '').trim().replace(/^@/, '').replace(/^=\s*/, '');
 					if (expr === ticket.name || expr === 'ticket' || expr === 'ticket.output') {
 						const cv = s.targetVariable.replace(/^@/, '');
-						if (!capturingVars.includes(cv)) capturingVars.push(cv);
+						if (!capturingVars.includes(cv)) { capturingVars.push(cv); }
 					}
 				}
 			}
@@ -4957,7 +5242,7 @@ export class WorkflowEditor extends EditorPane {
 				const expr = (v.expression || v.initialValue || '').trim().replace(/^@/, '').replace(/^=\s*/, '');
 				if (expr === ticket.name || expr === 'ticket' || expr === 'ticket.output') {
 					const cv = v.name.replace(/^@/, '');
-					if (!capturingVars.includes(cv)) capturingVars.push(cv);
+					if (!capturingVars.includes(cv)) { capturingVars.push(cv); }
 				}
 			}
 		}
@@ -5011,9 +5296,9 @@ export class WorkflowEditor extends EditorPane {
 			top = rect.bottom + 8;
 		}
 		let left = rect.left + (rect.width / 2) - (popRect.width / 2);
-		if (left < 10) left = 10;
-		if (left + popRect.width > window.innerWidth - 10) {
-			left = window.innerWidth - popRect.width - 10;
+		if (left < 10) { left = 10; }
+		if (left + popRect.width > this._targetWindow.innerWidth - 10) {
+			left = this._targetWindow.innerWidth - popRect.width - 10;
 		}
 
 		popover.style.top = `${top}px`;
@@ -5070,8 +5355,10 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _updateRunButtonSelectionBadge(targetRunBtn?: HTMLElement, targetFullSpeedBtn?: HTMLElement): void {
-		const runBtn = targetRunBtn || (this._toolbarEl?.querySelector('[data-role="workflow-run-btn"]') as HTMLElement | null);
-		const fullSpeedBtn = targetFullSpeedBtn || (this._toolbarEl?.querySelector('[data-role="workflow-full-speed-run-btn"]') as HTMLElement | null);
+		const toolbarEl = this._toolbarEl;
+		const toolbarRunButtons = toolbarEl ? wfToolbarRunButtons.get(toolbarEl) : undefined;
+		const runBtn = targetRunBtn || (toolbarEl && toolbarRunButtons && toolbarEl.contains(toolbarRunButtons.runBtn) ? toolbarRunButtons.runBtn : null);
+		const fullSpeedBtn = targetFullSpeedBtn || (toolbarEl && toolbarRunButtons && toolbarEl.contains(toolbarRunButtons.fullSpeedBtn) ? toolbarRunButtons.fullSpeedBtn : null);
 		if (!runBtn && !fullSpeedBtn) {
 			return;
 		}
@@ -5084,8 +5371,8 @@ export class WorkflowEditor extends EditorPane {
 			.map(id => this._data?.nodes?.find(n => n.id === id))
 			.filter((n): n is IFlowchartNode => !!n);
 		const selectedActionNodes = selectedNodes.filter(n => this._isActionNodeForSelectiveRun(n));
-		const runLabelEl = runBtn?.querySelector('.item-label') as HTMLElement | null;
-		const fullSpeedLabelEl = fullSpeedBtn?.querySelector('.item-label') as HTMLElement | null;
+		const runLabelEl = runBtn ? wfToolbarItemLabels.get(runBtn) : undefined;
+		const fullSpeedLabelEl = fullSpeedBtn ? wfToolbarItemLabels.get(fullSpeedBtn) : undefined;
 		if (selectedNodes.length >= 2 && selectedActionNodes.length >= 2) {
 			if (runLabelEl) {
 				runLabelEl.textContent = `Run (${selectedActionNodes.length})`;
@@ -5157,8 +5444,8 @@ export class WorkflowEditor extends EditorPane {
 		// If there are multiple entry nodes and none is currently selected, check if one was most recently clicked
 		if (entryCandidates.length > 1) {
 			const clickedCandidates = entryCandidates
-				.filter(n => typeof (n as any)._lastClickTime === 'number' && (n as any)._lastClickTime > 0)
-				.sort((a, b) => ((b as any)._lastClickTime || 0) - ((a as any)._lastClickTime || 0));
+				.filter(n => typeof n._lastClickTime === 'number' && n._lastClickTime > 0)
+				.sort((a, b) => (b._lastClickTime || 0) - (a._lastClickTime || 0));
 			if (clickedCandidates.length > 0) {
 				return clickedCandidates[0].id;
 			}
@@ -5237,7 +5524,7 @@ export class WorkflowEditor extends EditorPane {
 			this._pythonStepHoverHideTimeout = null;
 		}
 		if (this._pythonStepPopoverOutsideClickHandler) {
-			window.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
+			this._targetWindow.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
 			this._pythonStepPopoverOutsideClickHandler = null;
 		}
 		this._isPythonStepPopoverPinned = false;
@@ -5247,7 +5534,7 @@ export class WorkflowEditor extends EditorPane {
 		if (!this._pythonStepHoverPopoverEl) {
 			this._pythonStepHoverPopoverEl = document.createElement('div');
 			this._pythonStepHoverPopoverEl.className = 'workflow-python-step-popover';
-			document.body.appendChild(this._pythonStepHoverPopoverEl);
+			this._targetWindow.document.body.appendChild(this._pythonStepHoverPopoverEl);
 
 			this._pythonStepHoverPopoverEl.addEventListener('mouseenter', () => {
 				if (this._pythonStepHoverHideTimeout) {
@@ -5319,7 +5606,7 @@ export class WorkflowEditor extends EditorPane {
 			switch (comp.type) {
 				case 'table': {
 					metadataLabel = 'Table Name';
-					metadataValue = (comp.tableDbTableName || (comp as any).tableName || '').trim();
+					metadataValue = (comp.tableDbTableName || wfComponent(comp).tableName || '').trim();
 					break;
 				}
 				case 'prompt': {
@@ -5331,7 +5618,7 @@ export class WorkflowEditor extends EditorPane {
 				}
 				case 'browser': {
 					metadataLabel = 'URL';
-					metadataValue = (comp.defaultUrl || (comp as any).browserUrl || '').trim();
+					metadataValue = (comp.defaultUrl || wfComponent(comp).browserUrl || '').trim();
 					break;
 				}
 				case 'tts': {
@@ -5392,12 +5679,12 @@ export class WorkflowEditor extends EditorPane {
 			if (top < 12) {
 				top = rect.bottom + 8;
 			}
-			if (top + popRect.height > window.innerHeight - 12) {
-				top = Math.max(12, window.innerHeight - popRect.height - 12);
+			if (top + popRect.height > this._targetWindow.innerHeight - 12) {
+				top = Math.max(12, this._targetWindow.innerHeight - popRect.height - 12);
 			}
 			let left = rect.left;
-			if (left + popRect.width > window.innerWidth - 12) {
-				left = Math.max(12, window.innerWidth - popRect.width - 12);
+			if (left + popRect.width > this._targetWindow.innerWidth - 12) {
+				left = Math.max(12, this._targetWindow.innerWidth - popRect.width - 12);
 			}
 			if (left < 12) {
 				left = 12;
@@ -5432,7 +5719,7 @@ export class WorkflowEditor extends EditorPane {
 
 		const headerTitleText = comp
 			? (comp.type === 'table'
-				? ((comp.tableDbTableName || (comp as any).tableName || comp.label || '').trim() || 'Data Table')
+				? ((comp.tableDbTableName || wfComponent(comp).tableName || comp.label || '').trim() || 'Data Table')
 				: (comp.label || (node.label || node.id)))
 			: (node.label || node.id);
 		const nodeTitleSpan = append(header, $('span.python-step-popover-node-name', {}, headerTitleText));
@@ -5498,7 +5785,7 @@ export class WorkflowEditor extends EditorPane {
 			type: 'button',
 			title: 'Close popover',
 			style: 'padding: 2px 5px; opacity: 0.75;'
-		}, '✕'));
+		}, '\u2715'));
 		closePopBtn.onclick = (e) => {
 			e.stopPropagation();
 			this._hidePythonStepPopover(true);
@@ -5511,7 +5798,7 @@ export class WorkflowEditor extends EditorPane {
 				this._pythonStepHoverHideTimeout = null;
 			}
 			if (this._pythonStepPopoverOutsideClickHandler) {
-				window.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
+				this._targetWindow.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
 			}
 			this._pythonStepPopoverOutsideClickHandler = (ev: MouseEvent) => {
 				const tgt = ev.target as Node | null;
@@ -5522,7 +5809,7 @@ export class WorkflowEditor extends EditorPane {
 			};
 			setTimeout(() => {
 				if (this._isPythonStepPopoverPinned && this._pythonStepPopoverOutsideClickHandler) {
-					window.addEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
+					this._targetWindow.addEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
 				}
 			}, 20);
 		};
@@ -5583,7 +5870,7 @@ export class WorkflowEditor extends EditorPane {
 									}
 								} else if (ch === '#') {
 									break;
-								} else if (ch === '"' || ch === "'") {
+								} else if (ch === '"' || ch === '\'') {
 									inQuote = ch;
 								} else if (ch === '(') {
 									runningParenDepth++;
@@ -5614,7 +5901,7 @@ export class WorkflowEditor extends EditorPane {
 							isCodeExpanded = false;
 							this._isPythonStepPopoverPinned = false;
 							if (this._pythonStepPopoverOutsideClickHandler) {
-								window.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
+								this._targetWindow.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
 								this._pythonStepPopoverOutsideClickHandler = null;
 							}
 							renderCodeLines();
@@ -5641,9 +5928,9 @@ export class WorkflowEditor extends EditorPane {
 
 		// 2.5. Sub-Workflow Last Runtime Inputs section
 		if (comp?.type === 'sub_workflow') {
-			let lastInputsObj: Record<string, any> | undefined = (comp as any).lastExecutionInputs;
-			if (lastInputsObj === undefined && typeof (comp as any).lastExecutionLog === 'string') {
-				const logStr = String((comp as any).lastExecutionLog);
+			let lastInputsObj: Record<string, unknown> | undefined = wfComponent(comp).lastExecutionInputs;
+			if (lastInputsObj === undefined && typeof wfComponent(comp).lastExecutionLog === 'string') {
+				const logStr = String(wfComponent(comp).lastExecutionLog);
 				const inputsMatch = logStr.match(/(?:^|\n)Inputs:\s*(\{[\s\S]*?\})(?:\nOutputs:|$)/);
 				if (inputsMatch && inputsMatch[1]) {
 					try {
@@ -5687,7 +5974,7 @@ export class WorkflowEditor extends EditorPane {
 		);
 		if (isThisFailedStep) {
 			const errSection = append(popover, $('.python-step-popover-error'));
-			append(errSection, $('div.python-step-popover-error-title', {}, `✗ Execution Error (Step #${stepIndex + 1}):`));
+			append(errSection, $('div.python-step-popover-error-title', {}, `\u2717 Execution Error (Step #${stepIndex + 1}):`));
 			const errValBox = append(errSection, $('pre.python-step-popover-error-val'));
 			errValBox.textContent = nodeRunStateForErr?.failedStepError || nodeRunStateForErr?.error || 'Step failed during execution.';
 		}
@@ -5738,7 +6025,7 @@ export class WorkflowEditor extends EditorPane {
 			this._activePythonPopoverNode = null;
 			this._activePythonPopoverStep = null;
 			if (this._pythonStepPopoverOutsideClickHandler) {
-				window.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
+				this._targetWindow.removeEventListener('mousedown', this._pythonStepPopoverOutsideClickHandler, true);
 				this._pythonStepPopoverOutsideClickHandler = null;
 			}
 			if (this._pythonStepHoverPopoverEl) {
@@ -5812,9 +6099,9 @@ export class WorkflowEditor extends EditorPane {
 		for (const step of node.pipeline) {
 			if (step.type === 'call_function') {
 				const expr = (step.expression || '').replace(/\r\n/g, '\n').trim();
-				if (expr) callFnExprs.add(expr);
+				if (expr) { callFnExprs.add(expr); }
 				const tv = step.targetVariable?.replace(/^@/, '').trim();
-				if (tv) callFnVars.add(tv);
+				if (tv) { callFnVars.add(tv); }
 			}
 		}
 		const beforeLen = node.pipeline.length;
@@ -5842,7 +6129,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _syncFromNode(node: IFlowchartNode, silent: boolean = false): void {
-		if (!node.pipeline) node.pipeline = [];
+		if (!node.pipeline) { node.pipeline = []; }
 		this._deduplicateNodePipeline(node);
 
 		const ticketImports = (node.imports || []).filter(i =>
@@ -5866,7 +6153,7 @@ export class WorkflowEditor extends EditorPane {
 					ticketName: imp.name,
 					ticketType: imp.type,
 					ticketUri: imp.uri,
-					parameters: (imp as any).parameters
+					parameters: imp.parameters
 				});
 			}
 			for (const v of nodeVars) {
@@ -5895,7 +6182,7 @@ export class WorkflowEditor extends EditorPane {
 						ticketName: imp.name,
 						ticketType: imp.type,
 						ticketUri: imp.uri,
-						parameters: (imp as any).parameters
+						parameters: imp.parameters
 					});
 				}
 			}
@@ -5919,7 +6206,7 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
-		if (!node.imports) node.imports = [];
+		if (!node.imports) { node.imports = []; }
 		const newImports: typeof node.imports = [];
 		const newVars: NonNullable<typeof node.outputVariables> = [];
 
@@ -5932,11 +6219,11 @@ export class WorkflowEditor extends EditorPane {
 				const existingImp = node.imports.find(imp => imp.name === step.ticketName);
 				if (!newImports.some(i => i.name === step.ticketName)) {
 					newImports.push({
-						type: (step.ticketType || existingImp?.type || 'ticket') as any,
+						type: step.ticketType || existingImp?.type || 'ticket',
 						name: step.ticketName,
 						uri: step.ticketUri || existingImp?.uri,
 						parameters: step.parameters
-					} as any);
+					});
 					updatedTickets++;
 				}
 			} else if ((step.type === 'set_variable' || step.type === 'call_function' || step.type === 'component') && step.targetVariable) {
@@ -6150,15 +6437,15 @@ export class WorkflowEditor extends EditorPane {
 		return result;
 	}
 
-	private _attachAutocomplete(
+	private _attachAutocomplete<TRaw = unknown>(
 		input: HTMLInputElement,
-		getItems: () => { label: string; detail?: string; icon?: ThemeIcon; insertText: string; isVariable?: boolean; raw?: any }[],
-		onSelect: (insertText: string, rawItem?: any) => void,
+		getItems: () => IWfAutocompleteItem<TRaw>[],
+		onSelect: (insertText: string, rawItem?: IWfAutocompleteItem<TRaw>) => void,
 		mode: 'ticket' | 'variable' | 'any' = 'any'
 	): void {
 		let dropdownEl: HTMLElement | null = null;
 		let selectedIndex = 0;
-		let filteredItems: { label: string; detail?: string; icon?: ThemeIcon; insertText: string; isVariable?: boolean; raw?: any }[] = [];
+		let filteredItems: IWfAutocompleteItem<TRaw>[] = [];
 
 		const closeDropdown = () => {
 			if (dropdownEl && dropdownEl.parentNode) {
@@ -6180,7 +6467,7 @@ export class WorkflowEditor extends EditorPane {
 			const lowerQuery = query.toLowerCase();
 
 			filteredItems = allItems.filter(item => {
-				if (!lowerQuery) return true;
+				if (!lowerQuery) { return true; }
 				return item.label.toLowerCase().includes(lowerQuery) ||
 					(item.detail && item.detail.toLowerCase().includes(lowerQuery));
 			});
@@ -6192,7 +6479,7 @@ export class WorkflowEditor extends EditorPane {
 				}
 				dropdownEl = document.createElement('div');
 				dropdownEl.className = 'pipeline-autocomplete-dropdown';
-				document.body.appendChild(dropdownEl);
+				this._targetWindow.document.body.appendChild(dropdownEl);
 				this._activePipelineDropdown = dropdownEl;
 			}
 
@@ -6255,7 +6542,7 @@ export class WorkflowEditor extends EditorPane {
 		});
 
 		input.addEventListener('keydown', (e: KeyboardEvent) => {
-			if (!dropdownEl) return;
+			if (!dropdownEl) { return; }
 			if (e.key === 'ArrowDown') {
 				e.preventDefault();
 				if (filteredItems.length > 0) {
@@ -6290,10 +6577,19 @@ export class WorkflowEditor extends EditorPane {
 		});
 	}
 
+	/** The ticket name input of step `stepId` in the pipeline panel currently rendered into `panel`. */
+	private static _getPipelinePanelTicketInput(panel: HTMLElement, stepId: string): HTMLInputElement | undefined {
+		const input = wfPipelinePanelParts.get(panel)?.ticketInputsByStepId.get(stepId);
+		return input && panel.contains(input) ? input : undefined;
+	}
+
 	private _renderPipelinePanel(panel: HTMLElement, node: IFlowchartNode): void {
-		const existingBody = panel.querySelector('.pipeline-panel-body') as HTMLElement;
+		const previousParts = wfPipelinePanelParts.get(panel);
+		const existingBody = previousParts?.body && panel.contains(previousParts.body) ? previousParts.body : undefined;
 		const previousScrollTop = existingBody ? existingBody.scrollTop : 0;
 		clearNode(panel);
+		const panelParts: { body?: HTMLElement; readonly ticketInputsByStepId: Map<string, HTMLInputElement> } = { ticketInputsByStepId: new Map() };
+		wfPipelinePanelParts.set(panel, panelParts);
 
 		// Header
 		const header = append(panel, $('.pipeline-panel-header'));
@@ -6331,6 +6627,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// Panel Body
 		const body = append(panel, $('.pipeline-panel-body'));
+		panelParts.body = body;
 
 		// --- UPPER SECTION: 1. Imports ---
 		const importsSec = append(body, $('.pipeline-section'));
@@ -6398,10 +6695,11 @@ export class WorkflowEditor extends EditorPane {
 						this._openModuleInEditor(imp);
 					};
 
+					// allow-any-unicode-next-line
 					// Left: Drag handle ≡
 					const dragHandle = append(card, $('.pipeline-drag-handle'));
 					append(dragHandle, $('span' + ThemeIcon.asCSSSelector(Codicon.gripper)));
-					dragHandle.title = 'Drag ≡ to reorder import';
+					dragHandle.title = 'Drag \u2261 to reorder import';
 
 					const info = append(card, $('.pipeline-import-info'));
 					const style = getEntityBadgeStyle(imp.type);
@@ -6437,7 +6735,7 @@ export class WorkflowEditor extends EditorPane {
 					addStepBtn.title = `Add '${imp.name}' execution step to pipeline below`;
 					addStepBtn.onclick = (e) => {
 						e.stopPropagation();
-						if (!node.pipeline) node.pipeline = [];
+						if (!node.pipeline) { node.pipeline = []; }
 						node.pipeline.push({
 							id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 							type: 'run_ticket',
@@ -6478,17 +6776,17 @@ export class WorkflowEditor extends EditorPane {
 			e.stopPropagation();
 			importsSec.classList.remove('drag-over');
 			const dataStr = e.dataTransfer?.getData('text/plain');
-			if (!dataStr || !dataStr.startsWith('any-agent-import:')) return;
+			if (!dataStr || !dataStr.startsWith('any-agent-import:')) { return; }
 
 			const parts = dataStr.split(':');
 			const type = parts[1];
 			const name = parts[2];
 
-			if (!node.imports) node.imports = [];
+			if (!node.imports) { node.imports = []; }
 			if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
-				node.imports.push({ type: type as any, name });
+				node.imports.push({ type, name });
 				// Also auto-append step to pipeline
-				if (!node.pipeline) node.pipeline = [];
+				if (!node.pipeline) { node.pipeline = []; }
 				node.pipeline.push({
 					id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 					type: 'run_ticket',
@@ -6538,7 +6836,7 @@ export class WorkflowEditor extends EditorPane {
 			append(addRunEmptyBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
 			append(addRunEmptyBtn, $('span', {}, 'Add Runner'));
 			addRunEmptyBtn.onclick = () => {
-				if (!node.pipeline) node.pipeline = [];
+				if (!node.pipeline) { node.pipeline = []; }
 				const newStepId = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 				node.pipeline.push({
 					id: newStepId,
@@ -6549,8 +6847,8 @@ export class WorkflowEditor extends EditorPane {
 				this._saveFlowchartData();
 				this._renderPipelinePanel(panel, node);
 				setTimeout(() => {
-					const input = panel.querySelector(`[data-step-id="${newStepId}"] input.pipeline-ticket-input`) as HTMLInputElement;
-					if (input) input.focus();
+					const input = WorkflowEditor._getPipelinePanelTicketInput(panel, newStepId);
+					if (input) { input.focus(); }
 				}, 50);
 			};
 		} else {
@@ -6627,13 +6925,14 @@ export class WorkflowEditor extends EditorPane {
 
 				const dragHandle = append(leftCol, $('.pipeline-drag-handle'));
 				append(dragHandle, $('span' + ThemeIcon.asCSSSelector(Codicon.gripper)));
-				dragHandle.title = 'Drag ≡ to reorder step';
+				dragHandle.title = 'Drag \u2261 to reorder step';
 
 				// Center: Step Content
 				const content = append(stepCard, $('.pipeline-step-content'));
 				const topRow = append(content, $('.pipeline-step-top-row'));
 
 				if (step.type === 'run_ticket') {
+					// allow-any-unicode-next-line
 					// 1. Badge: [▶ RUN]
 					const badge = append(topRow, $('.pipeline-step-badge-run'));
 					append(badge, $('span' + ThemeIcon.asCSSSelector(Codicon.play)));
@@ -6641,6 +6940,9 @@ export class WorkflowEditor extends EditorPane {
 
 					// 2. Ticket selection input with autocomplete
 					const ticketInput = append(topRow, $('input.pipeline-step-input.pipeline-ticket-input')) as HTMLInputElement;
+					if (!panelParts.ticketInputsByStepId.has(step.id)) {
+						panelParts.ticketInputsByStepId.set(step.id, ticketInput);
+					}
 					ticketInput.type = 'text';
 					ticketInput.value = step.ticketName || '';
 					ticketInput.placeholder = '@ Select or type ticket...';
@@ -6652,8 +6954,8 @@ export class WorkflowEditor extends EditorPane {
 						(selectedText, rawItem) => {
 							ticketInput.value = selectedText;
 							step.ticketName = selectedText;
-							if (rawItem?.raw?.type) step.ticketType = rawItem.raw.type;
-							if (rawItem?.raw?.uri) step.ticketUri = rawItem.raw.uri;
+							if (rawItem?.raw?.type) { step.ticketType = rawItem.raw.type; }
+							if (rawItem?.raw?.uri) { step.ticketUri = rawItem.raw.uri; }
 							this._syncToNode(node, true);
 							this._saveFlowchartData();
 						},
@@ -6720,7 +7022,7 @@ export class WorkflowEditor extends EditorPane {
 					const valInput = append(cfgRow, $('input.pipeline-step-input.pipeline-var-val-input')) as HTMLInputElement;
 					valInput.type = 'text';
 					valInput.value = step.expression || '';
-					valInput.placeholder = "e.g. 'initial_val', ticket.output, or 0";
+					valInput.placeholder = 'e.g. \'initial_val\', ticket.output, or 0';
 					valInput.title = 'Initial value or expression (type @ to autocomplete)';
 
 
@@ -6768,8 +7070,8 @@ export class WorkflowEditor extends EditorPane {
 						step.expression = val || undefined;
 						const m = val.match(/^(?:@?([a-zA-Z0-9_\u4e00-\u9fa5]+)\s*=\s*)?([a-zA-Z0-9_]+)\s*(?:\(([\s\S]*)\))?$/);
 						if (m) {
-							if (m[1]) step.targetVariable = m[1].replace(/^@/, '');
-							if (m[2]) step.functionName = m[2];
+							if (m[1]) { step.targetVariable = m[1].replace(/^@/, ''); }
+							if (m[2]) { step.functionName = m[2]; }
 						}
 						this._syncToNode(node, true);
 						this._saveFlowchartData();
@@ -6892,7 +7194,7 @@ export class WorkflowEditor extends EditorPane {
 		addRunBtn.title = 'Add ticket execution step to pipeline';
 		addRunBtn.onclick = (e) => {
 			e.stopPropagation();
-			if (!node.pipeline) node.pipeline = [];
+			if (!node.pipeline) { node.pipeline = []; }
 			const newStepId = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 			const newStep: INodePipelineStep = {
 				id: newStepId,
@@ -6905,8 +7207,8 @@ export class WorkflowEditor extends EditorPane {
 			this._saveFlowchartData();
 			this._renderPipelinePanel(panel, node);
 			setTimeout(() => {
-				const input = panel.querySelector(`[data-step-id="${newStepId}"] input.pipeline-ticket-input`) as HTMLInputElement;
-				if (input) input.focus();
+				const input = WorkflowEditor._getPipelinePanelTicketInput(panel, newStepId);
+				if (input) { input.focus(); }
 			}, 50);
 		};
 
@@ -6919,7 +7221,7 @@ export class WorkflowEditor extends EditorPane {
 		addFnBtn.title = 'Add Python step (variables, expressions, loops, functions, or built-in ticket calls)';
 		addFnBtn.onclick = (e) => {
 			e.stopPropagation();
-			if (!node.pipeline) node.pipeline = [];
+			if (!node.pipeline) { node.pipeline = []; }
 			const newStepId = `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
 			const newStep: INodePipelineStep = {
 				id: newStepId,
@@ -7060,7 +7362,7 @@ export class WorkflowEditor extends EditorPane {
 						if (this._selectedLinkIds.size > 0) {
 							for (const id of this._selectedLinkIds) {
 								const link = this._data.links.find(l => l.id === id);
-								if (link) link.color = hex;
+								if (link) { link.color = hex; }
 							}
 							this._saveFlowchartData();
 							this._drawLinks();
@@ -7084,7 +7386,7 @@ export class WorkflowEditor extends EditorPane {
 						if (this._selectedLinkIds.size > 0) {
 							for (const id of this._selectedLinkIds) {
 								const link = this._data.links.find(l => l.id === id);
-								if (link) link.color = c.hex;
+								if (link) { link.color = c.hex; }
 							}
 							this._saveFlowchartData();
 							this._drawLinks();
@@ -7126,7 +7428,7 @@ export class WorkflowEditor extends EditorPane {
 					if (this._selectedLinkIds.size > 0) {
 						for (const id of this._selectedLinkIds) {
 							const link = this._data.links.find(l => l.id === id);
-							if (link) link.routing = rm.mode;
+							if (link) { link.routing = rm.mode; }
 						}
 						this._saveFlowchartData();
 						this._drawLinks();
@@ -7151,7 +7453,7 @@ export class WorkflowEditor extends EditorPane {
 				{ style: 'arrow-single', label: 'Single (→)', shortLabel: '→' },
 				{ style: 'arrow-double', label: 'Double (↔)', shortLabel: '↔' },
 				{ style: 'arrow-none', label: 'None (—)', shortLabel: '—' },
-				{ style: 'dashed', label: 'Dashed (╌)', shortLabel: '╌' }
+				{ style: 'dashed', label: 'Dashed (\u254C)', shortLabel: '\u254C' }
 			];
 			let curArrowStyle: IFlowchartLink['style'] = this._activeLinkStyle || 'arrow-single';
 			if (selLinkCount === 1) {
@@ -7172,7 +7474,7 @@ export class WorkflowEditor extends EditorPane {
 					if (this._selectedLinkIds.size > 0) {
 						for (const id of this._selectedLinkIds) {
 							const link = this._data.links.find(l => l.id === id);
-							if (link) link.style = as.style;
+							if (link) { link.style = as.style; }
 						}
 						this._saveFlowchartData();
 						this._drawLinks();
@@ -7224,14 +7526,14 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		let currentColor = this._activeNodeColor || '#0d9488';
-		let currentTextColor = this._activeTextColor || '#ffffff';
-		let isBold = this._activeIsBold;
-		let isItalic = this._activeIsItalic;
-		let isUnderline = this._activeIsUnderline;
-		let isStrikethrough = this._activeIsStrikethrough;
-		let textAlign: 'left' | 'center' | 'right' = this._activeTextAlign || 'center';
-		let verticalAlign: 'top' | 'center' | 'bottom' = this._activeVerticalAlign || 'center';
+		const currentColor = this._activeNodeColor || '#0d9488';
+		const currentTextColor = this._activeTextColor || '#ffffff';
+		const isBold = this._activeIsBold;
+		const isItalic = this._activeIsItalic;
+		const isUnderline = this._activeIsUnderline;
+		const isStrikethrough = this._activeIsStrikethrough;
+		const textAlign: 'left' | 'center' | 'right' = this._activeTextAlign || 'center';
+		const verticalAlign: 'top' | 'center' | 'bottom' = this._activeVerticalAlign || 'center';
 
 		// Section 1: Node Color
 		const colorSec = append(parent, $('.workflow-toolbar-section'));
@@ -7253,7 +7555,7 @@ export class WorkflowEditor extends EditorPane {
 					if (this._selectedNodeIds.size > 0) {
 						for (const id of this._selectedNodeIds) {
 							const node = this._data.nodes.find(n => n.id === id);
-							if (node) node.color = hex;
+							if (node) { node.color = hex; }
 						}
 						this._saveFlowchartData();
 						this._renderNodes();
@@ -7278,7 +7580,7 @@ export class WorkflowEditor extends EditorPane {
 					if (this._selectedNodeIds.size > 0) {
 						for (const id of this._selectedNodeIds) {
 							const node = this._data.nodes.find(n => n.id === id);
-							if (node) node.color = c.hex;
+							if (node) { node.color = c.hex; }
 						}
 						this._saveFlowchartData();
 						this._renderNodes();
@@ -7311,7 +7613,7 @@ export class WorkflowEditor extends EditorPane {
 			if (this._selectedNodeIds.size > 0) {
 				for (const id of this._selectedNodeIds) {
 					const node = this._data.nodes.find(n => n.id === id);
-					if (node) node.isBold = nextVal;
+					if (node) { node.isBold = nextVal; }
 				}
 				this._saveFlowchartData();
 				this._renderNodes();
@@ -7332,7 +7634,7 @@ export class WorkflowEditor extends EditorPane {
 			if (this._selectedNodeIds.size > 0) {
 				for (const id of this._selectedNodeIds) {
 					const node = this._data.nodes.find(n => n.id === id);
-					if (node) node.isItalic = nextVal;
+					if (node) { node.isItalic = nextVal; }
 				}
 				this._saveFlowchartData();
 				this._renderNodes();
@@ -7352,7 +7654,7 @@ export class WorkflowEditor extends EditorPane {
 			if (this._selectedNodeIds.size > 0) {
 				for (const id of this._selectedNodeIds) {
 					const node = this._data.nodes.find(n => n.id === id);
-					if (node) node.isUnderline = nextVal;
+					if (node) { node.isUnderline = nextVal; }
 				}
 				this._saveFlowchartData();
 				this._renderNodes();
@@ -7372,7 +7674,7 @@ export class WorkflowEditor extends EditorPane {
 			if (this._selectedNodeIds.size > 0) {
 				for (const id of this._selectedNodeIds) {
 					const node = this._data.nodes.find(n => n.id === id);
-					if (node) node.isStrikethrough = nextVal;
+					if (node) { node.isStrikethrough = nextVal; }
 				}
 				this._saveFlowchartData();
 				this._renderNodes();
@@ -7392,7 +7694,7 @@ export class WorkflowEditor extends EditorPane {
 			aBtn.textContent = this._isInspectorCompact ? ac.shortLabel : ac.label;
 			aBtn.title = ac.title;
 
-			let clickTimer: any = null;
+			let clickTimer: ReturnType<typeof setTimeout> | null = null;
 
 			const applyAlign = (includeTitle: boolean) => {
 				this._activeTextAlign = ac.align;
@@ -7500,7 +7802,7 @@ export class WorkflowEditor extends EditorPane {
 					if (this._selectedNodeIds.size > 0) {
 						for (const id of this._selectedNodeIds) {
 							const node = this._data.nodes.find(n => n.id === id);
-							if (node) node.textColor = hex;
+							if (node) { node.textColor = hex; }
 						}
 						this._saveFlowchartData();
 						this._renderNodes();
@@ -7527,7 +7829,7 @@ export class WorkflowEditor extends EditorPane {
 					if (this._selectedNodeIds.size > 0) {
 						for (const id of this._selectedNodeIds) {
 							const node = this._data.nodes.find(n => n.id === id);
-							if (node) node.textColor = tc.hex;
+							if (node) { node.textColor = tc.hex; }
 						}
 						this._saveFlowchartData();
 						this._renderNodes();
@@ -7676,9 +7978,9 @@ export class WorkflowEditor extends EditorPane {
 								this._refreshVariablesDrawer();
 							};
 							const findInspectorTicket = (rawRef?: string) => {
-								if (!rawRef) return undefined;
+								if (!rawRef) { return undefined; }
 								const clean = rawRef.trim().replace(/^@/, '').replace(/^=\s*/, '');
-								if (clean === 'ticket' || clean === 'ticket.output') return selectedNode.imports?.[0];
+								if (clean === 'ticket' || clean === 'ticket.output') { return selectedNode.imports?.[0]; }
 								return (selectedNode.imports || []).find(imp =>
 									imp.name === clean ||
 									imp.name.replace(/[^a-zA-Z0-9_]/g, '_') === clean ||
@@ -7715,7 +8017,7 @@ export class WorkflowEditor extends EditorPane {
 								exprInput.style.boxSizing = 'border-box';
 								exprInput.type = 'text';
 								exprInput.value = v.expression || '';
-								exprInput.placeholder = "e.g. += 1, -= 1, = ticket.output, = 'DONE'";
+								exprInput.placeholder = 'e.g. += 1, -= 1, = ticket.output, = \'DONE\'';
 								exprInput.onchange = () => {
 									const newExpr = exprInput.value.trim() || undefined;
 									v.expression = newExpr;
@@ -7759,7 +8061,7 @@ export class WorkflowEditor extends EditorPane {
 								initInput.style.boxSizing = 'border-box';
 								initInput.type = 'text';
 								initInput.value = v.initialValue || 'None';
-								initInput.placeholder = "0, None, True, 'admin'";
+								initInput.placeholder = '0, None, True, \'admin\'';
 								initInput.onchange = () => {
 									const newVal = initInput.value.trim() || 'None';
 									v.initialValue = newVal;
@@ -7800,7 +8102,7 @@ export class WorkflowEditor extends EditorPane {
 								exprInput.style.boxSizing = 'border-box';
 								exprInput.type = 'text';
 								exprInput.value = v.expression || '';
-								exprInput.placeholder = "e.g. += 1, = ticket.output (optional)";
+								exprInput.placeholder = 'e.g. += 1, = ticket.output (optional)';
 								exprInput.onchange = () => {
 									const newExpr = exprInput.value.trim() || undefined;
 									v.expression = newExpr;
@@ -8017,18 +8319,18 @@ export class WorkflowEditor extends EditorPane {
 			for (const node of this._data.nodes) {
 				const right = (node.x || 0) + (node.width || 120) + 1200;
 				const bottom = (node.y || 0) + (node.height || 50) + 1000;
-				if (right > maxRight) maxRight = right;
-				if (bottom > maxBottom) maxBottom = bottom;
+				if (right > maxRight) { maxRight = right; }
+				if (bottom > maxBottom) { maxBottom = bottom; }
 			}
 		}
 
 		if (additionalX !== undefined) {
 			const candidateX = additionalX + 1200;
-			if (candidateX > maxRight) maxRight = candidateX;
+			if (candidateX > maxRight) { maxRight = candidateX; }
 		}
 		if (additionalY !== undefined) {
 			const candidateY = additionalY + 1000;
-			if (candidateY > maxBottom) maxBottom = candidateY;
+			if (candidateY > maxBottom) { maxBottom = candidateY; }
 		}
 
 		this._currentCanvasWidth = Math.ceil(maxRight);
@@ -8045,6 +8347,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	/**
+	 * allow-any-unicode-next-line
 	 * Zoom anchor for the −/+ buttons: the node located from the Workflow Outline, else the single selected node, else the
 	 * middle of the view. A focus node that is off-screen is brought to the middle.
 	 */
@@ -8054,7 +8357,7 @@ export class WorkflowEditor extends EditorPane {
 			return undefined;
 		}
 		const located = this._workflowUri ? WorkflowEditor._outlineLocated.get(this._workflowUri.toString()) : undefined;
-		const locatedHere = [...(located?.targets || [])].reverse().find(t => this._nodesContainer?.querySelector(`[data-node-id="${CSS.escape(t.nodeId)}"]`));
+		const locatedHere = [...(located?.targets || [])].reverse().find(t => this._getNodeDom(t.nodeId));
 		const focusId = locatedHere ? locatedHere.nodeId
 			: this._selectedNodeIds.size === 1 ? Array.from(this._selectedNodeIds)[0] : undefined;
 		const node = focusId ? this._data?.nodes.find(n => n.id === focusId) : undefined;
@@ -8199,10 +8502,10 @@ export class WorkflowEditor extends EditorPane {
 			if (!this._selectedNodeIds.has(node.id)) {
 				this._selectedNodeIds.clear();
 				this._selectedNodeIds.add(node.id);
-				const prevSelected = (this._nodesContainer || this._canvas)?.querySelectorAll('.workflow-node.selected');
-				prevSelected?.forEach(el => el.classList.remove('selected'));
-				const nodeEl = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${node.id}"]`);
-				nodeEl?.classList.add('selected');
+				for (const d of this._renderedNodeDoms()) {
+					d.nodeEl.classList.remove('selected');
+				}
+				this._getNodeDom(node.id)?.nodeEl.classList.add('selected');
 				if (this._inspectorEl) {
 					this._renderInspector(this._inspectorEl);
 				}
@@ -8221,7 +8524,7 @@ export class WorkflowEditor extends EditorPane {
 
 		// Check if this variable is bound to a ticket
 		const findReferencedTicket = (rawRef?: string) => {
-			if (!rawRef) return undefined;
+			if (!rawRef) { return undefined; }
 			const clean = rawRef.trim().replace(/^@/, '').replace(/^=\s*/, '');
 			if (clean === 'ticket' || clean === 'ticket.output') {
 				// In pipeline, look backwards from stepIndex
@@ -8545,7 +8848,7 @@ export class WorkflowEditor extends EditorPane {
 						const strSpan = append(container, $('span.py-tok-string'));
 						const parts = fullToken.split(/(\{[^{}\n]+\})/g);
 						for (const part of parts) {
-							if (!part) continue;
+							if (!part) { continue; }
 							if (part.startsWith('{') && part.endsWith('}')) {
 								append(strSpan, $('span.py-tok-interp', {}, part));
 							} else {
@@ -8580,8 +8883,8 @@ export class WorkflowEditor extends EditorPane {
 						// Check if inside parentheses (keyword argument) vs variable assignment
 						let parenDepth = initialParenDepth;
 						for (let k = 0; k < beforeText.length; k++) {
-							if (beforeText[k] === '(') parenDepth++;
-							else if (beforeText[k] === ')') parenDepth = Math.max(0, parenDepth - 1);
+							if (beforeText[k] === '(') { parenDepth++; }
+							else if (beforeText[k] === ')') { parenDepth = Math.max(0, parenDepth - 1); }
 						}
 						if (parenDepth > 0) {
 							append(container, $('span.py-tok-kwarg', {}, ident));
@@ -8646,10 +8949,10 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _isFunctionCallExpression(expr?: string): boolean {
-		if (!expr) return false;
+		if (!expr) { return false; }
 		const trimmed = expr.trim();
 		const m = trimmed.match(/^(?:@?[a-zA-Z0-9_\u4e00-\u9fa5]+\s*=\s*)?([a-zA-Z0-9_]+)\s*\([\s\S]*\)$/);
-		if (!m) return false;
+		if (!m) { return false; }
 		const fn = m[1].toLowerCase();
 		const valueOperatorFns = new Set([
 			'date', 'today', 'time', 'now', 'datetime', 'timestamp',
@@ -8659,18 +8962,18 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	/** Last runtime value of a capsule (current / last run variables, the component's own last output, Display cards). */
-	private _resolveStepRuntimeValue(node: IFlowchartNode, step: INodePipelineStep): any {
+	private _resolveStepRuntimeValue(node: IFlowchartNode, step: INodePipelineStep): unknown {
 		const activeRun = this._getEffectiveRunForNode(node.id);
 		const cleanVar = step.targetVariable?.replace(/^@/, '');
-		let runtimeVal: any = undefined;
+		let runtimeVal: unknown = undefined;
 		if (step.component?.type === 'parameters') {
 			// Inputs component: NEVER look up by generic label "Inputs" (collides across multiple flows/sub-workflows!)
 			// Prefer this component's own lastExecutionOutput, or build strictly from its own declared parameter names
-			const ownOut = (step.component as any).lastExecutionOutput;
+			const ownOut = wfComponent(step.component).lastExecutionOutput;
 			if (ownOut !== undefined && ownOut !== null) {
 				runtimeVal = ownOut;
 			} else if (activeRun?.contextVariables && Array.isArray(step.component.parameters)) {
-				const scopedParams: Record<string, any> = {};
+				const scopedParams: IWorkflowRecord = {};
 				let foundAny = false;
 				for (const p of step.component.parameters) {
 					const pName = (p.name || '').trim();
@@ -8690,8 +8993,8 @@ export class WorkflowEditor extends EditorPane {
 				runtimeVal = (cleanVar ? activeRun.contextVariables[cleanVar] : undefined)
 					?? (step.component?.label ? activeRun.contextVariables[step.component.label] : undefined);
 			}
-			if (runtimeVal === undefined && step.component && (step.component as any).lastExecutionOutput !== undefined) {
-				runtimeVal = (step.component as any).lastExecutionOutput;
+			if (runtimeVal === undefined && step.component && wfComponent(step.component).lastExecutionOutput !== undefined) {
+				runtimeVal = wfComponent(step.component).lastExecutionOutput;
 			}
 			if (runtimeVal === undefined && !step.component && activeRun?.contextVariables && cleanVar) {
 				runtimeVal = activeRun.contextVariables[cleanVar];
@@ -8724,13 +9027,13 @@ export class WorkflowEditor extends EditorPane {
 		node: IFlowchartNode,
 		step: INodePipelineStep,
 		stepIndex?: number
-	): HTMLElement {
+	): { pill: HTMLElement; textEl: HTMLElement } {
 		if (step.component) {
 			this._syncComponentStepMetadata(step);
 		}
 		const activeRun = this._getEffectiveRunForNode(node.id);
 		const cleanVar = step.targetVariable?.replace(/^@/, '');
-		const runtimeVal: any = this._resolveStepRuntimeValue(node, step);
+		const runtimeVal = this._resolveStepRuntimeValue(node, step);
 		const isDisplayPillForFmt = Boolean(step.component?.type === 'display' || (!step.component && /^DISPLAY\s*\(/i.test((step.expression || '').trim())));
 		let rawFnRtStr = '';
 		if (runtimeVal !== undefined) {
@@ -8808,7 +9111,7 @@ export class WorkflowEditor extends EditorPane {
 				return;
 			}
 			e.stopPropagation();
-			if ((fnPill as any)._justDraggedAt && Date.now() - (fnPill as any)._justDraggedAt < 250) {
+			if (wfCapsuleJustDraggedAt.get(fnPill) && Date.now() - wfCapsuleJustDraggedAt.get(fnPill)! < 250) {
 				return;
 			}
 			if (!this._selectedNodeIds.has(node.id) || this._selectedNodeIds.size > 1) {
@@ -9037,7 +9340,7 @@ export class WorkflowEditor extends EditorPane {
 			this._renderExpressionWithTicketBadges(pillContent, displayExpr, false);
 		}
 		if (isFailedCapsule) {
-			const errBadgePill = append(fnPill, $('span.fn-pill-error-badge', {}, '✗ FAILED'));
+			const errBadgePill = append(fnPill, $('span.fn-pill-error-badge', {}, '\u2717 FAILED'));
 			const errMsg = nodeStateForPill?.failedStepError || nodeStateForPill?.error || 'Execution failed';
 			errBadgePill.title = `Step #${stepIndex + 1} Failed: ${errMsg}`;
 			fnPill.title = `[FAILED at Step #${stepIndex + 1}]: ${errMsg}`;
@@ -9091,14 +9394,16 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		return fnPill;
+		return { pill: fnPill, textEl: pillContent };
 	}
 
 	private _attachCapsuleDragReorder(
 		pillEl: HTMLElement,
 		badgesContainer: HTMLElement,
 		node: IFlowchartNode,
-		stepIndex: number
+		stepIndex: number,
+		/** The capsule's label element (`.fn-pill-text` / `.badge-text`), used for the drag ghost. */
+		labelEl: HTMLElement
 	): void {
 		pillEl.setAttribute('data-pipeline-step-idx', String(stepIndex));
 
@@ -9152,7 +9457,7 @@ export class WorkflowEditor extends EditorPane {
 
 			pillEl.classList.add('capsule-custom-width', 'capsule-resizing');
 			pillEl.style.width = `${startWidth}px`;
-			document.body.style.cursor = 'ew-resize';
+			this._targetWindow.document.body.style.cursor = 'ew-resize';
 
 			const onResizeMove = (mvEvent: MouseEvent) => {
 				const deltaX = (mvEvent.clientX - startX) / zoom;
@@ -9164,14 +9469,14 @@ export class WorkflowEditor extends EditorPane {
 			};
 
 			const onResizeUp = () => {
-				window.removeEventListener('mousemove', onResizeMove);
-				window.removeEventListener('mouseup', onResizeUp);
+				this._targetWindow.removeEventListener('mousemove', onResizeMove);
+				this._targetWindow.removeEventListener('mouseup', onResizeUp);
 				pillEl.classList.remove('capsule-resizing');
-				document.body.style.cursor = '';
+				this._targetWindow.document.body.style.cursor = '';
 
 				if (didResize) {
 					curStep.capsuleWidth = nextWidth;
-					(pillEl as any)._justDraggedAt = Date.now();
+					wfCapsuleJustDraggedAt.set(pillEl, Date.now());
 					this._saveFlowchartData();
 				} else if (typeof curStep.capsuleWidth !== 'number') {
 					pillEl.classList.remove('capsule-custom-width');
@@ -9179,8 +9484,8 @@ export class WorkflowEditor extends EditorPane {
 				}
 			};
 
-			window.addEventListener('mousemove', onResizeMove);
-			window.addEventListener('mouseup', onResizeUp);
+			this._targetWindow.addEventListener('mousemove', onResizeMove);
+			this._targetWindow.addEventListener('mouseup', onResizeUp);
 		});
 
 		const initStep = node.pipeline?.[stepIndex];
@@ -9214,7 +9519,7 @@ export class WorkflowEditor extends EditorPane {
 			if (e.metaKey || e.ctrlKey) {
 				e.preventDefault();
 				e.stopPropagation();
-				(pillEl as any)._justDraggedAt = Date.now();
+				wfCapsuleJustDraggedAt.set(pillEl, Date.now());
 				if (!this._selectedCapsules || this._selectedCapsules.nodeId !== node.id) {
 					const initialIds = new Set<string>();
 					if (this._selectedCapsule?.nodeId === node.id) {
@@ -9242,7 +9547,7 @@ export class WorkflowEditor extends EditorPane {
 			if (e.shiftKey) {
 				e.preventDefault();
 				e.stopPropagation();
-				(pillEl as any)._justDraggedAt = Date.now();
+				wfCapsuleJustDraggedAt.set(pillEl, Date.now());
 				const pipeline = node.pipeline || [];
 				let anchor = stepIndex;
 				if (this._selectedCapsules?.nodeId === node.id) {
@@ -9306,20 +9611,28 @@ export class WorkflowEditor extends EditorPane {
 			// 2-second dwell-to-copy (or Alt/Option instant copy) state when hovering over a different target node or split editor
 			let copyHoverKey: string | null = null;
 			let copyModeReady = false;
-			let copyTimer: any = null;
-			let copyCountdownInterval: any = null;
+			let copyTimer: ReturnType<typeof setTimeout> | null = null;
+			let copyCountdownInterval: number | null = null;
 
-			const getEditorDropRoots = (): HTMLElement[] => {
-				const roots: HTMLElement[] = [];
+			// Node elements and capsules on every open editor's canvas: the only elements that receive drop / copy indicator classes.
+			const getDropIndicatorElements = (): HTMLElement[] => {
+				const els: HTMLElement[] = [];
+				let hasRoot = false;
 				for (const ed of WorkflowEditor._openWorkflowEditors) {
-					if (ed._nodesContainer) {
-						roots.push(ed._nodesContainer);
+					const nodesContainer = ed._nodesContainer;
+					if (nodesContainer) {
+						hasRoot = true;
+						for (const d of ed._nodeDoms) {
+							if (nodesContainer.contains(d.nodeEl)) {
+								els.push(d.nodeEl, ...d.capsules);
+							}
+						}
 					}
 				}
-				if (roots.length === 0 && badgesContainer) {
-					roots.push(badgesContainer);
+				if (!hasRoot && badgesContainer) {
+					els.push(...(this._nodeDoms.find(d => d.nodeId === node.id)?.capsules || []).filter(c => badgesContainer.contains(c)));
 				}
-				return roots;
+				return els;
 			};
 
 			const resetCopyTimer = () => {
@@ -9328,7 +9641,7 @@ export class WorkflowEditor extends EditorPane {
 					copyTimer = null;
 				}
 				if (copyCountdownInterval) {
-					clearInterval(copyCountdownInterval);
+					this._targetWindow.clearInterval(copyCountdownInterval);
 					copyCountdownInterval = null;
 				}
 				copyHoverKey = null;
@@ -9341,19 +9654,15 @@ export class WorkflowEditor extends EditorPane {
 					copyBadgeEl.classList.remove('is-ready');
 					copyBadgeEl.textContent = '';
 				}
-				for (const root of getEditorDropRoots()) {
-					root.querySelectorAll('.capsule-copy-ready').forEach(el => el.classList.remove('capsule-copy-ready'));
+				for (const el of getDropIndicatorElements()) {
+					el.classList.remove('capsule-copy-ready');
 				}
 			};
 
 			const clearDropIndicators = () => {
-				for (const root of getEditorDropRoots()) {
-					root
-						.querySelectorAll('.capsule-drop-before, .capsule-drop-after')
-						.forEach(el => el.classList.remove('capsule-drop-before', 'capsule-drop-after'));
-					root
-						.querySelectorAll('.capsule-drop-target-node, .capsule-copy-ready')
-						.forEach(el => el.classList.remove('capsule-drop-target-node', 'capsule-copy-ready'));
+				for (const el of getDropIndicatorElements()) {
+					el.classList.remove('capsule-drop-before', 'capsule-drop-after');
+					el.classList.remove('capsule-drop-target-node', 'capsule-copy-ready');
 				}
 			};
 
@@ -9367,20 +9676,20 @@ export class WorkflowEditor extends EditorPane {
 					pillEl.classList.add('capsule-dragging');
 
 					ghostEl = $('.workflow-capsule-drag-ghost');
-					const baseLabel = (pillEl.querySelector('.fn-pill-text, .badge-text')?.textContent || pillEl.textContent || 'Step').trim();
+					const baseLabel = (labelEl.textContent || pillEl.textContent || 'Step').trim();
 					const labelSpan = append(ghostEl, $('span', {}, draggedIndices.length > 1 ? `${draggedIndices.length} capsules` : baseLabel));
 					labelSpan.style.overflow = 'hidden';
 					labelSpan.style.textOverflow = 'ellipsis';
 					copyBadgeEl = append(ghostEl, $('span.workflow-capsule-copy-badge'));
 					copyBadgeEl.style.display = 'none';
-					const compStyle = window.getComputedStyle(pillEl);
+					const compStyle = this._targetWindow.getComputedStyle(pillEl);
 					if (compStyle.borderColor) {
 						ghostEl.style.borderColor = compStyle.borderColor;
 					}
 					if (compStyle.color) {
 						ghostEl.style.color = compStyle.color;
 					}
-					document.body.appendChild(ghostEl);
+					this._targetWindow.document.body.appendChild(ghostEl);
 				}
 
 				if (!isDragging) {
@@ -9439,7 +9748,7 @@ export class WorkflowEditor extends EditorPane {
 							copyBadgeEl.classList.remove('is-ready');
 							copyBadgeEl.textContent = 'Hold 2.0s / Alt to Copy';
 						}
-						copyCountdownInterval = setInterval(() => {
+						copyCountdownInterval = this._targetWindow.setInterval(() => {
 							const rem = Math.max(0, 2.0 - (Date.now() - enteredAt) / 1000);
 							if (copyBadgeEl && !copyModeReady) {
 								copyBadgeEl.textContent = `Hold ${rem.toFixed(1)}s / Alt to Copy`;
@@ -9448,7 +9757,7 @@ export class WorkflowEditor extends EditorPane {
 						copyTimer = setTimeout(() => {
 							copyModeReady = true;
 							if (copyCountdownInterval) {
-								clearInterval(copyCountdownInterval);
+								this._targetWindow.clearInterval(copyCountdownInterval);
 								copyCountdownInterval = null;
 							}
 							targetElRef.classList.add('capsule-copy-ready');
@@ -9468,7 +9777,7 @@ export class WorkflowEditor extends EditorPane {
 					resetCopyTimer();
 				}
 
-				const targetPills = Array.from(hitNodeEl.querySelectorAll<HTMLElement>('[data-pipeline-step-idx]'));
+				const targetPills = [...(wfNodeDomByElement.get(hitNodeEl)?.capsules || [])];
 				if (targetPills.length === 0) {
 					targetInsertIdx = 0;
 					return;
@@ -9492,8 +9801,8 @@ export class WorkflowEditor extends EditorPane {
 			};
 
 			const onMouseUp = (upEvent: MouseEvent) => {
-				window.removeEventListener('mousemove', onMouseMove, true);
-				window.removeEventListener('mouseup', onMouseUp, true);
+				this._targetWindow.removeEventListener('mousemove', onMouseMove, true);
+				this._targetWindow.removeEventListener('mouseup', onMouseUp, true);
 
 				const dropHoverKey = hoveredTargetEditor && hoveredTargetNode
 					? `${hoveredTargetEditor._workflowUri?.toString() || 'ed'}:${hoveredTargetNode.id}`
@@ -9519,7 +9828,7 @@ export class WorkflowEditor extends EditorPane {
 				}
 				upEvent.preventDefault();
 				upEvent.stopPropagation();
-				(pillEl as any)._justDraggedAt = Date.now();
+				wfCapsuleJustDraggedAt.set(pillEl, Date.now());
 
 				if (!hoveredTargetNode) {
 					return;
@@ -9568,8 +9877,8 @@ export class WorkflowEditor extends EditorPane {
 				}
 			};
 
-			window.addEventListener('mousemove', onMouseMove, true);
-			window.addEventListener('mouseup', onMouseUp, true);
+			this._targetWindow.addEventListener('mousemove', onMouseMove, true);
+			this._targetWindow.addEventListener('mouseup', onMouseUp, true);
 		});
 	}
 
@@ -9577,11 +9886,10 @@ export class WorkflowEditor extends EditorPane {
 		if (!this._nodesContainer) {
 			return;
 		}
-		const allPills = this._nodesContainer.querySelectorAll<HTMLElement>('[data-pipeline-step-id]');
-		allPills.forEach(el => {
+		const allPills = this._renderedNodeDoms().flatMap(d => d.capsules.filter(el => el.hasAttribute('data-pipeline-step-id')).map(el => ({ el, nodeEl: d.nodeEl })));
+		allPills.forEach(({ el, nodeEl }) => {
 			const stepId = el.getAttribute('data-pipeline-step-id');
-			const nodeEl = el.closest('.workflow-node') as HTMLElement | null;
-			const nodeId = nodeEl?.getAttribute('data-node-id');
+			const nodeId = nodeEl.getAttribute('data-node-id');
 			const isSelected = Boolean(
 				this._selectedCapsules &&
 				nodeId &&
@@ -9668,21 +9976,22 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _updateNodeVoiceSpeakerVisuals(nodeId: string): void {
-		const nodeDom = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${nodeId}"]`);
+		const nodeDom = this._getNodeDom(nodeId);
 		if (!nodeDom) {
 			return;
 		}
-		const speakerBtn = nodeDom.querySelector('.node-voice-speaker-btn') as HTMLElement | null;
-		if (!speakerBtn) {
+		const speaker = nodeDom.speaker;
+		if (!speaker) {
 			return;
 		}
+		const speakerBtn = speaker.btn;
 		const isPlayingThis = this._activeVoicePlayNodeId === nodeId;
 		speakerBtn.classList.toggle('playing', isPlayingThis);
-		const iconEl = speakerBtn.querySelector('.codicon') as HTMLElement | null;
+		const iconEl = speaker.icon;
 		if (iconEl) {
 			iconEl.className = 'codicon codicon-unmute';
 		}
-		const badgeEl = speakerBtn.querySelector('.voice-count-badge') as HTMLElement | null;
+		const badgeEl = speaker.countBadge;
 		const totalClips = Number(speakerBtn.getAttribute('data-clip-count') || '0');
 		if (badgeEl) {
 			if (isPlayingThis && this._activeVoiceClipTotal > 0) {
@@ -9967,6 +10276,7 @@ export class WorkflowEditor extends EditorPane {
 
 		this._outlineBulbRefreshers = [];
 		const panel = append(this._subWorkflowWidgetEl, $('.wf-subworkflow-dropdown-panel.wf-outline-panel'));
+		this._outlinePanelEl = panel;
 		panel.onmousedown = (e) => e.stopPropagation();
 		panel.onclick = (e) => e.stopPropagation();
 		panel.onwheel = (e) => e.stopPropagation(); // scroll the menu, not the canvas
@@ -10144,6 +10454,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 		const columnEls: HTMLElement[] = [];
+		const outlineRows: HTMLElement[] = [];
 		columns.forEach((column, level) => {
 			const colEl = append(columnsEl, $('.wf-outline-column'));
 			columnEls.push(colEl);
@@ -10166,7 +10477,7 @@ export class WorkflowEditor extends EditorPane {
 				return;
 			}
 			for (const item of column.items) {
-				this._renderOutlineItem(colEl, item, level);
+				this._renderOutlineItem(colEl, item, level, columnsEl, outlineRows);
 			}
 		});
 
@@ -10191,11 +10502,16 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
-	private _renderOutlineItem(colEl: HTMLElement, item: IWfOutlineItem, level: number): void {
+	/**
+	 * @param columnsEl the `.wf-outline-columns` element the column belongs to
+	 * @param outlineRows all `.wf-outline-item` rows rendered into `columnsEl` (this row is added)
+	 */
+	private _renderOutlineItem(colEl: HTMLElement, item: IWfOutlineItem, level: number, columnsEl: HTMLElement, outlineRows: HTMLElement[]): void {
 		const isExpanded = this._outlinePath[level] === item.key;
 		// The clicked item and every level above it (its expanded ancestors) stay outlined
 		const isOnPath = isExpanded || this._outlineSelectedKey === item.key;
 		const row = append(colEl, $(`.wf-outline-item${isExpanded ? '.is-expanded' : ''}${isOnPath ? '.is-on-path' : ''}${item.disabled ? '.is-disabled' : ''}`));
+		outlineRows.push(row);
 		row.title = item.meta ? `${item.label}\n${item.meta}` : item.label;
 
 		row.style.background = item.theme.bg;
@@ -10234,7 +10550,13 @@ export class WorkflowEditor extends EditorPane {
 					this._renderSubWorkflowDropdown();
 				} else {
 					// No re-render follows: move the outline in place (ancestors are already outlined)
-					colEl.closest('.wf-outline-columns')?.querySelectorAll('.wf-outline-item.is-on-path:not(.is-expanded)').forEach(el => el.classList.remove('is-on-path'));
+					if (columnsEl.contains(colEl)) {
+						for (const el of outlineRows) {
+							if (el.classList.contains('is-on-path') && !el.classList.contains('is-expanded')) {
+								el.classList.remove('is-on-path');
+							}
+						}
+					}
 					row.classList.add('is-on-path');
 				}
 			}
@@ -10453,7 +10775,7 @@ export class WorkflowEditor extends EditorPane {
 		const pipelineIndex = (node.pipeline || []).indexOf(step);
 		const locateTarget: IWfLocateTarget = { nodeId: node.id, stepIndex: pipelineIndex >= 0 ? pipelineIndex : index, ownerSubWorkflowId };
 		const cardShow = this._outlineNodeEditorShowHide(liveNode, this._nodeTicketFieldId(step, index), ownerSubWorkflowId);
-		const disabled = Boolean(step.disabled || (comp as any)?.disabled);
+		const disabled = Boolean(step.disabled || comp?.disabled);
 		const firstExprLine = (step.expression || '').split('\n').map(l => l.trim()).find(l => l.length > 0) || '';
 		const label = comp ? ((comp.label || '').trim() || this._outlineComponentTypeLabel(comp.type)) : ((step.label || '').trim() || firstExprLine || step.functionName || step.type);
 		const baseMeta = comp ? this._outlineComponentTypeLabel(comp.type) : (step.functionName ? `${step.functionName} (Python step)` : step.type);
@@ -10522,8 +10844,8 @@ export class WorkflowEditor extends EditorPane {
 				const isOnThisCanvas = def.sourceWorkflowUri === (this._workflowUri?.toString() || '');
 				const liveById = new Map((this._data?.nodes || []).map(n => [n.id, n] as const));
 				const nodes: IFlowchartNode[] = isOnThisCanvas
-					? (def.nodeIds || []).map(id => liveById.get(id) || (def.nodes || []).find((sn: IFlowchartNode) => sn?.id === id)).filter((n): n is IFlowchartNode => !!n)
-					: (def.nodes || []).filter((n: IFlowchartNode) => !!n);
+					? (def.nodeIds || []).map(id => liveById.get(id) || subWorkflowSnapshotNodes(def).find(sn => sn?.id === id)).filter((n): n is IFlowchartNode => !!n)
+					: subWorkflowSnapshotNodes(def).filter((n): n is IFlowchartNode => !!n);
 				return [...nodes]
 					.sort((a, b) => (a.y - b.y) || (a.x - b.x))
 					.map(n => this._outlineNodeItem(n, itemKey, isOnThisCanvas && liveById.has(n.id), nextVisited, subWorkflowId));
@@ -10627,10 +10949,10 @@ export class WorkflowEditor extends EditorPane {
 			.map(f => ({
 				key: `${parentKey}/f:${f.id}`,
 				label: (f.label || f.id || '').trim(),
-				meta: `${this._outlineComponentTypeLabel(f.type)}${(f as any).disabled ? ' · disabled' : ''}`,
+				meta: `${this._outlineComponentTypeLabel(f.type)}${f.disabled ? ' · disabled' : ''}`,
 				icon: this._outlineThemeOf(f.type).icon,
 				theme: this._outlineThemeOf(f.type),
-				disabled: Boolean((f as any).disabled),
+				disabled: Boolean(f.disabled),
 				open: () => this._openOutlineTicket(ref, f.id),
 				showKey: parentKey,
 				locateTarget
@@ -10668,7 +10990,7 @@ export class WorkflowEditor extends EditorPane {
 					kindLabel: comp ? this._outlineComponentTypeLabel(comp.type) : 'Python Step',
 					code: comp ? (kind === 'sub_workflow' ? '' : this._buildBuiltinComponentPythonExpression(comp)) : (step.expression || ''),
 					targetVariable: (step.targetVariable || '').replace(/^@/, '').trim(),
-					disabled: Boolean(step.disabled || (comp as any)?.disabled),
+					disabled: Boolean(step.disabled || comp?.disabled),
 					subWorkflow: kind === 'sub_workflow' ? {
 						id: comp?.subWorkflowId,
 						name: comp?.subWorkflowName || (comp?.subWorkflowId ? this._workflowExecutionService.getSubWorkflowById(comp.subWorkflowId)?.name : undefined) || comp?.subWorkflowId,
@@ -10681,7 +11003,7 @@ export class WorkflowEditor extends EditorPane {
 		});
 		const ownerSub = this._outlineSubWorkflowsOfCanvas().find(sw => (sw.nodeIds || []).includes(node.id));
 		const workflowName = this.input?.getName() || decodeURIComponent(this._workflowUri?.path.split('/').filter(Boolean).pop() || 'Workflow');
-		return {
+		const virtualModule = {
 			id: `wf_node_${node.id}`,
 			name: (node.label || '').trim() || 'Node',
 			fields,
@@ -10692,7 +11014,10 @@ export class WorkflowEditor extends EditorPane {
 				workflowUri: this._workflowUri?.toString(),
 				subWorkflowName: ownerSub?.name
 			}
-		} as unknown as ICustomModule;
+		};
+		// Not a real module: it has no `color`, its cards may be of the virtual `python_step` kind and it carries the
+		// `__wfNode` / `__wfStep` / `__wfRuntime` extras that EntityDetailEditor reads for node previews.
+		return virtualModule as unknown as ICustomModule;
 	}
 
 	/** Last-run data of a capsule for the node view: its value, a Sub-Workflow's actual inputs, and the error if it failed. */
@@ -10706,8 +11031,8 @@ export class WorkflowEditor extends EditorPane {
 		}
 		let inputs: Record<string, unknown> | undefined;
 		if (comp?.type === 'sub_workflow') {
-			inputs = (comp as any).lastExecutionInputs;
-			const log = (comp as any).lastExecutionLog;
+			inputs = wfComponent(comp).lastExecutionInputs;
+			const log = wfComponent(comp).lastExecutionLog;
 			if (inputs === undefined && typeof log === 'string') {
 				const m = log.match(/(?:^|\n)Inputs:\s*(\{[\s\S]*?\})(?:\nOutputs:|$)/);
 				try {
@@ -10731,8 +11056,8 @@ export class WorkflowEditor extends EditorPane {
 			existing.updatePreviewModule(mod);
 			const existingGroup = this._editorGroupService.groups.find(g => g.contains(existing));
 			const pane = await this._editorService.openEditor(existing, { pinned: true, preserveFocus: true }, existingGroup?.id ?? this._outlineSideGroup());
-			if (pane && typeof (pane as any).refreshPreviewModule === 'function') {
-				await (pane as any).refreshPreviewModule(mod);
+			if (pane instanceof EntityDetailEditor) {
+				await pane.refreshPreviewModule(mod);
 			}
 			input = existing;
 		} else {
@@ -10811,7 +11136,11 @@ export class WorkflowEditor extends EditorPane {
 		if (!container) {
 			return false;
 		}
-		container.querySelectorAll('.wf-outline-locate-node, .wf-outline-locate-capsule').forEach(el => el.classList.remove('wf-outline-locate-node', 'wf-outline-locate-capsule', 'is-pulsing'));
+		for (const d of this._renderedNodeDoms()) {
+			for (const el of [d.nodeEl, ...d.capsules]) {
+				el.classList.remove('wf-outline-locate-node', 'wf-outline-locate-capsule', 'is-pulsing');
+			}
+		}
 		const located = this._workflowUri ? WorkflowEditor._outlineLocated.get(this._workflowUri.toString()) : undefined;
 		if (!located) {
 			return false;
@@ -10820,13 +11149,14 @@ export class WorkflowEditor extends EditorPane {
 		let deepestHere: IWfLocateTarget | undefined;
 		let clickedVisible = false;
 		located.targets.forEach((target, i) => {
-			const nodeEl = container.querySelector(`[data-node-id="${CSS.escape(target.nodeId)}"]`) as HTMLElement | null;
-			if (!nodeEl) {
+			const nodeDom = this._getNodeDom(target.nodeId);
+			if (!nodeDom) {
 				return; // not rendered here (e.g. inside a hidden Sub-Workflow region, or another Sub-Workflow's canvas)
 			}
+			const nodeEl = nodeDom.nodeEl;
 			nodeEl.classList.add('wf-outline-locate-node');
 			if (target.stepIndex !== undefined) {
-				(nodeEl.querySelector(`[data-pipeline-step-idx="${target.stepIndex}"]`) as HTMLElement | null)?.classList.add('wf-outline-locate-capsule');
+				nodeDom.capsules.find(el => el.getAttribute('data-pipeline-step-idx') === String(target.stepIndex))?.classList.add('wf-outline-locate-capsule');
 			}
 			const visible = nodeEl.isConnected && nodeEl.getClientRects().length > 0;
 			if (visible) {
@@ -10855,7 +11185,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 		const view = scroller.getBoundingClientRect();
 		let left = view.left;
-		const panel = this._subWorkflowWidgetEl?.querySelector('.wf-outline-panel') as HTMLElement | null;
+		const panel = this._outlinePanelEl && this._subWorkflowWidgetEl?.contains(this._outlinePanelEl) ? this._outlinePanelEl : null;
 		if (panel) {
 			const p = panel.getBoundingClientRect();
 			// The panel sits at the top-left: use the area to its right when that leaves a reasonable width
@@ -10902,13 +11232,12 @@ export class WorkflowEditor extends EditorPane {
 	 * ~1.5s: the editor may re-render or restore its previous scroll position after loading, which would hide the card again.
 	 */
 	private _revealOutlineField(input: EditorInput, fieldId: string): void {
-		const selector = `[data-field-id="${CSS.escape(fieldId)}"]`;
 		let tries = 0;
 		let flashed: HTMLElement | undefined;
 		const tick = () => {
 			const pane = this._editorService.visibleEditorPanes.find(p => p.input === input);
 			const root = pane instanceof EditorPane ? pane.getContainer() : undefined;
-			const card = root?.querySelector(selector) as HTMLElement | null | undefined;
+			const card = root ? findElementWithFieldId(root, fieldId) : undefined;
 			if (card && root) {
 				const view = root.getBoundingClientRect();
 				const r = card.getBoundingClientRect();
@@ -10951,8 +11280,14 @@ export class WorkflowEditor extends EditorPane {
 			this._hidePythonStepPopover(true);
 		}
 		this._updateCanvasDimensions();
-		if (!this._nodesContainer) return;
+		if (!this._nodesContainer) { return; }
+		for (const el of this._inlineNodeEditorEls) {
+			if (this._nodesContainer.contains(el)) {
+				this._inlineNodeEditorEls.delete(el); // discarded together with the nodes below
+			}
+		}
 		clearNode(this._nodesContainer);
+		this._nodeDoms = [];
 
 		if (!this._data || !Array.isArray(this._data.nodes)) {
 			return;
@@ -10979,6 +11314,9 @@ export class WorkflowEditor extends EditorPane {
 			this._ensureNodeFitsPipeline(node);
 			const nodeEl = append(this._nodesContainer, $(`.workflow-node.${node.type}${node.groupId ? '.grouped' : ''}`));
 			nodeEl.setAttribute('data-node-id', node.id);
+			const nodeDom: IWfNodeDom = { nodeId: node.id, nodeEl, pills: [], capsules: [] };
+			this._nodeDoms.push(nodeDom);
+			wfNodeDomByElement.set(nodeEl, nodeDom);
 			if (node.groupId) {
 				nodeEl.setAttribute('data-group-id', node.groupId);
 			}
@@ -10989,7 +11327,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Custom Node Theme Color & Geometry
 			if (node.type === 'diamond') {
-				const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg') as any;
+				const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
 				svg.setAttribute('class', 'diamond-svg-bg');
 				svg.setAttribute('viewBox', '0 0 100 100');
 				svg.setAttribute('preserveAspectRatio', 'none');
@@ -11040,7 +11378,7 @@ export class WorkflowEditor extends EditorPane {
 
 					// Human Approval Interactive Card
 					const humanCard = append(nodeEl, $('.node-human-approval-card'));
-					humanCard.textContent = '⏸ Waiting Approval [Approve]';
+					humanCard.textContent = '\u23F8 Waiting Approval [Approve]';
 					humanCard.title = 'Click to approve and continue workflow execution';
 					humanCard.onmousedown = (e) => e.stopPropagation();
 					humanCard.onclick = (e) => {
@@ -11057,7 +11395,7 @@ export class WorkflowEditor extends EditorPane {
 				const orderNum = selectedActionOrderMap.get(node.id);
 				if (orderNum !== undefined && selectedActionOrderMap.size >= 1) {
 					const orderBadge = append(nodeEl, $('.node-selection-order-badge'));
-					orderBadge.textContent = selectedActionOrderMap.size > 1 ? `▶ #${orderNum}` : '▶ Selected';
+					orderBadge.textContent = selectedActionOrderMap.size > 1 ? `\u25B6 #${orderNum}` : '\u25B6 Selected';
 					orderBadge.title = selectedActionOrderMap.size > 1
 						? `Selected to run #${orderNum} of ${selectedActionOrderMap.size} (Hold Cmd/Ctrl/Shift + Click to toggle nodes)`
 						: `Selected node: clicking Run executes this node (Hold Cmd/Ctrl/Shift + Click other nodes to run multiple non-contiguous nodes)`;
@@ -11109,8 +11447,10 @@ export class WorkflowEditor extends EditorPane {
 
 			// Drag over and Drop support on Node (Context Variables & Module Imports)
 			const computeNodeCapsuleDropIndex = (clientY: number, showIndicator: boolean): number => {
-				const allPills = Array.from(nodeEl.querySelectorAll<HTMLElement>('[data-pipeline-step-idx]'));
-				nodeEl.querySelectorAll('.capsule-drop-before, .capsule-drop-after').forEach(el => el.classList.remove('capsule-drop-before', 'capsule-drop-after'));
+				const allPills = [...nodeDom.capsules];
+				for (const el of nodeDom.capsules) {
+					el.classList.remove('capsule-drop-before', 'capsule-drop-after');
+				}
 				for (let k = 0; k < allPills.length; k++) {
 					const r = allPills[k].getBoundingClientRect();
 					const midY = r.top + r.height / 2;
@@ -11140,7 +11480,9 @@ export class WorkflowEditor extends EditorPane {
 			nodeEl.ondragleave = (e: DragEvent) => {
 				if (!nodeEl.contains(e.relatedTarget as Node)) {
 					nodeEl.classList.remove('drag-hover');
-					nodeEl.querySelectorAll('.capsule-drop-before, .capsule-drop-after').forEach(el => el.classList.remove('capsule-drop-before', 'capsule-drop-after'));
+					for (const el of nodeDom.capsules) {
+						el.classList.remove('capsule-drop-before', 'capsule-drop-after');
+					}
 				}
 			};
 
@@ -11151,7 +11493,7 @@ export class WorkflowEditor extends EditorPane {
 				const dropInsertIdx = computeNodeCapsuleDropIndex(e.clientY, false);
 
 				const dataStr = e.dataTransfer?.getData('text/plain');
-				if (!dataStr) return;
+				if (!dataStr) { return; }
 
 				// 1. Python Step [py] / Component / Variable / Function dropped onto node
 				try {
@@ -11189,15 +11531,15 @@ export class WorkflowEditor extends EditorPane {
 						this._saveFlowchartData();
 						this._renderNodes();
 						this._drawLinks();
-						if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+						if (this._inspectorEl) { this._renderInspector(this._inspectorEl); }
 						if (this._pipelinePanelEl && this._activePipelineNodeId === node.id) {
 							this._renderPipelinePanel(this._pipelinePanelEl, node);
 						}
 						setTimeout(() => {
-							const nodeDom = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${node.id}"]`);
-							const targetPill = nodeDom?.querySelector(`[data-pipeline-step-idx="${safeIdx}"]`) as HTMLElement | null;
-							const pills = nodeDom?.querySelectorAll('.node-function-pill, .node-variable-pill');
-							const fallbackPill = pills && pills.length > 0 ? (pills[pills.length - 1] as HTMLElement) : undefined;
+							const nodeDom = this._getNodeDom(node.id);
+							const targetPill = nodeDom?.capsules.find(el => el.getAttribute('data-pipeline-step-idx') === String(safeIdx));
+							const pills = nodeDom?.pills;
+							const fallbackPill = pills && pills.length > 0 ? pills[pills.length - 1] : undefined;
 							this._openNodeFunctionInlineEditor(node, newStep, targetPill || fallbackPill);
 						}, 50);
 						return;
@@ -11215,8 +11557,8 @@ export class WorkflowEditor extends EditorPane {
 					}
 					// Avoid duplicates
 					if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
-						node.imports.push({ type: type as any, name });
-						if (!node.pipeline) node.pipeline = [];
+						node.imports.push({ type, name });
+						if (!node.pipeline) { node.pipeline = []; }
 						const newStep: INodePipelineStep = {
 							id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 							type: 'run_ticket',
@@ -11237,6 +11579,7 @@ export class WorkflowEditor extends EditorPane {
 			};
 
 			const contentWrapper = append(nodeEl, $('.node-content-wrapper'));
+			nodeDom.contentWrapper = contentWrapper;
 
 			// Top-right Voice Note Speaker Icon (auto-shown whenever this node contains a voice_note component)
 			const voiceState = this._getNodeVoiceNoteState(node);
@@ -11245,8 +11588,9 @@ export class WorkflowEditor extends EditorPane {
 				const clipCount = voiceState.clips.length;
 				const speakerBtn = append(nodeEl, $(`.node-voice-speaker-btn${clipCount === 0 ? '.empty' : ''}${isPlayingThis ? '.playing' : ''}`));
 				speakerBtn.setAttribute('data-clip-count', String(clipCount));
-				append(speakerBtn, $('span.codicon.codicon-unmute'));
+				const speakerIcon = append(speakerBtn, $('span.codicon.codicon-unmute'));
 				const countBadge = append(speakerBtn, $('span.voice-count-badge'));
+				nodeDom.speaker = { btn: speakerBtn, icon: speakerIcon, countBadge };
 				if (isPlayingThis && this._activeVoiceClipTotal > 0) {
 					countBadge.textContent = `${this._activeVoiceClipIndex + 1}/${this._activeVoiceClipTotal}`;
 					countBadge.style.display = 'inline';
@@ -11403,7 +11747,7 @@ export class WorkflowEditor extends EditorPane {
 									return;
 								}
 								e.stopPropagation();
-								if ((badge as any)._justDraggedAt && Date.now() - (badge as any)._justDraggedAt < 250) {
+								if (wfCapsuleJustDraggedAt.get(badge) && Date.now() - wfCapsuleJustDraggedAt.get(badge)! < 250) {
 									return;
 								}
 								this._hideTicketPopover();
@@ -11423,17 +11767,20 @@ export class WorkflowEditor extends EditorPane {
 									uri: step.ticketUri
 								});
 							};
-							this._attachCapsuleDragReorder(badge, badgesContainer, node, i);
+							nodeDom.capsules.push(badge);
+							this._attachCapsuleDragReorder(badge, badgesContainer, node, i, badgeText);
 						} else if (step.type === 'call_function' || step.type === 'set_variable' || step.type === 'component' || step.component || step.expression) {
-							const fnPillEl = this._renderFunctionPill(badgesContainer, node, step, stepNumber);
-							this._attachCapsuleDragReorder(fnPillEl, badgesContainer, node, i);
+							const { pill: fnPillEl, textEl: fnPillTextEl } = this._renderFunctionPill(badgesContainer, node, step, stepNumber);
+							nodeDom.pills.push(fnPillEl);
+							nodeDom.capsules.push(fnPillEl);
+							this._attachCapsuleDragReorder(fnPillEl, badgesContainer, node, i, fnPillTextEl);
 						}
 					}
 				} else {
 					// Fallback: No pipeline configured yet (standard separate imports badges)
 					const effectiveTickets = node.imports || [];
 					for (const t of effectiveTickets) {
-						if (!t.name) continue;
+						if (!t.name) { continue; }
 						const badge = append(badgesContainer, $(`.node-import-badge.${t.type || 'custom'}`));
 						const typeLabel = t.type ? (t.type.charAt(0).toUpperCase() + t.type.slice(1)) : 'Module';
 						const style = getEntityBadgeStyle(t.type);
@@ -11494,7 +11841,7 @@ export class WorkflowEditor extends EditorPane {
 					varsContainer.style.padding = '0 8px';
 
 					for (const v of nodeVars) {
-						this._renderVariablePill(varsContainer, node, v);
+						nodeDom.pills.push(this._renderVariablePill(varsContainer, node, v));
 					}
 				}
 			}
@@ -11531,8 +11878,8 @@ export class WorkflowEditor extends EditorPane {
 				labelWrapper.style.fontStyle = 'italic';
 			}
 			const textDecorations: string[] = [];
-			if (node.isUnderline) textDecorations.push('underline');
-			if (node.isStrikethrough) textDecorations.push('line-through');
+			if (node.isUnderline) { textDecorations.push('underline'); }
+			if (node.isStrikethrough) { textDecorations.push('line-through'); }
 			if (textDecorations.length > 0) {
 				labelWrapper.style.textDecoration = textDecorations.join(' ');
 			}
@@ -11590,8 +11937,8 @@ export class WorkflowEditor extends EditorPane {
 
 				// Detect double click manually (immune to DOM nodes recreation)
 				const now = Date.now();
-				const lastClickTime = (node as any)._lastClickTime || 0;
-				(node as any)._lastClickTime = now;
+				const lastClickTime = node._lastClickTime || 0;
+				node._lastClickTime = now;
 				if (now - lastClickTime < 300) {
 					const target = e.target as HTMLElement;
 					if (
@@ -11714,14 +12061,34 @@ export class WorkflowEditor extends EditorPane {
 		this._applyOutlineLocateHighlight(false);
 	}
 
+	/** The `name` property of the current editor input, if it has one. */
+	private _inputNameProperty(): string | undefined {
+		const input = this.input;
+		if (input && hasWorkflowProperty(input, 'name')) {
+			const name = input.name;
+			return typeof name === 'string' ? name : undefined;
+		}
+		return undefined;
+	}
+
+	/** Rendered nodes that are currently attached to this editor's canvas, in document order. */
+	private _renderedNodeDoms(): IWfNodeDom[] {
+		const root = this._nodesContainer || this._canvas;
+		return root ? this._nodeDoms.filter(d => root.contains(d.nodeEl)) : [];
+	}
+
+	/** The (first) rendered node element of `nodeId` on this editor's canvas. */
+	private _getNodeDom(nodeId: string): IWfNodeDom | undefined {
+		return this._renderedNodeDoms().find(d => d.nodeId === nodeId);
+	}
+
 	private _hasActiveInlineNodeEditor(): boolean {
-		return Boolean(
-			this._nodesContainer?.querySelector('.node-inline-editor, .node-function-draft-wrapper, .node-variable-draft-wrapper')
-		);
+		const container = this._nodesContainer;
+		return !!container && [...this._inlineNodeEditorEls].some(el => container.contains(el));
 	}
 
 	private _showInlineEditor(nodeEl: HTMLElement, node: IFlowchartNode): void {
-		if (nodeEl.querySelector('.node-inline-editor')) {
+		if ([...this._inlineNodeEditorEls].some(el => el.classList.contains('node-inline-editor') && nodeEl.contains(el))) {
 			return;
 		}
 
@@ -11730,12 +12097,13 @@ export class WorkflowEditor extends EditorPane {
 			curLabel = curLabel.substring(0, 50).trim() || 'Step';
 		}
 
-		const contentWrapper = nodeEl.querySelector('.node-content-wrapper') as HTMLElement;
+		const contentWrapper = wfNodeDomByElement.get(nodeEl)?.contentWrapper;
 		if (contentWrapper) {
 			contentWrapper.style.visibility = 'hidden';
 		}
 
 		const textarea = append(nodeEl, $('textarea.node-inline-editor')) as HTMLTextAreaElement;
+		this._inlineNodeEditorEls.add(textarea);
 		textarea.value = curLabel;
 
 		textarea.style.position = 'absolute';
@@ -11751,8 +12119,8 @@ export class WorkflowEditor extends EditorPane {
 		textarea.style.fontWeight = node.isBold ? '700' : '500';
 		textarea.style.fontStyle = node.isItalic ? 'italic' : 'normal';
 		const editDecorations: string[] = [];
-		if (node.isUnderline) editDecorations.push('underline');
-		if (node.isStrikethrough) editDecorations.push('line-through');
+		if (node.isUnderline) { editDecorations.push('underline'); }
+		if (node.isStrikethrough) { editDecorations.push('line-through'); }
 		textarea.style.textDecoration = editDecorations.length > 0 ? editDecorations.join(' ') : 'none';
 		textarea.style.background = 'var(--vscode-input-background, #1e1e1e)';
 		textarea.style.color = node.textColor || 'var(--vscode-input-foreground, #ffffff)';
@@ -11799,7 +12167,7 @@ export class WorkflowEditor extends EditorPane {
 
 		textarea.focus();
 		textarea.select();
-		requestAnimationFrame(() => {
+		this._targetWindow.requestAnimationFrame(() => {
 			if (isFinished || !textarea.isConnected) {
 				return;
 			}
@@ -11844,7 +12212,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 			if (!blurReady) {
 				// Ignore transient blur caused by the trailing mouseup/click of the double-click gesture
-				requestAnimationFrame(() => {
+				this._targetWindow.requestAnimationFrame(() => {
 					if (!isFinished && textarea.isConnected) {
 						textarea.focus();
 					}
@@ -11855,18 +12223,26 @@ export class WorkflowEditor extends EditorPane {
 		};
 	}
 
+	/**
+	 * Inline node label editors (`textarea.node-inline-editor`) and function draft popups (`.node-function-draft-wrapper`)
+	 * created on the canvas; whether one is active is decided by whether it is still inside `_nodesContainer`.
+	 */
+	private readonly _inlineNodeEditorEls = new Set<HTMLElement>();
 	private _activeVariableDraftInputEl: HTMLElement | null = null;
 	private _activeFunctionDraftInputEl: HTMLElement | null = null;
 
 	private _setupDraftPopupPositionAndDrag(
 		nodeEl: HTMLElement,
 		draftWrapper: HTMLElement,
-		headerRow: HTMLElement
+		headerRow: HTMLElement,
+		/** The `.node-function-header-title` element of `headerRow`. */
+		titleEl: HTMLElement | undefined
 	): () => void {
 		// 1. Add visual drag grip icon to header title and set tooltip
-		const titleEl = headerRow.querySelector('.node-function-header-title');
-		if (titleEl && !titleEl.querySelector('.draft-drag-grip')) {
+		const existingGrip = titleEl ? wfDraftDragGrips.get(titleEl) : undefined;
+		if (titleEl && !(existingGrip && titleEl.contains(existingGrip))) {
 			const grip = document.createElement('span');
+			wfDraftDragGrips.set(titleEl, grip);
 			grip.className = 'draft-drag-grip';
 			grip.textContent = '\u283F';
 			grip.title = 'Drag header to move panel';
@@ -11889,7 +12265,7 @@ export class WorkflowEditor extends EditorPane {
 			const nodeRect = nodeEl.getBoundingClientRect();
 			const zoom = this._zoomLevel || 1;
 
-			const logDrawer = this._container?.querySelector('.workflow-log-drawer') as HTMLElement | null;
+			const logDrawer = this._logDrawerEl && this._container?.contains(this._logDrawerEl) ? this._logDrawerEl : null;
 			const logDrawerTop = (logDrawer && logDrawer.style.display !== 'none' && logDrawer.offsetHeight > 0)
 				? logDrawer.getBoundingClientRect().top
 				: canvasRect.bottom;
@@ -11947,11 +12323,11 @@ export class WorkflowEditor extends EditorPane {
 		const cleanupDragListeners = () => {
 			draftWrapper.classList.remove('is-dragging');
 			if (activeMoveHandler) {
-				window.removeEventListener('mousemove', activeMoveHandler, true);
+				this._targetWindow.removeEventListener('mousemove', activeMoveHandler, true);
 				activeMoveHandler = null;
 			}
 			if (activeUpHandler) {
-				window.removeEventListener('mouseup', activeUpHandler, true);
+				this._targetWindow.removeEventListener('mouseup', activeUpHandler, true);
 				activeUpHandler = null;
 			}
 		};
@@ -11987,8 +12363,8 @@ export class WorkflowEditor extends EditorPane {
 				cleanupDragListeners();
 			};
 
-			window.addEventListener('mousemove', activeMoveHandler, true);
-			window.addEventListener('mouseup', activeUpHandler, true);
+			this._targetWindow.addEventListener('mousemove', activeMoveHandler, true);
+			this._targetWindow.addEventListener('mouseup', activeUpHandler, true);
 		};
 
 		return cleanupDragListeners;
@@ -12010,7 +12386,7 @@ export class WorkflowEditor extends EditorPane {
 				s => s.targetVariable?.replace(/^@/, '') === targetVar.name.replace(/^@/, '')
 			);
 			if (!step) {
-				if (!node.pipeline) node.pipeline = [];
+				if (!node.pipeline) { node.pipeline = []; }
 				const rawExpr = (targetVar.expression || targetVar.initialValue || 'None').trim();
 				const cleanName = targetVar.name.replace(/^@/, '');
 				const fullExpr = rawExpr.startsWith(cleanName) || rawExpr.startsWith(`@${cleanName}`)
@@ -12057,7 +12433,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 
-		const nodeEl = (this._nodesContainer || this._canvas)?.querySelector(`[data-node-id="${node.id}"]`) as HTMLElement;
+		const nodeEl = this._getNodeDom(node.id)?.nodeEl;
 		if (!nodeEl) {
 			return;
 		}
@@ -12082,13 +12458,13 @@ export class WorkflowEditor extends EditorPane {
 		const availableVars = new Set<string>();
 		for (const n of this._data?.nodes || []) {
 			for (const v of this._getNodeVariables(n)) {
-				if (v.name) availableVars.add(v.name.replace(/^@/, ''));
+				if (v.name) { availableVars.add(v.name.replace(/^@/, '')); }
 			}
 			for (const p of n.pipeline || []) {
 				if (p.component && p.component.type !== 'parameters' && p.component.type !== 'output' && p.component.type !== 'display') {
 					availableVars.add(this._getComponentOutputVarName(p.component));
 				}
-				if (p.targetVariable) availableVars.add(p.targetVariable.replace(/^@/, ''));
+				if (p.targetVariable) { availableVars.add(p.targetVariable.replace(/^@/, '')); }
 			}
 		}
 
@@ -12131,6 +12507,7 @@ export class WorkflowEditor extends EditorPane {
 
 		const draftWrapper = document.createElement('div');
 		draftWrapper.className = 'node-function-draft-wrapper';
+		this._inlineNodeEditorEls.add(draftWrapper);
 		this._activeFunctionDraftInputEl = draftWrapper;
 
 		// Stop mouse events from reaching canvas or node to prevent dragging/re-rendering
@@ -12151,8 +12528,7 @@ export class WorkflowEditor extends EditorPane {
 		titleText.textContent = 'Python Step Editor';
 
 		const pyEnvChip = append(headerRow, $('span.node-function-py-env-chip'));
-		const rawPyPath: any = this._data?.pythonPath || this._detectedPythonPath || 'python3';
-		const activePyPath = typeof rawPyPath === 'string' ? rawPyPath : String(rawPyPath?.interpreterPath || 'python3');
+		const activePyPath = pythonPathSettingToPath(this._data?.pythonPath || this._detectedPythonPath || 'python3');
 		const shortPyLabel = activePyPath.includes('.venv') ? '.venv (Python)' : (activePyPath.split('/').pop() || 'python3');
 		const renderPyEnvChipContent = (labelStr: string) => {
 			clearNode(pyEnvChip);
@@ -12246,8 +12622,7 @@ export class WorkflowEditor extends EditorPane {
 		// Optional: Open referenced ticket in Editor Tab button
 		const candidateTicket = (node.imports || [])[0] || (node.pipeline || []).find(s => s.type === 'run_ticket' && s.ticketName);
 		if (candidateTicket) {
-			const ticketName = 'ticketName' in candidateTicket ? candidateTicket.ticketName : candidateTicket.name;
-			const ticketType = 'ticketType' in candidateTicket ? candidateTicket.ticketType : candidateTicket.type;
+			const { ticketName, ticketType } = ticketRefNameAndType(candidateTicket);
 			if (ticketName) {
 				const openTabBtn = append(headerRow, $('.node-function-open-tab-btn'));
 				openTabBtn.title = `Open Ticket '${ticketName}' in Editor Tab`;
@@ -12278,7 +12653,7 @@ export class WorkflowEditor extends EditorPane {
 
 		const cancelBtn = append(headerRow, $('.var-draft-cancel-btn'));
 		cancelBtn.title = 'Cancel (Esc)';
-		cancelBtn.textContent = '✕';
+		cancelBtn.textContent = '\u2715';
 		cancelBtn.style.cursor = 'pointer';
 		cancelBtn.onmousedown = (e) => {
 			e.stopPropagation();
@@ -12301,6 +12676,7 @@ export class WorkflowEditor extends EditorPane {
 				targetPillElement.style.display = '';
 			}
 			draftWrapper.remove();
+			this._inlineNodeEditorEls.delete(draftWrapper);
 			this._activeFunctionDraftInputEl = null;
 		};
 
@@ -12359,7 +12735,7 @@ export class WorkflowEditor extends EditorPane {
 					if (ch === inQuoteChar && val[i - 1] !== '\\') {
 						inQuoteChar = null;
 					}
-				} else if (ch === '"' || ch === "'") {
+				} else if (ch === '"' || ch === '\'') {
 					inQuoteChar = ch;
 				}
 			}
@@ -12463,6 +12839,8 @@ export class WorkflowEditor extends EditorPane {
 
 		// Row 4: Parameters Reference
 		const fieldsRow = append(draftWrapper, $('.node-function-fields-row'));
+		// Field chips, hints, "more" buttons and hidden-chip wraps created for the fields row (rebuilt on every update)
+		let fieldsRowChipEls: HTMLElement[] = [];
 		fieldsRow.onmousedown = (e) => e.stopPropagation();
 		const fieldsLabel = append(fieldsRow, $('.node-function-fields-label', {}, 'Inputs:'));
 
@@ -12484,7 +12862,7 @@ export class WorkflowEditor extends EditorPane {
 					if (ch === inStringQuote && before[i - 1] !== '\\') {
 						inStringQuote = null;
 					}
-				} else if (ch === '"' || ch === "'") {
+				} else if (ch === '"' || ch === '\'') {
 					inStringQuote = ch;
 				}
 			}
@@ -12566,27 +12944,28 @@ export class WorkflowEditor extends EditorPane {
 			}
 		};
 
-		const extractSchemaParamsForType = (typeName: string): { name: string; defaultValue: any }[] => {
+		const extractSchemaParamsForType = (typeName: string): IWfSchemaParamSpec[] => {
 			return this._extractSchemaParamsForType(typeName);
 		};
 
 		let lastAutoPrefilledType = '';
 		let lastAutoPrefilledDict = '';
 
-		const buildParamsDictLiteral = (specs: { name: string; defaultValue: any }[]): string => {
-			if (specs.length === 0) return '{}';
+		const buildParamsDictLiteral = (specs: IWfSchemaParamSpec[]): string => {
+			if (specs.length === 0) { return '{}'; }
 			const entries = specs.map(sp => {
-				const isVarRef = typeof sp.defaultValue === 'string' && sp.defaultValue.startsWith('@');
-				const valStr = typeof sp.defaultValue === 'number' || typeof sp.defaultValue === 'boolean'
-					? String(sp.defaultValue)
-					: (isVarRef ? sp.defaultValue.substring(1) : JSON.stringify(String(sp.defaultValue ?? '')));
+				const defaultValue = sp.defaultValue;
+				const isVarRef = typeof defaultValue === 'string' && defaultValue.startsWith('@');
+				const valStr = typeof defaultValue === 'number' || typeof defaultValue === 'boolean'
+					? String(defaultValue)
+					: (isVarRef ? defaultValue.substring(1) : JSON.stringify(String(defaultValue ?? '')));
 				return `"${sp.name}": ${valStr}`;
 			});
 			return `{${entries.join(', ')}}`;
 		};
 
-		const pruneNonSchemaParams = (code: string, schemaSpecs: { name: string; defaultValue: any }[]): string => {
-			if (!code) return code;
+		const pruneNonSchemaParams = (code: string, schemaSpecs: IWfSchemaParamSpec[]): string => {
+			if (!code) { return code; }
 			const validNames = new Set(schemaSpecs.map(s => s.name.toLowerCase()));
 			return code.replace(/\b(params|parameters)\s*=\s*\{([\s\S]*?)\}/, (match, paramKw, dictBody) => {
 				const entryRegex = /(?:["']([^"']+)["']|([a-zA-Z_][a-zA-Z0-9_]*))\s*:\s*([^,\n}]+(?:\{[^{}]*\}[^,\n}]*)?)(?:,\s*|\s*|$)/g;
@@ -12596,12 +12975,12 @@ export class WorkflowEditor extends EditorPane {
 				while ((em = entryRegex.exec(dictBody)) !== null) {
 					const key = (em[1] || em[2] || '').trim();
 					let rawVal = (em[3] || '').trim();
-					if (!key) continue;
+					if (!key) { continue; }
 					const lowerKey = key.toLowerCase();
 					if (validNames.has(lowerKey) && !seenKeys.has(lowerKey)) {
 						seenKeys.add(lowerKey);
 						const spec = schemaSpecs.find(s => s.name.toLowerCase() === lowerKey);
-						if ((rawVal === '""' || rawVal === "''") && spec && spec.defaultValue !== undefined && spec.defaultValue !== '') {
+						if ((rawVal === '""' || rawVal === '\'\'') && spec && spec.defaultValue !== undefined && spec.defaultValue !== '') {
 							rawVal = typeof spec.defaultValue === 'number' || typeof spec.defaultValue === 'boolean'
 								? String(spec.defaultValue)
 								: JSON.stringify(String(spec.defaultValue));
@@ -12619,8 +12998,8 @@ export class WorkflowEditor extends EditorPane {
 			});
 		};
 
-		const autoPrefillParamsInCode = (targetTypeKey: string, specs: { name: string; defaultValue: any }[]) => {
-			if (specs.length === 0) return;
+		const autoPrefillParamsInCode = (targetTypeKey: string, specs: IWfSchemaParamSpec[]) => {
+			if (specs.length === 0) { return; }
 			const dictLiteral = buildParamsDictLiteral(specs);
 			const curVal = codeArea.value;
 			const prevSelStart = codeArea.selectionStart ?? curVal.length;
@@ -12729,16 +13108,18 @@ export class WorkflowEditor extends EditorPane {
 			syncFnBackdrop();
 			const val = codeArea.value;
 
-			fieldsRow.querySelectorAll('.node-function-field-chip, .node-function-field-hint, .node-function-more-btn, .node-function-hidden-wrap').forEach(el => el.remove());
+			const chipElsInFieldsRow = fieldsRowChipEls.filter(el => fieldsRow.contains(el));
+			fieldsRowChipEls = fieldsRowChipEls.filter(el => !fieldsRow.contains(el));
+			chipElsInFieldsRow.forEach(el => el.remove());
 
 			// Collect all canvas variables available across nodes & pipelines + local editor variables
 			availableVars.clear();
 			for (const n of this._data?.nodes || []) {
 				for (const v of this._getNodeVariables(n)) {
-					if (v.name) availableVars.add(v.name.replace(/^@/, ''));
+					if (v.name) { availableVars.add(v.name.replace(/^@/, '')); }
 				}
 				for (const p of n.pipeline || []) {
-					if (p.targetVariable) availableVars.add(p.targetVariable.replace(/^@/, ''));
+					if (p.targetVariable) { availableVars.add(p.targetVariable.replace(/^@/, '')); }
 				}
 			}
 			// Also extract local variables & loop variables from current Python code
@@ -12762,7 +13143,7 @@ export class WorkflowEditor extends EditorPane {
 
 			interface IParamSpec {
 				name: string;
-				defaultValue: any;
+				defaultValue: unknown;
 				isStandard?: boolean;
 				isDictParam?: boolean;
 			}
@@ -12813,6 +13194,7 @@ export class WorkflowEditor extends EditorPane {
 
 			if (paramSpecs.length === 0) {
 				const hint = append(fieldsRow, $('.node-function-field-hint'));
+				fieldsRowChipEls.push(hint);
 				hint.textContent = 'Standard Python syntax enabled (variables, lists, dicts, loops, def, class)';
 				hint.style.fontSize = '9.5px';
 				hint.style.opacity = '0.5';
@@ -12839,6 +13221,7 @@ export class WorkflowEditor extends EditorPane {
 				const safeDisplayVal = formattedVal.length > 35 ? formattedVal.substring(0, 32) + '..."' : formattedVal;
 
 				const chip = append(parentEl, $('.node-function-field-chip'));
+				fieldsRowChipEls.push(chip);
 				if (isIncluded) {
 					chip.classList.add('included');
 					const actualValRaw = dictMatch ? dictMatch[2].trim() : (kwargMatch ? kwargMatch[2].trim() : safeDisplayVal);
@@ -12940,6 +13323,7 @@ export class WorkflowEditor extends EditorPane {
 				const hiddenWrap = append(fieldsRow, $('span.node-function-hidden-wrap', {
 					style: isParamsChipsExpanded ? 'display: contents;' : 'display: none;'
 				}));
+				fieldsRowChipEls.push(hiddenWrap);
 				for (const p of hiddenParamSpecs) {
 					renderParamSpecChip(hiddenWrap, p);
 				}
@@ -12948,6 +13332,7 @@ export class WorkflowEditor extends EditorPane {
 					style: 'padding: 1px 7px; font-size: 9.5px; font-weight: 600; border-radius: 4px; border: 1px dashed rgba(56, 189, 248, 0.45); background: rgba(56, 189, 248, 0.08); color: #38bdf8; cursor: pointer; white-space: nowrap;',
 					title: 'Show / hide more parameters'
 				}, isParamsChipsExpanded ? 'Less' : `+${hiddenParamSpecs.length} More...`));
+				fieldsRowChipEls.push(moreBtn);
 				moreBtn.onmousedown = (e) => {
 					e.stopPropagation();
 					e.preventDefault();
@@ -13111,7 +13496,7 @@ export class WorkflowEditor extends EditorPane {
 			clearNode(popover);
 			currentMatches.slice(0, 8).forEach((item, idx) => {
 				const row = append(popover!, $('.node-variable-ac-item'));
-				if (idx === activeAcIdx) row.classList.add('selected');
+				if (idx === activeAcIdx) { row.classList.add('selected'); }
 				const badge = append(row, $('.ac-item-badge'));
 				badge.textContent = item.badgeLabel;
 				const nameEl = append(row, $('.ac-item-name'));
@@ -13128,7 +13513,7 @@ export class WorkflowEditor extends EditorPane {
 
 		let committed = false;
 		const commit = () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 
 			const rawExpr = codeArea.value.replace(/\r\n/g, '\n').trim();
@@ -13147,7 +13532,7 @@ export class WorkflowEditor extends EditorPane {
 				fnName = singleLineCallMatch[1];
 			}
 
-			if (!node.pipeline) node.pipeline = [];
+			if (!node.pipeline) { node.pipeline = []; }
 
 			if (existingStep) {
 				existingStep.type = 'call_function';
@@ -13169,7 +13554,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Register any assigned variables in node.outputVariables so variable autocomplete & context tracking know about them
 			if (assignedVars.length > 0) {
-				if (!node.outputVariables) node.outputVariables = [];
+				if (!node.outputVariables) { node.outputVariables = []; }
 				for (const vName of assignedVars) {
 					const existingVar = node.outputVariables.find(v => v.name.replace(/^@/, '') === vName);
 					if (existingVar) {
@@ -13278,7 +13663,7 @@ export class WorkflowEditor extends EditorPane {
 		codeArea.onkeydown = handleKeyDown;
 
 		nodeEl.appendChild(draftWrapper);
-		disposeDrag = this._setupDraftPopupPositionAndDrag(nodeEl, draftWrapper, headerRow);
+		disposeDrag = this._setupDraftPopupPositionAndDrag(nodeEl, draftWrapper, headerRow, titleDiv);
 		codeArea.focus();
 		const quoteIdx = codeArea.value.indexOf('""');
 		if (quoteIdx !== -1) {
@@ -13295,7 +13680,7 @@ export class WorkflowEditor extends EditorPane {
 		pipelineStep?: INodePipelineStep
 	): void {
 		const trimmed = rawText.trim();
-		if (!trimmed) return;
+		if (!trimmed) { return; }
 
 		const vars = this._getNodeVariables(node);
 
@@ -13307,7 +13692,7 @@ export class WorkflowEditor extends EditorPane {
 
 			if (targetVar) {
 				const idx = vars.indexOf(targetVar);
-				if (idx !== -1) vars.splice(idx, 1);
+				if (idx !== -1) { vars.splice(idx, 1); }
 			}
 
 			for (let i = 0; i < leftNames.length; i++) {
@@ -13486,7 +13871,7 @@ export class WorkflowEditor extends EditorPane {
 		this._saveFlowchartData();
 		this._renderNodes();
 		this._drawLinks();
-		if (this._inspectorEl) this._renderInspector(this._inspectorEl);
+		if (this._inspectorEl) { this._renderInspector(this._inspectorEl); }
 		this._refreshVariablesDrawer();
 	}
 
@@ -13666,7 +14051,7 @@ export class WorkflowEditor extends EditorPane {
 
 		setTimeout(() => {
 			if (this._nodesContainer) {
-				const newNodeEl = this._nodesContainer.querySelector(`.workflow-node[data-node-id="${newId}"]`) as HTMLElement;
+				const newNodeEl = this._getNodeDom(newId)?.nodeEl;
 				if (newNodeEl) {
 					this._showInlineEditor(newNodeEl, newChild);
 				}
@@ -13799,7 +14184,7 @@ export class WorkflowEditor extends EditorPane {
 
 		setTimeout(() => {
 			if (this._nodesContainer) {
-				const newNodeEl = this._nodesContainer.querySelector(`.workflow-node[data-node-id="${newId}"]`) as HTMLElement;
+				const newNodeEl = this._getNodeDom(newId)?.nodeEl;
 				if (newNodeEl) {
 					this._showInlineEditor(newNodeEl, newSibling);
 				}
@@ -13962,12 +14347,14 @@ export class WorkflowEditor extends EditorPane {
 		fromPort: 'top' | 'right' | 'bottom' | 'left' = 'right',
 		toPort?: 'top' | 'right' | 'bottom' | 'left'
 	): void {
-		if (!this._svgOverlay) return;
-		let tempLine = this._svgOverlay.querySelector('#workflow-temp-line') as SVGPathElement;
+		if (!this._svgOverlay) { return; }
+		let tempLine = this._getTempLinkLine();
 		if (!tempLine) {
-			tempLine = document.createElementNS('http://www.w3.org/2000/svg', 'path') as any;
+			tempLine = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+			this._tempLinkLine = tempLine;
 			tempLine.setAttribute('id', 'workflow-temp-line');
 			tempLine.classList.add('workflow-connection-line');
+			this._connectionLineEls.add(tempLine);
 			tempLine.style.strokeDasharray = '5 4';
 			tempLine.style.stroke = '#22d3ee';
 			tempLine.style.strokeWidth = '2.5px';
@@ -13995,18 +14382,24 @@ export class WorkflowEditor extends EditorPane {
 		tempLine.setAttribute('d', d);
 	}
 
+	/** The `#workflow-temp-line` path currently in `_svgOverlay`, if any. */
+	private _getTempLinkLine(): SVGPathElement | undefined {
+		return this._tempLinkLine && this._svgOverlay?.contains(this._tempLinkLine) ? this._tempLinkLine : undefined;
+	}
+
 	private _clearTempLink(): void {
-		if (!this._svgOverlay) return;
-		const tempLine = this._svgOverlay.querySelector('#workflow-temp-line');
+		if (!this._svgOverlay) { return; }
+		const tempLine = this._getTempLinkLine();
 		if (tempLine) {
 			tempLine.remove();
+			this._connectionLineEls.delete(tempLine);
 		}
 	}
 
 	private _onMouseMove(e: MouseEvent): void {
 		if (this._isDrawerResizing && this._logDrawerEl) {
 			const dy = this._drawerResizeStartY - e.clientY;
-			const parentHeight = this._logDrawerEl.parentElement?.clientHeight || window.innerHeight;
+			const parentHeight = this._logDrawerEl.parentElement?.clientHeight || this._targetWindow.innerHeight;
 			const maxHeight = Math.max(200, parentHeight - 60);
 			const newHeight = Math.min(maxHeight, Math.max(100, this._drawerResizeStartHeight + dy));
 			this._drawerHeight = newHeight;
@@ -14022,7 +14415,7 @@ export class WorkflowEditor extends EditorPane {
 				link.labelWidth = Math.max(36, Math.round(this._resizeLinkLabelStartWidth + dw));
 				link.labelHeight = Math.max(20, Math.round(this._resizeLinkLabelStartHeight + dh));
 
-				const labelEl = this._linkDeletesContainer?.querySelector(`.workflow-link-label[data-link-id="${link.id}"]`) as HTMLElement;
+				const labelEl = this._getLinkLabelEl(link.id);
 				if (labelEl) {
 					labelEl.style.width = `${link.labelWidth}px`;
 					labelEl.style.maxWidth = 'none';
@@ -14057,7 +14450,7 @@ export class WorkflowEditor extends EditorPane {
 					const routingMode = link.routing || this._activeRoutingMode || 'orthogonal';
 					const pt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, t, link.waypoints);
 
-					const labelEl = this._linkDeletesContainer?.querySelector(`.workflow-link-label[data-link-id="${link.id}"]`) as HTMLElement;
+					const labelEl = this._getLinkLabelEl(link.id);
 					if (labelEl) {
 						labelEl.style.left = `${pt.x}px`;
 						labelEl.style.top = `${pt.y}px`;
@@ -14161,7 +14554,7 @@ export class WorkflowEditor extends EditorPane {
 					snapNode = this._data.nodes.find(n => n.id === hoveredNodeId);
 					if (snapNode && hoveredPortEl) {
 						const classes = Array.from(hoveredPortEl.classList);
-						directPort = classes.find(c => ['top', 'right', 'bottom', 'left'].includes(c)) as any;
+						directPort = classes.find(c => ['top', 'right', 'bottom', 'left'].includes(c)) as IFlowchartLink['fromPort'];
 					}
 				}
 			}
@@ -14169,7 +14562,7 @@ export class WorkflowEditor extends EditorPane {
 			if (!snapNode) {
 				let bestNodeDist = Infinity;
 				for (const node of this._data.nodes) {
-					if (node.id === this._tempLinkFromNodeId || hiddenSubWfNodeIds.has(node.id)) continue;
+					if (node.id === this._tempLinkFromNodeId || hiddenSubWfNodeIds.has(node.id)) { continue; }
 					// Detect if cursor is near or inside visible target node bounding box
 					if (currentX >= node.x - 24 && currentX <= node.x + node.width + 24 &&
 						currentY >= node.y - 24 && currentY <= node.y + node.height + 24) {
@@ -14262,7 +14655,7 @@ export class WorkflowEditor extends EditorPane {
 				node.height = Math.max(30, Math.round((this._resizeStartHeight + dh) / grid) * grid);
 
 				// Dynamically update size in DOM by data-node-id (safe even when Sub-Workflow nodes are hidden)
-				const nodeEl = this._nodesContainer?.querySelector(`.workflow-node[data-node-id="${node.id}"]`) as HTMLElement | null;
+				const nodeEl = this._getNodeDom(node.id)?.nodeEl;
 				if (nodeEl) {
 					nodeEl.style.width = `${node.width}px`;
 					nodeEl.style.height = `${node.height}px`;
@@ -14358,7 +14751,7 @@ export class WorkflowEditor extends EditorPane {
 					}
 
 					// Dynamically update position in DOM by data-node-id (instant 1:1 tracking even when Sub-Workflow nodes are hidden)
-					const nodeEl = this._nodesContainer?.querySelector(`.workflow-node[data-node-id="${node.id}"]`) as HTMLElement | null;
+					const nodeEl = this._getNodeDom(node.id)?.nodeEl;
 					if (nodeEl) {
 						nodeEl.style.left = `${node.x}px`;
 						nodeEl.style.top = `${node.y}px`;
@@ -14425,7 +14818,7 @@ export class WorkflowEditor extends EditorPane {
 			this._isDraggingLinkLabel = null;
 			this._dragLabelHasMoved = false;
 
-			const labelEl = this._linkDeletesContainer?.querySelector(`.workflow-link-label[data-link-id="${linkId}"]`) as HTMLElement;
+			const labelEl = this._getLinkLabelEl(linkId);
 			if (labelEl) {
 				labelEl.classList.remove('dragging');
 			}
@@ -14448,7 +14841,7 @@ export class WorkflowEditor extends EditorPane {
 				let toPort: 'top' | 'right' | 'bottom' | 'left' | undefined;
 
 				if (targetNodeEl) {
-					const targetNodeId = targetNodeEl.getAttribute("data-node-id");
+					const targetNodeId = targetNodeEl.getAttribute('data-node-id');
 					if (targetNodeId) {
 						targetNode = this._data.nodes.find(n => n.id === targetNodeId);
 					}
@@ -14462,7 +14855,7 @@ export class WorkflowEditor extends EditorPane {
 					const upY = (e.clientY - rect.top) / this._zoomLevel;
 					let bestDist = Infinity;
 					for (const n of this._data.nodes) {
-						if (n.id === this._tempLinkFromNodeId || hiddenSubWfNodeIds.has(n.id)) continue;
+						if (n.id === this._tempLinkFromNodeId || hiddenSubWfNodeIds.has(n.id)) { continue; }
 						if (upX >= n.x - 24 && upX <= n.x + n.width + 24 &&
 							upY >= n.y - 24 && upY <= n.y + n.height + 24) {
 							const d = Math.hypot(upX - (n.x + n.width / 2), upY - (n.y + n.height / 2));
@@ -14477,7 +14870,7 @@ export class WorkflowEditor extends EditorPane {
 				if (targetNode && targetNode.id !== this._tempLinkFromNodeId) {
 					if (targetPortEl) {
 						const classes = Array.from(targetPortEl.classList);
-						toPort = classes.find(c => ['top', 'right', 'bottom', 'left'].includes(c)) as any;
+						toPort = classes.find(c => ['top', 'right', 'bottom', 'left'].includes(c)) as IFlowchartLink['fromPort'];
 					}
 
 					if (!toPort) {
@@ -14543,7 +14936,7 @@ export class WorkflowEditor extends EditorPane {
 				let port: 'top' | 'right' | 'bottom' | 'left' | undefined;
 
 				if (targetNodeEl) {
-					const targetNodeId = targetNodeEl.getAttribute("data-node-id");
+					const targetNodeId = targetNodeEl.getAttribute('data-node-id');
 					if (targetNodeId) {
 						targetNode = this._data.nodes.find(n => n.id === targetNodeId);
 					}
@@ -14556,7 +14949,7 @@ export class WorkflowEditor extends EditorPane {
 					const upY = (e.clientY - rect.top) / this._zoomLevel;
 					let bestDist = Infinity;
 					for (const n of this._data.nodes) {
-						if (hiddenSubWfNodeIds.has(n.id)) continue;
+						if (hiddenSubWfNodeIds.has(n.id)) { continue; }
 						if (upX >= n.x - 24 && upX <= n.x + n.width + 24 &&
 							upY >= n.y - 24 && upY <= n.y + n.height + 24) {
 							const d = Math.hypot(upX - (n.x + n.width / 2), upY - (n.y + n.height / 2));
@@ -14571,7 +14964,7 @@ export class WorkflowEditor extends EditorPane {
 				if (targetNode) {
 					if (targetPortEl) {
 						const classes = Array.from(targetPortEl.classList);
-						port = classes.find(c => ['top', 'right', 'bottom', 'left'].includes(c)) as any;
+						port = classes.find(c => ['top', 'right', 'bottom', 'left'].includes(c)) as IFlowchartLink['fromPort'];
 					}
 
 					const link = this._data.links.find(l => l.id === linkId);
@@ -14913,8 +15306,8 @@ export class WorkflowEditor extends EditorPane {
 			clean.push(pts[i]);
 		}
 
-		if (clean.length === 0) return 'M 0 0';
-		if (clean.length === 1) return `M ${clean[0].x} ${clean[0].y}`;
+		if (clean.length === 0) { return 'M 0 0'; }
+		if (clean.length === 1) { return `M ${clean[0].x} ${clean[0].y}`; }
 		if (clean.length === 2 || radius <= 0) {
 			return clean.map((p, idx) => (idx === 0 ? `M ${p.x} ${p.y}` : `L ${p.x} ${p.y}`)).join(' ');
 		}
@@ -14978,7 +15371,7 @@ export class WorkflowEditor extends EditorPane {
 	private _getLinkMidpoint(link: IFlowchartLink): { x: number; y: number } {
 		const fromNode = this._data.nodes.find(n => n.id === link.from);
 		const toNode = this._data.nodes.find(n => n.id === link.to);
-		if (!fromNode || !toNode) return { x: 0, y: 0 };
+		if (!fromNode || !toNode) { return { x: 0, y: 0 }; }
 
 		const closest = this._getClosestPorts(fromNode, toNode);
 		const fromPort = link.fromPort || closest.fromPort;
@@ -15036,8 +15429,8 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _getOrthogonalPointAtT(waypoints: { x: number; y: number }[], t: number): { x: number; y: number } {
-		if (waypoints.length === 0) return { x: 0, y: 0 };
-		if (waypoints.length === 1) return waypoints[0];
+		if (waypoints.length === 0) { return { x: 0, y: 0 }; }
+		if (waypoints.length === 1) { return waypoints[0]; }
 
 		let totalLen = 0;
 		const segLens: number[] = [];
@@ -15047,7 +15440,7 @@ export class WorkflowEditor extends EditorPane {
 			totalLen += len;
 		}
 
-		if (totalLen === 0) return waypoints[0];
+		if (totalLen === 0) { return waypoints[0]; }
 
 		const targetDist = totalLen * t;
 		let accumulated = 0;
@@ -15067,7 +15460,7 @@ export class WorkflowEditor extends EditorPane {
 	private _findClosestTOnLink(link: IFlowchartLink, px: number, py: number): number {
 		const fromNode = this._data.nodes.find(n => n.id === link.from);
 		const toNode = this._data.nodes.find(n => n.id === link.to);
-		if (!fromNode || !toNode) return 0.5;
+		if (!fromNode || !toNode) { return 0.5; }
 
 		const closest = this._getClosestPorts(fromNode, toNode);
 		const fromPort = link.fromPort || closest.fromPort;
@@ -15079,7 +15472,7 @@ export class WorkflowEditor extends EditorPane {
 
 		if (routingMode === 'orthogonal') {
 			const waypoints = this._computeOrthogonalWaypoints(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, link.waypoints);
-			if (waypoints.length < 2) return 0.5;
+			if (waypoints.length < 2) { return 0.5; }
 
 			let totalLen = 0;
 			const segLens: number[] = [];
@@ -15088,7 +15481,7 @@ export class WorkflowEditor extends EditorPane {
 				segLens.push(len);
 				totalLen += len;
 			}
-			if (totalLen <= 0) return 0.5;
+			if (totalLen <= 0) { return 0.5; }
 
 			let bestDistSq = Infinity;
 			let bestPathDist = 0;
@@ -15151,7 +15544,7 @@ export class WorkflowEditor extends EditorPane {
 			const dx = bx - ax;
 			const dy = by - ay;
 			const lenSq = dx * dx + dy * dy;
-			if (lenSq < 1) continue;
+			if (lenSq < 1) { continue; }
 			let u = ((px - ax) * dx + (py - ay) * dy) / lenSq;
 			u = Math.max(0, Math.min(1, u));
 			const qx = ax + u * dx;
@@ -15181,10 +15574,10 @@ export class WorkflowEditor extends EditorPane {
 			const stubDist = 20;
 			let sx = copy[0].x;
 			let sy = copy[0].y;
-			if (fromPort === 'right') sx += stubDist;
-			else if (fromPort === 'left') sx -= stubDist;
-			else if (fromPort === 'bottom') sy += stubDist;
-			else if (fromPort === 'top') sy -= stubDist;
+			if (fromPort === 'right') { sx += stubDist; }
+			else if (fromPort === 'left') { sx -= stubDist; }
+			else if (fromPort === 'bottom') { sy += stubDist; }
+			else if (fromPort === 'top') { sy -= stubDist; }
 			copy.splice(1, 0, { x: sx, y: sy }, { x: sx, y: sy });
 			idx += 2;
 		}
@@ -15193,10 +15586,10 @@ export class WorkflowEditor extends EditorPane {
 			const last = copy[copy.length - 1];
 			let ex = last.x;
 			let ey = last.y;
-			if (toPort === 'left') ex -= stubDist;
-			else if (toPort === 'right') ex += stubDist;
-			else if (toPort === 'top') ey -= stubDist;
-			else if (toPort === 'bottom') ey += stubDist;
+			if (toPort === 'left') { ex -= stubDist; }
+			else if (toPort === 'right') { ex += stubDist; }
+			else if (toPort === 'top') { ey -= stubDist; }
+			else if (toPort === 'bottom') { ey += stubDist; }
 			copy.splice(copy.length - 1, 0, { x: ex, y: ey }, { x: ex, y: ey });
 		}
 
@@ -15212,7 +15605,7 @@ export class WorkflowEditor extends EditorPane {
 		canvasY: number,
 		isExplicitHandle: boolean
 	): void {
-		if (e.button !== 0) return;
+		if (e.button !== 0) { return; }
 		e.stopPropagation();
 		this._isDraggingLinkSegment = link.id;
 		this._dragLinkSegmentInitialIndex = segIdx;
@@ -15241,13 +15634,25 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
+	private _getLinkLabelEditorWrapper(): HTMLElement | undefined {
+		const wrapper = this._linkLabelEditorWrapper;
+		return wrapper && this._linkDeletesContainer?.contains(wrapper) ? wrapper : undefined;
+	}
+
+	/** The label element of link `linkId` currently drawn in `_linkDeletesContainer`. */
+	private _getLinkLabelEl(linkId: string): HTMLElement | undefined {
+		const labelEl = this._linkLabelEls.get(linkId);
+		return labelEl && this._linkDeletesContainer?.contains(labelEl) ? labelEl : undefined;
+	}
+
 	private _showLinkInlineEditor(link: IFlowchartLink, x: number, y: number): void {
-		if (!this._linkDeletesContainer) return;
+		if (!this._linkDeletesContainer) { return; }
 		// Remove any existing editor
-		const existing = this._linkDeletesContainer.querySelector('.workflow-link-label-editor-wrapper, .workflow-link-label-editor');
-		if (existing) existing.remove();
+		const existing = this._getLinkLabelEditorWrapper();
+		if (existing) { existing.remove(); }
 
 		const wrapper = append(this._linkDeletesContainer, $('.workflow-link-label-editor-wrapper'));
+		this._linkLabelEditorWrapper = wrapper;
 		wrapper.style.position = 'absolute';
 		wrapper.style.left = `${x}px`;
 		wrapper.style.top = `${y}px`;
@@ -15353,7 +15758,7 @@ export class WorkflowEditor extends EditorPane {
 		};
 
 		const commit = () => {
-			if (committed) return;
+			if (committed) { return; }
 			committed = true;
 			closeAc();
 			const val = textarea.value.trim();
@@ -15421,7 +15826,7 @@ export class WorkflowEditor extends EditorPane {
 
 	private _renderLinkLabelContent(parent: HTMLElement, rawLabel: string, status?: string): void {
 		clearNode(parent);
-		if (!rawLabel) return;
+		if (!rawLabel) { return; }
 
 		if (status === 'error') {
 			const errTag = append(parent, $('span.link-condition-error-tag'));
@@ -15449,7 +15854,7 @@ export class WorkflowEditor extends EditorPane {
 
 		const tokens = rawLabel.split(/(\s+|==|!=|<=|>=|<|>)/);
 		for (const tok of tokens) {
-			if (!tok) continue;
+			if (!tok) { continue; }
 			let varName: string | null = null;
 			let hasAt = false;
 			if (tok.startsWith('@')) {
@@ -15477,13 +15882,18 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _drawLinks(): void {
-		if (!this._svgOverlay || !this._linkDeletesContainer) return;
+		if (!this._svgOverlay || !this._linkDeletesContainer) { return; }
 
 		// Clear previous lines and handles (preserve any open inline link condition editor)
-		const lines = this._svgOverlay.querySelectorAll('.workflow-connection-line, .workflow-connection-hit-area');
-		lines.forEach(l => l.remove());
-		const activeLinkEditor = this._linkDeletesContainer.querySelector('.workflow-link-label-editor-wrapper');
+		const svgOverlay = this._svgOverlay;
+		const lines = [...this._connectionLineEls].filter(l => svgOverlay.contains(l));
+		lines.forEach(l => {
+			l.remove();
+			this._connectionLineEls.delete(l);
+		});
+		const activeLinkEditor = this._getLinkLabelEditorWrapper();
 		clearNode(this._linkDeletesContainer);
+		this._linkLabelEls = new Map();
 		if (activeLinkEditor) {
 			this._linkDeletesContainer.appendChild(activeLinkEditor);
 		}
@@ -15501,7 +15911,7 @@ export class WorkflowEditor extends EditorPane {
 			const fromNode = this._data.nodes.find(n => n.id === link.from);
 			const toNode = this._data.nodes.find(n => n.id === link.to);
 
-			if (!fromNode || !toNode) continue;
+			if (!fromNode || !toNode) { continue; }
 
 			// Use explicit ports or fall back to closest ports calculation
 			const closest = this._getClosestPorts(fromNode, toNode);
@@ -15534,21 +15944,22 @@ export class WorkflowEditor extends EditorPane {
 			const hasStartArrow = link.style === 'arrow-double';
 
 			if (hasStartArrow) {
-				if (fromPort === 'right') x1 += 8;
-				else if (fromPort === 'left') x1 -= 8;
-				else if (fromPort === 'bottom') y1 += 8;
-				else if (fromPort === 'top') y1 -= 8;
+				if (fromPort === 'right') { x1 += 8; }
+				else if (fromPort === 'left') { x1 -= 8; }
+				else if (fromPort === 'bottom') { y1 += 8; }
+				else if (fromPort === 'top') { y1 -= 8; }
 			}
 			if (hasEndArrow) {
-				if (toPort === 'left') x2 -= 8;
-				else if (toPort === 'right') x2 += 8;
-				else if (toPort === 'top') y2 -= 8;
-				else if (toPort === 'bottom') y2 += 8;
+				if (toPort === 'left') { x2 -= 8; }
+				else if (toPort === 'right') { x2 += 8; }
+				else if (toPort === 'top') { y2 -= 8; }
+				else if (toPort === 'bottom') { y2 += 8; }
 			}
 
 			// Draw connection line
 			const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
 			path.classList.add('workflow-connection-line');
+			this._connectionLineEls.add(path);
 
 			const activeRun = this._getEffectiveRunForLink(link);
 			const linkState = activeRun?.linkStates?.[link.id] || activeRun?.linkStates?.[`${link.from}->${link.to}`];
@@ -15610,6 +16021,7 @@ export class WorkflowEditor extends EditorPane {
 			// Wide transparent hit area so users can easily grab and drag any line segment
 			const hitPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
 			hitPath.classList.add('workflow-connection-hit-area');
+			this._connectionLineEls.add(hitPath);
 			hitPath.setAttribute('d', d);
 
 			this._svgOverlay.appendChild(path);
@@ -15635,12 +16047,12 @@ export class WorkflowEditor extends EditorPane {
 			hitPath.oncontextmenu = onLineContextMenu;
 
 			const onLineMouseDown = (e: MouseEvent) => {
-				if (e.button !== 0) return;
+				if (e.button !== 0) { return; }
 				const now = Date.now();
-				const lastLineClick = (link as any)._lastLineClickTime || 0;
-				(link as any)._lastLineClickTime = now;
+				const lastLineClick = link._lastLineClickTime || 0;
+				link._lastLineClickTime = now;
 				if (now - lastLineClick < 350) {
-					(link as any)._lastLineClickTime = 0;
+					link._lastLineClickTime = 0;
 					this._isDraggingLinkSegment = null;
 					e.stopPropagation();
 					e.preventDefault();
@@ -15706,6 +16118,9 @@ export class WorkflowEditor extends EditorPane {
 				const labelEl = append(this._linkDeletesContainer, $('.workflow-link-label'));
 				this._renderLinkLabelContent(labelEl, link.label, linkState?.status);
 				labelEl.setAttribute('data-link-id', link.id);
+				if (!this._linkLabelEls.has(link.id)) {
+					this._linkLabelEls.set(link.id, labelEl);
+				}
 				labelEl.style.left = `${labelPt.x}px`;
 				labelEl.style.top = `${labelPt.y}px`;
 				if (typeof link.labelWidth === 'number') {
@@ -15750,17 +16165,17 @@ export class WorkflowEditor extends EditorPane {
 					labelEl.title = `[✓] Condition Matched: ${link.label}\n${linkState.explanation || ''}`;
 				} else if (linkState?.status === 'rejected') {
 					labelEl.classList.add('status-rejected');
-					labelEl.title = `[✗] Condition Rejected: ${link.label}\n${linkState.explanation || ''}`;
+					labelEl.title = `[\u2717] Condition Rejected: ${link.label}\n${linkState.explanation || ''}`;
 				}
 
 				labelEl.onmousedown = (e) => {
 					e.stopPropagation();
-					if (e.button !== 0) return;
+					if (e.button !== 0) { return; }
 					const now = Date.now();
-					const lastLabelClick = (link as any)._lastLabelClickTime || 0;
-					(link as any)._lastLabelClickTime = now;
+					const lastLabelClick = link._lastLabelClickTime || 0;
+					link._lastLabelClickTime = now;
 					if (now - lastLabelClick < 350) {
-						(link as any)._lastLabelClickTime = 0;
+						link._lastLabelClickTime = 0;
 						this._isDraggingLinkLabel = null;
 						e.preventDefault();
 						const currentPt = this._computePointFromCoords(startCoords.x, startCoords.y, fromPort, endCoords.x, endCoords.y, toPort, routingMode, typeof link.labelPosition === 'number' ? link.labelPosition : 0.5, link.waypoints);
@@ -15776,7 +16191,7 @@ export class WorkflowEditor extends EditorPane {
 
 				labelEl.onclick = (e) => {
 					e.stopPropagation();
-					if (this._dragLabelHasMoved) return;
+					if (this._dragLabelHasMoved) { return; }
 
 					const isMultiKey = e.shiftKey || e.ctrlKey || e.metaKey;
 					if (!isMultiKey) {
@@ -15817,7 +16232,7 @@ export class WorkflowEditor extends EditorPane {
 					const pB = orthoPts[segIdx + 1];
 					const segLen = Math.hypot(pB.x - pA.x, pB.y - pA.y);
 					const isInterior = segIdx > 0 && segIdx < orthoPts.length - 2;
-					if (segLen < (isInterior ? 16 : 36)) continue;
+					if (segLen < (isInterior ? 16 : 36)) { continue; }
 
 					const isVert = Math.abs(pA.x - pB.x) <= Math.abs(pA.y - pB.y);
 					let hx = Math.round((pA.x + pB.x) / 2);
@@ -15839,12 +16254,12 @@ export class WorkflowEditor extends EditorPane {
 						segHandle.classList.add('selected');
 					}
 					segHandle.onmousedown = (e) => {
-						if (e.button !== 0) return;
+						if (e.button !== 0) { return; }
 						const now = Date.now();
-						const lastSegClick = (link as any)._lastLineClickTime || 0;
-						(link as any)._lastLineClickTime = now;
+						const lastSegClick = link._lastLineClickTime || 0;
+						link._lastLineClickTime = now;
 						if (now - lastSegClick < 350) {
-							(link as any)._lastLineClickTime = 0;
+							link._lastLineClickTime = 0;
 							this._isDraggingLinkSegment = null;
 							e.stopPropagation();
 							e.preventDefault();
@@ -15858,7 +16273,7 @@ export class WorkflowEditor extends EditorPane {
 							}
 							return;
 						}
-						if (!this._canvas) return;
+						if (!this._canvas) { return; }
 						const rect = this._canvas.getBoundingClientRect();
 						const mx = (e.clientX - rect.left) / this._zoomLevel;
 						const my = (e.clientY - rect.top) / this._zoomLevel;
@@ -15947,7 +16362,7 @@ export class WorkflowEditor extends EditorPane {
 	private _showContextMenu(x: number, y: number, targetType: 'node' | 'link' | 'canvas', targetId: string): void {
 		this._closeContextMenu();
 
-		const menu = append(document.body, $('.workflow-context-menu'));
+		const menu = append(this._targetWindow.document.body, $('.workflow-context-menu'));
 		this._contextMenuEl = menu;
 		menu.style.position = 'fixed';
 		menu.style.left = `${x}px`;
@@ -15976,11 +16391,11 @@ export class WorkflowEditor extends EditorPane {
 					runSelectedItem.style.color = '#38bdf8';
 					runSelectedItem.style.fontWeight = '600';
 					runSelectedItem.textContent = selectedActionNodes.length > 1
-						? `▶ Run Selected Nodes Only (${selectedActionNodes.length})`
-						: `▶ Run This Node Only`;
+						? `\u25B6 Run Selected Nodes Only (${selectedActionNodes.length})`
+						: `\u25B6 Run This Node Only`;
 					runSelectedItem.onclick = async () => {
 						this._closeContextMenu();
-						if (!this._workflowUri) return;
+						if (!this._workflowUri) { return; }
 						try {
 							const selectedNodeIds = selectedActionNodes.map(n => n.id);
 							this._openLogDrawer();
@@ -15991,19 +16406,19 @@ export class WorkflowEditor extends EditorPane {
 								entryNodeId: selectedNodeIds[0],
 								selectedNodeIds
 							});
-							if (this._toolbarEl) this._renderToolbar(this._toolbarEl);
+							if (this._toolbarEl) { this._renderToolbar(this._toolbarEl); }
 							this._renderNodes();
-						} catch (e: any) {
+						} catch (e) {
 							this._notificationService.error(e.message || String(e));
 						}
 					};
 				}
 
 				const runFromHereItem = append(menu, $('.context-menu-item'));
-				runFromHereItem.textContent = '▶ Run Workflow From This Node';
+				runFromHereItem.textContent = '\u25B6 Run Workflow From This Node';
 				runFromHereItem.onclick = async () => {
 					this._closeContextMenu();
-					if (!this._workflowUri) return;
+					if (!this._workflowUri) { return; }
 					try {
 						this._openLogDrawer();
 						this._clearDisplayInspectorCards();
@@ -16012,9 +16427,9 @@ export class WorkflowEditor extends EditorPane {
 							initialData: this._data,
 							entryNodeId: targetId
 						});
-						if (this._toolbarEl) this._renderToolbar(this._toolbarEl);
+						if (this._toolbarEl) { this._renderToolbar(this._toolbarEl); }
 						this._renderNodes();
-					} catch (e: any) {
+					} catch (e) {
 						this._notificationService.error(e.message || String(e));
 					}
 				};
@@ -16023,7 +16438,7 @@ export class WorkflowEditor extends EditorPane {
 				const targetNodeForSub = this._data.nodes.find(n => n.id === targetId);
 				const calledSubWorkflows = new Map<string, string>();
 				for (const step of (targetNodeForSub?.pipeline || [])) {
-					const comp: any = (step as any)?.component;
+					const comp = step?.component;
 					if (comp?.type === 'sub_workflow' && comp.subWorkflowId) {
 						const def = this._workflowExecutionService.getSubWorkflowById(comp.subWorkflowId);
 						calledSubWorkflows.set(comp.subWorkflowId, def?.name || comp.subWorkflowName || comp.label || comp.subWorkflowId);
@@ -16032,8 +16447,8 @@ export class WorkflowEditor extends EditorPane {
 				for (const [subWorkflowId, subWorkflowName] of calledSubWorkflows) {
 					const liveViewItem = append(menu, $('.context-menu-item'));
 					liveViewItem.textContent = calledSubWorkflows.size > 1
-						? `⧉ Show Sub-Workflow Live View: ${subWorkflowName}`
-						: '⧉ Show Sub-Workflow Live View';
+						? `\u29C9 Show Sub-Workflow Live View: ${subWorkflowName}`
+						: '\u29C9 Show Sub-Workflow Live View';
 					liveViewItem.onclick = () => {
 						this._closeContextMenu();
 						openSubWorkflowLiveView(this._editorService, this._editorGroupService, this._workflowExecutionService, subWorkflowId, {
@@ -16142,17 +16557,17 @@ export class WorkflowEditor extends EditorPane {
 				addSubModuleItem.textContent = 'Create Sub-Module...';
 				addSubModuleItem.onclick = () => {
 					this._closeContextMenu();
-					this._viewsService.openView<any>('workbench.workspacesExplorer.mainPane', true).then(workspacesView => {
+					this._viewsService.openView<MainWorkspaceViewPane>('workbench.workspacesExplorer.mainPane', true).then(workspacesView => {
 						if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
-							workspacesView.showCreateResourceModal(this._workflowUri, (this.input as any)?.name || '', (type: string, name: string) => {
+							workspacesView.showCreateResourceModal(this._workflowUri, this._inputNameProperty() || '', (type: string, name: string) => {
 								const node = this._data.nodes.find(n => n.id === targetId);
 								if (node) {
 									if (!node.imports) {
 										node.imports = [];
 									}
 									if (!node.imports.some(imp => imp.type === type && imp.name === name)) {
-										node.imports.push({ type: type as any, name });
-										if (!node.pipeline) node.pipeline = [];
+										node.imports.push({ type, name });
+										if (!node.pipeline) { node.pipeline = []; }
 										const newStep: INodePipelineStep = {
 											id: `step_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
 											type: 'run_ticket',
@@ -16252,7 +16667,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Node Color Submenu
 			const changeColorItem = append(menu, $('.context-menu-item.submenu-trigger'));
-			changeColorItem.textContent = 'Node Color ›';
+			changeColorItem.textContent = 'Node Color \u203A';
 			changeColorItem.style.position = 'relative';
 
 			const colorSubmenu = append(changeColorItem, $('.workflow-context-submenu'));
@@ -16304,7 +16719,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Text Formatting & Alignment Submenu
 			const textStyleItem = append(menu, $('.context-menu-item.submenu-trigger'));
-			textStyleItem.textContent = 'Text Formatting ›';
+			textStyleItem.textContent = 'Text Formatting \u203A';
 			textStyleItem.style.position = 'relative';
 
 			const textSubmenu = append(textStyleItem, $('.workflow-context-submenu'));
@@ -16415,7 +16830,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Text Colors
 			const textColorTrigger = append(textSubmenu, $('.context-menu-item.submenu-trigger'));
-			textColorTrigger.textContent = 'Text Color ›';
+			textColorTrigger.textContent = 'Text Color \u203A';
 			textColorTrigger.style.position = 'relative';
 
 			const textColorSubmenu = append(textColorTrigger, $('.workflow-context-submenu'));
@@ -16471,7 +16886,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Change Shape menu item with hover submenu
 			const changeShapeItem = append(menu, $('.context-menu-item.submenu-trigger'));
-			changeShapeItem.textContent = 'Change Shape ›';
+			changeShapeItem.textContent = 'Change Shape \u203A';
 			changeShapeItem.style.position = 'relative';
 
 			const submenu = append(changeShapeItem, $('.workflow-context-submenu'));
@@ -16523,7 +16938,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Export Selection Submenu
 			const exportSelItem = append(menu, $('.context-menu-item.submenu-trigger'));
-			exportSelItem.textContent = isMulti ? `Export Selected (${totalSelected}) ›` : 'Export Node Image ›';
+			exportSelItem.textContent = isMulti ? `Export Selected (${totalSelected}) \u203A` : 'Export Node Image \u203A';
 			exportSelItem.style.position = 'relative';
 
 			const exportSelSubmenu = append(exportSelItem, $('.workflow-context-submenu'));
@@ -16558,7 +16973,7 @@ export class WorkflowEditor extends EditorPane {
 			// View / Open Imported Modules Submenu (lists every imported module without deduplication/collapsing)
 			if (!this._isPureDiagram && nodeObj && nodeObj.imports && nodeObj.imports.length > 0) {
 				const openModulesItem = append(menu, $('.context-menu-item.submenu-trigger'));
-				openModulesItem.textContent = `Open Module (${nodeObj.imports.length}) ›`;
+				openModulesItem.textContent = `Open Module (${nodeObj.imports.length}) \u203A`;
 				openModulesItem.style.position = 'relative';
 
 				const modulesSubmenu = append(openModulesItem, $('.workflow-context-submenu'));
@@ -16636,7 +17051,7 @@ export class WorkflowEditor extends EditorPane {
 		} else if (targetType === 'canvas') {
 			// Add Node submenu for quick creation
 			const addNodeItem = append(menu, $('.context-menu-item.submenu-trigger'));
-			addNodeItem.textContent = 'Add Node ›';
+			addNodeItem.textContent = 'Add Node \u203A';
 			addNodeItem.style.position = 'relative';
 
 			const addNodeSubmenu = append(addNodeItem, $('.workflow-context-submenu'));
@@ -16701,9 +17116,9 @@ export class WorkflowEditor extends EditorPane {
 				createModuleItem.textContent = 'Create New Module...';
 				createModuleItem.onclick = () => {
 					this._closeContextMenu();
-					this._viewsService.openView<any>('workbench.workspacesExplorer.mainPane', true).then(workspacesView => {
+					this._viewsService.openView<MainWorkspaceViewPane>('workbench.workspacesExplorer.mainPane', true).then(workspacesView => {
 						if (workspacesView && typeof workspacesView.showCreateResourceModal === 'function') {
-							workspacesView.showCreateResourceModal(this._workflowUri, (this.input as any)?.name || '', (type: string, name: string) => {
+							workspacesView.showCreateResourceModal(this._workflowUri, this._inputNameProperty() || '', (type: string, name: string) => {
 								const rect = this._canvas!.getBoundingClientRect();
 								const rawX = (x - rect.left) / this._zoomLevel;
 								const rawY = (y - rect.top) / this._zoomLevel;
@@ -16720,7 +17135,7 @@ export class WorkflowEditor extends EditorPane {
 									width: 100,
 									height: 50,
 									label: name,
-									imports: [{ type: type as any, name }],
+									imports: [{ type, name }],
 									color: this._activeNodeColor,
 									textColor: this._activeTextColor,
 									textAlign: this._activeTextAlign,
@@ -16759,7 +17174,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Export Canvas Submenu
 			const exportCanvasItem = append(menu, $('.context-menu-item.submenu-trigger'));
-			exportCanvasItem.textContent = 'Export Canvas ›';
+			exportCanvasItem.textContent = 'Export Canvas \u203A';
 			exportCanvasItem.style.position = 'relative';
 
 			const exportCanvasSubmenu = append(exportCanvasItem, $('.workflow-context-submenu'));
@@ -16839,7 +17254,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Line Color Submenu
 			const lineColorItem = append(menu, $('.context-menu-item.submenu-trigger'));
-			lineColorItem.textContent = 'Line Color ›';
+			lineColorItem.textContent = 'Line Color \u203A';
 			lineColorItem.style.position = 'relative';
 
 			const lineColorSubmenu = append(lineColorItem, $('.workflow-context-submenu'));
@@ -16890,7 +17305,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Arrow Style Submenu
 			const arrowStyleItem = append(menu, $('.context-menu-item.submenu-trigger'));
-			arrowStyleItem.textContent = 'Arrow Style ›';
+			arrowStyleItem.textContent = 'Arrow Style \u203A';
 			arrowStyleItem.style.position = 'relative';
 
 			const arrowSubmenu = append(arrowStyleItem, $('.workflow-context-submenu'));
@@ -16906,7 +17321,7 @@ export class WorkflowEditor extends EditorPane {
 				{ style: 'arrow-single', label: 'Single Arrow (→)' },
 				{ style: 'arrow-double', label: 'Double Arrow (↔)' },
 				{ style: 'arrow-none', label: 'No Arrow (—)' },
-				{ style: 'dashed', label: 'Dashed Line (╌)' }
+				{ style: 'dashed', label: 'Dashed Line (\u254C)' }
 			];
 			const currentArrowStyle = linkObj?.style || 'arrow-single';
 
@@ -16926,7 +17341,7 @@ export class WorkflowEditor extends EditorPane {
 
 			// Submenu to choose routing mode for this link
 			const routingSubmenuTrigger = append(menu, $('.context-menu-item.submenu-trigger'));
-			routingSubmenuTrigger.textContent = 'Routing Mode ›';
+			routingSubmenuTrigger.textContent = 'Routing Mode \u203A';
 			routingSubmenuTrigger.style.position = 'relative';
 
 			const routingSubmenu = append(routingSubmenuTrigger, $('.workflow-context-submenu'));
@@ -16972,7 +17387,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		// Close menu when clicking outside
-		const clickListener = addDisposableListener(window, 'click', () => {
+		const clickListener = addDisposableListener(this._targetWindow, 'click', () => {
 			this._closeContextMenu();
 			clickListener.dispose();
 		}, true);
@@ -17024,7 +17439,7 @@ export class WorkflowEditor extends EditorPane {
 			if (vpRect && (clientX < vpRect.left || clientX > vpRect.right || clientY < vpRect.top || clientY > vpRect.bottom)) {
 				continue;
 			}
-			const allNodeEls = Array.from(ed._nodesContainer.querySelectorAll<HTMLElement>('.workflow-node[data-node-id]'));
+			const allNodeEls = ed._renderedNodeDoms().map(d => d.nodeEl);
 			for (let idx = allNodeEls.length - 1; idx >= 0; idx--) {
 				const candEl = allNodeEls[idx];
 				const r = candEl.getBoundingClientRect();
@@ -17047,7 +17462,7 @@ export class WorkflowEditor extends EditorPane {
 	} {
 		const clonedStep: INodePipelineStep = JSON.parse(JSON.stringify(step));
 		if (clonedStep.component) {
-			const compAny = clonedStep.component as any;
+			const compAny = wfComponent(clonedStep.component);
 			delete compAny.lastExecutionLog;
 			delete compAny.lastExecutionOutput;
 			delete compAny.lastExecutionStatus;
@@ -17285,7 +17700,7 @@ export class WorkflowEditor extends EditorPane {
 		const clonedStep: INodePipelineStep = JSON.parse(JSON.stringify(step));
 		// Strip transient runtime execution logs/status from copied component while preserving all config & params
 		if (clonedStep.component) {
-			const compAny = clonedStep.component as any;
+			const compAny = wfComponent(clonedStep.component);
 			delete compAny.lastExecutionLog;
 			delete compAny.lastExecutionOutput;
 			delete compAny.lastExecutionStatus;
@@ -17341,7 +17756,7 @@ export class WorkflowEditor extends EditorPane {
 					const parsed = JSON.parse(rawClip);
 					if (parsed && parsed.__anyagent_capsule_v1__) {
 						if (Array.isArray(parsed.capsules) && parsed.capsules.length > 0) {
-							payloads = parsed.capsules.filter((c: any) => c && c.step);
+							payloads = parsed.capsules.filter((c: { step?: INodePipelineStep } | null | undefined) => c && c.step);
 						} else if (parsed.step) {
 							payloads = [{
 								step: parsed.step,
@@ -17500,7 +17915,7 @@ export class WorkflowEditor extends EditorPane {
 		// Snapshot variable metadata from source node before removing
 		const movingStep = sourceNode.pipeline[sourceIndex];
 		const movedVarNames = this._extractStepVariableNames(movingStep);
-		const movedVarMeta = new Map<string, { initialValue: string; expression?: string; currentValue?: any }>();
+		const movedVarMeta = new Map<string, { initialValue: string; expression?: string; currentValue?: unknown }>();
 		for (const vName of movedVarNames) {
 			const existing = (sourceNode.outputVariables || []).find(v => (v.name || '').replace(/^@/, '').trim() === vName);
 			movedVarMeta.set(vName, {
@@ -17672,7 +18087,7 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 
-		const menu = append(document.body, $('.workflow-context-menu'));
+		const menu = append(this._targetWindow.document.body, $('.workflow-context-menu'));
 		this._contextMenuEl = menu;
 		menu.style.position = 'fixed';
 		menu.style.left = `${x}px`;
@@ -17817,21 +18232,21 @@ export class WorkflowEditor extends EditorPane {
 
 		// Keep menu inside viewport
 		const rect = menu.getBoundingClientRect();
-		if (rect.right > window.innerWidth - 8) {
-			menu.style.left = `${Math.max(8, window.innerWidth - rect.width - 8)}px`;
+		if (rect.right > this._targetWindow.innerWidth - 8) {
+			menu.style.left = `${Math.max(8, this._targetWindow.innerWidth - rect.width - 8)}px`;
 		}
-		if (rect.bottom > window.innerHeight - 8) {
-			menu.style.top = `${Math.max(8, window.innerHeight - rect.height - 8)}px`;
+		if (rect.bottom > this._targetWindow.innerHeight - 8) {
+			menu.style.top = `${Math.max(8, this._targetWindow.innerHeight - rect.height - 8)}px`;
 		}
 
 		// Auto-close on outside click / mousedown / Escape
 		this._contextMenuDisposables.push(
-			addDisposableListener(window, 'mousedown', (ev: MouseEvent) => {
+			addDisposableListener(this._targetWindow, 'mousedown', (ev: MouseEvent) => {
 				if (this._contextMenuEl && !this._contextMenuEl.contains(ev.target as Node)) {
 					this._closeContextMenu();
 				}
 			}, true),
-			addDisposableListener(window, 'keydown', (ev: KeyboardEvent) => {
+			addDisposableListener(this._targetWindow, 'keydown', (ev: KeyboardEvent) => {
 				if (ev.key === 'Escape') {
 					this._closeContextMenu();
 				}
@@ -17869,9 +18284,9 @@ export class WorkflowEditor extends EditorPane {
 				}
 			} else if (ch === '#') {
 				const nl = trimmed.indexOf('\n', i);
-				if (nl < 0) break;
+				if (nl < 0) { break; }
 				i = nl;
-			} else if (ch === '"' || ch === "'") {
+			} else if (ch === '"' || ch === '\'') {
 				if (trimmed.slice(i, i + 3) === ch + ch + ch) {
 					inQuote = ch + ch + ch;
 					i += 2;
@@ -17946,7 +18361,7 @@ export class WorkflowEditor extends EditorPane {
 				if (ch === inQuote && expr[i - 1] !== '\\') {
 					inQuote = null;
 				}
-			} else if (ch === '"' || ch === "'") {
+			} else if (ch === '"' || ch === '\'') {
 				inQuote = ch;
 			} else if (ch === '(' || ch === '[' || ch === '{') {
 				depth++;
@@ -17973,7 +18388,7 @@ export class WorkflowEditor extends EditorPane {
 				if (ch === inQuote && inner[i - 1] !== '\\') {
 					inQuote = null;
 				}
-			} else if (ch === '"' || ch === "'") {
+			} else if (ch === '"' || ch === '\'') {
 				inQuote = ch;
 				cur += ch;
 			} else if (ch === '(' || ch === '[' || ch === '{') {
@@ -17983,13 +18398,13 @@ export class WorkflowEditor extends EditorPane {
 				depth--;
 				cur += ch;
 			} else if (ch === ',' && depth === 0) {
-				if (cur.trim()) parts.push(cur.trim());
+				if (cur.trim()) { parts.push(cur.trim()); }
 				cur = '';
 			} else {
 				cur += ch;
 			}
 		}
-		if (cur.trim()) parts.push(cur.trim());
+		if (cur.trim()) { parts.push(cur.trim()); }
 
 		for (const p of parts) {
 			const eqIdx = p.indexOf('=');
@@ -18051,7 +18466,7 @@ export class WorkflowEditor extends EditorPane {
 				if (ch === inQuote && inner[i - 1] !== '\\') {
 					inQuote = null;
 				}
-			} else if (ch === '"' || ch === "'") {
+			} else if (ch === '"' || ch === '\'') {
 				inQuote = ch;
 				cur += ch;
 			} else if (ch === '(' || ch === '[' || ch === '{') {
@@ -18061,13 +18476,13 @@ export class WorkflowEditor extends EditorPane {
 				depth--;
 				cur += ch;
 			} else if (ch === ',' && depth === 0) {
-				if (cur.trim()) entries.push(cur.trim());
+				if (cur.trim()) { entries.push(cur.trim()); }
 				cur = '';
 			} else {
 				cur += ch;
 			}
 		}
-		if (cur.trim()) entries.push(cur.trim());
+		if (cur.trim()) { entries.push(cur.trim()); }
 
 		for (const entry of entries) {
 			let colonIdx = -1;
@@ -18076,8 +18491,8 @@ export class WorkflowEditor extends EditorPane {
 			for (let i = 0; i < entry.length; i++) {
 				const ch = entry[i];
 				if (q) {
-					if (ch === q && entry[i - 1] !== '\\') q = null;
-				} else if (ch === '"' || ch === "'") {
+					if (ch === q && entry[i - 1] !== '\\') { q = null; }
+				} else if (ch === '"' || ch === '\'') {
 					q = ch;
 				} else if (ch === '(' || ch === '[' || ch === '{') {
 					d++;
@@ -18593,7 +19008,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _copySelectedNodes(): void {
-		if (this._selectedNodeIds.size === 0) return;
+		if (this._selectedNodeIds.size === 0) { return; }
 		WorkflowEditor._lastCopyKind = 'node';
 		this._selectedCapsule = null;
 		this._copiedNodes = [];
@@ -18686,7 +19101,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _pasteNodes(anchorCanvasPos?: { x: number; y: number }): void {
-		if (this._copiedNodes.length === 0) return;
+		if (this._copiedNodes.length === 0) { return; }
 
 		// Record undo snapshot before paste
 		const beforeState = JSON.stringify(this._data);
@@ -18775,7 +19190,7 @@ export class WorkflowEditor extends EditorPane {
 
 	private async _importIntoNode(nodeId: string): Promise<void> {
 		const node = this._data.nodes.find(n => n.id === nodeId);
-		if (!node) return;
+		if (!node) { return; }
 
 		// Focus and expand the WORKSPACES side viewlet pane
 		await this._viewsService.openView('workbench.workspacesExplorer.mainPane', true);
@@ -18794,7 +19209,7 @@ export class WorkflowEditor extends EditorPane {
 		}
 
 		const cleanName = (imp.name || '').trim();
-		if (!cleanName) return undefined;
+		if (!cleanName) { return undefined; }
 		const lowerName = cleanName.toLowerCase();
 		const lowerType = (imp.type || '').toLowerCase();
 
@@ -18830,8 +19245,10 @@ export class WorkflowEditor extends EditorPane {
 		if (this._workflowUri) {
 			try {
 				const rtTicket = await this._ticketRuntimeService.getTicket(this._workflowUri, cleanName);
-				if (rtTicket && rtTicket.folderUri) {
-					const rtUri = URI.parse(rtTicket.folderUri);
+				// `folderUri` is not part of ITicketGetResult; read it reflectively exactly as before (normally absent).
+				const rtFolderUri: unknown = rtTicket ? Reflect.get(rtTicket, 'folderUri') : undefined;
+				if (rtFolderUri) {
+					const rtUri = URI.parse(String(rtFolderUri));
 					if (await this._fileService.exists(rtUri)) {
 						return rtUri;
 					}
@@ -18983,14 +19400,16 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _showExportMenu(anchorEl: HTMLElement): void {
-		const existing = document.querySelector('.workflow-export-floating-menu');
-		if (existing) {
+		const targetDocument = this._targetWindow.document;
+		const existing = wfExportFloatingMenus.get(targetDocument);
+		if (existing && targetDocument.contains(existing)) {
 			existing.remove();
 			return;
 		}
 
 		const rect = anchorEl.getBoundingClientRect();
-		const menuEl = append(document.body, $('.workflow-export-floating-menu'));
+		const menuEl = append(this._targetWindow.document.body, $('.workflow-export-floating-menu'));
+		wfExportFloatingMenus.set(targetDocument, menuEl);
 		menuEl.style.position = 'fixed';
 		menuEl.style.top = `${rect.bottom + 6}px`;
 		menuEl.style.left = `${Math.max(10, rect.left - 70)}px`;
@@ -19003,7 +19422,7 @@ export class WorkflowEditor extends EditorPane {
 		const header1 = append(menuEl, $('.export-menu-header'));
 		header1.textContent = 'EXPORT CANVAS';
 
-		const items: { label: string; icon: any; format: 'png' | 'jpeg' | 'svg' | 'pdf' }[] = [
+		const items: { label: string; icon: ThemeIcon; format: 'png' | 'jpeg' | 'svg' | 'pdf' }[] = [
 			{ label: 'PNG Image (.png)', icon: Codicon.fileMedia, format: 'png' },
 			{ label: 'JPEG Image (.jpg)', icon: Codicon.fileMedia, format: 'jpeg' },
 			{ label: 'SVG Vector (.svg)', icon: Codicon.fileCode, format: 'svg' },
@@ -19042,10 +19461,10 @@ export class WorkflowEditor extends EditorPane {
 		const closeListener = (e: MouseEvent) => {
 			if (!menuEl.contains(e.target as Node)) {
 				menuEl.remove();
-				window.removeEventListener('click', closeListener);
+				this._targetWindow.removeEventListener('click', closeListener);
 			}
 		};
-		setTimeout(() => window.addEventListener('click', closeListener), 10);
+		setTimeout(() => this._targetWindow.addEventListener('click', closeListener), 10);
 	}
 
 	private _createPdfFromJpeg(jpegBytes: Uint8Array, imgWidth: number, imgHeight: number): Uint8Array {
@@ -19115,14 +19534,14 @@ export class WorkflowEditor extends EditorPane {
 			// Fallback to direct download via browser anchor
 			try {
 				const mime = defaultExtension === 'svg' ? 'image/svg+xml;charset=utf-8' : (defaultExtension === 'pdf' ? 'application/pdf' : `image/${defaultExtension}`);
-				const blob = typeof dataBuffer === 'string' ? new Blob([dataBuffer], { type: mime }) : new Blob([dataBuffer as any], { type: mime });
+				const blob = typeof dataBuffer === 'string' ? new Blob([dataBuffer], { type: mime }) : new Blob([dataBuffer as Uint8Array<ArrayBuffer>], { type: mime });
 				const url = URL.createObjectURL(blob);
 				const a = document.createElement('a');
 				a.href = url;
 				a.download = fileName;
-				document.body.appendChild(a);
+				this._targetWindow.document.body.appendChild(a);
 				a.click();
-				document.body.removeChild(a);
+				this._targetWindow.document.body.removeChild(a);
 				URL.revokeObjectURL(url);
 				this._notificationService.info(`Exported diagram '${fileName}'`);
 			} catch (downloadErr) {
@@ -19163,7 +19582,7 @@ export class WorkflowEditor extends EditorPane {
 		const width = Math.max(120, maxX - minX);
 		const height = Math.max(80, maxY - minY);
 
-		const defaultName = (this.input as any)?.name || this._workflowUri?.path.split('/').filter(Boolean).pop()?.replace(/\.diagram\.json$/, '').replace(/\.flowchart\.json$/, '') || 'diagram';
+		const defaultName = this._inputNameProperty() || this._workflowUri?.path.split('/').filter(Boolean).pop()?.replace(/\.diagram\.json$/, '').replace(/\.flowchart\.json$/, '') || 'diagram';
 		const cleanBaseName = defaultName.replace(/[\\/:*?"<>|]/g, '_');
 		const suffix = selectionOnly ? '_selection' : '';
 		const fileName = `${cleanBaseName}${suffix}.${format === 'jpeg' ? 'jpg' : format}`;
@@ -19206,19 +19625,19 @@ export class WorkflowEditor extends EditorPane {
 				const dataUrl = canvas.toDataURL('image/png');
 				const raw = atob(dataUrl.replace(/^data:image\/png;base64,/, ''));
 				const bytes = new Uint8Array(raw.length);
-				for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+				for (let i = 0; i < raw.length; i++) { bytes[i] = raw.charCodeAt(i); }
 				await this._saveExportedFile(fileName, bytes, 'png');
 			} else if (format === 'jpeg') {
 				const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
 				const raw = atob(dataUrl.replace(/^data:image\/jpeg;base64,/, ''));
 				const bytes = new Uint8Array(raw.length);
-				for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+				for (let i = 0; i < raw.length; i++) { bytes[i] = raw.charCodeAt(i); }
 				await this._saveExportedFile(fileName, bytes, 'jpg');
 			} else if (format === 'pdf') {
 				const dataUrl = canvas.toDataURL('image/jpeg', 0.95);
 				const raw = atob(dataUrl.replace(/^data:image\/jpeg;base64,/, ''));
 				const jpegBytes = new Uint8Array(raw.length);
-				for (let i = 0; i < raw.length; i++) jpegBytes[i] = raw.charCodeAt(i);
+				for (let i = 0; i < raw.length; i++) { jpegBytes[i] = raw.charCodeAt(i); }
 				const pdfBytes = this._createPdfFromJpeg(jpegBytes, canvas.width, canvas.height);
 				await this._saveExportedFile(fileName, pdfBytes, 'pdf');
 			}
@@ -19228,6 +19647,8 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _displayInspectorContainer: HTMLElement | null = null;
+	/** The `.inspector-title-text` span of `_displayInspectorContainer` (null whenever the container is). */
+	private _displayInspectorTitleText: HTMLElement | null = null;
 	private _displayInspectorCardsContainer: HTMLElement | null = null;
 	private _displayInspectorCards: IWorkflowDisplayCard[] = [];
 	private _isDisplayInspectorMinimized = false;
@@ -19244,24 +19665,45 @@ export class WorkflowEditor extends EditorPane {
 		if (this._displayInspectorContainer) {
 			this._displayInspectorContainer.remove();
 			this._displayInspectorContainer = null;
+			this._displayInspectorTitleText = null;
 			this._displayInspectorCardsContainer = null;
 		}
 		this._updateLiveDisplayToolbarBtn();
 	}
 
+	private _getDisplayInspectorPart(part: 'header' | 'titleText' | 'minBtn'): HTMLElement | undefined {
+		const panel = this._displayInspectorContainer;
+		const el = panel ? wfDisplayInspectorParts.get(panel)?.[part] : undefined;
+		return el && panel?.contains(el) ? el : undefined;
+	}
+
+	/** The (first) card element of `cardId` in the Live Display cards container. */
+	private _getDisplayInspectorCardEl(cardId: string): HTMLElement | undefined {
+		const container = this._displayInspectorCardsContainer;
+		if (!container) {
+			return undefined;
+		}
+		for (const child of Array.from(container.children)) {
+			if (isHTMLElement(child) && child.getAttribute('data-card-id') === cardId) {
+				return child;
+			}
+		}
+		return undefined;
+	}
+
 	private _toggleDisplayInspectorMinimized(): void {
-		if (!this._displayInspectorContainer) return;
+		if (!this._displayInspectorContainer) { return; }
 		this._isDisplayInspectorMinimized = !this._isDisplayInspectorMinimized;
 		this._displayInspectorContainer.classList.toggle('minimized', this._isDisplayInspectorMinimized);
-		const header = this._displayInspectorContainer.querySelector('.workflow-display-inspector-header') as HTMLElement | null;
+		const header = this._getDisplayInspectorPart('header');
 		if (header) {
 			header.title = this._isDisplayInspectorMinimized
 				? `Live Display (${this._displayInspectorCards.length}) — Click to expand`
 				: 'Drag to reposition Live Display panel';
 		}
-		const minBtn = this._displayInspectorContainer.querySelector('.workflow-display-btn-toggle') as HTMLElement | null;
+		const minBtn = this._getDisplayInspectorPart('minBtn');
 		if (minBtn) {
-			minBtn.textContent = this._isDisplayInspectorMinimized ? '+' : '–';
+			minBtn.textContent = this._isDisplayInspectorMinimized ? '+' : '\u2013';
 			minBtn.title = this._isDisplayInspectorMinimized ? 'Expand Live Display' : 'Collapse Live Display';
 		}
 		// Keep expanded panel within viewport bounds if previously dragged near the right edge
@@ -19277,7 +19719,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _updateLiveDisplayToolbarBtn(): void {
-		if (!this._floatingLiveDisplayBtn) return;
+		if (!this._floatingLiveDisplayBtn) { return; }
 		const count = this._displayInspectorCards.length;
 		clearNode(this._floatingLiveDisplayBtn);
 		append(this._floatingLiveDisplayBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.terminal)));
@@ -19299,15 +19741,15 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _ensureDisplayInspectorPanel(): HTMLElement | null {
-		if (!this._canvasViewport) return null;
+		if (!this._canvasViewport) { return null; }
 
 		if (this._displayInspectorContainer && this._displayInspectorContainer.isConnected) {
-			const titleText = this._displayInspectorContainer.querySelector('.inspector-title-text');
+			const titleText = this._displayInspectorTitleText;
 			if (titleText) {
 				titleText.textContent = `Live Display (${this._displayInspectorCards.length})`;
 			}
 			if (this._isDisplayInspectorMinimized) {
-				const hdr = this._displayInspectorContainer.querySelector('.workflow-display-inspector-header') as HTMLElement | null;
+				const hdr = this._getDisplayInspectorPart('header');
 				if (hdr) {
 					hdr.title = `Live Display (${this._displayInspectorCards.length}) — Click to expand`;
 				}
@@ -19326,7 +19768,7 @@ export class WorkflowEditor extends EditorPane {
 		const MIN_LIVE_DISPLAY_WIDTH = 260;
 		const MAX_LIVE_DISPLAY_WIDTH = 1200;
 		try {
-			const savedWidthRaw = window.localStorage.getItem(LIVE_DISPLAY_WIDTH_KEY);
+			const savedWidthRaw = this._targetWindow.localStorage.getItem(LIVE_DISPLAY_WIDTH_KEY);
 			if (savedWidthRaw) {
 				const parsedW = parseInt(savedWidthRaw, 10);
 				if (Number.isFinite(parsedW) && parsedW >= MIN_LIVE_DISPLAY_WIDTH && parsedW <= MAX_LIVE_DISPLAY_WIDTH) {
@@ -19343,7 +19785,7 @@ export class WorkflowEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				panel.style.width = `${DEFAULT_LIVE_DISPLAY_WIDTH}px`;
-				try { window.localStorage.removeItem(LIVE_DISPLAY_WIDTH_KEY); } catch { }
+				try { this._targetWindow.localStorage.removeItem(LIVE_DISPLAY_WIDTH_KEY); } catch { }
 			});
 			handle.addEventListener('mousedown', (e: MouseEvent) => {
 				if (panel.classList.contains('minimized')) {
@@ -19362,7 +19804,7 @@ export class WorkflowEditor extends EditorPane {
 
 				panel.classList.add('is-resizing');
 				handle.classList.add('active');
-				document.body.style.cursor = 'ew-resize';
+				this._targetWindow.document.body.style.cursor = 'ew-resize';
 
 				const onMouseMove = (moveEvent: MouseEvent) => {
 					const dx = moveEvent.clientX - startX;
@@ -19394,17 +19836,17 @@ export class WorkflowEditor extends EditorPane {
 				const onMouseUp = () => {
 					panel.classList.remove('is-resizing');
 					handle.classList.remove('active');
-					document.body.style.cursor = '';
-					window.removeEventListener('mousemove', onMouseMove);
-					window.removeEventListener('mouseup', onMouseUp);
+					this._targetWindow.document.body.style.cursor = '';
+					this._targetWindow.removeEventListener('mousemove', onMouseMove);
+					this._targetWindow.removeEventListener('mouseup', onMouseUp);
 					const finalW = Math.round(panel.getBoundingClientRect().width);
 					if (Number.isFinite(finalW) && finalW >= MIN_LIVE_DISPLAY_WIDTH) {
-						try { window.localStorage.setItem(LIVE_DISPLAY_WIDTH_KEY, String(finalW)); } catch { }
+						try { this._targetWindow.localStorage.setItem(LIVE_DISPLAY_WIDTH_KEY, String(finalW)); } catch { }
 					}
 				};
 
-				window.addEventListener('mousemove', onMouseMove);
-				window.addEventListener('mouseup', onMouseUp);
+				this._targetWindow.addEventListener('mousemove', onMouseMove);
+				this._targetWindow.addEventListener('mouseup', onMouseUp);
 			});
 		};
 		attachResizeHandle('left');
@@ -19412,6 +19854,8 @@ export class WorkflowEditor extends EditorPane {
 
 		// Header (draggable across canvas viewport when expanded; compact icon button when minimized)
 		const header = append(panel, $('.workflow-display-inspector-header'));
+		const inspectorParts: { header?: HTMLElement; titleText?: HTMLElement; minBtn?: HTMLElement } = { header };
+		wfDisplayInspectorParts.set(panel, inspectorParts);
 		header.title = this._isDisplayInspectorMinimized
 			? `Live Display (${this._displayInspectorCards.length}) — Click to expand`
 			: 'Drag to reposition Live Display panel';
@@ -19440,7 +19884,7 @@ export class WorkflowEditor extends EditorPane {
 			initialTop = rect.top - parentRect.top;
 
 			const onMouseMove = (moveEvent: MouseEvent) => {
-				if (!isDragging) return;
+				if (!isDragging) { return; }
 				const dx = moveEvent.clientX - startX;
 				const dy = moveEvent.clientY - startY;
 				if (!hasDragged && Math.hypot(dx, dy) > 4) {
@@ -19451,7 +19895,7 @@ export class WorkflowEditor extends EditorPane {
 					panel.style.top = `${initialTop}px`;
 					panel.classList.add('is-dragging');
 				}
-				if (!hasDragged) return;
+				if (!hasDragged) { return; }
 
 				let newLeft = initialLeft + dx;
 				let newTop = initialTop + dy;
@@ -19471,16 +19915,16 @@ export class WorkflowEditor extends EditorPane {
 					isDragging = false;
 					hasDragged = false;
 					panel.classList.remove('is-dragging');
-					window.removeEventListener('mousemove', onMouseMove);
-					window.removeEventListener('mouseup', onMouseUp);
+					this._targetWindow.removeEventListener('mousemove', onMouseMove);
+					this._targetWindow.removeEventListener('mouseup', onMouseUp);
 					if (!didDrag && this._isDisplayInspectorMinimized) {
 						this._toggleDisplayInspectorMinimized();
 					}
 				}
 			};
 
-			window.addEventListener('mousemove', onMouseMove);
-			window.addEventListener('mouseup', onMouseUp);
+			this._targetWindow.addEventListener('mousemove', onMouseMove);
+			this._targetWindow.addEventListener('mouseup', onMouseUp);
 		});
 
 		const titleBox = append(header, $('.workflow-display-inspector-title'));
@@ -19489,6 +19933,8 @@ export class WorkflowEditor extends EditorPane {
 		const iconBadge = append(titleBox, $('span.workflow-display-header-badge'));
 		iconBadge.textContent = 'OUTPUT';
 		const titleText = append(titleBox, $('span.inspector-title-text'));
+		inspectorParts.titleText = titleText;
+		this._displayInspectorTitleText = titleText;
 		titleText.textContent = `Live Display (${this._displayInspectorCards.length})`;
 
 		const actionsBox = append(header, $('.workflow-display-inspector-actions'));
@@ -19504,7 +19950,8 @@ export class WorkflowEditor extends EditorPane {
 
 		// 2. Minimize / Expand button (outermost on the right)
 		const minBtn = append(actionsBox, $('button.workflow-display-btn-action.workflow-display-btn-toggle'));
-		minBtn.textContent = this._isDisplayInspectorMinimized ? '+' : '–';
+		inspectorParts.minBtn = minBtn;
+		minBtn.textContent = this._isDisplayInspectorMinimized ? '+' : '\u2013';
 		minBtn.title = this._isDisplayInspectorMinimized ? 'Expand Inspector' : 'Minimize Inspector';
 		minBtn.onclick = (e) => {
 			e.stopPropagation();
@@ -19519,16 +19966,16 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _restoreDisplayInspectorCards(): void {
-		if (!this._canvasViewport || !this._workflowUri) return;
+		if (!this._canvasViewport || !this._workflowUri) { return; }
 		const cards = this._workflowExecutionService.getDisplayCards(this._workflowUri);
 		if (cards && cards.length > 0) {
 			this._displayInspectorCards = cards.slice(0, 30);
 		}
 
-		if (this._displayInspectorCards.length === 0) return;
+		if (this._displayInspectorCards.length === 0) { return; }
 
 		this._ensureDisplayInspectorPanel();
-		if (!this._displayInspectorCardsContainer) return;
+		if (!this._displayInspectorCardsContainer) { return; }
 		clearNode(this._displayInspectorCardsContainer);
 
 		for (const card of this._displayInspectorCards) {
@@ -19539,7 +19986,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private _addDisplayInspectorCard(card: IWorkflowDisplayCard): void {
-		if (!this._canvasViewport) return;
+		if (!this._canvasViewport) { return; }
 
 		// Automatically clear cards from previous workflow execution runs when a new run begins
 		if (card.runId && this._activeDisplayRunId && card.runId !== this._activeDisplayRunId) {
@@ -19555,7 +20002,7 @@ export class WorkflowEditor extends EditorPane {
 		if (existingDupIdx !== -1) {
 			const removed = this._displayInspectorCards.splice(existingDupIdx, 1)[0];
 			if (removed && this._displayInspectorCardsContainer) {
-				const existingEl = this._displayInspectorCardsContainer.querySelector(`[data-card-id="${removed.id}"]`);
+				const existingEl = this._getDisplayInspectorCardEl(`${removed.id}`);
 				existingEl?.remove();
 			}
 		}
@@ -19563,7 +20010,7 @@ export class WorkflowEditor extends EditorPane {
 		while (this._displayInspectorCards.length > 30) {
 			const oldest = this._displayInspectorCards.pop();
 			if (oldest && this._displayInspectorCardsContainer) {
-				const oldestEl = this._displayInspectorCardsContainer.querySelector(`[data-card-id="${oldest.id}"]`);
+				const oldestEl = this._getDisplayInspectorCardEl(`${oldest.id}`);
 				oldestEl?.remove();
 			}
 		}
@@ -19572,7 +20019,7 @@ export class WorkflowEditor extends EditorPane {
 		// but respect user's minimized state — never force-expand when minimized!
 		this._ensureDisplayInspectorPanel();
 
-		if (!this._displayInspectorCardsContainer) return;
+		if (!this._displayInspectorCardsContainer) { return; }
 
 		const cardEl = this._renderDisplayInspectorCardElement(card);
 		this._displayInspectorCardsContainer.prepend(cardEl);
@@ -19588,7 +20035,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	private async _updatePythonEnvButtonLabel(): Promise<void> {
-		if (!this._floatingPythonEnvBtn) return;
+		if (!this._floatingPythonEnvBtn) { return; }
 		const wfDir = this._workflowUri
 			? (this._workflowUri.path.endsWith('.json') || this._workflowUri.path.endsWith('.workflow') ? URI.joinPath(this._workflowUri, '..') : this._workflowUri)
 			: undefined;
@@ -19608,7 +20055,7 @@ export class WorkflowEditor extends EditorPane {
 			resolvedPath = this._data?.pythonPath || 'python3';
 		}
 
-		if (!this._floatingPythonEnvBtn.isConnected) return;
+		if (!this._floatingPythonEnvBtn.isConnected) { return; }
 		const cleanResolved = String(resolvedPath || 'python3');
 		const isVenv = cleanResolved.includes('.venv') || cleanResolved.includes('venv');
 		const shortLabel = isVenv ? '.venv (Python)' : (cleanResolved.split('/').pop() || 'python3');
@@ -19648,7 +20095,7 @@ export class WorkflowEditor extends EditorPane {
 
 		try {
 			await this._fileService.writeFile(pyFileUri, VSBuffer.fromString(pyContent));
-		} catch (err: any) {
+		} catch (err) {
 			this._notificationService.error(`Failed to write workflow Python file: ${err?.message || err}`);
 			return undefined;
 		}
@@ -19658,8 +20105,8 @@ export class WorkflowEditor extends EditorPane {
 			options: { pinned: true, preserveFocus: options?.preserveFocus ?? false }
 		}, options?.group);
 
-		const control: any = pane?.getControl?.();
-		if (control && typeof control.getModel === 'function') {
+		const control = pane?.getControl?.();
+		if (isCodeEditor(control)) {
 			const model = control.getModel();
 			if (model && typeof model.getValue === 'function' && model.getValue() !== pyContent) {
 				model.setValue(pyContent);
@@ -19713,7 +20160,7 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	public static attachWorkflowPythonToolbox(
-		codeEditor: any,
+		codeEditor: unknown,
 		fileService: IFileService,
 		notificationService: INotificationService,
 		entityPersistenceService: IEntityPersistenceService,
@@ -19814,7 +20261,7 @@ export class WorkflowEditor extends EditorPane {
 						if (spec.varName) {
 							addVar(spec.varName, 'workflow');
 						}
-						addVar((spec as any).name || spec.label || spec.fieldKey, 'workflow');
+						addVar(wfOutputSpec(spec).name || spec.label || spec.fieldKey, 'workflow');
 					}
 				} else if (s.component?.type === 'parameters' && Array.isArray(s.component.parameters)) {
 					for (const p of s.component.parameters) {
@@ -19828,12 +20275,12 @@ export class WorkflowEditor extends EditorPane {
 					addVar(s.targetVariable, 'workflow');
 				}
 				const scanAssignments = (codeStr: string | undefined) => {
-					if (!codeStr) return;
+					if (!codeStr) { return; }
 					for (const rawLine of codeStr.split('\n')) {
 						// Skip indented lines so multi-line kwargs like `  ticket_type="..."` are never mistaken for top-level variables
-						if (/^\s/.test(rawLine)) continue;
+						if (/^\s/.test(rawLine)) { continue; }
 						const line = rawLine.trim();
-						if (!line || line.startsWith('#')) continue;
+						if (!line || line.startsWith('#')) { continue; }
 						const m = line.match(/^([a-zA-Z_][a-zA-Z0-9_]*)\s*=(?!=)/);
 						if (m && m[1] && !['OUTPUT', 'output', 'RESULT', 'result'].includes(m[1])) {
 							const isCreateOrGet = /\b(?:CREATE_TICKETS|create_tickets|GET_TICKET|get_ticket)\s*\(/.test(line)
@@ -19872,7 +20319,7 @@ export class WorkflowEditor extends EditorPane {
 		if (effectiveRun?.contextVariables) {
 			const skipCtxKeys = new Set(['__callerInputKeys__', 'OUTPUT', 'WORKFLOW_OUTPUTS', 'Parameters', 'Inputs', 'Title', 'title']);
 			for (const k of Object.keys(effectiveRun.contextVariables)) {
-				if (!k || k.startsWith('@') || k.startsWith('__') || skipCtxKeys.has(k)) continue;
+				if (!k || k.startsWith('@') || k.startsWith('__') || skipCtxKeys.has(k)) { continue; }
 				addVar(k, 'workflow');
 			}
 		}
@@ -19913,8 +20360,8 @@ export class WorkflowEditor extends EditorPane {
 					return 'Output: (click to configure outputs)';
 				}
 				const pairs = specs.map(s => {
-					const k = (s as any).name || s.label || s.varName || s.fieldKey;
-					const v = s.sourceExpression || (s as any).value || '';
+					const k = wfOutputSpec(s).name || s.label || s.varName || s.fieldKey;
+					const v = s.sourceExpression || wfOutputSpec(s).value || '';
 					return v ? `${k}=${v}` : k;
 				});
 				return `Output (${specs.length}): ${pairs.join(', ')}`;
@@ -19929,7 +20376,7 @@ export class WorkflowEditor extends EditorPane {
 			case 'prompt':
 				return `${varName} = ${title} (AI Prompt)`;
 			case 'table': {
-				const tblDisplay = (comp.tableDbTableName || (comp as any).tableName || comp.label || '').trim() || 'Data Table';
+				const tblDisplay = (comp.tableDbTableName || wfComponent(comp).tableName || comp.label || '').trim() || 'Data Table';
 				return `${varName} = ${tblDisplay} (Data Table)`;
 			}
 			case 'browser':
@@ -19957,11 +20404,11 @@ export class WorkflowEditor extends EditorPane {
 		}
 	}
 
-	private _extractSchemaParamsForType(typeNameOrId: string): { name: string; defaultValue: any }[] {
-		const extracted: { name: string; defaultValue: any }[] = [];
-		if (!typeNameOrId) return extracted;
+	private _extractSchemaParamsForType(typeNameOrId: string): IWfSchemaParamSpec[] {
+		const extracted: IWfSchemaParamSpec[] = [];
+		if (!typeNameOrId) { return extracted; }
 		const clean = typeNameOrId.trim().replace(/^\{|\}$/g, '').trim();
-		if (!clean) return extracted;
+		if (!clean) { return extracted; }
 		const normTarget = clean.toLowerCase().replace(/[-_]/g, ' ');
 
 		let matchedMod = (this._cachedCustomModules || []).find(m =>
@@ -20067,10 +20514,10 @@ export class WorkflowEditor extends EditorPane {
 		}
 		if (comp.type === 'get_tickets') {
 			const args: string[] = [];
-			if (comp.wfTicketType) args.push(`ticket_type=${JSON.stringify(comp.wfTicketType)}`);
-			if (comp.wfTicketStatus) args.push(`status=${JSON.stringify(comp.wfTicketStatus)}`);
-			if (comp.wfTicketTitle) args.push(`title=${JSON.stringify(comp.wfTicketTitle)}`);
-			if (comp.wfTicketPath) args.push(`path=${JSON.stringify(comp.wfTicketPath)}`);
+			if (comp.wfTicketType) { args.push(`ticket_type=${JSON.stringify(comp.wfTicketType)}`); }
+			if (comp.wfTicketStatus) { args.push(`status=${JSON.stringify(comp.wfTicketStatus)}`); }
+			if (comp.wfTicketTitle) { args.push(`title=${JSON.stringify(comp.wfTicketTitle)}`); }
+			if (comp.wfTicketPath) { args.push(`path=${JSON.stringify(comp.wfTicketPath)}`); }
 			return `${varName} = GET_TICKETS(${args.join(', ')})`;
 		}
 		if (comp.type === 'display') {
@@ -20110,7 +20557,7 @@ export class WorkflowEditor extends EditorPane {
 				i++;
 				continue;
 			}
-			if (ch === '"' || ch === "'") {
+			if (ch === '"' || ch === '\'') {
 				inQuote = ch;
 				out += ch;
 				i++;
@@ -20379,7 +20826,7 @@ export class WorkflowEditor extends EditorPane {
 			.map(st => {
 				const comp = st.component!;
 				if (comp.type === 'output' && nodeRunStateForInspector && (nodeRunStateForInspector.status === 'success' || nodeRunStateForInspector.status === 'failed')) {
-					const compAny = comp as any;
+					const compAny = wfComponent(comp);
 					if (!compAny.lastExecutionLog) {
 						compAny.lastExecutionStatus = nodeRunStateForInspector.status;
 						if (nodeRunStateForInspector.durationMs !== undefined) {
@@ -20390,9 +20837,9 @@ export class WorkflowEditor extends EditorPane {
 						} else {
 							const enabledSpecs = (comp.outputSpecs || []).filter(s => s && s.enabled !== false);
 							const rawOut = nodeRunStateForInspector.output;
-							const outObj = (rawOut && typeof rawOut === 'object' && !Array.isArray(rawOut)) ? rawOut as Record<string, any> : undefined;
+							const outObj = (rawOut && isWorkflowRecord(rawOut) && !Array.isArray(rawOut)) ? rawOut : undefined;
 							const ctxVars = effRunForInspector?.contextVariables || {};
-							const describeVal = (v: any): { typeTag: string; preview: string } => {
+							const describeVal = (v: unknown): { typeTag: string; preview: string } => {
 								if (v === null) { return { typeTag: 'null', preview: 'null' }; }
 								if (v === undefined) { return { typeTag: 'undefined', preview: 'undefined' }; }
 								if (Array.isArray(v)) {
@@ -20414,11 +20861,11 @@ export class WorkflowEditor extends EditorPane {
 							for (const spec of enabledSpecs) {
 								const k = (spec.label || spec.varName || spec.fieldKey || '').trim();
 								if (!k) { continue; }
-								const val = (outObj && k in outObj) ? outObj[k]
-									: (outObj && spec.varName && spec.varName in outObj) ? outObj[spec.varName]
-									: (k in ctxVars) ? ctxVars[k]
-									: (spec.varName && spec.varName in ctxVars) ? ctxVars[spec.varName]
-									: undefined;
+								const val = (outObj && hasWorkflowProperty(outObj, k)) ? outObj[k]
+									: (outObj && spec.varName && hasWorkflowProperty(outObj, spec.varName)) ? outObj[spec.varName]
+										: hasWorkflowProperty(ctxVars, k) ? ctxVars[k]
+											: (spec.varName && hasWorkflowProperty(ctxVars, spec.varName)) ? ctxVars[spec.varName]
+												: undefined;
 								const desc = describeVal(val);
 								const varTag = spec.varName ? ` [var: ${spec.varName}]` : '';
 								const srcTag = spec.sourceExpression ? ` <- ${spec.sourceExpression}` : '';
@@ -20473,7 +20920,7 @@ export class WorkflowEditor extends EditorPane {
 			}));
 		};
 		schemaInput.workflowRuntimeContextProvider = () => {
-			const ctx: Record<string, any> = {};
+			const ctx: IWorkflowRecord = {};
 			if (this._workflowUri) {
 				const activeRun = this._workflowExecutionService.getActiveRun(this._workflowUri);
 				if (activeRun?.contextVariables) {
@@ -20502,11 +20949,11 @@ export class WorkflowEditor extends EditorPane {
 					continue;
 				}
 				if (f.type === 'parameters') {
-					if (seenInputs) continue;
+					if (seenInputs) { continue; }
 					seenInputs = true;
 				}
 				if (f.type === 'output') {
-					if (seenOutput) continue;
+					if (seenOutput) { continue; }
 					seenOutput = true;
 				}
 				filteredFields.push(f);
@@ -20624,7 +21071,7 @@ export class WorkflowEditor extends EditorPane {
 
 	public static async syncPythonEditorToWorkflow(
 		pyFileUri: URI | undefined,
-		activeCodeEditor: any,
+		activeCodeEditor: unknown,
 		fileService: IFileService,
 		notificationService: INotificationService,
 		entityPersistenceService: IEntityPersistenceService,

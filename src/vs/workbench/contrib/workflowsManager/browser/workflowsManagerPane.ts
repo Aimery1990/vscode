@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import './media/workflowsManager.css';
@@ -353,7 +352,7 @@ export class WorkflowsManagerPane extends ViewPane {
 			const actionsList: Action[] = [];
 
 			if (workflow.isMissing) {
-				actionsList.push(new Action('remove_missing_workflow', 'Remove Missing Workflow from List (🗑️)', ThemeIcon.asClassName(Codicon.trash), true, async () => {
+				actionsList.push(new Action('remove_missing_workflow', 'Remove Missing Workflow from List (\uD83D\uDDD1️)', ThemeIcon.asClassName(Codicon.trash), true, async () => {
 					const confirm = await this.dialogService.confirm({
 						type: 'warning',
 						message: `Remove missing workflow '${workflow.name}'?`,
@@ -452,7 +451,7 @@ export class WorkflowsManagerPane extends ViewPane {
 			desc.textContent = workflow.description;
 		} else if (workflow.isMissing) {
 			const desc = append(card, $('.card-description', { style: 'color: #f43f5e; font-weight: 500;' }));
-			desc.textContent = `⚠️ Files missing on disk. Click 🗑️ to remove record.`;
+			desc.textContent = `⚠️ Files missing on disk. Click \uD83D\uDDD1️ to remove record.`;
 		}
 
 		// Footer Row

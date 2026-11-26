@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { localize, localize2 } from '../../../../nls.js';
@@ -31,6 +30,7 @@ import { WorkflowNotebookEditor, WorkflowNotebookEditorInput } from './workflowN
 import { EditorPaneDescriptor, IEditorPaneRegistry } from '../../../browser/editor.js';
 import { EditorExtensions, IEditorFactoryRegistry, IEditorSerializer } from '../../../common/editor.js';
 import { createWorkflowDialog } from './workflowEditorDialog.js';
+import { IWorkflowPyToolboxHost } from './workflowPythonSync.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
@@ -149,6 +149,7 @@ for (const vd of viewDescriptors) {
 
 		async run(accessor: ServicesAccessor): Promise<void> {
 			const fileDialogService = accessor.get(IFileDialogService);
+			const instantiationService = accessor.get(IInstantiationService);
 			const res = await fileDialogService.showOpenDialog({
 				canSelectFolders: true,
 				canSelectFiles: false,
@@ -157,7 +158,7 @@ for (const vd of viewDescriptors) {
 				title: 'Open Existing Workflow Directory'
 			});
 			if (res && res.length > 0) {
-				await createWorkflowDialog(accessor, res[0]);
+				await instantiationService.invokeFunction(createWorkflowDialog, res[0]);
 			}
 		}
 	});
@@ -301,7 +302,7 @@ registerAction2(class SyncPythonToWorkflowAction extends Action2 {
 		const ticketRuntimeService = accessor.get(ITicketWorkflowRuntimeService);
 
 		const activePane = editorService.activeEditorPane;
-		const activeControl: any = activePane?.getControl?.();
+		const activeControl = activePane?.getControl?.();
 		const activeResource = resourceArg || editorService.activeEditor?.resource;
 
 		await WorkflowEditor.syncPythonEditorToWorkflow(
@@ -339,7 +340,7 @@ class WorkflowPythonEditorToolboxContribution extends Disposable implements IWor
 			try {
 				for (const pane of this._editorService.visibleEditorPanes) {
 					const resource = pane.input?.resource;
-					const control: any = pane.getControl?.();
+					const control = pane.getControl?.();
 					if (control && resource && /\.workflow\.py$/i.test(resource.path)) {
 						WorkflowEditor.attachWorkflowPythonToolbox(
 							control,
@@ -351,8 +352,8 @@ class WorkflowPythonEditorToolboxContribution extends Disposable implements IWor
 							this._customModulesService,
 							resource
 						);
-					} else if (control && (control as any).__wfPyToolboxController) {
-						(control as any).__wfPyToolboxController.refreshContext(resource);
+					} else if (control && (control as IWorkflowPyToolboxHost).__wfPyToolboxController) {
+						(control as IWorkflowPyToolboxHost).__wfPyToolboxController!.refreshContext(resource);
 					}
 				}
 			} catch (err) {

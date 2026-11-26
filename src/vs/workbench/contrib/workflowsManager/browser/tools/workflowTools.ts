@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
@@ -25,7 +24,7 @@ export const RunTicketsToolId = 'RUN_TICKETS';
 export const GetPrimitivesCatalogToolId = 'GET_PRIMITIVES_CATALOG';
 
 
-function toolResult(data: any, message?: string): IToolResult {
+function toolResult(data: unknown, message?: string): IToolResult {
 	return {
 		content: [{
 			kind: 'text',
@@ -69,16 +68,16 @@ export class ExecuteWorkflowTool implements IToolImpl {
 				properties: {
 					workflow_uri: {
 						type: 'string',
-						description: "The workflow URI or workflow name to execute (e.g. 'vscode-userdata:/.../MyWorkflow.workflow' or 'MyWorkflow')."
+						description: 'The workflow URI or workflow name to execute (e.g. \'vscode-userdata:/.../MyWorkflow.workflow\' or \'MyWorkflow\').'
 					},
 					mode: {
 						type: 'string',
 						enum: ['standard', 'daemon', 'step'],
-						description: "Execution mode: 'standard' runs one-shot from start to finish; 'daemon' runs as a continuous long-running background service; 'step' pauses at each node for single-stepping."
+						description: 'Execution mode: \'standard\' runs one-shot from start to finish; \'daemon\' runs as a continuous long-running background service; \'step\' pauses at each node for single-stepping.'
 					},
 					initial_inputs: {
 						type: 'object',
-						description: "Optional key-value context variables passed to the entry node."
+						description: 'Optional key-value context variables passed to the entry node.'
 					}
 				},
 				required: ['workflow_uri']
@@ -98,7 +97,7 @@ export class ExecuteWorkflowTool implements IToolImpl {
 		try {
 			const { workflow_uri, mode, initial_inputs } = invocation.parameters;
 			if (!workflow_uri) {
-				return toolError("'workflow_uri' is required.");
+				return toolError('\'workflow_uri\' is required.');
 			}
 			const run = await this.executionService.executeWorkflow(workflow_uri, {
 				mode: mode || 'standard',
@@ -114,7 +113,7 @@ export class ExecuteWorkflowTool implements IToolImpl {
 				visitedNodeIds: run.visitedNodeIds,
 				contextVariables: run.contextVariables
 			}, `Workflow '${run.workflowName}' started with Run ID: ${run.runId} (Status: ${run.status})`);
-		} catch (err: any) {
+		} catch (err) {
 			return toolError(err.message || String(err));
 		}
 	}
@@ -143,11 +142,11 @@ export class GetWorkflowStateTool implements IToolImpl {
 				properties: {
 					run_id: {
 						type: 'string',
-						description: "The specific workflow run ID."
+						description: 'The specific workflow run ID.'
 					},
 					workflow_uri: {
 						type: 'string',
-						description: "Optional workflow URI to fetch the active or most recent run."
+						description: 'Optional workflow URI to fetch the active or most recent run.'
 					}
 				}
 			}
@@ -184,7 +183,7 @@ export class GetWorkflowStateTool implements IToolImpl {
 				recentLogs: run.logs.slice(-15),
 				contextVariables: run.contextVariables
 			}, `Retrieved state for run ${run.runId} (${run.status})`);
-		} catch (err: any) {
+		} catch (err) {
 			return toolError(err.message || String(err));
 		}
 	}
@@ -213,11 +212,11 @@ export class ResumeWorkflowStepTool implements IToolImpl {
 				properties: {
 					run_id: {
 						type: 'string',
-						description: "The workflow run ID to resume."
+						description: 'The workflow run ID to resume.'
 					},
 					user_input: {
 						type: 'object',
-						description: "Optional user input, parameters, or approval payload (e.g. { approved: true, comment: 'LGTM' })."
+						description: 'Optional user input, parameters, or approval payload (e.g. { approved: true, comment: \'LGTM\' }).'
 					}
 				},
 				required: ['run_id']
@@ -237,11 +236,11 @@ export class ResumeWorkflowStepTool implements IToolImpl {
 		try {
 			const { run_id, user_input } = invocation.parameters;
 			if (!run_id) {
-				return toolError("'run_id' is required.");
+				return toolError('\'run_id\' is required.');
 			}
 			await this.executionService.resumeWorkflow(run_id, user_input);
 			return toolResult({ runId: run_id, status: 'resumed' }, `Successfully resumed workflow run ${run_id}`);
-		} catch (err: any) {
+		} catch (err) {
 			return toolError(err.message || String(err));
 		}
 	}
@@ -270,7 +269,7 @@ export class StopWorkflowTool implements IToolImpl {
 				properties: {
 					run_id: {
 						type: 'string',
-						description: "The workflow run ID to terminate."
+						description: 'The workflow run ID to terminate.'
 					}
 				},
 				required: ['run_id']
@@ -290,11 +289,11 @@ export class StopWorkflowTool implements IToolImpl {
 		try {
 			const { run_id } = invocation.parameters;
 			if (!run_id) {
-				return toolError("'run_id' is required.");
+				return toolError('\'run_id\' is required.');
 			}
 			await this.executionService.stopWorkflow(run_id);
 			return toolResult({ runId: run_id, status: 'stopped' }, `Workflow run ${run_id} was stopped.`);
-		} catch (err: any) {
+		} catch (err) {
 			return toolError(err.message || String(err));
 		}
 	}
@@ -323,31 +322,31 @@ export class CreateTicketTool implements IToolImpl {
 				properties: {
 					workspace_uri: {
 						type: 'string',
-						description: "The root workspace URI or folder path where tickets are managed."
+						description: 'The root workspace URI or folder path where tickets are managed.'
 					},
 					target_path: {
 						type: 'string',
-						description: "Optional relative subfolder path within the workspace (e.g. 'jobs', 'jobs/fino3', 'tasks')."
+						description: 'Optional relative subfolder path within the workspace (e.g. \'jobs\', \'jobs/fino3\', \'tasks\').'
 					},
 					ticket_type: {
 						type: 'string',
-						description: "The schema type ID or name (e.g. 'task', 'job', 'analysis', or custom module ID)."
+						description: 'The schema type ID or name (e.g. \'task\', \'job\', \'analysis\', or custom module ID).'
 					},
 					title: {
 						type: 'string',
-						description: "The title of the ticket."
+						description: 'The title of the ticket.'
 					},
 					description: {
 						type: 'string',
-						description: "Optional description or summary of the ticket."
+						description: 'Optional description or summary of the ticket.'
 					},
 					parameters: {
 						type: 'object',
-						description: "Optional dictionary of initial parameter and variable values."
+						description: 'Optional dictionary of initial parameter and variable values.'
 					},
 					field_values: {
 						type: 'object',
-						description: "Optional initial values for specific schema fields."
+						description: 'Optional initial values for specific schema fields.'
 					}
 				},
 				required: ['workspace_uri', 'ticket_type', 'title']
@@ -367,7 +366,7 @@ export class CreateTicketTool implements IToolImpl {
 		try {
 			const { workspace_uri, target_path, ticket_type, title, description, parameters, field_values } = invocation.parameters;
 			if (!workspace_uri || !ticket_type || !title) {
-				return toolError("'workspace_uri', 'ticket_type', and 'title' are required.");
+				return toolError('\'workspace_uri\', \'ticket_type\', and \'title\' are required.');
 			}
 			const res = await this.ticketRuntimeService.createTicket({
 				workspaceUri: workspace_uri,
@@ -382,7 +381,7 @@ export class CreateTicketTool implements IToolImpl {
 				return toolError(res.error || 'Failed to create ticket.');
 			}
 			return toolResult(res, `Successfully created ticket '${res.ticketId}' (${res.ticketName}) at ${res.targetFolder}`);
-		} catch (err: any) {
+		} catch (err) {
 			return toolError(err.message || String(err));
 		}
 	}
@@ -411,11 +410,11 @@ export class GetTicketTool implements IToolImpl {
 				properties: {
 					workspace_uri: {
 						type: 'string',
-						description: "The root workspace URI or path."
+						description: 'The root workspace URI or path.'
 					},
 					ticket_id_or_path: {
 						type: 'string',
-						description: "Ticket identifier, ticket code, folder name, or relative path."
+						description: 'Ticket identifier, ticket code, folder name, or relative path.'
 					}
 				},
 				required: ['workspace_uri', 'ticket_id_or_path']
@@ -435,14 +434,14 @@ export class GetTicketTool implements IToolImpl {
 		try {
 			const { workspace_uri, ticket_id_or_path } = invocation.parameters;
 			if (!workspace_uri || !ticket_id_or_path) {
-				return toolError("'workspace_uri' and 'ticket_id_or_path' are required.");
+				return toolError('\'workspace_uri\' and \'ticket_id_or_path\' are required.');
 			}
 			const res = await this.ticketRuntimeService.getTicket(workspace_uri, ticket_id_or_path);
 			if (!res.success) {
 				return toolError(res.error || `Ticket '${ticket_id_or_path}' not found.`);
 			}
 			return toolResult(res, `Retrieved ticket '${res.ticketId}' (Type: ${res.ticketType}, Status: ${res.status})`);
-		} catch (err: any) {
+		} catch (err) {
 			return toolError(err.message || String(err));
 		}
 	}
@@ -493,9 +492,9 @@ export class GetTicketsTool implements IToolImpl {
 		try {
 			const { workspace_uri, ticket_type, status, title, path, field, limit } = invocation.parameters || {};
 			if (!workspace_uri) {
-				return toolError("'workspace_uri' is required.");
+				return toolError('\'workspace_uri\' is required.');
 			}
-			const query: Record<string, any> = {};
+			const query: Record<string, unknown> = {};
 			if (ticket_type) { query.ticket_type = ticket_type; }
 			if (status) { query.status = status; }
 			if (title) { query.title = title; }
@@ -508,7 +507,7 @@ export class GetTicketsTool implements IToolImpl {
 			const res = await this.ticketRuntimeService.getTickets(workspace_uri, query, field || undefined);
 			const list = Array.isArray(res) ? res : [];
 			return toolResult(list, `Found ${list.length} ticket(s)`);
-		} catch (err: any) {
+		} catch (err) {
 			return toolError(err.message || String(err));
 		}
 	}
@@ -537,15 +536,15 @@ export class RunTicketTool implements IToolImpl {
 				properties: {
 					workspace_uri: {
 						type: 'string',
-						description: "The root workspace URI or path."
+						description: 'The root workspace URI or path.'
 					},
 					ticket_id_or_path: {
 						type: 'string',
-						description: "Ticket identifier, code, folder name, or relative path."
+						description: 'Ticket identifier, code, folder name, or relative path.'
 					},
 					input_params: {
 						type: 'object',
-						description: "Optional runtime parameter overrides or context variables passed from workflow."
+						description: 'Optional runtime parameter overrides or context variables passed from workflow.'
 					}
 				},
 				required: ['workspace_uri', 'ticket_id_or_path']
@@ -565,7 +564,7 @@ export class RunTicketTool implements IToolImpl {
 		try {
 			const { workspace_uri, ticket_id_or_path, input_params } = invocation.parameters;
 			if (!workspace_uri || !ticket_id_or_path) {
-				return toolError("'workspace_uri' and 'ticket_id_or_path' are required.");
+				return toolError('\'workspace_uri\' and \'ticket_id_or_path\' are required.');
 			}
 			const res = await this.ticketRuntimeService.runTicket({
 				workspaceUri: workspace_uri,
@@ -576,7 +575,7 @@ export class RunTicketTool implements IToolImpl {
 				return toolError(res.error || `Execution of ticket '${ticket_id_or_path}' failed.`);
 			}
 			return toolResult(res, `Ticket '${res.ticketId}' executed successfully in ${res.durationMs}ms`);
-		} catch (err: any) {
+		} catch (err) {
 			return toolError(err.message || String(err));
 		}
 	}
@@ -605,7 +604,7 @@ export class GetPrimitivesCatalogTool implements IToolImpl {
 				properties: {
 					workspace_uri: {
 						type: 'string',
-						description: "Optional workspace URI to include workspace-specific Reusable Classes."
+						description: 'Optional workspace URI to include workspace-specific Reusable Classes.'
 					}
 				}
 			}
@@ -624,7 +623,7 @@ export class GetPrimitivesCatalogTool implements IToolImpl {
 			const { workspace_uri } = invocation.parameters;
 			const catalog = await this.ticketRuntimeService.getPrimitivesCatalog(workspace_uri);
 			return toolResult({ total: catalog.length, primitives: catalog }, `Retrieved catalog with ${catalog.length} primitives and classes.`);
-		} catch (err: any) {
+		} catch (err) {
 			return toolError(err.message || String(err));
 		}
 	}
@@ -653,14 +652,14 @@ export class GetOutputsTool implements IToolImpl {
 				properties: {
 					workspace_uri: {
 						type: 'string',
-						description: "Optional workspace URI or path."
+						description: 'Optional workspace URI or path.'
 					},
 					ticket_id: {
 						type: 'string',
-						description: "Ticket identifier, code, folder name, or relative path (e.g. 'FINDJ-0002')."
+						description: 'Ticket identifier, code, folder name, or relative path (e.g. \'FINDJ-0002\').'
 					},
 					ticket: {
-						description: "Ticket handle object or ticket identifier."
+						description: 'Ticket handle object or ticket identifier.'
 					}
 				}
 			}
@@ -681,11 +680,11 @@ export class GetOutputsTool implements IToolImpl {
 			const { workspace_uri, ticket_id, ticket, ticket_id_or_path } = invocation.parameters || {};
 			const target = ticket_id ?? ticket ?? ticket_id_or_path;
 			if (!target) {
-				return toolError("Either 'ticket_id' or 'ticket' is required.");
+				return toolError('Either \'ticket_id\' or \'ticket\' is required.');
 			}
 			const outputs = await this.ticketRuntimeService.getOutputs(workspace_uri || '', target);
 			return toolResult(outputs, outputs === null ? `Ticket template has no OUTPUT component (returned None).` : `Retrieved ${Object.keys(outputs).length} output field(s).`);
-		} catch (err: any) {
+		} catch (err) {
 			return toolError(err.message || String(err));
 		}
 	}

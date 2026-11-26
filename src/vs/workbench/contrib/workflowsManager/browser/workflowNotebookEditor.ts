@@ -1,10 +1,9 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import './media/workflowEditor.css';
-import { $, append, clearNode, Dimension } from '../../../../base/browser/dom.js';
+import { $, append, clearNode, Dimension, getWindow } from '../../../../base/browser/dom.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { DisposableStore } from '../../../../base/common/lifecycle.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
@@ -26,6 +25,7 @@ import { registerIcon } from '../../../../platform/theme/common/iconRegistry.js'
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IWorkflowExecutionService, INotebookCellExecutionResult } from '../common/workflowExecutionService.js';
+import { isWorkflowRecord } from '../common/workflowExecutionModel.js';
 import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import {
 	WorkflowToPythonConverter,
@@ -34,6 +34,14 @@ import {
 	parseComponentCommentAnchor,
 	IFlowchartData
 } from './workflowPythonSync.js';
+
+interface IIpynbCell {
+	cell_type: 'markdown' | 'code';
+	execution_count?: number | null;
+	metadata: Record<string, string | number>;
+	outputs?: unknown[];
+	source: string[];
+}
 
 const workflowNotebookEditorIcon = registerIcon(
 	'workflow-notebook-editor-label-icon',
@@ -135,6 +143,8 @@ export class WorkflowNotebookEditor extends EditorPane {
 	private _sidebarEl?: HTMLElement;
 	private _varChipsWrap?: HTMLElement;
 	private _notebookScrollEl?: HTMLElement;
+	/** The code cell that currently carries the `active` class (only one cell is active at a time). */
+	private _activeCodeCellEl?: HTMLElement;
 	private _kernelBadgeEl?: HTMLElement;
 	private _kernelStatusDot?: HTMLElement;
 	private _kernelStatusText?: HTMLElement;
@@ -192,7 +202,7 @@ export class WorkflowNotebookEditor extends EditorPane {
 		WorkflowNotebookEditor._savedScrollByUri.set(this._currentScrollKey, top);
 		try {
 			this._storageService.store(`workflowNotebookEditor.scroll.${this._currentScrollKey}`, String(top), StorageScope.PROFILE, StorageTarget.MACHINE);
-		} catch {}
+		} catch { }
 	}
 
 	private _getSavedScrollTop(key: string): number {
@@ -212,7 +222,7 @@ export class WorkflowNotebookEditor extends EditorPane {
 					return parsed;
 				}
 			}
-		} catch {}
+		} catch { }
 		return 0;
 	}
 
@@ -381,7 +391,7 @@ export class WorkflowNotebookEditor extends EditorPane {
 				}
 			};
 			applyScroll();
-			requestAnimationFrame(() => {
+			getWindow(this._notebookScrollEl).requestAnimationFrame(() => {
 				applyScroll();
 				setTimeout(() => {
 					applyScroll();
@@ -433,7 +443,7 @@ export class WorkflowNotebookEditor extends EditorPane {
 				if (ch === '#' && !inSingle && !inDouble) {
 					break;
 				}
-				if (ch === "'" && !inDouble && prev !== '\\') {
+				if (ch === '\'' && !inDouble && prev !== '\\') {
 					inSingle = !inSingle;
 				} else if (ch === '"' && !inSingle && prev !== '\\') {
 					inDouble = !inDouble;
@@ -537,7 +547,7 @@ export class WorkflowNotebookEditor extends EditorPane {
 	}
 
 	private _buildIpynbJsonString(): string {
-		const nbCells: any[] = [];
+		const nbCells: IIpynbCell[] = [];
 
 		nbCells.push({
 			cell_type: 'markdown',
@@ -547,7 +557,7 @@ export class WorkflowNotebookEditor extends EditorPane {
 				anyagent_workflow_uri: this._workflowUri?.toString() || ''
 			},
 			source: [
-				`# 📓 ${this._workflowName} (${this._workflowId})\n`,
+				`# \uD83D\uDCD3 ${this._workflowName} (${this._workflowId})\n`,
 				`Interactive AnyAgent Workflow Jupyter Notebook`
 			]
 		});
@@ -691,7 +701,7 @@ export class WorkflowNotebookEditor extends EditorPane {
 			try {
 				await this._fileService.writeFile(pyFileUri, VSBuffer.fromString(pySource));
 				await this._editorService.openEditor({ resource: pyFileUri, options: { pinned: true } });
-			} catch (err: any) {
+			} catch (err) {
 				this._notificationService.error(`Failed to open Python file: ${err?.message || err}`);
 			}
 		};
@@ -879,7 +889,7 @@ export class WorkflowNotebookEditor extends EditorPane {
 			WorkflowNotebookEditor._savedScrollByUri.set(scrollKey, top);
 			try {
 				this._storageService.store(`workflowNotebookEditor.scroll.${scrollKey}`, String(top), StorageScope.PROFILE, StorageTarget.MACHINE);
-			} catch {}
+			} catch { }
 		}, { passive: true });
 		this._renderCellsList();
 		this._refreshLiveVariables();
@@ -1109,7 +1119,8 @@ export class WorkflowNotebookEditor extends EditorPane {
 		textarea.addEventListener('focus', () => {
 			this._activeTextarea = textarea;
 			this._activeCellInfo = { section: sec, cell };
-			this._notebookScrollEl?.querySelectorAll('.nb-code-cell.active').forEach(el => el.classList.remove('active'));
+			this._activeCodeCellEl?.classList.remove('active');
+			this._activeCodeCellEl = cellEl;
 			cellEl.classList.add('active');
 		});
 
@@ -1201,7 +1212,8 @@ export class WorkflowNotebookEditor extends EditorPane {
 		textarea.addEventListener('focus', () => {
 			this._activeTextarea = textarea;
 			this._activeCellInfo = { conn };
-			this._notebookScrollEl?.querySelectorAll('.nb-code-cell.active').forEach(el => el.classList.remove('active'));
+			this._activeCodeCellEl?.classList.remove('active');
+			this._activeCodeCellEl = cellEl;
 			cellEl.classList.add('active');
 		});
 
@@ -1243,10 +1255,10 @@ export class WorkflowNotebookEditor extends EditorPane {
 		// Header meta row inside output
 		const outMeta = append(outBody, $('div.nb-output-meta-bar'));
 		const statusSpan = append(outMeta, $(`span.nb-output-status.${res.ok ? 'ok' : 'err'}`));
-		statusSpan.textContent = res.ok ? `✓ Executed in ${res.durationMs}ms` : `✕ Error (${res.durationMs}ms)`;
+		statusSpan.textContent = res.ok ? `✓ Executed in ${res.durationMs}ms` : `\u2715 Error (${res.durationMs}ms)`;
 
 		const outActions = append(outMeta, $('div.nb-output-actions'));
-		const clearBtn = append(outActions, $('button.nb-output-action-btn', {}, '✕'));
+		const clearBtn = append(outActions, $('button.nb-output-action-btn', {}, '\u2715'));
 		clearBtn.title = 'Clear this output';
 		clearBtn.onclick = () => {
 			clearNode(container);
@@ -1280,7 +1292,7 @@ export class WorkflowNotebookEditor extends EditorPane {
 
 		if (res.value !== undefined && res.value !== null) {
 			const valPre = append(outBody, $('pre.nb-output-pre.value'));
-			if (typeof res.value === 'object' && res.value.__assignedVar) {
+			if (isWorkflowRecord(res.value) && res.value.__assignedVar) {
 				const vName = res.value.__assignedVar;
 				const vVal = res.value.value;
 				const formatted = typeof vVal === 'object' ? JSON.stringify(vVal, null, 2) : String(vVal);
