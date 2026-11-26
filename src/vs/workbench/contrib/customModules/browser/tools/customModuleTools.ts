@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { CancellationToken } from '../../../../../base/common/cancellation.js';
@@ -18,7 +17,7 @@ export const GenerateCustomModuleToolId = 'anyagent_generate_custom_module';
 export const ToggleCustomModuleStatusToolId = 'anyagent_toggle_custom_module_status';
 export const DeleteCustomModuleToolId = 'anyagent_delete_custom_module';
 
-function toolResult(data: any, message?: string): IToolResult {
+function toolResult(data: unknown, message?: string): IToolResult {
 	return {
 		content: [{
 			kind: 'text',
@@ -565,7 +564,7 @@ function describeBasePrimitives(): string {
 async function resolveWorkspaceUri(workspacesExplorerService: IWorkspacesExplorerService, workspaceId?: string): Promise<URI | undefined> {
 	try {
 		const workspaces = await workspacesExplorerService.getWorkspaces();
-		if (!workspaces || workspaces.length === 0) return undefined;
+		if (!workspaces || workspaces.length === 0) { return undefined; }
 
 		const trimmedId = (workspaceId || '').trim();
 		if (!trimmedId || trimmedId === 'current' || trimmedId === 'active' || trimmedId === 'default' || trimmedId === '/' || trimmedId === '.') {
@@ -619,7 +618,7 @@ export class ListCustomModulesTool implements IToolImpl {
 				properties: {
 					workspace_id: {
 						type: 'string',
-						description: "Optional workspace identifier or name to scope lookup."
+						description: 'Optional workspace identifier or name to scope lookup.'
 					}
 				}
 			}
@@ -659,8 +658,8 @@ export class ListCustomModulesTool implements IToolImpl {
 				base_primitives: BASE_PRIMITIVES_CATALOG,
 				reusable_classes: reusableClassesSummary
 			}, `Found ${modules.length} custom module(s), ${BASE_PRIMITIVES_CATALOG.length} base primitive types, and ${reusableClassesSummary.length} reusable class(es).`);
-		} catch (err: any) {
-			return toolError(`Failed to list custom modules: ${err.message || err}`);
+		} catch (err) {
+			return toolError(`Failed to list custom modules: ${(err as Error).message || err}`);
 		}
 	}
 
@@ -672,6 +671,58 @@ export class ListCustomModulesTool implements IToolImpl {
 // -------------------------------------------------------------
 // 2. anyagent_generate_custom_module
 // -------------------------------------------------------------
+/** A table column as provided by the model; values are validated/coerced before use. */
+interface IGenerateTableColumnParameter {
+	id?: string;
+	name?: unknown;
+	dataType?: unknown;
+	primaryKey?: unknown;
+}
+
+/** A `parameters` component entry as provided by the model; values are validated/coerced before use. */
+interface IGenerateParameterDefinitionParameter {
+	name?: unknown;
+	label?: unknown;
+	defaultValue?: unknown;
+	options?: unknown;
+	description?: unknown;
+}
+
+/** An `output` component spec as provided by the model; values are validated/coerced before use. */
+interface IGenerateOutputSpecParameter {
+	label?: unknown;
+	sourceExpression?: unknown;
+	fieldKey?: unknown;
+	enabled?: unknown;
+	defaultFormat?: unknown;
+	varName?: unknown;
+}
+
+export interface IGenerateCustomModuleFieldParameter {
+	id: string;
+	label: string;
+	type: CustomFieldType;
+	options?: string[];
+	itemFields?: ICustomField[];
+	componentRef?: string;
+	buttons?: IActionButton[];
+	unit?: string;
+	precision?: number;
+	min?: number;
+	max?: number;
+	step?: number;
+	tableDbPath?: unknown;
+	tableDbTableName?: unknown;
+	tableColumns?: Array<IGenerateTableColumnParameter>;
+	tableRows?: unknown;
+	parameters?: Array<IGenerateParameterDefinitionParameter | null | undefined>;
+	outputSpecs?: Array<IGenerateOutputSpecParameter | null | undefined>;
+	/** Component settings may be nested in `config` ... */
+	config?: unknown;
+	/** ... or given directly on the field (any key of the component's config catalog). */
+	[configKey: string]: unknown;
+}
+
 export interface IGenerateCustomModuleParameters {
 	module_id: string;
 	module_name?: string;
@@ -679,20 +730,7 @@ export interface IGenerateCustomModuleParameters {
 	type_definition?: string;
 	type_prompt?: string;
 	storage_scope?: 'global' | 'workspace';
-	fields?: Array<{
-		id: string;
-		label: string;
-		type: CustomFieldType;
-		options?: string[];
-		itemFields?: ICustomField[];
-		componentRef?: string;
-		buttons?: IActionButton[];
-		unit?: string;
-		precision?: number;
-		min?: number;
-		max?: number;
-		step?: number;
-	}>;
+	fields?: IGenerateCustomModuleFieldParameter[];
 	statuses?: IStatusDefinition[];
 	workspace_id?: string;
 	auto_open?: boolean;
@@ -711,7 +749,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 			toolReferenceName: 'generateCustomModule',
 			displayName: localize('customModules.tool.generate.displayName', "Generate Custom Module"),
 			userDescription: localize('customModules.tool.generate.userDescription', "Create or synthesize a custom module schema with Type Definition, Type Prompt, and fields"),
-			modelDescription: "Synthesize and register a new Custom Module (entity type schema) or update an existing module in AnyAgent. Extracts Type Definition (business purpose) and Type Prompt (system instructions for AI processing tickets of this type) from user voice/text description, structures appropriate fields using Base Primitives and Reusable Classes, writes YAML definition, and opens Schema Designer for interactive visual review.",
+			modelDescription: 'Synthesize and register a new Custom Module (entity type schema) or update an existing module in AnyAgent. Extracts Type Definition (business purpose) and Type Prompt (system instructions for AI processing tickets of this type) from user voice/text description, structures appropriate fields using Base Primitives and Reusable Classes, writes YAML definition, and opens Schema Designer for interactive visual review.',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.extensions,
@@ -720,57 +758,57 @@ export class GenerateCustomModuleTool implements IToolImpl {
 				properties: {
 					module_id: {
 						type: 'string',
-						description: "Unique kebab-case or snake-case identifier for the module (e.g. 'expense_reimbursement', 'reimbursement_approval', 'contract_review')."
+						description: 'Unique kebab-case or snake-case identifier for the module (e.g. \'expense_reimbursement\', \'reimbursement_approval\', \'contract_review\').'
 					},
 					module_name: {
 						type: 'string',
-						description: "Human-readable display name for the module (e.g. 'Expense Reimbursement', 'Leave Request', 'Purchase Order')."
+						description: 'Human-readable display name for the module (e.g. \'Expense Reimbursement\', \'Leave Request\', \'Purchase Order\').'
 					},
 					color: {
 						type: 'string',
-						description: "Theme hex color code for this module badge (e.g. '#10b981' emerald/finance, '#3b82f6' blue/process, '#8b5cf6' purple/workflow, '#f59e0b' amber, '#ef4444' red). Defaults to '#10b981'."
+						description: 'Theme hex color code for this module badge (e.g. \'#10b981\' emerald/finance, \'#3b82f6\' blue/process, \'#8b5cf6\' purple/workflow, \'#f59e0b\' amber, \'#ef4444\' red). Defaults to \'#10b981\'.'
 					},
 					type_definition: {
 						type: 'string',
-						description: "Business purpose and semantic definition of this entity type extracted from user description. Explains what this entity is, why it is used, and its role in business operations."
+						description: 'Business purpose and semantic definition of this entity type extracted from user description. Explains what this entity is, why it is used, and its role in business operations.'
 					},
 					type_prompt: {
 						type: 'string',
-						description: "AI system instruction / prompt specifically guiding AI agents on how to process, audit, validate, calculate, and route tickets of this module type."
+						description: 'AI system instruction / prompt specifically guiding AI agents on how to process, audit, validate, calculate, and route tickets of this module type.'
 					},
 					storage_scope: {
 						type: 'string',
 						enum: ['global', 'workspace'],
-						description: "Storage scope: 'global' applies across all workspaces, 'workspace' stores within current workspace. Defaults to 'global'."
+						description: 'Storage scope: \'global\' applies across all workspaces, \'workspace\' stores within current workspace. Defaults to \'global\'.'
 					},
 					fields: {
 						type: 'array',
-						description: "Array of fields composing this entity type.",
+						description: 'Array of fields composing this entity type.',
 						items: {
 							type: 'object',
 							properties: {
 								id: {
 									type: 'string',
-									description: "Field identifier (e.g. 'total_amount', 'category', 'expense_items', 'receipts')."
+									description: 'Field identifier (e.g. \'total_amount\', \'category\', \'expense_items\', \'receipts\').'
 								},
 								label: {
 									type: 'string',
-									description: "Display label for the field (e.g. 'Total Amount', 'Expense Category', 'Line Items', 'Receipts')."
+									description: 'Display label for the field (e.g. \'Total Amount\', \'Expense Category\', \'Line Items\', \'Receipts\').'
 								},
 								type: {
 									type: 'string',
 									enum: aiFieldTypes(),
-									description: "Component type from Base Primitives catalog."
+									description: 'Component type from Base Primitives catalog.'
 								},
 								tableColumns: {
 									type: 'array',
-									description: "Column definitions if type is 'table' (each with name, dataType such as TEXT/INTEGER/REAL/NUMERIC/BOOLEAN/DATE/DATETIME/JSON/BLOB, and optional primaryKey).",
+									description: 'Column definitions if type is \'table\' (each with name, dataType such as TEXT/INTEGER/REAL/NUMERIC/BOOLEAN/DATE/DATETIME/JSON/BLOB, and optional primaryKey).',
 									items: {
 										type: 'object',
 										properties: {
 											id: { type: 'string' },
-											name: { type: 'string', description: "Column header / SQL column name" },
-											dataType: { type: 'string', description: "SQLite / SQL column data type (e.g. TEXT, INTEGER, REAL, NUMERIC, BOOLEAN, DATE, DATETIME, JSON, VARCHAR(255), BLOB)" },
+											name: { type: 'string', description: 'Column header / SQL column name' },
+											dataType: { type: 'string', description: 'SQLite / SQL column data type (e.g. TEXT, INTEGER, REAL, NUMERIC, BOOLEAN, DATE, DATETIME, JSON, VARCHAR(255), BLOB)' },
 											primaryKey: { type: 'boolean' }
 										},
 										required: ['name', 'dataType']
@@ -778,61 +816,61 @@ export class GenerateCustomModuleTool implements IToolImpl {
 								},
 								tableDbPath: {
 									type: 'string',
-									description: "Optional SQLite database file path (.db / .sqlite) if type is 'table'."
+									description: 'Optional SQLite database file path (.db / .sqlite) if type is \'table\'.'
 								},
 								tableDbTableName: {
 									type: 'string',
-									description: "Optional target SQLite table name if type is 'table'."
+									description: 'Optional target SQLite table name if type is \'table\'.'
 								},
 								options: {
 									type: 'array',
 									items: { type: 'string' },
-									description: "Options array for 'select' or 'multiselect' fields."
+									description: 'Options array for \'select\' or \'multiselect\' fields.'
 								},
 								itemFields: {
 									type: 'array',
-									description: "Sub-fields array if type is 'dynamic_list' (nested sub-table / repeating items)."
+									description: 'Sub-fields array if type is \'dynamic_list\' (nested sub-table / repeating items).'
 								},
 								componentRef: {
 									type: 'string',
-									description: "Optional ID of a reusable class if referencing a composite component."
+									description: 'Optional ID of a reusable class if referencing a composite component.'
 								},
 								unit: {
 									type: 'string',
-									description: "Optional unit or currency/measurement symbol for numeric fields (e.g. '$', 'kg', '%', 'hours', 'pts')."
+									description: 'Optional unit or currency/measurement symbol for numeric fields (e.g. \'$\', \'kg\', \'%\', \'hours\', \'pts\').'
 								},
 								precision: {
 									type: 'number',
-									description: "Decimal places precision for numeric fields. Defaults to 2 (e.g. 0.00)."
+									description: 'Decimal places precision for numeric fields. Defaults to 2 (e.g. 0.00).'
 								},
-								min: { type: 'number', description: "Minimum allowed value for numeric fields." },
-								max: { type: 'number', description: "Maximum allowed value for numeric fields." },
-								step: { type: 'number', description: "Stepping increment for numeric fields." },
+								min: { type: 'number', description: 'Minimum allowed value for numeric fields.' },
+								max: { type: 'number', description: 'Maximum allowed value for numeric fields.' },
+								step: { type: 'number', description: 'Stepping increment for numeric fields.' },
 								buttons: {
 									type: 'array',
-									description: "Array of action transition buttons if type is 'button_group'.",
+									description: 'Array of action transition buttons if type is \'button_group\'.',
 									items: {
 										type: 'object',
 										properties: {
-											id: { type: 'string', description: "Button identifier" },
-											label: { type: 'string', description: "Button display label" },
-											color: { type: 'string', description: "Hex color for button" },
-											targetStatus: { type: 'string', description: "Target status stage to transition ticket to upon click" }
+											id: { type: 'string', description: 'Button identifier' },
+											label: { type: 'string', description: 'Button display label' },
+											color: { type: 'string', description: 'Hex color for button' },
+											targetStatus: { type: 'string', description: 'Target status stage to transition ticket to upon click' }
 										},
 										required: ['id', 'label']
 									}
 								},
 								parameters: {
 									type: 'array',
-									description: "Input definitions if type is 'parameters' (the Inputs component). Each input becomes a variable that later components can reference as {name}; callers fill them via CREATE_TICKETS / RUN_TICKETS params.",
+									description: 'Input definitions if type is \'parameters\' (the Inputs component). Each input becomes a variable that later components can reference as {name}; callers fill them via CREATE_TICKETS / RUN_TICKETS params.',
 									items: {
 										type: 'object',
 										properties: {
-											name: { type: 'string', description: "Variable name (letters, digits, underscore)." },
-											label: { type: 'string', description: "Optional display label. Default: name." },
-											defaultValue: { type: 'string', description: "Optional default value; may reference another variable as {var}. Default: empty." },
-											options: { type: 'array', items: { type: 'string' }, description: "Optional allowed values (renders a dropdown)." },
-											description: { type: 'string', description: "Optional help text." }
+											name: { type: 'string', description: 'Variable name (letters, digits, underscore).' },
+											label: { type: 'string', description: 'Optional display label. Default: name.' },
+											defaultValue: { type: 'string', description: 'Optional default value; may reference another variable as {var}. Default: empty.' },
+											options: { type: 'array', items: { type: 'string' }, description: 'Optional allowed values (renders a dropdown).' },
+											description: { type: 'string', description: 'Optional help text.' }
 										},
 										required: ['name']
 									}
@@ -844,16 +882,16 @@ export class GenerateCustomModuleTool implements IToolImpl {
 								},
 								outputSpecs: {
 									type: 'array',
-									description: "Output items if type is 'output'. The Output component defines the RESULT of the ticket: a dictionary {label: value} returned by RUN_TICKETS(...).output and GET_OUTPUTS(ticket). Always include at least one item; a status flag such as {label: 'success', sourceExpression: 'True'} is recommended.",
+									description: 'Output items if type is \'output\'. The Output component defines the RESULT of the ticket: a dictionary {label: value} returned by RUN_TICKETS(...).output and GET_OUTPUTS(ticket). Always include at least one item; a status flag such as {label: \'success\', sourceExpression: \'True\'} is recommended.',
 									items: {
 										type: 'object',
 										properties: {
-											label: { type: 'string', description: "Key of this item in the result dictionary." },
-											sourceExpression: { type: 'string', description: "Where the value comes from: a variable reference such as {summary} or summary, a literal (True / 42), or a template string with {var} placeholders. Omit it and set fieldKey to export another component's value instead." },
-											fieldKey: { type: 'string', description: "Alternative to sourceExpression: id or label of another component in this module whose value is exported." },
-											varName: { type: 'string', description: "Optional Python variable name for this item. Default: derived from label." },
-											defaultFormat: { type: 'string', enum: ['text', 'markdown', 'json', 'table'], description: "Display format, used only with fieldKey. Default: table." },
-											enabled: { type: 'boolean', description: "Default: true." }
+											label: { type: 'string', description: 'Key of this item in the result dictionary.' },
+											sourceExpression: { type: 'string', description: 'Where the value comes from: a variable reference such as {summary} or summary, a literal (True / 42), or a template string with {var} placeholders. Omit it and set fieldKey to export another component\'s value instead.' },
+											fieldKey: { type: 'string', description: 'Alternative to sourceExpression: id or label of another component in this module whose value is exported.' },
+											varName: { type: 'string', description: 'Optional Python variable name for this item. Default: derived from label.' },
+											defaultFormat: { type: 'string', enum: ['text', 'markdown', 'json', 'table'], description: 'Display format, used only with fieldKey. Default: table.' },
+											enabled: { type: 'boolean', description: 'Default: true.' }
 										},
 										required: ['label']
 									}
@@ -864,30 +902,30 @@ export class GenerateCustomModuleTool implements IToolImpl {
 					},
 					statuses: {
 						type: 'array',
-						description: "Custom operational lifecycle statuses for tickets of this module type. If omitted, defaults to the 5 canonical stages (Todo, In Progress, Done, Blocked, Removed).",
+						description: 'Custom operational lifecycle statuses for tickets of this module type. If omitted, defaults to the 5 canonical stages (Todo, In Progress, Done, Blocked, Removed).',
 						items: {
 							type: 'object',
 							properties: {
-								id: { type: 'string', description: "Unique status stage identifier" },
-								label: { type: 'string', description: "Status stage display name" },
-								color: { type: 'string', description: "Hex color code for status stage badge" },
+								id: { type: 'string', description: 'Unique status stage identifier' },
+								label: { type: 'string', description: 'Status stage display name' },
+								color: { type: 'string', description: 'Hex color code for status stage badge' },
 								category: {
 									type: 'string',
 									enum: ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'],
-									description: "Canonical lifecycle bucket to map this custom status into"
+									description: 'Canonical lifecycle bucket to map this custom status into'
 								},
-								description: { type: 'string', description: "Optional description of what this stage represents" }
+								description: { type: 'string', description: 'Optional description of what this stage represents' }
 							},
 							required: ['id', 'label', 'color', 'category']
 						}
 					},
 					workspace_id: {
 						type: 'string',
-						description: "Target workspace ID or name if scoping to a specific workspace."
+						description: 'Target workspace ID or name if scoping to a specific workspace.'
 					},
 					auto_open: {
 						type: 'boolean',
-						description: "Whether to automatically open the visual Schema Designer editor in Workbench upon creation. Defaults to true."
+						description: 'Whether to automatically open the visual Schema Designer editor in Workbench upon creation. Defaults to true.'
 					}
 				},
 				required: ['module_id']
@@ -899,7 +937,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 		try {
 			const params = invocation.parameters as IGenerateCustomModuleParameters;
 			if (!params || !params.module_id) {
-				return toolError("Missing required parameter: 'module_id' must be provided.");
+				return toolError('Missing required parameter: \'module_id\' must be provided.');
 			}
 
 			const rawId = params.module_id.trim();
@@ -915,7 +953,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 			const existingMod = existingModules.find(m => m.id.toLowerCase() === cleanId.toLowerCase());
 
 			if (!existingMod && !params.module_name) {
-				return toolError("Missing required parameter: 'module_name' must be provided when creating a new module.");
+				return toolError('Missing required parameter: \'module_name\' must be provided when creating a new module.');
 			}
 
 			// Clean and validate fields if provided
@@ -960,7 +998,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 
 					if (fieldType === 'dynamic_list') {
 						if (Array.isArray(f.itemFields) && f.itemFields.length > 0) {
-							cleanField.itemFields = f.itemFields.map((sub: any, sIdx: number) => {
+							cleanField.itemFields = f.itemFields.map((sub: ICustomField, sIdx: number) => {
 								const subType = normalizeFieldType(sub.type ? sub.type.toLowerCase() : 'text') as CustomFieldType;
 								const subClean: ICustomField = {
 									id: (sub.id || `sub_${sIdx + 1}`).trim().replace(/[^a-zA-Z0-9_-]/g, '_'),
@@ -968,7 +1006,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 									type: VALID_FIELD_TYPES.has(subType) ? subType : 'text'
 								};
 								if ((subType === 'select' || subType === 'multiselect') && Array.isArray(sub.options)) {
-									subClean.options = sub.options.map((o: any) => String(o).trim()).filter(Boolean);
+									subClean.options = sub.options.map((o: unknown) => String(o).trim()).filter(Boolean);
 								}
 								return subClean;
 							});
@@ -984,7 +1022,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 
 					if (fieldType === 'button_group') {
 						if (Array.isArray(f.buttons) && f.buttons.length > 0) {
-							cleanField.buttons = f.buttons.map((b: any, bIdx: number) => ({
+							cleanField.buttons = f.buttons.map((b: IActionButton, bIdx: number) => ({
 								id: (b.id || `btn_${bIdx + 1}`).trim().replace(/[^a-zA-Z0-9_-]/g, '_'),
 								label: (b.label || `Action ${bIdx + 1}`).trim(),
 								color: b.color && /^#[0-9a-fA-F]{3,8}$/.test(b.color.trim()) ? b.color.trim() : '#3b82f6',
@@ -999,28 +1037,28 @@ export class GenerateCustomModuleTool implements IToolImpl {
 					}
 
 					if (fieldType === 'number') {
-						if (f.unit !== undefined) cleanField.unit = f.unit ? String(f.unit).trim() : undefined;
-						if (typeof f.precision === 'number') cleanField.precision = f.precision;
-						else if (cleanField.precision === undefined) cleanField.precision = 2;
-						if (typeof f.min === 'number') cleanField.min = f.min;
-						if (typeof f.max === 'number') cleanField.max = f.max;
-						if (typeof f.step === 'number') cleanField.step = f.step;
+						if (f.unit !== undefined) { cleanField.unit = f.unit ? String(f.unit).trim() : undefined; }
+						if (typeof f.precision === 'number') { cleanField.precision = f.precision; }
+						else if (cleanField.precision === undefined) { cleanField.precision = 2; }
+						if (typeof f.min === 'number') { cleanField.min = f.min; }
+						if (typeof f.max === 'number') { cleanField.max = f.max; }
+						if (typeof f.step === 'number') { cleanField.step = f.step; }
 					}
 
 					if (fieldType === 'table') {
 						cleanField.tableDbEngine = 'sqlite';
-						if ((f as any).tableDbPath !== undefined) {
-							cleanField.tableDbPath = String((f as any).tableDbPath).trim();
+						if (f.tableDbPath !== undefined) {
+							cleanField.tableDbPath = String(f.tableDbPath).trim();
 						} else if (!cleanField.tableDbPath) {
 							cleanField.tableDbPath = '';
 						}
-						if ((f as any).tableDbTableName !== undefined) {
-							cleanField.tableDbTableName = String((f as any).tableDbTableName).trim();
+						if (f.tableDbTableName !== undefined) {
+							cleanField.tableDbTableName = String(f.tableDbTableName).trim();
 						} else if (!cleanField.tableDbTableName) {
 							cleanField.tableDbTableName = fieldId.toLowerCase().replace(/[^a-z0-9_]/g, '_');
 						}
-						if (Array.isArray((f as any).tableColumns) && (f as any).tableColumns.length > 0) {
-							cleanField.tableColumns = (f as any).tableColumns.map((col: any, cIdx: number) => ({
+						if (Array.isArray(f.tableColumns) && f.tableColumns.length > 0) {
+							cleanField.tableColumns = f.tableColumns.map((col: IGenerateTableColumnParameter, cIdx: number) => ({
 								id: (col.id || `col_${cIdx + 1}`).trim(),
 								name: String(col.name || `column_${cIdx + 1}`).trim(),
 								dataType: String(col.dataType || 'TEXT').toUpperCase().trim(),
@@ -1034,8 +1072,8 @@ export class GenerateCustomModuleTool implements IToolImpl {
 								{ id: 'col_4', name: 'created_at', dataType: 'DATETIME' }
 							];
 						}
-						if (Array.isArray((f as any).tableRows)) {
-							cleanField.tableRows = (f as any).tableRows;
+						if (Array.isArray(f.tableRows)) {
+							cleanField.tableRows = f.tableRows;
 						} else if (!cleanField.tableRows) {
 							cleanField.tableRows = [];
 						}
@@ -1046,10 +1084,10 @@ export class GenerateCustomModuleTool implements IToolImpl {
 						const allowedKeys = Object.keys({ ...COMMON_CONFIG_PROPS, ...(COMPONENT_CONFIG_PROPS[fieldType] || {}) });
 						const merged: Record<string, unknown> = {};
 						for (const key of allowedKeys) {
-							if ((f as any)[key] !== undefined) { merged[key] = (f as any)[key]; }
+							if (f[key] !== undefined) { merged[key] = f[key]; }
 						}
-						if ((f as any).config && typeof (f as any).config === 'object') {
-							Object.assign(merged, (f as any).config);
+						if (f.config && typeof f.config === 'object') {
+							Object.assign(merged, f.config);
 						}
 						const configError = applyComponentConfig(cleanField, fieldType, merged);
 						if (configError) {
@@ -1057,23 +1095,23 @@ export class GenerateCustomModuleTool implements IToolImpl {
 						}
 					}
 
-					if (fieldType === 'parameters' && Array.isArray((f as any).parameters)) {
-						cleanField.parameters = (f as any).parameters
-							.filter((pd: any) => pd && String(pd.name || '').trim())
-							.map((pd: any, pIdx: number) => ({
+					if (fieldType === 'parameters' && Array.isArray(f.parameters)) {
+						cleanField.parameters = f.parameters
+							.filter((pd): pd is IGenerateParameterDefinitionParameter => !!(pd && String(pd.name || '').trim()))
+							.map((pd: IGenerateParameterDefinitionParameter, pIdx: number) => ({
 								id: `param_${pIdx + 1}`,
 								name: String(pd.name).trim().replace(/[^a-zA-Z0-9_]/g, '_'),
 								label: pd.label ? String(pd.label).trim() : undefined,
 								defaultValue: pd.defaultValue !== undefined ? String(pd.defaultValue) : '',
-								options: Array.isArray(pd.options) ? pd.options.map((o: any) => String(o)) : undefined,
+								options: Array.isArray(pd.options) ? pd.options.map((o: unknown) => String(o)) : undefined,
 								description: pd.description ? String(pd.description) : ''
 							}));
 					}
 
-					if (fieldType === 'output' && Array.isArray((f as any).outputSpecs)) {
-						cleanField.outputSpecs = (f as any).outputSpecs
-							.filter((os: any) => os && String(os.label || '').trim())
-							.map((os: any) => {
+					if (fieldType === 'output' && Array.isArray(f.outputSpecs)) {
+						cleanField.outputSpecs = f.outputSpecs
+							.filter((os): os is IGenerateOutputSpecParameter => !!(os && String(os.label || '').trim()))
+							.map((os: IGenerateOutputSpecParameter) => {
 								const label = String(os.label).trim();
 								const sourceExpression = os.sourceExpression !== undefined ? String(os.sourceExpression).trim() : '';
 								const fieldKey = os.fieldKey ? String(os.fieldKey).trim() : '';
@@ -1082,7 +1120,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 									fieldKey: fieldKey || label,
 									label,
 									enabled: os.enabled !== false,
-									defaultFormat: ['text', 'markdown', 'json', 'table'].includes(os.defaultFormat) ? os.defaultFormat : (isCustom ? 'text' : 'table'),
+									defaultFormat: typeof os.defaultFormat === 'string' && ['text', 'markdown', 'json', 'table'].includes(os.defaultFormat) ? os.defaultFormat : (isCustom ? 'text' : 'table'),
 									isCustom,
 									varName: os.varName ? String(os.varName).trim() : undefined,
 									varNameManual: !!os.varName,
@@ -1116,7 +1154,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 
 			let cleanedStatuses: IStatusDefinition[] | undefined;
 			if (Array.isArray(params.statuses) && params.statuses.length > 0) {
-				cleanedStatuses = params.statuses.map((st: any, sIdx: number) => {
+				cleanedStatuses = params.statuses.map((st: IStatusDefinition, sIdx: number) => {
 					const cat = ['Todo', 'In Progress', 'Done', 'Blocked', 'Removed'].includes(st.category) ? st.category : 'Todo';
 					return {
 						id: (st.id || `status_${sIdx + 1}`).trim().replace(/[^a-zA-Z0-9_-]/g, '_'),
@@ -1192,8 +1230,8 @@ export class GenerateCustomModuleTool implements IToolImpl {
 				designer_opened: designerOpened,
 				total_custom_modules: updatedModules.length
 			}, `Custom Module '${newModule.name}' (${newModule.id}) successfully ${replaced ? 'updated' : 'created'} with ${newModule.fields?.length || 0} field(s). Type Definition and Type Prompt are configured.`);
-		} catch (err: any) {
-			return toolError(`Failed to generate custom module: ${err.message || err}`);
+		} catch (err) {
+			return toolError(`Failed to generate custom module: ${(err as Error).message || err}`);
 		}
 	}
 
@@ -1218,7 +1256,7 @@ export class ToggleCustomModuleStatusTool implements IToolImpl {
 			toolReferenceName: 'toggleCustomModuleStatus',
 			displayName: localize('customModules.tool.toggle.displayName', "Disable/Enable Custom Module"),
 			userDescription: localize('customModules.tool.toggle.userDescription', "Disable (deactivate) or re-enable a custom module"),
-			modelDescription: "Disable (deactivate) or re-enable a Custom Module in AnyAgent. When disabled, the module will be hidden from the new ticket type options. Existing tickets remain preserved.",
+			modelDescription: 'Disable (deactivate) or re-enable a Custom Module in AnyAgent. When disabled, the module will be hidden from the new ticket type options. Existing tickets remain preserved.',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.circleSlash,
@@ -1227,16 +1265,16 @@ export class ToggleCustomModuleStatusTool implements IToolImpl {
 				properties: {
 					module_id: {
 						type: 'string',
-						description: "The identifier of the custom module (e.g. 'expense_reimbursement')."
+						description: 'The identifier of the custom module (e.g. \'expense_reimbursement\').'
 					},
 					action: {
 						type: 'string',
 						enum: ['disable', 'enable'],
-						description: "Action to perform: 'disable' (deactivate) or 'enable' (activate)."
+						description: 'Action to perform: \'disable\' (deactivate) or \'enable\' (activate).'
 					},
 					workspace_id: {
 						type: 'string',
-						description: "Optional workspace identifier or name."
+						description: 'Optional workspace identifier or name.'
 					}
 				},
 				required: ['module_id', 'action']
@@ -1248,7 +1286,7 @@ export class ToggleCustomModuleStatusTool implements IToolImpl {
 		try {
 			const params = (invocation.parameters || {}) as { module_id: string; action: 'disable' | 'enable'; workspace_id?: string };
 			if (!params.module_id || !params.action) {
-				return toolError("Missing required parameters: 'module_id' and 'action' ('disable' | 'enable') must be provided.");
+				return toolError('Missing required parameters: \'module_id\' and \'action\' (\'disable\' | \'enable\') must be provided.');
 			}
 
 			const cleanId = params.module_id.trim().toLowerCase();
@@ -1271,8 +1309,8 @@ export class ToggleCustomModuleStatusTool implements IToolImpl {
 				is_deprecated: targetMod.isDeprecated,
 				message: `Module '${targetMod.name}' is now ${targetMod.isDeprecated ? 'Disabled' : 'Active'}.`
 			}, `Custom Module '${targetMod.name}' successfully ${targetMod.isDeprecated ? 'disabled' : 'enabled'}.`);
-		} catch (err: any) {
-			return toolError(`Failed to toggle custom module status: ${err.message || err}`);
+		} catch (err) {
+			return toolError(`Failed to toggle custom module status: ${(err as Error).message || err}`);
 		}
 	}
 
@@ -1297,7 +1335,7 @@ export class DeleteCustomModuleTool implements IToolImpl {
 			toolReferenceName: 'deleteCustomModule',
 			displayName: localize('customModules.tool.delete.displayName', "Delete Custom Module"),
 			userDescription: localize('customModules.tool.delete.userDescription', "Delete a custom module schema YAML file"),
-			modelDescription: "Permanently delete a Custom Module definition from AnyAgent. This removes the schema YAML file. Existing tickets of this type will preserve their data.",
+			modelDescription: 'Permanently delete a Custom Module definition from AnyAgent. This removes the schema YAML file. Existing tickets of this type will preserve their data.',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.trash,
@@ -1306,11 +1344,11 @@ export class DeleteCustomModuleTool implements IToolImpl {
 				properties: {
 					module_id: {
 						type: 'string',
-						description: "The identifier of the custom module to delete (e.g. 'expense_reimbursement')."
+						description: 'The identifier of the custom module to delete (e.g. \'expense_reimbursement\').'
 					},
 					workspace_id: {
 						type: 'string',
-						description: "Optional workspace identifier or name."
+						description: 'Optional workspace identifier or name.'
 					}
 				},
 				required: ['module_id']
@@ -1322,7 +1360,7 @@ export class DeleteCustomModuleTool implements IToolImpl {
 		try {
 			const params = (invocation.parameters || {}) as { module_id: string; workspace_id?: string };
 			if (!params.module_id) {
-				return toolError("Missing required parameter: 'module_id' must be provided.");
+				return toolError('Missing required parameter: \'module_id\' must be provided.');
 			}
 
 			const cleanId = params.module_id.trim();
@@ -1335,8 +1373,8 @@ export class DeleteCustomModuleTool implements IToolImpl {
 				deleted_module_id: cleanId,
 				message: `Custom module '${cleanId}' has been deleted.`
 			}, `Custom Module '${cleanId}' was successfully deleted.`);
-		} catch (err: any) {
-			return toolError(`Failed to delete custom module: ${err.message || err}`);
+		} catch (err) {
+			return toolError(`Failed to delete custom module: ${(err as Error).message || err}`);
 		}
 	}
 

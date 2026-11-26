@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { EditorInput } from '../../../common/editor/editorInput.js';
@@ -27,9 +26,9 @@ export class CustomModuleSchemaEditorInput extends EditorInput {
 	public isFlowchartNodeMode?: boolean;
 	public nodeId?: string;
 	public workflowVariablesProvider?: () => Array<{ label: string; type: string; ticketType?: string }>;
-	public workflowRuntimeContextProvider?: () => Record<string, any>;
+	public workflowRuntimeContextProvider?: () => Record<string, unknown>;
 	/** Same variables as `workflowRuntimeContextProvider`, with large spilled variables (`__anyagentVarRef__`) loaded back to their real values. */
-	public hydratedWorkflowRuntimeContextProvider?: () => Promise<Record<string, any>>;
+	public hydratedWorkflowRuntimeContextProvider?: () => Promise<Record<string, unknown>>;
 	public subWorkflowRefreshProvider?: (subWorkflowId: string) => Promise<{
 		name: string;
 		inputs: Array<{ name: string; defaultValue?: string; description?: string }>;

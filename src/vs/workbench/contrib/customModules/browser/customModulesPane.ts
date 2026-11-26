@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import './media/customModules.css';
@@ -124,9 +123,11 @@ export class CustomModulesPane extends ViewPane {
 		// 2. Modules List Container
 		const listContainer = append(this.containerEl, $('.custom-modules-list'));
 
+		// Module cards currently rendered in `listContainer` (reset whenever the list is re-rendered).
+		const moduleCards: HTMLElement[] = [];
+
 		const updateSelectedCardStyle = () => {
-			listContainer.querySelectorAll('.custom-module-card[data-module-id]').forEach(el => {
-				const cardEl = el as HTMLElement;
+			moduleCards.forEach(cardEl => {
 				const cardModId = (cardEl.getAttribute('data-module-id') || '').toLowerCase();
 				if (this.selectedModuleId && cardModId === this.selectedModuleId.toLowerCase()) {
 					cardEl.classList.add('selected');
@@ -139,6 +140,7 @@ export class CustomModulesPane extends ViewPane {
 		const renderModuleCard = (m: ICustomModule, targetContainer: HTMLElement) => {
 			const card = append(targetContainer, $('.custom-module-card'));
 			card.setAttribute('data-module-id', m.id);
+			moduleCards.push(card);
 			if (this.selectedModuleId && m.id.toLowerCase() === this.selectedModuleId.toLowerCase()) {
 				card.classList.add('selected');
 			}
@@ -269,6 +271,7 @@ export class CustomModulesPane extends ViewPane {
 
 		const renderList = () => {
 			clearNode(listContainer);
+			moduleCards.length = 0;
 
 			let filtered = allModules;
 			if (this.filterText) {

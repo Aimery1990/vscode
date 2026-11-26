@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { append, $ } from '../../../../base/browser/dom.js';
@@ -213,7 +212,7 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 		syntaxExamples: [
 			'{Job Listings Table}',
 			'{Job Listings Table.json}',
-			"TICKET_CONTEXT['Job Listings Table']"
+			'TICKET_CONTEXT[\'Job Listings Table\']'
 		],
 		tips: [
 			'Mark a unique identifier column (such as id or job_id) as Primary Key (PK) so "Update in SQLite" performs clean upserts.',
@@ -390,7 +389,7 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 			'{Upload Resume.data.share_path}',
 			'{Get Resume.resume_data.hero.headline}',
 			'{API Request.status}',
-			"TICKET_CONTEXT['Upload Resume']['data']['share_path']"
+			'TICKET_CONTEXT[\'Upload Resume\'][\'data\'][\'share_path\']'
 		],
 		tips: [
 			'Use {param_name} or {{param_name}} inside the URL, headers, or body to dynamically bind upstream ticket inputs or AI outputs.',
@@ -940,13 +939,14 @@ export function showPrimitiveHelpModal(container: HTMLElement, fieldType: string
 
 	const closeBtn = append(header, $('button', {
 		style: 'background: transparent; border: none; font-size: 16px; color: rgba(255, 255, 255, 0.6); cursor: pointer; padding: 4px 8px; border-radius: 6px; transition: all 0.15s ease;'
-	}, '✕'));
+	}, '\u2715'));
 	closeBtn.onmouseenter = () => { closeBtn.style.color = '#ffffff'; closeBtn.style.background = 'rgba(255, 255, 255, 0.1)'; };
 	closeBtn.onmouseleave = () => { closeBtn.style.color = 'rgba(255, 255, 255, 0.6)'; closeBtn.style.background = 'transparent'; };
 
+	const targetDocument = container.ownerDocument;
 	const closeModal = () => {
 		overlay.remove();
-		document.removeEventListener('keydown', onKeyDown);
+		targetDocument.removeEventListener('keydown', onKeyDown);
 	};
 
 	closeBtn.onclick = closeModal;
@@ -957,7 +957,7 @@ export function showPrimitiveHelpModal(container: HTMLElement, fieldType: string
 			closeModal();
 		}
 	};
-	document.addEventListener('keydown', onKeyDown);
+	targetDocument.addEventListener('keydown', onKeyDown);
 
 	// 2. Scrollable Content Body
 	const body = append(card, $('div', {

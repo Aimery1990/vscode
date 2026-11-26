@@ -1,24 +1,21 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { $, append, clearNode } from '../../../../base/browser/dom.js';
+import { $, append, clearNode, Dimension, getWindow, isHTMLElement } from '../../../../base/browser/dom.js';
 import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
-import { IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
+import { IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { WorkflowEditorInput } from '../../workflowsManager/browser/workflowEditorInput.js';
 import { toDisposable } from '../../../../base/common/lifecycle.js';
 import { CancellationToken } from '../../../../base/common/cancellation.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { Dimension } from '../../../../base/browser/dom.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IThemeService } from '../../../../platform/theme/common/themeService.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IEditorOptions } from '../../../../platform/editor/common/editor.js';
 import { EditorPane } from '../../../browser/parts/editor/editorPane.js';
-import { IEditorGroup } from '../../../services/editor/common/editorGroupsService.js';
 import { IEditorOpenContext } from '../../../common/editor.js';
 import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IVoiceNoteClip, ICompositeComponent, IStatusDefinition, IActionButton, DEFAULT_STATUS_DEFINITIONS, IOutputSpec, TableColumnDataType, ITableColumnDefinition, generateSmartPythonVarName, sanitizePythonVarName, CUSTOM_MODULE_ICON_LIBRARY, CUSTOM_MODULE_COLOR_PALETTE, getDefaultCustomModuleIconId, getDefaultCustomModuleColor, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
@@ -38,12 +35,51 @@ import { isWindows } from '../../../../base/common/platform.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IPathService } from '../../../services/path/common/pathService.js';
 import { IWebContentExtractorService, WebContentExtractResult } from '../../../../platform/webContentExtractor/common/webContentExtractor.js';
-import { IAgentsManagerService, IAgentCredentialService, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
+import { IAgentsManagerService, IAgentCredentialService, IAgentItem, IAgentCredential, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
 import { ITicketWorkflowRuntimeService, findUnresolvedTemplateVariables } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeybinding, togglePythonComment } from './pythonSyntaxHighlighter.js';
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
+import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
+import { CodeWindow } from '../../../../base/browser/window.js';
 
+
+/**
+ * Transient, in-memory execution state that the editor / workflow runtime attaches to a field.
+ * It is not part of the persisted schema (it is stripped before saving).
+ */
+interface ICustomFieldRuntimeState {
+	lastSentPrompt?: string;
+	lastExecutionLog?: string;
+	lastExecutionOutput?: unknown;
+	lastExecutionInputs?: Record<string, unknown>;
+	lastExecutionStatus?: string;
+	lastExecutionDurationMs?: number;
+	lastExecutionExitCode?: number;
+	lastExecutedAt?: string;
+	lastQueryRows?: Record<string, unknown>[];
+	previousLabels?: string[];
+	pythonLocked?: boolean;
+	pythonStructuredData?: unknown;
+	structuredData?: unknown;
+	debugOutput?: string;
+}
+
+type IRuntimeCustomField = ICustomField & ICustomFieldRuntimeState;
+
+/** A table column as returned by the SQLite inspection APIs or stored in (possibly legacy) YAML. */
+interface ILooseTableColumn {
+	id?: string;
+	name?: string;
+	label?: string;
+	dataType?: string;
+	primaryKey?: boolean;
+	nullable?: boolean;
+	defaultValue?: unknown;
+}
+
+/** Electron (older versions) exposes the absolute file system path on dropped/picked `File` objects. */
+type IFileWithLegacyPath = File & { path?: string };
 
 interface ICopiedSchemaComponentEntry {
 	field: ICustomField;
@@ -51,11 +87,41 @@ interface ICopiedSchemaComponentEntry {
 	copiedAt: number;
 }
 
+/**
+ * Maps a `.prompt-tokenized-display` element to the raw-text textarea that sits next to it in the same
+ * wrapper. Used to copy the raw (token-preserving) text of a selection inside the display.
+ */
+const tokenizedDisplayTextareas = new WeakMap<HTMLElement, HTMLTextAreaElement>();
+
+/** Instant tooltips currently shown by `CustomModuleSchemaEditor._attachInstantTooltip` (appended to the document body). */
+const liveInstantTooltips = new Set<HTMLElement>();
+
+/** Removes every instant tooltip created by this editor (also orphans whose target element was re-rendered while hovered). */
+function removeAllInstantTooltips(): void {
+	for (const el of liveInstantTooltips) {
+		el.remove();
+	}
+	liveInstantTooltips.clear();
+}
+
+/** The "Sent Prompt Inspector" overlay currently shown (at most one at a time, shared by all editors). */
+let activeSentPromptModalOverlay: HTMLElement | undefined;
+
 let copiedSchemaComponentClipboard: ICopiedSchemaComponentEntry | null = null;
 const copiedComponentListeners = new Set<() => void>();
 let lastInteractedSchemaEditor: CustomModuleSchemaEditor | null = null;
 let lastKeyboardPasteTimestamp = 0;
 const savedSchemaScrollStateByKey = new Map<string, { mainScrollTop: number; toolboxScrollTop: number }>();
+
+/** Large workflow variables are spilled out of the runtime context and replaced by a `{ __anyagentVarRef__: true, ... }` marker. */
+function isSpilledVarRef(value: unknown): boolean {
+	return !!value && typeof value === 'object' && (value as { __anyagentVarRef__?: unknown }).__anyagentVarRef__ === true;
+}
+
+/** Same as `key in obj`: also true for inherited properties. */
+function hasPropertyIncludingInherited<K extends string>(obj: object, key: K): obj is Record<K, unknown> {
+	return key in obj;
+}
 
 function notifyCopiedComponentChanged(): void {
 	copiedComponentListeners.forEach(listener => {
@@ -78,6 +144,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 	private _currentScrollKey: string = '';
 	private _isRestoringScroll: boolean = false;
 	private _userHasScrolledSinceRender: boolean = false;
+	/** Main scrollable viewport / left toolbox created by the last render (see `_getRenderedViewport`). */
+	private _mainViewportEl?: HTMLElement;
+	private _toolboxEl?: HTMLElement;
 
 	constructor(
 		group: IEditorGroup,
@@ -93,7 +162,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 		@IFileDialogService private readonly _fileDialogService: IFileDialogService,
 		@IEntityPersistenceService private readonly _entityPersistenceService: IEntityPersistenceService,
-		@ITicketWorkflowRuntimeService private readonly _ticketWorkflowRuntimeService: ITicketWorkflowRuntimeService
+		@ITicketWorkflowRuntimeService private readonly _ticketWorkflowRuntimeService: ITicketWorkflowRuntimeService,
+		@ILayoutService private readonly _layoutService: ILayoutService
 	) {
 		super(CustomModuleSchemaEditor.ID, group, telemetryService, themeService, _storageService);
 
@@ -109,12 +179,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				const allMods = await this.customModulesService.getCustomModules(wsUri);
 				const updated = allMods.find(m => m.id.toLowerCase() === this._activeModule!.id.toLowerCase());
 				if (updated && this.input instanceof CustomModuleSchemaEditorInput) {
-					const prevViewport = this._container.querySelector('.schema-editor-main-viewport') as HTMLElement | null;
+					const prevViewport = this._getRenderedViewport(this._mainViewportEl);
 					const prevScrollTop = prevViewport ? prevViewport.scrollTop : 0;
 					this._activeModule = JSON.parse(JSON.stringify(updated));
 					this.input.draftModule = this._activeModule;
 					await this._loadAndRender(this.input);
-					const nextViewport = this._container.querySelector('.schema-editor-main-viewport') as HTMLElement | null;
+					const nextViewport = this._getRenderedViewport(this._mainViewportEl);
 					if (nextViewport) {
 						nextViewport.scrollTop = prevScrollTop;
 					}
@@ -138,20 +208,20 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		this._container.style.display = 'flex';
 		this._container.style.flexDirection = 'row';
 		this._container.style.userSelect = 'none';
-		(this._container.style as any).webkitUserSelect = 'none';
+		this._container.style.webkitUserSelect = 'none';
 
 		const extractSelectedTextPreservingTokens = (): string => {
-			const sel = window.getSelection();
+			const sel = getWindow(this._container).getSelection();
 			if (!sel || sel.rangeCount === 0) {
 				return '';
 			}
 			const range = sel.getRangeAt(0);
-			const commonEl = (range.commonAncestorContainer instanceof HTMLElement
+			const commonEl = (isHTMLElement(range.commonAncestorContainer)
 				? range.commonAncestorContainer
 				: range.commonAncestorContainer.parentElement) as HTMLElement | null;
 			const displayEl = commonEl?.closest('.prompt-tokenized-display') as HTMLElement | null;
 			if (displayEl && this._container && this._container.contains(displayEl)) {
-				const ta = displayEl.parentElement?.querySelector('textarea') as HTMLTextAreaElement | null;
+				const ta = tokenizedDisplayTextareas.get(displayEl) ?? null;
 				if (ta && typeof ta.value === 'string' && ta.value.length > 0) {
 					const resolveRawOffset = (container: Node, offset: number, isEnd: boolean): number | undefined => {
 						if (container === displayEl) {
@@ -162,7 +232,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								return ta.value.length;
 							}
 							const child = displayEl.childNodes[isEnd ? offset - 1 : offset] as HTMLElement | undefined;
-							if (child && child instanceof HTMLElement) {
+							if (child && isHTMLElement(child)) {
 								const attr = isEnd ? child.getAttribute('data-raw-end') : child.getAttribute('data-raw-start');
 								if (attr !== null && !isNaN(Number(attr))) {
 									return Number(attr);
@@ -172,7 +242,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 						let node: Node | null = container;
 						while (node && node !== displayEl) {
-							if (node instanceof HTMLElement) {
+							if (isHTMLElement(node)) {
 								if (node.classList.contains('prompt-token-pill')) {
 									const rawPos = Number(node.getAttribute(isEnd ? 'data-raw-end' : 'data-raw-start'));
 									return !isNaN(rawPos) ? rawPos : undefined;
@@ -200,14 +270,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 		this._container.addEventListener('keydown', (e: KeyboardEvent) => {
 			if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'c') {
-				const activeEl = document.activeElement as HTMLElement | null;
+				const activeEl = getWindow(this._container).document.activeElement as HTMLElement | null;
 				if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
 					const inputEl = activeEl as HTMLInputElement | HTMLTextAreaElement;
 					if (typeof inputEl.selectionStart === 'number' && typeof inputEl.selectionEnd === 'number' && inputEl.selectionStart !== inputEl.selectionEnd) {
 						return;
 					}
 				}
-				const sel = window.getSelection();
+				const sel = getWindow(this._container).getSelection();
 				const selectedText = extractSelectedTextPreservingTokens();
 				if (selectedText && this._container && sel?.anchorNode && this._container.contains(sel.anchorNode)) {
 					e.stopPropagation();
@@ -217,11 +287,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		});
 
 		this._container.addEventListener('copy', (e: ClipboardEvent) => {
-			const activeEl = document.activeElement as HTMLElement | null;
+			const activeEl = getWindow(this._container).document.activeElement as HTMLElement | null;
 			if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
 				return;
 			}
-			const sel = window.getSelection();
+			const sel = getWindow(this._container).getSelection();
 			const selectedText = extractSelectedTextPreservingTokens();
 			if (selectedText && this._container && sel?.anchorNode && this._container.contains(sel.anchorNode)) {
 				if (e.clipboardData) {
@@ -270,8 +340,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		if (!this._container || this._isRestoringScroll || !this._currentScrollKey) {
 			return;
 		}
-		const mainViewport = this._container.querySelector('.schema-editor-main-viewport') as HTMLElement | null;
-		const leftLibrary = this._container.querySelector('.schema-editor-toolbox') as HTMLElement | null;
+		const mainViewport = this._getRenderedViewport(this._mainViewportEl);
+		const leftLibrary = this._getRenderedViewport(this._toolboxEl);
 		if (!mainViewport || mainViewport.clientHeight <= 0) {
 			return;
 		}
@@ -284,6 +354,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		try {
 			this._storageService.store(`customModuleSchemaEditor.scroll.${this._currentScrollKey}`, JSON.stringify(nextState), StorageScope.PROFILE, StorageTarget.MACHINE);
 		} catch { }
+	}
+
+	/**
+	 * Returns the given element created by the last render if it is still attached inside the editor container
+	 * (i.e. it has not been removed by a subsequent `clearNode`), otherwise `null`.
+	 */
+	private _getRenderedViewport(el: HTMLElement | undefined): HTMLElement | null {
+		return el && this._container && this._container !== el && this._container.contains(el) ? el : null;
 	}
 
 	private _getSavedScrollState(scrollKey: string): { mainScrollTop: number; toolboxScrollTop: number } | undefined {
@@ -341,7 +419,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		super.dispose();
 	}
 
-	private _parseInputStringLiteral(val: any): any {
+	private _parseInputStringLiteral(val: unknown): unknown {
 		if (typeof val !== 'string') {
 			return val;
 		}
@@ -356,10 +434,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				// Keep original if not a valid single quoted string literal
 			}
 		}
-		if (trimmed.length >= 2 && trimmed.startsWith("'") && trimmed.endsWith("'")) {
+		if (trimmed.length >= 2 && trimmed.startsWith('\'') && trimmed.endsWith('\'')) {
 			const inner = trimmed.slice(1, -1);
 			if (!/(^|[^\\])'/.test(inner)) {
-				return inner.replace(/\\'/g, "'").replace(/\\\\/g, '\\');
+				return inner.replace(/\\'/g, '\'').replace(/\\\\/g, '\\');
 			}
 		}
 		return val;
@@ -390,20 +468,20 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			if (Array.isArray(moduleToSave.fields)) {
 				moduleToSave.fields = moduleToSave.fields.filter(f => f && typeof f === 'object' && !Array.isArray(f));
 				for (const f of moduleToSave.fields) {
-					delete (f as any).lastSentPrompt;
-					delete (f as any).lastExecutionLog;
-					delete (f as any).lastExecutionOutput;
-					delete (f as any).lastExecutionStatus;
-					delete (f as any).lastExecutionDurationMs;
-					delete (f as any).lastExecutedAt;
-					delete (f as any).lastExecutionExitCode;
+					delete (f as IRuntimeCustomField).lastSentPrompt;
+					delete (f as IRuntimeCustomField).lastExecutionLog;
+					delete (f as IRuntimeCustomField).lastExecutionOutput;
+					delete (f as IRuntimeCustomField).lastExecutionStatus;
+					delete (f as IRuntimeCustomField).lastExecutionDurationMs;
+					delete (f as IRuntimeCustomField).lastExecutedAt;
+					delete (f as IRuntimeCustomField).lastExecutionExitCode;
 					delete f.pythonOutput;
 					delete f.pythonResult;
-					delete (f as any).pythonStructuredData;
-					delete (f as any).structuredData;
+					delete (f as IRuntimeCustomField).pythonStructuredData;
+					delete (f as IRuntimeCustomField).structuredData;
 					delete f.debugPromptOutput;
 					delete f.debugSqlOutput;
-					delete (f as any).debugOutput;
+					delete (f as IRuntimeCustomField).debugOutput;
 					if (f.type === 'table' && (f.tableDbEngine || 'sqlite') === 'sqlite' && f.tableDbPath && f.tableDbPath.trim()) {
 						// Never persist transient SQLite database rows or partial SELECT results into template .yaml files
 						f.tableRows = [];
@@ -572,12 +650,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		const compositeClasses = await this.customModulesService.getCompositeComponents(input.workspaceUri);
 
 		// 1. Left Dedicated Toolbox Sidebar (Full-height, pinned, independent scroll, like Workflow Toolbox)
-		const leftLibrary = append(this._container, $('.schema-editor-toolbox', {
+		const leftLibrary = this._toolboxEl = append(this._container, $('.schema-editor-toolbox', {
 			style: `width: ${this._isToolboxCompact ? '56px' : '260px'}; min-width: ${this._isToolboxCompact ? '56px' : '260px'}; height: 100%; border-right: 1px solid var(--vscode-sideBar-border, rgba(255, 255, 255, 0.08)); background: var(--vscode-sideBar-background, #181818); display: ${isFlowchartNodeMode ? 'none' : 'flex'}; flex-direction: column; padding: ${this._isToolboxCompact ? '12px 6px' : '16px 14px'}; gap: 14px; box-sizing: border-box; flex-shrink: 0; overflow-y: auto; overflow-x: hidden; transition: width 0.2s cubic-bezier(0.16, 1, 0.3, 1), min-width 0.2s cubic-bezier(0.16, 1, 0.3, 1);`
 		}));
 
 		// 2. Right Main Scrollable Viewport (Contains Header, Config Card, Canvas & Footer. Scrolls smoothly as a unified document!)
-		const mainViewport = append(this._container, $('.schema-editor-main-viewport', {
+		const mainViewport = this._mainViewportEl = append(this._container, $('.schema-editor-main-viewport', {
 			style: 'flex: 1; height: 100%; min-width: 0; overflow-y: auto; overflow-x: hidden; padding: 24px 36px; box-sizing: border-box;'
 		}));
 
@@ -632,7 +710,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				if (targetScrollState.toolboxScrollTop > 0) {
 					leftLibrary.scrollTop = targetScrollState.toolboxScrollTop;
 				}
-				requestAnimationFrame(() => {
+				getWindow(mainViewport).requestAnimationFrame(() => {
 					if (this._currentScrollKey === scrollKey) {
 						this._isRestoringScroll = false;
 					}
@@ -956,7 +1034,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				activeIconPopover = null;
 			}
 			if (closePopoverHandler) {
-				document.removeEventListener('mousedown', closePopoverHandler, true);
+				iconTriggerBtn.ownerDocument.removeEventListener('mousedown', closePopoverHandler, true);
 				closePopoverHandler = null;
 			}
 		};
@@ -971,9 +1049,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			}
 
 			const rect = iconTriggerBtn.getBoundingClientRect();
-			const hostRoot = (document.querySelector('.monaco-workbench') as HTMLElement) || document.body;
+			const targetWindow = getWindow(iconTriggerBtn);
+			const hostRoot = this._layoutService.getContainer(targetWindow) || targetWindow.document.body;
 			const popover = append(hostRoot, $('.custom-module-icon-popover', {
-				style: `position: fixed; top: ${Math.min(window.innerHeight - 340, rect.bottom + 6)}px; left: ${Math.max(12, Math.min(window.innerWidth - 380, rect.left))}px; width: 360px; max-height: 320px; background: var(--vscode-editorWidget-background, #1e1e1e); color: var(--vscode-foreground, #cccccc); font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 10px; padding: 10px; box-shadow: 0 14px 36px rgba(0, 0, 0, 0.75); z-index: 100000; display: flex; flex-direction: column; gap: 8px; box-sizing: border-box; overflow: hidden;`
+				style: `position: fixed; top: ${Math.min(targetWindow.innerHeight - 340, rect.bottom + 6)}px; left: ${Math.max(12, Math.min(targetWindow.innerWidth - 380, rect.left))}px; width: 360px; max-height: 320px; background: var(--vscode-editorWidget-background, #1e1e1e); color: var(--vscode-foreground, #cccccc); font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif); border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 10px; padding: 10px; box-shadow: 0 14px 36px rgba(0, 0, 0, 0.75); z-index: 100000; display: flex; flex-direction: column; gap: 8px; box-sizing: border-box; overflow: hidden;`
 			}));
 			activeIconPopover = popover;
 			popover.onmousedown = ev => ev.stopPropagation();
@@ -1032,7 +1111,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					closeIconPopover();
 				}
 			};
-			document.addEventListener('mousedown', closePopoverHandler, true);
+			iconTriggerBtn.ownerDocument.addEventListener('mousedown', closePopoverHandler, true);
 		};
 
 		availableColors.forEach(c => {
@@ -1647,10 +1726,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			copiedComponentListeners.delete(refreshAllPasteUi);
 		});
 
+		// The window hosting this editor (the main window unless the editor lives in an auxiliary window).
+		const editorWindow = getWindow(this._container);
 		const onContainerMouseEnter = () => {
 			// Only mark as last interacted on hover if no other editor/input outside this container holds active focus
-			const activeEl = document.activeElement as HTMLElement | null;
-			if (!activeEl || activeEl === document.body || activeEl === document.documentElement || this._container?.contains(activeEl)) {
+			const activeEl = editorWindow.document.activeElement as HTMLElement | null;
+			if (!activeEl || activeEl === editorWindow.document.body || activeEl === editorWindow.document.documentElement || this._container?.contains(activeEl)) {
 				lastInteractedSchemaEditor = this;
 			}
 		};
@@ -1658,7 +1739,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			lastInteractedSchemaEditor = this;
 			const target = ev.target as HTMLElement | null;
 			if (target && !target.closest('input, textarea, select, button, [role="button"], .codicon, .param-copy-tag, .action-delete-btn, [contenteditable="true"], [contenteditable="plaintext-only"], .prompt-tokenized-display, .prompt-output-display, .python-debug-logs-display, .python-debug-result-display, .sql-output-box, [data-selectable-box="true"], pre, code')) {
-				const activeEl = document.activeElement as HTMLElement | null;
+				const activeEl = editorWindow.document.activeElement as HTMLElement | null;
 				if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.tagName === 'SELECT')) {
 					activeEl.blur();
 				}
@@ -1684,15 +1765,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		};
 		this._container.addEventListener('mouseenter', onContainerMouseEnter);
 		this._container.addEventListener('mousedown', onContainerMouseDown, true);
-		window.addEventListener('mousedown', onGlobalInteractionOutside, true);
-		window.addEventListener('focusin', onGlobalInteractionOutside, true);
-		window.addEventListener('copy', onGlobalCopyEvent, true);
+		editorWindow.addEventListener('mousedown', onGlobalInteractionOutside, true);
+		editorWindow.addEventListener('focusin', onGlobalInteractionOutside, true);
+		editorWindow.addEventListener('copy', onGlobalCopyEvent, true);
 		this._renderCleanupFns.push(() => {
 			this._container?.removeEventListener('mouseenter', onContainerMouseEnter);
 			this._container?.removeEventListener('mousedown', onContainerMouseDown, true);
-			window.removeEventListener('mousedown', onGlobalInteractionOutside, true);
-			window.removeEventListener('focusin', onGlobalInteractionOutside, true);
-			window.removeEventListener('copy', onGlobalCopyEvent, true);
+			editorWindow.removeEventListener('mousedown', onGlobalInteractionOutside, true);
+			editorWindow.removeEventListener('focusin', onGlobalInteractionOutside, true);
+			editorWindow.removeEventListener('copy', onGlobalCopyEvent, true);
 		});
 
 		const copyFieldComponent = async (fieldToCopy: ICustomField, badgeLabel: string, btnIconEl?: HTMLElement) => {
@@ -1702,13 +1783,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			delete clonedField.pythonOutput;
 			delete clonedField.pythonResult;
 			delete clonedField.ttsAudioDataUrl;
-			delete (clonedField as any).lastSentPrompt;
-			delete (clonedField as any).lastExecutionLog;
-			delete (clonedField as any).lastExecutionOutput;
-			delete (clonedField as any).lastExecutionStatus;
-			delete (clonedField as any).lastExecutionDurationMs;
-			delete (clonedField as any).lastExecutedAt;
-			delete (clonedField as any).lastExecutionExitCode;
+			delete (clonedField as IRuntimeCustomField).lastSentPrompt;
+			delete (clonedField as IRuntimeCustomField).lastExecutionLog;
+			delete (clonedField as IRuntimeCustomField).lastExecutionOutput;
+			delete (clonedField as IRuntimeCustomField).lastExecutionStatus;
+			delete (clonedField as IRuntimeCustomField).lastExecutionDurationMs;
+			delete (clonedField as IRuntimeCustomField).lastExecutedAt;
+			delete (clonedField as IRuntimeCustomField).lastExecutionExitCode;
 			if (clonedField.type === 'table' && (clonedField.tableDbEngine || 'sqlite') === 'sqlite' && clonedField.tableDbPath && clonedField.tableDbPath.trim()) {
 				clonedField.tableRows = [];
 			}
@@ -1769,13 +1850,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 			const newField: ICustomField = JSON.parse(JSON.stringify(sourceEntry.field));
 			delete newField.required;
-			delete (newField as any).lastSentPrompt;
-			delete (newField as any).lastExecutionLog;
-			delete (newField as any).lastExecutionOutput;
-			delete (newField as any).lastExecutionStatus;
-			delete (newField as any).lastExecutionDurationMs;
-			delete (newField as any).lastExecutedAt;
-			delete (newField as any).lastExecutionExitCode;
+			delete (newField as IRuntimeCustomField).lastSentPrompt;
+			delete (newField as IRuntimeCustomField).lastExecutionLog;
+			delete (newField as IRuntimeCustomField).lastExecutionOutput;
+			delete (newField as IRuntimeCustomField).lastExecutionStatus;
+			delete (newField as IRuntimeCustomField).lastExecutionDurationMs;
+			delete (newField as IRuntimeCustomField).lastExecutedAt;
+			delete (newField as IRuntimeCustomField).lastExecutionExitCode;
 			if (newField.type === 'table' && (newField.tableDbEngine || 'sqlite') === 'sqlite' && newField.tableDbPath && newField.tableDbPath.trim()) {
 				newField.tableRows = [];
 			}
@@ -1840,24 +1921,24 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			}
 			// When a native WebContentsView (built-in browser webpage) has focus, document.hasFocus() is false
 			// or activeEditorPane is the BrowserEditor — never intercept paste!
-			if (!document.hasFocus()) {
+			if (!editorWindow.document.hasFocus()) {
 				return false;
 			}
 			if (this.group && this.group.activeEditorPane !== this) {
 				return false;
 			}
-			const evtTarget = (evt?.target instanceof HTMLElement) ? evt.target : null;
-			const activeEl = document.activeElement as HTMLElement | null;
+			const evtTarget = isHTMLElement(evt?.target) ? evt.target : null;
+			const activeEl = editorWindow.document.activeElement as HTMLElement | null;
 
 			// Never intercept paste if ANY input, textarea, contenteditable, or browser element anywhere in the workbench has focus
 			if (isEditableOrExternalElement(evtTarget) || isEditableOrExternalElement(activeEl)) {
 				return false;
 			}
 			// If focus is inside a specific element outside this editor container, do not intercept
-			if (evtTarget && evtTarget !== document.body && evtTarget !== document.documentElement && !this._container.contains(evtTarget)) {
+			if (evtTarget && evtTarget !== editorWindow.document.body && evtTarget !== editorWindow.document.documentElement && !this._container.contains(evtTarget)) {
 				return false;
 			}
-			if (activeEl && activeEl !== document.body && activeEl !== document.documentElement && !this._container.contains(activeEl)) {
+			if (activeEl && activeEl !== editorWindow.document.body && activeEl !== editorWindow.document.documentElement && !this._container.contains(activeEl)) {
 				return false;
 			}
 			// Priority 1: active focus is directly inside this editor container
@@ -1915,19 +1996,22 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			pasteCopiedComponent().catch(() => { });
 		};
 
-		window.addEventListener('keydown', onWindowKeyDown, true);
-		window.addEventListener('paste', onWindowPaste, true);
+		editorWindow.addEventListener('keydown', onWindowKeyDown, true);
+		editorWindow.addEventListener('paste', onWindowPaste, true);
 		this._renderCleanupFns.push(() => {
-			window.removeEventListener('keydown', onWindowKeyDown, true);
-			window.removeEventListener('paste', onWindowPaste, true);
+			editorWindow.removeEventListener('keydown', onWindowKeyDown, true);
+			editorWindow.removeEventListener('paste', onWindowPaste, true);
 		});
 
+		// Field cards currently rendered in `rightCanvas` (reset whenever the canvas is re-rendered).
+		const canvasFieldCards: HTMLElement[] = [];
 		const renderCanvas = () => {
-			document.querySelectorAll('.anyagent-instant-tooltip').forEach(el => el.remove());
+			removeAllInstantTooltips();
 			this._syncDraft();
 			const savedScrollTop = mainViewport ? mainViewport.scrollTop : 0;
 			let didScrollToReorderedCard = false;
 			clearNode(rightCanvas);
+			canvasFieldCards.length = 0;
 			pasteUiRefreshers.length = 0;
 
 			if (fields.length === 0) {
@@ -2040,6 +2124,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								? `background: rgba(234, 179, 8, 0.03); border: 1px solid ${defaultBorderColor}; border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25); transition: border-color 0.15s ease, box-shadow 0.15s ease; position: relative;`
 								: `background: var(--vscode-editor-background, #1e1e1e); border: 1px solid ${defaultBorderColor}; border-radius: 8px; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25); transition: border-color 0.15s ease, box-shadow 0.15s ease; position: relative;`))
 				}));
+				canvasFieldCards.push(fieldCard);
 
 				const isFieldDisabled = Boolean(field.disabled);
 				if (isFieldDisabled) {
@@ -2075,7 +2160,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							focusFieldId = undefined;
 							input.focusFieldId = undefined;
 						}
-						requestAnimationFrame(() => {
+						getWindow(fieldCard).requestAnimationFrame(() => {
 							try {
 								if (mainViewport && fieldCard.isConnected) {
 									const vpRect = mainViewport.getBoundingClientRect();
@@ -2159,7 +2244,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				}
 
 				fieldCard.ondragstart = (e) => {
-					const activeEl = document.activeElement as HTMLElement | null;
+					const activeEl = fieldCard.ownerDocument.activeElement as HTMLElement | null;
 					if (isMandatory || (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) || this._container?.classList.contains('is-selecting-input') || this._container?.classList.contains('is-selecting-box')) {
 						e.preventDefault();
 						fieldCard.setAttribute('draggable', 'false');
@@ -2174,8 +2259,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					fieldCard.setAttribute('draggable', 'false');
 					fieldCard.style.opacity = '1';
 					currentDraggingItem = null;
-					rightCanvas.querySelectorAll('.canvas-field-card').forEach((el) => {
-						const card = el as HTMLElement;
+					canvasFieldCards.forEach((card) => {
 						card.style.boxShadow = '0 2px 6px rgba(0, 0, 0, 0.25)';
 						card.style.borderColor = defaultBorderColor;
 					});
@@ -2251,7 +2335,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				}, 'DISABLED (SKIPPED)'));
 
 				let propagateLabelRenameInModule: (oldLbl: string, newLbl: string) => void = () => { };
-				let labelInput: HTMLInputElement;
 
 				const headerRight = append(cardHeader, $('.header-right', {
 					style: 'display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto;'
@@ -2446,13 +2529,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							if (clonedField.outputVariableName) {
 								clonedField.outputVariableName = generateSmartPythonVarName(clonedField.label || clonedField.id, clonedField.type);
 							}
-							delete (clonedField as any).lastSentPrompt;
-							delete (clonedField as any).lastExecutionLog;
-							delete (clonedField as any).lastExecutionOutput;
-							delete (clonedField as any).lastExecutionStatus;
-							delete (clonedField as any).lastExecutionDurationMs;
-							delete (clonedField as any).lastExecutedAt;
-							delete (clonedField as any).lastExecutionExitCode;
+							delete (clonedField as IRuntimeCustomField).lastSentPrompt;
+							delete (clonedField as IRuntimeCustomField).lastExecutionLog;
+							delete (clonedField as IRuntimeCustomField).lastExecutionOutput;
+							delete (clonedField as IRuntimeCustomField).lastExecutionStatus;
+							delete (clonedField as IRuntimeCustomField).lastExecutionDurationMs;
+							delete (clonedField as IRuntimeCustomField).lastExecutedAt;
+							delete (clonedField as IRuntimeCustomField).lastExecutionExitCode;
 							delete clonedField.pythonOutput;
 							delete clonedField.pythonResult;
 
@@ -2533,7 +2616,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					style: 'display: flex; align-items: center; gap: 10px; flex-wrap: wrap;'
 				}));
 				append(labelRow, $('span', { style: 'font-size: 11.5px; opacity: 0.8; font-weight: 500; min-width: 75px;' }, 'Field Label:'));
-				labelInput = append(labelRow, $('input.monaco-inputbox', {
+				const labelInput = append(labelRow, $('input.monaco-inputbox', {
 					style: 'flex: 1; min-width: 140px; padding: 6px 10px; font-size: 12px; font-weight: 500; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.15); background: rgba(0, 0, 0, 0.25); color: inherit;'
 				})) as HTMLInputElement;
 				labelInput.value = field.label || field.id;
@@ -2558,11 +2641,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						if (!oldLbl || !newLbl || oldLbl === newLbl || !this._activeModule) {
 							return;
 						}
-						if (!Array.isArray((field as any).previousLabels)) {
-							(field as any).previousLabels = [];
+						const runtimeField: IRuntimeCustomField = field;
+						if (!Array.isArray(runtimeField.previousLabels)) {
+							runtimeField.previousLabels = [];
 						}
-						if (!(field as any).previousLabels.includes(oldLbl)) {
-							(field as any).previousLabels.push(oldLbl);
+						if (!runtimeField.previousLabels.includes(oldLbl)) {
+							runtimeField.previousLabels.push(oldLbl);
 						}
 						const escOld = oldLbl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 						const tokenRe = new RegExp(`(@?\\{\\{?)${escOld}(\\}?\\})`, 'g');
@@ -2585,8 +2669,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							}
 							if (otherField.defaultContent) { otherField.defaultContent = replaceRefs(otherField.defaultContent); }
 							if (otherField.defaultUserPrompt) { otherField.defaultUserPrompt = replaceRefs(otherField.defaultUserPrompt); }
-							if (Array.isArray((otherField as any).defaultUserPrompts)) {
-								(otherField as any).defaultUserPrompts = (otherField as any).defaultUserPrompts.map((p: string) => replaceRefs(p) || p);
+							if (Array.isArray(otherField.defaultUserPrompts)) {
+								otherField.defaultUserPrompts = otherField.defaultUserPrompts.map((p: string) => replaceRefs(p) || p);
 							}
 							if (otherField.pythonCode) { otherField.pythonCode = replaceRefs(otherField.pythonCode); }
 							if (otherField.tableSqlQuery) { otherField.tableSqlQuery = replaceRefs(otherField.tableSqlQuery); }
@@ -2670,7 +2754,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						append(copyVarBtn, $('span', {}, 'Copy'));
 
 						const updateAutoBadgeStyle = () => {
-							if (!outputVarAutoBadge) return;
+							if (!outputVarAutoBadge) { return; }
 							if (field.outputVariableManual) {
 								outputVarAutoBadge.style.border = '1px solid rgba(255, 255, 255, 0.18)';
 								outputVarAutoBadge.style.background = 'rgba(255, 255, 255, 0.06)';
@@ -2685,7 +2769,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						};
 
 						outputVarInput.oninput = () => {
-							if (!outputVarInput) return;
+							if (!outputVarInput) { return; }
 							const rawTyped = outputVarInput.value.trim();
 							const autoCandidate = generateSmartPythonVarName(field.label || field.id, field.type);
 							field.outputVariableManual = rawTyped.length > 0 && rawTyped !== autoCandidate;
@@ -2696,7 +2780,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						};
 
 						outputVarInput.onblur = () => {
-							if (!outputVarInput) return;
+							if (!outputVarInput) { return; }
 							const rawTyped = outputVarInput.value.trim();
 							const autoCandidate = generateSmartPythonVarName(field.label || field.id, field.type);
 							const finalVar = rawTyped ? sanitizePythonVarName(rawTyped, field.type) : autoCandidate;
@@ -2772,7 +2856,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						});
 						const unit = (field.unit || '').trim();
 						if (unit) {
-							if (/^[$€¥£₹₽₿]/.test(unit)) {
+							if (/^[$\u20AC\u00A5\u00A3\u20B9\u20BD\u20BF]/.test(unit)) {
 								previewBadge.textContent = `Preview: ${unit}${sampleVal}`;
 							} else {
 								previewBadge.textContent = `Preview: ${sampleVal} ${unit}`;
@@ -2848,7 +2932,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								style: 'background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 12px; padding: 3px 10px; font-size: 11px; display: flex; align-items: center; gap: 6px;'
 							}));
 							append(chip, $('span', {}, opt));
-							const removeX = append(chip, $('span', { style: 'cursor: pointer; opacity: 0.6; font-size: 11px;' }, '✕'));
+							const removeX = append(chip, $('span', { style: 'cursor: pointer; opacity: 0.6; font-size: 11px;' }, '\u2715'));
 							removeX.onclick = () => {
 								field.options!.splice(oIdx, 1);
 								renderChips();
@@ -3085,11 +3169,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}));
 
 						let draggingButtonIndex: number | null = null;
+						// Button cards rendered in `buttonsContainer` (which is re-created on every re-render).
+						const buttonCards: HTMLElement[] = [];
 
 						field.buttons!.forEach((btn, bIdx) => {
 							const btnCard = append(buttonsContainer, $('.button-config-card', {
 								style: 'padding: 8px 12px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;'
 							}));
+							buttonCards.push(btnCard);
 
 							// Drag Grip Handle (6-dots gripper)
 							const dragHandle = append(btnCard, $('.button-row-drag-handle'));
@@ -3124,8 +3211,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								btnCard.style.boxShadow = 'none';
 								btnCard.style.borderColor = 'rgba(255, 255, 255, 0.08)';
 								draggingButtonIndex = null;
-								buttonsContainer.querySelectorAll('.button-config-card').forEach(el => {
-									const c = el as HTMLElement;
+								buttonCards.forEach(c => {
 									c.style.boxShadow = 'none';
 									c.style.borderColor = 'rgba(255, 255, 255, 0.08)';
 								});
@@ -3304,7 +3390,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					let lastUrlSelectionStart: number | undefined = undefined;
 					let lastUrlSelectionEnd: number | undefined = undefined;
-					let urlBlurTimer: any = null;
+					let urlBlurTimer: ReturnType<typeof setTimeout> | null = null;
 					const recordUrlSelection = () => {
 						if (typeof urlInput.selectionStart === 'number') {
 							lastUrlSelectionStart = urlInput.selectionStart;
@@ -3334,17 +3420,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								return (ev.clientX - rect.left) < rect.width / 2 ? s : e;
 							}
 						}
-						const docAny = document as any;
+						const caretDoc = getWindow(ev).document;
 						let hitNode: Node | null = null;
 						let hitOffset = 0;
-						if (typeof docAny.caretRangeFromPoint === 'function') {
-							const range = docAny.caretRangeFromPoint(ev.clientX, ev.clientY) as Range | null;
+						if (typeof caretDoc.caretRangeFromPoint === 'function') {
+							const range = caretDoc.caretRangeFromPoint(ev.clientX, ev.clientY);
 							if (range) {
 								hitNode = range.startContainer;
 								hitOffset = range.startOffset;
 							}
-						} else if (typeof docAny.caretPositionFromPoint === 'function') {
-							const pos = docAny.caretPositionFromPoint(ev.clientX, ev.clientY);
+						} else if (typeof caretDoc.caretPositionFromPoint === 'function') {
+							const pos = caretDoc.caretPositionFromPoint(ev.clientX, ev.clientY);
 							if (pos) {
 								hitNode = pos.offsetNode;
 								hitOffset = pos.offset;
@@ -3813,7 +3899,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}));
 					addRowBtn.innerText = '+ Add Credential Row';
 					addRowBtn.onclick = () => {
-						if (!field.credentials) field.credentials = [];
+						if (!field.credentials) { field.credentials = []; }
 						field.credentials.push({
 							id: `cred_${Date.now()}_${field.credentials.length + 1}`,
 							key: '',
@@ -3846,14 +3932,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const statusBadge = append(contentHeaderLeft, $('span.browser-fetch-status', {
 						style: 'font-size: 10px; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); opacity: 0.9; display: none; white-space: nowrap;'
 					}));
-					if ((field as any).lastExecutionStatus) {
+					if ((field as IRuntimeCustomField).lastExecutionStatus) {
 						statusBadge.style.display = 'inline-block';
-						const st = (field as any).lastExecutionStatus;
+						const st = (field as IRuntimeCustomField).lastExecutionStatus;
 						if (st === 'success') {
-							statusBadge.textContent = `Completed in ${(field as any).lastExecutionDurationMs ?? 0}ms${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+							statusBadge.textContent = `Completed in ${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							statusBadge.style.color = '#4ade80';
 						} else if (st === 'failed') {
-							statusBadge.textContent = `Failed (${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+							statusBadge.textContent = `Failed (${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms)${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							statusBadge.style.color = '#f87171';
 						} else if (st === 'skipped') {
 							statusBadge.textContent = 'Skipped (Disabled)';
@@ -3985,8 +4071,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 						field.parameters.forEach((param, pIdx) => {
 							// Strip legacy hardcoded 'Start Offset' / 'Zero-based pagination start index' metadata
-							if ((param as any).label) {
-								delete (param as any).label;
+							if (param.label) {
+								delete param.label;
 							}
 							if (param.description === 'Zero-based pagination start index') {
 								delete param.description;
@@ -4099,7 +4185,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								const uniqueVarNames: string[] = [];
 								if (Array.isArray(wfVars)) {
 									for (const wv of wfVars) {
-										if (wv.type === 'NODE') continue;
+										if (wv.type === 'NODE') { continue; }
 										const vName = (wv.label || '').trim();
 										if (vName && !uniqueVarNames.includes(vName)) {
 											uniqueVarNames.push(vName);
@@ -4133,7 +4219,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 											const token = `{${vName}}`;
 											const curVal = defInput.value || '';
 											if (
-												document.activeElement === defInput &&
+												defInput.ownerDocument.activeElement === defInput &&
 												typeof defInput.selectionStart === 'number' &&
 												typeof defInput.selectionEnd === 'number' &&
 												defInput.selectionStart !== defInput.selectionEnd
@@ -4203,7 +4289,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										style: 'background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.15); border-radius: 12px; padding: 3px 10px; font-size: 11px; display: flex; align-items: center; gap: 6px;'
 									}));
 									append(chip, $('span', {}, opt));
-									const removeX = append(chip, $('span', { style: 'cursor: pointer; opacity: 0.6; font-size: 11px;' }, '✕'));
+									const removeX = append(chip, $('span', { style: 'cursor: pointer; opacity: 0.6; font-size: 11px;' }, '\u2715'));
 									removeX.onclick = () => {
 										if (param.options) {
 											param.options.splice(oIdx, 1);
@@ -4296,12 +4382,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'font-size: 10px; font-family: var(--vscode-editor-font-family, monospace);'
 					}));
 					const updateParamExecStatus = () => {
-						const st = (field as any).lastExecutionStatus;
+						const st = (field as IRuntimeCustomField).lastExecutionStatus;
 						if (st === 'success') {
-							paramExecStatus.textContent = `Completed in ${(field as any).lastExecutionDurationMs ?? 0}ms${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+							paramExecStatus.textContent = `Completed in ${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							paramExecStatus.style.color = '#4ade80';
 						} else if (st === 'failed') {
-							paramExecStatus.textContent = `Failed (${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+							paramExecStatus.textContent = `Failed (${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms)${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							paramExecStatus.style.color = '#f87171';
 						} else if (st === 'skipped') {
 							paramExecStatus.textContent = 'Skipped (Disabled)';
@@ -4323,20 +4409,20 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const paramExecPre = append(paramExecCard, $('pre', {
 						style: 'margin: 0; padding: 4px 6px; font-size: 11px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); color: #cbd5e1; min-height: 40px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;'
 					}));
-					paramExecPre.textContent = (field as any).lastExecutionLog || '[Ready to execute] Resolved input parameter values and types will be recorded here when the workflow or node runs.';
+					paramExecPre.textContent = (field as IRuntimeCustomField).lastExecutionLog || '[Ready to execute] Resolved input parameter values and types will be recorded here when the workflow or node runs.';
 					paramExecCopyBtn.onclick = () => {
-						const txt = (field as any).lastExecutionLog || paramExecPre.textContent || '';
+						const txt = (field as IRuntimeCustomField).lastExecutionLog || paramExecPre.textContent || '';
 						if (txt) {
 							this._clipboardService.writeText(txt);
 							this.notificationService.info('Inputs execution log copied to clipboard.');
 						}
 					};
 					paramExecClearBtn.onclick = async () => {
-						delete (field as any).lastExecutionLog;
-						delete (field as any).lastExecutionOutput;
-						delete (field as any).lastExecutionStatus;
-						delete (field as any).lastExecutionDurationMs;
-						delete (field as any).lastExecutedAt;
+						delete (field as IRuntimeCustomField).lastExecutionLog;
+						delete (field as IRuntimeCustomField).lastExecutionOutput;
+						delete (field as IRuntimeCustomField).lastExecutionStatus;
+						delete (field as IRuntimeCustomField).lastExecutionDurationMs;
+						delete (field as IRuntimeCustomField).lastExecutedAt;
 						updateParamExecStatus();
 						paramExecPre.textContent = '[Ready to execute] Resolved input parameter values and types will be recorded here when the workflow or node runs.';
 						this._syncDraft();
@@ -4394,7 +4480,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								style: 'width: 100%; padding: 6px 10px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(0, 0, 0, 0.25); color: inherit;'
 							})) as HTMLSelectElement;
 
-							let agentsList: any[] = [];
+							let agentsList: IAgentItem[] = [];
 							try {
 								const agentsMgr = this._instantiationService.invokeFunction(accessor => {
 									try { return accessor.get(IAgentsManagerService); } catch { return undefined; }
@@ -4409,7 +4495,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								opt.selected = true;
 							} else {
 								const defaultOpt = append(agentSelect, $('option', { value: '' }, '-- Select AI Agent --')) as HTMLOptionElement;
-								if (!field.targetAgentId) defaultOpt.selected = true;
+								if (!field.targetAgentId) { defaultOpt.selected = true; }
 
 								agentsList.forEach(ag => {
 									const opt = append(agentSelect, $('option', { value: ag.id }, `${ag.name} (${ag.role || 'Agent'})`)) as HTMLOptionElement;
@@ -4485,7 +4571,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								aliyun: ['qwen-flash', 'qwen-plus', 'qwen4-max', 'deepseek-v4.1-flash']
 							};
 
-							let configuredCreds: any[] = [];
+							let configuredCreds: IAgentCredential[] = [];
 
 							const isModelFromAnotherProvider = (modelId: string | undefined, providerId: string): boolean => {
 								if (!modelId || modelId === 'custom') {
@@ -4557,7 +4643,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										style: `padding: 6px 8px; font-size: 11.5px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; background: ${isSel ? 'rgba(59, 130, 246, 0.22)' : 'transparent'}; color: ${isSel ? '#60a5fa' : 'inherit'};`
 									}));
 									item.onmouseenter = () => {
-										if (field.targetModel !== m.id) item.style.background = 'rgba(255,255,255,0.06)';
+										if (field.targetModel !== m.id) { item.style.background = 'rgba(255,255,255,0.06)'; }
 									};
 									item.onmouseleave = () => {
 										item.style.background = field.targetModel === m.id ? 'rgba(59, 130, 246, 0.22)' : 'transparent';
@@ -4609,10 +4695,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 								let activeProv = field.targetProvider || 'openai';
 								if (!field.targetProvider && field.targetModel) {
-									if (field.targetModel.startsWith('gemini')) activeProv = 'gemini';
-									else if (field.targetModel.startsWith('claude')) activeProv = 'anthropic';
-									else if (field.targetModel.startsWith('gpt') || field.targetModel.startsWith('o1') || field.targetModel.startsWith('o3')) activeProv = 'openai';
-									else if (field.targetModel.startsWith('llama') || field.targetModel.startsWith('qwen') || field.targetModel.startsWith('mistral') || field.targetModel.startsWith('deepseek-r1')) activeProv = 'ollama';
+									if (field.targetModel.startsWith('gemini')) { activeProv = 'gemini'; }
+									else if (field.targetModel.startsWith('claude')) { activeProv = 'anthropic'; }
+									else if (field.targetModel.startsWith('gpt') || field.targetModel.startsWith('o1') || field.targetModel.startsWith('o3')) { activeProv = 'openai'; }
+									else if (field.targetModel.startsWith('llama') || field.targetModel.startsWith('qwen') || field.targetModel.startsWith('mistral') || field.targetModel.startsWith('deepseek-r1')) { activeProv = 'ollama'; }
 								}
 
 								standardProviders.forEach(p => {
@@ -4624,7 +4710,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										? `${matchingCred.name} (${p.id.toUpperCase()})${countSuffix}`
 										: p.label;
 									const opt = append(providerSelect, $('option', { value: p.id }, displayLabel)) as HTMLOptionElement;
-									if (p.id === activeProv) opt.selected = true;
+									if (p.id === activeProv) { opt.selected = true; }
 								});
 								providerSelect.value = activeProv;
 								field.targetProvider = providerSelect.value;
@@ -4729,7 +4815,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					// Collect available referenceable fields (primitives from the schema, excluding Output/Result manifest)
 					const allSchemaFields = (this._activeModule?.fields && this._activeModule.fields.length > 0) ? this._activeModule.fields : fields;
 					const referenceableFields = allSchemaFields.filter(f => {
-						if (!f || f === field) return false;
+						if (!f || f === field) { return false; }
 						const ft = (f.type || '').toLowerCase();
 						const fl = (f.label || f.id || '').toLowerCase().trim();
 						return ft !== 'output' && fl !== 'output';
@@ -4810,7 +4896,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						const map = new Map<string, { label: string; type: string }>();
 						const registerVar = (keyRaw: string, info: { label: string; type: string }, overwrite = true) => {
 							const k = keyRaw.toLowerCase().trim();
-							if (!k) return;
+							if (!k) { return; }
 							if (overwrite || !map.has(k)) {
 								map.set(k, info);
 							}
@@ -4827,9 +4913,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							registerVar(rt.label, { label: rt.label, type: rt.type }, true);
 						});
 						fields.forEach(rf => {
-							if (!rf || rf === field) return;
+							if (!rf || rf === field) { return; }
 							const ft = (rf.type || '').toLowerCase();
-							if (ft === 'output') return;
+							if (ft === 'output') { return; }
 							const l = (rf.label || rf.id || '').trim();
 							if (l) {
 								registerVar(l, { label: l, type: (rf.type || 'PRIMITIVE').toUpperCase() }, true);
@@ -5002,6 +5088,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							style: `width: 100%; height: 140px; min-height: 118px; max-height: ${DEFAULT_BOX_MAX_HEIGHT}px; overflow-y: auto; padding: 8px ${rightPadPx}px 18px 10px; font-size: 11.5px; border-radius: 5px; border: 1px solid rgba(56, 189, 248, 0.5); background: rgba(0, 0, 0, 0.35); color: inherit; box-sizing: border-box; font-family: var(--vscode-editor-font-family, monospace); line-height: 1.5; display: none; resize: vertical;`
 						})) as HTMLTextAreaElement;
 						textareaEl.value = initialText;
+						tokenizedDisplayTextareas.set(displayEl, textareaEl);
 
 						const bottomExpandPill = append(wrapperEl, $('button.prompt-expand-bottom-pill', {
 							type: 'button',
@@ -5099,17 +5186,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									return (ev.clientX - rect.left) < rect.width / 2 ? s : e;
 								}
 							}
-							const docAny = document as any;
+							const caretDoc = getWindow(ev).document;
 							let hitNode: Node | null = null;
 							let hitOffset = 0;
-							if (typeof docAny.caretRangeFromPoint === 'function') {
-								const range = docAny.caretRangeFromPoint(ev.clientX, ev.clientY) as Range | null;
+							if (typeof caretDoc.caretRangeFromPoint === 'function') {
+								const range = caretDoc.caretRangeFromPoint(ev.clientX, ev.clientY);
 								if (range) {
 									hitNode = range.startContainer;
 									hitOffset = range.startOffset;
 								}
-							} else if (typeof docAny.caretPositionFromPoint === 'function') {
-								const pos = docAny.caretPositionFromPoint(ev.clientX, ev.clientY);
+							} else if (typeof caretDoc.caretPositionFromPoint === 'function') {
+								const pos = caretDoc.caretPositionFromPoint(ev.clientX, ev.clientY);
 								if (pos) {
 									hitNode = pos.offsetNode;
 									hitOffset = pos.offset;
@@ -5160,9 +5247,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 						let isRecordingVoice = false;
 						let isTranscribingVoice = false;
-						let mediaRecorder: any = null;
+						let mediaRecorder: MediaRecorder | null = null;
 						let audioChunks: BlobPart[] = [];
-						let recordingTimer: any = undefined;
+						let recordingTimer: number | undefined = undefined;
 						let recordingSeconds = 0;
 						let activeStream: MediaStream | undefined = undefined;
 
@@ -5196,7 +5283,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 						const stopVoiceRecording = () => {
 							if (recordingTimer) {
-								clearInterval(recordingTimer);
+								getWindow(micBtn).clearInterval(recordingTimer);
 								recordingTimer = undefined;
 							}
 							if (mediaRecorder && isRecordingVoice) {
@@ -5223,9 +5310,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 								activeStream = stream;
 								audioChunks = [];
-								mediaRecorder = new (window as any).MediaRecorder(stream);
+								mediaRecorder = new (getWindow(micBtn).MediaRecorder)(stream);
 
-								mediaRecorder.ondataavailable = (e: any) => {
+								mediaRecorder.ondataavailable = (e: BlobEvent) => {
 									if (e.data && e.data.size > 0) {
 										audioChunks.push(e.data);
 									}
@@ -5283,9 +5370,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										} else if (result.error) {
 											this.notificationService.warn(`Voice Transcription: ${result.error}`);
 										}
-									} catch (err: any) {
+									} catch (err) {
 										console.error('Failed to transcribe voice input:', err);
-										this.notificationService.error(`Voice transcription error: ${err?.message || err}`);
+										this.notificationService.error(`Voice transcription error: ${(err as Error | undefined)?.message || err}`);
 									} finally {
 										isTranscribingVoice = false;
 										recordingIndicator.style.display = 'none';
@@ -5301,7 +5388,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								micBtn.classList.add('recording');
 								applyMicVisualState(false);
 
-								recordingTimer = setInterval(() => {
+								recordingTimer = getWindow(micBtn).setInterval(() => {
 									recordingSeconds++;
 									const mins = Math.floor(recordingSeconds / 60);
 									const secs = recordingSeconds % 60;
@@ -5310,9 +5397,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										stopVoiceRecording();
 									}
 								}, 1000);
-							} catch (err: any) {
+							} catch (err) {
 								console.error('Error accessing microphone:', err);
-								this.notificationService.error(`Microphone access error: ${err?.message || err}`);
+								this.notificationService.error(`Microphone access error: ${(err as Error | undefined)?.message || err}`);
 							}
 						};
 
@@ -5382,7 +5469,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 						this._renderCleanupFns.push(() => {
 							if (recordingTimer) {
-								clearInterval(recordingTimer);
+								getWindow(micBtn).clearInterval(recordingTimer);
 								recordingTimer = undefined;
 							}
 							if (activeStream) {
@@ -5509,7 +5596,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						};
 
 						const switchToDisplay = () => {
-							if (!isEditMode) return;
+							if (!isEditMode) { return; }
 							recordSelection();
 							const savedScrollTop = textareaEl.scrollTop;
 							isEditMode = false;
@@ -5523,17 +5610,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						};
 
 						displayEl.onclick = (ev: MouseEvent) => {
-							const sel = window.getSelection()?.toString() || '';
+							const sel = getWindow(displayEl).getSelection()?.toString() || '';
 							if (sel.length > 0) {
 								return;
 							}
 							switchToEdit(ev);
 						};
 
-						let blurTimer: any = null;
+						let blurTimer: ReturnType<typeof setTimeout> | null = null;
 						textareaEl.onblur = () => {
 							recordSelection();
-							if (blurTimer) clearTimeout(blurTimer);
+							if (blurTimer) { clearTimeout(blurTimer); }
 							blurTimer = setTimeout(() => {
 								if (autoMenu.style.display === 'block') {
 									return;
@@ -5806,7 +5893,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'width: 11px; height: 11px; border-radius: 50%; background: #ffffff; transition: transform 0.15s ease;'
 					}));
 
-					let userPromptsList: string[] = Array.isArray(field.defaultUserPrompts)
+					const userPromptsList: string[] = Array.isArray(field.defaultUserPrompts)
 						? [...field.defaultUserPrompts]
 						: (field.promptUserInputVisible === false ? [] : [field.defaultUserPrompt || '']);
 
@@ -6044,11 +6131,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					if (field.debugPromptOutput) {
 						promptOutputDisplay.textContent = field.debugPromptOutput;
-						if ((field as any).lastExecutionStatus === 'success') {
-							promptStatusBadge.textContent = `Completed in ${(field as any).lastExecutionDurationMs ?? 0}ms${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+						if ((field as IRuntimeCustomField).lastExecutionStatus === 'success') {
+							promptStatusBadge.textContent = `Completed in ${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							promptStatusBadge.style.color = '#4ade80';
-						} else if ((field as any).lastExecutionStatus === 'failed') {
-							promptStatusBadge.textContent = `Failed (${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+						} else if ((field as IRuntimeCustomField).lastExecutionStatus === 'failed') {
+							promptStatusBadge.textContent = `Failed (${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms)${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							promptStatusBadge.style.color = '#f87171';
 						} else {
 							promptStatusBadge.textContent = 'Saved Preview';
@@ -6304,7 +6391,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						'custom-openai': ['alloy', 'nova', 'shimmer', 'echo', 'onyx', 'fable', 'Kore', 'Puck']
 					};
 
-					let loadedCredentials: any[] = [];
+					let loadedCredentials: IAgentCredential[] = [];
 
 					const populateVoiceOptions = (providerId: string) => {
 						clearNode(voiceSelect);
@@ -6361,7 +6448,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								style: `padding: 6px 8px; font-size: 11.5px; border-radius: 4px; cursor: pointer; display: flex; align-items: center; justify-content: space-between; background: ${field.targetModel === m.id ? 'rgba(236, 72, 153, 0.2)' : 'transparent'}; color: ${field.targetModel === m.id ? '#f472b6' : 'inherit'};`
 							}));
 							item.onmouseenter = () => {
-								if (field.targetModel !== m.id) item.style.background = 'rgba(255,255,255,0.06)';
+								if (field.targetModel !== m.id) { item.style.background = 'rgba(255,255,255,0.06)'; }
 							};
 							item.onmouseleave = () => {
 								item.style.background = field.targetModel === m.id ? 'rgba(236, 72, 153, 0.2)' : 'transparent';
@@ -6409,7 +6496,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								{ id: 'custom-openai', label: 'Custom OpenAI Endpoint' }
 							].forEach(p => {
 								const opt = append(credSelect, $('option', { value: p.id }, p.label)) as HTMLOptionElement;
-								if (field.targetProvider === p.id) opt.selected = true;
+								if (field.targetProvider === p.id) { opt.selected = true; }
 							});
 						}
 
@@ -6820,10 +6907,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 						// Decode exact duration immediately via Web Audio API so duration is never 0:00
 						try {
-							const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
+							const audioWindow: CodeWindow & { webkitAudioContext?: typeof AudioContext } = getWindow(audioPlayerEl);
+							const AudioCtx = audioWindow.AudioContext || audioWindow.webkitAudioContext;
 							if (AudioCtx) {
 								const actx = new AudioCtx();
-								const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+								// `bytes` is backed by a regular (non-shared) ArrayBuffer, so the slice is an ArrayBuffer too.
+								const arrayBuf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 								const decoded = await actx.decodeAudioData(arrayBuf);
 								if (decoded && Number.isFinite(decoded.duration) && decoded.duration > 0) {
 									knownDurationSec = decoded.duration;
@@ -6982,9 +7071,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								const a = document.createElement('a');
 								a.href = currentBlobUrl;
 								a.download = defaultFileName;
-								document.body.appendChild(a);
+								a.ownerDocument.body.appendChild(a);
 								a.click();
-								document.body.removeChild(a);
+								a.ownerDocument.body.removeChild(a);
 							}
 						}
 					};
@@ -7099,9 +7188,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							statusTextEl.textContent = `Audio ready (${(field.ttsFormat || 'mp3').toUpperCase()})`;
 							this._syncDraft();
 							await this._persistCurrentModule();
-						} catch (err: any) {
-							statusTextEl.textContent = `Error: ${err.message || err}`;
-							this.notificationService.error(`TTS Error: ${err.message || err}`);
+						} catch (err) {
+							statusTextEl.textContent = `Error: ${(err as Error).message || err}`;
+							this.notificationService.error(`TTS Error: ${(err as Error).message || err}`);
 						} finally {
 							sendTtsBtn.disabled = false;
 							sendTtsBtnLabel.textContent = 'Send & Generate Audio';
@@ -7160,17 +7249,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							}
 							field.subWorkflowInputs = nextInputs;
 							// Clear stale execution output/logs after refreshing schema
-							delete (field as any).lastExecutionInputs;
-							delete (field as any).lastExecutionOutput;
-							delete (field as any).lastExecutionLog;
-							delete (field as any).lastExecutionStatus;
-							delete (field as any).lastExecutionDurationMs;
-							delete (field as any).lastExecutedAt;
+							delete (field as IRuntimeCustomField).lastExecutionInputs;
+							delete (field as IRuntimeCustomField).lastExecutionOutput;
+							delete (field as IRuntimeCustomField).lastExecutionLog;
+							delete (field as IRuntimeCustomField).lastExecutionStatus;
+							delete (field as IRuntimeCustomField).lastExecutionDurationMs;
+							delete (field as IRuntimeCustomField).lastExecutedAt;
 							this._syncDraft();
 							renderCanvas();
 							this.notificationService.info(`Refreshed Sub-Workflow '${fresh.name}' (${fresh.inputs.length} in · ${fresh.outputs.length} out).`);
-						} catch (err: any) {
-							this.notificationService.error(`Failed to refresh Sub-Workflow: ${err?.message || err}`);
+						} catch (err) {
+							this.notificationService.error(`Failed to refresh Sub-Workflow: ${(err as Error | undefined)?.message || err}`);
 						}
 					};
 
@@ -7212,9 +7301,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}
 
 					// Last Execution Inputs Box
-					let lastInObj: Record<string, any> | undefined = (field as any).lastExecutionInputs;
-					if (lastInObj === undefined && typeof (field as any).lastExecutionLog === 'string') {
-						const logStr = String((field as any).lastExecutionLog);
+					let lastInObj: Record<string, unknown> | undefined = (field as IRuntimeCustomField).lastExecutionInputs;
+					if (lastInObj === undefined && typeof (field as IRuntimeCustomField).lastExecutionLog === 'string') {
+						const logStr = String((field as IRuntimeCustomField).lastExecutionLog);
 						const inputsMatch = logStr.match(/(?:^|\n)Inputs:\s*(\{[\s\S]*?\})(?:\nOutputs:|$)/);
 						if (inputsMatch && inputsMatch[1]) {
 							try {
@@ -7254,7 +7343,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}, lastInText.length > 8000 ? lastInText.substring(0, 8000) + '\n... (use Copy for full inputs)' : lastInText));
 
 					// Last Execution Output Box
-					const lastOutVal = (field as any).lastExecutionOutput;
+					const lastOutVal = (field as IRuntimeCustomField).lastExecutionOutput;
 					const lastExecCard = append(subBox, $('div.component-exec-logs-card', {
 						style: 'display: flex; flex-direction: column; gap: 4px; margin-top: 4px; background: rgba(0, 0, 0, 0.3); border: 1px solid rgba(34, 211, 238, 0.25); border-radius: 5px; padding: 6px 8px;'
 					}));
@@ -7268,7 +7357,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					append(lastExecTitle, $('span', {}, 'LAST EXECUTION OUTPUT'));
 					const lastExecText = lastOutVal !== undefined
 						? (lastOutVal === null ? 'None' : (typeof lastOutVal === 'string' ? lastOutVal : JSON.stringify(lastOutVal, null, 2)))
-						: ((field as any).lastExecutionLog || '[Ready to execute] Sub-Workflow output will appear here after execution.');
+						: ((field as IRuntimeCustomField).lastExecutionLog || '[Ready to execute] Sub-Workflow output will appear here after execution.');
 					if (lastOutVal !== undefined) {
 						const copyOutBtn = append(lastExecHeader, $('button', {
 							type: 'button',
@@ -7428,10 +7517,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					// Local playback & recording state
 					let isRecordingVoice = false;
 					let isTranscribingVoice = false;
-					let mediaRecorder: any = null;
+					let mediaRecorder: MediaRecorder | null = null;
 					let activeStream: MediaStream | undefined = undefined;
 					let audioChunks: BlobPart[] = [];
-					let recordingTimer: any = undefined;
+					let recordingTimer: number | undefined = undefined;
 					let recordingSeconds = 0;
 
 					let activeAudio: HTMLAudioElement | undefined = undefined;
@@ -7720,8 +7809,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									} else if (res.error) {
 										this.notificationService.warn(`Voice Transcription: ${res.error}`);
 									}
-								} catch (err: any) {
-									this.notificationService.error(`Voice Transcription Error: ${err?.message || err}`);
+								} catch (err) {
+									this.notificationService.error(`Voice Transcription Error: ${(err as Error | undefined)?.message || err}`);
 								} finally {
 									reTranscribeBtn.disabled = false;
 									reTranscribeLabel.textContent = 'Transcribe';
@@ -7756,7 +7845,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					const stopVoiceRecording = () => {
 						if (recordingTimer) {
-							clearInterval(recordingTimer);
+							getWindow(voiceBox).clearInterval(recordingTimer);
 							recordingTimer = undefined;
 						}
 						if (mediaRecorder && isRecordingVoice) {
@@ -7786,9 +7875,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 							activeStream = stream;
 							audioChunks = [];
-							mediaRecorder = new (window as any).MediaRecorder(stream);
+							mediaRecorder = new (getWindow(voiceBox).MediaRecorder)(stream);
 
-							mediaRecorder.ondataavailable = (e: any) => {
+							mediaRecorder.ondataavailable = (e: BlobEvent) => {
 								if (e.data && e.data.size > 0) {
 									audioChunks.push(e.data);
 								}
@@ -7804,8 +7893,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								let audioDataUrl = '';
 								try {
 									audioDataUrl = await blobToDataUrl(audioBlob);
-								} catch (err: any) {
-									this.notificationService.error(`Failed to save recorded audio: ${err?.message || err}`);
+								} catch (err) {
+									this.notificationService.error(`Failed to save recorded audio: ${(err as Error | undefined)?.message || err}`);
 									recordingIndicator.style.display = 'none';
 									return;
 								}
@@ -7840,8 +7929,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										} else if (result.error) {
 											this.notificationService.warn(`Audio saved, but Voice Transcription failed: ${result.error}`);
 										}
-									} catch (err: any) {
-										this.notificationService.warn(`Audio saved, but Voice Transcription error: ${err?.message || err}`);
+									} catch (err) {
+										this.notificationService.warn(`Audio saved, but Voice Transcription error: ${(err as Error | undefined)?.message || err}`);
 									} finally {
 										isTranscribingVoice = false;
 										recordingIndicator.style.display = 'none';
@@ -7862,15 +7951,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							recordBtn.style.borderColor = '#ff3b30';
 							recordBtn.style.color = '#ffffff';
 
-							recordingTimer = setInterval(() => {
+							recordingTimer = getWindow(voiceBox).setInterval(() => {
 								recordingSeconds++;
 								recordingStatusSpan.textContent = `${formatVoiceDuration(recordingSeconds)} / 5:00`;
 								if (recordingSeconds >= 300) {
 									stopVoiceRecording();
 								}
 							}, 1000);
-						} catch (err: any) {
-							this.notificationService.error(`Microphone access error: ${err?.message || err}`);
+						} catch (err) {
+							this.notificationService.error(`Microphone access error: ${(err as Error | undefined)?.message || err}`);
 						}
 					};
 
@@ -7885,7 +7974,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					this._register(toDisposable(() => {
 						stopAllAudio();
 						if (recordingTimer) {
-							clearInterval(recordingTimer);
+							getWindow(voiceBox).clearInterval(recordingTimer);
 							recordingTimer = undefined;
 						}
 						if (activeStream) {
@@ -7906,7 +7995,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'font-size: 11px; color: #fbbf24; display: flex; align-items: center; gap: 6px; font-weight: 500;'
 					}));
 					append(mediaNotice, $('span' + ThemeIcon.asCSSSelector(Codicon.deviceCameraVideo)));
-					append(mediaNotice, $('span', {}, 'MP3 / MP4 Player: Select or drag & drop a local audio/video file (MP3, MP4, WAV, M4A, AAC, OGG, FLAC, WebM, MOV, etc.) for native HTML5 playback with 0.25x–2.0x speed control.'));
+					append(mediaNotice, $('span', {}, 'MP3 / MP4 Player: Select or drag & drop a local audio/video file (MP3, MP4, WAV, M4A, AAC, OGG, FLAC, WebM, MOV, etc.) for native HTML5 playback with 0.25x\u20132.0x speed control.'));
 
 					// Hidden <input type="file"> fallback
 					const hiddenFileInput = append(mediaBox, $('input', {
@@ -8072,9 +8161,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							return;
 						}
 						isVideoFullscreen = false;
-						window.removeEventListener('keydown', onFullscreenKeyDown, true);
-						if (document.fullscreenElement) {
-							document.exitFullscreen().catch(() => { });
+						const mediaWindow = getWindow(mediaBox);
+						mediaWindow.removeEventListener('keydown', onFullscreenKeyDown, true);
+						if (mediaWindow.document.fullscreenElement) {
+							mediaWindow.document.exitFullscreen().catch(() => { });
 						}
 						const wasPlaying = !videoPlayerEl.paused && !videoPlayerEl.ended;
 						videoStageWrap.style.flex = '';
@@ -8105,7 +8195,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 						isVideoFullscreen = true;
 						const wasPlaying = !videoPlayerEl.paused && !videoPlayerEl.ended;
-						const hostRoot = (document.querySelector('.monaco-workbench') as HTMLElement) || document.body;
+						const mediaWindow = getWindow(mediaBox);
+						const hostRoot = this._layoutService.getContainer(mediaWindow) || mediaWindow.document.body;
 						const overlay = append(hostRoot, $('div.media-player-fullscreen-overlay', {
 							style: 'position: fixed; inset: 0; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 2147483647; background: rgba(5, 8, 15, 0.96); backdrop-filter: blur(8px); display: flex; flex-direction: column; justify-content: space-between; padding: 16px 24px 20px 24px; box-sizing: border-box; gap: 12px;'
 						}));
@@ -8150,7 +8241,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						fullscreenBtn.title = 'Exit Fullscreen (Esc)';
 						fullscreenBtn.style.color = '#38bdf8';
 
-						window.addEventListener('keydown', onFullscreenKeyDown, true);
+						mediaWindow.addEventListener('keydown', onFullscreenKeyDown, true);
 						if (wasPlaying && videoPlayerEl.paused) {
 							videoPlayerEl.play().catch(() => { });
 						}
@@ -8327,17 +8418,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							if (persistAfterLoad) {
 								await this._persistCurrentModule();
 							}
-						} catch (err: any) {
-							showMediaError(`Failed to read local media file "${resolvedName}": ${err?.message || err}`);
+						} catch (err) {
+							showMediaError(`Failed to read local media file "${resolvedName}": ${(err as Error | undefined)?.message || err}`);
 						}
 					};
 
 					const handleDroppedOrInputFile = async (file: File) => {
 						let localPath = '';
 						try {
-							localPath = getPathForFile(file) || (file as any).path || '';
+							localPath = getPathForFile(file) || (file as IFileWithLegacyPath).path || '';
 						} catch {
-							localPath = (file as any).path || '';
+							localPath = (file as IFileWithLegacyPath).path || '';
 						}
 						mountBlobIntoPlayer(file, file.name, localPath, file.type);
 						await this._persistCurrentModule();
@@ -8478,6 +8569,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						e.preventDefault();
 						isScrubbing = true;
 						seekToClientX(e.clientX);
+						const scrubWindow = getWindow(progressTrack);
 
 						const onMouseMove = (moveEv: MouseEvent) => {
 							if (!isScrubbing) {
@@ -8490,11 +8582,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								seekToClientX(upEv.clientX);
 								isScrubbing = false;
 							}
-							window.removeEventListener('mousemove', onMouseMove, true);
-							window.removeEventListener('mouseup', onMouseUp, true);
+							scrubWindow.removeEventListener('mousemove', onMouseMove, true);
+							scrubWindow.removeEventListener('mouseup', onMouseUp, true);
 						};
-						window.addEventListener('mousemove', onMouseMove, true);
-						window.addEventListener('mouseup', onMouseUp, true);
+						scrubWindow.addEventListener('mousemove', onMouseMove, true);
+						scrubWindow.addEventListener('mouseup', onMouseUp, true);
 					};
 
 					speedSelect.onclick = (e) => e.stopPropagation();
@@ -8707,7 +8799,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						if (this.input instanceof CustomModuleSchemaEditorInput && typeof this.input.workflowVariablesProvider === 'function') {
 							try {
 								for (const wv of (this.input.workflowVariablesProvider() || [])) {
-									pushVar(typeof wv === 'string' ? wv : (wv as any)?.name);
+									pushVar(typeof wv === 'string' ? wv : (wv as { name?: string } | null | undefined)?.name);
 								}
 							} catch { }
 						}
@@ -9105,12 +9197,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'font-size: 10px; font-family: var(--vscode-editor-font-family, monospace);'
 					}));
 					const updateOutExecStatus = () => {
-						const st = (field as any).lastExecutionStatus;
+						const st = (field as IRuntimeCustomField).lastExecutionStatus;
 						if (st === 'success') {
-							outExecStatus.textContent = `Completed in ${(field as any).lastExecutionDurationMs ?? 0}ms${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+							outExecStatus.textContent = `Completed in ${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							outExecStatus.style.color = '#4ade80';
 						} else if (st === 'failed') {
-							outExecStatus.textContent = `Failed (${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+							outExecStatus.textContent = `Failed (${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms)${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							outExecStatus.style.color = '#f87171';
 						} else {
 							outExecStatus.textContent = '[Ready to execute]';
@@ -9129,20 +9221,20 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const outExecPre = append(outExecCard, $('pre', {
 						style: 'margin: 0; padding: 4px 6px; font-size: 11px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); color: #cbd5e1; min-height: 40px; max-height: 180px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;'
 					}));
-					outExecPre.textContent = (field as any).lastExecutionLog || '[Ready to execute] Exported output values will be recorded here when the workflow or node runs.';
+					outExecPre.textContent = (field as IRuntimeCustomField).lastExecutionLog || '[Ready to execute] Exported output values will be recorded here when the workflow or node runs.';
 					outExecCopyBtn.onclick = () => {
-						const txt = (field as any).lastExecutionLog || outExecPre.textContent || '';
+						const txt = (field as IRuntimeCustomField).lastExecutionLog || outExecPre.textContent || '';
 						if (txt) {
 							this._clipboardService.writeText(txt);
 							this.notificationService.info('Output execution log copied to clipboard.');
 						}
 					};
 					outExecClearBtn.onclick = async () => {
-						delete (field as any).lastExecutionLog;
-						delete (field as any).lastExecutionOutput;
-						delete (field as any).lastExecutionStatus;
-						delete (field as any).lastExecutionDurationMs;
-						delete (field as any).lastExecutedAt;
+						delete (field as IRuntimeCustomField).lastExecutionLog;
+						delete (field as IRuntimeCustomField).lastExecutionOutput;
+						delete (field as IRuntimeCustomField).lastExecutionStatus;
+						delete (field as IRuntimeCustomField).lastExecutionDurationMs;
+						delete (field as IRuntimeCustomField).lastExecutedAt;
 						updateOutExecStatus();
 						outExecPre.textContent = '[Ready to execute] Exported output values will be recorded here when the workflow or node runs.';
 						this._syncDraft();
@@ -9170,7 +9262,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					if (typeof field.pythonPath === 'string') {
 						initialPyPath = field.pythonPath.trim();
 					} else if (field.pythonPath && typeof field.pythonPath === 'object') {
-						initialPyPath = String((field.pythonPath as any).interpreterPath || (field.pythonPath as any).pythonPath || '').trim();
+						// Legacy YAML may store the interpreter as an object
+						const legacyPyPath = field.pythonPath as { interpreterPath?: unknown; pythonPath?: unknown };
+						initialPyPath = String(legacyPyPath.interpreterPath || legacyPyPath.pythonPath || '').trim();
 					}
 					if (initialPyPath === '[object Object]' || initialPyPath === 'undefined' || initialPyPath === 'null') {
 						initialPyPath = '';
@@ -9287,8 +9381,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								interpInput.value = finalPath;
 								await updateDetectionStatus();
 							}
-						} catch (err: any) {
-							this.notificationService.error(`Failed to pick folder: ${err.message || err}`);
+						} catch (err) {
+							this.notificationService.error(`Failed to pick folder: ${(err as Error).message || err}`);
 						}
 					};
 
@@ -9314,14 +9408,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								statusBadge.style.border = '1px solid rgba(74, 222, 128, 0.3)';
 								this.notificationService.info(`Python interpreter verified: ${res.version}`);
 							} else {
-								statusBadge.textContent = 'Interpreter test failed ✗';
+								statusBadge.textContent = 'Interpreter test failed \u2717';
 								statusBadge.style.color = '#f87171';
 								statusBadge.style.background = 'rgba(248, 113, 113, 0.12)';
 								statusBadge.style.border = '1px solid rgba(248, 113, 113, 0.3)';
 								this.notificationService.warn(`Test failed: ${res.error}`);
 							}
-						} catch (err: any) {
-							this.notificationService.error(`Test error: ${err.message || err}`);
+						} catch (err) {
+							this.notificationService.error(`Test error: ${(err as Error).message || err}`);
 						} finally {
 							testInterpBtn.removeAttribute('disabled');
 							testInterpBtn.textContent = 'Test';
@@ -9341,7 +9435,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 						venvCreateBtn.setAttribute('disabled', 'true');
 						venvCreateBtn.textContent = 'Creating venv...';
-						statusBadge.textContent = 'Initializing virtualenv via python3 -m venv... ⏳';
+						statusBadge.textContent = 'Initializing virtualenv via python3 -m venv... \u23F3';
 						try {
 							const targetName = interpInput.value.trim() || '.venv';
 							const res = await runtime.createVirtualEnv(wsUri, targetName);
@@ -9354,8 +9448,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							} else {
 								this.notificationService.error(`Failed to create virtualenv: ${res.error}`);
 							}
-						} catch (err: any) {
-							this.notificationService.error(`Creation error: ${err.message || err}`);
+						} catch (err) {
+							this.notificationService.error(`Creation error: ${(err as Error).message || err}`);
 						} finally {
 							venvCreateBtn.removeAttribute('disabled');
 							venvCreateBtn.textContent = '+ Create Virtualenv';
@@ -9447,8 +9541,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								this._syncDraft();
 								renderScriptsList();
 							}
-						} catch (err: any) {
-							this.notificationService.error(`Failed to pick script: ${err.message || err}`);
+						} catch (err) {
+							this.notificationService.error(`Failed to pick script: ${(err as Error).message || err}`);
 						}
 					};
 
@@ -9521,12 +9615,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						e.stopPropagation();
 					});
 
-					let isCodeLocked = Boolean((field as any).pythonLocked);
+					let isCodeLocked = Boolean((field as IRuntimeCustomField).pythonLocked);
 					let isCodeEditing = false;
 
 					const applyLockState = (locked: boolean) => {
 						isCodeLocked = locked;
-						(field as any).pythonLocked = locked;
+						(field as IRuntimeCustomField).pythonLocked = locked;
 						codeTextarea.readOnly = locked;
 						codeTextarea.style.cursor = locked ? 'default' : 'text';
 						lockCodeIcon.className = ThemeIcon.asClassName(locked ? Codicon.lock : Codicon.unlock);
@@ -9800,7 +9894,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							type: 'button',
 							style: chipStyle + ' font-weight: 600;',
 							title: 'Insert TICKET_CONTEXT[\'\'] into script'
-						}, "+ TICKET_CONTEXT['']"));
+						}, '+ TICKET_CONTEXT[\'\']'));
 						baseChip.onmousedown = (e) => {
 							e.preventDefault();
 							e.stopPropagation();
@@ -9809,7 +9903,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						baseChip.onclick = (e) => {
 							e.preventDefault();
 							e.stopPropagation();
-							insertTextAtCursor("TICKET_CONTEXT['']", -2);
+							insertTextAtCursor('TICKET_CONTEXT[\'\']', -2);
 						};
 
 						const outputChip = append(varBar, $('button', {
@@ -9860,7 +9954,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						});
 						if (this.input instanceof CustomModuleSchemaEditorInput && typeof this.input.workflowVariablesProvider === 'function') {
 							for (const wv of this.input.workflowVariablesProvider()) {
-								if (wv.type === 'NODE') continue;
+								if (wv.type === 'NODE') { continue; }
 								const vName = (wv.label || '').trim();
 								if (vName && vName !== (field.label || '').trim() && vName !== (field.outputVariableName || '').trim()) {
 									if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(vName) && !contextExpressions.includes(vName)) {
@@ -10037,13 +10131,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					})) as HTMLButtonElement;
 					const copyLogsCardIcon = append(copyLogsCardBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy), { style: 'font-size: 11px;' }));
 					const copyLogsCardLabel = append(copyLogsCardBtn, $('span', {}, 'Copy Logs'));
-					if ((field as any).lastExecutionStatus === 'success') {
-						logsStatusBadge.textContent = `Completed in ${(field as any).lastExecutionDurationMs ?? 0}ms (exit ${(field as any).lastExecutionExitCode ?? 0})${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+					if ((field as IRuntimeCustomField).lastExecutionStatus === 'success') {
+						logsStatusBadge.textContent = `Completed in ${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms (exit ${(field as IRuntimeCustomField).lastExecutionExitCode ?? 0})${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 						logsStatusBadge.style.color = '#4ade80';
-					} else if ((field as any).lastExecutionStatus === 'failed') {
-						logsStatusBadge.textContent = `Failed (Exit code: ${(field as any).lastExecutionExitCode ?? 1} | ${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+					} else if ((field as IRuntimeCustomField).lastExecutionStatus === 'failed') {
+						logsStatusBadge.textContent = `Failed (Exit code: ${(field as IRuntimeCustomField).lastExecutionExitCode ?? 1} | ${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms)${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 						logsStatusBadge.style.color = '#f87171';
-					} else if ((field as any).lastExecutionStatus === 'skipped') {
+					} else if ((field as IRuntimeCustomField).lastExecutionStatus === 'skipped') {
 						logsStatusBadge.textContent = 'Skipped (Disabled)';
 						logsStatusBadge.style.color = '#94a3b8';
 					} else if (field.pythonOutput) {
@@ -10054,11 +10148,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						'data-selectable-box': 'true',
 						style: 'margin: 0; padding: 4px 6px; font-size: 11px; line-height: 1.45; font-family: var(--vscode-editor-font-family, monospace); color: #cbd5e1; min-height: 48px; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-word; user-select: text; -webkit-user-select: text; cursor: text;'
 					}));
-					logsDisplayBox.textContent = field.pythonOutput || (field as any).lastExecutionLog || '[Ready to execute] Output, stdout/stderr, and pipeline steps will appear here when run.';
+					logsDisplayBox.textContent = field.pythonOutput || (field as IRuntimeCustomField).lastExecutionLog || '[Ready to execute] Output, stdout/stderr, and pipeline steps will appear here when run.';
 					copyLogsCardBtn.onclick = async (e) => {
 						e.preventDefault();
 						e.stopPropagation();
-						const rawLogs = field.pythonOutput || (field as any).lastExecutionLog || logsDisplayBox.textContent || '';
+						const rawLogs = field.pythonOutput || (field as IRuntimeCustomField).lastExecutionLog || logsDisplayBox.textContent || '';
 						if (!rawLogs || rawLogs.startsWith('[Ready to execute]')) {
 							this.notificationService.warn('No console logs to copy.');
 							return;
@@ -10193,15 +10287,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							const scriptCode = codeTextarea.value;
 
 							// Gather full schema context from workflow runtime variables + preceding and static fields
-							const schemaContext: Record<string, any> = { ...(await this._getHydratedWorkflowRuntimeContext()) };
+							const schemaContext: Record<string, unknown> = { ...(await this._getHydratedWorkflowRuntimeContext()) };
 							const allFieldsToGather = fields || this._activeModule?.fields || [];
 							for (const f of allFieldsToGather) {
-								if (!f || f === field) continue;
+								if (!f || f === field) { continue; }
 								const fKey = f.label || f.id;
-								const hasRecordedOutput = (f as any).lastExecutionOutput !== undefined;
-								let val: any = undefined;
+								const hasRecordedOutput = (f as IRuntimeCustomField).lastExecutionOutput !== undefined;
+								let val: unknown = undefined;
 								if (f.type === 'parameters' && f.parameters) {
-									const pMap: Record<string, any> = {};
+									const pMap: Record<string, unknown> = {};
 									f.parameters.forEach(p => {
 										if (p.name) {
 											const rawDef = p.defaultValue ?? '';
@@ -10221,7 +10315,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									schemaContext['Inputs'] = pMap;
 								} else if (hasRecordedOutput && f.type !== 'table') {
 									// Preserve exact native data type (dict, list, number, bool, null, string) from lastExecutionOutput
-									val = (f as any).lastExecutionOutput;
+									val = (f as IRuntimeCustomField).lastExecutionOutput;
 								} else if (f.type === 'browser') {
 									val = f.defaultContent || f.defaultUrl || '';
 								} else if (f.type === 'http_request') {
@@ -10270,10 +10364,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							const exitCodeStr = `Exit code: ${res.exitCode}`;
 
 							const nowStr = new Date().toLocaleTimeString();
-							(field as any).lastExecutionStatus = res.success ? 'success' : 'failed';
-							(field as any).lastExecutionDurationMs = res.durationMs;
-							(field as any).lastExecutionExitCode = res.exitCode;
-							(field as any).lastExecutedAt = nowStr;
+							(field as IRuntimeCustomField).lastExecutionStatus = res.success ? 'success' : 'failed';
+							(field as IRuntimeCustomField).lastExecutionDurationMs = res.durationMs;
+							(field as IRuntimeCustomField).lastExecutionExitCode = res.exitCode;
+							(field as IRuntimeCustomField).lastExecutedAt = nowStr;
 
 							logsStatusBadge.textContent = res.success
 								? `Completed in ${durationStr} (exit 0) · ${nowStr}`
@@ -10292,9 +10386,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							}
 
 							field.pythonOutput = res.output;
-							(field as any).lastExecutionLog = field.pythonOutput;
+							(field as IRuntimeCustomField).lastExecutionLog = field.pythonOutput;
 							if (res.success) {
-								(field as any).lastExecutionOutput = res.result !== undefined ? res.result : res.output;
+								(field as IRuntimeCustomField).lastExecutionOutput = res.result !== undefined ? res.result : res.output;
 							}
 							updateViewMode(currentViewMode);
 
@@ -10306,11 +10400,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							} else {
 								this.notificationService.warn(`Script pipeline finished with exit code ${res.exitCode}`);
 							}
-						} catch (err: any) {
+						} catch (err) {
 							logsStatusBadge.textContent = 'Error';
 							logsStatusBadge.style.color = '#f87171';
-							logsDisplayBox.textContent = `[Execution error]: ${err.message || err}`;
-							this.notificationService.error(`Execution error: ${err.message || err}`);
+							logsDisplayBox.textContent = `[Execution error]: ${(err as Error).message || err}`;
+							this.notificationService.error(`Execution error: ${(err as Error).message || err}`);
 						} finally {
 							testRunBtn.removeAttribute('disabled');
 							testRunBtn.style.opacity = '1';
@@ -10350,12 +10444,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						resultDisplayBox.textContent = '';
 						field.pythonOutput = '';
 						field.pythonResult = undefined;
-						delete (field as any).lastExecutionLog;
-						delete (field as any).lastExecutionOutput;
-						delete (field as any).lastExecutionStatus;
-						delete (field as any).lastExecutionDurationMs;
-						delete (field as any).lastExecutionExitCode;
-						delete (field as any).lastExecutedAt;
+						delete (field as IRuntimeCustomField).lastExecutionLog;
+						delete (field as IRuntimeCustomField).lastExecutionOutput;
+						delete (field as IRuntimeCustomField).lastExecutionStatus;
+						delete (field as IRuntimeCustomField).lastExecutionDurationMs;
+						delete (field as IRuntimeCustomField).lastExecutionExitCode;
+						delete (field as IRuntimeCustomField).lastExecutedAt;
 						resultCard.style.display = 'none';
 						this._syncDraft();
 						await this._persistCurrentModule();
@@ -10379,11 +10473,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					// Method color helper
 					const getMethodColor = (m: string) => {
 						const norm = (m || 'GET').toUpperCase();
-						if (norm === 'GET') return '#10b981';
-						if (norm === 'POST') return '#3b82f6';
-						if (norm === 'PUT') return '#f59e0b';
-						if (norm === 'PATCH') return '#f97316';
-						if (norm === 'DELETE') return '#ef4444';
+						if (norm === 'GET') { return '#10b981'; }
+						if (norm === 'POST') { return '#3b82f6'; }
+						if (norm === 'PUT') { return '#f59e0b'; }
+						if (norm === 'PATCH') { return '#f97316'; }
+						if (norm === 'DELETE') { return '#ef4444'; }
 						return '#8b5cf6';
 					};
 
@@ -10400,7 +10494,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 					methods.forEach(m => {
 						const opt = append(methodSelect, $('option', { value: m }, m)) as HTMLOptionElement;
-						if (m === field.httpMethod) opt.selected = true;
+						if (m === field.httpMethod) { opt.selected = true; }
 					});
 
 					// URL Input
@@ -10722,7 +10816,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						];
 						authTypes.forEach(at => {
 							const opt = append(authSelect, $('option', { value: at.id }, at.label)) as HTMLOptionElement;
-							if (at.id === (field.httpAuthType || 'none')) opt.selected = true;
+							if (at.id === (field.httpAuthType || 'none')) { opt.selected = true; }
 						});
 
 						const authConfigContainer = append(authPanel, $('div', {
@@ -10777,9 +10871,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								})) as HTMLSelectElement;
 								const optH = append(locSelect, $('option', { value: 'header' }, 'Header')) as HTMLOptionElement;
 								const optQ = append(locSelect, $('option', { value: 'query' }, 'Query Param')) as HTMLOptionElement;
-								if (field.httpApiKeyLocation === 'query') optQ.selected = true; else optH.selected = true;
+								if (field.httpApiKeyLocation === 'query') { optQ.selected = true; } else { optH.selected = true; }
 								locSelect.onchange = () => {
-									field.httpApiKeyLocation = locSelect.value as any;
+									field.httpApiKeyLocation = locSelect.value as ICustomField['httpApiKeyLocation'];
 									this._syncDraft();
 								};
 							} else if (at === 'basic') {
@@ -10843,7 +10937,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						];
 						bTypes.forEach(bt => {
 							const opt = append(bodyTypeSelect, $('option', { value: bt.id }, bt.label)) as HTMLOptionElement;
-							if (bt.id === (field.httpBodyType || 'none')) opt.selected = true;
+							if (bt.id === (field.httpBodyType || 'none')) { opt.selected = true; }
 						});
 
 						const bodyActions = append(bodyTop, $('div', { style: 'display: flex; gap: 6px;' }));
@@ -10870,15 +10964,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 						formatJsonBtn.onclick = () => {
 							const raw = bodyTextarea.value.trim();
-							if (!raw) return;
+							if (!raw) { return; }
 							try {
 								const parsed = JSON.parse(raw);
 								bodyTextarea.value = JSON.stringify(parsed, null, 2);
 								field.httpBodyContent = bodyTextarea.value;
 								this.notificationService.info('JSON formatted successfully.');
 								this._syncDraft();
-							} catch (err: any) {
-								this.notificationService.warn(`JSON Format Warning: ${err?.message || 'Invalid JSON syntax. Note that variable placeholders like {var} may make JSON temporarily non-standard until interpolated.'}`);
+							} catch (err) {
+								this.notificationService.warn(`JSON Format Warning: ${(err as Error | undefined)?.message || 'Invalid JSON syntax. Note that variable placeholders like {var} may make JSON temporarily non-standard until interpolated.'}`);
 							}
 						};
 
@@ -11056,23 +11150,23 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 						try {
 							// Gather live workflow context, with large spilled variables (__anyagentVarRef__) loaded back
-							const liveContext: Record<string, any> = { ...(await this._getHydratedWorkflowRuntimeContext()) };
+							const liveContext: Record<string, unknown> = { ...(await this._getHydratedWorkflowRuntimeContext()) };
 
 							const allFields = fields || this._activeModule?.fields || [];
 							for (const f of allFields) {
-								if (!f || f === field) continue;
+								if (!f || f === field) { continue; }
 								const fKey = f.label || f.id;
-								let fieldVal: any = undefined;
+								let fieldVal: unknown = undefined;
 								if (f.type === 'parameters' && f.parameters) {
-									const pMap: Record<string, any> = {};
-									f.parameters.forEach(p => { if (p.name) pMap[p.name] = this._parseInputStringLiteral(p.defaultValue ?? ''); });
+									const pMap: Record<string, unknown> = {};
+									f.parameters.forEach(p => { if (p.name) { pMap[p.name] = this._parseInputStringLiteral(p.defaultValue ?? ''); } });
 									fieldVal = pMap;
 									if (liveContext['Parameters'] === undefined) { liveContext['Parameters'] = pMap; }
 									if (liveContext['Inputs'] === undefined) { liveContext['Inputs'] = pMap; }
 								} else if (f.type === 'http_request') {
 									fieldVal = f.httpResponseData ?? f.httpResponseBody ?? undefined;
 								} else {
-									const fAny = f as any;
+									const fAny: IRuntimeCustomField = f;
 									fieldVal = fAny.lastExecutionOutput ?? fAny.pythonOutput ?? f.defaultContent ?? f.defaultValue ?? undefined;
 								}
 								// Never clobber hydrated runtime context values with empty fallback strings
@@ -11115,8 +11209,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							} else {
 								this.notificationService.warn(`HTTP Request: ${res.status || 'Error'} ${res.statusText || res.error || ''} (${res.durationMs}ms)`);
 							}
-						} catch (err: any) {
-							this.notificationService.error(`HTTP Request Failed: ${err?.message || String(err)}`);
+						} catch (err) {
+							this.notificationService.error(`HTTP Request Failed: ${(err as Error | undefined)?.message || String(err)}`);
 						} finally {
 							sendBtn.disabled = false;
 							sendBtnLabel.textContent = 'Send Request';
@@ -11439,9 +11533,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					const parsePastedTabularText = (rawText: string, treatFirstRowAsHeader: boolean, replaceExisting: boolean) => {
 						const trimmed = rawText.trim();
-						if (!trimmed) return;
+						if (!trimmed) { return; }
 						const cols = field.tableColumns || [];
-						const newRows: Record<string, any>[] = [];
+						const newRows: Record<string, unknown>[] = [];
 
 						// Case 1: JSON Array
 						if (trimmed.startsWith('[')) {
@@ -11471,7 +11565,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 						if (newRows.length === 0) {
 							const lines = trimmed.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
-							if (lines.length === 0) return;
+							if (lines.length === 0) { return; }
 
 							// Detect Markdown Table
 							const isMarkdown = lines[0].includes('|') && lines.length >= 2 && /^\|?[\s:-]+\|/.test(lines[1]);
@@ -11511,7 +11605,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 								for (let rIdx = startRowIdx; rIdx < matrix.length; rIdx++) {
 									const cells = matrix[rIdx];
-									const rowObj: Record<string, any> = {};
+									const rowObj: Record<string, unknown> = {};
 									for (let cIdx = 0; cIdx < headerNames.length; cIdx++) {
 										const targetHeader = headerNames[cIdx];
 										const matchedCol = cols.find(c => c.name.toLowerCase() === targetHeader.toLowerCase());
@@ -11722,7 +11816,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						return 'TEXT';
 					};
 
-					const cloneColumnDef = (c: any, idx: number): ITableColumnDefinition => ({
+					const cloneColumnDef = (c: ILooseTableColumn | null | undefined, idx: number): ITableColumnDefinition => ({
 						id: c?.id || `col_${Date.now()}_${idx + 1}`,
 						name: String(c?.name || c?.label || `col_${idx + 1}`).trim(),
 						label: String(c?.label || c?.name || `col_${idx + 1}`).trim(),
@@ -11732,7 +11826,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						defaultValue: c?.defaultValue !== undefined && c?.defaultValue !== null ? String(c.defaultValue) : ''
 					});
 
-					const cloneColumnsList = (cols: any[] | undefined): ITableColumnDefinition[] =>
+					const cloneColumnsList = (cols: ReadonlyArray<ILooseTableColumn | null | undefined> | undefined): ITableColumnDefinition[] =>
 						Array.isArray(cols) ? cols.map((c, idx) => cloneColumnDef(c, idx)) : [];
 
 					const areSchemasEqual = (
@@ -11884,7 +11978,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								hasLocalColumnEdits = true;
 								if (removed && Array.isArray(field.tableRows)) {
 									field.tableRows.forEach(r => {
-										if (r) delete r[removed.name];
+										if (r) { delete r[removed.name]; }
 									});
 								}
 								this._syncDraft();
@@ -11929,7 +12023,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						if (!Array.isArray(field.tableRows)) {
 							field.tableRows = [];
 						}
-						const newRow: Record<string, any> = {};
+						const newRow: Record<string, unknown> = {};
 						(field.tableColumns || []).forEach(c => {
 							if (c.primaryKey && c.dataType === 'INTEGER') {
 								newRow[c.name] = field.tableRows!.length + 1;
@@ -12007,7 +12101,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						this._syncDraft();
 					};
 					append(autoSyncLabel, $('span', {}, 'Create empty table if missing'));
-					autoSyncLabel.title = "When the workflow runs and the target table does not exist yet, create it (empty) from this card's columns. Never writes any rows.";
+					autoSyncLabel.title = 'When the workflow runs and the target table does not exist yet, create it (empty) from this card\'s columns. Never writes any rows.';
 
 					// Step 1: DB Engine + SQLite File Path + Select / Create New SQLite File
 					const dbPathRow = append(dbSection, $('div', {
@@ -12022,7 +12116,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						{ value: 'none', label: 'In-Ticket JSON Only' }
 					].forEach(eng => {
 						const opt = append(engineSelect, $('option', { value: eng.value }, eng.label)) as HTMLOptionElement;
-						if ((field.tableDbEngine || 'sqlite') === eng.value) opt.selected = true;
+						if ((field.tableDbEngine || 'sqlite') === eng.value) { opt.selected = true; }
 					});
 					engineSelect.onchange = () => {
 						field.tableDbEngine = engineSelect.value as 'sqlite' | 'none';
@@ -12401,9 +12495,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 						schemaDiffBanner.style.display = 'flex';
 						const parts: string[] = [];
-						if (diff.added.length > 0) parts.push(`Added (+): ${diff.added.join(', ')}`);
-						if (diff.removed.length > 0) parts.push(`Removed (-): ${diff.removed.join(', ')}`);
-						if (diff.modified.length > 0) parts.push(`Modified (~): ${diff.modified.join(', ')}`);
+						if (diff.added.length > 0) { parts.push(`Added (+): ${diff.added.join(', ')}`); }
+						if (diff.removed.length > 0) { parts.push(`Removed (-): ${diff.removed.join(', ')}`); }
+						if (diff.modified.length > 0) { parts.push(`Modified (~): ${diff.modified.join(', ')}`); }
 						if (parts.length === 0 && !exactEqual) {
 							parts.push('Column order or attribute changed');
 						}
@@ -12756,7 +12850,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						const runtime = this._instantiationService.invokeFunction(accessor => {
 							try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
 						});
-						if (!runtime) return;
+						if (!runtime) { return; }
 						const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
 						const { resolvedTable } = resolveTargetTableName();
 						const res = await runtime.executeSqliteTableOperation({
@@ -12839,7 +12933,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						const runtime = this._instantiationService.invokeFunction(accessor => {
 							try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
 						});
-						if (!runtime) return;
+						if (!runtime) { return; }
 						const reqSeq = ++schemaLoadSeq;
 						const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
 
@@ -13009,9 +13103,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								const diff = computeColumnDiff(prevUiCols, loadedCols);
 								if (diff.hasDiff || !areSchemasEqual(prevUiCols, loadedCols)) {
 									const diffNotes: string[] = [];
-									if (diff.removed.length > 0) diffNotes.push(`In DB (+loaded): ${diff.removed.join(', ')}`);
-									if (diff.added.length > 0) diffNotes.push(`Local only (-replaced): ${diff.added.join(', ')}`);
-									if (diff.modified.length > 0) diffNotes.push(`Type/PK changes: ${diff.modified.join(', ')}`);
+									if (diff.removed.length > 0) { diffNotes.push(`In DB (+loaded): ${diff.removed.join(', ')}`); }
+									if (diff.added.length > 0) { diffNotes.push(`Local only (-replaced): ${diff.added.join(', ')}`); }
+									if (diff.modified.length > 0) { diffNotes.push(`Type/PK changes: ${diff.modified.join(', ')}`); }
 									this.notificationService.info(`Synced ${loadedCols.length} column(s) from '${tblName}'${diffNotes.length > 0 ? ` — ${diffNotes.join(' | ')}` : ''}.`);
 								} else {
 									this.notificationService.info(res.message || `Queried ${loadedCols.length} column(s) from '${tblName}' (matches current header).`);
@@ -13130,7 +13224,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						const runtime = this._instantiationService.invokeFunction(accessor => {
 							try { return accessor.get(ITicketWorkflowRuntimeService); } catch { return undefined; }
 						});
-						if (!runtime) return;
+						if (!runtime) { return; }
 						const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
 
 						const inspectRes = await runtime.executeSqliteTableOperation({
@@ -13436,6 +13530,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'display: none; width: 100%; min-height: 84px; padding: 8px 10px; font-size: 11.5px; line-height: 1.6; font-family: var(--vscode-editor-font-family, monospace); border-radius: 5px; border: 1px solid rgba(56, 189, 248, 0.65); background: rgba(0, 0, 0, 0.45); color: #e2e8f0; box-sizing: border-box; resize: vertical; outline: none;'
 					})) as HTMLTextAreaElement;
 					sqlTextarea.value = field.tableSqlQuery || '';
+					tokenizedDisplayTextareas.set(sqlDisplayEl, sqlTextarea);
 
 					const sqlAutocompleteMenu = append(sqlEditorWrapper, $('div.prompt-autocomplete-menu', {
 						style: 'display: none; position: absolute; left: 8px; top: 100%; margin-top: 4px; z-index: 2500; min-width: 240px; max-height: 220px; overflow-y: auto; background: var(--vscode-editorWidget-background, #1e1e1e); border: 1px solid var(--vscode-editorWidget-border, #454545); border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,0.45); padding: 4px;'
@@ -13786,7 +13881,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							sqlOutputDisplay.style.opacity = '1';
 							sqlOutputDisplay.style.fontStyle = 'normal';
 						} else {
-							sqlOutputDisplay.textContent = 'No SQL debug output yet. Click "▷ Test" (or "▷ Run SQL") to interpolate {Field Label} references, execute the SQL statement against SQLite, and inspect the resolved SQL & query result here.';
+							sqlOutputDisplay.textContent = 'No SQL debug output yet. Click "\u25B7 Test" (or "\u25B7 Run SQL") to interpolate {Field Label} references, execute the SQL statement against SQLite, and inspect the resolved SQL & query result here.';
 							sqlOutputDisplay.style.opacity = '0.5';
 							sqlOutputDisplay.style.fontStyle = 'italic';
 						}
@@ -13794,13 +13889,13 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					setSqlOutputDisplayContent(savedSqlPreviewOutput);
 					if (savedSqlPreviewOutput.trim()) {
 						sqlStatusBadge.style.display = 'inline-block';
-						if ((field as any).lastExecutionStatus === 'success') {
-							sqlStatusBadge.textContent = `Completed in ${(field as any).lastExecutionDurationMs ?? 0}ms${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+						if ((field as IRuntimeCustomField).lastExecutionStatus === 'success') {
+							sqlStatusBadge.textContent = `Completed in ${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							sqlStatusBadge.style.color = '#10b981';
-						} else if ((field as any).lastExecutionStatus === 'failed') {
-							sqlStatusBadge.textContent = `Failed (${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+						} else if ((field as IRuntimeCustomField).lastExecutionStatus === 'failed') {
+							sqlStatusBadge.textContent = `Failed (${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms)${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							sqlStatusBadge.style.color = '#f87171';
-						} else if ((field as any).lastExecutionStatus === 'skipped') {
+						} else if ((field as IRuntimeCustomField).lastExecutionStatus === 'skipped') {
 							sqlStatusBadge.textContent = 'Skipped (Disabled)';
 							sqlStatusBadge.style.color = '#94a3b8';
 						} else {
@@ -13957,7 +14052,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										totalDbRowCount = res.rowCount;
 									}
 								} else if (res.isSelectQuery && Array.isArray(res.queryRows)) {
-									(field as any).lastQueryRows = res.queryRows;
+									(field as IRuntimeCustomField).lastQueryRows = res.queryRows;
 									if (!res.isPragmaQuery) {
 										field.tableRows = res.queryRows;
 									}
@@ -14024,14 +14119,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									const qrPrevBtn = append(qControlsRight, $('button.monaco-button', {
 										type: 'button',
 										style: 'padding: 2px 7px; font-size: 10px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.14); cursor: pointer;'
-									}, '‹ Prev')) as HTMLButtonElement;
+									}, '\u2039 Prev')) as HTMLButtonElement;
 									const qrPageBadge = append(qControlsRight, $('span', {
 										style: 'font-size: 10px; opacity: 0.8; font-family: var(--vscode-editor-font-family, monospace);'
 									}));
 									const qrNextBtn = append(qControlsRight, $('button.monaco-button', {
 										type: 'button',
 										style: 'padding: 2px 7px; font-size: 10px; border-radius: 4px; background: rgba(255,255,255,0.06); color: inherit; border: 1px solid rgba(255,255,255,0.14); cursor: pointer;'
-									}, 'Next ›')) as HTMLButtonElement;
+									}, 'Next \u203A')) as HTMLButtonElement;
 
 									const copyQueryJsonBtn = append(qControlsRight, $('button.monaco-button', {
 										type: 'button',
@@ -14093,7 +14188,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 											qrPage = safePage;
 											const startIdx = (safePage - 1) * qrPageSize;
 											const endIdx = Math.min(startIdx + qrPageSize, allQueryRows.length);
-											qInfoLabel.textContent = `Query Result (${allQueryRows.length} row(s) total · showing ${startIdx + 1}–${endIdx})`;
+											qInfoLabel.textContent = `Query Result (${allQueryRows.length} row(s) total · showing ${startIdx + 1}\u2013${endIdx})`;
 											qrPageBadge.textContent = `Page ${safePage} / ${qrTotalPages}`;
 											qrPrevBtn.disabled = safePage <= 1;
 											qrPrevBtn.style.opacity = safePage <= 1 ? '0.4' : '1';
@@ -14166,22 +14261,22 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					const formatParamValueForPythonExpr = (rawVal: string): string => {
 						const trimmed = (rawVal || '').trim();
-						if (!trimmed) return '""';
+						if (!trimmed) { return '""'; }
 						const singleBrace = trimmed.match(/^\{([a-zA-Z_][a-zA-Z0-9_]*)\}$/);
-						if (singleBrace) return singleBrace[1];
-						if (/^-?\d+(\.\d+)?$/.test(trimmed) || trimmed === 'True' || trimmed === 'False' || trimmed === 'None') return trimmed;
+						if (singleBrace) { return singleBrace[1]; }
+						if (/^-?\d+(\.\d+)?$/.test(trimmed) || trimmed === 'True' || trimmed === 'False' || trimmed === 'None') { return trimmed; }
 						return JSON.stringify(trimmed);
 					};
 
-					let refreshPythonPreview: () => void = () => { };
+					const refreshPythonPreview: () => void = () => { };
 					const buildCurrentPythonExpression = (): string => {
 						const varName = field.outputVariableName || generateSmartPythonVarName(field.label || field.id, field.type);
 						if (field.type === 'get_ticket') {
 							const rawTarget = (field.wfTicketTarget || field.wfTicketId || field.wfTicketVariable || '').trim();
 							const args: string[] = [];
-							if (rawTarget) args.push(`ticket=${formatParamValueForPythonExpr(rawTarget)}`);
-							if (field.wfTicketField && field.wfTicketField.trim()) args.push(`field=${formatParamValueForPythonExpr(field.wfTicketField)}`);
-							if (field.wfTicketType && field.wfTicketType.trim()) args.push(`ticket_type=${JSON.stringify(field.wfTicketType)}`);
+							if (rawTarget) { args.push(`ticket=${formatParamValueForPythonExpr(rawTarget)}`); }
+							if (field.wfTicketField && field.wfTicketField.trim()) { args.push(`field=${formatParamValueForPythonExpr(field.wfTicketField)}`); }
+							if (field.wfTicketType && field.wfTicketType.trim()) { args.push(`ticket_type=${JSON.stringify(field.wfTicketType)}`); }
 							return `${varName} = get_ticket(${args.join(', ')})`;
 						}
 						if (field.type === 'create_tickets') {
@@ -14243,7 +14338,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									idx++;
 									continue;
 								}
-								if (ch === '"' || ch === "'") {
+								if (ch === '"' || ch === '\'') {
 									inQ = ch;
 									normExpr += ch;
 									idx++;
@@ -14412,16 +14507,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							currentMatches = scored.slice(0, 30).map(s => s.tok);
 							activeIndex = 0;
 
+							const popupWindow = getWindow(targetInp);
 							if (!popupEl) {
-								popupEl = append(document.body, $('div.anyagent-var-autocomplete-popup', {
+								popupEl = append(popupWindow.document.body, $('div.anyagent-var-autocomplete-popup', {
 									style: 'position: fixed; z-index: 25000; min-width: 240px; max-width: 420px; max-height: 230px; overflow-y: auto; background: #141925; border: 1px solid rgba(56, 189, 248, 0.45); border-radius: 6px; padding: 4px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65); display: flex; flex-direction: column; gap: 2px;'
 								}));
 							}
 							const rect = targetInp.getBoundingClientRect();
 							const estHeight = Math.min(230, Math.max(36, currentMatches.length * 28 + 10));
-							const spaceBelow = window.innerHeight - rect.bottom - 12;
+							const spaceBelow = popupWindow.innerHeight - rect.bottom - 12;
 							const topPos = spaceBelow >= estHeight ? rect.bottom + 4 : Math.max(8, rect.top - estHeight - 4);
-							const leftPos = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - 320));
+							const leftPos = Math.min(Math.max(8, rect.left), Math.max(8, popupWindow.innerWidth - 320));
 							popupEl.style.top = `${topPos}px`;
 							popupEl.style.left = `${leftPos}px`;
 							popupEl.style.width = `${Math.max(240, Math.min(420, rect.width))}px`;
@@ -14480,26 +14576,27 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 							const addHandle = (rawName: string | undefined, desc?: string) => {
 								const clean = (rawName || '').trim().replace(/^@/, '');
-								if (!clean || !isCleanVarName(clean)) return;
+								if (!clean || !isCleanVarName(clean)) { return; }
 								const lower = clean.toLowerCase();
-								if (lower === currentOutVar || lower === currentFieldLabel || seenVars.has(lower)) return;
+								if (lower === currentOutVar || lower === currentFieldLabel || seenVars.has(lower)) { return; }
 								seenVars.add(lower);
 								ticketVars.push({ name: clean, desc });
 							};
 
 							// 1. Current node cards: ONLY genuine ticket handle producers (create_tickets, get_ticket, or python returning a ticket handle)
 							fields.forEach(f => {
-								if (!f || f === field) return;
+								if (!f || f === field) { return; }
 								if (f.type === 'create_tickets' || f.type === 'get_ticket') {
 									const vName = (f.outputVariableName || '').trim() || generateSmartPythonVarName(f.label || f.id, f.type);
 									addHandle(vName, f.wfTicketType || f.label || f.type);
 								} else if (f.type === 'python') {
-									const outObj = f.pythonResult ?? (f as any).lastExecutionOutput;
-									const hasTicketHandleOut = Boolean(outObj && typeof outObj === 'object' && !Array.isArray(outObj) && (outObj.ticketId || outObj.entityUri));
+									const outObj = f.pythonResult ?? (f as IRuntimeCustomField).lastExecutionOutput;
+									const outRec = (outObj && typeof outObj === 'object' && !Array.isArray(outObj)) ? outObj as { ticketId?: unknown; entityUri?: unknown; ticketType?: unknown } : undefined;
+									const hasTicketHandleOut = Boolean(outRec && (outRec.ticketId || outRec.entityUri));
 									const hasCreateInCode = typeof f.pythonCode === 'string' && /\b(?:CREATE_TICKETS|create_tickets|GET_TICKET|get_ticket)\s*\(/.test(f.pythonCode);
 									if (hasTicketHandleOut || hasCreateInCode) {
 										const vName = (f.outputVariableName || '').trim();
-										addHandle(vName, (outObj && typeof outObj === 'object' && outObj.ticketType) ? String(outObj.ticketType) : (f.label || 'Ticket Handle'));
+										addHandle(vName, outRec?.ticketType ? String(outRec.ticketType) : (f.label || 'Ticket Handle'));
 									}
 								}
 							});
@@ -14510,7 +14607,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									const wfVars = input.workflowVariablesProvider() || [];
 									wfVars.forEach(wv => {
 										const wLabel = (wv.label || '').trim();
-										if (!wLabel || !isCleanVarName(wLabel)) return;
+										if (!wLabel || !isCleanVarName(wLabel)) { return; }
 										const isGenuineHandle = wv.type === 'HANDLE' ||
 											Boolean(wv.ticketType) ||
 											wv.sourceType === 'create_tickets' ||
@@ -14572,7 +14669,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						};
 
 						const renderHandlePopupItems = () => {
-							if (!handlePopupEl) return;
+							if (!handlePopupEl) { return; }
 							clearNode(handlePopupEl);
 							if (handleMatches.length === 0) {
 								append(handlePopupEl, $('div', {
@@ -14641,16 +14738,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							handleMatches = scored.map(s => s.tv);
 							handleActiveIdx = 0;
 
+							const popupWindow = getWindow(targetInp);
 							if (!handlePopupEl) {
-								handlePopupEl = append(document.body, $('div.anyagent-handle-autocomplete-popup', {
+								handlePopupEl = append(popupWindow.document.body, $('div.anyagent-handle-autocomplete-popup', {
 									style: 'position: fixed; z-index: 25000; min-width: 240px; max-width: 420px; max-height: 220px; overflow-y: auto; background: #171424; border: 1px solid rgba(192, 132, 252, 0.55); border-radius: 6px; padding: 4px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65); display: flex; flex-direction: column; gap: 2px;'
 								}));
 							}
 							const rect = targetInp.getBoundingClientRect();
 							const estHeight = Math.min(220, Math.max(36, handleMatches.length * 28 + 10));
-							const spaceBelow = window.innerHeight - rect.bottom - 12;
+							const spaceBelow = popupWindow.innerHeight - rect.bottom - 12;
 							const topPos = spaceBelow >= estHeight ? rect.bottom + 4 : Math.max(8, rect.top - estHeight - 4);
-							const leftPos = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - 320));
+							const leftPos = Math.min(Math.max(8, rect.left), Math.max(8, popupWindow.innerWidth - 320));
 							handlePopupEl.style.top = `${topPos}px`;
 							handlePopupEl.style.left = `${leftPos}px`;
 							handlePopupEl.style.width = `${Math.max(240, Math.min(420, rect.width))}px`;
@@ -14660,7 +14758,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						targetInp.addEventListener('input', updateHandleAutocomplete);
 						targetInp.addEventListener('click', updateHandleAutocomplete);
 						targetInp.addEventListener('keydown', (ev: KeyboardEvent) => {
-							if (!handlePopupEl) return;
+							if (!handlePopupEl) { return; }
 							if (ev.key === 'ArrowDown') {
 								ev.preventDefault();
 								ev.stopPropagation();
@@ -14695,7 +14793,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					const attachTicketSearchDropdown = (inputEl: HTMLInputElement, onSelected: (ticketId: string) => void) => {
 						const container = inputEl.parentElement;
-						if (!container) return;
+						if (!container) { return; }
 						container.style.position = 'relative';
 
 						const menu = append(container, $('div.ticket-search-autocomplete-menu', {
@@ -14755,10 +14853,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 									const tid = (s.ticketId || s.entityName || '').trim();
 									const title = (s.title || s.entityName || '').trim();
 									const type = (s.entityType || '').trim();
-									if (!tid) continue;
+									if (!tid) { continue; }
 									if (!q || tid.toLowerCase().includes(q) || title.toLowerCase().includes(q) || type.toLowerCase().includes(q)) {
 										matched.push({ id: tid, title, type });
-										if (matched.length >= 8) break;
+										if (matched.length >= 8) { break; }
 									}
 								}
 								renderCandidates(matched);
@@ -14777,7 +14875,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							setTimeout(() => hideMenu(), 200);
 						});
 						inputEl.addEventListener('keydown', (e) => {
-							if (menu.style.display === 'none') return;
+							if (menu.style.display === 'none') { return; }
 							if (e.key === 'ArrowDown') {
 								e.preventDefault();
 								activeIndex = (activeIndex + 1) % currentCandidates.length;
@@ -14942,7 +15040,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 										if (spec && spec.enabled !== false) {
 											const specKey = (spec.fieldKey || spec.label || '').trim();
 											const specLabel = (spec.label || spec.fieldKey || '').trim();
-											if (!specKey && !specLabel) return;
+											if (!specKey && !specLabel) { return; }
 
 											const matchedComp = targetMod.fields.find(cf =>
 												cf.type !== 'output' && (
@@ -15444,7 +15542,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								field.wfTicketField = fInp.value.trim();
 								const valLower = (field.wfTicketField || '').toLowerCase();
 								const matchedOpt = Array.from(fSelect.options).find(opt => {
-									if (opt.value.toLowerCase() === valLower) return true;
+									if (opt.value.toLowerCase() === valLower) { return true; }
 									const co = candidateOutputs.find(c => c.fieldKey.toLowerCase() === opt.value.toLowerCase());
 									return !!(co && co.varName && co.varName.toLowerCase() === valLower);
 								});
@@ -15532,7 +15630,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							if (field.wfTicketType && detected && field.wfTicketType.toLowerCase() === detected.toLowerCase()) {
 								append(typeBadge, $('span', {
 									style: 'font-size: 10.5px; color: #38bdf8; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.3); padding: 1px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px;'
-								}, `⚡ Auto-detected: ${detected}`));
+								}, `\u26A1 Auto-detected: ${detected}`));
 							} else if (field.wfTicketType && detected && field.wfTicketType.toLowerCase() !== detected.toLowerCase()) {
 								append(typeBadge, $('span', {
 									style: 'font-size: 10.5px; color: #e9d5ff; background: rgba(168, 85, 247, 0.15); border: 1px solid rgba(168, 85, 247, 0.35); padding: 1px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px;'
@@ -15540,7 +15638,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							} else if (detected) {
 								append(typeBadge, $('span', {
 									style: 'font-size: 10.5px; color: #38bdf8; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.3); padding: 1px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px;'
-								}, `⚡ Detected: ${detected}`));
+								}, `\u26A1 Detected: ${detected}`));
 							} else if (field.wfTicketType) {
 								append(typeBadge, $('span', {
 									style: 'font-size: 10.5px; color: #a78bfa; background: rgba(167, 139, 250, 0.12); border: 1px solid rgba(167, 139, 250, 0.3); padding: 1px 7px; border-radius: 4px;'
@@ -15615,7 +15713,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							const curFieldLower = (field.wfTicketField || '').trim().toLowerCase();
 							let matchedCandidate: { fieldKey: string; label: string; group: string; varName?: string; fieldName?: string } | undefined;
 							const matchesCurField = (o: { fieldKey: string; label: string; varName?: string; fieldName?: string }): boolean => {
-								if (!curFieldLower) return false;
+								if (!curFieldLower) { return false; }
 								return curFieldLower === o.fieldKey.toLowerCase()
 									|| curFieldLower === o.label.toLowerCase()
 									|| Boolean(o.varName && curFieldLower === o.varName.toLowerCase())
@@ -15696,7 +15794,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								field.wfTicketField = fInp.value.trim();
 								const valLower = (field.wfTicketField || '').toLowerCase();
 								const matchedOpt = Array.from(fSelect.options).find(opt => {
-									if (opt.value.toLowerCase() === valLower) return true;
+									if (opt.value.toLowerCase() === valLower) { return true; }
 									const co = candidateOutputs.find(c => c.fieldKey.toLowerCase() === opt.value.toLowerCase());
 									return !!(co && co.varName && co.varName.toLowerCase() === valLower);
 								});
@@ -15798,12 +15896,12 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'font-size: 10px; font-family: var(--vscode-editor-font-family, monospace);'
 					}));
 					const updateWfExecStatus = () => {
-						const st = (field as any).lastExecutionStatus;
+						const st = (field as IRuntimeCustomField).lastExecutionStatus;
 						if (st === 'success') {
-							wfExecStatus.textContent = `Completed in ${(field as any).lastExecutionDurationMs ?? 0}ms${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+							wfExecStatus.textContent = `Completed in ${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							wfExecStatus.style.color = '#4ade80';
 						} else if (st === 'failed') {
-							wfExecStatus.textContent = `Failed (${(field as any).lastExecutionDurationMs ?? 0}ms)${(field as any).lastExecutedAt ? ` · ${(field as any).lastExecutedAt}` : ''}`;
+							wfExecStatus.textContent = `Failed (${(field as IRuntimeCustomField).lastExecutionDurationMs ?? 0}ms)${(field as IRuntimeCustomField).lastExecutedAt ? ` · ${(field as IRuntimeCustomField).lastExecutedAt}` : ''}`;
 							wfExecStatus.style.color = '#f87171';
 						} else if (st === 'skipped') {
 							wfExecStatus.textContent = 'Skipped (Disabled)';
@@ -15834,15 +15932,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							wfExecTestBtn.disabled = true;
 							wfExecTestLabel.textContent = 'Running...';
 							try {
-								const liveCtx: Record<string, any> = isFlowchartNodeMode
+								const liveCtx: Record<string, unknown> = isFlowchartNodeMode
 									? { ...(await this._getHydratedWorkflowRuntimeContext()) }
 									: {};
 								// Overlay sibling cards' latest outputs so freshly run/tested cards (e.g. {r2j_tkt}, {jbs_app_tkt}) always override stale run context
 								for (const sf of fields) {
-									if (!sf || sf === field) continue;
+									if (!sf || sf === field) { continue; }
 									const sOut = (sf.type === 'python' && sf.pythonResult !== undefined)
 										? sf.pythonResult
-										: (sf as any).lastExecutionOutput;
+										: (sf as IRuntimeCustomField).lastExecutionOutput;
 									if (sOut !== undefined) {
 										const sVar = (sf.outputVariableName || '').trim();
 										if (sVar) {
@@ -15857,9 +15955,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								updateWfExecStatus();
 								renderWfExecPreview();
 								this._syncDraft();
-							} catch (err: any) {
-								(field as any).lastExecutionStatus = 'failed';
-								(field as any).lastExecutionLog = `[Run Error]: ${err?.message || err}`;
+							} catch (err) {
+								(field as IRuntimeCustomField).lastExecutionStatus = 'failed';
+								(field as IRuntimeCustomField).lastExecutionLog = `[Run Error]: ${(err as Error | undefined)?.message || err}`;
 								updateWfExecStatus();
 								renderWfExecPreview();
 							} finally {
@@ -15887,11 +15985,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						style: 'display: none; font-size: 10px; color: #94a3b8; background: rgba(148, 163, 184, 0.08); border: 1px dashed rgba(148, 163, 184, 0.28); border-radius: 4px; padding: 3px 8px;'
 					}));
 					const getFullWfExecText = (): string => {
-						const out = (field as any).lastExecutionOutput;
+						const out = (field as IRuntimeCustomField).lastExecutionOutput;
 						if (out !== undefined) {
 							return typeof out === 'object' && out !== null ? JSON.stringify(out, null, 2) : String(out);
 						}
-						return String((field as any).lastExecutionLog || '');
+						return String((field as IRuntimeCustomField).lastExecutionLog || '');
 					};
 					const renderWfExecPreview = () => {
 						const fullText = getFullWfExecText();
@@ -15931,11 +16029,11 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}, 1500);
 					};
 					wfExecClearBtn.onclick = async () => {
-						delete (field as any).lastExecutionLog;
-						delete (field as any).lastExecutionOutput;
-						delete (field as any).lastExecutionStatus;
-						delete (field as any).lastExecutionDurationMs;
-						delete (field as any).lastExecutedAt;
+						delete (field as IRuntimeCustomField).lastExecutionLog;
+						delete (field as IRuntimeCustomField).lastExecutionOutput;
+						delete (field as IRuntimeCustomField).lastExecutionStatus;
+						delete (field as IRuntimeCustomField).lastExecutionDurationMs;
+						delete (field as IRuntimeCustomField).lastExecutedAt;
 						updateWfExecStatus();
 						renderWfExecPreview();
 						this._syncDraft();
@@ -16017,7 +16115,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 			if (mainViewport && savedScrollTop > 0 && !didScrollToReorderedCard) {
 				mainViewport.scrollTop = savedScrollTop;
-				requestAnimationFrame(() => {
+				getWindow(mainViewport).requestAnimationFrame(() => {
 					if (mainViewport && !didScrollToReorderedCard) {
 						mainViewport.scrollTop = savedScrollTop;
 					}
@@ -16215,7 +16313,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 			const closeBtn = append(mHeader, $('button', {
 				style: 'background: transparent; border: none; font-size: 16px; color: var(--vscode-descriptionForeground); cursor: pointer; padding: 2px 6px; border-radius: 4px;'
-			}, '✕'));
+			}, '\u2715'));
 			closeBtn.onclick = () => {
 				overlay.remove();
 			};
@@ -16231,12 +16329,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 			let draggingStatusIndex: number | null = null;
 
+			// Status rows currently rendered in `listContainer` (reset whenever the rows are re-rendered).
+			const statusRows: HTMLElement[] = [];
+
 			const renderModalRows = () => {
 				clearNode(listContainer);
+				statusRows.length = 0;
 				currentStatuses.forEach((st, sIdx) => {
 					const row = append(listContainer, $('.status-modal-row', {
 						style: 'display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 6px; transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;'
 					}));
+					statusRows.push(row);
 
 					// Drag Grip Handle (dots icon)
 					const dragHandle = append(row, $('.status-row-drag-handle'));
@@ -16271,8 +16374,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						row.style.boxShadow = 'none';
 						row.style.borderColor = 'rgba(255, 255, 255, 0.08)';
 						draggingStatusIndex = null;
-						listContainer.querySelectorAll('.status-modal-row').forEach(el => {
-							const r = el as HTMLElement;
+						statusRows.forEach(r => {
 							r.style.boxShadow = 'none';
 							r.style.borderColor = 'rgba(255, 255, 255, 0.08)';
 						});
@@ -16355,7 +16457,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					});
 					catSel.value = st.category;
 					catSel.onchange = () => {
-						st.category = catSel.value as any;
+						st.category = catSel.value as IStatusDefinition['category'];
 					};
 
 					// Row Actions: Move Up, Move Down, Delete
@@ -16534,7 +16636,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		};
 
 		applySavedScrollPosition();
-		requestAnimationFrame(() => {
+		getWindow(mainViewport).requestAnimationFrame(() => {
 			applySavedScrollPosition();
 			setTimeout(() => {
 				applySavedScrollPosition();
@@ -16637,8 +16739,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			statusCode = context.res.statusCode || 200;
 			const text = await asText(context);
 			html = text || '';
-		} catch (err: any) {
-			const rawErr = err?.message || String(err);
+		} catch (err) {
+			const rawErr = (err as Error | undefined)?.message || String(err);
 			return {
 				title: targetUrl,
 				content: `Failed to fetch URL (${targetUrl}): ${rawErr}`,
@@ -16679,7 +16781,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 			const formatted = `# ${title}\nURL: ${targetUrl}\nFetched At: ${new Date().toLocaleString()}\n\n${displayContent}`;
 			return { title, content: formatted };
-		} catch (parseErr: any) {
+		} catch (parseErr) {
 			const cleaned = this._cleanHtmlToText(html);
 			return { title: targetUrl, content: cleaned };
 		}
@@ -16779,7 +16881,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				.replace(/&lt;/gi, '<')
 				.replace(/&gt;/gi, '>')
 				.replace(/&quot;/gi, '"')
-				.replace(/&#39;/gi, "'")
+				.replace(/&#39;/gi, '\'')
 				.replace(/&middot;/gi, '·');
 			// 5. Clean up multiple spaces and empty lines
 			const lines = clean.split('\n')
@@ -16794,10 +16896,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 	}
 
 	/** Last result of `_getHydratedWorkflowRuntimeContext()`; lets synchronous interpolation resolve large spilled variables too. */
-	private _lastHydratedRuntimeCtx: Record<string, any> | undefined;
+	private _lastHydratedRuntimeCtx: Record<string, unknown> | undefined;
 
-	private async _getHydratedWorkflowRuntimeContext(): Promise<Record<string, any>> {
-		let ctx: Record<string, any> = {};
+	private async _getHydratedWorkflowRuntimeContext(): Promise<Record<string, unknown>> {
+		let ctx: Record<string, unknown> = {};
 		if (this.input instanceof CustomModuleSchemaEditorInput) {
 			try {
 				if (typeof this.input.hydratedWorkflowRuntimeContextProvider === 'function') {
@@ -16817,7 +16919,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		rawText: string,
 		currentField: ICustomField,
 		allFields?: ICustomField[],
-		runtimeContext?: Record<string, any>
+		runtimeContext?: Record<string, unknown>
 	): string {
 		if (!rawText) {
 			return '';
@@ -16854,7 +16956,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			const fId = (f.id || '').trim();
 
 			if (f.type === 'parameters' && Array.isArray(f.parameters)) {
-				const paramMap: Record<string, any> = {};
+				const paramMap: Record<string, string> = {};
 				for (const p of f.parameters) {
 					const pName = (p.name || '').trim();
 					if (pName) {
@@ -16988,10 +17090,10 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		if (effectiveRuntimeCtx && typeof effectiveRuntimeCtx === 'object') {
 			for (const [ctxKey, rawCtxVal] of Object.entries(effectiveRuntimeCtx)) {
 				let ctxVal = rawCtxVal;
-				if (ctxVal && typeof ctxVal === 'object' && (ctxVal as any).__anyagentVarRef__ === true) {
+				if (isSpilledVarRef(ctxVal)) {
 					// Large spilled variable: use the value loaded by the last _getHydratedWorkflowRuntimeContext() call
 					const cached = this._lastHydratedRuntimeCtx?.[ctxKey];
-					ctxVal = (cached && typeof cached === 'object' && (cached as any).__anyagentVarRef__ === true) ? undefined : cached;
+					ctxVal = isSpilledVarRef(cached) ? undefined : cached;
 				}
 				if (!ctxKey || ctxVal === undefined || ctxVal === null) {
 					continue;
@@ -17078,8 +17180,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			statusEl.textContent = `Fetched (${charCount} chars)`;
 			statusEl.style.color = '#34d399';
 			// Suppress notificationService.info toast to prevent webview "Paused due to Notification" overlay
-		} catch (err: any) {
-			const rawErr = err?.message || String(err);
+		} catch (err) {
+			const rawErr = (err as Error | undefined)?.message || String(err);
 			const isAuthOrCors = /auth|401|403|login|session|verification/i.test(rawErr);
 			const timestamp = new Date().toLocaleString();
 			if (isAuthOrCors) {
@@ -17167,14 +17269,15 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 		const preInterpolated = this._interpolateSchemaReferences(rawPreInjected, field, allFields, runtimeCtx);
 		const segsInterpolated = nonEmptySegments.map(seg => this._interpolateSchemaReferences(seg, field, allFields, runtimeCtx));
 
-		const existing = document.querySelector('.schema-sent-prompt-modal-overlay');
+		const existing = activeSentPromptModalOverlay;
 		if (existing) {
 			existing.remove();
 		}
 
-		const overlay = append(document.body, $('div.schema-sent-prompt-modal-overlay', {
+		const overlay = append(getWindow(promptTextarea).document.body, $('div.schema-sent-prompt-modal-overlay', {
 			style: 'position: fixed; inset: 0; background: rgba(0, 0, 0, 0.72); z-index: 10000; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(3px); padding: 24px; box-sizing: border-box;'
 		}));
+		activeSentPromptModalOverlay = overlay;
 
 		const dialog = append(overlay, $('div', {
 			style: 'background: var(--vscode-editorWidget-background, #18181b); color: var(--vscode-editorWidget-foreground, #e4e4e7); border: 1px solid rgba(56, 189, 248, 0.38); border-radius: 10px; width: min(1020px, 94vw); height: min(820px, 90vh); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.78); display: flex; flex-direction: column; overflow: hidden; font-family: var(--vscode-font-family, sans-serif);'
@@ -17182,6 +17285,9 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 
 		const closeDialog = () => {
 			overlay.remove();
+			if (activeSentPromptModalOverlay === overlay) {
+				activeSentPromptModalOverlay = undefined;
+			}
 		};
 
 		const header = append(dialog, $('div', {
@@ -17202,10 +17308,11 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 		}));
 		const copyIconEl = append(copyAllBtn, $('span' + ThemeIcon.asCSSSelector(Codicon.copy), { style: 'font-size: 12px;' }));
 		const copyLabelEl = append(copyAllBtn, $('span', {}, 'Copy Full Prompt'));
-		let copyResetTimer: any = null;
+		let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
+		let activeCopyToast: HTMLElement | undefined;
 		const showModalCopyToast = (msg: string, isError: boolean = false) => {
-			overlay.querySelector('.schema-modal-copy-toast')?.remove();
-			const toast = append(overlay, $('div.schema-modal-copy-toast', {
+			activeCopyToast?.remove();
+			const toast = activeCopyToast = append(overlay, $('div.schema-modal-copy-toast', {
 				style: `position: fixed; top: 24px; left: 50%; transform: translateX(-50%); z-index: 10002; padding: 8px 16px; border-radius: 8px; font-size: 12px; font-weight: 600; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6); pointer-events: none; background: ${isError ? 'rgba(127, 29, 29, 0.96)' : 'rgba(6, 78, 59, 0.96)'}; color: ${isError ? '#fecaca' : '#a7f3d0'}; border: 1px solid ${isError ? 'rgba(248, 113, 113, 0.55)' : 'rgba(52, 211, 153, 0.55)'};`
 			}, msg));
 			setTimeout(() => { toast.remove(); }, isError ? 3500 : 2200);
@@ -17230,14 +17337,14 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				copyAllBtn.style.borderColor = 'rgba(52, 211, 153, 0.55)';
 				showModalCopyToast(`✓ Copied full prompt (${fullInterpolated.length.toLocaleString()} chars)`, false);
 				this.notificationService.info(`Copied full prompt (${fullInterpolated.length.toLocaleString()} chars).`);
-			} catch (err: any) {
-				const reason = err?.message || String(err || 'Unknown clipboard error');
+			} catch (err) {
+				const reason = (err as Error | undefined)?.message || String(err || 'Unknown clipboard error');
 				copyIconEl.className = ThemeIcon.asClassName(Codicon.error);
 				copyLabelEl.textContent = 'Copy Failed';
 				copyAllBtn.style.background = 'rgba(239, 68, 68, 0.25)';
 				copyAllBtn.style.color = '#f87171';
 				copyAllBtn.style.borderColor = 'rgba(248, 113, 113, 0.55)';
-				showModalCopyToast(`✗ Copy failed: ${reason}`, true);
+				showModalCopyToast(`\u2717 Copy failed: ${reason}`, true);
 				this.notificationService.error(`Failed to copy full prompt: ${reason}`);
 			} finally {
 				copyResetTimer = setTimeout(() => {
@@ -17305,25 +17412,25 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 		};
 	}
 
-	private _parseJsonOrPythonListValue(val: any): any[] {
-		if (Array.isArray(val)) return val;
-		if (val === null || val === undefined) return [];
+	private _parseJsonOrPythonListValue(val: unknown): unknown[] {
+		if (Array.isArray(val)) { return val; }
+		if (val === null || val === undefined) { return []; }
 		const s = String(val).trim();
-		if (!s || s === '[]' || s.toLowerCase() === 'null' || s.toLowerCase() === 'none') return [];
+		if (!s || s === '[]' || s.toLowerCase() === 'null' || s.toLowerCase() === 'none') { return []; }
 		try {
 			const parsed = JSON.parse(s);
-			if (Array.isArray(parsed)) return parsed;
+			if (Array.isArray(parsed)) { return parsed; }
 		} catch { }
 		if (s.startsWith('[') && s.endsWith(']')) {
 			const inner = s.slice(1, -1).trim();
-			if (!inner) return [];
+			if (!inner) { return []; }
 			const items: string[] = [];
 			let i = 0;
 			while (i < inner.length) {
 				while (i < inner.length && (inner[i] === ' ' || inner[i] === '\t' || inner[i] === '\n' || inner[i] === '\r' || inner[i] === ',')) {
 					i++;
 				}
-				if (i >= inner.length) break;
+				if (i >= inner.length) { break; }
 				const quote = inner[i];
 				if (quote === '\'' || quote === '"') {
 					i++;
@@ -17331,10 +17438,10 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 					while (i < inner.length) {
 						if (inner[i] === '\\' && i + 1 < inner.length) {
 							const nextCh = inner[i + 1];
-							if (nextCh === 'n') buf += '\n';
-							else if (nextCh === 't') buf += '\t';
-							else if (nextCh === 'r') buf += '\r';
-							else buf += nextCh;
+							if (nextCh === 'n') { buf += '\n'; }
+							else if (nextCh === 't') { buf += '\t'; }
+							else if (nextCh === 'r') { buf += '\r'; }
+							else { buf += nextCh; }
 							i += 2;
 						} else if (inner[i] === quote) {
 							i++;
@@ -17347,9 +17454,9 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 					items.push(buf);
 				} else {
 					let end = i;
-					while (end < inner.length && inner[end] !== ',') end++;
+					while (end < inner.length && inner[end] !== ',') { end++; }
 					const token = inner.slice(i, end).trim();
-					if (token) items.push(token);
+					if (token) { items.push(token); }
 					i = end + 1;
 				}
 			}
@@ -17364,7 +17471,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 		allFields?: ICustomField[],
 		forceFallback: boolean = false
 	): string | undefined {
-		if (!rawPrompt) return undefined;
+		if (!rawPrompt) { return undefined; }
 		const isDbResultJsonArrayParser =
 			/(?:parse|extract)[\s\S]*?(?:database\s+query\s+result|query\s+result|returned\s+[\w\s]*records?|table\s+rows?)[\s\S]*?json\s+array/i.test(rawPrompt) ||
 			(/(?:extract\s+all\s+returned|into\s+a\s+json\s+array)/i.test(rawPrompt) && /(?:do\s+not\s+omit\s+records|output\s+only\s+valid\s+json)/i.test(rawPrompt));
@@ -17392,15 +17499,16 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 			}
 		}
 
-		if (!matchedTableField) return undefined;
+		if (!matchedTableField) { return undefined; }
 		const sqlOut = (matchedTableField.debugSqlOutput || '').trim();
 		if (/^Status:\s*FAILED\b/i.test(sqlOut)) {
 			return '[]';
 		}
 
-		let tableRows: any[] = [];
-		if (Array.isArray((matchedTableField as any).lastQueryRows) && (matchedTableField as any).lastQueryRows.length > 0) {
-			tableRows = (matchedTableField as any).lastQueryRows;
+		let tableRows: unknown[] = [];
+		const matchedTableRuntimeField: IRuntimeCustomField = matchedTableField;
+		if (Array.isArray(matchedTableRuntimeField.lastQueryRows) && matchedTableRuntimeField.lastQueryRows.length > 0) {
+			tableRows = matchedTableRuntimeField.lastQueryRows;
 		} else if (Array.isArray(matchedTableField.tableRows) && matchedTableField.tableRows.length > 0) {
 			tableRows = matchedTableField.tableRows;
 		} else if (sqlOut.includes('--- [Query Rows Preview')) {
@@ -17415,7 +17523,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				if (jsonPart.startsWith('[') && jsonPart.endsWith(']')) {
 					try {
 						const parsed = JSON.parse(jsonPart);
-						if (Array.isArray(parsed)) tableRows = parsed;
+						if (Array.isArray(parsed)) { tableRows = parsed; }
 					} catch { }
 				}
 			}
@@ -17425,7 +17533,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 			return '[]';
 		}
 
-		let templateObj: Record<string, any> | undefined;
+		let templateObj: Record<string, unknown> | undefined;
 		const structMatch = rawPrompt.match(/\[\s*(\{\s*"[^"]+"\s*:[\s\S]*?\})\s*\]/);
 		if (structMatch && structMatch[1]) {
 			try {
@@ -17439,21 +17547,23 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 		const arrayFields = new Set<string>(['what_to_do', 'require_base', 'require_bonus', 'keywords']);
 		if (templateObj) {
 			for (const [tk, tv] of Object.entries(templateObj)) {
-				if (Array.isArray(tv)) arrayFields.add(tk);
+				if (Array.isArray(tv)) { arrayFields.add(tk); }
 			}
 		}
 
-		const sampleRow = tableRows[0] && typeof tableRows[0] === 'object' ? tableRows[0] : {};
+		const firstRow = tableRows[0];
+		const sampleRow: object = firstRow && typeof firstRow === 'object' ? firstRow : {};
 		const templateKeys = templateObj ? Object.keys(templateObj) : [];
-		const matchingTemplateKeys = templateKeys.filter(k => k in sampleRow);
+		const matchingTemplateKeys = templateKeys.filter(k => hasPropertyIncludingInherited(sampleRow, k));
 		const useTemplateKeys = templateKeys.length >= 2 && matchingTemplateKeys.length >= 2;
 
 		const normalizedRows = tableRows.map(row => {
-			if (!row || typeof row !== 'object') return row;
-			const outRow: Record<string, any> = {};
-			const keysToCopy = useTemplateKeys ? templateKeys : Object.keys(row).filter(k => !(k === 'id' && row.id === null));
+			if (!row || typeof row !== 'object') { return row; }
+			const rowRecord = row as Record<string, unknown>;
+			const outRow: Record<string, unknown> = {};
+			const keysToCopy = useTemplateKeys ? templateKeys : Object.keys(rowRecord).filter(k => !(k === 'id' && rowRecord.id === null));
 			for (const k of keysToCopy) {
-				const rawV = row[k];
+				const rawV = rowRecord[k];
 				if (arrayFields.has(k)) {
 					outRow[k] = this._parseJsonOrPythonListValue(rawV);
 				} else {
@@ -17467,7 +17577,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 	}
 
 	private _formatPromptDisplayPreview(fullText: string): string {
-		if (!fullText || fullText.length <= 8000) return fullText;
+		if (!fullText || fullText.length <= 8000) { return fullText; }
 		const trimmed = fullText.trim();
 		if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
 			try {
@@ -17504,7 +17614,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 
 		// Interpolate referenced primitives ({Field Label}, {{Field Label}}, or @FieldLabel)
 		const hydratedPromptCtx = await this._getHydratedWorkflowRuntimeContext();
-			const interpolatedPrompt = this._interpolateSchemaReferences(rawPrompt, field, allFields, hydratedPromptCtx);
+		const interpolatedPrompt = this._interpolateSchemaReferences(rawPrompt, field, allFields, hydratedPromptCtx);
 
 		statusEl.style.display = 'inline-block';
 		statusEl.textContent = 'Running...';
@@ -17549,7 +17659,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 					if (agentsMgr) {
 						const ag = await agentsMgr.getAgent(field.targetAgentId);
 						if (ag) {
-							if (ag.modelName) targetModel = ag.modelName;
+							if (ag.modelName) { targetModel = ag.modelName; }
 							systemPrompt = ag.systemPrompt || (ag.role ? `You are a helpful ${ag.role}.` : undefined);
 						}
 					}
@@ -17590,9 +17700,9 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				statusEl.textContent = `Failed (${elapsedSec}s)`;
 				statusEl.style.color = '#f87171';
 			}
-		} catch (err: any) {
+		} catch (err) {
 			const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
-			const errMsg = err?.message || String(err);
+			const errMsg = (err as Error | undefined)?.message || String(err);
 			outputEl.textContent = `[Prompt Test Failed]\n${errMsg}`;
 			statusEl.textContent = `Error (${elapsedSec}s)`;
 			statusEl.style.color = '#f87171';
@@ -17848,7 +17958,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 
 		// Section 4: Sanitized Machine-Readable Schema (JSON)
 		const sanitizedFields = fields.map(f => {
-			const clone: Record<string, any> = { ...f };
+			const clone: Record<string, unknown> = { ...f };
 			delete clone.debugPromptOutput;
 			delete clone.debugSqlOutput;
 			delete clone.pythonOutput;
@@ -17914,7 +18024,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				tipEl.remove();
 				tipEl = null;
 			}
-			document.querySelectorAll('.anyagent-instant-tooltip').forEach(el => el.remove());
+			removeAllInstantTooltips();
 		};
 		const showTooltip = () => {
 			hideTooltip();
@@ -17923,6 +18033,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 			if (!rawText) { return; }
 			tipEl = document.createElement('div');
 			tipEl.className = 'anyagent-instant-tooltip';
+			liveInstantTooltips.add(tipEl);
 			tipEl.style.cssText = `position: fixed; z-index: 100000; pointer-events: none; background: #141417; color: #f4f4f5; border: 1px solid ${accentColor}; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.65); padding: 5px 10px; border-radius: 6px; font-size: 11px; font-weight: 500; white-space: nowrap; line-height: 1.35; letter-spacing: 0.01em;`;
 
 			const colonIdx = rawText.indexOf(':');
@@ -17938,15 +18049,16 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				tipEl.textContent = rawText;
 			}
 
-			document.body.appendChild(tipEl);
+			const targetWindow = getWindow(targetEl);
+			targetWindow.document.body.appendChild(tipEl);
 			const rect = targetEl.getBoundingClientRect();
 			const tipRect = tipEl.getBoundingClientRect();
 			let left = rect.left + (rect.width / 2) - (tipRect.width / 2);
-			const maxLeft = window.innerWidth - tipRect.width - 10;
+			const maxLeft = targetWindow.innerWidth - tipRect.width - 10;
 			if (left > maxLeft) { left = maxLeft; }
 			if (left < 10) { left = 10; }
 			let top = rect.bottom + 7;
-			if (top + tipRect.height > window.innerHeight - 8) {
+			if (top + tipRect.height > targetWindow.innerHeight - 8) {
 				top = rect.top - tipRect.height - 7;
 			}
 			tipEl.style.left = `${Math.round(left)}px`;

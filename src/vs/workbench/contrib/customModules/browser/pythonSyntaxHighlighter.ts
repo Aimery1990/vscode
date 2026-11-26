@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 /**
@@ -161,7 +160,7 @@ export function renderHighlightedPythonToDOM(container: HTMLElement, code: strin
 	const isLiveBackdrop = Boolean(options.isLiveBackdrop);
 	if (isLiveBackdrop) {
 		container.style.userSelect = 'none';
-		(container.style as any).webkitUserSelect = 'none';
+		container.style.webkitUserSelect = 'none';
 		container.style.pointerEvents = 'none';
 	}
 	code = (code || '').replace(/\r\n?/g, '\n');

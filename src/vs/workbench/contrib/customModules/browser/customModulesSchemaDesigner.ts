@@ -1,15 +1,15 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { $, append, clearNode } from '../../../../base/browser/dom.js';
+import { mainWindow } from '../../../../base/browser/window.js';
 import { URI } from '../../../../base/common/uri.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
-import { ICustomModule, ICustomField, ICompositeComponent } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomModule, ICustomField, ICompositeComponent, CustomFieldType } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../common/customModules.js';
 
 export interface ISchemaDesignerOptions {
@@ -39,7 +39,7 @@ export class CustomModulesSchemaDesignerDialog {
 		const targetUri = options.workspaceUri;
 		const onUpdate = options.onUpdate || (() => { });
 
-		const mgOverlay = append(document.body, $('.manage-modules-overlay'));
+		const mgOverlay = append(mainWindow.document.body, $('.manage-modules-overlay'));
 		mgOverlay.style.position = 'fixed';
 		mgOverlay.style.top = '0';
 		mgOverlay.style.left = '0';
@@ -383,7 +383,7 @@ export class CustomModulesSchemaDesignerDialog {
 					{ type: 'http_request', label: 'HTTP Request (API / REST Client)', icon: Codicon.cloudUpload }
 				];
 
-				let currentDraggingItem: { source: 'palette' | 'canvas' | 'subcanvas'; type?: string; label?: string; isClass?: boolean; classId?: string; itemFields?: any[]; canvasIndex?: number; subIndex?: number } | null = null;
+				let currentDraggingItem: { source: 'palette' | 'canvas' | 'subcanvas'; type?: string; label?: string; isClass?: boolean; classId?: string; itemFields?: ICustomField[]; canvasIndex?: number; subIndex?: number } | null = null;
 
 				const refreshLeftPalette = async () => {
 					clearNode(leftColumn);
@@ -416,7 +416,7 @@ export class CustomModulesSchemaDesignerDialog {
 							const newF: ICustomField = {
 								id: fieldId,
 								label: ft.type === 'dynamic_list' ? 'New Dynamic List' : `New ${ft.type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`,
-								type: ft.type as any,
+								type: ft.type as CustomFieldType,
 								options: (ft.type === 'select' || ft.type === 'multiselect') ? ['Option 1', 'Option 2'] : undefined,
 								itemFields: ft.type === 'dynamic_list' ? [
 									{ id: `sub_${Date.now()}_1`, label: 'Item Name', type: 'text' },
@@ -500,7 +500,7 @@ export class CustomModulesSchemaDesignerDialog {
 							activeMod.fields.push({
 								id: `field_${Date.now()}`,
 								label: pType === 'dynamic_list' ? 'New Dynamic List' : `New ${pType.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`,
-								type: pType as any,
+								type: pType as CustomFieldType,
 								options: (pType === 'select' || pType === 'multiselect') ? ['Option 1', 'Option 2'] : undefined,
 								itemFields: pType === 'dynamic_list' ? [
 									{ id: `sub_${Date.now()}_1`, label: 'Item Name', type: 'text' },
@@ -572,7 +572,7 @@ export class CustomModulesSchemaDesignerDialog {
 									} : {
 										id: `field_${Date.now()}`,
 										label: currentDraggingItem.type === 'dynamic_list' ? 'New Dynamic List' : `New ${currentDraggingItem.type!.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())}`,
-										type: currentDraggingItem.type as any,
+										type: currentDraggingItem.type as CustomFieldType,
 										options: (currentDraggingItem.type === 'select' || currentDraggingItem.type === 'multiselect') ? ['Option 1', 'Option 2'] : undefined,
 										itemFields: currentDraggingItem.type === 'dynamic_list' ? [
 											{ id: `sub_${Date.now()}_1`, label: 'Item Name', type: 'text' },

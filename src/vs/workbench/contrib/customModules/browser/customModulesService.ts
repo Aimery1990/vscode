@@ -1,6 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) 2026 Urbay Inc. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import { Emitter, Event } from '../../../../base/common/event.js';
@@ -28,7 +27,7 @@ import { ICustomModulesService } from '../common/customModules.js';
 import { CustomModuleSchemaEditorInput } from './customModuleSchemaEditorInput.js';
 import { EntityDetailEditorInput } from '../../workspacesExplorer/browser/entityDetailEditorInput.js';
 
-function formatYamlScalar(val: any): any {
+function formatYamlScalar(val: unknown): unknown {
 	if (typeof val !== 'string') {
 		return val;
 	}
@@ -46,10 +45,10 @@ function formatYamlScalar(val: any): any {
 	return val;
 }
 
-export function stringifyYaml(obj: any, indent = 0): string {
+export function stringifyYaml(obj: unknown, indent = 0): string {
 	const spacing = ' '.repeat(indent);
 	if (Array.isArray(obj)) {
-		if (obj.length === 0) return ' []';
+		if (obj.length === 0) { return ' []'; }
 		let res = '';
 		for (const item of obj) {
 			if (typeof item === 'object' && item !== null) {
@@ -81,7 +80,7 @@ export function stringifyYaml(obj: any, indent = 0): string {
 		return res;
 	} else if (typeof obj === 'object' && obj !== null) {
 		const entries = Object.entries(obj).filter(([_, v]) => v !== undefined);
-		if (entries.length === 0) return ' {}';
+		if (entries.length === 0) { return ' {}'; }
 		let res = '';
 		for (const [k, v] of entries) {
 			if (typeof v === 'object' && v !== null) {
@@ -97,14 +96,17 @@ export function stringifyYaml(obj: any, indent = 0): string {
 	return String(obj);
 }
 
-export function parseYaml(yaml: string): any {
+/** A value produced by {@link parseYaml}. */
+export type YamlValue = string | number | boolean | null | YamlValue[] | { [key: string]: YamlValue };
+
+export function parseYaml(yaml: string): unknown {
 	const lines = yaml.split(/\r?\n/);
 	let i = 0;
 
-	function parseBlock(currentIndent: number): any {
+	function parseBlock(currentIndent: number): YamlValue {
 		let isArray = false;
-		const arrayResult: any[] = [];
-		const objectResult: any = {};
+		const arrayResult: YamlValue[] = [];
+		const objectResult: { [key: string]: YamlValue } = {};
 
 		while (i < lines.length) {
 			const line = lines[i];
@@ -126,16 +128,16 @@ export function parseYaml(yaml: string): any {
 					i++;
 					const child = parseBlock(indent + 2);
 					arrayResult.push(child);
-				} else if (!content.startsWith('"') && !content.startsWith("'") && content.includes(':')) {
+				} else if (!content.startsWith('"') && !content.startsWith('\'') && content.includes(':')) {
 					const colonIdx = content.indexOf(':');
 					const k = content.substring(0, colonIdx).trim();
-					let v: any = content.substring(colonIdx + 1).trim();
+					let v: YamlValue = content.substring(colonIdx + 1).trim();
 					if (!v) {
 						i++;
 						let nextNonEmptyIndent = -1;
 						for (let kIdx = i; kIdx < lines.length; kIdx++) {
 							const kl = lines[kIdx].trim();
-							if (!kl || kl.startsWith('#')) continue;
+							if (!kl || kl.startsWith('#')) { continue; }
 							nextNonEmptyIndent = lines[kIdx].search(/\S/);
 							break;
 						}
@@ -144,7 +146,7 @@ export function parseYaml(yaml: string): any {
 						v = parseValue(v);
 						i++;
 					}
-					const itemObj: any = { [k]: v };
+					const itemObj: { [key: string]: YamlValue } = { [k]: v };
 					while (i < lines.length) {
 						const nextLine = lines[i];
 						const nextTrimmed = nextLine.trim();
@@ -162,13 +164,13 @@ export function parseYaml(yaml: string): any {
 						const nColon = nextTrimmed.indexOf(':');
 						if (nColon !== -1) {
 							const nk = nextTrimmed.substring(0, nColon).trim();
-							let nv: any = nextTrimmed.substring(nColon + 1).trim();
+							let nv: YamlValue = nextTrimmed.substring(nColon + 1).trim();
 							if (!nv) {
 								i++;
 								let nextSubIndent = -1;
 								for (let kIdx = i; kIdx < lines.length; kIdx++) {
 									const kl = lines[kIdx].trim();
-									if (!kl || kl.startsWith('#')) continue;
+									if (!kl || kl.startsWith('#')) { continue; }
 									nextSubIndent = lines[kIdx].search(/\S/);
 									break;
 								}
@@ -194,13 +196,13 @@ export function parseYaml(yaml: string): any {
 					continue;
 				}
 				const key = trimmed.substring(0, colonIdx).trim();
-				let val: any = trimmed.substring(colonIdx + 1).trim();
+				let val: YamlValue = trimmed.substring(colonIdx + 1).trim();
 				if (!val) {
 					i++;
 					let nextTopIndent = -1;
 					for (let kIdx = i; kIdx < lines.length; kIdx++) {
 						const kl = lines[kIdx].trim();
-						if (!kl || kl.startsWith('#')) continue;
+						if (!kl || kl.startsWith('#')) { continue; }
 						nextTopIndent = lines[kIdx].search(/\S/);
 						break;
 					}
@@ -216,14 +218,14 @@ export function parseYaml(yaml: string): any {
 		return isArray ? arrayResult : objectResult;
 	}
 
-	function parseValue(val: string): any {
-		if (val === 'true') return true;
-		if (val === 'false') return false;
-		if (val === 'null' || val === '~') return null;
-		if (val === '[]') return [];
-		if (val === '{}') return {};
-		if (!isNaN(Number(val)) && val.trim() !== '') return Number(val);
-		if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+	function parseValue(val: string): YamlValue {
+		if (val === 'true') { return true; }
+		if (val === 'false') { return false; }
+		if (val === 'null' || val === '~') { return null; }
+		if (val === '[]') { return []; }
+		if (val === '{}') { return {}; }
+		if (!isNaN(Number(val)) && val.trim() !== '') { return Number(val); }
+		if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith('\'') && val.endsWith('\''))) {
 			try { return JSON.parse(val); } catch { return val.slice(1, -1); }
 		}
 		return val;
@@ -234,6 +236,20 @@ export function parseYaml(yaml: string): any {
 	} catch {
 		return {};
 	}
+}
+
+/** Plain JSON-like record used when sanitizing data before it is written to YAML. */
+interface IPersistedRecord {
+	[key: string]: unknown;
+}
+
+/** Editor panes (e.g. the entity detail editor) that can live-refresh a previewed module. */
+interface IPreviewModuleRefreshable {
+	refreshPreviewModule(mod: ICustomModule): Promise<void>;
+}
+
+function isPreviewModuleRefreshable(pane: unknown): pane is IPreviewModuleRefreshable {
+	return !!pane && typeof (pane as Partial<IPreviewModuleRefreshable>).refreshPreviewModule === 'function';
 }
 
 export class CustomModulesService extends Disposable implements ICustomModulesService {
@@ -318,7 +334,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 		while (curr.path && curr.path !== '/') {
 			parts.push(curr);
 			const parent = dirname(curr);
-			if (parent.path === curr.path) break;
+			if (parent.path === curr.path) { break; }
 			curr = parent;
 		}
 		parts.reverse();
@@ -333,17 +349,21 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 		}
 	}
 
-	private async _readYamlFile(uri: URI): Promise<any> {
+	/**
+	 * Reads and parses a YAML file. The parsed content is untrusted: callers must validate
+	 * the shape (e.g. `mod && mod.id`) before relying on it.
+	 */
+	private async _readYamlFile<T>(uri: URI): Promise<T | null> {
 		try {
 			const content = await this.fileService.readFile(uri);
-			return normalizeLegacyFieldTypes(parseYaml(content.value.toString()));
+			return normalizeLegacyFieldTypes(parseYaml(content.value.toString())) as T | null;
 		} catch (e) {
 			console.error(`Error reading YAML from ${uri.toString()}:`, e);
 			return null;
 		}
 	}
 
-	private async _writeYamlFile(uri: URI, data: any): Promise<void> {
+	private async _writeYamlFile(uri: URI, data: unknown): Promise<void> {
 		try {
 			const parentDir = dirname(uri);
 			await this._ensureDirExists(parentDir);
@@ -384,14 +404,15 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 		}
 	}
 
-	private _sanitizeModuleForPersistence(mod: any): any {
+	private _sanitizeModuleForPersistence(mod: ICustomModule): IPersistedRecord {
 		if (!mod || typeof mod !== 'object') {
 			return mod;
 		}
-		const clone = JSON.parse(JSON.stringify(mod));
+		const clone: IPersistedRecord = JSON.parse(JSON.stringify(mod));
 		if (Array.isArray(clone.fields)) {
-			clone.fields = clone.fields.filter((f: any) => f && typeof f === 'object' && !Array.isArray(f));
-			for (const f of clone.fields) {
+			const fields = clone.fields.filter((f: unknown): f is IPersistedRecord => !!f && typeof f === 'object' && !Array.isArray(f));
+			clone.fields = fields;
+			for (const f of fields) {
 				delete f.lastSentPrompt;
 				delete f.lastExecutionLog;
 				delete f.lastExecutionOutput;
@@ -414,7 +435,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 		return clone;
 	}
 
-	private _stripModuleTransientMeta(mod: any): any {
+	private _stripModuleTransientMeta(mod: ICustomModule): IPersistedRecord {
 		if (!mod || typeof mod !== 'object') {
 			return mod;
 		}
@@ -438,7 +459,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 					for (const child of sortedChildren) {
 						if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
 							try {
-								const mod = await this._readYamlFile(child.resource);
+								const mod = await this._readYamlFile<ICustomModule>(child.resource);
 								if (mod && mod.id) {
 									if (typeof mod.description !== 'string') {
 										mod.description = '';
@@ -482,7 +503,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 							for (const child of sortedChildren) {
 								if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
 									try {
-										const mod = await this._readYamlFile(child.resource);
+										const mod = await this._readYamlFile<ICustomModule>(child.resource);
 										if (mod && mod.id) {
 											if (!modulesMap.has(mod.id.toLowerCase())) {
 												if (typeof mod.description !== 'string') {
@@ -574,7 +595,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 						}
 					}
 				}
-			} catch {}
+			} catch { }
 
 			if (targetUri) {
 				const localDir = URI.joinPath(targetUri, '.agents', 'entity_type');
@@ -591,7 +612,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 							}
 						}
 					}
-				} catch {}
+				} catch { }
 			}
 
 			for (const m of modules) {
@@ -607,9 +628,9 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 					? URI.joinPath(targetUri, '.agents', 'entity_type', filename)
 					: URI.joinPath(globalDir, filename);
 
-				let existingMod: any = null;
+				let existingMod: ICustomModule | null = null;
 				if (await this.fileService.exists(primaryFile)) {
-					existingMod = await this._readYamlFile(primaryFile);
+					existingMod = await this._readYamlFile<ICustomModule>(primaryFile);
 				}
 
 				const isContentChanged = !existingMod ||
@@ -648,7 +669,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 								URI.joinPath(dirname(ws.uri), '.agents', 'entity_type', filename)
 							);
 						}
-					} catch {}
+					} catch { }
 					const visitedPaths = new Set<string>();
 					for (const candidateFile of localCandidateFiles) {
 						const key = candidateFile.toString();
@@ -660,7 +681,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 							if (await this.fileService.exists(candidateFile)) {
 								await this._writeYamlFile(candidateFile, { ...fileData, storageScope: 'global' });
 							}
-						} catch {}
+						} catch { }
 					}
 				} else if (targetUri) {
 					const localFile = URI.joinPath(targetUri, '.agents', 'entity_type', filename);
@@ -701,7 +722,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 					URI.joinPath(ws.uri, '.agents', 'entity_types')
 				);
 			}
-		} catch {}
+		} catch { }
 
 		for (const dir of candidateDirs) {
 			try {
@@ -718,7 +739,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 						}
 					}
 				}
-			} catch {}
+			} catch { }
 		}
 
 		this._onDidChangeModules.fire();
@@ -747,7 +768,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 
 	async addCategory(category: string): Promise<void> {
 		const trimmed = (category || '').trim();
-		if (!trimmed) return;
+		if (!trimmed) { return; }
 		const categories = await this.getCategories();
 		if (!categories.includes(trimmed)) {
 			categories.push(trimmed);
@@ -758,7 +779,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 
 	async deleteCategory(category: string): Promise<void> {
 		const trimmed = (category || '').trim();
-		if (!trimmed) return;
+		if (!trimmed) { return; }
 		let categories = await this.getCategories();
 		categories = categories.filter(c => c !== trimmed);
 		this.storageService.store('customModules.categories', JSON.stringify(categories), StorageScope.PROFILE, StorageTarget.USER);
@@ -781,7 +802,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 	async renameCategory(oldName: string, newName: string): Promise<void> {
 		const o = (oldName || '').trim();
 		const n = (newName || '').trim();
-		if (!o || !n || o === n) return;
+		if (!o || !n || o === n) { return; }
 
 		let categories = await this.getCategories();
 		categories = categories.map(c => c === o ? n : c);
@@ -829,7 +850,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 				if (stat.children) {
 					for (const child of stat.children) {
 						if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
-							const comp = await this._readYamlFile(child.resource);
+							const comp = await this._readYamlFile<ICompositeComponent>(child.resource);
 							if (comp && comp.id) {
 								comp.storageScope = 'global';
 								componentsMap.set(comp.id, comp);
@@ -855,9 +876,9 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 						if (stat.children) {
 							for (const child of stat.children) {
 								if (!child.isDirectory && (child.name.endsWith('.yaml') || child.name.endsWith('.yml'))) {
-									const comp = await this._readYamlFile(child.resource);
+									const comp = await this._readYamlFile<ICompositeComponent>(child.resource);
 									if (comp && comp.id) {
-										if (!comp.storageScope) comp.storageScope = 'workspace';
+										if (!comp.storageScope) { comp.storageScope = 'workspace'; }
 										componentsMap.set(comp.id, comp);
 									}
 								}
@@ -1019,8 +1040,8 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 		if (existingInput) {
 			existingInput.updatePreviewModule(clonedMod);
 			const pane = await this.editorService.openEditor(existingInput, { pinned: true });
-			if (pane && typeof (pane as any).refreshPreviewModule === 'function') {
-				await (pane as any).refreshPreviewModule(clonedMod);
+			if (isPreviewModuleRefreshable(pane)) {
+				await pane.refreshPreviewModule(clonedMod);
 			}
 			return;
 		}
