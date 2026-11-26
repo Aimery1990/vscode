@@ -129,7 +129,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'media_player',
 		label: 'MP3 / MP4 Player',
-		description: 'Local HTML5 Audio & Video player supporting MP3, MP4, WAV, M4A, AAC, OGG, FLAC, WebM, MOV, etc. with drag-and-drop file import and 0.25x-2.0x playback speed control.',
+		description: 'Local HTML5 Audio & Video player supporting MP3, MP4, WAV, M4A, AAC, OGG, FLAC, WebM, MOV, etc. with drag-and-drop file import and 0.25x-2.0x playback speed control. Optional subtitles + dictation (mediaSubtitlesEnabled: true): extracts timed subtitles with a voice model (mediaSubtitleProvider openai|aliyun|gemini|custom or empty for the active voice model, mediaSubtitleModel e.g. whisper-1 / qwen3-asr-flash-us / gemini-2.5-flash, mediaSubtitleLanguage hint), limits mediaMaxUploadMb (default 200) and mediaMaxDurationMin (0 = none), mediaSubtitleDisplayMode single|scroll|dictation, mediaDictationUnit segment|seconds with mediaDictationSeconds (>= 1), mediaDictationAutoPause.',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: {
@@ -493,7 +493,7 @@ const COMPONENT_CONFIG_PROPS: Readonly<Record<string, Readonly<Record<string, Co
 	ssh: { sshHost: 'string', sshPort: 'number', sshUser: 'string', sshPassword: 'string', sshCwd: 'string', sshCommands: 'stringArray', sshOutputLines: 'number' },
 	browser: { defaultUrl: 'string', browserMaxRetries: 'number', browserRetryDelayMs: 'number' },
 	tts: { defaultContent: 'string', ttsVoice: 'string', ttsFormat: 'string', targetProvider: 'string', targetModel: 'string', targetCredentialId: 'string', ttsAutoPlay: 'boolean', ttsPlaybackRate: 'number' },
-	media_player: { mediaFilePath: 'string', mediaPlaybackRate: 'number', mediaAutoPlay: 'boolean' },
+	media_player: { mediaFilePath: 'string', mediaPlaybackRate: 'number', mediaAutoPlay: 'boolean', mediaSubtitlesEnabled: 'boolean', mediaSubtitleProvider: 'string', mediaSubtitleModel: 'string', mediaSubtitleLanguage: 'string', mediaMaxUploadMb: 'number', mediaMaxDurationMin: 'number', mediaSubtitleDisplayMode: 'string', mediaDictationUnit: 'string', mediaDictationSeconds: 'number', mediaDictationAutoPause: 'boolean' },
 	voice_note: { voiceRunInFlow: 'boolean', voiceAutoTranscribe: 'boolean' },
 	table: { tableSqlQuery: 'string' },
 	git: { gitRemoteUrl: 'string', gitBranch: 'string' },

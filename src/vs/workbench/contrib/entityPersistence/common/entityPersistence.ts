@@ -683,6 +683,17 @@ export interface ICustomField {
 	mediaMimeType?: string;
 	mediaPlaybackRate?: number;
 	mediaAutoPlay?: boolean;
+	/** MP3 / MP4 Player subtitles + dictation (CI-45, opt-in). See `voiceModels/common/subtitleConfig.ts`. */
+	mediaSubtitlesEnabled?: boolean;
+	mediaSubtitleProvider?: string;
+	mediaSubtitleModel?: string;
+	mediaSubtitleLanguage?: string;
+	mediaMaxUploadMb?: number;
+	mediaMaxDurationMin?: number;
+	mediaSubtitleDisplayMode?: 'single' | 'scroll' | 'dictation';
+	mediaDictationUnit?: 'segment' | 'seconds';
+	mediaDictationSeconds?: number;
+	mediaDictationAutoPause?: boolean;
 	voiceClips?: IVoiceNoteClip[];
 	voiceTranscript?: string;
 	voiceAutoTranscribe?: boolean;

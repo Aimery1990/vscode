@@ -40,6 +40,7 @@ import { showPrimitiveHelpModal } from './primitiveHelpGuide.js';
 import { ITicketWorkflowRuntimeService, findUnresolvedTemplateVariables } from '../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeybinding, togglePythonComment } from './pythonSyntaxHighlighter.js';
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
+import { renderMediaSubtitleSettings } from './mediaSubtitleSettings.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { CodeWindow } from '../../../../base/browser/window.js';
 import { isReservedFreestyleTemplate } from '../common/freestyleTicket.js';
@@ -8431,6 +8432,15 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					if (field.mediaFilePath) {
 						loadFromLocalPath(field.mediaFilePath, field.mediaFileName, false).catch(() => { });
 					}
+
+					// Subtitles + dictation settings (CI-45, opt-in)
+					const subtitleVoiceModels = this._instantiationService.invokeFunction(accessor => {
+						try { return accessor.get(IVoiceModelService); } catch { return undefined; }
+					});
+					this._register(renderMediaSubtitleSettings(mediaBox, field, subtitleVoiceModels, () => {
+						this._syncDraft();
+						this._persistCurrentModule().catch(() => { });
+					}));
 				}
 
 				if (field.type === 'output') {
@@ -17638,6 +17648,9 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 				lines.push(`- **Media File Path**: \`${f.mediaFilePath || '(none)'}\``);
 				lines.push(`- **Media Type**: \`${f.mediaKind || 'audio'}\``);
 				lines.push(`- **Playback Speed**: \`${f.mediaPlaybackRate || 1.0}x\``);
+				if (f.mediaSubtitlesEnabled) {
+					lines.push(`- **Subtitles**: enabled (\`${f.mediaSubtitleProvider || 'active voice model'}\`${f.mediaSubtitleModel ? ` / \`${f.mediaSubtitleModel}\`` : ''}, display \`${f.mediaSubtitleDisplayMode || 'single'}\`, dictation unit \`${f.mediaDictationUnit === 'seconds' ? `${f.mediaDictationSeconds || 5}s` : 'sentence'}\`)`);
+				}
 			} else if (f.type === 'voice_note') {
 				const clips = Array.isArray(f.voiceClips) ? f.voiceClips : [];
 				lines.push(`- **Recorded Voice Clips**: \`${clips.length}\``);

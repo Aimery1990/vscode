@@ -176,6 +176,15 @@ export function createComponentField(item: IComponentPaletteItem, fields: readon
 			field.mediaKind = 'audio';
 			field.mediaPlaybackRate = 1.0;
 			field.mediaAutoPlay = false;
+			// Subtitles + dictation (CI-45) are opt-in; these are the defaults once enabled.
+			field.mediaSubtitlesEnabled = false;
+			field.mediaSubtitleProvider = '';
+			field.mediaSubtitleModel = '';
+			field.mediaMaxUploadMb = 200;
+			field.mediaSubtitleDisplayMode = 'single';
+			field.mediaDictationUnit = 'segment';
+			field.mediaDictationSeconds = 5;
+			field.mediaDictationAutoPause = true;
 			break;
 		case 'voice_note':
 			field.voiceClips = [];
