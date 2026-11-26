@@ -8633,6 +8633,27 @@ Node Component Palette & Configuration Modal
 	padding-left: 0;
 }
 
+/*
+ * UI-07: each outline list (menu level, Sub-Workflow library) holds its rows in one content element that the mouse wheel
+ * can translate past the native scroll range, so rows hidden by a lower editor group can be pulled into view.
+ */
+.wf-outline-list-content {
+	display: flex;
+	flex-direction: column;
+	flex-shrink: 0;
+	gap: inherit;
+}
+
+.wf-outline-list-content.is-overscroll-resetting {
+	transition: transform 0.18s ease;
+}
+
+/* Content pulled down past the native start: the translate must not create a native scroll range / scrollbar */
+.wf-outline-column.is-overscrolled-down,
+.wf-subworkflow-list.is-overscrolled-down {
+	overflow-y: hidden;
+}
+
 /* Vertical rule between a menu level and the next one */
 .wf-outline-column + .wf-outline-column {
 	border-left: 1px solid rgba(148, 163, 184, 0.35);

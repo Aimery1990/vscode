@@ -21,6 +21,7 @@ import { IStorageService, StorageScope, StorageTarget } from '../../../../platfo
 import { GroupDirection, IEditorGroup, IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { WorkflowEditorInput } from './workflowEditorInput.js';
 import { openSubWorkflowLiveView, SubWorkflowCanvasEditorInput } from './subWorkflowLiveView.js';
+import { isOutlineBlankClickTarget, OutlineListOverscroll } from './outlineListOverscroll.js';
 import { URI } from '../../../../base/common/uri.js';
 import { VSBuffer } from '../../../../base/common/buffer.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
@@ -747,6 +748,10 @@ export class WorkflowEditor extends EditorPane {
 	private _outlineFlowGroupIds: number[] = [];
 	private _outlineScroll: { left: number; tops: number[] } = { left: 0, tops: [] };
 	private _outlineLastRenderedPath = '';
+	/** UI-07: lists of the rendered outline that the wheel can pull past their native range, and their forced offsets by list key. */
+	private readonly _outlineOverscrollDisposables = this._register(new DisposableStore());
+	private _outlineOverscrollLists: OutlineListOverscroll[] = [];
+	private _outlineOverscrollExtras = new Map<string, number>();
 	/** Lightbulbs currently rendered in the outline / library, refreshed in place when editors open or close (no full re-render). */
 	private _outlineBulbRefreshers: (() => void)[] = [];
 	private _outlineRerenderScheduled = false;
@@ -1223,7 +1228,10 @@ export class WorkflowEditor extends EditorPane {
 	}
 
 	override layout(dimension: { width: number; height: number }): void {
-		// Native layout override
+		// Native layout override. A resized editor (e.g. a moved split) changes the outline's visible area: re-clamp its lists.
+		for (const list of this._outlineOverscrollLists) {
+			list.clamp();
+		}
 	}
 
 	private static readonly _viewportStateByUri = new Map<string, { scrollLeft: number; scrollTop: number; zoomLevel: number }>();
@@ -10246,6 +10254,8 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 		clearNode(this._subWorkflowWidgetEl);
+		this._outlineOverscrollDisposables.clear();
+		this._outlineOverscrollLists = [];
 		const curUri = this._workflowUri?.toString() || '';
 		const allSubs = curUri
 			? this._workflowExecutionService.getSubWorkflows().filter(sw => sw.sourceWorkflowUri === curUri)
@@ -10280,6 +10290,12 @@ export class WorkflowEditor extends EditorPane {
 		panel.onmousedown = (e) => e.stopPropagation();
 		panel.onclick = (e) => e.stopPropagation();
 		panel.onwheel = (e) => e.stopPropagation(); // scroll the menu, not the canvas
+		// Clicking a blank area of the panel puts every list pulled past its native range back in place
+		this._outlineOverscrollDisposables.add(addDisposableListener(panel, 'click', (e: MouseEvent) => {
+			if (isOutlineBlankClickTarget(e.target, panel)) {
+				this._resetOutlineOverscroll();
+			}
+		}));
 
 		const header = append(panel, $('.wf-outline-header'));
 		append(header, $('span' + ThemeIcon.asCSSSelector(Codicon.layers)));
@@ -10351,11 +10367,13 @@ export class WorkflowEditor extends EditorPane {
 		};
 		if (this._outlineLibraryOpen) {
 			const listEl = append(panel, $('.wf-subworkflow-list.is-compact'));
+			const listContentEl = append(listEl, $('.wf-outline-list-content'));
 			if (allSubs.length === 0) {
-				append(listEl, $('.wf-subworkflow-empty', {}, 'No Sub-Workflows in this workflow yet. Select nodes on canvas and encapsulate them here.'));
+				append(listContentEl, $('.wf-subworkflow-empty', {}, 'No Sub-Workflows in this workflow yet. Select nodes on canvas and encapsulate them here.'));
 			} else {
-				this._renderSubWorkflowLibraryItems(listEl, allSubs, curUri);
+				this._renderSubWorkflowLibraryItems(listContentEl, allSubs, curUri);
 			}
+			this._addOutlineOverscroll('library', listEl, listContentEl);
 		}
 
 		this._renderWorkflowOutline(panel);
@@ -10458,6 +10476,10 @@ export class WorkflowEditor extends EditorPane {
 		columns.forEach((column, level) => {
 			const colEl = append(columnsEl, $('.wf-outline-column'));
 			columnEls.push(colEl);
+			// Rows go into one content element, translated when the wheel pulls the level past its native range (UI-07).
+			// The key includes the expanded path above this level: another branch starts without a forced offset.
+			const listEl = append(colEl, $('.wf-outline-list-content'));
+			this._addOutlineOverscroll(`col:${level}:${validPath.slice(0, level).join('\u0000')}`, colEl, listEl);
 			colEl.onscroll = () => {
 				if (colEl.isConnected) {
 					this._outlineScroll.tops[level] = colEl.scrollTop;
@@ -10465,19 +10487,19 @@ export class WorkflowEditor extends EditorPane {
 			};
 			this._outlineRenderedColumns[level] = column.items;
 			if (column.state === 'loading') {
-				append(colEl, $('.wf-outline-empty', {}, 'Loading…'));
+				append(listEl, $('.wf-outline-empty', {}, 'Loading…'));
 				return;
 			}
 			if (column.state === 'error') {
-				append(colEl, $('.wf-outline-empty', {}, 'Could not load the ticket template.'));
+				append(listEl, $('.wf-outline-empty', {}, 'Could not load the ticket template.'));
 				return;
 			}
 			if (column.state === 'empty' || column.items.length === 0) {
-				append(colEl, $('.wf-outline-empty', {}, level === 0 ? 'No nodes on this canvas yet.' : 'Nothing inside.'));
+				append(listEl, $('.wf-outline-empty', {}, level === 0 ? 'No nodes on this canvas yet.' : 'Nothing inside.'));
 				return;
 			}
 			for (const item of column.items) {
-				this._renderOutlineItem(colEl, item, level, columnsEl, outlineRows);
+				this._renderOutlineItem(listEl, item, level, columnsEl, outlineRows);
 			}
 		});
 
@@ -10494,12 +10516,36 @@ export class WorkflowEditor extends EditorPane {
 			columnsEl.scrollLeft = pathKey !== this._outlineLastRenderedPath ? columnsEl.scrollWidth : this._outlineScroll.left;
 			this._outlineLastRenderedPath = pathKey;
 			this._outlineScroll.left = columnsEl.scrollLeft;
+			// Forced offsets stay where the user left them, re-clamped to the new limits (rows expanded / collapsed)
+			const previousExtras = this._outlineOverscrollExtras;
+			this._outlineOverscrollExtras = new Map();
+			for (const list of this._outlineOverscrollLists) {
+				list.restore(previousExtras.get(list.key) ?? 0);
+			}
 		};
 		if (columnsEl.isConnected) {
 			restoreScroll();
 		} else {
 			setTimeout(restoreScroll, 0);
 		}
+	}
+
+	private _addOutlineOverscroll(key: string, scrollEl: HTMLElement, contentEl: HTMLElement): void {
+		const list = this._outlineOverscrollDisposables.add(new OutlineListOverscroll(key, scrollEl, contentEl, (k, extra) => {
+			if (extra !== 0) {
+				this._outlineOverscrollExtras.set(k, extra);
+			} else {
+				this._outlineOverscrollExtras.delete(k);
+			}
+		}));
+		this._outlineOverscrollLists.push(list);
+	}
+
+	private _resetOutlineOverscroll(): void {
+		for (const list of this._outlineOverscrollLists) {
+			list.reset();
+		}
+		this._outlineOverscrollExtras.clear();
 	}
 
 	/**
