@@ -12,6 +12,7 @@ import { IAgentsManagerService } from '../../../agentsManager/common/agentsManag
 import { IInstantiationService } from '../../../../../platform/instantiation/common/instantiation.js';
 import { ISqliteTableOperationResult, ITicketWorkflowRuntimeService } from '../../../workflowsManager/browser/ticketWorkflowRuntime.js';
 import { findTemplateField, getTemplateFields, parseTemplateYaml } from '../../../customModules/common/templateYaml.js';
+import { isFreestyleTicketType, readFreestyleSchema } from '../../../customModules/common/freestyleTicket.js';
 import { escapeRegExpCharacters } from '../../../../../base/common/strings.js';
 import { hasKey } from '../../../../../base/common/types.js';
 import { TicketWorklogStorage } from '../ticketWorklogStorage.js';
@@ -1195,8 +1196,14 @@ export class TicketDataEngine {
 	/**
 	 * 4. anyagent_update_ticket
 	 */
-	/** Reads the ticket's template (type) YAML: ticket folder, then workspace, then the global template folder. */
+	/**
+	 * Reads the ticket's template (type) YAML: ticket folder, then workspace, then the global template folder.
+	 * A Freestyle ticket has no template: its own structure (`.agents/freestyle_schema.json`) is returned instead.
+	 */
 	private async _readTicketSchema(folderUri: URI, wsUri: URI | undefined, ticketType: string): Promise<object | null> {
+		if (isFreestyleTicketType(ticketType)) {
+			return await readFreestyleSchema(this.fileService, folderUri) ?? null;
+		}
 		const typeYamlCandidates = [
 			URI.joinPath(folderUri, '.agents', 'entity_type', `${ticketType}.yaml`),
 			...(wsUri ? [URI.joinPath(wsUri, '.agents', 'entity_type', `${ticketType}.yaml`)] : []),

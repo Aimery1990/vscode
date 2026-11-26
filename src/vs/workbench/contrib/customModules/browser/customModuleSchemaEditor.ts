@@ -42,6 +42,7 @@ import { renderHighlightedPythonToDOM, buildPythonLineNumbersText, isCommentKeyb
 import { IVoiceModelService } from '../../voiceModels/common/voiceModel.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
 import { CodeWindow } from '../../../../base/browser/window.js';
+import { createDefaultFreestyleSchema, readFreestyleSchema, writeFreestyleSchema } from '../common/freestyleTicket.js';
 
 
 /**
@@ -171,7 +172,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			if (this._isSelfPersisting || !this._activeModule || !this._container) {
 				return;
 			}
-			if (this.input instanceof CustomModuleSchemaEditorInput && this.input.isFlowchartNodeMode) {
+			if (this.input instanceof CustomModuleSchemaEditorInput && (this.input.isFlowchartNodeMode || this.input.freestyleTicketUri)) {
 				return;
 			}
 			try {
@@ -461,6 +462,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		if (this.input instanceof CustomModuleSchemaEditorInput && this.input.isFlowchartNodeMode) {
 			return;
 		}
+		const freestyleTicketUri = this.input instanceof CustomModuleSchemaEditorInput ? this.input.freestyleTicketUri : undefined;
+		if (freestyleTicketUri) {
+			// A Freestyle ticket's structure is saved into that ticket's folder only (never as a template)
+			try {
+				const fileService = this._instantiationService.invokeFunction(accessor => accessor.get(IFileService));
+				await writeFreestyleSchema(fileService, freestyleTicketUri, this._activeModule);
+			} catch (e) {
+				this.notificationService.error(`Failed to save the ticket structure: ${e}`);
+			}
+			return;
+		}
 		const wsUri = this._workspaceUri || (this.input instanceof CustomModuleSchemaEditorInput ? this.input.workspaceUri : undefined);
 		try {
 			this._isSelfPersisting = true;
@@ -548,9 +560,14 @@ export class CustomModuleSchemaEditor extends EditorPane {
 			return;
 		}
 		const isFlowchartNodeMode = Boolean(input.isFlowchartNodeMode);
+		const isFreestyleTicketMode = Boolean(input.freestyleTicketUri);
 		this._saveCurrentScrollPosition();
 		this._workspaceUri = input.workspaceUri;
 		const allWorkspaceModules = await this.customModulesService.getCustomModules(input.workspaceUri);
+		if (input.freestyleTicketUri && !input.draftModule) {
+			const fileService = this._instantiationService.invokeFunction(accessor => accessor.get(IFileService));
+			input.draftModule = await readFreestyleSchema(fileService, input.freestyleTicketUri) ?? createDefaultFreestyleSchema();
+		}
 		if (seq !== this._renderSeq || !this._container) {
 			return;
 		}
@@ -736,7 +753,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		const headerModuleIconEl = append(titleEl, $('span' + ThemeIcon.asCSSSelector(resolveCustomModuleIcon(activeMod.icon, activeMod.id)), {
 			style: `font-size: 18px; color: ${activeMod.color || '#38bdf8'};`
 		}));
-		append(titleEl, $('span', {}, isFlowchartNodeMode ? `Flowchart Node: ${activeMod.name}` : `Edit Module Schema: ${activeMod.name}`));
+		append(titleEl, $('span', {}, isFreestyleTicketMode
+			? `Ticket Structure: ${input.moduleName}`
+			: isFlowchartNodeMode ? `Flowchart Node: ${activeMod.name}` : `Edit Module Schema: ${activeMod.name}`));
 
 		// Header Right Actions (Status Pill + Compact Icon Buttons: Preview, Copy Template, Toggle Status, Delete)
 		const headerActions = append(header, $('.schema-editor-header-actions', {
@@ -800,9 +819,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 		// Top Configuration Card (Scope, Type Definition, Color, Status)
 		const configCard = append(wrapper, $('.config-meta-container', {
-			style: `display: ${isFlowchartNodeMode ? 'none' : 'flex'}; flex-direction: column; gap: 8px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); padding: 10px 14px; border-radius: 8px; flex-shrink: 0;`
+			style: `display: ${isFlowchartNodeMode || isFreestyleTicketMode ? 'none' : 'flex'}; flex-direction: column; gap: 8px; background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.08); padding: 10px 14px; border-radius: 8px; flex-shrink: 0;`
 		}));
-		if (isFlowchartNodeMode) {
+		if (isFlowchartNodeMode || isFreestyleTicketMode) {
 			statusBadge.style.display = 'none';
 			previewHeaderBtn.style.display = 'none';
 			toggleStatusBtn.style.display = 'none';
@@ -16594,8 +16613,9 @@ export class CustomModuleSchemaEditor extends EditorPane {
 		const saveBtn = append(footerRight, $('button.monaco-button', {
 			style: 'padding: 6px 20px; font-size: 12px; border-radius: 6px; cursor: pointer; background: #007acc; color: #ffffff; border: none; font-weight: 600;'
 		}));
-		saveBtn.innerText = isFlowchartNodeMode ? 'Save Node Components' : 'Save Module Schema';
-		if (isFlowchartNodeMode) {
+		const saveBtnLabel = isFreestyleTicketMode ? 'Save Ticket Structure' : isFlowchartNodeMode ? 'Save Node Components' : 'Save Module Schema';
+		saveBtn.innerText = saveBtnLabel;
+		if (isFlowchartNodeMode || isFreestyleTicketMode) {
 			footerDelBtn.style.display = 'none';
 			previewFooterBtn.style.display = 'none';
 		}
@@ -16621,15 +16641,17 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				activeMod.statuses = currentStatuses;
 				activeMod.updatedAt = Date.now();
 				await this._persistCurrentModule();
-				saveBtn.innerText = '✓ Schema Saved';
+				saveBtn.innerText = isFreestyleTicketMode ? '✓ Structure Saved' : '✓ Schema Saved';
 				saveBtn.style.background = '#10b981';
 				setTimeout(() => {
 					if (saveBtn.isConnected) {
-						saveBtn.innerText = 'Save Module Schema';
+						saveBtn.innerText = saveBtnLabel;
 						saveBtn.style.background = '#007acc';
 					}
 				}, 1800);
-				this.notificationService.info(`Successfully saved schema for module "${activeMod.name}"`);
+				this.notificationService.info(isFreestyleTicketMode
+					? `Saved the structure of ticket "${input.moduleName}"`
+					: `Successfully saved schema for module "${activeMod.name}"`);
 			} catch (e) {
 				this.notificationService.error(`Failed to save schema: ${e}`);
 			}

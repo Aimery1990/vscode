@@ -14,6 +14,7 @@ import { URI } from '../../../../base/common/uri.js';
 import { dirname } from '../../../../base/common/resources.js';
 import { AgentScopeType, IAgentsManagerService, getGlobalDefaultModel } from '../../agentsManager/common/agentsManager.js';
 import { IEntityPersistenceService } from '../../entityPersistence/common/entityPersistence.js';
+import { ensureFreestyleSchema, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
 import { AuthenticationSession, AuthenticationSessionAccount, IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { EditorsOrder } from '../../../common/editor.js';
@@ -1660,6 +1661,15 @@ export class WorkspacesExplorerService extends Disposable implements IWorkspaces
 				folderPath: entityFolderUri.fsPath,
 				status: 'idle'
 			}, targetFolderUri);
+		}
+
+		// A Freestyle ticket (no template) starts with its own default structure: Title + Description
+		if (isFreestyleTicketType(type)) {
+			try {
+				await ensureFreestyleSchema(this.fileService, entityFolderUri);
+			} catch (err) {
+				console.error('Failed to write the Freestyle ticket structure:', err);
+			}
 		}
 
 		// Update persistent workspace sequence counter for activeCode (strictly monotonic)

@@ -33,12 +33,13 @@ import { ICommandService } from '../../../../platform/commands/common/commands.j
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
 import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { ILayoutService } from '../../../../platform/layout/browser/layoutService.js';
-import { IEditorService } from '../../../services/editor/common/editorService.js';
+import { IEditorService, SIDE_GROUP } from '../../../services/editor/common/editorService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
 import { parseYaml } from '../../customModules/common/templateYaml.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
+import { FREESTYLE_SCHEMA_FILE_NAME, createDefaultFreestyleSchema, getFreestyleDesignerModuleId, isFreestyleTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { ICustomField, IOutputSpec, IVoiceNoteClip, ITableColumnDefinition, IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
@@ -707,7 +708,7 @@ export class EntityDetailEditor extends EditorPane {
 			const relevantMdNames = new Set([
 				'ticket.md', 'workspace.md', 'job.md', 'project.md', 'task.md',
 				'agent.md', 'workflow.md', 'case.md', 'issue.md', 'analysis.md',
-				'readme.md', 'instruction.md', 'worklog.md', 'work_log.md'
+				'readme.md', 'instruction.md', 'worklog.md', 'work_log.md', FREESTYLE_SCHEMA_FILE_NAME
 			]);
 			const isRelevantEntityChange = allChangedUris.some(u => {
 				if (!u.path.startsWith(entityPathPrefix)) { return false; }
@@ -926,9 +927,29 @@ export class EntityDetailEditor extends EditorPane {
 			this._saveCurrentScrollPosition();
 		}
 		super.setEditorVisible(visible);
-		if (visible && this._entityUri && this._container && this._container.childElementCount === 0) {
+		// A Freestyle ticket's structure may have been edited in the designer while this page was hidden
+		if (visible && this._entityUri && this._container && (this._container.childElementCount === 0 || (!this._isPreviewMode && isFreestyleTicketType(this._entityType)))) {
 			this._resolvePathsAndLoadData();
 		}
+	}
+
+	/**
+	 * Opens the schema designer (beside this ticket) on the Freestyle ticket's own structure. Changes are saved into
+	 * the ticket folder only; this page reloads automatically when the structure file changes.
+	 */
+	private async _openFreestyleStructureDesigner(): Promise<void> {
+		const ticketUri = this._entityUri;
+		if (!ticketUri || this._isPreviewMode) {
+			return;
+		}
+		const ticketLabel = this._lastParsedData?.ticketId || this._entityName || basename(ticketUri);
+		let workspaceUri: URI | undefined;
+		try {
+			workspaceUri = await this._workspacesExplorerService.findWorkspaceRootUri(ticketUri);
+		} catch { }
+		const input = new CustomModuleSchemaEditorInput(getFreestyleDesignerModuleId(ticketUri), ticketLabel, workspaceUri);
+		input.freestyleTicketUri = ticketUri;
+		await this._editorService.openEditor(input, { pinned: true }, SIDE_GROUP);
 	}
 
 	private async _readCustomModule(workspaceUri: URI, typeId: string): Promise<ITicketTemplateModule | null> {
@@ -1417,7 +1438,10 @@ export class EntityDetailEditor extends EditorPane {
 			}
 
 			const attachments = await this._getAttachments(this._entityUri);
-			const customModule = await this._readCustomModule(this._entityUri, this._entityType);
+			// A Freestyle ticket has no template: its own structure is stored in its folder
+			const customModule = isFreestyleTicketType(this._entityType)
+				? (await readFreestyleSchema(this._fileService, this._entityUri) ?? createDefaultFreestyleSchema())
+				: await this._readCustomModule(this._entityUri, this._entityType);
 			this._lastCustomModule = customModule;
 
 			// If customModule exists, migrate/prune legacy ID keys (e.g. "Output 1" -> "Output") and empty deleted fields from customMetadata
@@ -1860,9 +1884,19 @@ export class EntityDetailEditor extends EditorPane {
 				e.preventDefault();
 				e.stopPropagation();
 				const ticketType = typeBadge.getAttribute('data-ticket-type');
-				if (ticketType) {
+				if (isFreestyleTicketType(ticketType || undefined)) {
+					await this._openFreestyleStructureDesigner();
+				} else if (ticketType) {
 					await this._customModulesService.openModuleTicketPreview(ticketType, this._entityUri);
 				}
+				return;
+			}
+
+			// 0.065 Freestyle ticket: edit this ticket's own components in the schema designer
+			if (target.closest('.freestyle-edit-structure-trigger')) {
+				e.preventDefault();
+				e.stopPropagation();
+				await this._openFreestyleStructureDesigner();
 				return;
 			}
 
@@ -21269,6 +21303,7 @@ ${interpolatedPrompt}`;
 		const typePromptDisplay = (data.typePrompt && data.typePrompt !== 'None') ? data.typePrompt : '';
 
 		const isAgent = (data.ticketType || '').toLowerCase() === 'agent';
+		const isFreestyleTicket = !this._isPreviewMode && !wfNode && isFreestyleTicketType(data.ticketType);
 		const matchingAgent = agents.find(a =>
 			(this._entityUri && a.folderPath && (a.folderPath === this._entityUri.fsPath || a.folderPath.toLowerCase() === this._entityUri.fsPath.toLowerCase())) ||
 			(a.name.toLowerCase() === (data.title || '').toLowerCase()) ||
@@ -21385,6 +21420,12 @@ ${interpolatedPrompt}`;
 						)
 					] : []),
 					' ',
+					...(isFreestyleTicket ? [
+						$<HTMLButtonElement>('button.btn-secondary.freestyle-edit-structure-trigger', { type: 'button', style: 'display: inline-flex; align-items: center; justify-content: center; padding: 5px 9px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(45, 212, 191, 0.14); border: 1px solid rgba(45, 212, 191, 0.4); color: #2dd4bf;', title: 'Edit Ticket Structure (add, remove and reorder this ticket\'s components)', 'aria-label': 'Edit Ticket Structure' },
+							$('span.codicon.codicon-symbol-structure', { style: 'font-size: 13px;' })
+						),
+						' '
+					] : []),
 					part('entityDetailRunTicketBtn', withParts(() => $<HTMLButtonElement>('button#entity-detail-run-ticket-btn.btn-primary', { type: 'button', style: 'display: inline-flex; align-items: center; gap: 6px; padding: 5px 14px; font-size: 0.84em; border-radius: 6px; cursor: pointer; background: rgba(34, 197, 94, 0.2); border: 1px solid rgba(34, 197, 94, 0.45); color: #4ade80; font-weight: 600; transition: all 0.15s ease;', title: 'Run Ticket (Execute current ticket with default parameters)' },
 						part('codicon', $('span.codicon.codicon-play', { style: 'font-size: 12px;' })),
 						part('runTicketBtnLabel', $('span.run-ticket-btn-label', undefined, 'Run'))
@@ -21567,6 +21608,12 @@ ${interpolatedPrompt}`;
 						)
 					))),
 					...customFieldsContent,
+					...(isFreestyleTicket ? [
+						$<HTMLButtonElement>('button.freestyle-edit-structure-trigger', { type: 'button', title: 'Open the component palette to add, remove and reorder this ticket\'s components', style: 'display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; padding: 14px; border-radius: 8px; border: 1px dashed rgba(45, 212, 191, 0.45); background: rgba(45, 212, 191, 0.05); color: #2dd4bf; cursor: pointer; font-size: 0.88em; font-weight: 600;' },
+							$('span.codicon.codicon-add', { style: 'font-size: 14px;' }),
+							$('span', undefined, 'Add Components')
+						)
+					] : []),
 					part('sectionCards', withParts(() => $('div.section-card', { style: `max-width: 100%; min-width: 0; box-sizing: border-box; overflow-x: hidden;${this._isPreviewMode ? ' display: none;' : ''}` },
 						part('sectionTitle', withParts(() => $('div.section-title', undefined,
 							$('span', undefined, isAgent ? 'Task History & Work Logs' : 'Work Logs'),

@@ -47,6 +47,7 @@ import { ICustomModulesService } from '../../customModules/common/customModules.
 import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 import { stringifyYaml } from '../../customModules/browser/customModulesService.js';
 import { parseYaml } from '../../customModules/common/templateYaml.js';
+import { FREESTYLE_TICKET_COLOR, FREESTYLE_TICKET_LABEL, FREESTYLE_TICKET_TYPE, FREESTYLE_TYPE_PROMPT, isFreestyleTicketType } from '../../customModules/common/freestyleTicket.js';
 
 function getTicketTypeBadge(type: string, customModulesMap?: Map<string, { color: string; icon: ThemeIcon }>): { color: string; bg: string } {
 	const t = (type || 'task').toLowerCase();
@@ -94,6 +95,8 @@ function buildCustomModulesVisualMap(mods: ICustomModule[]): Map<string, { color
 		if (keyId) { map.set(keyId, visual); }
 		if (keyName) { map.set(keyName, visual); }
 	}
+	// Freestyle tickets have no template; they always use the Freestyle look
+	map.set(FREESTYLE_TICKET_TYPE, { color: FREESTYLE_TICKET_COLOR, icon: Codicon.edit });
 	return map;
 }
 
@@ -3079,7 +3082,15 @@ export class MainWorkspaceViewPane extends ViewPane {
 				return a.name.localeCompare(b.name);
 			});
 
-			const customTypes = customModules.map(m => {
+			// "Freestyle" needs no template: the ticket designs its own components after creation
+			const freestyleType = {
+				type: FREESTYLE_TICKET_TYPE,
+				label: FREESTYLE_TICKET_LABEL,
+				icon: Codicon.edit,
+				color: FREESTYLE_TICKET_COLOR,
+				bg: hexToRgba(FREESTYLE_TICKET_COLOR, 0.18)
+			};
+			const customTypes = customModules.filter(m => !isFreestyleTicketType(m.id)).map(m => {
 				const icon = m.icon
 					? resolveCustomModuleIcon(m.icon, m.id)
 					: (systemPreconfiguredIcons[m.id.toLowerCase()] || resolveCustomModuleIcon(undefined, m.id));
@@ -3098,7 +3109,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				{ type: 'file', label: 'File', icon: Codicon.file, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.18)' }
 			];
 
-			typesList = [...customTypes, ...filesystemTypes];
+			typesList = [freestyleType, ...customTypes, ...filesystemTypes];
 
 			if (!typesList.some(t => t.type === selectedType)) {
 				selectedType = 'job';
@@ -3945,7 +3956,8 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 		const refreshNameAndBadge = async () => {
 			const customModules = await this._getCustomModules(targetUri);
-			const matchingModule = customModules.find((m: ICustomModule) => m.id === selectedType);
+			// Freestyle never uses a template, even if one happens to be called "freestyle"
+			const matchingModule = isFreestyleTicketType(selectedType) ? undefined : customModules.find((m: ICustomModule) => m.id === selectedType);
 
 			if (selectedType === 'folder') {
 				codeBox.style.display = 'none';
@@ -3994,7 +4006,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 				descLabel.innerText = 'Description:';
 				descInput.placeholder = 'Brief purpose of this entity...';
 			} else {
-				const hasDescField = !!(matchingModule && Array.isArray(matchingModule.fields) && matchingModule.fields.some(f => f.id?.toLowerCase() === 'description' || f.label?.toLowerCase() === 'description'));
+				const isFreestyle = isFreestyleTicketType(selectedType);
+				// A Freestyle ticket starts with Title + Description (no template)
+				const hasDescField = isFreestyle || !!(matchingModule && Array.isArray(matchingModule.fields) && matchingModule.fields.some(f => f.id?.toLowerCase() === 'description' || f.label?.toLowerCase() === 'description'));
 				const descFieldDef = matchingModule?.fields?.find(f => f.id?.toLowerCase() === 'description' || f.label?.toLowerCase() === 'description');
 				const titleFieldDef = matchingModule?.fields?.find(f => f.id?.toLowerCase() === 'title' || f.label?.toLowerCase() === 'title');
 
@@ -4034,7 +4048,10 @@ export class MainWorkspaceViewPane extends ViewPane {
 				previewBadge.style.borderColor = `${badgeColor}58`;
 
 				const isBuiltIn = !matchingModule;
-				if (isBuiltIn) {
+				if (isFreestyle) {
+					typeDefInput.value = 'Freestyle (no template: add components in the ticket after creation)';
+					typeDefInput.placeholder = typeDefInput.value;
+				} else if (isBuiltIn) {
 					typeDefInput.value = 'Built-in (System)';
 					typeDefInput.placeholder = 'Built-in (System)';
 				} else {
@@ -4047,7 +4064,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 				typeDefInput.style.opacity = '0.65';
 				typeDefInput.style.cursor = 'not-allowed';
 				const modPrompt = typeof matchingModule?.prompt === 'string' ? matchingModule.prompt.trim() : '';
-				typePromptInput.value = modPrompt || builtInTypePrompts[selectedType] || '';
+				typePromptInput.value = isFreestyle ? FREESTYLE_TYPE_PROMPT : (modPrompt || builtInTypePrompts[selectedType] || '');
 			}
 
 			// Git Section Visibility: Only displayed when module schema contains a 'git' primitive field!
@@ -4912,7 +4929,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 
 				let initialStatusOverride = '';
 				const customModules = await this._getCustomModules(targetUri);
-				const matchingModule = customModules.find((m: ICustomModule) => m.id === selectedType || m.name?.toLowerCase() === selectedType.toLowerCase());
+				const matchingModule = isFreestyleTicketType(selectedType) ? undefined : customModules.find((m: ICustomModule) => m.id === selectedType || m.name?.toLowerCase() === selectedType.toLowerCase());
 
 				const customMetadata: { [key: string]: string } = {};
 
@@ -5168,7 +5185,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 					agentRulePrompt: ruleInput.value.trim() || undefined,
 					ticketPrompt: ruleInput.value.trim() || undefined,
 					description: descInput.value.trim() || undefined,
-					typeDefinition: (typeDefInput.value.trim() && typeDefInput.value.trim() !== 'Built-in (System)' && typeDefInput.value.trim() !== 'None') ? typeDefInput.value.trim() : undefined,
+					typeDefinition: (!isFreestyleTicketType(selectedType) && typeDefInput.value.trim() && typeDefInput.value.trim() !== 'Built-in (System)' && typeDefInput.value.trim() !== 'None') ? typeDefInput.value.trim() : undefined,
 					typePrompt: typePromptInput.value.trim() || undefined,
 					linkTo: selectedLinkTickets.length > 0 ? selectedLinkTickets.join(', ') : undefined,
 					attachments: undefined,

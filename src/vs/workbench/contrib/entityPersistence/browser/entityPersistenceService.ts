@@ -12,6 +12,7 @@ import { INativeEnvironmentService } from '../../../../platform/environment/comm
 import { IEntityPersistenceService, IBaseEntitySnapshot } from '../common/entityPersistence.js';
 import { AuthenticationSession, AuthenticationSessionAccount, IAuthenticationService } from '../../../services/authentication/common/authentication.js';
 import { dirname } from '../../../../base/common/resources.js';
+import { FREESTYLE_TYPE_DEFINITION, FREESTYLE_TYPE_PROMPT } from '../../customModules/common/freestyleTicket.js';
 
 const SNAPSHOTS_STORAGE_KEY = 'anyagent.entityPersistence.snapshots';
 export const SYSTEM_CONFIG_DIR_NAME = '.agents';
@@ -241,6 +242,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			issue: 'An Issue tracks defects, bugs, and incident remediation items.',
 			analysis: 'An Analysis stores diagnostic findings, telemetry, and architectural studies.',
 			note: 'A Note stores unstructured research, memos, and knowledge-base items.',
+			freestyle: FREESTYLE_TYPE_DEFINITION,
 			folder: 'A standard directory container for grouping items.',
 			file: 'A standalone document or data asset.'
 		};
@@ -449,6 +451,7 @@ export class EntityPersistenceService extends Disposable implements IEntityPersi
 			issue: 'An issue tracks defects, root causes, and remediation actions.',
 			analysis: 'An analysis documents architectural telemetry, research, and diagnostic findings.',
 			note: 'A note captures memos, references, and knowledge-base items.',
+			freestyle: FREESTYLE_TYPE_PROMPT,
 			folder: 'A standard directory container for grouping items.',
 			file: 'A standalone document or data asset.'
 		};

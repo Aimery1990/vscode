@@ -187,7 +187,8 @@ class CustomModuleSchemaEditorInputSerializer implements IEditorSerializer {
 			moduleId: input.moduleId,
 			moduleName: input.moduleName,
 			workspaceUri: input.workspaceUri?.toString(),
-			nodeId: input.nodeId
+			nodeId: input.nodeId,
+			freestyleTicketUri: input.freestyleTicketUri?.toString()
 		});
 	}
 
@@ -200,6 +201,9 @@ class CustomModuleSchemaEditorInputSerializer implements IEditorSerializer {
 			const input = new CustomModuleSchemaEditorInput(data.moduleId, data.moduleName || data.moduleId, typeof data.workspaceUri === 'string' ? URI.parse(data.workspaceUri) : undefined);
 			if (typeof data.nodeId === 'string') {
 				input.nodeId = data.nodeId;
+			}
+			if (typeof data.freestyleTicketUri === 'string' && data.freestyleTicketUri) {
+				input.freestyleTicketUri = URI.parse(data.freestyleTicketUri);
 			}
 			return input;
 		} catch {

@@ -36,6 +36,11 @@ export class CustomModuleSchemaEditorInput extends EditorInput {
 	} | undefined>;
 	public onNodeFieldsChange?: (fields: ICustomField[], immediate?: boolean) => void;
 	public focusFieldId?: string;
+	/**
+	 * Set when the designer edits the own structure of one Freestyle ticket (stored in the ticket folder)
+	 * instead of a template: changes are saved to that ticket only and no template is created.
+	 */
+	public freestyleTicketUri?: URI;
 
 	private readonly _onDidUpdateExternalDraft = this._register(new Emitter<string | undefined>());
 	public readonly onDidUpdateExternalDraft = this._onDidUpdateExternalDraft.event;
@@ -70,12 +75,18 @@ export class CustomModuleSchemaEditorInput extends EditorInput {
 	}
 
 	override getName(): string {
+		if (this.freestyleTicketUri) {
+			return `Ticket Structure: ${this.moduleName}`;
+		}
 		return this.isFlowchartNodeMode
 			? `Node: ${this.moduleName}`
 			: `Edit Module Schema: ${this.moduleName}`;
 	}
 
 	override getDescription(): string {
+		if (this.freestyleTicketUri) {
+			return 'Freestyle Ticket Components';
+		}
 		return this.isFlowchartNodeMode ? 'Flowchart Node Components' : 'Schema Designer';
 	}
 

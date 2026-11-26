@@ -9,6 +9,7 @@ import { IInstantiationService, createDecorator } from '../../../../platform/ins
 import { ILogService } from '../../../../platform/log/common/log.js';
 import { IEntityPersistenceService, IBaseEntitySnapshot, CustomFieldType, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
+import { createDefaultFreestyleSchema, ensureFreestyleSchema, isFreestyleTicketType, readFreestyleSchema } from '../../customModules/common/freestyleTicket.js';
 import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { TicketWorklogStorage } from '../../workspacesExplorer/browser/ticketWorklogStorage.js';
@@ -913,6 +914,9 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			};
 
 			await this.entityPersistenceService.writeEntity4MDFiles(snapshot, parentFolderUri, true);
+			if (isFreestyleTicketType(canonicalTicketType)) {
+				await ensureFreestyleSchema(this.fileService, ticketFolderUri);
+			}
 
 			this.logService.info(`[TicketWorkflowRuntime] Created ticket '${ticketCode}' (${title}) at ${ticketFolderUri.fsPath}`);
 
@@ -1164,7 +1168,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			// Load schema definition (search ticket's parent workspace first, then wsUri)
 			let schema: ICustomModule | undefined;
-			if (ticketData.ticketType) {
+			if (isFreestyleTicketType(ticketData.ticketType)) {
+				// A Freestyle ticket has no template: its components are stored in the ticket folder
+				schema = await readFreestyleSchema(this.fileService, ticketUri) ?? createDefaultFreestyleSchema();
+			} else if (ticketData.ticketType) {
 				let ticketWsUri = URI.joinPath(ticketUri, '..');
 				try {
 					ticketWsUri = await this.workspacesExplorerService.findWorkspaceRootUri(ticketUri);

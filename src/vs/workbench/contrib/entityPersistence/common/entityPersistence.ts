@@ -1092,7 +1092,8 @@ const SYSTEM_MODULE_DEFAULT_ICONS: Record<string, ThemeIcon> = {
 	'agent': Codicon.robot,
 	'issue': Codicon.bug,
 	'analysis': Codicon.graph,
-	'note': Codicon.book
+	'note': Codicon.book,
+	'freestyle': Codicon.edit
 };
 
 export function getDefaultCustomModuleIconId(typeId?: string): string {
