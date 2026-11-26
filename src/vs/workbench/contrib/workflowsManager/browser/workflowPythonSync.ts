@@ -278,7 +278,7 @@ export function formatComponentStepComment(step: INodePipelineStep, stepNumber: 
 		};
 		const compTypeLabel = typeLabels[rawType] || rawType;
 		const compId = String(comp.id || step.id || `step_${stepNumber}`).replace(/[\r\n\]]/g, '').trim();
-		const varName = (rawType !== 'parameters' && rawType !== 'output' && rawType !== 'result' && rawType !== 'display')
+		const varName = (rawType !== 'parameters' && rawType !== 'output' && rawType !== 'display')
 			? String(comp.outputVariableName || step.targetVariable || '').replace(/^@/, '').trim()
 			: '';
 		const rawLabel = String(comp.label || step.label || compTypeLabel).replace(/\r?\n/g, ' ').trim();
@@ -288,7 +288,7 @@ export function formatComponentStepComment(step: INodePipelineStep, stepNumber: 
 			const params = Array.isArray(comp.parameters) ? comp.parameters : [];
 			const pairs = params.map((p: any) => `${p.name}=${p.defaultValue !== undefined && p.defaultValue !== '' ? p.defaultValue : '""'}`);
 			summary = params.length > 0 ? `Inputs (${params.length}): ${pairs.join(', ')}` : 'Inputs';
-		} else if (rawType === 'output' || rawType === 'result') {
+		} else if (rawType === 'output') {
 			const specs = Array.isArray(comp.outputSpecs) ? comp.outputSpecs : [];
 			const pairs = specs.map((s: any) => `${s.name || s.label || s.fieldKey}=${s.value || '""'}`);
 			summary = specs.length > 0 ? `Output (${specs.length}): ${pairs.join(', ')}` : 'Output';
@@ -3095,7 +3095,7 @@ export class WorkflowPythonEditorBridge {
 			if (th.parameters && Object.keys(th.parameters).length > 0) {
 				const paramsBox = append(handleEl, $('.workflow-display-handle-params-box'));
 				const paramsHeader = append(paramsBox, $('.workflow-display-handle-params-header'));
-				paramsHeader.textContent = `Parameters (${Object.keys(th.parameters).length})`;
+				paramsHeader.textContent = `Inputs (${Object.keys(th.parameters).length})`;
 				const paramsList = append(paramsBox, $('.workflow-display-handle-params-list'));
 				for (const [pk, pv] of Object.entries(th.parameters)) {
 					const chip = append(paramsList, $('.workflow-display-handle-param-chip'));

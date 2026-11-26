@@ -7,7 +7,7 @@ import { ServicesAccessor } from '../../../../platform/instantiation/common/inst
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
-import { IEntityPersistenceService, ICustomModule, IActionButton } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, ICustomModule, IActionButton, normalizeNumberFieldValue, numberFieldRulesFromAttributes } from '../../entityPersistence/common/entityPersistence.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
 import { IWorkflowsManagerService } from '../common/workflowsManager.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
@@ -675,7 +675,7 @@ export async function createWorkflowDialog(
 							};
 							dropZone.onclick = () => fileInput.click();
 							(attachContainer as any).__getAttachedFiles = () => attachedFiles;
-						} else if (field.type === 'button_group' || field.type === 'button') {
+						} else if (field.type === 'button_group') {
 							const buttonsList: IActionButton[] = (field.buttons && Array.isArray(field.buttons) && field.buttons.length > 0)
 								? field.buttons
 								: [
@@ -726,6 +726,9 @@ export async function createWorkflowDialog(
 								'data-field-id': field.id,
 								'data-field-label': field.label,
 								'data-field-type': field.type,
+								...(typeof field.min === 'number' ? { min: String(field.min), 'data-min': String(field.min) } : {}),
+								...(typeof field.max === 'number' ? { max: String(field.max), 'data-max': String(field.max) } : {}),
+								...(typeof field.precision === 'number' ? { 'data-precision': String(field.precision) } : {}),
 								step: (field.precision !== undefined && field.precision > 0) ? (1 / Math.pow(10, field.precision)).toString() : 'any',
 								placeholder: field.precision !== undefined && field.precision > 0 ? (0).toFixed(field.precision) : '0',
 								style: 'flex: 1; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
@@ -876,7 +879,7 @@ export async function createWorkflowDialog(
 							};
 							(pyBox as any).__getPythonData = () => ({
 								code: pyTextarea.value,
-								pythonInterpreter: field.pythonInterpreter || '',
+								pythonPath: field.pythonPath || '',
 								externalScripts: field.externalScripts || [],
 								output: '',
 								logs: '',
@@ -1065,9 +1068,19 @@ export async function createWorkflowDialog(
 			const customMetadata: { [key: string]: string } = {};
 			const allPendingFieldAttachments: Array<{ name: string; size: number; dataUrl?: string }> = [];
 			const customInputs = customFieldsBox.querySelectorAll('.custom-field-input');
+			const numberErrors: string[] = [];
 			customInputs.forEach(inputEl => {
 				const fieldLabel = inputEl.getAttribute('data-field-label');
 				if (fieldLabel) {
+					if (inputEl instanceof HTMLInputElement && inputEl.getAttribute('data-field-type') === 'number') {
+						const numCheck = normalizeNumberFieldValue(numberFieldRulesFromAttributes(n => inputEl.getAttribute(n), fieldLabel), inputEl.value);
+						if (!numCheck.ok) {
+							numberErrors.push(numCheck.error!);
+							return;
+						}
+						customMetadata[fieldLabel] = numCheck.value;
+						return;
+					}
 					if (inputEl instanceof HTMLInputElement && inputEl.type === 'checkbox') {
 						customMetadata[fieldLabel] = inputEl.checked ? 'true' : 'false';
 					} else if (inputEl.classList.contains('multiselect-container')) {
@@ -1134,13 +1147,17 @@ export async function createWorkflowDialog(
 						customMetadata[fieldLabel] = JSON.stringify(tData);
 					} else if (inputEl.classList.contains('python-field-container')) {
 						const getPyData = (inputEl as any).__getPythonData;
-						const pyData = getPyData ? getPyData() : { code: '', pythonInterpreter: '' };
+						const pyData = getPyData ? getPyData() : { code: '', pythonPath: '' };
 						customMetadata[fieldLabel] = JSON.stringify(pyData);
 					} else {
 						customMetadata[fieldLabel] = (inputEl as any).value || '';
 					}
 				}
 			});
+			if (numberErrors.length > 0) {
+				notificationService.warn(numberErrors.join(' '));
+				return;
+			}
 
 			const gitRepoUrl = gitRemoteInput.value.trim() || undefined;
 			const gitBranch = gitBranchInput.value.trim() || undefined;

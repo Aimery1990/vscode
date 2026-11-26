@@ -40,7 +40,7 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 			headline: 'How RUN_TICKETS Executes Inputs',
 			steps: [
 				{
-					step: '1. Inbound Arguments Ingestion',
+					step: '1. Receive Inputs',
 					detail: 'runTickets inspects options.inputParams passed from the caller, workflow nodes, or user triggers.'
 				},
 				{
@@ -75,14 +75,14 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 		designerConfig: [
 			{ name: 'Target URL Template', desc: 'Target URL supporting dynamic variable interpolation (e.g. https://news.ycombinator.com?q={topic}).' },
 			{ name: 'Credential Binding', desc: 'Optional authentication credentials or session tokens for protected endpoints.' },
-			{ name: 'Selector & Mode', desc: 'CSS selector filter or extraction mode (Markdown, plain text, HTML).' }
+			{ name: 'Retries', desc: 'Max retries (default 3, up to 10) and delay between retries (default 1000 ms).' }
 		],
 		runTicketsFlow: {
 			headline: 'How RUN_TICKETS Executes Browser Primitive',
 			steps: [
 				{
 					step: '1. Dynamic URL Interpolation',
-					detail: 'Substitutes {variable} placeholders in the Target URL with values from preceding Parameters or earlier steps.'
+					detail: 'Substitutes {variable} placeholders in the Target URL with values from preceding Inputs or earlier steps.'
 				},
 				{
 					step: '2. Web Content Fetching & Headless Engine',
@@ -158,46 +158,34 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 
 	output: {
 		type: 'output',
-		title: 'Output (Manifest & Export Selection)',
+		title: 'Output (Result)',
 		icon: Codicon.output,
-		category: 'Aggregation & Downstream Export',
-		summary: 'The central export hub of a ticket. Specifies which primitives to expose, their display format (Table, Markdown, JSON, Text), and provides the payload for downstream workflows.',
+		category: 'Result & Downstream Export',
+		summary: 'Defines the RESULT of a ticket, node, or workflow: a dictionary of named items. Whoever runs it (a person, another ticket, a parent workflow, or the AI) reads this result. Every template and every workflow should end with an Output, ideally including a success / status flag.',
 		designerConfig: [
-			{ name: 'Output Manifest Primitives', desc: 'Select which upstream primitives (Browser, AI Prompt, Text) to include in the exported result.' },
-			{ name: 'Default Display Format', desc: 'Choose between Table, Markdown, JSON, and Text representation.' },
-			{ name: 'Export as Output Flags', desc: 'Toggle individual items on or off for downstream consumption.' }
+			{ name: 'Output Items', desc: 'Each item has a name (label) and a source: a variable or expression such as {summary}, True, or "Done: {count} rows", or another component of this ticket whose value is exported.' },
+			{ name: 'Display Format', desc: 'Table, Markdown, JSON, or Text, applied to exported component values.' },
+			{ name: 'Enable / Disable', desc: 'Toggle individual items on or off without deleting them.' }
 		],
 		runTicketsFlow: {
-			headline: 'How RUN_TICKETS Executes Output Manifest',
+			headline: 'How the Output Is Produced and Used',
 			steps: [
-				{
-					step: '1. Upstream Primitive Collection',
-					detail: 'Scans the enabled output specs list (outputSpecs) and retrieves the latest values from contextVariables.'
-				},
-				{
-					step: '2. Format Normalization',
-					detail: 'Transforms data into the chosen format (Markdown table parsing, JSON serialization, or clean text formatting).'
-				},
-				{
-					step: '3. Persistence in metadata.json & work_log.md',
-					detail: 'Updates the ticket snapshot with the aggregated result and appends an execution summary entry to work_log.md.'
-				},
-				{
-					step: '4. Workflow Return Value Delivery',
-					detail: 'Directly returned as ITicketRunResult.output. In Workflow DAGs, this binds to downstream variables (e.g. @summary = ticketOutput).'
-				}
+				{ step: '1. Evaluate items', detail: 'Each enabled item is evaluated in order. A reference to an undefined variable is an error (the run fails) rather than a silent empty value.' },
+				{ step: '2. Store on the ticket', detail: 'The result dictionary is saved with the ticket and shown in its Output card.' },
+				{ step: '3. Return to the caller', detail: 'RUN_TICKETS(...).output and GET_OUTPUTS(ticket) return the dictionary; GET_OUTPUTS(ticket, field="name") returns one item.' },
+				{ step: '4. Workflow outputs', detail: 'The Output on the final node of a workflow (the node right before End) becomes the WORKFLOW OUTPUTS. When the workflow runs as a sub-workflow, the parent receives the raw value if there is one item, or a dictionary if there are several.' }
 			],
-			variableResolution: 'Referenced externally as {TicketName.output}, {TicketName.FieldLabel}, or @workflowVariable.',
-			downstreamPassing: 'This is the primary payload handed off to the next node in the workflow graph.'
+			variableResolution: 'Each item is also available to later steps as {label} and as its Python variable name.',
+			downstreamPassing: 'This is the payload handed to the next ticket, node, or parent workflow.'
 		},
 		syntaxExamples: [
-			'{TicketName.output}',
-			'{output.FieldLabel}',
-			'@workflowVar = ticketOutput'
+			'GET_OUTPUTS(ticket)',
+			'GET_OUTPUTS(ticket, field="summary")',
+			'res = RUN_TICKETS(ticket=t); res["output"]["success"]'
 		],
 		tips: [
-			'Use [Sync Primitives] in the card configuration to auto-detect and populate all canvas primitives.',
-			'Table view automatically parses Markdown pipes (|) into interactive data grids.'
+			'Add a "success" item (e.g. sourceExpression True, or an expression that checks the result) so callers can branch on it.',
+			'Use [Sync Primitives] in the card configuration to auto-detect and populate all canvas primitives.'
 		]
 	},
 
@@ -238,23 +226,21 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 		title: 'Git Repository & Branch Binding',
 		icon: Codicon.sourceControl,
 		category: 'Environment & Version Control',
-		summary: 'Binds the ticket to a specific Git repository and branch, enabling contextual workspace operations and commit tracking.',
+		summary: 'Records which Git repository and branch the ticket relates to. Reference information only: running the ticket does not clone, check out, or read the repository yet.',
 		designerConfig: [
 			{ name: 'Repository URL', desc: 'Git clone / remote URL.' },
 			{ name: 'Default Branch', desc: 'Target working branch (e.g. main, dev).' }
 		],
 		runTicketsFlow: {
-			headline: 'How RUN_TICKETS Executes Git Binding',
+			headline: 'How RUN_TICKETS Handles Git Binding',
 			steps: [
-				{ step: '1. Repository Verification', detail: 'Inspects configured Git URL and validates local checkout status.' },
-				{ step: '2. Branch Metadata Extraction', detail: 'Reads current HEAD commit hash, branch name, and status.' },
-				{ step: '3. Context Registration', detail: 'Registers {git_url} and {git_branch} into contextVariables.' }
+				{ step: '1. Pass-through only', detail: 'No git operation is performed. The component\'s stored text value is passed to the context under its label.' }
 			],
-			variableResolution: '{git_url}, {git_branch}, {Field Label}',
-			downstreamPassing: 'Available for commit scripts, CI/CD triggering, or repo-scoped AI coding subagents.'
+			variableResolution: '{Field Label}',
+			downstreamPassing: 'Downstream steps can read the stored value via {Field Label}. To run real git commands, use a Python or SSH component.'
 		},
-		syntaxExamples: ['{git_url}', '{git_branch}'],
-		tips: ['Combine with automated task tickets to record exact commit hashes for reproducibility.']
+		syntaxExamples: ['{Git Repo}'],
+		tips: ['Use a Python or SSH component for actual clone / pull / commit operations.']
 	},
 
 	text: {
@@ -559,16 +545,16 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 			{ name: 'Button Definitions', desc: 'Button title, color theme, and target status to transition to.' }
 		],
 		runTicketsFlow: {
-			headline: 'How RUN_TICKETS Executes Action Buttons',
+			headline: 'How RUN_TICKETS Handles Action Buttons',
 			steps: [
-				{ step: '1. Automated Step Handling', detail: 'In headless automated execution, action buttons represent checkpoints.' },
-				{ step: '2. Human-in-the-Loop Integration', detail: 'Can pause execution in single-step workflows waiting for human resume/approval.' }
+				{ step: '1. Manual use only', detail: 'Buttons act when a person clicks them in the ticket: the ticket status changes to the button\'s target status.' },
+				{ step: '2. No pause during runs', detail: 'Running the ticket or a workflow does NOT stop and wait for a button click. For a human approval step in a workflow, use a node whose label contains "Human Review" / "Approval".' }
 			],
-			variableResolution: '{Field Label}',
-			downstreamPassing: 'Workflow can inspect the chosen action or status transition.'
+			variableResolution: '{status}',
+			downstreamPassing: 'Later steps can read the ticket status (e.g. via GET_TICKET) to see which button was clicked.'
 		},
 		syntaxExamples: ['{status}'],
-		tips: ['Use action buttons to establish clear, auditable human-in-the-loop review gates.']
+		tips: ['Buttons are a quick way for people to move a ticket between statuses (e.g. Approve → Done, Reject → Blocked).']
 	},
 
 	reusable_class: {
@@ -721,6 +707,134 @@ const PRIMITIVE_GUIDES: Record<string, IPrimitiveGuide> = {
 		]
 	}
 };
+
+/** Help for the six date / time pickers. Values are stored as plain strings and passed through unchanged at run time. */
+function dateTimeGuide(type: string, title: string, format: string, example: string, isRange: boolean): IPrimitiveGuide {
+	const valueDesc = isRange ? `"start ~ end", each side formatted as ${format}` : format;
+	return {
+		type,
+		title,
+		icon: Codicon.calendar,
+		category: 'Date & Time Dimension',
+		summary: isRange
+			? `Captures a ${title.toLowerCase().replace(' range', '')} range. Stored as one string: ${valueDesc} (e.g. "${example}").`
+			: `Captures a single ${title.toLowerCase()} value. Stored as a string: ${valueDesc} (e.g. "${example}").`,
+		designerConfig: [{ name: 'Default Value', desc: `Optional initial value in the stored format (${valueDesc}).` }],
+		runTicketsFlow: {
+			headline: `How RUN_TICKETS Handles ${title}`,
+			steps: [
+				{ step: '1. Read value', detail: 'Uses the run input override if given, otherwise the saved ticket value, otherwise the default value.' },
+				{ step: '2. Pass-through', detail: 'The string is NOT reformatted or validated; {variables} inside it are interpolated, then it is stored in the context under the field label.' }
+			],
+			variableResolution: '{Field Label}',
+			downstreamPassing: isRange
+				? 'Downstream steps receive the whole "start ~ end" string. In Python, split it with value.split("~") and strip each side.'
+				: 'Downstream steps receive the string as-is. Parse it in Python (e.g. datetime.fromisoformat) before comparing.'
+		},
+		syntaxExamples: ['{Field Label}'],
+		tips: isRange
+			? ['Always keep the " ~ " separator between start and end.', `Example value: ${example}`]
+			: [`Example value: ${example}`]
+	};
+}
+
+PRIMITIVE_GUIDES['date'] = dateTimeGuide('date', 'Date', 'YYYY-MM-DD', '2026-11-25', false);
+PRIMITIVE_GUIDES['time'] = dateTimeGuide('time', 'Time', 'HH:MM (24-hour)', '09:30', false);
+PRIMITIVE_GUIDES['datetime'] = dateTimeGuide('datetime', 'Date & Time', 'YYYY-MM-DDTHH:MM (the picker writes a "T"; older values may use a space instead)', '2026-11-25T09:30', false);
+PRIMITIVE_GUIDES['date_range'] = dateTimeGuide('date_range', 'Date Range', 'YYYY-MM-DD', '2026-11-25 ~ 2026-11-30', true);
+PRIMITIVE_GUIDES['time_range'] = dateTimeGuide('time_range', 'Time Range', 'HH:MM (24-hour)', '09:00 ~ 18:00', true);
+PRIMITIVE_GUIDES['datetime_range'] = dateTimeGuide('datetime_range', 'Date & Time Range', 'YYYY-MM-DDTHH:MM', '2026-11-25T09:00 ~ 2026-11-25T18:00', true);
+
+/** Help for the workflow built-ins (ticket orchestration, display, sub-workflow call). */
+function builtinGuide(type: string, title: string, icon: ThemeIcon, summary: string, config: { name: string; desc: string }[], steps: { step: string; detail: string }[], output: string, examples: string[], tips: string[]): IPrimitiveGuide {
+	return {
+		type,
+		title,
+		icon,
+		category: 'Workflow Built-in',
+		summary,
+		designerConfig: config,
+		runTicketsFlow: { headline: `How ${title} Runs`, steps, variableResolution: '{Output Variable}', downstreamPassing: output },
+		syntaxExamples: examples,
+		tips
+	};
+}
+
+PRIMITIVE_GUIDES['create_tickets'] = builtinGuide('create_tickets', 'Create Tickets', Codicon.newFile,
+	'Creates a new ticket from a ticket template (type), for example one record per training run.',
+	[
+		{ name: 'Ticket Type', desc: 'Required. The template to create from.' },
+		{ name: 'Title', desc: 'Ticket title; supports {variables}. Default "New Ticket".' },
+		{ name: 'Path', desc: 'Folder to create it in. Default "." (the current workspace / folder).' },
+		{ name: 'Inputs', desc: 'Values for the template Inputs; each can be a fixed value or a {variable}.' }
+	],
+	[
+		{ step: '1. Create', detail: 'Creates the ticket folder and files from the template, filling the Inputs you gave.' },
+		{ step: '2. Return a handle', detail: 'Returns a ticket handle (ticketId, entityUri, fields) stored in the output variable.' }
+	],
+	'Pass the handle to Run Tickets or Get Outputs as {variable}.',
+	['new_ticket = CREATE_TICKETS(ticket_type="training_run", title="Run {run_no}", params={"lr": "{lr}"})'],
+	['Create the ticket first, then run it with Run Tickets.']);
+
+PRIMITIVE_GUIDES['run_tickets'] = builtinGuide('run_tickets', 'Run Tickets', Codicon.play,
+	'Runs all components of an existing ticket and returns its result.',
+	[
+		{ name: 'Ticket', desc: 'Required. A ticket id, or a {variable} holding a handle from Create Tickets.' },
+		{ name: 'Inputs', desc: 'Optional values that override the ticket Inputs for this run.' }
+	],
+	[
+		{ step: '1. Run', detail: 'Executes the ticket components top to bottom with the given Inputs.' },
+		{ step: '2. Return the result', detail: 'Returns success, status ("success" / "failed"), output (the ticket Output dictionary), and error.' }
+	],
+	'Read the ticket result from {output_variable}.output, or branch on .status.',
+	['res = RUN_TICKETS(ticket=new_ticket)', 'res["output"]["success"]'],
+	['Give the ticket template an Output component so the run returns a useful result.']);
+
+PRIMITIVE_GUIDES['get_outputs'] = builtinGuide('get_outputs', 'Get Outputs', Codicon.signOut,
+	'Reads the Output (result dictionary) of a ticket that has already run.',
+	[
+		{ name: 'Ticket', desc: 'Required. Ticket id or {variable} handle.' },
+		{ name: 'Field', desc: 'Optional. Name of one output item; leave empty for the whole dictionary.' }
+	],
+	[{ step: '1. Read', detail: 'Returns the stored Output dictionary, one item of it, or nothing if the template has no Output component.' }],
+	'Use the value directly in later steps.',
+	['GET_OUTPUTS(ticket=new_ticket)', 'GET_OUTPUTS(ticket="TRAIN-0003", field="accuracy")'],
+	['Run the ticket first; Get Outputs only reads what is already stored.']);
+
+PRIMITIVE_GUIDES['get_tickets'] = builtinGuide('get_tickets', 'Get Tickets', Codicon.search,
+	'Searches several tickets at once, for example all "Done" tickets of a template, so a workflow can loop over them.',
+	[
+		{ name: 'Ticket Type', desc: 'Optional. Template id (exact match).' },
+		{ name: 'Status', desc: 'Optional. Status (exact match).' },
+		{ name: 'Title', desc: 'Optional. Part of the title or folder name.' },
+		{ name: 'Path', desc: 'Optional. Only tickets inside this folder.' }
+	],
+	[{ step: '1. Search', detail: 'All filters are combined (AND). Give at least one.' }, { step: '2. Return a list', detail: 'Returns a list of tickets (id, title, status, type, fields).' }],
+	'Loop over the list in a Python step.',
+	['done = GET_TICKETS(ticket_type="training_run", status="Done")'],
+	['For one known ticket use Get Ticket instead.']);
+
+PRIMITIVE_GUIDES['display'] = builtinGuide('display', 'Display', Codicon.eye,
+	'Shows an intermediate value in the Live Output panel while a workflow runs, for debugging or progress. It does not create a variable.',
+	[{ name: 'Value', desc: 'Required. A Python expression using the current variables, e.g. train_log[-5:].' }],
+	[{ step: '1. Evaluate and show', detail: 'Evaluates the expression and prints the result to Live Output.' }],
+	'Nothing is passed on; it is display only.',
+	['DISPLAY(train_log[-5:])'],
+	['Remove or disable Display steps you no longer need.']);
+
+PRIMITIVE_GUIDES['sub_workflow'] = builtinGuide('sub_workflow', 'Call Sub-Workflow', Codicon.layers,
+	'Calls a reusable sub-workflow from the Sub-Workflow Library inside a node: passes inputs in, runs it, and hands its outputs to the next steps.',
+	[
+		{ name: 'Sub-Workflow', desc: 'Required. Chosen from the Sub-Workflow Library ("+" button or drag onto a node).' },
+		{ name: 'Inputs', desc: 'Values for the sub-workflow Inputs; each can be an expression or a {variable}.' }
+	],
+	[
+		{ step: '1. Run', detail: 'Runs the sub-workflow with the given Inputs.' },
+		{ step: '2. Return outputs', detail: 'Returns the sub-workflow Output: the value itself if there is one output item, otherwise a dictionary keyed by output name.' }
+	],
+	'Later steps read the result from the output variable.',
+	['{call_sub_workflow_result}'],
+	['To create a new sub-workflow, select nodes in a workflow and save them to the library; this component only calls existing ones.']);
 
 /**
  * Returns guide documentation for any primitive type or fallback generic info.

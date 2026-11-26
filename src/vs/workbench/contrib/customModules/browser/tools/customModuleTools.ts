@@ -10,7 +10,7 @@ import { localize } from '../../../../../nls.js';
 import { CountTokensCallback, IPreparedToolInvocation, IToolData, IToolImpl, IToolInvocation, IToolInvocationPreparationContext, IToolResult, ToolDataSource, ToolProgress } from '../../../chat/common/tools/languageModelToolsService.js';
 import { ICustomModulesService } from '../../common/customModules.js';
 import { IWorkspacesExplorerService } from '../../../workspacesExplorer/common/workspacesExplorer.js';
-import { CustomFieldType, ICustomField, ICustomModule, IActionButton, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS } from '../../../entityPersistence/common/entityPersistence.js';
+import { CustomFieldType, ICustomField, ICustomModule, IActionButton, IStatusDefinition, DEFAULT_STATUS_DEFINITIONS, normalizeFieldType } from '../../../entityPersistence/common/entityPersistence.js';
 import { resolveDefaultModel } from '../../../agentsManager/common/agentsManager.js';
 
 export const ListCustomModulesToolId = 'anyagent_list_custom_modules';
@@ -55,12 +55,10 @@ const VALID_FIELD_TYPES: Set<CustomFieldType> = new Set([
 	'dynamic_list',
 	'attachment',
 	'button_group',
-	'button',
 	'browser',
 	'git',
 	'parameters',
 	'prompt',
-	'result',
 	'output',
 	'python',
 	'tts',
@@ -68,7 +66,13 @@ const VALID_FIELD_TYPES: Set<CustomFieldType> = new Set([
 	'voice_note',
 	'table',
 	'ssh',
-	'http_request'
+	'http_request',
+	'create_tickets',
+	'run_tickets',
+	'get_outputs',
+	'get_ticket',
+	'get_tickets',
+	'display'
 ]);
 
 const BASE_PRIMITIVES_CATALOG = [
@@ -187,15 +191,18 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'output',
 		label: 'Output',
-		description: 'Aggregates, formats, and exports ticket pipeline outputs (Table, Markdown, JSON, Text) for inspection or inter-ticket reference.',
+		description: 'Defines the RESULT of a ticket, node, or workflow as a dictionary {label: value}. Each output item (outputSpecs) takes its value from a variable / expression (sourceExpression, e.g. {summary}, True, or \"Done: {count} rows\") or exports another component (fieldKey). Where the result goes: (1) in a ticket, RUN_TICKETS(...).output and GET_OUTPUTS(ticket) return it; (2) in a workflow, the Output component on the final node (the one right before End) becomes the WORKFLOW OUTPUTS, returned to the caller or to the parent workflow when used as a sub-workflow (one item -> the raw value, several -> a dict). Every ticket template and every workflow should end with an Output; include a success / status flag so callers can tell whether the run succeeded.',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: {
 			id: 'pipeline_output',
 			label: 'Output',
 			type: 'output',
-			defaultContent: '',
-			outputSpecs: []
+			outputSpecs: [
+				{ label: 'success', sourceExpression: 'True' },
+				{ label: 'summary', sourceExpression: '{ai_summary}' },
+				{ label: 'row_count', sourceExpression: '{row_count}' }
+			]
 		}
 	},
 	{
@@ -270,7 +277,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'date',
 		label: 'Single Date Picker',
-		description: 'Calendar date selection (YYYY-MM-DD).',
+		description: 'Calendar date. Value is a string "YYYY-MM-DD" (e.g. "2026-11-25"); passed through unchanged at run time.',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: { id: 'expense_date', label: 'Expense Date', type: 'date' }
@@ -278,7 +285,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'time',
 		label: 'Single Time Picker',
-		description: 'Time selection (HH:MM).',
+		description: 'Time of day. Value is a string "HH:MM" in 24-hour format (e.g. "09:30").',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: { id: 'incident_time', label: 'Incident Time', type: 'time' }
@@ -286,7 +293,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'datetime',
 		label: 'Single DateTime Picker',
-		description: 'Combined date and time timestamp.',
+		description: 'Date and time. Value is a string "YYYY-MM-DDTHH:MM" (e.g. "2026-11-25T09:30"); older values may use a space instead of "T".',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: { id: 'submission_time', label: 'Submission Timestamp', type: 'datetime' }
@@ -294,7 +301,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'date_range',
 		label: 'Date Range (Start ~ End)',
-		description: 'Range of dates (e.g. travel period, event dates).',
+		description: 'Range of dates. Value is one string "start ~ end" with each side "YYYY-MM-DD" (e.g. "2026-11-25 ~ 2026-11-30").',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: { id: 'travel_period', label: 'Travel Dates', type: 'date_range' }
@@ -302,7 +309,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'time_range',
 		label: 'Time Range (Start ~ End)',
-		description: 'Range of times (e.g. scheduled hours).',
+		description: 'Range of times. Value is one string "start ~ end" with each side "HH:MM" (e.g. "09:00 ~ 18:00").',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: { id: 'working_hours', label: 'Shift Hours', type: 'time_range' }
@@ -310,7 +317,7 @@ const BASE_PRIMITIVES_CATALOG = [
 	{
 		type: 'datetime_range',
 		label: 'DateTime Range (Start ~ End)',
-		description: 'Range of date and time timestamps.',
+		description: 'Range of date-times. Value is one string "start ~ end" with each side "YYYY-MM-DDTHH:MM" (e.g. "2026-11-25T09:00 ~ 2026-11-25T18:00").',
 		requiresOptions: false,
 		supportsItemFields: false,
 		example: { id: 'booking_window', label: 'Booking Window', type: 'datetime_range' }
@@ -365,22 +372,195 @@ const BASE_PRIMITIVES_CATALOG = [
 		supportsItemFields: false,
 		example: {
 			id: 'api_request_1',
-			label: 'Upload Tailored Resume',
+			label: 'Create Item',
 			type: 'http_request',
-			httpUrl: 'https://aimery.link/api/tailored-resumes/upload',
+			httpUrl: 'https://api.example.com/v1/items',
 			httpMethod: 'POST',
 			httpAuthType: 'bearer',
-			httpAuthToken: '{ADMIN_PASSWORD}',
+			httpAuthToken: '{API_TOKEN}',
 			httpHeaders: [
 				{ key: 'Content-Type', value: 'application/json; charset=utf-8', enabled: true },
 				{ key: 'Accept', value: 'application/json', enabled: true }
 			],
 			httpParams: [],
 			httpBodyType: 'json',
-			httpBodyContent: '{\n  "job_id": "{job_id}",\n  "source": "linkedin",\n  "job_title": "{job_title}",\n  "company": "{company}",\n  "status": "published",\n  "job_url": "{job_url}",\n  "resume_content": {ai_resume_json}\n}'
+			httpBodyContent: '{\n  "name": "{item_name}",\n  "status": "published",\n  "payload": {ai_result_json}\n}'
 		}
+	},
+	{
+		type: 'python',
+		label: 'Python (Code Automation)',
+		description: 'Runs a local Python script. Read upstream values from TICKET_CONTEXT (dict) or directly as globals; return the result by assigning OUTPUT = ... (or calling set_output(value)). Built-ins available: CREATE_TICKETS, RUN_TICKETS, GET_TICKET, GET_TICKETS, GET_OUTPUTS, DISPLAY. Output is exposed downstream as the component variable plus <var>_output / <var>_logs.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'python_1',
+			label: 'Clean Dataset',
+			type: 'python',
+			pythonCode: 'import json\nrows = json.loads(TICKET_CONTEXT.get("raw_rows", "[]"))\nOUTPUT = [r for r in rows if r.get("text")]\n'
+		}
+	},
+	{
+		type: 'ssh',
+		label: 'SSH Terminal (Remote Linux)',
+		description: 'Connects to a remote Linux host and runs the commands in order (stops at the first connection failure). Output is a JSON object mapping each command to its last N output lines. Commands support {var} interpolation. Never put a plain-text password in the config; reference a variable instead.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: {
+			id: 'ssh_1',
+			label: 'Check GPU Server',
+			type: 'ssh',
+			sshHost: '{gpu_host}',
+			sshPort: 22,
+			sshUser: 'ubuntu',
+			sshCwd: '~',
+			sshCommands: ['nvidia-smi', 'df -h'],
+			sshOutputLines: 50
+		}
+	},
+	{
+		type: 'create_tickets',
+		label: 'Create Tickets',
+		description: 'Creates a new ticket from another template when this ticket runs. Settings: wfTicketType (template id, required), wfTicketTitle (supports {var}), wfTicketPath (folder, default "."), wfTicketParams {inputName: value or {var}}. Output: a ticket handle usable by Run Tickets / Get Outputs as {var}.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: { id: 'new_run', label: 'New Run', type: 'create_tickets', wfTicketType: 'training_run', wfTicketTitle: 'Run {run_no}', wfTicketParams: { lr: '{lr}' } }
+	},
+	{
+		type: 'run_tickets',
+		label: 'Run Tickets',
+		description: 'Runs another ticket. Settings: wfTicketTarget (ticket id or {var} handle, required), wfTicketParams (Inputs overrides). Output: {success, status, output, error}.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: { id: 'run_it', label: 'Run It', type: 'run_tickets', wfTicketTarget: '{new_run}' }
+	},
+	{
+		type: 'get_outputs',
+		label: 'Get Outputs',
+		description: 'Reads another ticket\'s Output dictionary. Settings: wfTicketTarget (required), wfTicketField (optional item name).',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: { id: 'run_result', label: 'Run Result', type: 'get_outputs', wfTicketTarget: '{new_run}', wfTicketField: 'accuracy' }
+	},
+	{
+		type: 'get_ticket',
+		label: 'Get Ticket',
+		description: 'Reads one ticket (or one of its fields). Settings: wfTicketTarget (id / name / path / {var}, required), wfTicketField (optional).',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: { id: 'parent', label: 'Parent', type: 'get_ticket', wfTicketTarget: 'JOB-0001' }
+	},
+	{
+		type: 'get_tickets',
+		label: 'Get Tickets',
+		description: 'Searches several tickets (AND of filters; give at least one). Settings: wfTicketType, wfTicketStatus, wfTicketTitle (substring), wfTicketPath (folder), wfTicketField (return one field per ticket). Output: a list.',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: { id: 'done_runs', label: 'Done Runs', type: 'get_tickets', wfTicketType: 'training_run', wfTicketStatus: 'Done' }
+	},
+	{
+		type: 'display',
+		label: 'Display',
+		description: 'Shows a value in the Live Output panel while running (no variable is produced). Settings: wfDisplayValue (Python expression, required).',
+		requiresOptions: false,
+		supportsItemFields: false,
+		example: { id: 'show_progress', label: 'Show Progress', type: 'display', wfDisplayValue: 'row_count' }
 	}
 ];
+
+type ConfigPropKind = 'string' | 'number' | 'boolean' | 'stringArray' | 'objectArray' | 'object';
+
+/**
+ * Per-component configuration the AI may set through `config` (validated and copied onto the field). This is the single
+ * source for both the copy logic and the tool description, so they cannot drift apart.
+ */
+const COMPONENT_CONFIG_PROPS: Readonly<Record<string, Readonly<Record<string, ConfigPropKind>>>> = {
+	text: { defaultContent: 'string', required: 'boolean' },
+	textarea: { defaultContent: 'string', required: 'boolean' },
+	number: { defaultContent: 'string' },
+	select: { defaultContent: 'string' },
+	multiselect: { defaultContent: 'string' },
+	switch: { defaultContent: 'string' },
+	date: { defaultContent: 'string' },
+	time: { defaultContent: 'string' },
+	datetime: { defaultContent: 'string' },
+	date_range: { defaultContent: 'string' },
+	time_range: { defaultContent: 'string' },
+	datetime_range: { defaultContent: 'string' },
+	prompt: { defaultUserPrompt: 'string', defaultUserPrompts: 'stringArray', defaultContent: 'string', targetProvider: 'string', targetModel: 'string', targetCredentialId: 'string' },
+	python: { pythonCode: 'string', pythonPath: 'string', pythonEnvMode: 'string', externalScripts: 'stringArray' },
+	http_request: { httpUrl: 'string', httpMethod: 'string', httpParams: 'objectArray', httpHeaders: 'objectArray', httpAuthType: 'string', httpAuthToken: 'string', httpApiKeyName: 'string', httpApiKeyValue: 'string', httpApiKeyLocation: 'string', httpAuthUsername: 'string', httpAuthPassword: 'string', httpBodyType: 'string', httpBodyContent: 'string', httpTimeoutMs: 'number' },
+	ssh: { sshHost: 'string', sshPort: 'number', sshUser: 'string', sshPassword: 'string', sshCwd: 'string', sshCommands: 'stringArray', sshOutputLines: 'number' },
+	browser: { defaultUrl: 'string', browserMaxRetries: 'number', browserRetryDelayMs: 'number' },
+	tts: { defaultContent: 'string', ttsVoice: 'string', ttsFormat: 'string', targetProvider: 'string', targetModel: 'string', targetCredentialId: 'string', ttsAutoPlay: 'boolean', ttsPlaybackRate: 'number' },
+	media_player: { mediaFilePath: 'string', mediaPlaybackRate: 'number', mediaAutoPlay: 'boolean' },
+	voice_note: { voiceRunInFlow: 'boolean', voiceAutoTranscribe: 'boolean' },
+	table: { tableSqlQuery: 'string' },
+	git: { gitRemoteUrl: 'string', gitBranch: 'string' },
+	create_tickets: { wfTicketType: 'string', wfTicketTitle: 'string', wfTicketPath: 'string', wfTicketParams: 'object' },
+	run_tickets: { wfTicketTarget: 'string', wfTicketParams: 'object' },
+	get_outputs: { wfTicketTarget: 'string', wfTicketField: 'string' },
+	get_ticket: { wfTicketTarget: 'string', wfTicketField: 'string' },
+	get_tickets: { wfTicketType: 'string', wfTicketStatus: 'string', wfTicketTitle: 'string', wfTicketPath: 'string', wfTicketField: 'string' },
+	display: { wfDisplayValue: 'string' }
+};
+
+/** Secrets must reference a variable ({token}) instead of containing the plain-text value. */
+const SECRET_CONFIG_PROPS: ReadonlySet<string> = new Set(['httpAuthToken', 'httpApiKeyValue', 'httpAuthPassword', 'sshPassword']);
+
+/** Settings available to every component. */
+const COMMON_CONFIG_PROPS: Readonly<Record<string, ConfigPropKind>> = { outputVariableName: 'string', disabled: 'boolean' };
+
+function describeComponentConfigProps(): string {
+	return Object.entries(COMPONENT_CONFIG_PROPS).map(([type, props]) => `${type}: ${Object.keys(props).join(', ')}`).join('; ');
+}
+
+/** Copies the allowed `config` keys for a component type onto the field, coercing simple types. Returns an error message or undefined. */
+function applyComponentConfig(field: ICustomField, type: string, config: Record<string, unknown>): string | undefined {
+	const allowed = { ...COMMON_CONFIG_PROPS, ...(COMPONENT_CONFIG_PROPS[type] || {}) };
+	const target = field as unknown as Record<string, unknown>;
+	for (const [key, raw] of Object.entries(config)) {
+		const kind = allowed[key];
+		if (!kind || raw === undefined || raw === null) {
+			continue;
+		}
+		if (SECRET_CONFIG_PROPS.has(key) && String(raw).trim() && !/\{[^{}]+\}/.test(String(raw))) {
+			return `'${field.label}.${key}' must reference a variable such as {API_TOKEN}; plain-text secrets are not allowed.`;
+		}
+		switch (kind) {
+			case 'string': target[key] = typeof raw === 'string' ? raw : JSON.stringify(raw); break;
+			case 'number': {
+				const n = Number(raw);
+				if (!Number.isFinite(n)) { return `'${field.label}.${key}' must be a number.`; }
+				target[key] = n;
+				break;
+			}
+			case 'boolean': target[key] = raw === true || raw === 'true'; break;
+			case 'stringArray': target[key] = (Array.isArray(raw) ? raw : [raw]).map(v => String(v)); break;
+			case 'objectArray': {
+				if (!Array.isArray(raw)) { return `'${field.label}.${key}' must be an array.`; }
+				target[key] = raw.filter(v => v && typeof v === 'object').map(v => ({ enabled: true, ...(v as object) }));
+				break;
+			}
+			case 'object': {
+				if (typeof raw !== 'object' || Array.isArray(raw)) { return `'${field.label}.${key}' must be an object.`; }
+				target[key] = { ...(raw as object) };
+				break;
+			}
+		}
+	}
+	return undefined;
+}
+
+/** Field types the AI may use, derived from VALID_FIELD_TYPES so the tool schema can never drift from validation. */
+function aiFieldTypes(): string[] {
+	return Array.from(VALID_FIELD_TYPES);
+}
+
+/** One-line list of the base primitives, generated from the catalog so the tool description always matches what is returned. */
+function describeBasePrimitives(): string {
+	return `${BASE_PRIMITIVES_CATALOG.length} base primitives: ${BASE_PRIMITIVES_CATALOG.map(p => p.type).join(', ')}`;
+}
 
 async function resolveWorkspaceUri(workspacesExplorerService: IWorkspacesExplorerService, workspaceId?: string): Promise<URI | undefined> {
 	try {
@@ -430,7 +610,7 @@ export class ListCustomModulesTool implements IToolImpl {
 			toolReferenceName: 'listCustomModules',
 			displayName: localize('customModules.tool.list.displayName', "List Custom Modules & Component Library"),
 			userDescription: localize('customModules.tool.list.userDescription', "List existing custom modules, base primitives, and reusable classes"),
-			modelDescription: "List all existing Custom Modules, available Base Primitives (text, textarea, select, multiselect, switch, date, time, datetime, date_range, time_range, datetime_range, dynamic_list container, attachment, browser, git), and reusable composite component classes. Use this to discover available field building blocks before synthesizing a custom module schema.",
+			modelDescription: `List all existing Custom Modules, the available Base Primitives (${describeBasePrimitives()}), and reusable composite component classes. Use this to discover available field building blocks before synthesizing a custom module schema.`,
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.layout,
@@ -579,34 +759,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 								},
 								type: {
 									type: 'string',
-									enum: [
-										'text',
-										'number',
-										'textarea',
-										'select',
-										'multiselect',
-										'switch',
-										'date',
-										'time',
-										'datetime',
-										'date_range',
-										'time_range',
-										'datetime_range',
-										'dynamic_list',
-										'attachment',
-										'button_group',
-										'button',
-										'browser',
-										'git',
-										'parameters',
-										'prompt',
-										'python',
-										'tts',
-										'media_player',
-										'voice_note',
-										'table',
-										'output'
-									],
+									enum: aiFieldTypes(),
 									description: "Component type from Base Primitives catalog."
 								},
 								tableColumns: {
@@ -667,6 +820,42 @@ export class GenerateCustomModuleTool implements IToolImpl {
 											targetStatus: { type: 'string', description: "Target status stage to transition ticket to upon click" }
 										},
 										required: ['id', 'label']
+									}
+								},
+								parameters: {
+									type: 'array',
+									description: "Input definitions if type is 'parameters' (the Inputs component). Each input becomes a variable that later components can reference as {name}; callers fill them via CREATE_TICKETS / RUN_TICKETS params.",
+									items: {
+										type: 'object',
+										properties: {
+											name: { type: 'string', description: "Variable name (letters, digits, underscore)." },
+											label: { type: 'string', description: "Optional display label. Default: name." },
+											defaultValue: { type: 'string', description: "Optional default value; may reference another variable as {var}. Default: empty." },
+											options: { type: 'array', items: { type: 'string' }, description: "Optional allowed values (renders a dropdown)." },
+											description: { type: 'string', description: "Optional help text." }
+										},
+										required: ['name']
+									}
+								},
+								config: {
+									type: 'object',
+									description: `Component settings, by type (all optional; omitted settings use the defaults): ${describeComponentConfigProps()}. Every type also accepts outputVariableName and disabled. Text can reference earlier values as {variable}. Secrets (httpAuthToken, httpApiKeyValue, httpAuthPassword, sshPassword) MUST be a variable reference like {API_TOKEN}, never the plain value. Inputs use 'parameters', Output uses 'outputSpecs', table columns use 'tableColumns'.`,
+									additionalProperties: true
+								},
+								outputSpecs: {
+									type: 'array',
+									description: "Output items if type is 'output'. The Output component defines the RESULT of the ticket: a dictionary {label: value} returned by RUN_TICKETS(...).output and GET_OUTPUTS(ticket). Always include at least one item; a status flag such as {label: 'success', sourceExpression: 'True'} is recommended.",
+									items: {
+										type: 'object',
+										properties: {
+											label: { type: 'string', description: "Key of this item in the result dictionary." },
+											sourceExpression: { type: 'string', description: "Where the value comes from: a variable reference such as {summary} or summary, a literal (True / 42), or a template string with {var} placeholders. Omit it and set fieldKey to export another component's value instead." },
+											fieldKey: { type: 'string', description: "Alternative to sourceExpression: id or label of another component in this module whose value is exported." },
+											varName: { type: 'string', description: "Optional Python variable name for this item. Default: derived from label." },
+											defaultFormat: { type: 'string', enum: ['text', 'markdown', 'json', 'table'], description: "Display format, used only with fieldKey. Default: table." },
+											enabled: { type: 'boolean', description: "Default: true." }
+										},
+										required: ['label']
 									}
 								}
 							},
@@ -744,7 +933,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 					if (!f || !f.id || !f.label || !f.type) {
 						continue;
 					}
-					const fieldType = f.type.toLowerCase().trim() as CustomFieldType;
+					const fieldType = normalizeFieldType(f.type.toLowerCase()) as CustomFieldType;
 					if (!VALID_FIELD_TYPES.has(fieldType)) {
 						return toolError(`Field '${f.id}' has invalid type '${f.type}'. Allowed types: ${Array.from(VALID_FIELD_TYPES).join(', ')}`);
 					}
@@ -772,7 +961,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 					if (fieldType === 'dynamic_list') {
 						if (Array.isArray(f.itemFields) && f.itemFields.length > 0) {
 							cleanField.itemFields = f.itemFields.map((sub: any, sIdx: number) => {
-								const subType = (sub.type ? sub.type.toLowerCase().trim() : 'text') as CustomFieldType;
+								const subType = normalizeFieldType(sub.type ? sub.type.toLowerCase() : 'text') as CustomFieldType;
 								const subClean: ICustomField = {
 									id: (sub.id || `sub_${sIdx + 1}`).trim().replace(/[^a-zA-Z0-9_-]/g, '_'),
 									label: (sub.label || `Item ${sIdx + 1}`).trim(),
@@ -793,7 +982,7 @@ export class GenerateCustomModuleTool implements IToolImpl {
 						}
 					}
 
-					if (fieldType === 'button_group' || fieldType === 'button') {
+					if (fieldType === 'button_group') {
 						if (Array.isArray(f.buttons) && f.buttons.length > 0) {
 							cleanField.buttons = f.buttons.map((b: any, bIdx: number) => ({
 								id: (b.id || `btn_${bIdx + 1}`).trim().replace(/[^a-zA-Z0-9_-]/g, '_'),
@@ -850,6 +1039,56 @@ export class GenerateCustomModuleTool implements IToolImpl {
 						} else if (!cleanField.tableRows) {
 							cleanField.tableRows = [];
 						}
+					}
+
+					{
+						// Settings may be given inside `config` or (as in the catalog examples) directly on the field
+						const allowedKeys = Object.keys({ ...COMMON_CONFIG_PROPS, ...(COMPONENT_CONFIG_PROPS[fieldType] || {}) });
+						const merged: Record<string, unknown> = {};
+						for (const key of allowedKeys) {
+							if ((f as any)[key] !== undefined) { merged[key] = (f as any)[key]; }
+						}
+						if ((f as any).config && typeof (f as any).config === 'object') {
+							Object.assign(merged, (f as any).config);
+						}
+						const configError = applyComponentConfig(cleanField, fieldType, merged);
+						if (configError) {
+							return toolError(configError);
+						}
+					}
+
+					if (fieldType === 'parameters' && Array.isArray((f as any).parameters)) {
+						cleanField.parameters = (f as any).parameters
+							.filter((pd: any) => pd && String(pd.name || '').trim())
+							.map((pd: any, pIdx: number) => ({
+								id: `param_${pIdx + 1}`,
+								name: String(pd.name).trim().replace(/[^a-zA-Z0-9_]/g, '_'),
+								label: pd.label ? String(pd.label).trim() : undefined,
+								defaultValue: pd.defaultValue !== undefined ? String(pd.defaultValue) : '',
+								options: Array.isArray(pd.options) ? pd.options.map((o: any) => String(o)) : undefined,
+								description: pd.description ? String(pd.description) : ''
+							}));
+					}
+
+					if (fieldType === 'output' && Array.isArray((f as any).outputSpecs)) {
+						cleanField.outputSpecs = (f as any).outputSpecs
+							.filter((os: any) => os && String(os.label || '').trim())
+							.map((os: any) => {
+								const label = String(os.label).trim();
+								const sourceExpression = os.sourceExpression !== undefined ? String(os.sourceExpression).trim() : '';
+								const fieldKey = os.fieldKey ? String(os.fieldKey).trim() : '';
+								const isCustom = !!sourceExpression || !fieldKey;
+								return {
+									fieldKey: fieldKey || label,
+									label,
+									enabled: os.enabled !== false,
+									defaultFormat: ['text', 'markdown', 'json', 'table'].includes(os.defaultFormat) ? os.defaultFormat : (isCustom ? 'text' : 'table'),
+									isCustom,
+									varName: os.varName ? String(os.varName).trim() : undefined,
+									varNameManual: !!os.varName,
+									sourceExpression: isCustom ? (sourceExpression || `{${label}}`) : undefined
+								};
+							});
 					}
 
 					cleanedFields.push(cleanField);

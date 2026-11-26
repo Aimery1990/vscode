@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { normalizeNumberFieldValue } from '../../../entityPersistence/common/entityPersistence.js';
 import { URI } from '../../../../../base/common/uri.js';
 import { dirname } from '../../../../../base/common/resources.js';
 import { VSBuffer } from '../../../../../base/common/buffer.js';
@@ -1167,6 +1168,26 @@ export class TicketDataEngine {
 	/**
 	 * 4. anyagent_update_ticket
 	 */
+	/** Reads the ticket's template (type) YAML: ticket folder, then workspace, then the global template folder. */
+	private async _readTicketSchema(folderUri: URI, wsUri: URI | undefined, ticketType: string): Promise<any> {
+		const typeYamlCandidates = [
+			URI.joinPath(folderUri, '.agents', 'entity_type', `${ticketType}.yaml`),
+			...(wsUri ? [URI.joinPath(wsUri, '.agents', 'entity_type', `${ticketType}.yaml`)] : []),
+			URI.file(`/Users/aimery/.anyagent/entity_type/${ticketType}.yaml`)
+		];
+		for (const typeYamlUri of typeYamlCandidates) {
+			if (await this.fileService.exists(typeYamlUri)) {
+				try {
+					const schema = parseYaml((await this.fileService.readFile(typeYamlUri)).value.toString());
+					if (schema) {
+						return schema;
+					}
+				} catch { }
+			}
+		}
+		return null;
+	}
+
 	public async updateTicket(options: IUpdateTicketToolOptions): Promise<any> {
 		const wsUri = await this.findWorkspaceUri(options.workspace_id, options.ticket_id);
 		let paths = wsUri ? await this.resolveTicketPaths(wsUri, options.ticket_id, options.parent_path) : undefined;
@@ -1198,6 +1219,7 @@ export class TicketDataEngine {
 		let ticketModified = false;
 		let readmeModified = false;
 		let instructionModified = false;
+		let schemaForNumbers: any = undefined;
 
 		for (const [rawPath, rawVal] of Object.entries(options.updates)) {
 			const path = rawPath.trim();
@@ -1263,7 +1285,21 @@ export class TicketDataEngine {
 			// 7. Dynamic Custom Cards & Attributes (/Custom/...)
 			else if (path.startsWith('/Custom/') || path.startsWith('Custom/')) {
 				const cleanPath = path.replace(/^\/?Custom\//, '');
-				ticketContent = this._applyCustomUpdate(ticketContent, cleanPath, rawVal);
+				let customVal = rawVal;
+				if (!cleanPath.includes('/')) {
+					// Enforce a number component's range / precision (same rules as the ticket UI)
+					schemaForNumbers ??= await this._readTicketSchema(paths.folderUri, wsUri, paths.ticketType);
+					const numDef = (Array.isArray(schemaForNumbers?.fields) ? schemaForNumbers.fields : [])
+						.find((f: any) => f && f.type === 'number' && (f.label === cleanPath || f.id === cleanPath));
+					if (numDef) {
+						const numCheck = normalizeNumberFieldValue({ label: numDef.label, min: numDef.min, max: numDef.max, precision: numDef.precision }, customVal);
+						if (!numCheck.ok) {
+							throw new Error(numCheck.error);
+						}
+						customVal = numCheck.value;
+					}
+				}
+				ticketContent = this._applyCustomUpdate(ticketContent, cleanPath, customVal);
 				ticketModified = true;
 			}
 		}
@@ -1852,21 +1888,7 @@ export class TicketDataEngine {
 		let ticketContent = (await this.fileService.readFile(paths.ticketMdUri)).value.toString();
 		const parsedTicket = this._parseTicketMd(ticketContent);
 
-		let schema: any = null;
-		const typeYamlCandidates = [
-			URI.joinPath(paths.folderUri, '.agents', 'entity_type', `${paths.ticketType}.yaml`),
-			URI.joinPath(wsUri, '.agents', 'entity_type', `${paths.ticketType}.yaml`),
-			URI.file(`/Users/aimery/.anyagent/entity_type/${paths.ticketType}.yaml`)
-		];
-		for (const typeYamlUri of typeYamlCandidates) {
-			if (await this.fileService.exists(typeYamlUri)) {
-				try {
-					const yamlStr = (await this.fileService.readFile(typeYamlUri)).value.toString();
-					schema = parseYaml(yamlStr);
-					if (schema) break;
-				} catch {}
-			}
-		}
+		const schema: any = await this._readTicketSchema(paths.folderUri, wsUri, paths.ticketType);
 
 		const requestedField = (options.table_field || '').trim();
 		if (!requestedField) {

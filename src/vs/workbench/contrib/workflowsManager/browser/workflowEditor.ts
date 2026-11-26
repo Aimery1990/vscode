@@ -26,7 +26,7 @@ import { INotificationService } from '../../../../platform/notification/common/n
 import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
 import { Codicon } from '../../../../base/common/codicons.js';
-import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IVoiceNoteClip, IParameterDefinition, generateSmartPythonVarName, sanitizePythonVarName, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshCommandsList } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, ICustomModule, ICustomField, CustomFieldType, IVoiceNoteClip, IParameterDefinition, generateSmartPythonVarName, sanitizePythonVarName, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshCommandsList, normalizeLegacyFieldTypes } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
@@ -832,6 +832,9 @@ export class WorkflowEditor extends EditorPane {
 				this._activeRoutingMode = this._data.routingMode || 'orthogonal';
 				await this._saveFlowchartData(true);
 			}
+
+			// Migrate renamed component types (e.g. legacy 'result' -> 'output') before anything reads the graph
+			normalizeLegacyFieldTypes(this._data);
 
 			// Initialize history baseline
 			this._undoStack = [];
@@ -3223,7 +3226,7 @@ export class WorkflowEditor extends EditorPane {
 					}
 					if (d.parameters && Object.keys(d.parameters).length > 0) {
 						const row = append(opBody, $('.history-op-row'));
-						append(row, $('span.history-op-key')).textContent = 'Parameters:';
+						append(row, $('span.history-op-key')).textContent = 'Inputs:';
 						const pPre = append(row, $('pre.workflow-trace-pre'));
 						pPre.textContent = JSON.stringify(d.parameters, null, 2);
 					}
@@ -3524,7 +3527,7 @@ export class WorkflowEditor extends EditorPane {
 				const pTitleRow = append(pSec, $('.trace-sub-title-row'));
 				const pTitle = append(pTitleRow, $('span.trace-sub-title'));
 				append(pTitle, $('span' + ThemeIcon.asCSSSelector(Codicon.gear)));
-				append(pTitle, $('span')).textContent = 'Resolved Parameters';
+				append(pTitle, $('span')).textContent = 'Resolved Inputs';
 				const fullParams = JSON.stringify(d.parameters, null, 2);
 				attachTraceCopyBtn(pTitleRow, 'Copy', () => fullParams, 'Resolved parameters copied to clipboard.');
 				const pPre = append(pSec, $('pre.workflow-trace-pre'));
@@ -3532,7 +3535,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 		}
 		// 5. Output Manifest Primitive Trace
-		else if (step.fieldType === 'output' || step.fieldType === 'result') {
+		else if (step.fieldType === 'output') {
 			if (d.aggregatedOutputs && Object.keys(d.aggregatedOutputs).length > 0) {
 				const oSec = append(body, $('.trace-sub-section'));
 				const oTitleRow = append(oSec, $('.trace-sub-title-row'));
@@ -3648,7 +3651,7 @@ export class WorkflowEditor extends EditorPane {
 						if (op.type === 'create_ticket' && op.details) {
 							if (op.details.ticketId) lines.push(`    Created Ticket ID: ${op.details.ticketId}`);
 							if (op.details.targetFolder) lines.push(`    Target Folder: ${op.details.targetFolder}`);
-							if (op.details.parameters) lines.push(`    Parameters: ${JSON.stringify(op.details.parameters)}`);
+							if (op.details.parameters) lines.push(`    Inputs: ${JSON.stringify(op.details.parameters)}`);
 						} else if (op.type === 'set_variable' && op.details) {
 							if (op.details.expression) lines.push(`    Expression: ${op.details.expression}`);
 						} else if (op.type === 'run_ticket' && op.executedTicket) {
@@ -3738,8 +3741,8 @@ export class WorkflowEditor extends EditorPane {
 								lines.push(`    Fetched Content (${d.contentLength || String(d.content).length} chars):\n      ${preview.replace(/\n/g, '\n      ')}${String(d.content).length > 500 ? '\n      ... (truncated)' : ''}`);
 							}
 						} else if (step.fieldType === 'parameters') {
-							if (d.parameters) lines.push(`    Resolved Parameters: ${JSON.stringify(d.parameters, null, 2).replace(/\n/g, '\n      ')}`);
-						} else if (step.fieldType === 'output' || step.fieldType === 'result') {
+							if (d.parameters) lines.push(`    Resolved Inputs: ${JSON.stringify(d.parameters, null, 2).replace(/\n/g, '\n      ')}`);
+						} else if (step.fieldType === 'output') {
 							if (d.aggregatedOutputs) lines.push(`    Output Manifest: ${JSON.stringify(d.aggregatedOutputs, null, 2).replace(/\n/g, '\n      ')}`);
 						} else {
 							const valStr = typeof step.output === 'object' && step.output !== null ? JSON.stringify(step.output, null, 2) : String(step.output ?? '(empty)');
@@ -5275,7 +5278,7 @@ export class WorkflowEditor extends EditorPane {
 			tts: { label: 'O2 TTS', icon: Codicon.unmute, color: '#f87171', bg: 'rgba(239, 68, 68, 0.16)', border: 'rgba(248, 113, 113, 0.45)' },
 			media_player: { label: 'MP3 / MP4 PLAYER', icon: Codicon.deviceCameraVideo, color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.16)', border: 'rgba(251, 191, 36, 0.45)' },
 			voice_note: { label: 'VOICE NOTE', icon: Codicon.mic, color: '#94a3b8', bg: 'rgba(148, 163, 184, 0.14)', border: 'rgba(148, 163, 184, 0.35)' },
-			sub_workflow: { label: 'SUB-WORKFLOW', icon: Codicon.layers, color: '#22d3ee', bg: 'rgba(6, 182, 212, 0.16)', border: 'rgba(34, 211, 238, 0.45)' },
+			sub_workflow: { label: 'CALL SUB-WORKFLOW', icon: Codicon.layers, color: '#22d3ee', bg: 'rgba(6, 182, 212, 0.16)', border: 'rgba(34, 211, 238, 0.45)' },
 			ssh: { label: 'SSH TERMINAL', icon: Codicon.terminal, color: '#34d399', bg: 'rgba(16, 185, 129, 0.16)', border: 'rgba(52, 211, 153, 0.45)' },
 			git: { label: 'GIT BRANCH', icon: Codicon.gitMerge, color: '#a3e635', bg: 'rgba(132, 204, 22, 0.16)', border: 'rgba(163, 230, 53, 0.45)' },
 			create_tickets: { label: 'CREATE TICKETS', icon: Codicon.add, color: '#c084fc', bg: 'rgba(168, 85, 247, 0.16)', border: 'rgba(192, 132, 252, 0.45)' },
@@ -5294,7 +5297,7 @@ export class WorkflowEditor extends EditorPane {
 		const accentBorder = compMeta ? compMeta.border : (isVariableStep ? 'rgba(56, 189, 248, 0.4)' : 'rgba(192, 132, 252, 0.42)');
 
 		const varName = comp
-			? ((comp.type !== 'parameters' && comp.type !== 'output' && comp.type !== 'result' && comp.type !== 'display')
+			? ((comp.type !== 'parameters' && comp.type !== 'output' && comp.type !== 'display')
 				? this._getComponentOutputVarName(comp)
 				: '')
 			: (step.targetVariable || '').replace(/^@/, '').trim();
@@ -5304,7 +5307,7 @@ export class WorkflowEditor extends EditorPane {
 
 		let effectiveCode = fullCode;
 		if (comp?.type === 'python') {
-			effectiveCode = (comp.pythonCode || (comp as any).defaultValue || comp.defaultContent || '').replace(/\r\n/g, '\n').trim() || '# Empty Python script';
+			effectiveCode = (comp.pythonCode || comp.defaultValue || comp.defaultContent || '').replace(/\r\n/g, '\n').trim() || '# Empty Python script';
 		} else if (comp && (comp.type === 'create_tickets' || comp.type === 'run_tickets' || comp.type === 'get_outputs' || comp.type === 'get_ticket' || comp.type === 'get_tickets' || comp.type === 'display')) {
 			effectiveCode = this._buildBuiltinComponentPythonExpression(comp);
 		}
@@ -5351,7 +5354,7 @@ export class WorkflowEditor extends EditorPane {
 				case 'sub_workflow': {
 					const inCount = Array.isArray(comp.subWorkflowInputDefs) ? comp.subWorkflowInputDefs.length : 0;
 					const outCount = Array.isArray(comp.subWorkflowOutputDefs) ? comp.subWorkflowOutputDefs.length : 0;
-					metadataLabel = 'Sub-Workflow';
+					metadataLabel = 'Call Sub-Workflow';
 					metadataValue = `${comp.subWorkflowName || comp.subWorkflowId || '(unlinked)'} (${inCount} in · ${outCount} out)`;
 					break;
 				}
@@ -8890,14 +8893,14 @@ export class WorkflowEditor extends EditorPane {
 		}
 		const comp = step.component;
 		const isStandardComponentCapsule = Boolean(
-			comp && !['parameters', 'output', 'result', 'display', 'create_tickets', 'run_tickets', 'get_outputs', 'get_ticket', 'get_tickets'].includes(comp.type)
+			comp && !['parameters', 'output', 'display', 'create_tickets', 'run_tickets', 'get_outputs', 'get_ticket', 'get_tickets'].includes(comp.type)
 		);
 		const maxCapsuleChars = typeof step.capsuleWidth === 'number' ? 400 : (isStandardComponentCapsule ? 240 : 180);
 		if (displayExpr.length > maxCapsuleChars) {
 			displayExpr = displayExpr.substring(0, maxCapsuleChars - 3) + '...';
 		}
 
-		const isEditableComponentVar = comp && comp.type !== 'parameters' && comp.type !== 'output' && comp.type !== 'result' && comp.type !== 'display';
+		const isEditableComponentVar = comp && comp.type !== 'parameters' && comp.type !== 'output' && comp.type !== 'display';
 		const eqIdx = isEditableComponentVar ? displayExpr.indexOf(' = ') : -1;
 
 		// Detect CREATE_TICKETS (both native create_tickets component & classic Python CREATE_TICKETS(...) step)
@@ -10460,7 +10463,7 @@ export class WorkflowEditor extends EditorPane {
 			const subId = comp.subWorkflowId;
 			const def = this._workflowExecutionService.getSubWorkflowById(subId);
 			const subName = comp.subWorkflowName || def?.name || subId;
-			const swItem = this._outlineSubWorkflowItem(subId, label || subName, parentKey, visitedSubs, `Sub-Workflow · ${subName}${disabled ? ' · disabled' : ''}`, key, disabled);
+			const swItem = this._outlineSubWorkflowItem(subId, label || subName, parentKey, visitedSubs, `Call Sub-Workflow · ${subName}${disabled ? ' · disabled' : ''}`, key, disabled);
 			// Clicking the capsule: highlight it, show its card (inputs / outputs) on the right, and its flowchart in a split below
 			const showFlow = () => {
 				this._openOutlineSubWorkflow(subId).catch(err => this._notificationService.error(`Could not show Sub-Workflow '${subName}': ${err instanceof Error ? err.message : String(err)}`));
@@ -10930,7 +10933,7 @@ export class WorkflowEditor extends EditorPane {
 		const labels: Record<string, string> = {
 			prompt: 'AI Prompt', python: 'Python Script', table: 'Data Table', browser: 'Browser', http_request: 'HTTP Request',
 			parameters: 'Inputs', output: 'Output', create_tickets: 'Create Tickets', run_tickets: 'Run Tickets', get_outputs: 'Get Outputs',
-			get_ticket: 'Get Ticket', get_tickets: 'Get Tickets', display: 'Display', sub_workflow: 'Sub-Workflow', voice_note: 'Voice Note',
+			get_ticket: 'Get Ticket', get_tickets: 'Get Tickets', display: 'Display', sub_workflow: 'Call Sub-Workflow', voice_note: 'Voice Note',
 			tts: 'Text to Speech', media_player: 'Media Player', ssh: 'SSH Terminal', git: 'Git', text: 'Text', select: 'Select'
 		};
 		return labels[type || ''] || (type || 'Component');
@@ -12461,7 +12464,7 @@ export class WorkflowEditor extends EditorPane {
 		// Row 4: Parameters Reference
 		const fieldsRow = append(draftWrapper, $('.node-function-fields-row'));
 		fieldsRow.onmousedown = (e) => e.stopPropagation();
-		const fieldsLabel = append(fieldsRow, $('.node-function-fields-label', {}, 'Parameters:'));
+		const fieldsLabel = append(fieldsRow, $('.node-function-fields-label', {}, 'Inputs:'));
 
 		// Row 4b: Available Context Variables & Date/Time Symbols Reference Row
 		const varsRefRow = append(draftWrapper, $('.node-function-templates-row'));
@@ -12766,7 +12769,7 @@ export class WorkflowEditor extends EditorPane {
 			const paramSpecs: IParamSpec[] = [];
 
 			if (/CREATE_TICKETS/i.test(val)) {
-				fieldsLabel.textContent = `Parameters (${curType} Inputs):`;
+				fieldsLabel.textContent = `Inputs (${curType}):`;
 
 				// 1. Discover Inputs / Parameters strictly from Custom Module YAML schema (ICustomModulesService)
 				const schemaParams = extractSchemaParamsForType(curType);
@@ -12780,7 +12783,7 @@ export class WorkflowEditor extends EditorPane {
 				paramSpecs.push({ name: 'title', defaultValue: '', isStandard: true });
 				paramSpecs.push({ name: 'path', defaultValue: defaultPath, isStandard: true });
 			} else if (/\b(RUN_TICKETS|run_tickets)\b/i.test(val)) {
-				fieldsLabel.textContent = 'Parameters (RUN_TICKETS):';
+				fieldsLabel.textContent = 'Inputs (RUN_TICKETS):';
 				const ticketVarCandidate = Array.from(availableVars).find(v => /ticket/i.test(v));
 				const ticketDefault = ticketVarCandidate ? `@${ticketVarCandidate}` : '';
 				paramSpecs.push({ name: 'ticket', defaultValue: ticketDefault, isStandard: true });
@@ -12796,16 +12799,16 @@ export class WorkflowEditor extends EditorPane {
 					}
 				}
 			} else if (/GET_TICKETS/i.test(val)) {
-				fieldsLabel.textContent = 'Parameters (GET_TICKETS):';
+				fieldsLabel.textContent = 'Inputs (GET_TICKETS):';
 				const ticketVarCandidate = Array.from(availableVars).find(v => /ticket/i.test(v));
 				paramSpecs.push({ name: 'ticket', defaultValue: ticketVarCandidate ? `@${ticketVarCandidate}` : '', isStandard: true });
 			} else if (/GET_OUTPUTS/i.test(val)) {
-				fieldsLabel.textContent = 'Parameters (GET_OUTPUTS):';
+				fieldsLabel.textContent = 'Inputs (GET_OUTPUTS):';
 				const ticketVarCandidate = Array.from(availableVars).find(v => /ticket/i.test(v));
 				paramSpecs.push({ name: 'ticket', defaultValue: ticketVarCandidate ? `@${ticketVarCandidate}` : '', isStandard: true });
 				paramSpecs.push({ name: 'field', defaultValue: '' });
 			} else {
-				fieldsLabel.textContent = 'Parameters:';
+				fieldsLabel.textContent = 'Inputs:';
 			}
 
 			if (paramSpecs.length === 0) {
@@ -16995,7 +16998,7 @@ export class WorkflowEditor extends EditorPane {
 		};
 		if (step.component) {
 			const cType = step.component.type;
-			if (cType !== 'parameters' && cType !== 'output' && cType !== 'result' && cType !== 'display') {
+			if (cType !== 'parameters' && cType !== 'output' && cType !== 'display') {
 				pushVar(step.component.outputVariableName || step.targetVariable || this._getComponentOutputVarName(step.component));
 			}
 		} else {
@@ -17138,7 +17141,7 @@ export class WorkflowEditor extends EditorPane {
 				}
 			}
 			if (!mergedIntoExistingSingleInstance) {
-				if (compType !== 'parameters' && compType !== 'output' && compType !== 'result' && compType !== 'display') {
+				if (compType !== 'parameters' && compType !== 'output' && compType !== 'display') {
 					const resolvedVar = (clonedStep.component.outputVariableName || clonedStep.targetVariable || this._getComponentOutputVarName(clonedStep.component)).trim();
 					if (resolvedVar) {
 						clonedStep.component.outputVariableName = resolvedVar;
@@ -17419,7 +17422,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 
 			if (!mergedIntoExistingSingleInstance) {
-				if (compType !== 'parameters' && compType !== 'output' && compType !== 'result' && compType !== 'display') {
+				if (compType !== 'parameters' && compType !== 'output' && compType !== 'display') {
 					const resolvedVar = (clonedStep.component.outputVariableName || clonedStep.targetVariable || this._getComponentOutputVarName(clonedStep.component)).trim();
 					if (resolvedVar) {
 						clonedStep.component.outputVariableName = resolvedVar;
@@ -17577,7 +17580,7 @@ export class WorkflowEditor extends EditorPane {
 			}
 
 			if (!mergedIntoExistingSingleInstance) {
-				if (compType !== 'parameters' && compType !== 'output' && compType !== 'result' && compType !== 'display') {
+				if (compType !== 'parameters' && compType !== 'output' && compType !== 'display') {
 					const resolvedVar = (movedStep.component.outputVariableName || movedStep.targetVariable || this._getComponentOutputVarName(movedStep.component)).trim();
 					if (resolvedVar) {
 						movedStep.component.outputVariableName = resolvedVar;
@@ -19889,7 +19892,7 @@ export class WorkflowEditor extends EditorPane {
 
 	private _formatNodeComponentSummary(comp: ICustomField): string {
 		const title = (comp.label || '').trim() || comp.type;
-		const varName = (comp.type !== 'parameters' && comp.type !== 'output' && comp.type !== 'result' && comp.type !== 'display')
+		const varName = (comp.type !== 'parameters' && comp.type !== 'output' && comp.type !== 'display')
 			? this._getComponentOutputVarName(comp)
 			: '';
 		switch (comp.type) {
@@ -20133,7 +20136,7 @@ export class WorkflowEditor extends EditorPane {
 			return;
 		}
 		step.label = comp.label;
-		const outVar = (comp.type === 'parameters' || comp.type === 'output' || comp.type === 'result' || comp.type === 'display')
+		const outVar = (comp.type === 'parameters' || comp.type === 'output' || comp.type === 'display')
 			? undefined
 			: this._getComponentOutputVarName(comp);
 		if (comp.type === 'create_tickets' || comp.type === 'run_tickets' || comp.type === 'get_outputs' || comp.type === 'get_ticket' || comp.type === 'get_tickets' || comp.type === 'display') {
@@ -20198,7 +20201,7 @@ export class WorkflowEditor extends EditorPane {
 				? '# Write Python automation script here\nimport sys, os, json\n\nOUTPUT = None\n'
 				: '',
 			parameters: compType === 'parameters'
-				? [{ name: 'param1', defaultValue: '', description: '' }]
+				? [{ id: `param_${ts}_1`, name: 'param1', defaultValue: '', description: '' }]
 				: undefined,
 			outputSpecs: compType === 'output'
 				? []
@@ -20223,7 +20226,7 @@ export class WorkflowEditor extends EditorPane {
 			sshLastOutput: compType === 'ssh' ? '' : undefined,
 			sshOutputLines: compType === 'ssh' ? 50 : undefined,
 			sshQuickCommands: compType === 'ssh' ? SSH_DEFAULT_QUICK_COMMANDS.map(c => ({ ...c })) : undefined,
-			httpUrl: compType === 'http_request' ? 'https://aimery.link/api/tailored-resumes/JOB-41298374' : undefined,
+			httpUrl: compType === 'http_request' ? '' : undefined,
 			httpMethod: compType === 'http_request' ? 'GET' : undefined,
 			httpAuthType: compType === 'http_request' ? 'none' : undefined,
 			httpBodyType: compType === 'http_request' ? 'none' : undefined,

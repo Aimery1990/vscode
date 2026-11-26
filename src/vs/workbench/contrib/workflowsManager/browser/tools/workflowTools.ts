@@ -15,21 +15,14 @@ export const GetWorkflowStateToolId = 'anyagent_get_workflow_state';
 export const ResumeWorkflowStepToolId = 'anyagent_resume_workflow_step';
 export const StopWorkflowToolId = 'anyagent_stop_workflow';
 
+// Tool ids match the Python built-in function names used inside workflows. Each tool has exactly one id; the
+// human-readable name lives in `displayName` (no aliases).
 export const CreateTicketsToolId = 'CREATE_TICKETS';
+export const GetTicketToolId = 'GET_TICKET';
 export const GetTicketsToolId = 'GET_TICKETS';
 export const GetOutputsToolId = 'GET_OUTPUTS';
 export const RunTicketsToolId = 'RUN_TICKETS';
 export const GetPrimitivesCatalogToolId = 'GET_PRIMITIVES_CATALOG';
-
-// Backwards-compatible aliases
-export const CreateTicketToolId = CreateTicketsToolId;
-export const GetTicketToolId = GetTicketsToolId;
-export const RunTicketToolId = RunTicketsToolId;
-export const LegacyCreateTicketToolId = 'anyagent_create_ticket';
-export const LegacyGetTicketToolId = 'anyagent_get_ticket';
-export const LegacyGetOutputsToolId = 'anyagent_get_outputs';
-export const LegacyRunTicketToolId = 'anyagent_run_ticket';
-export const LegacyGetPrimitivesCatalogToolId = 'anyagent_get_primitives_catalog';
 
 
 function toolResult(data: any, message?: string): IToolResult {
@@ -319,7 +312,7 @@ export class CreateTicketTool implements IToolImpl {
 		return {
 			id: CreateTicketsToolId,
 			toolReferenceName: 'CREATE_TICKETS',
-			displayName: localize('workflow.tool.createTickets.displayName', "CREATE_TICKETS"),
+			displayName: localize('workflow.tool.createTickets.displayName', "Create Tickets"),
 			userDescription: localize('workflow.tool.createTicket.userDescription', "Create a new ticket from a schema template in the workspace"),
 			modelDescription: 'Create a new ticket entity in the workspace based on a schema (custom module or built-in type). Initializes fields, parameters, and 4 markdown files (instruction.md, README.md, work_log.md, metadata.json).',
 			source: ToolDataSource.Internal,
@@ -405,11 +398,11 @@ export class GetTicketTool implements IToolImpl {
 
 	getToolData(): IToolData {
 		return {
-			id: GetTicketsToolId,
-			toolReferenceName: 'GET_TICKETS',
-			displayName: localize('workflow.tool.getTickets.displayName', "GET_TICKETS"),
+			id: GetTicketToolId,
+			toolReferenceName: 'GET_TICKET',
+			displayName: localize('workflow.tool.getTicket.displayName', "Get Ticket"),
 			userDescription: localize('workflow.tool.getTicket.userDescription', "Retrieve ticket details, fields, custom metadata, and output"),
-			modelDescription: 'Query and fetch ticket details including current field values, customMetadata, execution outputs, and schema configuration by ticketId, name, or path.',
+			modelDescription: 'Fetch ONE ticket by id, name, or path: current field values, customMetadata, execution outputs, and schema configuration. To search for several tickets by type / status / title / folder, use GET_TICKETS.',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.info,
@@ -456,6 +449,72 @@ export class GetTicketTool implements IToolImpl {
 }
 
 // -------------------------------------------------------------
+// 6b. GET_TICKETS (batch query)
+// -------------------------------------------------------------
+export class GetTicketsTool implements IToolImpl {
+	constructor(
+		private readonly ticketRuntimeService: ITicketWorkflowRuntimeService
+	) { }
+
+	getToolData(): IToolData {
+		return {
+			id: GetTicketsToolId,
+			toolReferenceName: 'GET_TICKETS',
+			displayName: localize('workflow.tool.getTickets.displayName', "Get Tickets"),
+			userDescription: localize('workflow.tool.getTickets.userDescription', "Search tickets by type, status, title, or folder"),
+			modelDescription: 'Search for SEVERAL tickets at once. Filters are combined with AND; every filter is optional but at least one should be given. Returns a list of {ticketId, ticketName, ticketType, title, status, priority, entityUri, customMetadata} (or, when `field` is set, the list of that field\'s values). Use GET_TICKET to read one known ticket in full.',
+			source: ToolDataSource.Internal,
+			canBeReferencedInPrompt: true,
+			icon: Codicon.search,
+			inputSchema: {
+				type: 'object',
+				properties: {
+					workspace_uri: { type: 'string', description: 'The root workspace URI or path. Relative `path` filters are resolved against it.' },
+					ticket_type: { type: 'string', description: 'Ticket template (type) id, exact match, case-insensitive.' },
+					status: { type: 'string', description: 'Ticket status, exact match, case-insensitive (e.g. "Todo", "Done").' },
+					title: { type: 'string', description: 'Substring of the ticket title or folder name, case-insensitive.' },
+					path: { type: 'string', description: 'Only tickets inside this folder (absolute, or relative to workspace_uri).' },
+					field: { type: 'string', description: 'Return only this field\'s value for each ticket instead of the whole ticket.' },
+					limit: { type: 'number', description: 'Maximum number of tickets to return. Default: no limit.' }
+				},
+				required: ['workspace_uri']
+			}
+		};
+	}
+
+	async prepareToolInvocation(_context: IToolInvocationPreparationContext, _token: CancellationToken): Promise<IPreparedToolInvocation> {
+		return {
+			invocationMessage: localize('workflow.tool.getTickets.invoking', "Searching tickets..."),
+			pastTenseMessage: localize('workflow.tool.getTickets.done', "Searched tickets")
+		};
+	}
+
+	async invoke(invocation: IToolInvocation, _countTokens: CountTokensCallback, _progress: ToolProgress, _token: CancellationToken): Promise<IToolResult> {
+		try {
+			const { workspace_uri, ticket_type, status, title, path, field, limit } = invocation.parameters || {};
+			if (!workspace_uri) {
+				return toolError("'workspace_uri' is required.");
+			}
+			const query: Record<string, any> = {};
+			if (ticket_type) { query.ticket_type = ticket_type; }
+			if (status) { query.status = status; }
+			if (title) { query.title = title; }
+			if (path) { query.path = path; }
+			if (limit) { query.limit = limit; }
+			if (Object.keys(query).length === 0 && !field) {
+				return toolError('Give at least one filter (ticket_type, status, title, or path).');
+			}
+			if (field) { query.field = field; }
+			const res = await this.ticketRuntimeService.getTickets(workspace_uri, query, field || undefined);
+			const list = Array.isArray(res) ? res : [];
+			return toolResult(list, `Found ${list.length} ticket(s)`);
+		} catch (err: any) {
+			return toolError(err.message || String(err));
+		}
+	}
+}
+
+// -------------------------------------------------------------
 // 7. RUN_TICKETS
 // -------------------------------------------------------------
 export class RunTicketTool implements IToolImpl {
@@ -467,7 +526,7 @@ export class RunTicketTool implements IToolImpl {
 		return {
 			id: RunTicketsToolId,
 			toolReferenceName: 'RUN_TICKETS',
-			displayName: localize('workflow.tool.runTickets.displayName', "RUN_TICKETS"),
+			displayName: localize('workflow.tool.runTickets.displayName', "Run Tickets"),
 			userDescription: localize('workflow.tool.runTicket.userDescription', "Sequentially execute all primitives on a ticket schema from top to bottom"),
 			modelDescription: 'Execute a ticket as an autonomous runtime unit. Evaluates parameters, performs browser navigations/extractions, triggers AI prompts, aggregates outputs, and persists state.',
 			source: ToolDataSource.Internal,
@@ -535,9 +594,9 @@ export class GetPrimitivesCatalogTool implements IToolImpl {
 		return {
 			id: GetPrimitivesCatalogToolId,
 			toolReferenceName: 'GET_PRIMITIVES_CATALOG',
-			displayName: localize('workflow.tool.catalog.displayName', "GET_PRIMITIVES_CATALOG"),
+			displayName: localize('workflow.tool.catalog.displayName', "Get Primitives Catalog"),
 			userDescription: localize('workflow.tool.catalog.userDescription', "Get all Base Primitives and Reusable Classes with their runtime execution specifications"),
-			modelDescription: 'Retrieve the latest catalog of all 18 Base Primitives and Reusable Classes, including their data categories, supported inputs, outputs, and execution behaviors.',
+			modelDescription: 'Retrieve the live catalog of every Base Primitive (component type) and Reusable Class, including data category, supported inputs, outputs, and execution behavior. The list is generated at call time, so its length reflects the current system.',
 			source: ToolDataSource.Internal,
 			canBeReferencedInPrompt: true,
 			icon: Codicon.library,
@@ -583,7 +642,7 @@ export class GetOutputsTool implements IToolImpl {
 		return {
 			id: GetOutputsToolId,
 			toolReferenceName: 'GET_OUTPUTS',
-			displayName: localize('workflow.tool.getOutputs.displayName', "GET_OUTPUTS"),
+			displayName: localize('workflow.tool.getOutputs.displayName', "Get Outputs"),
 			userDescription: localize('workflow.tool.getOutputs.userDescription', "Retrieve only the structured Output component fields of a ticket"),
 			modelDescription: 'Retrieve the OUTPUT component dictionary of a ticket by ticket_id or ticket handle. Returns null if the ticket template has no OUTPUT component; if an individual output field has no value, its dictionary entry is null.',
 			source: ToolDataSource.Internal,

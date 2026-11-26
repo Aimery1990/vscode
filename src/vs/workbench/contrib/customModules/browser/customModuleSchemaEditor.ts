@@ -1370,7 +1370,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				newField.voiceRunInFlow = false;
 			}
 			if (bc.type === 'http_request') {
-				newField.httpUrl = 'https://aimery.link/api/tailored-resumes/JOB-41298374';
+				newField.httpUrl = '';
 				newField.httpMethod = 'GET';
 				newField.httpAuthType = 'none';
 				newField.httpBodyType = 'none';
@@ -1397,7 +1397,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				const candidatePrimitives = fields.filter(f =>
 					f &&
 					f.type !== 'output' &&
-					f.type !== 'result' &&
 					f.type !== 'display' &&
 					f.id !== 'title' &&
 					f.id !== 'description' &&
@@ -1990,7 +1989,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					const ft = (rf.type || '').toLowerCase();
 					const fl = (rf.label || rf.id || '').trim();
 					const flLower = fl.toLowerCase();
-					if (!fl || ft === 'output' || ft === 'result' || ft === 'display' || flLower === 'output' || flLower === 'result' || rf.id === 'title' || flLower === 'title') {
+					if (!fl || ft === 'output' || ft === 'display' || flLower === 'output' || rf.id === 'title' || flLower === 'title') {
 						return;
 					}
 					if (ft === 'parameters' && Array.isArray(rf.parameters)) {
@@ -2201,7 +2200,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				const isVoiceNote = field.type === 'voice_note';
 				const isSubWorkflow = field.type === 'sub_workflow';
 				const isHttpRequest = field.type === 'http_request';
-				const isOutput = field.type === 'output' || field.type === 'result';
+				const isOutput = field.type === 'output';
 				const isWfBuiltin = field.type === 'create_tickets' || field.type === 'run_tickets' || field.type === 'get_outputs' || field.type === 'get_ticket' || field.type === 'display';
 				const wfBadgeLabels: Record<string, string> = {
 					create_tickets: 'CREATE TICKETS',
@@ -2210,7 +2209,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					get_ticket: 'GET TICKET',
 					display: 'DISPLAY'
 				};
-				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isPython ? 'PYTHON' : (isTable ? 'DATA TABLE' : (isParameters ? 'INPUTS' : (isPrompt ? 'AI PROMPT' : (isTts ? 'AUDIO / TTS' : (isMediaPlayer ? 'MP3 / MP4 PLAYER' : (isVoiceNote ? 'VOICE NOTE' : (isSubWorkflow ? 'SUB-WORKFLOW' : (isHttpRequest ? 'HTTP REQUEST' : (isOutput ? 'OUTPUT' : (wfBadgeLabels[field.type] || field.type.toUpperCase())))))))))))))));
+				const badgeText = isContainer ? 'CONTAINER' : (isAttachment ? 'ATTACHMENT' : (isNumber ? 'NUMBER' : (isBrowser ? 'BROWSER' : (isGit ? 'GIT REPO' : (isPython ? 'PYTHON' : (isTable ? 'DATA TABLE' : (isParameters ? 'INPUTS' : (isPrompt ? 'AI PROMPT' : (isTts ? 'AUDIO / TTS' : (isMediaPlayer ? 'MP3 / MP4 PLAYER' : (isVoiceNote ? 'VOICE NOTE' : (isSubWorkflow ? 'CALL SUB-WORKFLOW' : (isHttpRequest ? 'HTTP REQUEST' : (isOutput ? 'OUTPUT' : (wfBadgeLabels[field.type] || field.type.toUpperCase())))))))))))))));
 				const badgeBg = isContainer ? 'rgba(6, 182, 212, 0.18)' : (isAttachment ? 'rgba(16, 185, 129, 0.18)' : (isNumber ? 'rgba(234, 179, 8, 0.18)' : (isBrowser ? 'rgba(56, 189, 248, 0.18)' : (isGit ? 'rgba(249, 115, 22, 0.18)' : (isPython ? 'rgba(56, 189, 248, 0.15)' : (isTable ? 'rgba(20, 184, 166, 0.18)' : (isParameters ? 'rgba(168, 85, 247, 0.18)' : (isPrompt ? 'rgba(59, 130, 246, 0.18)' : (isTts ? 'rgba(236, 72, 153, 0.18)' : (isMediaPlayer ? 'rgba(245, 158, 11, 0.18)' : (isVoiceNote ? 'rgba(148, 163, 184, 0.16)' : (isSubWorkflow ? 'rgba(6, 182, 212, 0.18)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.18)' : (isOutput ? 'rgba(129, 140, 248, 0.18)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.22)' : 'rgba(99, 102, 241, 0.18)')))))))))))))));
 				const badgeColor = isContainer ? '#06b6d4' : (isAttachment ? '#10b981' : (isNumber ? '#facc15' : (isBrowser ? '#38bdf8' : (isGit ? '#f97316' : (isPython ? '#38bdf8' : (isTable ? '#2dd4bf' : (isParameters ? '#c084fc' : (isPrompt ? '#60a5fa' : (isTts ? '#f472b6' : (isMediaPlayer ? '#fbbf24' : (isVoiceNote ? '#cbd5e1' : (isSubWorkflow ? '#22d3ee' : (isHttpRequest ? '#06b6d4' : (isOutput ? '#818cf8' : (isWfBuiltin ? '#d8b4fe' : '#818cf8')))))))))))))));
 				const badgeBorder = isContainer ? 'rgba(6, 182, 212, 0.35)' : (isAttachment ? 'rgba(16, 185, 129, 0.35)' : (isNumber ? 'rgba(234, 179, 8, 0.35)' : (isBrowser ? 'rgba(56, 189, 248, 0.35)' : (isGit ? 'rgba(249, 115, 22, 0.35)' : (isPython ? 'rgba(56, 189, 248, 0.35)' : (isTable ? 'rgba(20, 184, 166, 0.4)' : (isParameters ? 'rgba(168, 85, 247, 0.35)' : (isPrompt ? 'rgba(59, 130, 246, 0.35)' : (isTts ? 'rgba(236, 72, 153, 0.35)' : (isMediaPlayer ? 'rgba(251, 191, 36, 0.35)' : (isVoiceNote ? 'rgba(148, 163, 184, 0.34)' : (isSubWorkflow ? 'rgba(34, 211, 238, 0.42)' : (isHttpRequest ? 'rgba(6, 182, 212, 0.4)' : (isOutput ? 'rgba(129, 140, 248, 0.35)' : (isWfBuiltin ? 'rgba(168, 85, 247, 0.45)' : 'rgba(99, 102, 241, 0.35)')))))))))))))));
@@ -2539,7 +2538,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 				})) as HTMLInputElement;
 				labelInput.value = field.label || field.id;
 
-				const hasOutputVariable = !isMandatory && field.type !== 'parameters' && field.type !== 'output' && field.type !== 'result' && field.type !== 'display';
+				const hasOutputVariable = !isMandatory && field.type !== 'parameters' && field.type !== 'output' && field.type !== 'display';
 				if (hasOutputVariable && !field.outputVariableName) {
 					field.outputVariableName = generateSmartPythonVarName(field.label || field.id, field.type);
 				}
@@ -3052,7 +3051,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					renderSubFieldsList();
 				}
 
-				const isButtonGroup = field.type === 'button_group' || field.type === 'button';
+				const isButtonGroup = field.type === 'button_group';
 				if (isButtonGroup) {
 					if (!field.buttons || !Array.isArray(field.buttons) || field.buttons.length === 0) {
 						field.buttons = [
@@ -4733,7 +4732,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						if (!f || f === field) return false;
 						const ft = (f.type || '').toLowerCase();
 						const fl = (f.label || f.id || '').toLowerCase().trim();
-						return ft !== 'output' && ft !== 'result' && fl !== 'output' && fl !== 'result';
+						return ft !== 'output' && fl !== 'output';
 					});
 
 					if (field.promptPreInjectedVisible === undefined) {
@@ -4830,7 +4829,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						fields.forEach(rf => {
 							if (!rf || rf === field) return;
 							const ft = (rf.type || '').toLowerCase();
-							if (ft === 'output' || ft === 'result') return;
+							if (ft === 'output') return;
 							const l = (rf.label || rf.id || '').trim();
 							if (l) {
 								registerVar(l, { label: l, type: (rf.type || 'PRIMITIVE').toUpperCase() }, true);
@@ -8634,7 +8633,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 					}
 				}
 
-				if (field.type === 'output' || field.type === 'result') {
+				if (field.type === 'output') {
 					if (!Array.isArray(field.outputSpecs)) {
 						field.outputSpecs = [];
 					}
@@ -8714,7 +8713,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						}
 						const allFields = (this._activeModule?.fields && this._activeModule.fields.length > 0) ? this._activeModule.fields : fields;
 						for (const f of allFields) {
-							if (!f || f.id === field.id || f.type === 'output' || f.type === 'result' || f.type === 'voice_note' || f.id === 'title' || f.id === 'description') {
+							if (!f || f.id === field.id || f.type === 'output' || f.type === 'voice_note' || f.id === 'title' || f.id === 'description') {
 								continue;
 							}
 							if (f.type === 'parameters' && Array.isArray(f.parameters)) {
@@ -8739,7 +8738,6 @@ export class CustomModuleSchemaEditor extends EditorPane {
 								f &&
 								f.id !== field.id &&
 								f.type !== 'output' &&
-								f.type !== 'result' &&
 								f.type !== 'voice_note' &&
 								f.id !== 'title' &&
 								f.id !== 'description' &&
@@ -9830,7 +9828,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							insertTextAtCursor('\nOUTPUT = ');
 						};
 
-						const otherFields = fields.filter(f => f && f !== field && (!this._isFlowchartNodeMode || f.id !== 'title') && f.type !== 'output' && f.type !== 'result' && (f.label || f.id || '').toLowerCase() !== 'output' && (f.label || f.id || '').toLowerCase() !== 'result');
+						const otherFields = fields.filter(f => f && f !== field && (!this._isFlowchartNodeMode || f.id !== 'title') && f.type !== 'output' && (f.label || f.id || '').toLowerCase() !== 'output' && (f.label || f.id || '').toLowerCase() !== 'result');
 						const contextExpressions: string[] = [];
 						otherFields.forEach(of => {
 							const ofLabel = (of.label || of.id || '').trim();
@@ -10412,7 +10410,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 
 					const urlInput = append(urlWrapper, $('input.monaco-inputbox', {
 						type: 'text',
-						placeholder: 'e.g. https://aimery.link/api/tailored-resumes/upload or {api_url}',
+						placeholder: 'e.g. https://api.example.com/v1/items or {api_url}',
 						value: field.httpUrl || '',
 						style: 'width: 100%; padding: 5px 9px; font-size: 11.5px; border-radius: 4px; border: 1px solid rgba(255, 255, 255, 0.16); background: rgba(0, 0, 0, 0.25); color: inherit; font-family: var(--vscode-editor-font-family, monospace); outline: none;'
 					})) as HTMLInputElement;
@@ -14936,7 +14934,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 						const targetMod = findModuleByType(targetType) || cachedDiskSchema;
 						if (targetMod && Array.isArray(targetMod.fields)) {
 							// 1. Output/Result component outputSpecs
-							const outputFields = targetMod.fields.filter(f => f.type === 'output' || f.type === 'result');
+							const outputFields = targetMod.fields.filter(f => f.type === 'output');
 							outputFields.forEach(f => {
 								if (Array.isArray(f.outputSpecs)) {
 									f.outputSpecs.forEach(spec => {
@@ -14947,7 +14945,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 											if (!specKey && !specLabel) return;
 
 											const matchedComp = targetMod.fields.find(cf =>
-												cf.type !== 'output' && cf.type !== 'result' && (
+												cf.type !== 'output' && (
 													cf.id === specKey ||
 													cf.label === specLabel ||
 													cf.label === specKey ||
@@ -14979,7 +14977,7 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							// 2. Only if NOT strictOutputsOnly, include other component outputs
 							if (!strictOutputsOnly) {
 								targetMod.fields.forEach(f => {
-									if (f.type !== 'output' && f.type !== 'result' && f.type !== 'parameters') {
+									if (f.type !== 'output' && f.type !== 'parameters') {
 										const outVar = (f.outputVariableName || '').trim();
 										const compLabel = (f.label || f.id || '').trim();
 										const key = outVar || compLabel;
@@ -15067,8 +15065,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							append(paramsContainer, $('div', {
 								style: 'font-size: 10.5px; font-weight: 700; text-transform: uppercase; color: #c084fc; letter-spacing: 0.04em;'
 							}, selectedType
-								? `Inputs Parameters for "${selectedType}" (${schemaParams.length})`
-								: 'Inputs Parameters (Select a Ticket Type above to load its Inputs schema)'));
+								? `Inputs of "${selectedType}" (${schemaParams.length})`
+								: 'Inputs (Select a Ticket Type above to load its Inputs schema)'));
 
 							if (schemaParams.length === 0) {
 								append(paramsContainer, $('div', {
@@ -15243,8 +15241,8 @@ export class CustomModuleSchemaEditor extends EditorPane {
 							append(paramsContainer, $('div', {
 								style: 'font-size: 10.5px; font-weight: 700; text-transform: uppercase; color: #c084fc;'
 							}, effectiveType
-								? `Inputs Parameters for "${effectiveType}" (${schemaParams.length})`
-								: 'Inputs Parameters (Select Ticket Type or link a Create Tickets handle)'));
+								? `Inputs of "${effectiveType}" (${schemaParams.length})`
+								: 'Inputs (Select Ticket Type or link a Create Tickets handle)'));
 							schemaParams.forEach(p => {
 								const hasDefault = p.defaultValue !== undefined && String(p.defaultValue).trim() !== '';
 								const pWrap = append(paramsContainer, $('div', {
@@ -17701,7 +17699,7 @@ Check the network connection or click "Open in Tab" / "+ New Tab" to inspect the
 
 			if (f.type === 'parameters') {
 				const params = f.parameters || [];
-				lines.push(`- **Runtime Input Parameters (${params.length})**:`);
+				lines.push(`- **Inputs (${params.length})**:`);
 				if (params.length === 0) {
 					lines.push('  - *(No parameters defined)*');
 				} else {

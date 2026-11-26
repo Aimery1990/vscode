@@ -21,7 +21,8 @@ import {
 	ICompositeComponent,
 	DEFAULT_STATUS_DEFINITIONS,
 	getDefaultCustomModuleIconId,
-	getDefaultCustomModuleColor
+	getDefaultCustomModuleColor,
+	normalizeLegacyFieldTypes
 } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../common/customModules.js';
 import { CustomModuleSchemaEditorInput } from './customModuleSchemaEditorInput.js';
@@ -335,7 +336,7 @@ export class CustomModulesService extends Disposable implements ICustomModulesSe
 	private async _readYamlFile(uri: URI): Promise<any> {
 		try {
 			const content = await this.fileService.readFile(uri);
-			return parseYaml(content.value.toString());
+			return normalizeLegacyFieldTypes(parseYaml(content.value.toString()));
 		} catch (e) {
 			console.error(`Error reading YAML from ${uri.toString()}:`, e);
 			return null;

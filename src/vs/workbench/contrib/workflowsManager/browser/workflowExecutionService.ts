@@ -11,7 +11,7 @@ import { ILogService } from '../../../../platform/log/common/log.js';
 import { INotificationService } from '../../../../platform/notification/common/notification.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IStorageService, StorageScope, StorageTarget } from '../../../../platform/storage/common/storage.js';
-import { IEntityPersistenceService, extractSshOutputLastNLines, formatSshCommandsJsonOutput, generateSmartPythonVarName } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, generateSmartPythonVarName, normalizeLegacyFieldTypes, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
 import { IWorkflowExecutionService, IWorkflowDisplayCard, IWorkflowDisplayOutputItem, ITicketHandleInfo, INotebookCellExecutionResult } from '../common/workflowExecutionService.js';
 import { ITicketWorkflowRuntimeService } from './ticketWorkflowRuntime.js';
 import { ITerminalService } from '../../terminal/browser/terminal.js';
@@ -2339,7 +2339,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 				for (const st of (n.pipeline || [])) {
 					const comp = (st as any)?.component;
-					if (!comp || comp.type === 'parameters' || comp.type === 'output' || comp.type === 'result' || comp.type === 'display') {
+					if (!comp || comp.type === 'parameters' || comp.type === 'output' || comp.type === 'display') {
 						continue;
 					}
 					const savedVal = (comp.type === 'python' && comp.pythonResult !== undefined)
@@ -2643,7 +2643,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 				const hasAnyIOComp = data.nodes.some(n => (n.pipeline || []).some(s => {
 					const t = (s as any)?.component?.type;
-					return t === 'parameters' || t === 'output' || t === 'result';
+					return t === 'parameters' || t === 'output';
 				}));
 				if (hasAnyIOComp) {
 					throw new Error(ioContract.errors.join(' | '));
@@ -3924,7 +3924,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 							if (this._cancelledRuns.has(run.runId) || run.status === 'stopped') {
 								throw new Error('Workflow execution was stopped');
 							}
-							if (step.targetVariable && compRes.output !== undefined && stepComp.type !== 'parameters' && stepComp.type !== 'output' && stepComp.type !== 'result' && stepComp.type !== 'display') {
+							if (step.targetVariable && compRes.output !== undefined && stepComp.type !== 'parameters' && stepComp.type !== 'output' && stepComp.type !== 'display') {
 								const cleanTargetVar = step.targetVariable.trim().replace(/^@/, '');
 								if (cleanTargetVar) {
 									run.contextVariables[cleanTargetVar] = compRes.output;
@@ -4588,7 +4588,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 				}
 				result = getRes;
 			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS') {
-				const hasQueryFilters = kwargs.ticket_type !== undefined || kwargs.status !== undefined || kwargs.title !== undefined || kwargs.field !== undefined || kwargs.ticketType !== undefined;
+				const hasQueryFilters = kwargs.ticket_type !== undefined || kwargs.status !== undefined || kwargs.title !== undefined || kwargs.field !== undefined || kwargs.ticketType !== undefined || kwargs.path !== undefined || kwargs.limit !== undefined;
 				if (hasQueryFilters) {
 					result = await this.ticketRuntimeService.getTickets(workflowDir, kwargs, kwargs.field);
 				} else {
@@ -4617,7 +4617,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					if (outRes && typeof outRes === 'object' && !Array.isArray(outRes)) {
 						try {
 							const tRes = await this.ticketRuntimeService.GET_TICKETS(workflowDir, rawTarget);
-							const outputField = tRes?.schema?.fields?.find(f => f.type === 'output' || f.type === 'result');
+							const outputField = tRes?.schema?.fields?.find(f => f.type === 'output');
 							Object.defineProperty(outRes, '__ticketMetadata', {
 								value: {
 									ticketId: tRes?.ticketId || (typeof rawTarget === 'string' ? rawTarget : rawTarget?.ticketId),
@@ -4956,7 +4956,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			];
 			if (targetFolder) lines.push(`Path: ${targetFolder}`);
 			if (Object.keys(parameters).length > 0) {
-				lines.push(`Parameters: ${JSON.stringify(parameters, null, 2)}`);
+				lines.push(`Inputs: ${JSON.stringify(parameters, null, 2)}`);
 			}
 			lines.push(`(Ticket ready. Call RUN_TICKETS to execute.)`);
 
@@ -5094,16 +5094,13 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 					if (parsed.content !== undefined) {
 						return parsed.content;
 					}
-					// SSH Terminal primitive
-					if (Array.isArray(parsed.lastRawEntries) || parsed.lastNOutput !== undefined || parsed.sshHost !== undefined || (parsed.host !== undefined && (parsed.outputLines !== undefined || parsed.sshOutputLines !== undefined || Array.isArray(parsed.sshCommands)))) {
-						const maxLines = Number(parsed.outputLines ?? parsed.sshOutputLines ?? 50);
-						if (Array.isArray(parsed.lastRawEntries) && parsed.lastRawEntries.length > 0) {
-							return formatSshCommandsJsonOutput(parsed.lastRawEntries, maxLines);
-						}
-						if (parsed.lastNOutput !== undefined && String(parsed.lastNOutput).trim() !== '') {
-							return extractSshOutputLastNLines(String(parsed.lastNOutput).trim(), maxLines);
-						}
-						return parsed.output ? extractSshOutputLastNLines(String(parsed.output), maxLines) : '{}';
+					// HTTP Request / SSH primitives (ticket value uses the template config names; old short names are migrated)
+					if (isHttpTicketValue(parsed)) {
+						const httpVal = normalizeHttpTicketValue(parsed) ?? {};
+						return httpVal.httpResponseData ?? httpVal.httpResponseBody ?? '';
+					}
+					if (isSshTicketValue(parsed)) {
+						return sshTicketValueOutputText(parsed) || '{}';
 					}
 					// Prompt primitive
 					if (parsed.prompt !== undefined || parsed.output !== undefined) {
@@ -5472,7 +5469,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const isPureEndCircle = (n: IFlowchartNode): boolean => {
 			const hasOutputComp = (n.pipeline || []).some(s => {
 				const t = (s as any)?.component?.type;
-				return t === 'output' || t === 'result';
+				return t === 'output';
 			});
 			return !hasOutputComp && this._isEndNode(n);
 		};
@@ -5603,7 +5600,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		const terminalNodes = Array.from(terminalSet.values());
 		const nodesWithOutputComp = activeNodes.filter(n => !isPureEndCircle(n) && (n.pipeline || []).some(s => {
 			const t = (s as any)?.component?.type;
-			return t === 'output' || t === 'result';
+			return t === 'output';
 		}));
 
 		if (terminalNodes.length === 1) {
@@ -5611,7 +5608,7 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 		} else if (terminalNodes.length > 1) {
 			const terminalsWithOutput = terminalNodes.filter(n => (n.pipeline || []).some(s => {
 				const t = (s as any)?.component?.type;
-				return t === 'output' || t === 'result';
+				return t === 'output';
 			}));
 			if (terminalsWithOutput.length === 1) {
 				outputNode = terminalsWithOutput[0];
@@ -5639,11 +5636,11 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 			}
 		}
 
-		// Accumulate ALL enabled output specs from ALL Output ('output'/'result') components inside the unique Output Node in order
+		// Accumulate ALL enabled output specs from ALL Output ('output') components inside the unique Output Node in order
 		if (outputNode) {
 			for (const step of (outputNode.pipeline || [])) {
 				const comp = (step as any)?.component;
-				if (comp && (comp.type === 'output' || comp.type === 'result') && Array.isArray(comp.outputSpecs)) {
+				if (comp && (comp.type === 'output') && Array.isArray(comp.outputSpecs)) {
 					for (const spec of comp.outputSpecs) {
 						if (!spec || spec.enabled === false) {
 							continue;
@@ -5742,6 +5739,12 @@ export class WorkflowExecutionService implements IWorkflowExecutionService {
 	}
 
 	private async _loadFlowchartData(uriStr: string, options?: IWorkflowEngineOptions): Promise<IFlowchartData | undefined> {
+		const data = await this._loadFlowchartDataRaw(uriStr, options);
+		// Migrate renamed component types (e.g. legacy 'result' -> 'output') so the engine only sees current ids
+		return data ? normalizeLegacyFieldTypes(data) : data;
+	}
+
+	private async _loadFlowchartDataRaw(uriStr: string, options?: IWorkflowEngineOptions): Promise<IFlowchartData | undefined> {
 		// 1. Direct in-memory data passed from options (e.g. from active editor canvas)
 		if (options?.initialData && Array.isArray(options.initialData.nodes) && options.initialData.nodes.length > 0) {
 			return options.initialData;
@@ -6992,7 +6995,7 @@ finally:
 				const field = kwargs.field ?? kwargs.key ?? kwargs.name ?? args[1];
 				result = await this.ticketRuntimeService.getTicket(workflowDir, rawTarget, field);
 			} else if (upperFn === 'GET_TICKETS' || upperFn === 'GETTICKETS') {
-				const hasQueryFilters = kwargs.ticket_type !== undefined || kwargs.status !== undefined || kwargs.title !== undefined || kwargs.field !== undefined || kwargs.ticketType !== undefined;
+				const hasQueryFilters = kwargs.ticket_type !== undefined || kwargs.status !== undefined || kwargs.title !== undefined || kwargs.field !== undefined || kwargs.ticketType !== undefined || kwargs.path !== undefined || kwargs.limit !== undefined;
 				if (hasQueryFilters) {
 					result = await this.ticketRuntimeService.getTickets(workflowDir, kwargs, kwargs.field);
 				} else {

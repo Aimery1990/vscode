@@ -36,12 +36,10 @@ export type CustomFieldType =
 	| 'dynamic_list'
 	| 'attachment'
 	| 'button_group'
-	| 'button'
 	| 'browser'
 	| 'git'
 	| 'parameters'
 	| 'prompt'
-	| 'result'
 	| 'output'
 	| 'python'
 	| 'tts'
@@ -51,11 +49,333 @@ export type CustomFieldType =
 	| 'create_tickets'
 	| 'run_tickets'
 	| 'get_ticket'
+	| 'get_tickets'
 	| 'get_outputs'
 	| 'display'
 	| 'ssh'
 	| 'http_request'
 	| 'sub_workflow';
+
+/**
+ * Component type ids that were renamed. Old saved data (template YAML, workflow JSON) is migrated to the current id
+ * when it is loaded, so the rest of the code only ever sees the current id.
+ */
+const LEGACY_FIELD_TYPE_RENAMES: Readonly<Record<string, CustomFieldType>> = {
+	result: 'output',
+	button: 'button_group'
+};
+
+/** Maps a possibly-legacy component type id to its current id (e.g. 'result' -> 'output'). */
+export function normalizeFieldType(type: string): string {
+	const key = (type || '').trim();
+	return LEGACY_FIELD_TYPE_RENAMES[key] ?? key;
+}
+
+/**
+ * Walks loaded template / workflow data in place and renames legacy component type ids on every field-like object
+ * (an object with a string `type` plus an `id` or `label`). Returns the same object for convenience.
+ */
+export function normalizeLegacyFieldTypes<T>(data: T): T {
+	const seen = new Set<unknown>();
+	const visit = (value: unknown): void => {
+		if (!value || typeof value !== 'object' || seen.has(value)) {
+			return;
+		}
+		seen.add(value);
+		if (Array.isArray(value)) {
+			value.forEach(visit);
+			return;
+		}
+		const obj = value as Record<string, unknown>;
+		if (typeof obj.type === 'string' && (obj.id !== undefined || obj.label !== undefined) && LEGACY_FIELD_TYPE_RENAMES[obj.type]) {
+			obj.type = LEGACY_FIELD_TYPE_RENAMES[obj.type];
+		}
+		for (const child of Object.values(obj)) {
+			visit(child);
+		}
+	};
+	visit(data);
+	return data;
+}
+
+/**
+ * Ticket-level values of `http_request` / `ssh` components use EXACTLY the same property names as the template
+ * component config (`httpUrl`, `httpBodyContent`, `sshHost`, ...). Older tickets stored short names (`url`,
+ * `bodyContent`, `host`, ...); these maps translate them. Canonical names always win over legacy names.
+ */
+const HTTP_TICKET_LEGACY_KEYS: Readonly<Record<string, string>> = {
+	url: 'httpUrl',
+	method: 'httpMethod',
+	authType: 'httpAuthType',
+	authToken: 'httpAuthToken',
+	apiKeyName: 'httpApiKeyName',
+	apiKeyValue: 'httpApiKeyValue',
+	apiKeyLocation: 'httpApiKeyLocation',
+	authUsername: 'httpAuthUsername',
+	authPassword: 'httpAuthPassword',
+	bodyType: 'httpBodyType',
+	bodyContent: 'httpBodyContent',
+	timeoutMs: 'httpTimeoutMs',
+	responseStatus: 'httpResponseStatus',
+	responseStatusText: 'httpResponseStatusText',
+	responseHeaders: 'httpResponseHeaders',
+	responseBody: 'httpResponseBody',
+	responseData: 'httpResponseData',
+	lastExecuted: 'httpLastExecutionTime',
+	durationMs: 'httpLastDurationMs'
+};
+
+const SSH_TICKET_LEGACY_KEYS: Readonly<Record<string, string>> = {
+	host: 'sshHost',
+	port: 'sshPort',
+	user: 'sshUser',
+	password: 'sshPassword',
+	cwd: 'sshCwd',
+	command: 'sshCommand',
+	commands: 'sshCommands',
+	output: 'sshOutput',
+	lastRawOutput: 'sshLastRawOutput',
+	lastRawEntries: 'sshLastRawEntries',
+	lastNOutput: 'sshLastOutput',
+	outputLines: 'sshOutputLines',
+	quickCommands: 'sshQuickCommands',
+	lastExecuted: 'sshLastExecuted'
+};
+
+/** Request settings of an `http_request` component (template config names), i.e. what a ticket may override. */
+export const HTTP_REQUEST_CONFIG_KEYS: readonly string[] = [
+	'httpUrl', 'httpMethod', 'httpParams', 'httpHeaders', 'httpAuthType', 'httpAuthToken', 'httpApiKeyName',
+	'httpApiKeyValue', 'httpApiKeyLocation', 'httpAuthUsername', 'httpAuthPassword', 'httpBodyType', 'httpBodyContent',
+	'httpTimeoutMs'
+];
+
+function parseTicketValueObject(value: unknown): Record<string, any> | undefined {
+	if (value && typeof value === 'object' && !Array.isArray(value)) {
+		return value as Record<string, any>;
+	}
+	if (typeof value === 'string') {
+		const trimmed = value.trim();
+		if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+					return parsed;
+				}
+			} catch { /* not JSON */ }
+		}
+	}
+	return undefined;
+}
+
+function renameTicketKeys(src: Record<string, any>, map: Readonly<Record<string, string>>, skip: ReadonlySet<string> = new Set()): Record<string, any> {
+	const out: Record<string, any> = {};
+	for (const [k, v] of Object.entries(src)) {
+		if (map[k] === undefined && !skip.has(k)) {
+			out[k] = v;
+		}
+	}
+	for (const [legacy, canonical] of Object.entries(map)) {
+		if (src[legacy] !== undefined && src[canonical] === undefined) {
+			out[canonical] = src[legacy];
+		}
+	}
+	return out;
+}
+
+/**
+ * Returns the ticket value of an `http_request` component with canonical (template) property names, or undefined
+ * when the value is not an object / JSON object. Also understands the old post-run record
+ * (`{url, method, status, statusText, ok, headers, data, body, rawText}`), whose `url` was the resolved URL and
+ * whose `headers` / `body` were RESPONSE headers / body.
+ */
+export function normalizeHttpTicketValue(value: unknown): Record<string, any> | undefined {
+	const src = parseTicketValueObject(value);
+	if (!src) {
+		return undefined;
+	}
+	const isOldRunRecord = src.status !== undefined && src.authType === undefined && src.httpAuthType === undefined;
+	// Keys whose meaning depends on the record shape; handled explicitly below and never copied as-is.
+	const skip = new Set(['params', 'headers', 'body', 'status', 'statusText', 'data', 'rawText', 'ok']);
+	let map = HTTP_TICKET_LEGACY_KEYS;
+	if (isOldRunRecord) {
+		// The old post-run `url` is the RESOLVED url (query string already appended) - drop it, the template url applies.
+		const { url: _resolvedUrl, ...rest } = HTTP_TICKET_LEGACY_KEYS;
+		map = rest;
+		skip.add('url');
+	}
+	const out = renameTicketKeys(src, map, skip);
+	const setIfMissing = (key: string, v: unknown) => {
+		if (v !== undefined && out[key] === undefined) {
+			out[key] = v;
+		}
+	};
+	if (Array.isArray(src.params)) {
+		setIfMissing('httpParams', src.params);
+	}
+	if (Array.isArray(src.headers)) {
+		setIfMissing('httpHeaders', src.headers);
+	} else if (src.headers && typeof src.headers === 'object') {
+		setIfMissing('httpResponseHeaders', src.headers);
+	}
+	if (isOldRunRecord) {
+		setIfMissing('httpResponseStatus', typeof src.status === 'number' ? src.status : Number(src.status) || 0);
+		setIfMissing('httpResponseStatusText', src.statusText);
+		setIfMissing('httpResponseData', src.data);
+		setIfMissing('httpResponseBody', src.rawText ?? (typeof src.body === 'string' ? src.body : undefined));
+	} else if (typeof src.body === 'string') {
+		// The old runtime read `body` as the request body.
+		setIfMissing('httpBodyContent', src.body);
+	}
+	return out;
+}
+
+/** Returns the ticket value of an `ssh` component with canonical (template) property names, or undefined. */
+export function normalizeSshTicketValue(value: unknown): Record<string, any> | undefined {
+	const src = parseTicketValueObject(value);
+	return src ? renameTicketKeys(src, SSH_TICKET_LEGACY_KEYS) : undefined;
+}
+
+/** True when a parsed ticket value looks like an `http_request` value (canonical or legacy names). */
+export function looksLikeHttpTicketValue(obj: Record<string, any>): boolean {
+	return (obj.httpUrl !== undefined && obj.httpMethod !== undefined)
+		|| (obj.method !== undefined && obj.url !== undefined && (obj.authType !== undefined || obj.headers !== undefined || obj.params !== undefined));
+}
+
+/** True when a parsed ticket value looks like an `ssh` value (canonical or legacy names). */
+export function looksLikeSshTicketValue(obj: Record<string, any>): boolean {
+	return obj.sshHost !== undefined
+		|| (obj.host !== undefined && (obj.port !== undefined || obj.quickCommands !== undefined));
+}
+
+/** True when the object is an `http_request` ticket value, including the old post-run record. */
+export function isHttpTicketValue(obj: Record<string, any>): boolean {
+	return looksLikeHttpTicketValue(obj) || obj.httpResponseStatus !== undefined
+		|| (obj.status !== undefined && (obj.data !== undefined || obj.body !== undefined || obj.rawText !== undefined));
+}
+
+/** True when the object is an `ssh` ticket value (canonical or legacy names). */
+export function isSshTicketValue(obj: Record<string, any>): boolean {
+	return looksLikeSshTicketValue(obj)
+		|| Array.isArray(obj.sshLastRawEntries) || obj.sshLastOutput !== undefined
+		|| Array.isArray(obj.lastRawEntries) || obj.lastNOutput !== undefined;
+}
+
+/** Business output (response payload as text) of an `http_request` ticket value; '' before the first run. */
+export function httpTicketValueOutputText(obj: Record<string, any>): string {
+	const v = normalizeHttpTicketValue(obj) ?? {};
+	const data = v.httpResponseData;
+	if (data !== undefined && data !== null) {
+		return typeof data === 'object' ? JSON.stringify(data, null, 2) : String(data);
+	}
+	return v.httpResponseBody !== undefined && v.httpResponseBody !== null ? String(v.httpResponseBody) : '';
+}
+
+/** Business output (last N lines per command) of an `ssh` ticket value; '' before the first run. */
+export function sshTicketValueOutputText(obj: Record<string, any>): string {
+	const v = normalizeSshTicketValue(obj) ?? {};
+	const n = Number(v.sshOutputLines) > 0 ? Number(v.sshOutputLines) : 50;
+	if (Array.isArray(v.sshLastRawEntries) && v.sshLastRawEntries.length > 0) {
+		return formatSshCommandsJsonOutput(v.sshLastRawEntries, n);
+	}
+	if (v.sshLastOutput !== undefined && String(v.sshLastOutput).trim() !== '') {
+		return extractSshOutputLastNLines(String(v.sshLastOutput).trim(), n);
+	}
+	return v.sshOutput ? extractSshOutputLastNLines(String(v.sshOutput), n) : '';
+}
+
+/** Initial ticket value of an `http_request` component, built from its template config (same property names). */
+export function buildHttpTicketValue(f: ICustomField): Record<string, any> {
+	return {
+		httpMethod: f.httpMethod || 'GET',
+		httpUrl: f.httpUrl || f.defaultUrl || '',
+		httpParams: Array.isArray(f.httpParams) ? f.httpParams : [],
+		httpHeaders: Array.isArray(f.httpHeaders) ? f.httpHeaders : [],
+		httpAuthType: f.httpAuthType || 'none',
+		httpAuthToken: f.httpAuthToken || '',
+		httpApiKeyName: f.httpApiKeyName || '',
+		httpApiKeyValue: f.httpApiKeyValue || '',
+		httpApiKeyLocation: f.httpApiKeyLocation || 'header',
+		httpAuthUsername: f.httpAuthUsername || '',
+		httpAuthPassword: f.httpAuthPassword || '',
+		httpBodyType: f.httpBodyType || 'none',
+		httpBodyContent: f.httpBodyContent || '',
+		httpTimeoutMs: f.httpTimeoutMs || 30000
+	};
+}
+
+/** Initial ticket value of an `ssh` component, built from its template config (same property names). */
+export function buildSshTicketValue(f: ICustomField): Record<string, any> {
+	const cmds = normalizeSshCommandsList(f.sshCommands, f.sshCommand || f.defaultContent || '');
+	return {
+		sshHost: f.sshHost || '',
+		sshPort: Number(f.sshPort) || 22,
+		sshUser: f.sshUser || 'root',
+		sshPassword: f.sshPassword || '',
+		sshCwd: f.sshCwd || '~',
+		sshCommand: cmds[0] || '',
+		sshCommands: cmds,
+		sshOutputLines: typeof f.sshOutputLines === 'number' && f.sshOutputLines > 0 ? f.sshOutputLines : 50,
+		sshQuickCommands: normalizeSshQuickCommands(f.sshQuickCommands),
+		sshOutput: f.sshOutput || '',
+		sshLastRawOutput: f.sshLastRawOutput ?? '',
+		sshLastRawEntries: Array.isArray(f.sshLastRawEntries) ? f.sshLastRawEntries : [],
+		sshLastOutput: f.sshLastOutput ?? '',
+		sshLastExecuted: ''
+	};
+}
+
+/** Range / precision rules of a `number` component. */
+export interface INumberFieldRules {
+	label?: string;
+	min?: number;
+	max?: number;
+	/** Decimal places to keep. Undefined = keep the value as entered. */
+	precision?: number;
+}
+
+export interface INumberFieldCheck {
+	ok: boolean;
+	/** Normalized value to store (rounded to `precision`); the original text when not ok. */
+	value: string;
+	error?: string;
+}
+
+/**
+ * Validates and normalizes a value for a `number` component: empty is allowed, `{variable}` placeholders are kept as-is
+ * (they are checked again after interpolation at run time), anything else must be a number within [min, max] and is
+ * rounded to `precision` decimal places.
+ */
+export function normalizeNumberFieldValue(rules: INumberFieldRules, raw: unknown): INumberFieldCheck {
+	const text = raw === undefined || raw === null ? '' : String(raw).trim();
+	if (text === '' || /\{[^{}]+\}/.test(text)) {
+		return { ok: true, value: text };
+	}
+	const name = rules.label ? `"${rules.label}"` : 'Number';
+	const n = Number(text.replace(/,/g, ''));
+	if (!Number.isFinite(n)) {
+		return { ok: false, value: text, error: `${name} must be a number (got "${text}").` };
+	}
+	const p = typeof rules.precision === 'number' && rules.precision >= 0 ? Math.min(Math.floor(rules.precision), 15) : undefined;
+	const rounded = p === undefined ? n : Number(n.toFixed(p));
+	const hasMin = typeof rules.min === 'number' && Number.isFinite(rules.min);
+	const hasMax = typeof rules.max === 'number' && Number.isFinite(rules.max);
+	if ((hasMin && rounded < rules.min!) || (hasMax && rounded > rules.max!)) {
+		const range = hasMin && hasMax ? `between ${rules.min} and ${rules.max}` : hasMin ? `at least ${rules.min}` : `at most ${rules.max}`;
+		return { ok: false, value: text, error: `${name} must be ${range} (got ${text}).` };
+	}
+	return { ok: true, value: p === undefined ? String(rounded) : rounded.toFixed(p) };
+}
+
+/** Reads number rules written as data attributes (data-min / data-max / data-precision) on an input element. */
+export function numberFieldRulesFromAttributes(getAttr: (name: string) => string | null, label?: string): INumberFieldRules {
+	const num = (name: string): number | undefined => {
+		const v = getAttr(name);
+		if (v === null || v.trim() === '') { return undefined; }
+		const n = Number(v);
+		return Number.isFinite(n) ? n : undefined;
+	};
+	return { label, min: num('data-min'), max: num('data-max'), precision: num('data-precision') };
+}
 
 export interface IVoiceNoteClip {
 	id: string;
@@ -283,6 +603,8 @@ export interface ICustomField {
 	id: string;
 	label: string;
 	type: CustomFieldType;
+	/** Initial value seeded when the component is created (e.g. the Python script template). Read as a fallback after type-specific content such as `pythonCode`. */
+	defaultValue?: string;
 	options?: string[];
 	itemFields?: ICustomField[];
 	componentRef?: string;

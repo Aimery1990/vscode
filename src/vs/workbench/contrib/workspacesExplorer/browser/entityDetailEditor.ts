@@ -37,7 +37,7 @@ import { IClipboardService } from '../../../../platform/clipboard/common/clipboa
 import { parseYaml } from '../../customModules/browser/customModulesService.js';
 import { CustomModuleSchemaEditorInput } from '../../customModules/browser/customModuleSchemaEditorInput.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
-import { IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput } from '../../entityPersistence/common/entityPersistence.js';
+import { IActionButton, ICredentialPair, IParameterDefinition, ISshQuickCommand, ISshRawCommandEntry, resolveCustomModuleIcon, MEDIA_PLAYER_SPEED_OPTIONS, MEDIA_PLAYER_ALL_EXTENSIONS, detectMediaFileInfo, SSH_DEFAULT_QUICK_COMMANDS, normalizeSshQuickCommands, extractSshOutputLastNLines, normalizeSshCommandsList, cleanInterpolatedSshCommand, formatSshCommandsJsonOutput, normalizeNumberFieldValue, INumberFieldCheck, buildHttpTicketValue, buildSshTicketValue, normalizeSshTicketValue, normalizeHttpTicketValue, isHttpTicketValue, isSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
 import { getPathForFile } from '../../../../platform/dnd/browser/dnd.js';
 import { IRequestService, asText } from '../../../../platform/request/common/request.js';
 import { IQuickInputService } from '../../../../platform/quickinput/common/quickInput.js';
@@ -642,8 +642,12 @@ export class EntityDetailEditor extends EditorPane {
 				customMetadata[fLabel] = f.defaultContent || '09:00';
 			} else if (fType === 'datetime') {
 				customMetadata[fLabel] = f.defaultContent || `${todayStr} 09:00`;
-			} else if (fType === 'date_range' || fType === 'time_range' || fType === 'datetime_range') {
+			} else if (fType === 'date_range') {
 				customMetadata[fLabel] = f.defaultContent || `${todayStr} ~ ${todayStr}`;
+			} else if (fType === 'time_range') {
+				customMetadata[fLabel] = f.defaultContent || '09:00 ~ 18:00';
+			} else if (fType === 'datetime_range') {
+				customMetadata[fLabel] = f.defaultContent || `${todayStr} 09:00 ~ ${todayStr} 18:00`;
 			} else if (fType === 'parameters') {
 				const paramObj: Record<string, string> = {};
 				if (Array.isArray(f.parameters)) {
@@ -679,7 +683,7 @@ export class EntityDetailEditor extends EditorPane {
 				});
 			} else if (fType === 'python') {
 				customMetadata[fLabel] = JSON.stringify({
-					pythonInterpreter: f.pythonInterpreter || '',
+					pythonPath: f.pythonPath || '',
 					code: f.pythonCode || '',
 					output: f.pythonOutput || '',
 					result: f.pythonResult,
@@ -727,46 +731,15 @@ export class EntityDetailEditor extends EditorPane {
 					sqlOutput: f.debugSqlOutput || ''
 				});
 			} else if (fType === 'ssh') {
-				const outLines = typeof f.sshOutputLines === 'number' && f.sshOutputLines > 0 ? f.sshOutputLines : 50;
-				const initCmds = normalizeSshCommandsList(f.sshCommands, f.sshCommand || f.defaultContent || '');
-				customMetadata[fLabel] = JSON.stringify({
-					host: f.sshHost || '',
-					port: typeof f.sshPort === 'number' ? f.sshPort : 22,
-					user: f.sshUser || 'root',
-					password: f.sshPassword || '',
-					cwd: f.sshCwd || '~',
-					command: initCmds[0] || '',
-					commands: initCmds,
-					sshCommands: initCmds,
-					output: f.sshOutput || '',
-					lastRawOutput: f.sshLastRawOutput ?? '',
-					lastRawEntries: Array.isArray(f.sshLastRawEntries) ? f.sshLastRawEntries : [],
-					lastNOutput: f.sshLastOutput ?? '',
-					outputLines: outLines,
-					quickCommands: normalizeSshQuickCommands(f.sshQuickCommands),
-					lastExecuted: ''
-				});
+				customMetadata[fLabel] = JSON.stringify(buildSshTicketValue(f));
 			} else if (fType === 'http_request') {
 				customMetadata[fLabel] = JSON.stringify({
-					method: f.httpMethod || 'GET',
-					url: f.httpUrl || '',
-					params: Array.isArray(f.httpParams) ? f.httpParams : [],
-					headers: Array.isArray(f.httpHeaders) ? f.httpHeaders : [],
-					authType: f.httpAuthType || 'none',
-					authToken: f.httpAuthToken || '',
-					apiKeyName: f.httpApiKeyName || '',
-					apiKeyValue: f.httpApiKeyValue || '',
-					apiKeyLocation: f.httpApiKeyLocation || 'header',
-					authUsername: f.httpAuthUsername || '',
-					authPassword: f.httpAuthPassword || '',
-					bodyType: f.httpBodyType || 'none',
-					bodyContent: f.httpBodyContent || '',
-					timeoutMs: f.httpTimeoutMs || 30000,
-					responseStatus: f.httpResponseStatus,
-					responseStatusText: f.httpResponseStatusText,
-					responseHeaders: f.httpResponseHeaders,
-					responseBody: f.httpResponseBody,
-					responseData: f.httpResponseData
+					...buildHttpTicketValue(f),
+					httpResponseStatus: f.httpResponseStatus,
+					httpResponseStatusText: f.httpResponseStatusText,
+					httpResponseHeaders: f.httpResponseHeaders,
+					httpResponseBody: f.httpResponseBody,
+					httpResponseData: f.httpResponseData
 				});
 			} else if (fType === 'git') {
 				gitRemoteUrl = f.gitRemoteUrl || '';
@@ -3891,7 +3864,7 @@ export class EntityDetailEditor extends EditorPane {
 			} else if (cType === 'python') {
 				const pyCard = this._container.querySelector<HTMLElement>('.python-primitive-card');
 				if (pyCard) return pyCard;
-			} else if (cType === 'output' || cType === 'result') {
+			} else if (cType === 'output') {
 				const outCard = this._container.querySelector<HTMLElement>('.output-primitive-card');
 				if (outCard) return outCard;
 			} else if (cType === 'browser') {
@@ -4570,7 +4543,22 @@ export class EntityDetailEditor extends EditorPane {
 		}
 	}
 
+	/** Range / precision check for a `number` component of the current ticket; undefined when the field is not a number. */
+	private _checkNumberFieldValue(fieldKey: string, value: string): INumberFieldCheck | undefined {
+		const fields: any[] = Array.isArray(this._lastCustomModule?.fields) ? this._lastCustomModule.fields : [];
+		const def = fields.find(f => f && f.type === 'number' && (f.label === fieldKey || f.id === fieldKey));
+		return def ? normalizeNumberFieldValue({ label: def.label, min: def.min, max: def.max, precision: def.precision }, value) : undefined;
+	}
+
 	private async _saveCustomFieldDirectly(fieldKey: string, newValue: string): Promise<void> {
+		const numCheck = this._checkNumberFieldValue(fieldKey, newValue);
+		if (numCheck) {
+			if (!numCheck.ok) {
+				this._notificationService.warn(numCheck.error!);
+				return;
+			}
+			newValue = numCheck.value;
+		}
 		if (!this._lastParsedData) {
 			await this._resolvePathsAndLoadData();
 		}
@@ -4739,6 +4727,12 @@ export class EntityDetailEditor extends EditorPane {
 				isCommitted = true;
 				viewEl.removeAttribute('data-inline-editing');
 				const newVal = textarea.value;
+				const numCheck = this._checkNumberFieldValue(fieldKey, newVal);
+				if (numCheck && !numCheck.ok) {
+					this._notificationService.warn(numCheck.error!);
+					this._setElementHTML(viewEl, originalHtml);
+					return;
+				}
 				await this._saveCustomFieldDirectly(fieldKey, newVal);
 			};
 
@@ -4800,6 +4794,12 @@ export class EntityDetailEditor extends EditorPane {
 				isCommitted = true;
 				viewEl.removeAttribute('data-inline-editing');
 				const newVal = input.value;
+				const numCheck = this._checkNumberFieldValue(fieldKey, newVal);
+				if (numCheck && !numCheck.ok) {
+					this._notificationService.warn(numCheck.error!);
+					this._setElementHTML(viewEl, originalHtml);
+					return;
+				}
 				await this._saveCustomFieldDirectly(fieldKey, newVal);
 			};
 
@@ -7142,7 +7142,7 @@ ${rawErr}
 					subProps['prompt'] = prompt;
 					subProps['output'] = output;
 					primitiveVal = output || prompt;
-				} else if (f.type === 'output' || f.type === 'result') {
+				} else if (f.type === 'output') {
 					let resText = '';
 					const card = findLiveCard();
 					if (card) {
@@ -7247,46 +7247,24 @@ ${rawErr}
 					let sshHost = (f as any).sshHost || '';
 					let sshCwd = (f as any).sshCwd || '~';
 					let sshCmd = (f as any).sshCommand || '';
-					if (savedObj && typeof savedObj === 'object') {
-						if (savedObj.output !== undefined || savedObj.sshOutput !== undefined) {
-							sshOut = String(savedObj.output ?? savedObj.sshOutput ?? '');
+					// Saved ticket value first, then the live card state; both use the template config names.
+					const liveCard = findLiveCard();
+					for (const source of [savedObj, liveCard?.getAttribute('data-ssh-json')]) {
+						const sv = normalizeSshTicketValue(source);
+						if (!sv) {
+							continue;
 						}
-						if (savedObj.lastRawOutput !== undefined || savedObj.sshLastRawOutput !== undefined) {
-							sshLastRaw = String(savedObj.lastRawOutput ?? savedObj.sshLastRawOutput ?? '');
-						}
-						if (Array.isArray(savedObj.lastRawEntries) || Array.isArray(savedObj.sshLastRawEntries)) {
-							sshLastRawEntries = savedObj.lastRawEntries ?? savedObj.sshLastRawEntries;
-						}
-						if (savedObj.lastNOutput !== undefined || savedObj.sshLastOutput !== undefined) {
-							sshLastN = String(savedObj.lastNOutput ?? savedObj.sshLastOutput ?? '');
-						}
-						if (savedObj.outputLines !== undefined || savedObj.sshOutputLines !== undefined) {
-							const parsedN = Number(savedObj.outputLines ?? savedObj.sshOutputLines);
+						if (sv.sshOutput !== undefined) sshOut = String(sv.sshOutput ?? '');
+						if (sv.sshLastRawOutput !== undefined) sshLastRaw = String(sv.sshLastRawOutput ?? '');
+						if (Array.isArray(sv.sshLastRawEntries)) sshLastRawEntries = sv.sshLastRawEntries;
+						if (sv.sshLastOutput !== undefined) sshLastN = String(sv.sshLastOutput ?? '');
+						if (sv.sshOutputLines !== undefined) {
+							const parsedN = Number(sv.sshOutputLines);
 							if (!isNaN(parsedN) && parsedN > 0) sshOutLines = parsedN;
 						}
-						if (savedObj.host !== undefined || savedObj.sshHost !== undefined) sshHost = String(savedObj.host ?? savedObj.sshHost ?? '');
-						if (savedObj.cwd !== undefined || savedObj.sshCwd !== undefined) sshCwd = String(savedObj.cwd ?? savedObj.sshCwd ?? '~');
-						if (savedObj.command !== undefined || savedObj.sshCommand !== undefined) sshCmd = String(savedObj.command ?? savedObj.sshCommand ?? '');
-					}
-					const card = findLiveCard();
-					if (card) {
-						const liveJsonStr = card.getAttribute('data-ssh-json');
-						if (liveJsonStr) {
-							try {
-								const liveParsed = JSON.parse(liveJsonStr);
-								if (liveParsed.output !== undefined) sshOut = String(liveParsed.output);
-								if (liveParsed.lastRawOutput !== undefined) sshLastRaw = String(liveParsed.lastRawOutput);
-								if (Array.isArray(liveParsed.lastRawEntries)) sshLastRawEntries = liveParsed.lastRawEntries;
-								if (liveParsed.lastNOutput !== undefined) sshLastN = String(liveParsed.lastNOutput);
-								if (liveParsed.outputLines !== undefined) {
-									const parsedN = Number(liveParsed.outputLines);
-									if (!isNaN(parsedN) && parsedN > 0) sshOutLines = parsedN;
-								}
-								if (liveParsed.host !== undefined) sshHost = String(liveParsed.host);
-								if (liveParsed.cwd !== undefined) sshCwd = String(liveParsed.cwd);
-								if (liveParsed.command !== undefined) sshCmd = String(liveParsed.command);
-							} catch { }
-						}
+						if (sv.sshHost !== undefined) sshHost = String(sv.sshHost ?? '');
+						if (sv.sshCwd !== undefined) sshCwd = String(sv.sshCwd ?? '~');
+						if (sv.sshCommand !== undefined) sshCmd = String(sv.sshCommand ?? '');
 					}
 					const lastNOut = (sshLastRawEntries && sshLastRawEntries.length > 0)
 						? formatSshCommandsJsonOutput(sshLastRawEntries, sshOutLines)
@@ -7305,11 +7283,12 @@ ${rawErr}
 					let resStatus = 0;
 					let resStatusText = '';
 					let isOk = false;
-					if (savedObj && typeof savedObj === 'object') {
-						if (savedObj.responseBody !== undefined) resBody = String(savedObj.responseBody);
-						if (savedObj.responseData !== undefined) resData = savedObj.responseData;
-						if (savedObj.responseStatus !== undefined) resStatus = Number(savedObj.responseStatus);
-						if (savedObj.responseStatusText !== undefined) resStatusText = String(savedObj.responseStatusText);
+					const httpSaved = normalizeHttpTicketValue(savedObj);
+					if (httpSaved) {
+						if (httpSaved.httpResponseBody !== undefined) resBody = String(httpSaved.httpResponseBody);
+						if (httpSaved.httpResponseData !== undefined) resData = httpSaved.httpResponseData;
+						if (httpSaved.httpResponseStatus !== undefined) resStatus = Number(httpSaved.httpResponseStatus);
+						if (httpSaved.httpResponseStatusText !== undefined) resStatusText = String(httpSaved.httpResponseStatusText);
 						if (savedObj.ok !== undefined) isOk = Boolean(savedObj.ok);
 					}
 					if (!resBody && f.httpResponseBody) resBody = f.httpResponseBody;
@@ -8567,7 +8546,7 @@ ${rawErr}
 			lines.push('_No Pre-Injected Prompt configured._');
 		}
 
-		lines.push('', '---', '', `## 2. Referenced Fields & Parameters Injected (${snapshot.referencedVariables.length})`, '');
+		lines.push('', '---', '', `## 2. Referenced Fields & Inputs Injected (${snapshot.referencedVariables.length})`, '');
 		if (snapshot.referencedVariables.length > 0) {
 			snapshot.referencedVariables.forEach((rv, idx) => {
 				lines.push(`### 2.${idx + 1} \`${rv.token}\` (${rv.charCount.toLocaleString()} chars · Used in: ${rv.sourceLocations.join(', ')})`);
@@ -8724,7 +8703,7 @@ ${rawErr}
 						<div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 14px; background: rgba(56, 189, 248, 0.12); border-bottom: 1px solid rgba(56, 189, 248, 0.22); flex-wrap: wrap;">
 							<div style="display: flex; align-items: center; gap: 8px;">
 								<span style="font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 4px; background: rgba(56, 189, 248, 0.22); color: #38bdf8;">2. INJECTED FIELDS</span>
-								<span style="font-size: 12px; font-weight: 600; color: #7dd3fc;">Referenced {Field} &amp; {{Parameter}} Values</span>
+								<span style="font-size: 12px; font-weight: 600; color: #7dd3fc;">Referenced {Field} &amp; {{Input}} Values</span>
 								<span style="font-size: 10.5px; opacity: 0.75;">(${refVars.length} referenced)</span>
 							</div>
 						</div>
@@ -13740,7 +13719,7 @@ ${rawErr}
 					if (!cf) { continue; }
 					const cfLabel = (cf.label || cf.id || '').trim();
 					const cfType = (cf.type || '').toLowerCase();
-					if (!cfLabel || cfLabel === fieldKey || cf.id === fieldKey || cfType === 'output' || cfType === 'result') {
+					if (!cfLabel || cfLabel === fieldKey || cf.id === fieldKey || cfType === 'output') {
 						continue;
 					}
 					if (cfType === 'parameters' && Array.isArray(cf.parameters)) {
@@ -14388,36 +14367,25 @@ ${rawErr}
 			if (!mount || !fieldKey) continue;
 			clearNode(mount);
 
-			let parsed: any = {};
-			try { parsed = JSON.parse(rawJson); } catch { }
+			// Ticket value uses the template config names (sshHost, sshPort, ...); older short names are migrated here.
+			const parsed: any = normalizeSshTicketValue(rawJson) ?? {};
 
-			let sshHost: string = String(parsed.host ?? parsed.sshHost ?? '');
-			let sshPort: number | string = (parsed.port ?? parsed.sshPort) !== undefined && String(parsed.port ?? parsed.sshPort).trim() !== ''
-				? (Number(parsed.port ?? parsed.sshPort) > 0 ? Number(parsed.port ?? parsed.sshPort) : String(parsed.port ?? parsed.sshPort))
+			let sshHost: string = String(parsed.sshHost ?? '');
+			let sshPort: number | string = parsed.sshPort !== undefined && String(parsed.sshPort).trim() !== ''
+				? (Number(parsed.sshPort) > 0 ? Number(parsed.sshPort) : String(parsed.sshPort))
 				: 22;
-			let sshUser: string = String(parsed.user ?? parsed.sshUser ?? 'root');
-			let sshPassword: string = String(parsed.password ?? parsed.sshPassword ?? '');
-			let sshCwd: string = String(parsed.cwd ?? parsed.sshCwd ?? '~');
-			let sshCommands: string[] = normalizeSshCommandsList(
-				parsed.commands ?? parsed.sshCommands,
-				String(parsed.command ?? parsed.sshCommand ?? '')
-			);
+			let sshUser: string = String(parsed.sshUser ?? 'root');
+			let sshPassword: string = String(parsed.sshPassword ?? '');
+			let sshCwd: string = String(parsed.sshCwd ?? '~');
+			let sshCommands: string[] = normalizeSshCommandsList(parsed.sshCommands, String(parsed.sshCommand ?? ''));
 			let sshCommand: string = sshCommands[0] || '';
-			let sshOutput: string = String(parsed.output ?? parsed.sshOutput ?? '');
-			let sshLastRawOutput: string | undefined = parsed.lastRawOutput !== undefined
-				? String(parsed.lastRawOutput)
-				: (parsed.sshLastRawOutput !== undefined ? String(parsed.sshLastRawOutput) : undefined);
-			let sshLastRawEntries: ISshRawCommandEntry[] = Array.isArray(parsed.lastRawEntries)
-				? parsed.lastRawEntries
-				: (Array.isArray(parsed.sshLastRawEntries) ? parsed.sshLastRawEntries : []);
-			let sshLastOutput: string | undefined = parsed.lastNOutput !== undefined
-				? String(parsed.lastNOutput)
-				: (parsed.sshLastOutput !== undefined ? String(parsed.sshLastOutput) : undefined);
-			let sshOutputLines: number = Number(parsed.outputLines ?? parsed.sshOutputLines) > 0
-				? Math.floor(Number(parsed.outputLines ?? parsed.sshOutputLines))
-				: 50;
-			let quickCommands: ISshQuickCommand[] = normalizeSshQuickCommands(parsed.quickCommands ?? parsed.sshQuickCommands);
-			let lastExecuted: string = String(parsed.lastExecuted ?? '');
+			let sshOutput: string = String(parsed.sshOutput ?? '');
+			let sshLastRawOutput: string | undefined = parsed.sshLastRawOutput !== undefined ? String(parsed.sshLastRawOutput) : undefined;
+			let sshLastRawEntries: ISshRawCommandEntry[] = Array.isArray(parsed.sshLastRawEntries) ? parsed.sshLastRawEntries : [];
+			let sshLastOutput: string | undefined = parsed.sshLastOutput !== undefined ? String(parsed.sshLastOutput) : undefined;
+			let sshOutputLines: number = Number(parsed.sshOutputLines) > 0 ? Math.floor(Number(parsed.sshOutputLines)) : 50;
+			let quickCommands: ISshQuickCommand[] = normalizeSshQuickCommands(parsed.sshQuickCommands);
+			let lastExecuted: string = String(parsed.sshLastExecuted ?? '');
 			let lastDurationMs: number | undefined = (parsed.durationMs ?? parsed.lastExecutionDurationMs) !== undefined
 				? Number(parsed.durationMs ?? parsed.lastExecutionDurationMs)
 				: undefined;
@@ -14451,22 +14419,22 @@ ${rawErr}
 					: (sshLastOutput !== undefined && sshLastOutput !== ''
 						? extractSshOutputLastNLines(sshLastOutput, sshOutputLines)
 						: (sshLastRawOutput !== undefined ? extractSshOutputLastNLines(sshLastRawOutput, sshOutputLines) : ''));
+				// Same property names as the template config.
 				const payload = {
-					host: sshHost,
-					port: sshPort,
-					user: sshUser,
-					password: sshPassword,
-					cwd: sshCwd,
-					command: sshCommand,
-					commands: sshCommands,
+					sshHost,
+					sshPort,
+					sshUser,
+					sshPassword,
+					sshCwd,
+					sshCommand,
 					sshCommands,
-					output: sshOutput,
-					lastRawOutput: sshLastRawOutput ?? '',
-					lastRawEntries: sshLastRawEntries,
-					outputLines: sshOutputLines,
-					lastNOutput: computedLastN,
-					quickCommands,
-					lastExecuted,
+					sshOutput,
+					sshLastRawOutput: sshLastRawOutput ?? '',
+					sshLastRawEntries,
+					sshOutputLines,
+					sshLastOutput: computedLastN,
+					sshQuickCommands: quickCommands,
+					sshLastExecuted: lastExecuted,
 					durationMs: lastDurationMs
 				};
 				const str = JSON.stringify(payload);
@@ -14900,7 +14868,7 @@ ${rawErr}
 						}
 					}
 					const cfLabel = (cf?.label || cf?.id || '').trim();
-					if (cfLabel && cfLabel !== fieldKey && cf?.type !== 'output' && cf?.type !== 'result' && !refTokens.includes(cfLabel)) {
+					if (cfLabel && cfLabel !== fieldKey && cf?.type !== 'output' && !refTokens.includes(cfLabel)) {
 						refTokens.push(cfLabel);
 					}
 				}
@@ -18109,13 +18077,13 @@ ${interpolatedPrompt}`;
 								fType = 'media_player';
 							} else if (Array.isArray(parsedCheck.voiceClips) || parsedCheck.voiceTranscript !== undefined) {
 								fType = 'voice_note';
-							} else if (parsedCheck.code !== undefined && parsedCheck.pythonInterpreter !== undefined) {
+							} else if (parsedCheck.code !== undefined && (parsedCheck.pythonPath !== undefined || parsedCheck.pythonInterpreter !== undefined /* older saved data */)) {
 								fType = 'python';
 							} else if (parsedCheck.url !== undefined && Array.isArray(parsedCheck.credentials)) {
 								fType = 'browser';
-							} else if (parsedCheck.method !== undefined && parsedCheck.url !== undefined && (parsedCheck.authType !== undefined || parsedCheck.headers !== undefined || parsedCheck.params !== undefined)) {
+							} else if (isHttpTicketValue(parsedCheck)) {
 								fType = 'http_request';
-							} else if (parsedCheck.host !== undefined && (parsedCheck.port !== undefined || parsedCheck.quickCommands !== undefined || parsedCheck.sshHost !== undefined)) {
+							} else if (isSshTicketValue(parsedCheck)) {
 								fType = 'ssh';
 							}
 						}
@@ -18471,7 +18439,7 @@ ${interpolatedPrompt}`;
 							</div>
 						</div>
 					`;
-				} else if (fType === 'button_group' || fType === 'button') {
+				} else if (fType === 'button_group') {
 					const buttonsList: IActionButton[] = (fieldItem.buttons && fieldItem.buttons.length > 0)
 						? fieldItem.buttons
 						: [
@@ -18620,7 +18588,7 @@ ${interpolatedPrompt}`;
 							<div class="section-title">
 								<div style="display: flex; align-items: center; gap: 8px;">
 									<span>${k}</span>
-									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(168, 85, 247, 0.18); color: #c084fc; font-weight: 700; text-transform: uppercase;">Parameters</span>
+									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(168, 85, 247, 0.18); color: #c084fc; font-weight: 700; text-transform: uppercase;">Inputs</span>
 									<span style="font-size: 0.72em; padding: 2px 7px; border-radius: 4px; background: rgba(255, 255, 255, 0.06); color: #a1a1aa; font-weight: 600;">${paramDefs.length} Vars</span>
 								</div>
 								<div style="display: flex; align-items: center; gap: 8px;">
@@ -18721,7 +18689,7 @@ ${interpolatedPrompt}`;
 						? `Executed: ${lastExecutedText.substring(0, 16)} (${durationMs !== undefined ? `${durationMs}ms` : 'ok'})`
 						: 'Ready to execute';
 
-					const otherFields = (customModule?.fields || []).filter((f: any) => f && f.id !== rawKey && (f.label || f.id) !== k && f.type !== 'output' && f.type !== 'result' && (f.label || f.id || '').toLowerCase() !== 'output' && (f.label || f.id || '').toLowerCase() !== 'result');
+					const otherFields = (customModule?.fields || []).filter((f: any) => f && f.id !== rawKey && (f.label || f.id) !== k && f.type !== 'output' && (f.label || f.id || '').toLowerCase() !== 'output' && (f.label || f.id || '').toLowerCase() !== 'result');
 					const baseChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="TICKET_CONTEXT['']" data-cursor-offset="-2" style="padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.3); background: rgba(56, 189, 248, 0.1); color: #38bdf8; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert TICKET_CONTEXT[''] into script">+ TICKET_CONTEXT['']</button>`;
 					const outputChipHtml = `<button type="button" class="python-insert-ctx-chip" data-field-key="${this._escapeHtmlAttr(rawKey)}" data-insert="&#10;OUTPUT = " data-cursor-offset="0" style="padding: 2px 7px; font-size: 10.5px; font-weight: 600; border-radius: 4px; border: 1px solid rgba(52, 211, 153, 0.4); background: rgba(52, 211, 153, 0.1); color: #34d399; cursor: pointer; display: inline-flex; align-items: center; gap: 3px; font-family: var(--vscode-editor-font-family, monospace); white-space: nowrap;" title="Insert return value assignment OUTPUT = ... (consumed by downstream primitives & Output Manifest)">+ OUTPUT =</button>`;
 
@@ -18957,7 +18925,7 @@ ${interpolatedPrompt}`;
 							const cfLabel = (cf.label || cf.id || '').trim();
 							const cfLower = cfLabel.toLowerCase();
 							const cfType = (cf.type || '').toLowerCase();
-							if (!cfLabel || cfLower === rawKey.toLowerCase() || cfType === 'output' || cfType === 'result' || cfLower === 'output' || cfLower === 'result') {
+							if (!cfLabel || cfLower === rawKey.toLowerCase() || cfType === 'output' || cfLower === 'output') {
 								continue;
 							}
 							if (cfType === 'parameters' && Array.isArray(cf.parameters)) {
@@ -19243,7 +19211,7 @@ ${interpolatedPrompt}`;
 						const fTypeLower = (f.type || '').toLowerCase();
 						const fLabelTrim = (f.label || f.id || '').trim();
 						const fLabelLower = fLabelTrim.toLowerCase();
-						if (!fLabelTrim || fTypeLower === 'output' || fTypeLower === 'result' || fLabelLower === 'output' || fLabelLower === 'result') {
+						if (!fLabelTrim || fTypeLower === 'output' || fLabelLower === 'output') {
 							continue;
 						}
 						if (fTypeLower === 'parameters' && Array.isArray(f.parameters)) {
@@ -19881,7 +19849,7 @@ ${userPromptSectionHtml}
 						}
 					});
 					fieldsToRender.forEach(otherF => {
-						if (otherF.key !== rawKey && otherF.label !== k && otherF.type !== 'output' && otherF.type !== 'result') {
+						if (otherF.key !== rawKey && otherF.label !== k && otherF.type !== 'output') {
 							const tk = (otherF.label || otherF.key || '').trim();
 							if (tk && !tableRefTokens.includes(tk)) {
 								tableRefTokens.push(tk);
@@ -19938,79 +19906,35 @@ ${userPromptSectionHtml}
 					let sshQuickCommands: ISshQuickCommand[] = normalizeSshQuickCommands(fieldItem.sshQuickCommands);
 					let lastExecuted: string = '';
 
-					if (v) {
-						if (typeof v === 'string') {
-							const trimmed = v.trim();
-							if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-								try {
-									const pObj = JSON.parse(trimmed);
-									if (pObj.host !== undefined || pObj.sshHost !== undefined) sshHost = String(pObj.host ?? pObj.sshHost ?? '');
-									if (pObj.port !== undefined || pObj.sshPort !== undefined) sshPort = pObj.port ?? pObj.sshPort ?? 22;
-									if (pObj.user !== undefined || pObj.sshUser !== undefined) sshUser = String(pObj.user ?? pObj.sshUser ?? 'root');
-									if (pObj.password !== undefined || pObj.sshPassword !== undefined) sshPassword = String(pObj.password ?? pObj.sshPassword ?? '');
-									if (pObj.cwd !== undefined || pObj.sshCwd !== undefined) sshCwd = String(pObj.cwd ?? pObj.sshCwd ?? '~');
-									if (Array.isArray(pObj.commands) || Array.isArray(pObj.sshCommands)) {
-										sshCommands = normalizeSshCommandsList(pObj.commands ?? pObj.sshCommands);
-									} else if (pObj.command !== undefined || pObj.sshCommand !== undefined) {
-										sshCommands = normalizeSshCommandsList(undefined, String(pObj.command ?? pObj.sshCommand ?? ''));
-									}
-									if (pObj.output !== undefined || pObj.sshOutput !== undefined) sshOutput = String(pObj.output ?? pObj.sshOutput ?? '');
-									if (pObj.lastRawOutput !== undefined || pObj.sshLastRawOutput !== undefined) {
-										sshLastRawOutput = String(pObj.lastRawOutput ?? pObj.sshLastRawOutput ?? '');
-									}
-									if (Array.isArray(pObj.lastRawEntries) || Array.isArray(pObj.sshLastRawEntries)) {
-										sshLastRawEntries = pObj.lastRawEntries ?? pObj.sshLastRawEntries;
-									}
-									if (pObj.lastNOutput !== undefined || pObj.sshLastOutput !== undefined) {
-										sshLastOutput = String(pObj.lastNOutput ?? pObj.sshLastOutput ?? '');
-									}
-									if (pObj.outputLines !== undefined || pObj.sshOutputLines !== undefined) {
-										const parsedN = Number(pObj.outputLines ?? pObj.sshOutputLines);
-										if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
-									}
-									if (Array.isArray(pObj.quickCommands) && pObj.quickCommands.length > 0) {
-										sshQuickCommands = normalizeSshQuickCommands(pObj.quickCommands);
-									} else if (Array.isArray(pObj.sshQuickCommands) && pObj.sshQuickCommands.length > 0) {
-										sshQuickCommands = normalizeSshQuickCommands(pObj.sshQuickCommands);
-									}
-									if (pObj.lastExecuted) lastExecuted = String(pObj.lastExecuted);
-								} catch { }
-							} else {
-								sshCommands = [trimmed];
-							}
-						} else if (Array.isArray(v)) {
-							sshCommands = normalizeSshCommandsList(v);
-						} else if (typeof v === 'object' && v !== null) {
-							const pObj = v as any;
-							if (pObj.host !== undefined || pObj.sshHost !== undefined) sshHost = String(pObj.host ?? pObj.sshHost ?? '');
-							if (pObj.port !== undefined || pObj.sshPort !== undefined) sshPort = pObj.port ?? pObj.sshPort ?? 22;
-							if (pObj.user !== undefined || pObj.sshUser !== undefined) sshUser = String(pObj.user ?? pObj.sshUser ?? 'root');
-							if (pObj.password !== undefined || pObj.sshPassword !== undefined) sshPassword = String(pObj.password ?? pObj.sshPassword ?? '');
-							if (pObj.cwd !== undefined || pObj.sshCwd !== undefined) sshCwd = String(pObj.cwd ?? pObj.sshCwd ?? '~');
-							if (Array.isArray(pObj.commands) || Array.isArray(pObj.sshCommands)) {
-								sshCommands = normalizeSshCommandsList(pObj.commands ?? pObj.sshCommands);
-							} else if (pObj.command !== undefined || pObj.sshCommand !== undefined) {
-								sshCommands = normalizeSshCommandsList(undefined, String(pObj.command ?? pObj.sshCommand ?? ''));
-							}
-							if (pObj.output !== undefined || pObj.sshOutput !== undefined) sshOutput = String(pObj.output ?? pObj.sshOutput ?? '');
-							if (pObj.lastRawOutput !== undefined || pObj.sshLastRawOutput !== undefined) {
-								sshLastRawOutput = String(pObj.lastRawOutput ?? pObj.sshLastRawOutput ?? '');
-							}
-							if (Array.isArray(pObj.lastRawEntries) || Array.isArray(pObj.sshLastRawEntries)) {
-								sshLastRawEntries = pObj.lastRawEntries ?? pObj.sshLastRawEntries;
-							}
-							if (pObj.lastNOutput !== undefined || pObj.sshLastOutput !== undefined) {
-								sshLastOutput = String(pObj.lastNOutput ?? pObj.sshLastOutput ?? '');
-							}
-							if (pObj.outputLines !== undefined || pObj.sshOutputLines !== undefined) {
-								const parsedN = Number(pObj.outputLines ?? pObj.sshOutputLines);
-								if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
-							}
-							if (Array.isArray(pObj.quickCommands) && pObj.quickCommands.length > 0) {
-								sshQuickCommands = normalizeSshQuickCommands(pObj.quickCommands);
-							}
-							if (pObj.lastExecuted) lastExecuted = String(pObj.lastExecuted);
+					// Ticket value uses the template config names (sshHost, sshPort, ...); older short names are migrated.
+					const sshVal = normalizeSshTicketValue(v);
+					if (sshVal) {
+						if (sshVal.sshHost !== undefined) sshHost = String(sshVal.sshHost ?? '');
+						if (sshVal.sshPort !== undefined) sshPort = sshVal.sshPort ?? 22;
+						if (sshVal.sshUser !== undefined) sshUser = String(sshVal.sshUser ?? 'root');
+						if (sshVal.sshPassword !== undefined) sshPassword = String(sshVal.sshPassword ?? '');
+						if (sshVal.sshCwd !== undefined) sshCwd = String(sshVal.sshCwd ?? '~');
+						if (Array.isArray(sshVal.sshCommands)) {
+							sshCommands = normalizeSshCommandsList(sshVal.sshCommands);
+						} else if (sshVal.sshCommand !== undefined) {
+							sshCommands = normalizeSshCommandsList(undefined, String(sshVal.sshCommand ?? ''));
 						}
+						if (sshVal.sshOutput !== undefined) sshOutput = String(sshVal.sshOutput ?? '');
+						if (sshVal.sshLastRawOutput !== undefined) sshLastRawOutput = String(sshVal.sshLastRawOutput ?? '');
+						if (Array.isArray(sshVal.sshLastRawEntries)) sshLastRawEntries = sshVal.sshLastRawEntries;
+						if (sshVal.sshLastOutput !== undefined) sshLastOutput = String(sshVal.sshLastOutput ?? '');
+						if (sshVal.sshOutputLines !== undefined) {
+							const parsedN = Number(sshVal.sshOutputLines);
+							if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+						}
+						if (Array.isArray(sshVal.sshQuickCommands) && sshVal.sshQuickCommands.length > 0) {
+							sshQuickCommands = normalizeSshQuickCommands(sshVal.sshQuickCommands);
+						}
+						if (sshVal.sshLastExecuted) lastExecuted = String(sshVal.sshLastExecuted);
+					} else if (typeof v === 'string' && v.trim() && !v.trim().startsWith('{')) {
+						sshCommands = [v.trim()];
+					} else if (Array.isArray(v)) {
+						sshCommands = normalizeSshCommandsList(v);
 					}
 
 					const sshCommand = sshCommands[0] || '';
@@ -20021,21 +19945,20 @@ ${userPromptSectionHtml}
 							: (sshLastRawOutput ? extractSshOutputLastNLines(sshLastRawOutput, sshOutputLines) : ''));
 
 					const sshPayloadStr = JSON.stringify({
-						host: sshHost,
-						port: sshPort,
-						user: sshUser,
-						password: sshPassword,
-						cwd: sshCwd,
-						command: sshCommand,
-						commands: sshCommands,
+						sshHost,
+						sshPort,
+						sshUser,
+						sshPassword,
+						sshCwd,
+						sshCommand,
 						sshCommands,
-						output: sshOutput,
-						lastRawOutput: sshLastRawOutput ?? '',
-						lastRawEntries: sshLastRawEntries,
-						outputLines: sshOutputLines,
-						lastNOutput: resolvedLastNOutput,
-						quickCommands: sshQuickCommands,
-						lastExecuted
+						sshOutput,
+						sshLastRawOutput: sshLastRawOutput ?? '',
+						sshLastRawEntries,
+						sshOutputLines,
+						sshLastOutput: resolvedLastNOutput,
+						sshQuickCommands,
+						sshLastExecuted: lastExecuted
 					});
 					const connTargetLabel = sshHost ? `${sshUser || 'root'}@${sshHost}:${sshPort}` : 'Not Connected';
 
@@ -20057,7 +19980,7 @@ ${userPromptSectionHtml}
 							<div class="custom-field-view ssh-card-mount" style="display: flex; flex-direction: column; gap: 10px; padding: 4px 0;"></div>
 						</div>
 					`;
-				} else if (fType === 'output' || fType === 'result') {
+				} else if (fType === 'output') {
 					const enabledSpecs = (fieldItem.outputSpecs || []).filter(s => s.enabled);
 					let savedMap: Record<string, unknown> = {};
 					let singleResultText = fieldItem.defaultContent || '';
@@ -20123,17 +20046,12 @@ ${userPromptSectionHtml}
 								if (isBrowserField) {
 									return String(pRec.content ?? matchingField?.defaultContent ?? '');
 								} else if (isHttpRequestField) {
-									if (pRec.responseData !== undefined && pRec.responseData !== null) {
-										return typeof pRec.responseData === 'object' ? JSON.stringify(pRec.responseData, null, 2) : String(pRec.responseData);
+									const hv = normalizeHttpTicketValue(pRec) ?? {};
+									if (hv.httpResponseData !== undefined && hv.httpResponseData !== null) {
+										return typeof hv.httpResponseData === 'object' ? JSON.stringify(hv.httpResponseData, null, 2) : String(hv.httpResponseData);
 									}
-									if (pRec.data !== undefined && pRec.data !== null) {
-										return typeof pRec.data === 'object' ? JSON.stringify(pRec.data, null, 2) : String(pRec.data);
-									}
-									if (pRec.responseBody !== undefined && pRec.responseBody !== null) {
-										return String(pRec.responseBody);
-									}
-									if (pRec.body !== undefined && pRec.body !== null) {
-										return String(pRec.body);
+									if (hv.httpResponseBody !== undefined && hv.httpResponseBody !== null) {
+										return String(hv.httpResponseBody);
 									}
 									return String(pRec.output ?? '');
 								} else if (isPromptField) {
@@ -20142,19 +20060,19 @@ ${userPromptSectionHtml}
 									const v = (pRec.result !== undefined && pRec.result !== null && pRec.result !== '') ? pRec.result : (pRec.output ?? '');
 									return typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v ?? '');
 								} else if (isSshField) {
-									const nLines = Number(pRec.outputLines ?? pRec.sshOutputLines ?? matchingField?.sshOutputLines ?? 50);
+									const sv = normalizeSshTicketValue(pRec) ?? {};
+									const nLines = Number(sv.sshOutputLines ?? matchingField?.sshOutputLines ?? 50);
 									const validN = !isNaN(nLines) && nLines > 0 ? nLines : 50;
-									if (Array.isArray(pRec.lastRawEntries) && pRec.lastRawEntries.length > 0) {
-										return formatSshCommandsJsonOutput(pRec.lastRawEntries, validN);
+									if (Array.isArray(sv.sshLastRawEntries) && sv.sshLastRawEntries.length > 0) {
+										return formatSshCommandsJsonOutput(sv.sshLastRawEntries, validN);
 									}
-									if (pRec.lastNOutput !== undefined && String(pRec.lastNOutput) !== '') {
-										return extractSshOutputLastNLines(String(pRec.lastNOutput), validN);
+									if (sv.sshLastOutput !== undefined && String(sv.sshLastOutput) !== '') {
+										return extractSshOutputLastNLines(String(sv.sshLastOutput), validN);
 									}
-									if (pRec.lastRawOutput !== undefined && String(pRec.lastRawOutput) !== '') {
-										return extractSshOutputLastNLines(String(pRec.lastRawOutput), validN);
+									if (sv.sshLastRawOutput !== undefined && String(sv.sshLastRawOutput) !== '') {
+										return extractSshOutputLastNLines(String(sv.sshLastRawOutput), validN);
 									}
-									const rawSshLog = String(pRec.output ?? pRec.sshOutput ?? '');
-									return extractSshOutputLastNLines(rawSshLog, validN);
+									return extractSshOutputLastNLines(String(sv.sshOutput ?? ''), validN);
 								} else if (isParametersField) {
 									return JSON.stringify(pRec, null, 2);
 								} else if (isTableField) {

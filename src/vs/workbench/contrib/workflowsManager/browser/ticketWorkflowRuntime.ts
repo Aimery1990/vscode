@@ -8,7 +8,7 @@ import { VSBuffer } from '../../../../base/common/buffer.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { IInstantiationService, createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
-import { IEntityPersistenceService, IBaseEntitySnapshot, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, extractSshOutputLastNLines, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput } from '../../entityPersistence/common/entityPersistence.js';
+import { IEntityPersistenceService, IBaseEntitySnapshot, ICustomField, ICustomModule, IOutputSpec, ITableColumnDefinition, ISshRawCommandEntry, generateSmartPythonVarName, detectMediaFileInfo, normalizeSshQuickCommands, normalizeSshCommandsList, cleanInterpolatedSshCommand, buildSshCommandsJsonObject, formatSshCommandsJsonOutput, normalizeNumberFieldValue, normalizeHttpTicketValue, normalizeSshTicketValue, HTTP_REQUEST_CONFIG_KEYS, isHttpTicketValue, isSshTicketValue, httpTicketValueOutputText, sshTicketValueOutputText } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { IAgentCredentialService, getGlobalDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { IWorkspacesExplorerService } from '../../workspacesExplorer/common/workspacesExplorer.js';
@@ -223,6 +223,8 @@ export interface IPrimitiveCatalogItem {
 	executionBehavior: string;
 	supportedInputs?: string[];
 	supportedOutputs?: string[];
+	/** Where the component can be placed. Omitted = both ticket templates and workflow nodes. */
+	usableIn?: ('ticket' | 'node')[];
 }
 
 export interface IPythonExecutionResult {
@@ -729,18 +731,19 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						} else if (Array.isArray(passedVal)) {
 							sshCommands = normalizeSshCommandsList(passedVal);
 						} else if (passedVal && typeof passedVal === 'object') {
-							if ((passedVal as any).sshHost !== undefined || (passedVal as any).host !== undefined) sshHost = String((passedVal as any).sshHost ?? (passedVal as any).host ?? '');
-							if ((passedVal as any).sshPort !== undefined || (passedVal as any).port !== undefined) sshPort = (passedVal as any).sshPort ?? (passedVal as any).port ?? 22;
-							if ((passedVal as any).sshUser !== undefined || (passedVal as any).user !== undefined) sshUser = String((passedVal as any).sshUser ?? (passedVal as any).user ?? 'root');
-							if ((passedVal as any).sshPassword !== undefined || (passedVal as any).password !== undefined) sshPassword = String((passedVal as any).sshPassword ?? (passedVal as any).password ?? '');
-							if ((passedVal as any).sshCwd !== undefined || (passedVal as any).cwd !== undefined) sshCwd = String((passedVal as any).sshCwd ?? (passedVal as any).cwd ?? '');
-							if (Array.isArray((passedVal as any).sshCommands) || Array.isArray((passedVal as any).commands)) {
-								sshCommands = normalizeSshCommandsList((passedVal as any).sshCommands ?? (passedVal as any).commands);
-							} else if ((passedVal as any).sshCommand !== undefined || (passedVal as any).command !== undefined) {
-								sshCommands = normalizeSshCommandsList(undefined, String((passedVal as any).sshCommand ?? (passedVal as any).command ?? ''));
+							const pv = normalizeSshTicketValue(passedVal) ?? {};
+							if (pv.sshHost !== undefined) sshHost = String(pv.sshHost ?? '');
+							if (pv.sshPort !== undefined) sshPort = pv.sshPort ?? 22;
+							if (pv.sshUser !== undefined) sshUser = String(pv.sshUser ?? 'root');
+							if (pv.sshPassword !== undefined) sshPassword = String(pv.sshPassword ?? '');
+							if (pv.sshCwd !== undefined) sshCwd = String(pv.sshCwd ?? '');
+							if (Array.isArray(pv.sshCommands)) {
+								sshCommands = normalizeSshCommandsList(pv.sshCommands);
+							} else if (pv.sshCommand !== undefined) {
+								sshCommands = normalizeSshCommandsList(undefined, String(pv.sshCommand ?? ''));
 							}
-							if ((passedVal as any).sshOutputLines !== undefined || (passedVal as any).outputLines !== undefined) {
-								const parsedN = Number((passedVal as any).sshOutputLines ?? (passedVal as any).outputLines);
+							if (pv.sshOutputLines !== undefined) {
+								const parsedN = Number(pv.sshOutputLines);
 								if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
 							}
 						}
@@ -752,44 +755,42 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							sshCwd,
 							sshCommand: sshCommands[0] || '',
 							sshCommands,
-							commands: sshCommands,
 							sshOutputLines,
-							outputLines: sshOutputLines,
 							sshQuickCommands: normalizeSshQuickCommands(f.sshQuickCommands),
-							output: '',
-							lastRawOutput: '',
-							lastRawEntries: [],
-							lastNOutput: '',
+							sshOutput: '',
+							sshLastRawOutput: '',
+							sshLastRawEntries: [],
+							sshLastOutput: '',
 							history: []
 						});
 					} else if (f.type === 'http_request') {
-						let httpUrl = f.httpUrl || f.defaultUrl || '';
-						let httpMethod = (f.httpMethod || 'GET').toUpperCase();
-						let httpAuthType = f.httpAuthType || 'none';
-						let httpBodyType = f.httpBodyType || 'none';
-						let httpBodyContent = f.httpBodyContent || '';
-						let httpParams = Array.isArray(f.httpParams) ? f.httpParams : [];
-						let httpHeaders = Array.isArray(f.httpHeaders) ? f.httpHeaders : [];
+						// Same property names as the template config; start from the template, then apply the passed value.
+						const httpValue: Record<string, any> = {};
+						for (const key of HTTP_REQUEST_CONFIG_KEYS) {
+							if ((f as any)[key] !== undefined) {
+								httpValue[key] = (f as any)[key];
+							}
+						}
+						if (!httpValue.httpUrl && f.defaultUrl) {
+							httpValue.httpUrl = f.defaultUrl;
+						}
 						const passedVal = initialFields[fKey] ?? initialFields[f.id];
 						if (typeof passedVal === 'string' && /^https?:\/\//i.test(passedVal.trim())) {
-							httpUrl = passedVal.trim();
+							httpValue.httpUrl = passedVal.trim();
 						} else if (passedVal && typeof passedVal === 'object') {
-							if ((passedVal as any).url) httpUrl = String((passedVal as any).url);
-							if ((passedVal as any).method) httpMethod = String((passedVal as any).method).toUpperCase();
-							if ((passedVal as any).body) httpBodyContent = typeof (passedVal as any).body === 'string' ? (passedVal as any).body : JSON.stringify((passedVal as any).body);
+							const pv = normalizeHttpTicketValue(passedVal) ?? {};
+							for (const key of HTTP_REQUEST_CONFIG_KEYS) {
+								if (pv[key] !== undefined) {
+									httpValue[key] = key === 'httpBodyContent' && typeof pv[key] !== 'string' ? JSON.stringify(pv[key]) : pv[key];
+								}
+							}
+							if ((passedVal as any).body !== undefined && typeof (passedVal as any).body !== 'string' && httpValue.httpBodyContent === undefined) {
+								httpValue.httpBodyContent = JSON.stringify((passedVal as any).body);
+							}
 						}
-						customMetadata[fKey] = JSON.stringify({
-							httpUrl,
-							httpMethod,
-							httpAuthType,
-							httpBodyType,
-							httpBodyContent,
-							httpParams,
-							httpHeaders,
-							status: 0,
-							ok: false,
-							output: ''
-						});
+						httpValue.httpMethod = String(httpValue.httpMethod || 'GET').toUpperCase();
+						httpValue.httpUrl = httpValue.httpUrl || '';
+						customMetadata[fKey] = JSON.stringify(httpValue);
 					} else if (f.type === 'table') {
 						const passedVal = lookupInitialField(fKey) ?? lookupInitialField(f.id) ?? lookupInitialField(f.outputVariableName);
 						const isBoundSqlite = (f.tableDbEngine || 'sqlite') === 'sqlite' && Boolean(f.tableDbPath && f.tableDbPath.trim());
@@ -809,7 +810,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							sqlQuery: f.tableSqlQuery || '',
 							sqlOutput: ''
 						});
-					} else if (f.type === 'output' || f.type === 'result') {
+					} else if (f.type === 'output') {
 						const passedVal = initialFields[fKey] ?? initialFields[f.id];
 						if (passedVal !== undefined) {
 							customMetadata[fKey] = typeof passedVal === 'object' ? JSON.stringify(passedVal) : String(passedVal);
@@ -1270,7 +1271,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				// 5. Schema fields matching (by outputVariableName, id, label, previousLabels)
 				if (targetSchema?.fields && Array.isArray(targetSchema.fields)) {
 					const matchedField = targetSchema.fields.find(f => {
-						if (f.type === 'output' || f.type === 'result') return false;
+						if (f.type === 'output') return false;
 						const prevs: string[] = Array.isArray((f as any).previousLabels) ? (f as any).previousLabels : [];
 						return (
 							f.label === trimmedField ||
@@ -2197,55 +2198,29 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							let history: any[] = [];
 
 							const rawSshMeta = customMetadata[fieldLabel];
-							if (rawSshMeta) {
-								if (typeof rawSshMeta === 'string') {
-									const trimmed = rawSshMeta.trim();
-									if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-										try {
-											const parsed = JSON.parse(trimmed);
-											if (parsed.sshHost !== undefined || parsed.host !== undefined) sshHost = String(parsed.sshHost ?? parsed.host ?? '');
-											if (parsed.sshPort !== undefined || parsed.port !== undefined) sshPort = parsed.sshPort ?? parsed.port ?? 22;
-											if (parsed.sshUser !== undefined || parsed.user !== undefined) sshUser = String(parsed.sshUser ?? parsed.user ?? 'root');
-											if (parsed.sshPassword !== undefined || parsed.password !== undefined) sshPassword = String(parsed.sshPassword ?? parsed.password ?? '');
-											if (parsed.sshCwd !== undefined || parsed.cwd !== undefined) sshCwd = String(parsed.sshCwd ?? parsed.cwd ?? '');
-											if (Array.isArray(parsed.sshCommands) || Array.isArray(parsed.commands)) {
-												rawCommandsList = normalizeSshCommandsList(parsed.sshCommands ?? parsed.commands);
-											} else if (parsed.sshCommand !== undefined || parsed.command !== undefined) {
-												rawCommandsList = normalizeSshCommandsList(undefined, String(parsed.sshCommand ?? parsed.command ?? ''));
-											}
-											if (parsed.output !== undefined) existingOutput = String(parsed.output);
-											if (parsed.outputLines !== undefined || parsed.sshOutputLines !== undefined) {
-												const parsedN = Number(parsed.outputLines ?? parsed.sshOutputLines);
-												if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
-											}
-											if (Array.isArray(parsed.history)) history = parsed.history;
-										} catch {
-											rawCommandsList = [trimmed];
-										}
-									} else {
-										rawCommandsList = [trimmed];
-									}
-								} else if (Array.isArray(rawSshMeta)) {
-									rawCommandsList = normalizeSshCommandsList(rawSshMeta);
-								} else if (typeof rawSshMeta === 'object' && rawSshMeta !== null) {
-									const obj = rawSshMeta as any;
-									if (obj.sshHost !== undefined || obj.host !== undefined) sshHost = String(obj.sshHost ?? obj.host ?? '');
-									if (obj.sshPort !== undefined || obj.port !== undefined) sshPort = obj.sshPort ?? obj.port ?? 22;
-									if (obj.sshUser !== undefined || obj.user !== undefined) sshUser = String(obj.sshUser ?? obj.user ?? 'root');
-									if (obj.sshPassword !== undefined || obj.password !== undefined) sshPassword = String(obj.sshPassword ?? obj.password ?? '');
-									if (obj.sshCwd !== undefined || obj.cwd !== undefined) sshCwd = String(obj.sshCwd ?? obj.cwd ?? '');
-									if (Array.isArray(obj.sshCommands) || Array.isArray(obj.commands)) {
-										rawCommandsList = normalizeSshCommandsList(obj.sshCommands ?? obj.commands);
-									} else if (obj.sshCommand !== undefined || obj.command !== undefined) {
-										rawCommandsList = normalizeSshCommandsList(undefined, String(obj.sshCommand ?? obj.command ?? ''));
-									}
-									if (obj.output !== undefined) existingOutput = String(obj.output);
-									if (obj.outputLines !== undefined || obj.sshOutputLines !== undefined) {
-										const parsedN = Number(obj.outputLines ?? obj.sshOutputLines);
-										if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
-									}
-									if (Array.isArray(obj.history)) history = obj.history;
+							const sshVal = normalizeSshTicketValue(rawSshMeta);
+							if (sshVal) {
+								// Ticket value uses the same names as the template config (sshHost, sshPort, ...).
+								if (sshVal.sshHost !== undefined) sshHost = String(sshVal.sshHost ?? '');
+								if (sshVal.sshPort !== undefined) sshPort = sshVal.sshPort ?? 22;
+								if (sshVal.sshUser !== undefined) sshUser = String(sshVal.sshUser ?? 'root');
+								if (sshVal.sshPassword !== undefined) sshPassword = String(sshVal.sshPassword ?? '');
+								if (sshVal.sshCwd !== undefined) sshCwd = String(sshVal.sshCwd ?? '');
+								if (Array.isArray(sshVal.sshCommands)) {
+									rawCommandsList = normalizeSshCommandsList(sshVal.sshCommands);
+								} else if (sshVal.sshCommand !== undefined) {
+									rawCommandsList = normalizeSshCommandsList(undefined, String(sshVal.sshCommand ?? ''));
 								}
+								if (sshVal.sshOutput !== undefined) existingOutput = String(sshVal.sshOutput);
+								if (sshVal.sshOutputLines !== undefined) {
+									const parsedN = Number(sshVal.sshOutputLines);
+									if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
+								}
+								if (Array.isArray(sshVal.history)) history = sshVal.history;
+							} else if (typeof rawSshMeta === 'string' && rawSshMeta.trim()) {
+								rawCommandsList = [rawSshMeta.trim()];
+							} else if (Array.isArray(rawSshMeta)) {
+								rawCommandsList = normalizeSshCommandsList(rawSshMeta);
 							}
 
 							if (inputOverrides[fieldLabel] !== undefined) {
@@ -2255,19 +2230,19 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								} else if (Array.isArray(ovVal)) {
 									rawCommandsList = normalizeSshCommandsList(ovVal);
 								} else if (typeof ovVal === 'object' && ovVal !== null) {
-									const ov = ovVal as any;
-									if (ov.sshHost || ov.host) sshHost = String(ov.sshHost || ov.host);
-									if (ov.sshPort || ov.port) sshPort = ov.sshPort || ov.port;
-									if (ov.sshUser || ov.user) sshUser = String(ov.sshUser || ov.user);
-									if (ov.sshPassword || ov.password) sshPassword = String(ov.sshPassword || ov.password);
-									if (ov.sshCwd || ov.cwd) sshCwd = String(ov.sshCwd || ov.cwd);
-									if (Array.isArray(ov.sshCommands) || Array.isArray(ov.commands)) {
-										rawCommandsList = normalizeSshCommandsList(ov.sshCommands ?? ov.commands);
-									} else if (ov.sshCommand || ov.command) {
-										rawCommandsList = normalizeSshCommandsList(undefined, String(ov.sshCommand || ov.command));
+									const ov = normalizeSshTicketValue(ovVal) ?? {};
+									if (ov.sshHost) sshHost = String(ov.sshHost);
+									if (ov.sshPort) sshPort = ov.sshPort;
+									if (ov.sshUser) sshUser = String(ov.sshUser);
+									if (ov.sshPassword) sshPassword = String(ov.sshPassword);
+									if (ov.sshCwd) sshCwd = String(ov.sshCwd);
+									if (Array.isArray(ov.sshCommands)) {
+										rawCommandsList = normalizeSshCommandsList(ov.sshCommands);
+									} else if (ov.sshCommand) {
+										rawCommandsList = normalizeSshCommandsList(undefined, String(ov.sshCommand));
 									}
-									if (ov.sshOutputLines || ov.outputLines) {
-										const parsedN = Number(ov.sshOutputLines ?? ov.outputLines);
+									if (ov.sshOutputLines) {
+										const parsedN = Number(ov.sshOutputLines);
 										if (!isNaN(parsedN) && parsedN > 0) sshOutputLines = Math.floor(parsedN);
 									}
 								}
@@ -2314,25 +2289,25 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							}
 
 							stepOutput = batchRes.jsonOutput;
+							// Saved with the template config names. Config values are kept RAW (e.g. `{SSH_PASSWORD}`), never the
+							// resolved secret; resolved host/commands go to the run details only.
 							customMetadata[fieldLabel] = JSON.stringify({
-								sshHost: batchRes.host,
-								sshPort: batchRes.port,
-								sshUser: batchRes.user,
-								sshPassword: this._interpolateVariables(sshPassword, contextVariables),
-								sshCwd: batchRes.cwd,
-								sshCommand: batchRes.resolvedCommands[0] || rawCommandsList[0] || '',
+								sshHost,
+								sshPort,
+								sshUser,
+								sshPassword,
+								sshCwd: batchRes.cwd || sshCwd,
+								sshCommand: rawCommandsList[0] || '',
 								sshCommands: rawCommandsList,
-								commands: batchRes.resolvedCommands,
 								sshOutputLines,
-								outputLines: sshOutputLines,
-								sshQuickCommands: normalizeSshQuickCommands(field.sshQuickCommands),
-								output: batchRes.terminalTranscript,
-								lastRawOutput: batchRes.rawEntries.length > 0 ? batchRes.rawEntries[batchRes.rawEntries.length - 1].rawOutput : '',
-								lastRawEntries: batchRes.rawEntries,
-								lastNOutput: stepOutput,
+								sshQuickCommands: normalizeSshQuickCommands((normalizeSshTicketValue(rawSshMeta)?.sshQuickCommands) ?? field.sshQuickCommands),
+								sshOutput: batchRes.terminalTranscript,
+								sshLastRawOutput: batchRes.rawEntries.length > 0 ? batchRes.rawEntries[batchRes.rawEntries.length - 1].rawOutput : '',
+								sshLastRawEntries: batchRes.rawEntries,
+								sshLastOutput: stepOutput,
 								exitCode: batchRes.exitCode,
 								durationMs: batchRes.durationMs,
-								lastExecuted: new Date().toISOString(),
+								sshLastExecuted: new Date().toISOString(),
 								history
 							});
 							stepDetails = {
@@ -2356,21 +2331,31 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						}
 
 						case 'http_request': {
-							let effectiveField = { ...field };
+							const effectiveField: ICustomField = { ...field };
 							const rawHttpMeta = customMetadata[fieldLabel] ?? customMetadata[field.id];
-							if (typeof rawHttpMeta === 'string' && rawHttpMeta.trim().startsWith('{')) {
-								try {
-									const parsedHttp = JSON.parse(rawHttpMeta.trim());
-									if (parsedHttp && typeof parsedHttp === 'object') {
-										if (parsedHttp.url) effectiveField.httpUrl = parsedHttp.url;
-										if (parsedHttp.method) effectiveField.httpMethod = parsedHttp.method;
-										if (Array.isArray(parsedHttp.params)) effectiveField.httpParams = parsedHttp.params;
-										if (Array.isArray(parsedHttp.headers)) effectiveField.httpHeaders = parsedHttp.headers;
-										if (parsedHttp.authType) effectiveField.httpAuthType = parsedHttp.authType;
-										if (parsedHttp.authToken) effectiveField.httpAuthToken = parsedHttp.authToken;
-										if (parsedHttp.body !== undefined) effectiveField.httpBody = parsedHttp.body;
+							const httpVal = normalizeHttpTicketValue(rawHttpMeta);
+							if (httpVal) {
+								// The ticket value uses the template config names; every request setting saved on the ticket wins.
+								for (const key of HTTP_REQUEST_CONFIG_KEYS) {
+									const v = httpVal[key];
+									if (v === undefined || v === null) {
+										continue;
 									}
-								} catch { }
+									if ((key === 'httpParams' || key === 'httpHeaders') && !Array.isArray(v)) {
+										continue;
+									}
+									if (key === 'httpTimeoutMs') {
+										const n = Number(v);
+										if (!isNaN(n) && n > 0) {
+											effectiveField.httpTimeoutMs = n;
+										}
+										continue;
+									}
+									if (key === 'httpUrl' && String(v).trim() === '') {
+										continue;
+									}
+									(effectiveField as any)[key] = v;
+								}
 							}
 							const httpRes = await this.executeHttpRequest(effectiveField, contextVariables);
 							field.httpResponseStatus = httpRes.status;
@@ -2388,18 +2373,24 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								: (httpRes.body !== undefined && httpRes.body !== null ? httpRes.body : (httpRes.rawText || ''));
 							stepOutput = cleanHttpData;
 
-							customMetadata[fieldLabel] = JSON.stringify({
-								url: httpRes.url,
-								method: httpRes.method,
-								status: httpRes.status,
-								statusText: httpRes.statusText,
-								ok: httpRes.ok,
-								headers: httpRes.headers,
-								data: httpRes.data,
-								body: httpRes.body,
-								rawText: httpRes.rawText,
-								lastExecuted: new Date().toISOString()
+							// Keep the request settings (template config names) and add the response next to them, instead of
+							// replacing the whole ticket value with the response.
+							const savedHttp: Record<string, any> = { ...(httpVal ?? {}) };
+							for (const key of HTTP_REQUEST_CONFIG_KEYS) {
+								if (savedHttp[key] === undefined && (effectiveField as any)[key] !== undefined) {
+									savedHttp[key] = (effectiveField as any)[key];
+								}
+							}
+							Object.assign(savedHttp, {
+								httpResponseStatus: httpRes.status,
+								httpResponseStatusText: httpRes.statusText,
+								httpResponseHeaders: httpRes.headers,
+								httpResponseBody: httpRes.rawText,
+								httpResponseData: httpRes.data,
+								httpLastExecutionTime: new Date().toISOString(),
+								httpLastDurationMs: httpRes.durationMs
 							});
+							customMetadata[fieldLabel] = JSON.stringify(savedHttp);
 							customMetadata[`${fieldLabel}_status`] = String(httpRes.status);
 							customMetadata[`${fieldLabel}_ok`] = String(httpRes.ok);
 
@@ -2742,8 +2733,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							break;
 						}
 
-						case 'output':
-						case 'result': {
+						case 'output': {
 							// 4. Output Manifest Primitive: aggregate enabled primitive outputs
 							const aggregatedMap: Record<string, any> = {};
 							const specs: IOutputSpec[] = field.outputSpecs || [];
@@ -2760,7 +2750,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 										rawVal = this._resolveOutputSpecValue(spec, contextVariables);
 									} else {
 										const matchedSchemaField = fieldsToRun.find(f =>
-											f.type !== 'output' && f.type !== 'result' && (
+											f.type !== 'output' && (
 												f.label === specKey ||
 												f.label === spec.fieldKey ||
 												f.id === spec.fieldKey ||
@@ -2793,7 +2783,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								finalOutput = aggregatedMap;
 							} else {
 								for (const sr of stepResults) {
-									if (sr.fieldType !== 'output' && sr.fieldType !== 'result' && sr.fieldLabel && sr.output !== undefined) {
+									if (sr.fieldType !== 'output' && sr.fieldLabel && sr.output !== undefined) {
 										aggregatedMap[sr.fieldLabel] = sr.output;
 									}
 								}
@@ -2935,6 +2925,20 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							break;
 						}
 
+						case 'get_tickets': {
+							const query = this._buildGetTicketsQuery(field, contextVariables);
+							const found = await this.getTickets(wsUri, query);
+							stepOutput = found;
+							contextVariables[fieldLabel] = found;
+							contextVariables[this._cleanKey(fieldLabel)] = found;
+							if (field.outputVariableName) {
+								contextVariables[field.outputVariableName] = found;
+							}
+							customMetadata[fieldLabel] = JSON.stringify(found);
+							stepDetails = { query, count: Array.isArray(found) ? found.length : 0, result: found };
+							break;
+						}
+
 						case 'display': {
 							const rawDisp = (field.wfDisplayValue || '').trim();
 							const resolvedVal = await this._evaluateDisplayExpression(wsUri, ticketUri, rawDisp, contextVariables);
@@ -2948,9 +2952,17 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 							const rawVal = inputOverrides[fieldLabel] !== undefined
 								? inputOverrides[fieldLabel]
 								: (customMetadata[fieldLabel] !== undefined ? customMetadata[fieldLabel] : (field.defaultContent || ''));
-							const resolvedVal = typeof rawVal === 'string'
+							let resolvedVal = typeof rawVal === 'string'
 								? this._interpolateVariables(rawVal, contextVariables)
 								: rawVal;
+							if (fieldType === 'number') {
+								// Enforce the component's range / precision on the final (interpolated) value
+								const numCheck = normalizeNumberFieldValue({ label: fieldLabel, min: field.min, max: field.max, precision: field.precision }, resolvedVal);
+								if (!numCheck.ok) {
+									throw new Error(numCheck.error);
+								}
+								resolvedVal = numCheck.value;
+							}
 							stepOutput = resolvedVal;
 							contextVariables[fieldLabel] = resolvedVal;
 							contextVariables[this._cleanKey(fieldLabel)] = resolvedVal;
@@ -2962,7 +2974,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 								runtimeValue: resolvedVal,
 								value: resolvedVal,
 								options: (field as any).options,
-								defaultValue: (field as any).defaultValue
+								defaultValue: field.defaultValue
 							};
 							break;
 						}
@@ -2972,7 +2984,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 						const sanitizedStepOut = this.validateAndSanitizeComponentOutput(fieldType, field, stepOutput);
 						stepOutput = sanitizedStepOut;
 						const outVarName = (field.outputVariableName || '').trim() || generateSmartPythonVarName(fieldLabel, fieldType);
-						if (outVarName && fieldType !== 'parameters' && fieldType !== 'output' && fieldType !== 'result' && fieldType !== 'display') {
+						if (outVarName && fieldType !== 'parameters' && fieldType !== 'output' && fieldType !== 'display') {
 							contextVariables[outVarName] = sanitizedStepOut;
 							contextVariables[this._cleanKey(outVarName)] = sanitizedStepOut;
 						}
@@ -3039,7 +3051,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const totalDuration = Date.now() - startTime;
 			this.logService.info(`[TicketWorkflowRuntime] Finished running ticket '${ticketResult.ticketId}' in ${totalDuration}ms (status: ${executionStatus})`);
 
-			const outField = schema?.fields?.find(f => f.type === 'output' || f.type === 'result');
+			const outField = schema?.fields?.find(f => f.type === 'output');
 			if (hasFailedSteps) {
 				const failedStep = stepResults.find(s => s.status === 'failed');
 				const failureError = failedStep?.error || `Step '${failedStep?.fieldLabel || 'Unknown'}' failed`;
@@ -3495,6 +3507,65 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					contextVariables[`${this._cleanKey(fieldLabel)}_resolved_url`] = interpolatedUrl;
 					break;
 				}
+				case 'tts': {
+					// Text-to-speech inside a workflow node: synthesize the (interpolated) text and save the audio under
+					// <workflow>/attachments/. Reuses the previous file when the text and voice settings are unchanged.
+					const ttsProvider = field.targetProvider || 'gemini';
+					const ttsModel = field.targetModel || (ttsProvider === 'openai' ? 'tts-1' : 'gemini-2.5-flash-preview-tts');
+					const ttsFormat = (field.ttsFormat || 'mp3').toLowerCase();
+					const ttsVoice = field.ttsVoice || (ttsProvider === 'openai' ? 'alloy' : 'Kore');
+					const sourceText = (field.defaultContent || '').trim() ? (field.defaultContent || '') : ((field as any).ttsDisplayText || '');
+					const ttsText = this._interpolateVariables(sourceText, contextVariables).trim();
+					if (!ttsText) {
+						throw new Error(`Text to Speech '${fieldLabel}': the text is empty.`);
+					}
+					const cacheKey = JSON.stringify([ttsText, ttsProvider, ttsModel, ttsVoice, ttsFormat]);
+					const prevPath: string = (field as any).ttsLastAudioPath || '';
+					let audioPath = '';
+					let cached = false;
+					if (prevPath && (field as any).ttsLastCacheKey === cacheKey && await this.fileService.exists(URI.file(prevPath))) {
+						audioPath = prevPath;
+						cached = true;
+					} else {
+						const credService = this.instantiationService.invokeFunction(accessor => {
+							try { return accessor.get(IAgentCredentialService); } catch { return undefined; }
+						});
+						if (!credService?.synthesizeSpeech) {
+							throw new Error(`Text to Speech '${fieldLabel}': credential service unavailable.`);
+						}
+						const ttsRes = await credService.synthesizeSpeech({
+							text: ttsText,
+							modelId: ttsModel,
+							credentialId: field.targetCredentialId || undefined,
+							providerId: ttsProvider,
+							format: ttsFormat,
+							voice: ttsVoice
+						});
+						if (!ttsRes.success || !ttsRes.audioBuffer) {
+							throw new Error(`Text to Speech '${fieldLabel}' failed: ${ttsRes.error || 'synthesis failed'}`);
+						}
+						const attachDir = URI.joinPath(workUri, 'attachments');
+						if (!(await this.fileService.exists(attachDir))) {
+							await this.fileService.createFolder(attachDir);
+						}
+						const audioUri = URI.joinPath(attachDir, `tts_${this._cleanKey(fieldLabel) || 'audio'}_${Date.now()}.${ttsFormat}`);
+						await this.fileService.writeFile(audioUri, VSBuffer.wrap(ttsRes.audioBuffer));
+						audioPath = audioUri.fsPath;
+						(field as any).ttsLastAudioPath = audioPath;
+						(field as any).ttsLastCacheKey = cacheKey;
+					}
+					field.ttsAudioFile = audioPath;
+					stepOutput = audioPath;
+					contextVariables[fieldLabel] = stepOutput;
+					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+					if (field.outputVariableName) {
+						contextVariables[field.outputVariableName] = stepOutput;
+					}
+					stepDetails = { text: ttsText, provider: ttsProvider, model: ttsModel, voice: ttsVoice, format: ttsFormat, audioFile: audioPath, cached };
+					(field as any).lastExecutionLog = `>>> TEXT TO SPEECH (${ttsProvider}/${ttsModel}, voice ${ttsVoice})${cached ? ' [reused cached audio]' : ''}\n${audioPath}`;
+					(field as any).lastExecutionOutput = stepOutput;
+					break;
+				}
 				case 'media_player': {
 					const rawPath = field.mediaFilePath || field.defaultContent || '';
 					const interpolatedPath = this._interpolateVariables(rawPath, contextVariables).trim();
@@ -3791,6 +3862,19 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					(field as any).lastExecutionOutput = stepOutput;
 					break;
 				}
+				case 'get_tickets': {
+					const query = this._buildGetTicketsQuery(field, contextVariables);
+					stepOutput = await this.getTickets(wsUri, query);
+					contextVariables[fieldLabel] = stepOutput;
+					contextVariables[this._cleanKey(fieldLabel)] = stepOutput;
+					if (field.outputVariableName) {
+						contextVariables[field.outputVariableName] = stepOutput;
+					}
+					stepDetails = { query, count: Array.isArray(stepOutput) ? stepOutput.length : 0, result: stepOutput };
+					(field as any).lastExecutionLog = `>>> GET_TICKETS(${JSON.stringify(query)}) -> ${field.outputVariableName || fieldLabel} [${Array.isArray(stepOutput) ? stepOutput.length : 0} ticket(s)]\n${JSON.stringify(stepOutput, null, 2)}`;
+					(field as any).lastExecutionOutput = stepOutput;
+					break;
+				}
 				case 'display': {
 					const rawDisp = (field.wfDisplayValue || '').trim();
 					stepOutput = await this._evaluateDisplayExpression(wsUri, workUri, rawDisp, contextVariables);
@@ -3850,7 +3934,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				const sanitizedStepOut = this.validateAndSanitizeComponentOutput(fieldType, field, stepOutput);
 				stepOutput = sanitizedStepOut;
 				const outVarName = (field.outputVariableName || '').trim() || generateSmartPythonVarName(fieldLabel, fieldType);
-				if (outVarName && fieldType !== 'parameters' && fieldType !== 'output' && fieldType !== 'result' && fieldType !== 'display') {
+				if (outVarName && fieldType !== 'parameters' && fieldType !== 'output' && fieldType !== 'display') {
 					contextVariables[outVarName] = sanitizedStepOut;
 					contextVariables[this._cleanKey(outVarName)] = sanitizedStepOut;
 				}
@@ -4081,10 +4165,10 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				label: 'Git Repository & Branch Binding',
 				icon: 'source-control',
 				category: 'data',
-				description: 'Binds ticket to specific git repository URL and active branch for contextual workspace operations.',
-				executionBehavior: 'Verifies remote URL, checkout branch, and provides git context metadata to workflow.',
+				description: 'Records a git repository URL and branch on the ticket (reference metadata only).',
+				executionBehavior: 'NOT EXECUTABLE YET: no clone / checkout / fetch is performed and no git variables are registered; at run time the component only passes its text value through.',
 				supportedInputs: ['git remote URL', 'branch name'],
-				supportedOutputs: ['commit hash', 'branch status']
+				supportedOutputs: ['the stored text value (no git data)']
 			},
 			{
 				type: 'python',
@@ -4097,14 +4181,95 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				supportedOutputs: ['execution output (stdout)', 'logs', 'exit code', 'execution duration']
 			},
 			{
+				type: 'http_request',
+				label: 'HTTP Request (API / REST Client)',
+				icon: 'globe',
+				category: 'processing',
+				description: 'Calls an HTTP / REST API: GET, POST, PUT, PATCH, DELETE with query params, headers, Bearer / API-Key / Basic auth and a JSON / raw / form body.',
+				executionBehavior: 'Interpolates {variables} in URL, params, headers and body, sends the request (default timeout 30s), parses a JSON response, and registers the parsed data plus <var>_status / <var>_ok in context.',
+				supportedInputs: ['URL (supports {variables})', 'method', 'query params', 'headers', 'auth', 'body'],
+				supportedOutputs: ['parsed response data (JSON or text)', 'HTTP status', 'ok flag', 'response headers']
+			},
+			{
+				type: 'create_tickets',
+				label: 'Create Tickets',
+				icon: 'new-file',
+				category: 'processing',
+				description: 'Creates a new ticket from a ticket template (type), e.g. one record per training run.',
+				executionBehavior: 'Config: wfTicketType* (template id), wfTicketTitle (supports {var}; default "New Ticket"), wfTicketPath (folder, default "."), wfTicketParams {inputName: value or {var}} matching the template Inputs. Returns a ticket handle {success, ticketId, ticketName, ticketType, entityUri, targetFolder, fields}. In workflow nodes it compiles to Python: v = CREATE_TICKETS(ticket_type=..., title=..., path=..., params={...}).',
+				supportedInputs: ['template id', 'title', 'folder', 'template Inputs values'],
+				supportedOutputs: ['ticket handle (pass it to Run Tickets / Get Outputs as {var})']
+			},
+			{
+				type: 'run_tickets',
+				label: 'Run Tickets',
+				icon: 'play',
+				category: 'processing',
+				description: 'Runs all components of an existing ticket and returns its result.',
+				executionBehavior: 'Config: wfTicketTarget* (ticket id, or {var} holding a handle from Create Tickets), wfTicketParams {inputName: value} to override the ticket Inputs. Returns {success, ticketId, status: "success" | "failed", output (the ticket Output dictionary), error, durationMs}.',
+				supportedInputs: ['ticket id or handle', 'Inputs overrides'],
+				supportedOutputs: ['run result with .output (the ticket Output dictionary) and .status']
+			},
+			{
+				type: 'get_outputs',
+				label: 'Get Outputs',
+				icon: 'sign-out',
+				category: 'data',
+				description: 'Reads the Output (result dictionary) of a ticket that has already run.',
+				executionBehavior: 'Config: wfTicketTarget* (ticket id or {var} handle), wfTicketField (optional: one item name). Returns the whole Output dictionary, one item, or null when the ticket template has no Output component.',
+				supportedInputs: ['ticket id or handle', 'optional item name'],
+				supportedOutputs: ['Output dictionary or a single item']
+			},
+			{
+				type: 'get_ticket',
+				label: 'Get Ticket',
+				icon: 'info',
+				category: 'data',
+				description: 'Reads ONE ticket: its fields, status, and outputs.',
+				executionBehavior: 'Config: wfTicketTarget* (ticket id, name, path, or {var} handle), wfTicketField (optional: return just this field). Returns the ticket object or the field value.',
+				supportedInputs: ['ticket id / name / path / handle', 'optional field name'],
+				supportedOutputs: ['ticket object or one field value']
+			},
+			{
+				type: 'get_tickets',
+				label: 'Get Tickets',
+				icon: 'search',
+				category: 'data',
+				description: 'Searches SEVERAL tickets at once (AND of all filters), e.g. all "Done" tickets of a template, to loop over them.',
+				executionBehavior: 'Config (all optional, give at least one): wfTicketType (template id), wfTicketStatus, wfTicketTitle (substring), wfTicketPath (folder), wfTicketField (return only this field per ticket). Returns a list of {ticketId, ticketName, ticketType, title, status, priority, entityUri, customMetadata}.',
+				supportedInputs: ['template id', 'status', 'title substring', 'folder', 'optional field'],
+				supportedOutputs: ['list of tickets (or of one field value per ticket)']
+			},
+			{
+				type: 'display',
+				label: 'Display',
+				icon: 'eye',
+				category: 'output',
+				description: 'Shows an intermediate value in the Live Output panel while a workflow runs (debugging / progress). Produces no variable.',
+				executionBehavior: 'Config: wfDisplayValue* (a Python expression evaluated with all current variables, e.g. train_log[-5:]).',
+				supportedInputs: ['Python expression'],
+				supportedOutputs: ['nothing (display only)']
+			},
+			{
+				type: 'sub_workflow',
+				label: 'Call Sub-Workflow',
+				icon: 'layers',
+				category: 'composite',
+				description: 'Calls a reusable sub-workflow from the Sub-Workflow Library inside a node: passes inputs in, runs it, and hands its outputs to the next steps.',
+				executionBehavior: 'Config: subWorkflowId* (from the Sub-Workflow Library), subWorkflowInputs {inputName: expression or {var}}. Runs the sub-workflow with those inputs; the result is the sub-workflow Output: the raw value if it has exactly one output item, otherwise a dictionary keyed by output name. Creating a new sub-workflow is a separate action (save a group of nodes to the library), not done by this component.',
+				supportedInputs: ['sub-workflow id', 'input bindings'],
+				supportedOutputs: ['sub-workflow outputs (single value or dictionary)'],
+				usableIn: ['node']
+			},
+			{
 				type: 'output',
 				label: 'Output',
 				icon: 'output',
 				category: 'output',
-				description: 'Central Output Manifest & Export Selection specifying which primitive values to expose for inspection or downstream workflows.',
-				executionBehavior: 'Collects outputs of enabled primitives, formats as Table/Markdown/JSON/Text, writes to ticket storage, and returns final payload.',
-				supportedInputs: ['output specs', 'format selections'],
-				supportedOutputs: ['aggregated output object', 'formatted CSV/Markdown']
+				description: 'Defines the RESULT of a ticket, node, or workflow as a dictionary {label: value}. Each output item (outputSpecs) takes its value from a variable / expression (sourceExpression, e.g. {summary}, True, or \"Done: {count} rows\") or exports another component (fieldKey). Where the result goes: (1) in a ticket, RUN_TICKETS(...).output and GET_OUTPUTS(ticket) return it; (2) in a workflow, the Output component on the final node (the one right before End) becomes the WORKFLOW OUTPUTS, returned to the caller or to the parent workflow when used as a sub-workflow (one item -> the raw value, several -> a dict). Every ticket template and every workflow should end with an Output; include a success / status flag so callers can tell whether the run succeeded.',
+				executionBehavior: 'Evaluates each enabled output item (sourceExpression or exported component), stores the dictionary on the ticket, and returns it as the run result. On the final node of a workflow it becomes WORKFLOW_OUTPUTS.',
+				supportedInputs: ['output items: label + sourceExpression ({var}, literal, or template) or fieldKey (component to export)', 'display format (text / markdown / json / table)'],
+				supportedOutputs: ['result dictionary {label: value}', 'WORKFLOW_OUTPUTS when on the final workflow node']
 			},
 			{
 				type: 'text',
@@ -4285,7 +4450,8 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		const spec = querySpecOrTarget || {};
 		const hasQueryFilters = spec.ticket_type !== undefined || spec.ticketType !== undefined ||
 			spec.status !== undefined || spec.title !== undefined || spec.field !== undefined ||
-			spec.wfTicketType !== undefined || spec.wfTicketStatus !== undefined || spec.wfTicketTitle !== undefined;
+			spec.path !== undefined || spec.limit !== undefined ||
+			spec.wfTicketType !== undefined || spec.wfTicketStatus !== undefined || spec.wfTicketTitle !== undefined || spec.wfTicketPath !== undefined;
 		if (!hasQueryFilters && (spec.ticketId || spec.ticket_id || spec.id || spec.ticketName || spec.ticket_name)) {
 			return this.getTicket(workspaceUri, spec, field || spec.field);
 		}
@@ -4294,9 +4460,22 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		const targetStatus = String(spec.status || spec.wfTicketStatus || '').trim().toLowerCase();
 		const targetTitle = String(spec.title || spec.wfTicketTitle || '').trim().toLowerCase();
 		const targetField = String(field || spec.field || spec.wfTicketField || '').trim();
+		const rawPath = String(spec.path || spec.wfTicketPath || '').trim();
+		let pathRoot: string | undefined;
+		if (rawPath && rawPath !== '.') {
+			const wsRoot = typeof workspaceUri === 'string' ? (workspaceUri.includes('://') ? URI.parse(workspaceUri) : URI.file(workspaceUri)) : workspaceUri;
+			pathRoot = (rawPath.startsWith('/') ? URI.file(rawPath) : URI.joinPath(wsRoot, rawPath)).path.replace(/\/+$/, '');
+		}
+		const limitNum = Number(spec.limit);
+		const limit = Number.isFinite(limitNum) && limitNum > 0 ? Math.floor(limitNum) : undefined;
 
 		const allSnapshots = this.entityPersistenceService.getAllSnapshots();
 		const matchedSnapshots = allSnapshots.filter(s => {
+			if (pathRoot) {
+				let sPath = '';
+				try { sPath = URI.parse(s.entityUri).path; } catch { sPath = String(s.entityUri || ''); }
+				if (sPath !== pathRoot && !sPath.startsWith(pathRoot + '/')) return false;
+			}
 			if (targetType) {
 				const sType = String(s.entityType || '').trim().toLowerCase();
 				if (sType !== targetType) return false;
@@ -4314,7 +4493,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 		});
 
 		const results: any[] = [];
-		for (const s of matchedSnapshots) {
+		for (const s of (limit ? matchedSnapshots.slice(0, limit) : matchedSnapshots)) {
 			const item: Record<string, any> = {
 				success: true,
 				ticketId: s.ticketId || s.entityCode || s.entityName,
@@ -4347,6 +4526,21 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			}
 		}
 		return results;
+	}
+
+	/** Builds the GET_TICKETS filter object from a `get_tickets` component, interpolating `{var}` placeholders. */
+	private _buildGetTicketsQuery(field: ICustomField, contextVariables: Record<string, any>): Record<string, string> {
+		const query: Record<string, string> = {};
+		const put = (key: string, raw: string | undefined) => {
+			const v = raw ? this._interpolateVariables(raw, contextVariables).trim() : '';
+			if (v) { query[key] = v; }
+		};
+		put('ticket_type', field.wfTicketType);
+		put('status', field.wfTicketStatus);
+		put('title', field.wfTicketTitle);
+		put('path', field.wfTicketPath);
+		put('field', field.wfTicketField);
+		return query;
 	}
 
 	async GET_TICKETS(workspaceUri: string | URI, querySpecOrTarget: string | any, field?: string): Promise<any> {
@@ -4450,20 +4644,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					if (parsed.result !== undefined && parsed.result !== null && (typeof parsed.result !== 'string' || parsed.result.trim() !== '')) {
 						return typeof parsed.result === 'object' ? JSON.stringify(parsed.result) : String(parsed.result).trim();
 					}
-					if (parsed.data !== undefined && parsed.data !== null && (parsed.status !== undefined || parsed.ok !== undefined)) {
-						return typeof parsed.data === 'object' ? JSON.stringify(parsed.data, null, 2) : String(parsed.data);
+					if (isHttpTicketValue(parsed)) {
+						return httpTicketValueOutputText(parsed);
 					}
-					if (parsed.body !== undefined && parsed.body !== null && (parsed.status !== undefined || parsed.ok !== undefined)) {
-						return typeof parsed.body === 'object' ? JSON.stringify(parsed.body, null, 2) : String(parsed.body);
-					}
-					if (Array.isArray(parsed.lastRawEntries) && parsed.lastRawEntries.length > 0) {
-						return formatSshCommandsJsonOutput(parsed.lastRawEntries, Number(parsed.outputLines ?? parsed.sshOutputLines ?? 50));
-					}
-					if (parsed.lastNOutput !== undefined && String(parsed.lastNOutput).trim() !== '') {
-						return extractSshOutputLastNLines(String(parsed.lastNOutput), Number(parsed.outputLines ?? parsed.sshOutputLines ?? 50));
-					}
-					if (parsed.output !== undefined && (parsed.outputLines !== undefined || parsed.sshOutputLines !== undefined || parsed.sshHost !== undefined || parsed.host !== undefined)) {
-						return extractSshOutputLastNLines(String(parsed.output), Number(parsed.outputLines ?? parsed.sshOutputLines ?? 50));
+					if (isSshTicketValue(parsed)) {
+						return sshTicketValueOutputText(parsed);
 					}
 					if (parsed.output !== undefined && !Array.isArray(parsed.output)) return String(parsed.output);
 					if (parsed.url !== undefined && parsed.content === undefined) return String(parsed.url);
@@ -4485,20 +4670,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			if (rawVal.result !== undefined && rawVal.result !== null && (typeof rawVal.result !== 'string' || rawVal.result.trim() !== '')) {
 				return typeof rawVal.result === 'object' ? JSON.stringify(rawVal.result) : String(rawVal.result).trim();
 			}
-			if (rawVal.data !== undefined && rawVal.data !== null && (rawVal.status !== undefined || rawVal.ok !== undefined)) {
-				return typeof rawVal.data === 'object' ? JSON.stringify(rawVal.data, null, 2) : String(rawVal.data);
+			if (isHttpTicketValue(rawVal)) {
+				return httpTicketValueOutputText(rawVal);
 			}
-			if (rawVal.body !== undefined && rawVal.body !== null && (rawVal.status !== undefined || rawVal.ok !== undefined)) {
-				return typeof rawVal.body === 'object' ? JSON.stringify(rawVal.body, null, 2) : String(rawVal.body);
-			}
-			if (Array.isArray(rawVal.lastRawEntries) && rawVal.lastRawEntries.length > 0) {
-				return formatSshCommandsJsonOutput(rawVal.lastRawEntries, Number(rawVal.outputLines ?? rawVal.sshOutputLines ?? 50));
-			}
-			if (rawVal.lastNOutput !== undefined && String(rawVal.lastNOutput).trim() !== '') {
-				return extractSshOutputLastNLines(String(rawVal.lastNOutput), Number(rawVal.outputLines ?? rawVal.sshOutputLines ?? 50));
-			}
-			if (rawVal.output !== undefined && (rawVal.outputLines !== undefined || rawVal.sshOutputLines !== undefined || rawVal.sshHost !== undefined || rawVal.host !== undefined)) {
-				return extractSshOutputLastNLines(String(rawVal.output), Number(rawVal.outputLines ?? rawVal.sshOutputLines ?? 50));
+			if (isSshTicketValue(rawVal)) {
+				return sshTicketValueOutputText(rawVal);
 			}
 			if (rawVal.output !== undefined && !Array.isArray(rawVal.output)) return String(rawVal.output);
 			return JSON.stringify(rawVal, null, 2);
@@ -5307,25 +5483,19 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				const c = String(rawMeta.content).trim();
 				return c ? this._parseOutputFieldValue(c) : null;
 			}
-			if (('status' in rawMeta && ('data' in rawMeta || 'body' in rawMeta || 'headers' in rawMeta || 'statusText' in rawMeta || 'ok' in rawMeta || 'rawText' in rawMeta)) ||
-				('url' in rawMeta && ('data' in rawMeta || 'body' in rawMeta || 'rawText' in rawMeta || 'status' in rawMeta)) ||
-				'httpResponseData' in rawMeta || 'httpResponseBody' in rawMeta) {
-				const httpPayload = rawMeta.data !== undefined ? rawMeta.data : (rawMeta.body !== undefined ? rawMeta.body : (rawMeta.rawText !== undefined ? rawMeta.rawText : (rawMeta.httpResponseData !== undefined ? rawMeta.httpResponseData : rawMeta.httpResponseBody)));
-				if (httpPayload !== undefined && httpPayload !== null) {
-					return this._parseOutputFieldValue(httpPayload);
-				}
+			if (isHttpTicketValue(rawMeta)) {
+				const httpVal = normalizeHttpTicketValue(rawMeta) ?? {};
+				const httpPayload = httpVal.httpResponseData !== undefined && httpVal.httpResponseData !== null ? httpVal.httpResponseData : httpVal.httpResponseBody;
+				return httpPayload !== undefined && httpPayload !== null ? this._parseOutputFieldValue(httpPayload) : null;
 			}
-			if (Array.isArray(rawMeta.lastRawEntries) || rawMeta.lastNOutput !== undefined || rawMeta.sshHost !== undefined || (rawMeta.host !== undefined && (rawMeta.outputLines !== undefined || rawMeta.sshOutputLines !== undefined || Array.isArray(rawMeta.sshCommands)))) {
-				const maxLines = Number(rawMeta.outputLines ?? rawMeta.sshOutputLines ?? 50);
-				if (Array.isArray(rawMeta.lastRawEntries) && rawMeta.lastRawEntries.length > 0) {
-					return buildSshCommandsJsonObject(rawMeta.lastRawEntries, maxLines);
+			if (isSshTicketValue(rawMeta)) {
+				const sshVal = normalizeSshTicketValue(rawMeta) ?? {};
+				const maxLines = Number(sshVal.sshOutputLines) > 0 ? Number(sshVal.sshOutputLines) : 50;
+				if (Array.isArray(sshVal.sshLastRawEntries) && sshVal.sshLastRawEntries.length > 0) {
+					return buildSshCommandsJsonObject(sshVal.sshLastRawEntries, maxLines);
 				}
-				if (rawMeta.lastNOutput !== undefined && String(rawMeta.lastNOutput).trim() !== '') {
-					const sliced = extractSshOutputLastNLines(String(rawMeta.lastNOutput).trim(), maxLines);
-					return this._parseOutputFieldValue(sliced);
-				}
-				const out = rawMeta.output !== undefined ? extractSshOutputLastNLines(String(rawMeta.output).trim(), maxLines) : '';
-				return out ? this._parseOutputFieldValue(out) : {};
+				const sliced = sshTicketValueOutputText(sshVal);
+				return sliced ? this._parseOutputFieldValue(sliced) : {};
 			}
 			if (rawMeta.text !== undefined) {
 				const t = String(rawMeta.text).trim();
@@ -5356,11 +5526,11 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 	/**
 	 * Strictly extracts the OUTPUT component's fields if and only if the ticket template (or metadata) defines an OUTPUT component.
-	 * - Returns null (None) if the ticket's template has NO 'output'/'result' component.
+	 * - Returns null (None) if the ticket's template has NO 'output' component.
 	 * - Returns a dictionary mapping each output field label to its value (or null/None if that field's value is missing/empty).
 	 */
 	private _extractStrictOutputsComponent(metadata: Record<string, string>, schema?: ICustomModule): Record<string, any> | null {
-		const outputFields = schema?.fields?.filter(f => f.type === 'output' || f.type === 'result') || [];
+		const outputFields = schema?.fields?.filter(f => f.type === 'output') || [];
 
 		// Collect any saved Output JSON maps in customMetadata (e.g. "Output", "Output 1", "output_1")
 		const savedOutputRecords: Record<string, any> = {};
@@ -5420,7 +5590,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 
 			if (schema?.fields) {
 				const matchedField = schema.fields.find(f => {
-					if (f.type === 'output' || f.type === 'result') return false;
+					if (f.type === 'output') return false;
 					const prevs: string[] = Array.isArray((f as any).previousLabels) ? (f as any).previousLabels : [];
 					return (
 						f.label === label ||
@@ -5467,7 +5637,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			const candidates = [label, fieldKey];
 			if (schema?.fields) {
 				const mf = schema.fields.find(f =>
-					f.type !== 'output' && f.type !== 'result' && (
+					f.type !== 'output' && (
 						f.label === label || f.label === fieldKey || f.id === fieldKey || f.id === label
 					)
 				);
@@ -5503,7 +5673,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 			} else if (schema?.fields) {
 				// Default when outputSpecs was not explicitly customized: include all non-output fields in schema
 				for (const f of schema.fields) {
-					if (f.type !== 'output' && f.type !== 'result') {
+					if (f.type !== 'output') {
 						specsToProcess.push({
 							fieldKey: f.label || f.id,
 							label: f.label || f.id,
@@ -5522,7 +5692,7 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 				let matchedField: ICustomField | undefined = undefined;
 				if (schema?.fields) {
 					matchedField = schema.fields.find(f => {
-						if (f.type === 'output' || f.type === 'result') return false;
+						if (f.type === 'output') return false;
 						const prevs: string[] = Array.isArray((f as any).previousLabels) ? (f as any).previousLabels : [];
 						return (
 							f.label === outKey ||
@@ -5649,16 +5819,13 @@ export class TicketWorkflowRuntime implements ITicketWorkflowRuntimeService {
 					if (parsed.content !== undefined) {
 						return parsed.content;
 					}
+					// HTTP Request primitive
+					if (isHttpTicketValue(parsed)) {
+						return httpTicketValueOutputText(parsed);
+					}
 					// SSH Terminal primitive
-					if (Array.isArray(parsed.lastRawEntries) || parsed.lastNOutput !== undefined || parsed.sshHost !== undefined || (parsed.host !== undefined && (parsed.outputLines !== undefined || parsed.sshOutputLines !== undefined || Array.isArray(parsed.sshCommands)))) {
-						const maxLines = Number(parsed.outputLines ?? parsed.sshOutputLines ?? 50);
-						if (Array.isArray(parsed.lastRawEntries) && parsed.lastRawEntries.length > 0) {
-							return formatSshCommandsJsonOutput(parsed.lastRawEntries, maxLines);
-						}
-						if (parsed.lastNOutput !== undefined && String(parsed.lastNOutput).trim() !== '') {
-							return extractSshOutputLastNLines(String(parsed.lastNOutput).trim(), maxLines);
-						}
-						return parsed.output ? extractSshOutputLastNLines(String(parsed.output), maxLines) : '{}';
+					if (isSshTicketValue(parsed)) {
+						return sshTicketValueOutputText(parsed) || '{}';
 					}
 					// Prompt primitive
 					if (parsed.prompt !== undefined || parsed.output !== undefined) {
@@ -6193,15 +6360,22 @@ def _anyagent_extract_clean_meta_val(raw_val):
         if 'url' in raw_val and 'content' in raw_val:
             c = str(raw_val.get('content') or '').strip()
             return _anyagent_smart_parse(c) if c else None
+        if ('httpUrl' in raw_val or 'httpResponseStatus' in raw_val or 'httpResponseData' in raw_val or 'httpResponseBody' in raw_val):
+            # http_request ticket value (same names as the template config)
+            http_data = raw_val.get('httpResponseData') if raw_val.get('httpResponseData') is not None else raw_val.get('httpResponseBody')
+            if http_data is None:
+                return None
+            return _anyagent_smart_parse(http_data) if isinstance(http_data, str) else http_data
         if (('status' in raw_val and any(k in raw_val for k in ('data', 'body', 'headers', 'statusText', 'ok', 'rawText'))) or
-            ('url' in raw_val and any(k in raw_val for k in ('data', 'body', 'rawText', 'status', 'headers'))) or
-            ('httpResponseData' in raw_val or 'httpResponseBody' in raw_val)):
-            http_data = raw_val.get('data') if raw_val.get('data') is not None else (raw_val.get('body') if raw_val.get('body') is not None else (raw_val.get('rawText') if raw_val.get('rawText') is not None else (raw_val.get('httpResponseData') if raw_val.get('httpResponseData') is not None else raw_val.get('httpResponseBody'))))
+            ('url' in raw_val and any(k in raw_val for k in ('data', 'body', 'rawText', 'status', 'headers')))):
+            # older tickets: post-run record with short names
+            http_data = raw_val.get('data') if raw_val.get('data') is not None else (raw_val.get('body') if raw_val.get('body') is not None else raw_val.get('rawText'))
             if http_data is not None:
                 return _anyagent_smart_parse(http_data) if isinstance(http_data, str) else http_data
-        if any(k in raw_val for k in ('lastRawEntries', 'lastNOutput', 'sshHost', 'sshCommands')) or ('host' in raw_val and ('outputLines' in raw_val or 'sshOutputLines' in raw_val)):
-            raw_entries = raw_val.get('lastRawEntries')
-            max_l = int(raw_val.get('outputLines') or raw_val.get('sshOutputLines') or 50)
+        if any(k in raw_val for k in ('sshLastRawEntries', 'sshLastOutput', 'lastRawEntries', 'lastNOutput', 'sshHost', 'sshCommands')) or ('host' in raw_val and ('outputLines' in raw_val or 'sshOutputLines' in raw_val)):
+            # ssh ticket value: template config names (sshLastRawEntries, ...); short names are from older tickets
+            raw_entries = raw_val.get('sshLastRawEntries') if raw_val.get('sshLastRawEntries') is not None else raw_val.get('lastRawEntries')
+            max_l = int(raw_val.get('sshOutputLines') or raw_val.get('outputLines') or 50)
             if isinstance(raw_entries, list) and len(raw_entries) > 0:
                 ssh_obj = {}
                 for ent in raw_entries:
@@ -6214,10 +6388,10 @@ def _anyagent_extract_clean_meta_val(raw_val):
                                 r_lines.pop()
                             ssh_obj[c_key] = r_lines[-max_l:] if max_l > 0 and len(r_lines) > max_l else r_lines
                 return ssh_obj
-            last_n = str(raw_val.get('lastNOutput') or '').strip()
+            last_n = str(raw_val.get('sshLastOutput') or raw_val.get('lastNOutput') or '').strip()
             if last_n:
                 return _anyagent_smart_parse(last_n)
-            out = str(raw_val.get('output') or '').strip()
+            out = str(raw_val.get('sshOutput') or raw_val.get('output') or '').strip()
             return _anyagent_smart_parse(out) if out else {}
         if 'text' in raw_val:
             t = str(raw_val.get('text') or '').strip()
@@ -6639,6 +6813,20 @@ def get_ticket(ticket=None, *, ticket_id=None, ticket_name=None, field=None, tic
     return res
 GET_TICKET = get_ticket
 
+_orig_get_tickets = get_tickets
+def get_tickets(ticket=None, *, ticket_id=None, ticket_name=None, tickets=None, ticket_type=None, status=None, title=None, field=None, path=None, limit=None, **kwargs):
+    if ticket is not None or ticket_id is not None or ticket_name is not None or tickets is not None:
+        return _orig_get_tickets(ticket, ticket_id=ticket_id, ticket_name=ticket_name, tickets=tickets, field=field)
+    if _ANYAGENT_RPC_ENABLED:
+        try:
+            rpc_res = _anyagent_host_rpc("GET_TICKETS", {"ticket_type": ticket_type, "status": status, "title": title, "path": path, "limit": limit, "field": field})
+            if isinstance(rpc_res, list):
+                return rpc_res
+        except Exception:
+            pass
+    return _orig_get_tickets(ticket_type=ticket_type, status=status, title=title, field=field)
+GET_TICKETS = get_tickets
+
 def DISPLAY(*args, **kwargs):
     for _d_arg in args:
         if isinstance(_d_arg, (dict, list)):
@@ -6671,7 +6859,7 @@ def _anyagent_capture_exit_output():
     if _ANYAGENT_HAS_EXPLICIT_OUTPUT or os.path.exists(_ANYAGENT_RESULT_FILE):
         return
     gl = globals()
-    for candidate in ['OUTPUT', 'RESULT', 'output', 'result', 'RETURN_VALUE', 'return_value']:
+    for candidate in ['OUTPUT', 'RESULT', 'output', 'RETURN_VALUE', 'return_value']:
         if candidate in gl and gl[candidate] is not None:
             try:
                 with open(_ANYAGENT_RESULT_FILE, "w", encoding="utf-8") as _f:
@@ -6821,6 +7009,9 @@ atexit.register(_anyagent_capture_exit_output)
 								rpcResult = await this.getOutputs(wsUri, payload.target, payload.field || undefined);
 							} else if (fn === 'GET_TICKET') {
 								rpcResult = await this.getTicket(wsUri, payload.target, payload.field || undefined);
+							} else if (fn === 'GET_TICKETS') {
+								const q = (payload && typeof payload === 'object') ? payload : {};
+								rpcResult = await this.getTickets(wsUri, { ticket_type: q.ticket_type, status: q.status, title: q.title, path: q.path, limit: q.limit }, q.field || undefined);
 							} else {
 								rpcError = `Unknown host RPC function: ${fn}`;
 							}

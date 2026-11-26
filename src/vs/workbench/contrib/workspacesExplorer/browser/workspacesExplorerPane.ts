@@ -41,7 +41,7 @@ import { IViewsService } from '../../../services/views/common/viewsService.js';
 import { IUriIdentityService } from '../../../../platform/uriIdentity/common/uriIdentity.js';
 import { VIEW_ID } from '../../files/common/files.js';
 import { IClipboardService } from '../../../../platform/clipboard/common/clipboardService.js';
-import { ICustomModule, IActionButton, resolveCustomModuleIcon, getDefaultCustomModuleColor } from '../../entityPersistence/common/entityPersistence.js';
+import { ICustomModule, IActionButton, resolveCustomModuleIcon, getDefaultCustomModuleColor, normalizeNumberFieldValue, numberFieldRulesFromAttributes, buildHttpTicketValue, buildSshTicketValue } from '../../entityPersistence/common/entityPersistence.js';
 import { ICustomModulesService } from '../../customModules/common/customModules.js';
 import { isCommentKeybinding, togglePythonComment } from '../../customModules/browser/pythonSyntaxHighlighter.js';
 import { stringifyYaml, parseYaml } from '../../customModules/browser/customModulesService.js';
@@ -4319,7 +4319,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 						};
 
 						(attachContainer as any).__getAttachedFiles = () => attachedFiles;
-					} else if (field.type === 'button_group' || field.type === 'button') {
+					} else if (field.type === 'button_group') {
 						const buttonsList: IActionButton[] = (field.buttons && Array.isArray(field.buttons) && field.buttons.length > 0)
 							? field.buttons
 							: [
@@ -4376,6 +4376,9 @@ export class MainWorkspaceViewPane extends ViewPane {
 							'data-field-id': field.id,
 							'data-field-label': field.label,
 							'data-field-type': field.type,
+							...(typeof field.min === 'number' ? { min: String(field.min), 'data-min': String(field.min) } : {}),
+							...(typeof field.max === 'number' ? { max: String(field.max), 'data-max': String(field.max) } : {}),
+							...(typeof field.precision === 'number' ? { 'data-precision': String(field.precision) } : {}),
 							step: (field.precision !== undefined && field.precision > 0) ? (1 / Math.pow(10, field.precision)).toString() : 'any',
 							placeholder: field.precision !== undefined && field.precision > 0 ? (0).toFixed(field.precision) : '0',
 							style: 'flex: 1; padding: 7px 12px; font-size: 11.5px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.25); color: inherit; box-sizing: border-box;'
@@ -4670,7 +4673,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 						(pyBox as any).__getPythonData = () => ({
 							code: pyTextarea.value || initialPyCode,
 							pythonPath: (field as any).pythonPath || '',
-							pythonInterpreter: field.pythonInterpreter || (field as any).pythonPath || '',
 							pythonEnvMode: (field as any).pythonEnvMode || 'existing',
 							pythonLocked: Boolean((field as any).pythonLocked),
 							externalScripts: Array.isArray(field.externalScripts) ? field.externalScripts : (Array.isArray((field as any).pythonExternalScripts) ? (field as any).pythonExternalScripts : []),
@@ -4831,7 +4833,6 @@ export class MainWorkspaceViewPane extends ViewPane {
 							customMetadata[fKey] = JSON.stringify({
 								code: String(codeVal),
 								pythonPath: (f as any).pythonPath || '',
-								pythonInterpreter: f.pythonInterpreter || (f as any).pythonPath || '',
 								pythonEnvMode: (f as any).pythonEnvMode || 'existing',
 								pythonLocked: Boolean((f as any).pythonLocked),
 								externalScripts: Array.isArray(f.externalScripts) ? f.externalScripts : (Array.isArray((f as any).pythonExternalScripts) ? (f as any).pythonExternalScripts : []),
@@ -4840,31 +4841,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 								lastExecuted: ''
 							});
 						} else if (f.type === 'http_request') {
-							customMetadata[fKey] = JSON.stringify({
-								method: (f as any).httpMethod || 'GET',
-								url: (f as any).httpUrl || '',
-								params: Array.isArray((f as any).httpParams) ? (f as any).httpParams : [],
-								headers: Array.isArray((f as any).httpHeaders) ? (f as any).httpHeaders : [],
-								authType: (f as any).httpAuthType || 'none',
-								authToken: (f as any).httpAuthToken || '',
-								apiKeyName: (f as any).httpApiKeyName || '',
-								apiKeyValue: (f as any).httpApiKeyValue || '',
-								apiKeyLocation: (f as any).httpApiKeyLocation || 'header',
-								authUsername: (f as any).httpAuthUsername || '',
-								authPassword: (f as any).httpAuthPassword || '',
-								bodyType: (f as any).httpBodyType || 'none',
-								bodyContent: (f as any).httpBodyContent || '',
-								timeoutMs: (f as any).httpTimeoutMs || 30000,
-								outputVariableName: (f as any).outputVariableName || '',
-								previousLabels: (f as any).previousLabels || [],
-								responseStatus: (f as any).httpResponseStatus || 0,
-								responseStatusText: (f as any).httpResponseStatusText || '',
-								responseHeaders: (f as any).httpResponseHeaders || {},
-								responseData: (f as any).httpResponseData,
-								responseBody: (f as any).httpResponseBody || '',
-								lastExecutionTime: (f as any).httpLastExecutionTime || '',
-								lastDurationMs: (f as any).httpLastDurationMs || 0
-							});
+							customMetadata[fKey] = JSON.stringify(buildHttpTicketValue(f));
 						} else if (f.type === 'table') {
 							customMetadata[fKey] = JSON.stringify({
 								columns: Array.isArray((f as any).tableColumns) ? (f as any).tableColumns : [],
@@ -4929,25 +4906,7 @@ export class MainWorkspaceViewPane extends ViewPane {
 								voicePlaybackRate: typeof (f as any).voicePlaybackRate === 'number' ? (f as any).voicePlaybackRate : 1.0
 							});
 						} else if (f.type === 'ssh') {
-							const outLines = typeof (f as any).sshOutputLines === 'number' && (f as any).sshOutputLines > 0 ? (f as any).sshOutputLines : 50;
-							const initCmds = normalizeSshCommandsList((f as any).sshCommands, (f as any).sshCommand || f.defaultContent || '');
-							customMetadata[fKey] = JSON.stringify({
-								host: (f as any).sshHost || '',
-								port: typeof (f as any).sshPort === 'number' ? (f as any).sshPort : 22,
-								user: (f as any).sshUser || 'root',
-								password: (f as any).sshPassword || '',
-								cwd: (f as any).sshCwd || '~',
-								command: initCmds[0] || '',
-								commands: initCmds,
-								sshCommands: initCmds,
-								output: '',
-								lastRawOutput: '',
-								lastRawEntries: [],
-								lastNOutput: '',
-								outputLines: outLines,
-								quickCommands: normalizeSshQuickCommands((f as any).sshQuickCommands),
-								lastExecuted: ''
-							});
+							customMetadata[fKey] = JSON.stringify(buildSshTicketValue(f));
 						} else if (f.defaultContent !== undefined && f.defaultContent !== '') {
 							customMetadata[fKey] = String(f.defaultContent);
 						}
@@ -4960,6 +4919,14 @@ export class MainWorkspaceViewPane extends ViewPane {
 				customInputs.forEach(inputEl => {
 					const fieldLabel = inputEl.getAttribute('data-field-label');
 					if (fieldLabel) {
+						if (inputEl instanceof HTMLInputElement && inputEl.getAttribute('data-field-type') === 'number') {
+							const numCheck = normalizeNumberFieldValue(numberFieldRulesFromAttributes(n => inputEl.getAttribute(n), fieldLabel), inputEl.value);
+							if (!numCheck.ok) {
+								throw new Error(numCheck.error);
+							}
+							customMetadata[fieldLabel] = numCheck.value;
+							return;
+						}
 						if (inputEl instanceof HTMLInputElement && inputEl.type === 'checkbox') {
 							customMetadata[fieldLabel] = inputEl.checked ? 'true' : 'false';
 						} else if (inputEl.classList.contains('multiselect-container')) {
