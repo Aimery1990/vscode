@@ -12771,10 +12771,11 @@ ${rawErr}
 				try {
 					fieldProps = JSON.parse(subtitlesConfigRaw) as IMediaSubtitleFieldProps;
 				} catch { }
+				const ownerTicketFile = this._ticketFileUri?.toString();
 				const subsMount = $('div.media-subtitles-mount', { style: 'width: 100%;' });
 				mountEl.insertBefore(subsMount, customPlayerBar.nextSibling);
 				const panel = this._instantiationService.createInstance(MediaSubtitlesPanel, subsMount, {
-					ticketFolder: this._entityUri,
+					ticketFolder: this._isPreviewMode ? undefined : this._entityUri,
 					fieldKey,
 					mediaElements: [audioEl, videoEl],
 					getActiveMedia: getActiveEl,
@@ -12785,7 +12786,13 @@ ${rawErr}
 						}
 						return { name: card.getAttribute('data-media-name') || path.split(/[\\/]/).pop() || 'media', path: path || undefined, blobUrl: cardBlobUrl };
 					},
-					saveState: () => { this._saveMediaPlayerDataFromCard(card, fieldKey).catch(() => { }); }
+					saveState: () => {
+						// A flush during disposal can run after another ticket was loaded: never write into that one.
+						if (this._ticketFileUri?.toString() !== ownerTicketFile) {
+							return;
+						}
+						this._saveMediaPlayerDataFromCard(card, fieldKey).catch(() => { });
+					}
 				}, resolveMediaSubtitlesConfig(fieldProps), parseMediaSubtitlesState(this._storedMediaPlayerValue(fieldKey)));
 				cardSubtitlesPanel = panel;
 				this._mediaSubtitlePanels.set(card, panel);
