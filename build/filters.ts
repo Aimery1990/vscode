@@ -76,6 +76,12 @@ export const unicodeFilter = Object.freeze<string[]>([
 
 	// Files with licences
 	'!src/vs/platform/endpoint/common/licenseAgreement.ts',
+
+	// AnyAgent: vendored pdf.js (minified)
+	'!extensions/media-preview/media/pdf.min.js',
+	'!extensions/media-preview/media/pdf.worker.min.js',
+	// AnyAgent: launcher script prints emoji status messages
+	'!launch.sh',
 ]);
 
 export const indentationFilter = Object.freeze<string[]>([
@@ -169,6 +175,29 @@ export const indentationFilter = Object.freeze<string[]>([
 	'!extensions/ipynb/notebook-out/**',
 	'!extensions/notebook-renderers/renderer-out/*.js',
 	'!extensions/simple-browser/media/*.js',
+
+	// AnyAgent: launcher script (4-space shell style, help text in heredoc)
+	'!launch.sh',
+]);
+
+/**
+ * AnyAgent: files skipped by the indentation check ONLY.
+ *
+ * Unlike `indentationFilter` (whose exclusions cascade and also drop a file from the
+ * copyright, formatting and eslint checks), these files still go through every other check.
+ * Their only indentation "violations" are whitespace inside template literals, which is
+ * runtime-significant and must not be rewritten.
+ */
+export const indentationOnlyExclusions = Object.freeze<string[]>([
+	// AnyAgent: embedded Python in template literals
+	'!src/vs/workbench/contrib/workflowsManager/browser/ticketWorkflowRuntime.ts',
+	'!src/vs/workbench/contrib/workflowsManager/browser/workflowExecutionService.ts',
+	'!src/vs/workbench/contrib/workflowsManager/browser/workflowPythonSync.ts',
+
+	// AnyAgent: space-indented LLM prompt / guidance text in template literals
+	'!src/vs/workbench/contrib/centeredChat/browser/centeredChatWidget.ts',
+	'!src/vs/workbench/contrib/customModules/browser/customModuleSchemaEditor.ts',
+	'!src/vs/workbench/contrib/workspacesExplorer/browser/entityDetailEditor.ts',
 ]);
 
 export const copyrightFilter = Object.freeze<string[]>([
@@ -225,6 +254,8 @@ export const copyrightFilter = Object.freeze<string[]>([
 	// vendored third-party libraries
 	'!src/vs/base/common/lit-html/**',
 	'!src/vs/base/common/signals-core/**',
+	'!extensions/media-preview/media/pdf.min.js', // AnyAgent: vendored pdf.js
+	'!extensions/media-preview/media/pdf.worker.min.js', // AnyAgent: vendored pdf.js
 
 	// extensions/copilot has its own code style
 	'!extensions/copilot/**',

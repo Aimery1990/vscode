@@ -953,6 +953,7 @@
 		"--activity-bar-icon-size",
 		"--activity-bar-width",
 		"--editor-font-size",
+		"--btn-accent-color",
 		"--background-dark",
 		"--background-light",
 		"--mobile-diff-tok-comment",

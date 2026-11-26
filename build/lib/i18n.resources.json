@@ -627,6 +627,46 @@
 			"project": "vscode-workbench"
 		},
 		{
+			"name": "vs/workbench/contrib/customModules",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/workspacesExplorer",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/workflowsManager",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/accountManagement",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/agentsManager",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/diagramsManager",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/googleAuthentication",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/quickNotes",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/centeredChat",
+			"project": "vscode-workbench"
+		},
+		{
+			"name": "vs/workbench/contrib/agentGroups",
+			"project": "vscode-workbench"
+		},
+		{
 			"name": "vs/workbench/services/accounts",
 			"project": "vscode-workbench"
 		},

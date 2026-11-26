@@ -131,15 +131,28 @@ export default defineConfig(
 					]
 				}
 			],
+			// AnyAgent: accept either the Microsoft header (upstream / modified VS Code files, MIT)
+			// or the Urbay Inc. header (files added by AnyAgent). A single `pattern` is matched
+			// against the whole block comment; the `template` (Microsoft header) is used by --fix.
+			// Keep in sync with the copyright check in build/hygiene.ts.
 			'header/header': [
 				2,
 				'block',
-				[
-					'---------------------------------------------------------------------------------------------',
-					' *  Copyright (c) Microsoft Corporation. All rights reserved.',
-					' *  Licensed under the MIT License. See License.txt in the project root for license information.',
-					' *--------------------------------------------------------------------------------------------'
-				]
+				{
+					pattern: [
+						'^---------------------------------------------------------------------------------------------\\r?\\n',
+						'(?: \\*  Copyright \\(c\\) Microsoft Corporation\\. All rights reserved\\.\\r?\\n',
+						' \\*  Licensed under the MIT License\\. See License\\.txt in the project root for license information\\.\\r?\\n',
+						'| \\*  Copyright \\(c\\) \\d{4} Urbay Inc\\. All rights reserved\\.\\r?\\n)',
+						' \\*--------------------------------------------------------------------------------------------$'
+					].join(''),
+					template: [
+						'---------------------------------------------------------------------------------------------',
+						' *  Copyright (c) Microsoft Corporation. All rights reserved.',
+						' *  Licensed under the MIT License. See License.txt in the project root for license information.',
+						' *--------------------------------------------------------------------------------------------'
+					].join('\n')
+				}
 			]
 		},
 	},

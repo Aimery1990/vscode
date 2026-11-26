@@ -60,3 +60,6 @@
 # Vendored third-party libraries
 src/vs/base/common/lit-html/**
 src/vs/base/common/signals-core/**
+# AnyAgent: vendored pdf.js (minified)
+extensions/media-preview/media/pdf.min.js
+extensions/media-preview/media/pdf.worker.min.js

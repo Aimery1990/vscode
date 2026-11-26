@@ -11,7 +11,7 @@ import pall from 'p-all';
 import path from 'path';
 import VinylFile from 'vinyl';
 import vfs from 'vinyl-fs';
-import { all, copyrightFilter, eslintFilter, indentationFilter, stylelintFilter, tsFormattingFilter, unicodeFilter } from './filters.ts';
+import { all, copyrightFilter, eslintFilter, indentationFilter, indentationOnlyExclusions, stylelintFilter, tsFormattingFilter, unicodeFilter } from './filters.ts';
 import eslint from './gulp-eslint.ts';
 import * as formatter from './lib/formatter.ts';
 import gulpstylelint from './stylelint.ts';
@@ -22,6 +22,21 @@ const copyrightHeaderLines = [
 	' *  Licensed under the MIT License. See License.txt in the project root for license information.',
 	' *--------------------------------------------------------------------------------------------*/',
 ];
+
+/**
+ * AnyAgent: files added by AnyAgent (not derived from VS Code) carry the Urbay Inc. header
+ * instead of the Microsoft one. Modified upstream files must keep the Microsoft header (MIT).
+ * Keep in sync with the `header/header` rule in eslint.config.js.
+ */
+const urbayCopyrightHeaderLines: (string | RegExp)[] = [
+	'/*---------------------------------------------------------------------------------------------',
+	/^ \*  Copyright \(c\) \d{4} Urbay Inc\. All rights reserved\.$/,
+	' *--------------------------------------------------------------------------------------------*/',
+];
+
+function hasCopyrightHeader(lines: string[], header: readonly (string | RegExp)[]): boolean {
+	return header.every((expected, i) => typeof expected === 'string' ? lines[i] === expected : expected.test(lines[i] ?? ''));
+}
 
 interface VinylFileWithLines extends VinylFile {
 	__lines: string[];
@@ -157,14 +172,11 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 	});
 
 	const copyrights = es.through(function (file: VinylFileWithLines) {
-		const lines = file.__lines;
+		const lines = file.__lines || file.contents!.toString('utf8').split(/\r\n|\r|\n/);
 
-		for (let i = 0; i < copyrightHeaderLines.length; i++) {
-			if (lines[i] !== copyrightHeaderLines[i]) {
-				console.error(file.relative + ': Missing or bad copyright statement');
-				errorCount++;
-				break;
-			}
+		if (!hasCopyrightHeader(lines, copyrightHeaderLines) && !hasCopyrightHeader(lines, urbayCopyrightHeaderLines)) {
+			console.error(file.relative + ': Missing or bad copyright statement');
+			errorCount++;
 		}
 
 		this.emit('data', file);
@@ -202,6 +214,7 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 	const snapshotFilter = filter(['**', '!**/*.snap', '!**/*.snap.actual']);
 	const yarnLockFilter = filter(['**', '!**/yarn.lock']);
 	const unicodeFilterStream = filter(Array.from(unicodeFilter), { restore: true });
+	const indentationOnlyFilterStream = filter(['**', ...indentationOnlyExclusions], { restore: true }); // AnyAgent
 
 	const result = input
 		.pipe(filter((f) => Boolean(f.stat && !f.stat.isDirectory())))
@@ -214,7 +227,9 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 		.pipe(unicode)
 		.pipe(unicodeFilterStream.restore)
 		.pipe(filter(Array.from(indentationFilter)))
+		.pipe(indentationOnlyFilterStream)
 		.pipe(indentation)
+		.pipe(indentationOnlyFilterStream.restore)
 		.pipe(filter(Array.from(copyrightFilter)))
 		.pipe(copyrights);
 
