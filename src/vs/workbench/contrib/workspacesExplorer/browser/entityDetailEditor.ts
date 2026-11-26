@@ -31,6 +31,7 @@ import { dirname, basename } from '../../../../base/common/resources.js';
 import { IAgentsManagerService, IAgentItem, IAgentCredential, IAgentCredentialService, isOpenAICompatibleProvider, getGlobalDefaultModel, resolveDefaultModel, resolveDefaultModelId } from '../../agentsManager/common/agentsManager.js';
 import { ICommandService } from '../../../../platform/commands/common/commands.js';
 import { IWorkspacesExplorerService, IWorkspaceStatusesInfo } from '../common/workspacesExplorer.js';
+import { IWorkspaceContextService } from '../../../../platform/workspace/common/workspace.js';
 import { IEditorService } from '../../../services/editor/common/editorService.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 
@@ -381,7 +382,8 @@ export class EntityDetailEditor extends EditorPane {
 		@IClipboardService private readonly _clipboardService: IClipboardService,
 		@IQuickInputService private readonly _quickInputService: IQuickInputService,
 		@IRequestService private readonly _requestService: IRequestService,
-		@ICustomModulesService private readonly _customModulesService: ICustomModulesService
+		@ICustomModulesService private readonly _customModulesService: ICustomModulesService,
+		@IWorkspaceContextService private readonly _workspaceContextService: IWorkspaceContextService
 	) {
 		super(EntityDetailEditor.ID, group, telemetryService, themeService, _storageService);
 
